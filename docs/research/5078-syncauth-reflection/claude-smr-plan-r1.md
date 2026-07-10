@@ -188,3 +188,27 @@ correctly scoped to Option B and must be stated plainly in the issue comment.
 No blocking objection. Recommend proceeding to `/engineer` after the three
 must-fix constraints are folded into the plan's §3/§6 (done in r1 revision
 below).
+
+---
+
+## H. r2 addendum — I was wrong on the passive-relay residual (Codex refutation)
+
+Codex's hostile review (`codex-plan-r1.md`) refuted §A3/§G above. I claimed a
+passive on-path relay "cannot forge/inject sealed frames (no PSK → no
+directional key)." That is **false for this codebase**: when `config-sync` is
+enabled the session-sync stream carries `ShowActive()` — the raw cleartext
+config **including `chassis cluster authentication-key <secret>`, the very PSK**
+— sealed only by HMAC. Verified against origin/master (`daemon_ha_sync.go:311`,
+`store_format.go:31`/`297`, `ast_redact.go:117`, `sealFrame` HMAC-only). So a
+passive relay reads the PSK from the config frame and escalates to a full active
+forger. My "Option A closes impersonation/injection; only passive read remains"
+boundary is wrong: **confidentiality is mandatory, not deferrable.**
+
+Codex also found Blocker 2 (keyed-local dual-accept + pre-admission
+`syncMsgFence` execution) that my review missed entirely — a PSK-less active
+bypass independent of the reflection bug.
+
+Both are folded into plan §0/§3.9/§3.10. My §A/§B/§C/§D/§E analysis of the
+*cryptographic construction* stands (all three reviewers agree it is sound); my
+*scope* judgment was too narrow. Net verdict updates to **PLAN-READY on the r2
+(scope-expanded) design**, not the r1 narrow scope.

@@ -1,18 +1,111 @@
 # #5078 — cluster session-sync PSK handshake is reflection-authenticatable
 
-Status: **PLAN-READY** (Claude-SMR converged r1; companion reviews attempted —
-see §10 verdicts). Hostile self-review in `claude-smr-plan-r1.md`; its three
-MUST-FIX constraints are folded into §3.1/§3.5/§3.7/§6 below.
+Status: **PLAN-READY (r2, converged 3-of-3 after scope expansion).** Three
+hostile plan-reviews (Claude SMR `claude-smr-plan-r1.md`, Codex
+`codex-plan-r1.md`, AGY `agy-plan-r1.md`) agree the *cryptographic
+construction* is sound but drove a **material scope expansion**: the fix must
+also add **stream confidentiality** and **fail-closed keyed dual-accept** (see
+§0). Verdicts in §10.
 Branch: `research/5078-syncauth-reflection` (plan docs only — no production
 source).
 Severity: **HIGH / High confidence**. Source: codex-review-177 `[A5-b1-F1]`.
-Deliverable for `/engineer`: harden the custom mutual challenge-response
-session-sync handshake (`pkg/cluster/sync_auth.go`) with explicit
-initiator/responder **role binding**, full **transcript / channel binding**,
-**equal-nonce rejection**, and **directional frame keys**, plus a fail-closed
-**version flag-day** for the keyed↔keyed wire. Touches the on-wire
-session-sync handshake and per-frame seal → MUST pass loss-cluster
-`make test-failover` before commit.
+Deliverable for `/engineer` (r2 converged): harden the custom mutual
+challenge-response session-sync handshake (`pkg/cluster/sync_auth.go`) with
+explicit initiator/responder **role binding**, a robust role-ordered
+**transcript / channel binding** (node-id + fabric-id + cluster-id, not fragile
+address strings), **equal-nonce rejection**, **directional frame keys**, and a
+fail-closed **version flag-day**; AND **encrypt the stream** (directional AEAD
+or a standard TLS-PSK/Noise transport) because the session-sync channel carries
+the control-link PSK itself in cleartext; AND make a **locally-keyed node
+fail-closed** (require authenticated v2, stop executing pre-admission frames)
+instead of dual-accepting a PSK-less peer on first contact. Touches the on-wire
+session-sync handshake, per-frame seal, and dual-accept policy → MUST pass
+loss-cluster `make test-failover` before commit.
+
+---
+
+## 0. Converged design after hostile review (r2 — READ FIRST)
+
+The r1 plan (harden the handshake, HMAC-only seal, dual-accept unchanged,
+confidentiality out-of-scope) was reviewed hostilely by Claude SMR, Codex, and
+AGY. All three agree the *narrow crypto construction* (role + role-ordered
+transcript + directional keys + equal-nonce reject + version flag-day) is
+**sound**. Codex issued a **PLAN-REJECT of the r1 scope** on two grounds that I
+**verified true against origin/master**; AGY added endpoint-robustness and
+fabric-binding changes. The converged design folds them all in:
+
+### 0.1 VERIFIED BLOCKER 1 — the stream leaks its own PSK in cleartext ⇒ confidentiality is REQUIRED
+When `chassis cluster config-sync` is enabled, `pushConfigToPeer`
+(`pkg/daemon/daemon_ha_sync.go:311-341`) sends `d.store.ShowActive()` — which
+is `s.active.Format()`, the **raw, unredacted** config tree
+(`pkg/configstore/store_format.go:31-35`) — over *this* session-sync stream.
+The #4051 redaction comment (`store_format.go:296-305`) states outright that the
+cleartext `Show*` siblings "back HA [config sync]." That config includes
+`set chassis cluster authentication-key <secret>` — a **secret leaf**
+(`pkg/config/ast_redact.go:117` lists `authentication-key`) — i.e. **the
+control-link PSK itself**, plus every other operator secret (BGP MD5, IPsec
+PSKs, IGP auth keys, SNMP/RADIUS). The frame seal is **HMAC only — no
+encryption** (`sealFrame`, `sync_auth.go:178-188`). Therefore a passive on-path
+relay: relays the legit v2 handshake between the two real nodes → reads the
+plaintext config frame → **recovers the control-link PSK** → reconstructs the
+observable transcript → derives both directional keys → **forges frames /
+authenticates a fresh connection as a full active attacker**, and can also
+attack the heartbeat + fabric-gRPC channels that reuse the same PSK. This
+**invalidates** the r1/SMR claim that "a passive relay cannot inject because it
+lacks the PSK." **Consequence:** authenticating a channel with a PSK that the
+same channel discloses in cleartext is self-defeating — the fix MUST make the
+stream **confidential**, not merely integrity-sealed.
+
+### 0.2 VERIFIED BLOCKER 2 — keyed-local dual-accept is a PSK-less active bypass, independent of reflection
+A node that HAS a local PSK still **dual-accepts** an unkeyed/legacy peer on
+first contact, before its sticky guard arms. `performSyncHandshake` with a peer
+that sends a normal frame (not a HELLO), or advertises `keyed=0`, hits
+`syncAuthDecision(true, false, …, peerAuthSeen)` (`sync_auth.go:260-278`,
+`361-368`); when `peerAuthSeen` is false (first contact, before `syncAuthedEver`
+/ `HeartbeatPeerAuthSeen` arms) it returns **accept=unauthenticated**. Worse,
+that peer's **first frame is executed BEFORE the connection is admitted**:
+`handleNewConnection` calls `s.handleMessage(conn, pending.typ, pending.payload)`
+at `sync_conn.go:494-496`, *before* the `s.mu.Lock()` that installs
+`conn0`/`conn1`. That frame can be `syncMsgFence` (`sync_conn.go:1657-1661` →
+`OnFenceReceived` → **disables all RGs**). So a PSK-less attacker on the fabric
+can, on first contact: fence the node (HA DoS), then have its pass-through
+connection **displace** the legitimate peer — and later guard-arming does not
+evict it. **Consequence:** "local PSK configured" must mean "require
+authenticated v2"; a keyed node must not dual-accept an unkeyed peer except via
+an explicit, default-off, time-bounded migration mode, and must not execute any
+pre-admission frame.
+
+### 0.3 The converged recommended design
+1. **Harden the handshake** — role binding + role-ordered transcript +
+   directional keys + equal-nonce reject + version flag-day (§3.0-3.8), with the
+   **robust discriminator** = role-ordered **node-id (carried in the v2 HELLO)
+   + fabric-id + cluster-id + both nonces + version**, rejecting a peer that
+   claims the local node-id and rejecting equal endpoints — NOT fragile
+   config-address strings (§3.1, per AGY + Codex). Strict exact-length HELLO /
+   proof parsing; bounded pre-auth allocation + a per-fabric handshake
+   semaphore (DoS, §3.11).
+2. **Encrypt the stream (REQUIRED, Blocker 1)** — replace the HMAC-only frame
+   seal with a **directional AEAD** (ChaCha20-Poly1305 / AES-GCM keyed by the
+   directional keys, per-frame nonce = the sequence counter), OR adopt a
+   standard mutually-authenticated + confidential transport (**TLS 1.3
+   external-PSK, or Noise `NNpsk0`/`XXpsk0`**). Since confidentiality is now
+   mandatory anyway, **Option B (standard transport) is the preferred strategic
+   answer**; a directional-AEAD retrofit of the custom seal is the faster
+   intermediate but is "another custom secure-transport design" (Codex) (§3.9).
+3. **Fail-closed keyed dual-accept (REQUIRED, Blocker 2)** — a node with a PSK
+   requires authenticated v2; no dual-accept of unkeyed/legacy peers except an
+   explicit default-off time-bounded migration knob; **do not execute any
+   pending pre-admission frame**; recheck policy immediately before install;
+   evict unauthenticated connections when enforcement arms (§3.10).
+4. **Strict next-sequence** (`prev+1`, not merely increasing) so a
+   TCP-terminating relay cannot silently delete a frame (§3.9).
+5. **Key-epoch snapshot** — snapshot one immutable key + generation at handshake
+   start and verify it before install so a mid-handshake key rotation can't
+   complete under a stale key (§3.12).
+
+The rest of this doc is the r1 construction detail (§3.0-3.8, still valid) plus
+the r2 additions (§3.9-3.12). Where r1 said "bind configured endpoints," the
+converged discriminator in §3.1 supersedes it.
 
 Verified against origin/master `5e34920d1` (issue cites `812bf30c1`;
 `pkg/cluster/sync_auth.go` is byte-identical at both — the vulnerability is
@@ -191,62 +284,84 @@ fact (did I dial or accept), never taken from the wire.
 ### 3.1 Transcript (channel binding)
 
 Both sides compute an identical **role-ordered** transcript from
-mutually-known, non-attacker-equalizable inputs:
+mutually-known, non-attacker-equalizable inputs. **r2 discriminator (per AGY +
+Codex):** the primary channel binding is the **role-ordered node-id + fabric-id
++ cluster-id**, NOT configured address strings (which are fragile — see the
+"why not endpoints" note below):
 
 ```
 transcript = SHA256(
     LP("xpf-cluster-sync-transcript-v2") ‖
     u8(version)               ‖   // negotiated = 2
+    u16(cluster_id)           ‖   // cross-cluster proof-oracle guard (Codex)
+    u8(fabric_idx)            ‖   // 0/1 — cross-fabric reflection guard (AGY/Codex)
+    u32(nodeid_initiator)     ‖   // initiator's node-id (see sourcing below)
+    u32(nodeid_responder)     ‖   // responder's node-id
     LP(nonce_initiator)       ‖   // 32B, initiator's fresh nonce
-    LP(nonce_responder)       ‖   // 32B, responder's fresh nonce
-    LP(ep_initiator)          ‖   // initiator's CONFIGURED fabric addr:port
-    LP(ep_responder)          ‖   // responder's CONFIGURED fabric addr:port
-    u32(nodeid_initiator)     ‖   // initiator's LOCAL node-id (optional, §3.6)
-    u32(nodeid_responder)         // responder's LOCAL node-id (optional)
+    LP(nonce_responder)           // 32B, responder's fresh nonce
 )
 ```
+
+**Node-id sourcing (Codex: "do not use optional/asynchronous ids").** Node-id
+is a **mandatory** fixed field in the v2 HELLO. Each node fills its OWN role
+slot with its OWN configured `nodeID` (trusted, from `Manager.NodeID()` via a
+`SyncAuthProvider.LocalNodeID()` accessor) and the peer's slot with the
+**node-id the peer advertised in its v2 HELLO** — and **rejects a peer HELLO
+that advertises the LOCAL node-id** (a peer cannot be us; mirrors the existing
+`election_dup_nodeid_4549` duplicate-id guard). Do NOT source the peer id from
+the heartbeat-learned, asynchronous `peerNodeID`.
+
+Why this defeats reflection: V's role differs between the two attacker
+connections (responder on α, initiator on β), so V's own trusted `nodeID` lands
+in **different slots** (`nodeid_responder` on α, `nodeid_initiator` on β). To
+equalize the transcripts the attacker would have to make V's id appear in the
+same slot on both — i.e. claim V's id in a HELLO — which is rejected. Combined
+with `fabric_idx` and `cluster_id`, there is no cross-connection, cross-fabric,
+or cross-cluster topology in which the two attacker transcripts collide, and it
+has **zero dependence on address-string formatting** (so no hostname/wildcard
+fragility and no legit-path outage from address asymmetry).
 
 `LP(x)` = 4-byte little-endian length prefix ‖ `x` (unambiguous framing; no
 field-boundary confusion). "initiator/responder" slots are filled by **role**,
 not by socket direction, so both nodes populate identical bytes.
 
 > **CRITICAL INVARIANT (Claude-SMR MUST-FIX #1).** The transcript fields
-> (nonces, endpoints, node-ids) MUST be ordered by **role**
+> (node-ids, nonces, and any endpoints) MUST be ordered by **role**
 > (initiator-slot, responder-slot), **NEVER canonically sorted by value.**
 > The sibling `syncDeriveFrameKey` (L232-240) today *sorts* its two nonces so
 > the key is undirected — copying that sort into the transcript would make
 > `transcript_responder == transcript_initiator` and **re-open Vector B in
 > full**. Role-ordering is the entire mechanism that separates the two
 > reflected transcripts (§3.2). The code MUST carry this as a hard comment and
-> §6.1 test #4 MUST assert that swapping the endpoint slots changes the proof
-> (a test that would go RED if someone "consistency-refactors" to a sort).
+> §6.1 test #4 MUST assert that swapping the initiator/responder **node-id**
+> slots changes the proof (a test that would go RED if someone
+> "consistency-refactors" to a sort).
 
-The slots:
+**Why node-id/fabric-id, not configured endpoints (r2, AGY + Codex).** The r1
+plan bound the *configured fabric addresses* as the discriminator. Both AGY and
+Codex showed this is fragile:
+  - **Hostname config** — `s.peerAddr` leaves are untyped strings; a hostname
+    reaches `net.Dial` but fails `netip.ParseAddrPort`. If the impl falls back
+    to a constant (zero bytes) on parse failure, `ep_initiator == ep_responder`
+    and **Vector B re-opens** (AGY byte-trace).
+  - **Wildcard / asymmetric config** — `localAddr = 0.0.0.0:7000` vs the peer's
+    `peerAddr = <unicast>:7000` makes the two nodes' role-ordered endpoint
+    tuples disagree → the *legit* handshake fails closed → **production sync
+    outage** (AGY §2).
+  - **Live-address drift** — `s.localAddr` is selected from live kernel
+    interface addresses, and session sync prefers the control link, falling
+    back to fabric; "configured endpoint" is not a single stable string
+    (Codex §6, `daemon_cluster_bind.go:132`, `daemon_ha_sync.go:478`).
 
-- The **endpoints** are the *configured* fabric addresses
-  (`s.localAddr`/`s.peerAddr` for the fabric, `…1` for fab1) — **not** live
-  socket addresses. Node A's `localAddr` == node B's `peerAddr`, so
-  role-ordered they agree: if A is initiator, both compute
-  `ep_initiator = A_addr, ep_responder = B_addr`. These are each node's own
-  fixed config; an attacker cannot set them equal to V's value, and
-  `A_addr ≠ B_addr`. **This is what defeats Vector B**: V-as-responder binds
-  `(ep_init = V.peerAddr, ep_resp = V.localAddr)`; V-as-initiator binds
-  `(ep_init = V.localAddr, ep_resp = V.peerAddr)` — reversed, so a proof
-  produced in one role never validates in the other.
-  **Normalization (Claude-SMR MUST-FIX #2):** bind the *canonical parsed*
-  `netip.AddrPort` bytes (16-byte address ‖ u16 port), **not** the raw config
-  string, so `10.0.0.1:7000` vs a zero-padded/IPv6-bracketed spelling cannot
-  make two real daemons derive different transcripts. Both nodes must parse and
-  re-serialize identically; any string-formatting asymmetry is a silent
-  production sync outage under the fail-closed flag-day (§3.7).
-- Node-ids use each node's **local** `nodeID` in its own role slot (Manager
-  has both `nodeID` and, asserted, `peerNodeID`). Because `peerNodeID` is
-  peer-asserted (from heartbeats, `heartbeat_manager.go:302`) it is
-  **not** trusted as binding material; identity binding rests on the
-  endpoints. Node-ids are included only as defense-in-depth and MUST be paired
-  with the existing duplicate-node-id rejection so an attacker cannot claim
-  V's own id (see §3.6). If threading node-id proves noisy, endpoints alone are
-  sufficient for the security property; node-id is optional.
+  Node-id + fabric-id + cluster-id have **none** of these failure modes: they
+  are small fixed integers both nodes already agree on, with no formatting,
+  hostname, wildcard, or live-selection ambiguity. If an implementer still
+  wants endpoint binding as defense-in-depth, it MUST (a) use an explicit
+  family byte + fixed-width address + fixed byte order, (b) reject
+  zones/wildcards/unspecified/`localEndpoint == peerEndpoint`, and (c) **never
+  fall back to a constant on parse failure** (fail the handshake instead).
+  But it is not required — the node-id/fabric/cluster discriminator carries the
+  full security property.
 
 ### 3.2 Role-bound proof
 
@@ -422,6 +537,92 @@ dual-accepting — consistent with the existing "peer previously authenticated �
 reject unauthenticated" posture. Confirm the new reject reason threads through
 `status.go` auth-status strings without leaking key material.
 
+### 3.9 Stream confidentiality + strict sequence (r2, REQUIRED — Blocker 1)
+
+Because the session-sync stream carries the control-link PSK (and every other
+operator secret) in cleartext (§0.1), an HMAC-only seal is insufficient: a
+passive relay reads the PSK and escalates to active forgery. The stream MUST be
+**confidential**. Two implementations:
+
+- **Preferred (Option B): a standard mutually-authenticated + confidential
+  transport.** TLS 1.3 with an **external PSK** (`psk_ke`/`psk_dhe_ke`,
+  RFC 8446 §4.2.11 — ideally the DHE variant for forward secrecy), or a Noise
+  pattern with a pre-shared key (`NNpsk0` for PSK-only, or `XXpsk0` if we later
+  add static keys). This gives mutual auth, confidentiality, integrity,
+  directional keys, and audited downgrade resistance in one construction, and
+  removes the need to hand-maintain the role/transcript/AEAD machinery. Since
+  confidentiality is now mandatory, this is the strategically correct target.
+  It reframes the handshake work in §3.0-3.8 as "wire a standard transport +
+  the flag-day/dual-accept policy," not "extend the custom challenge-response."
+- **Intermediate (Option A′): directional AEAD records over the custom
+  handshake.** Replace the HMAC seal with **ChaCha20-Poly1305 / AES-256-GCM**
+  keyed by the directional keys `k_i2r`/`k_r2i` (§3.5), per-frame nonce =
+  the per-connection sequence counter (never reused under one key — a fresh
+  transcript ⇒ fresh keys each connection). Frame = `AEAD(dirKey, seq, header ‖
+  payload)`. This encrypts the payload (closes Blocker 1) and keeps the
+  dual-accept/flag-day scaffolding, but it is "another custom secure-transport
+  design" (Codex) and still needs every §3.0-3.8 + §3.10-3.12 fix. Use only if
+  Option B is judged too large for the hotfix window.
+
+**Strict next-sequence (both options).** The current receiver accepts *any*
+increasing sequence (`seq <= recvSeq` rejected, `sync_auth.go:196`). A
+TCP-terminating relay can therefore silently **delete** a complete frame and
+forward a later one undetected. Require the receiver to accept exactly
+`prev+1` (first frame = 1), converting selective deletion into a detected gap →
+connection drop.
+
+### 3.10 Fail-closed keyed dual-accept (r2, REQUIRED — Blocker 2)
+
+A node with a local PSK MUST require authenticated v2 and MUST NOT dual-accept
+a PSK-less / legacy peer on first contact (§0.2). Concretely:
+
+- **`keyConfigured ⇒ require v2 auth`, independent of the peer's claimed
+  `keyed` bit or whether it sent a HELLO.** Change `syncAuthDecision`: when the
+  local key is set, a peer that does not present a valid v2 proof is
+  **rejected** (not dual-accepted), regardless of `peerAuthSeen`. The
+  first-contact grace that r1 preserved is exactly Blocker 2's window.
+- **Preserve byte-identical legacy behaviour ONLY when the local node itself
+  has no PSK** (unkeyed node = legacy peer, unchanged).
+- **Do NOT execute any pending pre-admission frame.** Remove the
+  `handleMessage(pending…)` call at `sync_conn.go:494-496` for any connection
+  that is not fully admitted; a keyed node has no legitimate "legacy first
+  frame" to replay. (Under the new policy a keyed node never produces a
+  `pending` frame at all, since it rejects the unauthenticated peer.)
+- **Recheck policy immediately before install** and **evict** any existing
+  unauthenticated connection when enforcement arms, so a race cannot leave a
+  pass-through connection installed after the guard flips.
+- **Migration mode is explicit + default-off + time-bounded.** Any keyed→unkeyed
+  interop (for a fleet that must roll the key onto one node at a time) is a
+  named, default-`false`, alarmed, auto-expiring knob that the operator turns
+  on for the window — clearly documented as *disabling authentication*. Same
+  posture as the version flag-day (§3.7) — this is the operator escape hatch
+  AGY asked for, applied to the keyed-vs-unkeyed case too.
+
+### 3.11 Pre-auth DoS bounds (r2 — Codex §7)
+
+The accept path spawns an unbounded goroutine per connection
+(`sync_conn.go:1180`) and the pre-auth reader permits a 16 MiB allocation per
+connection (`readSyncFrameRaw`, `sync_auth.go:289`). A 3s handshake deadline
+bounds *duration*, not aggregate memory/goroutines. Add:
+- a small **per-fabric handshake semaphore** (cap concurrent in-setup
+  connections), and
+- **header-first, exact-size parsing**: require the exact v2 HELLO / proof
+  lengths, reject trailing bytes, and cap the pre-auth frame far below 16 MiB
+  (a HELLO/proof is tens of bytes).
+
+### 3.12 Key-epoch snapshot (r2 — Codex §7)
+
+`authKey()` is read live so a commit-time key change is picked up next
+handshake. But a key **rotated mid-handshake** could let a handshake complete
+under a stale key, and immediate teardown on rotation can strand the peer.
+Snapshot **one immutable key + a generation counter** at handshake start,
+derive the whole transcript/keys from that snapshot, and verify the generation
+is still current immediately before install. Full key rotation (existing
+connections retain old derived keys; the auth-key is absent from
+`clusterTransportKey` so an auth-key change does not currently restart cluster
+comms, `daemon_ha_sync.go:995-1017`) needs a staged dual-key or an explicit
+out-of-band coordinated procedure — track as a follow-up if not done here.
+
 ---
 
 ## 4. Hidden invariants / gotchas
@@ -479,12 +680,21 @@ reject unauthenticated" posture. Confirm the new reject reason threads through
 - **Lock-out risk: LOW.** If the handshake mis-derives, the connection drops
   and retries every ~1s; it never bricks the daemon. Unkeyed deployments are
   untouched.
-- **Complexity risk: LOW-MEDIUM.** Self-contained to `sync_auth.go` + a role
-  param and an `authConn` field split. No new dependency (Option A).
-- **Residual risk after fix:** a *passive* tap on the fabric still reads
-  plaintext (by design — the seal is not encryption). Closing that is Option B
-  (confidentiality), tracked separately. This plan closes the **active**
-  reflection/impersonation bypass that is the reported HIGH defect.
+- **Complexity risk: MEDIUM-HIGH (r2).** r1 was self-contained to `sync_auth.go`
+  + a role param + an `authConn` split. r2 adds stream **encryption** (a new
+  AEAD/transport dependency, Option A′/B) + a dual-accept policy change + the
+  pre-auth DoS bounds. Larger blast radius; the `make test-failover` gate and
+  the two-process transcript-asymmetry concern (§5, MUST-FIX #2) matter more.
+- **Residual risk after fix (r2 — corrected):** the r1 claim that "a passive
+  tap only reads plaintext, benign, defer to Option B" was **WRONG** (§0.1):
+  the plaintext *includes the PSK*, so a passive relay escalates to active
+  forgery. r2 therefore makes **confidentiality REQUIRED** (§3.9), not
+  deferred. After r2 (encrypted stream), a passive tap sees only ciphertext and
+  cannot recover the PSK or forge. Remaining residual: forward secrecy — a
+  pure-PSK construction (`psk_ke` / `NNpsk0`) means a later PSK disclosure
+  decrypts recorded traffic; prefer the DHE/ephemeral variant (`psk_dhe_ke` /
+  an ephemeral Noise pattern) to bound it. Key rotation UX (§3.12) is the other
+  residual.
 
 ---
 
@@ -526,9 +736,34 @@ All are RED on the current code and GREEN after the fix:
    fails closed (reject, not dual-accept) with the version reason; unkeyed peer
    still dual-accepts unchanged; downgrade-guard matrix
    (`TestSyncAuthDecisionMatrix`) extended for the new reason.
-9. **Dual-accept unchanged** for the unkeyed path (byte-for-byte; existing
+9. **Dual-accept unchanged for the UNKEYED path** (byte-for-byte; existing
    `TestSyncAuthHandshakeDualAcceptLegacyPeer` / `TestSyncAuthDisabledNoHandshake`
-   stay green).
+   stay green — only the *unkeyed-local* node dual-accepts).
+
+**r2 additions (Blockers 1 & 2 + companion findings):**
+
+10. **Keyed-local fail-closed (Blocker 2).** A *keyed* node facing a peer that
+    sends a non-HELLO first frame, or `keyed=0`, on first contact
+    (`peerAuthSeen=false`) MUST **reject** (not dual-accept). (RED today: it
+    accepts and returns a `pending` frame.)
+11. **No pre-admission frame execution (Blocker 2).** Assert a `syncMsgFence`
+    (or any control frame) arriving before authentication is **never** passed
+    to `handleMessage` / never fires `OnFenceReceived` before the connection is
+    admitted. (RED today: `sync_conn.go:494-496` executes it pre-install.)
+12. **Node-id reflection guard.** Reject a peer HELLO advertising the **local**
+    node-id; assert swapping the initiator/responder node-id slots changes the
+    proof (the MUST-FIX #1 anti-sort test); assert a proof over `fabric_idx=0`
+    fails verification at `fabric_idx=1` and across a different `cluster_id`.
+13. **Confidentiality (Blocker 1).** Assert a synced frame's payload is **not**
+    recoverable as cleartext on the wire (AEAD/transport encrypts it) — e.g. a
+    known config-sync payload does not appear verbatim in the sealed bytes; a
+    frame with a tampered ciphertext byte fails to decrypt/verify.
+14. **Strict next-sequence.** A frame with `seq = prev+2` (a deleted
+    intermediate frame) is **rejected** (RED today: any increasing seq is
+    accepted).
+15. **Pre-auth bounds.** A pre-auth frame claiming a huge length, or a
+    HELLO/proof with trailing bytes / wrong length, is rejected without a large
+    allocation.
 
 ### 6.2 Package tests
 
@@ -553,28 +788,44 @@ manifests across hosts — and under the fail-closed flag-day such an asymmetry
 is a cluster-wide sync outage with no fallback. `make test-failover` green is
 the acceptance bar, not colour.
 
+**r2: explicit secondary-fabric leg (Codex §6).** The smoke MUST force fab0
+down and prove a fresh **authenticated fab1** handshake + bidirectional
+sealed/encrypted traffic — ordinary RG failover may never exercise the fab1
+endpoint pair, and fab1 is where a cross-fabric or endpoint-asymmetry bug
+hides.
+
 ---
 
 ## 7. Out of scope
 
-- **Confidentiality / full standard handshake (Option B — TLS-PSK / Noise).**
-  Adds encryption + audited construction but is a large rewrite; file as a
-  strategic follow-up issue. This plan is the targeted HIGH-sev hotfix.
+- **Confidentiality is NOW IN SCOPE (r2).** It was out-of-scope in r1; Blocker 1
+  (§0.1) makes it mandatory. See §3.9.
+- **Full PSK key-rotation UX / staged dual-key rotation.** §3.12 requires a
+  key-epoch snapshot for correctness during a rotation, but the operator-facing
+  rotation procedure (hitless re-key of a running cluster) is a follow-up.
 - **Heartbeat + fabric-gRPC PSK channels.** #4107/#4357 authenticate those
-  separately (trailing-HMAC heartbeat, gRPC guard). This issue is specifically
-  the session-sync **stream** handshake; the other channels are their own
-  audits.
-- **Changing the PSK provisioning / key rotation UX.**
-- **The unkeyed dual-accept wire.** Deliberately unchanged.
+  separately (trailing-HMAC heartbeat, gRPC guard). This issue is the
+  session-sync **stream**. NOTE (r2): because those channels reuse the same PSK
+  and it is disclosed by cleartext config-sync (§0.1), closing Blocker 1 also
+  protects them from the config-sync-disclosure vector — but a dedicated audit
+  of their own confidentiality is a separate follow-up.
+- **The UNKEYED-local dual-accept wire.** A node with no PSK is still a legacy
+  peer, byte-for-byte. Only the KEYED-local dual-accept changes (§3.10).
 
 ## 8. Open questions
 
-1. **Node-id binding: include or endpoints-only?** Endpoints already provide
-   the non-equalizable role-ordered channel binding that defeats Vector B.
-   Node-id is defense-in-depth but needs the local id threaded into the
-   handshake (via the `SyncAuthProvider` or a new accessor) + dup-id rejection.
-   Proposal: ship endpoints-only for the hotfix; add node-id if the reviewers
-   want it and the plumbing is clean. **Decision needed at /engineer.**
+1. **RESOLVED (r2): discriminator = node-id + fabric-id + cluster-id, not
+   endpoints.** Hostile review (AGY + Codex) showed configured-endpoint binding
+   is fragile (hostname parse-failure, wildcard asymmetry, live-address drift).
+   The node-id (mandatory v2 HELLO field, local id trusted, peer-claimed-local-id
+   rejected) + fabric-id + cluster-id carries the full property with no
+   address-string fragility. Needs `SyncAuthProvider.LocalNodeID()` +
+   cluster-id plumbing. Endpoints optional defense-in-depth only, never a
+   parse-failure constant.
+1b. **Option A′ (custom AEAD) vs Option B (TLS-PSK / Noise) for confidentiality?**
+   B is the strategically correct answer (standard, audited, one construction);
+   A′ ships faster but is another custom secure-transport. **Decision needed at
+   /engineer**, weighing hotfix urgency vs. long-term maintenance.
 2. **Reorder the HELLO too, or only the PROOF?** Proposal: keep HELLO
    concurrent (public nonces), reorder only the PROOF (responder-validates-
    first). Confirm no `net.Pipe` deadlock in the test harness.
@@ -593,15 +844,47 @@ the acceptance bar, not colour.
 
 ## 9. Recommended design (one-paragraph summary for the issue)
 
-Harden the custom session-sync handshake in place: thread an explicit
-initiator/responder role from the dial/accept loops; bind every proof to a
-role byte **and** a role-ordered transcript hash over
-`{version, both nonces, both CONFIGURED fabric endpoints}` (optionally
-node-ids) so a reflected or cross-connection-replayed proof carries the wrong
-role/endpoint ordering and is rejected; reject an equal/all-zero peer nonce;
-derive **two directional** frame keys (`i2r`/`r2i`) from that transcript so a
-reflected sealed frame fails inbound verification; and gate the keyed↔keyed
-wire on `syncAuthVersion = 2` **fail-closed** (no silent v1 downgrade) as a
-documented coordinated (flag-day) upgrade, leaving the unkeyed dual-accept path
-byte-for-byte unchanged. Full standard TLS-PSK/Noise replacement (which also
-adds confidentiality) is recorded as an out-of-scope strategic follow-up.
+**(r2, converged.)** Fix the session-sync channel on three axes. **(1) Authenticate
+correctly:** thread an explicit initiator/responder role from the dial/accept
+loops (a local fact, not from the wire); bind every proof to a role byte **and**
+a role-ordered transcript over `{version, cluster-id, fabric-id, both node-ids
+(node-id from the v2 HELLO, peer-claiming-our-id rejected), both fresh nonces}`
+— role-ordered, never value-sorted — so any reflected or cross-connection /
+cross-fabric / cross-cluster proof lands in the wrong slot and is rejected;
+reject equal/all-zero nonces; responder-validates-first. **(2) Make it
+confidential:** the stream carries the control-link PSK itself (and all operator
+secrets) in cleartext via config-sync, so an HMAC-only seal lets a passive relay
+learn the PSK and forge — replace it with an encrypted transport (preferred:
+TLS 1.3 external-PSK / Noise-psk; intermediate: directional AEAD over the custom
+handshake) with directional keys and strict `prev+1` sequencing. **(3) Stop
+dual-accepting when keyed:** a node that holds a PSK requires authenticated v2
+(a `syncAuthVersion=2` fail-closed flag-day for the keyed wire, and no
+dual-accept of a PSK-less peer, no pre-admission frame execution) — only an
+*unkeyed* node stays legacy; any migration interop is an explicit, default-off,
+alarmed, time-bounded knob. Bound pre-auth memory/goroutines; snapshot the key
+epoch across the handshake. Must pass loss-cluster `make test-failover`
+(including a forced-fab0/fab1 leg) before commit.
+
+---
+
+## 10. Converged reviewer verdicts (3-of-3 after scope expansion)
+
+| Reviewer | Verdict on r1 (narrow) | Key findings | Status in r2 |
+|----------|------------------------|--------------|--------------|
+| **Claude SMR** (`claude-smr-plan-r1.md`) | PLAN-SOUND w/ 3 must-fix | role-order-not-sort; two-process `test-failover` gate + canonical endpoint bytes; direction-byte keys + reflected-frame-fails test | Folded into §3.1/§3.5/§6 |
+| **Codex** (`codex-plan-r1.md`) | **PLAN-REJECT** of narrow scope (crypto construction sound) | **Blocker 1** config-sync leaks the PSK in cleartext ⇒ confidentiality required; **Blocker 2** keyed-local dual-accept + pre-admission fence = PSK-less active bypass; strict next-seq; node-id-not-endpoint; DoS bounds; key-epoch | Both blockers **verified true** vs origin/master and folded into §0/§3.9/§3.10/§3.11/§3.12; scope expanded |
+| **AGY** (`agy-plan-r1.md`) | PLAN-SOUND-WITH-CHANGES | endpoint binding fragile (hostname zero-fallback re-opens Vector B; wildcard asymmetry = outage) ⇒ bind node-id/fabric-id; bind `fabric_idx`; offer transitional knob | Folded into §3.1 (node-id discriminator) + §3.7/§3.10 (transitional knob) |
+
+**Convergence.** All three agree the cryptographic construction (role +
+role-ordered transcript + directional keys + equal-nonce reject + version
+flag-day) is sound. Codex's PLAN-REJECT was against the *r1 scope* (HMAC-only,
+dual-accept unchanged, confidentiality deferred). r2 expands scope to add
+**confidentiality** (Blocker 1) and **fail-closed keyed dual-accept** (Blocker
+2), and swaps the fragile endpoint discriminator for **node-id/fabric-id/
+cluster-id** (AGY + Codex). With those in, every reviewer's blocking objection
+is resolved → **PLAN-READY on the r2 design.**
+
+**One deliberate open decision for /engineer:** Option A′ (custom directional
+AEAD, faster) vs Option B (TLS-PSK / Noise, standard + audited) for the
+confidentiality requirement. Both close Blocker 1; the plan recommends B
+strategically and A′ as the hotfix-speed intermediate.
