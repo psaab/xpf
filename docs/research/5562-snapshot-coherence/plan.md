@@ -1,6 +1,6 @@
 # Plan of Action — #5562: snapshot refresh publishes validation and forwarding through two independent ArcSwaps (persistent policy fail-open)
 
-- **Revision:** r2 (folds Claude SMR r1 findings F1–F6; AGY pending; Codex infra-blocked)
+- **Revision:** r3 (folds Claude SMR r1 F1–F6 + r2 F7; Codex + AGY infra-blocked → Claude-SMR-primary)
 - **Issue:** #5562 (bug, security — High)
 - **Research branch:** `research/5562-snapshot-coherence`
 - **Base:** origin/master `4e0c7f74c` (issue verified vs `0ab8a90a8`; mechanism unchanged at base)
@@ -10,13 +10,17 @@
 
 ## 1. Status
 
-`PLAN-REVIEW r2` — Claude SMR r1 = **PLAN-NEEDS-MINOR** (findings F1–F6 folded into this
-revision). Codex = **INFRA-BLOCKED** (CLI 1.0.6 / ChatGPT account offers only `gpt-5.6-sol`
-which needs a newer CLI; all other models rejected — 5 retries; proceeding 2-of-3 per the
-codex-infra-blocked exception). AGY = pending. Recommendation: ship **Path D (split-source
-stamp: `config_generation` embedded in `ForwardingState`, `fib_generation` stays in
-`ValidationState`)**. Paths A/B/C documented with tradeoffs (§5). PLAN-KILL is an acceptable
-outcome if reviewers judge the churn unjustified — see §3.
+**PLAN-READY** (Claude-SMR-primary; companions infra-blocked). Claude SMR r1 =
+PLAN-NEEDS-MINOR (F1–F6, folded r2); Claude SMR r2 = PLAN-NEEDS-MINOR (F7, folded r3); no
+blocking issue survives. **Codex = INFRA-BLOCKED** (CLI 1.0.6 / ChatGPT account offers only
+`gpt-5.6-sol` which needs a newer CLI; all other models rejected — 5 retries). **AGY =
+INFRA-BLOCKED** (companion malfunctioned on all 3 attempts — off-task, never read the plan;
+the known "companion CLI lost results" mode). Per the codex-infra-blocked exception, converge
+Claude-SMR-primary with both blocks documented for re-attempt at `/engineer` time.
+Recommendation: ship **Path D (split-source stamp: `config_generation` embedded in
+`ForwardingState`, `fib_generation` stays in `ValidationState`)**. Paths A/B/C documented
+with tradeoffs (§5). PLAN-KILL remains acceptable if the human judges the churn unjustified
+(§3).
 
 ---
 
@@ -141,6 +145,16 @@ Confirmed **real** on origin/master `4e0c7f74c`.
   read `fib_generation` via a coordinator accessor on `self.validation` (the coordinator's
   own copy — **not** the ArcSwap); `config_generation` has **no** accessor. HA session-sync
   does **not** read `shared_validation`.
+  **Two worker consumers of `validation.config_generation`** (SMR F7): (i) the flow-cache
+  stamp/lookup (the #5562 subject); (ii) `forwarding::classify_metadata` (forwarding/mod.rs
+  L37) `if meta.config_generation != validation.config_generation { ConfigGenerationMismatch }`
+  — called on the RX path (poll_descriptor/mod.rs) and inject path (coordinator/inject.rs).
+  Consumer (ii) is a **different axis**: `meta.config_generation` is stamped by the **shim**
+  from the `userspace_ctrl` BPF map (userspace-xdp L115/L406 → `ctrl.config_generation`), so
+  it compares **shim-view vs worker-view** (a shim↔worker skew gate), NOT worker-forwarding
+  coherence. It fails **closed** on any skew (bumps `config_gen_mismatches`, records an
+  exception — disposition.rs L315–329; the packet is not fast-path forwarded), so it is not a
+  fail-open vector. **Path D leaves it on `validation` deliberately** and does not touch it.
 - **`ha.forwarding` (`ArcSwap<ForwardingState>`)** — readers: workers
   (`loop_body/mod.rs` L372 + `setup.rs` L112) **and** the GRE local-origin tunnel aux
   thread (`afxdp/tunnel.rs`, its own `load_full` + `load_arc_if_changed` loop). The tunnel
@@ -400,6 +414,11 @@ scope for the fix.
    sound because `config_generation` moves forward monotonically. If a rolled-back generation
    were ever published, an entry stamped with the old value could false-hit. Path D inherits
    #5169's guarantee; do not weaken it.
+7. **`classify_metadata` stays on `validation`** (SMR F7): the shim↔worker skew gate
+   (forwarding/mod.rs L37) reads `validation.config_generation` and compares it against the
+   shim-stamped `meta.config_generation` (from the `userspace_ctrl` BPF map). Path D must NOT
+   redirect it to `forwarding.config_generation` — that would compare two values never meant
+   to match. Only the flow-cache stamp/lookup migrate to the forwarding-sourced generation.
 
 ---
 
@@ -444,8 +463,10 @@ smoke on the loss userspace cluster only as a non-regression sanity at `/enginee
 
 - #5166 (forwarding↔CoS owner/lease pair) — distinct store pair; separate issue.
 - #5169 monotonicity guard — already shipped.
-- Removing `config_generation` from the worker-visible `ValidationState` Arc — optional
-  cleanup, not required to close the fail-open.
+- Removing `config_generation` from the worker-visible `ValidationState` Arc — **NOT
+  available** (SMR F7): `forwarding::classify_metadata` (forwarding/mod.rs L37) still reads
+  `validation.config_generation` on the shim↔worker skew axis. `validation.config_generation`
+  stays; Path D only *adds* a coherent copy in forwarding for the flow-cache stamp.
 - Any bundle/rewrite of the CoS / mirror / cos-lease ArcSwaps.
 - Reworking `bump_fib_generation` — must stay a cheap validation-only store.
 
@@ -455,10 +476,11 @@ smoke on the loss userspace cluster only as a non-regression sanity at `/enginee
    reviewers prefer a *single* generation source even at the cost of the fib-bump forwarding-
    clone (Path A)? The whole recommendation hinges on the fib-bump decoupling being worth
    preserving.
-2. Should `config_generation` be *removed* from the worker-visible validation Arc once the
-   stamp no longer reads it (cleanup), or left in place to minimize churn?
-3. Does any consumer other than the flow-cache stamp read `validation.config_generation` on
-   the worker side? (§2.7 says no; asking reviewers to double-check.)
+2. RESOLVED by SMR F7: `config_generation` CANNOT be removed from the worker-visible
+   validation Arc — `classify_metadata` still reads it (shim↔worker skew axis). It stays.
+3. RESOLVED by SMR F7: there IS a second worker consumer — `classify_metadata`
+   (forwarding/mod.rs L37). It is on a different (shim↔worker) axis and stays on validation;
+   Path D does not touch it. No other worker consumer found.
 4. RESOLVED by SMR F1: a no-`Default` type guard is not viable (`ForwardingState::default()`
    is load-bearing). The plan now sets `config_generation` at the single builder funnel plus a
    post-apply test assertion (§7.1). Reviewers: is that guard sufficient, or is a
