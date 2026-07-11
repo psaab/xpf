@@ -1,6 +1,6 @@
 # Plan of Action — #5562: snapshot refresh publishes validation and forwarding through two independent ArcSwaps (persistent policy fail-open)
 
-- **Revision:** r1 (initial draft; pre-review)
+- **Revision:** r2 (folds Claude SMR r1 findings F1–F6; AGY pending; Codex infra-blocked)
 - **Issue:** #5562 (bug, security — High)
 - **Research branch:** `research/5562-snapshot-coherence`
 - **Base:** origin/master `4e0c7f74c` (issue verified vs `0ab8a90a8`; mechanism unchanged at base)
@@ -10,11 +10,13 @@
 
 ## 1. Status
 
-`PLAN-DRAFT` — awaiting Claude SMR + Codex + AGY hostile plan review. Recommendation
-(pending review): ship **Path D (split-source stamp: config_generation embedded in
-ForwardingState, fib_generation stays in ValidationState)**. Paths A/B/C are documented
-with tradeoffs. PLAN-KILL is an acceptable outcome if reviewers judge the churn
-unjustified — see §3.
+`PLAN-REVIEW r2` — Claude SMR r1 = **PLAN-NEEDS-MINOR** (findings F1–F6 folded into this
+revision). Codex = **INFRA-BLOCKED** (CLI 1.0.6 / ChatGPT account offers only `gpt-5.6-sol`
+which needs a newer CLI; all other models rejected — 5 retries; proceeding 2-of-3 per the
+codex-infra-blocked exception). AGY = pending. Recommendation: ship **Path D (split-source
+stamp: `config_generation` embedded in `ForwardingState`, `fib_generation` stays in
+`ValidationState`)**. Paths A/B/C documented with tradeoffs (§5). PLAN-KILL is an acceptable
+outcome if reviewers judge the churn unjustified — see §3.
 
 ---
 
@@ -176,7 +178,10 @@ acceptable.**
 ## 4. Already-shipped related work
 
 - #5169 — apply_snapshot generation-monotonicity guard (rejects rolled-back/reused
-  generations). CLOSED. Complements but does not fix #5562.
+  generations). CLOSED. Complements but does not fix #5562. **Load-bearing predecessor of
+  Path D** (SMR F3): the flow-cache invalidation is an *equality* compare, so it only
+  guarantees eviction if `config_generation` never rolls back to a value a live entry still
+  carries; #5169's monotonicity is the precondition that makes equality safe.
 - #5171 — defer_workers integrity build before ack. CLOSED.
 - #5166 — forwarding published before CoS owner/lease maps (forwarding↔CoS pair). **OPEN.**
   Same *family* (non-atomic multi-store publish), different store pair; a bundle-style fix
@@ -283,12 +288,43 @@ Why it closes the fail-open completely and atomically:
   no tearing is possible for a value that lives in exactly one ArcSwap. Route-churn
   invalidation is unchanged.
 
+Both-axes coherence proof (SMR F2) — a full apply bumps BOTH `config_generation` (→
+forwarding, store B) AND `fib_generation` (→ validation, store A); Path D must be coherent
+on every interleaving, not just the config axis:
+
+- **Forward torn read** (validation NEW `fib=F_N`, forwarding OLD `config=C_{N-1}`): decision
+  under `C_{N-1}`; stamp `= (C_{N-1}, F_N)`. After forwarding→`C_N`, lookup `= (C_N, F_N)`.
+  `C_{N-1} != C_N` → **evict**. Closed by the config axis.
+- **Inverse torn read** (validation OLD `fib=F_{N-1}`, forwarding NEW `config=C_N`): decision
+  under `C_N`; stamp `= (C_N, F_{N-1})`. After validation→`F_N`, lookup `= (C_N, F_N)`.
+  `F_{N-1} != F_N` → **evict** (transient, re-evaluated under live policy).
+- **fib-only bump** (forwarding unchanged, `F→F+1` via validation): one atomic; stamp and
+  lookup both read the single `validation.fib_generation`; advance → evict.
+
+Each axis is sourced from exactly one atomic, and the stamp/lookup read the *same* worker-
+local of that atomic — so neither axis can tear against itself. Coherence is structural.
+
+Why NOT just reorder the two stores (SMR F4): reordering to forwarding-first (stores AND
+reads) does not create atomicity. A worker can still load forwarding=OLD, then both stores
+land, then load validation=NEW → NEW-validation + OLD-forwarding persists. Reordering only
+shuffles which schedule is the persistent one; it never removes the torn pair. A real
+coherence mechanism (D) is required.
+
+Symmetry (SMR F6): the generation-mismatch eviction is direction-agnostic. If deny decisions
+are also cacheable, the inverse of the reported bug is a persistent fail-*closed* (a raced
+new PERMIT stays denied); Path D closes both directions with the same compare.
+
 - **Blast radius:** **Smallest.** No ArcSwap restructuring. The tunnel aux thread, bring-up,
   status, and HA sync are untouched (forwarding merely gains a `u64` field they ignore;
-  validation is unchanged). Change is confined to: `ForwardingState` struct + its builders
-  (`forwarding_build/`), `FlowCacheStamp::capture` / `FlowCacheLookup::for_packet` signatures
-  and their call sites in `flow_cache.rs` / `poll_descriptor/` / `worker/loop_body/`, and the
-  flow-cache tests.
+  validation is unchanged). The insert site (`flow_cache.rs` ~L430–542) ALREADY receives both
+  `forwarding` (used at L437/L466/L472) and `validation` (L536) as parameters, so the stamp
+  change is a one-token source swap (`forwarding.config_generation` for
+  `validation.config_generation`); the only real signature churn is
+  `FlowCacheLookup::for_packet` (L169), and `forwarding` is already in scope at its call site
+  (`poll_descriptor/flow_cache_hit.rs`, under `poll_binding`). Change is confined to:
+  `ForwardingState` struct + its builders (`forwarding_build/`), `FlowCacheStamp::capture` /
+  `FlowCacheLookup::for_packet` signatures and their call sites in `flow_cache.rs` /
+  `poll_descriptor/` / `worker/loop_body/`, and the flow-cache tests.
 - **Per-packet hot-path cost:** None — same number of atomic loads; the stamp/lookup read a
   struct field instead of a sibling struct field.
 - **Testability:** High — a pure unit test drives the exact schedule: build forwarding N-1
@@ -336,8 +372,17 @@ scope for the fix.
    — same-plan refresh, full reconcile, and any disarmed refresh — using the *same*
    `snapshot.generation` the coordinator writes to `validation`. A build path that forgets to
    set it would stamp `0` and mass-invalidate (fail-*closed*, self-healing, but a perf cliff).
-   A compile-time guard (no `Default` for the field, or a constructor that requires it) is
-   desirable.
+   **CORRECTION (SMR F1): a "no-`Default`" compile-time guard is NOT viable** —
+   `ForwardingState::default()` is load-bearing: `ha_state.rs` builds the forwarding ArcSwap
+   with `ArcSwap::from_pointee(ForwardingState::default())` at coordinator init, and every
+   builder starts from `let mut state = ForwardingState::default();`
+   (`forwarding_build/mod.rs` L206). Removing `Default` is therefore impossible. The guard is:
+   (a) the field defaults to `0`, which matches `ValidationState::default().config_generation
+   == 0`, so pre-first-apply stamp/lookup are coherent at 0; (b) all real forwarding flows
+   through `build_forwarding_state_*` — set `config_generation = snapshot.generation` once,
+   there, at the top of `build_forwarding_state_with_policy_counters_and_previous`; (c) a test
+   asserts `forwarding.config_generation == snapshot.generation` after same-plan refresh, full
+   reconcile, AND disarmed refresh (§9.5). This is a test/build-site guard, not a type guard.
 2. **`fib_generation` MUST stay sourced from `validation`.** It bumps without a forwarding
    rebuild; sourcing it from forwarding would silently drop route-churn invalidations
    (fail-open on stale next-hops). Path D keeps it in validation — this split is the crux and
@@ -351,6 +396,10 @@ scope for the fix.
    it does, as long as the field is on the struct).
 5. The stamp's other axes (owner_rg_id, owner_rg_epoch, lease) are unchanged and still
    sourced as today.
+6. **#5169 monotonicity is a precondition** (SMR F3): the equality invalidation is only
+   sound because `config_generation` moves forward monotonically. If a rolled-back generation
+   were ever published, an entry stamped with the old value could false-hit. Path D inherits
+   #5169's guarantee; do not weaken it.
 
 ---
 
@@ -358,7 +407,7 @@ scope for the fix.
 
 | Risk | Likelihood | Impact | Mitigation |
 |---|---|---|---|
-| A forwarding-build path forgets to set `config_generation` | Med | Perf cliff (mass invalidation), fail-closed | Constructor requires it / no field default; grep all `ForwardingState { … }` literals; test asserts non-zero after apply |
+| A forwarding-build path forgets to set `config_generation` | Low | Perf cliff (mass invalidation), fail-closed | Set it ONCE in `build_forwarding_state_..._and_previous` (the single funnel all builders pass through); test asserts it equals `snapshot.generation` after every apply path. (No-`Default` type guard is NOT viable — see §7.1.) |
 | Sourcing fib_generation from forwarding by mistake | Low | Fail-open on route churn | Keep fib in validation; explicit comment + test that a fib bump alone still invalidates |
 | Signature churn on `capture`/`for_packet` breaks a call site | Low | Compile error (caught) | Rust type system; update all sites in one change |
 | Hidden reader of `validation.config_generation` in worker beyond the stamp | Low | Behavior change | §2.7 grep shows worker reads it only for the stamp; re-grep at implementation |
@@ -410,9 +459,10 @@ smoke on the loss userspace cluster only as a non-regression sanity at `/enginee
    stamp no longer reads it (cleanup), or left in place to minimize churn?
 3. Does any consumer other than the flow-cache stamp read `validation.config_generation` on
    the worker side? (§2.7 says no; asking reviewers to double-check.)
-4. Is a compile-time guard (no `Default` on the new field) worth the ergonomic cost across
-   the `ForwardingState` builders, or is a single test assertion sufficient for invariant
-   §7.1?
+4. RESOLVED by SMR F1: a no-`Default` type guard is not viable (`ForwardingState::default()`
+   is load-bearing). The plan now sets `config_generation` at the single builder funnel plus a
+   post-apply test assertion (§7.1). Reviewers: is that guard sufficient, or is a
+   `debug_assert` at the store site also wanted?
 5. Should the fix also add a lightweight *diagnostic* — e.g. a debug assertion or counter
    that fires if a worker ever observes `validation.config_generation != forwarding.config_generation`
    — to catch any future re-introduction of a torn publish? (Detection, not correctness.)
