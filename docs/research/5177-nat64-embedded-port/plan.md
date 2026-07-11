@@ -1,7 +1,14 @@
 # Plan — #5177 NAT64 embedded ICMP-error L4 port/identifier restoration
 
-**Revision:** r2 (reachability trace folded in — recommendation flipped to PLAN-KILL as scoped)
+**Revision:** r3 (3-reviewer convergence — Codex corrections folded in; PLAN-KILL as scoped)
 **Base SHA:** `4e0c7f74c` (origin/master at research start)
+
+> **Reviewer convergence (round 1):**
+> - **Claude SMR — CONCUR PLAN-KILL** (hostile, 5 attacks; could not break the KILL). See `claude-smr-plan-r1.md`.
+> - **Codex — CONCUR PLAN-KILL** (hostile, read-only; found NO counter-path; confirmed items 1–3; corrected the plan's citations; and *exhaustively proved a larger bug* — ordinary reverse NAT64 TCP/UDP replies are also broken, R-C resolved). See `codex-plan-r1.md`.
+> - **AGY — INFRA-BLOCKED** after two documented retries (both runs went off-task, hallucinating about an unrelated `--print-timeout` CLI flag; zero signal). Per the research skill's infra-blocked exception, converged 2-of-3 (Claude SMR + Codex).
+>
+> r3 folds Codex's material corrections: (a) the ordinary-reply "may be broadly unreachable" hedge is **upgraded to exhaustively-broken**; (b) the `nat64_reverse: None` constructor citations are **corrected** to the three real production constructors; (c) the follow-up gains the small decision-derived ordinary-reply repair + the oversized-TCP IPv4-leak finding.
 **Issue:** #5177 — "userspace-dp NAT64: reverse ICMP-error translation leaves
 the translated PAT port/ICMP-id in the embedded quote instead of the original
 client value."
@@ -44,7 +51,8 @@ already available (`EmbeddedIcmpMatch.original_src` / `.original_src_port`).
 - [x] Defect in `translate_embedded_*` verified (verbatim L4 copy).
 - [x] Reachability trace complete (§3.1) — reverse case fully confirmed dropped.
 - [x] r1 Option A falsified; wrong-site + wrong-datum documented.
-- [ ] Codex + AGY + Claude-SMR converge on PLAN-KILL (or reject it).
+- [x] Converged 2-of-3 on PLAN-KILL: Claude SMR CONCUR + Codex CONCUR; AGY infra-blocked (2 retries).
+- [x] Codex corrections folded (r3); R-C (ordinary reverse replies broken) proven.
 - [ ] Follow-up issue filed for the real fix; `plan-kill` label on #5177.
 
 ---
@@ -114,18 +122,35 @@ site is dead for production ingress.**
 -family match is produced and the *effective* guard is the same-family builder's
 family check at `builders.rs:26-29` (a silent drop).
 
-**Additional latent gap flagged by the trace:** every `PendingForwardRequest`
-constructor hard-codes `nat64_reverse: None` (`forward_request.rs:299`,
-`poll_descriptor/mod.rs:2380/2557/5701/5865`, `worker/loop_body/mod.rs:1483`,
-`forwarding/mod.rs:804`). The only real `nat64_reverse` values live on
-`SessionMetadata` (`:3009/:3286`) and are never copied onto a forward request.
-The AF_INET reverse branch of `build_nat64_forwarded_frame` *requires*
-`request.nat64_reverse` (`frame/mod.rs:291`). This means the whole-packet v4→v6
-reverse translation may be broadly unreachable, **not only for the ICMP-error
-sub-case** — consistent with the `#4565` note in `shared_ops.rs:700-707` that
-the builder "returns None … and the reply is dropped" without it. *(Not
-exhaustively proven for the normal TCP/UDP reverse reply; called out as its own
-investigation, §10 / OQ7. The ICMP-error reverse drop IS fully proven.)*
+**Larger latent bug — EXHAUSTIVELY PROVEN by Codex (R-C resolved):** ordinary
+reverse NAT64 TCP/UDP replies are *also* broken, not only ICMP errors. The three
+**real** production `PendingForwardRequest` constructors all hard-code
+`nat64_reverse: None`:
+- normal live forwarding — `forward_request.rs:288-302`,
+- embedded-ICMP prebuilt forwarding — `poll_descriptor/mod.rs:2537-2557`,
+- generated time-exceeded forwarding — `icmp.rs:257-281`.
+
+*(Correction from r2: the earlier list — `poll_descriptor:2380/5701/5865`,
+`worker/loop_body:1483`, `forwarding/mod.rs:804` — were `SessionMetadata`
+fields, several test-only, NOT request constructors. Codex re-read and
+relabeled them.)* The real `nat64_reverse` values live only on `SessionMetadata`
+(`:3003-3010/:3280-3286`) and are never copied onto a request. The AF_INET
+reverse branch of `build_nat64_forwarded_frame` *requires* `request.nat64_reverse`
+(`frame/mod.rs:289-292`) → returns `None` → slow-path fallback
+(`tx/dispatch/mod.rs:880-882/:1201-1203`) → `extract_l3_packet_with_nat` picks
+same-family `apply_nat_ipv4` (`slow_path.rs:379-398`), which **discards the IPv6
+rewrite addresses** (`frame/mod.rs:896-905`) and emits the packet **still as
+IPv4** to the TUN. NAT64 is deliberately excluded from the flow cache
+(`flow_cache.rs:321-329`), and the XDP shim does not translate NAT64
+(`userspace-xdp/src/lib.rs:1427-1437`), so there is no alternate repair path.
+**Net: the userspace production path emits no IPv6 reply for a NAT64 flow** —
+consistent with the `#4565` note (`shared_ops.rs:700-707`) that the builder
+"returns None … and the reply is dropped." Unit tests miss this because they call
+`build_nat64_forwarded_frame` with `nat64_reverse` supplied explicitly; the gap
+is purely at the request-construction boundary. **Additional leak:** an oversized
+reverse NAT64 TCP reply is segmented *before* the NAT64 builder with no NAT64
+exclusion (`tx/dispatch/mod.rs:541-591/:1458-1502`,
+`frame/tcp_segmentation.rs:145-217`) and transmitted as IPv4.
 
 ### 3.2 Forward direction (v6→v4) — reachable, but wrong datum
 
@@ -253,14 +278,25 @@ described in §6.
 
 ## 10. Out of scope (of #5177) + filed follow-up
 
-- **Filed follow-up issue (the real fix):** "NAT64 reverse ICMP errors are
-  dropped — cross-family embedded-ICMP match discarded by the same-family
-  builder; needs a v4↔v6 ICMP-error builder that restores the embedded client
-  tuple." Its fix subsumes #5177's embedded-port intent using
-  `EmbeddedIcmpMatch.original_src_port`. Link added on filing.
-- **Separately flag (OQ7):** whether *normal* reverse NAT64 replies are also
-  affected by the "no request populates `nat64_reverse`" gap — its own
-  investigation, higher severity if confirmed. (Not asserted here; not proven.)
+- **Filed follow-up issue (the real fix) — now scoped larger and higher
+  severity, R-C proven:** "NAT64 reverse translation is broken in the userspace
+  production path — `Nat64ReverseInfo` is lost at the `PendingForwardRequest`
+  boundary." Two coupled defects:
+  1. **Ordinary reverse TCP/UDP replies** emit IPv4 instead of the translated
+     IPv6 (small repair: derive `src_v6`/`dst_v6` in the AF_INET builder from
+     `decision.nat.rewrite_src`/`rewrite_dst`, which already carry the original
+     v6 endpoints via `NatDecision::reverse` — `nat/mod.rs:106-120`,
+     `frame/mod.rs:310-318`; no dependency on `request.nat64_reverse`).
+  2. **Reverse ICMP errors** are dropped by the same-family `icmp_embed` builder
+     (needs a cross-family v4↔v6 ICMP-error builder that restores the embedded
+     client tuple — this subsumes #5177's intent using the already-available
+     `EmbeddedIcmpMatch.original_src_port`). The ordinary-reply repair does NOT
+     fix this sub-case (its request uses `NatDecision::default()`).
+  3. **Oversized reverse TCP leaks as IPv4** via the segmentation path (no NAT64
+     exclusion) — fold into the same fix.
+  Recommend its own `/research` pass before `/engineer` — it is materially
+  larger than #5177 and touches the request-carriage + a new builder. Link
+  added on filing.
 - Same-family SNAT/DNAT/NPTv6 embedded ICMP (already correct via `icmp_embed`).
 - The NAT64 fast path (throughput) — untouched.
 
@@ -281,9 +317,13 @@ described in §6.
 4. **Datum source.** Confirm `EmbeddedIcmpMatch.original_src_port ==
    fwd.key.src_port` is the original client port in all match arms (forward-NAT
    match vs. session-fallback). (`nat_match_v4.rs:46` vs `:106`.)
-5. **`nat64_reverse` population gap (OQ7).** Prerequisite severity: does the
-   reverse v4→v6 whole-packet path need wiring before any ICMP-error fix can be
-   validated end-to-end?
+5. **[RESOLVED] `nat64_reverse` population gap (was OQ7).** Codex proved
+   ordinary reverse TCP/UDP replies are broken too (emit IPv4). The reverse
+   carriage MUST be wired before any ICMP-error fix can be validated end-to-end;
+   both live in the filed follow-up. Recommend an end-to-end NAT64 reverse
+   repro (v6 client ↔ v4 server through NAT64, assert v6 reply) as the first
+   step of the follow-up's `/research`, since a shipped-but-only-unit-tested
+   feature could still have a real reverse path this static trace didn't model.
 6. **Checksum policy** for the new builder: leave embedded L4 stale (recommended)
    vs. incremental. (Same conclusion as r1 — kernels don't validate.)
 7. **Value threshold.** Is NAT64-ICMP-error correctness (PMTUD/traceroute)
@@ -302,6 +342,7 @@ described in §6.
 - `is_embedded_icmp_error` — `poll_descriptor/mod.rs:2170`; ICMP arm `:2454`; same-family build `:2495`
 - `match_outer_v4` recovers v6 `original_src` + client `original_src_port` — `icmp_embed/nat_match_v4.rs:41-46`
 - same-family builder family guard (silent drop) — `icmp_embed/builders.rs:26-29`
-- every `PendingForwardRequest.nat64_reverse = None` — `forward_request.rs:299`, `poll_descriptor/mod.rs:2380/2557/5701/5865`, `worker/loop_body/mod.rs:1483`
+- the THREE real production `PendingForwardRequest.nat64_reverse = None` constructors — `forward_request.rs:288-302`, `poll_descriptor/mod.rs:2537-2557`, `icmp.rs:257-281` (Codex correction; the r2 list conflated `SessionMetadata` sites)
+- ordinary reverse reply slow-path IPv4 leak — `tx/dispatch/mod.rs:880-882` → `slow_path.rs:379-398` → `frame/mod.rs:896-905`; oversized-TCP segmentation leak — `frame/tcp_segmentation.rs:145-217`
 - enshrining unit test (addresses-only call) — `nat64_tests.rs:1873`, assert `:1928`
 - forward `rewrite_src_port` = fresh `allocate_source` — `poll_descriptor/mod.rs:2746` → `nat64.rs:984-994`

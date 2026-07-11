@@ -46434,3 +46434,10 @@ top.
   port is a fresh allocation (wrong datum). r1 Option A falsified. Recommend
   PLAN-KILL #5177 as scoped + file new issue for the real cross-family fix.
 - **File(s)**: docs/research/5177-nat64-embedded-port/plan.md (r2)
+
+## 2026-07-11 — #5177 r3: 3-reviewer convergence → PLAN-KILL as scoped
+- **Action**: Codex CONCUR (no counter-path; proved ordinary reverse NAT64
+  TCP/UDP replies ALSO broken at PendingForwardRequest boundary; corrected
+  citations). Claude SMR CONCUR. AGY infra-blocked (2 off-task retries).
+  Converged 2-of-3 PLAN-KILL. Folded Codex corrections into r3.
+- **File(s)**: plan.md (r3), codex-plan-r1.md (new)
