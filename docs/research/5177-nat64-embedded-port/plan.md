@@ -1,6 +1,6 @@
 # Plan — #5177 NAT64 embedded ICMP-error L4 port/identifier restoration
 
-**Revision:** r1 (draft)
+**Revision:** r2 (reachability trace folded in — recommendation flipped to PLAN-KILL as scoped)
 **Base SHA:** `4e0c7f74c` (origin/master at research start)
 **Issue:** #5177 — "userspace-dp NAT64: reverse ICMP-error translation leaves
 the translated PAT port/ICMP-id in the embedded quote instead of the original
@@ -8,451 +8,300 @@ client value."
 **Scope:** research-only. Stops at PLAN-READY / PLAN-KILL. No production code
 in this branch — plan doc + reviewer verdicts only.
 
----
-
-## 1. Status
-
-- [x] Defect verified against current origin/master (`4e0c7f74c`).
-- [x] Blast radius quantified (call chain, available state, offsets, bounds).
-- [x] Design options enumerated (A / A′ / C).
-- [ ] Reverse-path reachability trace (delegated; see §3 Q1 — pending, updates
-      the value framing, not the design).
-- [ ] Codex + AGY + Claude-SMR converge PLAN-READY or PLAN-KILL.
+> **r1 → r2 change:** r1 recommended a small fix (Option A: thread the port from
+> `decision.nat` into `translate_embedded_*`). The delegated reachability trace
+> **falsified** that approach on two independent grounds (§3.1). r2's
+> recommendation is **PLAN-KILL #5177 as scoped**, plus a **new filed issue**
+> for the real, larger defect the trace surfaced (NAT64 reverse ICMP errors are
+> dropped entirely). The correctness *intent* of #5177 is valid but its named
+> fix site and datum are both wrong.
 
 ---
 
-## 2. Issue framing (the defect, verified)
+## 1. Status / recommendation
 
-`translate_embedded_v4_to_v6` (`userspace-dp/src/nat64.rs:2448-2501`) and its
-twin `translate_embedded_v6_to_v4` (`nat64.rs:2363-2443`) translate the quoted
-(embedded) original packet of a NAT64 ICMP error. They correctly restore the
-embedded **IPv6/IPv4 addresses** from the pre-resolved map
-(`EmbeddedV4ToV6.mapped_embedded_src` / `.prefix_bytes`,
-`EmbeddedV6ToV4.mapped_embedded_src` / `.mapped_embedded_dst`) but copy the
-quoted **L4 bytes verbatim**:
+**Recommendation: PLAN-KILL #5177 as literally scoped.** The named fix —
+rewrite the quoted L4 port inside `translate_embedded_v4_to_v6` /
+`translate_embedded_v6_to_v4` and source the value from the outer
+`NatDecision` — is **inert** for the direction the issue describes and uses the
+**wrong datum** for the other direction:
 
-```rust
-// translate_embedded_v4_to_v6, nat64.rs:2492
-out[40..total].copy_from_slice(l4);
-// ...then only an embedded ICMP *type/code* remap (nat64.rs:2494-2499):
-if protocol == PROTO_ICMP && l4_len >= 2 {
-    if let Some((t, c)) = embedded_icmpv4_type_to_icmpv6(out[40]) { out[40]=t; out[41]=c; }
-}
-```
+1. **Reverse direction (the issue's stated case — "delivered to the inside
+   host"): the fix site is unreachable.** A reverse NAT64 ICMPv4 error is
+   dropped upstream, never reaching `translate_embedded_v4_to_v6`.
+2. **Forward direction: wrong datum.** Where `translate_embedded_v6_to_v4` *is*
+   reachable, the outer `decision.nat.rewrite_src_port` is a **fresh per-error
+   pool allocation**, not the quoted data flow's port — restoring it would write
+   an unrelated port.
 
-There is **no** TCP/UDP source-port rewrite and **no** ICMP echo-Identifier
-rewrite. After #4381 introduced stateful PAT (RFC 6146 BIB), the embedded
-source port carried in the quote is the **translated pool port** (e.g. 40000),
-not the **original client port** (e.g. 12345). Likewise for an ICMP echo flow
-the embedded Identifier is the translated pool identifier, not the client's.
+The underlying RFC-6146 correctness goal is valid, but the actual defect is
+**upstream and larger**: the cross-family (`nat.nat64`) embedded-ICMP match is
+produced and then **discarded by the same-family builder**, so the reverse
+error is dropped. That is a separate, higher-severity bug → **file a new
+issue** (§10) whose fix subsumes #5177's intent using the datum that *is*
+already available (`EmbeddedIcmpMatch.original_src` / `.original_src_port`).
 
-RFC 6146 §3.5 / RFC 792: an ICMP error delivered to the inside host must quote
-the tuple the inside host **originally emitted** so the host can correlate the
-error to its socket. With the pool port in the quote the inside host cannot
-match the error to its flow — PMTUD black-holes (TCP path-MTU errors are keyed
-on the quoted ports in the Linux/BSD stacks) and NAT64 traceroute breaks.
+- [x] Defect in `translate_embedded_*` verified (verbatim L4 copy).
+- [x] Reachability trace complete (§3.1) — reverse case fully confirmed dropped.
+- [x] r1 Option A falsified; wrong-site + wrong-datum documented.
+- [ ] Codex + AGY + Claude-SMR converge on PLAN-KILL (or reject it).
+- [ ] Follow-up issue filed for the real fix; `plan-kill` label on #5177.
 
-**Confirmed by the existing test that enshrines the bug.**
-`nat64_v4_to_v6_time_exceeded_translates_outer_and_embedded`
+---
+
+## 2. Issue framing (the named defect, verified)
+
+`translate_embedded_v4_to_v6` (`nat64.rs:2448-2501`) and its twin
+`translate_embedded_v6_to_v4` (`nat64.rs:2363-2443`) restore the embedded
+**addresses** but copy the quoted **L4 bytes verbatim** (`out[40..total]
+.copy_from_slice(l4)` at `nat64.rs:2492`), applying only an embedded ICMP
+type/code remap — no TCP/UDP port or ICMP-id rewrite. So *as a leaf function*
+they do carry the bug the issue names.
+
+The existing test `nat64_v4_to_v6_time_exceeded_translates_outer_and_embedded`
 (`nat64_tests.rs:1873`) builds an embedded quote with L4
-`[0x30,0x39,0x00,0x50,...]` (src port `0x3039`=12345, dst port `0x0050`=80),
-translates via `translate_v4_to_v6(&v4_pkt, server_v6, client_v6)` — which
-passes **addresses only, no port** — and asserts:
+`[0x30,0x39,0x00,0x50,…]` (src port `0x3039`=12345) and asserts
+`emb[40..48] == inner_l4` (`nat64_tests.rs:1928`) — i.e. it enshrines the
+verbatim copy. **But this is a direct unit call to `translate_v4_to_v6`, which
+takes addresses only and no port** — it is not a production ingress path.
 
-```rust
-assert_eq!(&emb[40..48], &inner_l4, "embedded quoted L4 preserved");   // nat64_tests.rs:1928
-```
-
-i.e. the test asserts the embedded L4 (including the source port) is preserved
-byte-for-byte. In a #4381 deployment that `0x3039` would be the pool port, and
-the correct post-fix value is the original client port. **This test must be
-updated by the fix** — its "verbatim" expectation is exactly the defect.
+The problem: **that leaf function is not reached from production ingress for the
+direction the issue describes**, so fixing it there is invisible on real
+traffic. §3.1 proves this.
 
 ---
 
 ## 3. Honest scope + value framing
 
-This is a **slow-path correctness** fix on the NAT64 ICMP-error branch. It is
-NOT on the throughput fast path (no per-packet cost for TCP/UDP data). Its
-value is real but bounded to two operationally-important cases:
+### 3.1 Reachability trace — the load-bearing finding (Q1 resolved)
 
-- **TCP PMTUD through NAT64.** A "Fragmentation Needed / Packet Too Big" from a
-  v4 hop must reach the v6 client's socket. Linux `tcp_v4_err`/`tcp_v6_err`
-  look up the socket from the **embedded ports**; a wrong embedded source port
-  means the PMTU update is dropped and the flow black-holes at the reduced MTU.
-- **NAT64 traceroute / UDP error correlation.** `traceroute`, `ping`, and UDP
-  apps correlate Time-Exceeded/Dest-Unreachable to the probe via the embedded
-  port / ICMP identifier.
+Delegated line-precise read-only trace (corroborated by an independent
+first-hand read). **Reverse NAT64 ICMPv4 error** (outer `server → snat_v4`,
+quoting the forward packet `snat_v4:pool_port → server:sport`):
 
-**PLAN-KILL is an acceptable, honest outcome if the win is too small.** Two
-kill conditions to weigh against the evidence:
+1. Outer ICMPv4 error is L4-portless → session **MISS**.
+2. `is_embedded_icmp_error` = true — `poll_descriptor/mod.rs:2170-2181`.
+3. `if is_embedded_icmp_error {` — `:2454` → `try_embedded_icmp_nat_match` —
+   `:2458`. **This arm is taken, so the normal `else if ForwardCandidate`
+   NAT64 build at `:2619` / `:4183` is never reached.**
+4. Outer family AF_INET → `match_outer_v4` — `icmp_embed/mod.rs:157`.
+5. `match_outer_v4` parses the quote and calls
+   `lookup_forward_nat_across_scopes(reverse_key)` —
+   `icmp_embed/nat_match_v4.rs:18-42`. This **matches the forward IPv6 NAT64
+   session cross-family** (NAT64-aware reverse key, `session/key.rs:112-141`),
+   recovering `original_src = fwd.key.src_ip` = **the IPv6 client**
+   (`nat_match_v4.rs:45`), `original_src_port = fwd.key.src_port` = **the
+   original client port**, and `nat.nat64 = true`.
+6. Poll: `icmp_match.nat.rewrite_src.is_some()` true (`:2485`) → AF_INET →
+   `build_nat_reversed_icmp_error_v4` — `:2495`.
+7. **Terminal: `build_nat_reversed_icmp_error_v4` returns `None`** at
+   `icmp_embed/builders.rs:26-29` — `let original_client = match
+   icmp_match.original_src { IpAddr::V4(v4) => v4, _ => return None }`. The
+   match's `original_src` is `IpAddr::V6`, so the v4→v4 builder rejects it.
+8. `None` → no `PendingForwardRequest` queued (`:2507`), `recycle_now` stays
+   true; the untranslated IPv4 frame is kernel-reinjected/recycled
+   (`:5432-5473`). **The v6 client never receives the error.**
 
-1. If the reverse NAT64 ICMP-error path is **currently unreachable** in
-   production (delegated trace Q1 below) AND the forward direction is likewise
-   never exercised, the fix is defense-in-depth on latent code — still arguably
-   worth doing for correctness-in-depth and to un-enshrine the buggy test, but
-   the operational win is deferred until the path is wired. This weakens (not
-   necessarily kills) the case.
-2. If real inside hosts do NOT parse the embedded L4 port to correlate errors
-   (they don't — kernels DO), the fix is cosmetic. Evidence says kernels DO
-   parse the embedded ports, so this kill condition does **not** hold.
+`translate_embedded_v4_to_v6` is only invoked from `build_nat64_v4_to_v6_frame`
+← `build_nat64_forwarded_frame` (AF_INET reverse branch, `frame/mod.rs:289-331`)
+← the TX dispatcher gated on `is_nat64 = request.decision.nat.nat64`
+(`tx/dispatch/mod.rs:677`). The embedded-ICMP path never produces a
+`nat64`-flagged request (its only request carries `NatDecision::default()`,
+`poll_descriptor/mod.rs:2510`). **So the reverse `translate_embedded_v4_to_v6`
+site is dead for production ingress.**
 
-The plan argues the fix is correct and cheap; the reviewers must decide whether
-the operational reachability (Q1) is strong enough to ship now or defer.
+**No explicit `nat64` guard** exists in `try_embedded_icmp_nat_match`; the cross
+-family match is produced and the *effective* guard is the same-family builder's
+family check at `builders.rs:26-29` (a silent drop).
 
-### Blast-radius questions (answered)
+**Additional latent gap flagged by the trace:** every `PendingForwardRequest`
+constructor hard-codes `nat64_reverse: None` (`forward_request.rs:299`,
+`poll_descriptor/mod.rs:2380/2557/5701/5865`, `worker/loop_body/mod.rs:1483`,
+`forwarding/mod.rs:804`). The only real `nat64_reverse` values live on
+`SessionMetadata` (`:3009/:3286`) and are never copied onto a forward request.
+The AF_INET reverse branch of `build_nat64_forwarded_frame` *requires*
+`request.nat64_reverse` (`frame/mod.rs:291`). This means the whole-packet v4→v6
+reverse translation may be broadly unreachable, **not only for the ICMP-error
+sub-case** — consistent with the `#4565` note in `shared_ops.rs:700-707` that
+the builder "returns None … and the reply is dropped" without it. *(Not
+exhaustively proven for the normal TCP/UDP reverse reply; called out as its own
+investigation, §10 / OQ7. The ICMP-error reverse drop IS fully proven.)*
 
-**Q1 — Does the map struct already carry the original client L4 port / ICMP-id,
-or only the address?**
-Only the address. `EmbeddedV4ToV6` (`nat64.rs:2144-2149`) carries
-`mapped_embedded_src: Ipv6Addr` + `prefix_bytes: [u8;12]`. `EmbeddedV6ToV4`
-(`nat64.rs:2132-2137`) carries `mapped_embedded_src`/`mapped_embedded_dst`
-(both `Ipv4Addr`). Neither carries any L4 port or identifier. Likewise
-`Nat64ReverseInfo` (`nat64.rs:255-259`) carries only `orig_src_v6` /
-`orig_dst_v6` — **no ports**. So the port datum must be sourced elsewhere and
-plumbed in.
+### 3.2 Forward direction (v6→v4) — reachable, but wrong datum
 
-**Q2 — At the caller, is the original client tuple available, or must a new
-reverse lookup be plumbed?**
-It is **already available on `decision.nat`** at the frame-builder call site;
-no new reverse lookup is required. The NAT64 whole-packet translator is reached
-via `build_nat64_forwarded_frame` (`afxdp/frame/mod.rs:232`), which receives
-`decision: &SessionDecision` and already reads `decision.nat` for the **outer**
-port rewrite (`apply_nat64_port_translation`, `frame/mod.rs:286` and `:330`).
-The relevant field per direction:
+`translate_embedded_v6_to_v4` IS reachable via `build_nat64_v6_to_v4_frame`
+(`nat64.rs:1711-1718` → `translate_icmpv6_message_to_icmpv4`). BUT:
+- A forward ICMPv6 **error** *also* trips `is_embedded_icmp_error` and is
+  diverted to the same-family `match_outer_v6` at `:2454` before reaching the
+  normal forward build at `:4183`, so even the forward embedded translation is
+  reliably exercised only by **non-error** forward traffic.
+- Even if it were reached: forward NAT64 is classified by
+  **destination-prefix** (`poll_descriptor/mod.rs:1623`) and `rewrite_src_port`
+  is a **fresh per-flow `allocate_source`** (`:2746` → `forward_decision`,
+  `nat64.rs:984-994`) for *the ICMP error packet itself*, unrelated to the
+  quoted data flow's pool port. So r1's "read `decision.nat.rewrite_src_port`
+  for the embedded quote" would stamp an **unrelated** port.
 
-- **Reverse (AF_INET outer, v4→v6):** `decision.nat` is the reverse decision
-  (`NatDecision::reverse`, `nat/mod.rs:106-121`), where
-  `rewrite_dst_port == original_src_port` = the **original client port/id**.
-  The embedded quote is our forward packet, so its **source** port carries the
-  pool value and must be restored to `rewrite_dst_port`.
-- **Forward (AF_INET6 outer, v6→v4):** `decision.nat` is the forward decision,
-  where `rewrite_src_port` = the **translated pool port/id**. The embedded
-  quote is the return packet, so its **destination** port carries the original
-  client value and must be rewritten to `rewrite_src_port` (so the outside
-  server correlates the error to the translated flow it knows).
+### 3.3 Value verdict
 
-The ICMP echo identifier rides the **same** `rewrite_*_port` fields — see
-`apply_nat_icmp_identifier_rewrite` (`frame/mod.rs:1208`,
-`nat.rewrite_src_port.or(nat.rewrite_dst_port)`). So a single `u16` per
-direction suffices for TCP-port, UDP-port, and ICMP-id.
-
-> ⚠️ Load-bearing claim under active verification (delegated trace): that a
-> *reverse* NAT64 ICMP **error** actually reaches `build_nat64_forwarded_frame`
-> with `nat.nat64==true` and `rewrite_dst_port` set — rather than being
-> diverted into the **same-family** `icmp_embed` path
-> (`try_embedded_icmp_nat_match` → `build_nat_reversed_icmp_error_v4/v6`,
-> `poll_descriptor/mod.rs:2454-2506`), which is v4→v4 / v6→v6 only and cannot
-> perform a cross-family NAT64 reversal. §7 and Q1 in §11 track this. If the
-> reverse path is same-family-diverted, the design shifts (the fix would move
-> into the `icmp_embed` builders, or that path must delegate NAT64 to the
-> whole-packet translator). The forward v6→v4 direction is unaffected by this
-> uncertainty.
-
-**Q3 — Checksum policy: leave the embedded L4 checksum as-is, or update it?**
-**Leave as-is** (recommended). Rationale:
-- The shipped translator **already** rewrites the embedded IP addresses without
-  touching the embedded L4 checksum (`nat64.rs:2429-2432` comment: "the quoted
-  L4 checksum is left as-is — it is not validated by a receiver"). The embedded
-  L4 checksum is therefore **already stale** w.r.t. the address rewrite in
-  production today; adding a port rewrite does not introduce a *new* class of
-  staleness.
-- Receivers do not validate the embedded transport checksum. Linux
-  (`tcp_v4_err`, `__udp4_lib_err`, `ping_err`) and BSD match ICMP errors to
-  sockets on the embedded addresses + ports (+ ICMP id), never by recomputing
-  the quoted transport checksum. RFC 792/1122/6146 impose no such requirement.
-- For TCP the embedded checksum field (TCP header offset 16-17) is typically
-  **not even present** in the quote (quotes are commonly 8 bytes of L4), so an
-  incremental in-quote fix is impossible for the dominant case anyway.
-- The **outer** ICMP checksum DOES cover the rewritten embedded bytes and IS
-  recomputed: v6→v4 via `finalize_icmpv4_checksum(out)`
-  (`write_icmpv4_error_with_embedded`, `nat64.rs:2325`); v4→v6 via the caller's
-  `recompute_l4_checksum_after_nat64_v4_to_v6` over the whole ICMPv6 message.
-  Placing the embedded port rewrite **inside** `translate_embedded_*` (Option
-  A), i.e. *before* the outer checksum is finalized, keeps the outer checksum
-  correct automatically. This is a decisive reason to prefer Option A over a
-  post-frame-build step (Option C), which would additionally have to re-fold
-  the outer ICMP checksum for the port delta.
-
-**Q4 — The three L4 cases × two directions, with byte offsets and bounds.**
-Field layout in the translated embedded output (`out`):
-
-| Direction | Embedded fam | L4 start | TCP/UDP field to rewrite | ICMP-id field |
-|-----------|--------------|----------|--------------------------|---------------|
-| Reverse v4→v6 | IPv6 | `out[40..]` | **src** port `out[40..42]` (need `l4_len≥2`) | `out[44..46]` (need `l4_len≥6`) |
-| Forward v6→v4 | IPv4 | `out[20..]` | **dst** port `out[22..24]` (need `l4_len≥4`) | `out[24..26]` (need `l4_len≥6`) |
-
-- Reverse rewrites **source** port (embedded = forward packet: PAT'd source).
-- Forward rewrites **destination** port (embedded = return packet: PAT'd dest).
-- ICMP-id lives at L4-offset `+4` in both families (after type/code/checksum),
-  and is rewritten only for identifier-bearing echo types (mirror the
-  `embedded_icmpv{4,6}_type_to_icmpv{6,4}` echo gate already present, and
-  `icmp_identifier_bearing` in the outer helper).
-- **Every rewrite is gated on `l4_len ≥ field_end` and uses slice-bounded
-  writes** (`out.get_mut(a..b)?` / an explicit `if l4_len >= N` guard), a safe
-  no-op on a truncated/hostile quote — never a panic or OOB index. This mirrors
-  the existing `if ... l4_len >= 2` guard on the type/code remap.
-
-**Q5 — PLAN-KILL viability.** See §3 opening. The port-parsing-by-receivers
-kill condition is refuted by kernel behavior. The residual kill lever is Q1
-reachability; argued either way for the reviewers.
+The RFC-6146 goal (restore the embedded client tuple in NAT64 ICMP errors) is
+real and operationally meaningful (PMTUD/traceroute through NAT64). But #5177's
+**named fix is wrong on site and datum**, and the reverse path is dropped by a
+larger upstream defect. Therefore:
+- **#5177 as scoped → PLAN-KILL** (inert/wrong-datum leaf polish).
+- The real correctness win belongs to a **new issue** (§10) whose fix restores
+  the client tuple using `EmbeddedIcmpMatch.original_src`/`.original_src_port`
+  (already available) and routes the cross-family match to a v4→v6 builder.
 
 ---
 
-## 4. What's already shipped (compose, do not re-litigate)
+## 4. What's already shipped (context)
 
-- **#2371 — embedded checksum.** Already handles the embedded/outer checksum
-  interplay; this fix does not touch the outer-checksum recompute or re-open
-  #2371. The embedded-L4-checksum "leave-as-is" policy (Q3) is consistent with
-  #2371's disposition.
-- **#4381 — stateful NAT64 PAT (RFC 6146 BIB).** Allocates the unique
-  `(pool v4, translated port/id)` and rewrites the **outer** L4 on both
-  directions via `apply_nat64_port_translation`. This fix is the **embedded**
-  (quoted) analog of that outer rewrite. `rewrite_src_port` / `rewrite_dst_port`
-  on `NatDecision` are the exact datums #4381 populated; we reuse them.
-- **#4512 / #4565 — HA reverse-BIB sync.** The translated port already rides
-  `NatDecision` (synced) and the standby rebuilds `nat64=true` +
-  `rewrite_src=snat_v4`. **No new synced state** is introduced by this fix — it
-  is a pure translation change reading state that already exists and already
-  syncs. (Confirmed: the fix touches no wire field; see §6/§7.)
+- **#2371 — embedded checksum**, **#4381 — stateful PAT (BIB)**, **#4512/#4565 —
+  HA reverse-BIB sync.** #4381 populates `rewrite_src_port`/`rewrite_dst_port`.
+  #4565's own note (`shared_ops.rs:700-707`) already acknowledges the reverse
+  builder "returns None and the reply is dropped" without `nat64_reverse` — an
+  early signal of the §3.1 gap. This plan does not re-litigate any of them.
 
 ---
 
-## 5. Concrete design
+## 5. Why the r1 design (Option A) is rejected
 
-### Recommended: Option A — thread a per-direction `Option<u16>` into the
-embedded translator; apply before the outer-checksum finalize.
-
-Add one `Option<u16>` "embedded L4 rewrite value" parameter, carrying the
-port/identifier to stamp into the embedded quote, threaded down the existing
-NAT64 whole-packet call chain:
-
-1. **`build_nat64_forwarded_frame`** (`afxdp/frame/mod.rs:232`): in each arm,
-   compute the embedded rewrite value from `decision.nat`:
-   - AF_INET6 (forward v6→v4): `let emb_l4 = decision.nat.rewrite_src_port;`
-   - AF_INET (reverse v4→v6): `let emb_l4 = decision.nat.rewrite_dst_port;`
-   Pass `emb_l4` into the frame builder. (These are the same fields already
-   read for the outer rewrite, so no new lookup and no new state.)
-2. **`build_nat64_v6_to_v4_frame`** (`nat64.rs:3000`) /
-   **`build_nat64_v4_to_v6_frame`** (`nat64.rs:3034`): add
-   `embedded_l4_rewrite: Option<u16>`; forward it into `write_v6_to_v4_into` /
-   `write_v4_to_v6_into`.
-3. **`write_v6_to_v4_into`** (`nat64.rs:1583`) /
-   **`write_v4_to_v6_into`** (`nat64.rs:1811`): add the param; when the outer
-   is an ICMP error it flows into the `EmbeddedV6ToV4`/`EmbeddedV4ToV6`
-   construction (or directly into the `translate_embedded_*` call). Non-ICMP
-   outer packets ignore it (no embedded translation happens). `None` ⇒
-   bit-identical to today.
-4. **`EmbeddedV6ToV4` / `EmbeddedV4ToV6`** (`nat64.rs:2132` / `:2144`): add
-   `embedded_l4_rewrite: Option<u16>`.
-5. **`translate_embedded_v6_to_v4`** (`nat64.rs:2363`) /
-   **`translate_embedded_v4_to_v6`** (`nat64.rs:2448`): after the existing
-   type/code remap, apply the rewrite at the per-direction offset (§3 Q4 table)
-   with `l4_len` bounds gates. For TCP/UDP write the port; for ICMP echo write
-   the identifier at `+4`. Leave the embedded L4 checksum untouched (Q3). This
-   is **before** `finalize_icmpv4_checksum` / the caller's v6 recompute, so the
-   outer ICMP checksum ends correct.
-
-**Why A:** the offset/bounds logic lives in exactly one place
-(`translate_embedded_*`) that already knows the embedded layout — no
-re-derivation. Outer-checksum correctness is automatic (rewrite precedes
-finalize). The value is sourced from the decision already in hand.
-
-**Cost:** four signatures gain one `Option<u16>` param, two structs gain one
-field. Test wrappers `translate_v4_to_v6`/`translate_v6_to_v4`
-(`nat64.rs:1786`/`:1260`) and the `write_*_into` unit tests gain the param
-(pass `None` where the case is address-only; pass the port for the new tests).
-
-### Variant A′ — same as A but bundle `{value: Option<u16>, is_icmp_id: bool}`
-into a tiny `EmbeddedL4Rewrite` struct instead of a bare `Option<u16>`. Same
-behavior; marginally clearer at the signature boundary. Optional.
-
-### Alternative: Option C — post-frame-build rewrite in
-`build_nat64_forwarded_frame`.
-After the frame is built, locate the embedded L4 in the **output** frame
-(outer eth + outer L3 + outer ICMP(8) + embedded L3) and stamp the port there,
-mirroring how the **outer** port is already post-rewritten via
-`apply_nat64_port_translation`. **Rejected as primary** because:
-- It re-derives the embedded L4 offset that `translate_embedded_*` already
-  computes (drift risk, and the offset depends on embedded IHL / v6 ext-header
-  stripping already resolved inside the translator).
-- It runs **after** the outer ICMP checksum is finalized, so it must
-  additionally incrementally re-fold the outer checksum for the port delta —
-  more code, more failure surface, exactly the interplay #2371 already got
-  right and we'd be re-implementing.
-Keep C documented as the lower-signature-churn fallback if reviewers object to
-touching `translate_embedded_*` signatures.
+r1 proposed threading `decision.nat`'s port into `translate_embedded_*`. Rejected
+because (§3): the reverse translator is **unreachable** (dropped upstream) and
+the forward translator's `decision.nat` carries the **wrong** (fresh-allocation)
+port. A green leaf-level unit test on `translate_embedded_*` would therefore
+pass while the reverse bug still ships — exactly the "test the reachable path,
+not a synthetic translator call" failure mode. r1 is preserved in git history
+(commit `be71e0516`) for the record.
 
 ---
 
-## 6. API preservation
+## 6. The correct fix (for the NEW issue, not #5177-as-scoped)
 
-- No gRPC / wire / HA-sync surface changes. `NatDecision` shape is unchanged
-  (we only *read* `rewrite_src_port`/`rewrite_dst_port`, already synced).
-- `Nat64ReverseInfo` **need not** grow a port field under Option A (the port is
-  read from `decision.nat`, not from the reverse-info struct). If the delegated
-  trace shows the reverse path lacks `decision.nat.rewrite_dst_port` at the call
-  site, the fallback is to add `orig_src_port: u16` to `Nat64ReverseInfo` — but
-  that struct is `#[derive(PartialEq,Eq)]` and compared in session-equality
-  (`session/entry.rs:141`); adding a field is safe (still not wire-serialized —
-  `ha.rs`/`flow_cache.rs` set it locally), but is only taken if Q1 forces it.
-- The public function `translate_v4_to_v6`/`translate_v6_to_v4` are
-  `#[cfg(test)]`-only wrappers — signature growth affects tests only, not
-  production ABI.
+Sketch, so the KILL is constructive and the follow-up is actionable:
 
----
+**Locus:** the `is_embedded_icmp_error` handler
+(`poll_descriptor/mod.rs:2454-2600`) + a new **cross-family** builder, NOT
+`translate_embedded_*`'s signature.
 
-## 7. Hidden invariants / gotchas
+**Design:** when `try_embedded_icmp_nat_match` returns a match with
+`icmp_match.nat.nat64 == true`, route to a NAT64 v4↔v6 ICMP-error builder
+instead of the same-family `build_nat_reversed_icmp_error_v{4,6}`. The datum is
+already in hand:
+- `icmp_match.original_src` = the v6 client (outer new dst + embedded new src).
+- `icmp_match.original_src_port` = **the original client port** (`fwd.key.src_port`)
+  — this is the value #5177 wants, and it is already recovered.
+- `icmp_match.original_dst` / `resolution` / `metadata` for outer src + egress.
 
-1. **No panic on a truncated quote.** Every embedded-port/id write is gated on
-   `l4_len`. RFC says an error quotes ≥ IP header + 8 L4 bytes (covers both
-   TCP/UDP ports and the ICMP id), but a hostile/clamped quote can be shorter —
-   the rewrite must be a safe no-op then, never OOB. Mirror the existing
-   `l4_len >= 2` type/code gate. Add `l4_len >= 4` (dst port) / `>= 6` (id).
-2. **Embedded L4 checksum left stale — deliberately (Q3).** Do not attempt a
-   full recompute (payload absent); do not partially update (inconsistent with
-   the already-stale address rewrite). Document the RFC/kernel basis in the
-   code comment, extending the existing `nat64.rs:2429-2432` note.
-3. **Outer ICMP checksum must still cover the rewrite.** Option A guarantees
-   this by ordering (rewrite before finalize). Any reviewer pushing Option C
-   must confirm the outer re-fold.
-4. **Direction picks the field.** Reverse rewrites embedded **source** port;
-   forward rewrites embedded **dest** port. Getting this backwards silently
-   corrupts the quote. The `NatDecision::reverse` swap
-   (`rewrite_dst_port ↔ rewrite_src_port`) is the SSOT — reverse decision's
-   `rewrite_dst_port` is the original client value; forward decision's
-   `rewrite_src_port` is the pool value.
-5. **ICMP-id only for identifier-bearing echo types.** Reuse the echo gate
-   already in `embedded_icmpv{4,6}_type_to_icmpv{6,4}`; do not stamp an id onto
-   a non-echo embedded ICMP (its bytes 4-5 are not an identifier).
-6. **`None` is the identity.** For non-error outer packets, or a NAT64 flow with
-   no port allocation, `Option<u16> = None` ⇒ byte-identical to today. Under
-   #4381 every TCP/UDP/ICMP-echo NAT64 flow has a port/id allocated, so `Some`
-   is the norm for the error path.
-7. **Scratch buffer, no aliasing.** The embedded is built in the fixed stack
-   `scratch [u8; MAX_EMBEDDED_LEN]` (`nat64.rs:2315`/`:2341`) then copied into
-   the frame; the rewrite mutates `out` (the scratch/dest) in place — no
-   overlap with the read-only `l4` input slice.
-8. **Reverse-path reachability (Q1).** See §3 warning + §11 Q1. The design as
-   written assumes the reverse error reaches the whole-packet translator; the
-   trace confirms or redirects. The forward direction is unconditionally
-   through `build_nat64_forwarded_frame`.
+The builder translates the outer ICMPv4→ICMPv6 (server→prefix::server,
+snat_v4→client_v6) and the embedded quote v4→v6, stamping the embedded **source
+port** = `original_src_port` and the embedded **src IP** = client_v6. It MAY
+reuse `translate_embedded_v4_to_v6` as a subroutine **with** an added port
+parameter (r1's leaf change becomes correct **only** in this context, fed the
+right datum from `EmbeddedIcmpMatch`, not the outer `decision.nat`). The
+symmetric forward case (`match_outer_v6`, `nat.nat64`) builds v6→v4.
+
+**Checksum:** outer ICMPv6 checksum recomputed with the v6 pseudo-header (as the
+same-family v6 builder already does); embedded L4 checksum left stale (kernels
+don't validate it — consistent with the address rewrite).
+
+**Blocking prerequisite:** §3.1's "no request populates `nat64_reverse`" gap may
+mean the reverse v4→v6 whole-packet path needs wiring regardless (OQ7). The new
+issue must scope this — the ICMP-error fix cannot be validated end-to-end if the
+reverse reply path itself is broken.
+
+**Test (reachable path, per the steer):** drive a real NAT64 flow, then feed an
+inbound ICMPv4 error through the ingress classify (`poll_descriptor`), and assert
+a v6 ICMPv6 error is emitted to the client with the embedded source port ==
+original client port (TCP/UDP/ICMP-id). A leaf-only `translate_embedded_*` test
+is explicitly insufficient.
 
 ---
 
-## 8. Risk table
+## 7. Hidden invariants / gotchas (for the follow-up)
 
-| # | Risk | Likelihood | Impact | Mitigation |
-|---|------|-----------|--------|------------|
-| R1 | Reverse NAT64 ICMP error is same-family-diverted (never hits whole-packet translator) → fix inert for the dominant direction | Medium (under trace) | High to value | Delegated trace Q1; if confirmed, relocate fix into `icmp_embed` builders or delegate nat64 from that path. Forward dir still fixed. |
-| R2 | Wrong field per direction (src vs dst) corrupts the quote | Low | High | SSOT via `NatDecision::reverse`; direction-specific unit tests both ways. |
-| R3 | OOB/panic on truncated quote | Low | High (DoS) | `l4_len` gates + slice-bounded writes; fuzz-style truncated-quote test. |
-| R4 | Outer ICMP checksum invalidated | Low | Medium | Option A orders rewrite before finalize; checksum-oracle asserts in tests. |
-| R5 | Embedded L4 checksum staleness rejected by some receiver | Very low | Low | Kernels don't validate; already stale for addresses; documented policy. |
-| R6 | Signature churn breaks callers/tests | Low | Low | Compiler-enforced; `None` at address-only call sites. |
-| R7 | HA divergence (standby computes different embedded port) | Very low | Medium | No new state; both nodes read the same synced `NatDecision`. |
+1. Cross-family routing must key on `nat.nat64`, not on outer family alone.
+2. `EmbeddedIcmpMatch.original_src_port` is the correct client-port datum; the
+   outer `decision.nat` is NOT (fresh allocation / dropped).
+3. Truncated-quote bounds (no panic) still apply in the new builder.
+4. Embedded L4 checksum left stale; outer recomputed by the builder.
+5. The `nat64_reverse`-not-populated gap (§3.1) is a probable prerequisite.
 
 ---
 
-## 9. Test plan
+## 8. Risk table (of the KILL decision)
 
-**Gate:** full `cargo test --release` (binary crate — use `cargo test <name>`,
-never `--lib`). Rust leg also runs under `make test` (#4006). Build/test env:
-`TMPDIR=/dev/shm CARGO_TARGET_DIR=/dev/shm/cargo-5177 cargo test --release`.
-
-**iperf smoke is IRRELEVANT** — this is the ICMP-error slow path, not the
-throughput fast path, and the loss cluster is shim-ABI-walled. No cluster smoke
-required or meaningful.
-
-New fail-on-revert unit tests (in `nat64_tests.rs`), each building an ICMP error
-quoting a PAT'd NAT64 flow (embedded carries the **pool** port/id) and asserting
-the translated embedded quote carries the **original client** value:
-
-1. **Reverse v4→v6, TCP.** Embedded src port = pool 40000 → assert `emb[40..42]`
-   == original client port 12345. (Update/replace the existing
-   `nat64_v4_to_v6_time_exceeded_translates_outer_and_embedded` assertion at
-   `nat64_tests.rs:1928`, which currently asserts verbatim — the enshrined bug.)
-2. **Reverse v4→v6, UDP.** Same, embedded src port restored.
-3. **Reverse v4→v6, ICMP echo id.** Embedded quote is an ICMP echo; assert
-   `emb[44..46]` (id) == original client id.
-4. **Forward v6→v4, TCP.** Embedded dst port = original client 12345 → assert
-   `emb[22..24]` == pool 40000. (v6→v4 embedded is IPv4, L4 at out[20..].)
-5. **Forward v6→v4, UDP + ICMP id.** Symmetric.
-6. **Truncated quote (both directions).** Quote L4 truncated below the field
-   offset (e.g. 2 bytes) → translation succeeds, no panic, port left as-is
-   (documented no-op). Guards R3.
-7. **Outer checksum oracle (both directions).** After the embedded rewrite,
-   assert the **outer** ICMP/ICMPv6 checksum still verifies (pseudo-header sum
-   == 0 for v6; one's-complement over the message for v4). Guards R4.
-8. **`None`/non-error identity.** A normal (non-ICMP) reverse reply with the new
-   param wired is byte-identical to pre-fix. Guards R6.
-
-Each of 1–5 must **fail on revert** (drop the rewrite → embedded field stays the
-pool/client value the pre-fix code copied verbatim). Where the delegated trace
-confirms an end-to-end reachable path, add one integration-level assertion
-through `build_nat64_forwarded_frame` (not just the leaf translator) so the
-plumbing (decision.nat → frame builder → translator) is exercised, not only the
-byte-level function.
+| # | Risk | Likelihood | Mitigation |
+|---|------|-----------|------------|
+| K1 | A reviewer finds a path where the reverse error DOES reach `translate_embedded_v4_to_v6` (trace missed something) → KILL is wrong | Low | Trace is line-precise + first-hand-corroborated; reviewers asked to find the counter-path or ratify KILL. |
+| K2 | KILL loses the valid RFC-6146 intent | Low | Intent preserved + made correct in the filed follow-up (§6/§10). |
+| K3 | Normal reverse NAT64 replies actually work via an unexamined path, shrinking the follow-up | Medium | Scoped as OQ7 / a distinct investigation in the new issue; does not change #5177's KILL. |
 
 ---
 
-## 10. Out of scope
+## 9. Test plan (for the KILL)
 
-- The embedded **L4 checksum** recompute (deliberately left stale — Q3).
-- Any change to #2371 (outer/embedded checksum) or #4381 (outer PAT alloc).
-- HA wire-protocol / sync fields (none needed — §4).
-- Fragmented ICMP (still fail-closed per #2562).
-- The NAT64 fast path (TCP/UDP data-plane throughput) — untouched.
-- NPTv6 / same-family SNAT/DNAT embedded ICMP (`icmp_embed` module already
-  restores the original tuple incl. ports for same-family — this fix is the
-  cross-family NAT64 analog only).
+No production code, so no test lands on #5177. The KILL is validated by:
+- The reachability trace (§3.1) — reverse error is dropped; `translate_embedded_v4_to_v6` has no production caller for that direction.
+- The forward-datum argument (§3.2) — `decision.nat.rewrite_src_port` is a fresh allocation.
+- Reviewer convergence (adversarial: find the counter-path or ratify).
+The **follow-up** issue carries the reachable-path `cargo test --release` matrix
+described in §6.
 
 ---
 
-## 11. Open questions (each invitable to PLAN-KILL)
+## 10. Out of scope (of #5177) + filed follow-up
 
-1. **Reachability (load-bearing).** Does a *reverse* NAT64 ICMP error reach
-   `build_nat64_forwarded_frame` with `nat.nat64==true` +
-   `rewrite_dst_port` set, or is it diverted into the same-family `icmp_embed`
-   path (`poll_descriptor/mod.rs:2454`)? If diverted, is the fix (a) relocated
-   into `icmp_embed`'s builders, (b) a delegation of nat64 from that path to the
-   whole-packet translator, or (c) is the reverse path currently *unreachable*
-   for cross-family — which materially weakens the value and invites PLAN-KILL /
-   PLAN-DEFER-until-wired? **[Delegated trace pending — updates this section.]**
-2. **Both directions or reverse-only?** The forward v6→v4 error (v6 client
-   emitting an ICMPv6 error toward a v4 server) is rare. Fix both (cheap,
-   symmetric) or scope to the dominant reverse direction only?
-3. **Checksum policy.** Ratify "leave embedded L4 checksum stale" (Q3) vs an
-   incremental in-quote update where the checksum field is present (UDP/ICMP).
-   Recommendation: leave-as-is (consistent, kernels don't validate). Any
-   dissent?
-4. **Design option.** A (thread param, recommended) vs A′ (struct) vs C
-   (post-build). Confirm A.
-5. **`Nat64ReverseInfo` extension.** Keep sourcing the port from `decision.nat`
-   (no struct change), or add `orig_src_port` to `Nat64ReverseInfo` for
-   locality? Depends on Q1's answer.
-6. **Value threshold.** Given the slow-path scope, is PMTUD-through-NAT64 +
-   NAT64-traceroute correlation a strong enough operational win to ship now, or
-   PLAN-DEFER behind higher-materiality work? (Honest kill lever.)
-7. **HA parity test.** Do we need a standby-side assertion that a promoted
-   reverse NAT64 session reconstructs the same embedded port, or is the
-   "reads-only-synced-state" argument (§4) sufficient without a new HA test?
+- **Filed follow-up issue (the real fix):** "NAT64 reverse ICMP errors are
+  dropped — cross-family embedded-ICMP match discarded by the same-family
+  builder; needs a v4↔v6 ICMP-error builder that restores the embedded client
+  tuple." Its fix subsumes #5177's embedded-port intent using
+  `EmbeddedIcmpMatch.original_src_port`. Link added on filing.
+- **Separately flag (OQ7):** whether *normal* reverse NAT64 replies are also
+  affected by the "no request populates `nat64_reverse`" gap — its own
+  investigation, higher severity if confirmed. (Not asserted here; not proven.)
+- Same-family SNAT/DNAT/NPTv6 embedded ICMP (already correct via `icmp_embed`).
+- The NAT64 fast path (throughput) — untouched.
+
+---
+
+## 11. Open questions (each invitable to a different disposition)
+
+1. **[RESOLVED] Reachability.** Reverse NAT64 ICMP error is dropped;
+   `translate_embedded_v4_to_v6` unreachable for it (§3.1). → drives KILL.
+2. **Is KILL correct vs. PLAN-REFRAME-under-#5177?** Should the larger fix be
+   planned *under #5177* (reframe) instead of a new issue + KILL? Argument for
+   KILL+new-issue: #5177's title/body/fix-direction are specifically the wrong
+   leaf change; the real fix is a different subsystem (icmp_embed routing +
+   cross-family builder) at higher severity. Reviewers to decide.
+3. **Forward direction alone.** Is fixing only the (rarely-reached) forward
+   embedded translation with the *correct* datum worth anything on its own?
+   (Weak — also diverted to `match_outer_v6`.)
+4. **Datum source.** Confirm `EmbeddedIcmpMatch.original_src_port ==
+   fwd.key.src_port` is the original client port in all match arms (forward-NAT
+   match vs. session-fallback). (`nat_match_v4.rs:46` vs `:106`.)
+5. **`nat64_reverse` population gap (OQ7).** Prerequisite severity: does the
+   reverse v4→v6 whole-packet path need wiring before any ICMP-error fix can be
+   validated end-to-end?
+6. **Checksum policy** for the new builder: leave embedded L4 stale (recommended)
+   vs. incremental. (Same conclusion as r1 — kernels don't validate.)
+7. **Value threshold.** Is NAT64-ICMP-error correctness (PMTUD/traceroute)
+   high enough priority to schedule the larger follow-up now, or PLAN-DEFER it?
 
 ---
 
 ## Appendix — key line references (origin/master `4e0c7f74c`)
 
-- `translate_embedded_v4_to_v6` — `userspace-dp/src/nat64.rs:2448-2501`
-- `translate_embedded_v6_to_v4` — `nat64.rs:2363-2443`
-- `EmbeddedV4ToV6` / `EmbeddedV6ToV4` — `nat64.rs:2144` / `:2132`
-- `Nat64ReverseInfo` — `nat64.rs:255-259`
-- `write_v6_to_v4_into` / `write_v4_to_v6_into` — `nat64.rs:1583` / `:1811`
-- embedded map construction — `nat64.rs:1714` (v6→v4) / `:1954` (v4→v6)
-- `build_nat64_v6_to_v4_frame` / `build_nat64_v4_to_v6_frame` — `nat64.rs:3000` / `:3034`
-- `build_nat64_forwarded_frame` — `afxdp/frame/mod.rs:232`
-- `apply_nat64_port_translation` — `afxdp/frame/mod.rs:350`
-- `NatDecision` + `reverse()` — `nat/mod.rs:91-121`
-- `apply_nat_icmp_identifier_rewrite` — `afxdp/frame/mod.rs:1208`
-- same-family embedded-ICMP path — `afxdp/icmp_embed/*`, dispatch at
-  `poll_descriptor/mod.rs:2454-2506`
-- enshrining test — `nat64_tests.rs:1873` (assert at `:1928`)
+- `translate_embedded_v4_to_v6` / `_v6_to_v4` — `nat64.rs:2448` / `:2363`
+  (verbatim L4 copy at `:2492` / `:2427`)
+- `EmbeddedV4ToV6` / `EmbeddedV6ToV4` — `nat64.rs:2144` / `:2132` (addresses only)
+- `Nat64ReverseInfo` — `nat64.rs:255-259` (addresses only)
+- `build_nat64_forwarded_frame` (AF_INET reverse requires `nat64_reverse`) — `frame/mod.rs:232`, `:289-331`
+- `is_nat64 = request.decision.nat.nat64` — `tx/dispatch/mod.rs:677`
+- `is_embedded_icmp_error` — `poll_descriptor/mod.rs:2170`; ICMP arm `:2454`; same-family build `:2495`
+- `match_outer_v4` recovers v6 `original_src` + client `original_src_port` — `icmp_embed/nat_match_v4.rs:41-46`
+- same-family builder family guard (silent drop) — `icmp_embed/builders.rs:26-29`
+- every `PendingForwardRequest.nat64_reverse = None` — `forward_request.rs:299`, `poll_descriptor/mod.rs:2380/2557/5701/5865`, `worker/loop_body/mod.rs:1483`
+- enshrining unit test (addresses-only call) — `nat64_tests.rs:1873`, assert `:1928`
+- forward `rewrite_src_port` = fresh `allocate_source` — `poll_descriptor/mod.rs:2746` → `nat64.rs:984-994`

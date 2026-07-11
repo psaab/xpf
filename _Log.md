@@ -46426,3 +46426,11 @@ top.
   (thread Option<u16> into translate_embedded_*; rewrite before outer checksum
   finalize; leave embedded L4 checksum stale). Delegated reverse-path
   reachability trace pending.
+
+## 2026-07-11 — #5177 r2: reachability trace folded → PLAN-KILL as scoped
+- **Action**: Delegated trace confirmed reverse NAT64 ICMP error is DROPPED
+  (build_nat_reversed_icmp_error_v4 returns None on IPv6 original_src);
+  translate_embedded_v4_to_v6 unreachable for reverse; forward decision.nat
+  port is a fresh allocation (wrong datum). r1 Option A falsified. Recommend
+  PLAN-KILL #5177 as scoped + file new issue for the real cross-family fix.
+- **File(s)**: docs/research/5177-nat64-embedded-port/plan.md (r2)
