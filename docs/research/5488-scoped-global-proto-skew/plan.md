@@ -1,6 +1,9 @@
 # Plan of action — #5488: scoped-global multi-zone deny narrows on a same-version old helper (fail-open under version skew)
 
-- **Revision:** r1
+- **Revision:** r3 (r1→r2: folded Claude SMR F1 three-generation v3 collision +
+  F2 symmetric skew direction. r2→r3: folded Codex nit #5 effective-coverage
+  test design + nit #6 plural-as-authoritative wording. Converged: Claude SMR +
+  Codex both PLAN-READY on Path C; AGY off-task/blocked, documented.)
 - **Research branch:** `research/5488-scoped-global-proto-skew`
 - **Base:** `origin/master` @ `4e0c7f74cf0d`
 - **Mode:** `/research` — plan only, no production code, STOP at PLAN-READY / PLAN-KILL.
@@ -93,6 +96,20 @@ binary/process — a partial/botched deploy, a manual/rescue swap, or a staged
 upgrade that advances the daemon before the helper. This is precisely the
 window the scheduler/NAT gates already defend; #5488 is the *security* (fail-
 open) hole in that defense.
+
+**"Version 3" is a THREE-generation collision, not two (SMR F1).** `git log`
+shows `CONFIG_SNAPSHOT_PROTOCOL_VERSION = 3` has been fixed since `8477cf1a6`
+(#1567, protocol-module split), and BOTH scoped-global commits landed on it
+WITHOUT a bump: `eb42f8404` (#3148, singular `match_from_zone/to_zone`) and
+`572952745` (#4626 M03, plural `match_from_zones/to_zones`). So version 3 spans:
+- **gen1** (pre-#3148): no scoped-global support — ignores BOTH singular and
+  plural → every global is any-zone on both sides.
+- **gen2** (#3148 … #4626): honors the SINGULAR field only (the exact helper
+  #5488 names).
+- **gen3** (#4626+): honors the PLURAL, prefers it (correct).
+
+This is why the version-3 collision — not #4626 specifically — is the root
+cause, and it shapes the per-generation safety analysis in §5.
 
 **PLAN-KILL-acceptable line:** it is legitimate to PLAN-KILL if reviewers judge
 that (a) the mixed-version window is not a supported state (deploys are always
@@ -197,8 +214,12 @@ machinery of the three.
 ### Path C — version-free safe lowering (per-verdict singular) — RECOMMENDED
 
 Choose the singular field's VALUE per verdict so an OLD helper reading only the
-singular is ALWAYS at least as strict as configured. Plural stays the full set
-and remains a pure optimization; no version bump, no capability, no deploy wall.
+singular is ALWAYS at least as strict as configured. The plural fields remain
+the AUTHORITATIVE full-fidelity representation for current (gen3) readers; the
+singular fields become a deliberate *conservative compatibility projection* of
+the scope (widest for deny/reject, narrowest for permit) — NOT a lossy
+optimization but a fidelity-preserving-for-new / safe-for-old dual encoding. No
+version bump, no capability, no deploy wall (Codex nit #6).
 
 - **deny / reject** → singular = `""` (empty). An old helper maps empty →
   `GlobalZoneScope::Any` (`policy.rs:307-309`) → the deny/reject applies to ALL
@@ -224,6 +245,38 @@ There is no fourth terminal action: `PolicyAction ∈ {permit, deny, reject}`
 `count`/`log` are modifiers (`LogSessionInit/Close`), not actions, so they ride
 their verdict.
 
+**Per-generation robustness (SMR F1) — the sharp qualification.** Because
+version 3 spans three helper generations (§3), Path C's safety is not uniform
+across ALL old helpers — but it IS uniform for the deny/reject direction the
+invariant names:
+
+| Verdict → singular | gen1 (ignores scope) | gen2 (singular only) | gen3 (plural) |
+|---|---|---|---|
+| deny/reject → `""` | any-zone deny = **over-deny (fail-closed)** | empty→any-zone = **over-deny (fail-closed)** | correct |
+| permit → first-zone | any-zone permit = **OVER-PERMIT (fail-OPEN)** | first-zone = under-permit (fail-closed) | correct |
+
+**The deny/reject widening is fail-closed across ALL three v3 generations**
+(gen1 ignores the field → any-zone; gen2 reads empty → any-zone; both over-deny).
+This fully discharges the #5488 invariant, which is explicitly about DENY
+coverage. **Path C's permit-narrow is fail-closed only against singular-honoring
+(gen2+) helpers**; a gen1 helper ignores the singular field and over-permits a
+scoped permit — a fail-OPEN. That gen1 permit hole is PRE-EXISTING (gen1
+predates #3148/#4626; never covered) and is OUTSIDE #5488's deny-coverage scope;
+Path C does not regress it, but it does NOT close it either. Only Path A's
+version bump fail-closes gen1.
+
+**Symmetric skew direction (SMR F2).** #5488 names the new-Go/old-helper
+direction (Go emits plural + singular-first; old helper ignores plural). The
+REVERSE — an OLD Go (pre-#4626, emits singular-first, NO plural) driving a NEW
+gen3 helper (helper binary upgraded before xpfd on a node) — ALSO narrows the
+deny: gen3's `effective_match_zones` sees an empty plural, falls back to the
+singular first-zone, and the `trust→untrust` deny vanishes = fail-open. Path C
+CANNOT fix this (it changes only what NEW Go emits; it cannot rewrite
+already-shipped old Go). Path A closes it (v4 gen3 helper rejects the old Go's v3
+snapshot via the strict `!=` gate). Path B does not (old Go has no
+capability-check code). This too is pre-existing (old Go always emitted
+singular-first) — Path C is a non-regression, not a fix, for this direction.
+
 **Cost / footguns (must be handled in `/engineer`):**
 1. **Per-verdict logic belongs ONLY at wire-lowering sites**, not display
    sites. The value-rewrite must apply at `policies_lower.go:239-240` AND
@@ -246,19 +299,32 @@ their verdict.
    §11 Q3).
 
 **Verdict:** matches the issue author's own stated fix direction ("lower
-deny/reject scopes safely (expand) and permit scopes narrowly"), converts
-fail-open → uniformly fail-closed with ZERO wire/version/deploy cost, and keeps
-plural as a pure optimization. The price is a bounded *availability* regression
-on an already-degraded (mixed-version) install, never a security regression.
+deny/reject scopes safely (expand) and permit scopes narrowly"), converts the
+deny/reject fail-open → fail-closed with ZERO wire/version/deploy cost, and
+keeps the plural fields authoritative for current readers. The price is a
+bounded *availability* regression on an already-degraded (mixed-version)
+install, never a security regression.
 
 ### Recommendation
 
-**Path C**, primarily because it discharges the invariant (deny coverage is
-never silently narrowed) WITHOUT paying the #5364 deploy-crossing cost that
-Path A imposes on *every* config, and without inventing the new capability
-channel Path B needs. Path C's residual — an availability dip for *other* zones
-on a mixed-version box — is fail-closed and bounded to a rare config on an
-already-abnormal install.
+**Path C**, primarily because its deny/reject widening discharges the #5488
+invariant (deny coverage is never silently narrowed) — and does so **robustly
+across ALL three version-3 helper generations** (§5 table) — WITHOUT paying the
+#5364 deploy-crossing cost that Path A imposes on *every* config, and without
+inventing the new capability channel Path B needs. Path C's residual — an
+availability dip for *other* zones on a mixed-version box — is fail-closed and
+bounded to a rare config on an already-abnormal install.
+
+**Scope of the Path C recommendation, stated honestly (SMR F1/F2).** Path C is a
+COMPLETE fix for the defect #5488 names (deny coverage under the new-Go/old-
+helper skew) and a NON-REGRESSION for the two adjacent cases it cannot reach: the
+symmetric helper-first direction (old Go → gen3 helper still narrows the deny)
+and gen1's pre-existing scoped-*permit* over-permit. **Only Path A closes the
+entire multi-generation version-3 collision** (both skew directions + gen1's
+permit hole), because a bumped, strict-`!=`, unconditionally-stamped version is
+the only construct that makes an old helper of ANY generation fail-closed. If
+reviewers/operators require closing the full collision — not just the named deny-
+narrowing — Path A becomes mandatory and its all-configs flag-day is the price.
 
 **Pick Path A instead if** reviewers/operators decide a *silent* availability
 change during upgrade is itself unacceptable and prefer a hard, visible flag-day
@@ -333,14 +399,23 @@ master, PASS after the chosen fix.** Model on
 `protocol_failopen_2124_test.go` (constructs a config, lowers it, asserts the
 snapshot behavior a specific helper generation would see).
 
-- **Path C test (Go):** build a config with a global **deny** scoped `match
-  from-zone [ dmz trust ] to-zone untrust`; run the real lowering
-  (`buildOneRuleSnapshot`); simulate an OLD helper by resolving the scope from
-  ONLY the singular `MatchFromZone/MatchToZone`; assert the resolved from-scope
-  COVERS both `dmz` AND `trust` (via widened any-zone). On current master the
-  singular = `"dmz"` → old-decode covers only `dmz` → **test FAILS**
-  (fail-on-revert). Add the permit mirror: a scoped permit's old-decode must
-  NOT cover a zone outside the configured set. Add the reject mirror.
+- **Path C test (Go) — assert EFFECTIVE coverage, not `singular == ""` (Codex
+  nit #5):** build configs with a global **deny** AND a global **reject** scoped
+  `match from-zone [ dmz trust ] to-zone [ untrust dmz2 ]` (multi-zone on BOTH
+  the source AND destination dimensions); run the real lowering
+  (`buildOneRuleSnapshot`); simulate an OLD (gen2) helper by resolving the scope
+  from ONLY the singular `MatchFromZone/MatchToZone`; assert the *effective*
+  resolved scope COVERS every configured zone-pair on both sides (the widened
+  any-zone superset), i.e. the deny/reject still applies to `trust → untrust`.
+  On current master the singular = first-zone (`"dmz" / "untrust"`) → old-decode
+  covers only `dmz → untrust` and DROPS `trust → …` and `… → dmz2` → **test
+  FAILS** (fail-on-revert). The assertion must be on resolved coverage, not the
+  raw string value. Add the permit mirror: a scoped permit's gen2 old-decode
+  must NOT cover a zone-pair OUTSIDE the configured set (under-permit, never
+  over-permit) — and explicitly note that gen1 (singular-ignoring) is NOT
+  covered by this test because Path C cannot close the gen1 scoped-permit hole
+  (§5 F1). A `parse_action`-parity assertion that `reject` and `deny` share the
+  widening path guards against a future divergence.
 - **Path A test (Go):** assert `ensureScopedGlobalMultiZoneProtocolLocked`
   REFUSES to publish a multi-zone scoped-global config when
   `lastStatus.ConfigSnapshotProtocolVersion < ProtocolVersion`, and the
@@ -409,6 +484,14 @@ is deferred, not skipped silently.
 7. **Hybrid acceptance:** is "ship C now, fold the version bump into the next
    unavoidable ABI break" acceptable, or does leaving `version` at 3 while wire
    semantics changed violate a protocol-truthfulness principle the team holds?
+8. **Symmetric direction (SMR F2):** does the team require closing the
+   helper-first skew (old Go → new gen3 helper still narrows the deny)? If yes,
+   Path C is insufficient and Path A is mandatory. If the deploy model
+   guarantees Go-upgrades-before-helper (never helper-first), Path C suffices.
+9. **gen1 permit hole (SMR F1):** is the pre-existing scoped-*permit* over-permit
+   on a gen1 (pre-#3148) helper in scope? It is outside #5488's deny-coverage
+   invariant and only Path A closes it. Are gen1 helpers still a supported
+   in-field state, or EoL such that only gen2 matters?
 
 ---
 
