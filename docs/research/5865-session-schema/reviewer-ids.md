@@ -37,3 +37,18 @@ Notes:
 | Codex | codex-companion task --background (re-review) | `task-mro4rkhe-wxi69k` | running |
 | AGY | — | — | INFRA-BLOCKED (see r1 notes) |
 | Claude SMR | `claude-smr-plan-r2.md` | — | PLAN-READY-WITH-NITS → folded into v3 |
+
+## Round 3 (plan v4 @ 24ba06dfd4fd → v6 @ d74f86994faa)
+
+| Reviewer | Mechanism | Task/Job ID | Verdict |
+|---|---|---|---|
+| Codex | codex-companion task (re-review) | `task-mro4rkhe-wxi69k` (r2) | REVISE (producer model + Phase-2 safety) → folded into v4 |
+| Codex | codex-companion task (re-review) | `task-mro5ghdv-un8fpt` (r3) | REVISE (narrow Phase-1 scoping) — accepted phased convergence → folded into v6 |
+| Claude SMR | `claude-smr-plan-r3.md` | — | PLAN-READY (Phase 1 + Phase-2-contract) + 1 nit → folded into v5 |
+
+## Round 4 (plan v6 @ d74f86994faa)
+
+| Reviewer | Mechanism | Task/Job ID | Verdict |
+|---|---|---|---|
+| Codex | codex-companion task (confirm convergence) | pending | — |
+| Claude SMR | `claude-smr-plan-r4.md` | — | pending |
