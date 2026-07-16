@@ -2,10 +2,9 @@
 
 ## 1. Status
 
-`DRAFT v6 — v5 + Codex r3 REVISE folds (narrow Phase-1 claims to a local
-admission latch; export-epoch-scoped accounting + decided ok=false/durable-unready;
-Phase-2 contract additions §7.6-7.9; move sweep/mixed-peer/ACK assertions to
-Phase 2); pending Codex r4 concurrence (AGY infra-blocked)`
+`DRAFT v7 — v6 + Codex r4 fold (define the Phase-1-local export-failure
+recovery/latch-release path + tests); pending Codex r5 convergence (Claude SMR
+PLAN-READY; AGY infra-blocked)`
 
 Base: `origin/master` @ `b7343fda51b5`. Research-only branch
 `research/5865-session-schema`. **No production code is touched in `/research`.**
@@ -121,8 +120,20 @@ resync, and a fail-closed mixed-version posture.
 4. **Export fail-closed (P3) — the bounded Phase-1 choice is decided, not
    optional:** on any truncation/undercount the helper returns the existing RPC
    failure (`ok=false`), the daemon **discards the partial result** (no usable
-   partial), and enters **durable unready** with an exact retry/operator-recovery
-   path. Accounting MUST be **export-epoch-scoped** (expected/emitted/collected
+   partial), and enters **durable unready** on the affected owner-RG HA-sync path
+   (scope: per owner-RG path, not global). **Recovery path (defined,
+   Phase-1-local):** the daemon schedules a retry on the next FullResync trigger
+   plus a bounded backoff, each attempt a fresh export **epoch**; the latch
+   **clears** when a later epoch completes with `expected == collected` and zero
+   drops (a non-truncated owner-RG snapshot — reachable in Phase 1 whenever the
+   live per-binding count has fallen back under the 4096 cap, e.g. a transient
+   burst that drained). A **sustained** over-cap (a binding permanently > 4096)
+   **cannot** clear in Phase 1 (no complete JSON export exists above the cap), so
+   the latch **persists until Phase 2's complete-export escalation** or until the
+   operator reduces the offending load; the unready state is surfaced (health
+   signal + WARN log) so it is observable. On helper restart/reconnect the path
+   starts default-closed and clears only after one clean epoch. Accounting MUST be
+   **export-epoch-scoped** (expected/emitted/collected
    tagged with the export epoch) — a plain per-worker or dropped-counter total is
    **not** a completeness certificate: pre-existing P2 fallback entries in the
    shared 4096 queue can substitute for dropped export rows and produce a false
@@ -294,6 +305,11 @@ close it.
   five fields incl. `nat64`) to a binary-decoded delta from the same session.
 - **Export fail-closed** — exact 4096/4097 boundaries, prefilled queues, multiple
   workers, no-live-binding/rebind: undercount ⇒ `ok=false`, no partial success.
+- **Export-failure latch persistence + Phase-1-local recovery** — after an
+  `ok=false` export the owner-RG path stays **unready across the readiness
+  timeout**; a subsequent **under-cap, clean** export epoch (`expected==collected`,
+  zero drops) **clears** the latch; a **sustained** over-cap keeps it latched;
+  helper restart/reconnect re-arms default-closed until one clean epoch.
 - **Local capability gate** (Phase-1 scope only) — unknown startup state;
   absent/zero capability; binary-frame rejection; restart/downgrade invalidation;
   P2 and P3 admission refusal; **permanent unready latch held across the readiness
