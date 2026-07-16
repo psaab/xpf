@@ -2,7 +2,7 @@
 
 ## 1. Status
 
-`DRAFT v2 — revised after Codex r1 PLAN-KILL; pending re-review (Codex + Claude SMR; AGY infra-blocked)`
+`DRAFT v3 — v2 + Claude SMR r2 folds (couple B+C; capability-gate scope); pending Codex r2 concurrence (AGY infra-blocked)`
 
 Base: `origin/master` @ `b7343fda51b5`. Research-only branch
 `research/5865-session-schema`. **No production code is touched in `/research`.**
@@ -146,20 +146,25 @@ session-delta capability version gating every JSON/compat producer.
 - **Effort/risk:** MED–HIGH / MED. The risk is proving the binary bulk export
   covers every reconnect/resync scenario the JSON path covers today.
 
-### Recommendation — **Phased: B (Phase 1) then C (Phase 2)**, converging toward A's end-state
+### Recommendation — **land B+C together** (phased internally), converging toward A's end-state
 
-- **Phase 1 (bounded, ships first):** Option B — additive JSON fields (shared
-  helper, fixture update), export-overflow fail-closed, helper capability gate +
-  fail-closed. Closes P2/P3's field gap and the mixed-version hole. **Explicitly
-  documented as partial:** it does not stop P4's re-degradation, so it must not
-  be represented as closing #5865.
-- **Phase 2 (closes the issue):** Option C — binary-authoritative FullResync +
-  subordinate/suppress P4/P5 + resurrection semantics.
+- **Phase 1 (Option B):** additive JSON fields (shared helper, fixture update),
+  export-overflow fail-closed, helper capability gate + fail-closed. Closes
+  P2/P3's field gap and the mixed-version hole.
+- **Phase 2 (Option C):** binary-authoritative FullResync + subordinate/suppress
+  P4/P5 + resurrection semantics.
+- **Prefer landing Phase 1 and Phase 2 together.** Phase 1 *alone* barely moves
+  the **steady-state** needle: P4 re-degrades every ≤60 s regardless — it clears
+  the log flags (`publish_conntrack.rs` `log_flags: 0`) and zeroes AppTimeout /
+  PolicyCounterIdx / NAT64 source, keeping only `PolicyID` (which P4 already
+  preserved). Phase 1's standalone value is therefore mostly **de-risking** Phase
+  2 plus correctness in the brief pre-first-sweep window and on genuine
+  stream-loss. So Phase 1 is a legitimate *de-risking increment*, **not** a
+  partial fix a user should perceive as materially improving failover
+  correctness — the meaningful, durable win requires Phase 2. If the two are
+  split at `/engineer` time, #5865 stays **open** until Phase 2 lands.
 - Full Option A (codegen unification) is the north star but is **not required**
   to reach correctness; B+C reaches it with bounded, separately-smokeable steps.
-
-The user decides at `/engineer` time whether to land Phase 1 alone first or drive
-B+C together. **Phase 1 alone is a real improvement but leaves the issue open.**
 
 ## 6. Concrete design
 
@@ -230,7 +235,15 @@ today it would **silently decode the harmful zero values**. The correct handling
 is the issue's requirement #3: a **helper-reported session-delta capability/
 version**, and the daemon must **refuse JSON HA admission/export from an
 incapable helper and keep takeover/resync unready** (fail closed) rather than
-install zeroed metadata. Length-gating on the node→node wire gives *decode*
+install zeroed metadata.
+
+**Scope the gate to the AUTHORITATIVE path, not JSON-only.** A helper old enough
+to omit the JSON keys is very likely also older than #3301/#4565 and therefore
+omits the same fields on the **binary** path too — so "refuse JSON, use binary"
+rescues nothing. Define the capability as *"does the helper emit complete session
+metadata on the authoritative (binary) transport?"* If not, the daemon must
+**fail closed on HA session sync entirely** for that helper (keep takeover/resync
+unready), not merely switch transports. Length-gating on the node→node wire gives *decode*
 compatibility, **not** *semantic* fail-closed — a missing field silently becomes
 the exact harmful zero. If mixed node **releases** are supported, the peer
 semantic capability needs the same treatment; existing length checks do not
