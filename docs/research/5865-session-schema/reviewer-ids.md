@@ -29,3 +29,11 @@ Notes:
   `feedback_codex_infra_must_retry` / research SKILL.md), the research proceeds
   **2-of-3 (Claude SMR + Codex)** with the AGY failures documented here. AGY
   alone was never the basis for any verdict.
+
+## Round 2 (plan v2 @ e8aaa5e1be5f; SMR r2 folds → v3 @ 845c4b22c8ac)
+
+| Reviewer | Mechanism | Task/Job ID | Status |
+|---|---|---|---|
+| Codex | codex-companion task --background (re-review) | `task-mro4rkhe-wxi69k` | running |
+| AGY | — | — | INFRA-BLOCKED (see r1 notes) |
+| Claude SMR | `claude-smr-plan-r2.md` | — | PLAN-READY-WITH-NITS → folded into v3 |
