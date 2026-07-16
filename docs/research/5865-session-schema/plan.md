@@ -2,9 +2,8 @@
 
 ## 1. Status
 
-`DRAFT v4 — v3 + Codex r2 REVISE folds (producer model corrected; Phase 1 fully
-specified; Phase 2 recast as an invariant contract + dedicated follow-up); pending
-Codex r3 + Claude SMR r3 (AGY infra-blocked)`
+`DRAFT v5 — v4 + Claude SMR r3 fold (Phase-1 overflow → durable-unready, not P0
+escalation); pending Codex r3 concurrence (AGY infra-blocked)`
 
 Base: `origin/master` @ `b7343fda51b5`. Research-only branch
 `research/5865-session-schema`. **No production code is touched in `/research`.**
@@ -118,10 +117,12 @@ resync, and a fail-closed mixed-version posture.
    live binding/RPC queue skips JSON pushes without incrementing the drop
    counter, then ACKs). On truncation/undercount the helper returns the existing
    RPC failure (`ok=false`, no usable partial), so an old daemon cannot ignore an
-   additive flag. A binding **permanently** over 4096 must escalate to the binary
-   bulk export (P0) or the daemon must enter **durable unready** with defined
-   operator recovery — Phase 1 must state which (recommend: escalate to P0; if P0
-   unavailable, unready).
+   additive flag. A binding **permanently** over 4096 makes the daemon enter
+   **durable unready** with defined operator recovery. (Phase 1 deliberately does
+   **not** escalate to the binary bulk export P0: P0 is OPEN-only — a lost CLOSE
+   leaves a stale peer key (§3/§7.2) — so escalating to it would drag a Phase-2
+   full-set-reconciliation concern into Phase 1. Phase 2 adds the complete-export
+   escalation as the recovery target.)
 5. **Complete capability gate + fail-closed** (Section 8).
 6. **Fixture** — update `userspace-dp/tests/fixtures/protocol_wire_v1.json`
    (always-serialized fields).
