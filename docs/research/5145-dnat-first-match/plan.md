@@ -2,11 +2,102 @@
 
 ## 1. Status
 
-`DRAFT v1 — pending adversarial plan review` (Codex + AGY + Claude SMR)
+`v2 — PLAN-KILL (Option A)` — converged 2026-07-16.
 
-Research-only. This doc stops at PLAN-READY or PLAN-KILL. No production
-code is touched by `/research`; implementation begins only on a manual
-`/engineer 5145`.
+Research-only. Stops at PLAN-KILL. No production code touched.
+
+### Convergence & verdict (r2)
+
+Reviewers converged on **PLAN-KILL of Option A** (the reverse-to-first-match
+rewrite). Two independent architectural blockers — both verified firsthand
+against the code — make Option A unshippable as designed:
+
+- **B1 — flat global ordinal cannot honor Junos rule-set selection.** Junos
+  selects the single most-specific rule-set by `from`-context (interface > zone
+  > RI), then first-matches *within that rule-set*. Option A's global-candidate
+  argmin filters out the non-matching most-specific rule-set and picks the
+  lower-ordinal row from a *less*-specific rule-set — i.e. it silently
+  implements undocumented **rule-level fall-through**. The snapshot/wire/Rust
+  structures carry a rule name + 3 context fields but **no rule-set identity**
+  (protocol.go:680; destination.rs `DnatEntry` ~65), so a two-stage
+  select-rule-set-then-first-match cannot be expressed. A faithful design needs
+  `(effective_rule_set_id, context_rank, rule_index)` + two-stage lookup, and
+  the no-matching-rule-in-selected-set behavior pinned by a primary Juniper doc
+  or a vSRX trace (still an open citation — §11 Q1).
+- **B2 (decisive) — a winning `off` does not un-register the overlapping
+  translate VIP → the motivating case fails end-to-end.** `destination_ips_scoped`
+  (destination.rs:1028-1083) skips only `entry.off` rows and exports **every**
+  non-off translate destination into the firewall-local sets
+  (forwarding_build/mod.rs:479-486), with **no** awareness of a
+  higher-precedence covering `off`. A winning exemption collapses to the same
+  `None` as "no rule," so the poll path keeps the original destination
+  (poll_descriptor/mod.rs ~1596-1602), which — being registered as a local VIP
+  by the still-present `/32` translate — takes `LocalDelivery` before FIB
+  lookup (forwarding/mod.rs ~1468-1543). **The exempt host is consumed by the
+  firewall stack instead of routed.** So Option A, as designed (lookup
+  precedence only), does not even achieve the security goal it exists for. The
+  plan's "local-address registration unaffected" claim (§7) is false. Fixing
+  this requires precedence-aware local-ownership or carrying an explicit
+  `Exempt` outcome into forwarding — both violate Option A's "lookup API
+  unchanged / registration unaffected" premise.
+
+Supporting findings (each independently sufficient to fail the plan as written):
+- **HA mechanism named wrong.** Synced sessions ARE safe, but because the
+  resolved `NatDecision.rewrite_dst` is replayed through **session state**
+  (traced eventstream → cluster sync_protocol → manager_ha → server/helpers →
+  upsert_synced_session), **not** via the `dnat_table` BPF publish the plan
+  cited (`publish_dnat_table_entry` returns early unless `rewrite_src` exists —
+  it is reverse-SNAT steering). Fresh / missed / independently-created sessions
+  during a rolling mixed-version window still diverge, and the all-zero
+  fallback must run the **exact** current algorithm (not merely "deterministic
+  insertion order"). A real semantic/activation gate is required — an additive
+  JSON field is decode-compatible, not a semantic gate.
+- **Cost "LOW" is unproven.** Per-session-miss is confirmed, but "negligible"
+  is not: the global argmin must scan all **six** buckets (three exact-host +
+  three prefix sub-tiers), denied/dropped misses can pay repeatedly, and Juniper
+  lists destination-NAT capacities up to 51,200 rules on some platforms. No
+  table-size / session-rate / large-prefix-bucket benchmark exists.
+- **Test-masking trap.** Rust snapshot fixtures use `..Default()` → all-zero
+  ordinals → they become legacy-mode inputs; old tests stay green while
+  production Go emits nonzero ordinals and behaves differently. Production-
+  semantics tests must stamp ordinals or build via the Go path.
+- **Reversed contracts undercounted.** #3164 longest-prefix, exact-port>
+  wildcard-port, concrete-proto>IP-only, and last-wins dedup all flip to
+  first-wins; the plan enumerated only one LPM test.
+
+**Reviewer verdicts (r1 → convergence):**
+- **Codex-lane (hostile, evidence-backed):** PLAN-KILL (Option A) → re-plan
+  around a re-scoped Option C. `codex-plan-r1.md`.
+- **Claude SMR (hostile):** r1 ITERATE leaning-to-C; **r2 concurs PLAN-KILL**
+  after firsthand-verifying B2 (the LocalDelivery blocker it had missed).
+  `claude-smr-plan-r1.md`, `claude-smr-plan-r2.md`.
+- **AGY:** infra-blocked all round (MCP headless permission auto-deny; direct
+  CLI `--print` timed out with no output) — documented retries, proceed 2-of-3
+  per `feedback_codex_infra_must_retry`. AGY-alone was never relied on; the
+  convergence rests on the strong Codex + Claude SMR pair.
+
+**Go-forward (NOT plan-ready — recommendations only):**
+1. **Option C (proportionate)** — keep most-specific-wins; add a **commit-time
+   lint** that makes a shadowed broad `off`/translate operator-visible (strict
+   error at commit; tolerant warn on lenient/peer-sync load). This needs its
+   **own concrete plan** — disposition (strict vs warn), an overlap model over
+   the *canonical expanded* match space (address/app/proto/port/source/range
+   expansion, current exact/wildcard/proto-any/prefix precedence), scope
+   (within-rule-set first), dynamic-feed handling, and tests. Not shippable from
+   the 3-line sketch in §11.
+2. **File the B2 LocalDelivery interaction as a separate latent bug** — it may
+   already affect the "common" more-specific-`/32`-off idiom when a covering
+   translate prefix expands to include the off host (bounded prefix expansion,
+   destination.rs:1043-1077). Independent of #5145's precedence question.
+
+The remainder of this document (the original v1 Option A design) is retained
+below for context; it is the **killed** approach.
+
+---
+
+## 1a. (v1) Status — superseded
+
+`DRAFT v1 — pending adversarial plan review` (Codex + AGY + Claude SMR)
 
 ## 2. Issue framing
 
