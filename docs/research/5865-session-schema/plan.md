@@ -1,360 +1,332 @@
-# Plan of action — #5865: HA session JSON fallback omits policy, timeout, and NAT64 state
+# Plan of action — #5865: HA session sync installs semantically degraded sessions via lossy transports
 
 ## 1. Status
 
-`DRAFT v1 — pending adversarial plan review (Codex + AGY + Claude SMR)`
+`DRAFT v2 — revised after Codex r1 PLAN-KILL; pending re-review (Codex + Claude SMR; AGY infra-blocked)`
 
 Base: `origin/master` @ `b7343fda51b5`. Research-only branch
 `research/5865-session-schema`. **No production code is touched in `/research`.**
 
+**v1→v2 delta (why the scope grew):** Codex r1 PLAN-KILLed v1's "add 5 JSON
+fields and you're done" framing. It surfaced — and this plan verified — that the
+JSON fallback is only **one of three** degraded HA session-install producers, that
+the mixed-version helper↔daemon scenario v1 dismissed is **reachable**, and that
+the FullResync export **silently truncates**. v2 reframes the problem around the
+full producer inventory and recommends a **phased** fix. Every factual claim
+below was re-checked against the tree.
+
 ## 2. Issue framing
 
-The helper→daemon HA session-sync has two transports:
+#5865 reports that the helper→daemon HA session-sync JSON/RPC fallback
+(`drain_session_deltas`) omits five correctness fields (`policy_id`,
+`policy_counter_idx`, `app_timeout`, `nat64`, `nat64_snat_v4`) that the binary
+event stream carries, so a session installed via the fallback is mis-attributed,
+aged on the global timeout, and cannot rebuild the NAT64 reverse BIB after
+failover. That is real — but it is a **symptom of a broader root cause**: the
+userspace HA path has **multiple session-install producers of differing
+fidelity, no single authoritative metadata source, and no rule preventing a
+lossy producer from overwriting a complete value.**
 
-- **Binary event stream** (primary) — `EventFrame::encode_session_open`
-  (`userspace-dp/src/event_stream/codec/session_sync.rs:17`) packs the
-  admitting policy ID (#3056), per-rule counter index (#3073), per-application
-  idle timeout (#3227), and the NAT64 marker + translated pool source (#4565)
-  into length-gated trailing fields. The Go decoder
-  (`pkg/dataplane/userspace/eventstream.go:1052 decodeSessionEvent`) reads them
-  and `daemon_ha_userspace_convert.go:233-235,321-330` stamps them onto the
-  synced `SessionValue`.
-- **JSON/RPC fallback** (`drain_session_deltas`) — the Rust struct
-  `SessionDeltaInfo` (`userspace-dp/src/protocol/binding.rs:1105`) **ends at the
-  #2785 per-policy log flags**. It has no `policy_id`, `policy_counter_idx`,
-  `app_timeout`, `nat64`, or `nat64_snat_v4`. The producer
-  (`userspace-dp/src/afxdp/session_delta.rs:100-175`) correspondingly never
-  sets them.
+## 3. Root cause — the producer inventory (the core of v2)
 
-The Go `SessionDeltaInfo` (`pkg/dataplane/userspace/protocol.go:2941`) already
-declares all five with matching JSON tags (`policy_id`, `policy_counter_idx`,
-`app_timeout`, `nat64`, `nat64_snat_v4`) and its comment (`protocol.go:2985-2996`)
-claims they are "decoded from the trailing fields of the binary open frame **AND
-mirrored on the JSON RPC-fallback delta**." **That "mirrored on the JSON
-fallback" claim is false** — the Rust struct cannot serialize those keys, so
-every JSON-path delta decodes them as zero/empty. A session installed via the
-fallback is stamped `PolicyID=0` / `PolicyCounterIdx=0` / `AppTimeout=0` (global
-timeout) / no NAT64 reverse-BIB source.
+On the userspace HA path a synced `SessionValue` on the standby can be written by
+**five** producers. Only the binary event stream is complete.
 
-The issue asks us to: (1) define one versioned canonical session-open schema and
-generate both transports from it, or (2) add every correctness field to JSON — or
-remove the fallback from HA admission, (3) negotiate capabilities/version and
-fail closed rather than silently zero, (4) golden-test binary↔JSON equality, and
-(5) run failover forced onto the fallback.
+| # | Producer | Trigger | Carries the 5 fields? | Evidence |
+|---|---|---|---|---|
+| P1 | **Binary event stream** (incremental OPEN/CLOSE) | every session open/close | **YES (complete)** | `event_stream/codec/session_sync.rs:17-194`; decode `eventstream.go:1052`; stamp `daemon_ha_userspace_convert.go:233-235,321-330` |
+| P2 | **JSON `drain_session_deltas`** (fallback + reconcile) | 100 ms poll when stream down; **5 s reconcile even when connected** | **NO** — Rust `SessionDeltaInfo` lacks all 5 | `binding.rs:1105`; `session_delta.rs:100-175`; `umem/mod.rs:1325`; `daemon_ha_userspace_stream.go:289-330,412` |
+| P3 | **JSON `export_owner_rg_sessions`** (FullResync) | helper replay-buffer trim / gap | **NO** (same struct) **+ silently truncates >4096** | `ha.rs:889-944`; `daemon_ha_userspace_export.go:51` passes `max=0`; cap `mod.rs:375 MAX_PENDING_SESSION_DELTAS=4096`, drop `umem/mod.rs:1329` |
+| P4 | **Periodic cluster sweep** `syncSweep`→`ForEachV4/V6` over the **BPF-compat store** | 15 s active / 60 s idle in userspace | **PARTIAL** — keeps `PolicyID`, but `app_timeout=0`, no `PolicyCounterIdx`, no `Nat64SnatV4`, cleared log flags | `daemon_ha_sync.go:953 StartSyncSweep`; `manager.go:415` returns `true,15s,60s`; `sync_conn.go:778` walk+`stampInstallGenV4`+`encodeSessionV4`; degraded publish `bpf_map/publish_conntrack.rs:152,261` (`app_timeout: 0`); ABI limit `bpf_session_value.go:56`, `types.go:75` |
+| P5 | **Legacy bulk-sync fallback** | reconnect replay | **PARTIAL** (same reduced BPF-compat store) | serializes `s.sessions` compat store, same source as P4 |
 
-## 3. Honest scope/value framing
+**Consequence 1 — the fix is NOT "add 5 JSON fields."** Even with P2/P3 fully
+repaired, **P4 independently re-degrades every synced session every 15–60 s**:
+each sweep row is read from the BPF-compat store (`app_timeout=0`, no counter, no
+NAT64 source), `stampInstallGenV4` gives it a **fresh, newer** generation, and
+the peer's `installGenGuardV4` accepts newer generations
+(`sync_conn.go:196,385`), replacing the whole value
+(`PutClusterSyncedSession`→`session_store.go:257`, BPF `UpdateAny`
+`maps_session.go:69`, Rust `install.rs:288` removes-then-inserts). The BPF ABI
+**structurally cannot** carry `PolicyCounterIdx`/`Nat64SnatV4`/a nonzero
+`app_timeout`, so P4 cannot be "enriched" in place — it must be **re-sourced from
+authoritative Rust state or suppressed** in userspace mode.
 
-This is a **real HA-correctness defect**, not a perf tweak. After a failover, a
-degraded synced session on the promoted node is mis-attributed (wrong/zero
-policy on flow logs and hit counters), aged on the global per-protocol timeout
-instead of the configured per-application `inactivity-timeout`, and — for NAT64
-cross-family flows — cannot rebuild the reverse (v4→v6) BIB, so the return path
-translates incorrectly or drops. The fix restores the exact correctness that
-#3301 and #4565 built for the binary path but never completed for the JSON path.
+**Consequence 2 — steady-state, not fallback-only (severity, corrected).** P2's
+`push_session_delta` is unconditional (capacity-gated only), P2's queue is
+drained only by the JSON RPC, and the daemon runs the 5 s reconcile drain **even
+while the binary stream is healthy**. `QueueSessionV4/V6` does **not coalesce by
+key** (`sync_conn.go:914,931`): each call appends a distinct message with a fresh
+generation. So the normal low-churn ordering is `binary OPEN (gen G, complete) →
+JSON reconcile OPEN (gen G+1, zeroed) → peer accepts G+1 and replaces`. The
+degradation is therefore **continuous risk for new/long-lived sessions**, not
+merely a genuine-fallback event. Corrections to v1's wording: "within ≤5 s" is
+**not** a bound (only 256 entries drain per tick; backlog/overflow can delay or
+drop a duplicate); it is continuous *risk*, not deterministic degradation of
+every session; and field state is **timing-dependent** (P4 may restore `PolicyID`
+while leaving timeout/counter/NAT64 degraded).
 
-The value is **correctness**, so the usual perf-kill clause is inverted: if
-reviewers conclude the JSON fallback is genuinely never reachable in a real HA
-deployment, PLAN-KILL is an acceptable verdict. Section 5 (Option D) proves it
-**is** reachable — the fallback is load-bearing — so PLAN-KILL is **not**
-expected to be the outcome.
+**Consequence 3 — two secondary defects fall out of the same root cause:**
+- **Resurrection (no coalescing).** A binary `OPEN`→`CLOSE` leaves a delete
+  tombstone at gen G+1; a delayed JSON `OPEN` at gen G+2 is newer than the
+  tombstone and **resurrects a closed session** on the peer until its own close
+  crosses a batch boundary — or, if that close was dropped at the 4096 cap,
+  until expiry.
+- **Export truncation (P3).** `export_owner_rg_sessions` accumulates into the
+  same 4096-cap pending queue and Go requests `max=0` (unbounded); a FullResync
+  of >4096 sessions per binding **silently drops the excess and reports
+  success** — a silent standby session loss on the exact recovery path meant to
+  restore completeness.
 
-### Severity is likely broader than "only when the binary path falls back"
+## 4. Honest scope/value framing
 
-`push_session_delta` (`userspace-dp/src/afxdp/umem/mod.rs:1325`) pushes into
-`pending_session_deltas` **unconditionally** (only capacity-gated by
-`MAX_PENDING_SESSION_DELTAS`); it is **not** gated on the binary event stream
-being disconnected. The binary event-stream producer (`es.push_delta_lossless`)
-pushes to a **separate** queue, so `pending_session_deltas` is drained **only**
-by the JSON `drain_session_deltas` RPC. The daemon runs that drain **every 5 s as
-a "reconciliation" even while the binary stream is connected**
-(`daemon_ha_userspace_stream.go:289-311`, `drainUserspaceSessionDeltasWithConfig`
-→ `DrainSessionDeltas`). Consequence: a session correctly synced by the binary
-path is very likely **re-emitted degraded within ≤5 s by the reconcile drain and
-re-queued to the peer** (`queueUserspaceSessionDeltas` → `QueueSessionV4/V6`),
-overwriting the good `PolicyID`/`AppTimeout`/`Nat64SnatV4`. If confirmed, the
-degradation is **continuous in steady state**, silently undoing #3301/#4565 on
-the standby regardless of stream health. **This is the single most important
-claim to verify (Section 11, Q1)** — it changes the impact statement from
-"fallback-only" to "steady-state." Either way the fix (Section 5) is the same.
+This is a **High-severity HA-correctness defect** with a **larger blast radius
+than the issue title implies**. The value is correctness of failover
+(attribution, aging, NAT64 return path, no resurrection, complete resync). Given
+the scope, PLAN-KILL is **not** appropriate (the fallback and sweep are both
+load-bearing and reachable), but **decomposition is** — Section 6 recommends a
+phased plan so a bounded Phase 1 can land while Phase 2 (the structural
+producer-subordination) is scoped and smoked separately.
 
-## 4. What's already shipped / partially built
+## 5. Design options (reframed around the full producer set)
 
-- **Binary path is complete.** #2785 (log flags), #3301 (policy id / counter /
-  timeout), #4565 (NAT64 marker + `snat_v4`) all land on
-  `encode_session_open` (trailing, length-gated) and decode in
-  `eventstream.go`.
-- **Go `SessionDeltaInfo` already has all five fields** with the right JSON
-  tags and the convert path already stamps them onto `SessionValue`
-  (`daemon_ha_userspace_convert.go:233-235` V4, `:321-330` V6). **No Go decode
-  change is required** for the core fix.
-- **The node→node cluster wire already carries all five fields.**
-  `pkg/cluster/sync_protocol.go` encodes/decodes `PolicyID` (`:129/:224`),
-  `AppTimeout`+`PolicyCounterIdx` (`:181,:183/:275,:277`), and `Nat64SnatV4`
-  (`:284`), each as **length-gated trailing fields** (`:98-99`), tolerant of a
-  pre-#3301 peer. **No cluster-wire change is required.**
-- **`SyncedSessionEntry` retains the full `decision` + `metadata`**
-  (`userspace-dp/src/afxdp/worker/mod.rs:358-372`), so the owner-RG export
-  re-emission path (`export_owner_rg_sessions` → `drain_session_deltas_from_live`,
-  `ha.rs:889-944`) can reconstruct deltas whose `metadata.policy_id` /
-  `metadata.policy_counter_idx` / `metadata.inactivity_timeout_ns` /
-  `decision.nat.nat64` / `decision.nat.rewrite_src` are all present.
+### Option A — One canonical versioned schema for ALL transports + capability negotiation
 
-Net: **the only missing link is the five keys on the Rust `SessionDeltaInfo`
-struct + populating them at construction.** Everything downstream already
-consumes them.
+A single versioned session-open projection that P1/P2/P3 derive from, the sweep
+(P4/P5) re-sourced from authoritative Rust session state, and a helper-reported
+session-delta capability version gating every JSON/compat producer.
 
-## 5. Design options (multiple viable paths)
-
-### Option A — One canonical versioned session-open schema (generate both transports)
-
-Define a single schema (IDL or one canonical Rust struct) from which both the
-binary frame and the JSON delta are generated/derived, so the two can never
-drift again.
-
-- **Blast radius:** HIGH. The binary frame is a hand-packed, fixed-offset,
-  little-endian hot-path frame with length-gated trailing fields and flag bits;
-  the JSON is serde. Unifying them means either a codegen step or a canonical
-  struct that both serialize through — touching `codec/session_sync.rs`,
-  `session_delta.rs`, `binding.rs`, `eventstream.go`, `protocol.go`, plus every
-  golden test.
+- **Blast radius:** HIGHEST. Touches the binary codec, JSON struct, the
+  BPF-compat publish path or its replacement, the sweep source, and Go decode.
 - **Drift-prevention:** BEST (structural).
-- **Effort/risk:** HIGH / HIGH. For a **5-field, stable** delta whose two
-  transports have deliberately divergent wire constraints (fixed-offset binary
-  vs. serde JSON), full codegen unification is over-engineering.
+- **Effort/risk:** HIGH / HIGH. Correct end-state, but too large to land safely
+  in one step for a High-severity fix.
 
-### Option B — Additively mirror the five fields onto the JSON delta (RECOMMENDED)
+### Option B — Enrich the JSON producers + capability gate + export fail-closed (Phase 1 building block)
 
-Add the five fields to the Rust `SessionDeltaInfo` (`binding.rs`) with serde
-renames matching the Go JSON tags, and populate them in `flush_session_deltas`
-(`session_delta.rs:100`) exactly as `encode_session_open` does for the binary
-frame:
+- Add the five fields to the Rust `SessionDeltaInfo` (`binding.rs`) and populate
+  them in `flush_session_deltas` (`session_delta.rs:100`) via a **shared
+  conversion helper** that both the binary encoder and JSON builder call (so
+  `inactivity_ns→secs` and `snat_v4` can never diverge). Closes **P2 and P3's
+  field gap**.
+- **Export overflow fail-closed (P3):** detect when a per-binding export hit the
+  4096 cap (nonzero `session_delta_dropped` delta across the kick, or a returned
+  truncation flag) and **fail the FullResync closed** — return an error so the
+  daemon retries / escalates to a binary bulk export, rather than reporting a
+  truncated success.
+- **Capability gate + fail-closed (C4, see Section 8):** the helper reports a
+  session-delta schema capability/version on `ping`/`status`; the daemon
+  **refuses JSON HA admission/export from an incapable (older) helper** and keeps
+  takeover/resync unready for that path instead of silently installing zeroed
+  values.
+- **Does NOT fix P4/P5.** On its own, Option B leaves the BPF-compat sweep
+  re-degrading sessions. **Option B is necessary but not sufficient** — it must
+  be paired with Option C's producer-subordination.
 
-```rust
-// binding.rs SessionDeltaInfo (append, all #[serde(default)])
-#[serde(rename = "policy_id", default)]         pub policy_id: u32,
-#[serde(rename = "policy_counter_idx", default)] pub policy_counter_idx: u32,
-#[serde(rename = "app_timeout", default)]        pub app_timeout: u32, // SECONDS
-#[serde(rename = "nat64", default)]              pub nat64: bool,
-#[serde(rename = "nat64_snat_v4", default)]      pub nat64_snat_v4: String,
-```
+### Option C — Make the binary path authoritative; subordinate/suppress the lossy producers (Phase 2, the structural fix)
 
-```rust
-// session_delta.rs, inside the SessionDeltaInfo { ... } literal
-policy_id: delta.metadata.policy_id,
-policy_counter_idx: delta.metadata.policy_counter_idx,
-app_timeout: delta.metadata.inactivity_timeout_ns
-    .map(|ns| u32::try_from(ns / 1_000_000_000).unwrap_or(u32::MAX)).unwrap_or(0),
-nat64: delta.decision.nat.nat64,
-nat64_snat_v4: match (delta.decision.nat.nat64, delta.decision.nat.rewrite_src) {
-    (true, Some(IpAddr::V4(v4))) => v4.to_string(),
-    _ => String::new(),
-},
-```
+- **FullResync via the binary bulk export.** Route the owner-RG FullResync
+  through the existing binary `export_all_sessions` / `snapshot_all_sessions_export`
+  (#4054, pushes complete frames via `push_delta_lossless`) instead of the JSON
+  RPC — complete fields, no 4096 truncation.
+- **Subordinate P4/P5 in userspace mode.** The BPF-compat sweep install-replay
+  and legacy bulk-sync are structurally lossy (BPF ABI can't hold the fields).
+  In userspace mode, **suppress their session-INSTALL re-send** (the binary
+  stream + binary bulk export already provide authoritative convergence) while
+  **keeping the sweep's delete-journal/backfill convergence duties**
+  (`sync_conn.go:778` #3926 delete-journal). Alternatively, if suppression is too
+  risky, **subordinate their generation** so a sweep/bulk row can never supersede
+  a fresher complete install for the same key (a per-key "authoritative-source"
+  precedence), but suppression is cleaner.
+- **Cross-transport generation/duplicate semantics (resurrection).** Define that
+  a post-CLOSE duplicate OPEN cannot resurrect a tombstoned key (e.g. bind the
+  delta's generation to the session's create instant rather than a fresh
+  monotonic counter, or drop reconcile OPENs for keys with a live newer
+  tombstone).
+- **Effort/risk:** MED–HIGH / MED. The risk is proving the binary bulk export
+  covers every reconnect/resync scenario the JSON path covers today.
 
-- **Blast radius:** LOW. ~5 struct fields + ~6 assignment lines in Rust; Go
-  already decodes and stamps; cluster wire already carries. Updates the Rust
-  `SessionDeltaInfo` doc-comment and the README claim.
-- **Drift-prevention:** MODERATE by itself — pair it with the **golden
-  binary↔JSON field-set parity test** (Section 9 / Option E) to get most of
-  Option A's structural guarantee at a fraction of the cost.
-- **Effort/risk:** LOW / LOW. This literally **completes the stated intent of
-  #3301/#4565** ("… AND mirrored on the JSON RPC-fallback delta") that the Go
-  comment already documents as done.
+### Recommendation — **Phased: B (Phase 1) then C (Phase 2)**, converging toward A's end-state
 
-### Option C — Remove the JSON fallback from HA admission (binary is the only transport)
+- **Phase 1 (bounded, ships first):** Option B — additive JSON fields (shared
+  helper, fixture update), export-overflow fail-closed, helper capability gate +
+  fail-closed. Closes P2/P3's field gap and the mixed-version hole. **Explicitly
+  documented as partial:** it does not stop P4's re-degradation, so it must not
+  be represented as closing #5865.
+- **Phase 2 (closes the issue):** Option C — binary-authoritative FullResync +
+  subordinate/suppress P4/P5 + resurrection semantics.
+- Full Option A (codegen unification) is the north star but is **not required**
+  to reach correctness; B+C reaches it with bounded, separately-smokeable steps.
 
-Make the binary event stream the sole HA session-install path: route the
-FullResync owner-RG recovery through the binary bulk export
-(`export_all_sessions` / `snapshot_all_sessions_export` already pushes binary
-frames via `push_delta_lossless`, #4054) and drop the JSON reconnect/reconcile
-drains from the sync path; fail closed (no sync) while the stream is down.
+The user decides at `/engineer` time whether to land Phase 1 alone first or drive
+B+C together. **Phase 1 alone is a real improvement but leaves the issue open.**
 
-- **Blast radius:** MED–HIGH. The JSON drain is **load-bearing today** (Section
-  5, Option D): reconnect polling at 100 ms and the FullResync owner-RG export
-  both use it. Removing it needs a binary-native owner-RG resync and careful
-  handling of the "stream not yet connected at startup" window.
-- **Drift-prevention:** BEST (deletes the second transport → nothing to drift).
-- **Fail-closed semantics:** refusing to sync while the stream is down is
-  arguably *more* correct than syncing degraded sessions, but it worsens RPO
-  during the outage window (no incremental sync until the stream reconnects).
-- **Effort/risk:** MED–HIGH / MED. Attractive as **long-term hardening** but a
-  poor fit for a High-severity correctness fix that must land safely. Recommend
-  filing as a **follow-up** once the binary bulk-export path is proven, not
-  blocking this fix.
+## 6. Concrete design
 
-### Recommendation
+### Phase 1 (Option B)
+1. **`binding.rs`** — append 5 `#[serde(default)]` fields to `SessionDeltaInfo`:
+   `policy_id: u32`, `policy_counter_idx: u32`, `app_timeout: u32` (seconds),
+   `nat64: bool`, `nat64_snat_v4: String`, tags matching Go
+   (`policy_id`/`policy_counter_idx`/`app_timeout`/`nat64`/`nat64_snat_v4`).
+2. **Shared conversion helper** (new, in a module both callers import) computing
+   `inactivity_secs(metadata) -> u32` and `snat_v4_string(decision) -> String`
+   from a `&SessionDecision`/`&SessionMetadata`; call it from **both**
+   `encode_session_open` (`session_sync.rs:159-182`, replacing the inline logic)
+   **and** the JSON builder in `session_delta.rs:100`. This makes the two
+   transports share one semantic projection (a slice of Option A's value).
+3. **`session_delta.rs`** — populate the 5 fields from the shared helper. Note
+   the constructor is shared by OPEN **and CLOSE** deltas, so the fields (and the
+   `nat64_snat_v4` allocation) are written on close too — the v1 "alloc only on
+   NAT64 opens" claim was wrong.
+4. **Export overflow fail-closed** — thread a per-kick "dropped" signal from the
+   worker export back through `wait_and_collect`/the RPC; the Go
+   `exportUserspaceOwnerRGSessions*` treats truncation as an error.
+5. **Capability gate** — extend the helper `status`/`ping` with a
+   `session_delta_schema_version` (or a capability flag); Go refuses JSON
+   admission/export when the helper is below the fix version (Section 8).
+6. **Fixture** — `userspace-dp/tests/fixtures/protocol_wire_v1.json` must gain
+   the always-serialized fields (else the wire fixture test fails).
+7. **Docs** — `userspace-dp/src/session/README.md:675-683,770`; tighten the
+   overclaiming `protocol.go:2985-2996` comment.
 
-**Ship Option B + the golden parity test (Option E in Section 9), and file
-Option C as a follow-up hardening issue.** Option B is the minimal,
-end-to-end-complete correctness fix (everything downstream already consumes the
-fields); the golden test structurally prevents the next field from drifting;
-Option C's transport-deletion is real value but is a separate, riskier change
-that should not gate the correctness fix.
-
-## 6. Concrete design (Option B)
-
-1. **`userspace-dp/src/protocol/binding.rs`** — append the five
-   `#[serde(default)]` fields to `SessionDeltaInfo` (snippet above). Update the
-   struct doc-comment to state that these mirror the binary open frame's
-   #3301/#4565 trailing fields and that the daemon stamps them onto the synced
-   `SessionValue`.
-2. **`userspace-dp/src/afxdp/session_delta.rs`** — populate the five fields in
-   the `SessionDeltaInfo { ... }` literal at `:100`, converting
-   `inactivity_timeout_ns` → seconds (saturating) to match
-   `encode_session_open`'s `inactivity_secs` (`session_sync.rs:163-167`), and
-   deriving `nat64_snat_v4` from `decision.nat.rewrite_src` when
-   `decision.nat.nat64` (mirroring `session_sync.rs:178-182`). Single source of
-   the conversion logic — consider a shared helper so the binary and JSON paths
-   compute `inactivity_secs` / `snat_v4` identically.
-3. **No Go change for the core fix.** Optionally tighten the
-   `protocol.go:2985-2996` comment (it currently over-claims parity) to note the
-   parity is now real and guarded by the golden test.
-4. **Docs:** update `userspace-dp/src/session/README.md:675-683,770` (the JSON
-   RPC-fallback delta description) and note the parity invariant.
+### Phase 2 (Option C)
+8. Route FullResync (`handleEventStreamFullResync`) through binary
+   `export_all_sessions` instead of `ExportOwnerRGSessions` JSON.
+9. In userspace mode, suppress the P4 sweep install-replay and P5 bulk-sync
+   session-INSTALL emission (keep delete-journal), OR add per-key source
+   precedence so they cannot supersede a complete install.
+10. Resurrection fix: post-CLOSE duplicate OPENs must not win against a live
+    tombstone.
 
 ## 7. Public API preservation
 
-- No RPC verb, control-message type, or wire-frame layout changes.
-- `drain_session_deltas` / `export_owner_rg_sessions` responses gain keys in
-  their `SessionDeltaInfo` elements — **purely additive JSON**. `#[serde(default)]`
-  on the Rust side and `omitempty` on the Go side keep old/new decoders
-  compatible in both directions.
+- No control-verb removals. `SessionDeltaInfo` gains **additive** JSON keys
+  (`serde(default)` / `omitempty`).
+- New: a helper `session_delta_schema_version`/capability on `status` (additive),
+  and a truncation signal on the export response (additive).
 - Binary event-stream frame layout: **unchanged**.
-- Cluster node→node wire: **unchanged** (already carries the fields).
-- Go `SessionDeltaInfo`, `SessionValue`, convert functions: **unchanged**.
+- Node→node cluster wire: unchanged for the fields it already carries — but note
+  (correcting v1) `PolicyID` is in the **fixed** V4/V6 payload, and only
+  `AppTimeout`/`PolicyCounterIdx`/V6 `Nat64SnatV4` are additive **trailing**
+  fields (`sync_protocol.go:431,548`).
+- No Go **production** decode change for the field fix (Go already decodes/stamps);
+  Phase-1 capability gate + export fail-closed **do** add Go production logic.
 
-## 8. Hidden invariants the change must preserve
+## 8. Mixed-version / capability analysis (v1 rebuttal RETRACTED)
 
-- **Same-host, same-version IPC (load-bearing).** The daemon spawns the helper
-  as a child of the *same build*; #1917 STOP→FLIP→START kills the helper before
-  the new daemon starts. `session_sync.rs:108-115` already relies on this for
-  the binary frame ("no record-version negotiation is required"). The JSON delta
-  rides the same socket, so **adding fields needs no capability negotiation** —
-  the serde(default)/omitempty discipline is belt-and-suspenders, not required
-  for correctness. (See Section 10 for why this rebuts issue requirement #3.)
-- **Units:** `app_timeout` is **seconds** on the wire (Go stamps
-  `val.AppTimeout = delta.AppTimeout` with no conversion; the binary path
-  divides ns→s). The JSON path must divide identically or the standby ages
-  sessions 1e9× wrong.
-- **NAT64 direction:** `nat64_snat_v4` is only meaningful on a v6-keyed
-  (cross-family) session and is the *one* datum the standby cannot reconstruct
-  from the synced forward key. Derive it from `decision.nat.rewrite_src` exactly
-  as the binary path does; leave it empty otherwise.
-- **Export re-emission fidelity:** the owner-RG export re-emits sessions from
-  `SyncedSessionEntry` (`decision`+`metadata` retained). Confirm the re-emitted
-  `SessionDelta` carries populated `metadata.policy_id` /
-  `metadata.inactivity_timeout_ns` / `decision.nat.*` so the export path (not
-  just the incremental path) benefits (Section 11, Q2).
-- **Ordering / allocation:** construction stays on the existing drain path; no
-  new hot-path allocation beyond the `nat64_snat_v4` string, which is only
-  non-empty for NAT64 opens (same cost profile as the existing `nat_src_ip`
-  string fields on the struct).
+**v1 was wrong.** The helper↔daemon transport is **not** same-version by
+construction:
+- `system dataplane binary <path>` is operator-configurable
+  (`config/types_system.go:62`, `schema_system.go:292`), selected/executed at
+  `process.go:35`; readiness checks only ping/status (`process.go:116`), not
+  build identity or session-delta schema capability. The default binary search
+  also considers cwd / repo build output / `PATH`.
+- The codebase itself handles an **"OLDER local helper" upgrade-lag window**
+  (`manager_ha.go:458-472`), keyed on the helper's reported snapshot protocol
+  version — proof the daemon can transiently run a differently-versioned helper.
 
-## 9. Risk assessment
+Therefore a new daemon can spawn a pre-fix helper that omits the JSON keys, and
+today it would **silently decode the harmful zero values**. The correct handling
+is the issue's requirement #3: a **helper-reported session-delta capability/
+version**, and the daemon must **refuse JSON HA admission/export from an
+incapable helper and keep takeover/resync unready** (fail closed) rather than
+install zeroed metadata. Length-gating on the node→node wire gives *decode*
+compatibility, **not** *semantic* fail-closed — a missing field silently becomes
+the exact harmful zero. If mixed node **releases** are supported, the peer
+semantic capability needs the same treatment; existing length checks do not
+satisfy fail-closed. This capability gate is **in Phase 1**.
+
+## 9. Hidden invariants the change must preserve
+
+- **Units:** `app_timeout` is **seconds** (`None→0`, else `ns/1e9` floored,
+  saturating `u32::MAX`); Go applies it without conversion
+  (`convert.go:229,324`). Verified parity with `session_sync.rs:159-182`.
+- **NAT64 derivation:** `nat64_snat_v4` non-empty only for
+  `(nat64==true, rewrite_src==Some(V4))`; the reverse BIB datum not in the key.
+  Note `0.0.0.0`: the JSON path yields `"0.0.0.0"` while the binary decoder maps
+  all-zero octets to empty — final `SessionValue` semantics are identical, but a
+  delta-level golden compare must account for the representation difference.
+- **Delete-journal / backfill:** Phase-2 sweep subordination must preserve the
+  #3926 connected-delete-journal flush and the backfill replay — suppress only
+  the lossy INSTALL re-send, never the delete convergence.
+- **Export completeness:** after the fail-closed change, a truncated export must
+  never be treated as a complete resync.
+- **Ordering / allocation:** the shared constructor writes the fields on OPEN and
+  CLOSE; the `nat64_snat_v4` string alloc is off the packet hot path (drain path).
+
+## 10. Risk assessment
 
 | Class | Level | Notes |
 |---|---|---|
-| Behavioral regression | LOW | Purely additive fields; downstream already consumes them; no path currently reads a zero and depends on it. |
-| Lifetime / borrow-checker | LOW | Values are copied out of `&delta`; one owned `String` for `nat64_snat_v4`. |
-| Performance regression | LOW | One extra small `String` alloc only on NAT64 opens; other fields are `Copy`. Drain path is off the packet hot path. |
-| Architectural mismatch | LOW–MED | Option B leaves two transports (accepted, guarded by golden test). If reviewers require structural unification, that is Option A and a larger change; the plan argues B+E is the right altitude. |
+| Behavioral regression | MED | Phase-2 sweep suppression + FullResync re-route touch live HA recovery paths; must prove the binary bulk export covers every reconnect/resync scenario. Phase-1 additive fields are LOW. |
+| Lifetime / borrow-checker | LOW | Copies + one owned `String`; shared helper takes borrows. |
+| Performance regression | LOW | Off packet hot path; one small string on NAT64 rows. |
+| Architectural mismatch | MED | Two transports remain after Phase 1 (guarded by the shared projection + tests); full unification (A) deferred. Reviewers who require A must say why B+C's shared projection + capability gate is insufficient for a High-severity fix that must land safely. |
+| Silent-truncation / fail-open | HIGH if unfixed | The export truncation and capability hole are themselves correctness defects; Phase 1 must close both, not just the field gap. |
 
-**Option E — golden parity test (ships with B):** add a Rust test asserting the
-JSON `SessionDeltaInfo` serialized keys are a **superset** of the binary
-open-frame's #3301/#4565 correctness fields (or a shared field-set constant that
-both encoders reference), plus a Go round-trip test proving a JSON-decoded delta
-stamps a `SessionValue` **byte-identical** (on PolicyID/PolicyCounterIdx/
-AppTimeout/Nat64SnatV4) to a binary-decoded delta built from the same session.
-This is the "fail-closed at build time" analog the issue asks for.
+## 11. Test plan (smoke deferral noted)
 
-## 10. Mixed-version / capability negotiation analysis (issue requirement #3)
+`make test-failover` and the HA smoke targets are **blocked by the loss-cluster
+shim-ABI wall** (pinned cpumap=16 vs repo 256; verify-dataplane fail-closes every
+cluster-deploy). Confidence therefore rests on tests + design review, with a
+mandatory forced-fallback smoke recorded as a **merge precondition at
+`/engineer`**, not a waiver:
 
-The issue frames this as a wire change "across a cluster that may run mixed
-versions," invoking the #2239/#3931 lesson. **That lesson applies to the
-node→node cluster wire, not to the helper→daemon JSON/binary transports.**
+- **Shared-projection golden test** — assert the binary encoder and JSON builder
+  produce the **same semantic projection** for the 5 fields across a matrix:
+  `app_timeout` `None`/sub-second flooring/`u64::MAX` saturation; NAT64
+  false+V4-rewrite / true+missing-or-V6-rewrite / true+valid-V4; OPEN and CLOSE.
+  (A field-name-list test alone is insufficient — it cannot detect a *new* binary
+  field, so the guard must compare the shared projection both encoders call.)
+- **Go round-trip** — a JSON-decoded delta stamps a `SessionValue`
+  **byte-identical (on all 5 fields incl. `nat64`)** to a binary-decoded delta
+  from the same session.
+- **Sequence tests** — `binary OPEN → JSON reconcile OPEN` (no downgrade);
+  `binary OPEN→CLOSE → delayed JSON OPEN` (no resurrection); **sweep after a
+  complete install** (no re-degradation) — the P4 regression the whole plan
+  turns on.
+- **Export overflow** — a >4096-session owner-RG export **fails closed**, not
+  truncates-and-succeeds.
+- **Capability gate** — a helper reporting a pre-fix schema version causes the
+  daemon to refuse JSON admission/export (no zeroed installs).
+- **Fixture** — `protocol_wire_v1.json` updated; the Rust cargo suite + 30 Go
+  packages pass.
+- **Forced-fallback failover smoke (merge precondition, deferred):** with the
+  binary stream disconnected, `make test-failover` carrying policy hit-counters,
+  a custom per-application `inactivity-timeout`, source + static NAT, a NAT64
+  flow, fabric forwarding, IPv4 **and** IPv6 — assert the promoted node preserves
+  attribution, aging, and the NAT64 reverse path, with **no** re-degradation
+  across a subsequent sweep tick.
 
-- **Helper→daemon (both transports):** same-host, same-version by construction
-  (Section 8). There is no mixed-version scenario at matched versions; after the
-  fix the fields are always present. A runtime capability handshake here would
-  be machinery for a scenario that cannot occur. The correct "fail-closed"
-  mechanism is the **build-time golden parity test** (Option E), i.e. a
-  compile/test-time invariant per `docs/engineering-style.md`.
-- **Node→node cluster wire:** already length-gated + `omitempty`
-  (`sync_protocol.go:98-99`), already carries the five fields since #3301/#4565,
-  and deliberately does **not** bump `SessionSyncWireVersion` for additive
-  gated fields (`sync.go:21-36`). A pre-#3301 peer stops after the field it
-  knows and treats absence as "unattributed / global timeout / not NAT64" — the
-  same legitimate zero-value the code already tolerates. **No change and no new
-  negotiation is required here.**
+## 12. Out of scope (explicitly)
 
-**Conclusion:** issue requirement #3 ("negotiate capabilities/version and fail
-closed") is over-specified for the transport that carries the bug. The plan
-satisfies its *intent* (never silently zero a required field) via Option B
-(always populate) + Option E (build-time parity guard), and documents why a
-runtime handshake is unnecessary. Reviewers who disagree should say which
-concrete mixed-version scenario on the helper→daemon socket they believe is
-reachable given the #1917 restart discipline.
+- Full Option A codegen unification of the binary frame and JSON struct (deferred
+  north star; B+C's shared projection is the pragmatic subset).
+- Widening the BPF-compat `SessionValue` ABI to carry `PolicyCounterIdx` /
+  `Nat64SnatV4` (Phase 2 re-sources or suppresses instead).
+- Any eBPF dataplane path (retired, #1476).
 
-## 11. Open questions for adversarial review (each invitable to PLAN-KILL)
+## 13. Open questions for adversarial review (each invitable to further revision or PLAN-KILL of a sub-part)
 
-1. **Steady-state vs. fallback-only (severity crux).** Does the 5 s reconcile
-   drain (`daemon_ha_userspace_stream.go:289-311`) actually re-emit
-   already-streamed deltas and cause `QueueSessionV4/V6` on the peer to
-   **overwrite** a good binary-synced `SessionValue` with a zeroed one in steady
-   state? Confirm the sender-side coalescing (last-write-wins by key) and the
-   peer-side install replace-semantics (`SetClusterSyncedSessionV4`). If it
-   does, the impact statement must escalate from "fallback-only" to
-   "continuous." If some guard prevents it (e.g. `pending_session_deltas` is
-   normally empty because the buffer is drained/dropped before 5 s, or the peer
-   merges rather than replaces), the fix is still correct but the framing must
-   soften.
-2. **Export re-emission carries the metadata?** In the owner-RG export
-   (`export_owner_rg_sessions` → worker re-emit → `drain_session_deltas_from_live`),
-   does the re-emitted `SessionDelta` actually populate `metadata.policy_id` /
-   `metadata.policy_counter_idx` / `metadata.inactivity_timeout_ns` and
-   `decision.nat.nat64` / `decision.nat.rewrite_src` from the stored
-   `SyncedSessionEntry`, or does the re-emit build a stripped delta? If stripped,
-   Option B needs additional plumbing at the re-emit site and the "no other
-   change" claim is wrong.
-3. **Is Option B the right altitude, or is Option A mandatory?** Is a golden
-   parity test (Option E) a sufficient structural guarantee against future
-   drift, or do reviewers insist the two transports be generated from one schema
-   (Option A) despite the 5-field, stable surface and divergent wire
-   constraints?
-4. **Should the fallback be removed instead (Option C)?** Is the JSON HA
-   admission transport worth keeping at all, given the binary bulk-export path
-   (#4054) exists? If reviewers prefer deletion, is a fail-closed
-   "no-sync-while-stream-down" RPO regression acceptable, and does that belong in
-   *this* issue or a follow-up?
-5. **Units / NAT64 derivation parity.** Is `inactivity_timeout_ns → seconds`
-   (saturating) and `nat64_snat_v4` from `decision.nat.rewrite_src` byte-for-byte
-   what the binary path does? Any divergence silently corrupts aging or the
-   reverse BIB. Should the conversion be factored into a shared helper so binary
-   and JSON cannot diverge?
-6. **PLAN-KILL check.** Is there any real deployment in which the JSON fallback
-   is *never* taken (so this is dead code)? Section 5/Option D argues no
-   (reconnect polling + FullResync export + no-event-stream DP all route through
-   it). If a reviewer can show the fallback is unreachable in every supported
-   configuration, PLAN-KILL is on the table.
-
-## 12. Verification / smoke deferral
-
-`make test-failover` (and the sibling HA smoke targets) are **blocked by the
-loss-cluster shim-ABI wall** (pinned cpumap=16 vs. repo 256; verify-dataplane
-fail-closes every cluster-deploy until a full reload crosses the bump). This
-plan's confidence therefore rests on:
-
-- **Golden binary↔JSON parity unit test** (Rust) — field-set superset / shared
-  constant.
-- **Go round-trip test** — a JSON-decoded `SessionDeltaInfo` stamps a
-  `SessionValue` identical (on the five fields) to a binary-decoded one built
-  from the same session; assert the fallback install is no longer degraded.
-- **Design review** (this document).
-
-When the shim-ABI wall clears, the `/engineer` implementation must run
-`make test-failover` **forced onto the JSON fallback** (stream disconnected)
-with: policy hit-counters, a custom per-application `inactivity-timeout`,
-source + static NAT, a NAT64 flow, fabric forwarding, and both IPv4 and IPv6 —
-asserting the promoted node preserves policy attribution, aging, and the NAT64
-reverse path. This smoke is a **precondition of merge at `/engineer`**, recorded
-here as a deferral, not a waiver.
+1. **Phase split vs. all-at-once.** Is landing Phase 1 (additive JSON + capability
+   gate + export fail-closed) alone acceptable given it does **not** close the
+   issue (P4 still re-degrades), as long as it is documented as partial? Or must
+   B+C land together so #5865 is never marked fixed prematurely?
+2. **P4 subordination — suppress vs. precedence.** Is suppressing the
+   userspace-mode sweep install-replay (keeping delete-journal) safe, i.e. do the
+   binary stream + binary bulk export fully cover the sweep's "re-converge
+   long-lived flows" purpose? Or is per-key source-precedence the safer choice?
+3. **FullResync re-route.** Does the binary `export_all_sessions` (#4054) cover
+   every reconnect/resync trigger that the JSON `export_owner_rg_sessions`
+   currently serves (owner-RG scoping, ack sequencing)? If not, what is missing?
+4. **Capability-gate fail-closed blast radius.** If the daemon refuses JSON HA
+   admission from an incapable helper, what is the behavior during the legitimate
+   transient upgrade-lag window (`manager_ha.go:458-472`) — does takeover/resync
+   correctly stay "unready," and is that the desired posture vs. degraded-but-up?
+5. **Resurrection semantics.** What is the minimal correct rule to stop a
+   post-CLOSE duplicate OPEN from resurrecting a tombstoned key without breaking
+   legitimate rapid reopen of the same 5-tuple? Generation-from-create-instant,
+   or reconcile-OPEN suppression against live tombstones?
+6. **Is A actually required?** Does the shared semantic projection (Section 6.2) +
+   the sequence/golden tests give enough drift protection, or do reviewers insist
+   on full codegen (Option A) despite the cost?

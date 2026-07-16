@@ -1,0 +1,31 @@
+# Reviewer task-ID ledger — #5865 research plan
+
+Plan doc: `docs/research/5865-session-schema/plan.md`
+Branch: `research/5865-session-schema`
+
+## Round 1 (plan v1 @ 9238c85010c8)
+
+| Reviewer | Mechanism | Task/Job ID | Status |
+|---|---|---|---|
+| Codex | codex-companion task --background | `task-mro3zu2r-1snnkf` | running (deep verify) |
+| AGY | agy-companion adversarial-review | `mro438va` / `mro46wdv` / `mro47h4p` | **INFRA-BLOCKED** |
+| Claude SMR | in-conversation, `claude-smr-plan-r1.md` | — | written (REVISE→3 folds) |
+
+Notes:
+- Two earlier AGY jobs (`adversarial-review-mro41cof-dibj2k`,
+  `adversarial-review-mro41uw3-mk3852`) were cancelled — the local
+  `origin/master` ref is stale (`dea5ff5`), so `--base origin/master` fed AGY 8
+  unrelated commits of noise. Re-dispatched with `--base HEAD~1` for a clean
+  plan-only diff.
+- **AGY is infra-blocked in this headless environment.** Three substantive
+  attempts failed to produce a usable review:
+  - `mro438va` — succeeded (exit 0) but produced an off-topic `--print-timeout`
+    tangent, never reviewed the plan.
+  - `mro46wdv` — no output; auto-denied a `command` permission despite
+    `--dangerously-skip-permissions`.
+  - `mro47h4p` — no output; same permission auto-deny even with `--no-sandbox
+    --dangerously-skip-permissions`.
+  Per the standing rule (symmetric to the Codex-infra-blocked exception in
+  `feedback_codex_infra_must_retry` / research SKILL.md), the research proceeds
+  **2-of-3 (Claude SMR + Codex)** with the AGY failures documented here. AGY
+  alone was never the basis for any verdict.
