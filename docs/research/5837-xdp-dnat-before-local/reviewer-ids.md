@@ -34,3 +34,9 @@ Plan committed at: 36f830996db4
 - Codex: r3 re-review dispatched (resumed).
 - AGY: infra-blocked (environmental; not retried).
 - Claude SMR: PLAN-READY (r3) — claude-smr-plan-r3.md. All Codex r2 fixes code-verified.
+
+## Round 4
+- Plan revised to v4 @ a36aac626b37 (rollback-safe txn, IPv6-AH guard, restart reconcile, mandatory pins).
+- Codex: r4 re-review dispatched (resumed). At r3 it accepted the architecture + verifier bounding for a research plan.
+- AGY: infra-blocked (environmental).
+- Claude SMR: PLAN-READY (r4) — claude-smr-plan-r4.md. All Codex r3 fixes code-verified incl. IPv6-AH regression.
