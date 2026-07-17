@@ -1,10 +1,19 @@
 # Plan of action — #5837: userspace XDP local-interface destination check bypasses DNAT/static-NAT
 
-**Status:** DRAFT v1 — pending adversarial plan review (Codex + AGY + Claude SMR)
+**Status:** DRAFT v2 — revised after Codex + Claude SMR round-1 (both REVISE). Pending round-2 review.
 **Issue:** #5837 (bug, High, security, nat, audit)
 **Research branch:** `research/5837-xdp-dnat-before-local`
 **Base:** origin/master `7d2cd112fec4`
 **Mode:** `/research` — stops at PLAN-READY / PLAN-KILL. No PR, no production code touched here.
+
+**v2 changelog:** recommended path switched from *reuse `dnat_table`* (Option A) to a
+**dedicated zone-agnostic translation-intent map** (Option B) after Codex proved a
+shared-key collision hazard in `dnat_table`. Verifier section reframed: tail-call is
+**forbidden** by the retirement canary and `shimverify` gives no headroom metric, so the
+escape hatches are exact-only / v4-only scope reduction / instruction reclaim / PLAN-KILL.
+Added: complete key/byte-order contract, static-NAT representability limits, WG/ESP/IKE
+precedence, error-propagating generation transaction. Confirmed the helper needs no
+translation change (§4a).
 
 ---
 
@@ -13,302 +22,284 @@
 On a non-GRE **session miss**, the AF_XDP ingress shim (`userspace-xdp/src/lib.rs`,
 `try_xdp_userspace`) classifies a packet as **kernel-local** and returns it to the
 kernel (`cpumap_or_pass`) *before* consulting any configured destination-NAT or
-static-NAT. The local-destination test (`is_local_destination`, lib.rs:1363) only
-exempts **interface-mode source-NAT** addresses; it has no awareness of DNAT /
-static-NAT whose public/mapped address is also an interface address.
+static-NAT. `is_local_destination` (lib.rs:1363) only exempts **interface-mode
+source-NAT** addresses; it has no DNAT/static-NAT awareness. So a port-forward /
+static one-to-one NAT that maps the **WAN interface's own address** (a common,
+legitimate Junos config) never reaches the Rust dataplane on the first packet —
+Linux accepts/rejects it as local traffic instead of translating + applying transit
+zone policy, and if a local service binds that port the traffic is delivered to it.
+**High-severity security bypass.**
 
-Consequence: a port-forward / static one-to-one NAT that maps the **WAN
-interface's own address** (a common, legitimate Junos config) never reaches the
-Rust dataplane on the first packet. Linux accepts or rejects it as local traffic
-instead of applying the configured translation + transit zone policy. If a local
-service happens to bind that port, the traffic is delivered to it — a
-**High-severity security bypass** (the intended DNAT + policy path is inert).
-
-Required invariant (verbatim from the issue): *for a session miss, a configured
-destination translation matching destination address + protocol/port must take
-precedence over generic kernel-local delivery; unmatched traffic to the same
-interface address must still reach legitimate local control-plane services.*
+Required invariant (from the issue): *for a session miss, a configured destination
+translation matching destination address + protocol/port must take precedence over
+generic kernel-local delivery; unmatched traffic to the same interface address must
+still reach legitimate local control-plane services.*
 
 ## 2. Honest scope/value framing
 
-This is a **correctness/security** fix, not a performance change. The "win" is:
-a configured DNAT/static-NAT rule whose public address is an interface address
-becomes **enforced on the first packet** for ordinary IPv4/IPv6 ingress, instead
-of silently bypassed. Blast radius of the *bug*: any deployment that port-forwards
-to (or static-NATs) an interface address — a mainstream firewall configuration.
+Correctness/security fix, not performance. The win: a DNAT/static-NAT whose public
+address is an interface address becomes **enforced on the first packet** instead of
+silently bypassed. Blast radius of the *bug*: any deployment that port-forwards to
+(or static-NATs) an interface address — mainstream firewall config.
 
-Because the required change lives in the **`make generate`-gated AF_XDP shim**
-(pinned toolchain + real-kernel verifier gate, #1864), the make-or-break question
-is not "is the logic right" (it is straightforward) but "does the added hot-path
-lookup fit the eBPF verifier's 1M processed-insn budget on the supported kernels."
-The v6 GRE-inner classifier already had to **drop** its port-0 wildcard probe to
-stay under that cap (lib.rs:882-901). That precedent is why this is `/research`.
+The change lives in the **`make generate`-gated AF_XDP shim** (pinned toolchain +
+real-kernel verifier, #1864). The make-or-break is **verifier feasibility**, and the
+escape hatches are narrower than v1 assumed: **tail-call is forbidden** by the
+retirement canary (`retirement_boundary_canary_test.go:340-350` bans `ProgramArray`
+/`.tail_call`/`bpf_tail_call`, single XDP prog allowlisted), and `shimverify` returns
+only binary PASS/REJECT (`cmd/shimverify/main.go` — no processed-insn metric). So the
+verdict is genuinely uncertain until `make generate` runs, and the fallback is scope
+reduction, not restructure.
 
-*If reviewers conclude the verifier cost is prohibitive and no acceptable
-restructure exists, PLAN-KILL (or a scoped exact-only-v4 subset) is an acceptable
-verdict.* A commit-time reject is **not** an acceptable substitute (see §10/§11):
-port-forwarding to an interface address is legitimate Junos config; hard-rejecting
-it is a parity regression, and a warning alone does not fix the bypass.
+*If the verifier rejects even the minimal (v4 exact-only) form and no acceptable
+instruction-reclaim exists, PLAN-KILL — or ship v4-exact-only + a documented v6/wildcard
+limitation — is an acceptable verdict.* A commit-time hard-reject is **not** a
+substitute: port-forward to an interface address is legitimate Junos config
+(parity), and a warning alone doesn't fix the bypass.
 
-## 3. Key finding that reshapes the issue's suggested fix
+## 3. Central finding (verified by both reviewers)
 
-The issue's "Fix direction" suggests *"do a `DNAT_TABLE(_V6)` lookup — the helpers
-already exist at lib.rs:860-901."* **That is necessary but not sufficient**, because
-in the userspace-dp runtime the shim-visible `dnat_table` / `dnat_table_v6` maps do
-**not** currently contain the configured forward DNAT/static-NAT rules:
+The issue's "just add a `DNAT_TABLE` lookup — the helpers already exist" is
+**necessary but not sufficient**: in the userspace-dp runtime the shim-visible
+`dnat_table`/`dnat_table_v6` maps hold **only dynamic (flags=0) reverse-NAT**
+records, not configured forward DNAT.
 
-- `userspace-dp/README.md:177` (authoritative): *"Compiler-managed STATIC
-  DNAT-config entries (flags=1) are never published or deleted by this path."*
-  The helper only publishes **dynamic (flags=0) reverse-NAT** records into
-  `dnat_table` (`publish_dnat_table_entry`, #2979/#2406) for embedded-ICMP /
-  SNAT-return steering.
-- The Go compiler *does* build correctly-shaped static (flags=1) DNAT entries in
-  `pkg/dataplane/compiler_nat.go:855-918` — **but** in the userspace path the
-  `DataPlane` it writes through is `userspaceShimCompileDataplane`, whose
-  `SetDNATEntry`/`SetDNATEntryV6` are **no-ops** (`return nil`,
-  `pkg/dataplane/loader.go:407-408`). Configured DNAT/static-NAT matching happens
-  entirely inside the helper's `nat/destination.rs` engine
-  (`snapshot.destination_nat_rules` / `snapshot.static_nat_rules`), which the shim
-  cannot see.
+- `pkg/dataplane/loader.go:407-441` — the userspace path's `SetDNATEntry` /
+  `SetDNATEntryV6` / static-NAT setters / stale-static delete hooks are **no-ops**
+  (`return nil`). Configured DNAT/static-NAT is matched entirely inside the helper's
+  in-memory `DnatTable`/`StaticNatTable` (`forwarding_build/mod.rs:309`, consulted at
+  `poll_descriptor/mod.rs:1511/1577`).
+- `userspace-dp/README.md:159-177` — the helper publishes dynamic flags=0 reverse
+  records via `publish_dnat_table_entry`; "STATIC DNAT-config entries (flags=1) are
+  never published or deleted by this path."
+- Qualification (Codex): the pinned maps are non-LRU and the static cleanup hooks are
+  no-ops, so *stale historical* flags=1 bytes are not structurally impossible across
+  restarts — one more reason not to overload `dnat_table` (see §6).
 
-So a shim `dnat_lookup` before `is_local_destination` would find **nothing** for a
-configured port-forward on the first packet. **The fix must include a publication
-step that makes the configured translation intent visible to the shim.**
+**Therefore the fix requires a publication step that makes configured translation
+intent visible to the shim, plus a shim lookup before local classification.**
 
-**Good news — the key/wildcard/byte-order contract already lines up.** The shim's
-`dnat_lookup_v4/v6` (lib.rs:861-902) reads `DnatKeyV4{protocol, dst_ip (native),
-dst_port (host-order numeric)}`; `compiler_nat.go` already builds exactly that
-shape (`ipToUint32BE` native dst_ip, raw host-order `DstPort`, `DNATFlagStatic`),
-and `maps_helpers.go:8-30` documents the shared contract. The publication code is
-already correct; it is simply discarded by the no-op stub.
+## 4. What's already shipped / must compose with
 
-## 4. What's already shipped / partially batched (must compose with)
-
-- **Non-interface-address DNAT already works.** When the DNAT public address is a
-  routed-to-firewall IP that is *not* an interface address, `is_local_destination`
-  returns false, the packet falls through to XSK, and the helper's `destination.rs`
-  already translates + polices + creates the session correctly. **The defect is
-  ONLY the ingress classification of DNAT-target tuples that coincide with an
-  interface address.** The helper's translation path needs no change.
-- **Interface-SNAT address exclusion** (`buildNATTranslatedLocalAddressExclusions`,
-  maps_sync.go:1670) already removes interface-mode SNAT addresses from
-  `USERSPACE_LOCAL` and publishes them to `USERSPACE_INTERFACE_NAT`. That is
-  address-only and is the *wrong* model for DNAT (§6 Option C) because it is not
-  port-aware. Our change must not disturb it.
-- **`dnat_table` reverse-NAT lifecycle** (#2979): helper writes flags=0 dynamic
-  entries and deletes them on session close (`flush_session_deltas`). Our static
-  (flags=1) intent entries share the map but a **different flag class + different
-  key tuples** (forward public tuple vs. reverse SNAT tuple), so the two lifecycles
-  are disjoint. `ClearDNATStatic()` (maps_nat.go:37) already deletes *only* flags=1
-  entries — the selective-clear primitive we need for reconcile exists.
-- **`make generate` verifier gate** (#1864): `cmd/shimverify` runs a real
-  `BPF_PROG_LOAD` (needs CAP_BPF/root + pinned toolchain) before the tracked `.o`
-  is replaced. **This gate is checkable locally at implement time — it is NOT
+- **Interface-SNAT exclusion** (`buildNATTranslatedLocalAddressExclusions`,
+  maps_sync.go:1670) removes interface-mode SNAT addresses from `USERSPACE_LOCAL` and
+  publishes them to `USERSPACE_INTERFACE_NAT` — address-only, the *wrong* model for
+  DNAT (not port-aware). Must remain untouched.
+- **`dnat_table` reverse-NAT lifecycle** (#2979): helper publishes flags=0 via
+  `BPF_ANY` (`checksum.rs:304-346`) and deletes by key (`checksum.rs:246-289`) with
+  **no flags/value check** — the collision hazard that rules out map reuse (§6).
+- **Verifier gate** (#1864): `cmd/shimverify` real `BPF_PROG_LOAD` (CAP_BPF/root +
+  pinned toolchain) runs at `make generate` and at deploy pre-flight
+  (`xpfd verify-dataplane`). **Checkable locally at implement time — not
   shim-wall-blocked.** Only end-to-end cluster smoke is shim-wall-blocked.
-- **v6 wildcard precedent**: `dnat_lookup_v6` is exact-only *by design* — the
-  second (port-0 wildcard) HASH lookup blew the 1M cap when added to the v6
-  GRE-inner classify (lib.rs:882-891). Any v6 wildcard ambition inherits this
-  constraint; the issue's acceptance criteria already anticipate "the existing
-  IPv6 wildcard limitation."
+- **Retirement canary** forbids tail-call and >1 XDP program (§2).
+- **v6 wildcard precedent**: `dnat_lookup_v6` is exact-only because a 2nd HASH lookup
+  blew the 1M cap in the v6 GRE classify (lib.rs:882-891). Any v6 wildcard inherits
+  this; the issue's acceptance criteria already anticipate "the existing IPv6
+  wildcard limitation."
 
-## 5. Concrete design (recommended: Option A, helper-published intent)
+### 4a. The helper already applies DNAT before local resolution (fix is *sufficient*)
 
-Two independent pieces: **(P) publish intent** so the shim can see configured DNAT,
-and **(S) shim classify** DNAT intent before local delivery.
+Traced firsthand (`poll_descriptor/mod.rs`): on session miss the helper computes
+`pre_routing_dnat` (DNAT + static-DNAT match, :1577-1601), rewrites the destination
+to the internal host in `effective_resolution_target` (:1673-1685), and
+`resolve_forwarding` (:3633) runs on **that translated target** — so LocalDelivery is
+decided on the internal dst, not the interface address. Policy is evaluated on the
+post-translation tuple (#2345, :1685+). **Conclusion:** once the shim steers the first
+packet to XSK, the helper already does DNAT-before-local-resolution. The fix is
+purely (P) publish intent + (S) shim classify; **no helper translation change.**
 
-### P — publish configured DNAT/static-NAT forward intent (flags=1) into `dnat_table`
+## 5. Concrete design (recommended: Option B — dedicated intent map)
 
-Recommended owner: **the helper** (single writer of `dnat_table`, owns the reconcile
-and thus generation-safety). On every config apply, the coordinator reconcile
-(which already iterates `snapshot.destination_nat_rules` and
-`snapshot.static_nat_rules`, coordinator/mod.rs:934) computes the set of forward
-intent keys and reconciles them into `dnat_table`/`dnat_table_v6` with **flags=1**:
+Two pieces: **(P)** publish a config-driven, zone-agnostic translation-intent set the
+shim can see; **(S)** shim probes it before local classification.
+
+### P — dedicated `dnat_intent_v4` / `dnat_intent_v6` maps (helper-owned)
+
+New `BPF_MAP_TYPE_HASH`, `BPF_F_NO_PREALLOC`, max_entries sized to config rule count
+(small, bounded), **disjoint from the reverse-NAT `dnat_table` lifecycle** so dynamic
+publish/delete can never touch intent. Key is a deliberately **minimal steer-superset**
+— no `from_zone`, no source scope:
 
 ```
-DnatKeyV4 { protocol, dst_ip: <public/mapped addr, native>, dst_port: <host-order, 0=wildcard> }
-  -> DnatValueV4 { flags: STATIC (1), .. }   // value payload unused by the shim (it only tests is_some())
+IntentKeyV4 { protocol: u8, dst_ip: u32 (native bytes), dst_port: u16 (host-order, 0 = wildcard) }
+IntentKeyV6 { protocol: u8, dst_ip: [u8;16], dst_port: u16 (host-order, 0 = wildcard) }
+Value: 1 byte, unused by the shim (steering is presence-only).
 ```
 
-- **DNAT (port-scoped):** one exact entry per (proto, public_ip, public_port).
-- **Static 1:1 / port-less DNAT:** one **port-0 wildcard** entry per
-  (proto, public_ip) — this is the entry the shim's wildcard probe must find.
-- **Reconcile = generation-safe:** publish NEW intent entries *before* removing
-  stale ones (add-before-delete) so no first-packet window sees "no intent →
-  local delivery" during a config transition. Deletion keys on flags=1 only, never
-  touching the helper's flags=0 dynamic entries. `dnat_table` is
-  `max_entries=MAX_SESSIONS`, `BPF_F_NO_PREALLOC`, non-LRU — static intent count is
-  bounded by config rule count (tiny vs. session capacity), no eviction risk.
-- **Source-scoped DNAT (#2394):** a DNAT rule with `match source-address` fires
-  only for some sources. The intent map is keyed on dst-tuple only (no source), so
-  it will steer *all* sources for that dst-tuple to XSK; the helper's
-  `destination.rs` then applies the source constraint and, for a non-matching
-  source, treats it as a normal transit/local flow. This is safe: over-steering to
-  XSK never bypasses policy (the helper still decides). Document that the intent map
-  is deliberately source-agnostic (steer-superset, enforce-exact-in-helper).
+- **Owner = helper.** The helper holds the normalized rule tables
+  (`nat/destination.rs`, `nat/static_nat.rs`) and reconciles intent inside the
+  config-apply generation swap (`coordinator/snapshot_refresh.rs`). Go publication is
+  rejected: Go compilation runs *before* the snapshot build/apply
+  (`manager_compile.go`), so un-stubbing Go setters could mutate map state ahead of a
+  *failed* apply. (Codex: "single writer" is aspirational either way — Go HA/session
+  sync already writes dynamic `dnat_table` companions — but the *intent* map is a fresh,
+  helper-only namespace.)
+- **Populate from** `destination_nat_rules` + `static_nat_rules`, emitting:
+  - exact `(proto, public_ip, port)` for port-scoped DNAT;
+  - port-0 wildcard `(proto, public_ip, 0)` for port-less/range DNAT and single-address
+    static NAT (helper re-checks the range/exact predicate on the XSK path).
+- **Error-propagating generation transaction** (Codex #5): insert every new intent key
+  FIRST; abort the apply on any insert failure (fail-closed, config not activated);
+  swap generation; THEN delete stale keys with retry + metric on failure. A
+  missing-new-intent-after-activation would be a translation-bypass window — forbidden;
+  a stale-old-intent is over-steering only (helper re-checks). On bringup, clear stale
+  intent before first classify (restart reconciliation).
 
-**Alternative owner (A-Go):** un-stub `userspaceShimCompileDataplane.SetDNATEntry`
-to write flags=1 entries (the compiler machinery already builds them). Rejected as
-primary because it makes Go a *second* writer of `dnat_table` alongside the helper,
-splitting reconcile/generation ownership across the FFI boundary — the helper-owned
-variant keeps one writer and one reconcile authority.
+### S — shim: probe intent before local delivery
 
-### S — shim: classify DNAT intent before local delivery
-
-In `try_xdp_userspace`, non-GRE session-miss arm (lib.rs:632, the `_ =>` branch),
-**before** `is_icmp_to_interface_nat_local` / `is_local_destination`:
+In `try_xdp_userspace`, non-GRE session-miss arm (lib.rs:632), **before**
+`is_icmp_to_interface_nat_local` / `is_local_destination`:
 
 ```rust
-// A configured destination translation for this exact tuple takes precedence
-// over kernel-local delivery: steer to XSK so the helper applies DNAT + policy.
-if dnat_intent_matches(&parsed) {
-    // fall through to XSK redirect (do NOT pass to kernel)
+// Native-endian dst key MUST be rebuilt from raw bytes — parsed.dst_v4 is
+// BigEndian (matches the BigEndian-published USERSPACE_LOCAL_V4), while the
+// intent map is NativeEndian (matches ipToUint32BE / the GRE-path dnat key).
+let dst_ne = u32::from_ne_bytes([parsed.dst_addr[0], parsed.dst_addr[1],
+                                 parsed.dst_addr[2], parsed.dst_addr[3]]);
+if intent_matches(&parsed, dst_ne) {
+    // fall through to XSK redirect — do NOT pass to kernel
 } else {
     if is_icmp_to_interface_nat_local(&parsed) { return cpumap_or_pass; }
     if is_local_destination(&parsed) { return cpumap_or_pass; }
 }
 ```
 
-`dnat_intent_matches` reuses the existing `dnat_lookup_v4`/`dnat_lookup_v6`
-helpers (already in the ELF/ABI — **no new map, no map-ABI bump**), keyed on
-`parsed.protocol`, dst addr, and `parsed.flow_dst_port`. A match → skip local
-delivery, fall through to the existing XSK redirect. A non-match → existing local
-logic unchanged, so **unmatched ports on the same address still reach the kernel**
-(the invariant). ICMP: an exact (proto=ICMP) intent match steers; otherwise the
-existing `is_icmp_to_interface_nat_local` echo handling is preserved.
+`intent_matches` = one exact HASH probe per family (Phase 1). ICMP uses the identifier
+(stored in `src_port`) as the port field, matching the publisher and the GRE path
+convention (lib.rs:830-835) — and ICMP intent is emitted ONLY where an ICMP-bearing
+translation is configured, so `is_icmp_to_interface_nat_local` echo-reply handling for
+firewall-originated pings to non-translated addresses is preserved (SMR B2).
 
-### Phasing to manage the verifier budget (the crux)
+### Phasing (verifier budget — the crux)
 
-- **Phase 1 (primary security fix):** exact-match intent, both families. Covers
-  TCP/UDP port-forward to an interface address — the headline bug. Add an
-  **exact-only** variant of the lookup for the ordinary path (single HASH probe per
-  family) to minimize added instructions.
-- **Phase 2 (port-wildcard / static 1:1):** add the port-0 wildcard probe. Gate on
-  verifier headroom measured in Phase 1. Precedent (§4) says v4 can likely afford
-  exact+wildcard and **v6 wildcard may not** — if so, v6 static-1:1-on-interface
-  ships as a documented limitation (mirrors the existing v6 GRE wildcard limit the
-  issue already calls out), v6 exact DNAT still fixed.
-- **Fallback if even Phase-1 exact-only exceeds the cap:** restructure — a tail-call
-  to a small dedicated dnat-classify sub-program, or offset other lookups. This is
-  the residual risk that makes the verdict genuinely uncertain until `make generate`
-  runs. Since the GRE branch already performs an exact v4+v6 `dnat_lookup` within
-  budget and the ordinary branch is a sibling, exact-only is *plausibly* affordable
-  — but not guaranteed.
+- **Phase 1 (primary fix):** exact-match intent, both families, one HASH probe each.
+  Covers TCP/UDP port-forward to an interface address — the headline bug.
+- **Phase 2 (wildcard / static-1:1 / port-less):** add the port-0 wildcard probe.
+  Because `shimverify` gives no headroom metric, Phase 2 is a **separately built +
+  verified candidate**, not "measured in Phase 1." Precedent says v4 likely affords
+  exact+wildcard, **v6 wildcard likely does not** (→ documented v6 limitation).
+- **Fallback ladder if Phase-1 exact-only REJECTs** (tail-call forbidden, so):
+  (a) scope to **v4-exact-only**, v6 documented-limitation; (b) reclaim instructions by
+  folding the existing `is_local`/`interface_nat` probes; (c) if neither, **PLAN-KILL**
+  (or interim commit-warning). This residual is why the verdict is verifier-gated.
 
-## 6. Multiple path options considered
+## 6. Multiple path options
 
-| Option | Mechanism | Port-aware? | Verifier cost | Verdict |
+| Option | Mechanism | Port-aware | Verifier | Verdict |
 |---|---|---|---|---|
-| **A (recommended)** | Publish forward intent (flags=1) into existing `dnat_table`; shim `dnat_lookup` before `is_local_destination` | **Yes** | +1 HASH/family exact (Phase 1); +2 for v4 wildcard | **Primary** — reuses existing map + helpers + byte-order contract |
-| B | New dedicated `dnat_intent_v4/v6` map, Go-populated; shim looks it up | Yes | Same lookup cost + **new map ⇒ ABI bump ⇒ shim-wall** + more map surface | Alternative; cleaner ownership but heavier rollout. Fold into A only if reusing `dnat_table` proves unworkable |
-| C | Go address-exclusion: strip DNAT public addr from `USERSPACE_LOCAL` | **No** | Zero shim change | **Rejected**: not port-aware — kills local delivery for *other* ports (SSH:22 alongside DNAT:443); routes all address traffic through XSK, violating the acceptance criterion "unmatched port … still takes the kernel-local path"; degraded-mode local-return robustness concern |
-| D | Commit-time reject/warn when DNAT public addr == interface addr | n/a | Zero dataplane change | **Rejected as primary**: reject breaks a legitimate/common Junos config (parity); warn-only doesn't fix the bypass. Viable only as an interim mitigation banner |
-
-Option A vs B decision hinges on: A reuses the already-declared, already-ABI-checked
-`dnat_table` and the already-correct `compiler_nat.go` key contract, adding **no new
-map**; B is architecturally tidier (config-intent map separate from reverse-NAT
-lifecycle) but forces a new-map ABI bump through the shim-wall and adds verifier
-surface. Recommend A; keep B documented as the fallback if the dual-lifecycle sharing
-of `dnat_table` raises a reviewer objection.
+| **B (recommended)** | Dedicated `dnat_intent_v4/v6` maps, helper-reconciled; shim exact probe before local | Yes | +1 HASH/family exact; +wildcard as separate candidate | **Primary** — disjoint lifecycle, no collision, clean zone-agnostic key |
+| A | Reuse existing `dnat_table` with flags=1 forward intent | Yes | Same lookup cost, no new map | **Rejected**: `flags` is in the *value*, shim steers on `.is_some()`, dynamic `BPF_ANY` publish + delete-by-key (no flags check) can **overwrite/erase** a colliding intent entry → reopens bypass (`checksum.rs:246-346`); can't distinguish intent from reverse entries |
+| A′ | Reuse `dnat_table`, but namespace intent via a reserved `from_zone`/`pad2` sentinel (e.g. `0xffff`) | Yes | +distinct-shape probe | **Alternative-if-no-new-map**: sentinel keeps intent keys disjoint from dynamic (from_zone=0) so no collision, but still **shares capacity** with sessions and adds a distinct lookup shape. Weaker than B |
+| C | Go address-exclusion: strip DNAT public addr from `USERSPACE_LOCAL` | **No** | Zero shim change | **Rejected**: not port-aware; every port on the address becomes dependent on helper/slow-path availability (helper *can* LocalDelivery+reinject, but the whole address stops taking the direct cpumap path) — violates "unmatched port still takes kernel-local path" |
+| D | Commit-time reject/warn | n/a | none | **Rejected as primary**: reject breaks legitimate Junos config; warn doesn't fix bypass. Valid only as interim guard |
 
 ## 7. Public API / behavior preservation
 
 - `is_local_destination`, `is_icmp_to_interface_nat_local`,
-  `is_interface_nat_destination` signatures unchanged; only the *order* of checks in
-  `try_xdp_userspace` changes (intent tested first).
-- `dnat_lookup_v4`/`dnat_lookup_v6` signatures unchanged (reused).
-- `dnat_table`/`dnat_table_v6` MapSpec (type/key/value/max_entries/flags) unchanged —
-  **no ABI bump, `validateUserspaceShimSpec` #5307 check still passes.**
-- Helper reverse-NAT (flags=0) publish/delete lifecycle unchanged; only a new
-  flags=1 forward-intent reconcile is added, disjoint by flag + key tuple.
-- Non-interface-address DNAT, interface-SNAT, GRE-inner classify, ESP/WG/NDP
-  short-circuits — all unchanged.
+  `is_interface_nat_destination`, `dnat_lookup_v4/v6` signatures unchanged; only the
+  *order* of checks changes (intent first) + one new `intent_matches` helper.
+- Existing `dnat_table`/`dnat_table_v6` MapSpec unchanged (**not reused for intent** →
+  no reshaping of a pinned map). New `dnat_intent_v4/v6` are **additive** to the shim
+  ABI inventory (`userspaceABICheckedPinnedMaps`) + Go `userspaceShimSharedMapSpecs` —
+  a coordinated one-time bump, not a reshape (Codex: adding a name ≠ reshaping).
+- Helper reverse-NAT lifecycle, interface-SNAT, GRE classify, ESP/WG/NDP
+  short-circuits — unchanged.
 
-## 8. Hidden invariants the change must preserve
+## 8. Hidden invariants
 
-1. **Unmatched ports stay kernel-local.** Only tuples with a configured translation
-   are steered; everything else hits the unchanged `is_local_destination` path.
-2. **Byte-order/key contract is singular.** Shim reads native dst_ip + host-order
-   dst_port; publisher must write the identical shape. `compiler_nat.go` already
-   does — any new helper-side publisher must match `maps_helpers.go` semantics
-   exactly, and this must be asserted by a cross-side key test.
-3. **Flag-class disjointness.** Static intent = flags=1, dynamic reverse = flags=0.
-   Reconcile/delete of intent must key on flags=1 only; helper close-delta delete
-   must remain flags=0 only. No cross-contamination, no leaks.
-4. **Generation safety (add-before-delete).** A config apply must never open a window
-   where a still-configured DNAT tuple has no intent entry (transient bypass). New
-   before old.
-5. **Rule removal removes intent.** A deleted DNAT/static-NAT rule must delete its
-   intent entry or a stale entry keeps stealing local delivery forever (non-LRU map).
-6. **Session-hit / GRE-inner consistency.** A session that was created via the new
-   intent path must be found by `live_userspace_session_action` on packet 2 (it will
-   — the helper creates the normal session); GRE-inner classify already does the
-   dnat lookup, so its behavior is unchanged.
-7. **Degraded-mode.** When ctrl disabled / binding missing, the degraded path
-   (`is_degraded_local_or_control`) governs local delivery; intent classification
-   only applies on the healthy path — acceptable (degraded mode already conservative).
+1. **Unmatched ports stay kernel-local** — only configured tuples steer; else the
+   unchanged local path runs.
+2. **Byte-order/key contract is singular and native-endian** — intent map + shim probe
+   both use `from_ne_bytes(raw dst)` + host-order port. Assert with a cross-side key
+   test (Go builder == shim key bytes).
+3. **Intent lifecycle disjoint from reverse-NAT** — dedicated map guarantees dynamic
+   publish/delete can never touch intent (the A-rejection reason).
+4. **Fail-closed generation transaction** — new intent inserted+verified before the
+   generation swap; a failed insert aborts the apply.
+5. **Rule removal removes intent** — else a stale key steals local delivery forever
+   (non-LRU). Stale-delete has retry + metric.
+6. **Control-protocol precedence** — ESP/AH/IKE/non-native-GRE/local-WG short-circuit
+   *before* the ordinary lookup (lib.rs:539-548), and the helper also claims ESP/AH/IKE
+   before its DNAT stage (poll_descriptor:823 vs 1511). The shim intent check sits in
+   the ordinary session-miss branch, AFTER those short-circuits — consistent with the
+   helper. DNAT/static-NAT onto the firewall's OWN interface address at an
+   ESP/IKE/WG/GRE control port is **out of scope** (those terminate locally by design;
+   §11). Documented, not a silent gap.
+7. **Session-hit / GRE consistency** — packet 2 is found by
+   `live_userspace_session_action` (helper created the normal session); GRE classify
+   unchanged.
 
 ## 9. Risk assessment
 
 | Class | Level | Notes |
 |---|---|---|
-| eBPF verifier / 1M-insn cap (**crux**) | **HIGH** | Added hot-path HASH lookups; v6-wildcard precedent already hit the cap. Settled only by `make generate`+`shimverify`. Phasing + exact-only fallback + tail-call restructure mitigate. |
-| Behavioral regression (local delivery) | LOW–MED | Reordering checks; unmatched ports unchanged. Risk is a mis-scoped intent entry stealing local delivery — covered by tests + generation-safety. |
-| Publication/reconcile correctness | MED | New flags=1 reconcile across the map shared with dynamic entries; add-before-delete + flag-class discipline required. |
-| Byte-order/key drift | LOW | Contract already aligned; assert with cross-side key test. |
-| Architectural mismatch | LOW | Reuses existing map + helpers; no new ABI. Option B would raise this. |
-| Rollout / smoke | MED (deferred) | End-to-end first-packet capture is shim-wall-blocked; verifier + helper cargo tests are not. |
+| eBPF verifier / 1M cap (**crux**) | **HIGH** | +HASH probes; tail-call forbidden, no headroom metric. Settled only at `make generate`. Fallback = v4-exact-only scope reduction / instruction reclaim / PLAN-KILL. |
+| Publication/reconcile correctness | MED | New helper intent reconcile + fail-closed transaction + restart reconciliation. |
+| Behavioral regression (local delivery) | LOW–MED | Reorder of checks; unmatched ports unchanged; ICMP echo-reply preserved. |
+| Byte-order/key drift | LOW (was a v1 bug) | Fixed: native-endian rebuild; cross-side key test. |
+| Static-NAT representability | MED | proto-any / ranges / prefixes need scoping (§11). |
+| ABI bump (new maps) | MED | Additive, coordinated; shim-wall gates cluster smoke only. |
+| Rollout / smoke | MED (deferred) | End-to-end capture shim-wall-blocked; verifier + cargo tests are not. |
 
 ## 10. Test plan
 
-- **Verifier gate (make-or-break):** `make generate` → `build-userspace-xdp.sh` →
-  `cmd/shimverify` PASS on the pinned toolchain (root/CAP_BPF). This is the primary
-  gate and is runnable locally now — not shim-wall-blocked.
-- **Helper unit tests (cargo):** intent-reconcile add/remove; flags=1 vs flags=0
-  disjointness; `close_delta_deletes_dnat_table_entry_for_snat_flow` still green;
-  key-SSOT byte-order test extended to the forward-intent key.
-- **Go tests:** `buildLocalAddressEntries` / exclusion unchanged; if A-Go variant,
-  compiler_nat publish path. Cross-side key-shape assertion (Go key == shim key).
-- **RED acceptance tests (from the issue):** IPv4 & IPv6 TCP/UDP DNAT on the ingress
-  interface address → first packet to XSK + forward/reverse translate; port-wildcard
-  / static-1:1 (both families, v6-wildcard limitation noted); ICMP/ICMPv6 translated
-  vs. ordinary ping remains local; unmatched SSH/BGP/IKE port stays kernel-local;
-  zone policy evaluated on the translated transit flow; generation-safe add/remove.
+- **Verifier gate (make-or-break):** `make generate` → `shimverify` PASS on the pinned
+  toolchain (root/CAP_BPF), Phase-1 exact-only first; Phase-2 wildcard = separate
+  verified candidate. Also run against the **6.18 floor** kernel and the current image
+  kernel (Codex: `shimverify` tests only the running kernel), plus deploy pre-flight
+  per target. Local, not shim-wall-blocked.
+- **Helper cargo tests:** intent reconcile add/remove; fail-closed insert-before-swap;
+  disjointness from `dnat_table` dynamic entries; restart clears stale intent;
+  `close_delta_deletes_dnat_table_entry_for_snat_flow` still green.
+- **Go tests:** cross-side key-shape assertion (Go/publisher key bytes == shim probe
+  key); `buildLocalAddressEntries`/exclusion unchanged.
+- **RED acceptance tests (issue):** IPv4 & IPv6 TCP/UDP DNAT on the ingress interface
+  address → first packet to XSK + forward/reverse translate; port-wildcard/static-1:1
+  (both families, v6-wildcard limitation noted); ICMP/ICMPv6 translated vs. ordinary
+  ping stays local; unmatched SSH/BGP/IKE port stays kernel-local; zone policy on the
+  translated transit flow; generation-safe add/remove; **availability**: source-scoped
+  over-steer + unmatched traffic still delivered when the helper slow-path is
+  loaded/rate-limited (Codex #7).
 - **Smoke (DEFERRED — shim-wall):** end-to-end first-packet forward+reverse capture
-  for v4+v6 on `loss:` cluster once the shim-ABI wall clears. Documented deferral,
-  not a merge blocker for the code+verifier+unit gates.
+  v4+v6 on `loss:` once the shim-ABI wall clears. Documented deferral.
 
 ## 11. Out of scope (explicitly)
 
-- IPv6 **port-wildcard** static-1:1 on an interface address if the verifier cannot
-  afford the v6 wildcard probe (documented limitation, mirrors existing v6 GRE limit).
-- Any change to the helper's actual DNAT/static translation math (already correct).
-- Interface-mode SNAT handling (`USERSPACE_INTERFACE_NAT`) — unchanged.
-- Commit-time warning for "static-NAT/port-wildcard on a management-carrying
-  interface address" — optional defensive follow-up, not required for the fix.
+- **DNAT/static-NAT onto the firewall's own interface address at an ESP/AH/IKE/WG/
+  non-native-GRE control port** — those protocols terminate locally before the ordinary
+  lookup on both shim and helper (§8.6); port-forwarding the firewall's own tunnel
+  control port is pathological.
+- **Static-NAT with `protocol any` (helper `PROTO_ANY=256`)** beyond per-proto
+  expansion — the shim key protocol is `u8`; intent is emitted per concrete proto
+  (TCP/UDP/ICMP) or as a port-0 wildcard, not a single 256 sentinel.
+- **Static-NAT of an address *block/prefix* onto interface addresses** — an exact-hash
+  intent map can't hold a prefix and per-address expansion is unbounded; documented
+  limitation.
+- **IPv6 port-wildcard static-1:1 on an interface address** if the verifier can't afford
+  the v6 wildcard probe (mirrors existing v6 GRE limit).
+- Helper translation math, interface-mode SNAT handling — unchanged.
+- Optional commit-time warning for static-NAT/port-wildcard on a management-carrying
+  interface address — defensive follow-up, not required.
 
-## 12. Open questions for adversarial review (each invitable to PLAN-KILL)
+## 12. Open questions for round-2 review (each invitable to PLAN-KILL)
 
-1. **Verifier headroom:** Is exact-only intent (1 HASH/family) in the ordinary
-   branch affordable given the GRE branch already carries an exact v4+v6 dnat lookup
-   in the same program? If not, is a tail-call restructure acceptable, or is this a
-   PLAN-KILL / scope-to-v4-exact-only?
-2. **Publisher ownership:** helper-published intent (single writer, recommended) vs.
-   Go-published (un-stub `SetDNATEntry`, reuse existing compiler code). Which better
-   satisfies the "one canonical key/wildcard/byte-order contract" + generation-safety
-   requirement?
-3. **Reuse `dnat_table` vs. new intent map (A vs B):** is overloading `dnat_table`
-   with flags=1 forward intent alongside flags=0 dynamic reverse acceptable, or does
-   the shared lifecycle justify a dedicated map (and its ABI bump / shim-wall)?
-4. **Source-scoped DNAT over-steering:** intent map is source-agnostic, so it steers
-   all sources for a dst-tuple to XSK and lets the helper enforce the source
-   constraint. Is "steer-superset, enforce-exact-in-helper" acceptable, or must the
-   shim be source-aware (extra key width / verifier cost)?
-5. **All-ports (static 1:1) on a management address:** correctly steals all local
-   delivery per operator config (intended), but shadows local mgmt on that address.
-   Acceptable-per-config, or do we need a commit-time guard?
-6. **Generation-safety mechanism:** is add-before-delete on a non-LRU shared map
-   sufficient, or is a generation/epoch fence needed to close the config-transition
-   window?
-7. **Is PLAN-KILL warranted?** Given the High/security severity and that
-   commit-reject breaks parity, is any non-dataplane resolution defensible, or is the
-   phased shim fix the only acceptable outcome?
+1. **Verifier headroom:** is Phase-1 exact-only (1 HASH/family) affordable given the
+   GRE branch already carries an exact v4+v6 dnat lookup in the same program, and
+   tail-call is forbidden? If REJECT, is v4-exact-only + v6-documented-limitation an
+   acceptable ship, or PLAN-KILL?
+2. **Dedicated map (B) vs sentinel-namespace (A′):** is the new-map ABI bump worth the
+   clean disjoint lifecycle, or is the `from_zone`/`pad2` sentinel in `dnat_table`
+   (no new map, shared capacity) the better tradeoff?
+3. **Helper-owned reconcile fail-closed:** insert-before-swap + abort-apply-on-insert-
+   failure — sufficient, or is a shadow/double-buffer needed to avoid a partial-intent
+   window under a mid-apply crash?
+4. **Static-NAT scope:** is emitting per-proto + port-0-wildcard intent (dropping
+   proto-any and block-prefix) an acceptable representable subset, or must static-NAT
+   parity be fuller?
+5. **Control-protocol precedence:** is scoping out DNAT-on-own-ESP/IKE/WG/GRE-port
+   correct, or is there a real config that needs it?
+6. **Availability:** is moving source-scoped-nonmatch + unmatched traffic onto the
+   helper slow-path (from direct cpumap) an acceptable robustness change?
+7. **Is PLAN-KILL warranted** given the verifier risk + representability limits, or is
+   the phased Option-B fix the right call?
