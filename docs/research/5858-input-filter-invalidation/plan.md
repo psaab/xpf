@@ -2,482 +2,487 @@
 
 ## 1. Status
 
-`DRAFT v2 — Claude SMR r1 folded (SMR-1..4); pending Codex + AGY r1`
-(Codex + AGY + Claude SMR). v1 → v2 changelog at the end of this doc.
+`DRAFT v3 — pivoted to precise per-tuple revalidation after Codex r1
+(PLAN-NEEDS-MAJOR); pending Codex r2 + AGY + Claude SMR r2`. Changelog at end.
 
 Research branch: `research/5858-input-filter-invalidation` off origin/master
-`5c68818f6`. This is a `/research` deliverable — it stops at PLAN-READY /
-PLAN-KILL. No production code is touched here.
+`5c68818f6`. `/research` deliverable — stops at PLAN-READY / PLAN-KILL. No
+production code touched.
+
+> **Why v3 exists.** v1/v2 proposed the minimal "drop one `.filter()` gate +
+> reuse the existing family-wide purge" fix. Codex r1 (independently
+> re-verified) showed that design is **not production-safe**: a family-wide
+> purge **drops permitted SNAT flows**, which then re-install on a **fresh**
+> translated port and break; the HA delete propagation the plan leaned on is
+> sibling-worker-only and its cross-node channel is a bounded ring that drops
+> excess; and a validation/forwarding ArcSwap skew opens a one-iteration
+> flow-cache bypass. The corrected design (Path C) **re-evaluates each affected
+> session and drops only those whose verdict became a deny**, so permitted flows
+> — including SNAT — are never touched.
 
 ## 2. Issue framing
 
-A stateful transit session, once established, is served by the userspace
-session-hit fast path (`resolve_flow_session_decision`,
-`userspace-dp/src/afxdp/poll_descriptor/mod.rs:969`). That path replays the
-forwarding decision computed for the flow's **first** packet and does **no**
-cold-path input-filter evaluation. The only per-packet input-filter re-check on
-a session hit is `evaluate_dscp_sensitive_input_filter_on_session_hit`
-(`poll_descriptor/filter.rs:334`), which early-returns `None` unless the ingress
-interface's input filter carries a **DSCP** match term or a **per-packet-L4**
-match term (tcp-flags / is-fragment / icmp-type / icmp-code) — the only match
-classes whose result can vary *within* a single 5-tuple flow.
+An established transit session is served by the session-hit fast path
+(`resolve_flow_session_decision`, `poll_descriptor/mod.rs:969`), which replays
+the first packet's forwarding decision and runs **no** cold-path input-filter
+evaluation. The only per-packet input-filter re-check on a hit is
+`evaluate_dscp_sensitive_input_filter_on_session_hit` (`poll_descriptor/filter.rs:334`),
+which early-returns `None` unless the ingress interface's filter carries a
+**DSCP** or **per-packet-L4** match term (`:356-366`) — the only match classes
+whose result varies *within* a flow. So a **static** address/protocol/port
+`then discard`/`then reject` term **attached, detached, or tightened after** a
+session was created is never re-evaluated for that session, and the flow is
+forwarded until timeout. Filed **High** — a committed deny does not take effect
+on in-flight flows (a policy-revocation gap).
 
-Consequently a **static** address / protocol / port input-filter term
-(`then discard` / `then reject`) that is **attached, detached, or tightened
-after** a session was created is never re-evaluated for that session. The flow
-continues to be forwarded until it times out, contrary to the immediate
-firewall-enforcement expectation. Because this is a security-policy *revocation*
-gap (a deny the operator just committed does not take effect on in-flight
-flows), the issue is filed **High**.
-
-The config-rotation purge that *would* fix this already exists for the
-per-packet classes: on a `ForwardingState` rotation the worker
-(`worker/loop_body/mod.rs:376-393`) computes
-`input_dscp_filter_families_changed` and
-`input_per_packet_l4_filter_families_changed` and, if either fired, calls
-`purge_sessions_for_input_dscp_filter_revalidation`
-(`session_glue/mod.rs:326`) to drop the affected sessions so their next packet
-re-evaluates against the new snapshot. **Both change-detectors are gated on
-`has_dscp_match_terms` / `has_per_packet_l4_match_terms`** (the `.filter(...)`
-predicates at `cache_sensitive.rs:445` and `:512`), so a static-only filter
-change produces no purge. **That gate is the entire bug.**
-
-The issue's required closeout:
+The config-rotation purge that fixes this for the per-packet classes is gated on
+`has_dscp_match_terms` / `has_per_packet_l4_match_terms`
+(`cache_sensitive.rs:445`, `:512`), so a static change never triggers it. But
+per Codex r1 the fix is **not** simply "widen the trigger and reuse that purge"
+— that purge is family-wide and drops permitted flows. The issue's own closeout
+already anticipates the harder parts:
 1. Fingerprint the effective input filter per logical interface + family.
-2. On attach/detach or any verdict-relevant static match/action change,
-   invalidate affected sessions / flow-cache entries before or atomically with
+2. Invalidate affected sessions / flow-cache entries before or atomically with
    snapshot publication.
-3. Preserve the optimized per-packet re-evaluation for fields that genuinely
-   vary within a flow.
+3. Preserve the optimized per-packet re-evaluation for genuinely per-packet
+   fields.
 4. Propagate companion deletes to the HA peer; surface/retry partial
    invalidation.
-5. Test address / protocol / port / except / term-reorder / attach-detach /
-   VLAN logical interfaces / IPv4+IPv6 / flow-cache / HA failover.
+5. Test address/protocol/port/except/reorder/attach-detach/VLAN/IPv4+IPv6/
+   flow-cache/HA failover.
 
 ## 3. Honest scope/value framing
 
-The "win" is **correctness / security**, not throughput: an operator commit
-that adds or tightens an interface input-filter deny must revoke in-flight
-transit flows immediately (≈ within one config-rotation tick on every worker),
-instead of leaving them forwarded until session timeout (potentially hours for
-a long-lived TCP flow with default inactivity timeouts).
+The win is **security/correctness**: a committed input-filter deny revokes
+in-flight transit flows promptly (within the config-rotation window on every
+worker) instead of leaving them forwarded until timeout — **without** breaking
+the permitted flows that share the box. The corrected scope is materially larger
+than v1 assumed: it is a **new precise-revalidation mechanism** (a per-session
+ingress-interface stamp + a cold-path per-session re-evaluation + a flow-cache
+coherence fix), not a one-line gate removal. That is precisely why this went
+through `/research`.
 
-Absolute cost at scale: the fix runs **only on the config-rotation cold path**
-(a `ForwardingState` ArcSwap rotation, i.e. an operator commit — seconds-to-
-minutes apart, serialized by the commit machinery). It adds **zero** per-packet
-hot-path work. The added cold-path work is one extra structural diff of the
-per-interface input-filter maps per family per rotation (bounded by interface
-count × terms), plus, when a change is detected, a single family-wide session-
-table walk that already exists for the DSCP/per-packet case.
+Absolute cost: all new work is on the **config-rotation cold path** (an operator
+commit — serialized, seconds-to-minutes apart). Zero per-packet hot-path cost
+except the one added `SessionMetadata` field (an `i32`) read only on the cold
+re-eval walk. The re-eval is O(sessions on changed interfaces × terms) per
+commit, bounded and infrequent.
 
-*If reviewers conclude the correctness gain is too small to justify the churn,
-PLAN-KILL is an acceptable verdict.* (It is not expected to be — this is a
-named security gap with a shipped, reviewed purge mechanism one predicate away.)
+*If reviewers conclude the mechanism is too large for the value — or that a
+precise revalidation cannot be made HA-coherent without a wire-format flag-day
+they will not accept — PLAN-KILL or a scope-split is an acceptable outcome.* The
+recommendation below argues it is bounded and shippable.
 
-## 4. What's already shipped / partially batched (the plan must compose with)
+## 4. What's already shipped / partially batched (must compose with)
 
-The entire enforcement mechanism already exists and is HA-aware. The fix is a
-**trigger broadening**, not a new subsystem:
-
-- **Exhaustive verdict comparator (#5293 / PR #6053, in HEAD as `b43b16f44`).**
+- **Exhaustive verdict comparator (#5293 / PR #6053, HEAD `b43b16f44`).**
   `filter_term_semantics_match` (`cache_sensitive.rs:287`) destructures
-  `FilterTerm` with **no `..` rest pattern**, so every field is either compared
-  or explicitly bound to `_` (only `id` and the `counter` Arc handle are
-  excluded). `dscp_sensitive_filter_semantics_match` (`:420`) wraps it with the
-  filter-level flags + `terms.len()` + per-term walk. This is the single
-  source of truth for "did this filter change in a verdict-relevant way," and
-  it already handles flex-match, `*_constrained`, `*_except`, `continue_term`,
-  action, routing-instance, forwarding-class, dscp-rewrite.
+  `FilterTerm` with **no `..` rest** (only `id` + `counter` excluded);
+  `dscp_sensitive_filter_semantics_match` (`:420`) wraps it. Single source of
+  truth for "did a filter change." Path C reuses it via a **comparison mode**
+  (§5.3) so a telemetry-only edit is distinguishable from a verdict change while
+  keeping the compile-time completeness guarantee.
 - **Family-wide purge (`purge_sessions_for_input_dscp_filter_revalidation`,
-  `session_glue/mod.rs:326`).** Given `purge_v4` / `purge_v6` booleans it walks
-  the session table (`iter_with_origin`), and for each matching-family session:
-  releases source-NAT (`release_source_nat_allocation`) and NAT64
-  (`release_nat64_allocation`) allocations, deletes the session-map + conntrack
-  + shared-session entries, **replicates the delete to the HA peer**
-  (`replicate_session_delete`, `:478` via `delete_terminal_filtered_session`),
-  and emits the close delta. It is already the correct, complete, HA-propagating
-  invalidation primitive — closeout item 4 is satisfied by reusing it.
-- **Per-worker load-then-purge ordering (`worker/loop_body/mod.rs:372-499`).**
-  Each worker, on observing the ArcSwap rotation, runs straight-line: load new
-  snapshot → dependent updates → `forwarding = new_forwarding` (`:454`) → purge
-  (`:455`), all **before** the packet-processing section of that loop iteration.
-  This gives per-worker atomicity for free (closeout item 2).
-- **HA config-sync recompiles per node (`pkg/cluster/sync_conn.go:1089`,
-  `pkg/daemon/daemon_ha_sync.go:563`).** Raw Junos config **text** is shipped;
-  the standby compiles its **own** `ForwardingState` and independently rotates
-  + purges. So invalidation reaches the standby two independent ways: the
-  primary's `replicate_session_delete`, *and* the standby's own recompute-and-
-  purge. No compiled state crosses the wire; no new HA message is needed.
-- **Session-hit per-packet re-eval gate (DSCP / per-packet-L4).** Untouched by
-  this fix — it correctly stays for match classes that vary within a flow
-  (closeout item 3).
+  `session_glue/mod.rs:326`).** Retained **as-is for the DSCP/per-packet path**
+  (those verdicts depend on per-packet fields not stored on a session, so they
+  cannot be precisely re-evaluated from the session alone). Path C adds a
+  **separate** precise walk for static input-filter changes; it does **not**
+  route static changes through this family purge.
+- **Per-worker rotation site (`worker/loop_body/mod.rs:372-499`).** The new
+  precise re-eval hooks the same forwarding-rotation block, after
+  `forwarding = new_forwarding` (`:454`).
+- **Flow cache (`afxdp/flow_cache.rs`)** — checked before the session table
+  (`stage_flow_cache_hit`, `poll_descriptor/mod.rs:870`); entries carry a
+  `config_generation` (`:122`) from `snapshot.generation`
+  (`coordinator/snapshot_refresh.rs:281`), evicted on mismatch
+  (`flow_cache.rs:873`). Its coherence bug (finding 3) is fixed in §5.4.
+- **HA config-sync (`pkg/cluster/sync_conn.go:1089`,
+  `pkg/daemon/daemon_ha_sync.go:563`).** Raw config **text** ships; the standby
+  compiles its own `ForwardingState`. `replicate_session_delete`
+  (`session_glue/mod.rs:751`) is **sibling-worker only** — cross-node deletes
+  ride the Close-delta path (bounded ring). §5.5 defines the HA contract
+  accordingly (this is where v1/v2 were wrong).
+- **SNAT allocator (`nat/allocator.rs:540`).** Non-persistent PAT hands out a
+  **monotonic fresh cursor** port first, draining the recycle FIFO only after
+  the fresh range is spent; freed ports are pushed to the FIFO **back** (`:602`).
+  So re-creating a dropped permitted flow yields a **different** port → the flow
+  breaks. This is *the* reason Path C must never drop a permitted flow.
 
-Authoritative docs to update in `/engineer`: `userspace-dp/src/filter/README.md`
-(lines 58-65 describe the "conservative packet-family purge on rotation"
-contract) and `docs/pr/1431-filter-cache-invariants/plan.md`.
+Docs to update at `/engineer`: `userspace-dp/src/filter/README.md` (lines 58-65,
+the "conservative packet-family purge on rotation" contract — extend to describe
+the precise static-filter revalidation), `docs/pr/1431-filter-cache-invariants/plan.md`,
+and `docs/session-sync-architecture.md` (the HA revocation contract in §5.5).
 
-## 5. Concrete design
+## 5. Concrete design — Path C (precise per-tuple revalidation)
 
-### 5.1 Core change (all path options share this)
+### 5.1 Stamp the ingress logical interface on the session
 
-Add a **general, un-gated** per-family input-filter change detector that reuses
-the existing verdict comparator, and fold it into the existing purge trigger.
-
-New function in `userspace-dp/src/filter/engine/cache_sensitive.rs`, mirroring
-`input_dscp_filter_family_changed` **without** the `has_*_match_terms`
-`.filter(...)` predicate:
+Add one field to `SessionMetadata` (`session/entry.rs`):
 
 ```rust
-/// #5858: a verdict-relevant change to ANY interface input filter in this
-/// family — attach (new key absent from old), detach (old key absent from
-/// new), or a static match/action edit (both present, terms differ). Unlike
-/// input_dscp_filter_family_changed / input_per_packet_l4_filter_family_changed
-/// this is NOT gated on has_dscp_match_terms / has_per_packet_l4_match_terms,
-/// so a static address/protocol/port `then discard` added after session
-/// creation triggers the rotation purge and the stale session is revoked.
-fn input_filter_family_changed(
-    old_filters: &FxHashMap<i32, Arc<Filter>>,
-    new_filters: &FxHashMap<i32, Arc<Filter>>,
-) -> bool {
-    old_filters.iter().any(|(ifindex, old)| {
-        new_filters.get(ifindex)
-            .is_none_or(|new| !dscp_sensitive_filter_semantics_match(old, new))
-    }) || new_filters.iter().any(|(ifindex, new)| {
-        old_filters.get(ifindex)
-            .is_none_or(|old| !dscp_sensitive_filter_semantics_match(old, new))
-    })
-}
+/// #5858: logical ingress interface (from resolve_ingress_logical_ifindex at
+/// install). Enables scoping/evaluating a session against the correct
+/// interface INPUT filter on a config-rotation revalidation. LOCAL-ONLY:
+/// NOT added to the HA sync wire format (the kernel ifindex is node-specific;
+/// see §5.5). Default/-1 for synced sessions installed from a peer.
+ingress_logical_ifindex: i32,
+```
 
-pub(crate) fn input_filter_families_changed(
-    old: &FilterState, new: &FilterState,
-) -> (bool, bool) {
-    (
-        input_filter_family_changed(&old.iface_filter_v4_fast, &new.iface_filter_v4_fast),
-        input_filter_family_changed(&old.iface_filter_v6_fast, &new.iface_filter_v6_fast),
-    )
+Set at every transit session install from
+`resolve_ingress_logical_ifindex(forwarding, meta.ingress_ifindex, meta.ingress_vlan_id)`
+(`afxdp/forwarding/mod.rs:882`) — the same resolution the input-filter eval
+already does. **Must not enter the sync serialization** (verify the metadata is
+serialized field-by-field, not raw-copied; if raw-copied, place the field so it
+is skipped by the sync encoder). Synced sessions carry `-1` (unknown ingress on
+this node) and are handled by §5.5, not the primary re-eval walk.
+
+### 5.2 Precise re-evaluation walk on a verdict-relevant static input-filter change
+
+New function (session_glue), invoked from `loop_body` in the forwarding-rotation
+block right after `forwarding = new_forwarding`:
+
+```
+fn revalidate_sessions_for_input_filter_change(
+    sessions, fds, shared_*, peer_worker_commands,
+    old_filter_state, new_filter_state, forwarding /*new*/, now_ns) -> usize
+{
+    // 1. Compute the set of logical ifindexes whose input filter changed in a
+    //    VERDICT-relevant way (per family), using the comparison-mode
+    //    comparator (§5.3). Empty set ⇒ return 0 (no walk).
+    let changed_v4: FxHashSet<i32> = verdict_changed_ifindexes(old, new, V4);
+    let changed_v6: FxHashSet<i32> = verdict_changed_ifindexes(old, new, V6);
+    if changed_v4.is_empty() && changed_v6.is_empty() { return 0; }
+
+    // 2. Walk the session table; for each session whose stamped
+    //    ingress_logical_ifindex is in the changed set for its family,
+    //    re-evaluate its 5-tuple against the NEW interface input filter
+    //    using a STATIC (TermMatchExtra::default()) evaluation.
+    let mut deny = Vec::new();
+    sessions.iter_with_origin(|key, decision, meta, origin| {
+        let ifx = meta.ingress_logical_ifindex;
+        if ifx < 0 { return; }                     // synced/unknown -> §5.5
+        let changed = if key.is_v6 { &changed_v6 } else { &changed_v4 };
+        if !changed.contains(&ifx) { return; }
+        // Static verdict for this 5-tuple under the NEW filter.
+        match static_input_filter_verdict(new_filter_state, ifx, key) {
+            Verdict::Deny            => deny.push((key, decision, meta, origin)),
+            Verdict::Permit          => {}         // untouched — no NAT churn
+            Verdict::PerPacketDepends => {}        // handled by the retained
+                                                   // DSCP/per-packet path
+        }
+    });
+
+    // 3. Drop ONLY the now-denied sessions (release NAT/NAT64, delete session-
+    //    map/conntrack/shared, emit Close delta, replicate to siblings) — reuse
+    //    delete_terminal_filtered_session.
+    for e in &deny { delete_terminal_filtered_session(...); }
+    // 4. Invalidate the flow-cache entries for the dropped keys (§5.4).
+    deny.len()
 }
 ```
 
-The `is_none_or` structure already handles **attach** (`old.get()==None ⇒
-changed`) and **detach** (`new.get()==None ⇒ changed`) — the existing gated
-detector relies on exactly this; we only drop the family-membership filter.
+`static_input_filter_verdict` evaluates the session's stored 5-tuple + protocol
+against the interface's new input filter with `TermMatchExtra::default()`
+(exactly the cached path's assumption, `cache_sensitive.rs:163`). Three outcomes:
+- **Deny** — a terminal `discard`/`reject` matches on static fields alone → drop.
+- **Permit** — terminal accept, or no matching deny → **keep untouched** (this is
+  the whole point: no drop, no NAT release, no re-alloc, no break).
+- **PerPacketDepends** — the deny decision hinges on a DSCP/per-packet-L4 term.
+  Left to the retained DSCP/per-packet family purge + per-hit re-eval, which
+  already cover those (§4). (Conservative for availability; the security cover
+  for per-packet denies is the existing mechanism, unchanged.)
 
-**Subsumption / simplification.** `input_filter_families_changed` is a strict
-superset of both `input_dscp_filter_families_changed` and
-`input_per_packet_l4_filter_families_changed` (any DSCP/per-packet change is
-also a general change). So in `worker/loop_body/mod.rs` the three separate
-calls collapse to one:
+Only **newly-denied** sessions are dropped. Because a permitted SNAT flow is
+never dropped, the fresh-cursor re-alloc break (finding 6) cannot occur.
 
-```rust
-// BEFORE (loop_body/mod.rs:376-393): two gated detectors OR'd.
-// AFTER: one general detector.
-let (purge_input_v4, purge_input_v6) =
-    crate::filter::input_filter_families_changed(
-        &forwarding.filter_state, &new_forwarding.filter_state);
-```
+### 5.3 Verdict-only comparison mode (closes finding 7 without a divergent comparator)
 
-feeding the **existing** `purge_sessions_for_input_dscp_filter_revalidation`
-call at `:455` (renamed — see 5.3).
+Add a `verdict_only: bool` to the exhaustive-destructure comparator (or a sibling
+`fn filter_term_verdict_match` that reuses the *same* `..`-free destructure).
+When `verdict_only`, exclude `count` / `has_count` / `log` (and the filter-level
+`has_counter_terms` / `has_log_terms`) from the equality — they never change
+admit/deny — while still binding every field so a **new `FilterTerm` field fails
+to compile** until classified. This preserves the #5293 single-source-of-truth
+invariant (Codex correctly called the "one comparator vs unsafe second
+comparator" framing a false dichotomy). `verdict_changed_ifindexes` uses this
+mode so a `then count`/`then log`-only edit triggers **no** re-eval walk.
 
-**Decouple deletion from the correctness fix (SMR-4).** The load-bearing change
-is *adding* `input_filter_families_changed` and *replacing* the two call sites in
-`loop_body`. The now-dead `input_dscp_filter_families_changed` /
-`input_per_packet_l4_filter_families_changed` (`filter/engine/mod.rs:15`) are
-deleted **only after** a grep confirms zero other consumers (§11 Q5) — a
-separate, non-security cleanup step, so a hidden consumer cannot turn a deletion
-into a regression of the security fix. Note these detectors read the **per-
-`Filter`** flags `has_dscp_match_terms` / `has_per_packet_l4_match_terms`, which
-is a distinct thing from the `FilterState` **sets** below.
+### 5.4 Flow-cache coherence (closes finding 3 — the one-iteration bypass)
 
-**Nothing on the session-hit hot path changes.** The DSCP/per-packet gate in
-`evaluate_dscp_sensitive_input_filter_on_session_hit` and the
-`iface_filter_v{4,6}_has_dscp_match` / `_has_per_packet_l4_match` **sets** that
-gate it (read by `interface_input_filter_has_dscp_match` /
-`interface_input_filter_has_per_packet_l4_match`) are **retained unchanged** —
-they serve within-flow per-packet variance, an orthogonal mechanism from the
-cross-rotation purge this issue fixes. (They are *not* the same as the detectors
-deleted above; nothing here removes them.)
+`validation` (carrying `config_generation`) and `forwarding` are separate
+ArcSwaps read at `loop_body:364` and `:372`. A worker can purge sessions under
+the new forwarding while still processing that iteration's packets under the
+**old** validation, so an old-generation flow-cache entry hits
+(`poll_descriptor/mod.rs:870`) and replays the old allow for one tick. Fix
+options (pick one; recommend **(a)**):
 
-### 5.2 Where the "fingerprint" lives (closeout item 1)
+- **(a) Re-read `validation` in the same iteration the forwarding rotates.** In
+  the rotation block, after loading new forwarding, force
+  `validation = *shared_validation.load()` so the flow-cache generation check
+  uses the new generation immediately → all old-generation entries evict this
+  iteration. Minimal, and fixes the latent bug for the existing DSCP/per-packet
+  purge too.
+- **(b) Explicitly evict the dropped keys' flow-cache entries** in the re-eval
+  walk (targeted), *and* (a) for the general skew. Belt-and-suspenders.
 
-The issue asks for a per-interface+family fingerprint. There is **no hash today
-and the plan does not add one**: the coordinator holds both the old and new
-`FilterState` at rotation time, so a direct structural diff (the existing
-`dscp_sensitive_filter_semantics_match` per ifindex) *is* the fingerprint
-comparison — cheaper and less error-prone than maintaining a hash (a hash
-introduces a collision-and-staleness surface with no benefit when both snapshots
-are in hand). "Verdict-relevant" is precisely the field set the #5293
-exhaustive-destructure already classifies: match criteria + terminal action +
-forwarding-class / dscp-rewrite / routing-instance modifiers; `id` and the
-runtime `counter` Arc are excluded. (Comparator Path A vs B in §5.4 refines
-whether `then count`/`then log` should also be excluded.)
+(a) is required regardless; (b) is optional precision. Note the flow cache
+already **declines** insertion for DSCP/per-packet filters
+(`flow_cache.rs:411`), so this only concerns static/other cacheable flows.
 
-### 5.3 Naming
+### 5.5 HA contract (closes findings 4 & 5 honestly)
 
-`purge_sessions_for_input_dscp_filter_revalidation`,
-`purge_input_dscp_v4/v6`, and the `INPUT_DSCP_FILTER_PURGE` debug tag become
-misnamed once the trigger is general. Rename to
-`purge_sessions_for_input_filter_revalidation` /
-`purge_input_filter_v4/v6` / `INPUT_FILTER_PURGE`. Pure rename; no behavior
-change. (Deferrable, but recommended in the same PR for clarity.)
+The correct HA story, replacing v1/v2's wrong "replicate_session_delete
+propagates to the peer for free":
 
-### 5.4 The two decision-cache layers — the flow cache needs no new work (SMR-1)
+- **Primary side:** the precise walk drops only newly-denied sessions — a
+  **small** set in realistic edits — so their Close deltas comfortably fit the
+  per-worker 4096 delta ring (`session/mod.rs:60`,`:312`; overflow drop at
+  `:1656`). These deltas drive the Go cross-node delete path
+  (`daemon_ha_userspace_stream.go` `QueueDeleteV4/V6`) to the standby.
+- **Standby side:** the standby independently compiles the synced config text
+  and rotates its own `ForwardingState`. For **its own** locally-created
+  sessions it has the ingress stamp and runs the **same precise re-eval** → same
+  denies dropped, independent of deltas. For **synced** sessions (stamp `-1`, no
+  node-local ingress identity — the kernel ifindex differs per node) it cannot
+  precisely re-eval; those are revoked by the primary's Close deltas. This is
+  the belt-and-suspenders that makes revocation reliable for the common case.
+- **Residual (finding 5):** a failover in the window between the primary's
+  commit and the standby's config-apply + delta drain can briefly forward a
+  revoked synced flow on the newly-active node until it applies the config /
+  drains deltas. Bounded by config-sync latency; self-heals. The plan
+  **documents** this rather than adding a failover fence (a larger HA feature —
+  scoped out, §10). See §5.6 Path option for a stronger-but-heavier alternative.
 
-The RX path has **two** decision caches, and this fix touches only one:
+### 5.6 Naming / retained mechanisms
 
-1. **Flow cache** (per-worker, `afxdp/flow_cache.rs`), checked **first** via
-   `stage_flow_cache_hit` (`poll_descriptor/mod.rs:870`).
-2. **Session table** (`resolve_flow_session_decision`, `:969`), checked on a
-   flow-cache miss.
-
-Issue closeout item 2 says invalidate "sessions **/ flow-cache entries**." The
-flow cache is **already** invalidated on every commit and requires **no new
-work**: each entry carries a `config_generation: u64` (`flow_cache.rs:122`)
-stamped from `snapshot.generation` (`coordinator/snapshot_refresh.rs:281`), and a
-stale generation forces a lookup miss (`flow_cache_tests.rs:187`
-`stale_config_generation_causes_miss`). Every accepted config apply advances the
-snapshot generation, so **all** flow-cache entries go stale on **any** commit and
-fall through to the session-hit path — which this fix's purge then invalidates.
-So the flow cache is strictly downstream of the session table: purge the session,
-the next packet misses both caches, re-evaluates cold against the new filter, and
-re-populates both with the correct new decision. The plan therefore satisfies
-closeout item 2 in full with the single session-purge trigger; the flow-cache
-layer self-heals via the existing generation gate. (The DSCP/per-packet filters
-additionally *decline* flow-cache insertion; static filters are cacheable, but
-that only means their entries live until the next generation bump — the deny lands
-on a commit, which *is* a generation bump, so there is no static-filter flow-cache
-bypass either.)
+- The DSCP/per-packet detectors + family purge + the
+  `iface_filter_v{4,6}_has_dscp_match` / `_has_per_packet_l4_match` **sets** and
+  the per-hit gate (`interface_input_filter_has_*`) are **retained unchanged** —
+  they handle within-flow per-packet variance, orthogonal to this fix.
+- The new precise path is additive; no existing signature changes except the
+  `SessionMetadata` field addition (§5.1).
 
 ## 6. Public API preservation
 
-- No wire/protobuf/gRPC change. HA sync ships config text unchanged.
-- No `ForwardingState` / `FilterState` field additions under Path A (§5.1).
+- No wire/protobuf/gRPC change. HA sync ships config text; the new
+  `ingress_logical_ifindex` is **local-only**, excluded from the sync encoder
+  (§5.1) — **no HA flag-day**.
 - No session-map / conntrack layout change.
-- `purge_sessions_for_input_dscp_filter_revalidation` signature preserved (only
-  renamed); all args and the `usize` return unchanged.
-- The session-hit fast path signature (`resolve_flow_session_decision`) and the
-  per-packet re-eval gate are byte-for-byte unchanged.
+- The session-hit fast path (`resolve_flow_session_decision`) and the per-hit
+  re-eval gate are unchanged.
+- The DSCP/per-packet `purge_sessions_for_input_dscp_filter_revalidation` and its
+  callers are unchanged.
 
 ## 7. Hidden invariants the change must preserve
 
-- **Side-effect ordering / atomicity (precision — SMR-2).** The purge must
-  remain **after** `forwarding = new_forwarding` and **before** packet processing
-  within the worker loop iteration (current `:454`→`:455`). This is
-  **per-worker atomic**: within one worker there is no window where the new
-  filter is live but the old session still forwards, nor one where sessions are
-  purged but the old filter still forwards. It is **not** instantaneously global:
-  each worker rotates independently on its own poll iteration, so **all workers
-  converge within one rotation tick** (sub-millisecond). A not-yet-rotated worker
-  still runs old-filter + old-session — self-consistent, and identical to the
-  shipped DSCP/per-packet purge's convergence model. The load-bearing premise
-  that rules out split-brain for a *given* flow: a 5-tuple is RSS-pinned to one
-  worker, and the SessionTable consulted by the hit path
-  (`resolve_flow_session_decision(sessions, …)`) is **worker-local**, so worker B
-  never holds a session for a flow steered to worker A. Preserved by keeping the
-  call site. (If a flow can migrate workers mid-rotation via an RSS reprogram or
-  CoS owner handoff, the worst case is that same sub-ms enforcement delay bounded
-  by the tick — an open question for review, §11 Q3.)
-- **NAT/NAT64 allocation release + deterministic re-derivation (SMR-3).** Every
-  purged session returns its source-NAT (`:355`) and NAT64 (`:364`) allocations
-  (reusing the existing purge body). For an *unrelated still-permitted* NAT'd flow
-  caught by the family-wide over-purge, re-creation must not remap the translated
-  port. Verified safe: the SNAT allocator **deterministically re-derives the
-  preserved translated tuple** (`nat/source.rs:16-43` — "derives the preserved
-  port," `deterministic_indices_v4`, "preserved source port" in the reverse
-  identity), so the re-created flow reclaims its just-released port. The remap
-  hazard is therefore LOW even under family-wide purge.
-- **HA peer delete propagation.** Reusing `delete_terminal_filtered_session`
-  keeps `replicate_session_delete` in the loop → the standby is told. The delete
-  rides the same FIFO `peer_worker_commands` queue as any install, so it cannot
-  be overtaken by an earlier in-flight install for the same key.
-- **Established-flow availability.** Purging a still-permitted TCP session must
-  not break the flow. Verified: the transit session-miss path only drops a bare
-  RST/FIN-no-SYN (`strict_syn_check_drops_new_flow`,
-  `poll_descriptor/mod.rs:679`); a mid-stream data/ACK re-installs the session
-  (Junos no-syn-check default, `mod.rs:2092`). So re-evaluation of a permitted
-  flow is seamless (plain **and** NAT'd, per the deterministic re-derivation
-  above); only a now-denied flow is dropped (the intended effect).
-- **No hot-path allocation.** The change adds no per-packet allocation (it is
-  cold-path only).
-- **Fail-closed compile.** The filter compiler already returns
-  `Err(MissingFilterRef)` on a hook naming a missing filter
-  (`filter/compiler.rs:191`); the fix does not weaken this.
-- **#5293 exhaustive-destructure invariant.** Under comparator Path A the single
-  `filter_term_semantics_match` remains the only term comparator — adding a
-  `FilterTerm` field still fails to compile until classified.
+- **Never drop a permitted flow (the core availability invariant).** The re-eval
+  drops only sessions whose static verdict is a terminal deny; permitted flows
+  (incl. SNAT) are untouched, so the fresh-cursor NAT re-alloc break
+  (`nat/allocator.rs:540`/`:602`) cannot occur. This is the invariant that Path
+  C exists to hold and v1/v2 violated.
+- **Ordering / cutover.** The re-eval + flow-cache validation re-read run after
+  `forwarding = new_forwarding` (`:454`) and before packet processing, so a
+  worker never processes a packet under new-filter + stale-session or
+  stale-flow-cache. Cutover is **per-worker within one tick**, not globally
+  atomic (workers observe the Arc independently at `:372`; queued TX drains post-
+  rotation, `lifecycle.rs:69`). State this contract precisely; do not claim
+  global atomicity.
+- **NAT/NAT64 release only for dropped (denied) sessions** — reuse
+  `delete_terminal_filtered_session` (releases source-NAT `:355` + NAT64 `:364`).
+- **Static-vs-per-packet split.** `static_input_filter_verdict` must return
+  `PerPacketDepends` (not `Permit`) whenever the deny would hinge on a
+  DSCP/per-packet-L4 term, so security coverage for those is not silently
+  dropped — it is delegated to the retained per-packet mechanism, not lost.
+- **#5293 exhaustive-destructure invariant** preserved via the comparison mode
+  (§5.3) — a new `FilterTerm` field still fails to compile until classified.
+- **HA sync portability** — the new field is local-only; no wire change.
+- **No hot-path allocation** — the walk + eval are cold-path (commit-time) only.
 
 ## 8. Risk assessment
 
 | Class | Level | Notes |
 |---|---|---|
-| Behavioral regression | **LOW** | Superset trigger of an already-shipped purge; DSCP/per-packet behavior unchanged; established permitted flows re-install seamlessly. Only new effect: static-filter edits now also purge (the fix). |
-| Lifetime / borrow-checker | **LOW** | New fn is a pure read over two `&FilterState` maps returning `(bool,bool)`; identical shape to the existing detector. |
-| Performance regression | **LOW** | Cold path only (operator commit). One extra per-family structural diff + a family-wide table walk that already exists. Zero per-packet cost. Family-wide over-purge on a busy multi-interface box is the only cost lever → see Path B (§5.4) if profiling demands it. |
-| Architectural mismatch | **LOW** | Reuses the #2362/#5293 purge model exactly; no new mechanism, no HA flag-day, no shim/verifier surface. Bounded extension. |
+| Behavioral regression | **MED** | New mechanism (field + walk + eval + flow-cache re-read). Mitigated: precise re-eval only *adds* denies-dropped; permitted flows untouched; DSCP/per-packet path unchanged. RED-on-revert + smoke gate. |
+| Availability regression | **LOW** | Core invariant: permitted flows never dropped → no NAT re-alloc break. The v1/v2 family-wide break is eliminated by construction. |
+| Lifetime / borrow-checker | **LOW** | Walk is a read + a deferred delete list (existing pattern in the family purge). |
+| Performance regression | **LOW** | Cold path only; O(sessions × terms) on changed interfaces per commit. Zero per-packet cost. |
+| HA correctness | **MED** | Primary precise + delta; standby own-session precise + delta for synced; documented residual failover window (finding 5). Verify with `make test-failover`. |
+| Architectural mismatch | **LOW** | Composes with the #2362/#5293 model + existing purge/rotation machinery; no verifier/shim wall; no HA flag-day. |
 
 ## 9. Test plan
 
-Rust (`make test-rust` / cargo, short `TMPDIR=/tmp` per memory):
+Rust (`make test-rust`, `TMPDIR=/tmp`):
 
-- **New unit tests in `session_glue/tests.rs` + `cache_sensitive.rs`:**
-  - `input_filter_families_changed` fires on: static address deny **attach**
-    (old absent), **detach** (new absent), address-list tighten, protocol
-    change, port change, `source-address except` toggle, term **reorder**, and
-    action `accept`→`discard`. (RED-on-revert: restoring the `has_dscp_match_terms`
-    `.filter()` gate must make each assertion fail.)
-  - Does **not** fire on an unrelated commit (identical input filters ⇒
-    `(false,false)` ⇒ no purge — the no-spurious-purge control).
-  - v4 and v6 independence (a v4-only change returns `(true,false)`).
-  - The existing `purge_..._removes_family` test extended to assert the purge is
-    driven by the general detector output.
-- **Full cargo suite green** (`make test-rust`), 5× the named new tests for
-  flake, plus `make test-go` for the Go legs untouched.
-- **Parent RED-on-revert gate** (project merge gate): reverting the
-  `.filter(...)`-drop must break a bound assertion, not merely a build.
+- `revalidate_sessions_for_input_filter_change`:
+  - **Drops a now-denied static flow** (address / protocol / port / `except` /
+    term-reorder → deny) whose stamped ingress ifindex is in the changed set.
+    RED-on-revert: reverting the walk leaves the session.
+  - **Does NOT drop a still-permitted flow on the changed interface** (incl. a
+    NAT'd flow — assert its NAT allocation is retained and untouched). This is
+    the anti-regression for finding 6.
+  - **Does NOT touch sessions on unchanged interfaces** (ingress ifindex not in
+    the changed set).
+  - **`PerPacketDepends` deny is left to the per-packet path** (a deny hinging on
+    a DSCP/tcp-flags term does not falsely drop, and the DSCP/per-packet purge
+    still fires).
+  - **Verdict-only mode:** a `then count`/`then log`-only edit yields an **empty**
+    changed set → no walk (control: no spurious drops).
+  - **Attach / detach:** attach a deny (old absent) drops matching flows; detach
+    permits them going forward.
+  - v4 and v6 independence.
+- Flow-cache coherence (finding 3): a cached static-allow flow stops after a deny
+  commit **in the same rotation** (no one-iteration bypass) — assert via a test
+  that reproduces the validation/forwarding skew.
+- Full cargo suite green; 5× named tests for flake; `make test-go`.
+- Parent RED-on-revert gate.
 
-Smoke (loss userspace cluster, at `/engineer` time — deferred here):
+Smoke (loss userspace cluster, at `/engineer`):
 
-- Establish a transit flow (iperf3 172.16.80.200 / v6 `2001:559:8585:80::200`),
-  then `set interfaces <reth>.<unit> family inet filter input <deny>` and
-  commit; assert the flow **stops within one rotation tick** (was: continues to
-  timeout). Repeat detach (flow resumes on re-permit). v4 **and** v6.
-- HA failover variant: establish + sync a flow to the standby, commit the deny
-  on the primary, `make test-failover`; assert the standby does **not** forward
-  the revoked flow post-failover. (Required by the CLAUDE.md HA-touch gate —
-  this touches session-sync-adjacent purge.)
-- VLAN logical-interface variant (reth0.50 vs reth0.80) to confirm per-logical-
-  ifindex keying.
-- Flow-cache assertion (SMR-1): establish a **cacheable** flow (plain TCP/UDP,
-  no NAT64) so it populates the flow cache, then commit the deny; assert the flow
-  stops (proves the `config_generation` gate flushes the flow cache and the
-  session purge revokes the underlying session — neither cache layer bypasses
-  the new deny).
+- Establish a permitted transit flow (iperf3 172.16.80.200 / v6
+  `2001:559:8585:80::200`); commit an input-filter deny on that flow's ingress
+  reth.unit → assert it **stops within one rotation tick**; commit a deny on a
+  DIFFERENT flow → assert the first (permitted) flow **keeps running** (the
+  availability anti-regression). v4 **and** v6.
+- SNAT variant: a permitted SNAT'd flow must survive an unrelated-interface
+  input-filter commit with **no throughput dip / no reset** (proves no port
+  remap).
+- HA failover: establish + sync a flow, commit the deny on the primary,
+  `make test-failover`; assert the standby does **not** forward the revoked flow
+  post-failover (delta path) and permitted synced flows survive.
+- VLAN logical-interface variant (reth0.50 vs reth0.80) — per-logical-ifindex
+  stamping.
 
 ## 10. Out of scope (explicitly)
 
-- **Output (egress) filters and lo0 host-inbound filters.** lo0 already
-  re-evaluates every host-local hit (#3706 mandatory teardown re-check +
-  `republish_local_delivery_sessions_for_lo0_filter`, `loop_body/mod.rs:477`);
-  output filters run in the TX path. This issue is the **transit input** filter
-  (`iface_filter_v{4,6}_fast`) only.
-- **Per-interface / per-tuple purge granularity** (Path B / C, §5.4) — deferred
-  follow-up unless a reviewer requires it for v1.
-- **Policy (zone-based) revocation on session hit** — a separate concern
-  (`show security policies` re-eval); not this issue.
-- **Surfacing per-session delete errno** beyond the existing purge behavior —
-  matches current DSCP-purge semantics; a metrics follow-up if wanted.
+- **Output (egress) + lo0 host-inbound filters** — output enforcement is in TX
+  selection (`cos_classify.rs:157`); lo0 re-evaluates every host-bound hit
+  (`poll_descriptor/filter.rs:509`). Transit **input** filters only.
+- **DSCP/per-packet-L4 input-filter SNAT breakage (pre-existing).** The retained
+  family purge for those still drops permitted SNAT flows on a DSCP/per-packet
+  edit — a latent, out-of-scope issue (rare edits). Note it; a follow-up could
+  extend precise re-eval to them, but their verdict needs per-packet fields not
+  on the session, so it is a distinct design.
+- **A hard failover fence** (block failover eligibility until config-apply +
+  purge complete) — a larger HA feature; §5.6 Path option. v1 documents the
+  residual window instead.
+- **Node-stable synced ingress-interface identity** (would let the standby
+  precisely re-eval synced sessions) — needs a wire-format field; deferred (the
+  delta path + standby own-session re-eval cover the common case).
 
 ## 11. Open questions for adversarial review (each invitable to PLAN-KILL)
 
-1. **Granularity (the central design fork).** Is **family-wide** purge (Path A)
-   acceptable, or must v1 be **per-interface** (Path B, requires a new
-   `ingress_logical_ifindex` on `SessionMetadata` + install-site stamping,
-   because neither `SessionKey` nor `SessionMetadata` records the ingress
-   logical interface today — only `ingress_zone`, which is coarser)? Family-wide
-   matches the shipped DSCP/per-packet precedent and is availability-safe for
-   established flows; per-interface halves the blast radius on multi-interface
-   boxes at the cost of a hot-path session field. Recommend A; B as follow-up.
-   **Is that the right call, or is family-wide churn a real DoS/availability
-   problem worth the field now?**
-2. **Comparator reuse vs verdict-only (Path A vs B, §5.4).** Reusing
-   `dscp_sensitive_filter_semantics_match` means a `then count`/`then log`-only
-   edit also triggers a family-wide purge (over-purge on telemetry-only
-   changes). The issue explicitly asks to **exclude** counters/log-only. Do we
-   accept the over-purge to preserve the #5293 single-comparator invariant, or
-   build a second verdict-only comparator and re-accept the divergence risk
-   #5293 fought? Recommend accept over-purge (established flows re-install
-   seamlessly; commits are rare).
-3. **Atomicity across workers.** Is the per-worker load-then-purge ordering
-   truly gap-free, or is there a cross-worker window (worker A purged + new
-   filter live while worker B still runs old filter + old session for a flow
-   RSS-steered to B)? Claim: each worker is self-consistent (old filter ⇒ old
-   session, new filter ⇒ purged) and a 5-tuple flow is RSS-pinned to one worker,
-   so there is no split-brain for a given flow. **Refute if a flow can migrate
-   workers mid-rotation** (e.g. RSS reprogram, CoS owner handoff).
-4. **HA sufficiency.** Is `replicate_session_delete` + standby independent
-   recompile enough, or is there a failover window between primary-purge and
-   standby-config-apply where the standby forwards the revoked flow? Does the
-   config-generation high-water mark (#3931) plus the fast session-delete
-   channel close it, or must the purge block on peer-ack?
-5. **Subsumption safety.** Collapsing the two gated detectors into one general
-   detector — does any *other* caller depend on the DSCP-specific /
-   per-packet-specific `input_*_families_changed` returning a *narrower*
-   signal (e.g. a different downstream action keyed only to DSCP changes)? Grep
-   says the purge trigger is the sole consumer; **confirm no hidden second
-   consumer** before deleting them.
-6. **Reorder / continue-term correctness.** A term **reorder** with identical
-   term set changes verdict precedence. `terms.len()` is equal, so detection
-   relies on positional `zip` inequality in `dscp_sensitive_filter_semantics_match`
-   (`:432-436`). Confirm a reorder actually yields a per-position `name`/field
-   mismatch (it does when term names differ; **does a reorder of two terms with
-   identical fields but different match sets get caught?** — yes via the field
-   compare, but call it out).
+1. **Is the local-only ingress stamp actually excludable from HA sync** without a
+   wire change? **Confirmed:** the session delta encoder picks metadata
+   field-by-field into the wire struct (`session_delta.rs:89-118` —
+   `ingress_zone` / `owner_rg_id` / `policy_id` / …), not a raw copy, so an added
+   `SessionMetadata` field the encoder never references stays off the wire → no
+   flag-day. (Reviewers: sanity-check no *other* encoder raw-copies the struct.)
+2. **Static-vs-per-packet verdict split soundness.** Can
+   `static_input_filter_verdict` always cleanly classify Deny / Permit /
+   PerPacketDepends? A term mixing static + per-packet match (`from address X
+   tcp-flags syn then discard`) matches statically on address X but the deny
+   hinges on the flag — must return `PerPacketDepends`, and the DSCP/per-packet
+   purge must actually cover it. Is there a term shape that falls through both
+   (neither precise-dropped nor per-packet-purged) and silently bypasses a deny?
+3. **Standby synced-session revocation.** Is relying on the primary's Close
+   deltas (for synced sessions the standby can't precisely re-eval) acceptable,
+   given the ring can drop on a pathologically broad deny (>4096 denied)? Should a
+   broad-deny case trigger a `SessionSync.BulkSync` reconciliation
+   (`sync_bulk.go:14`) instead? Or is the standby's own config-apply re-eval of
+   *its* sessions plus deltas enough?
+4. **Failover window severity.** Is the documented residual window (commit →
+   standby apply/drain) acceptable for a security revocation, or does #5858
+   require the failover fence (§5.6) in v1? (Trade-off: correctness vs a larger
+   HA change + failover-latency risk.)
+5. **Cutover accuracy.** Is "per-worker within one tick, not globally atomic,
+   queued-TX drains post-rotation" the correct and complete cutover contract, or
+   is there a stronger guarantee needed (e.g., cancel queued TX for dropped
+   flows)? Codex flagged `lifecycle.rs:69` drain vs `loop_body:961` cancellation
+   ordering.
+6. **Re-eval cost.** O(all sessions) table walk + O(terms) eval on changed
+   interfaces, per commit. On a box with the full 131072-session table and a
+   broad multi-interface commit, is the cold-path cost acceptable, or is a
+   by-ingress-interface session index warranted (a bigger structural change)?
+7. **Flow-cache fix (a) vs (b).** Is re-reading validation in the rotation
+   iteration (a) sufficient and race-free, or is targeted per-key flow-cache
+   eviction (b) also required? Any ordering where (a) still leaves a stale entry?
 
 ---
 
-## §5.4 — Multiple Path Options (the design forks reviewers must rule on)
+## §12 — Multiple Path Options (the design forks reviewers must rule on)
 
-### Fork 1 — purge granularity
+### Fork 1 — granularity (revised after Codex r1)
 
-| Path | Mechanism | Blast radius | Complexity | New hot-path state | Recommend |
-|---|---|---|---|---|---|
-| **A. Family-wide** *(existing precedent)* | ungated detector → `purge_v4/v6` → drop all sessions of the changed family | all v4 (or v6) sessions on the node | ~30 LoC, one new fn | none | ✅ **v1** |
-| **B. Per-interface** | stamp `ingress_logical_ifindex` on `SessionMetadata` at install; purge only sessions ingressing a changed ifindex | only the changed interface's sessions | new session field + install-site stamping + purge predicate; touches hot path; possibly HA metadata | one `i32` per session | follow-up |
-| **C. Per-tuple precise** | re-evaluate every session against old vs new filter; drop only verdict-changed | minimal | O(sessions × terms) per rotation; **also** needs the ingress ifindex from B to re-run the filter; most code | as B | ✗ |
+| Path | Mechanism | Drops permitted flows? | SNAT-safe? | New session field | HA | Verdict |
+|---|---|---|---|---|---|---|
+| **A. Family-wide** (v1/v2) | ungated detector → drop all family sessions | **yes** | **no** — fresh-cursor remap breaks them | none | delta ring overflows on large purge | ✗ **rejected (Codex r1)** |
+| **B. Per-interface drop** | stamp ingress ifindex; drop all sessions on the changed interface | **yes (on that iface)** | **no** | i32 | smaller purge | ✗ still breaks permitted flows |
+| **C. Precise per-tuple re-eval** | stamp ingress ifindex; re-eval each affected session; drop **only newly-denied** | **no** | **yes** — permitted never dropped | i32 (local-only) | small delta set + standby own re-eval | ✅ **v3 recommendation** |
 
-**Recommendation: A for v1.** It reuses a shipped, HA-aware, NAT-safe purge;
-adds no hot-path state; and is availability-safe because purging a still-
-permitted TCP flow re-installs on the next data packet. Family-wide over-purge
-costs a re-eval of unrelated-interface sessions on a *commit that changed an
-input filter* — an infrequent, operator-initiated, already-heavyweight event.
-Ship B only if cluster profiling shows the family-wide walk materially churns a
-busy multi-interface deployment; it is a clean incremental follow-up (add the
-field, narrow the predicate — the detector and trigger are unchanged).
+**Recommendation: C.** It is the only option that revokes denied flows without
+breaking permitted ones. It costs one local session field + a cold-path re-eval,
+but needs **no HA wire change** and reuses the existing delete/rotation/delta
+machinery. B is strictly dominated (same field, still breaks permitted flows). A
+is unsafe.
 
-### Fork 2 — comparator scope
+### Fork 2 — comparator (revised)
 
-| Path | Comparator | Purges on `then count`/`then log`-only edit? | Divergence risk | Recommend |
+| Path | Mechanism | Telemetry-only edit triggers re-eval? | #5293 invariant | Verdict |
 |---|---|---|---|---|
-| **A. Reuse `dscp_sensitive_filter_semantics_match`** | full #5293 exhaustive | yes (over-purge) | none — one comparator | ✅ **v1** |
-| **B. New verdict-only comparator** | excludes `count`/`has_count`/`log` (and re-decides policer/`three_color_policer`) | no | reintroduces a 2nd comparator that must track `FilterTerm` — the exact hazard #5293 closed | ✗ |
+| Reuse full comparator | includes count/log | yes (wasted walk; but C drops nothing on it) | preserved | acceptable but wasteful |
+| **Verdict-only mode** (§5.3) | exclude count/log via a mode on the *same* `..`-free destructure | **no** | **preserved** | ✅ **v3 recommendation** |
 
-**Recommendation: A.** The issue's "exclude telemetry" is an efficiency ask, not
-a correctness one; the cost of a spurious purge is a seamless session re-install
-on the next packet. Preserving the single-source-of-truth comparator (and its
-compile-time completeness guarantee) outweighs saving a rare purge. Revisit only
-if a real workload commits `then count`/`then log` edits frequently enough to
-matter (unlikely).
+Codex correctly called the earlier "one comparator or unsafe second comparator"
+fork a false dichotomy: a comparison **mode** on the exhaustive destructure keeps
+the compile-time completeness guarantee *and* excludes telemetry. Under Path C
+even the full comparator is only *wasteful* (a re-eval that drops nothing), not
+unsafe — but the mode avoids the waste cleanly.
+
+### Fork 3 — HA standby revocation of synced sessions
+
+| Option | Mechanism | Cost | Verdict |
+|---|---|---|---|
+| **Deltas + standby own-session re-eval** | primary Close deltas revoke synced sessions; standby precisely re-evals its own | none extra | ✅ **v3 default** (small precise set fits the ring) |
+| BulkSync on broad deny | trigger absence-based reconciliation when denied>ring | moderate | fallback for pathological broad denies (§11 Q3) |
+| Node-stable synced ingress id | sync a config-stable interface id so the standby precisely re-evals synced sessions | **wire-format flag-day** | deferred (§10) |
 
 ### Bounded-vs-larger verdict
 
-This is a **BOUNDED extension**, not a new mechanism. The comparator, the purge,
-the atomicity ordering, the flow-cache generation gate, and the HA propagation
-all exist and are reviewed. The fix removes one `.filter(...)` gate (adds one
-general detector) and reuses everything downstream. No verifier / shim / HA
-flag-day wall. Expected to converge PLAN-READY on Path A / Path A.
+Path C is **larger than v1 claimed but still bounded**: one local session field,
+one cold-path re-eval, one flow-cache read-ordering fix, and a comparator mode —
+all composing with existing machinery, **no verifier/shim/HA flag-day wall**. The
+honest residuals (failover window, broad-deny delta overflow, DSCP/per-packet
+SNAT pre-existing) are documented and scoped, not hidden. Expected to converge
+PLAN-READY on Fork 1=C / Fork 2=verdict-only / Fork 3=deltas+own-reeval — unless
+a reviewer judges the residual HA failover window unacceptable for a security
+revocation, in which case the §5.6 fence becomes required scope (a larger change)
+or the issue splits.
 
 ---
 
-## v1 → v2 changelog (Claude SMR r1 folded)
+## v2 → v3 changelog (Codex r1 PLAN-NEEDS-MAJOR folded)
 
-- **SMR-1 (was BLOCKING):** added §5.4 documenting the two decision-cache layers
-  and why the **flow cache** needs no new work (self-invalidates via
-  `config_generation` = `snapshot.generation` on every commit). Closeout item 2
-  ("sessions / flow-cache entries") now fully addressed.
-- **SMR-2 (was BLOCKING):** §7 atomicity claim tightened from "no window" to
-  "per-worker atomic; all workers converge within one rotation tick," with the
-  RSS-pinned worker-local-SessionTable premise that rules out per-flow
-  split-brain. Migration edge moved to §11 Q3.
-- **SMR-3:** §7 now states the SNAT allocator deterministically re-derives the
-  preserved translated tuple (`nat/source.rs:16-43`), so family-wide over-purge
-  is availability-safe for NAT'd flows too, not just plain TCP.
-- **SMR-4:** §5.1 decouples deleting the old detectors from the correctness fix
-  (replace call sites first; delete only after grep) and clarifies that the
-  retained `iface_filter_v*_has_*` **sets** are distinct from the deleted
-  detector functions.
-- Test plan (§9): add an explicit flow-cache assertion (a cached-then-denied
-  flow stops after commit) and keep the HA-failover + VLAN-logical-interface
-  legs.
+- **Pivot Fork 1 A→C.** Codex proved (re-verified) that family-wide purge drops
+  permitted SNAT flows which re-install on a fresh cursor port and break
+  (`nat/allocator.rs:540`/`:602`). New design re-evaluates and drops **only
+  newly-denied** sessions; permitted flows untouched. Requires a local
+  `ingress_logical_ifindex` on `SessionMetadata` (§5.1) + a precise walk (§5.2).
+- **Finding 3 (flow cache):** added §5.4 — re-read `validation` in the rotation
+  iteration so an old-generation flow-cache entry cannot bypass the new deny for
+  one tick (also fixes the latent bug for the existing purge).
+- **Finding 4/5 (HA):** rewrote §5.5 — `replicate_session_delete` is
+  sibling-worker only; cross-node revocation is Close-deltas (small precise set
+  fits the ring) + the standby's own re-eval; documented the residual failover
+  window instead of claiming it away. Corrects v1/v2's wrong HA claim.
+- **Finding 7 (telemetry):** §5.3 verdict-only comparison **mode** on the same
+  exhaustive destructure — excludes count/log, keeps the #5293 compile-time
+  invariant (false-dichotomy fixed).
+- **Finding 2 (cutover):** §7 states the per-worker-within-a-tick contract
+  precisely (no global-atomic claim); queued-TX ordering flagged (§11 Q5).
+- Risk table upgraded to MED where the mechanism grew; test plan gains the
+  permitted-flow / SNAT-survival anti-regressions.
 
-Claude SMR r1 verdict on v1 was **PLAN-NEEDS-MINOR** (approach sound + bounded;
-these four doc gaps blocked/qualified PLAN-READY). v2 folds all four.
+Claude SMR r1 = PLAN-NEEDS-MINOR (SMR-3 later shown wrong by Codex's NAT
+finding). Codex r1 = PLAN-NEEDS-MAJOR (governing). AGY r1 = infra-blocked. v3
+addresses all Codex BLOCKINGs; a fresh Claude SMR r2 + Codex r2 review the
+pivoted design.
