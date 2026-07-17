@@ -2,8 +2,8 @@
 
 ## 1. Status
 
-`DRAFT v3 — pivoted to precise per-tuple revalidation after Codex r1
-(PLAN-NEEDS-MAJOR); pending Codex r2 + AGY + Claude SMR r2`. Changelog at end.
+`DRAFT v4 — Claude SMR r2 folded (purely-static scoping + race-free flow-cache
+eviction + dual-direction stamp); pending Codex r2`. Changelog at end.
 
 Research branch: `research/5858-input-filter-invalidation` off origin/master
 `5c68818f6`. `/research` deliverable — stops at PLAN-READY / PLAN-KILL. No
@@ -131,12 +131,49 @@ ingress_logical_ifindex: i32,
 Set at every transit session install from
 `resolve_ingress_logical_ifindex(forwarding, meta.ingress_ifindex, meta.ingress_vlan_id)`
 (`afxdp/forwarding/mod.rs:882`) — the same resolution the input-filter eval
-already does. **Must not enter the sync serialization** (verify the metadata is
-serialized field-by-field, not raw-copied; if raw-copied, place the field so it
-is skipped by the sync encoder). Synced sessions carry `-1` (unknown ingress on
-this node) and are handled by §5.5, not the primary re-eval walk.
+already does. **Confirmed excludable from the sync wire** (the delta encoder picks
+metadata field-by-field, `session_delta.rs:89-118`, not a raw copy — an added
+field the encoder never references stays off the wire). Synced sessions carry
+`-1` (unknown ingress on this node) and are handled by §5.5, not the primary
+re-eval walk.
 
-### 5.2 Precise re-evaluation walk on a verdict-relevant static input-filter change
+**Dual-direction stamping (SMR2-C).** An input filter applies per **ingress**
+direction. The reverse companion (reply traffic) ingresses the forward flow's
+**egress** interface — a *different* interface's input filter. Stamp **each**
+session entry (forward + reverse) with **its own** ingress logical ifindex at
+install (the reverse entry's ingress = the forward flow's egress, known at
+creation), so a deny on **either** direction's ingress interface revokes the
+flow. (If a reviewer judges the reverse leg out of scope for v1, it becomes an
+explicit §10 limitation — forward-ingress only — not silence.)
+
+### 5.2 Precise re-evaluation walk — scoped to PURELY-STATIC filters (SMR2-A)
+
+**The precise path runs ONLY for filters with no per-packet variance.** A filter
+mixing static and per-packet terms has an indeterminate 5-tuple verdict (a term
+`from dscp 10 then accept` ahead of `from address X then discard` makes the deny
+hinge on the packet's DSCP), so a static evaluation could either drop a permitted
+flow or miss a deny. The clean partition — **no gap, no overlap**:
+
+- **Purely-static filter** (`!has_dscp_match_terms && !has_per_packet_l4_match_terms`
+  on **both** the old and new snapshot for that ifindex): this is *exactly* the
+  set the existing gated family purge **excludes** (its
+  `.filter(has_dscp_match_terms)`), i.e. exactly the #5858 gap. Its 5-tuple
+  verdict is fully determined ⇒ **precise re-eval** here.
+- **Filter with any dscp/per-packet term** (either snapshot): **already**
+  family-purged on **any** change — static edits included — because
+  `dscp_sensitive_filter_semantics_match` compares *all* terms
+  (`cache_sensitive.rs:432-436`; the `.filter()` gate only selects *which*
+  filters, then compares them in full). Left to the existing purge, unchanged.
+  (Its pre-existing SNAT-break on those rarer edits stays an out-of-scope,
+  documented limitation, §10.)
+
+Route by "**either** old **or** new snapshot has a dscp/per-packet term for that
+ifindex ⇒ family purge; else precise re-eval" — so a purely-static↔mixed
+transition in one commit is caught by the family purge (the mixed side carries
+the flag). `verdict_changed_ifindexes` (§5.3) therefore emits **only** purely-
+static changed ifindexes; `static_input_filter_verdict` sees only filters where
+`TermMatchExtra::default()` is exact — the `PerPacketDepends` case cannot arise.
+This closes §11 Q2 by construction.
 
 New function (session_glue), invoked from `loop_body` in the forwarding-rotation
 block right after `forwarding = new_forwarding`:
@@ -163,34 +200,31 @@ fn revalidate_sessions_for_input_filter_change(
         if ifx < 0 { return; }                     // synced/unknown -> §5.5
         let changed = if key.is_v6 { &changed_v6 } else { &changed_v4 };
         if !changed.contains(&ifx) { return; }
-        // Static verdict for this 5-tuple under the NEW filter.
+        // Static verdict for this 5-tuple under the NEW (purely-static) filter.
         match static_input_filter_verdict(new_filter_state, ifx, key) {
-            Verdict::Deny            => deny.push((key, decision, meta, origin)),
-            Verdict::Permit          => {}         // untouched — no NAT churn
-            Verdict::PerPacketDepends => {}        // handled by the retained
-                                                   // DSCP/per-packet path
+            Verdict::Deny   => deny.push((key, decision, meta, origin)),
+            Verdict::Permit => {}                  // untouched — no NAT churn
+            // No PerPacketDepends: the changed set is purely-static (§5.2).
         }
     });
 
     // 3. Drop ONLY the now-denied sessions (release NAT/NAT64, delete session-
     //    map/conntrack/shared, emit Close delta, replicate to siblings) — reuse
-    //    delete_terminal_filtered_session.
-    for e in &deny { delete_terminal_filtered_session(...); }
-    // 4. Invalidate the flow-cache entries for the dropped keys (§5.4).
+    //    delete_terminal_filtered_session — AND evict each dropped key's flow-
+    //    cache entry (§5.4, race-free targeted eviction).
+    for e in &deny { delete_terminal_filtered_session(...); evict_flow_cache(e.key); }
     deny.len()
 }
 ```
 
 `static_input_filter_verdict` evaluates the session's stored 5-tuple + protocol
-against the interface's new input filter with `TermMatchExtra::default()`
-(exactly the cached path's assumption, `cache_sensitive.rs:163`). Three outcomes:
+against the interface's new (purely-static) input filter with
+`TermMatchExtra::default()` (exactly the cached path's assumption,
+`cache_sensitive.rs:163`). Because the filter is purely static, exactly two
+outcomes arise:
 - **Deny** — a terminal `discard`/`reject` matches on static fields alone → drop.
-- **Permit** — terminal accept, or no matching deny → **keep untouched** (this is
-  the whole point: no drop, no NAT release, no re-alloc, no break).
-- **PerPacketDepends** — the deny decision hinges on a DSCP/per-packet-L4 term.
-  Left to the retained DSCP/per-packet family purge + per-hit re-eval, which
-  already cover those (§4). (Conservative for availability; the security cover
-  for per-packet denies is the existing mechanism, unchanged.)
+- **Permit** — terminal accept, or no matching deny → **keep untouched** (the
+  whole point: no drop, no NAT release, no re-alloc, no break).
 
 Only **newly-denied** sessions are dropped. Because a permitted SNAT flow is
 never dropped, the fresh-cursor re-alloc break (finding 6) cannot occur.
@@ -213,21 +247,27 @@ mode so a `then count`/`then log`-only edit triggers **no** re-eval walk.
 ArcSwaps read at `loop_body:364` and `:372`. A worker can purge sessions under
 the new forwarding while still processing that iteration's packets under the
 **old** validation, so an old-generation flow-cache entry hits
-(`poll_descriptor/mod.rs:870`) and replays the old allow for one tick. Fix
-options (pick one; recommend **(a)**):
+(`poll_descriptor/mod.rs:870`) and replays the old allow for one tick.
 
-- **(a) Re-read `validation` in the same iteration the forwarding rotates.** In
-  the rotation block, after loading new forwarding, force
-  `validation = *shared_validation.load()` so the flow-cache generation check
-  uses the new generation immediately → all old-generation entries evict this
-  iteration. Minimal, and fixes the latent bug for the existing DSCP/per-packet
-  purge too.
-- **(b) Explicitly evict the dropped keys' flow-cache entries** in the re-eval
-  walk (targeted), *and* (a) for the general skew. Belt-and-suspenders.
+- **(b) PRIMARY — targeted eviction of each dropped key's flow-cache entry**
+  inside the re-eval walk (§5.2 step 3). Path C drops a *specific, known* set of
+  keys; evicting their flow-cache entries (by the same 5-tuple / flow hash) is
+  **race-free** — it does not depend on the validation/forwarding ArcSwap store
+  order at all. A permitted flow is not dropped and its (correct) allow entry
+  rightly stays. This fully closes finding 3 for the #5858 path.
+- **(a) SUPPLEMENTARY — re-read `validation` when the forwarding rotates** (force
+  `validation = *shared_validation.load()` in the rotation block). This is a
+  cleanup of the *latent* one-iteration bypass in the **existing** DSCP/per-packet
+  family purge. Its race-freedom depends on the coordinator storing `validation`
+  **before** `forwarding` (`snapshot_refresh.rs:354-355`) with acquire ordering
+  on the worker read; if that order is not guaranteed, prefer driving the
+  flow-cache generation from the `forwarding` snapshot itself (single source, no
+  skew). Verify the store order at `/engineer`.
 
-(a) is required regardless; (b) is optional precision. Note the flow cache
-already **declines** insertion for DSCP/per-packet filters
-(`flow_cache.rs:411`), so this only concerns static/other cacheable flows.
+(b) is the load-bearing, race-free fix for this issue; (a) is an
+independent latent-bug hardening. The flow cache already **declines** insertion
+for DSCP/per-packet filters (`flow_cache.rs:411`), so both concern
+static/other cacheable flows only.
 
 ### 5.5 HA contract (closes findings 4 & 5 honestly)
 
@@ -239,6 +279,12 @@ propagates to the peer for free":
   per-worker 4096 delta ring (`session/mod.rs:60`,`:312`; overflow drop at
   `:1656`). These deltas drive the Go cross-node delete path
   (`daemon_ha_userspace_stream.go` `QueueDeleteV4/V6`) to the standby.
+- **Broad-deny fallback (SMR2 / §11 Q3):** if a single deny revokes **more than
+  the ring holds** (denied > 4096 on a worker), trigger a `SessionSync.BulkSync`
+  (`pkg/cluster/sync_bulk.go:14`) whose absence-based reconciliation deletes the
+  revoked sessions on the standby by omission — the authoritative path when the
+  incremental ring would overflow. Gate it on the dropped-count so ordinary edits
+  keep the cheap delta path.
 - **Standby side:** the standby independently compiles the synced config text
   and rotates its own `ForwardingState`. For **its own** locally-created
   sessions it has the ingress stamp and runs the **same precise re-eval** → same
@@ -486,3 +532,28 @@ Claude SMR r1 = PLAN-NEEDS-MINOR (SMR-3 later shown wrong by Codex's NAT
 finding). Codex r1 = PLAN-NEEDS-MAJOR (governing). AGY r1 = infra-blocked. v3
 addresses all Codex BLOCKINGs; a fresh Claude SMR r2 + Codex r2 review the
 pivoted design.
+
+---
+
+## v3 → v4 changelog (Claude SMR r2 folded)
+
+- **SMR2-A (BLOCKING, the important one):** scope the precise re-eval to
+  **purely-static** filters (`!has_dscp_match_terms && !has_per_packet_l4_match_terms`
+  on both snapshots). Mixed static+per-packet filters have an indeterminate
+  5-tuple verdict and are **already** family-purged on any change, so the two
+  paths partition with no gap/overlap. Removes the `PerPacketDepends` branch;
+  closes §11 Q2 by construction.
+- **SMR2-B (BLOCKING):** make **targeted flow-cache eviction of the dropped keys**
+  the primary, race-free flow-cache fix (§5.4 (b)); demote the validation-reread
+  (a) to a latent-bug cleanup whose race-freedom depends on the ArcSwap store
+  order.
+- **SMR2-C:** stamp **both** the forward and reverse session entries so a deny on
+  either direction's ingress interface revokes the flow (§5.1).
+- **Fork 3 / §11 Q3:** name the `SessionSync.BulkSync` absence-based
+  reconciliation as the broad-deny (denied > ring) fallback (§5.5).
+- §5.1 HA-exclusion claim upgraded from "verify" to "confirmed"
+  (`session_delta.rs:89-118` field-by-field encoding).
+
+Claude SMR r2 = PLAN-NEEDS-MINOR (pivot correct; A/B/C tighten it). Codex r1 =
+PLAN-NEEDS-MAJOR (folded in v3). AGY = infra-blocked. v4 goes to Codex r2 for
+convergence.

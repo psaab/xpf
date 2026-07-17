@@ -16,6 +16,14 @@ that `replicate_session_delete` is sibling-worker-only (session_glue:751) so cro
 Close-delta ring, and that a validation/forwarding ArcSwap skew opens a one-iteration flow-cache bypass (loop_body:364 vs
 :372). Plan pivots to **Path C — precise per-tuple re-evaluation** in v3.
 
+| Round | Reviewer | Dispatch | Task/Agent ID | Verdict |
+|---|---|---|---|---|
+| r2 | Claude SMR | hostile plan review (v3/Path C) | claude-smr-plan-r2.md | PLAN-NEEDS-MINOR (SMR2-A purely-static scoping, SMR2-B eviction) |
+| r2 | Codex | adversarial plan review (v4) | (pending) | (pending) |
+
+**r2:** SMR2-A/B/C folded into v4 (purely-static scoping partitions cleanly with the retained family purge; targeted
+flow-cache eviction is race-free; dual-direction stamp). Codex r2 reviews v4.
+
 Note: the initial codex:codex-rescue / agy:agy-rescue agent dispatches (ab247709eb49ee6de / a42b3248ebdc5c8ed) mis-fired (ran in a
 separate runtime / explored their own guide); re-dispatched directly via the codex-companion `task` and the agy MCP
 `agy_adversarial_review` above.
