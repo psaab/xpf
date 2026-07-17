@@ -2,9 +2,9 @@
 
 ## 1. Status
 
-`DRAFT v7 — v6 + Codex r4 fold (define the Phase-1-local export-failure
-recovery/latch-release path + tests); pending Codex r5 convergence (Claude SMR
-PLAN-READY; AGY infra-blocked)`
+`PLAN-READY v7 @ 5cfe364fdd2f — CONVERGED (Codex r5 PLAN-READY + Claude SMR r4
+PLAN-READY; AGY infra-blocked, documented 2-of-3). Awaiting manual approval via
+/engineer 5865.`
 
 Base: `origin/master` @ `b7343fda51b5`. Research-only branch
 `research/5865-session-schema`. **No production code is touched in `/research`.**

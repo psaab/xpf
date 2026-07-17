@@ -52,3 +52,14 @@ Notes:
 |---|---|---|---|
 | Codex | codex-companion task (confirm convergence) | pending | — |
 | Claude SMR | `claude-smr-plan-r4.md` | — | pending |
+
+## Round 4 verdicts (final)
+
+| Reviewer | Task/Job ID | Verdict |
+|---|---|---|
+| Codex (r4) | `task-mro5yusr-09tk35` | REVISE (1 item: define export-failure recovery) → folded into v7 |
+| Codex (r5) | `task-mro685tv-8z2734` | **PLAN-READY (Phase 1 + Phase-2-contract-as-follow-up)** |
+| Claude SMR (r4) | `claude-smr-plan-r4.md` | **PLAN-READY** |
+| AGY | mro438va / mro46wdv / mro47h4p | INFRA-BLOCKED (documented; 2-of-3) |
+
+**CONVERGED at plan v7 @ 5cfe364fdd2f.** Codex + Claude SMR both PLAN-READY.
