@@ -1,6 +1,6 @@
 # Plan of action — #5837: userspace XDP local-interface destination check bypasses DNAT/static-NAT
 
-**Status:** DRAFT v6 — after Codex r5 (REVISE; architecture + verifier bounding + AH/gen-race/pins/availability CLOSED, 6 concrete design blockers) + Claude SMR r2–r5 (PLAN-READY). Pending round-6 review.
+**Status:** CONVERGED v7 — **PLAN-KILL (drive-by dataplane fix) + ship the Track-1 commit-WARNING; defer the full Option-B fix.** See §0. Codex r1–r6 (REVISE, high-signal, materially improved the design and surfaced deep unsolved fail-closed/HA/verifier surface) + Claude SMR r2–r6 (PLAN-READY r2–r6, self-corrected to concur with the PLAN-KILL-of-drive-by after Codex r6 disproved two v6 closures + surfaced the HA dimension). AGY infra-blocked every round (2-of-3 per the infra-block rule).
 
 **v6 changelog (closes Codex r5's six design blockers):** strict transaction order
 (insert-new → publish-generation → stale-delete-**after**-swap) + post-commit delete-failure
@@ -36,6 +36,101 @@ capability ⇒ zero-enforcement ⇒ warn-every-rule**, threaded through every `C
 
 **Earlier:** v2 dedicated intent map (collision); v3 concrete ABI + loud diagnostics; v4
 rollback-safe new-only txn + IPv6-AH guard + restart reconcile + mandatory pins.
+
+---
+
+## 0. CONVERGED VERDICT (v7) — PLAN-KILL of the drive-by dataplane fix; ship the commit-time WARNING; defer the full Option-B fix as a scoped, verifier-gated, HA-aware project
+
+After six adversarial rounds (Codex + Claude SMR; AGY infra-blocked), the research converges
+**not** on a clean drive-to-`/engineer`. The team-lead PLAN-READY test — *architectural
+agreement AND verifier feasibility settled* — is met by **neither**:
+
+1. **Verifier feasibility is unvalidated and the surface keeps GROWING.** The DNAT-before-local
+   probe must live in the healthy miss arm, **every degraded / binding-missing / heartbeat-stale
+   branch** (§5e — else #5837 recurs while the helper is degraded), and behind an **IPv6-AH
+   guard** (§5a) — all inside the single `xdp_userspace_prog` under the **1M-insn cap** with
+   **tail-call FORBIDDEN** (retirement canary) and **no `shimverify` headroom metric**. Each
+   correctness layer added *more* hot-path surface against a fixed budget. The make-or-break is
+   a real, unhedged gamble that can only be settled by a `make generate`/`shimverify` run — and
+   the growing surface makes REJECT materially likely.
+2. **The full fix's correctness surface is deep and NOT fully solved.** Codex r6 showed two of
+   v6's "closures" were wrong and surfaced an unaddressed dimension:
+   - **Incomplete-state fail-closed is NOT achieved.** The `intent_authoritative` bit only gates
+     binding-READY; a *missing / failed-insert* intent key still falls to the non-READY path,
+     which passes local = #5837 — the bit doesn't change what the degraded path does with a
+     local-classified tuple. True fail-closed needs a heavier generation-tagged design (more
+     verifier surface still).
+   - **Ingress-interface coverage was proved wrong.** A packet can ingress an interface *other*
+     than the one owning the destination address (DNAT is ingress-zone/interface/RI-scoped
+     independently), and the physical **fabric parent IS in the ingress set** (an intentional HA
+     path) — so the "always covered / fabric-skipped" claim is false.
+   - **HA failover generation-safety is unaddressed (first-order for an HA firewall).** A
+     stale-but-"authoritative" standby can remain takeover-eligible after a failed peer apply;
+     takeover must be gated on exact equality of active-expected / helper-forwarding /
+     intent-authoritative generations, which the current HA path does not check.
+   - Plus: worker-visible-vs-internal publication ordering, the new-plan `defer_workers=true`
+     acceptance path, and the boot/offline capability source/timing — each a real design decision.
+
+These are **not nits**. Each is solvable, but every solution adds implementation surface AND
+hot-path verifier cost, while the go/no-go verifier verdict stays unvalidated. Continuing to
+iterate would be oscillation: the change is genuinely large, and each newly-exposed layer
+yields another real hole.
+
+**Converged recommendation (two tracks):**
+
+- **TRACK 1 — SHIP NOW (pragmatic mitigation, PLAN-READY, tiny, zero verifier risk):** a
+  **commit-time WARNING** in the Go config compiler when a DNAT/static-NAT public/mapped address
+  equals a configured interface address — "this destination translation is inert on the first
+  packet in the userspace dataplane (interface-address DNAT/static-NAT limitation, #5837); use a
+  non-interface public address or expect first-packet local delivery." This is trivially feasible
+  (the compiler already has `cfg.Warnings` and both the pool addresses and interface addresses,
+  compiler.go), and it fixes the bug's **worst** property: today the bypass is **silent**. Making
+  it **loud** is a real, immediate security-posture improvement and the honest first step. Spec: §0a.
+- **TRACK 2 — DEFER (the full dataplane fix):** the Option-B design below (§5) is preserved as
+  the canonical starting point IF the project chooses to invest in a large, verifier-gated,
+  HA-aware implementation. It is NOT a drive-by. Before `/engineer`, the FIRST task is the
+  `shimverify` gate on a Phase-1 exact-both candidate that ALSO carries the §5e degraded-path
+  drop; a REJECT (materially likely) collapses this track to the Track-1 warning permanently.
+  The full fix must additionally solve: real fail-closed incomplete-state (generation-tagged),
+  per-rule ingress coverage + attach transition, HA-takeover generation-equality gating, and the
+  capability boot-timing/source — see §0b.
+
+**Terminal:** PLAN-KILL (drive-by dataplane fix) + Track-1 WARNING as the shippable outcome.
+This matches the team-lead's explicitly-blessed "PLAN-KILL-with-a-pragmatic-fallback."
+
+### §0a. Track-1 mitigation spec (the shippable part)
+
+In the Go config compiler (`pkg/config/compiler.go`), after DNAT + static-NAT rule-set
+compilation, for each rule whose translated **public/mapped destination address** (DNAT pool
+address; static-NAT external address) equals a **configured interface address** (any family),
+append a `cfg.Warnings` entry naming the rule-set/rule and the interface. Scope: warn (never a
+hard error — the config is legal Junos and works for reply packets / existing sessions; only the
+first-packet transit classification is affected). Covers both families. Test: a set-syntax config
+with `destination-nat pool P address <WAN-iface-ip>` + a rule using P → exactly one warning;
+a pool with a non-interface address → no warning; static-NAT external == iface addr → warning.
+This is a self-contained `/engineer`-able change independent of the shim.
+
+### §0b. What the deferred full fix (Track 2) must additionally solve (Codex r6)
+
+1. Define "publish" as **worker-visible** state completion (not the internal `coord.forwarding`
+   assignment), and delete stale intent only after that point.
+2. Real fail-closed incomplete-state: a **generation-tagged** intent value so the shim can drop
+   (not pass-local) a tuple whose configured generation isn't yet live — without a global bit
+   that would downgrade an already-live generation mid-apply. Resolve ctrl-word ownership (Go
+   reconstructs+overwrites the ctrl value; a helper-written bit is clobbered).
+3. Per-rule ingress coverage: derive each rule's possible ingress interfaces from its
+   zone/interface/RI scope (not address ownership); cover the attach-before-map-populate
+   transition; preserve the intentional physical fabric-parent ingress path.
+4. Cover every deferred/disarmed acceptance path, including new-plan `defer_workers=true`.
+5. HA takeover gated on exact active-expected / helper-forwarding / intent-authoritative
+   generation equality + local capability; a zero-capability legacy standby with applicable DNAT
+   is takeover-ineligible or explicitly unsupported.
+6. Capability source/timing: pre-load extraction from the embedded artifact OR
+   compile-conservative-then-recompile; thread through **all** `CompileConfig*` call sites
+   (store.go:343/481, check.go:39, upgrade.go:215, cli/grpc terse-interface shows, …).
+
+*The design below (§1–§13) remains the Track-2 reference. Read §0 first: it is the converged
+recommendation. §1–§13 are the full Option-B design and the six-round review history.*
 
 ---
 

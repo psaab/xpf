@@ -57,3 +57,18 @@ Plan committed at: 36f830996db4
   AH + gen-race + pins + availability, leaving 6 concrete design blockers (now closed).
 - AGY: infra-blocked (environmental).
 - Claude SMR: PLAN-READY (r6) — claude-smr-plan-r6.md. All 6 Codex r5 blockers resolved + code-verified.
+
+## Round 6 → CONVERGED (PLAN-KILL of drive-by + Track-1 warning)
+- Codex r6: REVISE, MATERIAL — disproved 2 of v6's closures (intent_authoritative doesn't
+  fail-closed for a missing/failed-insert key; ingress-interface proof factually wrong) + surfaced
+  an unaddressed HA-failover generation-safety dimension (first-order for an HA firewall) + worker-
+  visible publication ordering + defer_workers new-plan path + capability boot-timing.
+- Claude SMR r6: self-corrected PLAN-READY → concur PLAN-KILL-of-drive-by (SMR-soft-pass pattern:
+  I closed findings faster than truly closed). claude-smr-plan-r6.md.
+- AGY: infra-blocked every round.
+- CONVERGED VERDICT (plan v7 §0): PLAN-KILL the drive-by dataplane fix (verifier make-or-break
+  unvalidated + growing surface, tail-call forbidden; fail-closed-incomplete-state + HA-failover
+  generation-safety genuinely unsolved) → ship the Track-1 commit-time WARNING (§0a, tiny, zero
+  verifier risk, makes the silent bypass loud) → Track-2 full Option-B fix deferred as a scoped,
+  verifier-gated, HA-aware project (§0b lists the 6 remaining hard problems). Matches the team-
+  lead's explicitly-blessed PLAN-KILL-with-pragmatic-fallback.
