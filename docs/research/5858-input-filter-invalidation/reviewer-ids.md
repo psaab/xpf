@@ -18,11 +18,13 @@ Close-delta ring, and that a validation/forwarding ArcSwap skew opens a one-iter
 
 | Round | Reviewer | Dispatch | Task/Agent ID | Verdict |
 |---|---|---|---|---|
-| r2 | Claude SMR | hostile plan review (v3/Path C) | claude-smr-plan-r2.md | PLAN-NEEDS-MINOR (SMR2-A purely-static scoping, SMR2-B eviction) |
-| r2 | Codex | adversarial plan review (v4) | (pending) | (pending) |
+| r2 | Claude SMR | hostile plan review (v3/Path C) | claude-smr-plan-r2.md | PLAN-NEEDS-MINOR (SMR2-A/B/C — B & C later shown wrong by Codex r2) |
+| r2 | Codex | adversarial plan review (v4) | codex-plan-r2.md | **PLAN-NEEDS-MAJOR** (reverse-ingress, pair-teardown, cache-key, NAT-release, HA, fence) |
+| r3 | Claude SMR | convergence review (v5) | claude-smr-plan-r3.md | CONVERGE with Codex — PLAN-DEFERRED (product decision) |
 
-**r2:** SMR2-A/B/C folded into v4 (purely-static scoping partitions cleanly with the retained family purge; targeted
-flow-cache eviction is race-free; dual-direction stamp). Codex r2 reviews v4.
+**CONVERGED OUTCOME (Codex + Claude SMR; AGY infra-blocked):** the bounded fix is DEAD (unsafe); the correct fix is a
+MAJOR multi-subsystem feature; PLAN-READY is gated on (i) a v6 design round AND (ii) a product decision (§13.4: full
+failover-fenced guarantee vs scoped MVP with a documented residual). **PLAN-DEFERRED**, not PLAN-READY, not PLAN-KILL.
 
 Note: the initial codex:codex-rescue / agy:agy-rescue agent dispatches (ab247709eb49ee6de / a42b3248ebdc5c8ed) mis-fired (ran in a
 separate runtime / explored their own guide); re-dispatched directly via the codex-companion `task` and the agy MCP

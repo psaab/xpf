@@ -2,8 +2,18 @@
 
 ## 1. Status
 
-`DRAFT v4 — Claude SMR r2 folded (purely-static scoping + race-free flow-cache
-eviction + dual-direction stamp); pending Codex r2`. Changelog at end.
+`v5 — SCOPE REASSESSED after Codex r2 (2nd PLAN-NEEDS-MAJOR). NOT a bounded
+PLAN-READY: the correct fix is a MAJOR multi-subsystem feature gated on a
+product decision. See §13 (Research conclusion) FIRST.` Changelog at end.
+
+> **Read §13 before §5.** Two rounds of hostile review (both PLAN-NEEDS-MAJOR,
+> code-verified) established that the bounded fix is unsafe and the correct fix
+> engages ~6 subsystems plus a genuine product decision (revocation-guarantee
+> strength vs failover-fence complexity). §5.1–§5.5 below record the *corrected
+> design direction*; the load-bearing errors Codex r2 found are annotated inline,
+> but the full mechanism is /engineer-depth and is deferred pending the §13
+> decision. This is the "design needs human judgment" outcome `/research` exists
+> to surface.
 
 Research branch: `research/5858-input-filter-invalidation` off origin/master
 `5c68818f6`. `/research` deliverable — stops at PLAN-READY / PLAN-KILL. No
@@ -114,6 +124,44 @@ the precise static-filter revalidation), `docs/pr/1431-filter-cache-invariants/p
 and `docs/session-sync-architecture.md` (the HA revocation contract in §5.5).
 
 ## 5. Concrete design — Path C (precise per-tuple revalidation)
+
+> **Codex r2 corrections to the v4 design below (verified against code).** The
+> §5.1–§5.5 text is kept for continuity but these five errors must be fixed in
+> any implementation (full design deferred per §13):
+> 1. **Reverse-ingress is NOT knowable at forward install.** v4 §5.1 assumed
+>    reverse-ingress = forward-egress; false under asymmetric routing (reply can
+>    enter a *different* interface — `poll_descriptor/mod.rs:649`; real ingress is
+>    only on the reply's `meta`, `filter.rs:342`). Stamp the reverse entry's
+>    ingress **on the first reply packet**, or accept **forward-ingress-only**
+>    coverage as a documented limitation. (My SMR2-C was wrong.)
+> 2. **Teardown must be PAIR-aware.** Forward + reverse are independent entries;
+>    `delete_terminal_filtered_session` deletes only its argument key
+>    (`session_glue/mod.rs:446`) and does **no** NAT release. Revoking a flow must
+>    delete **both** keys, evict **both** from **every** binding cache, cancel
+>    queued work for both, release NAT/NAT64 **once via the forward entry**, and
+>    emit the **forward** Close even when the deny was found on the reverse entry.
+> 3. **NAT release is separate.** The family purge calls
+>    `release_source_nat_allocation`/`release_nat64_allocation` **before** delete
+>    (`session_glue/mod.rs:355`,`:364`); the precise walk must do the same (source
+>    release no-ops on a reverse entry, `nat/source.rs:789`). v4's attribution of
+>    NAT release to `delete_terminal_filtered_session` would **leak** allocations.
+> 4. **Flow-cache invalidation needs the all-binding `invalidate_slot` loop**
+>    (`loop_body/mod.rs:1332`) — the cache is per-binding keyed by
+>    `(SessionKey, physical ingress_ifindex)` (`flow_cache.rs:759`/`:868`/`:979`),
+>    not the 5-tuple; and a sibling worker's `DeleteSynced` removes a session
+>    without cache access (`delete_synced.rs:9`) so owner-side eviction alone can
+>    be bypassed — generation-refresh (a) stays load-bearing. (My SMR2-B was
+>    wrong: targeted eviction by 5-tuple is insufficient.)
+> 5. **`static_input_filter_verdict` must be side-effect-free** — reusing
+>    `evaluate_interface_filter` records a counter even at `packet_bytes==0`
+>    (`eval.rs:139`,`filter/mod.rs:696`); use a pure walk. Also update the manual
+>    `SessionMetadata::PartialEq` (`entry.rs:134`) for the new field.
+>
+> The purely-static↔mixed **partition is gap-free** (Codex verified no static
+> deny falls through both detectors) — but **not** overlap-free operationally: a
+> mixed change on interface A family-purges permitted sessions on a purely-static
+> interface B changed in the same commit, so the "permitted flows never touched"
+> invariant does **not** hold globally (§13).
 
 ### 5.1 Stamp the ingress logical interface on the session
 
@@ -557,3 +605,110 @@ pivoted design.
 Claude SMR r2 = PLAN-NEEDS-MINOR (pivot correct; A/B/C tighten it). Codex r1 =
 PLAN-NEEDS-MAJOR (folded in v3). AGY = infra-blocked. v4 goes to Codex r2 for
 convergence.
+
+---
+
+## §13 — Research conclusion: scope reassessment + required product decision
+
+Two rounds of hostile plan-review (Codex r1 + r2, both **PLAN-NEEDS-MAJOR**,
+every load-bearing finding independently re-verified against code; Claude SMR
+r1/r2 converging) have established the following, which is the deliverable of
+this `/research`:
+
+**1. The bug is real and High.** The session-hit fast path never re-evaluates a
+static input-filter deny attached after session creation; the flow forwards until
+timeout. Confirmed.
+
+**2. The bounded fix is DEAD.** "Widen the trigger and reuse the existing
+family-wide purge" (v1/v2) is a **connection-breaking availability regression**:
+the family purge drops permitted flows, and permitted **SNAT** flows re-install
+on a fresh monotonic-cursor port (`nat/allocator.rs:540`/`:602`) and break. It
+also has a one-iteration flow-cache bypass and cannot reliably propagate large
+purges to the HA peer. Not shippable.
+
+**3. The correct fix (precise per-tuple revalidation, Path C) is DIRECTIONALLY
+right but is a MAJOR multi-subsystem feature, not a bounded change.** A complete,
+correct implementation must engage all of:
+- a per-session **ingress-interface stamp**, with reverse-ingress captured **on
+  the first reply** (asymmetric routing makes it unknowable at forward install);
+- **pair-aware teardown** (delete forward+reverse, NAT release once via forward,
+  forward-Close even for a reverse-discovered deny — today the reverse entry
+  emits **no** Close, `install.rs:467`);
+- **all-binding + sibling-coherent flow-cache invalidation**
+  (`invalidate_slot` loop, `loop_body:1332`) plus generation-refresh, because a
+  sibling `DeleteSynced` bypasses owner-side eviction;
+- a **side-effect-free** static verdict evaluator;
+- an **authoritative HA resync**: fix reverse-Close emission, use the real
+  ring-occupancy overflow predicate (not `denied>4096`), and architect the
+  Rust→Go `SessionSync.BulkSync` fallback end-to-end (signal, cross-worker
+  aggregation, ordering, BulkAck) — the second Go queue and delete journal are
+  themselves bounded (`sync.go:597`/`:619`);
+- and — for the stated **High** security-revocation contract — a **failover
+  fence** (block failover eligibility until the peer has *applied* the config and
+  *completed* revocation), because config receipt can be dropped
+  (`sync_conn.go:1632`), apply can fail (`:1175`), there is no apply-ack, and a
+  standby retaining the old permitting config can **cold-reinstall the revoked
+  tuple** after failover. "Bounded by config-sync latency; self-heals" is false.
+
+**4. THE PRODUCT DECISION (this is why it stops here, not at PLAN-READY).**
+The central fork is not a technical detail an engineer can pick — it is a
+product/security judgment:
+
+> **For #5858's "High" security-revocation guarantee, do we ship (A) the full
+> failover-fenced mechanism, or (B) a scoped MVP with an explicitly-accepted
+> weaker guarantee?**
+
+- **Option A — full guarantee.** Immediate revocation on the active node **and**
+  a failover fence so a newly-active standby cannot forward a revoked flow. This
+  is the strongest posture but adds a real HA mechanism (apply-ack + fence) with
+  a **failover-latency risk** (fencing failover on config-apply could slow the
+  ~60ms failover the cluster is tuned for) and the full BulkSync resync. Largest
+  effort.
+- **Option B — scoped MVP + documented residual.** Precise per-tuple revocation
+  on the active node (forward-ingress-first, reverse-on-reply), pair-aware
+  teardown, all-binding cache invalidation, reverse-Close fix, and **lean on the
+  standby's own config-apply re-eval + deltas** for peer revocation — accepting a
+  **documented, bounded failover window** (a flow revoked on the primary may be
+  briefly forwarded by a just-promoted standby until it applies the config). This
+  is a meaningful security improvement over today (revocation goes from
+  *never/until-timeout* to *prompt on the active node*) at far lower cost and
+  **no failover-latency risk**, but it is an explicitly *weaker* guarantee that a
+  security owner must sign off on.
+
+**Reviewer convergence.** Codex r1+r2 = PLAN-NEEDS-MAJOR (not PLAN-KILL — "Path C
+is salvageable"). Claude SMR converges: the bounded framing is dead; the correct
+mechanism is well-characterized but MAJOR, and PLAN-READY is gated on (i)
+substantial additional design (the six items in §13.3, each with an existing
+in-tree pattern to follow) **and** (ii) the §13.4 product decision. AGY:
+infra-blocked in this headless runtime (documented). Neither reviewer will sign
+a bounded PLAN-READY, and neither recommends PLAN-KILL — the fix is real and
+achievable.
+
+**Recommended disposition:** **PLAN-DEFERRED pending a product decision on §13.4.**
+- If the user picks **Option B (scoped MVP)** — the likely pragmatic choice — this
+  plan is ~80% of the way to an /engineer-ready spec: it needs one more revision
+  fully designing pair-aware teardown, reverse-on-reply stamping, all-binding
+  invalidation, the reverse-Close fix, and the documented-residual HA contract
+  (all with cited in-tree patterns), then a final Codex+SMR round. Estimate:
+  1–2 more research rounds, then a substantial (multi-file, HA-touching) PR.
+- If the user picks **Option A (full fence)** — add the failover-fence + BulkSync
+  design; larger, with a `make test-failover` latency-regression gate.
+- Either way this is **not** a mechanical `/engineer 5858` from v5; it needs the
+  decision first, then a v6 design round.
+
+## v4 → v5 changelog (Codex r2 folded)
+
+- Recorded Codex r2 (2nd PLAN-NEEDS-MAJOR) at `codex-plan-r2.md`; re-verified the
+  load-bearing findings (reverse-Close early-return `install.rs:467`; per-binding
+  `(key,ifindex)` cache + all-binding `invalidate_slot` `loop_body:1332`; NAT
+  release separate from `delete_terminal_filtered_session`).
+- Corrected the five verified design errors inline at the head of §5 (reverse-
+  ingress-on-reply, pair-aware teardown, separate NAT release, all-binding cache
+  invalidation, side-effect-free evaluator + PartialEq).
+- Reframed scope honestly: this is a MAJOR multi-subsystem feature, not a bounded
+  fix (§13); the "permitted flows never touched" invariant does not hold globally
+  (mixed-filter family purge on co-committed interfaces).
+- Elevated the failover-fence-vs-weaker-guarantee fork to the explicit **product
+  decision** (§13.4) that gates PLAN-READY. **Research stops here** for that
+  decision (the `/research` "design needs human judgment" outcome).
+
