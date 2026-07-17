@@ -9,3 +9,15 @@ Plan committed at: 36f830996db4
 - Codex (codex:codex-rescue): dispatched
 - AGY (agy:agy-rescue): dispatched
 - Claude SMR: docs/research/5837-xdp-dnat-before-local/claude-smr-plan-r1.md
+
+## Round 1 outcomes
+- AGY: INFRA-BLOCKED. The `agy` headless CLI auto-denies its internal `command`
+  permission and produces no output even with `--dangerously-skip-permissions`
+  (retried 3×: plain, +skip-permissions, +no-sandbox+skip-permissions — identical
+  "jetski: no output produced" each time). Root cause is the agy runtime in this
+  environment, not the plan. Per the research skill's infra-block exception, proceed
+  2-of-3 (Codex + Claude SMR); AGY alone is never enough and it is not being relied
+  on as the sole reviewer here.
+- Claude SMR: REVISE (r1) — B1 resolved favorably on self-verification, B2 downgraded,
+  B3 stands. See claude-smr-plan-r1.md.
+- Codex: pending.
