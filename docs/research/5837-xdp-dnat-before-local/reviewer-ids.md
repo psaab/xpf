@@ -48,3 +48,12 @@ Plan committed at: 36f830996db4
 - AGY: infra-blocked (environmental).
 - Claude SMR: PLAN-READY (r5) — claude-smr-plan-r5.md. All 3 material Codex r4 findings
   (degraded-path, AH ordering, gen-safe delete) code-verified + resolved. Residual = impl-execution per §13.
+
+## Round 6
+- Plan revised to v6 @ 5192b6057915 (closes Codex r5's six design blockers: strict txn order,
+  intent_authoritative gate, ingress-iface proof, disarmed-refresh publish-before-accept,
+  reclaim-targets-exact-both, absent/legacy capability semantics).
+- Codex: r6 re-review dispatched (resumed). At r5 it CLOSED architecture + verifier bounding +
+  AH + gen-race + pins + availability, leaving 6 concrete design blockers (now closed).
+- AGY: infra-blocked (environmental).
+- Claude SMR: PLAN-READY (r6) — claude-smr-plan-r6.md. All 6 Codex r5 blockers resolved + code-verified.
