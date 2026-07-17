@@ -21,3 +21,10 @@ Plan committed at: 36f830996db4
 - Claude SMR: REVISE (r1) — B1 resolved favorably on self-verification, B2 downgraded,
   B3 stands. See claude-smr-plan-r1.md.
 - Codex: pending.
+
+## Round 2
+- Plan revised to v2 @ e17c2676d969.
+- Codex: re-review dispatched (resumed agent, r1 context preserved).
+- AGY: still infra-blocked (no retry — environmental).
+- Claude SMR: PLAN-READY (r2) — claude-smr-plan-r2.md. New-map rollout re-verified safe
+  (validateUserspaceShimLivePins skips absent pins). 3 non-blocking clarifications.
