@@ -28,3 +28,9 @@ Plan committed at: 36f830996db4
 - AGY: still infra-blocked (no retry — environmental).
 - Claude SMR: PLAN-READY (r2) — claude-smr-plan-r2.md. New-map rollout re-verified safe
   (validateUserspaceShimLivePins skips absent pins). 3 non-blocking clarifications.
+
+## Round 3
+- Plan revised to v3 @ bd1dbbfb9209 (concrete impl spec + loud diagnostics + factual fixes).
+- Codex: r3 re-review dispatched (resumed).
+- AGY: infra-blocked (environmental; not retried).
+- Claude SMR: PLAN-READY (r3) — claude-smr-plan-r3.md. All Codex r2 fixes code-verified.
