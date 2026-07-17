@@ -1,6 +1,18 @@
 # Plan of action — #5837: userspace XDP local-interface destination check bypasses DNAT/static-NAT
 
-**Status:** DRAFT v5 — after Codex r4 (REVISE; architecture + verifier bounding accepted since r3) + Claude SMR r2–r4 (PLAN-READY). Pending round-5 review.
+**Status:** DRAFT v6 — after Codex r5 (REVISE; architecture + verifier bounding + AH/gen-race/pins/availability CLOSED, 6 concrete design blockers) + Claude SMR r2–r5 (PLAN-READY). Pending round-6 review.
+
+**v6 changelog (closes Codex r5's six design blockers):** strict transaction order
+(insert-new → publish-generation → stale-delete-**after**-swap) + post-commit delete-failure
+result (§5d); **`intent_authoritative` ctrl gate** so incomplete-reconcile state fails closed
+independently of intent-map membership (§5b); ingress-interface coverage **proven** (zone
+dataplane interfaces always in the ingress set; skipped = out-of-scope+warned, §5b/§5e);
+disarmed-refresh **must publish-before-accept** (the defer branch rejected as unsafe, §5d);
+instruction-reclaim **targets exact-both first** then v4-only (§2); **absent/malformed/legacy
+capability ⇒ zero-enforcement ⇒ warn-every-rule**, threaded through every `CompileConfig*`
+(§5c); ICMP port-0 is an exact key (not a Phase-2 casualty — don't over-warn, §5d); fixed the
+`from_ne_bytes` pseudocode + `maps_sync.go:679-688` readiness cite.
+
 **Issue:** #5837 (bug, High, security, nat, audit)
 **Research branch:** `research/5837-xdp-dnat-before-local`
 **Base:** origin/master `7d2cd112fec4`
@@ -52,7 +64,10 @@ per-family capability bitmask, §5c, that the Go §5d diagnostics read):
 3. Phase-1 exact-both REJECT → build **v4-exact-only** → `shimverify`.
 4. v4-exact PASS → ship v4-only + LOUD §5d warning (all IPv6 forms un-enforced).
 5. v4-exact REJECT → **instruction reclaim** (fold the existing `is_local`/`interface_nat`
-   probes into one keyed pass) → re-verify; PASS → ship reclaimed scope.
+   probes into one keyed pass), **targeting exact-both first** to preserve v6 coverage →
+   re-verify. If reclaim+exact-both PASSes → ship exact-both; if reclaim only fits
+   v4-exact-only → ship v4-only + LOUD §5d warning. The shipped candidate's capability
+   bitmask (§5c) always reflects what actually passed.
 6. Still REJECT → **PLAN-KILL** (interim: commit reject/warn only).
 
 A candidate must PASS on **both** the 6.18 floor and current-image kernel (either REJECT =
@@ -93,7 +108,8 @@ lookup (or the live-session path must decline local AH). Placement:
 
 ```rust
 // dst_ne is NativeEndian (parsed.dst_v4 is BigEndian — matches USERSPACE_LOCAL_V4, NOT dnat).
-let dst_ne = u32::from_ne_bytes([parsed.dst_addr[0..4]]);
+let dst_ne = u32::from_ne_bytes([parsed.dst_addr[0], parsed.dst_addr[1],
+                                 parsed.dst_addr[2], parsed.dst_addr[3]]);
 // AH-local protection first: an AH-carrying packet whose (post-AH inner) dst is local must
 // keep the is_local_destination XFRM shunt (§8.6) — decline intent AND the session-hit steer.
 if parsed.ah_present && is_local_destination(&parsed) { return cpumap_or_pass(ctrl); }
@@ -108,18 +124,49 @@ if !parsed.ah_present && intent_matches(&parsed, dst_ne) {
 and hits exact (protocol byte disambiguates); identifier-agnostic; emitted only where an ICMP
 translation is configured, preserving echo-reply handling for non-translated addresses.
 
-### 5b. Intent semantics + restart reconcile
+### 5b. Intent semantics + authoritative-ready gate + restart reconcile
 
 Intent is a **steer-superset**: port-0 (or address-wildcard) over-steers ALL ports for that
 proto+ip; the helper re-checks the exact rule and locally-delivers non-matching packets (§4a)
-— no policy bypass, an availability shift (§9/§10). **Restart:** pinned maps **persist**
-across restart (loader_userspace_shim.go:63) — the map is NOT empty. On every bringup, the
-helper enumerates the pinned intent maps (the actual current contents, incl. crash residue),
-removes `current − desired` **before** inserting `desired − current` (so a stale-full map
-doesn't fail the union preflight), and gates **binding readiness** (`maps_sync.go:673`, the
-real shim steering gate) until the reconcile succeeds; any enumerate/insert/delete failure →
-keep bindings non-READY, report, retry from scratch. Fresh-node fail-safe (absent intent →
-is_local path → today's behavior, never a new bypass) still holds.
+— no policy bypass, an availability shift (§9/§10).
+
+**Superset ordering invariant (closes the incomplete-state bypass, Codex r5).** The intent
+map MUST always contain at least the **currently-active generation's** keys, so no live
+DNAT-transit tuple is ever absent. This is guaranteed by the §5d order (insert-new →
+publish-new-generation → delete-stale-*after*-swap) plus abort-on-insert-failure (a failed
+apply leaves the prior complete generation live). The only state that violates the invariant
+is a crash mid-apply — covered by the restart reconcile below.
+
+**Authoritative-ready gate (fail-closed for incomplete state, Codex r5 blocker).** Because the
+degraded/binding-not-ready/ctrl-disabled paths can only *drop a key that exists* — a MISSING
+intent key would fall through to `is_local_destination` and pass local — membership alone
+cannot fail closed during an incomplete reconcile. So add an explicit
+`USERSPACE_CTRL.intent_authoritative` bit set true only after a successful full intent
+reconcile for the live generation, and make **binding-READY additionally require it**. While
+it is false (first-ever activation before the map is populated; mid-reconcile; post-crash
+before restart reconcile), bindings are non-READY, so that generation's forwarding is not yet
+active — the window is bounded to *before a generation is live*, never during active
+forwarding of a generation whose intent is incomplete. During that window the shim uses the
+pre-fix fail-safe (today's behavior) for local classification, which is the status quo, not a
+new bypass. This is the shim-visible generation gate Codex asked for.
+
+**Ingress-interface coverage (closed, Codex r5 blocker).** The `USERSPACE_INGRESS_IFACES`
+early return (lib.rs:426) passes a packet before any probe, but `buildUserspaceIngressIfindexes`
+(maps_sync.go:1502) includes every interface that has a security zone and is not
+`userspaceSkipsIngressInterface` (which excludes mgmt/`fxp`/`em`/`fab`/`lo0`/tunnel/local-fabric,
+maps_sync.go:~1512). A DNAT/static public address is on a configured **zone dataplane
+interface**, which is therefore always in the ingress set → the probe runs. A DNAT configured
+on a *skipped* interface's address (mgmt/tunnel/fabric/loopback) is non-transit, **out of scope
+and §5d-warned**. So the fork is resolved: proven-covered for the in-scope case, warned for the
+excluded case — no residual bypass.
+
+**Restart:** pinned maps **persist** across restart (loader_userspace_shim.go:63) — the map is
+NOT empty. On every bringup the helper enumerates the pinned intent maps (actual current
+contents, incl. crash residue), removes `current − desired` **before** inserting
+`desired − current` (so a stale-full map doesn't fail the union preflight), and holds
+`intent_authoritative`=false (bindings non-READY, the real shim steering gate at
+`maps_sync.go:679-688` / `userspaceBindingReady`) until the reconcile succeeds; any
+enumerate/insert/delete failure → keep bindings non-READY, report, retry from scratch.
 
 ### 5c. Map + key ABI, mandatory plumbing, capability bitmask
 
@@ -145,10 +192,18 @@ Wiring (implement-time tasks):
 - **Capability bitmask (no import cycle):** package `dataplane` owns the embedded ELF
   (`userspace_xdp_rust.go`); `config` cannot read it (dataplane→config import edge,
   compiler.go:20). So `dataplane` computes a per-family bitmask
-  `{v4_exact, v6_exact, v4_wildcard, v6_wildcard}` (+ an absent/legacy value for a shim with
-  no intent maps) from the loaded artifact and PASSES it to the config compiler via a
-  parameter/interface. The §5d diagnostics read that bitmask, so warnings always match the
-  shipped candidate. Carrier: a shim-declared const map/section validated at load.
+  `{v4_exact, v6_exact, v4_wildcard, v6_wildcard}` from the loaded artifact and PASSES it to
+  the config compiler via a parameter/interface. The §5d diagnostics read that bitmask, so
+  warnings always match the shipped candidate. Carrier: a shim-declared const map/section
+  validated at load.
+- **Absent/malformed/legacy capability semantics (Codex r5 blocker).** A shim with no intent
+  maps (legacy/rollback), an unreadable carrier, or unknown/malformed bits ⇒ treated as
+  **zero intent enforcement**, which MUST make the compiler **§5d-warn every applicable
+  DNAT/static-NAT-on-interface-address rule** (fail-loud, never silently "fixed"). The
+  capability parameter MUST thread through **every** compile entry point — strict, lenient,
+  node-aware/HA, and offline (`config.CompileConfig*`, currently called with no capability
+  input at `pkg/configstore/store.go:336` and `pkg/config/compiler.go:1925`) — so no compile
+  surface emits an un-warned config against a reduced-capability shim.
 - **Cardinality preflight:** reject a config whose **`|current ∪ desired|` per-family**
   encoded-key count (after expansion) exceeds 8192.
 
@@ -165,34 +220,47 @@ destination.rs:113). Key generation:
 - **IP-only PROTO_ANY DNAT** (destination.rs:399) → TCP+UDP exact/port-0 expansion; the
   non-{TCP,UDP} residual is **loud-diagnosed** (the `u8` key can't hold 256).
 
-**Transaction (rollback- AND generation-safe):**
+**Transaction — strict order (rollback- AND generation-safe; Codex r5 blocker).** The order
+is LITERAL and must not be relaxed: **insert-new → publish-new-forwarding-generation →
+synchronous stale-delete AFTER the swap.** Deleting old-only intent *before* the new
+generation is live would leave the old rule active in the helper while its first packet again
+passes kernel-local — the §5b superset invariant forbids it.
 1. `desired`, `new_only = desired − current`, `stale = current − desired`.
 2. Preflight `|current ∪ desired|` per family ≤ 8192.
-3. Insert **only `new_only`** with `UpdateNoExist` (loader.go:588) — never overwrite an
-   active key. Any failure → delete only the `new_only` keys created this apply + abort the
-   apply (fail-closed; unchanged active keys untouched). EEXIST races abort safely (control
-   requests serialize under the server-state mutex, handlers/mod.rs:122).
-4. Publication completes **before** the full-reconcile worker teardown
-   (`coordinator/reconcile/mod.rs:297`, reconcile begins :193) and before the
-   same-plan-refresh commit (`snapshot_refresh.rs:220/236`). `lifecycle.rs:310` is *init*.
-5. **Generation-safe delete:** delete `stale` **synchronously under the writer mutex** in
-   the same apply, recomputing `current − desired` at apply time. **No deferred
+3. Insert **only `new_only`** with `UpdateNoExist` (loader.go:585) — never overwrite an
+   active key. Any failure → delete only the `new_only` keys created this apply + **abort the
+   apply** (fail-closed; the prior complete generation stays live). EEXIST races abort safely
+   (control requests serialize under the server-state mutex, handlers/mod.rs:122).
+4. **Publish the new forwarding generation** — full reconcile at
+   `coord.forwarding = new_forwarding` (snapshot.rs:430, after teardown at
+   `coordinator/reconcile/mod.rs:297`, reconcile begins :193); same-plan refresh commit at
+   `snapshot_refresh.rs:236`. `lifecycle.rs:310` is *init*. Only now is the new intent+forwarding
+   generation authoritative; set `intent_authoritative`=true (§5b) and mark bindings READY.
+5. **Generation-safe delete AFTER the swap:** delete `stale` **synchronously under the writer
+   mutex** in the same apply, recomputing `current − desired` at apply time. **No deferred
    cross-generation retry** (a delayed gen-B delete could remove a key gen-C re-desires — the
-   value is presence-only, no generation tag). A delete failure keeps bindings non-READY +
-   reports; the restart reconcile is the backstop.
-6. **Deferred arming / disarmed refresh:** deferred activation runs through
-   `set_forwarding_state`, which currently **discards** the reconcile error (forwarding.rs:32)
-   — an intent-reconcile/restart-reconcile failure must instead revert arming and return
-   `ok=false`. A disarmed same-plan refresh must reopen the mandatory intent pins (stop()
-   clears FDs, coordinator/mod.rs:521) or defer publication to arm-time reconcile while
-   classification stays disabled.
+   value is presence-only, no generation tag). **Post-commit delete failure result:** the
+   apply is reported as succeeded-with-warning (the new generation is already live and
+   correct — surplus stale keys only over-steer, never bypass), the failure is metered, and
+   the stale keys are reaped by the next apply's `stale` set or the restart reconcile.
+6. **Deferred arming / disarmed refresh (Codex r5 — pick the safe branch).** Deferred
+   activation runs through `set_forwarding_state`, which currently **discards** the reconcile
+   error (forwarding.rs:32) — an intent-reconcile/restart-reconcile failure must instead
+   revert arming and return `ok=false`. A disarmed same-plan refresh (updates forwarding
+   without workers, snapshot.rs:208) MUST **reopen and publish the mandatory intent pins
+   before accepting the refresh** — the "defer publication" alternative is rejected as unsafe
+   (newly-accepted DNAT keys would be absent while the disarmed/ctrl-disabled path passes
+   unmatched local to the kernel, lib.rs:1009). If the pins cannot be published, the refresh
+   is rejected (`intent_authoritative` stays false → non-READY → no active forwarding).
 
 **§5d loud-diagnostic set (mandatory; ≡ §11).** Every form not dataplane-enforced on the
 first packet raises an operator-visible commit-time warning naming the rule. Complete set:
 static-NAT `protocol any` / IP-only PROTO_ANY DNAT non-{TCP,UDP} residual; DNAT/static
-**address-prefix/LPM**; the **reduced-scope outcomes** — if Phase-2 rejects, ALL portless/
-range DNAT + whole-address static-wildcard in BOTH families; if v4-only ships, ALL IPv6
-forms; DNAT/static onto the firewall's own **ESP/AH/IKE/WG/non-native-GRE** control port;
+**address-prefix/LPM**; the **reduced-scope outcomes** — if Phase-2 rejects, TCP/UDP
+portless/range DNAT + whole-address static-wildcard in BOTH families (NOTE: ICMP/ICMPv6 use
+`dst_port=0` which is an **exact Phase-1 key** (lib.rs:1516), so explicit ICMP translation
+rules are covered by exact-both and are NOT Phase-2 casualties — do not over-warn them); if
+v4-only ships, ALL IPv6 forms; DNAT/static onto the firewall's own **ESP/AH/IKE/WG/non-native-GRE** control port;
 **native-GRE outer** DNAT (sibling branch, lib.rs:646); **multicast / link-local / IPv4
 limited-broadcast** (`should_fallback_early`, lib.rs:1340); **unicast NDP-shaped** ICMPv6
 133-137 to a global interface address (early return, lib.rs:578); **IPv6-AH-to-self** address
@@ -206,12 +274,16 @@ must be made **intent-aware and fail-closed**, or #5837 recurs during helper deg
   (lib.rs:1009), binding-missing/not-ready, heartbeat-missing/stale. A **matching non-AH
   intent tuple must be DROPPED via `drop_degraded_transit`** (fail-closed — the helper can't
   translate while degraded, so leaking the flow to the local host would reproduce the bypass).
-- The `USERSPACE_INGRESS_IFACES` absent/zero early return (lib.rs:426) passes the packet
-  before any probe. The plan must PROVE an active translating interface is always in the
-  ingress set (it is a configured zone interface) or apply fail-closed intent classification
-  there; either way, §5d warns for any interface that can't be covered.
+- The `USERSPACE_INGRESS_IFACES` absent/zero early return (lib.rs:426): **resolved in §5b**
+  — an active translating interface (a zone dataplane interface) is always in the ingress set
+  (`buildUserspaceIngressIfindexes`, maps_sync.go:1502), and a DNAT on a skipped interface's
+  address (mgmt/tunnel/fabric/loopback, `userspaceSkipsIngressInterface`) is out of scope +
+  §5d-warned. No residual bypass.
 - NDP (lib.rs:578) and `should_fallback_early` (lib.rs:1340) early returns: DNAT on those is
   nonsensical; out of scope with §5d warnings.
+- **Incomplete-state (missing key)** is closed by the §5b `intent_authoritative` gate: during
+  an incomplete reconcile bindings are non-READY, so no generation whose intent map is
+  incomplete is ever actively forwarding.
 
 This additional placement is what pushes the verifier surface up and must be budgeted in the
 §2 ladder (the degraded-path drop decision is part of Phase-1 exact-both).
@@ -324,14 +396,21 @@ translation math + interface-mode SNAT (unchanged).
 ## 13. Research-resolved vs implementation-execution boundary
 
 **Research-resolved (design decisions this plan owns):** map-reuse-vs-dedicated (B); the
-collision, byte-order, ICMP, AH, degraded-path, generation-safety, and restart-persistence
-correctness models; the verifier ladder + fail-safe + PLAN-KILL fork; the representable-subset
-+ loud-diagnostic policy; the capability-bitmask dependency direction. These are the design
-questions /research exists to answer, and they are answered.
+collision, byte-order, ICMP, AH-before-session-hit, degraded-path fail-closed drop,
+generation-safety, restart-persistence, and **incomplete-state authoritative-ready gate**
+correctness models; the **strict transaction order** (insert-new → publish-generation →
+stale-delete-after-swap) + post-commit delete-failure result; the **disarmed-refresh
+publish-before-accept** decision; the **ingress-interface coverage proof**; the verifier
+ladder (incl. instruction-reclaim-targets-exact-both-first) + fail-safe + PLAN-KILL fork; the
+representable-subset + loud-diagnostic policy; the **absent/malformed/legacy capability
+semantics** (zero-enforcement ⇒ warn-every-rule) + propagation through every `CompileConfig*`
+surface. These are the design questions /research exists to answer, and they are answered
+(Codex r5 design blockers closed in v6).
 
 **Implementation-execution (enumerated for `/engineer`, not authored here):** exact struct
-field byte layouts / JSON tag strings; the capability-bitmask wire encoding + validator; the
-precise `make generate`/`shimverify` runs on both kernels (the go/no-go gate is mechanical and
-belongs to implementation, not the plan); exact test rates/thresholds beyond the joint-bucket
-ceiling relationship. These are execution tasks the plan directs; a research doc that fully
-authored them would be the implementation, not a plan.
+field byte layouts / JSON tag strings / Rust `MapPins` identifiers; the capability-bitmask
+wire encoding + validator; the injected-clock/rate seam the availability test needs at the
+`SlowPathReinjector` level (slowpath.rs:313); the precise `make generate`/`shimverify` runs on
+both kernels (the go/no-go gate is mechanical and belongs to implementation); exact test
+rates/thresholds beyond the joint-bucket ceiling relationship. These are execution tasks the
+plan directs; a research doc that fully authored them would be the implementation, not a plan.
