@@ -2,7 +2,8 @@
 
 ## 1. Status
 
-`DRAFT v1 — pending adversarial plan review` (Codex + AGY + Claude SMR).
+`DRAFT v2 — Claude SMR r1 folded (SMR-1..4); pending Codex + AGY r1`
+(Codex + AGY + Claude SMR). v1 → v2 changelog at the end of this doc.
 
 Research branch: `research/5858-input-filter-invalidation` off origin/master
 `5c68818f6`. This is a `/research` deliverable — it stops at PLAN-READY /
@@ -176,16 +177,26 @@ let (purge_input_v4, purge_input_v6) =
 ```
 
 feeding the **existing** `purge_sessions_for_input_dscp_filter_revalidation`
-call at `:455` (renamed — see 5.3). The DSCP/per-packet-specific
-`input_*_families_changed` re-exports (`filter/engine/mod.rs:15`) become dead
-for the purge path; they may be deleted or retained if any other caller exists
-(grep shows the purge trigger is the only consumer — safe to delete).
+call at `:455` (renamed — see 5.3).
+
+**Decouple deletion from the correctness fix (SMR-4).** The load-bearing change
+is *adding* `input_filter_families_changed` and *replacing* the two call sites in
+`loop_body`. The now-dead `input_dscp_filter_families_changed` /
+`input_per_packet_l4_filter_families_changed` (`filter/engine/mod.rs:15`) are
+deleted **only after** a grep confirms zero other consumers (§11 Q5) — a
+separate, non-security cleanup step, so a hidden consumer cannot turn a deletion
+into a regression of the security fix. Note these detectors read the **per-
+`Filter`** flags `has_dscp_match_terms` / `has_per_packet_l4_match_terms`, which
+is a distinct thing from the `FilterState` **sets** below.
 
 **Nothing on the session-hit hot path changes.** The DSCP/per-packet gate in
 `evaluate_dscp_sensitive_input_filter_on_session_hit` and the
-`iface_filter_v{4,6}_has_dscp_match` / `_has_per_packet_l4_match` sets that gate
-it are **retained** — they serve within-flow per-packet variance, which is
-orthogonal to the cross-rotation purge this issue fixes.
+`iface_filter_v{4,6}_has_dscp_match` / `_has_per_packet_l4_match` **sets** that
+gate it (read by `interface_input_filter_has_dscp_match` /
+`interface_input_filter_has_per_packet_l4_match`) are **retained unchanged** —
+they serve within-flow per-packet variance, an orthogonal mechanism from the
+cross-rotation purge this issue fixes. (They are *not* the same as the detectors
+deleted above; nothing here removes them.)
 
 ### 5.2 Where the "fingerprint" lives (closeout item 1)
 
@@ -210,6 +221,33 @@ misnamed once the trigger is general. Rename to
 `purge_input_filter_v4/v6` / `INPUT_FILTER_PURGE`. Pure rename; no behavior
 change. (Deferrable, but recommended in the same PR for clarity.)
 
+### 5.4 The two decision-cache layers — the flow cache needs no new work (SMR-1)
+
+The RX path has **two** decision caches, and this fix touches only one:
+
+1. **Flow cache** (per-worker, `afxdp/flow_cache.rs`), checked **first** via
+   `stage_flow_cache_hit` (`poll_descriptor/mod.rs:870`).
+2. **Session table** (`resolve_flow_session_decision`, `:969`), checked on a
+   flow-cache miss.
+
+Issue closeout item 2 says invalidate "sessions **/ flow-cache entries**." The
+flow cache is **already** invalidated on every commit and requires **no new
+work**: each entry carries a `config_generation: u64` (`flow_cache.rs:122`)
+stamped from `snapshot.generation` (`coordinator/snapshot_refresh.rs:281`), and a
+stale generation forces a lookup miss (`flow_cache_tests.rs:187`
+`stale_config_generation_causes_miss`). Every accepted config apply advances the
+snapshot generation, so **all** flow-cache entries go stale on **any** commit and
+fall through to the session-hit path — which this fix's purge then invalidates.
+So the flow cache is strictly downstream of the session table: purge the session,
+the next packet misses both caches, re-evaluates cold against the new filter, and
+re-populates both with the correct new decision. The plan therefore satisfies
+closeout item 2 in full with the single session-purge trigger; the flow-cache
+layer self-heals via the existing generation gate. (The DSCP/per-packet filters
+additionally *decline* flow-cache insertion; static filters are cacheable, but
+that only means their entries live until the next generation bump — the deny lands
+on a commit, which *is* a generation bump, so there is no static-filter flow-cache
+bypass either.)
+
 ## 6. Public API preservation
 
 - No wire/protobuf/gRPC change. HA sync ships config text unchanged.
@@ -222,23 +260,43 @@ change. (Deferrable, but recommended in the same PR for clarity.)
 
 ## 7. Hidden invariants the change must preserve
 
-- **Side-effect ordering / atomicity.** The purge must remain **after**
-  `forwarding = new_forwarding` and **before** packet processing within the
-  worker loop iteration (current `:454`→`:455`). This guarantees no intra-worker
-  window where the new filter is live but the old session still forwards, and
-  none where sessions are purged but the old filter still forwards. Preserved by
-  keeping the call site.
-- **NAT/NAT64 allocation release.** Every purged session must still return its
-  source-NAT and NAT64 pool allocations (reusing the existing purge body
-  guarantees this — the general detector only changes *whether* it runs).
+- **Side-effect ordering / atomicity (precision — SMR-2).** The purge must
+  remain **after** `forwarding = new_forwarding` and **before** packet processing
+  within the worker loop iteration (current `:454`→`:455`). This is
+  **per-worker atomic**: within one worker there is no window where the new
+  filter is live but the old session still forwards, nor one where sessions are
+  purged but the old filter still forwards. It is **not** instantaneously global:
+  each worker rotates independently on its own poll iteration, so **all workers
+  converge within one rotation tick** (sub-millisecond). A not-yet-rotated worker
+  still runs old-filter + old-session — self-consistent, and identical to the
+  shipped DSCP/per-packet purge's convergence model. The load-bearing premise
+  that rules out split-brain for a *given* flow: a 5-tuple is RSS-pinned to one
+  worker, and the SessionTable consulted by the hit path
+  (`resolve_flow_session_decision(sessions, …)`) is **worker-local**, so worker B
+  never holds a session for a flow steered to worker A. Preserved by keeping the
+  call site. (If a flow can migrate workers mid-rotation via an RSS reprogram or
+  CoS owner handoff, the worst case is that same sub-ms enforcement delay bounded
+  by the tick — an open question for review, §11 Q3.)
+- **NAT/NAT64 allocation release + deterministic re-derivation (SMR-3).** Every
+  purged session returns its source-NAT (`:355`) and NAT64 (`:364`) allocations
+  (reusing the existing purge body). For an *unrelated still-permitted* NAT'd flow
+  caught by the family-wide over-purge, re-creation must not remap the translated
+  port. Verified safe: the SNAT allocator **deterministically re-derives the
+  preserved translated tuple** (`nat/source.rs:16-43` — "derives the preserved
+  port," `deterministic_indices_v4`, "preserved source port" in the reverse
+  identity), so the re-created flow reclaims its just-released port. The remap
+  hazard is therefore LOW even under family-wide purge.
 - **HA peer delete propagation.** Reusing `delete_terminal_filtered_session`
-  keeps `replicate_session_delete` in the loop → the standby is told.
+  keeps `replicate_session_delete` in the loop → the standby is told. The delete
+  rides the same FIFO `peer_worker_commands` queue as any install, so it cannot
+  be overtaken by an earlier in-flight install for the same key.
 - **Established-flow availability.** Purging a still-permitted TCP session must
   not break the flow. Verified: the transit session-miss path only drops a bare
   RST/FIN-no-SYN (`strict_syn_check_drops_new_flow`,
   `poll_descriptor/mod.rs:679`); a mid-stream data/ACK re-installs the session
   (Junos no-syn-check default, `mod.rs:2092`). So re-evaluation of a permitted
-  flow is seamless; only a now-denied flow is dropped (the intended effect).
+  flow is seamless (plain **and** NAT'd, per the deterministic re-derivation
+  above); only a now-denied flow is dropped (the intended effect).
 - **No hot-path allocation.** The change adds no per-packet allocation (it is
   cold-path only).
 - **Fail-closed compile.** The filter compiler already returns
@@ -289,6 +347,11 @@ Smoke (loss userspace cluster, at `/engineer` time — deferred here):
   this touches session-sync-adjacent purge.)
 - VLAN logical-interface variant (reth0.50 vs reth0.80) to confirm per-logical-
   ifindex keying.
+- Flow-cache assertion (SMR-1): establish a **cacheable** flow (plain TCP/UDP,
+  no NAT64) so it populates the flow cache, then commit the deny; assert the flow
+  stops (proves the `config_generation` gate flushes the flow cache and the
+  session purge revokes the underlying session — neither cache layer bypasses
+  the new deny).
 
 ## 10. Out of scope (explicitly)
 
@@ -388,7 +451,33 @@ matter (unlikely).
 ### Bounded-vs-larger verdict
 
 This is a **BOUNDED extension**, not a new mechanism. The comparator, the purge,
-the atomicity ordering, and the HA propagation all exist and are reviewed. The
-fix removes one `.filter(...)` gate (adds one general detector) and reuses
-everything downstream. No verifier / shim / HA flag-day wall. Expected to
-converge PLAN-READY on Path A / Path A.
+the atomicity ordering, the flow-cache generation gate, and the HA propagation
+all exist and are reviewed. The fix removes one `.filter(...)` gate (adds one
+general detector) and reuses everything downstream. No verifier / shim / HA
+flag-day wall. Expected to converge PLAN-READY on Path A / Path A.
+
+---
+
+## v1 → v2 changelog (Claude SMR r1 folded)
+
+- **SMR-1 (was BLOCKING):** added §5.4 documenting the two decision-cache layers
+  and why the **flow cache** needs no new work (self-invalidates via
+  `config_generation` = `snapshot.generation` on every commit). Closeout item 2
+  ("sessions / flow-cache entries") now fully addressed.
+- **SMR-2 (was BLOCKING):** §7 atomicity claim tightened from "no window" to
+  "per-worker atomic; all workers converge within one rotation tick," with the
+  RSS-pinned worker-local-SessionTable premise that rules out per-flow
+  split-brain. Migration edge moved to §11 Q3.
+- **SMR-3:** §7 now states the SNAT allocator deterministically re-derives the
+  preserved translated tuple (`nat/source.rs:16-43`), so family-wide over-purge
+  is availability-safe for NAT'd flows too, not just plain TCP.
+- **SMR-4:** §5.1 decouples deleting the old detectors from the correctness fix
+  (replace call sites first; delete only after grep) and clarifies that the
+  retained `iface_filter_v*_has_*` **sets** are distinct from the deleted
+  detector functions.
+- Test plan (§9): add an explicit flow-cache assertion (a cached-then-denied
+  flow stops after commit) and keep the HA-failover + VLAN-logical-interface
+  legs.
+
+Claude SMR r1 verdict on v1 was **PLAN-NEEDS-MINOR** (approach sound + bounded;
+these four doc gaps blocked/qualified PLAN-READY). v2 folds all four.
