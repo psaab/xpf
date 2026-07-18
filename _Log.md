@@ -1,3 +1,30 @@
+## 2026-07-18 — #5798 + #5689 /research: authority-keyed fragment association (PLAN-READY)
+- **Timestamp**: 2026-07-18 (research/5798-frag-assoc-authority)
+- **Action**: Converged a coupled security-design plan for #5798 (root, HIGH/
+  security — NAT64 fragment-association hit is not ingress-domain scoped and
+  bypasses input-filter/PBR/zone-policy) + #5689 (beneficiary — PR #6095
+  broadened that bypass from NAT64-only to all ordinary SNAT/DNAT/static-NAT/
+  NPTv6 by reusing the same unscoped `Nat64FragKey` cache). Walked the
+  reference base PR #6095 (branch fix/5689-nat-frag-assoc @ 9e13d448): the
+  shared cache key is `(addr_family, src, dst, ident)` with no ingress
+  identity; the consult sits in an `else if let Some(hit){hit} else {input
+  filter/PBR/zone policy}` arm so a hit bypasses all three enforcement gates.
+  Decisive finding: `UserspaceDpMeta` already stamps ingress_ifindex/vlan/
+  zone/routing_table/protocol on every packet, and ingress_zone_override +
+  packet_fabric_ingress are in scope at the consult — so the ingress authority
+  is derivable on the non-first-fragment path with zero new resolution
+  (kills the main PLAN-KILL condition). Recommended **Path A⁺**: authority +
+  protocol in the key (fail-closed by construction) PLUS a consult reorder so
+  the per-packet interface input filter still runs on a non-first fragment
+  even on a HIT (found in hostile self-review SMR-1: authority key alone does
+  NOT satisfy #5798 fix #4 — an `is-fragment then discard` term would still be
+  bypassed). One PR hardens #6095 for BOTH NAT64 + ordinary (they share the
+  key type); modular `fragment_assoc/` + the #5689 miss-classifier staged as
+  Path C follow-up. Deliverable: converged plan + hostile Claude SMR +
+  Codex/AGY hostile plan-reviews. STOPS at PLAN-READY (no code, no PR).
+- **File(s)**: docs/research/5798-frag-assoc-authority/plan.md,
+  docs/research/5798-frag-assoc-authority/claude-smr-plan-r1.md (docs only)
+
 ## 2026-07-18 — #5100: retire vanished queue identities in fairness throughput window
 
 - **Timestamp**: 2026-07-18 (fix/5100-fairness-window-retire)
