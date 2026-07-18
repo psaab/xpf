@@ -52465,3 +52465,24 @@ top.
 - **File(s)**: docs/generated-reply-rate-limit.md,
   userspace-dp/src/afxdp/icmp.rs, userspace-dp/src/afxdp/tx/dispatch/mod.rs,
   _Log.md
+
+## 2026-07-18 — #6102 research (generated-ICMP logical ifindex) — /research PLAN-READY
+
+- **Timestamp**: 2026-07-18
+- **Action**: Research + hostile SMR for #6102 — TE/PTB generated-ICMP paths
+  key egress-lookup + builder + classify on the PHYSICAL bind ifindex
+  (`ingress_ident.ifindex`) instead of the LOGICAL unit ifindex, silently
+  dropping generated ICMP on VLAN sub-ifs (traceroute/PMTUD break) and
+  mis-classifying CoS/output-filter. Verified firsthand: egress logical-keyed
+  (`forwarding_build/interfaces.rs:326-338`), `ingress_logical_ifindex`
+  `(bind,vlan)→logical` (:291-301), resolver at `forwarding/mod.rs:882-891`,
+  5 defect sites (`icmp.rs:189,197,200,268`; `tx/dispatch/mod.rs:259-272,1311`),
+  shipped reject/cookie precedent (`reject_reply.rs:272-278,343`;
+  `cookie_reply.rs:96-100`), #5856 bucket must STAY physical, HA egress key
+  (`icmp.rs:289`) unchanged (owner_rg_for_flow logical-keyed but TE prebuilt
+  path not HA-enforced), vacuous test `tests_icmp_te.rs:389`. Recommendation:
+  single /engineer PR (mechanical mirror at 5 sites + test rebuild + doc/comment
+  fix), no design fork.
+- **File(s)**: docs/research/6102-generated-icmp-logical-ifindex/plan.md (new),
+  claude-smr-plan-r1.md (new), companion-review-status.md (new)
+- **Branch**: research/6102-generated-icmp-logical-ifindex off origin/master 1e43937f5
