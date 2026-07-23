@@ -70,9 +70,10 @@ MASTER. `t_p0` = the instant O emits its first priority-0 advert.
 1. `sendAdvert(0)` ×3 — socket writes, ~µs each. Priority-0 is on the wire at `t_p0`.
 2. `becomeBackup` → `removeVIPs` — netlink `RTM_DELADDR` per VIP. O stops answering
    ARP at `t_p0 + δ_remove`. (The figures below for `δ_remove` are **illustrative,
-   not load-bearing** — see §4: the benign conclusion holds for ANY `δ_remove`,
-   including the ~1 s failed-removal case, because the harm is masked independent of
-   window width. No `δ_remove` measurement is claimed.)
+   not load-bearing** — see §4: on the **success path** the sub-ms window is benign at
+   any `δ_remove`; the **failure paths** (failed removeVIPs / failed `SetRGActive`) are
+   analysed separately below and are NOT unconditionally benign. No `δ_remove`
+   measurement is claimed.)
 
 **Peer R (promoting):**
 3. Receives priority-0 at `t_p0 + δ_net`; `handleBackupRx` sets `masterDownTimer` to
@@ -124,10 +125,12 @@ and the one corner where it CAN order (Codex F1):**
   on VIP removal, not the forwarding property — see §3-forwarding below).
 
 **What the ack barrier genuinely does (retained #5640 value):** it withholds the
-applied-ack until O's `rg_active` is cleared (daemon_ha.go:367 precedes :389), so
-the requester does not treat the failover as "applied" — RG0 config-write
-ownership handoff, fabric-redirect teardown — while O is still cluster-active
-**forwarding**. That is a coordination/forwarding property, not a VIP property.
+applied-ack until O's `rg_active` clear has been **attempted** (`SetRGActive(false)` at
+daemon_ha.go:367 precedes the signal at :389) — so on the *success* path the requester
+does not treat the failover as "applied" (RG0 config-write handoff, fabric-redirect
+teardown) while O is still cluster-active **forwarding**. Note the barrier gates on
+*attempt*, not success: a FAILED `SetRGActive(false)` still signals (the §5 Option-D
+hazard). That is a coordination/forwarding property, not a VIP property.
 
 **Harm — split the SUCCESS path from the FAILURE paths (Codex F2 correction):**
 

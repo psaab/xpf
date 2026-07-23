@@ -1,0 +1,1858 @@
+Reading additional input from stdin...
+OpenAI Codex v0.145.0
+--------
+[1mworkdir:[0m /home/ps/git/bpfrx/.claude/worktrees/6177-research
+[1mmodel:[0m gpt-5.6-sol
+[1mprovider:[0m openai
+[1mapproval:[0m never
+[1msandbox:[0m workspace-write [workdir, /tmp, $TMPDIR]
+[1mreasoning effort:[0m medium
+[1mreasoning summaries:[0m none
+[1msession id:[0m 019f8e30-38ae-72c3-a956-e1a5c6de9cb2
+--------
+[36muser[0m
+HOSTILE re-review of docs/research/6177-reth-twoowner/plan.md r4 (issue #6177). You
+reviewed r2 (PLAN-NEEDS-REVISION, F1-F5) and r3 (PLAN-NEEDS-REVISION, 5 precision fixes).
+r4 claims to have folded every r3 correction. This is a CONVERGENCE check: verify the
+corrections are real and correct; only raise a NEW blocker if it genuinely changes the
+recommendation. Do NOT re-litigate settled points. Budget: reason; spot-check <=3
+anchors; do not re-read the tree.
+
+r3 required corrections and r4's claimed folds:
+1. F1 all-3-lost: r4 now states the ack orders promotion ONLY in the sub-case where
+   post-ack ForceRGMaster wins the race vs R's independently-expiring masterDownTimer
+   (R's timer within its master-down horizon, not O's >=500ms safety timer). Correct now?
+2. "~2s bound" removed: r4 now says the 2s reconcile is a RETRY CADENCE not a recovery
+   bound — transient clears ~<=2s, PERSISTENT SetRGActive failure => dual-forward
+   UNBOUNDED (daemon_ha.go:842). Correct now?
+3. Failed fabric-prep: r4 now states it as an unquantified transient risk (masking
+   absent), not "brief TCP-recoverable loss." Correct now?
+4. Option D: r4 adds the #5079 ~15/30s lease (abort->~30s blackhole) and says the
+   follow-up must weigh transient-vs-persistent and must not use a false 2s bound to
+   prejudge. Still the right call to FILE (not ship)?
+5. §8 stale Residual-2 text + DisarmIdentityChecked removed; the false "#5640 ack =>
+   rg_active cleared" invariant corrected to "clear ATTEMPTED before signaling." Verify
+   §8 no longer contradicts §§6/7/9 and no longer claims the false invariant.
+
+Recommendation to confirm or reject: PLAN-KILL Residual-1's VIP-gate; DROP Residual-2;
+LAND a branch-level demotion-order test (SetRGActive success+failure) + doc-accuracy fix
+on #6177; FILE Option D (rg_active forwarding fence) as a separate /research issue.
+
+End with exactly one line:
+VERDICT: PLAN-READY   or   VERDICT: PLAN-NEEDS-REVISION   or   VERDICT: PLAN-KILL
+[35m[3mcodex[0m[0m
+I’ll do a narrow convergence review: inspect the r4 diff/history and spot-check at most three code/doc anchors, without reopening settled design points.
+[35m[3mexec[0m[0m
+[1m/bin/bash -lc 'git status --short && git log --oneline -6 -- docs/research/6177-reth-twoowner/plan.md && rg -n "all-3|ForceRGMaster|masterDownTimer|2s|2 s|RETRY|UNBOUNDED|fabric|Option D|5079|Residual-2|DisarmIdentityChecked|5640|clear ATTEMPT|SetRGActive|VIP-gate|Residual-1" docs/research/6177-reth-twoowner/plan.md'[0m in /home/ps/git/bpfrx/.claude/worktrees/6177-research
+[32m succeeded in 0ms:[0m
+5c13774e7 research(#6177): plan r4 — fold Codex r3 (retry-cadence-not-2s-bound, F1 race precision, purge stale §8 Residual-2 text, fix false #5640 invariant, #5079 lease)
+e41e68cdc research(#6177): plan r3 — fold Codex r2 (narrow ACK claim, failed-SetRGActive hazard, drop Residual-2, branch-level test, Option D filed)
+48667161a research(#6177): Claude SMR r2 (PLAN-READY-narrowed) + reviewer ledger + #5482 tail wording
+618451f9a research(#6177): plan r2 — address Claude SMR r1 (security TM, benign-independent-of-window, best-effort fabric, hybrid rebuttal, YAGNI)
+9b3b8fa86 research(#6177): plan r1 — RETH two-owner residual analysis
+4:  harden barrier delete-by-key + add daemon-barrier unit test — #5640 follow-up"
+7:- **Prior art:** #5640 (merged #6174) fixed the ack-before-fence window; #6367
+10:- **Status:** PLAN-READY (narrowed scope) — Residual-1's VIP-gate code change is
+11:  **PLAN-KILLED**; **Residual-2 DROPPED** (partial hardening, Codex F4); **Residual-3
+14:  `SetRGActive(false)` still signals actuation) is **FILED as a new issue** for
+21:#6177 bundles three residuals the #5640 hostile review flagged:
+23:1. **Residual-1 (headline):** on the RETH-VRRP path, the #5640 applied-ack
+28:2. **Residual-2 (LOW, latent):** `disarmFailoverActuation`/timeout delete
+32:3. **Residual-3 (MINOR):** the novel #5640 barrier code
+36:The core research question the earlier #6367 attempt got wrong: **is Residual-1 a
+46:| `pkg/vrrp/instance.go:1107-1128` | `handleBackupRx`: on priority-0 advert, `masterDownTimer.Reset(1ms)` + `skipNextPreemptHold=true` |
+47:| `pkg/vrrp/instance.go:760-819` | `stepBackup` masterDownTimer.C: skipHold → `becomeMaster` (addVIPs + GARP) |
+48:| `pkg/vrrp/instance.go:1042-1046` | comment: post-resign takeover flows through the **ungated** masterDownTimer path, not the gated `preemptNowCh` — true even under sync-hold |
+52:| `pkg/vrrp/manager.go:767-781` | `ForceRGMaster`: **no-op** for instances already `StateMaster` (:772) |
+53:| `pkg/daemon/daemon_ha.go:340-390` | demotion branch: preflight fabric-redirect → `ResignRG` → blackhole → `SetRGActive(false)` → `signalFailoverActuated` |
+54:| `pkg/daemon/daemon_ha.go:142-210` | the #5640 barrier: `armFailoverActuation`/`disarm`/`signal`/`waitFailoverActuated` |
+55:| `pkg/daemon/daemon_ha.go:367,389` | failed `SetRGActive(false)` logs `Warn` and proceeds; `signalFailoverActuated` fires anyway (the Codex-F2 forwarding hazard) |
+56:| `pkg/daemon/daemon_ha.go:604-620,826-842` | `reconcileRGStateLoop` — 2 s ticker RE-ATTEMPTS `rg_active` (retry cadence, not a recovery bound: each pass can re-fail, :842) |
+59:| `pkg/cluster/failover.go:313-352` | `commitRequestedPeerFailover` → `runElection` → (requester) ForceRGMaster no-op |
+78:3. Receives priority-0 at `t_p0 + δ_net`; `handleBackupRx` sets `masterDownTimer` to
+80:4. masterDownTimer fires → `becomeMaster` → `addVIPs` → GARP. R starts answering ARP
+104:  R's VIP takeover is driven by the **ungated** masterDownTimer 1 ms path
+108:  `commitRequestedPeerFailover` → `runElection` → `ForceRGMaster`) is a **no-op** when
+115:  its **own** masterDownTimer expires — that timer is based on R's last non-zero advert,
+119:  promotion **only in the narrower sub-case where the post-ack `ForceRGMaster` wins the
+120:  race against R's independently-expiring masterDownTimer** — the ack cannot suppress
+123:  VIP-removal window" describes, and #6367's VIP-gate was still the wrong tool (it gated
+126:**What the ack barrier genuinely does (retained #5640 value):** it withholds the
+129:ownership handoff, fabric-redirect teardown — while O is still cluster-active
+134:*Success path (removeVIPs + SetRGActive + fabric-prep all succeed) — BENIGN:*
+135:- Transit traffic landing on O is **fabric-redirected to R** — the demotion preflight
+145:- **Failed fabric-prep:** the preflight logs `Warn` and proceeds (readiness.go:23-27), so
+147:  fabric-redirected. This is availability-only (not dual-forwarding), but the loss is an
+153:  well past ~1 s. Transit is still fabric/rg_active-covered, but the plan may not claim
+155:- **Failed `SetRGActive(false)`:** the control-socket call at daemon_ha.go:367 only logs
+159:  (daemon_ha.go:604-620,826-842) RE-ATTEMPTS the clear every 2 s — but that is a **retry
+161:  on the next pass (~≤2 s), but a **persistent** control-socket/dataplane failure leaves
+163:  residual, on the **`SetRGActive`-failure axis, not the VIP-timing axis** — out of
+164:  Residual-1's stated scope and filed separately (§5 Option D / §11).
+171:with real security weight — arises only on a **failed `SetRGActive(false)`** — self-clears on the 2 s reconcile
+173:failure — and #5640's *stated* "ack ⇒ rg_active cleared" invariant does not actually
+175:THAT is the security-relevant work — see §5 Option D — but it has its own
+181:forwarding hazard on the failure path is real but out of Residual-1's scope.**
+186:  nuisance masked by fabric-redirect + rg_active-clear + GARP/per-node-MAC. Closing this
+187:  VIP-timing window (Residual-1's literal ask) buys nothing.
+189:  A **failed `SetRGActive(false)`** signals actuation anyway (daemon_ha.go:367→389),
+190:  producing a real dual-forwarding window: the 2 s reconcile is a **retry cadence, not a
+191:  recovery bound**, so a transient failure clears on the next pass (~≤2 s) but a
+194:  (instance_vip.go:125). These live on the `SetRGActive`/netlink-failure axis, not the
+195:  VIP-timing axis. They do NOT resurrect Residual-1 (gating the ack on VIP removal
+196:  addresses neither), but they ARE the security-relevant residual — see §5 Option D +
+198:- **PLAN-KILL for Residual-1 stands**: its lever (gate ack on VIP removal) is wrong for
+240:### Option C — accept the window as benign; PLAN-KILL the Residual-1 code change
+253:### Option D — hard rg_active forwarding fence (Codex F3; the security-relevant lever) — FILE SEPARATELY
+254:Codex correctly notes the plan cannot dismiss Residual-1 without evaluating a hard
+261:  demoting node keeps forwarding via the fabric path during the transition — clearing
+264:  `signalFailoverActuated` (:389) **conditional on the `SetRGActive(false)` at :367
+266:  instead of committing. This makes #5640's *stated* "ack ⇒ rg_active cleared"
+272:  is demoted, so the cluster must re-elect via the **#5079 owner-side lease (~15/30 s)**
+275:  `SetRGActive` failure is transient — under a **persistent** failure today's condition
+277:  persistent** actuation failure, the 2 s retry cadence, the ~15/30 s lease recovery, L2
+279:  The plan must NOT use a (false) "2 s bound" to prejudge that outcome either way.
+280:- **Verdict:** Option D targets the RIGHT property (forwarding, not VIP timing) but is
+289:Of the two independent residuals (they **do not depend on Q1/Q2**), **Residual-2 is
+291:and correct the **existing** #5640 barrier we are keeping, without half-measures.
+293:- **Residual-2 — delete-by-key identity hardening → DROPPED (Codex F4).** #6367's
+304:  initiator-serialization alone). **YAGNI → drop Residual-2** (resolves the r2 §11 Q-b in
+310:  `watchClusterEvents` demotion branch with `SetRGActive(false)` **succeeding** and
+312:  the #5640 invariant (rg_active clear is attempted before the signal). This both
+313:  closes the #5640 coverage gap AND documents-in-test the exact failed-`SetRGActive`
+314:  behavior that Option D would later change — so the follow-up research has a pinned
+316:- **Doc-accuracy fix.** `docs/session-sync-architecture.md` describes the #5640
+320:  failed-`SetRGActive` forwarding hazard is the real residual (tracked in the new
+321:  Option-D issue), and #5640's "ack ⇒ rg_active cleared" invariant does not currently
+322:  hold on a `SetRGActive` failure.
+328:1. **PLAN-KILL Residual-1's code change** (Option C). Do NOT gate the ack on VIP
+330:2. **DROP Residual-2** (partial delete-by-key hardening) — Codex F4, YAGNI.
+332:   `SetRGActive(false)` success + failure (Codex F5) — `pkg/daemon` only.
+336:5. **FILE a new issue** for Option D (the failed-`SetRGActive(false)` → signal-anyway
+345:process for no gain. The `plan-kill` label semantics apply to the Residual-1 sub-goal
+346:(and the dropped Residual-2), documented inside an otherwise PLAN-READY plan; the
+352:  duplicate-ARP nuisance masked by fabric-redirect + rg_active-clear + GARP/per-node-MAC.
+354:- **NOT keeping quiet about the failure paths:** the failed-`SetRGActive(false)` →
+356:  failure, **unbounded** (Codex r3 — the 2 s reconcile is a retry *cadence*, not a
+358:  does NOT close it — it FILES it (Option D) and pins it in the branch-level test. The
+361:  and Option D's naive form can make it worse (abort→~15/30 s lease blackhole).
+362:- **Docs-only Residual-1 decision:** zero runtime risk.
+363:- **Dropping Residual-2:** zero runtime risk (no code change); removes the temptation to
+372:  calls `SetRGActive(false)` (daemon_ha.go:367) BEFORE `signalFailoverActuated` (:389),
+374:  guarantee it SUCCEEDED (a failed clear still signals). So #5640's often-stated
+388:  `SetRGActive(false)` SUCCEEDS and where it FAILS; assert the demotion-order invariant
+390:  failed-`SetRGActive` behavior (signal still fires) so the Option-D follow-up has a
+393:- **No Residual-2 test** — Residual-2 is dropped.
+412:- **Q-b:** Confirm **dropping Residual-2** (Codex F4, YAGNI) — no half-hardening.
+414:- **Q-c:** File the Option-D issue now (failed-`SetRGActive` forwarding fence,
+419:- **Q-e:** Confirm the `plan-kill` label applies to Residual-1 + Residual-2 sub-goals,
+
+[35m[3mexec[0m[0m
+[1m/bin/bash -lc "git diff --unified=50 e41e68cdc..5c13774e7 -- docs/research/6177-reth-twoowner/plan.md && sed -n '96,180p' docs/research/6177-reth-twoowner/plan.md && sed -n '246,325p' docs/research/6177-reth-twoowner/plan.md && sed -n '365,400p' docs/research/6177-reth-twoowner/plan.md"[0m in /home/ps/git/bpfrx/.claude/worktrees/6177-research
+[32m succeeded in 0ms:[0m
+diff --git a/docs/research/6177-reth-twoowner/plan.md b/docs/research/6177-reth-twoowner/plan.md
+index 22b46cd1e..e9cf0e171 100644
+--- a/docs/research/6177-reth-twoowner/plan.md
++++ b/docs/research/6177-reth-twoowner/plan.md
+@@ -1,396 +1,420 @@
+ # Plan of Action — #6177 RETH failover two-owner residual
+ 
+ - **Issue:** #6177 — "close the RETH VIP-removal sub-ms two-owner residual +
+   harden barrier delete-by-key + add daemon-barrier unit test — #5640 follow-up"
+ - **Research branch:** `research/6177-reth-twoowner`
+ - **Base:** origin/master @ `11e23b49ac1e`
+ - **Prior art:** #5640 (merged #6174) fixed the ack-before-fence window; #6367
+   (CLOSED, unsound) tried to extend the ack barrier to VIP removal.
+-- **Revision:** r3 (post Claude-SMR-r1/r2 + Codex-r2)
++- **Revision:** r4 (post Claude-SMR-r1/r2/r3 + Codex-r2/r3)
+ - **Status:** PLAN-READY (narrowed scope) — Residual-1's VIP-gate code change is
+   **PLAN-KILLED**; **Residual-2 DROPPED** (partial hardening, Codex F4); **Residual-3
+   (expanded to a branch-level demotion-order test) + a doc-accuracy fix are
+   PLAN-READY**; a newly-discovered failure-path forwarding hazard (failed
+   `SetRGActive(false)` still signals actuation) is **FILED as a new issue** for
+   dedicated research (Codex F2/F3 — has an abort→blackhole tradeoff, not ship-ready).
+ 
+ ---
+ 
+ ## 1. Problem statement
+ 
+ #6177 bundles three residuals the #5640 hostile review flagged:
+ 
+ 1. **Residual-1 (headline):** on the RETH-VRRP path, the #5640 applied-ack
+    releases after the local demotion is *signaled* (VRRP priority-0 set +
+    `resignCh` fired), not after the physical RETH VIPs are removed. The issue
+    asks to gate `signalFailoverActuated` on `becomeBackup` completion to close a
+    claimed "sub-ms residual two-owner window."
+ 2. **Residual-2 (LOW, latent):** `disarmFailoverActuation`/timeout delete
+    `failoverActuateWait[rgID]` by KEY without a channel-identity check; an older
+    timed-out same-RG waiter could nuke a newer waiter's entry. Unreachable today
+    (initiator serializes per-RG).
+ 3. **Residual-3 (MINOR):** the novel #5640 barrier code
+    (`armFailoverActuation`/`signalFailoverActuated`/`waitFailoverActuated`) has
+    **no** direct daemon-side unit test.
+ 
+ The core research question the earlier #6367 attempt got wrong: **is Residual-1 a
+ real, closable two-owner window, and is the coordination-ACK the lever that
+ closes it?** #6367 was closed because it was firsthand-confirmed to close no real
+ window. This plan settles the design question, then scopes what actually ships.
+ 
+ ## 2. Blast radius / affected code (read firsthand @ 11e23b49ac1e)
+ 
+ | Path | Role in the failover |
+ |------|----------------------|
+ | `pkg/vrrp/instance.go:1009-1035` | run-loop `resignCh` case: sends 3× `sendAdvert(0)` **then** `becomeBackup`→`removeVIPs` |
+ | `pkg/vrrp/instance.go:1107-1128` | `handleBackupRx`: on priority-0 advert, `masterDownTimer.Reset(1ms)` + `skipNextPreemptHold=true` |
+ | `pkg/vrrp/instance.go:760-819` | `stepBackup` masterDownTimer.C: skipHold → `becomeMaster` (addVIPs + GARP) |
+ | `pkg/vrrp/instance.go:1042-1046` | comment: post-resign takeover flows through the **ungated** masterDownTimer path, not the gated `preemptNowCh` — true even under sync-hold |
+ | `pkg/vrrp/instance.go:1365-1380` | `becomeBackup` → `surfaceStaleVIP(removeVIPs())` |
+ | `pkg/vrrp/instance_vip.go:24-129` | #5482 `surfaceStaleVIP` + bounded async reconcile (200ms×≤5) on removeVIPs failure |
+ | `pkg/vrrp/manager.go:721-737` | `ResignRG`: sets priority-0 synchronously + `triggerResign` (non-blocking) |
+ | `pkg/vrrp/manager.go:767-781` | `ForceRGMaster`: **no-op** for instances already `StateMaster` (:772) |
+ | `pkg/daemon/daemon_ha.go:340-390` | demotion branch: preflight fabric-redirect → `ResignRG` → blackhole → `SetRGActive(false)` → `signalFailoverActuated` |
+ | `pkg/daemon/daemon_ha.go:142-210` | the #5640 barrier: `armFailoverActuation`/`disarm`/`signal`/`waitFailoverActuated` |
+ | `pkg/daemon/daemon_ha.go:367,389` | failed `SetRGActive(false)` logs `Warn` and proceeds; `signalFailoverActuated` fires anyway (the Codex-F2 forwarding hazard) |
+-| `pkg/daemon/daemon_ha.go:604-620` | `reconcileRGStateLoop` — 2 s ticker re-drives `rg_active`, bounding the failed-`SetRGActive` dual-forward window |
++| `pkg/daemon/daemon_ha.go:604-620,826-842` | `reconcileRGStateLoop` — 2 s ticker RE-ATTEMPTS `rg_active` (retry cadence, not a recovery bound: each pass can re-fail, :842) |
+ | `pkg/cluster/sync_failover.go:71-124` | `SendFailover`: per-RG serialization (:82), `failoverAckTimeout` wait |
+ | `pkg/cluster/sync_failover.go:443-450` | `handleRemoteFailover`: `WaitFailoverApplied` gates the ack |
+ | `pkg/cluster/failover.go:313-352` | `commitRequestedPeerFailover` → `runElection` → (requester) ForceRGMaster no-op |
+ 
+ Scope of any code change is small and confined to `pkg/daemon` (barrier hardening
+ + test) + docs. No dataplane/Rust change. No wire-protocol change.
+ 
+ ## 3. Firsthand evidence — the failover timeline (verified, not inherited)
+ 
+ Requester **R** wants the RG; current owner **O** holds the RETH VIPs and is VRRP
+ MASTER. `t_p0` = the instant O emits its first priority-0 advert.
+ 
+ **Owner O (demoting), run-loop `resignCh` case:**
+ 1. `sendAdvert(0)` ×3 — socket writes, ~µs each. Priority-0 is on the wire at `t_p0`.
+ 2. `becomeBackup` → `removeVIPs` — netlink `RTM_DELADDR` per VIP. O stops answering
+    ARP at `t_p0 + δ_remove`. (The figures below for `δ_remove` are **illustrative,
+    not load-bearing** — see §4: the benign conclusion holds for ANY `δ_remove`,
+    including the ~1 s failed-removal case, because the harm is masked independent of
+    window width. No `δ_remove` measurement is claimed.)
+ 
+ **Peer R (promoting):**
+ 3. Receives priority-0 at `t_p0 + δ_net`; `handleBackupRx` sets `masterDownTimer` to
+    **1 ms** + `skipNextPreemptHold`.
+ 4. masterDownTimer fires → `becomeMaster` → `addVIPs` → GARP. R starts answering ARP
+    at `t_p0 + δ_net + 1ms + δ_add`.
+ 
+ **Two-owner overlap** = `O_stop − R_start` = `δ_remove − (δ_net + 1ms + δ_add)`.
+ 
+ - **Normal case:** `δ_remove` (sub-ms) < `1ms + δ_net + δ_add` ⇒ overlap is
+   **negative** — i.e. there is a **~1 ms blackhole gap** (O has released, R has not
+   yet added), NOT a two-owner window. This is bit-identical to the documented
+   "planned shutdown → peer takes over in ~1 ms" path (CLAUDE.md, Chassis Cluster).
+ - **Slow-removal case:** if `δ_remove` exceeds ~1 ms (netlink contention, many
+   VIPs, run-loop scheduling delay), overlap = `δ_remove − ~1ms > 0`. A genuine
+   two-owner window bounded by removeVIPs latency — realistically sub-ms to a few ms.
+ - **Failed-removal case:** `removeVIPs` errors → O keeps the VIP until the #5482
+   `surfaceStaleVIP` reconcile clears it (typically within ~1 s; the reconcile is
+   bounded to 5 attempts at 200 ms, and a pathological netlink wedge logs Error and
+   defers to the next transition — a pre-existing #5482 property, not introduced here).
+   Two-owner for that span. **Independent of the ack barrier**; the ack-barrier levers
+   under debate do nothing for it either.
+ 
+ **Why the coordination-ACK is not the lever on the dominant path (the #6367 error),
+ and the one corner where it CAN order (Codex F1):**
+ 
+ - On the **priority-0 path** — which covers every failover where at least one of O's
+   three priority-0 adverts arrives, i.e. essentially all planned/requested failovers —
+   R's VIP takeover is driven by the **ungated** masterDownTimer 1 ms path
+   (`handleBackupRx` instance.go:1110-1128; `recordMasterAdvert` :1042-1046 confirms it
+   is taken even under sync-hold — the #2082 preempt gate applies only to the
+   `preemptNowCh` shortcut). The requester's post-ack commit (`SendFailoverCommit` →
+   `commitRequestedPeerFailover` → `runElection` → `ForceRGMaster`) is a **no-op** when
+   the instance is already `StateMaster` (manager.go:772). R is already MASTER via
+   priority-0, typically **before** the ack round-trip completes. So on this path
+   gating the ack on VIP removal adds **no** ordering guarantee — #6367's premise
+   ("hold the ack → peer promotes later") is false.
+-- **The narrowing (Codex F1):** in the pathological case where **all three** priority-0
+-  adverts are lost, R does NOT enter the 1 ms path; it promotes via the **ungated
+-  masterDown safety timer** (~97 ms) or, if the ack round-trip is faster, via the
+-  post-ack `ForceRGMaster`. In that sub-case the ack CAN order R's promotion. But this
+-  requires a 3-advert loss burst on the dataplane VF at the exact failover instant AND
+-  (for a two-owner window) O's removeVIPs to be slow/failed too — a compound-rare
+-  corner, and it is not what #6177's "sub-ms VIP-removal window" describes. The honest
+-  claim is therefore: **the ack is not the lever on the dominant priority-0 path;
+-  gating it on VIP removal does not close the general window, only a compound-rare
+-  lost-advert subset — for which #6367's mechanism was still the wrong tool** (it gated
+-  on VIP removal, not on the actual forwarding property, see §3-forwarding below).
++- **The narrowing (Codex F1, corrected in r4):** in the pathological case where **all
++  three** priority-0 adverts are lost, R does NOT enter the 1 ms path; it promotes when
++  its **own** masterDownTimer expires — that timer is based on R's last non-zero advert,
++  so R's remaining delay is somewhere **within** its master-down horizon (up to
++  ~97 ms), NOT a fixed ~97 ms from `t_p0` (and it is NOT O's post-resign safety timer,
++  which is separately clamped to ≥500 ms, instance.go:1021). The ack can order R's
++  promotion **only in the narrower sub-case where the post-ack `ForceRGMaster` wins the
++  race against R's independently-expiring masterDownTimer** — the ack cannot suppress
++  that timer. Even there it requires a 3-advert loss burst AND (for a two-owner window)
++  O's removeVIPs slow/failed too — a compound-rare corner, not what #6177's "sub-ms
++  VIP-removal window" describes, and #6367's VIP-gate was still the wrong tool (it gated
++  on VIP removal, not the forwarding property — see §3-forwarding below).
+ 
+ **What the ack barrier genuinely does (retained #5640 value):** it withholds the
+ applied-ack until O's `rg_active` is cleared (daemon_ha.go:367 precedes :389), so
+ the requester does not treat the failover as "applied" — RG0 config-write
+ ownership handoff, fabric-redirect teardown — while O is still cluster-active
+ **forwarding**. That is a coordination/forwarding property, not a VIP property.
+ 
+ **Harm — split the SUCCESS path from the FAILURE paths (Codex F2 correction):**
+ 
+-*Success path (removeVIPs + SetRGActive both succeed) — BENIGN:*
++*Success path (removeVIPs + SetRGActive + fabric-prep all succeed) — BENIGN:*
+ - Transit traffic landing on O is **fabric-redirected to R** — the demotion preflight
+   `tryPrepareUserspaceRGDemotion` is a **best-effort, bounded (5 s) blocking** prep
+   that runs BEFORE `ResignRG` (daemon_ha.go:348-354) and shifts the flow cache to
+-  `FabricRedirect` (on a prep failure it logs `Warn` and proceeds — brief
+-  TCP-recoverable loss, not a durable blackhole).
++  `FabricRedirect`.
+ - `rg_active` is cleared on O, so O does not cluster-forward for the RG.
+ - R's GARP re-points ARP within ms; RETH uses a **per-node** virtual MAC — the overlap
+   is a transient duplicate-ARP nuisance. No RST, no durable blackhole, no dual-forward.
+   On this path the sub-ms VIP window is benign and closing it buys nothing.
+ 
+-*Failure paths — NOT unconditionally benign (r2 overclaimed; Codex F2):*
++*Failure paths — NOT unconditionally benign (r2 overclaimed; Codex F2/r3):*
++- **Failed fabric-prep:** the preflight logs `Warn` and proceeds (readiness.go:23-27), so
++  its masking property is ABSENT — transit landing on O during the overlap is not
++  fabric-redirected. This is availability-only (not dual-forwarding), but the loss is an
++  **unquantified transient**, not a bounded "brief TCP-recoverable" figure; state it as
++  a risk, do not put a number on it.
+ - **Failed `removeVIPs`:** #5482 bounds retry **effort**, not stale-VIP **lifetime** —
+   after `vipRemoveReconcileMax` (5) attempts at 200 ms it logs Error and leaves the VIP
+-  until the next transition (instance_vip.go:125). So a wedged netlink can leave a stale
+-  VIP for longer than ~1 s. Transit is still fabric/rg_active-covered, but the plan may
+-  not claim "benign for any δ_remove."
++  until the next transition (instance_vip.go:125). A wedged netlink can leave a stale VIP
++  well past ~1 s. Transit is still fabric/rg_active-covered, but the plan may not claim
++  "benign for any δ_remove."
+ - **Failed `SetRGActive(false)`:** the control-socket call at daemon_ha.go:367 only logs
+   a `Warn`; `signalFailoverActuated` (:389) still fires. So the ack is released with O's
+   `rg_active` **still true** — O keeps cluster-forwarding for the RG. Combined with R's
+-  priority-0 promotion + commit, **both nodes can forward** for up to the reconcile
+-  period. Firsthand bound: `reconcileRGStateLoop` (daemon_ha.go:604-620) re-drives
+-  rg_active every **2 s** (+ immediate `reconcileNowCh` nudge), so the dual-forward
+-  window is **~2 s and self-heals** — real, bounded, but NOT what the r2 "universal
+-  benign" implied. This is the genuinely security-relevant residual, and it is on the
+-  **`SetRGActive`-failure axis, not the VIP-timing axis** — so it is out of Residual-1's
+-  stated scope (VIP removal) and is filed separately (§5 Option D / §11).
++  priority-0 promotion + commit, **both nodes can forward**. The `reconcileRGStateLoop`
++  (daemon_ha.go:604-620,826-842) RE-ATTEMPTS the clear every 2 s — but that is a **retry
++  cadence, not a recovery bound** (Codex r3): a single transient failure normally clears
++  on the next pass (~≤2 s), but a **persistent** control-socket/dataplane failure leaves
++  the dual-forward condition **unbounded**. This is the genuinely security-relevant
++  residual, on the **`SetRGActive`-failure axis, not the VIP-timing axis** — out of
++  Residual-1's stated scope and filed separately (§5 Option D / §11).
+ 
+ **Security threat model (the issue is labeled `security`).** (a) **Not
+ attacker-triggerable** — the window opens only on an operator-/weight-driven planned
+ failover coincident with a rare control-socket or netlink failure, not on demand from
+ the data path. (b) The benign VIP-timing overlap (success path) is a transient
+ duplicate-ARP with per-node MACs. (c) The **dual-active forwarding** condition — the one
+-with real security weight — arises only on a **failed `SetRGActive(false)`**, is bounded
+-to the ~2 s reconcile horizon, and #5640's *stated* "ack ⇒ rg_active cleared" invariant
+-does not actually hold on that failure (the ack signals anyway). Closing THAT is the
+-security-relevant work — see §5 Option D — but it has its own abort→blackhole tradeoff
+-and is filed for dedicated research rather than bundled here.
++with real security weight — arises only on a **failed `SetRGActive(false)`** — self-clears on the 2 s reconcile
++cadence for a transient failure but is **unbounded under persistent** control-socket
++failure — and #5640's *stated* "ack ⇒ rg_active cleared" invariant does not actually
++hold on that failure (the ack signals anyway; the clear is only *attempted*). Closing
++THAT is the security-relevant work — see §5 Option D — but it has its own
++abort→blackhole tradeoff and is filed for dedicated research rather than bundled here.
+ 
+ ## 4. Design question Q1 — is there a real two-owner window at all?
+ 
+ **Answer (refined after Codex F2): the VIP-*timing* window is benign; a distinct
+ forwarding hazard on the failure path is real but out of Residual-1's scope.**
+ 
+ - On a normal (success-path) failover there is **no VIP overlap** — a ~1 ms blackhole
+   gap, identical to the documented planned-shutdown takeover. A VIP overlap appears
+   only on slow/failed removal; on the success path it is a benign duplicate-ARP
+   nuisance masked by fabric-redirect + rg_active-clear + GARP/per-node-MAC. Closing this
+   VIP-timing window (Residual-1's literal ask) buys nothing.
+-- **The r2 "benign for ANY δ_remove / any failure" claim was too strong** (Codex F2). A
+-  **failed `SetRGActive(false)`** signals actuation anyway (daemon_ha.go:367→389),
+-  producing a real **~2 s reconcile-bounded dual-forwarding** window; a **failed
+-  removeVIPs** can persist past the #5482 5-attempt reconcile until the next transition
++- **The r2 "benign for ANY δ_remove / any failure" claim was too strong** (Codex F2/r3).
++  A **failed `SetRGActive(false)`** signals actuation anyway (daemon_ha.go:367→389),
++  producing a real dual-forwarding window: the 2 s reconcile is a **retry cadence, not a
++  recovery bound**, so a transient failure clears on the next pass (~≤2 s) but a
++  **persistent** control-socket failure leaves it **unbounded**. A **failed removeVIPs**
++  can persist past the #5482 5-attempt reconcile until the next transition
+   (instance_vip.go:125). These live on the `SetRGActive`/netlink-failure axis, not the
+   VIP-timing axis. They do NOT resurrect Residual-1 (gating the ack on VIP removal
+   addresses neither), but they ARE the security-relevant residual — see §5 Option D +
+   §11 (filed separately).
+ - **PLAN-KILL for Residual-1 stands**: its lever (gate ack on VIP removal) is wrong for
+   BOTH the benign VIP-timing window (nothing to gain) and the real forwarding hazard
+   (wrong property — that needs the rg_active fence, §5-D). The unmeasured `δ_remove`
+   is non-load-bearing for the KILL: the success-path window is benign at any width, and
+   the failure-path harm comes from rg_active/forwarding state, not VIP timing.
+ 
+ ## 5. Design question Q2 — if we wanted to close it, what is the lever? (Multiple Path Options)
+ 
+ ### Option A — reorder O's resign: `removeVIPs` BEFORE priority-0 adverts
+ Move `becomeBackup`/`removeVIPs` ahead of `sendAdvert(0)` in the `resignCh` case.
+ - **Closes:** the slow-removal overlap (O has released before it tells R to take over).
+ - **Costs / rebuttal:**
+   - Does **not** close the failed-removal window — the more dangerous one. Either
+     (i) still send priority-0 on failure ⇒ identical to today (#5482 reconcile), or
+     (ii) withhold priority-0 on failure ⇒ R only takes over via the ~120 ms
+     masterDown **safety timer** (instance.go:1031) — a catastrophic failover-latency
+     regression on the exact path (netlink trouble) where fast failover matters most.
+   - **Lengthens the normal-path blackhole** by `δ_remove`: today O's removal overlaps
+     R's 1 ms timer; serializing them adds the removal time to the gap.
+   - Regresses the documented ~1 ms planned-takeover budget; requires
+     `make test-failover` re-validation on the loss cluster.
+   - **Hybrid** ("remove first; on success send priority-0, on failure send priority-0
+     anyway"): it DOES close the overlap for every SUCCESSFUL slow removal (Codex fairly
+     rebuts the r2 "buys nothing"). But you cannot know the removal outcome without
+     attempting it, and attempting-first IS the reorder — so it adds `δ_remove` to EVERY
+     normal failover and does nothing for the dangerous FAILED-removal case (still sends
+     priority-0 with a stale VIP present, identical to today). Net: taxes every good case
+     to shrink a benign slow-success nuisance; still net-negative, same as A.
+   - **Verdict: NET NEGATIVE** — trades a benign, already-covered sub-ms window for a
+     real latency/availability loss and does not even close the failed case.
+ 
+ ### Option B — VRRP-layer: delay R's priority-0 fast-takeover until O confirms removal
+ Have O signal "VIPs removed" over the sync channel and hold R's takeover until then.
+ - **Closes:** all overlap (R never adds before O removes).
+ - **Costs / rebuttal:**
+   - Adds a full sync round-trip (tens of ms) to the ~1 ms priority-0 fast-path — it
+     reintroduces exactly the ack-round-trip dependency the fast-path exists to avoid.
+   - New failure mode: a lost confirm ⇒ R never takes over ⇒ both nodes secondary
+     (no primary) until a timeout. Strictly worse than a benign duplicate-ARP.
+   - **Verdict: NET NEGATIVE** — large failover-latency regression + a new split-none
+     hazard to close a benign window.
+ 
+ ### Option C — accept the window as benign; PLAN-KILL the Residual-1 code change
+ Do not change the resign ordering or the ack barrier's VIP semantics. Document the
+ analysis (Q1–Q3) in the HA docs so the decision is durable and the next reviewer
+ does not re-derive #6367.
+ - **Verdict: RECOMMENDED.** The window is benign and both real levers regress the
+   ~60 ms/~1 ms failover budget or introduce a worse failure mode.
+ 
+ ### Option C+ (optional add-on to C) — observability only
+ Emit a `Warn` + a counter/metric when a resign's `removeVIPs` exceeds the
+ masterDownInterval (i.e. when the benign window could become non-trivial). Purely
+ additive, no behavior change; converts "benign in theory" into "measurable in
+ practice." Offered as optional; not required for PLAN-READY.
+ 
+ ### Option D — hard rg_active forwarding fence (Codex F3; the security-relevant lever) — FILE SEPARATELY
+ Codex correctly notes the plan cannot dismiss Residual-1 without evaluating a hard
+ forwarding fence, and that the real closable property is `rg_active`-clear, not VIP
+ timing. Two sub-variants:
+ - **D1 (Codex's literal proposal):** reorder so `rg_active` is cleared **successfully
+   before** `ResignRG`/priority-0; if the clear fails, do not advertise resignation or
+   ack — retain the owner, fail the transfer. **Conflicts directly with #485**
+   (daemon_ha.go:341-347 deliberately does `ResignRG` BEFORE clearing `rg_active` so the
+   demoting node keeps forwarding via the fabric path during the transition — clearing
+   first re-introduces a self-blackhole while it is still VRRP-master). So D1 is not free.
+ - **D2 (#485-compatible refinement):** keep the ordering, but make
+   `signalFailoverActuated` (:389) **conditional on the `SetRGActive(false)` at :367
+   succeeding** — downgrade to `failoverAckFailed` on failure so the requester HOLDS
+   instead of committing. This makes #5640's *stated* "ack ⇒ rg_active cleared"
+   invariant actually hold and prevents the requester from reaching dual-active
+   forwarding.
+ - **Why NOT ship D here (firsthand tradeoff):** withholding the ack cannot un-take the
+   peer's **priority-0 VIP move** (already done at ~1 ms). On a failed clear, D2 makes
+   the requester ABORT — leaving the peer holding the VIP with `rg_active=false` while O
+-  is demoted, which can produce a **longer blackhole** (both `rg_active=false`, peer owns
+-  L2, cluster must re-elect via the #5079 lease path) than today's ~2 s
+-  dual-forward-then-reconcile-settle. Whether D2 is a net win depends on a careful
+-  comparison of "bounded dual-forward" vs "bounded blackhole + re-election," the #485
+-  interaction, and the #5079 lease timing — a **design pass in its own right**.
++  is demoted, so the cluster must re-elect via the **#5079 owner-side lease (~15/30 s)**
++  → a **~30 s blackhole** can be worse than today's transient dual-forward. But the
++  comparison is genuinely two-sided: today's dual-forward is only transient IF the
++  `SetRGActive` failure is transient — under a **persistent** failure today's condition
++  is **unbounded**, which argues FOR a fence. So the follow-up must weigh **transient vs
++  persistent** actuation failure, the 2 s retry cadence, the ~15/30 s lease recovery, L2
++  ownership during abort, and the D1/#485 ordering — a **design pass in its own right**.
++  The plan must NOT use a (false) "2 s bound" to prejudge that outcome either way.
+ - **Verdict:** Option D targets the RIGHT property (forwarding, not VIP timing) but is
+-  **not ship-ready** — it has a real abort→blackhole tradeoff and a #485 conflict.
+-  **File it as a new issue for dedicated `/research`** rather than bundling it into the
+-  #6177 follow-up. This keeps the #6177 PR small and honest and does not dismiss the
+-  hazard (it is tracked). See §11.
++  **not ship-ready** — it has a real abort→(~30 s)-blackhole tradeoff and a #485
++  conflict, AND the status-quo hazard it addresses can be unbounded. **File it as a new
++  issue for dedicated `/research`** rather than bundling it into the #6177 follow-up.
++  This keeps the #6177 PR small and honest and does not dismiss the hazard (it is
++  tracked). See §11.
+ 
+ ## 6. Design question Q3 — independent residuals worth landing regardless
+ 
+-Both are real, cheap, and **do not depend on Q1/Q2**. They harden and cover the
+-**existing** #5640 barrier we are keeping:
++Of the two independent residuals (they **do not depend on Q1/Q2**), **Residual-2 is
++DROPPED** and **Residual-3 (+ the doc fix) is LANDED** — see below. The theme: cover
++and correct the **existing** #5640 barrier we are keeping, without half-measures.
+ 
+ - **Residual-2 — delete-by-key identity hardening → DROPPED (Codex F4).** #6367's
+   version hardened only `disarm`/`timeout` to channel-identity while
+   `signalFailoverActuated` stays key-only (can close a newer generation) and
+   `armFailoverActuation` can overwrite an existing entry — i.e. it half-hardens a
+   forbidden state, backed by tests that manufacture that state. The clean choices are
+   EITHER a coherent generation/identity model across all four of arm/signal/timeout/
+   disarm (only worth it once concurrency is actually reachable) OR keep today's
+-  serialized invariant. Since same-RG concurrency is unreachable (initiator serializes
+-  per-RG at sync_failover.go:82), **YAGNI → drop Residual-2**. (This also resolves the
+-  r2 §11 Q-b in favor of dropping.)
++  serialized invariant. Same-RG concurrency is unreachable — the initiator serializes
++  per-RG (sync_failover.go:82) AND the responder acks (3 s actuate timeout) well before
++  the initiator's 20 s ack timeout could retry, so no overlapping same-RG waiter exists
++  even across a connection replace/re-entry (the fuller argument the drop rests on, not
++  initiator-serialization alone). **YAGNI → drop Residual-2** (resolves the r2 §11 Q-b in
++  favor of dropping). If a future change makes same-RG concurrency reachable, do the
++  coherent four-way generation model then, not the half-measure now.
+ - **Residual-3 — daemon-barrier unit test, EXPANDED to branch-level (Codex F5).**
+   Keep the primitive coverage (arm → signal | timeout → release/downgrade + no
+   stale-channel leak) AND add a **branch-level demotion-order test** that drives the
+   `watchClusterEvents` demotion branch with `SetRGActive(false)` **succeeding** and
+   **failing**, asserting the current behavior (signal fires in both cases today) and
+   the #5640 invariant (rg_active clear is attempted before the signal). This both
+   closes the #5640 coverage gap AND documents-in-test the exact failed-`SetRGActive`
+   behavior that Option D would later change — so the follow-up research has a pinned
+   baseline. Primitive-only tests must NOT claim to protect the ordering (Codex F5).
+ - **Doc-accuracy fix.** `docs/session-sync-architecture.md` describes the #5640
+   release as gating on the demotion being actuated; ensure the RETH wording says
+   "resign **signaled** + priority-0 set + rg_active clear **attempted**", NOT "VIPs
+   removed", and record the Q1–Q3 rationale: the VIP-timing window is benign, the
+   failed-`SetRGActive` forwarding hazard is the real residual (tracked in the new
+   Option-D issue), and #5640's "ack ⇒ rg_active cleared" invariant does not currently
+   hold on a `SetRGActive` failure.
+ 
+ ## 7. Recommended path (overall)
+ 
+ **PLAN-READY with a narrowed scope**, delivered as one small `/engineer 6177` PR:
+ 
+ 1. **PLAN-KILL Residual-1's code change** (Option C). Do NOT gate the ack on VIP
+    removal, do NOT reorder the resign. Record the rationale in the HA docs.
+ 2. **DROP Residual-2** (partial delete-by-key hardening) — Codex F4, YAGNI.
+ 3. **Land Residual-3, expanded to a branch-level demotion-order test** covering
+    `SetRGActive(false)` success + failure (Codex F5) — `pkg/daemon` only.
+ 4. **Land the doc-accuracy fix** + the Q1–Q3 design-decision writeup in
+    `docs/session-sync-architecture.md` (and a pointer from `pkg/vrrp/README.md` /
+    the HA cluster doc as appropriate).
+ 5. **FILE a new issue** for Option D (the failed-`SetRGActive(false)` → signal-anyway
+    dual-forwarding hazard / the rg_active forwarding fence). It targets the right
+    property but has a real abort→blackhole + #485 tradeoff → dedicated `/research`, not
+    this PR. Do NOT close #6177's security concern silently — it is tracked in the new
+    issue. (Per `feedback_triage_new_issue_per_finding`.)
+ 6. **Optional:** Option C+ observability warn/metric — engineer's discretion; deferrable.
+ 
+ **Alternative framing (X):** PLAN-KILL #6177 wholesale and spin #3+doc into a fresh
+ issue. Rejected — #3+doc are small, cohesive, already tracked here; a fresh issue adds
+ process for no gain. The `plan-kill` label semantics apply to the Residual-1 sub-goal
+ (and the dropped Residual-2), documented inside an otherwise PLAN-READY plan; the
+ security-relevant Option-D hazard moves to its own tracking issue.
+ 
+ ## 8. Risk analysis
+ 
+-- **Keeping the benign window:** the only realistic exposure is a duplicate-ARP
+-  nuisance on slow/failed removal, already masked by fabric-redirect + rg_active +
+-  GARP + #5482. No new risk introduced (status quo).
+-- **Residual-2 change:** the identity check is strictly more conservative than the
+-  key-only delete; the nil-ch legacy path preserves current behavior. Risk: a subtle
+-  mismatch between the armed channel and the one passed to disarm — covered by the
+-  Residual-3 tests (`SignalReleasesAndCleansUp`, `TimeoutDowngradesAndCleansUp`,
+-  `DisarmIdentityChecked`).
++- **Keeping the VIP-timing window (success path):** the only exposure is a transient
++  duplicate-ARP nuisance masked by fabric-redirect + rg_active-clear + GARP/per-node-MAC.
++  No new risk (status quo).
++- **NOT keeping quiet about the failure paths:** the failed-`SetRGActive(false)` →
++  signal-anyway dual-forward condition is real and, under a **persistent** control-socket
++  failure, **unbounded** (Codex r3 — the 2 s reconcile is a retry *cadence*, not a
++  recovery *bound*; each pass re-attempts and can re-fail, daemon_ha.go:842). This plan
++  does NOT close it — it FILES it (Option D) and pins it in the branch-level test. The
++  risk of *not* shipping a fix now is that the hazard remains latent until the Option-D
++  research lands; acceptable because it needs a control-socket/netlink failure to trigger
++  and Option D's naive form can make it worse (abort→~15/30 s lease blackhole).
+ - **Docs-only Residual-1 decision:** zero runtime risk.
+-- **Regression surface:** none touches the VRRP run-loop, the resign ordering, or
+-  the dataplane, so the ~60 ms/~1 ms failover budget is unchanged. `make
+-  test-failover` still required per CLAUDE.md because the file set touches
+-  `pkg/daemon` HA code, but no timing change is expected — the smoke is a
+-  **regression gate, not a measurement of the window** (nothing closes the window;
+-  the smoke proves nothing regressed).
+-- **Invariant to protect (#5640).** The retained genuine property is
+-  `SetRGActive(false)` (daemon_ha.go:367) ordered BEFORE `signalFailoverActuated`
+-  (:389) — the ack releases only after rg_active is cleared. The Residual-2 edit
+-  touches the barrier's disarm/arm signatures; the /engineer PR MUST NOT let that
+-  refactor move `signalFailoverActuated` ahead of `SetRGActive(false)`. Call it out
+-  in the PR and cover it with the existing ordering (a review-checklist item; the
+-  demotion-branch order is unit-observable via the barrier tests).
++- **Dropping Residual-2:** zero runtime risk (no code change); removes the temptation to
++  land incoherent half-hardening.
++- **Regression surface (Residual-3 test + doc):** the test may require extracting the
++  demotion-branch body into a unit-testable seam (a mechanical refactor); it does not
++  touch the VRRP run-loop, the resign ordering, or the dataplane, so the ~60 ms/~1 ms
++  failover budget is unchanged. `make test-failover` is still required per CLAUDE.md
++  (the file set touches `pkg/daemon` HA code) as a **regression gate, not a window
++  measurement** — nothing closes the window; the smoke proves nothing regressed.
++- **Ordering fact to CAPTURE (not an invariant to claim).** Today the demotion branch
++  calls `SetRGActive(false)` (daemon_ha.go:367) BEFORE `signalFailoverActuated` (:389),
++  but the clear is only **ATTEMPTED** before signaling — the current code does **NOT**
++  guarantee it SUCCEEDED (a failed clear still signals). So #5640's often-stated
++  "ack ⇒ rg_active cleared" invariant does **not** hold; the honest property is
++  "rg_active clear is attempted before the ack releases." The branch-level Residual-3
++  test must assert exactly this (attempt-before-signal, in BOTH the success and failure
++  cases) and NOT overclaim a cleared-before-signal guarantee. The Option-D follow-up is
++  what would upgrade the attempt into an enforced guarantee.
+ 
+ ## 9. Test plan
+ 
+ - **Unit (Residual-3, primitive):** `pkg/daemon` barrier tests — arm→signal→release
+   (nil err), arm→timeout→downgrade + entry cleaned up. Fail-on-revert per project
+   discipline (neutralize → bound test RED → revert → green).
+ - **Unit (Residual-3, branch-level — Codex F5):** drive the `watchClusterEvents`
+   demotion branch (or an extracted testable seam) with a mock dataplane where
+   `SetRGActive(false)` SUCCEEDS and where it FAILS; assert the demotion-order invariant
+   (rg_active clear attempted before `signalFailoverActuated`) and pin the current
+   failed-`SetRGActive` behavior (signal still fires) so the Option-D follow-up has a
+   baseline. This is the test that actually protects the ordering — primitive tests do
+   not.
+ - **No Residual-2 test** — Residual-2 is dropped.
+ - **No new VRRP timing test** — no timing behavior changes.
+ - **Smoke:** `make test-failover` on the loss userspace cluster (v4+v6, push +
+   reverse) once, to confirm the `pkg/daemon` HA touch did not regress failover.
+   Expectation: unchanged ~zero-drop failover; this is a **regression gate**, not a
+   measurement of the (unchanged) window.
+ 
+ ## 10. Docs to update
+ 
+ - `docs/session-sync-architecture.md` — correct the RETH release wording; add the
+   Q1–Q4 "why the RETH VIP window is intentionally not closed" subsection.
+ - `pkg/vrrp/README.md` and/or the HA cluster doc — one-line pointer to the decision.
+ - `_Log.md` — per project logging rules, on implementation.
+ - This plan doc is the durable research artifact; link it from the #6177 comment.
+ 
+ ## 11. Open questions / decisions for the user
+ 
+ - **Q-a:** Adopt the narrowed-scope PR (Framing Y, recommended) or the fresh-issue
+   split (Framing X)? Default: Y (land Residual-3 branch-level test + doc fix on #6177).
+ - **Q-b:** Confirm **dropping Residual-2** (Codex F4, YAGNI) — no half-hardening.
+   Default: drop.
+ - **Q-c:** File the Option-D issue now (failed-`SetRGActive` forwarding fence,
+   security-relevant, needs its own research)? Default: yes — file before closing
+   #6177's security label so nothing is silently dismissed.
+ - **Q-d:** Include Option C+ observability (warn/metric on slow resign removal) in the
+   same PR, or defer? Default: defer (keep the PR minimal).
+ - **Q-e:** Confirm the `plan-kill` label applies to Residual-1 + Residual-2 sub-goals,
+   while #6177 proceeds to a narrowed `/engineer` for the branch-level test + doc.
+  Two-owner for that span. **Independent of the ack barrier**; the ack-barrier levers
+  under debate do nothing for it either.
+
+**Why the coordination-ACK is not the lever on the dominant path (the #6367 error),
+and the one corner where it CAN order (Codex F1):**
+
+- On the **priority-0 path** — which covers every failover where at least one of O's
+  three priority-0 adverts arrives, i.e. essentially all planned/requested failovers —
+  R's VIP takeover is driven by the **ungated** masterDownTimer 1 ms path
+  (`handleBackupRx` instance.go:1110-1128; `recordMasterAdvert` :1042-1046 confirms it
+  is taken even under sync-hold — the #2082 preempt gate applies only to the
+  `preemptNowCh` shortcut). The requester's post-ack commit (`SendFailoverCommit` →
+  `commitRequestedPeerFailover` → `runElection` → `ForceRGMaster`) is a **no-op** when
+  the instance is already `StateMaster` (manager.go:772). R is already MASTER via
+  priority-0, typically **before** the ack round-trip completes. So on this path
+  gating the ack on VIP removal adds **no** ordering guarantee — #6367's premise
+  ("hold the ack → peer promotes later") is false.
+- **The narrowing (Codex F1, corrected in r4):** in the pathological case where **all
+  three** priority-0 adverts are lost, R does NOT enter the 1 ms path; it promotes when
+  its **own** masterDownTimer expires — that timer is based on R's last non-zero advert,
+  so R's remaining delay is somewhere **within** its master-down horizon (up to
+  ~97 ms), NOT a fixed ~97 ms from `t_p0` (and it is NOT O's post-resign safety timer,
+  which is separately clamped to ≥500 ms, instance.go:1021). The ack can order R's
+  promotion **only in the narrower sub-case where the post-ack `ForceRGMaster` wins the
+  race against R's independently-expiring masterDownTimer** — the ack cannot suppress
+  that timer. Even there it requires a 3-advert loss burst AND (for a two-owner window)
+  O's removeVIPs slow/failed too — a compound-rare corner, not what #6177's "sub-ms
+  VIP-removal window" describes, and #6367's VIP-gate was still the wrong tool (it gated
+  on VIP removal, not the forwarding property — see §3-forwarding below).
+
+**What the ack barrier genuinely does (retained #5640 value):** it withholds the
+applied-ack until O's `rg_active` is cleared (daemon_ha.go:367 precedes :389), so
+the requester does not treat the failover as "applied" — RG0 config-write
+ownership handoff, fabric-redirect teardown — while O is still cluster-active
+**forwarding**. That is a coordination/forwarding property, not a VIP property.
+
+**Harm — split the SUCCESS path from the FAILURE paths (Codex F2 correction):**
+
+*Success path (removeVIPs + SetRGActive + fabric-prep all succeed) — BENIGN:*
+- Transit traffic landing on O is **fabric-redirected to R** — the demotion preflight
+  `tryPrepareUserspaceRGDemotion` is a **best-effort, bounded (5 s) blocking** prep
+  that runs BEFORE `ResignRG` (daemon_ha.go:348-354) and shifts the flow cache to
+  `FabricRedirect`.
+- `rg_active` is cleared on O, so O does not cluster-forward for the RG.
+- R's GARP re-points ARP within ms; RETH uses a **per-node** virtual MAC — the overlap
+  is a transient duplicate-ARP nuisance. No RST, no durable blackhole, no dual-forward.
+  On this path the sub-ms VIP window is benign and closing it buys nothing.
+
+*Failure paths — NOT unconditionally benign (r2 overclaimed; Codex F2/r3):*
+- **Failed fabric-prep:** the preflight logs `Warn` and proceeds (readiness.go:23-27), so
+  its masking property is ABSENT — transit landing on O during the overlap is not
+  fabric-redirected. This is availability-only (not dual-forwarding), but the loss is an
+  **unquantified transient**, not a bounded "brief TCP-recoverable" figure; state it as
+  a risk, do not put a number on it.
+- **Failed `removeVIPs`:** #5482 bounds retry **effort**, not stale-VIP **lifetime** —
+  after `vipRemoveReconcileMax` (5) attempts at 200 ms it logs Error and leaves the VIP
+  until the next transition (instance_vip.go:125). A wedged netlink can leave a stale VIP
+  well past ~1 s. Transit is still fabric/rg_active-covered, but the plan may not claim
+  "benign for any δ_remove."
+- **Failed `SetRGActive(false)`:** the control-socket call at daemon_ha.go:367 only logs
+  a `Warn`; `signalFailoverActuated` (:389) still fires. So the ack is released with O's
+  `rg_active` **still true** — O keeps cluster-forwarding for the RG. Combined with R's
+  priority-0 promotion + commit, **both nodes can forward**. The `reconcileRGStateLoop`
+  (daemon_ha.go:604-620,826-842) RE-ATTEMPTS the clear every 2 s — but that is a **retry
+  cadence, not a recovery bound** (Codex r3): a single transient failure normally clears
+  on the next pass (~≤2 s), but a **persistent** control-socket/dataplane failure leaves
+  the dual-forward condition **unbounded**. This is the genuinely security-relevant
+  residual, on the **`SetRGActive`-failure axis, not the VIP-timing axis** — out of
+  Residual-1's stated scope and filed separately (§5 Option D / §11).
+
+**Security threat model (the issue is labeled `security`).** (a) **Not
+attacker-triggerable** — the window opens only on an operator-/weight-driven planned
+failover coincident with a rare control-socket or netlink failure, not on demand from
+the data path. (b) The benign VIP-timing overlap (success path) is a transient
+duplicate-ARP with per-node MACs. (c) The **dual-active forwarding** condition — the one
+with real security weight — arises only on a **failed `SetRGActive(false)`** — self-clears on the 2 s reconcile
+cadence for a transient failure but is **unbounded under persistent** control-socket
+failure — and #5640's *stated* "ack ⇒ rg_active cleared" invariant does not actually
+hold on that failure (the ack signals anyway; the clear is only *attempted*). Closing
+THAT is the security-relevant work — see §5 Option D — but it has its own
+abort→blackhole tradeoff and is filed for dedicated research rather than bundled here.
+
+## 4. Design question Q1 — is there a real two-owner window at all?
+
+**Answer (refined after Codex F2): the VIP-*timing* window is benign; a distinct
+
+### Option C+ (optional add-on to C) — observability only
+Emit a `Warn` + a counter/metric when a resign's `removeVIPs` exceeds the
+masterDownInterval (i.e. when the benign window could become non-trivial). Purely
+additive, no behavior change; converts "benign in theory" into "measurable in
+practice." Offered as optional; not required for PLAN-READY.
+
+### Option D — hard rg_active forwarding fence (Codex F3; the security-relevant lever) — FILE SEPARATELY
+Codex correctly notes the plan cannot dismiss Residual-1 without evaluating a hard
+forwarding fence, and that the real closable property is `rg_active`-clear, not VIP
+timing. Two sub-variants:
+- **D1 (Codex's literal proposal):** reorder so `rg_active` is cleared **successfully
+  before** `ResignRG`/priority-0; if the clear fails, do not advertise resignation or
+  ack — retain the owner, fail the transfer. **Conflicts directly with #485**
+  (daemon_ha.go:341-347 deliberately does `ResignRG` BEFORE clearing `rg_active` so the
+  demoting node keeps forwarding via the fabric path during the transition — clearing
+  first re-introduces a self-blackhole while it is still VRRP-master). So D1 is not free.
+- **D2 (#485-compatible refinement):** keep the ordering, but make
+  `signalFailoverActuated` (:389) **conditional on the `SetRGActive(false)` at :367
+  succeeding** — downgrade to `failoverAckFailed` on failure so the requester HOLDS
+  instead of committing. This makes #5640's *stated* "ack ⇒ rg_active cleared"
+  invariant actually hold and prevents the requester from reaching dual-active
+  forwarding.
+- **Why NOT ship D here (firsthand tradeoff):** withholding the ack cannot un-take the
+  peer's **priority-0 VIP move** (already done at ~1 ms). On a failed clear, D2 makes
+  the requester ABORT — leaving the peer holding the VIP with `rg_active=false` while O
+  is demoted, so the cluster must re-elect via the **#5079 owner-side lease (~15/30 s)**
+  → a **~30 s blackhole** can be worse than today's transient dual-forward. But the
+  comparison is genuinely two-sided: today's dual-forward is only transient IF the
+  `SetRGActive` failure is transient — under a **persistent** failure today's condition
+  is **unbounded**, which argues FOR a fence. So the follow-up must weigh **transient vs
+  persistent** actuation failure, the 2 s retry cadence, the ~15/30 s lease recovery, L2
+  ownership during abort, and the D1/#485 ordering — a **design pass in its own right**.
+  The plan must NOT use a (false) "2 s bound" to prejudge that outcome either way.
+- **Verdict:** Option D targets the RIGHT property (forwarding, not VIP timing) but is
+  **not ship-ready** — it has a real abort→(~30 s)-blackhole tradeoff and a #485
+  conflict, AND the status-quo hazard it addresses can be unbounded. **File it as a new
+  issue for dedicated `/research`** rather than bundling it into the #6177 follow-up.
+  This keeps the #6177 PR small and honest and does not dismiss the hazard (it is
+  tracked). See §11.
+
+## 6. Design question Q3 — independent residuals worth landing regardless
+
+Of the two independent residuals (they **do not depend on Q1/Q2**), **Residual-2 is
+DROPPED** and **Residual-3 (+ the doc fix) is LANDED** — see below. The theme: cover
+and correct the **existing** #5640 barrier we are keeping, without half-measures.
+
+- **Residual-2 — delete-by-key identity hardening → DROPPED (Codex F4).** #6367's
+  version hardened only `disarm`/`timeout` to channel-identity while
+  `signalFailoverActuated` stays key-only (can close a newer generation) and
+  `armFailoverActuation` can overwrite an existing entry — i.e. it half-hardens a
+  forbidden state, backed by tests that manufacture that state. The clean choices are
+  EITHER a coherent generation/identity model across all four of arm/signal/timeout/
+  disarm (only worth it once concurrency is actually reachable) OR keep today's
+  serialized invariant. Same-RG concurrency is unreachable — the initiator serializes
+  per-RG (sync_failover.go:82) AND the responder acks (3 s actuate timeout) well before
+  the initiator's 20 s ack timeout could retry, so no overlapping same-RG waiter exists
+  even across a connection replace/re-entry (the fuller argument the drop rests on, not
+  initiator-serialization alone). **YAGNI → drop Residual-2** (resolves the r2 §11 Q-b in
+  favor of dropping). If a future change makes same-RG concurrency reachable, do the
+  coherent four-way generation model then, not the half-measure now.
+- **Residual-3 — daemon-barrier unit test, EXPANDED to branch-level (Codex F5).**
+  Keep the primitive coverage (arm → signal | timeout → release/downgrade + no
+  stale-channel leak) AND add a **branch-level demotion-order test** that drives the
+  `watchClusterEvents` demotion branch with `SetRGActive(false)` **succeeding** and
+  **failing**, asserting the current behavior (signal fires in both cases today) and
+  the #5640 invariant (rg_active clear is attempted before the signal). This both
+  closes the #5640 coverage gap AND documents-in-test the exact failed-`SetRGActive`
+  behavior that Option D would later change — so the follow-up research has a pinned
+  baseline. Primitive-only tests must NOT claim to protect the ordering (Codex F5).
+- **Doc-accuracy fix.** `docs/session-sync-architecture.md` describes the #5640
+  release as gating on the demotion being actuated; ensure the RETH wording says
+  "resign **signaled** + priority-0 set + rg_active clear **attempted**", NOT "VIPs
+  removed", and record the Q1–Q3 rationale: the VIP-timing window is benign, the
+  failed-`SetRGActive` forwarding hazard is the real residual (tracked in the new
+  Option-D issue), and #5640's "ack ⇒ rg_active cleared" invariant does not currently
+  hold on a `SetRGActive` failure.
+
+## 7. Recommended path (overall)
+
+- **Regression surface (Residual-3 test + doc):** the test may require extracting the
+  demotion-branch body into a unit-testable seam (a mechanical refactor); it does not
+  touch the VRRP run-loop, the resign ordering, or the dataplane, so the ~60 ms/~1 ms
+  failover budget is unchanged. `make test-failover` is still required per CLAUDE.md
+  (the file set touches `pkg/daemon` HA code) as a **regression gate, not a window
+  measurement** — nothing closes the window; the smoke proves nothing regressed.
+- **Ordering fact to CAPTURE (not an invariant to claim).** Today the demotion branch
+  calls `SetRGActive(false)` (daemon_ha.go:367) BEFORE `signalFailoverActuated` (:389),
+  but the clear is only **ATTEMPTED** before signaling — the current code does **NOT**
+  guarantee it SUCCEEDED (a failed clear still signals). So #5640's often-stated
+  "ack ⇒ rg_active cleared" invariant does **not** hold; the honest property is
+  "rg_active clear is attempted before the ack releases." The branch-level Residual-3
+  test must assert exactly this (attempt-before-signal, in BOTH the success and failure
+  cases) and NOT overclaim a cleared-before-signal guarantee. The Option-D follow-up is
+  what would upgrade the attempt into an enforced guarantee.
+
+## 9. Test plan
+
+- **Unit (Residual-3, primitive):** `pkg/daemon` barrier tests — arm→signal→release
+  (nil err), arm→timeout→downgrade + entry cleaned up. Fail-on-revert per project
+  discipline (neutralize → bound test RED → revert → green).
+- **Unit (Residual-3, branch-level — Codex F5):** drive the `watchClusterEvents`
+  demotion branch (or an extracted testable seam) with a mock dataplane where
+  `SetRGActive(false)` SUCCEEDS and where it FAILS; assert the demotion-order invariant
+  (rg_active clear attempted before `signalFailoverActuated`) and pin the current
+  failed-`SetRGActive` behavior (signal still fires) so the Option-D follow-up has a
+  baseline. This is the test that actually protects the ordering — primitive tests do
+  not.
+- **No Residual-2 test** — Residual-2 is dropped.
+- **No new VRRP timing test** — no timing behavior changes.
+- **Smoke:** `make test-failover` on the loss userspace cluster (v4+v6, push +
+  reverse) once, to confirm the `pkg/daemon` HA touch did not regress failover.
+  Expectation: unchanged ~zero-drop failover; this is a **regression gate**, not a
+  measurement of the (unchanged) window.
+
+## 10. Docs to update
+
+[35m[3mcodex[0m[0m
+The claimed folds are present, but I found one potentially material stale sentence outside §8: §3 still says the ack is withheld “until `rg_active` is cleared,” even though the same section and §§6/8/9 correctly say only “clear attempted.” I’m checking the three underlying code anchors now to decide whether this is merely editorial or recommendation-changing.
+[35m[3mexec[0m[0m
+[1m/bin/bash -lc "sed -n '990,1048p' pkg/vrrp/instance.go; sed -n '748,790p' pkg/vrrp/manager.go; sed -n '330,400p' pkg/daemon/daemon_ha.go; sed -n '600,625p' pkg/daemon/daemon_ha.go; sed -n '816,848p' pkg/daemon/daemon_ha.go; rg -n -C 4 \"15|30|lease|owner\" pkg/cluster pkg/daemon | head -160"[0m in /home/ps/git/bpfrx/.claude/worktrees/6177-research
+[32m succeeded in 0ms:[0m
+			select {
+			case <-vi.stopCh:
+				// Send burst of priority-0 advertisements to signal resignation.
+				// Multiple adverts improve reliability if one is lost on the wire.
+				for i := 0; i < 3; i++ {
+					vi.sendAdvert(0)
+				}
+				// Best-effort at process exit: log a removal failure but do not
+				// schedule a reconcile (stopCh is closed, the run-loop is ending).
+				if err := vi.removeVIPs(); err != nil {
+					slog.Warn("vrrp: VIP removal failed during resignation shutdown",
+						"key", vi.key(), "err", err)
+				}
+				return
+			case pkt := <-vi.rxCh:
+				vi.handleMasterRx(pkt, masterDownTimer, advertTimer)
+			case <-advertTimer.C:
+				vi.sendAdvert(vi.getPriority())
+				advertTimer.Reset(vi.advertInterval())
+			case <-vi.resignCh:
+				// Forced resignation (manual failover / cluster Primary→Secondary).
+				slog.Info("vrrp: forced resignation", "key", vi.key())
+				for i := 0; i < 3; i++ {
+					vi.sendAdvert(0)
+				}
+				vi.becomeBackup(masterDownTimer, advertTimer)
+				// Use an extended safety-net timer instead of stopping entirely.
+				// With short RETH intervals (30ms), masterDownInterval() at
+				// priority 0 is only ~120ms, which re-elects the resigned node
+				// before the peer can take over. We use 3× the normal
+				// masterDownInterval to give the peer time to become MASTER
+				// and start advertising, while still providing a recovery path
+				// if the peer crashes without sending priority-0.
+				//
+				// Normal recovery paths (faster than the safety timer):
+				//   - preemptNowCh (cluster ForceRGMaster after failover reset)
+				//   - priority-0 from peer (peer resigning) → 1ms takeover
+				//   - peer advert received → resets timer to masterDownInterval
+				//
+				// The safety timer only fires if the peer is completely gone
+				// (crash without priority-0, network partition).
+				safetyTimeout := 3 * vi.masterDownInterval()
+				if safetyTimeout < 500*time.Millisecond {
+					safetyTimeout = 500 * time.Millisecond
+				}
+				masterDownTimer.Reset(safetyTimeout)
+			}
+		}
+	}
+}
+
+// recordMasterAdvert records a peer's last advertised priority for the
+// sync-hold preempt gate (#2082). Priority-0 (resignation) adverts are NOT
+// recorded — leaving a stale lastMasterPriority is safe because post-resign
+// takeover flows through the ungated masterDownTimer path, not the gated
+// preemptNowCh shortcut. Called from handleBackupRx/handleMasterRx, which run
+// in the run-loop goroutine; mu only guards external readers.
+func (vi *vrrpInstance) recordMasterAdvert(pkt *VRRPPacket) {
+	if pkt.Priority == 0 {
+		if isRethInstance(vi.cfg) && vi.cfg.GroupID == vrid {
+			vi.mu.Lock()
+			old := vi.cfg.Priority
+			vi.cfg.Priority = priority
+			vi.mu.Unlock()
+			if old != priority {
+				slog.Info("vrrp: immediate priority update",
+					"key", vi.key(), "old_pri", old, "new_pri", priority)
+			}
+		}
+	}
+}
+
+// ForceRGMaster forces all VRRP instances for the given redundancy group
+// to become MASTER, even with preempt=false. Used when the cluster state
+// machine has determined this node is primary for the RG but VRRP hasn't
+// transitioned (e.g. after failover reset with preempt=false).
+// Uses a one-shot forcePreemptOnce flag instead of modifying cfg.Preempt,
+// so the configured preempt value is never leaked.
+func (m *Manager) ForceRGMaster(rgID int) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	vrid := 100 + rgID
+	for _, vi := range m.instances {
+		if isRethInstance(vi.cfg) && vi.cfg.GroupID == vrid && vi.getState() != StateMaster {
+			slog.Info("vrrp: forcing MASTER (cluster authoritative)",
+				"key", vi.key())
+			vi.mu.Lock()
+			vi.forcePreemptOnce = true
+			vi.mu.Unlock()
+			vi.triggerPreemptNow()
+		}
+	}
+}
+
+// ReconcileVIPs re-adds VIPs on any MASTER instances. Call this after
+// operations that may remove addresses (e.g. programRethMAC link down/up).
+func (m *Manager) ReconcileVIPs() {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	for _, vi := range m.instances {
+		vi.reconcileVIP()
+				// actual cluster local/peer state, not just this rg_active
+				// edge. This prevents stale VIPs from surviving a demotion
+				// when the rg_state machine has already drifted inactive.
+				if noRethVRRP {
+					d.reconcileDirectVIPOwnership(ev.GroupID, "cluster-primary")
+					go d.RefreshFabricFwd()
+				}
+				if noRethVRRP && d.cluster != nil && d.cluster.IsLocalPrimary(ev.GroupID) && (d.dp == nil || !s.NeedsApply()) {
+					d.setLocalFailoverCommitReady(ev.GroupID, true)
+				}
+			} else {
+				// Demotion: run preflight and resign VRRP BEFORE
+				// clearing rg_active (#485). The preflight shifts
+				// userspace flow cache entries to FabricRedirect so
+				// the demoting node forwards via fabric during the
+				// transition window. ResignRG must follow preflight
+				// so traffic is already on the fabric path before
+				// the VRRP BACKUP transition removes VIPs.
+				if clusterDemotionEdge && d.dp != nil {
+					d.tryPrepareUserspaceRGDemotion(ev.GroupID)
+				}
+				if !noRethVRRP {
+					if ev.OldState == cluster.StatePrimary &&
+						(ev.NewState == cluster.StateSecondary || ev.NewState == cluster.StateSecondaryHold) {
+						d.vrrpMgr.ResignRG(ev.GroupID)
+					}
+				}
+				// Deactivation: blackhole routes first (if transitioning
+				// to inactive), then clear rg_active.
+				if tr.Changed && !tr.Active {
+					d.injectBlackholeRoutes(ev.GroupID)
+				}
+				if tr.Changed && d.dp != nil {
+					cur, _ := s.CurrentDesired()
+					if !cur && !clusterDemotionEdge {
+						d.tryPrepareUserspaceRGDemotion(ev.GroupID)
+					}
+					if err := d.dp.HA().SetRGActive(ctx, ev.GroupID, cur); err != nil {
+						slog.Warn("failed to update rg_active from cluster event",
+							"rg", ev.GroupID, "active", cur, "err", err)
+					} else {
+						recordRGActiveAppliedIfCurrentOrStable(s, tr, cur)
+					}
+				}
+
+				// no-reth-vrrp direct mode: always reconcile actual VIP
+				// ownership on non-primary transitions. Removal must not
+				// depend on a fresh rg_active edge because stale VIPs can
+				// survive a failback if the state machine already drifted.
+				if noRethVRRP {
+					d.reconcileDirectVIPOwnership(ev.GroupID, "cluster-secondary")
+				}
+
+				// #5640: the local demotion is now actuated — VRRP has
+				// resigned to priority-0 (or direct VIP ownership was
+				// reconciled away) and rg_active is cleared. Release any
+				// remote-failover applied-ack that is holding for this fence
+				// so the peer only promotes AFTER this node stopped owning
+				// the RG. Fires for every non-primary edge; unarmed RGs no-op.
+				d.signalFailoverActuated(ev.GroupID)
+			}
+
+			// Strict VIP ownership: suppress GARP on secondary, allow on primary.
+			// Not applicable with no-reth-vrrp (no VRRP instances).
+			if !noRethVRRP && s.IsStrictVIPOwnership() {
+				d.vrrpMgr.SetGARPSuppression(ev.GroupID, !isPrimary)
+			}
+
+			// Debounced VRRP priority update — 500ms coalesce window.
+			// Skipped in no-reth-vrrp mode (no RETH VRRP instances to update).
+			if !noRethVRRP {
+// VRRP posture / RA+DHCP services.
+// This is the safety net for dropped events (non-blocking channel sends).
+// Runs every 2s; also wakes immediately on event-drop notifications via
+// reconcileNowCh. Skips if cluster or dataplane is nil.
+func (d *Daemon) reconcileRGStateLoop(ctx context.Context) {
+	// Run immediately on startup to correct stale rg_active from prior run.
+	d.reconcileRGStatePass()
+
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			d.reconcileRGStatePass()
+		case <-d.reconcileNowCh:
+			d.reconcileRGStatePass()
+		}
+	}
+}
+
+// reconcileRGStatePass runs one reconcile pass. In production it calls
+// reconcileRGState; a non-nil reconcileTickHook (test-only, #5681) substitutes
+// for it so the shutdown-ordering regression test can hold a pass in-flight and
+					"rg", rgID, "active", tr.Active, "epoch", tr.Epoch)
+			} else if s.ShouldLogRetry() {
+				// #757: only log retry once per apply streak; subsequent
+				// ticks stay silent until MarkApplied() clears the gate.
+				slog.Info("reconcile: retrying rg_active apply",
+					"rg", rgID, "active", tr.Active)
+			}
+			if tr.Active {
+				// Activation ordering: set rg_active FIRST, then
+				// remove blackholes.
+				if err := d.dp.HA().SetRGActive(context.Background(), rgID, true); err != nil {
+					if s.ShouldLogApplyError(err.Error()) {
+						slog.Warn("reconcile: failed to update rg_active",
+							"rg", rgID, "active", true, "err", err)
+					}
+				} else {
+					s.MarkApplied(true)
+					if noRethVRRP && clusterPri && !s.NeedsApply() {
+						d.setLocalFailoverCommitReady(rgID, true)
+					}
+				}
+			} else {
+				// Deactivation ordering: blackholes FIRST, then
+				// clear rg_active.
+				d.injectBlackholeRoutes(rgID)
+				d.tryPrepareUserspaceRGDemotion(rgID)
+				if err := d.dp.HA().SetRGActive(context.Background(), rgID, false); err != nil {
+					if s.ShouldLogApplyError(err.Error()) {
+						slog.Warn("reconcile: failed to update rg_active",
+							"rg", rgID, "active", false, "err", err)
+					}
+				} else {
+					s.MarkApplied(false)
+pkg/cluster/sync_auth.go-60-const (
+pkg/cluster/sync_auth.go-61-	// syncMsgAuthHello and syncMsgAuthProof are the two handshake message
+pkg/cluster/sync_auth.go-62-	// types. They are ABOVE the legacy message set (<= 26) so a peer that
+pkg/cluster/sync_auth.go-63-	// predates F23 hits the (implicit) default receive case and ignores them —
+pkg/cluster/sync_auth.go:64:	// the same additive-type discipline as the #2239 DHCP-lease messages.
+pkg/cluster/sync_auth.go-65-	syncMsgAuthHello = 27 // {version:u8, keyed:u8, nonce[32]}
+pkg/cluster/sync_auth.go-66-	syncMsgAuthProof = 28 // HMAC-SHA256 proof over the peer's HELLO nonce
+pkg/cluster/sync_auth.go-67-)
+pkg/cluster/sync_auth.go-68-
+--
+pkg/cluster/heartbeat_test.go-12-		SoftwareVersion:   "xpf-test-1",
+pkg/cluster/heartbeat_test.go-13-		HAProtocolVersion: CurrentHAProtocolVersion,
+pkg/cluster/heartbeat_test.go-14-		Groups: []HeartbeatGroup{
+pkg/cluster/heartbeat_test.go-15-			{GroupID: 0, Priority: 200, Weight: 255, State: uint8(StatePrimary)},
+pkg/cluster/heartbeat_test.go:16:			{GroupID: 1, Priority: 150, Weight: 100, State: uint8(StateSecondary)},
+pkg/cluster/heartbeat_test.go-17-		},
+pkg/cluster/heartbeat_test.go-18-	}
+pkg/cluster/heartbeat_test.go-19-
+pkg/cluster/heartbeat_test.go-20-	data := MarshalHeartbeat(pkt)
+--
+pkg/cluster/heartbeat_test.go-37-	}
+pkg/cluster/heartbeat_test.go-38-	if got.Groups[0].State != uint8(StatePrimary) {
+pkg/cluster/heartbeat_test.go-39-		t.Errorf("group 0 state = %d, want %d", got.Groups[0].State, StatePrimary)
+pkg/cluster/heartbeat_test.go-40-	}
+pkg/cluster/heartbeat_test.go:41:	if got.Groups[1].GroupID != 1 || got.Groups[1].Priority != 150 || got.Groups[1].Weight != 100 {
+pkg/cluster/heartbeat_test.go-42-		t.Errorf("group 1 = %+v", got.Groups[1])
+pkg/cluster/heartbeat_test.go-43-	}
+pkg/cluster/heartbeat_test.go-44-	if got.Groups[1].State != uint8(StateSecondary) {
+pkg/cluster/heartbeat_test.go-45-		t.Errorf("group 1 state = %d, want %d", got.Groups[1].State, StateSecondary)
+--
+pkg/cluster/heartbeat_test.go-356-		ClusterID:       1,
+pkg/cluster/heartbeat_test.go-357-		SoftwareVersion: "peer-build",
+pkg/cluster/heartbeat_test.go-358-		Groups: []HeartbeatGroup{
+pkg/cluster/heartbeat_test.go-359-			{GroupID: 0, Priority: 200, Weight: 255, State: uint8(StatePrimary)},
+pkg/cluster/heartbeat_test.go:360:			{GroupID: 1, Priority: 150, Weight: 100, State: uint8(StateSecondary)},
+pkg/cluster/heartbeat_test.go-361-		},
+pkg/cluster/heartbeat_test.go-362-	}
+pkg/cluster/heartbeat_test.go-363-	// Each monitor with a 20-char interface name takes 4+20 = 24 bytes.
+pkg/cluster/heartbeat_test.go-364-	// 80 monitors × 24 bytes = 1920 bytes just for monitors (+ header, groups, numMon).
+--
+pkg/cluster/heartbeat_test.go-391-	}
+pkg/cluster/heartbeat_test.go-392-	if got.Groups[0].Priority != 200 {
+pkg/cluster/heartbeat_test.go-393-		t.Errorf("group 0 priority = %d, want 200", got.Groups[0].Priority)
+pkg/cluster/heartbeat_test.go-394-	}
+pkg/cluster/heartbeat_test.go:395:	if got.Groups[1].Priority != 150 {
+pkg/cluster/heartbeat_test.go:396:		t.Errorf("group 1 priority = %d, want 150", got.Groups[1].Priority)
+pkg/cluster/heartbeat_test.go-397-	}
+pkg/cluster/heartbeat_test.go-398-
+pkg/cluster/heartbeat_test.go-399-	// Some monitors should be present (but fewer than 80 due to truncation).
+pkg/cluster/heartbeat_test.go-400-	if len(got.Monitors) == 0 {
+--
+pkg/cluster/heartbeat_test.go-472-func TestBuildHeartbeat(t *testing.T) {
+pkg/cluster/heartbeat_test.go-473-	m := NewManager(0, 1)
+pkg/cluster/heartbeat_test.go-474-	cfg := makeConfig(
+pkg/cluster/heartbeat_test.go-475-		makeRG(0, false, map[int]int{0: 200}),
+pkg/cluster/heartbeat_test.go:476:		makeRG(1, true, map[int]int{0: 150}),
+pkg/cluster/heartbeat_test.go-477-	)
+pkg/cluster/heartbeat_test.go-478-	m.UpdateConfig(cfg)
+pkg/cluster/heartbeat_test.go-479-
+pkg/cluster/heartbeat_test.go-480-	pkt := m.buildHeartbeat()
+--
+pkg/cluster/sync_failover.go-215-		return fmt.Errorf("failover request for %s aborted", label)
+pkg/cluster/sync_failover.go-216-	}
+pkg/cluster/sync_failover.go-217-}
+pkg/cluster/sync_failover.go-218-
+pkg/cluster/sync_failover.go:219:// SendFailoverCommit sends the final ownership-commit step for a previously
+pkg/cluster/sync_failover.go-220-// acknowledged failover request and waits for the peer to finalize transfer-out.
+pkg/cluster/sync_failover.go-221-func (s *SessionSync) SendFailoverCommit(rgID int, reqID uint64) error {
+pkg/cluster/sync_failover.go-222-	if err := validateFailoverProtocolRGID(rgID); err != nil {
+pkg/cluster/sync_failover.go-223-		return err
+--
+pkg/cluster/sync_failover.go-271-		return fmt.Errorf("timed out waiting for peer failover commit ack for redundancy group %d", rgID)
+pkg/cluster/sync_failover.go-272-	}
+pkg/cluster/sync_failover.go-273-}
+pkg/cluster/sync_failover.go-274-
+pkg/cluster/sync_failover.go:275:// SendFailoverCommitBatch sends the final ownership-commit step for a
+pkg/cluster/sync_failover.go-276-// previously acknowledged multi-RG failover request.
+pkg/cluster/sync_failover.go-277-func (s *SessionSync) SendFailoverCommitBatch(rgIDs []int, reqID uint64) error {
+pkg/cluster/sync_failover.go-278-	ids, err := normalizeFailoverRGIDs(rgIDs)
+pkg/cluster/sync_failover.go-279-	if err != nil {
+--
+pkg/cluster/sync_failover.go-433-		s.sendFailoverResult(conn, syncMsgFailoverAck, rgID, reqID, status, err.Error())
+pkg/cluster/sync_failover.go-434-		return
+pkg/cluster/sync_failover.go-435-	}
+pkg/cluster/sync_failover.go-436-	// #5640: OnRemoteFailover only ENQUEUES the async demotion event; the old
+pkg/cluster/sync_failover.go:437:	// owner is not fenced (VRRP resigned / VIPs removed) until the daemon's
+pkg/cluster/sync_failover.go-438-	// event consumer actuates it. Acking applied here let the peer promote
+pkg/cluster/sync_failover.go:439:	// while this node still owned the RG → a two-owner window. Gate the
+pkg/cluster/sync_failover.go-440-	// applied-ack on the fence-completion barrier; if the fence does not
+pkg/cluster/sync_failover.go-441-	// actuate within the bounded timeout, downgrade to failed so the peer
+pkg/cluster/sync_failover.go-442-	// holds rather than joining a split-brain.
+pkg/cluster/sync_failover.go-443-	if s.WaitFailoverApplied != nil {
+--
+pkg/cluster/sync_failover.go-462-		s.sendFailoverBatchResult(conn, syncMsgFailoverBatchAck, rgIDs, reqID, status, err.Error())
+pkg/cluster/sync_failover.go-463-		return
+pkg/cluster/sync_failover.go-464-	}
+pkg/cluster/sync_failover.go-465-	// #5640: gate the batch applied-ack on every RG being fenced. See
+pkg/cluster/sync_failover.go:466:	// handleRemoteFailover for the two-owner rationale — a batch handoff that
+pkg/cluster/sync_failover.go-467-	// acks before actuation opens the same window across the whole set.
+pkg/cluster/sync_failover.go-468-	if s.WaitFailoverAppliedBatch != nil {
+pkg/cluster/sync_failover.go-469-		if err := s.WaitFailoverAppliedBatch(rgIDs); err != nil {
+pkg/cluster/sync_failover.go-470-			slog.Warn("cluster sync: remote batch failover fence barrier failed", "rgs", rgIDs, "req_id", reqID, "err", err)
+--
+pkg/cluster/heartbeat_manager.go-182-//     mid-restart still fails over.
+pkg/cluster/heartbeat_manager.go-183-//
+pkg/cluster/heartbeat_manager.go-184-//   - Local side: lastSeen carries over to the replacement receiver (same
+pkg/cluster/heartbeat_manager.go-185-//     CLOCK_MONOTONIC domain, same process) so a peer that dies while our
+pkg/cluster/heartbeat_manager.go:186://     sockets are down is still detected once the post-restart 30s startup
+pkg/cluster/heartbeat_manager.go-187-//     grace expires. Without the seed the new receiver starts at
+pkg/cluster/heartbeat_manager.go-188-//     lastSeen=0, whose timeout path only invokes handlePeerNeverSeen — a
+pkg/cluster/heartbeat_manager.go-189-//     no-op once peerEverSeen is set — and a peer death during the restart
+pkg/cluster/heartbeat_manager.go-190-//     window would never be detected.
+--
+pkg/cluster/heartbeat_manager.go-381-	defer m.mu.Unlock()
+pkg/cluster/heartbeat_manager.go-382-	if !m.peerAlive {
+pkg/cluster/heartbeat_manager.go-383-		return // already marked lost while guard ran
+pkg/cluster/heartbeat_manager.go-384-	}
+pkg/cluster/heartbeat_manager.go:385:	// Re-check heartbeat STALENESS, not just peerAlive. m.mu is released
+pkg/cluster/heartbeat_manager.go-386-	// across the guard call above, so the receiver read path can run
+pkg/cluster/heartbeat_manager.go-387-	// handlePeerHeartbeat — setting peerAlive and advancing lastSeen — for
+pkg/cluster/heartbeat_manager.go-388-	// ANY guard duration, not only a slow guard fn (a configured slow guard
+pkg/cluster/heartbeat_manager.go-389-	// merely widens the window). peerAlive is essentially always true here
+--
+pkg/cluster/heartbeat_manager.go-411-
+pkg/cluster/heartbeat_manager.go-412-	// Clear ManualFailover on all RGs: the peer is dead, so the surviving
+pkg/cluster/heartbeat_manager.go-413-	// node MUST be able to take over. Without this, a previous manual
+pkg/cluster/heartbeat_manager.go-414-	// transfer-out would keep the local node parked in secondary-hold even
+pkg/cluster/heartbeat_manager.go:415:	// though there is no longer a peer to hand ownership to.
+pkg/cluster/heartbeat_manager.go-416-	for _, rg := range m.groups {
+pkg/cluster/heartbeat_manager.go-417-		if rg.ManualFailover {
+pkg/cluster/heartbeat_manager.go-418-			slog.Info("cluster: clearing manual failover (peer lost)", "rg", rg.GroupID)
+pkg/cluster/heartbeat_manager.go-419-			rg.ManualFailover = false
+--
+pkg/cluster/heartbeat_manager.go-428-	// Attempt peer fencing if configured.
+pkg/cluster/heartbeat_manager.go-429-	if m.peerFencing == "disable-rg" {
+pkg/cluster/heartbeat_manager.go-430-		fn := m.peerFenceFn
+pkg/cluster/heartbeat_manager.go-431-		if fn != nil {
+pkg/cluster/heartbeat_manager.go:432:			// Release lock for the network call.
+pkg/cluster/heartbeat_manager.go-433-			m.mu.Unlock()
+pkg/cluster/heartbeat_manager.go-434-			err := fn()
+pkg/cluster/heartbeat_manager.go-435-			m.mu.Lock()
+pkg/cluster/heartbeat_manager.go-436-			if err != nil {
+--
+pkg/cluster/failover_lease_5079_test.go-6-)
+pkg/cluster/failover_lease_5079_test.go-7-
+pkg/cluster/failover_lease_5079_test.go-8-// TestRemoteTransferOutLeaseRestoresOwnerWhenNoCommitArrives is the #5079
+pkg/cluster/failover_lease_5079_test.go-9-// fail-on-revert guard. A peer failover request demotes this node to
+pkg/cluster/failover_lease_5079_test.go:10:// secondary-hold and arms a reqID-bound auto-restore lease. The requester then
+pkg/cluster/failover_lease_5079_test.go-11-// aborts after the ACK (or crashes / loses the fabric): it sends no commit AND
+pkg/cluster/failover_lease_5079_test.go:12:// no abort frame, and rolls back to a HEALTHY secondary. Before the lease this
+pkg/cluster/failover_lease_5079_test.go-13-// stranded the cluster with both nodes secondary forever — the pre-existing
+pkg/cluster/failover_lease_5079_test.go-14-// dual-resign 2s guard never rescues it because a healthy secondary peer is
+pkg/cluster/failover_lease_5079_test.go:15:// neither resigned (weight 0) nor in secondary-hold. Once the lease expires with
+pkg/cluster/failover_lease_5079_test.go:16:// no commit, electRG restores the owner.
+pkg/cluster/failover_lease_5079_test.go-17-//
+pkg/cluster/failover_lease_5079_test.go:18:// Revert the electRG lease-expiry branch and this test goes RED: the owner stays
+pkg/cluster/failover_lease_5079_test.go-19-// secondary-hold against the healthy-secondary peer.
+pkg/cluster/failover_lease_5079_test.go-20-func TestRemoteTransferOutLeaseRestoresOwnerWhenNoCommitArrives(t *testing.T) {
+pkg/cluster/failover_lease_5079_test.go-21-	m := NewManager(0, 1)
+pkg/cluster/failover_lease_5079_test.go-22-	// Owner outranks the peer so, once the hold clears, normal election promotes
+
+[35m[3mexec[0m[0m
+[1m/bin/bash -lc "rg -n \"remoteTransfer|transfer.*Lease|failover.*Lease|15 \\* time.Second|30 \\* time.Second|lease\" pkg/cluster/failover.go pkg/cluster/*.go | head -100; nl -ba docs/research/6177-reth-twoowner/plan.md | sed -n '65,180p'; nl -ba docs/research/6177-reth-twoowner/plan.md | sed -n '250,325p'; nl -ba docs/research/6177-reth-twoowner/plan.md | sed -n '345,395p'"[0m in /home/ps/git/bpfrx/.claude/worktrees/6177-research
+[32m succeeded in 0ms:[0m
+pkg/cluster/election.go:68:		// Owner-side transfer-out lease (#5079). A peer-requested transfer-out
+pkg/cluster/election.go:73:		// needs the peer resigned or itself in secondary-hold). Once the lease
+pkg/cluster/election.go:76:		// the lease first (reqID-bound), so this never fires on a real handoff.
+pkg/cluster/election.go:77:		if until, leased := m.remoteTransferOutLeaseUntil[rg.GroupID]; leased && !time.Now().Before(until) {
+pkg/cluster/election.go:78:			slog.Warn("cluster: remote transfer-out lease expired without commit, restoring",
+pkg/cluster/election.go:79:				"rg", rg.GroupID, "req_id", m.remoteTransferOutLeaseReqID[rg.GroupID])
+pkg/cluster/sync_admission.go:65:// finishSetup releases the slot/registration once the handshake resolves.
+pkg/cluster/sync_conn_gen.go:65:// stream (IPsec SA, or DHCP leases per family) under #5706. It records the
+pkg/cluster/sync_conn_gen.go:420:// read FIRST and folded with a max: on the success-release ordering (high-water
+pkg/cluster/monitor_parallel_5301_test.go:196:	mon.IPMonitorCycleTimeout = 30 * time.Second
+pkg/cluster/heartbeat_neverseen_floor_test.go:25:	const grace = 30 * time.Second
+pkg/cluster/cluster_test.go:429:	// Pre-hook blocks until released, simulating a long barrier wait.
+pkg/cluster/cluster_test.go:431:	hookRelease := make(chan struct{})
+pkg/cluster/cluster_test.go:434:		<-hookRelease
+pkg/cluster/cluster_test.go:455:	// Release the first failover and verify it completes.
+pkg/cluster/cluster_test.go:456:	close(hookRelease)
+pkg/cluster/cluster_test.go:480:	hookRelease := make(chan struct{})
+pkg/cluster/cluster_test.go:484:			<-hookRelease
+pkg/cluster/cluster_test.go:501:	close(hookRelease)
+pkg/cluster/sync.go:63:	// #2239 HA DHCP-server lease sync (PATH C). A full-set push of the
+pkg/cluster/sync.go:64:	// active lease records this node serves, per family. These are ADDITIVE
+pkg/cluster/sync.go:69:	// additive AND end-to-end gated on the `dhcp-lease-synchronization` config
+pkg/cluster/sync.go:91:const syncPeerSilenceTimeout = 30 * time.Second
+pkg/cluster/sync.go:128:	// #2239 HA DHCP-server lease sync counters. Sent/Received count
+pkg/cluster/sync.go:129:	// full-set lease push MESSAGES (one per family per push); Seeded counts
+pkg/cluster/sync.go:130:	// leases written into a freshly-started Kea on takeover; errors fold
+pkg/cluster/sync.go:134:	// DHCPLeasesStaleIgnored counts DHCP lease full-sets dropped by the #5706
+pkg/cluster/sync.go:136:	// reordered older lease set that would otherwise have regressed the
+pkg/cluster/sync.go:350:	// OnDHCPLeasesReceived is called when a DHCP-server lease set arrives from
+pkg/cluster/sync.go:353:	OnDHCPLeasesReceived func(family int, leases []dhcpserver.SyncLease)
+pkg/cluster/sync.go:356:	// owner binds its auto-restore lease to it so a stale commit cannot clear a
+pkg/cluster/sync.go:357:	// newer request's lease (#5079).
+pkg/cluster/sync.go:361:	// matching auto-restore lease (#5079).
+pkg/cluster/sync.go:407:	// #2239: the standby holds the peer's most-recent full lease set per
+pkg/cluster/sync.go:415:	// seeding — otherwise a lease held for minutes is re-anchored to
+pkg/cluster/sync.go:600:	// #5706 full-set state-sync ordering guard (IPsec SA + DHCP leases).
+pkg/cluster/sync.go:602:	// IPsec SA and DHCP lease sync are FULL-SET pushes — each message REPLACES
+pkg/cluster/sync.go:867:// release cycle so any out-of-tree caller still passing the legacy
+pkg/cluster/sync.go:1150:// RecordDHCPLeasesSeeded adds n to the seeded-leases counter (#2239). The
+pkg/cluster/sync.go:1158:// PeerDHCPLeases4 returns the v4 lease set held from the peer, AGED by this
+pkg/cluster/sync.go:1165:// PeerDHCPLeases6 returns the aged v6 lease set held from the peer (#2239/#4871).
+pkg/cluster/sync.go:1170:// peerDHCPLeasesAged returns a copy of the held peer lease set for a family with
+pkg/cluster/sync.go:1171:// each lease's Remaining lifetime reduced by this node's standby RESIDENCE —
+pkg/cluster/sync.go:1172:// the monotonic time elapsed since the set was received — and leases that have
+pkg/cluster/sync.go:1176:// no sample epoch. Without this subtraction a lease held on the standby for
+pkg/cluster/sync.go:1179:// original server already reassigned (duplicate allocation). A lease at or below
+pkg/cluster/sync.go:1209:		// deprecated lease held on the standby is never revived at seed.
+pkg/cluster/sync.go:1222:// SetPeerDHCPLeasesForTesting injects a held peer lease set for a family so
+pkg/cluster/sync.go:1225:func (s *SessionSync) SetPeerDHCPLeasesForTesting(family int, leases []dhcpserver.SyncLease) {
+pkg/cluster/sync.go:1226:	s.storePeerDHCPLeases(family, leases)
+pkg/cluster/sync.go:1229:// storePeerDHCPLeases replaces the held lease set for a family (full-set push
+pkg/cluster/sync.go:1231:func (s *SessionSync) storePeerDHCPLeases(family int, leases []dhcpserver.SyncLease) {
+pkg/cluster/sync.go:1238:		s.peerDHCPLeases6 = leases
+pkg/cluster/sync.go:1241:		s.peerDHCPLeases4 = leases
+pkg/cluster/sync.go:1247:// QueueDHCPLeases sends a full-set DHCP-server lease push for one family to the
+pkg/cluster/sync.go:1250:// re-pushes), it NEVER blocks lease granting on this node. Mirrors QueueIPsecSA.
+pkg/cluster/sync.go:1251:func (s *SessionSync) QueueDHCPLeases(family int, leases []dhcpserver.SyncLease) {
+pkg/cluster/sync.go:1264:	// receiver's lease decoder reads exactly its record count and ignores the
+pkg/cluster/sync.go:1267:	payload := appendFullSetSeq(encodeDHCPLeasePayload(leases), s.syncEpoch, seq)
+pkg/cluster/sync.go:1272:		slog.Warn("cluster sync: DHCP lease send error", "family", family, "err", err)
+pkg/cluster/sync.go:1278:	slog.Debug("cluster sync: DHCP lease set sent", "family", family, "count", len(leases))
+pkg/cluster/sync_conn_config.go:163:			// max(fence, high-water) from dipping in the release window (#6284).
+pkg/cluster/heartbeat_manager.go:385:	// Re-check heartbeat STALENESS, not just peerAlive. m.mu is released
+pkg/cluster/heartbeat_manager.go:432:			// Release lock for the network call.
+pkg/cluster/failover_races_5245_5246_test.go:104:// lands while ManualFailover is parked in its pre-failover hook (m.mu released)
+pkg/cluster/failover_races_5245_5246_test.go:119:	// A pre-hook that blocks until released, holding ManualFailover in the
+pkg/cluster/failover_races_5245_5246_test.go:122:	hookRelease := make(chan struct{})
+pkg/cluster/failover_races_5245_5246_test.go:125:		<-hookRelease
+pkg/cluster/failover_races_5245_5246_test.go:134:	// Wait for ManualFailover to enter the pre-hook (m.mu released here).
+pkg/cluster/failover_races_5245_5246_test.go:143:	// Release the parked pre-hook so ManualFailover re-acquires m.mu.
+pkg/cluster/failover_races_5245_5246_test.go:144:	close(hookRelease)
+pkg/cluster/monitor_globalthreshold_5271_test.go:143:// global-threshold on a KEPT group must release a previously installed
+pkg/cluster/monitor_globalthreshold_5271_test.go:199:// debt. The clear path must still release it via the fixed aggregate monitor
+pkg/cluster/status.go:386:		fmt.Fprintf(&b, "    %-32s %-12d %d\n", "DHCP leases",
+pkg/cluster/status.go:389:			fmt.Fprintf(&b, "    %-32s %-12s %d\n", "DHCP leases seeded",
+pkg/cluster/status.go:470:	fmt.Fprintf(&b, "    %-32s %-12d %d\n", "DHCP leases",
+pkg/cluster/status.go:473:		fmt.Fprintf(&b, "    %-32s %-12s %d\n", "DHCP leases seeded",
+pkg/cluster/sync_conn.go:101:	// #5303: release the pre-auth admission slot (and the setup-tracking entry)
+pkg/cluster/monitor.go:1023:	// releases it before pollInterfaceMonitors, and RGInterfaceReady()
+pkg/cluster/monitor.go:1024:	// releases it before calling; so this does not deadlock. The handle can
+pkg/cluster/fullset_seq_test.go:53:// the new-sender -> old-receiver direction for DHCP: the pre-#5706 lease
+pkg/cluster/fullset_seq_test.go:55:// seq), so a stamped frame decodes to the same lease set an old node would see.
+pkg/cluster/fullset_seq_test.go:57:	leases := []dhcpserver.SyncLease{
+pkg/cluster/fullset_seq_test.go:61:	stamped := appendFullSetSeq(encodeDHCPLeasePayload(leases), 999, 7)
+pkg/cluster/fullset_seq_test.go:63:	// not know to strip a trailer). It must still recover exactly the 2 leases.
+pkg/cluster/fullset_seq_test.go:66:		t.Fatalf("old decoder on stamped DHCP frame: got %d leases, want 2 (trailer must be ignored)", len(got))
+pkg/cluster/fullset_seq_test.go:69:		t.Fatalf("old decoder recovered wrong leases: %+v", got)
+pkg/cluster/fullset_seq_test.go:166:	applied := map[int]int{} // family -> last-applied lease count
+pkg/cluster/fullset_seq_test.go:167:	ss.OnDHCPLeasesReceived = func(family int, leases []dhcpserver.SyncLease) {
+pkg/cluster/fullset_seq_test.go:169:		applied[family] = len(leases)
+pkg/cluster/fullset_seq_test.go:179:	v4 := func(seq uint64, leases []dhcpserver.SyncLease) {
+pkg/cluster/fullset_seq_test.go:180:		ss.handleMessage(nil, syncMsgDHCPLeaseV4, appendFullSetSeq(encodeDHCPLeasePayload(leases), epoch, seq))
+pkg/cluster/fullset_seq_test.go:182:	v6 := func(seq uint64, leases []dhcpserver.SyncLease) {
+pkg/cluster/fullset_seq_test.go:183:		ss.handleMessage(nil, syncMsgDHCPLeaseV6, appendFullSetSeq(encodeDHCPLeasePayload(leases), epoch, seq))
+pkg/cluster/fullset_seq_test.go:197:		t.Fatalf("v4 seq=2 must apply 2 leases, got %d", c)
+pkg/cluster/fullset_seq_test.go:210:		t.Fatalf("held v4 lease set must stay 2 after a rejected reorder, got %d", len(got))
+pkg/cluster/fullset_seq_test.go:367:// trailer and the receiver strips EXACTLY ONE, even when the encoded lease base
+pkg/cluster/fullset_seq_test.go:372:	leases := []dhcpserver.SyncLease{
+pkg/cluster/fullset_seq_test.go:375:	base := encodeDHCPLeasePayload(leases)
+pkg/cluster/fullset_seq_test.go:377:	// One stamp + one strip recovers the base byte-for-byte and the lease set.
+    65	
+    66	Requester **R** wants the RG; current owner **O** holds the RETH VIPs and is VRRP
+    67	MASTER. `t_p0` = the instant O emits its first priority-0 advert.
+    68	
+    69	**Owner O (demoting), run-loop `resignCh` case:**
+    70	1. `sendAdvert(0)` ×3 — socket writes, ~µs each. Priority-0 is on the wire at `t_p0`.
+    71	2. `becomeBackup` → `removeVIPs` — netlink `RTM_DELADDR` per VIP. O stops answering
+    72	   ARP at `t_p0 + δ_remove`. (The figures below for `δ_remove` are **illustrative,
+    73	   not load-bearing** — see §4: the benign conclusion holds for ANY `δ_remove`,
+    74	   including the ~1 s failed-removal case, because the harm is masked independent of
+    75	   window width. No `δ_remove` measurement is claimed.)
+    76	
+    77	**Peer R (promoting):**
+    78	3. Receives priority-0 at `t_p0 + δ_net`; `handleBackupRx` sets `masterDownTimer` to
+    79	   **1 ms** + `skipNextPreemptHold`.
+    80	4. masterDownTimer fires → `becomeMaster` → `addVIPs` → GARP. R starts answering ARP
+    81	   at `t_p0 + δ_net + 1ms + δ_add`.
+    82	
+    83	**Two-owner overlap** = `O_stop − R_start` = `δ_remove − (δ_net + 1ms + δ_add)`.
+    84	
+    85	- **Normal case:** `δ_remove` (sub-ms) < `1ms + δ_net + δ_add` ⇒ overlap is
+    86	  **negative** — i.e. there is a **~1 ms blackhole gap** (O has released, R has not
+    87	  yet added), NOT a two-owner window. This is bit-identical to the documented
+    88	  "planned shutdown → peer takes over in ~1 ms" path (CLAUDE.md, Chassis Cluster).
+    89	- **Slow-removal case:** if `δ_remove` exceeds ~1 ms (netlink contention, many
+    90	  VIPs, run-loop scheduling delay), overlap = `δ_remove − ~1ms > 0`. A genuine
+    91	  two-owner window bounded by removeVIPs latency — realistically sub-ms to a few ms.
+    92	- **Failed-removal case:** `removeVIPs` errors → O keeps the VIP until the #5482
+    93	  `surfaceStaleVIP` reconcile clears it (typically within ~1 s; the reconcile is
+    94	  bounded to 5 attempts at 200 ms, and a pathological netlink wedge logs Error and
+    95	  defers to the next transition — a pre-existing #5482 property, not introduced here).
+    96	  Two-owner for that span. **Independent of the ack barrier**; the ack-barrier levers
+    97	  under debate do nothing for it either.
+    98	
+    99	**Why the coordination-ACK is not the lever on the dominant path (the #6367 error),
+   100	and the one corner where it CAN order (Codex F1):**
+   101	
+   102	- On the **priority-0 path** — which covers every failover where at least one of O's
+   103	  three priority-0 adverts arrives, i.e. essentially all planned/requested failovers —
+   104	  R's VIP takeover is driven by the **ungated** masterDownTimer 1 ms path
+   105	  (`handleBackupRx` instance.go:1110-1128; `recordMasterAdvert` :1042-1046 confirms it
+   106	  is taken even under sync-hold — the #2082 preempt gate applies only to the
+   107	  `preemptNowCh` shortcut). The requester's post-ack commit (`SendFailoverCommit` →
+   108	  `commitRequestedPeerFailover` → `runElection` → `ForceRGMaster`) is a **no-op** when
+   109	  the instance is already `StateMaster` (manager.go:772). R is already MASTER via
+   110	  priority-0, typically **before** the ack round-trip completes. So on this path
+   111	  gating the ack on VIP removal adds **no** ordering guarantee — #6367's premise
+   112	  ("hold the ack → peer promotes later") is false.
+   113	- **The narrowing (Codex F1, corrected in r4):** in the pathological case where **all
+   114	  three** priority-0 adverts are lost, R does NOT enter the 1 ms path; it promotes when
+   115	  its **own** masterDownTimer expires — that timer is based on R's last non-zero advert,
+   116	  so R's remaining delay is somewhere **within** its master-down horizon (up to
+   117	  ~97 ms), NOT a fixed ~97 ms from `t_p0` (and it is NOT O's post-resign safety timer,
+   118	  which is separately clamped to ≥500 ms, instance.go:1021). The ack can order R's
+   119	  promotion **only in the narrower sub-case where the post-ack `ForceRGMaster` wins the
+   120	  race against R's independently-expiring masterDownTimer** — the ack cannot suppress
+   121	  that timer. Even there it requires a 3-advert loss burst AND (for a two-owner window)
+   122	  O's removeVIPs slow/failed too — a compound-rare corner, not what #6177's "sub-ms
+   123	  VIP-removal window" describes, and #6367's VIP-gate was still the wrong tool (it gated
+   124	  on VIP removal, not the forwarding property — see §3-forwarding below).
+   125	
+   126	**What the ack barrier genuinely does (retained #5640 value):** it withholds the
+   127	applied-ack until O's `rg_active` is cleared (daemon_ha.go:367 precedes :389), so
+   128	the requester does not treat the failover as "applied" — RG0 config-write
+   129	ownership handoff, fabric-redirect teardown — while O is still cluster-active
+   130	**forwarding**. That is a coordination/forwarding property, not a VIP property.
+   131	
+   132	**Harm — split the SUCCESS path from the FAILURE paths (Codex F2 correction):**
+   133	
+   134	*Success path (removeVIPs + SetRGActive + fabric-prep all succeed) — BENIGN:*
+   135	- Transit traffic landing on O is **fabric-redirected to R** — the demotion preflight
+   136	  `tryPrepareUserspaceRGDemotion` is a **best-effort, bounded (5 s) blocking** prep
+   137	  that runs BEFORE `ResignRG` (daemon_ha.go:348-354) and shifts the flow cache to
+   138	  `FabricRedirect`.
+   139	- `rg_active` is cleared on O, so O does not cluster-forward for the RG.
+   140	- R's GARP re-points ARP within ms; RETH uses a **per-node** virtual MAC — the overlap
+   141	  is a transient duplicate-ARP nuisance. No RST, no durable blackhole, no dual-forward.
+   142	  On this path the sub-ms VIP window is benign and closing it buys nothing.
+   143	
+   144	*Failure paths — NOT unconditionally benign (r2 overclaimed; Codex F2/r3):*
+   145	- **Failed fabric-prep:** the preflight logs `Warn` and proceeds (readiness.go:23-27), so
+   146	  its masking property is ABSENT — transit landing on O during the overlap is not
+   147	  fabric-redirected. This is availability-only (not dual-forwarding), but the loss is an
+   148	  **unquantified transient**, not a bounded "brief TCP-recoverable" figure; state it as
+   149	  a risk, do not put a number on it.
+   150	- **Failed `removeVIPs`:** #5482 bounds retry **effort**, not stale-VIP **lifetime** —
+   151	  after `vipRemoveReconcileMax` (5) attempts at 200 ms it logs Error and leaves the VIP
+   152	  until the next transition (instance_vip.go:125). A wedged netlink can leave a stale VIP
+   153	  well past ~1 s. Transit is still fabric/rg_active-covered, but the plan may not claim
+   154	  "benign for any δ_remove."
+   155	- **Failed `SetRGActive(false)`:** the control-socket call at daemon_ha.go:367 only logs
+   156	  a `Warn`; `signalFailoverActuated` (:389) still fires. So the ack is released with O's
+   157	  `rg_active` **still true** — O keeps cluster-forwarding for the RG. Combined with R's
+   158	  priority-0 promotion + commit, **both nodes can forward**. The `reconcileRGStateLoop`
+   159	  (daemon_ha.go:604-620,826-842) RE-ATTEMPTS the clear every 2 s — but that is a **retry
+   160	  cadence, not a recovery bound** (Codex r3): a single transient failure normally clears
+   161	  on the next pass (~≤2 s), but a **persistent** control-socket/dataplane failure leaves
+   162	  the dual-forward condition **unbounded**. This is the genuinely security-relevant
+   163	  residual, on the **`SetRGActive`-failure axis, not the VIP-timing axis** — out of
+   164	  Residual-1's stated scope and filed separately (§5 Option D / §11).
+   165	
+   166	**Security threat model (the issue is labeled `security`).** (a) **Not
+   167	attacker-triggerable** — the window opens only on an operator-/weight-driven planned
+   168	failover coincident with a rare control-socket or netlink failure, not on demand from
+   169	the data path. (b) The benign VIP-timing overlap (success path) is a transient
+   170	duplicate-ARP with per-node MACs. (c) The **dual-active forwarding** condition — the one
+   171	with real security weight — arises only on a **failed `SetRGActive(false)`** — self-clears on the 2 s reconcile
+   172	cadence for a transient failure but is **unbounded under persistent** control-socket
+   173	failure — and #5640's *stated* "ack ⇒ rg_active cleared" invariant does not actually
+   174	hold on that failure (the ack signals anyway; the clear is only *attempted*). Closing
+   175	THAT is the security-relevant work — see §5 Option D — but it has its own
+   176	abort→blackhole tradeoff and is filed for dedicated research rather than bundled here.
+   177	
+   178	## 4. Design question Q1 — is there a real two-owner window at all?
+   179	
+   180	**Answer (refined after Codex F2): the VIP-*timing* window is benign; a distinct
+   250	additive, no behavior change; converts "benign in theory" into "measurable in
+   251	practice." Offered as optional; not required for PLAN-READY.
+   252	
+   253	### Option D — hard rg_active forwarding fence (Codex F3; the security-relevant lever) — FILE SEPARATELY
+   254	Codex correctly notes the plan cannot dismiss Residual-1 without evaluating a hard
+   255	forwarding fence, and that the real closable property is `rg_active`-clear, not VIP
+   256	timing. Two sub-variants:
+   257	- **D1 (Codex's literal proposal):** reorder so `rg_active` is cleared **successfully
+   258	  before** `ResignRG`/priority-0; if the clear fails, do not advertise resignation or
+   259	  ack — retain the owner, fail the transfer. **Conflicts directly with #485**
+   260	  (daemon_ha.go:341-347 deliberately does `ResignRG` BEFORE clearing `rg_active` so the
+   261	  demoting node keeps forwarding via the fabric path during the transition — clearing
+   262	  first re-introduces a self-blackhole while it is still VRRP-master). So D1 is not free.
+   263	- **D2 (#485-compatible refinement):** keep the ordering, but make
+   264	  `signalFailoverActuated` (:389) **conditional on the `SetRGActive(false)` at :367
+   265	  succeeding** — downgrade to `failoverAckFailed` on failure so the requester HOLDS
+   266	  instead of committing. This makes #5640's *stated* "ack ⇒ rg_active cleared"
+   267	  invariant actually hold and prevents the requester from reaching dual-active
+   268	  forwarding.
+   269	- **Why NOT ship D here (firsthand tradeoff):** withholding the ack cannot un-take the
+   270	  peer's **priority-0 VIP move** (already done at ~1 ms). On a failed clear, D2 makes
+   271	  the requester ABORT — leaving the peer holding the VIP with `rg_active=false` while O
+   272	  is demoted, so the cluster must re-elect via the **#5079 owner-side lease (~15/30 s)**
+   273	  → a **~30 s blackhole** can be worse than today's transient dual-forward. But the
+   274	  comparison is genuinely two-sided: today's dual-forward is only transient IF the
+   275	  `SetRGActive` failure is transient — under a **persistent** failure today's condition
+   276	  is **unbounded**, which argues FOR a fence. So the follow-up must weigh **transient vs
+   277	  persistent** actuation failure, the 2 s retry cadence, the ~15/30 s lease recovery, L2
+   278	  ownership during abort, and the D1/#485 ordering — a **design pass in its own right**.
+   279	  The plan must NOT use a (false) "2 s bound" to prejudge that outcome either way.
+   280	- **Verdict:** Option D targets the RIGHT property (forwarding, not VIP timing) but is
+   281	  **not ship-ready** — it has a real abort→(~30 s)-blackhole tradeoff and a #485
+   282	  conflict, AND the status-quo hazard it addresses can be unbounded. **File it as a new
+   283	  issue for dedicated `/research`** rather than bundling it into the #6177 follow-up.
+   284	  This keeps the #6177 PR small and honest and does not dismiss the hazard (it is
+   285	  tracked). See §11.
+   286	
+   287	## 6. Design question Q3 — independent residuals worth landing regardless
+   288	
+   289	Of the two independent residuals (they **do not depend on Q1/Q2**), **Residual-2 is
+   290	DROPPED** and **Residual-3 (+ the doc fix) is LANDED** — see below. The theme: cover
+   291	and correct the **existing** #5640 barrier we are keeping, without half-measures.
+   292	
+   293	- **Residual-2 — delete-by-key identity hardening → DROPPED (Codex F4).** #6367's
+   294	  version hardened only `disarm`/`timeout` to channel-identity while
+   295	  `signalFailoverActuated` stays key-only (can close a newer generation) and
+   296	  `armFailoverActuation` can overwrite an existing entry — i.e. it half-hardens a
+   297	  forbidden state, backed by tests that manufacture that state. The clean choices are
+   298	  EITHER a coherent generation/identity model across all four of arm/signal/timeout/
+   299	  disarm (only worth it once concurrency is actually reachable) OR keep today's
+   300	  serialized invariant. Same-RG concurrency is unreachable — the initiator serializes
+   301	  per-RG (sync_failover.go:82) AND the responder acks (3 s actuate timeout) well before
+   302	  the initiator's 20 s ack timeout could retry, so no overlapping same-RG waiter exists
+   303	  even across a connection replace/re-entry (the fuller argument the drop rests on, not
+   304	  initiator-serialization alone). **YAGNI → drop Residual-2** (resolves the r2 §11 Q-b in
+   305	  favor of dropping). If a future change makes same-RG concurrency reachable, do the
+   306	  coherent four-way generation model then, not the half-measure now.
+   307	- **Residual-3 — daemon-barrier unit test, EXPANDED to branch-level (Codex F5).**
+   308	  Keep the primitive coverage (arm → signal | timeout → release/downgrade + no
+   309	  stale-channel leak) AND add a **branch-level demotion-order test** that drives the
+   310	  `watchClusterEvents` demotion branch with `SetRGActive(false)` **succeeding** and
+   311	  **failing**, asserting the current behavior (signal fires in both cases today) and
+   312	  the #5640 invariant (rg_active clear is attempted before the signal). This both
+   313	  closes the #5640 coverage gap AND documents-in-test the exact failed-`SetRGActive`
+   314	  behavior that Option D would later change — so the follow-up research has a pinned
+   315	  baseline. Primitive-only tests must NOT claim to protect the ordering (Codex F5).
+   316	- **Doc-accuracy fix.** `docs/session-sync-architecture.md` describes the #5640
+   317	  release as gating on the demotion being actuated; ensure the RETH wording says
+   318	  "resign **signaled** + priority-0 set + rg_active clear **attempted**", NOT "VIPs
+   319	  removed", and record the Q1–Q3 rationale: the VIP-timing window is benign, the
+   320	  failed-`SetRGActive` forwarding hazard is the real residual (tracked in the new
+   321	  Option-D issue), and #5640's "ack ⇒ rg_active cleared" invariant does not currently
+   322	  hold on a `SetRGActive` failure.
+   323	
+   324	## 7. Recommended path (overall)
+   325	
+   345	process for no gain. The `plan-kill` label semantics apply to the Residual-1 sub-goal
+   346	(and the dropped Residual-2), documented inside an otherwise PLAN-READY plan; the
+   347	security-relevant Option-D hazard moves to its own tracking issue.
+   348	
+   349	## 8. Risk analysis
+   350	
+   351	- **Keeping the VIP-timing window (success path):** the only exposure is a transient
+   352	  duplicate-ARP nuisance masked by fabric-redirect + rg_active-clear + GARP/per-node-MAC.
+   353	  No new risk (status quo).
+   354	- **NOT keeping quiet about the failure paths:** the failed-`SetRGActive(false)` →
+   355	  signal-anyway dual-forward condition is real and, under a **persistent** control-socket
+   356	  failure, **unbounded** (Codex r3 — the 2 s reconcile is a retry *cadence*, not a
+   357	  recovery *bound*; each pass re-attempts and can re-fail, daemon_ha.go:842). This plan
+   358	  does NOT close it — it FILES it (Option D) and pins it in the branch-level test. The
+   359	  risk of *not* shipping a fix now is that the hazard remains latent until the Option-D
+   360	  research lands; acceptable because it needs a control-socket/netlink failure to trigger
+   361	  and Option D's naive form can make it worse (abort→~15/30 s lease blackhole).
+   362	- **Docs-only Residual-1 decision:** zero runtime risk.
+   363	- **Dropping Residual-2:** zero runtime risk (no code change); removes the temptation to
+   364	  land incoherent half-hardening.
+   365	- **Regression surface (Residual-3 test + doc):** the test may require extracting the
+   366	  demotion-branch body into a unit-testable seam (a mechanical refactor); it does not
+   367	  touch the VRRP run-loop, the resign ordering, or the dataplane, so the ~60 ms/~1 ms
+   368	  failover budget is unchanged. `make test-failover` is still required per CLAUDE.md
+   369	  (the file set touches `pkg/daemon` HA code) as a **regression gate, not a window
+   370	  measurement** — nothing closes the window; the smoke proves nothing regressed.
+   371	- **Ordering fact to CAPTURE (not an invariant to claim).** Today the demotion branch
+   372	  calls `SetRGActive(false)` (daemon_ha.go:367) BEFORE `signalFailoverActuated` (:389),
+   373	  but the clear is only **ATTEMPTED** before signaling — the current code does **NOT**
+   374	  guarantee it SUCCEEDED (a failed clear still signals). So #5640's often-stated
+   375	  "ack ⇒ rg_active cleared" invariant does **not** hold; the honest property is
+   376	  "rg_active clear is attempted before the ack releases." The branch-level Residual-3
+   377	  test must assert exactly this (attempt-before-signal, in BOTH the success and failure
+   378	  cases) and NOT overclaim a cleared-before-signal guarantee. The Option-D follow-up is
+   379	  what would upgrade the attempt into an enforced guarantee.
+   380	
+   381	## 9. Test plan
+   382	
+   383	- **Unit (Residual-3, primitive):** `pkg/daemon` barrier tests — arm→signal→release
+   384	  (nil err), arm→timeout→downgrade + entry cleaned up. Fail-on-revert per project
+   385	  discipline (neutralize → bound test RED → revert → green).
+   386	- **Unit (Residual-3, branch-level — Codex F5):** drive the `watchClusterEvents`
+   387	  demotion branch (or an extracted testable seam) with a mock dataplane where
+   388	  `SetRGActive(false)` SUCCEEDS and where it FAILS; assert the demotion-order invariant
+   389	  (rg_active clear attempted before `signalFailoverActuated`) and pin the current
+   390	  failed-`SetRGActive` behavior (signal still fires) so the Option-D follow-up has a
+   391	  baseline. This is the test that actually protects the ordering — primitive tests do
+   392	  not.
+   393	- **No Residual-2 test** — Residual-2 is dropped.
+   394	- **No new VRRP timing test** — no timing behavior changes.
+   395	- **Smoke:** `make test-failover` on the loss userspace cluster (v4+v6, push +
+
+[35m[3mexec[0m[0m
+[1m/bin/bash -lc "sed -n '1,95p' pkg/cluster/election.go; rg -n \"remoteTransferOutLease|transferOutLease|failoverAckTimeout|failoverActuateTimeout\" pkg/cluster | head -120; git diff --check e41e68cdc..5c13774e7 -- docs/research/6177-reth-twoowner/plan.md"[0m in /home/ps/git/bpfrx/.claude/worktrees/6177-research
+[32m succeeded in 0ms:[0m
+package cluster
+
+import (
+	"log/slog"
+	"sort"
+	"time"
+
+	"github.com/psaab/xpf/pkg/config"
+)
+
+// EffectivePriority calculates the effective priority for a node.
+// effective = base_priority * (weight / 255)
+// Returns an integer value scaled to avoid floating-point issues.
+// Higher value = higher priority = more likely to be primary.
+func EffectivePriority(basePriority, weight int) int {
+	if weight <= 0 {
+		return 0
+	}
+	return basePriority * weight / 255
+}
+
+// electionResult is the outcome of a per-RG election.
+type electionResult int
+
+const (
+	electLocalPrimary   electionResult = iota // local node should be primary
+	electLocalSecondary                       // local node should be secondary
+	electNoChange                             // no state change needed
+)
+
+// elect performs election for a single RG considering peer state.
+// It implements the full Junos-style election logic:
+//   - If peer is lost, local becomes primary (if weight > 0)
+//   - If peer is alive, compare effective priorities
+//   - Preempt: higher effective priority wins immediately
+//   - Non-preempt: incumbent stays unless weight drops to 0
+//   - Split-brain (both primary): lower node ID wins
+func (m *Manager) electRG(rg *RedundancyGroupState, peerGroup *PeerGroupState) (electionResult, string) {
+	// Skip disabled groups entirely.
+	if rg.State == StateDisabled {
+		return electNoChange, ""
+	}
+
+	// #1930 INC-2: a node booted as a kernel-upgrade CANDIDATE holds SECONDARY
+	// unconditionally until the promotion gate verifies the dataplane. Unlike
+	// ManualFailover (which the isolated-node path below auto-clears after 2s so
+	// a lone node can reclaim primary), this hold is NOT auto-cleared — a
+	// candidate with a broken dataplane must NEVER become primary even if it
+	// can't see the peer, or it would blackhole traffic (r2 AGY Critical). It is
+	// cleared only by promote/rejoin/revert (KernelUpgradeHoldClear).
+	if m.kernelUpgradeHold {
+		return electNoChange, ""
+	}
+
+	clearedManualFailover := false
+
+	// ManualFailover normally blocks election (stays secondary-hold until
+	// reset). Exception: if the peer has also explicitly transferred out or
+	// already resigned with weight 0, both nodes can end up parked as
+	// non-owners. Clear ManualFailover and restore normal election after a
+	// short guard window so one node can reclaim primary.
+	//
+	// Time guard: only clear after 2s to prevent re-promoting a node that
+	// JUST transferred out. Without this, the resigned node sees stale peer
+	// transfer-out or weight=0 state and immediately re-elects itself as
+	// primary, defeating the handoff.
+	if rg.ManualFailover {
+		// Owner-side transfer-out lease (#5079). A peer-requested transfer-out
+		// demoted us BEFORE the requester ran its own post-ACK commit checks. If
+		// the requester aborted after the ACK — or crashed / lost the fabric — it
+		// sent no commit AND no abort, and it may have rolled back to a HEALTHY
+		// secondary, a state the dual-resign guard below never rescues (that guard
+		// needs the peer resigned or itself in secondary-hold). Once the lease
+		// expires with no commit, restore ourselves so a failed coordinated
+		// failover cannot leave both nodes secondary. A committed transfer clears
+		// the lease first (reqID-bound), so this never fires on a real handoff.
+		if until, leased := m.remoteTransferOutLeaseUntil[rg.GroupID]; leased && !time.Now().Before(until) {
+			slog.Warn("cluster: remote transfer-out lease expired without commit, restoring",
+				"rg", rg.GroupID, "req_id", m.remoteTransferOutLeaseReqID[rg.GroupID])
+			m.clearRemoteTransferOutLeaseLocked(rg.GroupID)
+			rg.ManualFailover = false
+			rg.ManualFailoverAt = time.Time{}
+			m.manualFailoverRestoreWeightLocked(rg)
+			clearedManualFailover = true
+			// Fall through to normal priority/tie-break election below.
+		} else {
+			peerResigned := peerGroup != nil && peerGroup.Weight <= 0
+			peerTransferOut := peerGroup != nil && peerGroup.State == StateSecondaryHold
+			if !peerResigned && !peerTransferOut {
+				return electNoChange, ""
+			}
+			if time.Since(rg.ManualFailoverAt) < 2*time.Second {
+				return electNoChange, ""
+			}
+			// The peer has also yielded for >2s. Clear manual failover and
+pkg/cluster/sync_failover.go:106:	timer := time.NewTimer(failoverAckTimeout)
+pkg/cluster/sync_failover.go:168:	timer := time.NewTimer(failoverAckTimeout)
+pkg/cluster/sync_failover.go:255:	timer := time.NewTimer(failoverAckTimeout)
+pkg/cluster/sync_failover.go:316:	timer := time.NewTimer(failoverAckTimeout)
+pkg/cluster/failover_lease_5079_test.go:67:	m.remoteTransferOutLeaseUntil[0] = time.Now().Add(-time.Second)
+pkg/cluster/failover_lease_5079_test.go:75:	_, leaseLeft := m.remoteTransferOutLeaseUntil[0]
+pkg/cluster/failover_lease_5079_test.go:104:	_, stillLeased := m.remoteTransferOutLeaseUntil[0]
+pkg/cluster/failover_lease_5079_test.go:113:	_, leasedAfter := m.remoteTransferOutLeaseUntil[0]
+pkg/cluster/failover_lease_5079_test.go:140:	_, leased := m.remoteTransferOutLeaseUntil[0]
+pkg/cluster/failover_lease_5079_test.go:151:// remoteTransferOutLease{Until,ReqID} entry dormant in the maps. Repeated
+pkg/cluster/failover_lease_5079_test.go:172:	_, untilBefore := m.remoteTransferOutLeaseUntil[0]
+pkg/cluster/failover_lease_5079_test.go:173:	_, reqIDBefore := m.remoteTransferOutLeaseReqID[0]
+pkg/cluster/failover_lease_5079_test.go:184:	_, untilAfter := m.remoteTransferOutLeaseUntil[0]
+pkg/cluster/failover_lease_5079_test.go:185:	_, reqIDAfter := m.remoteTransferOutLeaseReqID[0]
+pkg/cluster/failover_lease_5079_test.go:219:		m.remoteTransferOutLeaseUntil[id] = time.Now().Add(-time.Second)
+pkg/cluster/sync.go:89:const failoverAckTimeout = 20 * time.Second
+pkg/cluster/election.go:77:		if until, leased := m.remoteTransferOutLeaseUntil[rg.GroupID]; leased && !time.Now().Before(until) {
+pkg/cluster/election.go:79:				"rg", rg.GroupID, "req_id", m.remoteTransferOutLeaseReqID[rg.GroupID])
+pkg/cluster/README.md:718:  failover-ACK cap (`failoverAckTimeout`, `sync.go`) further bounds this: if the
+pkg/cluster/README.md:721:  handles — so a large `failoverActuateTimeout` cannot delay a real commit past
+pkg/cluster/failover.go:410:	m.remoteTransferOutLease = d
+pkg/cluster/failover.go:422:	until := time.Now().Add(m.remoteTransferOutLease)
+pkg/cluster/failover.go:428:		m.remoteTransferOutLeaseUntil[rgID] = until
+pkg/cluster/failover.go:429:		m.remoteTransferOutLeaseReqID[rgID] = reqID
+pkg/cluster/failover.go:431:			"rg", rgID, "req_id", reqID, "expires_in", m.remoteTransferOutLease.String())
+pkg/cluster/failover.go:442:	if cur, ok := m.remoteTransferOutLeaseReqID[rgID]; ok && cur != reqID {
+pkg/cluster/failover.go:449:	delete(m.remoteTransferOutLeaseUntil, rgID)
+pkg/cluster/failover.go:450:	delete(m.remoteTransferOutLeaseReqID, rgID)
+pkg/cluster/manager.go:155:	// remoteTransferOutLeaseUntil bounds how long a peer-REQUESTED transfer-out
+pkg/cluster/manager.go:166:	remoteTransferOutLeaseUntil map[int]time.Time
+pkg/cluster/manager.go:167:	remoteTransferOutLeaseReqID map[int]uint64
+pkg/cluster/manager.go:168:	// remoteTransferOutLease is how long an armed lease survives without a
+pkg/cluster/manager.go:172:	remoteTransferOutLease time.Duration
+pkg/cluster/manager.go:365:		remoteTransferOutLeaseUntil:    make(map[int]time.Time),
+pkg/cluster/manager.go:366:		remoteTransferOutLeaseReqID:    make(map[int]uint64),
+pkg/cluster/manager.go:367:		remoteTransferOutLease:         DefaultRemoteTransferOutLease,
+
+[35m[3mexec[0m[0m
+[1m/bin/bash -lc "rg -n \"DefaultRemoteTransferOutLease|SetRemoteTransferOutLease|remote-transfer\" pkg/cluster && sed -n '395,435p' pkg/cluster/failover.go && sed -n '145,180p' pkg/cluster/manager.go"[0m in /home/ps/git/bpfrx/.claude/worktrees/6177-research
+[32m succeeded in 0ms:[0m
+pkg/cluster/manager.go:170:	// worst-case post-ACK commit latency; see DefaultRemoteTransferOutLease and
+pkg/cluster/manager.go:171:	// SetRemoteTransferOutLeaseDuration.
+pkg/cluster/manager.go:336:// DefaultRemoteTransferOutLease bounds how long a peer-requested transfer-out
+pkg/cluster/manager.go:342:// forever. The daemon raises this via SetRemoteTransferOutLeaseDuration when a
+pkg/cluster/manager.go:345:const DefaultRemoteTransferOutLease = 30 * time.Second
+pkg/cluster/manager.go:347:// minRemoteTransferOutLease floors SetRemoteTransferOutLeaseDuration so a
+pkg/cluster/manager.go:367:		remoteTransferOutLease:         DefaultRemoteTransferOutLease,
+pkg/cluster/failover.go:400:// SetRemoteTransferOutLeaseDuration overrides how long an armed remote
+pkg/cluster/failover.go:405:func (m *Manager) SetRemoteTransferOutLeaseDuration(d time.Duration) {
+pkg/cluster/README.md:39:  `SetRemoteTransferOutLeaseDuration`,
+pkg/cluster/README.md:714:  duration (`SetRemoteTransferOutLeaseDuration`, default
+pkg/cluster/README.md:715:  `DefaultRemoteTransferOutLease` = 30s, floored at 15s) is sized above the
+// electRG restores the owner. A local operator ManualFailover / ISSU
+// ForceSecondary clears any stale lease so their deliberate holds are never
+// auto-restored.
+// =============================================================================
+
+// SetRemoteTransferOutLeaseDuration overrides how long an armed remote
+// transfer-out lease survives without a commit before electRG restores the
+// owner. The daemon sizes this above its configured local commit-ready settle
+// window plus the commit round-trip so the lease never fires on an in-flight
+// commit. Values below minRemoteTransferOutLease are floored.
+func (m *Manager) SetRemoteTransferOutLeaseDuration(d time.Duration) {
+	if d < minRemoteTransferOutLease {
+		d = minRemoteTransferOutLease
+	}
+	m.mu.Lock()
+	m.remoteTransferOutLease = d
+	m.mu.Unlock()
+}
+
+// ArmRemoteTransferOutLease binds an auto-restore lease to each RG that a peer
+// request has just demoted, so a requester-side post-ACK abort/crash cannot
+// strand the owner secondary (#5079). Only RGs actually holding ManualFailover
+// are armed — a demotion superseded by a concurrent reset (which cleared the
+// hold) leaves no lease, so the owner is never spuriously restored.
+func (m *Manager) ArmRemoteTransferOutLease(rgIDs []int, reqID uint64) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	until := time.Now().Add(m.remoteTransferOutLease)
+	for _, rgID := range rgIDs {
+		rg, ok := m.groups[rgID]
+		if !ok || !rg.ManualFailover {
+			continue
+		}
+		m.remoteTransferOutLeaseUntil[rgID] = until
+		m.remoteTransferOutLeaseReqID[rgID] = reqID
+		slog.Info("cluster: armed remote transfer-out lease",
+			"rg", rgID, "req_id", reqID, "expires_in", m.remoteTransferOutLease.String())
+	}
+}
+
+// ClearRemoteTransferOutLease disarms the lease for an RG once the transfer-out
+	peerTransferOutOverride map[int]uint64
+	// peerTransferCommitGraceUntil keeps the peer in secondary-hold for a
+	// short window after a transfer commit so a transient stale heartbeat
+	// cannot immediately steal the RG back from the new primary.
+	peerTransferCommitGraceUntil map[int]time.Time
+	// localTransferOutHoldUntil keeps a just-demoted local RG parked in
+	// secondary during the same window so a transient heartbeat gap cannot
+	// immediately re-promote the old primary.
+	localTransferOutHoldUntil map[int]time.Time
+	peerTransferOutPrevious   map[int]peerGroupSnapshot
+	// remoteTransferOutLeaseUntil bounds how long a peer-REQUESTED transfer-out
+	// keeps this node parked in secondary-hold without a commit. It is armed
+	// (ArmRemoteTransferOutLease) when a remote failover request demotes an RG
+	// via ManualFailover, and cleared on the matching commit
+	// (ClearRemoteTransferOutLease, reqID-bound). If the lease expires with no
+	// commit — a requester-side post-ACK abort/crash/partition that never sent
+	// (or could not send) the commit — electRG auto-restores this node so a
+	// failed coordinated failover cannot strand the cluster with both nodes
+	// secondary (#5079). Only a REMOTE transfer-out arms a lease; a local
+	// operator ManualFailover / ISSU ForceSecondary clears any stale entry so
+	// their deliberate holds are never auto-restored. Read/written under m.mu.
+	remoteTransferOutLeaseUntil map[int]time.Time
+	remoteTransferOutLeaseReqID map[int]uint64
+	// remoteTransferOutLease is how long an armed lease survives without a
+	// commit before electRG restores the owner. Sized above the requester's
+	// worst-case post-ACK commit latency; see DefaultRemoteTransferOutLease and
+	// SetRemoteTransferOutLeaseDuration.
+	remoteTransferOutLease time.Duration
+	peerMonitors           []InterfaceMonitorInfo
+
+	// lastDupNodeIDWarn rate-limits the duplicate-node-id warning (#4549 F11).
+	// A peer advertising the local node's own node-id is an invalid cluster
+	// (two chassis cannot share a node-id); the warning fires at most once per
+	// 30s so a 5/s heartbeat stream cannot flood the log. Read/written under
+	// m.mu.
+	lastDupNodeIDWarn time.Time
+
+[35m[3mcodex[0m[0m
+No recommendation-changing blocker found. The r4 design recommendation is confirmed.
+
+- F1 race precision is correct: R’s independent master-down timer can beat post-ack `ForceRGMaster`; O’s separate safety timer is ≥500 ms.
+- The 2-second loop is correctly characterized as retry cadence. Persistent `SetRGActive(false)` failure leaves dual-forwarding unbounded.
+- Failed fabric preparation is now an unquantified availability risk.
+- Option D correctly includes the 15-second floor/30-second default #5079 lease tradeoff. FILE for dedicated research; do not ship it here.
+- §8 has removed Residual-2 and accurately states attempt-before-signal. It agrees with §§6/7/9.
+
+Two non-blocking stale sentences remain:
+
+- Lines 73–75 still claim benignity for any `δ_remove`, including failed removal, contradicting lines 150–154.
+- Lines 126–130 still say the ack waits until `rg_active` “is cleared”; this should say the clear is attempted.
+
+These are cleanup errors from the prior correction, not grounds to change the recommendation: kill the VIP gate, drop Residual-2, land the branch-level success/failure ordering test plus documentation correction, and file Option D separately.
+
+VERDICT: PLAN-READY
+[2mtokens used[0m
+43,411
+No recommendation-changing blocker found. The r4 design recommendation is confirmed.
+
+- F1 race precision is correct: R’s independent master-down timer can beat post-ack `ForceRGMaster`; O’s separate safety timer is ≥500 ms.
+- The 2-second loop is correctly characterized as retry cadence. Persistent `SetRGActive(false)` failure leaves dual-forwarding unbounded.
+- Failed fabric preparation is now an unquantified availability risk.
+- Option D correctly includes the 15-second floor/30-second default #5079 lease tradeoff. FILE for dedicated research; do not ship it here.
+- §8 has removed Residual-2 and accurately states attempt-before-signal. It agrees with §§6/7/9.
+
+Two non-blocking stale sentences remain:
+
+- Lines 73–75 still claim benignity for any `δ_remove`, including failed removal, contradicting lines 150–154.
+- Lines 126–130 still say the ack waits until `rg_active` “is cleared”; this should say the clear is attempted.
+
+These are cleanup errors from the prior correction, not grounds to change the recommendation: kill the VIP gate, drop Residual-2, land the branch-level success/failure ordering test plus documentation correction, and file Option D separately.
+
+VERDICT: PLAN-READY
