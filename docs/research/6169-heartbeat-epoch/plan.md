@@ -1,29 +1,32 @@
 # #6169 — cluster/heartbeat across-reboot boot-epoch anti-replay (research plan)
 
-**Status:** DRAFT v5 — revised after four rounds of adversarial plan review
-(Codex r1–r4 + Claude SMR r1–r4, each round PLAN-NEEDS-MAJOR). Pending round-5
+**Status:** DRAFT v6 — revised after five rounds of adversarial plan review
+(Codex r1–r5 + Claude SMR r1–r5, each round PLAN-NEEDS-MAJOR). Pending round-6
 review. AGY infra-down.
 
 Worktree `.claude/worktrees/6169-research`, branch `research/6169-heartbeat-epoch`,
 base `origin/master` @ `11e23b49a`. **/research** — STOPS at PLAN-READY; no
 production code; implementation only on `/engineer 6169`.
 
-> **v5 changelog (what round 4 forced).** The **key-derived marker** and the
+> **v6 changelog (what round 5 forced).** The **key-derived marker** and the
 > **separated Manager send-nonce + `(epoch,counter)` total order** remain the
-> confirmed correct center (all four rounds). Round 4 showed **persist-before-emit
-> alone is not fail-closed**: a persist-failed was-primary node emitting markerless
-> frames is rejected by a peer holding `sawEpoch` (one-way UDP partition) →
-> **sustained dual-primary**. v5 introduces one **epoch-ownership hold** that
-> subsumes the persist-fail response, the live-key barrier, *and* the ownership
-> demote (reusing the existing kernel-upgrade hold + the never-seen/went-silent
-> distinction), so the failure cases resolve cleanly: asymmetric → peer takes
-> over; both-fail → safe outage (not dual-primary); sole-node → promotes. v5 also
-> replaces the far-future heuristic with a **checksummed persisted epoch (trust a
-> valid value, never regress)**, a **serialized read-max-write persistence
-> worker** (async retry can no longer overwrite a newer durable epoch), moves
-> `lastSeen` inside the gen-checked transaction, restores the **+16-byte tail
-> reserve**, and requires **#5639 to drain pre-arm unauthenticated sync
-> connections**.
+> validated center (five rounds). Round 5 exposed a **fundamental** flaw in v5's
+> ownership hold: sole-node availability + two-node partition safety is
+> **impossible from heartbeat absence alone** — a one-way receive partition is
+> indistinguishable from a genuinely-absent peer, so v5's "held node promotes via
+> never-seen" recreates dual-primary. v6 therefore **chooses CONSISTENCY**: in a
+> *configured* cluster a node that cannot emit a durably-persisted marker is
+> **peer-visibly epoch-ineligible** (advertises ineligibility, demotes, never
+> promotes) → **safe outage + an explicit operator override** for availability; a
+> genuinely standalone deployment is explicit config (no peer → no epoch → no
+> hold). This removes the never-seen exception, the asymmetric-takeover gap, and
+> the attacker-gameable `noteRejectedFromPeer`. v6 also makes epoch allocation a
+> **strict successor** (`> max(durable, emitted)`, `MaxUint64`→fail-held), binds a
+> **sender-side `{keyGen,key,markerEnabled,epoch,RG}` snapshot** (no stale K1 body
+> signed under K2), corrects that **key rotation cannot repair a write fault**,
+> uses a **separate hold flag** (not the kernel bool) with an aggregate gate, and
+> requires **#5639 to gen-check before applying any pending/in-flight sync
+> message** (not just drain installed connections).
 
 ---
 
@@ -48,9 +51,9 @@ sessions replays a retired incarnation to refresh peer liveness / re-apply its
 stale RG role). Threat model: on-path **replay** without forging (no PSK) and
 without actively blocking the live peer. The cost is real — a #5639
 prerequisite, a persist-before-emit path, and a coordinated key-rotation
-runbook. **If reviewers judge the residual too narrow to justify this surface,
-PLAN-KILL is acceptable** (§11); not recommended — the center is sound and a
-half-fix is worse than the honest 64 bound.
+runbook, and — surfaced by review — a real HA-availability constraint at the
+persist boundary (§5.4/§11). **If reviewers judge the residual too narrow to
+justify this surface, PLAN-KILL/defer is a legitimate user call** (§11 cost/benefit).
 
 ## 3. Prerequisite and composition
 
@@ -61,29 +64,32 @@ half-fix is worse than the honest 64 bound.
   recreation replaces `SessionSync` (`daemon_ha_sync.go:851`). #6169's epoch
   downgrade-gate rides on the same auth-seen state. **#6169 is BLOCKED-ON #5639**
   (`/engineer 6169` cannot proceed until it lands, or the two are done together).
-  **#5639 acceptance criteria** (strengthened per Codex r3 + r4): one
+  **#5639 acceptance criteria** (strengthened per Codex r3–r5): one
   Manager/daemon-scoped cross-channel auth owner armed by *both* heartbeat and
-  sync-auth, with a commit-time owner-generation recheck **AND active
-  drain/rehandshake of any unauthenticated sync connection installed before the
-  owner armed** — a recheck alone does not evict a pass-through connection whose
-  auth was fixed at handshake (`sync_auth.go:329`), so it must be drained or
-  re-validated per message.
+  sync-auth, with a commit-time owner-generation recheck AND a **generation check
+  before applying any pending / in-flight sync message** — draining *installed*
+  connections is not enough (Codex r5 §6): the current setup removes a connection
+  from pre-auth tracking, applies a legacy pending frame, then installs it
+  (`sync_conn.go:100/119/130`), and a payload already read before `handleMessage`
+  (`sync_conn_read.go:71`) cannot be retracted by closing the connection. The
+  owner must therefore gen-check at message-application time (a fully linearized
+  arm-and-drain), not only evict connections.
 - **Composes with:** #4107 (`XPFA` 52-byte trailer, unchanged), #5477/#6167 ring
-  (kept for v1-migration), #5081/#5086. **Independent of held #5078.** v4 keeps
+  (kept for v1-migration), #5081/#5086. **Independent of held #5078.** v6 keeps
   the corrected note: #5639's owner *does* touch `sync_auth.go`'s auth-seen bit.
 - **Reused:** `fullSetSeqGuard` `(incarnation,seq)` comparison (`sync_conn_gen.go:64`).
 - **Persistence precedent — SNMPv3 `engineBoots`** (`agent.go:573`):
-  **fail-closed on read/parse/arithmetic/write uncertainty.** v4 adopts this
-  literally via persist-before-emit (§5.4), not a volatile fence.
+  **fail-closed on read/parse/arithmetic/write uncertainty.** v6 adopts this
+  via persist-before-emit + peer-visible epoch-ineligibility (§5.4).
 
 ## 4. The five findings — verified
 
 Unchanged (all CONFIRMED): F1 rolling-upgrade split; F2 ring churn (worse — many
 same-epoch sessions from routine restarts); F3 self-lock + undesigned
 persistence; F4 lifecycle reset + wrong-node recovery; F5 parse ambiguity. §5
-shows how v4 closes each; the resolutions were rebuilt across three rounds.
+shows how v6 closes each; the resolutions were rebuilt across five rounds.
 
-## 5. Concrete design — v4
+## 5. Concrete design — v6
 
 ### 5.1 Wire — key-derived, tail-anchored, MAC-verified epoch marker (F1 + F5)
 
@@ -121,7 +127,7 @@ Two distinct Manager/daemon-scoped pieces (never conflated):
 - **Sender send-nonce `{session, counter}`** — created once per daemon; `counter`
   monotonic; **never reset on a key change**; reset only on a new Manager (daemon
   restart), where the epoch is strictly higher. **Counter exhaustion** is
-  practically unreachable (`MaxUint64` at 10 Hz ≈ 10¹¹ years); v4 treats it as a
+  practically unreachable (`MaxUint64` at 10 Hz ≈ 10¹¹ years); v6 treats it as a
   hard defensive assertion (refuse to advance past `MaxUint64`) rather than a live
   epoch-rotation dance — documented as unreachable, not a runtime path.
 - **Receiver `peerAdmission{ring, highEpoch, highCounter, sawEpoch, keyGen}`** —
@@ -146,106 +152,110 @@ pkt := UnmarshalHeartbeat(frame[:bodyEnd]); hasEpoch,epoch := parseMarker(...) i
 … clusterID / duplicate-node checks …
 m.mu.Lock()                                                  // ONE lock for admission + apply (no nesting)
   if keyGen != m.keyGen { m.mu.Unlock(); DROP }              // key rotated since verify → discard
-  if macOK && !hasEpoch && sawEpoch { m.mu.Unlock(); noteRejectedFromPeer(); REJECT "epoch strip" }
+  if macOK && !hasEpoch && sawEpoch { m.mu.Unlock(); REJECT "epoch strip" }
   accept := macOK ? (hasEpoch ? admitEpoch(epoch,counter) : ring.admit(session,counter))
                   : baseAuthDecision(...)
-  if !accept { m.mu.Unlock(); noteRejectedFromPeer(); REJECT }
+  if !accept { m.mu.Unlock(); REJECT }
   markAuthSeen(); if hasEpoch { sawEpoch=true }
   lastSeen = now                                              // INSIDE the gen-checked txn (Codex r4)
   handlePeerHeartbeatLocked(pkt)                              // peer-alive/RG/election, m.mu already held
 m.mu.Unlock()
 ```
 
-- **Single `m.mu` transaction** (Codex r4): the whole admit → `lastSeen` →
+- **Single `m.mu` transaction** (Codex r4): admit → `lastSeen` →
   peer-state/election apply is one critical section under `m.mu`, checked against
   `keyGen` at the top. A `handlePeerHeartbeatLocked` variant avoids the reentrant
   `m.mu` the v4 sketch had. `lastSeen` is set *inside* the transaction, so a
   gen-mismatch drop never leaves `lastSeen≠0` with `peerAlive=false` (which would
-  strand a fresh node — Codex r4).
+  strand a fresh node).
 - **Key-publish + admission-reset is one atomic step** (re-prime/§5.5) also under
   `m.mu` and bumping `keyGen`, so no frame is admitted between publish and reset.
   A monotonic `keyGen` counter is ABA-safe (K1→K2→K1).
 - **Epoch-strip gate** (`!hasEpoch && sawEpoch → REJECT`) keeps a markerless frame
   out of the churnable ring after a marker has been seen.
-- **`noteRejectedFromPeer()`** records a "frame arrived from the peer but was
-  rejected" timestamp — distinct from `lastSeen` — consumed by the ownership hold
-  (§5.4) to tell a *present-but-unverifiable* peer from a *genuinely-absent* one.
+- **No `noteRejectedFromPeer`** (dropped in v6): v5 used it to tell a
+  present-but-unverifiable peer from an absent one, but Codex r5 showed (a) a
+  one-way receive partition defeats it and (b) an attacker's replayed frames make
+  it a gameable liveness signal. v6's consistency choice (§5.4) does not need a
+  frame-derived presence signal — a *configured* peer is known from config.
 
-### 5.4 Epoch persistence + the epoch-ownership hold (F3 + F4; unifies the fence)
+### 5.4 Epoch persistence + peer-visible epoch-eligibility (F3 + F4; chooses consistency)
 
 **Persistence rules.**
 - **Persist-before-emit:** a frame carries a marker only if that epoch is durably
-  persisted (`markerEnabled`), so no unpersisted epoch escapes (round-3 crash
-  schedule impossible).
-- **Checksummed, never-regress:** the epoch file stores `epoch || crc`. On read, a
-  **crc-valid** value is TRUSTED and never regressed below — even if it is far in
-  the future (a legitimate forward clock); only a **crc-invalid / absent** value
-  is state-loss → seed from the clamped wall clock. This **drops the far-future
-  heuristic**, which Codex r4 showed *regresses* a legitimate forward-clock value
-  (boot far-forward → persist `Tfuture` → correct clock → the old heuristic
-  rejected intact `Tfuture` and emitted a lower `Treal` → peer rejects →
-  dual-primary). The residual is now only a genuine **crc-invalid corruption /
-  deletion** *and* a backward clock — operator-recoverable (§5.5).
-- **Serialized read-max-write worker** (Codex r4): all persistence goes through a
-  single worker; each write **re-reads the durable value and writes
-  `max(durable, candidate)`**, so a stale async retry (G1 chose C1, slept; G2 wrote
-  C2>C1) can never overwrite C2 with C1. `markerEnabled` is set only for the
-  current `keyGen` after a successful write. Async retry uses bounded backoff off
-  the send path (never a per-100 ms fsync).
+  persisted (`markerEnabled`), so no unpersisted epoch escapes.
+- **Checksummed, never-regress:** the epoch file stores `epoch || crc`. A
+  **crc-valid** value is TRUSTED and never regressed below (even far-future — a
+  legitimate forward clock advanced with a checked `+1` is safe and need not wait
+  for wall time); only a **crc-invalid / absent** value is state-loss. This
+  **drops the far-future heuristic**, which Codex r4 showed *regresses* a
+  legitimate forward-clock value.
+- **Serialized worker + STRICT SUCCESSOR** (Codex r5 §4): one worker; each
+  allocation re-reads the durable value and publishes
+  `next = max(durable, emitted_high_water) + 1` clamped to also be `≥ clampedNow`
+  — **strictly above both the durable floor and any value ever emitted**, and the
+  exact published value becomes the emitted epoch. A stale retry can therefore
+  never re-publish `P` (which would reset the counter under an unchanged epoch and
+  reopen dual-primary). `MaxUint64` reached → **fail held** (never wrap/regress).
+  `markerEnabled` is set only for the current `keyGen` after the durable write.
+  Bounded backoff off the send path (no per-100 ms fsync).
 
-**The epoch-ownership hold** (subsumes the persist-fail response, the live-key
-barrier, and the ownership demote):
+**Peer-visible epoch-eligibility** (v6's consistency choice — replaces v5's hold):
 
-> **Invariant:** a node may hold a redundancy group PRIMARY only if it can emit a
-> durably-persisted marker for its current `keyGen`. While it cannot
-> (`markerEnabled==false`: persist-failed, resolving, or a live key-enable in
-> progress), it takes an **epoch-ownership hold** — reusing the existing
-> kernel-upgrade hold mechanism (`SetKernelUpgradeHold`: demote-if-primary + guard
-> every promotion path, `kernel_selfrecover.go:52`, `election.go:44/405`).
+> **Invariant:** a node may own a redundancy group PRIMARY only if it can emit a
+> durably-persisted marker for its current `keyGen` (`markerEnabled`). While it
+> cannot (persist-failed / resolving / live key-enable in progress) it is
+> **epoch-ineligible**: it (a) **advertises ineligibility on the wire** (a new RG
+> flag in the heartbeat body — so a healthy peer takes ownership *even without
+> `sawEpoch`*, closing Codex r5 §2), (b) **demotes** any group it holds, and (c)
+> **never promotes** via any election path.
 
-Release semantics — the piece that makes the failure cases correct:
-- A held node **does NOT promote via the went-silent timeout** (`handlePeerTimeout`).
-  It promotes **only** via the never-seen path (`handlePeerNeverSeen` — the peer
-  *never existed*, i.e. a single-node deployment) OR when it clears the hold
-  (persist succeeds).
-- The hold clears when `markerEnabled` becomes true (persist recovers /epoch
-  resolves) → the node re-enters normal election and emits its (higher, durable)
-  marker; the peer re-anchors.
+The hold is a **dedicated `epochIneligible` source**, distinct from
+`kernelUpgradeHold` (Codex r5 §3 — literal reuse cross-clears); the promotion gate
+is the aggregate `kernelUpgradeHold || epochIneligible || …`, each source
+sets/clears its own flag, and the demote-if-primary re-fires whenever the aggregate
+transitions armed.
 
-This yields exactly-one-primary in every case (verified against the code paths):
-- **Asymmetric (A persist-fails, B healthy):** A holds (demoted); B is not held,
-  gets no *accepted* A frames, times A out via the normal went-silent path and
-  **promotes**. → B primary, A secondary. ✓
-- **Both-fail (both hold, both hold a prior epoch):** each rejects the other's
-  markerless frames, but `noteRejectedFromPeer()` shows the peer is *present*
-  (frames arriving), so neither reaches the never-seen path and **neither
-  promotes** → a **safe outage** (not dual-primary) until a disk recovers or the
-  operator re-baselines via §5.5 key rotation. A correlated double-disk fault; an
-  opt-in "stay-primary-degraded" override may be offered. ✓
-- **Sole node (persist-fail, no peer ever):** the never-seen path fires after the
-  grace and it **promotes** — no receiver to protect. ✓
+**The consistency choice (Codex r5 §1 — the fundamental point).** Sole-node
+availability and two-node partition safety are **impossible from heartbeat absence
+alone** (a one-way receive partition is indistinguishable from an absent peer). So:
+- **Configured cluster:** an epoch-ineligible node **never promotes**, even if it
+  hears nothing (which could be a one-way partition). Outcomes:
+  - *Asymmetric* (A ineligible, B healthy): A advertises ineligibility + demotes;
+    B reads it and **owns** (regardless of `sawEpoch`). → B primary, A secondary. ✓
+  - *Both-ineligible* (correlated persist fault) or *A-ineligible + B-genuinely-down*:
+    **safe outage** (no primary) — the design deliberately chooses consistency over
+    a possible dual-primary. Availability is restored by **storage recovery** or an
+    explicit **operator override** (`request chassis cluster force-primary
+    epoch-degraded`, audited) when the operator confirms the peer is truly dead.
+- **Standalone:** a genuinely single-node deployment (no cluster / an explicit
+  standalone marker) has no peer to replay-protect → the epoch mechanism and its
+  eligibility gate do not engage at all.
 
-This also **subsumes the live key-enable barrier** (Codex r4): a Manager may boot
-unkeyed and enable auth live, and heartbeat/timeout/readiness/monitor all elect
-independently — but while the epoch is unresolved for the new `keyGen` the node is
-under the ownership hold, which guards *every* promotion path (that is exactly what
-`SetKernelUpgradeHold` already does). So there is no separate barrier to slot
-before `UpdateConfig`'s election; the hold is armed the instant `markerEnabled`
-is false for the live key and cleared when the epoch resolves. The resolve itself
-runs on the serialized worker off `m.mu` (no durable I/O under the config lock).
+This **subsumes the live key-enable window**: while the epoch is unresolved for a
+new `keyGen` the node is epoch-ineligible, which guards *every* promotion path and
+is advertised, so a live empty→key-enable cannot promote on stale state. The
+resolve runs on the serialized worker off `m.mu`.
+
+**Sender-side generation atomicity** (Codex r5 §5): the sender takes ONE snapshot
+binding `{keyGen, key, markerEnabled, epoch, RG states, eligibility}` and signs
+from it; if `keyGen` advanced since the snapshot it re-snapshots — so a paused
+sender can never sign a stale K1 marker/PRIMARY body under K2.
 
 ### 5.5 Re-prime + coordinated recovery (F4)
 
 Re-prime clears only `{highEpoch, highCounter, sawEpoch}` (keep `peerAuthSeen`,
-the ring, the sender nonce — a rolled-back v1 node still signs `XPFA`, so cleartext
-enforcement must stay). **Race-free recovery = coordinated cluster-wide rotation
-to a NEVER-USED key** (config-synced PSK): *isolate the affected node → (roll back
-if applicable) → install the new key on **both** nodes → the atomic keyGen-bump
-resets each node's floor (§5.3) → reconnect.* A never-used key makes archived
-captures unverifiable; the atomic keyGen-bump+reset prevents an in-flight old-key
-frame re-arming. A one-sided key change (MAC mismatch → split) is called out as
-unsafe. This same rotation is the operator recovery for the both-fail outage and
-the crc-invalid+backward-clock self-lock.
+the ring, the sender nonce — a rolled-back v1 node still signs `XPFA`). **Race-free
+recovery = coordinated cluster-wide rotation to a NEVER-USED key** (config-synced
+PSK): *isolate → (roll back if applicable) → install the new key on **both** nodes
+→ the atomic keyGen-bump resets each node's floor (§5.3) → reconnect.* A never-used
+key makes archived captures unverifiable; the atomic keyGen-bump+reset prevents an
+in-flight old-key frame re-arming. A one-sided key change (MAC mismatch → split) is
+unsafe. **Key rotation does NOT repair a persist/write fault** (Codex r5 §4): a
+node that cannot write stays epoch-ineligible after rotation — that path is
+recovered by **storage repair or the operator override**, not by rotation. Rotation
+recovers the *receiver-floor* self-lock (a crc-invalid or rolled-back durable
+value), not the *sender's* inability to persist.
 
 ## 6. Honest residuals
 
@@ -255,14 +265,21 @@ the crc-invalid+backward-clock self-lock.
   frame repairs the floor. The epoch closes the **sustained** replay; fully
   closing the single-admit needs disk-persisting the **receiver** floor (named
   follow-up, adds its own cross-restart self-lock).
-- **crc-invalid corruption / deletion ∧ backward-clock self-lock** (§5.4): with
-  the checksummed-trust rule a legitimate forward clock no longer regresses; the
-  only remaining self-lock needs genuine state corruption/deletion *and* a
-  backward clock — operator-recoverable via cluster key rotation (§5.5).
-- **Correlated double persist-failure → safe outage** (§5.4): both nodes losing
-  durable epoch state simultaneously holds both secondary (no dual-primary) until
-  a disk recovers or the operator re-baselines. A triple-fault; optional opt-in
-  "stay-primary-degraded" override.
+- **crc-invalid corruption / deletion ∧ backward-clock self-lock** (§5.4):
+  operator-recoverable via cluster key rotation (§5.5, receiver-floor reset).
+- **Rollback to an older complete `{epoch,crc}` pair** (Codex r5 §4): a filesystem
+  snapshot restore reinstates a *valid* older value that CRC cannot detect as
+  stale; it regresses the durable floor. Mitigation is out of band (don't restore
+  `/var/lib/xpf/ha-boot-epoch` from a snapshot; or a monotonic-hardware counter) —
+  documented, not solved in-band.
+- **`MaxUint64` epoch exhaustion** (Codex r5 §4): unreachable at 10 Hz (~10¹¹
+  years) but has no successor; the worker **fails held** rather than wrapping.
+- **Persist/write fault → epoch-ineligible → safe outage** (§5.4): a node that
+  cannot durably write its epoch is epoch-ineligible and will not own a group; if
+  it is the only otherwise-healthy node the cluster has **no primary** until
+  storage recovers or the operator issues the audited `force-primary
+  epoch-degraded` override. This is the deliberate consistency-over-availability
+  choice; it is a real availability cost of the mechanism (see §11 cost/benefit).
 
 ## 7. Multiple Path Options (final)
 
@@ -271,12 +288,14 @@ the crc-invalid+backward-clock self-lock.
 - **Same-epoch guard:** separated nonce + `(epoch,counter)` (A) vs
   shared/reset-on-key nonce (B, breaks the order) vs bigger ring (C, moves the
   constant).
-- **Persist-failure:** **persist-before-emit + the epoch-ownership hold
-  (A, chosen — reuses the kernel-upgrade hold; held nodes promote only via the
-  never-seen/single-node path, giving asymmetric→takeover, both-fail→safe outage,
-  sole-node→promote)** vs markerless + peer-timeout alone (B, one-way UDP
-  partition → dual-primary — round-4 killer) vs volatile election fence (C, does
-  not survive a crash — round-3 killer).
+- **Persist-failure / ownership:** **peer-visible epoch-ineligibility + choose
+  CONSISTENCY (A, chosen — a configured-cluster ineligible node advertises, demotes,
+  never promotes; availability via storage recovery / audited operator override)**
+  vs a hold that promotes via never-seen (B, one-way partition → dual-primary —
+  round-5 killer) vs markerless + peer-timeout alone (C, round-4 killer) vs a
+  volatile election fence (D, round-3 killer). The consistency choice is forced:
+  sole-node availability + partition safety is impossible from heartbeat absence
+  alone.
 - **Persist monotonicity:** **checksummed-trust + never-regress + serialized
   read-max-write (A, chosen)** vs far-future rejection (B, regresses a legit
   forward clock) vs unserialized async retry (C, overwrites a newer durable value).
@@ -309,48 +328,60 @@ Unchanged: `MarshalHeartbeat`, `MarshalHeartbeatAuth`, `heartbeatAuthTrailer`,
 | Class | Level | Notes |
 |---|---|---|
 | Behavioral regression (bring-up / key-enable / failover) | **HIGH** | Persist-before-emit + live-key barrier + key-gen recheck touch the send/election path; `make test-failover` (v4+v6) + mixed-version + persist-fail-fail-closed + key-rotation-reprime harnesses mandatory. |
-| HA availability (self-lock / ownership) | **MED** | Persist-before-emit removes the crash-escape; the ownership hold prevents the markerless dual-primary; residual = crc-invalid∧backward-clock self-lock + correlated double-fault safe-outage, both operator-recoverable. |
+| HA availability (self-lock / ownership) | **MED-HIGH** | Persist-before-emit removes the crash-escape and peer-visible epoch-ineligibility prevents the markerless dual-primary, but the consistency choice makes a persist fault an eligibility (potential safe-outage) condition recovered by storage repair or an audited operator override — a real availability cost (§11). |
 | Wire/interop | **LOW** | Unchanged 52-byte `XPFA`; key-derived marker; old receiver ignores it; `bodyEnd≥16` guard. |
 | Security (replay/downgrade) | **LOW-MED** | Total order + key-gen linearization + epoch-strip gate + cross-channel owner; bounded single-admit residual documented. |
 | Coupling / scope | **MED-HIGH** | Hard #5639 prereq + persist/election-integration — a sequenced multi-PR effort. |
 
-## 11. Out of scope / PLAN-KILL
+## 11. Out of scope / PLAN-KILL / cost-benefit
 
-Disk-persisting the receiver floor (closes the single-admit window) — follow-up.
-Retiring the v1 ring — kept for migration. **PLAN-KILL?** Legitimate only if the
-residual is judged too narrow for the #5639 prereq + persist-before-emit +
-key-rotation runbook. Not recommended: the residual is real and more credible
-post-review, the center is sound, a half-fix is worse than the honest 64 bound.
-Realistic path: sequence behind #5639; land Stage 0 (restart churn) before Stage 1.
+Disk-persisting the receiver floor (single-admit window) — follow-up. Retiring the
+v1 ring — kept for migration.
 
-## 12. Open questions for round-5 (each invitable to PLAN-KILL)
+**The cost/benefit the research surfaced (now the load-bearing decision).** Five
+rounds validated the anti-replay *center* (key-derived marker + `(epoch,counter)`
+total order) but proved the *persistence/ownership boundary* is genuinely hard:
+because the epoch is a **durable** security counter, a node's ability to be PRIMARY
+now depends on writing it, and a partition cannot be told from an absent peer — so
+the only safe choice is **consistency** (a persist-failed node is epoch-ineligible
+→ possible safe outage until storage recovery / an operator override). That is a
+**real HA-availability constraint** traded for closing a **narrow** residual (an
+on-path sniffer with ≥65 captured sessions). Two honest terminal outcomes:
+- **Proceed (scoped):** the design is sound and complete; drive it sequenced
+  behind #5639, Stage 0 (restart-churn, no wire change, independently valuable)
+  before Stage 1 (the epoch + ownership), accepting the availability constraint.
+- **PLAN-KILL / defer:** keep the honest 64-ring bound (already documented by
+  #6167) and decline the epoch, judging the availability constraint too high for
+  the residual. **Codex has held that PLAN-KILL is not *forced*** (the defects are
+  repairable) — but the cost/benefit is a **user judgment**, which is exactly why
+  `/research` stops here for approval rather than auto-proceeding.
 
-1. **Epoch-ownership hold correctness.** Does "a held node promotes only via the
-   never-seen (single-node) path, never via the went-silent timeout" give
-   exactly-one-primary in all three cases (asymmetric → takeover, both-fail →
-   safe outage, sole-node → promote), and does `noteRejectedFromPeer()` correctly
-   distinguish present-but-unverifiable from genuinely-absent at every election
-   site (`handlePeerTimeout` / `handlePeerNeverSeen` / readiness / monitor)?
-2. **Hold ↔ kernel-hold reuse.** Can the epoch-ownership hold reuse
-   `SetKernelUpgradeHold`/`ClearKernelUpgradeHold` cleanly (they interact with a
-   real kernel-upgrade hold — is a two-source hold well-defined), or does it need
-   its own hold flag with the same demote+guard semantics?
-3. **Checksummed persistence.** Is "trust a crc-valid value, never regress; only
-   crc-invalid/absent is state-loss" the right rule, and does the serialized
-   read-max-write worker fully prevent an async retry regressing the durable
-   floor across a key generation?
-4. **Single `m.mu` transaction.** Is folding admit + `lastSeen` +
-   `handlePeerHeartbeatLocked` into one `m.mu` critical section (with a locked
-   handler variant) free of the reentrancy and stale-`lastSeen` defects, and does
-   holding `m.mu` across the (non-I/O) admission add unacceptable contention at
-   ~10 Hz?
-5. **#5639 drain.** Is "drain/rehandshake pre-arm unauthenticated sync
-   connections" the right acceptance bar, and does it belong in #5639 or #6169
-   Stage −1?
-6. **Scope / readiness.** After five rounds the center is validated and the
-   failure-mode state machine is now concretely specified — is v5 PLAN-READY to
-   `/engineer` (sequenced behind #5639, Stage 0 before Stage 1), or does the
-   remaining intricacy argue for re-scoping / PLAN-KILL on cost/benefit?
+## 12. Open questions for round-6 (each invitable to PLAN-KILL)
+
+1. **Peer-visible ineligibility + consistency choice.** Is advertising an epoch-
+   ineligible RG flag (peer takes ownership without `sawEpoch`) + "an ineligible
+   node in a configured cluster never promotes" free of any remaining dual-primary
+   or wrong-owner schedule, and is the audited `force-primary epoch-degraded`
+   override the right availability escape?
+2. **Strict successor.** Is `next = max(durable, emitted)+1` (≥ clampedNow,
+   `MaxUint64`→fail-held) the correct allocation, and does it compose with the
+   serialized worker so no reboot/retry ever re-publishes `P`?
+3. **Separate hold flag + aggregate gate.** Does a dedicated `epochIneligible`
+   source (with a demote-re-fire on aggregate arm) compose cleanly with
+   `kernelUpgradeHold`/`ResetFailover` without cross-clearing?
+4. **Sender-side snapshot.** Does one `{keyGen,key,markerEnabled,epoch,RG,eligibility}`
+   snapshot (re-snapshot on `keyGen` change) fully close the stale-K1-body-under-K2
+   send race, and where does it slot vs the current build-then-read-key sender?
+5. **#5639 message-time gen check.** Is "gen-check before applying any
+   pending/in-flight sync message" the right prerequisite bar, and does it belong
+   in #5639 or #6169 Stage −1?
+6. **Cost/benefit — the load-bearing decision.** The mechanism now makes a node's
+   ability to be PRIMARY depend on durably writing a boot-epoch file: a persist
+   fault → epoch-ineligible → potential safe-outage until storage recovery / an
+   operator override. Is trading that HA-availability constraint for closing the
+   on-path-sniffer replay residual the right call, or is the honest outcome to
+   keep the documented 64-ring bound (#6167) and PLAN-KILL / defer the epoch? This
+   is the decision the research now puts to the user.
 
 ---
 
@@ -358,13 +389,14 @@ Realistic path: sequence behind #5639; land Stage 0 (restart churn) before Stage
 
 `pkg/cluster/heartbeat.go` (marker derive/write/parse, +68 tail reserve,
 MAC-before-`bodyEnd`, `bodyEnd≥16`, `admit*` with the epoch-strip gate, `readLoop`
-single `m.mu` transaction + `lastSeen`-inside + `noteRejectedFromPeer` +
-`handlePeerHeartbeatLocked`); `pkg/cluster/heartbeat_epoch.go` new (checksummed
-persist, serialized read-max-write worker, `markerEnabled`); `pkg/cluster/manager.go`
-(`peerAdmission` + sender nonce + `epochState` + `keyGen`; epoch-ownership hold
-reusing/paralleling the kernel hold; cross-channel owner via #5639);
-`pkg/cluster/election.go` / `kernel_selfrecover.go` (held nodes promote only via
-never-seen); `pkg/cluster/group_state.go` (atomic keyGen-bump+reset on key change);
+single `m.mu` transaction + `lastSeen`-inside + `handlePeerHeartbeatLocked` +
+sender-side `{keyGen,key,markerEnabled,epoch,RG,eligibility}` snapshot);
+`pkg/cluster/heartbeat_epoch.go` new (checksummed persist, serialized worker with
+STRICT-SUCCESSOR allocation, `markerEnabled`); `pkg/cluster/manager.go`
+(`peerAdmission` + sender nonce + `epochState` + `keyGen`; dedicated
+`epochIneligible` hold source + aggregate promotion gate; cross-channel owner via
+#5639); `pkg/cluster/election.go` / `kernel_selfrecover.go` (aggregate gate;
+epoch-ineligible advertised + demoted + never promotes in a configured cluster); `pkg/cluster/group_state.go` (atomic keyGen-bump+reset on key change);
 `pkg/cluster/heartbeat_manager.go` (`buildHeartbeat` reads resolved epoch; marker
 gated on `markerEnabled`); `pkg/config` (commit-time monitor/name caps);
 `pkg/cluster/README.md` + this doc. Tests: F1 mixed-version both ways; **F2 65
