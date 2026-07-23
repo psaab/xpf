@@ -12,8 +12,11 @@ at /engineer on the code PR, not here.
 | r2 | Claude SMR | PLAN-NEEDS-REVISION | claude-smr-plan-r2.md |
 | r3 | Codex (`codex exec`, medium) | PLAN-NEEDS-REVISION (BLOCKER stale-restart) | codex-plan-r3.md |
 | r3 | Claude SMR | PLAN-READY | claude-smr-plan-r3.md |
-| r4 | Codex (`codex exec`, medium) | pending | codex-plan-r4.md |
-| r4 | Claude SMR | pending | claude-smr-plan-r4.md |
+| r4 | Codex (`codex exec`, medium) | PLAN-NEEDS-REVISION (5 BLOCKER+2 HIGH) | codex-plan-r4.md |
+| r4 | Claude SMR | PLAN-NEEDS-REVISION | claude-smr-plan-r4.md |
+| r5 | Codex (`codex exec`, medium) | pending | codex-plan-r5.md |
+| r5 | Claude SMR | pending | claude-smr-plan-r5.md |
+| r5 | AGY | infra-down | — |
 | r4 | AGY | infra-down | — |
 | r3 | AGY | infra-down | — |
 | r2 | AGY | infra-down | — |
