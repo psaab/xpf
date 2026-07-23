@@ -7,9 +7,11 @@ reviewer (joins the quad at `/engineer` on the code PR).
 |-------|----------|-----------|----------|---------|
 | r1 | Claude SMR | in-conversation hostile pass | `claude-smr-plan-r1.md` | PLAN-NEEDS-REVISION (SMR-1..7) |
 | r1 | Codex | `codex exec` medium effort (foreground) | timed out at 10m mid-spelunk — retried | (no verdict) |
-| r2 | Codex | `codex exec` medium effort, fact-front-loaded, background | `codex-plan-r2.md` | (pending) |
-| r2 | AGY | `agy` adversarial | — | INFRA-DOWN (best-effort per feedback_gemini_infra_outage_merge_policy) |
-| r2 | Claude SMR | in-conversation re-review of r2 | `claude-smr-plan-r2.md` | (pending) |
+| r2 | Codex | `codex exec` medium effort, fact-front-loaded, background | `codex-plan-r2.md` (+ raw) | PLAN-NEEDS-REVISION (F1-F5, high-signal) |
+| r2 | Claude SMR | in-conversation re-review of r2 | `claude-smr-plan-r2.md` | PLAN-READY (r1 fixes landed) |
+| r3 | Claude SMR | in-conversation re-review of r3 (post Codex-r2 fold) | `claude-smr-plan-r3.md` | PLAN-READY (narrowed) |
+| r3 | Codex | `codex exec` medium effort, background | `codex-plan-r3.md` | (pending) |
+| — | AGY | `agy` adversarial | — | INFRA-DOWN (best-effort; 2-of-3 Codex+SMR per feedback_codex_infra_must_retry) |
 
 Convergence rule: Codex + Claude SMR must agree (PLAN-READY or PLAN-KILL). AGY
 infra-down → 2-of-3 SMR-primary with documented retries (research SKILL standing
