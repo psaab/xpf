@@ -6,7 +6,7 @@
 - **Base:** origin/master @ `11e23b49ac1e`
 - **Prior art:** #5640 (merged #6174) fixed the ack-before-fence window; #6367
   (CLOSED, unsound) tried to extend the ack barrier to VIP removal.
-- **Revision:** r3 (post Claude-SMR-r1/r2 + Codex-r1/r2 convergence)
+- **Revision:** r2 (post Claude-SMR-r1)
 - **Status:** PLAN-READY (narrowed scope) — Residual-1 code change is
   **PLAN-KILLED**; Residuals #2+#3 + a doc-accuracy fix are PLAN-READY.
 
@@ -63,7 +63,10 @@ MASTER. `t_p0` = the instant O emits its first priority-0 advert.
 **Owner O (demoting), run-loop `resignCh` case:**
 1. `sendAdvert(0)` ×3 — socket writes, ~µs each. Priority-0 is on the wire at `t_p0`.
 2. `becomeBackup` → `removeVIPs` — netlink `RTM_DELADDR` per VIP. O stops answering
-   ARP at `t_p0 + δ_remove`, `δ_remove` ≈ tens-of-µs to sub-ms for a handful of VIPs.
+   ARP at `t_p0 + δ_remove`. (The figures below for `δ_remove` are **illustrative,
+   not load-bearing** — see §4: the benign conclusion holds for ANY `δ_remove`,
+   including the ~1 s failed-removal case, because the harm is masked independent of
+   window width. No `δ_remove` measurement is claimed.)
 
 **Peer R (promoting):**
 3. Receives priority-0 at `t_p0 + δ_net`; `handleBackupRx` sets `masterDownTimer` to
@@ -106,22 +109,46 @@ ownership handoff, fabric-redirect teardown — while O is still cluster-active
 
 **Harm during any VIP overlap (slow/failed removal):**
 - Transit traffic landing on O is **fabric-redirected to R** — the demotion preflight
-  `tryPrepareUserspaceRGDemotion` runs BEFORE `ResignRG` (daemon_ha.go:348-354) and
-  shifts the flow cache to `FabricRedirect`. So transit is not blackholed.
+  `tryPrepareUserspaceRGDemotion` is a **best-effort, bounded (5 s) blocking** prep
+  that runs BEFORE `ResignRG` (daemon_ha.go:348-354) and shifts the flow cache to
+  `FabricRedirect`. It is ordered-before VIP removal but not a hard guarantee: on a
+  prep failure it logs `Warn` and proceeds (readiness.go:23-27), leaving the residual
+  exposure as brief **packet loss** (TCP-recoverable), not a guaranteed zero-loss
+  redirect. Either way transit is not durably blackholed.
 - `rg_active` is cleared on O, so O does not cluster-forward for the RG.
 - R's GARP re-points ARP caches within ms; RETH uses a **per-node** virtual MAC, so
   the overlap is a transient duplicate-ARP nuisance, resolved by the gratuitous ARP.
-- Net: no TCP RST, no transit blackhole, no forwarding-correctness violation, no
-  lasting dual-owner. The window is **benign**.
+- Net: no TCP RST, no durable transit blackhole, no forwarding-correctness violation,
+  no lasting dual-owner. The window is **benign**.
+
+**Security threat model (the issue is labeled `security`).** The window is (a) **not
+attacker-triggerable** — it occurs only on an operator-/weight-driven planned
+failover, not on demand from the data path, so an adversary cannot induce it at will;
+(b) bounded to a transient duplicate-ARP with per-node MACs, resolved by GARP; (c)
+the dual-active **forwarding** hazard — the one with real security weight (two nodes
+forwarding/NATing the same flows, asymmetric state) — is **already closed by #5640's
+`rg_active`-clear-before-ack gate, which this plan retains**. What remains after
+#5640 is an on-wire ARP-answering nuisance with no forwarding, no session
+duplication, and no attacker lever. The `security` residual is therefore empty
+beyond what #5640 already fenced.
 
 ## 4. Design question Q1 — is there a real two-owner window at all?
 
 **Answer: not on a normal failover** (it is a ~1 ms blackhole gap, not overlap).
 A genuine VIP overlap exists only on slow/failed removal, is sub-ms to a few ms
-(or ~1 s on outright failure), and is **benign**: fabric-redirect covers transit,
-`rg_active`-clear covers forwarding, GARP + per-node MAC covers ARP, and #5482
-covers failed removal. The "two-owner window" the issue names is a duplicate-ARP
-nuisance already masked by existing mechanisms, not a correctness or security hole.
+(or ~1 s on outright failure), and is **benign**: fabric-redirect (best-effort)
+covers transit, `rg_active`-clear covers forwarding, GARP + per-node MAC covers ARP,
+and #5482 covers failed removal. The "two-owner window" the issue names is a
+duplicate-ARP nuisance already masked by existing mechanisms, not a correctness or
+security hole.
+
+**The benign conclusion is independent of the window's width.** Crucially the
+argument does NOT rest on `δ_remove` being small: even the worst case (outright
+removal failure, ~1 s until the #5482 reconcile) is masked by the same four
+mechanisms. So the unmeasured `δ_remove` magnitude is not load-bearing — widening
+the window does not create harm, it only lengthens a nuisance that the existing
+mechanisms already absorb. This is why no `δ_remove` measurement is needed to reach
+PLAN-KILL, and why closing the window (which only shrinks the nuisance) buys nothing.
 
 ## 5. Design question Q2 — if we wanted to close it, what is the lever? (Multiple Path Options)
 
@@ -138,6 +165,12 @@ Move `becomeBackup`/`removeVIPs` ahead of `sendAdvert(0)` in the `resignCh` case
     R's 1 ms timer; serializing them adds the removal time to the gap.
   - Regresses the documented ~1 ms planned-takeover budget; requires
     `make test-failover` re-validation on the loss cluster.
+  - **Hybrid rebuttal** ("remove first; on success send priority-0, on failure send
+    priority-0 anyway"): you cannot know the removal outcome without attempting it,
+    and attempting-first IS the reorder — so the hybrid adds `δ_remove` to EVERY
+    normal failover while, on the failed path, still sending priority-0 with a stale
+    VIP present (identical to today). It buys nothing on the dangerous case and taxes
+    every good case. Same net-negative as A.
   - **Verdict: NET NEGATIVE** — trades a benign, already-covered sub-ms window for a
     real latency/availability loss and does not even close the failed case.
 
@@ -176,6 +209,14 @@ Both are real, cheap, and **do not depend on Q1/Q2**. They harden and cover the
   armed/waited on; `armFailoverActuation` returns that channel; the timeout path and
   the ManualFailover error paths pass their own. Latent today (initiator serializes
   per-RG at sync_failover.go:82) but a correct defense-in-depth + symmetry fix.
+  **YAGNI weighing:** it hardens an unreachable-today path, which cuts against
+  keep-it-simple. The case FOR landing it anyway: (i) the #5640 hostile review
+  explicitly flagged it; (ii) it is a ~10-line change with no behavior change on the
+  reachable path (nil-ch legacy delete preserved); (iii) the Residual-3 barrier tests
+  we are adding would otherwise exercise a half-hardened barrier — the identity check
+  and its fail-on-revert test are cohesive with that coverage. Decision: land it, but
+  this is a genuine judgment call — if the user prefers minimalism, dropping Residual-2
+  (keeping #3 + the doc fix) is a defensible narrower scope (see §11 Q-b).
 - **Residual-3 — daemon-barrier unit test.** Add direct coverage of
   arm → (signal | timeout) → release/downgrade + no stale-channel leak, with no
   cluster/VRRP manager. Closes the coverage gap the #5640 review flagged.
@@ -218,7 +259,16 @@ an otherwise PLAN-READY plan.
 - **Regression surface:** none touches the VRRP run-loop, the resign ordering, or
   the dataplane, so the ~60 ms/~1 ms failover budget is unchanged. `make
   test-failover` still required per CLAUDE.md because the file set touches
-  `pkg/daemon` HA code, but no timing change is expected.
+  `pkg/daemon` HA code, but no timing change is expected — the smoke is a
+  **regression gate, not a measurement of the window** (nothing closes the window;
+  the smoke proves nothing regressed).
+- **Invariant to protect (#5640).** The retained genuine property is
+  `SetRGActive(false)` (daemon_ha.go:367) ordered BEFORE `signalFailoverActuated`
+  (:389) — the ack releases only after rg_active is cleared. The Residual-2 edit
+  touches the barrier's disarm/arm signatures; the /engineer PR MUST NOT let that
+  refactor move `signalFailoverActuated` ahead of `SetRGActive(false)`. Call it out
+  in the PR and cover it with the existing ordering (a review-checklist item; the
+  demotion-branch order is unit-observable via the barrier tests).
 
 ## 9. Test plan
 
