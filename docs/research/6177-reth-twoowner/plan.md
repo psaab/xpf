@@ -84,8 +84,11 @@ MASTER. `t_p0` = the instant O emits its first priority-0 advert.
   VIPs, run-loop scheduling delay), overlap = `δ_remove − ~1ms > 0`. A genuine
   two-owner window bounded by removeVIPs latency — realistically sub-ms to a few ms.
 - **Failed-removal case:** `removeVIPs` errors → O keeps the VIP until the #5482
-  `surfaceStaleVIP` reconcile clears it (~200 ms–~1 s). Two-owner for that span.
-  **Independent of the ack barrier**; a pre-existing hazard already mitigated by #5482.
+  `surfaceStaleVIP` reconcile clears it (typically within ~1 s; the reconcile is
+  bounded to 5 attempts at 200 ms, and a pathological netlink wedge logs Error and
+  defers to the next transition — a pre-existing #5482 property, not introduced here).
+  Two-owner for that span. **Independent of the ack barrier**; the ack-barrier levers
+  under debate do nothing for it either.
 
 **Why the coordination-ACK is provably not the lever (the #6367 error):**
 
@@ -144,8 +147,8 @@ security hole.
 
 **The benign conclusion is independent of the window's width.** Crucially the
 argument does NOT rest on `δ_remove` being small: even the worst case (outright
-removal failure, ~1 s until the #5482 reconcile) is masked by the same four
-mechanisms. So the unmeasured `δ_remove` magnitude is not load-bearing — widening
+removal failure, up to the #5482 reconcile clearing it — typically ~1 s, with a
+bounded-reconcile tail on a wedged netlink) is masked by the same four mechanisms. So the unmeasured `δ_remove` magnitude is not load-bearing — widening
 the window does not create harm, it only lengthens a nuisance that the existing
 mechanisms already absorb. This is why no `δ_remove` measurement is needed to reach
 PLAN-KILL, and why closing the window (which only shrinks the nuisance) buys nothing.
