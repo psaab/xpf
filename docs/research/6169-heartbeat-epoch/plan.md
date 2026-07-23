@@ -383,6 +383,61 @@ on-path sniffer with ≥65 captured sessions). Two honest terminal outcomes:
    keep the documented 64-ring bound (#6167) and PLAN-KILL / defer the epoch? This
    is the decision the research now puts to the user.
 
+## 13. Research conclusion & recommendation (converged after 6 rounds)
+
+Six hostile plan-review rounds (Codex r1–r6 + Claude SMR r1–r6; AGY infra-down)
+converged on the following, which is the actual `/research` deliverable:
+
+**What is settled (both reviewers).**
+- The **anti-replay center is validated**: the key-derived, tail-anchored,
+  MAC-verified epoch marker (F1/F5) + the separated Manager send-nonce with an
+  `(epoch,counter)` total order (F2) is correct and worth implementing. Codex
+  confirmed it every round; PLAN-KILL of the *mechanism* is **not** justified.
+- The **consistency choice is correct**: a durable security epoch cannot preserve
+  both sole-node availability and two-node partition safety from heartbeat absence
+  alone, so a persist-failed node in a configured cluster must be
+  epoch-ineligible.
+- **Stage 0 is independently valuable and cheap**: Manager-scoping the anti-replay
+  nonce + the field caps closes the **routine-restart churn** (the *more common*
+  vector Codex identified) with **no wire change and no availability cost**.
+
+**What Stage 1 (the wire epoch) still requires** — the six rounds showed it
+entangles the *entire* HA stack, and each round surfaced a new cross-layer
+dual-primary hazard that is fixable but not yet fully specified:
+- a **two-phase actuation barrier** (physically fence VRRP-resign + dataplane
+  deactivate *before* advertising ineligibility / releasing peer takeover — the
+  logical demote is async/droppable over a 64-event channel; Codex r6 §1);
+- a **rolling-upgrade-safe wire contract** for ineligibility — project it onto the
+  **existing legacy yield encoding** (`weight=0` / `StateSecondaryHold`, which old
+  receivers already honor) or capability-gate it, not a new unrecognized flag
+  (Codex r6 §2);
+- an **operator override that is a break-glass consistency waiver** with durable
+  peer fencing + auto-revoke-on-peer-return (Codex r6 §3);
+- an explicit **engagement predicate** `epochRequired = configuredCluster &&
+  keyConfigured` (keyless clusters do not engage the epoch at all; keyed→empty
+  defined) (Codex r6);
+- the **#5639 prerequisite** (cross-channel auth owner + message-application-time
+  generation check, linearized through deferred config to `configApplyLoop`).
+
+**Recommendation to the user.** Given a **narrow** residual (an on-path sniffer
+with ≥65 captured sessions) against a **large, #5639-blocked, full-HA-stack
+change with a real availability cost** (a durable-write fault → possible
+safe-outage / break-glass override):
+
+1. **Ship Stage 0** (Manager-scope the nonce + caps) — it closes the common
+   routine-restart vector safely and cheaply, no wire change. This can proceed as
+   its own PR (and largely *is* #5639's heartbeat lifecycle fix).
+2. **Defer / PLAN-KILL Stage 1** (the wire epoch) as currently scoped — keep the
+   honest 64-ring bound (#6167 already documents it) and revisit the full epoch
+   only if the threat model justifies the cross-layer cost, ideally with a witness
+   / quorum that removes the partition-vs-absence ambiguity at the root.
+
+The reviewers did **not** reach a clean PLAN-READY for the full Stage 1 (Codex
+held NEEDS-MAJOR each round with a real, new, fixable cross-layer finding; SMR
+reached READY only *conditional* on the user accepting the availability cost).
+That non-convergence is itself the signal: **Stage 1 is a genuine multi-PR HA
+program, not a bounded fix**, and the decision to pay its cost is the user's.
+
 ---
 
 ### Appendix — files in blast radius (for /engineer)
@@ -400,8 +455,9 @@ epoch-ineligible advertised + demoted + never promotes in a configured cluster);
 `pkg/cluster/heartbeat_manager.go` (`buildHeartbeat` reads resolved epoch; marker
 gated on `markerEnabled`); `pkg/config` (commit-time monitor/name caps);
 `pkg/cluster/README.md` + this doc. Tests: F1 mixed-version both ways; **F2 65
-same-epoch sessions must not churn the guard**; F3 persist-fail→ownership-hold
-(asymmetric takeover, both-fail safe-outage, sole-node promote),
+same-epoch sessions must not churn the guard**; F3 persist-fail→epoch-ineligible
+(asymmetric peer-takeover, configured-cluster both-fail/peer-down safe-outage,
+true-standalone epoch-disengaged),
 crash-after-would-be-emit (no escape), crc-invalid+backward-clock recovery,
 forward-clock-correction NO regression, async-retry no durable regress; F4 key-gen
 TOCTOU (K1-verify/K2-reset/stale drop + `lastSeen` not stranded), live key-enable
