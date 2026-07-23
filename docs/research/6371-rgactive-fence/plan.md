@@ -13,7 +13,7 @@
   Codex r7 confirmed 4/5 r6 fixes and flagged one residual "accepted" vs
   "conditional" wording inconsistency (§5.4 + ledger); r8 resolves it. No
   architecture change since r6 (BLOCKER closed there). AGY infra-down (2-of-3).
-- **Status:** DRAFT (r8). **Recommendation: PLAN-KILL Option D + Path A′ + the
+- **Status:** PLAN-READY (CONVERGED r8) — Codex PLAN-READY + Claude SMR PLAN-READY (2-of-3; AGY infra-down). **Recommendation: PLAN-KILL Option D + Path A′ + the
   decouple. SHIP Path D = (1) boot pin-quarantine (fail-closed) + (2) a
   generation-linearized, convergent, retryable clear with a shared per-RG
   unresolved-clear debt across all clear sites + (3) doc correction. Path D closes
@@ -302,7 +302,7 @@ Per §5.3.
 | r5 | PLAN-NEEDS-REVISION (linearization BLOCKER + residual-honesty) | PLAN-READY | infra-down | r5 |
 | r6 | PLAN-NEEDS-REVISION (5 narrow text-consistency, BLOCKER closed) | PLAN-READY | infra-down | r6 |
 | r7 | PLAN-NEEDS-REVISION (1 wording inconsistency, 4/5 confirmed) | PLAN-READY | infra-down | r7 |
-| r8 | pending | pending | infra-down | r8 |
+| r8 | **PLAN-READY** | **PLAN-READY** | infra-down | r8 — **CONVERGED** |
 
 Convergence target (2-of-3, AGY infra-blocked): Codex + Claude SMR agree on
 PLAN-READY for Path D (boot pin-quarantine + generation-linearized convergent-retry

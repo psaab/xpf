@@ -20,7 +20,7 @@ at /engineer on the code PR, not here.
 | r6 | Claude SMR | PLAN-READY | claude-smr-plan-r6.md |
 | r7 | Codex (`codex exec`, medium) | PLAN-NEEDS-REVISION (1 wording) | codex-plan-r7.md |
 | r7 | Claude SMR | PLAN-READY | claude-smr-plan-r7.md |
-| r8 | Codex (`codex exec`, medium) | pending | codex-plan-r8.md |
+| r8 | Codex (`codex exec`, medium) | **PLAN-READY** | codex-plan-r8.md |
 | r8 | Claude SMR | PLAN-READY | claude-smr-plan-r7.md |
 | r8 | AGY | infra-down | — |
 | r7 | AGY | infra-down | — |
