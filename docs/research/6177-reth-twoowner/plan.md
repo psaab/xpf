@@ -6,7 +6,9 @@
 - **Base:** origin/master @ `11e23b49ac1e`
 - **Prior art:** #5640 (merged #6174) fixed the ack-before-fence window; #6367
   (CLOSED, unsound) tried to extend the ack barrier to VIP removal.
-- **Revision:** r4 (post Claude-SMR-r1/r2/r3 + Codex-r2/r3)
+- **Revision:** r4 (post Claude-SMR-r1/r2/r3 + Codex-r2/r3) — **CONVERGED**: Codex
+  **PLAN-READY** + Claude SMR **PLAN-READY** (AGY infra-blocked → 2-of-3). See
+  `reviewer-ids.md`.
 - **Status:** PLAN-READY (narrowed scope) — Residual-1's VIP-gate code change is
   **PLAN-KILLED**; **Residual-2 DROPPED** (partial hardening, Codex F4); **Residual-3
   (expanded to a branch-level demotion-order test) + a doc-accuracy fix are
