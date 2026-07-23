@@ -57408,3 +57408,12 @@ top.
     test/xsk-repro/selftest-compile.sh,
     test/xsk-repro/selftest-skipgate_6289.sh (new),
     test/xsk-repro/README.md, scripts/run-selftests.sh
+
+- **Timestamp**: 2026-07-22
+  **Action**: #6236 PR-2 research — drafted revised plan resolving Codex's 3
+    blockers (duplicate-ifindex cache-equivalence → last-wins canonical + derive
+    aggregates from final fast maps; tx_selection_enabled_* → has_output_needs_tx_eval_*
+    aggregate; PBR double-probe → &Filter evaluator core). Recommended 3-sub-PR
+    split (A foundations / B accessor migration + set deletion / C single-lookup
+    fold). No production source touched.
+  **File(s)**: docs/research/6236-pr2-filter-flag-convergence/plan.md (new)
