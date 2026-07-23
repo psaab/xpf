@@ -9,14 +9,18 @@
 - **Base:** origin/master @ `3ecdc80568a3`
 - **Prior art:** #5640, #5079, #485, #3917 (`fenceAllRedundancyGroups`), #1928
   (cluster-only HA replay), `fce172532` (removed the demote preflight).
-- **Revision:** r5 — after Codex r1/r2/r3/r4 (each BLOCKER/≥4 findings) + Claude
-  SMR r1-r4, all firsthand-verified. AGY infra-down (2-of-3).
-- **Status:** DRAFT (r5). **Recommendation: PLAN-KILL Option D + Path A′ + the
+- **Revision:** r6 — after Codex r1-r5 (each BLOCKER/≥4 findings) + Claude
+  SMR r1-r5, all firsthand-verified. Codex r5 confirmed r4-B1/B2/B3/B4/H7 CLOSED;
+  r6 adds the remaining concurrency-linearization invariant + residual-honesty
+  fixes. AGY infra-down (2-of-3).
+- **Status:** DRAFT (r6). **Recommendation: PLAN-KILL Option D + Path A′ + the
   decouple. SHIP Path D = (1) boot pin-quarantine (fail-closed) + (2) a
-  convergent, retryable clear with a shared per-RG unresolved-clear debt across
-  all clear sites + (3) doc correction. Path D closes every reachable unbounded
-  reactivation mode and alarms the one extremely-rare residual; PLAN-DEFER only
-  the map-as-authority architectural cleanup, with a follow-up issue filed now.**
+  generation-linearized, convergent, retryable clear with a shared per-RG
+  unresolved-clear debt across all clear sites + (3) doc correction. Path D closes
+  the reachable restart + peer-fence reactivation modes and detects-and-alarms
+  (does not auto-fix) the extremely-rare persistent-map-write residual; PLAN-DEFER
+  the map-as-authority architectural cleanup as an accepted, detected-but-unfixed
+  residual, with a follow-up issue filed now + a named security/HA signer.**
 
 ---
 
@@ -106,16 +110,27 @@ consumer reads it, addressing the ordering BLOCKER) and it needs **no** sticky-
 
 **Invariant choice (explicit):** this is **fail-closed on boot** — a restarted
 node does NOT resume forwarding from the stale pin; it re-earns ownership by
-election. **Availability cost, disclosed:** a legitimate former owner is
-fail-closed for up to the election window (≤ the 30 s never-seen-peer floor, or
-heartbeat-timeout when the peer is down). This **intentionally trades the current
-hitless-daemon-restart behavior for safety** (a node cannot prove it retained
+election. **The availability cost is small in the common case:** VRRP is
+daemon-managed, so a daemon restart already drops adverts and the peer takes over
+within masterDownInterval (~97 ms) — the returning node is legitimately Secondary,
+so quarantining its stale pin **prevents dual-active rather than adding an
+outage**. It re-owns only by normal failback/election (~election-time, ~1 s with a
+live already-known peer). The worst case is a **cold cluster boot** (both nodes
+down), where the never-seen-peer election floor applies (**at least 30 s**, plus
+scheduling/election work — not a strict upper bound) and fail-closed is
+unambiguously correct anyway. This intentionally trades the current
+hitless-daemon-restart behavior for safety (a node cannot prove it retained
 ownership across a restart while its peer may have taken over). Optional
-refinement to shrink the gap (follow-up, not required): **peer-authoritative
-boot** — keep the pin quarantined, learn authoritative ownership from the peer on
-reconnect, then re-activate if still owner (gap ≈ peer reconnect, ~1 s). r5
-recommends shipping plain fail-closed-on-boot; the peer-authoritative refinement
-is a tracked enhancement.
+refinement to shrink even the cold-boot gap (follow-up, not required):
+**peer-authoritative boot** — keep the pin quarantined, learn authoritative
+ownership from the peer on reconnect, then re-activate if still owner.
+
+**Quarantine failure is fail-closed (not "log + proceed"):** if any of the 16
+pin-key writes (or the `ha_watchdog` zeroing) fails, a surviving nonzero key would
+re-arm on replay/poll/watchdog — so a partial quarantine-write failure MUST abort
+dataplane arming (or retain a gate that suppresses replay, poll, AND watchdog
+publication) until the quarantine is confirmed complete. A failure-injection test
+covers this.
 
 ### 5.2 Convergent, retryable clear + shared unresolved-clear debt — closes peer-fence + persistent modes
 Make every clear site record a **daemon-level** per-RG *desired-inactive intent
@@ -130,16 +145,41 @@ expiry alone is insufficient — the poll can reload a non-zero pin). This:
   converges → debt → alarm), rather than silently active;
 - supersedes/clears the intent on a legitimate ownership change (new generation).
 
+**Linearization invariant (Codex r5 BLOCKER — the load-bearing contract).**
+`UpdateRGActive` serializes on the manager mutex, but that orders *lock
+acquisition*, not *ownership causality*: with three activation-capable paths and
+five clear categories running from different goroutines, a stale clear-retry can
+land after a newer legitimate activation (stranding the owner inactive), or an old
+activation can land after a newer peer-fence (resurrecting the peer-fence
+one-shot). `ApplyIfCurrent`/`rgStateMachine.epoch` do not fix this — the former
+validates bookkeeping only *after* the physical write, and the epoch increments on
+every unchanged periodic reconcile. The plan therefore requires **one
+daemon-owned per-RG monotonic ownership generation** that gates **every** writer
+(activate AND clear, all paths incl. quarantine=gen0):
+- every intended write captures the generation it was issued for;
+- a write (true or false) is applied to the map/helper only if its generation is
+  still the current one — a **stale write is dropped** (and re-drives the current
+  desired), enforced **before** the physical write, not after;
+- a clear dominates until a **strictly newer, still-current** ownership transition
+  supersedes it;
+- convergence may clear debt only if the generation is **still current across a
+  fresh pin + helper readback**;
+- a resolved inactive intent / tombstone survives until ownership supersession.
+The daemon-level intent + reconcile retry-consumer is the right structure; this
+invariant is what linearizes it. (Stated as an invariant; the implementation is
+/engineer's.)
+
 **Debt/alarm:** raise a `show security alarms` entry + increment
 `ha_rg_active_unresolved_clear{...}` when an intent is unconverged for ≥ T
 (hysteresis; T defined, e.g. ~5 s ≈ min lease margin); clear only on confirmed
 convergence for the SAME generation; preserve the first-failure timestamp across
-retries; **the shutdown site is out of the runtime alarm** (an in-memory
-hysteresis alarm cannot mature after shutdown monitoring stops — a failed
-shutdown clear is caught by the next boot's §5.1 quarantine). This needs a new
-`HAController` **read/snapshot** API (currently write-only) exposing the pinned
-`rg_active` + helper `Active` per RG, with defined locking/order and
-**fail-closed on a map-read error**.
+retries; **the shutdown site is out of the runtime alarm** — the reconcile loop is
+canceled/joined before shutdown clearing, so a failed shutdown clear is not
+runtime-convergent; it is instead **recovered by the next boot's §5.1 quarantine**
+(state it that way, not "runtime-convergent"). This needs a new `HAController`
+**read/snapshot** API (currently write-only) exposing the pinned `rg_active` +
+helper `Active` per RG, with defined locking/order and **fail-closed on a map-read
+error**.
 
 ### 5.3 Doc + stale-comment correction
 Issue body (unbounded → the reactivation modes + the bounded ~11 s named case);
@@ -152,17 +192,24 @@ rationale; the stale fabric/#485-preflight comments (`fce172532`); #5079 relabel
 authority + the five clear sites + the boot-quarantine invariant.
 
 ### 5.4 Residual + deferral
-After Path D, **every reachable unbounded reactivation mode is closed** (restart →
-§5.1; peer-fence one-shot → §5.2; persistent map-write → §5.2 retry + alarm). The
-only residual is an **extremely-rare persistent map-write failure** (a pinned
-array-map write syscall failing indefinitely), which is **detected + alarmed, not
-auto-fixed** — accepted with disclosure. "Stuck VRRP ownership" is a separate
-election/VRRP domain (not dual-active unless split-brain; produces no clear debt).
-**PLAN-DEFER only** the map-as-authority architectural cleanup (retire the eBPF
-map as the daemon's Active store; unify daemon-desired vs persisted-manager
-state) — a simplification, not a residual-hazard fix. **File the follow-up issue
-now** (title: "retire rg_active eBPF map as the daemon HA Active authority") and
-name the security/HA owner as the accepting signer at /engineer time.
+Path D **closes the two reachable unbounded reactivation modes** (stale-active
+restart → §5.1; failed peer-fence one-shot → §5.2, linearized). It **does NOT
+close** the **extremely-rare persistent map-write failure**: `UpdateRGActive`
+returns before mutating manager/helper state when the eBPF map write itself fails
+(`manager_ha.go:635`), so an indefinitely-failing pin write stays indefinitely
+active — Path D's retry + alarm make it **detected-and-alarmed, but not
+terminated**. This is an **accepted, detected-but-unfixed residual**, disclosed
+here. "Stuck VRRP ownership" is a separate election/VRRP domain (not dual-active
+unless split-brain; produces no clear debt).
+
+**PLAN-DEFER** the map-as-authority architectural cleanup (retire the eBPF map as
+the daemon's Active store; unify daemon-desired vs persisted-manager state) —
+which is what would actually *terminate* the persistent-map-write residual, not
+merely a cosmetic simplification. Its deferral therefore **requires**: (a) this
+explicit detected-but-unfixed disclosure, (b) a **concrete follow-up issue filed
+now** (title: "retire rg_active eBPF map as the daemon HA Active authority"),
+linked from #6371, and (c) a **named security/HA owner** recorded as the accepting
+signer at /engineer time. It cannot be presented as a non-hazard cleanup.
 
 **PLAN-KILL** Option D + Path A′ + the decouple; the per-call `UpdateRGActive`
 ordering is affirmed correct.
@@ -172,14 +219,20 @@ ordering is affirmed correct.
   `rg_active`+`ha_watchdog` keys + empty `haGroups`) called from HA init before
   replay; guard cluster-only; fail-closed if the map write errors (log + proceed
   helper-unarmed).
-- **§5.2:** a daemon-level `map[int]clearIntent{gen uint64; since time.Time}`;
-  clear sites publish intent; the reconcile drives `SetRGActive(false)` +
-  reads back convergence via the new `HAController.HASnapshot()`; debt→alarm on
-  non-convergence ≥ T.
-- No change to `UpdateRGActive` ordering, `signalFailoverActuated`,
-  `waitFailoverActuated`, #5079, #485, or the #1928 cluster-only guard.
-- Realistic scope: ~200-300 LOC (quarantine + intent/convergence + snapshot API +
-  alarm + metric) + docs + tests. No wire/ABI/Rust behavior change.
+- **§5.2:** a daemon-level per-RG `ownershipGen uint64` (monotonic, bumped on
+  every ownership transition) + `clearIntent{gen; since}`; a single apply gate
+  covers **every** true/false writer and drops a stale-generation write before the
+  physical map/helper mutation (the linearization invariant); the reconcile drives
+  `SetRGActive(false)` for the current-gen intent and reads back convergence
+  (pin==0 AND helper `Active=false`, gen still current) via the new
+  `HAController.HASnapshot()`; debt→alarm on non-convergence ≥ T.
+- No change to the per-call `UpdateRGActive` map-first ordering,
+  `signalFailoverActuated`, `waitFailoverActuated`, #5079, #485, or the #1928
+  cluster-only guard. (The generation gate wraps the writers; it does not reorder
+  the map-vs-helper writes inside `UpdateRGActive`.)
+- Realistic scope: ~250-350 LOC (quarantine + generation gate + intent/convergence
+  + snapshot API + alarm + metric) + docs + tests. No wire/ABI/Rust behavior
+  change.
 
 ## 7. Test plan (parent-RED bindings)
 - **Restart quarantine (core):** pinned `rg_active=1` for a not-owned RG →
@@ -191,6 +244,16 @@ ordering is affirmed correct.
 - **Peer-fence convergence:** inject a transient failed peer-fence clear → assert
   the reconcile retries to convergence (pin=0 AND helper inactive) and the debt
   raises then clears. Parent-RED: revert §5.2 → RG stays active, no retry.
+- **Generation linearization (Codex r5 BLOCKER):** interleave a stale clear-retry
+  (gen G) with a newer legitimate activation (gen G+1) → assert the stale clear is
+  dropped and the owner stays active; and the inverse (old activation vs newer
+  peer-fence) → assert the fence wins and its debt is not retired. Parent-RED:
+  remove the generation gate → the stale write lands → owner stranded inactive (or
+  peer-fence resurrected).
+- **Quarantine partial-write failure:** inject a failing pin-key write during
+  §5.1 → assert the dataplane is NOT armed / replay+poll+watchdog are suppressed
+  (no surviving nonzero key re-arms). Parent-RED: revert the fail-closed guard →
+  the surviving key re-arms.
 - **Ordering-correctness (guards the r2 decouple):** failed map write →
   `UpdateRGActive` returns error, does NOT send `update_ha_state(false)`; poll
   keeps `Active=true`.
@@ -228,9 +291,11 @@ Per §5.3.
 | r2 | PLAN-NEEDS-REVISION (BLOCKER decouple) | PLAN-NEEDS-REVISION (5) | infra-down | r2 |
 | r3 | PLAN-NEEDS-REVISION (BLOCKER stale-restart) | PLAN-READY | infra-down | r3 |
 | r4 | PLAN-NEEDS-REVISION (5 BLOCKER+2 HIGH, impl-completeness) | PLAN-NEEDS-REVISION (2) | infra-down | r4 |
-| r5 | pending | pending | infra-down | r5 |
+| r5 | PLAN-NEEDS-REVISION (linearization BLOCKER + residual-honesty) | PLAN-READY | infra-down | r5 |
+| r6 | pending | pending | infra-down | r6 |
 
 Convergence target (2-of-3, AGY infra-blocked): Codex + Claude SMR agree on
-PLAN-READY for Path D (boot pin-quarantine + convergent-retry clear/debt + doc;
-PLAN-KILL Option D/A′/decouple; deferral of the map-as-authority cleanup with a
-filed follow-up + named signer).
+PLAN-READY for Path D (boot pin-quarantine + generation-linearized convergent-retry
+clear/debt + doc; PLAN-KILL Option D/A′/decouple; the persistent-map-write residual
+is a disclosed detected-but-unfixed accepted risk; deferral of the map-as-authority
+cleanup with a filed follow-up + named signer).
