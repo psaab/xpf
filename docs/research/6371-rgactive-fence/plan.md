@@ -1,234 +1,244 @@
-# Plan of Action — #6371 rg_active forwarding fence on a failed clear
+# Plan of Action — #6371 rg_active ownership reconciliation
 
-- **Issue:** #6371 (bug, security) — "a failed `SetRGActive(false)` still fires
-  `signalFailoverActuated` → dual cluster-active forwarding under control-socket
-  failure." Surfaced during #6177 /research.
+- **Issue:** #6371 (bug, security) — framed as "a failed `SetRGActive(false)`
+  still fires `signalFailoverActuated` → dual cluster-active forwarding." Research
+  found the real security content is broader: **`rg_active` (the daemon's Active
+  authority) can diverge from desired ownership and never be reconciled, giving
+  indefinite reactivation** — most clearly on a stale-active restart.
 - **Research branch:** `research/6371-rgactive-fence`
 - **Base:** origin/master @ `3ecdc80568a3`
-- **Prior art:** #5640 (fence-completion barrier), #5079 (owner-side transfer-out
+- **Prior art:** #5640 (fence barrier), #5079 (owner-side transfer-out
   election-eligibility lease), #485 (activation/demotion ordering), #3917
-  (`fenceAllRedundancyGroups` peer-fence), `fce172532` (collapsed userspace
-  demotion prep to a barrier — removed the flow-cache demote preflight).
-- **Revision:** r3 — rewritten after hostile Codex r2 (BLOCKER + 4 findings) +
-  Claude SMR r2, all firsthand-verified below. AGY infra-down (2-of-3).
-- **Status:** DRAFT (r3). **Recommendation: PLAN-KILL the issue's Option D AND
-  every code-fix variant (r1 Path A′, r2 decouple) — the current
-  `UpdateRGActive` ordering is CORRECT. Ship a minimal Option-(c): doc/comment
-  correction + a persistence/hysteresis observability alarm. Accept the bounded
-  residual risk explicitly and PLAN-DEFER the deep transfer-phase redesign.**
+  (`fenceAllRedundancyGroups`), #1928 (cluster-only HA replay), `fce172532`
+  (removed the flow-cache demote preflight).
+- **Revision:** r4 — after hostile Codex r1/r2/r3 (each a BLOCKER or ≥4 findings)
+  + Claude SMR r1/r2/r3, all firsthand-verified. AGY infra-down (2-of-3).
+- **Status:** DRAFT (r4). **Recommendation: PLAN-KILL Option D + Path A′ + the
+  decouple (affirm the per-call `UpdateRGActive` ordering is correct); SHIP a
+  startup ownership-reconciliation fix that closes the genuinely-unbounded
+  stale-active-restart reactivation, plus a shared unresolved-clear-debt
+  persistence alarm and doc correction; PLAN-DEFER only the full
+  single-Active-authority redesign, with explicit unbounded-mode disclosure +
+  a tracked follow-up filed now.**
 
 ---
 
-## 1. Problem statement
+## 1. Problem statement (re-scoped by the research)
 
-On a coordinated transfer-out the peer sends `SendFailover(rgID)` and waits up to
-`failoverAckTimeout` (20 s) for an ack; this node handles it in
-`handleRemoteFailover` → `OnRemoteFailover` arms the #5640 barrier +
-`ManualFailover` + the #5079 lease; `WaitFailoverApplied = waitFailoverActuated`
-(barrier 3 s) gates the ack. The demotion event runs
-`ResignRG`→(if `tr.Changed`)`SetRGActive(false)`→ **unconditional**
-`signalFailoverActuated`. The issue claims a failed clear + released ack →
-**UNBOUNDED** dual-active under persistent control-socket failure, and proposes
-**Option D** (hold the ack until the clear is confirmed).
+The issue's stated mechanism — a failed `SetRGActive(ctx,rgID,false)`
+(`daemon_ha.go:367`) still runs the unconditional `signalFailoverActuated`
+(`:389`) → the peer promotes off the ack — is **real but not the hazard**: the
+ack is not a promotion fence (the peer promotes on heartbeat-observed
+`StateSecondaryHold` + priority-0 VRRP regardless, §3.4), and the specific
+"persistent control-socket failure" precondition is **bounded ~11 s** by the
+helper forwarding lease (§3.2).
 
-**Research outcome:** the "unbounded" premise is refuted **for the issue's
-stated precondition** (persistent control-socket failure → the helper's
-forwarding lease self-expires at ~11 s because the socket-down watchdog cannot
-renew it). Option D is an **invalid fence** (the peer promotes independently of
-the ack). Both code-fix variants explored (Path A′ retry, r2 map/live-update
-decouple) are **unsafe or harmful**; the current ordering is correct. Only a
-minimal observability + documentation change is warranted.
+Hostile review surfaced the actual security content: the eBPF `rg_active` map is
+the daemon's **Active authority** (the status poll re-derives `haGroups.Active`
+from it and the watchdog re-publishes it to the helper, §3.1), yet **nothing
+reconciles the map against desired ownership when they diverge outside a state
+transition.** The concrete, reachable, **unbounded** manifestation is a
+**stale-active restart** (§3.5): a former owner reboots with `rg_active=1` pinned,
+the fresh state machine starts `applied=false`, the reconcile never issues a
+corrective clear, and the poll/watchdog re-arm the helper `active=true`
+indefinitely — dual-active with the peer that legitimately took over.
 
 ## 2. Blast radius / affected code (read firsthand @ 3ecdc80568a3)
 
 | Path | Role |
 |------|------|
-| `pkg/daemon/daemon_ha.go:353-389` | cluster-event demotion: `SetCluster(false)`→`ResignRG`→(if `tr.Changed`)`SetRGActive(false)` at 367→ unconditional `signalFailoverActuated` at 389 |
-| `pkg/daemon/rg_state.go:250-265` | `reconcileLocked`: default `desired = clusterPri \|\| allVRRPMaster` |
-| `pkg/daemon/daemon_ha.go:567-590` | VRRP-BACKUP handler: RETH-mode clear (`SetRGActive(false)` ~583) |
-| `pkg/daemon/daemon_ha.go:820-848` | `reconcileRGState`: 2 s desired-vs-applied retry clear (`SetRGActive(false)` ~846) |
-| `pkg/daemon/daemon_ha_sync.go:1268` | `fenceAllRedundancyGroups` (#3917) peer-fence: clears **all** RGs on a fence msg |
-| `pkg/dataplane/userspace/manager_ha.go:631-716` | `Manager.UpdateRGActive`: BPF `rg_active` map write (638, returns on err) **then** live `update_ha_state` (699) |
-| `pkg/dataplane/userspace/manager_ha.go:257-360` | `refreshHAStateFromMapsLocked`/`mergeHAStateFromMaps`: **re-derives `haGroups.Active` FROM the rg_active map** (`group.Active = rgVal != 0`) |
-| `pkg/dataplane/userspace/process_status.go:150-258` | 1 s status poll: `refreshHAStateFromMapsLocked` + watchdog re-publish (`update_ha_state` when `Active` delta) |
-| `pkg/dataplane/userspace/manager_compile.go:360` | startup: replays `Active` from the map (`refreshHAStateFromMapsLocked`) |
-| `pkg/dataplane/maps_fabric.go:36-47` | writes the `rg_active` eBPF map |
-| `pkg/cluster/failover.go:120-128` | `ManualFailover` → `StateSecondaryHold` (heartbeat-published) |
-| `pkg/cluster/election.go:160-167` | peer promotes on observing `StateSecondaryHold` — independent of the ack |
-| `pkg/daemon/daemon_ha_sync.go:1067` | owner-side transfer-out lease = `2·localFailoverCommitTimeout + 20 s` = 26 s (election-eligibility, not a forwarding fence) |
-| `userspace-dp/src/afxdp/types/runtime.rs:335-370` | `HAForwardingLease` / `active(now)=until!=0 && now<=until` (inclusive) / `HA_WATCHDOG_STALE_AFTER_SECS=10` |
-| `userspace-dp/src/afxdp/forwarding/ha.rs:66-113`, `shared_ops.rs:803-812` | lease gate + fabric-ingress exception |
+| `pkg/daemon/rg_state.go:75` (`newRGStateMachine`) | fresh state machine: `active=false`, `applied=false`, no pending apply |
+| `pkg/daemon/daemon_ha.go:604-605` | `reconcileRGStateLoop` "correct stale rg_active from prior run" — **false** for a pinned-map/`applied=false` divergence |
+| `pkg/daemon/daemon_ha.go:806-848` | reconcile acts only on `Changed \|\| NeedsApply` — a fresh `applied=false` never detects `map=1` |
+| `pkg/dataplane/loader_userspace_shim.go:602` | `rg_active` is a **pinned** shared map (survives restart) |
+| `pkg/dataplane/userspace/manager_compile.go:360,372-378` | cluster-node startup: `refreshHAStateFromMapsLocked` (reads pinned map) → `syncHAStateLocked` **re-arms the helper `active=true`** from the stale map |
+| `pkg/dataplane/userspace/manager_ha.go:257-360` | `refreshHAStateFromMapsLocked`/`mergeHAStateFromMaps` — `haGroups.Active = rgVal!=0` (map is authority) |
+| `pkg/dataplane/userspace/manager_ha.go:631-716,751,781` | `UpdateRGActive` (map-first, return-on-map-error — correct); watchdog re-publish renews the Rust lease per active update |
+| `userspace-dp/src/afxdp/ha/state.rs:4`, `types/runtime.rs:343` | lease `active(now)=until!=0 && now<=until` (inclusive), renewed only for `active` groups; `HA_WATCHDOG_STALE_AFTER_SECS=10` |
+| clear sites (all five) | cluster-event `daemon_ha.go:367`; VRRP-BACKUP `:583`; reconcile `:846`; peer-fence `fenceAllRedundancyGroups` `daemon_ha_sync.go:1267` (**bypasses `rgStateMachine`, no retry debt**); shutdown `daemon_run_shutdown.go:153` |
+| `pkg/cluster/failover.go:127`, `election.go:160` | `ManualFailover`→`SecondaryHold`; peer promotes on observing it (ack-independent) |
+| `pkg/daemon/daemon.go:199` | NAT-pool alarm manager — **NAT-specific** (CLI + gRPC callbacks); no generic alarm manager exists |
 
-## 3. Reachability / precondition analysis (the crux, corrected)
+## 3. Reachability / precondition analysis
 
-### 3.1 `rg_active` is dead to packet programs but LIVE control-plane authority
-No **forwarding** path reads the eBPF `rg_active`/`ha_watchdog` maps
-(`userspace-xdp` has none; `check_egress_rg_active` is uncalled retired-eBPF;
-userspace-dp gates on `rg_runtime`). **But the daemon's own control plane treats
-the map as the authoritative `Active` store:** the 1 s status poll
-(`refreshHAStateFromMapsLocked` → `mergeHAStateFromMaps`, `group.Active = rgVal!=0`)
-**re-derives `m.haGroups` from the map**, startup replays `Active` from it
-(`manager_compile.go:360`), and the watchdog re-publishes `update_ha_state`
-whenever `Active` deltas. So the map is not vestigial — it is the source of truth
-that reconstructs the helper's HA state. This corrects r1/r2's "dead map"
-framing and is why the r2 decouple is unsafe (§4).
+### 3.1 `rg_active` is dead to packet programs but is the daemon's Active authority
+No forwarding path reads the eBPF `rg_active`/`ha_watchdog` maps (userspace-dp
+gates on `rg_runtime`; `check_egress_rg_active` is uncalled retired-eBPF). But the
+daemon control plane treats the pinned map as authoritative: the 1 s poll
+re-derives `haGroups.Active` from it (`mergeHAStateFromMaps`), startup replays it
+(`manager_compile.go:360`), and the watchdog re-publishes `update_ha_state`.
 
-### 3.2 The lease bound is CONDITIONAL on the demotion being latched (or socket-down)
-`update_ha_state` sets `lease = ActiveUntil(max(watchdog_ts, now)+10)`; packet-time
-`active(now)= now ≤ until` (inclusive whole-second → up to ~11 s). The lease is
-**renewed** every watchdog IPC while `haGroups.Active=true` — and
-`haGroups.Active` is derived from the map. Therefore:
-- **Map latched inactive (rg_active=0):** poll sets `Active=false` → watchdog stops
-  renewing `true` → lease expires ≤~11 s → helper fails closed. Bounded.
-- **Persistent control-socket failure (the issue's precondition):** the watchdog
-  IPC cannot reach the helper → no renewal → lease expires ≤~11 s → fail closed.
-  **Bounded.** ✔ (This is the issue's stated scenario — it *is* bounded.)
-- **Map STILL active + socket UP (NOT the issue's precondition):** the watchdog
-  keeps renewing `true` → the helper forwards **indefinitely**. This is *correct*
-  when the node legitimately still owns the RG (VRRP still MASTER); it becomes a
-  hazard only if the map is never cleared despite a demotion — e.g. a stuck/missed
-  VRRP-BACKUP with the reconcile loop unable to clear. The reconcile loop
-  (`reconcileRGState`, reads live VRRP states every 2 s) is the recovery for a
-  *dropped* BACKUP event; a genuinely stuck VRRP-MASTER is a different failure
-  domain (VRRP, not this defect).
+### 3.2 The issue's precondition is bounded ~11 s; other modes are not
+The lease is renewed every watchdog IPC **applied** by the helper while the
+group is `active`; `haGroups.Active` is map-derived. So:
+- **Persistent control-socket failure (the issue's precondition):** no IPC is
+  applied → lease expires ≤~11 s → fail closed. **Bounded.** (Phrase the bound on
+  IPC *application*, not "error returned": a request may be applied by the helper
+  before its response fails, so the daemon seeing an error does not prove
+  non-application.) ~11 s bounds **new ordinary admission**, not final egress of
+  already-queued packets.
+- **Map stays active + socket up:** the watchdog keeps renewing → the helper
+  forwards **indefinitely**. This is correct while the node legitimately owns the
+  RG, but **unbounded** when the map is stale-active and never reconciled:
+  the stale-active restart (§3.5) and a persistent map-write failure with live
+  reads (reconcile keeps returning error, map never reaches 0, poll re-arms).
 
-So the honest bound is: **≤~11 s once the demotion is latched into the map OR the
-socket is persistently down** — which covers the issue's precondition. The
-"unbounded is unreachable" claim must carry this qualification, not stand
-unconditionally.
-
-### 3.3 No fabric mitigation; residual exposure
+### 3.3 No fabric mitigation
 `fce172532` removed the flow-cache demote preflight; userspace mode skips Linux
-blackhole routes. On a failed helper update, existing local flows keep forwarding
-locally until latch/expiry. VRRP priority-0 moves the VIP (1 ms peer takeover),
-so most new traffic goes to the peer; the genuinely dual-forwarded traffic is
-stale-ARP/ND residue to the pre-resign MAC + whatever was admitted before latch —
-bounded by min{ARP/ND timeout, ~11 s}. (Do not claim a TX-queue wall-clock drain
-bound — queued volume is bounded, drain time is not formally established.)
+blackhole routes. Residual dual-forwarded traffic is stale-ARP/ND residue +
+pre-latch admission (no wall-clock queue-drain bound is claimed).
 
 ### 3.4 The ack is not the fence
-`ManualFailover` publishes `StateSecondaryHold`; the peer promotes on observing it
-(`election.go:160`) + priority-0 VRRP (1 ms takeover), independent of the ack.
-`signalFailoverActuated` (389) fires at the cluster-event point — in RETH mode
-before the clear (583) — so the ack is a coordination signal, not proof forwarding
-stopped. This kills Option D (§4).
+`ManualFailover` publishes `SecondaryHold`; the peer promotes on observing it
+(`election.go:160`) + priority-0 VRRP, independent of the ack →
+`signalFailoverActuated` is a coordination signal, not proof forwarding stopped →
+Option D is an invalid fence (§4).
 
-## 4. Options — all code-fix variants rejected; current ordering is correct
+### 3.5 BLOCKER — stale-active restart is never reconciled (firsthand-verified)
+1. `rg_active=1` survives (pinned map, `loader_userspace_shim.go:602`).
+2. Cluster startup `refreshHAStateFromMapsLocked` reads it → `syncHAStateLocked`
+   re-arms the fresh helper `active=true` (`manager_compile.go:372-378`).
+3. The fresh `rgStateMachine` is `desired=false, applied=false` (`rg_state.go:75`).
+4. Non-preempt boot starts Secondary; initial reconcile is `false→false`.
+5. Reconcile acts only on `Changed || NeedsApply` (`daemon_ha.go:806`) — both
+   false — so **no corrective clear**; the "startup repair" comment (`:605`) is
+   false for this divergence.
+6. The watchdog re-publishes map-derived `active=true`; the Rust lease renews on
+   every active update → **indefinite reactivation with a live socket**. No clear
+   is attempted, so a reconcile-only alarm sees nothing.
 
-- **Option D (hold the ack):** PLAN-KILL. Not a valid fence (§3.4); where it bites
-  it strands the requester without stopping local forwarding.
-- **Path A′ (fast retry in the demotion branch, r1):** REJECT. One `SetRGActive`
-  attempt allows 2 s dial + 3 s roundtrip with no in-flight cancel; 3 attempts
-  ≈ 15 s > the 3 s actuation barrier → the retry itself trips `failoverAckFailed`.
-- **r2 decouple (send live update even if the map write fails):** REJECT —
-  **harmful.** Because the poll re-derives `haGroups.Active` from the map (§3.1),
-  a failed map write + successful live clear → next poll rereads the stale
-  `active=1` → watchdog re-publishes `active=true` → **helper reactivates and the
-  lease renews**, oscillating indefinitely against the reconcile clear. Holding
-  `m.mu` only prevents interleaving *during* the call. The **current
-  map-first / return-on-map-error ordering is correct**: it keeps the daemon's
-  single `Active` authority (the map) and the helper consistent.
-- **Conclusion:** there is no safe local code change that improves on the current
-  bounded, fail-closed behavior for the issue's precondition. The only lever that
-  would help the (out-of-precondition) "socket up + stale-active map" case is a
-  single-`Active`-authority redesign (retire the map as authority, or a per-RG
-  dirty/desired-state repair) — high blast radius, PLAN-DEFER (§5).
+This is the reachable, unbounded, security-relevant defect. It is independent of
+the failed-clear mechanism the issue names, and disproves any "current behavior is
+correct / bounded" conclusion.
 
-## 5. Recommended path — **Path C: minimal Option-(c) (doc + observability), no HA-path code change**
+## 4. Options — code-fix variants for the *named* defect are rejected
+- **Option D (hold the ack):** PLAN-KILL — not a valid fence (§3.4).
+- **Path A′ (fast retry in the demotion branch):** REJECT — one attempt allows
+  2 s dial + 3 s roundtrip, uncancellable; 3 attempts > the 3 s actuation barrier
+  → self-inflicted `failoverAckFailed`.
+- **r2 decouple (live update past a failed map write):** REJECT — harmful; the
+  poll re-derives Active from the map, so it oscillates/reactivates. The current
+  **map-first / return-on-map-error ordering is correct.**
+None of these touch §3.5.
 
-1. **Persistence/hysteresis "rg_active clear failing" security alarm + counter.**
-   Drive it from the **reconcile loop** (`reconcileRGState`, `daemon_ha.go:846`) —
-   the natural persistent-failure detector (it already retries every 2 s and
-   dedups). Raise a `show security alarms` entry after N consecutive failed
-   clears / ≥T seconds, clear it on the next confirmed success (hysteresis, like
-   the NAT-pool alarm manager, `daemon.go:201`). A monotonic counter
-   (`ha_rg_active_clear_failed_total`) counts attempts independently across ALL
-   clear sites (cluster-event 367, VRRP-BACKUP 583, reconcile 846, peer-fence
-   `fenceAllRedundancyGroups`). This is a **helper-liveness / dual-active-risk**
-   signal — the one genuine gap (today a persistent failure is an ordinary
-   deduped `Warn`). No change to `UpdateRGActive`, `signalFailoverActuated`,
-   `waitFailoverActuated`, or the map ordering.
-2. **Doc + stale-comment correction:**
-   - Issue body: replace "UNBOUNDED" with the §3.2 conditional ~11 s bound.
-   - Remove the stale "fabric-mitigated"/#485-preflight comments in the demotion
-     branch (`daemon_ha.go` 342-349, 385-388) — `fce172532` removed the preflight.
-   - Enumerate and correct the stale #5640 comments that describe the ack as
-     *preventing peer promotion* (`cluster/sync.go`, `cluster/sync_failover.go`,
-     `daemon.go`, `daemon_ha_sync.go`): the ack is a coordination signal; the peer
-     promotes via `SecondaryHold`/priority-0 regardless.
-   - Fix the #5079 description: it is the **demoted owner's** election-eligibility
-     lease (26 s prod), not the requester's, and not a forwarding fence.
-   - Document that the `rg_active` eBPF map is the daemon-side `Active` authority
-     (poll re-derivation) and the ~11 s-after-latch/socket-down lease bound.
-3. **Explicit security-risk acceptance + PLAN-DEFER the redesign.** The residual —
-   ≤~11 s (latched/socket-down) of fail-closed dual-forwarded stale-ARP residue,
-   plus a pre-latch window bounded by VRRP-resign + 2 s reconcile — is **accepted**
-   as the permanent posture (fail-closed lease + operator alarm). The
-   single-`Active`-authority redesign (retire the map-as-authority, or per-RG
-   dirty-map repair with explicit restart semantics) is DEFERRED as
-   disproportionate; file a follow-up research issue if a zero-window guarantee is
-   later required. This deferral is an explicit acceptance, NOT a claim that no
-   residual exists.
+## 5. Recommended path — **Path D: reconcile `rg_active` against desired ownership**
 
-Rationale: the issue's headline hazard does not exist as stated for its own
-precondition; no safe code fix improves on the current behavior; the current
-`UpdateRGActive` ordering is correct. The only warranted change is observability +
-doc hygiene.
+1. **Close the stale-active-restart reactivation (the core security fix).** On
+   cluster-node startup, the pinned `rg_active` map must not be trusted as
+   ownership. Seed the `rgStateMachine`'s `applied` (per RG) from the **actual**
+   pinned map value so the reconcile's `NeedsApply` (`applied != desired`) detects
+   a stale-active non-owned RG and issues the corrective `SetRGActive(false)` —
+   fail-closed until legitimate election, while a genuine still-owner
+   (`desired=true`) stays applied (hitless). Equivalent seam to weigh in
+   /engineer: have `manager_compile` start **fail-closed** (do not re-arm from the
+   pinned map on a cluster node) and let the daemon drive activation on election.
+   Either closes the unbounded window; both need explicit restart semantics
+   (bounded re-arm-then-clear window ≤ the immediate reconcile pass).
+2. **Shared unresolved-clear debt + persistence alarm/metric.** A per-RG
+   *unresolved-clear* debt raised whenever any clear site fails or a demotion is
+   requested but not confirmed applied — shared across **all five** sites,
+   including the ones that bypass `rgStateMachine` (peer-fence
+   `fenceAllRedundancyGroups`) and the restart/persistent-map-write cases (a
+   reconcile-only signal misses those). Time-based hysteresis (raise after ≥T,
+   clear on confirmed applied), explicit supersession/removal on ownership change
+   and restart, and requested-value classification (a map-only failure after a
+   confirmed live clear is not dual-active-risk). This needs its **own** plumbing
+   — there is no generic alarm manager (the NAT-pool one is NAT-specific), so this
+   is materially more than the r3 "40-70 LOC" estimate; scope it honestly at
+   /engineer.
+3. **Doc + stale-comment correction (expanded):**
+   - Issue body: the socket-down mechanism is bounded ~11 s; the genuinely
+     unbounded content is the stale-active-restart / map-not-reconciled defect.
+   - Fix the stale #5640 "ack prevents peer promotion" claims — enumerated:
+     `daemon_ha.go:168`, `docs/session-sync-architecture.md:1358`,
+     `cluster/sync.go`, `cluster/sync_failover.go`, `daemon.go`,
+     `daemon_ha_sync.go`, and the matching sync-test rationale.
+   - Fix the false "correct stale rg_active from prior run" comment
+     (`daemon_ha.go:605`) and the stale "fabric-mitigated"/#485-preflight comments
+     (`fce172532`).
+   - Relabel #5079 (demoted **owner's** election-eligibility lease, not a
+     forwarding fence) and document the map-as-Active-authority + the five clear
+     sites.
+4. **PLAN-DEFER only the full single-Active-authority redesign** (retire the map
+   as authority / unify daemon-desired vs persisted-manager state). Its deferral
+   requires **accurate unbounded-mode disclosure** (persistent map-write failure
+   with a live socket, and genuinely-stuck ownership, remain indefinite even after
+   Path D — Path D closes only the restart path and adds detection), **accountable
+   security/HA-owner signoff**, and a **tracked follow-up issue filed now** — not
+   "if later required."
 
-## 6. Detailed design (Path C)
+Rationale: the issue's named mechanism is bounded/benign; the real, reachable,
+unbounded hazard is stale-active reactivation. Path D fixes the clearly-reachable
+restart path, surfaces the residual unbounded modes operationally, and corrects
+the record — a genuine, proportionate security fix — while honestly deferring the
+larger authority redesign with disclosure + a tracked issue.
 
-- **Alarm/counter:** add a per-RG consecutive-failed-clear counter to
-  `rgStateMachine` (or the reconcile pass), raise/clear a `show security alarms`
-  entry via the existing alarm manager, increment
-  `ha_rg_active_clear_failed_total{site=...}` in the Prometheus collector
-  (`pkg/api/`). Gate the alarm on persistence (≥N ticks), not a one-shot, so
-  benign transients do not raise it.
-- **No** change to `UpdateRGActive`, the map-write ordering, the #5640 barrier,
-  `signalFailoverActuated`, #5079, or #485 ordering.
-- Docs/comments per §5.2. Scope: ~40-70 LOC (mostly the alarm + counter) + tests.
-  No wire/ABI/Rust change.
+## 6. Detailed design (Path D)
+
+- **Startup seed (item 1):** at daemon HA init, read the pinned `rg_active`
+  (and `ha_watchdog`) map per RG and seed `rgStateMachine.applied` accordingly
+  (a small `SeedApplied(active bool)` on the state machine, or reuse
+  `mergeHAStateFromMaps`), BEFORE the first `reconcileRGStatePass`. Guard: cluster
+  nodes only (standalone already clears via `clearHelperHAStateWithDebtEnsureRetryLocked`).
+  Confirm the immediate reconcile then clears a non-owned stale-active RG.
+- **Debt/alarm (item 2):** a per-RG `unresolvedClearSince time.Time` +
+  `unresolvedClearCount`, set at every clear request (all five sites) and cleared
+  on a confirmed applied-inactive (helper status reports the group inactive, not
+  merely a nil error). Raise a `show security alarms` entry + increment
+  `ha_rg_active_unresolved_clear{...}` after hysteresis. Requires its own alarm
+  registration (no generic manager).
+- **No** change to `UpdateRGActive` ordering, `signalFailoverActuated`,
+  `waitFailoverActuated`, #5079, or #485.
+- Docs/comments per §5.3. Scope: realistically ~120-200 LOC across daemon +
+  userspace-manager + a metric + docs. No wire/ABI/Rust behavior change.
 
 ## 7. Test plan (parent-RED bindings)
 
-- **Regression proving the current ordering is correct (guards against the r2
-  decouple):** a userspace-manager test that freezes `rg_active=1`, injects a
-  failing map write, and asserts `UpdateRGActive` returns error and does **not**
-  publish `update_ha_state(false)` — then a follow-on poll (`mergeHAStateFromMaps`)
-  keeps `Active=true` (no divergence). Parent-RED: apply the decouple → the live
-  clear is sent while the map stays 1 → the poll re-reads 1 and the test asserts
-  the resulting oscillation/reactivation. (`TMPDIR=/tmp`, short sun_path.)
-- **Alarm/counter:** drive persistent failed clears through the reconcile loop
-  (failing `SetRGActive`); assert the counter increments each tick and the alarm
-  raises after N and clears on the next success. Parent-RED: revert the alarm →
-  counter stays 0 / no alarm entry.
-- **Rust lease bound:** extend `ha_tests.rs` — `is_forwarding_active` false once
-  `now > until` (pins `HA_WATCHDOG_STALE_AFTER_SECS`).
-- **Smoke:** `make test-failover` (loss userspace cluster, v4+v6) — zero-drop
-  failover unchanged (Path C touches no HA-path behavior).
+- **Stale-active-restart regression (the core):** construct a daemon/manager with
+  a pinned `rg_active=1` for an RG the node does NOT own (Secondary, no VRRP
+  master); run startup seed + one reconcile pass; assert `SetRGActive(false)` was
+  issued and the helper is not left armed. Parent-RED: revert the seed →
+  `applied=false` → no clear → the RG stays armed → assertion fails (behavioral,
+  per `feedback_red_on_revert_must_be_assertion_not_build_break`). `TMPDIR=/tmp`.
+- **Ordering-correctness regression (guards against the r2 decouple):** failing
+  map write → `UpdateRGActive` returns error and does NOT send
+  `update_ha_state(false)`; a follow-on poll keeps `Active=true` (no divergence).
+- **Debt/alarm:** drive a persistent failed clear (reconcile) AND a bypass
+  peer-fence failed clear; assert the shared debt raises the alarm after
+  hysteresis and clears on confirmed applied-inactive. Parent-RED: revert →
+  no alarm.
+- **Rust lease bound:** `is_forwarding_active` false once `now > until`.
+- **Smoke:** `make test-failover` (loss userspace cluster, v4+v6) + a
+  restart-connectivity check that a restarted former-owner does NOT resume
+  forwarding an RG the peer owns.
 
 ## 8. Risk analysis / rollback
 
-- **Risk:** the alarm must be persistence-gated (hysteresis) so it does not fire
-  on benign transients or on legitimate steady-state (a demoted RG whose map is
-  0 has no failed clears). Verify it clears after a confirmed success.
-- **Risk:** none to the forwarding/HA path — Path C adds observability + docs only.
+- **Risk:** the startup seed must not cause a forwarding blip for a legitimate
+  still-owner — seed `applied` (not force-clear); the reconcile keeps a
+  `desired=true` RG active. Verify the boot re-arm-then-clear window is bounded by
+  the immediate reconcile pass.
+- **Risk:** the alarm/debt must clear on a CONFIRMED applied-inactive (helper
+  status), not a nil error, to avoid false clears; and must not fire on a
+  legitimate demoted RG at steady state.
 - **Rollback:** `git revert`; no schema/wire/ABI/Rust change.
 
 ## 9. Documentation updates
-Per §5.2 (issue body, demotion-branch comments, #5640 ack comments across
-sync.go/sync_failover.go/daemon.go/daemon_ha_sync.go, #5079 description, the
-map-as-Active-authority + ~11 s bound). HA design notes /
-`docs/fabric-cross-chassis-fwd.md` gain the lease fail-closed bound + fabric-ingress
-gate exception.
+Per §5.3 — the enumerated stale #5640 comments (incl.
+`docs/session-sync-architecture.md:1358`, `daemon_ha.go:168` "peer never
+promotes", sync-test rationale), the false `daemon_ha.go:605` startup-repair
+comment, the fabric/#485 stale comments, #5079 relabel, the map-as-authority +
+five clear sites, and the ~11 s IPC-application bound. HA design notes /
+`docs/fabric-cross-chassis-fwd.md` gain the lease bound + fabric-ingress exception.
 
 ## 10. Open questions (for reviewers)
-1. Is the persistence alarm worth the `show security alarms` + counter surface, or
-   is **doc-only** the right minimal outcome (i.e. pure PLAN-KILL of code)?
-2. Is the explicit security-risk acceptance of the bounded window acceptable, or
-   does the security label force the single-`Active`-authority redesign now
-   despite its blast radius?
-3. Confirm the four clear sites (367 / 583 / 846 / `fenceAllRedundancyGroups`) are
-   the complete set the counter should cover.
+1. Startup seam: seed `applied`-from-map (minimal, self-corrects via reconcile) vs
+   `manager_compile` boot-fail-closed (no re-arm from the pinned map). Which is
+   the cleaner, more hitless-restart-honest fix?
+2. Is Path D's scope (restart fix + detection + doc) the right #6371 boundary, or
+   should the persistent-map-write-failure + stuck-ownership unbounded modes be
+   their own tracked issue rather than "accepted + alarmed" here?
+3. Alarm surface: `show security alarms` + counter (own plumbing) vs metric-only.
 
 ## 11. Convergence / verdict ledger
 
@@ -236,9 +246,10 @@ gate exception.
 |-------|-------|------------|-----|----------|
 | r1 | PLAN-NEEDS-REVISION (6) | PLAN-NEEDS-REVISION (5) | infra-down | r1 |
 | r2 | PLAN-NEEDS-REVISION (BLOCKER+4) | PLAN-NEEDS-REVISION (5) | infra-down | r2 |
-| r3 | pending | pending | infra-down | r3 |
+| r3 | PLAN-NEEDS-REVISION (BLOCKER stale-restart+4) | PLAN-READY | infra-down | r3 |
+| r4 | pending | pending | infra-down | r4 |
 
 Convergence target (2-of-3, AGY infra-blocked): Codex + Claude SMR agree on
-PLAN-READY for Path C (minimal doc + hysteresis alarm, no HA-path code change,
-current ordering affirmed correct) — or PLAN-KILL-to-doc-only if the alarm is
-judged not worth the surface.
+PLAN-READY for Path D (startup ownership reconciliation closing the stale-active
+restart + shared-debt alarm + doc; PLAN-KILL Option D/A′/decouple; deferral of the
+full authority redesign with disclosure + tracked follow-up).
