@@ -16,8 +16,11 @@ at /engineer on the code PR, not here.
 | r4 | Claude SMR | PLAN-NEEDS-REVISION | claude-smr-plan-r4.md |
 | r5 | Codex (`codex exec`, medium) | PLAN-NEEDS-REVISION (linearization) | codex-plan-r5.md |
 | r5 | Claude SMR | PLAN-READY | claude-smr-plan-r5.md |
-| r6 | Codex (`codex exec`, medium) | pending | codex-plan-r6.md |
-| r6 | Claude SMR | pending | claude-smr-plan-r6.md |
+| r6 | Codex (`codex exec`, medium) | PLAN-NEEDS-REVISION (5 text-consistency, BLOCKER closed) | codex-plan-r6.md |
+| r6 | Claude SMR | PLAN-READY | claude-smr-plan-r6.md |
+| r7 | Codex (`codex exec`, medium) | pending | codex-plan-r7.md |
+| r7 | Claude SMR | PLAN-READY (author) | claude-smr-plan-r6.md |
+| r7 | AGY | infra-down | — |
 | r6 | AGY | infra-down | — |
 | r5 | AGY | infra-down | — |
 | r4 | AGY | infra-down | — |

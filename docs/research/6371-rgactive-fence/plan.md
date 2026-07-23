@@ -9,18 +9,20 @@
 - **Base:** origin/master @ `3ecdc80568a3`
 - **Prior art:** #5640, #5079, #485, #3917 (`fenceAllRedundancyGroups`), #1928
   (cluster-only HA replay), `fce172532` (removed the demote preflight).
-- **Revision:** r6 — after Codex r1-r5 (each BLOCKER/≥4 findings) + Claude
-  SMR r1-r5, all firsthand-verified. Codex r5 confirmed r4-B1/B2/B3/B4/H7 CLOSED;
-  r6 adds the remaining concurrency-linearization invariant + residual-honesty
-  fixes. AGY infra-down (2-of-3).
-- **Status:** DRAFT (r6). **Recommendation: PLAN-KILL Option D + Path A′ + the
+- **Revision:** r7 — after Codex r1-r6 + Claude SMR r1-r6, all firsthand-verified.
+  Codex r6 confirmed the concurrency BLOCKER CLOSED and §5.4 substantively correct;
+  r7 applies the five narrow plan-text-consistency fixes Codex r6 listed (no
+  architecture change). AGY infra-down (2-of-3).
+- **Status:** DRAFT (r7). **Recommendation: PLAN-KILL Option D + Path A′ + the
   decouple. SHIP Path D = (1) boot pin-quarantine (fail-closed) + (2) a
   generation-linearized, convergent, retryable clear with a shared per-RG
   unresolved-clear debt across all clear sites + (3) doc correction. Path D closes
   the reachable restart + peer-fence reactivation modes and detects-and-alarms
   (does not auto-fix) the extremely-rare persistent-map-write residual; PLAN-DEFER
-  the map-as-authority architectural cleanup as an accepted, detected-but-unfixed
-  residual, with a follow-up issue filed now + a named security/HA signer.**
+  the map-as-authority architectural cleanup as a **conditionally-accepted**,
+  detected-but-unfixed residual — acceptance is NOT yet granted: it is contingent
+  on filing the follow-up issue and recording a named security/HA signer at
+  /engineer time (this /research pass does not open issues).**
 
 ---
 
@@ -132,7 +134,7 @@ dataplane arming (or retain a gate that suppresses replay, poll, AND watchdog
 publication) until the quarantine is confirmed complete. A failure-injection test
 covers this.
 
-### 5.2 Convergent, retryable clear + shared unresolved-clear debt — closes peer-fence + persistent modes
+### 5.2 Convergent, retryable clear + shared unresolved-clear debt — closes the peer-fence one-shot (persistent map-write is detected-not-fixed, §5.4)
 Make every clear site record a **daemon-level** per-RG *desired-inactive intent
 with a clear generation* (NOT on `rgStateMachine`, since the peer-fence bypasses
 it). The reconcile loop is the single **retry consumer**: it drives
@@ -196,7 +198,7 @@ Path D **closes the two reachable unbounded reactivation modes** (stale-active
 restart → §5.1; failed peer-fence one-shot → §5.2, linearized). It **does NOT
 close** the **extremely-rare persistent map-write failure**: `UpdateRGActive`
 returns before mutating manager/helper state when the eBPF map write itself fails
-(`manager_ha.go:635`), so an indefinitely-failing pin write stays indefinitely
+(`manager_ha.go:638-640`), so an indefinitely-failing pin write stays indefinitely
 active — Path D's retry + alarm make it **detected-and-alarmed, but not
 terminated**. This is an **accepted, detected-but-unfixed residual**, disclosed
 here. "Stuck VRRP ownership" is a separate election/VRRP domain (not dual-active
@@ -205,11 +207,14 @@ unless split-brain; produces no clear debt).
 **PLAN-DEFER** the map-as-authority architectural cleanup (retire the eBPF map as
 the daemon's Active store; unify daemon-desired vs persisted-manager state) —
 which is what would actually *terminate* the persistent-map-write residual, not
-merely a cosmetic simplification. Its deferral therefore **requires**: (a) this
-explicit detected-but-unfixed disclosure, (b) a **concrete follow-up issue filed
-now** (title: "retire rg_active eBPF map as the daemon HA Active authority"),
-linked from #6371, and (c) a **named security/HA owner** recorded as the accepting
-signer at /engineer time. It cannot be presented as a non-hazard cleanup.
+merely a cosmetic simplification. **Acceptance of the residual is CONDITIONAL and
+not yet granted** (this /research pass opens no issues). The deferral becomes
+accepted only once, at /engineer time: (a) this explicit detected-but-unfixed
+disclosure is carried into the #6371 fix, (b) a **concrete follow-up issue is
+filed** (title: "retire rg_active eBPF map as the daemon HA Active authority"),
+linked from #6371, and (c) a **named security/HA owner** is recorded as the
+accepting signer. Until then the residual is disclosed-and-pending, not accepted;
+it cannot be presented as a non-hazard cleanup.
 
 **PLAN-KILL** Option D + Path A′ + the decouple; the per-call `UpdateRGActive`
 ordering is affirmed correct.
@@ -217,8 +222,10 @@ ordering is affirmed correct.
 ## 6. Detailed design (Path D)
 - **§5.1:** add a `QuarantineHAState()` on the userspace manager (zero all
   `rg_active`+`ha_watchdog` keys + empty `haGroups`) called from HA init before
-  replay; guard cluster-only; fail-closed if the map write errors (log + proceed
-  helper-unarmed).
+  replay; guard cluster-only; **fail-closed on any pin-write error** — do NOT
+  proceed to arm; retain a gate that suppresses replay, poll, AND watchdog
+  publication until the quarantine of all 16 keys is confirmed complete (a bare
+  "log + proceed" would let a surviving nonzero key re-arm, §5.1).
 - **§5.2:** a daemon-level per-RG `ownershipGen uint64` (monotonic, bumped on
   every ownership transition) + `clearIntent{gen; since}`; a single apply gate
   covers **every** true/false writer and drops a stale-generation write before the
@@ -278,7 +285,7 @@ Per §5.3.
 ## 10. Open questions (for reviewers)
 1. Ship plain fail-closed-on-boot (§5.1) now with peer-authoritative boot as a
    tracked enhancement, or design peer-authoritative boot into #6371 directly (to
-   avoid the up-to-30 s legitimate-owner gap)?
+   avoid the cold-boot ≥30 s never-seen-peer-floor gap for a would-be re-owner)?
 2. Convergence read-back: extend `HAController` with a snapshot API (chosen), or
    have the daemon read the pinned map directly (it already holds a shim handle)?
 3. Alarm `T` value + surface (`show security alarms` + counter vs metric-only).
@@ -292,7 +299,8 @@ Per §5.3.
 | r3 | PLAN-NEEDS-REVISION (BLOCKER stale-restart) | PLAN-READY | infra-down | r3 |
 | r4 | PLAN-NEEDS-REVISION (5 BLOCKER+2 HIGH, impl-completeness) | PLAN-NEEDS-REVISION (2) | infra-down | r4 |
 | r5 | PLAN-NEEDS-REVISION (linearization BLOCKER + residual-honesty) | PLAN-READY | infra-down | r5 |
-| r6 | pending | pending | infra-down | r6 |
+| r6 | PLAN-NEEDS-REVISION (5 narrow text-consistency, BLOCKER closed) | PLAN-READY | infra-down | r6 |
+| r7 | pending | pending | infra-down | r7 |
 
 Convergence target (2-of-3, AGY infra-blocked): Codex + Claude SMR agree on
 PLAN-READY for Path D (boot pin-quarantine + generation-linearized convergent-retry
