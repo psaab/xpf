@@ -358,12 +358,18 @@ security {
 // statement (`[ a b ] { c; host-inbound {...} }`) applies the override to a and b
 // — the names on the node the body was authored on — but NOT to c.
 //
-// c is a nested membership statement, not a bracket sibling of the authored
-// node, so it is in the same position as the `b` leaf in the flat-set shape:
-// authored separately, therefore not in scope. Deliberate, and asserted so it
-// stays a decision rather than an accident. c is still a zone MEMBER (it appears
-// in zone.Interfaces via zoneInterfaceMembers) — it simply falls back to the
-// zone-level host-inbound, which is the conservative direction.
+// The reason is stronger than a judgement call, and it is the same reason #6389
+// was unsound: c is a nested CHILD, not a bracket PEER, and its position in the
+// AST is INDISTINGUISHABLE from the flat-set membership tail that caused #6389
+// (`set ... interfaces [ a b ]` nests `b` as exactly this kind of child). So
+// applying the body to c would restore the forbidden children-fan — not merely
+// over-apply in one unusual spelling, but RE-OPEN THE ORIGINAL LEAK by another
+// route. Excluding c is therefore forced by the fix's own invariant rather than
+// chosen.
+//
+// c is still a zone MEMBER (it appears in zone.Interfaces via
+// zoneInterfaceMembers); it simply falls back to the zone-level host-inbound,
+// which is the conservative direction.
 func TestHostInbound6391BracketBodyNestedExtraMemberScope(t *testing.T) {
 	tree := parseHierarchical(t, `
 security {

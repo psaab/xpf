@@ -958,6 +958,7 @@ disproved by dumping both):
 | authored as | compiled AST | meaning |
 |---|---|---|
 | `interfaces { [ ge-0/0/0 ge-0/0/1 ] { host-inbound-traffic {...} } }` | ONE container `Keys=["ge-0/0/0","ge-0/0/1"]`, **no** membership child | multi-member intent → **both** members |
+| `interfaces { ge-0/0/0 ge-0/0/1 { host-inbound-traffic {...} } }` — the **bare** spelling | identical to the row above; the lexer discards `[` / `]` (#2419), so the brackets are **cosmetic at this position** | multi-member intent → **both** members |
 | `set ... interfaces [ ge-0/0/0 ge-0/0/1 ]`<br>`set ... interfaces ge-0/0/0 host-inbound-traffic system-services ssh` | container `Keys=["ge-0/0/0"]` with membership **child leaf** `Keys=["ge-0/0/1"]` | ssh scoped to `ge-0/0/0` **only** |
 
 `SetPath` descends the wildcard for the FIRST bracket token and nests the tail
@@ -1003,10 +1004,13 @@ Scope rules that follow:
   applied it to the first member only — see the operator note in
   `docs/host-inbound-service-matrix.md`.
 - **A nested extra membership is out of scope.**
-  `[ a b ] { c; host-inbound {...} }` fans to `a` and `b` but NOT `c`: `c` is a
-  nested membership statement, not a bracket sibling of the authored node, so it
-  is in the same position as the flat-set `b` leaf. `c` remains a zone MEMBER and
-  falls back to the zone-level host-inbound.
+  `[ a b ] { c; host-inbound {...} }` fans to `a` and `b` but NOT `c`. This is
+  forced by the fix's own invariant rather than chosen: `c` is a nested CHILD,
+  not a bracket PEER, and its AST position is indistinguishable from the flat-set
+  membership tail that caused #6389 (`set ... interfaces [ a b ]` nests `b` as
+  exactly this kind of child). Applying the body to `c` would restore the
+  forbidden children-fan and re-open the original leak by another route. `c`
+  remains a zone MEMBER and falls back to the zone-level host-inbound.
 - **Members do not share a backing store.** `mergeHostInbound` returns `src`
   unchanged when `dst` is nil, so the fan clones per key (`cloneHostInbound`).
   Without that, a later single-scoped override merged into one member would
