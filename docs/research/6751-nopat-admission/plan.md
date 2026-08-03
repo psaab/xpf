@@ -1,15 +1,18 @@
 # #6751 plan — interface SNAT no-PAT admission: reserve-or-PAT the colliding translated tuple
 
-- **Status**: DRAFT v15.8 — round-21 fold (Codex r21 blocker 1 + nit 1:
-  clause (2b) is now STAMP-AND-ENQUEUE — the atomic admission unit is
-  bounded to stamping the slot with the current abort generation and
-  enqueueing generation-bound setup intents (the tail — clock I/O, 10k
-  journal replay, doBulkSync with 2s-per-frame write deadlines — can
-  never run inside the arbiter: it is unbounded in cardinality, a
-  documented self-deadlock under s.mu (sync_conn.go:588), and there is
-  no global serialized receiver loop to run it on); each intent
-  revalidates its bound generation/slot at its own effect-commit and a
-  stale intent is cancelled; §11's stale fabric-gate text corrected)
+- **Status**: DRAFT v15.9 — round-22 fold (Codex r22 blocker 1 + minor 2
+  + nit 3: the effect-authorization contract replaces "treat completion
+  as stale" with a reversibility classification — session frames stop
+  via the pre-write generation check and already-written frames are
+  ACCEPTED as individually-valid provisional installs with partial bulks
+  never ACKed/reconciled/hold-released and bounded by the receive
+  deadline; callbacks revalidate before triggering and their work reads
+  CURRENT state at execution (convergent, never verdict-time snapshots);
+  journal replay needs no abort-generation coupling because the per-key
+  #2170 install generation already orders session state; §9 gains the
+  blocked-I/O, large-bulk, abort-mid-BulkSync, BulkEnd-race, and
+  callback/journal generation-race tests; §11's false-positive claim now
+  includes non-fabric identity-NPTv6)
 - **Issue**: #6751 (opus-review-001 R08, High, `bug`+`audit`+`security`) —
   interface SNAT admits indistinguishable no-PAT return tuples and sends
   replies to the FIRST session.
@@ -738,20 +741,72 @@ record's identity frees only when `per_worker` is empty AND
       each connection launches its own receiveLoop, sync_conn.go:132,
       sync_conn_read.go:14, sync_conn_gen.go:381). The intents execute
       OUTSIDE the arbiter on the normal async paths, and each intent
-      REVALIDATES its bound generation and slot at its own
-      effect-commit point (the same commit-time guard as clause (4) —
-      the machinery already exists): a stale intent (generation
-      advanced, slot detached, or fence set) is cancelled and its
-      completion treated as stale, so an abort landing between verdict
-      and tail can never let a stale tail take effect. To keep the
-      arbiter starve-free, network I/O and callback execution inside
-      every intent happen on background goroutines
+      is GENERATION-BOUND (stamped with the admission generation and
+      its slot) and revalidates that binding at its own effect point:
+      a stale intent (generation advanced, slot detached, or fence
+      set) is CANCELLED before producing effects. Cancellation is only
+      half the contract — the effects themselves are classified by
+      their reversibility (Codex r22 blocker 1: a generation check
+      before a write cannot undo a frame already accepted by TCP, and
+      "treating completion as stale" cannot reverse externally visible
+      work; and there are two concurrent fabric receive loops, not one
+      global serialized commit loop, sync_conn_gen.go:64):
+      (i) **Session frames / bulk writes** (`BulkSync` writes
+      BulkStart, every V4/V6 session, BulkEnd —
+      sync_bulk.go:81/95/133/169, each with its own 2s deadline,
+      sync_protocol.go:59): the pre-write generation check STOPS
+      further frames after an abort (that part is effective), and
+      frames already written are ACCEPTED as individually-valid
+      PROVISIONAL installs — each is a session that existed in the
+      sender's authoritative snapshot at send time, and the peer
+      installs session frames immediately (sync_conn_read.go:109).
+      A partial bulk is NEVER ACKed and NEVER reconciled and NEVER
+      releases the sync hold (BulkEnd missing → no ACK,
+      sync_conn_read.go:205) — its provisional installs stand until
+      the NEXT COMPLETE authoritative bulk's reconcile converges them
+      (the reconcile is what deletes stale rows; a partial bulk never
+      triggers it). Every incomplete bulk's lifetime is bounded by
+      the per-bulk RECEIVE DEADLINE (the required new behavior from
+      the epoch-death rules), at which the incomplete bulk aborts
+      without ACK and its pinned quarantine entries drop fail-closed.
+      This is the named partial-bulk disposition: provisional, never
+      ACKed, never hold-released, deadline-bounded, converged by the
+      next authoritative reconcile.
+      (ii) **Callbacks** (`OnPeerConnected` — carries no generation
+      today, sync.go:419, and fires externally visible work,
+      daemon_ha_sync.go:934): the intent binds the admission
+      generation and revalidates BEFORE TRIGGERING (a stale callback
+      intent is cancelled with no externally visible work); work
+      already triggered is CONVERGENT, not reversed — the callback's
+      work (config reconciliation, DHCP/IPsec re-advertisement) reads
+      CURRENT config/state at execution time, never a verdict-time
+      snapshot, so a completed-but-stale callback installs current
+      state, which is by definition not stale.
+      (iii) **Journal replay** (messages move into a generation-blind
+      queue whose sender later picks whatever connection is active,
+      sync_conn_write.go:135/268): NO abort-generation coupling is
+      needed — each replayed message already carries its own
+      per-(sender,key) monotonic install generation (#2170), so a
+      replay that travels post-abort is either a still-current per-key
+      state (a valid install — the session exists on the sender) or an
+      older per-key generation for a key with newer state (rejected by
+      the receiver's EXISTING #2170 strict-older-generation rule).
+      Session state is ordered by the per-key generation independent
+      of the abort generation.
+      (iv) **Clock writes** (`sendClockSync`): idempotent clock
+      exchange — a stale clock sync is harmless and self-corrects on
+      the next tick.
+      To keep the arbiter starve-free, network I/O and callback
+      execution inside every intent happen on background goroutines
       (`go s.OnPeerConnected()`, `go s.doBulkSync()` — spawned by
       `handleNewConnection`'s intent wrappers, AGY r22 nit 1) — only slot
       stamping, intent enqueuing, and goroutine spawning happen inside
-      the atomic unit (AGY r21 nit 2). §9 pins a blocked-I/O test and a
-      large-bulk (10k-journal-entry) test proving AbortFenceTimeout and
-      the atomic unit stay bounded under both.
+      the atomic unit (AGY r21 nit 2). §9 pins a blocked-I/O test, a
+      large-bulk (10k-journal-entry) test, an abort-mid-BulkSync test
+      (partial bulk: no ACK, no reconcile, provisional installs converge
+      at the next complete bulk), a BulkEnd-race test, and
+      callback/journal generation-race tests proving AbortFenceTimeout
+      and the atomic unit stay bounded under all of them.
       (5) **Reset-once ownership + deterministic detach**: when both
       slots confirm detached (or the named AbortFenceTimeout fires — a
       wedged handler's frames are commit-discarded per (4), so the
@@ -792,6 +847,12 @@ record's identity frees only when `per_worker` is empty AND
       (2); pending-frame-before-install discarded at (3); a stalled
       handler's post-reset frame discarded at (4); wedged-handler
       AbortFenceTimeout reset at (5); nested abort re-arm at (5);
+      blocked-I/O boundedness at (2b); large-bulk (10k-entry)
+      boundedness at (2b); abort-mid-BulkSync partial-bulk disposition
+      (no ACK, no reconcile, provisional installs converge at the next
+      complete bulk) at (2b/i); a BulkEnd race at (2b/i); callback
+      generation-race cancellation at (2b/ii); journal generation-race
+      (per-key #2170 ordering, not abort-generation) at (2b/iii);
       AbortFenceTimeout completing with a STILL-REGISTERED slot —
       the slot is generation-invalidated and logically detached anyway,
       so the next admission sees the both-nil registry and arms
@@ -1445,7 +1506,7 @@ quarantine-admitted + overflow), and tests.
    cluster codec carries no disposition field, so non-fabric
    identity-NPTv6 rows also quarantine — Codex r14 blocker 1's priced
    consequence) false-positives on NOTHING except genuine self-NAT rows
-   in the legacy window, and those
+   AND non-fabric identity-NPTv6 rows in the legacy window, and those
    are ADMITTED after the quarantine timeout (a delay, not a drop); and
    the base-lifecycle delete suppression is strictly safer-or-equal to
    today in every matrix cell (today the alias upsert clobbers a
