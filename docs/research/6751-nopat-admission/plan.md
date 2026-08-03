@@ -1,17 +1,20 @@
 # #6751 plan — interface SNAT no-PAT admission: reserve-or-PAT the colliding translated tuple
 
-- **Status**: DRAFT v15.12 — round-25 fold (AGY r25 blocker 1 + minor 2
-  + nit 3: the generation-CAS now has TWO disciplines making it truly
-  linearizable — (i) STRICT MONOTONIC GENERATION ADVANCE ACROSS
-  ADMISSIONS, so every lifecycle event (abort, admission, disconnect)
-  draws a FRESH generation and no connect callback ever shares a
-  generation number with a prior disconnect callback (closing the
-  equal-generation overwrite where a stale disconnect flips a live
-  connect's state back to false); and (ii) STRICT-INEQUALITY CAS for
-  value-flipping mutations, so even an equal-generation stale write can
-  never flip active state; the inventory now includes
-  outboundBulkAcked/inboundBulkAcked (sync.go:479); and §5.8 names the
-  full 4+3 counter taxonomy)
+- **Status**: DRAFT v15.13 — round-25 fold (Codex r25 blockers 1-2 +
+  minor 3: lifecycle events now carry STRICTLY ORDERED TAGS
+  (abortGeneration, lifecycleSequence) assigned at the transition's
+  commit point — never inside the callback, so no callback can forge
+  ahead — with a strict-inequality tag CAS for value-flipping mutations
+  and ALL safety-critical effects (timer stop, VRRP sync-hold release,
+  sync-ready marking) executing INSIDE the committed lifecycle event so
+  a failed/stale event admission suppresses every associated effect
+  atomically; and the send guard is now epoch-ENVELOPE stamping at
+  ENQUEUE (a delta queued before an abort can never travel on a
+  replacement connection regardless of when it is dequeued — the
+  queued-behind-A case dies by construction) with the compared epoch
+  advancing ONLY on transitions that schedule an authoritative prime
+  (routine no-prime flips keep sending deltas — the delta stream itself
+  is the authority there))
 - **Issue**: #6751 (opus-review-001 R08, High, `bug`+`audit`+`security`) —
   interface SNAT admits indistinguishable no-PAT return tuples and sends
   replies to the FIRST session.
@@ -817,19 +820,46 @@ record's identity frees only when `per_worker` is empty AND
       C1's delayed disconnect callback still passes `g >= g` and
       overwrites the live state with `(g, false)` — an equal-generation
       stale write flipping active state):
-      (i) **STRICT MONOTONIC GENERATION ADVANCE ACROSS ADMISSIONS** —
-      every lifecycle event (abort, ADMISSION, disconnect) draws a
-      FRESH generation from the counter; a new slot's admission NEVER
-      reuses the current value, so no connect callback ever shares a
-      generation number with a prior disconnect callback
-      (g_connect > g_disconnect always); and
-      (ii) **STRICT-INEQUALITY CAS FOR VALUE-FLIPPING MUTATIONS** —
-      for fields whose semantics are connected-state flips
-      (`syncPeerConnected`, priming flags), a mutation commits only if
-      its event generation is STRICTLY GREATER than the currently
-      stored generation (`g_event > g_stored`), so even an
-      equal-generation stale write can never flip active state
-      (defense-in-depth behind (i)). Value-nonmonotonic transitions
+      (i) **STRICTLY ORDERED EVENT TAGS `(abortGeneration,
+      lifecycleSequence)` assigned AT THE TRANSITION'S COMMIT POINT**
+      (Codex r25 blocker 1 — discipline (i)'s fresh-generation draw is
+      NOT sufficient on its own: the abort advances to G and its
+      disconnect binds G; the replacement's ADMISSION then draws G+1 —
+      but if the admission's draw happens BEFORE the disconnect event
+      is admitted, the disconnect's tag and the connect's tag can
+      still interleave incorrectly; and incrementing a generation
+      INSIDE the callback is no solution either — a delayed callback
+      could "forge ahead" by obtaining a newer generation at execution
+      time). Every lifecycle event is therefore tagged with a TUPLE:
+      the abort generation of its lineage plus a per-generation
+      lifecycle SEQUENCE number assigned atomically when the EVENT is
+      admitted onto the lifecycle queue (never when the callback later
+      executes) — so tags strictly order every event (abort, admission,
+      disconnect, bulk-received, bulk-ack-received) by construction,
+      and non-monotonic values (true → false → true) remain free
+      because the tags, not the values, advance. The lifecycle queue's
+      admission point is the single place tags are minted, so no
+      callback can forge ahead; and
+      (ii) **STRICT-INEQUALITY TAG CAS FOR VALUE-FLIPPING MUTATIONS
+      WITH EFFECTS INSIDE THE COMMIT UNIT** — for fields whose
+      semantics are connected-state flips (`syncPeerConnected`,
+      priming flags, and the bulk-ack flags
+      `outboundBulkAcked`/`inboundBulkAcked`, sync.go:479), a mutation
+      commits only if its event tag is STRICTLY GREATER than the
+      currently stored tag for that field, so even an equal-tag stale
+      write can never flip active state. And because a per-field flag
+      CAS cannot protect the callbacks' EXTERNAL EFFECTS (Codex r25
+      blocker 1's second half: a stale bulk-received callback can race
+      after a newer lifecycle transition and still stop the readiness
+      timer, release the VRRP sync hold, and mark sync ready,
+      daemon_ha_sync.go:90), a FAILED/STALE event admission SUPPRESSES
+      ALL ASSOCIATED EFFECTS ATOMICALLY: the safety-critical effects
+      (timer stop, VRRP sync-hold release, sync-ready marking) execute
+      only INSIDE the committed lifecycle event — the same commit unit
+      that writes the flag performs the hold release, so a newer
+      transition can never interleave between the flag write and the
+      release, and a stale event never produces any effect at all.
+      Value-nonmonotonic transitions
       (true → false → true) remain free — the CAS orders by
       generation, not value.
       Every lifecycle state field in the inventory — `syncPeerConnected`,
@@ -882,24 +912,47 @@ record's identity frees only when `per_worker` is empty AND
       install can RESURRECT the closed session — the exact reorder
       #2221's tombstone exists to prevent (sync_gen_guard_test.go:830).
       The disposition is therefore three-layered:
-      (a) **epoch-bound SEND guard at the dequeue/send effect point —
-      for EVERY outbound delta, not just journal envelopes** (Codex r24
-      blocker 2: `QueueDeleteV4/V6` journals only when `queueMessage`
-      FAILS; successful deltas enter `sendCh` DIRECTLY as raw
-      `[]byte` (sync_conn_write.go:36/77), and `sendLoop` can dequeue
-      one, wait indefinitely for any active connection, and later send
-      it over a REPLACEMENT connection (sync_conn_write.go:135/268) —
-      so an envelope guard at the journal queue alone cannot stop a
-      pre-abort zero-generation delete from traveling on the
-      replacement connection, and the "never travels" claim was false).
-      Every outbound session delta (upsert or delete, journal replay,
-      direct sendCh entry, or an already-dequeued retry) is
-      EPOCH-BOUND at dequeue time with the sender's current connection
-      epoch, and the sendLoop DISCARDS any delta whose bound epoch is
-      older than the epoch of the connection it would send on — the
-      delta's content predates the reset, and the new epoch's
-      cold-prime bulk is the authoritative backstop that re-conveys
-      every still-valid session, so discarding is safe and complete.
+      (a) **epoch-ENVELOPE SEND guard — content-origin stamping at
+      ENQUEUE, with the epoch advancing only where an authoritative
+      prime is scheduled** (Codex r25 blocker 2: binding at DEQUEUE is
+      too late — deltas A and B enter `sendCh` under epoch N; A is
+      dequeued and waits while the connection aborts; epoch N+1
+      connects and A is correctly discarded; but B is only NOW
+      dequeued, so a dequeue-time guard binds it to N+1 EVEN THOUGH
+      ITS CONTENT PREDATES THE ABORT — and a generation-zero B travels
+      on the replacement connection and unconditionally deletes newer
+      state. And the claimed cold-prime backstop is NOT universal:
+      cold-prime arms only on a both-slots-empty transition
+      (sync_conn.go:235/278), while routine single-fabric flips
+      explicitly do NOT re-bulk (sync_conn.go:178/208), so advancing
+      the compared epoch on such a flip would discard valid deltas
+      with NO authoritative replay; and even where cold-prime occurs,
+      `flushDeleteJournal` merely enqueues (sync_conn_write.go:135)
+      while bulk sessions write directly under per-frame `writeMu`
+      (sync_bulk.go:95), so the bulk is not necessarily ordered after
+      the queued deltas). The rule is therefore two-part:
+      (a1) **every `sendCh` entry carries an epoch ENVELOPE from
+      ENQUEUE** — the delta (upsert or delete, journal replay, or
+      direct raw-byte entry) is stamped with the connection epoch
+      current at its enqueue, and the sendLoop discards any envelope
+      whose epoch is older than the connection it would send on, so a
+      delta queued BEFORE an abort can never travel on a replacement
+      connection regardless of when it is dequeued (the
+      queued-behind-A case dies by construction); and
+      (a2) **the compared epoch advances ONLY on transitions that
+      schedule an authoritative prime** — an abort/teardown always
+      primes (the fenced recovery drives cold-prime), while a routine
+      no-prime single-fabric flip does NOT advance the guard's epoch,
+      so valid deltas keep traveling on flips where the delta stream
+      itself is the authority and nothing else will re-convey them;
+      whenever the epoch does advance and deltas are discarded, the
+      scheduled prime is the guaranteed backstop that re-conveys every
+      still-valid session (and the prime's session frames are
+      enqueued through the same envelope path so they order correctly
+      after any still-queued newer deltas — the journal-flush path
+      (sync_conn_write.go:135) and the bulk write path (sync_bulk.go:95)
+      share the envelope discipline, so a prime cannot overtake a
+      newer queued delta).
       The journal envelope guard from the earlier layer is subsumed by
       this rule (the binding point moved from enqueue to the send
       effect, covering all four flow shapes uniformly).
