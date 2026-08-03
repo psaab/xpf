@@ -1,10 +1,14 @@
 # #6751 plan — interface SNAT no-PAT admission: reserve-or-PAT the colliding translated tuple
 
-- **Status**: DRAFT v15.1 — round-15 fold so far (AGY r15 blocker 1:
-  bulk bookkeeping is NOT gated by the quarantine — quarantined keys are
-  still recorded as received so BulkEnd reconcile never deletes genuine
-  rows as stale; timeout admission's bookkeeping touch is guarded on a
-  bulk being open, no nil-map write)
+- **Status**: DRAFT v15.2 — round-15 fold (Codex r15 blocker 1 + minor 2
+  + nit 3: quarantine entries are pinned to their arrival bulk epoch and
+  RESOLVE AT THEIR OWN BulkEnd (definitive sibling-base check against
+  the complete snapshot; nothing defers cross-epoch; the bulk is ACKed
+  only after its quarantines resolve); all quarantine actions run on the
+  receiver's serialized event loop (timer enqueues only); capability is
+  derive-until-capable with per-tick re-advertisement (a lost frame
+  self-heals; mid-stream transition is covered by the receiver
+  quarantine); six counters)
 - **Issue**: #6751 (opus-review-001 R08, High, `bug`+`audit`+`security`) —
   interface SNAT admits indistinguishable no-PAT return tuples and sends
   replies to the FIRST session.
@@ -555,18 +559,22 @@ record's identity frees only when `per_worker` is empty AND
     (AGY r14 minor 1: `performSyncHandshake`, sync_auth.go:331-334, is
     bypassed when no auth key is configured — `handleNewConnection`,
     sync_conn.go:100-137, opens the stream with no setup handshake —
-    so the capability rides an additive post-connect
+    so the capability rides an additive
     `syncMsgCapability` frame (or a `syncMsgClockSync` extension,
-    sync_conn.go:137) sent BEFORE any session data on every connection,
-    authenticated or not (Codex r14 major 3: extending
-    `syncMsgAuthHello` would leave unauthenticated clusters
-    unnegotiated, sync_auth.go:321). Alias emission is HELD until the
-    peer's capability state is known (the frame can race initial session
-    traffic otherwise); the fail-safe default is capability UNKNOWN →
-    KEEP DERIVING (legacy behavior — a lost capability frame degrades
-    to today, never to dropped sync); on reconnect the capability is
-    re-exchanged and the state resets to UNKNOWN first (fail-safe
-    reset lifecycle). A sender that honors the
+    sync_conn.go:137) — and is RE-ADVERTISED on every clock-sync tick,
+    so a lost frame self-heals within one tick (Codex r15 minor 2: a
+    one-shot frame has no defined UNKNOWN → unsupported transition;
+    periodic re-advertisement gives every connection a bounded path to
+    capability discovery with no handshake dependency — the
+    unauthenticated-cluster case is covered, sync_auth.go:321 bypass).
+    The sender's rule is DERIVE-UNTIL-CAPABLE: peers start UNKNOWN and
+    the sender keeps deriving (today's exact behavior) until a
+    capability frame arrives, then omits from that point on. No
+    emission hold is needed: a mid-stream transition only means some
+    early aliases flowed, and those are exactly what the receiver-side
+    quarantine (below) exists to confirm and drop — the transition is
+    safe by construction, and a permanently lost capability simply
+    stays legacy (never drops sync). A sender that has learned the
     capability SKIPS the alias derivation entirely (the
     `delta.FabricRedirect && !delta.FabricIngress` alias queue branch,
     daemon_ha_userspace_stream.go:370/379) — zero alias upserts, zero
@@ -607,8 +615,32 @@ record's identity frees only when `per_worker` is empty AND
       NON-fabric identity-NPTv6 canonical rows also quarantine and
       timeout-admit — a bounded 5s sync delay for a corner-of-corner,
       not a drop).
-    - **Quarantine**: a bounded per-peer map (4096 entries, 5s) holding
-      signature-matching upserts. **Bulk bookkeeping is NOT gated**
+    - **Quarantine**: a bounded per-peer map (4096 entries) holding
+      signature-matching upserts, PINNED TO ITS ARRIVAL BULK EPOCH
+      (Codex r15 blocker 1 — deferred cross-epoch admission is unsafe:
+      a frame quarantined in bulk E1 and admitted at wall-clock timeout
+      would (a) race E1's BulkEnd reconcile, which deletes sessions
+      absent from E1's received set — see the bookkeeping rule below —
+      while the receiver ACKs the bulk and releases the sync-hold with
+      the row still missing (sync_conn_read.go:240/244), and (b) be
+      counted as part of a LATER bulk E2 if E2 starts first, falsely
+      retaining a stale row whose delete was lost. Resolution is
+      therefore EPOCH-DEFINITIVE: all quarantine actions run as events
+      on the receiver's SERIALIZED event loop (a timer only enqueues a
+      wakeup — the import path's generation-check/install/record
+      sequence is safe only single-threaded, sync_conn_gen.go:381),
+      and every quarantined entry RESOLVES AT ITS OWN BULK'S BulkEnd:
+      at BulkEnd the complete snapshot is present, so the sibling-base
+      check is definitive for that epoch — still-matching entries whose
+      sibling base is in the received set CONFIRM-alias and drop;
+      everything else is ADMITTED through the complete normal import
+      path in the same serialized pass, BEFORE the bulk is ACKed and
+      the sync-hold released. Entries received OUTSIDE any bulk
+      (incremental deltas) resolve on a 5s fallback timer instead —
+      incremental frames carry no reconcile semantics, so the same
+      confirm-vs-admit rule applies with the CURRENT store as the
+      definitive state. No frame ever defers past its own bulk epoch).
+      **Bulk bookkeeping is NOT gated**
       (AGY r15 blocker 1: a quarantined key is STILL RECORDED in
       `s.bulkRecvV4/V6` at decode time — it was genuinely received in
       the bulk — because `reconcileStaleSessions` /
@@ -616,7 +648,7 @@ record's identity frees only when `per_worker` is empty AND
       session whose key is absent from the received set as stale and
       DELETES it at BulkEnd; gating the bookkeeping would delete every
       genuine self-NAT / identity-NPTv6 session ~50 ms after the bulk
-      completes, before its 5s timeout admission could ever run. The
+      completes, before any resolution could run. The
       quarantine gates ONLY the import (install / publish / reserve /
       companion synthesis), never the "was received" record).
       Confirmation is ORDER-AGNOSTIC (Codex
@@ -907,7 +939,8 @@ validator extension (dedup-by-address), the snapshot-builder overlap
 marking (source pools + NAT64 empty-pool + the §5.7 derivation matrix),
 the receiver-side signature-drop rule + delete-suppression set
 (§5.6), the four helper-side status-counter mirrors + Describe
-registration, the Go-side alias-ignored counter, and tests.
+registration, the TWO Go-side counters (confirmed-dropped +
+quarantine-admitted), and tests.
 
 ## 7. Hidden invariants the change must preserve
 
@@ -1067,9 +1100,20 @@ registration, the Go-side alias-ignored counter, and tests.
   AFTER the base's delete is consumed (the alias's own delete — the
   exporter queues base-delete before alias-delete on close,
   daemon_ha_userspace_stream.go:398/403) or on a short bound;
-  timeout → ADMITTED through the complete normal import path
-  (generation checks, timestamp rebasing, bulk bookkeeping, coordinator
-  reserve, helper dispatch — sync_conn_read.go:110 → sync_conn_gen.go:435)
+  every quarantined entry RESOLVES AT ITS OWN BULK'S BulkEnd (Codex r15
+  blocker 1 — no cross-epoch deferral: at BulkEnd the complete snapshot
+  makes the sibling-base check definitive — still-matching entries with
+  a sibling in the received set CONFIRM-alias and drop; everything else
+  is ADMITTED through the complete normal import path — generation
+  checks, timestamp rebasing, bulk bookkeeping, coordinator reserve,
+  helper dispatch — in the same serialized pass BEFORE the bulk ACK and
+  sync-hold release (sync_conn_read.go:240/244), so the receiver never
+  ACKs while a genuine row is unresolved; incremental-delta entries
+  (outside any bulk) resolve on a 5s fallback timer with the CURRENT
+  store as definitive; ALL quarantine actions run as events on the
+  receiver's SERIALIZED event loop — a timer only enqueues a wakeup,
+  since the generation-check/install/record sequence is safe only
+  single-threaded, sync_conn_gen.go:381)
   for the genuine self-NAT, identity-NPTv6 (no alias is ever derived
   for it, daemon_ha_userspace_convert.go:511), and lost-base cases;
   a genuine direct row sharing the key whose delete arrives while
@@ -1132,7 +1176,7 @@ registration, the Go-side alias-ignored counter, and tests.
   two-legacy-flows-one-identity import case (first reserves, second drops,
   failover kills only the second); helper-restart rehydration via HA
   re-sync pre-reserve.
-- Counters: the five §5.8 counters bump exactly on their events;
+- Counters: the six §5.8 counters (four helper-side + two Go-side) bump exactly on their events;
   `NAT_REVERSE_KEY_SHARED_DISPLACEMENTS` stays flat for the interface
   class.
 - Docs sweep: docs/userspace-dataplane-architecture.md,
