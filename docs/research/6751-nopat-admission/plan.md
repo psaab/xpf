@@ -870,6 +870,10 @@ record's identity frees only when `per_worker` is empty AND
       :90, `onSessionSyncBulkAckReceived` :103 — the complete set,
       AGY r24 nit 3), AND the bulk-ack lifecycle flags
       `outboundBulkAcked` / `inboundBulkAcked` (sync.go:479 — AGY r25
+      minor 2). (Cited line numbers throughout this plan are
+      ILLUSTRATIVE snapshot points at the base commit — function/symbol
+      names are the primary identifiers and drift slower than line
+      numbers, AGY r26 nit 1.)
       minor 2) — is stored as a (generation, value) pair
       committed by the CAS under rules (i)-(ii), so a stale
       connect-callback's `true` cannot overwrite a newer disconnect's
@@ -1706,6 +1710,9 @@ quarantine-admitted + overflow), and tests.
   failover kills only the second); helper-restart rehydration via HA
   re-sync pre-reserve.
 - Counters: the seven §5.8 counters (four helper-side + three Go-side) bump exactly on their events;
+  a unit test asserts `prometheus.MustRegister` coverage for all seven
+  counter descriptors (no registration panic, no silent omission — AGY
+  r26 nit 2);
   `NAT_REVERSE_KEY_SHARED_DISPLACEMENTS` stays flat for the interface
   class.
 - Docs sweep: docs/userspace-dataplane-architecture.md,
