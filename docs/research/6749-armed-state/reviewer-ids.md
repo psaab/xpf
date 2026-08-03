@@ -177,7 +177,25 @@
   PLAN-READY-WITH-NITS (N1 exact empty-guard discriminator; N2 MAC
   debt member-removal cancellation; N3 plan-scoped convergence note).
 
-## Round 8 (plan v8.2 @ pending)
+## Round 8 (plan v8.2 @ f84e0827a)
+
+- **Codex r8** — background bash task `bt8sgfmyh`; output
+  `/tmp/codex-6749-r8.out`; verdict doc `codex-plan-r8.md`. Verdict:
+  DEMAND-REVISION (3 BLOCKER — MAC contract not restart-safe or
+  positively provenance-gated, applySem missing; update_fabrics
+  unknown-outcome handling + understated budget; rollover belongs
+  at acceptance + operator arm must clear the helper latch; + 3
+  MAJOR — mixed-version Q1 producer, reset clock, tests/split-gate).
+- **AGY r8** — background bash task `b0toie254` (prompt trimmed to
+  122,201 bytes after two E2BIG failures at ~132-144KB:
+  `byq130nbg` at 144,022 and `bubm0r8yi` at 132,025; the working
+  ceiling is ~127KB); output `/tmp/agy-6749-r8c.out`; verdict doc
+  `agy-plan-r8.md`. Verdict: PLAN-READY (clean pass, zero findings).
+- **Claude SMR r8** — `claude-smr-plan-r8.md`. Verdict:
+  PLAN-READY-WITH-NITS (N1 rollover ordering, N2 mixed-update
+  whole-defer, N3 claimed-slot rebind assurance).
+
+## Round 9 (plan v8.3 @ pending)
 
 - Codex — pending dispatch.
 - AGY — pending dispatch.
