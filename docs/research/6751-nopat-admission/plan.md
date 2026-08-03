@@ -1,14 +1,16 @@
 # #6751 plan — interface SNAT no-PAT admission: reserve-or-PAT the colliding translated tuple
 
-- **Status**: DRAFT v15.5 — round-18 fold (Codex r18 blocker 1 + minors
-  2-3: the abort is now an ATOMIC, GENERATION-FENCED cluster-level
-  teardown — an abort-generation counter fences the connection registry
-  so no reconnect can install between the two old disconnect callbacks
-  (sync_conn.go:244/278), the fence (not Close) invalidates stale
-  handlers, state resets exactly once inside the transition, and the
-  peer converges via refused reconnects onto the cold-prime edge;
-  capability transport is the dedicated periodic ticker alone; the
-  abort cycle's full lifecycle-callback churn is priced)
+- **Status**: DRAFT v15.6 — round-19 fold (Codex r19 blocker 1 + minor 2
+  + nit 3: the generation-fenced abort transition is now NORMATIVE in
+  §5.6 with six contract clauses — atomic abort-generation fence state,
+  installConn ADMITTED/REFUSED verdicts with refused connections closed
+  without any pending-frame/loop/callback/cold-prime work,
+  install-before-dispatch for the pending first frame, COMMIT-TIME
+  generation validation at every stateful frame application (closing
+  the pass-check-then-stall race), reset-once ownership with nested-
+  abort re-arm semantics, and receiver-local peer convergence; the
+  capability transport is the dedicated ticker alone; §5.8 names the
+  overflow counter explicitly)
 - **Issue**: #6751 (opus-review-001 R08, High, `bug`+`audit`+`security`) —
   interface SNAT admits indistinguishable no-PAT return tuples and sends
   replies to the FIRST session.
@@ -653,31 +655,91 @@ record's identity frees only when `per_worker` is empty AND
       sessions per bulk; larger deployments raise it up front), and the
       overflow counter + backoff are the visible escape hatch for the
       undersized case, not the steady-state plan.
-      **The abort recovery contract is CLUSTER-LEVEL TEARDOWN** (Codex
-      r17 blocker 1: no retry mechanism exists today — `BulkSync()` is
-      write-only, recording the pending ACK and writing BulkEnd WITHOUT
-      waiting (sync_bulk.go:169/183/195), connection setup clears
-      needColdPrime before any ACK (sync_conn.go:194), a missing ACK
-      merely stays in pendingBulkAckEpoch with no ACK-timeout retry
-      (sync_conn_read.go:257), and the survivor re-drive's
-      `outboundBulkAcked` flag is intentionally sticky and never reset
-      after the first acknowledged bulk (sync.go:479), so "let the
-      sender's bulk machinery retry" was false on both counts). On any
-      abort (overflow, deadline, teardown) the receiver CLOSES BOTH
-      connections: the existing full-disconnect cleanup fires on both
-      nodes (all fabrics down → state reset → reconnect → cold
-      re-prime → a FRESH bulk with a fresh epoch), a reconnect backoff
-      rate-limits the cycle, and inbound frames from the aborted epoch
-      are discarded by the TCP teardown itself (the alternative —
-      discard-until-end on a live stream — is rejected: session
-      handlers use `bulkInProgress` only for bookkeeping and install
-      trailing frames normally, sync_conn_read.go:109, so only a
-      teardown stops them cleanly). This also covers the fourth
-      epoch-death shape Codex named (single active-fabric reset after a
-      prior successful bulk while the other fabric survives — the abort
-      converts it to the full-disconnect path that already exists and
-      works). Entries pinned to an aborted epoch are dropped fail-closed
-      with the connection state (see the epoch-death rule below)
+      **The abort recovery contract is a GENERATION-FENCED, ATOMIC
+      CLUSTER-LEVEL TEARDOWN with commit-time generation validation**
+      (Codex r17 blocker 1: no retry mechanism exists today —
+      `BulkSync()` is write-only (sync_bulk.go:169/183/195), connection
+      setup clears needColdPrime before any ACK (sync_conn.go:194), a
+      missing ACK merely stays in pendingBulkAckEpoch with no
+      ACK-timeout retry (sync_conn_read.go:257), and the survivor
+      re-drive's `outboundBulkAcked` flag is intentionally sticky
+      (sync.go:479). Codex r18 blocker 1: two `Close()` calls do NOT
+      guarantee the full-disconnect transition — receive loops remove
+      connections independently via deferred callbacks
+      (sync_conn_read.go:14), `handleDisconnect` runs full cleanup only
+      if both slots happen to be nil at that instant
+      (sync_conn.go:483/496), and a reconnect installed between the two
+      old disconnect callbacks sees a NONEMPTY registry, so neither a
+      full-disconnect edge nor needColdPrime is armed
+      (sync_conn.go:244/278). Codex r19 blocker 1: a fence stated only
+      at `installConn` is still insufficient — receive handlers
+      dispatch frames WITHOUT checking registry membership or
+      generation (sync_conn_read.go:91) and those frames can install
+      sessions (:109) or replace bulk state (:183), so a handler can
+      pass a pre-dispatch check, stall, and mutate state AFTER the
+      reset; and a legacy peer's PENDING FIRST FRAME is processed
+      BEFORE `installConn` (sync_conn.go:119/130), so an install-gate
+      alone cannot stop an old peer from mutating receiver state during
+      the fence; and `installConn`'s current result cannot express
+      refusal while `handleNewConnection` unconditionally starts the
+      receive loop afterward (sync_conn.go:130)). The transition
+      contract is therefore:
+      (1) **Fence state**: an atomic ABORT-GENERATION counter + fenced
+      flag in the connection registry. On any abort (overflow,
+      deadline, teardown) the receiver increments the generation and
+      sets the fence — one atomic store on the serialized event loop.
+      (2) **Admission verdicts**: `installConn` returns
+      ADMITTED/REFUSED (its result type gains the verdict; today it
+      cannot express refusal). A REFUSED connection is closed
+      immediately with NO pending-frame processing, NO receive-loop
+      launch, NO clock sync, NO lifecycle callbacks, and NO cold-prime
+      work (Codex r19: `handleNewConnection` must become conditional on
+      the verdict, sync_conn.go:130).
+      (3) **Install-before-dispatch**: a connection's pending first
+      frame is dispatched ONLY AFTER an ADMITTED installation
+      (reordering sync_conn.go:119 → :130), and it carries the same
+      generation guard as (4) — so an old peer's pending frame can
+      never mutate receiver state during a fence (Codex r19's
+      old-peer bypass).
+      (4) **COMMIT-TIME generation validation**: every stateful frame
+      application on the serialized receiver loop (session install,
+      bulk-state mutation, quarantine action) re-checks the frame's
+      generation against the current abort generation AT THE COMMIT
+      POINT — a frame carrying an older generation, or any frame
+      arriving while the fence is set, is discarded at commit (Codex
+      r19's pass-check-then-stall race: a handler that passed a
+      pre-dispatch check and then stalled can never mutate
+      post-reset state, because the commit-time guard re-validates at
+      the mutation point, not at handler start).
+      (5) **Reset-once ownership**: when both slots confirm detached
+      (or the named AbortFenceTimeout fires — a wedged handler's frames
+      are commit-discarded per (4), so the reset is safe on timeout),
+      the bulk / quarantine / capability STATE RESET runs EXACTLY ONCE,
+      inside the serialized loop, owned by the fence transition — never
+      per-callback. A second abort raised inside an active fence is a
+      no-op when it carries no newer abort generation, or re-arms the
+      fence at the higher generation with the same reset-once
+      semantics.
+      (6) **Peer convergence**: the fence clears and the
+      abort-triggered per-peer backoff applies (unrelated disconnects
+      are never delayed). The peer's reconnect attempts during the
+      fence are REFUSED at (2); it retries and lands after cleanup on
+      the genuine empty→connected cold-prime edge (sync_conn.go:139/
+      :551, sync_bulk.go:65) with a FRESH bulk and a FRESH epoch —
+      and the peer needs no fence awareness: the receiver-local fence
+      enforces the transition regardless of peer version. Inbound
+      frames from the aborted epoch are discarded by the TCP teardown
+      (the discard-until-end alternative is rejected: session handlers
+      use `bulkInProgress` only for bookkeeping and install trailing
+      frames normally, sync_conn_read.go:109). This also covers the
+      fourth epoch-death shape Codex named (single active-fabric reset
+      after a prior successful bulk while the other fabric survives).
+      Entries pinned to an aborted epoch are dropped fail-closed with
+      the connection state (see the epoch-death rule below).
+      §9 pins the race tests: install-between-detachments refused at
+      (2); pending-frame-before-install discarded at (3); a stalled
+      handler's post-reset frame discarded at (4); wedged-handler
+      AbortFenceTimeout reset at (5); nested abort re-arm at (5)
       (Codex r15 blocker 1 — deferred cross-epoch admission is unsafe:
       a frame quarantined in bulk E1 and admitted at wall-clock timeout
       would (a) race E1's BulkEnd reconcile, which deletes sessions
@@ -1324,9 +1386,10 @@ quarantine-admitted + overflow), and tests.
    the derived row does not serve, a NAT class where the full signature
    still false-positives, or a delete-ordering where the
    base-lifecycle-keyed suppression strands a genuine row past its
-   timeout. Also: is the dedicated periodic syncMsgCapability ticker
-   the right transport, or should the capability piggyback on an
-   existing periodic session-stream message in pkg/cluster?
+   timeout. The capability transport is now fixed (dedicated periodic
+   syncMsgCapability ticker, no alternatives) — is there any receiver
+   state machine in pkg/cluster whose periodic cadence the ticker
+   should SHARE rather than duplicate?
 3. Tuple-versioned records (§5.3): confined to the interface registry's
    allocator instances, with pool allocators keeping today's flow-keyed
    shape and free-on-release semantics. Is the two-shape split coherent,
