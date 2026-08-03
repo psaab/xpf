@@ -125,8 +125,24 @@
   PLAN-READY-WITH-NITS (N1 Warn-rate edge-trigger [= same]; N2
   no-link-cycle completion corner doc; N3 idempotent re-arm test pin).
 
-## Round 6 (plan v7 @ commit pending)
+## Round 6 (plan v7 @ 3e388fde8; v7.1 @ d61e76ec3 folded AGY r6 + SMR r6 mid-round)
 
-- Codex — pending dispatch.
-- AGY — pending dispatch (direct `agy --print` transport).
+- **Codex** — background bash task `b8qo89ua3`; prompt
+  `/tmp/codex-6749-r6-prompt.txt`; output `/tmp/codex-6749-r6.out`;
+  IN FLIGHT at v7.1 fold time.
+- **AGY** — background bash task `buksg7v0r` (direct `agy --print`,
+  inline-evidence prompt `/tmp/agy-6749-r6-prompt.txt`); output
+  `/tmp/agy-6749-r6.out`; verdict doc `agy-plan-r6.md`. Verdict:
+  DEMAND-REVISION (1 BLOCKER — convergence signature/latch atomicity;
+  2 MAJOR — transient-MAC stranding, fixed-5s retry thrash; 1 MINOR —
+  clear-to-dispatch race).
+- **Claude SMR** — `claude-smr-plan-r6.md`. Verdict:
+  PLAN-READY-WITH-NITS (N1 retry backoff/cap/debt-suppression
+  [= AGY f3/f4], N2 MAC-failure corner doc [= AGY f2], N3 latch write
+  ordering [= AGY f1]).
+
+## Round 7 (plan v7.1+ @ pending)
+
+- Codex — pending (r6 verdict lands first; fold, then dispatch).
+- AGY — pending dispatch.
 - Claude SMR — pending.
