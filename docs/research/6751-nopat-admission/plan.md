@@ -1309,6 +1309,19 @@ quarantine-admitted + overflow), and tests.
 - `cargo build` clean; full `make test-rust` and `make test-go`;
   `make test` umbrella. Fleet cap: build with
   `CARGO_TARGET_DIR=/home/ps/cargo-target/research-6751`.
+- Alias-discipline abort/fence race tests (§5.6 contract, AGY r23 nit):
+  install-between-detachments refused at clause (2); pending-frame-
+  before-install discarded at clause (3); a stalled handler's post-reset
+  frame discarded at clause (4); wedged-handler AbortFenceTimeout reset
+  with a still-registered slot asserting both-nil + cold-prime arm at
+  clause (5); nested abort re-arm at clause (5); blocked-I/O boundedness
+  at clause (2b); large-bulk (10k-entry) boundedness at clause (2b);
+  abort-mid-BulkSync partial-bulk disposition (no ACK, no reconcile,
+  provisional installs converge at the next complete bulk) at (2b/i);
+  a BulkEnd race at (2b/i); callback generation-race cancellation at
+  (2b/ii); journal generation-race (per-key #2170 ordering covers
+  upserts AND deletes via tombstones, sync_conn_gen.go:179-322) at
+  (2b/iii).
 - New unit tests (nat/source.rs + allocator):
   preserve-first success; collision → PAT (distinct identities, distinct
   `reverse_wire_key`s, both flows' replies resolve to their OWN forward
