@@ -1,6 +1,6 @@
 # #6749 — binding-plan expansion registers new slots unarmed, dataplane disabled indefinitely
 
-**Status: DRAFT v7 — pending adversarial plan review (round 6)**
+**Status: DRAFT v7.1 — pending adversarial plan review (round 7)**
 
 - Issue: #6749 (opus-review-001 root R06, severity High)
 - Research base: `ad9591177` (origin/master at worktree creation)
@@ -10,21 +10,21 @@
   all DEMAND-REVISION); v4 @ `f679a791a` (r3: all DEMAND-REVISION);
   v5 @ `0c0b9b677` (r4: Codex DEMAND-REVISION; AGY + SMR
   PLAN-READY-WITH-NITS); v6 @ `6969b6167` (r5: Codex DEMAND-REVISION;
-  AGY + SMR PLAN-READY-WITH-NITS); v7 folds round 5: failure-path
-  plain restoration (Codex r5 B3/B5), E2 narrowed to pending (r5 B2),
-  update_fabrics replan (r5 B4), durable defer flag + MAC-success
-  completion gating (r5 B6/B8), latch consumption + #5134 generation
-  scoping (r5 B8), the Go pending-activation retry + status-loop
-  ordering (r5 B7), edge-triggered sync-failure warn (r5 M10 =
-  SMR r5 N1 = AGY r5 minor-1).
+  AGY + SMR PLAN-READY-WITH-NITS); v7 @ `3e388fde8` (r6: AGY
+  DEMAND-REVISION; SMR PLAN-READY-WITH-NITS; Codex pending); v7.1
+  folds round 6: explicit `defer_completion_authorized` signature +
+  latch-consume-on-Ok-inside ordering (AGY r6 f1 / SMR r6 N3),
+  daemon-side MAC-retry debt (AGY r6 f2), retry backoff + attempt cap
+  + debt/in-flight suppression (AGY r6 f3/f4 = SMR r6 N1).
 
 ---
 
 ## 1. Status
 
-DRAFT v7 — pending adversarial plan review round 6 (Codex + AGY + Claude
-SMR). Convergence target: PLAN-READY (recommended path shipped to
-`/engineer`) or PLAN-KILL. No production code is written under `/research`.
+DRAFT v7.1 — pending adversarial plan review round 7 (Codex + AGY +
+Claude SMR). Convergence target: PLAN-READY (recommended path shipped
+to `/engineer`) or PLAN-KILL. No production code is written under
+`/research`.
 
 ### Round verdict log
 
@@ -91,6 +91,40 @@ SMR). Convergence target: PLAN-READY (recommended path shipped to
   | AGY r5 minor-1 / SMR r5 N1 | = Codex M10 (triple convergence) |
   | AGY r5 nit-2 / SMR r5 N2 | CLOSED — §9 docs bullet covers both |
   | SMR r5 N3 | CLOSED — §9 item 14(iv) gains the idempotent re-arm pin |
+
+- **Round 6** (v7): AGY DEMAND-REVISION (1 BLOCKER + 2 MAJOR + 1
+  MINOR); SMR PLAN-READY-WITH-NITS (3 nits); Codex pending at v7.1
+  fold time. AGY's round: the convergence gate references a caller
+  `complete_deferred` flag that is never threaded into
+  `reconcile_status_bindings`' SIGNATURE, and the latch-consume
+  ordering is ambiguous (clear-before → a failed tagged rebind would
+  permanently consume the latch; clear-after → the convergence inside
+  blocks on the still-set latch) — v7.1 makes the signature and the
+  consume-on-Ok-inside ordering explicit; suppressing completion on
+  MAC failure without a daemon-side retry strands transient MAC
+  failures indefinitely (the Go retry is itself gated on the flag)
+  — v7.1 adds the daemon-side MAC-retry debt; the fixed-5s
+  un-backed-off pending-activation retry tears down the FULL healthy
+  worker set every 5s on a permanent bind failure — v7.1 adds
+  backoff + attempt cap (+ the SMR r6 N1 debt/in-flight suppression);
+  the clear→dispatch microseconds let a poll-tick fire an untagged
+  rebind racing the tagged completion — v7.1 suppresses the untagged
+  retry while a completion is in-flight (noting the race is otherwise
+  benign: the stored-defer gate blocks convergence and the MAC is
+  already programmed). SMR r6's nits: retry backoff/cap/debt
+  suppression (= AGY f3, folded), the MAC-failure corner's
+  documentation (= AGY f2, folded with the debt), the latch write
+  ordering (= AGY f1, folded).
+- **Round-6 disposition table:**
+
+  | r6 finding | v7.1 disposition |
+  |---|---|
+  | AGY f1 signature + latch atomicity | CLOSED — explicit `reconcile_status_bindings(state, defer_completion_authorized)`; latch consumed inside on Ok, never on Err (§5-C) |
+  | AGY f2 transient MAC stranding | CLOSED — daemon-side MAC-retry debt (§5-C completion machinery) |
+  | AGY f3 retry thrash | CLOSED — backoff 5s→10s→20s→60s + attempt cap + edge Warn (§5-C retry) |
+  | AGY f4 clear→dispatch race | CLOSED — completion-in-flight suppression on the retry; benign-race note (§5-C) |
+  | AGY test notes (13/17) | CLOSED — §9 items 13/17 + Go retry tests |
+  | SMR r6 N1/N2/N3 | = AGY f3 / f2 / f1 respectively |
 
 ### Round-1 detail log (kept for the record)
 
@@ -531,6 +565,31 @@ callers (rebind, toggles, forwarding arm, same-plan leg): on
 before the Err propagates (Codex r4 B4's common-locus requirement,
 kept).
 
+**Convergence — one locus, two gates, one explicit signature (v7.1,
+AGY r6 f1).** `reconcile_status_bindings(state,
+defer_completion_authorized: bool) -> Result<(), ReconcileError>` —
+the `rebind` handler passes `request.complete_deferred`; every other
+caller (apply legs, forwarding, queue/binding toggles) passes
+`false`. In the ARMED leg (`should_run_afxdp` true), after
+`afxdp.reconcile` returns `Ok` and BEFORE the bindings are written
+back / `refresh_status` / the single persist: (1) if
+`defer_completion_authorized && guard.snapshot.defer_workers` —
+CONSUME the latch: set the stored snapshot's `defer_workers=false`
+(one mutation, inside the same critical section, sharing the
+handler's one persist — never a separate write, never a window where
+the state file says defer=true while in-memory says false, SMR r6
+N3); (2) for every `state==pending && registered` slot, set
+`armed=true, state=none, last_change=now`. The two gates are therefore
+`should_run_afxdp` AND `(!stored_defer || defer_completion_authorized)`
+— evaluated against the stored value AT ENTRY (before the consume),
+so the tagged rebind converges in the same call that consumes the
+latch, and an UNTAGGED caller during a stored-defer window is blocked
+exactly as before. On `Err` the latch is NEVER consumed (a failed
+tagged rebind leaves the defer state intact for the retry — AGY r6
+f1's clear-before hazard is structurally excluded) and S4' marks as
+usual. The convergence still cannot fire on a partial bind
+(`bound == planned` is required for the Ok, bringup.rs:188).
+
 **INVARIANT 2 (coherent vector), completed — `update_fabrics`
 replans (Codex r5 BLOCKER 4).** `update_fabrics`
 (handlers/mod.rs:141-168) replaces `guard.snapshot.fabrics` — a
@@ -561,14 +620,25 @@ BLOCKERs 6 + 8):**
   then publishes `DeferWorkers=false` (its whole purpose,
   :466-481), and any arm the sync sends after the clear lands on an
   already-programmed MAC — no longer premature.
-- **Completion requires a SUCCESSFUL prerequisite.** Today the
+- **Completion requires a SUCCESSFUL prerequisite — and a failed
+  prerequisite gets its own debt (v7.1, AGY r6 f2).** Today the
   live-change completion (`reapplyAfterDeferredMAC`, :401) fires
   whenever `rethMACPending && !needLinkCycleRecovery` — including
   when `programRethMAC` returned an error (warned-only, :267-270).
   v7 tracks per-commit MAC success and skips the completion dispatch
   when programming failed: the defer flag stays set, the slots stay
-  pending (fail-closed, visible in `show`), and the next
-  commit/event re-drives. Same for the link-cycle path: the
+  pending (fail-closed, visible in `show`). On that failure the
+  daemon records a **MAC-retry debt** (mirroring the #5134 worker-arm
+  debt pattern): a daemon-side tick re-attempts `programRethMAC` for
+  the deferred interfaces on subsequent event/status iterations, and
+  on success clears the flag and dispatches the completion — so a
+  TRANSIENT MAC failure (netlink busy, buffer pressure) self-heals
+  without waiting for an unrelated commit. Any subsequent full apply
+  also re-attempts programming naturally (it recomputes
+  `rethMACPending`). The stranding corner that remains by design is
+  only "failure + a debt that can never succeed" (a genuinely broken
+  member interface) — fail-closed, Warn-visible, pending-visible,
+  and the operator's to fix. Same for the link-cycle path: the
   `complete_deferred` rebind flag is set only when the cycle
   followed a successful MAC program.
 - **The completion CONSUMES the latch (helper side).** A successful
@@ -599,12 +669,18 @@ because the tri-state makes `pending` UNAMBIGUOUSLY planner-created
 
 ```
 // in the periodic status loop, after syncDesiredForwardingStateLocked:
-if desired == true && !m.deferWorkers &&
+if desired == true && !m.deferWorkers && !m.pendingWorkerArm &&
+   !m.completionInFlight &&
    anyBinding(state == pending) &&
-   now.Sub(m.lastPendingActivationRetry) >= 5s {
+   now >= m.pendingRetryNextAt {
     send plain rebind   // reconciles the CURRENT coherent plan;
                         // convergence arms the pending slots inside
-    m.lastPendingActivationRetry = now
+    m.pendingRetryAttempts++
+    m.pendingRetryNextAt = now + backoff(attempts)  // 5s,10s,20s,60s cap
+    if m.pendingRetryAttempts >= 12 {
+        warn once (edge): "bindings stuck pending activation"
+        stop retrying until the pending set changes
+    }
 }
 ```
 
@@ -612,14 +688,31 @@ The plain rebind is the right verb (reconciles + converges when
 `!stored_defer`; control-socket-serialized so it never races an
 in-progress bind — the spurious-EBUSY the daemon's own comment
 warns about requires an in-progress first bind, which cannot exist
-here). Throttled at ≥5s (rebind is heavyweight: worker teardown +
-respawn; control-socket contention rules). During a defer window
-(flag set — now durable per the daemon fix above) the retry is
-suppressed; completion owns that window. And the first-Compile hole
-closes by starting/ensuring the status loop BEFORE the compile-path
+here). **Backoff + cap (v7.1, AGY r6 f3 = SMR r6 N1):** the
+`rebind` tears down and respawns the FULL worker set, so a
+PERMANENT bind failure (a queue that can never bind) must not churn
+healthy workers at a fixed 5s forever — exponential backoff to a
+60s cap, and after ~12 attempts (~5 minutes) the retry stops and
+emits one edge-triggered Warn; the pending state remains visible in
+`show` and any later state change (new commit, toggle, link event)
+re-arms the retry. **Two suppressions (v7.1):** while
+`m.pendingWorkerArm` is set the #5134 debt owns the retry for its
+generation (it republishes the exact snapshot — senior to the
+generic rebind); and while a provenance completion is IN-FLIGHT
+(`completionInFlight`, a manager-side flag set when the daemon
+dispatches `NotifyLinkCycle`/`reapplyAfterDeferredMAC` and cleared
+when the tagged rebind / re-apply returns — mirroring
+`rgTransitionInFlight`) the untagged retry holds fire, closing the
+clear→dispatch microseconds race (AGY r6 f4; the race is otherwise
+benign — the stored-defer gate blocks the untagged convergence and
+the MAC is already programmed, but the suppression avoids a wasted
+worker teardown). During a defer window (flag set — durable per the
+daemon fix above) the retry is suppressed; completion owns that
+window. And the first-Compile hole closes by starting/ensuring the
+status loop BEFORE the compile-path
 `syncDesiredForwardingStateLocked` (or on its error path) — the
 #5873 orphaned-debt pattern. This is NOT option B resurrected: B
-auto-converged blindly and fought operator disarms; the v7 retry
+auto-converged blindly and fought operator disarms; the v7.1 retry
 only schedules the helper's OWN requested activations and changes
 no armed bit itself.
 
@@ -654,13 +747,22 @@ invariant violation (replan on change); the pre-MAC arm race
 (durable defer flag); completion-without-success (MAC-success
 gating); the unconsumed defer latch; generationless #5134 debt; the
 unscheduled pending sinks (Go pending-activation retry + status-loop
-ordering); the sync-failure Warn flood (edge-trigger).
+ordering); the sync-failure Warn flood (edge-trigger). **Delta v7 →
+v7.1 (round 6):** the convergence gate's caller authorization is now
+an explicit `defer_completion_authorized` parameter with the latch
+consumed inside the armed leg on Ok — never on Err (AGY r6 f1);
+transient MAC failures self-heal via a daemon-side MAC-retry debt
+instead of stranding until the next commit (AGY r6 f2); the
+pending-activation retry is backoff-shaped with an attempt cap and
+suppressed while the #5134 debt or a provenance completion owns the
+retry (AGY r6 f3/f4 = SMR r6 N1/N3).
 
 **Size:** failure-path restoration + re-mark (~12), common S4' (~8),
 E2 narrowing (~4), update_fabrics replan (~12), daemon clear reorder
-+ MAC-success gating (~25), latch consume (~6), #5134 generation
-scoping (~12), Go pending-activation retry + loop-order (~30),
-edge-triggered warn (~15), C2/C3 rule sites (~8), Go
++ MAC-success gating + MAC-retry debt (~45), convergence signature +
+latch consume (~8), #5134 generation scoping (~12), Go
+pending-activation retry + backoff/cap/suppressions + loop-order
+(~45), edge-triggered warn (~15), C2/C3 rule sites (~8), Go
 `BindingStatus`/`ControlRequest` fields + D predicate (~20),
 protocol canary + #4952-pin test updates, docs. No coordinator,
 gate-semantics, or shim changes.
@@ -986,11 +1088,14 @@ activations a scheduled retry.
 - Manager unit test for the arm-sync defer gate: with
   `m.deferWorkers == true` and desired==true, the sync issues NO arm
   (disarm still passes); with the flag cleared, the arm proceeds.
-- Manager unit test for the pending-activation retry (Codex r5 B7):
-  pending binding + desired==true + flag clear → exactly one plain
-  rebind, then suppression for ≥5s; pending + flag SET → NO rebind;
-  no pending → NO rebind; the retry is NOT sent when a tagged
-  completion is already expected (documented overlap rule).
+- Manager unit test for the pending-activation retry (Codex r5 B7,
+  v7.1-shaped): pending binding + desired==true + flag clear →
+  exactly one plain rebind, then suppression until the backoff
+  elapses; backoff sequence 5s→10s→20s→60s cap on repeated failure;
+  attempt cap (~12) → retry stops + exactly one edge Warn; pending +
+  flag SET → NO rebind; `m.pendingWorkerArm` set → NO rebind (debt
+  owns); `completionInFlight` set → NO rebind; no pending → NO
+  rebind; a pending-set change re-arms the retry after the cap.
 - Manager unit test for `complete_deferred` provenance: the
   NotifyLinkCycle path sets it ONLY after a successful MAC program;
   the busy-watchdog path (maps_sync.go:1484) never sets it.
@@ -999,10 +1104,16 @@ activations a scheduled retry.
   ONCE on the false→true transition, not per tick, and once on
   recovery; a repeated-tick test pins the count.
 - Daemon unit test for the defer-flag lifetime + MAC-success gating
-  (Codex r5 B6/B8): the flag is SET through apply → MAC programming
-  and cleared only before the completion dispatch; a failed
-  `programRethMAC` suppresses the completion dispatch (no re-apply,
-  no tagged rebind) and leaves the flag set.
+  + MAC-retry debt (Codex r5 B6/B8, AGY r6 f2/f4): the flag is SET
+  through apply → MAC programming and cleared only before the
+  completion dispatch; a failed `programRethMAC` suppresses the
+  completion dispatch (no re-apply, no tagged rebind), leaves the
+  flag set (assert `m.deferWorkers == true` immediately after the
+  failure, AGY r6 test note), and records the MAC-retry debt; a
+  later tick re-attempts programming and, on success, clears the
+  flag and dispatches the completion; the mandatory re-apply path
+  (same-plan, generation-bumped republish) converges without the
+  rebind flag.
 - `maps_sync` gate test (AGY r1 f3): synthesized post-expansion
   status (new slots converged) through `probeBindingsReady`/
   `bindingForwardingLive` — ctrl admits, shim rows go READY.
@@ -1084,54 +1195,57 @@ binds workers onto a stale MAC.
 
 ## 11. Open questions for adversarial review
 
-Resolved across rounds 1-5 (for the record): Q2, Q5, Q6, Q7,
+Resolved across rounds 1-6 (for the record): Q2, Q5, Q6, Q7,
 applied-vs-requested init, full fan-out vs scoped, Q3 (uniform S3),
 Q5-toggle, Q7-boot, the plan gate (deleted), the failure-path replan
-(deleted), E2's operator arm (deleted — narrowed to pending).
+(deleted), E2's operator arm (deleted — narrowed to pending), the
+retry's fixed-5s shaping (backoff + cap + suppressions, AGY r6 f3 /
+SMR r6 N1), the transient-MAC stranding (daemon-side MAC-retry
+debt, AGY r6 f2), the latch signature/atomicity (explicit
+`defer_completion_authorized` + consume-on-Ok-inside, AGY r6 f1 /
+SMR r6 N3).
 
-Remaining questions for round 6, each invitable to PLAN-KILL with a
+Remaining questions for round 7, each invitable to PLAN-KILL with a
 concrete counterexample:
 
 1. **Tri-state completeness, final form.** Exhibit a path to
-   `Registered && !Armed` with `activation_state == none` that is NOT
-   global-fan-out-created and NOT operator-created — an unowned
+   `Registered && !Armed` with `activation_state == none` that is
+   NOT global-fan-out-created and NOT operator-created — an unowned
    producer that strands D-silent. (Enumeration to attack: every
    replan branch, S3/S4' gates, the C3 reorder+rollback, operator
    verbs, lifecycle init, rebind, both apply legs, the failure-path
    restoration, update_fabrics, #5134, helper restart, the #2794
    disarmed leg.)
-2. **The pending-activation retry's blast radius.** The retry issues
-   a plain rebind (worker teardown + respawn) at ≥5s while pending
-   persists. On a box where the bind failure is PERMANENT (e.g. an
-   NIC that can never bind queue N), the retry cycles workers every
-   5s indefinitely — each cycle tearing down HEALTHY workers along
-   with the failing one. Is the 5s fixed throttle + teardown churn
-   acceptable for a box that is already fail-closed (ctrl=0
-   throughout), or does the retry need backoff (e.g. exponential to
-   60s) and/or a per-failure-class exemption (last_error unchanged
-   across N attempts → stop retrying and surface)?
-3. **Completion-after-MAC-failure semantics.** v7 suppresses the
-   completion dispatch when `programRethMAC` fails, leaving the defer
-   flag set and slots pending. The daemon then re-drives only on the
-   NEXT commit/event — is there a production path where MAC
-   programming fails TRANSIENTLY (link busy) and no later event
-   arrives, stranding the box in defer despite the config being
-   applicable? Should the daemon's own reconcile loop retry MAC
-   programming (a daemon-side debt, mirroring #5134) rather than
-   waiting for the operator?
-4. **The latch-consume path's atomicity.** The successful tagged
-   rebind consumes the stored defer latch AFTER its reconcile. If
-   the process dies between the reconcile's success and the
-   latch-clear + persist, the helper restarts with the latch set
-   (harmless — Go re-applies non-deferred on reconnect) but the state
-   file diverges from in-memory until the next write. Any objection
-   to ordering latch-clear BEFORE refresh_status/persist (one
-   mutation, one write)?
-5. **`update_fabrics` replan + the 30s periodic.** The replan fires
-   only on set change; the periodic SyncFabricState refresh is
-   unchanged otherwise. On a flapping fabric link (resolve/unresolve
-   churn), the set can change every 30s — replan each time (cold
-   path, no worker teardown without a following reconcile). Any rate
-   concern, or is the set-change check sufficient?
-6. **Round-5 disposition table audit.** §1's table maps every r5
-   finding to its v7 fold. Which row is claimed-but-wrong this time?
+2. **Retry interplay exhaustiveness.** With backoff, cap, and the
+   two suppressions (debt, in-flight), exhibit a pending state that
+   NO actor retries: (i) #5134 debt owns its generation's republish;
+   (ii) the backoff retry owns everything else with flag clear;
+   (iii) the MAC-retry debt owns failed-MAC defer windows;
+   (iv) completion owns successful-MAC windows. Is there a
+   generation/defer/pending combination that falls between (i)-(iv)?
+3. **The consume-on-Ok ordering under a crash.** The latch is
+   consumed inside the armed leg after `Ok`, before write-back /
+   refresh / persist. A crash between the coordinator's successful
+   bind and the persist leaves the state file defer=true with
+   workers actually bound — helper restart replays from Go (full
+   apply, non-deferred) and converges anyway. Any real hazard, or
+   is the crash window provably harmless?
+4. **MAC-retry debt scope.** The debt retries `programRethMAC` on
+   daemon ticks. Should it be bounded (attempt cap + edge Warn, like
+   the rebind retry) or is unbounded retry correct while the box is
+   fail-closed and Warn-visible (mirroring the #5134 debt's
+   unbounded republish)? Either way, name the invariant it must not
+   violate (e.g. it must never clear the flag or dispatch completion
+   on failure).
+5. **Round-6 disposition table audit.** §1's table maps every r6
+   finding to its v7.1 fold. Which row is claimed-but-wrong this
+   time?
+6. **Cumulative blast-radius check.** Six rounds in, the diff now
+   spans the helper planner + status/convergence paths, two additive
+   wire fields, the Go manager (D, arm gate, retry, debt scoping,
+   edge-triggered warn), and the daemon apply ordering (defer-flag
+   lifetime, MAC-success gating, MAC-retry debt). Does any reviewer
+   assess the ACCUMULATED surface as exceeding the bug's High
+   severity — i.e. should some pieces (the daemon MAC debt? the
+   pending-activation retry?) be split into follow-up PRs to keep
+   this one reviewable, and if so which?
