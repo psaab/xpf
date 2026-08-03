@@ -1,11 +1,13 @@
 # #6751 plan — interface SNAT no-PAT admission: reserve-or-PAT the colliding translated tuple
 
-- **Status**: DRAFT v14 — round-13 fold (Codex r13 blockers 1-2 + major 3:
-  adopted Codex's own "negotiated sender-side alias omission" for new+new
-  (zero alias traffic, zero collateral) + receiver-side signature
-  QUARANTINE with confirm-on-sibling-base / admit-on-timeout for the
-  legacy window (full-tuple signature with mandatory NAT64 exclusion and
-  fabric-redirect gate; delete suppression keyed to the base lifecycle))
+- **Status**: DRAFT v15 — round-14 fold (Codex r14 blockers 1-2 + major 3
+  + minor 4 + nit 5: fabric gate REMOVED (disposition does not survive
+  the legacy wire — non-fabric identity-NPTv6 rows quarantine+timeout-
+  admit instead); order-agnostic alias confirmation (check the current
+  store at quarantine insertion, since the base normally imports FIRST);
+  delete suppression survives until the alias's own delete is consumed;
+  universal pre-data capability frame with fail-safe lifecycle; explicit
+  full-pipeline timeout admission; separate admissions counter)
 - **Issue**: #6751 (opus-review-001 R08, High, `bug`+`audit`+`security`) —
   interface SNAT admits indistinguishable no-PAT return tuples and sends
   replies to the FIRST session.
@@ -556,11 +558,18 @@ record's identity frees only when `per_worker` is empty AND
     (AGY r14 minor 1: `performSyncHandshake`, sync_auth.go:331-334, is
     bypassed when no auth key is configured — `handleNewConnection`,
     sync_conn.go:100-137, opens the stream with no setup handshake —
-    so the capability rides EITHER a zero-key `syncMsgAuthHello` frame
-    at connect OR an additive post-connect message such as a new
-    `syncMsgCapability` or an extension of `syncMsgClockSync`,
-    sync_conn.go:137; the implementer picks one, both additive and
-    old-peer-ignorable). A sender that honors the
+    so the capability rides an additive post-connect
+    `syncMsgCapability` frame (or a `syncMsgClockSync` extension,
+    sync_conn.go:137) sent BEFORE any session data on every connection,
+    authenticated or not (Codex r14 major 3: extending
+    `syncMsgAuthHello` would leave unauthenticated clusters
+    unnegotiated, sync_auth.go:321). Alias emission is HELD until the
+    peer's capability state is known (the frame can race initial session
+    traffic otherwise); the fail-safe default is capability UNKNOWN →
+    KEEP DERIVING (legacy behavior — a lost capability frame degrades
+    to today, never to dropped sync); on reconnect the capability is
+    re-exchanged and the state resets to UNKNOWN first (fail-safe
+    reset lifecycle). A sender that honors the
     capability SKIPS the alias derivation entirely (the
     `delta.FabricRedirect && !delta.FabricIngress` alias queue branch,
     daemon_ha_userspace_stream.go:370/379) — zero alias upserts, zero
@@ -586,44 +595,62 @@ record's identity frees only when `per_worker` is empty AND
       a v4 NAT64 rewrite is padded into a v6 slot and reformatted as an
       IPv6 address, eventstream.go:1350, so a legitimate NAT64 client at
       that address WOULD match the source-only signature — the NAT64
-      exclusion is mandatory) ∧ disposition == FabricRedirect (the alias
-      derivation's own gate — excludes non-fabric identity-NPTv6
-      canonical rows) ∧ `key.src_ip == decision.rewrite_src` ∧
+      exclusion is mandatory) ∧ `key.src_ip == decision.rewrite_src` ∧
       (`key.src_port == decision.rewrite_src_port` OR
       `rewrite_src_port == 0`) — full rewritten-tuple equality (Codex
       r13 major 3a: same-address pool/interface PAT and same-IP static
       mapped-port sessions are bijective by port and must NOT match;
       static NAT rewrites address AND mapped port, static_nat.rs:746).
+      NO disposition/FabricRedirect gate (Codex r14 blocker 1:
+      `userspaceSessionFromDeltaV4/V6` does NOT copy FabricRedirect into
+      `SessionValue` — only SNAT/DNAT and FabricIngress survive,
+      daemon_ha_userspace_convert.go:357/462 — so the cluster codec
+      carries no disposition field at all, sync_protocol.go:114/229, and
+      the legacy sender cannot provide one. The priced consequence:
+      NON-fabric identity-NPTv6 canonical rows also quarantine and
+      timeout-admit — a bounded 5s sync delay for a corner-of-corner,
+      not a drop).
     - **Quarantine**: a bounded per-peer map (4096 entries, 5s) holding
-      signature-matching upserts. A quarantined entry is
-      CONFIRMED-alias — dropped and its key entered into the
-      confirmed-delete-suppression set — when a sibling canonical base
-      arrives (a canonical row whose forward-wire form equals the
-      quarantined key with an identical NatDecision and, when non-zero,
-      an equal RTFlowSessionID — the r6-r8 predicate, reliable for an
-      actual pair). On timeout the entry is ADMITTED as a canonical row
-      by DISPATCHING THE STORED FRAME INTO THE STANDARD import pipeline
-      (`SessionSync.importSession` / `bulkRecv`), so generation
-      tracking, sequence numbers, and the helper dispatch
-      (`WorkerCommand::UpsertSynced`) execute identically to
-      non-quarantined frames (AGY r14 nit 2):
+      signature-matching upserts. Confirmation is ORDER-AGNOSTIC (Codex
+      r14 blocker 2: the sender queues canonical base FIRST and alias
+      SECOND on open, daemon_ha_userspace_stream.go:370/375/384, so the
+      base has normally ALREADY been imported when the alias arrives —
+      confirmation checks the CURRENT session store for a sibling
+      canonical base at quarantine INSERTION (a canonical row whose
+      forward-wire form equals the quarantined key with an identical
+      NatDecision and an equal NON-ZERO RTFlowSessionID — the r6-r8
+      predicate, reliable for an actual pair) and confirms immediately;
+      only when NO sibling base is present (the lossy-reorder
+      alias-first case) does the entry wait for the base's arrival or
+      the timeout). A confirmed entry is dropped and its key enters the
+      delete-suppression set. On timeout the entry is ADMITTED as a
+      canonical row by DISPATCHING THE STORED FRAME INTO THE COMPLETE
+      NORMAL import path — generation checks, timestamp rebasing, bulk
+      bookkeeping, coordinator reserve, and helper dispatch
+      (`WorkerCommand::UpsertSynced`), identically to a non-quarantined
+      frame reaching `installClusterSynced*` (sync_conn_read.go:110 →
+      sync_conn_gen.go:435; AGY r14 nit 2 + Codex r14 minor 4):
       this is the genuine self-NAT case, the identity-NPTv6
       fabric-redirect case (no alias is ever derived for it —
       daemon_ha_userspace_convert.go:511 returns false when wire == key),
       and the genuinely-lost-base alias case (which degrades to TODAY's
       behavior for that case — bounded, and only on a wire loss).
     - **Deletes**: suppressed only for keys in the
-      confirmed-delete-suppression set, and only while the alias's base
-      session remains open — the alias rides its base's lifecycle (the
-      exporter sends base+alias deletes in the same close delta,
-      daemon_ha_userspace_stream.go:393/400), so the suppression entry
-      clears when the base's own delete is processed. Documented
+      confirmed-delete-suppression set, with the lifecycle matching the
+      actual close ordering (Codex r14 blocker 2: the exporter queues
+      the BASE delete BEFORE the alias delete in the same close delta,
+      daemon_ha_userspace_stream.go:398/403 — so the suppression entry
+      does NOT clear when the base's delete processes; it clears when
+      the FIRST delete for the key AFTER the base's delete is consumed
+      (the alias's own delete, which the suppression then swallows), or
+      on a short bound if that delete was lost on the wire). Documented
       residual: a genuine DIRECT row sharing the key with a confirmed
-      alias (the #2387 overlap corner) whose delete arrives while the
-      base is open is suppressed and the row strands until its own
-      session timeout — versus TODAY, where the alias upsert clobbers
-      that row at publish with certainty (shared_ops.rs:907). Every
-      matrix cell is strictly safer-or-equal to today.
+      alias (the #2387 overlap corner) whose own delete arrives while
+      suppression is active is suppressed and the row strands until its
+      OWN session timeout (bounded — entries expire on their own
+      timeouts) — versus TODAY, where the alias upsert clobbers that
+      row at publish with certainty (shared_ops.rs:907). Every matrix
+      cell is strictly safer-or-equal to today.
   - **Why dropping/omitting is safe (verified five times)**:
     the explicit alias row is REDUNDANT with the derived forward-wire
     index row the base session's own publish inserts
@@ -806,9 +833,11 @@ alias-ignored counter of §5.6 — no helper wire involvement):
   GO-side Prometheus counter for fabric forward-wire alias rows
   confirmed-dropped from the receiver-side quarantine (§5.6; a routine
   benign steady-state event for fabric-redirect sessions on the legacy
-  window — operator-visible proof the discipline is active — plus
-  quarantine-timeout ADMISSIONS of genuine self-NAT rows counted
-  separately so operators can see the collateral); the Rust-side
+  window — operator-visible proof the discipline is active); and
+  `xpf_userspace_session_sync_alias_quarantine_admitted_total` — GO-side
+  counter for quarantine-timeout ADMISSIONS (genuine self-NAT /
+  identity-NPTv6 / lost-base rows — Codex r14 nit 5: the collateral is
+  its own series, not a note on the drop counter). The Rust-side
   `NAT_REVERSE_KEY_SHARED_DISPLACEMENTS` going quiet for the same
   sessions confirms the companion-poisoning side fix.
 `debug_log!` is feature-gated (afxdp/mod.rs:51) — test/dev aid only.
@@ -914,22 +943,32 @@ registration, the Go-side alias-ignored counter, and tests.
   queue/relay-or-expiry-bounded reverse-companion edge
   (`replicate_session_delete` enqueues commands — no strict deadline),
   which is identical in shape to shipped pool-mode discipline today.
-- **Fabric-alias discipline (v14)**: on the new+new path the SENDER
-  omits derived forward-wire aliases entirely (additive receiver
-  capability advertisement in the cluster handshake — zero alias
-  traffic, zero collateral, genuine self-NAT and identity-NPTv6 rows
-  flow normally). On the legacy window the RECEIVER quarantines
-  signature-matching upserts (full rewritten-tuple signature with a
-  mandatory NAT64 exclusion and the fabric-redirect gate), confirms
-  aliases on a sibling canonical base (drop + base-lifecycle delete
-  suppression) and ADMITS everything else on timeout (genuine self-NAT,
-  identity-NPTv6, lost-base aliases — a sync delay for the corner, not
-  a drop). No alias row ever reaches the helper's ownership machinery
-  unvetted; the base session's own derived forward-wire index row
-  (shared_ops.rs:943-957) serves every lookup the alias row served, and
-  the broken synthesized-companion churn (a live shipped hazard,
-  shared_ops.rs:750 + nat/mod.rs:106) closes wherever the alias never
-  forms.
+- **Fabric-alias discipline (v15)**: on the new+new path the SENDER
+  omits derived forward-wire aliases entirely (additive pre-data
+  `syncMsgCapability` frame with a fail-safe unknown→derive lifecycle —
+  zero alias traffic, zero collateral, genuine self-NAT and
+  identity-NPTv6 rows flow normally). On the legacy window the RECEIVER
+  quarantines signature-matching upserts (full rewritten-tuple signature
+  with the mandatory NAT64 exclusion and NO disposition gate — the
+  cluster codec carries no disposition field, so non-fabric
+  identity-NPTv6 rows also quarantine and timeout-admit), confirms
+  aliases ORDER-AGNOSTICALLY (check the current store for a sibling
+  canonical base at quarantine insertion — the sender queues base first
+  on open — and only wait for the base's arrival in the lossy-reorder
+  case), and ADMITS everything else on timeout through the complete
+  normal import path (generation checks, timestamp rebasing, bulk
+  bookkeeping, coordinator reserve, helper dispatch). Delete suppression
+  begins at confirmation and clears when the first delete for the key
+  after the base's delete is consumed (the alias's own delete, queued
+  after the base's on close) or on a short bound; a genuine direct row
+  sharing the key whose delete arrives while suppressed strands until
+  its own session timeout — bounded, and strictly safer than today's
+  certain publish-time clobber (shared_ops.rs:907). No alias row ever
+  reaches the helper's ownership machinery unvetted; the base session's
+  own derived forward-wire index row (shared_ops.rs:943-957) serves
+  every lookup the alias row served, and the broken synthesized-companion
+  churn (a live shipped hazard, shared_ops.rs:750 + nat/mod.rs:106)
+  closes wherever the alias never forms.
 - **NatDecision freeze**: no new fields; `rewrite_src_port: Some(_)` is
   handled generically everywhere from pool mode.
 - **Hot path**: established-flow transit untouched; zero new per-packet
@@ -989,25 +1028,36 @@ registration, the Go-side alias-ignored counter, and tests.
   (forward ∧ sync-derived ∧ SNAT flag ∧ NOT NAT64 — decoded Nat64SnatV4
   exclusion per Codex r13 blocker 2, since a v4 NAT64 rewrite reformats
   as an IPv6 address and a legitimate NAT64 client at that address would
-  otherwise match — ∧ disposition == FabricRedirect ∧ key.src_ip ==
+  otherwise match — ∧ key.src_ip ==
   rewrite_src ∧ (key.src_port == rewrite_src_port OR rewrite_src_port ==
   0) — the full-tuple term per Codex r13 major 3a, so bijective
-  same-address PAT and same-IP static mapped-port sessions never match);
-  a quarantined entry CONFIRMS as alias when a sibling canonical base
-  arrives (forward-wire relation + identical decision + equal non-zero
-  RTFlowSessionID) → dropped + base-lifecycle delete suppression
-  (suppression clears when the base's own delete processes — the alias
-  rides the base lifecycle, daemon_ha_userspace_stream.go:393/400);
-  timeout → ADMITTED as canonical (genuine self-NAT, fabric
-  identity-NPTv6 — no alias is ever derived for it,
-  daemon_ha_userspace_convert.go:511 — and the lost-base case, which
-  degrades to today's behavior); a genuine direct row sharing the key
-  whose delete arrives while the base is open strands until its own
-  session timeout (documented residual, strictly safer than today's
-  certain publish-time clobber, shared_ops.rs:907); V4 AND V6 parity —
-  AGY r10/r11 nit; `NAT_REVERSE_KEY_SHARED_DISPLACEMENTS` no longer
-  fires per sweep for a fabric-redirect SNAT session wherever the alias
-  never forms — the pre-existing
+  same-address PAT and same-IP static mapped-port sessions never match;
+  NO disposition gate per Codex r14 blocker 1 — the cluster codec
+  carries no disposition field, so non-fabric identity-NPTv6 rows also
+  quarantine and timeout-admit);
+  confirmation is ORDER-AGNOSTIC (Codex r14 blocker 2 — the sender queues
+  the base FIRST on open, daemon_ha_userspace_stream.go:370/375/384, so
+  the quarantine checks the CURRENT store for a sibling canonical base
+  at INSERTION: forward-wire relation + identical decision + equal
+  NON-ZERO RTFlowSessionID — and only waits for the base's arrival in
+  the lossy-reorder alias-first case) → confirmed entries dropped +
+  delete suppression that clears only when the FIRST delete for the key
+  AFTER the base's delete is consumed (the alias's own delete — the
+  exporter queues base-delete before alias-delete on close,
+  daemon_ha_userspace_stream.go:398/403) or on a short bound;
+  timeout → ADMITTED through the complete normal import path
+  (generation checks, timestamp rebasing, bulk bookkeeping, coordinator
+  reserve, helper dispatch — sync_conn_read.go:110 → sync_conn_gen.go:435)
+  for the genuine self-NAT, identity-NPTv6 (no alias is ever derived
+  for it, daemon_ha_userspace_convert.go:511), and lost-base cases;
+  a genuine direct row sharing the key whose delete arrives while
+  suppression is active strands until its own session timeout
+  (documented residual, strictly safer than today's certain
+  publish-time clobber, shared_ops.rs:907); two Go-side counters
+  (confirmed-dropped, quarantine-admitted — Codex r14 nit 5); V4 AND
+  V6 parity — AGY r10/r11 nit; `NAT_REVERSE_KEY_SHARED_DISPLACEMENTS`
+  no longer fires per sweep for a fabric-redirect SNAT session wherever
+  the alias never forms — the pre-existing
   companion-displacement churn is gone — Codex r10/r11/r12 blockers
   resolved by removal); staged replacement
   (T_old held until unreachable;
