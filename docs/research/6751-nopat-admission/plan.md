@@ -561,8 +561,13 @@ record's identity frees only when `per_worker` is empty AND
     sync_conn.go:100-137, opens the stream with no setup handshake —
     so the capability rides an additive
     `syncMsgCapability` frame (or a `syncMsgClockSync` extension,
-    sync_conn.go:137) — and is RE-ADVERTISED on every clock-sync tick,
-    so a lost frame self-heals within one tick (Codex r15 minor 2: a
+    sync_conn.go:137) — RE-ADVERTISED PERIODICALLY (Codex r16 minor 3:
+    `sendClockSync` currently runs only ONCE at connection setup,
+    sync_conn.go:137, so the re-advertisement needs a named transport:
+    a new periodic capability ticker, or piggybacking on an existing
+    periodic session-stream message — the implementer picks one and the
+    per-peer capability state RESETS TO UNKNOWN on every (re)connection)
+    — so a lost frame self-heals within one period (Codex r15 minor 2: a
     one-shot frame has no defined UNKNOWN → unsupported transition;
     periodic re-advertisement gives every connection a bounded path to
     capability discovery with no handshake dependency — the
@@ -575,10 +580,11 @@ record's identity frees only when `per_worker` is empty AND
     quarantine (below) exists to confirm and drop — the transition is
     safe by construction, and a permanently lost capability simply
     stays legacy (never drops sync). A sender that has learned the
-    capability SKIPS the alias derivation entirely (the
-    `delta.FabricRedirect && !delta.FabricIngress` alias queue branch,
-    daemon_ha_userspace_stream.go:370/379) — zero alias upserts, zero
-    alias deletes on the wire. Nothing is dropped at the receiver, no
+    capability SKIPS the alias derivation entirely at ALL FOUR alias
+    branches — V4/V6 open AND V4/V6 close
+    (daemon_ha_userspace_stream.go:370/379 upserts, :398/:413 deletes;
+    Codex r16 minor 3: the omission gate must cover alias deletes too)
+    — zero alias upserts, zero alias deletes on the wire. Nothing is dropped at the receiver, no
     signature is needed, NO collateral exists: genuine self-NAT and
     identity-NPTv6 rows flow normally. The alias's work is done by the
     derived forward-wire index row the base session's own publish
@@ -615,9 +621,24 @@ record's identity frees only when `per_worker` is empty AND
       NON-fabric identity-NPTv6 canonical rows also quarantine and
       timeout-admit — a bounded 5s sync delay for a corner-of-corner,
       not a drop).
-    - **Quarantine**: a bounded per-peer map (4096 entries) holding
-      signature-matching upserts, PINNED TO ITS ARRIVAL BULK EPOCH
-      (Codex r15 blocker 1 — deferred cross-epoch admission is unsafe:
+    - **Quarantine**: a bounded per-peer map (4096 entries, tunable)
+      holding signature-matching upserts, PINNED TO ITS ARRIVAL BULK
+      EPOCH. **Overflow is a terminal bulk abort, never an eviction**
+      (Codex r16 blocker 1: bulk bookkeeping retains only KEYS
+      (sync_conn_read.go:200) and the decoded value is consumed
+      immediately, so an evicted frame cannot be admitted later — its
+      payload is gone; and blind drop could lose genuine self-NAT /
+      identity-NPTv6 rows). On overflow the receiver ABORTS the
+      incomplete bulk WITHOUT ACK (no reconcile, no sync-hold release),
+      counts the saturation
+      (`xpf_userspace_session_sync_alias_quarantine_overflow_total`,
+      Go-side), applies a per-peer re-prime backoff, and lets the
+      sender's bulk machinery retry — the retry re-drives every row,
+      so nothing is lost permanently; a persistently overflowing
+      deployment (>4096 fabric SNAT sessions in one bulk) must raise
+      the cap, and the saturation counter makes the pressure visible.
+      Entries pinned to an aborted epoch are dropped fail-closed (see
+      the epoch-death rule below) (Codex r15 blocker 1 — deferred cross-epoch admission is unsafe:
       a frame quarantined in bulk E1 and admitted at wall-clock timeout
       would (a) race E1's BulkEnd reconcile, which deletes sessions
       absent from E1's received set — see the bookkeeping rule below —
@@ -629,13 +650,32 @@ record's identity frees only when `per_worker` is empty AND
       on the receiver's SERIALIZED event loop (a timer only enqueues a
       wakeup — the import path's generation-check/install/record
       sequence is safe only single-threaded, sync_conn_gen.go:381),
-      and every quarantined entry RESOLVES AT ITS OWN BULK'S BulkEnd:
-      at BulkEnd the complete snapshot is present, so the sibling-base
-      check is definitive for that epoch — still-matching entries whose
-      sibling base is in the received set CONFIRM-alias and drop;
-      everything else is ADMITTED through the complete normal import
-      path in the same serialized pass, BEFORE the bulk is ACKed and
-      the sync-hold released. Entries received OUTSIDE any bulk
+      and every quarantined entry RESOLVES AT THE EARLIEST OF:
+      (i) ITS OWN BULK'S BulkEnd — at BulkEnd the complete snapshot is
+      present, so the sibling-base check is definitive for that epoch —
+      still-matching entries whose sibling base is in the received set
+      CONFIRM-alias and drop; everything else is ADMITTED through the
+      complete normal import path in the same serialized pass, BEFORE
+      the bulk is ACKed and the sync-hold released;
+      (ii) A SUPERSEDING BulkStart (Codex r16 blocker 2: fabric 0 can
+      drop mid-E1 while fabric 1 survives — receiver bulk state resets
+      only when ALL fabrics are down, sync_conn.go:496/554, the sender
+      can re-drive a new bulk on the survivor, and E2's BulkStart
+      UNCONDITIONALLY OVERWRITES E1's epoch and received maps,
+      sync_conn_read.go:183/198 — so E1's pinned quarantines never
+      receive their own BulkEnd). At a superseding BulkStart the PRIOR
+      epoch's pinned entries are DROPPED fail-closed BEFORE the maps
+      are overwritten — no cross-epoch leakage, and the superseding
+      bulk re-sends every row anyway, so genuine rows re-quarantine and
+      resolve on the completed retry (bounded delay, never a poison);
+      (iii) A BULK DEADLINE / TEARDOWN (Codex r16 blocker 2: no receive
+      deadline exists today — read timeouts merely send heartbeats,
+      sync_conn_read.go:27, and the 30s VRRP timeout releases sync hold
+      degraded without tearing down the bulk, manager.go:372 — so a
+      per-bulk RECEIVE DEADLINE is required new behavior: on deadline
+      the incomplete bulk aborts WITHOUT ACK, per the overflow-abort
+      rule, and its pinned entries drop fail-closed per (ii)).
+      Entries received OUTSIDE any bulk
       (incremental deltas) resolve on a 5s fallback timer instead —
       incremental frames carry no reconcile semantics, so the same
       confirm-vs-admit rule applies with the CURRENT store as the
@@ -911,8 +951,9 @@ Prometheus, §5.8).
 stamped at publish inside the helper; it is NOT read from or written to
 any Go-facing wire, and older in-image rows read as token 0).
 The four helper-side §5.8 status counters are additive optional fields
-(#1961-safe); the fifth §5.8 counter (alias-ignored) is GO-side
-Prometheus with no helper wire involvement.
+(#1961-safe); the TWO Go-side §5.8 counters (alias confirmed-dropped,
+alias quarantine-admitted) are GO-side Prometheus with no helper wire
+involvement (six counters total).
 Changed signatures are `pub(crate)`-internal only:
 `match_source_nat_result_for_tuple` (+1 arg),
 `match_source_nat_for_flow_result_at` (+1), `source_nat_decision_for_flow`
@@ -1116,11 +1157,12 @@ quarantine-admitted), and tests.
   single-threaded, sync_conn_gen.go:381)
   for the genuine self-NAT, identity-NPTv6 (no alias is ever derived
   for it, daemon_ha_userspace_convert.go:511), and lost-base cases
-  (plus two SMR r16 implementation notes: a quarantine-cap EVICTION
-  resolves as admit-after-confirm-check against the complete received
-  set at that epoch's BulkEnd, never as blind admission; and a bulk
-  that STALLS mid-bulk resolves its pinned quarantines in the bulk
-  teardown path the existing bulk-liveness timeout already drives);
+  (plus the Codex r16 lifecycle rules folded above: quarantine-cap
+  OVERFLOW aborts the incomplete bulk without ACK (no eviction —
+  payloads are not retained past decode) and its pinned entries drop
+  fail-closed; a STALLED bulk hits the new per-bulk receive deadline
+  and aborts the same way; a SUPERSEDING BulkStart drops the prior
+  epoch's pinned entries fail-closed before overwriting the maps);
   a genuine direct row sharing the key whose delete arrives while
   suppression is active strands until its own session timeout
   (documented residual, strictly safer than today's certain
