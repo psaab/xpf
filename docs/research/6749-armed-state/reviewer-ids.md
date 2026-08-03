@@ -141,8 +141,19 @@
   [= AGY f3/f4], N2 MAC-failure corner doc [= AGY f2], N3 latch write
   ordering [= AGY f1]).
 
-## Round 7 (plan v7.1+ @ pending)
+## Round 7 (plan v8 @ pending)
 
-- Codex — pending (r6 verdict lands first; fold, then dispatch).
-- AGY — pending dispatch.
-- Claude SMR — pending.
+- **Codex r6** — background bash task `b8qo89ua3`; output
+  `/tmp/codex-6749-r6.out`; verdict doc `codex-plan-r6.md`. Verdict:
+  DEMAND-REVISION (6 BLOCKER — C2 discriminator + candidate-deletion
+  claim loss; partial-B/restored-A volatile alias; replan-only
+  update_fabrics publishes wrong-physical with enabled=true;
+  sysfs race relocated into update_fabrics + netlink-driven cadence;
+  quiescence race from the v7.1 flag clear; pending-retry incomplete
+  (untagged latch, unregistered pendings, desired-vs-actual, churn,
+  first-Compile orphans); Go re-latches Rust via wholesale snapshot
+  clones + wrong debt scope (FIB bumps) + MAC-set/link-up-failed
+  phase loss; + 2 MAJOR tests + 1 NIT retry observability).
+- Codex r7 — pending dispatch.
+- AGY r7 — pending dispatch.
+- Claude SMR r7 — pending.
