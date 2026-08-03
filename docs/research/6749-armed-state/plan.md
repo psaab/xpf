@@ -708,23 +708,27 @@ Telemetry-only changes persist WITHOUT replanning (the 30s periodic
 and the netlink-event-driven refresh, daemon_ha_fabric.go:243/:1039,
 pay nothing). On a PROJECTION change, the handler:
 
-1. **Evaluates the guard FIRST (Codex r7 f3):** the incoming
-   projection is STAGED, never published before acceptance —
-   `refresh_fabric_links` (which pushes fabric state to workers,
-   snapshot_refresh.rs:83) receives only the ACCEPTED projection
-   (the prior one on a guard hit). The guard fires exactly when an
-   eligible candidate (present in the accepted projection with raw
-   `rx_queues==0`) fails queue-count resolution IN THE SAME PASS
-   (`rx_queue_count`'s read_dir failed, planning.rs:605-621 — the
-   only path to 0; the planner returns an exact per-candidate skip
-   cause so the guard does not infer it). A guard hit keeps the
-   PRIOR projection AND the PRIOR vector on BOTH sides (below), and
-   persists only the telemetry. A legitimate full removal goes
-   through `apply_snapshot` — never `update_fabrics`, which
-   production cannot even encode today (an explicitly-empty fabrics
-   slice is dropped by `json:"fabrics,omitempty"`, protocol.go:83,
-   and Go early-returns on empty, manager_ha.go:166 — so the
-   removal case is Rust-test-only and never triggers the guard).
+1. **Evaluates the guard FIRST (Codex r7 f3; mixed-update rule per
+   SMR r8 N2):** the incoming projection is STAGED, never published
+   before acceptance — `refresh_fabric_links` (which pushes fabric
+   state to workers, snapshot_refresh.rs:83) receives only the
+   ACCEPTED projection (the prior one on a guard hit). The guard
+   fires exactly when an eligible candidate (present in the
+   accepted projection with raw `rx_queues==0`) fails queue-count
+   resolution IN THE SAME PASS (`rx_queue_count`'s read_dir failed,
+   planning.rs:605-621 — the only path to 0; the planner returns an
+   exact per-candidate skip cause so the guard does not infer it).
+   A guard hit defers the WHOLE update — prior projection AND prior
+   vector, never a partial subset, because partial acceptance would
+   diverge the vector from the accepted projection (SMR r8 N2); the
+   deferred update re-applies on the next pass when sysfs recovers
+   (projection and pending marks then apply together). A legitimate
+   full removal goes through `apply_snapshot` — never
+   `update_fabrics`, which production cannot even encode today (an
+   explicitly-empty fabrics slice is dropped by
+   `json:"fabrics,omitempty"`, protocol.go:83, and Go early-returns
+   on empty, manager_ha.go:166 — so the removal case is
+   Rust-test-only and never triggers the guard).
 2. **Marks the whole non-operator vector unarmed+pending (Codex r6
    f4's option (b), made gate-exact by Codex r7 f2):** on an
    accepted projection change, EVERY non-operator registered slot
@@ -795,22 +799,28 @@ BLOCKERs 6 + 8; v8 epoch form per Codex r6 f6/f8):**
     early return, so the disarm direction is never blocked.
   - **Epoch rollover (v8.2, Codex r7 f4's counterexample
     killed):** a stale epoch must never leak into an unrelated
-    config. On EVERY commit, before the snapshot is stamped: if the
-    commit's own `rethMACPending` precheck finds NO MAC work, the
-    manager clears `m.deferWorkers` at compile start (the stale
-    epoch is superseded by a config that needs none), cancels any
-    stale tagged-completion and MAC debts (they are
-    config-generation-scoped and would abandon anyway — this makes
-    the abandonment explicit), and the commit's own non-deferred
-    stamp clears the helper's stored latch via the normal
-    `apply_snapshot` swap. If the commit HAS MAC work, it opens (or
-    replaces) the epoch — cancelling the prior epoch's debts first.
-    An explicit OPERATOR global arm during a window also clears the
-    manager flag (the operator completed the window explicitly —
-    documented). Without rollover, a deferred A whose tagged
-    completion failed would leak `DeferWorkers=true` into every
-    later unrelated compile's stamp — B workerless forever with no
-    MAC completion owner (Codex r7 f4's trace).
+    config. The ordering is ROLLOVER-THEN-OPEN, driven by ONE
+    precheck (SMR r8 N1): on EVERY commit, before the snapshot is
+    stamped, the commit's own `rethMACPending` precheck runs first.
+    If it finds NO MAC work, the manager clears `m.deferWorkers` at
+    compile start (the stale epoch is superseded by a config that
+    needs none) and cancels any stale tagged-completion and MAC
+    debts (they are config-generation-scoped and would abandon
+    anyway — this makes the abandonment explicit); the commit's own
+    non-deferred stamp then clears the helper's stored latch via
+    the normal `apply_snapshot` swap. If it finds MAC work, the
+    commit opens (or replaces) the epoch — the same cancellation
+    runs, keyed on generation MISMATCH (stale debts), never on the
+    epoch being opened — so the new epoch can never cancel itself:
+    the flag-clear happens only in the no-MAC-work branch, the
+    flag-set only in the MAC-work branch, and the precheck's answer
+    selects exactly one branch. An explicit OPERATOR global arm
+    during a window also clears the manager flag (the operator
+    completed the window explicitly — documented). Without
+    rollover, a deferred A whose tagged completion failed would
+    leak `DeferWorkers=true` into every later unrelated compile's
+    stamp — B workerless forever with no MAC completion owner
+    (Codex r7 f4's trace).
 - **Completion requires a SUCCESSFUL prerequisite — and a failed
   prerequisite gets a PHASE-REVALIDATING debt with an
   accepted-config contract (v8.2, Codex r6 f8 + r7 f6).**
@@ -1126,13 +1136,26 @@ activations a scheduled retry.
    §5-C C2), in the same mutation as the verb's values, before any
    registration-changed reconcile. A claim is never marked pending,
    never converged, and never planner-restored (E2 is
-   `pending`-only). Claim lifetime: claims survive reshuffles,
-   renames, flaps, and deferred applies; they die at an explicit
-   global fan-out (C3, registered slots) or WITH the physical
-   binding (candidate deletion, §5-C C2 boundary). A
-   globally-DISARMED slot (`none`) is NOT operator-owned: S2
-   re-marks it pending on flap and E2 re-registers it.
-   `set_queue_state` remains membership-at-invocation shorthand.
+   `pending`-only). Claim lifetime (Codex r7 f8's exact form):
+   claims survive SLOT RESHUFFLES and interface FLAPS (the planned
+   `(linux-interface, queue_id)` identity persists); they die at an
+   explicit global fan-out (C3, registered slots) or at ANY
+   deletion of that planned identity — a candidate dropout
+   (invalid fabric parent / unreadable queue count), a RENAME (the
+   linux name changes → new identity), or a queue-count contraction
+   (the global-min layout drops high-queue identities on healthy
+   interfaces). A globally-DISARMED slot (`none`) is NOT
+   operator-owned: S2 re-marks it pending on flap and E2
+   re-registers it. `set_queue_state` remains
+   membership-at-invocation shorthand. And the claimed-slot rebind
+   assurance (SMR r8 N3): any reconcile — including the
+   pending-activation retry's plain rebind — tears down and
+   re-binds a CLAIMED slot's XSK physically (worker planning
+   filters `registered && ifindex > 0`, never `armed`), but the
+   claim keeps `armed=false`, so its shim rows stay non-READY
+   (`bindingForwardingLive` requires Armed) and no traffic is ever
+   steered to it: the operator's no-forward intent survives
+   physical rebinds exactly.
 9. **Volatile state rebuilt, not carried (kept):** R3 carries
    {`armed`, `registered`, `activation_state`, `last_change`} only;
    everything else resets at replan and is re-derived — now by an
