@@ -1,3 +1,23 @@
+## 2026-08-03 — #6751 research: plan v1 for interface-SNAT no-PAT tuple collision
+
+- **Timestamp**: 2026-08-03 (research/6751-nopat-admission, /research skill)
+- **Action**: Drafted the research plan for #6751 (interface SNAT admits
+  indistinguishable no-PAT return tuples; replies resolve to the
+  first-installed session — the misdelivery is pinned by
+  session/tests.rs:4560/4602). Walked the anchors (nat/source.rs:1226-1251,
+  session/lookup.rs:222, session/mod.rs index install, afxdp/session_glue,
+  afxdp/shared_ops.rs publish/displacement) and the adjacencies
+  (#1758/#1760/#4399/#4438 1:N multimaps, #5269 address-only token,
+  #4388/#4512 synced reserve, #6122 read-only fragment probe, #1852 fragment
+  gate, OPEN #6522 holder-refcount hazard, #4291 port-overloading parity
+  evidence). Plan presents three path options — (a) reserve-at-admission +
+  PAT later colliders via a node-global per-egress-address PortAllocator
+  registry (recommended), (b) reserve-and-reject fail-closed mirroring
+  #5269, (c) status quo + doc — with the #6522 holder discipline mandatory
+  for the new registry.
+- **File(s)**: `docs/research/6751-nopat-admission/plan.md`, `_Log.md`
+
+
 ## 2026-08-01 — #6588 round 6c: put the two-of-three characterization in the comment
 
 - **Timestamp**: 2026-08-01 (fix/6588-interface-monitor-packed-leaf, PR #6658)
