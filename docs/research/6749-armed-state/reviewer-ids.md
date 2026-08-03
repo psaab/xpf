@@ -78,7 +78,28 @@
   (SMR3-1 S4-E2 side door [subsumed by AGY f1 + S4']; SMR3-2/3/4
   commitments on Q3/Q5/Q7).
 
-## Round 4 (plan v5 @ commit pending)
+## Round 4 (plan v5 @ 0c0b9b677)
+
+- **Codex** — background bash task `b6kq41wsw`; prompt
+  `/tmp/codex-6749-r4-prompt.txt`; output `/tmp/codex-6749-r4.out`;
+  verdict doc `codex-plan-r4.md`. Verdict: DEMAND-REVISION (6 BLOCKER
+  — name-only plan gate authorizes wrong-physical and incomplete
+  retained plans; bool conflates global-disarm with operator
+  ownership; S4' full-apply-only + retained-records retry deficit;
+  arm-then-fail strands with no production retry; compile-time
+  arm-sync bypasses the defer gate (verified manager_ha.go:601-607);
+  rebind verb-identity is not completion provenance; + 3 MAJOR —
+  sysfs-race authorization, more test holes).
+- **AGY** — background bash task `b30wsddwd` (direct `agy --print`,
+  inline-evidence prompt `/tmp/agy-6749-r4-prompt.txt`); output
+  `/tmp/agy-6749-r4.out`; verdict doc `agy-plan-r4.md`. Verdict:
+  PLAN-READY-WITH-NITS (all r3 dispositions confirmed; nits: arm-verb
+  global-bit rollback on reconcile Err; rebind log pending count).
+- **Claude SMR** — `claude-smr-plan-r4.md`. Verdict:
+  PLAN-READY-WITH-NITS (N1 plan-gate drift semantics; N2 C2
+  claim-before-reconcile code order; N3 cosmetic).
+
+## Round 5 (plan v6 @ commit pending)
 
 - Codex — pending dispatch.
 - AGY — pending dispatch (direct `agy --print` transport).
