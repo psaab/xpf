@@ -302,5 +302,15 @@
   unmonitored; f6 telemetry-locus suppression deadlock).
   Convergence: AGY f2/f3/f4/f6 == SMR12-1/3/2/4; AGY f1/f5 new.
 - **Codex r12** — background task `task-msdremqy-s0poqq`
-  (prompt `/tmp/codex-6749-r12-prompt.txt`, --fresh). Output:
-  pending.
+  (prompt `/tmp/codex-6749-r12-prompt.txt`, --fresh); output
+  `/tmp/codex-6749-r12.out`; verdict doc `codex-plan-r12.md`.
+  Verdict: DEMAND-REVISION (11 BLOCKER + 3 MAJOR —
+  ConfigGeneration vs wrong helper authority (all full-apply
+  producers false-refuse); appliedSnapshot asymmetric capture;
+  staged-ahead disjuncts false-block; B unrecoverable; echo
+  erases staged intent + verb provenance + restart; reclassify
+  discards MAC obligation; AttemptMACDebt incoherent;
+  TRY-acquire starvation; env token causal/watch/incarnation/
+  dispatch; error corrupts map-commit; :618 citation +
+  pending-XSK handoff; test greens; budget omissions. Q1
+  remains CLOSED).
