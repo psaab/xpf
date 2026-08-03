@@ -422,8 +422,13 @@ The holder set on each flow's `live_by_flow` record is
     `publish_shared_session` only inserts the new aliases at
     shared_ops.rs:918-943 and never removes the old tuple's, so a stale
     alias would stay resolvable; this sweep is new and also fixes the
-    pre-existing stale-alias residual for any tuple-changing republish)
-    → `−{Shared}` on T_old. T_old stays held by its `{Worker}` markers
+    pre-existing stale-alias residual for any tuple-changing republish.
+    The sweep mirrors `remove_shared_session`'s exact conditionals
+    (reverse_canonical removed only when `!= reverse_wire`; forward_wire
+    only when `!= key`) and is FILTERED against the new entry's aliases —
+    a same-tuple refresh (T_old == T_new) sweeps nothing, so the entry
+    never loses aliases it still needs (SMR r6 nit 1)
+    ) → `−{Shared}` on T_old. T_old stays held by its `{Worker}` markers
     (never freed mid-overlap); its canonical row and aliases are already
     unreachable when the marker drops.
   - Worker wrapper: pre-read the existing entry's tuple T_old via a NEW
@@ -525,7 +530,11 @@ sessions:
      on E are quarantined in EVERY domain — pool admission SKIPS
      quarantined addresses in its address loop (allocates on a
      non-quarantined pool address; exhaustion only if ALL are
-     quarantined), NAT64 likewise, interface-mode mints fail closed
+     quarantined — and an address-persistent/sticky pool, whose loop is
+     single-attempt by contract, yields `AllocatorExhausted` when its
+     sticky address is quarantined: fail closed, NEVER rotate a sticky
+     flow to a different address — SMR r6 nit 2), NAT64 likewise,
+     interface-mode mints fail closed
      (`InterfaceOverlapDraining`) since their "pool" is the single
      address. Reserves (ownership claims for existing sessions) are never
      quarantined — they are tri-state per §5.3.
