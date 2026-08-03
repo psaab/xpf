@@ -710,7 +710,12 @@ record's identity frees only when `per_worker` is empty AND
       r19's pass-check-then-stall race: a handler that passed a
       pre-dispatch check and then stalled can never mutate
       post-reset state, because the commit-time guard re-validates at
-      the mutation point, not at handler start).
+      the mutation point, not at handler start). The frame-side
+      generation is inherited from the CONNECTION SLOT that delivered
+      the frame (each slot is stamped with the abort generation
+      current at its admission — SMR r20 nit 2), so no per-frame
+      generation field is needed on the wire; one atomic load per
+      commit on the already-serialized loop, not a lock.
       (5) **Reset-once ownership**: when both slots confirm detached
       (or the named AbortFenceTimeout fires — a wedged handler's frames
       are commit-discarded per (4), so the reset is safe on timeout),
