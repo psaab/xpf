@@ -1,15 +1,14 @@
 # #6751 plan — interface SNAT no-PAT admission: reserve-or-PAT the colliding translated tuple
 
-- **Status**: DRAFT v15.4 — round-17 fold (Codex r17 blocker 1 + minor 2
-  + nits: the abort recovery contract is CLUSTER-LEVEL TEARDOWN — close
-  both connections so the existing full-disconnect cleanup fires and the
-  reconnect cold-re-primes a fresh bulk (today's BulkSync is write-only
-  with no ACK-timeout retry, sync_bulk.go:169-195, and the survivor
-  re-drive's outboundBulkAcked flag is sticky, sync.go:479, so "let the
-  sender retry" needed an explicit contract); capability transport named
-  consistently as a periodic syncMsgCapability ticker (NOT a handshake
-  field — unkeyed deployments bypass it, sync_auth.go:321); seven
-  counters)
+- **Status**: DRAFT v15.5 — round-18 fold (Codex r18 blocker 1 + minors
+  2-3: the abort is now an ATOMIC, GENERATION-FENCED cluster-level
+  teardown — an abort-generation counter fences the connection registry
+  so no reconnect can install between the two old disconnect callbacks
+  (sync_conn.go:244/278), the fence (not Close) invalidates stale
+  handlers, state resets exactly once inside the transition, and the
+  peer converges via refused reconnects onto the cold-prime edge;
+  capability transport is the dedicated periodic ticker alone; the
+  abort cycle's full lifecycle-callback churn is priced)
 - **Issue**: #6751 (opus-review-001 R08, High, `bug`+`audit`+`security`) —
   interface SNAT admits indistinguishable no-PAT return tuples and sends
   replies to the FIRST session.
@@ -642,6 +641,18 @@ record's identity frees only when `per_worker` is empty AND
       so nothing is lost permanently; a persistently overflowing
       deployment (>4096 fabric SNAT sessions in one bulk) must raise
       the cap, and the saturation counter makes the pressure visible.
+      The abort CYCLE cost is priced honestly (Codex r18 minor 3): each
+      successful full-disconnect ALSO fires the peer-disconnect/connect
+      lifecycle callbacks (sync_conn.go:569/142) — config
+      reconciliation plus DHCP and IPsec re-advertisement
+      (daemon_ha_sync.go:934) — so a persistently overflowing
+      deployment pays REPEATED CLUSTER-WIDE SYNCHRONIZATION CHURN per
+      cycle, not merely one cold re-prime; the cap is therefore sized
+      at provisioning so genuine fabric-session counts never saturate
+      it in steady state (the 4096 default assumes ≤~4k fabric SNAT
+      sessions per bulk; larger deployments raise it up front), and the
+      overflow counter + backoff are the visible escape hatch for the
+      undersized case, not the steady-state plan.
       **The abort recovery contract is CLUSTER-LEVEL TEARDOWN** (Codex
       r17 blocker 1: no retry mechanism exists today — `BulkSync()` is
       write-only, recording the pending ACK and writing BulkEnd WITHOUT
