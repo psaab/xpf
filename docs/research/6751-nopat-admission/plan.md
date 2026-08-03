@@ -746,7 +746,12 @@ additive per #1961):
   optional `reason` label (`flow_cap` vs `allocator_cap`) is an
   implementation-time refinement, not a plan requirement (AGY r5 nit 1).
 - `xpf_userspace_interface_snat_sync_identity_conflict_drops_total` —
-  coordinator import-conflict drops (§5.6).
+  coordinator import-conflict drops (§5.6). Its doc text states that the
+  series ALSO includes the BENIGN zero-id legacy-alias drop (an id-0
+  fabric alias importing into its own base's identity — indistinguishable
+  from a genuine conflict by construction, which is exactly why it fails
+  closed; the alias row is redundant with the derived forward-wire index
+  row for the lookup path, so this drop is near-free) — SMR r9 N17.
 `debug_log!` is feature-gated (afxdp/mod.rs:51) — test/dev aid only.
 Exhaustion additionally rides the existing production NAT-failure event
 path (`record_source_nat_failure`, nat_exception.rs:154). PAT'd sessions
