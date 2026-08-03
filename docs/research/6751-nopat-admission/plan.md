@@ -796,15 +796,30 @@ record's identity frees only when `per_worker` is empty AND
       `syncPeerConnected=false` (daemon_ha_sync.go:109), and the
       already-launched connect callback storing it back to TRUE.
       Class (b) mutations are therefore GENERATION-ORDERED AT THEIR
-      COMMIT POINT (not merely validated at spawn): every lifecycle
-      state store carries the admission generation and revalidates at
-      the store — (i) the abort generation has not advanced past the
-      admission generation and (ii) the slot is still the admitted
-      one — so a stale connect-callback's flag write commits only if
-      no newer abort/disconnect event has committed (the same
-      commit-time guard as clause (4), applied to daemon lifecycle
-      state). §9 pins the abort-after-callback-launch-but-before-state-
-      commit test.
+      COMMIT POINT (not merely validated at spawn), and the revalidation
+      and the state store execute ATOMICALLY TOGETHER under the daemon
+      lifecycle lock (`d.syncMu`) — AGY r24 minor 1: a revalidate-then-
+      store split lets a disconnect (`onSessionSyncPeerDisconnected`,
+      daemon_ha_sync.go:109) advance the abort generation, detach the
+      slot, and store `syncPeerConnected=false` AFTER the connect
+      callback revalidates but BEFORE it stores `true`, so the check
+      and the write must be one critical section. The lifecycle store
+      inventory covered by this discipline is complete (AGY r24 nit 3):
+      `onSessionSyncPeerConnected` (syncPeerConnected flag, connection
+      epoch, heartbeat-suppression state, bulk-prime flags, readiness
+      arming — daemon_ha_sync.go:51/68/81),
+      `onSessionSyncPeerDisconnected` (the false write, :109),
+      `onSessionSyncBulkReceived` (`syncBulkPrimed=true`, VRRP sync-hold
+      release, :90), and `onSessionSyncBulkAckReceived`
+      (`syncPeerBulkPrimed=true`, :103) — every lifecycle state store
+      carries the admission generation and revalidates at the store
+      (i) the abort generation has not advanced past the admission
+      generation and (ii) the slot is still the admitted one, inside
+      the same critical section, so a stale connect-callback's write
+      commits only if no newer abort/disconnect event has committed
+      (the same commit-time guard as clause (4), applied to daemon
+      lifecycle state). §9 pins the abort-after-callback-launch-but-
+      before-state-commit test for each callback in the inventory.
       (iii) **Journal replay** (messages move into a generation-blind
       queue whose sender later picks whatever connection is active,
       sync_conn_write.go:135/268): the per-(sender,key) monotonic
@@ -854,7 +869,13 @@ record's identity frees only when `per_worker` is empty AND
       for the next bulk drive (or an immediate one if idle), because the
       bulk is authoritative and needs no per-key ordering for its
       installs — saturation degrades to a bulk-driven sync cadence for
-      the affected keys instead of an unordered delta stream.
+      the affected keys instead of an unordered delta stream. The
+      trigger COALESCES on a single dirty/pending flag and respects a
+      minimum inter-bulk COOLDOWN (AGY r24 minor 2: under sustained
+      >200k-session churn, per-key triggers would otherwise drive a
+      continuous bulk-sync CPU/network storm; one pending flag plus one
+      cooldown timer bounds the drive rate to at most one bulk per
+      cooldown window regardless of churn).
       The pre-existing generation-0 tombstone-clearing residual
       (resurrection / killing a generation-bearing entry) is a
       #2221-family behavior pinned by today's tests
