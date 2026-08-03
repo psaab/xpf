@@ -1,7 +1,7 @@
 # #6751 plan — interface SNAT no-PAT admission: reserve-or-PAT the colliding translated tuple
 
-- **Status**: DRAFT v4 — round-3 fold (Codex r3 blockers 1-4 + majors 5-7 +
-  minor 8; AGY r3 majors 1-2 + nit 3; Claude SMR r3 M13-M15 all folded)
+- **Status**: DRAFT v5 — round-4 fold (Codex r4 blockers 1-6 + majors 7-8 +
+  minor 9 + nit 10; AGY r4 majors 1-2 + minor 3 all folded)
 - **Issue**: #6751 (opus-review-001 R08, High, `bug`+`audit`+`security`) —
   interface SNAT admits indistinguishable no-PAT return tuples and sends
   replies to the FIRST session.
@@ -10,11 +10,12 @@
   foreclosure + Go commit-validator extension (§5.7) + additive optional
   status counters (§5.8). No breaking wire change, no `NatDecision`/
   `SourceNatLookup` shape change.
-- **Core invariant** (round-3 reviewers' formulation, adopted): EVERY
+- **Core invariant** (round-3/4 reviewers' formulation, adopted): EVERY
   reachable session owns exactly one translated identity, held continuously
   from before it is reachable until after it is not — across admission,
-  replication, materialization, re-reserve, reconcile replay, snapshot
-  rebuilds, HA transitions, link stop→rebind cycles, and helper restart.
+  publication, replication, materialization, tuple-changing re-sync,
+  reconcile replay, snapshot rebuilds, drain transitions, HA transitions,
+  link stop→rebind cycles, worker teardown, and helper restart.
 
 ---
 
@@ -83,10 +84,8 @@ win:
   same server + simultaneous liveness. Rare for random-ephemeral TCP, but
   realistic for ICMP echo (Linux ping reuses small per-socket identifiers),
   for UDP services with pinned source ports, and for any middlebox that
-  normalizes source ports. It is also a deterministic insider primitive: a
-  malicious internal host can deliberately squat a victim's (port, server)
-  external identity (UDP/ICMP need no handshake), or brute-force the whole
-  64512-port space against a victim server (§4 option (b) analysis).
+  normalizes source ports. It is also a deterministic insider primitive
+  (deliberate squatting; UDP/ICMP need no handshake).
 
 If reviewers conclude the fix's churn exceeds the risk, PLAN-KILL is an
 acceptable verdict — PLAN-KILL here means shipping option (c), status quo
@@ -96,15 +95,15 @@ plus documentation, and saying so on the issue.
 
 | Prior work | What it gives this plan |
 |---|---|
-| #4399/#4438 1:N multimaps + validate-on-lookup | Retains both colliding handles; stays as defense-in-depth for the OTHER non-bijective classes (DNAT-shared-backend, NAT64, static). |
-| **#5269/#5336/#5338/#5341/#6041/#6226** address-only occupancy token (`PortAllocator::reserve_address_only`, `address_only_owners`, `release_flow`/`rollback_flow` address_only arm) | THE mechanism option (a) is built on: identity-keyed occupancy `(protocol, translated_ip, translated_port, dst_ip, dst_port)`, ONE-mutex mint (no TOCTOU), idempotent re-entry, fail-closed collision, stale-tuple-drop on re-reserve (allocator.rs:1666-1676). Preserve AND PAT both mint this token shape; release/rollback verbatim (allocator.rs:1318/1392). |
-| #5144 strict overlap validator (`natAllocOwner`/compiler_validate_strict_nat.go:2525-2576) + `pool_failure`/`PoolUnusable` fail-closed channel (nat_source.go:118-122; NAT64 native empty-pool fail-closed at nat64.rs:1123) | The two-layer foreclosure pattern §5.7 extends. |
-| #4388/#4512 `reserve_synced_source_nat_allocation` + coordinator publish path (ha/session_import.rs) | The HA reservation points §5.6 makes transactional. |
-| #4518 NAT64 allocator carry-over across reloads (`Nat64State::from_snapshots_with_previous`) | The drain-domain precedent for §5.7's quarantined-pool drain. |
-| #4074/#4088 ICMP id translation; #1852 fragment gate + #2562/#5146 frag assoc + #6122 fail-closed probe | The ICMP/fragment stories, unchanged. |
-| #4676 `gc_expired_chunked` (bounded work per mutex acquisition) | The §5.2 probe chunking discipline. |
+| #4399/#4438 1:N multimaps + validate-on-lookup | Defense-in-depth retention for the OTHER non-bijective classes (DNAT-shared-backend, NAT64, static). |
+| **#5269/#5336/#5338/#5341/#6041/#6226** address-only occupancy token (`reserve_address_only`, `address_only_owners`, `release_flow`/`rollback_flow` address_only arm, `reserve_flow` stale-tuple-drop at allocator.rs:1666-1676) | THE mechanism option (a) is built on: identity-keyed occupancy `(protocol, translated_ip, translated_port, dst_ip, dst_port)`, ONE-mutex mint, idempotent re-entry, fail-closed collision. Preserve AND PAT both mint this token shape; release/rollback verbatim (allocator.rs:1318/1392). |
+| #5144 strict overlap validator (compiler_validate_strict_nat.go:2525-2576) + `pool_failure`/`PoolUnusable` channel (nat_source.go:118-122; NAT64 native empty-pool fail-closed at nat64.rs:1123) | The two-layer foreclosure pattern §5.7 extends. |
+| #4388/#4512 synced reserve + coordinator publish path (ha/session_import.rs) | The HA reservation points §5.6 makes transactional. |
+| #4518 NAT64 allocator carry-over across reloads | The drain-domain retention precedent for §5.7. |
+| #4074/#4088 ICMP id translation; #1852 + #2562/#5146 + #6122 fragment machinery | The ICMP/fragment stories, unchanged. |
+| #4676 `gc_expired_chunked` | The §4.3 probe chunking discipline. |
 | SessionManager coordinator-owned shared maps (coordinator/session_manager.rs:12 → worker/launch.rs:130) | The registry placement precedent. |
-| #1760 W3' status-counter plumbing (protocol/control.rs:343, protocol_status.go:287, server/lifecycle.rs:228, server/helpers/status.rs:102, pkg/api/metrics.go:377, metrics_descriptors_userspace_session.go:27, metrics_userspace.go:677) | The additive-counters precedent §5.8 follows — full inventory (Codex r3 major 7). |
+| #1760 W3' status-counter plumbing (protocol/control.rs:343, coordinator/status.rs:241, server/lifecycle.rs:228, server/helpers/status.rs:102, protocol_status.go:287, pkg/api/metrics.go:377/791, metrics_descriptors_userspace_session.go:27, metrics_userspace.go:677) | The additive-counters precedent §5.8 follows — full inventory (Codex r3 major 7 + r4 minor 9). |
 | **OPEN #6522** — sibling replica reap releases a live flow's SNAT allocation | The new registry's holder model (§5.6) is designed so this hazard cannot exist in it; pool-side fix remains #6522's own issue. |
 
 ## 4. Multiple Path Options (the design fork)
@@ -114,82 +113,69 @@ plus documentation, and saying so on the issue.
 Interface-mode becomes "address-only occupancy with preserve-first and an
 exact PAT fallback", built ENTIRELY on the shipped #5269 token machinery:
 
-1. **Registry (node-lifetime, OUTSIDE ForwardingState)** — in the
-   coordinator-owned shared-state home next to the three shared session maps
-   (`SessionManager`, coordinator/session_manager.rs:12), cloned into every
-   worker (`WorkerSharedDataplane::from_coord`, worker/launch.rs:130). Never
-   rebuilt on commit; one `Arc<PortAllocator>` per egress address.
-   `allocator_for` is ONE write-lock `entry(addr).or_insert_with(...)`
-   returning the stored winner. Bounded lifetime: snapshot-apply reclamation
-   (address absent from the new egress set AND `live_by_flow` empty), PLUS
-   opportunistic reclaim when a release empties an absent address's
-   allocator (AGY r3 nit 3); a cumulative cap of 256 CURRENTLY-RETAINED
-   allocators (Codex r3 minor 8: retained cardinality, NOT ever-created —
-   with its own cap-failure counter/reason); RELEASE is LOOKUP-ONLY
-   (`allocator_if_present` — a static/foreign decision's release never
-   creates an empty allocator).
+1. **Registry (node-lifetime, OUTSIDE ForwardingState)** — coordinator-owned
+   next to the shared session maps (`SessionManager`), cloned into every
+   worker (`WorkerSharedDataplane::from_coord`). Never rebuilt on commit;
+   one `Arc<PortAllocator>` per egress address. `allocator_for` is ONE
+   write-lock `entry(addr).or_insert_with(...)` returning the stored winner.
+   Bounded lifetime: apply-time reclamation (address absent from the new
+   egress set AND `live_by_flow` empty) + opportunistic reclaim when a
+   release empties an absent allocator; a cap of 256 CURRENTLY-RETAINED
+   allocators (retained cardinality, NOT ever-created — its own failure
+   surface per §5.8); RELEASE is LOOKUP-ONLY (`allocator_if_present`).
 2. **Occupancy model (identity-set, no bitmap claims)** — occupancy keyed on
    the FULL reverse identity `(protocol, egress_addr, port, dst_ip,
    dst_port)` (the shipped `AddressOnlyReverseKey`, allocator.rs:178-183):
    same source port to different servers → BOTH preserve; TCP vs UDP same
-   numeric port → both preserve; source port < 1024 → preserved (only PAT
-   candidates are drawn ≥ 1024); cross-destination port reuse allowed (the
+   numeric port → both preserve; source port < 1024 → preserved (PAT
+   candidates drawn ≥ 1024); cross-destination port reuse allowed (the
    Junos-default OVERLOADING posture).
 3. **Admission mint** (interface branch, nat/source.rs:1226), gated
    `!non_first_fragment && !tuple_unknown` (BOTH probe classes mint nothing):
    - **port-less protocol**: `alloc.reserve_address_only(flow, egress)` —
      Ok → Matched (address-only); Err → `Unavailable(AllocatorExhausted)`.
-   - **port-bearing**: per-step single-mutex CS — (i) idempotent re-entry
-     (`live_by_flow[flow]` → existing translation); (ii) identity-mint the
-     PRESERVED tuple → Matched with `rewrite_src_port: None`; (iii)
-     identity held by a different flow → EXACT PAT probe (Codex r3 major 5):
-     capture ONE start ordinal from the allocator's atomic cursor, then walk
+   - **port-bearing**: per-step single-mutex CS — (i) idempotent re-entry;
+     (ii) identity-mint the PRESERVED tuple → `rewrite_src_port: None`;
+     (iii) identity held by a different flow → EXACT PAT probe: capture ONE
+     start ordinal from the allocator's atomic cursor, walk
      `start + i mod 64512` LOCALLY (never re-calling the shared cursor
-     mid-walk — concurrent callers cannot skip/revisit this walk's
-     candidates), identity-minting `(proto, egress, candidate, dst,
-     dst_port)` per candidate, at most 64 candidates per `live` mutex
-     acquisition with a yield between chunks (#4676 discipline). A full
-     cycle with no success means one of two EXACT failure modes, both
-     reported `Unavailable(AllocatorExhausted)` and counted distinctly: the
-     per-(egress,dst,dport) identity space is full, OR the per-address
-     `live_by_flow` registry cap (64512) is consumed by flows to OTHER
-     destinations (registry-cap exhaustion is NOT per-destination
-     exhaustion — Codex r3 major 5a). Because chunks release the mutex, a
-     candidate can free after its chunk passed: ONE mutation-epoch retry
-     (if the allocator's mutation epoch advanced during the walk, re-walk
-     once); a second failure is accepted as exhaustion-under-churn
-     (documented transient, not a correctness violation — the
-     linearizability boundary AGY r3 verified).
+     mid-walk), identity-minting per candidate, at most 64 candidates per
+     `live` mutex acquisition with yields between (#4676). A full cycle
+     with no success = exhaustion, two modes distinguished by counter
+     (§5.8): per-(egress,dst,dport) identity space full, OR the per-address
+     `live_by_flow` registry cap (64512) consumed by flows to OTHER
+     destinations. ONE mutation-epoch retry (re-walk once if the epoch
+     advanced mid-walk); a second failure is documented exhaustion-under-
+     churn (the linearizability boundary AGY r3 verified).
    - Preserved and PAT'd tokens share the SAME `address_only` record shape
-     and the SAME release/rollback arms (allocator.rs:1332-1345/:1404-1418).
-     No lock-free pre-claim exists; the AGY r1/SMR M5 race cannot occur.
+     and the SAME release/rollback arms. No lock-free pre-claim exists.
 4. **No session-index, lookup, flow-cache, or packet-rewrite changes** —
-   translated identities unique per flow ⟹ the existing bijective fast path
-   is correct; NO longer packet-path scan (per the review's guidance).
-   Surface audit (verified POSITIVE by AGY r2 + Codex r2/r3):
+   identities unique per flow ⟹ the bijective fast path is correct; NO
+   longer packet-path scan (per the review's guidance). Surface audit
+   (verified POSITIVE by AGY r2 + Codex r2/r3/r4):
    `rewrite_src_port: Some(_)` is already generic from pool mode on
    flow-cache descriptors (flow_cache.rs:586), conntrack publish
    (publish_conntrack.rs:197), gRPC render (server_sessions.go:1724),
    RT_FLOW (rt_flow.rs:82), HA conversion (daemon_ha_userspace_convert.go:357
-   + protocol_ha.go:57).
+   + protocol_ha.go:57); DNAT composition is internally consistent
+   (`merge()` preserves destination rewrites, nat/mod.rs:125, and the SNAT
+   allocation uses the effective post-DNAT destination,
+   poll_descriptor/mod.rs:2201); tunnel-local entries carry
+   `NatDecision::default()` (tunnel.rs:565) — no counterexample.
 
 Trade-offs: closes the security hole AND the availability hole; wire change
-only for wire-ambiguous flows; (b)'s squatting DoS avoided (the victim PATs
-around the squatter). Cost: registry + holder model + §5.7 foreclosure +
-§5.8 counters.
+only for wire-ambiguous flows; (b)'s squatting DoS avoided. Cost: registry +
+holder model + §5.7 foreclosure + §5.8 counters.
 
 ### Option (b) — reserve-and-reject: fail the later collider closed
 
 Identical machinery minus the PAT probe: identity-mint Err →
-`Unavailable(AllocatorExhausted)`. Smallest diff (a strict subset of (a)'s);
-internally consistent with pool `no-translation` (#5269). Costs: (i)
-availability loss Junos does not have (same-id ICMP ping pair hard-fails the
-second host); (ii) **identity-squatting DoS**: an insider mints a victim's
-(source port, server) identity first and keeps it (or brute-forces all
-64512), denying the victim indefinitely — converting a confidentiality bug
-into an availability bug under the SAME attacker preconditions. Under (a)
-the victim PATs around the squatter. (AGY r1 argued (b); AGY r2 re-evaluated
-and now endorses (a); Codex r2/r3 endorse (a).)
+`Unavailable(AllocatorExhausted)`. Smallest diff (strict subset of (a)).
+Costs: (i) availability loss Junos does not have (same-id ICMP ping pair
+hard-fails the second host); (ii) **identity-squatting DoS** (learned or
+brute-forced (port, server) squats deny the victim indefinitely) — converting
+a confidentiality bug into an availability bug under the SAME attacker
+preconditions. (AGY r1 argued (b); AGY r2+ and Codex r2+ endorse (a).)
 
 ### Option (c) — status quo + documentation
 
@@ -198,8 +184,8 @@ misdelivery + hijack/squat primitive on a security-labeled issue.
 Recommended AGAINST.
 
 **Recommendation: option (a)** — preserve-first identity reservation + exact
-chunked PAT probe + port-less fail-closed token + §5.7 two-layer foreclosure
-with drain. All three reviewers have endorsed (a) since round 2.
+chunked PAT probe + port-less fail-closed token + §5.7 foreclosure with
+drain. All three reviewers have endorsed (a) since round 2.
 
 ## 5. Concrete design
 
@@ -211,7 +197,7 @@ with drain. All three reviewers have endorsed (a) since round 2.
 /// coordinator/session_manager.rs:12), cloned into every worker
 /// (worker/launch.rs:130). ONE allocator per egress ADDRESS (never per
 /// rule, never per VRF: the reverse lookup namespace is global-by-address —
-/// SessionKey carries no VRF/zone/ifindex, session/key.rs:9, #2387 open).
+/// session/key.rs:9, #2387 open).
 pub(crate) struct InterfaceNatAllocators {
     map: RwLock<FxHashMap<IpAddr, Arc<PortAllocator>>>, // 1-address each, 1024-65535
     /// §5.7: addresses whose interface mints are quarantined while a
@@ -223,10 +209,12 @@ impl InterfaceNatAllocators {
     fn allocator_for(&self, egress: IpAddr) -> Arc<PortAllocator>;
     /// LOOKUP-ONLY release path: None when no allocator exists — never creates.
     fn allocator_if_present(&self, egress: IpAddr) -> Option<Arc<PortAllocator>>;
-    /// Snapshot-apply: drop allocators absent from the new egress set with
-    /// an EMPTY live_by_flow; same predicate applied opportunistically when
-    /// a release empties an absent allocator. Cap 256 RETAINED.
+    /// Apply-time + opportunistic release-time reclamation (absent AND
+    /// empty); cap 256 RETAINED allocators.
     fn reclaim_absent(&self, live_egress: &FastSet<IpAddr>);
+    /// Teardown: drop ALL Worker markers registry-wide (workers joined,
+    /// tables destroyed); records emptied -> freed (§5.6).
+    fn release_all_worker_markers(&self);
 }
 ```
 
@@ -249,9 +237,8 @@ if rule.interface_mode {
     if non_first_fragment || tuple_unknown {
         return Matched(address-only decision);   // BOTH probe classes: mint nothing
     }
-    // §5.7 drain quarantine: fail closed while a draining pool/NAT64 domain
-    // holds live allocations on this address (new-mint gate ONLY — reserves
-    // for existing sessions are NOT quarantined).
+    // §5.7 drain quarantine: fail closed while a draining domain holds live
+    // allocations on this address (new-mint gate ONLY — reserves exempt).
     if iface_allocs.is_draining(rewrite_src) {
         return Unavailable(for_rule(rule, SourceNatFailureReason::InterfaceOverlapDraining));
     }
@@ -262,42 +249,59 @@ if rule.interface_mode {
             Err(r) => Unavailable(for_rule(rule, r)),
         };
     }
-    match alloc.allocate_interface_identity(flow, rewrite_src, now_ns) {
-        // per §4.3: idempotent re-entry -> existing; mint preserved identity;
-        // else exact full-cycle probe (local start ordinal, 64-chunk yields,
-        // one mutation-epoch retry); preserved -> rewrite_src_port None,
-        // PAT'd -> Some(candidate); exhaustion (two exact modes) -> Unavailable
-    }
+    match alloc.allocate_interface_identity(flow, rewrite_src, now_ns) { /* §4.3 */ }
 }
 ```
 
-### 5.3 Release / rollback / reserve-synced
+### 5.3 Reserve / release scan semantics (tri-state + provenance + drain)
 
-`release_source_nat_allocation_with_mode` and
-`reserve_synced_source_nat_allocation` each gain the registry parameter.
-Scan order stays pools-first (Codex r3 blocker 2's provenance concern is
-resolved by the DRAIN model, §5.7: a preserved pool session's identity
-belongs to the DRAINING pool domain, so pool-first scan order is CORRECT
-during drain; after drain the pool is gone and only the interface domain
-remains — no window where both domains claim ownership of new mints).
-Interface arm is LOOKUP-ONLY, flow-keyed discrimination
-(`live_by_flow[flow]` + `existing.translated == translated`,
-allocator.rs:1318-1330) so pool address-only and interface-mode decisions
-each miss the other's registry. The nine release sites thread the worker's
-stable `worker_id: u32` (`BindingWorker.worker_id`, worker/mod.rs:108-112).
-Synced reserve mints the exact synced identity and mirrors `reserve_flow`'s
-stale-tuple-drop (allocator.rs:1666-1676) with the PER-HOLDER-OWNER
-decrement discipline (SMR r3 M14): each site decrements only its own
-marker — the coordinator's drop decrements `{Shared}`, a worker's drop
-decrements `{Worker(W)}`; cross-site orphan windows are bounded by the
-upsert fanout and are leak-safe direction (never free-early).
+Every reserve and release scan over the occupancy domains becomes
+TRI-STATE per domain (Codex r4 blocker 1 — "not this domain" and "identity
+conflict" must never be conflated):
+
+```
+enum DomainReserve { NotThisDomain, Owned, IdentityConflict }
+```
+
+- A domain answers `NotThisDomain` when the translated address is not its
+  own (pool does not contain E; interface registry has no allocator for E —
+  noting the registry is lookup-only here).
+- A domain that owns the address attempts the reserve: success → `Owned`;
+  the identity is held by a DIFFERENT flow → `IdentityConflict`.
+- Scan order pools (active rules) → draining pools → interface registry;
+  the scan STOPS at `Owned` and ABORTS at `IdentityConflict` (the import/
+  reserve fails closed — never falls through to a second domain, so no
+  cross-domain duplicate is possible even mid-drain: Codex r4's
+  counterexample — draining pool owns T, interface reserve of the same T
+  falls through — dies here: the draining pool answers IdentityConflict and
+  the reserve aborts).
+- `nat.nat64` decisions BYPASS the source/interface scan entirely (their
+  reserve belongs to `reserve_synced_nat64_allocation`,
+  upsert_synced.rs:105) — no double-domain token. (Post-#5144 a NAT64 pool
+  is never also a source pool, so this is defense-in-depth, not a behavior
+  change.)
+- The DRAINING vec participates in BOTH the release and reserve scans
+  (AGY r4 major 2: a pool edited/removed while draining leaves its
+  allocator out of active `rules`; expiring pool flows' releases and
+  mirrored reserves must still reach it — flow-keyed discrimination makes
+  double-release impossible: a flow's allocation lives in exactly one
+  allocator).
+- `addr_index` becomes AUTHORITATIVE in every address-only mint/reserve
+  path (Codex r4 blocker 3: `reserve_address_only` and its roundrobin
+  variant currently write `addr_index: 0`, allocator.rs:1770/1874/1809, so
+  the per-index drain counter would misattribute an address-only flow on E
+  to index 0 = a different address). The mint/reserve paths record the
+  chosen address's real index; stale-tuple moves update it. The drain
+  probe is then O(1) per-index live count.
+- The nine release sites thread the worker's stable `worker_id: u32`
+  (`BindingWorker.worker_id`, worker/mod.rs:108-112).
 
 ### 5.4 HA / mixed-version
 
 Synced decisions carry `rewrite_src_port` over the existing wire — no wire
 change. Mixed-version rolling upgrade:
 - new active → old standby: the old standby IMPORTS the PAT'd decision fine
-  (the field is generic — protocol_ha.go:57, daemon_ha_userspace_convert.go:357;
+  (generic field — protocol_ha.go:57, daemon_ha_userspace_convert.go:357;
   AGY r1's "mis-parse" claim withdrawn in AGY r2). The old standby never
   RESERVES it (its reserve skips non-pool rules, nat/source.rs:921).
   Post-failover it can admit a no-PAT flow onto the synced tuple —
@@ -305,164 +309,197 @@ change. Mixed-version rolling upgrade:
 - old active → new standby: the pair the old active admitted collides on
   the standby exactly as on the active; the new standby pre-reserves the
   first and DROPS the second import on conflict (§5.6); post-failover the
-  dropped flow re-establishes. Pinned bulk-sync/failover test (§9, Codex r3
-  major 6).
+  dropped flow re-establishes. Pinned bulk-sync/failover test (§9).
 - Verdict: an ACCEPTED, documented rolling-upgrade window bounded by the
   pre-existing bug's probability, closing when both nodes upgrade.
-  `SessionSyncProtocol` gating (pkg/upgrade/imageversions.go:162) rejected:
-  hard-gating breaks HA sync during any rolling upgrade — worse.
+  `SessionSyncProtocol` gating (pkg/upgrade/imageversions.go:162) rejected.
 
 ### 5.5 Fragments / ICMP
 
 First fragment carries L4 → normal admission; the forward fragment assoc
 (#2562/#5146) stores the decision (with any PAT port) and non-first
 fragments consult it; out-of-order non-first-first fragments drop fail-closed
-via the #6122 probe (probe purity per §5.2); ICMP echo id collision →
-second id translated through the #4074 `rewrite_src_port` machinery (RFC
-5508 §3.1) including incremental checksum.
+via the #6122 probe; ICMP echo id collision → second id translated through
+the #4074 machinery (RFC 5508 §3.1) including incremental checksum.
 
 ### 5.6 Holder ownership and transactional reserve (the lifecycle-complete model)
 
 The holder set on each flow's `live_by_flow` record is
 `FxHashSet<HolderId>`, `HolderId = Worker(u32) | Shared`:
 
-- **Local admission**: mint at decision time inserts `{Worker(W)}` —
-  RESERVE-BEFORE-INSTALL by construction (the mint precedes the session
-  install; install-refused aborts roll back via the existing rollback
-  sites, poll_descriptor/mod.rs:2313/2374/2472/2634/4902).
+- **Local admission**: mint inserts `{Worker(W)}` at decision time —
+  RESERVE-BEFORE-INSTALL by construction (install-refused aborts roll back
+  via the existing rollback sites).
+- **Local publication acquires {Shared}** (Codex r4 blocker 5):
+  `publish_shared_session` gains the registry parameter and, for FORWARD
+  entries whose decision's `rewrite_src` resolves to an interface-registry
+  allocator (`allocator_if_present`) with a live record for this flow,
+  inserts `{Shared}` into that record (idempotent — the canonical insert
+  below). Without this, worker expiry released the only holder
+  (loop_body/mod.rs:1625) before the Close-delta removed the shared row
+  (session_delta.rs:436) — the early-free shape the holder model exists to
+  eliminate. Reverse companions are holder-neutral.
+  `remove_shared_session` gains the registry parameter and removes
+  `{Shared}` (the canonical row's removal at
+  session_delta.rs:436/446, promote.rs:181, session_glue/mod.rs:587/938/945,
+  session_import.rs:314/329, local_delivery.rs:91 — the closed inventory,
+  SMR r3 M13 including the note that a locally-owned reap reaches removal
+  VIA THE CLOSE-DELTA RELAY, not at reap time).
 - **Sync import — TRANSACTIONAL at the coordinator**: the coordinator
   pre-reserves the identity (+`{Shared}`) BEFORE `publish_shared_session`
   (ha/session_import.rs:131-137 publishes before fanning worker upserts at
-  :233). On identity CONFLICT the import is DROPPED (not published, not
-  queued; counted by §5.8's
+  :233). On identity CONFLICT the import is DROPPED (counted by
   `xpf_userspace_interface_snat_sync_identity_conflict_drops_total` + one
-  Debug line per drop) — fail-closed: the standby never holds a session it
-  cannot own; post-failover the flow re-establishes. The pre-reserve gates
-  `is_reverse`. Bulk-sync replay is idempotent (`{Shared}` set-absorbed;
-  a tuple CHANGED re-import hits the §5.3 stale-tuple-drop with the
-  per-holder-owner decrement). The HA-fidelity DoS (an attacker on the
-  standby's local segments squatting a synced identity so every refresh
-  import loses; failover then kills that flow) is EXPLICITLY ACCEPTED and
-  EXPOSED (the counter) — the alternatives are worse: install-unreserved
-  restores the confidentiality bug post-failover; quarantine-with-retry
-  holds table state for a session that still cannot forward at failover
-  (Codex r3 major 6 adjudication).
-- **Worker-side sync install — RESERVE-BEFORE-INSTALL** (Codex r3 blocker 3;
-  v3's install-then-reserve wrapper plus the delete/upsert race produced an
-  installed-but-unreserved duplicate): the single
+  Debug line) — fail-closed: the standby never holds a session it cannot
+  own. Pre-reserve gates `is_reverse`. Bulk-sync replay is idempotent. The
+  HA-fidelity DoS (an attacker on the standby's segments squatting a synced
+  identity so every refresh import loses) is EXPLICITLY ACCEPTED and
+  EXPOSED (Codex r3 major 6: drop is the safer posture;
+  quarantine-with-retry adjudicated and rejected — a quarantined session
+  still cannot forward at failover but holds table state).
+- **Worker-side sync install — RESERVE-BEFORE-INSTALL**: the single
   `install_synced_with_reserve(...)` wrapper = (1) reserve/+`{Worker(W)}`
   (idempotent-hits the coordinator's pre-reserved record); on reserve
-  FAILURE → DO NOT install (drop the command, count, Debug); (2) install;
+  FAILURE → do NOT install (drop the command, count, Debug); (2) install;
   on install refusal → release the just-added holder (rollback). Used by
   ALL THREE sync-family install sites (AGY r3 verified the inventory
   complete): `WorkerCommand::UpsertSynced` (commands/upsert_synced.rs:65),
   `materialize_shared_session_hit` (session_glue/mod.rs:1130),
-  `WorkerCommand::UpsertLocal` (session_glue/mod.rs:808 tunnel prewarm).
-  With reserve-first, the v3 race (coordinator delete removes `{Shared}`
-  before a queued upsert; a local mint claims the identity; the stale
-  upsert arrives) fails at the upsert's RESERVE — nothing installs — no
-  unreserved duplicate.
-- **Shared-map lifetime — pinned to the CANONICAL map** (SMR r3, refining
-  AGY r3 major 1): the `{Shared}` holder rides the `shared_sessions`
-  canonical map (keyed by session key, shared_ops.rs:905-909), NOT the
-  reverse indexes. Canonical-map displacement is same-key (the same logical
-  session re-publishing — refresh/promote/RG-migration), which the holder
-  SET absorbs idempotently; reverse-index displacement (shared_ops.rs:921/
-  :932) drops only an index row and is NOT a holder event. The closed
-  removal inventory (SMR r3 M13): the seven `remove_shared_session` callers
-  (session_delta.rs:436/446 — note the locally-owned reap reaches removal
-  VIA THE CLOSE-DELTA RELAY, not at reap time; promote.rs:181;
-  session_glue/mod.rs:587/938/945; session_import.rs:314/329;
-  local_delivery.rs:91), the canonical same-key displacement (set-absorbed,
-  non-event), the reverse-index displacement (non-event), and the wholesale
-  clears — next bullet.
-- **Wholesale clears — ITERATE-AND-RELEASE first** (AGY r3 major 2 +
-  Codex r3 blocker 4): `stop_inner(true)`/`clear_synced_state`
-  (coordinator/mod.rs:756-766) `.clear()`s all three shared maps — reached
-  in PRODUCTION via `stop_workers` link stop→rebind cycles
-  (server/handlers/stop_workers.rs:7), and the node-lifetime registry
-  survives. Before clearing, walk the canonical map and `−{Shared}` every
-  forward entry holding an interface-mode reserve (bulk release helper on
-  the registry); only then clear. Test: stop→rebind with a held interface
-  identity (§9).
-- **Releases**: the nine release sites remove the releasing worker's
-  `{Worker(W)}`; the identity's token frees when the holder set empties.
-  Saturating-decrement clamp + flow+tuple-keyed release (a stray decrement
-  can never touch a different flow's allocation).
-- **Neutral paths**: promote (promote.rs:99 mutate-in-place), demote
-  (install.rs:568 origin flip), #1752 in-place refresh — NO reserve/release
-  calls, holder-neutral by construction.
-- Net effect: the identity survives while ANY entry replica or shared entry
-  lives node-wide — the #6522 hazard cannot exist in this registry.
+  `WorkerCommand::UpsertLocal` (session_glue/mod.rs:808).
+  **Materialize failure semantics** (Codex r4 major 7): materialize is not
+  a command — its wrapper variant returns `Option`; on reserve failure the
+  LOOKUP returns a miss (the reply packet takes the no-session path and
+  drops) rather than returning the shared decision unconditionally
+  (session_glue/mod.rs:1128/1146 today).
+  **Dropped-command gap** (AGY r4 adjudication): a worker whose
+  `UpsertSynced` dropped never installs the entry; failover onto that
+  worker takes the standard no-session re-establishment path — no
+  confidentiality compromise; a later genuine refresh re-publishes and
+  re-queues. The coordinator's `{Shared}` for such an entry persists by
+  design ({Shared} rides the canonical row, removed by the peer's
+  delete-sync or entry expiry — AGY r4 minor 3, documented accepted
+  asymmetry, not fed back).
+- **Tuple-changing re-sync — STAGED REPLACEMENT protocol** (Codex r4
+  blocker 6: one `live_by_flow[F]` record cannot hold `{Worker}` on T1 and
+  `{Shared}` on T2 during the overlap; and `reserve_flow`'s unconditional
+  stale-drop at allocator.rs:1671 must not free T1 while the worker still
+  forwards on it):
+  - Coordinator: pre-read the canonical row's CURRENT tuple T_old →
+    pre-reserve T_new (+`{Shared}`) → `−{Shared}` on T_old (its own marker
+    only) → publish T_new. T_old stays held by its `{Worker}` markers
+    (never freed mid-overlap).
+  - Worker wrapper: pre-read the existing entry's tuple T_old → reserve
+    T_new (+`{Worker(W)}`) → install (in-table replace makes T_old
+    unreachable, session/install.rs:322) → release T_old (`−{Worker(W)}`).
+    T_old's record empties → freed, only AFTER it is unreachable on every
+    scope that referenced it.
+  - Each side decrements only its own marker (SMR r3 M14); cross-site
+    windows are bounded by the fanout and are hold-safe direction
+    (never free-early).
+- **Worker-thread teardown — marker drop** (Codex r4 blocker 4 + AGY r4
+  major 1): `stop_and_clear` (worker_manager.rs:141) joins worker threads,
+  whose tables drop WITHOUT release routines (worker exit only flushes
+  counters + CoS leases, loop_body/mod.rs:1563). After the join,
+  `release_all_worker_markers()` drops every `{Worker(*)}` registry-wide;
+  records emptied → freed. Path matrix (Codex r4's inventory):
+  - `stop_inner(false)` — full reconcile (teardown.rs:80) and bind-
+    incomplete rollback (bringup.rs:213): worker tables DESTROYED; canonical
+    shared entries SNAPSHOT-PRESERVED (teardown.rs:56) and REPLAYED
+    (coordinator/mod.rs:810). Worker markers dropped at join; `{Shared}`
+    survives (canonical rows persist); replay re-acquires `{Worker}` via
+    the wrapper on the new workers.
+  - `stop_inner(true)` — link-cycle stop (coordinator/mod.rs:459) and
+    process exit (:471): workers joined (worker markers dropped) AND the
+    shared maps cleared wholesale — the clear FIRST iterate-and-releases
+    `{Shared}` per forward interface-mode entry (AGY r3 major 2), then
+    clears; with both marker classes gone the registry holds nothing for
+    the wiped state.
+  - Same-plan refresh: worker tables PERSIST — no marker event at all.
+- **Neutral paths**: promote (promote.rs:99), demote (install.rs:568),
+  #1752 in-place refresh — NO reserve/release calls.
+- Net effect: the identity survives while ANY entry replica or shared
+  canonical row lives node-wide — the #6522 hazard cannot exist in this
+  registry.
 
-### 5.7 Cross-domain overlap foreclosure with DRAIN (Codex r3 blockers 1-2)
+### 5.7 Cross-domain overlap foreclosure with DRAIN (Codex r3 blockers 1-2, r4 blockers 2-3)
 
 The interface registry, source-pool allocators, and NAT64 allocators are
 DISJOINT occupancy domains; a source pool (or NAT64 pool) containing an
 egress interface address reintroduces the collision across the seam.
 Foreclosure at BOTH layers, plus a DRAIN discipline for already-live
-sessions (Codex r3 blocker 1: marking a pool unusable stops only NEW pool
-admissions; preserved/live pool sessions keep their tuples — teardown.rs:54
-preserves shared sessions across reconcile, coordinator/mod.rs:810 replays,
-and local worker-table sessions persist across snapshot swaps — so the
-interface domain must not mint on the overlapping address until the old
-domain drains):
+sessions:
 
 1. **Commit validator** (#5144 extension): interface-mode egress addresses
    join the owner set DEDUPED BY ADDRESS (multi-rule same-WAN configs must
    not false-reject). Overlap → REJECT at strict commit; WARN on tolerant
    load / peer-sync (#5837/#1960 no-brick doctrine).
-2. **Snapshot builder + DRAIN** (the runtime layer — interface snapshots
-   resolve LIVE kernel addresses, interfaces.go:455-465, so DHCP/
-   externally-installed addresses can overlap a configured pool invisibly
-   to config validation; DHCP triggers a full recompile on address change,
-   daemon_dhcp.go:73/85):
-   - Any pool address overlapping an interface address that an
-     interface-mode rule can egress on marks that POOL unusable
-     (`pool_failure`/`PoolUnusable` — fail-closed NEW pool admissions,
-     nat_source.go:118-122 precedent). NAT64: the builder emits the
-     overlapping NAT64 rule with an EMPTY pool — the shipped native
-     fail-closed path (nat64.rs:1123) — plus the validator warning names
-     the overlap (Codex r3 blocker 2: no `PoolUnusable` field exists on the
-     NAT64 snapshot, protocol_nat.go:319/protocol/nat.rs:312; empty-pool is
-     the channel).
+2. **Snapshot builder + DRAIN** (interface snapshots resolve LIVE kernel
+   addresses, interfaces.go:455-465; DHCP triggers a full recompile on
+   address change, daemon_dhcp.go:73/85):
+   - **Egress-address derivation matrix** (Codex r4 major 8): per
+     interface-mode rule, the overlap candidate set is — `to-interface`:
+     that interface's addresses; `to-zone`: the zone's interfaces'
+     addresses; `to-routing-instance`: the RI's interfaces' addresses;
+     NO to-side scope (or from-side only): ALL dataplane interfaces'
+     addresses (wildcard, matching the Rust `scope_matches` semantics at
+     nat/source.rs:351 — the Go precedent that collected only non-empty
+     `ToZone` and returned nothing for unscoped rules, maps_sync.go:1735,
+     is insufficient and is replaced). §9's builder test matrix covers all
+     four scope shapes.
+   - Any pool address overlapping a derived candidate address marks that
+     POOL unusable (`pool_failure`/`PoolUnusable` — fail-closed NEW pool
+     admissions). NAT64: the overlapping rule is emitted with an EMPTY pool
+     (shipped native fail-closed at nat64.rs:1123; the old NAT64 allocator
+     is retained SEPARATELY from the active empty prefix — normal reuse
+     requires a byte-identical pool, nat64.rs:937, Codex r4 verified).
    - The dataplane RETAINS the quarantined pool's previous allocator as a
-     DRAINING domain (the #4518 NAT64 carry-over precedent): releases from
-     already-live sessions keep draining it; a per-address-index live
-     counter (small allocator addition; mint +1 / release −1) makes the
-     drain observable in O(1). Reserve/release scans for POOL decisions
-     keep consulting the draining allocator (their identities belong to
-     that domain until empty).
-   - The interface registry records `draining[E] = [draining allocators]`;
-     interface MINTS on E fail closed
-     (`InterfaceOverlapDraining`, counted) while any draining allocator
-     holds live allocations on E; the quarantine lifts when the drain
-     empties, and the drained allocator is then dropped. Interface
-     RESERVES (synced imports of existing sessions) are NOT quarantined —
-     they are ownership claims for sessions that already exist.
-   - Race window (documented): a NEW interface mint on E racing the
-     drain-marker installation at snapshot-apply can claim an identity a
-     preserved session still holds; the preserved session's replay/import
-     reserve then conflicts and DROPS that session (fail-closed per §5.6) —
-     availability loss bounded to the racing session, never misdelivery.
+     DRAINING domain (a compatibility carry-over key that ignores the new
+     failure marker and survives repeated quarantined snapshots — Codex r4
+     verified the current `allocator_key()` drops carry-over on
+     `pool_failure`, source.rs:337/726, so the drain retention is an
+     explicit new key); releases and mirrored reserves keep reaching it
+     (§5.3 drain-vec scan); the per-index live counter (§5.3's
+     authoritative `addr_index`) makes the drain O(1)-observable.
+   - **Drain-marker ordering** (Codex r4 blocker 2): the drain marker for
+     an address E is installed in the registry BEFORE the new RuntimeView
+     is published to workers (before the worker-visible store at
+     snapshot_refresh.rs:458/472 — early installation is safe, it can only
+     over-quarantine; late installation is not). Under the OLD dataplane
+     state the overlap does not yet exist (the pool edit / address
+     addition is not applied), so mints before the marker are consistent
+     with the old config; mints under the new state are quarantined from
+     the first packet. The v4 "race window" is CLOSED, not documented.
+   - **Atomic drain lift**: when the drain empties, the draining entry and
+     its allocator are removed from the draining map under ONE registry
+     lock, and the quarantine lifts in the same critical section — a late
+     synced reserve after that point gets `NotThisDomain` from the
+     (removed) pool domain and transfers to the interface registry
+     (ownership continuity), never resurrects the drained allocator
+     (Codex r4 blocker 2's closed/resurrection protocol).
+   - Interface RESERVES (synced imports of existing sessions) are NOT
+     quarantined — they are ownership claims for sessions that already
+     exist (but are tri-state per §5.3: an `IdentityConflict` aborts).
 
 ### 5.8 Observability (additive, production)
 
-Three ADDITIVE optional counters on the existing helper status wire,
-plumbed via the FULL #1760-W3' precedent (Codex r3 major 7 inventory:
-protocol/control.rs:343 + server/lifecycle.rs:228 init +
-server/helpers/status.rs:102 refresh on the Rust side;
-protocol_status.go:287 + pkg/api/metrics.go:377 +
-metrics_descriptors_userspace_session.go:27 + metrics_userspace.go:677 on
-the Go/Prometheus side; additive per #1961):
+Four ADDITIVE optional counters on the existing helper status wire,
+plumbed via the FULL #1760-W3' precedent (protocol/control.rs:343 +
+coordinator/status.rs:241 + server/lifecycle.rs:228 init +
+server/helpers/status.rs:102 refresh; protocol_status.go:287 +
+pkg/api/metrics.go:377 + Describe registration at metrics.go:791 +
+metrics_descriptors_userspace_session.go:27 + metrics_userspace.go:677;
+additive per #1961):
 - `xpf_userspace_interface_snat_pat_collisions_total` — identity-mint
   conflicts that took the PAT probe;
 - `xpf_userspace_interface_snat_identity_exhaustion_total` — completed
-  full-cycle probes (per-destination exhaustion) + registry-cap exhaustion
-  + port-less fail-closed collisions + drain-quarantine rejections;
+  full-cycle probes (per-destination exhaustion) + port-less fail-closed
+  collisions + drain-quarantine rejections;
+- `xpf_userspace_interface_snat_registry_cap_exhaustion_total` — the
+  per-address 64512 flow-registry cap AND the 256-retained-allocator cap
+  (both "cannot create more registry state" events; Codex r4 minor 9 +
+  nit 10 — the two §4.3 exhaustion modes are now counted distinctly);
 - `xpf_userspace_interface_snat_sync_identity_conflict_drops_total` —
-  coordinator import-conflict drops (§5.6) — a High security fix that
-  deliberately discards HA state must expose it (Codex r3 major 7).
+  coordinator import-conflict drops (§5.6).
 `debug_log!` is feature-gated (afxdp/mod.rs:51) — test/dev aid only.
 Exhaustion additionally rides the existing production NAT-failure event
 path (`record_source_nat_failure`, nat_exception.rs:154). PAT'd sessions
@@ -473,71 +510,79 @@ occupancy/holder introspection is a named follow-up, not this PR.
 
 Preserved byte-for-byte: `NatDecision`, `SourceNatLookup`, `SessionKey`,
 `SyncedSessionEntry`, the HA session-sync wire, the Go→helper snapshot
-protocol (`SourceNATRuleSnapshot` gains NO fields; the NAT64 snapshot gains
-NONE — empty-pool is the fail-closed channel), all CLI/gRPC surfaces.
-Additive-only wire change: the three §5.8 status counters (optional fields,
+protocol (`SourceNATRuleSnapshot` and the NAT64 snapshot gain NO fields —
+empty-pool is the NAT64 fail-closed channel), all CLI/gRPC surfaces.
+Additive-only wire change: the four §5.8 status counters (optional fields,
 #1961-safe). Changed signatures are `pub(crate)`-internal only:
 `match_source_nat_result_for_tuple` (+1 arg),
 `match_source_nat_for_flow_result_at` (+1), `source_nat_decision_for_flow`
 (+1), `source_nat_would_translate_fragment` (+1),
 `release_source_nat_allocation` / `rollback_source_nat_allocation` /
-`reserve_synced_source_nat_allocation` (+2 each: registry + worker id), the
-coordinator test helper, the nine release sites' call expressions, the new
+`reserve_synced_source_nat_allocation` (+2 each: registry + worker id),
+`publish_shared_session` (+1: registry — Codex r4 blocker 5),
+`remove_shared_session` (+1: registry), the coordinator test helper, the
+nine release sites' call expressions, the new
 `install_synced_with_reserve` wrapper at the three sync-family install
-sites, the registry bulk-release helper at the wholesale-clear site, and
-the pool-allocator per-index live counter + drain carry-over. Go changes:
-the #5144 validator extension (dedup-by-address), the snapshot-builder
-overlap marking (source pools + NAT64 empty-pool), the three status-counter
-mirrors, and tests.
+sites, `release_all_worker_markers` at the worker-join teardown,
+the registry bulk-release at the wholesale-clear site, the pool-allocator
+authoritative `addr_index` + per-index live counter + drain carry-over key,
+and the address-only mint paths' `addr_index` correction. Go changes: the
+#5144 validator extension (dedup-by-address), the snapshot-builder overlap
+marking (source pools + NAT64 empty-pool + the §5.7 derivation matrix),
+the four status-counter mirrors + Describe registration, and tests.
 
 ## 7. Hidden invariants the change must preserve
 
 - **Core ownership invariant**: every reachable session owns exactly one
   translated identity, held continuously from BEFORE it is reachable
   (decision-time mint; coordinator pre-reserve; reserve-before-install
-  wrapper) until AFTER it is not (holder set empties: all workers + shared
-  canonical row released).
+  wrapper; publish-time {Shared}) until AFTER it is not (holder set
+  empties: all workers + shared canonical row + teardown marker sweeps).
 - **Probe purity (both classes)**: `non_first_fragment == true` OR
   `tuple_unknown == true` mints NOTHING.
 - **Single-CS mint**: identity check + insert under ONE `live` mutex
-  acquisition; the exact PAT probe chunks at 64 candidates per acquisition
-  with yields, a LOCAL start ordinal (no shared-cursor skips), and ONE
-  mutation-epoch retry (second failure = exhaustion-under-churn,
-  documented).
+  acquisition; the exact PAT probe chunks at 64 with yields, a LOCAL start
+  ordinal, and ONE mutation-epoch retry.
 - **Idempotent re-entry**: a second packet of the same flow returns the
   existing translation; no double-mint.
 - **Release symmetry**: every mint frees through the existing teardown
   sites — no new delete site; rollback frees pre-install aborted mints;
-  holder set (workers + shared) empties before the identity frees;
-  wholesale clears iterate-and-release first.
+  holder set empties before the identity frees; wholesale worker teardown
+  drops all worker markers; wholesale shared clears iterate-and-release.
 - **Never-steal**: synced reserve fails rather than evict a different
-  flow's live identity; conflict at import DROPS the synced entry.
+  flow's live identity; `IdentityConflict` ABORTS the reserve (tri-state),
+  never falls through to a second domain.
 - **Reserve-before-install everywhere**: local mint precedes install;
-  worker wrapper reserves first (drop on failure, rollback on install
-  refusal); coordinator pre-reserve precedes publication.
-- **Drain discipline**: interface mints quarantine on an overlapping
-  address while any draining domain holds live allocations on it; reserves
-  are never quarantined; the draining allocator is carried (not dropped)
-  until empty.
+  worker wrapper reserves first (drop on failure, rollback on refusal);
+  coordinator pre-reserve precedes publication; materialize returns
+  miss-on-failure.
+- **Continuous holding across tuple change**: the staged replacement
+  protocol (§5.6) never frees T_old before it is unreachable on every
+  scope; each owner decrements only its own marker.
+- **Drain discipline**: drain markers install BEFORE the worker-visible
+  RuntimeView store; interface mints quarantine while any draining domain
+  holds live allocations on the address; reserves are never quarantined
+  (but are tri-state); the drain lift is one atomic critical section (no
+  resurrection); `addr_index` is authoritative in every mint path.
 - **Registry lifetime**: node-lifetime; atomic `or_insert_with` creation;
   reclamation only when address-absent AND live-empty (apply-time +
-  opportunistic at release); cap 256 RETAINED with its own failure
-  counter; release LOOKUP-ONLY.
+  opportunistic); cap 256 RETAINED with its own counter; release
+  LOOKUP-ONLY.
 - **NatDecision freeze**: no new fields; `rewrite_src_port: Some(_)` is
   handled generically everywhere from pool mode.
 - **Hot path**: established-flow transit untouched; zero new per-packet
   work; admission-only registry locks; 1:N multimaps return to len-1
   inline buckets for interface SNAT.
-- **Logging**: no per-packet logging; security-relevant events (PAT probe,
-  exhaustion, quarantine, import-conflict drop) ride §5.8 counters.
+- **Logging**: no per-packet logging; security-relevant events ride §5.8
+  counters.
 
 ## 8. Risk assessment
 
 | Class | Rating | Notes |
 |---|---|---|
-| Behavioral regression | LOW-MED | Wire change only for wire-ambiguous flows (later collider PAT'd); non-colliding flows byte-identical incl. sub-1024 ports and cross-dst port sharing. Overlap foreclose marks misconfigured pools unusable and DRAINS live ones (interface mints on the overlapping address fail closed during the drain — an availability pause on a previously-misdelivering path, not a silent failure). Import drop-on-conflict sacrifices individual synced flows rather than their confidentiality. Pinned tests at session/tests.rs:4560/4602 stay GREEN (direct-install pins bypass admission) — one re-pointed at a live collision class, one annotated (§9). Mixed-version HA window documented (§5.4). |
-| Lifetime / borrow-checker | LOW | Registry is `Arc<PortAllocator>` clones out of a coordinator-owned `RwLock` map; the SessionManager placement precedent. |
-| Performance regression | LOW | Admission-only: registry write-lock create (first use per address) or read; one `live` mutex identity mint per NEW interface-mode flow; PAT probe only on collision (chunked); drain probe O(1) per mint on quarantined addresses only; sync import +1 mint per entry on the coordinator (throttled sweep); zero per-packet cost. |
+| Behavioral regression | LOW-MED | Wire change only for wire-ambiguous flows (later collider PAT'd); non-colliding flows byte-identical incl. sub-1024 ports and cross-dst port sharing. Overlap foreclose marks misconfigured pools unusable and DRAINS live ones (interface mints on the overlapping address fail closed during the drain — an availability pause on a previously-misdelivering path). Import drop-on-conflict sacrifices individual synced flows rather than their confidentiality. Tuple-changing re-sync keeps T_old held until unreachable. Pinned tests at session/tests.rs:4560/4602 stay GREEN (direct-install pins bypass admission) — one re-pointed at a live collision class, one annotated (§9). Mixed-version HA window documented (§5.4). |
+| Lifetime / borrow-checker | LOW | Registry is `Arc<PortAllocator>` clones out of coordinator-owned `RwLock` maps; the SessionManager placement precedent. |
+| Performance regression | LOW | Admission-only: registry write-lock create (first use per address) or read; one `live` mutex identity mint per NEW interface-mode flow; PAT probe only on collision (chunked); drain probe O(1) on quarantined addresses only; publish/remove +1 idempotent holder op per forward session lifecycle (cold paths); sync import +1 mint per entry on the coordinator (throttled sweep); zero per-packet cost. |
 | Architectural mismatch | LOW | Built verbatim on the shipped #5269 token machinery + #5144 validator pattern + SessionManager placement + #4518 drain carry-over + #1760-W3' counter plumbing; no new subsystem, no packet-path scan. |
 
 ## 9. Test plan
@@ -554,29 +599,37 @@ mirrors, and tests.
   fail-closed; EXACT probe (local start ordinal: full cycle finds the one
   free candidate among shaped contiguous occupied runs — RED on the v2
   4096-budget design; genuine per-destination saturation → exhaustion;
-  registry-cap exhaustion distinguished from per-destination exhaustion —
-  Codex r3 major 5; concurrent mint/free with the mutation-epoch retry);
-  idempotent re-entry; cross-rule same-egress collision detected; BOTH
-  probe classes mint nothing; rollback frees; reserve_synced mirrors exact
-  identity, never steals, stale-tuple re-reserve drops old identity with
-  per-holder-owner decrement; holder completeness (sibling replica reap
-  does not free the owner's identity — RED on the #6522 shape; replay
-  re-reserve is a no-op; all-workers-reap with live shared canonical row
-  does NOT free; materialize acquires via the wrapper; coordinator
+  registry-cap vs per-destination exhaustion distinguished; concurrent
+  mint/free with the mutation-epoch retry); idempotent re-entry;
+  cross-rule same-egress collision detected; BOTH probe classes mint
+  nothing; rollback frees; reserve_synced tri-state (NotThisDomain /
+  Owned / IdentityConflict — the Codex r4 counterexample: draining pool
+  owns T, interface import of T aborts, never falls through); nat64
+  decisions bypass the source/interface scan; addr_index authoritative in
+  every address-only mint path (pool [A,E] address-only flow on E counts
+  against E, not A); stale-tuple staged replacement (T_old held until
+  unreachable; each owner drops only its own marker); holder completeness
+  (sibling replica reap does not free the owner's identity — RED on the
+  #6522 shape; replay re-reserve is a no-op; all-workers-reap with live
+  shared canonical row does NOT free; materialize acquires via the wrapper
+  and returns miss-on-failure; local publish acquires {Shared}; coordinator
   pre-reserve conflict drops the import; RESERVE-BEFORE-INSTALL: the
-  delete/upsert/local-mint race leaves NO installed-unreserved duplicate —
-  Codex r3 blocker 3's deterministic test; wholesale clear
-  iterate-and-releases every {Shared}; stop→rebind with a held identity);
-  drain quarantine (overlapping pool marked unusable; live pool session
-  keeps its tuple in the draining allocator; interface mint on the address
-  fails closed; drain completes → mints proceed).
+  delete/upsert/local-mint race leaves NO installed-unreserved duplicate;
+  worker-join teardown drops all worker markers; stop_inner(false)
+  reconcile replay re-acquires; wholesale clear iterate-and-releases every
+  {Shared}; stop→rebind with a held identity); drain quarantine (overlap
+  marked unusable; live pool session keeps its tuple in the draining
+  allocator; interface mint on the address fails closed; drain completes →
+  atomic lift → mints proceed; pool EDITED mid-drain → releases still
+  reach the draining allocator via the drain-vec scan — AGY r4 major 2).
 - Go validator tests: dedup-by-address (two interface rules, one WAN
   address → NO false rejection); interface-vs-source-pool overlap → strict
   reject + tolerant warn; interface-vs-NAT64-pool overlap → same;
   no-overlap pass.
-- Go builder tests: pool overlapping a RUNTIME-resolved interface address
-  (mocked buildLinkSnapshot) → pool_unusable; NAT64 overlapping rule →
-  emitted with EMPTY pool (native nat64.rs:1123 fail-closed); non-overlap
+- Go builder tests (the §5.7 derivation matrix): overlap via `to-zone`,
+  via `to-interface`, via `to-routing-instance`, via UNSCOPED to-side
+  (wildcard = all interfaces) — each marks the pool unusable / NAT64 pool
+  empty; RUNTIME-resolved address (mocked buildLinkSnapshot); non-overlap
   unchanged.
 - Existing pins: session/tests.rs:4560/4602 stay GREEN; ONE re-pointed at a
   live non-bijective class (DNAT-to-shared-backend), the OTHER annotated
@@ -588,9 +641,9 @@ mirrors, and tests.
   replies land on the correct host; same-id ping pair both get replies;
   `make test-failover`; bulk-sync/failover pin for the
   two-legacy-flows-one-identity import case (first reserves, second drops,
-  failover kills only the second — Codex r3 major 6); helper-restart
-  rehydration via HA re-sync pre-reserve.
-- Counters: the three §5.8 counters bump exactly on their events;
+  failover kills only the second); helper-restart rehydration via HA
+  re-sync pre-reserve.
+- Counters: the four §5.8 counters bump exactly on their events;
   `NAT_REVERSE_KEY_SHARED_DISPLACEMENTS` stays flat for the interface
   class.
 - Docs sweep: docs/userspace-dataplane-architecture.md,
@@ -603,8 +656,7 @@ mirrors, and tests.
 - Junos-literal always-PAT — larger wire change, no correctness gain.
 - Config knobs for the interface-mode port range (fixed 1024-65535);
   registry occupancy/holder introspection (§5.8 follow-up).
-- Quarantine-with-retry for import conflicts (adjudicated §5.6: drop is
-  cleaner and fails closed).
+- Quarantine-with-retry for import conflicts (adjudicated §5.6).
 - #2387 session-identity enrichment — orthogonal; the colliding flows share
   every context.
 - DNAT-to-shared-backend / NAT64 / static non-bijective classes — covered
@@ -615,29 +667,28 @@ mirrors, and tests.
 ## 11. Open questions for adversarial review
 
 1. Core invariant (top of doc): name ONE remaining lifecycle path where a
-   reachable session does not own its identity — admission, replication,
-   materialize, re-reserve, reconcile replay, snapshot rebuild, HA
-   transition, stop→rebind, helper restart are all covered in §5.6/§5.7.
-2. Drain model (§5.7): the per-index live counter on the pool allocator is
-   the only new allocator state beyond the token shape. Is O(1) drain
-   observability worth it, or should the quarantine probe scan
-   `live_by_flow` filtering `translated.ip == E` (O(pool flows), quarantine
-   window only)?
-3. Import drop-on-conflict (§5.6): is the accepted HA-fidelity DoS
-   correctly priced, or do reviewers now prefer quarantine-with-retry
-   despite the failover equivalence?
-4. Reserve-before-install wrapper: the reserve failure drops the worker
-   command — should a dropped `UpsertSynced` ALSO remove the coordinator's
-   `{Shared}` (it was pre-reserved for an entry that will never install on
-   this worker)? Current spec: no — `{Shared}` rides the canonical map row,
-   which the peer's delete-sync removes; per-worker reserve is additive
-   only. Attack.
-5. Exact probe: is ONE mutation-epoch retry the right bound, or should the
-   walk retry until the epoch is stable across a full cycle (unbounded
-   under adversarial churn)?
-6. Registry cap 256 retained — right bound, or derive from the #5877-style
-   aggregate capacity budget?
-7. Preserve-first vs Junos-literal always-PAT (Codex r2: Juniper documents
-   always-PAT): does any reviewer still demand literal parity?
+   reachable session does not own its identity — the r4 inventory
+   (publication, tuple-changing re-sync, drain transition, worker
+   teardown, reconcile replay) is now covered in §5.3/§5.6/§5.7.
+2. Tri-state reserve (§5.3): is `IdentityConflict`-aborts-always the right
+   posture even for a LOCAL admission reserve (currently local mints
+   PAT around a conflict rather than abort — should the tri-state apply
+   only to reserves, with local mints keeping the PAT fallback)?
+3. Staged replacement (§5.6): the wrapper pre-reads the existing entry's
+   tuple before install. Is the pre-read + install + release ordering
+   implementable with `upsert_synced_with_origin`'s current bool return,
+   or must it return the previous decision (signature change named in §6)?
+4. Drain retention key (§5.7): the compatibility carry-over key ignores
+   the failure marker and survives repeated quarantined snapshots — any
+   hazard when the pool is re-ENABLED (marker removed) while an older
+   drain is still open (two drains for one pool across generations)?
+5. Worker-marker drop at join (§5.6): `release_all_worker_markers` is
+   registry-wide — under a FUTURE partial-worker restart (one worker of N
+   rejoined), would a per-worker-id-scoped drop be required? Current code
+   joins ALL workers on every teardown path (worker_manager.rs:141) —
+   is that a stable enough contract for the registry-wide drop?
+6. Preserve-first vs Junos-literal always-PAT: does any reviewer still
+   demand literal parity?
+7. Mixed-version window (§5.4): accept, or gate `SessionSyncProtocol`?
 8. Is PLAN-KILL (option (c)) defensible for a High security finding given
    the mechanism is ~verbatim reuse of shipped machinery?

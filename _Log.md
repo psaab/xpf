@@ -1,3 +1,9 @@
+## 2026-08-03 — #6751 research round 4: three re-reviews, plan v5 fold
+
+- **Timestamp**: 2026-08-03 (research/6751-nopat-admission, /research skill)
+- **Action**: Round-4 verdicts all PLAN-NEEDS-REVISION, deeper lifecycle holes only. Codex r4: pool-first reserve conflates not-this-domain with identity-conflict (tri-state enum: NotThisDomain/Owned/IdentityConflict, conflict aborts — kills the drain-mid cross-domain duplicate); drain-marker must install BEFORE the worker-visible RuntimeView store (snapshot_refresh.rs:458/472) + atomic drain lift (no resurrection); addr_index: 0 on address-only mints (allocator.rs:1770/1874) breaks the per-index drain counter for pool [A,E]; worker-join teardown drops tables without releasing {Worker} (stop_inner(true/false) matrix: link-cycle :459, process exit :471, reconcile teardown.rs:80, rollback bringup.rs:213); publish_shared_session never acquires {Shared} (local publish at poll_descriptor/mod.rs:2591 — early-free via reap before the Close-delta relay); one live_by_flow record cannot hold {Worker}@T1+{Shared}@T2 during a tuple-changing re-sync (staged replacement protocol). AGY r4: same worker-teardown leak; pool edited mid-drain leaves the draining allocator out of the release scan (permanent quarantine); {Shared} asymmetry on worker reserve refusal documented. v5 folds all + materialize miss-on-failure, the four-scope egress derivation matrix, 4 counters with distinct registry-cap series + Describe registration.
+- **File(s)**: `docs/research/6751-nopat-admission/plan.md`, `docs/research/6751-nopat-admission/codex-plan-r4.md`, `docs/research/6751-nopat-admission/agy-plan-r4.md`, `docs/research/6751-nopat-admission/reviewer-ids.md`, `_Log.md`
+
 ## 2026-08-03 — #6751 research round 3: three re-reviews, plan v4 fold
 
 - **Timestamp**: 2026-08-03 (research/6751-nopat-admission, /research skill)

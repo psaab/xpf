@@ -14,6 +14,9 @@ reviewer (it joins the quad at `/engineer` on the code PR).
 | r3 | Claude SMR | `claude-smr-plan-r3.md` | PLAN-NEEDS-REVISION (AGY r3 majors adjudicated: displacement refined to canonical-map pin, wholesale clear confirmed; M13 delta-relay inventory, M14 per-holder-owner decrement, M15 conflict-drop counter) |
 | r3 | Codex | codex session `019fc7b7-81b3-7123-a9ab-9966860dfc01` (companion task `task-msd8npxz-0qs5md`) → `codex-plan-r3.md` | PLAN-NEEDS-REVISION (4 BLOCKERs: live-pool-session drain gap, pool_failure-blind reserve scan + NAT64 channel, install-before-reserve wrapper race, wholesale clear at stop/rebind; 3 MAJORs: exhaustion claims, HA-fidelity DoS acceptance, observability scope; 1 MINOR) |
 | r3 | AGY | direct `agy --print --dangerously-skip-permissions` foreground → `agy-plan-r3.md` | PLAN-NEEDS-REVISION (2 MAJORs: publish-displacement {Shared} leak, wholesale-clear {Shared} leak; 1 NIT: churn-cap accumulation; every other r2 fold verified complete) |
+| r4 | Claude SMR | (fold-only round — SMR r4 findings were pre-empted by Codex/AGY r4 and folded directly; see plan v5 header) | — |
+| r4 | Codex | codex session `019fc7cd-f792-7cc1-a6de-106358ca4ebe` (companion task `task-msd9j9yk-f6n9wd`) → `codex-plan-r4.md` | PLAN-NEEDS-REVISION (6 BLOCKERs: tri-state reserve, drain-marker ordering + atomic lift, addr_index authoritative, worker-teardown markers, publish-acquires-{Shared}, tuple-change overlap; 2 MAJORs: materialize failure semantics, egress derivation matrix; 1 MINOR, 1 NIT) |
+| r4 | AGY | direct `agy --print --dangerously-skip-permissions` foreground → `agy-plan-r4.md` | PLAN-NEEDS-REVISION (2 MAJORs: {Worker} leak across stop/rebind, drain release-scan omission on pool edit; 1 MINOR: {Shared} asymmetry on worker reserve refusal — documented) |
 
 Round-1 infra notes: the Codex companion background job tracker lost the first
 job (`task-msd5pjfq-yfwbeg` — state dir is workspace-hash-keyed and the poll
