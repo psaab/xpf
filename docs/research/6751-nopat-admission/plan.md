@@ -221,7 +221,11 @@ impl InterfaceNatAllocators {
     /// LOOKUP-ONLY release path: None when no allocator exists — never creates.
     fn allocator_if_present(&self, egress: IpAddr) -> Option<Arc<PortAllocator>>;
     /// Apply-time + opportunistic release-time reclamation (absent AND
-    /// empty); cap 256 RETAINED allocators.
+    /// empty); cap 256 RETAINED allocators. Allocators present in
+    /// `draining` are EXCLUDED from reclamation until their drain
+    /// completes (live count reaches zero and the drain lifts —
+    /// reclaiming a draining allocator would strand the releases that
+    /// must still reach it, AGY r22 nit 2).
     fn reclaim_absent(&self, live_egress: &FastSet<IpAddr>);
     /// Teardown: drop ALL Worker markers registry-wide (workers joined,
     /// tables destroyed); records emptied -> freed (§5.6).
@@ -742,7 +746,8 @@ record's identity frees only when `per_worker` is empty AND
       and tail can never let a stale tail take effect. To keep the
       arbiter starve-free, network I/O and callback execution inside
       every intent happen on background goroutines
-      (`go s.OnPeerConnected()`, `go s.doBulkSync()`) — only slot
+      (`go s.OnPeerConnected()`, `go s.doBulkSync()` — spawned by
+      `handleNewConnection`'s intent wrappers, AGY r22 nit 1) — only slot
       stamping, intent enqueuing, and goroutine spawning happen inside
       the atomic unit (AGY r21 nit 2). §9 pins a blocked-I/O test and a
       large-bulk (10k-journal-entry) test proving AbortFenceTimeout and
