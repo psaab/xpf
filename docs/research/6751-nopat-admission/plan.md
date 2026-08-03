@@ -1030,7 +1030,12 @@ additive per #1961), PLUS THREE GO-side Prometheus counters (the
   `xpf_userspace_session_sync_alias_quarantine_admitted_total` — GO-side
   counter for quarantine-timeout ADMISSIONS (genuine self-NAT /
   identity-NPTv6 / lost-base rows — Codex r14 nit 5: the collateral is
-  its own series, not a note on the drop counter). The Rust-side
+  its own series, not a note on the drop counter).
+- `xpf_userspace_session_sync_alias_quarantine_overflow_total` — GO-side
+  counter for quarantine-CAP saturations (each triggers a terminal bulk
+  abort per §5.6's recovery contract; the operator-visible signal that
+  the cap is undersized for the deployment — Codex r16 blocker 1,
+  AGY r20 nit 1). The Rust-side
   `NAT_REVERSE_KEY_SHARED_DISPLACEMENTS` going quiet for the same
   sessions confirms the companion-poisoning side fix.
 `debug_log!` is feature-gated (afxdp/mod.rs:51) — test/dev aid only.
