@@ -524,10 +524,18 @@ record's identity frees only when `per_worker` is empty AND
   least one side sync-derived; (4) **same session identity** — the alias
   export carries the base's full value unchanged
   (`userspaceForwardWireAliasV4` returns `(wireKey, val, true)`,
-  daemon_ha_userspace_convert.go:399-405), which includes the #5212
-  stable session id: require EQUAL non-zero `session_id`; when either
-  side's id is 0 (legacy/local), fall back to requiring the base
-  canonical row to be PRESENT with an identical value. Clause (4) makes
+  daemon_ha_userspace_convert.go:399-405), so clause (4) compares the
+  CROSS-NODE-correlatable `RTFlowSessionID` (#5212/#6198,
+  protocol_ha.go:190 — NOT the node-local `SessionID`, on which the two
+  nodes deliberately disagree, pkg/dataplane/types.go:31-36): require
+  EQUAL non-zero `RTFlowSessionID`; when either side's id is 0
+  (legacy/local), fall back to requiring the base canonical row to be
+  PRESENT with an IDENTICAL `SessionValue` — the fallback runs against
+  the CANDIDATE record's row that the wire-form relation selected (the
+  base form is never reverse-derived from the alias alone; the candidate
+  iteration supplies the base key), and the node-local per-session
+  `SessionID` inside the value discriminates colliding flows even at
+  RT-flow-id 0 — AGY r8 verification + SMR r8. Clause (4) makes
   Codex r7's counterexample (colliding flow B's alias, different session
   id) fail the predicate: B's alias imports as its own first-class entry,
   hits `IdentityConflict`, and DROPS — the promised second-import
