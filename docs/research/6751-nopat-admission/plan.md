@@ -922,8 +922,8 @@ coordinator/status.rs:241 + server/lifecycle.rs:228 init +
 server/helpers/status.rs:102 refresh; protocol_status.go:287 +
 pkg/api/metrics.go:377 + Describe registration at metrics.go:791 +
 metrics_descriptors_userspace_session.go:27 + metrics_userspace.go:677;
-additive per #1961), PLUS one GO-side Prometheus counter (the
-alias-ignored counter of §5.6 — no helper wire involvement):
+additive per #1961), PLUS THREE GO-side Prometheus counters (the
+§5.6 alias-discipline counters — no helper wire involvement):
 - `xpf_userspace_interface_snat_pat_collisions_total` — identity-mint
   conflicts that took the PAT probe;
 - `xpf_userspace_interface_snat_identity_exhaustion_total` — completed
@@ -975,8 +975,8 @@ peers on both sides see today's exact behavior; explicitly NOT a
 handshake field, since unkeyed deployments bypass the handshake,
 sync_auth.go:321).
 Additive-only wire-visible changes (#1961-safe): the four helper-side
-§5.8 status counters (the fifth, the alias-ignored counter, is GO-side
-Prometheus, §5.8).
+§5.8 status counters (three more — the alias-discipline counters —
+are GO-side Prometheus, §5.8).
 `SyncedSessionEntry` gains ONE additive HELPER-INTERNAL field
 (`pub_token: u64`, the coordinator-local publication token of §5.6 —
 stamped at publish inside the helper; it is NOT read from or written to
@@ -1011,8 +1011,8 @@ validator extension (dedup-by-address), the snapshot-builder overlap
 marking (source pools + NAT64 empty-pool + the §5.7 derivation matrix),
 the receiver-side signature-drop rule + delete-suppression set
 (§5.6), the four helper-side status-counter mirrors + Describe
-registration, the TWO Go-side counters (confirmed-dropped +
-quarantine-admitted), and tests.
+registration, the THREE Go-side counters (confirmed-dropped +
+quarantine-admitted + overflow), and tests.
 
 ## 7. Hidden invariants the change must preserve
 
@@ -1197,8 +1197,8 @@ quarantine-admitted), and tests.
   a genuine direct row sharing the key whose delete arrives while
   suppression is active strands until its own session timeout
   (documented residual, strictly safer than today's certain
-  publish-time clobber, shared_ops.rs:907); two Go-side counters
-  (confirmed-dropped, quarantine-admitted — Codex r14 nit 5); V4 AND
+  publish-time clobber, shared_ops.rs:907); three Go-side counters
+  (confirmed-dropped, quarantine-admitted, overflow); V4 AND
   V6 parity — AGY r10/r11 nit; `NAT_REVERSE_KEY_SHARED_DISPLACEMENTS`
   no longer fires per sweep for a fabric-redirect SNAT session wherever
   the alias never forms — the pre-existing
@@ -1307,9 +1307,9 @@ quarantine-admitted), and tests.
    the derived row does not serve, a NAT class where the full signature
    still false-positives, or a delete-ordering where the
    base-lifecycle-keyed suppression strands a genuine row past its
-   timeout. Also: is the additive handshake capability field the right
-   negotiation channel, or is there an existing per-peer capability
-   mechanism in pkg/cluster it should ride?
+   timeout. Also: is the dedicated periodic syncMsgCapability ticker
+   the right transport, or should the capability piggyback on an
+   existing periodic session-stream message in pkg/cluster?
 3. Tuple-versioned records (§5.3): confined to the interface registry's
    allocator instances, with pool allocators keeping today's flow-keyed
    shape and free-on-release semantics. Is the two-shape split coherent,
