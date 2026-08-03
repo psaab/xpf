@@ -1,7 +1,8 @@
 # #6751 plan — interface SNAT no-PAT admission: reserve-or-PAT the colliding translated tuple
 
-- **Status**: DRAFT v10 — round-9 fold (Codex r9 blocker 1 + major 2;
-  SMR r9 N17; AGY r9 nit carried)
+- **Status**: DRAFT v11 — round-10 fold (Codex r10 blocker 1 resolved by
+  REMOVING the alias from the ownership design: exact exporter flag +
+  drop-at-import; SMR r10 N18 mooted; AGY r10 nit carried)
 - **Issue**: #6751 (opus-review-001 R08, High, `bug`+`audit`+`security`) —
   interface SNAT admits indistinguishable no-PAT return tuples and sends
   replies to the FIRST session.
@@ -497,163 +498,88 @@ record's identity frees only when `per_worker` is empty AND
     clears; with both marker classes gone the registry holds nothing for
     the wiped state.
   - Same-plan refresh: worker tables PERSIST — no marker event at all.
-- **Fabric forward-wire alias ownership** (Codex r6 blocker 1): HA
+- **Fabric forward-wire alias: exact exporter flag + drop-at-import
+  (Codex r6-r10 alias blockers, resolved by REMOVING the alias from the
+  ownership design rather than teaching the design to host it)**: HA
   session sync deliberately exports a fabric-redirect session TWICE — the
-  canonical forward key AND a NAT-translated forward-WIRE alias key
-  carrying the same value (`userspaceForwardWireAliasFromDeltaV4`,
-  daemon_ha_userspace_stream.go:370/373; "two conntrack keys for ONE
-  logical session", userspace_sync_session_id_6198_test.go:350). Each key
-  independently reaches `publish_shared_session` and worker fanout
-  (session_import.rs:133/233), and the alias is stored as ANOTHER
-  CANONICAL ROW in `shared_sessions` (shared_ops.rs:907). The reserve
-  reconstruction derives `SourceNatFlowKey` from the PRESENTED key, so
-  canonical (H→S) and alias (E→S) look like different flows claiming one
-  identity — v6 would have dropped every such alias import as
-  `IdentityConflict`, and naive idempotence would leave the alias
-  reachable when the base's sole marker dropped. The design elevates the
-  SHIPPED wire-alias predicate (the `record_shared_nat_displacement`
-  exclusion, shared_ops.rs:73-100) to a first-class ownership relation —
-  STRENGTHENED with a session-identity clause (Codex r7 blocker 1: the
-  telemetry predicate alone is a documented accepted-false-negative
-  exclusion, not an ownership equivalence — a colliding second flow's
-  alias carries the same wire-form, the same NatDecision, and a
-  sync-derived origin, and would mis-attach to the first flow's base
-  record). The OWNERSHIP predicate is four-part:
-  (1) one key is the other's forward-wire form
-  (`forward_wire_key` idempotent); (2) identical NatDecision; (3) at
-  least one side sync-derived; (4) **same session identity** — the alias
-  export carries the base's full value unchanged
-  (`userspaceForwardWireAliasV4` returns `(wireKey, val, true)`,
-  daemon_ha_userspace_convert.go:399-405), so clause (4) compares the
-  CROSS-NODE-correlatable `RTFlowSessionID` (#5212/#6198,
-  protocol_ha.go:190; the helper stores it on `SyncedSessionEntry`,
-  server/helpers/session_sync.rs:274 — NOT the node-local `SessionID`,
-  on which the two nodes deliberately disagree,
-  pkg/dataplane/types.go:31-36): require EQUAL non-zero
-  `RTFlowSessionID`. **Zero-id alias attachment FAILS CLOSED — with a
-  wire-form-yield conflict rule** (Codex r8 blocker 1 + r9 blocker 1: no
-  value-equality fallback is safe — base and alias are queued
-  independently and stamped with fresh per-call generations,
-  sync_conn_write.go:53/sync_conn_gen.go:113; and a naive
-  first-class-import of a zero-id alias is not arrival-order safe: an
-  alias arriving FIRST reserves the identity successfully, then the real
-  base arrives, conflicts, and drops — leaving the alias, whose source
-  is the NAT address, unable to reconstruct delivery to the real client
-  (reverse synthesis reads `forward_match.key.src_ip`,
-  shared_ops.rs:678/738) — the worst outcome). The zero-id rule is:
-  an import whose clause-(4) ids are 0 imports as its own first-class
-  entry; on an identity CONFLICT between two zero-id imports,
-  (i) if one presented key is the forward-wire form of the other under an
-  identical NatDecision, the CANONICAL-FORM import WINS — the wire-form
-  (alias) import yields via the both-direction adopt/merge (SMR r7 E1):
-  its markers and identity fold into the canonical-form import's record,
-  regardless of arrival order (so the real base always survives its
-  alias). The alias's ALREADY-PUBLISHED canonical row (published when the
-  alias arrived first) is RETAINED — it is byte-identical to the alias
-  row the base itself would export, now serving as the base's alias row
-  with its holder units transferred to the base's record; the peer's next
-  re-export refreshes it idempotently (SMR r10 N18 — least churn, and it
-  is the steady state the export stream converges to anyway; the derived
-  forward-wire index covers the lookup in the interim regardless);
-  (ii) if neither key is the other's forward-wire form, the pair is a
-  genuine collision: first-wins, second gets `IdentityConflict` and DROPS
-  (fail-closed). Clause (i) makes the legit alias-first arrival converge
-  on the correct outcome (base survives, alias attaches); clause (ii)
-  keeps the genuine-collision posture of §5.6. The fabric-return lookup
-  consequence of a DROPPED explicit alias row remains near-free (the base
-  publish populates the derived forward-wire index,
-  shared_ops.rs:943-957; AGY r9's walk verified the lookup resolves to
-  the base; Codex r9 independently verified the same via the worker
-  forward_wire_index, session/mod.rs:1971, and the synthesized reverse
-  companion, session_import.rs:122). A zero-id alias-first regression
-  test pins rule (i). Clause (4) makes
-  Codex r7's counterexample (colliding flow B's alias, different session
-  id) fail the predicate: B's alias imports as its own first-class entry,
-  hits `IdentityConflict`, and DROPS — the promised second-import
-  behavior. The remaining under-count inheritance is bounded by an
-  already-ambiguous case (a genuine session whose canonical key equals a
-  fabric alias's key with an identical decision AND identical session id —
-  the #2387 cross-VRF same-tuple corner, already indistinguishable at the
-  reverse index pre-change; §5.1, out of scope):
-  - At reserve/import, a presented key satisfying the FOUR-PART predicate
-    against an existing record's `(flow, nat, session_id)` attaches one
-    holder unit to the BASE record at its scope (base and alias are TWO
-    holder-bearing rows — the counting HolderSet above) — no false
-    `IdentityConflict`; the alias is reachable-backed-by-the-base's
-    identity, which is exactly its purpose (route the base flow's
-    packets). Per-scope decrements apply on the base record, so deleting
-    either key can never free the identity while the companion key
-    remains reachable.
-  - **Both-direction predicate + out-of-order merge** (SMR r7 E1, AGY r7
-    nit 1): on one healthy stream the export queues canonical-then-alias
-    (daemon_ha_userspace_stream.go:368-376), but bulk sync and
-    incremental deltas can interleave across a reconnect, so an alias CAN
-    arrive first. The predicate therefore runs BOTH directions at import:
-    presented-is-wire-form-of-existing (alias attaches to the base) AND
-    existing-is-wire-form-of-presented (a base arriving after its alias
-    ADOPTS the alias record — the alias record's markers and identity
-    fold into the base's record and the spare record drops). Both orders
-    converge to ONE record holding the union of markers; the out-of-order
-    import test pins this.
-  - Tuple replacement additionally removes the OLD explicit canonical
-    alias row — but ONLY when that row satisfies the four-part predicate
-    against the displaced base entry (never an unrelated real session
-    occupying that key); the peer's re-export after the change
-    re-establishes the new alias.
-  - The alias sweep of §5.6's transactional shared replacement covers
-    BOTH alias classes (derived index rows + the explicit canonical alias
-    row, predicate-gated) and is COMPARE-AND-REMOVE ownership-validated
-    (Codex r7 major 4 + r8 major 2 + r9 major 2: the current removals
-    delete derived reverse/forward-wire slots by key unconditionally,
-    shared_ops.rs:978/987/997 — if a legitimate non-bijective third-party
-    session has since displaced T_old's derived slot, an unconditional
-    sweep would remove the CURRENT occupant; "key + NatDecision" is not a
-    sufficient identity, since a newer same-key/same-NAT session can
-    carry a different stable session identity; and the swept maps store
-    `SyncedSessionEntry`, whose ONLY id field is the cross-node RT-flow
-    id (worker/mod.rs:375, populated from
-    `SessionSyncRequest.session_id`/`RTFlowSessionID`,
-    server/helpers/session_sync.rs:274) — the Go node-local `SessionID`
-    is NOT transmitted (manager_ha.go:1645), and LOCAL publications store
-    `session_id: 0` deliberately (poll_descriptor/mod.rs:2569), so a
-    value-equality fallback can false-match a newer local
-    same-key/same-NAT publication. The ownership identity therefore uses
-    a HELPER-LOCAL publication token: `SyncedSessionEntry` gains an
-    additive `pub_token: u64` — a coordinator-local monotonic counter
-    stamped at publish into BOTH the canonical row and every derived
-    index row of one publication (helper-internal struct change, NOT a
-    wire/Go change). Every swept removal validates ownership ATOMICALLY
-    under the removing map's own lock (the maps lock separately) against
-    the identity chain: equal non-zero `RTFlowSessionID`, else equal
-    non-zero `pub_token`, else (token-0 legacy rows only) full
-    `SyncedSessionEntry` equality excluding counters — two token-0 rows
-    that agree on every remaining field are semantically the same session
-    for routing purposes (AGY r9's field enumeration), so removing either
-    is indistinguishable. A third-party-displacement test, a
-    same-key/same-NAT/different-id replacement test, and a newer-local-
-    publication (session_id 0, non-zero pub_token) test pin it).
-  - **NAT64 alias exports are OUT OF SCOPE for the holder model**
-    (Codex r7 blocker 3, scoped): NAT64 fabric redirects also export
-    forward-wire aliases (userspaceForwardWireAliasV6,
-    daemon_ha_userspace_stream.go:379, convert at
-    daemon_ha_userspace_convert.go:496), and the NAT64 reserve
-    reconstructs `SourceNatFlowKey` from the presented key so base and
-    alias look like different flows (nat64.rs:1322) — but NAT64 decisions
-    BYPASS the source/interface scan and the interface registry entirely
-    (§5.3), so the new holder model never touches them. Their reserve
-    keeps TODAY's behavior: the alias's NAT64 reserve fails the
-    never-steal check and skips gracefully (the shipped posture), and the
-    cross-family reconstruction concern (an alias reconstructing a
-    different NatDecision from the padded v6 slot, codec/wire.rs:182 +
-    server/helpers/session_sync.rs:47) is a PRE-EXISTING NAT64-sync
-    question independent of this issue — named as a follow-up candidate
-    in §10, not expanded here.
-  - Implementation note (AGY r7 nit 2): the shared predicate helper
-    carries a doc comment that the `sync_derived`-origin clause is what
-    prevents an active-node LOCAL mint from ever mistaking a genuine
-    local cross-session collision for a fabric alias (local mints are
-    never sync-derived; genuine collisions carry distinct PAT decisions
-    and fail the identical-NatDecision clause).
+  canonical forward key AND a derived NAT-translated forward-WIRE alias
+  key carrying the same value (`userspaceForwardWireAliasFromDeltaV4`,
+  daemon_ha_userspace_stream.go:370/373, queued under
+  `delta.FabricRedirect && !delta.FabricIngress`; "two conntrack keys for
+  ONE logical session", userspace_sync_session_id_6198_test.go:350).
+  Rounds 6-10 established that hosting the alias inside the ownership
+  model is a losing game: the alias reconstructs as a different flow
+  (false `IdentityConflict`), its holder multiplicity defeats a marker
+  set, zero-id arrival order inverts the outcome (alias reserves, real
+  base drops), the import path synthesizes a REVERSE COMPANION from the
+  alias entry whose `nat.reverse(src_ip=E)` un-NATs replies to the
+  firewall's own address instead of the client
+  (synthesized_synced_reverse_entry, shared_ops.rs:750 +
+  build_reverse_session_from_forward_match, shared_ops.rs:666-743 — a
+  PRE-EXISTING shipped hazard: the alias's broken companion publishes
+  after the base's correct one and displaces it at the shared reverse
+  key K every sync sweep, the exact churn the
+  `record_shared_nat_displacement` exclusion comments on), and no
+  value-equality/predicate fallback safely identifies alias-ness (per-call
+  generation stamps, id-0 legacy rows, local `session_id: 0`
+  publications). The exporter, however, KNOWS exactly which rows are
+  derived aliases — so v11 makes alias-ness EXACT instead of heuristic:
+  - **Additive wire flag** `is_forward_wire_alias` on the HA
+    session-sync request (Go sets it at the two alias queue sites, V4
+    daemon_ha_userspace_stream.go:370 and V6 :379; additive `omitempty`
+    per #1961: an old helper treats flagged rows as canonical — today's
+    behavior; an old Go omits it — new helper treats the rows as
+    canonical — today's behavior. The clean path arrives only when both
+    nodes are new; the mixed-version window is exactly today's status
+    quo, §5.4).
+  - **Flagged alias rows are DROPPED at import** (counted by a NEW
+    additive counter
+    `xpf_userspace_session_sync_forward_wire_alias_ignored_total` +
+    rate-limited Debug log): no reserve, no canonical publish, no
+    reverse synthesis, no worker fanout, no holder units, no artifact
+    sweeps. Rationale, verified twice independently (AGY r9 walk,
+    Codex r9/r10 walks): the explicit alias row is REDUNDANT with the
+    DERIVED forward-wire index row that the base session's own publish
+    inserts (`publish_shared_session` populates
+    `shared_forward_wire_sessions[forward_wire_key(base)]` for every
+    non-reverse entry whose wire key differs from its canonical key,
+    shared_ops.rs:943-957) — fabric-return lookups resolve to the base
+    entry either way, with the same fabric-redirect disposition.
+    Dropping the alias ALSO fixes the pre-existing broken-companion
+    poisoning as a side effect (no alias entry to synthesize from → no
+    un-NAT-to-E companion → no displacement churn at K →
+    `NAT_REVERSE_KEY_SHARED_DISPLACEMENTS` goes quiet for fabric-redirect
+    SNAT sessions).
+  - **Alias-first arrival is a non-event**: a flagged alias never
+    reserves, so the real base's later import never conflicts with it
+    (Codex r9 blocker 1 dies by construction — there is nothing to win
+    or merge). A base-first-then-alias arrival likewise drops the alias
+    with zero state change.
+  - **r8 mis-attachment dies by construction**: a colliding flow's
+    flagged alias is dropped like any other flagged alias; it attaches
+    nothing, publishes nothing, and cannot poison the first flow's rows.
+    The genuine-collision posture (first-wins at the base, second gets
+    `IdentityConflict` and drops) is unchanged.
+  - **Old-peer parity note**: with an old Go exporter the alias rows
+    arrive unflagged and import as canonical with today's exact behavior
+    (including the broken-companion churn) — the mixed-version window
+    keeps the status quo; nothing regresses, and the clean behavior
+    arrives when both nodes upgrade.
+  - **NAT64 alias exports take the same flag path**
+    (`userspaceForwardWireAliasV6` sets the flag at the V6 queue site):
+    flagged NAT64 aliases are dropped at import the same way — their
+    derived forward-wire index row (populated by the NAT64 base's
+    publish) covers the lookup, and the cross-family reconstruction
+    concern (an alias deriving a different NatDecision from the padded
+    v6 slot, codec/wire.rs:182 + server/helpers/session_sync.rs:47)
+    becomes moot for flagged rows and remains a pre-existing NAT64-sync
+    follow-up only for the unflagged legacy window (§10).
+  - The §5.6 transactional shared replacement's alias sweep is
+    correspondingly scoped to the INTERNALLY-DERIVED index rows only
+    (reverse-wire / reverse-canonical / forward-wire rows derived from
+    the displaced entry — no explicit canonical alias rows exist on the
+    new path), still compare-and-remove validated with the `pub_token`
+    identity chain above.
 - **Neutral paths**: promote (promote.rs:99), demote (install.rs:568),
   #1752 in-place refresh — NO reserve/release calls.
 - **Reverse-companion lag (documented inherited window, SMR r5 N16)**:
@@ -762,7 +688,7 @@ sessions:
 
 ### 5.8 Observability (additive, production)
 
-Four ADDITIVE optional counters on the existing helper status wire,
+Five ADDITIVE optional counters on the existing helper status wire,
 plumbed via the FULL #1760-W3' precedent (protocol/control.rs:343 +
 coordinator/status.rs:241 + server/lifecycle.rs:228 init +
 server/helpers/status.rs:102 refresh; protocol_status.go:287 +
@@ -782,11 +708,17 @@ additive per #1961):
   implementation-time refinement, not a plan requirement (AGY r5 nit 1).
 - `xpf_userspace_interface_snat_sync_identity_conflict_drops_total` —
   coordinator import-conflict drops (§5.6). Its doc text states that the
-  series ALSO includes the BENIGN zero-id legacy-alias drop (an id-0
-  fabric alias importing into its own base's identity — indistinguishable
-  from a genuine conflict by construction, which is exactly why it fails
-  closed; the alias row is redundant with the derived forward-wire index
-  row for the lookup path, so this drop is near-free) — SMR r9 N17.
+  series ALSO includes the BENIGN legacy-alias conflict drop from the
+  unflagged (legacy-peer) window (an unflagged fabric alias importing
+  into its own base's identity — indistinguishable from a genuine
+  conflict by construction, hence fail-closed there; on the new flagged
+  path aliases never conflict at all) — SMR r9 N17.
+- `xpf_userspace_session_sync_forward_wire_alias_ignored_total` —
+  flagged fabric forward-wire alias rows dropped at import (§5.6; a
+  routine benign steady-state event for fabric-redirect sessions —
+  operator-visible proof the new alias discipline is active, and the
+  displacement counter going quiet for the same sessions confirms the
+  companion-poisoning side fix).
 `debug_log!` is feature-gated (afxdp/mod.rs:51) — test/dev aid only.
 Exhaustion additionally rides the existing production NAT-failure event
 path (`record_source_nat_failure`, nat_exception.rs:154). PAT'd sessions
@@ -796,14 +728,19 @@ occupancy/holder introspection is a named follow-up, not this PR.
 ## 6. Public API preservation
 
 Preserved byte-for-byte: `NatDecision`, `SourceNatLookup`, `SessionKey`,
-the HA session-sync wire, the Go→helper snapshot
+the Go→helper snapshot
 protocol (`SourceNATRuleSnapshot` and the NAT64 snapshot gain NO fields —
 empty-pool is the NAT64 fail-closed channel), all CLI/gRPC surfaces.
+Additive-only wire changes (#1961-safe, both optional/omitempty):
+`is_forward_wire_alias` on the HA session-sync request (old Go omits it,
+old helpers ignore it — the §5.6 mixed-version note), and the §5.8 status
+counters.
 `SyncedSessionEntry` gains ONE additive HELPER-INTERNAL field
 (`pub_token: u64`, the coordinator-local publication token of §5.6 —
 stamped at publish inside the helper; it is NOT read from or written to
 any Go-facing wire, and older in-image rows read as token 0).
-Additive-only wire change: the four §5.8 status counters (optional fields,
+Additive-only wire change (beyond the alias flag named above): the five
+§5.8 status counters (optional fields,
 #1961-safe). Changed signatures are `pub(crate)`-internal only:
 `match_source_nat_result_for_tuple` (+1 arg),
 `match_source_nat_for_flow_result_at` (+1), `source_nat_decision_for_flow`
@@ -879,16 +816,16 @@ the four status-counter mirrors + Describe registration, and tests.
   queue/relay-or-expiry-bounded reverse-companion edge
   (`replicate_session_delete` enqueues commands — no strict deadline),
   which is identical in shape to shipped pool-mode discipline today.
-- **Fabric-alias ownership**: the FOUR-PART wire-alias predicate
-  (wire-form + identical NatDecision + sync-derived + equal non-zero
-  RTFlowSessionID) attaches a fabric forward-wire alias's holder units to
-  its base record; zero-id alias attachment FAILS CLOSED (the alias
-  imports first-class and drops on conflict — no value-equality
-  fallback); neither key's deletion frees the identity while the
-  companion remains reachable (counting HolderSet); tuple replacement
-  removes the old explicit canonical alias row only under the predicate
-  with compare-and-remove identity validation (never a third party's
-  slot).
+- **Fabric-alias discipline (v11)**: the exporter marks derived
+  forward-wire alias rows with the additive `is_forward_wire_alias` flag;
+  the helper DROPS flagged aliases at import (no reserve, no publish, no
+  reverse synthesis, no fanout) — the base session's own derived
+  forward-wire index row (populated at the base's publish,
+  shared_ops.rs:943-957) serves every lookup the alias row served, so
+  alias-first arrival, mis-attachment, artifact retraction, and the
+  broken synthesized-companion churn are all eliminated by construction.
+  Unflagged (legacy-peer) aliases keep today's exact behavior — the
+  mixed-version window is the status quo, never worse.
 - **NatDecision freeze**: no new fields; `rewrite_src_port: Some(_)` is
   handled generically everywhere from pool mode.
 - **Hot path**: established-flow transit untouched; zero new per-packet
@@ -937,14 +874,19 @@ the four status-counter mirrors + Describe registration, and tests.
   aliases — reverse_wire/reverse_canonical/forward_wire of T_old no
   longer resolvable — with COMPARE-AND-REMOVE ownership validation so a
   third-party occupant of T_old's derived slot is never swept — Codex r7
-  major 4); fabric alias four-part predicate (wire-form + identical
-  decision + sync-derived + SAME SESSION ID via equal non-zero
-  RTFlowSessionID: a colliding flow's alias with a different id does NOT
-  attach and drops as its own first-class import — Codex r7 blocker 1;
-  zero-id alias attachment FAILS CLOSED — Codex r8 blocker 1; out-of-order
-  alias-first arrival adopts/merges per the both-direction rule; base+alias
-  count as TWO holder units per scope in the counting HolderSet — Codex r7
-  blocker 2); staged replacement (T_old held until unreachable;
+  major 4); fabric forward-wire alias flag discipline (a FLAGGED alias
+  import drops cleanly: no reserve, no canonical row, no synthesized
+  reverse companion, no worker fanout; the fabric-return lookup resolves
+  via the base's derived forward-wire index row with the identical
+  fabric-redirect disposition; alias-first arrival is a non-event — the
+  base's later import never conflicts; a colliding flow's flagged alias
+  drops without touching the first flow's rows; V4 AND V6 converter
+  parity — AGY r10 nit; an UNFLAGGED (legacy-peer) alias imports as
+  canonical with today's exact behavior — mixed-version window parity;
+  `NAT_REVERSE_KEY_SHARED_DISPLACEMENTS` no longer fires per sweep for a
+  flagged fabric session — the pre-existing companion-displacement churn
+  is gone — Codex r10 blocker 1 resolved by removal); staged replacement
+  (T_old held until unreachable;
   each owner drops only its own marker); uniform mint quarantine (a
   re-enabled edited pool cannot mint an identity an older draining
   generation owns — pool skips quarantined addresses in its address loop,
@@ -956,13 +898,7 @@ the four status-counter mirrors + Describe registration, and tests.
   deterministic NAT64 (allocator.rs:1561) — Codex r7 minor 5 / r8 minor 3);
   materialize conflict returns
   MaterializeConflict (explicit recycle/drop branch, NEVER the
-  cold-admission miss path — Codex r5 major 4); fabric forward-wire alias
-  (alias import attaches markers to the BASE record via the wire-alias
-  predicate — no false IdentityConflict on the alias import; deleting
-  either the canonical or the alias key never frees the identity while
-  the companion key remains reachable; tuple replacement removes the old
-  explicit canonical alias row ONLY under the predicate — an unrelated
-  real session at that key is untouched — Codex r6 blocker 1); tuple-
+  cold-admission miss path — Codex r5 major 4); tuple-
   versioned secondary flow index (local mint re-entry returns the flow's
   locally-minted record across the staged overlap; reserve NEVER
   auto-drops a different-tuple record — Codex r6 major 2); holder completeness
@@ -1035,18 +971,21 @@ the four status-counter mirrors + Describe registration, and tests.
    session does not own its identity — the r4/r5 inventory (publication,
    tuple-changing re-sync on tuple-versioned records, drain transition
    with uniform mint quarantine, worker teardown, reconcile replay,
-   transactional shared replacement with alias sweep) is now covered in
-   §5.3/§5.6/§5.7.
-2. Tuple-versioned records (§5.3): confined to the interface registry's
+   transactional shared replacement with the derived-index sweep) is now
+   covered in §5.3/§5.6/§5.7, and the fabric-alias class is removed from
+   the ownership design entirely (§5.6, v11).
+2. The v11 alias discipline (flag + drop-at-import) rests on two verified
+   claims: the explicit alias row is redundant with the base's derived
+   forward-wire index row, and dropping the alias also removes the
+   pre-existing broken-companion displacement churn. Falsify either with
+   a consumer of the explicit alias row that the derived row does not
+   serve (start from `is_fabric_wire_placeholder`,
+   shared_ops.rs:585-635, and the promote paths).
+3. Tuple-versioned records (§5.3): confined to the interface registry's
    allocator instances, with pool allocators keeping today's flow-keyed
    shape and free-on-release semantics. Is the two-shape split coherent,
    or should pools adopt the tuple-versioned shape uniformly (which
    entangles #6522's open holder question)?
-3. Transactional shared replacement (§5.6): the alias sweep on canonical
-   displacement also fixes a PRE-EXISTING stale-alias residual for any
-   tuple-changing republish (today's publish inserts new aliases and never
-   removes the displaced entry's). Should that sweep be pinned as its own
-   regression test independent of the interface-mode work?
 4. Uniform mint quarantine (§5.7): pool admission skips a quarantined
    address and tries the next pool address — graceful for multi-address
    pools, exhaustion when all are quarantined. Is skip-next the right
