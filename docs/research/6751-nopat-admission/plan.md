@@ -1,14 +1,15 @@
 # #6751 plan — interface SNAT no-PAT admission: reserve-or-PAT the colliding translated tuple
 
-- **Status**: DRAFT v15.2 — round-15 fold (Codex r15 blocker 1 + minor 2
-  + nit 3: quarantine entries are pinned to their arrival bulk epoch and
-  RESOLVE AT THEIR OWN BulkEnd (definitive sibling-base check against
-  the complete snapshot; nothing defers cross-epoch; the bulk is ACKed
-  only after its quarantines resolve); all quarantine actions run on the
-  receiver's serialized event loop (timer enqueues only); capability is
-  derive-until-capable with per-tick re-advertisement (a lost frame
-  self-heals; mid-stream transition is covered by the receiver
-  quarantine); six counters)
+- **Status**: DRAFT v15.4 — round-17 fold (Codex r17 blocker 1 + minor 2
+  + nits: the abort recovery contract is CLUSTER-LEVEL TEARDOWN — close
+  both connections so the existing full-disconnect cleanup fires and the
+  reconnect cold-re-primes a fresh bulk (today's BulkSync is write-only
+  with no ACK-timeout retry, sync_bulk.go:169-195, and the survivor
+  re-drive's outboundBulkAcked flag is sticky, sync.go:479, so "let the
+  sender retry" needed an explicit contract); capability transport named
+  consistently as a periodic syncMsgCapability ticker (NOT a handshake
+  field — unkeyed deployments bypass it, sync_auth.go:321); seven
+  counters)
 - **Issue**: #6751 (opus-review-001 R08, High, `bug`+`audit`+`security`) —
   interface SNAT admits indistinguishable no-PAT return tuples and sends
   replies to the FIRST session.
@@ -559,9 +560,11 @@ record's identity frees only when `per_worker` is empty AND
     (AGY r14 minor 1: `performSyncHandshake`, sync_auth.go:331-334, is
     bypassed when no auth key is configured — `handleNewConnection`,
     sync_conn.go:100-137, opens the stream with no setup handshake —
-    so the capability rides an additive
-    `syncMsgCapability` frame (or a `syncMsgClockSync` extension,
-    sync_conn.go:137) — RE-ADVERTISED PERIODICALLY (Codex r16 minor 3:
+    so the capability rides ONE named contract: an additive periodic
+    `syncMsgCapability` frame on a dedicated ticker (Codex r17 minor 2:
+    the transport must be one contract, not alternatives — and NOT a
+    handshake field, because unkeyed deployments bypass the handshake,
+    sync_auth.go:321) — RE-ADVERTISED PERIODICALLY (Codex r16 minor 3:
     `sendClockSync` currently runs only ONCE at connection setup,
     sync_conn.go:137, so the re-advertisement needs a named transport:
     a new periodic capability ticker, or piggybacking on an existing
@@ -637,8 +640,32 @@ record's identity frees only when `per_worker` is empty AND
       so nothing is lost permanently; a persistently overflowing
       deployment (>4096 fabric SNAT sessions in one bulk) must raise
       the cap, and the saturation counter makes the pressure visible.
-      Entries pinned to an aborted epoch are dropped fail-closed (see
-      the epoch-death rule below) (Codex r15 blocker 1 — deferred cross-epoch admission is unsafe:
+      **The abort recovery contract is CLUSTER-LEVEL TEARDOWN** (Codex
+      r17 blocker 1: no retry mechanism exists today — `BulkSync()` is
+      write-only, recording the pending ACK and writing BulkEnd WITHOUT
+      waiting (sync_bulk.go:169/183/195), connection setup clears
+      needColdPrime before any ACK (sync_conn.go:194), a missing ACK
+      merely stays in pendingBulkAckEpoch with no ACK-timeout retry
+      (sync_conn_read.go:257), and the survivor re-drive's
+      `outboundBulkAcked` flag is intentionally sticky and never reset
+      after the first acknowledged bulk (sync.go:479), so "let the
+      sender's bulk machinery retry" was false on both counts). On any
+      abort (overflow, deadline, teardown) the receiver CLOSES BOTH
+      connections: the existing full-disconnect cleanup fires on both
+      nodes (all fabrics down → state reset → reconnect → cold
+      re-prime → a FRESH bulk with a fresh epoch), a reconnect backoff
+      rate-limits the cycle, and inbound frames from the aborted epoch
+      are discarded by the TCP teardown itself (the alternative —
+      discard-until-end on a live stream — is rejected: session
+      handlers use `bulkInProgress` only for bookkeeping and install
+      trailing frames normally, sync_conn_read.go:109, so only a
+      teardown stops them cleanly). This also covers the fourth
+      epoch-death shape Codex named (single active-fabric reset after a
+      prior successful bulk while the other fabric survives — the abort
+      converts it to the full-disconnect path that already exists and
+      works). Entries pinned to an aborted epoch are dropped fail-closed
+      with the connection state (see the epoch-death rule below)
+      (Codex r15 blocker 1 — deferred cross-epoch admission is unsafe:
       a frame quarantined in bulk E1 and admitted at wall-clock timeout
       would (a) race E1's BulkEnd reconcile, which deletes sessions
       absent from E1's received set — see the bookkeeping rule below —
@@ -939,10 +966,12 @@ the Go→helper snapshot
 protocol (`SourceNATRuleSnapshot` and the NAT64 snapshot gain NO fields —
 empty-pool is the NAT64 fail-closed channel), all CLI/gRPC surfaces.
 NO wire change of any kind for the core fix; the fabric-alias
-discipline adds ONE additive, old-peer-ignorable receiver capability
-field in the cluster sync HANDSHAKE (advertised by new receivers; new
-senders omit alias derivation when it is present — old peers on both
-sides see today's exact behavior).
+discipline adds ONE additive, old-peer-ignorable periodic
+`syncMsgCapability` frame on a dedicated ticker (advertised by new
+receivers; new senders omit alias derivation when it is present — old
+peers on both sides see today's exact behavior; explicitly NOT a
+handshake field, since unkeyed deployments bypass the handshake,
+sync_auth.go:321).
 Additive-only wire-visible changes (#1961-safe): the four helper-side
 §5.8 status counters (the fifth, the alias-ignored counter, is GO-side
 Prometheus, §5.8).
@@ -951,9 +980,9 @@ Prometheus, §5.8).
 stamped at publish inside the helper; it is NOT read from or written to
 any Go-facing wire, and older in-image rows read as token 0).
 The four helper-side §5.8 status counters are additive optional fields
-(#1961-safe); the TWO Go-side §5.8 counters (alias confirmed-dropped,
-alias quarantine-admitted) are GO-side Prometheus with no helper wire
-involvement (six counters total).
+(#1961-safe); the THREE Go-side §5.8 counters (alias confirmed-dropped,
+alias quarantine-admitted, quarantine-overflow) are GO-side Prometheus
+with no helper wire involvement (seven counters total).
 Changed signatures are `pub(crate)`-internal only:
 `match_source_nat_result_for_tuple` (+1 arg),
 `match_source_nat_for_flow_result_at` (+1), `source_nat_decision_for_flow`
@@ -1223,7 +1252,7 @@ quarantine-admitted), and tests.
   two-legacy-flows-one-identity import case (first reserves, second drops,
   failover kills only the second); helper-restart rehydration via HA
   re-sync pre-reserve.
-- Counters: the six §5.8 counters (four helper-side + two Go-side) bump exactly on their events;
+- Counters: the seven §5.8 counters (four helper-side + three Go-side) bump exactly on their events;
   `NAT_REVERSE_KEY_SHARED_DISPLACEMENTS` stays flat for the interface
   class.
 - Docs sweep: docs/userspace-dataplane-architecture.md,
