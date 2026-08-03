@@ -223,7 +223,26 @@
   storm; + 4 MAJOR — invariant/error contradictions, test holes, HA
   authority, lost-ACK latch + nil-config teardown).
 
-## Round 10 (plan v8.5 @ 867d12166)
+## Round 10 (plan v8.5 @ fe899556f)
+
+- **Codex r10** — background bash task `bnbl68qo1`; output
+  `/tmp/codex-6749-r10.out`; verdict doc `codex-plan-r10.md`.
+  Verdict: DEMAND-REVISION (3 BLOCKER — three-bucket mixed-case
+  outage + bucket semantics + handoff; unconditional fabric
+  adoption hybrids; stored-generation guard contamination +
+  three-authority latch; + 4 MAJOR — contradiction sweep, test
+  folds, budget, handoff spec).
+- **AGY r10** — background bash task `bawfiel1f` (prompt trimmed to
+  126,173 bytes); output `/tmp/agy-6749-r10.out`; verdict doc
+  `agy-plan-r10.md`. Verdict: PLAN-READY-WITH-NITS (1 MINOR —
+  stored-generation guard must compare a config-only generation,
+  not the fib-contaminated scalar; 2 NITs — rebind handler
+  plumbing, evidence wish).
+- **Claude SMR r10** — `claude-smr-plan-r10.md`. Verdict:
+  PLAN-READY-WITH-NITS (N1 fib-invariance sentence [superseded by
+  configEpoch]; N2 flap classes; N3 posture sentence).
+
+## Round 11 (plan v8.6 @ pending)
 
 - Codex — pending dispatch.
 - AGY — pending dispatch.
