@@ -266,6 +266,41 @@
   `task-msdotvm6-vc98k3` (orphan from the interrupted prior
   session, discovered in `status --all`) and
   `task-msdpdhr4-xmh4du` (this session, prompt
-  `/tmp/codex-6749-r11-prompt.txt`, --fresh). Both left
-  running; first-to-complete is the primary, the other a
-  cross-check. Output: pending.
+  `/tmp/codex-6749-r11-prompt.txt`, --fresh). The orphan stalled
+  70+ minutes with no output and was CANCELLED; the completed
+  task is the round-11 Codex verdict of record. Output:
+  `/tmp/codex-6749-r11.out`; verdict doc `codex-plan-r11.md`.
+  Verdict: DEMAND-REVISION (9 BLOCKER + 3 MAJOR — pair authority
+  not a lineage pair; request-side hybrids unfenced; completion
+  token false-refusal + ordering; ownership protocol + exits
+  incomplete; configEpoch advance inconsistent; bucket cohort
+  contradictory; LinkController not a contract; edge-trigger
+  unsafe + error swallowed; test greens; 19s not worst-case.
+  Q1 remains CLOSED).
+
+## Round 12 (plan v8.7 @ d63d98f75e3d)
+
+- **Claude SMR r12** — `claude-smr-plan-r12.md`. Verdict:
+  DEMAND-REVISION (SMR12-1 BLOCKER — my own v8.7
+  `ConfigGeneration` token false-refuses after ordinary overlay
+  republishes (manager_overlay.go:188/:239 sends full applies
+  with fresh generations; the helper's stored generation
+  advances, the compile-stamped token does not) → fix is
+  `config_epoch` ON THE WIRE; + SMR12-2 MAJOR — AttemptMACDebt's
+  call direction contradicts the daemon→manager LinkController
+  reality; + SMR12-3 staged-ahead scalar disjunct false-fires
+  after fib bumps (upgraded to BLOCKER per AGY f3); + SMR12-4
+  guard-env locus pin; + SMR12-5 bucket-iii pass-1 reread).
+- **AGY r12** — background bash `bo613nc74`; direct `agy
+  --print-timeout 9m --print` (prompt assembled at 125,322
+  bytes); output `/tmp/agy-6749-r12.out`; verdict doc
+  `agy-plan-r12.md`. Verdict: DEMAND-REVISION (3 BLOCKER —
+  f1 re-sync cannot read B's ConfigGeneration (Go discards the
+  staged snap on publish timeout, manager_compile.go:350-365);
+  f2 = SMR12-1; f3 = SMR12-3; + 3 MAJOR — f4 AB-BA
+  m.mu↔applySem inversion; f5 bucket-iii flap leaves member
+  unmonitored; f6 telemetry-locus suppression deadlock).
+  Convergence: AGY f2/f3/f4/f6 == SMR12-1/3/2/4; AGY f1/f5 new.
+- **Codex r12** — background task `task-msdremqy-s0poqq`
+  (prompt `/tmp/codex-6749-r12-prompt.txt`, --fresh). Output:
+  pending.
