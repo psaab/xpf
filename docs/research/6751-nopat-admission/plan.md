@@ -559,8 +559,10 @@ record's identity frees only when `per_worker` is empty AND
     bypassed when no auth key is configured — `handleNewConnection`,
     sync_conn.go:100-137, opens the stream with no setup handshake —
     so the capability rides ONE named contract: an additive periodic
-    `syncMsgCapability` frame on a dedicated ticker (period chosen at
-    implementation, e.g. the clock-sync cadence — SMR r18 nit 2;
+    `syncMsgCapability` frame on a dedicated ticker (period aligned to
+    the EXISTING heartbeat/ping ticker interval (5-10s) rather than an
+    uncoordinated standalone timer goroutine — AGY r21 nit 1; SMR r18
+    nit 2;
     Codex r17 minor 2:
     the transport must be one contract, not alternatives — and NOT a
     handshake field, because unkeyed deployments bypass the handshake,
@@ -720,7 +722,12 @@ record's identity frees only when `per_worker` is empty AND
       and its tail (Codex r20 blocker 1b: the tail today runs as
       separate steps after `installConn` returns, sync_conn.go:130, so
       an abort could otherwise land between verdict and
-      loop/callback/cold-prime).
+      loop/callback/cold-prime). To keep the atomic step
+      sub-millisecond and starve-free, network I/O and callback
+      execution inside the tail are dispatched via background
+      goroutines (`go s.OnPeerConnected()`, `go s.doBulkSync()`) — only
+      handle setup and goroutine spawning happen inside the atomic step
+      (AGY r21 nit 2).
       (5) **Reset-once ownership + deterministic detach**: when both
       slots confirm detached (or the named AbortFenceTimeout fires — a
       wedged handler's frames are commit-discarded per (4), so the
