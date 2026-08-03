@@ -1,6 +1,6 @@
 # #6749 — binding-plan expansion registers new slots unarmed, dataplane disabled indefinitely
 
-**Status: DRAFT v8.4 — pending adversarial plan review (round 10)**
+**Status: DRAFT v8.5 — pending adversarial plan review (round 10)**
 
 - Issue: #6749 (opus-review-001 root R06, severity High)
 - Research base: `ad9591177` (origin/master at worktree creation)
@@ -20,26 +20,32 @@
   precheck, epoch-open MAC debt with applySem, Go fabric
   pre-disable, acceptance-time rollover, reset clock,
   identity-keyed error attribution, r8 test matrix) @ `e7b835f73`
-  (r9: AGY DEMAND-REVISION; SMR PLAN-READY-WITH-NITS; Codex in
-  flight); v8.4 folds AGY r9 + SMR r9: the precheck reverts to
-  MAC-mismatch-only for epoch opening with a three-bucket
-  classification (MAC mismatch → epoch; correct-MAC-link-down →
-  link-recovery debt entry with NO epoch — an unplugged cable must
-  never take the whole dataplane down, AGY r9 f1; restart-safe per
-  Codex r8 f4 via the recovery entry), in-flow synchronous
-  settlement of the initial programRethMAC's validated phases and
-  settlement-EVENT-driven tagged dispatch (the AGY r9 f2 deadlock),
-  fabric pre-disable with no liveness reset on guard-hits
-  (AGY r9 f3 = SMR r9 N3), operator-arm retry-clock reset
-  (AGY r9 f4), CLI display pinned to JSON+verbose (AGY r9 f5), and
-  the timeout-landed convergence + dropped-queue-error +
-  reverse-sync doc notes (SMR r9 N4/N5).
+  (r9: all DEMAND-REVISION); v8.4 folds AGY r9 + SMR r9
+  (three-bucket precheck, in-flow settlement, settlement-driven
+  dispatch, pre-disable-no-liveness-reset, operator-arm clock
+  reset, CLI scope, doc notes) @ `bfdf6daf8`; v8.5 folds Codex r9:
+  VERIFIED pre-disable (readback-proved ctrl=0 before the RPC is
+  sent, else don't send), helper-authoritative fabric cache
+  adoption on every status application (the lost-response cache
+  divergence class dies), the tagged retry's stored-generation
+  guard (a stale epoch's retry never consumes a landed-but-
+  unacknowledged successor's latch), nil-config teardown
+  cancellation, HA role-based sync authority (applied → advance +
+  supersede; identical shortcut → no advance), reset-clock
+  exponent preservation (events never touch the exponent; only
+  immutable membership transitions pull the deadline earlier),
+  §7.3 planned-identity alignment + identity-keyed error
+  attribution + the dropped-identity pin, and the r9 test matrix
+  (reconcile-entry hook, lost-ACK shapes, advance-point matrix
+  with UNKNOWN/nil-config/reverse-vs-identical, pre-disable fault
+  injection, guard-hit/UNKNOWN release budgets, event storm,
+  bucket edges, stale-attempt race, real validation handoff).
 
 ---
 
 ## 1. Status
 
-DRAFT v8.4 — pending adversarial plan review round 10 (Codex + AGY +
+DRAFT v8.5 — pending adversarial plan review round 10 (Codex + AGY +
 Claude SMR). Convergence target: PLAN-READY (recommended path shipped
 to `/engineer`) or PLAN-KILL. No production code is written under
 `/research`.
@@ -260,7 +266,46 @@ to `/engineer`) or PLAN-KILL. No production code is written under
   | AGY f4 retry clock on operator arm | CLOSED — any operator arm (global or per-binding) resets pendingRetryAttempts and pendingRetryNextAt to zero (§5-C) |
   | AGY f5 CLI scope | CLOSED — `activation_state` pinned to JSON + verbose only; non-verbose CLI layout byte-identical (§6) |
   | SMR r9 N1-N5 | CLOSED — N1 out-of-band admin-down = config-authoritative drift (folded into the three-bucket text); N2 first-validation-is-synchronous (folded into the settlement text); N3 = AGY f3; N4 timeout-landed convergence via #4036 exact-equal retry + completion machinery (no mirror rollback needed); N5 dropped-queue errors die with the identity, reverse-sync arrives only as rollback (both covered by existing contracts) |
-  | Codex r9 | in flight on v8.3 @ e7b835f73 at v8.4 fold time; its verdict folds into the next revision |
+  | Codex r9 | see the r9-codex table below (v8.5) |
+
+- **Round 9, Codex verdict (v8.3):** DEMAND-REVISION (2 BLOCKER +
+  4 MAJOR). Codex's round: the pre-disable is insufficient without
+  failure semantics (ctrl lookup/update/readback can fail — the
+  projection RPC must not be sent unless ctrl=0 is VERIFIED, else
+  don't send); UNKNOWN recovery leaves Go's accepted-fabric cache
+  stale (helper accepts B, response lost, Go keeps A, a
+  route/scheduler clone republishes A and reverts B — the status
+  application must adopt `status.Fabrics` helper-authoritatively
+  on every poll); §7.3 still mandated the torn socket-tuple check
+  (reviving the relaxed-store tear — must be the planned
+  identity); item 16's error rule was self-contradictory (now
+  identity-keyed: match copies even with a zeroed tuple, mismatch
+  copies nothing, dropped-identity errors die with the identity);
+  the reset clock lets an event storm pin worker-set teardowns at
+  a 5s cadence (events must never touch the attempt exponent —
+  only immutable membership transitions pull the deadline
+  earlier); the tagged retry can consume a landed-but-
+  unacknowledged successor's latch (needs a stored-generation
+  guard); nil-config bootstrap teardown leaves ownerless
+  epoch/debt state (needs explicit cancellation); HA reverse-sync
+  authority is role-based (applied older peer config IS
+  authoritative → advance + supersede; the applied-identical
+  shortcut must NOT advance); and the tests still green-capable
+  (reconcile-entry hook, lost-ACK shapes, advance matrix
+  additions, pre-disable fault injection, release budgets, event
+  storm, bucket edges, stale-attempt race, real handoff).
+- **Round-9-codex disposition table:**
+
+  | r9 finding | v8.5 disposition |
+  |---|---|
+  | Codex f5 pre-disable verification + cache adoption | CLOSED — ctrl=0 is readback-VERIFIED before the projection RPC is sent (disable failure blocks the send); applyHelperStatusLocked adopts status.Fabrics into m.lastSnapshot.fabrics on EVERY poll (helper-authoritative — the lost-response A/B divergence dies; partial publishers always carry the accepted set) (§5-C) |
+  | Codex f6 invariant/error-rule contradictions | CLOSED — §7.3 now mandates the PLANNED-identity comparison (tear-free); item 16's error rule is identity-keyed with the explicit no-dropped-row/no-B→A-attribution/operation-stage-retained pin (§5-C, §7, §9) |
+  | Codex f7 reset exponent | CLOSED — events never touch the attempt exponent; only immutable pending-membership transitions pull nextAt EARLIER with the exponent preserved (event-storm test at the floor) (§5-C, §9) |
+  | Codex f8 test holes | CLOSED — §9 items 12/13/16/17/19 + retry storm + MAC bucket edges/stale-attempt/real-handoff rewritten |
+  | Codex f9 HA authority | CLOSED — role-based note: applied peer config (any origin) advances + supersedes; the applied-identical shortcut advances nothing (§5-C, §9 item 17) |
+  | Codex f10 lost-ACK latch + nil-config teardown | CLOSED — tagged retry suppressed while the helper's stored generation exceeds the debt's epoch; shutdown with no accepted config cancels open epoch/debts explicitly (§5-C) |
+
+### Round-1 detail log (kept for the record)
 
 ### Round-1 detail log (kept for the record)
 
@@ -785,11 +830,17 @@ for a queue the restored plan DELETED dies with the identity (the
 mismatch case already refuses the copy; the queue no longer
 exists in the accepted config and the failure was surfaced at
 apply time) — consistent with the claim-deletion boundary; and
-the cluster's config-sync monotonicity (newest-wins at the
-configstore) means a peer-reverse-synced OLDER config only ever
-lands as a deliberate rollback, which the accepted-generation
-contract already supersedes by design — no generation floor is
-needed.
+the cluster's HA sync is ROLE-based (Codex r9 f9's
+sharpening): only the RG0 primary pushes
+(daemon_ha_sync.go:318), the secondary accepts whatever the peer
+applies (daemon_ha_sync.go:534), and the generation hash is
+content-deduplication, not an ordinal (daemon_ha_sync.go:381) —
+so a peer config that APPLIES (older or newer by origin) is the
+accepted authoritative configuration: the node-local acceptance
+epoch advances and newer-local debts supersede, with NO numeric
+generation floor imported. The applied-identical shortcut
+(daemon_ha_sync.go:563) performs NO adoption and must NOT advance
+the epoch.
 
 **INVARIANT 2 (coherent vector), completed — `update_fabrics`
 replans (Codex r5 BLOCKER 4, projection-scoped in v8 per Codex r6
@@ -881,7 +932,15 @@ pay nothing). On a PROJECTION change, the handler:
    failure; (ii) on a clean response Go writes back the HELPER's
    accepted fabric set (from the returned status, not its request
    input) and applies that status immediately, so the pending
-   marks keep ctrl disabled in the same tick; (iii) on an UNKNOWN
+   marks keep ctrl disabled in the same tick — and GENERALIZED to
+   every poll (Codex r9 f5's cache-divergence fix):
+   `applyHelperStatusLocked` reconciles `m.lastSnapshot.fabrics`
+   from `status.Fabrics` (the helper exports its accepted set at
+   status.rs:204) — helper-authoritative — so a lost response can
+   never leave Go holding a stale A while the helper runs B (which
+   a route/scheduler wholesale clone would then republish,
+   reverting B; route/scheduler partial publishers therefore
+   always carry the accepted set and need no fencing); (iii) on an UNKNOWN
    outcome (timeout, EOF, transport error) Go stays fail-closed —
    ctrl remains 0 until a subsequent successful status poll shows
    the converged state (the pending-activation retry drives the
@@ -899,7 +958,16 @@ pay nothing). On a PROJECTION change, the handler:
    with its own timeout-but-landed state), which is why the
    mark-and-retry shape wins even with the budget stated
    honestly (Codex r8 f5 concurs: mark-and-retry, given the
-   pre-disable).
+   pre-disable). The budget breakdown (Codex r9 f5's numbers): a
+   CLEAN guard-hit re-enables at the RPC/application interval
+   (bounded by the 3s small-request deadline,
+   process_control.go:33, plus ~1 poll tick); an isolated UNKNOWN
+   where the helper did NOT commit releases at roughly failed-RPC
+   + ~1s poll + round trip ≈ ~7s; a converging accepted change
+   lands at the ~15s worst case above (rebind ~5s + readiness ~10s
+   + status application); persistent control failure stays
+   fail-closed indefinitely. Each shape has an explicit test (§9
+   item 19).
 
 **Completion machinery, durable and provenance-exact (Codex r5
 **Completion machinery, durable and provenance-exact (Codex r5
@@ -974,7 +1042,14 @@ BLOCKERs 6 + 8; v8 epoch form per Codex r6 f6/f8):**
     `m.lastAcceptedConfigGeneration` and thereby supersedes any
     debt keyed on an older generation, because the debt's config is
     by definition no longer the accepted one; the new accepted
-    config's own precheck owns whatever defer it needs.
+    config's own precheck owns whatever defer it needs. And the
+    nil-config teardown rule (Codex r9 f10): a daemon shutdown or
+    bootstrap teardown with NO accepted config cancels any open
+    epoch/debt explicitly — they have no accepted owner and must
+    not outlive the process that created them (their state dies
+    with the daemon; nothing leaks into the next boot, where the
+    three-bucket precheck re-derives everything from the active
+    config anyway).
 - **Completion requires a SUCCESSFUL prerequisite — and the
   prerequisite has a PHASE-COMPLETE precheck, an epoch-open debt,
   and applySem serialization (v8.3, Codex r8 f4).** `programRethMAC`
@@ -1099,7 +1174,15 @@ BLOCKERs 6 + 8; v8 epoch form per Codex r6 f6/f8):**
   defer epoch AND a clean MAC state — so a spurious or flap-driven
   `NotifyLinkCycle` (or one fired while the MAC-retry debt is
   active) sends an UNTAGGED rebind instead and can never consume
-  the latch or arm slots against a wrong MAC.
+  the latch or arm slots against a wrong MAC. And the TAGGED
+  completion RETRY carries a stored-generation guard (Codex r9
+  f10's lost-ACK hazard): it is suppressed while the helper's
+  STORED snapshot generation (from the status poll) exceeds the
+  debt's epoch — a timeout-but-landed SUCCESSOR's latch belongs to
+  that successor's own completion path (the #4036 exact-equal
+  retry / the next apply / the successor's own epoch), never to a
+  stale epoch's retry, so A's completion owner can never consume
+  B's latch.
 - **#5134 debt is scoped to the ACCEPTED config generation (v8.2
   contract, Codex r6 f8 + r7 f6).** The manager gains
   `m.lastAcceptedConfigGeneration`, advanced ONLY when a config
@@ -1795,7 +1878,18 @@ activations a scheduled retry.
   intervention; and the provenance test pins the POSITIVE
   current-epoch form: the tag fires only when the epoch is open
   AND the debt has settled (all phases validated for the current
-  desired set), never merely in the absence of a recorded failure. And the v8.4 mechanics
+  desired set — exercised through the REAL daemon-to-manager
+      validation handoff, never by manually constructing "epoch
+      open, no active debt" (Codex r9 f8); plus the bucket edges:
+      a configured-but-administratively-down member and a MISSING
+      member (netlink LinkByName error) classify into their
+      buckets without opening an epoch; the inline first validation
+      settles in-flow WITHOUT reacquiring the semaphore (no
+      re-entrant applySem); and the stale-attempt race — hold
+      applySem, supersede the epoch via a newer accepted config,
+      release the semaphore, and prove the stale attempt performs
+      NO netlink mutation (the immediate pre-mutation epoch
+      revalidation catches the mismatch). And the v8.4 mechanics
       (AGY r9 f1/f2/f3/f4): the THREE-BUCKET precheck — (i) MAC
       mismatch → epoch opens; (ii) MAC correct + link down →
       link-recovery entry ONLY (assert NO epoch, NO latch, NO
@@ -1915,70 +2009,74 @@ not complete and no release ships without it.
 
 ## 11. Open questions for adversarial review
 
-Resolved across rounds 1-7 (for the record): Q2, Q5, Q6, Q7,
+Resolved across rounds 1-9 (for the record): Q2, Q5, Q6, Q7,
 applied-vs-requested init, full fan-out vs scoped, Q3 (uniform S3),
 Q5-toggle, Q7-boot, the plan gate (deleted), the failure-path replan
 (deleted), E2's operator arm (deleted), C2's discriminator (result-
 based), the latch signature/atomicity, the retry's fixed-5s shaping,
 the transient-MAC stranding, the update_fabrics wrong-physical
 hazard, the Go shadow-latch, the quiescence race, the debt
-generation scope, the in-handler fabric reconcile (replaced by
-mark-all-pending + retry-driven bind), the guard authority split,
-the leaking epoch (rollover), the terminal retry cap (rate-capped
-forever), the torn identity check (planned identity), the claim
-boundary (any planned-identity deletion), Q2 convergence scope
-(plan-scoped, confirmed sound).
+generation scope, the in-handler fabric reconcile, the guard
+authority split, the leaking epoch (rollover-at-acceptance), the
+terminal retry cap (rate-capped forever), the torn identity check
+(planned identity), the claim boundary (any planned-identity
+deletion), Q2 convergence scope (plan-scoped), the two-phase
+precheck (reverted to MAC-mismatch-only + three-bucket), the
+epoch-open deadlock (in-flow settlement + settlement-driven
+dispatch), the prewarm reset on guard-hits (plain ctrl write), and
+Q1's unowned-producer hunt (no producer beyond the three owners
+through eight enumerations; the mixed-version producer is the
+documented exception with the required helper restart).
 
-Remaining questions for round 8, each invitable to PLAN-KILL with a
-concrete counterexample:
+Remaining questions for round 10, each invitable to PLAN-KILL with
+a concrete counterexample:
 
 1. **Completeness, final form.** Exhibit a path to
    `Registered && !Armed` with `activation_state == none` that is
    NOT global-fan-out-created, NOT operator-created, NOT a
-   documented deletion-boundary re-creation, and NOT an
-   enabled-gate-explicit `armed=false` pending mark — an unowned
-   producer that strands D-silent.
-2. **The mark-all-pending fabric gate's outage shape.** An
-   accepted fabric projection change now takes the WHOLE dataplane
-   fail-closed (all non-operator slots unarmed) until the
-   pending-retry's first rebind (≤5s initial backoff) — a total
-   outage per fabric projection change, on a path that also fires
-   during HA fabric churn (rate-capped). Is the alternative
-   (in-handler reconcile with a Go fail-closed transaction
-   wrapper, ~10s ctrl=0 but converged atomically) actually worse,
-   and on which metric (window length, complexity, deadlock
-   surface)? Pick one and defend the pick.
-3. **The lastAcceptedConfigGeneration advance points.** The
-   contract advances the epoch ONLY on accepted config commits.
-   Name every production path that can move it and confirm the
-   debts behave: compile success, mandatory re-apply success,
-   config sync from the HA peer, rollback (commit revert to an
-   OLDER config — does the epoch roll back too, and do debts from
-   the newer generation strand?), `commit confirmed` auto-revert.
-4. **The epoch rollover vs a mid-commit defer.** A commit whose
-   OWN apply defers (MAC work) opens the epoch at compile start —
-   but the rollover bullet also runs at compile start. Order them
-   exactly: rollover (cancel stale) THEN open (set flag for this
-   commit). Any interleaving where the new epoch is cancelled by
-   its own rollover?
-5. **The volatile identity check vs fabric parent re-keying.** A
-   VLAN-orphan child's bindings key on the PARENT netdev; the
-   planned identity in `workers.identities` is the candidate's
-   (parent name, parent ifindex, queue). The binding record carries
-   the same. Any case where the planned identity and the binding's
-   `(interface, ifindex, queue_id)` legitimately differ (making the
-   check zero out a HEALTHY slot)?
-6. **Round-7 disposition table audit.** §1's table maps every r7
-   finding to its v8.1/v8.2 fold. Which row is claimed-but-wrong
-   this time?
-7. **Split-line confirmation (Codex r7's own answer).** Codex r7
-   said: do NOT split the MAC debt or pending retry (load-bearing);
-   option D is the only safe split. Confirm or deny with a
-   dependency argument: is D truly independent (the warn predicate
-   + manager test ride no other v8.2 mechanism beyond the wire
-   field), or does splitting it leave the issue's third leg
-   (detection) unaddressed in the PR that owns the model?
-
-
-
-
+   documented deletion-boundary re-creation, NOT an
+   enabled-gate-explicit armed=false pending mark, and NOT the
+   documented mixed-version (old-helper) case.
+2. **The VERIFIED pre-disable's own failure shape.** The
+   projection RPC is blocked unless ctrl=0 is readback-proved. If
+   the readback itself intermittently fails (control plane
+   degraded but dataplane healthy), fabric updates stop flowing
+   while the dataplane keeps running on the old projection — the
+   intended fail-closed posture for control-path mutations. Any
+   case where blocking the SEND is the wrong failure choice (vs
+   sending and accepting the unknown-outcome path)?
+3. **The helper-authoritative fabric cache adoption vs the
+   guard.** `applyHelperStatusLocked` adopts `status.Fabrics` on
+   every poll. On a guard-hit, the helper's accepted set is the
+   PRIOR projection — the adoption is a no-op. On an accepted
+   change, the adoption matches. Is there ANY window where the
+   helper's accepted set legitimately differs from what Go should
+   publish (e.g. a newer config apply in flight that the helper
+   hasn't accepted yet — the status poll races it), making
+   unconditional adoption wrong?
+4. **The stored-generation guard's exact comparison.** The tagged
+   retry suppresses while `status.LastSnapshotGeneration >
+   debtEpochGeneration`. A same-generation-but-different-fib
+   overlay bump (route overlay) — does it move
+   LastSnapshotGeneration? If not, the guard is exact; if it can,
+   the guard needs (generation, fib) pairs, and the overlay case
+   needs a rule.
+5. **The three-bucket precheck vs a flap-during-commit.** A
+   member whose link flaps down between the precheck (bucket iii,
+   correct+up) and the MAC-programming step (which would have
+   been a no-op) — the flow proceeds as if bucket iii held. Does
+   the settle validation catch the now-down member (bucket ii
+   reclassification at validation time), or does the completion
+   dispatch on a member that just went down?
+6. **Round-9 disposition table audit.** §1's two r9 tables (AGY r9
+   → v8.4, Codex r9 → v8.5) map every r9 finding to its fold.
+   Which row is claimed-but-wrong this time?
+7. **Hazard budget sign-off.** The v8.5 hazard list with honest
+   numbers: fabric projection change worst-case ~15s convergence
+   (rate-capped); clean guard-hit ~RPC-interval + 1 poll tick;
+   isolated UNKNOWN-no-commit ≈7s; persistent control failure
+   indefinite fail-closed; permanent bind failure 60s-floor
+   probes forever with edge Warns; unplugged RETH member =
+   link-recovery retry with NO dataplane impact. Does any
+   reviewer find any of these budgets unacceptable for the
+   severity-High class, and if so which and why?
