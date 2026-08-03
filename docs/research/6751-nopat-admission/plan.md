@@ -1,10 +1,10 @@
 # #6751 plan — interface SNAT no-PAT admission: reserve-or-PAT the colliding translated tuple
 
-- **Status**: DRAFT v12 — round-11 fold (Codex r11 blockers 1-2 + major 3
-  + nit 4: the alias marker rides the EXISTING SessionValue.Flags u16 as
-  `SessFlagForwardWireAlias`; the DROP happens receiver-side at the
-  cluster boundary with a per-peer sticky capability gate; pub_token
-  chain restored; stale fold artifacts cleaned)
+- **Status**: DRAFT v13 — round-12 fold (Codex r12 blockers 1-2 + major 3
+  + minor 4: the cluster codec truncates flags to a byte, so the alias
+  marker is RECEIVER-DERIVED from row content (self-wire signature), no
+  wire change of any kind; bounded delete-suppression set; drop hook in
+  pkg/cluster pre-bulk; pub_token chain retained)
 - **Issue**: #6751 (opus-review-001 R08, High, `bug`+`audit`+`security`) —
   interface SNAT admits indistinguishable no-PAT return tuples and sends
   replies to the FIRST session.
@@ -532,67 +532,67 @@ record's identity frees only when `per_worker` is empty AND
     clears; with both marker classes gone the registry holds nothing for
     the wiped state.
   - Same-plan refresh: worker tables PERSIST — no marker event at all.
-- **Fabric forward-wire alias: exporter marks, RECEIVER drops at the
-  cluster boundary (Codex r6-r11 alias blockers, resolved by keeping the
-  alias out of BOTH the ownership design AND the helper entirely)**: HA
-  session sync deliberately exports a fabric-redirect session TWICE — the
-  canonical forward key AND a derived NAT-translated forward-WIRE alias
-  key (`userspaceForwardWireAliasFromDeltaV4`,
-  daemon_ha_userspace_stream.go:370/373, queued under
-  `delta.FabricRedirect && !delta.FabricIngress`). Rounds 6-10 established
-  that hosting the alias in the ownership model loses; r11 established
-  that a flag only on the Go→helper request cannot work either — the
-  exporter's `QueueSessionV4/V6` take only (key, val) and encode onto the
-  CLUSTER wire (sync_conn_write.go:56, sync_protocol.go:95/98), and the
-  PEER constructs the helper `SessionSyncRequest` from the decoded
-  key/value (manager_ha.go:1584/1668), so alias provenance must cross the
-  cluster boundary, not just the local one. The design:
-  - **Carrier (exact marker)**: a NEW flag bit
-    `SessFlagForwardWireAlias` in the EXISTING
-    `SessionValue.Flags uint16` field (the #5460 `SessFlagNPTV6` bit-8
-    precedent, pkg/dataplane/types.go:18-22 — a new high bit does not
-    change the ABI size, which stays 136 and keeps its assertion). The
-    exporter sets the bit at the two alias derivation sites
-    (daemon_ha_userspace_stream.go:370 V4, :379 V6). The bit rides the
-    cluster upsert wire inside the existing value payload (no wire-format
-    change), the Go BPF conntrack mirror (same ABI field), and the
-    peer's Go→helper request construction. Decode-tolerance is PINNED as
-    an implementation gate: every reader of the flags field (Go mirror
-    decode, Rust helper decode) MUST use truncate-style decoding for
-    unknown bits (the #5460 precedent); if any decoder validates
-    strictly, the old-receiver matrix cell changes to "unknown bit
-    ignored at decode" and is verified by test.
-  - **Receiver-side drop rule** (in the Go daemon at the cluster receive
-    boundary, BEFORE any forwarding/mirroring to the helper or the local
-    session store): drop an upsert row when EITHER
-    (i) `SessFlagForwardWireAlias` is set (exact, new+new path), OR
-    (ii) the row matches the self-wire signature — forward,
-    sync-derived, and `key.src_ip == decision.rewrite_src` — AND the
-    peer is not known to set the flag (per-peer sticky capability: once
-    ANY flagged row arrives from a peer, the signature heuristic is
-    disabled for that peer, so a flag-capable peer's GENUINE self-NAT
-    sessions — a client legitimately owning the WAN address, the #2387
-    corner — are never dropped; the heuristic exists only for
-    flag-incapable legacy peers, and its collateral (dropping a genuine
-    self-NAT canonical row from a legacy peer) is documented and counted).
-    Dropped rows never reach the helper, the BPF mirror, or the local
-    session store. Counted by
-    `xpf_userspace_session_sync_forward_wire_alias_ignored_total`
-    (Go-side counter, Prometheus, §5.8) + rate-limited Debug log.
-  - **Why dropping is safe (verified three times independently — AGY
-    r9/r11, Codex r9/r10/r11)**: the explicit alias row is REDUNDANT with
-    the derived forward-wire index row the base session's own publish
-    inserts (`publish_shared_session` populates
+- **Fabric forward-wire alias: RECEIVER-DERIVED signature drop + delete
+  suppression — NO wire change of any kind (Codex r6-r12 alias blockers,
+  converged)**: HA session sync deliberately exports a fabric-redirect
+  session TWICE — the canonical forward key AND a derived NAT-translated
+  forward-WIRE alias key (`userspaceForwardWireAliasFromDeltaV4`,
+  daemon_ha_userspace_stream.go:370/373). Rounds 6-10 established the
+  alias cannot live in the ownership model; r11 established a flag only
+  on the Go→helper request cannot cross the CLUSTER wire; r12 established
+  the flag cannot ride the existing `SessionValue.Flags` either — the
+  cluster codec serializes only `byte(val.Flags)` and documents bits ≥ 8
+  as lost (sync_protocol.go:116/122 V4, :231/237 V6; decoders reconstruct
+  from only that byte, :396/:525), and the low byte is fully assigned
+  (SNAT/DNAT/LOG/COUNT/ALG/PREDICTED/STATIC_NAT/NAT64,
+  bpf/headers/xpf_common.h:191). So the receiver DERIVES alias-ness from
+  the decoded row content instead of any carried marker:
+  - **Self-wire signature** (computable entirely receiver-side, no wire
+    change): an upsert row is a suspected alias when it is (forward ∧
+    sync-derived ∧ `decision.rewrite_src.is_some()` ∧
+    `key.src_ip == decision.rewrite_src`). Every derived alias matches
+    exactly (its key IS the translated tuple). The only other matching
+    rows are GENUINE self-NAT sessions (a client legitimately owning the
+    translated/WAN address — the #2387 cross-VRF corner): they take the
+    collateral drop, DOCUMENTED + counted (their forward path is already
+    ambiguous at the reverse index pre-change; §5.1). No false positives
+    in any other NAT class: NAT64 (v6 src ≠ v4 rewrite), static 1:1
+    (internal ≠ external), DNAT/direct (no `rewrite_src`).
+  - **Drop point**: in `pkg/cluster` immediately AFTER decode and BEFORE
+    `bulkRecvV4/V6` bookkeeping insertion (sync_conn_read.go:109 records
+    the decoded key before invoking installation — Codex r12 minor 4: a
+    drop inside `SetClusterSyncedSession*` would be too late for
+    authoritative bulk reconciliation). Dropped rows never reach the
+    helper, the BPF mirror, the local session store, or bulk state.
+    Counted by `xpf_userspace_session_sync_forward_wire_alias_ignored_total`
+    (Go-side Prometheus counter, §5.8) + rate-limited Debug log.
+  - **Delete suppression set** (Codex r12 blocker 2): the receiver keeps
+    a bounded per-peer set (4096-entry LRU) of recently-dropped
+    alias-signature keys; a cluster DELETE whose key is in the set is
+    SUPPRESSED (not forwarded). This kills the residual corner where an
+    alias delete (wire key) could remove a genuine canonical occupant —
+    on the new path no signature-matching occupant can exist (upserts
+    are dropped), and with the suppression set even a delete racing the
+    drop can't touch a same-key genuine self-NAT row that an OLD window
+    had admitted. (Today, the alias upsert itself already clobbers such
+    an occupant at publish, shared_ops.rs:907 — the corner is
+    pre-existing; the suppression set makes the new path strictly safer
+    than today.)
+  - **Why dropping is safe (verified four times independently — AGY
+    r9/r11/r12, Codex r9/r10/r11/r12)**: the explicit alias row is
+    REDUNDANT with the derived forward-wire index row the base session's
+    own publish inserts (`publish_shared_session` populates
     `shared_forward_wire_sessions[forward_wire_key(base)]`,
     shared_ops.rs:943-957) — fabric-return lookups resolve to the base
-    entry with the identical fabric-redirect disposition
-    (lookup_session_across_scopes, shared_ops.rs:585-635; RG-promote
-    republish indexes the derived map, shared_ops.rs:432-437/:950;
-    activation prewarm needs only the base rows; materialize/promote take
-    the base's canonical key from the derived entry,
-    shared_ops.rs:549/session_glue/mod.rs:1268). No Rust forwarding
-    consumer requires the explicit row.
-  - **Side fix (a live shipped hazard, verified by Codex r11 and AGY
+    entry with the identical fabric-redirect disposition; exact shared
+    lookup falls through to that derived index (shared_ops.rs:630);
+    materialization carries the base canonical key (shared_ops.rs:549);
+    RG-promote republish indexes the derived map (shared_ops.rs:432-437/
+    :950); BPF publication already emits canonical + forward-wire +
+    reverse-wire + reverse-canonical keys for the base
+    (bpf_map/mod.rs:76). No Rust forwarding consumer requires the
+    explicit row.
+  - **Side fix (a live shipped hazard, verified by Codex r11/r12 and AGY
     r11)**: the import path synthesizes a reverse companion for every
     forward import including alias rows
     (synthesized_synced_reverse_entry, shared_ops.rs:750 — no alias
@@ -611,32 +611,16 @@ record's identity frees only when `per_worker` is empty AND
     the hazard on the new path (no alias entry → no broken companion →
     no displacement; `NAT_REVERSE_KEY_SHARED_DISPLACEMENTS` goes quiet
     for fabric-redirect SNAT sessions).
-  - **Delete path**: alias deletes carry only key+generation
-    (QueueDeleteV4/V6, sync_conn_write.go:77; the helper deletes the
-    presented key unconditionally, sync_session.rs:29). On the new path
-    the alias row was never published, so the wire-key delete finds no
-    canonical row and NO-OPS (`remove_shared_session` removes only what
-    it finds); the base's derived forward-wire index row lives under the
-    base's OWN key and is removed only by the base's delete. The one
-    corner — a genuine self-NAT occupant at the wire key — is
-    pre-clobbered TODAY (the alias publish displaces it at
-    shared_ops.rs:907 before any delete), so the delete introduces no
-    new hazard; documented, no delete flag needed.
-  - **Mixed-version matrix** (no cell regresses):
-    - new sender + new receiver: flag-exact drop (genuine self-NAT
-      preserved — the flag is set only on DERIVED aliases).
-    - old sender + new receiver: no flag → signature heuristic (sticky
-      gate) → alias dropped, base imports cleanly — BETTER than today
-      (the broken companion never forms); collateral (legacy genuine
-      self-NAT) documented + counted.
-    - new sender + old receiver: the bit rides the existing flags field;
-      old decoders truncate/ignore unknown bits (pinned verification
-      above) → alias imports as canonical, TODAY'S exact behavior
-      (broken companion included — the status quo, not worse).
-    - old + old: status quo.
-    - Codex r11 blocker 2's regression (unflagged alias reserving
-      against the real base) cannot occur in any cell: on the new path
-      no alias row ever reaches the helper's ownership machinery.
+  - **Mixed-version matrix** (no cell regresses): old+old: status quo.
+    new receiver (any sender): signature-derived drop — the alias never
+    reaches the helper's ownership machinery in any cell, so Codex r11
+    blocker 2's regression (unflagged alias reserving against the real
+    base) cannot occur; the window is BETTER than today (no broken
+    companion), at the price of the documented self-NAT collateral.
+    new sender + old receiver: sender keeps deriving aliases (old
+    receivers need them); old receiver treats them as canonical —
+    TODAY'S exact behavior (broken companion included — the status quo,
+    not worse).
   - **Helper side**: NO alias-specific handling at all — the ownership
     machinery (reserve/holders/tri-state/staged replacement) sees only
     canonical rows.
@@ -748,13 +732,14 @@ sessions:
 
 ### 5.8 Observability (additive, production)
 
-Five ADDITIVE optional counters on the existing helper status wire,
+Four ADDITIVE optional counters on the existing helper status wire,
 plumbed via the FULL #1760-W3' precedent (protocol/control.rs:343 +
 coordinator/status.rs:241 + server/lifecycle.rs:228 init +
 server/helpers/status.rs:102 refresh; protocol_status.go:287 +
 pkg/api/metrics.go:377 + Describe registration at metrics.go:791 +
 metrics_descriptors_userspace_session.go:27 + metrics_userspace.go:677;
-additive per #1961):
+additive per #1961), PLUS one GO-side Prometheus counter (the
+alias-ignored counter of §5.6 — no helper wire involvement):
 - `xpf_userspace_interface_snat_pat_collisions_total` — identity-mint
   conflicts that took the PAT probe;
 - `xpf_userspace_interface_snat_identity_exhaustion_total` — completed
@@ -793,13 +778,13 @@ Preserved byte-for-byte: `NatDecision`, `SourceNatLookup`, `SessionKey`,
 the Go→helper snapshot
 protocol (`SourceNATRuleSnapshot` and the NAT64 snapshot gain NO fields —
 empty-pool is the NAT64 fail-closed channel), all CLI/gRPC surfaces.
-Additive-only wire changes (#1961-safe, both optional/omitempty):
-Additive-only wire-visible changes (#1961-safe): ONE new high bit
-`SessFlagForwardWireAlias` in the EXISTING `SessionValue.Flags uint16`
-(the #5460 `SessFlagNPTV6` bit-8 precedent — no ABI size change, no new
-field; old decoders truncate/ignore unknown bits — pinned as an
-implementation verification in §5.6), and the §5.8 status
-counters.
+NO wire change of any kind for the fabric-alias discipline (v13: the
+receiver derives the self-wire signature from row content — the r12
+finding that the cluster codec truncates `Flags` to one byte,
+sync_protocol.go:116/122/231/237, makes any carried marker moot).
+Additive-only wire-visible changes (#1961-safe): the four helper-side
+§5.8 status counters (the fifth, the alias-ignored counter, is GO-side
+Prometheus, §5.8).
 `SyncedSessionEntry` gains ONE additive HELPER-INTERNAL field
 (`pub_token: u64`, the coordinator-local publication token of §5.6 —
 stamped at publish inside the helper; it is NOT read from or written to
@@ -830,8 +815,9 @@ shared-replacement
 alias sweep inside `publish_shared_session`'s displacement handling. Go changes: the #5144
 validator extension (dedup-by-address), the snapshot-builder overlap
 marking (source pools + NAT64 empty-pool + the §5.7 derivation matrix),
-the `SessFlagForwardWireAlias` exporter bit + receiver-side drop rule
-(§5.6), the five status-counter mirrors + Describe registration, and tests.
+the receiver-side signature-drop rule + delete-suppression set
+(§5.6), the four helper-side status-counter mirrors + Describe
+registration, the Go-side alias-ignored counter, and tests.
 
 ## 7. Hidden invariants the change must preserve
 
@@ -881,19 +867,20 @@ the `SessFlagForwardWireAlias` exporter bit + receiver-side drop rule
   queue/relay-or-expiry-bounded reverse-companion edge
   (`replicate_session_delete` enqueues commands — no strict deadline),
   which is identical in shape to shipped pool-mode discipline today.
-- **Fabric-alias discipline (v12)**: the exporter marks derived
-  forward-wire alias rows with a new high bit in the EXISTING
-  `SessionValue.Flags` u16 (the #5460 additive-bit precedent); the
-  RECEIVING Go daemon drops flagged rows at the cluster receive boundary
-  (plus a per-peer sticky-gated self-wire-signature rule for
-  flag-incapable legacy peers) so no alias row ever reaches the helper's
-  ownership machinery — the base session's own derived forward-wire
-  index row (populated at the base's publish, shared_ops.rs:943-957)
-  serves every lookup the alias row served, and the broken
-  synthesized-companion churn (a live shipped hazard,
-  shared_ops.rs:750 + nat/mod.rs:106) closes as a side effect.
-  Old decoders truncate/ignore the unknown bit (pinned verification), so
-  no mixed-version cell regresses.
+- **Fabric-alias discipline (v13)**: NO carried marker exists (the
+  cluster codec truncates `Flags` to one byte, sync_protocol.go:116/122/
+  231/237), so the RECEIVING side derives alias-ness from row content —
+  the self-wire signature (forward ∧ sync-derived ∧ `rewrite_src` set ∧
+  `key.src_ip == rewrite_src`) — and drops matching upserts in
+  `pkg/cluster` immediately after decode, before bulk bookkeeping
+  (sync_conn_read.go:109), so no alias row ever reaches the helper's
+  ownership machinery; a bounded per-peer delete-suppression set kills
+  the genuine-occupant delete corner. The base session's own derived
+  forward-wire index row (populated at the base's publish,
+  shared_ops.rs:943-957) serves every lookup the alias row served, and
+  the broken synthesized-companion churn (a live shipped hazard,
+  shared_ops.rs:750 + nat/mod.rs:106) closes as a side effect. The
+  genuine self-NAT collateral (#2387 corner) is documented + counted.
 - **NatDecision freeze**: no new fields; `rewrite_src_port: Some(_)` is
   handled generically everywhere from pool mode.
 - **Hot path**: established-flow transit untouched; zero new per-packet
@@ -942,24 +929,26 @@ the `SessFlagForwardWireAlias` exporter bit + receiver-side drop rule
   aliases — reverse_wire/reverse_canonical/forward_wire of T_old no
   longer resolvable — with COMPARE-AND-REMOVE ownership validation so a
   third-party occupant of T_old's derived slot is never swept — Codex r7
-  major 4); fabric forward-wire alias discipline (Go receiver-side drop
-  at the cluster boundary: a FLAGGED row drops before reaching the
-  helper — no reserve, no canonical row, no synthesized reverse
-  companion, no fanout; the fabric-return lookup resolves via the base's
+  major 4); fabric forward-wire alias discipline (receiver-DERIVED
+  self-wire signature — no carried marker, no wire change: a
+  signature-matching upsert drops in pkg/cluster AFTER decode and BEFORE
+  bulkRecvV4/V6 bookkeeping (the sync_conn_read.go:109 ordering pin —
+  Codex r12 minor 4), never reaching the helper/reserve/publish/
+  companion synthesis; the fabric-return lookup resolves via the base's
   derived forward-wire index row with the identical fabric-redirect
   disposition; alias-first arrival is a non-event — the base's later
-  import never conflicts; a colliding flow's flagged alias drops without
-  touching the first flow's rows; the per-peer sticky capability gate
-  disables the self-wire signature once any flagged row arrives from
-  that peer, so a flag-capable peer's genuine self-NAT sessions are
-  preserved; the legacy-peer signature rule drops unflagged aliases
-  (documented collateral); V4 AND V6 converter parity — AGY r10/r11
-  nit; a wire-key DELETE on the new path no-ops (no row present;
-  derived rows under the base's key untouched); the old-decoder
-  truncate-tolerance gate for the new flags bit is test-verified;
-  `NAT_REVERSE_KEY_SHARED_DISPLACEMENTS` no longer fires per sweep for a
-  flagged fabric session — the pre-existing companion-displacement churn
-  is gone — Codex r10/r11 blockers resolved by removal); staged replacement
+  import never conflicts; a colliding flow's alias drops without touching
+  the first flow's rows; the genuine self-NAT collateral row drops and
+  counts (documented, #2387 corner); the bounded per-peer
+  delete-suppression set (4096-entry LRU) suppresses deletes for
+  recently-dropped alias keys so no genuine occupant is deleted by an
+  alias delete (Codex r12 blocker 2); signature precision — NAT64 (v6 src
+  ≠ v4 rewrite), static 1:1 (internal ≠ external), DNAT/direct (no
+  rewrite_src) never match; V4 AND V6 signature parity — AGY r10/r11
+  nit; `NAT_REVERSE_KEY_SHARED_DISPLACEMENTS` no longer fires per sweep
+  for a fabric-redirect SNAT session — the pre-existing
+  companion-displacement churn is gone — Codex r10/r11/r12 blockers
+  resolved by removal); staged replacement
   (T_old held until unreachable;
   each owner drops only its own marker); uniform mint quarantine (a
   re-enabled edited pool cannot mint an identity an older draining
@@ -1048,19 +1037,22 @@ the `SessFlagForwardWireAlias` exporter bit + receiver-side drop rule
    transactional shared replacement with the derived-index sweep) is now
    covered in §5.3/§5.6/§5.7, and the fabric-alias class is removed from
    the ownership design entirely (§5.6, v11).
-2. The v12 alias discipline (exporter marks via the existing
-   SessionValue.Flags u16; the RECEIVER drops at the cluster boundary —
-   flag-exact on new peers, per-peer-sticky-gated self-wire signature on
-   legacy peers) rests on two verified claims: the explicit alias row is
-   redundant with the base's derived forward-wire index row (AGY r9/r11,
-   Codex r9/r10/r11 all walked it), and wire-key deletes no-op on the new
-   path. Falsify either with a consumer of the explicit alias row that
-   the derived row does not serve, or a delete path that reaches a live
-   row on the new path. Also: is the self-wire signature's collateral
-   (dropping a legacy peer's genuine self-NAT canonical row — a client
-   owning the WAN address, the #2387 corner) priced correctly at
-   documented-plus-counter, or must the legacy window keep the broken
-   companion instead of taking the collateral?
+2. The v13 alias discipline (receiver-derived self-wire signature, no
+   carried marker, delete-suppression set) rests on three verified
+   claims: the explicit alias row is redundant with the base's derived
+   forward-wire index row (walked independently by AGY r9/r11/r12 and
+   Codex r9/r10/r11/r12); the signature's only collateral is the genuine
+   self-NAT corner (a client owning the translated address — already
+   ambiguous pre-change); and the suppression set makes the delete path
+   strictly safer than today's (today the alias upsert clobbers the
+   occupant at publish). Falsify any of the three with a consumer of the
+   explicit alias row the derived row does not serve, a NAT class where
+   the signature false-positives, or a delete path that reaches a live
+   row the suppression set cannot cover (e.g., an alias delete delayed
+   past the LRU window). Is the documented-plus-counter collateral
+   pricing right, or does this corner demand the additive
+   length-gated-cluster-field exact carrier (the r12-rejected wire
+   change) as a follow-up?
 3. Tuple-versioned records (§5.3): confined to the interface registry's
    allocator instances, with pool allocators keeping today's flow-keyed
    shape and free-on-release semantics. Is the two-shape split coherent,

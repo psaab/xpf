@@ -38,6 +38,9 @@ reviewer (it joins the quad at `/engineer` on the code PR).
 | r11 | Claude SMR | `claude-smr-plan-r11.md` | PLAN-READY-WITH-NITS (retreat verified: alias row redundant with derived index; broken companion independently confirmed as live shipped hazard) |
 | r11 | Codex | codex session `019fc88d-926d-7510-b7b5-b5069e7bbacd` (companion task `task-msdh0f0a-lsp1j5`) → `codex-plan-r11.md` | PLAN-NEEDS-REVISION (2 BLOCKERs: flag has no end-to-end carrier across the cluster wire + unmarked deletes; old-Go+new-helper cell regresses under the new reserve machinery; 1 MAJOR: pub_token chain text lost in the section replacement; 1 NIT: stale fold artifacts) |
 | r11 | AGY | direct `agy --print --dangerously-skip-permissions` foreground → `agy-plan-r11.md` | PLAN-READY-WITH-NITS (redundancy + broken-companion + matrix all verified; 2 carried NITs) |
+| r12 | Claude SMR | `claude-smr-plan-r12.md` | PLAN-READY-WITH-NITS (v12 carrier/gate/drop-point verified; §9 counter typo folded v12.1) |
+| r12 | Codex | codex session `019fc8ac-0d94-7772-adc4-46db74a88c5b` (companion task `task-msdi787b-0wwwlx`) → `codex-plan-r12.md` | PLAN-NEEDS-REVISION (2 BLOCKERs: cluster codec serializes only byte(Flags) — high bits lost, sync_protocol.go:116/122/231/237/396/525, low byte fully assigned; unmarked alias delete can delete a genuine canonical occupant via DeleteWithCompanions + unconditional helper delete; 1 MAJOR: sticky gate has an unavoidable bootstrap false-positive window; 1 MINOR: drop hook must be in pkg/cluster pre-bulk, sync_conn_read.go:109; 1 NIT: counter inventory) |
+| r12 | AGY | direct `agy --print --dangerously-skip-permissions` foreground → `agy-plan-r12.md` | PLAN-READY-WITH-NITS (carrier/drop/sticky-gate/pub_token/artifacts verified; 1 NIT: §9 said four counters) |
 
 Round-1 infra notes: the Codex companion background job tracker lost the first
 job (`task-msd5pjfq-yfwbeg` — state dir is workspace-hash-keyed and the poll
