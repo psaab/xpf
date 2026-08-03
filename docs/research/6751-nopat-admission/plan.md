@@ -1,17 +1,19 @@
 # #6751 plan — interface SNAT no-PAT admission: reserve-or-PAT the colliding translated tuple
 
-- **Status**: DRAFT v15.10 — round-23 fold (Codex r23 blockers 1-2 +
-  minor 3: callback work now splits into convergent reads (config/DHCP/
-  IPsec — verified to read live state at execution) and DAEMON LIFECYCLE
-  MUTATIONS (syncPeerConnected flag, connection epoch, heartbeat
-  suppression, bulk-prime flags, readiness arming — NOT convergent and
-  NOT ordered today, daemon_ha_sync.go:51/68/81/109) which are now
-  GENERATION-ORDERED AT THEIR COMMIT POINT, closing the
-  connect-after-disconnect flag race; and the journal contract is now
-  three-layered — abort-generation-bound envelopes discarded at drain,
-  zero-generation/cap-saturated replay as the documented UNORDERED class
-  bounded by the next authoritative reconcile, and sender-cap saturation
-  triggering a fresh authoritative bulk drive)
+- **Status**: DRAFT v15.11 — round-24 fold (Codex r24 blockers 1-2 +
+  major 3 + minor 4: class-(b) lifecycle mutations now use ONE
+  linearizable commit mechanism — generation-tagged compare-and-swap
+  with monotonic-advance semantics, so a stale connect can never
+  overwrite a newer disconnect and a stale disconnect can never
+  overwrite a newer connect, with no check-then-store window by
+  construction; the send guard moved to the dequeue/send effect point
+  and now covers EVERY outbound delta (journal replay, direct raw-byte
+  sendCh entries, and already-dequeued retries — a pre-abort delta sent
+  on a replacement connection is discarded because the new epoch's
+  cold-prime bulk is the authoritative backstop); and the sender-cap
+  recovery is episode-latched (one recovery bulk per cooldown window,
+  refusals during a recovery bulk cannot arm the next episode — a
+  recovery bulk never re-arms itself))
 - **Issue**: #6751 (opus-review-001 R08, High, `bug`+`audit`+`security`) —
   interface SNAT admits indistinguishable no-PAT return tuples and sends
   replies to the FIRST session.
@@ -795,31 +797,33 @@ record's identity frees only when `per_worker` is empty AND
       generation and the disconnect callback storing
       `syncPeerConnected=false` (daemon_ha_sync.go:109), and the
       already-launched connect callback storing it back to TRUE.
-      Class (b) mutations are therefore GENERATION-ORDERED AT THEIR
-      COMMIT POINT (not merely validated at spawn), and the revalidation
-      and the state store execute ATOMICALLY TOGETHER under the daemon
-      lifecycle lock (`d.syncMu`) — AGY r24 minor 1: a revalidate-then-
-      store split lets a disconnect (`onSessionSyncPeerDisconnected`,
-      daemon_ha_sync.go:109) advance the abort generation, detach the
-      slot, and store `syncPeerConnected=false` AFTER the connect
-      callback revalidates but BEFORE it stores `true`, so the check
-      and the write must be one critical section. The lifecycle store
-      inventory covered by this discipline is complete (AGY r24 nit 3):
-      `onSessionSyncPeerConnected` (syncPeerConnected flag, connection
+      Class (b) mutations therefore use ONE LINEARIZABLE COMMIT
+      MECHANISM — generation-tagged compare-and-swap with
+      MONOTONIC-ADVANCE semantics — not independent validation plus
+      stores (Codex r24 blocker 1: a check-then-store split lets the
+      detach land after validation and before `syncPeerConnected.Store(true)`,
+      recreating the exact connect-after-disconnect race it was meant
+      to close; and the asynchronously launched DISCONNECT callback was
+      not symmetrically guarded at all — a stale disconnect could store
+      `false` after a newer connection stored `true`). Every lifecycle
+      state field in the inventory — `syncPeerConnected`, connection
       epoch, heartbeat-suppression state, bulk-prime flags, readiness
-      arming — daemon_ha_sync.go:51/68/81),
-      `onSessionSyncPeerDisconnected` (the false write, :109),
-      `onSessionSyncBulkReceived` (`syncBulkPrimed=true`, VRRP sync-hold
-      release, :90), and `onSessionSyncBulkAckReceived`
-      (`syncPeerBulkPrimed=true`, :103) — every lifecycle state store
-      carries the admission generation and revalidates at the store
-      (i) the abort generation has not advanced past the admission
-      generation and (ii) the slot is still the admitted one, inside
-      the same critical section, so a stale connect-callback's write
-      commits only if no newer abort/disconnect event has committed
-      (the same commit-time guard as clause (4), applied to daemon
-      lifecycle state). §9 pins the abort-after-callback-launch-but-
-      before-state-commit test for each callback in the inventory.
+      arming, and the bulk-received/ack-received priming flags
+      (`onSessionSyncPeerConnected` :51/:68/:81,
+      `onSessionSyncPeerDisconnected` :109, `onSessionSyncBulkReceived`
+      :90, `onSessionSyncBulkAckReceived` :103 — the complete set,
+      AGY r24 nit 3) — is stored as a (generation, value) pair
+      committed by a CAS that REFUSES TO MOVE BACKWARD: a mutation
+      commits only if its event generation is >= the currently stored
+      generation for that field, so a stale connect-callback's `true`
+      cannot overwrite a newer disconnect's `false`, and a stale
+      disconnect's `false` cannot overwrite a newer connect's `true` —
+      last-writer-newest-wins, never stale-over-new, with no
+      check-then-store window by construction (the CAS IS the commit
+      point; there is no separate validation step to race). §9 pins
+      the detach-between-check-and-store case (impossible under CAS)
+      and the old-disconnect-after-new-connect case (the stale
+      disconnect's write fails the generation CAS).
       (iii) **Journal replay** (messages move into a generation-blind
       queue whose sender later picks whatever connection is active,
       sync_conn_write.go:135/268): the per-(sender,key) monotonic
@@ -849,12 +853,27 @@ record's identity frees only when `per_worker` is empty AND
       install can RESURRECT the closed session — the exact reorder
       #2221's tombstone exists to prevent (sync_gen_guard_test.go:830).
       The disposition is therefore three-layered:
-      (a) **abort-generation-bound journal envelopes**: every journaled
-      envelope binds the admission/abort generation of the connection
-      that queued it, and is discarded at queue-drain when its bound
-      generation is older than the current abort generation or the
-      fence is set — the ABORT-adjacent resurrection/kill never
-      travels (this is the contract this issue requires);
+      (a) **epoch-bound SEND guard at the dequeue/send effect point —
+      for EVERY outbound delta, not just journal envelopes** (Codex r24
+      blocker 2: `QueueDeleteV4/V6` journals only when `queueMessage`
+      FAILS; successful deltas enter `sendCh` DIRECTLY as raw
+      `[]byte` (sync_conn_write.go:36/77), and `sendLoop` can dequeue
+      one, wait indefinitely for any active connection, and later send
+      it over a REPLACEMENT connection (sync_conn_write.go:135/268) —
+      so an envelope guard at the journal queue alone cannot stop a
+      pre-abort zero-generation delete from traveling on the
+      replacement connection, and the "never travels" claim was false).
+      Every outbound session delta (upsert or delete, journal replay,
+      direct sendCh entry, or an already-dequeued retry) is
+      EPOCH-BOUND at dequeue time with the sender's current connection
+      epoch, and the sendLoop DISCARDS any delta whose bound epoch is
+      older than the epoch of the connection it would send on — the
+      delta's content predates the reset, and the new epoch's
+      cold-prime bulk is the authoritative backstop that re-conveys
+      every still-valid session, so discarding is safe and complete.
+      The journal envelope guard from the earlier layer is subsumed by
+      this rule (the binding point moved from enqueue to the send
+      effect, covering all four flow shapes uniformly).
       (b) **zero-generation / cap-saturated replay is the UNORDERED
       class**: a message whose per-key generation is 0 (sender untracked
       or receiver cap-saturated) carries no ordering information; its
@@ -864,18 +883,26 @@ record's identity frees only when `per_worker` is empty AND
       convergence backstop for every provisional effect — and by
       (c) below;
       (c) **sender-cap saturation triggers a fresh authoritative bulk
-      drive**: when the sender's generation map refuses a new key at
-      capacity (sync_conn_gen.go:45), the affected key range is marked
-      for the next bulk drive (or an immediate one if idle), because the
+      drive — with an EPISODE LATCH and an anti-self-rearm rule**
+      (Codex r24 major 3: at capacity `putGenBounded` refuses EVERY
+      unseen key on EVERY attempt, and `BulkSync` itself calls
+      `stampInstallGenV4/V6` for every session (sync_bulk.go:95/135),
+      so a refusal-armed bulk re-arms its own successor; with the
+      active one-second sweep cadence (sync_conn_sweep.go:47/118),
+      persistent saturation could produce back-to-back 200k-session
+      bulks indefinitely — "one bulk per trigger edge" is insufficient
+      because each bulk creates a new edge). The rule: (i) the
+      saturation trigger COALESCES on a single dirty/pending flag and
+      respects a minimum inter-bulk COOLDOWN (AGY r24 minor 2); (ii)
+      an EPISODE LATCH sets on the FIRST refusal in a cooldown window
+      and permits at most one recovery bulk per window; and (iii)
+      refusals caused by `stampInstallGenV4/V6` DURING an active
+      recovery bulk are recorded but CANNOT arm the next episode until
+      the cooldown expires AND a new non-bulk-triggered refusal occurs —
+      a recovery bulk never re-arms itself. The
       bulk is authoritative and needs no per-key ordering for its
-      installs — saturation degrades to a bulk-driven sync cadence for
-      the affected keys instead of an unordered delta stream. The
-      trigger COALESCES on a single dirty/pending flag and respects a
-      minimum inter-bulk COOLDOWN (AGY r24 minor 2: under sustained
-      >200k-session churn, per-key triggers would otherwise drive a
-      continuous bulk-sync CPU/network storm; one pending flag plus one
-      cooldown timer bounds the drive rate to at most one bulk per
-      cooldown window regardless of churn).
+      installs — saturation degrades to a bulk-driven sync cadence
+      bounded by the latch, not an unordered delta stream.
       The pre-existing generation-0 tombstone-clearing residual
       (resurrection / killing a generation-bearing entry) is a
       #2221-family behavior pinned by today's tests
@@ -1418,12 +1445,23 @@ quarantine-admitted + overflow), and tests.
   abort-mid-BulkSync partial-bulk disposition (no ACK, no reconcile,
   provisional installs converge at the next complete bulk) at (2b/i);
   a BulkEnd race at (2b/i); callback generation-race cancellation at
-  (2b/ii) PLUS the abort-after-callback-launch-but-before-state-commit
-  test for the class-(b) lifecycle mutations (Codex r23 blocker 1);
-  journal generation-race tests (per-key #2170 ordering covers upserts
-  AND deletes via tombstones, sync_conn_gen.go:179-322) PLUS the
+  (2b/ii) PLUS the detach-between-check-and-store case (impossible
+  under the generation-tagged CAS) and the old-disconnect-after-new-
+  connect case (the stale disconnect's write fails the CAS) — Codex r24
+  blocker 1's two lifecycle races, one pinned per callback in the
+  inventory (connect, disconnect, bulk-received, bulk-ack-received);
+  journal/delta race tests: per-key #2170 ordering covers upserts AND
+  deletes via tombstones (sync_conn_gen.go:179-322), PLUS the
   sender-cap / receiver-cap / zero-generation delete-install reorder
-  cases and the abort-envelope discard (Codex r23 blocker 2).
+  cases, PLUS a directly-queued raw-byte delta dequeued pre-abort and
+  sent on a REPLACEMENT connection (discarded by the epoch-bound send
+  guard), PLUS an already-dequeued retry crossing the abort boundary
+  (same guard), PLUS the persistent-cap self-rearm case (the recovery
+  bulk cannot arm its successor; the episode latch permits one bulk per
+  cooldown window), PLUS a zero-generation envelope bound to the fresh
+  post-abort generation intentionally admitted into the documented
+  unordered class and pinned through the following authoritative bulk
+  (Codex r24 minor 4).
 - New unit tests (nat/source.rs + allocator):
   preserve-first success; collision → PAT (distinct identities, distinct
   `reverse_wire_key`s, both flows' replies resolve to their OWN forward
