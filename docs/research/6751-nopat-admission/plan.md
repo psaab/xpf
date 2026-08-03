@@ -1,16 +1,13 @@
 # #6751 plan — interface SNAT no-PAT admission: reserve-or-PAT the colliding translated tuple
 
-- **Status**: DRAFT v15.6 — round-19 fold (Codex r19 blocker 1 + minor 2
-  + nit 3: the generation-fenced abort transition is now NORMATIVE in
-  §5.6 with six contract clauses — atomic abort-generation fence state,
-  installConn ADMITTED/REFUSED verdicts with refused connections closed
-  without any pending-frame/loop/callback/cold-prime work,
-  install-before-dispatch for the pending first frame, COMMIT-TIME
-  generation validation at every stateful frame application (closing
-  the pass-check-then-stall race), reset-once ownership with nested-
-  abort re-arm semantics, and receiver-local peer convergence; the
-  capability transport is the dedicated ticker alone; §5.8 names the
-  overflow counter explicitly)
+- **Status**: DRAFT v15.7 — round-20 fold (Codex r20 blockers 1a/1b +
+  minor 2: clause (5) now GENERATION-INVALIDATES AND LOGICALLY DETACHES
+  BOTH SLOTS before fence release even on timeout, so the next admission
+  always sees the both-nil registry and arms cold-prime; new clause (2b)
+  makes the ADMITTED verdict and its entire setup tail (loop launch,
+  clock sync, callbacks, cold-prime) ONE serialized step under the fence
+  check; capability transport is the dedicated ticker alone, no
+  alternatives anywhere)
 - **Issue**: #6751 (opus-review-001 R08, High, `bug`+`audit`+`security`) —
   interface SNAT admits indistinguishable no-PAT return tuples and sends
   replies to the FIRST session.
@@ -567,12 +564,12 @@ record's identity frees only when `per_worker` is empty AND
     Codex r17 minor 2:
     the transport must be one contract, not alternatives — and NOT a
     handshake field, because unkeyed deployments bypass the handshake,
-    sync_auth.go:321) — RE-ADVERTISED PERIODICALLY (Codex r16 minor 3:
-    `sendClockSync` currently runs only ONCE at connection setup,
-    sync_conn.go:137, so the re-advertisement needs a named transport:
-    a new periodic capability ticker, or piggybacking on an existing
-    periodic session-stream message — the implementer picks one and the
-    per-peer capability state RESETS TO UNKNOWN on every (re)connection)
+    sync_auth.go:321) — RE-ADVERTISED PERIODICALLY on the dedicated
+    capability ticker ALONE (Codex r16 minor 3 + r19 minor 2 + r20
+    minor 2: `sendClockSync` currently runs only ONCE at connection
+    setup, sync_conn.go:137; the contract is the dedicated periodic
+    ticker, with NO piggyback alternative; the per-peer capability
+    state RESETS TO UNKNOWN on every (re)connection)
     — so a lost frame self-heals within one period (Codex r15 minor 2: a
     one-shot frame has no defined UNKNOWN → unsupported transition;
     periodic re-advertisement gives every connection a bounded path to
@@ -716,12 +713,31 @@ record's identity frees only when `per_worker` is empty AND
       current at its admission — SMR r20 nit 2), so no per-frame
       generation field is needed on the wire; one atomic load per
       commit on the already-serialized loop, not a lock.
-      (5) **Reset-once ownership**: when both slots confirm detached
-      (or the named AbortFenceTimeout fires — a wedged handler's frames
-      are commit-discarded per (4), so the reset is safe on timeout),
-      the bulk / quarantine / capability STATE RESET runs EXACTLY ONCE,
-      inside the serialized loop, owned by the fence transition — never
-      per-callback. A second abort raised inside an active fence is a
+      (2b) **Atomic admission**: the ADMITTED verdict and its entire
+      setup tail (receive-loop launch, clock sync, lifecycle callbacks,
+      cold-prime) commit as ONE serialized step under the fence check —
+      no abort can advance the generation between an ADMITTED verdict
+      and its tail (Codex r20 blocker 1b: the tail today runs as
+      separate steps after `installConn` returns, sync_conn.go:130, so
+      an abort could otherwise land between verdict and
+      loop/callback/cold-prime).
+      (5) **Reset-once ownership + deterministic detach**: when both
+      slots confirm detached (or the named AbortFenceTimeout fires — a
+      wedged handler's frames are commit-discarded per (4), so the
+      reset is safe on timeout), the bulk / quarantine / capability
+      STATE RESET runs EXACTLY ONCE, inside the serialized loop, owned
+      by the fence transition — never per-callback — AND the transition
+      GENERATION-INVALIDATES AND LOGICALLY DETACHES BOTH SLOTS before
+      the fence releases, even on timeout (Codex r20 blocker 1a: today
+      slots clear only from `handleDisconnect`, sync_conn.go:480, and
+      the empty→connected edge that arms `needColdPrime` requires BOTH
+      slots nil, sync_conn.go:248/278 — so a wedged slot left
+      registered at timeout would let the next connection join a
+      NONEMPTY registry, observe `wasDisconnected == false`, and MISS
+      the fresh cold-prime clause (6) promises). Late callbacks from
+      the detached slots are treated as stale (their slot generation is
+      older than the reset's, so clause (4) discards their frames at
+      commit). A second abort raised inside an active fence is a
       no-op when it carries no newer abort generation, or re-arms the
       fence at the higher generation with the same reset-once
       semantics.
@@ -744,7 +760,15 @@ record's identity frees only when `per_worker` is empty AND
       §9 pins the race tests: install-between-detachments refused at
       (2); pending-frame-before-install discarded at (3); a stalled
       handler's post-reset frame discarded at (4); wedged-handler
-      AbortFenceTimeout reset at (5); nested abort re-arm at (5)
+      AbortFenceTimeout reset at (5); nested abort re-arm at (5);
+      AbortFenceTimeout completing with a STILL-REGISTERED slot —
+      the slot is generation-invalidated and logically detached anyway,
+      so the next admission sees the both-nil registry and arms
+      cold-prime (Codex r20 blocker 1a); and an abort raised BETWEEN an
+      ADMITTED verdict and its setup tail — the atomic-admission rule
+      (2b) makes that interleave impossible, asserted by a test that
+      drives an abort between verdict and loop/callback/cold-prime
+      (Codex r20 blocker 1b)
       (Codex r15 blocker 1 — deferred cross-epoch admission is unsafe:
       a frame quarantined in bulk E1 and admitted at wall-clock timeout
       would (a) race E1's BulkEnd reconcile, which deletes sessions
