@@ -1010,7 +1010,7 @@ the `SessFlagForwardWireAlias` exporter bit + receiver-side drop rule
   two-legacy-flows-one-identity import case (first reserves, second drops,
   failover kills only the second); helper-restart rehydration via HA
   re-sync pre-reserve.
-- Counters: the four §5.8 counters bump exactly on their events;
+- Counters: the five §5.8 counters bump exactly on their events;
   `NAT_REVERSE_KEY_SHARED_DISPLACEMENTS` stays flat for the interface
   class.
 - Docs sweep: docs/userspace-dataplane-architecture.md,
