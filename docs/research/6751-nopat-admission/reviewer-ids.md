@@ -32,6 +32,12 @@ reviewer (it joins the quad at `/engineer` on the code PR).
 | r9 | Claude SMR | `claude-smr-plan-r9.md` | PLAN-READY-WITH-NITS (fail-closed consequence verified near-free via the derived forward-wire index; N17 counter-semantics doc, folded v9.1) |
 | r9 | Codex | codex session `019fc851-bc9c-7df0-94bc-40a9954e4a95` (companion task `task-msdeod3l-mvzavu`) → `codex-plan-r9.md` | PLAN-NEEDS-REVISION (1 BLOCKER: zero-id alias-first arrival lets the alias reserve and the real base drop — needs wire-form-yield/deferral; 1 MAJOR: identity chain not representable on SyncedSessionEntry (no node-local id; local publications are session_id 0) — needs a helper-local publication token) |
 | r9 | AGY | direct `agy --print --dangerously-skip-permissions` foreground → `agy-plan-r9.md` | PLAN-READY-WITH-NITS (all v9 folds verified incl. the standby forward-wire walk resolving to base; 1 NIT: v4+v6 alias test parity) |
+| r10 | Claude SMR | `claude-smr-plan-r10.md` | PLAN-READY-WITH-NITS (N18 retain merged alias row, folded v10.1; mooted by v11) |
+| r10 | Codex | codex session `019fc86a-a176-7f60-ae06-a38c38bf45d2` (companion task `task-msdfnbxz-7navdm`) → `codex-plan-r10.md` | PLAN-NEEDS-REVISION (1 BLOCKER: wire-form-yield unsafe — alias's published artifacts (canonical row + broken synthesized companion with rewrite_dst=E) not retracted by holder merging; 1 NIT) |
+| r10 | AGY | direct `agy --print --dangerously-skip-permissions` foreground → `agy-plan-r10.md` | PLAN-READY-WITH-NITS (wire-form-yield walks verified; 1 carried NIT) |
+| r11 | Claude SMR | `claude-smr-plan-r11.md` | PLAN-READY-WITH-NITS (retreat verified: alias row redundant with derived index; broken companion independently confirmed as live shipped hazard) |
+| r11 | Codex | codex session `019fc88d-926d-7510-b7b5-b5069e7bbacd` (companion task `task-msdh0f0a-lsp1j5`) → `codex-plan-r11.md` | PLAN-NEEDS-REVISION (2 BLOCKERs: flag has no end-to-end carrier across the cluster wire + unmarked deletes; old-Go+new-helper cell regresses under the new reserve machinery; 1 MAJOR: pub_token chain text lost in the section replacement; 1 NIT: stale fold artifacts) |
+| r11 | AGY | direct `agy --print --dangerously-skip-permissions` foreground → `agy-plan-r11.md` | PLAN-READY-WITH-NITS (redundancy + broken-companion + matrix all verified; 2 carried NITs) |
 
 Round-1 infra notes: the Codex companion background job tracker lost the first
 job (`task-msd5pjfq-yfwbeg` — state dir is workspace-hash-keyed and the poll
