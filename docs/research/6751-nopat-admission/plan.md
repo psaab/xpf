@@ -503,6 +503,17 @@ The holder set on each flow's `live_by_flow` record is
     packets). Per-holder-owner decrements apply per scope on the base
     record, so deleting either key can never free the identity while the
     companion key remains reachable.
+  - **Both-direction predicate + out-of-order merge** (SMR r7 E1, AGY r7
+    nit 1): on one healthy stream the export queues canonical-then-alias
+    (daemon_ha_userspace_stream.go:368-376), but bulk sync and
+    incremental deltas can interleave across a reconnect, so an alias CAN
+    arrive first. The predicate therefore runs BOTH directions at import:
+    presented-is-wire-form-of-existing (alias attaches to the base) AND
+    existing-is-wire-form-of-presented (a base arriving after its alias
+    ADOPTS the alias record — the alias record's markers and identity
+    fold into the base's record and the spare record drops). Both orders
+    converge to ONE record holding the union of markers; the out-of-order
+    import test pins this.
   - Tuple replacement additionally removes the OLD explicit canonical
     alias row — but ONLY when that row satisfies the wire-alias predicate
     against the displaced base entry (never an unrelated real session
@@ -511,6 +522,12 @@ The holder set on each flow's `live_by_flow` record is
   - The alias sweep of §5.6's transactional shared replacement covers
     BOTH alias classes: the internally derived reverse/forward-wire index
     rows AND the explicit canonical alias row (predicate-gated).
+  - Implementation note (AGY r7 nit 2): the shared predicate helper
+    carries a doc comment that the `sync_derived`-origin clause is what
+    prevents an active-node LOCAL mint from ever mistaking a genuine
+    local cross-session collision for a fabric alias (local mints are
+    never sync-derived; genuine collisions carry distinct PAT decisions
+    and fail the identical-NatDecision clause).
 - **Neutral paths**: promote (promote.rs:99), demote (install.rs:568),
   #1752 in-place refresh — NO reserve/release calls.
 - **Reverse-companion lag (documented inherited window, SMR r5 N16)**:
