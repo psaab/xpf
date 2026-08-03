@@ -56,7 +56,29 @@
   independently confirmed by AGY r2 f1 + generalized by Codex r2
   BLOCKER 4; SMR2-2: commitment cleanups).
 
-## Round 3 (plan v4 @ commit pending)
+## Round 3 (plan v4 @ f679a791a)
+
+- **Codex** — background bash task `b3nxp5nhd`; prompt
+  `/tmp/codex-6749-r3-prompt.txt`; output `/tmp/codex-6749-r3.out`;
+  verdict doc `codex-plan-r3.md`. Verdict: DEMAND-REVISION (6 BLOCKER
+  — hybrid-plan activation via unversioned marker + auto-rebind; S3
+  marks operator-disarmed slots; one-bool conflates registration and
+  activation provenance (C3 must scope to registered; S2 was-armed
+  gate); S4's identity scope never guaranteed enabled=false (contraction
+  shape); registration-toggle reconcile converges mid-defer-window
+  (defer gate, rebind-authorized); C3 clears marks before the fallible
+  arm reconcile; tests green unsafe impls; + 2 MAJOR + 2 MINOR).
+- **AGY** — background bash task `bvv1uiufg` (direct `agy --print`,
+  inline-evidence prompt `/tmp/agy-6749-r3-prompt.txt`); output
+  `/tmp/agy-6749-r3.out`; verdict doc `agy-plan-r3.md`. Verdict:
+  DEMAND-REVISION (2 MAJOR — S5 must never arm at replan
+  [convergence-only arming deletes S4]; S2 marks operator-disarmed
+  slots on flap; 1 MINOR — test 7(c) split; 1 NIT — S3 release note).
+- **Claude SMR** — `claude-smr-plan-r3.md`. Verdict: DEMAND-REVISION
+  (SMR3-1 S4-E2 side door [subsumed by AGY f1 + S4']; SMR3-2/3/4
+  commitments on Q3/Q5/Q7).
+
+## Round 4 (plan v5 @ commit pending)
 
 - Codex — pending dispatch.
 - AGY — pending dispatch (direct `agy --print` transport).

@@ -1,21 +1,24 @@
 # #6749 — binding-plan expansion registers new slots unarmed, dataplane disabled indefinitely
 
-**Status: DRAFT v4 — pending adversarial plan review (round 3)**
+**Status: DRAFT v5 — pending adversarial plan review (round 4)**
 
 - Issue: #6749 (opus-review-001 root R06, severity High)
 - Research base: `ad9591177` (origin/master at worktree creation)
 - Research branch: `research/6749-armed-state` (plan docs only — no
   production code in this branch)
 - v1 @ `8c76670d6` (r1: all DEMAND-REVISION); v3 @ `bce10126c` (r2:
-  all DEMAND-REVISION); v4 folds the round-2 convergence: durable
-  activation provenance consumed at every successful worker-producing
-  reconcile.
+  all DEMAND-REVISION); v4 @ `f679a791a` (r3: all DEMAND-REVISION);
+  v5 folds round 3: the planner never arms (AGY r3 f1), was-armed
+  gates on every mark rule (AGY r3 f2 / Codex r3 B3/B4), S4' global
+  failure mark (Codex r3 B5), plan-gated + defer-gated convergence
+  (Codex r3 B2/B6), C3 reordered and scoped to registered (Codex r3
+  B4/M7), D gated on desired (Codex r3 m10).
 
 ---
 
 ## 1. Status
 
-DRAFT v4 — pending adversarial plan review round 3 (Codex + AGY + Claude
+DRAFT v5 — pending adversarial plan review round 4 (Codex + AGY + Claude
 SMR). Convergence target: PLAN-READY (recommended path shipped to
 `/engineer`) or PLAN-KILL. No production code is written under `/research`.
 
@@ -29,31 +32,53 @@ SMR). Convergence target: PLAN-READY (recommended path shipped to
   queue-override lifetime, B dismissal overstated, unsafe-green tests,
   trigger/outage overstatement.
 - **Round 2** (v3): all three DEMAND-REVISION, converging on ONE
-  architecture. Codex (6 BLOCKER + 2 MAJOR): v3's fold claims partly
-  false; R1 arms-before-reconcile → armed-but-unbound + partial
-  forwarding after failed non-deferred reconcile (WorkerSpawn leaves
-  earlier workers running — bringup.rs:172-183); **R2 misses the
-  NORMAL completion path — link-cycle completion is `rebind`
-  (process_linkcycle.go:219), not `apply_snapshot`**; defer-completion
-  via the full-apply leg (+ #5134 debt discard at
-  manager_worker_arm_5134.go:50); **deferred CONTRACTION introduces no
-  new identity → R1 leaves everything armed → ctrl stays open with
-  stale shifted rows**; full fan-out reverses operator maintenance
-  disarms (permissions.go:267) even when nothing was deferred — scoped
-  provenance is REQUIRED; E2 loses operator-unregister provenance
-  across a flap; tests can green unsafe implementations. AGY (1 BLOCKER
-  + 2 MAJOR + 1 MINOR + 1 NIT): full-leg defer completion stranding
-  (= SMR2-1), R1 pre-arm on failed reconcile (= Codex2-2), E2/operator
-  unregister flap (= Codex2-7), test gaps, fan-out override loss. SMR
-  r2: the full-leg completion hole + commitment cleanups.
-- **v4 answer (all three reviewers' shared architecture):** durable
-  activation provenance — an `activation_pending` marker on
-  `BindingStatus` — set ONLY by planner/apply machinery, consumed
-  (armed+cleared) after EVERY successful worker-producing reconcile
-  (same-plan apply, full apply, **rebind**, forwarding arm), and
-  claimed/cleared by every operator verb. §5-C defines the lifecycle.
+  architecture. Codex (6 BLOCKER + 2 MAJOR): the rebind completion path;
+  full-leg defer completion + #5134 debt discard; deferred CONTRACTION
+  leaves all armed; R1 arm-before-reconcile lie on failed bring-up;
+  full fan-out reverses operator maintenance disarms — scoped
+  provenance REQUIRED; E2/operator-unregister flap; unsafe-green tests.
+  AGY: full-leg stranding (BLOCKER), R1 pre-arm, E2 flap, test gaps,
+  fan-out override loss. SMR: the full-leg hole + commitments.
+- **Round 3** (v4): all three DEMAND-REVISION. Codex (6 BLOCKER + 2
+  MAJOR + 2 MINOR): unversioned marker can activate a REJECTED hybrid
+  plan (B-vector retained after failure + auto-rebind → plan-gate the
+  convergence); S3 marks operator-disarmed slots (was-armed gate);
+  one-bool conflates registration with activation provenance (C3 must
+  be scoped to registered; S2 was-armed gate); S4's identity scope
+  never guaranteed enabled=false (S4' global failure mark);
+  registration-toggle reconcile converges mid-defer-window (defer
+  gate, rebind-authorized); C3 clears marks before the fallible arm
+  reconcile (reorder arm fan-out after Ok); tests still green unsafe
+  impls; S3 expansion cost overstated but global gate still safer; D
+  must gate on desired==true. AGY (2 MAJOR + 1 MINOR + 1 NIT): S5 must
+  NEVER arm at replan — convergence-only arming deletes S4's revert
+  machinery (= adopted); S2 marks operator-disarmed slots on flap
+  (= Codex B4, same was-armed gate); test 7(c) must split; S3's
+  total-disable needs a prominent release note. SMR r3: S4's revert
+  set misses E2 (subsumed by AGY f1's adoption + S4'); Q3/Q5/Q7
+  commitment answers (adopted in §11).
+- **Round-3 disposition table (the anti-"claims false" record, Codex
+  r3 BLOCKER 1):**
 
-### Round-1 detail log
+  | r3 finding | v5 disposition |
+  |---|---|
+  | Codex B2 hybrid activation | CLOSED — plan gate on convergence (§5-C) |
+  | Codex B3 S3 marks operator slots | CLOSED — was-armed gate on S3 (§5-C S3) |
+  | Codex B4 bool conflation | CLOSED — C3 scoped to registered + S2 was-armed gate (§5-C C3/S2) |
+  | Codex B5 S4 scope | CLOSED — S4 deleted; S4' global failure mark + S5 never-arm (§5-C) |
+  | Codex B6 toggle mid-defer | CLOSED — defer gate + rebind-authorized flag (§5-C) |
+  | Codex M7 C3 pre-reconcile | CLOSED — arm fan-out reordered after Ok (§5-C C3) |
+  | Codex M8 test holes | CLOSED — §9 items 12-17 rewritten |
+  | Codex m9 S3 cost | CLOSED — §11 Q3 resolved (global gate, bootstrap evidence) |
+  | Codex m10 D on disarm | CLOSED — D gated on desired==true (§5-D) |
+  | AGY f1 S5 pre-arm | CLOSED — planner never arms (§5-C S5) |
+  | AGY f2 S2 flap | CLOSED — S2 was-armed gate (§5-C S2) |
+  | AGY f3 test 7(c) | CLOSED — §9 item 7 split |
+  | AGY f4 S3 release note | CLOSED — §9 docs bullet |
+  | SMR3-1 S4-E2 | CLOSED — subsumed by AGY f1 + S4' |
+  | SMR3-2/3/4 | CLOSED — §11 commitments |
+
+- **Round-1 detail log** (kept for the record):
 
 - Claude SMR r1: DEMAND-REVISION — SMR-1 B-rejection overstated, SMR-2
   missing observability-only Go leg, SMR-3 close Q2/Q5 from source, SMR-4
@@ -412,13 +437,15 @@ worker teardown+rebind even for a no-op re-assert, `forwarding.rs:43-58`).
 
 ### Option D — Go observability-only drift detection (companion to C; v2, SMR r1 SMR-2)
 
-In `syncDesiredForwardingStateLocked`, when the global bit equals
-desired but any binding presents `Registered && Ifindex > 0 && !Armed
+In `syncDesiredForwardingStateLocked`, **only when `desired == true`
+and the global bit already equals it** (Codex r3 MINOR 10 — evaluating
+on an intentional global disarm would warn on every healthy slot),
+when any binding presents `Registered && Ifindex > 0 && !Armed
 && !ActivationPending`, emit an EDGE-TRIGGERED `slog.Warn` (fires on
 the drift predicate transitioning false→true, and again when it clears;
 never per-tick — the project logging rules forbid >1/s control-plane
 Info). No request is issued; nothing auto-reverts, so an operator
-diagnostic disarm simply logs a truthful warn. The v4 marker
+diagnostic disarm simply logs a truthful warn. The marker
 (`ActivationPending`, §5-C) is what makes the predicate EXACT: pending
 planner activations are excluded (they converge at the next successful
 reconcile — warning on them would be noise), and what remains is
@@ -435,184 +462,205 @@ stranding, so the warn doubles as the mixed-version detector.
 - **Cost/risk:** near zero; no semantics change. Bundled into the
   recommended ship.
 
-### Option C — durable activation provenance: the `activation_pending` lifecycle (Rust helper; superset of A)
+### Option C — the `activation_pending` lifecycle, v5 (Rust helper; superset of A)
 
-v4 rewrite (Codex r2 BLOCKERs 2–6, AGY r2 f1–f3, SMR r2 SMR2-1 — all
-three reviewers converged on this architecture). v3's leg-scoped rules
-(R1-at-replan, R2-same-plan-fan-out) died to three independent doors:
-the completion path that is actually a `rebind`, defer-completion via
-the full-apply leg, and deferred contractions that create no new
-identity. v4 replaces leg-scoped rules with a marker lifecycle:
+v5 rewrite (AGY r3 f1–f3, Codex r3 BLOCKERs 2–7 + MAJOR 8, SMR r3).
+Round 3 tightened the lifecycle in five ways, all folded here. The
+one-sentence model: **the planner NEVER arms — it only MARKS
+(`activation_pending=true`) the slots it left unactivated; a slot arms
+only at a successful, plan-authorized, defer-authorized armed reconcile,
+or by an operator/global verb.**
 
 **The marker.** `BindingStatus.activation_pending: bool` — additive
-wire field (serde `#[serde(default)]` on the Rust side; Go's status
-decode uses ordinary `json.Unmarshal`, which ignores unknown fields —
-protocol_status.go:440, process_control.go:148; compatibility verified
-by Codex r2 against binding.rs:292). Go's `BindingStatus`
-(protocol_binding.go) gains the optional field so option D's predicate
-and `show` rendering can consume it. Meaning: **"the planner/apply
-machinery left this slot short of `registered && armed` while the
-dataplane was expected to forward; converge it at the next successful
-worker-producing reconcile."** Operator-owned states never carry it.
+wire field (serde `#[serde(default)]`; Go's `json.Unmarshal` ignores
+unknown fields — protocol_status.go:440, process_control.go:148,
+verified r2). Go's `BindingStatus` gains it as optional for option D
+and `show`. Meaning: **"planner/apply machinery left this slot short
+of `registered && armed`; converge it at the next successful armed
+reconcile for the CURRENT plan."** Operator-owned states
+(`registered && !armed && !pending`, or `!registered && !pending`)
+never carry it — that distinction is the whole point.
 
-**Set rules (planner/apply machinery ONLY):**
+**Set rules (planner/apply machinery ONLY), each gated so an
+operator-owned slot (`!armed && !pending` or `!registered &&
+!pending`) is NEVER marked (AGY r3 f2 / Codex r3 BLOCKER 3):**
 
-- **S1 — replan creates a slot it cannot register** (`ifindex <= 0`:
-  candidate present in config, netdev not yet present/renamed):
-  `registered=false, armed=false, activation_pending=true`.
-- **S2 — replan force-clears a previously-registered slot** (the
-  `registered=true → false` transition when `ifindex` resolves to
-  `<= 0`, planning.rs:516-519): `activation_pending=true`. A slot
-  already unregistered by an OPERATOR (`registered=false` with pending
-  already false) is NOT re-marked — that is the E2/flap discriminator
-  (Codex r2 MAJOR 7 / AGY r2 f3).
+- **S1 — replan creates a slot it cannot register** (`ifindex <= 0`):
+  `registered=false, armed=false, pending=true`.
+- **S2 — replan force-clears on `ifindex <= 0`:** the
+  `registered=true → false` transition marks pending **only if the
+  record was `armed` (or already pending) before the clear**. An
+  operator-DISARMED slot (`registered && !armed && !pending`) that
+  flaps is force-cleared to `registered=false` WITHOUT a mark; on
+  recovery it is not re-registered (operator-owned — the documented
+  disarm→unregister degradation across a flap, §10; the no-forward
+  intent survives, which is what a destructive maintenance verb
+  guarantees). An operator-UNREGISTERED slot (`!registered &&
+  !pending`) is untouched as before.
 - **S3 — deferred plan-CHANGING apply** (full-apply leg with
-  `defer_workers=true`, snapshot.rs:285-354): after the replan, for
-  EVERY registered slot (not just new ones): `armed=false,
-  activation_pending=true`. This is the global pending gate Codex r2
-  BLOCKER 5 forced: a deferred CONTRACTION creates no new identity, so
-  v3's per-slot R1 left everything armed with `enabled=true` and stale
-  shifted rows flowing through a ctrl that never closed. Under S3 the
-  whole vector goes pending-unarmed → `enabled=false` → Go keeps
-  `ctrl.Enabled=0` → the defer window is fail-closed for contractions,
-  expansions, and reshuffles alike — matching the reality that the
-  helper cannot forward the NEW plan until the deferred reconcile
-  re-plans and binds it. A deferred apply with an UNCHANGED plan
-  (same-plan leg — a pure RETH-MAC-pending re-apply) marks nothing:
-  the old workers are already correctly bound for that plan and
-  forwarding continues.
-- **S4 — post-teardown bring-up failure revert** (full-apply leg,
-  `ReconcileError::WorkerSpawn | WorkerBindIncomplete`,
-  snapshot.rs:356-396): on the error path, slots INITIALIZED IN THIS
-  APPLY (identities absent from `existing_bindings` by
-  `(interface, queue_id)` — the apply already has both vectors in
-  scope) revert to `armed=false, activation_pending=true`. Carried
-  slots keep their armed bits (master parity). This closes the
-  armed-but-unbound / partial-forwarding lie (Codex r2 BLOCKER 2 / AGY
-  r2 f2): v3's R1 armed new slots at replan, so a failed reconcile
-  reported `enabled=true` (the gate ignores `ready`/`bound`) while
-  WorkerSpawn had left earlier workers running against dead queue sets
-  (bringup.rs:172-183 keeps their records) and Go could publish READY
-  rows for the survivors. Under S4 `enabled` recomputes false on the
-  error path, ctrl stays closed, and the pending marks SURVIVE the
-  failure so the NEXT successful armed reconcile converges the slots
-  (Codex r2's "survive failed reconcile" requirement) — the retry
-  self-heals instead of stranding.
-- **S5 — non-deferred new/E2 initialization (the original fix):** at
-  replan on a non-deferred apply, genuinely-new identities and
-  E2-re-registered slots initialize `registered=true,
-  armed=forwarding_armed`; `activation_pending = !armed` (a globally
-  disarmed apply therefore marks pending — the boot case — cleared by
-  the boot arm fan-out per C1/C3).
-
-**E2 re-registration (AGY r1 f1, lifecycle form):** at replan, a
-carried record with `!registered && activation_pending && new
-ifindex > 0` re-registers (`registered=true`, armed per S5's gate).
-Without the pending mark, `!registered` is operator-owned and left
-alone (the carve-out that survives interface flaps, per S2).
+  `defer_workers=true`): for every registered slot, `armed=false`;
+  mark pending **only if the slot was `armed` or already pending**
+  (Codex r3 BLOCKER 3 — an operator-disarmed slot is already unarmed;
+  S3 leaves it unarmed and UNMARKED, so completion convergence can
+  never re-arm it, and test 15 is possible again). This is the global
+  pending gate Codex r2 BLOCKER 5 forced for deferred
+  contractions/reshuffles; per Codex r3 MINOR 9 + SMR r3 SMR3-2, the
+  global gate costs nothing real even for expansions: the all-or-
+  nothing `enabled` gate closes ctrl through the window either way,
+  and ordinary plan-changing commits already bootstrap-ctrl-off +
+  clear rows (manager_compile.go:315, maps_sync.go:163/178). A
+  deferred apply with an UNCHANGED plan marks nothing.
+- **S4' — post-teardown bring-up failure** (full-apply leg,
+  `WorkerSpawn | WorkerBindIncomplete`, snapshot.rs:356-396): for
+  EVERY registered slot, `armed=false, pending=true` (was-armed-gated;
+  operator-owned slots untouched). v4's S4 (revert only this-apply's
+  initialized identities) is deleted: it missed E2 re-registrations
+  (SMR r3 SMR3-1) and every shape with no new identity — contractions,
+  same-name/new-ifindex, workers/ring-only plan changes (Codex r3
+  BLOCKER 5). S4' is shape-independent and, combined with S5's
+  never-arm rule, means NOTHING is ever reported armed against a
+  failed bring-up: `enabled` recomputes false, ctrl stays closed,
+  and the pending marks survive so the NEXT successful armed
+  reconcile self-heals. The #4952 retained-vector semantics are
+  unchanged (the rejected plan's binding vector is still reported,
+  now uniformly unarmed+pending).
+- **S5 — new/E2 initialization (AGY r3 f1 — the planner never
+  arms):** genuinely-new identities initialize `registered=true,
+  armed=false, pending=true` ALWAYS (any defer state, any global
+  state). E2 re-registration at replan: `!registered && pending &&
+  new ifindex > 0` → `registered=true`, still `armed=false,
+  pending=true`. The ONLY paths that set `armed=true` on a
+  planner-created slot are the convergence locus below, an operator
+  verb, or the global fan-out. v4's arm-at-replan (and with it the
+  transient armed-before-bind state AGY r3 f1 attacked) is gone.
 
 **Clear/claim rules:**
 
 - **C1 — converged:** a slot that reaches `registered && armed` (any
   cause) clears the mark.
 - **C2 — operator claim:** `set_binding_state` / `set_queue_state`
-  clear the mark on every affected slot, in BOTH directions — an
-  operator disarm claims the unarmed state (it must never be
-  auto-converged), an operator arm hand-converges. Codex r2 BLOCKER
-  6's "cleared by operator calls even for an already-unarmed no-op
-  disarm."
-- **C3 — global fan-out:** `set_forwarding_state` (either direction)
-  clears the mark everywhere — an explicit global arm converges all
-  (C1 subsumes it); an explicit global disarm means nothing may
-  auto-activate later; a later re-arm fans out again.
+  clear the mark on every affected slot in BOTH directions (an
+  operator disarm claims the unarmed state; an operator arm
+  hand-converges). Ordering inside those handlers: claim FIRST, then
+  reconcile (SMR r3 SMR3-3).
+- **C3 — global fan-out (Codex r3 BLOCKER 4a + MAJOR 7):**
+  `set_forwarding_state` clears marks **only on REGISTERED slots** —
+  the fan-out's own domain (`armed = req && registered`,
+  status.rs:418-423). An unregistered slot (S1/S2 mark) keeps its
+  mark across global arm/disarm cycles, so `invalid → global arm →
+  valid` still re-registers via E2 (v4's C3 cleared everywhere and
+  stranded exactly that shape, D-silent). And the ARM direction is
+  reordered (Codex r3 MAJOR 7): `set_forwarding_state(true)` sets the
+  global bit, runs the fallible reconcile FIRST, and only on `Ok`
+  fans out `armed=true` + clears marks (registered slots). On `Err`
+  no slot arms and no mark clears — v4's arm-then-fail ordering
+  falsified the "Err consumes no marker" invariant and stranded
+  armed-mark-free slots against dead workers with Go seeing
+  global==desired and never retrying. The disarm direction is
+  unchanged (fan-out + clear-first, never blocked).
 
-**Convergence — the single locus (Codex r2 BLOCKERs 3+4):** in
-`reconcile_status_bindings`' ARMED leg (status.rs:400-411,
-`should_run_afxdp` true), after `afxdp.reconcile` returns `Ok` and the
-bindings are written back: for every `activation_pending &&
-registered` slot, set `armed=true, activation_pending=false,
-last_change=now`. One locus covers every worker-producing path,
-because they ALL flow through this function:
+**Convergence — one locus, three gates (Codex r3 BLOCKERs 2 + 6):**
+in `reconcile_status_bindings`' armed leg, after `afxdp.reconcile`
+returns `Ok` and the bindings are written back, for every slot with
+`pending && registered && in_current_plan && defer_authorized`:
+`armed=true, pending=false, last_change=now`.
 
-- the full-apply leg (expansion-while-armed: new slots S5-armed at
-  replan, any straggler converged here);
-- the same-plan apply leg (defer-completion re-apply — the only path
-  v3's R2 targeted);
-- **`rebind` (rebind.rs:64) — the NORMAL link-cycle completion path
-  Codex r2 BLOCKER 3 caught: `NotifyLinkCycle` → Go sends `rebind`
-  (process_linkcycle.go:219) — the deferred slots are bound by the
-  rebind's reconcile and converged in the same lock-hold.** v3 missed
-  this path entirely;
-- `set_forwarding_state(true)` (its own fan-out already converges —
-  redundant and harmless);
-- queue/binding registration-change reconciles.
+- **Armed gate (from v4):** only when `should_run_afxdp(status)`
+  (globally armed + supported); the disarmed leg never converges.
+- **Plan gate (Codex r3 BLOCKER 2):** the slot's `(interface,
+  queue_id)` must belong to the plan of the CURRENT stored snapshot —
+  computed at convergence time by running the pure
+  `replan_queues(stored_snapshot, workers, bindings)` and collecting
+  its identity set (cold path, no side effects). This kills the
+  hybrid-plan hazard: full apply B fails post-teardown → snapshot A
+  restored but B's vector retained (#4952) → a later REBIND (no
+  replan; busy-binding recovery can auto-trigger it,
+  maps_sync.go:1474) reconciles A-forwarding with B-layout workers —
+  v4 would have armed B's pending slots against A's snapshot,
+  bringing the rejected hybrid live. Under the plan gate, B-only
+  identities stay pending (master parity: `enabled=false`), A's
+  pending slots converge, and a later genuine retry of B converges
+  the rest because the stored snapshot is B again.
+- **Defer gate (Codex r3 BLOCKER 6):** convergence requires
+  `!stored_snapshot.defer_workers` UNLESS the caller is the `rebind`
+  handler — the daemon-authorized deferred completion (Codex r2
+  BLOCKER 3 established that `NotifyLinkCycle` → `rebind`,
+  process_linkcycle.go:219, IS the normal completion path).
+  `reconcile_status_bindings` gains a one-bit
+  `defer_completion_authorized` parameter: rebind.rs passes `true`,
+  every other caller (apply legs, forwarding, queue/binding toggles)
+  passes `false`. Without it, an operator registration toggle
+  mid-defer-window runs a full armed reconcile (binding.rs:34-53;
+  `should_run_afxdp` does not see defer, status.rs:414) and would
+  bind + converge every pending slot BEFORE the RETH MAC cycle — the
+  premature activation the defer mechanism exists to prevent. (The
+  toggle's early-BIND side is pre-existing on master and noted as a
+  follow-up in §10; the early-CONVERGE side is what this gate closes.)
+- **Err paths:** every fallible caller returns before the convergence
+  (snapshot.rs:196 structure; `bound == planned` required for Ok,
+  bringup.rs:188), so no mark is consumed and no slot arms against
+  unbound workers.
 
-The failed-reconcile paths return `Err` before the convergence, so no
-mark is consumed and no slot is armed against unbound workers (Codex
-r2's "consumed only after successful same-plan/full/rebind
-completion"; the literal placement after `reconcile_status_bindings`
-returns `Ok` was independently confirmed safe by Codex r2 MAJOR 8 —
-the error branch returns first, snapshot.rs:196, and successful
-bring-up requires `bound == planned` per worker, bringup.rs:188).
-
-**R3 — control-state identity carry (from v3, marker added).** Carry
+**R3 — control-state identity carry (from v4, quad updated).** Carry
 {`armed`, `registered`, `activation_pending`, `last_change`} keyed on
-configured-name `(interface, queue_id)`; volatile fields
-(`bound`/`xsk_registered`/`ready`/socket/counters/`last_error`/
-latency) reset at replan and rebuild downstream
-(`reset_binding_counters` + `refresh_bindings`). Identity semantics
-unchanged: same-name/new-ifindex carries; rename re-initializes;
-orphan-VLAN→explicit-parent promotion carries armed across the ifindex
-swap. `had_existing` DIES (Codex r2 MAJOR 7 + SMR r2 SMR2-2): the
-identity-map lookup IS the membership test; the five-field heuristic
-conflated existence with state and is deleted. Queue-scoped overrides
-remain membership-at-invocation shorthand (Codex r1 MAJOR 5).
+configured-name `(interface, queue_id)`; volatile fields reset at
+replan and rebuild downstream. Identity semantics unchanged
+(same-name/new-ifindex carries; rename re-initializes;
+orphan-VLAN→explicit-parent promotion carries). `had_existing` stays
+dead (identity-map membership only). Queue-scoped overrides remain
+membership-at-invocation shorthand.
 
 **Ownership model (the issue's design question, final answer):**
-`armed` = the GLOBAL default (Go-pushed `forwarding_armed`, fanned out
-on explicit arms) MINUS ephemeral operator overrides (identity-scoped,
-claimed per C2, dying at the next global fan-out) MINUS
-planner-pending activations (marked per S1–S5, converged at the next
-successful armed reconcile). The helper owns the marker because only
-the helper can distinguish "unarmed because the planner hasn't
-activated yet" from "unarmed because the operator said so" — the
-discrimination v1 tried to do in Go and could not.
+`armed` is set by exactly three actors: the GLOBAL default
+(Go-pushed `forwarding_armed`, fanned out post-reconcile on explicit
+arms), OPERATOR verbs (ephemeral, identity-scoped, claim-protected),
+and the CONVERGENCE (slots the planner marked and a successful armed
+reconcile for the current plan has now bound). The planner itself
+never arms — it only marks its own pending work, because only the
+helper can tell that apart from an operator's deliberate disarm.
 
 **What it fixes (full inventory):** the issue's indefinite disable on
-expansion-while-armed (S5 + convergence); the deferred-activation
-stranding on ALL THREE completion shapes — same-plan re-apply,
-full-leg re-apply, rebind link-cycle (S3 + the convergence locus);
+expansion-while-armed (S5 + convergence); deferred stranding on all
+three completion shapes (S3 + rebind-authorized convergence);
 deferred contractions/reshuffles (S3's global gate); armed-but-unbound
-reporting after failed bring-up (S4); E2 invalid→valid stranding (E2
-lifecycle); wrong-identity control-state carry (R3); retry-after-
-failure stranding (S4 marks + convergence — master's posture is
-EXCEEDED here: recovery now self-heals).
+reporting after failed bring-up on EVERY plan shape (S4' + S5's
+never-arm); the rejected-hybrid activation (plan gate); premature
+convergence via registration toggles mid-defer (defer gate);
+arm-then-fail stranding (C3 reorder); invalid→global-arm→valid
+stranding (C3 scoped to registered); E2 invalid→valid stranding (E2
+lifecycle); operator-disarm destruction across flaps, deferred
+applies, and completions (was-armed gates on S2/S3/S4'); wrong-
+identity control-state carry (R3); retry-after-failure stranding
+(self-heals via surviving marks).
 
-**Size:** marker field + S1–S5 set rules in/around the replan
-(~40 lines), S4 revert (~10), convergence in
-`reconcile_status_bindings` (~8), verb/fan-out clears (~6), Go
-optional field + D predicate (~20), protocol snapshot-test updates
-(the exact-schema canaries in userspace-dp/src/protocol/tests.rs gain
-the field), docs. No coordinator, gate, or shim changes.
+**Size:** marker field + S1/S2/S3/S4'/S5 set rules (~45 lines),
+convergence with plan+defer gates (~20 incl. the pure replan for the
+membership set), `defer_completion_authorized` plumbing (~5), C3
+reorder in forwarding.rs (~10), verb clears (~6), Go optional field +
+D predicate (~20), protocol canary updates, docs. No coordinator,
+gate, or shim changes.
 ### Recommendation
 
-**Ship option C + option D** — the `activation_pending` lifecycle
-(S1–S5 set rules, C1–C3 clear/claim rules, convergence inside
-`reconcile_status_bindings`' armed leg, R3 control-only identity
-carry, E2 lifecycle re-registration) plus the marker-aware warn-only
-Go drift detector. Retreat: none lighter survives review — v3's
-leg-scoped R1/R2 (the previous retreat shape) was killed by three
-independent doors (rebind completion, full-leg completion, deferred
-contraction); option A shares R1's arm-at-replan defect and is
-recorded for history only. **Reject B as Go-converger** (§5-B); the
-converger the design genuinely needs is the helper-side marker, and
-D covers detection.
+**Ship option C + option D** — the `activation_pending` lifecycle as
+refined in v5 (S1–S5/S3/S4' was-armed-gated set rules with the planner
+NEVER arming, C1–C3 clear/claim rules with C3 scoped to registered and
+the arm fan-out reordered post-reconcile, the tri-gated convergence
+locus — armed × in-current-plan × defer-authorized — inside
+`reconcile_status_bindings`, R3 control-only identity carry, E2
+lifecycle re-registration) plus the marker-aware, desired-gated Go
+drift detector. Retreat: none lighter survives review — v3's
+leg-scoped R1/R2 was killed by three independent doors (rebind
+completion, full-leg completion, deferred contraction), v4's ungated
+marker by the hybrid-plan and operator-claim counterexamples, and
+option A shares the arm-at-replan defect the planner-never-arms rule
+deletes. **Reject B as Go-converger** (§5-B); the converger the design
+genuinely needs is the helper-side marker, and D covers detection.
 
 Rationale in one line: armed state is born in the planner, so the
-planner MARKS what it leaves unactivated; the reconcile that actually
-binds workers is the only moment activation may complete; and only the
-helper can tell its own pending work apart from an operator's
-deliberate disarm.
+planner MARKS what it leaves unactivated — never arms it; the
+reconcile that actually binds workers for the current plan is the only
+moment activation may complete; and only the helper can tell its own
+pending work apart from an operator's deliberate disarm.
 
 ## 6. Public API preservation
 
@@ -642,27 +690,32 @@ deliberate disarm.
 
 ## 7. Hidden invariants the change must preserve
 
-1. **Defer contract — the REAL one (v3/v4, Codex r1 BLOCKER 1 + r2
-   BLOCKERs 3+5):** a `defer_workers=true` PLAN-CHANGING apply must
-   leave the whole vector unarmed+pending (S3), because its reconcile
-   (and XSK re-bind) is SKIPPED and `refresh_bindings` reports old
-   workers by numeric slot — for expansions, reshuffles, AND
-   contractions. A deferred apply with an UNCHANGED plan marks nothing
-   (old workers are correctly bound for that plan). Completion — via
-   same-plan re-apply, full-leg re-apply, OR the rebind link-cycle —
-   converges the marks exactly when the workers have bound (§5-C
-   convergence). A test pins every completion shape (§9 items 12-16).
+1. **Defer contract — the REAL one (v3–v5):** a `defer_workers=true`
+   PLAN-CHANGING apply must leave the whole vector unarmed (S3), with
+   pending marks on exactly the non-operator-owned slots, because its
+   reconcile is SKIPPED and `refresh_bindings` reports old workers by
+   numeric slot. A deferred apply with an UNCHANGED plan marks nothing.
+   Completion — via same-plan re-apply, full-leg re-apply, OR the
+   rebind link-cycle — converges the marks exactly when the workers
+   have bound, and ONLY via the rebind-authorized or non-deferred
+   paths (Codex r3 BLOCKER 6's defer gate). A test pins every
+   completion shape AND the mid-window toggle block (§9 items 13, 17).
 2. **#869 no-ready-in-enabled:** `enabled` must keep NOT requiring
    `ready`. Untouched — only the armed defaults change.
 3. **#1666 ready-gate:** per-row shim steering must keep requiring
    `Ready`. Untouched. In the defer window S3 keeps everything
    unarmed, so the slot-keyed stale `Ready` alias (§4 item 7) can never
    produce a READY row — and even if it could, `ctrl.Enabled=0`
-   overrides row contents (maps_sync.go:391-404).
+   overrides row contents (verified by Codex r3 BLOCKER 5's Q4 check:
+   ctrl=0 short-circuits the shim before binding lookup,
+   lib.rs:405, and all enable writes are conditional,
+   maps_sync.go:679/809).
 4. **Disarm direction never blocked:** the `ifindex <= 0` leg still
-   force-clears (and now MARKS, S2); `set_forwarding_state(false)`
-   still fans out `armed=false` to every binding AND clears all marks
-   (C3) — a deliberate global disarm leaves nothing to auto-activate.
+   force-clears (and marks only was-armed/was-pending records, S2);
+   `set_forwarding_state(false)` still fans out `armed=false` to every
+   binding and clears marks on registered slots — a deliberate global
+   disarm leaves nothing armed to auto-activate, while unregistered
+   (S1/S2-marked) slots keep their marks for E2 (Codex r3 BLOCKER 4a).
 5. **Same-plan skip (#2915/#2916/#3007/#3175):** the plan key and the
    candidate set are untouched; identity-carry only runs on the
    full-apply leg that ALREADY decided the plan changed.
@@ -671,151 +724,167 @@ deliberate disarm.
    plan follows from it.
 7. **Coordinator filter (`registered && ifindex > 0`):** unchanged;
    worker bring-up must not start reading `armed` OR the marker.
-8. **Operator override ownership (v4):** operator per-slot/queue verbs
-   CLAIM the slot (C2 clears the mark in both directions); their
-   overrides are identity-scoped (R3) and die only at the next global
-   fan-out (C3). The marker NEVER auto-converges an operator-owned
-   state — the discrimination v1 could not do in Go. `set_queue_state`
-   remains membership-at-invocation shorthand (Codex r1 MAJOR 5): a
-   new member of a previously disarmed queue initializes per S5 (NOT
-   disarmed); a queue whose overridden members all vanish carries no
-   residual state.
+8. **Operator override ownership (v5):** operator per-slot/queue verbs
+   CLAIM the slot (C2 clears the mark in both directions, ordered
+   claim-before-reconcile); their overrides are identity-scoped (R3)
+   and die only at a global arm fan-out (C3, registered slots). No
+   mark rule (S1–S5, S3, S4') may mark an operator-owned
+   (`!armed && !pending` or `!registered && !pending`) slot — the
+   was-armed gate — so convergence NEVER re-arms an operator state
+   (Codex r3 BLOCKER 3, AGY r3 f2). `set_queue_state` remains
+   membership-at-invocation shorthand (Codex r1 MAJOR 5). The
+   documented degradation: an operator-DISARMED slot whose interface
+   flaps recovers as unregistered (its no-forward intent survives; the
+   disarm→unregister widening across a flap is recorded in §10).
 9. **Volatile state rebuilt, not carried (v3, kept):** R3 carries
    {`armed`, `registered`, `activation_pending`, `last_change`} only;
-   everything else resets at replan and is re-derived
-   (`reset_binding_counters` + `refresh_bindings`). The defer-window
-   slot-keyed alias is cosmetic per invariant 3 and remains a
-   documented follow-up (§10).
-10. **Failure truthfulness (v4, Codex r2 BLOCKER 2):** on the
+   everything else resets at replan and is re-derived. The
+   defer-window slot-keyed alias is cosmetic per invariant 3 and
+   remains a documented follow-up (§10).
+10. **Failure truthfulness (v5):** the planner never arms (S5), so
+    nothing is ever reported armed before a successful bind; on the
     post-teardown bring-up failure paths (WorkerSpawn /
-    WorkerBindIncomplete), the slots initialized in that apply revert
-    to unarmed+pending (S4) BEFORE `refresh_status` recomputes
-    `enabled` — the status after a failed bring-up is
-    fail-closed-truthful (master parity for carried slots), and the
-    surviving marks make the NEXT successful armed reconcile
-    self-healing. Failed reconciles return `Err` before the
-    convergence runs (snapshot.rs:196 error-branch-first structure),
-    so marks are never consumed by a partial bind.
+    WorkerBindIncomplete) every non-operator-owned registered slot
+    goes unarmed+pending (S4') BEFORE `refresh_status` recomputes
+    `enabled` — fail-closed-truthful on every plan shape (expansion,
+    contraction, workers/ring-only), and the surviving marks make the
+    NEXT successful armed reconcile self-healing. The arm verb's
+    fan-out runs only after its reconcile returns Ok (C3 reorder) —
+    no armed-mark-free stranding after a failed global arm (Codex r3
+    MAJOR 7). Failed reconciles return `Err` before the convergence
+    (snapshot.rs:196), so marks are never consumed by a partial bind.
 11. **HA portability:** no cluster-protocol or session-sync
     interaction; per-node helper-internal change with an additive
-    wire field. Standby nodes run the same armed semantics
-    (`desiredForwardingArmedLocked` returns true on standby with data
-    RGs), so the lifecycle behaves identically on both cluster roles.
-    Mixed-version window: old helper + new Go strands as before (D
-    warns); new helper + old Go self-converges (the lifecycle is
-    helper-internal; old Go ignores the field).
+    wire field. Standby nodes run the same armed semantics. Rejected-
+    plan leftovers can never be armed by an auto-rebind (the plan
+    gate, Codex r3 BLOCKER 2) — important on HA nodes where the
+    busy-binding repair path (maps_sync.go:1474) fires rebinds
+    autonomously. Mixed-version window: old helper + new Go strands
+    as before (D warns); new helper + old Go self-converges.
 12. **Bootstrap fail-closed floor (Go side):** a plan-changing Compile
     already programs bootstrap ctrl disabled and clears binding rows
-    before publish (manager_compile.go:319, maps_sync.go:121) — the
-    commit-window posture is fail-closed on master and stays so; the
-    fix removes the INDEFINITE tail, not the bounded interruption (§3).
+    before publish (manager_compile.go:315, maps_sync.go:163/178) —
+    the commit-window posture is fail-closed on master and stays so;
+    the fix removes the INDEFINITE tail, not the bounded
+    interruption (§3, Codex r3 MINOR 9's confirming evidence).
 ## 8. Risk assessment
 
 | Risk class | Level | Assessment |
 |---|---|---|
-| Behavioral regression | LOW-MED | Observable changes: (i) expansion-while-armed self-heals (S5 + convergence) instead of stranding; (ii) deferred PLAN-CHANGING applies now deliberately fail-closed for the whole vector until completion (S3) — on master the contraction/reshuffle shape could stay enabled with stale shifted rows (Codex r2 BLOCKER 5), so this is a posture TIGHTENING toward fail-closed, trading a bounded defer-window outage for eliminating mis-steering; (iii) failed bring-up reverts initialized slots (S4) — master-parity reporting, self-healing retry (better than master); (iv) operator verbs claim slots (C2) and their disarms now SURVIVE defer-completion (v3's full fan-out would have cleared them); (v) D adds an edge-triggered warn on genuine drift (truthful on operator disarms; doubles as the old-helper detector). The dangerous shapes from rounds 1-2 — armed-but-unbound rows, rebind-missed activation, contraction window — are structurally excluded and pinned by §9 items 12-16. |
-| Lifetime / borrow-checker | LOW | Cold path; owned `BindingStatus` clones already in use; the identity map is a local `BTreeMap<(String, u32), BindingStatus>`; the marker is a plain bool on an existing struct. No new lifetimes, no hot-path allocation. |
-| Performance regression | LOW | Planner runs once per full apply (control path); O(n) map build replaces O(n) map build; convergence is one O(n) pass after an already-O(n) reconcile. D's drift scan is O(n) on the ~1s poll over ≤ dozens of bindings. |
-| Architectural mismatch | LOW-MED | The marker is a new piece of wire-visible control state — the design's deliberate answer to "who owns armed" — and its lifecycle is small and fully enumerated (S1-S5/C1-C3/one convergence locus). Must not entangle with #6702/#6681's planner rework: the identity key is layout-shape-independent; the slot-keyed `refresh_bindings` cosmetic residual (§4 item 7) is deliberately deferred to their coordinator-adjacent work. One coordination note: whichever lands second rebases the replan function. |
+| Behavioral regression | LOW-MED | Observable changes: (i) expansion-while-armed self-heals (S5 + convergence) instead of stranding; (ii) deferred PLAN-CHANGING applies deliberately fail-close the whole vector until completion (S3) — posture TIGHTENING vs master's contraction mis-steer, and per Codex r3 MINOR 9 the expansion window was already bootstrap-interrupted, so the real cost ≈ 0; (iii) failed bring-up marks all non-operator slots pending (S4') — master-parity fail-closed reporting plus self-healing retry (better than master); (iv) the arm verb's fan-out moves after its reconcile (C3) — a failed global arm now fails CLOSED instead of stranding armed-mark-free slots (master had that hole; Codex r3 MAJOR 7); (v) operator verbs claim slots (C2) and their disarms survive flaps-as-unregistered, deferred applies, completions, and failed bring-ups (was-armed gates); (vi) D adds an edge-triggered warn on genuine drift when desired==true. The dangerous shapes from rounds 1-3 — armed-but-unbound rows, rebind-missed activation, contraction window, hybrid-plan activation, mid-window toggle convergence, arm-then-fail stranding — are structurally excluded and pinned by §9 items 12-17. |
+| Lifetime / borrow-checker | LOW | Cold path; owned `BindingStatus` clones already in use; the identity map is a local `BTreeMap`; the marker is a plain bool; the convergence's plan-membership set is a pure `replan_queues` call per armed reconcile (no side effects). No new lifetimes, no hot-path allocation. |
+| Performance regression | LOW | Planner runs once per full apply (control path); convergence is one O(n) pass + one pure replan (identity extraction only) after an already-O(n) reconcile, on control events only — never per-packet/session/poll. D's drift scan is O(n) on the ~1s poll over ≤ dozens of bindings. |
+| Architectural mismatch | LOW-MED | The marker is new wire-visible control state with a fully enumerated lifecycle (S1–S5/S3/S4' set rules, C1–C3 clear rules, one tri-gated convergence locus). Must not entangle with #6702/#6681's planner rework: the identity key is layout-shape-independent; the slot-keyed `refresh_bindings` cosmetic residual is deliberately deferred to their coordinator-adjacent work. One coordination note: whichever lands second rebases the replan function. The pre-existing mid-defer-window early-BIND hazard of registration toggles (Codex r3 BLOCKER 6's other half) is filed as a follow-up, not silently absorbed (§10). |
 ## 9. Test plan
 
 **Rust unit/integration (the fix lives here):**
 
 - `replan_bindings_from_candidates` unit tests (extend the existing
-  replan test module — `userspace-dp/src/main_tests.rs` hosts
-  `replan_queues_binds_vlan_unit_on_parent_netdev`):
-  1. **expansion while armed, non-deferred (S5)** — existing plan
-     all-armed, add a candidate: new slots `registered=true,
-     armed=true, activation_pending=false`; carried slots unchanged.
-  2. **expansion while disarmed** — global false: new slots
-     `armed=false, activation_pending=true` (boot-shape mark).
-  3. **deferred plan-changing apply (S3 global gate)** — armed plan,
-     replan with `defer_workers=true`: EVERY registered slot
-     `armed=false, activation_pending=true`, INCLUDING carried ones;
-     an unchanged-plan deferred apply marks nothing.
+  replan test module — `userspace-dp/src/main_tests.rs`):
+  1. **expansion while armed, non-deferred (S5 never-arm)** — existing
+     plan all-armed, add a candidate: new slots `registered=true,
+     armed=false, pending=true`; carried slots unchanged.
+  2. **expansion while disarmed** — same shape (the S5 rule is
+     uniform; no defer/global dependence).
+  3. **deferred plan-changing apply (S3 gate)** — armed plan, replan
+     with `defer_workers=true`: every registered slot `armed=false`;
+     pending=true on exactly the was-armed/was-pending slots; an
+     operator-disarmed slot (`registered && !armed && !pending`)
+     stays unarmed and UNMARKED; an unchanged-plan deferred apply
+     marks nothing.
   4. **deferred CONTRACTION (Codex r2 BLOCKER 5)** — `[a,b,c] → [b,c]`
      with defer: survivors unarmed+pending despite no new identity.
   5. **contraction (non-deferred)** — remove a candidate: vanished
      identities' state does not leak onto survivors.
-  6. **reshuffle identity carry** — insert a candidate that sorts
-     earlier (or change queue_count): each surviving identity keeps its
-     own `armed`/`activation_pending` at its NEW slot; an
-     operator-disarmed (mark-free) identity stays disarmed at its new
-     slot.
-  7. **E2 + flap matrix (AGY r1 f1 / AGY r2 f3 / Codex r2 MAJOR 7):**
-     (a) candidate with `ifindex == 0` at apply → `registered=false,
-     pending=true` (S1); later valid → re-registered, armed per S5;
-     (b) operator-unregistered (valid ifindex, pending=false) → flap
-     (`ifindex<=0`, S2 does NOT re-mark) → valid again → STAYS
-     unregistered; (c) registered slot flaps (S2 marks) → recovers →
-     re-registered + converged.
-  8. **identity transition matrix (Codex r1 BLOCKER 2):** same-name /
-     new-ifindex carries control state; rename / same-ifindex
-     re-initializes; orphan-fallback (parent-name key + child ifindex)
-     → explicit-parent carries across the ifindex swap.
-  9. **queue-override semantics (Codex r1 MAJOR 5):** queue disarm →
-     expansion adds a new member of that queue → new member
-     initializes per S5 (NOT disarmed); contraction removing all
+  6. **reshuffle identity carry** — each surviving identity keeps its
+     own `armed`/`pending` at its NEW slot; an operator-disarmed
+     (mark-free) identity stays disarmed at its new slot.
+  7. **E2 + flap matrix, split per AGY r3 f3:** (a) candidate
+     `ifindex == 0` at apply → `registered=false, pending=true` (S1);
+     later valid → re-registered (`registered=true, armed=false,
+     pending=true`); converges at the next armed reconcile; (b)
+     operator-UNREGISTERED (valid, pending=false) → flap → valid →
+     STAYS unregistered; (c-i) ARMED slot flaps (S2 marks, was-armed)
+     → recovers → re-registered + converged; (c-ii)
+     operator-DISARMED slot (`registered && !armed && !pending`)
+     flaps → force-cleared WITHOUT a mark → recovers as
+     `registered=false, pending=false` (documented degradation;
+     never re-armed); (d) invalid → GLOBAL ARM fan-out → valid (Codex
+     r3 BLOCKER 4a): the S1 mark SURVIVES the fan-out (C3 clears only
+     registered slots) → re-registers.
+  8. **identity transition matrix:** same-name/new-ifindex carries;
+     rename/same-ifindex re-initializes; orphan-fallback →
+     explicit-parent carries across the ifindex swap.
+  9. **queue-override semantics:** queue disarm → expansion adds a new
+     member → initializes per S5 (pending, NOT disarmed — it converges
+     at the apply's own reconcile); contraction removing all
      overridden members leaves no residual; queue unregister survives
-     a reshuffle on its remaining members; operator verbs CLEAR marks
-     on affected slots in both directions (C2).
+     a reshuffle; operator verbs CLEAR marks in both directions (C2).
   10. **volatile non-carry (R3):** a carried identity's
       `ready`/`bound`/`xsk_registered`/counters/`last_error` reset at
       replan; only the control quad carries.
-  11. **`had_existing` death:** state-inheritance depends ONLY on
-      identity-map membership (e.g. a record with all-false fields but
-      present in the old map is still "carried"); the five-field
-      heuristic is gone.
+  11. **`had_existing` death:** inheritance depends ONLY on
+      identity-map membership.
 - **Convergence unit tests** (`reconcile_status_bindings` armed leg):
-  pending+registered slots arm+clear on Ok; pending marks are NOT
-  consumed on Err; unmarked unarmed slots (operator-owned) are NOT
-  armed.
-- **Server-level regressions** (`userspace-dp/src/server/tests.rs`,
-  alongside the full-apply tests at :1314/:1475; per Codex r1 MAJOR 7
-  these MUST use valid map pins (server/tests.rs:913) and
-  `force_worker_healthy_stub` (coordinator/mod.rs:329) — and per Codex
-  r2 MAJOR 8 the assertions must account for the stub populating
-  planned slots + heartbeats but NOT live `bound`/`xsk_registered`
-  (bringup.rs:751), so tests assert on the ARMED/MARKER state and the
-  reconcile Ok/Err outcome, not on stub-live volatile fields):
+  pending+registered+in-plan slots arm+clear on Ok; pending slots NOT
+  in the stored snapshot's plan are NOT armed (the hybrid gate, Codex
+  r3 BLOCKER 2); marks NOT consumed on Err; unmarked unarmed slots
+  never armed; convergence blocked when the stored snapshot is
+  defer=true and the caller is not rebind-authorized; allowed for the
+  rebind-authorized caller.
+- **Server-level regressions** (`userspace-dp/src/server/tests.rs`;
+  per Codex r1 MAJOR 7 + r3 MAJOR 8: valid map pins
+  (server/tests.rs:913), `force_worker_healthy_stub`
+  (coordinator/mod.rs:329), assertions on ARMED/MARKER state and
+  reconcile Ok/Err outcome — the stub populates planned slots +
+  heartbeats but not live `bound`/`xsk_registered` (bringup.rs:751) —
+  and pin the reconcile call/stage (status.rs:263-265's
+  debug_reconcile_stage) plus plan provenance where relevant):
   12. **expansion-while-armed** (the issue's demanded test): apply A,
       `set_forwarding_state(true)`, apply B with an additional zoned
       interface; assert BOTH responses ok, plan keys differ, binding
       count increased, the added identity exists, EVERY binding
-      `registered && armed && !activation_pending`, and
-      `status.enabled == true`. Red on master (trace: planning.rs:521
-      → status.rs:280), green after.
-  13. **deferred expansion, three completion shapes:** apply A, arm,
-      apply B with `defer_workers=true` + an inserted candidate that
-      sorts BEFORE an existing identity (slot reshuffle): assert all
-      registered slots `!armed && activation_pending` and
-      `enabled == false` (the S3 window). Then complete via EACH of:
-      (a) same-plan re-apply `defer_workers=false`; (b) full-leg
-      re-apply with a changed plan key (Codex r2 BLOCKER 4 shape);
-      (c) `rebind` (Codex r2 BLOCKER 3 shape) — after each, EVERY
-      binding `registered && armed && !pending`, `enabled == true`.
-      (Where the harness cannot drive a real link cycle, invoke the
-      `rebind` control verb directly — it shares the reconcile locus.)
-  14. **failed bring-up (Codex r2 BLOCKER 2 / AGY r2 f2):** force a
-      `WorkerSpawn` failure and a `WorkerBindIncomplete` failure on a
-      non-deferred expansion apply; IMMEDIATELY after the Err response
-      assert: initialized slots `!armed && pending`, carried slots
-      keep prior armed, `enabled == false`, and the marks SURVIVE;
-      then a successful retry apply converges them (self-heal, better
-      than master).
-  15. **operator-override survival:** operator-disarm a slot; commit a
-      plan-changing deferred apply + completion — the operator-disarmed
-      slot stays `!armed` (C2 claimed, never auto-converged) while the
-      deferred slots converge; D-shaped warn would fire for it
-      (asserted in the Go test below).
-  16. **#5134-shaped retry:** deferred apply → failed completion →
-      republish with `DeferWorkers=false` + bumped generation (and the
-      debt-discard interleaving of Codex r2 BLOCKER 4: a plan-changing
-      commit before the retry) → slots converge.
+      `registered && armed && !pending`, `enabled == true`, and the
+      reconcile stage advanced. Red on master, green after.
+  13. **deferred expansion, three completion shapes + the mid-window
+      block:** apply A, arm, apply B `defer_workers=true` + inserted
+      earlier-sorting candidate: all non-operator slots
+      `!armed && pending`, `enabled == false`. Then complete via EACH
+      of: (a) same-plan re-apply `defer_workers=false`; (b) full-leg
+      re-apply with a changed plan key (Codex r2 BLOCKER 4); (c)
+      `rebind` (Codex r2 BLOCKER 3) — after each, every non-operator
+      slot `registered && armed && !pending`, `enabled == true`. AND
+      the negative: a `set_binding_state` registration toggle DURING
+      the window does NOT converge the pending slots (Codex r3
+      BLOCKER 6).
+  14. **failed bring-up, all shapes (Codex r3 BLOCKER 5 + MAJOR 8):**
+      force `WorkerSpawn` and `WorkerBindIncomplete` on (i) an
+      expansion apply, (ii) an E2-only apply, (iii) a CONTRACTION
+      apply, (iv) a global-arm (`set_forwarding_state(true)` after a
+      deferred boot apply — the C3-reorder case). IMMEDIATELY after
+      each Err assert: every non-operator registered slot
+      `!armed && pending` (S4'), `enabled == false`, marks SURVIVE;
+      then a successful retry converges them. (iv) additionally
+      asserts the arm verb did NOT fan out before its failed
+      reconcile (no armed-mark-free slots).
+  15. **operator-override survival (Codex r3 BLOCKER 3):**
+      operator-disarm a slot; commit a plan-changing deferred apply +
+      completion — the operator-disarmed slot stays `!armed` (claimed,
+      never marked, never converged) while the deferred slots
+      converge; repeat with the failure path of item 14(i).
+  16. **rejected-hybrid (Codex r3 BLOCKER 2):** apply A, apply B
+      (expansion), force B's bring-up to fail post-teardown, then
+      `rebind` (the auto-recovery shape): assert B-only pending
+      identities are NOT armed (plan gate), `enabled == false`, and a
+      later successful retry of B converges them (stored snapshot is B
+      again). Immediate post-failure assertions REQUIRED (Codex r3
+      MAJOR 8) — no eventual-retry-only green.
+  17. **#5134-shaped retry + debt-discard interleaving (Codex r2
+      BLOCKER 4):** deferred apply → failed completion → plan-changing
+      commit before the retry → slots converge on the later successful
+      armed reconcile.
 - The fail-fast invariant (Q6, resolved r1): assertions live ONLY in
-  tests and only over well-defined planner/activation transitions — a
-  production `debug_assert!` would panic under a legitimate operator
-  diagnostic disarm. Not shipped.
+  tests and only over well-defined planner/activation transitions.
 - Protocol canaries: `userspace-dp/src/protocol/tests.rs` exact-schema
   snapshots updated to pin `activation_pending` deliberately.
 - `make test-rust` (full cargo suite) clean; `cargo build` warning-free.
@@ -823,17 +892,16 @@ deliberate disarm.
 
 **Go (option D + gate test):**
 
-- Manager unit test for the D warn: synthesize `lastStatus` with global
-  armed + (i) one `Registered && !Armed && !ActivationPending` binding
-  → exactly one warn on the false→true edge, none on subsequent ticks,
-  warn clears after re-arm; (ii) one `Registered && !Armed &&
-  ActivationPending` binding → NO warn (pending activation is not
-  drift); (iii) missing field (old helper) → reads as drift (warn).
-- `maps_sync` gate test (AGY r1 f3): feed a synthesized post-expansion
-  status (new slots armed per S5) through
-  `probeBindingsReady`/`bindingForwardingLive` and assert the ctrl gate
-  admits and the shim rows go READY — pins that the Go gates consume
-  the fixed default as intended.
+- Manager unit test for the D warn, desired-gated (Codex r3 MINOR 10):
+  (i) desired==true + one `Registered && !Armed && !ActivationPending`
+  binding → exactly one warn on the false→true edge, none on
+  subsequent ticks, clears after re-arm; (ii) desired==true + one
+  `Registered && !Armed && ActivationPending` binding → NO warn;
+  (iii) desired==FALSE → NO warn regardless of binding state; (iv)
+  missing field (old helper) → reads as drift (warn when desired).
+- `maps_sync` gate test (AGY r1 f3): synthesized post-expansion status
+  (new slots converged) through `probeBindingsReady`/
+  `bindingForwardingLive` — ctrl admits, shim rows go READY.
 - `make test-go` clean.
 
 **Smoke (loss userspace cluster, lock-cell wrapped):** deploy; verify
@@ -844,17 +912,19 @@ the new slots armed with no `activation-pending`. Re-apply CoS after
 the deploy per the cluster protocol (`apply-cos-config.sh`).
 
 **Docs (module contract, same work item):**
-`userspace-dp/src/server/README.md` — the arm-model narrative (the
-`set_bindings_forwarding_armed`/defer sections around :71/:294-324)
-gains the marker lifecycle: who sets `activation_pending`, who
-consumes it, who may clear it, and the operator-claim rule.
-**Release note / upgrade note (AGY r1 Q7 + Codex r1 MINOR 8):**
-required, and it must state that the fix takes effect only after the
-HELPER restarts into the new binary — a pingable same-config helper is
-reused rather than replaced (process.go:18), so the old-helper window
-is operationally relevant and the note should call for
-`systemctl restart xpf-userspace-dp` (or an equivalent helper bounce)
-on upgrade.
+`userspace-dp/src/server/README.md` — the arm-model narrative gains
+the marker lifecycle: the planner never arms, who sets
+`activation_pending`, the tri-gated convergence, the operator-claim
+rule, and the was-armed gates. **Release note / upgrade note (AGY r1
+Q7 + Codex r1 MINOR 8 + AGY r3 f4):** required and PROMINENT on two
+points: (1) the fix takes effect only after the HELPER restarts into
+the new binary — a pingable same-config helper is reused rather than
+replaced (process.go:18), so call for `systemctl restart
+xpf-userspace-dp` on upgrade; (2) the deliberate posture change —
+deferred (RETH-MAC-pending) plan-changing commits now fail-close
+transit for the whole dataplane until the link-cycle completion,
+instead of risking stale shifted rows (previously) or stranding new
+slots (the bug).
 ## 10. Out of scope (explicitly)
 
 - **Go per-binding armed AUTO-convergence (option B)** — rejected
@@ -868,70 +938,87 @@ on upgrade.
   were fed. No gate changes. (The all-or-nothing `enabled` gate making
   an operator per-slot disarm a whole-dataplane-off is master's
   semantics, unchanged; D's warn makes it visible.)
+- **The pre-existing mid-defer-window early-BIND hazard** (Codex r3
+  BLOCKER 6's other half): a registration toggle during the defer
+  window runs an armed reconcile that BINDS workers before the RETH
+  MAC cycle — present on master (the toggle's reconcile is
+  defer-blind). v5 closes only the early-CONVERGE side (the defer
+  gate); the early-BIND side is a separate pre-existing issue filed
+  as a follow-up.
 - **Re-keying the coordinator's slot-keyed live-worker lookup
   (`refresh_bindings`)** — the defer-window cosmetic alias (§4 item 7,
   §7.9) is documented and neutralized by S3; re-keying it belongs with
   #6702's coordinator-adjacent planner rework. Filed as a follow-up.
+- **Operator-disarm → unregister degradation across a flap** (AGY r3
+  f2 / Codex r3 BLOCKER 4's accepted residual): an operator-DISARMED
+  slot whose interface flaps recovers as `registered=false,
+  pending=false` (its no-forward intent survives; re-registering it
+  while keeping the disarm would need a second provenance bit —
+  rejected as machinery disproportionate to a destructive-maintenance
+  edge). Documented in the server README.
 - **Persisted-state migration** — none needed (state file write-only;
   the marker is additive with serde default).
 - **Operator-override persistence across global arm toggles** — the
-  fan-out still clears them (C3); making diagnostic disarms durable is
-  a separate product decision.
-- **The retired v3 machinery** — leg-scoped R1/R2 and the full
-  fan-out defer-completion are superseded by the marker lifecycle and
-  recorded here for history (v3 @ bce10126c).
+  fan-out still clears them (C3, registered slots); making diagnostic
+  disarms durable is a separate product decision.
+- **The retired v3/v4 machinery** — leg-scoped R1/R2, the full
+  fan-out defer-completion, v4's S4 identity-scoped revert, and v4's
+  arm-at-replan S5 are superseded and recorded at bce10126c /
+  f679a791a.
+
 ## 11. Open questions for adversarial review
 
-Closed across rounds 1-2 (for the record): Q2 (drift-producer
-enumeration — §5-B; three reviewers concur), Q5 (VLAN-alias consumer —
-no interaction), Q6 (fail-fast assertion is test-only), Q7 (High +
-release note + helper-restart requirement), the applied-vs-requested
-init value (control-socket serialization + publish-side disarm
-ordering), and v3's Q1 (full fan-out vs scoped — round 2 ANSWERED it:
-scoped provenance is required, shipped as the marker).
+Resolved across rounds 1-3 (for the record): Q2 (drift-producer
+enumeration), Q5 (VLAN-alias consumer), Q6 (test-only assertion), Q7
+(High + release note + helper restart), applied-vs-requested init,
+full fan-out vs scoped (scoped REQUIRED — shipped), Q3 (uniform S3 —
+Codex r3 MINOR 9's bootstrap evidence + the all-or-nothing gate make
+it cost-neutral and strictly safer; SMR r3 SMR3-2), Q5-toggle
+(registration-toggle reconcile convergence is now BLOCKED mid-defer
+by the defer gate and acceptable outside it — the reconcile genuinely
+re-binds; SMR r3 SMR3-3 + Codex r3 BLOCKER 6), Q7-boot (disarmed-leg
+non-convergence + C3 semantics close it; SMR r3 SMR3-4).
 
-Remaining questions for round 3, each invitable to PLAN-KILL with a
+Remaining questions for round 4, each invitable to PLAN-KILL with a
 concrete counterexample:
 
-1. **Marker lifecycle completeness.** S1–S5 (set), C1–C3 (clear/claim),
-  one convergence locus. Can a reviewer exhibit a path where a slot
-  reaches `registered && !armed` with NO mark and NO operator verb —
-  i.e. an unmarked producer that strands again? (The enumeration to
-  attack: replan S1/S2/S5, S3 gate, S4 revert, operator verbs C2,
-  global fan-outs C3, lifecycle init, rebind, same-plan/full apply
-  legs, #5134 republish, helper restart.)
-2. **Marker lifecycle leaks.** The dual: a path where a slot keeps
-  `activation_pending=true` after reaching a state where activation
-  can never complete (e.g. its identity vanishes from the plan without
-  the record being dropped, or a permanently-failing reconcile) —
-  does anything misreport or misbehave with a stale mark? (Marks on
-  dropped identities vanish with the record; a permanently-failing
-  reconcile leaves the dataplane down for a DIFFERENT surfaced reason
-  with `enabled=false` — truthful. Attack it anyway.)
-3. **S3's posture tightening.** Deferred plan-changing applies now
-  fail-close the WHOLE vector until completion (master's contraction
-  shape could stay enabled on stale rows — a mis-steer, so tightening
-  is argued correct; but the expansion-only shape on master kept OLD
-  identities forwarding through the window and S3 now drops them too).
-  Is any production workflow dependent on deferred-apply window
-  forwarding on unchanged identities — and if so, is the honest fix a
-  per-identity gate (carry old identities armed, pending-gate only
-  new/shifted ones) with the shifted-identity alias that reopens?
-4. **S4's revert scope.** Only slots initialized in the failed apply
-  revert (carried slots keep armed, master parity). Codex r2 BLOCKER 2
-  showed surviving workers can publish READY rows for carried slots —
-  with `enabled=false` the ctrl gate overrides rows (§7.3). Is
-  "ctrl=0 overrides stale READY rows" verified tightly enough
-  (maps_sync.go:391-404 + shim behavior), or must the revert widen to
-  the whole vector on this path?
-5. **Convergence-on-registration-toggle.** The convergence locus also
-  covers queue/binding registration-change reconciles (a registration
-  toggle triggers `reconcile_status_bindings`, binding.rs:34-53).
-  Converging OTHER pending slots as a side effect of an operator's
-  registration toggle: acceptable (the reconcile genuinely re-binds
-  workers) or a surprise worth scoping out?
-6. **D's warn on operator disarm vs pending.** With the marker, D's
-  predicate is `!Armed && !ActivationPending`. Is warning on operator
-  disarms (truthful but intentional) the right default, or should D
-  rate-limit them separately from unmarked-no-operator drift (which is
-  the actual bug tripwire)?
+1. **Marker lifecycle completeness, final form.** Set rules
+   S1/S2/S3/S4'/S5 (each was-armed gated), clears C1/C2/C3 (C3 scoped
+   to registered), one tri-gated convergence locus. Exhibit a path to
+   `Registered && !Armed` with NO mark and NO operator verb — an
+   unmarked producer that strands again. (The enumeration to attack:
+   every replan branch, the S3/S4' gates, the C3 reorder, operator
+   verbs, lifecycle init, rebind, both apply legs, #5134, helper
+   restart, the #2794 disarmed-reconcile path.)
+2. **The plan gate's cost and sufficiency.** Convergence computes the
+   current plan's identity set via a pure `replan_queues` call per
+   armed reconcile. Is there a case where the stored snapshot's plan
+   CONTAINS the pending identity yet arming it is still wrong (the
+   hybrid's inverse — a retained vector slot that belongs to the
+   restored plan but whose workers the failed bring-up never
+   replaced)? Does `bound == planned` at the Ok boundary (bringup.rs:188)
+   already exclude it?
+3. **The defer gate's authorization split.** `rebind` is treated as
+   the daemon-authorized completion and converges despite a stored
+   `defer_workers=true` snapshot; a spurious link-flap rebind
+   mid-window would also converge (its workers DID bind). Is any
+   deferred state reachable where converging on a non-NotifyLinkCycle
+   rebind is wrong — e.g. the flap arrives BEFORE the daemon's MAC
+   programming, workers bind on the pre-MAC interface, and the
+   subsequent MAC cycle + its rebind re-binds again (self-consistent),
+   or is there a hole in that reasoning?
+4. **S4' + operator-owned slots on the failure path.** S4' marks
+   every non-operator-owned registered slot pending; an
+   operator-disarmed slot stays unarmed+unmarked. After the retry
+   converges the marked slots, the operator slot keeps `enabled=false`
+   single-handedly (the all-or-nothing gate) — master's semantics for
+   an operator disarm, D-visible. Any objection?
+5. **D's warn on operator disarm vs unmarked drift.** With
+   desired==true, D warns on ANY `!armed && !pending` registered
+   slot — operator disarms included (truthful, deliberate policy).
+   Should D distinguish "slot was NEVER armed since last plan change"
+   (stronger bug signal) from "armed then disarmed" (operator shape)
+   using `last_change` history, or is the single predicate + operator
+   awareness sufficient?
+6. **Round-3 disposition table audit.** §1's table maps every r3
+   finding to its v5 fold. Which row is claimed-but-wrong this time?
