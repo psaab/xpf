@@ -561,7 +561,9 @@ record's identity frees only when `per_worker` is empty AND
     bypassed when no auth key is configured — `handleNewConnection`,
     sync_conn.go:100-137, opens the stream with no setup handshake —
     so the capability rides ONE named contract: an additive periodic
-    `syncMsgCapability` frame on a dedicated ticker (Codex r17 minor 2:
+    `syncMsgCapability` frame on a dedicated ticker (period chosen at
+    implementation, e.g. the clock-sync cadence — SMR r18 nit 2;
+    Codex r17 minor 2:
     the transport must be one contract, not alternatives — and NOT a
     handshake field, because unkeyed deployments bypass the handshake,
     sync_auth.go:321) — RE-ADVERTISED PERIODICALLY (Codex r16 minor 3:
