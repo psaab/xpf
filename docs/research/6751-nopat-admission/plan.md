@@ -1,7 +1,7 @@
 # #6751 plan — interface SNAT no-PAT admission: reserve-or-PAT the colliding translated tuple
 
-- **Status**: DRAFT v8 — round-7 fold (Codex r7 blockers 1-3 + major 4 +
-  minor 5 + nit 6; SMR r7 E1 + AGY r7 nits 1-2 all folded)
+- **Status**: DRAFT v9 — round-8 fold (Codex r8 blocker 1 + major 2 +
+  minor 3; SMR r8 + AGY r8 nits all folded)
 - **Issue**: #6751 (opus-review-001 R08, High, `bug`+`audit`+`security`) —
   interface SNAT admits indistinguishable no-PAT return tuples and sends
   replies to the FIRST session.
@@ -526,16 +526,25 @@ record's identity frees only when `per_worker` is empty AND
   (`userspaceForwardWireAliasV4` returns `(wireKey, val, true)`,
   daemon_ha_userspace_convert.go:399-405), so clause (4) compares the
   CROSS-NODE-correlatable `RTFlowSessionID` (#5212/#6198,
-  protocol_ha.go:190 — NOT the node-local `SessionID`, on which the two
-  nodes deliberately disagree, pkg/dataplane/types.go:31-36): require
-  EQUAL non-zero `RTFlowSessionID`; when either side's id is 0
-  (legacy/local), fall back to requiring the base canonical row to be
-  PRESENT with an IDENTICAL `SessionValue` — the fallback runs against
-  the CANDIDATE record's row that the wire-form relation selected (the
-  base form is never reverse-derived from the alias alone; the candidate
-  iteration supplies the base key), and the node-local per-session
-  `SessionID` inside the value discriminates colliding flows even at
-  RT-flow-id 0 — AGY r8 verification + SMR r8. Clause (4) makes
+  protocol_ha.go:190; the helper stores it on `SyncedSessionEntry`,
+  server/helpers/session_sync.rs:274 — NOT the node-local `SessionID`,
+  on which the two nodes deliberately disagree,
+  pkg/dataplane/types.go:31-36): require EQUAL non-zero
+  `RTFlowSessionID`. **Zero-id alias attachment FAILS CLOSED** (Codex r8
+  blocker 1: no value-equality fallback is safe — base and alias are
+  queued independently and stamped with fresh per-call generations,
+  sync_conn_write.go:53/sync_conn_gen.go:113, so "identical value"
+  either never matches legitimately or false-matches a legacy colliding
+  flow whose id fields are all zero; and a base-row-presence requirement
+  breaks base-first deletion). An alias import whose side of clause (4)
+  cannot be evaluated (either id is 0) imports as its own first-class
+  entry: against its own base's identity it gets `IdentityConflict` and
+  DROPS (fail-closed — no mis-attachment, no duplicate ownership; the
+  base flow is unaffected; the fabric alias row is absent, a bounded
+  fabric-return fidelity degradation confined to id-0-synced fabric
+  sessions from legacy peers — post-#6198 peers always export non-zero
+  ids, so the degradation is the legacy-only corner of the §5.4
+  mixed-version window). Clause (4) makes
   Codex r7's counterexample (colliding flow B's alias, different session
   id) fail the predicate: B's alias imports as its own first-class entry,
   hits `IdentityConflict`, and DROPS — the promised second-import
@@ -572,14 +581,22 @@ record's identity frees only when `per_worker` is empty AND
   - The alias sweep of §5.6's transactional shared replacement covers
     BOTH alias classes (derived index rows + the explicit canonical alias
     row, predicate-gated) and is COMPARE-AND-REMOVE ownership-validated
-    (Codex r7 major 4: the current removals delete derived
+    (Codex r7 major 4 + r8 major 2: the current removals delete derived
     reverse/forward-wire slots by key unconditionally,
     shared_ops.rs:978/987/997 — if a legitimate non-bijective third-party
     session has since displaced T_old's derived slot, an unconditional
-    sweep would remove the CURRENT occupant. Every swept removal checks
-    the stored entry still belongs to the displaced session — key +
-    NatDecision — before deleting; a third-party-displacement test pins
-    it).
+    sweep would remove the CURRENT occupant; and "key + NatDecision" is
+    not a sufficient identity, since a newer same-key/same-NAT session
+    can carry a different stable session identity. Every swept removal
+    validates ownership ATOMICALLY under the removing map's own lock
+    (the maps lock separately — a third party can replace a derived slot
+    between canonical replacement and sweep, so the check must be
+    compare-and-remove under that map's lock, not check-then-remove):
+    the stored row's value matches the displaced entry's on the identity
+    chain — equal non-zero `RTFlowSessionID`, else equal non-zero
+    node-local `SessionID`, else full `SessionValue` equality EXCLUDING
+    the per-call generation stamp and counters. A third-party-displacement
+    test and a same-key/same-NAT/different-id replacement test pin it).
   - **NAT64 alias exports are OUT OF SCOPE for the holder model**
     (Codex r7 blocker 3, scoped): NAT64 fabric redirects also export
     forward-wire aliases (userspaceForwardWireAliasV6,
@@ -818,12 +835,16 @@ the four status-counter mirrors + Describe registration, and tests.
   queue/relay-or-expiry-bounded reverse-companion edge
   (`replicate_session_delete` enqueues commands — no strict deadline),
   which is identical in shape to shipped pool-mode discipline today.
-- **Fabric-alias ownership**: the wire-alias predicate (shipped for the
-  displacement counter) attaches a fabric forward-wire alias's markers to
-  its base record; neither key's deletion frees the identity while the
-  companion remains reachable; tuple replacement removes the old explicit
-  canonical alias row only under the predicate (never an unrelated
-  session at that key).
+- **Fabric-alias ownership**: the FOUR-PART wire-alias predicate
+  (wire-form + identical NatDecision + sync-derived + equal non-zero
+  RTFlowSessionID) attaches a fabric forward-wire alias's holder units to
+  its base record; zero-id alias attachment FAILS CLOSED (the alias
+  imports first-class and drops on conflict — no value-equality
+  fallback); neither key's deletion frees the identity while the
+  companion remains reachable (counting HolderSet); tuple replacement
+  removes the old explicit canonical alias row only under the predicate
+  with compare-and-remove identity validation (never a third party's
+  slot).
 - **NatDecision freeze**: no new fields; `rewrite_src_port: Some(_)` is
   handled generically everywhere from pool mode.
 - **Hot path**: established-flow transit untouched; zero new per-packet
@@ -873,16 +894,23 @@ the four status-counter mirrors + Describe registration, and tests.
   longer resolvable — with COMPARE-AND-REMOVE ownership validation so a
   third-party occupant of T_old's derived slot is never swept — Codex r7
   major 4); fabric alias four-part predicate (wire-form + identical
-  decision + sync-derived + SAME SESSION ID: a colliding flow's alias
-  with a different session id does NOT attach and drops as its own
-  first-class import — Codex r7 blocker 1; out-of-order alias-first
-  arrival adopts/merges per the both-direction rule; base+alias count as
-  TWO holder units per scope in the counting HolderSet — Codex r7
+  decision + sync-derived + SAME SESSION ID via equal non-zero
+  RTFlowSessionID: a colliding flow's alias with a different id does NOT
+  attach and drops as its own first-class import — Codex r7 blocker 1;
+  zero-id alias attachment FAILS CLOSED — Codex r8 blocker 1; out-of-order
+  alias-first arrival adopts/merges per the both-direction rule; base+alias
+  count as TWO holder units per scope in the counting HolderSet — Codex r7
   blocker 2); staged replacement (T_old held until unreachable;
   each owner drops only its own marker); uniform mint quarantine (a
   re-enabled edited pool cannot mint an identity an older draining
   generation owns — pool skips quarantined addresses in its address loop,
-  interface fails closed); materialize conflict returns
+  interface fails closed; EVERY fixed-address mode fails closed when its
+  selected address is quarantined, enumerated as separate test cases —
+  address-persistent/sticky single-probe, port-translating persistent-NAT
+  pinned-lease decision (allocator.rs:1114), address-only persistent
+  (allocator.rs:1955), deterministic CGNAT (allocator.rs:1482),
+  deterministic NAT64 (allocator.rs:1561) — Codex r7 minor 5 / r8 minor 3);
+  materialize conflict returns
   MaterializeConflict (explicit recycle/drop branch, NEVER the
   cold-admission miss path — Codex r5 major 4); fabric forward-wire alias
   (alias import attaches markers to the BASE record via the wire-alias

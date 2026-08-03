@@ -1,3 +1,9 @@
+## 2026-08-03 — #6751 research round 8: split verdict, plan v9 fold
+
+- **Timestamp**: 2026-08-03 (research/6751-nopat-admission, /research skill)
+- **Action**: Round-8 verdicts split a fourth time: AGY PLAN-READY-WITH-NITS (all v8 folds verified, 2 implementation nits), Claude SMR PLAN-READY-WITH-NITS (predicate re-derived sound; v8.1 named RTFlowSessionID as the clause-4 field), Codex PLAN-NEEDS-REVISION (1 blocker + 1 major + 1 minor). Codex r8: the zero/legacy session_id value-equality fallback is unsound — base and alias queue independently and stamp fresh per-call generations (sync_conn_write.go:53, sync_conn_gen.go:113), so identical-value either never matches legitimately or false-matches a legacy all-zero collider; fix = zero-id alias attachment FAILS CLOSED (alias imports first-class, conflicts with its base, drops; bounded fabric-return fidelity degradation confined to legacy peers). The compare-and-remove sweep identity becomes a chain (equal non-zero RTFlowSessionID, else equal non-zero node-local SessionID, else full SessionValue equality excluding generation+counters) applied ATOMICALLY under each removing map's own lock (maps lock separately — check-then-remove across locks races a third-party slot replacement). §9 now enumerates the five fixed-address quarantine test cases (sticky, both persistent paths, deterministic CGNAT, deterministic NAT64).
+- **File(s)**: `docs/research/6751-nopat-admission/plan.md`, `docs/research/6751-nopat-admission/claude-smr-plan-r8.md`, `docs/research/6751-nopat-admission/codex-plan-r8.md`, `docs/research/6751-nopat-admission/agy-plan-r8.md`, `docs/research/6751-nopat-admission/reviewer-ids.md`, `_Log.md`
+
 ## 2026-08-03 — #6751 research round 7: split verdict, plan v8 fold
 
 - **Timestamp**: 2026-08-03 (research/6751-nopat-admission, /research skill)

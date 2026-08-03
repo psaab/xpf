@@ -26,6 +26,9 @@ reviewer (it joins the quad at `/engineer` on the code PR).
 | r7 | Claude SMR | `claude-smr-plan-r7.md` | PLAN-READY-WITH-NITS (self-found E1 out-of-order alias-first merge rule, folded v7.1; AGY's 2 nits adopted) |
 | r7 | Codex | codex session `019fc822-a935-71e3-addc-8573934988ef` (companion task `task-msdcu8lh-9omzxx`) → `codex-plan-r7.md` | PLAN-NEEDS-REVISION (3 BLOCKERs: telemetry predicate unsafe as ownership equivalence — needs session-identity clause; holder set cannot encode base+alias multiplicity — needs per-row counts; NAT64 alias export class uncovered; 1 MAJOR: sweep needs compare-and-remove; 1 MINOR; 1 NIT) |
 | r7 | AGY | direct `agy --print --dangerously-skip-permissions` foreground → `agy-plan-r7.md` | PLAN-READY-WITH-NITS (fabric-alias lifecycle verified end-to-end; 2 NITs: out-of-order arrival test, predicate doc comment) |
+| r8 | Claude SMR | `claude-smr-plan-r8.md` | PLAN-READY-WITH-NITS (four-part predicate re-derived sound; fallback discriminates via per-session node-local id; counting HolderSet order-safe; folded v8.1 RTFlowSessionID precision) |
+| r8 | Codex | codex session `019fc83b-6d00-7790-9542-2eb2ab337ffc` (companion task `task-msddt06o-dlnhjt`) → `codex-plan-r8.md` | PLAN-NEEDS-REVISION (1 BLOCKER: zero/legacy id fallback unsafe — per-call generation stamps break value equality, legacy all-zero values false-match; fix = fail closed; 1 MAJOR: compare-and-remove identity chain + per-map atomicity; 1 MINOR: §9 must enumerate five fixed-path quarantine tests) |
+| r8 | AGY | direct `agy --print --dangerously-skip-permissions` foreground → `agy-plan-r8.md` | PLAN-READY-WITH-NITS (all v8 folds verified incl. id-0 fallback adequacy; 2 implementation nits) |
 
 Round-1 infra notes: the Codex companion background job tracker lost the first
 job (`task-msd5pjfq-yfwbeg` — state dir is workspace-hash-keyed and the poll
