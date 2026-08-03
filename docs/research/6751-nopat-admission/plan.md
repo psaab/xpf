@@ -789,9 +789,10 @@ Prometheus, §5.8).
 (`pub_token: u64`, the coordinator-local publication token of §5.6 —
 stamped at publish inside the helper; it is NOT read from or written to
 any Go-facing wire, and older in-image rows read as token 0).
-Additive-only wire change (beyond the alias flag named above): the five
-§5.8 status counters (optional fields,
-#1961-safe). Changed signatures are `pub(crate)`-internal only:
+The four helper-side §5.8 status counters are additive optional fields
+(#1961-safe); the fifth §5.8 counter (alias-ignored) is GO-side
+Prometheus with no helper wire involvement.
+Changed signatures are `pub(crate)`-internal only:
 `match_source_nat_result_for_tuple` (+1 arg),
 `match_source_nat_for_flow_result_at` (+1), `source_nat_decision_for_flow`
 (+1), `source_nat_would_translate_fragment` (+1),
