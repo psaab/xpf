@@ -1,0 +1,28 @@
+# Codex hostile plan review — #6751 (round 14)
+
+# PLAN-NEEDS-REVISION
+
+Reviewed the committed v14 blob at `0e7423efe`.
+
+1. **BLOCKER — the legacy signature cannot evaluate `disposition == FabricRedirect`.**  
+   The plan requires this at the cluster decode boundary ([plan.md](/home/ps/git/kimi-xpf/.claude/worktrees/6751-research-nopat-admission/docs/research/6751-nopat-admission/plan.md:582)). The helper event decoder initially knows `FabricRedirect` ([eventstream.go](/home/ps/git/kimi-xpf/.claude/worktrees/6751-research-nopat-admission/pkg/dataplane/userspace/eventstream.go:1334)), but `userspaceSessionFromDeltaV4/V6` does not copy it into `SessionValue`; only SNAT/DNAT and `FabricIngress` survive ([daemon_ha_userspace_convert.go](/home/ps/git/kimi-xpf/.claude/worktrees/6751-research-nopat-admission/pkg/daemon/daemon_ha_userspace_convert.go:357), [daemon_ha_userspace_convert.go](/home/ps/git/kimi-xpf/.claude/worktrees/6751-research-nopat-admission/pkg/daemon/daemon_ha_userspace_convert.go:462)). The cluster codec consequently carries no disposition field ([sync_protocol.go](/home/ps/git/kimi-xpf/.claude/worktrees/6751-research-nopat-admission/pkg/cluster/sync_protocol.go:114), [sync_protocol.go](/home/ps/git/kimi-xpf/.claude/worktrees/6751-research-nopat-admission/pkg/cluster/sync_protocol.go:229)). Because the legacy sender is old, adding a new field in v14 cannot recover this missing sender-side information. The plan must either remove the fabric gate and price the wider quarantine delay, or provide a discriminator genuinely available from old senders.
+
+2. **BLOCKER — the quarantine state machine assumes the opposite of actual open/delete ordering.**  
+   On open, the sender queues the canonical base first and alias second for both families ([daemon_ha_userspace_stream.go](/home/ps/git/kimi-xpf/.claude/worktrees/6751-research-nopat-admission/pkg/daemon/daemon_ha_userspace_stream.go:370), [daemon_ha_userspace_stream.go](/home/ps/git/kimi-xpf/.claude/worktrees/6751-research-nopat-admission/pkg/daemon/daemon_ha_userspace_stream.go:375), [daemon_ha_userspace_stream.go](/home/ps/git/kimi-xpf/.claude/worktrees/6751-research-nopat-admission/pkg/daemon/daemon_ha_userspace_stream.go:384)). The plan only confirms when a sibling base “arrives” after quarantine. Normally it has already been imported, so every alias times out and is admitted, recreating the poisoned companion. A bounded recent-base index or confirmation on either arrival order is required.  
+   On close, the base delete is likewise queued before the alias delete ([daemon_ha_userspace_stream.go](/home/ps/git/kimi-xpf/.claude/worktrees/6751-research-nopat-admission/pkg/daemon/daemon_ha_userspace_stream.go:398), [daemon_ha_userspace_stream.go](/home/ps/git/kimi-xpf/.claude/worktrees/6751-research-nopat-admission/pkg/daemon/daemon_ha_userspace_stream.go:403)). Clearing suppression when the base delete processes, as specified, lets the following alias delete through. Suppression must survive until the alias delete is consumed, with the unavoidable direct-delete ambiguity explicitly priced.
+
+3. **MAJOR — the capability channel is not defined for unauthenticated clusters.**  
+   The existing setup handshake is bypassed entirely when no authentication key is configured ([sync_auth.go](/home/ps/git/kimi-xpf/.claude/worktrees/6751-research-nopat-admission/pkg/cluster/sync_auth.go:321)). Therefore simply extending `syncMsgAuthHello` leaves common new+new deployments unnegotiated. A post-connect capability message is old-peer-ignorable, but it can race initial session traffic unless alias emission is held until capability state is known. Specify a universal pre-data exchange and fail-safe reset lifecycle. New sender + old receiver otherwise remains today’s exact behavior, as claimed.
+
+4. **MINOR — timeout admission must explicitly re-enter the complete normal import path.**  
+   At `0e7423efe`, “ADMITTED as canonical” does not state whether generation checks, timestamp rebasing, bulk bookkeeping, coordinator reserve, and helper dispatch all run. Today those steps surround `installClusterSynced*` in [sync_conn_read.go](/home/ps/git/kimi-xpf/.claude/worktrees/6751-research-nopat-admission/pkg/cluster/sync_conn_read.go:110), which reaches the normal transactional store path ([sync_conn_gen.go](/home/ps/git/kimi-xpf/.claude/worktrees/6751-research-nopat-admission/pkg/cluster/sync_conn_gen.go:435)). This must be explicit for timeout-admitted identity-NPTv6/self-NAT rows.
+
+5. **NIT — §5.8 still lacks a concrete separate admission counter.**  
+   It declares only one Go-side metric, `...alias_ignored_total`, while saying confirmed drops and timeout admissions are counted separately ([plan.md](/home/ps/git/kimi-xpf/.claude/worktrees/6751-research-nopat-admission/docs/research/6751-nopat-admission/plan.md:803)). Give admissions their own metric or an explicit bounded outcome label.
+
+Other folds check out: the derived forward-wire index exists on helper versions predating explicit alias export; NAT64’s nonzero `Nat64SnatV4` survives decode; the port term excludes same-address PAT/static mapped-port rows; direct no-NAT `D` does not quarantine and any suppressed-delete strand is bounded by session expiry; and equal **nonzero** RT-flow IDs make a distinct same-sender sibling false-positive infeasible. The plan’s “when non-zero” wording should be aligned with its test’s mandatory “equal non-zero” predicate.
+
+The worktree acquired uncommitted plan folds during this review; they address parts of findings 3–4, but findings 1–2 remain.
+
+Codex session ID: 019fc8ec-95b8-73e2-9c6c-67c332ed1f7a
+Resume in Codex: codex resume 019fc8ec-95b8-73e2-9c6c-67c332ed1f7a

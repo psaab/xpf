@@ -63,3 +63,35 @@ pinned-test disposition (SMR M7 = AGY 7), release-site inventory (Codex 10),
 RST-claim wording (Codex 12), (a)-vs-(b) fork dispute (AGY 4 — answered in v2
 with the identity-squatting-DoS counter-argument + the (a)≈(b)+probe redesign).
 v2 folds every finding; round 2 re-reviews v2.
+
+## Rounds 13-26 (compact ledger; full review docs in this directory)
+
+Codex ran via `codex exec` foreground sessions (IDs below); AGY ran via
+direct `agy --print --dangerously-skip-permissions` foreground; Claude SMR
+docs are `claude-smr-plan-r<N>.md` in this directory. From round 13 the
+review docs were archived to /tmp only; they are backfilled here as
+`codex-plan-r<N>.md` / `agy-plan-r<N>.md` (round 26 backfill + ledger
+catch-up in the v15.14 commit).
+
+| Round | Codex session / verdict | AGY verdict | Claude SMR verdict |
+|---|---|---|---|
+| r13 | `019fc8c2-c4d8-7933-ba77-c4bd47f1cb10` / PLAN-NEEDS-REVISION | PLAN-READY-WITH-NITS | PLAN-READY-WITH-NITS (r13 file) |
+| r14 | `019fc8ec-95b8-73e2-9c6c-67c332ed1f7a` / PLAN-NEEDS-REVISION | PLAN-READY-WITH-NITS | PLAN-READY-WITH-NITS (r14 file) |
+| r15 | `019fc8fe-d80b-77c2-bee8-f91fd6c6288c` / PLAN-NEEDS-REVISION | PLAN-NEEDS-REVISION (bulk-bookkeeping blocker) | PLAN-READY-WITH-NITS (r15 file) |
+| r16 | `019fc91d-f77c-7c73-a301-d885ec99f21e` / PLAN-NEEDS-REVISION | PLAN-READY-WITH-NITS | PLAN-READY-WITH-NITS (r16 file) |
+| r17 | `019fc930-ed4e-7b43-aeee-cf7f9d6462e3` / PLAN-NEEDS-REVISION | PLAN-READY-WITH-NITS | PLAN-READY-WITH-NITS (r17 file) |
+| r18 | `019fc93f-b633-7191-acb6-bd398f400de5` / PLAN-NEEDS-REVISION | PLAN-READY-WITH-NITS | PLAN-READY-WITH-NITS (r18 file) |
+| r19 | `019fc95f-4a54-75c0-96f4-e71265b70fd8` / PLAN-NEEDS-REVISION | PLAN-READY-WITH-NITS | PLAN-READY-WITH-NITS (r19 file) |
+| r20 | `019fc96d-dec6-7870-9c69-3ed87e33cf03` / PLAN-NEEDS-REVISION | PLAN-READY-WITH-NITS | PLAN-READY-WITH-NITS (r20 file) |
+| r21 | `019fc983-5b3a-72e0-adf1-3b666963566c` / PLAN-NEEDS-REVISION | PLAN-READY-WITH-NITS | PLAN-READY-WITH-NITS (r21 file) |
+| r22 | `019fc993-44db-7290-8e5a-f626b15d6b45` / PLAN-NEEDS-REVISION | PLAN-READY-WITH-NITS | PLAN-READY-WITH-NITS (r22 file) |
+| r23 | `019fc9a4-2f5e-7d83-b4dc-fb1493447a58` / PLAN-NEEDS-REVISION | PLAN-READY-WITH-NITS | PLAN-READY-WITH-NITS (r23 file) |
+| r24 | `019fc9b5-1d7f-71c1-a480-08a202b56598` / PLAN-NEEDS-REVISION | PLAN-READY-WITH-NITS | PLAN-READY-WITH-NITS (r24 file) |
+| r25 | `019fc9c0-9b1c-7d71-9d30-6d199428946f` / PLAN-NEEDS-REVISION | PLAN-NEEDS-REVISION (equal-generation CAS blocker) | PLAN-READY-WITH-NITS (r25 + r26 files) |
+| r26 | `019fc9d5-922d-7ef3-86e0-d5d2eaf46679` / PLAN-NEEDS-REVISION (2 BLOCKERs: readiness-timeout bypass, lossless-bulk order; 1 MINOR: §9 test enumeration; 1 NIT) | PLAN-READY-WITH-NITS (2 nits, folded v15.13.1) | PLAN-READY-WITH-NITS (r26b fold-check of v15.13) |
+
+Round-26 disposition: Codex's 4 findings fold in v15.14 (readiness-timeout
+joins the lifecycle event inventory; prime order via epoch barrier with the
+bulk keeping its lossless direct-write discipline; §9 enumerates the six
+lifecycle/delta regression tests explicitly; stale binding-point sentence
+corrected). Round 27 re-reviews v15.14.

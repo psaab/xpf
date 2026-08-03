@@ -1,20 +1,20 @@
 # #6751 plan — interface SNAT no-PAT admission: reserve-or-PAT the colliding translated tuple
 
-- **Status**: DRAFT v15.13 — round-25 fold (Codex r25 blockers 1-2 +
-  minor 3: lifecycle events now carry STRICTLY ORDERED TAGS
-  (abortGeneration, lifecycleSequence) assigned at the transition's
-  commit point — never inside the callback, so no callback can forge
-  ahead — with a strict-inequality tag CAS for value-flipping mutations
-  and ALL safety-critical effects (timer stop, VRRP sync-hold release,
-  sync-ready marking) executing INSIDE the committed lifecycle event so
-  a failed/stale event admission suppresses every associated effect
-  atomically; and the send guard is now epoch-ENVELOPE stamping at
-  ENQUEUE (a delta queued before an abort can never travel on a
-  replacement connection regardless of when it is dequeued — the
-  queued-behind-A case dies by construction) with the compared epoch
-  advancing ONLY on transitions that schedule an authoritative prime
-  (routine no-prime flips keep sending deltas — the delta stream itself
-  is the authority there))
+- **Status**: DRAFT v15.14 — round-26 fold (Codex r26 blockers 1-2 +
+  minor 3 + nit 4: the READINESS-TIMEOUT event joins the lifecycle
+  inventory — timer expiry only ENQUEUES a transition-tagged event
+  whose commit unit re-validates AND performs `SetSyncReady(true)`,
+  so the race `Timer.Stop()` cannot retract is adjudicated by the
+  same strict-inequality tag CAS as every other event; the prime's
+  ORDER is an EPOCH BARRIER, not envelope-queue routing — the bulk
+  KEEPS its lossless direct-write discipline and the barrier drains
+  the delta queue before the bulk writes under the new epoch, with
+  `BulkEnd` never emitted after any dropped/stale bulk frame; §9 now
+  explicitly enumerates the queued-behind-A, no-prime-flip,
+  stale-effects, equal-tag-overwrite, stalled-after-validation, and
+  prime-barrier regression tests; the lifecycle event inventory
+  (abort, admission, disconnect, bulk-received, bulk-ack-received,
+  readiness-timeout) is complete)
 - **Issue**: #6751 (opus-review-001 R08, High, `bug`+`audit`+`security`) —
   interface SNAT admits indistinguishable no-PAT return tuples and sends
   replies to the FIRST session.
@@ -835,7 +835,9 @@ record's identity frees only when `per_worker` is empty AND
       lifecycle SEQUENCE number assigned atomically when the EVENT is
       admitted onto the lifecycle queue (never when the callback later
       executes) — so tags strictly order every event (abort, admission,
-      disconnect, bulk-received, bulk-ack-received) by construction,
+      disconnect, bulk-received, bulk-ack-received, AND
+      readiness-timeout — the complete event inventory, Codex r26
+      blocker 1) by construction,
       and non-monotonic values (true → false → true) remain free
       because the tags, not the values, advance. The lifecycle queue's
       admission point is the single place tags are minted, so no
@@ -862,13 +864,38 @@ record's identity frees only when `per_worker` is empty AND
       Value-nonmonotonic transitions
       (true → false → true) remain free — the CAS orders by
       generation, not value.
+      The READINESS-TIMEOUT event is a lifecycle event, not a side
+      channel (Codex r26 blocker 1): today the readiness timer's
+      expiry callback independently validates `timerGen`/
+      `syncPeerConnected` and then calls `SetSyncReady(true)`
+      (daemon_ha_sync.go:40-46) OUTSIDE the tag/commit discipline —
+      and `Timer.Stop()` cannot retract a callback already executing
+      (daemon_ha_sync.go:19), so a timer that passes its checks, then
+      stalls while a newer disconnect/cold-start transition commits
+      readiness false, resumes and marks readiness TRUE — the exact
+      stale-effect race rules (i)-(ii) close for the callback events.
+      The rule: timer EXPIRY only ENQUEUES a transition-tagged
+      readiness-timeout lifecycle event onto the same serialized
+      lifecycle queue (minting its `(abortGeneration,
+      lifecycleSequence)` tag at admission like every other event);
+      the event's commit unit re-validates the arming generation and
+      connected state AND performs `SetSyncReady(true)` — so a
+      readiness flip can never commit after a newer transition has
+      superseded it, and `stopSyncReadyTimer`'s generation bump plus
+      `Timer.Stop()` remains the fast path for the common case while
+      the enqueued-event tag CAS is the linearizable adjudicator for
+      the race `Timer.Stop()` cannot retract. A stalled expiry event
+      whose validation passes and whose commit then loses the tag CAS
+      to a newer disconnect/cold-start produces NO effect at all —
+      readiness stays false, exactly like a stale bulk-received event.
       Every lifecycle state field in the inventory — `syncPeerConnected`,
       connection epoch, heartbeat-suppression state, bulk-prime flags,
       readiness arming, the bulk-received/ack-received priming flags
       (`onSessionSyncPeerConnected` :51/:68/:81,
       `onSessionSyncPeerDisconnected` :109, `onSessionSyncBulkReceived`
-      :90, `onSessionSyncBulkAckReceived` :103 — the complete set,
-      AGY r24 nit 3), AND the bulk-ack lifecycle flags
+      :90, `onSessionSyncBulkAckReceived` :103, AND the
+      `armSyncReadyTimer` expiry event :40 — the complete set,
+      AGY r24 nit 3 + Codex r26 blocker 1), AND the bulk-ack lifecycle flags
       `outboundBulkAcked` / `inboundBulkAcked` (sync.go:479 — AGY r25
       minor 2). (Cited line numbers throughout this plan are
       ILLUSTRATIVE snapshot points at the base commit — function/symbol
@@ -951,15 +978,44 @@ record's identity frees only when `per_worker` is empty AND
       itself is the authority and nothing else will re-convey them;
       whenever the epoch does advance and deltas are discarded, the
       scheduled prime is the guaranteed backstop that re-conveys every
-      still-valid session (and the prime's session frames are
-      enqueued through the same envelope path so they order correctly
-      after any still-queued newer deltas — the journal-flush path
-      (sync_conn_write.go:135) and the bulk write path (sync_bulk.go:95)
-      share the envelope discipline, so a prime cannot overtake a
-      newer queued delta).
+      still-valid session. The prime's ORDER is provided by an EPOCH
+      BARRIER, NOT by routing bulk frames through the delta queue
+      (Codex r26 blocker 2: the existing `sendCh` is explicitly
+      NON-BLOCKING and LOSSY when full, sync_conn_write.go:36, and the
+      bulk intentionally bypasses it through LOSSLESS DIRECT WRITES
+      because an incomplete snapshot followed by `BulkEnd` would delete
+      live peer sessions, sync_bulk.go:17/50 — so routing bulk frames
+      through the lossy envelope path could drop frames and still
+      deliver `BulkEnd`, which is catastrophic: the receiver reconciles
+      immediately upon `BulkEnd`, sync_conn_read.go:205, and would
+      delete the live sessions the dropped frames represented). The
+      bulk therefore KEEPS its lossless direct-write discipline
+      (writeMu sequence, sync_bulk.go:95), and the epoch barrier
+      serializes it against the delta path: when a prime begins, the
+      barrier (i) stops accepting NEW delta envelopes under the old
+      epoch (the compared epoch advances first, so a delta enqueued
+      after the advance stamps the NEW epoch — and such a new-epoch
+      delta is safe in either send order relative to the bulk frames:
+      its content post-dates the abort just as the prime's snapshot
+      does, and the receiver's per-key #2170 generation guard is the
+      adjudicator of any overlap), (ii) waits for the delta queue to
+      DRAIN to the barrier point (every old-epoch envelope either sent
+      on the dying connection or discarded by the envelope rule), then
+      (iii) the bulk writes losslessly under the new epoch, with
+      `BulkEnd` committed ONLY after every bulk frame is confirmed
+      written in the same direct-write sequence. Backpressure: if the
+      delta queue does not drain within the barrier bound, the prime
+      ABORTS BEFORE STARTING (it does not interleave with stale
+      deltas) and is retried by the recovery machinery. The guarantee
+      is exact: `BulkEnd` can NEVER be emitted after any dropped or
+      stale bulk frame — any bulk frame write failure aborts the bulk
+      BEFORE `BulkEnd` (never emitted), and the receiver's
+      incomplete-bulk rules (receive deadline, no ACK, fail-closed
+      quarantine drop) apply.
       The journal envelope guard from the earlier layer is subsumed by
-      this rule (the binding point moved from enqueue to the send
-      effect, covering all four flow shapes uniformly).
+      this rule (the binding point moved from the dequeue/send effect
+      BACK to enqueue-time content-origin stamping, covering all four
+      flow shapes uniformly — Codex r26 nit 4).
       (b) **zero-generation / cap-saturated replay is the UNORDERED
       class**: a message whose per-key generation is 0 (sender untracked
       or receiver cap-saturated) carries no ordering information; its
@@ -1546,19 +1602,45 @@ quarantine-admitted + overflow), and tests.
   under the generation-tagged CAS) and the old-disconnect-after-new-
   connect case (the stale disconnect's write fails the CAS) — Codex r24
   blocker 1's two lifecycle races, one pinned per callback in the
-  inventory (connect, disconnect, bulk-received, bulk-ack-received);
+  inventory (connect, disconnect, bulk-received, bulk-ack-received,
+  readiness-timeout) — PLUS the equal-tag `true@G`/`false@G`
+  overwrite regression (the C1-disconnect / C2-connect same-g
+  collision: the stale equal-generation write MUST fail the
+  strict-inequality tag CAS, AGY r25 blocker 1 / Codex r26 minor 3),
+  PLUS the stale bulk-received event producing NO effects at all (no
+  timer stop, no `ReleaseSyncHold`, no sync-ready marking — the
+  failed tag CAS suppresses every associated effect atomically,
+  Codex r25 blocker 1's second half / Codex r26 minor 3), PLUS the
+  readiness-timer stalled-after-validation case (the expiry event
+  passes arming-generation/connected validation, stalls, a newer
+  disconnect/cold-start transition commits readiness false, and the
+  stalled event's commit then loses the tag CAS — `SetSyncReady(true)`
+  NEVER executes, Codex r26 blocker 1);
   journal/delta race tests: per-key #2170 ordering covers upserts AND
   deletes via tombstones (sync_conn_gen.go:179-322), PLUS the
   sender-cap / receiver-cap / zero-generation delete-install reorder
   cases, PLUS a directly-queued raw-byte delta dequeued pre-abort and
   sent on a REPLACEMENT connection (discarded by the epoch-bound send
   guard), PLUS an already-dequeued retry crossing the abort boundary
-  (same guard), PLUS the persistent-cap self-rearm case (the recovery
-  bulk cannot arm its successor; the episode latch permits one bulk per
-  cooldown window), PLUS a zero-generation envelope bound to the fresh
-  post-abort generation intentionally admitted into the documented
-  unordered class and pinned through the following authoritative bulk
-  (Codex r24 minor 4).
+  (same guard), PLUS the queued-behind-A case (delta B enqueued under
+  epoch N behind delta A, still QUEUED when the abort lands, dequeued
+  only after the replacement connection N+1 is up — B's envelope says
+  N and the sendLoop discards it; B NEVER travels on N+1, Codex r25
+  blocker 2 / Codex r26 minor 3), PLUS a routine no-prime
+  single-fabric flip RETAINING all pre- and mid-flip deltas (the
+  compared epoch does not advance where no authoritative prime is
+  scheduled, sync_conn.go:178/208 — the delta stream itself is the
+  authority, Codex r25 blocker 2 / Codex r26 minor 3), PLUS the
+  prime-barrier ordering case (a cold-prime bulk never emits `BulkEnd`
+  after a dropped or stale bulk frame: the epoch barrier drains the
+  delta queue before the bulk writes losslessly under the new epoch,
+  and any bulk frame write failure aborts the bulk BEFORE `BulkEnd`
+  — Codex r26 blocker 2), PLUS the persistent-cap self-rearm case
+  (the recovery bulk cannot arm its successor; the episode latch
+  permits one bulk per cooldown window), PLUS a zero-generation
+  envelope bound to the fresh post-abort generation intentionally
+  admitted into the documented unordered class and pinned through the
+  following authoritative bulk (Codex r24 minor 4).
 - New unit tests (nat/source.rs + allocator):
   preserve-first success; collision → PAT (distinct identities, distinct
   `reverse_wire_key`s, both flows' replies resolve to their OWN forward

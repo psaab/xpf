@@ -1,0 +1,26 @@
+# Codex hostile plan review — #6751 (round 19)
+
+# PLAN-NEEDS-REVISION
+
+1. **BLOCKER — the generation-fenced abort was not folded into the normative plan.**
+
+   The v15.5 banner claims an atomic fence ([plan.md:3](/home/ps/git/kimi-xpf/.claude/worktrees/6751-research-nopat-admission/docs/research/6751-nopat-admission/plan.md:3)), but §5.6 still specifies the rejected v15.4 behavior: close both connections and rely on TCP teardown to discard frames ([plan.md:656](/home/ps/git/kimi-xpf/.claude/worktrees/6751-research-nopat-admission/docs/research/6751-nopat-admission/plan.md:656), [plan.md:666](/home/ps/git/kimi-xpf/.claude/worktrees/6751-research-nopat-admission/docs/research/6751-nopat-admission/plan.md:666)). No normative text defines fence state, handler generations, timeout completion, reset-once ownership, or nested-abort semantics; none of the claimed fence races appears in §9.
+
+   This leaves the timeout attack structurally open. Existing receive handlers dispatch frames without checking registry membership or generation ([sync_conn_read.go:91](/home/ps/git/kimi-xpf/.claude/worktrees/6751-research-nopat-admission/pkg/cluster/sync_conn_read.go:91)), and those frames can install sessions ([sync_conn_read.go:109](/home/ps/git/kimi-xpf/.claude/worktrees/6751-research-nopat-admission/pkg/cluster/sync_conn_read.go:109)) or replace bulk state ([sync_conn_read.go:183](/home/ps/git/kimi-xpf/.claude/worktrees/6751-research-nopat-admission/pkg/cluster/sync_conn_read.go:183)). A mere pre-dispatch fence check is insufficient: a handler can pass it, stall, then mutate state after timeout reset. The plan must define serialization or commit-time generation validation that orders every stateful frame application against the reset.
+
+   Old-peer convergence also has a concrete bypass: a legacy peer’s pending first frame is processed **before** `installConn` ([sync_conn.go:119](/home/ps/git/kimi-xpf/.claude/worktrees/6751-research-nopat-admission/pkg/cluster/sync_conn.go:119), [sync_conn.go:130](/home/ps/git/kimi-xpf/.claude/worktrees/6751-research-nopat-admission/pkg/cluster/sync_conn.go:130)). Therefore an `installConn` fence alone cannot prevent an old peer from mutating receiver state during the fence. Pending-frame dispatch must occur only after admitted installation and carry the same generation guard.
+
+   For fork (c), all production slot occupancy does route through `installConn`, but its current result cannot express refusal and `handleNewConnection` unconditionally starts the receive loop afterward ([sync_conn.go:130](/home/ps/git/kimi-xpf/.claude/worktrees/6751-research-nopat-admission/pkg/cluster/sync_conn.go:130)). The revised contract must specify that refused connections are closed without pending-frame processing, receive-loop launch, clock sync, callbacks, or cold-prime work.
+
+2. **MINOR — capability transport remains explicitly undecided.**
+
+   The plan first selects the dedicated ticker, then says “ticker, or piggybacking” and leaves the choice to the implementer ([plan.md:562](/home/ps/git/kimi-xpf/.claude/worktrees/6751-research-nopat-admission/docs/research/6751-nopat-admission/plan.md:562), [plan.md:569](/home/ps/git/kimi-xpf/.claude/worktrees/6751-research-nopat-admission/docs/research/6751-nopat-admission/plan.md:569)). §11 repeats the same open alternative ([plan.md:1321](/home/ps/git/kimi-xpf/.claude/worktrees/6751-research-nopat-admission/docs/research/6751-nopat-admission/plan.md:1321)). The round-18 transport finding therefore remains. Retain only the dedicated periodic `syncMsgCapability` ticker; explanatory “not a handshake field” wording is consistent and need not be removed.
+
+3. **NIT — the canonical §5.8 inventory claims three Go counters but names only two there.**
+
+   §5.8 says “PLUS THREE” ([plan.md:936](/home/ps/git/kimi-xpf/.claude/worktrees/6751-research-nopat-admission/docs/research/6751-nopat-admission/plan.md:936)) but its list names only `forward_wire_alias_ignored` and `alias_quarantine_admitted` ([plan.md:958](/home/ps/git/kimi-xpf/.claude/worktrees/6751-research-nopat-admission/docs/research/6751-nopat-admission/plan.md:958)). The overflow counter is defined earlier ([plan.md:638](/home/ps/git/kimi-xpf/.claude/worktrees/6751-research-nopat-admission/docs/research/6751-nopat-admission/plan.md:638)) and correctly included in §6’s three-counter summary ([plan.md:995](/home/ps/git/kimi-xpf/.claude/worktrees/6751-research-nopat-admission/docs/research/6751-nopat-admission/plan.md:995)); add it explicitly to §5.8.
+
+The healthy-peer pricing fold is correct: the plan prices repeated config reconciliation, DHCP, and IPsec churn ([plan.md:644](/home/ps/git/kimi-xpf/.claude/worktrees/6751-research-nopat-admission/docs/research/6751-nopat-admission/plan.md:644)), matching the reconnect callback’s actual work ([daemon_ha_sync.go:934](/home/ps/git/kimi-xpf/.claude/worktrees/6751-research-nopat-admission/pkg/daemon/daemon_ha_sync.go:934)). I found no new BLOCKER in the settled registry/mint/holder/tri-state/staged-replacement/drain design; the remaining blocker is the unfurled alias-abort transition itself.
+
+Codex session ID: 019fc95f-4a54-75c0-96f4-e71265b70fd8
+Resume in Codex: codex resume 019fc95f-4a54-75c0-96f4-e71265b70fd8
