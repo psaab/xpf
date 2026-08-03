@@ -548,7 +548,13 @@ record's identity frees only when `per_worker` is empty AND
   (alias) import yields via the both-direction adopt/merge (SMR r7 E1):
   its markers and identity fold into the canonical-form import's record,
   regardless of arrival order (so the real base always survives its
-  alias — the byte-identical alias row merges harmlessly);
+  alias). The alias's ALREADY-PUBLISHED canonical row (published when the
+  alias arrived first) is RETAINED — it is byte-identical to the alias
+  row the base itself would export, now serving as the base's alias row
+  with its holder units transferred to the base's record; the peer's next
+  re-export refreshes it idempotently (SMR r10 N18 — least churn, and it
+  is the steady state the export stream converges to anyway; the derived
+  forward-wire index covers the lookup in the interim regardless);
   (ii) if neither key is the other's forward-wire form, the pair is a
   genuine collision: first-wins, second gets `IdentityConflict` and DROPS
   (fail-closed). Clause (i) makes the legit alias-first arrival converge
