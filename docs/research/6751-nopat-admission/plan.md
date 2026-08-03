@@ -1115,7 +1115,12 @@ quarantine-admitted), and tests.
   since the generation-check/install/record sequence is safe only
   single-threaded, sync_conn_gen.go:381)
   for the genuine self-NAT, identity-NPTv6 (no alias is ever derived
-  for it, daemon_ha_userspace_convert.go:511), and lost-base cases;
+  for it, daemon_ha_userspace_convert.go:511), and lost-base cases
+  (plus two SMR r16 implementation notes: a quarantine-cap EVICTION
+  resolves as admit-after-confirm-check against the complete received
+  set at that epoch's BulkEnd, never as blind admission; and a bulk
+  that STALLS mid-bulk resolves its pinned quarantines in the bulk
+  teardown path the existing bulk-liveness timeout already drives);
   a genuine direct row sharing the key whose delete arrives while
   suppression is active strands until its own session timeout
   (documented residual, strictly safer than today's certain
