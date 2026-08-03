@@ -1,3 +1,9 @@
+## 2026-08-03 — #6751 research round 7: split verdict, plan v8 fold
+
+- **Timestamp**: 2026-08-03 (research/6751-nopat-admission, /research skill)
+- **Action**: Round-7 verdicts split a third time: AGY PLAN-READY-WITH-NITS (fabric-alias lifecycle verified end-to-end, 2 nits), Claude SMR PLAN-READY-WITH-NITS (E1 out-of-order alias-first merge folded v7.1), Codex PLAN-NEEDS-REVISION (3 blockers on alias internals). Codex r7: (1) the shipped telemetry predicate is an accepted-false-negative exclusion, unsafe as ownership equivalence — a colliding flow's alias (same wire-form, same decision, sync-derived) mis-attaches to the first flow's base; fix = four-part ownership predicate adding SAME SESSION IDENTITY (the alias export carries the base's full value incl. the #5212 session id, daemon_ha_userspace_convert.go:399-405); (2) FxHashSet<HolderId> cannot count base+alias as two holder-bearing rows in one scope — fix = counting HolderSet (per_worker: map<u32,u16> + shared_rows: u16); (3) NAT64 fabric redirects also export aliases with cross-family reconstruction hazards — scoped OUT (nat64 bypass preserved, today's graceful-skip, reconstruction concern named follow-up); (4) sweep needs compare-and-remove ownership validation (a third party may have displaced T_old's derived slot). v8 folds all + persistent-lease pinned path quarantine gate (allocator.rs:1114) + §9 wording.
+- **File(s)**: `docs/research/6751-nopat-admission/plan.md`, `docs/research/6751-nopat-admission/claude-smr-plan-r7.md`, `docs/research/6751-nopat-admission/codex-plan-r7.md`, `docs/research/6751-nopat-admission/agy-plan-r7.md`, `docs/research/6751-nopat-admission/reviewer-ids.md`, `_Log.md`
+
 ## 2026-08-03 — #6751 research round 6: split verdict, plan v7 fold
 
 - **Timestamp**: 2026-08-03 (research/6751-nopat-admission, /research skill)

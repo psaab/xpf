@@ -23,6 +23,9 @@ reviewer (it joins the quad at `/engineer` on the code PR).
 | r6 | Claude SMR | `claude-smr-plan-r6.md` | PLAN-READY-WITH-NITS (v6 mechanisms verified independently; nits: alias-sweep same-tuple guard, sticky-pool quarantine exhaustion — folded in v6.1) |
 | r6 | Codex | codex session `019fc800-2646-70d1-a7d2-a28e76dd9a1d` (companion task `task-msdbhrfh-dslfvv`) → `codex-plan-r6.md` | PLAN-NEEDS-REVISION (1 BLOCKER: fabric forward-wire alias separately-synced canonical row false-conflicts + sole-marker hazard + sweep gap; 1 MAJOR: idempotence secondary index + reserve auto-drop; 2 MINORs; 1 NIT) |
 | r6 | AGY | direct `agy --print --dangerously-skip-permissions` foreground → `agy-plan-r6.md` | PLAN-READY-WITH-NITS (all v6 folds verified incl. staged replacement walkthrough, alias-sweep parity, quarantine placement; 2 carried NITs) |
+| r7 | Claude SMR | `claude-smr-plan-r7.md` | PLAN-READY-WITH-NITS (self-found E1 out-of-order alias-first merge rule, folded v7.1; AGY's 2 nits adopted) |
+| r7 | Codex | codex session `019fc822-a935-71e3-addc-8573934988ef` (companion task `task-msdcu8lh-9omzxx`) → `codex-plan-r7.md` | PLAN-NEEDS-REVISION (3 BLOCKERs: telemetry predicate unsafe as ownership equivalence — needs session-identity clause; holder set cannot encode base+alias multiplicity — needs per-row counts; NAT64 alias export class uncovered; 1 MAJOR: sweep needs compare-and-remove; 1 MINOR; 1 NIT) |
+| r7 | AGY | direct `agy --print --dangerously-skip-permissions` foreground → `agy-plan-r7.md` | PLAN-READY-WITH-NITS (fabric-alias lifecycle verified end-to-end; 2 NITs: out-of-order arrival test, predicate doc comment) |
 
 Round-1 infra notes: the Codex companion background job tracker lost the first
 job (`task-msd5pjfq-yfwbeg` — state dir is workspace-hash-keyed and the poll
