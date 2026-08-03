@@ -1205,6 +1205,12 @@ quarantine-admitted + overflow), and tests.
   fail-closed; a STALLED bulk hits the new per-bulk receive deadline
   and aborts the same way; a SUPERSEDING BulkStart drops the prior
   epoch's pinned entries fail-closed before overwriting the maps);
+  the implementation parameter summary for the alias discipline:
+  quarantine cap (4096, tunable per deployment at provisioning),
+  incremental-delta fallback timeout (5s), AbortFenceTimeout (a small
+  multiple of the disconnect callback's normal latency — AGY r19 nit),
+  per-bulk receive deadline (new, named at implementation), and the
+  abort-triggered per-peer reconnect backoff (base/cap, abort-only);
   a genuine direct row sharing the key whose delete arrives while
   suppression is active strands until its own session timeout
   (documented residual, strictly safer than today's certain
