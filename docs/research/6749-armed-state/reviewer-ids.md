@@ -99,7 +99,33 @@
   PLAN-READY-WITH-NITS (N1 plan-gate drift semantics; N2 C2
   claim-before-reconcile code order; N3 cosmetic).
 
-## Round 5 (plan v6 @ commit pending)
+## Round 5 (plan v6 @ 6969b6167)
+
+- **Codex** — background bash task `btb0wkhig`; prompt
+  `/tmp/codex-6749-r5-prompt.txt`; output `/tmp/codex-6749-r5.out`;
+  verdict doc `codex-plan-r5.md`. Verdict: DEMAND-REVISION (8 BLOCKER
+  — tri-state cannot distinguish disarmed-then-force-cleared from
+  unregistered; failure-path replan destroys accepted-A operator
+  claims AND reintroduces the live-sysfs race (permanent empty
+  vector); update_fabrics falsifies the coherent-vector invariant;
+  daemon clears m.deferWorkers before MAC programming (pre-MAC arm
+  race moved, not closed); S4' creates unscheduled pending sinks
+  (first-Compile loop ordering, rollback-to-true no-op, failed tagged
+  rebind warns-only, watchdog suppressed); completion + #5134
+  provenance neither durable nor generation-safe, and live-change
+  completion fires on FAILED MAC programs; + 2 MAJOR — tests, #6165
+  Warn flood).
+- **AGY** — background bash task `bkrhr0gc1` (direct `agy --print`,
+  inline-evidence prompt `/tmp/agy-6749-r5-prompt.txt`); output
+  `/tmp/agy-6749-r5.out`; verdict doc `agy-plan-r5.md`. Verdict:
+  PLAN-READY-WITH-NITS (1 MINOR — un-ratelimited Warn on #6165
+  refusal [= SMR r5 N1 = Codex r5 M10]; 1 NIT — README must state
+  defer-clearing alone does not activate).
+- **Claude SMR** — `claude-smr-plan-r5.md`. Verdict:
+  PLAN-READY-WITH-NITS (N1 Warn-rate edge-trigger [= same]; N2
+  no-link-cycle completion corner doc; N3 idempotent re-arm test pin).
+
+## Round 6 (plan v7 @ commit pending)
 
 - Codex — pending dispatch.
 - AGY — pending dispatch (direct `agy --print` transport).
