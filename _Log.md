@@ -1,3 +1,9 @@
+## 2026-08-03 — #6751 research round 3: three re-reviews, plan v4 fold
+
+- **Timestamp**: 2026-08-03 (research/6751-nopat-admission, /research skill)
+- **Action**: Round-3 verdicts all PLAN-NEEDS-REVISION, all on lifecycle-completeness of the ownership invariant (no direction challenge — option (a) endorsed by all since round 2). Codex r3: live pool sessions keep tuples across the pool_unusable transition (teardown.rs:54 preserves, coordinator replays, local tables persist) → drain model (retain quarantined allocator until empty, interface mints quarantined on the address); pool_failure-blind reserve scan + no NAT64 PoolUnusable field (empty-pool native fail-closed at nat64.rs:1123); install-before-reserve wrapper admits an unreserved duplicate in the delete/upsert/local-mint race → reserve-before-install everywhere; wholesale clears at stop→rebind leak {Shared} (coordinator/mod.rs:756 via stop_workers.rs:7). AGY r3: publish displacement + wholesale clear {Shared} leaks, churn-cap nit. SMR r3: refined displacement to the canonical-map pin (reverse-index displacement is a non-event), the Close-delta-relay removal inventory (M13), per-holder-owner decrement discipline (M14), conflict-drop counter (M15, merged with Codex's). v4 folds all + exact-probe corrections (local start ordinal, mutation-epoch retry, two exact exhaustion modes), accepted+exposed HA-fidelity DoS, full counter plumbing inventory.
+- **File(s)**: `docs/research/6751-nopat-admission/plan.md`, `docs/research/6751-nopat-admission/claude-smr-plan-r3.md`, `docs/research/6751-nopat-admission/codex-plan-r3.md`, `docs/research/6751-nopat-admission/agy-plan-r3.md`, `docs/research/6751-nopat-admission/reviewer-ids.md`, `_Log.md`
+
 ## 2026-08-03 — #6751 research round 2: three re-reviews, plan v3 fold
 
 - **Timestamp**: 2026-08-03 (research/6751-nopat-admission, /research skill)
