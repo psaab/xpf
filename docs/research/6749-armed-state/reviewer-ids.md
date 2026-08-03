@@ -32,8 +32,32 @@
   D], SMR-3 close Q2/Q5 from source, SMR-4 identity semantics
   documentation).
 
-## Round 2 (plan v3 @ commit pending)
+## Round 2 (plan v3 @ bce10126c)
+
+- **Codex** — background bash task `bd01h9f99`; prompt
+  `/tmp/codex-6749-r2-prompt.txt`; output `/tmp/codex-6749-r2.out`;
+  verdict doc `codex-plan-r2.md`. Verdict: DEMAND-REVISION (6 BLOCKER
+  — fold claims partly false; R1 arm-before-reconcile →
+  armed-but-unbound/partial forwarding on failed bring-up; **R2 misses
+  the rebind completion path** (process_linkcycle.go:219);
+  defer-completion via full-apply leg + #5134 debt discard; deferred
+  CONTRACTION leaves everything armed (no new identity); full fan-out
+  reverses operator maintenance disarms — scoped provenance REQUIRED;
+  E2/operator-unregister flap; tests green unsafe impls; + 2 MAJOR).
+- **AGY** — background bash task `b7b4f8pf7` (direct `agy
+  --print-timeout 9m --print`, inline-evidence prompt
+  `/tmp/agy-6749-r2-prompt.txt`); output `/tmp/agy-6749-r2.out`;
+  verdict doc `agy-plan-r2.md`. Verdict: DEMAND-REVISION (1 BLOCKER —
+  full-leg defer-completion stranding; 2 MAJOR — R1 pre-arm on failed
+  reconcile, E2/operator-unregister flap; 1 MINOR — test gaps; 1 NIT —
+  fan-out override loss).
+- **Claude SMR** — `claude-smr-plan-r2.md`. Verdict: DEMAND-REVISION
+  (SMR2-1: R2 same-plan-only placement misses full-leg completions —
+  independently confirmed by AGY r2 f1 + generalized by Codex r2
+  BLOCKER 4; SMR2-2: commitment cleanups).
+
+## Round 3 (plan v4 @ commit pending)
 
 - Codex — pending dispatch.
-- AGY — pending dispatch (direct `agy --print` transport per attempt 5).
+- AGY — pending dispatch (direct `agy --print` transport).
 - Claude SMR — pending.
