@@ -1,7 +1,7 @@
 # #6751 plan — interface SNAT no-PAT admission: reserve-or-PAT the colliding translated tuple
 
-- **Status**: DRAFT v6 — round-5 fold (Codex r5 blockers 1-3 + major 4;
-  AGY r5 nits 1-2; Claude SMR r5 N16 all folded)
+- **Status**: DRAFT v7 — round-6 fold (Codex r6 blocker 1 + major 2 +
+  minors 3-4 + nit 5; SMR r6 nits 1-2; AGY r6 nits carried)
 - **Issue**: #6751 (opus-review-001 R08, High, `bug`+`audit`+`security`) —
   interface SNAT admits indistinguishable no-PAT return tuples and sends
   replies to the FIRST session.
@@ -16,9 +16,9 @@
   publication, replication, materialization, tuple-changing re-sync,
   reconcile replay, snapshot rebuilds, drain transitions, HA transitions,
   link stop→rebind cycles, worker teardown, and helper restart. Scoped
-  (SMR r5 N16): the relay-bounded reverse-companion edge (ms-scale
-  delete-replication lag) is excluded — identical in shape to shipped
-  pool-mode discipline today; see §5.6.
+  (SMR r5 N16): the queue/relay-or-expiry-bounded reverse-companion edge
+  is excluded — identical in shape to shipped pool-mode discipline today;
+  see §5.6.
 
 ---
 
@@ -302,9 +302,23 @@ enum DomainReserve { NotThisDomain, Owned, IdentityConflict }
     staged replacement — each with its own holder set;
   - release/rollback match `(flow, translated)` exactly (the construction
     already carries both);
-  - the stale-tuple-drop removes the `(flow, T_old)` record ONLY when its
-    holder set is empty; otherwise it decrements only the caller's own
-    marker (per-holder-owner discipline) and leaves the record;
+  - **the reserve NEVER auto-drops a different-tuple record** (Codex r6
+    major 2: `reserve_flow`'s unconditional stale-drop at
+    allocator.rs:1671 is NOT inherited — the §5.6 staged protocol drives
+    every marker move explicitly at its own steps; a reserve only ever
+    inserts/idempotent-hits the `(flow, translated)` record it was asked
+    for);
+  - **secondary flow index + selection rule** (Codex r6 major 2: the
+    admission mint calls the allocator with only `flow` — the translated
+    tuple is what is being decided — so a `(flow, translated)`-only map
+    removes the idempotent lookup). A `flow -> SmallVec<records>`
+    secondary index backs the mint path. Selection rule: a LOCAL mint
+    re-entry returns the flow's locally-minted record (in practice at
+    most one exists — a local admission is a single decision episode;
+    the two-record transient exists only across a RE-SYNC boundary on the
+    standby, where no local mint of that flow runs); reserves present
+    their tuple explicitly and hit the `(flow, translated)` record
+    directly;
   - `max_tracked_flows` counts RECORDS (a mid-overlap flow counts 2 — a
     bounded transient);
   - the per-index drain counter increments per record's authoritative
@@ -462,6 +476,41 @@ The holder set on each flow's `live_by_flow` record is
     clears; with both marker classes gone the registry holds nothing for
     the wiped state.
   - Same-plan refresh: worker tables PERSIST — no marker event at all.
+- **Fabric forward-wire alias ownership** (Codex r6 blocker 1): HA
+  session sync deliberately exports a fabric-redirect session TWICE — the
+  canonical forward key AND a NAT-translated forward-WIRE alias key
+  carrying the same value (`userspaceForwardWireAliasFromDeltaV4`,
+  daemon_ha_userspace_stream.go:370/373; "two conntrack keys for ONE
+  logical session", userspace_sync_session_id_6198_test.go:350). Each key
+  independently reaches `publish_shared_session` and worker fanout
+  (session_import.rs:133/233), and the alias is stored as ANOTHER
+  CANONICAL ROW in `shared_sessions` (shared_ops.rs:907). The reserve
+  reconstruction derives `SourceNatFlowKey` from the PRESENTED key, so
+  canonical (H→S) and alias (E→S) look like different flows claiming one
+  identity — v6 would have dropped every such alias import as
+  `IdentityConflict`, and naive idempotence would leave the alias
+  reachable when the base's sole marker dropped. The design elevates the
+  SHIPPED wire-alias predicate (the `record_shared_nat_displacement`
+  exclusion, shared_ops.rs:73-100: "one key is the other's forward-wire
+  form" — `forward_wire_key` is idempotent — PLUS an identical
+  NatDecision PLUS at least one side carrying a sync-derived origin) to a
+  first-class ownership relation:
+  - At reserve/import, a presented key satisfying the predicate against
+    an existing record's `(flow, nat)` attaches its holder markers to the
+    BASE record (`{Shared}`/`{Worker(W)}` per scope) — no false
+    `IdentityConflict`; the alias is reachable-backed-by-the-base's
+    identity, which is exactly its purpose (route the base flow's
+    packets). Per-holder-owner decrements apply per scope on the base
+    record, so deleting either key can never free the identity while the
+    companion key remains reachable.
+  - Tuple replacement additionally removes the OLD explicit canonical
+    alias row — but ONLY when that row satisfies the wire-alias predicate
+    against the displaced base entry (never an unrelated real session
+    occupying that key); the peer's re-export after the change
+    re-establishes the new alias.
+  - The alias sweep of §5.6's transactional shared replacement covers
+    BOTH alias classes: the internally derived reverse/forward-wire index
+    rows AND the explicit canonical alias row (predicate-gated).
 - **Neutral paths**: promote (promote.rs:99), demote (install.rs:568),
   #1752 in-place refresh — NO reserve/release calls.
 - **Reverse-companion lag (documented inherited window, SMR r5 N16)**:
@@ -470,19 +519,22 @@ The holder set on each flow's `live_by_flow` record is
   identity frees when the holder set empties (forward reap −{Worker} +
   canonical removal −{Shared}), while a reverse companion elsewhere is
   holder-neutral and lingers until its own reap or the delete-replication
-  relay (`replicate_session_delete`; the session_delta.rs:436-446 removal
-  covers both keys) reaches it — a relay-bounded (ms-scale) window in
-  which a re-minted identity's reply could land on the lingering reverse
-  entry. This window exists TODAY for pool mode (pool port freed at
-  forward reap while the reverse companion lingers; the #3011 recycle
+  relay (`replicate_session_delete` — it ENQUEUES per-worker commands,
+  session_glue/mod.rs:881, so the bound is queue/relay-or-expiry, not a
+  strict millisecond deadline; the session_delta.rs:436-446 removal
+  covers both keys) reaches it — a queue/relay-or-expiry-bounded window
+  in which a re-minted identity's reply could land on the lingering
+  reverse entry. This window exists TODAY for pool mode (pool port freed
+  at forward reap while the reverse companion lingers; the #3011 recycle
   FIFO is only a reuse-delay, also churnable), so the change does not
   widen it; closing it belongs to the session-teardown domain, not this
   NAT-admission fix. The core invariant statement is scoped accordingly:
   continuous holding on every scope EXCEPT the relay-bounded
   reverse-companion edge, which matches shipped pool discipline.
-- Net effect: the identity survives while ANY entry replica or shared
-  canonical row lives node-wide — the #6522 hazard cannot exist in this
-  registry.
+- Net effect: the identity survives while ANY HOLDER-BEARING FORWARD
+  replica or shared canonical row lives node-wide (reverse companions are
+  holder-neutral by design — Codex r6 nit 5) — the #6522 hazard cannot
+  exist in this registry.
 
 ### 5.7 Cross-domain overlap foreclosure with DRAIN (Codex r3 blockers 1-2, r4 blockers 2-3)
 
@@ -533,7 +585,11 @@ sessions:
      quarantined — and an address-persistent/sticky pool, whose loop is
      single-attempt by contract, yields `AllocatorExhausted` when its
      sticky address is quarantined: fail closed, NEVER rotate a sticky
-     flow to a different address — SMR r6 nit 2), NAT64 likewise,
+     flow to a different address — SMR r6 nit 2; the same fail-closed
+     posture applies to deterministic CGNAT (fixed address derived from
+     the subscriber, allocator.rs:1482), persistent-NAT pinned-address
+     reuse (allocator.rs:1955), and deterministic NAT64 — Codex r6 minor
+     3), NAT64 likewise,
      interface-mode mints fail closed
      (`InterfaceOverlapDraining`) since their "pool" is the single
      address. Reserves (ownership claims for existing sessions) are never
@@ -611,9 +667,11 @@ private, session/mod.rs:1093 — Codex r5 blocker 1), the
 the registry bulk-release at the wholesale-clear site, the pool-allocator
 authoritative `addr_index` + per-index live counter + drain carry-over key,
 the address-only mint paths' `addr_index` correction, the tuple-versioned
-`(flow, translated)` record key inside the interface registry's allocator
-instances, and the transactional shared-replacement alias sweep inside
-`publish_shared_session`'s displacement handling. Go changes: the #5144
+`(flow, translated)` record key + secondary flow index inside the
+interface registry's allocator instances, the wire-alias predicate helper
+(shared with `record_shared_nat_displacement`'s exclusion logic) and its
+base-record marker attachment, and the transactional shared-replacement
+alias sweep inside `publish_shared_session`'s displacement handling. Go changes: the #5144
 validator extension (dedup-by-address), the snapshot-builder overlap
 marking (source pools + NAT64 empty-pool + the §5.7 derivation matrix),
 the four status-counter mirrors + Describe registration, and tests.
@@ -641,8 +699,10 @@ the four status-counter mirrors + Describe registration, and tests.
   never falls through to a second domain.
 - **Reserve-before-install everywhere**: local mint precedes install;
   worker wrapper reserves first (drop on failure, rollback on refusal);
-  coordinator pre-reserve precedes publication; materialize returns
-  miss-on-failure.
+  coordinator pre-reserve precedes publication; materialize reserve
+  conflict returns `MaterializeConflict` to an explicit recycle/drop
+  branch — NEVER a lookup miss and never the cold-admission path
+  (Codex r5 major 4 / r6 minor 4).
 - **Continuous holding across tuple change**: the staged replacement
   protocol (§5.6) on tuple-versioned records never frees T_old before it
   is unreachable on every scope — coordinator: pre-reserve T_new →
@@ -661,8 +721,15 @@ the four status-counter mirrors + Describe registration, and tests.
   opportunistic); cap 256 RETAINED with its own counter; release
   LOOKUP-ONLY.
 - **Invariant scoping (SMR r5 N16)**: "continuous holding" excludes the
-  relay-bounded reverse-companion edge (ms-scale delete-replication lag),
+  queue/relay-or-expiry-bounded reverse-companion edge
+  (`replicate_session_delete` enqueues commands — no strict deadline),
   which is identical in shape to shipped pool-mode discipline today.
+- **Fabric-alias ownership**: the wire-alias predicate (shipped for the
+  displacement counter) attaches a fabric forward-wire alias's markers to
+  its base record; neither key's deletion frees the identity while the
+  companion remains reachable; tuple replacement removes the old explicit
+  canonical alias row only under the predicate (never an unrelated
+  session at that key).
 - **NatDecision freeze**: no new fields; `rewrite_src_port: Some(_)` is
   handled generically everywhere from pool mode.
 - **Hot path**: established-flow transit untouched; zero new per-packet
@@ -714,7 +781,16 @@ the four status-counter mirrors + Describe registration, and tests.
   generation owns — pool skips quarantined addresses in its address loop,
   interface fails closed); materialize conflict returns
   MaterializeConflict (explicit recycle/drop branch, NEVER the
-  cold-admission miss path — Codex r5 major 4); holder completeness
+  cold-admission miss path — Codex r5 major 4); fabric forward-wire alias
+  (alias import attaches markers to the BASE record via the wire-alias
+  predicate — no false IdentityConflict on the alias import; deleting
+  either the canonical or the alias key never frees the identity while
+  the companion key remains reachable; tuple replacement removes the old
+  explicit canonical alias row ONLY under the predicate — an unrelated
+  real session at that key is untouched — Codex r6 blocker 1); tuple-
+  versioned secondary flow index (local mint re-entry returns the flow's
+  locally-minted record across the staged overlap; reserve NEVER
+  auto-drops a different-tuple record — Codex r6 major 2); holder completeness
   (sibling replica reap does not free the owner's identity — RED on the
   #6522 shape; replay re-reserve is a no-op; all-workers-reap with live
   shared canonical row does NOT free; materialize acquires via the wrapper;

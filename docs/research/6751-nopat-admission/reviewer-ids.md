@@ -20,6 +20,9 @@ reviewer (it joins the quad at `/engineer` on the code PR).
 | r5 | Claude SMR | `claude-smr-plan-r5.md` | PLAN-READY-WITH-NITS (no BLOCKER/MAJOR survives; self-found N16 reverse-companion relay-lag window documented as inherited pool-shape discipline) |
 | r5 | Codex | codex session `019fc7e7-9d1d-72f1-9ccc-e64dbeeb62ed` (companion task `task-msdajap7-xs09zy`) → `codex-plan-r5.md` | PLAN-NEEDS-REVISION (3 BLOCKERs: live_by_flow single-record cardinality vs staged overlap, canonical-row/alias staleness on tuple replace, re-enabled pool minting past an older draining generation; 1 MAJOR: materialize None is a cold-miss not a drop) |
 | r5 | AGY | direct `agy --print --dangerously-skip-permissions` foreground → `agy-plan-r5.md` | PLAN-READY-WITH-NITS (every r4 fold verified; 2 NITs: Prometheus reason label, staged pre-read helper signature) |
+| r6 | Claude SMR | `claude-smr-plan-r6.md` | PLAN-READY-WITH-NITS (v6 mechanisms verified independently; nits: alias-sweep same-tuple guard, sticky-pool quarantine exhaustion — folded in v6.1) |
+| r6 | Codex | codex session `019fc800-2646-70d1-a7d2-a28e76dd9a1d` (companion task `task-msdbhrfh-dslfvv`) → `codex-plan-r6.md` | PLAN-NEEDS-REVISION (1 BLOCKER: fabric forward-wire alias separately-synced canonical row false-conflicts + sole-marker hazard + sweep gap; 1 MAJOR: idempotence secondary index + reserve auto-drop; 2 MINORs; 1 NIT) |
+| r6 | AGY | direct `agy --print --dangerously-skip-permissions` foreground → `agy-plan-r6.md` | PLAN-READY-WITH-NITS (all v6 folds verified incl. staged replacement walkthrough, alias-sweep parity, quarantine placement; 2 carried NITs) |
 
 Round-1 infra notes: the Codex companion background job tracker lost the first
 job (`task-msd5pjfq-yfwbeg` — state dir is workspace-hash-keyed and the poll
