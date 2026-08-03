@@ -1,7 +1,7 @@
 # #6751 plan — interface SNAT no-PAT admission: reserve-or-PAT the colliding translated tuple
 
-- **Status**: DRAFT v9 — round-8 fold (Codex r8 blocker 1 + major 2 +
-  minor 3; SMR r8 + AGY r8 nits all folded)
+- **Status**: DRAFT v10 — round-9 fold (Codex r9 blocker 1 + major 2;
+  SMR r9 N17; AGY r9 nit carried)
 - **Issue**: #6751 (opus-review-001 R08, High, `bug`+`audit`+`security`) —
   interface SNAT admits indistinguishable no-PAT return tuples and sends
   replies to the FIRST session.
@@ -530,21 +530,37 @@ record's identity frees only when `per_worker` is empty AND
   server/helpers/session_sync.rs:274 — NOT the node-local `SessionID`,
   on which the two nodes deliberately disagree,
   pkg/dataplane/types.go:31-36): require EQUAL non-zero
-  `RTFlowSessionID`. **Zero-id alias attachment FAILS CLOSED** (Codex r8
-  blocker 1: no value-equality fallback is safe — base and alias are
-  queued independently and stamped with fresh per-call generations,
-  sync_conn_write.go:53/sync_conn_gen.go:113, so "identical value"
-  either never matches legitimately or false-matches a legacy colliding
-  flow whose id fields are all zero; and a base-row-presence requirement
-  breaks base-first deletion). An alias import whose side of clause (4)
-  cannot be evaluated (either id is 0) imports as its own first-class
-  entry: against its own base's identity it gets `IdentityConflict` and
-  DROPS (fail-closed — no mis-attachment, no duplicate ownership; the
-  base flow is unaffected; the fabric alias row is absent, a bounded
-  fabric-return fidelity degradation confined to id-0-synced fabric
-  sessions from legacy peers — post-#6198 peers always export non-zero
-  ids, so the degradation is the legacy-only corner of the §5.4
-  mixed-version window). Clause (4) makes
+  `RTFlowSessionID`. **Zero-id alias attachment FAILS CLOSED — with a
+  wire-form-yield conflict rule** (Codex r8 blocker 1 + r9 blocker 1: no
+  value-equality fallback is safe — base and alias are queued
+  independently and stamped with fresh per-call generations,
+  sync_conn_write.go:53/sync_conn_gen.go:113; and a naive
+  first-class-import of a zero-id alias is not arrival-order safe: an
+  alias arriving FIRST reserves the identity successfully, then the real
+  base arrives, conflicts, and drops — leaving the alias, whose source
+  is the NAT address, unable to reconstruct delivery to the real client
+  (reverse synthesis reads `forward_match.key.src_ip`,
+  shared_ops.rs:678/738) — the worst outcome). The zero-id rule is:
+  an import whose clause-(4) ids are 0 imports as its own first-class
+  entry; on an identity CONFLICT between two zero-id imports,
+  (i) if one presented key is the forward-wire form of the other under an
+  identical NatDecision, the CANONICAL-FORM import WINS — the wire-form
+  (alias) import yields via the both-direction adopt/merge (SMR r7 E1):
+  its markers and identity fold into the canonical-form import's record,
+  regardless of arrival order (so the real base always survives its
+  alias — the byte-identical alias row merges harmlessly);
+  (ii) if neither key is the other's forward-wire form, the pair is a
+  genuine collision: first-wins, second gets `IdentityConflict` and DROPS
+  (fail-closed). Clause (i) makes the legit alias-first arrival converge
+  on the correct outcome (base survives, alias attaches); clause (ii)
+  keeps the genuine-collision posture of §5.6. The fabric-return lookup
+  consequence of a DROPPED explicit alias row remains near-free (the base
+  publish populates the derived forward-wire index,
+  shared_ops.rs:943-957; AGY r9's walk verified the lookup resolves to
+  the base; Codex r9 independently verified the same via the worker
+  forward_wire_index, session/mod.rs:1971, and the synthesized reverse
+  companion, session_import.rs:122). A zero-id alias-first regression
+  test pins rule (i). Clause (4) makes
   Codex r7's counterexample (colliding flow B's alias, different session
   id) fail the predicate: B's alias imports as its own first-class entry,
   hits `IdentityConflict`, and DROPS — the promised second-import
@@ -581,22 +597,35 @@ record's identity frees only when `per_worker` is empty AND
   - The alias sweep of §5.6's transactional shared replacement covers
     BOTH alias classes (derived index rows + the explicit canonical alias
     row, predicate-gated) and is COMPARE-AND-REMOVE ownership-validated
-    (Codex r7 major 4 + r8 major 2: the current removals delete derived
-    reverse/forward-wire slots by key unconditionally,
+    (Codex r7 major 4 + r8 major 2 + r9 major 2: the current removals
+    delete derived reverse/forward-wire slots by key unconditionally,
     shared_ops.rs:978/987/997 — if a legitimate non-bijective third-party
     session has since displaced T_old's derived slot, an unconditional
-    sweep would remove the CURRENT occupant; and "key + NatDecision" is
-    not a sufficient identity, since a newer same-key/same-NAT session
-    can carry a different stable session identity. Every swept removal
-    validates ownership ATOMICALLY under the removing map's own lock
-    (the maps lock separately — a third party can replace a derived slot
-    between canonical replacement and sweep, so the check must be
-    compare-and-remove under that map's lock, not check-then-remove):
-    the stored row's value matches the displaced entry's on the identity
-    chain — equal non-zero `RTFlowSessionID`, else equal non-zero
-    node-local `SessionID`, else full `SessionValue` equality EXCLUDING
-    the per-call generation stamp and counters. A third-party-displacement
-    test and a same-key/same-NAT/different-id replacement test pin it).
+    sweep would remove the CURRENT occupant; "key + NatDecision" is not a
+    sufficient identity, since a newer same-key/same-NAT session can
+    carry a different stable session identity; and the swept maps store
+    `SyncedSessionEntry`, whose ONLY id field is the cross-node RT-flow
+    id (worker/mod.rs:375, populated from
+    `SessionSyncRequest.session_id`/`RTFlowSessionID`,
+    server/helpers/session_sync.rs:274) — the Go node-local `SessionID`
+    is NOT transmitted (manager_ha.go:1645), and LOCAL publications store
+    `session_id: 0` deliberately (poll_descriptor/mod.rs:2569), so a
+    value-equality fallback can false-match a newer local
+    same-key/same-NAT publication. The ownership identity therefore uses
+    a HELPER-LOCAL publication token: `SyncedSessionEntry` gains an
+    additive `pub_token: u64` — a coordinator-local monotonic counter
+    stamped at publish into BOTH the canonical row and every derived
+    index row of one publication (helper-internal struct change, NOT a
+    wire/Go change). Every swept removal validates ownership ATOMICALLY
+    under the removing map's own lock (the maps lock separately) against
+    the identity chain: equal non-zero `RTFlowSessionID`, else equal
+    non-zero `pub_token`, else (token-0 legacy rows only) full
+    `SyncedSessionEntry` equality excluding counters — two token-0 rows
+    that agree on every remaining field are semantically the same session
+    for routing purposes (AGY r9's field enumeration), so removing either
+    is indistinguishable. A third-party-displacement test, a
+    same-key/same-NAT/different-id replacement test, and a newer-local-
+    publication (session_id 0, non-zero pub_token) test pin it).
   - **NAT64 alias exports are OUT OF SCOPE for the holder model**
     (Codex r7 blocker 3, scoped): NAT64 fabric redirects also export
     forward-wire aliases (userspaceForwardWireAliasV6,
@@ -761,9 +790,13 @@ occupancy/holder introspection is a named follow-up, not this PR.
 ## 6. Public API preservation
 
 Preserved byte-for-byte: `NatDecision`, `SourceNatLookup`, `SessionKey`,
-`SyncedSessionEntry`, the HA session-sync wire, the Go→helper snapshot
+the HA session-sync wire, the Go→helper snapshot
 protocol (`SourceNATRuleSnapshot` and the NAT64 snapshot gain NO fields —
 empty-pool is the NAT64 fail-closed channel), all CLI/gRPC surfaces.
+`SyncedSessionEntry` gains ONE additive HELPER-INTERNAL field
+(`pub_token: u64`, the coordinator-local publication token of §5.6 —
+stamped at publish inside the helper; it is NOT read from or written to
+any Go-facing wire, and older in-image rows read as token 0).
 Additive-only wire change: the four §5.8 status counters (optional fields,
 #1961-safe). Changed signatures are `pub(crate)`-internal only:
 `match_source_nat_result_for_tuple` (+1 arg),

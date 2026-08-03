@@ -29,6 +29,9 @@ reviewer (it joins the quad at `/engineer` on the code PR).
 | r8 | Claude SMR | `claude-smr-plan-r8.md` | PLAN-READY-WITH-NITS (four-part predicate re-derived sound; fallback discriminates via per-session node-local id; counting HolderSet order-safe; folded v8.1 RTFlowSessionID precision) |
 | r8 | Codex | codex session `019fc83b-6d00-7790-9542-2eb2ab337ffc` (companion task `task-msddt06o-dlnhjt`) → `codex-plan-r8.md` | PLAN-NEEDS-REVISION (1 BLOCKER: zero/legacy id fallback unsafe — per-call generation stamps break value equality, legacy all-zero values false-match; fix = fail closed; 1 MAJOR: compare-and-remove identity chain + per-map atomicity; 1 MINOR: §9 must enumerate five fixed-path quarantine tests) |
 | r8 | AGY | direct `agy --print --dangerously-skip-permissions` foreground → `agy-plan-r8.md` | PLAN-READY-WITH-NITS (all v8 folds verified incl. id-0 fallback adequacy; 2 implementation nits) |
+| r9 | Claude SMR | `claude-smr-plan-r9.md` | PLAN-READY-WITH-NITS (fail-closed consequence verified near-free via the derived forward-wire index; N17 counter-semantics doc, folded v9.1) |
+| r9 | Codex | codex session `019fc851-bc9c-7df0-94bc-40a9954e4a95` (companion task `task-msdeod3l-mvzavu`) → `codex-plan-r9.md` | PLAN-NEEDS-REVISION (1 BLOCKER: zero-id alias-first arrival lets the alias reserve and the real base drop — needs wire-form-yield/deferral; 1 MAJOR: identity chain not representable on SyncedSessionEntry (no node-local id; local publications are session_id 0) — needs a helper-local publication token) |
+| r9 | AGY | direct `agy --print --dangerously-skip-permissions` foreground → `agy-plan-r9.md` | PLAN-READY-WITH-NITS (all v9 folds verified incl. the standby forward-wire walk resolving to base; 1 NIT: v4+v6 alias test parity) |
 
 Round-1 infra notes: the Codex companion background job tracker lost the first
 job (`task-msd5pjfq-yfwbeg` — state dir is workspace-hash-keyed and the poll
