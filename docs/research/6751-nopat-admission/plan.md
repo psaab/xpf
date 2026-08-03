@@ -1,13 +1,15 @@
 # #6751 plan — interface SNAT no-PAT admission: reserve-or-PAT the colliding translated tuple
 
-- **Status**: DRAFT v15.7 — round-20 fold (Codex r20 blockers 1a/1b +
-  minor 2: clause (5) now GENERATION-INVALIDATES AND LOGICALLY DETACHES
-  BOTH SLOTS before fence release even on timeout, so the next admission
-  always sees the both-nil registry and arms cold-prime; new clause (2b)
-  makes the ADMITTED verdict and its entire setup tail (loop launch,
-  clock sync, callbacks, cold-prime) ONE serialized step under the fence
-  check; capability transport is the dedicated ticker alone, no
-  alternatives anywhere)
+- **Status**: DRAFT v15.8 — round-21 fold (Codex r21 blocker 1 + nit 1:
+  clause (2b) is now STAMP-AND-ENQUEUE — the atomic admission unit is
+  bounded to stamping the slot with the current abort generation and
+  enqueueing generation-bound setup intents (the tail — clock I/O, 10k
+  journal replay, doBulkSync with 2s-per-frame write deadlines — can
+  never run inside the arbiter: it is unbounded in cardinality, a
+  documented self-deadlock under s.mu (sync_conn.go:588), and there is
+  no global serialized receiver loop to run it on); each intent
+  revalidates its bound generation/slot at its own effect-commit and a
+  stale intent is cancelled; §11's stale fabric-gate text corrected)
 - **Issue**: #6751 (opus-review-001 R08, High, `bug`+`audit`+`security`) —
   interface SNAT admits indistinguishable no-PAT return tuples and sends
   replies to the FIRST session.
@@ -715,19 +717,36 @@ record's identity frees only when `per_worker` is empty AND
       current at its admission — SMR r20 nit 2), so no per-frame
       generation field is needed on the wire; one atomic load per
       commit on the already-serialized loop, not a lock.
-      (2b) **Atomic admission**: the ADMITTED verdict and its entire
-      setup tail (receive-loop launch, clock sync, lifecycle callbacks,
-      cold-prime) commit as ONE serialized step under the fence check —
-      no abort can advance the generation between an ADMITTED verdict
-      and its tail (Codex r20 blocker 1b: the tail today runs as
-      separate steps after `installConn` returns, sync_conn.go:130, so
-      an abort could otherwise land between verdict and
-      loop/callback/cold-prime). To keep the atomic step
-      sub-millisecond and starve-free, network I/O and callback
-      execution inside the tail are dispatched via background
-      goroutines (`go s.OnPeerConnected()`, `go s.doBulkSync()`) — only
-      handle setup and goroutine spawning happen inside the atomic step
-      (AGY r21 nit 2).
+      (2b) **Stamp-and-enqueue admission**: the ADMITTED verdict's
+      atomic unit is BOUNDED to (i) stamping the slot with the current
+      abort generation and (ii) ENQUEUEING generation-bound setup
+      intents (receive-loop launch, clock sync, lifecycle callbacks,
+      cold-prime) — microseconds, no I/O, never the tail itself (Codex
+      r21 blocker 1: the tail contains synchronous clock I/O, replay of
+      up to 10,000 journal entries, and `doBulkSync()` walking every
+      owned session with a fresh 2s write deadline per frame
+      (sync_conn.go:132/137/141/194, sync_bulk.go:92/133,
+      sync_protocol.go:59) — running it inside the arbiter is
+      effectively unbounded in cardinality and backpressure; running it
+      under `s.mu` is a documented self-deadlock
+      (`BulkSync → getActiveConn` re-enters `s.mu`, sync_conn.go:588);
+      and there is no global serialized receiver loop to run it on —
+      each connection launches its own receiveLoop, sync_conn.go:132,
+      sync_conn_read.go:14, sync_conn_gen.go:381). The intents execute
+      OUTSIDE the arbiter on the normal async paths, and each intent
+      REVALIDATES its bound generation and slot at its own
+      effect-commit point (the same commit-time guard as clause (4) —
+      the machinery already exists): a stale intent (generation
+      advanced, slot detached, or fence set) is cancelled and its
+      completion treated as stale, so an abort landing between verdict
+      and tail can never let a stale tail take effect. To keep the
+      arbiter starve-free, network I/O and callback execution inside
+      every intent happen on background goroutines
+      (`go s.OnPeerConnected()`, `go s.doBulkSync()`) — only slot
+      stamping, intent enqueuing, and goroutine spawning happen inside
+      the atomic unit (AGY r21 nit 2). §9 pins a blocked-I/O test and a
+      large-bulk (10k-journal-entry) test proving AbortFenceTimeout and
+      the atomic unit stay bounded under both.
       (5) **Reset-once ownership + deterministic detach**: when both
       slots confirm detached (or the named AbortFenceTimeout fires — a
       wedged handler's frames are commit-discarded per (4), so the
@@ -1417,8 +1436,11 @@ quarantine-admitted + overflow), and tests.
    three verified claims: the explicit alias row is redundant with the
    base's derived forward-wire index row (walked independently by AGY
    r9/r11/r12/r13 and Codex r9/r10/r11/r12/r13); the full rewritten-tuple
-   signature with the NAT64 exclusion and fabric gate false-positives on
-   NOTHING except genuine self-NAT rows in the legacy window, and those
+   signature with the NAT64 exclusion and NO disposition gate (the
+   cluster codec carries no disposition field, so non-fabric
+   identity-NPTv6 rows also quarantine — Codex r14 blocker 1's priced
+   consequence) false-positives on NOTHING except genuine self-NAT rows
+   in the legacy window, and those
    are ADMITTED after the quarantine timeout (a delay, not a drop); and
    the base-lifecycle delete suppression is strictly safer-or-equal to
    today in every matrix cell (today the alias upsert clobbers a
