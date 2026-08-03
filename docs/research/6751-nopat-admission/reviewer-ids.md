@@ -1,0 +1,32 @@
+# #6751 plan-review reviewer ledger
+
+3-way hostile plan review (Codex + AGY + Claude SMR). Copilot is NOT a research
+reviewer (it joins the quad at `/engineer` on the code PR).
+
+| Round | Reviewer | ID / location | Verdict |
+|---|---|---|---|
+| r1 | Claude SMR | `claude-smr-plan-r1.md` | PLAN-NEEDS-REVISION (B1 tuple_unknown probe leak, B2 carry-over aliasing, B3 holder boundary, B4 pool/iface occupancy seam, M5-M8, N9-N10) |
+| r1 | Codex | codex session `019fc774-03cb-74d0-b590-c17cd31a3803` (companion task `task-msd60x19-a1vhsp` + `codex exec resume` foreground) → `codex-plan-r1.md` | PLAN-NEEDS-REVISION (4 BLOCKERs: cross-domain overlap, generation-global registry, holder lifecycle, sync reserve not fail-closed; 5 MAJORs; 3 MINORs) |
+| r1 | AGY | companion jobs `rescue-msd5qexy-q9isgm` + `rescue-msd732ow-sp1cw8` both infra-misfired (returned `--print-timeout` CLI docs, not a review); direct `agy --print` foreground run succeeded → `agy-plan-r1.md` | PLAN-NEEDS-REVISION (2 BLOCKERs: reserve/insert race, cross-commit leak; 2 MAJORs incl. "adopt option (b)"; 2 MINORs; 1 NIT) |
+
+Round-1 infra notes: the Codex companion background job tracker lost the first
+job (`task-msd5pjfq-yfwbeg` — state dir is workspace-hash-keyed and the poll
+cwd must be the worktree); the review completed via foreground
+`codex exec resume`. The AGY companion `rescue` wrapper mangled the prompt
+twice (model answered a meta question about its own `--print-timeout` flag);
+the review completed via direct `agy --print` invocation. Per
+`feedback_codex_infra_must_retry` both were retried to real completions —
+neither counts as a blocked/absent review.
+
+## Round-1 convergence state
+
+All three reviewers independently confirmed the bug analysis (real, High,
+nothing existing disambiguates). All three demanded revision; the findings
+converged on: probe purity (SMR B1 = Codex 5), registry lifetime (SMR B2 =
+Codex 2 = AGY 2), holder model (SMR B3 = Codex 3), cross-domain occupancy seam
+(SMR B4 = Codex 1), over-PATing semantics (Codex 6 → v2 identity-set redesign,
+which also moots AGY 1 + SMR M5), Junos wording (SMR N9 = Codex 7 = AGY 5),
+pinned-test disposition (SMR M7 = AGY 7), release-site inventory (Codex 10),
+RST-claim wording (Codex 12), (a)-vs-(b) fork dispute (AGY 4 — answered in v2
+with the identity-squatting-DoS counter-argument + the (a)≈(b)+probe redesign).
+v2 folds every finding; round 2 re-reviews v2.

@@ -1,3 +1,9 @@
+## 2026-08-03 — #6751 research round 1: three hostile reviews, plan v2 fold
+
+- **Timestamp**: 2026-08-03 (research/6751-nopat-admission, /research skill)
+- **Action**: Round-1 verdicts all PLAN-NEEDS-REVISION (Claude SMR: B1-B4/M5-M8/N9-N10; Codex: 4 blockers + 5 majors + 3 minors; AGY: 2 blockers + 2 majors + 2 minors + 1 nit). Convergent findings: probe purity (tuple_unknown + fragment), registry generation lifetime, holder-model desync, cross-domain occupancy seam, over-PATing under a strict bitmap, Junos-parity wording. v2 redesigns option (a) onto the shipped #5269 identity-token machinery verbatim (full reverse-identity occupancy, single-mutex mint, bounded PAT probe via atomic cursor), moves the registry OUTSIDE ForwardingState (node-lifetime, next to the shared session maps), replaces the scalar refcount with a per-worker holder SET, extends the #5144 strict validator to interface-mode egress addresses (reject on strict commit, warn on tolerant), and answers AGY's (b)-over-(a) argument with the identity-squatting-DoS vector (b) would introduce.
+- **File(s)**: `docs/research/6751-nopat-admission/plan.md`, `docs/research/6751-nopat-admission/claude-smr-plan-r1.md`, `docs/research/6751-nopat-admission/codex-plan-r1.md`, `docs/research/6751-nopat-admission/agy-plan-r1.md`, `docs/research/6751-nopat-admission/reviewer-ids.md`, `_Log.md`
+
 ## 2026-08-03 — #6751 research: plan v1 for interface-SNAT no-PAT tuple collision
 
 - **Timestamp**: 2026-08-03 (research/6751-nopat-admission, /research skill)
