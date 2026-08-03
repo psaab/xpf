@@ -1,6 +1,6 @@
 # #6749 — binding-plan expansion registers new slots unarmed, dataplane disabled indefinitely
 
-**Status: DRAFT v8 — pending adversarial plan review (round 7)**
+**Status: DRAFT v8.2 — pending adversarial plan review (round 8)**
 
 - Issue: #6749 (opus-review-001 root R06, severity High)
 - Research base: `ad9591177` (origin/master at worktree creation)
@@ -11,22 +11,23 @@
   v5 @ `0c0b9b677` (r4: Codex DEMAND-REVISION; AGY + SMR
   PLAN-READY-WITH-NITS); v6 @ `6969b6167` (r5: Codex DEMAND-REVISION;
   AGY + SMR PLAN-READY-WITH-NITS); v7 @ `3e388fde8` (r6: all
-  DEMAND-REVISION); v7.1 @ `d61e76ec3` folded AGY r6 + SMR r6; v8
-  folds Codex r6: result-based C2 (no discriminator needed),
-  claim-deletion boundary, identity-checked volatile refresh
-  (Codex r6 f3), projection-scoped `update_fabrics` with
-  physical-change pending + rate-capped reconcile + empty-replan
-  guard (Codex r6 f4/f5), Go latch authority + completion epoch
-  (Codex r6 f6/f8), actionable pending-retry with unregistered-
-  pending exclusion and backoff-with-reset (Codex r6 f7), MAC debt
-  phase revalidation (Codex r6 f8), config-generation debt scoping,
-  status-loop ensured after `ensureProcessLocked` (Codex r6 f7e).
+  DEMAND-REVISION); v7.1 @ `d61e76ec3` (AGY r6 + SMR r6 folds); v8 @
+  `ee2f548d8` (r7: Codex DEMAND-REVISION; AGY + SMR
+  PLAN-READY-WITH-NITS); v8.1 (AGY r7 f1/f3 + SMR r7 N1-N3 folds);
+  v8.2 folds Codex r7: fail-closed update_fabrics without an
+  in-handler reconcile (Codex r7 f2), guard authority on both sides
+  (Codex r7 f3), epoch rollover on every commit (Codex r7 f4),
+  retry rate-capped-forever with no terminal cap (Codex r7 f5),
+  accepted-config-epoch contracts for both debts (Codex r7 f6),
+  planned-identity volatile check with last_error preservation
+  (Codex r7 f7), claim boundary as ANY planned-identity deletion
+  (Codex r7 f8), plus the r7 test matrix (Codex r7 M9).
 
 ---
 
 ## 1. Status
 
-DRAFT v8 — pending adversarial plan review round 7 (Codex + AGY +
+DRAFT v8.2 — pending adversarial plan review round 8 (Codex + AGY +
 Claude SMR). Convergence target: PLAN-READY (recommended path shipped
 to `/engineer`) or PLAN-KILL. No production code is written under
 `/research`.
@@ -124,6 +125,56 @@ to `/engineer`) or PLAN-KILL. No production code is written under
   | Codex M9 tests | CLOSED v8 — §9 rewritten with the new shapes |
   | Codex NIT M10/retry observability | CLOSED v8 — retry carries attempt counter, fingerprint, edge Warns (§5-C) |
   | SMR r6 N1/N2/N3 | = AGY f3/f2/f1 (v7.1) |
+
+- **Round 7** (v8): Codex DEMAND-REVISION (6 BLOCKER + 3 MAJOR);
+  AGY PLAN-READY-WITH-NITS (3 nits, folded in v8.1); SMR
+  PLAN-READY-WITH-NITS (3 nits, folded in v8.1). Codex's round:
+  `update_fabrics` is not a fail-closed Go→Rust replan transaction
+  (Go's SyncFabricState ignores the returned status and writes back
+  its input; the in-handler reconcile's teardown window leaves
+  ctrl=1 with dying XSKs; and a `pending`-only mark does NOT close
+  the `enabled` gate, which reads only `registered && armed` — the
+  physical-change mark must be explicitly `armed=false`); the
+  empty-replan guard has split Rust/Go authority (Go stores the
+  incoming fabric slice unconditionally, so a guard-rejected
+  projection re-enters through the next wholesale clone; and the
+  handler publishes the incoming projection to workers BEFORE
+  evaluating it — a rejected projection must be staged); the defer
+  "epoch" is a leaking boolean (a failed tagged completion + an
+  unrelated no-MAC-work commit stamps DeferWorkers=true into every
+  later compile with no completion owner — needs explicit rollover
+  on every commit); the ~12-attempt terminal cap deliberately
+  recreates the issue's permanent sink (WorkerSpawn includes
+  TRANSIENT pthread_create EAGAIN/ENOMEM whose recovery needs no
+  state change — cap the FREQUENCY at 60s, never the recovery);
+  "CONFIG generation" is not an implementable contract (the
+  composite counter moves on FIB/fabric bumps and failed-compile
+  allocations — needs `m.lastAcceptedConfigGeneration` advanced
+  only on accepted commits) and the MAC debt has no accepted-config
+  identity/desired-set/supersession rule; the socket-tuple identity
+  check can tear on relaxed stores (compare the PLANNED identity in
+  workers.identities instead, and preserve last_error when zeroing
+  on mismatch); the claim boundary contradicts itself on renames
+  and queue-count contraction (the honest boundary is ANY
+  planned-identity deletion); Q2 is sound (plan-scoped convergence;
+  add the prior-S4 + current-S3 overlap test); tests remain
+  false-green-capable; and do NOT split the MAC debt or pending
+  retry into follow-ups — they are load-bearing (option D is the
+  only safe split candidate).
+- **Round-7 disposition table:**
+
+  | r7 finding | v8.2 disposition |
+  |---|---|
+  | Codex f2 update_fabrics transaction | CLOSED — NO in-handler reconcile; projection change marks ALL non-operator slots `armed=false, pending` (enabled-gate-exact); Go applies the returned status IMMEDIATELY so ctrl drops in the same tick; the retry/next-apply drives the binding reconcile with the normal fail-closed posture (§5-C) |
+  | Codex f3 guard authority | CLOSED — incoming projection is STAGED (refresh_fabric_links gets only the ACCEPTED set); Go writes back the helper's accepted fabrics, not its request input; the per-candidate skip cause is exact; legit full removal goes through apply_snapshot (never triggers the guard; the explicitly-empty fabrics slice is unencodable today — Rust-test-only) (§5-C) |
+  | Codex f4 leaking epoch | CLOSED — epoch rollover on every commit: no-MAC-work clears the manager flag at compile start + cancels stale debts + the non-deferred stamp clears the helper latch; MAC work opens/replaces the epoch; an explicit operator arm clears the flag too (§5-C) |
+  | Codex f5 terminal cap | CLOSED — retry is rate-capped-forever (60s floor) with one edge Warn at ~12 and reset-on-change; NO terminal cap anywhere; the tagged completion retry is explicitly exempt (§5-C) |
+  | Codex f6 debt contracts | CLOSED — `m.lastAcceptedConfigGeneration` (advances only on accepted config commits) keys the #5134 debt; the MAC debt keys on (accepted generation, desired member→MAC set) with supersession, member-removal cancellation, and completion-mode history (§5-C) |
+  | Codex f7 torn identity check | CLOSED — compare the PLANNED identity (workers.identities, written once at plan time) not the relaxed socket tuple; mismatch zeroing preserves last_error (§5-C) |
+  | Codex f8 claim boundary | CLOSED — boundary restated: claims survive slot reshuffles and flaps; die at global fan-out or ANY planned-identity deletion (rename, candidate dropout, queue-count contraction) (§5-C C2, §10) |
+  | Codex M9 tests | CLOSED — §9 rewritten with the r7 matrix incl. the Q2 overlap test |
+  | AGY r7 f1/f2/f3 | CLOSED v8.1 — tag issued as `deferWorkers && !hasActiveMACDebt`; the Go test pins it; the arm-sync gate is the arm-direction skip `if desired && m.deferWorkers { return nil }` |
+  | SMR r7 N1/N2/N3 | CLOSED v8.1 — exact empty-guard discriminator (superseded by Codex r7 f3's exact form); MAC debt member-removal cancellation; plan-scoped convergence note (Codex r7 confirms Q2 sound + overlap test) |
 
 ### Round-1 detail log (kept for the record)
 
@@ -523,34 +574,35 @@ all registered slots `armed=false`, `pending` unless `operator`), S5
 unregistered keep state).
 
 **C2, restated result-based (Codex r6 f2 — no discriminator
-needed).** r5's formulation ("register → `none`, disarm →
-`operator`") was attacked as unimplementable because
-`(registered=true, armed=false)` serializes identically for both
-names. The correct rule needs no operation discriminator because it
-keys on the verb's RESULT, not its name: **a verb that LEAVES the
-slot non-forwarding (`!armed`, or `!registered`) sets
-`activation_state=operator` — the operator owns that non-forwarding
-state, whatever they called the request; a verb that leaves the
-slot forwarding (`registered && armed`) sets `none` (C1 subsumes
-it).** There is no wire case that means "register into the global
-default": the control API takes explicit booleans
+needed; boundary restated per Codex r7 f8).** r5's formulation
+("register → `none`, disarm → `operator`") was attacked as
+unimplementable because `(registered=true, armed=false)` serializes
+identically for both names. The correct rule needs no operation
+discriminator because it keys on the verb's RESULT, not its name:
+**a verb that LEAVES the slot non-forwarding (`!armed`, or
+`!registered`) sets `activation_state=operator` — the operator owns
+that non-forwarding state, whatever they called the request; a verb
+that leaves the slot forwarding (`registered && armed`) sets `none`
+(C1 subsumes it).** There is no wire case that means "register into
+the global default": the control API takes explicit booleans
 (control.go:104 → protocol_binding.go:11 → control.rs:959), and
 every caller is an explicit operator diagnostic
 (cli_request_chassis.go:167-176, server_diag_system_action.go:430-455),
 so a non-forwarding result IS the operator's intent. The state is
 written in the same field mutation that applies the verb's values,
 BEFORE any registration-changed reconcile (SMR r4 N2 code-order
-pin). **Claim-deletion boundary (Codex r6 f2, documented):** a
-candidate that drops OUT of the plan (fabric parent invalid —
-planning.rs:464-467 — or interface queue count unreadable,
-planning.rs:452-460) takes its binding record, and any operator
-claim on it, with it; when the candidate returns, S5 creates a NEW
-binding (`pending`) with no memory of the claim. This is the claim
-lifetime contract: claims survive reshuffles, renames, flaps, and
-deferred applies; they die at a global fan-out OR with the physical
-binding they were made against (the XSK the operator disarmed no
-longer exists; its later namesake is a new binding). §10 records
-the boundary; §9 item 15 pins it.
+pin). **Claim-deletion boundary (Codex r6 f2, restated exactly per
+Codex r7 f8):** claims survive SLOT RESHUFFLES and interface FLAPS
+(the planned `(linux-interface, queue_id)` identity persists), and
+they die at a global fan-out (C3, registered slots) OR at ANY
+deletion of that planned identity — a candidate dropout (invalid
+fabric parent, planning.rs:464-467; unreadable queue count,
+planning.rs:452-460), a rename (the linux name itself changes → new
+identity, planning.rs:398), OR a queue-count contraction (the
+global-min layout, planning.rs:495, deletes high-queue identities
+on otherwise healthy interfaces). The later namesake is a new
+binding (S5 pending) with no claim; §10 records the boundary; §9
+item 15 pins all three deletion shapes.
 
 **E2 narrowed to `pending` only (Codex r5 BLOCKER 2).** The
 tri-state cannot distinguish "operator-disarmed then planner-force-
@@ -618,72 +670,110 @@ f1's clear-before hazard is structurally excluded) and S4' marks as
 usual. The convergence still cannot fire on a partial bind
 (`bound == planned` is required for the Ok, bringup.rs:188).
 
-**Identity-checked volatile refresh (Codex r6 f3 — one predicate,
-absorbs the r1 cosmetic alias).** `refresh_bindings` maps live
-workers into the status vector by NUMERIC SLOT
-(refresh_bindings.rs:25). Surviving partial-B workers after a failed
-bring-up (bringup.rs:172, pinned) therefore alias their socket/
-heartbeat/`ready` state onto possibly-unrelated restored-A
-identities — wrong in the failure window, and the same mechanism as
-the deferred-window cosmetic alias from round 1. The live record
-carries `socket_ifindex` and `socket_queue_id`
-(refresh_bindings.rs:61-62), so the fix is one predicate:
-`copy_live_snapshot` runs ONLY when the live worker's
-`(socket_ifindex, socket_queue_id)` equals the binding's
-`(ifindex, queue_id)`; otherwise the slot takes `zero_unbound_slot`.
-Volatile state is then reported only for the physical binding it
-belongs to, in every window (deferred, failure, reshuffle). This is
-the ONLY coordinator-side change in the PR.
+**Identity-checked volatile refresh (Codex r6 f3; v8.2 per Codex r7
+f7 — planned identity, not the relaxed socket tuple).**
+`refresh_bindings` maps live workers into the status vector by
+NUMERIC SLOT (refresh_bindings.rs:25). Surviving partial-B workers
+after a failed bring-up (bringup.rs:172, pinned) therefore alias
+their socket/heartbeat/`ready` state onto possibly-unrelated
+restored-A identities — wrong in the failure window, and the same
+mechanism as the deferred-window cosmetic alias from round 1. The
+identity check compares the binding's `(interface, ifindex,
+queue_id)` against the live record's PLANNED identity
+(`workers.identities[slot]`, written ONCE at plan time,
+bringup.rs:280 — tear-free), NOT the live socket tuple: v8's
+socket-fields check was itself racy (separate relaxed stores of
+ifindex and queue, binding_state/mod.rs:873, can tear a
+(new-ifindex, queue-0) read into a false accept, Codex r7 f7). On a
+mismatch the slot zeroes its volatile/socket fields — but PRESERVES
+`last_error` (a genuine bind failure's diagnostic must survive;
+bind failure clears the tuple then records the error,
+worker/mod.rs:921, and v8's blanket `zero_unbound_slot` would have
+wiped it, refresh_bindings.rs:433). Volatile state is then reported
+only for the physical binding it belongs to, in every window
+(deferred, failure, reshuffle). This is the ONLY coordinator-side
+change in the PR.
 
 **INVARIANT 2 (coherent vector), completed — `update_fabrics`
 replans (Codex r5 BLOCKER 4, projection-scoped in v8 per Codex r6
-f4/f5).** `update_fabrics` (handlers/mod.rs:141-168) replaces
-`guard.snapshot.fabrics` — a plan-key input that also ADDS binding
-candidates (planning.rs:160-173, 462-477). v8 splits the fabric
-update into a TELEMETRY half and a PROJECTION half: the projection
-is exactly the fields the planner reads (`name`,
-`parent_linux_name`, `parent_ifindex`, `rx_queues` — the plan-key
-inputs); telemetry is everything else (resolved MACs, `up`, peer
-data — snapshot.rs:445). Telemetry-only changes persist WITHOUT
-replanning (the 30s periodic and the netlink-event-driven refresh,
-daemon_ha_fabric.go:243/:1039, pay nothing). On a PROJECTION change:
+f4/f5, transaction-shaped per Codex r7 f2/f3).** `update_fabrics`
+(handlers/mod.rs:141-168) replaces `guard.snapshot.fabrics` — a
+plan-key input that also ADDS binding candidates
+(planning.rs:160-173, 462-477). v8 splits the fabric update into a
+TELEMETRY half and a PROJECTION half: the projection is exactly the
+fields the planner reads (`name`, `parent_linux_name`,
+`parent_ifindex`, `rx_queues` — the plan-key inputs); telemetry is
+everything else (resolved MACs, `up`, peer data — snapshot.rs:445).
+Telemetry-only changes persist WITHOUT replanning (the 30s periodic
+and the netlink-event-driven refresh, daemon_ha_fabric.go:243/:1039,
+pay nothing). On a PROJECTION change, the handler:
 
-1. Replan bindings with the usual rules — new fabric-parent
-   candidates initialize per S5 (`registered=true, armed=false,
-   pending`); REMOVED candidates drop out (their claims die at the
-   deletion boundary, §5-C C2).
-2. **Physical-change pending (Codex r6 f4):** a candidate whose
-   `parent_ifindex` CHANGED under the same name is carried by R3
-   (same-name/new-ifindex) — but there is no reconcile in this
-   handler, so its workers are still bound to the OLD physical
-   device while Go would program the NEW ifindex onto the old XSK
-   with `enabled` reported (v7's wrong-physical hazard). The replan
-   therefore marks such identities `pending` (they are physically
-   unbound until the next reconcile, regardless of carried
-   `armed=true`).
-3. **Guaranteed, rate-capped reconcile:** the handler then runs
-   `reconcile_status_bindings(state, defer_completion_authorized=false)`
-   — which tears down orphaned workers (removal/contraction), binds
-   the new/physically-changed slots, and converges the pending
-   marks inside (the same locus as every other activation).
-   Fabric-driven reconciles are rate-capped (≥2s apart,
-   trailing-edge coalesce) because the fabric refresh is also
-   netlink-event-driven and can flap faster than 30s.
-4. **Empty-replan guard (Codex r6 f5):** if the projection-replan
-   would install an empty or candidate-dropped result caused by a
-   transient sysfs read failure (`rx_queues==0` → read_dir fails →
-   `rx_queue_count` returns 0, planning.rs:605-621), the handler
-   keeps the PRIOR vector and persists only the telemetry — a
-   fabric refresh must never be the path that empties the binding
-   plan (the r5 permanent-empty-vector sink in relocated form).
+1. **Evaluates the guard FIRST (Codex r7 f3):** the incoming
+   projection is STAGED, never published before acceptance —
+   `refresh_fabric_links` (which pushes fabric state to workers,
+   snapshot_refresh.rs:83) receives only the ACCEPTED projection
+   (the prior one on a guard hit). The guard fires exactly when an
+   eligible candidate (present in the accepted projection with raw
+   `rx_queues==0`) fails queue-count resolution IN THE SAME PASS
+   (`rx_queue_count`'s read_dir failed, planning.rs:605-621 — the
+   only path to 0; the planner returns an exact per-candidate skip
+   cause so the guard does not infer it). A guard hit keeps the
+   PRIOR projection AND the PRIOR vector on BOTH sides (below), and
+   persists only the telemetry. A legitimate full removal goes
+   through `apply_snapshot` — never `update_fabrics`, which
+   production cannot even encode today (an explicitly-empty fabrics
+   slice is dropped by `json:"fabrics,omitempty"`, protocol.go:83,
+   and Go early-returns on empty, manager_ha.go:166 — so the
+   removal case is Rust-test-only and never triggers the guard).
+2. **Marks the whole non-operator vector unarmed+pending (Codex r6
+   f4's option (b), made gate-exact by Codex r7 f2):** on an
+   accepted projection change, EVERY non-operator registered slot
+   is set `armed=false, state=pending` — explicitly `armed=false`,
+   because the `enabled` gate reads only `registered && armed`
+   (status.rs:274-281) and ignores the state field, so a
+   `pending`-only mark would leave `enabled=true` against stale
+   physical bindings. New candidates then initialize per S5
+   (already `registered=true, armed=false, pending`); REMOVED
+   candidates drop out (their claims die at the deletion boundary);
+   same-name/new-ifindex identities are both carried AND marked
+   (physically unbound until the next reconcile).
+3. **Does NOT reconcile in-handler (v8.2, replacing v8's
+   rate-capped in-handler reconcile):** the binding reconcile is
+   driven by the existing machinery with the normal fail-closed
+   posture — the pending marks force `enabled=false`, and the Go
+   pending-activation retry (or the next apply, or the
+   busy-watchdog) drives the plain rebind that tears down orphaned
+   workers, binds the new/physically-changed slots, and converges
+   the marks. This avoids embedding a 10-second worker-readiness
+   reconcile inside an RPC with a 3-second deadline
+   (process_control.go:33 vs bringup.rs:30) — the v8 in-handler
+   reconcile's timeout-but-landed class disappears by
+   construction — and it cannot leave Go holding `ctrl.Enabled=1`
+   with stale READY rows across a teardown window, because of the
+   next rule:
+4. **Go applies the returned status IMMEDIATELY and adopts the
+   helper's ACCEPTED set (Codex r7 f2/f3's authority fix):** the
+   manager's `SyncFabricState` today ignores the returned status
+   and writes back its own input (manager_ha.go:153/:175), so a
+   projection the helper guard-rejected would live on in
+   `m.lastSnapshot.fabrics` and re-enter through the next wholesale
+   clone (route/scheduler republish, manager_overlay.go:188) —
+   recreating the sink through the back door. v8.2: Go writes back
+   the HELPER's accepted fabric set (from the returned status, not
+   its request input) and applies that status immediately, so the
+   pending marks disable ctrl in the same tick — no
+   `ctrl.Enabled=1`-with-dying-XSKs window at all (the v8
+   in-handler reconcile's window is gone with it).
 
+**Completion machinery, durable and provenance-exact (Codex r5
 **Completion machinery, durable and provenance-exact (Codex r5
 BLOCKERs 6 + 8; v8 epoch form per Codex r6 f6/f8):**
 
 - **The defer EPOCH spans apply → MAC → sleep → dispatch →
-  completion return.** Today `clearDeferWorkers()` runs immediately
-  after `ApplyConfig` (daemon_apply_dataplane.go:170) — before
-  `programRethMAC` (:247), before the completion dispatch
+  completion return — and ROLLS OVER on every commit (v8.2, Codex
+  r7 f4's leaking-boolean fix).** Today `clearDeferWorkers()` runs
+  immediately after `ApplyConfig` (daemon_apply_dataplane.go:170) —
+  before `programRethMAC` (:247), before the completion dispatch
   (:393/:401), and before `NotifyLinkCycle`'s deliberate 1s
   quiescence sleep (process_linkcycle.go:184, the mlx5 queue-reuse
   quiescence). v8 splits the two completion flows:
@@ -698,23 +788,53 @@ BLOCKERs 6 + 8; v8 epoch form per Codex r6 f6/f8):**
     fails — then it stays set and the completion debt below owns
     the retry). The desired-state arm-sync stays gated the whole
     time, so no arm and no retry can recreate workers
-    mid-quiescence (Codex r6 f6's EBUSY race).
+    mid-quiescence (Codex r6 f6's EBUSY race). The gate's exact
+    form (AGY r7 f3): an ARM-DIRECTION skip in
+    `syncDesiredForwardingStateLocked` —
+    `if desired && m.deferWorkers { return nil }` — NOT a blanket
+    early return, so the disarm direction is never blocked.
+  - **Epoch rollover (v8.2, Codex r7 f4's counterexample
+    killed):** a stale epoch must never leak into an unrelated
+    config. On EVERY commit, before the snapshot is stamped: if the
+    commit's own `rethMACPending` precheck finds NO MAC work, the
+    manager clears `m.deferWorkers` at compile start (the stale
+    epoch is superseded by a config that needs none), cancels any
+    stale tagged-completion and MAC debts (they are
+    config-generation-scoped and would abandon anyway — this makes
+    the abandonment explicit), and the commit's own non-deferred
+    stamp clears the helper's stored latch via the normal
+    `apply_snapshot` swap. If the commit HAS MAC work, it opens (or
+    replaces) the epoch — cancelling the prior epoch's debts first.
+    An explicit OPERATOR global arm during a window also clears the
+    manager flag (the operator completed the window explicitly —
+    documented). Without rollover, a deferred A whose tagged
+    completion failed would leak `DeferWorkers=true` into every
+    later unrelated compile's stamp — B workerless forever with no
+    MAC completion owner (Codex r7 f4's trace).
 - **Completion requires a SUCCESSFUL prerequisite — and a failed
-  prerequisite gets a PHASE-REVALIDATING debt (v8, Codex r6 f8
-  deepening AGY r6 f2).** `programRethMAC` can fail BEFORE setting
-  the MAC, AFTER setting it but failing `setUp` (returns
-  `(true, error)`, daemon_reth.go:257 — and a later attempt no-ops
-  on the already-installed MAC, :244, never retrying the link-up),
-  or not at all. v8: the completion dispatch fires only on full
-  success; on any failure the daemon records a **MAC-retry debt**
-  (the #5134 debt pattern) that re-VALIDATES BOTH phases on each
-  attempt — desired MAC installed AND link up — and re-drives only
-  the missing one, with autonomous backoff (5s→10s→30s→60s cap) and
-  an edge Warn per phase transition. A permanently broken member
-  interface leaves the box fail-closed, Warn-visible,
-  pending-visible — the operator's to fix. The `complete_deferred`
-  rebind flag is set only when the cycle followed a successful
-  (both-phase) MAC program.
+  prerequisite gets a PHASE-REVALIDATING debt with an
+  accepted-config contract (v8.2, Codex r6 f8 + r7 f6).**
+  `programRethMAC` can fail BEFORE setting the MAC, AFTER setting
+  it but failing `setUp` (returns `(true, error)`,
+  daemon_reth.go:257 — and a later attempt no-ops on the
+  already-installed MAC, :244, never retrying the link-up), or not
+  at all. v8.2: the completion dispatch fires only when EVERY
+  member of the desired set has its MAC installed AND is
+  administratively up; on any failure the daemon records a
+  **MAC-retry debt** keyed on `(m.lastAcceptedConfigGeneration,
+  desired member→MAC set)` that re-VALIDATES BOTH phases on each
+  attempt and re-drives only the missing one, with autonomous
+  backoff (5s→10s→30s→60s cap) and an edge Warn per phase
+  transition. Contract rules: a NEWER accepted config supersedes
+  (cancels) the debt BEFORE any stale MAC work runs — its own
+  `rethMACPending` recompute owns the new epoch; a member REMOVED
+  from config cancels only its own entry (SMR r7 N2); the debt
+  records its completion-mode history (live vs cycle) so the
+  eventual dispatch picks the right path; a permanently broken
+  member leaves the box fail-closed, Warn-visible, pending-visible
+  — the operator's to fix. The `complete_deferred` rebind flag is
+  set only when the cycle followed a successful (both-phase) MAC
+  program.
 - **The completion CONSUMES the latch — on BOTH sides of the
   process boundary (v8, Codex r6 f8's Go-shadow-latch).** Helper
   side: a successful `complete_deferred=true` rebind sets the
@@ -733,24 +853,38 @@ BLOCKERs 6 + 8; v8 epoch form per Codex r6 f6/f8):**
   bringup.rs:30) is safe to retry — a second tagged rebind against
   an already-consumed latch is a no-op convergence over an
   already-bound plan.
-- **The tagged completion RETRY (Codex r6 f7a).** A failed tagged
+- **The tagged completion RETRY (Codex r6 f7a) — and the tag's
+  provenance gate (AGY r7 f1).** A failed tagged
   rebind leaves the latch set and the slots pending; the generic
   untagged retry cannot consume the latch. The completion retry
   therefore re-sends the TAGGED rebind (backoff-shaped, same
   schedule as the generic retry) while the SAME defer epoch is open
   (flag still set, same config generation) — epoch expiry (a newer
-  commit pends its own defer, or a global disarm) abandons it.
-- **#5134 debt is CONFIG-generation-scoped (v8, Codex r6 f8's
-  scope fix).** `RecordDeferredWorkerArmDebt` records the debt with
-  the CONFIG generation at creation (the composite
-  `lastSnapshot.Generation` is wrong: FIB-only bumps
-  (manager_generation.go:69) and resolved-fabric persistence
-  (manager_ha.go:208) advance it without a new config plan, and
-  would wrongly discard live debt). `retryDeferredWorkerArmLocked`
-  fires only while the current CONFIG generation equals the debt's
-  — a stale A debt can never authorize a newer deferred B before
-  B's MAC work (Codex r5 B8), and a mere FIB/fabric bump no longer
-  kills valid debt (Codex r6 f8).
+  commit pends its own defer, or a global disarm) abandons it. The
+  tag itself is issued as `CompleteDeferred:
+  m.deferWorkers && !m.hasActiveMACDebt` (AGY r7 f1): an open
+  defer epoch AND a clean MAC state — so a spurious or flap-driven
+  `NotifyLinkCycle` (or one fired while the MAC-retry debt is
+  active) sends an UNTAGGED rebind instead and can never consume
+  the latch or arm slots against a wrong MAC.
+- **#5134 debt is scoped to the ACCEPTED config generation (v8.2
+  contract, Codex r6 f8 + r7 f6).** The manager gains
+  `m.lastAcceptedConfigGeneration`, advanced ONLY when a config
+  apply SUCCEEDS (`bumpGeneration` at compile success — the
+  composite `lastSnapshot.Generation` is wrong for this purpose:
+  it moves on FIB-only bumps (manager_generation.go:69) and
+  resolved-fabric persistence (manager_ha.go:208), and a FAILED
+  compile's pre-build allocation (manager_compile.go:214) must not
+  move the epoch either). `RecordDeferredWorkerArmDebt` records the
+  debt with `m.lastAcceptedConfigGeneration` at creation;
+  `retryDeferredWorkerArmLocked` fires only while the CURRENT
+  `m.lastAcceptedConfigGeneration` equals the debt's — so a stale A
+  debt can never authorize a newer deferred B before B's MAC work
+  (Codex r5 B8), a FAILED newer compile cancels nothing (it never
+  advanced the accepted epoch), FIB/overlay/fabric-telemetry bumps
+  discard nothing (they never touch it), and the mandatory
+  same-config re-apply's own success advances it — settling the
+  debt exactly once (Codex r7 f6's contract).
 
 **Retry ownership — the Go pending-activation retry, actionable
 form (Codex r5 BLOCKER 7; v8 per Codex r6 f7).** v6 marked pending
@@ -773,11 +907,12 @@ if m.lastStatus.ForwardingArmed &&          // ACTUAL, not desired
                         // convergence arms the pending slots inside
     m.pendingRetryAttempts++
     m.pendingRetryNextAt = now + backoffJitter(attempts) // 5,10,20,60s cap
-    if m.pendingRetryAttempts >= 12 {
+    if m.pendingRetryAttempts == 12 {
         edge-warn once ("bindings stuck pending activation",
                         fingerprint of the failing slots)
-        stop until pendingSetChanges || configEvent || linkEvent
+        // keep probing at the 60s floor — recovery is never capped
     }
+    // a pending-set change / config event / link event resets attempts
 }
 ```
 
@@ -795,23 +930,31 @@ its generation) — documented, and visible in `show`. (iii) the two
 suppressions (debt ownership, completion-in-flight) from v7.1, with
 `completionInFlight` now backed by the defer epoch itself for the
 link-cycle flow (flag set) and an explicit in-flight marker for
-the live-change dispatch. (iv) **backoff with jitter + reset** —
-permanent failures back off to a 60s cap instead of tearing down
-the full worker set every 5s (each cycle: full teardown,
+the live-change dispatch. (iv) **backoff with jitter, rate-capped
+forever, NEVER attempt-capped (v8.2, Codex r7 f5):** permanent
+failures back off to a 60s floor instead of tearing down the full
+worker set every 5s (each cycle: full teardown,
 reconcile/mod.rs:330, the 500ms mlx5 quiescence when workers
 existed, teardown.rs:54, up to 10s readiness wait, bringup.rs:30 —
-all under `m.mu`, process_status.go:162); after ~12 attempts one
-edge Warn with the failure fingerprint; the retry RESETS on any
-pending-set change, config event, or link event (new hope). (v)
-**the status loop is ensured right after `ensureProcessLocked`**
-(before the publish at manager_compile.go:350 and every later error
-exit, :369/:408) — no compile failure path can orphan the retry
-(Codex r6 f7e; the #5873 orphaned-debt pattern generalized). The
-retry carries its own attempt counter, backoff state, failure
-fingerprint, and edge/rate-limited diagnostics (Codex r6 NIT).
-This is NOT option B resurrected: B auto-converged blindly and
-fought operator disarms; the v8 retry only schedules the helper's
-OWN requested activations and changes no armed bit itself.
+all under `m.mu`, process_status.go:162); at attempt ~12 ONE edge
+Warn with the failure fingerprint fires — but the retry CONTINUES
+at the 60s floor indefinitely, because `WorkerSpawn` failures
+include TRANSIENT `pthread_create` EAGAIN/ENOMEM (bringup.rs:49)
+whose recovery needs no state/config/link change, and a terminal
+cap would recreate this issue's permanent sink through the back
+door; the backoff RESETS to 5s on any pending-set change, config
+event, or link event (new hope); the tagged completion retry
+(§5-C) is explicitly EXEMPT from any terminal cap for the same
+reason. (v) **the status loop is ensured right after
+`ensureProcessLocked`** (before the publish at
+manager_compile.go:350 and every later error exit, :369/:408) — no
+compile failure path can orphan the retry (Codex r6 f7e; the #5873
+orphaned-debt pattern generalized). The retry carries its own
+attempt counter, backoff state, failure fingerprint, and
+edge/rate-limited diagnostics (Codex r6 NIT). This is NOT option B
+resurrected: B auto-converged blindly and fought operator disarms;
+the v8 retry only schedules the helper's OWN requested activations
+and changes no armed bit itself.
 
 **Logging (Codex r5 MAJOR 10 = SMR r5 N1 = AGY r5 minor-1, triple
 convergence).** The arm-verb rollback makes the Go desired-loop
@@ -1131,13 +1274,26 @@ activations a scheduled retry.
       DURING the window does NOT converge; (ii) a plain rebind
       DURING the window does NOT converge; (iii) a FAILED tagged
       completion leaves the latch set + slots pending, and the
-      TAGGED completion retry (epoch-scoped) drives recovery —
+      TAGGED completion retry (epoch-scoped, production-scheduled —
+      NOT a manually issued second request) drives recovery —
       assert no untagged retry fires while the epoch is open; (iv)
       during the quiescence sleep the desired arm-sync does NOT
       fire (Go-side test below); (v) a completion dispatched after
       a FAILED MAC program does not fire (daemon-side, below); (vi)
       a route-overlay republish after successful completion does
-      NOT re-latch (Go-side, below).
+      NOT re-latch (Go-side, below); (vii) the Q2 OVERLAP test
+      (Codex r7): a prior S4' pending (failed bring-up) AND a
+      current S3 defer pending coexist — a tagged SUCCESS converges
+      BOTH (plan-scoped), a tagged FAILURE converges NEITHER; (viii)
+      the EPOCH ROLLOVER test (Codex r7 f4): deferred A with a
+      failed tagged completion, then an UNRELATED commit B with no
+      MAC work — B's compile clears the manager flag at compile
+      start (assert), cancels A's stale tagged/MAC debts, publishes
+      B non-deferred (helper latch cleared via the swap), and B's
+      workers bind — no workerless-B sink; (ix) a successor commit
+      WITH MAC work opens a new epoch and cancels the old one first;
+      (x) an explicit operator global arm during the window also
+      clears the manager flag.
   14. **failed bring-up, all shapes + retry (Codex r4-r6):** force
       `WorkerSpawn` and `WorkerBindIncomplete` on (i) expansion
       apply, (ii) E2-only apply, (iii) CONTRACTION apply, (iv)
@@ -1151,29 +1307,41 @@ activations a scheduled retry.
       `enabled == false`, marks SURVIVE; then a successful retry
       converges each.
   15. **operator-override survival + the deletion boundary (Codex
-      r6 f2):** operator-disarm a slot; commit a plan-changing
+      r6 f2, r7 f8):** operator-disarm a slot; commit a plan-changing
       deferred apply + completion — the claimed slot stays
       `armed=false, operator` while the deferred slots converge;
       repeat across the failure path of 14(i) and the flap path of
       7(c-ii); a global arm fan-out afterwards clears the claim
       (C3). PLUS: accepted A with operator-claimed `a`, rejected
       B=[b,c] failing post-teardown — the restored vector CONTAINS
-      `a` still claimed (plain restoration). PLUS the boundary: the
-      claimed slot's candidate drops out (fabric parent invalid /
-      queue count unreadable) — the claim dies WITH the binding;
-      the candidate returns — S5 creates it `pending` and it
-      converges (documented boundary; §10).
+      `a` still claimed (plain restoration). PLUS the three
+      deletion shapes, each killing the claim and re-creating the
+      namesake as S5-pending (which converges): (i) candidate
+      dropout (fabric parent invalid / queue count unreadable) →
+      candidate returns; (ii) RENAME (the linux name changes → the
+      old identity vanishes); (iii) queue-count CONTRACTION (the
+      global-min layout drops the high-queue claimed identity on a
+      healthy interface); and (iv) the boundary is exercised WITH
+      sysfs unreadable during the replan (the guard holds the prior
+      vector, no phantom re-creation).
   16. **coherent-vector invariant + plain restoration + volatile
-      identity (Codex r4 B2, r5 B3/B5, r6 f3):** apply A, apply B
-      (expansion), force B's bring-up to fail post-teardown with a
-      MULTI-WORKER partial spawn (some B workers survive,
-      coordinator/tests.rs:4151's pinned retention): IMMEDIATELY
-      assert the reported vector EQUALS the pre-apply vector
-      (identities + ifindex + claims), all non-operator slots
-      unarmed+pending, AND no restored-A slot reports volatile
-      state from a physically-different surviving B worker (the
-      identity check). Then: (i) a plain rebind binds A's plan and
-      converges (self-heal to last-good); (ii) the
+      identity (Codex r4 B2, r5 B3/B5, r6 f3, r7 f7):** apply A,
+      apply B (expansion), force B's bring-up to fail post-teardown
+      with a MULTI-WORKER partial spawn where ONE worker owns
+      MULTIPLE slots with distinctive socket/error/counter values
+      (not the coordinator/tests.rs:4135 one-slot-per-worker
+      fixture — Codex r7 f7): IMMEDIATELY assert the reported
+      vector EQUALS the pre-apply vector (identities + ifindex +
+      claims), all non-operator slots unarmed+pending, AND no
+      restored-A slot reports volatile state from a
+      physically-different surviving B worker — the identity check
+      compares the PLANNED identity (`workers.identities`,
+      tear-free), so a surviving B worker at slot 2 `(c,q2,if30)`
+      cannot publish into restored-A's slot 2 `(c,q0,if30)` even
+      with relaxed socket stores; and a slot whose live record
+      carries a REAL bind-failure `last_error` KEEPS it (mismatch
+      zeroing preserves the error). Then: (i) a plain rebind binds
+      A's plan and converges (self-heal to last-good); (ii) the
       failed-CONTRACTION shape: `a` is present, pending, and the
       rebind binds it — no enabled=true without an `a` worker;
       (iii) the same-name/new-ifindex shape: the restored vector
@@ -1183,37 +1351,56 @@ activations a scheduled retry.
       #6140 full-apply-leg proof re-anchored to an observable that
       survives the restoration (Codex r6 f3's requirement: the leg
       proof must not depend on the retained-B vector itself).
-  17. **#5134 config-generation scoping + debt-discard (Go +
-      Rust):** deferred apply → failed mandatory re-apply → debt
-      recorded WITH config generation; (i) a plan-changing commit
-      (newer config generation) → the stale debt does NOT fire;
-      (ii) a FIB-only bump / resolved-fabric persist /
-      route-overlay / scheduler publish (config generation
-      UNCHANGED) → the debt STILL fires (Codex r6 f8's scope fix);
-      (iii) the retry's republish (same-plan, generation-bumped)
-      converges without the rebind flag.
+  17. **#5134 accepted-config-epoch contract (Go + Rust, Codex r7
+      f6):** deferred apply → failed mandatory re-apply → debt
+      recorded WITH `m.lastAcceptedConfigGeneration`; (i) a
+      plan-changing SUCCESSFUL commit (accepted generation
+      advances) → the stale debt does NOT fire; (ii) a FAILED
+      newer compile (accepted generation UNMOVED) → the debt STILL
+      fires (a failed compile cancels nothing); (iii) a FIB-only
+      bump / resolved-fabric persist / route-overlay / scheduler
+      publish (accepted generation UNMOVED) → the debt STILL fires
+      (Codex r6 f8's scope fix, contract form); (iv) the retry's
+      republish (same-plan, generation-bumped) converges without
+      the rebind flag, and its success advances the accepted
+      generation — settling the debt exactly once; (v) a newer
+      successful commit with the SAME binding plan (different other
+      content) still supersedes (accepted generation advanced) —
+      the debt does not fire across it.
   18. **same-plan retry deficit (Codex r4 B4 second half):** force
       a spawn failure (retained records with `last_error`), then a
       same-plan apply: the pending-aware deficit predicate MUST
       fire the reconcile, and the reconcile converges the marks.
-  19. **update_fabrics matrix (Codex r5 B4, r6 f4/f5):**
+  19. **update_fabrics matrix (Codex r5 B4, r6 f4/f5, r7 f2/f3):**
       (i) `[] → fab0`: fabric-parent bindings appear as
-      `registered=true, armed=false, pending` and the reconcile
-      converges them; (ii) telemetry-only change (resolved MAC,
-      `up`, peer data): NO replan, NO reconcile, vector untouched,
-      persist happens; (iii) fab0 same name NEW parent_ifindex:
-      that identity marked `pending` (physically unbound) and the
-      reconcile rebinds it on the new ifindex before
-      `enabled=true`; (iv) removal-only change (fab0 → []): the
-      vector shrinks, orphaned workers are torn down by the
-      reconcile — no pending record needed, no stale worker left
-      forwarding; (v) operator claim on a fabric candidate whose
-      parent becomes invalid: claim dies at the deletion boundary
-      (item 15); (vi) killed sysfs-queues dir for an `rx_queues==0`
-      interface during a fabric update: the empty-replan guard
-      keeps the prior vector (telemetry still persists); (vii)
-      rate: two projection changes inside 2s coalesce to one
-      reconcile.
+      `registered=true, armed=false, pending` and the
+      pending-retry/next-apply's rebind binds and converges them;
+      (ii) telemetry-only change (resolved MAC, `up`, peer data):
+      NO replan, NO pending marks, vector untouched, persist
+      happens; (iii) fab0 same name NEW parent_ifindex: EVERY
+      non-operator registered slot is explicitly `armed=false,
+      pending` (the enabled gate closes — the Codex r7 f2 exact
+      form), and the rebind re-binds the identity on the new
+      ifindex before `enabled=true`; (iv) removal-only change
+      (fab0 → []): Rust-test-only today (production cannot encode
+      an explicitly-empty fabrics slice — `omitempty` + Go
+      early-return, protocol.go:83/manager_ha.go:166); in-test: the
+      vector shrinks and orphaned workers are torn down by the
+      next reconcile — no stale worker left forwarding; production
+      removal goes through apply_snapshot and NEVER triggers the
+      guard; (v) operator claim on a fabric candidate whose parent
+      becomes invalid: claim dies at the deletion boundary (item
+      15); (vi) killed sysfs-queues dir for an `rx_queues==0`
+      interface during a fabric update: the guard fires (exact
+      per-candidate skip cause), keeps the prior vector AND the
+      prior projection, `refresh_fabric_links` publishes only the
+      ACCEPTED (prior) projection, telemetry persists — and Go
+      writes back the HELPER's accepted fabrics (NOT its request
+      input), so a later route/scheduler wholesale clone carries
+      the accepted set (the Codex r7 f3 authority fix); (vii)
+      trailing coalesce: two projection changes inside the rate
+      window reconcile the FINAL projection once (not the first,
+      not twice).
 - The fail-fast invariant (Q6, resolved r1): assertions live ONLY
   in tests and only over well-defined planner/activation
   transitions.
@@ -1240,22 +1427,34 @@ activations a scheduled retry.
   tagged-rebind success (link-cycle flow) or just before the
   synchronous live-change re-apply.
 - Manager unit test for the pending-activation retry (v8
-  actionable form): (i) ACTUAL armed + registered+ifindex pending
-  + flag clear + no debt/in-flight → exactly one plain rebind,
-  then backoff 5s→10s→20s→60s (with jitter) on repeated failure;
-  (ii) desired==true but `lastStatus.ForwardingArmed == false`
-  (protocol-gated) → NO rebind; (iii) `registered=false` pending
-  (S1/S2) → NO rebind (replan-only convergence); (iv) attempt cap
-  (~12) → stop + one edge Warn with fingerprint; (v) reset on
-  pending-set change / config event / link event; (vi)
+  actionable form + Codex r7 f5): (i) ACTUAL armed +
+  registered+ifindex pending + flag clear + no debt/in-flight →
+  exactly one plain rebind, then backoff 5s→10s→20s→60s (with
+  jitter) on repeated failure; (ii) desired==true but
+  `lastStatus.ForwardingArmed == false` (protocol-gated) → NO
+  rebind; (iii) `registered=false` pending (S1/S2) → NO rebind
+  (replan-only convergence); (iv) at attempt ~12 ONE edge Warn
+  with fingerprint fires and the retry CONTINUES at the 60s floor
+  (NO terminal cap) — and a recovery at attempt >12 with NO
+  intervening state/config/link event succeeds (the transient
+  EAGAIN/ENOMEM class, Codex r7 f5); (v) reset on pending-set
+  change / config event / link event shortens the backoff; (vi)
   `pendingWorkerArm` set → NO rebind; (vii) completion in-flight →
-  NO rebind; (viii) a failed tagged completion triggers the
-  TAGGED completion retry (epoch-scoped), not the untagged one.
-- Manager unit test for `complete_deferred` provenance: the
-  NotifyLinkCycle path sets it ONLY after a successful (both-phase)
-  MAC program; the busy-watchdog path (maps_sync.go:1484) never
-  sets it; a timeout-but-landed tagged rebind is idempotent on
-  retry.
+  NO rebind; (viii) a failed tagged completion triggers the TAGGED
+  completion retry (epoch-scoped, explicitly exempt from any
+  terminal cap), not the untagged one; (ix) a first-Compile
+  failure (publish error at :350) followed by a production status
+  tick still drives the retry (loop ensured after
+  `ensureProcessLocked`).
+- Manager unit test for `complete_deferred` provenance (v8 + AGY
+  r7 f1/f2): the NotifyLinkCycle path sets
+  `CompleteDeferred: m.deferWorkers && !m.hasActiveMACDebt` — true
+  ONLY with an open defer epoch AND no active MAC debt; a spurious
+  / flap-driven NotifyLinkCycle with the flag clear sends false;
+  a NotifyLinkCycle fired while MAC debt is ACTIVE sends false
+  (the latch survives); the busy-watchdog path
+  (maps_sync.go:1484) never sets it; a timeout-but-landed tagged
+  rebind is idempotent on retry.
 - Manager unit test for the Go latch authority (Codex r6 f8):
   after a successful completion, a route-overlay or scheduler
   republish carries `DeferWorkers=false` (no re-latch).
@@ -1264,15 +1463,24 @@ activations a scheduled retry.
   refusal logs ONCE on the false→true transition, not per tick,
   and once on recovery; a repeated-tick test pins the count.
 - Daemon unit test for the defer-flag epoch + MAC-success gating +
-  MAC debt (Codex r5 B6/B8, r6 f6/f8, AGY r6 f2/f4): the flag is
-  SET through apply → MAC programming → quiescence → dispatch;
-  clears only on completion success; a failed `programRethMAC`
-  suppresses the dispatch, leaves the flag set (assert
-  `m.deferWorkers == true` immediately after), and records the
-  phase-revalidating debt; the "MAC installed, setUp failed"
-  (true, error) shape retries the link-up phase (not the MAC
-  phase); a permanently-failing member leaves the box deferred
-  with an edge Warn.
+  MAC debt contract (Codex r5 B6/B8, r6 f6/f8, r7 f4/f6, AGY r6
+  f2/f4): the flag is SET through apply → MAC programming →
+  quiescence → dispatch; clears only on completion success OR on
+  epoch rollover (a no-MAC-work commit at compile start); a failed
+  `programRethMAC` suppresses the dispatch, leaves the flag set
+  (assert `m.deferWorkers == true` immediately after), and records
+  the phase-revalidating debt keyed on (accepted config
+  generation, desired member→MAC set); the "MAC installed, setUp
+  failed" (true, error) shape retries the link-up phase (not the
+  MAC phase), INCLUDING after a process restart (the debt's
+  desired set is revalidated, not assumed); TWO OR MORE members
+  with order permutations complete only when EVERY member has the
+  desired MAC AND is up; a newer accepted config supersedes the
+  debt BEFORE any stale MAC work runs; a member removed from
+  config cancels only its own entry; live-change vs link-cycle
+  completion modes dispatch on the recorded history; a
+  permanently-failing member leaves the box deferred with an edge
+  Warn.
 - `maps_sync` gate test (AGY r1 f3): synthesized post-expansion
   status (new slots converged) through `probeBindingsReady`/
   `bindingForwardingLive` — ctrl admits, shim rows go READY.
@@ -1329,14 +1537,17 @@ longer binds workers onto a stale MAC.
   correct completion (tagged completion retry); the toggle's
   early-BIND itself is a separate pre-existing issue filed as a
   follow-up.
-- **Operator-claim lifetime at candidate deletion (Codex r6 f2's
-  documented boundary):** an operator-claimed slot whose CANDIDATE
-  drops out of the plan (invalid fabric parent, unreadable queue
-  count) loses the claim WITH the binding — the later namesake is a
-  new binding (S5 pending) with no claim. Durable cross-deletion
-  claims would need a manager-side claim registry (rejected as
-  machinery disproportionate to an ephemeral diagnostic state that
-  already dies at global fan-outs); documented in the server README.
+- **Operator-claim lifetime at planned-identity deletion (Codex r6
+  f2 + r7 f8's boundary, documented):** an operator-claimed slot
+  whose planned `(linux-interface, queue_id)` identity is DELETED —
+  by candidate dropout (invalid fabric parent, unreadable queue
+  count), by rename (the linux name changes), or by queue-count
+  contraction (the global-min layout dropping high-queue identities)
+  — loses the claim WITH the binding; the later namesake is a new
+  binding (S5 pending) with no claim. Durable cross-deletion claims
+  would need a manager-side claim registry (rejected as machinery
+  disproportionate to an ephemeral diagnostic state that already
+  dies at global fan-outs); documented in the server README.
 - **Operator-claim registration degradation across a flap** (kept
   from v7): an operator-claimed slot whose interface flaps recovers
   as `registered=false, operator` — no-forward intent survives
@@ -1363,61 +1574,66 @@ longer binds workers onto a stale MAC.
 
 ## 11. Open questions for adversarial review
 
-Resolved across rounds 1-6 (for the record): Q2, Q5, Q6, Q7,
+Resolved across rounds 1-7 (for the record): Q2, Q5, Q6, Q7,
 applied-vs-requested init, full fan-out vs scoped, Q3 (uniform S3),
-Q5-toggle, Q7-boot, the plan gate (deleted), the failure-path
-replan (deleted), E2's operator arm (deleted), C2's discriminator
-(result-based semantics instead), the latch signature/atomicity,
-the retry's fixed-5s shaping, the transient-MAC stranding, the
-update_fabrics wrong-physical hazard, the Go shadow-latch, the
-quiescence race, the debt generation scope.
+Q5-toggle, Q7-boot, the plan gate (deleted), the failure-path replan
+(deleted), E2's operator arm (deleted), C2's discriminator (result-
+based), the latch signature/atomicity, the retry's fixed-5s shaping,
+the transient-MAC stranding, the update_fabrics wrong-physical
+hazard, the Go shadow-latch, the quiescence race, the debt
+generation scope, the in-handler fabric reconcile (replaced by
+mark-all-pending + retry-driven bind), the guard authority split,
+the leaking epoch (rollover), the terminal retry cap (rate-capped
+forever), the torn identity check (planned identity), the claim
+boundary (any planned-identity deletion), Q2 convergence scope
+(plan-scoped, confirmed sound).
 
-Remaining questions for round 7, each invitable to PLAN-KILL with a
+Remaining questions for round 8, each invitable to PLAN-KILL with a
 concrete counterexample:
 
-1. **Tri-state + boundary completeness, final form.** Exhibit a
-   path to `Registered && !Armed` with `activation_state == none`
-   that is NOT global-fan-out-created, NOT operator-created, and
-   NOT a deletion-boundary re-creation (documented) — an unowned
+1. **Completeness, final form.** Exhibit a path to
+   `Registered && !Armed` with `activation_state == none` that is
+   NOT global-fan-out-created, NOT operator-created, NOT a
+   documented deletion-boundary re-creation, and NOT an
+   enabled-gate-explicit `armed=false` pending mark — an unowned
    producer that strands D-silent.
-2. **The tagged completion retry vs the generic retry's overlap,
-   final form.** A failed tagged completion opens the tagged retry
-   (epoch-scoped); the generic retry is suppressed while the epoch
-   is open (flag set) — but what if the epoch is open AND a
-   NON-defer pending exists from an unrelated cause (a prior S4'
-   mark)? The generic retry's suppression (flag set) also covers
-   it; the tagged retry's convergence only arms pendings
-   defer-authorized by the latch... the tagged rebind's
-   `complete_deferred=true` authorizes convergence of ALL pendings,
-   not just defer-created ones — is that over-reach acceptable (the
-   rebind genuinely re-binds the whole current plan) or must the
-   convergence track WHICH pendings each authorization covers?
-3. **The volatile identity check vs multi-queue workers.** One
-   worker owns MULTIPLE slots (queue_id % workers grouping). The
-   live record is per-slot (workers.live keyed by slot,
-   refresh_bindings.rs:25) with per-slot
-   `socket_ifindex`/`socket_queue_id` — confirm the identity check
-   is per-slot-correct (no cross-slot bleed within a worker), or
-   specify the record shape needed.
-4. **The empty-replan guard's false-positive case.** A legitimate
-   full removal (operator deletes all zoned interfaces in one
-   commit) produces an empty plan INTENTIONALLY. The guard keeps
-   the prior vector only when the emptiness is
-   sysfs-transient-caused (rx_queues==0 candidates that were
-   previously resolvable). Is the guard's discriminator
-   (removal-in-config vs unreadable-sysfs) implementable from the
-   snapshot alone, or does it need the prior vector's rx_queues
-   provenance?
-5. **Cumulative blast-radius check (carried from r6 unanswered).**
-   The diff now spans the helper planner + status/convergence + one
-   coordinator predicate, two additive wire fields, the Go manager
-   (D, arm gate, two retries, two debts, edge-triggered warn,
-   latch authority), and the daemon apply ordering (defer epoch,
-   MAC-success gating, MAC debt). Should any piece split into a
-   follow-up PR — the daemon MAC debt is the most separable, the
-   pending-activation retry the second — or does the coherence
-   argument (each piece closes a door another opens) hold the PR
-   together? Reviewers: pick the split line or reject splitting.
-6. **Round-6 disposition table audit.** §1's table maps every r6
-   finding to its v7.1/v8 fold. Which row is claimed-but-wrong
+2. **The mark-all-pending fabric gate's outage shape.** An
+   accepted fabric projection change now takes the WHOLE dataplane
+   fail-closed (all non-operator slots unarmed) until the
+   pending-retry's first rebind (≤5s initial backoff) — a total
+   outage per fabric projection change, on a path that also fires
+   during HA fabric churn (rate-capped). Is the alternative
+   (in-handler reconcile with a Go fail-closed transaction
+   wrapper, ~10s ctrl=0 but converged atomically) actually worse,
+   and on which metric (window length, complexity, deadlock
+   surface)? Pick one and defend the pick.
+3. **The lastAcceptedConfigGeneration advance points.** The
+   contract advances the epoch ONLY on accepted config commits.
+   Name every production path that can move it and confirm the
+   debts behave: compile success, mandatory re-apply success,
+   config sync from the HA peer, rollback (commit revert to an
+   OLDER config — does the epoch roll back too, and do debts from
+   the newer generation strand?), `commit confirmed` auto-revert.
+4. **The epoch rollover vs a mid-commit defer.** A commit whose
+   OWN apply defers (MAC work) opens the epoch at compile start —
+   but the rollover bullet also runs at compile start. Order them
+   exactly: rollover (cancel stale) THEN open (set flag for this
+   commit). Any interleaving where the new epoch is cancelled by
+   its own rollover?
+5. **The volatile identity check vs fabric parent re-keying.** A
+   VLAN-orphan child's bindings key on the PARENT netdev; the
+   planned identity in `workers.identities` is the candidate's
+   (parent name, parent ifindex, queue). The binding record carries
+   the same. Any case where the planned identity and the binding's
+   `(interface, ifindex, queue_id)` legitimately differ (making the
+   check zero out a HEALTHY slot)?
+6. **Round-7 disposition table audit.** §1's table maps every r7
+   finding to its v8.1/v8.2 fold. Which row is claimed-but-wrong
    this time?
+7. **Split-line confirmation (Codex r7's own answer).** Codex r7
+   said: do NOT split the MAC debt or pending retry (load-bearing);
+   option D is the only safe split. Confirm or deny with a
+   dependency argument: is D truly independent (the warn predicate
+   + manager test ride no other v8.2 mechanism beyond the wire
+   field), or does splitting it leave the issue's third leg
+   (detection) unaddressed in the PR that owns the model?

@@ -141,7 +141,7 @@
   [= AGY f3/f4], N2 MAC-failure corner doc [= AGY f2], N3 latch write
   ordering [= AGY f1]).
 
-## Round 7 (plan v8 @ pending)
+## Round 6 (plan v7 @ 3e388fde8)
 
 - **Codex r6** — background bash task `b8qo89ua3`; output
   `/tmp/codex-6749-r6.out`; verdict doc `codex-plan-r6.md`. Verdict:
@@ -154,6 +154,31 @@
   first-Compile orphans); Go re-latches Rust via wholesale snapshot
   clones + wrong debt scope (FIB bumps) + MAC-set/link-up-failed
   phase loss; + 2 MAJOR tests + 1 NIT retry observability).
-- Codex r7 — pending dispatch.
-- AGY r7 — pending dispatch.
-- Claude SMR r7 — pending.
+
+## Round 7 (plan v8 @ ee2f548d8)
+
+- **Codex r7** — background bash task `bl3eothhw`; output
+  `/tmp/codex-6749-r7.out`; verdict doc `codex-plan-r7.md`. Verdict:
+  DEMAND-REVISION (6 BLOCKER — update_fabrics not a fail-closed
+  Go→Rust transaction + pending-only mark doesn't close the enabled
+  gate; guard authority split Rust/Go; leaking defer epoch (needs
+  rollover); terminal retry cap recreates the sink; debt/config-epoch
+  contracts not implementable as stated; socket-tuple identity check
+  tears on relaxed stores; + 3 MAJOR — claim boundary contradiction,
+  Q2 sound + overlap test, tests/split-line).
+- **AGY r7** — background bash task `b9tm0qwts` (trimmed prompt
+  `/tmp/agy-6749-r7b-prompt.txt` after the 2505-line r7 prompt hit
+  E2BIG; first attempt `bblk9uveu` failed "Argument list too long");
+  output `/tmp/agy-6749-r7b.out`; verdict doc `agy-plan-r7.md`.
+  Verdict: PLAN-READY-WITH-NITS (MAJOR f1: tag must gate on
+  !hasActiveMACDebt; MINOR f2: test for it; NIT f3: arm-sync gate as
+  explicit arm-direction skip).
+- **Claude SMR r7** — `claude-smr-plan-r7.md`. Verdict:
+  PLAN-READY-WITH-NITS (N1 exact empty-guard discriminator; N2 MAC
+  debt member-removal cancellation; N3 plan-scoped convergence note).
+
+## Round 8 (plan v8.2 @ pending)
+
+- Codex — pending dispatch.
+- AGY — pending dispatch.
+- Claude SMR — pending.
