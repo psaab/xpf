@@ -214,8 +214,17 @@
   liveness [= AGY f3]; N4 timeout-landed convergence path; N5
   dropped-queue errors + reverse-sync notes).
 
-## Round 10 (plan v8.4 @ pending)
+## Round 9, Codex verdict (v8.3 @ e7b835f73)
 
-- Codex — pending dispatch (r9 verdict folds first if it lands).
+- **Codex r9** — background bash task `bo6f1zwek`; output
+  `/tmp/codex-6749-r9.out`; verdict doc `codex-plan-r9.md`. Verdict:
+  DEMAND-REVISION (2 BLOCKER — pre-disable insufficient without
+  failure semantics + UNKNOWN cache divergence; reset clock event
+  storm; + 4 MAJOR — invariant/error contradictions, test holes, HA
+  authority, lost-ACK latch + nil-config teardown).
+
+## Round 10 (plan v8.5 @ 867d12166)
+
+- Codex — pending dispatch.
 - AGY — pending dispatch.
 - Claude SMR — pending.
