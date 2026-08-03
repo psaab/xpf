@@ -551,9 +551,16 @@ record's identity frees only when `per_worker` is empty AND
   provenance — or negotiated sender-side alias omission" — is adopted:
   - **New+new path: negotiated sender-side alias omission.** The
     receiver advertises an additive "omit forward-wire aliases"
-    capability in the cluster sync handshake (old peers ignore the
-    field — sync continues with legacy behavior; the handshake/lifecycle
-    lives at pkg/cluster/sync.go:295). A sender that honors the
+    capability (old peers ignore it — sync continues with legacy
+    behavior). The channel must work on UNAUTHENTICATED clusters too
+    (AGY r14 minor 1: `performSyncHandshake`, sync_auth.go:331-334, is
+    bypassed when no auth key is configured — `handleNewConnection`,
+    sync_conn.go:100-137, opens the stream with no setup handshake —
+    so the capability rides EITHER a zero-key `syncMsgAuthHello` frame
+    at connect OR an additive post-connect message such as a new
+    `syncMsgCapability` or an extension of `syncMsgClockSync`,
+    sync_conn.go:137; the implementer picks one, both additive and
+    old-peer-ignorable). A sender that honors the
     capability SKIPS the alias derivation entirely (the
     `delta.FabricRedirect && !delta.FabricIngress` alias queue branch,
     daemon_ha_userspace_stream.go:370/379) — zero alias upserts, zero
@@ -594,7 +601,12 @@ record's identity frees only when `per_worker` is empty AND
       arrives (a canonical row whose forward-wire form equals the
       quarantined key with an identical NatDecision and, when non-zero,
       an equal RTFlowSessionID — the r6-r8 predicate, reliable for an
-      actual pair). On timeout the entry is ADMITTED as a canonical row:
+      actual pair). On timeout the entry is ADMITTED as a canonical row
+      by DISPATCHING THE STORED FRAME INTO THE STANDARD import pipeline
+      (`SessionSync.importSession` / `bulkRecv`), so generation
+      tracking, sequence numbers, and the helper dispatch
+      (`WorkerCommand::UpsertSynced`) execute identically to
+      non-quarantined frames (AGY r14 nit 2):
       this is the genuine self-NAT case, the identity-NPTv6
       fabric-redirect case (no alias is ever derived for it —
       daemon_ha_userspace_convert.go:511 returns false when wire == key),
@@ -787,7 +799,9 @@ alias-ignored counter of §5.6 — no helper wire involvement):
   legacy window (a fabric alias importing into its own base's identity —
   indistinguishable from a genuine conflict by construction, hence
   fail-closed there; on the negotiated-omission path aliases never
-  conflict at all) — SMR r9 N17.
+  conflict at all) — SMR r9 N17 — and that NON-ZERO counts are EXPECTED
+  during a mixed-version rolling upgrade while receiving from legacy
+  senders (AGY r14 nit 3).
 - `xpf_userspace_session_sync_forward_wire_alias_ignored_total` —
   GO-side Prometheus counter for fabric forward-wire alias rows
   confirmed-dropped from the receiver-side quarantine (§5.6; a routine
