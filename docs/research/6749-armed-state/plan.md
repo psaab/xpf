@@ -1,6 +1,6 @@
 # #6749 — binding-plan expansion registers new slots unarmed, dataplane disabled indefinitely
 
-**Status: DRAFT v8.3 — pending adversarial plan review (round 9)**
+**Status: DRAFT v8.4 — pending adversarial plan review (round 10)**
 
 - Issue: #6749 (opus-review-001 root R06, severity High)
 - Research base: `ad9591177` (origin/master at worktree creation)
@@ -16,22 +16,30 @@
   PLAN-READY-WITH-NITS); v8.1 (AGY r7 f1/f3 + SMR r7 N1-N3 folds);
   v8.2 (Codex r7 folds) @ `f84e0827a` (r8: Codex DEMAND-REVISION;
   AGY PLAN-READY; SMR PLAN-READY-WITH-NITS); v8.2.1 @ `c15a99796`
-  (AGY r7 leftovers + SMR r8 nits); v8.3 folds Codex r8: two-phase
-  defer precheck (MAC mismatch OR link down — restart-safe by
-  construction), MAC debt lifecycle from epoch opening with applySem
-  serialization (Codex r8 f4), Go fabric pre-disable +
-  unknown-outcome fail-closed + honest ~15s budget (Codex r8 f5),
-  identity-keyed last_error attribution (Codex r8 f6), immutable
-  reset fingerprint with pull-earlier-only clock (Codex r8 f7),
-  rollover actions at compile ACCEPTANCE with failed-successor
-  debt survival (Codex r8 f9), operator arm clears the helper
-  latch too, and the r8 test matrix (Codex r8 M8).
+  (AGY r7 leftovers + SMR r8 nits); v8.3 folds Codex r8 (two-phase
+  precheck, epoch-open MAC debt with applySem, Go fabric
+  pre-disable, acceptance-time rollover, reset clock,
+  identity-keyed error attribution, r8 test matrix) @ `e7b835f73`
+  (r9: AGY DEMAND-REVISION; SMR PLAN-READY-WITH-NITS; Codex in
+  flight); v8.4 folds AGY r9 + SMR r9: the precheck reverts to
+  MAC-mismatch-only for epoch opening with a three-bucket
+  classification (MAC mismatch → epoch; correct-MAC-link-down →
+  link-recovery debt entry with NO epoch — an unplugged cable must
+  never take the whole dataplane down, AGY r9 f1; restart-safe per
+  Codex r8 f4 via the recovery entry), in-flow synchronous
+  settlement of the initial programRethMAC's validated phases and
+  settlement-EVENT-driven tagged dispatch (the AGY r9 f2 deadlock),
+  fabric pre-disable with no liveness reset on guard-hits
+  (AGY r9 f3 = SMR r9 N3), operator-arm retry-clock reset
+  (AGY r9 f4), CLI display pinned to JSON+verbose (AGY r9 f5), and
+  the timeout-landed convergence + dropped-queue-error +
+  reverse-sync doc notes (SMR r9 N4/N5).
 
 ---
 
 ## 1. Status
 
-DRAFT v8.3 — pending adversarial plan review round 9 (Codex + AGY +
+DRAFT v8.4 — pending adversarial plan review round 10 (Codex + AGY +
 Claude SMR). Convergence target: PLAN-READY (recommended path shipped
 to `/engineer`) or PLAN-KILL. No production code is written under
 `/research`.
@@ -220,6 +228,39 @@ to `/engineer`) or PLAN-KILL. No production code is written under
   | Codex M8 tests | CLOSED — §9 items 12/13/14/16/17/19 + Go retry reset-clock cases + MAC fresh-daemon restart and positive-provenance pins |
   | AGY r8 PLAN-READY | (clean pass) |
   | SMR r8 N1/N2/N3 | CLOSED v8.2.1 — rollover ordering sentence, mixed-update whole-defer rule, claimed-slot rebind assurance |
+
+- **Round 9** (v8.3): AGY DEMAND-REVISION (2 BLOCKER + 1 MAJOR + 1
+  MINOR + 1 NIT); SMR PLAN-READY-WITH-NITS (5 doc nits); Codex in
+  flight at v8.4 fold time. AGY's round: the two-phase precheck
+  (`mac != desired || !linkUp`) opens a defer epoch on EVERY commit
+  while any member link is down — an unplugged cable then gates the
+  arm-sync AND the pending retry forever, taking the whole
+  dataplane down over one dead member (this issue's outage mode,
+  reproduced by the v8.3 precheck); the epoch-open debt deadlocks
+  the FIRST tagged rebind (the background debt task can't settle
+  while applySem is held in the apply flow, so
+  `deferWorkers && !hasActiveMACDebt` evaluates false at the
+  dispatch and the untagged rebind never consumes the latch —
+  needs in-flow synchronous settlement of the initial
+  programRethMAC's validated phases, and the debt's full-settlement
+  EVENT must dispatch the tagged completion itself); the fabric
+  pre-disable must not reset `neighborsPrewarmed` on a guard-hit
+  (nothing changed helper-side — the next poll's normal readiness
+  gate re-enables in ~1 tick; reset only on accepted projection
+  changes); operator arm must reset the pending-retry clock
+  (attempts + nextAt); and `activation_state` display must be
+  pinned to JSON + verbose only (non-verbose CLI layout unchanged).
+- **Round-9 disposition table:**
+
+  | r9 finding | v8.4 disposition |
+  |---|---|
+  | AGY f1 two-phase precheck outage | CLOSED — precheck reverts to MAC-mismatch-only for epoch opening; three-bucket classification: MAC mismatch → epoch, correct-MAC-link-down → link-recovery debt entry with NO epoch/latch/pending marks (healthy dataplane keeps forwarding; the Codex r8 f4 restart case is restart-safe via the recovery entry, not an epoch) (§5-C) |
+  | AGY f2 epoch-open deadlock | CLOSED — the initial programRethMAC IS validation pass 1 and settles validated phases in the debt SYNCHRONOUSLY in-flow before the dispatch is evaluated; a fully-successful first attempt fires the tag in the same flow; and the debt's full-settlement EVENT dispatches the tagged rebind itself (the retry path's completion) (§5-C) |
+  | AGY f3 pre-disable prewarm reset | CLOSED — the fabric pre-disable is a plain ctrl.Enabled=0 write; liveness/prewarm resets happen only on ACCEPTED projection changes (§5-C, §7; = SMR r9 N3) |
+  | AGY f4 retry clock on operator arm | CLOSED — any operator arm (global or per-binding) resets pendingRetryAttempts and pendingRetryNextAt to zero (§5-C) |
+  | AGY f5 CLI scope | CLOSED — `activation_state` pinned to JSON + verbose only; non-verbose CLI layout byte-identical (§6) |
+  | SMR r9 N1-N5 | CLOSED — N1 out-of-band admin-down = config-authoritative drift (folded into the three-bucket text); N2 first-validation-is-synchronous (folded into the settlement text); N3 = AGY f3; N4 timeout-landed convergence via #4036 exact-equal retry + completion machinery (no mirror rollback needed); N5 dropped-queue errors die with the identity, reverse-sync arrives only as rollback (both covered by existing contracts) |
+  | Codex r9 | in flight on v8.3 @ e7b835f73 at v8.4 fold time; its verdict folds into the next revision |
 
 ### Round-1 detail log (kept for the record)
 
@@ -739,7 +780,16 @@ binding and must never be copied onto the restored identity (the
 restored record keeps only its own pre-restoration diagnostic). Volatile state is then reported
 only for the physical binding it belongs to, in every window
 (deferred, failure, reshuffle). This is the ONLY coordinator-side
-change in the PR.
+change in the PR. Two boundary notes (SMR r9 N5): a bind error
+for a queue the restored plan DELETED dies with the identity (the
+mismatch case already refuses the copy; the queue no longer
+exists in the accepted config and the failure was surfaced at
+apply time) — consistent with the claim-deletion boundary; and
+the cluster's config-sync monotonicity (newest-wins at the
+configstore) means a peer-reverse-synced OLDER config only ever
+lands as a deliberate rollback, which the accepted-generation
+contract already supersedes by design — no generation floor is
+needed.
 
 **INVARIANT 2 (coherent vector), completed — `update_fabrics`
 replans (Codex r5 BLOCKER 4, projection-scoped in v8 per Codex r6
@@ -813,13 +863,22 @@ pay nothing). On a PROJECTION change, the handler:
    recreating the sink through the back door. v8.3's Go
    transaction: (i) whenever the REQUESTED projection differs from
    the cached accepted projection, Go disables ctrl BEFORE sending
-   the RPC (the #4959 fail-closed pattern — a response
-   timeout/EOF after the helper committed the projection and
-   marked the vector, process_control.go:129 permitting
-   response-read failure after send, can otherwise leave
+   the RPC — a PLAIN `ctrl.Enabled=0` write that touches NO
+   liveness state (v8.4, AGY r9 f3 = SMR r9 N3: a guard-hit or
+   rejected response changed nothing helper-side, so
+   `neighborsPrewarmed`/`ctrlEnableAt`/`xskLivenessProven` are
+   reset ONLY when the helper ACCEPTED a projection change that
+   marked bindings pending — i.e. a real rebind is coming; on a
+   guard-hit the next poll's normal readiness gate
+   (`probeBindingsReady && neighborSyncReady`,
+   maps_sync.go:486) re-enables ctrl in ~1 tick with no
+   re-prewarm delay). The fail-closed pattern still applies: a
+   response timeout/EOF after the helper committed the projection
+   and marked the vector (process_control.go:129 permitting
+   response-read failure after send) must not leave
    `ctrl.Enabled=1` with stale READY rows against dying XSKs for a
    full poll interval, or indefinitely under persistent control
-   failure); (ii) on a clean response Go writes back the HELPER's
+   failure; (ii) on a clean response Go writes back the HELPER's
    accepted fabric set (from the returned status, not its request
    input) and applies that status immediately, so the pending
    marks keep ctrl disabled in the same tick; (iii) on an UNKNOWN
@@ -893,7 +952,16 @@ BLOCKERs 6 + 8; v8 epoch form per Codex r6 f6/f8):**
     pre-acceptance rolls the flag back to its prior value and
     leaves the stale debts ALIVE (still generation-matched to the
     last accepted config) — the old epoch and its retry owners
-    survive a failed successor instead of being cancelled by it.
+    survive a failed successor instead of being cancelled by it. The helper side needs NO mirror rollback (SMR r9 N4): the
+    stamp only exists inside the publish path
+    (manager_compile.go:330), so a pre-acceptance failure either
+    never reached the helper, was rejected with the helper keeping
+    prior state (#3766/#3789 capture-restore), or LANDED as
+    timeout-but-landed — and the last case converges through the
+    existing #4036 exact-equal idempotent-retry semantics (a retry
+    re-sending the same (generation, fib) pair is accepted
+    exact-equal) plus the completion machinery that owns the
+    latch.
     An explicit OPERATOR global arm during a window also clears the
     manager flag (the operator completed the window explicitly —
     documented). Without rollover, a deferred A whose tagged
@@ -914,28 +982,63 @@ BLOCKERs 6 + 8; v8 epoch form per Codex r6 f6/f8):**
   `setUp` (returns `(true, error)`, daemon_reth.go:257 — and a
   later attempt no-ops on the already-installed MAC, :244, never
   retrying the link-up), or not at all. v8.3's contract:
-  - **The precheck checks BOTH phases per member (Codex r8 f4's
-    restart case):** the `rethMACPending` computation
-    (daemon_apply_dataplane.go:45-70) becomes
-    `mac != desired || !linkUp` per desired member — so a daemon
-    restart after "MAC installed, setUp failed" (boot sees the
-    CORRECT MAC but a DOWN member) reopens the epoch and
-    reconstructs the debt from the ACTIVE config, with no separate
-    reconstruction rule needed (the boot precheck is the same code
-    path). The debt is therefore restart-safe by construction, not
-    by a promise.
-  - **The MAC debt lifecycle starts at epoch OPENING (positive
-    provenance, Codex r8 f4's gate fix):** when the epoch opens
-    (defer flag set), the debt opens in phase-validation-pending
-    state and settles only when EVERY member of the desired set
-    has its MAC installed AND is administratively up — so
+  - **The precheck opens an epoch only on MAC MISMATCH; a DOWN
+    member with a CORRECT MAC is link-recovery, never an epoch
+    (v8.4, Codex r8 f4 reconciled with AGY r9 f1).** The
+    `rethMACPending` computation (daemon_apply_dataplane.go:45-70)
+    stays `mac != desired` per desired member for the epoch
+    decision: the defer epoch exists to avoid the mlx5 zero-copy
+    EBUSY of MAC PROGRAMMING's link cycle, which only exists when
+    the MAC actually needs changing. A member that is
+    administratively/carrier down with the MAC already correct
+    (unplugged cable, standby member, or the
+    restart-after-"MAC installed, setUp failed" case Codex r8 f4
+    raised) requires NO MAC programming and therefore NO epoch —
+    opening one there would set `deferWorkers=true` on every
+    commit while the cable stays out, gating the arm-sync AND the
+    pending-retry forever and taking the WHOLE dataplane down over
+    one dead member (AGY r9 f1's reproduction of this issue's
+    outage mode through the v8.3 precheck). Instead the boot/apply
+    precheck classifies each desired member into exactly one of
+    three buckets: (i) MAC MISMATCH → epoch opens (both phases);
+    (ii) MAC CORRECT but LINK DOWN → a link-recovery entry in the
+    MAC debt (link-up phase only, NO epoch, NO latch, NO pending
+    marks — the healthy dataplane forwards normally on every other
+    interface while the debt re-drives the member's `setUp`; the
+    restart case is thus restart-safe by construction WITHOUT an
+    epoch); (iii) MAC CORRECT and LINK UP → nothing. An
+    out-of-band admin-down of a CONFIGURED RETH member is
+    config-authoritative drift (SMR r9 N1): nothing happens until
+    the next commit, whose bucket-(ii) recovery entry brings the
+    member back up — and the commit never waits for it.
+  - **The MAC debt lifecycle starts at epoch OPENING, with
+    SYNCHRONOUS in-flow settlement and settlement-driven dispatch
+    (v8.4, Codex r8 f4's gate fix + AGY r9 f2's deadlock fix):**
+    when the epoch opens (defer flag set), the debt opens in
+    phase-validation-pending state with every member unvalidated,
+    and settles only when EVERY member of the desired set has its
+    MAC installed AND is administratively up. The INITIAL
+    `programRethMAC` in the apply flow IS validation pass 1 —
+    synchronous, applySem-held — and its per-member results settle
+    the validated phases IN THE DEBT, in-flow, before the
+    completion dispatch is evaluated (AGY r9 f2's deadlock: without
+    in-flow settlement, the tag would evaluate
+    `deferWorkers && !hasActiveMACDebt` against a debt the
+    background task could not yet settle — applySem was held — and
+    send an UNTAGGED rebind that never consumes the latch,
+    stranding the epoch forever). So
     `complete_deferred = m.deferWorkers && !m.hasActiveMACDebt`
-    means "epoch open AND all prerequisites VALIDATED", never
-    merely "no failure recorded yet" (the v8.1 negative formula
-    would let a tag fire in the gap between epoch opening and the
-    first validation attempt). The debt re-drives only the missing
-    phase per attempt, with autonomous backoff (5s→10s→30s→60s
-    cap) and an edge Warn per phase transition.
+    means "epoch open AND all prerequisites VALIDATED", and on a
+    fully-successful first attempt it fires in the SAME flow. On a
+    partial or failed first attempt the unvalidated phases stay
+    pending (debt active), completion is suppressed, and the
+    autonomous retry drives them after applySem releases — and
+    CRITICALLY, the debt's FULL-SETTLEMENT EVENT dispatches the
+    tagged completion ITSELF (the retry path's completion: when the
+    last pending phase validates, the debt issues the tagged rebind
+    rather than waiting for an unrelated event). The debt re-drives
+    only the missing phase per attempt, with autonomous backoff
+    (5s→10s→30s→60s cap) and an edge Warn per phase transition.
   - **The debt participates in the daemon's apply serialization
     (Codex r8 f4's mutation race):** each autonomous attempt
     acquires `applySem` (daemon.go:485 — the same semaphore as
@@ -977,7 +1080,12 @@ BLOCKERs 6 + 8; v8 epoch form per Codex r6 f6/f8):**
   dual-cache afterlife: without it the stored `defer_workers=true`
   would block convergence of FUTURE pendings until the next apply —
   the operator completed the window explicitly, so the window
-  closes on both sides at once).
+  closes on both sides at once). And ANY operator arm (global or
+  per-binding) resets the pending-retry clock (v8.4, AGY r9 f4):
+  `m.pendingRetryAttempts = 0` and `m.pendingRetryNextAt` zeroed —
+  an operator who armed the system after a deep backoff expects the
+  next pending state to retry at the 5s initial interval, not at
+  the inherited 60s floor.
 - **The tagged completion RETRY (Codex r6 f7a) — and the tag's
   provenance gate (AGY r7 f1).** A failed tagged
   rebind leaves the latch set and the slots pending; the generic
@@ -1190,8 +1298,10 @@ activations a scheduled retry.
   pending-activation retry, and the #5134 generation scoping are
   manager-internal). Daemon-internal ordering changes (defer-flag
   lifetime, MAC-success gating) do not alter any interface.
-- **CLI / `show` output:** unchanged shape; `activation-state` may
-  surface in verbose binding output as an additive display field.
+- **CLI / `show` output:** unchanged shape; `activation_state`
+  surfaces ONLY in JSON and verbose binding output (v8.4, AGY r9
+  f5) — the non-verbose CLI text layout is byte-identical, so
+  existing parsing scripts keep working.
 - **Pinned behavior changes (each reviewer-sanctioned through
   rounds 3-5):**
   1. The #4952/#5143 post-teardown failure path now restores the
@@ -1685,7 +1795,25 @@ activations a scheduled retry.
   intervention; and the provenance test pins the POSITIVE
   current-epoch form: the tag fires only when the epoch is open
   AND the debt has settled (all phases validated for the current
-  desired set), never merely in the absence of a recorded failure.
+  desired set), never merely in the absence of a recorded failure. And the v8.4 mechanics
+      (AGY r9 f1/f2/f3/f4): the THREE-BUCKET precheck — (i) MAC
+      mismatch → epoch opens; (ii) MAC correct + link down →
+      link-recovery entry ONLY (assert NO epoch, NO latch, NO
+      pending marks, and the healthy dataplane forwards: the AGY
+      r9 f1 case — an unplugged cable on one member must NOT
+      disable the dataplane); (iii) MAC correct + link up →
+      nothing; the in-flow settlement — a fully-successful first
+      programRethMAC settles the debt synchronously and the tag
+      fires IN THE SAME FLOW (assert CompleteDeferred=true reaches
+      the helper — the AGY r9 f2 deadlock shape); a
+      partially-failed first attempt suppresses completion until
+      the debt's full-settlement EVENT dispatches the tagged
+      rebind itself (not an unrelated event); the fabric
+      pre-disable does NOT reset neighborsPrewarmed on a guard-hit
+      (ctrl re-enables on the next poll's normal readiness gate)
+      but DOES reset it on an accepted projection change; and any
+      operator arm (global or per-binding) resets
+      pendingRetryAttempts/pendingRetryNextAt to zero.
 - `maps_sync` gate test (AGY r1 f3): synthesized post-expansion
   status (new slots converged) through `probeBindingsReady`/
   `bindingForwardingLive` — ctrl admits, shim rows go READY.
@@ -1850,6 +1978,7 @@ concrete counterexample:
    + manager test ride no other v8.2 mechanism beyond the wire
    field), or does splitting it leave the issue's third leg
    (detection) unaddressed in the PR that owns the model?
+
 
 
 

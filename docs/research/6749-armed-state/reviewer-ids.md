@@ -195,8 +195,27 @@
   PLAN-READY-WITH-NITS (N1 rollover ordering, N2 mixed-update
   whole-defer, N3 claimed-slot rebind assurance).
 
-## Round 9 (plan v8.3 @ pending)
+## Round 9 (plan v8.3 @ e7b835f73)
 
-- Codex — pending dispatch.
+- **Codex r9** — background bash task `bo6f1zwek`; IN FLIGHT on v8.3
+  at v8.4 fold time; output `/tmp/codex-6749-r9.out`.
+- **AGY r9** — background bash task `bh7r5snyo` (prompt trimmed to
+  122,243 bytes — the agy argv ceiling is ~127KB); output
+  `/tmp/agy-6749-r9.out`; verdict doc `agy-plan-r9.md`. Verdict:
+  DEMAND-REVISION (2 BLOCKER — two-phase precheck disables the whole
+  dataplane on any down member; epoch-open debt deadlocks the first
+  tagged rebind (applySem held during the flow); + 1 MAJOR —
+  pre-disable resets neighborsPrewarmed on guard-hits; + 1 MINOR —
+  operator arm must reset the retry clock; + 1 NIT — CLI display
+  scope).
+- **Claude SMR r9** — `claude-smr-plan-r9.md`. Verdict:
+  PLAN-READY-WITH-NITS (N1 out-of-band admin-down as drift; N2
+  first-validation-is-synchronous; N3 pre-disable must not reset
+  liveness [= AGY f3]; N4 timeout-landed convergence path; N5
+  dropped-queue errors + reverse-sync notes).
+
+## Round 10 (plan v8.4 @ pending)
+
+- Codex — pending dispatch (r9 verdict folds first if it lands).
 - AGY — pending dispatch.
 - Claude SMR — pending.
