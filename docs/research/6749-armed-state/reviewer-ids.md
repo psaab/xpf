@@ -314,3 +314,34 @@
   dispatch; error corrupts map-commit; :618 citation +
   pending-XSK handoff; test greens; budget omissions. Q1
   remains CLOSED).
+
+## Round 13 (plan v8.8 @ c2147e57329e)
+
+- **Claude SMR r13** — `claude-smr-plan-r13.md`. Verdict:
+  DEMAND-REVISION (SMR13-1 BLOCKER — the content-dedup collapse
+  advances the WRONG counter: the helper's stored epoch is set
+  only on full applies, so collapsing accepted=pending on a
+  no-publish skip wedges the adoption gate AND the fence;
+  correct rule: retire the staged mint, pending=accepted;
+  + SMR13-2 re-sync debt identity; SMR13-3 debt keying
+  uniform sentence; SMR13-4 recovery drop-window + oscillation
+  posture sentences).
+- **AGY r13** — background bash `bkl6u4zsp`; direct `agy
+  --print-timeout 9m --print` (prompt assembled at 126,383
+  bytes); output `/tmp/agy-6749-r13.out`; verdict doc
+  `agy-plan-r13.md`. Verdict: DEMAND-REVISION (4 BLOCKER —
+  f1 = SMR13-1 (dedup desync); f2 mint-vs-stamp contradiction
+  (text ambiguity — the mint point must be pinned:
+  post-build/pre-dispatch staging, failed builds never mint,
+  failed publishes leave a staged mint BY DESIGN); f3
+  defer-intent deletion reopens the mid-compile arm-sync
+  window (VERIFIED — the pre-Compile call covered the long
+  build; fix: daemon sets intent+compileInFlight atomically
+  before Compile); f4 applySem↔m.mu inversion (NOT VERIFIED —
+  applySem is daemon-private, no manager→daemon path exists;
+  answered by the hierarchy proof sentence); + 2 MAJOR — f5
+  1Hz oscillation bound; f6 post-recovery binding
+  reconciliation naming).
+- **Codex r13** — background task `task-msdu5oma-68z6tz`
+  (prompt `/tmp/codex-6749-r13-prompt.txt`, --fresh). Output:
+  pending.
