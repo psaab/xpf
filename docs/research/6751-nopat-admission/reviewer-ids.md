@@ -17,6 +17,9 @@ reviewer (it joins the quad at `/engineer` on the code PR).
 | r4 | Claude SMR | (fold-only round — SMR r4 findings were pre-empted by Codex/AGY r4 and folded directly; see plan v5 header) | — |
 | r4 | Codex | codex session `019fc7cd-f792-7cc1-a6de-106358ca4ebe` (companion task `task-msd9j9yk-f6n9wd`) → `codex-plan-r4.md` | PLAN-NEEDS-REVISION (6 BLOCKERs: tri-state reserve, drain-marker ordering + atomic lift, addr_index authoritative, worker-teardown markers, publish-acquires-{Shared}, tuple-change overlap; 2 MAJORs: materialize failure semantics, egress derivation matrix; 1 MINOR, 1 NIT) |
 | r4 | AGY | direct `agy --print --dangerously-skip-permissions` foreground → `agy-plan-r4.md` | PLAN-NEEDS-REVISION (2 MAJORs: {Worker} leak across stop/rebind, drain release-scan omission on pool edit; 1 MINOR: {Shared} asymmetry on worker reserve refusal — documented) |
+| r5 | Claude SMR | `claude-smr-plan-r5.md` | PLAN-READY-WITH-NITS (no BLOCKER/MAJOR survives; self-found N16 reverse-companion relay-lag window documented as inherited pool-shape discipline) |
+| r5 | Codex | codex session `019fc7e7-9d1d-72f1-9ccc-e64dbeeb62ed` (companion task `task-msdajap7-xs09zy`) → `codex-plan-r5.md` | PLAN-NEEDS-REVISION (3 BLOCKERs: live_by_flow single-record cardinality vs staged overlap, canonical-row/alias staleness on tuple replace, re-enabled pool minting past an older draining generation; 1 MAJOR: materialize None is a cold-miss not a drop) |
+| r5 | AGY | direct `agy --print --dangerously-skip-permissions` foreground → `agy-plan-r5.md` | PLAN-READY-WITH-NITS (every r4 fold verified; 2 NITs: Prometheus reason label, staged pre-read helper signature) |
 
 Round-1 infra notes: the Codex companion background job tracker lost the first
 job (`task-msd5pjfq-yfwbeg` — state dir is workspace-hash-keyed and the poll

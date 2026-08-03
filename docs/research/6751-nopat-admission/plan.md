@@ -1,7 +1,7 @@
 # #6751 plan — interface SNAT no-PAT admission: reserve-or-PAT the colliding translated tuple
 
-- **Status**: DRAFT v5 — round-4 fold (Codex r4 blockers 1-6 + majors 7-8 +
-  minor 9 + nit 10; AGY r4 majors 1-2 + minor 3 all folded)
+- **Status**: DRAFT v6 — round-5 fold (Codex r5 blockers 1-3 + major 4;
+  AGY r5 nits 1-2; Claude SMR r5 N16 all folded)
 - **Issue**: #6751 (opus-review-001 R08, High, `bug`+`audit`+`security`) —
   interface SNAT admits indistinguishable no-PAT return tuples and sends
   replies to the FIRST session.
@@ -15,7 +15,10 @@
   from before it is reachable until after it is not — across admission,
   publication, replication, materialization, tuple-changing re-sync,
   reconcile replay, snapshot rebuilds, drain transitions, HA transitions,
-  link stop→rebind cycles, worker teardown, and helper restart.
+  link stop→rebind cycles, worker teardown, and helper restart. Scoped
+  (SMR r5 N16): the relay-bounded reverse-companion edge (ms-scale
+  delete-replication lag) is excluded — identical in shape to shipped
+  pool-mode discipline today; see §5.6.
 
 ---
 
@@ -253,7 +256,7 @@ if rule.interface_mode {
 }
 ```
 
-### 5.3 Reserve / release scan semantics (tri-state + provenance + drain)
+### 5.3 Reserve / release scan semantics (tri-state + provenance + drain + tuple-versioned records)
 
 Every reserve and release scan over the occupancy domains becomes
 TRI-STATE per domain (Codex r4 blocker 1 — "not this domain" and "identity
@@ -285,7 +288,31 @@ enum DomainReserve { NotThisDomain, Owned, IdentityConflict }
   allocator out of active `rules`; expiring pool flows' releases and
   mirrored reserves must still reach it — flow-keyed discrimination makes
   double-release impossible: a flow's allocation lives in exactly one
-  allocator).
+  allocator per tuple).
+- **Tuple-versioned ownership records** (Codex r5 blocker 1 — one
+  `live_by_flow[flow]` record CANNOT represent the staged-replacement
+  overlap where T_old and T_new must both be held; allocator.rs:480 keys
+  records by `SourceNatFlowKey` alone, and `reserve_flow`'s stale-drop at
+  allocator.rs:1671 unconditionally removes+frees the old record). The
+  interface registry's allocators key ownership records by
+  `(SourceNatFlowKey, TranslatedTuple)`:
+  - idempotent re-entry = a hit on the SAME `(flow, translated)` pair
+    (unchanged semantics);
+  - a flow MAY transiently hold two records (T_old + T_new) during a
+    staged replacement — each with its own holder set;
+  - release/rollback match `(flow, translated)` exactly (the construction
+    already carries both);
+  - the stale-tuple-drop removes the `(flow, T_old)` record ONLY when its
+    holder set is empty; otherwise it decrements only the caller's own
+    marker (per-holder-owner discipline) and leaves the record;
+  - `max_tracked_flows` counts RECORDS (a mid-overlap flow counts 2 — a
+    bounded transient);
+  - the per-index drain counter increments per record's authoritative
+    `addr_index`.
+  Pool allocators are NOT re-keyed: pool records keep today's
+  flow-keyed shape and today's free-on-release semantics (pool holder
+  tracking remains #6522's own issue). The tuple-versioned shape is a
+  property of the allocator instances the interface registry creates.
 - `addr_index` becomes AUTHORITATIVE in every address-only mint/reserve
   path (Codex r4 blocker 3: `reserve_address_only` and its roundrobin
   variant currently write `addr_index: 0`, allocator.rs:1770/1874/1809, so
@@ -366,10 +393,15 @@ The holder set on each flow's `live_by_flow` record is
   complete): `WorkerCommand::UpsertSynced` (commands/upsert_synced.rs:65),
   `materialize_shared_session_hit` (session_glue/mod.rs:1130),
   `WorkerCommand::UpsertLocal` (session_glue/mod.rs:808).
-  **Materialize failure semantics** (Codex r4 major 7): materialize is not
-  a command — its wrapper variant returns `Option`; on reserve failure the
-  LOOKUP returns a miss (the reply packet takes the no-session path and
-  drops) rather than returning the shared decision unconditionally
+  **Materialize failure semantics** (Codex r4 major 7 + r5 major 4):
+  materialize is not a command, and a `None` lookup return does NOT drop
+  the packet — `resolve_flow_session_decision` returning None at
+  session_glue/mod.rs:1227 makes the caller treat it as an ORDINARY
+  session miss and enter the full cold policy/NAT/admission path
+  (poll_descriptor/mod.rs:432/903). The wrapper's reserve-conflict
+  therefore returns a DISTINCT `MaterializeConflict` outcome propagated to
+  an explicit recycle/drop branch (packet recycles, counted) — never the
+  cold-admission path and never the unconditional shared decision
   (session_glue/mod.rs:1128/1146 today).
   **Dropped-command gap** (AGY r4 adjudication): a worker whose
   `UpsertSynced` dropped never installs the entry; failover onto that
@@ -379,16 +411,26 @@ The holder set on each flow's `live_by_flow` record is
   design ({Shared} rides the canonical row, removed by the peer's
   delete-sync or entry expiry — AGY r4 minor 3, documented accepted
   asymmetry, not fed back).
-- **Tuple-changing re-sync — STAGED REPLACEMENT protocol** (Codex r4
-  blocker 6: one `live_by_flow[F]` record cannot hold `{Worker}` on T1 and
-  `{Shared}` on T2 during the overlap; and `reserve_flow`'s unconditional
-  stale-drop at allocator.rs:1671 must not free T1 while the worker still
-  forwards on it):
+- **Tuple-changing re-sync — STAGED REPLACEMENT protocol on
+  tuple-versioned records** (Codex r4 blocker 6 + r5 blockers 1-2):
   - Coordinator: pre-read the canonical row's CURRENT tuple T_old →
-    pre-reserve T_new (+`{Shared}`) → `−{Shared}` on T_old (its own marker
-    only) → publish T_new. T_old stays held by its `{Worker}` markers
-    (never freed mid-overlap).
-  - Worker wrapper: pre-read the existing entry's tuple T_old → reserve
+    pre-reserve T_new (+`{Shared}` on the NEW `(flow, T_new)` record —
+    the tuple-versioned record shape of §5.3 lets T_old and T_new coexist)
+    → canonical insert displacing T_old's row → ALIAS SWEEP: remove every
+    reverse-index/forward-wire alias derived from the DISPLACED entry
+    (reverse_wire/reverse_canonical/forward_wire of T_old — today's
+    `publish_shared_session` only inserts the new aliases at
+    shared_ops.rs:918-943 and never removes the old tuple's, so a stale
+    alias would stay resolvable; this sweep is new and also fixes the
+    pre-existing stale-alias residual for any tuple-changing republish)
+    → `−{Shared}` on T_old. T_old stays held by its `{Worker}` markers
+    (never freed mid-overlap); its canonical row and aliases are already
+    unreachable when the marker drops.
+  - Worker wrapper: pre-read the existing entry's tuple T_old via a NEW
+    read accessor (Codex r5 blocker 1: `entry_by_key` is private,
+    session/mod.rs:1093 — add a narrow `translated_tuple_of(key)` accessor;
+    `upsert_synced_with_origin` keeps its bool return, AGY r5 nit 2's
+    `Option<NatDecision>` return is the optional alternative) → reserve
     T_new (+`{Worker(W)}`) → install (in-table replace makes T_old
     unreachable, session/install.rs:322) → release T_old (`−{Worker(W)}`).
     T_old's record empties → freed, only AFTER it is unreachable on every
@@ -417,6 +459,22 @@ The holder set on each flow's `live_by_flow` record is
   - Same-plan refresh: worker tables PERSIST — no marker event at all.
 - **Neutral paths**: promote (promote.rs:99), demote (install.rs:568),
   #1752 in-place refresh — NO reserve/release calls.
+- **Reverse-companion lag (documented inherited window, SMR r5 N16)**:
+  forward and reverse companions of one flow can live in DIFFERENT
+  workers' tables (internal and external tuples hash differently). The
+  identity frees when the holder set empties (forward reap −{Worker} +
+  canonical removal −{Shared}), while a reverse companion elsewhere is
+  holder-neutral and lingers until its own reap or the delete-replication
+  relay (`replicate_session_delete`; the session_delta.rs:436-446 removal
+  covers both keys) reaches it — a relay-bounded (ms-scale) window in
+  which a re-minted identity's reply could land on the lingering reverse
+  entry. This window exists TODAY for pool mode (pool port freed at
+  forward reap while the reverse companion lingers; the #3011 recycle
+  FIFO is only a reuse-delay, also churnable), so the change does not
+  widen it; closing it belongs to the session-teardown domain, not this
+  NAT-admission fix. The core invariant statement is scoped accordingly:
+  continuous holding on every scope EXCEPT the relay-bounded
+  reverse-companion edge, which matches shipped pool discipline.
 - Net effect: the identity survives while ANY entry replica or shared
   canonical row lives node-wide — the #6522 hazard cannot exist in this
   registry.
@@ -460,6 +518,17 @@ sessions:
      explicit new key); releases and mirrored reserves keep reaching it
      (§5.3 drain-vec scan); the per-index live counter (§5.3's
      authoritative `addr_index`) makes the drain O(1)-observable.
+   - **Uniform mint quarantine** (Codex r5 blocker 3 — v5 quarantined
+     only INTERFACE mints, so a re-enabled edited pool could mint an
+     identity an older draining generation still owns): while ANY
+     generation/domain holds live allocations on an address E, NEW mints
+     on E are quarantined in EVERY domain — pool admission SKIPS
+     quarantined addresses in its address loop (allocates on a
+     non-quarantined pool address; exhaustion only if ALL are
+     quarantined), NAT64 likewise, interface-mode mints fail closed
+     (`InterfaceOverlapDraining`) since their "pool" is the single
+     address. Reserves (ownership claims for existing sessions) are never
+     quarantined — they are tri-state per §5.3.
    - **Drain-marker ordering** (Codex r4 blocker 2): the drain marker for
      an address E is installed in the registry BEFORE the new RuntimeView
      is published to workers (before the worker-visible store at
@@ -475,10 +544,10 @@ sessions:
      synced reserve after that point gets `NotThisDomain` from the
      (removed) pool domain and transfers to the interface registry
      (ownership continuity), never resurrects the drained allocator
-     (Codex r4 blocker 2's closed/resurrection protocol).
-   - Interface RESERVES (synced imports of existing sessions) are NOT
-     quarantined — they are ownership claims for sessions that already
-     exist (but are tri-state per §5.3: an `IdentityConflict` aborts).
+     (Codex r4 blocker 2's closed/resurrection protocol). A re-ENABLED
+     pool (marker removed by a later config) starts minting on its
+     non-quarantined addresses immediately and on E only after every
+     older generation for E drains (the uniform rule above).
 
 ### 5.8 Observability (additive, production)
 
@@ -497,7 +566,9 @@ additive per #1961):
 - `xpf_userspace_interface_snat_registry_cap_exhaustion_total` — the
   per-address 64512 flow-registry cap AND the 256-retained-allocator cap
   (both "cannot create more registry state" events; Codex r4 minor 9 +
-  nit 10 — the two §4.3 exhaustion modes are now counted distinctly);
+  nit 10 — the two §4.3 exhaustion modes are now counted distinctly). An
+  optional `reason` label (`flow_cap` vs `allocator_cap`) is an
+  implementation-time refinement, not a plan requirement (AGY r5 nit 1).
 - `xpf_userspace_interface_snat_sync_identity_conflict_drops_total` —
   coordinator import-conflict drops (§5.6).
 `debug_log!` is feature-gated (afxdp/mod.rs:51) — test/dev aid only.
@@ -523,11 +594,18 @@ Additive-only wire change: the four §5.8 status counters (optional fields,
 `remove_shared_session` (+1: registry), the coordinator test helper, the
 nine release sites' call expressions, the new
 `install_synced_with_reserve` wrapper at the three sync-family install
-sites, `release_all_worker_markers` at the worker-join teardown,
+sites, a NEW narrow read accessor `translated_tuple_of(key)` on
+`SessionTable` for the staged-replacement pre-read (`entry_by_key` is
+private, session/mod.rs:1093 — Codex r5 blocker 1), the
+`MaterializeConflict` outcome type for the materialize wrapper,
+`release_all_worker_markers` at the worker-join teardown,
 the registry bulk-release at the wholesale-clear site, the pool-allocator
 authoritative `addr_index` + per-index live counter + drain carry-over key,
-and the address-only mint paths' `addr_index` correction. Go changes: the
-#5144 validator extension (dedup-by-address), the snapshot-builder overlap
+the address-only mint paths' `addr_index` correction, the tuple-versioned
+`(flow, translated)` record key inside the interface registry's allocator
+instances, and the transactional shared-replacement alias sweep inside
+`publish_shared_session`'s displacement handling. Go changes: the #5144
+validator extension (dedup-by-address), the snapshot-builder overlap
 marking (source pools + NAT64 empty-pool + the §5.7 derivation matrix),
 the four status-counter mirrors + Describe registration, and tests.
 
@@ -557,17 +635,25 @@ the four status-counter mirrors + Describe registration, and tests.
   coordinator pre-reserve precedes publication; materialize returns
   miss-on-failure.
 - **Continuous holding across tuple change**: the staged replacement
-  protocol (§5.6) never frees T_old before it is unreachable on every
-  scope; each owner decrements only its own marker.
+  protocol (§5.6) on tuple-versioned records never frees T_old before it
+  is unreachable on every scope — coordinator: pre-reserve T_new →
+  canonical replace → alias sweep of the displaced entry → −{Shared};
+  worker: pre-read → reserve T_new → install/replace → −{Worker}; each
+  owner decrements only its own marker.
 - **Drain discipline**: drain markers install BEFORE the worker-visible
-  RuntimeView store; interface mints quarantine while any draining domain
-  holds live allocations on the address; reserves are never quarantined
-  (but are tri-state); the drain lift is one atomic critical section (no
-  resurrection); `addr_index` is authoritative in every mint path.
+  RuntimeView store; NEW mints on an address quarantine in EVERY domain
+  while any generation holds live allocations on it (pool skips the
+  address in its loop, NAT64 likewise, interface fails closed); reserves
+  are never quarantined (but are tri-state); the drain lift is one atomic
+  critical section (no resurrection); `addr_index` is authoritative in
+  every mint path.
 - **Registry lifetime**: node-lifetime; atomic `or_insert_with` creation;
   reclamation only when address-absent AND live-empty (apply-time +
   opportunistic); cap 256 RETAINED with its own counter; release
   LOOKUP-ONLY.
+- **Invariant scoping (SMR r5 N16)**: "continuous holding" excludes the
+  relay-bounded reverse-companion edge (ms-scale delete-replication lag),
+  which is identical in shape to shipped pool-mode discipline today.
 - **NatDecision freeze**: no new fields; `rewrite_src_port: Some(_)` is
   handled generically everywhere from pool mode.
 - **Hot path**: established-flow transit untouched; zero new per-packet
@@ -607,12 +693,23 @@ the four status-counter mirrors + Describe registration, and tests.
   owns T, interface import of T aborts, never falls through); nat64
   decisions bypass the source/interface scan; addr_index authoritative in
   every address-only mint path (pool [A,E] address-only flow on E counts
-  against E, not A); stale-tuple staged replacement (T_old held until
-  unreachable; each owner drops only its own marker); holder completeness
+  against E, not A); tuple-versioned records (a flow holds T_old + T_new
+  transiently during staged replacement; release matches (flow,
+  translated) exactly; stale-drop removes the record only when its holder
+  set is empty, else decrements only the caller's marker); transactional
+  shared replacement (canonical replace sweeps the displaced entry's
+  aliases — reverse_wire/reverse_canonical/forward_wire of T_old no
+  longer resolvable); staged replacement (T_old held until unreachable;
+  each owner drops only its own marker); uniform mint quarantine (a
+  re-enabled edited pool cannot mint an identity an older draining
+  generation owns — pool skips quarantined addresses in its address loop,
+  interface fails closed); materialize conflict returns
+  MaterializeConflict (explicit recycle/drop branch, NEVER the
+  cold-admission miss path — Codex r5 major 4); holder completeness
   (sibling replica reap does not free the owner's identity — RED on the
   #6522 shape; replay re-reserve is a no-op; all-workers-reap with live
-  shared canonical row does NOT free; materialize acquires via the wrapper
-  and returns miss-on-failure; local publish acquires {Shared}; coordinator
+  shared canonical row does NOT free; materialize acquires via the wrapper;
+  local publish acquires {Shared}; coordinator
   pre-reserve conflict drops the import; RESERVE-BEFORE-INSTALL: the
   delete/upsert/local-mint race leaves NO installed-unreserved duplicate;
   worker-join teardown drops all worker markers; stop_inner(false)
@@ -666,29 +763,30 @@ the four status-counter mirrors + Describe registration, and tests.
 
 ## 11. Open questions for adversarial review
 
-1. Core invariant (top of doc): name ONE remaining lifecycle path where a
-   reachable session does not own its identity — the r4 inventory
-   (publication, tuple-changing re-sync, drain transition, worker
-   teardown, reconcile replay) is now covered in §5.3/§5.6/§5.7.
-2. Tri-state reserve (§5.3): is `IdentityConflict`-aborts-always the right
-   posture even for a LOCAL admission reserve (currently local mints
-   PAT around a conflict rather than abort — should the tri-state apply
-   only to reserves, with local mints keeping the PAT fallback)?
-3. Staged replacement (§5.6): the wrapper pre-reads the existing entry's
-   tuple before install. Is the pre-read + install + release ordering
-   implementable with `upsert_synced_with_origin`'s current bool return,
-   or must it return the previous decision (signature change named in §6)?
-4. Drain retention key (§5.7): the compatibility carry-over key ignores
-   the failure marker and survives repeated quarantined snapshots — any
-   hazard when the pool is re-ENABLED (marker removed) while an older
-   drain is still open (two drains for one pool across generations)?
-5. Worker-marker drop at join (§5.6): `release_all_worker_markers` is
-   registry-wide — under a FUTURE partial-worker restart (one worker of N
-   rejoined), would a per-worker-id-scoped drop be required? Current code
-   joins ALL workers on every teardown path (worker_manager.rs:141) —
-   is that a stable enough contract for the registry-wide drop?
-6. Preserve-first vs Junos-literal always-PAT: does any reviewer still
+1. Core invariant (top of doc, as scoped by SMR r5 N16's reverse-companion
+   relay-lag note): name ONE remaining lifecycle path where a reachable
+   session does not own its identity — the r4/r5 inventory (publication,
+   tuple-changing re-sync on tuple-versioned records, drain transition
+   with uniform mint quarantine, worker teardown, reconcile replay,
+   transactional shared replacement with alias sweep) is now covered in
+   §5.3/§5.6/§5.7.
+2. Tuple-versioned records (§5.3): confined to the interface registry's
+   allocator instances, with pool allocators keeping today's flow-keyed
+   shape and free-on-release semantics. Is the two-shape split coherent,
+   or should pools adopt the tuple-versioned shape uniformly (which
+   entangles #6522's open holder question)?
+3. Transactional shared replacement (§5.6): the alias sweep on canonical
+   displacement also fixes a PRE-EXISTING stale-alias residual for any
+   tuple-changing republish (today's publish inserts new aliases and never
+   removes the displaced entry's). Should that sweep be pinned as its own
+   regression test independent of the interface-mode work?
+4. Uniform mint quarantine (§5.7): pool admission skips a quarantined
+   address and tries the next pool address — graceful for multi-address
+   pools, exhaustion when all are quarantined. Is skip-next the right
+   pool-side posture, or should pool admission fail closed on the rule
+   (like interface) while any of its addresses drains?
+5. Preserve-first vs Junos-literal always-PAT: does any reviewer still
    demand literal parity?
-7. Mixed-version window (§5.4): accept, or gate `SessionSyncProtocol`?
-8. Is PLAN-KILL (option (c)) defensible for a High security finding given
+6. Mixed-version window (§5.4): accept, or gate `SessionSyncProtocol`?
+7. Is PLAN-KILL (option (c)) defensible for a High security finding given
    the mechanism is ~verbatim reuse of shipped machinery?

@@ -1,3 +1,9 @@
+## 2026-08-03 — #6751 research round 5: split verdict, plan v6 fold
+
+- **Timestamp**: 2026-08-03 (research/6751-nopat-admission, /research skill)
+- **Action**: Round-5 verdicts split: AGY PLAN-READY-WITH-NITS (all r4 folds verified, 2 nits), Claude SMR PLAN-READY-WITH-NITS (self-found N16 reverse-companion relay-lag documented as inherited pool-shape), Codex PLAN-NEEDS-REVISION (3 blockers + 1 major). Codex r5 caught what SMR r5 missed: one live_by_flow record per flow cannot hold T_old+T_new during the staged overlap (tuple-versioned (flow, translated) records now specified, confined to the interface registry's allocator instances); the coordinator's tuple replace must sweep the displaced entry's reverse/forward-wire aliases (also a pre-existing stale-alias residual); a re-enabled edited pool could mint past an older draining generation (uniform mint quarantine across ALL domains — pool skips the address in its loop, interface fails closed); and materialize None is a cold-miss not a drop (distinct MaterializeConflict outcome to an explicit recycle/drop branch). v6 folds all + AGY's two nits (reason label optional, translated_tuple_of accessor — entry_by_key is private at session/mod.rs:1093).
+- **File(s)**: `docs/research/6751-nopat-admission/plan.md`, `docs/research/6751-nopat-admission/claude-smr-plan-r5.md`, `docs/research/6751-nopat-admission/codex-plan-r5.md`, `docs/research/6751-nopat-admission/agy-plan-r5.md`, `docs/research/6751-nopat-admission/reviewer-ids.md`, `_Log.md`
+
 ## 2026-08-03 — #6751 research round 4: three re-reviews, plan v5 fold
 
 - **Timestamp**: 2026-08-03 (research/6751-nopat-admission, /research skill)
