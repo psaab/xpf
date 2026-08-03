@@ -242,8 +242,30 @@
   PLAN-READY-WITH-NITS (N1 fib-invariance sentence [superseded by
   configEpoch]; N2 flap classes; N3 posture sentence).
 
-## Round 11 (plan v8.6 @ pending)
+## Round 11 (plan v8.6 @ dc0e618f8)
 
-- Codex — pending dispatch.
-- AGY — pending dispatch.
-- Claude SMR — pending.
+- **Claude SMR r11** — `claude-smr-plan-r11.md` (written by the
+  prior session, committed here at f42b500ce2). Verdict:
+  PLAN-READY-WITH-NITS (SMR11-1 MINOR — the pair-gated adoption
+  wedges on a fib-bump failure; refine the gate to config
+  lineage: adopt UNLESS staged-uncommitted OR
+  helper-strictly-ahead-of-publishedSnapshot; + N2 bucket-i
+  link-flap sentence + N3 configured-disabled posture
+  sentence).
+- **AGY r11** — background bash `bxaoyldjz`; direct `agy
+  --print-timeout 9m --print "$(cat
+  /tmp/agy-6749-r11-prompt.txt)"` (prompt assembled at 125,992
+  bytes: boilerplate + transport-trimmed plan [rounds 1-9
+  verdict rows, r8/r9 tables, Round-10 narrative, round-1
+  detail, §2-§4, §7-§8, §10 elided] + evidence excerpts ev0/
+  ev1/ev2/ev5/ev6 + manager_generation.go:55-73); output
+  `/tmp/agy-6749-r11.out`; verdict doc `agy-plan-r11.md`.
+  Verdict: PLAN-READY (clean pass, zero findings; evidence
+  wishes informational).
+- **Codex r11** — TWO dispatches on the same v8.6 blob:
+  `task-msdotvm6-vc98k3` (orphan from the interrupted prior
+  session, discovered in `status --all`) and
+  `task-msdpdhr4-xmh4du` (this session, prompt
+  `/tmp/codex-6749-r11-prompt.txt`, --fresh). Both left
+  running; first-to-complete is the primary, the other a
+  cross-check. Output: pending.
