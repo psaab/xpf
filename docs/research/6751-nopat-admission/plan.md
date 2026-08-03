@@ -1,18 +1,17 @@
 # #6751 plan — interface SNAT no-PAT admission: reserve-or-PAT the colliding translated tuple
 
-- **Status**: DRAFT v15.9 — round-22 fold (Codex r22 blocker 1 + minor 2
-  + nit 3: the effect-authorization contract replaces "treat completion
-  as stale" with a reversibility classification — session frames stop
-  via the pre-write generation check and already-written frames are
-  ACCEPTED as individually-valid provisional installs with partial bulks
-  never ACKed/reconciled/hold-released and bounded by the receive
-  deadline; callbacks revalidate before triggering and their work reads
-  CURRENT state at execution (convergent, never verdict-time snapshots);
-  journal replay needs no abort-generation coupling because the per-key
-  #2170 install generation already orders session state; §9 gains the
-  blocked-I/O, large-bulk, abort-mid-BulkSync, BulkEnd-race, and
-  callback/journal generation-race tests; §11's false-positive claim now
-  includes non-fabric identity-NPTv6)
+- **Status**: DRAFT v15.10 — round-23 fold (Codex r23 blockers 1-2 +
+  minor 3: callback work now splits into convergent reads (config/DHCP/
+  IPsec — verified to read live state at execution) and DAEMON LIFECYCLE
+  MUTATIONS (syncPeerConnected flag, connection epoch, heartbeat
+  suppression, bulk-prime flags, readiness arming — NOT convergent and
+  NOT ordered today, daemon_ha_sync.go:51/68/81/109) which are now
+  GENERATION-ORDERED AT THEIR COMMIT POINT, closing the
+  connect-after-disconnect flag race; and the journal contract is now
+  three-layered — abort-generation-bound envelopes discarded at drain,
+  zero-generation/cap-saturated replay as the documented UNORDERED class
+  bounded by the next authoritative reconcile, and sender-cap saturation
+  triggering a fresh authoritative bulk drive)
 - **Issue**: #6751 (opus-review-001 R08, High, `bug`+`audit`+`security`) —
   interface SNAT admits indistinguishable no-PAT return tuples and sends
   replies to the FIRST session.
@@ -776,23 +775,102 @@ record's identity frees only when `per_worker` is empty AND
       today, sync.go:419, and fires externally visible work,
       daemon_ha_sync.go:934): the intent binds the admission
       generation and revalidates BEFORE TRIGGERING (a stale callback
-      intent is cancelled with no externally visible work); work
-      already triggered is CONVERGENT, not reversed — the callback's
-      work (config reconciliation, DHCP/IPsec re-advertisement) reads
-      CURRENT config/state at execution time, never a verdict-time
-      snapshot, so a completed-but-stale callback installs current
-      state, which is by definition not stale.
+      intent is cancelled with no externally visible work). The
+      callback's work splits into two classes (Codex r23 blocker 1):
+      (a) the CONVERGENT reads — config reconciliation, DHCP lease
+      sync, IPsec SA sync (`d.clusterConfig()`,
+      `d.nudgeDHCPLeaseSync()`, `d.nudgeIPsecSASync()`,
+      `d.reconcileConfigSyncToPeer("peer-connect")`,
+      daemon_ha_sync.go:934-957) — which evaluate LIVE daemon state at
+      execution time (verified: none use frozen verdict-time
+      snapshots), so a completed-but-stale callback of this class
+      installs current state, which is by definition not stale; and
+      (b) the DAEMON LIFECYCLE MUTATIONS
+      (`onSessionSyncPeerConnected`, daemon_ha_sync.go:934 → :51/:68/:81)
+      — storing `syncPeerConnected=true`, advancing the connection
+      epoch, resetting heartbeat-suppression state, clearing
+      bulk-prime flags, arming the readiness timer — which are NOT
+      convergent reads and are NOT ordered today: the concrete race is
+      the intent validating and launching, the abort advancing the
+      generation and the disconnect callback storing
+      `syncPeerConnected=false` (daemon_ha_sync.go:109), and the
+      already-launched connect callback storing it back to TRUE.
+      Class (b) mutations are therefore GENERATION-ORDERED AT THEIR
+      COMMIT POINT (not merely validated at spawn): every lifecycle
+      state store carries the admission generation and revalidates at
+      the store — (i) the abort generation has not advanced past the
+      admission generation and (ii) the slot is still the admitted
+      one — so a stale connect-callback's flag write commits only if
+      no newer abort/disconnect event has committed (the same
+      commit-time guard as clause (4), applied to daemon lifecycle
+      state). §9 pins the abort-after-callback-launch-but-before-state-
+      commit test.
       (iii) **Journal replay** (messages move into a generation-blind
       queue whose sender later picks whatever connection is active,
-      sync_conn_write.go:135/268): NO abort-generation coupling is
-      needed — each replayed message already carries its own
-      per-(sender,key) monotonic install generation (#2170), so a
-      replay that travels post-abort is either a still-current per-key
-      state (a valid install — the session exists on the sender) or an
-      older per-key generation for a key with newer state (rejected by
-      the receiver's EXISTING #2170 strict-older-generation rule).
-      Session state is ordered by the per-key generation independent
-      of the abort generation.
+      sync_conn_write.go:135/268): the per-(sender,key) monotonic
+      install generation (#2170) orders session state for the TRACKED
+      class — upserts are refused when older than the stored
+      generation INCLUDING tombstones (installGenGuardV4,
+      sync_conn_gen.go:205), and deletes draw fresh strictly-greater
+      generations with stale deletes refused and valid deletes recorded
+      as tombstones (takeDeleteGenV4/deleteGenGuardV4,
+      sync_conn_gen.go:179-322) — so a stale replayed upsert cannot
+      overwrite a newer delete and a stale replayed delete cannot
+      overwrite a newer install, for the tracked class. But #2170 does
+      NOT universally order replay (Codex r23 blocker 2, with pinned
+      code evidence): the generation maps are capped at 200,000 keys
+      and a new key at capacity is deliberately NOT recorded
+      (sync_conn_gen.go:23/45); a sender with no recorded stamp emits
+      generation-0 deletes (takeDeleteGenV4/V6 → 0,
+      sync_conn_gen.go:176) that can be journaled and replayed
+      (sync_conn_write.go:69); a generation-0 delete is UNCONDITIONAL
+      at the receiver and removes the stored tombstone
+      (sync_conn_gen.go:263, pinned by sync_gen_guard_test.go:128 even
+      against a generation-bearing live entry); a receiver map at
+      capacity records no high-water generation for a new replacement
+      (sync_conn_gen.go:233, sync_gen_guard_test.go:635), so an older
+      nonzero replay sees no stored generation and applies; and once a
+      zero-generation delete clears a tombstone, a delayed older
+      install can RESURRECT the closed session — the exact reorder
+      #2221's tombstone exists to prevent (sync_gen_guard_test.go:830).
+      The disposition is therefore three-layered:
+      (a) **abort-generation-bound journal envelopes**: every journaled
+      envelope binds the admission/abort generation of the connection
+      that queued it, and is discarded at queue-drain when its bound
+      generation is older than the current abort generation or the
+      fence is set — the ABORT-adjacent resurrection/kill never
+      travels (this is the contract this issue requires);
+      (b) **zero-generation / cap-saturated replay is the UNORDERED
+      class**: a message whose per-key generation is 0 (sender untracked
+      or receiver cap-saturated) carries no ordering information; its
+      potential reorder damage (resurrecting a closed session, or a
+      late zero delete killing a newer replacement) is bounded by the
+      NEXT COMPLETE authoritative bulk reconcile — the sync protocol's
+      convergence backstop for every provisional effect — and by
+      (c) below;
+      (c) **sender-cap saturation triggers a fresh authoritative bulk
+      drive**: when the sender's generation map refuses a new key at
+      capacity (sync_conn_gen.go:45), the affected key range is marked
+      for the next bulk drive (or an immediate one if idle), because the
+      bulk is authoritative and needs no per-key ordering for its
+      installs — saturation degrades to a bulk-driven sync cadence for
+      the affected keys instead of an unordered delta stream.
+      The pre-existing generation-0 tombstone-clearing residual
+      (resurrection / killing a generation-bearing entry) is a
+      #2221-family behavior pinned by today's tests
+      (sync_gen_guard_test.go:128/635/830) and is OUT OF SCOPE for this
+      issue — the abort-envelope guard in (a) prevents the
+      ABORT-SPECIFIC instance of it; closing the general window (e.g.,
+      not clearing a tombstone on gen-0 when the live entry carries a
+      nonzero generation) is a named follow-up, not this plan.
+      §9's journal race tests enumerate: sender-cap saturation triggers
+      the bulk drive; receiver-cap replacement with no recorded
+      high-water; a zero-generation delete clearing a tombstone
+      (documented #2221 behavior, unchanged); an older install
+      resurrecting after a gen-0 delete (bounded by the next
+      authoritative reconcile); and the abort-envelope discard (an
+      envelope queued pre-abort is dropped at drain when its bound
+      generation is stale).
       (iv) **Clock writes** (`sendClockSync`): idempotent clock
       exchange — a stale clock sync is harmless and self-corrects on
       the next tick.
@@ -1319,9 +1397,12 @@ quarantine-admitted + overflow), and tests.
   abort-mid-BulkSync partial-bulk disposition (no ACK, no reconcile,
   provisional installs converge at the next complete bulk) at (2b/i);
   a BulkEnd race at (2b/i); callback generation-race cancellation at
-  (2b/ii); journal generation-race (per-key #2170 ordering covers
-  upserts AND deletes via tombstones, sync_conn_gen.go:179-322) at
-  (2b/iii).
+  (2b/ii) PLUS the abort-after-callback-launch-but-before-state-commit
+  test for the class-(b) lifecycle mutations (Codex r23 blocker 1);
+  journal generation-race tests (per-key #2170 ordering covers upserts
+  AND deletes via tombstones, sync_conn_gen.go:179-322) PLUS the
+  sender-cap / receiver-cap / zero-generation delete-install reorder
+  cases and the abort-envelope discard (Codex r23 blocker 2).
 - New unit tests (nat/source.rs + allocator):
   preserve-first success; collision → PAT (distinct identities, distinct
   `reverse_wire_key`s, both flows' replies resolve to their OWN forward
