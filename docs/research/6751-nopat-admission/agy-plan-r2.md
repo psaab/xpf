@@ -1,0 +1,41 @@
+# AGY hostile plan review — #6751 plan v2 (round 2)
+
+PLAN-NEEDS-REVISION
+
+### Summary of Adjudication & Round-1 Re-evaluation
+- **Option (a) vs Option (b) & DoS Vector (Attack 4)**: Option (b) introduces a critical identity-squatting DoS vector: an internal attacker can squat a victim's `(source_port, destination_server)` identity, causing all victim traffic to be dropped (`Unavailable`). With v2 keying occupancy on the full 5-tuple reverse identity `(protocol, egress_ip, port, dst_ip, dst_port)`, Option (a) preserves ports for all non-colliding flows without broad bitmap claims while allowing victims to PAT around squatters. **Option (a) is the correct architecture.**
+- **HA Mixed-Version Conversion (Attack 3)**: v2 §5.4 is **correct** based on code evidence. `[daemon_ha_userspace_convert.go:357-360](file:///home/ps/git/kimi-xpf/.claude/worktrees/6751-research-nopat-admission/pkg/daemon/daemon_ha_userspace_convert.go#L357-L360)` handles `NATSrcPort` via `effectiveUserspaceNATSrcPort`, and `[upsert_synced.rs:64](file:///home/ps/git/kimi-xpf/.claude/worktrees/6751-research-nopat-admission/userspace-dp/src/afxdp/session_glue/commands/upsert_synced.rs#L64)` parses `rewrite_src_port` generically for any NAT decision. AGY round 1's claim that old nodes would mis-parse or fail to install PAT'd interface decisions is invalid.
+- **Surface Audit Verification (Attack 5)**: All four citations in v2 §4 item 6 generically handle `Some(rewrite_src_port)`: `[flow_cache.rs:586-599](file:///home/ps/git/kimi-xpf/.claude/worktrees/6751-research-nopat-admission/userspace-dp/src/afxdp/flow_cache.rs#L586-L599)`, `[publish_conntrack.rs:197-207](file:///home/ps/git/kimi-xpf/.claude/worktrees/6751-research-nopat-admission/userspace-dp/src/afxdp/bpf_map/publish_conntrack.rs#L197-L207)`, `[server_sessions.go:1724-1728](file:///home/ps/git/kimi-xpf/.claude/worktrees/6751-research-nopat-admission/pkg/grpcapi/server_sessions.go#L1724-L1728)`, and `[rt_flow.rs:82-92](file:///home/ps/git/kimi-xpf/.claude/worktrees/6751-research-nopat-admission/userspace-dp/src/event_stream/rt_flow.rs#L82-L92)`.
+- **Single-Mutex CS (Attack 1)**: `reserve_address_only` (`[allocator.rs:1727-1784](file:///home/ps/git/kimi-xpf/.claude/worktrees/6751-research-nopat-admission/userspace-dp/src/nat/allocator.rs#L1727-L1784)`) acquires `live.lock()` once for check-and-insert. However, holding this lock across a 4096-candidate probe loop introduces severe lock contention.
+
+---
+
+### Detailed Findings
+
+#### 1. [BLOCKER] Premature Allocation Teardown on Materialized Shared Session Hits
+- **Evidence**: `[session_glue/mod.rs:1122-1145](file:///home/ps/git/kimi-xpf/.claude/worktrees/6751-research-nopat-admission/userspace-dp/src/afxdp/session_glue/mod.rs#L1122-L1145)` (`materialize_shared_session_hit`), `[upsert_synced.rs:90-95](file:///home/ps/git/kimi-xpf/.claude/worktrees/6751-research-nopat-admission/userspace-dp/src/afxdp/session_glue/commands/upsert_synced.rs#L90-L95)`, Plan §5.6.
+- **Impact**: When worker $W_2$ materializes a shared session hit via `materialize_shared_session_hit`, it calls `upsert_synced_with_origin` directly without calling `reserve_synced_source_nat_allocation`. Under v2's per-worker holder set model (`holders: FxHashSet<u16>`), $W_2$ is **never added** to `holders`. When admitting worker $W_1$ later reaps its local session entry (`[loop_body/mod.rs:1625](file:///home/ps/git/kimi-xpf/.claude/worktrees/6751-research-nopat-admission/userspace-dp/src/afxdp/worker/loop_body/mod.rs#L1625)`), $W_1$ removes itself from `holders`. `holders` becomes empty (`{}`), causing `InterfaceNatAllocators` to **free the translated tuple `(E, P)` while $W_2$'s materialized session is still active**. A new flow on $W_3$ can then be assigned `(E, P)`, recreating the 1:N tuple collision and cross-session data leak.
+
+#### 2. [BLOCKER] Leaked Allocation on Session Replacement in `upsert_synced_with_origin`
+- **Evidence**: `[session/install.rs:322](file:///home/ps/git/kimi-xpf/.claude/worktrees/6751-research-nopat-admission/userspace-dp/src/session/install.rs#L322)` (`let _previous = self.remove_entry(&key);`), `[upsert_synced.rs:64-95](file:///home/ps/git/kimi-xpf/.claude/worktrees/6751-research-nopat-admission/userspace-dp/src/afxdp/session_glue/commands/upsert_synced.rs#L64-L95)`.
+- **Impact**: When `upsert_synced_with_origin` replaces an existing session entry, it invokes `self.remove_entry(&key)` at `[install.rs:322](file:///home/ps/git/kimi-xpf/.claude/worktrees/6751-research-nopat-admission/userspace-dp/src/session/install.rs#L322)`. `remove_entry` cleans internal indices but does **not** call `release_source_nat_allocation`. `upsert_synced` then calls `reserve_synced_source_nat_allocation` for the new entry. If the replaced `_previous` session held a different translated tuple $T_1$, $T_1$'s holder count is never decremented, leaking $T_1$ permanently in `InterfaceNatAllocators`.
+
+#### 3. [MAJOR] Missing Identity Rehydration on Helper Restart
+- **Evidence**: `[session_glue/mod.rs:778-820](file:///home/ps/git/kimi-xpf/.claude/worktrees/6751-research-nopat-admission/userspace-dp/src/afxdp/session_glue/mod.rs#L778-L820)` (`WorkerCommand::UpsertLocal`), Plan §9.
+- **Impact**: When the `userspace-dp` helper process restarts, `InterfaceNatAllocators` is instantiated empty. Local active sessions rehydrated or installed via `WorkerCommand::UpsertLocal` do not invoke `allocate_interface_identity` or `reserve_synced_source_nat_allocation`. As a result, active post-restart flows have no reservation in `InterfaceNatAllocators`, allowing newly admitted flows to claim their translated identities.
+
+#### 4. [MAJOR] Admission-Rate DoS via Global Mutex Lock Contention in Probe Loop
+- **Evidence**: `[allocator.rs:1747](file:///home/ps/git/kimi-xpf/.claude/worktrees/6751-research-nopat-admission/userspace-dp/src/nat/allocator.rs#L1747)` (`live.lock()`), Plan §5.2.
+- **Impact**: Probing up to 4096 candidates in `allocate_interface_identity` performs up to 4096 `address_only_owners.contains_key(&rkey)` hashmap lookups **while holding the single `live.lock()` mutex**. Under a colliding-flow SYN or UDP flood across multiple workers, every worker thread blocks on `live.lock()`, turning interface SNAT allocation into a severe multi-core contention bottleneck (Admission-Rate DoS).
+
+#### 5. [MINOR] False Exhaustion under High Single-Destination Occupancy
+- **Evidence**: Plan §4.1 item 3 (`probe budget 4096`), `[allocator.rs:771](file:///home/ps/git/kimi-xpf/.claude/worktrees/6751-research-nopat-admission/userspace-dp/src/nat/allocator.rs#L771)`.
+- **Impact**: When identity occupancy for a specific destination tuple $(S, \text{port})$ reaches high density (e.g. 12 free ports out of 64,512), a 4096 randomized candidate probe fails to find an open identity with probability $(64500/64512)^{4096} \approx 46.7\%$. Valid open ports exist, but nearly half of new admissions are falsely dropped with `AllocatorExhausted`.
+
+#### 6. [MINOR] Omitted Control Status / Telemetry Plumbing
+- **Evidence**: `[protocol/control.rs:343](file:///home/ps/git/kimi-xpf/.claude/worktrees/6751-research-nopat-admission/userspace-dp/src/protocol/control.rs#L343)`, `[protocol_status.go:287](file:///home/ps/git/kimi-xpf/.claude/worktrees/6751-research-nopat-admission/pkg/dataplane/userspace/protocol_status.go#L287)`, Plan §5.8.
+- **Impact**: Descoping control-status plumbing leaves operators without metrics for PAT transitions (`interface_pat_collisions_total`) or allocation failures (`interface_allocator_exhaustion_total`), violating operational visibility requirements for a High-severity security change.
+
+#### 7. [NIT] Unhandled Dormant RST Teardown Release Path
+- **Evidence**: `[session_glue/mod.rs:908](file:///home/ps/git/kimi-xpf/.claude/worktrees/6751-research-nopat-admission/userspace-dp/src/afxdp/session_glue/mod.rs#L908)`, `[session_glue/mod.rs:893](file:///home/ps/git/kimi-xpf/.claude/worktrees/6751-research-nopat-admission/userspace-dp/src/afxdp/session_glue/mod.rs#L893)`.
+- **Impact**: The dormant TCP RST teardown path at `session_glue/mod.rs:908` lacks forwarding state context and cannot invoke `release_source_nat_allocation_with_mode`. The plan should explicitly document its exclusion from the release invariant.

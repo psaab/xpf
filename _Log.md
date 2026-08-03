@@ -1,3 +1,9 @@
+## 2026-08-03 — #6751 research round 2: three re-reviews, plan v3 fold
+
+- **Timestamp**: 2026-08-03 (research/6751-nopat-admission, /research skill)
+- **Action**: Round-2 verdicts all PLAN-NEEDS-REVISION but all three reviewers now endorse option (a) (AGY withdrew its r1 (b)-over-(a) position and its mis-parse claim). Codex r2: runtime overlap seam (tolerant load + netlink-resolved addresses evade the config validator), non-transactional sync reserve (shared publish precedes any holder), shared-map holder gap (all-workers-reap frees identity under a live shared entry, expire.rs:342). AGY r2: materialize_shared_session_hit bypasses reserve (session_glue/mod.rs:1122), replace-time tuple leak, probe-mutex contention, helper-restart reserve gap. SMR r2 verified every one and added the single install+reserve wrapper (M9), pre-reserve is_reverse gate (M10), delete-sync tail (M11), brute-force squat variant (M12). v3 folds: two-layer §5.7 foreclosure (validator deduped-by-address + snapshot-builder pool_unusable fail-closed); coordinator pre-reserve before publish with drop-on-conflict; holder set {Worker(u32)|Shared} with the wrapper at all three sync-family install sites and +Shared/-Shared at publish/remove; atomic or_insert_with creation + reclamation + cap + lookup-only release; exact full-cycle chunked PAT probe (v2's probabilistic budget withdrawn); two additive status counters.
+- **File(s)**: `docs/research/6751-nopat-admission/plan.md`, `docs/research/6751-nopat-admission/claude-smr-plan-r2.md`, `docs/research/6751-nopat-admission/codex-plan-r2.md`, `docs/research/6751-nopat-admission/agy-plan-r2.md`, `docs/research/6751-nopat-admission/reviewer-ids.md`, `_Log.md`
+
 ## 2026-08-03 — #6751 research round 1: three hostile reviews, plan v2 fold
 
 - **Timestamp**: 2026-08-03 (research/6751-nopat-admission, /research skill)
