@@ -722,7 +722,12 @@ record's identity frees only when `per_worker` is empty AND
       the frame (each slot is stamped with the abort generation
       current at its admission — SMR r20 nit 2), so no per-frame
       generation field is needed on the wire; one atomic load per
-      commit on the already-serialized loop, not a lock.
+      commit on the already-serialized loop, not a lock. The guard
+      compares a frame's SLOT-LINEAGE generation against the abort
+      generation relevant to THAT slot's lineage, not the global
+      maximum — with admissions now advancing the counter too (AGY r25
+      blocker 1's discipline (i)), a routine new admission elsewhere
+      must NOT poison live slots (SMR r26 clarification).
       (2b) **Stamp-and-enqueue admission**: the ADMITTED verdict's
       atomic unit is BOUNDED to (i) stamping the slot with the current
       abort generation and (ii) ENQUEUEING generation-bound setup
