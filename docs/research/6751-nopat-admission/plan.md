@@ -1,13 +1,10 @@
 # #6751 plan — interface SNAT no-PAT admission: reserve-or-PAT the colliding translated tuple
 
-- **Status**: DRAFT v15 — round-14 fold (Codex r14 blockers 1-2 + major 3
-  + minor 4 + nit 5: fabric gate REMOVED (disposition does not survive
-  the legacy wire — non-fabric identity-NPTv6 rows quarantine+timeout-
-  admit instead); order-agnostic alias confirmation (check the current
-  store at quarantine insertion, since the base normally imports FIRST);
-  delete suppression survives until the alias's own delete is consumed;
-  universal pre-data capability frame with fail-safe lifecycle; explicit
-  full-pipeline timeout admission; separate admissions counter)
+- **Status**: DRAFT v15.1 — round-15 fold so far (AGY r15 blocker 1:
+  bulk bookkeeping is NOT gated by the quarantine — quarantined keys are
+  still recorded as received so BulkEnd reconcile never deletes genuine
+  rows as stale; timeout admission's bookkeeping touch is guarded on a
+  bulk being open, no nil-map write)
 - **Issue**: #6751 (opus-review-001 R08, High, `bug`+`audit`+`security`) —
   interface SNAT admits indistinguishable no-PAT return tuples and sends
   replies to the FIRST session.
@@ -611,7 +608,18 @@ record's identity frees only when `per_worker` is empty AND
       timeout-admit — a bounded 5s sync delay for a corner-of-corner,
       not a drop).
     - **Quarantine**: a bounded per-peer map (4096 entries, 5s) holding
-      signature-matching upserts. Confirmation is ORDER-AGNOSTIC (Codex
+      signature-matching upserts. **Bulk bookkeeping is NOT gated**
+      (AGY r15 blocker 1: a quarantined key is STILL RECORDED in
+      `s.bulkRecvV4/V6` at decode time — it was genuinely received in
+      the bulk — because `reconcileStaleSessions` /
+      `ReconcileClusterBulk` (sync.go:1086-1126) treats any live
+      session whose key is absent from the received set as stale and
+      DELETES it at BulkEnd; gating the bookkeeping would delete every
+      genuine self-NAT / identity-NPTv6 session ~50 ms after the bulk
+      completes, before its 5s timeout admission could ever run. The
+      quarantine gates ONLY the import (install / publish / reserve /
+      companion synthesis), never the "was received" record).
+      Confirmation is ORDER-AGNOSTIC (Codex
       r14 blocker 2: the sender queues canonical base FIRST and alias
       SECOND on open, daemon_ha_userspace_stream.go:370/375/384, so the
       base has normally ALREADY been imported when the alias arrives —
@@ -625,11 +633,17 @@ record's identity frees only when `per_worker` is empty AND
       the timeout). A confirmed entry is dropped and its key enters the
       delete-suppression set. On timeout the entry is ADMITTED as a
       canonical row by DISPATCHING THE STORED FRAME INTO THE COMPLETE
-      NORMAL import path — generation checks, timestamp rebasing, bulk
-      bookkeeping, coordinator reserve, and helper dispatch
+      NORMAL import path — generation checks, timestamp rebasing,
+      coordinator reserve, and helper dispatch
       (`WorkerCommand::UpsertSynced`), identically to a non-quarantined
       frame reaching `installClusterSynced*` (sync_conn_read.go:110 →
-      sync_conn_gen.go:435; AGY r14 nit 2 + Codex r14 minor 4):
+      sync_conn_gen.go:435; AGY r14 nit 2 + Codex r14 minor 4) — PLUS a
+      guarded bookkeeping touch: the key is added to the CURRENT bulk's
+      received set ONLY IF a bulk is currently open (AGY r15 blocker 1:
+      after BulkEnd the map is nil'd, sync.go:1090, so an unconditional
+      write panics with assignment-to-nil-map; and a session admitted
+      between bulks needs no bookkeeping at all — reconcile only runs
+      at BulkEnd):
       this is the genuine self-NAT case, the identity-NPTv6
       fabric-redirect case (no alias is ever derived for it —
       daemon_ha_userspace_convert.go:511 returns false when wire == key),
@@ -1035,6 +1049,14 @@ registration, the Go-side alias-ignored counter, and tests.
   NO disposition gate per Codex r14 blocker 1 — the cluster codec
   carries no disposition field, so non-fabric identity-NPTv6 rows also
   quarantine and timeout-admit);
+  bulk bookkeeping is NOT gated (AGY r15 blocker 1 — quarantined keys are
+  still recorded as received at decode time, so
+  reconcileStaleSessions/ReconcileClusterBulk at BulkEnd never deletes a
+  genuine self-NAT or identity-NPTv6 session as stale ~50ms after the
+  bulk, before its 5s timeout admission could run; and the timeout
+  admission's bookkeeping touch is guarded on a bulk being open — after
+  BulkEnd the map is nil'd, sync.go:1090, so an unconditional write
+  would panic);
   confirmation is ORDER-AGNOSTIC (Codex r14 blocker 2 — the sender queues
   the base FIRST on open, daemon_ha_userspace_stream.go:370/375/384, so
   the quarantine checks the CURRENT store for a sibling canonical base
