@@ -1,19 +1,17 @@
 # #6751 plan — interface SNAT no-PAT admission: reserve-or-PAT the colliding translated tuple
 
-- **Status**: DRAFT v15.11 — round-24 fold (Codex r24 blockers 1-2 +
-  major 3 + minor 4: class-(b) lifecycle mutations now use ONE
-  linearizable commit mechanism — generation-tagged compare-and-swap
-  with monotonic-advance semantics, so a stale connect can never
-  overwrite a newer disconnect and a stale disconnect can never
-  overwrite a newer connect, with no check-then-store window by
-  construction; the send guard moved to the dequeue/send effect point
-  and now covers EVERY outbound delta (journal replay, direct raw-byte
-  sendCh entries, and already-dequeued retries — a pre-abort delta sent
-  on a replacement connection is discarded because the new epoch's
-  cold-prime bulk is the authoritative backstop); and the sender-cap
-  recovery is episode-latched (one recovery bulk per cooldown window,
-  refusals during a recovery bulk cannot arm the next episode — a
-  recovery bulk never re-arms itself))
+- **Status**: DRAFT v15.12 — round-25 fold (AGY r25 blocker 1 + minor 2
+  + nit 3: the generation-CAS now has TWO disciplines making it truly
+  linearizable — (i) STRICT MONOTONIC GENERATION ADVANCE ACROSS
+  ADMISSIONS, so every lifecycle event (abort, admission, disconnect)
+  draws a FRESH generation and no connect callback ever shares a
+  generation number with a prior disconnect callback (closing the
+  equal-generation overwrite where a stale disconnect flips a live
+  connect's state back to false); and (ii) STRICT-INEQUALITY CAS for
+  value-flipping mutations, so even an equal-generation stale write can
+  never flip active state; the inventory now includes
+  outboundBulkAcked/inboundBulkAcked (sync.go:479); and §5.8 names the
+  full 4+3 counter taxonomy)
 - **Issue**: #6751 (opus-review-001 R08, High, `bug`+`audit`+`security`) —
   interface SNAT admits indistinguishable no-PAT return tuples and sends
   replies to the FIRST session.
@@ -805,25 +803,51 @@ record's identity frees only when `per_worker` is empty AND
       recreating the exact connect-after-disconnect race it was meant
       to close; and the asynchronously launched DISCONNECT callback was
       not symmetrically guarded at all — a stale disconnect could store
-      `false` after a newer connection stored `true`). Every lifecycle
-      state field in the inventory — `syncPeerConnected`, connection
-      epoch, heartbeat-suppression state, bulk-prime flags, readiness
-      arming, and the bulk-received/ack-received priming flags
+      `false` after a newer connection stored `true`). Two disciplines
+      make the CAS actually linearizable (AGY r25 blocker 1, with the
+      exact counterexample: slot C1's abort increments the counter to
+      g and its disconnect callback binds g; replacement slot C2's
+      admission READS the same g without incrementing, so its connect
+      callback ALSO binds g; if C2's connect commits `(g, true)` first,
+      C1's delayed disconnect callback still passes `g >= g` and
+      overwrites the live state with `(g, false)` — an equal-generation
+      stale write flipping active state):
+      (i) **STRICT MONOTONIC GENERATION ADVANCE ACROSS ADMISSIONS** —
+      every lifecycle event (abort, ADMISSION, disconnect) draws a
+      FRESH generation from the counter; a new slot's admission NEVER
+      reuses the current value, so no connect callback ever shares a
+      generation number with a prior disconnect callback
+      (g_connect > g_disconnect always); and
+      (ii) **STRICT-INEQUALITY CAS FOR VALUE-FLIPPING MUTATIONS** —
+      for fields whose semantics are connected-state flips
+      (`syncPeerConnected`, priming flags), a mutation commits only if
+      its event generation is STRICTLY GREATER than the currently
+      stored generation (`g_event > g_stored`), so even an
+      equal-generation stale write can never flip active state
+      (defense-in-depth behind (i)). Value-nonmonotonic transitions
+      (true → false → true) remain free — the CAS orders by
+      generation, not value.
+      Every lifecycle state field in the inventory — `syncPeerConnected`,
+      connection epoch, heartbeat-suppression state, bulk-prime flags,
+      readiness arming, the bulk-received/ack-received priming flags
       (`onSessionSyncPeerConnected` :51/:68/:81,
       `onSessionSyncPeerDisconnected` :109, `onSessionSyncBulkReceived`
       :90, `onSessionSyncBulkAckReceived` :103 — the complete set,
-      AGY r24 nit 3) — is stored as a (generation, value) pair
-      committed by a CAS that REFUSES TO MOVE BACKWARD: a mutation
-      commits only if its event generation is >= the currently stored
-      generation for that field, so a stale connect-callback's `true`
-      cannot overwrite a newer disconnect's `false`, and a stale
-      disconnect's `false` cannot overwrite a newer connect's `true` —
-      last-writer-newest-wins, never stale-over-new, with no
-      check-then-store window by construction (the CAS IS the commit
-      point; there is no separate validation step to race). §9 pins
-      the detach-between-check-and-store case (impossible under CAS)
-      and the old-disconnect-after-new-connect case (the stale
-      disconnect's write fails the generation CAS).
+      AGY r24 nit 3), AND the bulk-ack lifecycle flags
+      `outboundBulkAcked` / `inboundBulkAcked` (sync.go:479 — AGY r25
+      minor 2) — is stored as a (generation, value) pair
+      committed by the CAS under rules (i)-(ii), so a stale
+      connect-callback's `true` cannot overwrite a newer disconnect's
+      `false`, a stale disconnect's `false` cannot overwrite a newer
+      connect's `true`, and an equal-generation write can never flip
+      active state — with no check-then-store window by construction
+      (the CAS IS the commit point; there is no separate validation
+      step to race). §9 pins the detach-between-check-and-store case
+      (impossible under CAS), the old-disconnect-after-new-connect case
+      (the stale disconnect's write fails the generation CAS), AND the
+      equal-generation overwrite case from AGY r25 (the C1-disconnect /
+      C2-connect same-g collision — impossible under rules (i)-(ii) and
+      pinned as a regression test).
       (iii) **Journal replay** (messages move into a generation-blind
       queue whose sender later picks whatever connection is active,
       sync_conn_write.go:135/268): the per-(sender,key) monotonic
@@ -1243,7 +1267,18 @@ server/helpers/status.rs:102 refresh; protocol_status.go:287 +
 pkg/api/metrics.go:377 + Describe registration at metrics.go:791 +
 metrics_descriptors_userspace_session.go:27 + metrics_userspace.go:677;
 additive per #1961), PLUS THREE GO-side Prometheus counters (the
-§5.6 alias-discipline counters — no helper wire involvement):
+§5.6 alias-discipline counters — no helper wire involvement). For
+clarity (AGY r25 nit 3): the FOUR helper-side counters are
+`xpf_userspace_interface_snat_pat_collisions_total`,
+`xpf_userspace_interface_snat_identity_exhaustion_total`,
+`xpf_userspace_interface_snat_registry_cap_exhaustion_total`, and
+`xpf_userspace_interface_snat_sync_identity_conflict_drops_total`
+(the last recorded inside the Rust helper coordinator,
+ha/session_import.rs); the THREE Go-side cluster counters are
+`xpf_userspace_session_sync_forward_wire_alias_ignored_total`,
+`xpf_userspace_session_sync_alias_quarantine_admitted_total`, and
+`xpf_userspace_session_sync_alias_quarantine_overflow_total`
+(pkg/cluster): 4 + 3 = 7 total:
 - `xpf_userspace_interface_snat_pat_collisions_total` — identity-mint
   conflicts that took the PAT probe;
 - `xpf_userspace_interface_snat_identity_exhaustion_total` — completed
