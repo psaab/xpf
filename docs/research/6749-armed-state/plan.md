@@ -1,6 +1,6 @@
 # #6749 — binding-plan expansion registers new slots unarmed, dataplane disabled indefinitely
 
-**Status: DRAFT v8.19 — pending adversarial plan review (round 24)**
+**Status: DRAFT v8.20 — pending adversarial plan review (round 25)**
 
 - Issue: #6749 (opus-review-001 root R06, severity High)
 - Research base: `ad9591177` (origin/master at worktree creation)
@@ -1122,7 +1122,52 @@
   sync reconciler); §9 (b)/(d)/(f) gain the
   assertions (AGY r23 f6); §8's budget gains the
   new classes; the cursor-crash phrasing corrected
-  (SMR23-8) @ pending
+  (SMR23-8) @ `8d1911b5f` (r24: SMR DEMAND-REVISION
+  (1 BLOCKER + 1 MAJOR + 4 MINOR + 3 NIT); AGY
+  DEMAND-REVISION (1 BLOCKER + 2 MAJOR + 1 MINOR +
+  1 NIT); Codex infra-blocked (third documented
+  attempt; 2-of-3))
+; v8.20 folds SMR r24 (1 BLOCKER + 1 MAJOR + 4 MINOR
+  + 3 NIT) + AGY r24 (1 BLOCKER + 2 MAJOR + 1 MINOR
+  + 1 NIT): the completion notice's tails gain their
+  pair-currency gate (SMR24-1 = AGY r24 f1 — a stale
+  notice for B drained after C's apply ran A→B
+  invalidation over C-permitted sessions and
+  overwrote C's stamp; and the abort-only fix LEAKS
+  (C's B→C delta never covers
+  A-permitted/B-revoked/C-revoked sessions): the
+  drain acquires `applySem`, re-reads the CURRENT
+  pair at drain time, composes prior → CURRENT (the
+  uniform base — complete with no over-deletion),
+  currency-gates the applied stamp + peer push, and
+  marks a superseded notice's cursor entry
+  SUPERSEDED (terminal)); the cursor's
+  check-and-advance is pinned (SMR24-2 = AGY r24 f2 —
+  one manager method under `m.mu` for every
+  `{phaseCursor, completionState}` read-modify-write;
+  the transports are per-acceptance unique, so the
+  residual race is phase-level); the post-clear
+  `m.lastSnapshot` value is pinned NIL (SMR24-3 =
+  AGY r24 f3, downgraded on the verified nil-guard
+  census — overlay/neighbor/HA/status/applied-view
+  all nil-guard under `m.mu`; the census becomes a
+  build-time canary; the transient overlay/scheduler
+  publish gap until the re-drive rebuilds is
+  stated); the notice channel's overflow gains a
+  periodic pending-cursor sweep (SMR24-4 = AGY r24
+  f4 — the notice is an optimization over the sweep;
+  the enqueue failure Warns); the suppression
+  marker's recording moves to the SHARED
+  guard-refusal path (SMR24-5 — the sync-receive
+  guard records too, so the drain never fires even
+  once for R); §9 (a) gains the listener assertions
+  (SMR24-6 = AGY r24 f5 — the stale-notice
+  composition, the currency-gated stamp, SUPERSEDED,
+  the sweep); the stage-timeout/bind race
+  serialization (SMR24-7), the `isExposed` closure's
+  lock-order rule (SMR24-8 — writeMu → `s.mu` only),
+  and the held-push-forever budget note (SMR24-9)
+  fold @ pending
   AGY r15 (4 BLOCKER + 3 MAJOR + 1 MINOR) + SMR r15 (2
   BLOCKER + 3 MAJOR + 3 MINOR/NIT): R1 becomes a REAL
   rollout+transport contract — a legacy `active.json`
@@ -1204,7 +1249,7 @@
 
 ## 1. Status
 
-DRAFT v8.19 — pending adversarial plan review round 24 (Codex + AGY +
+DRAFT v8.20 — pending adversarial plan review round 25 (Codex + AGY +
 Claude SMR). Convergence target: PLAN-READY (recommended path shipped
 to `/engineer`) or PLAN-KILL. No production code is written under
 `/research`.
@@ -2271,6 +2316,39 @@ to `/engineer`) or PLAN-KILL. No production code is written under
   | SMR23-7 / AGY f5 QueueConfig wiring | CLOSED — constructor-injected `activePair func() (*config.Config, uint64)` + `isExposed func(rev uint64) bool` closures (the daemon wires the configstore reads; no `pkg/cluster`→configstore import); the marker records from the structured RESULT (the claim moves after the send; the reconciler at daemon_ha_sync.go:474-497 reads `sentPair` from the result); the held push re-wakes on the exposure drain's completion (a trigger edge into the level-triggered reconciler) (§5-C (ii), §6) |
   | SMR23-8 cursor-crash phrasing | CLOSED — reworded: the crash LOSES the cursor; recovery derives the incomplete set from the `appliedRevision` sidecar + the store's rollback/archive trees (exposed vs active revision) (§5-C (ii)) |
   | AGY r23 f6 §9 gaps | CLOSED — §9 (b) gains the timer-mechanism assertion; §9 (d) gains the restart-only suppression assertion (a guard-refused promotion neither re-fires the rule nor holds the debt) |
+
+- **Round 24** (v8.19): SMR DEMAND-REVISION (1 BLOCKER + 1 MAJOR
+  + 4 MINOR + 3 NIT); AGY DEMAND-REVISION (1 BLOCKER + 2 MAJOR +
+  1 MINOR + 1 NIT); Codex INFRA-BLOCKED (third documented
+  attempt; 2-of-3). Convergence (the BLOCKER found by BOTH
+  independently): the v8.19 completion notice's tails have no
+  pair-currency gate (SMR24-1 = AGY f1 — a stale notice for B
+  drained after C's apply runs A→B invalidation over C-permitted
+  sessions and overwrites C's applied stamp; SMR's trace showed
+  the abort-only fix LEAKS (C's B→C delta never covers
+  A-permitted/B-revoked/C-revoked sessions), so the fold is the
+  plan's own uniform-base rule: `applySem` + prior→CURRENT
+  composition + SUPERSEDED terminal). The remainder: the
+  cursor's check-and-advance atomic (SMR24-2 = AGY f2); the
+  post-clear `m.lastSnapshot` value (SMR24-3 = AGY f3,
+  downgraded on the verified nil-guard census); the notice
+  overflow sweep (SMR24-4 = AGY f4); the suppression marker's
+  recording locus (SMR24-5, SMR-only); the r23 table's SMR23-3
+  §9 citation gap (SMR24-6 = AGY f5's §9 demand); three NITs
+  (SMR24-7..9).
+- **Round-24 disposition table:**
+
+  | r24 finding | v8.20 disposition |
+  |---|---|
+  | SMR24-1 / AGY f1 notice currency gate | CLOSED — the completion-notice drain acquires `applySem`, re-reads the CURRENT pair at drain time, composes prior → CURRENT for the invalidation (the uniform base — complete with no over-deletion), currency-gates the applied stamp + peer push (skipped when the notice's pair is no longer current), and marks a superseded notice's cursor entry SUPERSEDED (terminal — the newer pair's chain covers the composition) (§5-C (ii), §6, §9 (a)) |
+  | SMR24-2 / AGY f2 cursor atomic | CLOSED — the cursor record lives manager-side; EVERY `{phaseCursor, completionState}` read-modify-write goes through ONE manager method under `m.mu` (the daemon wrapper's phase completions call it across the package boundary; the listener likewise); the transports are per-acceptance unique, so the residual race is phase-level and the `m.mu` advancement covers it (§5-C (ii), §9 (a)) |
+  | SMR24-3 / AGY f3 post-clear value | CLOSED — the post-clear `m.lastSnapshot` value is NIL (the staged object is the only reference; revert-to-published is impossible without new retained state — rejected); the nil-guard census (syncSnapshotLocked, overlay, neighbor, HA, status, applied-view — all nil-guard under `m.mu`) becomes a build-time canary; the transient overlay/scheduler publish gap until the GO-LOCAL re-drive rebuilds is stated (§5-C, §6) |
+  | SMR24-4 / AGY f4 notice overflow | CLOSED — the notice is an OPTIMIZATION over a periodic pending-cursor sweep on the daemon scheduler (the cursor registry is queryable daemon-side; the sweep runs at the standing debt cadence); the enqueue failure records a Warn edge (§5-C (ii), §9 (a)) |
+  | SMR24-5 marker recording locus | CLOSED — the recording lives in the SHARED guard-refusal path (one routine called by both the sync-receive guard (daemon_apply_commit.go:381-402) and the drain's guard), so the marker lands on the FIRST refusal and the drain never fires even once for R (§5-C epoch contract + re-sync) |
+  | SMR24-6 / AGY f5 §9 listener assertions | CLOSED — §9 (a) gains the stale-notice composition assertion (prior → CURRENT at drain time, never A→B over C), the currency-gated stamp/push, the SUPERSEDED terminal marking, and the sweep fallback |
+  | SMR24-7 timeout/bind race | CLOSED — the scheduler entry's fire and the registration's completion serialize under `m.mu`; the fire re-checks the registration's liveness under the same lock (a completed registration cancels the entry atomically) (§5-C) |
+  | SMR24-8 isExposed lock order | CLOSED — the closure's `DurableRevision()` read under `writeMu` follows the order writeMu → `s.mu` ONLY (the reconciler reads `ActivePair()` under `s.mu` and RELEASES before `QueueConfig`; no `s.mu` holder calls into the send path) (§5-C (ii), §6) |
+  | SMR24-9 held-push budget | CLOSED — §11 Q7 carries the class (a never-completing drain leaves the gated push held — a consequence of the budgeted persistent-storage-failure class; the peer's state never leads the primary's exposed state) |
 
 ### Round-1 detail log (kept for the record)
 
@@ -4258,9 +4336,16 @@ BLOCKERs 6 + 8; v8 epoch form per Codex r6 f6/f8):**
   loop against a config that can never apply without a
   restart, for what is a NORMAL, expected state (every
   #5840/#6192 topology/identity peer sync puts the
-  standby here BY DESIGN): the drain's guard-refusal
-  records R into the revision-keyed
-  `restartSuppressed` set (a terminal "restart-required"
+  standby here BY DESIGN): the SHARED guard-refusal
+  path records R into the revision-keyed
+  `restartSuppressed` set (v8.20, SMR r24 SMR24-5's
+  locus pin — ONE routine called by both the
+  sync-receive guard (daemon_apply_commit.go:381-402)
+  and the drain's guard, so the marker lands on the
+  FIRST refusal and the drain never fires even once
+  for R — the v8.19 drain-only recording wasted one
+  compile-and-refuse drain cycle per restart-only
+  sync) — a terminal "restart-required"
   marker, Warn-once with the guard's reason — and the
   re-sync debt CLEARS into that marker (terminal, NOT
   into acceptance — the v8.18 text's "defers to the
@@ -4575,7 +4660,25 @@ BLOCKERs 6 + 8; v8 epoch form per Codex r6 f6/f8):**
   rebuild, never correctness — and the GO-LOCAL
   re-drive's full-apply retry rebuilds from the
   store) — `m.lastSnapshot` NEVER references a
-  cancelled staged object by construction; AND
+  cancelled staged object by construction (and the
+  post-clear value is pinned (v8.20, SMR r24 SMR24-3
+  = AGY r24 f3: the value is NIL — the staged object
+  is the only reference; revert-to-published is
+  impossible (staging OVERWRITES `m.lastSnapshot` and
+  the manager retains no second reference — adding
+  one is new state, rejected); EVERY auxiliary
+  producer nil-guards under the same `m.mu`
+  (syncSnapshotLocked process_status.go:11; overlay
+  manager_overlay.go:129/:134; neighbor
+  manager_neighbor.go:52/:84/:202/:259; HA
+  manager_ha.go:159/:209/:524/:630; status
+  manager_status.go:111; applied_nat_view.go:85) —
+  the census is a build-time canary (a new producer
+  without a nil-guard fails it); the cost is a
+  TRANSIENT publish gap — the route overlay /
+  scheduler / neighbor legs skip until the GO-LOCAL
+  re-drive rebuilds (≤ the 60s backoff floor),
+  stated); AND
   `syncSnapshotLocked`'s publish path gains the
   defense-in-depth token-liveness branch (belt-and-
   suspenders: a dead token → skip the publish, drop
@@ -4593,7 +4696,12 @@ BLOCKERs 6 + 8; v8 epoch form per Codex r6 f6/f8):**
   seconds-to-minutes); the owner is a scheduler entry
   recorded at staging and cancelled with the
   registration (every other lifetime path cancels
-  it); on expiry the registration dies and the
+  it; the entry's fire and the registration's
+  completion serialize under `m.mu` — the fire
+  re-checks the registration's liveness under the
+  same lock, so a bind completing at the boundary
+  cancels the entry atomically (v8.20, SMR r24
+  SMR24-7)); on expiry the registration dies and the
   GO-LOCAL re-drive's full-apply retry at backoff
   owns the re-attempt — not an indefinite stage; the
   POSTURE stated: for the whole stage AND the
@@ -4726,10 +4834,13 @@ BLOCKERs 6 + 8; v8 epoch form per Codex r6 f6/f8):**
   GO-LOCAL drain's revised `applyConfigLocked` carries
   the SAME topology/identity guard (v8.18, Codex r22
   f2's bypass fix: a restart-only config is never
-  live-applied by the re-sync) — and the drain's
-  guard-refusal records the revision-keyed
-  `restartSuppressed` marker (v8.19, SMR r23 SMR23-1 =
-  AGY r23 f1: the v8.18 "defers to the operator
+  live-applied by the re-sync) — and the SHARED
+  guard-refusal path records the revision-keyed
+  `restartSuppressed` marker (v8.19/v8.20, SMR r23
+  SMR23-1 = AGY r23 f1 + SMR r24 SMR24-5's locus pin:
+  ONE routine called by both the sync-receive guard
+  and the drain's guard — the marker lands on the
+  FIRST refusal); the v8.18 "defers to the operator
   restart exactly as the SyncApply path does" was
   FALSE — the SyncApply path refuses ONCE per
   sync-receive, but the drain is a retrying debt and
@@ -5168,7 +5279,49 @@ BLOCKERs 6 + 8; v8 epoch form per Codex r6 f6/f8):**
   the listener observes it first (the wrapper's
   ApplyResult path and the notice path both consult
   and advance the same cursor record; a completed
-  entry's tails are skipped); the helper-restart
+  entry's tails are skipped) — AND with the
+  PAIR-CURRENCY gate (v8.20, SMR r24 SMR24-1 = AGY
+  r24 f1's stale-notice fix: a newer commit C can
+  promote and apply while B's notice sits queued —
+  an un-gated drain would compose A→B over C-permitted
+  sessions and overwrite C's stamp; and the
+  abort-only fix LEAKS (C's own tails compose B→C,
+  which never covers A-permitted/B-revoked/C-revoked
+  sessions)): the notice drain ACQUIRES `applySem`
+  (serializing against every promotion+apply),
+  re-reads the CURRENT pair at drain time, and (i)
+  the session invalidation composes prior → CURRENT
+  (the uniform base — A→C covers A\B\C-revoked
+  exactly, keeps A\B∩C-permitted, and C's own B→C
+  covers B\C: the union is complete with no
+  over-deletion), (ii) the applied stamp and the peer
+  push are CURRENCY-GATED (skipped when the notice's
+  pair is no longer current — the newer pair's own
+  tails carry them), and (iii) a superseded notice's
+  cursor entry is marked SUPERSEDED (terminal — the
+  composition is covered by the newer pair's chain,
+  never left pending); the cursor's check-and-advance
+  is atomic by construction (v8.20, SMR r24 SMR24-2 =
+  AGY r24 f2: the cursor record lives manager-side
+  and EVERY `{phaseCursor, completionState}`
+  read-modify-write goes through ONE manager method
+  under `m.mu` — the daemon wrapper's phase
+  completions call it across the package boundary,
+  the listener likewise; the transports are
+  per-acceptance unique (a Compile-leg acceptance
+  yields an `ApplyResult`, a catch-up acceptance
+  yields a notice — never both for one acceptance),
+  so the residual race is phase-level and the `m.mu`
+  advancement covers it); and the notice is an
+  OPTIMIZATION over a sweep (v8.20, SMR r24 SMR24-4 =
+  AGY r24 f4: the enqueue-after-unlock is
+  non-blocking — a full buffer drops the notice, so
+  the daemon's apply scheduler runs a periodic
+  pending-cursor sweep at the standing debt cadence
+  (the cursor registry is queryable daemon-side) and
+  the enqueue failure records a Warn edge — a dropped
+  notice delays the tails to the sweep interval,
+  never loses them); the helper-restart
   shape's no-op tails are NAMED (a fresh helper holds
   no sessions — the invalidation is a no-op on the
   empty base — but the peer push and the applied
@@ -6396,7 +6549,16 @@ activations a scheduled retry.
   and `isExposed func(rev uint64) bool`, wired by the
   daemon at construction (pkg/cluster imports NO
   configstore (sync_conn_config.go:1-8) and keeps it
-  that way — no package cycle); (ii) the marker-claim
+  that way — no package cycle); the closures'
+  lock-order rule (v8.20, SMR r24 SMR24-8): the
+  `isExposed`/`activePair` reads take `s.mu` UNDER
+  `QueueConfig`'s `writeMu`, so the ONLY direction is
+  writeMu → `s.mu` — the reconciler reads
+  `ActivePair()` under `s.mu` and RELEASES before
+  `QueueConfig`, and no `s.mu` holder may call into
+  the sync layer's send path (the census: the
+  reconciler at daemon_ha_sync.go:474-497 and the
+  loop's begin/end, which take no `s.mu`); (ii) the marker-claim
   ORDER: today the daemon claims its marker BEFORE
   calling `QueueConfig` (daemon_ha_sync.go:474-497) —
   the claim moves AFTER the send: the reconciler
@@ -6665,7 +6827,15 @@ activations a scheduled retry.
   the OnXSKBound shape); the daemon drains it and runs
   the phased tails with the cursor's `completionState`
   as the single exactly-once authority across BOTH
-  legs (v8.19, SMR r23 SMR23-3 = AGY r23 f3). The prior
+  legs (v8.19, SMR r23 SMR23-3 = AGY r23 f3) — UNDER
+  the pair-currency gate (v8.20, SMR r24 SMR24-1 =
+  AGY r24 f1: the drain acquires `applySem`, re-reads
+  the CURRENT pair, composes prior → CURRENT,
+  currency-gates the stamp/push, and marks a
+  superseded entry SUPERSEDED) with every cursor
+  read-modify-write through ONE `m.mu` method
+  (SMR24-2) and a periodic pending-cursor sweep
+  backing the bounded channel (SMR24-4). The prior
   config is durable by construction (the store's
   rollback/archive trees retain it by revision), so a
   crash mid-completion re-derives the cursor from the
@@ -7554,6 +7724,24 @@ activations a scheduled retry.
       INCLUDING the commit-confirmed auto-rollback
       wrapper (v8.15, Codex r19 f5 — assert its session
       invalidation and push also gate on `Exposed`);
+      the COMPLETION-LISTENER legs (v8.20, SMR r24
+      SMR24-1/2/4/6 = AGY r24 f1/f2/f4/f5): B accepted
+      via the status-loop catch-up posts its notice;
+      C promotes and applies BEFORE the notice drains
+      — assert the drain acquires `applySem`, composes
+      prior → CURRENT (A→C — an A-permitted,
+      B-revoked, C-permitted session SURVIVES; an
+      A-permitted, B-revoked, C-revoked session is
+      deleted — never the A→B composition over C),
+      skips the applied stamp + peer push for the
+      superseded pair, and marks the cursor entry
+      SUPERSEDED (terminal); the cursor's
+      check-and-advance runs under `m.mu` (assert a
+      concurrent wrapper/listener phase completion
+      cannot double-run a tail); a full notice
+      channel drops the enqueue with a Warn AND the
+      periodic pending-cursor sweep runs the tails
+      anyway (assert the sweep, not just the notice);
       the A→B→C COMPOSITION (v8.15, Codex r19 f5): A
       exposed → gated B tightens → gated C promoted →
       C's exposure invalidates sessions against
@@ -8382,7 +8570,7 @@ the three owners through nine enumerations; the mixed-version
 producer is the documented exception with the required helper
 restart).
 
-Remaining questions for round 24, each invitable to PLAN-KILL with
+Remaining questions for round 25, each invitable to PLAN-KILL with
 a concrete counterexample:
 
 1. **Completeness, final form.** Exhibit a path to
@@ -8445,12 +8633,12 @@ a concrete counterexample:
    candidate-filter territory
    (`include_userspace_binding_interface`), explicitly out of
    scope here.
-6. **Round-23 disposition table audit.** §1's r23 table maps
-   every r23 finding (SMR 2 BLOCKER + 2 MAJOR + 3 MINOR + 1
-   NIT; AGY 3 BLOCKER + 2 MAJOR + 1 MINOR; Codex infra-blocked)
-   to its v8.19 fold, and every fold this revision was
-   verified per-edit against the file. Which row is
-   claimed-but-wrong this time?
+6. **Round-24 disposition table audit.** §1's r24 table maps
+   every r24 finding (SMR 1 BLOCKER + 1 MAJOR + 4 MINOR + 3
+   NIT; AGY 1 BLOCKER + 2 MAJOR + 1 MINOR + 1 NIT; Codex
+   infra-blocked) to its v8.20 fold, and every fold this
+   revision was verified per-edit against the file. Which row
+   is claimed-but-wrong this time?
 7. **Cumulative hazard budget, final sign-off (v8.8 honest
    numbers, Codex r11 f11 + r12 f14).** Healthy unsuppressed
    baseline for
@@ -8525,5 +8713,13 @@ a concrete counterexample:
    rollback timer (a recovered confirm window whose
    deadline falls mid-startup) = QUEUED, never dropped
    (the arm fires it immediately after the boot apply,
-   serialized by `applySem`). Which of these, if any, is
+   serialized by `applySem`); the held-push-forever
+   class (v8.20, SMR r24 SMR24-9: a never-completing
+   exposure drain leaves the gated config's peer push
+   HELD indefinitely) = a CONSEQUENCE of the budgeted
+   persistent-storage-failure class above (the peer's
+   state never leads the primary's exposed state —
+   correct by invariant; the peer converges when the
+   push lands post-exposure; the periodic reconciler
+   re-attempts on every trigger edge). Which of these, if any, is
    unacceptable for the severity-High class, and why?
