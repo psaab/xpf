@@ -672,4 +672,51 @@
 
 ## Round 22 (plan v8.17 @ aca354bba)
 
+- **Claude SMR r22** — `claude-smr-plan-r22.md`. Verdict:
+  DEMAND-REVISION (2 MAJOR — SMR22-1 the OVERLAP-finalized staged
+  leg can publish late over the newer accepted config (the
+  finalization must CANCEL the staged leg's registration + the leg
+  checks its token's liveness); SMR22-2 beginFirstExposure's
+  locus/transport and the oldActive dual-source unpinned; + 4
+  MINOR — boot-recovery edge, closeout strand, tombstone posture,
+  settlement crash).
+- **AGY r22** — background bash `bvchwhnoy`; output
+  `/tmp/agy-6749-r22.out`; verdict doc `agy-plan-r22.md`. Verdict:
+  DEMAND-REVISION (3 BLOCKER — f1 accepted_snapshot_token missing
+  from StatusSnapshot (the seed has no wire field); f2 the
+  OnXSKBound callback neither revoked nor OVERLAP-checked (=
+  SMR22-1); f3 ApplyResult doesn't transport ledgerID/priorPair
+  (= SMR22-2's transport half); + 2 MAJOR — f4 the QueueConfig
+  re-derivation lacks the exposure check (a gated pair must never
+  be pushed); f5 the link recording strands deleted members;
+  + 1 MINOR — f6 the tombstone's full-build phrasing contradicts
+  itself).
+- **Codex r22** — background bash `bymt66avd`; output
+  `/tmp/codex-6749-r22.out`; verdict doc `codex-plan-r22.md`.
+  Verdict: DEMAND-REVISION (13 BLOCKER + 1 MAJOR — f2 the
+  invariant is false at startup and doesn't cover every promoted
+  outcome (SyncApply's topology/identity guard skips the apply
+  (:381-402) — GO-LOCAL would bypass it; the rollback executor
+  can fire mid-startup); f3 the stale interposition texts not
+  swept; f4 the closeout has no implementable A-live model
+  (last-EXPOSED; whole-config owners; web binds not interface-
+  independent; the debt needs a pair key + recomputation + the
+  failure transition); f5 beginFirstExposure/cursor have no
+  cross-layer lifecycle (transport + the durable prior config or
+  a conservative clear-all, sidecar-present included); f6 = AGY
+  f2 (sharper: the primitive must verify the node is OPEN); f7
+  the discriminator's registration is undefined (the ACTUAL
+  publisher is syncSnapshotLocked (process_status.go:10-140));
+  f8 the fence is contradicted by leftover newest-seen text and
+  lacks its seed field; f9 fence ownership + settlement exactly-
+  once need a token registry (not one MAX-CAS writer); f10 the
+  gate's clear-on-transfer lacks the restore-authorized quiesce
+  (each retry a new transaction); f11 runtime-scoped tombstone
+  expiry can resurrect a down fabric into a blackhole (persists
+  until a successful nonzero map transaction); f12 the outbound
+  marker needs a structured {queued, sentPair, sentDigest}
+  transaction). Prior closures remain valid; Q1 remains complete.
+
+## Round 23 (plan v8.18 @ 0e4604ac4)
+
 - Codex, AGY, Claude SMR — pending dispatch.
