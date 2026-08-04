@@ -876,6 +876,30 @@
   `/tmp/codex-6749-r27-prompt.txt`). Proceeding 2-of-3 per the
   codex-infra-blocked exception; retries continue each round.
 
-## Round 28 (plan v8.23 @ pending)
+## Round 28 (plan v8.23 @ 6c6d00b09)
 
-- Codex (retry), AGY, Claude SMR — pending v8.23 fold.
+- **Claude SMR r28** — `claude-smr-plan-r28.md`. Verdict:
+  DEMAND-REVISION (0 BLOCKER + 0 MAJOR + 2 MINOR — SMR28-1 the
+  check-and-advance needs the claim-or-skip tri-state
+  (self-found; the v8.20 wording was ambiguous between
+  claim-or-skip and check-then-execute-then-advance); SMR28-2
+  the failing-tail retry cadence unpinned (per-entry
+  nextAttempt on the standing ladder)).
+- **AGY r28** — background bash `bz8wc08no`; prompt
+  `/tmp/agy-6749-r28-prompt.txt` (122,808 bytes); output
+  `/tmp/agy-6749-r28.out`; verdict doc `agy-plan-r28.md`.
+  Verdict: DEMAND-REVISION (1 MAJOR — f1 the 1Hz failing-tail
+  retry loop (= SMR28-2); + 1 MINOR — f2 the missing-entry
+  contract's scope (uniform across ALL accessors incl. the
+  synchronous wrapper — the iterate drain picks up a
+  Compile-leg entry concurrently with its wrapper); + 1 NIT —
+  f3 the §9 (a) wrapper-vs-GC assertion).
+- **Codex r28** — INFRA-BLOCKED (usage limit; reset Aug 10
+  06:57 UTC). Seventh documented attempt this session
+  (`/tmp/codex-6749-r28-retry1.err`; r28 prompt staged at
+  `/tmp/codex-6749-r28-prompt.txt`). Proceeding 2-of-3 per the
+  codex-infra-blocked exception; retries continue each round.
+
+## Round 29 (plan v8.24 @ pending)
+
+- Codex (retry), AGY, Claude SMR — pending v8.24 fold.

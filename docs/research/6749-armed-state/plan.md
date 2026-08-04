@@ -1,6 +1,6 @@
 # #6749 — binding-plan expansion registers new slots unarmed, dataplane disabled indefinitely
 
-**Status: DRAFT v8.23 — pending adversarial plan review (round 28)**
+**Status: DRAFT v8.24 — pending adversarial plan review (round 29)**
 
 - Issue: #6749 (opus-review-001 root R06, severity High)
 - Research base: `ad9591177` (origin/master at worktree creation)
@@ -1267,7 +1267,41 @@
   SMR26-1 row's dispatch phrasing is amended
   (AGY r27 f3); §9 (a) gains the GC'd-dequeue
   no-op assertion and the no-queue convergence
-  assertion @ pending
+  assertion @ `6c6d00b09` (r28: SMR DEMAND-REVISION
+  (0 BLOCKER + 0 MAJOR + 2 MINOR); AGY
+  DEMAND-REVISION (1 MAJOR + 1 MINOR + 1 NIT);
+  Codex infra-blocked (seventh documented attempt;
+  2-of-3))
+; v8.24 folds SMR r28 (2 MINOR) + AGY r28 (1 MAJOR
+  + 1 MINOR + 1 NIT): the cursor's phase machine is
+  the claim-or-skip TRI-STATE (SMR28-1 — the v8.20
+  "check-and-advance" was ambiguous between
+  claim-or-skip and check-then-execute-then-advance,
+  and only the first is exactly-once: per phase,
+  pending → claimed → complete, with the claim
+  atomic under `m.mu` and a duplicate claimant
+  skipping (a claimed-but-slow drain's phase
+  completes on the first executor; a
+  claimed-but-crashed drain is the in-memory-loss
+  case the crash rule re-derives)); the failing-tail
+  retry gains its cadence (SMR28-2 = AGY r28 f1 —
+  the iterate-pending-set model re-invoked the
+  drain on a failing entry every 1s tick: the entry
+  stays pending (correct) but the retry rides a
+  per-entry `nextAttempt` on the standing
+  5/10/20/60s exponent-preserving ladder (the
+  per-tick pass skips not-yet-due entries) and the
+  failure Warns on the standing edge-detect); and
+  the missing-entry contract goes UNIFORM (AGY r28
+  f2/f3 — the scheduler's iterate drain picks up a
+  Compile-leg entry CONCURRENTLY with its
+  synchronous `ApplyResult` wrapper (the claim
+  serializes the phases), so the wrapper's accessor
+  can hit a GC'd key too: the missing-entry →
+  already-terminal contract applies to EVERY
+  registry accessor (drain AND synchronous
+  wrapper)); §9 (a) gains the claim-collision,
+  backoff, and wrapper-vs-GC assertions @ pending
   AGY r15 (4 BLOCKER + 3 MAJOR + 1 MINOR) + SMR r15 (2
   BLOCKER + 3 MAJOR + 3 MINOR/NIT): R1 becomes a REAL
   rollout+transport contract — a legacy `active.json`
@@ -1349,7 +1383,7 @@
 
 ## 1. Status
 
-DRAFT v8.23 — pending adversarial plan review round 28 (Codex + AGY +
+DRAFT v8.24 — pending adversarial plan review round 29 (Codex + AGY +
 Claude SMR). Convergence target: PLAN-READY (recommended path shipped
 to `/engineer`) or PLAN-KILL. No production code is written under
 `/research`.
@@ -2519,6 +2553,29 @@ to `/engineer`) or PLAN-KILL. No production code is written under
   |---|---|
   | SMR27-1 / AGY f2+f3 dispatch mechanism | CLOSED — there is NO dispatch channel: the scheduler's per-tick pass ITERATES THE PENDING CURSOR SET directly (the notice remains the fast-path optimization; the pending set IS the correctness path — no dispatched-flag, no queue, no drop policy, no stuck state: an entry is pending until terminal, and the scheduler drains the pending set through the ONE drain routine every tick); the r26 SMR26-1 row's phrasing amended (§5-C (ii), §1 r26 row, §9 (a)) |
   | SMR27-2 / AGY f1+f4 missing-entry contract | CLOSED — the drain's cursor lookup treats a MISSING entry as already-terminal (a safe no-op — the entry's work completed or was covered by the newer pair's chain; the crash rule never depends on a GC'd entry), never a nil dereference or an unhandled error; §9 (a) asserts the GC'd-dequeue no-op (§5-C (ii), §9 (a)) |
+
+- **Round 28** (v8.23): SMR DEMAND-REVISION (0 BLOCKER + 0
+  MAJOR + 2 MINOR); AGY DEMAND-REVISION (1 MAJOR + 1 MINOR +
+  1 NIT); Codex INFRA-BLOCKED (seventh documented attempt;
+  2-of-3). Convergence: the failing-tail retry cadence was
+  unpinned (SMR28-2 = AGY f1 — the iterate-pending-set model
+  re-invoked the drain every 1s tick on a failing entry,
+  bypassing the standing backoff); the cursor's phase machine
+  needed the claim-or-skip tri-state (SMR28-1, SMR-only — the
+  v8.20 "check-and-advance" was ambiguous between claim-or-skip
+  and check-then-execute-then-advance, and only the first is
+  exactly-once); and the missing-entry contract's scope needed
+  to go uniform (AGY f2/f3 — the scheduler's iterate drain
+  picks up a Compile-leg entry concurrently with its
+  synchronous wrapper, so the wrapper's accessor can hit a
+  GC'd key too).
+- **Round-28 disposition table:**
+
+  | r28 finding | v8.24 disposition |
+  |---|---|
+  | SMR28-1 claim-or-skip tri-state | CLOSED — per phase, pending → claimed → complete; the claim is atomic under `m.mu`; a duplicate claimant skips (the first executor covers the phase; a claimed-but-crashed drain is the in-memory-loss case the crash rule re-derives); §9 (a) asserts the claim-collision (two concurrent drains, one phase, exactly one execution) (§5-C (ii), §9 (a)) |
+  | SMR28-2 / AGY f1 failing-tail cadence | CLOSED — the entry stays pending and the retry rides a per-entry `nextAttempt` on the standing 5/10/20/60s exponent-preserving ladder (the per-tick pass skips not-yet-due entries); the failure Warns on the standing edge-detect; §9 (a) asserts two consecutive failures do not produce back-to-back full drains (§5-C (ii), §9 (a)) |
+  | AGY f2+f3 uniform missing-entry contract | CLOSED — the missing-entry → already-terminal contract applies to EVERY registry accessor (the scheduler/notice drains AND the synchronous `ApplyResult` wrapper — the iterate drain picks up a Compile-leg entry concurrently with its wrapper, so the wrapper's accessor can hit a GC'd key); §9 (a) asserts the wrapper-vs-GC race no-ops cleanly (§5-C (ii), §6, §9 (a)) |
 
 ### Round-1 detail log (kept for the record)
 
@@ -5520,7 +5577,22 @@ BLOCKERs 6 + 8; v8 epoch form per Codex r6 f6/f8):**
   yields an `ApplyResult`, a catch-up acceptance
   yields a notice — never both for one acceptance),
   so the residual race is phase-level and the `m.mu`
-  advancement covers it); and the notice is an
+  advancement covers it) — as the claim-or-skip
+  TRI-STATE (v8.24, SMR r28 SMR28-1: per phase,
+  pending → claimed → complete, with the CLAIM
+  atomic under `m.mu` and a duplicate claimant
+  skipping (the v8.20 "check-and-advance" was
+  ambiguous between claim-or-skip and
+  check-then-execute-then-advance — and only the
+  first is exactly-once: two concurrent drains (the
+  notice-triggered AND the scheduler-iterated, which
+  also picks up a Compile-leg entry concurrently
+  with its synchronous wrapper) would otherwise
+  both observe a phase pending and both execute it;
+  with the claim, the first claimant executes and
+  the duplicate skips; a claimed-but-crashed drain
+  is the in-memory-loss case the crash rule
+  re-derives)); and the notice is an
   OPTIMIZATION over a sweep (v8.20, SMR r24 SMR24-4 =
   AGY r24 f4: the enqueue-after-unlock is
   non-blocking — a full buffer drops the notice, so
@@ -5565,9 +5637,25 @@ BLOCKERs 6 + 8; v8 epoch form per Codex r6 f6/f8):**
   drain routine every tick — the sweep's mark is
   advisory-only and the cursor's `m.mu`
   check-and-advance is the only exactly-once
-  authority; and the drain's cursor lookup treats a
+  authority; a drain that FAILS mid-tails leaves
+  the entry pending and the retry rides a per-entry
+  `nextAttempt` on the standing 5/10/20/60s
+  exponent-preserving ladder (v8.24, SMR r28
+  SMR28-2 = AGY r28 f1: the per-tick pass SKIPS
+  not-yet-due entries — the iterate model
+  re-invoking the drain every 1s on a failing entry
+  was a tight 1Hz retry loop against the plan's own
+  standing posture — and the failure Warns on the
+  standing edge-detect); and the drain's cursor
+  lookup treats a
   MISSING entry as already-terminal (v8.23, SMR r27
-  SMR27-2 = AGY r27 f1/f4: a drain dequeued for an
+  SMR27-2 = AGY r27 f1/f4; scope made uniform
+  v8.24, AGY r28 f2/f3: the contract applies to
+  EVERY registry accessor — the scheduler/notice
+  drains AND the synchronous `ApplyResult` wrapper
+  (the iterate drain picks up a Compile-leg entry
+  concurrently with its wrapper, so the wrapper's
+  accessor can hit a GC'd key too)): a drain dequeued for an
   entry a concurrent sweep already observed terminal
   and GC'd finds the key GONE — a safe no-op (the
   entry's work completed or was covered by the newer
@@ -7102,8 +7190,15 @@ activations a scheduled retry.
   currency-gates the stamp/push, and marks a
   superseded entry SUPERSEDED) with every cursor
   read-modify-write through ONE `m.mu` method
-  (SMR24-2) and a periodic pending-cursor sweep
-  backing the bounded channel (SMR24-4). The prior
+  (SMR24-2 — the claim-or-skip tri-state, v8.24 SMR
+  r28 SMR28-1) and the scheduler's per-tick pass
+  iterating the pending-cursor set (v8.23 — the
+  pending set IS the correctness path, the notice
+  the fast path) with the per-entry `nextAttempt`
+  backoff (v8.24 SMR28-2) and the UNIFORM
+  missing-entry → already-terminal contract across
+  every accessor including this wrapper's (v8.24,
+  AGY r28 f2). The prior
   config is durable by construction (the store's
   rollback/archive trees retain it by revision), so a
   crash mid-completion re-derives the cursor from the
@@ -8037,7 +8132,22 @@ activations a scheduled retry.
       GC'd entry is a safe NO-OP (v8.23, SMR r27
       SMR27-2 = AGY r27 f1/f4: assert the missing
       entry lookup returns already-terminal, never a
-      nil dereference or an unhandled error);
+      nil dereference or an unhandled error) — FOR
+      EVERY accessor (v8.24, AGY r28 f2/f3: the
+      synchronous `ApplyResult` wrapper's accessor
+      hits a GC'd key and no-ops cleanly too (the
+      iterate drain can claim and complete a
+      Compile-leg entry's phases concurrently with
+      its wrapper)); the phase machine is the
+      claim-or-skip tri-state (v8.24, SMR r28
+      SMR28-1: assert two concurrent drains on one
+      phase produce exactly ONE execution — the
+      duplicate claimant skips); a failing tail
+      retries on the per-entry `nextAttempt` ladder
+      (v8.24, SMR r28 SMR28-2 = AGY r28 f1: assert
+      two consecutive failures do NOT produce two
+      back-to-back full drains, and the Warn fires
+      on the standing edge-detect);
       the A→B→C COMPOSITION (v8.15, Codex r19 f5): A
       exposed → gated B tightens → gated C promoted →
       C's exposure invalidates sessions against
@@ -8866,7 +8976,7 @@ the three owners through nine enumerations; the mixed-version
 producer is the documented exception with the required helper
 restart).
 
-Remaining questions for round 28, each invitable to PLAN-KILL with
+Remaining questions for round 29, each invitable to PLAN-KILL with
 a concrete counterexample:
 
 1. **Completeness, final form.** Exhibit a path to
@@ -8929,11 +9039,11 @@ a concrete counterexample:
    candidate-filter territory
    (`include_userspace_binding_interface`), explicitly out of
    scope here.
-6. **Round-27 disposition table audit.** §1's r27 table maps
-   every r27 finding (SMR 1 MINOR + 1 NIT; AGY 2 MAJOR + 1
-   MINOR + 1 NIT; Codex infra-blocked) to its v8.23 fold, and
-   every fold this revision was verified per-edit against the
-   file. Which row is claimed-but-wrong this time?
+6. **Round-28 disposition table audit.** §1's r28 table maps
+   every r28 finding (SMR 2 MINOR; AGY 1 MAJOR + 1 MINOR + 1
+   NIT; Codex infra-blocked) to its v8.24 fold, and every fold
+   this revision was verified per-edit against the file.
+   Which row is claimed-but-wrong this time?
 7. **Cumulative hazard budget, final sign-off (v8.8 honest
    numbers, Codex r11 f11 + r12 f14).** Healthy unsuppressed
    baseline for
