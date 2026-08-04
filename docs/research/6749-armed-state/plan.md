@@ -1,6 +1,6 @@
 # #6749 — binding-plan expansion registers new slots unarmed, dataplane disabled indefinitely
 
-**Status: DRAFT v8.22 — pending adversarial plan review (round 27)**
+**Status: DRAFT v8.23 — pending adversarial plan review (round 28)**
 
 - Issue: #6749 (opus-review-001 root R06, severity High)
 - Research base: `ad9591177` (origin/master at worktree creation)
@@ -1233,7 +1233,41 @@
   registry's live set is bounded by concurrently-
   incomplete exposures and the 1s scan is O(handful);
   the crash rule never reads a GC'd entry — it
-  re-derives from the sidecar + store) @ pending
+  re-derives from the sidecar + store) @ `a5ddf88ed`
+  (r27: SMR DEMAND-REVISION (0 BLOCKER + 0 MAJOR +
+  1 MINOR + 1 NIT); AGY DEMAND-REVISION (2 MAJOR +
+  1 MINOR + 1 NIT); Codex infra-blocked (sixth
+  documented attempt; 2-of-3))
+; v8.23 folds SMR r27 (1 MINOR + 1 NIT) + AGY r27 (2
+  MAJOR + 1 MINOR + 1 NIT): the sweep's "dispatch"
+  mechanism is named — and simplified away (SMR27-1
+  = AGY r27 f2/f3 — the v8.22 wording left the
+  scheduler queue's capacity/drop-policy/mark
+  semantics unspecified (AGY's two horns: a bounded
+  queue that drops leaves a marked-dispatched entry
+  stuck forever — never pending again, never
+  terminal; an unbounded queue is an OOM vector):
+  there is NO dispatch channel at all — the
+  scheduler's per-tick pass ITERATES THE PENDING
+  CURSOR SET directly (the notice remains the
+  fast-path optimization; the pending set IS the
+  correctness path — no dispatched-flag, no queue,
+  no drop policy, no stuck state: an entry is
+  pending until terminal, and the scheduler drains
+  the pending set through the ONE drain routine
+  every tick); and the drain's cursor lookup gains
+  its missing-entry contract (SMR27-2 = AGY r27
+  f1/f4 — a drain dequeued for an entry a
+  concurrent sweep already observed terminal and
+  GC'd finds the key GONE: the lookup treats a
+  MISSING entry as already-terminal (a safe no-op
+  — the entry's work completed or was covered; the
+  crash rule never depends on a GC'd entry), never
+  a nil dereference or an unhandled error); the r26
+  SMR26-1 row's dispatch phrasing is amended
+  (AGY r27 f3); §9 (a) gains the GC'd-dequeue
+  no-op assertion and the no-queue convergence
+  assertion @ pending
   AGY r15 (4 BLOCKER + 3 MAJOR + 1 MINOR) + SMR r15 (2
   BLOCKER + 3 MAJOR + 3 MINOR/NIT): R1 becomes a REAL
   rollout+transport contract — a legacy `active.json`
@@ -1315,7 +1349,7 @@
 
 ## 1. Status
 
-DRAFT v8.22 — pending adversarial plan review round 27 (Codex + AGY +
+DRAFT v8.23 — pending adversarial plan review round 28 (Codex + AGY +
 Claude SMR). Convergence target: PLAN-READY (recommended path shipped
 to `/engineer`) or PLAN-KILL. No production code is written under
 `/research`.
@@ -2460,10 +2494,31 @@ to `/engineer`) or PLAN-KILL. No production code is written under
 
   | r26 finding | v8.22 disposition |
   |---|---|
-  | SMR26-1 / AGY f1 sweep blocks the status thread | CLOSED — the 1s status pass only SCANS and MARKS pending cursors (under `m.mu`, non-blocking) and DISPATCHES the per-entry drain execution to the daemon's apply scheduler (the scheduler thread the notice drain rides — the blocking acquire is safe there); the "ONE routine, two triggers" lives on the scheduler thread, never the status thread; §9 (a) asserts the pass completes under `applySem` contention (§5-C (ii), §9 (a)) |
+  | SMR26-1 / AGY f1 sweep blocks the status thread | CLOSED — the 1s status pass only SCANS and MARKS pending cursors (under `m.mu`, non-blocking) and DISPATCHES the per-entry drain execution to the daemon's apply scheduler (the scheduler thread the notice drain rides — the blocking acquire is safe there); the "ONE routine, two triggers" lives on the scheduler thread, never the status thread; §9 (a) asserts the pass completes under `applySem` contention (§5-C (ii), §9 (a)) — amended v8.23 (AGY r27 f3): the "dispatch" is NOT a channel — the scheduler's per-tick pass ITERATES THE PENDING CURSOR SET (the notice is the fast path; the pending set is the correctness path; no dispatched-flag, no queue, no drop policy, no stuck state), and the drain's cursor lookup treats a MISSING entry as already-terminal |
   | SMR26-2 / AGY f2+f4 composition target | CLOSED — the invalidation composes prior → the drain-time EXPOSED pair (`m.lastExposedPair` under `m.mu`) — A→C when C is exposed, A→B when C is gated (one rule, both shapes; a gated successor never invalidates B-authorized sessions); the stamp/push gate keys on STORE currency (the two "currents" named explicitly); §9 (a) gains the gated-successor assertion (§5-C (ii), §9 (a)) |
   | SMR26-3 / AGY f3 r25 f1 row | CLOSED-ALREADY at `e728b2e7d` — the row now records NOT-VERIFIED (spurious — both artifacts read `C-revoked`; an AGY misread) |
   | SMR26-4 cursor terminal-entry GC | CLOSED — a terminal entry (completed or SUPERSEDED) is GC'd on the sweep pass that first observes it terminal; the registry's live set is bounded by concurrently-incomplete exposures; the crash rule re-derives from the sidecar + store, never from a GC'd entry (§5-C (ii)) |
+
+- **Round 27** (v8.22): SMR DEMAND-REVISION (0 BLOCKER + 0
+  MAJOR + 1 MINOR + 1 NIT); AGY DEMAND-REVISION (2 MAJOR + 1
+  MINOR + 1 NIT); Codex INFRA-BLOCKED (sixth documented
+  attempt; 2-of-3). Convergence (same underlying gap at
+  different severities): the v8.22 "dispatch" mechanism was
+  unspecified (SMR27-1 = AGY f2/f3 — a bounded queue that
+  drops strands a marked-dispatched entry forever; an
+  unbounded queue is an OOM vector; the fold removes the
+  channel entirely — the scheduler iterates the PENDING cursor
+  set), and the drain's cursor lookup had no missing-entry
+  contract (SMR27-2 = AGY f1/f4 — a drain dequeued for a
+  GC'd entry must treat the missing key as already-terminal,
+  not dereference nil). AGY-only: f3 (the r26 SMR26-1 row's
+  dispatch phrasing). SMR-only: none beyond the shared spine.
+- **Round-27 disposition table:**
+
+  | r27 finding | v8.23 disposition |
+  |---|---|
+  | SMR27-1 / AGY f2+f3 dispatch mechanism | CLOSED — there is NO dispatch channel: the scheduler's per-tick pass ITERATES THE PENDING CURSOR SET directly (the notice remains the fast-path optimization; the pending set IS the correctness path — no dispatched-flag, no queue, no drop policy, no stuck state: an entry is pending until terminal, and the scheduler drains the pending set through the ONE drain routine every tick); the r26 SMR26-1 row's phrasing amended (§5-C (ii), §1 r26 row, §9 (a)) |
+  | SMR27-2 / AGY f1+f4 missing-entry contract | CLOSED — the drain's cursor lookup treats a MISSING entry as already-terminal (a safe no-op — the entry's work completed or was covered by the newer pair's chain; the crash rule never depends on a GC'd entry), never a nil dereference or an unhandled error; §9 (a) asserts the GC'd-dequeue no-op (§5-C (ii), §9 (a)) |
 
 ### Round-1 detail log (kept for the record)
 
@@ -5494,7 +5549,31 @@ BLOCKERs 6 + 8; v8 epoch form per Codex r6 f6/f8):**
   heartbeat) — the "one routine" now lives ONLY on
   the scheduler thread, with the notice and the
   sweep-dispatch as its two triggers, and the status
-  thread never takes `applySem`); and a terminal
+  thread never takes `applySem`) — and the
+  "dispatch" is NOT a channel (v8.23, SMR r27
+  SMR27-1 = AGY r27 f2/f3's mechanism pin: the
+  scheduler's per-tick pass ITERATES THE PENDING
+  CURSOR SET directly — the notice remains the
+  fast-path optimization and the pending set IS the
+  correctness path: no dispatched-flag, no queue,
+  no drop policy, and no stuck state (a bounded
+  queue that drops would strand a marked-dispatched
+  entry forever — never pending again, never
+  terminal; an unbounded queue is an OOM vector);
+  an entry is pending until terminal, and the
+  scheduler drains the pending set through the ONE
+  drain routine every tick — the sweep's mark is
+  advisory-only and the cursor's `m.mu`
+  check-and-advance is the only exactly-once
+  authority; and the drain's cursor lookup treats a
+  MISSING entry as already-terminal (v8.23, SMR r27
+  SMR27-2 = AGY r27 f1/f4: a drain dequeued for an
+  entry a concurrent sweep already observed terminal
+  and GC'd finds the key GONE — a safe no-op (the
+  entry's work completed or was covered by the newer
+  pair's chain; the crash rule never depends on a
+  GC'd entry), never a nil dereference or an
+  unhandled error)); and a terminal
   cursor entry (completed or SUPERSEDED) is GC'd on
   the sweep pass that first observes it terminal
   (v8.22, SMR r26 SMR26-4: the registry's live set
@@ -7949,7 +8028,16 @@ activations a scheduled retry.
       under `m.mu` only, the drain execution is
       dispatched to the apply scheduler, and a
       terminal entry is GC'd on the observing pass
-      (SMR26-4));
+      (SMR26-4)); the scheduler's per-tick pass
+      ITERATES the pending cursor set (v8.23, SMR r27
+      SMR27-1 = AGY r27 f2: assert NO channel exists
+      — N pending entries converge with no queue and
+      no drop policy, and an entry stays pending
+      until terminal); a drain dequeued for a
+      GC'd entry is a safe NO-OP (v8.23, SMR r27
+      SMR27-2 = AGY r27 f1/f4: assert the missing
+      entry lookup returns already-terminal, never a
+      nil dereference or an unhandled error);
       the A→B→C COMPOSITION (v8.15, Codex r19 f5): A
       exposed → gated B tightens → gated C promoted →
       C's exposure invalidates sessions against
@@ -8778,7 +8866,7 @@ the three owners through nine enumerations; the mixed-version
 producer is the documented exception with the required helper
 restart).
 
-Remaining questions for round 27, each invitable to PLAN-KILL with
+Remaining questions for round 28, each invitable to PLAN-KILL with
 a concrete counterexample:
 
 1. **Completeness, final form.** Exhibit a path to
@@ -8841,9 +8929,9 @@ a concrete counterexample:
    candidate-filter territory
    (`include_userspace_binding_interface`), explicitly out of
    scope here.
-6. **Round-26 disposition table audit.** §1's r26 table maps
-   every r26 finding (SMR 1 MAJOR + 3 MINOR; AGY 1 MAJOR + 2
-   MINOR + 1 NIT; Codex infra-blocked) to its v8.22 fold, and
+6. **Round-27 disposition table audit.** §1's r27 table maps
+   every r27 finding (SMR 1 MINOR + 1 NIT; AGY 2 MAJOR + 1
+   MINOR + 1 NIT; Codex infra-blocked) to its v8.23 fold, and
    every fold this revision was verified per-edit against the
    file. Which row is claimed-but-wrong this time?
 7. **Cumulative hazard budget, final sign-off (v8.8 honest

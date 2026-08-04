@@ -855,6 +855,27 @@
   `/tmp/codex-6749-r26-prompt.txt`). Proceeding 2-of-3 per the
   codex-infra-blocked exception; retries continue each round.
 
-## Round 27 (plan v8.22 @ pending)
+## Round 27 (plan v8.22 @ a5ddf88ed)
 
-- Codex (retry), AGY, Claude SMR — pending v8.22 fold.
+- **Claude SMR r27** — `claude-smr-plan-r27.md`. Verdict:
+  DEMAND-REVISION (0 BLOCKER + 0 MAJOR + 1 MINOR + 1 NIT —
+  SMR27-1 the sweep's "dispatch" mechanism unpinned (channel vs
+  mark — self-found); SMR27-2 the drain's missing-entry posture
+  (one-sentence pin)).
+- **AGY r27** — background bash `bzv6j93yf`; prompt
+  `/tmp/agy-6749-r27-prompt.txt` (121,994 bytes); output
+  `/tmp/agy-6749-r27.out`; verdict doc `agy-plan-r27.md`.
+  Verdict: DEMAND-REVISION (2 MAJOR — f1 the missing-entry race
+  after terminal GC (= SMR27-2); f2 the unbounded queue / stuck
+  dispatch (= SMR27-1); + 1 MINOR — f3 the r26 SMR26-1 row's
+  dispatch phrasing; + 1 NIT — f4 the §9 (a) GC'd-dequeue +
+  backpressure assertions).
+- **Codex r27** — INFRA-BLOCKED (usage limit; reset Aug 10
+  06:57 UTC). Sixth documented attempt this session
+  (`/tmp/codex-6749-r27-retry1.err`; r27 prompt staged at
+  `/tmp/codex-6749-r27-prompt.txt`). Proceeding 2-of-3 per the
+  codex-infra-blocked exception; retries continue each round.
+
+## Round 28 (plan v8.23 @ pending)
+
+- Codex (retry), AGY, Claude SMR — pending v8.23 fold.
