@@ -1186,6 +1186,33 @@
   `/tmp/codex-6749-r39-prompt.txt`). Proceeding 2-of-3 per the
   codex-infra-blocked exception; retries continue each round.
 
-## Round 40 (plan v8.35 @ pending)
+## Round 40 (plan v8.35 @ 64bad83d7)
 
-- Codex (retry), AGY, Claude SMR — pending v8.35 fold.
+- **Claude SMR r40** — `claude-smr-plan-r40.md`. Verdict:
+  DEMAND-REVISION (0 BLOCKER + 0 MAJOR + 1 MINOR + 2 NIT —
+  SMR40-1 the snapshot field's WIRE POSTURE is unpinned
+  (ConfigSnapshot is the helper-bound wire object — pinned
+  manager-local); SMR40-2 the auxiliary-clone note; SMR40-3
+  the boot-path note). NOTE: the SMR sweep MISSED AGY's f1
+  (the content-hash dedup's missing completion hook for
+  deferred same-content pairs — verified
+  process_status.go:2271-2275); recorded honestly.
+- **AGY r40** — background bash `b68r80jq7`; prompt
+  `/tmp/agy-6749-r40-prompt.txt` (129,350 argv bytes);
+  output `/tmp/agy-6749-r40.out`; verdict doc
+  `agy-plan-r40.md`. Verdict: DEMAND-REVISION (1 MAJOR —
+  f1 the content-hash dedup strands the catch-up completion
+  for same-content/new-revision snapshots (the deferred leg
+  has no wrapper — the push and stamp never run, the cursor
+  strands pending); + 2 MINOR — f2 the wire posture +
+  missing protocol canary (= SMR40-1, folded manager-local);
+  f3 the §9 (a) same-content assertion).
+- **Codex r40** — INFRA-BLOCKED (usage limit; reset Aug 10
+  06:57 UTC). Nineteenth documented attempt this session
+  (`/tmp/codex-6749-r40-retry1.err`; r40 prompt staged at
+  `/tmp/codex-6749-r40-prompt.txt`). Proceeding 2-of-3 per the
+  codex-infra-blocked exception; retries continue each round.
+
+## Round 41 (plan v8.36 @ pending)
+
+- Codex (retry), AGY, Claude SMR — pending v8.36 fold.

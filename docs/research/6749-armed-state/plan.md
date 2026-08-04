@@ -1,6 +1,6 @@
 # #6749 — binding-plan expansion registers new slots unarmed, dataplane disabled indefinitely
 
-**Status: DRAFT v8.35 — pending adversarial plan review (round 40)**
+**Status: DRAFT v8.36 — pending adversarial plan review (round 41)**
 
 - Issue: #6749 (opus-review-001 root R06, severity High)
 - Research base: `ad9591177` (origin/master at worktree creation)
@@ -1755,7 +1755,53 @@
   a NEW first exposure (a new revision) installs
   a new cursor); and §9 (a) gains the catch-up
   carrier, re-apply stamp, and deferred-leg
-  extraction assertions (AGY r39 f3) @ pending
+  extraction assertions (AGY r39 f3) @ `64bad83d7`
+  (r40: SMR DEMAND-REVISION (0 BLOCKER + 0 MAJOR +
+  1 MINOR + 2 NIT); AGY DEMAND-REVISION (1 MAJOR +
+  2 MINOR); Codex infra-blocked (nineteenth
+  documented attempt; 2-of-3))
+; v8.36 folds SMR r40 (1 MINOR + 2 NIT) + AGY r40
+  (1 MAJOR + 2 MINOR): the content-hash dedup's
+  completion bookkeeping (AGY r40 f1 — verified
+  against the code (process_status.go:2271-2275:
+  the dedup (`hash == m.lastSnapshotHash`)
+  advances `publishedSnapshot` and returns nil
+  WITHOUT a send and WITHOUT any completion hook —
+  a deferred/staged SAME-CONTENT pair (a new
+  revision whose forwarding content is identical
+  to the published snapshot) never posts its
+  completion notice: its push and stamp never run
+  (the deferred leg has no wrapper) and its cursor
+  strands pending until the sweep — the SMR r40
+  sweep missed it (recorded honestly)): when the
+  dedup matches AND a pending first-exposure
+  cursor exists for the pair, the catch-up runs
+  the completion (posts the notice / runs the
+  stamp + push from the snapshot field — the
+  helper's enforced content IS the pair's
+  (identical), so the exposure is real); §9 (a)
+  asserts it (= AGY r40 f3); the snapshot field's
+  wire posture is MANAGER-LOCAL (SMR40-1 = AGY
+  r40 f2, convergent — `ConfigSnapshot` is the
+  helper-bound wire object, and the field is the
+  STORE's bookkeeping (the helper never needs
+  it): the manager's in-memory snapshot struct
+  carries it; the wire encode OMITS it (nothing
+  marshaled, no wire change, no protocol canary —
+  §6 states the posture explicitly); the builder's
+  zero set (builder.go:156-178) grows to cover
+  it, so the content-hash dedup never sees a
+  field-only delta); and the auxiliary-clone note
+  (SMR40-2 — the clones carry the field verbatim
+  (same pair); their republish's stamp is
+  idempotent-correct; the OVERLAP-clear discards
+  the staged object and its snapshot's field
+  together) and the boot-path note (SMR40-3 —
+  the every-apply rule covers the boot apply and
+  the rollback executor's apply (each stamps its
+  own pair's digest), and the feed/DHCP-queued
+  identical-recommit retry re-stamps the same
+  digest idempotently) fold @ pending
   AGY r15 (4 BLOCKER + 3 MAJOR + 1 MINOR) + SMR r15 (2
   BLOCKER + 3 MAJOR + 3 MINOR/NIT): R1 becomes a REAL
   rollout+transport contract — a legacy `active.json`
@@ -1837,7 +1883,7 @@
 
 ## 1. Status
 
-DRAFT v8.35 — pending adversarial plan review round 40 (Codex + AGY +
+DRAFT v8.36 — pending adversarial plan review round 41 (Codex + AGY +
 Claude SMR). Convergence target: PLAN-READY (recommended path shipped
 to `/engineer`) or PLAN-KILL. No production code is written under
 `/research`.
@@ -3281,6 +3327,31 @@ to `/engineer`) or PLAN-KILL. No production code is written under
   | SMR39-2 §6 field | CLOSED — the §6 `ApplyResult` inventory gains `capturedDigest` (minted at build time, transported on the result, consumed by the wrapper's stamp and the cursor install) — the r38 row's §6 citation is now true |
   | SMR39-3 / AGY f4 duplicate-install policy | CLOSED — the install is IDEMPOTENT per pair: a second `beginFirstExposure` for the same pair+ledgerID no-ops (the digest is install-time-immutable; an empty digest never overwrites a valid captured value); a NEW first exposure (a new revision) installs a new cursor (§5-C (ii)) |
   | AGY f3 §9 (a) gaps | CLOSED — §9 (a) asserts the catch-up leg reads the snapshot field and stamps (`ActiveApplied() == true` for a catch-up acceptance), a same-pair re-apply after complete-skipped stamps on its next successful apply (the wrapper's standing authority), and the deferred leg extracts the digest from the staged object's snapshot field |
+
+- **Round 40** (v8.35): SMR DEMAND-REVISION (0 BLOCKER + 0
+  MAJOR + 1 MINOR + 2 NIT); AGY DEMAND-REVISION (1 MAJOR + 2
+  MINOR); Codex INFRA-BLOCKED (nineteenth documented attempt;
+  2-of-3). The round's substance: AGY's MAJOR found a real
+  deferred-leg gap the SMR r40 sweep missed (recorded
+  honestly) — the content-hash dedup
+  (process_status.go:2271-2275) advances `publishedSnapshot`
+  and returns nil WITHOUT a send AND without any completion
+  hook, so a deferred SAME-CONTENT pair (a new revision with
+  identical forwarding content) never posts its completion
+  notice: its push and stamp never run and its cursor strands
+  pending. AGY-only: f2 (= SMR40-1, the wire posture — folded
+  manager-local), f3 (the §9 (a) same-content assertion).
+  SMR-only: SMR40-2 (the auxiliary-clone note), SMR40-3 (the
+  boot-path note).
+- **Round-40 disposition table:**
+
+  | r40 finding | v8.36 disposition |
+  |---|---|
+  | AGY f1 dedup strands the completion | CLOSED — when the dedup matches (`hash == m.lastSnapshotHash`) AND a pending first-exposure cursor exists for the pair, the catch-up runs the completion (posts the notice / runs the stamp + push from the snapshot field — the helper's enforced content IS the pair's (identical), so the exposure is real); §9 (a) asserts it (a dedup-without-completion implementation FAILS) (§5-C (ii), §9 (a)) |
+  | SMR40-1 / AGY f2 wire posture | CLOSED — MANAGER-LOCAL: the manager's in-memory snapshot struct carries `capturedDigest`; the wire encode OMITS it (nothing marshaled to the helper, no wire change, no protocol canary — §6 states the posture explicitly); the builder's zero set (builder.go:156-178) grows to cover it (the content-hash dedup never sees a field-only delta) (§5-C (ii), §6) |
+  | SMR40-2 auxiliary-clone note | CLOSED — stated: the auxiliary clones (route overlay, scheduler republish, #5134) carry the field verbatim (same pair); their republish's stamp is idempotent-correct; the OVERLAP-clear discards the staged object and its snapshot's field together (the re-drive's rebuild mints a new snapshot with the identical field value if the pair is unchanged — the render determinism) (§5-C (ii)) |
+  | SMR40-3 boot-path note | CLOSED — stated: the every-apply rule covers the boot apply and the rollback executor's apply (each stamps its own pair's digest — the boot's pair is the boot-promoted active at that Compile); the feed/DHCP-queued identical-recommit retry re-reads the pair under `applySem` and re-stamps the same digest (idempotent) (§5-C (ii)) |
+  | AGY f3 §9 (a) same-content assertion | CLOSED — §9 (a) asserts a same-content / new-revision snapshot catch-up acceptance posts its completion notice and stamps `capturedDigest` WITHOUT waiting for the periodic sweep (a dedup-without-completion implementation FAILS) |
 
 ### Round-1 detail log (kept for the record)
 
@@ -6219,7 +6290,23 @@ BLOCKERs 6 + 8; v8 epoch form per Codex r6 f6/f8):**
   the listener observes it first (the wrapper's
   ApplyResult path and the notice path both consult
   and advance the same cursor record; a completed
-  entry's tails are skipped) — AND with the
+  entry's tails are skipped) — and the content-hash
+  dedup's completion bookkeeping is explicit
+  (v8.36, AGY r40 f1's same-content fix: the dedup
+  (process_status.go:2271-2275's
+  `hash == m.lastSnapshotHash` early return)
+  advances `publishedSnapshot` and returns nil
+  WITHOUT a send — and when a pending
+  first-exposure cursor exists for the pair, the
+  catch-up runs the completion ANYWAY (posts the
+  notice / runs the stamp + push from the
+  snapshot's `capturedDigest` field — the helper's
+  enforced content IS the pair's (identical), so
+  the exposure is real and the tails are owed;
+  the v8.20-v8.35 text's silence would strand a
+  deferred SAME-CONTENT pair's push and stamp
+  (the deferred leg has no wrapper) and its
+  cursor pending until the sweep)) — AND with the
   PAIR-CURRENCY gate (v8.20, SMR r24 SMR24-1 = AGY
   r24 f1's stale-notice fix: a newer commit C can
   promote and apply while B's notice sits queued —
@@ -6391,7 +6478,22 @@ BLOCKERs 6 + 8; v8 epoch form per Codex r6 f6/f8):**
   confirmed every deferred snapshot comes from
   Compile's `pendingXSKStartup` branch, which
   stages the object — the field removes the
-  ambiguity class)), and
+  ambiguity class) — with the wire posture pinned
+  (v8.36, SMR r40 SMR40-1 = AGY r40 f2's
+  manager-local pin: `ConfigSnapshot` is the
+  HELPER-BOUND wire object, and the field is the
+  STORE's bookkeeping (the helper never needs
+  it) — the manager's in-memory snapshot struct
+  carries it; the wire encode OMITS it (nothing
+  marshaled to the helper, no wire change, no
+  protocol canary — §6 states the posture
+  explicitly); the builder's zero set
+  (builder.go:156-178) grows to cover it, so the
+  content-hash dedup never sees a field-only
+  delta — and the auxiliary clones (route
+  overlay, scheduler republish, #5134) carry the
+  field verbatim (same pair), their republish's
+  stamp idempotent-correct (SMR40-2)), and
   `beginFirstExposure` takes it as an ARGUMENT
   (never reads the staged object itself — the
   v8.32 "copies it from the staged object" left
@@ -8176,7 +8278,13 @@ activations a scheduled retry.
   `capturedDigest` (v8.35, SMR r39 SMR39-2's §6 gap fix:
   copied from the accepted snapshot's own field
   (`ConfigSnapshot.capturedDigest` — minted at build time
-  inside Compile), consumed by the daemon wrapper's stamp
+  inside Compile; MANAGER-LOCAL (v8.36, SMR r40
+  SMR40-1 = AGY r40 f2: NOT marshaled to the helper —
+  the wire encode omits it (no wire change, no
+  protocol canary); the builder's zero set
+  (builder.go:156-178) grows to cover it, so the
+  content-hash dedup never sees a field-only
+  delta)), consumed by the daemon wrapper's stamp
   (`MarkAppliedDigest` on every successful
   `applyConfigLocked`, first-exposure or not) and by the
   cursor install (the `beginFirstExposure` argument); the
@@ -9278,7 +9386,19 @@ activations a scheduled retry.
       the digest from the staged object's snapshot
       field, and a duplicate `beginFirstExposure`
       for the same pair no-ops without
-      overwriting the digest);
+      overwriting the digest) — and the
+      SAME-CONTENT catch-up completion (v8.36, AGY
+      r40 f1/f3: a deferred same-content
+      (identical-forwarding) new revision whose
+      dedup matches — assert the completion notice
+      posts and the stamp lands from the snapshot
+      field WITHOUT waiting for the periodic
+      sweep (a dedup-without-completion
+      implementation FAILS), and the manager-local
+      wire posture (SMR40-1 = AGY f2: assert the
+      field is absent from the wire encode and
+      the content hash treats two snapshots
+      differing only in the field as EQUAL));
       and the GC collects complete-skipped entries
       (v8.34, AGY r38 f2: assert the terminal set
       is {complete, complete-skipped, SUPERSEDED} —
@@ -10112,7 +10232,7 @@ the three owners through nine enumerations; the mixed-version
 producer is the documented exception with the required helper
 restart).
 
-Remaining questions for round 40, each invitable to PLAN-KILL with
+Remaining questions for round 41, each invitable to PLAN-KILL with
 a concrete counterexample:
 
 1. **Completeness, final form.** Exhibit a path to
@@ -10175,12 +10295,11 @@ a concrete counterexample:
    candidate-filter territory
    (`include_userspace_binding_interface`), explicitly out of
    scope here.
-6. **Round-39 disposition table audit.** §1's r39 table maps
-   every r39 finding (SMR 1 MAJOR + 2 MINOR + 1 NIT; AGY 2
-   MAJOR + 1 MINOR + 1 NIT; Codex infra-blocked) to its
-   v8.35 fold, and every fold this revision was verified
-   per-edit against the file. Which row is claimed-but-wrong
-   this time?
+6. **Round-40 disposition table audit.** §1's r40 table maps
+   every r40 finding (SMR 1 MINOR + 2 NIT; AGY 1 MAJOR + 2
+   MINOR; Codex infra-blocked) to its v8.36 fold, and every
+   fold this revision was verified per-edit against the
+   file. Which row is claimed-but-wrong this time?
 7. **Cumulative hazard budget, final sign-off (v8.8 honest
    numbers, Codex r11 f11 + r12 f14).** Healthy unsuppressed
    baseline for
