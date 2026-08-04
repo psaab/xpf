@@ -1,6 +1,6 @@
 # #6749 — binding-plan expansion registers new slots unarmed, dataplane disabled indefinitely
 
-**Status: DRAFT v8.32 — pending adversarial plan review (round 37)**
+**Status: DRAFT v8.33 — pending adversarial plan review (round 38)**
 
 - Issue: #6749 (opus-review-001 root R06, severity High)
 - Research base: `ad9591177` (origin/master at worktree creation)
@@ -1632,7 +1632,44 @@
   (`s.active == C1`) `appliedDigest` is still
   `digest(C2)` ⇒ `ActiveApplied() == false` until
   the rollback's OWN apply stamps `digest(C1)`;
-  post-rollback-APPLY ⇒ applied) @ pending
+  post-rollback-APPLY ⇒ applied) @ `83b95df94`
+  (r37: SMR PLAN-READY-WITH-NITS (2
+  NIT); AGY DEMAND-REVISION (1 MAJOR + 1 MINOR +
+  2 NIT); Codex infra-blocked (sixteenth
+  documented attempt; 2-of-3))
+; v8.33 folds SMR r37 (2 NIT) + AGY r37 (1 MAJOR +
+  1 MINOR + 2 NIT): the missing-revision
+  stamp-skip records a TERMINAL phase outcome
+  (AGY r37 f1, a real state-machine hole (SMR37-2
+  had the outcome naming but not the stranding
+  consequence — recorded honestly): the v8.32
+  "SKIPS with an edge Warn" never marked the phase
+  complete, so `isTerminal()` stayed false — the
+  entry stranded in the pending set (no terminal
+  GC — a memory leak) and the sweep re-drained and
+  re-Warned on every tick: the skip now marks the
+  phase `complete-skipped` (a TERMINAL phase
+  outcome) under `m.mu` — the entry goes terminal
+  and the sweep GCs it; the edge Warn fires ONCE
+  at the skip, never per-tick); the Compile
+  capture-point is pinned (AGY r37 f2 — the
+  capture runs on successful AST/tree compilation
+  immediately prior to staged object creation; a
+  pre-publish Compile error discards the captured
+  value with the stack frame (no cursor is ever
+  created for a failed compile)); the render
+  determinism is cited (SMR37-1 = AGY r37 f3 —
+  the store's canonical `Format()` render is
+  deterministic per tree (the property
+  `configTextDigest`'s `ActiveApplied()` use
+  already relies on), so a same-pair staged
+  reshape's re-capture is byte-identical); and §9
+  (a) gains the missing-revision GC assertion
+  (AGY r37 f4 — after the complete-skipped
+  marking the entry transitions terminal and is
+  GC'd on the subsequent sweep pass — a
+  stranded-entry or per-tick-Warn implementation
+  FAILS) @ pending
   AGY r15 (4 BLOCKER + 3 MAJOR + 1 MINOR) + SMR r15 (2
   BLOCKER + 3 MAJOR + 3 MINOR/NIT): R1 becomes a REAL
   rollout+transport contract — a legacy `active.json`
@@ -1714,7 +1751,7 @@
 
 ## 1. Status
 
-DRAFT v8.32 — pending adversarial plan review round 37 (Codex + AGY +
+DRAFT v8.33 — pending adversarial plan review round 38 (Codex + AGY +
 Claude SMR). Convergence target: PLAN-READY (recommended path shipped
 to `/engineer`) or PLAN-KILL. No production code is written under
 `/research`.
@@ -3085,6 +3122,28 @@ to `/engineer`) or PLAN-KILL. No production code is written under
   | SMR36-1 / AGY f1+f3 digest capture point + retention contract | CLOSED — the digest is captured INSIDE Compile while `s.active` is the pair being built (the standing #6296 pattern — every apply-path Compile holds `applySem`) and RIDES the staged object into the cursor (`beginFirstExposure` copies it from the staged object; the Compile-leg wrapper uses the same captured value — identical by construction, one capture, one renderer); the retained-tree accessor (`DigestOfRevision(rev) → (digest, error)`, node-cached (computed once at commit/promotion — O(1) under `s.mu`)) is the RECOVERY-fallback only (a startup re-derived cursor has no staged object), with the missing-revision contract: empty digest ⇒ the stamp phase SKIPS with an edge Warn while the invalidation and push proceed (the marker heals on the next full apply) (§5-C (ii), §9 (a)) |
   | SMR36-2 / AGY f2 single-renderer property | CLOSED — stated: every digest in the machinery comes from the store's ONE renderer (build-time `ActiveDigest()` or the retained tree's render of the same tree); no manager-side re-render is ever compared against a store render; §9 (a) enforces it with a config carrying compilation-stripped formatting (comments/whitespace): `appliedDigest` matches the store's render, never a snapshot-text digest (§5-C (ii), §9 (a)) |
   | AGY f4 rollback window precision | CLOSED — the window text now distinguishes rollback-PROMOTION (immediately post-promotion `appliedDigest` is still `digest(C2)` ⇒ `ActiveApplied() == false`) from post-rollback-APPLY (the rollback's own apply stamps `digest(C1)` ⇒ true) (§5-C (ii), §1 r35 row 2 amended) |
+
+- **Round 37** (v8.32): SMR PLAN-READY-WITH-NITS (2 NIT); AGY
+  DEMAND-REVISION (1 MAJOR + 1 MINOR + 2 NIT); Codex
+  INFRA-BLOCKED (sixteenth documented attempt; 2-of-3). The
+  round's substance: AGY's MAJOR found a real state-machine
+  hole in the v8.32 fallback fold (SMR37-2 had the outcome
+  naming but not the stranding consequence — recorded
+  honestly): the missing-revision stamp-skip never marked the
+  phase complete — the entry stranded in the pending set (no
+  terminal GC, a memory leak) and the sweep re-drained and
+  re-Warned on every tick. The skip now records the
+  `complete-skipped` TERMINAL outcome. AGY-only: f2 (the
+  Compile capture-point timing), f3 (= SMR37-1), f4 (the §9
+  (a) GC assertion).
+- **Round-37 disposition table:**
+
+  | r37 finding | v8.33 disposition |
+  |---|---|
+  | AGY f1 stamp-skip strands the entry | CLOSED — the missing-revision stamp-skip marks the phase `complete-skipped` (a TERMINAL phase outcome) under `m.mu`: the entry goes terminal and the sweep GCs it; the edge Warn fires ONCE at the skip, never per-tick (§5-C (ii), §9 (a)) |
+  | AGY f2 Compile capture-point timing | CLOSED — the capture runs on successful AST/tree compilation immediately prior to staged object creation; a pre-publish Compile error discards the captured value with the stack frame (no cursor is ever created for a failed compile) (§5-C (ii)) |
+  | SMR37-1 / AGY f3 determinism citation | CLOSED — stated: the store's canonical `Format()` render is deterministic per tree (the property `configTextDigest`'s `ActiveApplied()` use already relies on), so a same-pair staged reshape's re-capture is byte-identical (§5-C (ii)) |
+  | SMR37-2 / AGY f4 outcome naming + GC assertion | CLOSED — the `complete-skipped` naming (SMR37-2's ask, with AGY f1's terminal semantics) and §9 (a) asserts the entry transitions terminal and is GC'd on the subsequent sweep pass (a stranded-entry or per-tick-Warn implementation FAILS) |
 
 ### Round-1 detail log (kept for the record)
 
@@ -6172,7 +6231,13 @@ BLOCKERs 6 + 8; v8 epoch form per Codex r6 f6/f8):**
   drain-time accessor form: every apply-path
   Compile holds `applySem` via `applyConfigLocked`,
   so `ActiveDigest()` there is exactly the standing
-  #6296 pattern — and the captured value RIDES
+  #6296 pattern — with the capture point pinned
+  (v8.33, AGY r37 f2: the capture runs on
+  SUCCESSFUL AST/tree compilation, immediately
+  prior to staged object creation; a pre-publish
+  Compile error discards the captured value with
+  the stack frame — no cursor is ever created for
+  a failed compile) — and the captured value RIDES
   the staged object (the pending-XSK staged object
   carries it; `beginFirstExposure` copies it from
   the staged object into the cursor; the
@@ -6181,7 +6246,13 @@ BLOCKERs 6 + 8; v8 epoch form per Codex r6 f6/f8):**
   CONSTRUCTION: one capture, one renderer (the
   store's own `configTextDigest`, never a
   manager-side re-render (v8.32, SMR r36 SMR36-2 =
-  AGY r36 f2's single-renderer property))); the
+  AGY r36 f2's single-renderer property; the
+  determinism cited v8.33, SMR r37 SMR37-1 = AGY
+  r37 f3 — the store's canonical `Format()` render
+  is deterministic per tree (the property
+  `configTextDigest`'s `ActiveApplied()` use
+  already relies on), so a same-pair staged
+  reshape's re-capture is byte-identical))); the
   OVERLAP-clear discards the staged object and its
   digest with it; the re-drive's rebuild
   re-captures; the revision-0 CLI diagnostic
@@ -6192,8 +6263,16 @@ BLOCKERs 6 + 8; v8 epoch form per Codex r6 f6/f8):**
   O(1) under `s.mu`)) is the RECOVERY-fallback
   only (a startup re-derived cursor has no staged
   object), with the missing-revision contract
-  (empty digest ⇒ the stamp phase SKIPS with an
-  edge Warn while the invalidation and push
+  (empty digest ⇒ the stamp phase records
+  `complete-skipped` (a TERMINAL phase outcome)
+  under `m.mu` (v8.33, AGY r37 f1's stranding fix —
+  the v8.32 "SKIPS with an edge Warn" never marked
+  the phase complete, so the entry stranded in the
+  pending set (no terminal GC, a memory leak) and
+  the sweep re-drained and re-Warned on every
+  tick: with the terminal marking the entry
+  completes and GCs, and the edge Warn fires ONCE
+  at the skip) while the invalidation and push
   proceed — the marker heals on the next full
   apply) — the v8.31 form's retained-tree basis
   stands only for that fallback (the
@@ -8964,7 +9043,13 @@ activations a scheduled retry.
       and a startup re-derived cursor with a
       rotated-out revision skips the stamp with an
       edge Warn while the invalidation and push
-      proceed);
+      proceed; and the skip marks the phase
+      `complete-skipped` (v8.33, AGY r37 f1/f4 =
+      SMR r37 SMR37-2: assert the entry transitions
+      TERMINAL after the complete-skipped marking
+      and is GC'd on the subsequent sweep pass, and
+      the edge Warn fires ONCE (a stranded-entry or
+      per-tick-Warn implementation FAILS));
       the A→B→C COMPOSITION (v8.15, Codex r19 f5): A
       exposed → gated B tightens → gated C promoted →
       C's exposure invalidates sessions against
@@ -9793,7 +9878,7 @@ the three owners through nine enumerations; the mixed-version
 producer is the documented exception with the required helper
 restart).
 
-Remaining questions for round 37, each invitable to PLAN-KILL with
+Remaining questions for round 38, each invitable to PLAN-KILL with
 a concrete counterexample:
 
 1. **Completeness, final form.** Exhibit a path to
@@ -9856,11 +9941,11 @@ a concrete counterexample:
    candidate-filter territory
    (`include_userspace_binding_interface`), explicitly out of
    scope here.
-6. **Round-36 disposition table audit.** §1's r36 table maps
-   every r36 finding (SMR 1 MINOR + 1 NIT; AGY 1 MAJOR + 1
-   MINOR + 2 NIT; Codex infra-blocked) to its v8.32 fold, and
-   every fold this revision was verified per-edit against the
-   file. Which row is claimed-but-wrong this time?
+6. **Round-37 disposition table audit.** §1's r37 table maps
+   every r37 finding (SMR 2 NIT; AGY 1 MAJOR + 1 MINOR + 2
+   NIT; Codex infra-blocked) to its v8.33 fold, and every fold
+   this revision was verified per-edit against the file.
+   Which row is claimed-but-wrong this time?
 7. **Cumulative hazard budget, final sign-off (v8.8 honest
    numbers, Codex r11 f11 + r12 f14).** Healthy unsuppressed
    baseline for

@@ -1102,6 +1102,31 @@
   `/tmp/codex-6749-r36-prompt.txt`). Proceeding 2-of-3 per the
   codex-infra-blocked exception; retries continue each round.
 
-## Round 37 (plan v8.32 @ pending)
+## Round 37 (plan v8.32 @ 83b95df94)
 
-- Codex (retry), AGY, Claude SMR — pending v8.32 fold.
+- **Claude SMR r37** — `claude-smr-plan-r37.md`. Verdict:
+  PLAN-READY-WITH-NITS (2 NIT — SMR37-1 the render
+  determinism citation; SMR37-2 the stamp-skip outcome
+  naming). NOTE: SMR37-2 named the outcome but missed the
+  stranding CONSEQUENCE AGY's f1 found (an unmarked skip
+  leaves isTerminal() false — the entry strands and the
+  sweep re-Warns per tick); recorded honestly.
+- **AGY r37** — background bash `bucziz25t`; prompt
+  `/tmp/agy-6749-r37-prompt.txt` (122,812 argv bytes);
+  output `/tmp/agy-6749-r37.out`; verdict doc
+  `agy-plan-r37.md`. Verdict: DEMAND-REVISION (1 MAJOR —
+  f1 the missing-revision stamp-skip's undefined phase
+  state (strands the entry + per-tick Warn loop — the skip
+  now marks the phase complete-skipped (terminal));
+  + 1 MINOR — f2 the Compile capture-point timing;
+  + 2 NIT — f3 the determinism citation (= SMR37-1); f4
+  the §9 (a) GC assertion (= SMR37-2's consequence)).
+- **Codex r37** — INFRA-BLOCKED (usage limit; reset Aug 10
+  06:57 UTC). Sixteenth documented attempt this session
+  (`/tmp/codex-6749-r37-retry1.err`; r37 prompt staged at
+  `/tmp/codex-6749-r37-prompt.txt`). Proceeding 2-of-3 per the
+  codex-infra-blocked exception; retries continue each round.
+
+## Round 38 (plan v8.33 @ pending)
+
+- Codex (retry), AGY, Claude SMR — pending v8.33 fold.
