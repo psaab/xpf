@@ -1213,6 +1213,34 @@
   `/tmp/codex-6749-r40-prompt.txt`). Proceeding 2-of-3 per the
   codex-infra-blocked exception; retries continue each round.
 
-## Round 41 (plan v8.36 @ pending)
+## Round 41 (plan v8.36 @ 29a9ca319)
 
-- Codex (retry), AGY, Claude SMR — pending v8.36 fold.
+- **Claude SMR r41** — `claude-smr-plan-r41.md`. Verdict:
+  DEMAND-REVISION (1 BLOCKER — SMR41-1 the dedup-completion
+  without the convergence semantics loops the GO-LOCAL drain
+  on every same-content pair (self-found in the v8.36 fold;
+  the contentConvergedRevision comparator form closes both
+  legs); + 1 MINOR — SMR41-2 the deferred-restage variant;
+  + 1 NIT — SMR41-3 the §6 precision).
+- **AGY r41** — background bash `b3931bptn`; prompt
+  `/tmp/agy-6749-r41-prompt.txt` (129,651 argv bytes);
+  output `/tmp/agy-6749-r41.out`; verdict doc
+  `agy-plan-r41.md`. Verdict: DEMAND-REVISION (1 BLOCKER —
+  f1 the dedup-completion omits the acceptedCommitRevision
+  advancement (= SMR41-1 — FULL convergence; AGY's own
+  advance-acceptedCommitRevision remediation was evaluated
+  and REJECTED in the fold: it opens the NONZERO
+  helper-behind leg (helper-stored(old) < accepted(new) and
+  the re-drive dedups again — the loop moves instead of
+  dying)); + 1 MAJOR — f2 the §9 (a) false-green gap
+  (assert no GO-LOCAL fire AND no helper-behind fire);
+  + 1 NIT — f3 the r40 row's premature CLOSED).
+- **Codex r41** — INFRA-BLOCKED (usage limit; reset Aug 10
+  06:57 UTC). Twentieth documented attempt this session
+  (`/tmp/codex-6749-r41-retry1.err`; r41 prompt staged at
+  `/tmp/codex-6749-r41-prompt.txt`). Proceeding 2-of-3 per the
+  codex-infra-blocked exception; retries continue each round.
+
+## Round 42 (plan v8.37 @ pending)
+
+- Codex (retry), AGY, Claude SMR — pending v8.37 fold.

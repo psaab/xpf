@@ -1,6 +1,6 @@
 # #6749 — binding-plan expansion registers new slots unarmed, dataplane disabled indefinitely
 
-**Status: DRAFT v8.36 — pending adversarial plan review (round 41)**
+**Status: DRAFT v8.37 — pending adversarial plan review (round 42)**
 
 - Issue: #6749 (opus-review-001 root R06, severity High)
 - Research base: `ad9591177` (origin/master at worktree creation)
@@ -1801,7 +1801,61 @@
   the rollback executor's apply (each stamps its
   own pair's digest), and the feed/DHCP-queued
   identical-recommit retry re-stamps the same
-  digest idempotently) fold @ pending
+  digest idempotently) fold @ `29a9ca319`
+  (r41: SMR DEMAND-REVISION (1 BLOCKER + 1 MINOR
+  + 1 NIT); AGY DEMAND-REVISION (1 BLOCKER + 1
+  MAJOR + 1 NIT); Codex infra-blocked (twentieth
+  documented attempt; 2-of-3))
+; v8.37 folds SMR r41 (1 BLOCKER + 1 MINOR + 1
+  NIT) + AGY r41 (1 BLOCKER + 1 MAJOR + 1 NIT):
+  the dedup-completion gains its convergence
+  semantics (SMR41-1 = AGY r41 f1/f2 — the v8.36
+  fold ran the tails without them, which loops on
+  EVERY same-content pair (an address-only commit
+  in the XSK-startup window — the excerpt's own
+  scenario): the dedup suppresses the send, so NO
+  observed acceptance exists and
+  `m.acceptedCommitRevision` never advances —
+  `ActivePair().revision > m.acceptedCommitRevision`
+  stays true and the drain re-drives into the
+  same dedup at the 60s floor forever (a
+  self-inflicted SMR23-1 loop) — and AGY's own
+  remediation (advance `acceptedCommitRevision`)
+  was evaluated and REJECTED (it opens the OTHER
+  leg: the NONZERO helper-behind clause reads
+  helper-stored(old) < accepted(new) and re-drives
+  into the same dedup — the loop moves, it does
+  not die): the dedup path records the pair
+  CONTENT-CONVERGED in a manager-side
+  `contentConvergedRevision` (the dedup match IS
+  the proof — the active pair's forwarding hash ==
+  the accepted snapshot's hash), the GO-LOCAL
+  rule's comparator becomes `ActivePair().revision
+  > max(m.acceptedCommitRevision,
+  m.contentConvergedRevision)`, and
+  `m.acceptedCommitRevision` itself does NOT
+  advance for the dedup (the note CAS's authority
+  stays the LAST-SENT lineage — `accepted ==
+  helper-stored`, so the note CAS passes
+  idempotently and the NONZERO helper-behind leg
+  reads old == old (no false divergence)); the
+  helper-lineage caveat is stated (the dedup never
+  advances the helper's stored lineage — the next
+  non-deduped send converges it, monotonically
+  skipping the deduped revisions); §9 (a) asserts
+  BOTH legs stay quiet post-completion (no
+  GO-LOCAL fire AND no helper-behind fire) AND
+  the deferred-restage variant (SMR41-2 — T1
+  deduped, T2 re-staged same pair and ALSO
+  deduped: the exemption is content-keyed (not
+  object-keyed), the OVERLAP-cancelled T1's
+  cursor is dead per the standing rule, and the
+  newest restage's cursor owns the completion);
+  the §6 posture sentence names the zero-set
+  growth explicitly (SMR41-3); and the r40
+  disposition row's premature CLOSED is amended
+  (AGY r41 f3 — the f1 closure completes only
+  with v8.37's convergence semantics) @ pending
   AGY r15 (4 BLOCKER + 3 MAJOR + 1 MINOR) + SMR r15 (2
   BLOCKER + 3 MAJOR + 3 MINOR/NIT): R1 becomes a REAL
   rollout+transport contract — a legacy `active.json`
@@ -1883,7 +1937,7 @@
 
 ## 1. Status
 
-DRAFT v8.36 — pending adversarial plan review round 41 (Codex + AGY +
+DRAFT v8.37 — pending adversarial plan review round 42 (Codex + AGY +
 Claude SMR). Convergence target: PLAN-READY (recommended path shipped
 to `/engineer`) or PLAN-KILL. No production code is written under
 `/research`.
@@ -3347,11 +3401,38 @@ to `/engineer`) or PLAN-KILL. No production code is written under
 
   | r40 finding | v8.36 disposition |
   |---|---|
-  | AGY f1 dedup strands the completion | CLOSED — when the dedup matches (`hash == m.lastSnapshotHash`) AND a pending first-exposure cursor exists for the pair, the catch-up runs the completion (posts the notice / runs the stamp + push from the snapshot field — the helper's enforced content IS the pair's (identical), so the exposure is real); §9 (a) asserts it (a dedup-without-completion implementation FAILS) (§5-C (ii), §9 (a)) |
+  | AGY f1 dedup strands the completion | CLOSED — when the dedup matches (`hash == m.lastSnapshotHash`) AND a pending first-exposure cursor exists for the pair, the catch-up runs the completion (posts the notice / runs the stamp + push from the snapshot field — the helper's enforced content IS the pair's (identical), so the exposure is real); §9 (a) asserts it (a dedup-without-completion implementation FAILS) (§5-C (ii), §9 (a)) — COMPLETED v8.37 (AGY r41 f1/f3): the dedup path ALSO records the pair content-converged (`contentConvergedRevision`, feeding ONLY the GO-LOCAL rule's comparator), without which the completion alone loops the drain on every same-content pair |
   | SMR40-1 / AGY f2 wire posture | CLOSED — MANAGER-LOCAL: the manager's in-memory snapshot struct carries `capturedDigest`; the wire encode OMITS it (nothing marshaled to the helper, no wire change, no protocol canary — §6 states the posture explicitly); the builder's zero set (builder.go:156-178) grows to cover it (the content-hash dedup never sees a field-only delta) (§5-C (ii), §6) |
   | SMR40-2 auxiliary-clone note | CLOSED — stated: the auxiliary clones (route overlay, scheduler republish, #5134) carry the field verbatim (same pair); their republish's stamp is idempotent-correct; the OVERLAP-clear discards the staged object and its snapshot's field together (the re-drive's rebuild mints a new snapshot with the identical field value if the pair is unchanged — the render determinism) (§5-C (ii)) |
   | SMR40-3 boot-path note | CLOSED — stated: the every-apply rule covers the boot apply and the rollback executor's apply (each stamps its own pair's digest — the boot's pair is the boot-promoted active at that Compile); the feed/DHCP-queued identical-recommit retry re-reads the pair under `applySem` and re-stamps the same digest (idempotent) (§5-C (ii)) |
   | AGY f3 §9 (a) same-content assertion | CLOSED — §9 (a) asserts a same-content / new-revision snapshot catch-up acceptance posts its completion notice and stamps `capturedDigest` WITHOUT waiting for the periodic sweep (a dedup-without-completion implementation FAILS) |
+
+- **Round 41** (v8.36): SMR DEMAND-REVISION (1 BLOCKER + 1
+  MINOR + 1 NIT); AGY DEMAND-REVISION (1 BLOCKER + 1 MAJOR +
+  1 NIT); Codex INFRA-BLOCKED (twentieth documented attempt;
+  2-of-3). FULL convergence on the same defect from both
+  sides, with a remediation fork resolved by evaluation: the
+  v8.36 dedup-completion ran the tails without the
+  convergence semantics, so a same-content pair (the send
+  suppressed, no observed acceptance,
+  `acceptedCommitRevision` unadvanced) leaves the GO-LOCAL
+  rule firing forever at the 60s floor (SMR41-1 = AGY f1/f2).
+  AGY's own remediation (advance `acceptedCommitRevision`)
+  was evaluated and REJECTED — it opens the OTHER leg (the
+  NONZERO helper-behind clause reads helper-stored(old) <
+  accepted(new) and re-drives into the same dedup — the loop
+  moves instead of dying). The `contentConvergedRevision`
+  comparator form closes both legs. AGY-only: f3 (the r40
+  row's premature CLOSED). SMR-only: SMR41-2 (the
+  deferred-restage variant), SMR41-3 (the §6 precision).
+- **Round-41 disposition table:**
+
+  | r41 finding | v8.37 disposition |
+  |---|---|
+  | SMR41-1 / AGY f1+f2 dedup convergence loop | CLOSED — the dedup path records the pair CONTENT-CONVERGED in a manager-side `contentConvergedRevision` (the dedup match IS the proof), and the GO-LOCAL rule's comparator becomes `ActivePair().revision > max(m.acceptedCommitRevision, m.contentConvergedRevision)` — while `m.acceptedCommitRevision` does NOT advance for the dedup (the note CAS's authority stays the LAST-SENT lineage: `accepted == helper-stored` ⇒ the CAS passes idempotently and the NONZERO helper-behind leg reads old == old — BOTH legs stay quiet; AGY's advance-`acceptedCommitRevision` form was evaluated and REJECTED (it opens the helper-behind leg)); the helper-lineage caveat stated (the next non-deduped send converges the helper's stored lineage, monotonically skipping the deduped revisions); §9 (a) asserts no GO-LOCAL fire AND no helper-behind fire post-completion (§5-C (ii), §9 (a)) |
+  | SMR41-2 deferred-restage variant | CLOSED — §9 (a) asserts T1 deduped → T2 re-staged same pair ALSO deduped: the exemption is content-keyed (not object-keyed), the OVERLAP-cancelled T1's cursor is dead per the standing rule, and the newest restage's cursor owns the completion |
+  | SMR41-3 §6 precision | CLOSED — the §6 posture sentence names the zero-set growth explicitly (the semantic hash's exclusion list gains `capturedDigest`) |
+  | AGY f3 r40 row premature CLOSED | CLOSED — the r40 row is amended (the f1 closure completes only with v8.37's convergence semantics) |
 
 ### Round-1 detail log (kept for the record)
 
@@ -5327,7 +5408,25 @@ BLOCKERs 6 + 8; v8 epoch form per Codex r6 f6/f8):**
   catch; the discriminator added v8.17, SMR r21 SMR21-1 =
   AGY r21 f2's staged-window catch): the ACTIVE pair's revision
   exceeding the newest OBSERVED-ACCEPTED revision
-  (`ActivePair().revision > m.acceptedCommitRevision`)
+  (`ActivePair().revision > max(m.acceptedCommitRevision,
+  m.contentConvergedRevision)` (v8.37, SMR r41
+  SMR41-1 = AGY r41 f1's comparator fix: the
+  manager-side `contentConvergedRevision` records
+  the dedup path's content-convergence (the dedup
+  match IS the proof — the active pair's
+  forwarding hash == the accepted snapshot's
+  hash) — while `m.acceptedCommitRevision` itself
+  does NOT advance for a dedup (the note CAS's
+  authority stays the LAST-SENT lineage —
+  `accepted == helper-stored`, so the note CAS
+  passes idempotently and the NONZERO
+  helper-behind leg reads old == old (no false
+  divergence); AGY r41's own remediation
+  (advance `acceptedCommitRevision`) was
+  evaluated and REJECTED — it opens the
+  helper-behind leg (helper-stored(old) <
+  accepted(new) and the re-drive dedups again —
+  the loop moves instead of dying)))
   AND **no live deferred-publish registration exists for
   the active pair** AND **the active revision is not
   RESTART-SUPPRESSED** (v8.19, SMR r23 SMR23-1 = AGY r23
@@ -6306,7 +6405,24 @@ BLOCKERs 6 + 8; v8 epoch form per Codex r6 f6/f8):**
   the v8.20-v8.35 text's silence would strand a
   deferred SAME-CONTENT pair's push and stamp
   (the deferred leg has no wrapper) and its
-  cursor pending until the sweep)) — AND with the
+  cursor pending until the sweep) — AND records
+  the pair CONTENT-CONVERGED (v8.37, SMR r41
+  SMR41-1 = AGY r41 f1's convergence fix: the
+  dedup match IS the proof (the active pair's
+  forwarding hash == the accepted snapshot's
+  hash) — the manager-side
+  `contentConvergedRevision` advances to the
+  pair's revision (feeding ONLY the GO-LOCAL
+  rule's comparator), while
+  `m.acceptedCommitRevision` does NOT advance
+  (the note CAS's authority stays the LAST-SENT
+  lineage — `accepted == helper-stored`, the CAS
+  passes idempotently, and the NONZERO
+  helper-behind leg reads old == old); the
+  helper-lineage caveat: the dedup never advances
+  the helper's STORED lineage — the next
+  non-deduped send converges it (monotonic —
+  skipping the deduped revisions is coherent))) — AND with the
   PAIR-CURRENCY gate (v8.20, SMR r24 SMR24-1 = AGY
   r24 f1's stale-notice fix: a newer commit C can
   promote and apply while B's notice sits queued —
@@ -9398,7 +9514,19 @@ activations a scheduled retry.
       wire posture (SMR40-1 = AGY f2: assert the
       field is absent from the wire encode and
       the content hash treats two snapshots
-      differing only in the field as EQUAL));
+      differing only in the field as EQUAL)) —
+      and the CONVERGENCE legs stay quiet (v8.37,
+      SMR r41 SMR41-1/2 = AGY r41 f1/f2: assert
+      NO GO-LOCAL fire AND NO helper-behind fire
+      on any later poll (the dedup recorded
+      `contentConvergedRevision`;
+      `acceptedCommitRevision` unchanged), and the
+      deferred-restage variant (T1 deduped, T2
+      re-staged same pair and ALSO deduped — the
+      exemption is content-keyed, the
+      OVERLAP-cancelled T1's cursor is dead, and
+      the newest restage's cursor owns the
+      completion));
       and the GC collects complete-skipped entries
       (v8.34, AGY r38 f2: assert the terminal set
       is {complete, complete-skipped, SUPERSEDED} —
@@ -10232,7 +10360,7 @@ the three owners through nine enumerations; the mixed-version
 producer is the documented exception with the required helper
 restart).
 
-Remaining questions for round 41, each invitable to PLAN-KILL with
+Remaining questions for round 42, each invitable to PLAN-KILL with
 a concrete counterexample:
 
 1. **Completeness, final form.** Exhibit a path to
@@ -10295,11 +10423,12 @@ a concrete counterexample:
    candidate-filter territory
    (`include_userspace_binding_interface`), explicitly out of
    scope here.
-6. **Round-40 disposition table audit.** §1's r40 table maps
-   every r40 finding (SMR 1 MINOR + 2 NIT; AGY 1 MAJOR + 2
-   MINOR; Codex infra-blocked) to its v8.36 fold, and every
-   fold this revision was verified per-edit against the
-   file. Which row is claimed-but-wrong this time?
+6. **Round-41 disposition table audit.** §1's r41 table maps
+   every r41 finding (SMR 1 BLOCKER + 1 MINOR + 1 NIT; AGY 1
+   BLOCKER + 1 MAJOR + 1 NIT; Codex infra-blocked) to its
+   v8.37 fold, and every fold this revision was verified
+   per-edit against the file. Which row is claimed-but-wrong
+   this time?
 7. **Cumulative hazard budget, final sign-off (v8.8 honest
    numbers, Codex r11 f11 + r12 f14).** Healthy unsuppressed
    baseline for
