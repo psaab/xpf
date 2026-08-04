@@ -719,4 +719,49 @@
 
 ## Round 23 (plan v8.18 @ 0e4604ac4)
 
-- Codex, AGY, Claude SMR — pending dispatch.
+- **Claude SMR r23** — `claude-smr-plan-r23.md`. Verdict:
+  DEMAND-REVISION (2 BLOCKER — SMR23-1 the restart-only guard ×
+  GO-LOCAL rule is an unbounded compile-and-refuse loop (nothing
+  advances acceptedCommitRevision for a guard-refused promotion,
+  so the rule re-fires forever; the fix is a revision-keyed
+  restart-suppression marker); SMR23-4 the ACTUAL publisher
+  (syncSnapshotLocked) never checks the token liveness the plan
+  pins on the OnXSKBound leg (a cancelled staged object still
+  referenced by m.lastSnapshot publishes); + 2 MAJOR — SMR23-2
+  the timer-arms-post-boot-apply edge names no mechanism (the
+  registration is pre-Load (daemon_run.go:130-136, VERIFIED) and
+  Load re-arms unconditionally (store_persist.go:231-253,
+  VERIFIED); the §9 (b) citation lacks the assertion); SMR23-3
+  the status-loop catch-up acceptance has no completion-tail
+  owner (no ApplyResult on that leg; Codex r22 f5's required
+  queryable-cursor/listener never landed); + 3 MINOR — SMR23-5
+  stage-timeout mechanics (duration/owner/posture); SMR23-6 the
+  fence-registry admission read discipline + crash window;
+  SMR23-7 the QueueConfig closure wiring (pkg/cluster imports no
+  configstore — VERIFIED sync_conn_config.go:1-8) + marker-claim
+  ordering + held-push re-wake; + 1 NIT — SMR23-8 circular
+  cursor-crash phrasing).
+- **AGY r23** — background bash `bt61rhgmk`; first dispatch died
+  on the kernel MAX_ARG_STRLEN (147,799-byte prompt > 128 KiB
+  single-argv limit, exit 126); prompt transport-trimmed to
+  130,800 bytes (`/tmp/agy-6749-r23-final.txt`, elisions marked
+  inline) and re-dispatched successfully; output
+  `/tmp/agy-6749-r23.out`; verdict doc `agy-plan-r23.md`.
+  Verdict: DEMAND-REVISION (3 BLOCKER — f1 the restart-only
+  GO-LOCAL loop (= SMR23-1); f2 the pre-Load executor
+  registration contradicts the timer edge (= SMR23-2); f3 the
+  catch-up leg has no completion-tail trigger (= SMR23-3);
+  + 2 MAJOR — f4 the publisher lacks the liveness check
+  (= SMR23-4); f5 the QueueConfig closure wiring (= SMR23-7);
+  + 1 MINOR — f6 §9 gaps for f1/f2).
+- **Codex r23** — INFRA-BLOCKED (usage limit; reset Aug 10 06:57
+  UTC). Documented attempts: (1) prior-session dispatch at 05:33
+  UTC (`/tmp/codex-6749-r23.err` — prompt composed at
+  `/tmp/codex-6749-r23-prompt.txt`); (2) retry this session at
+  ~12:05 UTC (`/tmp/codex-6749-r23-retry1.err` — identical
+  usage-limit response). Proceeding 2-of-3 (SMR + AGY) per the
+  codex-infra-blocked exception; retries continue each round.
+
+## Round 24 (plan v8.19 @ pending)
+
+- Codex (retry), AGY, Claude SMR — pending v8.19 fold.
