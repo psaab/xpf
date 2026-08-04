@@ -1078,6 +1078,30 @@
   `/tmp/codex-6749-r35-prompt.txt`). Proceeding 2-of-3 per the
   codex-infra-blocked exception; retries continue each round.
 
-## Round 36 (plan v8.31 @ pending)
+## Round 36 (plan v8.31 @ 31fea1cef)
 
-- Codex (retry), AGY, Claude SMR — pending v8.31 fold.
+- **Claude SMR r36** — `claude-smr-plan-r36.md`. Verdict:
+  DEMAND-REVISION (0 BLOCKER + 0 MAJOR + 1 MINOR + 1 NIT —
+  SMR36-1 the digest source should be build-time capture
+  riding the staged object (the drain-time accessor inherits
+  the store's BOUNDED retention + a lock edge; superseded);
+  SMR36-2 the single-renderer property).
+- **AGY r36** — background bash `b589drbw8`; prompt
+  `/tmp/agy-6749-r36-prompt.txt` (120,850 argv bytes); output
+  `/tmp/agy-6749-r36.out`; verdict doc `agy-plan-r36.md`.
+  Verdict: DEMAND-REVISION (1 MAJOR — f1 the
+  DigestOfRevision missing-revision contract (= SMR36-1's
+  retention concern); + 1 MINOR — f2 the §9 (a) store-vs-
+  snapshot digest source (= SMR36-2); + 2 NIT — f3 the
+  accessor's m.mu latency (node-cached O(1) in the fold);
+  f4 the post-rollback window prose (the v8.31 window text
+  conflated promotion with apply — made precise)).
+- **Codex r36** — INFRA-BLOCKED (usage limit; reset Aug 10
+  06:57 UTC). Fifteenth documented attempt this session
+  (`/tmp/codex-6749-r36-retry1.err`; r36 prompt staged at
+  `/tmp/codex-6749-r36-prompt.txt`). Proceeding 2-of-3 per the
+  codex-infra-blocked exception; retries continue each round.
+
+## Round 37 (plan v8.32 @ pending)
+
+- Codex (retry), AGY, Claude SMR — pending v8.32 fold.

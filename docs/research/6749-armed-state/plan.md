@@ -1,6 +1,6 @@
 # #6749 — binding-plan expansion registers new slots unarmed, dataplane disabled indefinitely
 
-**Status: DRAFT v8.31 — pending adversarial plan review (round 36)**
+**Status: DRAFT v8.32 — pending adversarial plan review (round 37)**
 
 - Issue: #6749 (opus-review-001 root R06, severity High)
 - Research base: `ad9591177` (origin/master at worktree creation)
@@ -1587,7 +1587,52 @@
   FAILS); and the v8.27-era "CAS revision
   verification" leftover in the (d)
   cancellation-scope text is swept (consistency) @
-  pending
+  `31fea1cef` (r36: SMR DEMAND-REVISION (0 BLOCKER
+  + 0 MAJOR + 1 MINOR + 1 NIT); AGY DEMAND-REVISION
+  (1 MAJOR + 1 MINOR + 2 NIT); Codex infra-blocked
+  (fifteenth documented attempt; 2-of-3))
+; v8.32 folds SMR r36 (1 MINOR + 1 NIT) + AGY r36
+  (1 MAJOR + 1 MINOR + 2 NIT): the digest's capture
+  moves to BUILD time (SMR36-1 = AGY r36 f1/f3 —
+  the v8.31 drain-time `DigestOfRevision` accessor
+  inherited the store's BOUNDED retention (rollback
+  slots rotate; `archiveDir` with `archiveMax`,
+  "empty = disabled" (store.go:215-216)) and added
+  a lock edge + a render under `m.mu`: the digest
+  is captured INSIDE Compile while `s.active` is
+  the pair being built (every apply-path Compile
+  holds `applySem` — exactly the standing #6296
+  pattern) and RIDES the staged object into the
+  cursor (`beginFirstExposure` copies it from the
+  staged object; the Compile-leg wrapper uses the
+  same captured value — identical by construction,
+  one capture, one renderer); the retained-tree
+  accessor (`DigestOfRevision(rev) → (digest,
+  error)`, node-cached (computed once at
+  commit/promotion — O(1) under `s.mu`)) is the
+  RECOVERY-fallback only (a cursor re-derived at
+  startup has no staged object), with the
+  missing-revision contract (empty digest ⇒ the
+  stamp phase SKIPS with an edge Warn while the
+  invalidation and push proceed — the marker heals
+  on the next full apply); the single-renderer
+  property is stated (SMR36-2 = AGY r36 f2 — every
+  digest in the machinery comes from the store's
+  ONE renderer (build-time `ActiveDigest()` or the
+  retained tree's render of the same tree) — no
+  manager-side re-render is ever compared against
+  a store render — and §9 (a) enforces it with a
+  config carrying compilation-stripped formatting
+  (comments/whitespace): `appliedDigest` matches
+  the store's render, never a snapshot-text
+  digest); and the rollback window is made precise
+  (AGY r36 f4 — the v8.31 "rollback-to-C1 ⇒
+  applied" conflated the promotion with the apply:
+  immediately post-rollback-PROMOTION
+  (`s.active == C1`) `appliedDigest` is still
+  `digest(C2)` ⇒ `ActiveApplied() == false` until
+  the rollback's OWN apply stamps `digest(C1)`;
+  post-rollback-APPLY ⇒ applied) @ pending
   AGY r15 (4 BLOCKER + 3 MAJOR + 1 MINOR) + SMR r15 (2
   BLOCKER + 3 MAJOR + 3 MINOR/NIT): R1 becomes a REAL
   rollout+transport contract — a legacy `active.json`
@@ -1669,7 +1714,7 @@
 
 ## 1. Status
 
-DRAFT v8.31 — pending adversarial plan review round 36 (Codex + AGY +
+DRAFT v8.32 — pending adversarial plan review round 37 (Codex + AGY +
 Claude SMR). Convergence target: PLAN-READY (recommended path shipped
 to `/engineer`) or PLAN-KILL. No production code is written under
 `/research`.
@@ -3016,9 +3061,30 @@ to `/engineer`) or PLAN-KILL. No production code is written under
   | r35 finding | v8.31 disposition |
   |---|---|
   | SMR35-1 / AGY f1 digest source locus | CLOSED — the digest is computed from the STORE'S RETAINED TREE for the pair's revision (the rollback/archive trees, durable by construction) via `DigestOfRevision(rev)` (taking `s.mu`), captured at the cursor's install (`beginFirstExposure`, the same `m.mu` section) for BOTH legs (the Compile-leg wrapper digest and the catch-up-leg cursor digest are the SAME value for the same pair; the `m.mu` → `s.mu` edge is safe — the store never calls into the manager); NEVER from `s.active` at capture time (§5-C (ii), §9 (a)) |
-  | SMR35-2 marker window semantics | CLOSED — stated once in §5-C (ii): post-stamp(C1) ⇒ applied; post-promotion(C2) pre-apply ⇒ NOT applied; post-stamp(C2) ⇒ applied; rollback-to-C1 ⇒ applied |
+  | SMR35-2 marker window semantics | CLOSED — stated once in §5-C (ii): post-stamp(C1) ⇒ applied; post-promotion(C2) pre-apply ⇒ NOT applied; post-stamp(C2) ⇒ applied; rollback-PROMOTION to C1 ⇒ NOT applied until the rollback's own apply stamps digest(C1) ⇒ applied (the "rollback-to-C1 ⇒ applied" shorthand was made precise v8.32 per AGY r36 f4) |
   | AGY f2 §9 (a) mandated sequence | CLOSED — §9 (a) mandates: promote C1 → expose C1 → promote C2 (GATED) → drain C1's notice → assert `appliedDigest == digest(C1)` AND `ActiveApplied() == false`, and `== digest(C2)` + `ActiveApplied() == true` after C2's apply (a drain-time-`ActiveDigest()` implementation FAILS) |
   | (sweep) v8.27-era CAS leftover in (d) | CLOSED — the "CAS revision verification" phrasing in the cancellation-scope text is replaced by the v8.30/v8.31 captured-digest + admission-gate form (consistency) |
+
+- **Round 36** (v8.31): SMR DEMAND-REVISION (0 BLOCKER + 0
+  MAJOR + 1 MINOR + 1 NIT); AGY DEMAND-REVISION (1 MAJOR + 1
+  MINOR + 2 NIT); Codex INFRA-BLOCKED (fifteenth documented
+  attempt; 2-of-3). Convergence: the drain-time
+  `DigestOfRevision` accessor inherited the store's BOUNDED
+  retention and had no missing-revision contract (SMR36-1 =
+  AGY f1/f3 — the capture moves to BUILD time, riding the
+  staged object; the accessor becomes the recovery fallback
+  with the error contract), and the digest's renderer identity
+  needed enforcing (SMR36-2 = AGY f2 — the store's ONE
+  renderer, never a snapshot-text digest). AGY-only: f4 (the
+  rollback window's promotion-vs-apply precision — the v8.31
+  window text was imprecise).
+- **Round-36 disposition table:**
+
+  | r36 finding | v8.32 disposition |
+  |---|---|
+  | SMR36-1 / AGY f1+f3 digest capture point + retention contract | CLOSED — the digest is captured INSIDE Compile while `s.active` is the pair being built (the standing #6296 pattern — every apply-path Compile holds `applySem`) and RIDES the staged object into the cursor (`beginFirstExposure` copies it from the staged object; the Compile-leg wrapper uses the same captured value — identical by construction, one capture, one renderer); the retained-tree accessor (`DigestOfRevision(rev) → (digest, error)`, node-cached (computed once at commit/promotion — O(1) under `s.mu`)) is the RECOVERY-fallback only (a startup re-derived cursor has no staged object), with the missing-revision contract: empty digest ⇒ the stamp phase SKIPS with an edge Warn while the invalidation and push proceed (the marker heals on the next full apply) (§5-C (ii), §9 (a)) |
+  | SMR36-2 / AGY f2 single-renderer property | CLOSED — stated: every digest in the machinery comes from the store's ONE renderer (build-time `ActiveDigest()` or the retained tree's render of the same tree); no manager-side re-render is ever compared against a store render; §9 (a) enforces it with a config carrying compilation-stripped formatting (comments/whitespace): `appliedDigest` matches the store's render, never a snapshot-text digest (§5-C (ii), §9 (a)) |
+  | AGY f4 rollback window precision | CLOSED — the window text now distinguishes rollback-PROMOTION (immediately post-promotion `appliedDigest` is still `digest(C2)` ⇒ `ActiveApplied() == false`) from post-rollback-APPLY (the rollback's own apply stamps `digest(C1)` ⇒ true) (§5-C (ii), §1 r35 row 2 amended) |
 
 ### Round-1 detail log (kept for the record)
 
@@ -6099,28 +6165,39 @@ BLOCKERs 6 + 8; v8 epoch form per Codex r6 f6/f8):**
   CAS-free overwrite would let a late stale stamp
   regress the marker): the stamp is
   `MarkAppliedDigest(pair.capturedDigest)` — the
-  pair's OWN digest, computed from the STORE'S
-  RETAINED TREE for the pair's revision (v8.31,
-  SMR r35 SMR35-1 = AGY r35 f1's source pin:
-  the rollback/archive trees (durable by
-  construction) via a store accessor
-  (`DigestOfRevision(rev)` taking `s.mu`) — NEVER
-  from `s.active` at capture time (a drain-time
-  or acceptance-time `ActiveDigest()` would read
-  `digest(s.active == C2)` in exactly the
-  stale-notice windows this machinery exists
-  for, and `MarkAppliedDigest(digest(C2))` would
-  make `ActiveApplied()` report the GATED
-  UNEXPOSED C2 as APPLIED — the sharpest form of
-  the #6296 class); the cursor's install
-  (`beginFirstExposure`, the same `m.mu` section)
-  captures it there for BOTH legs (the Compile-leg
-  wrapper digest and the catch-up-leg cursor
-  digest are then the SAME value for the same
-  pair; the new lock edge `m.mu` → `s.mu` is safe
-  by the SMR25-3 census's own argument — the
-  store never calls into the manager, so no
-  `s.mu` → `m.mu` path exists),
+  pair's OWN digest, captured AT BUILD time inside
+  Compile while `s.active` is the pair being built
+  (v8.32, SMR r36 SMR36-1 = AGY r36 f1/f3's
+  capture-point refinement, superseding the v8.31
+  drain-time accessor form: every apply-path
+  Compile holds `applySem` via `applyConfigLocked`,
+  so `ActiveDigest()` there is exactly the standing
+  #6296 pattern — and the captured value RIDES
+  the staged object (the pending-XSK staged object
+  carries it; `beginFirstExposure` copies it from
+  the staged object into the cursor; the
+  Compile-leg wrapper uses the same captured
+  value — the two legs' digests are identical BY
+  CONSTRUCTION: one capture, one renderer (the
+  store's own `configTextDigest`, never a
+  manager-side re-render (v8.32, SMR r36 SMR36-2 =
+  AGY r36 f2's single-renderer property))); the
+  OVERLAP-clear discards the staged object and its
+  digest with it; the re-drive's rebuild
+  re-captures; the revision-0 CLI diagnostic
+  compile is exempt from the stamp path entirely;
+  and the retained-tree accessor
+  (`DigestOfRevision(rev) → (digest, error)`,
+  node-cached (computed once at commit/promotion —
+  O(1) under `s.mu`)) is the RECOVERY-fallback
+  only (a startup re-derived cursor has no staged
+  object), with the missing-revision contract
+  (empty digest ⇒ the stamp phase SKIPS with an
+  edge Warn while the invalidation and push
+  proceed — the marker heals on the next full
+  apply) — the v8.31 form's retained-tree basis
+  stands only for that fallback (the
+  rollback/archive trees, durable by construction),
   captured at acceptance/apply
   time under the apply serialization (the #6296
   TOCTOU-safe form) — NEVER `MarkActiveApplied()`;
@@ -6130,12 +6207,15 @@ BLOCKERs 6 + 8; v8 epoch form per Codex r6 f6/f8):**
   call — the read-side `ActiveApplied()` digest
   comparison is the only "CAS" the machinery
   needs; and the marker's window semantics are
-  stated once (v8.31, SMR r35 SMR35-2:
+  stated once (v8.31, SMR r35 SMR35-2; the
+  rollback window made precise v8.32, AGY r36 f4:
   post-stamp(C1) ⇒ applied; post-promotion(C2)
   pre-apply ⇒ NOT applied (C2 not applied —
   correct); post-stamp(C2) ⇒ applied;
-  rollback-to-C1 ⇒ applied (C1's digest already
-  landed))); (c) the drain's `applySem` hold
+  rollback-PROMOTION to C1 ⇒ NOT applied
+  (`appliedDigest` is still `digest(C2)` in the
+  promotion window) until the rollback's OWN
+  apply stamps `digest(C1)` ⇒ applied)); (c) the drain's `applySem` hold
   + the drain-time-EXPOSED composition order every
   mid-drain case (no exposure can move while the
   drain holds the semaphore; a live-claimed drain
@@ -8861,18 +8941,30 @@ activations a scheduled retry.
       HELD, and the peer converges on C1 exactly —
       and the stamp LANDS in captured-digest form
       (v8.30, SMR r34 SMR34-1/2 = AGY r34 f1/f2;
-      sequence mandated v8.31, AGY r35 f2: promote
+      sequence mandated v8.31, AGY r35 f2; capture
+      point + renderer enforced v8.32, SMR r36
+      SMR36-1/2 = AGY r36 f1/f2: promote
       C1 → expose C1 → promote C2 (GATED) → drain
       C1's notice — assert `appliedDigest ==
       configTextDigest(C1's text)` (the stamp is
-      `MarkAppliedDigest` of C1's retained-tree
-      digest, NEVER a drain-time `ActiveDigest()`
-      of s.active (== C2)), `ActiveApplied() ==
+      `MarkAppliedDigest` of C1's BUILD-TIME
+      captured digest (captured inside C1's Compile
+      while `s.active == C1` — riding the staged
+      object into the cursor — NEVER a drain-time
+      `ActiveDigest()` of s.active (== C2) and
+      never a manager-side snapshot-text re-render
+      (a config carrying compilation-stripped
+      comments/whitespace: the digest matches the
+      store's render)), `ActiveApplied() ==
       false` (C2 correctly reports unapplied while
       gated), and `== digest(C2)` +
       `ActiveApplied() == true` after C2's own
-      apply — a drain-time-`ActiveDigest()`
-      implementation FAILS);
+      apply — a drain-time-`ActiveDigest()` or a
+      snapshot-text-digest implementation FAILS;
+      and a startup re-derived cursor with a
+      rotated-out revision skips the stamp with an
+      edge Warn while the invalidation and push
+      proceed);
       the A→B→C COMPOSITION (v8.15, Codex r19 f5): A
       exposed → gated B tightens → gated C promoted →
       C's exposure invalidates sessions against
@@ -9701,7 +9793,7 @@ the three owners through nine enumerations; the mixed-version
 producer is the documented exception with the required helper
 restart).
 
-Remaining questions for round 36, each invitable to PLAN-KILL with
+Remaining questions for round 37, each invitable to PLAN-KILL with
 a concrete counterexample:
 
 1. **Completeness, final form.** Exhibit a path to
@@ -9764,11 +9856,11 @@ a concrete counterexample:
    candidate-filter territory
    (`include_userspace_binding_interface`), explicitly out of
    scope here.
-6. **Round-35 disposition table audit.** §1's r35 table maps
-   every r35 finding (SMR 1 MINOR + 1 NIT; AGY 1 BLOCKER + 1
-   MINOR; Codex infra-blocked) to its v8.31 fold, and every
-   fold this revision was verified per-edit against the file.
-   Which row is claimed-but-wrong this time?
+6. **Round-36 disposition table audit.** §1's r36 table maps
+   every r36 finding (SMR 1 MINOR + 1 NIT; AGY 1 MAJOR + 1
+   MINOR + 2 NIT; Codex infra-blocked) to its v8.32 fold, and
+   every fold this revision was verified per-edit against the
+   file. Which row is claimed-but-wrong this time?
 7. **Cumulative hazard budget, final sign-off (v8.8 honest
    numbers, Codex r11 f11 + r12 f14).** Healthy unsuppressed
    baseline for
