@@ -1,6 +1,6 @@
 # #6749 — binding-plan expansion registers new slots unarmed, dataplane disabled indefinitely
 
-**Status: DRAFT v8.39 — pending adversarial plan review (round 44)**
+**Status: DRAFT v8.40 — pending adversarial plan review (round 45)**
 
 - Issue: #6749 (opus-review-001 root R06, severity High)
 - Research base: `ad9591177` (origin/master at worktree creation)
@@ -1956,7 +1956,46 @@
   application definitions are all
   forwarding-relevant hash inputs, so a
   session-policy change forces a hash mismatch
-  and bypasses the dedup entirely) @ pending
+  and bypasses the dedup entirely) @ `44ab7a630`
+  (r44: SMR PLAN-READY-WITH-NITS (2 NIT + post-AGY
+  addendum); AGY DEMAND-REVISION (1 BLOCKER (valid
+  as TEXTUAL AMBIGUITY, not as the blackhole) +
+  1 MAJOR + 1 MINOR + 1 NIT); Codex infra-blocked
+  (twenty-third documented attempt; 2-of-3))
+; v8.40 folds SMR r44 (2 NIT + the addendum's
+  evaluations) + AGY r44 (1 BLOCKER + 1 MAJOR + 1
+  MINOR + 1 NIT): the echo-0 sentence is
+  DISAMBIGUATED (AGY r44 f1 — the normative "AND it
+  FIRES on the GO-LOCAL rule" phrasing supported a
+  reading in which the echo-0 startup re-apply owner
+  is COMPARATOR-GATED (the respawn blackhole AGY r43
+  f1 traced); the SMR r44 post-AGY evaluation
+  records it VALID-AS-AMBIGUITY (the echo-0 owner
+  exists either way — but the sentence had to stop
+  supporting the gated reading): the echo-0 startup
+  re-apply owner now fires on the zero-stored
+  helper's status echo (`LastSnapshotGeneration == 0`
+  or the lineage echo zero) INDEPENDENTLY of the
+  comparator, and the re-sync debt's GO-LOCAL rule
+  is named as the SEPARATE abandoned/failed-build
+  path); the SMR43-2 wrapper-coverage sentence lands
+  in §5-C (ii) (AGY r44 f2 — the r43 fold's own
+  §5-C (ii) citation gap, self-confirmed via AGY:
+  a same-content commit whose Compile dedups at
+  publish time is fully covered by the daemon
+  wrapper's STANDING Compile-leg tails (no cursor
+  needs to install for the wrapper to run them),
+  and the NEXT transition's invalidation is
+  content-equivalent regardless of which
+  generation the helper physically holds (B's
+  content == A's content)); §9 (a) asserts the
+  echo-0 owner's independence explicitly (AGY r44
+  f3) and notes BOTH hygiene-clear forms pass
+  (AGY r44 f4 — the OPTIONAL clear and the
+  no-clear form are both safe, the echo-0 owner
+  being the recovery authority either way); and
+  SMR44-1/SMR44-2 (the standing-posture and
+  plan-change sentences) fold @ pending
   AGY r15 (4 BLOCKER + 3 MAJOR + 1 MINOR) + SMR r15 (2
   BLOCKER + 3 MAJOR + 3 MINOR/NIT): R1 becomes a REAL
   rollout+transport contract — a legacy `active.json`
@@ -3584,7 +3623,37 @@ to `/engineer`) or PLAN-KILL. No production code is written under
   | AGY f3 wasted-cycle Compile side effects | CLOSED — stated: the restart-window cycle includes the Compile-side XDP/pin/shim/bootstrap mutations (manager_compile.go:177-350), idempotent-vs-the-running-helper because the rebuild targets the CURRENT plan with identical content (plan-keyed writes of the same values; the v8.14 publish-leg-entry validation already orders them before any send decision) (§5-C (ii)) |
   | AGY f4 hash session-policy coverage | CLOSED — stated: the content hash covers the session-policy structures (zone assignments, address books, application definitions), so a session-policy change forces a hash mismatch and bypasses the dedup entirely (the SMR42-2 fence caveat's proof obligation) (§5-C (ii)) |
   | SMR43-1 incarnation-guard citation | CLOSED — cited: the dedup's gate is `hash == m.lastSnapshotHash && m.publishedSnapshot != 0` (process_status.go:77), and `stopLocked()` resets `m.publishedSnapshot = 0` (and `publishedPlanKey`) on helper stop (process.go:259) — the dedup can never fire over a respawn (the first publish after a stop is a full send by construction) |
-  | SMR43-2 wrapper-coverage sentence | CLOSED — stated: a same-content commit whose Compile dedups at publish time is fully covered by the daemon wrapper's standing Compile-leg tails (the stamp from the result's `capturedDigest` + the structured-transaction push), and the NEXT transition's invalidation is content-equivalent regardless of which generation the helper physically holds (the stale-prior composition A → C2 and the deduped pair B → C2 are the same set, since B's content == A's content) (§5-C (ii)) |
+  | SMR43-2 wrapper-coverage sentence | CLOSED — stated in §5-C (ii) (the r43 fold's own §5-C (ii) citation gap — AGY r44 f2's catch, self-confirmed): a same-content commit whose Compile dedups at publish time is fully covered by the daemon wrapper's standing Compile-leg tails (the stamp from the result's `capturedDigest` + the structured-transaction push — no cursor needs to install for the wrapper to run them), and the NEXT transition's invalidation is content-equivalent regardless of which generation the helper physically holds (the stale-prior composition A → C2 and the deduped pair B → C2 are the same set, since B's content == A's content) |
+
+- **Round 44** (v8.39): SMR PLAN-READY-WITH-NITS (2 NIT +
+  post-AGY addendum); AGY DEMAND-REVISION (1 BLOCKER + 1
+  MAJOR + 1 MINOR + 1 NIT); Codex INFRA-BLOCKED
+  (twenty-third documented attempt; 2-of-3). The round's
+  substance: AGY's BLOCKER was a REAL textual ambiguity, not
+  the r43 blackhole — the normative "AND it FIRES on the
+  GO-LOCAL rule" phrasing (plan.md:5485) supported a reading
+  in which the echo-0 startup re-apply owner is
+  COMPARATOR-GATED (under which the respawn blackhole
+  returns), and the SMR r44 post-AGY evaluation recorded it
+  VALID-AS-AMBIGUITY (the r43 NOT-VERIFIED evaluation
+  answered the semantic question correctly but missed that
+  the sentence supports the gated reading). AGY f2
+  CONFIRMED a claimed-but-wrong citation in the r43 fold
+  itself (the SMR43-2 wrapper-coverage sentence never
+  landed in §5-C (ii)). AGY-only: f3 (the test dependency);
+  f4 (the both-forms note). SMR's own r44 nits: SMR44-1
+  (the standing-posture sentence), SMR44-2 (the plan-change
+  sentence).
+- **Round-44 disposition table:**
+
+  | r44 finding | v8.40 disposition |
+  |---|---|
+  | AGY f1 echo-0 trigger ambiguity | CLOSED — DISAMBIGUATED: the echo-0 startup re-apply owner fires on the zero-stored helper's status echo (`LastSnapshotGeneration == 0` or the lineage echo zero) INDEPENDENTLY of the GO-LOCAL comparator (the comparator was never the recovery path); the re-sync debt's GO-LOCAL rule is named as the SEPARATE abandoned/failed-build path (the prior "AND it FIRES on the GO-LOCAL rule" phrasing supported the comparator-gated reading AGY r43 f1 traced — recorded VALID-AS-AMBIGUITY, not as the blackhole) (§5-C (ii), §9 (a)) |
+  | AGY f2 SMR43-2 citation gap | CLOSED — the wrapper-coverage sentence lands in §5-C (ii) (self-confirmed via AGY: it previously existed only in the narrative and the table row) (§5-C (ii)) |
+  | AGY f3 test dependency | CLOSED — §9 (a) asserts the echo-0 owner's independence explicitly (the recovery fires on the zero echo, never the comparator) |
+  | AGY f4 both hygiene-clear forms | CLOSED — §9 (a) notes BOTH the OPTIONAL clear and the no-clear form pass (the echo-0 owner is the recovery authority either way) |
+  | SMR44-1 standing-posture sentence | CLOSED — stated: the echo-0 recovery's latency is the PRE-EXISTING respawn posture (the helper died — the config loss is the death's); the dedup machinery adds zero latency (the gate is closed after `stopLocked()`, so the recovery's publish is a full send by construction) (§5-C (ii)) |
+  | SMR44-2 plan-change sentence | CLOSED — stated: the plan-change restart path (process_status.go:60's `publishedPlanKey != planKey` branch) also goes through `stopLocked()` → `publishedSnapshot = 0` → the dedup suppressed → a full send of the current plan lands on the fresh helper (the same guarantee as the echo-0 recovery; the two restart shapes share the gate) (§5-C (ii)) |
 
 ### Round-1 detail log (kept for the record)
 
@@ -5554,7 +5623,35 @@ BLOCKERs 6 + 8; v8 epoch form per Codex r6 f6/f8):**
   echoes-0 case (→ startup re-apply), so a nonzero-behind
   helper matched NEITHER owner and diverged permanently);
   the echo-0 helper-behind case keeps the startup re-apply
-  owner — AND it FIRES on the GO-LOCAL rule (v8.15, Codex
+  owner — which fires on the zero-stored helper's status
+  echo (`LastSnapshotGeneration == 0` or the lineage echo
+  zero) INDEPENDENTLY of the GO-LOCAL comparator
+  (v8.40, AGY r44 f1's disambiguation — the prior
+  phrasing ("AND it FIRES on the GO-LOCAL rule")
+  supported a reading in which the echo-0 owner was
+  COMPARATOR-GATED (the respawn blackhole AGY r43 f1
+  traced); the echo-0 owner was never the comparator's
+  to gate — the fresh helper accepts everything
+  zero-stored (the standing benign-respawn rule) and the
+  recovery's own publish cannot dedup (`stopLocked()`
+  resets `m.publishedSnapshot = 0` (process.go:259))) —
+  and the recovery's latency is the STANDING respawn
+  posture (v8.40, SMR r44 SMR44-1: death detection +
+  respawn + the zero echo's arrival on the next 1s
+  poll + the full apply — the config loss is the
+  DEATH's, pre-existing, and the dedup machinery adds
+  ZERO latency to it (the gate is closed after
+  `stopLocked()`, so the recovery's publish is a full
+  send by construction); and the PLAN-CHANGE restart
+  shares the guarantee (SMR44-2: the
+  `publishedPlanKey != planKey` branch
+  (process_status.go:60) also goes through
+  `stopLocked()` → `publishedSnapshot = 0` → the
+  dedup suppressed → a full send of the current plan
+  lands on the fresh helper — the two restart shapes
+  share the gate)) —
+  and SEPARATELY the re-sync debt FIRES on the GO-LOCAL
+  rule for the abandoned/failed-build case (v8.15, Codex
   r19 f7's ownerless-path fix; the qualifier corrected
   v8.16, SMR r20 SMR20-7 = AGY r20 f2's circular-deadlock
   catch; the discriminator added v8.17, SMR r21 SMR21-1 =
@@ -6590,7 +6687,24 @@ BLOCKERs 6 + 8; v8 epoch form per Codex r6 f6/f8):**
   entirely), so
   no session is admitted under a policy the
   helper is not enforcing and no session is
-  dropped by a lineage the helper never saw);
+  dropped by a lineage the helper never saw) —
+  and the COMPILE-LEG same-content case is the
+  wrapper's, not the cursor's (v8.40, SMR r43
+  SMR43-2's wrapper-coverage sentence (the r43
+  fold's own §5-C (ii) citation gap, AGY r44
+  f2's catch): a same-content commit whose
+  Compile dedups at publish time is fully
+  covered by the daemon wrapper's STANDING
+  Compile-leg tails (the stamp from the result's
+  `capturedDigest` + the structured-transaction
+  push — no cursor needs to install for the
+  wrapper to run them), and the NEXT
+  transition's invalidation is
+  content-equivalent regardless of which
+  generation the helper physically holds (the
+  stale-prior composition A → C2 and the
+  deduped pair B → C2 are the SAME set, since
+  B's content == A's content));
   and the marker's lifecycle is stated (v8.38,
   SMR r42 SMR42-1 = AGY r42 f1:
   `contentConvergedRevision` is ADVISORY and
@@ -9752,11 +9866,20 @@ activations a scheduled retry.
       deduped pair — assert the echo-0 startup
       re-apply owner drives the full bring-up
       (the dataplane is never unconfigured past
-      the owner's own latency), the recovery's
+      the owner's own latency — the STANDING
+      respawn posture), the recovery's
       publish does NOT dedup (`stopLocked()`
       reset `publishedSnapshot = 0`), and the
-      GO-LOCAL comparator's quietness is NOT the
-      recovery authority);
+      echo-0 owner fires on the ZERO ECHO
+      INDEPENDENTLY of the comparator (v8.40,
+      AGY r44 f1/f3 — an implementation that
+      gates the echo-0 owner on the comparator
+      FAILS); and BOTH hygiene-clear forms pass
+      (AGY r44 f4 — with or without the
+      OPTIONAL clear-on-helper-death, the
+      recovery completes identically (the
+      echo-0 owner is the authority either
+      way));
       and the GC collects complete-skipped entries
       (v8.34, AGY r38 f2: assert the terminal set
       is {complete, complete-skipped, SUPERSEDED} —
@@ -10590,7 +10713,7 @@ the three owners through nine enumerations; the mixed-version
 producer is the documented exception with the required helper
 restart).
 
-Remaining questions for round 44, each invitable to PLAN-KILL with
+Remaining questions for round 45, each invitable to PLAN-KILL with
 a concrete counterexample:
 
 1. **Completeness, final form.** Exhibit a path to
@@ -10653,10 +10776,10 @@ a concrete counterexample:
    candidate-filter territory
    (`include_userspace_binding_interface`), explicitly out of
    scope here.
-6. **Round-43 disposition table audit.** §1's r43 table maps
-   every r43 finding (SMR 2 NIT; AGY 1 BLOCKER
-   (NOT-VERIFIED) + 1 MAJOR + 1 MINOR + 1 NIT; Codex
-   infra-blocked) to its v8.39 fold, and every fold this
+6. **Round-44 disposition table audit.** §1's r44 table maps
+   every r44 finding (SMR 2 NIT + addendum; AGY 1 BLOCKER
+   (ambiguity) + 1 MAJOR + 1 MINOR + 1 NIT; Codex
+   infra-blocked) to its v8.40 fold, and every fold this
    revision was verified per-edit against the file. Which
    row is claimed-but-wrong this time?
 7. **Cumulative hazard budget, final sign-off (v8.8 honest

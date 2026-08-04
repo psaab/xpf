@@ -1300,6 +1300,36 @@
   `/tmp/codex-6749-r43-prompt.txt`). Proceeding 2-of-3 per the
   codex-infra-blocked exception; retries continue each round.
 
-## Round 44 (plan v8.39 @ pending)
+## Round 44 (plan v8.39 @ 44ab7a630)
 
-- Codex (retry), AGY, Claude SMR — pending v8.39 fold.
+- **Claude SMR r44** — `claude-smr-plan-r44.md`. Verdict:
+  PLAN-READY-WITH-NITS (2 NIT — SMR44-1 the standing-posture
+  sentence; SMR44-2 the plan-change sentence) + the post-AGY
+  addendum: AGY's f1 evaluated VALID-AS-AMBIGUITY (the "AND it
+  FIRES on the GO-LOCAL rule" phrasing at plan.md:5485
+  supported the comparator-gated reading under which the
+  respawn blackhole returns — the r43 NOT-VERIFIED evaluation
+  answered the semantic question correctly but missed that the
+  sentence supports the gated reading), and AGY's f2 CONFIRMED
+  as a claimed-but-wrong citation in the r43 fold itself (the
+  SMR43-2 wrapper-coverage sentence never landed in §5-C (ii)).
+- **AGY r44** — background bash `be74u0mln`; prompt
+  `/tmp/agy-6749-r44-prompt.txt` (131,022 argv bytes — the
+  SyncApply guard + daemon_run phases excerpts elided as
+  settled with pointers); output `/tmp/agy-6749-r44.out`;
+  verdict doc `agy-plan-r44.md`. Verdict: DEMAND-REVISION
+  (1 BLOCKER — f1 the §1-vs-§5-C (ii) echo-0 trigger
+  contradiction (the normative sentence's ambiguous "it");
+  + 1 MAJOR — f2 the SMR43-2 wrapper-coverage sentence
+  missing from §5-C (ii) (a claimed-but-wrong citation in
+  the fold); + 1 MINOR — f3 the test dependency; + 1 NIT —
+  f4 the both-forms note).
+- **Codex r44** — INFRA-BLOCKED (usage limit; reset Aug 10
+  06:57 UTC). Twenty-third documented attempt this session
+  (`/tmp/codex-6749-r44-retry1.err`; r44 prompt staged at
+  `/tmp/codex-6749-r44-prompt.txt`). Proceeding 2-of-3 per the
+  codex-infra-blocked exception; retries continue each round.
+
+## Round 45 (plan v8.40 @ pending)
+
+- Codex (retry), AGY, Claude SMR — pending v8.40 fold.
