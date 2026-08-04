@@ -259,3 +259,12 @@ scoped by the capability gate; derived interval everywhere; the
 seventh lifecycle event with atomic precedence and a distinct
 degraded-release effect; the private-RG gate introduced by this
 plan). Round 42 is the convergence check.
+
+| r42 | `codex exec` (detached-poll), session in /tmp/codex-6751-r42.log / PLAN-NEEDS-REVISION (4 BLOCKERs: last retained-text contradictions (scoped); seventh event + fence precedence absent from the detailed contract (readiness commit re-validates fence state now); fence engagement never arms the hold its expiry releases — a REAL logic hole (engagement's commit unit sets readiness false + re-arms the classic hold); private-RG gate lacks the sync-configured predicate (conditioned on fabric endpoints — no-op otherwise); 2 MAJORs: behavior change unpriced/unpinned (§8 pricing vs the deliberate-policy history + §9 refusal + no-op cases); alias confirmation names the impossible "current store" (decode-time base-identity index named as the predicate's source); 1 NIT: interval formula joins the parameter summary) | PLAN-READY-WITH-NITS (2 nits: capability qualifier on the §9 recaps; seven-event parenthetical — both folded) | PLAN-READY-WITH-NITS (r43 fold-check of v15.31; engagement-arming disjointness from #466, the re-armed hold's 30s bound ordering, and the stranded-cluster class analyzed) |
+
+Round-42 disposition: all findings fold in v15.31 (retained-text
+scoping sweep complete; fence-state revalidation in the readiness
+commit unit; engagement arms the hold — the real logic hole closed;
+the conditioned private-RG gate with §8 pricing and §9 refusal +
+no-op pins; the index-named predicate source; the parameter summary
+interval). Round 43 is the convergence check.
