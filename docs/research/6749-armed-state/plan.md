@@ -1986,12 +1986,12 @@ BLOCKERs 6 + 8; v8 epoch form per Codex r6 f6/f8):**
   maps_sync.go:451-456); the daemon's scheduler drains it,
   acquires `applySem`, re-reads the ACTIVE config from the
   configstore (the control-plane commit already landed), and
-  drives the normal commit path — fresh compile (the commit
-  seq is the ACTIVE config's own, so the helper's
-  epoch-rollback refusal passes: stored B's seq == the
-  re-applied seq), identical content (idempotent), fresh
-  three-bucket precheck re-instantiating debts — and the
-  observed-accepted publish advances
+  drives the dataplane RE-APPLY of that active config
+  (`ApplyConfig` — NOT a new configstore commit, so the carried
+  seq is B's OWN seq, matching the landed helper state) —
+  a fresh compile whose content is identical (idempotent),
+  whose three-bucket precheck re-instantiates the debts, and
+  whose observed-accepted publish advances
   `m.acceptedConfigEpoch` to it. During the divergence EVERY
   older-lineage producer is suppressed AND the helper's
   epoch-rollback refusal is the backstop (§5-C (iv)), so a
@@ -2836,7 +2836,8 @@ activations a scheduled retry.
       RECORDS the debt under m.mu (enqueue-after-unlock — NO
       inline manager→daemon call, assert none); the daemon's
       scheduler drains it, acquires `applySem`, re-reads the
-      ACTIVE config, and drives the normal commit path (fresh
+      ACTIVE config, and drives the dataplane RE-APPLY (`ApplyConfig`,
+      NOT a new configstore commit — the carried seq is B's own,
       generation, the ACTIVE config's own commit seq —
       assert the helper's epoch-rollback refusal PASSES
       because stored B's seq equals the re-applied seq);
