@@ -140,3 +140,13 @@ API-representable owner/occupancy split with InterfaceOwnerKey;
 import-driven standby allocator creation; static provenance + mapped
 ports + own counter; id preservation across HA hops; pre-dispatch
 no-pair assertion; SMR r31 legacy-id pin). Round 31 re-reviews v15.18.
+
+| r31 | `codex exec` (detached-poll), session in /tmp/codex-6751-r31.log / PLAN-NEEDS-REVISION (7 BLOCKERs: close not incarnation-linearizable + fatal inverse, zombie at gen-map capacity, carry-forward overflow wrong direction, owner/occupancy API contradictory, static emitted-port/inbound/drain, P2 no atomic seam, old-sender lost-base cell; 2 MAJORs: deferral liveness, FOUR-producers false tree-wide; 1 MINOR: standby edge tests) | PLAN-READY-WITH-NITS (2 nits, both already satisfied by v15.18 pins) | PLAN-READY-WITH-NITS (r32 fold-check of v15.19) |
+
+Round-31 disposition: Codex's 10 findings fold in v15.19
+(incarnation-gated close suppression end-to-end with striped-mutex
+atomicity; omission index + table-truth overflow; fenced inbound
+re-prime + reconciliation hold; honest signature inventory; static
+emitted-port/inbound/drain; serialized-loop purge; honest
+mixed-version cell; scoped producer claim; standby edge tests).
+Round 32 re-reviews v15.19.
