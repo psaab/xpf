@@ -1,6 +1,6 @@
 # #6749 — binding-plan expansion registers new slots unarmed, dataplane disabled indefinitely
 
-**Status: DRAFT v8.37 — pending adversarial plan review (round 42)**
+**Status: DRAFT v8.38 — pending adversarial plan review (round 43)**
 
 - Issue: #6749 (opus-review-001 root R06, severity High)
 - Research base: `ad9591177` (origin/master at worktree creation)
@@ -1855,7 +1855,43 @@
   growth explicitly (SMR41-3); and the r40
   disposition row's premature CLOSED is amended
   (AGY r41 f3 — the f1 closure completes only
-  with v8.37's convergence semantics) @ pending
+  with v8.37's convergence semantics) @
+  `6099e19f9` (r42: SMR PLAN-READY-WITH-NITS (2
+  NIT); AGY PLAN-READY-WITH-NITS (1 MINOR + 1
+  NIT); Codex infra-blocked (twenty-first
+  documented attempt; 2-of-3))
+; v8.38 folds SMR r42 (2 NIT) + AGY r42 (1 MINOR
+  + 1 NIT): the marker's restart-window statement
+  (SMR42-1 = AGY r42 f1 — `contentConvergedRevision`
+  is in-memory and dies with the manager process:
+  the window between a manager restart and the
+  next dedup match has the deduped pairs'
+  revisions exceeding the re-seeded
+  `acceptedCommitRevision`, so the GO-LOCAL rule
+  fires ONCE per restart — the drain re-drives
+  the full apply, the rebuild dedups again (the
+  content is still identical), and the marker
+  re-records — exactly ONE wasted drain cycle per
+  restart (the newest deduped pair's re-drive
+  converges every older deduped revision with it,
+  the comparator being a max), bounded,
+  self-correcting, and Warn-visible at the edge;
+  the marker is ADVISORY and rebuilds on the next
+  dedup match (no persistence is needed or
+  wanted); §9 (a) asserts the single-cycle
+  post-restart convergence AND the rejected-form
+  guard (`acceptedCommitRevision ==
+  helper-stored` post-dedup — an
+  advance-accepted implementation FAILS (AGY r42
+  f2))); and the fence-untouched caveat (SMR42-2 —
+  the session-admission fence (the helper's
+  stored `commit_revision` + the Go high-water)
+  is untouched by the dedup (no send): sessions
+  continue under the old lineage with IDENTICAL
+  enforced content — no session is admitted
+  under a policy the helper is not enforcing, and
+  no session is dropped by a lineage the helper
+  never saw) @ pending
   AGY r15 (4 BLOCKER + 3 MAJOR + 1 MINOR) + SMR r15 (2
   BLOCKER + 3 MAJOR + 3 MINOR/NIT): R1 becomes a REAL
   rollout+transport contract — a legacy `active.json`
@@ -1937,7 +1973,7 @@
 
 ## 1. Status
 
-DRAFT v8.37 — pending adversarial plan review round 42 (Codex + AGY +
+DRAFT v8.38 — pending adversarial plan review round 43 (Codex + AGY +
 Claude SMR). Convergence target: PLAN-READY (recommended path shipped
 to `/engineer`) or PLAN-KILL. No production code is written under
 `/research`.
@@ -3433,6 +3469,24 @@ to `/engineer`) or PLAN-KILL. No production code is written under
   | SMR41-2 deferred-restage variant | CLOSED — §9 (a) asserts T1 deduped → T2 re-staged same pair ALSO deduped: the exemption is content-keyed (not object-keyed), the OVERLAP-cancelled T1's cursor is dead per the standing rule, and the newest restage's cursor owns the completion |
   | SMR41-3 §6 precision | CLOSED — the §6 posture sentence names the zero-set growth explicitly (the semantic hash's exclusion list gains `capturedDigest`) |
   | AGY f3 r40 row premature CLOSED | CLOSED — the r40 row is amended (the f1 closure completes only with v8.37's convergence semantics) |
+
+- **Round 42** (v8.37): SMR PLAN-READY-WITH-NITS (2 NIT); AGY
+  PLAN-READY-WITH-NITS (1 MINOR + 1 NIT); Codex INFRA-BLOCKED
+  (twenty-first documented attempt; 2-of-3). The campaign's
+  FIRST convergent round: both reviewers returned non-DEMAND
+  verdicts on the same two items — the marker's restart
+  window (SMR42-1 = AGY f1: one wasted drain cycle per
+  restart, self-correcting, advisory-not-durable) and the §9
+  (a) assertions (SMR42-2-adjacent = AGY f2: the
+  single-cycle convergence assertion + the rejected-form
+  guard), plus SMR42-2 (the fence-untouched caveat).
+- **Round-42 disposition table:**
+
+  | r42 finding | v8.38 disposition |
+  |---|---|
+  | SMR42-1 / AGY f1 restart window | CLOSED — stated: `contentConvergedRevision` is ADVISORY and rebuilds on the next dedup match (no persistence); the restart window costs exactly ONE wasted drain cycle per restart (the newest deduped pair's re-drive converges every older deduped revision with it — the comparator is a max), bounded, self-correcting, Warn-visible at the edge; §9 (a) asserts the single-cycle post-restart convergence AND the rejected-form guard (`acceptedCommitRevision == helper-stored` post-dedup — an advance-accepted implementation FAILS) (§5-C (ii), §8, §9 (a)) |
+  | SMR42-2 fence-untouched caveat | CLOSED — stated: the session-admission fence (the helper's stored `commit_revision` + the Go high-water) is untouched by the dedup (no send): sessions continue under the old lineage with IDENTICAL enforced content — no session is admitted under a policy the helper is not enforcing, and no session is dropped by a lineage the helper never saw (§5-C (ii)) |
+  | AGY f2 §9 (a) assertions | CLOSED — §9 (a) gains the single-cycle post-restart convergence assertion and the `acceptedCommitRevision == helper-stored` post-dedup guard (an advance-accepted implementation FAILS) |
 
 ### Round-1 detail log (kept for the record)
 
@@ -6422,7 +6476,27 @@ BLOCKERs 6 + 8; v8 epoch form per Codex r6 f6/f8):**
   helper-lineage caveat: the dedup never advances
   the helper's STORED lineage — the next
   non-deduped send converges it (monotonic —
-  skipping the deduped revisions is coherent))) — AND with the
+  skipping the deduped revisions is coherent);
+  and the session-admission FENCE is untouched
+  (v8.38, SMR r42 SMR42-2: no send means the
+  helper's stored `commit_revision` and the Go
+  high-water are unchanged — sessions continue
+  under the old lineage with IDENTICAL enforced
+  content (the dedup match's whole premise), so
+  no session is admitted under a policy the
+  helper is not enforcing and no session is
+  dropped by a lineage the helper never saw);
+  and the marker's lifecycle is stated (v8.38,
+  SMR r42 SMR42-1 = AGY r42 f1:
+  `contentConvergedRevision` is ADVISORY and
+  rebuilds on the next dedup match (no
+  persistence) — a manager restart costs exactly
+  ONE wasted drain cycle (the rule fires once,
+  the rebuild dedups, the marker re-records —
+  the newest deduped pair's re-drive converges
+  every older deduped revision with it, the
+  comparator being a max — bounded,
+  self-correcting, Warn-visible at the edge))) — AND with the
   PAIR-CURRENCY gate (v8.20, SMR r24 SMR24-1 = AGY
   r24 f1's stale-notice fix: a newer commit C can
   promote and apply while B's notice sits queued —
@@ -9526,7 +9600,17 @@ activations a scheduled retry.
       exemption is content-keyed, the
       OVERLAP-cancelled T1's cursor is dead, and
       the newest restage's cursor owns the
-      completion));
+      completion)) — AND the restart window
+      (v8.38, SMR r42 SMR42-1 = AGY r42 f1/f2:
+      a manager restart over a deduped active
+      pair — assert the rule fires EXACTLY ONCE
+      (the drain re-drives, the rebuild dedups,
+      the marker re-records, the comparator goes
+      quiet on the next poll — a second fire
+      FAILS), and the rejected-form guard
+      (`acceptedCommitRevision == helper-stored`
+      post-dedup — an advance-accepted
+      implementation FAILS));
       and the GC collects complete-skipped entries
       (v8.34, AGY r38 f2: assert the terminal set
       is {complete, complete-skipped, SUPERSEDED} —
@@ -10360,7 +10444,7 @@ the three owners through nine enumerations; the mixed-version
 producer is the documented exception with the required helper
 restart).
 
-Remaining questions for round 42, each invitable to PLAN-KILL with
+Remaining questions for round 43, each invitable to PLAN-KILL with
 a concrete counterexample:
 
 1. **Completeness, final form.** Exhibit a path to
@@ -10423,12 +10507,11 @@ a concrete counterexample:
    candidate-filter territory
    (`include_userspace_binding_interface`), explicitly out of
    scope here.
-6. **Round-41 disposition table audit.** §1's r41 table maps
-   every r41 finding (SMR 1 BLOCKER + 1 MINOR + 1 NIT; AGY 1
-   BLOCKER + 1 MAJOR + 1 NIT; Codex infra-blocked) to its
-   v8.37 fold, and every fold this revision was verified
-   per-edit against the file. Which row is claimed-but-wrong
-   this time?
+6. **Round-42 disposition table audit.** §1's r42 table maps
+   every r42 finding (SMR 2 NIT; AGY 1 MINOR + 1 NIT; Codex
+   infra-blocked) to its v8.38 fold, and every fold this
+   revision was verified per-edit against the file. Which
+   row is claimed-but-wrong this time?
 7. **Cumulative hazard budget, final sign-off (v8.8 honest
    numbers, Codex r11 f11 + r12 f14).** Healthy unsuppressed
    baseline for

@@ -1241,6 +1241,29 @@
   `/tmp/codex-6749-r41-prompt.txt`). Proceeding 2-of-3 per the
   codex-infra-blocked exception; retries continue each round.
 
-## Round 42 (plan v8.37 @ pending)
+## Round 42 (plan v8.37 @ 6099e19f9)
 
-- Codex (retry), AGY, Claude SMR — pending v8.37 fold.
+- **Claude SMR r42** — `claude-smr-plan-r42.md`. Verdict:
+  PLAN-READY-WITH-NITS (2 NIT — SMR42-1 the marker's
+  restart-window statement (advisory, rebuilds on the next
+  dedup match; one wasted drain cycle per restart); SMR42-2
+  the fence-untouched caveat).
+- **AGY r42** — background bash `bynat193y`; prompt
+  `/tmp/agy-6749-r42-prompt.txt` (131,063 argv bytes);
+  output `/tmp/agy-6749-r42.out`; verdict doc
+  `agy-plan-r42.md`. Verdict: PLAN-READY-WITH-NITS (1 MINOR
+  — f1 the unstated single-tick restart re-drive
+  (= SMR42-1); + 1 NIT — f2 the §9 (a) rejected-form guard
+  + single-cycle convergence assertions). The v8.37
+  mechanism "re-derived and verified sound for running
+  manager instances". THE CAMPAIGN'S FIRST CONVERGENT ROUND:
+  both reviewers non-DEMAND on the same items.
+- **Codex r42** — INFRA-BLOCKED (usage limit; reset Aug 10
+  06:57 UTC). Twenty-first documented attempt this session
+  (`/tmp/codex-6749-r42-retry1.err`; r42 prompt staged at
+  `/tmp/codex-6749-r42-prompt.txt`). Proceeding 2-of-3 per the
+  codex-infra-blocked exception; retries continue each round.
+
+## Round 43 (plan v8.38 @ pending)
+
+- Codex (retry), AGY, Claude SMR — pending v8.38 fold.
