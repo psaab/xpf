@@ -1,6 +1,6 @@
 # #6749 — binding-plan expansion registers new slots unarmed, dataplane disabled indefinitely
 
-**Status: DRAFT v8.34 — pending adversarial plan review (round 39)**
+**Status: DRAFT v8.35 — pending adversarial plan review (round 40)**
 
 - Issue: #6749 (opus-review-001 root R06, severity High)
 - Research base: `ad9591177` (origin/master at worktree creation)
@@ -1708,7 +1708,54 @@
   made precise (AGY r38 f4 + SMR38-2 — the
   aged-out pair's own marker is abandoned
   (unreachable); the marker CORRECTS for the
-  CURRENT pair when its own apply stamps) @ pending
+  CURRENT pair when its own apply stamps) @
+  `6c01344b3` (r39: SMR DEMAND-REVISION (1 MAJOR +
+  2 MINOR + 1 NIT); AGY DEMAND-REVISION (2 MAJOR +
+  1 MINOR + 1 NIT); Codex infra-blocked
+  (eighteenth documented attempt; 2-of-3))
+; v8.35 folds SMR r39 (1 MAJOR + 2 MINOR + 1 NIT)
+  + AGY r39 (2 MAJOR + 1 MINOR + 1 NIT): the digest
+  becomes a FIELD of the built snapshot (the
+  transport unification — AGY r39 f1's carrier-gap
+  trace was PARTIALLY VERIFIED by the SMR sweep
+  (every deferred snapshot comes from Compile's
+  `pendingXSKStartup` branch, which stages the
+  object the v8.34 transport names — but the
+  enumeration could be read as the linkcycle case
+  only): the digest is minted at build time inside
+  Compile AS A FIELD OF THE BUILT SNAPSHOT, and
+  EVERY acceptance leg (the Compile-leg result,
+  the staged object (which wraps the snapshot),
+  the catch-up (`m.lastSnapshot.capturedDigest`))
+  reads that ONE field — no dependence on the
+  defer shape); the stamp runs on EVERY
+  successful apply/publish of the exposed pair
+  (SMR39-1 = AGY r39 f2 — the non-first re-apply
+  case: a pair that took complete-skipped must
+  re-stamp on its next apply even though
+  `firstExposure == false` suppresses the cursor:
+  the stamp is NOT cursor-exclusive — the
+  Compile-leg wrapper stamps after every
+  successful `applyConfigLocked` (the standing
+  #4957/#6296 pattern), the catch-up stamps from
+  the snapshot field (first-exposure via the
+  cursor's stamp phase, non-first idempotently
+  from the same field), and the wrapper's stamp
+  is never suppressed by the cursor — the
+  complete-skipped state heals on the next
+  successful apply of the exposed pair, from ANY
+  transport); the §6 `ApplyResult` inventory
+  gains the field (SMR39-2 — the r38 row's §6
+  citation was claimed-but-wrong without it); the
+  duplicate `beginFirstExposure` install is
+  IDEMPOTENT per pair (SMR39-3 = AGY r39 f4 — a
+  second call for the same pair+ledgerID no-ops
+  (the digest is install-time-immutable; an empty
+  digest never overwrites a valid captured value);
+  a NEW first exposure (a new revision) installs
+  a new cursor); and §9 (a) gains the catch-up
+  carrier, re-apply stamp, and deferred-leg
+  extraction assertions (AGY r39 f3) @ pending
   AGY r15 (4 BLOCKER + 3 MAJOR + 1 MINOR) + SMR r15 (2
   BLOCKER + 3 MAJOR + 3 MINOR/NIT): R1 becomes a REAL
   rollout+transport contract — a legacy `active.json`
@@ -1790,7 +1837,7 @@
 
 ## 1. Status
 
-DRAFT v8.34 — pending adversarial plan review round 39 (Codex + AGY +
+DRAFT v8.35 — pending adversarial plan review round 40 (Codex + AGY +
 Claude SMR). Convergence target: PLAN-READY (recommended path shipped
 to `/engineer`) or PLAN-KILL. No production code is written under
 `/research`.
@@ -3208,6 +3255,32 @@ to `/engineer`) or PLAN-KILL. No production code is written under
   | AGY f2 GC predicate omits complete-skipped | CLOSED — the terminal set is {complete, complete-skipped, SUPERSEDED} at both the phase and entry levels; the §5-C (ii) GC text enumerates all three (§5-C (ii)) |
   | AGY f3 / SMR38-1 Warn scope | CLOSED — per-CURSOR (each skip is a distinct exposure event, each earning its own one-time Warn); the pair-keyed resume rule (v8.18's "an incomplete replay resumes its phase") dedups the recovery re-derivation (a second crash mid-recovery RESUMES the same cursor rather than minting a second — no duplicate cursors for one logical exposure) (§5-C (ii)) |
   | AGY f4 / SMR38-2 heal phrasing | CLOSED — made precise: the aged-out pair's own marker is abandoned (unreachable — its tree is gone from active); the marker CORRECTS for the CURRENT pair when its own apply stamps (§5-C (ii)) |
+
+- **Round 39** (v8.34): SMR DEMAND-REVISION (1 MAJOR + 2
+  MINOR + 1 NIT); AGY DEMAND-REVISION (2 MAJOR + 1 MINOR + 1
+  NIT); Codex INFRA-BLOCKED (eighteenth documented attempt;
+  2-of-3). The round's substance: the non-first re-apply's
+  stamp authority was unstated (SMR39-1 = AGY f2 — a pair
+  that took complete-skipped would never re-stamp if the
+  stamp were cursor-exclusive); the v8.34 transport
+  enumeration could be read as missing the XSK-startup-defer
+  leg's carrier (AGY f1 — PARTIALLY VERIFIED by the SMR
+  sweep: every deferred snapshot comes from Compile's
+  `pendingXSKStartup` branch, which stages the object — the
+  fold kills the ambiguity class by making the digest a field
+  of the built snapshot); the §6 inventory never gained the
+  field (SMR39-2 — self-found claimed-but-wrong); the
+  duplicate-install policy (SMR39-3 = AGY f4); and §9 (a)'s
+  three gaps (AGY f3).
+- **Round-39 disposition table:**
+
+  | r39 finding | v8.35 disposition |
+  |---|---|
+  | AGY f1 catch-up carrier gap | CLOSED — the digest is a FIELD of the built snapshot (minted at build time inside Compile), and EVERY acceptance leg (the Compile-leg result, the staged object (which wraps the snapshot), the catch-up (`m.lastSnapshot.capturedDigest`)) reads that ONE field — the transport no longer depends on the defer shape (the SMR sweep confirmed every deferred snapshot comes from Compile's `pendingXSKStartup` branch, which stages the object; the field removes the enumeration ambiguity class) (§5-C (ii), §6, §9 (a)) |
+  | SMR39-1 / AGY f2 non-first re-apply stamp authority | CLOSED — the stamp runs on EVERY successful apply/publish of the exposed pair: the Compile-leg wrapper stamps after every successful `applyConfigLocked` (the standing #4957/#6296 pattern — the stamp is NOT cursor-exclusive); the catch-up stamps from the snapshot field (first-exposure via the cursor's stamp phase, non-first idempotently from the same field); the wrapper's stamp is never suppressed by the cursor; the complete-skipped state heals on the next successful apply of the exposed pair, from ANY transport (§5-C (ii), §9 (a)) |
+  | SMR39-2 §6 field | CLOSED — the §6 `ApplyResult` inventory gains `capturedDigest` (minted at build time, transported on the result, consumed by the wrapper's stamp and the cursor install) — the r38 row's §6 citation is now true |
+  | SMR39-3 / AGY f4 duplicate-install policy | CLOSED — the install is IDEMPOTENT per pair: a second `beginFirstExposure` for the same pair+ledgerID no-ops (the digest is install-time-immutable; an empty digest never overwrites a valid captured value); a NEW first exposure (a new revision) installs a new cursor (§5-C (ii)) |
+  | AGY f3 §9 (a) gaps | CLOSED — §9 (a) asserts the catch-up leg reads the snapshot field and stamps (`ActiveApplied() == true` for a catch-up acceptance), a same-pair re-apply after complete-skipped stamps on its next successful apply (the wrapper's standing authority), and the deferred leg extracts the digest from the staged object's snapshot field |
 
 ### Round-1 detail log (kept for the record)
 
@@ -6301,20 +6374,38 @@ BLOCKERs 6 + 8; v8 epoch form per Codex r6 f6/f8):**
   prior to staged object creation; a pre-publish
   Compile error discards the captured value with
   the stack frame — no cursor is ever created for
-  a failed compile) — and the captured value's
-  TRANSPORT is the acceptance's OWN result
-  (v8.34, AGY r38 f1's non-staged fix: the digest
-  rides the Compile's RESULT for the Compile leg
-  (`ApplyResult` gains `capturedDigest`) and the
-  staged object for the deferred leg (the
-  pending-XSK staged object carries it), and
+  a failed compile) — and the digest is a FIELD
+  of the built snapshot (v8.35, AGY r39 f1's
+  transport unification: minted at build time
+  inside Compile AS A FIELD OF THE BUILT SNAPSHOT
+  (`ConfigSnapshot.capturedDigest`), and EVERY
+  acceptance leg reads that ONE field — the
+  Compile-leg result (`ApplyResult.capturedDigest`
+  copied from the accepted snapshot), the staged
+  object (which wraps the snapshot), and the
+  catch-up (`m.lastSnapshot.capturedDigest`) — no
+  dependence on the defer shape (the v8.34
+  enumeration ("`ApplyResult` OR the staged
+  object") could be read as missing the
+  XSK-startup-defer leg; the SMR r39 sweep
+  confirmed every deferred snapshot comes from
+  Compile's `pendingXSKStartup` branch, which
+  stages the object — the field removes the
+  ambiguity class)), and
   `beginFirstExposure` takes it as an ARGUMENT
   (never reads the staged object itself — the
   v8.32 "copies it from the staged object" left
   every DIRECT durable apply (the common case —
   no staged object exists) with an empty digest,
   so direct applies would take the
-  complete-skipped path and NEVER stamp)); the
+  complete-skipped path and NEVER stamp) — and the
+  install is IDEMPOTENT per pair (v8.35, SMR r39
+  SMR39-3 = AGY r39 f4: a second
+  `beginFirstExposure` for the same pair+ledgerID
+  no-ops (the digest is install-time-immutable;
+  an empty digest never overwrites a valid
+  captured value); a NEW first exposure (a new
+  revision) installs a new cursor); the
   Compile-leg wrapper uses the same captured
   value — the two legs' digests are identical BY
   CONSTRUCTION: one capture, one renderer (the
@@ -6371,7 +6462,26 @@ BLOCKERs 6 + 8; v8 epoch form per Codex r6 f6/f8):**
   and the anti-stale protection is the v8.29
   EXPOSED-currency ADMISSION gate (a stale
   notice's stamp is SKIPPED before any stamp
-  call — the read-side `ActiveApplied()` digest
+  call — and the stamp runs on EVERY successful
+  apply/publish of the exposed pair (v8.35, SMR
+  r39 SMR39-1 = AGY r39 f2's non-first-re-apply
+  fix: the stamp is NOT cursor-exclusive — the
+  Compile-leg wrapper stamps after every
+  successful `applyConfigLocked` (the standing
+  #4957/#6296 pattern — a same-pair re-apply
+  whose `firstExposure == false` suppresses the
+  cursor STILL stamps from the result's
+  `capturedDigest`), the catch-up stamps from the
+  snapshot field (first-exposure via the cursor's
+  stamp phase, non-first idempotently from the
+  same field), and the wrapper's stamp is never
+  suppressed by the cursor (one value, one
+  renderer — a repeated stamp of the same digest
+  is a no-op-equivalent overwrite): the
+  complete-skipped state heals on the next
+  successful apply of the exposed pair, from ANY
+  transport);
+  the read-side `ActiveApplied()` digest
   comparison is the only "CAS" the machinery
   needs; and the marker's window semantics are
   stated once (v8.31, SMR r35 SMR35-2; the
@@ -8062,7 +8172,18 @@ activations a scheduled retry.
   supplied the config (v8.13, Codex r17 f3: never a
   separate `ActiveConfigRevision()` getter) — AND the
   exposure-transition triple `{priorPair, ledgerID,
-  firstExposure}` (v8.18, Codex r22 f5 = AGY r22 f3:
+  firstExposure}` (v8.18, Codex r22 f5 = AGY r22 f3) — AND
+  `capturedDigest` (v8.35, SMR r39 SMR39-2's §6 gap fix:
+  copied from the accepted snapshot's own field
+  (`ConfigSnapshot.capturedDigest` — minted at build time
+  inside Compile), consumed by the daemon wrapper's stamp
+  (`MarkAppliedDigest` on every successful
+  `applyConfigLocked`, first-exposure or not) and by the
+  cursor install (the `beginFirstExposure` argument); the
+  deferred leg reads the same field from the staged
+  object's snapshot, and the catch-up reads it from
+  `m.lastSnapshot` — ONE field for every
+  acceptance leg) — and the triple's
   `beginFirstExposure(B)` runs manager-side at
   acceptance (the same `m.mu` section that advances
   `m.acceptedCommitRevision`) and returns the immutable
@@ -9143,7 +9264,21 @@ activations a scheduled retry.
       build-time capture on the `ApplyResult` into
       `beginFirstExposure` and stamps
       `MarkAppliedDigest` — `ActiveApplied() ==
-      true` — never the complete-skipped path);
+      true` — never the complete-skipped path) —
+      and the digest rides the SNAPSHOT FIELD on
+      every leg (v8.35, AGY r39 f1/f3 + SMR r39
+      SMR39-1/3: assert the catch-up reads
+      `m.lastSnapshot.capturedDigest` and stamps
+      (`ActiveApplied() == true` for a catch-up
+      acceptance), a same-pair re-apply after a
+      complete-skipped state stamps on its next
+      successful apply (the wrapper's standing
+      authority, `firstExposure == false`
+      notwithstanding), the deferred leg extracts
+      the digest from the staged object's snapshot
+      field, and a duplicate `beginFirstExposure`
+      for the same pair no-ops without
+      overwriting the digest);
       and the GC collects complete-skipped entries
       (v8.34, AGY r38 f2: assert the terminal set
       is {complete, complete-skipped, SUPERSEDED} —
@@ -9977,7 +10112,7 @@ the three owners through nine enumerations; the mixed-version
 producer is the documented exception with the required helper
 restart).
 
-Remaining questions for round 39, each invitable to PLAN-KILL with
+Remaining questions for round 40, each invitable to PLAN-KILL with
 a concrete counterexample:
 
 1. **Completeness, final form.** Exhibit a path to
@@ -10040,11 +10175,12 @@ a concrete counterexample:
    candidate-filter territory
    (`include_userspace_binding_interface`), explicitly out of
    scope here.
-6. **Round-38 disposition table audit.** §1's r38 table maps
-   every r38 finding (SMR 2 NIT; AGY 2 MAJOR + 1 MINOR + 1
-   NIT; Codex infra-blocked) to its v8.34 fold, and every fold
-   this revision was verified per-edit against the file.
-   Which row is claimed-but-wrong this time?
+6. **Round-39 disposition table audit.** §1's r39 table maps
+   every r39 finding (SMR 1 MAJOR + 2 MINOR + 1 NIT; AGY 2
+   MAJOR + 1 MINOR + 1 NIT; Codex infra-blocked) to its
+   v8.35 fold, and every fold this revision was verified
+   per-edit against the file. Which row is claimed-but-wrong
+   this time?
 7. **Cumulative hazard budget, final sign-off (v8.8 honest
    numbers, Codex r11 f11 + r12 f14).** Healthy unsuppressed
    baseline for

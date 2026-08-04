@@ -1154,6 +1154,38 @@
   `/tmp/codex-6749-r38-prompt.txt`). Proceeding 2-of-3 per the
   codex-infra-blocked exception; retries continue each round.
 
-## Round 39 (plan v8.34 @ pending)
+## Round 39 (plan v8.34 @ 6c01344b3)
 
-- Codex (retry), AGY, Claude SMR — pending v8.34 fold.
+- **Claude SMR r39** — `claude-smr-plan-r39.md`. Verdict:
+  DEMAND-REVISION (1 MAJOR — SMR39-1 the non-first
+  re-apply's stamp authority is unstated (a pair that took
+  complete-skipped would never re-stamp if the stamp were
+  cursor-exclusive — independently derived before reading
+  AGY's output; = AGY f2); + 2 MINOR — SMR39-2 the §6
+  `ApplyResult` inventory never gained `capturedDigest`
+  (self-found claimed-but-wrong in the r38 row); SMR39-3
+  the duplicate-install policy (= AGY f4); + 1 NIT — none
+  beyond SMR39-3. NOTE: AGY's f1 (the catch-up carrier
+  gap) was PARTIALLY VERIFIED — every deferred snapshot
+  comes from Compile's `pendingXSKStartup` branch (which
+  stages the object the v8.34 transport names); the fold
+  (the digest as a field of the built snapshot) kills the
+  enumeration-ambiguity class rather than renaming the leg.
+- **AGY r39** — background bash `b8wo7jva1`; prompt
+  `/tmp/agy-6749-r39-prompt.txt` (125,440 argv bytes);
+  output `/tmp/agy-6749-r39.out`; verdict doc
+  `agy-plan-r39.md`. Verdict: DEMAND-REVISION (2 MAJOR —
+  f1 the catch-up leg's transport carrier gap; f2 the
+  non-first re-apply's undefined completion behavior
+  (= SMR39-1); + 1 MINOR — f3 the §9 (a) carrier/re-apply/
+  extraction assertions; + 1 NIT — f4 the duplicate
+  beginFirstExposure overwrite policy (= SMR39-3)).
+- **Codex r39** — INFRA-BLOCKED (usage limit; reset Aug 10
+  06:57 UTC). Eighteenth documented attempt this session
+  (`/tmp/codex-6749-r39-retry1.err`; r39 prompt staged at
+  `/tmp/codex-6749-r39-prompt.txt`). Proceeding 2-of-3 per the
+  codex-infra-blocked exception; retries continue each round.
+
+## Round 40 (plan v8.35 @ pending)
+
+- Codex (retry), AGY, Claude SMR — pending v8.35 fold.
