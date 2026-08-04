@@ -1,0 +1,16 @@
+# AGY plan review — round 20 — #6749 armed-state plan v8.15 (132309631)
+
+**Reviewer:** AGY (hostile, zero-tool-call inline-evidence constraint; prompt /tmp/agy-6749-r20-prompt.txt assembled at 126,787 bytes). Raw output: /tmp/agy-6749-r20.out. Background bash `bo8ceagp7` (direct `agy --print-timeout 9m --print`).
+
+**Verdict: DEMAND-REVISION** (2 BLOCKER + 1 MAJOR + 1 MINOR; f1 NOT-VERIFIED on SMR re-derivation).
+
+---
+
+1. **[BLOCKER] Contradiction between Delta 10's map-authoritative MAC hashing and §9 test 19(ii)'s telemetry-only no-replan behavior**: a peer MAC resolving from zero to learned updates the map's fields, alters the final wire content and (per Delta 10) the dedup hash, and thus fires the projection-change mark-all rule — while test 19(ii) asserts resolved-MAC changes never replan. **SMR re-derivation: NOT-VERIFIED** — the projection IDENTITY is (name, parent Linux name, parent ifindex, effective queue count) (the v8.12 definition); the MAC is NOT in the identity, so a MAC resolution is a telemetry update that mints a generation and updates the canonical payload's telemetry fields WITHOUT firing the mark-all rule (identity unchanged). The "dedup hash" in Delta 10 is the note-CAS content hash, not the projection-change detector. The two live in different fields; a separation sentence resolves the ambiguity (= SMR20-6).
+2. **[BLOCKER] Permanent `compileInFlight` deadlock on a leaked reservation node via the circular dependency with the GO-LOCAL firing rule**: the orphaned open node is finalized as OVERLAP only by a newer StartCompile; the GO-LOCAL rule fires only when `!m.compileInFlight`; the only clear path for inFlight is Finish — so a leaked node means no rule fires, no StartCompile comes, and inFlight wedges forever, freezing the (v) latch echo. (= SMR20-7: the qualifier is unnecessary — the drain's applySem acquisition already serializes it behind any live compile; the GO-LOCAL rule fires on `active > accepted` PERIOD and the drain's own StartCompile OVERLAP-finalizes the orphan; plus the unconditional Finish defer.)
+3. **[MAJOR] Unbounded applySem thrashing or dropped exposure tail on persistent drain `applyConfigLocked` failures**: once `R <= DurableRevision()` is permanently true, a persistent drain error is unspecified — clear-on-error drops the exposure tail forever; unconditional 1s retry locks out every other applySem caller. (= SMR20-3: the drain keeps the debt with the standing backoff shape (5/10/30/60s + jitter + edge Warn), latest-wins re-read, publish-UNKNOWN routed to the re-sync.)
+4. **[MINOR] Missing claimToken re-validation before the batch's unconditional restore rebind after a boundary cancellation**: the operator's verb may already have issued its own rebind/worker startup, so the batch's unconditional restore could issue a redundant or racing rebind. (Answered by idempotency + serialization (= SMR20-4): both are helper-serialized full reconciles of the current coherent plan — whichever runs second converges the same state; the restore stays unconditional by design (workers never left stopped).)
+
+Evidence wishes (informational): daemon_apply_commit.go (commitAndApply + the auto-rollback wrapper), loader.go (full CompileUserspaceShim/attachUserspaceShimXDP), daemon_ha_fabric.go:700-750 (the MAC population's mutex boundaries).
+
+DEMAND-REVISION
