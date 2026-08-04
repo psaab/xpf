@@ -228,3 +228,12 @@ fail-on-timeout-clear regression; the stage carrier reconciled
 end-to-end as a second additive SyncedSessionEntry field with all
 exporters gated; the liveness suite; the §5.8 counter (6+3=9) and
 log marker). Round 39 is the convergence check.
+
+| r39 | `codex exec` (detached-poll), session in /tmp/codex-6751-r39.log / PLAN-NEEDS-REVISION (2 BLOCKERs: observed BulkStart proves neither both-empty nor authoritativeness — the no-ACK cohort predates #5085's lossless bulk (capability-gate: legacy windows are FRAMING-ONLY); nothing plan-bounded kills retained legacy C0 (the cited deadline was a WRITE deadline — my factual error, owned — honesty statement + readiness-timeout terminal + interval cap); 1 MAJOR: §6 two-field contradiction (folded as the AGY nit); 1 MINOR: exact accept trace absent from §9; 2 NITs: named admission mutex, literal 'CURRENT store as definitive' tail) | PLAN-READY-WITH-NITS (1 nit: §6 line 2690 still said ONE additive field — folded) | PLAN-READY-WITH-NITS (r40 fold-check of v15.28; the honesty folds verified; the write-deadline factual error owned) |
+
+Round-39 disposition: all findings fold in v15.28 (capability-gated
+authoritative uses of a bulk window; retained-C0 honesty with the
+readiness-timeout terminal and interval cap; §6 two-field
+reconciliation; named admission mutex with advance-before-disengage;
+the exact accept trace + wording cleanup pinned). Round 40 is the
+convergence check.

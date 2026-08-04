@@ -1,32 +1,26 @@
 # #6751 plan — interface SNAT no-PAT admission: reserve-or-PAT the colliding translated tuple
 
-- **Status**: DRAFT v15.27 — round-38 fold (AGY r38's two nits +
-  Codex r38's two blockers + two majors + minor: the fenced window
-  is accept-proof — `Accept` REFUSES atomically while the fence is
-  engaged (no stamp is ever issued mid-window) and the admission
-  generation advances AGAIN at release after listener quiescence
-  and a final sweep, so no accept can stall through the fence and
-  resume after it; the both-empty proof is two-mode — the
-  interval-derived proof for peers with a known disconnect bound,
-  and the OBSERVED PRIME for legacy no-heartbeat-ACK peers (the
-  peer's needColdPrime arm IS the remote-empty proof; a missed
-  receive deadline re-fences with the readiness timeout terminal,
-  and the no-ACK C0 case with a delayed/lost close notification
-  is §9-pinned); the 5-second timer resolves ONLY quarantine
-  disposition and NEVER clears lineage (the "CURRENT store as
-  definitive" wording replaced in §5.6 and §9 with a
-  fail-on-timeout-clear regression); the lineage stage's
-  authoritative carrier is reconciled end-to-end — a SECOND
-  additive SyncedSessionEntry field riding the import request
-  (JSON and binary codec) into the table metadata, preserved by
-  replication and promotion, with the promotion Open GATED on
-  the stage and every exporter (promotion Open, owner-RG export,
-  helper snapshot, Go bulk, Go sweep) explicitly gated; §9 gains
-  the prime-request/re-fence liveness suite (coalesced suspects,
-  capable-peer completion, ignored-request fence, post-prime
-  re-arm); and the export-skip counter joins §5.8 as the sixth
-  helper counter (6 + 3 = 9 total) with the incarnation log
-  marker carrying `G_old -> G_new`)
+- **Status**: DRAFT v15.28 — round-39 fold (AGY r39's nit + Codex
+  r39's two blockers + major + minor + two nits: a bulk window
+  from a non-capability-advertising peer is FRAMING-ONLY — it may
+  install frames per today's rolling-upgrade interop but NEVER
+  clears lineage, NEVER drives the definitive alias pass, and
+  NEVER releases the reconciliation hold for lineage purposes,
+  because BulkStart carries no provenance and the no-heartbeat-ACK
+  cohort predates the #5085 lossless-bulk fix; the retained-C0
+  case is stated with full honesty — NO plan-bounded mechanism
+  kills a legacy C0 whose detectors are absent by design (the
+  cited sync_protocol.go:59 deadline is a WRITE deadline — a
+  factual error owned), the terminal is the readiness-timeout
+  degraded release with the debt retained, and the quiet interval
+  is CAPPED by the readiness timeout (the 7.5s > 5s ordering
+  inconsistency Codex caught); §6's two-field stage carrier text
+  is reconciled (AGY r39's nit, folded during the round); the
+  admission linearization point is a NAMED mutex covering
+  engaged-check, stamp issuance, child registration, the
+  release-side advance, and disengage ordering with
+  advance-before-disengage required; and §9 pins the exact
+  accept-after-sweep-start → resume-after-release trace)
 - **Issue**: #6751 (opus-review-001 R08, High, `bug`+`audit`+`security`) —
   interface SNAT admits indistinguishable no-PAT return tuples and sends
   replies to the FIRST session.
@@ -670,15 +664,56 @@ consequences onto the surviving §5.x machinery.
   the interval-derived proof stands — the peer's own read-path
   teardown of C0 fires within the bound once our close starves its
   retry stream; and (ii) for a legacy no-ACK peer the completion
-  condition is the OBSERVED PRIME, not the timer: the receiver
-  waits for the authoritative bulk's `BulkStart` (the peer's own
-  needColdPrime arm IS the remote-empty proof — it fires only when
-  the peer's registry is both-empty at install), and a missed
-  per-bulk receive deadline RE-FENCES (each cycle gives the
-  legacy C0 another full bound to die via the peer's read-path
-  teardown — the sync protocol's per-frame read deadline,
-  sync_protocol.go:59, and the refusal of its retry stream), with
-  the readiness timeout as the terminal bounded release. §9 pins
+  condition is CAPABILITY-GATED, not merely observed (Codex r39
+  blocker 1: `BulkStart` carries only an epoch, sync_bulk.go:65 —
+  connected force-resync and survivor re-drive also initiate bulks
+  without a both-empty transition, sync_conn_sweep.go:111 /
+  sync_conn.go:572; and the no-heartbeat-ACK cohort PREDATES the
+  #5085 lossless-bulk fix — heartbeat ACK landed 63ab422cf,
+  lossless authoritative bulk landed 52fc4a513 — so the legacy
+  peer's window is the historical LOSSY one: async lossy export
+  plus empty markers, sync_bulk.go:26, pinned by
+  sync_bulk_override_5085_test.go:57; an old sender can write an
+  incomplete window, return success after BulkEnd, and clear its
+  needColdPrime, sync_bulk.go:183 / sync_conn.go:194). The rule:
+  a bulk window from a NON-capability-advertising peer is
+  FRAMING-ONLY — it may install frames (today's rolling-upgrade
+  interop, unchanged and not worsened) but it NEVER clears alias
+  lineage or suspect marks, NEVER drives the definitive alias
+  resolution pass, and NEVER releases the reconciliation hold for
+  lineage purposes (the definitive pass and every lineage clear
+  run ONLY against capability-advertising senders' snapshots; a
+  legacy window is non-definitive by construction and the plan
+  does not pretend otherwise). The receiver's ACK and VRRP
+  hold-release behavior toward legacy peers is TODAY's behavior,
+  unchanged — the pre-#5085 lossy-window exposure is inherited
+  and documented, not created here; and a missed
+  per-bulk receive deadline RE-FENCES (each cycle's terminal is
+  honest, not proof-based — see below), with
+  the readiness timeout as the terminal bounded release — stated
+  with full honesty about what is NOT plan-bounded (Codex r39
+  blocker 2, with a factual correction owned: the
+  `sync_protocol.go:59` deadline cited above is a two-second
+  WRITE deadline, not a read deadline — there is NO read-side
+  detector for the no-ACK cohort by design: missed-heartbeat
+  accounting is disabled until an ACK has been seen,
+  sync_conn_read.go:27, the compatibility regression requires
+  the connection to stay alive past the silence limit,
+  sync_test.go:4655, and while C0 stays registered the initiator
+  never redials, sync_conn.go:446 — so for the retained-C0
+  trace, NOTHING plan-bounded kills C0; no detector exists by
+  design. The terminal is the readiness-timeout degraded release
+  — release the VRRP hold, RETAIN the debt — and the debt keeps
+  owing the authoritative prime, which any subsequent genuine
+  both-empty transition (an OS/TCP failure, the peer's restart,
+  or a later real disconnect) eventually discharges; the plan
+  does not claim a proof it cannot have). And the quiet interval
+  is CAPPED by the readiness timeout (an ordering inconsistency
+  Codex r39 caught: 2.5 × 3s = 7.5s exceeds the production 5s
+  readiness timeout, daemon.go:1148 — so
+  `quiet_interval = min(2.5 × keepalive_timeout,
+  readiness_timeout)`, guaranteeing the degraded release always
+  post-dates at least the start of a complete fence cycle). §9 pins
   the no-ACK C0 case with a delayed/lost close notification. The old peer's own
   write-completion clearing hazard is bounded receiver-side: the
   receiver never reconciles or releases the hold without a COMPLETE
@@ -2687,10 +2722,17 @@ sync_auth.go:321).
 Additive-only wire-visible changes (#1961-safe): the six helper-side
 §5.8 status counters (three more — the alias-discipline counters —
 are GO-side Prometheus, §5.8).
-`SyncedSessionEntry` gains ONE additive HELPER-INTERNAL field
-(`pub_token: u64`, the coordinator-local publication token of §5.6 —
-stamped at publish inside the helper; it is NOT read from or written to
-any Go-facing wire, and older in-image rows read as token 0).
+`SyncedSessionEntry` gains TWO additive fields (AGY r39 nit):
+`pub_token: u64` (the coordinator-local publication token of §5.6 —
+stamped at publish inside the helper, HELPER-INTERNAL: it is NOT read
+from or written to any Go-facing wire, and older in-image rows read as
+token 0), and the alias lineage STAGE (`alias-suspect` /
+`alias-lineage` / clear — the §5.6 lineage carrier, Codex r38 major 4:
+unlike `pub_token` this field IS carried on the sync wire as an
+additive-optional field per #1961, on both the JSON
+`SessionSyncRequest` and the binary codec; an old peer/helper ignores
+it and the receiver treats its absence as the legacy posture, never as
+'clear').
 The six helper-side §5.8 status counters are additive optional fields
 (#1961-safe); the THREE Go-side §5.8 counters (alias confirmed-dropped,
 alias quarantine-admitted, quarantine-overflow) are GO-side Prometheus
@@ -2902,7 +2944,8 @@ quarantine-admitted + overflow), and tests.
   become a tight re-fence loop); and the debt re-arms cleanly
   after a completed prime (the next suspect's timeout starts a
   fresh cycle, never inheriting a stale debt).
-- **Pre-install children fence suite** (Codex r37 blocker 1):
+- **Pre-install children fence suite** (Codex r37 blocker 1 +
+  r38 blocker 1 + r39 minor 4):
   every accepted child is generation-stamped AT `Accept`; fence
   engagement KILLS every pre-fence child (tracked setup children
   AND accepted-but-untracked ones) BEFORE the quiet interval
@@ -2910,8 +2953,21 @@ quarantine-admitted + overflow), and tests.
   dead); a child whose fence generation predates the current
   fence is REJECTED at every later stage (beginSetup,
   finishSetup, installConn) — a stale child resuming after fence
-  release is never stamped as a current admission; and the two
-  stalls are pinned directly: `Accept→beginSetup` and
+  release is never stamped as a current admission; while the
+  fence is ENGAGED, `Accept` REFUSES atomically (the engaged
+  flag and the stamp are read/issued under ONE named admission
+  mutex — Codex r39 nit 5: the admission linearization point is
+  explicit, covering engaged-check, stamp issuance, child
+  registration, the release-side generation advance, and
+  disengage ordering, with advance-BEFORE-disengage required —
+  distinct from the connection-state and setup-state locks,
+  sync.go:301/322); the admission generation advances AGAIN at
+  release after listener quiescence and a final sweep, so any
+  residual mid-window stamp is stale at release; and the exact
+  new trace is pinned directly:
+  accept-after-sweep-start → resume-after-release (refused at
+  admission — no stamp is ever issued mid-window), alongside the
+  two original stalls: `Accept→beginSetup` and
   `finishSetup→installConn` (a child stalled at either seam is
   killed by the fence and rejected on resume).
 - Alias-discipline abort/fence race tests (§5.6 contract, AGY r23 nit):
@@ -3192,8 +3248,9 @@ quarantine-admitted + overflow), and tests.
   (outside any bulk) resolve on a 5s fallback timer (disposition
   ONLY — the timer admits but NEVER clears lineage; a
   fail-on-timeout-clear regression pins that an admitted suspect
-  keeps its mark — Codex r38 major 3) with the CURRENT
-  store as definitive; ALL quarantine actions run as events on the
+  keeps its mark — Codex r38 major 3) against the CURRENT store
+  (which is disposition-definitive only, never lineage-definitive
+  — Codex r39 nit 6's wording cleanup); ALL quarantine actions run as events on the
   receiver's SERIALIZED event loop — a timer only enqueues a wakeup,
   since the generation-check/install/record sequence is safe only
   single-threaded, sync_conn_gen.go:381)
