@@ -1,6 +1,6 @@
 # #6749 — binding-plan expansion registers new slots unarmed, dataplane disabled indefinitely
 
-**Status: DRAFT v8.16 — pending adversarial plan review (round 21)**
+**Status: DRAFT v8.17 — pending adversarial plan review (round 22)**
 
 - Issue: #6749 (opus-review-001 root R06, severity High)
 - Research base: `ad9591177` (origin/master at worktree creation)
@@ -865,6 +865,94 @@
   §9's chain tests re-specified per Codex f12's
   table; and the hazard budget gains the v8.15/16
   classes (Codex f13) @ pending
+; v8.17 folds Codex r21 (12 BLOCKER + 2 MAJOR) + AGY
+  r21 (2 BLOCKER + 2 MAJOR) + SMR r21 (1 BLOCKER + 2
+  MAJOR + 4 MINOR): the PROMOTION-SERIALIZATION
+  INVARIANT is stated (Codex f3, VERIFIED —
+  `commitAndApply` holds `applySem` across
+  `configstore.Commit` AND the apply
+  (daemon_apply_commit.go:129-175; HA sync
+  (:326-355), commit-confirmed (:525-531),
+  auto-rollback (:629-645) the same; the persistence
+  retry advances only durability; the boot-recovery
+  promote precedes all flows) — NO promotion can
+  interpose mid-flow, so the v8.16 flow-level
+  re-reads and the second-leg abort rule are REVERTED
+  (the abort itself recreated the workerless strand
+  (Codex f4 = AGY f1); the residual pair-current
+  concerns are the manager-internal classes the
+  staged-ahead suppression and the legacy-zero mode
+  already own); the closeout set is re-scoped to
+  PROVEN MONOTONIC TIGHTENING ONLY (Codex f2 — B's
+  REMOVALS only, computed against the union of
+  A-live and B-desired reachability; additions,
+  listener expansions, and relaxations DEFER; the
+  closeout gets its own persistent retry debt; and
+  it never consults deferred state (no
+  `ApplyResult.ManagedInterfaces`, no B-derived
+  host-inbound view over A's live interfaces)) with
+  the flow re-ordered (closeout first, then the gate
+  check, then the forwarding mutations (AGY f4));
+  `beginFirstExposure(B) -> {priorPair,
+  firstExposure, ledgerID}` is the atomic transition
+  (Codex f6 — the wrapper carries the IMMUTABLE
+  prior through completion (acceptance no longer
+  tears the invalidation base), and the boot
+  unknown-base policy (persisted exposed sidecar or
+  a conservative clear-all when the base is
+  unprovable)); the completion cursor `{pair,
+  phaseCursor, completionState}` is installed
+  ATOMICALLY at acceptance (Codex f7 — the re-sync
+  clears only after the record installs; a completed
+  replay skips tails; an incomplete replay resumes;
+  a crash re-runs idempotent tails conservatively);
+  the reservation token becomes an explicit Compile
+  argument (Codex f8 — `Compile(cfg,
+  commitRevision, reservationToken)`; the staged
+  object carries the token + its baked-in
+  `DeferWorkers`; clones preserve the cached value;
+  #5134 forces `false` only for the generation it
+  owns completion for); the helper's token fence is
+  newest-ACCEPTED, not seen (Codex f10 — a rejected
+  snapshot never advances the fence, and the seed
+  reads newest accepted (the seen=100/accepted=5
+  catch-up wedge dies); the token is per-build
+  immutable (a wire retry carries the same token;
+  `publication_rev` keeps the attempt order)); the
+  GO-LOCAL rule gains the live-registration
+  discriminator (SMR r21 SMR21-1 = AGY f2 = Codex
+  f9 — `active > accepted` AND **no live
+  deferred-publish registration for the active
+  pair** (the pending-XSK staged window is owned by
+  its `OnXSKBound` registration; a leaked
+  registration lets the rule fire and OVERLAP-
+  finalize the orphan (the AGY r20 f2 closure
+  survives))); the settlement carries `(peer
+  incarnation, gen, pair, settlementID)` with
+  loop-side dedup/ack (Codex f5 — an
+  old-incarnation settlement can never advance a
+  new incarnation; exactly-once via the ack), and
+  the drain's fence raise is MAX-CAS with an
+  ownership token (never lowers; only its owner
+  releases); the verb gate covers each physical
+  quiescent transaction and clears at restore
+  completion or debt transfer (SMR r21 SMR21-2 =
+  AGY f3 = Codex f11 — the restore debt's backoff
+  intervals do not hold it; each retry re-sets it
+  for its window), and the link-down observation is
+  recorded through a CANCELLATION-INSENSITIVE path
+  before token disposition (Codex f11 — a stale
+  Report can never un-record it); the tombstone is
+  specified across all three paths with the
+  configured fabric NAME as its stable key (Codex
+  f12 — incremental, full build (omitted; the
+  config re-adds at the next apply — runtime-scoped),
+  and the runtime refresh (dropped from the preserved
+  merge)); the outbound marker revalidates against
+  `ActivePair()` inside the send-time write lock
+  (Codex f13 — a stale capture is re-derived, never
+  sent); §9's chain tests re-specified; and the
+  hazard budget gains the v8.16/17 classes @ pending
   AGY r15 (4 BLOCKER + 3 MAJOR + 1 MINOR) + SMR r15 (2
   BLOCKER + 3 MAJOR + 3 MINOR/NIT): R1 becomes a REAL
   rollout+transport contract — a legacy `active.json`
@@ -946,7 +1034,7 @@
 
 ## 1. Status
 
-DRAFT v8.16 — pending adversarial plan review round 21 (Codex + AGY +
+DRAFT v8.17 — pending adversarial plan review round 22 (Codex + AGY +
 Claude SMR). Convergence target: PLAN-READY (recommended path shipped
 to `/engineer`) or PLAN-KILL. No production code is written under
 `/research`.
@@ -1818,6 +1906,77 @@ to `/engineer`) or PLAN-KILL. No production code is written under
   | AGY r20 f1-f4 | CLOSED — f1 NOT-VERIFIED (the projection identity excludes MACs — the SMR20-6 separation sentence resolves the ambiguity); f2 → SMR20-7's qualifier deletion; f3 → SMR20-3's drain-failure policy; f4 → SMR20-4's idempotency/serialization answer |
   | SMR r20 SMR20-1..8 | CLOSED — SMR20-1 (named report + coverage) → f3 row; SMR20-2 (update points) → f5 row; SMR20-3 (drain policy) → f13 row; SMR20-4 (first-member check + idempotency) → f9 row; SMR20-5 (settlement context/FIFO) → f4 row; SMR20-6 (identity vs telemetry) → f11 row; SMR20-7 (qualifier deletion + Finish defer) → the GO-LOCAL rule (§5-C, §9 (d)); SMR20-8 (benign respawn) → f8 row |
 
+- **Round 21** (v8.16): ALL THREE DEMAND-REVISION — Codex (12
+  BLOCKER + 2 MAJOR), AGY (2 BLOCKER + 2 MAJOR), SMR (1
+  BLOCKER + 2 MAJOR + 4 MINOR). Convergence: the
+  unqualified GO-LOCAL rule publishes the pending-XSK
+  staged config early (SMR21-1 = AGY f2 = Codex f9 —
+  the live-registration discriminator is the shared
+  fix); the second-leg abort strands DeferWorkers=true
+  for a gated successor (AGY f1 = Codex f4 — both
+  reverted by Codex f3's invariant); the verb gate
+  must clear at restore completion/debt transfer
+  (SMR21-2 = AGY f3 = Codex f11's first half); the
+  gate's entry placement conflicts with the closeout
+  set and the bootstrap-exit line (AGY f4 — the flow
+  re-orders). Codex-only depth, several of it
+  simplifying: f3 — EVERY promotion is serialized
+  WITH its apply under `applySem` (VERIFIED:
+  `commitAndApply` holds it across `configstore.Commit`
+  AND the apply (daemon_apply_commit.go:129-175)), so
+  NO promotion can interpose mid-flow and the v8.16
+  flow-level pair machinery addressed a state the
+  locking already prevents (the residual concerns are
+  the manager-internal classes the staged-ahead
+  suppression and the legacy-zero mode own); f2 — the
+  FOLLOW set was neither directionally safe nor a
+  coherent partition (SNMP adds users/listeners; web
+  does bind/TLS replacement; the RELAXING direction
+  grants B access while A is exposed) — re-scoped to
+  proven-monotonic-tightening-only with a persistent
+  closeout debt; f5 — the drain cannot raise the HA
+  fence out-of-loop safely (needs a MAX-CAS raise
+  with an ownership token, and the settlement needs
+  (peer incarnation, gen, pair, settlementID) with
+  loop dedup/ack); f6 — lastExposedPair advances too
+  early (beginFirstExposure returns the immutable
+  prior; boot unknown-base policy); f7 — the
+  completion ledger needs {pair, phaseCursor,
+  completionState} installed at acceptance; f8 — the
+  reservation token must be an explicit Compile
+  argument; f10 — newest-seen makes rejected
+  snapshots an ordering authority (fence on ACCEPTED;
+  per-build immutability); f11 — the failed-UP record
+  is lost on stale-token discard (cancellation-
+  insensitive link recording); f12 — the tombstone
+  spans three refresh/build paths and needs the
+  configured-name key; f13 — atomic capture does not
+  order the outbound generation (revalidate inside the
+  send-time write lock). Codex's narrow prior closures
+  remain valid (flag deletion, old-helper note,
+  identity/telemetry separation, the drain backoff);
+  Q1 remains complete.
+- **Round-21 disposition table:**
+
+  | r21 finding | v8.17 disposition |
+  |---|---|
+  | Codex f1 disposition accuracy | CLOSED — this table + the r20 rows re-audited; every v8.17 fold verified per-edit |
+  | Codex f2 FOLLOW set unsafe/incoherent | CLOSED — the closeout is re-scoped to PROVEN MONOTONIC TIGHTENING ONLY (B's REMOVALS, computed against the union of A-live and B-desired reachability); additions/listener expansions/relaxations DEFER; a PERSISTENT CLOSEOUT DEBT owns the closeout's failure; the closeout never consults deferred state (no `ApplyResult.ManagedInterfaces`, no B-derived host-inbound view over A's live interfaces); the flow re-orders (closeout first, then the gate check, then forwarding mutations (AGY f4)) (§5-C (i), §9 (b)) |
+  | Codex f3 pair check unreachable-or-racy | CLOSED — the PROMOTION-SERIALIZATION INVARIANT is stated (VERIFIED: `commitAndApply` holds `applySem` across `configstore.Commit` AND the apply (daemon_apply_commit.go:129-175); HA sync/commit-confirmed/auto-rollback the same; the persistence retry advances only durability; the boot-recovery promote precedes all flows) — NO promotion can interpose mid-flow; the v8.16 flow-level re-reads and the second-leg abort rule are REVERTED; the residual classes are manager-internal (the staged-ahead suppression owns the clones; the legacy-zero mode refuses the CLI on epoch-established boxes) (§5-C epoch contract, §9 (b)/(d)) |
+  | Codex f4 abort recreates the outage (= AGY f1) | CLOSED with f3 — the abort is deleted (no interposition is reachable; the second leg always reuses the outer pair and completes) (§5-C epoch contract, §9 (b)) |
+  | Codex f5 fence raise + settlement identity | CLOSED — the drain's fence raise is MAX-CAS with an OWNERSHIP TOKEN (never lowers; only its owner releases); the settlement carries `(peer incarnation, gen, pair, settlementID)` with loop-side dedup/ack (exactly-once via the ack; an old-incarnation settlement can never advance a new incarnation) (§5-C (ii), §9 (a)) |
+  | Codex f6 lastExposedPair advances too early | CLOSED — `beginFirstExposure(B) -> {priorPair, firstExposure, ledgerID}` is the atomic transition at acceptance; the wrapper carries the IMMUTABLE prior through completion (no read-after-advance tear); the boot unknown-base policy (persisted exposed sidecar, or a conservative clear-all when the base is unprovable) (§5-C (ii), §6, §9 (a)) |
+  | Codex f7 ledger has no state | CLOSED — the completion cursor `{pair, phaseCursor, completionState}` is installed ATOMICALLY at acceptance; the re-sync clears only after the record installs; a completed replay skips tails; an incomplete replay resumes its phase; a crash re-runs idempotent tails conservatively (§5-C (ii), §9 (a)) |
+  | Codex f8 token not transported | CLOSED — `Compile(cfg, commitRevision, reservationToken)` (+ `ApplyConfig(ctx, cfg, commitRevision, reservationToken)`); the daemon passes the `StartCompile` token; the assert-or-default paths pass the default token they created; the staged object carries the token + its baked-in `DeferWorkers`; clones preserve the cached value; #5134 forces `false` only for the generation it owns completion for (§5-C, §6, §9 (f)) |
+  | Codex f9 GO-LOCAL attacks the staged owner (= AGY f2 = SMR21-1) | CLOSED — the discriminator: `active > accepted` AND **no live deferred-publish registration for the active pair** (the pending-XSK staged window is owned by its `OnXSKBound` registration; a leaked registration lets the rule fire and OVERLAP-finalize the orphan) (§5-C re-sync, §9 (d)) |
+  | Codex f10 newest-seen poisons | CLOSED — the helper's token fence is newest-ACCEPTED (a rejected token never advances it); the seed reads newest accepted; the token is per-build immutable (a wire retry carries the same token; `publication_rev` keeps the attempt order) (§5-C epoch contract, §9 (d)) |
+  | Codex f11 gate lockout + failed-UP discard (= AGY f3 = SMR21-2) | CLOSED — the gate covers each physical quiescent transaction and clears at restore completion or debt transfer (the restore debt's backoff intervals do not hold it; each retry re-sets it for its window); the link-down observation is recorded through a CANCELLATION-INSENSITIVE path before token disposition (§5-C debt execution, §9 (g)) |
+  | Codex f12 tombstone paths/key/lifetime | CLOSED — specified across all three paths (incremental (drop in refresh_fabric_links), full build (omitted — the config re-adds at the next apply, runtime-scoped), the runtime refresh (dropped from the preserved merge)); the configured fabric NAME is the stable key (the runtime FabricLink lacks it); the deliberate clear is distinguished from the guard's unresolved-candidate rejection (§5-C (i), §9 (i)) |
+  | Codex f13 capture doesn't order outbound | CLOSED — the captured revision is revalidated against `ActivePair()` INSIDE the send-time write lock (a stale capture is re-derived from the current active pair before the generation is allocated, never sent) (§6, §9 (a)) |
+  | Codex f14 tests/budget | CLOSED — §9 re-specified per the finding's walk; the budget gains the v8.16/17 classes (§8, §11 Q7) |
+  | AGY r21 f1-f4 | CLOSED — f1 → f3/f4 rows (the invariant reverts the abort); f2 → f9 row; f3 → f11 row; f4 → f2 row (the flow re-order) |
+  | SMR r21 SMR21-1..7 | CLOSED — SMR21-1 → f9 row; SMR21-2 → f11 row; SMR21-3 (boot/replay base semantics) → f6 row; SMR21-4 (deferred-leg stamp + #5134) → f8 row; SMR21-5 (fence discipline) → f5 row; SMR21-6 (tombstone posture) → f12 row; SMR21-7 (closeout failure = the commit's error) → superseded by f2's persistent closeout debt |
+
 ### Round-1 detail log (kept for the record)
 
 - Claude SMR r1: DEMAND-REVISION — SMR-1 B-rejection overstated, SMR-2
@@ -2629,7 +2788,42 @@ pay nothing). On a PROJECTION change, the handler:
    its recorded one (v8.15 — the full snapshot's
    acceptance of (P, g) clears a debt recorded for the
    failed `update_fabrics(P, g)` — the self-healing leg
-   the v8.14 text missed).
+   the v8.14 text missed). The REMOVAL TOMBSTONE
+   (v8.16, Codex r20 f11; specified across all three
+   paths per Codex r21 f12): the canonical payload
+   carries `removed: true` PLUS the configured fabric
+   NAME (the `FabricSnapshot` names exist
+   (protocol.go:315-333) — the RUNTIME `FabricLink`
+   lacks the name (forwarding.rs:848-860), so the
+   payload's name is the tombstone's stable key, and
+   the helper resolves it against the OLD snapshot's
+   fabrics for the physical identity). ALL THREE
+   paths honor it: (i) the incremental `update_fabrics`
+   handler (handlers/mod.rs:144-174 — the tombstone's
+   entry drops the fabric state in `refresh_fabric_links`
+   and stores the tombstoned projection); (ii) the full
+   snapshot build (`populate_fabrics`,
+   forwarding_build/fib.rs:233-264 — a tombstoned
+   fabric is OMITTED from the built set (the full
+   build is authoritative: it re-adds CONFIGURED
+   fabrics — the tombstone is RUNTIME-SCOPED and
+   dies with the next full apply, which re-adds any
+   fabric the CONFIG still lists (the config's fabric
+   set is authoritative; the runtime clear is
+   operational state, and the oscillation
+   (clear-then-re-add) is the same posture as any
+   runtime teardown vs config intent, stated)); (iii)
+   the same-plan/full runtime refresh
+   (snapshot_refresh.rs:247-269/:380-396 — which
+   today PRESERVES and merges old resolved fabrics:
+   a tombstoned name is dropped from the preserved
+   merge instead). The deliberate CLEAR (the daemon
+   zeroes a map entry, `Ifindex=0`) is distinguished
+   from the guard's unresolved-candidate rejection
+   (planning.rs:452-476 — a candidate that was NEVER
+   resolvable), and the generation/echo protocol
+   covers the tombstone identically (its acceptance
+   advances accepted — readiness compares).
    `map_generation` SEEDS from the startup ping echo
    (v8.13, SMR r17 SMR17-4: accepted → the minted
    high-water, mirroring the `publication_rev` seed — a
@@ -3549,15 +3743,38 @@ BLOCKERs 6 + 8; v8 epoch form per Codex r6 f6/f8):**
     the class dead without closing it, so the manager's
     binding/queue verbs now REFUSE with a busy error
     while a quiescence is active (`m.linkCycleActive`,
-    set by `PrepareLinkCycleChecked` on `Valid` and
-    cleared by the restore — the operator retries; the
-    pre-existing mid-defer-window early-BIND hazard
+    set by `PrepareLinkCycleChecked` on `Valid`) — with
+    the gate's CLEAR points pinned (v8.17, AGY r21 f3 =
+    SMR r21 SMR21-2: the gate HOLDS from the
+    quiescence through the batch's program phase (or
+    the batch's abandonment) and CLEARS at the
+    transaction's restore completion (success OR
+    failure — the restore is unconditional, and once
+    it has run the current batch's transaction is
+    over; the RESTORE DEBT's retries are POST-window
+    and do NOT hold the gate (the v8.16 form locked
+    the operator out for the whole retry-forever
+    window during a persistent control-socket outage —
+    a restore-debt retry re-quiesces when it runs,
+    re-setting the gate for THAT attempt's window);
+    the pre-existing mid-defer-window early-BIND hazard
     (§10's follow-up) shrinks to this same gate's
     coverage). And the failed-UP ownership is pinned
-    (v8.16, Codex r20 f9's second half:
+    (v8.16, Codex r20 f9's second half; hardened v8.17,
+    Codex r21 f11's stale-discard fix:
     `programRethMAC` can fail its final UP, or return
     its best-effort UP failure after a MAC-set error
-    (daemon_reth.go:257-270) — an operator
+    (daemon_reth.go:257-270), and a cancellation racing
+    that failure lets `ReportMACDebtAttempt` discard
+    the stale-token results WHOLESALE — including the
+    only observation that the member is down: the
+    LINK-DOWN observation is therefore recorded through
+    a CANCELLATION-INSENSITIVE path BEFORE token
+    disposition (the work loop records each member's
+    observed link state into `linkOnlyRecovery` as it
+    goes — a stale Report can never un-record it —
+    and the MAC-debt disposition (validate/transfer)
+    remains token-gated as before): an operator
     cancellation removes the MAC obligation but NEVER
     the member's LINK obligation: a member found DOWN
     at any validation (including the phase-failure
@@ -3712,19 +3929,37 @@ BLOCKERs 6 + 8; v8 epoch form per Codex r6 f6/f8):**
   owner — AND it FIRES on the GO-LOCAL rule (v8.15, Codex
   r19 f7's ownerless-path fix; the qualifier corrected
   v8.16, SMR r20 SMR20-7 = AGY r20 f2's circular-deadlock
-  catch): the ACTIVE pair's revision
+  catch; the discriminator added v8.17, SMR r21 SMR21-1 =
+  AGY r21 f2's staged-window catch): the ACTIVE pair's revision
   exceeding the newest OBSERVED-ACCEPTED revision
-  (`ActivePair().revision > m.acceptedCommitRevision`),
-  PERIOD — the v8.15 "with no apply in flight" qualifier
-  is DELETED as unnecessary AND deadlocking (a live
+  (`ActivePair().revision > m.acceptedCommitRevision`)
+  AND **no live deferred-publish registration exists for
+  the active pair** — the v8.15 "with no apply in flight"
+  qualifier was deleted as unnecessary AND deadlocking (a live
   compile holds `applySem`, and the drain acquires
   `applySem`, so the FIFO already serializes them; and
   the qualifier deadlocked the leak case: inFlight stuck
   true → the rule never fires → no newer StartCompile →
   the orphaned node is never OVERLAP-finalized →
-  inFlight wedges forever, freezing the (v) latch echo;
-  the drain's own StartCompile OVERLAP-finalizes any
-  orphan it finds, and the Compile's Finish `defer` is
+  inFlight wedges forever, freezing the (v) latch echo),
+  but the unqualified form fired DURING the pending-XSK
+  STAGED window (B promoted and staged with
+  `DeferWorkers=true` because the XSK cannot bind yet —
+  `active(B) > accepted(A)` — and the drain's apply would
+  publish B EARLY (AGY r21 f2's trace: the drain's apply
+  calls `StartCompile(false)`, overwrites
+  `m.deferWorkers=false`, and publishes B before the
+  bind — EBUSY / socket bind errors and a polling retry
+  loop with side-effect churn, defeating the defer); the
+  staged window has a LIVE owner — the `OnXSKBound`
+  registration for the pending pair (maps_sync.go:451-456's
+  shape) — so the rule's discriminator is exactly that
+  registration: while it lives, the staged leg owns the
+  publish; a LEAKED registration (the staged leg died)
+  has no live registration, so the rule fires and the
+  drain's own StartCompile OVERLAP-finalizes any
+  orphan it finds (the AGY r20 f2 closure survives
+  intact), and the Compile's Finish `defer` is
   UNCONDITIONAL (a plain `defer` at Compile's top
   covering EVERY return path, with the exit-census
   canary test pinning it)) — the autonomous owner for EVERY
@@ -3946,12 +4181,41 @@ BLOCKERs 6 + 8; v8 epoch form per Codex r6 f6/f8):**
   leg: the helper would then accept T1's config with
   `defer_workers=false` and start workers before T1's
   MAC work, and no later Go-side fold can undo that
-  unsafe wire publication; the wire stamp is
-  NODE-LOCAL (T1's token carries T1's immutable
-  intent), while the shared global remains the
-  GO-side gate state the fold machinery reduces).
+  unsafe wire publication) — with the token TRANSPORTED
+  as an explicit Compile argument (v8.17, Codex r21
+  f8's association fix: the token returned from
+  `StartCompile` could never reach Compile through a
+  mutable head or a process-global value under the
+  documented overlapping-Compile model — the
+  reservation token becomes an explicit argument:
+  `Manager.Compile(cfg, commitRevision,
+  reservationToken)` (and
+  `ConfigSink.ApplyConfig(ctx, cfg, commitRevision,
+  reservationToken)`); the daemon passes the token its
+  `StartCompile` returned; the assert-or-default paths
+  (HA sync's apply path, background recompiles, tests,
+  the direct CLI path) pass the DEFAULT token they
+  created; and the wire stamp reads THE TOKEN'S NODE,
+  never the shared global. The PENDING-XSK staged
+  object carries BOTH the immutable token AND its
+  already-resolved `DeferWorkers` value (baked in at
+  staging from T1's node), so the deferred-publish leg
+  (a different goroutine) needs no re-stamp. The
+  auxiliary clones: route/scheduler clones PRESERVE the
+  cached snapshot's defer value (they are republishes
+  of the cached content, not new intents); and the
+  #5134 clone's forcible `DeferWorkers=false`
+  (manager_worker_arm_5134.go:50-64) fires only when
+  the debt OWNS completion for that exact staged
+  generation (the debt's settlement proves it — the
+  v8.13 "no reservation means default false" is
+  unsafe for a clone of a deferred snapshot and is
+  replaced by the cached-value rule).
   The v8.8 "intent
-  as a Compile argument" text remains DELETED.
+  as a Compile argument" text remains DELETED — as a
+  DIFFERENT form (an untokened intent argument); the
+  v8.17 token argument is the association that form
+  lacked.
 - **The epoch contract, v8.10 two-revision form (Codex r14
   f2/f3/f4/f5/f6; supersedes the v8.9 commit-seq contract,
   whose foundation was false).** `archiveSeq` was the wrong
@@ -4038,27 +4302,38 @@ BLOCKERs 6 + 8; v8 epoch form per Codex r6 f6/f8):**
   three-bucket precheck — arming workers on B's plan with
   A's MACs. B's own queued apply flow (or the exposure
   debt's drain) runs B's precheck as a separate full
-  apply; the second leg never re-reads) — and EVERY leg
-  re-checks pair-current at ITS start (v8.16, Codex r20
-  f3's flow-level ordering rule, reconciling tests
-  (b) and (d): the daemon's dataplane leg re-reads
-  `ActivePair()` at ITS entry (before `d.dp.ApplyConfig`)
-  and ABORTS the flow's dataplane leg when the pair
-  moved (returning SUPERSEDED-BY-NEWER-COMMIT — the
-  newer promotion's own queued flow owns the world;
-  the wrappers skip the deferred set on that outcome);
-  and the mandatory second leg runs the SAME check —
-  an interposed promotion BETWEEN the legs ABORTS the
-  second leg (it does NOT complete A's deferred
-  bring-up: B's queued flow runs its own precheck and
-  publishes B (deferred or not per B's own
-  classification) — completing A's bring-up in the
-  window would arm A's workers only for B's flow to
-  replace them immediately, and the abort is the
-  safer, simpler posture; test (b)'s requirement
-  becomes "the second leg reuses pair A AND aborts on
-  interposition", consistent with test (d)'s
-  invalidation). The feed and
+  apply; the second leg never re-reads) — and the
+  PROMOTION-SERIALIZATION INVARIANT is stated explicitly
+  (v8.17, Codex r21 f3, VERIFIED: EVERY pair-changing
+  promotion is serialized WITH its apply under `applySem`
+  — `commitAndApply` holds `applySem` across
+  `configstore.Commit` AND the apply
+  (daemon_apply_commit.go:129-175), and the HA sync
+  (:326-355), commit-confirmed (:525-531), and
+  auto-rollback (:629-645) paths are the same shape;
+  the persistence retry advances only DURABILITY under
+  `s.mu` (never a new active pair); the boot-recovery
+  promote precedes all flows. Therefore NO promotion
+  can interpose mid-flow: the pair read at a flow's
+  start stays current for the whole flow; the v8.16
+  flow-level re-reads and the second-leg abort rule
+  addressed a state the locking already prevents (and
+  the abort itself recreated the indefinite workerless
+  outage for a gated successor (Codex r21 f4 = AGY
+  r21 f1) — both are REVERTED: the second leg simply
+  REUSES THE OUTER TRANSACTION'S ORIGINAL PAIR,
+  always), and the residual pair-current concerns live
+  ONLY in the manager-internal paths: the auxiliary
+  producers CLONE the cached snapshot (their stamped
+  revision is the cached snapshot's own — the
+  staged-ahead divergence suppression (§5-C (iv))
+  owns that class), and the direct CLI Compile is
+  refused on any epoch-established box by the
+  legacy-zero mode (it works only pre-epoch, where
+  nothing exists to race). The manager-side
+  pair-current leg at the send primitive remains as the
+  belt-and-suspenders backstop for those manager-internal
+  paths (below). The feed and
   DHCP queued reapplies REPLACE their captured config
   ENTIRELY with the `ActivePair()` result under `applySem`
   at apply time (daemon_feeds.go:26-41,
@@ -4160,11 +4435,62 @@ BLOCKERs 6 + 8; v8 epoch form per Codex r6 f6/f8):**
   because leaving permissive host authorization after
   promotion is a revocation violation): the
   management-auth closeout FOLLOWS the commit even
-  under the gate (it authenticates management access —
-  it forwards no packets, so applying it early is
-  fail-safe in the tightening direction and merely
-  early in the relaxing direction); the deferred set is
-  exactly {the dataplane leg, FRR, routing, fabric};
+  under the gate — re-scoped to PROVEN MONOTONIC
+  TIGHTENING ONLY (v8.17, Codex r21 f2's partition
+  fix: the v8.16 closeout set was neither directionally
+  safe nor a coherent partition — SNMP is not merely
+  revocation (starts/stops UDP/161, adds
+  users/communities/trap targets (daemon_apply.go:167-198)),
+  web-management does listener bind/TLS/auth
+  replacement (:200-213), and the RELAXING direction
+  (adding an RW community/API credential/root key,
+  expanding an HTTP listener, adding a host-inbound
+  permit) would grant B's access while A remains the
+  exposed state — "merely early" is not an acceptable
+  security invariant. The closeout therefore applies
+  ONLY B's REMOVALS — access present in A's live
+  config and absent in B's desired config (computed
+  against the union of A-live and B-desired
+  reachability, so a removal can never exceed what B
+  actually removes and never touch what B keeps) —
+  while ADDITIONS, listener expansions, and
+  relaxations DEFER with the dataplane leg (they
+  authorize access, and authorizing B's access before
+  B is exposed is the violation); and the closeout's
+  own failure records a PERSISTENT CLOSEOUT DEBT
+  (v8.17, Codex r21 f2's owner fix — SNMP/web
+  currently retry only on a later commit
+  (daemon_snmp_reconcile.go:394-410,
+  daemon_apply.go:210-213), and the host-auth closeout
+  may time out and abandon an owner
+  (daemon_apply_hostauth.go:34-79/:158-186): the debt
+  rides the daemon's apply scheduler with the standing
+  backoff + edge Warn, and the closeout must also
+  never consult deferred state (no
+  `ApplyResult.ManagedInterfaces` (exists only after
+  the dataplane leg) and no B-derived host-inbound
+  view over A's live interfaces (daemon_nft.go:419-462 —
+  a B-derived closeout could delete A's protection for
+  an interface B removes or moves: the host-inbound
+  closeout is computed against A's LIVE interface set
+  only))) — with the flow
+  ORDER pinned (v8.17, AGY r21 f4: the closeout set
+  (SNMP (daemon_apply.go:167), web-management (:200),
+  host-auth) runs FIRST, THEN the gate check, THEN the
+  forwarding-plane mutations — because line 192's
+  bootstrap exit (interface renaming, IP forwarding
+  enablement, dataplane arming) is FORWARDING-plane
+  and sits BETWEEN the management-auth mutations in
+  the current order, so a gate at the very entry would
+  skip the closeout (violating it) and a gate after
+  :200 would run the bootstrap exit (violating the
+  gate); the web-management reconciliation moves AHEAD
+  of the bootstrap exit (it is management-plane and
+  independent of interface state) so the closeout set
+  is contiguous before the gate); the deferred set is
+  exactly {the dataplane leg, FRR, routing, fabric,
+  the bootstrap-exit/host/VRF mutations, networkd,
+  services, AND the closeout's additions/relaxations};
   and with FRR gated, the RIB never moves during the
   window, the overlay publishes A's routes in A's
   clone, and the v8.14 `m.exposureGateActive`
@@ -4236,19 +4562,38 @@ BLOCKERs 6 + 8; v8 epoch form per Codex r6 f6/f8):**
   session invalidation composes LAST-EXPOSED →
   CURRENT (A→C, covering A→B→C), never only the
   newest delta; the record itself,
-  `m.lastExposedPair`, advances at EXACTLY the points
-  `m.acceptedCommitRevision` advances (v8.16, SMR r20
-  SMR20-2 — the compile publish legs
-  (manager_compile.go:361/:365), the pending-XSK
-  deferred publish's clean leg, the status catch-up
-  leg (process_status.go:18-37/:120-139), the
-  re-sync's apply, the drain's apply, the boot apply —
-  ONE write in the SAME critical sections, one truth;
-  a missed point would make the retention itself stale
-  and a later drain would invalidate stale→current,
-  deleting LIVE sessions — the class the retention
-  exists to prevent) — and the session invalidation's
-  base is ALWAYS `m.lastExposedPair`, on EVERY commit
+  `m.lastExposedPair`, is replaced by the ATOMIC
+  `beginFirstExposure(B) -> {priorPair, firstExposure,
+  ledgerID}` transition (v8.17, Codex r21 f6's
+  too-early-advance fix: advancing last-exposed at the
+  observed-acceptance points (inside Compile, before
+  the wrapper's invalidation runs
+  (manager_compile.go:350-365 vs
+  daemon_apply_commit.go:245-270)) would change A→B
+  into B→B even in the no-gate common case — the
+  invalidation would compose against the NEW pair and
+  delete nothing): `beginFirstExposure(B)` runs under
+  `m.mu` AT acceptance and returns the IMMUTABLE PRIOR
+  pair (A) plus a ledger ID; the wrapper carries THAT
+  prior through the whole completion (the session
+  invalidation composes prior → B, always — the
+  uniform base (every commit/drain/re-sync/restore)
+  with no read-after-advance tear); the boot
+  unknown-base policy (Codex r21 f6's second half):
+  a genuinely cold helper has no sessions (empty base,
+  no-op — safe), but a manager/daemon RESTART over a
+  surviving A helper with disk-active B leaves the
+  base UNKNOWN (the invalidators no-op on a nil old
+  config (daemon_policy_invalidate.go:60-65/:193-195),
+  so EMPTY→B would leave A-authorized sessions alive):
+  the exposed base is PERSISTED with the store's
+  active pair (the `appliedRevision` sidecar records
+  the exposed revision), and when the base cannot be
+  proven (no sidecar), the first apply after startup
+  CONSERVATIVELY CLEARS all sessions (fail-closed
+  visibility over a silent stale-authorization gap);
+  the session invalidation's
+  base is ALWAYS that immutable prior, on EVERY commit
   (v8.16, Codex r20 f5's uniform fix: the invalidation
   today composes from the wrapper's captured
   `oldActive` (the STORE's previous active), so a
@@ -4257,8 +4602,7 @@ BLOCKERs 6 + 8; v8 epoch form per Codex r6 f6/f8):**
   session alive; composing from last-EXPOSED instead
   (A→C) covers it uniformly — every commit, drain,
   re-sync, and restore composes
-  last-exposed → new-pair, and last-exposed advances
-  on observed acceptance; the peer-push phase's
+  prior → new-pair); the peer-push phase's
   observability is pinned (Codex r20 f5: `QueueConfig`
   returns void and silently no-ops without a
   connection (sync_conn_config.go:230-252) — the
@@ -4271,14 +4615,22 @@ BLOCKERs 6 + 8; v8 epoch form per Codex r6 f6/f8):**
   Codex r20 f6's completion-ledger fix — the GO-local
   re-sync's accepted apply was clearing its debt
   WITHOUT any tails, forwarding B while A-authorized
-  sessions and stale peer/marker state remained): an
-  exposure is COMPLETE only after the dataplane
-  acceptance AND the phased tails, so the normal
-  commit, the exposure drain, the GO-local re-sync's
-  first-exposure of a newer pair, and the restore's
-  first-exposure (vs a replay of an already-exposed
-  pair, which needs no tails) all run the same phased
-  completion ledger. The deferred tails are PHASED with
+  sessions and stale peer/marker state remained):
+  an exposure is COMPLETE only after the dataplane
+  acceptance AND the phased tails, with the
+  completion-cursor state (v8.17, Codex r21 f7):
+  `{pair, phaseCursor, completionState}` — DISTINCT
+  from the prior/exposed pair — installed ATOMICALLY
+  at acceptance (the re-sync debt clears ONLY after
+  the record is installed, never on acceptance alone);
+  a tail success advances the cursor; a PURE
+  divergence replay of a completed pair skips the
+  tails (the cursor says complete); an incomplete
+  replay RESUMES its phase; a crash between phases is
+  covered by re-running the idempotent tails
+  conservatively at startup (v8.17 — the daemon-local
+  in-memory cursor does not survive a crash, and the
+  idempotent phases are safe to re-run). The deferred tails are PHASED with
   their own sub-debt (v8.15, Codex r19 f5's
   tail-failure fix: after the re-exposure apply's
   observed acceptance, the tails run as phases
@@ -4317,11 +4669,33 @@ BLOCKERs 6 + 8; v8 epoch form per Codex r6 f6/f8):**
   until the high-water advances (sync_conn_gen.go:398-432)
   — the drain therefore (1) raises the gen fence at
   observed acceptance (before ANY session
-  invalidation), (2) runs the phased tails (the clear
+  invalidation) — via a MAX-CAS fence raise carrying
+  an OWNERSHIP TOKEN (v8.17, Codex r21 f5's fence fix:
+  the current fence contract is deliberately
+  loop-owned (`recordAppliedConfigGen` non-CAS and
+  loop-only; `beginConfigApply`/`endConfigApply`
+  unconditional atomic stores (sync_conn_config.go:275-309)),
+  so an out-of-loop raise could lower a concurrently
+  raised C fence and one owner's unconditional
+  `endConfigApply` could clear another's; the drain's
+  raise is MAX-CAS (never lowers) with a fence TOKEN
+  that ONLY its owner can release (the drain's token
+  rides to the settlement; the loop's own
+  begin/end pair is untouched)), (2) runs the phased tails (the clear
   included), and (3) the settlement item advances the
   high-water LAST — the fence covers the whole
   window); the settlement item carries
-  `(gen, digest, the deferred-tail context)` — an
+  `(peerIncarnation, gen, pair, settlementID, the
+  deferred-tail context)` (v8.17, Codex r21 f5's
+  settlement-identity fix: bulk/reconnect resets both
+  high-water and fence to zero (sync_conn_gen.go:324-367),
+  so a delayed OLD-INCARNATION settlement could
+  advance the new incarnation past its legitimate
+  generations — the item keys on the peer incarnation
+  and the loop dedups/acks by settlementID (exactly-once:
+  the tail debt retains until the loop's ack (not
+  just the post); a stale (older-incarnation or
+  newer-gen-landed) settlement is discarded) — an
   in-process item, not a wire change — the context
   being the last-exposed config by GC-RETAINED POINTER
   (v8.16, SMR r20 SMR20-5: the store's active object;
@@ -4335,8 +4709,8 @@ BLOCKERs 6 + 8; v8 epoch form per Codex r6 f6/f8):**
   f4's FIFO fix: the channel is finite (64,
   sync.go:847-857) — a full channel drops the
   settlement INTO THE TAIL DEBT (which re-posts at
-  its backoff; a stale settlement (a newer gen has
-  since landed) is discarded as superseded — never a
+  its backoff; the loop's ack (or the stale check)
+  clears it — never a
   deadlock from blocking the drain on the channel,
   never a silent loss),
   which advances
@@ -4659,9 +5033,31 @@ BLOCKERs 6 + 8; v8 epoch form per Codex r6 f6/f8):**
   re-sync debt owns the outcome (never a silent loss).
   The helper
   additionally REFUSES a `snapshot_token` strictly older
-  than the newest it has seen (per helper incarnation;
-  `error_code: "stale_snapshot_token"`) as the backstop
-  for the residual race the Go legs cannot see (T1
+  than the newest it has ACCEPTED (per helper
+  incarnation; `error_code: "stale_snapshot_token"`) as
+  the backstop — FENCING ON ACCEPTED, NOT SEEN (v8.17,
+  Codex r21 f10's poisoning fix: the v8.16 "newest
+  seen" rule made a REJECTED snapshot an ordering
+  authority — a higher T2 that reached the helper but
+  failed validation would poison a lower viable T1
+  with no accepted successor, and after a manager
+  restart (helper `seen=100, accepted=5`) Go would
+  seed from 5 and mint refused tokens 6…100 (an
+  unbounded retry-count catch-up, not benign
+  behavior); fencing on ACCEPTED removes both (a
+  rejected token never advances the fence, and the
+  seed reads the newest accepted)) — and the token's
+  identity is PER-BUILD IMMUTABLE (v8.17, Codex r21
+  f10's scalar fix: `snapshot_token == buildSeq` is
+  minted ONCE per build; a wire RETRY of the same
+  logical send carries the SAME token (idempotent —
+  the exact-equal retry (#4036) passes, and a
+  strictly-older refusal applies only against a newer
+  ACCEPTED build; the `publication_rev` (burned per
+  ATTEMPT) remains the wire-attempt order, so the two
+  identities no longer contradict);
+  the refusal
+  catches the residual race the Go legs cannot see (T1
   validated before T2's acceptance LANDED — the refusal
   catches it and the typed code classifies it as
   superseded, success-equivalent; two managers are
@@ -4669,7 +5065,8 @@ BLOCKERs 6 + 8; v8 epoch form per Codex r6 f6/f8):**
   connection but a stale same-host process could exist;
   the refusal is per-incarnation so a respawned helper
   resets); and `buildSeq` SEEDS from the startup ping
-  echo (v8.14, Codex r18 f6: the ping/status exchange
+  echo of the newest ACCEPTED token
+  (v8.14, Codex r18 f6: the ping/status exchange
   gains the helper's newest accepted `snapshot_token`
   (additive), and the manager seeds
   `m.latestBuildSeq = max(echo, 0)` — a manager re-init
@@ -5323,11 +5720,22 @@ activations a scheduled retry.
   periodic push marker
   (daemon_ha_sync.go:474-497) gains ONE store-atomic
   captured `(text, digest, revision, exposed)` value
-  read under `s.mu` at enqueue (v8.16, Codex r20 f10's
-  atomic-capture fix — the current form reads the
-  active config, the formatted text, and the claimed
-  marker SEPARATELY, so a promotion can interpose
-  between the check and the claim); the revision
+  read under `s.mu` at enqueue — REVALIDATED against
+  `ActivePair()` immediately BEFORE the generation
+  allocation/write (v8.17, Codex r21 f13's
+  outbound-ordering fix: the atomic capture prevents
+  a torn tuple but not the send-order race (periodic
+  captures A; B promotes and sends first; delayed
+  periodic A acquires `QueueConfig` afterward and
+  receives the higher wire generation; the peer
+  applies stale A after B; the marker stays at B, so
+  the reconciler believes B was pushed): `QueueConfig`
+  assigns its generation at send time under a separate
+  write lock (sync_conn_config.go:230-252), so the
+  captured revision is re-read and revalidated inside
+  that same write-lock hold — a stale capture is
+  re-derived from the CURRENT active pair before the
+  generation is allocated, never sent); the revision
   assignment itself (the five
   promotion paths + the dedicated high-water + the
   migration allocator + the capability-2 envelope) is
@@ -6453,12 +6861,18 @@ activations a scheduled retry.
       transition's `s.mu`-only retry) makes the second
       leg ABORT (it never compiles the interposed B AND
       never completes A's bring-up; B's own queued flow
-      runs B's precheck)); the FLOW-LEVEL pair-current
-      check (v8.16, Codex r20 f3): the dataplane leg
-      re-reads `ActivePair()` at ITS entry and aborts
-      BEFORE any Compile/host mutation (assert no
-      SNMP/web-management/VRF/interface mutation of the
-      stale pair runs); AND the PAIR-SPECIFIC gate (v8.14, Codex
+      runs B's precheck)); the PROMOTION-SERIALIZATION
+      INVARIANT (v8.17, Codex r21 f3): EVERY promotion is
+      serialized with its apply under `applySem`
+      (VERIFIED: `commitAndApply` holds `applySem`
+      across `configstore.Commit` AND the apply
+      (daemon_apply_commit.go:129-175)) — assert NO
+      interposition is reachable from any promotion
+      path (local commit, HA sync, commit-confirmed,
+      auto-rollback all hold the semaphore), so the
+      pair read at flow start stays current for the
+      whole flow and the second leg ALWAYS completes
+      with the outer pair; AND the PAIR-SPECIFIC gate (v8.14, Codex
       r18 f4): durable A's MAC-deferred apply with
       nondurable B promoted BETWEEN the legs — A's
       mandatory second leg (R_a ≤ durableRevision) RUNS
@@ -6489,15 +6903,14 @@ activations a scheduled retry.
       replay carries `ActivePair()`'s current pair; the
       false-green refused: asserting ping-precedes-build
       while the boot retry has no owner.
-      (d) FRESHNESS: the ordering rule (v8.16, Codex r20
-      f8): the DAEMON's dataplane-leg pair-current check
-      aborts a stale flow BEFORE any Compile/host
-      mutation (assert no VLAN/address/MTU/ethtool/link
-      mutation of the stale pair runs (compiler_iface.go
-      mutations stay un-executed), and the auxiliary
+      (d) FRESHNESS: the promotion-serialization
+      invariant (v8.17, Codex r21 f3 — no promotion can
+      interpose mid-flow, so no stale-pair mutation can
+      occur on any daemon flow); the auxiliary
       producers (overlay/scheduler/#5134) CLONE the
       cached snapshot (assert no Compile runs for them
-      at all));
+      at all, and the staged-ahead divergence
+      suppression holds them while `pending > accepted`);
       T1 builds, T2 builds and publishes, T1's
       publish leg is REFUSED AT ENTRY (T2 was
       observed-accepted) — assert NO XDP/pin/shim/
@@ -6554,7 +6967,18 @@ activations a scheduled retry.
       `not_seeded` never appears on the wire; the
       false-green refused: parsing one code while the
       other producers/consumers are unexercised.
-      (f) RESERVATION CHAIN: T2 starts (captures T1's
+      (f) RESERVATION CHAIN: the token is an explicit
+      Compile argument (v8.17, Codex r21 f8 — assert
+      `Compile(cfg, commitRevision, reservationToken)`
+      receives the daemon's `StartCompile` token and the
+      wire stamp reads THE TOKEN'S NODE (T1's immutable
+      intent), never the shared global; the pending-XSK
+      staged object carries both the token and its
+      baked-in `DeferWorkers`; route/scheduler clones
+      PRESERVE the cached defer value; the #5134 clone
+      forces `false` only for the generation it owns
+      completion for);
+      T2 starts (captures T1's
       `{true,true}`), T1 finishes ACCEPTED (recorded,
       non-head), T2 fails pre-publish — the head's Finish
       applies the recorded outcomes oldest-first, its own
@@ -6609,16 +7033,27 @@ activations a scheduled retry.
       effect at the NEXT member boundary (the cancelled
       member's entries are gone; its completed program is
       wasted-not-harmful); the OPERATOR-VERB QUIESCENCE
-      GATE (v8.16, Codex r20 f9): a registration toggle
+      GATE (v8.16, Codex r20 f9; clear points v8.17, AGY
+      r21 f3 = SMR r21 SMR21-2 = Codex r21 f11): a
+      registration toggle
       while `m.linkCycleActive` is REFUSED busy (assert
       NO helper-side reconcile re-spawns workers mid-
       quiescence — the live-XSK-during-MAC-cycle class
-      is closed, not just bounded); the FAILED-UP
-      ownership (v8.16, Codex r20 f9): a member whose
+      is closed, not just bounded), AND the gate CLEARS
+      at the transaction's restore completion (success
+      OR transfer to the restore debt — assert the
+      restore debt's backoff intervals do NOT hold it
+      (the operator's verbs work between attempts) and a
+      retry re-sets it for THAT attempt's window); the FAILED-UP
+      ownership (v8.16, Codex r20 f9; hardened v8.17,
+      Codex r21 f11): a member whose
       MAC-set succeeded but whose final UP failed keeps
       its `linkOnlyRecovery` entry EVEN WHEN the MAC
       debt is concurrently cancelled (assert the
-      link-recovery owner survives — the member is never
+      link-recovery owner survives — the link-down
+      observation is recorded through the
+      cancellation-insensitive path BEFORE token
+      disposition — the member is never
       left down ownerless), and the batch's latency is
       asserted (bounded driver time per member
       transaction (50-500ms link cycles), bounded
@@ -7137,7 +7572,7 @@ the three owners through nine enumerations; the mixed-version
 producer is the documented exception with the required helper
 restart).
 
-Remaining questions for round 21, each invitable to PLAN-KILL with
+Remaining questions for round 22, each invitable to PLAN-KILL with
 a concrete counterexample:
 
 1. **Completeness, final form.** Exhibit a path to
@@ -7200,12 +7635,12 @@ a concrete counterexample:
    candidate-filter territory
    (`include_userspace_binding_interface`), explicitly out of
    scope here.
-6. **Round-20 disposition table audit.** §1's r20 table maps
-   every r20 finding (Codex 10 BLOCKER + 3 MAJOR; AGY 2
-   BLOCKER + 1 MAJOR + 1 MINOR (f1 NOT-VERIFIED); SMR 2
-   MAJOR + 6 MINOR) to its v8.16 fold, and every fold this
-   revision was verified per-edit against the file. Which
-   row is claimed-but-wrong this time?
+6. **Round-21 disposition table audit.** §1's r21 table maps
+   every r21 finding (Codex 12 BLOCKER + 2 MAJOR; AGY 2
+   BLOCKER + 2 MAJOR; SMR 1 BLOCKER + 2 MAJOR + 4 MINOR)
+   to its v8.17 fold, and every fold this revision was
+   verified per-edit against the file. Which row is
+   claimed-but-wrong this time?
 7. **Cumulative hazard budget, final sign-off (v8.8 honest
    numbers, Codex r11 f11 + r12 f14).** Healthy unsuppressed
    baseline for
