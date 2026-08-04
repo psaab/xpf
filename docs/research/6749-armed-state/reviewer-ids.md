@@ -977,6 +977,28 @@
   `/tmp/codex-6749-r31-prompt.txt`). Proceeding 2-of-3 per the
   codex-infra-blocked exception; retries continue each round.
 
-## Round 32 (plan v8.27 @ pending)
+## Round 32 (plan v8.27 @ a5f2918c7)
 
-- Codex (retry), AGY, Claude SMR — pending v8.27 fold.
+- **Claude SMR r32** — `claude-smr-plan-r32.md`. Verdict:
+  DEMAND-REVISION (0 BLOCKER + 0 MAJOR + 1 MINOR + 1 NIT —
+  SMR32-1 the C2-gap composition note (the stealer runs its
+  OWN composition against the exposed pair at ITS OWN entry;
+  the union is exactly (A∪C)\C2); SMR32-2 the
+  record-before-timer note).
+- **AGY r32** — background bash `b693dqva6`; prompt
+  `/tmp/agy-6749-r32-prompt.txt` (130,809 bytes); output
+  `/tmp/agy-6749-r32.out`; verdict doc `agy-plan-r32.md`.
+  Verdict: PLAN-READY-WITH-NITS (1 MINOR — f1 the §9 (a)
+  C2-interpose assertion (= SMR32-1); + 1 NIT — f2 the stamp
+  prose's store-currency-skip form). The mid-drain trace
+  assessed "mathematically sound". Second non-DEMAND verdict
+  of the campaign.
+- **Codex r32** — INFRA-BLOCKED (usage limit; reset Aug 10
+  06:57 UTC). Eleventh documented attempt this session
+  (`/tmp/codex-6749-r32-retry1.err`; r32 prompt staged at
+  `/tmp/codex-6749-r32-prompt.txt`). Proceeding 2-of-3 per the
+  codex-infra-blocked exception; retries continue each round.
+
+## Round 33 (plan v8.28 @ pending)
+
+- Codex (retry), AGY, Claude SMR — pending v8.28 fold.

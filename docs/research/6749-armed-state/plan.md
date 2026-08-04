@@ -1,6 +1,6 @@
 # #6749 — binding-plan expansion registers new slots unarmed, dataplane disabled indefinitely
 
-**Status: DRAFT v8.27 — pending adversarial plan review (round 32)**
+**Status: DRAFT v8.28 — pending adversarial plan review (round 33)**
 
 - Issue: #6749 (opus-review-001 root R06, severity High)
 - Research base: `ad9591177` (origin/master at worktree creation)
@@ -1428,7 +1428,43 @@
   bound is stated (SMR31-3 — cancellation reaps
   each goroutine within one operation of its
   cancellation; the residue is the kernel-wedged
-  budgeted D-state class only) @ pending
+  budgeted D-state class only) @ `a5f2918c7` (r32:
+  SMR DEMAND-REVISION (0 BLOCKER + 0 MAJOR + 1
+  MINOR + 1 NIT); AGY PLAN-READY-WITH-NITS (1
+  MINOR + 1 NIT — the mid-drain trace assessed
+  "mathematically sound"); Codex infra-blocked
+  (eleventh documented attempt; 2-of-3))
+; v8.28 folds SMR r32 (1 MINOR + 1 NIT) + AGY r32
+  (1 MINOR + 1 NIT): the C2-gap composition note
+  (SMR32-1 = AGY r32 f1 — the stealer acquires
+  `applySem` AFTER the stale drain releases it, and
+  an intervening exposure C2 can land in the gap:
+  the stealer does NOT re-run the stale drain's
+  composition, it runs its OWN against the exposed
+  pair at ITS OWN entry — the union is exactly
+  right (the stale drain's A→C deletes (composed
+  at ITS entry), C2's own wrapper's C→C2 (its own
+  tails), and the stealer's A→C2 delete exactly
+  (A∪C)\C2 with every C2-permitted session
+  surviving all three — the drain-time-EXPOSED-at-
+  each-entry rule is what makes the union correct —
+  and the two cursor entries are independent (each
+  composes against the shared `m.lastExposedPair`
+  at its own entry; the claim-or-skip serializes
+  only within an entry)); §9 (a) gains the
+  C2-interpose assertion (the stealer detects C1
+  as non-store-active, skips its stamp/push,
+  composes A→C2 idempotently, and marks C1
+  SUPERSEDED); the stamp prose gains the
+  store-currency-skip form (AGY r32 f2 — "a second
+  identical stamp CAS on the same value (or skipped
+  via store-currency gating when the pair is no
+  longer store-active)"); and the
+  record-before-timer case is stated (SMR32-2 —
+  a drain finishing before the namedBound records
+  complete normally and the steal-timer is
+  cancelled by the completion, same `m.mu` op) @
+  pending
   AGY r15 (4 BLOCKER + 3 MAJOR + 1 MINOR) + SMR r15 (2
   BLOCKER + 3 MAJOR + 3 MINOR/NIT): R1 becomes a REAL
   rollout+transport contract — a legacy `active.json`
@@ -1510,7 +1546,7 @@
 
 ## 1. Status
 
-DRAFT v8.27 — pending adversarial plan review round 32 (Codex + AGY +
+DRAFT v8.28 — pending adversarial plan review round 33 (Codex + AGY +
 Claude SMR). Convergence target: PLAN-READY (recommended path shipped
 to `/engineer`) or PLAN-KILL. No production code is written under
 `/research`.
@@ -2773,6 +2809,25 @@ to `/engineer`) or PLAN-KILL. No production code is written under
   | SMR31-1 / AGY f1+f3 mid-drain steal walk + test | CLOSED — the full trace stated in §5-C (ii) (the steal fires under `m.mu` while the stale drain executes under `applySem`: the invalidation composed at entry stays correct (no exposure moves under the semaphore); the stale stamp's CAS lands correctly (store-active pair); the completion record is generation-refused; the stealer re-executes and the side effects are the idempotent forms — identical stamp CAS on the same value, identical push (receiver `SyncApply` no-ops on identical content (daemon_apply_commit.go:356-360)), idempotent deletes); §9 (a) gains the mid-drain interleaving assertion (a no-generation-check implementation FAILS) (§5-C (ii), §9 (a)) |
   | SMR31-2 / AGY f2 cancellation scope | CLOSED — clarified: ctx cancellation bounds the I/O tails (the conn write's TCP timeout + `handleDisconnect`; socket operations); in-memory store mutations (`setAppliedDigest` takes no ctx) rely on the CAS revision verification — either order safe (§5-C (ii)) |
   | SMR31-3 goroutine population bound | CLOSED — stated: cancellation reaps each steal-spawned goroutine within one operation of its cancellation; the residual population is the kernel-wedged budgeted D-state class only (§5-C (ii)) |
+
+- **Round 32** (v8.27): SMR DEMAND-REVISION (0 BLOCKER + 0
+  MAJOR + 1 MINOR + 1 NIT); AGY PLAN-READY-WITH-NITS (1 MINOR
+  + 1 NIT — the mid-drain trace assessed "mathematically
+  sound" and the cancellation partition accepted); Codex
+  INFRA-BLOCKED (eleventh documented attempt; 2-of-3).
+  Convergence: the C2-interpose gap (an exposure landing
+  between the stale drain's `applySem` release and the
+  stealer's acquire) needed its composition proof and test
+  (SMR32-1 = AGY f1). AGY-only: f2 (the stamp prose's
+  store-currency-skip form). SMR-only: SMR32-2 (the
+  record-before-timer note).
+- **Round-32 disposition table:**
+
+  | r32 finding | v8.28 disposition |
+  |---|---|
+  | SMR32-1 / AGY f1 C2-gap composition + test | CLOSED — the stealer runs its OWN composition against the exposed pair at ITS OWN entry (never re-runs the stale drain's): the union (stale A→C + C2's wrapper's C→C2 + stealer A→C2) deletes exactly (A∪C)\C2 with every C2-permitted session surviving all three — the drain-time-EXPOSED-at-each-entry rule makes the union correct; the two cursor entries are independent; §9 (a) gains the C2-interpose assertion (the stealer detects C1 as non-store-active, skips its stamp/push, composes A→C2 idempotently, marks C1 SUPERSEDED) (§5-C (ii), §9 (a)) |
+  | AGY f2 stamp prose | CLOSED — "a second identical stamp CAS on the same value (or skipped via store-currency gating when the pair is no longer store-active)" (§5-C (ii)) |
+  | SMR32-2 record-before-timer | CLOSED — stated: a drain finishing before the namedBound records complete normally and the steal-timer is cancelled by the completion (same `m.mu` op as the record) (§5-C (ii)) |
 
 ### Round-1 detail log (kept for the record)
 
@@ -5871,10 +5926,34 @@ BLOCKERs 6 + 8; v8 epoch form per Codex r6 f6/f8):**
   stealer RE-EXECUTES the phase, and the
   re-execution's side effects are the idempotent
   forms (a second identical stamp CAS on the same
-  value; a second identical push — the receiver's
+  value (or skipped via store-currency gating when
+  the pair is no longer store-active (v8.28, AGY
+  r32 f2)); a second identical push — the receiver's
   `SyncApply` no-ops on identical content
   (daemon_apply_commit.go:356-360); the
-  invalidation's deletes idempotent); and (iii)
+  invalidation's deletes idempotent) — and the
+  stealer's composition is its OWN (v8.28, SMR
+  r32 SMR32-1 = AGY r32 f1's C2-gap note: the
+  stealer acquires `applySem` AFTER the stale
+  drain releases it, and an intervening exposure
+  C2 can land in the gap — the stealer does NOT
+  re-run the stale drain's composition; it runs
+  its OWN against the exposed pair at ITS OWN
+  entry, and the union is exactly right: the
+  stale drain's A→C deletes (composed at ITS
+  entry), C2's own wrapper's C→C2 (its own
+  tails), and the stealer's A→C2 delete exactly
+  (A∪C)\C2 with every C2-permitted session
+  surviving all three — the drain-time-EXPOSED-at-
+  each-entry rule is what makes the union
+  correct; and the two cursor entries are
+  independent (each composes against the shared
+  `m.lastExposedPair` at its own entry; the
+  claim-or-skip serializes only within an entry);
+  and a drain that finishes BEFORE the namedBound
+  records complete normally — the steal-timer is
+  cancelled by the completion, same `m.mu` op
+  (SMR32-2)); and (iii)
   the steal-spawned goroutine population is
   bounded (SMR31-3: cancellation reaps each
   goroutine within one operation of its
@@ -8485,7 +8564,16 @@ activations a scheduled retry.
       completion record is generation-refused, and
       the stealer's re-execution completes
       idempotently (a no-generation-check
-      implementation FAILS this test));
+      implementation FAILS this test)) — AND the
+      C2-INTERPOSE gap (v8.28, SMR r32 SMR32-1 =
+      AGY r32 f1: C2 exposes BETWEEN the stale
+      drain's `applySem` release and the stealer's
+      acquire — assert the stealer composes A→C2
+      (never A→C), detects C1 as non-store-active
+      (its stamp/push skipped), and marks C1
+      SUPERSEDED — the union of the three delete
+      sets is exactly (A∪C)\C2 with every
+      C2-permitted session surviving);
       the A→B→C COMPOSITION (v8.15, Codex r19 f5): A
       exposed → gated B tightens → gated C promoted →
       C's exposure invalidates sessions against
@@ -9314,7 +9402,7 @@ the three owners through nine enumerations; the mixed-version
 producer is the documented exception with the required helper
 restart).
 
-Remaining questions for round 32, each invitable to PLAN-KILL with
+Remaining questions for round 33, each invitable to PLAN-KILL with
 a concrete counterexample:
 
 1. **Completeness, final form.** Exhibit a path to
@@ -9377,11 +9465,11 @@ a concrete counterexample:
    candidate-filter territory
    (`include_userspace_binding_interface`), explicitly out of
    scope here.
-6. **Round-31 disposition table audit.** §1's r31 table maps
-   every r31 finding (SMR 1 MINOR + 2 NIT; AGY 1 MAJOR + 1
-   MINOR + 1 NIT; Codex infra-blocked) to its v8.27 fold, and
-   every fold this revision was verified per-edit against the
-   file. Which row is claimed-but-wrong this time?
+6. **Round-32 disposition table audit.** §1's r32 table maps
+   every r32 finding (SMR 1 MINOR + 1 NIT; AGY 1 MINOR + 1
+   NIT; Codex infra-blocked) to its v8.28 fold, and every fold
+   this revision was verified per-edit against the file.
+   Which row is claimed-but-wrong this time?
 7. **Cumulative hazard budget, final sign-off (v8.8 honest
    numbers, Codex r11 f11 + r12 f14).** Healthy unsuppressed
    baseline for
