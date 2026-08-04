@@ -1,26 +1,31 @@
 # #6751 plan — interface SNAT no-PAT admission: reserve-or-PAT the colliding translated tuple
 
-- **Status**: DRAFT v15.28 — round-39 fold (AGY r39's nit + Codex
-  r39's two blockers + major + minor + two nits: a bulk window
-  from a non-capability-advertising peer is FRAMING-ONLY — it may
-  install frames per today's rolling-upgrade interop but NEVER
-  clears lineage, NEVER drives the definitive alias pass, and
-  NEVER releases the reconciliation hold for lineage purposes,
-  because BulkStart carries no provenance and the no-heartbeat-ACK
-  cohort predates the #5085 lossless-bulk fix; the retained-C0
-  case is stated with full honesty — NO plan-bounded mechanism
-  kills a legacy C0 whose detectors are absent by design (the
-  cited sync_protocol.go:59 deadline is a WRITE deadline — a
-  factual error owned), the terminal is the readiness-timeout
-  degraded release with the debt retained, and the quiet interval
-  is CAPPED by the readiness timeout (the 7.5s > 5s ordering
-  inconsistency Codex caught); §6's two-field stage carrier text
-  is reconciled (AGY r39's nit, folded during the round); the
-  admission linearization point is a NAMED mutex covering
-  engaged-check, stamp issuance, child registration, the
-  release-side advance, and disengage ordering with
-  advance-before-disengage required; and §9 pins the exact
-  accept-after-sweep-start → resume-after-release trace)
+- **Status**: DRAFT v15.29 — round-40 fold (Codex r40's two
+  blockers + major + minor; AGY r40 converged PLAN-READY with zero
+  findings: window authority is bound PER WINDOW (recorded at its
+  BulkStart from the peer's capability state at that moment), a
+  non-capability window's resolution is DISPOSITION-ONLY (the
+  quarantine's confirm-vs-admit runs as today but every admitted
+  suspect keeps its mark UNRESOLVED — no confirmation, purge,
+  clear, or definitive pass — while genuine rows import normally,
+  so the legacy table never regresses), and the capability
+  advertisement moves OFF the periodic ticker onto an ORDERED
+  PRE-DATA send (handshake → capability frame → any bulk/delta
+  frame) with UNKNOWN treated as non-capable and a FRESH CAPABLE
+  PRIME forced when capability is first learned mid-connection;
+  the quiet interval is DERIVED from the peer's actual
+  disconnect-detection bound (≈20s read-deadline-plus-two-misses
+  for ACK-capable peers, sync.go:90 / sync_conn_read.go:33 — not
+  2.5×keepalive), the degraded terminal is FENCE-OWNED and
+  DISCONNECTED-ELIGIBLE (the connected-only 5s readiness timer
+  and its no-release-without-reconnect regression are preserved
+  intact; classic RETH VRRP's 30s hold and the private-RG gate
+  are the named outer bounds); and the debt is TWO SEPARATE
+  DEBTS — the sender delivery/ACK debt discharges at BulkEnd-ACK
+  while the receiver ALIAS-PROOF debt discharges ONLY on a
+  capability-advertising definitive snapshot or the suspect row's
+  own close, never at a legacy both-empty transition — with the
+  retained-C0 regression pinned in §9)
 - **Issue**: #6751 (opus-review-001 R08, High, `bug`+`audit`+`security`) —
   interface SNAT admits indistinguishable no-PAT return tuples and sends
   replies to the FIRST session.
@@ -491,7 +496,19 @@ consequences onto the surviving §5.x machinery.
    export evaluation keeps the suppression (conservative — every
    export path skips a marked row with the skip counted; the
    terminal bound is the session's own lifetime, the documented
-   residual). Every export path sees the marks:
+   residual). The debt is TWO SEPARATE DEBTS with separate
+   terminals (Codex r40 major 3: a genuine both-empty transition
+   with the SAME legacy peer can never discharge the alias-proof
+   debt — every snapshot from that peer is permanently
+   framing-only): (i) the sender delivery/ACK debt (the existing
+   authoritative-prime debt) discharges on `BulkEnd`-ACK per its
+   own machinery; and (ii) the RECEIVER ALIAS-PROOF DEBT (the
+   suspects' owed definitive proof) discharges ONLY on a
+   capability-advertising definitive snapshot or the suspect
+   row's own close — a legacy both-empty transition discharges
+   (i) per today's interop while (ii) persists until the peer's
+   capability is first learned (which forces the fresh capable
+   prime). Every export path sees the marks:
    the mirror value gains a
    provenance bit (the `xpf_conntrack.h` ABI has no provenance field
    today — additive per #1961) OR an exact lifecycle-managed side
@@ -684,7 +701,34 @@ consequences onto the surviving §5.x machinery.
   lineage purposes (the definitive pass and every lineage clear
   run ONLY against capability-advertising senders' snapshots; a
   legacy window is non-definitive by construction and the plan
-  does not pretend otherwise). The receiver's ACK and VRRP
+  does not pretend otherwise). Authority is bound PER WINDOW
+  (Codex r40 blocker 1: the §5.6 rules — every quarantined entry
+  resolves at its own BulkEnd, P1 runs at every completed
+  BulkEnd, §9 repeats both — predated the capability gate and
+  would force resolution on a non-authoritative window): each
+  window's authority class is recorded AT ITS `BulkStart` from
+  the peer's capability state at that moment, so a mid-window
+  capability change neither retro-authorizes nor corrupts it;
+  and a NON-CAPABILITY window's resolution is DISPOSITION-ONLY
+  (the quarantine's confirm-vs-admit disposition runs as today —
+  provisional admission into the import path — but every admitted
+  suspect KEEPS its `alias-suspect` mark UNRESOLVED: no
+  confirmation, no purge, no clear, and the definitive pass does
+  not run — while a genuine row imports normally, so today's
+  table never regresses for self-NAT/NPTv6). The capability
+  advertisement moves OFF the periodic ticker onto an ORDERED
+  PRE-DATA send (the bootstrap defect: the ticker fires every
+  5-10s with state initially UNKNOWN, while the connection path
+  starts cold-prime IMMEDIATELY, sync_conn.go:130 — a new↔new
+  first window could complete before any advertisement): the
+  ordered send contract is handshake → capability frame → ANY
+  bulk or delta frame, so a new↔new window is never authority-
+  less, and UNKNOWN is treated as non-capable (safe default).
+  And when capability is FIRST LEARNED mid-connection, the
+  receiver forces a FRESH CAPABLE PRIME (a prime-REQUEST the
+  capable peer answers — the suspects held under framing-only
+  windows resolve at the first CAPABLE definitive pass; the
+  prime debt coalesces across them). The receiver's ACK and VRRP
   hold-release behavior toward legacy peers is TODAY's behavior,
   unchanged — the pre-#5085 lossy-window exposure is inherited
   and documented, not created here; and a missed
@@ -702,18 +746,36 @@ consequences onto the surviving §5.x machinery.
   sync_test.go:4655, and while C0 stays registered the initiator
   never redials, sync_conn.go:446 — so for the retained-C0
   trace, NOTHING plan-bounded kills C0; no detector exists by
-  design. The terminal is the readiness-timeout degraded release
-  — release the VRRP hold, RETAIN the debt — and the debt keeps
+  design. The terminal is a FENCE-OWNED, DISCONNECTED-ELIGIBLE
+  degraded release (Codex r40 blocker 2's three code facts: the
+  production ACK-capable detector is a 10-second read deadline
+  with teardown after two misses — ≈20s, sync.go:90 /
+  sync_conn_read.go:33 — so a 5-second fence interval cannot
+  prove mode-(i) both-empty either; the 5-second readiness timer
+  requires `syncPeerConnected` and fires only while connected,
+  daemon_ha_sync.go:40/:109, and its regression explicitly pins
+  NO timeout release without reconnect,
+  session_sync_readiness_test.go:33 — so it is NOT the degraded
+  terminal for a disconnected fence; and classic RETH VRRP has
+  its own 30-second hold timer, manager.go:351). The quiet
+  interval is therefore DERIVED from the peer's actual
+  disconnect-detection bound: for ACK-capable peers, the
+  read-deadline-plus-two-misses bound (≈20s) plus jitter margin;
+  for legacy no-ACK peers there is no such bound (the retained-C0
+  honesty above — no plan-bounded kill). The degraded terminal is
+  the FENCE's own cycle timer, explicitly disconnected-eligible:
+  on expiry it releases the sync hold through the same release
+  path the bulk-received callback drives (never the connected-
+  only 5s readiness timer, whose no-release-without-reconnect
+  regression is preserved intact), with each hold class named —
+  the sync-hold release path, the classic RETH VRRP 30s hold
+  (manager.go:351), and the private-RG readiness gate — the
+  fence's release cannot outlast the applicable class's own
+  bound. The debt keeps
   owing the authoritative prime, which any subsequent genuine
   both-empty transition (an OS/TCP failure, the peer's restart,
   or a later real disconnect) eventually discharges; the plan
-  does not claim a proof it cannot have). And the quiet interval
-  is CAPPED by the readiness timeout (an ordering inconsistency
-  Codex r39 caught: 2.5 × 3s = 7.5s exceeds the production 5s
-  readiness timeout, daemon.go:1148 — so
-  `quiet_interval = min(2.5 × keepalive_timeout,
-  readiness_timeout)`, guaranteeing the degraded release always
-  post-dates at least the start of a complete fence cycle). §9 pins
+  does not claim a proof it cannot have). §9 pins
   the no-ACK C0 case with a delayed/lost close notification. The old peer's own
   write-completion clearing hazard is bounded receiver-side: the
   receiver never reconciles or releases the hold without a COMPLETE
@@ -2932,6 +2994,18 @@ quarantine-admitted + overflow), and tests.
   racing the verdict transition can never emit the row mid-
   transition (the mark update and the resolution verdict commit
   in the same critical section).
+- **Retained-C0 degraded-terminal regression** (Codex r40 minor
+  4): a legacy no-ACK peer retains C0 past a delayed/lost close
+  notification (no plan-bounded kill — asserted, not assumed);
+  the fence's degraded terminal is DISCONNECTED-ELIGIBLE (the
+  connected-only 5s readiness timer never fires it,
+  session_sync_readiness_test.go:33 intact); the release drives
+  the sync-hold release path with the classic RETH VRRP 30s hold
+  (manager.go:351) and the private-RG gate as the outer bounds;
+  and the TWO debt terminals are asserted separately (delivery
+  debt discharges at BulkEnd-ACK; the alias-proof debt persists
+  until a capability-advertising definitive snapshot or the
+  row's own close — never at a legacy both-empty transition).
 - **Prime-request/re-fence liveness suite** (Codex r38 minor 5):
   timeout-admission of a suspect issues exactly one
   prime-REQUEST for it (coalesced across any number of

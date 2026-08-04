@@ -237,3 +237,16 @@ readiness-timeout terminal and interval cap; §6 two-field
 reconciliation; named admission mutex with advance-before-disengage;
 the exact accept trace + wording cleanup pinned). Round 40 is the
 convergence check.
+
+| r40 | `codex exec` (detached-poll), session in /tmp/codex-6751-r40.log / PLAN-NEEDS-REVISION (2 BLOCKERs: framing-only rule contradicts the retained r15-era resolution rules + bootstrap (capability ticker at 5-10s vs immediate cold-prime — per-window authority binding, disposition-only non-capable resolution, ordered pre-data send, fresh capable prime on first-learn); the retained-C0 degraded terminal is not code-real (the detector is ≈20s not 5s, the 5s readiness timer is connected-only with a no-release-without-reconnect regression, classic RETH VRRP has a 30s hold — derived interval + fence-owned disconnected-eligible terminal); 1 MAJOR: alias-proof debt can never discharge for a legacy peer (two separate debts: delivery vs alias-proof); 1 MINOR: retained-C0 regression absent from §9) | **PLAN-READY (zero findings)** — first clean verdict of the research | PLAN-READY-WITH-NITS (r41 fold-check of v15.29; ordered-send robustness, disposition-only vs never-ACK, first-learn storm bound, 20s-delay failover pricing analyzed) |
+
+Round-40 disposition: all findings fold in v15.29 (per-window
+authority binding; disposition-only non-capable resolution with
+genuine rows never regressing; ordered pre-data capability send
+with UNKNOWN = non-capable and a forced fresh capable prime on
+first-learn; derived quiet interval from the actual ≈20s detector;
+fence-owned disconnected-eligible degraded terminal with the
+connected-only 5s timer preserved and the 30s classic-VRRP hold +
+private-RG gate as outer bounds; two separate debt terminals; the
+§9 regression). AGY's PLAN-READY is the first clean verdict.
+Round 41 is the convergence check.
