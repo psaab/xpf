@@ -150,3 +150,13 @@ re-prime + reconciliation hold; honest signature inventory; static
 emitted-port/inbound/drain; serialized-loop purge; honest
 mixed-version cell; scoped producer claim; standby edge tests).
 Round 32 re-reviews v15.19.
+
+| r32 | `codex exec` (detached-poll), session in /tmp/codex-6751-r32.log / PLAN-NEEDS-REVISION (7 BLOCKERs: cross-process gate not atomic + refresh-restore inverse, purge id source absent + legacy zero undefined, omission-index seam + non-authoritative overflow, receiver-local fencing can't force inbound prime, carried-hold overflow identity, inbound static lifecycle, P2 no atomic seam; 2 MAJORs: deferral liveness, contradictory old-sender promises; 1 MINOR: probe signature; 1 NIT: 257th qualifier) | PLAN-READY-WITH-NITS (2 nits: stripe count, reverse-companion test — both folded) | **PLAN-NEEDS-REVISION on the v15.19 substrate + PATH B (table-truth) RECOMMENDED** (r33 doc — the fold attempt surfaced the six-round breed-a-race pattern; the substrate fork is now §4.0) |
+
+Round-32 disposition: the round is the inflection point. Rather than
+fold a seventh mirror-defense layer, v15.20 puts the substrate fork
+to the reviewers in §4.0: PATH A (cross-process arbiter, rerouted
+HA import — rejected on the control-socket contention foreclose) vs
+PATH B (table-truth snapshot channel; the mirror exits the sync
+path; every mirror-defense mechanism retires). Round 33 adjudicates
+the fork.
