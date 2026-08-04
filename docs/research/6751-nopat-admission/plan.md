@@ -1,31 +1,35 @@
 # #6751 plan — interface SNAT no-PAT admission: reserve-or-PAT the colliding translated tuple
 
-- **Status**: DRAFT v15.31 — round-42 fold (Codex r42's four
-  blockers + two majors + nit + AGY r42's two nits: the last
-  retained-text contradictions are scoped (confirm-at-insertion,
-  the every-BulkEnd-definitive passages, and the §9 recaps all
-  carry the capability qualifier; the legacy-window resolution
-  names the decode-time BASE-IDENTITY INDEX as the predicate's
-  source — never "the current store", which delegates to the BPF
-  ABI that omits the sync-only id); the readiness commit unit
-  re-validates the FENCE STATE alongside arming generation and
-  connected state with the stale-fence-expiry-after-rearm case
-  §9-pinned; fence ENGAGEMENT now ARMS the hold its expiry later
-  releases — the engagement lifecycle event's commit unit SETS
-  SYNC READINESS FALSE with its tag and re-arms the classic RETH
-  VRRP sync hold via the startup path, closing the real logic
-  hole where a warm disconnect would have preserved readiness and
-  made the release a no-op (the #466 warm-disconnect preserve
-  rule survives for ordinary unfenced disconnects); the
-  introduced private-RG gate is CONDITIONED ON session sync
-  being configured with fabric endpoints (a default private-RG
-  cluster without session sync is a no-op — never
-  takeover-ineligible by accident), its behavior change is PRICED
-  in §8 against the deliberate-policy history
-  (issue-history.md:8513-8527 / pr-history.md:4277-4289), and §9
-  pins the takeover-while-not-sync-ready refusal AND the
-  not-configured no-op case; and the fence quiet interval joins
-  the parameter summary as `2 × syncReadDeadline + 5s`)
+- **Status**: DRAFT v15.32 — round-43 fold (Codex r43's four
+  blockers + minor + AGY r43's nit: the decode-time INSERTION
+  confirmation is explicitly EVIDENCE-BASED (fires only on equal
+  NON-ZERO RTFlowSessionIDs — intrinsic per-frame evidence, correct
+  on any window class; a true old-sender window carries id=0 and
+  the predicate fails by itself) while the capability gate governs
+  WINDOW-AUTHORITY decisions (the definitive pass, lineage clears,
+  and purges — the deferred-entries "definitive BulkEnd" and the
+  P1 re-evaluation are capability-qualified, and the "prevents
+  poisoned companions" absolute is scoped to id-capable windows);
+  the gate covers the WHOLE direct/no-VRRP takeover domain
+  (NoRethVRRP || PrivateRGElection — not only private-RG),
+  conditioned on session sync being configured with EITHER
+  supported endpoint pair (control-link OR fabric — a
+  control-link-only deployment is configured, not "not
+  configured"), and the PEER-DEAD election bypass survives
+  unchanged with §9 testing election state; the NEVER-CONNECTED
+  cold start gets its own bounded degraded release (the
+  readiness-timeout event's commit unit fires at the cold-start
+  bound even when never connected — takeover by normal VRRP
+  priority with the heartbeat-alive precondition — while the
+  no-release-without-reconnect regression is preserved for the
+  connected-then-disconnected case it was written for); the
+  classic-hold re-arm never installs an independent untagged
+  AfterFunc (the shared-pointer stale-timer race at
+  manager.go:354/372/389 dies — the re-arm goes through the
+  lifecycle queue as a generation-bound fence-cycle event, or the
+  fence-owned terminal is the sole release path); §9 pins the
+  stale fence expiry after re-arm explicitly; and the §9 callback
+  recap lists all seven events)
 - **Issue**: #6751 (opus-review-001 R08, High, `bug`+`audit`+`security`) —
   interface SNAT admits indistinguishable no-PAT return tuples and sends
   replies to the FIRST session.
@@ -769,7 +773,30 @@ consequences onto the surviving §5.x machinery.
   `quiet_interval = 2 × syncReadDeadline + 5s` for ACK-capable
   peers — no drift at implementation, AGY r41 nit 1);
   for legacy no-ACK peers there is no such bound (the retained-C0
-  honesty above — no plan-bounded kill). The degraded terminal is
+  honesty above — no plan-bounded kill). The NEVER-CONNECTED cold
+  start gets its own bounded terminal (Codex r43 blocker 3:
+  `syncReady` begins false, manager.go:299; startup arms the private
+  readiness timer, daemon_run_bringup.go:234, but its one-shot
+  callback returns when session sync has never connected,
+  daemon_ha_sync.go:40; failed TCP dials merely retry and create no
+  disconnect/fence event, sync_conn.go:462 — so a simultaneous cold
+  boot with healthy heartbeat but failed session-sync TCP leaves
+  BOTH nodes enforcing readiness, election.go:322, and neither
+  takes over indefinitely). The cold-start degraded release: the
+  readiness-timeout event's commit unit fires at the cold-start
+  bound EVEN when never connected — committing the degraded
+  release through the same DISTINCT effect (no bulk-completion
+  claim, no debt discharge), takeover then proceeding by normal
+  VRRP priority with the heartbeat-alive precondition (the peer is
+  alive — priority decides; the peer-dead bypass is unchanged) —
+  while the existing no-release-without-reconnect regression
+  (session_sync_readiness_test.go:33) is preserved for the
+  CONNECTED-then-disconnected case it was written for (a warm
+  disconnect must never release on timeout alone; a never-connected
+  cold start is a different state — first-ever boot takes over with
+  an empty table by design, and a rebooted node's own table is its
+  own — and the bound is named at implementation alongside the
+  other fence parameters). The degraded terminal is
   the FENCE's own cycle timer, explicitly disconnected-eligible —
   and it is a GENERATION-BOUND LIFECYCLE EVENT in the same
   serialized inventory as every other lifecycle event (Codex r41
@@ -798,7 +825,22 @@ consequences onto the surviving §5.x machinery.
   READINESS FALSE with its tag AND re-arms the classic RETH VRRP
   sync hold via the same path as startup — the #466 warm-
   disconnect preserve rule is preserved for ORDINARY disconnects
-  with no fence; the fence is the explicit quiescence case); and
+  with no fence; the fence is the explicit quiescence case).
+  And the classic-hold RE-ARM never installs an independent
+  `time.AfterFunc` (Codex r43 blocker 4: the startup path's
+  SetSyncHold stops the old timer and installs an independent
+  callback that directly releases the hold, manager.go:354/372 —
+  and the shared-pointer race is exact: an old callback that
+  resumes after a new fence's re-arm observes `syncHold == true`
+  and releases the NEW hold while stopping the NEW timer,
+  manager.go:389 — bypassing the lifecycle tag/CAS discipline).
+  The re-arm goes THROUGH the lifecycle queue as a fence-cycle
+  event (the manager's timeout is generation-bound to the fence
+  cycle: the hold's release commits only inside the current
+  fence generation's lifecycle event — or, equivalently, the
+  fence-owned degraded terminal is the SOLE release path for the
+  re-armed hold — never an independent untagged AfterFunc);
+  and
   the fence's degraded release is a
   DISTINCT committed effect — it releases the sync hold WITHOUT
   the bulk-received callback's other effects (that callback sets
@@ -815,20 +857,33 @@ consequences onto the surviving §5.x machinery.
   `vip_readiness_test.go:345-386` proves takeover can succeed
   while `IsSyncReady()` is false — the state exists,
   sync_state.go:13-27, but no production takeover consumer does):
-  the work includes wiring the private-RG sync-readiness gate
-  (private-RG election consults sync readiness before takeover,
-  with the fence-owned disconnected-eligible release driving it,
-  mirroring the classic RETH VRRP sync hold) — CONDITIONED ON
-  SESSION SYNC BEING CONFIGURED/OWED (Codex r42 blocker 4:
+  the work includes wiring the direct/no-VRRP sync-readiness gate
+  (the WHOLE direct takeover domain — `NoRethVRRP ||
+  PrivateRGElection`, daemon_ha_vip.go:100 / vrrp.go:139 — consults
+  sync readiness before takeover, with the fence-owned
+  disconnected-eligible release driving it, mirroring the classic
+  RETH VRRP sync hold; the no-private-rg-election + no-reth-vrrp
+  variant is explicitly supported,
+  compiler_validate_strict_reth_vrrp_4826_test.go:116, and receives
+  the same gate — not only the private-RG path, Codex r43 blocker
+  2) — CONDITIONED ON SESSION SYNC BEING CONFIGURED with EITHER
+  supported endpoint pair (control-link `ControlInterface +
+  PeerAddress` preferred, fabric as fallback,
+  daemon_ha_sync.go:774 — a control-link-only deployment is
+  configured, not "not configured") or, equivalently, with the
+  fabric pair (Codex r42 blocker 4's default-stranding fix:
   `PrivateRGElection` defaults true, compiler_system.go:1897-1901,
   `NewManager` leaves `syncReady=false`, manager.go:383-408, and
   the existing startup release timer arms ONLY with configured
   fabric endpoints, daemon_run_bringup.go:238-240 — so an
   unconditional gate would make a default private-RG cluster
   WITHOUT session sync permanently takeover-ineligible; the gate
-  engages ONLY when chassis-cluster session sync is configured
-  with fabric endpoints, the same arming predicate as startup,
-  and is a no-op otherwise) — and §9 pins the
+  engages ONLY when session sync is configured with a usable
+  endpoint pair, the same arming predicate as startup,
+  and is a no-op otherwise). The PEER-DEAD election bypass
+  SURVIVES unchanged (election.go:427 bypasses readiness when the
+  peer is dead — crash takeover stays ungated by design, and §9
+  tests the ELECTION STATE, not merely `RG.Ready`) — and §9 pins the
   takeover-while-not-sync-ready refusal AND the
   sync-not-configured no-op case — the
   fence's release cannot outlast the applicable class's own
@@ -2339,7 +2394,12 @@ record's identity frees only when `per_worker` is empty AND
       handler's post-reset frame discarded at (4); wedged-handler
       AbortFenceTimeout reset at (5); nested abort re-arm at (5);
       blocked-I/O boundedness at (2b); large-bulk (10k-entry)
-      boundedness at (2b); abort-mid-BulkSync partial-bulk disposition
+      boundedness at (2b); stale FENCE EXPIRY AFTER RE-ARM (Codex
+      r43 minor 5, explicit: fire the old fence-cycle expiry AFTER a
+      higher-generation abort/re-arm and assert NO readiness flip,
+      NO VRRP-hold release, and NO private-gate release — the stale
+      event fails the tag CAS and its distinct degraded effect never
+      commits); abort-mid-BulkSync partial-bulk disposition
       (no ACK, no reconcile, provisional installs converge at the next
       complete bulk) at (2b/i); a BulkEnd race at (2b/i); callback
       generation-race cancellation at (2b/ii); journal generation-race
@@ -2588,7 +2648,9 @@ record's identity frees only when `per_worker` is empty AND
   - **Mixed-version matrix** (no cell regresses): new+new: omission —
     zero alias traffic, zero collateral. old sender + new receiver:
     signature quarantine — genuine rows admitted after the window (a
-    sync DELAY, not a drop, for the corner); aliases from an old
+    sync DELAY, not a drop, for the corner); the quarantine prevents
+    the poisoned companion from forming on ID-CAPABLE windows, while
+    aliases from an old
     sender are NOT confirmable (Codex r31 finding 7: confirmation
     requires equal NON-ZERO RTFlowSessionID, and the old sender's
     definitive bulk encodes the id from the zero-lifted BPF field —
@@ -3006,8 +3068,25 @@ quarantine-admitted + overflow), and tests.
   6's impossible-source correction: the predicate's source is the
   decode-time index, where the id IS present — the sender queues base first
   on open — and only wait for the base's arrival in the lossy-reorder
-  case), with CONFIRMATION only on capability-advertising windows
-  (a legacy window's entries are disposition-only — admitted on
+  case), with the confirmation CLASS broken out precisely (Codex
+  r43 blocker 1's last contradiction: the decode-time INSERTION
+  confirmation is EVIDENCE-BASED, not window-authority-based — it
+  fires only when the frame pair carries equal NON-ZERO
+  RTFlowSessionIDs, which is intrinsic per-frame evidence, so it
+  is correct on ANY window class (a true old-sender window
+  carries id=0 and the predicate fails by itself — no
+  confirmation happens; a new sender that has not yet learned
+  the receiver's advertisement emits nonzero ids and the
+  confirmation drops its aliases cleanly); the capability gate
+  governs WINDOW-AUTHORITY decisions instead — the definitive
+  resolution pass, every lineage clear, and every purge that
+  relies on snapshot completeness (those run ONLY against
+  capability-advertising windows — so the deferred-entries
+  "definitive BulkEnd" and the P1 re-evaluation at every
+  completed BulkEnd are capability-qualified: they run at every
+  completed CAPABILITY-ADVERTISING BulkEnd, and at a non-capable
+  BulkEnd the entries stay quarantined-or-suspect), and a
+  legacy window's entries are disposition-only — admitted on
   timeout WITHOUT lineage clearing, per the capability gate), and
   ADMITS everything else on timeout through the complete
   normal import path (generation checks, timestamp rebasing, bulk
@@ -3182,9 +3261,10 @@ quarantine-admitted + overflow), and tests.
   (2b/ii) PLUS the detach-between-check-and-store case (impossible
   under the generation-tagged CAS) and the old-disconnect-after-new-
   connect case (the stale disconnect's write fails the CAS) — Codex r24
-  blocker 1's two lifecycle races, one pinned per callback in the
-  inventory (connect, disconnect, bulk-received, bulk-ack-received,
-  readiness-timeout) — PLUS the equal-tag `true@G`/`false@G`
+  blocker 1's two lifecycle races, one pinned per event in the
+  seven-event inventory (connect, disconnect, bulk-received,
+  bulk-ack-received, readiness-timeout, AND fence-cycle expiry —
+  AGY r43 nit) — PLUS the equal-tag `true@G`/`false@G`
   overwrite regression (the C1-disconnect / C2-connect same-g
   collision: the stale equal-generation write MUST fail the
   strict-inequality tag CAS, AGY r25 blocker 1 / Codex r26 minor 3),

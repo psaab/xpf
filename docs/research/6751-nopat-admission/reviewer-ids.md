@@ -268,3 +268,11 @@ commit unit; engagement arms the hold — the real logic hole closed;
 the conditioned private-RG gate with §8 pricing and §9 refusal +
 no-op pins; the index-named predicate source; the parameter summary
 interval). Round 43 is the convergence check.
+
+| r43 | `codex exec` (detached-poll), session in /tmp/codex-6751-r43.log / PLAN-NEEDS-REVISION (4 BLOCKERs: capability-gated alias resolution still contradictory (evidence-based insertion confirmation vs window-authority decisions — the split); the readiness gate uses neither production predicate (whole direct/no-VRRP domain; control-link OR fabric endpoints; peer-dead bypass survives); configured never-connected cold startup has no bounded terminal (cold-start degraded release with heartbeat-alive priority precondition, no-release-without-reconnect preserved for its own case); re-arming through SetSyncHold imports an untagged stale-timer release (re-arm via the lifecycle queue / generation-bound hold); 1 MINOR: §9 lacks the explicit stale-fence-expiry-after-rearm pin) | PLAN-READY-WITH-NITS (1 nit: the §9 callback recap lists 5 events, update to 7 — folded) | PLAN-READY-WITH-NITS (r44 fold-check of v15.32; the pre-learn mixed deployment, forged-id trust model, endpoint-pair completeness, cold-start priority precondition, and the shared-pointer race death analyzed) |
+
+Round-43 disposition: all findings fold in v15.32 (evidence-vs-
+authority confirmation split; whole-domain conditioned gate with
+peer-dead bypass intact; cold-start bounded release; generation-
+bound hold re-arm; the explicit §9 pin; the seven-event recap).
+Round 44 is the convergence check.
