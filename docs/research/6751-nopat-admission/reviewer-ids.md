@@ -295,3 +295,11 @@ with the revised guarantee; generation-bound live-transition
 arming with the day-2 regression; the epoch-selection note; the
 branch-(ii) precondition; the two terminology cleanups). Round 46
 is the convergence check.
+
+| r46 | **infra-blocked**: weekly usage quota exhausted (reset Aug 10th); two documented attempts (full review + probe) — see `codex-plan-r46-r47-infra.md`. Convergence proceeds 2-of-3 per the codex-infra-blocked exception. | PLAN-READY-WITH-NITS (1 nit: capability-qualify the deferred-overflow line — folded in v15.34.1) | — |
+| r47 | (same infra block — documented in `codex-plan-r46-r47-infra.md`) | **PLAN-READY-WITH-NITS (terminal)** — 3 nits, ALL explicitly implementation-level (timer handle naming, stage wire enum values, counter struct naming — "PR implementation details", not plan defects) | **PLAN-READY-WITH-NITS (terminal)** — r47 final verification of the complete v15.34.1 blob; the contradiction class grep-confirmed exhausted |
+
+**CONVERGENCE (rounds 46-47)**: Claude SMR + AGY converge on
+PLAN-READY-WITH-NITS over the final v15.34.1 blob, with the
+codex-infra-blocked exception documented. The remaining nits are
+implementation-level PR details. The research is PLAN-READY.

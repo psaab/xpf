@@ -1,30 +1,6 @@
 # #6751 plan — interface SNAT no-PAT admission: reserve-or-PAT the colliding translated tuple
 
-- **Status**: DRAFT v15.34 — round-45 fold (Codex r45's three
-  blockers + minor + two nits + AGY r45's nit: the EPOCH-DEFINITIVE
-  non-capable branch now says the epoch pass never performs
-  SNAPSHOT-AUTHORITY confirmation/purge/clear while decode-time
-  EVIDENCE confirmation remains allowed on every window class; the
-  deferred incremental-index entry's terminal is EXPLICIT — at a
-  legacy BulkEnd it PROVISIONALLY ADMITS with the alias-suspect
-  mark (export-suppressed, session-lifetime-bound — the ratified
-  residual, strictly better than today's certain broken companion)
-  with the guarantee revised to "never left UNRESOLVED past the
-  row's own lifetime or the peer's capability upgrade", and §9's
-  claim corrected to "never installs a PERMANENT broken companion";
-  the shared sessionSyncConfigured arming is generation-bound
-  across LIVE transitions (every FALSE→TRUE — initial boot or a
-  day-2 commit, including the zero-transport restart guard at
-  daemon_apply_tail.go:243 — arms the cold-start bound under the
-  next lifecycle generation; every TRUE→FALSE cancels; §9 pins the
-  day-2 regression); the mode predicate's epoch advances on BOTH
-  transitions (NOT syncPeerConnEpoch, which advances only on
-  connect — abortGeneration or a dedicated paired counter serves);
-  the mode branch (ii) precondition is "current epoch != arming
-  epoch" (the cold-start-connects-mid-bound case is invalidated
-  exactly as intended, AGY r45 nit); the old sender "OMITS the id
-  field — the receiver decodes zero" terminology is corrected; and
-  the reconciliation-hold sentence is deduplicated)
+- **Status**: DRAFT v15.34.1 — AGY r46 nit folded (the deferred-overflow line now reads "the NEXT BULK's CAPABILITY-QUALIFIED BulkEnd resolution (provisional admission with the alias-suspect mark on a non-capable BulkEnd, per the explicit terminal)"). Codex is infra-blocked at r46 (weekly usage quota, reset Aug 10th — two documented attempts: the full r46 review and a probe; the codex-infra-blocked exception applies: convergence proceeds 2-of-3, Claude SMR + AGY, per the standing rules)
 - **Issue**: #6751 (opus-review-001 R08, High, `bug`+`audit`+`security`) —
   interface SNAT admits indistinguishable no-PAT return tuples and sends
   replies to the FIRST session.
@@ -2624,8 +2600,10 @@ record's identity frees only when `per_worker` is empty AND
       which already retain every received key — so index growth can
       never abort a bulk; ONLY the incremental-window index carries a
       numeric cap (4096), and ITS overflow DEFERS the excess
-      alias-signature entries to the NEXT BULK's definitive BulkEnd
-      resolution rather than timeout-admitting them (AGY r30 finding
+      alias-signature entries to the NEXT BULK's CAPABILITY-QUALIFIED
+      BulkEnd resolution (provisional admission with the
+      `alias-suspect` mark on a non-capable BulkEnd, per the
+      explicit terminal — AGY r46 nit 1) rather than timeout-admitting them (AGY r30 finding
       5: timeout-admission installs a real alias as a canonical row —
       the synthesized broken companion — so under a >4096 inter-bulk
       burst the excess would misdeliver return traffic; deferral
