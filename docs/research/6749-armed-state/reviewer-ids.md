@@ -485,4 +485,52 @@
 
 ## Round 17 (plan v8.12 @ 08c78677f)
 
-- Codex, AGY, Claude SMR — pending dispatch.
+- **Claude SMR r17** — `claude-smr-plan-r17.md`. Verdict:
+  DEMAND-REVISION (3 BLOCKER — SMR17-1 exposure gate has no mechanical
+  locus and no re-exposure trigger (persistRetryLoop observer-free,
+  source-verified); SMR17-2 freshness-token validation compares only
+  the (config, revision) pair — same-commit stale content escapes;
+  SMR17-3 live-MAC re-apply ActivePair() re-read admits an
+  interposed-commit wrong-MAC publish; + 3 MAJOR — SMR17-4
+  map_generation no seed/first-proof rule; SMR17-5 PENDING-XSK STAGED
+  leaks compileInFlight forever; SMR17-6 §9 lacks half the claimed
+  chain tests (disposition accuracy); + 5 MINOR — late-arrival
+  exposure text, Warn episode keying, PrepareLinkCycleChecked hold
+  span, ping deadline class, edit-hygiene splice artifacts).
+- **AGY r17** — background bash `bi99ym7sf` (direct `agy
+  --print-timeout 9m --print`, prompt assembled at 119,259 bytes);
+  output `/tmp/agy-6749-r17.out`; verdict doc `agy-plan-r17.md`.
+  Verdict: DEMAND-REVISION (4 BLOCKER — f1 exposure-gate re-exposure
+  trigger; f2 snapshot_token post-build mint re-ordering; f3
+  fresh-boot FabricSyncStateOK false forever; f4 live-MAC re-apply
+  interposed commit; + 3 MAJOR — f5 PENDING-XSK compileInFlight leak;
+  f6 ping-under-m.mu monopoly; f7 late-arrival exposure understates
+  FIFO delay; + 1 MINOR — f8 RetryLater resets Warn; + 1 NIT — f9
+  evidence wishes).
+- **Codex r17** — background bash `bpji20ck2` (`codex exec -C
+  <worktree> -s read-only`; prompt `/tmp/codex-6749-r17-prompt.txt`);
+  output `/tmp/codex-6749-r17.out`; verdict doc `codex-plan-r17.md`.
+  Verdict: DEMAND-REVISION (13 BLOCKER + 1 MAJOR + 1 MINOR —
+  disposition false; exposure gate no state/owner (+ HA applied-marker
+  depth: standby marked converged while running A); paired transport
+  three competing authorities + stale SetActiveRevision reference +
+  boot not under the hold; zero-event boot retry has no owner;
+  freshness token no build linearization (+ locked/unlocked entry
+  points, §6 omission, semantic-hash exclusion); error_code
+  producer/consumer contract (+ not_seeded manager-local); predecessor
+  chain still reproduces the ABA (non-head outcomes unrecorded) + API
+  impossible as written; PrepareLinkCycleChecked split-API
+  contradiction + RetryLater phase boundary; restore debt not
+  executable (#5134 self-clears; respawn needs a paired full replay);
+  late arrival has NO event source; FIFO proof false (stopLocked
+  unbounded `<-done`); map_generation no atomic mutation identity or
+  semantic coherence (+ fresh-boot trigger ANSWERED via
+  startClusterComms); tests green; residuals unbounded; Warn lifecycle
+  inconsistent). Convergence: Codex f2=AGY f1=SMR17-1; f5=AGY
+  f2=SMR17-2; f3=AGY f4=SMR17-3; f12=AGY f3=SMR17-4; f7-tail=AGY
+  f5=SMR17-5; f8=SMR17-9; f10=AGY f7=SMR17-7; f15=AGY f8=SMR17-8;
+  f13=SMR17-6.
+
+## Round 18 (plan v8.13 @ pending)
+
+- Codex, AGY, Claude SMR — pending fold + dispatch.
