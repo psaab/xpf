@@ -250,3 +250,12 @@ connected-only 5s timer preserved and the 30s classic-VRRP hold +
 private-RG gate as outer bounds; two separate debt terminals; the
 §9 regression). AGY's PLAN-READY is the first clean verdict.
 Round 41 is the convergence check.
+
+| r41 | `codex exec` (detached-poll), session in /tmp/codex-6751-r41.log / PLAN-NEEDS-REVISION (4 BLOCKERs: capability/framing contradiction remains in retained texts + ordered send not bound to a lossless pre-publication path (the EMISSION GATE — checked direct write before publication, failed write fails the connection + cold-prime); degraded interval vs connected-only terminal conflict (the stale 2.5×keepalive text replaced with the derived 2×syncReadDeadline+5s everywhere); fence-cycle expiry missing from the lifecycle inventory + no precedence over the 5s timer + bulk-received effect reuse (seventh generation-bound lifecycle event, atomic engagement gating, DISTINCT release effect with no false bulk-completion and no debt discharge); private-RG outer gate not code-real (INTRODUCED by this plan — daemon_ha_vip.go:40-55 takes over on VIP readiness with IsSyncReady() false; §9 refusal pin)) | PLAN-READY-WITH-NITS (2 nits: named jitter constant 2×syncReadDeadline+5s; §6 struct inventory notes syncCapabilityTicker — both folded) | PLAN-READY-WITH-NITS (r42 fold-check of v15.30; emission-gate failure posture, seventh-event composition, private-RG proportionality analyzed) |
+
+Round-41 disposition: all findings fold in v15.30 (lossless
+emission gate for the capability frame; retained resolution rules
+scoped by the capability gate; derived interval everywhere; the
+seventh lifecycle event with atomic precedence and a distinct
+degraded-release effect; the private-RG gate introduced by this
+plan). Round 42 is the convergence check.

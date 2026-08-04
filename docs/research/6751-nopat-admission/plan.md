@@ -1,31 +1,32 @@
 # #6751 plan — interface SNAT no-PAT admission: reserve-or-PAT the colliding translated tuple
 
-- **Status**: DRAFT v15.29 — round-40 fold (Codex r40's two
-  blockers + major + minor; AGY r40 converged PLAN-READY with zero
-  findings: window authority is bound PER WINDOW (recorded at its
-  BulkStart from the peer's capability state at that moment), a
-  non-capability window's resolution is DISPOSITION-ONLY (the
-  quarantine's confirm-vs-admit runs as today but every admitted
-  suspect keeps its mark UNRESOLVED — no confirmation, purge,
-  clear, or definitive pass — while genuine rows import normally,
-  so the legacy table never regresses), and the capability
-  advertisement moves OFF the periodic ticker onto an ORDERED
-  PRE-DATA send (handshake → capability frame → any bulk/delta
-  frame) with UNKNOWN treated as non-capable and a FRESH CAPABLE
-  PRIME forced when capability is first learned mid-connection;
-  the quiet interval is DERIVED from the peer's actual
-  disconnect-detection bound (≈20s read-deadline-plus-two-misses
-  for ACK-capable peers, sync.go:90 / sync_conn_read.go:33 — not
-  2.5×keepalive), the degraded terminal is FENCE-OWNED and
-  DISCONNECTED-ELIGIBLE (the connected-only 5s readiness timer
-  and its no-release-without-reconnect regression are preserved
-  intact; classic RETH VRRP's 30s hold and the private-RG gate
-  are the named outer bounds); and the debt is TWO SEPARATE
-  DEBTS — the sender delivery/ACK debt discharges at BulkEnd-ACK
-  while the receiver ALIAS-PROOF debt discharges ONLY on a
-  capability-advertising definitive snapshot or the suspect row's
-  own close, never at a legacy both-empty transition — with the
-  retained-C0 regression pinned in §9)
+- **Status**: DRAFT v15.30 — round-41 fold (Codex r41's four
+  blockers + AGY r41's two nits: the capability frame's ordered
+  pre-data send is bound to the LOSSLESS DIRECT-WRITE class with
+  an EMISSION GATE (checked write BEFORE the connection is
+  published for general selection — a failed capability write
+  fails the connection and its cold-prime, so no data frame can
+  precede the capability frame and queueMessage's lossy path can
+  never drop or overtake it); the r15-era EPOCH-DEFINITIVE
+  resolution rules are scoped by the capability gate (lineage-
+  definitive only for capability-advertising windows, disposition-
+  only otherwise — genuine rows still import before the ACK in
+  both classes); the quiet interval is DERIVED from the actual
+  ≈20s detector everywhere (the stale 2.5×keepalive text replaced
+  with `2 × syncReadDeadline + 5s`); the fence-cycle expiry JOINS
+  the lifecycle inventory as the seventh generation-bound event
+  (with cancellation on re-arm and commit ordering), fence
+  ENGAGEMENT atomically gates the readiness-timeout event's
+  release (the readiness commit unit re-validates fence state
+  alongside arming generation and connected state), and the
+  fence's degraded release is a DISTINCT committed effect that
+  releases the hold WITHOUT falsely claiming bulk completion or
+  discharging either debt; and the private-RG sync-readiness gate
+  is explicitly INTRODUCED by this plan (it is not code-real
+  today — daemon_ha_vip.go:40-55 takes over on VIP readiness with
+  IsSyncReady() false — the work wires the gate mirroring the
+  classic RETH VRRP sync hold, with §9's takeover-while-not-
+  sync-ready refusal))
 - **Issue**: #6751 (opus-review-001 R08, High, `bug`+`audit`+`security`) —
   interface SNAT admits indistinguishable no-PAT return tuples and sends
   replies to the FIRST session.
@@ -660,9 +661,13 @@ consequences onto the surviving §5.x machinery.
   disconnect-detection bound
   after the last transport-refused attempt (any already-installed-
   but-dead connection drains within the bound), and is
-  parameterized as `quiet_interval = 2.5 × keepalive_timeout`
-  (e.g. 7.5s for a 3s bound — jitter-safe, AGY r36 nit 2, joining
-  the implementation parameter summary); a fixed interval sufficing
+  DERIVED from the peer's actual disconnect-detection bound (Codex
+  r40/r41 blockers: the production ACK-capable detector is a 10s
+  read deadline with teardown after two misses — ≈20s,
+  sync.go:90 / sync_conn_read.go:33 — NOT 2.5×keepalive; the
+  concrete parameter is `quiet_interval = 2 × syncReadDeadline +
+  5s` for ACK-capable peers, joining the implementation parameter
+  summary, AGY r41 nit 1); a fixed interval sufficing
   because no refusal can be "completed past" — there is no
   post-auth race to restart against (and restarting on every
   refusal would livelock against the 1s retry). The interval's
@@ -760,16 +765,49 @@ consequences onto the surviving §5.x machinery.
   its own 30-second hold timer, manager.go:351). The quiet
   interval is therefore DERIVED from the peer's actual
   disconnect-detection bound: for ACK-capable peers, the
-  read-deadline-plus-two-misses bound (≈20s) plus jitter margin;
+  read-deadline-plus-two-misses bound (≈20s — 2 × syncReadDeadline,
+  sync.go:90) plus a NAMED jitter margin (concretely
+  `quiet_interval = 2 × syncReadDeadline + 5s` for ACK-capable
+  peers — no drift at implementation, AGY r41 nit 1);
   for legacy no-ACK peers there is no such bound (the retained-C0
   honesty above — no plan-bounded kill). The degraded terminal is
-  the FENCE's own cycle timer, explicitly disconnected-eligible:
-  on expiry it releases the sync hold through the same release
-  path the bulk-received callback drives (never the connected-
-  only 5s readiness timer, whose no-release-without-reconnect
-  regression is preserved intact), with each hold class named —
+  the FENCE's own cycle timer, explicitly disconnected-eligible —
+  and it is a GENERATION-BOUND LIFECYCLE EVENT in the same
+  serialized inventory as every other lifecycle event (Codex r41
+  blocker 3: the v15.14 inventory — abort, admission, disconnect,
+  bulk-received, bulk-ack-received, readiness-timeout — omitted
+  the fence-cycle expiry; it now joins as the seventh event type,
+  minting its `(abortGeneration, lifecycleSequence)` tag at
+  admission like every other event, with cancellation on re-arm
+  and commit ordering, so an old fence timer can never fire after
+  a higher-generation abort/re-arm and release the newer cycle).
+  PRECEDENCE is explicit: fence ENGAGEMENT atomically gates the
+  readiness-timeout event's release (the readiness commit unit
+  re-validates the FENCE STATE alongside the arming generation
+  and connected state — a connected-only readiness callback that
+  races fence engagement before disconnected state commits is
+  suppressed, because disconnect notification is asynchronous,
+  sync_conn.go:569-570); and the fence's degraded release is a
+  DISTINCT committed effect — it releases the sync hold WITHOUT
+  the bulk-received callback's other effects (that callback sets
+  `syncBulkPrimed = true` and records `bulk-sync-complete`,
+  daemon_ha_sync.go:90-100 / vrrp/manager.go:380-405 — a degraded
+  release must not falsely claim bulk completion, and it
+  discharges NEITHER debt), with each hold class named —
   the sync-hold release path, the classic RETH VRRP 30s hold
-  (manager.go:351), and the private-RG readiness gate — the
+  (manager.go:351), and the private-RG readiness gate — which this
+  plan INTRODUCES, because it is not code-real today (Codex r41
+  blocker 4: `daemon_ha_vip.go:40-55` bases no-RETH takeover on
+  VIP readiness without consulting sync readiness, :100-105 routes
+  private-RG election through that path, and
+  `vip_readiness_test.go:345-386` proves takeover can succeed
+  while `IsSyncReady()` is false — the state exists,
+  sync_state.go:13-27, but no production takeover consumer does):
+  the work includes wiring the private-RG sync-readiness gate
+  (private-RG election consults sync readiness before takeover,
+  with the fence-owned disconnected-eligible release driving it,
+  mirroring the classic RETH VRRP sync hold) and §9 pins the
+  takeover-while-not-sync-ready refusal — the
   fence's release cannot outlast the applicable class's own
   bound. The debt keeps
   owing the authoritative prime, which any subsequent genuine
@@ -1351,19 +1389,35 @@ record's identity frees only when `per_worker` is empty AND
     (AGY r14 minor 1: `performSyncHandshake`, sync_auth.go:331-334, is
     bypassed when no auth key is configured — `handleNewConnection`,
     sync_conn.go:100-137, opens the stream with no setup handshake —
-    so the capability rides ONE named contract: an additive periodic
-    `syncMsgCapability` frame on a dedicated ticker (period aligned to
+    so the capability rides ONE named frame type with TWO ordered
+    emission points (the v15.29 bootstrap fold, Codex r40 blocker 1):
+    (i) an ORDERED PRE-DATA send of the additive `syncMsgCapability`
+    frame immediately after the handshake/connection-open and BEFORE
+    any bulk or delta frame — sent as a CHECKED DIRECT WRITE of the
+    same class the bulk's own frames use (sync_protocol.go:49-82),
+    gated by an EMISSION GATE: the capability frame is written and
+    its write result checked BEFORE the connection is published for
+    general selection by the global writer (today the connection is
+    published and its reader started before the immediate
+    cold-prime, sync_conn.go:130-194/244-274, the global writer can
+    then select it, sync_conn_write.go:268-300, and `queueMessage`
+    is explicitly LOSSY, sync_conn_write.go:36-49 — so a ticker- or
+    queue-driven capability frame could be dropped or overtaken;
+    under the gate, a failed capability write fails the connection
+    and its cold-prime, and no data frame can precede the
+    capability frame — Codex r41 blocker 1's lossless-path
+    requirement), so a new↔new window is never authority-
+    less — and NOT a handshake field, because unkeyed deployments
+    bypass the handshake, sync_auth.go:321); and (ii) PERIODIC
+    RE-ADVERTISEMENT of the same frame on the dedicated ticker
+    (period aligned to
     the EXISTING heartbeat/ping ticker interval (5-10s) rather than an
     uncoordinated standalone timer goroutine — AGY r21 nit 1; SMR r18
     nit 2;
     Codex r17 minor 2:
-    the transport must be one contract, not alternatives — and NOT a
-    handshake field, because unkeyed deployments bypass the handshake,
-    sync_auth.go:321) — RE-ADVERTISED PERIODICALLY on the dedicated
-    capability ticker ALONE (Codex r16 minor 3 + r19 minor 2 + r20
-    minor 2: `sendClockSync` currently runs only ONCE at connection
-    setup, sync_conn.go:137; the contract is the dedicated periodic
-    ticker, with NO piggyback alternative; the per-peer capability
+    the transport must be one contract — the SAME frame type at both
+    emission points, never a piggybacked field on other frame types;
+    the per-peer capability
     state RESETS TO UNKNOWN on every (re)connection)
     — so a lost frame self-heals within one period (Codex r15 minor 2: a
     one-shot frame has no defined UNKNOWN → unsupported transition;
@@ -2276,17 +2330,32 @@ record's identity frees only when `per_worker` is empty AND
       the row still missing (sync_conn_read.go:240/244), and (b) be
       counted as part of a LATER bulk E2 if E2 starts first, falsely
       retaining a stale row whose delete was lost. Resolution is
-      therefore EPOCH-DEFINITIVE: all quarantine actions run as events
+      therefore EPOCH-DEFINITIVE — GOVERNED BY THE WINDOW'S
+      CAPABILITY CLASS (Codex r41 blocker 1's retained-rule
+      contradiction: the rules below were written before the
+      capability gate and would force LINEAGE-definitive resolution
+      on every completed BulkEnd; under the gate, the epoch pass is
+      LINEAGE-DEFINITIVE only for capability-advertising windows,
+      and DISPOSITION-ONLY for non-capable windows — the
+      confirm-vs-admit disposition still runs and genuine rows
+      still import in the same serialized pass before the ACK, but
+      a non-capable window never confirms, purges, or clears any
+      mark, and the definitive alias pass does not run):
+      all quarantine actions run as events
       on the receiver's SERIALIZED event loop (a timer only enqueues a
       wakeup — the import path's generation-check/install/record
       sequence is safe only single-threaded, sync_conn_gen.go:381),
       and every quarantined entry RESOLVES AT THE EARLIEST OF:
       (i) ITS OWN BULK'S BulkEnd — at BulkEnd the complete snapshot is
-      present, so the sibling-base check is definitive for that epoch —
+      present, so the sibling-base check is definitive for that epoch
+      WHEN THE WINDOW IS CAPABILITY-ADVERTISING —
       still-matching entries whose sibling base is in the received set
       CONFIRM-alias and drop; everything else is ADMITTED through the
       complete normal import path in the same serialized pass, BEFORE
-      the bulk is ACKed and the sync-hold released;
+      the bulk is ACKed and the sync-hold released (and for a
+      NON-capable window the same admission runs WITHOUT the
+      lineage-definitive semantics — every admitted suspect keeps
+      its mark UNRESOLVED);
       (ii) A SUPERSEDING BulkStart (Codex r16 blocker 2: fabric 0 can
       drop mid-E1 while fabric 1 survives — receiver bulk state resets
       only when ALL fabrics are down, sync_conn.go:496/554, the sender
@@ -2770,8 +2839,11 @@ empty-pool is the NAT64 fail-closed channel), all CLI/gRPC surfaces.
 NO wire change of any kind for the core fix; beyond it, the plan adds
 ADDITIVE-ONLY, old-peer-ignorable wire elements per the #1961
 precedent (Codex r34 finding 6's revision of the earlier absolute
-statement): the ONE additive
-`syncMsgCapability` frame on a dedicated ticker (advertised by new
+statement): the additive
+`syncMsgCapability` frame (ONE frame type, TWO ordered emission points
+per §5.6 — the ordered pre-data send on connect BEFORE any bulk/delta
+frame, then periodic re-advertisement on the dedicated ticker;
+advertised by new
 receivers; new senders omit alias derivation when it is present — old
 peers on both sides see today's exact behavior), the dual-lane
 ordering tuple `(worker_id, source sequence, helper incarnation /
@@ -2784,6 +2856,11 @@ sync_auth.go:321).
 Additive-only wire-visible changes (#1961-safe): the six helper-side
 §5.8 status counters (three more — the alias-discipline counters —
 are GO-side Prometheus, §5.8).
+The `SessionSync` struct notes the capability ticker's handle
+explicitly (`syncCapabilityTicker`, or reuse of the existing
+heartbeat ticker's scheduling — the advertisement's two emission
+points per §5.6: the ordered pre-data send on connect and the
+periodic re-advertisement, AGY r41 nit 2).
 `SyncedSessionEntry` gains TWO additive fields (AGY r39 nit):
 `pub_token: u64` (the coordinator-local publication token of §5.6 —
 stamped at publish inside the helper, HELPER-INTERNAL: it is NOT read
