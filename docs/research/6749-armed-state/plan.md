@@ -1,6 +1,6 @@
 # #6749 — binding-plan expansion registers new slots unarmed, dataplane disabled indefinitely
 
-**Status: DRAFT v8.18 — pending adversarial plan review (round 23)**
+**Status: DRAFT v8.19 — pending adversarial plan review (round 24)**
 
 - Issue: #6749 (opus-review-001 root R06, severity High)
 - Research base: `ad9591177` (origin/master at worktree creation)
@@ -1046,7 +1046,83 @@
   — `{queued, sentPair, sentDigest}`; the marker
   records the SENT pair; the exposure check holds
   gated pairs (AGY f4)); §9 re-specified; and the
-  hazard budget gains the v8.17/18 classes @ pending
+  hazard budget gains the v8.17/18 classes @
+  `0e4604ac4` (r23: SMR DEMAND-REVISION (2 BLOCKER +
+  2 MAJOR + 3 MINOR + 1 NIT); AGY DEMAND-REVISION (3
+  BLOCKER + 2 MAJOR + 1 MINOR); Codex infra-blocked
+  (usage limit, reset Aug 10 — two documented
+  attempts; 2-of-3 per the infra-blocked exception))
+; v8.19 folds SMR r23 (2 BLOCKER + 2 MAJOR + 3 MINOR
+  + 1 NIT) + AGY r23 (3 BLOCKER + 2 MAJOR + 1 MINOR):
+  the restart-only guard × GO-LOCAL loop dies to a
+  revision-keyed RESTART-SUPPRESSION marker (SMR23-1
+  = AGY r23 f1 — a guard-refused promotion never
+  advances `m.acceptedCommitRevision`, so the
+  GO-LOCAL rule re-fired forever: the drain's
+  guard-refusal now records the terminal marker
+  (Warn-once with the reason), the rule's firing
+  condition gains `ActivePair().revision ∉
+  restartSuppressed`, the re-sync debt CLEARS into
+  the marker (terminal, not into acceptance), a
+  newer promotion R′ > R re-arms the rule for R′
+  only, and the boot path owns the post-restart
+  apply); the timer edge gains its MECHANISM
+  (SMR23-2 = AGY r23 f2 — `Load` RECORDS the
+  recovered confirm window WITHOUT arming the timer
+  (the `time.AfterFunc` moves out of
+  store_persist.go:231-253), and the daemon arms it
+  via a store call (`ArmRecoveredConfirmTimer()`)
+  AFTER the boot apply completes — an already-
+  expired deadline fires immediately on that arm,
+  ordered after the boot apply by construction and
+  serialized by `applySem`; the executor
+  registration stays at daemon init
+  (daemon_run.go:130-136)); the status-loop
+  catch-up acceptance gains its completion-tail
+  owner (SMR23-3 = AGY r23 f3 — the catch-up's
+  `beginFirstExposure` installs the cursor AND posts
+  a completion notice on the bounded daemon channel
+  (enqueue-after-unlock, the OnXSKBound shape
+  (maps_sync.go:451-456)); the daemon drains it and
+  runs the phased tails exactly-once per cursor
+  entry (the cursor's `completionState` is the
+  single authority — the Compile-leg wrapper and
+  the listener never double-run); the
+  helper-restart shape's no-op tails are named
+  (invalidation no-op on the empty base; the peer
+  push + applied stamp still run for HA)); the
+  OVERLAP finalization ALSO clears the staged
+  snapshot reference atomically (SMR23-4 = AGY r23
+  f4 — `m.lastSnapshot` never references a cancelled
+  staged object (same `m.mu` section), AND
+  `syncSnapshotLocked`'s publish path gains the
+  defense-in-depth token-liveness branch (a dead
+  token → skip the publish + drop the staged
+  reference → the GO-LOCAL re-drive owns)); the
+  stage timeout is pinned (SMR23-5 — five minutes,
+  a scheduler entry recorded at staging and
+  cancelled with the registration, converting to
+  the GO-LOCAL re-drive; the never-recoverable-XSK
+  posture stated: the dataplane stays down by
+  CONFIG INTENT (the config committed an
+  unbindable plan), Warn-visible at the
+  transitions); the fence registry gains its read
+  discipline + crash window (SMR23-6 — the
+  admission check reads the effective fence and the
+  high-water as ONE consistent snapshot; the
+  process-exit window (slots + in-memory
+  high-water lost) stated in the budget); the
+  structured send gains its wiring (SMR23-7 = AGY
+  r23 f5 — constructor-injected `activePair`/
+  `isExposed` closures (no `pkg/cluster`→
+  configstore import), the marker records from the
+  RESULT (the claim moves after the send; the
+  reconciler reads `sentPair` from the result),
+  and the exposure drain's completion wakes the
+  sync reconciler); §9 (b)/(d)/(f) gain the
+  assertions (AGY r23 f6); §8's budget gains the
+  new classes; the cursor-crash phrasing corrected
+  (SMR23-8) @ pending
   AGY r15 (4 BLOCKER + 3 MAJOR + 1 MINOR) + SMR r15 (2
   BLOCKER + 3 MAJOR + 3 MINOR/NIT): R1 becomes a REAL
   rollout+transport contract — a legacy `active.json`
@@ -1128,7 +1204,7 @@
 
 ## 1. Status
 
-DRAFT v8.18 — pending adversarial plan review round 23 (Codex + AGY +
+DRAFT v8.19 — pending adversarial plan review round 24 (Codex + AGY +
 Claude SMR). Convergence target: PLAN-READY (recommended path shipped
 to `/engineer`) or PLAN-KILL. No production code is written under
 `/research`.
@@ -2147,6 +2223,54 @@ to `/engineer`) or PLAN-KILL. No production code is written under
   | Codex f14 hazard budget omits v8.17 hazards | CLOSED — the budget gains the v8.17/18 classes (the startup edge (dead — the timer arms post-boot-apply), the restart-only bypass (dead — the drain carries the guard), the closeout failure/strand (dead — the debt + the documented recovery channel), the cursor/crash (dead — the durable prior + the conservative clear-all), the dead-registration suppression (dead — the registry's bounded lifetime), the post-OVERLAP publication (dead — the cancellation + the OPEN check), the settlement/fence crash (dead — the registry + the cursor's durability), the operator-vs-restore collision (dead — the restore-authorized quiesce re-binds the current plan), the tombstone resurrection (dead — persists until a nonzero write), the stale outbound (dead — the structured transaction)) (§8, §11 Q7) |
   | AGY r22 f1-f6 | CLOSED — f1 → f8 row; f2 → f6 row; f3 → f5 row; f4 → f12 row; f5 → f10 row; f6 (phrasing) → f11 row |
   | SMR r22 SMR22-1..6 | CLOSED — SMR22-1 → f6 row; SMR22-2 → f5 row; SMR22-3 (boot-recovery edge) → f2 row; SMR22-4 (closeout strand) → f4 row; SMR22-5 (tombstone posture) → f11 row; SMR22-6 (settlement crash) → f9 row |
+
+- **Round 23** (v8.18): SMR DEMAND-REVISION (2 BLOCKER + 2 MAJOR +
+  3 MINOR + 1 NIT); AGY DEMAND-REVISION (3 BLOCKER + 2 MAJOR + 1
+  MINOR); Codex INFRA-BLOCKED (usage limit, reset Aug 10 — two
+  documented dispatch attempts; 2-of-3 per the infra-blocked
+  exception, retries continue). Convergence (every BLOCKER/MAJOR
+  found by BOTH reviewers independently, all verified against
+  source): the restart-only guard × GO-LOCAL rule is an unbounded
+  compile-and-refuse loop (SMR23-1 = AGY f1 — a guard-refused
+  promotion never advances `m.acceptedCommitRevision`, so
+  `ActivePair().revision > m.acceptedCommitRevision` stays true
+  forever and the drain re-fires at the 60s backoff floor until
+  the operator restarts — the plan's "defers to the operator
+  restart exactly as the SyncApply path does" was false: the
+  SyncApply path refuses ONCE per sync-receive; the drain has a
+  retry loop); the timer-arms-post-boot-apply edge names no
+  mechanism (SMR23-2 = AGY f2 — the registration is pre-`Load`
+  (daemon_run.go:130-136) and `Load` re-arms unconditionally
+  (store_persist.go:231-253), so a recovered near-expiry timer
+  can fire mid-startup against nil/partial managers; the §9 (b)
+  citation for the edge had no assertion); the status-loop
+  catch-up acceptance has no completion-tail owner (SMR23-3 =
+  AGY f3 — the ACTUAL publisher's acceptance leg has no
+  `ApplyResult` to ride; Codex r22 f5's required
+  queryable-cursor/listener never landed); the ACTUAL publisher
+  never checks the token liveness the plan pins on the
+  `OnXSKBound` leg (SMR23-4 = AGY f4 —
+  `syncSnapshotLocked`'s publish conditions never consult the
+  registry: a cancelled staged object still referenced by
+  `m.lastSnapshot` publishes). SMR-only: SMR23-5 (stage-timeout
+  mechanics unpinned), SMR23-6 (fence-registry admission read
+  discipline + crash window), SMR23-7 (the `QueueConfig` closure
+  wiring — `pkg/cluster` imports no configstore), SMR23-8
+  (circular cursor-crash phrasing). AGY-only: f5 (= SMR23-7),
+  f6 (§9 gaps for f1/f2).
+- **Round-23 disposition table:**
+
+  | r23 finding | v8.19 disposition |
+  |---|---|
+  | SMR23-1 / AGY f1 restart-only GO-LOCAL loop | CLOSED — the drain's guard-refusal records a revision-keyed RESTART-SUPPRESSION marker (terminal, Warn-once with the reason); the GO-LOCAL firing condition gains `ActivePair().revision ∉ restartSuppressed`; the re-sync debt CLEARS into the marker (terminal "restart-required", not into acceptance); a newer promotion R′ > R re-arms the rule for R′ only; the boot path owns the post-restart apply (§5-C epoch contract + re-sync, §9 (d), §8) |
+  | SMR23-2 / AGY f2 timer mechanism + §9 (b) citation | CLOSED — `Load` RECORDS the recovered confirm window WITHOUT arming (the `time.AfterFunc` moves out of store_persist.go:231-253); the daemon arms it via `ArmRecoveredConfirmTimer()` AFTER the boot apply completes (an already-expired deadline fires immediately on that arm — ordered after the boot apply by construction, serialized by `applySem`; the executor registration stays at daemon init); §9 (b) asserts the mechanism (a mid-startup-expiry timer does NOT fire before the boot apply; a queued expiry fires after, in order) (§5-C epoch contract, §9 (b)) |
+  | SMR23-3 / AGY f3 catch-up completion-tail owner | CLOSED — the catch-up's `beginFirstExposure` installs the cursor AND posts a completion notice on the bounded daemon channel (enqueue-after-unlock, the OnXSKBound shape); the daemon drains it and runs the phased tails exactly-once per cursor entry (the cursor's `completionState` is the single authority — the Compile-leg wrapper and the listener never double-run); the helper-restart shape's no-op tails named (invalidation no-op on the empty base; the peer push + applied stamp still run) (§5-C (ii), §6, §9 (a)/(d)) |
+  | SMR23-4 / AGY f4 publisher liveness | CLOSED — the OVERLAP finalization CANCELS the registration AND CLEARS the staged snapshot reference atomically under the same `m.mu` section (`m.lastSnapshot` never references a cancelled staged object); AND `syncSnapshotLocked`'s publish path gains the defense-in-depth token-liveness branch (a dead token → skip + drop the staged reference → the GO-LOCAL re-drive owns); §9 (f) asserts the publisher leg (T1 staged → OVERLAP → T2 fails pre-staging → XSK bindable → NO publish of T1) (§5-C, §9 (f)) |
+  | SMR23-5 stage-timeout mechanics | CLOSED — five minutes; a scheduler entry recorded at staging, cancelled with the registration; converts to the GO-LOCAL re-drive (not an indefinite stage); the never-recoverable-XSK posture stated (dataplane down by CONFIG INTENT, Warn-visible at the transitions; §8 carries the class) (§5-C, §8, §9 (f)) |
+  | SMR23-6 fence read discipline + crash window | CLOSED — the session-admission check reads the effective fence (max over live slots) and the high-water as ONE consistent snapshot (a fence raise can never be torn away from the high-water it covers); the process-exit window (slots + in-memory high-water lost; admission runs against the lost high-water until the boot's first re-raise) stated as the pre-existing posture in §8 (§5-C (ii), §8) |
+  | SMR23-7 / AGY f5 QueueConfig wiring | CLOSED — constructor-injected `activePair func() (*config.Config, uint64)` + `isExposed func(rev uint64) bool` closures (the daemon wires the configstore reads; no `pkg/cluster`→configstore import); the marker records from the structured RESULT (the claim moves after the send; the reconciler at daemon_ha_sync.go:474-497 reads `sentPair` from the result); the held push re-wakes on the exposure drain's completion (a trigger edge into the level-triggered reconciler) (§5-C (ii), §6) |
+  | SMR23-8 cursor-crash phrasing | CLOSED — reworded: the crash LOSES the cursor; recovery derives the incomplete set from the `appliedRevision` sidecar + the store's rollback/archive trees (exposed vs active revision) (§5-C (ii)) |
+  | AGY r23 f6 §9 gaps | CLOSED — §9 (b) gains the timer-mechanism assertion; §9 (d) gains the restart-only suppression assertion (a guard-refused promotion neither re-fires the rule nor holds the debt) |
 
 ### Round-1 detail log (kept for the record)
 
@@ -4124,7 +4248,33 @@ BLOCKERs 6 + 8; v8 epoch form per Codex r6 f6/f8):**
   exceeding the newest OBSERVED-ACCEPTED revision
   (`ActivePair().revision > m.acceptedCommitRevision`)
   AND **no live deferred-publish registration exists for
-  the active pair** — the v8.15 "with no apply in flight"
+  the active pair** AND **the active revision is not
+  RESTART-SUPPRESSED** (v8.19, SMR r23 SMR23-1 = AGY r23
+  f1's loop fix: a guard-refused promotion never advances
+  `m.acceptedCommitRevision` (the guard refuses BEFORE
+  any Compile, so no acceptance is ever observed for R),
+  so the unmodified rule re-fires the drain forever at
+  the 60s backoff floor — an unbounded compile-and-refuse
+  loop against a config that can never apply without a
+  restart, for what is a NORMAL, expected state (every
+  #5840/#6192 topology/identity peer sync puts the
+  standby here BY DESIGN): the drain's guard-refusal
+  records R into the revision-keyed
+  `restartSuppressed` set (a terminal "restart-required"
+  marker, Warn-once with the guard's reason — and the
+  re-sync debt CLEARS into that marker (terminal, NOT
+  into acceptance — the v8.18 text's "defers to the
+  operator restart exactly as the SyncApply path does"
+  was false: the SyncApply path refuses ONCE per
+  sync-receive; the drain has a retry loop, and only the
+  marker stops it)); the rule never fires for a
+  suppressed revision; a newer promotion R′ > R
+  evaluates on its own merits (R′ ∉ the set until its
+  own guard-refusal records it); the set is
+  process-scoped (the boot path owns the post-restart
+  apply — a restart clears it by construction) and
+  bounded (one entry per guard-refused revision, GC'd
+  when the active revision moves past)) — the v8.15 "with no apply in flight"
   qualifier was deleted as unnecessary AND deadlocking (a live
   compile holds `applySem`, and the drain acquires
   `applySem`, so the FIFO already serializes them; and
@@ -4403,15 +4553,59 @@ BLOCKERs 6 + 8; v8 epoch form per Codex r6 f6/f8):**
   the deferred leg ALSO checks its token's liveness
   BEFORE publishing (an OVERLAP-finalized token is
   dead — the leg discards the staged object and
-  skips), and the registration's lifetime is bounded
+  skips) — AND the OVERLAP finalization CLEARS the
+  staged snapshot reference ATOMICALLY with the
+  cancellation (v8.19, SMR r23 SMR23-4 = AGY r23 f4's
+  publisher-blindness fix: the ACTUAL publisher is
+  `syncSnapshotLocked` (process_status.go:10-140) and
+  its publish conditions (the nil guards, the
+  already-published skip, the helper-ahead catch-up,
+  the XSK-liveness defer + same-plan exception, the
+  plan-change restart, the content-hash dedup) never
+  consulted the registry — so a cancelled staged
+  object still referenced by `m.lastSnapshot` (T2
+  OVERLAP-finalized T1 and then failed BEFORE staging
+  its own object) published anyway via the main
+  path): under the same `m.mu` section the
+  finalization marks the reservation OVERLAP, cancels
+  the registration, AND drops `m.lastSnapshot`'s
+  staged reference (the accepted config is durable in
+  the store — the staged snapshot is only the
+  manager's compiled cache; losing it costs a
+  rebuild, never correctness — and the GO-LOCAL
+  re-drive's full-apply retry rebuilds from the
+  store) — `m.lastSnapshot` NEVER references a
+  cancelled staged object by construction; AND
+  `syncSnapshotLocked`'s publish path gains the
+  defense-in-depth token-liveness branch (belt-and-
+  suspenders: a dead token → skip the publish, drop
+  the staged reference, and let the GO-LOCAL
+  re-drive own the re-apply) — and the
+  registration's lifetime is bounded
   by exactly: `OnXSKBound` firing (with the liveness
-  check), OVERLAP finalization (which cancels), helper
+  check), OVERLAP finalization (which cancels AND
+  clears), helper
   death (the registration dies with the process), and
-  an explicit STAGE TIMEOUT (a never-firing event —
-  the staged config is the ACCEPTED control-plane
-  config, so a never-binding XSK converts to the
-  GO-LOCAL re-drive's full-apply retry at backoff —
-  not an indefinite stage). The
+  an explicit STAGE TIMEOUT (v8.19, SMR r23 SMR23-5's
+  mechanics pin: FIVE MINUTES — an XSK that has not
+  bound in five minutes is not the transient
+  channel-set change (which recovers in
+  seconds-to-minutes); the owner is a scheduler entry
+  recorded at staging and cancelled with the
+  registration (every other lifetime path cancels
+  it); on expiry the registration dies and the
+  GO-LOCAL re-drive's full-apply retry at backoff
+  owns the re-attempt — not an indefinite stage; the
+  POSTURE stated: for the whole stage AND the
+  re-drive's retries the staged config's
+  `DeferWorkers=true` keeps the dataplane DOWN, and
+  for a never-recoverable XSK (the VF destroyed) that
+  is indefinite BY CONFIG INTENT — the config
+  committed a binding plan whose interfaces cannot
+  bind; the dataplane stays down until the operator
+  fixes the XSK or the config, Warn-visible at the
+  stage/timeout/retry transitions (§8 carries the
+  class)). The
   auxiliary clones: route/scheduler clones PRESERVE the
   cached snapshot's defer value (they are republishes
   of the cached content, not new intents); and the
@@ -4532,8 +4726,19 @@ BLOCKERs 6 + 8; v8 epoch form per Codex r6 f6/f8):**
   GO-LOCAL drain's revised `applyConfigLocked` carries
   the SAME topology/identity guard (v8.18, Codex r22
   f2's bypass fix: a restart-only config is never
-  live-applied by the re-sync — it defers to the
-  operator restart exactly as the SyncApply path does);
+  live-applied by the re-sync) — and the drain's
+  guard-refusal records the revision-keyed
+  `restartSuppressed` marker (v8.19, SMR r23 SMR23-1 =
+  AGY r23 f1: the v8.18 "defers to the operator
+  restart exactly as the SyncApply path does" was
+  FALSE — the SyncApply path refuses ONCE per
+  sync-receive, but the drain is a retrying debt and
+  a guard-refused promotion never advances
+  `m.acceptedCommitRevision`, so the unmarked drain
+  re-fires forever at the 60s floor; the marker makes
+  the refusal terminal (Warn-once), clears the debt,
+  and suppresses the GO-LOCAL rule for that revision
+  (§5-C re-sync));
   the persistence retry advances only DURABILITY under
   `s.mu` (never a new active pair; the write is
   atomic (`writeTreeMarked`), so a drain's
@@ -4545,17 +4750,54 @@ BLOCKERs 6 + 8; v8 epoch form per Codex r6 f6/f8):**
   complete BEFORE the apply scheduler starts (startup
   serialization, v8.18's edge pin — INCLUDING the
   rollback executor's timer: it is armed only AFTER
-  the boot apply completes (the v8.17 text's
-  "precedes all flows" was too weak: the executor is
-  registered before `Load` (daemon_run.go:130-136)
-  and `Load` re-arms it (store_persist.go:231-253),
-  so a near-expiry timer could fire mid-startup
+  the boot apply completes, BY MECHANISM (v8.19, SMR
+  r23 SMR23-2 = AGY r23 f2's mechanism pin — the v8.18
+  text stated the arming as fact but named no
+  mechanism, and the registration reality contradicts
+  the unmodified code: the executor is registered
+  before `Load` (daemon_run.go:130-136) and `Load`
+  re-arms the recovered confirm window's timer
+  UNCONDITIONALLY (`s.confirmTimer =
+  time.AfterFunc(remaining, ...)`,
+  store_persist.go:231-253), while the executor's
+  `applySem` is FREE during the startup phases — so a
+  recovered near-expiry timer could fire mid-startup
   between naming (daemon_run_naming.go:42-90) and
   manager construction/dataplane apply
-  (daemon_run_bringup.go:161-208/:418-520) —
+  (daemon_run_bringup.go:161-208/:418-520),
   producing B-derived naming with A-derived
-  managers/dataplane; arming post-boot-apply closes
-  it (and `PromoteRollback`'s own apply takes
+  managers/dataplane or a nil-manager panic): the
+  chosen mechanism is the DEFERRED ARM — `Load`
+  RECORDS the recovered window (the deadline, the
+  rollback target trees, the confirm generation —
+  everything store_persist.go:231-253 already
+  restores) WITHOUT calling `time.AfterFunc`, and the
+  daemon arms it via a new store method
+  `ArmRecoveredConfirmTimer()` invoked AFTER the boot
+  apply completes (phase 4,
+  `setupDataplaneAndInitialConfig`, returns): an
+  already-expired deadline fires IMMEDIATELY on that
+  arm (`time.Until` ≤ 0 → `AfterFunc` runs at once),
+  so the expiry is never dropped — it is ORDERED
+  after the boot apply by construction and serialized
+  by `applySem` like every other promotion+apply (the
+  executor then promotes the rollback target and
+  re-applies as an ordinary serialized DECISION); the
+  executor registration stays at daemon init
+  (daemon_run.go:130-136 — it covers every
+  commit-confirmed path from the first commit, and no
+  commit can exist before phase 1 completes, so the
+  registration point is not the hazard — the ARM
+  point was); the alternatives rejected: moving the
+  registration post-phase-4 leaves `Load`'s re-arm
+  executorless (a silent no-op expiry — the worst
+  shape), and a boot-complete gate inside the
+  executor defers the fire into daemon state the
+  store cannot see (the store's confirm state would
+  sit un-fired past its deadline with no record —
+  the deferred arm keeps the pending expiry INSIDE
+  the store, visible and exactly-once); and
+  `PromoteRollback`'s own apply takes
   `applySem` like every other path)).
   Therefore NO promotion
   can interpose mid-flow: the pair read at a flow's
@@ -4900,7 +5142,38 @@ BLOCKERs 6 + 8; v8 epoch form per Codex r6 f6/f8):**
   direct-durable: `oldActive` is B (store-active), the
   prior is A (last-exposed) — the prior is the correct
   base, and the wrapper's `oldActive` would reopen
-  Codex r20 f5's direct-C case if it ever won); the boot
+  Codex r20 f5's direct-C case if it ever won); the
+  STATUS-LOOP CATCH-UP acceptance leg gains its own
+  completion-tail owner (v8.19, SMR r23 SMR23-3 = AGY
+  r23 f3's transport fix for the second acceptance
+  leg: the `syncSnapshotLocked` catch-up (the ACTUAL
+  publisher, process_status.go:10-140) accepts
+  asynchronously inside the manager's background
+  status loop — no `ApplyConfig` frame, no
+  `ApplyResult`, no daemon wrapper — so the
+  `ApplyResult` transport can never serve it): the
+  catch-up's `beginFirstExposure` runs in the same
+  manager-side `m.mu` acceptance section, installs
+  the cursor atomically exactly as the Compile leg
+  does, AND posts a COMPLETION NOTICE on the bounded
+  daemon channel (enqueue-after-unlock — no
+  synchronous manager→daemon call under `m.mu`; the
+  `OnXSKBound` shape, maps_sync.go:451-456); the
+  daemon's scheduler drains the notice and runs the
+  phased tails (the session invalidation composing
+  prior → B, the peer push, the applied stamp) with
+  the cursor's `completionState` as the SINGLE
+  exactly-once authority — a tail runs once
+  regardless of whether the Compile-leg wrapper or
+  the listener observes it first (the wrapper's
+  ApplyResult path and the notice path both consult
+  and advance the same cursor record; a completed
+  entry's tails are skipped); the helper-restart
+  shape's no-op tails are NAMED (a fresh helper holds
+  no sessions — the invalidation is a no-op on the
+  empty base — but the peer push and the applied
+  stamp are NOT no-ops: HA still needs both, and the
+  listener runs them); the boot
   unknown-base policy (Codex r21 f6's second half):
   a genuinely cold helper has no sessions (empty base,
   no-op — safe), but a manager/daemon RESTART over a
@@ -5005,7 +5278,22 @@ BLOCKERs 6 + 8; v8 epoch form per Codex r6 f6/f8):**
   own slot (a slot clear is owner-scoped — no writer
   can erase another's); and a slot dies with its
   owner's terminal path (the drain's settlement, the
-  loop's end, a process exit), (2) runs the phased tails (the clear
+  loop's end, a process exit) — and the
+  session-admission READER discipline is pinned
+  (v8.19, SMR r23 SMR23-6: the admission check
+  (sync_conn_gen.go:398-432's `max(fence, high-water)`)
+  reads the effective fence (the max over live slots)
+  AND the high-water as ONE consistent snapshot (one
+  short registry lock covering both reads — a fence
+  raise can never be torn away from the high-water it
+  covers: reading the pair separately admits a session
+  under a just-raised fence, fail-open); the
+  process-exit window is the pre-existing posture,
+  stated: a crash loses all slots AND the in-memory
+  high-water, so admission between crash and the
+  boot's first re-raise runs against the lost (zero)
+  fence/high-water — the boot's first apply re-raises
+  both and the window closes (§8 carries the class)), (2) runs the phased tails (the clear
   included), and (3) the settlement item advances the
   high-water LAST — the fence covers the whole
   window); the settlement item carries
@@ -5032,9 +5320,13 @@ BLOCKERs 6 + 8; v8 epoch form per Codex r6 f6/f8):**
   landed-but-unprocessed item is re-posted by the
   debt's backoff; a process crash losing the channel,
   cursor, AND debt together is covered by the
-  completion cursor's crash rule (re-derivable from
-  the store-retained prior + the cursor, re-run
-  idempotently at startup)) — an
+  completion cursor's crash rule (v8.19, SMR r23
+  SMR23-8's phrasing fix: the crash LOSES the cursor —
+  recovery derives the incomplete set from the
+  `appliedRevision` sidecar (the exposed revision) and
+  the store's rollback/archive trees (the durable
+  active revision): exposed < active ⇒ the tails for
+  exposed→active re-run idempotently at startup)) — an
   in-process item, not a wire change — the context
   being the last-exposed config by GC-RETAINED POINTER
   (v8.16, SMR r20 SMR20-5: the store's active object;
@@ -6096,7 +6388,29 @@ activations a scheduled retry.
   (the peer's state never leads the primary's exposed
   state, and the peer's own exposure machinery
   converges its local config independently once the
-  push lands post-exposure)); the revision
+  push lands post-exposure)) — with the WIRING pinned
+  (v8.19, SMR r23 SMR23-7 = AGY r23 f5: (i) the
+  revalidation reaches the configstore through
+  CONSTRUCTOR-INJECTED closures — `SessionSync`
+  gains `activePair func() (*config.Config, uint64)`
+  and `isExposed func(rev uint64) bool`, wired by the
+  daemon at construction (pkg/cluster imports NO
+  configstore (sync_conn_config.go:1-8) and keeps it
+  that way — no package cycle); (ii) the marker-claim
+  ORDER: today the daemon claims its marker BEFORE
+  calling `QueueConfig` (daemon_ha_sync.go:474-497) —
+  the claim moves AFTER the send: the reconciler
+  records the marker FROM the structured result's
+  `sentPair` (a re-derived B is marked B, never the
+  originally captured A); and (iii) the held push's
+  RE-WAKE owner: a gated pair HOLDS the push
+  (`{queued: false, holdReason: "unexposed"}` — no
+  send, no generation burned), and the exposure
+  drain's completion posts a trigger edge into the
+  level-triggered `reconcileConfigSyncToPeer` (the
+  same reconciler, daemon_ha_sync.go:355-378), which
+  re-attempts the push on that edge — the peer never
+  waits for the slow periodic tick); the revision
   assignment itself (the five
   promotion paths + the dedicated high-water + the
   migration allocator + the capability-2 envelope) is
@@ -6343,7 +6657,15 @@ activations a scheduled retry.
   completionState}` is installed ATOMICALLY in the same
   section (the re-sync debt clears ONLY after the
   record installs; a completed replay skips the tails;
-  an incomplete replay resumes its phase). The prior
+  an incomplete replay resumes its phase) — and the
+  STATUS-LOOP CATCH-UP acceptance leg (the
+  `syncSnapshotLocked` publisher, which has no
+  `ApplyResult` to ride) posts a COMPLETION NOTICE on
+  the bounded daemon channel (enqueue-after-unlock,
+  the OnXSKBound shape); the daemon drains it and runs
+  the phased tails with the cursor's `completionState`
+  as the single exactly-once authority across BOTH
+  legs (v8.19, SMR r23 SMR23-3 = AGY r23 f3). The prior
   config is durable by construction (the store's
   rollback/archive trees retain it by revision), so a
   crash mid-completion re-derives the cursor from the
@@ -7303,7 +7625,19 @@ activations a scheduled retry.
       Codex r20 f2): a gated commit's SNMP/web/host-auth
       tightening FOLLOWS (assert old communities/
       credentials close even while the dataplane leg
-      waits);
+      waits); the DEFERRED-ARM rollback timer (v8.19,
+      SMR r23 SMR23-2 = AGY r23 f2): a recovered
+      confirm window whose deadline falls MID-STARTUP
+      does NOT fire before the boot apply completes
+      (assert `Load` records the window without arming
+      — no `time.AfterFunc` in the load path — and the
+      executor never runs between phases); an
+      already-expired deadline fires IMMEDIATELY on the
+      post-boot-apply `ArmRecoveredConfirmTimer()` call
+      (assert the expiry is queued, never dropped, and
+      its promote+apply serializes under `applySem`
+      AFTER the boot apply — never B-derived naming
+      with A-derived dataplane);
       the false-green refused: asserting
       precheck execution while letting the second leg
       re-read or the boolean gate suppress A.
@@ -7352,7 +7686,18 @@ activations a scheduled retry.
       T1 — and the GO-LOCAL re-sync rule FIRES
       (`ActivePair().revision > m.acceptedCommitRevision`,
       no helper input — assert the autonomous re-drive,
-      Codex r19 f7's ownerless path); the explicit
+      Codex r19 f7's ownerless path) — AND the
+      RESTART-SUPPRESSION marker (v8.19, SMR r23
+      SMR23-1 = AGY r23 f1): a peer-synced
+      topology/identity-changing config promotes R but
+      is guard-refused — assert the drain's guard-refusal
+      records R into `restartSuppressed` (Warn-once),
+      the re-sync debt CLEARS into the terminal marker
+      (no acceptance, no retry — assert NO second drain
+      fires for R on any later poll), the rule never
+      re-fires for R, and a newer promotion R′ > R
+      re-arms the rule for R′ only (the set is
+      process-scoped — a restart clears it); the explicit
       revision-0 CLI Compile is EXEMPT from the
       pair-current leg (SMR r19 SMR19-4);
       the token seed (v8.14, Codex r18 f6): a manager re-init
@@ -7405,19 +7750,34 @@ activations a scheduled retry.
       forces `false` only for the generation it owns
       completion for);
       the POST-OVERLAP staged send (v8.18, Codex r22 f6
-      = AGY r22 f2 = SMR r22 SMR22-1): T1 stages
+      = AGY r22 f2 = SMR r22 SMR22-1; the publisher leg
+      added v8.19, SMR r23 SMR23-4 = AGY r23 f4): T1 stages
       (pending-XSK), same-pair T2 starts and finalizes
       T1 as OVERLAP, T2 FAILS before acceptance — T1's
       deferred leg fires — assert the leg's registration
       was CANCELLED by the finalization AND the send
       primitive checks the node is still OPEN (T1's
       staged content NEVER publishes late over T2's
-      state, and the leg discards the staged object);
+      state, and the leg discards the staged object) —
+      AND the publisher leg: T2 fails BEFORE staging its
+      own object, so `m.lastSnapshot` still references
+      T1's staged object; the XSK becomes bindable;
+      assert the OVERLAP finalization ALSO CLEARED the
+      staged reference atomically (the publisher has
+      nothing stale to send), `syncSnapshotLocked`'s
+      defense-in-depth token-liveness branch skips any
+      residual dead-token publish (and drops the staged
+      reference), and the GO-LOCAL re-drive owns the
+      re-apply (T1's cancelled content NEVER reaches
+      the helper on EITHER leg);
       the registration's lifetime (staged → live →
       completed on the catch-up's publish; OVERLAP →
-      cancelled; helper death → died; stage timeout →
+      cancelled + cleared; helper death → died; stage
+      timeout →
       the GO-LOCAL re-drive (assert the timeout fires
-      the re-sync, not an indefinite stage));
+      the re-sync at the five-minute mark, not an
+      indefinite stage, and the scheduler entry is
+      cancelled on every other lifetime path));
       T2 starts (captures T1's
       `{true,true}`), T1 finishes ACCEPTED (recorded,
       non-head), T2 fails pre-publish — the head's Finish
@@ -8022,7 +8382,7 @@ the three owners through nine enumerations; the mixed-version
 producer is the documented exception with the required helper
 restart).
 
-Remaining questions for round 23, each invitable to PLAN-KILL with
+Remaining questions for round 24, each invitable to PLAN-KILL with
 a concrete counterexample:
 
 1. **Completeness, final form.** Exhibit a path to
@@ -8085,10 +8445,10 @@ a concrete counterexample:
    candidate-filter territory
    (`include_userspace_binding_interface`), explicitly out of
    scope here.
-6. **Round-22 disposition table audit.** §1's r22 table maps
-   every r22 finding (Codex 13 BLOCKER + 1 MAJOR; AGY 3
-   BLOCKER + 2 MAJOR + 1 MINOR; SMR 2 MAJOR + 4 MINOR)
-   to its v8.18 fold, and every fold this revision was
+6. **Round-23 disposition table audit.** §1's r23 table maps
+   every r23 finding (SMR 2 BLOCKER + 2 MAJOR + 3 MINOR + 1
+   NIT; AGY 3 BLOCKER + 2 MAJOR + 1 MINOR; Codex infra-blocked)
+   to its v8.19 fold, and every fold this revision was
    verified per-edit against the file. Which row is
    claimed-but-wrong this time?
 7. **Cumulative hazard budget, final sign-off (v8.8 honest
@@ -8143,5 +8503,27 @@ a concrete counterexample:
    the kernel-unreapable/D-state class = unbounded PERIOD
    (SIGKILL cannot reap D-state; the 60s Warn +
    out-of-band operator action up to a reboot is the only
-   mitigation). Which of these, if any, is
+   mitigation) — PLUS the v8.17-v8.19 classes (Codex r22
+   f14's demand, completed): the restart-only active
+   config (a peer-synced topology/identity promotion the
+   guard refuses live) = the terminal `restartSuppressed`
+   marker (Warn-once, no retry loop — the boot path owns
+   the post-restart apply; DEAD as a loop, the marker is
+   the posture); the never-recoverable-XSK stage (the
+   staged config's `DeferWorkers=true` keeps the
+   dataplane DOWN for the stage + the re-drive's
+   retries, INDEFINITE for a destroyed VF) = BY CONFIG
+   INTENT (the config committed an unbindable binding
+   plan; the dataplane stays down until the operator
+   fixes the XSK or the config), Warn-visible at the
+   stage/timeout/retry transitions; the fence-registry
+   crash window (a process exit loses all slots AND the
+   in-memory high-water; admission between crash and the
+   boot's first re-raise runs against the lost zero
+   fence/high-water) = pre-existing posture, the boot's
+   first apply re-raises both; the deferred-arm
+   rollback timer (a recovered confirm window whose
+   deadline falls mid-startup) = QUEUED, never dropped
+   (the arm fires it immediately after the boot apply,
+   serialized by `applySem`). Which of these, if any, is
    unacceptable for the severity-High class, and why?
