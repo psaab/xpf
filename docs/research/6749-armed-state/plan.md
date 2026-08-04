@@ -1,6 +1,6 @@
 # #6749 — binding-plan expansion registers new slots unarmed, dataplane disabled indefinitely
 
-**Status: DRAFT v8.17 — pending adversarial plan review (round 22)**
+**Status: DRAFT v8.18 — pending adversarial plan review (round 23)**
 
 - Issue: #6749 (opus-review-001 root R06, severity High)
 - Research base: `ad9591177` (origin/master at worktree creation)
@@ -953,6 +953,100 @@
   (Codex f13 — a stale capture is re-derived, never
   sent); §9's chain tests re-specified; and the
   hazard budget gains the v8.16/17 classes @ pending
+; v8.18 folds Codex r22 (13 BLOCKER + 1 MAJOR) + AGY
+  r22 (3 BLOCKER + 2 MAJOR + 1 MINOR) + SMR r22 (2
+  MAJOR + 4 MINOR): the promotion-serialization
+  invariant gains its EDGES (Codex f2 — SyncApply's
+  topology/identity guard (:381-402) and
+  PromoteRollback's nil-target bootstrap teardown are
+  serialized DECISIONS, not violations, and the
+  GO-LOCAL drain's revised `applyConfigLocked` carries
+  the SAME guard (a restart-only config is never
+  live-applied by the re-sync); the startup
+  promotions (Load's boot-recovery promote, the
+  legacy migration, bootstrapFromFile) complete
+  BEFORE the apply scheduler starts, and the
+  rollback executor's timer is armed only AFTER the
+  boot apply (a near-expiry timer could otherwise
+  fire mid-startup — B-derived naming with A-derived
+  dataplane)); the stale interposition texts are
+  swept (Codex f3 — the v8.12-v8.16 "operator
+  promotion needs no applySem" claims were FALSE
+  under the invariant); the closeout's A-live model
+  is last-EXPOSED with a targeted removal projection
+  (Codex f4 — beginFirstExposure's prior, never
+  store-active `oldActive`; the owners take whole
+  desired configs, so the closeout synthesizes a
+  REMOVAL-ONLY desired projection and applies it
+  through class-targeted removals (web binds read
+  CURRENT kernel addresses; MIXED changes defer
+  wholesale); the debt keys on the pair and
+  RECOMPUTES from live authorization to the latest
+  desired state on each retry (a stale B debt never
+  removes something C keeps); the failure TRANSITION
+  (a closeout failure does NOT prevent B's exposure
+  — the alternative adds an unbounded gate); the
+  operator-session strand is the intended
+  monotonic-revocation consequence with the
+  out-of-band recovery channel documented; and
+  networkd/services are DEFERRED everywhere (they
+  consume `ApplyResult.ManagedInterfaces`)); the
+  beginFirstExposure lifecycle is cross-layer (Codex
+  f5 = AGY f3 = SMR22-2 — manager-side at acceptance
+  (the same `m.mu` section that advances
+  `m.acceptedCommitRevision`), the `{priorPair,
+  ledgerID, firstExposure}` triple rides the
+  `ApplyResult`, `oldActive` is RETIRED from the
+  invalidation path, the cursor installs atomically,
+  the prior config is durable via the store's
+  rollback/archive trees, and an unrecoverable base
+  (sidecar-present included) triggers the
+  conservative clear-all); the OVERLAP finalization
+  CANCELS the staged leg's registration (SMR22-1 =
+  AGY f2 = Codex f6 — and the send primitive checks
+  the reservation node is still OPEN for staged
+  sends; the registration's lifetime is bounded by
+  {OnXSKBound firing with the liveness check, OVERLAP
+  finalization, helper death, an explicit stage
+  timeout → the GO-LOCAL re-drive}); the deferred-
+  publish discriminator becomes a REAL REGISTRY
+  (Codex f7 — `{pair, token, state, registeredAt}`
+  with the transitions (staged → live; the
+  syncSnapshotLocked catch-up publishes → completes
+  (the ACTUAL publisher, process_status.go:10-140);
+  OVERLAP → cancelled; helper death → died; stage
+  timeout → the GO-LOCAL re-drive)); the helper
+  fences on newest-ACCEPTED with the
+  `accepted_snapshot_token` echo field (Codex f8 =
+  AGY f1 — and the leftover newest-SEEN text is
+  swept); the fence becomes an OWNER-TOKEN REGISTRY
+  (Codex f9 — every fence writer takes a slot; the
+  effective fence is the max over live slots; a
+  writer clears only its own slot; slots die with
+  their owner's terminal path) and the settlement
+  lifecycle completes (allocation, dedup
+  retention/GC, duplicate re-ack, stale-discard ack,
+  release on every terminal path; the crash case
+  rides the cursor's durability); the restore debt's
+  retry uses a RESTORE-AUTHORIZED quiesce (Codex
+  f10 — each retry becomes a NEW transaction:
+  reassert the gate, stop operator-spawned workers,
+  restore, rebind the CURRENT plan) and the
+  link-state observation becomes the UNCONDITIONAL
+  `RecordLinkObservation` (Codex f10 = AGY f5 — a
+  stale Report can never un-record it, and it SKIPS
+  already-removed members); the tombstone PERSISTS
+  until a successful nonzero map transaction (Codex
+  f11 — the config-authoritative form could
+  resurrect a down fabric into a blackhole (every
+  installed fabric down → the redirect falls back
+  to one (fabric.rs:446-464)); the full build reads
+  the canonical pair verbatim); the outbound marker
+  becomes a STRUCTURED SEND TRANSACTION (Codex f12
+  — `{queued, sentPair, sentDigest}`; the marker
+  records the SENT pair; the exposure check holds
+  gated pairs (AGY f4)); §9 re-specified; and the
+  hazard budget gains the v8.17/18 classes @ pending
   AGY r15 (4 BLOCKER + 3 MAJOR + 1 MINOR) + SMR r15 (2
   BLOCKER + 3 MAJOR + 3 MINOR/NIT): R1 becomes a REAL
   rollout+transport contract — a legacy `active.json`
@@ -1034,7 +1128,7 @@
 
 ## 1. Status
 
-DRAFT v8.17 — pending adversarial plan review round 22 (Codex + AGY +
+DRAFT v8.18 — pending adversarial plan review round 23 (Codex + AGY +
 Claude SMR). Convergence target: PLAN-READY (recommended path shipped
 to `/engineer`) or PLAN-KILL. No production code is written under
 `/research`.
@@ -1977,6 +2071,83 @@ to `/engineer`) or PLAN-KILL. No production code is written under
   | AGY r21 f1-f4 | CLOSED — f1 → f3/f4 rows (the invariant reverts the abort); f2 → f9 row; f3 → f11 row; f4 → f2 row (the flow re-order) |
   | SMR r21 SMR21-1..7 | CLOSED — SMR21-1 → f9 row; SMR21-2 → f11 row; SMR21-3 (boot/replay base semantics) → f6 row; SMR21-4 (deferred-leg stamp + #5134) → f8 row; SMR21-5 (fence discipline) → f5 row; SMR21-6 (tombstone posture) → f12 row; SMR21-7 (closeout failure = the commit's error) → superseded by f2's persistent closeout debt |
 
+- **Round 22** (v8.17): ALL THREE DEMAND-REVISION — Codex (13
+  BLOCKER + 1 MAJOR), AGY (3 BLOCKER + 2 MAJOR + 1
+  MINOR), SMR (2 MAJOR + 4 MINOR). Convergence: the
+  OVERLAP-finalized staged leg can publish late over
+  the newer accepted config (SMR22-1 = AGY f2 = Codex
+  f6 — the OVERLAP finalization must CANCEL the staged
+  leg's registration, and the send primitive checks
+  the node is still OPEN); the ApplyResult must
+  transport the beginFirstExposure triple (AGY f3 =
+  SMR22-2); AGY-only: f1 (accepted_snapshot_token
+  missing from StatusSnapshot — the seed has no wire
+  field), f4 (the QueueConfig re-derivation lacks the
+  exposure check — a gated pair must never be
+  pushed), f5 (the link recording strands deleted
+  members), f6 (the tombstone's full-build phrasing
+  contradicts itself). SMR-only: SMR22-2's
+  locus/single-source half + SMR22-3..6 pins.
+  Codex-only depth: the invariant is FALSE at startup
+  and does not cover every promoted outcome (f2 —
+  SyncApply promotes but deliberately SKIPS the apply
+  for topology/identity changes (:381-402), so
+  GO-LOCAL's revised applyConfigLocked would
+  live-apply a restart-only config and bypass the
+  guards; PromoteRollback's nil target takes
+  bootstrap teardown; the boot-recovery promote and
+  bootstrapFromFile run outside applySem; and the
+  rollback executor can fire mid-startup (B-derived
+  naming with A-derived dataplane)); the stale
+  interposition texts were not actually swept (f3);
+  the tightening-only closeout has no implementable
+  A-live model (f4 — A-live must mean last-EXPOSED;
+  the owners take whole desired configs; web binds
+  are NOT interface-independent; the debt needs a
+  pair key + recomputation rule + the failure
+  transition); beginFirstExposure and the cursor
+  have no cross-layer lifecycle (f5 — the
+  prior/ledger/cursor must transport; the crash case
+  needs the durable prior config or a conservative
+  clear-all, sidecar-present included); the
+  discriminator's registration is undefined and
+  lifecycle-unbounded (f7 — the ACTUAL pending
+  publisher is syncSnapshotLocked
+  (process_status.go:10-140), not OnXSKBound); the
+  accepted-token fence is contradicted by leftover
+  newest-seen text and lacks its seed field (f8);
+  fence ownership and settlement exactly-once need a
+  token registry, not one MAX-CAS writer (f9); the
+  gate's clear-on-transfer lacks the
+  restore-authorized quiesce (f10); the
+  runtime-scoped tombstone expiry can resurrect a
+  down fabric into a blackhole (f11 — the tombstone
+  persists until a successful nonzero map
+  transaction); the outbound marker needs a
+  structured {queued, sentPair, sentDigest}
+  transaction (f12). Codex's prior closures remain
+  valid; Q1 remains complete.
+- **Round-22 disposition table:**
+
+  | r22 finding | v8.18 disposition |
+  |---|---|
+  | Codex f1 disposition accuracy | CLOSED — this table + the r21 rows re-audited; every v8.18 fold verified per-edit |
+  | Codex f2 invariant false at startup / doesn't cover all outcomes | CLOSED — the invariant gains its EDGES: SyncApply's topology/identity guard (:381-402) and PromoteRollback's nil-target teardown are serialized DECISIONS, not violations; the GO-LOCAL drain carries the SAME guard (a restart-only config is never live-applied by the re-sync); the startup promotions complete BEFORE the apply scheduler starts; the rollback executor's timer is armed only AFTER the boot apply (§5-C epoch contract, §9 (b)) |
+  | Codex f3 stale interposition texts | CLOSED — the v8.12-v8.16 "operator promotion needs no applySem" claims are swept (FALSE under the invariant; the persistence transition changes only durability) (§5-C epoch contract, §9 (b)) |
+  | Codex f4 closeout A-live/debt/failure semantics | CLOSED — A-live := last-EXPOSED (beginFirstExposure's prior); the closeout synthesizes a REMOVAL-ONLY desired projection (the union of A-live and B-desired reachability MINUS B's removals) and applies it through class-targeted removals (web binds read CURRENT kernel addresses; MIXED changes defer wholesale); the debt keys on the pair and RECOMPUTES from live authorization to the latest desired state on each retry; a closeout failure does NOT prevent B's exposure (the alternative adds an unbounded gate — rejected); the operator-session strand is the intended monotonic-revocation consequence with the out-of-band recovery channel documented; networkd/services DEFERRED everywhere (§5-C (i), §9 (b)) |
+  | Codex f5 cursor cross-layer lifecycle (= AGY f3 = SMR22-2) | CLOSED — `beginFirstExposure` runs manager-side at acceptance (the same `m.mu` section that advances `m.acceptedCommitRevision`); the `{priorPair, ledgerID, firstExposure}` triple rides the `ApplyResult`; `oldActive` is RETIRED from the invalidation path; the cursor installs atomically; the prior config is durable via the store's rollback/archive trees; an unrecoverable base (sidecar-present included) triggers the conservative clear-all (§5-C (ii), §6, §9 (a)) |
+  | Codex f6 staged leg publishes late (= AGY f2 = SMR22-1) | CLOSED — the OVERLAP finalization CANCELS the staged leg's registration; the send primitive checks the reservation node is still OPEN for staged sends; the registration's lifetime is bounded by {OnXSKBound firing with the liveness check, OVERLAP finalization, helper death, an explicit stage timeout → the GO-LOCAL re-drive} (§5-C, §6, §9 (f)) |
+  | Codex f7 discriminator registration undefined | CLOSED — the deferred-publish discriminator becomes a REAL REGISTRY `{pair, token, state, registeredAt}` with the transitions (staged → live; the syncSnapshotLocked catch-up publishes → completes (the ACTUAL publisher, process_status.go:10-140); OVERLAP → cancelled; helper death → died; stage timeout → the GO-LOCAL re-drive) (§5-C re-sync, §6, §9 (d)) |
+  | Codex f8 fence contradictory + no seed field (= AGY f1) | CLOSED — the helper fences on newest-ACCEPTED (a rejected token never advances it); `StatusSnapshot.accepted_snapshot_token: u64` added (+ the canary); the leftover newest-SEEN text swept; the token is per-build immutable (§5-C epoch contract, §6, §9 (c)/(d)) |
+  | Codex f9 fence ownership + settlement exactly-once | CLOSED — the fence becomes an OWNER-TOKEN REGISTRY (every writer takes a slot; the effective fence is the max over live slots; a writer clears only its own slot; slots die with their owner's terminal path); the settlement lifecycle completes (allocation, dedup retention/GC, duplicate re-ack, stale-discard ack, release on every terminal path; the crash case rides the cursor's durability) (§5-C (ii), §9 (a)) |
+  | Codex f10 restore-authorized quiesce + link observation | CLOSED — the restore debt's retry uses a RESTORE-AUTHORIZED quiesce (the same method with the restore debt's own claim token — each retry becomes a NEW transaction: reassert the gate, stop operator-spawned workers, restore, rebind the CURRENT plan); the UNCONDITIONAL `RecordLinkObservation` (a stale Report can never un-record it; it SKIPS already-removed members (AGY f5)) (§5-C debt execution, §6, §9 (g)) |
+  | Codex f11 tombstone expiry blackhole | CLOSED — the tombstone PERSISTS until a successful nonzero map transaction; the full build reads the canonical pair verbatim (a fabric REMOVED from the config is absent by construction); the all-down-fabric fallback (fabric.rs:446-464) is pre-existing, not the tombstone's doing (§5-C (i), §9 (i)) |
+  | Codex f12 outbound transaction incomplete | CLOSED — the STRUCTURED SEND TRANSACTION `{queued, sentPair, sentDigest}`; the marker records the SENT pair; the exposure check holds gated pairs (AGY f4) (§6, §9 (a)) |
+  | Codex f13 tests green | CLOSED — §9 re-specified per the finding's walk (§9 (a)-(j)) |
+  | Codex f14 hazard budget omits v8.17 hazards | CLOSED — the budget gains the v8.17/18 classes (the startup edge (dead — the timer arms post-boot-apply), the restart-only bypass (dead — the drain carries the guard), the closeout failure/strand (dead — the debt + the documented recovery channel), the cursor/crash (dead — the durable prior + the conservative clear-all), the dead-registration suppression (dead — the registry's bounded lifetime), the post-OVERLAP publication (dead — the cancellation + the OPEN check), the settlement/fence crash (dead — the registry + the cursor's durability), the operator-vs-restore collision (dead — the restore-authorized quiesce re-binds the current plan), the tombstone resurrection (dead — persists until a nonzero write), the stale outbound (dead — the structured transaction)) (§8, §11 Q7) |
+  | AGY r22 f1-f6 | CLOSED — f1 → f8 row; f2 → f6 row; f3 → f5 row; f4 → f12 row; f5 → f10 row; f6 (phrasing) → f11 row |
+  | SMR r22 SMR22-1..6 | CLOSED — SMR22-1 → f6 row; SMR22-2 → f5 row; SMR22-3 (boot-recovery edge) → f2 row; SMR22-4 (closeout strand) → f4 row; SMR22-5 (tombstone posture) → f11 row; SMR22-6 (settlement crash) → f9 row |
+
 ### Round-1 detail log (kept for the record)
 
 - Claude SMR r1: DEMAND-REVISION — SMR-1 B-rejection overstated, SMR-2
@@ -2803,16 +2974,24 @@ pay nothing). On a PROJECTION change, the handler:
    entry drops the fabric state in `refresh_fabric_links`
    and stores the tombstoned projection); (ii) the full
    snapshot build (`populate_fabrics`,
-   forwarding_build/fib.rs:233-264 — a tombstoned
-   fabric is OMITTED from the built set (the full
-   build is authoritative: it re-adds CONFIGURED
-   fabrics — the tombstone is RUNTIME-SCOPED and
-   dies with the next full apply, which re-adds any
-   fabric the CONFIG still lists (the config's fabric
-   set is authoritative; the runtime clear is
-   operational state, and the oscillation
-   (clear-then-re-add) is the same posture as any
-   runtime teardown vs config intent, stated)); (iii)
+   forwarding_build/fib.rs:233-264) reads the CANONICAL
+   PAIR VERBATIM, and the tombstone PERSISTS until a
+   successful nonzero map transaction (v8.18, Codex
+   r22 f11's resurrection fix — the v8.17
+   config-authoritative form let an unrelated full
+   apply re-add the Rust `FabricLink` while the BPF
+   map stays deliberately zero (the clear sets
+   `fabricPopulated=false` and further clears no-op
+   (daemon_ha_fabric.go:762-778)), and when EVERY
+   installed fabric reports down the redirect
+   deliberately falls back to one (fabric.rs:446-464) —
+   a blackhole; so the tombstone dies ONLY when the
+   population machinery next lands a successful
+   nonzero map write (the operational state
+   re-converging on its own machinery), and a fabric
+   REMOVED from the config is absent from the build by
+   construction);
+   (iii)
    the same-plan/full runtime refresh
    (snapshot_refresh.rs:247-269/:380-396 — which
    today PRESERVES and merges old resolved fabrics:
@@ -3773,6 +3952,17 @@ BLOCKERs 6 + 8; v8 epoch form per Codex r6 f6/f8):**
     disposition (the work loop records each member's
     observed link state into `linkOnlyRecovery` as it
     goes — a stale Report can never un-record it —
+    AND the recording SKIPS a member already removed
+    from the desired set (v8.18, AGY r22 f5's
+    deleted-member fix: the recording checks the
+    desired membership at record time, so a
+    cancellation-then-failure sequence can never leave
+    a deleted member in `linkOnlyRecovery` attempting
+    to bring UP an interface that no longer exists in
+    the desired config; and the standing member-removal
+    rule sweeps a removed member's entries in EVERY
+    collection (macEpochDebt, macAndLinkRecovery,
+    linkOnlyRecovery) as before) —
     and the MAC-debt disposition (validate/transfer)
     remains token-gated as before): an operator
     cancellation removes the MAC obligation but NEVER
@@ -4199,8 +4389,29 @@ BLOCKERs 6 + 8; v8 epoch form per Codex r6 f6/f8):**
   never the shared global. The PENDING-XSK staged
   object carries BOTH the immutable token AND its
   already-resolved `DeferWorkers` value (baked in at
-  staging from T1's node), so the deferred-publish leg
-  (a different goroutine) needs no re-stamp. The
+  staging from T1's node), and the OVERLAP finalization
+  CANCELS the staged leg's registration (v8.18, SMR
+  r22 SMR22-1 = AGY r22 f2's stale-staged-leg fix: a
+  newer `StartCompile` finalizing an open staged
+  predecessor as OVERLAP must also CANCEL the staged
+  leg's `OnXSKBound` registration — the v8.13/v8.17
+  form marked the reservation but left the registration
+  live, so the leg could later fire with the staged
+  object and overwrite the newer accepted config (the
+  DUAL refusal saves only the strictly-older-revision
+  case; a same-commit staged reshape would land);
+  the deferred leg ALSO checks its token's liveness
+  BEFORE publishing (an OVERLAP-finalized token is
+  dead — the leg discards the staged object and
+  skips), and the registration's lifetime is bounded
+  by exactly: `OnXSKBound` firing (with the liveness
+  check), OVERLAP finalization (which cancels), helper
+  death (the registration dies with the process), and
+  an explicit STAGE TIMEOUT (a never-firing event —
+  the staged config is the ACCEPTED control-plane
+  config, so a never-binding XSK converts to the
+  GO-LOCAL re-drive's full-apply retry at backoff —
+  not an indefinite stage). The
   auxiliary clones: route/scheduler clones PRESERVE the
   cached snapshot's defer value (they are republishes
   of the cached content, not new intents); and the
@@ -4293,27 +4504,60 @@ BLOCKERs 6 + 8; v8 epoch form per Codex r6 f6/f8):**
   at the apply-flow entry under the same applySem hold
   the whole flow still holds — coherent by construction;
   the v8.12 text's "calls `ActivePair()` itself for its
-  second apply" is DELETED: an interposed promotion CAN
-  land mid-flow (an operator commit's store promotion
-  needs no applySem, AND the persistence transition's
-  `s.mu`-only retry (store_persist.go:402) can make a
-  gated B durable mid-MAC-program), and a re-read would
-  compile and publish the interposed B WITHOUT B's
-  three-bucket precheck — arming workers on B's plan with
-  A's MACs. B's own queued apply flow (or the exposure
-  debt's drain) runs B's precheck as a separate full
-  apply; the second leg never re-reads) — and the
+  second apply" is DELETED (the v8.12-v8.16
+  interposition texts claimed an operator promotion
+  could land mid-flow because it "needs no applySem" —
+  FALSE under the v8.17 invariant (every promotion
+  holds `applySem` across promote+apply), and the
+  persistence transition's `s.mu`-only retry changes
+  only durability, never the active pair — so no
+  interposition of any kind exists to re-read for;
+  a re-read would only ever find the SAME pair); the
+  second leg never re-reads) — and the
   PROMOTION-SERIALIZATION INVARIANT is stated explicitly
-  (v8.17, Codex r21 f3, VERIFIED: EVERY pair-changing
-  promotion is serialized WITH its apply under `applySem`
+  (v8.17, Codex r21 f3, VERIFIED; the edges completed
+  v8.18, Codex r22 f2): EVERY pair-changing promotion is
+  serialized WITH its apply DECISION under `applySem`
   — `commitAndApply` holds `applySem` across
   `configstore.Commit` AND the apply
   (daemon_apply_commit.go:129-175), and the HA sync
   (:326-355), commit-confirmed (:525-531), and
-  auto-rollback (:629-645) paths are the same shape;
+  auto-rollback (:629-697) paths are the same shape —
+  WHERE the apply DECISION includes the deliberate
+  skips: SyncApply's topology/identity guard
+  (:381-402 — a restart-only config is promoted but
+  deliberately NOT live-applied) and PromoteRollback's
+  nil-target bootstrap teardown (:651-683) are
+  serialized DECISIONS, not violations — and the
+  GO-LOCAL drain's revised `applyConfigLocked` carries
+  the SAME topology/identity guard (v8.18, Codex r22
+  f2's bypass fix: a restart-only config is never
+  live-applied by the re-sync — it defers to the
+  operator restart exactly as the SyncApply path does);
   the persistence retry advances only DURABILITY under
-  `s.mu` (never a new active pair); the boot-recovery
-  promote precedes all flows. Therefore NO promotion
+  `s.mu` (never a new active pair; the write is
+  atomic (`writeTreeMarked`), so a drain's
+  `ActivePair()` read observes before-or-after
+  durability, never a torn pair); and the startup
+  promotions (the boot-recovery promote inside `Load`
+  (store_persist.go:171-228), the legacy migration,
+  `bootstrapFromFile` (daemon_apply_commit.go:14-63))
+  complete BEFORE the apply scheduler starts (startup
+  serialization, v8.18's edge pin — INCLUDING the
+  rollback executor's timer: it is armed only AFTER
+  the boot apply completes (the v8.17 text's
+  "precedes all flows" was too weak: the executor is
+  registered before `Load` (daemon_run.go:130-136)
+  and `Load` re-arms it (store_persist.go:231-253),
+  so a near-expiry timer could fire mid-startup
+  between naming (daemon_run_naming.go:42-90) and
+  manager construction/dataplane apply
+  (daemon_run_bringup.go:161-208/:418-520) —
+  producing B-derived naming with A-derived
+  managers/dataplane; arming post-boot-apply closes
+  it (and `PromoteRollback`'s own apply takes
+  `applySem` like every other path)).
+  Therefore NO promotion
   can interpose mid-flow: the pair read at a flow's
   start stays current for the whole flow; the v8.16
   flow-level re-reads and the second-leg abort rule
@@ -4437,7 +4681,8 @@ BLOCKERs 6 + 8; v8 epoch form per Codex r6 f6/f8):**
   management-auth closeout FOLLOWS the commit even
   under the gate — re-scoped to PROVEN MONOTONIC
   TIGHTENING ONLY (v8.17, Codex r21 f2's partition
-  fix: the v8.16 closeout set was neither directionally
+  fix, completed v8.18 per Codex r22 f4:
+  the v8.16 closeout set was neither directionally
   safe nor a coherent partition — SNMP is not merely
   revocation (starts/stops UDP/161, adds
   users/communities/trap targets (daemon_apply.go:167-198)),
@@ -4448,32 +4693,77 @@ BLOCKERs 6 + 8; v8 epoch form per Codex r6 f6/f8):**
   permit) would grant B's access while A remains the
   exposed state — "merely early" is not an acceptable
   security invariant. The closeout therefore applies
-  ONLY B's REMOVALS — access present in A's live
-  config and absent in B's desired config (computed
-  against the union of A-live and B-desired
-  reachability, so a removal can never exceed what B
-  actually removes and never touch what B keeps) —
+  ONLY B's REMOVALS — access present in A's
+  LAST-EXPOSED config and absent in B's desired config
+  (v8.18, Codex r22 f4's A-live fix: "A-live" is the
+  last EXPOSED configuration (beginFirstExposure's
+  prior), never the store-active predecessor (which
+  can be gated-and-unexposed)) — computed as a
+  TARGETED removal projection per class (v8.18, Codex
+  r22 f4's whole-config fix: the existing owners
+  accept WHOLE desired configs (SNMP replaces all
+  authorization (daemon_snmp_reconcile.go:375-423),
+  web reconciliation consumes a complete desired API
+  config (management.go:189-249), host-auth passes
+  one whole config (daemon_apply_hostauth.go:53-79)),
+  so a set-difference narration cannot drive them —
+  the closeout synthesizes a REMOVAL-ONLY desired
+  projection (the union of A-live and B-desired
+  reachability MINUS B's removals, so a removal can
+  never exceed what B actually removes and never
+  touch what B keeps) and applies it through
+  class-targeted removal operations (SNMP
+  community/user/trap-target removal, web endpoint
+  auth removal for the REMOVED endpoint (and web
+  binds resolve CURRENT kernel addresses
+  (daemon_run_servers.go:507-539) — the closeout's
+  web leg reads A's live interface set, never B's
+  deferred one), host-inbound rule removal against
+  A's LIVE interface set only (daemon_nft.go:419-462 —
+  a B-derived closeout could delete A's protection
+  for an interface B removes or moves); MIXED changes
+  (remove A's listener AND add B's listener, or
+  retain a credential on only one endpoint) DEFER
+  wholesale to the exposure — the tightening-only
+  form applies only to pure-removal deltas) —
   while ADDITIONS, listener expansions, and
   relaxations DEFER with the dataplane leg (they
   authorize access, and authorizing B's access before
   B is exposed is the violation); and the closeout's
   own failure records a PERSISTENT CLOSEOUT DEBT
-  (v8.17, Codex r21 f2's owner fix — SNMP/web
+  (v8.17/v8.18, Codex r21 f2 + r22 f4's owner fix — SNMP/web
   currently retry only on a later commit
   (daemon_snmp_reconcile.go:394-410,
   daemon_apply.go:210-213), and the host-auth closeout
   may time out and abandon an owner
   (daemon_apply_hostauth.go:34-79/:158-186): the debt
-  rides the daemon's apply scheduler with the standing
-  backoff + edge Warn, and the closeout must also
-  never consult deferred state (no
+  keys on the closeout PAIR with a captured removal
+  projection, rides the daemon's apply scheduler with
+  the standing
+  backoff + edge Warn, and RECOMPUTES from actual
+  live authorization to the LATEST desired state on
+  each retry (v8.18, Codex r22 f4's supersession fix —
+  a stale B debt can never remove something C keeps
+  (the recomputation supersedes it), and discarding B
+  blindly can never lose a still-required revocation
+  (the recomputation re-derives it)); the failure
+  TRANSITION (v8.18, Codex r22 f4): a closeout
+  failure does NOT prevent B's exposure (B's
+  dataplane exposure is independent — the alternative
+  (gating exposure on the closeout) would add another
+  unbounded whole-forwarding-plane gate, rejected);
+  B runs with the closeout PENDING (Warn-visible, the
+  debt retrying) — and the operator-session strand is
+  the intended monotonic-revocation consequence (B
+  may revoke the channel used to submit it: the
+  commit already landed control-plane, the synchronous
+  note may not reach the operator on that channel
+  (acceptable), and the out-of-band recovery channel
+  (console / another credential) is the operator's
+  documented escape);
+  the closeout never consults deferred state (no
   `ApplyResult.ManagedInterfaces` (exists only after
-  the dataplane leg) and no B-derived host-inbound
-  view over A's live interfaces (daemon_nft.go:419-462 —
-  a B-derived closeout could delete A's protection for
-  an interface B removes or moves: the host-inbound
-  closeout is computed against A's LIVE interface set
-  only))) — with the flow
+  the dataplane leg))) — with the flow
   ORDER pinned (v8.17, AGY r21 f4: the closeout set
   (SNMP (daemon_apply.go:167), web-management (:200),
   host-auth) runs FIRST, THEN the gate check, THEN the
@@ -4490,7 +4780,14 @@ BLOCKERs 6 + 8; v8 epoch form per Codex r6 f6/f8):**
   is contiguous before the gate); the deferred set is
   exactly {the dataplane leg, FRR, routing, fabric,
   the bootstrap-exit/host/VRF mutations, networkd,
-  services, AND the closeout's additions/relaxations};
+  services, AND the closeout's additions/relaxations}
+  (v8.18 — networkd and services are DEFERRED here,
+  reconciling the v8.17 text's other passage that
+  classified them as FOLLOW (Codex r22 f4's
+  contradiction catch: they consume
+  `ApplyResult.ManagedInterfaces` (exists only after
+  the dataplane leg, daemon_apply_dataplane.go:137-165/
+  :218-245), so they cannot run under the gate);
   and with FRR gated, the RIB never moves during the
   window, the overlay publishes A's routes in A's
   clone, and the v8.14 `m.exposureGateActive`
@@ -4539,9 +4836,13 @@ BLOCKERs 6 + 8; v8 epoch form per Codex r6 f6/f8):**
   `applyConfigLocked` and then unconditionally
   invalidates sessions and pushes the rollback
   (daemon_apply_commit.go:629-723) — those actions gate
-  on `Exposed` identically); FOLLOW =
-  {networkd, services} (control plane, host-side —
-  visible, converges at exposure; FRR is NOT in this
+  on `Exposed` identically); networkd and services are
+  DEFERRED with the dataplane leg (v8.18, Codex r22
+  f4's contradiction fix — they consume
+  `ApplyResult.ManagedInterfaces` (exists only after
+  the dataplane leg), so they cannot run under the
+  gate (the v8.15/v8.17 "FOLLOW" classification is
+  corrected); FRR is NOT in this
   set — it lives INSIDE the gated
   `applyConfigLocked` (the (i) full-gating choice),
   so it defers with the dataplane leg). The deferred session
@@ -4572,13 +4873,34 @@ BLOCKERs 6 + 8; v8 epoch form per Codex r6 f6/f8):**
   daemon_apply_commit.go:245-270)) would change A→B
   into B→B even in the no-gate common case — the
   invalidation would compose against the NEW pair and
-  delete nothing): `beginFirstExposure(B)` runs under
-  `m.mu` AT acceptance and returns the IMMUTABLE PRIOR
-  pair (A) plus a ledger ID; the wrapper carries THAT
+  delete nothing): `beginFirstExposure(B)` runs
+  MANAGER-SIDE at acceptance, in the SAME `m.mu`
+  section that advances `m.acceptedCommitRevision`
+  (v8.18, SMR r22 SMR22-2's locus pin — the prior is
+  always the pre-advance value), and returns the
+  IMMUTABLE PRIOR
+  pair (A) plus a ledger ID — TRANSPORTED on the
+  `ApplyResult` (v8.18, SMR r22 SMR22-2 = AGY r22
+  f3's transport fix: `ApplyResult` gains
+  `{priorPair, ledgerID, firstExposure}` — the
+  daemon wrapper receives the captured values from
+  Compile's atomic acceptance across the package
+  boundary, never a post-hoc read after `m.mu` is
+  released); the wrapper carries THAT
   prior through the whole completion (the session
   invalidation composes prior → B, always — the
   uniform base (every commit/drain/re-sync/restore)
-  with no read-after-advance tear); the boot
+  with no read-after-advance tear) — and the wrapper's
+  `oldActive` parameter is REPLACED by the prior ON
+  THE INVALIDATION PATH (v8.18, SMR r22 SMR22-2's
+  single-source pin: under the promotion-serialization
+  invariant they agree in the no-gate case
+  (`oldActive == last-exposed`), and they differ
+  EXACTLY post-gate (B promoted and gated, C committed
+  direct-durable: `oldActive` is B (store-active), the
+  prior is A (last-exposed) — the prior is the correct
+  base, and the wrapper's `oldActive` would reopen
+  Codex r20 f5's direct-C case if it ever won); the boot
   unknown-base policy (Codex r21 f6's second half):
   a genuinely cold helper has no sessions (empty base,
   no-op — safe), but a manager/daemon RESTART over a
@@ -4669,33 +4991,50 @@ BLOCKERs 6 + 8; v8 epoch form per Codex r6 f6/f8):**
   until the high-water advances (sync_conn_gen.go:398-432)
   — the drain therefore (1) raises the gen fence at
   observed acceptance (before ANY session
-  invalidation) — via a MAX-CAS fence raise carrying
-  an OWNERSHIP TOKEN (v8.17, Codex r21 f5's fence fix:
-  the current fence contract is deliberately
-  loop-owned (`recordAppliedConfigGen` non-CAS and
-  loop-only; `beginConfigApply`/`endConfigApply`
-  unconditional atomic stores (sync_conn_config.go:275-309)),
-  so an out-of-loop raise could lower a concurrently
-  raised C fence and one owner's unconditional
-  `endConfigApply` could clear another's; the drain's
-  raise is MAX-CAS (never lowers) with a fence TOKEN
-  that ONLY its owner can release (the drain's token
-  rides to the settlement; the loop's own
-  begin/end pair is untouched)), (2) runs the phased tails (the clear
+  invalidation) — through the OWNER-TOKEN REGISTRY
+  (v8.18, Codex r22 f9's fence fix, replacing v8.17's
+  single-writer MAX-CAS (which left the loop's
+  begin/end pair untouched: the current loop operations
+  are unconditional `Store(gen)` and `Store(0)`
+  (sync_conn_config.go:289-309), so a loop begin can
+  lower a drain-owned fence and any loop end can erase
+  it): EVERY fence writer (the drain AND the loop's
+  begin/end pair) takes a registry SLOT with an
+  ownership token; the EFFECTIVE fence is the maximum
+  over live slots; a writer raises or clears ONLY its
+  own slot (a slot clear is owner-scoped — no writer
+  can erase another's); and a slot dies with its
+  owner's terminal path (the drain's settlement, the
+  loop's end, a process exit), (2) runs the phased tails (the clear
   included), and (3) the settlement item advances the
   high-water LAST — the fence covers the whole
   window); the settlement item carries
   `(peerIncarnation, gen, pair, settlementID, the
   deferred-tail context)` (v8.17, Codex r21 f5's
-  settlement-identity fix: bulk/reconnect resets both
+  settlement-identity fix; the lifecycle completed
+  v8.18, Codex r22 f9: the settlementID allocates from
+  the drain's monotonic counter; the loop's dedup
+  retains processed IDs (bounded, GC'd on
+  peer-incarnation change); a duplicate delivery is
+  re-acked without re-processing; a stale
+  (older-incarnation or newer-gen-landed) settlement
+  is discarded WITH an ack (so the tail debt can
+  clear); and EVERY terminal path (processed,
+  duplicate, stale, superseded) releases the tail
+  debt exactly once: bulk/reconnect resets both
   high-water and fence to zero (sync_conn_gen.go:324-367),
   so a delayed OLD-INCARNATION settlement could
   advance the new incarnation past its legitimate
   generations — the item keys on the peer incarnation
   and the loop dedups/acks by settlementID (exactly-once:
-  the tail debt retains until the loop's ack (not
-  just the post); a stale (older-incarnation or
-  newer-gen-landed) settlement is discarded) — an
+  the tail debt retains until the loop's PROCESSING
+  ack (not just the post); a same-process
+  landed-but-unprocessed item is re-posted by the
+  debt's backoff; a process crash losing the channel,
+  cursor, AND debt together is covered by the
+  completion cursor's crash rule (re-derivable from
+  the store-retained prior + the cursor, re-run
+  idempotently at startup)) — an
   in-process item, not a wire change — the context
   being the last-exposed config by GC-RETAINED POINTER
   (v8.16, SMR r20 SMR20-5: the store's active object;
@@ -4977,10 +5316,15 @@ BLOCKERs 6 + 8; v8 epoch form per Codex r6 f6/f8):**
   `snapshot_token`, seeded from the ping echo);
   `m.acceptedBuildSeq` advances ONLY on an observed
   acceptance (the (b) leg's authority); the helper
-  tracks the NEWEST SEEN token (per incarnation — a
-  sent-but-REJECTED token still counts as seen, and
-  every wire retry RE-MINTS, so the strict-greater
-  rule never strands a retry); and a mid-flow helper
+  fences on the NEWEST ACCEPTED token (per incarnation
+  — v8.17, Codex r21 f10: a sent-but-REJECTED token
+  NEVER advances the fence (a rejected snapshot is not
+  an ordering authority), and a wire retry of the same
+  build carries the SAME token (per-build immutable —
+  the exact-equal retry (#4036) passes); the
+  `publication_rev` (burned per ATTEMPT) keeps the
+  wire-attempt order, so the two identities never
+  contradict); and a mid-flow helper
   respawn is benign (SMR r20 SMR20-8 — zero-stored
   accepts everything; the bring-up is the bounded
   class) as TWO legs plus the
@@ -5611,10 +5955,15 @@ activations a scheduled retry.
      carries a full snapshot (serde defaults 0; v8.13, Codex
      r17 f5): the build sequence (== `buildSeq`, minted at
      input capture under `m.mu`); the helper REFUSES a
-     strictly-older token per incarnation
-     (`error_code: "stale_snapshot_token"`, retryable only
-     by rebuilding current — the Go-side buildSeq validation
-     abandons first in every reachable case). Old Go omits
+     strictly-older-than-newest-ACCEPTED token per
+     incarnation (`error_code: "stale_snapshot_token"`, and
+     `StatusSnapshot.accepted_snapshot_token: u64` (serde
+     default 0; v8.17, AGY r22 f1's missing-wire-field fix
+     — the seed's ONLY source: the ping/status exchange
+     echoes the newest ACCEPTED token, and a rejected token
+     never advances it); a wire retry of the same build
+     carries the SAME token (per-build immutable; the
+     exact-equal retry (#4036) passes). Old Go omits
      it (0 — legacy-accept, same posture as the revision
      fields); old helpers ignore it. The semantic hash
      EXCLUDES it (builder.go:156-178's zero set grows).
@@ -5731,11 +6080,23 @@ activations a scheduled retry.
   applies stale A after B; the marker stays at B, so
   the reconciler believes B was pushed): `QueueConfig`
   assigns its generation at send time under a separate
-  write lock (sync_conn_config.go:230-252), so the
-  captured revision is re-read and revalidated inside
-  that same write-lock hold — a stale capture is
-  re-derived from the CURRENT active pair before the
-  generation is allocated, never sent); the revision
+  write lock (sync_conn_config.go:230-252), as ONE
+  STRUCTURED SEND TRANSACTION (v8.18, Codex r22 f12:
+  `{queued, sentPair, sentDigest}` — the captured
+  revision is re-read and revalidated against
+  `ActivePair()` inside the write-lock hold (a stale
+  capture is re-derived from the CURRENT active pair
+  before the generation is allocated, never sent),
+  and the marker records the SENT pair (B, not the
+  originally captured A) — AND the
+  revalidation includes the EXPOSURE check (v8.18,
+  AGY r22 f4: the re-derived pair may itself be GATED
+  (R > `DurableRevision()`) — an unexposed config must
+  NEVER be pushed: the push HOLDS for a gated pair
+  (the peer's state never leads the primary's exposed
+  state, and the peer's own exposure machinery
+  converges its local config independently once the
+  push lands post-exposure)); the revision
   assignment itself (the five
   promotion paths + the dedicated high-water + the
   migration allocator + the capability-2 envelope) is
@@ -5927,19 +6288,76 @@ activations a scheduled retry.
   unit), and a cancellation takes effect at the next
   boundary (wasted-not-harmful; no half-cycled member
   can exist)); `RetryLater` exists only for
-  pre-`applySem` probes; and
+  pre-`applySem` probes — and the RESTORE DEBT's retry
+  uses a RESTORE-AUTHORIZED variant (v8.18, Codex r22
+  f10's API fix: the restore debt has a DIFFERENT
+  token than the MAC debt's claim — the restore's
+  retry calls the restore-authorized quiesce (the same
+  method with the restore debt's own claim token), so
+  each retry becomes a NEW transaction: reassert the
+  gate, stop any workers an intervening operator verb
+  spawned, perform the restore, and rebind the CURRENT
+  plan (including the operator's change) — the v8.17
+  form named no restore-authorized quiesce operation);
+  and
   `ReportMACDebtAttempt(claimToken uint64, results
   []MACDebtMemberResult) (settled bool)` — accepted only
   while `claimToken` is current (stale-token results
   discarded wholesale), updating the collections under
   `m.mu`, with `settled=true` authorizing the daemon to
   dispatch the tagged completion via the EXISTING
-  `NotifyLinkCycle` path.
+  `NotifyLinkCycle` path — PLUS the UNCONDITIONAL
+  `RecordLinkObservation(member string, linkUp bool)`
+  (v8.18, Codex r22 f10's second half: a separate
+  unconditional, cancellation-insensitive transition
+  for the link-state observation (the work loop calls
+  it as it goes, BEFORE any token disposition) — a
+  stale `ReportMACDebtAttempt` can never un-record it
+  (§5-C's failed-UP ownership rule rides it), and it
+  SKIPS a member already removed from the desired set
+  (AGY r22 f5's deleted-member fix — the recording
+  checks the desired membership at record time, so a
+  deleted member can never linger in
+  `linkOnlyRecovery`).
   **`ApplyResult` gains the commit revision** (apply.go:97-117
   currently carries only the ordinary generation, Codex r13
   f9) — sourced from the SAME `ActivePair()` read that
   supplied the config (v8.13, Codex r17 f3: never a
-  separate `ActiveConfigRevision()` getter).
+  separate `ActiveConfigRevision()` getter) — AND the
+  exposure-transition triple `{priorPair, ledgerID,
+  firstExposure}` (v8.18, Codex r22 f5 = AGY r22 f3:
+  `beginFirstExposure(B)` runs manager-side at
+  acceptance (the same `m.mu` section that advances
+  `m.acceptedCommitRevision`) and returns the immutable
+  prior (the pre-advance last-exposed pair), the ledger
+  ID, and whether this acceptance IS a first exposure;
+  the daemon wrapper receives them on the `ApplyResult`
+  across the package boundary (never a post-hoc read
+  after `m.mu` is released); the wrapper's `oldActive`
+  parameter is RETIRED from the invalidation path (the
+  prior is the one source of truth — they differ
+  exactly post-gate (B promoted and gated, then C
+  committed direct-durable: `oldActive` is B
+  (store-active), the prior is A (last-exposed))); and
+  the completion cursor `{pair, phaseCursor,
+  completionState}` is installed ATOMICALLY in the same
+  section (the re-sync debt clears ONLY after the
+  record installs; a completed replay skips the tails;
+  an incomplete replay resumes its phase). The prior
+  config is durable by construction (the store's
+  rollback/archive trees retain it by revision), so a
+  crash mid-completion re-derives the cursor from the
+  store and re-runs the idempotent tails conservatively
+  at startup — and when the cursor AND the prior are
+  BOTH unrecoverable, the first apply after startup
+  CONSERVATIVELY CLEARS all sessions (INCLUDING
+  sidecar-present cases: the `appliedRevision` sidecar
+  records the exposed revision, not the prior config,
+  so its presence alone cannot prove the base
+  (Codex r22 f5's sidecar fix; the invalidators no-op
+  on a nil old config (daemon_policy_invalidate.go:60-65/
+  :193-195), so an unprovable base must never silently
+  pass)).
   **`NotifyLinkCycle` gains a typed result** (v8.13, Codex
   r17 f9 — void today, swallowing missing-process, ctrl,
   rebind, and status-application failures
@@ -6856,12 +7274,13 @@ activations a scheduled retry.
       wrapper's hold (assert a migration-retry interpose
       test); the live-MAC second leg REUSES the outer
       pair AND ABORTS on interposition (v8.16, Codex r20
-      f3 — assert: a promotion interposed BETWEEN the
-      legs (operator commit AND the persistence
-      transition's `s.mu`-only retry) makes the second
-      leg ABORT (it never compiles the interposed B AND
-      never completes A's bring-up; B's own queued flow
-      runs B's precheck)); the PROMOTION-SERIALIZATION
+      f3 — the interposition tests of v8.12-v8.16 are
+      UNREACHABLE under the invariant (every promotion
+      path holds `applySem` across promote+apply — no
+      operator commit, HA sync, commit-confirmed, or
+      auto-rollback can interpose mid-flow, and the
+      persistence transition changes only durability);
+      the PROMOTION-SERIALIZATION
       INVARIANT (v8.17, Codex r21 f3): EVERY promotion is
       serialized with its apply under `applySem`
       (VERIFIED: `commitAndApply` holds `applySem`
@@ -6895,7 +7314,14 @@ activations a scheduled retry.
       second apply); the ping runs before the build
       stamps Generation/FIB (order asserted); the seeded
       state resets on respawn (a post-respawn Compile
-      re-pings before minting); a helper RESPAWN BETWEEN
+      re-pings before minting); the ACCEPTED-ECHO seed
+      (v8.18, Codex r22 f8): a manager re-init over a
+      surviving helper seeds `m.latestBuildSeq` from the
+      ping's `accepted_snapshot_token` echo (assert the
+      wire field exists, a REJECTED token never advances
+      the fence (a rejected-high T2 followed by a
+      lower-viable T1 is ADMITTED), and an exact-equal
+      retry of the same build passes (#4036)); a helper RESPAWN BETWEEN
       the ping and the validation is benign (v8.16, SMR
       r20 SMR20-8 — assert the send lands on the fresh
       helper (zero-stored accepts) and a full bring-up
@@ -6978,6 +7404,20 @@ activations a scheduled retry.
       PRESERVE the cached defer value; the #5134 clone
       forces `false` only for the generation it owns
       completion for);
+      the POST-OVERLAP staged send (v8.18, Codex r22 f6
+      = AGY r22 f2 = SMR r22 SMR22-1): T1 stages
+      (pending-XSK), same-pair T2 starts and finalizes
+      T1 as OVERLAP, T2 FAILS before acceptance — T1's
+      deferred leg fires — assert the leg's registration
+      was CANCELLED by the finalization AND the send
+      primitive checks the node is still OPEN (T1's
+      staged content NEVER publishes late over T2's
+      state, and the leg discards the staged object);
+      the registration's lifetime (staged → live →
+      completed on the catch-up's publish; OVERLAP →
+      cancelled; helper death → died; stage timeout →
+      the GO-LOCAL re-drive (assert the timeout fires
+      the re-sync, not an indefinite stage));
       T2 starts (captures T1's
       `{true,true}`), T1 finishes ACCEPTED (recorded,
       non-head), T2 fails pre-publish — the head's Finish
@@ -7110,14 +7550,24 @@ activations a scheduled retry.
       (coherent with the map), AND the debt CLEARS on
       the observed accepted ≥ recorded (the full
       snapshot's acceptance is the self-healing leg);
-      the REMOVAL TOMBSTONE (v8.16, Codex r20 f11): the
+      the REMOVAL TOMBSTONE (v8.16, Codex r20 f11;
+      persistence v8.18, Codex r22 f11): the
       daemon clears a map entry (`Ifindex=0`) — the
       payload carries `removed: true` and the helper
       DROPS its retained fabric state (assert NO stale
       working set survives (a preserve-on-unresolved
       read would fail this), the debt's clear is
       truthful, and HA readiness stays FALSE until the
-      tombstone is accepted); the unresolved-candidate
+      tombstone is accepted); the tombstone PERSISTS
+      until a successful nonzero map transaction
+      (assert an unrelated full apply does NOT
+      re-introduce the `FabricLink` while the map
+      stays zero (the full build reads the canonical
+      pair verbatim — no blackhole via the all-down
+      fallback), and the population machinery's next
+      successful nonzero write lifts it); a fabric
+      REMOVED from the config is absent from the
+      build by construction; the unresolved-candidate
       guard still rejects missing parent/MAC values
       (distinct from the deliberate clear);
       the content hash for the dedup covers the FINAL
@@ -7572,7 +8022,7 @@ the three owners through nine enumerations; the mixed-version
 producer is the documented exception with the required helper
 restart).
 
-Remaining questions for round 22, each invitable to PLAN-KILL with
+Remaining questions for round 23, each invitable to PLAN-KILL with
 a concrete counterexample:
 
 1. **Completeness, final form.** Exhibit a path to
@@ -7635,10 +8085,10 @@ a concrete counterexample:
    candidate-filter territory
    (`include_userspace_binding_interface`), explicitly out of
    scope here.
-6. **Round-21 disposition table audit.** §1's r21 table maps
-   every r21 finding (Codex 12 BLOCKER + 2 MAJOR; AGY 2
-   BLOCKER + 2 MAJOR; SMR 1 BLOCKER + 2 MAJOR + 4 MINOR)
-   to its v8.17 fold, and every fold this revision was
+6. **Round-22 disposition table audit.** §1's r22 table maps
+   every r22 finding (Codex 13 BLOCKER + 1 MAJOR; AGY 3
+   BLOCKER + 2 MAJOR + 1 MINOR; SMR 2 MAJOR + 4 MINOR)
+   to its v8.18 fold, and every fold this revision was
    verified per-edit against the file. Which row is
    claimed-but-wrong this time?
 7. **Cumulative hazard budget, final sign-off (v8.8 honest
