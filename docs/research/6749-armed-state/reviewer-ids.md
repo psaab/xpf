@@ -395,3 +395,8 @@
   eviction ownership + aggregate bound; fabric debt payload
   aliasing + readiness conduit doesn't exist; tests green;
   pass-1 estimate unsupported; budget unbounded).
+
+
+## Round 15 (plan v8.10 @ pending)
+
+- Codex, AGY, Claude SMR — pending dispatch.
