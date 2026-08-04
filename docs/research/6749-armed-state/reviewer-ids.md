@@ -424,5 +424,22 @@
   f7 FabricSyncDebtOutstanding misses telemetry-updated debts;
   + 1 MINOR — f8 note clear vs supersession).
 - **Codex r15** — background task `task-msdyv5wo-1gs8c2`
-  (prompt `/tmp/codex-6749-r15-prompt.txt`, --fresh). Output:
-  pending.
+  (prompt `/tmp/codex-6749-r15-prompt.txt`, --fresh); output
+  `/tmp/codex-6749-r15.out`; verdict doc `codex-plan-r15.md`.
+  Verdict: DEMAND-REVISION (12 BLOCKER + 2 MAJOR + 1 MINOR —
+  f11 environment token the ONE clean closure. R1 durability
+  (Option-B reuse) + rollout migration + atomic transport;
+  publication high-water conflation + ping seed + legacy
+  guard; R2 fence not freshness + legacy-zero contradiction +
+  unverified rebase; note CAS self-contradiction + refusal
+  plumbing; re-sync owner incomplete + precheck-bypassing
+  execution; StartCompile self-clobber + ownerless Clear;
+  claim fence has no validator + no nextWake; recovery
+  abandonment leaves workers stopped + wrong-MAC rebind;
+  fairness FIFO position loss; readiness hash incoherent;
+  tests carry v8.9 identifiers; pass-1 unspecified).
+
+
+## Round 16 (plan v8.11 @ c381b621a44f)
+
+- Codex, AGY, Claude SMR — pending dispatch.
