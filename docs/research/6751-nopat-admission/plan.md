@@ -1,31 +1,24 @@
 # #6751 plan — interface SNAT no-PAT admission: reserve-or-PAT the colliding translated tuple
 
-- **Status**: DRAFT v15.23 — round-34 fold (AGY r34's five
-  findings + Codex r34's ten blockers + major: Rule 3 keeps two
-  DISTINCT receiver ledgers — decode-time bulkRecv membership for
-  reconcile protection vs the install-confirmation ledger with
-  five terminal outcomes conditioning the BulkEnd ACK; Rule 1
-  gains the 11th-13th writer classes (the #5305 pre-image
-  rollback, the maps_sync initial-control cleanup — whose
-  `Created`-field ABI misread at maps_sync.go:609 is a shipped
-  bug flagged for a separate issue — idle reaping, terminal
-  teardown) with the negative-inventory completeness bound; Rule
- 2 gets ONE end-to-end deadline, reserve-before-mutate atomic
-  admission, and unknown-result = fenced receive epoch; Rule 4's
-  predicate is the helper's TABLE (mirror absence safe only when
-  no different live table entry exists), exactly ONE close
-  producer (the helper's commit — Go deletes are requests), and
-  named identity domains per transaction class; Rule 5 is a
-  stripe-guarded RMW with named-field merge and singular counter
-  ownership; Rule 6 is ONE arbiter covering source admission +
-  high-water + generation draw with additive both-lane fields
-  (§6 revised to additive-optional-fields) and an
-  incarnation-validated watermark; Rule 7 is STICKY alias lineage
-  visible to every export path; the bulk callback's omission
-  binds (key, publication id, generation) at copy time; the
-  debt's recovery source is the helper's framed owner-RG
-  snapshot; the old-peer re-prime is quiet-interval-proven; P2 is
-  in-helper with the no-close-toward-owner exception)
+- **Status**: DRAFT v15.24 — round-35 fold (AGY r35's three
+  clarifications + Codex r35's blocker/major/minors: the dual-lane
+  arbiter is explicitly GO-SIDE (a single Go mutex wrapping both
+  lanes, fed by Rust-carried tuples — an IPC critical section is
+  not implementable); the fence's re-drive is CONNECTION TEARDOWN
+  (no NACK frame type exists); the old-peer re-prime is now an
+  ADMISSION fence held throughout the quiet interval in BOTH
+  directions (refuse authenticated inbound + suppress outbound on
+  both fabrics until the peer's disconnect bound elapses — the
+  non-initiator redial race is excluded); every worker records an
+  import outcome before its barrier ACK (reserve/install failure
+  aggregates to Failed or stays Pending — the §5.6 "not fed back"
+  asymmetry is superseded); the helper incarnation is a
+  DAEMON-ISSUED monotonic generation bound to the validated
+  instance (source sequencing restarts at zero — reuse is
+  excluded); ConfirmedAliasNoop terminalizes only after P2 reports
+  deleted/absent/publication-mismatch-to-newer; and replica
+  refresh is origin-predicate-gated with monotonic
+  max(current,candidate) last_seen)
 - **Issue**: #6751 (opus-review-001 R08, High, `bug`+`audit`+`security`) —
   interface SNAT admits indistinguishable no-PAT return tuples and sends
   replies to the FIRST session.
@@ -252,7 +245,18 @@ consequences onto the surviving §5.x machinery.
    is the precedent. A refused import returns an EXACT per-key error
    (the import-cap silent return at session_import.rs:115-120 and the
    always-successful handler response at sync_session.rs:19-32 are
-   both replaced by exact results). Three hardenings (Codex r34
+   both replaced by exact results). And EVERY WORKER records an
+   outcome before its barrier ACK (Codex r35 major 2: today the
+   worker handler returns `()`, upsert_synced.rs:18, the table can
+   refuse an import, install.rs:310, and `WorkerCommandResults` has
+   no import result channel, session_glue/mod.rs:250 — so an
+   implementation could mark `Applied` and ACK despite a worker
+   refusal; under this rule a reserve/install failure aggregates to
+   `Failed` or remains `Pending`, NEVER disappears — the retained
+   §5.6 "worker reserve failure drops `UpsertSynced` with an
+   accepted not-fed-back asymmetry" text is SUPERSEDED: the
+   asymmetry was acceptable only before the applied transaction
+   existed, and the outcome channel is now mandatory). Three hardenings (Codex r34
    finding 2): (a) ONE end-to-end deadline — the Go request deadline
    covers the helper's barrier wait plus margin (today export waits
    15s, export.rs:237, Go abandons a session request after ~3s,
@@ -265,11 +269,16 @@ consequences onto the surviving §5.x machinery.
    shared-state or companion-map mutation (today shared state
    mutates before fanout, session_import.rs:133 → :233); and (c)
    any refusal, timeout, or unknown result ABORTS/FENCES the receive
-   epoch — no reconcile, no ACK, no hold release, with an explicit
-   NACK or a forced authoritative re-bulk (a missing ACK alone only
-   pends — survivor re-drive triggers on disconnect, not on an ACK
-   timeout, sync_conn.go:572, so tens of thousands of provisional
-   installs could strand while both fabrics stay connected).
+   epoch — no reconcile, no ACK, no hold release. The fence's
+   re-drive mechanism is CONNECTION TEARDOWN, not a new wire message
+   (AGY r35 finding 2: no NACK frame type exists in the protocol;
+   the receiver tears down the sync connection, which triggers the
+   sender's existing disconnect re-drive at sync_conn.go:572 with
+   the debt machinery re-arming the authoritative prime — a missing
+   ACK alone only pends, and survivor re-drive triggers on
+   disconnect, not on an ACK timeout, so tens of thousands of
+   provisional installs could strand while both fabrics stay
+   connected without the teardown).
 3. **The applied transaction at the receiver** (Codex r33 finding
    2's first half), with the two ledgers kept DISTINCT (AGY r34
    major 1): (a) `bulkRecv` MEMBERSHIP is still recorded AT DECODE
@@ -291,7 +300,16 @@ consequences onto the surviving §5.x machinery.
    ledger's terminal outcomes are explicit (Codex r34 finding 3):
    `Applied`, `AlreadyNewer`, `ConfirmedAliasNoop` (an intentional
    non-install — never a failure), `Failed`, and `Pending`; the
-   `BulkEnd` ACK requires ZERO `Failed`/`Pending`.
+   `BulkEnd` ACK requires ZERO `Failed`/`Pending`. A
+   `ConfirmedAliasNoop` terminalizes ONLY after P2's purge reports
+   (Codex r35 finding 5: the noop can otherwise become terminal
+   before the purge of a previously admitted publication completes
+   — the current helper deletion returns no result,
+   delete_synced.rs:20): the purge's report is one of `deleted`,
+   `absent`, or `publication-mismatch-to-newer` (the key is now a
+   legitimate newer row — no purge needed); a purge failure is
+   `Failed`, and a timeout/unknown result remains `Pending` and
+   fences the epoch before reconcile.
 4. **Exact-incarnation delete transactions that PUBLISH the close
    inside the commit** (the r32 crux, now statable because there is
    exactly one writer process): every close/delete compares the
@@ -345,10 +363,19 @@ consequences onto the surviving §5.x machinery.
    the id or any other field (today the whole cached value is
    written back with `BPF_EXIST`, bpf_map/mod.rs:429/451 — the
    refresh-restore inverse). Counter ownership is singular: only
-   the session's OWNING worker's refresh merges counters (every
-   worker invokes refresh today, loop_body/mod.rs:975 — a replica's
-   refresh must never overwrite the owner's legitimate counter or
-   policy state with its own stale view).
+   the session's OWNING worker's refresh merges counters AND the
+   re-resolved policy_id (every worker invokes refresh today,
+   loop_body/mod.rs:975, and imports fan out to every worker,
+   session_import.rs:233, so replicas SHARE the adopted session id
+   and id-gating alone cannot identify the owner — the executable
+   predicate is the entry's ORIGIN/ownership marker, evaluated
+   before the merge: only the owner merges policy_id and counters,
+   Codex r35 finding 6); a replica's refresh touches ONLY
+   `last_seen` and applies it MONOTONICALLY
+   (`max(current, candidate)` — a replica must never overwrite the
+   owner's legitimate counter or policy state, nor drag the row's
+   last_seen BACKWARD with its own stale view, AGY r35 finding 3 +
+   Codex r35 finding 6).
 6. **Dual-lane deduplication through ONE arbiter** (Codex r33
    finding 5's discovery + r34 finding 6's serialization correction):
    Rust clones every delta into the RPC fallback buffer AND the event
@@ -362,7 +389,13 @@ consequences onto the surviving §5.x machinery.
    ARBITER covering source admission, high-water update, AND the
    #2170 generation draw as a single critical section per frame on
    EITHER lane (the dedup check and the generation draw can never be
-   split by a stall). The ordering tuple is carried on BOTH lanes —
+   split by a stall) — and the arbiter is explicitly GO-SIDE (AGY
+   r35 finding 1: an IPC critical section spanning the Rust-Go
+   boundary per frame is not implementable; the arbiter is a single
+   Go mutex wrapping BOTH the event-stream callback path AND the
+   fallback-buffer drain, fed by the Rust-carried ordering tuples,
+   evaluating them against the Go per-worker high-water and drawing
+   the #2170 generation inside the same critical section). The ordering tuple is carried on BOTH lanes —
    `(worker_id, per-worker source sequence, helper incarnation /
    table epoch)` — as ADDITIVE OPTIONAL fields per the #1961
    additive-wire precedent (the JSON fallback today has only
@@ -471,14 +504,22 @@ consequences onto the surviving §5.x machinery.
   window); the fenced re-prime gains the one-bit additive
   prime-REQUEST protocol field (Codex r31 finding 3/r32 finding 4),
   and the old-peer fallback is proven rather than assumed (Codex r34
-  finding 10: an old peer ignores the field, and its cold-prime arms
-  only on both-slots-empty, sync_conn.go:244/480 — the fencing side
-  waits a QUIET INTERVAL exceeding the peer's disconnect-detection
-  bound (the heartbeat/keepalive timeout) before reconnecting, so
-  the peer provably observes both slots empty before the new
-  connection arrives; the dual-slot race — reconnect one fabric
-  between the two disconnect callbacks — is excluded by the
-  interval).
+  finding 10 + r35 blocker 1: an old peer ignores the field, and its
+  cold-prime arms only on both-slots-empty, sync_conn.go:244/480 —
+  and dial ownership is address-selected, sync_conn.go:12/319, so a
+  fencing node that is the NON-INITIATOR cannot prevent the old peer
+  from redialing one fabric before the other clears (the initiator
+  retries every second, sync_conn.go:435; the non-initiator always
+  accepts inbound, :388). The rule is therefore an ADMISSION fence
+  held THROUGHOUT the quiet interval, in BOTH directions: the
+  fencing side refuses authenticated inbound connections AND
+  suppresses its own outbound dialing on both fabrics until the
+  interval exceeding the peer's disconnect-detection bound (the
+  heartbeat/keepalive timeout) has elapsed — only then does it
+  admit/dial, so the peer provably observes both slots empty before
+  any new connection arrives; the dual-slot race — one fabric
+  redialed between the two disconnect callbacks — is excluded by
+  the fence, not by dial timing alone).
 - **The debt machinery** is retained with one correction (Codex r33
   finding 8's tail): the (epoch → debtGen) pair is recorded BEFORE
   the peer-facing End; page/checksum failure, write failure,

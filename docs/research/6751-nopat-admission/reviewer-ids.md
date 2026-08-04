@@ -187,3 +187,14 @@ in-helper). Codex r34 also surfaced a shipped ABI bug
 (maps_sync.go:609 reads SessionID bytes as Created) — flagged for
 a separate fix issue, NOT absorbed into this plan. Round 35
 re-reviews v15.23.
+
+| r35 | `codex exec` (detached-poll), session in /tmp/codex-6751-r35.log / PLAN-NEEDS-REVISION (1 BLOCKER: quiet interval controls outbound dialing not inbound admission — the non-initiator redial race; 1 MAJOR: worker outcomes not recorded before barrier ACK / §5.6 "not fed back" contradiction; 3 MINORs: incarnation namespace reuse, ConfirmedAliasNoop terminalizes before P2 result, replica refresh owner predicate; 1 NIT: NACK naming — several attacks CLOSED: F1 inventory, quarantine recording, F4, F8, F9 precedent, M11) | PLAN-READY-WITH-NITS (2 MINORs: arbiter Go-side scoping, NACK = connection teardown; 1 NIT: replica last_seen only) | PLAN-READY-WITH-NITS (r36 fold-check of v15.24) |
+
+Round-35 disposition: all six findings fold in v15.24 (Go-side
+arbiter scoped; teardown named as the single fence mechanism; the
+quiet interval becomes a BOTH-directions admission fence; worker
+outcomes mandatory before barrier ACK with the §5.6 asymmetry
+superseded; daemon-issued incarnation namespace; ConfirmedAliasNoop
+terminalizes only after P2's report; origin-predicate replica
+refresh with monotonic last_seen). Round 36 is the convergence
+check.
