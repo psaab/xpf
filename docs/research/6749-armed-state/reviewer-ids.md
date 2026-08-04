@@ -1028,6 +1028,32 @@
   `/tmp/codex-6749-r33-prompt.txt`). Proceeding 2-of-3 per the
   codex-infra-blocked exception; retries continue each round.
 
-## Round 34 (plan v8.29 @ pending)
+## Round 34 (plan v8.29 @ f67996d5f)
 
-- Codex (retry), AGY, Claude SMR — pending v8.29 fold.
+- **Claude SMR r34** — `claude-smr-plan-r34.md`. Verdict:
+  DEMAND-REVISION (1 BLOCKER — SMR34-1 the "stamp CAS
+  (expected store-current revision)" model is wrong against
+  the actual digest machinery (verified store.go:787-853:
+  digest-based, no revision CAS; an active-keyed CAS refuses
+  the gate-admitted stamp; a CAS-free overwrite lets a late
+  stamp regress — the correct form is the captured-digest
+  stamp + the exposed-currency admission gate); + 1 MINOR —
+  SMR34-2 the §9 (a) stamp-LANDS assertion).
+- **AGY r34** — background bash `bba8w0cvx`; prompt
+  `/tmp/agy-6749-r34-prompt.txt` (117,962 argv bytes — the
+  §6 standing Configstore/manager/debt/control-verb
+  inventory (v8.10-v8.17, settled r22-r28) elided to fit);
+  output `/tmp/agy-6749-r34.out`; verdict doc
+  `agy-plan-r34.md`. Verdict: DEMAND-REVISION (1 BLOCKER —
+  f1 the CAS expected basis conflicts with the
+  EXPOSED-currency gate (= SMR34-1); + 1 MINOR — f2 the §9
+  (a) stamp-LANDS assertion (= SMR34-2)).
+- **Codex r34** — INFRA-BLOCKED (usage limit; reset Aug 10
+  06:57 UTC). Thirteenth documented attempt this session
+  (`/tmp/codex-6749-r34-retry1.err`; r34 prompt staged at
+  `/tmp/codex-6749-r34-prompt.txt`). Proceeding 2-of-3 per the
+  codex-infra-blocked exception; retries continue each round.
+
+## Round 35 (plan v8.30 @ pending)
+
+- Codex (retry), AGY, Claude SMR — pending v8.30 fold.
