@@ -1189,9 +1189,12 @@
   pass (a dropped notice delays the tails ≤ 1s +
   drain scheduling) and its per-entry execution is
   the SAME `applySem`-acquiring drain path as the
-  notice's (one routine, two triggers)); the §9 (a)
-  assertion's `C-permitted`→`C-revoked` typo is
-  fixed (AGY r25 f1); the applySem → `m.mu`
+  notice's (one routine, two triggers)); AGY r25 f1
+  (a claimed §9 (a) `C-permitted`→`C-revoked` typo)
+  is NOT-VERIFIED (spurious — both the dispatched
+  prompt and plan.md read `C-revoked`; an AGY
+  misread of the wrapped clause pair); the applySem
+  → `m.mu`
   lock-order census (SMR25-3) and the OVERLAP-clear
   → re-drive chain-state note (SMR25-4) fold @
   pending
@@ -2398,7 +2401,7 @@ to `/engineer`) or PLAN-KILL. No production code is written under
   |---|---|
   | SMR25-1 / AGY f2 SUPERSEDED wording | CLOSED — reworded in the normative text AND the r24 table row: SUPERSEDED marks ONLY the pair-specific tails (stamp/push) as skipped-by-design; the invalidation (i) composes prior → CURRENT and RUNS for stale notices exactly as for current ones; §9 (a) pins the reading (a skip-everything implementation FAILS) (§5-C (ii), §1 r24 row, §9 (a)) |
   | SMR25-2 / AGY f3 sweep semaphore + cadence | CLOSED — the sweep rides the 1s status-application pass (a dropped notice delays the tails ≤ 1s + drain scheduling) and its per-entry execution is the SAME `applySem`-acquiring drain path as the notice's (one routine, two triggers) (§5-C (ii)) |
-  | AGY f1 §9 (a) typo | CLOSED-NO-PLAN-DEFECT — verified a prompt-transport typo in the r25 review prompt's §9 (a) replay; plan.md's §9 (a) already reads `C-revoked` (the v8.20 §9 (a) edit used the correct form; the r25 prompt-build script's replay mistyped it) |
+  | AGY f1 §9 (a) typo claim | NOT-VERIFIED (spurious) — AGY quoted the review prompt's §9 (a) as reading "C-permitted session is deleted", but BOTH the dispatched prompt (`/tmp/agy-6749-r25-prompt.txt`, md5 3fd8b4c0) AND plan.md's §9 (a) read `C-revoked` (zero occurrences of the claimed form in either); an AGY misread of the wrapped SURVIVES/deleted clause pair |
   | SMR25-3 applySem → m.mu census | CLOSED — stated next to SMR24-8's writeMu → `s.mu` rule (Compile runs under `applySem` and takes `m.mu`; the GO-LOCAL debt recording is enqueue-after-unlock; the manager never acquires `applySem`) (§5-C (ii)) |
   | SMR25-4 chain-state note | CLOSED — stated: T1's node is OVERLAP-terminal, T2's Finish folded the recorded outcomes and cleared `compileInFlight`, and the re-drive's StartCompile begins a FRESH chain (§5-C) |
 

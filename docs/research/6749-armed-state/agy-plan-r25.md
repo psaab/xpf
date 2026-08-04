@@ -13,13 +13,13 @@ non-DEMAND verdict of the campaign on this issue.
 ---
 
 1. **[MINOR] §9 (a) assertion repeats `C-permitted` in the deletion
-   clause** — VERIFIED a PROMPT-TRANSPORT typo: the r25 review
-   prompt's §9 (a) replay read "an A-permitted, B-revoked,
-   C-permitted session is deleted", but plan.md's §9 (a) already
-   reads `C-revoked` (the v8.20 §9 (a) edit used the correct form;
-   the r25 prompt-build script's replay mistyped it). No plan
-   defect; recorded in the r25 disposition table as
-   CLOSED-NO-PLAN-DEFECT.
+   clause** — NOT-VERIFIED (spurious): AGY quoted the review
+   prompt's §9 (a) as reading "C-permitted session is deleted",
+   but BOTH the dispatched prompt (`/tmp/agy-6749-r25-prompt.txt`)
+   AND plan.md's §9 (a) read `C-revoked` (zero occurrences of the
+   claimed form in either — an AGY misread of the wrapped
+   SURVIVES/deleted clause pair). Recorded in the r25 disposition
+   table as NOT-VERIFIED (spurious); no fold.
 2. **[MINOR] The SMR24-1 disposition row's SUPERSEDED rationale is
    inaccurate** (= SMR r25 SMR25-1): "the newer pair's chain covers
    the composition" is the abort-only leak SMR24-1 traced (C's B→C
