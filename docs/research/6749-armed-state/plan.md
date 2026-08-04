@@ -1,6 +1,6 @@
 # #6749 — binding-plan expansion registers new slots unarmed, dataplane disabled indefinitely
 
-**Status: DRAFT v8.25 — pending adversarial plan review (round 30)**
+**Status: DRAFT v8.26 — pending adversarial plan review (round 31)**
 
 - Issue: #6749 (opus-review-001 root R06, severity High)
 - Research base: `ad9591177` (origin/master at worktree creation)
@@ -1338,7 +1338,58 @@
   the remaining phases — each phase's failure is
   operation-specific, matching the standing debt
   behavior); and §9 (a) gains the panic-injection
-  assertion (AGY r29 f4) @ pending
+  assertion (AGY r29 f4) @ `c9c70de90` (r30: SMR
+  DEMAND-REVISION (0 BLOCKER + 0 MAJOR + 1 MINOR +
+  2 NIT); AGY DEMAND-REVISION (2 BLOCKER + 1 MINOR
+  + 1 NIT); Codex infra-blocked (ninth documented
+  attempt; 2-of-3))
+; v8.26 folds SMR r30 (1 MINOR + 2 NIT) + AGY r30
+  (2 BLOCKER + 1 MINOR + 1 NIT): the lease's steal
+  is FENCED (AGY r30 f1 — the v8.25 generation
+  guard refused only the stale claimant's
+  completion RECORD while its tail EXECUTION
+  mutated the world un-fenced: a late
+  `MarkActiveApplied(B)` regresses `appliedRevision`
+  after C stamped C (a store stamp corruption that
+  reports C unapplied permanently), and a late
+  invalidation(A,B) deletes sessions C re-permitted
+  — SMR r30 SMR30-1's "idempotency proofs" were
+  WRONG for the multi-commit case (the stamp is a
+  regression, not an idempotent set; the late
+  invalidation is the SMR24-1 class reopened) and
+  are RETRACTED): (i) the drain's claim checks
+  LIVENESS AT ENTRY (a stolen/dead claim aborts
+  the drain BEFORE any side effect — the
+  missing/stolen-entry contract, same `m.mu`
+  operation as the claim), (ii) the applied stamp
+  uses the CAS form (expected store-current
+  revision — `setAppliedDigest` (store.go:848) —
+  refusing when the store has moved past), and
+  (iii) the drain's `applySem` hold + the
+  drain-time-EXPOSED composition order every
+  mid-drain case (no exposure can move while the
+  drain holds the semaphore; a live-claimed drain
+  composes correctly at entry); and the steal is
+  BOUNDED (AGY r30 f2 — the v8.25 fixed-interval
+  steal spawned a goroutine every namedBound on a
+  hanging phase, an unbounded leak): the steal (i)
+  CANCELS the stale claimant's context (every tail
+  operation takes the claim's ctx and aborts on
+  cancellation; a kernel-wedged residue is the
+  budgeted D-state class, out-of-band), (ii)
+  ADVANCES the entry's ladder (a steal is a failure
+  by construction — the cadence decays to the 60s
+  floor, never a fixed spin), and (iii) is a
+  REPLACEMENT (exactly one live claim generation
+  per entry — a second steal is refused while a
+  live one stands); the defer-revert's
+  missing-entry no-op is explicit (SMR30-2 = AGY
+  r30 f4 — the revert rides the uniform
+  missing-entry → already-terminal contract); and
+  §9 (a) gains the steal-side-effect fence, the
+  steal-cancellation + cadence-decay, and the
+  revert-missing-entry assertions (AGY r30 f3) @
+  pending
   AGY r15 (4 BLOCKER + 3 MAJOR + 1 MINOR) + SMR r15 (2
   BLOCKER + 3 MAJOR + 3 MINOR/NIT): R1 becomes a REAL
   rollout+transport contract — a legacy `active.json`
@@ -1420,7 +1471,7 @@
 
 ## 1. Status
 
-DRAFT v8.25 — pending adversarial plan review round 30 (Codex + AGY +
+DRAFT v8.26 — pending adversarial plan review round 31 (Codex + AGY +
 Claude SMR). Convergence target: PLAN-READY (recommended path shipped
 to `/engineer`) or PLAN-KILL. No production code is written under
 `/research`.
@@ -2635,6 +2686,33 @@ to `/engineer`) or PLAN-KILL. No production code is written under
   | SMR29-2 stuck-claim bound | CLOSED — superseded by AGY f1's lease (the named bound IS the tail operations' timeout sum; the steal replaces the D-state-only posture for claims) |
   | SMR29-3 ladder scope/reset | CLOSED — per-ENTRY ladder; AGY f3's reset form adopted (a SUCCESSFUL phase resets the ladder to the base step for the remaining phases; a FAILED phase advances it), superseding the terminal-only form (§5-C (ii)) |
   | AGY f4 §9 (a) panic injection | CLOSED — §9 (a) asserts a panicking phase execution reverts claimed → pending with backoff applied |
+
+- **Round 30** (v8.25): SMR DEMAND-REVISION (0 BLOCKER + 0
+  MAJOR + 1 MINOR + 2 NIT); AGY DEMAND-REVISION (2 BLOCKER +
+  1 MINOR + 1 NIT); Codex INFRA-BLOCKED (ninth documented
+  attempt; 2-of-3). The round's substance: the v8.25 lease
+  steal was under-fenced on BOTH sides (AGY f1 — the
+  generation guard refused only the stale claimant's
+  completion RECORD while its tail EXECUTION mutated the store
+  and sessions un-fenced (a late stamp regresses
+  `appliedRevision`; a late invalidation deletes C-authorized
+  sessions); and AGY f2 — the fixed-interval steal spawned an
+  unbounded goroutine per namedBound on a hanging phase). SMR
+  r30's own idempotency "proofs" (SMR30-1) were WRONG for the
+  multi-commit case and are RETRACTED in v8.26 (the stamp is
+  a regression, not an idempotent set; the late invalidation
+  is the SMR24-1 class reopened). SMR-only: SMR30-2/SMR30-3
+  (the revert's missing-entry no-op; the advisory-mark note).
+- **Round-30 disposition table:**
+
+  | r30 finding | v8.26 disposition |
+  |---|---|
+  | AGY f1 un-fenced stale side effects | CLOSED — (i) the drain's claim checks LIVENESS AT ENTRY (a stolen/dead claim aborts the drain BEFORE any side effect — the missing/stolen-entry contract, same `m.mu` operation); (ii) the applied stamp uses the CAS form (`setAppliedDigest` (store.go:848), expected store-current revision — refuses when the store moved past); (iii) the drain's `applySem` hold + the drain-time-EXPOSED composition order every mid-drain case (no exposure moves under the semaphore; a live-claimed drain composes correctly); SMR30-1's multi-commit idempotency claims RETRACTED (§5-C (ii), §9 (a)) |
+  | AGY f2 steal goroutine leak | CLOSED — the steal (i) CANCELS the stale claimant's context (every tail operation takes the claim's ctx and aborts on cancellation; a kernel-wedged residue is the budgeted D-state class), (ii) ADVANCES the entry's ladder (a steal is a failure by construction — the cadence decays to the 60s floor), (iii) is a REPLACEMENT (exactly one live claim generation per entry — a second steal is refused while a live one stands) (§5-C (ii), §9 (a)) |
+  | SMR30-1 overlap idempotency | CLOSED-PARTIALLY-RETRACTED — the single-pair idempotency claims stand (idempotent deletes; the receiver's SyncApply no-ops identical content; the marker records the same sentPair) but the multi-commit forms were wrong (a late stamp on the OLD revision is a regression; a late invalidation over a NEWER exposure is the SMR24-1 class) — the fences in the AGY f1 row replace the multi-commit reliance |
+  | SMR30-2 / AGY f4 revert missing-entry | CLOSED — the defer-revert rides the uniform missing-entry → already-terminal contract (a no-op on a GC'd entry), stated explicitly (§5-C (ii)) |
+  | SMR30-3 advisory mark × due-check | CLOSED — stated (the claim refuses not-yet-due entries; the mark re-fires next pass; no mark-clearing machinery) (§5-C (ii)) |
+  | AGY f3 §9 (a) gaps | CLOSED — §9 (a) asserts the late-stamp CAS refusal, the late-invalidation entry-fence abort, the steal's context cancellation + cadence decay + replacement-only, and the revert's missing-entry no-op |
 
 ### Round-1 detail log (kept for the record)
 
@@ -5660,7 +5738,12 @@ BLOCKERs 6 + 8; v8 epoch form per Codex r6 f6/f8):**
   GC'd, no boot recovery): (i) a `defer` wrapper
   around EVERY phase execution catches panics and
   atomically reverts claimed → pending WITH
-  `nextAttempt` under `m.mu`, and (ii) the claim
+  `nextAttempt` under `m.mu` (the revert rides the
+  SAME uniform missing-entry → already-terminal
+  contract — a no-op on an entry a concurrent pass
+  GC'd (v8.26, SMR r30 SMR30-2 = AGY r30 f4 —
+  the panic-safe path never dereferences a missing
+  key either)), and (ii) the claim
   records `claimedAt` + a claim GENERATION and is
   STEALABLE after the named bound (the tail
   operations' own timeout sum — the peer push's
@@ -5669,7 +5752,39 @@ BLOCKERs 6 + 8; v8 epoch form per Codex r6 f6/f8):**
   invalidation's local kernel calls) — the stealer
   runs with a bumped generation and the stale
   claimant's late advance is REFUSED (the
-  generation check under `m.mu`)); and the notice is an
+  generation check under `m.mu`) — AND the steal
+  is FENCED and BOUNDED (v8.26, AGY r30 f1/f2: the
+  v8.25 guard refused only the stale claimant's
+  completion RECORD while its tail EXECUTION
+  mutated the world un-fenced (a late
+  `MarkActiveApplied(B)` regressing
+  `appliedRevision` after C stamped C; a late
+  invalidation deleting C-authorized sessions),
+  and the fixed-interval steal spawned an
+  unbounded goroutine per namedBound on a hanging
+  phase): (a) the drain's claim checks LIVENESS AT
+  ENTRY (a stolen/dead claim aborts the drain
+  BEFORE any side effect — the missing/stolen-
+  entry contract, in the same `m.mu` operation as
+  the claim); (b) the applied stamp uses the CAS
+  form (`setAppliedDigest` (store.go:848) with the
+  expected store-current revision — refusing when
+  the store has moved past, so a late stamp can
+  never regress); (c) the drain's `applySem` hold
+  + the drain-time-EXPOSED composition order every
+  mid-drain case (no exposure can move while the
+  drain holds the semaphore; a live-claimed drain
+  composes correctly at entry); and the steal
+  itself (d) CANCELS the stale claimant's context
+  (every tail operation takes the claim's ctx and
+  aborts on cancellation — a kernel-wedged residue
+  is the budgeted D-state class, out-of-band),
+  (e) ADVANCES the entry's ladder (a steal is a
+  failure by construction — the steal cadence
+  decays to the 60s floor, never a fixed spin),
+  and (f) is a REPLACEMENT (exactly one live claim
+  generation per entry — a second steal is refused
+  while a live one stands)); and the notice is an
   OPTIMIZATION over a sweep (v8.20, SMR r24 SMR24-4 =
   AGY r24 f4: the enqueue-after-unlock is
   non-blocking — a full buffer drops the notice, so
@@ -8251,7 +8366,22 @@ activations a scheduled retry.
       STOLEN after the named bound (v8.25, AGY r29
       f1: assert the stealer's bumped generation
       executes and the stale claimant's late advance
-      is refused);
+      is refused) — FENCED (v8.26, AGY r30 f1/f2:
+      the stale claimant's drain ABORTS AT ENTRY
+      (assert NO side effect lands — no session
+      delete, no stamp, no push — when the claim is
+      dead at entry); a late stamp on the OLD
+      revision is CAS-refused (assert
+      `appliedRevision` never regresses after a
+      newer stamp); the steal CANCELS the stale
+      claimant's context (assert the wedged
+      goroutine exits on cancellation), ADVANCES the
+      entry's ladder (assert two steals are never
+      back-to-back at the base interval — the
+      cadence decays to the 60s floor), and is
+      REFUSED while a live claim stands (assert
+      max-one-live-claim); the panic-revert on a
+      GC'd entry is a no-op (AGY r30 f4));
       the A→B→C COMPOSITION (v8.15, Codex r19 f5): A
       exposed → gated B tightens → gated C promoted →
       C's exposure invalidates sessions against
@@ -9080,7 +9210,7 @@ the three owners through nine enumerations; the mixed-version
 producer is the documented exception with the required helper
 restart).
 
-Remaining questions for round 30, each invitable to PLAN-KILL with
+Remaining questions for round 31, each invitable to PLAN-KILL with
 a concrete counterexample:
 
 1. **Completeness, final form.** Exhibit a path to
@@ -9143,9 +9273,9 @@ a concrete counterexample:
    candidate-filter territory
    (`include_userspace_binding_interface`), explicitly out of
    scope here.
-6. **Round-29 disposition table audit.** §1's r29 table maps
-   every r29 finding (SMR 2 MINOR + 1 NIT; AGY 1 MAJOR + 1
-   MINOR + 2 NIT; Codex infra-blocked) to its v8.25 fold, and
+6. **Round-30 disposition table audit.** §1's r30 table maps
+   every r30 finding (SMR 1 MINOR + 2 NIT; AGY 2 BLOCKER + 1
+   MINOR + 1 NIT; Codex infra-blocked) to its v8.26 fold, and
    every fold this revision was verified per-edit against the
    file. Which row is claimed-but-wrong this time?
 7. **Cumulative hazard budget, final sign-off (v8.8 honest

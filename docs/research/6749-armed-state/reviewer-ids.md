@@ -924,6 +924,32 @@
   `/tmp/codex-6749-r29-prompt.txt`). Proceeding 2-of-3 per the
   codex-infra-blocked exception; retries continue each round.
 
-## Round 30 (plan v8.25 @ pending)
+## Round 30 (plan v8.25 @ c9c70de90)
 
-- Codex (retry), AGY, Claude SMR — pending v8.25 fold.
+- **Claude SMR r30** — `claude-smr-plan-r30.md`. Verdict:
+  DEMAND-REVISION (0 BLOCKER + 0 MAJOR + 1 MINOR + 2 NIT —
+  SMR30-1 the steal's overlapping execution needs its three
+  idempotency proofs (partially RETRACTED v8.26: the
+  multi-commit forms were wrong — a late stamp is a
+  regression, a late invalidation is the SMR24-1 class);
+  SMR30-2 the revert's missing-entry tolerance; SMR30-3 the
+  advisory-mark × due-check note).
+- **AGY r30** — background bash `bdtzbc3ik`; prompt
+  `/tmp/agy-6749-r30-prompt.txt` (127,630 bytes); output
+  `/tmp/agy-6749-r30.out`; verdict doc `agy-plan-r30.md`.
+  Verdict: DEMAND-REVISION (2 BLOCKER — f1 the un-fenced
+  stale-claimant side effects (late stamp regression + late
+  invalidation over C — the generation guard refused only
+  the RECORD); f2 the unbounded steal-goroutine leak (fixed
+  5s spin, no cancellation); + 1 MINOR — f3 the §9 (a)
+  side-effect/leak assertions; + 1 NIT — f4 the
+  panic-revert's missing-entry (= SMR30-2)).
+- **Codex r30** — INFRA-BLOCKED (usage limit; reset Aug 10
+  06:57 UTC). Ninth documented attempt this session
+  (`/tmp/codex-6749-r30-retry1.err`; r30 prompt staged at
+  `/tmp/codex-6749-r30-prompt.txt`). Proceeding 2-of-3 per the
+  codex-infra-blocked exception; retries continue each round.
+
+## Round 31 (plan v8.26 @ pending)
+
+- Codex (retry), AGY, Claude SMR — pending v8.26 fold.
