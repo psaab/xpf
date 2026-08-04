@@ -1,6 +1,6 @@
 # #6749 — binding-plan expansion registers new slots unarmed, dataplane disabled indefinitely
 
-**Status: DRAFT v8.24 — pending adversarial plan review (round 29)**
+**Status: DRAFT v8.25 — pending adversarial plan review (round 30)**
 
 - Issue: #6749 (opus-review-001 root R06, severity High)
 - Research base: `ad9591177` (origin/master at worktree creation)
@@ -1301,7 +1301,44 @@
   already-terminal contract applies to EVERY
   registry accessor (drain AND synchronous
   wrapper)); §9 (a) gains the claim-collision,
-  backoff, and wrapper-vs-GC assertions @ pending
+  backoff, and wrapper-vs-GC assertions @
+  `50f0ef069` (r29: SMR DEMAND-REVISION (0 BLOCKER
+  + 0 MAJOR + 2 MINOR + 1 NIT); AGY DEMAND-REVISION
+  (1 MAJOR + 1 MINOR + 2 NIT); Codex infra-blocked
+  (eighth documented attempt; 2-of-3))
+; v8.25 folds SMR r29 (2 MINOR + 1 NIT) + AGY r29
+  (1 MAJOR + 1 MINOR + 2 NIT): the claim gains its
+  panic-safe release and its lease (AGY r29 f1 —
+  the v8.24 "claimed-but-crashed drain is the
+  in-memory-loss case the crash rule re-derives"
+  covered only PROCESS crashes: a goroutine PANIC
+  (the process lives) pinned the phase `claimed`
+  forever — skipped by every claimant, never
+  terminal, never GC'd, no boot recovery (the
+  "un-leased claimed trap")): (i) a `defer` wrapper
+  around EVERY phase execution catches panics and
+  atomically reverts claimed → pending WITH
+  `nextAttempt` under `m.mu`, and (ii) the claim
+  records `claimedAt` + a claim GENERATION and is
+  STEALABLE after the named bound (the tail
+  operations' own timeout sum) — the stealer runs
+  with a bumped generation and the stale claimant's
+  late advance is REFUSED (the generation check
+  under `m.mu`); the release-on-failure composes
+  with the backoff (SMR29-1 = AGY r29 f2: the
+  claimed → pending release and the `nextAttempt`
+  set are ONE `m.mu` operation, and the claim
+  itself refuses entries whose `nextAttempt` is in
+  the future (the due-check lives in the claim —
+  the notice-triggered drain respects it too, never
+  accelerating a backed-off entry)); the ladder's
+  reset adopts AGY's form (AGY r29 f3, SUPERSEDING
+  SMR29-3's terminal-only form: a SUCCESSFUL phase
+  resets the entry's ladder to the base step for
+  the remaining phases — each phase's failure is
+  operation-specific, matching the standing debt
+  behavior); and §9 (a) gains the panic-injection
+  assertion (AGY r29 f4) @ pending
   AGY r15 (4 BLOCKER + 3 MAJOR + 1 MINOR) + SMR r15 (2
   BLOCKER + 3 MAJOR + 3 MINOR/NIT): R1 becomes a REAL
   rollout+transport contract — a legacy `active.json`
@@ -1383,7 +1420,7 @@
 
 ## 1. Status
 
-DRAFT v8.24 — pending adversarial plan review round 29 (Codex + AGY +
+DRAFT v8.25 — pending adversarial plan review round 30 (Codex + AGY +
 Claude SMR). Convergence target: PLAN-READY (recommended path shipped
 to `/engineer`) or PLAN-KILL. No production code is written under
 `/research`.
@@ -2576,6 +2613,28 @@ to `/engineer`) or PLAN-KILL. No production code is written under
   | SMR28-1 claim-or-skip tri-state | CLOSED — per phase, pending → claimed → complete; the claim is atomic under `m.mu`; a duplicate claimant skips (the first executor covers the phase; a claimed-but-crashed drain is the in-memory-loss case the crash rule re-derives); §9 (a) asserts the claim-collision (two concurrent drains, one phase, exactly one execution) (§5-C (ii), §9 (a)) |
   | SMR28-2 / AGY f1 failing-tail cadence | CLOSED — the entry stays pending and the retry rides a per-entry `nextAttempt` on the standing 5/10/20/60s exponent-preserving ladder (the per-tick pass skips not-yet-due entries); the failure Warns on the standing edge-detect; §9 (a) asserts two consecutive failures do not produce back-to-back full drains (§5-C (ii), §9 (a)) |
   | AGY f2+f3 uniform missing-entry contract | CLOSED — the missing-entry → already-terminal contract applies to EVERY registry accessor (the scheduler/notice drains AND the synchronous `ApplyResult` wrapper — the iterate drain picks up a Compile-leg entry concurrently with its wrapper, so the wrapper's accessor can hit a GC'd key); §9 (a) asserts the wrapper-vs-GC race no-ops cleanly (§5-C (ii), §6, §9 (a)) |
+
+- **Round 29** (v8.24): SMR DEMAND-REVISION (0 BLOCKER + 0
+  MAJOR + 2 MINOR + 1 NIT); AGY DEMAND-REVISION (1 MAJOR + 1
+  MINOR + 2 NIT); Codex INFRA-BLOCKED (eighth documented
+  attempt; 2-of-3). Convergence: the claim's release-on-failure
+  had to be atomic with the backoff set (SMR29-1 = AGY f2), and
+  the claim's lifetime needed more than the process-crash story
+  (AGY f1's MAJOR — a goroutine PANIC pins the phase claimed
+  forever with no recovery path; SMR29-2's named-bounds/D-state
+  fold was superseded by the defer-revert + lease). AGY-only:
+  f3 (the ladder reset — AGY's per-phase-success form adopted,
+  superseding SMR29-3), f4 (the §9 (a) panic-injection
+  assertion).
+- **Round-29 disposition table:**
+
+  | r29 finding | v8.25 disposition |
+  |---|---|
+  | AGY f1 un-leased claimed trap (panic vs process crash) | CLOSED — (i) a `defer` wrapper around EVERY phase execution catches panics and atomically reverts claimed → pending WITH `nextAttempt` under `m.mu`; (ii) the claim records `claimedAt` + a claim GENERATION and is STEALABLE after the named bound (the tail operations' own timeout sum) — the stealer runs with a bumped generation and the stale claimant's late advance is REFUSED (§5-C (ii), §9 (a)) |
+  | SMR29-1 / AGY f2 atomic release + due-check | CLOSED — the claimed → pending release and the `nextAttempt` set are ONE `m.mu` operation; the claim itself refuses entries whose `nextAttempt` is in the future (the due-check lives in the claim — the notice-triggered drain respects it too) (§5-C (ii), §9 (a)) |
+  | SMR29-2 stuck-claim bound | CLOSED — superseded by AGY f1's lease (the named bound IS the tail operations' timeout sum; the steal replaces the D-state-only posture for claims) |
+  | SMR29-3 ladder scope/reset | CLOSED — per-ENTRY ladder; AGY f3's reset form adopted (a SUCCESSFUL phase resets the ladder to the base step for the remaining phases; a FAILED phase advances it), superseding the terminal-only form (§5-C (ii)) |
+  | AGY f4 §9 (a) panic injection | CLOSED — §9 (a) asserts a panicking phase execution reverts claimed → pending with backoff applied |
 
 ### Round-1 detail log (kept for the record)
 
@@ -5592,7 +5651,25 @@ BLOCKERs 6 + 8; v8 epoch form per Codex r6 f6/f8):**
   with the claim, the first claimant executes and
   the duplicate skips; a claimed-but-crashed drain
   is the in-memory-loss case the crash rule
-  re-derives)); and the notice is an
+  re-derives) — with the claim's own lifetime
+  bounded (v8.25, AGY r29 f1's un-leased-claimed
+  fix: the "crashed drain" phrase covered only
+  PROCESS crashes — a goroutine PANIC (the process
+  lives) would pin the phase `claimed` forever
+  (skipped by every claimant, never terminal, never
+  GC'd, no boot recovery): (i) a `defer` wrapper
+  around EVERY phase execution catches panics and
+  atomically reverts claimed → pending WITH
+  `nextAttempt` under `m.mu`, and (ii) the claim
+  records `claimedAt` + a claim GENERATION and is
+  STEALABLE after the named bound (the tail
+  operations' own timeout sum — the peer push's
+  connection write path (handleDisconnect on
+  error), the stamp's synchronous store return, the
+  invalidation's local kernel calls) — the stealer
+  runs with a bumped generation and the stale
+  claimant's late advance is REFUSED (the
+  generation check under `m.mu`)); and the notice is an
   OPTIMIZATION over a sweep (v8.20, SMR r24 SMR24-4 =
   AGY r24 f4: the enqueue-after-unlock is
   non-blocking — a full buffer drops the notice, so
@@ -5646,7 +5723,24 @@ BLOCKERs 6 + 8; v8 epoch form per Codex r6 f6/f8):**
   re-invoking the drain every 1s on a failing entry
   was a tight 1Hz retry loop against the plan's own
   standing posture — and the failure Warns on the
-  standing edge-detect); and the drain's cursor
+  standing edge-detect) — with the release
+  composed atomically (v8.25, SMR r29 SMR29-1 =
+  AGY r29 f2: the claimed → pending release-on-
+  failure and the `nextAttempt` set are ONE `m.mu`
+  operation (a split release lets a racing iterate
+  tick re-claim immediately and the 1Hz loop
+  returns via the claim path), and the claim itself
+  refuses entries whose `nextAttempt` is in the
+  future (the due-check lives in the claim — the
+  notice-triggered drain respects it too, never
+  accelerating a backed-off entry)) and the ladder
+  per-ENTRY with AGY's reset form (v8.25, AGY r29
+  f3, superseding SMR29-3's terminal-only form: a
+  SUCCESSFUL phase resets the entry's ladder to the
+  base step for the remaining phases — each phase's
+  failure is operation-specific, matching the
+  standing debt behavior; a FAILED phase advances
+  the ladder); and the drain's cursor
   lookup treats a
   MISSING entry as already-terminal (v8.23, SMR r27
   SMR27-2 = AGY r27 f1/f4; scope made uniform
@@ -8147,7 +8241,17 @@ activations a scheduled retry.
       (v8.24, SMR r28 SMR28-2 = AGY r28 f1: assert
       two consecutive failures do NOT produce two
       back-to-back full drains, and the Warn fires
-      on the standing edge-detect);
+      on the standing edge-detect); a PANICKING
+      phase execution reverts claimed → pending
+      with backoff applied (v8.25, AGY r29 f1/f4:
+      inject a panic mid-phase — assert the `defer`
+      wrapper's atomic revert and that the next
+      claimant picks the phase up at the ladder-due
+      time, never immediately); a stuck claim is
+      STOLEN after the named bound (v8.25, AGY r29
+      f1: assert the stealer's bumped generation
+      executes and the stale claimant's late advance
+      is refused);
       the A→B→C COMPOSITION (v8.15, Codex r19 f5): A
       exposed → gated B tightens → gated C promoted →
       C's exposure invalidates sessions against
@@ -8976,7 +9080,7 @@ the three owners through nine enumerations; the mixed-version
 producer is the documented exception with the required helper
 restart).
 
-Remaining questions for round 29, each invitable to PLAN-KILL with
+Remaining questions for round 30, each invitable to PLAN-KILL with
 a concrete counterexample:
 
 1. **Completeness, final form.** Exhibit a path to
@@ -9039,11 +9143,11 @@ a concrete counterexample:
    candidate-filter territory
    (`include_userspace_binding_interface`), explicitly out of
    scope here.
-6. **Round-28 disposition table audit.** §1's r28 table maps
-   every r28 finding (SMR 2 MINOR; AGY 1 MAJOR + 1 MINOR + 1
-   NIT; Codex infra-blocked) to its v8.24 fold, and every fold
-   this revision was verified per-edit against the file.
-   Which row is claimed-but-wrong this time?
+6. **Round-29 disposition table audit.** §1's r29 table maps
+   every r29 finding (SMR 2 MINOR + 1 NIT; AGY 1 MAJOR + 1
+   MINOR + 2 NIT; Codex infra-blocked) to its v8.25 fold, and
+   every fold this revision was verified per-edit against the
+   file. Which row is claimed-but-wrong this time?
 7. **Cumulative hazard budget, final sign-off (v8.8 honest
    numbers, Codex r11 f11 + r12 f14).** Healthy unsuppressed
    baseline for

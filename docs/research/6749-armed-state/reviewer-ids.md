@@ -900,6 +900,30 @@
   `/tmp/codex-6749-r28-prompt.txt`). Proceeding 2-of-3 per the
   codex-infra-blocked exception; retries continue each round.
 
-## Round 29 (plan v8.24 @ pending)
+## Round 29 (plan v8.24 @ 50f0ef069)
 
-- Codex (retry), AGY, Claude SMR — pending v8.24 fold.
+- **Claude SMR r29** — `claude-smr-plan-r29.md`. Verdict:
+  DEMAND-REVISION (0 BLOCKER + 0 MAJOR + 2 MINOR + 1 NIT —
+  SMR29-1 the claim's release-on-failure must set nextAttempt
+  atomically (the 1Hz loop returns via the claim path);
+  SMR29-2 the stuck-claim bound rests on an unstated assumption
+  (superseded by AGY f1's lease); SMR29-3 the ladder's
+  scope/reset (superseded by AGY f3's per-phase-success form)).
+- **AGY r29** — background bash `ba1ume11d`; prompt
+  `/tmp/agy-6749-r29-prompt.txt` (125,164 bytes); output
+  `/tmp/agy-6749-r29.out`; verdict doc `agy-plan-r29.md`.
+  Verdict: DEMAND-REVISION (1 MAJOR — f1 the un-leased claimed
+  trap (goroutine panic conflated with process crash — the
+  defer-revert + the claim lease/generation-steal);
+  + 1 MINOR — f2 the non-atomic release + nextAttempt
+  (= SMR29-1); + 2 NIT — f3 the ladder reset (per-phase-success
+  form adopted); f4 the §9 (a) panic-injection assertion).
+- **Codex r29** — INFRA-BLOCKED (usage limit; reset Aug 10
+  06:57 UTC). Eighth documented attempt this session
+  (`/tmp/codex-6749-r29-retry1.err`; r29 prompt staged at
+  `/tmp/codex-6749-r29-prompt.txt`). Proceeding 2-of-3 per the
+  codex-infra-blocked exception; retries continue each round.
+
+## Round 30 (plan v8.25 @ pending)
+
+- Codex (retry), AGY, Claude SMR — pending v8.25 fold.
