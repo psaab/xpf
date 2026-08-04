@@ -276,3 +276,13 @@ authority confirmation split; whole-domain conditioned gate with
 peer-dead bypass intact; cold-start bounded release; generation-
 bound hold re-arm; the explicit §9 pin; the seven-event recap).
 Round 44 is the convergence check.
+
+| r44 | `codex exec` (detached-poll), session in /tmp/codex-6751-r44.log / PLAN-NEEDS-REVISION (3 BLOCKERs: the split is sound but five retained passages still contradict it (all five now carry the split inline); the never-connected release contradicts its own commit predicate (mode-aware three-epoch predicate: (0,0) cold-start release, (changed) invalidated, (unchanged) normal release — the warm-disconnect invariant survives); the cold terminal is not armed across the expanded gate domain (ONE shared sessionSyncConfigured predicate for gate engagement AND cold-start arming); 1 MINOR: the cold-start bound and the four regression cases unpinned (bound = syncReadyTimeout named; the four cases pinned); 1 NIT: the §9 recap omitted abort (all seven named)) — with explicit verification that the split is behaviorally sound (legacy ids decode to zero, sync_protocol.go:491 + sync_rtflow_session_id_5212_test.go:64) | **PLAN-READY (zero findings)** — second clean verdict | PLAN-READY-WITH-NITS (r45 fold-check of v15.33; the epoch-zero collision and the mid-bound connect transition analyzed) |
+
+Round-44 disposition: all findings fold in v15.33 (the five
+passages carry the split inline; the mode-aware commit predicate
+resolves the never-connected contradiction; the shared
+sessionSyncConfigured predicate unifies gate and arming; the bound
+is named and the four cases pinned; the recap names all seven).
+AGY's PLAN-READY is the second clean verdict. Round 45 is the
+convergence check.

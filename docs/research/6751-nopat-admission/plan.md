@@ -1,35 +1,35 @@
 # #6751 plan — interface SNAT no-PAT admission: reserve-or-PAT the colliding translated tuple
 
-- **Status**: DRAFT v15.32 — round-43 fold (Codex r43's four
-  blockers + minor + AGY r43's nit: the decode-time INSERTION
-  confirmation is explicitly EVIDENCE-BASED (fires only on equal
-  NON-ZERO RTFlowSessionIDs — intrinsic per-frame evidence, correct
-  on any window class; a true old-sender window carries id=0 and
-  the predicate fails by itself) while the capability gate governs
-  WINDOW-AUTHORITY decisions (the definitive pass, lineage clears,
-  and purges — the deferred-entries "definitive BulkEnd" and the
-  P1 re-evaluation are capability-qualified, and the "prevents
-  poisoned companions" absolute is scoped to id-capable windows);
-  the gate covers the WHOLE direct/no-VRRP takeover domain
-  (NoRethVRRP || PrivateRGElection — not only private-RG),
-  conditioned on session sync being configured with EITHER
-  supported endpoint pair (control-link OR fabric — a
-  control-link-only deployment is configured, not "not
-  configured"), and the PEER-DEAD election bypass survives
-  unchanged with §9 testing election state; the NEVER-CONNECTED
-  cold start gets its own bounded degraded release (the
-  readiness-timeout event's commit unit fires at the cold-start
-  bound even when never connected — takeover by normal VRRP
-  priority with the heartbeat-alive precondition — while the
-  no-release-without-reconnect regression is preserved for the
-  connected-then-disconnected case it was written for); the
-  classic-hold re-arm never installs an independent untagged
-  AfterFunc (the shared-pointer stale-timer race at
-  manager.go:354/372/389 dies — the re-arm goes through the
-  lifecycle queue as a generation-bound fence-cycle event, or the
-  fence-owned terminal is the sole release path); §9 pins the
-  stale fence expiry after re-arm explicitly; and the §9 callback
-  recap lists all seven events)
+- **Status**: DRAFT v15.33 — round-44 fold (Codex r44's three
+  blockers + minor + nit; AGY r44 converged PLAN-READY with zero
+  findings: the last five contradictory alias passages carry the
+  evidence-vs-authority split inline (the FRAMING-ONLY rule now
+  says the gate governs window-authority decisions ONLY while
+  decode-time insertion confirmation stays evidence-based on every
+  window — a true old-sender's frames decode the id to zero,
+  sync_protocol.go:491 / sync_rtflow_session_id_5212_test.go:64,
+  so the predicate fails by itself, and a pre-learn new sender's
+  alias copies the base's nonzero id and is confirmed-and-dropped
+  exactly as designed, daemon_ha_userspace_convert.go:338/399; P1
+  re-evaluates at every completed CAPABILITY-ADVERTISING BulkEnd;
+  the poisoned-companion prevention is scoped to id-capable
+  windows); the readiness-timeout event's commit unit is
+  MODE-AWARE across the three connection-epoch states —
+  never-connected cold start (arming epoch zero, still zero at
+  commit: the cold-start degraded release commits), connected-
+  then-disconnected (epoch differs: INVALIDATED, no release — the
+  no-release-without-reconnect invariant holds), still connected
+  (normal release) — so the never-connected release no longer
+  contradicts its own commit predicate; ONE SHARED
+  `sessionSyncConfigured` predicate (control-link OR fabric
+  endpoints, any takeover mode) governs BOTH gate engagement AND
+  cold-start timer arming, so every sync-configured deployment
+  gets the cold-start bound regardless of mode or transport; the
+  cold-start bound IS the existing syncReadyTimeout (named, not
+  left to implementation) and §9 pins the four regression cases
+  (simultaneous-never-connected, control-link-only, whole direct
+  domain, peer-dead election state); and the §9 recap names all
+  seven events including abort)
 - **Issue**: #6751 (opus-review-001 R08, High, `bug`+`audit`+`security`) —
   interface SNAT admits indistinguishable no-PAT return tuples and sends
   replies to the FIRST session.
@@ -706,6 +706,16 @@ consequences onto the surviving §5.x machinery.
   interop, unchanged and not worsened) but it NEVER clears alias
   lineage or suspect marks, NEVER drives the definitive alias
   resolution pass, and NEVER releases the reconciliation hold for
+  lineage purposes (the gate governs WINDOW-AUTHORITY decisions only
+  — the decode-time INSERTION confirmation remains EVIDENCE-BASED on
+  every window class: it fires only on equal NON-ZERO
+  RTFlowSessionIDs, which a true old-sender's frames never carry —
+  they decode to zero, sync_protocol.go:491, pinned by
+  sync_rtflow_session_id_5212_test.go:64 — while a pre-learn new
+  sender's alias copies the base's nonzero id,
+  daemon_ha_userspace_convert.go:338/399, and is confirmed-and-
+  dropped exactly as designed, Codex r43 blocker 1 / r44 blocker 1's
+  verified split) — and NEVER releases the reconciliation hold for
   lineage purposes (the definitive pass and every lineage clear
   run ONLY against capability-advertising senders' snapshots; a
   legacy window is non-definitive by construction and the plan
@@ -782,7 +792,18 @@ consequences onto the surviving §5.x machinery.
   disconnect/fence event, sync_conn.go:462 — so a simultaneous cold
   boot with healthy heartbeat but failed session-sync TCP leaves
   BOTH nodes enforcing readiness, election.go:322, and neither
-  takes over indefinitely). The cold-start degraded release: the
+  takes over indefinitely). ONE SHARED `sessionSyncConfigured`
+  predicate governs BOTH the gate's configured check AND the
+  cold-start timer's arming (Codex r44 blocker 3: today startup
+  arms only `PrivateRGElection && fabric-pair`,
+  daemon_run_bringup.go:229, and the other arm requires a
+  successful connection, daemon_ha_sync.go:81 — so control-link-only
+  private RG and `NoRethVRRP && !PrivateRGElection` never-connected
+  starts can still hang indefinitely; the shared predicate is
+  "session sync configured with a usable endpoint pair — control-
+  link OR fabric — regardless of takeover mode", and EVERY
+  sync-configured deployment arms the cold-start bound at startup
+  regardless of mode or transport). The cold-start degraded release: the
   readiness-timeout event's commit unit fires at the cold-start
   bound EVEN when never connected — committing the degraded
   release through the same DISTINCT effect (no bulk-completion
@@ -1792,8 +1813,25 @@ record's identity frees only when `per_worker` is empty AND
       readiness-timeout lifecycle event onto the same serialized
       lifecycle queue (minting its `(abortGeneration,
       lifecycleSequence)` tag at admission like every other event);
-      the event's commit unit re-validates the arming generation,
-      connected state, AND the FENCE STATE (Codex r41 blocker 3 /
+      the event's commit unit is MODE-AWARE across the three
+      connection-epoch states (Codex r44 blocker 2 — the
+      never-connected release must not remove the connected check
+      wholesale, which would threaten the warm-disconnect invariant
+      at session_sync_readiness_test.go:33; the event carries the
+      connection epoch AT ARMING): (i) NEVER-CONNECTED COLD START
+      (arming epoch ZERO and still zero at commit) — the cold-start
+      degraded release commits at the cold-start bound (the
+      DISTINCT effect; takeover proceeds by normal VRRP priority
+      with the heartbeat-alive precondition); (ii)
+      CONNECTED-THEN-DISCONNECTED (arming epoch > 0 and the current
+      epoch differs from the arming epoch) — the event is
+      INVALIDATED (no release; the existing
+      no-release-without-reconnect regression holds — a warm
+      disconnect must never release on timeout alone); (iii) STILL
+      CONNECTED at the arming epoch — the normal readiness release.
+      The arming generation,
+      connected state (as the epoch comparison, not a bare boolean),
+      AND the FENCE STATE (Codex r41 blocker 3 /
       r42 blocker 2: a connected-only readiness callback racing
       fence engagement before disconnected state commits —
       disconnect notification is asynchronous, sync_conn.go:569-570 —
@@ -2487,7 +2525,17 @@ record's identity frees only when `per_worker` is empty AND
       completes, before any resolution could run. The
       quarantine gates ONLY the import (install / publish / reserve /
       companion synthesis), never the "was received" record).
-      Confirmation is ORDER-AGNOSTIC (Codex
+      Confirmation is ORDER-AGNOSTIC and EVIDENCE-BASED, not
+      window-authority-based (it fires only when the frame pair
+      carries equal NON-ZERO RTFlowSessionIDs — intrinsic per-frame
+      evidence, correct on ANY window class; a true old-sender's
+      frames decode the id to zero, sync_protocol.go:491 /
+      sync_rtflow_session_id_5212_test.go:64, so the predicate fails
+      by itself and the entry goes to provisional admission — the
+      ratified mixed-version cell; and a pre-learn new sender's
+      alias copies the base's nonzero id and is confirmed-and-dropped
+      exactly as designed, daemon_ha_userspace_convert.go:338/399)
+      (Codex
       r14 blocker 2: the sender queues canonical base FIRST and alias
       SECOND on open, daemon_ha_userspace_stream.go:370/375/384, so the
       base has normally ALREADY been imported when the alias arrives —
@@ -2559,7 +2607,8 @@ record's identity frees only when `per_worker` is empty AND
       admitted companion behind. Two refinements make the purge
       total and safe (Codex r30 findings 2 and 6):
       (P1) a timeout-admitted alias row is PROVISIONAL — every
-      completed BulkEnd re-evaluates it against the definitive
+      completed CAPABILITY-ADVERTISING BulkEnd re-evaluates it
+      against the definitive
       snapshot (alias signature + sibling base present), purging it
       even when NO new alias frame ever arrives — the active derives
       explicit aliases only on the incremental path
@@ -2642,7 +2691,11 @@ record's identity frees only when `per_worker` is empty AND
     (shared_ops.rs:92-120). Return packets consult the exact session key
     K (shared_ops.rs:602/630), so the poisoned companion is
     forwarding-relevant TODAY. Sender omission (new+new) and
-    quarantine-confirmation (legacy) both prevent the poisoned
+    quarantine-confirmation (legacy — on ID-CAPABLE windows; on a
+    true old-sender window the ids are zero and no confirmation is
+    possible, so the admission is provisional with the
+    session-lifetime bound, the ratified mixed-version cell) both
+    prevent the poisoned
     companion from ever forming; `NAT_REVERSE_KEY_SHARED_DISPLACEMENTS`
     goes quiet for fabric-redirect SNAT sessions.
   - **Mixed-version matrix** (no cell regresses): new+new: omission —
@@ -3191,6 +3244,19 @@ quarantine-admitted + overflow), and tests.
   racing the verdict transition can never emit the row mid-
   transition (the mark update and the resolution verdict commit
   in the same critical section).
+- **Cold-start degraded-terminal suite** (Codex r44 minor 4): the
+  cold-start bound IS the existing `syncReadyTimeout`
+  (daemon.go:1148 — named explicitly, not left to implementation);
+  the four cases are pinned directly: simultaneous-never-connected
+  cold boot with healthy heartbeat but failed session-sync TCP
+  (both nodes enforce readiness, election.go:322 — the bound
+  commits the degraded release and normal VRRP priority elects);
+  control-link-only private RG (the shared `sessionSyncConfigured`
+  predicate arms the bound identically); the whole direct domain
+  (`NoRethVRRP || PrivateRGElection`, including
+  no-private-rg-election + no-reth-vrrp); and the peer-dead
+  election-state bypass (election.go:427 ungated — tested as
+  election state, not merely `RG.Ready`).
 - **Retained-C0 degraded-terminal regression** (Codex r40 minor
   4): a legacy no-ACK peer retains C0 past a delayed/lost close
   notification (no plan-bounded kill — asserted, not assumed);
@@ -3262,9 +3328,9 @@ quarantine-admitted + overflow), and tests.
   under the generation-tagged CAS) and the old-disconnect-after-new-
   connect case (the stale disconnect's write fails the CAS) — Codex r24
   blocker 1's two lifecycle races, one pinned per event in the
-  seven-event inventory (connect, disconnect, bulk-received,
-  bulk-ack-received, readiness-timeout, AND fence-cycle expiry —
-  AGY r43 nit) — PLUS the equal-tag `true@G`/`false@G`
+  seven-event inventory (abort, admission/connect, disconnect,
+  bulk-received, bulk-ack-received, readiness-timeout, AND
+  fence-cycle expiry — AGY r43 nit + Codex r44 nit 5) — PLUS the equal-tag `true@G`/`false@G`
   overwrite regression (the C1-disconnect / C2-connect same-g
   collision: the stale equal-generation write MUST fail the
   strict-inequality tag CAS, AGY r25 blocker 1 / Codex r26 minor 3),
