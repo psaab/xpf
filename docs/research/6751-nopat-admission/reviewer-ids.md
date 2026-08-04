@@ -116,3 +116,15 @@ effective-destination IP+port canonicalization; decode-time
 base-identity index; universal producer atomicity; sender-side
 known-stale omission; telemetry-excluded equality projection;
 receive-deadline default). Round 29 re-reviews v15.16.
+
+| r29 | `codex exec` (detached-poll), session in /tmp/codex-6751-r29.log / PLAN-NEEDS-REVISION (5 BLOCKERs: incarnation/producer-completeness, pre-BulkStart Open gap, owner/occupancy conflation, static cross-domain, index lifecycle+stale-row; 3 MAJORs: debt attribution, worker-id threading, fallible allocator; 3 MINORs: producer enumeration, sweep bound, projection) | PLAN-READY (no nits) | PLAN-READY-WITH-NITS (r30 fold-check of v15.17) |
+
+Round-29 disposition: all eleven Codex findings fold in v15.17
+(incarnation-conditional error-accounted delete + three-producer
+funnel; received-set carry-forward; owner/occupancy tuple split with
+effective-port plumbing; static whole-address occupancy arm;
+received-set-bounded index + confirm-purge; debt epoch→debtGen
+attribution + terminal clear; worker-id threading; fallible
+allocator_for; sweep-wake; producer enumeration precision;
+projection exclude-list). AGY wrote its PLAN-READY verdict with zero
+findings. Round 30 re-reviews v15.17.
