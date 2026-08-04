@@ -1,24 +1,28 @@
 # #6751 plan — interface SNAT no-PAT admission: reserve-or-PAT the colliding translated tuple
 
-- **Status**: DRAFT v15.24 — round-35 fold (AGY r35's three
-  clarifications + Codex r35's blocker/major/minors: the dual-lane
-  arbiter is explicitly GO-SIDE (a single Go mutex wrapping both
-  lanes, fed by Rust-carried tuples — an IPC critical section is
-  not implementable); the fence's re-drive is CONNECTION TEARDOWN
-  (no NACK frame type exists); the old-peer re-prime is now an
-  ADMISSION fence held throughout the quiet interval in BOTH
-  directions (refuse authenticated inbound + suppress outbound on
-  both fabrics until the peer's disconnect bound elapses — the
-  non-initiator redial race is excluded); every worker records an
-  import outcome before its barrier ACK (reserve/install failure
-  aggregates to Failed or stays Pending — the §5.6 "not fed back"
-  asymmetry is superseded); the helper incarnation is a
-  DAEMON-ISSUED monotonic generation bound to the validated
-  instance (source sequencing restarts at zero — reuse is
-  excluded); ConfirmedAliasNoop terminalizes only after P2 reports
-  deleted/absent/publication-mismatch-to-newer; and replica
-  refresh is origin-predicate-gated with monotonic
-  max(current,candidate) last_seen)
+- **Status**: DRAFT v15.26 — round-37 fold (AGY r37's two nits +
+  Codex r37's blocker/major/minors, PLUS the fold-landing audit
+  their disagreement exposed: three earlier folds had silently
+  failed on wrap mismatches — the v15.24 daemon-issued incarnation
+  text, the v15.25 Rule-6 normative text, and the v15.25 §9
+  failure-semantics pins — and AGY's "verification" of the §9 pins
+  was a hallucination pattern-matched on the header; all three are
+  now repaired and grep-verified. Substance: the fence
+  GENERATION-BINDS the whole admission path (children stamped at
+  Accept/dial completion, pre-fence children killed before the
+  drain clock starts, stale-stamp children rejected at every later
+  stage, both stalls §9-pinned); the 5-second incremental window
+  NEVER clears `alias-suspect` (a lost-base alias copies the base
+  exactly — only the COMPLETE-PRIME definitive pass or the row's
+  own close clears, and an unresolved suspect OWES a complete
+  inbound prime via prime-REQUEST with the fence cycle as its
+  bound); the lineage stage carrier is inventoried
+  (SessionMetadata, additive SyncedSessionEntry extension, worker
+  replication, promotion Open path, every exporter); §9 gains the
+  consolidated PATH-A transaction suite, the failure-semantics
+  pins, the alias-stage propagation suite, and the pre-install
+  children fence suite; and Rule 6's incarnation is normatively
+  daemon-issued in the rule body itself)
 - **Issue**: #6751 (opus-review-001 R08, High, `bug`+`audit`+`security`) —
   interface SNAT admits indistinguishable no-PAT return tuples and sends
   replies to the FIRST session.
@@ -375,7 +379,13 @@ consequences onto the surviving §5.x machinery.
    (`max(current, candidate)` — a replica must never overwrite the
    owner's legitimate counter or policy state, nor drag the row's
    last_seen BACKWARD with its own stale view, AGY r35 finding 3 +
-   Codex r35 finding 6).
+   Codex r35 finding 6). The refresh iterator gains the origin
+   projection as an internal signature change (today it exposes no
+   origin, lookup.rs:501 — Codex r36 nit 6; the conversion
+   distinguishes local/promoted owners from replicas, entry.rs:216 /
+   shared_ops.rs:212), and §9 pins the stale-replica regression
+   (a replica's older last_seen never overwrites the owner's newer
+   one).
 6. **Dual-lane deduplication through ONE arbiter** (Codex r33
    finding 5's discovery + r34 finding 6's serialization correction):
    Rust clones every delta into the RPC fallback buffer AND the event
@@ -407,11 +417,23 @@ consequences onto the surviving §5.x machinery.
    advertise the capability disables the fallback lane ENTIRELY, the
    safe degradation — no duplicates are possible when only one lane
    runs). The high-water is preserved across an ordinary event-
-   stream reconnect; a helper INCARNATION (boot epoch) rides both
+   stream reconnect; a helper INCARNATION rides both
    lanes and the watermark resets ONLY after validating a new
    incarnation (a reset without validation admits delayed
    pre-reconnect frames; retaining across a helper restart drops
-   genuine new low sequences); and a reconnect's barriered handoff
+   genuine new low sequences). The incarnation is NORMATIVELY a
+   DAEMON-ISSUED monotonic generation (or collision-resistant
+   nonce), established at the barriered handoff and bound to the
+   currently validated helper instance on BOTH lanes (Codex r35
+   finding 4 + r36 nit 5 + r37 nit 5: Rust source sequencing
+   restarts at zero, event_stream/mod.rs:261/275, and status
+   exposes only PID/start time, control.rs:141 — a helper-local
+   boot counter would let a retained (E1,100) reject a genuine
+   restarted (E2,1), and §9 pins exactly that case: restarted
+   (E2,1) is ACCEPTED after retained (E1,100)); it is never a
+   helper-local boot counter, and every incarnation advancement
+   emits ONE info-level log marker (AGY r37 nit 2).
+   And a reconnect's barriered handoff
    FLUSHES/INVALIDATES the worker's pending fallback buffer (AGY r34
    minor 2). Go draws #2170
    generations in consumption order inside the arbiter, so with both
@@ -434,12 +456,53 @@ consequences onto the surviving §5.x machinery.
    would export to a NEW capable peer as canonical. Alias lineage is
    therefore ORTHOGONAL STICKY metadata preserved across promotion,
    demotion, replication, and reconciliation (never recomputed from
-   origin), and every export path sees it: the mirror value gains a
+   origin), in TWO STAGES (Codex r36 major 2 — the missed second r35
+   MAJOR: marking only CONFIRMED aliases lets a timeout-admitted
+   suspect promote and export as canonical — the legacy alias copies
+   the base value exactly, daemon_ha_userspace_convert.go:399, and
+   `SharedPromote` is exportable, export.rs:114 — while marking
+   EVERY suspect permanently would suppress genuine self-NAT/NPTv6
+   export beyond the priced delay): (a) `alias-suspect` is
+   PROVISIONAL — set at quarantine insertion AND at
+   timeout-admission for every signature-matching row, sticky like
+   the permanent mark, and suppressing export WHILE UNRESOLVED; and
+   (b) `alias-lineage` is PERMANENT — set on alias CONFIRMATION,
+   suppressing export for the row's lifetime (subject to the P1/P2
+   purge). The suspect mark clears ONLY through a DEFINITIVE
+   verdict (Codex r37 major 2: the 5-second incremental window is
+   NOT definitive — a lost-base alias copies the base value
+   exactly, daemon_ha_userspace_convert.go:399, so "no sibling
+   base present" at the timeout proves nothing, and clearing there
+   would reproduce the alias-only → timeout → clear → import →
+   promote → export trace): the ONLY clearing verdicts are (i)
+   the COMPLETE-PRIME definitive pass (the whole snapshot makes
+   the sibling-base relation decidable — a suspect whose complete-
+   prime verdict is GENUINE (self-NAT, identity-NPTv6, lost-base)
+   clears the mark and exports normally; an alias verdict
+   transitions it to the permanent mark), or (ii) the row's OWN
+   close (mark and row die together). A timeout-admitted suspect
+   therefore remains `alias-suspect` — UNRESOLVED — and OWES a
+   definitive proof: the receiver requests a complete inbound
+   prime for it via the prime-REQUEST field (a stable connection
+   may never run another authoritative bulk — the normal sweep
+   sends individual frames, sync_conn_sweep.go:142 — so the debt
+   is explicit, with the fence cycle as its bound: overdue, the
+   receiver fences for it), and a suspect STILL UNRESOLVED at any
+   export evaluation keeps the suppression (conservative — every
+   export path skips a marked row with the skip counted; the
+   terminal bound is the session's own lifetime, the documented
+   residual). Every export path sees the marks:
+   the mirror value gains a
    provenance bit (the `xpf_conntrack.h` ABI has no provenance field
    today — additive per #1961) OR an exact lifecycle-managed side
    index (same lifetime as the row, updated by the same transactions)
    is consulted by the Go bulk and sweep (sync_bulk.go:95 /
-   sync_conn_sweep.go:137 filter only ordinary row fields today).
+   sync_conn_sweep.go:137 filter only ordinary row fields today);
+   the helper-side export skip of EITHER mark is counted with its
+   own explicit counter/label (the §5.8 taxonomy names the Go-side
+   quarantine counter; the export skip is a distinct event and
+   gets a distinct helper-side counter covering both
+   `alias-suspect` and `alias-lineage` skips — AGY r37 nit 1).
    The alias quarantine,
    decode-time base-identity index, timeout-admission, and P1/P2
    provisional purge remain as the LEGACY-gated disciplines for
@@ -519,7 +582,62 @@ consequences onto the surviving §5.x machinery.
   admit/dial, so the peer provably observes both slots empty before
   any new connection arrives; the dual-slot race — one fabric
   redialed between the two disconnect callbacks — is excluded by
-  the fence, not by dial timing alone).
+  the fence, not by dial timing alone. The refusal is at the
+  TRANSPORT level, not the post-auth install verdict (Codex r36
+  blocker 1: an installConn-time refusal still lets both endpoints
+  complete setup and install LOCALLY first, sync_conn.go:100/130 /
+  sync_auth.go:329 — so a retry begun within one disconnect bound
+  of fence expiry could still occupy an old-peer slot when the next
+  connection is admitted, and installConn would observe a nonempty
+  registry and never arm needColdPrime, sync_conn.go:248/278; and a
+  briefly both-empty old peer can complete a small bulk WRITE —
+  BulkEnd written = success without ACK on the old implementation,
+  sync_bulk.go:169 / sync_conn.go:194 — clearing its latch with the
+  sticky `outboundBulkAcked` suppressing survivor re-drive,
+  sync.go:479 / sync_conn.go:572). During the quiet interval the
+  fencing side therefore refuses at the TRANSPORT — the listener
+  is closed / SYN-level refused — so NO NEW setup completes (an
+  old peer needs no protocol change: its connect(2) simply
+  fails). Listener closure alone is NOT sufficient (Codex r37
+  blocker 1: `Accept` returns a child before `beginSetup` tracks
+  it, `finishSetup` removes the child from tracking before
+  `installConn`, and `Stop` closes listeners, registered slots,
+  and setup children SEPARATELY, sync_conn.go:349 — an
+  already-accepted pre-install child survives listener closure,
+  and the old unkeyed initiator installs it LOCALLY immediately,
+  sync_auth.go:329, leaving the old peer's registry non-empty
+  after quiet expiry). The fence therefore GENERATION-BINDS the
+  whole admission path: every accepted/dialed child is stamped
+  with the current fence generation AT `Accept`/dial completion;
+  fence engagement KILLS every pre-fence child (tracked setup
+  children AND accepted-but-untracked ones) BEFORE the quiet
+  interval's drain clock starts (the interval starts only after
+  those children are dead, not at listener closure); and a child
+  whose stamp predates the current fence generation is REJECTED
+  at every subsequent stage (`beginSetup`, `finishSetup`,
+  `installConn`) — a stale child resuming after fence release is
+  never stamped as a current admission. The two stalls are §9-
+  pinned directly (`Accept→beginSetup` and
+  `finishSetup→installConn`). With pre-fence children dead and
+  no new setup completing, NO install happens on either side
+  during the interval; the interval starts only after the
+  pre-fence children are dead, covers the peer's
+  disconnect-detection bound
+  after the last transport-refused attempt (any already-installed-
+  but-dead connection drains within the bound), and is
+  parameterized as `quiet_interval = 2.5 × keepalive_timeout`
+  (e.g. 7.5s for a 3s bound — jitter-safe, AGY r36 nit 2, joining
+  the implementation parameter summary); a fixed interval sufficing
+  because no refusal can be "completed past" — there is no
+  post-auth race to restart against (and restarting on every
+  refusal would livelock against the 1s retry). The old peer's own
+  write-completion clearing hazard is bounded receiver-side: the
+  receiver never reconciles or releases the hold without a COMPLETE
+  bulk (existing rules), the reconciliation hold protects the
+  carried set, and a missed per-bulk receive deadline RE-FENCES
+  (the receiver invokes the fence again — each cycle carries the
+  same both-empty proof). The refusal's connect failure gives the
+  peer's 1s retry immediate feedback (no stall, AGY r36 nit 1).
 - **The debt machinery** is retained with one correction (Codex r33
   finding 8's tail): the (epoch → debtGen) pair is recorded BEFORE
   the peer-facing End; page/checksum failure, write failure,
@@ -974,8 +1092,14 @@ record's identity frees only when `per_worker` is empty AND
   confidentiality compromise; a later genuine refresh re-publishes and
   re-queues. The coordinator's `{Shared}` for such an entry persists by
   design ({Shared} rides the canonical row, removed by the peer's
-  delete-sync or entry expiry — AGY r4 minor 3, documented accepted
-  asymmetry, not fed back).
+  delete-sync or entry expiry — AGY r4 minor 3). (Codex r35 major 2 /
+  r36 minor 3 SUPERSESSION: the "not fed back" acceptance predated the
+  §4.0.1 applied transaction — under Rules 2-3 every worker now
+  records an outcome before its barrier ACK, and a reserve/install
+  failure aggregates to `Failed` or remains `Pending` and FENCES the
+  receive epoch; the outcome channel is mandatory, and this gap's
+  only remaining shape is the post-fence re-drive, which replays the
+  import through the same outcome-recorded path.)
 - **Tuple-changing re-sync — STAGED REPLACEMENT protocol on
   tuple-versioned records** (Codex r4 blocker 6 + r5 blockers 1-2):
   - Coordinator: pre-read the canonical row's CURRENT tuple T_old →
@@ -2221,9 +2345,17 @@ record's identity frees only when `per_worker` is empty AND
     keeps deriving; old receiver treats aliases as canonical — TODAY'S
     exact behavior (broken companion included — the status quo, not
     worse). old + old: status quo.
-  - **Helper side**: NO alias-specific handling at all — the ownership
-    machinery (reserve/holders/tri-state/staged replacement) sees only
-    canonical rows.
+  - **Helper side**: no alias-specific OWNERSHIP handling — the
+    ownership machinery (reserve/holders/tri-state/staged
+    replacement) sees only canonical rows. (Codex r37 minor 3
+    clarification: the alias LINEAGE MARKS are metadata, not
+    ownership — the stage carrier is inventoried explicitly:
+    `SessionMetadata` for local rows, the additive
+    `SyncedSessionEntry` extension for synced rows (per #1961),
+    worker replication (which already carries metadata), and the
+    promotion Open path — every exporter checks the marks, and §9
+    pins suspect→promote suppression, genuine-clear/export,
+    stage preservation, and the concurrent-export race.)
 - **Neutral paths**: promote (promote.rs:99), demote (install.rs:568),
   #1752 in-place refresh — NO reserve/release calls.
 - **Reverse-companion lag (documented inherited window, SMR r5 N16)**:
@@ -2614,6 +2746,81 @@ quarantine-admitted + overflow), and tests.
 - `cargo build` clean; full `make test-rust` and `make test-go`;
   `make test` umbrella. Fleet cap: build with
   `CARGO_TARGET_DIR=/home/ps/cargo-target/research-6751`.
+- **PATH-A sole-writer transaction suite** (Codex r34 findings
+  1-10 + major 11, Codex r36 minor 4, Codex r37 minor 4, AGY r32
+  nit 2 — the consolidated §9 anchors for §4.0.1/§4.0.2):
+  the COMPLETE writer inventory routes through helper
+  transactions (including the #5305 pre-image rollback, the
+  maps_sync initial-control cleanup, idle reaping with the table
+  entry's id, and terminal teardown); bounded admission refuses
+  at the per-worker bound with exact per-key errors and reserves
+  capacity across all affected workers BEFORE any shared-state
+  mutation; ONE end-to-end deadline with unknown-result = fenced
+  receive epoch (no reconcile, no ACK, no hold release);
+  the applied transaction's two ledgers with the five terminal
+  outcomes (`Applied`, `AlreadyNewer`, `ConfirmedAliasNoop`,
+  `Failed`, `Pending` — the ACK requires zero Failed/Pending,
+  and a confirmed alias's intentional non-install is NEVER a
+  failure); the delete transaction's table-authoritative
+  predicate (mirror absence is safe only when no different live
+  table entry exists); EXACTLY ONE close producer (the helper's
+  commit; Go-initiated deletes are requests — refusal publishes
+  nothing); the identity domains per transaction class; the
+  stripe-guarded refresh RMW with named-field merge and singular
+  counter ownership; the dual-lane Go-side arbiter (source
+  admission + high-water + generation draw in one critical
+  section per frame on either lane — the stalled-fallback-Close
+  trace can never outdraw the event-stream Open; additive
+  both-lane fields with fallback-disabled degradation;
+  incarnation-validated watermark reset — restarted (E2,1)
+  ACCEPTED after retained (E1,100)); sticky two-stage alias
+  lineage across promotion/demotion/replication with export-path
+  visibility; the copy-time identity binding for the bulk
+  callback's omission decision; the helper-snapshot
+  authoritative recovery source (SharedPromote included, alias
+  excluded, full BulkStart/BulkEnd framing); the
+  transport-refusal quiet interval with re-fence cycles; and the
+  P2 purge in-helper with the no-close-toward-owner exception.
+- **Failure-semantics pins** (Codex r36 minor 4 / r37 minor 4,
+  made explicit after the r25-era fold audit): a worker reserve/
+  install REFUSAL before the barrier ACK aggregates to `Failed`
+  and FENCES the receive epoch — no reconcile, no ACK, no hold
+  release, connection teardown; a P2 purge failure → `Failed`;
+  a timeout/unknown purge or import result → `Pending` with the
+  epoch fenced by teardown before any reconcile; the
+  restarted-incarnation case (restarted (E2,1) ACCEPTED after
+  retained (E1,100)); the stale-replica last_seen regression (a
+  replica's older candidate never overwrites the owner's newer
+  value — monotonic max(current, candidate)); S_new's reverse
+  traffic resolving correctly on the peer WHILE S_old's stale
+  reverse companion is still timing out (the adopted residual,
+  verified end-to-end — AGY r32 nit 2).
+- **Alias-stage propagation suite** (Codex r37 minor 3): a
+  timeout-admitted `alias-suspect` row promoted to
+  `SharedPromote` is NEVER exported while UNRESOLVED (the
+  suspect mark rides SessionMetadata for local rows and the
+  additive SyncedSessionEntry extension for synced rows, is
+  preserved by worker replication and by the promotion Open
+  path, and is checked by every exporter); a genuine verdict at
+  the definitive resolution pass clears the mark and the row
+  exports normally; an alias verdict transitions it to permanent
+  `alias-lineage`; the mark's stage is preserved across
+  promotion, demotion, and re-promotion; and a concurrent export
+  racing the verdict transition can never emit the row mid-
+  transition (the mark update and the resolution verdict commit
+  in the same critical section).
+- **Pre-install children fence suite** (Codex r37 blocker 1):
+  every accepted child is generation-stamped AT `Accept`; fence
+  engagement KILLS every pre-fence child (tracked setup children
+  AND accepted-but-untracked ones) BEFORE the quiet interval
+  starts (the drain clock starts only after those children are
+  dead); a child whose fence generation predates the current
+  fence is REJECTED at every later stage (beginSetup,
+  finishSetup, installConn) — a stale child resuming after fence
+  release is never stamped as a current admission; and the two
+  stalls are pinned directly: `Accept→beginSetup` and
+  `finishSetup→installConn` (a child stalled at either seam is
+  killed by the fence and rejected on resume).
 - Alias-discipline abort/fence race tests (§5.6 contract, AGY r23 nit):
   install-between-detachments refused at clause (2); pending-frame-
   before-install discarded at clause (3); a stalled handler's post-reset

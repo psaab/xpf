@@ -198,3 +198,23 @@ superseded; daemon-issued incarnation namespace; ConfirmedAliasNoop
 terminalizes only after P2's report; origin-predicate replica
 refresh with monotonic last_seen). Round 36 is the convergence
 check.
+
+| r36 | `codex exec` (detached-poll), session in /tmp/codex-6751-r36.log / PLAN-NEEDS-REVISION (1 BLOCKER: post-auth refusal installs locally first — transport-level refusal required; 1 MAJOR: the missed second r35 MAJOR — alias-suspect lineage (marking only confirmed aliases permits alias→promote→export; marking every suspect permanently over-suppresses genuine rows); 2 MINORs: §5.6 paragraph replacement, §9 failure-semantics pins; 2 NITs: normative incarnation in Rule 6, replica iterator origin projection) | PLAN-READY-WITH-NITS (2 nits: RST refusal feedback, quiet_interval = 2.5× keepalive_timeout — both folded) | PLAN-READY-WITH-NITS (r37 fold-check of v15.25) |
+
+Round-36 disposition: all findings fold in v15.25 (transport-level
+refusal with re-fence cycles; two-stage alias-suspect/alias-lineage
+marks with definitive-pass clearing; §5.6 paragraph replaced; §9
+failure-semantics pins; normative daemon-issued incarnation;
+iterator origin projection). Round 37 is the convergence check.
+
+| r37 | `codex exec` (detached-poll), session in /tmp/codex-6751-r37.log / PLAN-NEEDS-REVISION (1 BLOCKER: listener closure does not fence already-accepted pre-install children — generation-bind Accept through install, kill pre-fence children, reject stale stamps; 1 MAJOR: the 5s window's clear semantics contradictory — only complete-prime or row-close clears, suspect owes a prime; 2 MINORs: §9 pins absent, stage carrier inventory; 2 NITs: Rule 6 incarnation fold only in summary, stale-replica regression absent) | PLAN-READY-WITH-NITS (2 nits: export-skip counter for both marks, incarnation-advancement log marker — both folded; BUT its §9-pins verification was a hallucination pattern-matched on the header — the pins were absent, caught by the audit) | PLAN-READY-WITH-NITS (r38 fold-check + the fold-landing audit — 3 silent fold failures found and repaired, grep-verified) |
+
+Round-37 disposition: the round exposed a process failure — three
+earlier folds had silently no-opped (python replace wrap mismatch)
+and AGY's §9 "verification" was hallucinated. All repaired and
+grep-verified in v15.26, plus the substance folds: generation-bound
+admission with pre-fence child kill + stale-stamp rejection; the
+5s window never clears alias-suspect (complete-prime or row-close
+only; the suspect owes a prime via prime-REQUEST with the fence
+bound); the lineage stage carrier inventory; four consolidated §9
+suites. Round 38 is the convergence check.
