@@ -376,5 +376,22 @@
   suppression; + 2 MAJOR — f5 note monotonicity/CAS; f6
   debt-state RPC; + 1 MINOR — f7 Deadline semantics).
 - **Codex r14** — background task `task-msdwofas-rgffdh`
-  (prompt `/tmp/codex-6749-r14-prompt.txt`, --fresh). Output:
-  pending.
+  (prompt `/tmp/codex-6749-r14-prompt.txt`, --fresh); output
+  `/tmp/codex-6749-r14.out`; verdict doc `codex-plan-r14.md`.
+  Verdict: DEMAND-REVISION (12 BLOCKER + 3 MAJOR — archiveSeq
+  is not a commit sequence (per-process retention counter;
+  CommitConfirmed/SyncApply/PromoteRollback don't bump it;
+  manual archive bumps it without a commit; crash-reseed
+  reuse; no revision on config.Config or ActiveConfig);
+  rollback refusal rejects legitimate auto-revert; same-config
+  divergence needs a separate publication revision; auxiliary
+  first-publishers lack acceptance handoff (#5134 arms staged
+  B); note monotonicity backdoor + no failed-transfer owner;
+  re-sync debt prohibited by its own firing rule + not
+  latest-wins; StartDeferredCompile one-sided; claimToken
+  fences bookkeeping not physical work; recovery can't prove
+  quiescence (PrepareLinkCycle void, ignores failures);
+  fairness proof source-false (120s owner holds); env
+  eviction ownership + aggregate bound; fabric debt payload
+  aliasing + readiness conduit doesn't exist; tests green;
+  pass-1 estimate unsupported; budget unbounded).
