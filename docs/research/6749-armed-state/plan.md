@@ -1,6 +1,6 @@
 # #6749 — binding-plan expansion registers new slots unarmed, dataplane disabled indefinitely
 
-**Status: DRAFT v8.30 — pending adversarial plan review (round 35)**
+**Status: DRAFT v8.31 — pending adversarial plan review (round 36)**
 
 - Issue: #6749 (opus-review-001 root R06, severity High)
 - Research base: `ad9591177` (origin/master at worktree creation)
@@ -1548,6 +1548,45 @@
   after C1's drain with C2 gated, and
   `== digest(C2)` after C2's apply — a
   stamp-call-that-doesn't-land FAILS the test) @
+  `1b3cf5138` (r35: SMR DEMAND-REVISION (0 BLOCKER
+  + 0 MAJOR + 1 MINOR + 1 NIT); AGY DEMAND-REVISION
+  (1 BLOCKER + 1 MINOR); Codex infra-blocked
+  (fourteenth documented attempt; 2-of-3))
+; v8.31 folds SMR r35 (1 MINOR + 1 NIT) + AGY r35
+  (1 BLOCKER + 1 MINOR): the captured digest's
+  SOURCE is pinned (SMR35-1 = AGY r35 f1 — the
+  v8.30 "the pair's OWN digest" left the capture
+  locus open, and a drain-time or acceptance-time
+  `ActiveDigest()` reads `digest(s.active == C2)`
+  in exactly the stale-notice windows this
+  machinery exists for — `MarkAppliedDigest(
+  digest(C2))` then makes `ActiveApplied()`
+  report the GATED UNEXPOSED C2 as APPLIED (AGY's
+  sharpest trace): the digest is computed from
+  the STORE'S RETAINED TREE for the pair's
+  revision (the rollback/archive trees, durable
+  by construction) via `DigestOfRevision(rev)`
+  (taking `s.mu`), captured at the cursor's
+  install (`beginFirstExposure`, the same `m.mu`
+  section) for BOTH legs (the Compile-leg
+  wrapper digest and the catch-up-leg cursor
+  digest are then the SAME value for the same
+  pair; the new lock edge `m.mu` → `s.mu` is safe
+  — the store never calls into the manager); the
+  marker's window semantics are stated once
+  (SMR35-2 — post-stamp(C1) ⇒ applied;
+  post-promotion(C2) pre-apply ⇒ NOT applied;
+  post-stamp(C2) ⇒ applied; rollback-to-C1 ⇒
+  applied); the §9 (a) sequence is mandated
+  (AGY r35 f2 — promote C1 → expose C1 → promote
+  C2 (GATED) → drain C1's notice → assert
+  `appliedDigest == digest(C1)` AND
+  `ActiveApplied() == false`, and `== digest(C2)`
+  + `ActiveApplied() == true` after C2's apply —
+  a drain-time-`ActiveDigest()` implementation
+  FAILS); and the v8.27-era "CAS revision
+  verification" leftover in the (d)
+  cancellation-scope text is swept (consistency) @
   pending
   AGY r15 (4 BLOCKER + 3 MAJOR + 1 MINOR) + SMR r15 (2
   BLOCKER + 3 MAJOR + 3 MINOR/NIT): R1 becomes a REAL
@@ -1630,7 +1669,7 @@
 
 ## 1. Status
 
-DRAFT v8.30 — pending adversarial plan review round 35 (Codex + AGY +
+DRAFT v8.31 — pending adversarial plan review round 36 (Codex + AGY +
 Claude SMR). Convergence target: PLAN-READY (recommended path shipped
 to `/engineer`) or PLAN-KILL. No production code is written under
 `/research`.
@@ -2957,6 +2996,29 @@ to `/engineer`) or PLAN-KILL. No production code is written under
   |---|---|
   | SMR34-1 / AGY f1 stamp CAS basis wrong | CLOSED — the v8.26 revision-CAS phrasing is RETRACTED (plan-invented; fails both ways against the actual machinery: an active-keyed CAS refuses the gate-admitted stamp; a CAS-free overwrite lets a late stamp regress). The stamp is the CAPTURED-DIGEST stamp (`MarkAppliedDigest(pair.capturedDigest)` — the pair's OWN digest captured at acceptance/apply time under the apply serialization (the #6296 form, store.go:824-853) — NEVER `MarkActiveApplied()` (which re-reads `s.active` and would stamp the never-applied successor)); the anti-stale protection is the v8.29 EXPOSED-currency ADMISSION gate (a stale notice's stamp is skipped before any stamp call); the read-side `ActiveApplied()` digest comparison is the only "CAS" the machinery needs (§5-C (ii), §9 (a)) |
   | SMR34-2 / AGY f2 stamp-LANDS assertion | CLOSED — §9 (a) asserts `appliedDigest == configTextDigest(C1's text)` after C1's drain with C2 gated, and `== digest(C2)` after C2's apply (a stamp-call-that-doesn't-land FAILS) |
+
+- **Round 35** (v8.30): SMR DEMAND-REVISION (0 BLOCKER + 0
+  MAJOR + 1 MINOR + 1 NIT); AGY DEMAND-REVISION (1 BLOCKER +
+  1 MINOR); Codex INFRA-BLOCKED (fourteenth documented
+  attempt; 2-of-3). Full convergence on ONE locus defect,
+  found from both sides: the v8.30 "the pair's OWN digest"
+  left the capture locus open (SMR35-1 = AGY f1 — a
+  drain-time or acceptance-time `ActiveDigest()` reads
+  `digest(s.active == C2)` in the stale-notice windows, and
+  `MarkAppliedDigest(digest(C2))` then makes `ActiveApplied()`
+  report the GATED UNEXPOSED C2 as APPLIED — the sharpest
+  form of the #6296 class); the source is pinned to the
+  store's retained tree for the pair's revision in v8.31.
+  AGY-only: f2 (the §9 (a) mandated sequence). SMR-only:
+  SMR35-2 (the marker's window semantics).
+- **Round-35 disposition table:**
+
+  | r35 finding | v8.31 disposition |
+  |---|---|
+  | SMR35-1 / AGY f1 digest source locus | CLOSED — the digest is computed from the STORE'S RETAINED TREE for the pair's revision (the rollback/archive trees, durable by construction) via `DigestOfRevision(rev)` (taking `s.mu`), captured at the cursor's install (`beginFirstExposure`, the same `m.mu` section) for BOTH legs (the Compile-leg wrapper digest and the catch-up-leg cursor digest are the SAME value for the same pair; the `m.mu` → `s.mu` edge is safe — the store never calls into the manager); NEVER from `s.active` at capture time (§5-C (ii), §9 (a)) |
+  | SMR35-2 marker window semantics | CLOSED — stated once in §5-C (ii): post-stamp(C1) ⇒ applied; post-promotion(C2) pre-apply ⇒ NOT applied; post-stamp(C2) ⇒ applied; rollback-to-C1 ⇒ applied |
+  | AGY f2 §9 (a) mandated sequence | CLOSED — §9 (a) mandates: promote C1 → expose C1 → promote C2 (GATED) → drain C1's notice → assert `appliedDigest == digest(C1)` AND `ActiveApplied() == false`, and `== digest(C2)` + `ActiveApplied() == true` after C2's apply (a drain-time-`ActiveDigest()` implementation FAILS) |
+  | (sweep) v8.27-era CAS leftover in (d) | CLOSED — the "CAS revision verification" phrasing in the cancellation-scope text is replaced by the v8.30/v8.31 captured-digest + admission-gate form (consistency) |
 
 ### Round-1 detail log (kept for the record)
 
@@ -6037,7 +6099,29 @@ BLOCKERs 6 + 8; v8 epoch form per Codex r6 f6/f8):**
   CAS-free overwrite would let a late stale stamp
   regress the marker): the stamp is
   `MarkAppliedDigest(pair.capturedDigest)` — the
-  pair's OWN digest, captured at acceptance/apply
+  pair's OWN digest, computed from the STORE'S
+  RETAINED TREE for the pair's revision (v8.31,
+  SMR r35 SMR35-1 = AGY r35 f1's source pin:
+  the rollback/archive trees (durable by
+  construction) via a store accessor
+  (`DigestOfRevision(rev)` taking `s.mu`) — NEVER
+  from `s.active` at capture time (a drain-time
+  or acceptance-time `ActiveDigest()` would read
+  `digest(s.active == C2)` in exactly the
+  stale-notice windows this machinery exists
+  for, and `MarkAppliedDigest(digest(C2))` would
+  make `ActiveApplied()` report the GATED
+  UNEXPOSED C2 as APPLIED — the sharpest form of
+  the #6296 class); the cursor's install
+  (`beginFirstExposure`, the same `m.mu` section)
+  captures it there for BOTH legs (the Compile-leg
+  wrapper digest and the catch-up-leg cursor
+  digest are then the SAME value for the same
+  pair; the new lock edge `m.mu` → `s.mu` is safe
+  by the SMR25-3 census's own argument — the
+  store never calls into the manager, so no
+  `s.mu` → `m.mu` path exists),
+  captured at acceptance/apply
   time under the apply serialization (the #6296
   TOCTOU-safe form) — NEVER `MarkActiveApplied()`;
   and the anti-stale protection is the v8.29
@@ -6045,7 +6129,13 @@ BLOCKERs 6 + 8; v8 epoch form per Codex r6 f6/f8):**
   notice's stamp is SKIPPED before any stamp
   call — the read-side `ActiveApplied()` digest
   comparison is the only "CAS" the machinery
-  needs); (c) the drain's `applySem` hold
+  needs; and the marker's window semantics are
+  stated once (v8.31, SMR r35 SMR35-2:
+  post-stamp(C1) ⇒ applied; post-promotion(C2)
+  pre-apply ⇒ NOT applied (C2 not applied —
+  correct); post-stamp(C2) ⇒ applied;
+  rollback-to-C1 ⇒ applied (C1's digest already
+  landed))); (c) the drain's `applySem` hold
   + the drain-time-EXPOSED composition order every
   mid-drain case (no exposure can move while the
   drain holds the semaphore; a live-claimed drain
@@ -6059,8 +6149,12 @@ BLOCKERs 6 + 8; v8 epoch form per Codex r6 f6/f8):**
   (the conn write's TCP timeout +
   `handleDisconnect`; socket operations); the
   in-memory store mutations (`setAppliedDigest`
-  takes no ctx) rely on the CAS revision
-  verification — either order safe, and the
+  takes no ctx) rely on the v8.30/v8.31
+  captured-digest form + the exposed-currency
+  admission gate for their stale safety (v8.31
+  consistency fix — the v8.27 "CAS revision
+  verification" phrasing was left over when the
+  v8.30 retraction landed), and the
   cancellation bounds the goroutine's remaining
   life to one operation, not to the next tick)),
   (e) ADVANCES the entry's ladder (a steal is a
@@ -8766,14 +8860,19 @@ activations a scheduled retry.
       gate keys on EXPOSED currency), C2's push is
       HELD, and the peer converges on C1 exactly —
       and the stamp LANDS in captured-digest form
-      (v8.30, SMR r34 SMR34-1/2 = AGY r34 f1/f2:
-      assert `appliedDigest ==
-      configTextDigest(C1's text)` after C1's
-      drain (the stamp is `MarkAppliedDigest` of
-      C1's captured digest, NEVER
-      `MarkActiveApplied()` of the gated successor)
-      and `== digest(C2)` after C2's own apply —
-      a stamp-call-that-doesn't-land FAILS);
+      (v8.30, SMR r34 SMR34-1/2 = AGY r34 f1/f2;
+      sequence mandated v8.31, AGY r35 f2: promote
+      C1 → expose C1 → promote C2 (GATED) → drain
+      C1's notice — assert `appliedDigest ==
+      configTextDigest(C1's text)` (the stamp is
+      `MarkAppliedDigest` of C1's retained-tree
+      digest, NEVER a drain-time `ActiveDigest()`
+      of s.active (== C2)), `ActiveApplied() ==
+      false` (C2 correctly reports unapplied while
+      gated), and `== digest(C2)` +
+      `ActiveApplied() == true` after C2's own
+      apply — a drain-time-`ActiveDigest()`
+      implementation FAILS);
       the A→B→C COMPOSITION (v8.15, Codex r19 f5): A
       exposed → gated B tightens → gated C promoted →
       C's exposure invalidates sessions against
@@ -9602,7 +9701,7 @@ the three owners through nine enumerations; the mixed-version
 producer is the documented exception with the required helper
 restart).
 
-Remaining questions for round 35, each invitable to PLAN-KILL with
+Remaining questions for round 36, each invitable to PLAN-KILL with
 a concrete counterexample:
 
 1. **Completeness, final form.** Exhibit a path to
@@ -9665,11 +9764,11 @@ a concrete counterexample:
    candidate-filter territory
    (`include_userspace_binding_interface`), explicitly out of
    scope here.
-6. **Round-34 disposition table audit.** §1's r34 table maps
-   every r34 finding (SMR 1 BLOCKER + 1 MINOR; AGY 1 BLOCKER
-   + 1 MINOR; Codex infra-blocked) to its v8.30 fold, and
-   every fold this revision was verified per-edit against the
-   file. Which row is claimed-but-wrong this time?
+6. **Round-35 disposition table audit.** §1's r35 table maps
+   every r35 finding (SMR 1 MINOR + 1 NIT; AGY 1 BLOCKER + 1
+   MINOR; Codex infra-blocked) to its v8.31 fold, and every
+   fold this revision was verified per-edit against the file.
+   Which row is claimed-but-wrong this time?
 7. **Cumulative hazard budget, final sign-off (v8.8 honest
    numbers, Codex r11 f11 + r12 f14).** Healthy unsuppressed
    baseline for

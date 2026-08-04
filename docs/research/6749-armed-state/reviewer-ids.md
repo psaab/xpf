@@ -1054,6 +1054,30 @@
   `/tmp/codex-6749-r34-prompt.txt`). Proceeding 2-of-3 per the
   codex-infra-blocked exception; retries continue each round.
 
-## Round 35 (plan v8.30 @ pending)
+## Round 35 (plan v8.30 @ 1b3cf5138)
 
-- Codex (retry), AGY, Claude SMR — pending v8.30 fold.
+- **Claude SMR r35** — `claude-smr-plan-r35.md`. Verdict:
+  DEMAND-REVISION (0 BLOCKER + 0 MAJOR + 1 MINOR + 1 NIT —
+  SMR35-1 the captured digest's SOURCE is unpinned (a
+  drain-time or acceptance-time `ActiveDigest()` reads
+  digest(s.active == C2) in the stale-notice windows — the
+  #6296 class the captured form cites; pinned to the store's
+  retained tree for the pair's revision); SMR35-2 the marker's
+  window semantics).
+- **AGY r35** — background bash `bu8x365x1`; prompt
+  `/tmp/agy-6749-r35-prompt.txt` (118,744 argv bytes); output
+  `/tmp/agy-6749-r35.out`; verdict doc `agy-plan-r35.md`.
+  Verdict: DEMAND-REVISION (1 BLOCKER — f1 the digest locus
+  TOCTOU (= SMR35-1, with the sharpest consequence trace:
+  MarkAppliedDigest(digest(C2)) makes ActiveApplied() report
+  the GATED UNEXPOSED C2 as APPLIED); + 1 MINOR — f2 the §9
+  (a) mandated interleaving sequence).
+- **Codex r35** — INFRA-BLOCKED (usage limit; reset Aug 10
+  06:57 UTC). Fourteenth documented attempt this session
+  (`/tmp/codex-6749-r35-retry1.err`; r35 prompt staged at
+  `/tmp/codex-6749-r35-prompt.txt`). Proceeding 2-of-3 per the
+  codex-infra-blocked exception; retries continue each round.
+
+## Round 36 (plan v8.31 @ pending)
+
+- Codex (retry), AGY, Claude SMR — pending v8.31 fold.
