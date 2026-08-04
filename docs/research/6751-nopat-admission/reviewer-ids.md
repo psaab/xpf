@@ -95,3 +95,14 @@ joins the lifecycle event inventory; prime order via epoch barrier with the
 bulk keeping its lossless direct-write discipline; §9 enumerates the six
 lifecycle/delta regression tests explicitly; stale binding-point sentence
 corrected). Round 27 re-reviews v15.14.
+
+| r27 | `codex exec` foreground (detached-poll), session in /tmp/codex-6751-r27.log / PLAN-NEEDS-REVISION (2 BLOCKERs: content-order cut, authoritative recovery; 1 MINOR: ss==nil teardown skip; 2 NITs) | PLAN-READY-WITH-NITS (1 nit: drain bound in parameter summary — folded) | PLAN-READY-WITH-NITS (r28 fold-check of v15.15) |
+
+Round-27 disposition: all five Codex findings + the AGY nit fold in
+v15.15 (content-version binding V1-V4, epoch-at-stamp envelopes with
+the journal-replay exception, authoritative-only recovery,
+unconditional timer invalidation, stall-seam precision, flag-name
+corrections, drain-bound parameter). AGY note: agy 1.1.10 requires
+`--prompt`; positional args are silently ignored (two misfires
+answered flag documentation — retried per infra-must-retry, real
+review obtained). Round 28 re-reviews v15.15.

@@ -1,20 +1,21 @@
 # #6751 plan — interface SNAT no-PAT admission: reserve-or-PAT the colliding translated tuple
 
-- **Status**: DRAFT v15.14 — round-26 fold (Codex r26 blockers 1-2 +
-  minor 3 + nit 4: the READINESS-TIMEOUT event joins the lifecycle
-  inventory — timer expiry only ENQUEUES a transition-tagged event
-  whose commit unit re-validates AND performs `SetSyncReady(true)`,
-  so the race `Timer.Stop()` cannot retract is adjudicated by the
-  same strict-inequality tag CAS as every other event; the prime's
-  ORDER is an EPOCH BARRIER, not envelope-queue routing — the bulk
-  KEEPS its lossless direct-write discipline and the barrier drains
-  the delta queue before the bulk writes under the new epoch, with
-  `BulkEnd` never emitted after any dropped/stale bulk frame; §9 now
-  explicitly enumerates the queued-behind-A, no-prime-flip,
-  stale-effects, equal-tag-overwrite, stalled-after-validation, and
-  prime-barrier regression tests; the lifecycle event inventory
-  (abort, admission, disconnect, bulk-received, bulk-ack-received,
-  readiness-timeout) is complete)
+- **Status**: DRAFT v15.15 — round-27 fold (Codex r27 blockers 1-2 +
+  minor 3 + nits 4-5 + AGY r27 nit 1: the epoch envelope is captured
+  at the CONTENT-VERSION POINT — the per-key generation stamp — so
+  pre-abort content can never receive a post-abort epoch across the
+  stamp→encode→queue window; bulk frames bind generation to content
+  atomically (live re-read under the generation-map lock, recorded
+  generation for unchanged content, fresh mint for changed content,
+  omitted frame for vanished keys) so a stale batch copy can never
+  carry a generation greater than the change that overtook it;
+  barrier-abort recovery is AUTHORITATIVE-ONLY (doBulkSync or fenced
+  cold-prime, never the event-stream exporter, owed state persists,
+  abort does not consume the episode latch); stopClusterComms bumps
+  the arming generation UNCONDITIONALLY; the commit-gate stall seam
+  is exact; the bulk-ack flags carry their code names
+  (outboundBulkAcked/bulkEverCompleted); the barrier drain bound
+  (2-5s) is named in the parameter summary)
 - **Issue**: #6751 (opus-review-001 R08, High, `bug`+`audit`+`security`) —
   interface SNAT admits indistinguishable no-PAT return tuples and sends
   replies to the FIRST session.
@@ -846,7 +847,7 @@ record's identity frees only when `per_worker` is empty AND
       WITH EFFECTS INSIDE THE COMMIT UNIT** — for fields whose
       semantics are connected-state flips (`syncPeerConnected`,
       priming flags, and the bulk-ack flags
-      `outboundBulkAcked`/`inboundBulkAcked`, sync.go:479), a mutation
+      `outboundBulkAcked`/`bulkEverCompleted`, sync.go:478-479), a mutation
       commits only if its event tag is STRICTLY GREATER than the
       currently stored tag for that field, so even an equal-tag stale
       write can never flip active state. And because a per-field flag
@@ -884,7 +885,23 @@ record's identity frees only when `per_worker` is empty AND
       superseded it, and `stopSyncReadyTimer`'s generation bump plus
       `Timer.Stop()` remains the fast path for the common case while
       the enqueued-event tag CAS is the linearizable adjudicator for
-      the race `Timer.Stop()` cannot retract. A stalled expiry event
+      the race `Timer.Stop()` cannot retract. Timer invalidation is
+      also NOT contingent on the session-sync object existing:
+      `stopClusterComms` calls `stopSyncReadyTimer` UNCONDITIONALLY
+      (moved out of the `if ss != nil` branch, daemon_ha_sync.go:1405
+      — Codex r27 minor 3: bringup arms the VRRP sync hold before
+      `SessionSync` exists, daemon_run_bringup.go:226, so an
+      ss==nil teardown must still bump the arming generation; the
+      commit unit's connected-state revalidation is the second gate
+      either way). The commit-gate seam is exact (Codex r27 nit 4):
+      the expiry event's arming-generation/connected-state reads
+      happen BEFORE entry into the serialized commit gate, and the
+      gate itself (tag CAS + re-validation + effects) is ONE atomic
+      unit — a newer event can never commit while another event is
+      inside the gate; the stalled-after-validation scenario stalls
+      the event BETWEEN its pre-gate reads and its gate entry, which
+      is the only place a newer transition can interpose. A stalled
+      expiry event
       whose validation passes and whose commit then loses the tag CAS
       to a newer disconnect/cold-start produces NO effect at all —
       readiness stays false, exactly like a stale bulk-received event.
@@ -896,12 +913,14 @@ record's identity frees only when `per_worker` is empty AND
       :90, `onSessionSyncBulkAckReceived` :103, AND the
       `armSyncReadyTimer` expiry event :40 — the complete set,
       AGY r24 nit 3 + Codex r26 blocker 1), AND the bulk-ack lifecycle flags
-      `outboundBulkAcked` / `inboundBulkAcked` (sync.go:479 — AGY r25
-      minor 2). (Cited line numbers throughout this plan are
+      `outboundBulkAcked` / `bulkEverCompleted` (sync.go:478-479 — AGY r25
+      minor 2; `bulkEverCompleted` is the inbound-direction flag — set
+      by an inbound BulkEnd — and `outboundBulkAcked` the outbound ack,
+      the code's actual names, Codex r27 nit 5). (Cited line numbers throughout this plan are
       ILLUSTRATIVE snapshot points at the base commit — function/symbol
       names are the primary identifiers and drift slower than line
       numbers, AGY r26 nit 1.)
-      minor 2) — is stored as a (generation, value) pair
+      Every field in the inventory is stored as a (generation, value) pair
       committed by the CAS under rules (i)-(ii), so a stale
       connect-callback's `true` cannot overwrite a newer disconnect's
       `false`, a stale disconnect's `false` cannot overwrite a newer
@@ -962,11 +981,33 @@ record's identity frees only when `per_worker` is empty AND
       while bulk sessions write directly under per-frame `writeMu`
       (sync_bulk.go:95), so the bulk is not necessarily ordered after
       the queued deltas). The rule is therefore two-part:
-      (a1) **every `sendCh` entry carries an epoch ENVELOPE from
-      ENQUEUE** — the delta (upsert or delete, journal replay, or
-      direct raw-byte entry) is stamped with the connection epoch
-      current at its enqueue, and the sendLoop discards any envelope
-      whose epoch is older than the connection it would send on, so a
+      (a1) **every `sendCh` entry carries an epoch ENVELOPE captured
+      at the CONTENT-VERSION POINT, not at enqueue** — a FIRST-OFFER
+      delta (upsert or delete, or direct raw-byte entry) is
+      stamped with the connection epoch current AT THE MOMENT its
+      per-key generation is drawn (`stampInstallGenV4/V6` /
+      `takeDeleteGenV4/V6`, sync_conn_write.go:56/63/77/87), and the
+      generation and the epoch travel together as ONE content-version
+      tuple (Codex r27 blocker 1's first counterexample:
+      `QueueSessionV4` stamps and encodes BEFORE calling
+      `queueMessage`, so an abort landing between stamp and enqueue
+      would hand PRE-abort content the NEW epoch at enqueue if the
+      stamp point were the enqueue — capturing the epoch at the
+      generation stamp closes that window by construction). A
+      JOURNAL-REPLAYED delete is the deliberate exception: its
+      generation was drawn at journal time and already binds its
+      content version, so the replay RE-ENVELOPES at replay-enqueue
+      under the current epoch (`flushDeleteJournal`,
+      sync_conn_write.go:135) — the replay is a designed re-offer of
+      pre-abort content the peer still needs (refusing it would
+      strand peer state the journal exists to convey), and its
+      journaled generation still orders it against same-key installs
+      at the receiver (a stale replayed delete is refused by a newer
+      live entry; the gen-0 subset remains the documented unordered
+      class, bounded by the next authoritative bulk — layer (b)
+      below); the
+      sendLoop discards any envelope whose epoch is older than the
+      connection it would send on, so a
       delta queued BEFORE an abort can never travel on a replacement
       connection regardless of when it is dequeued (the
       queued-behind-A case dies by construction); and
@@ -993,20 +1034,80 @@ record's identity frees only when `per_worker` is empty AND
       (writeMu sequence, sync_bulk.go:95), and the epoch barrier
       serializes it against the delta path: when a prime begins, the
       barrier (i) stops accepting NEW delta envelopes under the old
-      epoch (the compared epoch advances first, so a delta enqueued
-      after the advance stamps the NEW epoch — and such a new-epoch
-      delta is safe in either send order relative to the bulk frames:
-      its content post-dates the abort just as the prime's snapshot
-      does, and the receiver's per-key #2170 generation guard is the
-      adjudicator of any overlap), (ii) waits for the delta queue to
+      epoch (the compared epoch advances first, so a delta stamped
+      after the advance carries the NEW epoch in its content-version
+      tuple — and such a new-epoch delta is safe in either send order
+      relative to the bulk frames: its content version post-dates the
+      abort just as the prime's snapshot does, and the receiver's
+      per-key #2170 generation guard is the adjudicator of any
+      overlap), (ii) waits for the delta queue to
       DRAIN to the barrier point (every old-epoch envelope either sent
       on the dying connection or discarded by the envelope rule), then
       (iii) the bulk writes losslessly under the new epoch, with
       `BulkEnd` committed ONLY after every bulk frame is confirmed
-      written in the same direct-write sequence. Backpressure: if the
+      written in the same direct-write sequence.
+      The bulk's own frames obey CONTENT-VERSION BINDING, not
+      write-time stamping (Codex r27 blocker 1's second
+      counterexample: the batch iterator copies up to 256 values
+      before their callbacks run, maps_session.go:237, and today the
+      bulk callback draws a FRESH generation at write time —
+      `stampInstallGenV4` inside the ForEach callback, sync_bulk.go:95
+      → sync_conn_gen.go:59 — so a stale copy `K=V_old`, overtaken by
+      a close/replacement that drew `G1`, gets stamped `G2 > G1` and
+      the receiver keeps the stale row in EVERY wire order: bulk-first
+      rejects the real `G1` as older, delta-first lets stale `G2`
+      overwrite `G1`, and the BulkEnd received-set bookkeeping
+      retains it, sync_conn_read.go:109/205). The rule — generation
+      is bound to CONTENT at one atomic point, never drawn after the
+      content may have advanced: each bulk callback, under the
+      generation-map lock, (V1) re-reads the LIVE sessions map for K
+      and encodes from the live value, never from the batch copy;
+      (V2) uses the generation RECORDED for K when the live value
+      equals the copy (the copy is still the current content version),
+      and mints-and-records a FRESH generation when the live value
+      differs (current content has no reliable recorded version —
+      minting for current content is exactly what `QueueSessionV4`
+      does at stamp time, and over-minting the CURRENT content is
+      always safe: the receiver's guard prefers the higher generation
+      and the mint IS the sender's latest knowledge); (V3) OMITS the
+      frame when K has vanished between copy and callback — the
+      close's tombstone delta (durable via the delete journal,
+      sync_conn_write.go:69) and the BulkEnd reconcile (K absent from
+      the received set) converge the receiver; and (V4) a frame
+      refused by a strictly-greater tombstone is re-conveyed by the
+      existing sweep-replay/backfill machinery (#5450) with a fresh
+      generation — the (V2) mint makes this window near-zero. Every
+      wire interleave of bulk frames against deltas then resolves
+      through the receiver's per-key #2170 guard with NO stale
+      survivorship: a stale copy can never carry a generation greater
+      than the change that overtook it.
+      Backpressure: if the
       delta queue does not drain within the barrier bound, the prime
       ABORTS BEFORE STARTING (it does not interleave with stale
-      deltas) and is retried by the recovery machinery. The guarantee
+      deltas) and is retried by the recovery machinery — and the
+      retry is AUTHORITATIVE-ONLY (Codex r27 blocker 2: the current
+      retry entry point `bulkSyncViaEventStreamOrFallback`,
+      daemon_ha_sync.go:269/289, prefers the userspace event-stream
+      exporter, legacy_dataplane.go:611, whose export is
+      point-in-time Open deltas with NO BulkStart/BulkEnd and NO
+      absence reconciliation, export.rs:85/143, forwarded through the
+      LOSSY queueMessage path, sync_conn_write.go:36 — so a delete
+      discarded by the epoch guard can stay absent from every such
+      retry and the peer's stale row is never reconciled, while the
+      readiness timeout releases the hold with the authoritative
+      obligation unmet). A barrier-aborted prime therefore persists
+      an authoritative-prime-owed state and the recovery re-drives
+      ONLY the lossless direct-write `doBulkSync` (the #5085
+      cold-prime window) or forces a fenced reconnect whose
+      cold-prime IS `doBulkSync` — NEVER the event-stream exporter;
+      a barrier abort does NOT consume the episode latch (one
+      authoritative re-drive per cooldown window, and the owed state
+      survives until a `doBulkSync` completes or a fenced cold-prime
+      lands); the readiness-timeout degraded release remains the
+      bounded last resort, and the barrier
+      drain bound is a concrete implementation parameter — default
+      2-5s, named alongside the other parameters in the summary below
+      — AGY r27 nit 1). The guarantee
       is exact: `BulkEnd` can NEVER be emitted after any dropped or
       stale bulk frame — any bulk frame write failure aborts the bulk
       BEFORE `BulkEnd` (never emitted), and the receiver's
@@ -1635,7 +1736,26 @@ quarantine-admitted + overflow), and tests.
   after a dropped or stale bulk frame: the epoch barrier drains the
   delta queue before the bulk writes losslessly under the new epoch,
   and any bulk frame write failure aborts the bulk BEFORE `BulkEnd`
-  — Codex r26 blocker 2), PLUS the persistent-cap self-rearm case
+  — Codex r26 blocker 2), PLUS the content-version binding cases
+  (Codex r27 blocker 1, before/between/after: a batch-copied
+  `K=V_old` overtaken by a close/replacement that drew `G1` is NEVER
+  written with `G2 > G1` — the callback re-reads live under the
+  generation-map lock and the frame carries the recorded `G0`, so
+  delta-first the stale `G0` frame is refused and bulk-first the real
+  `G1` corrects the provisional install; a vanished K omits its frame
+  and converges via tombstone + BulkEnd reconcile; a live-value
+  mismatch mints fresh for the CURRENT content; and the
+  `QueueSessionV4` stamp→encode→queue window — an abort between
+  generation stamp and enqueue leaves the envelope at the OLD epoch,
+  discarded on the replacement connection), PLUS the
+  authoritative-recovery case (a barrier-aborted prime re-drives ONLY
+  the lossless direct-write `doBulkSync` or a fenced-reconnect
+  cold-prime — the event-stream exporter path is NEVER used for the
+  owed authoritative prime, the abort does not consume the episode
+  latch, and the owed state survives until an authoritative prime
+  completes — Codex r27 blocker 2), PLUS the unconditional
+  timer-invalidation case (`stopClusterComms` with ss==nil still
+  bumps the arming generation — Codex r27 minor 3), PLUS the persistent-cap self-rearm case
   (the recovery bulk cannot arm its successor; the episode latch
   permits one bulk per cooldown window), PLUS a zero-generation
   envelope bound to the fresh post-abort generation intentionally
@@ -1729,8 +1849,10 @@ quarantine-admitted + overflow), and tests.
   quarantine cap (4096, tunable per deployment at provisioning),
   incremental-delta fallback timeout (5s), AbortFenceTimeout (a small
   multiple of the disconnect callback's normal latency — AGY r19 nit),
-  per-bulk receive deadline (new, named at implementation), and the
-  abort-triggered per-peer reconnect backoff (base/cap, abort-only);
+  per-bulk receive deadline (new, named at implementation), the
+  abort-triggered per-peer reconnect backoff (base/cap, abort-only),
+  AND the epoch-barrier drain bound (default 2-5s, named at
+  implementation — AGY r27 nit 1);
   a genuine direct row sharing the key whose delete arrives while
   suppression is active strands until its own session timeout
   (documented residual, strictly safer than today's certain
