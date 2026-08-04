@@ -1,6 +1,6 @@
 # #6749 — binding-plan expansion registers new slots unarmed, dataplane disabled indefinitely
 
-**Status: DRAFT v8.33 — pending adversarial plan review (round 38)**
+**Status: DRAFT v8.34 — pending adversarial plan review (round 39)**
 
 - Issue: #6749 (opus-review-001 root R06, severity High)
 - Research base: `ad9591177` (origin/master at worktree creation)
@@ -1669,7 +1669,46 @@
   marking the entry transitions terminal and is
   GC'd on the subsequent sweep pass — a
   stranded-entry or per-tick-Warn implementation
-  FAILS) @ pending
+  FAILS) @ `00d9567ae` (r38: SMR
+  PLAN-READY-WITH-NITS (2 NIT); AGY DEMAND-REVISION
+  (2 MAJOR + 1 MINOR + 1 NIT); Codex infra-blocked
+  (seventeenth documented attempt; 2-of-3))
+; v8.34 folds SMR r38 (2 NIT) + AGY r38 (2 MAJOR +
+  1 MINOR + 1 NIT): the digest's transport is the
+  ACCEPTANCE'S OWN captured value (AGY r38 f1, a
+  real break in the v8.32 form (the SMR r38 sweep
+  missed it — recorded honestly): the v8.32 text
+  tied the transport to the pending-XSK staged
+  object ("`beginFirstExposure` copies it from the
+  staged object"), but a DIRECT durable apply (the
+  common case) creates NO staged object — the copy
+  yields `""` and every direct apply takes the
+  complete-skipped path, so direct applies NEVER
+  stamp and `ActiveApplied()` stays false across
+  all standard commits: the digest rides the
+  Compile's RESULT for the Compile leg
+  (`ApplyResult` gains `capturedDigest`) and the
+  staged object for the deferred leg, and
+  `beginFirstExposure` takes it as an ARGUMENT
+  (never reads the staged object itself)); the GC
+  predicate's terminal set is completed
+  (AGY r38 f2 — the §5-C (ii) GC text still
+  enumerated "(completed or SUPERSEDED)", stranding
+  every complete-skipped entry: the terminal set
+  is {complete, complete-skipped, SUPERSEDED} at
+  both the phase and entry levels); the edge Warn's
+  scope is pinned (AGY r38 f3 + SMR38-1 — per-
+  CURSOR (each skip is a distinct exposure event),
+  and the pair-keyed resume rule (v8.18's "an
+  incomplete replay resumes its phase") dedups the
+  recovery re-derivation (a second crash
+  mid-recovery RESUMES the same cursor rather than
+  minting a second — no duplicate cursors for one
+  logical exposure)); and the "heal" phrasing is
+  made precise (AGY r38 f4 + SMR38-2 — the
+  aged-out pair's own marker is abandoned
+  (unreachable); the marker CORRECTS for the
+  CURRENT pair when its own apply stamps) @ pending
   AGY r15 (4 BLOCKER + 3 MAJOR + 1 MINOR) + SMR r15 (2
   BLOCKER + 3 MAJOR + 3 MINOR/NIT): R1 becomes a REAL
   rollout+transport contract — a legacy `active.json`
@@ -1751,7 +1790,7 @@
 
 ## 1. Status
 
-DRAFT v8.33 — pending adversarial plan review round 38 (Codex + AGY +
+DRAFT v8.34 — pending adversarial plan review round 39 (Codex + AGY +
 Claude SMR). Convergence target: PLAN-READY (recommended path shipped
 to `/engineer`) or PLAN-KILL. No production code is written under
 `/research`.
@@ -3144,6 +3183,31 @@ to `/engineer`) or PLAN-KILL. No production code is written under
   | AGY f2 Compile capture-point timing | CLOSED — the capture runs on successful AST/tree compilation immediately prior to staged object creation; a pre-publish Compile error discards the captured value with the stack frame (no cursor is ever created for a failed compile) (§5-C (ii)) |
   | SMR37-1 / AGY f3 determinism citation | CLOSED — stated: the store's canonical `Format()` render is deterministic per tree (the property `configTextDigest`'s `ActiveApplied()` use already relies on), so a same-pair staged reshape's re-capture is byte-identical (§5-C (ii)) |
   | SMR37-2 / AGY f4 outcome naming + GC assertion | CLOSED — the `complete-skipped` naming (SMR37-2's ask, with AGY f1's terminal semantics) and §9 (a) asserts the entry transitions terminal and is GC'd on the subsequent sweep pass (a stranded-entry or per-tick-Warn implementation FAILS) |
+
+- **Round 38** (v8.33): SMR PLAN-READY-WITH-NITS (2 NIT); AGY
+  DEMAND-REVISION (2 MAJOR + 1 MINOR + 1 NIT); Codex
+  INFRA-BLOCKED (seventeenth documented attempt; 2-of-3). The
+  round's substance: TWO real defects in the v8.32/v8.33
+  digest folds that the SMR r38 sweep missed (recorded
+  honestly): AGY f1 — the digest's transport was tied to the
+  pending-XSK staged object, so DIRECT durable applies (the
+  common case — no staged object) would take the
+  complete-skipped path and NEVER stamp (a permanent false
+  `ActiveApplied()` across all standard commits); and AGY f2 —
+  the §5-C (ii) GC predicate still enumerated "(completed or
+  SUPERSEDED)", stranding every complete-skipped entry (the
+  r37 f1 memory leak returning). AGY-only: f3 (the Warn
+  scope); f4 (the "heal" phrasing). SMR's own nits: SMR38-1
+  (the dedup — folds with f3), SMR38-2 (the self-consistency —
+  folds with f4).
+- **Round-38 disposition table:**
+
+  | r38 finding | v8.34 disposition |
+  |---|---|
+  | AGY f1 non-staged digest transport | CLOSED — the digest rides the Compile's RESULT for the Compile leg (`ApplyResult` gains `capturedDigest`) and the staged object for the deferred leg, and `beginFirstExposure` takes it as an ARGUMENT (never reads the staged object itself): a DIRECT durable apply's Compile-leg acceptance carries the build-time capture on the result, so direct applies stamp normally (§5-C (ii), §6, §9 (a)) |
+  | AGY f2 GC predicate omits complete-skipped | CLOSED — the terminal set is {complete, complete-skipped, SUPERSEDED} at both the phase and entry levels; the §5-C (ii) GC text enumerates all three (§5-C (ii)) |
+  | AGY f3 / SMR38-1 Warn scope | CLOSED — per-CURSOR (each skip is a distinct exposure event, each earning its own one-time Warn); the pair-keyed resume rule (v8.18's "an incomplete replay resumes its phase") dedups the recovery re-derivation (a second crash mid-recovery RESUMES the same cursor rather than minting a second — no duplicate cursors for one logical exposure) (§5-C (ii)) |
+  | AGY f4 / SMR38-2 heal phrasing | CLOSED — made precise: the aged-out pair's own marker is abandoned (unreachable — its tree is gone from active); the marker CORRECTS for the CURRENT pair when its own apply stamps (§5-C (ii)) |
 
 ### Round-1 detail log (kept for the record)
 
@@ -6237,10 +6301,20 @@ BLOCKERs 6 + 8; v8 epoch form per Codex r6 f6/f8):**
   prior to staged object creation; a pre-publish
   Compile error discards the captured value with
   the stack frame — no cursor is ever created for
-  a failed compile) — and the captured value RIDES
-  the staged object (the pending-XSK staged object
-  carries it; `beginFirstExposure` copies it from
-  the staged object into the cursor; the
+  a failed compile) — and the captured value's
+  TRANSPORT is the acceptance's OWN result
+  (v8.34, AGY r38 f1's non-staged fix: the digest
+  rides the Compile's RESULT for the Compile leg
+  (`ApplyResult` gains `capturedDigest`) and the
+  staged object for the deferred leg (the
+  pending-XSK staged object carries it), and
+  `beginFirstExposure` takes it as an ARGUMENT
+  (never reads the staged object itself — the
+  v8.32 "copies it from the staged object" left
+  every DIRECT durable apply (the common case —
+  no staged object exists) with an empty digest,
+  so direct applies would take the
+  complete-skipped path and NEVER stamp)); the
   Compile-leg wrapper uses the same captured
   value — the two legs' digests are identical BY
   CONSTRUCTION: one capture, one renderer (the
@@ -6272,9 +6346,23 @@ BLOCKERs 6 + 8; v8 epoch form per Codex r6 f6/f8):**
   the sweep re-drained and re-Warned on every
   tick: with the terminal marking the entry
   completes and GCs, and the edge Warn fires ONCE
-  at the skip) while the invalidation and push
-  proceed — the marker heals on the next full
-  apply) — the v8.31 form's retained-tree basis
+  at the skip, per CURSOR (each skip is a
+  distinct exposure event, each earning its own
+  one-time Warn (v8.34, AGY r38 f3 = SMR r38
+  SMR38-1: the pair-keyed resume rule (v8.18's
+  "an incomplete replay resumes its phase")
+  dedups the recovery re-derivation — a second
+  crash mid-recovery RESUMES the same cursor
+  rather than minting a second — no duplicate
+  cursors for one logical exposure))) while the
+  invalidation and push
+  proceed — and the aged-out pair's own marker is
+  abandoned (v8.34, AGY r38 f4 = SMR r38 SMR38-2's
+  precision: its tree is gone from active, so its
+  `ActiveApplied()` is unreachable; the marker
+  CORRECTS for the CURRENT pair when its own
+  apply stamps — the v8.32 "the marker heals on
+  the next full apply" was imprecise)) — the v8.31 form's retained-tree basis
   stands only for that fallback (the
   rollback/archive trees, durable by construction),
   captured at acceptance/apply
@@ -6474,7 +6562,12 @@ BLOCKERs 6 + 8; v8 epoch form per Codex r6 f6/f8):**
   pair's chain; the crash rule never depends on a
   GC'd entry), never a nil dereference or an
   unhandled error)); and a terminal
-  cursor entry (completed or SUPERSEDED) is GC'd on
+  cursor entry ({complete, complete-skipped,
+  SUPERSEDED} — the full terminal set at both the
+  phase and entry levels (v8.34, AGY r38 f2's
+  predicate fix — the v8.22-v8.33 "(completed or
+  SUPERSEDED)" enumeration would strand every
+  complete-skipped entry)) is GC'd on
   the sweep pass that first observes it terminal
   (v8.22, SMR r26 SMR26-4: the registry's live set
   is bounded by concurrently-incomplete exposures —
@@ -9043,13 +9136,19 @@ activations a scheduled retry.
       and a startup re-derived cursor with a
       rotated-out revision skips the stamp with an
       edge Warn while the invalidation and push
-      proceed; and the skip marks the phase
-      `complete-skipped` (v8.33, AGY r37 f1/f4 =
-      SMR r37 SMR37-2: assert the entry transitions
-      TERMINAL after the complete-skipped marking
-      and is GC'd on the subsequent sweep pass, and
-      the edge Warn fires ONCE (a stranded-entry or
-      per-tick-Warn implementation FAILS));
+      proceed; and a DIRECT (non-staged) durable
+      apply stamps from the Compile RESULT's
+      `capturedDigest` (v8.34, AGY r38 f1: assert a
+      plain commit (no staged object) carries the
+      build-time capture on the `ApplyResult` into
+      `beginFirstExposure` and stamps
+      `MarkAppliedDigest` — `ActiveApplied() ==
+      true` — never the complete-skipped path);
+      and the GC collects complete-skipped entries
+      (v8.34, AGY r38 f2: assert the terminal set
+      is {complete, complete-skipped, SUPERSEDED} —
+      a GC predicate missing complete-skipped
+      FAILS);
       the A→B→C COMPOSITION (v8.15, Codex r19 f5): A
       exposed → gated B tightens → gated C promoted →
       C's exposure invalidates sessions against
@@ -9878,7 +9977,7 @@ the three owners through nine enumerations; the mixed-version
 producer is the documented exception with the required helper
 restart).
 
-Remaining questions for round 38, each invitable to PLAN-KILL with
+Remaining questions for round 39, each invitable to PLAN-KILL with
 a concrete counterexample:
 
 1. **Completeness, final form.** Exhibit a path to
@@ -9941,9 +10040,9 @@ a concrete counterexample:
    candidate-filter territory
    (`include_userspace_binding_interface`), explicitly out of
    scope here.
-6. **Round-37 disposition table audit.** §1's r37 table maps
-   every r37 finding (SMR 2 NIT; AGY 1 MAJOR + 1 MINOR + 2
-   NIT; Codex infra-blocked) to its v8.33 fold, and every fold
+6. **Round-38 disposition table audit.** §1's r38 table maps
+   every r38 finding (SMR 2 NIT; AGY 2 MAJOR + 1 MINOR + 1
+   NIT; Codex infra-blocked) to its v8.34 fold, and every fold
    this revision was verified per-edit against the file.
    Which row is claimed-but-wrong this time?
 7. **Cumulative hazard budget, final sign-off (v8.8 honest

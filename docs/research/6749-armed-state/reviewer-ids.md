@@ -1127,6 +1127,33 @@
   `/tmp/codex-6749-r37-prompt.txt`). Proceeding 2-of-3 per the
   codex-infra-blocked exception; retries continue each round.
 
-## Round 38 (plan v8.33 @ pending)
+## Round 38 (plan v8.33 @ 00d9567ae)
 
-- Codex (retry), AGY, Claude SMR — pending v8.33 fold.
+- **Claude SMR r38** — `claude-smr-plan-r38.md`. Verdict:
+  PLAN-READY-WITH-NITS (2 NIT — SMR38-1 the skip's dedup +
+  the recovery-path count; SMR38-2 the skip case's
+  self-consistency statement). NOTE: the SMR sweep MISSED
+  AGY's two MAJORs (the non-staged digest transport and the
+  GC predicate's omitted complete-skipped); recorded
+  honestly.
+- **AGY r38** — background bash `bth9q4s50`; prompt
+  `/tmp/agy-6749-r38-prompt.txt` (122,754 argv bytes);
+  output `/tmp/agy-6749-r38.out`; verdict doc
+  `agy-plan-r38.md`. Verdict: DEMAND-REVISION (2 MAJOR —
+  f1 the non-staged apply capturedDigest carrier missing
+  (direct durable applies create no staged object — the
+  staged-object-only transport would make every standard
+  commit take the complete-skipped path and NEVER stamp);
+  f2 the §5-C (ii) GC predicate omits complete-skipped
+  (the r37 f1 memory leak returns); + 1 MINOR — f3 the
+  edge-Warn scope; + 1 NIT — f4 the "marker heals"
+  terminology).
+- **Codex r38** — INFRA-BLOCKED (usage limit; reset Aug 10
+  06:57 UTC). Seventeenth documented attempt this session
+  (`/tmp/codex-6749-r38-retry1.err`; r38 prompt staged at
+  `/tmp/codex-6749-r38-prompt.txt`). Proceeding 2-of-3 per the
+  codex-infra-blocked exception; retries continue each round.
+
+## Round 39 (plan v8.34 @ pending)
+
+- Codex (retry), AGY, Claude SMR — pending v8.34 fold.
