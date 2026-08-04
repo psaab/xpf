@@ -531,6 +531,75 @@
   f5=SMR17-5; f8=SMR17-9; f10=AGY f7=SMR17-7; f15=AGY f8=SMR17-8;
   f13=SMR17-6.
 
-## Round 18 (plan v8.13 @ pending)
+## Round 18 (plan v8.13 @ 92fb722e1)
 
-- Codex, AGY, Claude SMR — pending fold + dispatch.
+- **Claude SMR r18** — `claude-smr-plan-r18.md`. Verdict:
+  DEMAND-REVISION (2 BLOCKER — SMR18-1 auxiliary-producer gate-window
+  A-config/B-FIB hybrid (SMR-only); SMR18-2 input-capture refs
+  unimplementable → content-hash validation; + 3 MAJOR — SMR18-3
+  replay order; SMR18-4 post-quiescence try-lock contradiction;
+  SMR18-5 m.mu-resident netlink resolution; + 5 MINOR — exposure debt
+  wake, error_code consumer contract + warning surface, 60s-floor
+  bound, respawn replay composition, gate locus/peer visibility).
+- **AGY r18** — background bash `b4wkeltmj`; output
+  `/tmp/agy-6749-r18.out`; verdict doc `agy-plan-r18.md`. Verdict:
+  DEMAND-REVISION (4 BLOCKER — f1 post-quiescence try-lock
+  contradiction; f2 error_code Go survival contract; f3 m.mu-resident
+  netlink resolution; f4 input-capture mutable refs; + 4 MAJOR — f5
+  unspecified fold matrix; f6 missing commit-warning delivery; f7
+  60s-floor blackhole; f8 polling cannot accelerate; + 1 NIT — f9
+  requestDetailedLocked spec).
+- **Codex r18** — background bash `bknj3ap8h`; output
+  `/tmp/codex-6749-r18.out`; verdict doc `codex-plan-r18.md`.
+  Verdict: DEMAND-REVISION (11 BLOCKER + 3 MAJOR — exposed marker
+  inherits same-text; no typed outcome + wrapper tails leak; global
+  gate suppresses durable A's second leg (pair-specific
+  durableRevision); premature buildSeq invalidation + pre-send side
+  effects; capture-order + token incarnation; note verb census; fold
+  algebra (v8.13 head-first); read-to-syscall race + RetryLater
+  starvation; restore debt not executable; map_generation false
+  coherence (idempotent advance); late-arrival cutoff (CLOSED);
+  tests green; hazard budget + false systemd bound). Convergence:
+  f6=AGY f4=SMR18-2; f8=AGY f5=SMR18-3; f9=AGY f1=SMR18-4; f12=AGY
+  f3=SMR18-5; f12-late=AGY f7=SMR18-8; f7=AGY f2/f9=SMR18-7;
+  f15-Warn=CLOSED.
+
+## Round 19 (plan v8.14 @ ef735f529)
+
+- **Claude SMR r19** — `claude-smr-plan-r19.md`. Verdict:
+  DEMAND-REVISION (2 MAJOR — SMR19-1 hash leg incoherent with the
+  canonical fabrics replacement AND unnecessary (two legs suffice);
+  SMR19-2 revision-keyed marker conflates node-local vs inter-node
+  identity; + 5 MINOR — suppression-flag fail-stale + ordering, CLI
+  pair-current exemption, deferred-tail set enumeration, lease
+  latency + restore semaphore, durableRevision derivation).
+- **AGY r19** — background bash `b4u6mmwvz`; output
+  `/tmp/agy-6749-r19.out`; verdict doc `agy-plan-r19.md`. Verdict:
+  DEMAND-REVISION (3 BLOCKER — f1 both-abandoned hash deadlock (=
+  SMR19-1); f2 suppression flag stuck after superseding non-gated
+  commit; f3 fold algebra NOT-VERIFIED on re-derivation (trace
+  misreads the capture semantics); + 4 MAJOR — f4 MarkActiveApplied
+  TOCTOU (VERIFIED: store.go:787-794 parameterless); f5 fabric
+  replacement invalidates the hash (= SMR19-1); f6 lease latency
+  (link cycles 50-500ms); f7 typed error via errors.As (adopted);
+  + 1 NIT — requestDetailedLocked spec).
+- **Codex r19** — background bash `b9uiq5t7f`; output
+  `/tmp/codex-6749-r19.out`; verdict doc `codex-plan-r19.md`.
+  Verdict: DEMAND-REVISION (11 BLOCKER + 4 MAJOR — gate/FRR
+  contradiction (full gating subsumes the suppression flag);
+  suppression fail-open (scheduler closes); HA settlement transport
+  (ordered-loop item); deferred tails lose history + omit rollback +
+  need phased ownership + warning aliases store state; marker
+  pair-safety (all four call sites); hash contradicts invalidation
+  both directions + ownerless pair-current (GO-LOCAL re-sync rule);
+  no implementable build graph (named phase split); fold replays
+  speculative priors (both-fail resurrection); lease cross-layer
+  impossible + per-syscall insufficient (member-boundary model);
+  restore intent + applySem; canonical pair uniform (P,g) +
+  map-authoritative MACs; old-helper note narrative; tests green;
+  hazard budget). f7 note verb CLOSED core; f12 late cutoff CLOSED;
+  prior f15 CLOSED.
+
+## Round 20 (plan v8.15 @ 132309631)
+
+- Codex, AGY, Claude SMR — pending dispatch.
