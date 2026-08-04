@@ -128,3 +128,15 @@ attribution + terminal clear; worker-id threading; fallible
 allocator_for; sweep-wake; producer enumeration precision;
 projection exclude-list). AGY wrote its PLAN-READY verdict with zero
 findings. Round 30 re-reviews v15.17.
+
+| r30 | `codex exec` (detached-poll), session in /tmp/codex-6751-r30.log / PLAN-NEEDS-REVISION (6 BLOCKERs: close ordering producer-incomplete/non-convergent, carry-forward poisoned aliases + unbounded, split not API-representable, worker-holder/standby lifecycle, static mapped-port + test inversion + provenance, alias index/purge three failures; 1 NIT: pre-dispatch assertion) | PLAN-NEEDS-REVISION (1 BLOCKER: tunnel_purge 4th producer; 3 MAJORs: zombie resurrection, worker-shard locality, carry-forward abort invalidation; 4 MINORs: index overflow misdelivery, carry-forward cardinality, static counter, mapped-port static) | PLAN-READY-WITH-NITS (r31 fold-check of v15.18) |
+
+Round-30 disposition: AGY's 8 + Codex's 7 findings fold together in
+v15.18 (compare-and-delete on the #5213 session_id; four-producer
+funnel + tracked purge generations; sender delete tombstones;
+clear-on-completion carry-forward with forceResync overflow;
+provisional admitted aliases with exact-publication purge;
+API-representable owner/occupancy split with InterfaceOwnerKey;
+import-driven standby allocator creation; static provenance + mapped
+ports + own counter; id preservation across HA hops; pre-dispatch
+no-pair assertion; SMR r31 legacy-id pin). Round 31 re-reviews v15.18.

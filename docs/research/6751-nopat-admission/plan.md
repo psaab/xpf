@@ -1,26 +1,30 @@
 # #6751 plan — interface SNAT no-PAT admission: reserve-or-PAT the colliding translated tuple
 
-- **Status**: DRAFT v15.17 — round-29 fold (Codex r29 findings 1-11:
-  the producer invariant is now INCARNATION-SAFE (every close-side
-  mirror delete checks the authoritative table first — a queued old
-  Close never strips a same-key replacement) and PRODUCER-COMPLETE
-  (expiry, terminal teardown, AND policy invalidation all obey
-  delete-before-publish; persistent mirror failures latch
-  out-of-sync with the #2442 re-export); the Open-direction gap is
-  closed by RECEIVED-SET CARRY-FORWARD at BulkStart; owner and
-  occupancy tuples are SPLIT (original-destination owner identity vs
-  effective-destination occupancy identity — the VIP:80/VIP:81 case
-  PATs instead of false-idempotence, with effective-port plumbing);
-  whole-address static joins the cross-domain owners (validator arm
-  + fixed-address occupancy accounting, fail-closed on conflict);
-  the base-identity index is bounded by the received-set cardinality
-  (never aborts a bulk) and confirmation PURGES a previously
-  admitted alias row; the debt gains (bulk epoch → debtGen)
-  attribution and a terminal disable-clear; the local mint threads
-  the worker id; allocator_for is fallible with a fail-closed cap
-  arm; the sweep arm WAKES the timer; the producer enumeration
-  includes sweep first-offers and excludes the journal re-envelope
-  from re-drawing; the versioned projection is an exclude-list)
+- **Status**: DRAFT v15.18 — round-30 fold (AGY r30 findings 1-8 +
+  Codex r30 findings 1-7: close-side mirror deletes are
+  COMPARE-AND-DELETE on the row's stored #5213 session_id —
+  cross-worker safe, no shard-locality assumption; the funnel is
+  FOUR producers (expiry, terminal teardown, policy invalidation,
+  tunnel-remap purge) and purge/GC deletes draw tracked tombstone
+  generations instead of forced gen-0; the sender records delete
+  tombstones so a mirror row that survived a failed delete is
+  omitted from every bulk instead of re-minted into a peer-side
+  zombie; the carry-forward accumulator clears only on a COMPLETED
+  BulkEnd with a capped-overflow forceResync arm; timeout-admitted
+  aliases are PROVISIONAL — re-evaluated and purged at every
+  completed BulkEnd, with exact-publication compare-and-delete;
+  incremental index overflow DEFERS aliases to the next bulk;
+  the owner/occupancy split is API-representable (explicit occupancy
+  input computed at the decision point, records keyed (owner, FULL
+  occupancy), a new InterfaceOwnerKey — SourceNatFlowKey stays
+  pool-domain); the synchronized reserve CREATES the allocator
+  import-driven so a fresh standby mirrors occupied identities
+  before its first local mint; whole-address AND mapped-port static
+  register occupancy with provenance (config-removal release, drain
+  discipline) and their own conflict counter (5 helper + 3 Go = 8);
+  the RTFlowSessionID is preserved across HA hops via the sync-side
+  record so a promoted standby's re-bulk still confirms pairs; and
+  the pre-dispatch no-pair attribution is asserted)
 - **Issue**: #6751 (opus-review-001 R08, High, `bug`+`audit`+`security`) —
   interface SNAT admits indistinguishable no-PAT return tuples and sends
   replies to the FIRST session.
@@ -179,6 +183,28 @@ exact PAT fallback", built ENTIRELY on the shipped #5269 token machinery:
    admission is a real new flow whose occupancy tuple collides, so it
    PATs — and §9 pins both the VIP:80/VIP:81 composed-DNAT collision
    AND the same-client two-VIP idempotence regression).
+   Representability (Codex r30 finding 3): the occupancy tuple is an
+   EXPLICIT INPUT to every registry API — computed ONCE at the
+   decision point from the NAT decision (where `rewrite_dst` /
+   `rewrite_dst_port` live) and passed down — NEVER derived from the
+   owner flow downstream (the shipped address-only allocator derives
+   destination occupancy from `flow.dst_ip/dst_port` at
+   allocator.rs:1727/1740, which would silently re-break the moment
+   `flow` carries the original destination). Ownership records are
+   keyed `(owner, FULL occupancy tuple)` — the complete
+   `(protocol, egress_addr, translated_port, eff_dst_ip,
+   eff_dst_port)` — not `(owner, TranslatedTuple)` (which is only
+   (ip, port), allocator.rs:108, so a backend-only DNAT change would
+   leave the record key unchanged and the staged replacement could
+   not hold old and new occupancy simultaneously). And the keys are
+   SEPARATE TYPES: the interface registry's owner key is a NEW
+   `InterfaceOwnerKey` (original destination); the shipped
+   `SourceNatFlowKey` (effective destination) stays EXCLUSIVELY in
+   the pool domain whose idempotence/occupancy semantics it already
+   serves (source.rs:807/880/1191 and the rollback sites
+   poll_descriptor/mod.rs:2201/2313 keep their current meaning);
+   NAT64's three sites (nat64.rs:1179/1254/1337) are internally
+   consistent and untouched.
 3. **Admission mint** (interface branch, nat/source.rs:1226), gated
    `!non_first_fragment && !tuple_unknown` (BOTH probe classes mint nothing):
    - **port-less protocol**: `alloc.reserve_address_only(flow, egress)` —
@@ -314,12 +340,14 @@ if rule.interface_mode {
         return Unavailable(for_rule(rule, SourceNatFailureReason::InterfaceRegistryCap));
     };
     if port_less {
-        return match alloc.reserve_address_only(flow, rewrite_src) {
+        // occupancy = (protocol, rewrite_src, flow.src_port, eff_dst) — the
+        // port-less token keys the reverse identity; w acquires {Worker(W)}.
+        return match alloc.reserve_address_only(owner, occupancy, w) {
             Ok(_)  => Matched(address-only decision),
             Err(r) => Unavailable(for_rule(rule, r)),
         };
     }
-    match alloc.allocate_interface_identity(flow, rewrite_src, now_ns, w) { /* §4.3 */ }
+    match alloc.allocate_interface_identity(owner, occupancy, now_ns, w) { /* §4.3 */ }
 }
 ```
 
@@ -334,10 +362,25 @@ enum DomainReserve { NotThisDomain, Owned, IdentityConflict }
 ```
 
 - A domain answers `NotThisDomain` when the translated address is not its
-  own (pool does not contain E; interface registry has no allocator for E —
-  noting the registry is lookup-only here).
+  own (pool does not contain E; interface registry has no allocator for E
+  AND this is not an interface-SNAT import — see the import-driven
+  creation rule below).
 - A domain that owns the address attempts the reserve: success → `Owned`;
   the identity is held by a DIFFERENT flow → `IdentityConflict`.
+- **Import-driven allocator creation** (Codex r30 finding 4's standby
+  hole: only local admission called `allocator_for`, while the
+  synchronized reserve was lookup-only — a fresh passive standby
+  imported peer interface-SNAT rows with NO reservation, and its first
+  post-failover local mint created an EMPTY allocator that could
+  preserve an already-live imported identity): when the synchronized
+  reserve processes an interface-SNAT import for egress E and no
+  allocator for E exists, the reserve CREATES it (the same fallible
+  `allocator_for` path — cap discipline included) and reserves the
+  imported identity, so the standby's registry mirrors the active's
+  occupied identities BEFORE any local mint; `NotThisDomain` remains
+  for the genuinely-other-domain and drain cases only. §9 pins the
+  failover-then-mint collision regression (imported identity held,
+  first local mint PATs).
 - Scan order pools (active rules) → draining pools → interface registry;
   the scan STOPS at `Owned` and ABORTS at `IdentityConflict` (the import/
   reserve fails closed — never falls through to a second domain, so no
@@ -362,7 +405,7 @@ enum DomainReserve { NotThisDomain, Owned, IdentityConflict }
   records by `SourceNatFlowKey` alone, and `reserve_flow`'s stale-drop at
   allocator.rs:1671 unconditionally removes+frees the old record). The
   interface registry's allocators key ownership records by
-  `(owner tuple, TranslatedTuple)` — the owner tuple being the
+  `(owner tuple, FULL occupancy tuple)` — the owner tuple being the
   original-destination flow identity of the §4 split (so the shipped
   `SourceNatFlowKey` sites at source.rs:807/880 STOP canonicalizing
   `dst_ip` into the flow key — that canonicalization MOVES to the
@@ -1127,35 +1170,62 @@ record's identity frees only when `per_worker` is empty AND
       still holds K's install record (or never had one) — the mirror
       re-read IS a consistent cut relative to Go's generation state.
       Two refinements make the rule true rather than aspirational
-      (Codex r29 finding 1):
+      (Codex r29 finding 1, AGY r30 findings 1-3):
       (R1) **every close-side mirror delete is INCARNATION-CONDITIONAL
-      and error-accounted** — the delete runs ONLY when the
-      authoritative SessionTable does NOT hold a newer same-key
-      incarnation (a queued old Close whose key has since been
-      reinstalled as K' MUST NOT delete K''s row — the expiry path
-      deletes the mirror early at loop_body/mod.rs:958, the
-      replacement republishes at loop_body/mod.rs:1027/
-      poll_descriptor/mod.rs:2449, and a later key-only flush-time
-      delete at session_delta.rs:406 would otherwise strip the live
-      replacement; today's delete has no identity compare and ignores
-      the syscall status, bpf_map/mod.rs:600), and a delete syscall
+      and error-accounted** — the delete is a COMPARE-AND-DELETE on
+      the mirror row's stored stable session id (the #5213
+      `session_id` stamped into the conntrack value at publish,
+      bpf_map/mod.rs:260-265): the row is deleted ONLY when its
+      stored id equals the closing session's id — so a queued old
+      Close whose key has since been reinstalled as K' can NEVER
+      delete K''s row, under ANY steering (the check lives in the
+      row itself, not in any worker-local table — AGY r30's
+      flow-migration trace, where a worker-shard-local table check
+      would strip a replacement installed on a different worker,
+      dies by construction; the expiry-early-delete /
+      replacement-republish / flush-time-delete trace at
+      loop_body/mod.rs:958/:1027/:1230 keeps the replacement because
+      the old close's id no longer matches). A delete syscall
       error is ENOENT-tolerant with bounded retry — after retries the
       close is still published (the tombstone is the peer's
       correctness channel) but the failure is counted and latches
       out-of-sync with the #2442 full re-export recovery, because a
       persistently unwritable mirror is dataplane-fatal, not a
-      per-session condition; and
-      (R2) **the funnel is EVERY outbound close producer, not one
-      call site** — the per-session expiry/teardown path
-      (session_delta.rs), the terminal-teardown path
-      (session_glue/mod.rs:546, which emits a locally-originated
-      Close after its own deletion path), and the daemon's
-      policy-invalidation path (which calls QueueDeleteV4/V6 even
-      when the mirror deletion returned an error,
-      daemon_policy_invalidate.go:357 → session_store.go:391) all
-      obey the same delete-before-publish-with-incarnation-check
-      discipline, so no producer can publish a close whose mirror
-      row survives.
+      per-session condition — AND the sender records a DELETE
+      TOMBSTONE (K → G_d) with the same bounded discipline as the
+      receiver's #2221 tombstones (today `takeDeleteGenV4` REMOVES
+      the record, sync_conn_gen.go:179 — the tombstone retention is
+      new sender-side state): the bulk callback consults it, so a
+      mirror row that survived a failed delete is OMITTED from every
+      bulk (no strictly-newer install exists for it) instead of
+      being re-minted a fresh generation that would resurrect the
+      zombie on the peer over its tombstone (AGY r30 finding 2);
+      a replacement install stamps strictly-greater and clears the
+      tombstone; and
+      (R2) **the funnel is EVERY outbound close producer — FOUR
+      producers, not one call site** — the per-session
+      expiry/teardown path (session_delta.rs), the terminal-teardown
+      path (session_glue/mod.rs:546), the daemon's policy-
+      invalidation path (QueueDeleteV4/V6 even when the mirror
+      deletion returned an error, daemon_policy_invalidate.go:357 →
+      session_store.go:391), AND the tunnel-remap purge
+      (`purge_remapped_tunnel_sessions`, tunnel_purge.rs:47-103,
+      which constructs forward Close deltas and pushes them via
+      `push_purge_close_deltas`/`push_delta_lossless` while removing
+      the shared_sessions entries — AGY r30 finding 1) all obey the
+      same compare-and-delete-before-publish discipline, so no
+      producer can publish a close whose mirror row survives. The
+      purge/GC helper-local delete path additionally DRAWS a
+      sender-side generation for every tracked key instead of
+      emitting an unconditional generation-zero delete (today
+      `delete_synced_session` forces gen-0, session_import.rs:245 —
+      helper-local deletes are authoritative, but a gen-0 delete
+      applies unconditionally and can kill a newer same-key
+      replacement imported after it, Codex r30 finding 1; under the
+      universal producer rule the purge's outbound deletes take the
+      tombstone generation, and gen-0 remains ONLY for genuinely
+      untracked keys in the documented unordered class, bounded by
+      the next authoritative bulk).
       The invariant is scoped to OUTBOUND-published closes of
       locally-originated sessions: the other mirror-removal paths
       (session_glue/mod.rs:437/577/926 — worker-synced redirect and
@@ -1183,7 +1253,18 @@ record's identity frees only when `per_worker` is empty AND
       keys the snapshot cannot contain — and a key legitimately
       closed sender-side in that window is deleted by its
       strictly-greater tombstone through the normal delete path, so
-      carry-forward cannot resurrect it). A persistent mirror-write
+      carry-forward cannot resurrect it). The carry-forward
+      accumulator is RETAINED ACROSS ABORTED BULK ATTEMPTS and
+      cleared ONLY at a completed BulkEnd (AGY r30 finding 4: seeding
+      consumes it into bulkRecv at BulkStart; if that bulk aborts,
+      the seed must still be present for the NEXT BulkStart — the
+      accumulator clears on completion, not on consumption, so a
+      BulkEnd1 → delta D1 → BulkStart2 → abort → BulkStart3 →
+      BulkEnd3 trace keeps D1 carried and reconcile never deletes a
+      live delta-installed session), and it carries a numeric cap
+      (same 200k-key order as the generation maps; overflow arms
+      `forceResync` and clears — the resync re-anchors everything
+      authoritatively, AGY r30 finding 6). A persistent mirror-write
       failure on Open is additionally counted and latches out-of-sync
       with the #2442 full re-export, same as (R1). On top of that invariant the bulk callback, in ONE
       critical section per frame (the universal producer rule below):
@@ -1531,7 +1612,17 @@ record's identity frees only when `per_worker` is empty AND
       the key (sync_conn_read.go:110 ordering), where the decoded
       frame's RTFlowSessionID IS present: every SNAT-flagged
       non-NAT64 canonical-candidate frame records (forward-wire
-      relation → RTFlowSessionID); the index is scoped to the bulk
+      relation → RTFlowSessionID); and the id is PRESERVED ACROSS HA
+      HOPS (Codex r30 finding 6's first failure: a promoted legacy
+      standby re-bulks its imported rows with the id lifted from the
+      BPF store — where it is ZERO, bpf_session_value.go:75/204,
+      encoded as zero by sync_bulk.go:95 — so the downstream receiver
+      can never satisfy the equal-nonzero predicate and admits the
+      alias): the receiver retains the received RTFlowSessionID in
+      its SYNC-SIDE session record (the #5212 id is the ORIGINATING
+      node's stable id by design — it must survive re-export), and
+      every re-bulk/re-export encodes the id FROM that record, never
+      from the zero-lifted BPF field. the index is scoped to the bulk
       epoch (dropped at BulkEnd after the quarantine resolution pass
       — the complete-snapshot resolution IS the definitive check) and
       to the incremental-delta fallback window (entries expire with
@@ -1544,9 +1635,17 @@ record's identity frees only when `per_worker` is empty AND
       the same order as the existing bulkRecv maps (sync.go:518),
       which already retain every received key — so index growth can
       never abort a bulk; ONLY the incremental-window index carries a
-      numeric cap (4096), and ITS overflow merely degrades the excess
-      to the designed timeout-admission fallback (an unconfirmed
-      entry admits after its 5s timer), never aborts anything.
+      numeric cap (4096), and ITS overflow DEFERS the excess
+      alias-signature entries to the NEXT BULK's definitive BulkEnd
+      resolution rather than timeout-admitting them (AGY r30 finding
+      5: timeout-admission installs a real alias as a canonical row —
+      the synthesized broken companion — so under a >4096 inter-bulk
+      burst the excess would misdeliver return traffic; deferral
+      keeps the alias row uninstalled — the base session flows
+      normally, only the fabric-redirect affordance waits — and the
+      next bulk's complete snapshot resolves definitively; the 5s
+      timeout-admission remains ONLY for the genuine lost-base case,
+      unchanged), never aborts anything.
       And confirmation PURGES (the r29 stale-row hole: a lost-base
       incremental alias timeout-admitted as a canonical row, then
       re-received in a later complete bulk — the alias key lands in
@@ -1555,7 +1654,23 @@ record's identity frees only when `per_worker` is empty AND
       additionally issues the LOCAL delete for any previously
       admitted row at the quarantined key through the normal
       delete path, so a re-received alias can never leave a stale
-      admitted companion behind.
+      admitted companion behind. Two refinements make the purge
+      total and safe (Codex r30 findings 2 and 6):
+      (P1) a timeout-admitted alias row is PROVISIONAL — every
+      completed BulkEnd re-evaluates it against the definitive
+      snapshot (alias signature + sibling base present), purging it
+      even when NO new alias frame ever arrives — the active derives
+      explicit aliases only on the incremental path
+      (daemon_ha_userspace_stream.go:370), so an admitted alias would
+      otherwise be carried forward and retained by every reconcile
+      indefinitely; and
+      (P2) the purge is EXACT-PUBLICATION compare-and-delete — it
+      deletes the admitted row ONLY when the stored row IS that
+      admitted publication (session-id matched), never key-only
+      (key-based UpdateAny/delete would delete a genuine direct
+      replacement row D that legitimately took the key after the
+      admission, maps_session.go:69 / session_store.go:537 — outside
+      the documented shared_ops.rs:907 residual).
       A confirmed entry is dropped and its key enters the
       delete-suppression set. On timeout the entry is ADMITTED as a
       canonical row by DISPATCHING THE STORED FRAME INTO THE COMPLETE
@@ -1735,11 +1850,23 @@ sessions:
      mapping's flows register their translated occupancy —
      `(E_static, original_port, effective_dst)` — in the interface
      registry as a FIXED-ADDRESS holder, exactly like the other
-     fixed-address modes above. The two collision directions resolve
+     fixed-address modes above; a MAPPED-PORT static registers with
+     its mapped port `(E_static, mapped_port, effective_dst)` (AGY r30
+     finding 8 — otherwise an interface flow can preserve/PAT onto the
+     mapped port and collide on the wire). The two collision directions resolve
      asymmetrically by design: a static flow whose occupancy is already
      held FAILS CLOSED (static cannot PAT without breaking bijectivity —
-     same posture as sticky/deterministic modes); an interface-mode mint
+     same posture as sticky/deterministic modes — and the drop carries
+     its OWN §5.8 counter, not the interface exhaustion counter); an
+     interface-mode mint
      colliding with a static-held occupancy PATs (interface can).
+     Provenance (Codex r30 finding 5): a static mapping's holder
+     RELEASES on the mapping's config removal; static-held addresses
+     join the uniform mint quarantine's domain enumeration (a static
+     edited mid-drain releases its occupancy into the SAME drain
+     discipline — releases keep reaching the draining holder); and
+     pool/NAT64 enablement on a static-held address hits the strict
+     validator's owner set before any runtime state forms.
      §9 pins both directions plus the commit-validator arm above.
      (`InterfaceOverlapDraining`) since their "pool" is the single
      address. Reserves (ownership claims for existing sessions) are never
@@ -1766,7 +1893,7 @@ sessions:
 
 ### 5.8 Observability (additive, production)
 
-Four ADDITIVE optional counters on the existing helper status wire,
+FIVE ADDITIVE optional counters on the existing helper status wire,
 plumbed via the FULL #1760-W3' precedent (protocol/control.rs:343 +
 coordinator/status.rs:241 + server/lifecycle.rs:228 init +
 server/helpers/status.rs:102 refresh; protocol_status.go:287 +
@@ -1774,17 +1901,21 @@ pkg/api/metrics.go:377 + Describe registration at metrics.go:791 +
 metrics_descriptors_userspace_session.go:27 + metrics_userspace.go:677;
 additive per #1961), PLUS THREE GO-side Prometheus counters (the
 §5.6 alias-discipline counters — no helper wire involvement). For
-clarity (AGY r25 nit 3): the FOUR helper-side counters are
+clarity (AGY r25 nit 3): the FIVE helper-side counters are
 `xpf_userspace_interface_snat_pat_collisions_total`,
 `xpf_userspace_interface_snat_identity_exhaustion_total`,
-`xpf_userspace_interface_snat_registry_cap_exhaustion_total`, and
+`xpf_userspace_interface_snat_registry_cap_exhaustion_total`,
 `xpf_userspace_interface_snat_sync_identity_conflict_drops_total`
 (the last recorded inside the Rust helper coordinator,
-ha/session_import.rs); the THREE Go-side cluster counters are
+ha/session_import.rs), and
+`xpf_userspace_static_nat_occupancy_conflict_drops_total` (the §5.7
+static whole-address/mapped-port fail-closed drop — its OWN counter,
+never folded into the interface exhaustion counter, AGY r30 finding 7);
+the THREE Go-side cluster counters are
 `xpf_userspace_session_sync_forward_wire_alias_ignored_total`,
 `xpf_userspace_session_sync_alias_quarantine_admitted_total`, and
 `xpf_userspace_session_sync_alias_quarantine_overflow_total`
-(pkg/cluster): 4 + 3 = 7 total:
+(pkg/cluster): 5 + 3 = 8 total:
 - `xpf_userspace_interface_snat_pat_collisions_total` — identity-mint
   conflicts that took the PAT probe;
 - `xpf_userspace_interface_snat_identity_exhaustion_total` — completed
@@ -1840,17 +1971,17 @@ receivers; new senders omit alias derivation when it is present — old
 peers on both sides see today's exact behavior; explicitly NOT a
 handshake field, since unkeyed deployments bypass the handshake,
 sync_auth.go:321).
-Additive-only wire-visible changes (#1961-safe): the four helper-side
+Additive-only wire-visible changes (#1961-safe): the five helper-side
 §5.8 status counters (three more — the alias-discipline counters —
 are GO-side Prometheus, §5.8).
 `SyncedSessionEntry` gains ONE additive HELPER-INTERNAL field
 (`pub_token: u64`, the coordinator-local publication token of §5.6 —
 stamped at publish inside the helper; it is NOT read from or written to
 any Go-facing wire, and older in-image rows read as token 0).
-The four helper-side §5.8 status counters are additive optional fields
+The five helper-side §5.8 status counters are additive optional fields
 (#1961-safe); the THREE Go-side §5.8 counters (alias confirmed-dropped,
 alias quarantine-admitted, quarantine-overflow) are GO-side Prometheus
-with no helper wire involvement (seven counters total).
+with no helper wire involvement (eight counters total).
 Changed signatures are `pub(crate)`-internal only:
 `match_source_nat_result_for_tuple` (+1 arg),
 `match_source_nat_for_flow_result_at` (+1), `source_nat_decision_for_flow`
@@ -1876,7 +2007,7 @@ alias sweep inside `publish_shared_session`'s displacement handling. Go changes:
 validator extension (dedup-by-address), the snapshot-builder overlap
 marking (source pools + NAT64 empty-pool + the §5.7 derivation matrix),
 the receiver-side signature-drop rule + delete-suppression set
-(§5.6), the four helper-side status-counter mirrors + Describe
+(§5.6), the five helper-side status-counter mirrors + Describe
 registration, the THREE Go-side counters (confirmed-dropped +
 quarantine-admitted + overflow), and tests.
 
@@ -2042,17 +2173,33 @@ quarantine-admitted + overflow), and tests.
   takes the V3 omit branch and the durable tombstone + BulkEnd
   reconcile converge the receiver in BOTH wire orders; the reverse
   order (publish-then-delete) is a pinned regression RED), PLUS the
-  incarnation-conditional delete (Codex r29 finding 1: a queued old
-  Close whose key has been reinstalled as K' does NOT delete K''s
-  mirror row — the delete checks the authoritative table first; the
+  incarnation-conditional delete (Codex r29 finding 1 / AGY r30
+  findings 1-3: a queued old Close whose key has been reinstalled as
+  K' does NOT delete K''s mirror row — the compare-and-delete matches
+  the row's stored #5213 session_id, cross-worker safe; the
   expiry-early-delete / replacement-republish / flush-time-delete
-  trace at loop_body/mod.rs:958/:1027/:1230 keeps the replacement),
-  PLUS the funnel-completeness cases (terminal teardown
-  session_glue/mod.rs:546 and policy invalidation
-  daemon_policy_invalidate.go:357 obey the same
-  delete-before-publish discipline; a persistent mirror-delete or
-  mirror-write failure latches out-of-sync and drives the #2442
-  re-export), PLUS the received-set carry-forward (an Open consumed
+  trace at loop_body/mod.rs:958/:1027/:1230 keeps the replacement
+  even under a worker-migration steering change; and a row published
+  before #5213 (legacy zero session_id) NEVER matches a closing id —
+  the safe direction: the tombstone still conveys the close and the
+  sender-tombstone omits the stale row from bulks — pinned so a
+  future refactor cannot "fix" it into matching, SMR r31), PLUS the
+  sender-tombstone zombie case (AGY r30 finding 2: a mirror row that
+  survived a failed delete is OMITTED from every bulk while its
+  sender-side delete tombstone stands — never re-minted a fresh
+  generation that would resurrect the zombie over the peer's
+  tombstone; a replacement install stamps strictly-greater and
+  clears the tombstone), PLUS the funnel-completeness cases (terminal
+  teardown session_glue/mod.rs:546, policy invalidation
+  daemon_policy_invalidate.go:357, AND the tunnel-remap purge
+  tunnel_purge.rs:47-103 all obey compare-and-delete-before-publish;
+  a persistent mirror-delete or mirror-write failure latches
+  out-of-sync and drives the #2442 re-export), PLUS the
+  carry-forward retention case (AGY r30 finding 4: BulkEnd1 → delta
+  D1 → BulkStart2 → abort → BulkStart3 → BulkEnd3 keeps D1 carried
+  and reconcile never deletes it — the accumulator clears only on a
+  COMPLETED BulkEnd; the capped-overflow arm drives forceResync),
+  PLUS the received-set carry-forward (an Open consumed
   immediately before BulkStart with a mirror-write hole is rescued
   by carry-forward; a key legitimately closed in that window is NOT
   resurrected — its strictly-greater tombstone deletes it), PLUS the
@@ -2089,11 +2236,31 @@ quarantine-admitted + overflow), and tests.
   exceeds the cap), PLUS the index-cardinality case (Codex r29
   finding 5: a bulk carrying >4096 ordinary non-fabric SNAT rows
   does NOT abort — the bulk-epoch index is bounded by the received
-  set, and only the incremental-window cap degrades to
-  timeout-admission), PLUS the confirm-and-purge case (a
+  set, and the incremental-window cap DEFERS excess alias entries to
+  the next bulk's BulkEnd resolution — a deferred real alias never
+  installs a broken companion, AGY r30 finding 5), PLUS the confirm-and-purge cases (a
   timeout-admitted alias later re-received confirms and its admitted
   row is locally deleted — no stale companion survives the later
-  bulk), PLUS the
+  bulk; a timeout-admitted alias is PROVISIONAL — the next completed
+  BulkEnd purges it against the definitive snapshot even when no new
+  alias frame ever arrives, Codex r30 finding 2; and the purge is
+  exact-publication compare-and-delete — a genuine direct
+  replacement row at the alias key SURVIVES, Codex r30 finding 6),
+  PLUS the id-preservation case (a promoted standby's re-bulk
+  encodes the received RTFlowSessionID from its sync-side record —
+  the downstream receiver confirms the base+alias pair, never
+  admits the alias, Codex r30 finding 6), PLUS the
+  import-driven-creation case (a fresh standby's synchronized
+  reserve creates the egress allocator and reserves the imported
+  identity; after failover the first local mint on the same
+  occupancy PATs instead of preserving the already-live imported
+  identity, Codex r30 finding 4), PLUS the purge-generation case
+  (the tunnel-remap purge/GC helper-local delete draws a tracked
+  tombstone generation — gen-0 remains only for genuinely untracked
+  keys, Codex r30 finding 1), PLUS the pre-dispatch attribution
+  assertion (a barrier pre-start abort records NO
+  (bulk epoch → debtGen) pair — the pair exists only from dispatch,
+  Codex r30 nit 7), PLUS the
   authoritative-recovery case (a barrier-aborted prime re-drives ONLY
   the lossless direct-write `doBulkSync` or a fenced-reconnect
   cold-prime — the event-stream exporter path is NEVER used for the
@@ -2121,10 +2288,13 @@ quarantine-admitted + overflow), and tests.
   both flows' replies un-NAT to their OWN forward session; PLUS the
   idempotence regression: re-admission of the SAME owner flow
   (`H:5555→VIP:80` again) hits its owner tuple and does NOT PAT;
-  PLUS whole-address static occupancy: static-first collision fails the
-  static flow closed, interface-first collision PATs the interface
-  flow, and the commit validator rejects/warns the static-on-iface-
-  egress config per the §5.7 arm);
+  PLUS whole-address static occupancy (directions per the §5.7 norm:
+  static-FIRST — the static holds the occupancy — makes the arriving
+  INTERFACE flow PAT; interface-FIRST makes the arriving STATIC flow
+  fail closed with its OWN static conflict counter, never the
+  interface exhaustion counter; a MAPPED-PORT static registers and
+  defends its mapped port; and the commit validator rejects/warns the
+  static-on-iface-egress config per the §5.7 arm);
   EXACT probe (local start ordinal: full cycle finds the one
   free candidate among shaped contiguous occupied runs — RED on the v2
   4096-budget design; genuine per-destination saturation → exhaustion;
@@ -2277,8 +2447,8 @@ quarantine-admitted + overflow), and tests.
   two-legacy-flows-one-identity import case (first reserves, second drops,
   failover kills only the second); helper-restart rehydration via HA
   re-sync pre-reserve.
-- Counters: the seven §5.8 counters (four helper-side + three Go-side) bump exactly on their events;
-  a unit test asserts `prometheus.MustRegister` coverage for all seven
+- Counters: the eight §5.8 counters (five helper-side + three Go-side) bump exactly on their events;
+  a unit test asserts `prometheus.MustRegister` coverage for all eight
   counter descriptors (no registration panic, no silent omission — AGY
   r26 nit 2);
   `NAT_REVERSE_KEY_SHARED_DISPLACEMENTS` stays flat for the interface
