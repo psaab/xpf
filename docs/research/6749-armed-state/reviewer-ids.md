@@ -762,6 +762,45 @@
   usage-limit response). Proceeding 2-of-3 (SMR + AGY) per the
   codex-infra-blocked exception; retries continue each round.
 
-## Round 24 (plan v8.19 @ pending)
+## Round 24 (plan v8.19 @ 8d1911b5f)
 
-- Codex (retry), AGY, Claude SMR — pending v8.19 fold.
+- **Claude SMR r24** — `claude-smr-plan-r24.md`. Verdict:
+  DEMAND-REVISION (1 BLOCKER — SMR24-1 the completion notice's
+  tails have no pair-currency gate, self-found in the v8.19
+  listener fold (a stale notice for B drained after C's apply
+  runs A→B invalidation over C-permitted sessions + overwrites
+  C's stamp; and the abort-only fix LEAKS
+  A-permitted/B-revoked/C-revoked sessions — the fold is the
+  uniform-base rule: applySem + prior→CURRENT composition +
+  SUPERSEDED terminal); + 1 MAJOR — SMR24-2 the cursor's
+  check-and-advance lacks a pinned atomic (one manager method
+  under m.mu); + 4 MINOR — SMR24-3 the post-clear m.lastSnapshot
+  value unpinned (= AGY f3, downgraded on the verified
+  nil-guard census; pinned NIL + canary + transient-gap note);
+  SMR24-4 the notice channel overflow (periodic pending-cursor
+  sweep + Warn); SMR24-5 the suppression marker's recording
+  locus (shared guard-refusal path, not the drain only — one
+  wasted drain cycle per restart-only sync); SMR24-6 the r23
+  table's SMR23-3 row cites §9 (a)/(d) but no listener
+  assertion landed (claimed-but-wrong); + 3 NIT — SMR24-7
+  timeout/bind race serialization; SMR24-8 the isExposed
+  closure's lock order (writeMu → s.mu only); SMR24-9 the
+  held-push-forever budget note).
+- **AGY r24** — background bash `bych5k71e`; prompt
+  `/tmp/agy-6749-r24-prompt.txt` (126,135 bytes); output
+  `/tmp/agy-6749-r24.out`; verdict doc `agy-plan-r24.md`.
+  Verdict: DEMAND-REVISION (1 BLOCKER — f1 the un-semaphored
+  out-of-order notice drain (= SMR24-1); + 2 MAJOR — f2 the
+  cursor completionState race (= SMR24-2); f3 the
+  m.lastSnapshot drop (= SMR24-3); + 1 MINOR — f4 the notice
+  overflow (= SMR24-4); + 1 NIT — f5 the §9 interleave
+  assertion (= SMR24-6)).
+- **Codex r24** — INFRA-BLOCKED (usage limit; reset Aug 10
+  06:57 UTC). Third documented attempt this session
+  (`/tmp/codex-6749-r24-retry1.err`; r24 prompt staged at
+  `/tmp/codex-6749-r24-prompt.txt`). Proceeding 2-of-3 per the
+  codex-infra-blocked exception; retries continue each round.
+
+## Round 25 (plan v8.20 @ pending)
+
+- Codex (retry), AGY, Claude SMR — pending v8.20 fold.
