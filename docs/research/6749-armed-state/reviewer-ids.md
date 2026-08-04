@@ -343,5 +343,13 @@
   1Hz oscillation bound; f6 post-recovery binding
   reconciliation naming).
 - **Codex r13** — background task `task-msdu5oma-68z6tz`
-  (prompt `/tmp/codex-6749-r13-prompt.txt`, --fresh). Output:
-  pending.
+  (prompt `/tmp/codex-6749-r13-prompt.txt`, --fresh); output
+  `/tmp/codex-6749-r13.out`; verdict doc `codex-plan-r13.md`.
+  Verdict: DEMAND-REVISION (12 BLOCKER + 3 MAJOR — epoch
+  allocator/ambiguous failure; overlay B-under-A lineage +
+  census; dedup lineage; re-sync owner + A-clone overwrite;
+  mixed-version epoch-0; defer-intent API + provenance wire;
+  recovery XSK transaction; work-pull + linearization +
+  pendingWorkerArm; lock rule + fairness; env
+  loss/oscillation; fabric debt state machine; test greens;
+  pass-1 cost; budget).
