@@ -1,6 +1,6 @@
 # #6749 — binding-plan expansion registers new slots unarmed, dataplane disabled indefinitely
 
-**Status: DRAFT v8.13 — pending adversarial plan review (round 18)**
+**Status: DRAFT v8.14 — pending adversarial plan review (round 19)**
 
 - Issue: #6749 (opus-review-001 root R06, severity High)
 - Research base: `ad9591177` (origin/master at worktree creation)
@@ -597,6 +597,108 @@
   and the remaining duplicated lines are fixed; the
   Codex r16 count corrects to 14 tagged blockers @
   pending
+; v8.14 folds Codex r18 (11 BLOCKER + 3 MAJOR) + AGY
+  r18 (4 BLOCKER + 4 MAJOR + 1 MINOR + 1 NIT) + SMR
+  r18 (2 BLOCKER + 3 MAJOR + 5 MINOR): the exposure
+  gate becomes PAIR-SPECIFIC (Codex f4 — `durableRevision`:
+  a pair is exposable iff `R <= durableRevision`, so
+  durable A's mandatory second leg is never gated by
+  nondurable B's interposed pendency — the global
+  boolean's fatal counterexample dies; the check runs
+  at `applyConfigLocked`'s ENTRY before any
+  SNMP/web-management/bootstrap/kernel/VRF mutation)
+  with a TYPED `ApplyOutcome{Ran, Exposed,
+  ExposurePending}` (Codex f3 — every wrapper's success
+  tails (MarkActiveApplied, session clear, peer push,
+  applied stamp, armedActive, CF clear,
+  lastAppliedConfigGen) gate on `Exposed`, so a standby
+  enforcing A never reports B applied or
+  transfer-ready; the exposure debt record carries the
+  HA `item.gen` and runs the DEFERRED tails after
+  observed acceptance); the exposed marker becomes
+  REVISION-KEYED (Codex f2 — `appliedRevision` alongside
+  `appliedDigest`, so a same-text/new-revision gated
+  promotion never inherits applied==true and the
+  equal-text shortcut cannot fire); the exposure debt
+  carries an ALWAYS-LIVE timer (explicit `nextWake`,
+  the MAC debt's Claim shape); the commit's
+  pending-durable note rides `compiled.Warnings`
+  synchronously (plumbed through REST/gRPC/CLI today);
+  and the AUXILIARY-PRODUCER suppression
+  (`m.exposureGateActive`, SMR18-1) closes the
+  A-config/B-FIB overlay hybrid (the v8.13 "staged-ahead
+  engages" text was wrong on its own terms — nothing is
+  staged, so nothing suppressed the overlay). The
+  freshness validation moves to the publish leg's ENTRY
+  (Codex f5 — BEFORE any XDP/pin/shim/bootstrap-map
+  side effect) with invalidation DELAYED until a
+  successor's OBSERVED ACCEPTANCE (a newer capture
+  never invalidates; T2's pre-publish failure leaves
+  T1 viable; the SUPERSEDED report fires only on a
+  real accepted successor), the validation compares the
+  CONTENT HASH (SMR18-2 = AGY f4 — the input-ref
+  capture was unimplementable) against
+  `m.latestBuiltHash` plus the new `m.currentPair`
+  field, and `buildSeq` SEEDS from the ping echo
+  (Codex f6 — the surviving-helper token wedge dies).
+  The reservation chain's fold order is PINNED (Codex
+  f8 = AGY f5 = SMR18-3 — recorded outcomes apply
+  oldest-first, the head's own LAST, with the 7×7
+  matrix in §6 (PENDING-XSK STAGED is a state, not a
+  Finish) and three-node coverage). The checked
+  quiescence gains the MUTATION LEASE (Codex f9 — the
+  claimToken re-read AND the netlink syscall under ONE
+  `m.mu` acquisition, so an operator cancellation
+  serializes atomically before or after each mutation,
+  never inside it) and the acquisition rule is
+  reconciled (while holding `applySem`, ALL `m.mu`
+  acquisitions are BLOCKING — bounded by one legal
+  owner hold, and the applySem transaction already
+  prices RPC-length holds; the v8.13 `RetryLater`
+  release-and-requeue lost FIFO position and could
+  starve indefinitely; try-lock-or-skip survives only
+  for non-applySem probes, AGY r15 f6's original
+  motivation). The restore debt becomes DAEMON-SIDE
+  with a real pull API (Codex f10 —
+  `RecordRestoreDebt`/`ClaimRestoreWork`/
+  `ReportRestoreAttempt` mirroring the MAC debt; the
+  ctrl retry is the FULL `NotifyLinkCycle` sequence
+  (rebind + status reconcile + the reconciled enable —
+  never a bare ctrl write); the ctrl=0-while-bound
+  window is fail-closed + Warn-visible + retry-forever).
+  `map_generation` becomes the CANONICAL
+  `(payload, generation)` pair (Codex f11 — built once
+  per mutation from the rich locked sample (map view +
+  names/overlay/queues/Up + the neighbor-CACHE
+  resolution (SMR18-5 = AGY f3, never a netlink dump
+  under the lock)); EVERY carrier uses its own
+  payload's generation — full snapshots read the
+  canonical pair at the publish leg, so a failed
+  `update_fabrics` followed by a stale clone advances
+  the helper's accepted only to the CLONE's (P0, g0),
+  never to current g (the v8.13 idempotent-advance
+  false proof dies); the debt's retry re-sends the
+  recorded pair). The late-arrival cutoff is pinned
+  (Codex f12 — absorption covers only members DUE AT
+  THE CLAIM; a return between Claim and rebind rides
+  the debt's own current backoff — up to the 60s
+  floor, SMR18-8 = AGY f7). The FIFO contract drops
+  the false systemd claim (Codex f14 — SIGKILL cannot
+  reap D-state; the kernel-unreapable class is
+  unbounded PERIOD; the 60s Warn + out-of-band operator
+  action is the only mitigation). The note verb is
+  enumerated end-to-end (Codex f7 — the request arm,
+  the dispatcher match arm, and the decoded-response
+  typed-return Go API, SMR18-7 = AGY f2/f9). §9's
+  chain tests gain the false-green refusals per Codex
+  f13's table (the always-live timer, the
+  pair-specific gate, the deferred tails, the
+  revision-keyed marker, delayed invalidation, the
+  pre-side-effect validation, the token seed, the
+  inverse + 7×7 + three-node folds, the lease, the
+  blocking acquisition, the real restore drain, the
+  failed-send/stale-carrier race, the honest warm
+  blackhole) @ pending
   AGY r15 (4 BLOCKER + 3 MAJOR + 1 MINOR) + SMR r15 (2
   BLOCKER + 3 MAJOR + 3 MINOR/NIT): R1 becomes a REAL
   rollout+transport contract — a legacy `active.json`
@@ -678,7 +780,7 @@
 
 ## 1. Status
 
-DRAFT v8.13 — pending adversarial plan review round 18 (Codex + AGY +
+DRAFT v8.14 — pending adversarial plan review round 19 (Codex + AGY +
 Claude SMR). Convergence target: PLAN-READY (recommended path shipped
 to `/engineer`) or PLAN-KILL. No production code is written under
 `/research`.
@@ -1385,6 +1487,58 @@ to `/engineer`) or PLAN-KILL. No production code is written under
   | Codex f15 Warn lifecycle (= AGY f8 = SMR17-8) | CLOSED — the Warn keys on the work item's FIRST-QUEUE timestamp with PERIODIC 60s reporting while queued; a RetryLater re-queue continues the episode (§5-C debt execution, §9) |
   | AGY r17 f1-f9 | CLOSED — folded with the matching rows (f1→Codex f2, f2→f5, f3→f12, f4→f3, f5→f7, f6→SMR17-10's pin (3s base deadline, in the budget text), f7→f10, f8→f15, f9 (evidence wishes) informational — f1/f4 were independently source-verified by SMR) |
   | SMR r17 SMR17-1..11 | CLOSED — SMR17-1→Codex f2 row; SMR17-2→f5 row; SMR17-3→f3 row; SMR17-4→f12 row; SMR17-5→f7 row; SMR17-6→f13 row; SMR17-7→f10 row; SMR17-8→f15 row; SMR17-9→f8 row; SMR17-10→f4 row (the ping deadline pin); SMR17-11 (edit hygiene) → the splice/duplication fixes folded throughout |
+
+- **Round 18** (v8.13): ALL THREE DEMAND-REVISION — Codex (11
+  BLOCKER + 3 MAJOR), AGY (4 BLOCKER + 4 MAJOR + 1 MINOR +
+  1 NIT), SMR (2 BLOCKER + 3 MAJOR + 5 MINOR). Convergence:
+  the input-ref capture is unimplementable (Codex f6 = AGY
+  f4 = SMR18-2 — the validation must be content-based);
+  the outcome fold order is unspecified (Codex f8 = AGY f5
+  = SMR18-3); the post-quiescence try-lock skip
+  contradicts the standing text (AGY f1 = SMR18-4); the
+  m.mu-resident netlink resolution (AGY f3 = SMR18-5);
+  the 60s-floor blackhole bound (Codex f12 = AGY f7 =
+  SMR18-8); the error_code Go consumer contract (Codex f7
+  = AGY f2/f9 = SMR18-7); the commit-warning surface
+  (Codex f3 = AGY f6); the polling-cannot-accelerate note
+  (Codex f4 = AGY f8 = SMR18-6). SMR-only: the
+  auxiliary-producer gate-window hybrid (SMR18-1). Codex-only
+  depth: the exposed marker inherits same-text applied
+  state (f2 — revision-keyed required); no typed
+  accepted-vs-exposed outcome (f3 — every wrapper treats
+  nil as ran; the HA generation/failover readiness tails
+  leak); the global gate suppresses durable A's mandatory
+  second leg (f4 — pair-specific durableRevision
+  required); buildSeq invalidates predecessors before a
+  viable successor + pre-send side effects (f5); the
+  token lacks an incarnation seed (f6); the
+  read-to-syscall cancellation race + RetryLater FIFO
+  starvation (f9); the restore debt's placement/API/ctrl-
+  retry composition (f10); the idempotent advance
+  certifies map-P/helper-P0 (f11 — canonical
+  (payload, generation) required); the systemd claim is
+  not a bound (f14). Codex f15 (the v8.13 Warn
+  lifecycle) was the round's one clean closure.
+- **Round-18 disposition table:**
+
+  | r18 finding | v8.14 disposition |
+  |---|---|
+  | Codex f1 disposition accuracy | CLOSED — this table + the r17 rows re-audited; every v8.14 fold verified per-edit |
+  | Codex f2 exposed marker inherits same-text | CLOSED — `appliedRevision` alongside `appliedDigest`; `ActiveApplied()` compares the PAIR; HA markers key to the typed outcome's `Exposed`; the primary's marker claim defers until exposure; the lag is visible in `show chassis cluster` (§5-C epoch contract (iv), §6, §9 (a)) |
+  | Codex f3 no typed accepted/exposed outcome | CLOSED — `ApplyOutcome{Ran, Exposed, ExposurePending}`; every wrapper tail gates on `Exposed`; the debt record carries the HA `item.gen` + commit context and runs the DEFERRED tails after observed acceptance; the commit note rides `compiled.Warnings` synchronously (§5-C (ii), §6, §9 (a)) |
+  | Codex f4 global gate + no bounded wake | CLOSED — PAIR-SPECIFIC `durableRevision` gating at `applyConfigLocked`'s ENTRY (A's second leg never gated by B); the debt's ALWAYS-LIVE timer (explicit `nextWake`); the honest storage-failure-unbounded budget (§5-C (i)/(iii), §6, §9 (a)/(b)) |
+  | Codex f5 premature invalidation + side effects | CLOSED — invalidation DELAYED until a successor's observed acceptance; the validation runs at the publish leg's ENTRY (before any XDP/pin/shim/bootstrap-map mutation); `m.currentPair` added; the SUPERSEDED report only on a real accepted successor (§5-C epoch contract, §9 (d)) |
+  | Codex f6 capture-order + token incarnation (= AGY f4 = SMR18-2) | CLOSED — the validation compares the CONTENT HASH (no input enumeration); `buildSeq` SEEDS from the ping echo (`m.latestBuildSeq = max(echo, 0)`) (§5-C epoch contract, §9 (d)) |
+  | Codex f7 note verb contradictory (= AGY f2/f9 = SMR18-7) | CLOSED — §6 enumerates the `note_commit_revision` request arm + the dispatcher match arm + the decoded-response typed-return Go API (callers branch on `error_code` BEFORE the `err != nil` return) (§6, §9 (e)) |
+  | Codex f8 fold algebra (= AGY f5 = SMR18-3) | CLOSED — recorded outcomes apply OLDEST-FIRST, the head's own LAST; the 7×7 matrix in §6 (PENDING-XSK STAGED is a state, not a Finish); three-node coverage; `m.compileInFlight` clears exactly when every node is terminal (§5-C, §6, §9 (f)) |
+  | Codex f9 read-to-syscall race + RetryLater starvation | CLOSED — the MUTATION LEASE (re-read + syscall under ONE `m.mu` acquisition); while holding `applySem` ALL `m.mu` acquisitions are BLOCKING (bounded by one legal owner hold; the applySem transaction already prices RPC-length holds); try-lock-or-skip survives only for non-applySem probes (§5-C debt execution, §9 (g)) |
+  | Codex f10 restore debt not executable | CLOSED — DAEMON-SIDE entirely with `RecordRestoreDebt`/`ClaimRestoreWork`/`ReportRestoreAttempt` (the MAC debt's pull shape); the ctrl retry is the FULL `NotifyLinkCycle` sequence (rebind + status reconcile + reconciled enable, never a bare write); the ctrl=0 window fail-closed + Warn-visible + retry-forever (§5-C debt execution, §6, §9 (h)) |
+  | Codex f11 map_generation false coherence | CLOSED — the CANONICAL `(payload, generation)` pair per projection (rich locked sample + neighbor-cache resolution); EVERY carrier uses its own payload's generation (full snapshots read the pair at the publish leg); the failed-send/stale-carrier race advances accepted only to (P0, g0); the debt's retry re-sends the recorded pair (§5-C (i), §6, §9 (i)) |
+  | Codex f12 late-arrival cutoff + backoff (= AGY f7 = SMR18-8) | CLOSED — absorption covers ONLY members DUE AT THE CLAIM; a return between Claim and rebind rides the debt's own current backoff (up to the 60s floor); the ≤ ~1s text deleted in v8.13 (§5-C debt, §9) |
+  | Codex f13 tests green | CLOSED — §9's chain tests gain the false-green refusals per the finding's table (§9 (a)-(j)) |
+  | Codex f14 hazard budget + systemd claim | CLOSED — the budget gains the new classes (gate exposure, typed-outcome tails, premature invalidation, lease race, restore ctrl=0, warm blackhole, false fabric proof — all closed by the rows above); the systemd claim deleted: the kernel-unreapable class is unbounded PERIOD (the 60s Warn + out-of-band operator action is the only mitigation) (§5-C budget, §11 Q7) |
+  | AGY r18 f1-f9 | CLOSED — f1 (post-quiescence contradiction) → the lease + blocking reconciliation (Codex f9 row); f2/f9 (error_code contract) → f7 row; f3 (m.mu-resident resolution) → the neighbor-cache pin (f11 row); f4 (input refs) → f6 row; f5 (fold matrix) → f8 row; f6 (warning surface) → f3 row; f7 (60s floor) → f12 row; f8 (polling) → f4 row (the honest unbounded-storage budget) |
+  | SMR r18 SMR18-1..10 | CLOSED — SMR18-1 (auxiliary hybrid) → the `m.exposureGateActive` suppression (f2 row, §5-C (vi), §9 (a)); SMR18-2 → f6 row; SMR18-3 → f8 row; SMR18-4 → f9 row (subsumed by the lease); SMR18-5 → f11 row; SMR18-6 → f4 row; SMR18-7 → f7/f3 rows; SMR18-8 → f12 row; SMR18-9 → f10/f11 rows; SMR18-10 → f2/f4 rows |
 
 ### Round-1 detail log (kept for the record)
 
@@ -2100,51 +2254,62 @@ pay nothing). On a PROJECTION change, the handler:
    consistency answer with a CAUSAL protocol (v8.12, Codex
    r16 f14, replacing v8.11's name-only query; the
    single-transaction completion is v8.13, Codex r17 f12 =
-   AGY r17 f3 = SMR r17 SMR17-4): the
-   manager maintains a `map_generation` and owns the WHOLE
-   fabric sync as ONE transaction — a single `m.mu`
-   section that (a) SAMPLES the map view
-   (`FabricFwdInfo`, types.go:797-804), (b) performs or
+   AGY r17 f3 = SMR r17 SMR17-4; the CANONICAL-PAIR
+   completion is v8.14, Codex r18 f11): the
+   manager maintains, per fabric projection, a CANONICAL
+   `(payload, generation)` pair — built ONCE per accepted
+   mutation in ONE `m.mu`
+   section that (a) SAMPLES the rich observation (the map
+   view (`FabricFwdInfo`, types.go:797-804) PLUS the names,
+   overlay identity, queue counts, and `Up` states the
+   `FabricSnapshot` payload needs (protocol.go:315-333 —
+   the v8.13 "build the payload from the map view" was
+   incomplete: the map view is two ifindexes and two MACs;
+   the payload needs independent link reads, which this
+   section performs), (b) performs or
    confirms the BPF map mutation AND mints
-   `map_generation` ATOMICALLY with it, and (c) builds the
-   helper payload FROM THE SAME SAMPLE — the v8.12 form
-   minted a bare counter, which ordered sends without
-   proving correspondence (Codex r17 f12's divergence:
-   the map is written with peer MAC X at generation g;
-   neighbor resolution moves to Y before an independent
-   payload build samples; the helper accepts payload Y
-   tagged g and `accepted == current` reads true while
-   map-X and helper-Y diverge — impossible when the
-   payload is built from the sampled mutation itself).
-   The controllers.go:68/:112 shape (write the BPF shim
-   OUTSIDE `m.mu`, then ask the manager to build/send) is
-   restructured so the sample/mint/build/send sequence
-   serializes under `m.mu`; the direct key writes
-   (maps_fabric.go:16-33) move inside the manager's
-   wrapper; and the public legacy-adapter fabric methods
-   (legacy_dataplane.go:346) are enumerated as
-   pre-upgrade/test-only paths (production fabric writes
-   route ONLY through the manager's wrapper). Every
-   fabric send (`update_fabrics` AND full
-   snapshots) carries the current `map_generation`
-   (additive fields), and the helper echoes
-   `accepted_fabric_map_generation` (the generation of the
-   last fabric send it ACCEPTED) in every status —
-   advancing on EVERY accepted full snapshot that carries
-   the field, EVEN WHEN the fabric content is equal
-   (idempotent advance, v8.13: the accepted value tracks
-   the newest accepted send, not the newest content
-   change; the helper's assignment is unconditional on
-   accept, ordered with the snapshot's own storage). A clean
+   `map_generation` ATOMICALLY with it, and (c) builds and
+   RETAINS the helper payload FROM THE SAME SAMPLE, bound
+   to the minted generation.
+   The peer-MAC resolution inside the section reads the
+   manager's NEIGHBOR CACHE (v8.14, SMR r18 SMR18-5 = AGY
+   r18 f3 — NEVER a fresh netlink dump under the lock;
+   the manager already maintains the cache
+   (manager_neighbor.go:129-140's regen machinery); a
+   cache MISS carries the existing unresolved-posture
+   marker and the cache's regen drives the next attempt).
+   EVERY carrier then uses the canonical pair VERBATIM
+   (v8.14, Codex r18 f11's false-coherence fix): an
+   `update_fabrics` send carries the canonical
+   `(payload, generation)`; a FULL SNAPSHOT's fabrics
+   section is READ FROM THE RETAINED PAIR AT THE PUBLISH
+   LEG (never the pre-m.mu build — the builder builds
+   Fabrics before `m.mu` today (builder.go:78,
+   manager_compile.go:214/:228), and a failed
+   `update_fabrics` retains the OLD `lastSnapshot.Fabrics`
+   on failure (manager_ha.go:175), so a route/scheduler/
+   #5134 clone carrying the old payload with the CURRENT
+   generation would let the helper accept (P0, g) and
+   echo g — `accepted == current` true for
+   map-P/helper-P0; under the canonical pair the clone
+   carries (P0, g0) and the helper's accepted advances to
+   g0, which is != current g while the debt is
+   outstanding — readiness stays correctly FALSE). The
+   helper echoes
+   `accepted_fabric_map_generation` — the generation OF
+   THE LAST PAYLOAD IT ACCEPTED — advancing on EVERY
+   accepted carrier (full snapshot or `update_fabrics`)
+   to THAT PAYLOAD's generation (v8.14 restates the v8.13
+   "idempotent advance": accepted tracks the accepted
+   PAYLOAD's generation, never the sender's current —
+   the false-proof class dies). A clean
    fabric send whose echoed generation matches the current
    `map_generation` is the coherence proof.
    `map_generation` SEEDS from the startup ping echo
    (v8.13, SMR r17 SMR17-4: accepted → the minted
    high-water, mirroring the `publication_rev` seed — a
    manager re-init over a surviving helper no longer
-   desyncs (v8.12's minted-from-0 vs the helper's
-   retained accepted would have wedged readiness false
-   forever)); and the new-helper-zero vs old-helper-zero
+   desyncs); and the new-helper-zero vs old-helper-zero
    ambiguity resolves via a protocol CAPABILITY bit in
    the ping exchange (v8.13, Codex r17 f12: an old
    helper lacks the capability → every lineage-sensitive
@@ -2175,21 +2340,24 @@ pay nothing). On a PROJECTION change, the handler:
    queue count) (planning.rs:160-171 — the v8.11 text's
    (name, parent, vlans, queues) was source-wrong:
    `FabricSnapshot` has no VLAN field
-   (protocol.go:315-333)). The map's view
-   (`FabricFwdInfo`: two ifindexes and two MACs,
-   types.go:797-804) and the sent payload
-   (`FabricSnapshot`: names, parent/overlay, queue count,
-   peer address, Up, protocol.go:315-333) are DIFFERENT
-   projections, with peer-MAC resolution independent
-   (daemon_ha_fabric.go:484-490) — which is exactly why
-   the payload must be built from the sampled map view in
-   the same locked section (no daemon-side hash can name
-   the sent payload without another TOCTOU sample, and a
-   bare counter cannot prove correspondence).
+   (protocol.go:315-333)). The controllers.go:68/:112 shape
+   (write the BPF shim OUTSIDE `m.mu`, then ask the
+   manager to build/send) is restructured so the
+   sample/mint/build/send sequence serializes under
+   `m.mu`; the direct key writes (maps_fabric.go:16-33)
+   move inside the manager's wrapper; and the public
+   legacy-adapter fabric methods (legacy_dataplane.go:346)
+   are enumerated as pre-upgrade/test-only paths
+   (production fabric writes route ONLY through the
+   manager's wrapper).
    The debt itself keys on `(commit_revision,
    projection-identity)` as before (a telemetry update is
    the same identity — the debt is always found, AGY r15
-   f7); a clean sync clears the entry ONLY when its
+   f7); the debt's RETRY re-sends the RECORDED
+   `(map_generation, payload)` pair (v8.14, SMR r18
+   SMR18-9 — a fresh sample mints a NEW generation and
+   SUPERSEDES the debt, never a re-mint moving the
+   target the helper never saw); a clean sync clears the entry ONLY when its
    `map_generation` is the debt's or newer (v8.13 — the
    clear rule moves from payload-hash to generation; a
    stale clean retry never clears a newer unsynced
@@ -2600,7 +2768,14 @@ BLOCKERs 6 + 8; v8 epoch form per Codex r6 f6/f8):**
     enabled gate (SMR r16 SMR16-1's two bad readings)):
     Prepare (quiesce) → validate-and-program MACs for ALL
     due members (including arrivals absorbed at the
-    re-Claim — absorbed members' MAC programs happen
+    re-Claim — and the absorption CUTOFF is pinned
+    (v8.14, Codex r18 f12): absorption covers ONLY
+    members DUE AT THE CLAIM (the Claim returns
+    currently-due items only — a member whose link
+    returns BETWEEN the Claim and the rebind is NOT
+    absorbed (it was never claimed) and rides the debt's
+    normal retry at its own current backoff);
+    absorbed members' MAC programs happen
     INSIDE the batch's program phase, BEFORE the settle,
     so no second link cycle and no wrong-MAC rebind) →
     the 1s settle → the global rebind. The
@@ -2632,8 +2807,12 @@ BLOCKERs 6 + 8; v8 epoch form per Codex r6 f6/f8):**
     factory MAC (a partial-path blackhole for flows
     hashed to it — peer frames to the virtual MAC drop
     at that member) from the batch's rebind until the
-    debt's next attempt (5s initial backoff) programs
-    its MAC and rebinds — an exposure of backoff +
+    debt's next attempt programs
+    its MAC and rebinds — an exposure of THE MEMBER'S OWN
+    CURRENT BACKOFF (v8.14, SMR r18 SMR18-8 = AGY r18 f7:
+    a member with prior failures sits at the 60s floor —
+    the v8.13 text's "(5s initial backoff)" was the best
+    case, not the bound) +
     FIFO queueing + the transaction, NOT "~1s" (the
     no-priority posture (AGY r16 f8, below) already owns
     this latency class for the recovery itself). A `programRethMAC`
@@ -2808,10 +2987,21 @@ BLOCKERs 6 + 8; v8 epoch form per Codex r6 f6/f8):**
     performs a cheap `claimToken` re-read (an `m.mu` read,
     µs-scale) — and the validation is ATOMIC with the
     quiescence (v8.12, Codex r16 f11; hold span pinned v8.13,
-    Codex r17 f8 = SMR r17 SMR17-9): the work loop calls
+    Codex r17 f8 = SMR r17 SMR17-9; the acquisition rule
+    reconciled v8.14, Codex r18 f9): the work loop calls
     `PrepareLinkCycleChecked(claimToken) (outcome, error)` —
-    ONE manager method that (i) TRY-acquires `m.mu`
-    (contention → `RetryLater`), (ii) validates the token
+    ONE manager method that (i) acquires `m.mu` — BLOCKING
+    while the batch holds `applySem` (v8.14's reconciliation:
+    a blocking acquire is bounded by ONE legal `m.mu` owner
+    hold (≤ ~67s worst — the 3s-typical status RPC or a
+    large-snapshot tick), and the applySem transaction
+    ALREADY prices RPC-length holds, so blocking never
+    loses FIFO position (the v8.13 `RetryLater` release-
+    and-requeue DID — repeated finite status-loop holds
+    could fail every try-lock indefinitely, Codex r18 f9's
+    starvation); the try-lock-or-skip rule survives ONLY
+    for paths NOT holding `applySem` (ambient scheduler
+    probes)); (ii) validates the token
     (bumped → `Stale`), and (iii) on `Valid` ISSUES the
     quiescence — ctrl-disable + `stop_workers` — UNDER THE
     SAME HOLD (each a small request at the 3s
@@ -2820,18 +3010,13 @@ BLOCKERs 6 + 8; v8 epoch form per Codex r6 f6/f8):**
     bump between validation and the first irreversible
     action is structurally excluded), then RELEASES `m.mu`
     before the MAC phase begins (Go's `sync.Mutex` is
-    non-reentrant: the per-mutation try-lock re-reads resume
-    AFTER the release, and the window between release and
-    the first MAC mutation is covered by exactly those
-    re-reads). The verdicts:
-    `Valid` (proceed), `RetryLater` (contended BEFORE any
-    ctrl/worker mutation — the loop RELEASES `applySem`,
-    keeps the batch AND its claimToken, retries next tick,
-    NO unwind — harmonized with the validator's
-    tri-state, Codex r16 f11's contradiction catch; a
-    try-lock skip AFTER the quiescence has begun is NOT
-    RetryLater — it routes through the restore finalizer
-    below, because workers may already be stopped), and
+    non-reentrant: the per-mutation leases below take it
+    again per mutation). The verdicts:
+    `Valid` (proceed), `RetryLater` (contended BEFORE
+    `applySem` is held — the loop releases nothing, keeps
+    the batch, retries next tick, NO unwind; after
+    `applySem` the acquisitions are blocking, so this
+    verdict cannot occur mid-transaction), and
     `Stale` (abandon WITH the balanced unwind below). A
     `stop_workers` timeout is UNKNOWN (the helper stops
     every worker and clears socket readiness BEFORE
@@ -2842,23 +3027,44 @@ BLOCKERs 6 + 8; v8 epoch form per Codex r6 f6/f8):**
     quiesce before `applySem` releases (the idempotent
     rebind covers both). The RESTORE ITSELF is typed
     (v8.12, Codex r16 f11) and its debt is EXECUTABLE
-    (v8.13, Codex r17 f9): `NotifyLinkCycle` gains a typed
+    (v8.13, Codex r17 f9; placed v8.14, Codex r18 f10):
+    `NotifyLinkCycle` gains a typed
     result (it is void today and swallows missing-process,
     ctrl, rebind, and status-application failures
     (process_linkcycle.go:184-224; even ctrl re-enable
     ignores errors (:102-116))) — a failed restore records
-    a RESTORE DEBT (daemon-side, its own retry at
+    a RESTORE DEBT — DAEMON-SIDE entirely (v8.14, Codex
+    r18 f10's placement fix: state + scheduler + drain,
+    the MAC debt's daemon-ownership shape; the v8.13 text's
+    "manager-side, daemon-driven" was contradictory), with
+    a pull-model API mirroring the MAC debt's
+    (`RecordRestoreDebt(failure, context)` +
+    `ClaimRestoreWork() (items, claimToken, nextWake)` +
+    `ReportRestoreAttempt(claimToken, results)`, stale-
+    token discarded), its own retry at
     5/10/30/60s with an edge Warn and NO terminal cap —
     the pending-activation retry's posture, since a
     stopped-worker recovery needs no state change), with
     explicit policies per failure mode: missing process →
     the respawn path FOLLOWED BY a daemon-owned REVISED
     FULL APPLY (the re-sync's applyConfigLocked shape,
-    re-reading `ActivePair()` — a respawned helper holds
+    re-reading `ActivePair()` — and running the FULL
+    machinery: a fresh `StartCompile(false)` reservation
+    AND the three-bucket precheck (v8.14, SMR r18
+    SMR18-9 — never the CLI's default-reservation path;
+    a respawned helper holds
     ZERO stored state, so rebinding an empty helper can
     never restore forwarding; the paired replay is the
     only correct restore); ctrl error → the restore
-    debt's own retry; rebind error → the RESTORE DEBT
+    debt's retry of the FULL `NotifyLinkCycle` SEQUENCE
+    (v8.14, Codex r18 f10 — NEVER a bare ctrl map write:
+    a safe enable occurs only after binding/map
+    reconciliation in `applyHelperStatusLocked`
+    (maps_sync.go:689/:809), so the retry re-runs
+    rebind + status reconcile + ctrl enable; the ctrl=0
+    window while it retries is a TOTAL fail-closed
+    outage, Warn-visible and retry-forever — stated
+    honestly, v8.14); rebind error → the RESTORE DEBT
     itself (NOT the #5134 worker-arm debt, v8.13's
     correction — the #5134 debt self-clears when the last
     snapshot is already non-deferred
@@ -2917,21 +3123,25 @@ BLOCKERs 6 + 8; v8 epoch form per Codex r6 f6/f8):**
     hold is several minutes of sequential ~67s-capped
     control requests (process_control.go:31-56/:85-103),
     never infinite) — with the honest exception restated
-    (v8.13, Codex r17 f11): helper teardown is NOT
+    (v8.13, Codex r17 f11; corrected v8.14, Codex r18
+    f14): helper teardown is NOT
     userspace-bounded — Rust worker stop performs
     blocking thread joins (worker_manager.rs:141) and
     `stopLocked` performs an unconditional `<-done` after
     `Kill()` (process.go:231-244), so a D-state or
     unreapable helper process has NO deadline while an
-    apply owner holds `applySem` inside `stopLocked`. No
-    userspace design can bound that class (abandoning the
-    reap wait would let a respawn race the corpse's
-    AF_XDP sockets — strictly worse); the escape is the
-    60s Warn (visibility — it names the wedged owner)
-    plus the systemd outer bound (`TimeoutStopSec` +
-    `Restart`, the supervisor's SIGKILL-and-restart that
-    clears even a D-state corpse eventually). The
-    guarantee is therefore: progress for every owner
+    apply owner holds `applySem` inside `stopLocked`. NO
+    design bounds that class: abandoning the reap wait
+    would let a respawn race the corpse's AF_XDP sockets
+    (strictly worse), and the v8.13 "systemd outer bound"
+    claim is WRONG (Codex r18 f14) — `TimeoutStopSec` +
+    `Restart` cannot terminate an uninterruptible
+    D-state task (SIGKILL does not reap it; the kernel
+    wait itself blocks). The ONLY mitigation is the 60s
+    Warn (visibility — it names the wedged owner so an
+    operator can act on the host, up to and including a
+    reboot — the one true bound, out-of-band).
+    The guarantee is therefore: progress for every owner
     whose hold is userspace-bounded, and surfaced-not-
     silent for the one kernel class that is not — plus a queued-state Warn REPORTED
     EVERY 60s while waiting (visibility; the v8.10 retry-with-timeout
@@ -2956,13 +3166,29 @@ BLOCKERs 6 + 8; v8 epoch form per Codex r6 f6/f8):**
     surfaces the wait; a skipped attempt retries
     at its own backoff. `ClaimMACDebtWork`,
     `ReportMACDebtAttempt`, AND the work loop's per-mutation
-    `claimToken` re-read are ALL TRY-LOCK-OR-SKIP on `m.mu`
-    (v8.11, AGY r15 f6 = SMR r15 SMR15-4: v8.10 left the
-    per-mutation re-read blocking, so the status loop's
-    120s control request monopolized `applySem` behind it —
-    a contended re-read now skips the mutation to the next
-    backoff tick with the work item still claimed; no stall,
-    no monopoly);
+    `claimToken` re-read are governed by the v8.14
+    acquisition reconciliation (Codex r18 f9): while the
+    batch HOLDS `applySem`, every `m.mu` acquisition is
+    BLOCKING (bounded by one legal `m.mu` owner hold —
+    the applySem transaction already prices RPC-length
+    holds, and blocking never loses FIFO position the way
+    the v8.13 try-lock `RetryLater` release did); and each
+    netlink mutation runs under a MUTATION LEASE — the
+    claimToken re-read AND the syscall under ONE `m.mu`
+    acquisition (µs-ms netlink calls, so the hold is tiny,
+    but the operator's cancellation can no longer land
+    between the read and the syscall (Codex r18 f9's
+    read-to-syscall race: token re-read succeeds and
+    unlocks → `SetBindingState` acquires `m.mu`, cancels,
+    bumps (manager_status.go:157) → the daemon executes
+    `setHardwareAddr`/`setDown`/`setUp` anyway
+    (daemon_reth.go:248) — under the lease the bump
+    serializes atomically BEFORE or AFTER each mutation,
+    never inside it); the try-lock-or-skip rule survives
+    ONLY for paths NOT holding `applySem` (ambient
+    scheduler probes — v8.11, AGY r15 f6 = SMR r15
+    SMR15-4's original motivation, the 120s status-loop
+    monopoly, which only ever applied to those paths);
     fixed-cadence retries cannot
     starve a commit because the commit's own acquire is
     FIFO-ordered ahead of the next retry). The #5134
@@ -3195,12 +3421,24 @@ BLOCKERs 6 + 8; v8 epoch form per Codex r6 f6/f8):**
   PREDECESSOR node's ID; `FinishCompileReservation(token,
   outcome)` on a NON-HEAD token RECORDS the outcome on
   its node (never discarded); a Finish on the HEAD
-  applies its own outcome AND REPLAYS the recorded
-  outcomes of any completed predecessors in chain order
-  (so T1's ACCEPTED lands even though T1 finished while
-  T2 was head — the terminal state is the fold of every
-  recorded outcome, and T1's `{true,true}` is never the
-  final word once T1's own Finish recorded otherwise).
+  applies the recorded outcomes of ALL completed nodes
+  IN CHAIN ORDER (oldest first), its own outcome LAST
+  (v8.14, SMR r18 SMR18-3 = AGY r18 f5 — outcome
+  application is non-commutative, so the fold order is
+  pinned: each outcome computes as defined (ACCEPTED /
+  POST-ACCEPTANCE TAIL: `deferWorkers` := the node's own
+  deferIntent; PRE-PUBLISH FAILURE: `deferWorkers` := the
+  node's captured prior; PRE-SEND / UNKNOWN / OVERLAP:
+  no flag change), and because the head is applied LAST,
+  the newest outcome is always the terminal word —
+  T1-ACCEPTED + T2-head-PRE-PUBLISH-FAILURE yields
+  `deferWorkers` = T2's captured prior (which correctly
+  preserves T1's deferred epoch, because T2's prior IS
+  T1's state at T2's start); T1-PRE-PUBLISH-FAILURE +
+  T2-head-ACCEPTED yields T2's intent; and
+  `m.compileInFlight` clears exactly when EVERY node in
+  the chain has a terminal outcome (recorded or
+  finalized); §6 carries the 7×7 matrix).
   The outcomes: ACCEPTED (the new intent
   authoritative), PRE-PUBLISH FAILURE (restore the head's
   captured prior — a received error RESPONSE (the helper's
@@ -3392,47 +3630,142 @@ BLOCKERs 6 + 8; v8 epoch form per Codex r6 f6/f8):**
   locus and no re-exposure owner: `persistRetryLoop`
   (store_persist.go:389-465) is an observer-free
   goroutine, so nothing would ever re-expose the
-  config).** (i) LOCUS: the daemon's apply flow consults
-  the store's pending-durable indicator (the promotion's
-  return gains a degraded flag, or
-  `Store.PersistDegraded()` consulted inside
-  `applyConfigLocked` BEFORE compiling) — a promotion
-  with a failed pair write SKIPS its dataplane apply;
+  config); completed v8.14 (Codex r18 f2/f3/f4 + SMR r18
+  SMR18-1/6/7/10 + AGY r18 f6/f8).** (i) LOCUS,
+  PAIR-SPECIFIC (v8.14, Codex r18 f4 — the v8.13/v8.14
+  global-boolean form had a fatal counterexample: durable
+  A's MAC-deferred apply spans two legs; nondurable B is
+  promoted BETWEEN the legs (expressly allowed); A's
+  mandatory second leg reuses pair A — but a global
+  `PersistDegraded()` boolean sees B's degradation and
+  skips A's second leg anyway, leaving the whole
+  dataplane workerless until B lands (indefinitely on
+  persistent storage failure)): the store tracks
+  `durableRevision` (the last `writeTreeMarked`-landed
+  revision, advanced only inside that write); a pair
+  `(cfg, R)` is EXPOSABLE iff `R <= durableRevision` —
+  A's second leg (R_a durable) is NEVER gated by B's
+  pendency, and B's own apply (R_b > durableRevision)
+  skips. The check runs at `applyConfigLocked`'s ENTRY
+  (v8.14, Codex r18 f4 — before that function's SNMP,
+  web-management, bootstrap, naming, and kernel/VRF
+  mutations (daemon_apply.go:127/:167/:200/:246); the
+  dataplane call itself is deeper
+  (daemon_apply_dataplane.go:137));
   the commit reports SUCCESS WITH a "dataplane exposure
-  pending-durable" warning (a commit-result warning plus
-  an edge Warn plus `show` visibility — never the silent
-  divergence the v8.12 form would have introduced).
-  (ii) RE-EXPOSURE OWNER: the DURABILITY-EXPOSURE DEBT —
+  pending-durable" note delivered SYNCHRONOUSLY on the
+  commit's own result surface (v8.14, Codex r18 f3:
+  `compiled.Warnings` — already plumbed end-to-end
+  (REST (pkg/api/config.go:600), gRPC
+  (pkg/grpcapi/server_config.go:275), CLI
+  (pkg/cli/cli_config.go:277)) — a synchronous note set
+  at commit time, NOT the async debt state appended to
+  persistent warnings (which would stale after
+  recovery), and NOT a new `ControlResponse` field),
+  plus an edge Warn plus the exposure debt's presence in
+  `show` — never the silent
+  divergence the v8.12 form would have introduced.
+  (ii) TYPED OUTCOME (v8.14, Codex r18 f3): the gated
+  apply returns `ApplyOutcome{Ran, Exposed,
+  ExposurePending}` (NOT nil-success, NOT error) — and
+  every wrapper's success tails gate on `Exposed`: the
+  boot/background path SKIPS `MarkActiveApplied`
+  (daemon_apply.go:49); the local commit SKIPS the
+  session clear, the peer push, and the applied stamp
+  (daemon_apply_commit.go:245); the peer sync SKIPS
+  `armedActive=true` and its success tail (:479);
+  `configApplyLoop` SKIPS the CF-health clear and the
+  `lastAppliedConfigGen` advance
+  (sync_conn_config.go:350/:385 — which control manual
+  failover readiness (sync.go:231, sync_bulk.go:235) and
+  stale-session refusal (sync_conn_gen.go:398), so a
+  standby still enforcing A can NEVER report B applied,
+  transfer-ready, or healthy). The exposure DEBT RECORD
+  carries the HA `item.gen` (and the commit context),
+  so the drain runs the DEFERRED SUCCESS TAILS after the
+  re-exposure apply's observed acceptance (the HA
+  generation settles then, not at commit).
+  (iii) RE-EXPOSURE OWNER: the DURABILITY-EXPOSURE DEBT —
   a daemon-side, single-flight, latest-wins debt recorded
-  when the gate skips an apply; the store's persist-retry
-  success leg is observed by the daemon's apply
-  scheduler POLLING `PersistDegraded()` on its wake
-  cadence (no new store→daemon call direction — the
-  scheduler already owns the re-sync/MAC-debt drains);
+  on EVERY gate skip (idempotently — the re-sync and
+  restore paths through `applyConfigLocked` inherit it);
+  the debt carries its OWN ALWAYS-LIVE timer (v8.14,
+  Codex r18 f4 + SMR r18 SMR18-6: recording schedules a
+  1s wake via the scheduler's timer with an explicit
+  `nextWake` on every scheduler query (the MAC debt's
+  Claim shape) — a gated commit with no other debts
+  never waits on ambient wakes) and polls
+  `durableRevision` at each wake (no new store→daemon
+  call direction; polling observes the store's own retry
+  and cannot accelerate it (AGY r18 f8) — the bound is
+  the store's backoff (1s initial, doubling to a 60s
+  ceiling, `ensurePersistRetryLoopLocked`
+  (store_commit.go:615-628)) plus, honestly, UNBOUNDED
+  time while storage itself is failed — the
+  commit→exposure latency is storage-recovery
+  (unbounded in the worst case, Warn-visible via the
+  store's own retry Warns) + the debt's 1s wake +
+  FIFO/apply, stated honestly);
   the drain acquires applySem, re-reads `ActivePair()`
   (latest-wins — a chain of gated B then C converges on
   C), and drives the REVISED `applyConfigLocked(ctx,
   cfg, commitRevision)` INCLUDING the three-bucket
   precheck and MAC-debt creation — the re-exposure apply
-  is a full apply, never a precheck bypass. (iii) the
-  ACCEPTED/EXPOSED pair split: HA applied markers key to
-  the EXPOSED pair — the `syncAndApply` applied-digest
-  stamp (daemon_apply_commit.go:426/:464) happens ONLY
-  when the dataplane apply RAN; a gated apply stamps
-  NOTHING, so the peer's equal-text suppression
+  is a full apply, never a precheck bypass. (iv) the
+  ACCEPTED/EXPOSED pair split, REVISION-KEYED (v8.14,
+  Codex r18 f2 — the v8.13 "stamp nothing" form was
+  insufficient: `appliedDigest` compares config TEXT
+  (store.go:278/:781/:803), so a same-text promotion
+  with a NEW `commit_revision` inherits
+  `ActiveApplied()==true` from its predecessor even when
+  the new pair was gated): the store gains
+  `appliedRevision uint64` alongside `appliedDigest`;
+  `ActiveApplied()` compares the PAIR (text AND
+  revision); HA applied markers (the `syncAndApply`
+  digest stamp (daemon_apply_commit.go:426/:464)) happen
+  ONLY when the dataplane apply RAN (the typed
+  outcome's `Exposed`); a gated apply stamps
+  NOTHING and the revision-keyed comparison can never
+  inherit a same-text predecessor's applied state, so
+  the peer's equal-text/pair shortcut
   (daemon_ha_sync.go:474/:549) can never strand B (the
   receiver's re-exposure debt converges locally
   regardless), and the current tails' session/peer
-  bookkeeping keys to the exposed config. (iv) the
+  bookkeeping keys to the exposed pair; the primary's
+  marker claim (daemon_ha_sync.go:474) is likewise
+  deferred until exposure, and the peer's reported
+  applied state during the window keys to the exposed
+  pair with the primary-side lag VISIBLE in `show
+  chassis cluster` output (never silent). (v) the
   legacy-migration retry rides the SAME debt (a failed
   migration write leaves the dataplane in the
   legacy-zero gate AND records the exposure debt; the
-  retry landing revision 1 wakes the drain). (v) the
-  staged-ahead divergence suppression engages for the
-  gate window by design (`m.pendingCommitRevision >
-  m.acceptedCommitRevision` while B waits) and LIFTS on
-  the re-exposure apply's observed acceptance — bounded
-  by the debt's drain, never indefinite. The high-water rule
+  retry landing revision 1 wakes the drain). (vi) the
+  AUXILIARY-PRODUCER GATE-WINDOW SUPPRESSION (v8.14, SMR
+  r18 SMR18-1 — the v8.13 text's "staged-ahead
+  suppression engages for the gate window" was WRONG on
+  its own terms (Codex r18 f2 confirms: the gate skips
+  BEFORE compiling, so B is never staged manager-side
+  and `m.pendingCommitRevision == m.acceptedCommitRevision`
+  stays at A — the staged-ahead rule NEVER fires, and
+  the manager's auxiliary producers (the route overlay
+  (manager_overlay.go:188-250), the scheduler republish
+  (manager_compile.go:575-621), the #5134 clone
+  (manager_worker_arm_5134.go:57-92)) would keep
+  publishing A-clones whose FIB section tracks the
+  RIB — which the commit's FRR tail has already moved
+  to B's routes: an A-config/B-FIB hybrid for the whole
+  window, the same-content-wrong-lineage class through
+  the overlay back door): the daemon's gated commit sets
+  `m.exposureGateActive` (a manager-visible flag set
+  through the LinkController path); ALL auxiliary
+  full-publish producers (overlay, scheduler, #5134,
+  `SyncFabricState`) check it ALONGSIDE the staged-ahead
+  rule and hold; FRR itself follows the commit (control
+  plane — visible, and the helper's FIB converges at
+  the drain); and the exposure drain CLEARS the flag
+  after the re-exposure apply's observed acceptance —
+  bounded by the debt's drain, never indefinite. The high-water rule
   stays: a DEDICATED revision counter seeded from
   `max(active.json revision, 0)` at startup, bumped ONLY
   inside the five promotion paths — NEVER from archive
@@ -3526,21 +3859,63 @@ BLOCKERs 6 + 8; v8 epoch form per Codex r6 f6/f8):**
   overlay, scheduler republish, #5134 — send under `m.mu`
   today) and an UNLOCKED entry that acquires it
   (Compile's publish leg) — never a recursive acquire.
-  The primitive's two halves: (i) a CHEAP INPUT-CAPTURE
-  section under `m.mu` at build START — it snapshots the
-  build's inputs (the `(config, revision)` pair AND the
-  feed/overlay state refs the build will read) and mints
-  `buildSeq` (ONE monotonic manager counter, ==
-  `snapshot_token` on the wire — build order is now
-  defined by the capture order, not the lock order at
-  send); and (ii) a SEND-TIME validation under `m.mu`:
-  the send proceeds only when `buildSeq ==
-  m.latestBuildSeq` (no LATER build has captured inputs
-  since) AND the captured pair still equals the manager's
-  current pair — T1's stale same-commit reshape fails
-  (i) the moment T2's capture lands (T2's buildSeq is
-  newer), regardless of which lock acquisition happens
-  first, and is ABANDONED Go-side; the helper
+  The primitive's two halves, v8.14 content-hash form
+  (SMR r18 SMR18-2 = AGY r18 f4, replacing v8.13's
+  input-capture-of-refs — storing a REFERENCE freezes
+  nothing: the build dereferences feed/overlay state
+  lazily OUTSIDE `m.mu`, so a concurrent mutation
+  between capture and dereference silently changes the
+  content the sequence supposedly orders (and is a data
+  race outright); the enumeration of "which refs" is
+  also unanswerable in principle (Compile reads
+  scheduler state, route/feed overlays, FIB generation,
+  NAT IDs, and the cold-path mask at separate times
+  (manager_compile.go:192-225) and the builder later
+  samples routes, fabrics, interfaces, and neighbors
+  (builder.go:41-105) including live netlink fabric
+  state (fabric.go:34/:102)), so the input-capture
+  form is unimplementable as written): (i) a CHEAP
+  section under `m.mu` at build START mints `buildSeq`
+  (ONE monotonic manager counter, ==
+  `snapshot_token` on the wire — the WIRE ORDERING and
+  the helper-side backstop) and records NOTHING else;
+  and (ii) a PUBLISH-LEG-ENTRY CONTENT validation
+  (v8.14, Codex r18 f5 — NOT "at send time": Compile
+  performs side effects BEFORE the send (XDP/pin work
+  and shim compilation at manager_compile.go:177-226,
+  classifier/bootstrap map mutations at :279-350, and
+  the deferred path confirms those maps are already
+  ahead before its later send (process_status.go:103)),
+  so the validation runs at the publish leg's ENTRY,
+  before ANY of those mutations): under `m.mu`, the
+  built snapshot's SEMANTIC HASH
+  (builder.go:156-178 — computed at build
+  end, deterministic over the whole content: feed-derived
+  address books, route overlay, scheduler state, NAT
+  counters are all IN the snapshot, so no input
+  enumeration is needed) must EQUAL `m.latestBuiltHash`
+  (recorded under `m.mu` at every build's end) AND the
+  built `(config, revision)` pair must equal
+  `m.currentPair` (v8.14, Codex r18 f5's missing field:
+  the manager's current-pair record, set from every
+  `ActivePair()` read). Invalidation is DELAYED until a
+  successor's OBSERVED ACCEPTANCE (v8.14, Codex r18 f5 —
+  a newer CAPTURE never invalidates: T2 can fail in
+  shim compilation or snapshot construction before
+  sending anything, and abandoning T1 at T2's capture
+  would leave T1 invalid, T2 unpublished, and no owner
+  for the accepted config): a build is abandoned ONLY
+  when a strictly-newer build has been OBSERVED-ACCEPTED
+  (its send landed) OR its pair is no longer current —
+  so T2's pre-publish failure leaves T1 VIABLE (T1's
+  content is the newest that can still land), and T1's
+  abandon on a real accepted successor returns the typed
+  SUPERSEDED-BY-NEWER-BUILD result, SUCCESS-equivalent
+  for the apply flow (the accepted successor fulfills
+  the commit's dataplane leg); if the ACCEPTED
+  successor's own bookkeeping later unravels, the
+  re-sync debt owns the outcome (never a silent loss).
+  The helper
   additionally REFUSES a `snapshot_token` strictly older
   than the newest it has seen (per helper incarnation;
   `error_code: "stale_snapshot_token"`) as the backstop
@@ -3548,7 +3923,14 @@ BLOCKERs 6 + 8; v8 epoch form per Codex r6 f6/f8):**
   impossible — the control socket is single-client per
   connection but a stale same-host process could exist;
   the refusal is per-incarnation so a respawned helper
-  resets). The auxiliary producers (route overlay, scheduler
+  resets); and `buildSeq` SEEDS from the startup ping
+  echo (v8.14, Codex r18 f6: the ping/status exchange
+  gains the helper's newest accepted `snapshot_token`
+  (additive), and the manager seeds
+  `m.latestBuildSeq = max(echo, 0)` — a manager re-init
+  over a surviving helper no longer mints from zero into
+  indefinite refusal, mirroring the publication_rev and
+  map_generation seeds). The auxiliary producers (route overlay, scheduler
   republish, #5134, deferred-XSK) all ride the same
   primitive, so no stale same-commit clone can pass either
   layer; and the semantic hash EXCLUDES `snapshot_token`
@@ -4111,13 +4493,22 @@ activations a scheduled retry.
      afterthought); `stale_snapshot_token` (the token
      refusal). `not_seeded` is MANAGER-LOCAL — synthesized
      Go-side before the send, NEVER on the wire. Consumer
-     contract: a response with `error_code != ""` SURVIVES
-     the OK=false whole-response discard
-     (process_control.go:163-169 amended for typed
-     responses), invokes the ONE common lineage-observation
-     routine (note echo → accepted advancement → divergence
-     classification, shared by the response path and the
-     poll), and selects the reservation/debt outcome;
+     contract, v8.14 explicit Go form (SMR r18 SMR18-7 =
+     AGY r18 f2/f9 — the v8.13 "survives the discard" text
+     named no signature, and today's OK=false path returns
+     a ZERO-valued `ControlResponse{}` plus
+     `errors.New(resp.Error)` (process_control.go:163-169),
+     so any caller doing `if err != nil { return err }`
+     would drop the code): `requestDetailedLocked` returns
+     the DECODED response alongside the error — a response
+     with `error_code != ""` is returned parsed (never the
+     zero struct), and callers branch on `resp.error_code`
+     BEFORE the `err != nil` early-return;
+     every typed response invokes the ONE common
+     lineage-observation routine (note echo → accepted
+     advancement → divergence classification, shared by
+     the response path and the poll) and selects the
+     reservation/debt outcome;
      UNTYPED failures (`error_code == ""`) keep TODAY's
      handling exactly (status NOT copied on failure — Rust
      attaches `Status` to ordinary failed responses too
@@ -4131,19 +4522,21 @@ activations a scheduled retry.
      new-helper-zero vs old-helper-zero ambiguity for
      `map_generation` (and documents the same for the
      revision pair).
-- **Configstore API (v8.10/v8.13):** `ActiveConfigRevision()
+- **Configstore API (v8.10/v8.13/v8.14):** `ActiveConfigRevision()
   uint64` (v8.10 — confirmed values only); `ActivePair()
   (*config.Config, uint64)` (v8.12 — ONE `s.mu`-atomic read
   of the active config AND its revision; the ONLY transport
-  source for every apply path); `PersistDegraded() bool`
-  (v8.13, Codex r17 f2 — the exposure gate's indicator:
-  true while a promotion's pair write is outstanding, i.e.
-  `persistRetryLoop` has work); the promotion paths' return
-  surface (or the getter) feeds the daemon's apply-skip
-  decision; and the daemon's apply scheduler POLLS the
-  getter on its wake cadence to wake the
-  durability-exposure debt (no new store→daemon call
-  direction). The revision assignment itself (the five
+  source for every apply path); `DurableRevision() uint64`
+  (v8.14, Codex r18 f4 — the last `writeTreeMarked`-landed
+  revision; the exposure gate's PAIR-SPECIFIC comparison
+  (`R <= DurableRevision()` ⇒ exposable), consulted at
+  `applyConfigLocked`'s ENTRY and polled by the
+  durability-exposure debt); `appliedRevision uint64`
+  alongside `appliedDigest` (v8.14, Codex r18 f2 —
+  `ActiveApplied()` compares the PAIR (text AND revision),
+  so a same-text/new-revision gated promotion never
+  inherits its predecessor's applied state); the revision
+  assignment itself (the five
   promotion paths + the dedicated high-water + the
   migration allocator + the capability-2 envelope) is
   store-internal per §5-C's epoch contract.
@@ -4164,11 +4557,22 @@ activations a scheduled retry.
   INCARNATION-SCOPED (`m.seededPublicationRev` resets on every
   manager-driven (re)spawn, v8.13 Codex r17 f4),
   `m.latestBuildSeq` (the build-sequence high-water; each
-  build's input-capture mints from it, v8.13 Codex r17 f5),
+  build's input-capture mints from it, v8.13 Codex r17 f5;
+  SEEDED from the startup ping echo (v8.14, Codex r18 f6)),
+  `m.latestBuiltHash` (the semantic hash of the newest
+  completed build, recorded under `m.mu` at build end,
+  v8.14 SMR r18 SMR18-2) and `m.currentPair` (the
+  manager's current `(config, revision)` record, set from
+  every `ActivePair()` read, v8.14 Codex r18 f5),
   `m.mapGeneration` (the fabric map high-water, seeded from
   the startup ping echo, v8.13 Codex r17 f12 = SMR r17
-  SMR17-4) and the fabric coherence-proof flag (set on the
+  SMR17-4), the canonical `fabricProjection{payload,
+  generation}` retained per projection (v8.14, Codex r18
+  f11), and the fabric coherence-proof flag (set on the
   first observed matching echo since startup),
+  `m.exposureGateActive` (the auxiliary-producer
+  suppression flag for the gate window, v8.14 SMR r18
+  SMR18-1),
   `m.compileInFlight` (the StartCompile reservation's
   in-flight flag, cleared on every Compile exit), the
   reservation CHAIN (head pointer + node registry +
@@ -4189,13 +4593,38 @@ activations a scheduled retry.
   `commit_revision` are all DELETED.
 - **Control verbs:** `set_forwarding_state`, `set_binding_state`,
   `set_queue_state`, `apply_snapshot`, `rebind`, `update_fabrics` —
-  signatures unchanged; response shapes ADDITIVELY EXTENDED
+  signatures unchanged; PLUS the NEW `note_commit_revision`
+  verb (v8.14, Codex r18 f7's enumeration fix — the v8.12
+  text demanded a named dispatcher entry while this list
+  claimed "signatures unchanged" and omitted the verb; today
+  both request structs lack the field (protocol.go:55,
+  control.rs:108) and Rust falls through to the unknown-type
+  arm (handlers/mod.rs:124/:255)): the request type gains a
+  `note_commit_revision {new_rev, expected_rev}` arm
+  (additive, serde defaults — old Go never sends it; old
+  helpers reject it as unknown, which the note debt
+  classifies as the mixed-version fail-closed case), the
+  dispatcher gains its named match arm, and the handler
+  implements the three-way CAS (§5-C (iv)); response shapes
+  ADDITIVELY EXTENDED
   (v8.13, Codex r17 f6's correction of the v8.12
   "shapes unchanged" text): `ControlResponse` gains
   `error_code: string` (serde default `""`; the typed codes
   classify the new machinery's refusals; existing errors keep
   `""` and their handling). `set_binding_state` slot
   addressing is unchanged (slots remain positional).
+- **Daemon apply outcome (v8.14, Codex r18 f3):**
+  `ApplyOutcome` ∈ {`Ran`, `Exposed`,
+  `ExposurePending`} — the gated apply returns
+  `ExposurePending` (NOT nil-success, NOT error); every
+  wrapper's success tails gate on `Exposed` (boot skips
+  `MarkActiveApplied`; the commit skips the session clear
+  / peer push / applied stamp; the peer sync skips
+  `armedActive=true` + its success tail; `configApplyLoop`
+  skips the CF clear + `lastAppliedConfigGen` advance);
+  the exposure debt record carries the HA `item.gen` +
+  commit context so the drain runs the deferred tails
+  after observed acceptance.
 - **Go manager API:** the manager gains the epoch/debt state
   (`m.deferWorkers`, `m.pendingCommitRevision` +
   `m.acceptedCommitRevision`, `m.mintedPublicationRev` +
@@ -4238,9 +4667,18 @@ activations a scheduled retry.
   clear path, tokened by the predecessor-chained
   reservation WITH RECORDED OUTCOMES (§5-C, v8.13 Codex
   r17 f7): a non-head Finish RECORDS its outcome on its
-  node; the head's Finish applies its own outcome AND
-  replays completed predecessors' recorded outcomes in
-  chain order: ACCEPTED / PRE-PUBLISH FAILURE /
+  node; the head's Finish applies the recorded outcomes
+  of ALL completed nodes IN CHAIN ORDER (oldest first),
+  its own outcome LAST (v8.14, SMR r18 SMR18-3 = AGY
+  r18 f5 — the fold order is pinned because outcome
+  application is non-commutative; the terminal-state
+  matrix: ACCEPTED / POST-ACCEPTANCE TAIL ⇒
+  `deferWorkers` := the node's own deferIntent;
+  PRE-PUBLISH FAILURE ⇒ `deferWorkers` := the node's
+  captured prior; PRE-SEND / UNKNOWN / OVERLAP ⇒ no
+  flag change; `m.compileInFlight` clears exactly when
+  EVERY node is terminal):
+  ACCEPTED / PRE-PUBLISH FAILURE /
   UNKNOWN / PRE-SEND / PENDING-XSK STAGED (its token is
   stored for the deferred-publish leg; helper death before
   the leg finalizes it UNKNOWN) /
@@ -4289,14 +4727,25 @@ activations a scheduled retry.
   to an explicit owner — missing process → respawn
   FOLLOWED BY a daemon-owned revised full apply
   (`applyConfigLocked(ctx, cfg, commitRevision)` from
-  `ActivePair()`); ctrl error → the RESTORE DEBT's retry
-  (5/10/30/60s + edge Warn, no terminal cap); rebind
-  error → the RESTORE DEBT itself (NOT the #5134 debt,
-  which self-clears on non-deferred snapshots,
+  `ActivePair()`, full reservation + precheck); ctrl
+  error → the RESTORE DEBT's retry of the FULL
+  `NotifyLinkCycle` sequence (rebind + status reconcile +
+  ctrl enable via `applyHelperStatusLocked`'s reconciled
+  path (maps_sync.go:689/:809) — never a bare ctrl write);
+  rebind error → the RESTORE DEBT itself (NOT the #5134
+  debt, which self-clears on non-deferred snapshots,
   manager_worker_arm_5134.go:50-54); status error → the
-  poll reconciles. The restore-debt state is
-  manager-side; the debt is daemon-driven like the MAC
-  debt.
+  poll reconciles. **The restore debt is DAEMON-SIDE
+  entirely** (v8.14, Codex r18 f10 — state + scheduler +
+  drain, the MAC debt's daemon-ownership shape; the
+  manager's only role is the typed result + the reconcile
+  primitives), with a pull-model API mirroring the MAC
+  debt's: `RecordRestoreDebt(failure, context)` +
+  `ClaimRestoreWork() (items, claimToken, nextWake)` +
+  `ReportRestoreAttempt(claimToken, results)` (stale-token
+  discarded); retry 5/10/30/60s + edge Warn, NO terminal
+  cap; the ctrl=0-while-bound window is a TOTAL
+  fail-closed outage, Warn-visible, retry-forever.
   **`FabricSyncStateOK() bool`** — a no-argument
   manager-owned consistency answer (v8.11, Codex r15 f12;
   causal single-transaction form v8.13, Codex r17 f12 —
@@ -5109,20 +5558,48 @@ activations a scheduled retry.
       legacy-zero gate AND records the exposure debt; and
       CRITICALLY: a pair write failed at promotion → the
       commit reports success WITH the pending-durable
-      warning and NO dataplane apply runs (assert the
+      note ON THE COMMIT'S OWN RESULT SURFACE
+      (`compiled.Warnings` — assert the CLI prints it)
+      and NO dataplane apply runs (assert the
       helper never sees B) → the persist retry lands the
-      write with NO config event → the
-      `PersistDegraded()`-polled drain FIRES and drives
+      write with NO config event → the debt's OWN
+      always-live timer (assert the 1s `nextWake` fires —
+      an ambient-wait implementation fails) polls
+      `DurableRevision()` and
+      the drain FIRES and drives
       the full revised `applyConfigLocked` (assert the
       three-bucket precheck runs, B's MAC debt is
       recreated, and the helper is observed at B's
       revisions) — the retry ALONE exposes B (the v8.12
-      hole had no owner); a chain of gated B then C
+      hole had no owner); the TYPED OUTCOME (v8.14, Codex
+      r18 f3): the gated apply returns `ExposurePending`
+      and EVERY wrapper tail is SKIPPED (assert no
+      `MarkActiveApplied`, no session clear, no peer
+      push, no applied stamp, no `armedActive`, no CF
+      clear, no `lastAppliedConfigGen` advance — the
+      standby never reports B applied or transfer-ready),
+      and the drain runs the DEFERRED tails after observed
+      acceptance (the HA generation settles); the
+      REVISION-KEYED marker (v8.14, Codex r18 f2): a
+      same-text/new-revision gated promotion does NOT
+      inherit `ActiveApplied()==true` (assert the
+      equal-text shortcut cannot fire); the
+      AUXILIARY-PRODUCER
+      suppression (v8.14, SMR r18 SMR18-1): with the gate
+      active, the route overlay, the scheduler republish,
+      the #5134 retry, AND `SyncFabricState` are ALL
+      HELD (assert NO A-config/B-FIB hybrid publish — the
+      v8.13 hole), FRR still reloads (control plane), and
+      the drain CLEARS `m.exposureGateActive` after the
+      re-exposure apply's observed acceptance;
+      a chain of gated B then C
       converges on C (latest-wins drain); the HA leg:
       `syncAndApply` stamps NO applied digest for a gated
       apply (assert the peer's equal-text suppression can
-      never skip the later push, and the receiver's own
-      exposure debt converges it); the false-green refused:
+      never skip the later push, the receiver's own
+      exposure debt converges it, and the primary-side
+      lag is VISIBLE in `show chassis cluster`);
+      the false-green refused:
       inspecting revision allocation + disk retry without
       asserting the dataplane exposure.
       (b) PAIRED TRANSPORT: every `ConfigSink.ApplyConfig`
@@ -5138,9 +5615,18 @@ activations a scheduled retry.
       legs — operator commit AND the persistence
       transition's `s.mu`-only retry — is NEVER compiled
       by the second leg; B's own queued flow runs B's
-      precheck); the false-green refused: asserting
+      precheck); AND the PAIR-SPECIFIC gate (v8.14, Codex
+      r18 f4): durable A's MAC-deferred apply with
+      nondurable B promoted BETWEEN the legs — A's
+      mandatory second leg (R_a ≤ durableRevision) RUNS
+      (assert the gate NEVER skips it), while B's apply
+      (R_b > durableRevision) skips; the gate check runs
+      at `applyConfigLocked`'s ENTRY (assert no
+      SNMP/web-management/bootstrap/kernel/VRF mutation
+      precedes it);
+      the false-green refused: asserting
       precheck execution while letting the second leg
-      re-read.
+      re-read or the boolean gate suppress A.
       (c) PING/BOOT: a send before the ping returns the
       manager-local `not_seeded` error AND records the
       boot-apply debt; the debt FIRES with ZERO config
@@ -5152,11 +5638,25 @@ activations a scheduled retry.
       replay carries `ActivePair()`'s current pair; the
       false-green refused: asserting ping-precedes-build
       while the boot retry has no owner.
-      (d) FRESHNESS: T1 captures inputs, T2 captures
-      inputs and publishes, T1's send is ABANDONED
-      (buildSeq mismatch) — assert T1's content never
-      reaches the helper even when T1 acquires `m.mu`
-      first at send; the helper refuses a forced
+      (d) FRESHNESS: T1 builds, T2 builds and publishes, T1's
+      publish leg is REFUSED AT ENTRY (its semantic hash
+      differs from `m.latestBuiltHash` AND T2 was
+      observed-accepted) — assert NO XDP/pin/shim/
+      bootstrap-map side effect of T1's runs (the
+      validation precedes them, v8.14 Codex r18 f5) and
+      T1's content never reaches the helper; the DELAYED
+      invalidation (v8.14, Codex r18 f5): T2 fails in
+      shim compilation BEFORE sending — T1 remains VIABLE
+      and its send lands (assert T1 is NOT abandoned on a
+      mere newer capture); the SUPERSEDED report fires
+      only on an observed-accepted successor
+      (success-equivalent — assert the apply flow does
+      NOT surface an error, and the successor's own
+      bookkeeping failure records the re-sync debt); the
+      token seed (v8.14, Codex r18 f6): a manager re-init
+      over a surviving helper seeds `m.latestBuildSeq`
+      from the ping echo (assert no indefinite refusal);
+      the helper refuses a forced
       strictly-older token (`stale_snapshot_token`); the
       semantic hash produces EQUAL hashes for two
       identical builds (token excluded — dedup survives);
@@ -5164,15 +5664,23 @@ activations a scheduled retry.
       (locked entry for the already-locked auxiliary
       publishers — no self-deadlock; unlocked for
       Compile's publish leg); the false-green refused:
-      manually assigning token values instead of driving
-      the capture/send ordering.
+      manually assigning token values, asserting
+      capture-order instead of content, or abandoning on
+      capture instead of acceptance.
       (e) ERROR_CODE: each producer emits its code
       (stale_completion on the rebind handler ordered
       BEFORE any field clearing; diverged_fabric;
       epoch_rollback + publication_rollback;
-      note_cas_refusal via the named dispatcher entry;
-      stale_snapshot_token); a typed response survives
-      the OK=false discard and drives the common
+      note_cas_refusal via the named dispatcher entry
+      (assert the `note_commit_revision` REQUEST arm exists
+      in both request structs AND the dispatcher's match
+      table — an unknown-type fall-through fails the test,
+      v8.14 Codex r18 f7);
+      stale_snapshot_token); a typed response returns the
+      DECODED body alongside the error (assert callers
+      branch on `error_code` BEFORE the `err != nil`
+      early-return, and `requestLocked` observes the typed
+      status) and drives the common
       lineage-observation routine (note echo → accepted →
       divergence, in order); an UNTYPED failure copies NO
       status (today's handling byte-identical);
@@ -5182,9 +5690,19 @@ activations a scheduled retry.
       (f) RESERVATION CHAIN: T2 starts (captures T1's
       `{true,true}`), T1 finishes ACCEPTED (recorded,
       non-head), T2 fails pre-publish — the head's Finish
-      applies T2's restore AND replays T1's ACCEPTED
-      (assert the terminal state is NOT the resurrected
-      `{true,true}` — the v8.12 ABA dies); panic phase
+      applies the recorded outcomes oldest-first, its own
+      LAST (assert the terminal state preserves T1's
+      deferred epoch — T2's restore yields T2's prior
+      (which IS T1's `{true,true}`), never a resurrected
+      orphan); AND the INVERSE ordering (v8.14, Codex r18
+      f8): T1 fails pre-publish (recorded), T2 ACCEPTED —
+      T1's restore applies first, T2's intent is terminal;
+      the full 7×7 matrix across {ACCEPTED, PRE-PUBLISH
+      FAILURE, UNKNOWN, PRE-SEND, PENDING-XSK STAGED (a
+      state, not a Finish — pinned), POST-ACCEPTANCE
+      TAIL, OVERLAP} for two-node AND three-node chains
+      (assert `m.compileInFlight` clears exactly when
+      every node is terminal); panic phase
       classification (pre-wire → PRE-SEND;
       possibly-landed → UNKNOWN; post-acceptance →
       tail); PENDING-XSK STAGED stores its token and the
@@ -5194,50 +5712,77 @@ activations a scheduled retry.
       echo resumes); helper death before the leg
       finalizes UNKNOWN; the CLI default reservation
       never panics; the false-green refused: asserting
-      "T2 restores its own prior" without checking the
-      prior contains finished T1's `inFlight=true`.
+      only the favorable ordering.
       (g) CHECKED QUIESCENCE: the merged
       `PrepareLinkCycleChecked` (no split API remains —
       compile-break); an operator bump between Claim and
-      the method is `Stale` (abandon WITH unwind); `m.mu`
-      contention before any mutation is `RetryLater`
-      (applySem released, batch + token kept, NO unwind);
-      a try-lock skip AFTER the quiescence began routes
-      through the restore finalizer (assert workers are
-      never left stopped); `stop_workers`
+      the method is `Stale` (abandon WITH unwind); the
+      m.mu acquisition while holding applySem is BLOCKING
+      (assert NO `RetryLater` position loss — a repeated
+      finite status-loop hold cannot starve the batch,
+      v8.14 Codex r18 f9); the MUTATION LEASE: an
+      operator cancellation landing between a pre-lease
+      state and the syscall is impossible (assert the
+      cancellation serializes BEFORE or AFTER the
+      mutation atomically — the read-to-syscall race
+      dies); `stop_workers`
       timeout-but-landed → the unconditional restore runs
       (rebind re-spawns the plan's workers); the hold
       span is asserted (m.mu released before the MAC
       phase — no self-deadlock); the false-green refused:
-      mocking an atomic method without the phase
-      boundary.
+      mocking an atomic method without the lease or the
+      blocking acquisition.
       (h) RESTORE DEBT: an ORDINARY recovery rebind
       failure records the restore debt (assert the #5134
       debt is NOT consulted — it self-clears on
-      non-deferred snapshots); missing-process → respawn
+      non-deferred snapshots); the REAL cross-owner drain
+      (assert `ClaimRestoreWork` hands the item to the
+      daemon's scheduler, not a mock replay, v8.14 Codex
+      r18 f10); missing-process → respawn
       → the daemon-owned revised full apply replays
-      `ActivePair()` (assert NO bare rebind against the
-      empty helper); ctrl error → the debt retries at
-      5/10/30/60s with the edge Warn and no terminal cap;
+      `ActivePair()` with the FULL reservation + precheck
+      (assert NO bare rebind against the
+      empty helper); ctrl error → the debt retries the
+      FULL `NotifyLinkCycle` sequence (rebind + status
+      reconcile + the reconciled ctrl enable — assert NO
+      bare ctrl map write), and the ctrl=0-while-bound
+      window is asserted fail-closed + Warn-visible +
+      retry-forever;
       status error → the poll reconciles; the false-green
-      refused: a debt record without the paired replay.
+      refused: a debt record without the real drain or
+      the paired replay.
       (i) CAUSAL FABRIC: concurrent map writers serialize
       through the manager's wrapper (the direct key
       writes route inside it; the legacy-adapter bypass
       is enumerated and production-unreachable); the
-      payload is built from the SAME sample as the
-      mutation (a peer-MAC change between mutation and
+      canonical `(payload, generation)` pair is built
+      from the SAME locked sample as the mutation
+      (a peer-MAC change between mutation and
       payload is impossible — assert the TOCTOU shape
-      cannot construct); `map_generation` seeds from the
+      cannot construct; the resolution reads the
+      neighbor CACHE, never a netlink dump under the
+      lock); the FAILED-SEND/STALE-CARRIER race (v8.14,
+      Codex r18 f11): a mutation P mints g, the
+      `update_fabrics(P, g)` send FAILS (the debt
+      records), then a route-overlay clone publishes
+      carrying the RETAINED `(P0, g0)` — assert the
+      helper's accepted advances to g0 (NOT g),
+      readiness stays FALSE while the debt is
+      outstanding, and the debt's retry re-sends the
+      RECORDED `(g, P)` (never a fresh re-mint);
+      `map_generation` seeds from the
       ping echo on re-init (readiness recovers); the
       capability bit distinguishes new-helper-zero from
       old-helper-zero (old → fail-closed); a full
-      snapshot advances accepted even with equal fabric
-      content (idempotent advance); the first-startup
+      snapshot's fabrics section reads the canonical
+      pair AT THE PUBLISH LEG (assert no pre-m.mu
+      fabric content);
+      the first-startup
       proof arrives via `startClusterComms`'s population
       goroutines (readiness true after bringup with
       fabrics configured); the false-green refused:
-      manually manipulating counters.
+      manually manipulating counters or asserting
+      accepted==current without the payload binding.
       (j) FAIRNESS/WARN: the Warn fires PERIODICALLY
       every 60s keyed on the first-queue timestamp; a
       `RetryLater` re-queue CONTINUES the episode (assert
@@ -5674,7 +6219,7 @@ the three owners through nine enumerations; the mixed-version
 producer is the documented exception with the required helper
 restart).
 
-Remaining questions for round 18, each invitable to PLAN-KILL with
+Remaining questions for round 19, each invitable to PLAN-KILL with
 a concrete counterexample:
 
 1. **Completeness, final form.** Exhibit a path to
@@ -5737,10 +6282,10 @@ a concrete counterexample:
    candidate-filter territory
    (`include_userspace_binding_interface`), explicitly out of
    scope here.
-6. **Round-17 disposition table audit.** §1's r17 table maps
-   every r17 finding (Codex 13 BLOCKER + 1 MAJOR + 1 MINOR;
-   AGY 4 BLOCKER + 3 MAJOR + 1 MINOR + 1 NIT; SMR 3 BLOCKER +
-   3 MAJOR + 5 MINOR) to its v8.13 fold, and every fold this
+6. **Round-18 disposition table audit.** §1's r18 table maps
+   every r18 finding (Codex 11 BLOCKER + 3 MAJOR; AGY 4
+   BLOCKER + 4 MAJOR + 1 MINOR + 1 NIT; SMR 2 BLOCKER + 3
+   MAJOR + 5 MINOR) to its v8.14 fold, and every fold this
    revision was verified per-edit against the file. Which
    row is claimed-but-wrong this time?
 7. **Cumulative hazard budget, final sign-off (v8.8 honest
