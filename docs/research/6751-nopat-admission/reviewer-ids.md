@@ -218,3 +218,13 @@ admission with pre-fence child kill + stale-stamp rejection; the
 only; the suspect owes a prime via prime-REQUEST with the fence
 bound); the lineage stage carrier inventory; four consolidated §9
 suites. Round 38 is the convergence check.
+
+| r38 | `codex exec` (detached-poll), session in /tmp/codex-6751-r38.log / PLAN-NEEDS-REVISION (2 BLOCKERs: accept-after-advance escapes through the fence (accept-refuse-while-engaged + release-side generation advance); legacy no-heartbeat-ACK peer retains C0 (two-mode both-empty proof: interval-derived vs OBSERVED PRIME + re-fence); 2 MAJORs: 5s "definitive" wording contradicts no-window-clear; stage carrier lacks Go→helper ingress + §6 reconciliation (second additive field, import request rides it, promotion Open gated, all exporters gated); 1 MINOR: prime-request/re-fence liveness suite; 1 NIT: export-skip counter not in §5.8) | PLAN-READY-WITH-NITS (2 nits: export-skip counter in the §5.8 table, incarnation log marker carries G_old → G_new — both folded; its line-cites are now grep-verified per the process fix) | PLAN-READY-WITH-NITS (r39 fold-check of v15.27; accept-refusal atomicity, legacy-both-detectors-absent residual, stage wire-enum degradation analyzed) |
+
+Round-38 disposition: all findings fold in v15.27 (accept-proof
+fenced window with release-side advance; two-mode both-empty proof
+with the no-ACK C0 pin; disposition-vs-lineage wording fixed with a
+fail-on-timeout-clear regression; the stage carrier reconciled
+end-to-end as a second additive SyncedSessionEntry field with all
+exporters gated; the liveness suite; the §5.8 counter (6+3=9) and
+log marker). Round 39 is the convergence check.
