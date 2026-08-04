@@ -999,6 +999,35 @@
   `/tmp/codex-6749-r32-prompt.txt`). Proceeding 2-of-3 per the
   codex-infra-blocked exception; retries continue each round.
 
-## Round 33 (plan v8.28 @ pending)
+## Round 33 (plan v8.28 @ 676b176d5)
 
-- Codex (retry), AGY, Claude SMR — pending v8.28 fold.
+- **Claude SMR r33** — `claude-smr-plan-r33.md`. Verdict:
+  PLAN-READY-WITH-NITS (2 NIT — SMR33-1 the multi-gap
+  generalization + the stealer's delete-set subsumption;
+  SMR33-2 the push-coverage note). The first SMR non-DEMAND
+  verdict of the campaign. NOTE: the SMR sweep MISSED AGY's
+  BLOCKER (the gated-successor starvation of the exposed
+  pair's stamp/push — the SMR trace re-derived the over-stamp
+  direction but not the gated-lag direction); recorded
+  honestly here and in the r33 table.
+- **AGY r33** — background bash `b1fzlf70o`; prompt
+  `/tmp/agy-6749-r33-prompt.txt` (131,062 argv bytes); output
+  `/tmp/agy-6749-r33.out`; verdict doc `agy-plan-r33.md`.
+  Verdict: DEMAND-REVISION (1 BLOCKER — f1 the
+  STORE-currency stamp/push gate starves the LIVE exposed
+  pair when the successor is GATED (C1 skipped, C2 held —
+  peer and appliedRevision stuck at A while the primary runs
+  C1; the gate re-keys to EXPOSED currency in v8.29);
+  + 1 MINOR — f2 the C2-gap union formula wrong for
+  re-permitted sessions (deleted set is (A∪C)\(C∩C2);
+  intermediate revocations permanent); + 1 NIT — f3 the
+  multi-gap generalization (= SMR33-1 (i))).
+- **Codex r33** — INFRA-BLOCKED (usage limit; reset Aug 10
+  06:57 UTC). Twelfth documented attempt this session
+  (`/tmp/codex-6749-r33-retry1.err`; r33 prompt staged at
+  `/tmp/codex-6749-r33-prompt.txt`). Proceeding 2-of-3 per the
+  codex-infra-blocked exception; retries continue each round.
+
+## Round 34 (plan v8.29 @ pending)
+
+- Codex (retry), AGY, Claude SMR — pending v8.29 fold.

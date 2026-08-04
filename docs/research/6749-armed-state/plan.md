@@ -1,6 +1,6 @@
 # #6749 — binding-plan expansion registers new slots unarmed, dataplane disabled indefinitely
 
-**Status: DRAFT v8.28 — pending adversarial plan review (round 33)**
+**Status: DRAFT v8.29 — pending adversarial plan review (round 34)**
 
 - Issue: #6749 (opus-review-001 root R06, severity High)
 - Research base: `ad9591177` (origin/master at worktree creation)
@@ -1464,7 +1464,49 @@
   a drain finishing before the namedBound records
   complete normally and the steal-timer is
   cancelled by the completion, same `m.mu` op) @
-  pending
+  `676b176d5` (r33: SMR PLAN-READY-WITH-NITS (2
+  NIT — the first SMR non-DEMAND verdict); AGY
+  DEMAND-REVISION (1 BLOCKER + 1 MINOR + 1 NIT);
+  Codex infra-blocked (twelfth documented attempt;
+  2-of-3))
+; v8.29 folds SMR r33 (2 NIT) + AGY r33 (1 BLOCKER
+  + 1 MINOR + 1 NIT): the stamp/push gate re-keys
+  from STORE currency to EXPOSED currency (AGY r33
+  f1, a real design hole the SMR r33 sweep missed
+  (recorded honestly): C1 exposed (notice queued),
+  C2 promoted but GATED (store-active, unexposed —
+  its own push HELD by the exposure check) — the
+  v8.20 STORE-currency gate skipped C1's stamp and
+  push (C1 no longer store-active), so the peer
+  stayed on A and `appliedRevision` stayed at A
+  while the primary ran C1 — an indefinite silent
+  divergence for the whole gated window: the gate
+  now keys on EXPOSED currency (the notice's pair
+  == `m.lastExposedPair`) — the SMR24-1 over-stamp
+  case (the newer pair EXPOSED → skip) stays
+  killed, and the gated-successor case (successor
+  store-active but UNEXPOSED → C1 is STILL the
+  exposed pair → stamp/push C1 normally, and C1's
+  entry completes normally (not SUPERSEDED)) now
+  converges (the peer receives the exposed config
+  exactly); and the C2-gap union formula is
+  corrected (AGY r33 f2 — the v8.28 "every
+  C2-permitted session survives all three" was
+  FALSE: a session A-permitted, C-revoked,
+  C2-re-permitted was deleted at C's exposure
+  (correctly, at that time) and never recreated —
+  intermediate revocations are PERMANENT (the
+  intended semantics — the final config re-permits
+  via re-handshake, never resurrection): the
+  deleted set is (A∪C)\(C∩C2) (survivors
+  (A∪C)∩C∩C2); the safety-critical direction
+  stands (SMR33-1 (ii)'s subsumption: the
+  stealer's A\C2 ⊆ (A\C) ∪ (C\C2) — the stealer
+  provably cannot over-delete)); and the multi-gap
+  generalization is stated (SMR33-1 (i) = AGY r33
+  f3 — N successive gaps leave the stealer
+  composing A→C_k and the union exactly
+  (A∪C_1∪…∪C_{k-1})\(C_1∩…∩C_k)) @ pending
   AGY r15 (4 BLOCKER + 3 MAJOR + 1 MINOR) + SMR r15 (2
   BLOCKER + 3 MAJOR + 3 MINOR/NIT): R1 becomes a REAL
   rollout+transport contract — a legacy `active.json`
@@ -1546,7 +1588,7 @@
 
 ## 1. Status
 
-DRAFT v8.28 — pending adversarial plan review round 33 (Codex + AGY +
+DRAFT v8.29 — pending adversarial plan review round 34 (Codex + AGY +
 Claude SMR). Convergence target: PLAN-READY (recommended path shipped
 to `/engineer`) or PLAN-KILL. No production code is written under
 `/research`.
@@ -2825,9 +2867,35 @@ to `/engineer`) or PLAN-KILL. No production code is written under
 
   | r32 finding | v8.28 disposition |
   |---|---|
-  | SMR32-1 / AGY f1 C2-gap composition + test | CLOSED — the stealer runs its OWN composition against the exposed pair at ITS OWN entry (never re-runs the stale drain's): the union (stale A→C + C2's wrapper's C→C2 + stealer A→C2) deletes exactly (A∪C)\C2 with every C2-permitted session surviving all three — the drain-time-EXPOSED-at-each-entry rule makes the union correct; the two cursor entries are independent; §9 (a) gains the C2-interpose assertion (the stealer detects C1 as non-store-active, skips its stamp/push, composes A→C2 idempotently, marks C1 SUPERSEDED) (§5-C (ii), §9 (a)) |
+  | SMR32-1 / AGY f1 C2-gap composition + test | CLOSED — the stealer runs its OWN composition against the exposed pair at ITS OWN entry (never re-runs the stale drain's): the union (stale A→C + C2's wrapper's C→C2 + stealer A→C2) deletes exactly (A∪C)\(C∩C2) with survivors exactly (A∪C)∩C∩C2 (the v8.28 "(A∪C)\C2 with every C2-permitted session surviving" was corrected v8.29 per AGY r33 f2 — a session A-permitted, C-revoked, C2-re-permitted was deleted at C's exposure and never recreated; intermediate revocations are permanent); the two cursor entries are independent; §9 (a) gains the C2-interpose assertion (the stealer detects C1 as non-store-active, skips its stamp/push, composes A→C2 idempotently, marks C1 SUPERSEDED) (§5-C (ii), §9 (a)) |
   | AGY f2 stamp prose | CLOSED — "a second identical stamp CAS on the same value (or skipped via store-currency gating when the pair is no longer store-active)" (§5-C (ii)) |
   | SMR32-2 record-before-timer | CLOSED — stated: a drain finishing before the namedBound records complete normally and the steal-timer is cancelled by the completion (same `m.mu` op as the record) (§5-C (ii)) |
+
+- **Round 33** (v8.28): SMR PLAN-READY-WITH-NITS (2 NIT — the
+  first SMR non-DEMAND verdict of the campaign); AGY
+  DEMAND-REVISION (1 BLOCKER + 1 MINOR + 1 NIT); Codex
+  INFRA-BLOCKED (twelfth documented attempt; 2-of-3). The
+  round's substance: AGY's BLOCKER found a real design hole
+  the SMR sweep missed — the STORE-currency stamp/push gate
+  starves the LIVE exposed pair whenever the successor is
+  GATED (C1 exposed, C2 store-active-but-unexposed: C1's
+  stamp/push skipped, C2's push held — the peer and
+  `appliedRevision` stay at A while the primary runs C1);
+  the gate re-keys to EXPOSED currency in v8.29. And the
+  v8.28 union formula was wrong for re-permitted sessions
+  (AGY f2 — a session A-permitted, C-revoked, C2-re-permitted
+  was deleted at C's exposure and never recreated; the
+  deleted set is (A∪C)\(C∩C2)). SMR's own r33 nits: the
+  multi-gap generalization (SMR33-1 (i) = AGY f3) and the
+  push-coverage note (SMR33-2, subsumed by f1's fix).
+- **Round-33 disposition table:**
+
+  | r33 finding | v8.29 disposition |
+  |---|---|
+  | AGY f1 gated-successor starves the exposed pair | CLOSED — the stamp/push gate re-keys from STORE currency to EXPOSED currency (the notice's pair == `m.lastExposedPair`): the SMR24-1 over-stamp case (newer pair EXPOSED → skip) stays killed; the gated-successor case (successor store-active but UNEXPOSED → C1 is still the exposed pair → stamp/push C1 normally, entry completes normally); the SUPERSEDED marking keys on the same exposed currency (§5-C (ii), §6, §9 (a)) |
+  | AGY f2 union formula wrong for re-permitted sessions | CLOSED — corrected: the deleted set is (A∪C)\(C∩C2) (survivors (A∪C)∩C∩C2); intermediate revocations are PERMANENT (the intended semantics — re-permit is re-handshake, never resurrection); the v8.28 "every C2-permitted session survives all three" is struck in §5-C (ii), the r32 row, and §9 (a); the stealer's delete-set subsumption (A\C2 ⊆ (A\C) ∪ (C\C2) — provably no over-deletion) stands (§5-C (ii), §1 r32 row, §9 (a)) |
+  | SMR33-1 (i) / AGY f3 multi-gap generalization | CLOSED — stated: N successive gaps leave the stealer composing A→C_k and the union exactly (A∪C_1∪…∪C_{k-1})\(C_1∩…∩C_k) (the drain-time-EXPOSED-at-each-entry rule, not a new case) (§5-C (ii)) |
+  | SMR33-2 push coverage | CLOSED — subsumed by the f1 fix: in the gated-successor case C1's push FIRES (C1 is the exposed pair); in the exposed-successor case C2's own push carries the newer config, with the periodic reconciler as the backstop (§5-C (ii)) |
 
 ### Round-1 detail log (kept for the record)
 
@@ -5796,13 +5864,23 @@ BLOCKERs 6 + 8; v8 epoch form per Codex r6 f6/f8):**
   sessions the ENFORCED config revokes; C's own
   exposure tails compose B→C later)), (ii)
   the applied stamp and the peer
-  push are CURRENCY-GATED on STORE currency
-  (skipped when the notice's pair is no longer
-  store-active — the two "currents" are named
-  explicitly: the invalidation composes against the
-  drain-time EXPOSED pair; the stamp/push key on
-  the STORE-active pair), and (iii) a superseded
-  notice's
+  push are CURRENCY-GATED on EXPOSED currency
+  (v8.29, AGY r33 f1's gated-successor fix, RE-KEYED
+  from the v8.20/v8.22 STORE currency: the gate is
+  `notice.pair == m.lastExposedPair` — the SMR24-1
+  over-stamp case (a newer pair EXPOSED ⇒ the
+  notice's pair is no longer the exposed pair ⇒
+  skip) stays killed, and the GATED-successor case
+  (C2 store-active but UNEXPOSED — its own push
+  HELD by the exposure check) leaves C1 STILL the
+  exposed pair ⇒ C1's stamp and push FIRE normally
+  and C1's entry completes normally (the v8.20
+  store-currency form starved the LIVE exposed
+  pair for the whole gated window — the peer and
+  `appliedRevision` stuck at A while the primary
+  ran C1, an indefinite silent divergence); the
+  SUPERSEDED marking keys on the same EXPOSED
+  currency), and (iii) a superseded notice's
   cursor entry is marked SUPERSEDED (terminal,
   never left pending) — where SUPERSEDED marks ONLY
   the pair-specific tails (the stamp and the push)
@@ -5943,10 +6021,26 @@ BLOCKERs 6 + 8; v8 epoch form per Codex r6 f6/f8):**
   stale drain's A→C deletes (composed at ITS
   entry), C2's own wrapper's C→C2 (its own
   tails), and the stealer's A→C2 delete exactly
-  (A∪C)\C2 with every C2-permitted session
-  surviving all three — the drain-time-EXPOSED-at-
-  each-entry rule is what makes the union
-  correct; and the two cursor entries are
+  (A∪C)\(C∩C2) with survivors exactly (A∪C)∩C∩C2
+  (v8.29, AGY r33 f2's formula fix: the v8.28
+  "(A∪C)\C2 with every C2-permitted session
+  surviving" was FALSE for re-permitted sessions —
+  a session A-permitted, C-revoked,
+  C2-re-permitted was deleted at C's exposure
+  (correctly, at that time) and never recreated:
+  intermediate revocations are PERMANENT (the
+  intended semantics — the final config re-permits
+  via re-handshake, never resurrection); and the
+  safety-critical direction STANDS (SMR33-1 (ii)'s
+  subsumption: the stealer's own delete set A\C2 ⊆
+  (A\C) ∪ (C\C2), so the stealer provably cannot
+  over-delete beyond the already-correct union);
+  and the rule generalizes (SMR33-1 (i) = AGY r33
+  f3: N successive gaps leave the stealer
+  composing A→C_k and the union exactly
+  (A∪C_1∪…∪C_{k-1})\(C_1∩…∩C_k) — the
+  drain-time-EXPOSED-at-each-entry rule, not a new
+  case); and the two cursor entries are
   independent (each composes against the shared
   `m.lastExposedPair` at its own entry; the
   claim-or-skip serializes only within an entry);
@@ -7571,7 +7665,12 @@ activations a scheduled retry.
   AGY r24 f1: the drain acquires `applySem`, re-reads
   the CURRENT pair, composes prior → CURRENT,
   currency-gates the stamp/push, and marks a
-  superseded entry SUPERSEDED) with every cursor
+  superseded entry SUPERSEDED) — the stamp/push
+  gate keying on EXPOSED currency (v8.29, AGY r33
+  f1 — the notice's pair == `m.lastExposedPair`,
+  never the store-active pair: a gated successor
+  leaves the exposed pair's stamp/push firing)
+  with every cursor
   read-modify-write through ONE `m.mu` method
   (SMR24-2 — the claim-or-skip tri-state, v8.24 SMR
   r28 SMR28-1) and the scheduler's per-tick pass
@@ -8566,14 +8665,24 @@ activations a scheduled retry.
       idempotently (a no-generation-check
       implementation FAILS this test)) — AND the
       C2-INTERPOSE gap (v8.28, SMR r32 SMR32-1 =
-      AGY r32 f1: C2 exposes BETWEEN the stale
+      AGY r32 f1; formula corrected v8.29, AGY r33
+      f2): C2 exposes BETWEEN the stale
       drain's `applySem` release and the stealer's
       acquire — assert the stealer composes A→C2
       (never A→C), detects C1 as non-store-active
       (its stamp/push skipped), and marks C1
       SUPERSEDED — the union of the three delete
-      sets is exactly (A∪C)\C2 with every
-      C2-permitted session surviving);
+      sets is exactly (A∪C)\(C∩C2) with survivors
+      exactly (A∪C)∩C∩C2 (an A-permitted,
+      C-revoked, C2-re-permitted session was
+      deleted at C's exposure and never recreated
+      — intermediate revocations are permanent);
+      and the GATED-successor case (v8.29, AGY r33
+      f1): C1 exposed, C2 store-active but GATED
+      (unexposed) — assert C1's stamp and push
+      FIRE (C1 is still the exposed pair — the
+      gate keys on EXPOSED currency), C2's push is
+      HELD, and the peer converges on C1 exactly;
       the A→B→C COMPOSITION (v8.15, Codex r19 f5): A
       exposed → gated B tightens → gated C promoted →
       C's exposure invalidates sessions against
@@ -9402,7 +9511,7 @@ the three owners through nine enumerations; the mixed-version
 producer is the documented exception with the required helper
 restart).
 
-Remaining questions for round 33, each invitable to PLAN-KILL with
+Remaining questions for round 34, each invitable to PLAN-KILL with
 a concrete counterexample:
 
 1. **Completeness, final form.** Exhibit a path to
@@ -9465,9 +9574,9 @@ a concrete counterexample:
    candidate-filter territory
    (`include_userspace_binding_interface`), explicitly out of
    scope here.
-6. **Round-32 disposition table audit.** §1's r32 table maps
-   every r32 finding (SMR 1 MINOR + 1 NIT; AGY 1 MINOR + 1
-   NIT; Codex infra-blocked) to its v8.28 fold, and every fold
+6. **Round-33 disposition table audit.** §1's r33 table maps
+   every r33 finding (SMR 2 NIT; AGY 1 BLOCKER + 1 MINOR + 1
+   NIT; Codex infra-blocked) to its v8.29 fold, and every fold
    this revision was verified per-edit against the file.
    Which row is claimed-but-wrong this time?
 7. **Cumulative hazard budget, final sign-off (v8.8 honest
