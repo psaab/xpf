@@ -634,4 +634,42 @@
 
 ## Round 21 (plan v8.16 @ 0ef942686)
 
+- **Claude SMR r21** — `claude-smr-plan-r21.md`. Verdict:
+  DEMAND-REVISION (1 BLOCKER — SMR21-1 the unqualified GO-LOCAL
+  rule publishes the pending-XSK staged config early
+  (self-found; the live-registration discriminator is the fix);
+  + 2 MAJOR — SMR21-2 the verb gate's clear points (restore debt's
+  retries must not hold it); SMR21-4 the deferred-leg stamp
+  coherence pin + #5134 clone reconciliation; + 4 MINOR — boot/
+  replay base semantics, fence discipline, tombstone posture,
+  closeout failure = the commit's error).
+- **AGY r21** — background bash `bhnz048u7`; output
+  `/tmp/agy-6749-r21.out`; verdict doc `agy-plan-r21.md`. Verdict:
+  DEMAND-REVISION (2 BLOCKER — f1 the second-leg abort strands
+  DeferWorkers=true for a gated successor; f2 the unqualified
+  GO-LOCAL publishes the staged config early (= SMR21-1); + 2
+  MAJOR — f3 the verb gate holds through the restore debt's
+  retries (operator lockout); f4 the gate's entry placement
+  conflicts with the closeout set and the bootstrap-exit line).
+- **Codex r21** — background bash `bpar7yyf5`; output
+  `/tmp/codex-6749-r21.out`; verdict doc `codex-plan-r21.md`.
+  Verdict: DEMAND-REVISION (12 BLOCKER + 2 MAJOR — f2 FOLLOW set
+  unsafe/incoherent (tightening-only + persistent closeout debt);
+  f3 the pair check is unreachable-or-racy (VERIFIED: promotions
+  are serialized WITH apply under applySem
+  (daemon_apply_commit.go:129-175) — the pivotal simplifying
+  find); f4 the abort recreates the outage (= AGY f1); f5 fence
+  raise + settlement identity (MAX-CAS + ownership token + (peer
+  incarnation, gen, pair, settlementID) + loop dedup); f6
+  lastExposedPair advances too early (beginFirstExposure); f7 the
+  ledger needs {pair, phaseCursor, completionState}; f8 the token
+  must be an explicit Compile argument; f9 = AGY f2; f10
+  newest-seen poisons (fence on ACCEPTED; per-build immutability);
+  f11 gate lockout (= AGY f3) + failed-UP discard
+  (cancellation-insensitive recording); f12 tombstone paths/key/
+  lifetime; f13 capture doesn't order outbound; f14 tests/budget).
+  Narrow prior closures remain valid; Q1 remains complete.
+
+## Round 22 (plan v8.17 @ aca354bba)
+
 - Codex, AGY, Claude SMR — pending dispatch.
