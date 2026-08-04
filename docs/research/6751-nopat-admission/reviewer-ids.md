@@ -172,3 +172,18 @@ specification with §4.0.2's consequence map (V1-V4 shrink, exact
 omission results, in-helper P2, retained carry-forward/hold/
 re-prime + prime-REQUEST field, debt pair recorded before End).
 Round 34 re-reviews v15.21 for convergence.
+
+| r34 | `codex exec` (detached-poll), session in /tmp/codex-6751-r34.log / PLAN-NEEDS-REVISION (10 BLOCKERs: writer inventory incomplete ×3 classes + ABI bug, Rule 2 deadline/admission/refusal-recovery, Rule 3 two-ledger, Rule 4 absent-predicate/one-producer/identity-domains, Rule 5 RMW, Rule 6 one-arbiter + both-lane fields + incarnation namespace, Rule 7 sticky lineage, known-stale copy binding, omission-overflow authoritative source, old-peer re-prime proof; 1 MAJOR: P2 ownership) — explicitly "fixable within PATH A, not PLAN-KILL" | PLAN-NEEDS-REVISION (1 MAJOR: Rule 3 vs §5.6 bookkeeping; 2 MINORs: dedup reconnect reset, 11th writer restoreBPFSession; 2 NITs: clear latency, metric scope) — PATH A ACCEPTED on the corrected evidence | PLAN-READY-WITH-NITS (r35 fold-check of v15.23; self-audit for the fifth factual error passed) |
+
+Round-34 disposition: AGY's 5 + Codex's 11 findings fold in
+v15.23 (two-ledger applied transaction with five terminal outcomes;
+complete writer inventory with the negative bound; one deadline +
+reserve-before-mutate + fence-on-unknown; table-authoritative
+delete predicate + one close producer + identity domains; RMW
+refresh; one-arbiter dual-lane dedup with additive both-lane
+fields; sticky alias lineage; copy-time identity binding; framed
+helper-snapshot recovery source; quiet-interval re-prime; P2
+in-helper). Codex r34 also surfaced a shipped ABI bug
+(maps_sync.go:609 reads SessionID bytes as Created) — flagged for
+a separate fix issue, NOT absorbed into this plan. Round 35
+re-reviews v15.23.
