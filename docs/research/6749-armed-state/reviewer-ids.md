@@ -827,6 +827,34 @@
   `/tmp/codex-6749-r25-prompt.txt`). Proceeding 2-of-3 per the
   codex-infra-blocked exception; retries continue each round.
 
-## Round 26 (plan v8.21 @ pending)
+## Round 26 (plan v8.21 @ b7b9ff1ae + e728b2e7d)
 
-- Codex (retry), AGY, Claude SMR — pending v8.21 fold.
+- **Claude SMR r26** — `claude-smr-plan-r26.md`. Verdict:
+  DEMAND-REVISION (0 BLOCKER + 1 MAJOR + 3 MINOR — SMR26-1 the
+  sweep's drain execution must never block the status thread
+  (self-found in the v8.21 pin; the 1s pass scans+marks under
+  m.mu and DISPATCHES to the apply scheduler); SMR26-2 the
+  drain-time composition target is the drain-time EXPOSED pair,
+  not ActivePair() (a gated successor C must not invalidate
+  B-authorized sessions); SMR26-3 the r25 f1 row mis-recorded
+  (CLOSED-ALREADY at e728b2e7d); SMR26-4 the cursor registry's
+  terminal-entry GC unpinned (self-found; GC on the observing
+  sweep pass)).
+- **AGY r26** — background bash `bh4feiu5m`; prompt
+  `/tmp/agy-6749-r26-prompt.txt` (120,054 bytes); output
+  `/tmp/agy-6749-r26.out`; verdict doc `agy-plan-r26.md`.
+  Verdict: DEMAND-REVISION (1 MAJOR — f1 the 1s-pass sweep
+  blocks on applySem (= SMR26-1); + 2 MINOR — f2 prior→CURRENT
+  invalidates for a gated successor (= SMR26-2); f3 the r25 f1
+  row's mis-attribution (= SMR26-3, closed at e728b2e7d);
+  + 1 NIT — f4 the §9 (a) gated-successor assertion (= SMR26-2's
+  test)).
+- **Codex r26** — INFRA-BLOCKED (usage limit; reset Aug 10
+  06:57 UTC). Fifth documented attempt this session
+  (`/tmp/codex-6749-r26-retry1.err`; r26 prompt staged at
+  `/tmp/codex-6749-r26-prompt.txt`). Proceeding 2-of-3 per the
+  codex-infra-blocked exception; retries continue each round.
+
+## Round 27 (plan v8.22 @ pending)
+
+- Codex (retry), AGY, Claude SMR — pending v8.22 fold.
