@@ -602,4 +602,36 @@
 
 ## Round 20 (plan v8.15 @ 132309631)
 
+- **Claude SMR r20** — `claude-smr-plan-r20.md`. Verdict:
+  DEMAND-REVISION (2 MAJOR — SMR20-1 the pair-not-current abandon
+  has no named report; SMR20-2 the last-exposed record's update
+  points are unpinned; + 6 MINOR — SMR20-3 drain-failure policy;
+  SMR20-4 first-member check + idempotency answer; SMR20-5
+  settlement context/FIFO; SMR20-6 identity-vs-telemetry (AGY f1's
+  resolution); SMR20-7 GO-LOCAL qualifier circular deadlock (AGY
+  f2's resolution); SMR20-8 benign respawn).
+- **AGY r20** — background bash `bo8ceagp7`; output
+  `/tmp/agy-6749-r20.out`; verdict doc `agy-plan-r20.md`. Verdict:
+  DEMAND-REVISION (2 BLOCKER — f1 MAC-in-hash vs 19(ii)
+  NOT-VERIFIED (the projection identity excludes MACs); f2
+  GO-LOCAL qualifier's circular deadlock with a leaked node (the
+  round's sharpest find); + 1 MAJOR — f3 drain failure thrash-or-
+  drop; + 1 MINOR — f4 restore rebind re-validation).
+- **Codex r20** — background bash `b5mn725fe`; output
+  `/tmp/codex-6749-r20.out`; verdict doc `codex-plan-r20.md`.
+  Verdict: DEMAND-REVISION (10 BLOCKER + 3 MAJOR — revocation
+  deferral (closeout FOLLOWS); pair not linearized (flow-level
+  rule); settlement ingress + session fence (fence AT exposure);
+  last-exposed not a state machine (uniform invalidation base);
+  re-sync loses wrapper tails (completion ledger); wrong defer
+  intent on the wire (node-local stamp); side-effect-free phase
+  source-false (leg-entry check); quiescence + failed-link
+  ownership (verb gate + survival); marker/restore partial (atomic
+  capture + auto-rollback census + daemon-side); zero-entry false
+  coherence (tombstone); tests green; hazard budget stale). Codex
+  f3 (flag deletion) + f13 (old-helper note) narrowly CLOSED;
+  Q1 remains complete.
+
+## Round 21 (plan v8.16 @ 0ef942686)
+
 - Codex, AGY, Claude SMR — pending dispatch.
