@@ -1330,6 +1330,45 @@
   `/tmp/codex-6749-r44-prompt.txt`). Proceeding 2-of-3 per the
   codex-infra-blocked exception; retries continue each round.
 
-## Round 45 (plan v8.40 @ pending)
+## Round 45 (plan v8.40 @ c13b6da34) — CONVERGED
 
-- Codex (retry), AGY, Claude SMR — pending v8.40 fold.
+- **Claude SMR r45** — `claude-smr-plan-r45.md`. Verdict:
+  PLAN-READY-WITH-NITS (2 NIT — SMR45-1 the Compile-leg's own
+  publish-dedup division; SMR45-2 the wedge-vs-death posture
+  split), with a five-step attack trace (the GO-LOCAL rule never
+  needing to fire for a fresh helper; both hygiene-clear forms;
+  the disambiguation × the abandoned/failed-build path; Q1's
+  forty-fifth enumeration; the r44 disposition table re-derived
+  per row). PLUS the post-AGY addendum: AGY f1 VALID (folded),
+  AGY f2 NOT-VERIFIED (§11 item 6 already read "Round-44
+  disposition table audit" at plan.md:10779 on the reviewed blob;
+  AGY's L1106 citation does not match the committed file — folded
+  anyway as standing per-round maintenance), AGY f3 VALID as a
+  documentation gap (folded).
+- **AGY r45** — prompt `/tmp/agy-6749-r45-prompt.txt` (127,696
+  argv bytes, staged via `/tmp/agy-6749-r45-stage1.txt`);
+  output `/tmp/agy-6749-r45.out` (4,426 bytes, `AGY-EXIT=0`,
+  empty stderr); dispatched by the prior session (direct `agy
+  --print-timeout 9m --print`), collected and evaluated this
+  session; verdict doc `agy-plan-r45.md`. Verdict:
+  PLAN-READY-WITH-NITS (1 MINOR — f1 the §9 (a) direct
+  Compile-leg same-content dedup test gap; + 2 NIT — f2 the §11
+  item 6 stale-heading claim (NOT-VERIFIED by SMR), f3 the
+  `acceptedCommitRevision` manager-side persistence note). AGY's
+  attack-surface summary: "New Hazards: None introduced by
+  v8.40"; the r44 disposition table re-derived clean.
+- **Codex r45** — INFRA-BLOCKED (usage limit; reset Aug 10
+  06:57 UTC). Twenty-fourth documented attempt this campaign
+  (`/tmp/codex-6749-r45-retry1.err`; r45 prompt staged at
+  `/tmp/codex-6749-r45-prompt.txt`, 19,924 bytes). Proceeding
+  2-of-3 per the codex-infra-blocked exception.
+
+**CONVERGENCE: PLAN-READY.** Both active reviewers non-DEMAND on
+the same committed blob (v8.40 @ `c13b6da34`) — the campaign's
+second convergent round after r42 (r43/r44 broke convergence on a
+real textual ambiguity; v8.40 resolved it and r45 confirmed). The
+v8.41 fold is doc-level only (one test assertion, three
+clarifying sentences, one §11 pointer refresh — zero mechanism
+changes), so v8.41 is the convergence record, not a new review
+target; re-reviewing doc-only folds is the infinite-regress the
+loop protocol terminates on.

@@ -1,6 +1,6 @@
 # #6749 — binding-plan expansion registers new slots unarmed, dataplane disabled indefinitely
 
-**Status: DRAFT v8.40 — pending adversarial plan review (round 45)**
+**Status: PLAN-READY v8.41 — converged (round 45: SMR + AGY PLAN-READY-WITH-NITS on v8.40; Codex infra-blocked, 2-of-3 per the codex-infra-blocked exception); awaiting manual approval via `/engineer 6749`**
 
 - Issue: #6749 (opus-review-001 root R06, severity High)
 - Research base: `ad9591177` (origin/master at worktree creation)
@@ -1995,7 +1995,46 @@
   no-clear form are both safe, the echo-0 owner
   being the recovery authority either way); and
   SMR44-1/SMR44-2 (the standing-posture and
-  plan-change sentences) fold @ pending
+  plan-change sentences) fold @ `c13b6da34`
+  (r45: SMR PLAN-READY-WITH-NITS (2 NIT); AGY
+  PLAN-READY-WITH-NITS (1 MINOR + 2 NIT); Codex
+  infra-blocked (twenty-fourth documented
+  attempt) — CONVERGED 2-of-3); v8.41 folds SMR
+  r45 (2 NIT) + AGY r45 (1 MINOR + 1 NIT; the
+  second NIT NOT-VERIFIED — §11 item 6 already
+  read "Round-44 disposition table audit" at
+  plan.md:10779 on the reviewed blob, AGY's
+  plan.md:L1106 citation does not match the
+  committed file): the Compile-leg publish
+  division is explicit (SMR45-1 — the
+  Compile-leg is covered under EITHER publish
+  behavior: a publish-time dedup runs the
+  wrapper's standing Compile-leg tails from the
+  result's `capturedDigest`, a redundant-but-
+  identical send lands the cursor and runs the
+  same tails through it; the deferred-RESUME
+  leg — the only place the dedup gates a NEEDED
+  send — is the dedup-completion's (v8.36/37));
+  the comparator's quietness on a benign respawn
+  is stated as structural (AGY r45 f3 —
+  `m.acceptedCommitRevision` is MANAGER-SIDE
+  lineage state, advanced on commit acceptance
+  and NOT reset by `stopLocked()` or any
+  helper-death path, so the GO-LOCAL comparator
+  evaluates FALSE for an unchanged active
+  revision across a respawn); the wedge-vs-death
+  posture split is stated (SMR45-2 — the
+  OPTIONAL hygiene clear's trigger is helper
+  DEATH detection; a WEDGED helper is the
+  persistent-control-failure class owned by the
+  helper-behind detection, never by the clear
+  or the echo-0 owner); §9 (a) gains the DIRECT
+  (Compile-leg, non-staged) same-content dedup
+  assertion (AGY r45 f1 — the wrapper's
+  Compile-leg tails STILL execute and
+  `ActiveApplied() == true`); §11 item 6
+  re-points to the r45 table; and the
+  convergence record lands (§1) @ pending
   AGY r15 (4 BLOCKER + 3 MAJOR + 1 MINOR) + SMR r15 (2
   BLOCKER + 3 MAJOR + 3 MINOR/NIT): R1 becomes a REAL
   rollout+transport contract — a legacy `active.json`
@@ -2077,10 +2116,20 @@
 
 ## 1. Status
 
-DRAFT v8.39 — pending adversarial plan review round 44 (Codex + AGY +
-Claude SMR). Convergence target: PLAN-READY (recommended path shipped
-to `/engineer`) or PLAN-KILL. No production code is written under
-`/research`.
+PLAN-READY v8.41 — CONVERGED at round 45 (Codex + AGY + Claude SMR).
+Round 45 on v8.40 (`c13b6da34`): Claude SMR PLAN-READY-WITH-NITS (2
+NIT) and AGY PLAN-READY-WITH-NITS (1 MINOR + 2 NIT) — both active
+reviewers non-DEMAND on the same committed blob; Codex INFRA-BLOCKED
+(twenty-fourth documented attempt across the campaign; usage-limit
+reset Aug 10 06:57 UTC) — 2-of-3 per the codex-infra-blocked exception
+(`feedback_codex_infra_must_retry`). v8.41 folds the round-45 findings
+(one test assertion, three clarifying sentences, one §11 pointer
+refresh — doc-level only, ZERO mechanism changes); re-reviewing a
+doc-only fold would be the infinite-regress the loop protocol
+terminates on, so v8.41 is the convergence record, not a new review
+target. No production code is written under `/research`. Awaiting
+manual approval — `/engineer 6749` proceeds to implementation against
+this doc; Copilot joins as the 4th reviewer on the implementation PR.
 
 ### Round verdict log
 
@@ -3654,6 +3703,36 @@ to `/engineer`) or PLAN-KILL. No production code is written under
   | AGY f4 both hygiene-clear forms | CLOSED — §9 (a) notes BOTH the OPTIONAL clear and the no-clear form pass (the echo-0 owner is the recovery authority either way) |
   | SMR44-1 standing-posture sentence | CLOSED — stated: the echo-0 recovery's latency is the PRE-EXISTING respawn posture (the helper died — the config loss is the death's); the dedup machinery adds zero latency (the gate is closed after `stopLocked()`, so the recovery's publish is a full send by construction) (§5-C (ii)) |
   | SMR44-2 plan-change sentence | CLOSED — stated: the plan-change restart path (process_status.go:60's `publishedPlanKey != planKey` branch) also goes through `stopLocked()` → `publishedSnapshot = 0` → the dedup suppressed → a full send of the current plan lands on the fresh helper (the same guarantee as the echo-0 recovery; the two restart shapes share the gate) (§5-C (ii)) |
+
+- **Round 45** (v8.40): SMR PLAN-READY-WITH-NITS (2 NIT); AGY
+  PLAN-READY-WITH-NITS (1 MINOR + 2 NIT); Codex INFRA-BLOCKED
+  (twenty-fourth documented attempt; 2-of-3). **CONVERGED** — both
+  active reviewers non-DEMAND on the same committed blob
+  (`c13b6da34`), the campaign's second convergent round after r42
+  (r43/r44 broke it on real textual ambiguity, now resolved). SMR's
+  hostile sweep (attack trace in `claude-smr-plan-r45.md`: the
+  GO-LOCAL rule never needing to fire for a fresh helper, both
+  hygiene-clear forms, the disambiguation × the abandoned/failed-build
+  path, Q1's forty-fifth enumeration, the r44 disposition table
+  re-derived per row) surfaced only two statement-level nits:
+  SMR45-1 (the Compile-leg's own publish-dedup division) and SMR45-2
+  (the wedge-vs-death posture split). AGY's items: f1 (MINOR — §9 (a)
+  asserts the DEFERRED same-content catch-up but not the DIRECT
+  Compile-leg same-content dedup), f2 (NIT — NOT-VERIFIED: §11 item 6
+  already read "Round-44 disposition table audit" at plan.md:10779 on
+  the reviewed blob; AGY's plan.md:L1106 citation does not match the
+  committed file), f3 (NIT — the `acceptedCommitRevision`
+  manager-side persistence note). v8.41 folds f1/f3 + SMR45-1/2 and
+  re-points §11 item 6 — doc-level only, zero mechanism changes.
+- **Round-45 disposition table:**
+
+  | r45 finding | v8.41 disposition |
+  |---|---|
+  | SMR45-1 Compile-leg publish division | CLOSED — stated in §5-C (ii): the Compile-leg is covered under EITHER publish behavior (a publish-time dedup runs the wrapper's standing Compile-leg tails from the result's `capturedDigest`; a redundant-but-identical send lands the cursor and runs the same tails through it); the deferred-RESUME leg (the only place the dedup gates a NEEDED send) is the dedup-completion's (v8.36/37) |
+  | SMR45-2 wedge-vs-death posture | CLOSED — stated in §5-C (ii): the OPTIONAL hygiene clear's trigger is helper-DEATH detection (the control-socket loss / the process exit); a WEDGED helper (unresponsive without exiting) is the persistent-control-failure class (the standing budget: indefinite fail-closed with retries and diagnostics alive), owned by the helper-behind detection — never by the hygiene clear or the echo-0 owner (the clear's trigger never depends on distinguishing the two, but the operator-facing semantics differ) |
+  | AGY f1 §9 (a) direct Compile-leg dedup gap | CLOSED — §9 (a) gains the DIRECT (non-staged) same-content assertion: a Compile-leg commit whose publish dedups in `syncSnapshotLocked` STILL executes the daemon wrapper's Compile-leg tails (the `capturedDigest` stamp + the structured-transaction push) and reports `ActiveApplied() == true` — an implementation that skips the wrapper tails on a direct deduped apply FAILS |
+  | AGY f2 §11 item 6 stale heading | NOT-VERIFIED — §11 item 6 on the reviewed blob (plan.md:10779 @ `c13b6da34`) already reads "Round-44 disposition table audit" and maps the r44 findings to the v8.40 fold; AGY's citation (plan.md#L1106, "left un-updated from v8.18") does not match the committed file. Folded anyway as the standing per-round maintenance: §11 item 6 re-points to THIS r45 table and the v8.41 fold |
+  | AGY f3 `acceptedCommitRevision` persistence | CLOSED — stated in §5-C (ii): the comparator's quietness on a benign respawn is structural, not incidental — `m.acceptedCommitRevision` is MANAGER-SIDE lineage state (advanced on commit acceptance; NOT reset by `stopLocked()` or any helper-death path), so `ActivePair().revision > max(m.acceptedCommitRevision, m.contentConvergedRevision)` evaluates FALSE for an unchanged active revision across a respawn |
 
 ### Round-1 detail log (kept for the record)
 
@@ -6705,6 +6784,19 @@ BLOCKERs 6 + 8; v8 epoch form per Codex r6 f6/f8):**
   stale-prior composition A → C2 and the
   deduped pair B → C2 are the SAME set, since
   B's content == A's content));
+  the division is explicit (v8.41, SMR r45
+  SMR45-1): the Compile-leg is covered under
+  EITHER publish behavior — if the Compile's
+  own publish dedups in `syncSnapshotLocked`
+  (no new generation reaches the helper) the
+  daemon wrapper's standing Compile-leg tails
+  run from the result's `capturedDigest`, and
+  if it sends (a redundant-but-identical
+  snapshot) the helper accepts, the cursor
+  installs, and the same tails run through the
+  cursor; the deferred-RESUME leg (the only
+  place the dedup gates a NEEDED send) is the
+  dedup-completion's (v8.36/37);
   and the marker's lifecycle is stated (v8.38,
   SMR r42 SMR42-1 = AGY r42 f1:
   `contentConvergedRevision` is ADVISORY and
@@ -6740,13 +6832,37 @@ BLOCKERs 6 + 8; v8 epoch form per Codex r6 f6/f8):**
   `m.publishedSnapshot = 0` (process.go:259), so
   the dedup's `publishedSnapshot != 0` gate is
   closed and a real send lands — the SMR43-1
-  incarnation-guard citation); the marker's
+  incarnation-guard citation); the
+  comparator's quietness on a benign respawn
+  is structural, not incidental (v8.41, AGY
+  r45 f3): `m.acceptedCommitRevision` is
+  MANAGER-SIDE lineage state — advanced on
+  commit acceptance and NOT reset by
+  `stopLocked()` or any helper-death path —
+  so `ActivePair().revision > max(
+  m.acceptedCommitRevision,
+  m.contentConvergedRevision)` evaluates FALSE
+  for an unchanged active revision across a
+  respawn; the marker's
   staleness is harmless precisely because its
   ONLY reader is the comparator, and a hygiene
   clear-on-helper-death is OPTIONAL (it would
   make the comparator fire once, redundantly
   with the echo-0 owner — idempotent), never
-  required))) — AND with the
+  required; and the posture split is stated
+  (v8.41, SMR r45 SMR45-2): the OPTIONAL
+  hygiene clear's trigger is helper-DEATH
+  detection (the control-socket loss / the
+  process exit); a WEDGED helper (unresponsive
+  without exiting) is the persistent-control-
+  failure class — the standing budget:
+  indefinite fail-closed with retries and
+  diagnostics alive — owned by the
+  helper-behind detection, NEVER by the
+  hygiene clear or the echo-0 owner (the
+  clear's trigger never depends on
+  distinguishing the two, but the
+  operator-facing semantics differ))) — AND with the
   PAIR-CURRENCY gate (v8.20, SMR r24 SMR24-1 = AGY
   r24 f1's stale-notice fix: a newer commit C can
   promote and apply while B's notice sits queued —
@@ -9839,6 +9955,16 @@ activations a scheduled retry.
       field is absent from the wire encode and
       the content hash treats two snapshots
       differing only in the field as EQUAL)) —
+      and the DIRECT (Compile-leg) same-content
+      case (v8.41, AGY r45 f1: a NON-staged
+      same-content commit whose publish dedups
+      in `syncSnapshotLocked` — assert the
+      daemon wrapper's Compile-leg tails STILL
+      execute (the `capturedDigest` stamp lands
+      + the structured-transaction push posts)
+      and `ActiveApplied() == true`; an
+      implementation that skips the wrapper
+      tails on a direct deduped apply FAILS) —
       and the CONVERGENCE legs stay quiet (v8.37,
       SMR r41 SMR41-1/2 = AGY r41 f1/f2: assert
       NO GO-LOCAL fire AND NO helper-behind fire
@@ -10776,10 +10902,11 @@ a concrete counterexample:
    candidate-filter territory
    (`include_userspace_binding_interface`), explicitly out of
    scope here.
-6. **Round-44 disposition table audit.** §1's r44 table maps
-   every r44 finding (SMR 2 NIT + addendum; AGY 1 BLOCKER
-   (ambiguity) + 1 MAJOR + 1 MINOR + 1 NIT; Codex
-   infra-blocked) to its v8.40 fold, and every fold this
+6. **Round-45 disposition table audit.** §1's r45 table maps
+   every r45 finding (SMR 2 NIT; AGY 1 MINOR + 2 NIT — one of
+   which (f2, this item's own pointer) was NOT-VERIFIED against
+   the reviewed blob and folded as standing maintenance; Codex
+   infra-blocked) to its v8.41 fold, and every fold this
    revision was verified per-edit against the file. Which
    row is claimed-but-wrong this time?
 7. **Cumulative hazard budget, final sign-off (v8.8 honest
