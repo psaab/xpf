@@ -1264,6 +1264,42 @@
   `/tmp/codex-6749-r42-prompt.txt`). Proceeding 2-of-3 per the
   codex-infra-blocked exception; retries continue each round.
 
-## Round 43 (plan v8.38 @ pending)
+## Round 43 (plan v8.38 @ 07762de4d)
 
-- Codex (retry), AGY, Claude SMR — pending v8.38 fold.
+- **Claude SMR r43** — `claude-smr-plan-r43.md`. Verdict:
+  PLAN-READY-WITH-NITS (2 NIT — SMR43-1 the dedup's
+  incarnation-guard citation (self-raised and
+  source-resolved: the gate (process_status.go:77) + the
+  stopLocked reset (process.go:259)); SMR43-2 the
+  wrapper-coverage sentence). PLUS the post-AGY addendum:
+  AGY's f1 (the stale-marker respawn blackhole) evaluated
+  NOT-VERIFIED — the echo-0 helper-behind case keeps the
+  STARTUP RE-APPLY OWNER (plan.md:5485), which fires on a
+  zero-stored helper's status echo independently of the
+  GO-LOCAL comparator (the comparator was never the
+  recovery path), and the recovery's publish cannot dedup
+  (stopLocked() resets publishedSnapshot = 0, closing the
+  dedup's gate) — the dataplane is never unconfigured past
+  the echo-0 owner's own latency.
+- **AGY r43** — background bash `b20ekewg1`; prompt
+  `/tmp/agy-6749-r43-prompt.txt` (131,067 argv bytes);
+  output `/tmp/agy-6749-r43.out`; verdict doc
+  `agy-plan-r43.md`. Verdict: DEMAND-REVISION (1 BLOCKER
+  — f1 the stale contentConvergedRevision after a HELPER
+  respawn allegedly strands the fresh helper unconfigured
+  (NOT-VERIFIED by the SMR r43 post-AGY evaluation — the
+  echo-0 startup re-apply owner covers the respawn
+  independently of the comparator); + 1 MAJOR — f2 the §9
+  (a) exercises only the manager restart, not the helper
+  respawn (valid as test coverage); + 1 MINOR — f3 the
+  wasted cycle's Compile side effects unstated; + 1 NIT —
+  f4 the hash's session-policy coverage citation).
+- **Codex r43** — INFRA-BLOCKED (usage limit; reset Aug 10
+  06:57 UTC). Twenty-second documented attempt this session
+  (`/tmp/codex-6749-r43-retry1.err`; r43 prompt staged at
+  `/tmp/codex-6749-r43-prompt.txt`). Proceeding 2-of-3 per the
+  codex-infra-blocked exception; retries continue each round.
+
+## Round 44 (plan v8.39 @ pending)
+
+- Codex (retry), AGY, Claude SMR — pending v8.39 fold.
