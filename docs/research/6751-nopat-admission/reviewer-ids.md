@@ -286,3 +286,12 @@ sessionSyncConfigured predicate unifies gate and arming; the bound
 is named and the four cases pinned; the recap names all seven).
 AGY's PLAN-READY is the second clean verdict. Round 45 is the
 convergence check.
+
+| r45 | `codex exec` (detached-poll), session in /tmp/codex-6751-r45.log / PLAN-NEEDS-REVISION (3 BLOCKERs: the epoch-pass non-capable branch still said "never confirms" (now: no SNAPSHOT-AUTHORITY confirmation/purge/clear; evidence confirmation remains allowed); deferred incremental-index entries had contradictory legacy semantics (explicit terminal: provisional admission with alias-suspect at a legacy BulkEnd, guarantee revised to never-UNRESOLVED-past-lifetime-or-upgrade, §9 corrected to no PERMANENT broken companion); the shared predicate had no live false→true arming transition (generation-bound arming on every FALSE→TRUE including day-2 commits and the zero-transport guard, cancellation on TRUE→FALSE, day-2 regression pinned); 1 MINOR: mode partition omitted arming=0/current=1 (fixed by the AGY nit mid-round; epoch must advance on both transitions — not syncPeerConnEpoch); 2 NITs: "encodes zero" → "OMITS the id field — receiver decodes zero"; reconciliation-hold sentence deduplicated) | PLAN-READY-WITH-NITS (1 nit: branch (ii)'s precondition should be "current epoch != arming epoch" to cover the cold-start-connects-mid-bound case — folded) | PLAN-READY-WITH-NITS (r46 fold-check of v15.34; the provisional row's fabric-redirect residual, the day-2 churn tag handling, and the deferred-entry terminal's honesty analyzed) |
+
+Round-45 disposition: all findings fold in v15.34 (epoch-pass
+snapshot-authority scoping; the explicit deferred-entry terminal
+with the revised guarantee; generation-bound live-transition
+arming with the day-2 regression; the epoch-selection note; the
+branch-(ii) precondition; the two terminology cleanups). Round 46
+is the convergence check.

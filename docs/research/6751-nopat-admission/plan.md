@@ -1,35 +1,30 @@
 # #6751 plan — interface SNAT no-PAT admission: reserve-or-PAT the colliding translated tuple
 
-- **Status**: DRAFT v15.33 — round-44 fold (Codex r44's three
-  blockers + minor + nit; AGY r44 converged PLAN-READY with zero
-  findings: the last five contradictory alias passages carry the
-  evidence-vs-authority split inline (the FRAMING-ONLY rule now
-  says the gate governs window-authority decisions ONLY while
-  decode-time insertion confirmation stays evidence-based on every
-  window — a true old-sender's frames decode the id to zero,
-  sync_protocol.go:491 / sync_rtflow_session_id_5212_test.go:64,
-  so the predicate fails by itself, and a pre-learn new sender's
-  alias copies the base's nonzero id and is confirmed-and-dropped
-  exactly as designed, daemon_ha_userspace_convert.go:338/399; P1
-  re-evaluates at every completed CAPABILITY-ADVERTISING BulkEnd;
-  the poisoned-companion prevention is scoped to id-capable
-  windows); the readiness-timeout event's commit unit is
-  MODE-AWARE across the three connection-epoch states —
-  never-connected cold start (arming epoch zero, still zero at
-  commit: the cold-start degraded release commits), connected-
-  then-disconnected (epoch differs: INVALIDATED, no release — the
-  no-release-without-reconnect invariant holds), still connected
-  (normal release) — so the never-connected release no longer
-  contradicts its own commit predicate; ONE SHARED
-  `sessionSyncConfigured` predicate (control-link OR fabric
-  endpoints, any takeover mode) governs BOTH gate engagement AND
-  cold-start timer arming, so every sync-configured deployment
-  gets the cold-start bound regardless of mode or transport; the
-  cold-start bound IS the existing syncReadyTimeout (named, not
-  left to implementation) and §9 pins the four regression cases
-  (simultaneous-never-connected, control-link-only, whole direct
-  domain, peer-dead election state); and the §9 recap names all
-  seven events including abort)
+- **Status**: DRAFT v15.34 — round-45 fold (Codex r45's three
+  blockers + minor + two nits + AGY r45's nit: the EPOCH-DEFINITIVE
+  non-capable branch now says the epoch pass never performs
+  SNAPSHOT-AUTHORITY confirmation/purge/clear while decode-time
+  EVIDENCE confirmation remains allowed on every window class; the
+  deferred incremental-index entry's terminal is EXPLICIT — at a
+  legacy BulkEnd it PROVISIONALLY ADMITS with the alias-suspect
+  mark (export-suppressed, session-lifetime-bound — the ratified
+  residual, strictly better than today's certain broken companion)
+  with the guarantee revised to "never left UNRESOLVED past the
+  row's own lifetime or the peer's capability upgrade", and §9's
+  claim corrected to "never installs a PERMANENT broken companion";
+  the shared sessionSyncConfigured arming is generation-bound
+  across LIVE transitions (every FALSE→TRUE — initial boot or a
+  day-2 commit, including the zero-transport restart guard at
+  daemon_apply_tail.go:243 — arms the cold-start bound under the
+  next lifecycle generation; every TRUE→FALSE cancels; §9 pins the
+  day-2 regression); the mode predicate's epoch advances on BOTH
+  transitions (NOT syncPeerConnEpoch, which advances only on
+  connect — abortGeneration or a dedicated paired counter serves);
+  the mode branch (ii) precondition is "current epoch != arming
+  epoch" (the cold-start-connects-mid-bound case is invalidated
+  exactly as intended, AGY r45 nit); the old sender "OMITS the id
+  field — the receiver decodes zero" terminology is corrected; and
+  the reconciliation-hold sentence is deduplicated)
 - **Issue**: #6751 (opus-review-001 R08, High, `bug`+`audit`+`security`) —
   interface SNAT admits indistinguishable no-PAT return tuples and sends
   replies to the FIRST session.
@@ -715,8 +710,7 @@ consequences onto the surviving §5.x machinery.
   sender's alias copies the base's nonzero id,
   daemon_ha_userspace_convert.go:338/399, and is confirmed-and-
   dropped exactly as designed, Codex r43 blocker 1 / r44 blocker 1's
-  verified split) — and NEVER releases the reconciliation hold for
-  lineage purposes (the definitive pass and every lineage clear
+  verified split) — and the definitive pass and every lineage clear
   run ONLY against capability-advertising senders' snapshots; a
   legacy window is non-definitive by construction and the plan
   does not pretend otherwise). Authority is bound PER WINDOW
@@ -794,7 +788,25 @@ consequences onto the surviving §5.x machinery.
   BOTH nodes enforcing readiness, election.go:322, and neither
   takes over indefinitely). ONE SHARED `sessionSyncConfigured`
   predicate governs BOTH the gate's configured check AND the
-  cold-start timer's arming (Codex r44 blocker 3: today startup
+  cold-start timer's arming — and the ARMING is generation-bound
+  across LIVE configuration transitions, not only initial boot
+  (Codex r45 blocker 3: production supports live transport changes,
+  daemon_apply_tail.go:238; heartbeat can start before session-sync
+  construction, daemon_ha_sync.go:767; address resolution can fail
+  before a sync object exists, :786; and failed TCP dials merely
+  retry, sync_conn.go:435 — so the connection-time arm at
+  daemon_ha_sync.go:51 may never occur after session sync becomes
+  configured on day 2). Every `sessionSyncConfigured` FALSE→TRUE
+  transition (initial boot OR a day-2 commit that adds session sync,
+  including a transport change — the zero-transport restart guard at
+  daemon_apply_tail.go:243) ARMS the cold-start bound under the next
+  lifecycle generation (generation-bound: a re-config re-arms with a
+  strictly newer tag and cancels the prior arming); every TRUE→FALSE
+  transition CANCELS the arming (the gate disengages with the
+  configuration); §9 pins the day-2 regression (configure session
+  sync on a running node → the cold-start bound arms and the
+  degraded release commits at the bound; deconfigure → the arming
+  cancels) — and (Codex r44 blocker 3: today startup
   arms only `PrivateRGElection && fabric-pair`,
   daemon_run_bringup.go:229, and the other arm requires a
   successful connection, daemon_ha_sync.go:81 — so control-link-only
@@ -1818,13 +1830,19 @@ record's identity frees only when `per_worker` is empty AND
       never-connected release must not remove the connected check
       wholesale, which would threaten the warm-disconnect invariant
       at session_sync_readiness_test.go:33; the event carries the
-      connection epoch AT ARMING): (i) NEVER-CONNECTED COLD START
+      connection epoch AT ARMING — an epoch that advances on BOTH
+      transitions, NOT syncPeerConnEpoch, which advances only on
+      connect (daemon_ha_sync.go:57/109) and is unsuitable alone —
+      the abortGeneration or a dedicated paired counter serves,
+      Codex r45 minor 4's implementation note): (i) NEVER-CONNECTED COLD START
       (arming epoch ZERO and still zero at commit) — the cold-start
       degraded release commits at the cold-start bound (the
       DISTINCT effect; takeover proceeds by normal VRRP priority
       with the heartbeat-alive precondition); (ii)
-      CONNECTED-THEN-DISCONNECTED (arming epoch > 0 and the current
-      epoch differs from the arming epoch) — the event is
+      CONNECTED-THEN-DISCONNECTED (the current epoch DIFFERS from
+      the arming epoch — including a cold start that connected
+      mid-bound, arming 0 → current 1, which is invalidated exactly
+      as intended, AGY r45 nit) — the event is
       INVALIDATED (no release; the existing
       no-release-without-reconnect regression holds — a warm
       disconnect must never release on timeout alone); (iii) STILL
@@ -2173,9 +2191,21 @@ record's identity frees only when `per_worker` is empty AND
       liveness contract for the incremental-index deferral (Codex
       r31 finding 8: deferred alias entries join the quarantine's
       payload-cap accounting, and overflow of THAT takes the same
-      fenced-re-prime path — a deferred entry is resolved by the
-      re-prime's definitive BulkEnd, never left uninstalled
-      indefinitely). A persistent mirror-write
+      fenced-re-prime path — and the deferred entry's terminal is
+      EXPLICIT (Codex r45 blocker 2's forced choice, taken as the
+      ratified cell's own position): at a LEGACY (non-capable)
+      BulkEnd the deferred entry PROVISIONALLY ADMITS with the
+      `alias-suspect` mark — the documented residual: a provisional,
+      export-suppressed, session-lifetime-bound row, strictly better
+      than today's CERTAIN broken companion at publish time, because
+      the mark suppresses export and the next capable definitive
+      pass (or the row's own close) ends it; the "never left
+      uninstalled indefinitely" guarantee is revised to "never left
+      UNRESOLVED past the row's own lifetime or the peer's
+      capability upgrade" (a true old sender's ids are zero, so the
+      definitive pass can never resolve for it — only the upgrade's
+      fresh capable prime, the row's close, or the session timeout
+      terminates the mark). A persistent mirror-write
       failure on Open is additionally counted and latches out-of-sync
       with the #2442 full re-export, same as (R1). On top of that invariant the bulk callback, in ONE
       critical section per frame (the universal producer rule below):
@@ -2466,9 +2496,17 @@ record's identity frees only when `per_worker` is empty AND
       LINEAGE-DEFINITIVE only for capability-advertising windows,
       and DISPOSITION-ONLY for non-capable windows — the
       confirm-vs-admit disposition still runs and genuine rows
-      still import in the same serialized pass before the ACK, but
-      a non-capable window never confirms, purges, or clears any
-      mark, and the definitive alias pass does not run):
+      still import in the same serialized pass before the ACK; and
+      a non-capable EPOCH PASS never performs SNAPSHOT-AUTHORITY
+      confirmation, purge, or clearing of any mark, and the
+      definitive alias pass does not run — while the decode-time
+      EVIDENCE confirmation remains allowed on every window class
+      (it fires only on equal NON-ZERO RTFlowSessionIDs, which a
+      true old-sender's frames never carry — they decode to zero,
+      sync_protocol.go:491 / sync_rtflow_session_id_5212_test.go:64 —
+      so it cannot fire there anyway, and a pre-learn new sender's
+      alias copies the base's nonzero id and is confirmed-and-dropped
+      exactly as designed, Codex r44/r45 blockers' verified split)):
       all quarantine actions run as events
       on the receiver's SERIALIZED event loop (a timer only enqueues a
       wakeup — the import path's generation-check/install/record
@@ -2705,9 +2743,11 @@ record's identity frees only when `per_worker` is empty AND
     the poisoned companion from forming on ID-CAPABLE windows, while
     aliases from an old
     sender are NOT confirmable (Codex r31 finding 7: confirmation
-    requires equal NON-ZERO RTFlowSessionID, and the old sender's
-    definitive bulk encodes the id from the zero-lifted BPF field —
-    it never had the preservation machinery — so in the lost-base
+    requires equal NON-ZERO RTFlowSessionID, and the old sender
+    OMITS the id field — the receiver decodes it as zero,
+    sync_protocol.go:491 / sync_rtflow_session_id_5212_test.go:64 —
+    because the old sender never had the preservation machinery, so
+    in the lost-base
     case neither the base nor the alias carries a matchable id and
     P1 cannot purge). The honest cell semantics: a provisional
     admitted alias in this cell expires with its SESSION's own
@@ -3454,7 +3494,12 @@ quarantine-admitted + overflow), and tests.
   does NOT abort — the bulk-epoch index is bounded by the received
   set, and the incremental-window cap DEFERS excess alias entries to
   the next bulk's BulkEnd resolution — a deferred real alias never
-  installs a broken companion, AGY r30 finding 5), PLUS the confirm-and-purge cases (a
+  installs a PERMANENT broken companion: at a LEGACY BulkEnd it
+  provisionally admits with the `alias-suspect` mark (export-
+  suppressed, session-lifetime-bound; the mark terminates at the
+  next capable definitive pass, the row's own close, or the peer's
+  capability upgrade — Codex r45 blocker 2, revising AGY r30
+  finding 5's absolute accordingly), PLUS the confirm-and-purge cases (a
   timeout-admitted alias later re-received confirms and its admitted
   row is locally deleted — no stale companion survives the later
   bulk; a timeout-admitted alias is PROVISIONAL — the next completed
