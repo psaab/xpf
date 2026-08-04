@@ -1,6 +1,6 @@
 # #6749 — binding-plan expansion registers new slots unarmed, dataplane disabled indefinitely
 
-**Status: DRAFT v8.26 — pending adversarial plan review (round 31)**
+**Status: DRAFT v8.27 — pending adversarial plan review (round 32)**
 
 - Issue: #6749 (opus-review-001 root R06, severity High)
 - Research base: `ad9591177` (origin/master at worktree creation)
@@ -1389,7 +1389,46 @@
   §9 (a) gains the steal-side-effect fence, the
   steal-cancellation + cadence-decay, and the
   revert-missing-entry assertions (AGY r30 f3) @
-  pending
+  `c09cceed3` (r31: SMR DEMAND-REVISION (0 BLOCKER
+  + 0 MAJOR + 1 MINOR + 2 NIT); AGY DEMAND-REVISION
+  (1 MAJOR + 1 MINOR + 1 NIT — architectural audit
+  clean); Codex infra-blocked (tenth documented
+  attempt; 2-of-3))
+; v8.27 folds SMR r31 (1 MINOR + 2 NIT) + AGY r31
+  (1 MAJOR + 1 MINOR + 1 NIT): the mid-drain steal's
+  full walk is spelled out (SMR31-1 = AGY r31
+  f1/f3 — the steal can fire while the stale drain
+  executes under `applySem` (the steal needs only
+  `m.mu`): (i) the invalidation was composed AT
+  ENTRY against the drain-time EXPOSED pair and no
+  exposure can move under `applySem` — the
+  composition stays correct after the claim dies;
+  (ii) the stamp's CAS passes (the store cannot
+  move either) — the stale stamp LANDS and is
+  CORRECT (the pair is store-active), while the
+  phase's completion RECORD is refused by the
+  generation guard, so the stealer RE-EXECUTES the
+  phase and the re-execution's side effects are the
+  idempotent ones (a second identical stamp CAS on
+  the same value; a second identical push — the
+  receiver's `SyncApply` no-ops on identical
+  content (daemon_apply_commit.go:356-360); the
+  invalidation's deletes idempotent); §9 (a) gains
+  the mid-drain interleaving assertion (AGY r31
+  f1's false-green fix — an implementation that
+  omits the generation check on the completion
+  record FAILS the test)); the cancellation's
+  scope is clarified (SMR31-2 = AGY r31 f2 — ctx
+  cancellation bounds the I/O tails (the conn
+  write's TCP timeout + `handleDisconnect`; socket
+  operations), while in-memory store mutations
+  (`setAppliedDigest` takes no ctx) rely on the
+  CAS revision verification — either order safe);
+  and the steal-spawned goroutine population's
+  bound is stated (SMR31-3 — cancellation reaps
+  each goroutine within one operation of its
+  cancellation; the residue is the kernel-wedged
+  budgeted D-state class only) @ pending
   AGY r15 (4 BLOCKER + 3 MAJOR + 1 MINOR) + SMR r15 (2
   BLOCKER + 3 MAJOR + 3 MINOR/NIT): R1 becomes a REAL
   rollout+transport contract — a legacy `active.json`
@@ -1471,7 +1510,7 @@
 
 ## 1. Status
 
-DRAFT v8.26 — pending adversarial plan review round 31 (Codex + AGY +
+DRAFT v8.27 — pending adversarial plan review round 32 (Codex + AGY +
 Claude SMR). Convergence target: PLAN-READY (recommended path shipped
 to `/engineer`) or PLAN-KILL. No production code is written under
 `/research`.
@@ -2713,6 +2752,27 @@ to `/engineer`) or PLAN-KILL. No production code is written under
   | SMR30-2 / AGY f4 revert missing-entry | CLOSED — the defer-revert rides the uniform missing-entry → already-terminal contract (a no-op on a GC'd entry), stated explicitly (§5-C (ii)) |
   | SMR30-3 advisory mark × due-check | CLOSED — stated (the claim refuses not-yet-due entries; the mark re-fires next pass; no mark-clearing machinery) (§5-C (ii)) |
   | AGY f3 §9 (a) gaps | CLOSED — §9 (a) asserts the late-stamp CAS refusal, the late-invalidation entry-fence abort, the steal's context cancellation + cadence decay + replacement-only, and the revert's missing-entry no-op |
+
+- **Round 31** (v8.26): SMR DEMAND-REVISION (0 BLOCKER + 0
+  MAJOR + 1 MINOR + 2 NIT); AGY DEMAND-REVISION (1 MAJOR + 1
+  MINOR + 1 NIT — architectural audit CLEAN: "no new
+  architectural race conditions or deadlocks were introduced by
+  v8.26"); Codex INFRA-BLOCKED (tenth documented attempt;
+  2-of-3). Convergence: the mid-drain steal's full trace needed
+  spelling out (SMR31-1 = AGY f1/f3 — the entry fence covers
+  dead-at-entry, but the steal can fire mid-execution under
+  `applySem`, and the landed-but-unrecorded side effects plus
+  the stealer's idempotent re-execution had to be stated and
+  tested); the cancellation claim was imprecise for in-memory
+  store operations (SMR31-2 = AGY f2); the goroutine
+  population bound needed stating (SMR31-3).
+- **Round-31 disposition table:**
+
+  | r31 finding | v8.27 disposition |
+  |---|---|
+  | SMR31-1 / AGY f1+f3 mid-drain steal walk + test | CLOSED — the full trace stated in §5-C (ii) (the steal fires under `m.mu` while the stale drain executes under `applySem`: the invalidation composed at entry stays correct (no exposure moves under the semaphore); the stale stamp's CAS lands correctly (store-active pair); the completion record is generation-refused; the stealer re-executes and the side effects are the idempotent forms — identical stamp CAS on the same value, identical push (receiver `SyncApply` no-ops on identical content (daemon_apply_commit.go:356-360)), idempotent deletes); §9 (a) gains the mid-drain interleaving assertion (a no-generation-check implementation FAILS) (§5-C (ii), §9 (a)) |
+  | SMR31-2 / AGY f2 cancellation scope | CLOSED — clarified: ctx cancellation bounds the I/O tails (the conn write's TCP timeout + `handleDisconnect`; socket operations); in-memory store mutations (`setAppliedDigest` takes no ctx) rely on the CAS revision verification — either order safe (§5-C (ii)) |
+  | SMR31-3 goroutine population bound | CLOSED — stated: cancellation reaps each steal-spawned goroutine within one operation of its cancellation; the residual population is the kernel-wedged budgeted D-state class only (§5-C (ii)) |
 
 ### Round-1 detail log (kept for the record)
 
@@ -5778,13 +5838,48 @@ BLOCKERs 6 + 8; v8 epoch form per Codex r6 f6/f8):**
   itself (d) CANCELS the stale claimant's context
   (every tail operation takes the claim's ctx and
   aborts on cancellation — a kernel-wedged residue
-  is the budgeted D-state class, out-of-band),
+  is the budgeted D-state class, out-of-band — and
+  the ctx scope is precise (v8.27, SMR r31 SMR31-2
+  = AGY r31 f2: cancellation bounds the I/O tails
+  (the conn write's TCP timeout +
+  `handleDisconnect`; socket operations); the
+  in-memory store mutations (`setAppliedDigest`
+  takes no ctx) rely on the CAS revision
+  verification — either order safe, and the
+  cancellation bounds the goroutine's remaining
+  life to one operation, not to the next tick)),
   (e) ADVANCES the entry's ladder (a steal is a
   failure by construction — the steal cadence
   decays to the 60s floor, never a fixed spin),
   and (f) is a REPLACEMENT (exactly one live claim
   generation per entry — a second steal is refused
-  while a live one stands)); and the notice is an
+  while a live one stands) — and the MID-DRAIN
+  steal's full trace is stated (v8.27, SMR r31
+  SMR31-1 = AGY r31 f1/f3: the steal needs only
+  `m.mu` to fire, so it can land while the stale
+  drain executes its tails under `applySem` (no
+  `m.mu` held mid-tails): (i) the invalidation was
+  composed AT ENTRY against the drain-time EXPOSED
+  pair, and no exposure can move while the drain
+  holds `applySem` — the composition stays correct
+  after the claim dies; (ii) the stamp's CAS
+  passes (the store cannot move under `applySem`
+  either) — the stale stamp LANDS and is CORRECT
+  (the pair is store-active; the stamp marks it
+  applied), while the phase's completion RECORD
+  is refused by the generation guard — so the
+  stealer RE-EXECUTES the phase, and the
+  re-execution's side effects are the idempotent
+  forms (a second identical stamp CAS on the same
+  value; a second identical push — the receiver's
+  `SyncApply` no-ops on identical content
+  (daemon_apply_commit.go:356-360); the
+  invalidation's deletes idempotent); and (iii)
+  the steal-spawned goroutine population is
+  bounded (SMR31-3: cancellation reaps each
+  goroutine within one operation of its
+  cancellation; the residue is the kernel-wedged
+  budgeted D-state class only))); and the notice is an
   OPTIMIZATION over a sweep (v8.20, SMR r24 SMR24-4 =
   AGY r24 f4: the enqueue-after-unlock is
   non-blocking — a full buffer drops the notice, so
@@ -8381,7 +8476,16 @@ activations a scheduled retry.
       cadence decays to the 60s floor), and is
       REFUSED while a live claim stands (assert
       max-one-live-claim); the panic-revert on a
-      GC'd entry is a no-op (AGY r30 f4));
+      GC'd entry is a no-op (AGY r30 f4)) — AND the
+      MID-DRAIN interleaving (v8.27, SMR r31
+      SMR31-1 = AGY r31 f1: a claim valid at entry,
+      stolen MID-execution — assert the side
+      effects land under `applySem` (the composed
+      invalidation, the CAS stamp, the push), the
+      completion record is generation-refused, and
+      the stealer's re-execution completes
+      idempotently (a no-generation-check
+      implementation FAILS this test));
       the A→B→C COMPOSITION (v8.15, Codex r19 f5): A
       exposed → gated B tightens → gated C promoted →
       C's exposure invalidates sessions against
@@ -9210,7 +9314,7 @@ the three owners through nine enumerations; the mixed-version
 producer is the documented exception with the required helper
 restart).
 
-Remaining questions for round 31, each invitable to PLAN-KILL with
+Remaining questions for round 32, each invitable to PLAN-KILL with
 a concrete counterexample:
 
 1. **Completeness, final form.** Exhibit a path to
@@ -9273,9 +9377,9 @@ a concrete counterexample:
    candidate-filter territory
    (`include_userspace_binding_interface`), explicitly out of
    scope here.
-6. **Round-30 disposition table audit.** §1's r30 table maps
-   every r30 finding (SMR 1 MINOR + 2 NIT; AGY 2 BLOCKER + 1
-   MINOR + 1 NIT; Codex infra-blocked) to its v8.26 fold, and
+6. **Round-31 disposition table audit.** §1's r31 table maps
+   every r31 finding (SMR 1 MINOR + 2 NIT; AGY 1 MAJOR + 1
+   MINOR + 1 NIT; Codex infra-blocked) to its v8.27 fold, and
    every fold this revision was verified per-edit against the
    file. Which row is claimed-but-wrong this time?
 7. **Cumulative hazard budget, final sign-off (v8.8 honest

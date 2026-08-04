@@ -950,6 +950,33 @@
   `/tmp/codex-6749-r30-prompt.txt`). Proceeding 2-of-3 per the
   codex-infra-blocked exception; retries continue each round.
 
-## Round 31 (plan v8.26 @ pending)
+## Round 31 (plan v8.26 @ c09cceed3)
 
-- Codex (retry), AGY, Claude SMR — pending v8.26 fold.
+- **Claude SMR r31** — `claude-smr-plan-r31.md`. Verdict:
+  DEMAND-REVISION (0 BLOCKER + 0 MAJOR + 1 MINOR + 2 NIT —
+  SMR31-1 the mid-drain steal's landed-but-unrecorded side
+  effects need their idempotency statement (the entry fence
+  covers dead-at-entry; the steal can fire mid-execution);
+  SMR31-2 the cancellation's window; SMR31-3 the D-state
+  population bound).
+- **AGY r31** — first dispatch died on a RESOURCE_EXHAUSTED
+  429 (exit 1, no output); retried after a 90 s backoff per
+  the 429 rule — background bash `b7oovjpes`; prompt
+  `/tmp/agy-6749-r31-prompt.txt` (130,750 bytes); output
+  `/tmp/agy-6749-r31.out`; verdict doc `agy-plan-r31.md`.
+  Verdict: DEMAND-REVISION (1 MAJOR — f1 §9 (a) permits a
+  false-green of the steal fences (no mid-drain test;
+  = SMR31-1); + 1 MINOR — f2 the ctx-cancellation claim
+  imprecise for in-memory store ops (= SMR31-2); + 1 NIT —
+  f3 the mid-drain refusal→re-execution trace unstated
+  (= SMR31-1)). Architectural audit CLEAN ("no new
+  architectural race conditions or deadlocks in v8.26").
+- **Codex r31** — INFRA-BLOCKED (usage limit; reset Aug 10
+  06:57 UTC). Tenth documented attempt this session
+  (`/tmp/codex-6749-r31-retry1.err`; r31 prompt staged at
+  `/tmp/codex-6749-r31-prompt.txt`). Proceeding 2-of-3 per the
+  codex-infra-blocked exception; retries continue each round.
+
+## Round 32 (plan v8.27 @ pending)
+
+- Codex (retry), AGY, Claude SMR — pending v8.27 fold.
