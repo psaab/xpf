@@ -106,3 +106,13 @@ corrections, drain-bound parameter). AGY note: agy 1.1.10 requires
 `--prompt`; positional args are silently ignored (two misfires
 answered flag documentation — retried per infra-must-retry, real
 review obtained). Round 28 re-reviews v15.15.
+
+| r28 | `codex exec` (detached-poll), session in /tmp/codex-6751-r28.log / PLAN-NEEDS-REVISION (4 BLOCKERs: mirror not a consistent cut, debt ownership/discharge, pre-DNAT dst_port occupancy, RTFlowSessionID not retrievable; 2 MAJORs: double-mint, V4 trigger; 1 MINOR: equality projection) | PLAN-READY-WITH-NITS (1 nit: receive-deadline default — folded) | PLAN-READY-WITH-NITS (r29 fold-check of v15.16) |
+
+Round-28 disposition: all seven Codex findings + the AGY nit fold in
+v15.16 (producer-ordering invariant for Close; daemon-lifetime
+monotonic-generation debt with exact-generation ACK discharge;
+effective-destination IP+port canonicalization; decode-time
+base-identity index; universal producer atomicity; sender-side
+known-stale omission; telemetry-excluded equality projection;
+receive-deadline default). Round 29 re-reviews v15.16.

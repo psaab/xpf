@@ -1,21 +1,26 @@
 # #6751 plan — interface SNAT no-PAT admission: reserve-or-PAT the colliding translated tuple
 
-- **Status**: DRAFT v15.15 — round-27 fold (Codex r27 blockers 1-2 +
-  minor 3 + nits 4-5 + AGY r27 nit 1: the epoch envelope is captured
-  at the CONTENT-VERSION POINT — the per-key generation stamp — so
-  pre-abort content can never receive a post-abort epoch across the
-  stamp→encode→queue window; bulk frames bind generation to content
-  atomically (live re-read under the generation-map lock, recorded
-  generation for unchanged content, fresh mint for changed content,
-  omitted frame for vanished keys) so a stale batch copy can never
-  carry a generation greater than the change that overtook it;
-  barrier-abort recovery is AUTHORITATIVE-ONLY (doBulkSync or fenced
-  cold-prime, never the event-stream exporter, owed state persists,
-  abort does not consume the episode latch); stopClusterComms bumps
-  the arming generation UNCONDITIONALLY; the commit-gate stall seam
-  is exact; the bulk-ack flags carry their code names
-  (outboundBulkAcked/bulkEverCompleted); the barrier drain bound
-  (2-5s) is named in the parameter summary)
+- **Status**: DRAFT v15.16 — round-28 fold (Codex r28 blockers 1-4 +
+  majors 5-6 + minor 7 + AGY r28 nit 1: content-version binding is
+  now rooted in a PRODUCER-ORDERING INVARIANT — a Close deletes the
+  BPF mirror row BEFORE the close publishes on any channel, so
+  mirror-presence at a Go read implies no close consumed and the
+  mirror re-read IS a consistent cut relative to Go's generation
+  state; V1-V4 re-framed on that invariant with sender-side
+  known-stale omission as the re-conveyance trigger; the occupancy
+  identity canonicalizes the EFFECTIVE post-DNAT destination IP AND
+  PORT at every SourceNatFlowKey site — the VIP:80/VIP:81 →
+  backend:8080 composed-DNAT collision closes through the registry;
+  the authoritative-prime debt is daemon-lifetime with a monotonic
+  debtGen, inherited across SessionSync replacement, discharged by
+  exact-generation compare-and-clear on BulkEnd-ACK, never cleared
+  by the readiness timeout, with runtime attach before accept;
+  the alias sibling-confirmation predicate reads a bounded
+  decode-time BASE-IDENTITY INDEX (RTFlowSessionID is absent from
+  the BPF ABI — the store can never answer it); the (generation
+  draw, epoch capture, record) triple is one critical section for
+  EVERY producer; versioned equality excludes mirror-only telemetry;
+  the per-bulk receive deadline default (5-10s) is named)
 - **Issue**: #6751 (opus-review-001 R08, High, `bug`+`audit`+`security`) —
   interface SNAT admits indistinguishable no-PAT return tuples and sends
   replies to the FIRST session.
@@ -146,7 +151,23 @@ exact PAT fallback", built ENTIRELY on the shipped #5269 token machinery:
    same source port to different servers → BOTH preserve; TCP vs UDP same
    numeric port → both preserve; source port < 1024 → preserved (PAT
    candidates drawn ≥ 1024); cross-destination port reuse allowed (the
-   Junos-default OVERLOADING posture).
+   Junos-default OVERLOADING posture). The destination components of
+   every flow identity are the EFFECTIVE post-DNAT destination —
+   `dst_ip = nat.rewrite_dst.unwrap_or(key.dst_ip)` AND
+   `dst_port = nat.rewrite_dst_port.unwrap_or(key.dst_port)` — at EVERY
+   `SourceNatFlowKey` construction site (admission mint, synchronized
+   reserve, release source.rs:807, rollback, the shared-holder release
+   :880, and both probe classes), mirroring exactly the wire-key
+   derivation in `forward_wire_key`/`reverse_wire_key`
+   (session/key.rs:28/94) so the registry's identity space IS the wire
+   tuple space (Codex r28 blocker 3: `with_destination` changes only
+   the IP, types/mod.rs:280, and today the release/reserve sites build
+   the flow key with the RAW `key.dst_port` — so `VIP:80` and `VIP:81`
+   both DNAT'd to `backend:8080` and interface-SNAT'd would occupy two
+   registry identities whose forward AND reverse wire tuples are
+   identical: the exact indistinguishable-tuple misdelivery through
+   the registry itself; canonicalizing the port closes it, and §9
+   pins the composed-DNAT collision test).
 3. **Admission mint** (interface branch, nat/source.rs:1226), gated
    `!non_first_fragment && !tuple_unknown` (BOTH probe classes mint nothing):
    - **port-less protocol**: `alloc.reserve_address_only(flow, egress)` —
@@ -176,7 +197,8 @@ exact PAT fallback", built ENTIRELY on the shipped #5269 token machinery:
    RT_FLOW (rt_flow.rs:82), HA conversion (daemon_ha_userspace_convert.go:357
    + protocol_ha.go:57); DNAT composition is internally consistent
    (`merge()` preserves destination rewrites, nat/mod.rs:125, and the SNAT
-   allocation uses the effective post-DNAT destination,
+   allocation uses the effective post-DNAT destination — IP AND port,
+   per the §4-option-(a) canonicalization rule,
    poll_descriptor/mod.rs:2201); tunnel-local entries carry
    `NatDecision::default()` (tunnel.rs:565) — no counterexample.
 
@@ -1046,41 +1068,108 @@ record's identity frees only when `per_worker` is empty AND
       (iii) the bulk writes losslessly under the new epoch, with
       `BulkEnd` committed ONLY after every bulk frame is confirmed
       written in the same direct-write sequence.
-      The bulk's own frames obey CONTENT-VERSION BINDING, not
-      write-time stamping (Codex r27 blocker 1's second
-      counterexample: the batch iterator copies up to 256 values
-      before their callbacks run, maps_session.go:237, and today the
-      bulk callback draws a FRESH generation at write time —
-      `stampInstallGenV4` inside the ForEach callback, sync_bulk.go:95
-      → sync_conn_gen.go:59 — so a stale copy `K=V_old`, overtaken by
-      a close/replacement that drew `G1`, gets stamped `G2 > G1` and
-      the receiver keeps the stale row in EVERY wire order: bulk-first
-      rejects the real `G1` as older, delta-first lets stale `G2`
-      overwrite `G1`, and the BulkEnd received-set bookkeeping
-      retains it, sync_conn_read.go:109/205). The rule — generation
-      is bound to CONTENT at one atomic point, never drawn after the
-      content may have advanced: each bulk callback, under the
-      generation-map lock, (V1) re-reads the LIVE sessions map for K
-      and encodes from the live value, never from the batch copy;
-      (V2) uses the generation RECORDED for K when the live value
-      equals the copy (the copy is still the current content version),
-      and mints-and-records a FRESH generation when the live value
-      differs (current content has no reliable recorded version —
-      minting for current content is exactly what `QueueSessionV4`
-      does at stamp time, and over-minting the CURRENT content is
-      always safe: the receiver's guard prefers the higher generation
-      and the mint IS the sender's latest knowledge); (V3) OMITS the
-      frame when K has vanished between copy and callback — the
-      close's tombstone delta (durable via the delete journal,
+      The bulk's own frames obey CONTENT-VERSION BINDING rooted in a
+      PRODUCER-ORDERING INVARIANT, not write-time stamping and not a
+      Go-side lock around the mirror read (Codex r27 blocker 1's
+      second counterexample: the batch iterator copies up to 256
+      values before their callbacks run, maps_session.go:237, and
+      today the bulk callback draws a FRESH generation at write time
+      so a stale copy gets stamped above the change that overtook it;
+      Codex r28 blocker 1's deeper cut: the "LIVE sessions map" is the
+      asynchronously maintained BPF MIRROR, not the Rust helper's
+      authoritative session table — Rust publishes the close event at
+      session_delta.rs:282 BEFORE deleting the mirror row at
+      session_delta.rs:406, so Go can consume the close, draw the
+      tombstone `G1`, and REMOVE the recorded generation
+      (takeDeleteGenV4, sync_conn_gen.go:179) while the mirror still
+      shows `K=V_old` — no Go lock around the mirror read can order
+      that, because the event stream and the mirror are two
+      unsynchronized producer channels). The root rule is therefore
+      PRODUCER-SIDE: **for a session Close, the mirror row is deleted
+      BEFORE the close is published on ANY channel** (event stream,
+      RPC fallback, recent-deltas ring — the single
+      session_delta.rs funnel), giving the load-bearing invariant:
+      mirror-PRESENCE of K at a Go read implies NO close for K has
+      been published, hence none consumed, hence Go's generation map
+      still holds K's install record (or never had one) — the mirror
+      re-read IS a consistent cut relative to Go's generation state.
+      The invariant is scoped to OUTBOUND-published closes of
+      locally-originated sessions: the other mirror-removal paths
+      (session_glue/mod.rs:437/577/926 — worker-synced redirect and
+      import-path removals) are receiver-side or redirect-lifecycle
+      machinery that never outbound-publishes a delete for a
+      locally-owned key (a sync-imported session's delete is SENT by
+      the peer through ITS ordered funnel and consumed here via the
+      receiver import path), and the bulk's owned-zone filter
+      (ShouldSyncZone + IsReverse, sync_bulk.go:94-96) scopes the
+      snapshot to rows this node answers for
+      (the reverse direction needs no invariant: an Open published
+      before its mirror insert can only make the bulk OMIT a live
+      key, and the Open delta itself — lossless per #2874 —
+      re-conveys it, landing in the received set when it interleaves
+      the bulk). On top of that invariant the bulk callback, in ONE
+      critical section per frame (the universal producer rule below):
+      (V1) re-reads the mirror for K and encodes from the live value,
+      never from the batch copy; (V2) uses the generation RECORDED
+      for K when the live value equals the copy under the VERSIONED
+      EQUALITY PROJECTION (forwarding-relevant fields only — tuple +
+      rewrite fields; the mirror-only telemetry Rust re-stamps
+      without generation — `last_seen`, re-resolved `policy_id`,
+      counters, bpf_map/mod.rs:364/438 — is EXCLUDED from versioned
+      equality, Codex r28 minor 7), and mints-and-records a FRESH
+      generation when the projection differs (current content has no
+      reliable recorded version — minting for current content is
+      exactly what `QueueSessionV4` does at stamp time, and
+      over-minting the CURRENT content is always safe: the receiver's
+      guard prefers the higher generation and the mint IS the
+      sender's latest knowledge); (V3) OMITS the frame when the
+      mirror lacks K — under the producer invariant that means the
+      close was already published (or K never existed): the close's
+      tombstone delta (durable via the delete journal,
       sync_conn_write.go:69) and the BulkEnd reconcile (K absent from
-      the received set) converge the receiver; and (V4) a frame
-      refused by a strictly-greater tombstone is re-conveyed by the
-      existing sweep-replay/backfill machinery (#5450) with a fresh
-      generation — the (V2) mint makes this window near-zero. Every
+      the received set) converge the receiver; and (V4) KNOWN-STALE
+      OMISSION with a sender-side trigger (Codex r28 major 6: a
+      tombstone-refused frame at the receiver only bumps a counter,
+      sync_conn_gen.go:435, and no refusal feedback reaches the
+      sender — so the guarantee is sender-local): if, inside the same
+      critical section, K's recorded generation has ADVANCED PAST the
+      bound one (or the record was removed by a consumed close) since
+      the live re-read, the frame is known-stale and is NOT written;
+      re-conveyance is guaranteed by the advancing event's own
+      durable channel — deletes ride the delete journal (journaled on
+      any queue failure), installs arm `syncBackfillNeeded` on
+      queue-full and re-send from the 1s sweep (sync_conn_sweep.go)
+      — no receiver feedback is required (documented residual: if
+      the advancing event is a replacement whose delta is dropped by
+      a full queue AND the bulk's BulkEnd lands before the 1s sweep
+      re-sends, the receiver deletes K at reconcile and re-installs
+      it at the sweep — a sub-second standby gap for a session that
+      changed mid-bulk, identical in shape to today's
+      in-flight-change-during-bulk behavior). Every
       wire interleave of bulk frames against deltas then resolves
       through the receiver's per-key #2170 guard with NO stale
       survivorship: a stale copy can never carry a generation greater
-      than the change that overtook it.
+      than the change that overtook it. The cap-saturation residual
+      (a generation-zero first-sight install racing a tombstone,
+      bounded maps at 200k keys, sync_conn_gen.go:23/45) stays in the
+      documented unordered class — the resurrected row is a DEAD
+      session (tuple reuse re-conveys a fresh install that out-orders
+      it), and the sender-cap arm drives a correcting authoritative
+      bulk within one cooldown window whose discharge is now
+      guaranteed by the debt machinery below.
+      And the UNIVERSAL PRODUCER RULE (Codex r28 major 5): for EVERY
+      producer — `QueueSessionV4/V6`, `QueueDeleteV4/V6`, the bulk
+      callback, and the journal re-envelope — the (generation draw,
+      epoch capture, generation-map record) triple is ONE critical
+      section (today `stampInstallGenV4` draws `nextInstallGen` and
+      mutates the value BEFORE taking `genSentMu`,
+      sync_conn_gen.go:119, while `putGenBounded` overwrites
+      unconditionally, :45 — a draw-record split that lets a
+      first-offer `G1` overwrite the bulk's newer recorded `G2`;
+      moving the draw inside the record lock closes it), and every
+      `sendCh` insertion path — including the barrier request path
+      (`writeBarrierMessage`, sync_bulk.go:305) — carries the epoch
+      envelope.
       Backpressure: if the
       delta queue does not drain within the barrier bound, the prime
       ABORTS BEFORE STARTING (it does not interleave with stale
@@ -1101,9 +1190,37 @@ record's identity frees only when `per_worker` is empty AND
       cold-prime window) or forces a fenced reconnect whose
       cold-prime IS `doBulkSync` — NEVER the event-stream exporter;
       a barrier abort does NOT consume the episode latch (one
-      authoritative re-drive per cooldown window, and the owed state
-      survives until a `doBulkSync` completes or a fenced cold-prime
-      lands); the readiness-timeout degraded release remains the
+      authoritative re-drive per cooldown window); and the owed state
+      is a DAEMON-LIFETIME DEBT with a monotonic generation, not a
+      SessionSync-local boolean (Codex r28 blocker 2: the existing
+      latches are SessionSync-local, sync.go:448/500, and teardown
+      destroys that object, daemon_ha_sync.go:1405, while the retry
+      exits on replacement, :223 — and a plain boolean lets an older
+      asynchronous success clear a newer abort's re-armed debt, the
+      exact race the `needColdPrime` comment admits at sync.go:513).
+      The debt (`authoritativePrimeDebt`) lives in the Daemon: ARMING
+      (a barrier abort, or any transition that schedules an
+      authoritative prime) increments a monotonic `debtGen` and
+      records owed=true under the daemon's lifecycle lock; a
+      REPLACEMENT SessionSync INHERITS the debt at construction — its
+      first connection schedules the authoritative prime whenever the
+      daemon holds owed=true, regardless of the wasDisconnected
+      shape; DISCHARGE is EXACT-GENERATION COMPARE-AND-CLEAR on
+      BulkEnd-ACK, not on write completion (doBulkSync success means
+      BulkEnd was WRITTEN, sync_bulk.go:183 — the ACK arrives later,
+      sync_conn_read.go:249): the ack-received path clears owed only
+      when the acked prime's debt generation EQUALS the current
+      `debtGen`, so an older async completion can never clear a newer
+      abort's debt; and the readiness timeout releases the VRRP HOLD
+      but NEVER clears the debt (the hold release is the bounded
+      degraded path; the debt still discharges at the next
+      authoritative prime). The replacement also attaches its runtime
+      BEFORE accepting connections (today the accept runs at
+      daemon_ha_sync.go:1138 while `SetRuntime` lands at :1165, so an
+      immediate cold-prime fails `sessions == nil`,
+      sync_bulk.go:57 — under the debt rule a cold-prime attempted
+      with no runtime attached DEFERS and re-arms instead of
+      failing); the readiness-timeout degraded release remains the
       bounded last resort, and the barrier
       drain bound is a concrete implementation parameter — default
       2-5s, named alongside the other parameters in the summary below
@@ -1287,14 +1404,35 @@ record's identity frees only when `per_worker` is empty AND
       r14 blocker 2: the sender queues canonical base FIRST and alias
       SECOND on open, daemon_ha_userspace_stream.go:370/375/384, so the
       base has normally ALREADY been imported when the alias arrives —
-      confirmation checks the CURRENT session store for a sibling
-      canonical base at quarantine INSERTION (a canonical row whose
-      forward-wire form equals the quarantined key with an identical
-      NatDecision and an equal NON-ZERO RTFlowSessionID — the r6-r8
-      predicate, reliable for an actual pair) and confirms immediately;
-      only when NO sibling base is present (the lossy-reorder
-      alias-first case) does the entry wait for the base's arrival or
-      the timeout). A confirmed entry is dropped and its key enters the
+      confirmation checks a BOUNDED RECEIVER-SIDE BASE-IDENTITY INDEX
+      for a sibling canonical base at quarantine INSERTION (a canonical
+      row whose forward-wire form equals the quarantined key with an
+      identical NatDecision and an equal NON-ZERO RTFlowSessionID —
+      the r6-r8 predicate, reliable for an actual pair) and confirms
+      immediately; only when NO sibling base is present (the
+      lossy-reorder alias-first case) does the entry wait for the
+      base's arrival or the timeout). The index — not the session
+      store — is the predicate's source (Codex r28 blocker 4:
+      `SessionSync.sessions` is a `dataplane.SessionStore`,
+      sync.go:293, whose reads delegate to the BPF session map,
+      session_store.go:118, and `RTFlowSessionID` is sync-only —
+      absent from that ABI, types.go:114, lifted as zero,
+      bpf_session_value.go:204 — so the store can NEVER satisfy the
+      equal-nonzero predicate and the base-first normal case would
+      fail open at BulkEnd, recreating the synthesized companion the
+      quarantine exists to prevent). The index is populated at DECODE
+      time — the same serialized point where bulk bookkeeping records
+      the key (sync_conn_read.go:110 ordering), where the decoded
+      frame's RTFlowSessionID IS present: every SNAT-flagged
+      non-NAT64 canonical-candidate frame records (forward-wire
+      relation → RTFlowSessionID); the index is scoped to the bulk
+      epoch (dropped at BulkEnd after the quarantine resolution pass
+      — the complete-snapshot resolution IS the definitive check) and
+      to the incremental-delta fallback window (entries expire with
+      the 5s timer), bounded by the same cap discipline as the
+      quarantine itself (overflow joins the quarantine-overflow
+      fail-closed bulk abort — payloads are already retained by the
+      quarantine, so the index adds only (key, id) pairs). A confirmed entry is dropped and its key enters the
       delete-suppression set. On timeout the entry is ADMITTED as a
       canonical row by DISPATCHING THE STORED FRAME INTO THE COMPLETE
       NORMAL import path — generation checks, timestamp rebasing,
@@ -1748,6 +1886,34 @@ quarantine-admitted + overflow), and tests.
   `QueueSessionV4` stamp→encode→queue window — an abort between
   generation stamp and enqueue leaves the envelope at the OLD epoch,
   discarded on the replacement connection), PLUS the
+  producer-ordering invariant (Codex r28 blocker 1: for a Close the
+  mirror row is deleted BEFORE the close publishes on any channel —
+  a Go close-consumption (tombstone drawn, generation record removed)
+  implies the mirror already lacks K, so the bulk's live re-read
+  takes the V3 omit branch and the durable tombstone + BulkEnd
+  reconcile converge the receiver in BOTH wire orders; the reverse
+  order (publish-then-delete) is a pinned regression RED), PLUS the
+  known-stale omission (Codex r28 major 6: a close/replacement
+  consumed between the live re-read and the bind advances the
+  recorded generation inside the same critical section — the frame
+  is NOT written, and the advancing event's own channel re-conveys:
+  journaled delete, or backfill-armed sweep re-send), PLUS the
+  universal producer atomicity regression (Codex r28 major 5: a
+  first-offer draw racing a bulk mint can never overwrite the map
+  with an older generation — draw, epoch capture, and record are one
+  critical section per producer, RED on the draw-before-lock shape at
+  sync_conn_gen.go:119), PLUS the debt machinery (Codex r28 blocker
+  2: a barrier-aborted prime's debt survives SessionSync teardown
+  and is INHERITED by the replacement's first connection; discharge
+  is exact-generation compare-and-clear on BulkEnd-ACK — an older
+  async completion never clears a newer abort's debt (second-abort/
+  older-completion race); a cold-prime attempted with no runtime
+  attached DEFERS and re-arms (never fails sessions==nil, never
+  discharges); the readiness timeout releases the hold but NEVER
+  clears the debt), PLUS the equality-projection case (Codex r28
+  minor 7: a LastSeen/policy_id/counter-only mirror refresh does NOT
+  force a fresh mint — versioned equality covers only the
+  forwarding-relevant projection), PLUS the
   authoritative-recovery case (a barrier-aborted prime re-drives ONLY
   the lossless direct-write `doBulkSync` or a fenced-reconnect
   cold-prime — the event-stream exporter path is NEVER used for the
@@ -1767,7 +1933,15 @@ quarantine-admitted + overflow), and tests.
   session); same port different servers BOTH preserve; TCP vs UDP same
   numeric port BOTH preserve; source port < 1024 preserved; ICMP same-id
   pair → second id translated; port-less GRE → token, second collider
-  fail-closed; EXACT probe (local start ordinal: full cycle finds the one
+  fail-closed; COMPOSED-DNAT collision (Codex r28 blocker 3: `VIP:80`
+  and `VIP:81` both DNAT to `backend:8080` and share the interface-SNAT
+  egress — the registry MUST see one effective identity
+  (rewrite_dst_port-canonicalized), the first flow preserves, the
+  second PATs, and both flows' replies un-NAT to their OWN forward
+  session; every `SourceNatFlowKey` construction site — mint, reserve,
+  release source.rs:807, rollback, shared-holder release :880, both
+  probe classes — uses `rewrite_dst_port.unwrap_or(key.dst_port)`);
+  EXACT probe (local start ordinal: full cycle finds the one
   free candidate among shaped contiguous occupied runs — RED on the v2
   4096-budget design; genuine per-destination saturation → exhaustion;
   registry-cap vs per-destination exhaustion distinguished; concurrent
@@ -1815,10 +1989,15 @@ quarantine-admitted + overflow), and tests.
   would panic);
   confirmation is ORDER-AGNOSTIC (Codex r14 blocker 2 — the sender queues
   the base FIRST on open, daemon_ha_userspace_stream.go:370/375/384, so
-  the quarantine checks the CURRENT store for a sibling canonical base
-  at INSERTION: forward-wire relation + identical decision + equal
-  NON-ZERO RTFlowSessionID — and only waits for the base's arrival in
-  the lossy-reorder alias-first case) → confirmed entries dropped +
+  the quarantine checks the bounded decode-time BASE-IDENTITY INDEX for a
+  sibling canonical base at INSERTION: forward-wire relation + identical
+  decision + equal NON-ZERO RTFlowSessionID — populated at decode where
+  the ID IS present, since the store-delegating read can never return it
+  (RTFlowSessionID is sync-only, absent from the BPF ABI, types.go:114 /
+  bpf_session_value.go:204 — Codex r28 blocker 4; the base-first normal
+  case MUST confirm through the index, RED on any store-read predicate)
+  — and only waits for the base's arrival in the lossy-reorder
+  alias-first case) → confirmed entries dropped +
   delete suppression that clears only when the FIRST delete for the key
   AFTER the base's delete is consumed (the alias's own delete — the
   exporter queues base-delete before alias-delete on close,
@@ -1849,7 +2028,8 @@ quarantine-admitted + overflow), and tests.
   quarantine cap (4096, tunable per deployment at provisioning),
   incremental-delta fallback timeout (5s), AbortFenceTimeout (a small
   multiple of the disconnect callback's normal latency — AGY r19 nit),
-  per-bulk receive deadline (new, named at implementation), the
+  per-bulk receive deadline (new, default 5-10s scaled to the bulk
+  size floor, named at implementation — AGY r28 nit 1), the
   abort-triggered per-peer reconnect backoff (base/cap, abort-only),
   AND the epoch-barrier drain bound (default 2-5s, named at
   implementation — AGY r27 nit 1);
