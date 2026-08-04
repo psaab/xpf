@@ -400,3 +400,29 @@
 ## Round 15 (plan v8.10 @ pending)
 
 - Codex, AGY, Claude SMR — pending dispatch.
+## Round 15 (plan v8.10 @ 12ced136fe30)
+
+- **Claude SMR r15** — `claude-smr-plan-r15.md`. Verdict:
+  DEMAND-REVISION (2 BLOCKER — SMR15-1 StartCompile reservation
+  clobbers itself in one apply (= AGY f1); SMR15-2
+  publication_rev seed has no acquisition ordering (= AGY f4);
+  + 3 MAJOR — 150s bound not the honest guarantee (= AGY f5);
+  per-mutation re-read must be try-lock (= AGY f6); re-sync
+  must fire on NONZERO helper-behind (= AGY f2, missed);
+  restore-rebind on every quiesced attempt (= AGY f3, missed);
+  + 3 MINOR — identity-keyed fabric debt (= AGY f7); note
+  clear ≥ sent (= AGY f8); batch-arrival + fsatomic pins).
+- **AGY r15** — background bash `bhsjhsjth`; direct `agy
+  --print-timeout 9m --print` (prompt assembled at 123,397
+  bytes); output `/tmp/agy-6749-r15.out`; verdict doc
+  `agy-plan-r15.md`. Verdict: DEMAND-REVISION (4 BLOCKER —
+  f1 StartCompile(false) clobbers precheck StartCompile(true);
+  f2 re-sync ignores nonzero helper-behind; f3 post-quiescence
+  failure leaves workers stopped; f4 unseeded publication_rev
+  at startup; + 3 MAJOR — f5 150s bound vs multi-RPC
+  pipelines; f6 blocking claimToken re-read under applySem;
+  f7 FabricSyncDebtOutstanding misses telemetry-updated debts;
+  + 1 MINOR — f8 note clear vs supersession).
+- **Codex r15** — background task `task-msdyv5wo-1gs8c2`
+  (prompt `/tmp/codex-6749-r15-prompt.txt`, --fresh). Output:
+  pending.
