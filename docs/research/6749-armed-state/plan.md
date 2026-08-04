@@ -1,6 +1,6 @@
 # #6749 — binding-plan expansion registers new slots unarmed, dataplane disabled indefinitely
 
-**Status: DRAFT v8.21 — pending adversarial plan review (round 26)**
+**Status: DRAFT v8.22 — pending adversarial plan review (round 27)**
 
 - Issue: #6749 (opus-review-001 root R06, severity High)
 - Research base: `ad9591177` (origin/master at worktree creation)
@@ -1197,7 +1197,43 @@
   → `m.mu`
   lock-order census (SMR25-3) and the OVERLAP-clear
   → re-drive chain-state note (SMR25-4) fold @
-  pending
+  `b7b9ff1ae` (r26: SMR DEMAND-REVISION (0 BLOCKER +
+  1 MAJOR + 3 MINOR); AGY DEMAND-REVISION (1 MAJOR +
+  2 MINOR + 1 NIT); Codex infra-blocked (fifth
+  documented attempt; 2-of-3); + the AGY r25 f1
+  record correction @ `e728b2e7d`)
+; v8.22 folds SMR r26 (1 MAJOR + 3 MINOR) + AGY r26
+  (1 MAJOR + 2 MINOR + 1 NIT): the sweep never blocks
+  the status thread (SMR26-1 = AGY r26 f1 — the
+  v8.21 "ONE routine, two triggers" wording let the
+  1s status pass execute a blocking `applySem`
+  acquire (freezable for minutes behind a long
+  control apply): the 1s pass now only SCANS and
+  MARKS pending cursors (under `m.mu`, non-blocking)
+  and DISPATCHES the per-entry drain execution to
+  the daemon's apply scheduler — the same scheduler
+  thread the notice drain rides, where the blocking
+  acquire is safe; the status thread never takes
+  `applySem`); the drain-time composition target is
+  the drain-time EXPOSED pair (SMR26-2 = AGY r26 f2
+  + f4 — a promoted-but-GATED successor C leaves the
+  dataplane enforcing B, so composing A→C would
+  delete B-authorized sessions: the invalidation
+  composes prior → `m.lastExposedPair` at drain time
+  (A→C when C is exposed, A→B when C is gated — one
+  rule, both shapes), the stamp/push gate keys on
+  STORE currency (the two "currents" named
+  explicitly), and §9 (a) gains the gated-successor
+  assertion); the r25 f1 row's mis-attribution is
+  recorded (SMR26-3 — corrected at `e728b2e7d`);
+  and the cursor registry's terminal-entry GC is
+  pinned (SMR26-4, self-found — a terminal entry
+  (completed or SUPERSEDED) is GC'd on the sweep
+  pass that first observes it terminal, so the
+  registry's live set is bounded by concurrently-
+  incomplete exposures and the 1s scan is O(handful);
+  the crash rule never reads a GC'd entry — it
+  re-derives from the sidecar + store) @ pending
   AGY r15 (4 BLOCKER + 3 MAJOR + 1 MINOR) + SMR r15 (2
   BLOCKER + 3 MAJOR + 3 MINOR/NIT): R1 becomes a REAL
   rollout+transport contract — a legacy `active.json`
@@ -1279,7 +1315,7 @@
 
 ## 1. Status
 
-DRAFT v8.21 — pending adversarial plan review round 26 (Codex + AGY +
+DRAFT v8.22 — pending adversarial plan review round 27 (Codex + AGY +
 Claude SMR). Convergence target: PLAN-READY (recommended path shipped
 to `/engineer`) or PLAN-KILL. No production code is written under
 `/research`.
@@ -2389,11 +2425,12 @@ to `/engineer`) or PLAN-KILL. No production code is written under
   abort-only leak SMR24-1 traced; the fold's (i) is what
   actually covers the A-era deletions, and it RUNS for stale
   notices), and the sweep's semaphore/cadence were unpinned
-  (SMR25-2 = AGY f3). AGY-only: f1 (a `C-permitted`→
-  `C-revoked` typo — verified a PROMPT-TRANSPORT typo in the
-  r25 review prompt's §9 (a) replay; plan.md's §9 (a) already
-  read `C-revoked` — no plan defect, no fold needed beyond the
-  record). SMR-only: SMR25-3 (the applySem → `m.mu` census),
+  (SMR25-2 = AGY f3). AGY-only: f1 (a claimed
+  `C-permitted`→`C-revoked` typo — NOT-VERIFIED
+  (spurious): both the dispatched prompt and plan.md
+  read `C-revoked`; an AGY misread of the wrapped
+  SURVIVES/deleted clause pair). SMR-only: SMR25-3
+  (the applySem → `m.mu` census),
   SMR25-4 (the OVERLAP-clear → re-drive chain-state note).
 - **Round-25 disposition table:**
 
@@ -2404,6 +2441,29 @@ to `/engineer`) or PLAN-KILL. No production code is written under
   | AGY f1 §9 (a) typo claim | NOT-VERIFIED (spurious) — AGY quoted the review prompt's §9 (a) as reading "C-permitted session is deleted", but BOTH the dispatched prompt (`/tmp/agy-6749-r25-prompt.txt`, md5 3fd8b4c0) AND plan.md's §9 (a) read `C-revoked` (zero occurrences of the claimed form in either); an AGY misread of the wrapped SURVIVES/deleted clause pair |
   | SMR25-3 applySem → m.mu census | CLOSED — stated next to SMR24-8's writeMu → `s.mu` rule (Compile runs under `applySem` and takes `m.mu`; the GO-LOCAL debt recording is enqueue-after-unlock; the manager never acquires `applySem`) (§5-C (ii)) |
   | SMR25-4 chain-state note | CLOSED — stated: T1's node is OVERLAP-terminal, T2's Finish folded the recorded outcomes and cleared `compileInFlight`, and the re-drive's StartCompile begins a FRESH chain (§5-C) |
+
+- **Round 26** (v8.21): SMR DEMAND-REVISION (0 BLOCKER + 1 MAJOR
+  + 3 MINOR); AGY DEMAND-REVISION (1 MAJOR + 2 MINOR + 1 NIT);
+  Codex INFRA-BLOCKED (fifth documented attempt; 2-of-3).
+  Convergence (both substantive pins found independently): the
+  v8.21 sweep pin let the 1s status pass execute a blocking
+  `applySem` acquire (SMR26-1 = AGY f1 — freezable for minutes
+  behind a long control apply, stalling status ingestion and
+  heartbeat), and the notice drain's composition target could
+  be an unexposed gated successor (SMR26-2 = AGY f2 — composing
+  A→C while C is gated deletes B-authorized sessions). AGY-only:
+  f3 (the r25 f1 row's mis-attribution — already corrected at
+  `e728b2e7d`), f4 (the §9 (a) gated-successor assertion, folds
+  with SMR26-2). SMR-only: SMR26-4 (the cursor registry's
+  terminal-entry GC, self-found).
+- **Round-26 disposition table:**
+
+  | r26 finding | v8.22 disposition |
+  |---|---|
+  | SMR26-1 / AGY f1 sweep blocks the status thread | CLOSED — the 1s status pass only SCANS and MARKS pending cursors (under `m.mu`, non-blocking) and DISPATCHES the per-entry drain execution to the daemon's apply scheduler (the scheduler thread the notice drain rides — the blocking acquire is safe there); the "ONE routine, two triggers" lives on the scheduler thread, never the status thread; §9 (a) asserts the pass completes under `applySem` contention (§5-C (ii), §9 (a)) |
+  | SMR26-2 / AGY f2+f4 composition target | CLOSED — the invalidation composes prior → the drain-time EXPOSED pair (`m.lastExposedPair` under `m.mu`) — A→C when C is exposed, A→B when C is gated (one rule, both shapes; a gated successor never invalidates B-authorized sessions); the stamp/push gate keys on STORE currency (the two "currents" named explicitly); §9 (a) gains the gated-successor assertion (§5-C (ii), §9 (a)) |
+  | SMR26-3 / AGY f3 r25 f1 row | CLOSED-ALREADY at `e728b2e7d` — the row now records NOT-VERIFIED (spurious — both artifacts read `C-revoked`; an AGY misread) |
+  | SMR26-4 cursor terminal-entry GC | CLOSED — a terminal entry (completed or SUPERSEDED) is GC'd on the sweep pass that first observes it terminal; the registry's live set is bounded by concurrently-incomplete exposures; the crash rule re-derives from the sidecar + store, never from a GC'd entry (§5-C (ii)) |
 
 ### Round-1 detail log (kept for the record)
 
@@ -5353,19 +5413,38 @@ BLOCKERs 6 + 8; v8 epoch form per Codex r6 f6/f8):**
   sessions)): the notice drain ACQUIRES `applySem`
   (serializing against every promotion+apply),
   re-reads the CURRENT pair at drain time, and (i)
-  the session invalidation composes prior → CURRENT
-  (the uniform base — A→C covers A\B\C-revoked
+  the session invalidation composes prior → the
+  drain-time EXPOSED pair (`m.lastExposedPair` under
+  `m.mu` — v8.22, SMR r26 SMR26-2 = AGY r26 f2's
+  gated-successor fix: "CURRENT" for the
+  invalidation is the EXPOSED pair at drain time,
+  NOT the store-active pair — a promoted-but-GATED
+  successor C (`R_c > durableRevision`) leaves the
+  dataplane enforcing B, and composing A→C would
+  delete B-authorized sessions while C is
+  unenforced (the exposure gate's invariant: an
+  unexposed config never alters session posture);
+  the rule covers both shapes — C exposed ⇒ A→C
+  (A→C covers A\B\C-revoked
   exactly, keeps A\B∩C-permitted, and C's own B→C
   covers B\C: the union is complete with no
-  over-deletion), (ii) the applied stamp and the peer
-  push are CURRENCY-GATED (skipped when the notice's
-  pair is no longer current — the newer pair's own
-  tails carry them), and (iii) a superseded notice's
+  over-deletion), C gated ⇒ A→B (exactly the
+  sessions the ENFORCED config revokes; C's own
+  exposure tails compose B→C later)), (ii)
+  the applied stamp and the peer
+  push are CURRENCY-GATED on STORE currency
+  (skipped when the notice's pair is no longer
+  store-active — the two "currents" are named
+  explicitly: the invalidation composes against the
+  drain-time EXPOSED pair; the stamp/push key on
+  the STORE-active pair), and (iii) a superseded
+  notice's
   cursor entry is marked SUPERSEDED (terminal,
   never left pending) — where SUPERSEDED marks ONLY
   the pair-specific tails (the stamp and the push)
   as skipped-by-design, and the invalidation (i)
-  composes prior → CURRENT and RUNS for stale
+  composes prior → the drain-time EXPOSED pair and
+  RUNS for stale
   notices exactly as for current ones (v8.21, SMR
   r25 SMR25-1 = AGY r25 f2's wording fix — the
   v8.20 parenthetical "the composition is covered
@@ -5400,12 +5479,30 @@ BLOCKERs 6 + 8; v8 epoch form per Codex r6 f6/f8):**
   status-application pass — after each helper-status
   application the daemon scans the pending-cursor set
   (no new timer; a dropped notice delays the tails
-  ≤ 1s + drain scheduling) — and the sweep's
-  per-entry execution is the SAME
-  `applySem`-acquiring drain path as the notice's
-  (ONE routine, two triggers — a sweep that composed
-  without the semaphore would race a promotion
-  mid-composition))); the helper-restart
+  ≤ 1s + drain scheduling) — and the pass NEVER
+  blocks on `applySem` (v8.22, SMR r26 SMR26-1 = AGY
+  r26 f1's freeze fix: the 1s pass only SCANS and
+  MARKS pending entries (under `m.mu`, non-blocking)
+  and DISPATCHES the per-entry drain execution to
+  the daemon's apply scheduler — the same scheduler
+  thread the notice drain rides, where the blocking
+  `applySem` acquire is safe; the v8.21 "ONE
+  routine, two triggers" wording let the status
+  thread itself execute the blocking acquire,
+  freezable for minutes behind a long control apply
+  (stalling status ingestion, fabric tracking, and
+  heartbeat) — the "one routine" now lives ONLY on
+  the scheduler thread, with the notice and the
+  sweep-dispatch as its two triggers, and the status
+  thread never takes `applySem`); and a terminal
+  cursor entry (completed or SUPERSEDED) is GC'd on
+  the sweep pass that first observes it terminal
+  (v8.22, SMR r26 SMR26-4: the registry's live set
+  is bounded by concurrently-incomplete exposures —
+  a handful — so the 1s scan is O(handful) for the
+  daemon's lifetime; the crash rule never reads a
+  GC'd entry — it re-derives from the sidecar +
+  store))); the helper-restart
   shape's no-op tails are NAMED (a fresh helper holds
   no sessions — the invalidation is a no-op on the
   empty base — but the peer push and the applied
@@ -7821,11 +7918,18 @@ activations a scheduled retry.
       via the status-loop catch-up posts its notice;
       C promotes and applies BEFORE the notice drains
       — assert the drain acquires `applySem`, composes
-      prior → CURRENT (A→C — an A-permitted,
+      prior → the drain-time EXPOSED pair (v8.22, SMR
+      r26 SMR26-2 = AGY r26 f2/f4: C EXPOSED ⇒ A→C (an
+      A-permitted,
       B-revoked, C-permitted session SURVIVES; an
       A-permitted, B-revoked, C-revoked session is
-      deleted — never the A→B composition over C; and
-      the A→C composition RUNS for the stale notice —
+      deleted) — never the A→B composition over C; and
+      C promoted-GATED (unexposed) ⇒ A→B (a
+      B-permitted, C-revoked session SURVIVES the
+      gated window — an unexposed config never alters
+      session posture; C's own exposure tails compose
+      B→C later); and
+      the composition RUNS for the stale notice —
       a skip-everything-on-SUPERSEDED implementation
       FAILS this test (v8.21, SMR r25 SMR25-1 = AGY
       r25 f2)),
@@ -7837,7 +7941,15 @@ activations a scheduled retry.
       cannot double-run a tail); a full notice
       channel drops the enqueue with a Warn AND the
       periodic pending-cursor sweep runs the tails
-      anyway (assert the sweep, not just the notice);
+      anyway (assert the sweep, not just the notice)
+      — and the sweep NEVER blocks the status thread
+      (v8.22, SMR r26 SMR26-1 = AGY r26 f1: assert
+      the 1s pass completes with `applySem` HELD by a
+      long control apply — the pass scans and marks
+      under `m.mu` only, the drain execution is
+      dispatched to the apply scheduler, and a
+      terminal entry is GC'd on the observing pass
+      (SMR26-4));
       the A→B→C COMPOSITION (v8.15, Codex r19 f5): A
       exposed → gated B tightens → gated C promoted →
       C's exposure invalidates sessions against
@@ -8666,7 +8778,7 @@ the three owners through nine enumerations; the mixed-version
 producer is the documented exception with the required helper
 restart).
 
-Remaining questions for round 26, each invitable to PLAN-KILL with
+Remaining questions for round 27, each invitable to PLAN-KILL with
 a concrete counterexample:
 
 1. **Completeness, final form.** Exhibit a path to
@@ -8729,11 +8841,11 @@ a concrete counterexample:
    candidate-filter territory
    (`include_userspace_binding_interface`), explicitly out of
    scope here.
-6. **Round-25 disposition table audit.** §1's r25 table maps
-   every r25 finding (SMR 2 MINOR + 2 NIT; AGY 2 MINOR + 2
-   NIT; Codex infra-blocked) to its v8.21 fold, and every fold
-   this revision was verified per-edit against the file.
-   Which row is claimed-but-wrong this time?
+6. **Round-26 disposition table audit.** §1's r26 table maps
+   every r26 finding (SMR 1 MAJOR + 3 MINOR; AGY 1 MAJOR + 2
+   MINOR + 1 NIT; Codex infra-blocked) to its v8.22 fold, and
+   every fold this revision was verified per-edit against the
+   file. Which row is claimed-but-wrong this time?
 7. **Cumulative hazard budget, final sign-off (v8.8 honest
    numbers, Codex r11 f11 + r12 f14).** Healthy unsuppressed
    baseline for
