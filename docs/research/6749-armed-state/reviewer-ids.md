@@ -442,4 +442,47 @@
 
 ## Round 16 (plan v8.11 @ c381b621a44f)
 
+- **Claude SMR r16** — `claude-smr-plan-r16.md`. Verdict:
+  DEMAND-REVISION (1 MAJOR — SMR16-1 the batch-arrival "REVALIDATES
+  before enabling" rule is either a no-op or takes the whole dataplane
+  down via the all-or-nothing enabled gate; the correct form is
+  ABSORPTION at the re-Claim + immediate event-fired attempts with a
+  read-only MAC-match routing check; + 5 MINOR/NIT — dedicated
+  revision high-water counter (not archiveSeq), migration-write-failure
+  posture, note-echo loop ordering, UNKNOWN vs PRE-PUBLISH
+  classification, unwind failure routes to #5134, fairness pins,
+  FabricSyncStateOK fresh-boot polarity).
+- **AGY r16** — background bash (direct `agy --print-timeout 9m
+  --print`, prompt assembled at 123,277 bytes); output
+  `/tmp/agy-6749-r16.out`; verdict doc `agy-plan-r16.md`. Verdict:
+  DEMAND-REVISION (4 BLOCKER — f1 Option-B (B,A) duplicate-revision
+  aliasing; f2 DUAL refusal permanent deadlock when a restarted
+  manager's active lags the helper's stored revision; f3 direct
+  Compile invocations (HA sync, background recompiles, tests) canary-
+  panic under the single-site StartCompile model; f4 mid-quiesce link
+  return → wrong-MAC rebind for deferred recovery members; + 3 MAJOR —
+  f5 pre-first-poll not-seeded-yet abort drops the boot apply with no
+  re-trigger; f6 claimToken re-read contention spurious unwinds;
+  f7 FabricSyncStateOK true immediately at startup before helper
+  alignment; + 1 MINOR — f8 applySem FIFO starvation of urgent MAC
+  recovery; + 1 NIT — f9 evidence requests).
+- **Codex r16** — companion session 019fcaa9-fa07-7ce3-b114-47683c8fcf59
+  (prompt `/tmp/codex-6749-r16-prompt.txt`, --fresh); output
+  `/tmp/codex-6749-r16.out` (arrived after the prior session ended;
+  verdict doc `codex-plan-r16.md` transcribed this session). Verdict:
+  DEMAND-REVISION (14 BLOCKER + 2 MAJOR + 1 MINOR — disposition table
+  false; Option B destroys config identity ((B,A) pair); migration no
+  failure policy/allocator ordering; SetActiveRevision+ApplyConfig not
+  atomic; ping seed too late for Compile stamping; socket ownership no
+  rebase proof + downward-rebase rollback window; fresh-minted stale
+  content escapes both fences; note has no typed refusal / note-first
+  ordering; re-sync test permits the precheck bypass; reservation ABA
+  + incomplete outcomes; claim validation not atomic with quiescence +
+  no restore owner; batch MAC revalidation no safe rebind; fabric
+  readiness not a coherence protocol + wrong identity; fairness model
+  inconsistent; tests green; pass-1 fixture-scoped; severity-High
+  residuals unbounded).
+
+## Round 17 (plan v8.12 @ 08c78677f)
+
 - Codex, AGY, Claude SMR — pending dispatch.
