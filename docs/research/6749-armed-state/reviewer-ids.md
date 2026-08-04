@@ -801,6 +801,32 @@
   `/tmp/codex-6749-r24-prompt.txt`). Proceeding 2-of-3 per the
   codex-infra-blocked exception; retries continue each round.
 
-## Round 25 (plan v8.20 @ pending)
+## Round 25 (plan v8.20 @ 783c9581d)
 
-- Codex (retry), AGY, Claude SMR — pending v8.20 fold.
+- **Claude SMR r25** — `claude-smr-plan-r25.md`. Verdict:
+  DEMAND-REVISION (0 BLOCKER + 0 MAJOR + 2 MINOR + 2 NIT —
+  SMR25-1 the SUPERSEDED parenthetical mis-describes the fix it
+  ships (self-found; "the composition is covered by the newer
+  pair's chain" is the abort-only leak SMR24-1 traced — reworded
+  in the normative text AND the r24 table row + the §9 (a) pin);
+  SMR25-2 the sweep's applySem/cadence unpinned (1s
+  status-application pass + the same drain routine); + 2 NIT —
+  SMR25-3 the applySem → m.mu census; SMR25-4 the OVERLAP-clear
+  → re-drive chain-state note).
+- **AGY r25** — background bash `b4kevrgzs`; prompt
+  `/tmp/agy-6749-r25-prompt.txt` (124,510 bytes); output
+  `/tmp/agy-6749-r25.out`; verdict doc `agy-plan-r25.md`.
+  Verdict: PLAN-READY-WITH-NITS (2 MINOR + 2 NIT — f1 a §9 (a)
+  `C-permitted`/`C-revoked` typo (VERIFIED prompt-transport
+  only; plan.md already correct — CLOSED-NO-PLAN-DEFECT);
+  f2 = SMR25-1; f3 = SMR25-2; f4 evidence wish). First
+  non-DEMAND verdict of the campaign.
+- **Codex r25** — INFRA-BLOCKED (usage limit; reset Aug 10
+  06:57 UTC). Fourth documented attempt this session
+  (`/tmp/codex-6749-r25-retry1.err`; r25 prompt staged at
+  `/tmp/codex-6749-r25-prompt.txt`). Proceeding 2-of-3 per the
+  codex-infra-blocked exception; retries continue each round.
+
+## Round 26 (plan v8.21 @ pending)
+
+- Codex (retry), AGY, Claude SMR — pending v8.21 fold.

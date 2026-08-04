@@ -1,6 +1,6 @@
 # #6749 — binding-plan expansion registers new slots unarmed, dataplane disabled indefinitely
 
-**Status: DRAFT v8.20 — pending adversarial plan review (round 25)**
+**Status: DRAFT v8.21 — pending adversarial plan review (round 26)**
 
 - Issue: #6749 (opus-review-001 root R06, severity High)
 - Research base: `ad9591177` (origin/master at worktree creation)
@@ -1167,7 +1167,34 @@
   serialization (SMR24-7), the `isExposed` closure's
   lock-order rule (SMR24-8 — writeMu → `s.mu` only),
   and the held-push-forever budget note (SMR24-9)
-  fold @ pending
+  fold @ `783c9581d` (r25: SMR DEMAND-REVISION (0
+  BLOCKER + 0 MAJOR + 2 MINOR + 2 NIT); AGY
+  PLAN-READY-WITH-NITS (2 MINOR + 2 NIT); Codex
+  infra-blocked (fourth documented attempt; 2-of-3))
+; v8.21 folds SMR r25 (2 MINOR + 2 NIT) + AGY r25 (2
+  MINOR + 2 NIT): the SUPERSEDED parenthetical is
+  reworded (SMR25-1 = AGY r25 f2 — "the composition
+  is covered by the newer pair's chain" was FALSE on
+  its face (it is exactly the abort-only leak
+  SMR24-1 traced) and contradicted the fold's own
+  (i): SUPERSEDED now marks ONLY the pair-specific
+  tails (stamp/push) as skipped-by-design while the
+  invalidation (i) composes prior → CURRENT and RUNS
+  for stale notices exactly as for current ones —
+  reworded in the normative text AND the r24 table
+  row, and §9 (a) pins the reading (a skip-everything
+  implementation fails the test)); the sweep's
+  semaphore + cadence are pinned (SMR25-2 = AGY r25
+  f3 — the sweep rides the 1s status-application
+  pass (a dropped notice delays the tails ≤ 1s +
+  drain scheduling) and its per-entry execution is
+  the SAME `applySem`-acquiring drain path as the
+  notice's (one routine, two triggers)); the §9 (a)
+  assertion's `C-permitted`→`C-revoked` typo is
+  fixed (AGY r25 f1); the applySem → `m.mu`
+  lock-order census (SMR25-3) and the OVERLAP-clear
+  → re-drive chain-state note (SMR25-4) fold @
+  pending
   AGY r15 (4 BLOCKER + 3 MAJOR + 1 MINOR) + SMR r15 (2
   BLOCKER + 3 MAJOR + 3 MINOR/NIT): R1 becomes a REAL
   rollout+transport contract — a legacy `active.json`
@@ -1249,7 +1276,7 @@
 
 ## 1. Status
 
-DRAFT v8.20 — pending adversarial plan review round 25 (Codex + AGY +
+DRAFT v8.21 — pending adversarial plan review round 26 (Codex + AGY +
 Claude SMR). Convergence target: PLAN-READY (recommended path shipped
 to `/engineer`) or PLAN-KILL. No production code is written under
 `/research`.
@@ -2340,7 +2367,7 @@ to `/engineer`) or PLAN-KILL. No production code is written under
 
   | r24 finding | v8.20 disposition |
   |---|---|
-  | SMR24-1 / AGY f1 notice currency gate | CLOSED — the completion-notice drain acquires `applySem`, re-reads the CURRENT pair at drain time, composes prior → CURRENT for the invalidation (the uniform base — complete with no over-deletion), currency-gates the applied stamp + peer push (skipped when the notice's pair is no longer current), and marks a superseded notice's cursor entry SUPERSEDED (terminal — the newer pair's chain covers the composition) (§5-C (ii), §6, §9 (a)) |
+  | SMR24-1 / AGY f1 notice currency gate | CLOSED — the completion-notice drain acquires `applySem`, re-reads the CURRENT pair at drain time, composes prior → CURRENT for the invalidation (the uniform base — complete with no over-deletion; the invalidation RUNS for stale notices exactly as for current ones), currency-gates the applied stamp + peer push (skipped when the notice's pair is no longer current), and marks a superseded notice's cursor entry SUPERSEDED (terminal — SUPERSEDED marks ONLY the pair-specific tails (stamp/push) as skipped-by-design; the v8.20 "the newer pair's chain covers the composition" phrasing was reworded v8.21 per SMR r25 SMR25-1 = AGY r25 f2 — C's B→C chain never covers A-permitted/B-revoked/C-revoked sessions; the drain's own prior → CURRENT composition does) (§5-C (ii), §6, §9 (a)) |
   | SMR24-2 / AGY f2 cursor atomic | CLOSED — the cursor record lives manager-side; EVERY `{phaseCursor, completionState}` read-modify-write goes through ONE manager method under `m.mu` (the daemon wrapper's phase completions call it across the package boundary; the listener likewise); the transports are per-acceptance unique, so the residual race is phase-level and the `m.mu` advancement covers it (§5-C (ii), §9 (a)) |
   | SMR24-3 / AGY f3 post-clear value | CLOSED — the post-clear `m.lastSnapshot` value is NIL (the staged object is the only reference; revert-to-published is impossible without new retained state — rejected); the nil-guard census (syncSnapshotLocked, overlay, neighbor, HA, status, applied-view — all nil-guard under `m.mu`) becomes a build-time canary; the transient overlay/scheduler publish gap until the GO-LOCAL re-drive rebuilds is stated (§5-C, §6) |
   | SMR24-4 / AGY f4 notice overflow | CLOSED — the notice is an OPTIMIZATION over a periodic pending-cursor sweep on the daemon scheduler (the cursor registry is queryable daemon-side; the sweep runs at the standing debt cadence); the enqueue failure records a Warn edge (§5-C (ii), §9 (a)) |
@@ -2349,6 +2376,31 @@ to `/engineer`) or PLAN-KILL. No production code is written under
   | SMR24-7 timeout/bind race | CLOSED — the scheduler entry's fire and the registration's completion serialize under `m.mu`; the fire re-checks the registration's liveness under the same lock (a completed registration cancels the entry atomically) (§5-C) |
   | SMR24-8 isExposed lock order | CLOSED — the closure's `DurableRevision()` read under `writeMu` follows the order writeMu → `s.mu` ONLY (the reconciler reads `ActivePair()` under `s.mu` and RELEASES before `QueueConfig`; no `s.mu` holder calls into the send path) (§5-C (ii), §6) |
   | SMR24-9 held-push budget | CLOSED — §11 Q7 carries the class (a never-completing drain leaves the gated push held — a consequence of the budgeted persistent-storage-failure class; the peer's state never leads the primary's exposed state) |
+
+- **Round 25** (v8.20): SMR DEMAND-REVISION (0 BLOCKER + 0
+  MAJOR + 2 MINOR + 2 NIT); AGY PLAN-READY-WITH-NITS (2 MINOR
+  + 2 NIT); Codex INFRA-BLOCKED (fourth documented attempt;
+  2-of-3). Convergence: the SUPERSEDED parenthetical
+  mis-described the fix it shipped (SMR25-1 = AGY f2 — "the
+  composition is covered by the newer pair's chain" is the
+  abort-only leak SMR24-1 traced; the fold's (i) is what
+  actually covers the A-era deletions, and it RUNS for stale
+  notices), and the sweep's semaphore/cadence were unpinned
+  (SMR25-2 = AGY f3). AGY-only: f1 (a `C-permitted`→
+  `C-revoked` typo — verified a PROMPT-TRANSPORT typo in the
+  r25 review prompt's §9 (a) replay; plan.md's §9 (a) already
+  read `C-revoked` — no plan defect, no fold needed beyond the
+  record). SMR-only: SMR25-3 (the applySem → `m.mu` census),
+  SMR25-4 (the OVERLAP-clear → re-drive chain-state note).
+- **Round-25 disposition table:**
+
+  | r25 finding | v8.21 disposition |
+  |---|---|
+  | SMR25-1 / AGY f2 SUPERSEDED wording | CLOSED — reworded in the normative text AND the r24 table row: SUPERSEDED marks ONLY the pair-specific tails (stamp/push) as skipped-by-design; the invalidation (i) composes prior → CURRENT and RUNS for stale notices exactly as for current ones; §9 (a) pins the reading (a skip-everything implementation FAILS) (§5-C (ii), §1 r24 row, §9 (a)) |
+  | SMR25-2 / AGY f3 sweep semaphore + cadence | CLOSED — the sweep rides the 1s status-application pass (a dropped notice delays the tails ≤ 1s + drain scheduling) and its per-entry execution is the SAME `applySem`-acquiring drain path as the notice's (one routine, two triggers) (§5-C (ii)) |
+  | AGY f1 §9 (a) typo | CLOSED-NO-PLAN-DEFECT — verified a prompt-transport typo in the r25 review prompt's §9 (a) replay; plan.md's §9 (a) already reads `C-revoked` (the v8.20 §9 (a) edit used the correct form; the r25 prompt-build script's replay mistyped it) |
+  | SMR25-3 applySem → m.mu census | CLOSED — stated next to SMR24-8's writeMu → `s.mu` rule (Compile runs under `applySem` and takes `m.mu`; the GO-LOCAL debt recording is enqueue-after-unlock; the manager never acquires `applySem`) (§5-C (ii)) |
+  | SMR25-4 chain-state note | CLOSED — stated: T1's node is OVERLAP-terminal, T2's Finish folded the recorded outcomes and cleared `compileInFlight`, and the re-drive's StartCompile begins a FRESH chain (§5-C) |
 
 ### Round-1 detail log (kept for the record)
 
@@ -4659,7 +4711,15 @@ BLOCKERs 6 + 8; v8 epoch form per Codex r6 f6/f8):**
   manager's compiled cache; losing it costs a
   rebuild, never correctness — and the GO-LOCAL
   re-drive's full-apply retry rebuilds from the
-  store) — `m.lastSnapshot` NEVER references a
+  store) — and the re-drive's chain state is CLEAN
+  (v8.21, SMR r25 SMR25-4: T1's node is
+  OVERLAP-terminal and T2's Finish already folded the
+  recorded outcomes oldest-first and cleared
+  `compileInFlight`, so the re-drive's StartCompile
+  begins a FRESH chain — no stale chain state
+  carries, and the cleared staged reference means
+  the rebuild mints from the store) —
+  `m.lastSnapshot` NEVER references a
   cancelled staged object by construction (and the
   post-clear value is pinned (v8.20, SMR r24 SMR24-3
   = AGY r24 f3: the value is NIL — the staged object
@@ -5298,9 +5358,20 @@ BLOCKERs 6 + 8; v8 epoch form per Codex r6 f6/f8):**
   push are CURRENCY-GATED (skipped when the notice's
   pair is no longer current — the newer pair's own
   tails carry them), and (iii) a superseded notice's
-  cursor entry is marked SUPERSEDED (terminal — the
-  composition is covered by the newer pair's chain,
-  never left pending); the cursor's check-and-advance
+  cursor entry is marked SUPERSEDED (terminal,
+  never left pending) — where SUPERSEDED marks ONLY
+  the pair-specific tails (the stamp and the push)
+  as skipped-by-design, and the invalidation (i)
+  composes prior → CURRENT and RUNS for stale
+  notices exactly as for current ones (v8.21, SMR
+  r25 SMR25-1 = AGY r25 f2's wording fix — the
+  v8.20 parenthetical "the composition is covered
+  by the newer pair's chain" was FALSE on its face
+  (it is exactly the abort-only leak SMR24-1
+  traced: C's B→C chain never covers
+  A-permitted/B-revoked/C-revoked sessions) and
+  contradicted (i); a skip-everything reading
+  reintroduces the leak); the cursor's check-and-advance
   is atomic by construction (v8.20, SMR r24 SMR24-2 =
   AGY r24 f2: the cursor record lives manager-side
   and EVERY `{phaseCursor, completionState}`
@@ -5317,11 +5388,21 @@ BLOCKERs 6 + 8; v8 epoch form per Codex r6 f6/f8):**
   AGY r24 f4: the enqueue-after-unlock is
   non-blocking — a full buffer drops the notice, so
   the daemon's apply scheduler runs a periodic
-  pending-cursor sweep at the standing debt cadence
-  (the cursor registry is queryable daemon-side) and
+  pending-cursor sweep (the cursor registry is
+  queryable daemon-side) and
   the enqueue failure records a Warn edge — a dropped
   notice delays the tails to the sweep interval,
-  never loses them); the helper-restart
+  never loses them; the sweep's pins (v8.21, SMR r25
+  SMR25-2 = AGY r25 f3: the sweep rides the 1s
+  status-application pass — after each helper-status
+  application the daemon scans the pending-cursor set
+  (no new timer; a dropped notice delays the tails
+  ≤ 1s + drain scheduling) — and the sweep's
+  per-entry execution is the SAME
+  `applySem`-acquiring drain path as the notice's
+  (ONE routine, two triggers — a sweep that composed
+  without the semaphore would race a promotion
+  mid-composition))); the helper-restart
   shape's no-op tails are NAMED (a fresh helper holds
   no sessions — the invalidation is a no-op on the
   empty base — but the peer push and the applied
@@ -6558,7 +6639,15 @@ activations a scheduled retry.
   `QueueConfig`, and no `s.mu` holder may call into
   the sync layer's send path (the census: the
   reconciler at daemon_ha_sync.go:474-497 and the
-  loop's begin/end, which take no `s.mu`); (ii) the marker-claim
+  loop's begin/end, which take no `s.mu`); and the
+  COMPANION order (v8.21, SMR r25 SMR25-3): the
+  notice drain holds `applySem` while calling the
+  cursor's `m.mu` method — applySem → `m.mu` is the
+  ONLY direction there too (Compile runs under
+  `applySem` and takes `m.mu`; the GO-LOCAL debt
+  recording is enqueue-after-unlock (no `m.mu` →
+  `applySem` path); the manager NEVER acquires
+  `applySem` (it is a daemon semaphore)); (ii) the marker-claim
   ORDER: today the daemon claims its marker BEFORE
   calling `QueueConfig` (daemon_ha_sync.go:474-497) —
   the claim moves AFTER the send: the reconciler
@@ -7732,7 +7821,11 @@ activations a scheduled retry.
       prior → CURRENT (A→C — an A-permitted,
       B-revoked, C-permitted session SURVIVES; an
       A-permitted, B-revoked, C-revoked session is
-      deleted — never the A→B composition over C),
+      deleted — never the A→B composition over C; and
+      the A→C composition RUNS for the stale notice —
+      a skip-everything-on-SUPERSEDED implementation
+      FAILS this test (v8.21, SMR r25 SMR25-1 = AGY
+      r25 f2)),
       skips the applied stamp + peer push for the
       superseded pair, and marks the cursor entry
       SUPERSEDED (terminal); the cursor's
@@ -8570,7 +8663,7 @@ the three owners through nine enumerations; the mixed-version
 producer is the documented exception with the required helper
 restart).
 
-Remaining questions for round 25, each invitable to PLAN-KILL with
+Remaining questions for round 26, each invitable to PLAN-KILL with
 a concrete counterexample:
 
 1. **Completeness, final form.** Exhibit a path to
@@ -8633,12 +8726,11 @@ a concrete counterexample:
    candidate-filter territory
    (`include_userspace_binding_interface`), explicitly out of
    scope here.
-6. **Round-24 disposition table audit.** §1's r24 table maps
-   every r24 finding (SMR 1 BLOCKER + 1 MAJOR + 4 MINOR + 3
-   NIT; AGY 1 BLOCKER + 2 MAJOR + 1 MINOR + 1 NIT; Codex
-   infra-blocked) to its v8.20 fold, and every fold this
-   revision was verified per-edit against the file. Which row
-   is claimed-but-wrong this time?
+6. **Round-25 disposition table audit.** §1's r25 table maps
+   every r25 finding (SMR 2 MINOR + 2 NIT; AGY 2 MINOR + 2
+   NIT; Codex infra-blocked) to its v8.21 fold, and every fold
+   this revision was verified per-edit against the file.
+   Which row is claimed-but-wrong this time?
 7. **Cumulative hazard budget, final sign-off (v8.8 honest
    numbers, Codex r11 f11 + r12 f14).** Healthy unsuppressed
    baseline for
