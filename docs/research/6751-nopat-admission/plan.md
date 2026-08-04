@@ -1,19 +1,30 @@
 # #6751 plan — interface SNAT no-PAT admission: reserve-or-PAT the colliding translated tuple
 
-- **Status**: DRAFT v15.20 — round-32 SUBSTRATE FORK adjudication
-  (§4.0: Codex r32's cross-process-atomicity blockers show the
-  mirror-defense machinery cannot be made correct at proportionate
-  cost — six rounds of envelope → barrier → carry-forward →
-  incarnation-gate → omission-index each introduced the race the
-  next round found. The plan now presents the fork explicitly:
-  PATH A (fold r32 into the machinery — cross-process arbiter,
-  rerouted HA import) vs PATH B (table-truth substrate retreat —
-  the authoritative prime iterates the Rust SessionTable via a new
-  lossless paginated snapshot channel with a generation horizon,
-  the BPF mirror EXITS the sync path to a cosmetic role, and every
-  mirror-defense mechanism dies with the substrate). Reviewer
-  adjudication requested; §5.x retains PATH-A text pending the
-  verdict. The option-(a) registry core is identical in both)
+- **Status**: DRAFT v15.21 — round-33 fork ADJUDICATION: PATH A
+  (sole-writer helper) wins on corrected facts. The r32
+  control-socket foreclose was factually wrong — the helper binds a
+  DEDICATED session socket (lifecycle.rs:165-175,
+  process_control.go:172-178) that HA imports already use, so
+  sole-writer costs no shared-socket traffic; PATH B-as-written had
+  four factual errors (no gRPC server, per-worker-private
+  reconcile-ephemeral tables with excluded retagged provenance, no
+  mutation sequence, alias-bearing imported tables) and a
+  redesigned table-truth ("B2") is a LARGER design, noted as future
+  work. §4.0.1 is the seven-rule sole-writer specification
+  (complete writer inventory over the session socket; bounded
+  admission + explicit refusal + ImportBarrier ACK per the
+  export.rs two-phase precedent; the receiver applied transaction
+  with ACK conditioned on zero per-key failures; exact-incarnation
+  delete transactions that PUBLISH the close inside the commit —
+  no cross-process arbiter needed; field-targeted refresh that
+  never rewrites session_id; dual-lane source-sequence dedup;
+  alias provenance). §4.0.2 maps the consequences: V1-V4 shrink to
+  known-stale omission, the omission index becomes exact-result-fed,
+  P2 executes in-helper, carry-forward/hold/fenced re-prime
+  retained with a prime-REQUEST field, the debt pair recorded
+  before End with ACK-only discharge. The option-(a) core is
+  unchanged — no reviewer found a core kill shot in either
+  substrate
 - **Issue**: #6751 (opus-review-001 R08, High, `bug`+`audit`+`security`) —
   interface SNAT admits indistinguishable no-PAT return tuples and sends
   replies to the FIRST session.
@@ -123,152 +134,203 @@ plus documentation, and saying so on the issue.
 
 ## 4. Multiple Path Options (the design fork)
 
-### 4.0 The round-32 substrate fork (adjudication requested)
+### 4.0 The round-32/33 substrate fork — ADJUDICATED: PATH A (sole-writer helper)
 
-Rounds 1-29 settled the (a)/(b)/(c) behavior fork in favor of option (a)
-below. Rounds 30-32 then attacked the HA-sync substrate the option-(a)
-registry replicates through. The round-32 evidence forces a SECOND,
-deeper fork — not about the registry's behavior, but about what the
-authoritative sync snapshot reads:
+Rounds 1-29 settled the (a)/(b)/(c) behavior fork. Round 32 asked whether
+the mirror substrate could be defended at proportionate cost; v15.20 put
+PATH A (fold r32 into the machinery) against PATH B (table-truth
+retreat). Round 33 adjudicated it, and the answer rests on CORRECTED
+FACTS, not preference:
 
-**The r32 inflection.** Codex r32's blockers 1 and 7 show that the
-v15.19 close/incarnation gate cannot be made atomic as specified: the
-mirror writer set spans TWO processes (Rust publish/refresh/close;
-Go policy-invalidation and HA mirror writes,
-daemon_policy_invalidate.go:357 / manager_ha.go:1058), BPF maps
-provide no compare-and-swap (publish is `BPF_ANY`,
-publish_conntrack.rs:141; delete is key-only, bpf_map/mod.rs:321),
-the refresh writer restores a CACHED full value including
-`session_id` with `BPF_EXIST` (bpf_map/mod.rs:429/451 — the
-refresh-restore inverse: a stale id is written back over the
-replacement, after which the delayed old close MATCHES and deletes
-and publishes `G_del > G_new`), and the composite derived-key
-operations (redirect/session-map, bpf_map/mod.rs:531) sit outside
-any conntrack-only gate. The only arbiter that closes this within
-the mirror substrate — making the Rust helper the SOLE writer of
-session mirror rows and routing every Go-side mutation through the
-helper — is foreclosed by the control-socket contention budget
-(CLAUDE.md: the shared control socket starves session installs at
->1/s of new traffic; bulk HA import cannot ride it). Meanwhile the
-mirror-defense machinery has been accreting one new mechanism per
-review round for six rounds (envelope → barrier → carry-forward →
-incarnation gate → omission index → cross-process arbiter), and
-each mechanism has introduced the race the next round finds. The
-machinery is defending an indefensible substrate: **the Go bulk
-iterates an asynchronously maintained, lossily refreshed MIRROR of
-the authoritative table** (and the daemon already names the real
-end-state — "a table-truth, owner-RG-filtered snapshot via
-ExportOwnerRGSessions ... is tracked as a follow-up",
-daemon_ha_sync.go:974).
+- **The r32 control-socket foreclose was factually wrong** (owned —
+  SMR r33 and AGY r33's PATH-A rejections both rested on it). The
+  helper binds TWO Unix listeners: the shared control socket AND a
+  DEDICATED session socket (`userspace-dp-sessions.sock`, derived
+  from the control path — lifecycle.rs:165-175,
+  process_control.go:172-178). HA imports already ride the session
+  socket (`SetClusterSyncedSessionV4/V6` → manager_ha.go:1112-1167),
+  serviced on a dedicated thread (lifecycle.rs:344-381). Making the
+  helper the sole mirror writer changes WHERE the mutation executes,
+  not the transport's traffic class — nothing new touches the shared
+  control socket's >1/s budget.
+- **PATH B as specified in v15.20 had four factual errors** (Codex
+  r33, each verified): (i) the helper has NO gRPC server — it serves
+  newline-delimited JSON over Unix streams (handlers/mod.rs:44-89);
+  (ii) the "authoritative SessionTable" is per-worker PRIVATE
+  (setup.rs:28-42) and the coordinator's shared aggregate is
+  reconcile-EPHEMERAL — a normal reconcile snapshots, destroys, and
+  replays it with retagged provenance (`WorkerLocalImport`,
+  session_glue/mod.rs:868-878) that the existing owner export
+  EXCLUDES (session_glue/mod.rs:608-635), so the named export can
+  omit valid local sessions after any reconcile; (iii) no mutation
+  sequence exists to order pages against a Go generation horizon
+  (`install_epoch` is per-worker private and resets,
+  session/mod.rs:343-349; `session_id` is write-once,
+  session/mod.rs:459-470; #2170 generations are Go-assigned at queue
+  time, worker/mod.rs:383-389); and (iv) the "helper tables never
+  contain aliases" premise was false — imported alias rows install
+  into worker tables (upsert_synced.rs:64-78) and after promotion
+  export as locally-originated. The mirror also retains
+  non-cosmetic consumers (receiver absence reconciliation,
+  session_store.go:613-672; policy invalidation; clear-all and
+  filtered clears; neighbor warming), so "mirror becomes cosmetic"
+  was false. A redesigned table-truth ("B2" — durable table
+  ownership across reconcile, a coherent cross-worker cut, page
+  cursor semantics, dual-lane dedup, alias provenance, table-native
+  receiver reconciliation, policy/clear APIs, sweep-to-debt
+  conversion) is a LARGER design than PATH A, and is noted as
+  possible future work, not this plan.
+- **AGY r33's strongest PATH-A objection — the unbounded per-worker
+  `VecDeque` command queues (bringup.rs:426-432) — is a REQUIRED
+  FEATURE of PATH A, not a foreclose**: bounded admission with
+  explicit refusal is rule 2 of the specification below.
+- **No kill shot against the option-(a) registry core exists in
+  either substrate** (both reviewers confirmed independently): the
+  registry, occupancy split, holders, drain, static accounting,
+  #2170 delta discipline, and alias machinery never read the mirror
+  for their own correctness.
 
-**PATH A — fold r32 into the machinery (rejected).** Spell out the
-cross-process arbiter (helper as sole mirror writer, Go mutations
-rerouted through the helper's WorkerCommand import channel), the
-purge's authoritative id source, the omission-index Go seam, an
-explicit remote-prime request, the inbound-static lifecycle
-transaction, and the remaining contradiction cleanup. Estimated
-cost: a rerouted HA import pipeline with new queue/backpressure
-review surface, PLUS the next rounds of races inside THAT. The
-round-over-round finding count (5, 7, 11, 7+8, 10, 11) is not
-converging — each fold births the next race at rate 1.
+**PATH A — the helper becomes the SOLE writer of session mirror
+rows, with an exact-incarnation transaction discipline — is the
+adjudicated substrate.** §4.0.1 specifies it; §4.0.2 maps the
+consequences onto the surviving §5.x machinery.
 
-**PATH B — table-truth substrate retreat (RECOMMENDED).** Promote
-the named follow-up into the foundation: the authoritative prime
-and every bulk iterate the RUST AUTHORITATIVE SESSION TABLE through
-a NEW lossless snapshot channel (§4.0.1), and the BPF mirror EXITS
-the sync path entirely (it remains for CLI/metrics/enumeration,
-where drift is cosmetic). Every mechanism whose sole purpose was
-defending against mirror staleness DIES with the substrate: the
-V1-V4 live re-read (no mirror read remains), the failed-delete
-omission index (no dirty-mirror zombie is possible — the table
-never contains the closed session), the compare-and-delete atomics
-and the cross-process arbiter (nothing to be atomic against), the
-carry-forward accumulator (no mirror-hole Open exists — a published
-session IS in the table and therefore in the snapshot), and the
-forced inbound re-prime's fencing question (the prime is
-debt-driven table-truth, not slot-shape-driven). What SURVIVES
-unchanged: the entire option-(a) registry core (registry/occupancy/
-owner-split/holders/drain/static accounting — none of it reads the
-mirror), the delta stream's #2170 per-key generation + tombstone
-discipline (it never involved the mirror), the epoch envelope +
-barrier + lifecycle-tag machinery (they order the delta stream and
-the lifecycle, not the mirror), the alias quarantine + decode-time
-base-identity index (the receiver-side legacy-sender disciplines —
-the table-truth snapshot never CONTAINS aliases because the helper
-never installs them, so the new+new cell gets stronger), the debt
-machinery (it now drives the table-truth prime directly), and the
-provisional admitted-alias purge (its target is the helper's
-canonical row via the import path, not the mirror). The stale-close
-question survives in a SMALLER form: with no mirror cut to defend,
-the delta stream's own per-worker order plus the generation guard
-cover the common same-worker replacement (queued [Close, Open]
-flush in worker order; Go draws `G_del < G_new`; the tombstone
-loses); the cross-worker migration case is closed by a table EPOCH
-bump on steering rebalance that suppresses pre-rebalance closes
-(worker-local check, no cross-process state). The r32 findings map
-cleanly: B1 (cross-process gate) — killed by the substrate change;
-B2 (purge id source) — the purge rides the delta stream with the
-authoritative entry's id from the import record (worker/mod.rs:390
-zero-id shared entries are adopted into the worker's allocated id
-at install, install.rs:340 — the import record retains the mapping);
-B3 (omission-index seam + non-authoritative overflow) — both die
-with the index; B4 (receiver-local fencing) — the debt drives the
-prime; the receiver's overflow signal is a one-bit additive
-prime-REQUEST protocol field (old peers ignore it; the receiver
-falls back to the reconnect, whose both-slots-empty cold-prime
-still works for the common case); B5 (carried-key hold overflow) —
-carry-forward dies; the snapshot's generation high-water horizon
-keeps newer deltas; B6 (inbound static lifecycle) — orthogonal to
-the substrate; folded as the direction-aware transaction in §5.7;
-B7 (P2 atomic seam) — the purge executes in the helper via the
-import path with publication-identity compare (the helper owns the
-canonical row and the mirror write, single process, its own stripe);
-M8 (deferral liveness) — the deferral resolves at the next
-debt-driven table-truth prime; M9/m10/n11 — textual folds.
+#### 4.0.1 The sole-writer specification (PATH A)
 
-The fork question put to the reviewers: is PATH A (the cross-process
-arbiter and its rerouted import pipeline) defensible at its cost, or
-is PATH B (retire the mirror from the sync path) the proportionate
-substrate? Sections 5.x retain the PATH-A text pending adjudication
-so both paths are reviewable; a PATH-B adoption rewrites them per
-§4.0.1's specification.
+1. **Sole-writer rule with the COMPLETE writer inventory** (Codex
+   r33 finding 2's "not a two-call-site change"): every mutation of a
+   session mirror row — local publish (publish_conntrack.rs), the
+   last_seen/policy_id refresh writers (bpf_map/mod.rs:364/438),
+   close deletes (session_delta.rs:420/426/444/445), imported
+   forward/reverse installs (manager_ha.go:1112-1167/1265-1303),
+   Go-constructed reverse/DNAT companions (session_store.go:274-350),
+   policy invalidation (daemon_policy_invalidate.go:357-386 →
+   manager_ha.go:1392-1412), filtered clears (cli_clear.go:336-550,
+   server_sessions.go:1293-1543), and clear-all
+   (maps_session.go:405-528) — executes INSIDE the Rust helper.
+   Go-side direct BPF writes become requests over the DEDICATED
+   session socket (the channel HA imports already use — no new
+   traffic class; the shared control socket is untouched).
+2. **Bounded admission + explicit refusal + ImportBarrier** (Codex
+   r33 finding 1): the per-worker command queues gain bounded
+   admission with EXPLICIT REFUSAL (today unbounded,
+   bringup.rs:426-432; replacements/deletes bypass the
+   distinct-session cap, session_import.rs:108-120/337-345; workers
+   drain the whole queue in one loop turn, session_glue/mod.rs:663-704),
+   an import sequence, and a per-worker `ImportBarrier` ACK — the
+   two-phase owner-export pattern (enqueue under `ServerState`,
+   release the global mutex, wait worker ACKs, export.rs:22-66/237-264)
+   is the precedent. A refused import returns an EXACT per-key error
+   (the import-cap silent return at session_import.rs:115-120 and the
+   always-successful handler response at sync_session.rs:19-32 are
+   both replaced by exact results).
+3. **The applied transaction at the receiver** (Codex r33 finding
+   2's first half): bulk bookkeeping records a key only AFTER the
+   helper confirms the install (today: recorded before install,
+   install errors only logged, sync_conn_read.go:109-147 /
+   sync_conn_gen.go:435-490), and the `BulkEnd` ACK is conditioned on
+   ZERO per-key failures (a failed key means no ACK and the
+   partial-bulk disposition — never reconcile-and-ACK over a
+   silently skipped install).
+4. **Exact-incarnation delete transactions that PUBLISH the close
+   inside the commit** (the r32 crux, now statable because there is
+   exactly one writer process): every close/delete compares the
+   mirror row's stored #5213 id against the closing entry's id under
+   the helper's OWN per-key stripe (single process — no
+   cross-process arbiter is needed, the two-process writer set that
+   killed v15.19 no longer exists). On a match (or absent row), the
+   transaction deletes the row AND publishes the close delta INSIDE
+   the same commit — a close can never be published for a row the
+   arbiter refused to delete (Codex r33 finding 2's policy-
+   invalidation trace: Go enumerates rows, the arbiter refuses the
+   live replacement's deletion, and Go publishes the close anyway →
+   the peer deletes the live replacement; under the transaction the
+   refusal suppresses BOTH). On a newer-incarnation mismatch the
+   close is suppressed entirely (v15.19's rule, retained). Go's
+   `QueueDeleteV4/V6` for helper-enumerated rows fires ONLY on the
+   helper's exact per-key confirmed result.
+5. **Refresh discipline** (Codex r32's refresh-restore inverse): the
+   last_seen/policy_id refresh writers use FIELD-TARGETED updates
+   that NEVER rewrite `session_id` (today they write back the whole
+   cached value including the id with `BPF_EXIST`,
+   bpf_map/mod.rs:429/451 — after this rule a refresh can never
+   resurrect a stale incarnation into the row).
+6. **Dual-lane deduplication** (Codex r33 finding 5's real
+   discovery): Rust clones every delta into the RPC fallback buffer
+   AND the event stream (session_delta.rs:276-317), and Go drains
+   the fallback every 5s on a different mutex
+   (daemon_ha_userspace_stream.go:254-320) — a delayed fallback
+   Close can arrive after the replacement's event-stream Open with
+   NO rebalance needed. The rule: one Rust SOURCE SEQUENCE per
+   worker serializes both lanes; the receiver drops any frame whose
+   source sequence is ≤ the highest event-stream sequence seen for
+   that worker (or the fallback lane is disabled once the event
+   stream is connected past a barriered handoff — the sequence
+   dedup is the belt, the handoff the suspenders). Go draws #2170
+   generations in consumption order, so with both lanes deduplicated
+   the [Close, Open] order yields `G_del < G_new` and the tombstone
+   loses by construction. Cross-worker migration closes are gated by
+   the table epoch bump (retained from v15.20: every full snapshot
+   replan/teardown, worker-count/queue/RSS change, link-cycle
+   stop/rebind, and helper restart bumps the epoch — reconcile tears
+   down the complete worker set, reconcile/mod.rs:330-398, and each
+   such event is an epoch boundary; a worker-local pre-epoch close
+   is suppressed).
+7. **Alias provenance** (Codex r33 finding 6's correction): imported
+   rows carry explicit provenance (locally-originated vs
+   sync-imported vs sync-imported-ALIAS); the alias quarantine,
+   decode-time base-identity index, timeout-admission, and P1/P2
+   provisional purge remain as the LEGACY-gated disciplines for
+   mixed-version cells and transition-era rows (the new+new cell's
+   negotiated omission keeps zero alias frames on the wire; the
+   machinery's steady-state purpose is the mixed-version and
+   timeout-admission transitions, and alias-marked rows are excluded
+   from any future table-truth export by provenance).
 
-#### 4.0.1 The lossless table-truth snapshot channel (PATH B specification)
+#### 4.0.2 Consequence map for the surviving §5.x machinery
 
-- **Source**: the Rust helper's authoritative SessionTable (owner-RG
-  filtered), never the BPF mirror. The channel is the control socket's
-  sibling — a dedicated snapshot RPC on the helper's existing gRPC
-  server (server/helpers/) with PAGINATED pull semantics (the Go side
-  drives the pages at its own pace; the control socket's existing
-  traffic is untouched — CLAUDE.md's >1/s budget concerns the shared
-  status/HA socket, and the snapshot channel is separate).
-- **Framing**: `SnapshotStart{epoch, generation_horizon}` → N ×
-  `SnapshotPage{epoch, page_seq, entries[], page_checksum}` →
-  `SnapshotEnd{epoch, total_entries, final_checksum}`. A page whose
-  sequence/checksum fails aborts the snapshot before `SnapshotEnd`
-  (never emitted) — the exact `BulkEnd`-integrity discipline the
-  direct-write bulk already has (sync_bulk.go:183), carried onto the
-  new channel. The receiver reconciles ONLY at a verified
-  `SnapshotEnd`.
-- **Generation horizon**: `SnapshotStart` carries the sender's #2170
-  generation high-water at snapshot start; delta frames stamped with
-  a generation ABOVE the horizon are kept at the receiver even when
-  absent from the snapshot (they post-date it) — the delta/snapshot
-  seam needs no carry-forward accumulator.
-- **Debt integration**: the authoritative-prime debt (daemon-lifetime,
-  monotonic debtGen, exact-generation ACK discharge) drives this
-  channel; a completed `SnapshotEnd` + receiver ACK discharges, an
-  abort re-arms. The readiness-timeout degraded release is unchanged.
-- **Delta path unchanged**: QueueSessionV4/V6 / QueueDeleteV4/V6 /
-  journal replay keep the epoch-envelope + universal-producer rules;
-  the snapshot and the deltas share the per-key #2170 generation
-  namespace.
-- **What the helper exposes**: a paginated `ExportOwnerRGSessions`
-  variant that returns STABLE entry snapshots (the table's own
-  per-entry mutation sequence, already present for RT_FLOW ids,
-  orders pages against concurrent mutation — a page either reflects
-  an entry at-or-after the horizon or omits it, and the receiver's
-  generation guard resolves any overlap with deltas).
+- **The mirror is now CONSISTENT BY CONSTRUCTION** (sole writer +
+  exact-incarnation transactions + refresh discipline): the v15.15-
+  era V1-V4 bulk-callback re-read machinery SHRINKS to the Go-side
+  known-stale omission check (a close CONSUMED BY GO between the
+  bulk's batch copy and its callback — the generation map knows the
+  close, the callback omits the frame; the producer-side races that
+  motivated V1-V4 cannot exist under sole-writer).
+- **The failed-delete omission index** (v15.19) becomes EXACT:
+  delete failures are per-key results from the helper's transaction
+  (rule 2/4), reported on the session socket; the Go-side omission
+  set is fed by exact results, not by inferring from syscall
+  silence; its overflow still arms the out-of-sync latch + debt.
+- **P2 (exact-publication alias purge)** executes INSIDE the helper
+  (rule 4's transaction with publication identity) — the
+  cross-writer atomic seam that v15.19 could not state exists by
+  construction under sole-writer.
+- **Carry-forward + reconciliation hold + fenced inbound re-prime
+  are RETAINED** (the bulk still iterates the mirror — a consistent
+  mirror now — and the Open-publish window between Go's delta
+  install and the mirror row remains a real, if sole-writer-bounded,
+  window); the fenced re-prime gains the one-bit additive
+  prime-REQUEST protocol field (Codex r31 finding 3/r32 finding 4:
+  old peers ignore it; the reconnect cold-prime remains the
+  fallback).
+- **The debt machinery** is retained with one correction (Codex r33
+  finding 8's tail): the (epoch → debtGen) pair is recorded BEFORE
+  the peer-facing End; page/checksum failure, write failure,
+  disconnect, or receive abort preserves the debt; ONLY the
+  matching peer ACK clears it — the current write-completion clear
+  of `needColdPrime` at sync_conn.go:194-206 gets the same
+  ACK-conditioned rule.
+- **The stale-close discipline** is the three-layer rule: per-worker
+  FIFO order + deduplicated lanes (rule 6) for the common
+  same-worker replacement; the table-epoch gate for cross-worker
+  migration; and the exact-incarnation transaction (rule 4) for the
+  mirror.
+- **The Go incremental sweep** keeps its journal-flush and
+  delete-overflow duties and its mirror scan (now against a
+  consistent mirror); its Open-drop recovery is exact — Go's
+  `queueMessage` drop arm already sets `syncBackfillNeeded`
+  (sync_conn_write.go:36-49), and the sweep re-sends live sessions
+  from the same sole-writer mirror.
 
 ### Option (a) — reserve translated identity at admission; PAT the later collider (RECOMMENDED)
 

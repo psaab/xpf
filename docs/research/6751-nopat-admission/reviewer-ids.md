@@ -160,3 +160,15 @@ HA import — rejected on the control-socket contention foreclose) vs
 PATH B (table-truth snapshot channel; the mirror exits the sync
 path; every mirror-defense mechanism retires). Round 33 adjudicates
 the fork.
+
+| r33 | `codex exec` (detached-poll), session in /tmp/codex-6751-r33.log / fork adjudication: **PATH A** (control-socket foreclose DISPROVED — dedicated session socket exists; PATH B-as-written killed on 4 factual errors; PATH A needs bounded admission + ImportBarrier + sole-writer transaction + exact Close publication) | fork adjudication: **PATH B** (PATH A rejected on unbounded WorkerCommand queue + socket budget — the same factual error SMR made) | **Concedes to PATH A** after independent verification (r34 doc — both factual errors owned; §4.0.1 attacked rule-by-rule) |
+
+Round-33 disposition: the fork CLOSED on corrected facts — PATH A
+(sole-writer helper) is the adjudicated substrate. v15.21 rewrites
+§4.0 with the evidence (dedicated session socket verified;
+PATH B's four factual errors enumerated; "B2" table-truth noted as
+possible future work) and §4.0.1 as the seven-rule sole-writer
+specification with §4.0.2's consequence map (V1-V4 shrink, exact
+omission results, in-helper P2, retained carry-forward/hold/
+re-prime + prime-REQUEST field, debt pair recorded before End).
+Round 34 re-reviews v15.21 for convergence.
