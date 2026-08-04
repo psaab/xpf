@@ -353,3 +353,28 @@
   pendingWorkerArm; lock rule + fairness; env
   loss/oscillation; fabric debt state machine; test greens;
   pass-1 cost; budget).
+
+## Round 14 (plan v8.9 @ 6e2da70b98e1)
+
+- **Claude SMR r14** — `claude-smr-plan-r14.md`. Verdict:
+  DEMAND-REVISION (SMR14-1 BLOCKER — `note_config_epoch` needs
+  compare-and-set semantics (= AGY f5); SMR14-2 BLOCKER — the
+  latch echo must be ASYMMETRIC clear-only (credit AGY f2);
+  + 4 MINOR/NIT — drain-time re-read pin, recovery clear
+  predicate for operator slots (= AGY f3), suppression TTL
+  (= AGY f4), three pins (= AGY f6/f7 + exit pairing)).
+- **AGY r14** — background bash `bbw71e22g`; direct `agy
+  --print-timeout 9m --print` (prompt assembled at 126,095
+  bytes); output `/tmp/agy-6749-r14.out`; verdict doc
+  `agy-plan-r14.md`. Verdict: DEMAND-REVISION (4 BLOCKER —
+  f1 factory reset bricks via archiveSeq reseed vs surviving
+  helper state (state.json at os.TempDir(),
+  capabilities.go:21); f2 non-deferred compile defer
+  corruption via the (v) echo (VERIFIED — asymmetric
+  clear-only echo is the fix); f3 operator-disarmed slots →
+  infinite recovery retry; f4 ack-set eviction strands
+  suppression; + 2 MAJOR — f5 note monotonicity/CAS; f6
+  debt-state RPC; + 1 MINOR — f7 Deadline semantics).
+- **Codex r14** — background task `task-msdwofas-rgffdh`
+  (prompt `/tmp/codex-6749-r14-prompt.txt`, --fresh). Output:
+  pending.
