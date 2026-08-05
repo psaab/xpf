@@ -1980,6 +1980,14 @@ func syslogSelectorTokenSafe(tok string) bool {
 	if tok == "" {
 		return true
 	}
+	// LOAD-BEARING: the ordinary SPACE is the byte this guard exists for, not
+	// the control characters it superficially resembles a check for. A newline
+	// cannot reach here (the lexer folds it to a space), while a space alone
+	// separates an rsyslog selector from its action field. Relaxing this to
+	// "printable ASCII" or "no control bytes" would keep rejecting the newline
+	// and start admitting the space — the guard would look intact and stop
+	// guarding anything. TestSyslogSelectorTokenSpaceIsUnsafe_5797 fails on
+	// exactly that edit. #5797.
 	for i := 0; i < len(tok); i++ {
 		c := tok[i]
 		switch {
