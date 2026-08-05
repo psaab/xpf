@@ -196,17 +196,28 @@ connectionless and exempt:
   daemon can warn; the substituted code is unchanged, because which
   facility a record actually goes out under is an operator-visible contract
   question still owned by #5797. Prefer the checked form at any call site
-  that can surface the difference.
+  that can surface the difference. Note there is no commit gate to lean on
+  instead: `system syslog <dest> <facility> <severity>` models the facility
+  as the schema's wildcard KEY and validates only the severity VALUE, so
+  every spelling commits clean.
 - **rsyslog selector tokens are shape-checked (#5797).** The `file` and
   `user` destinations do not use `SyslogClient` at all — the daemon builds
   an rsyslog selector `<facility>.<severity>` and writes a managed drop-in.
   #4902 belted the file NAME and user TOKEN on that line but not the two
   selector tokens, so a newline or an rsyslog metacharacter in either one
-  escaped the selector and injected configuration on the leniently-loaded /
-  peer-synced path. `syslogSelectorTokenSafe` (pkg/daemon) rejects anything
-  outside `[A-Za-z0-9-]`, which admits the entire legitimate Junos
-  vocabulary — including the names the mapper cannot yet resolve — so the
-  belt does not pre-empt the mapping decision above.
+  escaped the selector and injected configuration.
+  `syslogSelectorTokenSafe` (pkg/daemon) rejects anything outside
+  `[A-Za-z0-9-]`, which admits the entire legitimate Junos vocabulary —
+  including the names the mapper cannot yet resolve — so the belt does not
+  pre-empt the mapping decision above. The two tokens do not share a threat
+  model: the severity is enum-gated at commit and so only arrives unsafe on
+  the tolerant load / peer-sync path, while the unvalidated facility
+  reaches the render site verbatim from an ORDINARY commit
+  (`set system syslog file audit "daemon;*.* /tmp/pwn" info` passes
+  commit-check). The belt is the only thing standing between that string
+  and a written rsyslog directive, so it is bound at the render site by
+  `pkg/daemon/syslog_selector_render_5797_test.go`, not only by the
+  predicate's own unit tests.
 - **Lazy connect — receiver down at apply does not disable the stream
   (#3351).** A TCP/TLS receiver that is unreachable at config-apply or
   boot must NOT permanently silence the stream. `NewSyslogClientTransport`

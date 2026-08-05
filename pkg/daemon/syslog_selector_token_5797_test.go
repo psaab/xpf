@@ -1,16 +1,25 @@
 package daemon
 
-import "testing"
+import (
+	"math/rand"
+	"strings"
+	"testing"
+)
 
 // #5797 invariant 7, render-belt half.
 //
-// applySyslogFiles / applySyslogUsers build an rsyslog selector line
-// `<facility>.<severity>\t<target>` from config tokens and write it to a
+// syslogDropinContents builds an rsyslog selector line
+// `<facility>.<severity>\t<target>` from config tokens and writes it to a
 // managed drop-in under /etc/rsyslog.d. #4902 belted the file NAME and the
-// user TOKEN on that exact line against leniently-loaded / peer-synced values
-// but left the two SELECTOR tokens unchecked, so a newline or an rsyslog
-// metacharacter in a facility/severity escaped the selector and injected
-// configuration. syslogSelectorTokenSafe closes that.
+// user TOKEN on that exact line but left the two SELECTOR tokens unchecked, so
+// a newline or an rsyslog metacharacter in a facility/severity escaped the
+// selector and injected configuration. syslogSelectorTokenSafe closes that.
+//
+// SCOPE OF THIS FILE: it tests the PREDICATE in isolation, and that is not the
+// same as testing the fix. The shipped protection is the two
+// `if !syslogSelectorTokenSafe(...)` guards at the render site; every test
+// here stays green if both are deleted. syslog_selector_render_5797_test.go
+// is what binds those call sites — do not treat this file as covering them.
 //
 // The belt is a SHAPE check on purpose. Deciding which facility NAMES are
 // honoured means reconciling the Junos vocabulary (`authorization`, `kernel`,
@@ -77,11 +86,69 @@ func TestSyslogSelectorTokenAcceptsJunosVocabulary_5797(t *testing.T) {
 		// Severities.
 		"any", "none", "emergency", "alert", "critical",
 		"error", "warning", "notice", "info", "debug",
+		// Safe-shaped names that belong to NO vocabulary listed above, present
+		// so a "hardcoded set of exactly the fixtures above" implementation
+		// fails here. See TestSyslogSelectorTokenIsAShapeNotAList_5797 for the
+		// form of that argument that a fixture cannot be added to.
+		"audit-log", "local8", "vendor-specific-9",
 	}
 	for _, tok := range safe {
 		if !syslogSelectorTokenSafe(tok) {
 			t.Errorf("legitimate syslog selector token %q rejected — the belt is scoped "+
 				"wider than the injection surface it guards", tok)
+		}
+	}
+}
+
+// TestSyslogSelectorTokenIsAShapeNotAList_5797 closes the blind spot the
+// fixture list above cannot close on its own. Every name written into a fixture
+// list becomes part of that list, so "accepts the Junos vocabulary" is equally
+// satisfied by a hardcoded set containing exactly those names — an
+// implementation that would then reject the next safe-shaped facility somebody
+// configures, silently dropping their destination. That failure mode is this
+// issue's own history: the accept set IS the decision.
+//
+// This pins the predicate as a SHAPE rather than a membership test, in the one
+// form no fixture can be retrofitted into:
+//
+//   - exhaustively over all 256 byte values, accepted iff the byte is
+//     [A-Za-z0-9-] — a set-membership implementation fails on the first
+//     unlisted letter;
+//   - over randomly generated safe-shaped tokens, which by construction are
+//     not in any list a maintainer could have written.
+//
+// It is deliberately a restatement of the accept CLASS, because that class is
+// the security decision: everything in it is inert inside an rsyslog selector,
+// everything outside it can alter the line's structure.
+func TestSyslogSelectorTokenIsAShapeNotAList_5797(t *testing.T) {
+	const accepted = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-"
+
+	for b := 0; b < 256; b++ {
+		tok := string([]byte{byte(b)})
+		want := strings.ContainsRune(accepted, rune(b))
+		if got := syslogSelectorTokenSafe(tok); got != want {
+			if want {
+				t.Errorf("byte %#x (%q) rejected: the belt is a membership test, not a shape "+
+					"check — the next safe-shaped facility an operator writes will be dropped", b, tok)
+			} else {
+				t.Errorf("byte %#x (%q) accepted: it can alter the structure of the rendered "+
+					"rsyslog selector line", b, tok)
+			}
+		}
+	}
+
+	// Randomly generated safe-shaped tokens. Fixed seed: a failure is
+	// reproducible, and the corpus is still outside any hand-written list.
+	rng := rand.New(rand.NewSource(5797))
+	for i := 0; i < 500; i++ {
+		n := 1 + rng.Intn(24)
+		var sb strings.Builder
+		for j := 0; j < n; j++ {
+			sb.WriteByte(accepted[rng.Intn(len(accepted))])
+		}
+		if tok := sb.String(); !syslogSelectorTokenSafe(tok) {
+			t.Fatalf("generated safe-shaped token %q rejected — the belt cannot be a list of "+
+				"known facility names; it must accept the whole [A-Za-z0-9-] shape", tok)
 		}
 	}
 }

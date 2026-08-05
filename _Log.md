@@ -1,3 +1,67 @@
+## 2026-08-05 — #5797 round 2: bind the selector belts at the render site, and correct a threat model that was wrong in the understating direction
+
+- **Timestamp**: 2026-08-05 (fix/5797-syslog-selector-failclosed, PR #6829)
+- **Action**: The round-1 tests proved the PREDICATE
+  (`syslogSelectorTokenSafe`) and the checked parser in isolation; nothing
+  proved the RENDER SITES consult them. Measured, not assumed: with both
+  `if !syslogSelectorTokenSafe(...)` guards deleted the whole suite stayed
+  GREEN, and so did deleting the unmapped-facility warning. Split the
+  desired-drop-in builder out of `applySyslogFiles` as
+  `syslogDropinContents` so the belts are testable at the site that calls
+  them, and added `syslog_selector_render_5797_test.go`: a safe token
+  renders byte-for-byte, an unsafe file/user token is omitted, a drop-in a
+  previous apply wrote for a now-unsafe destination is REMOVED from disk
+  (production pair `syslogDropinContents` -> `reconcileSyslogDropins`
+  against a temp dir) and `changed` flips so rsyslog restarts, and both
+  skips warn while a clean config stays quiet. Same for the daemon side of
+  `ParseFacilityChecked` — `applySystemSyslog` is driven directly and the
+  warning asserted, with mapped names as the negative control.
+  While tracing reachability for those tests, a runnable probe falsified
+  the PR's own threat model. Both `daemon_system.go` and
+  `pkg/logging/syslog.go` claimed the facility name was gated at commit by
+  `config.SystemSyslogFacilities` "via the schema's wildcardNameValidator",
+  making the belt tolerant-load-only defence in depth. That symbol does not
+  exist and neither does that gate: `<facility> <severity>` is a schema
+  WILDCARD whose validator sits on the severity VALUE, so
+  `set system syslog file audit "daemon;*.* /tmp/pwn" info` passes
+  SchemaValidate, compiles, and arrives at the render site verbatim. The
+  facility half of the injection surface is reachable from an ORDINARY
+  operator commit; only the severity half is tolerant-path-only. Corrected
+  every comment carrying the old framing (both belts, the predicate doc,
+  `ParseFacilityChecked`, both test headers, `pkg/logging/README.md`) and
+  pinned the chain end to end in
+  `TestSyslogRenderUnsafeFacilityIsCommitReachable_5797`, whose
+  SchemaValidate assertion is deliberately `must pass` so a future key
+  validator fails the test instead of silently licensing the belt's removal.
+  Three review items folded: the vocabulary test could be satisfied by a
+  hardcoded set of exactly its own fixtures, so
+  `TestSyslogSelectorTokenIsAShapeNotAList_5797` characterizes the
+  predicate exhaustively over all 256 bytes plus 500 generated safe-shaped
+  tokens no fixture list can contain; the unmapped-facility test's
+  hand-written list permitted an unlisted special case, so the corpus is
+  now DERIVED from the mapping table's edit neighbourhood plus the Junos
+  and BSD vocabularies and a generated tail, with its scope limit stated
+  rather than implied; and the "cannot drift" test sampled eight names
+  while discarding the `known` return, so it is replaced by
+  `TestParseFacilityCheckedKnownSetIsExactlyParseFacility_5797`, which runs
+  the full mapping table plus that corpus and asserts BOTH returns.
+- **Validation**: seven-mutation matrix, snapshot-and-write-back restore
+  with a byte-for-byte verify, each mutant required to COMPILE so no RED is
+  a build break. At this head all seven are RED. Negative control at the
+  PR head d4018236 in a throwaway detached worktree: M1 drop file belt,
+  M2 drop user belt, M3 drop both, M5 drop the unmapped warning, and
+  M7 predicate replaced by a hardcoded fixture set were all GREEN there —
+  four escapes the old guard could not see, now closed. M4 checked
+  always-true and M6 predicate relaxed to control-bytes-only were already
+  RED at the old head, confirming those two existing guards were live
+  rather than dead. Full `pkg/daemon`, `pkg/logging`, `pkg/config` suites
+  pass.
+- **File(s)**: `pkg/daemon/daemon_system.go`,
+  `pkg/daemon/syslog_selector_render_5797_test.go` (new),
+  `pkg/daemon/syslog_selector_token_5797_test.go`,
+  `pkg/logging/syslog.go`, `pkg/logging/parse_facility_checked_5797_test.go`,
+  `pkg/logging/README.md`, `_Log.md`
+
 ## 2026-08-01 — #6588 round 6c: put the two-of-three characterization in the comment
 
 - **Timestamp**: 2026-08-01 (fix/6588-interface-monitor-packed-leaf, PR #6658)

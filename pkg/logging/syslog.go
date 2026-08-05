@@ -931,10 +931,20 @@ func ParseSeverity(name string) int {
 // syslog client wiring) MUST use this form; ParseFacility is retained for
 // callers that genuinely only want the code.
 //
-// The recognized set here is the SSOT the config gate validates against
-// (config.SystemSyslogFacilities), minus `any` — `any` is a selector wildcard
-// meaningful to rsyslog-backed file/user destinations, not a numeric facility a
-// host client can stamp on a record, so it is deliberately NOT recognized here.
+// The recognized set is exactly ParseFacility's mapped names — no more, no
+// less. It is NOT derived from a config-side gate, because there is no gate to
+// derive it from: `system syslog <dest> <facility> <severity>` models the
+// facility as the schema's wildcard KEY (pkg/config syslogFacilitySeverityLeaf)
+// and attaches a validator only to the severity VALUE, so any facility spelling
+// whatsoever commits clean and arrives at the daemon verbatim. (pkg/config's
+// `syslogFacilities` enum does gate a facility name, but on the unrelated
+// `security log ... facility` leaf — do not mistake it for this surface.)
+// TestParseFacilityCheckedKnownSetIsExactlyParseFacility_5797 pins the
+// two-function agreement over the whole mapping table.
+//
+// `any` is deliberately NOT recognized: it is a selector wildcard meaningful to
+// the rsyslog-backed file/user destinations, not a numeric facility a host
+// client can stamp on a record.
 func ParseFacilityChecked(name string) (int, bool) {
 	switch name {
 	case "kern", "user", "daemon", "auth", "syslog",

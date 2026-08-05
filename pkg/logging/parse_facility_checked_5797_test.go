@@ -1,6 +1,36 @@
 package logging
 
-import "testing"
+import (
+	"math/rand"
+	"strings"
+	"testing"
+)
+
+// parseFacilityMappingTable is the COMPLETE set of names ParseFacility maps to
+// something other than its unrecognized-name default, enumerated from its
+// switch. It is the reference both directions of the agreement test below are
+// derived from; keeping it here (rather than sampling names ad hoc) is what
+// lets that test claim to cover the whole table.
+//
+// `local0` is in the table even though ParseFacility's default also returns
+// FacilityLocal0: it is an AUTHORED name with an explicit case, and telling it
+// apart from the default is the entire point of ParseFacilityChecked.
+var parseFacilityMappingTable = map[string]int{
+	"kern":       FacilityKern,
+	"user":       FacilityUser,
+	"daemon":     FacilityDaemon,
+	"auth":       FacilityAuth,
+	"syslog":     FacilitySyslog,
+	"local0":     FacilityLocal0,
+	"local1":     FacilityLocal1,
+	"local2":     FacilityLocal2,
+	"local3":     FacilityLocal3,
+	"local4":     FacilityLocal4,
+	"local5":     FacilityLocal5,
+	"local6":     FacilityLocal6,
+	"local7":     FacilityLocal7,
+	"change-log": FacilityLocal6,
+}
 
 // #5797 invariant 7, visibility half.
 //
@@ -15,29 +45,87 @@ import "testing"
 // substitution. It deliberately does NOT change which code is returned: the
 // facility a misconfigured destination lands under is an operator-visible
 // contract question owned by the deferred half of #5797.
+//
+// This is a common path, not an exotic one. `system syslog <dest> <facility>
+// <severity>` models the facility as the schema's wildcard KEY with no key
+// validator, so every one of these names commits clean — and the Junos
+// spellings among them (`authorization`, `kernel`, `interactive-commands`) are
+// what a vSRX config actually contains.
+
+// unmappedCorpus builds the names that must report unmapped. Listing them by
+// hand is what let an unlisted special case (`bogus -> (local0, true)`) slip
+// through: a hand-written list only rejects what somebody thought to write
+// down. So the corpus is DERIVED — every entry of the mapping table put
+// through the mechanical edits a "be helpful about typos" special case would
+// most plausibly accept (case flips, one-character substitutions and deletions,
+// affixes) — and then extended with the vocabularies an operator actually
+// types.
+//
+// Scope, stated rather than implied: this covers the mapping table's edit
+// neighbourhood, the Junos facility vocabulary, the BSD facilities, and a
+// randomly generated tail. It does NOT enumerate the infinite complement, so a
+// special case on some string outside all of that would survive. What it does
+// bind is every place such a case would realistically be written.
+func unmappedCorpus() []string {
+	seen := map[string]bool{}
+	var out []string
+	add := func(names ...string) {
+		for _, n := range names {
+			if _, mapped := parseFacilityMappingTable[n]; mapped || seen[n] {
+				continue
+			}
+			seen[n] = true
+			out = append(out, n)
+		}
+	}
+
+	for name := range parseFacilityMappingTable {
+		add(strings.ToUpper(name), strings.ToUpper(name[:1])+name[1:])
+		add(name+"0", name+"-", name+" ", " "+name, name+"x")
+		for i := range name {
+			add(name[:i] + name[i+1:])                                // one-character deletion
+			add(name[:i] + "z" + name[i+1:])                          // one-character substitution
+			add(name[:i] + strings.ToUpper(name[i:i+1]) + name[i+1:]) // one-character case flip
+		}
+	}
+
+	// Junos facility names the mapper does not know. These are the ones that
+	// matter: they are VALID configuration, they are what #5797's own worked
+	// example uses, and today they silently become local0.
+	add("authorization", "kernel", "interactive-commands", "conflict-log",
+		"pfe", "security", "firewall", "external", "dfc", "ntp", "dcd")
+	// BSD facilities outside the mapped set.
+	add("mail", "ftp", "cron", "authpriv", "lpr", "news", "uucp")
+	// `any` is a selector wildcard for the rsyslog-backed file/user
+	// destinations, not a numeric facility a host client can stamp on a record
+	// — so it must report unmapped here even though it is valid configuration
+	// on those other destinations.
+	add("any", "none", "*", "")
+	// Plain typos and a generated tail.
+	add("deamon", "autherization", "local8", "local10", "bogus", "facility")
+	rng := rand.New(rand.NewSource(5797))
+	const alphabet = "abcdefghijklmnopqrstuvwxyz-0123456789"
+	for i := 0; i < 200; i++ {
+		var sb strings.Builder
+		for j := 0; j < 1+rng.Intn(12); j++ {
+			sb.WriteByte(alphabet[rng.Intn(len(alphabet))])
+		}
+		add(sb.String())
+	}
+	return out
+}
 
 // TestParseFacilityCheckedReportsUnmapped_5797 is the fail-on-revert guard.
 // Reverting ParseFacilityChecked to `return ParseFacility(name), true` makes
-// every unmapped case below claim to be known, and the daemon's warning — the
+// every name in the corpus claim to be known, and the daemon's warning — the
 // only signal that a substitution happened — goes silent.
 func TestParseFacilityCheckedReportsUnmapped_5797(t *testing.T) {
-	unmapped := []string{
-		// Plain typos.
-		"kernel", "deamon", "autherization", "local8", "",
-		// Junos facility names the mapper does not know. These are the ones
-		// that matter: they are VALID configuration, they are what #5797's own
-		// worked example uses, and today they silently become local0.
-		"authorization", "interactive-commands", "conflict-log",
-		"pfe", "security", "firewall", "external", "dfc",
-		// BSD facilities outside the mapped set.
-		"mail", "ftp", "cron", "authpriv", "lpr", "news", "uucp",
-		// `any` is a selector wildcard for the rsyslog-backed file/user
-		// destinations, not a numeric facility a host client can stamp on a
-		// record — so it must report unmapped here even though it is valid
-		// configuration on those other destinations.
-		"any",
+	corpus := unmappedCorpus()
+	if len(corpus) < 200 {
+		t.Fatalf("unmapped corpus collapsed to %d entries; the derivation is broken and this "+
+			"test is no longer checking what it claims", len(corpus))
 	}
-	for _, name := range unmapped {
+	for _, name := range corpus {
 		code, known := ParseFacilityChecked(name)
 		if known {
 			t.Errorf("ParseFacilityChecked(%q) reported KNOWN; the runtime cannot map it, "+
@@ -55,38 +143,58 @@ func TestParseFacilityCheckedReportsUnmapped_5797(t *testing.T) {
 // name the runtime really does map must report known, with the same code
 // ParseFacility returns. A false "unmapped" would emit a warning on a correct
 // config and train operators to ignore it.
+//
+// It iterates the whole mapping table rather than a sample, and cross-checks
+// the table against ParseFacility itself, so a new facility added to
+// ParseFacility but not to ParseFacilityChecked fails here as soon as the table
+// is updated — and a table left stale fails the code comparison.
 func TestParseFacilityCheckedAcceptsMapped_5797(t *testing.T) {
-	mapped := []string{
-		"kern", "user", "daemon", "auth", "syslog", "change-log",
-		"local0", "local1", "local2", "local3",
-		"local4", "local5", "local6", "local7",
-	}
-	for _, name := range mapped {
+	for name, want := range parseFacilityMappingTable {
+		if got := ParseFacility(name); got != want {
+			t.Errorf("parseFacilityMappingTable[%q] = %d but ParseFacility(%q) = %d; the "+
+				"reference table has drifted from the function it mirrors", name, want, name, got)
+		}
 		code, known := ParseFacilityChecked(name)
 		if !known {
 			t.Errorf("ParseFacilityChecked(%q) reported UNMAPPED, but ParseFacility maps it "+
 				"— a correct config would emit a spurious substitution warning", name)
 		}
-		if want := ParseFacility(name); code != want {
+		if code != want {
 			t.Errorf("ParseFacilityChecked(%q) code = %d, want %d — the checked form must "+
 				"agree with ParseFacility exactly", name, code, want)
 		}
 	}
 }
 
-// TestParseFacilityCheckedAgreesWithParseFacility_5797 pins that the two
-// functions cannot drift: for the mapped set they return identical codes, and
-// for anything else ParseFacility's local0 default is exactly what the checked
-// form reports as unmapped. This is what makes the checked form a pure
-// visibility split rather than a behaviour change.
-func TestParseFacilityCheckedAgreesWithParseFacility_5797(t *testing.T) {
-	for _, name := range []string{
-		"kern", "daemon", "authorization", "kernel", "local3", "mail", "", "any",
-	} {
-		code, _ := ParseFacilityChecked(name)
+// TestParseFacilityCheckedKnownSetIsExactlyParseFacility_5797 is the
+// cannot-drift pin, in the only form that earns the phrase: it runs the FULL
+// mapping table plus the derived unmapped corpus, and on every name asserts
+// BOTH returns — the code (which must equal ParseFacility's, always) and the
+// `known` bit (true iff the name has its own case in ParseFacility). An earlier
+// version of this test sampled eight names and discarded `known`, which is how
+// a claim ends up wider than what it checks.
+//
+// Together the two directions are what make ParseFacilityChecked a pure
+// visibility split rather than a behaviour change: the code never differs, and
+// the extra bit is exactly "did this name have a case, or did it fall through
+// to the local0 default".
+func TestParseFacilityCheckedKnownSetIsExactlyParseFacility_5797(t *testing.T) {
+	check := func(name string, wantKnown bool) {
+		t.Helper()
+		code, known := ParseFacilityChecked(name)
 		if want := ParseFacility(name); code != want {
 			t.Errorf("ParseFacilityChecked(%q) = %d but ParseFacility(%q) = %d; the checked "+
 				"form must not change which facility is used", name, code, name, want)
 		}
+		if known != wantKnown {
+			t.Errorf("ParseFacilityChecked(%q) known = %v, want %v", name, known, wantKnown)
+		}
+	}
+
+	for name := range parseFacilityMappingTable {
+		check(name, true)
+	}
+	for _, name := range unmappedCorpus() {
+		check(name, false)
 	}
 }
