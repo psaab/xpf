@@ -384,9 +384,18 @@ func TestApplySystemSyslogWarnsOnUnmappedFacility_5797(t *testing.T) {
 // the classification below the dial, the warning is lost exactly when the
 // operator has the most to debug.
 //
-// The failure is forced hermetically: binding the source to a documentation
-// address (RFC 5737) that is on no local interface fails with EADDRNOTAVAIL
-// immediately — no DNS, no packets, no sandbox dependency.
+// The failure is forced without touching the network: binding the source to a
+// documentation address (RFC 5737) that is on no local interface fails
+// immediately, with no DNS lookup and no packet sent.
+//
+// #6829: the errno is ENVIRONMENT-DEPENDENT and an earlier version of this
+// comment over-specified it. On a host that may create sockets the bind fails
+// with EADDRNOTAVAIL (measured: errors.Is(err, syscall.EADDRNOTAVAIL) true,
+// EPERM false). In a sandbox that denies socket CREATION the call fails earlier
+// with EPERM, never reaching the bind. This test does not depend on which: its
+// premise asserts only that client construction FAILED — the "failed to create
+// system syslog client" warning — which holds under either. So the hermeticity
+// holds, but for a weaker reason than "no sandbox dependency" claimed.
 //
 // RED-on-revert: move the ParseFacilityChecked block back below the
 // NewSyslogClientWithSource call in applySystemSyslog and this goes silent,

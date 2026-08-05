@@ -1,3 +1,57 @@
+## 2026-08-05 — #6829 fold round 5: dangling refs, an uncorrected artifact, an unrunnable repro
+
+- **Timestamp**: 2026-08-05 (fold/6829-r3, gate at 44af059d5 — MINOR, no blockers)
+- **Action**: Four fixes, all of them the PR's own failure species pointed inward.
+    - **F1 — five references to three tests round 4 DELETED.**
+      `parse_facility_checked_5797_test.go` still named
+      `TestParseFacilityMappingTableMatchesSource_6829` and
+      `TestParseFacilityCheckedCoversEveryParseFacilityCase_6829` at `:16`,
+      `:161`, `:164`, `:195-196`, and described a mechanism that no longer
+      exists ("reads ParseFacility's case labels from the source"). Confirmed
+      undefined at HEAD. Retargeted to the behavioural tests that DO exist, with
+      a parenthetical recording that the source-walking pair was replaced in
+      round 4 and why — so the next reader is not left wondering whether the
+      rename lost something.
+    - **F2 — the errno retraction reached `_Log.md` and not the artifact.**
+      `syslog_selector_render_5797_test.go` was byte-identical to `767ee3696`
+      and still claimed "no sandbox dependency", the exact sub-claim retracted
+      in round 4. The caveat now lives in the shipping comment: the errno is
+      environment-dependent, and the test survives it because its premise
+      asserts only that construction FAILED. Second time this session a
+      correction landed in the log while the comment kept the wrong version.
+    - **F3 — a cited invocation that cannot be run.** `_Log.md` cited
+      `go test -run TestProbeErrno6829`; that probe was ad-hoc and never
+      committed, so `git grep` finds it at no head. This is the failure mode of
+      the "name the invocation" habit adopted in round 4: an invocation naming a
+      nonexistent thing is worse than none, because it reads as reproducible.
+      The probe source is now inlined in the entry so the measurement is
+      genuinely re-runnable.
+    - **F4 — an escape OUTSIDE the stated residual.** The corpus builder did
+      `lit.Value[1:len-1]`, stripping delimiters WITHOUT unquoting, so
+      `"audit\x2dlog"` — a bare literal that does appear in the body, which the
+      residual therefore promised was sampled — entered the corpus as 12 source
+      characters and never as the 9-character runtime value. Switched to
+      `strconv.Unquote`.
+    - **E1 named in the file with its asymmetry**, per the gate: a package-level
+      map consulted before a RETAINED switch is the realistic future refactor
+      and slips; a WHOLESALE move trips the zero-literal `t.Fatalf` loudly. Both
+      halves verified rather than asserted (below). Also recorded the corpus
+      scale — ~539 names, 14 discriminating, AST contributes zero new ones at
+      HEAD — so the framing cannot be read as broader than it is.
+- **Validation**, each with the command that produced it, all
+  `go test -count=1 -run '6829' -v ./pkg/logging/` unless noted:
+  M3 pre-switch return keyed on `"audit\x2dlog"` — REDs BOTH assertions now
+  that the corpus unquotes (16 vs 21); this is the case F4 closed.
+  E1 partial (map before a retained switch) — rc=0, SLIPS, exactly as the file
+  now says.
+  E5 wholesale (switch replaced, zero literals) — REDs both via
+  `t.Fatalf` "extracted zero string literals", the loud half of the asymmetry.
+  `go vet ./pkg/logging/ ./pkg/daemon/` -> 0 under every mutation. Restored by
+  pristine-snapshot write-back plus `touch`.
+- **File(s)**: `pkg/logging/parse_facility_source_6829_test.go`,
+  `pkg/logging/parse_facility_checked_5797_test.go`,
+  `pkg/daemon/syslog_selector_render_5797_test.go`, `_Log.md`
+
 ## 2026-08-05 — #6829 fold round 4: the AST guards bound the switch, not the function
 
 - **Timestamp**: 2026-08-05 (fold/6829-r3, gate at 767ee3696)
@@ -95,8 +149,23 @@
   `go test -count=1 -run '<TestName>$' ./pkg/daemon/`.
   The dial failure is forced by binding the source to an RFC 5737 address on no
   local interface. On a host that may create sockets that is EADDRNOTAVAIL —
-  measured, `errors.Is(err, syscall.EADDRNOTAVAIL) == true`, EPERM false, via
-  `go test -count=1 -run TestProbeErrno6829 -v ./pkg/logging/`. In a sandbox
+  measured, `errors.Is(err, syscall.EADDRNOTAVAIL) == true`, EPERM false. That
+  was an AD-HOC probe, not a committed test, so the earlier citation of
+  `go test -run TestProbeErrno6829` named something that does not exist at any
+  head — an invocation that cannot be run is worse than none, because it reads
+  as reproducible. The probe is reproduced here so the measurement can be
+  re-run: write to `pkg/logging/probe_errno_test.go`
+  ```go
+  package logging
+  import ("errors";"syscall";"testing")
+  func TestProbeErrno(t *testing.T) {
+      _, err := NewSyslogClientWithSource("192.0.2.10", 514, "192.0.2.1")
+      t.Logf("%v EADDRNOTAVAIL=%v EPERM=%v", err,
+          errors.Is(err, syscall.EADDRNOTAVAIL), errors.Is(err, syscall.EPERM))
+  }
+  ```
+  then `go test -count=1 -run TestProbeErrno -v ./pkg/logging/` and delete it.
+  In a sandbox
   that denies socket CREATION the call fails earlier with EPERM instead, so the
   errno is environment-dependent and the earlier "EADDRNOTAVAIL immediately"
   wording was true only of an unsandboxed host. The test does not depend on

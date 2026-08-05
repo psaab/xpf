@@ -12,10 +12,13 @@ import (
 // derived from; keeping it here (rather than sampling names ad hoc) is what
 // lets that test claim to cover the whole table.
 //
-// #6829: this list is hand-copied, so it is CHECKED against ParseFacility's
-// real case labels by TestParseFacilityMappingTableMatchesSource_6829 rather
-// than trusted. Adding a case to ParseFacility without adding it here fails
-// that test — before it existed, the omission silently shrank the covered set.
+// #6829: this list is hand-copied, so its completeness is CHECKED rather than
+// trusted — by TestParseFacilityMappingTableIsComplete_6829, which asserts that
+// any name NOT in this table falls through ParseFacility to the default. A name
+// ParseFacility maps but this table omits therefore fails that test; before it
+// existed, the omission silently shrank the set every table-driven test here
+// covers. Note what does the work: the check is behavioural (it CALLS
+// ParseFacility), not a source comparison.
 //
 // `local0` is in the table even though ParseFacility's default also returns
 // FacilityLocal0: it is an AUTHORED name with an explicit case, and telling it
@@ -158,11 +161,15 @@ func TestParseFacilityCheckedReportsUnmapped_5797(t *testing.T) {
 // comment claimed "a table left stale fails the code comparison", which was
 // false and was disproved by adding `audit-log` to ParseFacility and watching
 // the package stay green. Staleness is caught by
-// TestParseFacilityMappingTableMatchesSource_6829, which reads ParseFacility's
-// case labels from the source instead of trusting a hand-copied list; the
-// over-rejection direction is closed by
-// TestParseFacilityCheckedCoversEveryParseFacilityCase_6829. Keep the drift
-// claim over there, where a mechanism backs it.
+// TestParseFacilityMappingTableIsComplete_6829, which CALLS ParseFacility on
+// every corpus name and requires anything absent from this table to return the
+// default; the code-agreement direction is closed by
+// TestParseFacilityCheckedAgreesWithParseFacility_6829. Keep the drift claim
+// over there, where a mechanism backs it.
+//
+// (Round 3 of #6829 named two source-walking tests here. They were replaced in
+// round 4 — an AST walk over the SWITCH could not see a short-circuit placed
+// before it — so this comment names the behavioural tests that exist now.)
 func TestParseFacilityCheckedAcceptsMapped_5797(t *testing.T) {
 	for name, want := range parseFacilityMappingTable {
 		if got := ParseFacility(name); got != want {
@@ -191,11 +198,12 @@ func TestParseFacilityCheckedAcceptsMapped_5797(t *testing.T) {
 // locally maintained lists, so this test verifies agreement ON THOSE NAMES; it
 // does not, by itself, establish that the known-set EQUALS ParseFacility's case
 // set, because neither input is derived from ParseFacility. The set equality the
-// name promises is proved from source, in both directions, by
-// TestParseFacilityCheckedCoversEveryParseFacilityCase_6829 (nothing ParseFacility
-// maps is reported unmapped) and TestParseFacilityCheckedKnowsNothingExtra_6829
-// (nothing is reported mapped that lacks a case). Read this test as the
-// per-name agreement half of that pair.
+// name promises is established BEHAVIOURALLY, in both directions, by
+// TestParseFacilityCheckedAgreesWithParseFacility_6829 (the returned code never
+// differs from ParseFacility's, for any name) and
+// TestParseFacilityMappingTableIsComplete_6829 (a name in the table reports
+// known; a name absent from it reports not-known AND falls through to the
+// default). Read this test as the per-name agreement half of that pair.
 //
 // Together the two directions are what make ParseFacilityChecked a pure
 // visibility split rather than a behaviour change: the code never differs, and

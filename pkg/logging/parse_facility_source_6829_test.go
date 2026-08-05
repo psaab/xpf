@@ -5,6 +5,7 @@ import (
 	"go/parser"
 	"go/token"
 	"sort"
+	"strconv"
 	"testing"
 )
 
@@ -52,12 +53,35 @@ import (
 // literal in the whole function BODY rather than case labels, so a name
 // special-cased by any construct that mentions it literally is sampled.
 //
-// NOT BOUND, stated so nobody reads this file as complete: a name ParseFacility
-// special-cases WITHOUT the literal appearing in its body — built by
-// concatenation, read from a package-level map, derived from another value — is
-// not in the corpus, and no assertion here will visit it. The behavioural
-// assertions are total over the corpus; the corpus is not total over the
-// language.
+// NOT BOUND, stated so nobody reads this file as complete. A name ParseFacility
+// special-cases without its literal reaching this corpus is not visited by any
+// assertion here. Known ways that happens, most to least realistic:
+//
+//  1. A package-level `var extraFacilities = map[string]int{...}` consulted
+//     BEFORE the switch, with the switch RETAINED. This is the realistic one —
+//     converting a 14-case switch to a map is the likely future refactor here,
+//     and the PARTIAL form is exactly how someone adds a vendor facility
+//     without touching reviewed code. Note the asymmetry: a WHOLESALE move
+//     fails loudly, because facilityNameLiterals finds zero literals and
+//     t.Fatalf's; the PARTIAL move slips silently, because the remaining
+//     switch still yields literals and the extraction looks healthy.
+//  2. A name assembled by concatenation, or derived from another value, so no
+//     literal exists to find.
+//  3. A name special-cased inside a helper function rather than in
+//     ParseFacility's own body — this walk reads one FuncDecl.
+//
+// Escape sequences are NOT in this list: they were, until the extraction
+// switched to strconv.Unquote above.
+//
+// The behavioural assertions are total over the corpus; the corpus is not total
+// over the language.
+//
+// Scale, so the framing is not read as broader than it is: the corpus is ~539
+// names, of which only the 14 table entries DISCRIMINATE — for the rest both
+// functions return FacilityLocal0 and agreement is trivially satisfied. At HEAD
+// the AST contributes zero names the table does not already hold. Its value is
+// PROSPECTIVE: it self-samples a mutation that introduces a new literal, which
+// is exactly the M1 shape this file exists to catch.
 
 // facilityNameLiterals returns every string literal appearing anywhere in the
 // named function's body. It is deliberately over-inclusive: a surplus literal
@@ -96,7 +120,18 @@ func facilityNameLiterals(t *testing.T, fnName string) []string {
 		if !ok || lit.Kind != token.STRING {
 			return true
 		}
-		v := lit.Value[1 : len(lit.Value)-1]
+		// #6829 F4: UNQUOTE rather than stripping the delimiters. A naive
+		// lit.Value[1:len-1] hands back the SOURCE text, so `"audit\x2dlog"` —
+		// a bare literal that does appear in the body — enters the corpus as 12
+		// characters and never as the 9-character runtime value, escaping a
+		// guard whose stated residual says it is sampled.
+		v, err := strconv.Unquote(lit.Value)
+		if err != nil {
+			// Not unquotable (should not happen for a STRING literal); fall
+			// back to the raw text rather than dropping the name, since an
+			// extra corpus entry is harmless and a missing one is not.
+			v = lit.Value
+		}
 		if !seen[v] {
 			seen[v] = true
 			out = append(out, v)
