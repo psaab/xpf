@@ -36,7 +36,7 @@ fabric-binding changes. The converged design folds them all in:
 
 ### 0.1 VERIFIED BLOCKER 1 — the stream leaks its own PSK in cleartext ⇒ confidentiality is REQUIRED
 When `chassis cluster config-sync` is enabled, `pushConfigToPeer`
-(`pkg/daemon/daemon_ha_sync.go:311-341`) sends `d.store.ShowActive()` — which
+(`pkg/daemon/daemon_ha_sync.go:355-370`) sends `d.store.ShowActive()` — which
 is `s.active.Format()`, the **raw, unredacted** config tree
 (`pkg/configstore/store_format.go:31-35`) — over *this* session-sync stream.
 The #4051 redaction comment (`store_format.go:296-305`) states outright that the
@@ -65,8 +65,8 @@ that sends a normal frame (not a HELLO), or advertises `keyed=0`, hits
 / `HeartbeatPeerAuthSeen` arms) it returns **accept=unauthenticated**. Worse,
 that peer's **first frame is executed BEFORE the connection is admitted**:
 `handleNewConnection` calls `s.handleMessage(conn, pending.typ, pending.payload)`
-at `sync_conn.go:494-496`, *before* the `s.mu.Lock()` that installs
-`conn0`/`conn1`. That frame can be `syncMsgFence` (`sync_conn.go:1657-1661` →
+at `sync_conn.go:122`, *before* the `installConn` that installs
+`conn0`/`conn1`. That frame can be `syncMsgFence` (`sync_conn_read.go:469` →
 `OnFenceReceived` → **disables all RGs**). So a PSK-less attacker on the fabric
 can, on first contact: fence the node (HA DoS), then have its pass-through
 connection **displace** the legitimate peer — and later guard-arming does not
@@ -107,6 +107,34 @@ The rest of this doc is the r1 construction detail (§3.0-3.8, still valid) plus
 the r2 additions (§3.9-3.12). Where r1 said "bind configured endpoints," the
 converged discriminator in §3.1 supersedes it.
 
+> **Address refresh, 2026-08-05 (origin/master `ad9591177`).** Every premise
+> below re-verified and still LIVE — but the addresses had moved and are now
+> corrected in place, so do not read a failed grep as a rotted plan.
+> `pkg/cluster/sync_auth.go` is **byte-identical** to the base this was written
+> against, so the reflection construction is untouched. `sync_conn.go` was
+> refactored -1506/+692 and split into `sync_conn_{read,write,config,sweep,gen}.go`,
+> which is what invalidated most citations. Refreshed: the pre-admission
+> `handleMessage` (`:494-496` → `:122`), the fence dispatch (→
+> `sync_conn_read.go:469`), `handleNewConnection` (→ `:88`, handshake `:100`),
+> `acceptLoop` (→ `:394`), `fabricConnectLoop` (→ `:441`),
+> `shouldInitiateFabricDial` (→ `:12`), the install/displace block (→
+> `installConn`, `:250`), `receiveLoop` (→ `sync_conn_read.go:14`), and
+> `pushConfigToPeer` (→ `daemon_ha_sync.go:355-370`, `ShowActive()` at `:366`).
+>
+> **Not re-verified:** the three citations at §4/§6 into
+> `daemon_cluster_bind.go:132`, `daemon_ha_sync.go:478`, and
+> `daemon_ha_sync.go:995-1017`. They are left as written rather than
+> substituted, because a confidently-wrong line number is worse than a stale
+> one — re-resolve them by symbol before relying on them.
+>
+> **Partly pre-closed:** #5303 (`c06722f14`) added a bounded pre-auth admission
+> pool, setup tracking and close-on-stop, covering most of §3.11.
+>
+> **Already shipped:** §3.10 (fail-closed keyed dual-accept + no pre-admission
+> frame execution) landed as PR #6865. §3.9's Option A′/B fork is **decided:
+> Option B** (TLS 1.3 external PSK, `psk_dhe_ke`), which subsumes most of
+> §3.0-3.8 — build the transport, do not extend the custom handshake.
+
 Verified against origin/master `5e34920d1` (issue cites `812bf30c1`;
 `pkg/cluster/sync_auth.go` is byte-identical at both — the vulnerability is
 live on current origin/master). All code line references below are
@@ -142,16 +170,16 @@ textbook precondition for a **reflection attack**.
 ### 1.1 Blast radius (who runs the handshake — both sides)
 
 `performSyncHandshake` is invoked from exactly one place,
-`handleNewConnection` (`sync_conn.go:483`), which is the **shared** setup path
+`handleNewConnection` (`sync_conn.go:88`, handshake at `:100`), which is the **shared** setup path
 for **both** roles:
 
-- **Responder** — `acceptLoop` (`sync_conn.go:1180-1210`) spawns
+- **Responder** — `acceptLoop` (`sync_conn.go:394`) spawns
   `handleNewConnection` per inbound TCP connection.
-- **Initiator** — `fabricConnectLoop` (`sync_conn.go:1215-1252`) dials the peer
+- **Initiator** — `fabricConnectLoop` (`sync_conn.go:441`) dials the peer
   and calls `handleNewConnection` on the dialed connection.
 
 Neither passes a role. Which node dials is decided by `shouldInitiateFabricDial`
-(`sync_conn.go:399-412`): the node with the numerically **lower** fabric
+(`sync_conn.go:12`): the node with the numerically **lower** fabric
 `addr:port` dials (initiator); the higher listens (responder). This is
 antisymmetric, so for a given fabric **both real nodes already agree who is
 initiator** — but an attacker does not respect it, and the handshake code never
@@ -159,7 +187,7 @@ consults it. Dual-fabric (`fab0`/`fab1`) each get an independent
 connect/accept pair.
 
 On success `handleNewConnection` **closes any existing conn** for that fabric
-and installs the new one (`sync_conn.go:500-520`) — so a winning attacker
+and installs the new one (`installConn`, `sync_conn.go:250`) — so a winning attacker
 **displaces** the legitimate peer connection.
 
 ### 1.2 What the frame seal does / does NOT protect
@@ -194,7 +222,7 @@ sealed **plaintext** session/config frames — which the attacker reads. The
 attacker cannot compute the frame key (no PSK) so it cannot forge *new* sealed
 frames, **but the undirected key means V's own sealed frames verify inbound on
 V**: the attacker reflects V's sealed frames and V's `receiveLoop`
-(`sync_conn.go:1349-1364`) accepts them (valid MAC — V's own key; `recvSeq` and
+(`receiveLoop`, `sync_conn_read.go:14`) accepts them (valid MAC — V's own key; `recvSeq` and
 `sendSeq` are independent counters) and feeds them to peer-state handlers. So
 the attacker gets, with **no PSK**: (a) displacement of the real peer
 connection (HA-sync DoS), (b) disclosure of all plaintext session/config, (c)
@@ -584,7 +612,7 @@ a PSK-less / legacy peer on first contact (§0.2). Concretely:
 - **Preserve byte-identical legacy behaviour ONLY when the local node itself
   has no PSK** (unkeyed node = legacy peer, unchanged).
 - **Do NOT execute any pending pre-admission frame.** Remove the
-  `handleMessage(pending…)` call at `sync_conn.go:494-496` for any connection
+  `handleMessage(pending…)` call at `sync_conn.go:122` for any connection
   that is not fully admitted; a keyed node has no legitimate "legacy first
   frame" to replay. (Under the new policy a keyed node never produces a
   `pending` frame at all, since it rejects the unauthenticated peer.)
@@ -601,7 +629,7 @@ a PSK-less / legacy peer on first contact (§0.2). Concretely:
 ### 3.11 Pre-auth DoS bounds (r2 — Codex §7)
 
 The accept path spawns an unbounded goroutine per connection
-(`sync_conn.go:1180`) and the pre-auth reader permits a 16 MiB allocation per
+(`acceptLoop`, `sync_conn.go:394`) and the pre-auth reader permits a 16 MiB allocation per
 connection (`readSyncFrameRaw`, `sync_auth.go:289`). A 3s handshake deadline
 bounds *duration*, not aggregate memory/goroutines. Add:
 - a small **per-fabric handshake semaphore** (cap concurrent in-setup
@@ -749,7 +777,7 @@ All are RED on the current code and GREEN after the fix:
 11. **No pre-admission frame execution (Blocker 2).** Assert a `syncMsgFence`
     (or any control frame) arriving before authentication is **never** passed
     to `handleMessage` / never fires `OnFenceReceived` before the connection is
-    admitted. (RED today: `sync_conn.go:494-496` executes it pre-install.)
+    admitted. (RED at the time of writing: `sync_conn.go:122` executed it pre-install; CLOSED by PR #6865.)
 12. **Node-id reflection guard.** Reject a peer HELLO advertising the **local**
     node-id; assert swapping the initiator/responder node-id slots changes the
     proof (the MUST-FIX #1 anti-sort test); assert a proof over `fabric_idx=0`
