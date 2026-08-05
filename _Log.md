@@ -1,3 +1,46 @@
+## 2026-08-05 — #6829 fold round 4: the AST guards bound the switch, not the function
+
+- **Timestamp**: 2026-08-05 (fold/6829-r3, gate at 767ee3696)
+- **Action**: MAJOR. All three round-3 guards asserted over an AST walk of
+  `ParseFacility`'s SWITCH, so a short-circuit placed BEFORE the switch was
+  invisible to every one of them. Reproduced first: inserting
+  `if name == "audit-log" { return FacilityLocal5 }` ahead of the switch leaves
+  `ParseFacilityChecked("audit-log") == (FacilityLocal0, false)` while
+  `ParseFacility` returns `FacilityLocal5` (21 vs 16 — measured), and the whole
+  `pkg/logging` package stayed green. That is a live over-rejection: a config
+  naming the facility draws a spurious "unmapped" warning for a name the
+  runtime does map.
+    - **Assertions are now behavioural** — they CALL both functions and compare.
+      A structural check binds only the construct it walks, so widening the walk
+      to "every return" would buy one more mutation shape and stay fragile to
+      the next.
+    - **The enumeration clause the obvious fix misses.** Behavioural assertions
+      still need something to enumerate names, and the natural enumerator is the
+      mapping table. "For every table name assert agreement, and for a name
+      absent from the table assert Checked reports not-known" PASSES the
+      mutation — `Checked("audit-log")` genuinely IS not-known; the defect is
+      that `ParseFacility` maps it. That form was written and run against the
+      mutation before being rejected, not reasoned about: rc=0. The missing
+      clause is that a name absent from the table must ALSO fall through
+      `ParseFacility` to the default, which converts "the table is complete"
+      from an assumption every table-driven test rests on into an assertion one
+      of them makes.
+    - **The AST walk survives only as a corpus contributor** — it supplies names
+      to call with and nothing is asserted about its output. It now collects
+      every string literal in the whole function BODY rather than case labels,
+      so a name special-cased by any construct that mentions it literally is
+      sampled. What is NOT bound is stated in the file: a name special-cased
+      without its literal appearing in the body is not in the corpus.
+- **Validation**, each with the command that produced it:
+  M1 pre-switch return in `ParseFacility` — `go test -count=1 -run '6829' -v
+  ./pkg/logging/` REDs BOTH new assertions (agreement: 16 vs 21;
+  table-completeness: non-default code for an absent name).
+  M2 pre-switch `return FacilityLocal0, true` in `ParseFacilityChecked` — same
+  command REDs the table-completeness assertion (reports KNOWN for a name with
+  no table entry). `go vet ./pkg/logging/` -> 0 under both, so neither RED is a
+  build break. Restored by pristine-snapshot write-back plus `touch`.
+- **File(s)**: `pkg/logging/parse_facility_source_6829_test.go`, `_Log.md`
+
 ## 2026-08-05 — #6829 fold round 3: make the drift claim true, un-hide the dial
 
 - **Timestamp**: 2026-08-05 (fold/6829-r3, gate at 453844ca3)
@@ -45,13 +88,25 @@
   now REDs three assertions naming the missing coverage, where before the fold
   it was green.
   (2) Classification moved back below the dial REDs the new
-  `TestApplySystemSyslogWarnsWhenClientDialFails_6829`; the PRE-EXISTING 5797
-  warning test PASSES under that same mutation (rc=0), so the new test is what
-  binds the hoist, not the old one. The dial failure is forced hermetically by
-  binding the source to an RFC 5737 address on no local interface —
-  EADDRNOTAVAIL immediately, no DNS, no packets, no sandbox dependency.
-  Gates from real exit codes: `GATE1_RC=0`; the first full run came back
-  `FULL_RC=1` on `pkg/refactoraudit` `TestHeatmapNotStale`.
+  `TestApplySystemSyslogWarnsWhenClientDialFails_6829` (rc=1); the PRE-EXISTING
+  5797 warning test PASSES under that same mutation (rc=0), so the new test is
+  what binds the hoist, not the old one. Both re-measured in #6829 round 4 on
+  this workstation via
+  `go test -count=1 -run '<TestName>$' ./pkg/daemon/`.
+  The dial failure is forced by binding the source to an RFC 5737 address on no
+  local interface. On a host that may create sockets that is EADDRNOTAVAIL —
+  measured, `errors.Is(err, syscall.EADDRNOTAVAIL) == true`, EPERM false, via
+  `go test -count=1 -run TestProbeErrno6829 -v ./pkg/logging/`. In a sandbox
+  that denies socket CREATION the call fails earlier with EPERM instead, so the
+  errno is environment-dependent and the earlier "EADDRNOTAVAIL immediately"
+  wording was true only of an unsandboxed host. The test does not depend on
+  which: its premise asserts only that client construction FAILED (the
+  "failed to create system syslog client" warning), which holds under either
+  errno, so the hermeticity argument survives the correction.
+  Gates, each with the invocation that produced it:
+  `go test ./pkg/logging/... ./pkg/daemon/...` -> 0;
+  `go test ./...` -> 1 on `pkg/refactoraudit` `TestHeatmapNotStale` first,
+  then 0 after regenerating the heatmap.
 - **Pre-existing red found while gating (not introduced by this fold).**
   `daemon_system.go` crossed the 2000-LOC tier boundary in THIS PR's own
   commit — 1889 on master to 2047 at `453844ca3` — without regenerating
