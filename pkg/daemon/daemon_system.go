@@ -890,15 +890,17 @@ func (d *Daemon) applySystemSyslog(cfg *config.Config) {
 		if host.Port > 0 {
 			port = host.Port
 		}
-		c, err := logging.NewSyslogClientWithSource(host.Address, port, host.SourceAddress)
-		if err != nil {
-			slog.Warn("failed to create system syslog client",
-				"host", host.Address, "err", err)
-			continue
-		}
-
-		// Apply facility from first facility entry, default to daemon
-		c.Facility = logging.FacilityDaemon
+		// #6829: classify the facility BEFORE constructing the client, because
+		// construction DIALS. NewSyslogClientWithSource resolves and dials
+		// (logging/syslog.go), and on UDP a dial failure returns a nil client,
+		// so the `continue` below used to skip the classification entirely — an
+		// operator whose collector hostname does not resolve was never told
+		// their facility name is also unmappable, which is the one diagnosis
+		// that does not depend on the network being up. Classification reads
+		// only the config, so it belongs on this side of the dial. It also makes
+		// the warning observable in a restricted runner where socket creation is
+		// denied, instead of the test dying at construction before reaching it.
+		facility := logging.FacilityDaemon
 		if len(host.Facilities) > 0 {
 			// #5797: an UNMAPPED facility name silently resolved to local0 here,
 			// so records left under a facility the operator never authored and
@@ -921,13 +923,24 @@ func (d *Daemon) applySystemSyslog(cfg *config.Config) {
 			// is the whole fix — TestApplySystemSyslogWarnsOnUnmappedFacility_5797
 			// pins that it fires.
 			raw := host.Facilities[0].Facility
-			facility, known := logging.ParseFacilityChecked(raw)
+			f, known := logging.ParseFacilityChecked(raw)
 			if !known {
 				slog.Warn("system syslog: unmapped facility name; forwarding under local0 — "+
 					"records will carry a facility the configuration does not name (#5797)",
 					"host", host.Address, "facility", raw, "using", "local0")
 			}
-			c.Facility = facility
+			facility = f
+		}
+
+		c, err := logging.NewSyslogClientWithSource(host.Address, port, host.SourceAddress)
+		if err != nil {
+			slog.Warn("failed to create system syslog client",
+				"host", host.Address, "err", err)
+			continue
+		}
+
+		c.Facility = facility
+		if len(host.Facilities) > 0 {
 			c.MinSeverity = syslogHostMinSeverity(host.Facilities)
 		}
 

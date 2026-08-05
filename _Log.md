@@ -1,3 +1,78 @@
+## 2026-08-05 — #6829 fold round 3: make the drift claim true, un-hide the dial
+
+- **Timestamp**: 2026-08-05 (fold/6829-r3, gate at 453844ca3)
+- **Action**: Gate returned MERGE-NEEDS-MAJOR on four items, all of the same
+  species this PR exists to fight: a comment asserting a mechanism the code does
+  not have. Fixed the claims to match the measurements — and where the claim was
+  worth keeping, built the mechanism so it became true.
+    - **The drift guard did not guard (items 1 and 3, same root cause).** There
+      were THREE hand-maintained copies of one name set: `ParseFacility`'s
+      switch, `ParseFacilityChecked`'s case list, and the test's
+      `parseFacilityMappingTable`. The agreement test iterated the TABLE, so a
+      name added to `ParseFacility` alone was visited by no assertion at all.
+      Reproduced the gate's experiment first: adding `audit-log` to
+      `ParseFacility` left the whole package green. A test cannot reflect over a
+      switch, so `parse_facility_source_6829_test.go` reads the case labels from
+      SOURCE via go/ast (an established convention here — 8 packages already do
+      it) and pins three things against that authority: every `ParseFacility`
+      case is known to `ParseFacilityChecked` with the same code (this is the
+      OVER-REJECTION direction, and reading it from source is what finally
+      completes it — a table-driven test structurally could not), nothing extra
+      is claimed as known, and the hand-written table matches the real case set.
+      The helper fails closed on a missing function, a missing switch, a
+      non-literal case, or an empty extraction, so a refactor cannot quietly
+      turn these into no-ops.
+    - **The host-warning test was non-hermetic AND its comment was false.** It
+      claimed UDP "resolves without a connect"; `NewSyslogClientWithSource`
+      dials, and on UDP a failure returns a NIL client, so
+      `applySystemSyslog`'s `continue` skipped everything after it. Under a
+      restricted runner the test died at construction having asserted nothing.
+      Fixed in production rather than with a test-only seam, because the
+      ordering is a real defect: an operator whose collector is unreachable was
+      never told their facility name is ALSO unmappable — the one diagnosis
+      that does not depend on the network. Classification now runs BEFORE the
+      dial; it reads only config, so it belongs on that side.
+    - **Two `_Log.md` claims overstated.** "500 generated tokens no fixture list
+      can contain" — the corpus is a FIXED seed (5797) with lengths 1-24, so it
+      is reproducible and finite and a list could enumerate it; corrected to
+      what it does rule out. "changed flips so rsyslog restarts" — the test
+      asserts the `changed` return and never calls `applySyslogFiles` or
+      observes `systemctl restart`; corrected to say it asserts the flag that
+      GATES the restart.
+- **Validation**: Preflight build+vet clean; every mutation vet-clean; restores
+  by pristine-snapshot write-back plus `touch`, never `git checkout --`.
+  (1) The gate's own experiment — `audit-log` added to `ParseFacility` only —
+  now REDs three assertions naming the missing coverage, where before the fold
+  it was green.
+  (2) Classification moved back below the dial REDs the new
+  `TestApplySystemSyslogWarnsWhenClientDialFails_6829`; the PRE-EXISTING 5797
+  warning test PASSES under that same mutation (rc=0), so the new test is what
+  binds the hoist, not the old one. The dial failure is forced hermetically by
+  binding the source to an RFC 5737 address on no local interface —
+  EADDRNOTAVAIL immediately, no DNS, no packets, no sandbox dependency.
+  Gates from real exit codes: `GATE1_RC=0`; the first full run came back
+  `FULL_RC=1` on `pkg/refactoraudit` `TestHeatmapNotStale`.
+- **Pre-existing red found while gating (not introduced by this fold).**
+  `daemon_system.go` crossed the 2000-LOC tier boundary in THIS PR's own
+  commit — 1889 on master to 2047 at `453844ca3` — without regenerating
+  `docs/refactoring-audit-current.txt`, so the branch has been failing the
+  full Go suite since that commit. Verified by attribution rather than
+  assumed: the gate FAILS at the untouched PR head in a throwaway detached
+  worktree, and PASSES at `origin/master` `ad9591177`. My hoist took the file
+  to 2060 but did not cause the crossing. Regenerated the heatmap as the
+  failure message prescribes; the file now records
+  `[REFACTOR] 2060 pkg/daemon/daemon_system.go`. The regenerated artifact
+  also refreshes LOC numbers for unrelated files (e.g. `compiler_system.go`
+  2157 -> 2583) — those are WITHIN-tier drift that the gate deliberately
+  tolerates, which is why master is green despite them; they are refreshed
+  because the script rewrites the whole file, not because they were failing.
+  Full suite re-run clean afterwards.
+- **File(s)**: `pkg/daemon/daemon_system.go`,
+  `docs/refactoring-audit-current.txt`,
+  `pkg/daemon/syslog_selector_render_5797_test.go`,
+  `pkg/logging/parse_facility_source_6829_test.go`,
+  `pkg/logging/parse_facility_checked_5797_test.go`, `_Log.md`
+
 ## 2026-08-05 — #5797 round 2: bind the selector belts at the render site, and correct a threat model that was wrong in the understating direction
 
 - **Timestamp**: 2026-08-05 (fix/5797-syslog-selector-failclosed, PR #6829)
@@ -12,7 +87,9 @@
   renders byte-for-byte, an unsafe file/user token is omitted, a drop-in a
   previous apply wrote for a now-unsafe destination is REMOVED from disk
   (production pair `syslogDropinContents` -> `reconcileSyslogDropins`
-  against a temp dir) and `changed` flips so rsyslog restarts, and both
+  against a temp dir) and the `changed` return flips — the flag that GATES
+  the restart; the test asserts the flag, it does not call
+  `applySyslogFiles` or observe `systemctl restart` — and both
   skips warn while a clean config stays quiet. Same for the daemon side of
   `ParseFacilityChecked` — `applySystemSyslog` is driven directly and the
   warning asserted, with mapped names as the negative control.
@@ -37,7 +114,10 @@
   hardcoded set of exactly its own fixtures, so
   `TestSyslogSelectorTokenIsAShapeNotAList_5797` characterizes the
   predicate exhaustively over all 256 bytes plus 500 generated safe-shaped
-  tokens no fixture list can contain; the unmapped-facility test's
+  tokens (fixed seed 5797, lengths 1-24, so the corpus is reproducible and
+  finite — a fixture list COULD enumerate it; what it rules out is the
+  specific hardcoded-set-of-its-own-fixtures shape the review found, not
+  every conceivable list); the unmapped-facility test's
   hand-written list permitted an unlisted special case, so the corpus is
   now DERIVED from the mapping table's edit neighbourhood plus the Junos
   and BSD vocabularies and a generated tail, with its scope limit stated

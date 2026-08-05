@@ -315,8 +315,16 @@ func TestSyslogRenderUnsafeFacilityIsCommitReachable_5797(t *testing.T) {
 // on it. Reverting ParseFacilityChecked to `return ParseFacility(name), true`,
 // or dropping the `if !known` warn in applySystemSyslog, makes this fail.
 //
-// applySystemSyslog installs real clients, so this uses a documentation-range
-// literal (RFC 5737) and UDP, which resolves without a connect or any DNS.
+// Hermeticity (#6829): applySystemSyslog DOES dial — NewSyslogClientWithSource
+// resolves and connects, and on UDP a failure returns a nil client. An earlier
+// comment here claimed UDP "resolves without a connect", which was simply
+// false: under a restricted runner the socket call was refused and this test
+// died at client construction, never reaching ParseFacilityChecked, so it
+// asserted nothing and failed for an unrelated reason. The classification and
+// its warning now run BEFORE the dial (daemon_system.go), so the assertions
+// below hold whether or not the sandbox permits a socket. The
+// documentation-range literal (RFC 5737) is still used so no real host is
+// contacted when sockets ARE permitted.
 func TestApplySystemSyslogWarnsOnUnmappedFacility_5797(t *testing.T) {
 	apply := func(t *testing.T, facility string) string {
 		t.Helper()
@@ -360,5 +368,60 @@ func TestApplySystemSyslogWarnsOnUnmappedFacility_5797(t *testing.T) {
 					"correct config must stay quiet. captured:\n%s", facility, got)
 			}
 		})
+	}
+}
+
+// TestApplySystemSyslogWarnsWhenClientDialFails_6829 binds the ordering fix:
+// the unmapped-facility classification must run BEFORE the client is
+// constructed, because construction DIALS.
+//
+// This is not only a test-hermeticity concern. NewSyslogClientWithSource
+// resolves and dials, and on UDP a failure returns a NIL client, so
+// applySystemSyslog's `continue` skipped everything after it. An operator whose
+// collector address is unreachable — or whose source-address binding is wrong —
+// therefore never learned that their facility name was ALSO unmappable, which
+// is precisely the diagnosis that does not depend on the network working. With
+// the classification below the dial, the warning is lost exactly when the
+// operator has the most to debug.
+//
+// The failure is forced hermetically: binding the source to a documentation
+// address (RFC 5737) that is on no local interface fails with EADDRNOTAVAIL
+// immediately — no DNS, no packets, no sandbox dependency.
+//
+// RED-on-revert: move the ParseFacilityChecked block back below the
+// NewSyslogClientWithSource call in applySystemSyslog and this goes silent,
+// because the `continue` fires first.
+func TestApplySystemSyslogWarnsWhenClientDialFails_6829(t *testing.T) {
+	buf := captureRenderedWarnings(t)
+
+	d := &Daemon{slogHandler: logging.NewSyslogSlogHandler(slog.Default().Handler())}
+	t.Cleanup(func() { d.slogHandler.SetClients(nil) })
+
+	cfg := &config.Config{}
+	cfg.System.Syslog = &config.SystemSyslogConfig{
+		Hosts: []*config.SyslogHostConfig{{
+			Address: "192.0.2.10",
+			// On no local interface, so the bind fails and the client is nil.
+			SourceAddress: "192.0.2.1",
+			Facilities:    []config.SyslogFacility{{Facility: "authorization", Severity: "info"}},
+		}},
+	}
+	d.applySystemSyslog(cfg)
+	got := buf.String()
+
+	// Precondition: the dial really did fail, or this test proves nothing about
+	// ordering — it would just be the ordinary warning path again.
+	if !strings.Contains(got, "failed to create system syslog client") {
+		t.Fatalf("premise broken: the client was expected to FAIL construction so the "+
+			"ordering matters; captured:\n%s", got)
+	}
+	if !strings.Contains(got, "unmapped facility name") {
+		t.Errorf("the unmapped-facility warning was lost because the client could not be "+
+			"constructed — classification must not sit behind the dial (#6829). The "+
+			"operator with an unreachable collector is the one who most needs to be "+
+			"told their facility name is wrong. captured:\n%s", got)
+	}
+	if !strings.Contains(got, "authorization") {
+		t.Errorf("the warning must still name the unmapped facility. captured:\n%s", got)
 	}
 }
