@@ -900,7 +900,25 @@ func (d *Daemon) applySystemSyslog(cfg *config.Config) {
 		// Apply facility from first facility entry, default to daemon
 		c.Facility = logging.FacilityDaemon
 		if len(host.Facilities) > 0 {
-			c.Facility = logging.ParseFacility(host.Facilities[0].Facility)
+			// #5797: an UNMAPPED facility name silently resolved to local0 here,
+			// so records left under a facility the operator never authored and
+			// the collector's facility-based routing misfiled them with no
+			// signal anywhere. The strict commit gate
+			// (config.SystemSyslogFacilities via the schema's
+			// wildcardNameValidator) now rejects such a name, so this is only
+			// reachable on the tolerant load / peer-sync path (#1960 no-brick) —
+			// where the substitution must be VISIBLE rather than silent.
+			// Forwarding is deliberately NOT withheld: which facility a
+			// misconfigured host lands under is an availability-affecting
+			// contract question, and the selector redesign owns it.
+			raw := host.Facilities[0].Facility
+			facility, known := logging.ParseFacilityChecked(raw)
+			if !known {
+				slog.Warn("system syslog: unmapped facility name; forwarding under local0 — "+
+					"records will carry a facility the configuration does not name (#5797)",
+					"host", host.Address, "facility", raw, "using", "local0")
+			}
+			c.Facility = facility
 			c.MinSeverity = syslogHostMinSeverity(host.Facilities)
 		}
 
@@ -936,6 +954,27 @@ func (d *Daemon) applySyslogFiles(cfg *config.Config) {
 				slog.Warn("skipping invalid syslog file destination", "name", f.Name, "err", err)
 				continue
 			}
+			// #5797 render belt: the facility and severity tokens are
+			// interpolated VERBATIM into the rsyslog selector below — the very
+			// line #4902 already belts the file NAME for, using the same
+			// leniently-loaded / peer-synced threat model. #4902 stopped one
+			// field short: a selector metacharacter or control byte in either
+			// token escapes the intended selector and injects rsyslog
+			// configuration. Shape-check both, and skip the destination rather
+			// than write a drop-in built from an unsafe token.
+			//
+			// This is deliberately a SHAPE check, not a facility-name allowlist.
+			// Closing the name set requires first reconciling the Junos facility
+			// vocabulary (`authorization`, `kernel`, `interactive-commands`, ...)
+			// against the BSD/rsyslog names the runtime maps (`auth`, `kern`,
+			// ...) — an operator-visible mapping decision tracked on #5797, not
+			// something to guess at here. The shape check is correct regardless
+			// of how that lands.
+			if !syslogSelectorTokenSafe(f.Facility) || !syslogSelectorTokenSafe(f.Severity) {
+				slog.Warn("skipping syslog file destination with unsafe selector token (#5797)",
+					"name", f.Name, "facility", f.Facility, "severity", f.Severity)
+				continue
+			}
 			// Map Junos facility/severity to rsyslog selector
 			facility := f.Facility
 			if facility == "" || facility == "any" {
@@ -969,6 +1008,14 @@ func (d *Daemon) applySyslogFiles(cfg *config.Config) {
 			// rejects it at commit.
 			if err := config.ValidateSyslogUser(u.User, nil); err != nil {
 				slog.Warn("skipping invalid syslog user destination", "user", u.User, "err", err)
+				continue
+			}
+			// #5797 render belt: same rsyslog-selector interpolation as the file
+			// destinations above, same tolerant-path threat model as the #4902
+			// user-token belt beside it.
+			if !syslogSelectorTokenSafe(u.Facility) || !syslogSelectorTokenSafe(u.Severity) {
+				slog.Warn("skipping syslog user destination with unsafe selector token (#5797)",
+					"user", u.User, "facility", u.Facility, "severity", u.Severity)
 				continue
 			}
 			facility := u.Facility
@@ -1886,4 +1933,45 @@ func (d *Daemon) applyRootAuth(cfg *config.Config) (retErr error) {
 		}
 	}
 	return retErr
+}
+
+// syslogSelectorTokenSafe reports whether a Junos syslog facility or severity
+// token can be interpolated into an rsyslog selector line without escaping it
+// (#5797).
+//
+// applySyslogFiles / applySyslogUsers build `<facility>.<severity>\t<target>`
+// and write it to a managed drop-in under /etc/rsyslog.d. #4902 already belts
+// the file NAME and the user TOKEN on that same line against leniently-loaded
+// and peer-synced values, but left the two selector tokens unchecked — a
+// newline, a `;` (rsyslog statement separator), a `.`/`*` (selector grammar) or
+// a control byte in either one escapes the intended selector and injects
+// rsyslog configuration.
+//
+// Empty is SAFE and expected: both call sites map an empty token to the `*`
+// wildcard before building the selector, so an unset facility/severity is
+// ordinary configuration, not an omission to reject.
+//
+// Every real Junos facility and severity — `daemon`, `authorization`,
+// `change-log`, `interactive-commands`, `local0`..`local7`, `any`, `none`,
+// `emergency`..`debug` — is ASCII letters, digits and hyphen, so this accepts
+// the whole legitimate vocabulary (including the Junos names the runtime does
+// not yet MAP) while rejecting anything that could alter the file's structure.
+// It deliberately does NOT decide which facility NAMES are honoured; that is
+// the deferred mapping question on #5797.
+func syslogSelectorTokenSafe(tok string) bool {
+	if tok == "" {
+		return true
+	}
+	for i := 0; i < len(tok); i++ {
+		c := tok[i]
+		switch {
+		case c >= 'a' && c <= 'z':
+		case c >= 'A' && c <= 'Z':
+		case c >= '0' && c <= '9':
+		case c == '-':
+		default:
+			return false
+		}
+	}
+	return true
 }

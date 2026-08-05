@@ -920,8 +920,39 @@ func ParseSeverity(name string) int {
 	}
 }
 
+// ParseFacilityChecked converts a facility name to its numeric code and
+// reports whether the name was RECOGNIZED (#5797).
+//
+// ParseFacility below collapses "unrecognized" and "local0" into the same
+// return value, so a caller cannot tell an authored `local0` from a typo that
+// silently became local0 — records then leave under a facility the operator
+// never wrote, and the remote collector's facility-based routing/filtering
+// silently misfiles them. Callers that can surface the difference (the daemon's
+// syslog client wiring) MUST use this form; ParseFacility is retained for
+// callers that genuinely only want the code.
+//
+// The recognized set here is the SSOT the config gate validates against
+// (config.SystemSyslogFacilities), minus `any` — `any` is a selector wildcard
+// meaningful to rsyslog-backed file/user destinations, not a numeric facility a
+// host client can stamp on a record, so it is deliberately NOT recognized here.
+func ParseFacilityChecked(name string) (int, bool) {
+	switch name {
+	case "kern", "user", "daemon", "auth", "syslog",
+		"local0", "local1", "local2", "local3",
+		"local4", "local5", "local6", "local7",
+		"change-log":
+		return ParseFacility(name), true
+	default:
+		return FacilityLocal0, false
+	}
+}
+
 // ParseFacility converts a facility name to its numeric code.
 // Returns FacilityLocal0 for unrecognized names.
+//
+// #5797: prefer ParseFacilityChecked at any call site that can report the
+// substitution — this form cannot distinguish an unmapped name from an
+// authored local0.
 func ParseFacility(name string) int {
 	switch name {
 	case "kern":

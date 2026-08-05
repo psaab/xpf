@@ -66266,3 +66266,37 @@ break — `go vet` confirmed passing under every revert.
   pkg/config/compiler_opts.go,
   pkg/config/compiler_policy_valueless_match_6526_test.go,
   docs/config-schema.md, _Log.md
+
+- **Timestamp**: 2026-08-05
+- **Action**: #5797 invariant 7 — make an unmappable syslog facility VISIBLE and
+  stop it reaching rsyslog's config grammar; do NOT close the facility name set.
+  STEP-0 found two facts that redirected the work. First, the obvious fix was
+  wrong: `security log stream facility` is already enum-validated against
+  `syslogFacilities`, and reusing that enum for `system syslog` would hard-reject
+  `any` (absent from the list but special-cased by the daemon into the rsyslog
+  wildcard `*`) — i.e. `set system syslog host <h> any info`, ordinary Junos.
+  Second, and decisive: the facility vocabulary itself diverges. Junos writes
+  `authorization` / `kernel` / `interactive-commands`; `ParseFacility` knows only
+  the BSD spellings `auth` / `kern`. A prototype commit gate keyed on the mapped
+  set was built, and its own over-rejection test rejected #5797's OWN worked
+  example (`daemon info; authorization critical;`). That gate was therefore
+  REVERTED rather than shipped: closing the name set first requires deciding the
+  Junos-to-BSD mapping, which changes which facility records go out under —
+  operator-visible, and the deferred half of this issue. Also found: the `file`
+  and `user` destinations never touch `SyslogClient` — the daemon interpolates
+  facility+severity into an rsyslog selector and writes a managed drop-in, and
+  #4902's belts on that exact line cover the file NAME and user TOKEN but not the
+  two selector tokens, so a newline or metacharacter injects rsyslog config on
+  the tolerant path. Shipped: `ParseFacilityChecked` (returns the recognized bit;
+  the substituted code is deliberately unchanged, so no behaviour change) wired
+  into the host client with a warning, and `syslogSelectorTokenSafe`, a SHAPE
+  belt (`[A-Za-z0-9-]`) on the file/user render path that admits the whole
+  legitimate Junos vocabulary — including names the mapper cannot resolve — so it
+  does not pre-empt the mapping decision. Validation: both guards proven RED
+  under isolating mutations with `go vet` clean each time (shape check forced to
+  always-safe → 12 injection sub-tests RED; checked parse forced to always-known
+  → 22 unmapped names RED). Full `go test ./...` exit 0. No Rust files touched,
+  so the cargo leg is unaffected (#6819's flake is not implicated).
+- **File(s)**: pkg/logging/syslog.go, pkg/daemon/daemon_system.go,
+  pkg/logging/parse_facility_checked_5797_test.go,
+  pkg/daemon/syslog_selector_token_5797_test.go, pkg/logging/README.md, _Log.md

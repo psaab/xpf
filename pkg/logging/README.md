@@ -183,6 +183,30 @@ connectionless and exempt:
   all leaked as "no filter". A syslog host that lists several
   `<facility> <severity>` pairs is folded to one client filter via
   `MoreRestrictiveMinSeverity` (the most restrictive pair wins).
+- **Unmapped facility names are reported, not silent (#5797).**
+  `ParseFacility` returns `FacilityLocal0` for any name it does not know,
+  which makes an authored `local0` indistinguishable from a name the
+  mapper simply lacks — and the mapper lacks the **Junos** facility
+  vocabulary outright. Junos writes `authorization`, `kernel`,
+  `interactive-commands`, `conflict-log`, `pfe`; `ParseFacility` knows only
+  the BSD/rsyslog spellings (`auth`, `kern`, ...). So an ordinary Junos
+  `host H authorization critical` forwards under **local0** today and the
+  collector's facility-based routing misfiles it, with no signal.
+  `ParseFacilityChecked` returns the "was this recognized" bit so the
+  daemon can warn; the substituted code is unchanged, because which
+  facility a record actually goes out under is an operator-visible contract
+  question still owned by #5797. Prefer the checked form at any call site
+  that can surface the difference.
+- **rsyslog selector tokens are shape-checked (#5797).** The `file` and
+  `user` destinations do not use `SyslogClient` at all — the daemon builds
+  an rsyslog selector `<facility>.<severity>` and writes a managed drop-in.
+  #4902 belted the file NAME and user TOKEN on that line but not the two
+  selector tokens, so a newline or an rsyslog metacharacter in either one
+  escaped the selector and injected configuration on the leniently-loaded /
+  peer-synced path. `syslogSelectorTokenSafe` (pkg/daemon) rejects anything
+  outside `[A-Za-z0-9-]`, which admits the entire legitimate Junos
+  vocabulary — including the names the mapper cannot yet resolve — so the
+  belt does not pre-empt the mapping decision above.
 - **Lazy connect — receiver down at apply does not disable the stream
   (#3351).** A TCP/TLS receiver that is unreachable at config-apply or
   boot must NOT permanently silence the stream. `NewSyslogClientTransport`
