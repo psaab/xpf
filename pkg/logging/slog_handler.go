@@ -44,6 +44,19 @@ func (h *SyslogSlogHandler) SetClients(clients []*SyslogClient) {
 	}
 }
 
+// Clients returns the currently installed syslog clients.
+//
+// #6829 A5: exported so a caller's wiring can be asserted on the VALUE that
+// reaches the client, not just on a log line. applySystemSyslog computes the
+// facility and assigns it in two separate steps either side of the dial, which
+// is the refactor shape that silently drops a value; without this, deleting
+// either step left the whole suite green.
+func (h *SyslogSlogHandler) Clients() []*SyslogClient {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return append([]*SyslogClient(nil), h.clients...)
+}
+
 // Close closes all syslog clients.
 func (h *SyslogSlogHandler) Close() {
 	h.mu.Lock()

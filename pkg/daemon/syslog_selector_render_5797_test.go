@@ -73,7 +73,14 @@ func TestSyslogRenderOmitsUnsafeFileToken_5797(t *testing.T) {
 		// Tolerant-load / peer-sync only: the severity is enum-gated at commit.
 		{"severity pushes an action field", "daemon", "* @@collector.example:514"},
 		{"severity statement separator", "daemon", "info;*.*"},
-		{"severity newline", "daemon", "info\n*.* /tmp/pwn"},
+		// #6829 NIT: a literal newline is reachable on NEITHER path — strict
+		// rejects control characters and the tolerant path sanitizes them to a
+		// space, so this row is a defence-in-depth characterization of the
+		// predicate, not a reachable input. It sits under the tolerant-load
+		// heading for grouping only; the belt's own comment already says this,
+		// and mislabelling the row re-taught the misconception that comment
+		// exists to correct.
+		{"severity newline (predicate only, reachable on no path)", "daemon", "info\n*.* /tmp/pwn"},
 		// Both halves unsafe.
 		{"both unsafe", "daemon;x", "info;y"},
 	} {
@@ -433,4 +440,164 @@ func TestApplySystemSyslogWarnsWhenClientDialFails_6829(t *testing.T) {
 	if !strings.Contains(got, "authorization") {
 		t.Errorf("the warning must still name the unmapped facility. captured:\n%s", got)
 	}
+
+	// #6829 A4 — scope control. The assertions above are the only cell with a
+	// SourceAddress, and it also carries an unmapped facility, so they cannot
+	// tell "classification runs before the dial" from "classification runs for
+	// unmapped names". This cell holds the dial failure fixed and makes the
+	// facility MAPPED: the dial-failure warning must still appear (the premise
+	// is unchanged) and the unmapped warning must NOT, which is the half the
+	// combined fixture could not distinguish.
+	t.Run("mapped facility with a failing dial warns only about the dial", func(t *testing.T) {
+		buf := captureRenderedWarnings(t)
+		d := &Daemon{slogHandler: logging.NewSyslogSlogHandler(slog.Default().Handler())}
+		t.Cleanup(func() { d.slogHandler.SetClients(nil) })
+		cfg := &config.Config{}
+		cfg.System.Syslog = &config.SystemSyslogConfig{
+			Hosts: []*config.SyslogHostConfig{{
+				Address:       "192.0.2.10",
+				SourceAddress: "192.0.2.1",
+				Facilities:    []config.SyslogFacility{{Facility: "auth", Severity: "info"}},
+			}},
+		}
+		d.applySystemSyslog(cfg)
+		got := buf.String()
+		if !strings.Contains(got, "failed to create system syslog client") {
+			t.Fatalf("premise broken: the dial was expected to fail; captured:\n%s", got)
+		}
+		if strings.Contains(got, "unmapped facility name") {
+			t.Errorf("`auth` is mapped, so a failing dial must not produce an unmapped-facility "+
+				"warning. captured:\n%s", got)
+		}
+	})
+}
+
+// TestApplySystemSyslogFacilityReachesClient_6829 binds the facility VALUE that
+// reaches the installed client (A5).
+//
+// applySystemSyslog computes the facility on one side of the dial and assigns
+// it on the other — the split this PR introduced to fix the ordering, and
+// exactly the refactor shape that drops a value. Before this test, deleting
+// EITHER `facility = f` or `c.Facility = facility` left the whole suite green:
+// the warning still fired, so every existing assertion was satisfied while the
+// records went out under the wrong facility.
+func TestApplySystemSyslogFacilityReachesClient_6829(t *testing.T) {
+	apply := func(t *testing.T, facility string) *logging.SyslogClient {
+		t.Helper()
+		d := &Daemon{slogHandler: logging.NewSyslogSlogHandler(slog.Default().Handler())}
+		t.Cleanup(func() { d.slogHandler.SetClients(nil) })
+		cfg := &config.Config{}
+		cfg.System.Syslog = &config.SystemSyslogConfig{
+			Hosts: []*config.SyslogHostConfig{{
+				Address:    "192.0.2.10",
+				Facilities: []config.SyslogFacility{{Facility: facility, Severity: "info"}},
+			}},
+		}
+		d.applySystemSyslog(cfg)
+		cs := d.slogHandler.Clients()
+		if len(cs) != 1 {
+			t.Fatalf("want exactly one installed client, got %d", len(cs))
+		}
+		return cs[0]
+	}
+
+	t.Run("mapped facility reaches the client", func(t *testing.T) {
+		if got := apply(t, "auth").Facility; got != logging.FacilityAuth {
+			t.Errorf("installed client Facility = %d, want FacilityAuth (%d) — the authored "+
+				"facility must survive the compute/assign split across the dial",
+				got, logging.FacilityAuth)
+		}
+	})
+
+	t.Run("unmapped facility lands on the documented substitution", func(t *testing.T) {
+		if got := apply(t, "authorization").Facility; got != logging.FacilityLocal0 {
+			t.Errorf("installed client Facility = %d, want FacilityLocal0 (%d) — the warning "+
+				"promises records leave under local0, so that must be what is installed",
+				got, logging.FacilityLocal0)
+		}
+	})
+}
+
+// TestApplySystemSyslogWildcardFacilityDoesNotWarn_6829 pins A3: `any` is the
+// CANONICAL Junos form (`set system syslog host <ip> any <sev>` is this repo's
+// own fixture) and names no facility deliberately. Warning "records will carry
+// a facility the configuration does not name" is literally false for it, and a
+// warning on a correct config is what trains operators to ignore warnings.
+//
+// The mapped/unmapped negative controls live in
+// TestApplySystemSyslogWarnsOnUnmappedFacility_5797; this pins only the
+// wildcard, which is neither.
+func TestApplySystemSyslogWildcardFacilityDoesNotWarn_6829(t *testing.T) {
+	buf := captureRenderedWarnings(t)
+	d := &Daemon{slogHandler: logging.NewSyslogSlogHandler(slog.Default().Handler())}
+	t.Cleanup(func() { d.slogHandler.SetClients(nil) })
+	cfg := &config.Config{}
+	cfg.System.Syslog = &config.SystemSyslogConfig{
+		Hosts: []*config.SyslogHostConfig{{
+			Address:    "192.0.2.10",
+			Facilities: []config.SyslogFacility{{Facility: "any", Severity: "info"}},
+		}},
+	}
+	d.applySystemSyslog(cfg)
+	if got := buf.String(); strings.Contains(got, "unmapped facility name") {
+		t.Errorf("the canonical `host <ip> any <sev>` form warned about an unmapped "+
+			"facility. `any` names no facility on purpose, so the warning's own text "+
+			"is false for it. captured:\n%s", got)
+	}
+}
+
+// TestApplySyslogConfigSecurityStreamWarnsOnUnmappedFacility_6829 binds the A2
+// conversion of the SECURITY/AUDIT stream wiring in applySyslogConfig.
+//
+// That site was left on the unchecked ParseFacility for four rounds on the
+// argument that the schema enum gates it. That is true on the STRICT path only:
+// configstore.Store downgrades the gate to a warning on Load (boot) and
+// SyncApply (HA peer sync) — the same reachability class the severity belt is
+// built for. Untold, every audit record on this stream leaves under local0
+// while `show system syslog` still reports the authored name, which is the
+// worst stream in the daemon to misroute silently.
+//
+// RED-on-revert: put the site back on logging.ParseFacility, or drop the
+// !known warn, and this goes silent.
+func TestApplySyslogConfigSecurityStreamWarnsOnUnmappedFacility_6829(t *testing.T) {
+	apply := func(t *testing.T, facility string) string {
+		t.Helper()
+		buf := captureRenderedWarnings(t)
+		d := &Daemon{slogHandler: logging.NewSyslogSlogHandler(slog.Default().Handler())}
+		t.Cleanup(func() { d.slogHandler.SetClients(nil) })
+
+		cfg := &config.Config{}
+		cfg.Security.Log.Streams = map[string]*config.SyslogStream{
+			"audit": {
+				Name: "audit", Host: "192.0.2.10", Port: 514,
+				Facility: facility, Severity: "info",
+			},
+		}
+		er := logging.NewEventReader(nil, nil)
+		d.applySyslogConfig(er, cfg)
+		return buf.String()
+	}
+
+	t.Run("unmapped facility warns", func(t *testing.T) {
+		got := apply(t, "authorization")
+		if !strings.Contains(got, "unmapped facility name") {
+			t.Errorf("the security/audit stream silently mapped an unmappable facility to "+
+				"local0 with no warning — this is the audit path (#5797/#6829). captured:\n%s", got)
+		}
+		if !strings.Contains(got, "authorization") {
+			t.Errorf("the warning must name the unmapped facility. captured:\n%s", got)
+		}
+	})
+
+	t.Run("mapped facility stays quiet", func(t *testing.T) {
+		if got := apply(t, "auth"); strings.Contains(got, "unmapped facility name") {
+			t.Errorf("`auth` is mapped; a correct config must not warn. captured:\n%s", got)
+		}
+	})
+
+	t.Run("wildcard any stays quiet", func(t *testing.T) {
+		if got := apply(t, "any"); strings.Contains(got, "unmapped facility name") {
+			t.Errorf("`any` names no facility on purpose; warning about it is false. captured:\n%s", got)
+		}
+	})
 }

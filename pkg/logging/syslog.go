@@ -945,6 +945,23 @@ func ParseSeverity(name string) int {
 // `any` is deliberately NOT recognized: it is a selector wildcard meaningful to
 // the rsyslog-backed file/user destinations, not a numeric facility a host
 // client can stamp on a record.
+// FacilityIsWildcard reports whether name is the Junos "all facilities"
+// wildcard rather than a facility name to be mapped.
+//
+// #6829 A3: `set system syslog host <ip> any <sev>` is the CANONICAL Junos
+// form — it is the repo's own fixture in parser_system_test.go — and `any`
+// deliberately names no facility. ParseFacilityChecked correctly reports it
+// unmapped (it has no case, so it takes the local0 default like any other
+// unrecognized name), but a CALLER must not turn that into a substitution
+// warning: the #5797 warning says "records will carry a facility the
+// configuration does not name", which for `any` is literally false — the
+// configuration names none on purpose. Warning on the canonical form is exactly
+// the train-operators-to-ignore-it failure the warning exists to avoid.
+//
+// This is a caller-side suppression, not a mapping change: ParseFacility and
+// ParseFacilityChecked both still return FacilityLocal0 for `any`, unchanged.
+func FacilityIsWildcard(name string) bool { return name == "any" }
+
 func ParseFacilityChecked(name string) (int, bool) {
 	switch name {
 	case "kern", "user", "daemon", "auth", "syslog",

@@ -1,3 +1,67 @@
+## 2026-08-05 — #6829 fold round 6: the residual was a scope choice, and two call sites did not satisfy the shipped contract
+
+- **Timestamp**: 2026-08-05 (fold/6829-r3, gate at 8e994753b — MINOR, no blockers)
+- **Action**: Five items. Two substantive.
+    - **A1 — the corpus walk was scoped to `fn.Body` while already holding the
+      whole `*ast.File`.** A `const auditLogFacility = "audit-log"` consulted
+      before the switch SLIPPED; the identical mutation with a bare literal
+      RED. So the escape was the IDENTIFIER, not the mutation — verified both
+      ways before adopting the prescribed patch, per the standing rule that a
+      prescribed fix is a hypothesis. Widened to also walk the file's
+      package-level `GenDecl`s. **That also closed the residual this file
+      shipped as "the realistic one"** — a package-level map consulted before a
+      RETAINED switch. It was never a property of the approach, only of the
+      scope, so the residual list was re-derived and the closed entries deleted
+      rather than left reading as considered-and-kept.
+    - **A2 — the PR shipped a contract two of its three call sites did not
+      satisfy.** `syslog.go` says callers "MUST use this form"; the security/
+      audit stream wiring (`daemon_system.go`) and the CLI commit mirror
+      (`cli/apply.go`) were still on the unchecked `ParseFacility`. My own
+      dismissal — enum-gated — holds on the STRICT path only:
+      `configstore.Store` downgrades the gate to a warning on `Load` (boot) and
+      `SyncApply` (HA peer sync), the same reachability class the severity belt
+      exists for. Identical class, opposite treatment. Both converted, and BOTH
+      now bound by tests — the first mutation run showed the daemon conversion
+      RED but the CLI one rc=0, i.e. converted-but-unbound, so a `pkg/cli` test
+      was added rather than shipping an unbound production change.
+    - **A3 — this PR made the canonical Junos form warn, with text false for
+      it.** `set system syslog host <ip> any <sev>` is the repo's own fixture,
+      and `any` names no facility on purpose, so "records will carry a facility
+      the configuration does not name" is literally false. Added
+      `logging.FacilityIsWildcard` as the single shared definition and applied
+      it at all three warn sites; `any` was already in the unmapped corpus, so
+      the not-known half stays pinned and a new daemon test pins the no-warn
+      half.
+    - **A4** — added the mapped-facility + failing-dial cell, so the dial-fail
+      test no longer has its only `SourceAddress` case coincide with its only
+      unmapped facility.
+    - **A5** — the facility VALUE reaching the wire was bound by nothing.
+      Added `SyslogSlogHandler.Clients()` and asserted the installed
+      `Facility` for a mapped and an unmapped case.
+    - **NITs** — the `"severity newline"` fixture is relabelled: a literal
+      newline is reachable on NEITHER path, and the old label re-taught the
+      misconception the belt's own comment exists to correct.
+- **Validation** — 9 cells, each `go vet ./<pkg>/` then
+  `go test -count=1 -run '6829' ./<pkg>/`; rc=1 means RED, vet=0 means the RED
+  is an assertion and not a build break. All nine: vet=0 rc=1.
+  A1 const-identifier · E1 partial map · M3 escaped literal · M2 pre-switch
+  accept · A5a drop `facility = f` · A5b drop `c.Facility = facility` ·
+  A3 remove wildcard suppression · A2a security stream unchecked ·
+  A2b cli mirror unchecked.
+  Two process notes: the first A5b attempt reported vet=1 — an unused-variable
+  BUILD BREAK, so that red was invalid and was redone as `_ = facility`; and my
+  first `pkg/cli` test failed on unmutated code because
+  `return buf.String(), build(cfg)` evaluates the buffer BEFORE the call, so it
+  always captured "". Both were my errors, caught by reading the vet code and
+  the failure rather than adjusting the assertion.
+- **File(s)**: `pkg/logging/syslog.go`,
+  `pkg/logging/parse_facility_source_6829_test.go`,
+  `pkg/logging/parse_facility_checked_5797_test.go`,
+  `pkg/logging/slog_handler.go`, `pkg/logging/README.md`,
+  `pkg/daemon/daemon_system.go`,
+  `pkg/daemon/syslog_selector_render_5797_test.go`, `pkg/cli/apply.go`,
+  `pkg/cli/syslog_facility_checked_6829_test.go`, `_Log.md`
+
 ## 2026-08-05 — #6829 fold round 5: dangling refs, an uncorrected artifact, an unrunnable repro
 
 - **Timestamp**: 2026-08-05 (fold/6829-r3, gate at 44af059d5 — MINOR, no blockers)

@@ -6,6 +6,7 @@ package cli
 
 import (
 	"fmt"
+	"log/slog"
 	"os"
 
 	"github.com/psaab/xpf/pkg/config"
@@ -142,7 +143,20 @@ func buildSyslogClients(cfg *config.Config) []*logging.SyslogClient {
 			client.MinSeverity = logging.ParseSeverity(stream.Severity)
 		}
 		if stream.Facility != "" {
-			client.Facility = logging.ParseFacility(stream.Facility)
+			// #6829 A2: use the CHECKED form and report the substitution. The
+			// schema enum gates this on the STRICT path only —
+			// configstore.Store downgrades the gate to a warning on Load (boot)
+			// and SyncApply (HA peer sync), so an unmappable name reaches here
+			// on exactly the tolerant paths the severity belt is built for.
+			// Untold, every record on this stream leaves under local0 while
+			// `show system syslog` still reports the authored name.
+			facility, known := logging.ParseFacilityChecked(stream.Facility)
+			if !known && !logging.FacilityIsWildcard(stream.Facility) {
+				slog.Warn("security log: unmapped facility name; forwarding under local0 — "+
+					"records will carry a facility the configuration does not name (#5797)",
+					"facility", stream.Facility, "using", "local0")
+			}
+			client.Facility = facility
 		}
 		if stream.Category != "" {
 			client.Categories = logging.ParseCategory(stream.Category)

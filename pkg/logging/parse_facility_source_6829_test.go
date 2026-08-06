@@ -53,22 +53,31 @@ import (
 // literal in the whole function BODY rather than case labels, so a name
 // special-cased by any construct that mentions it literally is sampled.
 //
-// NOT BOUND, stated so nobody reads this file as complete. A name ParseFacility
-// special-cases without its literal reaching this corpus is not visited by any
-// assertion here. Known ways that happens, most to least realistic:
+// NOT BOUND, stated so nobody reads this file as complete — and re-derived in
+// round 6 after the corpus widened, because a stale "accepted limit" reads as
+// considered-and-kept when it is really just untried.
 //
-//  1. A package-level `var extraFacilities = map[string]int{...}` consulted
-//     BEFORE the switch, with the switch RETAINED. This is the realistic one —
-//     converting a 14-case switch to a map is the likely future refactor here,
-//     and the PARTIAL form is exactly how someone adds a vendor facility
-//     without touching reviewed code. Note the asymmetry: a WHOLESALE move
-//     fails loudly, because facilityNameLiterals finds zero literals and
-//     t.Fatalf's; the PARTIAL move slips silently, because the remaining
-//     switch still yields literals and the extraction looks healthy.
-//  2. A name assembled by concatenation, or derived from another value, so no
-//     literal exists to find.
-//  3. A name special-cased inside a helper function rather than in
-//     ParseFacility's own body — this walk reads one FuncDecl.
+// CLOSED by the package-level widening, listed so the history is legible: a
+// `const` identifier hiding a literal, and a package-level `var ... map[string]int`
+// consulted before a RETAINED switch. That second one shipped here as "the
+// realistic" residual for a round. It was never a property of the approach —
+// only of the walk's scope — and both now RED (measured, with a bare-literal
+// control to prove the escape had been the identifier rather than the mutation).
+//
+// STILL OPEN, most to least realistic:
+//
+//  1. A name special-cased inside ANOTHER FuncDecl in this file, with the
+//     literal appearing only in that helper's body. This walk reads
+//     ParseFacility's own body plus the file's package-level GenDecls; it does
+//     not read sibling function bodies. Widening to every FuncDecl is available
+//     and safe (over-inclusion only adds names that agree trivially) — it is
+//     not done here because no such helper exists today and the gate scoped
+//     round 6 to the GenDecl widening.
+//  2. A name assembled by concatenation or derived from another value, so no
+//     literal exists anywhere to find. This is the only entry that is genuinely
+//     a property of the approach rather than of its scope.
+//  3. A name special-cased in a DIFFERENT file of this package: the walk parses
+//     syslog.go only.
 //
 // Escape sequences are NOT in this list: they were, until the extraction
 // switched to strconv.Unquote above.
@@ -115,29 +124,49 @@ func facilityNameLiterals(t *testing.T, fnName string) []string {
 
 	seen := map[string]bool{}
 	var out []string
-	ast.Inspect(fn.Body, func(n ast.Node) bool {
-		lit, ok := n.(*ast.BasicLit)
-		if !ok || lit.Kind != token.STRING {
+	collect := func(root ast.Node) {
+		ast.Inspect(root, func(n ast.Node) bool {
+			lit, ok := n.(*ast.BasicLit)
+			if !ok || lit.Kind != token.STRING {
+				return true
+			}
+			// #6829 F4: UNQUOTE rather than stripping the delimiters. A naive
+			// lit.Value[1:len-1] hands back the SOURCE text, so `"audit\x2dlog"` —
+			// a bare literal that does appear in the body — enters the corpus as 12
+			// characters and never as the 9-character runtime value, escaping a
+			// guard whose stated residual says it is sampled.
+			v, err := strconv.Unquote(lit.Value)
+			if err != nil {
+				// Not unquotable (should not happen for a STRING literal); fall
+				// back to the raw text rather than dropping the name, since an
+				// extra corpus entry is harmless and a missing one is not.
+				v = lit.Value
+			}
+			if !seen[v] {
+				seen[v] = true
+				out = append(out, v)
+			}
 			return true
+		})
+	}
+	collect(fn.Body)
+	// #6829 A1: also walk the file's package-level declarations. The body-only
+	// scope let an identifier hide a literal that IS present in syslog.go:
+	//
+	//	const auditLogFacility = "audit-log"
+	//	if name == auditLogFacility { return FacilityLocal5 }
+	//
+	// slipped, while the identical mutation written with a bare "audit-log"
+	// red. So the escape was the IDENTIFIER, not the mutation — measured both
+	// ways before this widening was adopted. The same scope choice hid a
+	// package-level map consulted before a retained switch, which this file
+	// previously shipped as "the realistic" accepted residual. It was not a
+	// property of the approach; it was a property of the scope.
+	for _, decl := range file.Decls {
+		if gd, ok := decl.(*ast.GenDecl); ok {
+			collect(gd)
 		}
-		// #6829 F4: UNQUOTE rather than stripping the delimiters. A naive
-		// lit.Value[1:len-1] hands back the SOURCE text, so `"audit\x2dlog"` —
-		// a bare literal that does appear in the body — enters the corpus as 12
-		// characters and never as the 9-character runtime value, escaping a
-		// guard whose stated residual says it is sampled.
-		v, err := strconv.Unquote(lit.Value)
-		if err != nil {
-			// Not unquotable (should not happen for a STRING literal); fall
-			// back to the raw text rather than dropping the name, since an
-			// extra corpus entry is harmless and a missing one is not.
-			v = lit.Value
-		}
-		if !seen[v] {
-			seen[v] = true
-			out = append(out, v)
-		}
-		return true
-	})
+	}
 	if len(out) == 0 {
 		t.Fatalf("%s: extracted zero string literals — the corpus contribution is empty, "+
 			"so the agreement assertions would run over a smaller set than intended", fnName)

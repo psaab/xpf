@@ -195,11 +195,28 @@ connectionless and exempt:
   `ParseFacilityChecked` returns the "was this recognized" bit so the
   daemon can warn; the substituted code is unchanged, because which
   facility a record actually goes out under is an operator-visible contract
-  question still owned by #5797. Prefer the checked form at any call site
-  that can surface the difference. Note there is no commit gate to lean on
+  question still owned by #5797. Note there is no commit gate to lean on
   instead: `system syslog <dest> <facility> <severity>` models the facility
   as the schema's wildcard KEY and validates only the severity VALUE, so
   every spelling commits clean.
+
+  As of #6829 ALL THREE `ParseFacility` call sites that install a client use
+  the checked form and warn: `applySystemSyslog` (host streams), the
+  security/audit stream wiring in `daemon_system.go`, and the CLI commit
+  mirror in `pkg/cli/apply.go`. The last two were previously left on the
+  unchecked form on the argument that the schema enum gates them — true on the
+  STRICT path only. `configstore.Store` downgrades that gate to a warning on
+  `Load` (boot) and `SyncApply` (HA peer sync), which is the same reachability
+  class the severity belt exists for, so the two were treated inconsistently.
+  Untold, an unmappable name sends every record on those streams out under
+  local0 while `show system syslog` still reports the authored name.
+
+  The `any` wildcard does NOT warn. `set system syslog host <ip> any <sev>` is
+  the canonical Junos form and names no facility deliberately, so the
+  substitution warning's own text — "records will carry a facility the
+  configuration does not name" — is false for it. `logging.FacilityIsWildcard`
+  is the single definition all three call sites share; it suppresses the
+  warning only, and does not change what `ParseFacility` returns.
 - **rsyslog selector tokens are shape-checked (#5797).** The `file` and
   `user` destinations do not use `SyslogClient` at all — the daemon builds
   an rsyslog selector `<facility>.<severity>` and writes a managed drop-in.
