@@ -672,12 +672,32 @@ carry its real name instead of `unattributed`.
    **separate** RT_FLOW codec (`event_stream/codec/rt_flow.rs`) — without that
    last one the durable syslog record keeps the ambiguity this is meant to
    retire.
-2. **The BPF publication path hardcodes `log_flags: 0`**
-   (`userspace-dp/src/afxdp/bpf_map/publish_conntrack.rs:240` and `:382`) —
-   verified. The bit cannot ride `LogFlags` there until that path carries real
-   flags, and *why* it is hardcoded (and what the existing
-   `LogFlagSessionInit`/`SessionClose` bits do on that path today) must be
-   answered before implementation, not after.
+2. ~~**The BPF publication path hardcodes `log_flags: 0`**~~ — **RESOLVED, and
+   it turns out to hand the design its shape.** The hardcode at
+   `publish_conntrack.rs:240/382` is real, but `LogFlags` is **not** the
+   helper→Go carrier for these bits. Go *synthesises* the byte in
+   `daemon_ha_userspace_convert.go:373-379` and `:477-480` from **named
+   booleans on the session delta** (`LogSessionInit`, `LogSessionClose`,
+   `FabricIngress`, plus the tunnel-endpoint bit) and only then does it ride the
+   cross-chassis `LogFlags` byte. The BPF-map mirror is a different,
+   non-authoritative consumer. So the carrier is:
+
+   | Hop | Mechanism |
+   |---|---|
+   | helper → Go | a **named boolean** `policy_attributed` on the session delta, alongside the three that already exist there — in the binary event-stream codec **and** in `SessionDeltaInfo` (Rust `binding.rs`, which already carries `log_session_init` / `log_session_close` / `fabric_ingress` and is exactly the struct missing `policy_id`, §5.0.1) |
+   | Go internal | folded into a free `LogFlags` bit (2-5) in `daemon_ha_userspace_convert.go`, the same fold the other three already get |
+   | Go → peer | rides the existing `LogFlags` byte at `sync_protocol.go:170/285` — **zero wire growth**, as claimed |
+   | Go → helper | a named boolean on `SessionSyncRequest`, mirroring `log_session_init` |
+
+   This follows an established pattern end to end rather than inventing one,
+   and it composes with the §5.0.1 prerequisite: the same `SessionDeltaInfo`
+   change adds `policy_id` and `policy_attributed` together.
+
+   **Residual, and it is narrower:** the BPF mirror row *does* carry
+   `policy_id` (`publish_conntrack.rs:227/369`) while its `log_flags` stays 0,
+   so any Go surface that reads the MIRROR rather than the delta-derived table
+   would see the id without the discriminator. Enumerate the mirror's consumers
+   and confirm none of them resolve a policy name.
 3. **The wire scalar stays non-self-describing.** An off-box collector reading
    `policy_id` alone still cannot distinguish. Mitigation: expose the
    discriminator explicitly on the structured surfaces (REST/gRPC session
@@ -857,10 +877,12 @@ Residual risks for the recommended path, stated without softening:
   table. A missed plane leaves the ambiguity exactly where it hurts most —
   in a durable off-box record — while every test that looks at session rows
   goes green.
-- **`log_flags` is hardcoded to 0 on the BPF publication path** (verified,
-  `publish_conntrack.rs:240/382`). Until that is understood and fixed, the
-  chosen carrier does not work end-to-end. Treat as a blocking prerequisite,
-  not an implementation detail.
+- **The BPF mirror carries `policy_id` with `log_flags` permanently 0**
+  (`publish_conntrack.rs:227/369` vs `:240/382`). The carrier itself is fine
+  (§5.4-D cost 2), but any Go consumer reading the mirror instead of the
+  delta-derived table would see an id with no discriminator. Enumerate those
+  consumers; this is the narrow residual of what looked like a blocking
+  carrier problem.
 - **The `UnattributedPolicyID` render arm becomes conditional.** It is currently
   unconditional and is documented as LOAD-BEARING in both directions. This is
   the single edit most likely to reintroduce the defect #6851 fixed.
@@ -970,14 +992,16 @@ the site classification (five classes, §5.2.3), the `SessionDeltaInfo`
 sequencing (field-first, no wrong-meaning window), and the risk rating. What
 remains:
 
-**Q1″ — Is the `LogFlags` bit actually a viable carrier end-to-end?**
-`publish_conntrack.rs:240/382` hardcodes `log_flags: 0`, so the bit cannot ride
-that path today. Two sub-questions: *why* is it hardcoded, and what do the
-existing `LogFlagSessionInit` / `LogFlagSessionClose` bits do on that path as a
-result? If the answer is "that path never carries flags and something else
-supplies them", the carrier choice may need to change — to a dedicated field on
-the session value, or to the existing NAT-flags `uint16` whose bit 9+ is free.
-**This is the one open item that can force a redesign of the recommended path.**
+**Q1″ — RESOLVED before dispatch; verify the resolution rather than the
+question.** The `log_flags: 0` hardcode does not block the carrier: `LogFlags`
+is synthesised on the Go side from named booleans on the session delta
+(`daemon_ha_userspace_convert.go:373-379/477-480`), so the discriminator travels
+helper→Go as a boolean exactly like `log_session_init`, and only then rides the
+existing `LogFlags` byte cross-chassis. Full hop table in §5.4-D cost 2. **What
+still needs checking:** the BPF mirror row carries `policy_id` with
+`log_flags` permanently 0, so enumerate the mirror's Go consumers and confirm
+none of them resolve a policy name from it. If one does, that surface needs the
+delta-derived value instead.
 
 **Q2″ — Where should the discriminator live on the STRUCTURED surfaces?** §5.4-D
 cost 3 says REST/gRPC and RT_FLOW should expose it explicitly rather than leave
