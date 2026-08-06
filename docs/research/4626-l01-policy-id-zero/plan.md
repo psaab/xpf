@@ -2,10 +2,96 @@
 
 ## 1. Status
 
-`REVISION v3 — rounds 1 and 2 folded. Recommendation: **Path D** (explicit
+`FINAL v4 — **PLAN-KILL**, converged. Every candidate mechanism was tried and
+rejected across three review rounds: Path C at r1, Path B′ (the literal
+reservation) at r2, Path D at r3. Reviewers at convergence: **Codex PLAN-KILL**
+(r3), **Claude SMR PLAN-KILL** (r4). AGY infra-blocked, 7 documented attempts —
+2-of-3 per the standing reviewer rule.`
+
+---
+
+## 0. CONVERGED VERDICT — PLAN-KILL, and what to do instead
+
+**Recommendation: accept and document the limitation; do not implement L01 as
+scoped.** The ambiguity is real and is documented in four places in the tree,
+but every mechanism that removes it is either unsafe or cannot deliver the
+payoff:
+
+| Path | Mechanism | Why it fails |
+|---|---|---|
+| A | bare `+1` | mixed-version misattribution in both directions (§5.1) |
+| B′ | `+1` + capability + ingress normalise + egress downgrade | corrupts **both** reserved sentinels; `1→0` is an arithmetic but not behavioural inverse for the first policy; ordinary ids break under routine config skew; the capability is unvalidatable on an unsound carrier (§1) |
+| C | move the non-policy sentinel to `0xFFFFFFFE` | end state turns every manufactured zero into a confident attribution + sweep target; its guards could never be retired (§5.4-C) |
+| D | explicit attributed discriminator | **the blocker is not the ambiguity.** See below |
+
+### The finding that decides it
+
+The commit path activates the new policy set **before** the invalidation scan
+runs — `applyAndSyncCommitted` calls `applyConfigLocked` then
+`clearSessionsForPolicyChanges` (`pkg/daemon/daemon_apply_commit.go:245-262`),
+and the in-tree comment states the ordering as intent ("after the dataplane
+apply so the new policy set is already live"). Because runtime policy ids are
+**positional**, a deleted policy's id can be **reassigned to a different policy
+by the very commit that deleted it**:
+
+```
+C1 = [A, B]   ->  A=0, B=1
+C2 = [B]      ->  B=0
+deletion set  =  { A's old id } = { 0 }
+```
+
+A session admitted under C2 after activation and before the scan carries
+`policy_id 0` and is genuinely policy-attributed, so `attributed && ids[0]`
+clears a **live, correctly-permitted B session** as though it were the deleted
+A. `d.applySem` serialises applies, not dataplane admission.
+
+Path D's bit answers *"is this `policy_id` meaningful?"*. The race asks *"which
+config generation assigned it?"*. The session row carries nothing that answers
+the second — no config epoch, no stable admitting-rule identity — so no
+refinement of a session-carried boolean closes it. A correct design needs stable
+admitting-rule/snapshot identity on every local, peer and BPF row, or an
+admission fence spanning activation→invalidation. Either **replaces** the
+mechanism rather than extending it, and is a materially larger design than this
+issue scopes.
+
+Today that exact cell is protected — by accident — by the `if id == 0 { continue }`
+this issue asks to remove.
+
+### Two live defects this research surfaced, both worth more than the item
+
+1. **Post-activation reused-id over-clear (NEW, live on master).** The race
+   above is not hypothetical and is not limited to id 0:
+   `C1=[A,B,C]` → `0,1,2`; delete B → `C2=[A,C]` → `0,1`; the deletion set is
+   `{1}`; a C session admitted after activation carries `1` and is swept. Every
+   policy except the first is exposed today, because only id 0 is excluded.
+2. **`SessionDeltaInfo` carries no policy attribution (live on master).** The
+   Rust struct (`userspace-dp/src/protocol/binding.rs:1147`) has no `policy_id`,
+   its constructor (`afxdp/session_delta.rs:200`) never sets one, and the Go
+   fallback drains that queue every 100 ms while disconnected and every 5 s
+   while connected (`pkg/daemon/daemon_ha_userspace_stream.go:254`) — stamping
+   `0` onto real sessions. Go already declares and consumes `PolicyID`,
+   `PolicyCounterIdx` and `AppTimeout` (`protocol_ha.go:93/162`), so this is a
+   one-sided Rust omission.
+
+Also worth a small fix: `daemon_policy_invalidate.go` describes a "~1s live-row
+refresh", but the implementation is an incremental budgeted slice pacing a
+full-table cycle to a **~10 s** window (`bpf_map/mod.rs:375-383`). The two docs
+disagree.
+
+### What remains unfixed, stated plainly
+
+Deleting or renaming the literal first security policy does not clear its
+sessions, and modifying it does not rematch them; its RT_FLOW denies render as
+`unattributed`. These are **under**-claims and **under**-clears — the safe
+direction — and they affect exactly one policy. That is the accepted limitation.
+
+---
+
+### Superseded status line (v3)
+
+`REVISION v3 — rounds 1 and 2 folded. Recommendation: Path D (explicit
 attributed discriminator). Path C rejected at r1; Path B′ (the literal
-reservation) rejected at r2. Reviewers: Codex PLAN-NEEDS-MAJOR ×2, Claude SMR
-PLAN-NEEDS-MAJOR ×2, AGY infra-blocked (7 documented attempts).`
+reservation) rejected at r2.`
 
 ### What changed at v3, and why
 
@@ -466,9 +552,12 @@ stores carry numeric policy ids and each needs an explicit disposition:
    old numbering and should be noted.
 3. **RT_FLOW records already shipped off-box.** A renumbering makes archived
    records disagree with a current `show security policies` Index for the same
-   policy. This is the genuine forensic-continuity cost of the recommended path
-   and must go in the release note. It is bounded: the records carry the stable
-   `rule_id` string too, so a collector that joins on `rule_id` is unaffected.
+   policy. ~~It is bounded: the records carry the stable `rule_id` string too~~
+   — **retracted at r3**: `rt_flow.rs:99` declares `rule_id: u32`, a numeric
+   field, not the `"<from>-><to>/<name>"` string. There is no stable-string join
+   to fall back on, so the forensic-continuity cost of any renumbering is
+   unmitigated. (Moot now that every renumbering path is rejected, but the
+   original claim was wrong and is corrected rather than deleted.)
 
 ### 5.4 The four paths
 
@@ -623,7 +712,24 @@ deletion-clear precise; delete the workaround) without its stated *mechanism*.
 A reviewer may legitimately reject this as not-the-ask; §11 Q1 puts that
 question directly.
 
-#### Path D — keep the ids, add an explicit `policy-attributed` discriminator (**RECOMMENDED at v3**)
+#### Path D — keep the ids, add an explicit `policy-attributed` discriminator (**REJECTED at r3**)
+
+> **REJECTED.** The design below is sound as far as it goes — the carrier
+> resolves, there is no unsafe mixed-version window, and the predicate is
+> correct — but it **cannot deliver the payoff**. The blocker is the
+> positional-id reuse race in §0, which the discriminator does not address
+> because it answers a different question. Retained in full because the carrier
+> analysis, the predicate, and the resolver forms are the reusable output of
+> this research if the issue is ever reopened behind stable admitting-rule
+> identity.
+>
+> Three claims made for Path D in v3 were also falsified at r3 and are corrected
+> in place below: `pkg/policymatch` is **not** a Path-D plane (it carries
+> `Matched` plus an authoritative `PolicyName` and emits `policy_id` only on a
+> positive match); the plane count is **≥10, not 6**, once both Rust
+> projections, the separate RT_FLOW builders and both Go decoders are counted;
+> and "no signature moves / no `.proto` change" is false, since the resolvers
+> gain a parameter and the structured discriminator is an additive proto field.
 
 Thread a boolean "this `policy_id` is meaningful" through
 `SessionMetadata` (Rust) → `publish_conntrack` → `SessionValue` (Go) → cluster

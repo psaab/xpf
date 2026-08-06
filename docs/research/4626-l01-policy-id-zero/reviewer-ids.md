@@ -44,5 +44,6 @@ Proceeding **2-of-3 (Codex + Claude SMR)** per the standing reviewer rule, which
 permits a documented Codex/AGY infra-block with retries and forbids only AGY
 alone.
 
-| r3 | Codex | (pending dispatch) | `codex-plan-r3.md` |
-| r3 | Claude SMR | (in-conversation) | `claude-smr-plan-r3.md` |
+| r3 | Codex | `task-mshr3ghb-16q62y` | `codex-plan-r3.md` — **PLAN-KILL** |
+| r3 | Claude SMR | (in-conversation) | `claude-smr-plan-r3.md` (PLAN-READY-WITH-CONDITIONS — **superseded**) |
+| r4 | Claude SMR | (in-conversation) | `claude-smr-plan-r4.md` — **PLAN-KILL** (converging) |
