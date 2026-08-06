@@ -2,14 +2,58 @@
 
 ## 1. Status
 
-`REVISION v2 — round-1 reviews folded (Codex PLAN-NEEDS-MAJOR, Claude SMR
-PLAN-NEEDS-MAJOR, AGY infra-blocked); recommendation FLIPPED to the literal
-reservation`
+`REVISION v3 — rounds 1 and 2 folded. Recommendation: **Path D** (explicit
+attributed discriminator). Path C rejected at r1; Path B′ (the literal
+reservation) rejected at r2. Reviewers: Codex PLAN-NEEDS-MAJOR ×2, Claude SMR
+PLAN-NEEDS-MAJOR ×2, AGY infra-blocked (7 documented attempts).`
 
-**What changed from v1, and why.** v1 recommended moving the *sentinel* off 0
-(Path C) rather than moving *policies* off 0. Round-1 review demolished two of
-the three legs that recommendation stood on, and both retractions were verified
-firsthand against the tree before folding:
+### What changed at v3, and why
+
+v2 flipped to the literal reservation (Path B′) on the strength of a
+"default-value safety" argument. **Round 2 established independently, by both
+reviewers, that the argument does not discriminate B′ from Path D** — with the
+corrected predicate `effective_attributed = policy_id != 0 || attributed_bit`,
+a forgotten field defaults to `(0, false)` and reads *unattributed* under D too.
+With that leg gone, B′'s remaining costs are not survivable:
+
+- **The translation layer corrupts both reserved sentinels.** A blind
+  `policy_id - 1` egress downgrade maps `0` (unattributed) to `0xFFFFFFFF`,
+  which an old peer reads as **`default-policy`** — a false attribution that is
+  also eligible for default-policy clearing — and maps `0xFFFFFFFF`
+  (`DefaultPolicySentinelID`, carried by real default-permit sessions) to
+  `0xFFFFFFFE`, so default-policy invalidation misses it. The symmetric ingress
+  rule ("rewrite every old id to 0") destroys the same sentinel.
+- **`1 → 0` is an arithmetic inverse but not a behavioural one.** An old build
+  resolves 0 through `ReservedPolicyName` *before* the map lookup and skips 0 in
+  both invalidators, so the first policy — the one policy this issue is about —
+  still renders `unattributed` and is still exempt from clearing on the old
+  node.
+- **Ordinary ids break under routine config skew.** C1 `[A,B,C]` → old ids
+  `0,1,2`; the new node commits C2 `[A,C]` → B′ ids `1,2`; `C=2` downgrades to
+  `1`; the old peer still on C1 reads `1` as `B`; when it applies C2 its
+  deletion sweep for old `B=1` clears the freshly synced `C` session. The
+  generation machinery does not close this: local apply completes before the
+  config is pushed, and `configEpochStale` rejects only
+  `epoch < max(applied, applying)`, so an equal-or-newer session is admitted
+  before or during apply.
+- **The capability cannot be validated.** A space-1 peer legitimately sends 0
+  (for genuinely unattributed sessions) and the old/new non-zero domains
+  overlap, so no receiver-side check can prove which numbering produced a bare
+  scalar. Advertise-only is therefore not an admission invariant — and the
+  carrier itself is unsound as drafted: the `"XPFA"` auth trailer sits
+  immediately after the HA version, so a naive "read one more byte" reads `'X'`
+  from an authenticated old peer, and session sync can connect and bulk-prime
+  before the first 100 ms heartbeat, so "no capability seen yet" cannot be
+  taken as "legacy".
+
+**Path D is now the recommendation.** It reaches the same enforcement precision
+with no numeric change, no translation layer, and no mixed-version window.
+
+### What changed at v2 (retained — these corrections still stand)
+
+v1 recommended moving the *sentinel* off 0 (Path C). Round-1 review demolished
+two of the three legs that recommendation stood on, and both retractions were
+verified firsthand against the tree before folding:
 
 - **v1 §5.2's `divmod`/capacity objection to renumbering was wrong.** I
   conflated two id namespaces the codebase deliberately keeps separate.
@@ -381,11 +425,22 @@ discharged:
 2. Should a runtime-id `divmod` decoder ever be introduced, it must decode
    `id-1`. Add a comment at the SSOT (`policies.go:63`) saying so.
 3. The 21 open-coded `policySetID*MaxRulesPerPolicy + i` occurrences (enumerated
-   in `claude-smr-plan-r1.md` §S3) span **four** namespaces — runtime allocation,
-   runtime-display fallback, legacy-compiler rule ids, and physical BPF map keys
-   — and they do **not** all move together. The implementation must classify
-   each one before touching it; treating them as a single space (as v1 implied)
-   is itself a defect risk.
+   in `claude-smr-plan-r1.md` §S3) span **five** namespaces, not four, and they
+   do **not** move together. Corrected disposition (round-2 review, verified):
+
+   | Class | Sites | Under a `+1` |
+   |---|---|---|
+   | runtime SSOT | `policies.go:64` | **must shift** |
+   | legacy-compiler `PolicyRule.RuleID` | `compiler.go:924` + its global twin `:1059` | **must shift or be explicitly decoupled** — these keys populate `CompileResult.PolicyNames`, which the session/log/API renderers still consume, so leaving them behind makes new id 1 resolve to the OLD second policy's name |
+   | runtime-display fallback | `policies_ids.go:123-127` | **delete, do not shift** — it fabricates a plausible id for a policy the walker never assigned one to, and can collide with another missing entry; surface the absence instead |
+   | raw counter handles | 15 sites (`api/metrics.go:1220`, the REST/CLI/gRPC policy renderers, `policycounters.go:239/248`) | **must NOT shift** — shifting one silently reads the wrong counter |
+   | physical BPF map keys | `maps_policy.go:45` + the scheduler-update twin `:268` | **must NOT shift** |
+
+   A related invariant break sits outside that table: `pkg/policymatch`
+   `matchedResult` indexes the partial `RuntimePolicyIDs` map directly
+   (`policymatch.go:1516`), so a miss yields `Matched=true, PolicyID=0` — which
+   would contradict a "zero is never assigned" invariant no matter which path
+   ships. Fix or document it either way.
 
 ### 5.3 Persisted state — no config-DB migration, but three durable stores DO hold ids
 
@@ -427,9 +482,19 @@ withdrawn — the shift is arithmetically clean and costs no capacity. Path A is
 rejected as *incomplete*, not as *wrong in principle*, and Path B′ is the
 completed version of it.
 
-#### Path B′ — uniform `+1` reservation + peer capability + ingress normalise + egress downgrade (**RECOMMENDED**)
+#### Path B′ — uniform `+1` reservation + peer capability + ingress normalise + egress downgrade (**REJECTED at r2**)
 
-This is the issue's literal request, made safe.
+> **REJECTED.** The design below is the issue's literal request and it is
+> arithmetically clean (§5.2), but round-2 review killed its compatibility
+> layer on four independent grounds — sentinel corruption in both directions,
+> a behavioural (not merely arithmetic) inverse failure on exactly the first
+> policy, ordinary-id corruption under routine config skew, and an
+> unvalidatable capability on an unsound carrier. All four are set out in §1.
+> Retained in full because §5.2's arithmetic result and the site classification
+> in §5.2.3 remain correct and are cited elsewhere, and because a future reader
+> must be able to see *why* the literal request was not taken.
+
+This is the issue's literal request, made safe — or so v2 argued.
 
 **Numbering.** `policyRuleSlot.policyID()` returns
 `PolicySetID*MaxRulesPerPolicy + RuleIndex + 1`. Zero is never assigned to any
@@ -558,77 +623,104 @@ deletion-clear precise; delete the workaround) without its stated *mechanism*.
 A reviewer may legitimately reject this as not-the-ask; §11 Q1 puts that
 question directly.
 
-#### Path D — keep the ids, add an explicit `policy-attributed` discriminator bit
+#### Path D — keep the ids, add an explicit `policy-attributed` discriminator (**RECOMMENDED at v3**)
 
 Thread a boolean "this `policy_id` is meaningful" through
 `SessionMetadata` (Rust) → `publish_conntrack` → `SessionValue` (Go) → cluster
-wire → display. It can ride a **free bit in the existing `LogFlags u8`** (bits
-2-5 are unused; bits 6-7 are already used for userspace-only sync metadata) —
-and `LogFlags` **is** on the cross-chassis wire at a fixed offset
-(`sync_protocol.go:170/285` encode, `:455/586` decode), so this costs **zero
-wire growth**. Old peer never sets it → receiver reads false → fail-safe. Old
-receiver ignores the bit → unchanged.
+wire → display + clear. It can ride a **free bit in the existing `LogFlags u8`**
+(bits 2-5 unused; bits 0-1 and 6-7 taken, `types.go:947-958`), and `LogFlags`
+**is** carried on the cross-chassis wire at a fixed offset
+(`sync_protocol.go:170/285` encode, `:455/586` decode) — **zero wire growth.**
 
-**The predicate v1 gave was wrong.** `attributed && ids[PolicyID]` breaks
-rolling compatibility: an old peer leaves the bit clear for **every** session,
-including all its legitimate non-zero ids, so a deleted policy's synced sessions
-stop being swept across the whole id space. The compatible rule is
+**The predicate is the whole design and it must be exactly this:**
 
 ```text
 effective_attributed = policy_id != 0 || attributed_bit
 ```
 
-i.e. the bit disambiguates **zero only** and every non-zero id keeps meaning
-what it means. (Round-1 Codex finding; correct.)
+- A forgotten / defaulted field is `(0, false)` → **unattributed** (fail-safe).
+- A real non-zero id from an **old** peer has the bit clear → the `!= 0` arm
+  keeps it attributed, so a deleted policy's synced sessions still clear
+  correctly across the whole id space.
+- Only the first policy's `0` needs the bit, which is exactly the ambiguity
+  being retired.
 
-With that correction the `continue` can go **on day one** for locally installed
-sessions, which is Path D's genuine advantage.
+v1's `attributed && ids[PolicyID]` is **wrong** and must not be shipped: an old
+peer leaves the bit clear for every session, so that form silently stops
+sweeping every non-zero id during an upgrade.
 
-**Cost**: more plumbing than v1 admitted. The bit must reach Rust
-`SessionMetadata`, the same-host event flags, the JSON/RPC fallback (§5.0.1 —
-which today carries no policy field at all), the Go→Rust import, the BPF
-publication path (`log_flags` is currently hardcoded zero there), **and** the
-separate RT_FLOW codec (`event_stream/codec/rt_flow.rs`) — otherwise the durable
-syslog record keeps the ambiguity. It is not "one cheap bit". It also leaves the
-wire scalar non-self-describing: an off-box collector reading `policy_id` alone
-still cannot tell, and a *forgotten* field still defaults to a real policy.
+**Why there is no mixed-version window.** No id changes meaning in either
+direction. New node ← old peer: non-zero ids resolve correctly (same numbering),
+zero reads unattributed — today's behaviour. Old node ← new peer: the old node
+ignores an unknown `LogFlags` bit and resolves the id exactly as it does now;
+the first policy's zero renders `unattributed` through its own #6851 guard —
+again today's behaviour. **No capability, no translation, no negotiation, no
+sentinel arithmetic.** Both reserved values (`0`, `0xFFFFFFFF`) keep their
+meanings untouched, which is precisely where Path B′ failed.
 
-### 5.5 Recommendation (revised at r2)
+**What it delivers.** Both `if id == 0 { continue }` exclusions
+(`daemon_policy_invalidate.go:72-77` and `:443-447`) can be removed on day one,
+with the clear matching `effective_attributed && ids[PolicyID]`; the first
+policy's sessions clear on delete and rematch on modify; and its RT_FLOW denies
+carry its real name instead of `unattributed`.
 
-**Ship Path B′ — the literal reservation.** v1 recommended Path C; round-1
-review removed both of the legs that recommendation rested on, and the revised
-comparison is not close:
+**Costs, stated plainly — this is not "one cheap bit":**
 
-1. **Default-value safety is the deciding property.** §5.0.1 establishes that
-   this codebase *manufactures* zeros on a production path (`SessionDeltaInfo`
-   carries no policy id) and *structurally* (`omitempty` + `serde(default)`).
-   Under Path B′ every such zero reads as `unattributed` — fail-safe. Under
-   Path C every such zero becomes a confident first-policy attribution and a
-   sweep target — fail-dangerous. A design whose forgotten-field behaviour is
-   safe beats one whose forgotten-field behaviour is a security-surface lie,
-   and no amount of test coverage substitutes for that asymmetry.
-2. **The unique technical objection to renumbering evaporated.** §5.2's `divmod`
-   corruption and capacity loss were my error. Renumbering is arithmetically
-   clean and costs no slots.
-3. **Path C's retirement mechanism did not exist.** Its guards could never
-   actually be dropped, so it delivered no end state — only churn plus an
-   automation-visible sentinel change.
-4. **The compatibility machinery Path B′ needs is machinery Path C needed too.**
-   Round-1 review concluded Path C would itself require a real capability /
-   admission invariant to be viable. Once both need it, the path that reaches
-   the correct end state wins.
+1. **Six planes.** Rust `SessionMetadata`; the same-host event flags; the
+   JSON/RPC fallback (which today carries no policy field at all, §5.0.1); the
+   Go→Rust import (`SessionSyncRequest`); the BPF publication path; and the
+   **separate** RT_FLOW codec (`event_stream/codec/rt_flow.rs`) — without that
+   last one the durable syslog record keeps the ambiguity this is meant to
+   retire.
+2. **The BPF publication path hardcodes `log_flags: 0`**
+   (`userspace-dp/src/afxdp/bpf_map/publish_conntrack.rs:240` and `:382`) —
+   verified. The bit cannot ride `LogFlags` there until that path carries real
+   flags, and *why* it is hardcoded (and what the existing
+   `LogFlagSessionInit`/`SessionClose` bits do on that path today) must be
+   answered before implementation, not after.
+3. **The wire scalar stays non-self-describing.** An off-box collector reading
+   `policy_id` alone still cannot distinguish. Mitigation: expose the
+   discriminator explicitly on the structured surfaces (REST/gRPC session
+   objects) and in the RT_FLOW record, rather than leaving it implicit.
+4. **`policy_id 0` remains a valid configured id**, so a future validator cannot
+   reject it structurally — the one durable advantage the literal reservation
+   would have bought.
 
-Path D (attributed bit, with the corrected `policy_id != 0 || bit` predicate)
-remains a viable runner-up and is the right answer if reviewers judge the
-Index/RT_FLOW numeric shift unacceptable; it buys day-one precision at the cost
-of threading a bit through six planes and still leaves a forgotten field
-defaulting to a real policy. Path C is rejected. Path A is Path B′ without the
-compatibility work and must not be shipped alone.
+### 5.5 Recommendation (settled at v3)
 
-**Sequencing.** The `SessionDeltaInfo` policy-id gap (§5.0.1) should land
-**first**, as its own small change: it is a real attribution hole on master
-today, it is independently reviewable, and it shrinks the population of
-manufactured zeros before the numbering moves.
+**Ship Path D.** Two independent reviewers reached this conclusion in round 2
+from different starting positions, and the reasoning is stable across rounds:
+
+1. **The argument that carried v2's flip does not discriminate.** With the
+   corrected predicate, a forgotten or defaulted field is `(0, false)` and reads
+   *unattributed* under D exactly as it does under B′. §5.0.1's manufactured
+   zeros are fail-safe under both, so default-value safety separates B′ from
+   Path C — not from D. That was v2's error.
+2. **B′'s compatibility layer is not correct and is not fixable cheaply.** It
+   corrupts both reserved sentinels in both directions, it is not a
+   *behavioural* inverse for the one policy the issue is about, it breaks
+   ordinary ids under routine config skew that the generation guard does not
+   close, and its capability cannot be validated by any receiver. See §1.
+3. **D has no mixed-version window to get wrong.** Nothing changes meaning, so
+   the failure modes B′ must engineer around do not exist.
+4. **D changes nothing externally visible.** Index, RT_FLOW numeric ids and
+   structured `policy_id` all keep their values; archived records keep joining.
+
+What D gives up, honestly: `policy_id 0` remains a valid configured id, so the
+scalar is not self-describing and a future validator cannot reject 0
+structurally. That is the literal request's one durable advantage and D does not
+deliver it. **If reviewers judge the self-describing scalar non-negotiable, the
+correct answer is not B′ — it is PLAN-KILL / document-the-limitation**, because
+B′'s translation layer is unsound at the values that matter.
+
+Path A and Path B′ are rejected. Path C is rejected.
+
+**Sequencing.** The `SessionDeltaInfo` gap (§5.0.1) lands **first**, as its own
+change, and should carry `policy_counter_idx` and the application timeout too —
+Go already declares and consumes all three (`protocol_ha.go:162`), so this is a
+one-sided Rust omission with no wrong-meaning deployment window. It is a real
+attribution hole on master today and is worth filing whatever this plan
+converges to.
 
 ---
 
@@ -650,61 +742,72 @@ cross-chassis frame layout, `SessionSyncWireVersion`,
 regeneration only if `SessionDeltaInfo` gains its `policy_id` field (the §5.0.1
 prerequisite), which is additive.
 
-**CHANGED, and operator/automation visible — state it in the release note:**
+**Under the recommended Path D, no numeric value changes anywhere.** Index,
+RT_FLOW ids, structured `policy_id`, counter handles, BPF map keys and the
+proto's `optional` presence semantics (#3623 — `MatchPolicies` uses presence to
+distinguish matched from unmatched, so `optional` **stays**) are all untouched.
+Archived RT_FLOW records keep joining numerically to a live Index. The 21
+open-coded packing sites and their five namespaces (§5.2.3) are **not touched at
+all** — that table now documents what B′ *would* have had to do, and is retained
+as the record of why the literal reservation was costly.
+
+**CHANGED under Path D:**
 
 | Surface | Before | After |
 |---|---|---|
-| `show security policies` **Index** | first policy `0` | first policy `1` (every policy +1) |
-| RT_FLOW `policy_id` in syslog | `N` | `N+1`; archived records no longer join numerically to a live Index (they still join on the stable `rule_id` string) |
-| REST / gRPC session `policy_id` | `N` | `N+1` |
-| REST / gRPC / CLI for a non-policy session | `0` → name `unattributed` | `0` → name `unattributed` (**unchanged** — and now structurally true) |
+| Session row for the first configured policy | name `unattributed`, id `0` | **its real policy name**, id `0` |
+| RT_FLOW deny record for the first policy | name `unattributed` | **its real policy name** |
+| Session row for host-inbound / fabric / tunnel / old-peer | `unattributed`, id `0` | unchanged |
+| First policy delete / modify | sessions idle out | sessions clear / rematch |
+| REST + gRPC session objects | no discriminator | **new additive field** exposing whether `policy_id` is meaningful (§5.4 D cost 3) |
+| `LogFlags` on the cross-chassis wire | bits 2-5 unused | one bit consumed; old readers ignore it |
 
-Note the direction of the change: the ambiguous value keeps its rendering and
-becomes honest; the unambiguous values shift by one. Any automation that pinned
-literal Index/policy_id integers must be updated; automation joining on
-`rule_id` is unaffected.
+Every change is in the direction of *more* precision on the ambiguous
+population, and no existing field changes value or type. The only new surface is
+the additive discriminator on the structured APIs and the RT_FLOW record.
 
-**Tests that pin current numbering and must be updated deliberately**, not
-mechanically: `pkg/dataplane/userspace/policy_namespace_3143_3145_test.go:219-220`
-(global set's first id `== MaxRulesPerPolicy`),
-`pkg/api/security_policy_id_zero_3623_test.go:17` (asserts the first policy
-legitimately has id 0 — this test's *premise* is what the change retires, so it
-must be rewritten to assert the opposite, not deleted), and the
-`userspace-dp/src/policy_tests.rs:7498/7515` cases that require two rules at
-`policy_id 0` to parse.
+**Tests whose premise the change retires** (rewrite, do not delete):
+`pkg/api/security_policy_id_zero_3623_test.go:17` and
+`pkg/grpcapi/server_policy_id_zero_3623_test.go:13` both assert that the first
+policy legitimately has `policy_id 0` — under Path D that stays **true**, so
+these keep passing; it is the *rendering* that changes and each needs a
+companion asserting the discriminator. Under B′ they would have had to be
+inverted; that difference is itself an argument for D.
 
 ---
 
 ## 7. Hidden invariants the change must preserve
 
-1. **Zero is never assigned.** `walkPolicyRuleSlots` must be unable to emit 0 for
-   any config, and `PolicyIDsByStableKey` / `RuntimePolicyIDs` must be unable to
-   contain it. Pin with a property test over generated configs, not a single
-   fixture — the guarantee is universal, so a one-config assertion does not bind
-   it. Replace **both** deleted `if id == 0 { continue }` blocks with an
-   assertion that the sweep set holds no reserved value, so a regression is
-   caught rather than silently re-sweeping.
-2. **The upper sentinel stays reachable-in-theory but rejected-in-practice.**
-   `DefaultPolicySentinelID` (`0xFFFFFFFF`) is *arithmetically* producible at
-   an absurd policy-set count; the shipped code relies on an impossibility
-   argument (`pkg/dataplane/types.go:535-541`). The `+1` shift does not change
-   that, but since this plan adds a second reserved boundary it should add a
-   **production rejection** at the walker (refuse a config whose computed id
-   reaches any reserved value) rather than extending the prose argument.
-3. **Reserved-before-lookup ordering.** `SessionPolicyName` and
-   `PeerSessionPolicyName` document this as LOAD-BEARING. `UnattributedPolicyID`
-   keeps its value and its arm; the arm's *justification* changes from
-   "ambiguous" to "reserved", and the comment must be rewritten or it will read
-   as stale-and-wrong.
-4. **`reresolve_session_policy_id`'s `bound = None` arm.** It preserves the
-   stamped value, which stays correct: a session carrying the reserved 0 must
-   never be re-stamped into a real id.
-5. **Ingress normalisation must be the ONLY door.** Every path that admits a
-   peer-originated `policy_id` must pass through it — the binary sync decode
-   (`sync_protocol.go:415/543`) **and** the JSON/RPC fallback conversion
-   (`daemon_ha_userspace_convert.go:385/483`). A missed door reintroduces the
-   old-space ids the normalisation exists to exclude. Enumerate them; do not
-   grep for one spelling.
+1. **The predicate is `policy_id != 0 || attributed_bit` and the `!= 0` arm is
+   LOAD-BEARING.** Any "simplification" to `attributed && ...` stops sweeping
+   every non-zero id arriving from an old peer. This needs a comment saying so
+   at the definition and a test whose only distinguishing mutation is dropping
+   the `!= 0` arm.
+2. **The discriminator must reach every plane that reads `policy_id`.** Six are
+   named in §5.4-D. A plane that reads the scalar without the bit silently keeps
+   today's ambiguity — and the RT_FLOW codec is the one that matters most,
+   because its output is durable and shipped off-box.
+3. **Reserved-before-lookup ordering.** `SessionPolicyName` /
+   `PeerSessionPolicyName` document this as LOAD-BEARING.
+   `DefaultPolicySentinelID`'s arm is untouched. `UnattributedPolicyID`'s arm
+   must now be **conditional on the discriminator** rather than unconditional,
+   and that is the single most delicate edit in the change: get it wrong in the
+   permissive direction and #6851's misattribution returns.
+4. **`PeerSessionPolicyName` must keep trusting the peer's own name for
+   unreserved ids.** Policy ids are node-local; re-resolving a peer's id against
+   the local map is a fresh misattribution on every mixed-config cluster.
+5. **`reresolve_session_policy_id`'s `bound = None` arm** preserves the stamped
+   value; the discriminator must ride alongside it unchanged, so a peer-synced
+   session's bit is not lost at the refresh tick.
+6. **Both reserved values keep their exact meanings.** `0` stays a valid
+   configured id; `0xFFFFFFFF` stays the implicit-default sentinel. Path D
+   introduces no sentinel arithmetic, and none may be added later without
+   re-deriving §1's sentinel-corruption analysis.
+7. **`pkg/policymatch` `matchedResult` indexes the partial `RuntimePolicyIDs`
+   map** (`policymatch.go:1516`), so a miss yields `Matched=true, PolicyID=0` —
+   a *synthetic* zero on an inventory surface. Under Path D that reads as
+   "unattributed" only if the discriminator is plumbed there too; otherwise it
+   silently names the first policy. Must be covered.
 6. **`DuplicatePolicyId` (M01) excludes 0 for a reason that is now confirmed
    stale.** Its comment justifies the exclusion by "a legitimate older-peer /
    hand-built snapshot that simply omits policy_id (all-zero)". `apply_snapshot`
@@ -740,29 +843,34 @@ must be rewritten to assert the opposite, not deleted), and the
 
 ## 8. Risk assessment
 
-| Class | Path B′ (recommended) | Path C (rejected) | Path D | Note |
-|---|---|---|---|---|
-| **Behavioral regression** | **MED** | **LOW transitionally / HIGH at end state** | **MED** | B′ reinterprets peer-synced ids during the upgrade window and relies on ingress normalisation + egress downgrade to contain it. C is nearly today's behaviour while its guards stand, but its end state turns every manufactured zero into a confident attribution and a sweep target (§5.0.1). D is safe once the predicate is `policy_id != 0 \|\| bit`, but touches six planes. |
-| **Lifetime / borrow-checker** | **LOW** | **LOW** | **LOW** | All three are scalar/flag changes at struct-literal sites; no new borrows, no hot-path allocation. |
-| **Performance regression** | **NONE** | **NONE** | **NONE** | No hot-path work added; the bit test in D is on display/clear paths only. |
-| **Architectural mismatch** | **MED** | **MED** | **MED** | B′ introduces a bidirectional wire translation that exists nowhere else here — but round-1 concluded C needs a capability/admission invariant too, so the asymmetry v1 claimed is not real. |
+| Class | Path D (recommended) | Path B′ (rejected) | Path C (rejected) |
+|---|---|---|---|
+| **Behavioral regression** | **MED** — nothing changes meaning and there is no mixed-version window, but the discriminator must reach six planes and the `UnattributedPolicyID` render arm becomes conditional; getting that arm wrong in the permissive direction restores #6851's misattribution | **HIGH** — changes every public runtime id, translates every peer-synced session, couples async UDP capability state to TCP session admission, and corrupts both reserved sentinels at the values that matter (§1) | **HIGH at end state** — every manufactured zero becomes a confident attribution and a sweep target |
+| **Lifetime / borrow-checker** | **LOW** | **LOW** | **LOW** |
+| **Performance regression** | **NONE** — the bit test is on display/clear paths only | **NONE** | **NONE** |
+| **Architectural mismatch** | **LOW** — an additive per-session flag on an existing carried byte is a shape this codebase already uses (the `LogFlagUserspace*` bits) | **HIGH** — a permanent bidirectional translation protocol whose correctness depends on config-propagation timing exists nowhere else here | **MED** |
 
 Residual risks for the recommended path, stated without softening:
 
-- **The numeric shift is externally visible** (§6). Index, RT_FLOW ids and
-  structured `policy_id` all move by one. Automation pinned to literal integers
-  breaks. This is the price of the correct end state.
-- **Translation completeness.** Ingress normalisation must cover *both* import
-  doors (binary sync decode and the JSON/RPC fallback conversion), and the
-  egress downgrade must cover both encode paths. A missed door is a silent
-  cross-space id.
-- **Capability trust.** The peer capability rides an optional trailer that a
-  legacy peer simply omits — correct — but nothing authenticates it beyond the
-  existing heartbeat auth. A peer that lies about its space is a
-  misconfiguration, not an attack the plan defends against; say so rather than
-  implying a guarantee.
-- **Orphan-helper and pinned-map fencing** (§5.0, §7.10) are prerequisites, not
-  nice-to-haves: each is an unlabelled source of old-space ids.
+- **Plane completeness is the whole risk.** Six planes must carry the
+  discriminator, and the RT_FLOW codec is a *separate* path from the session
+  table. A missed plane leaves the ambiguity exactly where it hurts most —
+  in a durable off-box record — while every test that looks at session rows
+  goes green.
+- **`log_flags` is hardcoded to 0 on the BPF publication path** (verified,
+  `publish_conntrack.rs:240/382`). Until that is understood and fixed, the
+  chosen carrier does not work end-to-end. Treat as a blocking prerequisite,
+  not an implementation detail.
+- **The `UnattributedPolicyID` render arm becomes conditional.** It is currently
+  unconditional and is documented as LOAD-BEARING in both directions. This is
+  the single edit most likely to reintroduce the defect #6851 fixed.
+- **The scalar stays ambiguous off-box** unless the structured surfaces and
+  RT_FLOW expose the discriminator explicitly. That mitigation is part of the
+  change, not a follow-up.
+- **Intra-node channels remain unlabelled** (§5.0): an orphaned helper on the
+  unauthenticated event socket and the pinned-map flush dependence. Under D
+  these do not carry a *wrong-space* id — nothing changes space — so they drop
+  from blocking to hardening. Confirm that read before relying on it.
 - **The `SessionDeltaInfo` gap is a live defect on master.** Even if this plan
   is never implemented, that path stamps `policy_id 0` on real sessions today
   and should be filed regardless of the outcome here.
@@ -775,53 +883,51 @@ Residual risks for the recommended path, stated without softening:
    (0 failed); `make test-go` across the affected packages (`pkg/dataplane`,
    `pkg/dataplane/userspace`, `pkg/daemon`, `pkg/cli`, `pkg/api`, `pkg/grpcapi`,
    `pkg/logging`, `pkg/cluster`).
-2. **Zero-never-assigned property test** over generated configs (varying set
-   count, policies per set, application-set expansion spans, nil zone-pair
-   slots, globals): `walkPolicyRuleSlots`, `RuntimePolicyIDs` and
-   `PolicyIDsByStableKey` never emit `0`. A single fixture does not bind a
-   universal claim.
-3. **Boundary test at the exact-fill edge**: a set with exactly 256 policies
-   still produces ids inside its own range and no id collides with the next
-   set's — the §5.2 disjointness argument as a test rather than a table.
-4. **Both exclusions**: assert that the deletion-clear AND the rematch sweep
-   sets each contain no reserved value, and that deleting/modifying the FIRST
-   policy now clears its own sessions. One test per exclusion — a single test
-   covering both would stay green if only one `continue` were removed.
-5. **Mixed-version matrix, both directions**, as unit tests over the decode /
-   render / clear / normalise / downgrade functions (no cluster required):
-   - space-0 peer session imported → `policy_id` normalised to `0`, renders
-     `unattributed`, not swept on a first-policy delete;
-   - space-1 peer session imported → id preserved, renders the real policy,
-     swept when that policy is deleted;
-   - egress toward a space-0 peer → id downgraded by exactly one, and the
-     round-trip through the old decoder names the right policy;
-   - egress toward a space-1 peer → id sent unchanged.
-   Each arm needs its **own** fixture so a single-arm regression reds a distinct
-   test (one fixture binding one match arm).
-6. **Negative control for the normalisation**: a LOCAL session admitted by the
-   first policy (id `1` after the shift) must still be swept when that policy is
-   deleted — otherwise the normalisation test passes with the fix absent.
-7. **Pinned-map lifetime proof** (§5.3.1): a test that the first-ctrl-enable
-   flush actually empties the pinned session maps, since the design depends on
-   it rather than on their absence.
-8. **Revert-probe discipline**: each new assertion must be shown RED when its
-   specific production line is reverted — and the RED must be an **assertion
-   failure**, not a build break. A `+1` that is removed will red many tests at
-   once; that is not evidence that any particular test binds its own property,
-   so each new assertion needs its own targeted mutation.
+2. **The predicate's value matrix**, one fixture per cell so a single-cell
+   regression reds a distinct test — `(policy_id, bit)` over
+   `(0,false) (0,true) (N,false) (N,true) (0xFFFFFFFF,false) (0xFFFFFFFF,true)`
+   for both render and clear. The `(N,false)` cell is the one that binds the
+   `!= 0` arm: it is the old-peer case, and its only distinguishing mutation is
+   dropping that arm.
+3. **Both exclusions removed, separately.** One test for the deletion-clear and
+   one for the rematch sweep — a single test covering both stays green if only
+   one `continue` is removed.
+4. **Per-plane coverage, one test per plane.** Session row, REST, gRPC, CLI,
+   **RT_FLOW record**, and the peer fan-out (`PeerSessionPolicyName`). The
+   RT_FLOW leg must assert on the emitted record, not on a shared resolver, or
+   it does not bind the plane that matters.
+5. **Mixed-version matrix, both directions**, as unit tests over the
+   decode/render/clear functions:
+   - old-peer session, real policy, bit clear → attributed, renders the real
+     policy, **swept** when that policy is deleted;
+   - old-peer session, `policy_id 0`, bit clear → unattributed, **not swept**;
+   - new-peer session, first policy, bit set → real name, **swept**;
+   - new-peer session, non-policy, bit clear → unattributed, not swept.
+6. **Negative control**: a host-inbound session must NOT be swept when the first
+   policy is deleted, in the same test file as the positive case — otherwise the
+   positive test passes with an over-broad predicate.
+7. **Mutation list that must each produce a distinct RED** (not just "revert the
+   feature"): drop the `!= 0` arm; invert the render arm's condition; drop the
+   bit from any one of the six planes; drop it from the cluster encode but not
+   the decode; leave `policyNames[0]` reachable ahead of the guard.
+8. **Revert-probe discipline**: each RED must be an **assertion failure**, not a
+   build break.
 9. **Loss-cluster smoke** (`loss:xpf-userspace-fw0/fw1`) is **required** — the
    change touches session metadata that crosses the HA wire: v4+v6,
    push+reverse, CoS-off and CoS-on, plus `make test-failover` (mandatory for
    any session-sync change). Confirm host-inbound (SSH to the firewall itself),
-   fabric and tunnel sessions render `unattributed`, that the FIRST policy's
-   sessions now clear on its delete, and that a failover mid-stream does not
-   drop sessions.
-10. **Mixed-build cluster leg.** The one thing unit tests cannot cover is a real
-    old binary. Run one failover cycle with node 0 on the new build and node 1
-    on the pre-change build (and then reversed), and check attribution and
-    clear behaviour on both. Without this leg the compatibility claims are
-    reasoned, not measured, and the plan should say so rather than implying
-    otherwise.
+   fabric and tunnel sessions still render `unattributed`, that the FIRST
+   policy's sessions now clear on delete and rematch on modify, and that a
+   failover mid-stream drops nothing.
+10. **Mixed-build cluster leg — necessary, and it must be designed not to be
+    theatre.** A steady identical-config failover proves nothing about the
+    decisive claim. It must pin the exact pre-change artifact, exercise
+    first-policy / ordinary / unattributed / default-policy sessions, force a
+    policy delete and a policy modify while the pair is mixed, reverse which
+    node holds config authority as well as which node is new, and cross a
+    reconnect. Without those it is a smoke test wearing a compatibility label.
+11. **Affected-package list must include `pkg/policymatch`** (§7.7), which v2
+    omitted and which synthesises `PolicyID=0` on a map miss.
 
 ---
 
@@ -832,9 +938,13 @@ Residual risks for the recommended path, stated without softening:
   by this work, not delivered by it.
 - **Dropping `DuplicatePolicyId`'s 0-exclusion** — see §7.6; independent
   validator cleanup, file separately.
-- **Removing `optional` from gRPC `policy_id`** (#3623 explicit presence) — a
-  proto wire change; harmless to leave, and removing it is not required once
-  ids start at 1.
+- **Removing `optional` from gRPC `policy_id`** (#3623 explicit presence) —
+  **keep it.** `MatchPolicies` uses presence to distinguish matched from
+  unmatched, and it is now an established compatibility contract. Under Path D
+  its rationale (id 0 is a real policy) also stays literally true.
+- **Any renumbering of real policy ids** — rejected (§5.5).
+- **Any sentinel arithmetic on `policy_id`** — rejected; §1 shows where it
+  corrupts `DefaultPolicySentinelID` and the unattributed value.
 - **Removing the #6851 render guards** — `UnattributedPolicyID`'s arm STAYS. Its
   value and rendering do not change; only its justification does (from
   "ambiguous, so under-claim" to "reserved, so exact"). Deleting the guard would
@@ -847,62 +957,53 @@ Residual risks for the recommended path, stated without softening:
 
 ---
 
-## 11. Open questions for adversarial review (r2)
+## 11. Open questions for adversarial review (r3)
 
-Round-1 questions Q1-Q3 and Q5-Q6 are **resolved** and folded into the body:
-the substitution was rejected (Q1 → §5.5), the restart-isolation claim was
-narrowed and two residual channels named (Q2 → §5.0), the "version bump does not
-gate sync frames" finding was independently verified (Q3 → §5.1), the event-site
-inventory was corrected (Q5 → §10), and the second-sentinel choice is moot now
-that the recommendation does not add one (Q6). The live questions are:
+Rounds 1-2 resolved: the Path-C substitution (rejected, §5.5), restart isolation
+(narrowed, §5.0), the version-bump-does-not-gate-sync finding (verified, §5.1),
+the event-site inventory (§10), the `divmod`/capacity objection (retracted,
+§5.2), the egress-downgrade soundness (**killed**, §1), the ingress-door
+inventory (corrected — the real doors are `sync_conn_read.go:98/124`; the
+`daemon_ha_userspace_convert.go` path is *egress*, and normalising there would
+have corrupted local ids), the heartbeat-capability carrier (**killed**, §1),
+the site classification (five classes, §5.2.3), the `SessionDeltaInfo`
+sequencing (field-first, no wrong-meaning window), and the risk rating. What
+remains:
 
-**Q1′ — Is the numeric shift acceptable to operators and automation?** Every
-policy's `show security policies` Index moves by one, RT_FLOW records change
-value, and archived records stop joining numerically to a live Index (§6, §5.3).
-This is the largest externally visible cost of the recommended path and it has
-no mitigation beyond a release note and the stable `rule_id` join. If reviewers
-judge it unacceptable, the answer is Path D (attributed bit, `policy_id != 0 ||
-bit`), which buys day-one precision with no numeric change at the cost of
-threading a bit through six planes. **This question decides between the top two
-paths.**
+**Q1″ — Is the `LogFlags` bit actually a viable carrier end-to-end?**
+`publish_conntrack.rs:240/382` hardcodes `log_flags: 0`, so the bit cannot ride
+that path today. Two sub-questions: *why* is it hardcoded, and what do the
+existing `LogFlagSessionInit` / `LogFlagSessionClose` bits do on that path as a
+result? If the answer is "that path never carries flags and something else
+supplies them", the carrier choice may need to change — to a dedicated field on
+the session value, or to the existing NAT-flags `uint16` whose bit 9+ is free.
+**This is the one open item that can force a redesign of the recommended path.**
 
-**Q2′ — Is the egress downgrade (`policy_id - 1` toward a space-0 peer) sound,
-or too clever?** It is an exact inverse only while (a) the delta is a uniform
-constant and (b) both nodes compile the same text-synced config. Config sync is
-eventually consistent, so during a commit-propagation window the two nodes can
-briefly hold different configs. Does that window break the inverse, and if so is
-the fail-safe alternative (send `0` to a space-0 peer, accepting `unattributed`
-for the window) strictly better? Argue with the config-sync ordering
-(#3931 generation guard) in hand.
+**Q2″ — Where should the discriminator live on the STRUCTURED surfaces?** §5.4-D
+cost 3 says REST/gRPC and RT_FLOW should expose it explicitly rather than leave
+the scalar ambiguous off-box. Is a boolean the right shape, or should the
+surfaces emit a small enum (`policy` / `unattributed` / `default-policy`) that
+also absorbs `DefaultPolicySentinelID` and retires the "two reserved values a
+client must know about" problem entirely? The enum is more churn and more
+value.
 
-**Q3′ — Is a heartbeat-trailer capability the right carrier, or does this need a
-real admission invariant?** Round-1 review argued that a capability which merely
-*advertises* is weaker than one the receiver can *enforce*, since nothing stops a
-misconfigured or hand-rolled peer from sending space-0 ids while advertising
-space 1. Is advertise-only sufficient given that both nodes are operator-owned
-appliances, or must the receiver validate (e.g. reject an id of 0 from a peer
-claiming space 1)? A validating receiver is cheap here — under Path B′ a
-space-1 peer should never send 0 — so the question is whether to make that a
-hard reject or a counter.
+**Q3″ — Does Path D genuinely have no mixed-version window, or is that claim
+resting on an unexamined path?** The argument is that no id changes meaning, so
+both directions degrade to today's behaviour. Attack it: is there any consumer
+that would behave differently on receiving a `LogFlags` byte with an unknown bit
+set — a strict decoder, a bit-mask comparison, a byte-equality check in a test
+or a reconcile path?
 
-**Q4′ — Should the `SessionDeltaInfo` policy-id gap be filed as its own issue
-regardless of this plan's outcome?** It stamps `policy_id 0` onto real sessions
-on a production path today (§5.0.1), independent of any renumbering. It looks
-like a genuine standalone defect. Confirm or refute, and say whether it should
-block this work or merely precede it.
+**Q4″ — Is the six-plane list complete?** Rust `SessionMetadata`, same-host
+event flags, JSON/RPC fallback, Go→Rust import, BPF publication, RT_FLOW codec.
+A missed plane leaves the ambiguity in place while session-row tests go green.
+Enumerate independently rather than checking the list.
 
-**Q5′ — Is the intra-node fencing (orphan helper on the event socket, pinned-map
-flush) a prerequisite or a separate hardening item?** Both are sources of
-old-space ids that no peer capability describes (§5.0, §7.10). If they are
-prerequisites, this plan's real scope is larger than the numbering change and
-should be sequenced accordingly; if they are pre-existing and orthogonal, say so
-and they leave the critical path.
-
-**Q6′ — Should this still be PLAN-KILLed as WONT-FIX?** The prior converged
-verdict was PLAN-DEFER, and #6851 already fixed the display half. What remains
-is: one policy exempt from deletion-clear, one policy exempt from rematch, one
-under-claimed name on a durable audit surface, and a codebase invariant that
-zero-defaults fail safe. Weigh that against a cross-plane change with an
-externally visible numeric shift and a bidirectional translation layer. A
-reviewer who concludes "document the limitation and close" is giving a
-defensible answer; state plainly which side you land on.
+**Q5″ — Should this be PLAN-KILLed as WONT-FIX?** The remaining payoff is: one
+policy exempt from deletion-clear, one exempt from rematch, and one under-claimed
+name on a durable audit surface. Against that, Path D threads a discriminator
+through six planes and makes the #6851 render guard conditional — the edit most
+likely to reintroduce the defect that guard exists to prevent. A reviewer who
+concludes "document the limitation and close" is giving a defensible answer.
+Note that "reserve 0 instead" is **not** an available alternative to that
+conclusion: §1 shows why. State plainly which side you land on.
