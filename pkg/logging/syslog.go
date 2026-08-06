@@ -945,6 +945,18 @@ func ParseSeverity(name string) int {
 // `any` is deliberately NOT recognized: it is a selector wildcard meaningful to
 // the rsyslog-backed file/user destinations, not a numeric facility a host
 // client can stamp on a record.
+func ParseFacilityChecked(name string) (int, bool) {
+	switch name {
+	case "kern", "user", "daemon", "auth", "syslog",
+		"local0", "local1", "local2", "local3",
+		"local4", "local5", "local6", "local7",
+		"change-log":
+		return ParseFacility(name), true
+	default:
+		return FacilityLocal0, false
+	}
+}
+
 // FacilityIsWildcard reports whether name is the Junos "all facilities"
 // wildcard rather than a facility name to be mapped.
 //
@@ -961,18 +973,6 @@ func ParseSeverity(name string) int {
 // This is a caller-side suppression, not a mapping change: ParseFacility and
 // ParseFacilityChecked both still return FacilityLocal0 for `any`, unchanged.
 func FacilityIsWildcard(name string) bool { return name == "any" }
-
-func ParseFacilityChecked(name string) (int, bool) {
-	switch name {
-	case "kern", "user", "daemon", "auth", "syslog",
-		"local0", "local1", "local2", "local3",
-		"local4", "local5", "local6", "local7",
-		"change-log":
-		return ParseFacility(name), true
-	default:
-		return FacilityLocal0, false
-	}
-}
 
 // ParseFacility converts a facility name to its numeric code.
 // Returns FacilityLocal0 for unrecognized names.

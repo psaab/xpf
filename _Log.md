@@ -1,3 +1,57 @@
+## 2026-08-05 — #6829 fold round 7: the widening I adopted killed a tripwire
+
+- **Timestamp**: 2026-08-05 (fold/6829-r3, gate at f4da2fc1b — MINOR, no blockers)
+- **Action**: Six items. The first is the important one, and it is a defect in
+  a patch I verified and adopted.
+    - **F1 — the A1 widening made the zero-literal tripwire unreachable.**
+      `import ( ... )` IS an `*ast.GenDecl` and every `ImportSpec.Path` is a
+      STRING `BasicLit`, so once the package-level walk runs, `out` always holds
+      this file's ~11 import paths plus its package-level `errors.New` strings.
+      `len(out) == 0` could never be true again. Reproduced at HEAD before
+      fixing: moving the mapping to a `var` in a NEW file and reducing
+      `ParseFacility` to a lookup passed SILENTLY (rc=0), where the same
+      mutation RED at the parent with "extracted zero string literals". So the
+      widening closed one escape and converted a loud `t.Fatalf` into silence
+      for another, while the helper's doc still claimed "a refactor cannot
+      quietly shrink the corpus". Fixed by counting the BODY contribution
+      separately (`bodyLits := len(out)` before the package-level walk).
+      Filtering `gd.Tok != token.IMPORT` is NOT sufficient — the package-level
+      `errors.New` strings alone keep `out` non-empty and the moved-table
+      mutation still escapes; the gate measured that and I did not re-derive it.
+    - **The lesson, which is mine to carry**: I verified the prescribed patch
+      against the escape it targeted and it worked. Neither I nor the lead asked
+      what it BROKE. **A prescribed fix needs a regression check against the
+      guards it touches, not only a check against the escape it closes.** This
+      round runs both directions.
+    - **F2** — the compute/assign-across-the-dial value was bound at 1 of the 3
+      sites the round-6 delta put into that shape. Added
+      `EventReader.SyslogClients()` (sibling of the existing
+      `SyslogClientCount`, which cannot observe WHICH facility was installed)
+      and bound the value on the audit stream and in the CLI test, where the
+      clients were already returned and every caller discarded them.
+    - **F3** — inserting `FacilityIsWildcard` immediately below
+      `ParseFacilityChecked`'s doc block reassigned that doc to it. Third
+      instance of this class today. Fixed — and I reproduced it once while
+      fixing it, by re-anchoring below `ParseFacility`'s doc instead of above
+      it, which moved the same defect one function over. Verified with
+      `go doc` on all THREE functions rather than the two I had changed.
+    - **F4** — the scale paragraph still said the AST contributes "zero" names
+      the table does not hold; it is 14 after the widening, and sitting next to
+      the widening it read as "this change was inert", the opposite of what
+      round 6 established.
+    - **F5** — regenerated `docs/refactoring-audit-current.txt` (2060 -> 2076).
+    - **F6** — the round-6 `File(s)` list named a round-FIVE file; corrected in
+      place with a note rather than silently.
+- **Validation**, each `go vet ./<pkg>/` then `go test -count=1 -run '6829'`:
+  moved-table mutation now **rc=1** (tripwire restored) where it was rc=0 at
+  `f4da2fc1b`; and the REGRESSION check the F1 lesson demands — both escapes A1
+  closed are still caught, A1-const rc=1 and E1-map rc=1. vet=0 throughout.
+- **File(s)**: `pkg/logging/parse_facility_source_6829_test.go`,
+  `pkg/logging/syslog.go`, `pkg/logging/ringbuf.go`,
+  `pkg/daemon/syslog_selector_render_5797_test.go`,
+  `pkg/cli/syslog_facility_checked_6829_test.go`,
+  `docs/refactoring-audit-current.txt`, `_Log.md`
+
 ## 2026-08-05 — #6829 fold round 6: the residual was a scope choice, and two call sites did not satisfy the shipped contract
 
 - **Timestamp**: 2026-08-05 (fold/6829-r3, gate at 8e994753b — MINOR, no blockers)
@@ -56,11 +110,13 @@
   the failure rather than adjusting the assertion.
 - **File(s)**: `pkg/logging/syslog.go`,
   `pkg/logging/parse_facility_source_6829_test.go`,
-  `pkg/logging/parse_facility_checked_5797_test.go`,
   `pkg/logging/slog_handler.go`, `pkg/logging/README.md`,
   `pkg/daemon/daemon_system.go`,
   `pkg/daemon/syslog_selector_render_5797_test.go`, `pkg/cli/apply.go`,
   `pkg/cli/syslog_facility_checked_6829_test.go`, `_Log.md`
+  (#6829 F6: this list previously also named
+  `parse_facility_checked_5797_test.go`, which was round FIVE's file and not in
+  the round-6 delta — checked against `git show --stat`.)
 
 ## 2026-08-05 — #6829 fold round 5: dangling refs, an uncorrected artifact, an unrunnable repro
 

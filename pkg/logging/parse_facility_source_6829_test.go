@@ -88,9 +88,15 @@ import (
 // Scale, so the framing is not read as broader than it is: the corpus is ~539
 // names, of which only the 14 table entries DISCRIMINATE — for the rest both
 // functions return FacilityLocal0 and agreement is trivially satisfied. At HEAD
-// the AST contributes zero names the table does not already hold. Its value is
-// PROSPECTIVE: it self-samples a mutation that introduces a new literal, which
-// is exactly the M1 shape this file exists to catch.
+// the AST contributes 14 names the table does not hold — the file's import
+// paths and its package-level errors.New strings, swept in by the #6829 A1
+// widening to package-level GenDecls. They are inert passengers: neither
+// function special-cases them, so agreement is trivially satisfied. The AST's
+// real value is PROSPECTIVE — it self-samples a mutation that introduces a new
+// literal, which is exactly the M1/A1 shape this file exists to catch. (An
+// earlier version of this paragraph said "zero", which was true before the
+// widening and read as though the widening had been inert — the opposite of
+// what it did.)
 
 // facilityNameLiterals returns every string literal appearing anywhere in the
 // named function's body. It is deliberately over-inclusive: a surplus literal
@@ -150,6 +156,19 @@ func facilityNameLiterals(t *testing.T, fnName string) []string {
 		})
 	}
 	collect(fn.Body)
+	// #6829 F1: count the BODY contribution before widening. `import ( ... )` is
+	// itself an *ast.GenDecl and every ImportSpec.Path is a STRING BasicLit, so
+	// once the package-level walk below runs, `out` always holds this file's ~11
+	// import paths plus its package-level errors.New strings — making a
+	// `len(out) == 0` check after it UNREACHABLE. The A1 widening therefore
+	// closed one escape and silently converted this tripwire into a no-op:
+	// moving the mapping to a var in another file and reducing ParseFacility to
+	// a lookup RED at the parent ("extracted zero string literals") and passed
+	// silently after. Filtering gd.Tok != token.IMPORT is NOT enough — the
+	// package-level errors.New strings alone keep `out` non-empty and the
+	// moved-table mutation still escapes. The body count is the only quantity
+	// that means what the tripwire claims.
+	bodyLits := len(out)
 	// #6829 A1: also walk the file's package-level declarations. The body-only
 	// scope let an identifier hide a literal that IS present in syslog.go:
 	//
@@ -167,9 +186,11 @@ func facilityNameLiterals(t *testing.T, fnName string) []string {
 			collect(gd)
 		}
 	}
-	if len(out) == 0 {
-		t.Fatalf("%s: extracted zero string literals — the corpus contribution is empty, "+
-			"so the agreement assertions would run over a smaller set than intended", fnName)
+	if bodyLits == 0 {
+		t.Fatalf("%s: extracted zero string literals from the function BODY — the mapping has "+
+			"moved out of this function, so the corpus no longer self-samples it and the "+
+			"agreement assertions run over a smaller set than intended. Point this walk at "+
+			"wherever the mapping now lives rather than deleting the check", fnName)
 	}
 	sort.Strings(out)
 	return out

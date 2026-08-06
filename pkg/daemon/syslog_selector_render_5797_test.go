@@ -560,7 +560,7 @@ func TestApplySystemSyslogWildcardFacilityDoesNotWarn_6829(t *testing.T) {
 // RED-on-revert: put the site back on logging.ParseFacility, or drop the
 // !known warn, and this goes silent.
 func TestApplySyslogConfigSecurityStreamWarnsOnUnmappedFacility_6829(t *testing.T) {
-	apply := func(t *testing.T, facility string) string {
+	apply := func(t *testing.T, facility string) (string, *logging.EventReader) {
 		t.Helper()
 		buf := captureRenderedWarnings(t)
 		d := &Daemon{slogHandler: logging.NewSyslogSlogHandler(slog.Default().Handler())}
@@ -575,11 +575,19 @@ func TestApplySyslogConfigSecurityStreamWarnsOnUnmappedFacility_6829(t *testing.
 		}
 		er := logging.NewEventReader(nil, nil)
 		d.applySyslogConfig(er, cfg)
-		return buf.String()
+		return buf.String(), er
 	}
 
 	t.Run("unmapped facility warns", func(t *testing.T) {
-		got := apply(t, "authorization")
+		got, er := apply(t, "authorization")
+		// #6829 F2: bind the VALUE on the audit stream — the site this file
+		// calls the worst in the daemon to misroute silently. It has the same
+		// compute/assign split as the host path, so a log-only assertion cannot
+		// see either half being dropped.
+		if cs := er.SyslogClients(); len(cs) == 1 && cs[0].Facility != logging.FacilityLocal0 {
+			t.Errorf("installed audit-stream Facility = %d, want FacilityLocal0 (%d) — the "+
+				"warning promises records leave under local0", cs[0].Facility, logging.FacilityLocal0)
+		}
 		if !strings.Contains(got, "unmapped facility name") {
 			t.Errorf("the security/audit stream silently mapped an unmappable facility to "+
 				"local0 with no warning — this is the audit path (#5797/#6829). captured:\n%s", got)
@@ -590,13 +598,22 @@ func TestApplySyslogConfigSecurityStreamWarnsOnUnmappedFacility_6829(t *testing.
 	})
 
 	t.Run("mapped facility stays quiet", func(t *testing.T) {
-		if got := apply(t, "auth"); strings.Contains(got, "unmapped facility name") {
+		got, er := apply(t, "auth")
+		if strings.Contains(got, "unmapped facility name") {
 			t.Errorf("`auth` is mapped; a correct config must not warn. captured:\n%s", got)
+		}
+		cs := er.SyslogClients()
+		if len(cs) != 1 {
+			t.Fatalf("want one installed audit-stream client, got %d", len(cs))
+		}
+		if cs[0].Facility != logging.FacilityAuth {
+			t.Errorf("installed audit-stream Facility = %d, want FacilityAuth (%d) — the "+
+				"authored facility must survive the compute/assign split", cs[0].Facility, logging.FacilityAuth)
 		}
 	})
 
 	t.Run("wildcard any stays quiet", func(t *testing.T) {
-		if got := apply(t, "any"); strings.Contains(got, "unmapped facility name") {
+		if got, _ := apply(t, "any"); strings.Contains(got, "unmapped facility name") {
 			t.Errorf("`any` names no facility on purpose; warning about it is false. captured:\n%s", got)
 		}
 	})

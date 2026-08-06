@@ -57,7 +57,12 @@ func TestBuildSyslogClientsWarnsOnUnmappedFacility_6829(t *testing.T) {
 	}
 
 	t.Run("unmapped facility warns", func(t *testing.T) {
-		got, _ := build(t, "authorization")
+		got, clients := build(t, "authorization")
+		if len(clients) == 1 && clients[0].Facility != logging.FacilityLocal0 {
+			t.Errorf("installed client Facility = %d, want FacilityLocal0 (%d) — the warning "+
+				"promises records leave under local0, so that must be what is installed",
+				clients[0].Facility, logging.FacilityLocal0)
+		}
 		if !strings.Contains(got, "unmapped facility name") {
 			t.Errorf("the CLI commit mirror silently mapped an unmappable facility to local0 "+
 				"with no warning, while the daemon warns for the same config — the two "+
@@ -69,8 +74,20 @@ func TestBuildSyslogClientsWarnsOnUnmappedFacility_6829(t *testing.T) {
 	})
 
 	t.Run("mapped facility stays quiet", func(t *testing.T) {
-		if got, _ := build(t, "auth"); strings.Contains(got, "unmapped facility name") {
+		got, clients := build(t, "auth")
+		if strings.Contains(got, "unmapped facility name") {
 			t.Errorf("`auth` is mapped; a correct config must not warn. captured:\n%s", got)
+		}
+		// #6829 F2: bind the VALUE, not just the warning. This site has the same
+		// compute-then-assign shape as the daemon's, so dropping either half is
+		// invisible to a log assertion.
+		if len(clients) != 1 {
+			t.Fatalf("want one installed client, got %d", len(clients))
+		}
+		if clients[0].Facility != logging.FacilityAuth {
+			t.Errorf("installed client Facility = %d, want FacilityAuth (%d) — the authored "+
+				"facility must survive the compute/assign split",
+				clients[0].Facility, logging.FacilityAuth)
 		}
 	})
 

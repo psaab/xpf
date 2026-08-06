@@ -12,9 +12,9 @@
 [REFACTOR]   2227  userspace-dp/src/session/mod.rs
 [REFACTOR]   2192  pkg/config/compiler_opts.go
 [REFACTOR]   2166  userspace-dp/src/afxdp/cos/queue_service/mod.rs
+[REFACTOR]   2076  pkg/daemon/daemon_system.go
 [REFACTOR]   2074  pkg/dhcprelay/relay.go
 [REFACTOR]   2062  pkg/dataplane/userspace/manager_ha.go
-[REFACTOR]   2060  pkg/daemon/daemon_system.go
 [REFACTOR]   2029  userspace-dp/src/afxdp/frame/mod.rs
 [WATCH]      1997  userspace-dp/src/afxdp/frame/inspect.rs
 [WATCH]      1932  pkg/ddns/manager.go

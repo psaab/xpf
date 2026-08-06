@@ -367,6 +367,20 @@ func (er *EventReader) SyslogClientCount() int {
 	return len(er.syslogClients)
 }
 
+// SyslogClients returns the currently installed syslog clients (goroutine-safe).
+//
+// #6829 F2: the sibling of SyslogClientCount, exposing the clients themselves
+// rather than just how many. applySyslogConfig computes each stream's facility
+// on one side of the client construction and assigns it on the other — the
+// compute/assign split that silently drops a value — and a COUNT cannot observe
+// which facility was installed. Deleting either half left the whole package
+// green before this existed.
+func (er *EventReader) SyslogClients() []*SyslogClient {
+	er.syslogMu.RLock()
+	defer er.syslogMu.RUnlock()
+	return append([]*SyslogClient(nil), er.syslogClients...)
+}
+
 // LocalWriterCount reports how many local log writers are currently installed
 // (goroutine-safe). Observability/testability only — lets a caller confirm that
 // event mode installed a local writer (and that a stream-mode reload cleared
