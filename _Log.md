@@ -1,3 +1,69 @@
+## 2026-08-05 — #6829 round 8: apply the ordering doctrine at the two sites that did not have it
+
+- **Timestamp**: 2026-08-05 (fold/6829-r3, PR #6829)
+- **Action**: Four items.
+  **1. Ordering at the audit + CLI sites.** The rationale I wrote at the
+  HOST site — classify the facility BEFORE constructing the client, because
+  construction dials and an unmappable facility is the one diagnosis that
+  does not depend on the network being up — was applied at 1 of 3 sites.
+  The other two classified BELOW the `client == nil` continue, so a stream
+  whose host does not resolve was skipped and the operator was never told
+  the facility was ALSO unmappable.
+  Measured before changing anything: `host 192.0.2.10` constructs fine (1
+  client); an unresolvable name returns `nil, err` from the UDP arm and
+  installs ZERO. That is the fixture the property needs.
+  SPLIT, not moved, and this is the load-bearing part — the question the
+  brief asked to answer before committing. **What the old position supplied
+  besides ordering:** `client` is guaranteed non-nil there precisely
+  BECAUSE the nil case already `continue`d. Hoisting the whole block would
+  put `client.Facility` on a pointer that does not exist yet — the same
+  trap that panicked a prescribed hoist on another PR this week. **What
+  supplies it now:** nothing changed for the assign half. Only the COMPUTE
+  half moved (it needs nothing from `client`); the ASSIGN half stays below
+  the same `continue`, taking the same guarantee from the same source. A
+  `haveFacility` bool preserves the original conditional assignment so a
+  stream with no facility keeps the constructor default rather than being
+  overwritten with a zero value.
+  **2. Two vacuous unmapped cells.** `len(cs) == 1 && cs[0].Facility != ...`
+  evaporates when nothing is installed. Replaced with a `t.Fatalf` on the
+  count — which binds a real dimension, "forwarding is deliberately NOT
+  withheld" — and left the value check in place but documented as NOT
+  discriminating: `FacilityLocal0` is the constructor default, so on an
+  unmapped facility "the substitution ran" and "nothing ran" are the same
+  number. Rather than assert a non-default value that cannot exist on that
+  path, added a two-stream subtest (one unmappable → local0, one mapped →
+  auth) asserting the two DIFFER. Dropping the assign half puts both on the
+  default, which is what the single-stream cell cannot see.
+  **3. A comment this round's own delta contradicted.** The CLI test header
+  said the test "captures the log rather than inspecting the client"; the
+  previous round added exactly that inspection. Rewritten to say what is
+  true now — the log capture binds the CONVERSION, the client inspection
+  binds the ASSIGNMENT — and to record that the old sentence stopped being
+  true when the inspection was added.
+  **4. Two numbers that no longer described the code.** The corpus is 553
+  at HEAD, not ~539 (539 is the count EXCLUDING the widening, which cannot
+  be quoted beside "the widening added 14"); verified empirically at 553.
+  And the moved-table tripwire's message claimed the corpus "no longer
+  self-samples" — measured false: moving the table to a package-level var
+  in the same file also reds, and there the GenDecl walk still samples every
+  name. Reworded to what it actually detects; it fails closed either way and
+  the remediation instruction was already right.
+- **Validation**: two mutations, snapshot-and-write-back with byte-for-byte
+  verify, each required to compile.
+  R1 (ordering reverted at BOTH sites) → RED on exactly the two new
+  `warns_even_when_client_construction_fails` subtests and nothing else, so
+  the new emission is not unconditional.
+  R2 (assign half dropped at BOTH sites) → RED on the mapped cells AND the
+  new two-stream cells, so the two-stream construction discriminates.
+  `go vet ./...` rc=0. `go test ./... -count=1` rc=0, 59 ok, zero FAIL,
+  real exit codes captured to files (no pipes).
+  `daemon_system.go` grew 2076 → 2103, so `go test ./pkg/refactoraudit/
+  -count=1` was run explicitly and uncached: rc=0.
+- **File(s)**: `pkg/daemon/daemon_system.go`, `pkg/cli/apply.go`,
+  `pkg/daemon/syslog_selector_render_5797_test.go`,
+  `pkg/cli/syslog_facility_checked_6829_test.go`,
+  `pkg/logging/parse_facility_source_6829_test.go`, `_Log.md`
+
 ## 2026-08-05 — #6829 fold round 7: the widening I adopted killed a tripwire
 
 - **Timestamp**: 2026-08-05 (fold/6829-r3, gate at f4da2fc1b — MINOR, no blockers)

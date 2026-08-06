@@ -22,9 +22,18 @@ import (
 // record on the stream leaves under local0 while `show system syslog` still
 // reports the authored name.
 //
-// The warning is the ONLY observable difference: both forms return the same
-// code, so an assertion on client.Facility cannot bind this conversion. That is
-// why this test captures the log rather than inspecting the client.
+// The warning is the only observable difference for the checked-vs-unchecked
+// CONVERSION itself — both forms return the same code, so no assertion on
+// client.Facility can distinguish ParseFacility from ParseFacilityChecked.
+//
+// The test does BOTH, and the reason is a different property. Since #6829 the
+// site has a compute/assign split (classify above the client construction,
+// assign below it), and dropping the ASSIGN half is invisible to a log
+// assertion — the warning still fires while nothing is installed. So the log
+// capture binds the conversion and the client inspection binds the assignment.
+// An earlier revision of this comment said the test captures the log RATHER
+// THAN inspecting the client; that stopped being true when the inspection was
+// added below.
 //
 // The warn uses slog.Warn rather than the fmt.Fprintf(os.Stderr) form its two
 // sibling warnings in buildSyslogClients use. That is deliberate: this function
@@ -58,7 +67,21 @@ func TestBuildSyslogClientsWarnsOnUnmappedFacility_6829(t *testing.T) {
 
 	t.Run("unmapped facility warns", func(t *testing.T) {
 		got, clients := build(t, "authorization")
-		if len(clients) == 1 && clients[0].Facility != logging.FacilityLocal0 {
+		// #6829 round 8: count asserted with Fatalf rather than folded into the
+		// value check — `len(clients) == 1 && ...` evaporates when nothing is
+		// installed, so a regression to ZERO passed silently.
+		//
+		// The VALUE is deliberately not treated as discriminating here:
+		// FacilityLocal0 is the constructor default, so on an unmapped facility
+		// "the substitution ran" and "nothing ran" are the same number. The
+		// discriminating coverage is the mapped subtest and the two-stream
+		// subtest below.
+		if len(clients) != 1 {
+			t.Fatalf("want exactly one installed client, got %d — forwarding is deliberately "+
+				"NOT withheld for an unmappable facility, so a regression to zero clients is "+
+				"a behaviour change this subtest must catch", len(clients))
+		}
+		if clients[0].Facility != logging.FacilityLocal0 {
 			t.Errorf("installed client Facility = %d, want FacilityLocal0 (%d) — the warning "+
 				"promises records leave under local0, so that must be what is installed",
 				clients[0].Facility, logging.FacilityLocal0)
@@ -70,6 +93,62 @@ func TestBuildSyslogClientsWarnsOnUnmappedFacility_6829(t *testing.T) {
 		}
 		if !strings.Contains(got, "authorization") {
 			t.Errorf("the warning must name the unmapped facility. captured:\n%s", got)
+		}
+	})
+
+	// #6829 round 8: the ordering property, mirroring the daemon site. Before
+	// the compute/assign split the classify block sat BELOW the `client == nil`
+	// continue, so a stream whose host does not resolve was skipped and the
+	// operator never learned the facility was also unmappable. RED-on-revert:
+	// move the classify block back below the continue and this goes silent.
+	t.Run("warns even when client construction fails", func(t *testing.T) {
+		var buf bytes.Buffer
+		prev := slog.Default()
+		slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+		t.Cleanup(func() { slog.SetDefault(prev) })
+
+		cfg := &config.Config{}
+		cfg.Security.Log.Streams = map[string]*config.SyslogStream{
+			"audit": {
+				Name: "audit", Host: "no-such-host.invalid.", Port: 514,
+				Facility: "authorization", Severity: "info",
+			},
+		}
+		clients := buildSyslogClients(cfg)
+
+		if len(clients) != 0 {
+			t.Fatalf("premise broken: this fixture must FAIL construction so the ordering "+
+				"is what is under test; got %d clients", len(clients))
+		}
+		if got := buf.String(); !strings.Contains(got, "unmapped facility name") {
+			t.Errorf("construction failed and the stream was skipped, so the operator was "+
+				"never told the facility is ALSO unmappable (#6829). captured:\n%s", got)
+		}
+	})
+
+	// The value assertion that CAN fail: two streams, one unmappable and one
+	// mapped to a non-default facility. Dropping the assign half leaves BOTH on
+	// the constructor default, which the single-stream unmapped cell cannot see.
+	t.Run("unmapped and mapped streams get different facilities", func(t *testing.T) {
+		cfg := &config.Config{}
+		cfg.Security.Log.Streams = map[string]*config.SyslogStream{
+			"unmappable": {Name: "unmappable", Host: "192.0.2.10", Port: 514,
+				Facility: "authorization", Severity: "info"},
+			"mapped": {Name: "mapped", Host: "192.0.2.11", Port: 514,
+				Facility: "auth", Severity: "info"},
+		}
+		clients := buildSyslogClients(cfg)
+		if len(clients) != 2 {
+			t.Fatalf("want two installed clients, got %d", len(clients))
+		}
+		seen := map[int]bool{}
+		for _, c := range clients {
+			seen[c.Facility] = true
+		}
+		if !seen[logging.FacilityLocal0] || !seen[logging.FacilityAuth] {
+			t.Errorf("installed facilities = %v, want both FacilityLocal0 (%d) and "+
+				"FacilityAuth (%d). Both on local0 means the assign half was dropped",
+				seen, logging.FacilityLocal0, logging.FacilityAuth)
 		}
 	})
 

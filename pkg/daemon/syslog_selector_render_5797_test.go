@@ -584,7 +584,25 @@ func TestApplySyslogConfigSecurityStreamWarnsOnUnmappedFacility_6829(t *testing.
 		// calls the worst in the daemon to misroute silently. It has the same
 		// compute/assign split as the host path, so a log-only assertion cannot
 		// see either half being dropped.
-		if cs := er.SyslogClients(); len(cs) == 1 && cs[0].Facility != logging.FacilityLocal0 {
+		// #6829 round 8: the count is asserted with Fatalf, not folded into the
+		// value check. `len(cs) == 1 && ...` evaporates when nothing is
+		// installed, so a regression to ZERO clients passed silently — the
+		// vacuity is per dimension, and {} == {} is free.
+		//
+		// The VALUE here is deliberately NOT treated as discriminating:
+		// FacilityLocal0 is the constructor default (pkg/logging/syslog.go),
+		// so on an unmapped facility "the substitution ran" and "nothing ran"
+		// produce the same number and this assertion cannot tell them apart.
+		// It is kept as a consistency check on the warning's promise. The
+		// discriminating coverage is the mapped subtest and the two-stream
+		// subtest below, both of which red when the assign half is dropped.
+		cs := er.SyslogClients()
+		if len(cs) != 1 {
+			t.Fatalf("want exactly one installed audit-stream client, got %d — forwarding "+
+				"is deliberately NOT withheld for an unmappable facility, so a regression "+
+				"to zero clients is a behaviour change this subtest must catch", len(cs))
+		}
+		if cs[0].Facility != logging.FacilityLocal0 {
 			t.Errorf("installed audit-stream Facility = %d, want FacilityLocal0 (%d) — the "+
 				"warning promises records leave under local0", cs[0].Facility, logging.FacilityLocal0)
 		}
@@ -594,6 +612,83 @@ func TestApplySyslogConfigSecurityStreamWarnsOnUnmappedFacility_6829(t *testing.
 		}
 		if !strings.Contains(got, "authorization") {
 			t.Errorf("the warning must name the unmapped facility. captured:\n%s", got)
+		}
+	})
+
+	// #6829 round 8: the ordering property. Construction DIALS; an unmappable
+	// facility is the one diagnosis that does not depend on the network being
+	// up. Before the compute/assign split the classify block sat BELOW the
+	// `client == nil` continue, so a stream whose host does not resolve was
+	// skipped and the operator was never told the facility was also unmappable.
+	//
+	// Measured: host "192.0.2.10" constructs fine (1 client); an unresolvable
+	// name returns nil,err from the UDP arm (pkg/logging/syslog.go) and installs
+	// ZERO. RED-on-revert: move the classify block back below the continue and
+	// this subtest goes silent while every other cell stays green.
+	t.Run("warns even when client construction fails", func(t *testing.T) {
+		buf := captureRenderedWarnings(t)
+		d := &Daemon{slogHandler: logging.NewSyslogSlogHandler(slog.Default().Handler())}
+		t.Cleanup(func() { d.slogHandler.SetClients(nil) })
+
+		cfg := &config.Config{}
+		cfg.Security.Log.Streams = map[string]*config.SyslogStream{
+			"audit": {
+				Name: "audit", Host: "no-such-host.invalid.", Port: 514,
+				Facility: "authorization", Severity: "info",
+			},
+		}
+		er := logging.NewEventReader(nil, nil)
+		d.applySyslogConfig(er, cfg)
+
+		if n := er.SyslogClientCount(); n != 0 {
+			t.Fatalf("premise broken: this fixture must FAIL construction so the ordering "+
+				"is what is under test; got %d installed clients", n)
+		}
+		got := buf.String()
+		if !strings.Contains(got, "unmapped facility name") {
+			t.Errorf("construction failed and the stream was skipped, so the operator was "+
+				"never told the facility is ALSO unmappable — the one diagnosis that does "+
+				"not need the network up (#6829). captured:\n%s", got)
+		}
+		if !strings.Contains(got, "authorization") {
+			t.Errorf("the warning must name the unmapped facility. captured:\n%s", got)
+		}
+	})
+
+	// The value assertion that CAN fail. Two streams in one apply: one
+	// unmappable (substitutes to local0) and one mapped to a non-default
+	// facility. Dropping the assign half leaves BOTH on the constructor
+	// default, so asserting they DIFFER is what the single-stream unmapped cell
+	// cannot do.
+	t.Run("unmapped and mapped streams get different facilities", func(t *testing.T) {
+		_ = captureRenderedWarnings(t)
+		d := &Daemon{slogHandler: logging.NewSyslogSlogHandler(slog.Default().Handler())}
+		t.Cleanup(func() { d.slogHandler.SetClients(nil) })
+
+		cfg := &config.Config{}
+		cfg.Security.Log.Streams = map[string]*config.SyslogStream{
+			"unmappable": {Name: "unmappable", Host: "192.0.2.10", Port: 514,
+				Facility: "authorization", Severity: "info"},
+			"mapped": {Name: "mapped", Host: "192.0.2.11", Port: 514,
+				Facility: "auth", Severity: "info"},
+		}
+		er := logging.NewEventReader(nil, nil)
+		d.applySyslogConfig(er, cfg)
+
+		cs := er.SyslogClients()
+		if len(cs) != 2 {
+			t.Fatalf("want two installed clients, got %d", len(cs))
+		}
+		seen := map[int]bool{}
+		for _, c := range cs {
+			seen[c.Facility] = true
+		}
+		if !seen[logging.FacilityLocal0] || !seen[logging.FacilityAuth] {
+			t.Errorf("installed facilities = %v, want both FacilityLocal0 (%d, the "+
+				"substitution) and FacilityAuth (%d, the authored value). Both landing on "+
+				"local0 means the assign half was dropped — which the single-stream "+
+				"unmapped cell cannot distinguish, because local0 is also the constructor "+
+				"default", seen, logging.FacilityLocal0, logging.FacilityAuth)
 		}
 	})
 

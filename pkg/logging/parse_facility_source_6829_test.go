@@ -85,9 +85,11 @@ import (
 // The behavioural assertions are total over the corpus; the corpus is not total
 // over the language.
 //
-// Scale, so the framing is not read as broader than it is: the corpus is ~539
-// names, of which only the 14 table entries DISCRIMINATE — for the rest both
-// functions return FacilityLocal0 and agreement is trivially satisfied. At HEAD
+// Scale, so the framing is not read as broader than it is: the corpus is 553
+// names at HEAD, of which only the 14 table entries DISCRIMINATE — for the rest
+// both functions return FacilityLocal0 and agreement is trivially satisfied.
+// (539 is the count EXCLUDING the widening; quoting it beside "the widening
+// added 14" was the arithmetic this paragraph got wrong for a round.) At HEAD
 // the AST contributes 14 names the table does not hold — the file's import
 // paths and its package-level errors.New strings, swept in by the #6829 A1
 // widening to package-level GenDecls. They are inert passengers: neither
@@ -187,10 +189,22 @@ func facilityNameLiterals(t *testing.T, fnName string) []string {
 		}
 	}
 	if bodyLits == 0 {
-		t.Fatalf("%s: extracted zero string literals from the function BODY — the mapping has "+
-			"moved out of this function, so the corpus no longer self-samples it and the "+
-			"agreement assertions run over a smaller set than intended. Point this walk at "+
-			"wherever the mapping now lives rather than deleting the check", fnName)
+		// What this actually detects: the mapping is no longer expressed as
+		// string literals INSIDE this function body. That covers moving it to a
+		// package-level var, to another file, or replacing the switch with a
+		// table lookup — and it fires for all of them.
+		//
+		// It does NOT mean the corpus stopped sampling the names. Measured: a
+		// move to a package-level var in this same file still reds here, yet the
+		// GenDecl walk keeps sampling every name, so the corpus is intact. An
+		// earlier version of this message asserted the corpus had shrunk; that
+		// diagnosis was wrong even though the tripwire itself fails closed and
+		// the remediation below is still the right instruction.
+		t.Fatalf("%s: extracted zero string literals from the function BODY — the mapping is "+
+			"no longer expressed as literals inside this function, so this walk is not "+
+			"sampling it and the agreement assertions may run over a set that no longer "+
+			"tracks the mapping. Point this walk at wherever the mapping now lives rather "+
+			"than deleting the check", fnName)
 	}
 	sort.Strings(out)
 	return out

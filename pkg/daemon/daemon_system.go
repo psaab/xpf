@@ -121,6 +121,43 @@ func (d *Daemon) applySyslogConfig(er *logging.EventReader, cfg *config.Config) 
 		// degrade the secure-syslog posture. If profile resolution is ever
 		// implemented, build the *tls.Config from stream.Transport.TLSProfile
 		// here and lift that compiler reject.
+		// #6829 round 8: classify the facility BEFORE constructing the client.
+		// Construction DIALS, and an unmappable facility is the one diagnosis
+		// that does not depend on the network being up — the same reasoning
+		// already written at the host site. Measured before this change: a
+		// stream with `host 192.0.2.10` (TEST-NET, UDP construction returns
+		// nil,err) was skipped by the `client == nil` continue below and the
+		// operator was never told the facility was ALSO unmappable.
+		//
+		// SPLIT, not moved, and this is the load-bearing part. The old position
+		// supplied something besides ordering: `client` is guaranteed non-nil
+		// there precisely BECAUSE the nil case already `continue`d. Hoisting the
+		// whole block would put `client.Facility` on a pointer that does not
+		// exist yet. So only the COMPUTE half moves — it needs nothing from
+		// client — and the ASSIGN half stays below the continue, keeping the
+		// same guarantee from the same source.
+		//
+		// haveFacility preserves the original conditional assignment: a stream
+		// with no facility must keep the constructor default rather than be
+		// overwritten with a zero value.
+		var facility int
+		var haveFacility bool
+		if stream.Facility != "" {
+			// #6829 A2: use the CHECKED form and report the substitution. The
+			// schema enum gates this on the STRICT path only —
+			// configstore.Store downgrades the gate to a warning on Load (boot)
+			// and SyncApply (HA peer sync), so an unmappable name reaches here
+			// on exactly the tolerant paths the severity belt is built for.
+			// Untold, every record on this stream leaves under local0 while
+			// `show system syslog` still reports the authored name.
+			f, known := logging.ParseFacilityChecked(stream.Facility)
+			if !known && !logging.FacilityIsWildcard(stream.Facility) {
+				slog.Warn("security log: unmapped facility name; forwarding under local0 — "+
+					"records will carry a facility the configuration does not name (#5797)",
+					"facility", stream.Facility, "using", "local0")
+			}
+			facility, haveFacility = f, true
+		}
 		client, err := logging.NewSyslogClientTransport(stream.Host, stream.Port, srcAddr, protocol, nil)
 		if err != nil {
 			if client == nil {
@@ -139,20 +176,10 @@ func (d *Daemon) applySyslogConfig(er *logging.EventReader, cfg *config.Config) 
 		if stream.Severity != "" {
 			client.MinSeverity = logging.ParseSeverity(stream.Severity)
 		}
-		if stream.Facility != "" {
-			// #6829 A2: use the CHECKED form and report the substitution. The
-			// schema enum gates this on the STRICT path only —
-			// configstore.Store downgrades the gate to a warning on Load (boot)
-			// and SyncApply (HA peer sync), so an unmappable name reaches here
-			// on exactly the tolerant paths the severity belt is built for.
-			// Untold, every record on this stream leaves under local0 while
-			// `show system syslog` still reports the authored name.
-			facility, known := logging.ParseFacilityChecked(stream.Facility)
-			if !known && !logging.FacilityIsWildcard(stream.Facility) {
-				slog.Warn("security log: unmapped facility name; forwarding under local0 — "+
-					"records will carry a facility the configuration does not name (#5797)",
-					"facility", stream.Facility, "using", "local0")
-			}
+		if haveFacility {
+			// Assign half — see the classification block above the client
+			// construction. This stays below the `client == nil` continue
+			// because that continue is what makes the pointer safe here.
 			client.Facility = facility
 		}
 		if stream.Category != "" {
