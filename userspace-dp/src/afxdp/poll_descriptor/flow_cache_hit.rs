@@ -562,3 +562,12 @@ pub(super) fn stage_flow_cache_hit(
     }
     FlowCacheOutcome::FallThrough
 }
+
+// #6304: bind the LIVE mirror call site above. The #6114 tests drive the same
+// sample-before-CAS invariant through the DEAD
+// `enqueue_sampled_mirror_clone_to_live` wrapper via the shared
+// `sample_then_admit_mirror_clone`, so reverting ONLY this call site left the
+// suite green. These tests drive `stage_flow_cache_hit` itself.
+#[cfg(test)]
+#[path = "flow_cache_hit_tests.rs"]
+mod flow_cache_hit_tests;
