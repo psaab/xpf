@@ -356,3 +356,40 @@ func TestShowServicesDynamicDNS_LocalCLIEscapesLastError_6468(t *testing.T) {
 		t.Fatalf("the provider body forged a table row — the embedded newline survived:\n%q", out)
 	}
 }
+
+// TestShowServicesDynamicDNS_OrphanCountInSummary_6218 pins #6218 item 16: a
+// non-zero Surface A orphan count was surfaced ONLY as individual per-scope
+// rows in `detail` mode (State == SurfaceAStateOrphaned) — a bare `show
+// services dynamic-dns` (no detail) gave the operator no signal at all that
+// any record needed manual cleanup. The DHCP-DDNS sibling surface
+// (showDHCPDynamicDNS) has always printed its own orphan-shaped alarm
+// (OrphanedBackendChange) unconditionally in the summary; Surface A should
+// match that precedent.
+//
+// RED on revert: dropping the `st.Orphaned > 0` alarm block (and the
+// "Orphaned records:" counter line) makes both assertions below fail against
+// summary-mode (detail=false) output.
+func TestShowServicesDynamicDNS_OrphanCountInSummary_6218(t *testing.T) {
+	dir := t.TempDir()
+	store := newConfigStore(t, filepath.Join(dir, "xpf.conf"))
+
+	c := &CLI{
+		store: store,
+		surfaceADDNSStatsFn: func() *ddnspkg.SurfaceAStats {
+			return &ddnspkg.SurfaceAStats{Scopes: 1, Orphaned: 2}
+		},
+	}
+	// detail=false: the summary-only path.
+	out := captureStdout(t, func() {
+		if err := c.showServicesDynamicDNS(false); err != nil {
+			t.Fatalf("showServicesDynamicDNS: %v", err)
+		}
+	})
+	if !strings.Contains(out, "ALARM") || !strings.Contains(out, "2 record(s) orphaned") {
+		t.Fatalf("summary output must alarm on a non-zero orphan count without needing "+
+			"'detail':\n%q", out)
+	}
+	if !strings.Contains(out, "Orphaned records:  2") {
+		t.Fatalf("summary Counters block must report the orphan count:\n%q", out)
+	}
+}

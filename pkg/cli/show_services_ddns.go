@@ -60,11 +60,24 @@ func (c *CLI) showServicesDynamicDNS(detail bool) error {
 		fmt.Printf("\n  ALARM: Surface A DDNS DEGRADED (fail-closed) — %s\n", st.DegradedReason)
 		fmt.Println("    Publishing and withdrawals are SUSPENDED until the ownership state is resolved.")
 	}
+	if st.Orphaned > 0 {
+		// #6218 item 16: the orphan count was surfaced ONLY as individual
+		// per-scope rows in `detail` mode (State == SurfaceAStateOrphaned in
+		// the "Configured scopes:" table below) — an operator running a bare
+		// `show services dynamic-dns` (no detail) had no signal that any
+		// record needed manual cleanup. Mirror the DHCP-DDNS sibling surface
+		// (showDHCPDynamicDNS below), which has always printed its own
+		// OrphanedBackendChange alarm unconditionally in the summary.
+		fmt.Printf("\n  ALARM: %d record(s) orphaned at a previous provider endpoint —\n", st.Orphaned)
+		fmt.Println("    a provider identity change left them stale and un-withdrawable through")
+		fmt.Println("    the current catalog; manual cleanup required (see 'detail' for which).")
+	}
 	fmt.Println("\n  Counters:")
 	fmt.Printf("    Publishes: ok=%d fail=%d\n", st.UpsertOK, st.UpsertFail)
 	fmt.Printf("    Withdraws: ok=%d fail=%d\n", st.DeleteOK, st.DeleteFail)
 	fmt.Printf("    Skipped:   unchanged=%d backoff=%d no-backend=%d\n", st.Skipped, st.BackedOff, st.SkippedNoBackend)
 	fmt.Printf("    Published records: %d\n", st.Scopes)
+	fmt.Printf("    Orphaned records:  %d\n", st.Orphaned)
 
 	if detail && c.surfaceADDNSStatusFn != nil {
 		views := c.surfaceADDNSStatusFn()

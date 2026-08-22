@@ -1226,6 +1226,39 @@ func ValidateConfig(cfg *Config) []string {
 		}
 	}
 
+	// #7146: the `system syslog file <f> archive` block — files, size,
+	// start-time, transfer-interval, archive-sites, world/no-world-readable —
+	// is fully modeled in setSchema and implemented by NOTHING. #4303 put
+	// `archive` in compileSystem's recognized-modifier skip list, so every
+	// knob was read and discarded: the stanza committed clean, rendered back
+	// in `show configuration`, and produced no rotation, no retention, and no
+	// off-box transfer. An operator configuring log archival believed they had
+	// it. Make the acceptance LOUD instead of implementing archival (which is
+	// a feature: rotation, size accounting, a transfer schedule, and an scp
+	// path that would then need the #4589 leading-dash treatment).
+	//
+	// WARN, never reject: this stanza commits today, and a hard reject would
+	// fail the tolerant load / peer-sync path on a config an operator already
+	// has, which is the #1960 brick-on-upgrade shape.
+	//
+	// Note this is NOT the `system archival configuration` advisory above:
+	// that feature archives the CONFIG and does run. Keywords only — an
+	// archive-sites URL can embed credentials.
+	if cfg.System.Syslog != nil {
+		for _, f := range cfg.System.Syslog.Files {
+			if f == nil || !f.ArchiveConfigured {
+				continue
+			}
+			knobs := ""
+			if len(f.ArchiveKnobs) > 0 {
+				knobs = fmt.Sprintf(" [%s]", strings.Join(f.ArchiveKnobs, " "))
+			}
+			warnings = append(warnings, fmt.Sprintf(
+				"system syslog file %q archive%s: accepted for Junos compatibility but NOT implemented — xpf writes /var/log/%s through an rsyslog drop-in and applies no rotation, no size cap, no retention count, no start-time schedule, and no off-box transfer, so this log file is never rotated and its contents are NOT archived anywhere. The configuration is valid and this is expected, not a fault in it; rotate and collect /var/log/%s with the host's own log policy (#7146)",
+				f.Name, knobs, f.Name, f.Name))
+		}
+	}
+
 	if cfg.System.Services != nil && cfg.System.Services.DNSProxyConfigured {
 		warnings = append(warnings, "system services dns dns-proxy configured but DNS proxy/forwarder runtime is not implemented")
 	}

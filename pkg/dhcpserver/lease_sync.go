@@ -331,8 +331,16 @@ func readSyncLeasesViaMemfile(path string, family int, now time.Time) ([]SyncLea
 			l.FQDNFwd = true
 		}
 		if a.SubnetID != "" {
-			if sid, e := strconv.Atoi(a.SubnetID); e == nil {
-				l.SubnetID = sid
+			// #6218 item 11: strconv.Atoi parses with the PLATFORM int
+			// bit-size (bitSize=0 -> 64-bit on amd64/arm64, but 32-bit on a
+			// 32-bit target), so a Kea subnet-id near keaSubnetIDMax
+			// (0xFFFFFFFE, dhcpserver.go) would silently fail to parse (and
+			// so silently drop the subnet-id) on a 32-bit build even though
+			// it is a perfectly valid Kea subnet-id. ParseUint(...,32) is
+			// exact and portable: it accepts every value up to 2^32-1
+			// regardless of the host's native int width.
+			if sid, e := strconv.ParseUint(a.SubnetID, 10, 32); e == nil {
+				l.SubnetID = int(sid)
 			}
 		}
 		if family == 6 {

@@ -29,6 +29,8 @@ type fakeRSSExecutor struct {
 	drivers map[string]string
 	// Per-iface RX queue count.
 	queues map[string]int
+	// Per-iface sysfs enumeration error, overriding queues (#5250 A7-b2 F2).
+	queueErrs map[string]error
 	// Scripted ethtool -x <iface> output for idempotency probe.
 	ethtoolX map[string][]byte
 	// Scripted ethtool -c <iface> output for coalescence probe (#801).
@@ -102,8 +104,13 @@ func (f *fakeRSSExecutor) readDriver(iface string) string {
 	return f.drivers[iface]
 }
 
-func (f *fakeRSSExecutor) readQueueCount(iface string) int {
-	return f.queues[iface]
+func (f *fakeRSSExecutor) readQueueCount(iface string) (int, error) {
+	if f.queueErrs != nil {
+		if err, ok := f.queueErrs[iface]; ok {
+			return 0, err
+		}
+	}
+	return f.queues[iface], nil
 }
 
 func (f *fakeRSSExecutor) listInterfaces() []string {

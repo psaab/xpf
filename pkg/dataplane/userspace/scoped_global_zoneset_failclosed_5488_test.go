@@ -236,8 +236,11 @@ func TestProtocolGateSitesRouteThroughFailClosedHelper5488(t *testing.T) {
 		whyInPlce string
 	}{
 		{
+			// #5485 split Compile at the m.mu boundary; the publish site is now
+			// applyCompiledSnapshot. Retargeted, not relaxed — both asserted
+			// substrings are unchanged.
 			file:      "manager_compile.go",
-			fn:        "Compile",
+			fn:        "applyCompiledSnapshot",
 			wantGate:  "m.disarmSnapshotProtocolFailClosedLocked(snap, err, samePlanRefresh)",
 			wantPub:   "publishSnapshotFailClosedLocked(&publishSnap, &status, samePlanRefresh)",
 			whyInPlce: "samePlanRefresh mutates the classifier maps in place before the publish",

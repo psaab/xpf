@@ -30,6 +30,29 @@ func runUniformGatesNAT(tree *ConfigTree, cfg *Config, opts compileOpts) error {
 		}
 	}
 
+	// #7145 NAT match-address literal gate. The four (NAT kind x match leaf)
+	// slots that had NO parse gate at all — `match source-address` on source /
+	// destination / static NAT, and `match destination-address` on source NAT —
+	// accepted a malformed CIDR (`999.1.1.1/24`) that the sibling slot in the
+	// SAME rule rejected. The values reach the wire verbatim; each Rust consumer
+	// drops the unparseable entry but keeps the rule CONSTRAINED, so the rule
+	// silently narrows and an all-malformed list matches NOTHING. Strict on
+	// commit / commit-check (hard reject); lenient on load / peer-sync
+	// (downgrade to a warning so an already-persisted or peer-synced config
+	// still boots — #1960 no-brick; the value is KEPT so the dataplane's
+	// fail-closed drop still applies rather than collapsing to match-any).
+	// Runs immediately after the sibling destination-address gate so the two
+	// read as one family, and so a rule tripping BOTH reports the older,
+	// narrower message first (no change to an existing config's first error).
+	if err := validateNATMatchAddressLiteralsStrict(cfg); err != nil {
+		if opts.lenientNATMatchAddressLiterals {
+			cfg.Warnings = append(cfg.Warnings,
+				fmt.Sprintf("nat match address (downgraded to warning on tolerant path): %v", err))
+		} else {
+			return err
+		}
+	}
+
 	// #2396(a)/(3) destination-NAT match-protocol gate. The DNAT `match
 	// protocol <token>` reaches the wire VERBATIM (nodeVal -> rule.Match.Protocol
 	// -> snapshot, with no validation), and the Rust DNAT table drops a token

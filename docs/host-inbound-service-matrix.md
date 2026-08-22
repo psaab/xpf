@@ -312,7 +312,7 @@ the source recorded is a strict improvement and is expected.
 |---|---|---|
 | `tcp-encap` | IPsec-in-TCP (Juniper Secure Connect) | Transport is TCP. **Not sourced:** a default listening port. The closest Juniper evidence is the sample output of `show security tcp-encap connection detail`, whose "Local Gateway" (the SRX side) is `10.4.0.2:443` in one session and `10.4.0.2:500` in another — the vendor's own example shows **two** listening ports, and its Output Fields table never documents the port component. `[edit security tcp-encap]` exposes only `profile`/`ssl-profile`/`log`/`traceoptions`; `services ssl termination profile` has no port option and no default either (an earlier revision inferred the port from that profile — withdrawn). TCP/443 is *convention*: the NCP Path Finder **client** guide describes falling back to "TCP encapsulation of IPsec with SSL header (via port 443)", but that is the client vendor describing client behaviour, and Juniper's own Secure Connect guide never mentions 443. A sample plus a third-party convention is not a default. **Operator note:** TCP/443 is already in the `all` union via `https`/`webapi-ssl`, so the observable gap is the non-443 case (e.g. the TCP/500 the same sample shows). |
 | `appqoe` | AppQoE ACTIVE probe | **Not sourced:** transport or port. Juniper describes the active probe only as *"custom packets are sent between spoke and hub points on all the multiple routes"*; `active-probe-params` exposes probe-count, probe-interval, data-fill, data-size, dscp-code-points, enable-sla-export, per-packet-loss-timeout, forwarding-class and loss-priority — no port, no transport — and `show … sla active-probe-statistics` reports addresses and timings with no port column. **Decoy:** udp/36000 is the only port on the AppQoE page and belongs to the *passive* probe; the Limitations section says *"An input firewall filter is required at the non-WAN interfaces to discard UDP packets with UDP destination port 36000."* That is TRANSIT traffic Juniper tells operators to DISCARD — admitting it host-inbound would be doubly wrong. |
-| `high-availability` | Multinode HA (MNHA) inter-node control over the ICL | **Juniper explicitly acknowledges a protocol and port exist and declines to publish them.** The MNHA preparation guidance says the ICL *"path uses (whether the ICL is encrypted or not) IP address, protocol, and port details. You must ensure that this communication is allowed between the nodes if any firewall or other inspection is in place."* That is the entire published statement — no numbers appear anywhere. A sweep of the full Junos High Availability User Guide found 12 config examples using this token and not one port; every TCP/UDP port in the book belongs to the generic BFD chapters, not MNHA. `show chassis high-availability information`/`peer-info` carry peer IP, interface, routing-instance and encryption state — no port field. **Do not attribute udp/500+4500 or ESP here:** those belong to the *optional* `ha-link-encryption` and are admitted through the separate `ike` token Juniper's own examples configure alongside this one. *Mitigation:* xpf does not implement MNHA. Its own inter-node HA control plane (heartbeat on the cluster control interface, session/config sync over the fabric) rides LIFELINE interfaces — `fxp0`, `em0`, `fab*`, plus any configured `control-interface` / `fabric-interface` (`HostInboundLifelineSet`, #3277) — which `BuildZoneHostInboundViews` removes before generating host-inbound deny sets. So an unported `high-availability` cannot break xpf's own HA. **Stated plainly: xpf does not implement the MNHA ICL, so naming this token is a no-op for xpf** — it governs a feature xpf does not have. It bites only an operator porting a Junos MNHA config onto a non-lifeline zone, who gets the commit advisory. |
+| `high-availability` | Multinode HA (MNHA) inter-node control over the ICL | **Juniper explicitly acknowledges a protocol and port exist and declines to publish them.** The MNHA preparation guidance says the ICL *"path uses (whether the ICL is encrypted or not) IP address, protocol, and port details. You must ensure that this communication is allowed between the nodes if any firewall or other inspection is in place."* That is the entire published statement — no numbers appear anywhere. A sweep of the full Junos High Availability User Guide found 12 config examples using this token and not one port; every TCP/UDP port in the book belongs to the generic BFD chapters, not MNHA. `show chassis high-availability information`/`peer-info` carry peer IP, interface, routing-instance and encryption state — no port field. **Do not attribute udp/500+4500 or ESP here:** those belong to the *optional* `ha-link-encryption` and are admitted through the separate `ike` token Juniper's own examples configure alongside this one. *Mitigation:* xpf does not implement MNHA. Its own inter-node HA control plane (heartbeat on the cluster control interface, session/config sync over the fabric) rides LIFELINE interfaces — `fxp0`, `em0`, `fab<N>`, plus any configured `control-interface` / `fabric-interface` (`HostInboundLifelineSet`, #3277) — which `BuildZoneHostInboundViews` removes before generating host-inbound deny sets. So an unported `high-availability` cannot break xpf's own HA. **Stated plainly: xpf does not implement the MNHA ICL, so naming this token is a no-op for xpf** — it governs a feature xpf does not have. It bites only an operator porting a Junos MNHA config onto a non-lifeline zone, who gets the commit advisory. |
 
 #### The only escape is `any-service`
 
@@ -507,7 +507,7 @@ catch-all instead of short-circuiting on the established-accept. Properties:
   because still-permitted flows are kept. A service that stays configured is never
   flushed (no connection-reset regression).
 - **Lifeline-safe.** Only addresses in the covered default-deny set are eligible;
-  management / cluster-control lifelines (fxp0 / em0 / fab*) are excluded from the
+  management / cluster-control lifelines (fxp0 / em0 / fab<N>) are excluded from the
   host-inbound views, so their conntrack is never flushed. Addressed-but-unzoned
   addresses (#4420 HI-2) are covered with an empty admit set (fully denied except
   the global exemptions below).
@@ -552,7 +552,7 @@ from `zone_host_inbound` and hit the `None => true` admit-all arm in
 (a management-plane fail-open on the exact tolerant-load / HA-sync path where nil
 zones arise). `None` now means only a genuinely unknown / global ingress zone
 (id 0, never in the table), which keeps the admit default; lifeline interfaces
-(fxp0/em0/fab*) never reach the AF_XDP classifier (#3682).
+(fxp0/em0/fab<N>) never reach the AF_XDP classifier (#3682).
 
 ## Deliberate narrowings & the one cross-surface divergence
 
@@ -618,7 +618,7 @@ same builder that drives the nft payload — so the signal describes the same
 address snapshot, not whether the later nft transaction succeeded. It reports a
 zone iff it has at least one **non-lifeline**
 interface assigned yet resolves no address; zones that are scoped, whose only
-interfaces are management/cluster-control lifelines (fxp0 / em0 / fab*), or that
+interfaces are management/cluster-control lifelines (fxp0 / em0 / fab<N>), or that
 have no interfaces are deliberately NOT reported (low-noise).
 
 Two observability surfaces consume it:
@@ -714,7 +714,7 @@ snapshot produces a zero-drop table shell:
   It carries **no per-service accept and no named counters** — it is strictly the
   real table with every service ACCEPT removed, so during the fence window even a
   `system-services all` zone is denied (maximally fail-closed). The address sets
-  are already lifeline-excluded (fxp0 / em0 / fab* and their addresses are
+  are already lifeline-excluded (fxp0 / em0 / fab<N> and their addresses are
   subtracted by `BuildZoneHostInboundViews` / `BuildUnzonedHostInboundAddrs`), so
   the fence can **never** strand management or break HA.
 - The requested apply still **fails** (`applyHostInboundFilter` returns the
@@ -730,9 +730,9 @@ snapshot produces a zero-drop table shell:
   management-only skip is now gated on the config-derived host-inbound LIFELINE
   set (`config.HostInboundLifelineSet` / `HostInboundLifelineInterface` — the SAME
   authority that lifeline-excludes these address sets), not the broad
-  management-VRF name class (fxp*/fab*/em*). So a zoned NON-lifeline DHCP interface
+  management-VRF name class (fxp*/fab<N>/em*). So a zoned NON-lifeline DHCP interface
   (a standalone `fxp1`) is classified for the full recompile that builds its
-  address-scoped fence; only a true lifeline (fxp0/em0/fab*/configured
+  address-scoped fence; only a true lifeline (fxp0/em0/fab<N>/configured
   control-interface) keeps the management-only fast path. The skip decision and
   this fence now share one classifier and cannot drift.
 - If the fence **also** fails to load (nft itself broken), both errors are joined
@@ -1153,7 +1153,7 @@ This is caught fail-closed at commit and surfaced at runtime:
   zones with different `host-inbound-traffic`, or one zone with differing #3362
   per-interface overrides) is rejected. Covers IPv4 (H01), IPv6 (M02), VRRP VIPs
   (M03), and the cross-zone subset of same-address-across-routing-instances
-  (M04). Management / cluster-control lifeline interfaces (fxp0 / em0 / fab*) are
+  (M04). Management / cluster-control lifeline interfaces (fxp0 / em0 / fab<N>) are
   excluded, mirroring the deny scoping. On the tolerant load / peer-sync path the
   rejection is downgraded to a `cfg.Warnings` entry (`lenientDuplicateHostLocalAddress`)
   so an already-persisted or peer-synced config an older binary accepted still
@@ -1249,7 +1249,7 @@ helper never sees it, so a helper crash cannot lock management out).
 - **Ingress `iifname` scope, never `daddr` as the ZONE scope.** The DROP is scoped
   by the from-zone's kernel netdev names
   (`pkg/dataplane/userspace/BuildJunosHostPrograms`), excluding lifelines
-  (fxp0/em0/fab*) — a daddr-derived zone scope would both under- and over-deny
+  (fxp0/em0/fab<N>) — a daddr-derived zone scope would both under- and over-deny
   across zones. A global-any term renders per ingress zone with that zone's
   netdevs, never unscoped. An EXPLICIT `match destination-address` adds a
   narrowing `daddr` predicate ON TOP of that iifname scope (see the destination

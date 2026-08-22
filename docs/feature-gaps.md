@@ -38,9 +38,9 @@ Last updated: 2026-05-24
 | Multi-Tenancy | 4 | 0 | 0 | 4 |
 | Management & Automation | 12 | 2 | 0 | 14 |
 | Interface Enhancements | 1 | 1 | 0 | 2 |
-| System Enhancements | 5 | 0 | 0 | 5 |
+| System Enhancements | 5 | 0 | 1 | 6 |
 | Miscellaneous | 6 | 0 | 0 | 6 |
-| **TOTAL** | **120** | **19** | **0** | **139** |
+| **TOTAL** | **120** | **19** | **1** | **140** |
 
 > The per-section counts and grand total above are a hand-maintained
 > summary and drift by ±1 against a strict machine row-parse of
@@ -826,6 +826,7 @@ xpf has hostname, domain-name, domain-search, timezone, name-servers, NTP, servi
 | Feature | Junos Config Path | Description | Priority | Status |
 |---------|-------------------|-------------|----------|--------|
 | **SSH Key Exchange** | `system services ssh key-exchange ...` | Restrict the SSH key-exchange (KEX) algorithms the firewall offers | Medium | Done (H5/#2008 — repeatable leaf rendered to the sshd `KexAlgorithms` drop-in, `pkg/daemon/daemon_system.go`; drop-in lifecycle hardened in #2062 — removing/emptying the ssh stanza removes the `/etc/ssh/sshd_config.d/xpf.conf` drop-in and reloads so sshd reverts to base-image defaults, and a reload failure after a write reverts the drop-in to its prior content/removes it so a bad config never breaks the next sshd restart) |
+| **Syslog File Archive / Rotation** | `system syslog file <name> archive { files <n>; size <bytes>; start-time <t>; transfer-interval <min>; archive-sites <url>; }` | Rotate `/var/log/<name>` at a size threshold, retain N archives, and transfer them off-box on a schedule | Low | Missing — accepted-but-inert with a commit advisory (#7146). The whole block is modeled in `setSchema` and compiled by nothing: #4303 folded `archive` into `compileSystem`'s recognized-modifier skip list, and `applySyslogFiles` writes only an rsyslog drop-in pointing at `/var/log/<name>`. #7146 keeps it unimplemented and makes it LOUD instead of silent — the block is recorded on `SyslogFileConfig` (`ArchiveConfigured` / `ArchiveKnobs`, keywords only) and `ValidateConfig` emits one per-file advisory naming the file and its knobs and stating the logs are NOT archived. Warn, never reject: the stanza commits today and a reject would fail the tolerant load / peer-sync path (#1960). Implementing it needs rotation, size accounting, a transfer schedule, and an `scp` path that would then owe the #4589 leading-dash gate that guards `system archival configuration archive-sites`. See [docs/config-schema.md](config-schema.md) "Syslog file `archive` is accepted-but-inert (#7146)". |
 | **RADIUS Server Config** | `system radius-server ... port ... secret ...` | RADIUS server definitions for AAA (authentication, authorization, accounting) | Medium | Missing |
 | **TACACS+ Server Config** | `system tacplus-server ... port ... secret ...` | TACACS+ server definitions for per-command authorization | Medium | Missing |
 | **Authentication Order** | `system authentication-order [radius tacplus password]` | Control order of authentication methods for management access | Medium | Missing |
@@ -911,6 +912,7 @@ table, so this list count can be higher than the category-level Parse-Only total
 | # | Config Path | Type | Notes |
 |---|------------|------|-------|
 | 1 | `system license autoupdate url` | SystemConfig.LicenseAutoUpdate | No licensing system |
+| 2 | `system syslog file <name> archive { files, size, start-time, transfer-interval, archive-sites, world-readable, no-world-readable }` | SyslogFileConfig.ArchiveConfigured / .ArchiveKnobs | Recorded at compile ONLY so the #7146 commit advisory can name the block; no runtime consumer. No rotation, retention, schedule, or off-box transfer exists for a syslog file — `applySyslogFiles` writes an rsyslog drop-in pointing at `/var/log/<name>` and nothing more. Keywords are recorded, never values (an `archive-sites` URL can embed credentials). |
 
 ## Runtime Follow-Up Features Summary
 

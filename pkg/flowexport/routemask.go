@@ -101,15 +101,57 @@ type routeMaskEntry struct {
 	expires time.Time
 }
 
+// defaultRouteMaskTTL is the cache TTL selected by NewRouteMaskResolver(0) —
+// the value every production caller uses.
+const defaultRouteMaskTTL = 10 * time.Second
+
+// routeMaskSharedOnce/routeMaskShared hold the PROCESS-SINGLETON cache used by
+// every default-TTL resolver (#5250 A9 F3). Both production call sites
+// (NewExporter, newIPFIXExporter) run on the flow-export RECONCILE path, so a
+// per-exporter cache meant every commit built a fresh instance: its background
+// RTM_GETROUTE goroutines (bounded at defaultRouteMaskInflight per instance,
+// but per instance) outlived the exporter that scheduled them with nothing able
+// to stop them, the in-flight ceiling scaled with the number of exporter
+// generations rather than with the process, and each generation restarted from
+// a COLD cache — re-issuing the netlink lookups the previous generation had
+// already paid for. The FIB mask for an (ifindex, IP) key is a property of the
+// kernel routing table, not of any exporter's config, so one shared instance is
+// semantically identical to N and is what bounds the background work
+// process-wide. A non-default ttl still gets its own instance: that is a
+// caller asking for different freshness, and no production path takes it.
+var (
+	routeMaskSharedOnce sync.Once
+	routeMaskShared     *routeMaskCache
+)
+
 // NewRouteMaskResolver returns a MaskResolver backed by the kernel FIB
 // (RTM_GETROUTE with RTM_F_FIB_MATCH), with a short TTL cache to bound the
 // netlink syscall rate on the hot session-close export path. ttl<=0 selects a
-// sensible default (10s).
+// sensible default (10s) and shares the process-wide cache; see
+// routeMaskCacheFor.
 func NewRouteMaskResolver(ttl time.Duration) MaskResolver {
+	return routeMaskCacheFor(ttl).resolve
+}
+
+// routeMaskCacheFor returns the cache instance backing a resolver with the
+// given ttl: the process singleton for the default TTL (ttl<=0 or exactly
+// defaultRouteMaskTTL), a dedicated instance otherwise. Split out from
+// NewRouteMaskResolver so the singleton identity is directly assertable.
+func routeMaskCacheFor(ttl time.Duration) *routeMaskCache {
 	if ttl <= 0 {
-		ttl = 10 * time.Second
+		ttl = defaultRouteMaskTTL
 	}
-	c := &routeMaskCache{
+	if ttl == defaultRouteMaskTTL {
+		routeMaskSharedOnce.Do(func() {
+			routeMaskShared = newRouteMaskCache(defaultRouteMaskTTL)
+		})
+		return routeMaskShared
+	}
+	return newRouteMaskCache(ttl)
+}
+
+func newRouteMaskCache(ttl time.Duration) *routeMaskCache {
+	return &routeMaskCache{
 		ttl:         ttl,
 		maxSize:     routeMaskCacheMax,
 		maxInflight: defaultRouteMaskInflight,
@@ -117,7 +159,6 @@ func NewRouteMaskResolver(ttl time.Duration) MaskResolver {
 		entries:     make(map[routeMaskKey]routeMaskEntry),
 		pending:     make(map[routeMaskKey]struct{}),
 	}
-	return c.resolve
 }
 
 // resolve implements MaskResolver with caching. It NEVER issues the netlink

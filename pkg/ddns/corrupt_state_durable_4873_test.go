@@ -125,3 +125,57 @@ func TestDegradedMarkerGatesEvenWithValidState(t *testing.T) {
 		t.Fatalf("valid state file must be left in place under a marker gate; stat err=%v", err)
 	}
 }
+
+// TestQuarantineBadStateSameSecondCollisionDoesNotOverwrite pins #6218 item 6:
+// two quarantine events landing in the same wall-clock SECOND (the stamp's
+// resolution) must not let the second os.Rename silently overwrite the first
+// quarantine file — that would destroy the only forensic copy of the FIRST
+// corruption. Both corrupt files must survive as distinct paths.
+//
+// RED on revert: restoring the bare `os.Rename(path, dst)` with no collision
+// probe makes the second quarantineBadState call rename over the first
+// quarantine file, so the first quarantined file's content ("first-corrupt")
+// is lost — the byte-content assertion below fails.
+func TestQuarantineBadStateSameSecondCollisionDoesNotOverwrite(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Unix(1_700_000_000, 0)
+
+	path1 := filepath.Join(dir, "state.json")
+	if err := os.WriteFile(path1, []byte("first-corrupt"), 0o600); err != nil {
+		t.Fatalf("write path1: %v", err)
+	}
+	q1, err := quarantineBadState(path1, now)
+	if err != nil {
+		t.Fatalf("quarantineBadState (first): %v", err)
+	}
+
+	// A second corrupt file at the SAME canonical path, quarantined at the
+	// SAME `now` (same-second collision) — simulating a rapid restart loop
+	// within one wall-clock second.
+	path2 := filepath.Join(dir, "state.json")
+	if err := os.WriteFile(path2, []byte("second-corrupt"), 0o600); err != nil {
+		t.Fatalf("write path2: %v", err)
+	}
+	q2, err := quarantineBadState(path2, now)
+	if err != nil {
+		t.Fatalf("quarantineBadState (second): %v", err)
+	}
+
+	if q1 == q2 {
+		t.Fatalf("both quarantine calls resolved to the SAME path %q; second must not collide with first", q1)
+	}
+	b1, err := os.ReadFile(q1)
+	if err != nil {
+		t.Fatalf("read first quarantine file %q: %v", q1, err)
+	}
+	if string(b1) != "first-corrupt" {
+		t.Fatalf("first quarantine file %q was overwritten; got %q, want %q", q1, b1, "first-corrupt")
+	}
+	b2, err := os.ReadFile(q2)
+	if err != nil {
+		t.Fatalf("read second quarantine file %q: %v", q2, err)
+	}
+	if string(b2) != "second-corrupt" {
+		t.Fatalf("second quarantine file %q has wrong content; got %q, want %q", q2, b2, "second-corrupt")
+	}
+}

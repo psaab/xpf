@@ -133,7 +133,18 @@ func (c *CLI) showInterfaces(args []string) error {
 		physName := parts[0]
 		unitNum := 0
 		if len(parts) == 2 {
-			unitNum, _ = strconv.Atoi(parts[1])
+			// #6218 item 12: strconv.Atoi's ignored error left a malformed
+			// unit token (e.g. "ge-0-0-0.abc") silently defaulting to unit 0
+			// — a display-only misattribution that could ALSO borrow unit 0's
+			// real VLAN ID below (config.LookupUnit) for a zone reference that
+			// names no real unit. -1 can never match a configured unit (units
+			// are always >= 0), so it neither borrows a foreign unit's VLAN ID
+			// nor renders as a plausible-but-wrong "0".
+			if n, err := strconv.Atoi(parts[1]); err == nil {
+				unitNum = n
+			} else {
+				unitNum = -1
+			}
 		}
 		vlanID := 0
 		if ifCfg, ok := config.LookupInterface(cfg, physName); ok && ifCfg != nil {

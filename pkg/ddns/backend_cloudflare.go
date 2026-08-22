@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log/slog"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -234,9 +233,17 @@ func (b *cloudflareBackend) listRecords(ctx context.Context, zoneID, rtype, fqdn
 			return all, nil
 		}
 	}
-	slog.Warn("ddns cloudflare: record list hit page cap; results may be truncated",
-		"backend", b.name, "name", name, "type", rtype, "max_pages", maxPages)
-	return all, nil
+	// #6218 item 5: the pre-fix Warn-and-return-nil-error here silently
+	// truncated the result set past the cap — the ownership-scoped
+	// upsert/delete callers (below) trust listRecords to return EVERY row for
+	// the name+type, so a truncated set could hide the row xpf actually owns
+	// and drive a duplicate create or a false "already absent" delete (the
+	// exact #4909 hazard this function exists to close). Fail loud instead:
+	// both callers already propagate a non-nil error and skip the write this
+	// cycle rather than acting on a partial list.
+	return nil, fmt.Errorf("ddns cloudflare: %s: record list for %s type %s exceeded "+
+		"%d pages (%d rows); refusing to act on a possibly-truncated list",
+		b.name, name, rtype, maxPages, len(all))
 }
 
 // UpsertLease publishes the A/AAAA with a VALUE-SPECIFIC in-place replace

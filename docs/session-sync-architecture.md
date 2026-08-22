@@ -133,11 +133,37 @@ result. **#5007 invariant: the forward/reverse pair MUST be resolved against
 ONE consistent snapshot.** The mirror helpers (`mirrorSessionPairV4` /
 `mirrorSessionPairV6`) build BOTH `SessionSyncRequest`s under a single
 uninterrupted `m.mu` hold — completing every snapshot read *before* any socket
-I/O drops the lock — then transmit both via `syncSessionRequestsLocked`, which
-releases `m.mu` for the send. This preserves the deliberate "session installs
-must not block snapshot publishes" property while closing the window where a
-concurrent `ApplyConfig` (which swaps `m.lastSnapshot` under `m.mu`) could make
-the reverse companion resolve against a different snapshot than the forward.
+I/O drops the lock — then transmit both. This preserves the deliberate "session
+installs must not block snapshot publishes" property while closing the window
+where a concurrent `ApplyConfig` (which swaps `m.lastSnapshot` under `m.mu`)
+could make the reverse companion resolve against a different snapshot than the
+forward.
+
+**#5698 invariant: the pair's transmit must be CONTIGUOUS.** The `m.mu` unlock
+above is about snapshot publishes and says nothing about session-socket
+ordering — the two locks are independent. The general batch transmit
+(`syncSessionRequestsLocked`) takes `m.sessionMu` once per REQUEST, so the lock
+is free between consecutive requests and any other session-socket caller (an
+operator clear, a policy invalidation, a GC delete, a stale-session
+reconciliation) can land between a pair's forward and its reverse. A
+generation-0 forward delete arriving in that gap removes BOTH halves in the
+helper, and the pair's already-built explicit reverse then re-creates a
+standalone reverse-only permit. The pair mirrors therefore transmit through
+`syncSessionPairLocked`, which takes `m.sessionMu` ONCE for the whole pair.
+
+That contiguous hold is deliberately capped at `sessionPairMaxRequests` (2, the
+forward plus its reverse companion). Bulk paths — the delete chunks up to
+`sessionHelperDeleteChunk` (256) and the authoritative clear-all — keep the
+per-request discipline on purpose: holding `m.sessionMu` across a 256-request
+chunk would starve live session installs for minutes, which is exactly the harm
+the #5380 fast-fail exists to bound. An over-cap group falls back to the
+per-request path (logged) rather than trading a rare interleave for an install
+stall.
+
+**Residual, not closed by #5698:** the pair's transmit is contiguous, not
+atomic. If the SECOND request fails at the transport layer the helper keeps a
+half-installed pair; nothing rolls the first half back. Closing that needs a
+helper-side pair transaction on the wire.
 
 That is only one direction of the userspace integration. Locally-created
 userspace sessions do **not** flow back through `SetClusterSyncedSession*`.
