@@ -345,9 +345,26 @@ func compileSystem(node *Node, sys *SystemConfig, cfg *Config, opts compileOpts)
 			}
 			for _, fileInst := range namedInstances(child.FindChildren("file")) {
 				file := &SyslogFileConfig{Name: fileInst.name}
+				archiveKnobs := map[string]bool{}
 				for _, prop := range fileInst.node.Children {
 					switch prop.Name() {
-					case "archive", "match", "match-strings", "structured-data",
+					case "archive":
+						// #7146: the whole `archive` block (files, size,
+						// start-time, transfer-interval, archive-sites,
+						// world/no-world-readable) is modeled in setSchema
+						// and implemented by NOTHING — #4303 folded it into
+						// the recognized-modifier skip list below, so every
+						// knob committed clean and vanished. Record the
+						// container's presence and its sub-statement
+						// KEYWORDS (never their values) so ValidateConfig can
+						// tell the operator their logs are not being
+						// archived. Recording is all this does; no runtime
+						// consumer reads these fields.
+						file.ArchiveConfigured = true
+						for _, knob := range syslogArchiveKnobs(prop) {
+							archiveKnobs[knob] = true
+						}
+					case "match", "match-strings", "structured-data",
 						"explicit-priority", "allow-duplicates":
 						// #4303 S-1: recognized file modifiers, not a
 						// facility/severity pair — do not append as one.
@@ -357,6 +374,13 @@ func compileSystem(node *Node, sys *SystemConfig, cfg *Config, opts compileOpts)
 							file.Severity = sev
 						}
 					}
+				}
+				if len(archiveKnobs) > 0 {
+					file.ArchiveKnobs = make([]string, 0, len(archiveKnobs))
+					for knob := range archiveKnobs {
+						file.ArchiveKnobs = append(file.ArchiveKnobs, knob)
+					}
+					sort.Strings(file.ArchiveKnobs)
 				}
 				sys.Syslog.Files = append(sys.Syslog.Files, file)
 			}
@@ -922,6 +946,88 @@ func syslogFacilitySeverity(prop *Node) (facility, severity string, ok bool) {
 		}
 	}
 	return "", "", false
+}
+
+// syslogArchiveKeywordArgs enumerates the `system syslog file <f> archive`
+// sub-statements setSchema models (schema_system.go) and records, for each,
+// whether it is followed by a value token. It is the keyword allowlist the
+// token walker below uses to tell a KEYWORD apart from a VALUE in a flattened
+// token stream, and the arity it uses to step over a value so an
+// `archive-sites` URL that happens to equal a keyword is not mistaken for one
+// (#7146).
+var syslogArchiveKeywordArgs = map[string]bool{
+	"size":              true,
+	"files":             true,
+	"start-time":        true,
+	"transfer-interval": true,
+	"archive-sites":     true,
+	"world-readable":    false,
+	"no-world-readable": false,
+}
+
+// syslogArchiveTokens flattens a syslog-file `archive` subtree into its tokens
+// in source order, depth-first pre-order: a node contributes its own Keys,
+// then each child's subtree. This is what makes ONE walker cover every shape
+// the dual AST produces for the same stanza (#7146):
+//
+//	flat block      `set ... archive files 7` + `set ... archive size 1m`
+//	                -> Keys=["archive"], children ["files","7"] ["size","1m"]
+//	flat compact    `set ... archive size 1m files 5`
+//	                -> Keys=["archive"] -> child ["size","1m"] -> GRANDchild
+//	                   ["files","5"] (a nested chain, not siblings)
+//	hierarchical    `archive { files 7; size 1m; }` -> same as flat block
+//	hier. one-line  `archive size 1m files 5;`
+//	                -> Keys=["archive","size","1m","files","5"], NO children
+//
+// A reader that only walked Children would miss the one-line form entirely;
+// one that only read Keys would miss both block forms.
+func syslogArchiveTokens(n *Node, out []string) []string {
+	if n == nil {
+		return out
+	}
+	out = append(out, n.Keys...)
+	for _, c := range n.Children {
+		out = syslogArchiveTokens(c, out)
+	}
+	return out
+}
+
+// syslogArchiveKnobs returns the sorted, deduplicated archive sub-statement
+// KEYWORDS configured under a syslog-file `archive` node — never their values,
+// because an `archive-sites` URL can carry credentials and the caller feeds
+// this straight into an operator-visible commit advisory (#7146).
+//
+// Unrecognized tokens are skipped rather than reported: the schema already
+// rejects an unknown leaf at commit, and echoing an arbitrary token here would
+// reintroduce the value-leak this function exists to avoid.
+func syslogArchiveKnobs(n *Node) []string {
+	if n == nil {
+		return nil
+	}
+	tokens := syslogArchiveTokens(n, nil)
+	if len(tokens) > 0 {
+		// Drop the leading "archive" keyword itself.
+		tokens = tokens[1:]
+	}
+	seen := map[string]bool{}
+	var knobs []string
+	for i := 0; i < len(tokens); i++ {
+		takesValue, isKeyword := syslogArchiveKeywordArgs[tokens[i]]
+		if !isKeyword {
+			continue
+		}
+		if !seen[tokens[i]] {
+			seen[tokens[i]] = true
+			knobs = append(knobs, tokens[i])
+		}
+		if takesValue {
+			// Step over the value so `archive-sites "size"` records
+			// archive-sites once, not archive-sites AND size.
+			i++
+		}
+	}
+	sort.Strings(knobs)
+	return knobs
 }
 
 // loginClassPermName renders a coarse xpf permission for the advisory.

@@ -976,8 +976,8 @@ allowed-ips folds are covered by the `security-nat-static-multi-zone` and
 
 **A leaf whose flat-set bracket list lands on a CHILD's Keys needs more than
 `firewallMatchValues` (#6694).** The SSOT helper reads `Keys[1:]` of the node
-plus `Keys[0]` of each child, which covers every leaf whose flat-set path
-absorbs the list onto the node itself. `interfaces fab0 fabric-options
+plus — since #6714 — every key of each child, which covers every leaf whose
+flat-set path absorbs the list onto the node itself. `interfaces fab0 fabric-options
 member-interfaces` does not: its schema node is a plain `children: nil` leaf
 with no `args` and no `multi`, so `SetPath` files the whole bracket list as ONE
 child carrying every name on that child's Keys — and `firewallMatchValues`
@@ -1045,6 +1045,67 @@ arm leaves the other spelling broken and nothing says so. They now share
 selects with `FindChildren("")`, which matches only a child whose first key is
 the empty string, and no parse produces one. The duplication was latent, which
 is precisely why no test could have caught a divergence.)
+
+**The one-sided read has a SECOND half, and it is not a leaf spelling at all
+(#6714).** Everything above is about the five ways ONE statement can be
+spelled. Three more sites dropped values for a different reason: the parser
+keeps a repeated same-keyed STATEMENT as a SIBLING node, so a compiler that
+resolves it with `FindChild` compiles the first and discards the rest. That is
+invisible to the behavioural spelling gate
+(`schema_spelling_differential_gate_test.go`), which authors one statement per
+site and cannot emit a second one.
+
+| site | shape that dropped | fix |
+|---|---|---|
+| `event-options policy <p> then change-configuration commands` | repeated `commands` statements, and repeated `change-configuration` blocks | `FindChildren` on both levels |
+| `routing-options forwarding-table export` | two sibling `forwarding-table` blocks in ONE `routing-options` root | `FindChildren("forwarding-table")` for the LIST; the scalar still binds to the FIRST block |
+| `firewallMatchValues` (~70 call sites) | a value tail riding on a block CHILD (`flag { basic-datapath session; }`, `flag { [ a b ]; }`) | read every key of each child, not `Keys[0]` |
+
+The `commands` row is worth reading twice, because it inverts the usual
+advice. CLAUDE.md tells you to test flat-set syntax with
+`ParseSetCommand` + `SetPath`; here the flat-set spelling was the one that
+already WORKED (`SetPath` merges a repeated leaf into one node), and only the
+brace-authored file dropped. A fixture built the recommended way could not have
+seen it. Build BOTH.
+
+The `firewallMatchValues` row states a property rather than a shape: the reader
+already took every token of the node's OWN tail, so taking only `Keys[0]` of a
+child made the identical token sequence read differently depending on which
+side of the AST the parser put it on. The fix is that agreement, and it is
+pinned as an agreement (`TestFirewallMatchValues6714ReadsEveryKeyOfEveryChild`)
+rather than as an expected output. Note the blast radius is bounded by depth:
+the reader takes each child's Keys and does NOT descend, because a child with a
+sub-block (`neighbor 10.0.0.1 { metric 2; }`) contributes its name only — that
+is what separates it from `plainListValues`, which descends and must therefore
+never be pointed at a leaf whose children are containers.
+
+Other `multi: true` sites still take `Keys[0]` of each child through
+`multiLeafAuthoredValues` / `addressSetMemberValues` / `proxyARPAddressValues`,
+and that residue was MEASURED rather than assumed: a `leaf { v1 v2; }` probe
+across the whole schema names 30 sites where the second token is still
+dropped. They are left
+alone deliberately — that spelling is not authorable Junos (Junos writes one
+value per statement inside a block), the readers differ for stated reasons
+(`multiLeafAuthoredValues` keeps empty values to hold the
+`multiLeafAuthoredValues(n)[0] == nodeVal(n)` invariant; `proxyARPAddressValues`
+holds #6673's measured install-parity), and adding the spelling to the gate
+would assert a defect at 30 sites that no operator can author.
+
+**A silent DROP can be closed by diagnosing it instead of widening the read
+(#6714, proxy-ARP).** `security nat proxy-arp … address` accepts one
+address/prefix, one `<low> to <high>` range, or a list of plain addresses —
+never a MIXTURE. A statement that mixes them (`address [ 192.0.2.1 192.0.2.2 to
+192.0.2.9 ]`) falls through both range branches, and #6673 pinned the fallback
+to master's single-value read against a corpus measured through the installer's
+own `netip.ParsePrefix` gate. Widening it would have invented a grammar Junos
+does not have AND made an upgraded appliance answer ARP for addresses it did not
+answer for before. The compiler now stamps the offending statement into
+`ProxyARPEntry.MalformedRangeSpecs` (a `json:"-"` compile artifact, mirroring
+`NATPool.PortRangeInvalidSpec`) and `validateProxyARPAddressesStrict` rejects it
+at commit while the tolerant load / peer-sync path warns and installs exactly
+what it installed before. The installed set does not move; what an operator can
+COMMIT does. A rejection can be relaxed into an expansion later if the demand
+appears; an ARP response cannot be un-sent.
 
 **Widening a multi-value READ requires widening its VALIDATOR in the same
 change (#6659).** Adopting the accumulating reader at a site changes what a
@@ -1194,7 +1255,11 @@ bundled, because each needs its own value-domain gate widened in the same change
 | Leaf | Still one-sided | Tracked |
 |---|---|---|
 | ~~`system archival archive-sites` (+ three sibling system leaves)~~ | ~~reads `Children` and only slot 1 of the tail~~ | #6692 — FIXED |
-| nested-bracket tails, proxy-ARP after a range, repeated `commands` leaves | assorted value drops | #6714 |
+| ~~nested-bracket tails, proxy-ARP after a range, repeated `commands` leaves~~ | ~~assorted value drops~~ | #6714 — FIXED (see "The one-sided read has a SECOND half" above) |
+
+The table is empty of live rows. That is a state to defend rather than a state
+to fill: the next entry belongs here only after the behavioural gate below has
+been asked and found blind, with the reason it was blind written down.
 
 ### The list above is now enforced by a gate, not maintained by hand
 
@@ -3247,7 +3312,7 @@ address OR VRRP VIP — is host-inbound-reachable from more than one **distinct
 effective host-inbound token set**. It keys on *differing* sets (via the shared
 `config.CanonicalHostInboundTokenSig`), NOT merely ">1 zone", so a deliberate
 duplicate with **identical** service sets across its zones is allowed (no false
-positive), and management/cluster-control lifeline interfaces (fxp0 / em0 / fab*)
+positive), and management/cluster-control lifeline interfaces (fxp0 / em0 / fab<N>, exact — #5250)
 are excluded. Lenient downgrade to a `cfg.Warnings` entry on the tolerant load /
 peer-sync path (`lenientDuplicateHostLocalAddress`, #1960 no-brick); the runtime
 `dpuserspace.AmbiguousHostInboundAddresses` reporter + the
@@ -6624,7 +6689,13 @@ reserved for whole-dataplane selection where a rewrite shim
   `source-address` (`ValueIPAddress`). `source-interface` uses
   `ValidateSyslogSourceInterface`, which rejects a non-numeric `.<unit>`
   suffix (`resolveSourceAddr` silently `Atoi`-fell-back to unit 0, binding the
-  wrong source IP). The enum value sets live in `schema_security.go`
+  wrong source IP) AND, since #6218 item 7, a `.<unit>` above `MaxLogicalUnit`
+  (16385) — e.g. `ge-0-0-0.50000` — which previously committed even though no
+  real interface unit can exceed that ceiling (`compiler_interfaces.go` caps a
+  real `unit <n>` there), so the reference could never resolve and
+  `ResolveSyslogSourceAddr` silently returned "" (the same audit-source-IP
+  loss the non-numeric case closes, reached via an out-of-range unit instead
+  of a typo'd one). The enum value sets live in `schema_security.go`
   (`syslogLogModes`/`syslogLogFormats`/`syslogSeverities`/`syslogFacilities`/
   `syslogCategories`) and MUST stay in sync with those `pkg/logging` parsers —
   a value the validator allows but the runtime does not recognize would
@@ -9224,6 +9295,65 @@ Strict = hard commit error; lenient = `cfg.Warnings` entry (the Rust
 `from_snapshots` drop remains the lenient/peer-sync backstop). Same exemptions
 apply (NPTv6, `then static-nat inet`).
 
+**#7145 — malformed literal in a NAT `match` address, on the four slots that
+had no gate at all.** #3206 above closed static-NAT `match
+destination-address`; #3228 closed destination-NAT `match destination-address`.
+The other four (NAT kind x match leaf) slots had NO parse gate, so the SAME
+value — `999.1.1.1/24`, or `zznotanaddr`, so this is not a near-miss in the CIDR
+grammar — was refused in one slot of a rule and accepted in the sibling slot of
+the same rule:
+
+| kind | `match source-address` | `match destination-address` |
+|---|---|---|
+| `security nat source` | accepted -> **rejected (#7145)** | accepted -> **rejected (#7145)** |
+| `security nat destination` | accepted -> **rejected (#7145)** | rejected (#3228) |
+| `security nat static` | accepted -> **rejected (#7145)** | rejected (#3206) |
+
+These values are not inert. The Go snapshot builders copy them to the wire
+verbatim and each Rust consumer — `parse_match_prefix`
+(`userspace-dp/src/nat/source.rs`), `DnatTable::from_snapshots`
+(`nat/destination.rs`), `SourceConstraint::from_list` (`nat/static_nat.rs`) —
+drops the entry it cannot parse while the `*_constrained` flag stays set from
+the non-empty list. A malformed entry therefore NARROWS the rule below what was
+authored, and an all-malformed list leaves the rule constrained with zero
+prefixes: it matches NOTHING and stops translating, recorded only as a bounded
+NAT parse-error counter (#4718).
+
+`validateNATMatchAddressLiteralsStrict`
+(`pkg/config/compiler_validate_strict_nat_match_addr.go`, wired into
+`runUniformGatesNAT` immediately after the #3228 sibling) rejects it at strict
+commit / commit-check, naming the NAT kind, rule-set, rule, match leaf, and
+value. Scope is the LITERAL leaves only: `match source-address-name` /
+`destination-address-name` are address-book references whose unresolvable raw
+token is deliberately appended to the same wire list as a fail-closed backstop
+(#2416), so the gate must never walk the post-resolution list.
+
+The acceptance predicate is `net.ParseCIDR` then `net.ParseIP`
+(`natMatchPrefixParses`, `compiler_nat_helpers.go`) — the exact Rust pair,
+NOT the `netip` equivalents. `netip.ParsePrefix` is stricter than Rust on the
+mask text: it rejects a zero-padded prefix length (`1.2.3.4/024`) that Rust's
+`u8::from_str` reads as 24 and installs, and a validator that refuses a value
+the dataplane installs bricks the operator's next commit on a working box.
+
+Lenient (`Store.Load` / HA peer-sync, flag `lenientNATMatchAddressLiterals`):
+warn, do not fail. That value committed clean on every build before this gate,
+so boxes carrying one exist by construction. The tolerant path deliberately
+KEEPS the value in the compiled config: dropping it would empty an
+all-malformed list, clear the Rust `*_constrained` flag and collapse the rule to
+MATCH-ANY — a fail-OPEN regression strictly worse than the silent narrowing this
+gate is about.
+
+Regression coverage: `pkg/config/nat_match_address_literal_7145_test.go` (the
+full 3x2 census at strict, including the two pre-existing gates as controls;
+tolerant warn-and-KEEP with the good value intact and the malformed one authored
+second; an over-rejection guard that pins `0.0.0.0/0`, `::/0`, a bare host, a
+host-bits CIDR and `1.2.3.4/024` still committing) and
+`pkg/configstore/nat_match_address_no_brick_7145_test.go` (the no-brick property
+at the REAL ingresses — `Store.Load` and `Store.SyncApply` — plus a
+`CommitCheck` over-reach guard). The four sites were also removed from
+`slotEscapeUngated` (`schema_slot_escape_fixtures_test.go`), so their #7143
+slot-escape rows now run the full slot-1 comparison instead of skipping.
+
 Regression coverage: `pkg/config/compiler_nat_host_mask_test.go` (bare/​/32/​/128
 accept; v4 + v6 non-host match/prefix reject with asserted message; NPTv6 and
 `inet` exemptions; NAT64 source-pool host vs non-host; strict-reject /
@@ -10348,7 +10478,8 @@ enum and rejected (an IP is not a severity).
   switches on the known modifier keywords before the pair fallback. Host
   `source-address`/`port` are captured into `SyslogHostConfig.SourceAddress`
   / `.Port`; `match`/`structured-data`/`explicit-priority`/`log-prefix`/
-  `facility-override`/`archive` are recognized-and-skipped. The
+  `facility-override` are recognized-and-skipped, and `archive` is
+  recognized-recorded-and-warned (see #7146 below). The
   `syslogFacilitySeverity` helper extracts the pair (flat `Keys[0]/Keys[1]`
   or hierarchical `Keys[0]` + child) and returns ok=false for a valueless
   leaf, so a bare/garbage keyword is dropped instead of appended as a
@@ -10363,6 +10494,77 @@ enum and rejected (an IP is not a severity).
   hardcoded 514.
 - **tests** — `pkg/config/compiler_syslog_hostmods_4303_test.go` (facilities
   not polluted, source-address/port captured, strict commit accepts).
+
+## Syslog file `archive` is accepted-but-inert (#7146)
+
+The `archive` sub-statement of `system syslog file <name>` is modeled in
+`setSchema` in full — `files`, `size`, `start-time`, `transfer-interval`,
+`archive-sites` (`multi: true`), `world-readable` / `no-world-readable` — and
+is implemented by **nothing**. The #4303 S-1 work above put `archive` in
+`compileSystem`'s recognized-modifier skip list so it would not be captured as
+a bogus `<facility> <severity>` pair, but no consumer was ever written: the
+whole subtree was read and discarded. Every knob committed clean, rendered back
+in `show configuration`, and produced no rotation, no retention, and no
+off-box transfer. An operator who configured log archival got a clean commit
+and no archiving.
+
+The runtime for a syslog file is `applySyslogFiles` (`pkg/daemon/daemon_system.go`),
+which writes an rsyslog drop-in (`/etc/rsyslog.d/10-xpf-<name>.conf`) directing
+matching facility/severity messages to `/var/log/<name>` — and nothing else.
+There is no rotation, size accounting, schedule, or transfer anywhere in the
+daemon for a syslog file. (The `archiveConfig` / `archiveTransfer` machinery in
+`pkg/daemon` is the **unrelated** `system archival configuration` feature, which
+archives the running **config**, not logs, and does work.)
+
+#7146 keeps the block unimplemented and makes it **loud**, the same
+accept-with-advisory shape as #4316:
+
+- **compiler** — `compileSystem`'s syslog `file` loop switches `archive` out of
+  the skip list into its own case. It sets `SyslogFileConfig.ArchiveConfigured`
+  (presence: a bare `archive;` is archiving-with-defaults in Junos, so presence
+  alone is what the operator asked for) and records the sub-statement
+  **keywords** in `SyslogFileConfig.ArchiveKnobs` (sorted, deduplicated).
+  `syslogArchiveTokens` flattens the subtree depth-first pre-order so ONE walker
+  covers every shape the dual AST produces for the same stanza — the flat block
+  (`Keys=["archive"]` + sibling children), the flat compact form
+  (`archive size 1m files 5` → a NESTED key chain, not siblings), the
+  hierarchical block, and the hierarchical one-line form
+  (`archive size 1m files 5;` → all tokens on `Keys`, no children).
+  `syslogArchiveKnobs` then walks those tokens against the
+  `syslogArchiveKeywordArgs` allowlist, stepping over each keyword's value so an
+  `archive-sites` URL that happens to equal a keyword is not read as one.
+- **keywords only, never values** — an `archive-sites` URL can embed credentials
+  (`scp://user:pass@host/`), and the advisory is printed at commit and pasted
+  into support tickets. This is the same rule `systemInertKnobWarnings` applies
+  to the NTP `authentication-key`.
+- **advisory** — `ValidateConfig` (`compiler_validate_warn.go`) emits one
+  warning per archiving file naming the file, the configured knobs, and the
+  consequence:
+
+  ```
+  system syslog file "f1" archive [archive-sites files size start-time transfer-interval]:
+  accepted for Junos compatibility but NOT implemented — xpf writes /var/log/f1
+  through an rsyslog drop-in and applies no rotation, no size cap, no retention
+  count, no start-time schedule, and no off-box transfer, so this log file is
+  never rotated and its contents are NOT archived anywhere. The configuration is
+  valid and this is expected, not a fault in it; rotate and collect /var/log/f1
+  with the host's own log policy (#7146)
+  ```
+
+- **warn, never reject** — the stanza commits today. A hard reject would fail
+  the tolerant load / peer-sync path on a config an operator already has, which
+  is the #1960 brick-on-upgrade shape.
+- **not a CWE-88** — the #4589 leading-dash gate on `system archival
+  configuration archive-sites` exists because that value is handed to `scp` as a
+  destination (`pkg/daemon/daemon_flow.go`). The syslog leaf has no such gate and
+  does not need one: it reaches no `scp` invocation because it reaches nothing at
+  all. Implementing archival would change that and would then owe the #4589
+  treatment.
+- **tests** — `pkg/config/syslog_archive_inert_7146_test.go`: the advisory fires
+  in all four AST shapes and for a bare `archive`, one per file, never on the
+  common case (a plain facility/severity file, a `host`/`user` destination,
+  `system archival configuration`, or no syslog block), never echoes a value,
+  and the commit still succeeds.
 
 ## Custom system login class (#4304 S-2)
 

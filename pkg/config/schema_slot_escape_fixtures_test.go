@@ -138,16 +138,21 @@ var slotEscRibGroup = []string{
 //
 // Every entry below was measured, not assumed.
 // ---------------------------------------------------------------------------
+// #7145 CLOSED the four NAT match-address rows this map used to carry:
+//
+//	security nat source      rule-set <*> rule <*> match source-address
+//	security nat source      rule-set <*> rule <*> match destination-address
+//	security nat destination rule-set <*> rule <*> match source-address
+//	security nat static      rule-set <*> rule <*> match source-address
+//
+// They were recorded here because a malformed CIDR (999.1.1.1/24) committed
+// clean in slot 0, while the destination-NAT and static-NAT `match
+// destination-address` siblings rejected the identical value — the asymmetry
+// this scout's inventory surfaced. validateNATMatchAddressLiteralsStrict now
+// gates all four, so their rows carry a REAL verdict and run the full slot-1
+// escape comparison instead of skipping. Removed rather than annotated: an
+// entry here means "this gate has nothing to compare", which is no longer true.
 var slotEscapeUngated = map[string]string{
-	"security nat source rule-set <*> rule <*> match source-address": "" +
-		"a malformed CIDR (999.1.1.1/24) commits clean, while the destination-NAT " +
-		"and static-NAT `match destination-address` siblings reject one",
-	"security nat source rule-set <*> rule <*> match destination-address": "" +
-		"same: no parse gate on the source rule-set's match addresses",
-	"security nat destination rule-set <*> rule <*> match source-address": "" +
-		"the destination rule-set gates match destination-address but not match source-address",
-	"security nat static rule-set <*> rule <*> match source-address": "" +
-		"the static rule-set gates match destination-address (#37b814d5) but not match source-address",
 	"snmp trap-group <*> categories": "" +
 		"trap categories are an open token set at commit; no domain check exists to escape",
 }

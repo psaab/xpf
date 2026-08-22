@@ -645,6 +645,70 @@ generation therefore still reports success while the live generation
 keeps its counters. Detecting that needs a generation tag or lease on the
 handle itself — **#6741**, not this wrapper.
 
+## Apply ordering: attach → publish → detach (#5485)
+
+`userspace.Manager.Compile` mutates kernel XDP/TC attachment state twice
+per apply, and the two halves sit on opposite sides of the snapshot
+publish. The ordering is load-bearing, not incidental:
+
+1. **Attach** — `CompileUserspaceShim` installs the retained XDP shim on
+   every candidate ingress in the NEW config. This has to happen BEFORE
+   `apply_snapshot`: the helper cannot bind an AF_XDP socket to an
+   interface that carries no shim, so there is no way to stage it later.
+2. **Publish** — `applyCompiledSnapshot` programs the classifier maps and
+   sends `apply_snapshot`. `m.lastSnapshot` — the authority every
+   fail-closed path calls "the retained snapshot" — advances only on
+   success, or on the deliberate deferred-publish branch, which advances
+   it and returns nil while the status loop publishes later.
+3. **Detach** — `syncInterfaceAttachments` removes XDP and TC from every
+   ifindex the accepted snapshot no longer adjudicates. It runs at the
+   ACCEPTANCE POINTS ONLY, immediately after each `m.lastSnapshot = snap`.
+
+**Why the detach is last.** Until #5485 it ran before step 2, so any
+failure in between left the kernel on the new interface set while the
+control plane still reported the old one. That divergence is a policy
+BYPASS, not merely an outage. Both pre-publish failure modes drive the
+shim to `ctrl.Enabled=0` — `programBootstrapMapsLocked` programs it
+disabled, and `publishSnapshotFailClosedLocked` disables it on the
+same-plan path (#4959) — and a disabled ctrl DROPS transit on every
+interface that still carries the shim, because
+`degraded_ctrl_disabled_action` runs before the ingress-map test in
+`userspace-xdp/src/lib.rs`. An interface that has already been detached
+is outside that fail-closed surface entirely: with no XDP program and
+`ip_forward=1` its traffic goes straight into the Linux stack,
+unadjudicated by xpf, while the daemon reports the previous-good
+snapshot as enforced.
+
+**The transient the new ordering opens is strictly safe.** Between a
+successful publish and the detach, an interface still carries the shim
+while the applied snapshot no longer lists it. In both ctrl states that
+is at least as strict as the detached state it precedes: an ifindex
+absent from `userspace_ingress_ifaces` takes `cpumap_or_pass`, which is
+the kernel path a detached interface would have taken anyway, and a
+still-disabled ctrl drops its transit. Nothing in the window between the
+old detach site and the publish reads the attachment set —
+`entryProgramsLocked` (`maps_sync.go`) is the only other `XDPLinks()`
+reader and it is status reporting — so moving the detach costs no
+dependency.
+
+**Consequence to expect on a failing apply:** an interface the operator
+REMOVED from the config keeps its shim, and its transit stays dropped,
+until an apply succeeds. That is the intended fail-closed retention —
+the retained snapshot still lists the interface, so xpf still owns it.
+
+Record-and-rollback (capture the detached set, re-attach on error) was
+the considered alternative. It was rejected: it compensates for the
+window instead of removing it, the re-attach itself can fail with no
+second recovery, and `AttachXDP` does a fresh attach that reinitializes
+mlx5 XSK buffer pools — churning the datapath on interfaces that were
+never in question.
+
+Guarded by `TestAttachmentsNotDetachedBeforePublish_5485` (behavioral: a
+pre-publish failure retains both links) and
+`TestDetachOnlyAfterSnapshotAccepted_5485` (structural: every
+`syncInterfaceAttachments` call site is dominated by `m.lastSnapshot =
+snap`, and there are two of them — one per acceptance path).
+
 ## Entry points
 
 - `DataPlane` — `dataplane.go`. Legacy BPF-shaped interface kept for the

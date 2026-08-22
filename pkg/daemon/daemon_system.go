@@ -720,18 +720,16 @@ func (d *Daemon) applyKernelTuning(cfg *config.Config) {
 		}
 	}
 
-	// Enable IP forwarding (required for firewall operation)
-	for _, path := range []string{
-		"/proc/sys/net/ipv4/ip_forward",
-		"/proc/sys/net/ipv6/conf/all/forwarding",
-	} {
-		current, _ := os.ReadFile(path)
-		if strings.TrimSpace(string(current)) != "1" {
-			if err := os.WriteFile(path, []byte("1\n"), 0644); err != nil {
-				slog.Warn("failed to enable forwarding", "path", path, "err", err)
-			}
-		}
-	}
+	// Kernel TRANSIT forwarding, gated on the dataplane being armed (#5275).
+	//
+	// This is the load-bearing half of the gate: the tail runs at EVERY
+	// apply, so an unconditional "1" here re-opened policy-free kernel
+	// routing on the next commit even after bring-up had failed closed —
+	// which is how a node whose AF_XDP shim never attached stayed an open
+	// router. Writing the armed state (rather than skipping the write when
+	// unarmed) is deliberate: it also RE-ASSERTS the closure against
+	// anything else that raised the knob since the last apply.
+	writeTransitForwardSysctls(d.DataplaneArmed())
 }
 
 // sshKnownHostsPath is the OpenSSH global known-hosts file xpfd owns and fully

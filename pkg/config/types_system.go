@@ -456,6 +456,30 @@ type SyslogFileConfig struct {
 	Name     string
 	Facility string
 	Severity string
+	// ArchiveConfigured records that an `archive` container was present
+	// under this syslog file (#7146). In Junos a bare `archive;` enables
+	// archiving with defaults, so PRESENCE alone — not just a populated
+	// sub-statement — is what the operator asked for and what the commit
+	// advisory reports.
+	//
+	// xpf implements NONE of it: applySyslogFiles writes an rsyslog drop-in
+	// that directs matching messages to /var/log/<name> and nothing more.
+	// There is no rotation, size cap, retention count, start-time schedule,
+	// or off-box transfer anywhere in the daemon for a syslog FILE (the
+	// `archive`/`archiveTransfer` machinery in pkg/daemon belongs to the
+	// unrelated `system archival configuration` feature, which archives the
+	// CONFIG, not logs). These two fields exist only so ValidateConfig can
+	// name the inert block at commit — the #4316 accept-with-advisory
+	// pattern — and are read by nothing else.
+	ArchiveConfigured bool
+	// ArchiveKnobs holds the sorted, deduplicated `archive` sub-statement
+	// KEYWORDS found under this file (files, size, start-time,
+	// transfer-interval, archive-sites, world-readable, no-world-readable).
+	// Keywords ONLY, never their values: an `archive-sites` URL can embed
+	// credentials (scp://user:pass@host/), and the advisory echoes this
+	// slice — the same "name the keyword, never the leaf value" rule
+	// systemInertKnobWarnings applies to the NTP authentication-key.
+	ArchiveKnobs []string
 }
 
 // SNMPConfig holds SNMP agent configuration.

@@ -181,6 +181,80 @@ func TestGetSyncLeases4_MemfileFallback(t *testing.T) {
 	}
 }
 
+// TestGetSyncLeases4_MemfileFallback_SubnetIDBounds pins #6218 item 11: the
+// memfile fallback parsed subnet_id with a bare strconv.Atoi, whose bitSize=0
+// parses at the PLATFORM int width — 64-bit on amd64/arm64, but only 32-bit
+// on a 32-bit target — rather than the fixed uint32 width Kea's subnet-id
+// space actually uses (keaSubnetIDMax = 0xFFFFFFFE, dhcpserver.go).
+// strconv.ParseUint(s, 10, 32) is exact and portable: it accepts every value
+// up to keaSubnetIDMax regardless of host int width, AND (unlike the bare
+// 64-bit-native Atoi) correctly REJECTS a value outside Kea's real uint32
+// subnet-id space rather than silently accepting it as a garbage subnet id.
+//
+// The at-boundary case (keaSubnetIDMax itself) round-trips under both the
+// old and new parse, so it alone would not catch a reverted fix on this
+// (64-bit) test host. The out-of-range case is the one that does: on a bare
+// strconv.Atoi (64-bit here) a subnet_id ABOVE math.MaxUint32 still parses
+// successfully and is silently accepted as SubnetID — a garbage value Kea's
+// real uint32 subnet-id space could never produce. ParseUint(...,32) refuses
+// it, leaving SubnetID at its zero/unset value.
+//
+// RED on revert: restoring the bare strconv.Atoi accepts the out-of-range
+// subnet_id below and sets SubnetID to a huge garbage int instead of leaving
+// it 0, failing the second assertion.
+func TestGetSyncLeases4_MemfileFallback_SubnetIDBounds(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	expire := now.Unix() + 1800
+	header := "address,hwaddr,client_id,valid_lifetime,expire,subnet_id,fqdn_fwd,fqdn_rev,hostname,state\n"
+
+	t.Run("at-boundary-accepted", func(t *testing.T) {
+		dir := t.TempDir()
+		memfile := filepath.Join(dir, "kea-leases4.csv")
+		const boundarySubnetID = 4294967294 // 0xFFFFFFFE == keaSubnetIDMax
+		csv := header + "10.0.61.71,aa:bb:cc:dd:ee:71,01:aa:bb:cc:dd:ee:71,3600," +
+			strconv.FormatInt(expire, 10) + "," + strconv.Itoa(boundarySubnetID) + ",0,0,host-big,0\n"
+		if err := os.WriteFile(memfile, []byte(csv), 0644); err != nil {
+			t.Fatal(err)
+		}
+		m := New()
+		m.SetLeaseSyncSeamsForTesting(nil, filepath.Join(dir, "missing.sock"), "", memfile, "")
+		leases, err := m.GetSyncLeases4(context.Background(), now)
+		if err != nil {
+			t.Fatalf("GetSyncLeases4 (fallback): %v", err)
+		}
+		if len(leases) != 1 {
+			t.Fatalf("expected 1 lease from memfile, got %d", len(leases))
+		}
+		if leases[0].SubnetID != boundarySubnetID {
+			t.Errorf("boundary subnet-id not recovered: got %d, want %d", leases[0].SubnetID, boundarySubnetID)
+		}
+	})
+
+	t.Run("above-uint32-rejected", func(t *testing.T) {
+		dir := t.TempDir()
+		memfile := filepath.Join(dir, "kea-leases4.csv")
+		const overRangeSubnetID = "5000000000" // > math.MaxUint32 (4294967295)
+		csv := header + "10.0.61.72,aa:bb:cc:dd:ee:72,01:aa:bb:cc:dd:ee:72,3600," +
+			strconv.FormatInt(expire, 10) + "," + overRangeSubnetID + ",0,0,host-huge,0\n"
+		if err := os.WriteFile(memfile, []byte(csv), 0644); err != nil {
+			t.Fatal(err)
+		}
+		m := New()
+		m.SetLeaseSyncSeamsForTesting(nil, filepath.Join(dir, "missing.sock"), "", memfile, "")
+		leases, err := m.GetSyncLeases4(context.Background(), now)
+		if err != nil {
+			t.Fatalf("GetSyncLeases4 (fallback): %v", err)
+		}
+		if len(leases) != 1 {
+			t.Fatalf("expected 1 lease from memfile, got %d", len(leases))
+		}
+		if leases[0].SubnetID != 0 {
+			t.Errorf("out-of-uint32-range subnet_id %q must leave SubnetID unset (0), got %d",
+				overRangeSubnetID, leases[0].SubnetID)
+		}
+	})
+}
+
 // Test (a) v6 fallback (#2262): the memfile-fallback read path must PRESERVE
 // the v6 lease kind (IA_NA vs IA_PD) and the PD prefix length from the Kea v6
 // memfile, not hardcode IA_NA. A memfile holding BOTH an IA_NA and an IA_PD row

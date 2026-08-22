@@ -208,12 +208,10 @@ func (d *Daemon) initManagers(configCompileFailed bool) error {
 		d.startKernelSelfRecovery(d.daemonCtx)
 	}
 
-	// Enable IP forwarding — required for the firewall to route packets.
-	// #1922: suppressed in bootstrap mode (a takeover host tunable; the
-	// bootstrap-exit reconcile enables it on the first confirmed commit).
-	if !d.opts.NoDataplane && !d.inBootstrap() {
-		enableForwarding()
-	}
+	// Enable IP forwarding — required for the firewall to route packets —
+	// or, in the two states that never arm, explicitly CLOSE it (#1922
+	// suppression + the #5275 gate). See applyBootTransitPolicy.
+	d.applyBootTransitPolicy()
 
 	// Create VRRP manager eagerly — must exist before applyConfig runs.
 	d.vrrpMgr = vrrp.NewManager()
@@ -454,6 +452,10 @@ func (d *Daemon) setupDataplaneAndInitialConfig() error {
 				"remediation", "set system dataplane-type userspace",
 			)
 			d.setDataplane(nil)
+			// #5275: a retired backend never arms, so transit must be
+			// closed BEFORE the applyConfig below runs.
+			d.markDataplaneArmFailed("boot: dpdk backend retired",
+				"set system dataplane-type userspace", err)
 		} else if errors.Is(err, dataplane.ErrEBPFBackendRetired) {
 			// #1476: mechanical source removal of the legacy
 			// eBPF dataplane. Behaviour mirrors the DPDK arm
@@ -470,6 +472,9 @@ func (d *Daemon) setupDataplaneAndInitialConfig() error {
 				"remediation", "set system dataplane-type userspace",
 			)
 			d.setDataplane(nil)
+			// #5275: as above — a retired backend never arms.
+			d.markDataplaneArmFailed("boot: ebpf backend retired",
+				"set system dataplane-type userspace", err)
 		} else if err != nil {
 			slog.Error("failed to create dataplane", "type", dpType, "err", err)
 			return fmt.Errorf("create dataplane: %w", err)
@@ -503,31 +508,15 @@ func (d *Daemon) setupDataplaneAndInitialConfig() error {
 		if d.inBootstrap() {
 			slog.Info("bootstrap mode: dataplane arm and boot-time config apply suppressed")
 		} else {
-			if rt != nil {
-				if err := rt.Start(d.daemonCtx); err != nil {
-					slog.Warn("failed to start dataplane, running in config-only mode",
-						"err", err)
-					d.setDataplane(nil)
-				} else {
-					// natSeeder is satisfied by both *dataplane.Manager
-					// (legacy eBPF — SeedNATPortCounters in maps_nat.go,
-					// SeedSessionIDCounter in maps_session.go) and the userspace
-					// *LegacyDataPlaneAdapter (via embedded bpfShim). The
-					// seed methods are no-ops on the userspace fast path
-					// but harmless to invoke. The legacyDP() round-trip is
-					// no longer required (#1519).
-					if seeder, ok := rt.(natSeeder); ok {
-						seeder.SeedNATPortCounters()
-						nodeID := 0
-						if cfg := d.store.ActiveConfig(); cfg != nil && cfg.Chassis.Cluster != nil {
-							nodeID = cfg.Chassis.Cluster.NodeID
-						}
-						seeder.SeedSessionIDCounter(nodeID)
-					}
-				}
-			}
+			d.armBootDataplane(rt)
 			// Apply current config — needed even in config-only mode so that
 			// VRFs, interfaces, and routing are configured before cluster comms.
+			//
+			// #5275: this runs on the arm-FAILURE path too, which is exactly
+			// the fall-through that made an unarmed node an open router. The
+			// arm decision above has already driven the transit knobs, so by
+			// the time this apply reaches its tail (applyKernelTuning) the
+			// gate reads the real arm state instead of re-opening forwarding.
 			if cfg := d.store.ActiveConfig(); cfg != nil {
 				slog.Info("applying active configuration")
 				d.applyConfig(cfg)
@@ -552,6 +541,87 @@ func (d *Daemon) setupDataplaneAndInitialConfig() error {
 	return nil
 }
 
+// applyBootTransitPolicy decides, at bring-up, whether the kernel is allowed
+// to route transit — the #5275 gate's boot half. Split out of initManagers so
+// the decision is drivable in a test against the sysctl seam rather than
+// buried behind the manager-construction block.
+//
+// Three cases, and the two closing ones are the decision this function
+// exists to state explicitly:
+//
+//   - --no-dataplane: there is no dataplane at all. Bring-up already declined
+//     to enable forwarding here; closing the knob makes the apply tail agree
+//     with bring-up instead of contradicting it.
+//   - bootstrap mode: no committed config, so no policy to enforce. #1922
+//     already SUPPRESSED enableForwarding — but suppression is not closure,
+//     because the sysctls outlive the process: a daemon restart into
+//     bootstrap (or into the #1960 compile-failed boot, which forces
+//     bootstrap) inherits ip_forward=1 from the previous armed run and routes
+//     transit under no policy. pkg/daemon/README.md already asserts transit
+//     is fail-closed in this state; this is what makes that true.
+//   - otherwise: enable, provisionally. The arm has not happened yet;
+//     setupDataplaneAndInitialConfig closes the knobs again if it fails.
+func (d *Daemon) applyBootTransitPolicy() {
+	switch {
+	case d.opts.NoDataplane:
+		d.markDataplaneNotArmed("boot", "--no-dataplane config-only mode")
+	case d.inBootstrap():
+		d.markDataplaneNotArmed("boot", "bootstrap mode: no committed config to enforce")
+	default:
+		enableForwarding()
+	}
+}
+
+// armBootDataplane arms the runtime dataplane on the NORMAL (non-bootstrap)
+// boot path: it Starts the constructed backend and, on success, seeds the
+// NAT port / session-id counters. On failure the cell is CLEARED so nothing
+// can acquire the unarmed backend, mirroring armBootstrapExitDataplane.
+//
+// Split out of setupDataplaneAndInitialConfig (#5275) for the same reason
+// #2114 split armBootstrapExitDataplane: the arm/nil-on-failure writer is
+// the security boundary, and it must be drivable in a test without building
+// a real backend or running the boot applyConfig. The caller passes the
+// ONE dataplane snapshot the surrounding boot block shares (#2114 plan
+// §5.3 rule 3) rather than re-reading the cell here.
+//
+// Both outcomes drive the #5275 transit gate: a successful arm leaves
+// kernel transit forwarding enabled, a failed arm closes it BEFORE the
+// caller's applyConfig runs.
+func (d *Daemon) armBootDataplane(rt dataplane.RuntimeDataPlane) {
+	if rt == nil {
+		return
+	}
+	if err := rt.Start(d.daemonCtx); err != nil {
+		slog.Warn("failed to start dataplane, running in config-only mode",
+			"err", err)
+		d.setDataplane(nil)
+		// #5275: the AF_XDP shim never attached, so nothing adjudicates
+		// transit on this node and there is no nftables `hook forward`
+		// substitute. Close the kernel transit path before the caller's
+		// applyConfig (and its applyKernelTuning tail) runs.
+		d.markDataplaneArmFailed("boot: dataplane start failed",
+			"check `journalctl -u xpfd` for the shim/AF_XDP attach error, then "+
+				"correct the config and re-commit, or restart xpfd", err)
+		return
+	}
+	d.markDataplaneArmed("boot")
+	// natSeeder is satisfied by both *dataplane.Manager
+	// (legacy eBPF — SeedNATPortCounters in maps_nat.go,
+	// SeedSessionIDCounter in maps_session.go) and the userspace
+	// *LegacyDataPlaneAdapter (via embedded bpfShim). The
+	// seed methods are no-ops on the userspace fast path
+	// but harmless to invoke. The legacyDP() round-trip is
+	// no longer required (#1519).
+	if seeder, ok := rt.(natSeeder); ok {
+		seeder.SeedNATPortCounters()
+		nodeID := 0
+		if cfg := d.store.ActiveConfig(); cfg != nil && cfg.Chassis.Cluster != nil {
+			nodeID = cfg.Chassis.Cluster.NodeID
+		}
+		seeder.SeedSessionIDCounter(nodeID)
+	}
+}
+
 // isInteractive returns true if stdin is a real terminal (not /dev/null or a pipe).
 // enableForwarding enables IPv4 and IPv6 forwarding via sysctl
 // and disables RA acceptance on all interfaces.
@@ -559,9 +629,13 @@ func (d *Daemon) setupDataplaneAndInitialConfig() error {
 // the kernel drops all transit traffic. A firewall must not accept
 // RAs — it uses its own configured routes exclusively.
 func enableForwarding() {
+	// #5275: the two TRANSIT knobs are owned by the arm gate
+	// (daemon_transit_gate.go) so bring-up and the apply tail cannot drift
+	// into disagreeing about which sysctls admit transit. The rest of this
+	// bundle is host posture that does not admit transit on its own and
+	// stays unconditional.
+	writeTransitForwardSysctls(true)
 	sysctls := map[string]string{
-		"/proc/sys/net/ipv4/ip_forward":             "1",
-		"/proc/sys/net/ipv6/conf/all/forwarding":    "1",
 		"/proc/sys/net/ipv6/conf/all/accept_ra":     "0",
 		"/proc/sys/net/ipv6/conf/default/accept_ra": "0",
 		// l3mdev_accept: allow accepting TCP/UDP connections on management VRF

@@ -427,3 +427,40 @@ func applyDeterministicHost(det *DeterministicNATConfig, hostNode *Node) {
 		det.HostAddress = hostNode.Keys[1]
 	}
 }
+
+// natMatchPrefixParses mirrors the Rust NAT match-prefix parser EXACTLY, so
+// "accepted at commit" and "installed at runtime" cannot diverge for a NAT
+// rule's literal `match source-address` / `match destination-address` values.
+//
+// Those values reach the wire VERBATIM — the Go snapshot builders copy the
+// list without filtering (pkg/dataplane/userspace/nat_source.go,
+// nat_destination.go, nat_static.go) — and all three Rust consumers parse each
+// entry the same way:
+//
+//   - source NAT:      parse_match_prefix (userspace-dp/src/nat/source.rs)
+//   - destination NAT: DnatTable::from_snapshots (nat/destination.rs)
+//   - static NAT:      SourceConstraint::from_list (nat/static_nat.rs)
+//
+// Each tries `IpNet::from_str` first (a CIDR, host bits permitted) and falls
+// back to `IpAddr::from_str` (a bare host IP, promoted to /32 or /128). An
+// entry that satisfies neither is DROPPED from the match set.
+//
+// The Go mirror is net.ParseCIDR then net.ParseIP, chosen over the netip
+// equivalents because netip.ParsePrefix is STRICTER than Rust on the mask
+// text: it rejects a zero-padded prefix length (`1.2.3.4/024`) that Rust's
+// `u8::from_str` accepts as 24, so a netip-based gate would reject a value the
+// dataplane installs — the one direction a widened validator must never take
+// (#1960 no-brick). net.ParseIP is likewise the right bare-host mirror because
+// it rejects a zone-suffixed literal (`fe80::1%eth0`) exactly as Rust's
+// `IpAddr::from_str` does, where netip.ParseAddr would accept it.
+//
+// An empty value returns false: an empty entry is not a prefix, it still
+// leaves the match list NON-empty, and the Rust `*_constrained` flag is keyed
+// on list length — so an empty entry narrows the rule (or, alone, makes it
+// match nothing) exactly like any other unparseable one.
+func natMatchPrefixParses(raw string) bool {
+	if _, _, err := net.ParseCIDR(raw); err == nil {
+		return true
+	}
+	return net.ParseIP(raw) != nil
+}

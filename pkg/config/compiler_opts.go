@@ -1422,6 +1422,28 @@ type compileOpts struct {
 	// leniently-loaded bad config is inert. Same doctrine as
 	// lenientPolicyZoneRefs / lenientNATHostMask.
 	lenientDestNATAddresses bool
+	// lenientNATMatchAddressLiterals (#7145) downgrades the NAT match-address
+	// literal gate (validateNATMatchAddressLiteralsStrict) from a hard compile
+	// error to a cfg.Warnings entry. The strict commit / commit-check path
+	// hard-rejects a source / destination / static NAT rule whose literal
+	// `match source-address` (any kind) or `match destination-address` (source
+	// kind) carries a value the dataplane cannot parse. Before #7145 those four
+	// (kind x leaf) slots had NO parse gate at all, while the sibling slot in
+	// the SAME rule — destination-NAT and static-NAT `match
+	// destination-address` — rejected the identical value (#3228 / #3206): one
+	// operator typo, opposite verdicts depending on which slot it landed in.
+	// The values reach the wire verbatim and each Rust consumer drops what it
+	// cannot parse while keeping the rule CONSTRAINED, so a malformed entry
+	// narrows the rule and an all-malformed list makes it match NOTHING —
+	// visible only as a bounded NAT parse-error counter. The tolerant load /
+	// peer-sync paths downgrade to a warning so an already-persisted or
+	// peer-synced config carrying a malformed prefix still BOOTS (#1960
+	// no-brick), and the value is deliberately KEPT in the compiled config on
+	// that path: dropping it Go-side would empty an all-malformed list, clear
+	// the Rust `*_constrained` flag and collapse the rule to MATCH-ANY, turning
+	// a fail-closed break into a fail-open one. Same doctrine as
+	// lenientDestNATAddresses.
+	lenientNATMatchAddressLiterals bool
 	// lenientRPMSourceAddress (#2492) downgrades the RPM test
 	// source-address gate (validateRPMSourceAddressStrict) from a hard
 	// compile error to a cfg.Warnings entry. The strict commit /
@@ -2323,6 +2345,7 @@ func lenientCompileOpts() compileOpts {
 		lenientDuplicateHostLocalAddress:       true,
 		lenientClusterAuthKey:                  true,
 		lenientDestNATAddresses:                true,
+		lenientNATMatchAddressLiterals:         true,
 		lenientRPMSourceAddress:                true,
 		lenientRPMLinkLocalZone:                true,
 		lenientRPMHTTPGetScheme:                true,

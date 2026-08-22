@@ -192,11 +192,16 @@ func TestAddressOnlyCommitRejectedPublishFailsClosed4959(t *testing.T) {
 // publish site and slip past the behavioral test above (which drives the
 // extracted helper directly). Compile's classifier-map publish MUST route
 // through publishSnapshotFailClosedLocked with the samePlanRefresh flag.
+//
+// #5485 split Compile at the m.mu boundary: the publish now lives in
+// applyCompiledSnapshot, which is everything Compile does once the shim is
+// attached and the snapshot is built. Retargeted, not relaxed — the asserted
+// substring is unchanged.
 func TestCompileRoutesPublishThroughFailClosedHelper4959(t *testing.T) {
 	t.Parallel()
-	src := goFunctionSource(t, "manager_compile.go", "Compile")
+	src := goFunctionSource(t, "manager_compile.go", "applyCompiledSnapshot")
 	if !strings.Contains(src, "publishSnapshotFailClosedLocked(&publishSnap, &status, samePlanRefresh)") {
-		t.Fatalf("Compile must publish the classifier-map snapshot via "+
+		t.Fatalf("applyCompiledSnapshot must publish the classifier-map snapshot via "+
 			"publishSnapshotFailClosedLocked(..., samePlanRefresh) so a rejected "+
 			"same-plan apply_snapshot fails closed (#4959); got:\n%s", src)
 	}

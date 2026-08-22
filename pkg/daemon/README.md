@@ -872,10 +872,15 @@ never lock an operator out of a remote box it manages.
     not what keeps a *previously* managed box reachable here.
     - **Transit is still fail-closed** — do not read "freeze" as "the firewall
       keeps forwarding." Bootstrap mode suppresses `enableForwarding` and the
-      dataplane arm (`dp.Start`), so the daemon itself forwards no transit in
-      this state. A cold reboot therefore carries NO transit until the operator
-      commits a compilable config; only a daemon *restart* that leaves an
-      already-armed dataplane process running keeps enforcing the
+      dataplane arm (`dp.Start`), and since #5275 it also explicitly WRITES
+      `ip_forward` / `ipv6.conf.all.forwarding` to `0`
+      (`applyBootTransitPolicy`), so the daemon itself forwards no transit in
+      this state. The explicit close is load-bearing, not belt-and-braces:
+      sysctls outlive the process, so a daemon *restart* into this state used
+      to inherit `ip_forward=1` from the previous armed run and route transit
+      with no policy attached. A cold reboot carries NO transit until the
+      operator commits a compilable config; only a daemon restart that leaves
+      an already-armed dataplane *process* running keeps enforcing the
       last-known-good policy in the interim. Either way no traffic is forwarded
       under an unknown/no policy — what persists is interface identity + mgmt
       reachability, not unpoliced forwarding.
@@ -998,9 +1003,72 @@ never lock an operator out of a remote box it manages.
   the lifeline + `.link` files), clears the FRR managed section, and
   detaches the dataplane — instead of applying an empty config — and the
   store persists the never-committed marker so a restart re-enters
-  bootstrap.
+  bootstrap. The detach also drops the #5275 armed flag and closes kernel
+  transit forwarding: the node is un-armed by that step, so leaving
+  `ip_forward=1` would let the next apply tail keep routing transit for a
+  dataplane that is no longer attached.
 
 ## Notable gotchas
+
+- **An unarmed dataplane stops kernel transit forwarding (#5275).** Kernel
+  transit forwarding is CONDITIONAL on the dataplane being armed. The daemon
+  tracks that as `Daemon.dataplaneArmed` (accessor `DataplaneArmed()`), set
+  true only after `rt.Start()` (→ `LoadUserspaceShim`) returns nil, and the
+  gate in `daemon_transit_gate.go` drives `/proc/sys/net/ipv4/ip_forward` and
+  `/proc/sys/net/ipv6/conf/all/forwarding` to match it.
+  - **Why.** A successful config *compile* followed by an *arm* failure took a
+    branch that logged "running in config-only mode", cleared the dataplane
+    cell, and fell through to `applyConfig` — while bring-up had already
+    raised both knobs and `applyKernelTuning` re-raised them at every apply
+    tail. With no XDP shim attached and no nftables `hook forward` chain
+    anywhere in the repo (the host-inbound tables are `hook input`), the
+    kernel routed transit under zero policy. #1960/#1993 fail closed on a
+    compile failure only; this closes the arm-failure sibling.
+  - **When it closes.** Every path that lands in `setDataplane(nil)` — the
+    boot `rt.Start` failure (`armBootDataplane`), the bootstrap-exit
+    `rt.Start` failure (`armBootstrapExitDataplane`), and both retired-backend
+    arms (`ErrDPDKBackendRetired` / `ErrEBPFBackendRetired`); the two states
+    that never arm at all (bootstrap mode and `--no-dataplane`, via
+    `applyBootTransitPolicy`); and the first-commit-confirmed rollback, whose
+    `runBootstrapTeardownSteps` step 4 DETACHES an already-armed dataplane
+    without passing through either arm writer.
+  - **When it re-opens.** A successful arm. Recovery does NOT need a daemon
+    restart on the bootstrap path: the bootstrap-exit arm on the first
+    compilable `commit confirmed` (or cluster `SyncApply`) re-enables both
+    knobs. There is, however, **no re-arm path after a NON-bootstrap boot arm
+    failure** — `rt.Start` has exactly two call sites (boot and bootstrap
+    exit), and the boot one runs once — so that node stays transit-closed
+    until xpfd restarts. Fixing the config and re-committing is not enough;
+    `systemctl restart xpfd` is.
+  - **How to tell.** The failure logs at **Error**: `dataplane arm FAILED;
+    kernel transit forwarding DISABLED (fail-closed, degraded)` with a
+    `remediation` attribute. Confirm with `sysctl net.ipv4.ip_forward` (0) and
+    `journalctl -u xpfd | grep 'arm FAILED'`.
+  - **What still works.** `ip_forward` governs FORWARDED packets only, so
+    management is unaffected by design (#1960 no-brick): SSH, gRPC/REST/CLI,
+    the cluster heartbeat, and DHCP are locally terminated, and the `hook
+    input` host-inbound chains are untouched. The daemon does NOT exit.
+  - **What is NOT covered.** FRR adjacencies and VRRP/RG ownership are *not*
+    relinquished by this gate — an unarmed node can still hold a VIP and
+    advertise routes, so peers may keep steering transit at it (a blackhole
+    rather than an open router: strictly the safer failure, but still a gap).
+    That half of #5275 is HA-coupled and split to a successor issue. The
+    `ip_forward=0` here is also only one leg of the full transit barrier in
+    `docs/research/5275-arm-failclosed/plan.md` §6 (which adds an inet FORWARD
+    drop, a bridge-family barrier, and a flowtable disable), and the arm
+    boundary tracked is `Start`/`LoadUserspaceShim`, not the later
+    per-interface AF_XDP attach inside the first `ApplyConfig` (see the
+    observe-only proof in `pkg/dataplane/armproof.go`).
+  - **Armed behaviour is unchanged.** The armed desired value is `1`,
+    byte-identical to the pre-#5275 unconditional write. The AF_XDP fast path
+    does not itself need `ip_forward` (measured in `docs/image-validation.md`:
+    with both knobs at 0 an armed appliance still moved 4.29 Gbit/s v4 /
+    3.02 Gbit/s v6 at 0% loss), but several ARMED paths `XDP_PASS` to the
+    kernel and do rely on it — route-based-VPN plaintext off an xfrm
+    interface, and SNAT'd frames passed up for kernel routing (the reason
+    `enableForwarding` also sets `accept_local`). The gate never lowers the
+    knob while armed.
+  - Tests: `pkg/daemon/transit_forwarding_failclosed_5275_test.go`.
 
 - ISSU (in-service software upgrade) preserves sessions across the upgrade
   by handing the BPF map FDs to the new daemon and timing the cutover

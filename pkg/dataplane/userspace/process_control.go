@@ -181,13 +181,29 @@ func (m *Manager) sessionSocketPath() string {
 // requestSessionSync sends a session sync request via the dedicated session
 // socket, using sessionMu instead of mu. This ensures session installs from
 // HA sync never block behind snapshot publishes on the main control socket.
+//
+// It is the per-request locking wrapper: sessionMu is taken and released around
+// THIS round trip alone, so unrelated session-socket callers interleave freely
+// between consecutive calls. That is the right discipline for a bulk batch (a
+// delete chunk is up to sessionHelperDeleteChunk requests — holding sessionMu
+// across the whole chunk would starve live session installs), but NOT for a
+// forward/reverse pair, which must not be split. A caller that needs a group of
+// requests to reach the helper with nothing in between takes sessionMu itself
+// and drives requestSessionSyncLocked per request — see syncSessionPairLocked
+// (#5698).
 func (m *Manager) requestSessionSync(req ControlRequest) error {
+	m.sessionMu.Lock()
+	defer m.sessionMu.Unlock()
+	return m.requestSessionSyncLocked(req)
+}
+
+// requestSessionSyncLocked performs ONE session-socket round trip. The caller
+// MUST already hold m.sessionMu; it is not reentrant.
+func (m *Manager) requestSessionSyncLocked(req ControlRequest) error {
 	sockPath := m.sessionSocketPath()
 	if sockPath == "" {
 		return errors.New("session socket not configured")
 	}
-	m.sessionMu.Lock()
-	defer m.sessionMu.Unlock()
 	// A bounded dial + round-trip deadline so a hung helper (accepts the
 	// connection but never reads/replies) fails THIS request in a few seconds
 	// instead of the OS default. Transport failures (dial/write/read) are
