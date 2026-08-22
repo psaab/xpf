@@ -215,15 +215,33 @@ func (m *Manager) rebuildMonitoredIfindexes() {
 // entries (FAILED/INCOMPLETE/none). For force-probe target
 // collection we want only the entries the dataplane is actually
 // using, so we walk neighborIndex (publishable-only).
+//
+// #5250 (A6-b2 F1): fn is invoked AFTER m.mu is released. Calling a
+// caller-supplied callback while holding the manager lock made every
+// re-entrant Manager call from fn a self-deadlock, and held mu across
+// arbitrary user work (force-probe emission does netlink/control-socket I/O)
+// where the control socket is already the contended resource. The walk now
+// snapshots (ifindex, ip) pairs under the lock and calls fn on that snapshot
+// with the lock dropped; a concurrent snapshot refresh may therefore land
+// between the copy and the callback, which is the same staleness every other
+// caller of this best-effort probe-target view already tolerates.
 func (m *Manager) ForEachSnapshotNeighbor(fn func(ifindex int, ip net.IP)) {
+	type snapshotNeighbor struct {
+		ifindex int
+		ip      net.IP
+	}
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	targets := make([]snapshotNeighbor, 0, len(m.neighborIndex))
 	for k, n := range m.neighborIndex {
 		ip := net.ParseIP(n.IP)
 		if ip == nil {
 			continue
 		}
-		fn(k.ifindex, ip)
+		targets = append(targets, snapshotNeighbor{ifindex: k.ifindex, ip: ip})
+	}
+	m.mu.Unlock()
+	for _, t := range targets {
+		fn(t.ifindex, t.ip)
 	}
 }
 

@@ -17,6 +17,7 @@ package config_test
 // RED-on-revert: removing the validator makes the bad value pass.
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -56,6 +57,12 @@ func TestLogStream3349_SchemaFields_RejectTypos(t *testing.T) {
 		"mode":             {"set security log mode steam"},
 		"format":           {"set security log format sdsyslog"},
 		"source-interface": {"set security log source-interface reth1.abc"},
+		// #6218 item 7: MaxLogicalUnit+1 can never name a real interface unit
+		// (compiler_interfaces.go caps `unit <n>` at MaxLogicalUnit), so this
+		// source-interface could never resolve — the same silent audit-source
+		// loss #3349 closed for a non-numeric unit.
+		"source-interface-unit-range": {fmt.Sprintf(
+			"set security log source-interface ge-0-0-0.%d", config.MaxLogicalUnit+1)},
 	}
 	for name, cmds := range bad {
 		t.Run(name, func(t *testing.T) {
@@ -81,6 +88,10 @@ func TestLogStream3349_SchemaFields_AcceptValid(t *testing.T) {
 		"set security log stream s source-address 2001:db8::1",
 		"set security log stream s2 host 10.0.0.2",
 		"set security log stream s2 source-interface reth1.100",
+		// At the exact MaxLogicalUnit boundary: the #6218 item 7 upper bound
+		// must not over-reject a legitimate, if extreme, unit number.
+		"set security log stream s3 host 10.0.0.3",
+		fmt.Sprintf("set security log stream s3 source-interface ge-0-0-0.%d", config.MaxLogicalUnit),
 	}
 	if err := schemaCheck3349(t, good...); err != nil {
 		t.Fatalf("valid log config rejected: %v", err)

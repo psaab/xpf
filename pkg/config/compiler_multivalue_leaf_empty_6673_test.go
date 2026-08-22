@@ -1219,37 +1219,58 @@ func TestProxyARPAddresses6673MalformedRangeInstallsExactlyWhatMasterInstalled(t
 		// head's intended set, not a parity oracle — do not "restore" them to
 		// master's single address.
 		wantInstalled []string
+		// wantStrictReject is the #6714 axis added on top of #6673's parity
+		// corpus: TRUE for every row whose `to` survived both range branches.
+		//
+		// #6673 asserted that strict must ACCEPT every row here, and the reason
+		// it gave was specific: "the keyword must never reach
+		// validateProxyARPAddressesStrict, or the widened read invents a commit
+		// rejection master never made". That guarded against an ACCIDENTAL
+		// rejection — the `to` token materialising as the address "to/32" and
+		// failing netip.ParsePrefix. #6714 adds a DELIBERATE one at the
+		// STATEMENT level: the compiler installs the first value of such a
+		// statement and discards the rest, and until now said nothing about it
+		// on any surface. Both claims are asserted below and they are different
+		// claims — the row must reject for the STATEMENT reason, and no
+		// compiled address may be the bare keyword.
+		//
+		// The parity criterion this test exists for is untouched: every `want`
+		// and `wantInstalled` below is byte-identical to #6673's, and both are
+		// now asserted on the TOLERANT compile, which is the path an
+		// already-persisted config boots through (#1960 no-brick). What a box
+		// installs does not move; what an operator can commit does.
+		wantStrictReject bool
 	}{
 		{"bracket leading with the keyword", `
 security { nat { proxy-arp { interface ge-0-0-0 { address [ to 192.0.2.1 ]; } } } }`,
-			nil, nil},
+			nil, nil, true},
 		{"block with a keyword-only child", `
 security { nat { proxy-arp { interface ge-0-0-0 { address { to; 192.0.2.5; } } } } }`,
-			nil, nil},
+			nil, nil, true},
 		{"keyword-only block", `
 security { nat { proxy-arp { interface ge-0-0-0 { address { to; } } } } }`,
-			nil, nil},
+			nil, nil, true},
 		{"bare keyword", `
 security { nat { proxy-arp { interface ge-0-0-0 { address to; } } } }`,
-			nil, nil},
+			nil, nil, true},
 		{"keyword ahead of a CIDR", `
 security { nat { proxy-arp { interface ge-0-0-0 { address [ to 192.0.2.0/30 ]; } } } }`,
-			nil, nil},
+			nil, nil, true},
 		{"keyword past the range slot", `
 security { nat { proxy-arp { interface ge-0-0-0 { address [ 192.0.2.1 192.0.2.2 to 192.0.2.9 ]; } } } }`,
-			[]string{"192.0.2.1/32"}, []string{"192.0.2.1/32"}},
+			[]string{"192.0.2.1/32"}, []string{"192.0.2.1/32"}, true},
 		{"keyword further past the range slot", `
 security { nat { proxy-arp { interface ge-0-0-0 { address [ 192.0.2.1 192.0.2.2 192.0.2.3 to 192.0.2.9 ]; } } } }`,
-			[]string{"192.0.2.1/32"}, []string{"192.0.2.1/32"}},
+			[]string{"192.0.2.1/32"}, []string{"192.0.2.1/32"}, true},
 		{"dangling trailing keyword still installs the low endpoint", `
 security { nat { proxy-arp { interface ge-0-0-0 { address [ 192.0.2.1 to ]; } } } }`,
-			[]string{"192.0.2.1/32"}, []string{"192.0.2.1/32"}},
+			[]string{"192.0.2.1/32"}, []string{"192.0.2.1/32"}, true},
 		{"block address then dangling keyword still installs", `
 security { nat { proxy-arp { interface ge-0-0-0 { address { 192.0.2.5; to; } } } } }`,
-			[]string{"192.0.2.5/32"}, []string{"192.0.2.5/32"}},
+			[]string{"192.0.2.5/32"}, []string{"192.0.2.5/32"}, true},
 		{"well-formed sibling beside a malformed range", `
 security { nat { proxy-arp { interface ge-0-0-0 { address [ to 192.0.2.1 ]; address 192.0.2.9; } } } }`,
-			[]string{"192.0.2.9/32"}, []string{"192.0.2.9/32"}},
+			[]string{"192.0.2.9/32"}, []string{"192.0.2.9/32"}, true},
 		// --- BLOCK-CHILD placements (round 7) -------------------------------
 		//
 		// In the hierarchical BLOCK form a range rides on a child's OWN Keys —
@@ -1262,13 +1283,13 @@ security { nat { proxy-arp { interface ge-0-0-0 { address [ to 192.0.2.1 ]; addr
 		// origin/master through the installer's netip.ParsePrefix gate.
 		{"block child carries the range on its own Keys", `
 security { nat { proxy-arp { interface ge-0-0-0 { address { 192.0.2.1; 192.0.2.2 to 192.0.2.9; } } } } }`,
-			[]string{"192.0.2.1/32"}, []string{"192.0.2.1/32"}},
+			[]string{"192.0.2.1/32"}, []string{"192.0.2.1/32"}, true},
 		{"block child range with no high endpoint", `
 security { nat { proxy-arp { interface ge-0-0-0 { address { 192.0.2.1; 192.0.2.2 to; } } } } }`,
-			[]string{"192.0.2.1/32"}, []string{"192.0.2.1/32"}},
+			[]string{"192.0.2.1/32"}, []string{"192.0.2.1/32"}, true},
 		{"two block-child ranges", `
 security { nat { proxy-arp { interface ge-0-0-0 { address { 192.0.2.2 to 192.0.2.9; 198.51.100.2 to 198.51.100.9; } } } } }`,
-			[]string{"192.0.2.2/32"}, []string{"192.0.2.2/32"}},
+			[]string{"192.0.2.2/32"}, []string{"192.0.2.2/32"}, true},
 		// The per-STATEMENT veto: 198.51.100.1 is well-formed but shares the
 		// statement with a broken range, so it is dropped with it — which is
 		// what master installs, and what the bracket form above already does.
@@ -1276,30 +1297,30 @@ security { nat { proxy-arp { interface ge-0-0-0 { address { 192.0.2.2 to 192.0.2
 		// ARP for.
 		{"block-child range beside well-formed siblings", `
 security { nat { proxy-arp { interface ge-0-0-0 { address { 192.0.2.1; 192.0.2.2 to 192.0.2.9; 198.51.100.1; } } } } }`,
-			[]string{"192.0.2.1/32"}, []string{"192.0.2.1/32"}},
+			[]string{"192.0.2.1/32"}, []string{"192.0.2.1/32"}, true},
 		{"IPv6 block-child range", `
 security { nat { proxy-arp { interface ge-0-0-0 { address { 2001:db8::1; 2001:db8::2 to 2001:db8::9; } } } } }`,
-			[]string{"2001:db8::1/32"}, []string{"2001:db8::1/32"}},
+			[]string{"2001:db8::1/32"}, []string{"2001:db8::1/32"}, true},
 		// The `to` at a child's THIRD key, and under a NESTED child — two more
 		// positions an enumeration would have to know about in advance. The
 		// detector walks the statement's whole token stream instead, so depth
 		// and index are irrelevant to it.
 		{"keyword at a block child's third key", `
 security { nat { proxy-arp { interface ge-0-0-0 { address { 192.0.2.1 192.0.2.2 to 192.0.2.9; 198.51.100.1; } } } } }`,
-			[]string{"192.0.2.1/32"}, []string{"192.0.2.1/32"}},
+			[]string{"192.0.2.1/32"}, []string{"192.0.2.1/32"}, true},
 		{"keyword nested one level below a block child", `
 security { nat { proxy-arp { interface ge-0-0-0 { address { 192.0.2.1 { to 192.0.2.9; } 198.51.100.1; } } } } }`,
-			[]string{"192.0.2.1/32"}, []string{"192.0.2.1/32"}},
+			[]string{"192.0.2.1/32"}, []string{"192.0.2.1/32"}, true},
 		{"keyword nested two levels below a block child", `
 security { nat { proxy-arp { interface ge-0-0-0 { address { 192.0.2.1 { 192.0.2.5 { to 192.0.2.9; } } 198.51.100.1; } } } } }`,
-			[]string{"192.0.2.1/32"}, []string{"192.0.2.1/32"}},
+			[]string{"192.0.2.1/32"}, []string{"192.0.2.1/32"}, true},
 		// Pre-existing on BOTH trees and deliberately left alone: a lone
 		// block-form range does not EXPAND. Master compiles the low endpoint
 		// only, and so does this tree — making it expand would be a change to
 		// range handling, not the install-parity fix this arm is.
 		{"lone block-child range does not expand (PRE-EXISTING, both trees)", `
 security { nat { proxy-arp { interface ge-0-0-0 { address { 192.0.2.1 to 192.0.2.9; } } } } }`,
-			[]string{"192.0.2.1/32"}, []string{"192.0.2.1/32"}},
+			[]string{"192.0.2.1/32"}, []string{"192.0.2.1/32"}, true},
 		// CONTROL: a `to` leading a block child IS a well-formed set-syntax
 		// range (FindChild("to") consumes it), so the caller's second range
 		// branch expands it BEFORE the value reader runs. The veto must not
@@ -1307,30 +1328,61 @@ security { nat { proxy-arp { interface ge-0-0-0 { address { 192.0.2.1 to 192.0.2
 		{"block child leading with the keyword still expands (CONTROL)", `
 security { nat { proxy-arp { interface ge-0-0-0 { address { 192.0.2.1; to 192.0.2.3; } } } } }`,
 			[]string{"192.0.2.1/32", "192.0.2.2/32", "192.0.2.3/32"},
-			[]string{"192.0.2.1/32", "192.0.2.2/32", "192.0.2.3/32"}},
+			[]string{"192.0.2.1/32", "192.0.2.2/32", "192.0.2.3/32"}, false},
 		{"well-formed range still expands (CONTROL)", `
 security { nat { proxy-arp { interface ge-0-0-0 { address 192.0.2.1 to 192.0.2.3; } } } }`,
 			[]string{"192.0.2.1/32", "192.0.2.2/32", "192.0.2.3/32"},
-			[]string{"192.0.2.1/32", "192.0.2.2/32", "192.0.2.3/32"}},
+			[]string{"192.0.2.1/32", "192.0.2.2/32", "192.0.2.3/32"}, false},
 		{"plain list keeps the #6659 widening (CONTROL)", `
 security { nat { proxy-arp { interface ge-0-0-0 { address [ 192.0.2.1 192.0.2.2 ]; } } } }`,
 			[]string{"192.0.2.1/32", "192.0.2.2/32"},
-			[]string{"192.0.2.1/32", "192.0.2.2/32"}},
+			[]string{"192.0.2.1/32", "192.0.2.2/32"}, false},
 		{"plain block keeps the #6659 widening (CONTROL)", `
 security { nat { proxy-arp { interface ge-0-0-0 { address { 192.0.2.1; 192.0.2.2; } } } } }`,
 			[]string{"192.0.2.1/32", "192.0.2.2/32"},
-			[]string{"192.0.2.1/32", "192.0.2.2/32"}},
+			[]string{"192.0.2.1/32", "192.0.2.2/32"}, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			// STRICT: the keyword must never reach
-			// validateProxyARPAddressesStrict, or the widened read invents a
-			// commit rejection master never made.
-			cfg, err := CompileConfig(hierTree6659(t, tc.cfg))
-			if err != nil {
+			// STRICT verdict. Two separate claims, both required:
+			//
+			//  1. #6714: a statement whose `to` neither range branch consumed
+			//     must be REJECTED at commit rather than silently installing
+			//     its first value. A CONTROL row must still be accepted, which
+			//     is what proves the gate fires on the fall-through and not on
+			//     "the config mentions a range".
+			//  2. #6673: the rejection must be the STATEMENT-level one, never
+			//     an address-parse failure on a materialised "to/32". The `to`
+			//     token is grammar, not an address; if it ever reaches
+			//     Addresses the message below changes and this row fails.
+			_, strictErr := CompileConfig(hierTree6659(t, tc.cfg))
+			switch {
+			case tc.wantStrictReject && strictErr == nil:
+				t.Fatalf("strict compile ACCEPTED a statement whose `to` fell " +
+					"through both range branches; the compiler installs only " +
+					"its first value, so accepting it is the silent drop #6714 " +
+					"exists to close")
+			case !tc.wantStrictReject && strictErr != nil:
 				t.Fatalf("strict compile rejected a config master accepted: %v\n"+
 					"the `to` token is grammar, not an address; letting it "+
 					"materialise as \"to/32\" makes the proxy-ARP validator "+
-					"reject it", err)
+					"reject it", strictErr)
+			case tc.wantStrictReject:
+				if msg := strictErr.Error(); !strings.Contains(msg, "is not a valid address statement") {
+					t.Fatalf("strict rejection came from the wrong gate: %v\n"+
+						"expected the #6714 STATEMENT-level message; an "+
+						"address-parse rejection here means the `to` keyword "+
+						"materialised as an address (the #6673 regression)", strictErr)
+				}
+			}
+
+			// The parity assertions run on the TOLERANT path — the one an
+			// already-persisted config boots through, and the one whose
+			// installed set #6673 measured against origin/master. The compile
+			// stage is shared, so these are the same compiled Addresses the
+			// strict path produced before this gate existed.
+			cfg, err := CompileConfigLenient(hierTree6659(t, tc.cfg))
+			if err != nil {
+				t.Fatalf("tolerant compile failed: %v", err)
 			}
 			var got []string
 			for _, e := range cfg.Security.NAT.ProxyARP {

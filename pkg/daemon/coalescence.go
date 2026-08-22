@@ -189,6 +189,14 @@ func applyCoalescenceOne(iface string, adaptiveEnable bool, rxUsecs, txUsecs int
 // output at least resembled what we expect).
 func parseEthtoolCoalesce(out []byte) (rxUsecs, txUsecs int, adaptRX, adaptTX bool, parsed bool) {
 	scanner := bufio.NewScanner(bytes.NewReader(out))
+	// #5250 (A7-b1 F1): bufio.Scanner's default 64 KiB line cap turns a single
+	// over-long line into a SILENT truncation of the rest of the output — the
+	// remaining fields would read as absent and the live/desired comparison
+	// would decide "mismatch" on a partial parse, rewriting coalescence on
+	// every commit. Raise the cap and, if the scan still errors, report
+	// parsed=false so the caller writes blindly (its documented fail-safe)
+	// instead of comparing against half-read values.
+	scanner.Buffer(make([]byte, 0, 64*1024), ethtoolCoalesceMaxLine)
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
 		if line == "" {
@@ -228,8 +236,18 @@ func parseEthtoolCoalesce(out []byte) (rxUsecs, txUsecs int, adaptRX, adaptTX bo
 			parsed = true
 		}
 	}
+	if err := scanner.Err(); err != nil {
+		slog.Warn("linksetup: ethtool -c output scan failed, treating probe as unparseable",
+			"err", err)
+		return 0, 0, false, false, false
+	}
 	return rxUsecs, txUsecs, adaptRX, adaptTX, parsed
 }
+
+// ethtoolCoalesceMaxLine is the per-line ceiling for the `ethtool -c` probe
+// scan. Real output lines are a few dozen bytes; 1 MiB is far past any
+// plausible driver verbosity while still bounding the read.
+const ethtoolCoalesceMaxLine = 1 << 20
 
 // parseLabelledInt returns the integer value that follows label in
 // line, or (0, false) if the line doesn't start with label. Tolerates

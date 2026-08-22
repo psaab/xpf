@@ -1213,8 +1213,17 @@ func (m *Manager) SetSessionV4(key dataplane.SessionKey, val dataplane.SessionVa
 // while holding m.mu, so resolving both requests during one continuous hold
 // guarantees the forward/reverse pair derives from the SAME snapshot.
 // Transmitting only after both builds preserves the deliberate "socket I/O
-// must not block snapshot publishes" property (syncSessionRequestsLocked
-// drops m.mu for the send).
+// must not block snapshot publishes" property (the transmit drops m.mu for the
+// send).
+//
+// #5698: the transmit goes through syncSessionPairLocked, which holds
+// m.sessionMu for BOTH requests. The single m.mu unlock says nothing about
+// session-socket ordering — the per-request path frees m.sessionMu between
+// requests, and a concurrent generation-0 forward delete landing in that gap
+// removes both halves in the helper, after which this pair's already-built
+// explicit reverse re-creates a standalone reverse-only permit. One
+// m.sessionMu hold removes the gap. It does not make the pair ATOMIC: a
+// transport failure on the reverse still leaves the forward installed alone.
 func (m *Manager) mirrorSessionPairV4(key dataplane.SessionKey, val dataplane.SessionValue) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -1239,10 +1248,11 @@ func (m *Manager) mirrorSessionPairV4(key dataplane.SessionKey, val dataplane.Se
 		revVal.FibGen = 0
 		reqs = append(reqs, m.buildSessionSyncRequestV4("upsert", val.ReverseKey, &revVal))
 	}
-	// Snapshot reads are complete; transmit both requests in sequence. The
-	// mirror upsert is best-effort (the periodic session sync reconciles a
-	// transient miss), so the helper IPC error is intentionally discarded.
-	_ = m.syncSessionRequestsLocked(reqs...)
+	// Snapshot reads are complete; transmit both requests under ONE sessionMu
+	// hold so nothing interleaves between the halves (#5698). The mirror upsert
+	// is best-effort (the periodic session sync reconciles a transient miss),
+	// so the helper IPC error is intentionally discarded.
+	_ = m.syncSessionPairLocked(reqs...)
 }
 
 func (m *Manager) SetClusterSyncedSessionV4(key dataplane.SessionKey, val dataplane.SessionValue) error {
@@ -1365,9 +1375,10 @@ func (m *Manager) SetSessionV6(key dataplane.SessionKeyV6, val dataplane.Session
 }
 
 // mirrorSessionPairV6 is the IPv6 analogue of mirrorSessionPairV4 — see that
-// method for the #5007 single-snapshot rationale. It builds the forward
-// request and its reverse companion under one uninterrupted m.mu hold, then
-// transmits both.
+// method for the #5007 single-snapshot rationale and the #5698 contiguous-
+// transmit rationale. It builds the forward request and its reverse companion
+// under one uninterrupted m.mu hold, then transmits both through
+// syncSessionPairLocked (one m.sessionMu hold for the pair).
 func (m *Manager) mirrorSessionPairV6(key dataplane.SessionKeyV6, val dataplane.SessionValueV6) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -1392,10 +1403,11 @@ func (m *Manager) mirrorSessionPairV6(key dataplane.SessionKeyV6, val dataplane.
 		revVal.FibGen = 0
 		reqs = append(reqs, m.buildSessionSyncRequestV6("upsert", val.ReverseKey, &revVal))
 	}
-	// Snapshot reads are complete; transmit both requests in sequence. The
-	// mirror upsert is best-effort (the periodic session sync reconciles a
-	// transient miss), so the helper IPC error is intentionally discarded.
-	_ = m.syncSessionRequestsLocked(reqs...)
+	// Snapshot reads are complete; transmit both requests under ONE sessionMu
+	// hold so nothing interleaves between the halves (#5698). The mirror upsert
+	// is best-effort (the periodic session sync reconciles a transient miss),
+	// so the helper IPC error is intentionally discarded.
+	_ = m.syncSessionPairLocked(reqs...)
 }
 
 func (m *Manager) SetClusterSyncedSessionV6(key dataplane.SessionKeyV6, val dataplane.SessionValueV6) error {
@@ -1511,7 +1523,12 @@ func (m *Manager) DeleteSessionV6(key dataplane.SessionKeyV6) error {
 // batch/clear session paths transmit under a single control-socket unlock so a
 // large clear stays cooperative and cannot monopolize the shared control socket
 // (#5096). syncSessionRequestsLocked drops and reacquires m.mu once per chunk,
-// giving a concurrent snapshot publish a window between chunks.
+// giving a concurrent snapshot publish a window between chunks, and takes
+// m.sessionMu once per REQUEST so live session installs can interleave INSIDE a
+// chunk. A chunk this large deliberately stays interleavable: the contiguous
+// transmit (syncSessionPairLocked, #5698) is capped at sessionPairMaxRequests
+// precisely because holding m.sessionMu across 256 round trips would starve
+// those installs for minutes.
 const sessionHelperDeleteChunk = 256
 
 // BatchDeleteSessions deletes a batch of IPv4 sessions from the BPF mirror AND
@@ -1921,38 +1938,29 @@ func (m *Manager) syncSessionRequestLocked(req SessionSyncRequest) error {
 	return err
 }
 
-// syncSessionRequestsLocked transmits one or more PRE-BUILT session-sync
-// requests to the Rust helper over the control socket. Like
-// syncSessionRequestLocked it drops m.mu once for the socket I/O (so snapshot
-// publishes are not blocked by a session install) and reacquires it before
-// returning; the caller keeps the lock across the call. It performs NO
-// snapshot reads — callers MUST have built every request under a single,
-// uninterrupted prior m.mu hold so a forward/reverse companion pair is
-// resolved against one consistent snapshot (#5007). Sending both requests
-// under a single unlock also keeps the pair's transmit contiguous.
+// sendSessionSyncBatch transmits reqs through send, which performs one
+// session-socket round trip per request. It is the single implementation of the
+// batch loop shared by syncSessionRequestsLocked (send = the per-request
+// locking wrapper) and syncSessionPairLocked (send = the unlocked inner, under
+// one caller-held sessionMu), so the two transmit paths cannot drift apart on
+// error handling.
 //
 // It attempts every request as long as the helper keeps answering — an
 // APPLICATION-level rejection of one request (helper alive, resp.OK=false) does
 // not stop the loop, so a bulk revocation drops as many helper sessions as it
 // can. It returns the FIRST helper IPC error encountered, or nil if all
-// succeeded. Best-effort mirror callers (mirrorSessionPair*, batch delete)
-// discard the result; the authoritative clear-all path (#5881) propagates it so
-// a failed helper revocation is reported instead of masquerading as success.
+// succeeded.
 //
 // #5380: if a request fails at the TRANSPORT layer (dial/write/read wrapped
 // with errSessionHelperUnreachable), the helper is down or hung and every
-// remaining request in this batch would pay the full per-request deadline too.
-// A bulk delete chunk is up to sessionHelperDeleteChunk (256) requests, so
-// looping on would stall bulk session ops — and repeatedly hold sessionMu,
-// starving live session installs — for ~256 * sessionSyncRoundtripDeadline
-// (~13 min). So the batch fast-fails: it stops after the first transport
-// failure and returns it. The mirror is best-effort — the periodic sweep
-// retries once the helper is healthy again.
-func (m *Manager) syncSessionRequestsLocked(reqs ...SessionSyncRequest) error {
-	if len(reqs) == 0 {
-		return nil
-	}
-	m.mu.Unlock()
+// remaining request would pay the full per-request deadline too. A bulk delete
+// chunk is up to sessionHelperDeleteChunk (256) requests, so looping on would
+// stall bulk session ops — and repeatedly hold sessionMu, starving live session
+// installs — for ~256 * sessionSyncRoundtripDeadline (~13 min). So the batch
+// fast-fails: it stops after the first transport failure and returns it. The
+// mirror is best-effort — the periodic sweep retries once the helper is healthy
+// again.
+func sendSessionSyncBatch(reqs []SessionSyncRequest, send func(ControlRequest) error) error {
 	var firstErr error
 	for i := range reqs {
 		ctrlReq := ControlRequest{
@@ -1960,7 +1968,7 @@ func (m *Manager) syncSessionRequestsLocked(reqs ...SessionSyncRequest) error {
 			SuppressStatus: true,
 			SessionSync:    &reqs[i],
 		}
-		if err := m.requestSessionSync(ctrlReq); err != nil {
+		if err := send(ctrlReq); err != nil {
 			slog.Debug("userspace session sync mirror failed", "operation", reqs[i].Operation, "err", err)
 			if firstErr == nil {
 				firstErr = err
@@ -1972,6 +1980,99 @@ func (m *Manager) syncSessionRequestsLocked(reqs ...SessionSyncRequest) error {
 			}
 		}
 	}
+	return firstErr
+}
+
+// syncSessionRequestsLocked transmits one or more PRE-BUILT session-sync
+// requests to the Rust helper over the session socket. Like
+// syncSessionRequestLocked it drops m.mu once for the socket I/O (so snapshot
+// publishes are not blocked by a session install) and reacquires it before
+// returning; the caller keeps the lock across the call. It performs NO
+// snapshot reads — callers MUST have built every request under a single,
+// uninterrupted prior m.mu hold so a forward/reverse companion pair is
+// resolved against one consistent snapshot (#5007).
+//
+// The single m.mu unlock buys exactly two things and NOTHING more: the
+// deliberate "socket I/O must not block snapshot publishes" property, and the
+// #5007 one-snapshot build (every request was resolved before the lock was
+// dropped). It does NOT make the transmit contiguous. This path acquires and
+// releases m.sessionMu once PER request (requestSessionSync), so m.sessionMu is
+// free between consecutive requests and an unrelated session-socket mutation —
+// an operator clear, a policy invalidation, a GC delete, a stale-session
+// reconciliation — can land between them (#5698). That interleaving is the
+// CORRECT behaviour here: a bulk caller passes up to sessionHelperDeleteChunk
+// (256) requests, and holding sessionMu across a chunk that large would starve
+// live session installs for minutes — the exact harm the #5380 fast-fail
+// exists to avoid. Contiguity, where a group genuinely must not be split,
+// comes from syncSessionPairLocked's single sessionMu hold instead.
+//
+// It returns the FIRST helper IPC error encountered, or nil if all succeeded.
+// Best-effort mirror callers (batch delete) discard the result; the
+// authoritative clear-all path (#5881) propagates it so a failed helper
+// revocation is reported instead of masquerading as success.
+func (m *Manager) syncSessionRequestsLocked(reqs ...SessionSyncRequest) error {
+	if len(reqs) == 0 {
+		return nil
+	}
+	m.mu.Unlock()
+	firstErr := sendSessionSyncBatch(reqs, m.requestSessionSync)
+	m.mu.Lock()
+	return firstErr
+}
+
+// sessionPairMaxRequests is the hard cap on how many requests
+// syncSessionPairLocked will transmit under ONE m.sessionMu hold. The only
+// group that needs an uninterrupted transmit is a forward session plus its
+// pre-installed reverse companion (#310), so two is the real bound; the
+// constant exists so a future caller cannot quietly turn the contiguous path
+// into a bulk path. Holding sessionMu across a large group would starve live
+// session installs — see the #5380 note on sendSessionSyncBatch — so a group
+// larger than this falls back to the per-request discipline rather than
+// trading a rare interleave for a multi-minute install stall.
+const sessionPairMaxRequests = 2
+
+// syncSessionPairLocked transmits a SMALL, PRE-BUILT group of session-sync
+// requests to the Rust helper with nothing interleaved between them.
+//
+// Like syncSessionRequestsLocked it drops m.mu once for the socket I/O and
+// reacquires it before returning, so snapshot publishes are still never blocked
+// by a session install and the #5007 one-snapshot build still holds. The
+// difference is m.sessionMu: this path takes it ONCE for the whole group
+// instead of once per request, so no other session-socket caller can run
+// between the group's members. That closes the #5698 window in which a
+// generation-0 forward delete landed between a pair's forward and its reverse:
+// the delete removed BOTH halves in the helper, and the pair's already-built
+// explicit reverse then re-created a standalone reverse-only permit.
+//
+// The group is capped at sessionPairMaxRequests. A larger group falls back to
+// syncSessionRequestsLocked's per-request locking: an oversized contiguous hold
+// would starve live session installs, which is a worse failure than the
+// interleave it would prevent. The fallback is logged because reaching it means
+// a caller mis-sized the group — it is unreachable from the pair mirrors, which
+// build at most two requests.
+//
+// Error semantics are identical to syncSessionRequestsLocked (see
+// sendSessionSyncBatch): first error wins, application-level rejections do not
+// stop the group, a transport failure aborts it.
+//
+// RESIDUAL (deliberately out of scope): this makes the pair's transmit
+// contiguous, not atomic. If the SECOND request fails at the transport layer
+// the helper is left with a half-installed pair; nothing rolls the first half
+// back. Closing that needs a helper-side pair transaction over the wire.
+func (m *Manager) syncSessionPairLocked(reqs ...SessionSyncRequest) error {
+	if len(reqs) == 0 {
+		return nil
+	}
+	if len(reqs) > sessionPairMaxRequests {
+		slog.Error("userspace session pair transmit oversized; falling back to "+
+			"per-request locking (no contiguity guarantee)",
+			"requests", len(reqs), "max", sessionPairMaxRequests)
+		return m.syncSessionRequestsLocked(reqs...)
+	}
+	m.mu.Unlock()
+	m.sessionMu.Lock()
+	firstErr := sendSessionSyncBatch(reqs, m.requestSessionSyncLocked)
+	m.sessionMu.Unlock()
 	m.mu.Lock()
 	return firstErr
 }

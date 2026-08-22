@@ -638,6 +638,32 @@ type NATConfig struct {
 type ProxyARPEntry struct {
 	Interface string
 	Addresses []string // /32 CIDRs (expanded from ranges)
+	// MalformedRangeSpecs records every proxy-arp `address` STATEMENT on this
+	// interface whose token stream still carried the `to` range keyword after
+	// neither well-formed range shape consumed it (#6714). Two things reach it:
+	// a genuinely broken range (`address [ to 192.0.2.1 ]`, `address 192.0.2.1
+	// to`), and a LIST that MIXES discrete addresses with a range
+	// (`address [ 192.0.2.1 192.0.2.2 to 192.0.2.9 ]`), which is not authorable
+	// Junos — the leaf takes one address/prefix, one `<low> to <high>` range, or
+	// a bracketed list of plain addresses, never a mixture.
+	//
+	// Both compile to what MASTER installed: proxyARPAddressValues falls back to
+	// the single-value read for such a statement (#6673 pinned that against
+	// origin/master through the installer's own netip.ParsePrefix gate), so the
+	// dataplane answers ARP for exactly the addresses it did before. What was
+	// missing was any signal that the rest of the statement had been discarded:
+	// `show configuration` rendered the whole list back and the compiler
+	// installed one address of it. This field is that signal —
+	// validateProxyARPAddressesStrict hard-rejects at commit and the call site
+	// downgrades to a warning on the tolerant load / peer-sync path (#1960
+	// no-brick), so an already-persisted config still boots with the identical
+	// installed set.
+	//
+	// `json:"-"`: a compile-time diagnostic artifact recomputed on every
+	// compile. It does not cross the wire to the Rust helper and must not leak
+	// into configstore.ExportJSON's dump of the compiled *config.Config —
+	// mirrors NATPool.PortRangeInvalidSpec.
+	MalformedRangeSpecs []string `json:"-"`
 }
 
 // PoolUtilizationAlarmConfig configures NAT pool utilization alarms.

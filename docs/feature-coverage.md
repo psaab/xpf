@@ -300,7 +300,12 @@ the userspace dataplane admission boundary is in
 ## Observability
 
 - **Syslog**: facility/severity/category filtering, structured RT_FLOW
-  format, TCP/TLS transport, event mode local file.
+  format, TCP/TLS transport, event mode local file. A `system syslog file`
+  destination is written to `/var/log/<name>` via an rsyslog drop-in; its
+  `archive` block (rotation, retention, `start-time`, `transfer-interval`,
+  `archive-sites`) is accepted for Junos compatibility but **not implemented**
+  and raises a commit advisory saying so (#7146) — xpf does not rotate or
+  archive these files.
 - **NetFlow v9 / IPFIX**: 1-in-N sampling (IPFIX advertises the rate to
   collectors via a sampler Options Template — Set ID 3, template 258,
   `selectorAlgorithm`/`samplingPacketInterval`/`samplingPacketSpace`, scoped by

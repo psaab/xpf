@@ -62,6 +62,14 @@ func TestDNATInterfaceAddressCollisionWarns(t *testing.T) {
 		"172.16.50.8",
 		"ge-0/0/2.0",
 		"INERT on the first packet",
+		// The advisory must state the DISPOSITION truthfully. Track-2 (the
+		// dedicated-intent-map dataplane fix) was #6051 and is plan-killed, so
+		// this warning is the terminal mitigation. It previously promised a
+		// "deferred (Track-2)" fix; an operator reading that would wait for
+		// something that is not coming instead of applying the workaround the
+		// same sentence offers.
+		"the dataplane fix is not planned (#6051)",
+		"Use a non-interface public address",
 	} {
 		if !strings.Contains(w, want) {
 			t.Fatalf("advisory missing %q, got: %s", want, w)
@@ -107,6 +115,10 @@ func TestStaticNATInterfaceAddressCollisionWarns(t *testing.T) {
 		"security nat static rule-set \"RS\" rule \"R1\"",
 		"172.16.50.8",
 		"ge-0/0/2.0",
+		// Same disposition claim as the DNAT advisory (see above): #6051 is
+		// plan-killed, so the sentence must not promise a deferred fix.
+		"the dataplane fix is not planned (#6051)",
+		"Use a non-interface external address",
 	} {
 		if !strings.Contains(ws[0], want) {
 			t.Fatalf("advisory missing %q, got: %s", want, ws[0])

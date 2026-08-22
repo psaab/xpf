@@ -262,8 +262,20 @@ func (d *Daemon) armBootstrapExitDataplane(nodeID int) {
 		slog.Warn("bootstrap exit: failed to start dataplane, running in config-only mode",
 			"err", err)
 		d.setDataplane(nil)
+		// #5275: runBootstrapExitStartup just called enableForwarding in
+		// anticipation of this arm. The arm failed, so the node has no
+		// policy enforcement and must not carry transit — close the knobs
+		// again, before the reconcile this exit precedes.
+		d.markDataplaneArmFailed("bootstrap exit: dataplane start failed",
+			"check `journalctl -u xpfd` for the shim/AF_XDP attach error, then "+
+				"correct the config and re-commit, or restart xpfd", err)
 		return
 	}
+	// #5275: the RE-ARM path. Boot left the knobs closed (bootstrap is
+	// transit-off), so recovery has to re-open them here — otherwise the
+	// first good commit would leave a correctly-armed node forwarding
+	// nothing until a daemon restart.
+	d.markDataplaneArmed("bootstrap exit")
 	if seeder, ok := rt.(natSeeder); ok {
 		seeder.SeedNATPortCounters()
 		seeder.SeedSessionIDCounter(nodeID)

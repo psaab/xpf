@@ -796,6 +796,29 @@ func validateFirewallFilterFamilyAnyMatchesAST(nodes []*Node, lenient bool) ([]s
 // Returning the full slice lets the caller ACCUMULATE repeated occurrences into
 // a match-ANY set instead of overwriting (the prior scalar last-write-wins bug).
 // Empty / blank tokens are skipped so an empty result means "criterion absent".
+//
+// #6714: EVERY key of each child, not Keys[0]. The node's own tail was already
+// read in full (Keys[1:]), so taking one key per child made the identical token
+// sequence read differently depending on which side of the AST the parser put
+// it on — `flag basic-datapath session;` kept both and
+// `flag { basic-datapath session; }` kept one. That shape comes from a
+// hand-authored or `load merge`d file (a value tail packed onto a statement
+// inside a value block, or a bracket list nested in one); the canonical Junos
+// spellings put one token per child, which is why it survived every
+// brace-authored fixture in this package.
+//
+// Two things it is deliberately NOT:
+//
+//   - It does NOT descend. A child with a sub-block (`neighbor 10.0.0.1
+//     { metric 2; }`) contributes its NAME only; descending would promote
+//     `metric` and `2` into the value list. That is the line between this and
+//     plainListValues (ast.go), which descends and must only ever be pointed at
+//     a leaf whose subtree is entirely values.
+//   - It does NOT become safe for a leaf with per-value option KEYWORDS. It
+//     already promoted every token of the node's own tail, so a leaf like
+//     `ntp server <ip> prefer` was never eligible and still keeps its own
+//     reader (ntpServerValues). This change did not widen that exposure; it
+//     made the two sides of one node agree.
 func firewallMatchValues(child *Node) []string {
 	var vals []string
 	for _, k := range child.Keys[1:] {
@@ -804,8 +827,10 @@ func firewallMatchValues(child *Node) []string {
 		}
 	}
 	for _, vn := range child.Children {
-		if len(vn.Keys) >= 1 && vn.Keys[0] != "" {
-			vals = append(vals, vn.Keys[0])
+		for _, k := range vn.Keys {
+			if k != "" {
+				vals = append(vals, k)
+			}
 		}
 	}
 	return vals

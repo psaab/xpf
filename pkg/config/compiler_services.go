@@ -2108,8 +2108,27 @@ func compileEventOptions(node *Node, policies *[]*EventPolicy) error {
 			case "attributes-match":
 				ep.AttributesMatch = append(ep.AttributesMatch, eventAttributesMatchExprs(child)...)
 			case "then":
-				if ccNode := child.FindChild("change-configuration"); ccNode != nil {
-					if cmdsNode := ccNode.FindChild("commands"); cmdsNode != nil {
+				// #6714: FindChildren, not FindChild, on BOTH levels. The
+				// hierarchical parser keeps repeated same-keyed statements as
+				// SIBLINGS (parseStatements), so
+				// `change-configuration { commands "a"; commands "b"; }`
+				// arrives as two `commands` nodes and two
+				// `change-configuration { ... }` blocks arrive as two nodes.
+				// The first-only read compiled command "a" and silently
+				// discarded every later one — a remediation action the operator
+				// authored that never runs, with nothing on any surface saying
+				// so (`show event-options` renders the config back intact).
+				//
+				// This is spelling-dependent, which is why it survived the
+				// #2419 differential gate: the FLAT-SET spelling
+				// (`set … commands "a"` / `set … commands "b"`) already kept
+				// both, because SetPath merges the repeated leaf into ONE node
+				// instead of appending a sibling. Only the brace-authored file
+				// dropped — and the gate does not compare the repeated
+				// spellings here at all, because setSchema marks `commands`
+				// scalar (see docs/config-schema.md).
+				for _, ccNode := range child.FindChildren("change-configuration") {
+					for _, cmdsNode := range ccNode.FindChildren("commands") {
 						ep.ThenCommands = append(ep.ThenCommands, eventChangeConfigCommands(cmdsNode)...)
 					}
 				}

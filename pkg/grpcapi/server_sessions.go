@@ -324,7 +324,7 @@ func (s *Server) getSessionsCursor(ctx context.Context, req *pb.GetSessionsReque
 func (s *Server) setSessionsTotal(resp *pb.GetSessionsResponse, f *sessionFilter) error {
 	if !f.hasFilters {
 		v4, v6 := s.dp.SessionCount()
-		resp.Total = int32(v4 + v6)
+		resp.Total = clampInt32(int64(v4) + int64(v6))
 		return nil
 	}
 	total := 0
@@ -344,7 +344,7 @@ func (s *Server) setSessionsTotal(resp *pb.GetSessionsResponse, f *sessionFilter
 	}); err != nil {
 		return status.Errorf(codes.Internal, "v6 session count: %v", err)
 	}
-	resp.Total = int32(total)
+	resp.Total = clampInt32(int64(total))
 	return nil
 }
 

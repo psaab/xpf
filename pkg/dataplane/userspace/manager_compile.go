@@ -244,7 +244,6 @@ func (m *Manager) Compile(cfg *config.Config) (*dataplane.CompileResult, error) 
 		}
 	}
 	caps := deriveUserspaceCapabilities(cfg)
-	_ = caps // used below for helper config
 	// Userspace mode always attaches the retained XDP shim. The shim
 	// redirects to XSK when ctrl=1; when ctrl=0 it only passes proven
 	// local/control traffic to the kernel and drops transit. Do not swap to
@@ -277,8 +276,52 @@ func (m *Manager) Compile(cfg *config.Config) (*dataplane.CompileResult, error) 
 	m.mu.Lock()
 	snap.ColdPathSampleMask = m.coldPathSampleMask
 	m.mu.Unlock()
-	m.syncInterfaceAttachments(result, snap)
+	return m.applyCompiledSnapshot(cfg, result, snap, ucfg, caps)
+}
 
+// applyCompiledSnapshot is everything Compile does after the XDP shim is
+// attached and the snapshot is built: publish the snapshot to the running Rust
+// helper (or defer it during XSK startup), advance the retained authority, and
+// only THEN reconcile the kernel attachment set.
+//
+// #5485 — WHY THE DETACH LIVES HERE AND NOT AT THE TOP OF THE APPLY.
+// syncInterfaceAttachments detaches XDP and TC from every ifindex the NEW
+// snapshot no longer lists as an adjudicated ingress. It used to run BEFORE
+// this critical section, i.e. before the helper had accepted anything, so every
+// failure between it and a successful apply_snapshot left the KERNEL on the new
+// interface set while m.lastSnapshot — the authority the fail-closed comments
+// promise is "retained" — was still the OLD one.
+//
+// That divergence is a policy BYPASS, not just an outage. Both pre-publish
+// failure modes drive the shim to ctrl.Enabled=0 (programBootstrapMapsLocked
+// programs it disabled; publishSnapshotFailClosedLocked disables it on the
+// same-plan path), and a disabled ctrl makes the shim DROP transit —
+// degraded_ctrl_disabled_action runs before the ingress-map test in
+// userspace-xdp/src/lib.rs, so an interface that still carries the shim is
+// still fail-closed. An interface that has been DETACHED is not: it has no XDP
+// program at all, so with ip_forward=1 its traffic goes straight into the Linux
+// stack, unadjudicated by xpf, while the daemon reports the previous-good
+// snapshot as retained.
+//
+// Deferring the detach to the acceptance points creates the mirror-image
+// transient — attached shim, interface already gone from the applied snapshot —
+// and that one is harmless in BOTH ctrl states: an ifindex absent from
+// userspace_ingress_ifaces takes cpumap_or_pass (the kernel path, identical to
+// having no program), and a still-disabled ctrl drops transit, which is the
+// fail-closed direction. So the window this ordering opens can only be as
+// permissive as the detach it replaces, never more.
+//
+// The ATTACH half stays before the publish deliberately: the helper cannot bind
+// an AF_XDP socket to an interface with no shim, so staging it later is not
+// possible, and its failure mode is an extra fail-closed drop on an interface
+// xpf was in the middle of claiming — not a bypass.
+func (m *Manager) applyCompiledSnapshot(
+	cfg *config.Config,
+	result *dataplane.CompileResult,
+	snap *ConfigSnapshot,
+	ucfg config.UserspaceConfig,
+	caps UserspaceCapabilities,
+) (*dataplane.CompileResult, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	// #3261: record whether this snapshot carries unrepresentable policy
@@ -356,6 +399,12 @@ func (m *Manager) Compile(cfg *config.Config) (*dataplane.CompileResult, error) 
 			}
 		}
 		m.lastSnapshot = snap
+		// #5485: the retained authority is now the NEW snapshot, and the
+		// classifier maps above already dropped the obsolete ifindexes from
+		// userspace_ingress_ifaces, so the kernel attachment set may follow.
+		// The publish is deferred, not skipped — this branch still returns nil
+		// and its snapshot is what every later reader enforces.
+		m.syncInterfaceAttachments(result, snap)
 		m.cfg = ucfg
 		m.recordApplyResultLocked(dataplane.ApplyResultFromCompileResult(result), caps, snap.Generation)
 		slog.Info(
@@ -406,6 +455,13 @@ func (m *Manager) Compile(cfg *config.Config) (*dataplane.CompileResult, error) 
 	}
 	m.logWgEndpointSetTransitionLocked(&publishSnap, "apply")
 	m.lastSnapshot = snap
+	// #5485: apply_snapshot landed and the retained authority has advanced, so
+	// the obsolete XDP/TC attachments may now be reconciled away. Placed
+	// immediately after the acceptance rather than at the tail of this function
+	// so the later status/HA/forwarding steps — every one of which can fail
+	// AFTER the snapshot is already the authority — cannot strand a stale
+	// attachment for an interface the applied snapshot no longer adjudicates.
+	m.syncInterfaceAttachments(result, snap)
 	// #1197 v4: apply_snapshot succeeded — userspace-dp has the
 	// new neighbors. NOW rebuild listener caches; before this
 	// point the index would shadow events for entries the

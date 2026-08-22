@@ -44,20 +44,38 @@ func compileRoutingOptions(node *Node, ro *RoutingOptionsConfig) error {
 	// gate wants (every named policy must exist) and what makes the cardinality
 	// gate see the ambiguity.
 	//
-	// KNOWN BLIND SPOT (#6714, unchanged from master, deliberately not fixed
-	// here): the FindChild below takes the FIRST `forwarding-table` block only.
-	// Two blocks inside ONE `routing-options` root —
-	// `forwarding-table { export p1; } forwarding-table { export p2; }` — leave
-	// p2 invisible to BOTH the scalar and the list, so the cardinality gate
-	// cannot see the ambiguity it exists to reject and the config commits clean.
-	// Repeated `routing-options` ROOTS are handled (compiler_dispatch.go calls
-	// this per root); repeated sibling BLOCKS within a root are not. Widening it
-	// is a FindChild-vs-FindChildren change of the same class as the `export`
-	// leaf itself and belongs with the other repeated-block sites in #6714,
-	// not bundled into the empty-value fold.
-	if ftNode := node.FindChild("forwarding-table"); ftNode != nil {
+	// #6714: the LIST accumulates across every `forwarding-table` block, the
+	// SCALAR still comes from the first one.
+	//
+	// The parser keeps repeated same-keyed blocks as siblings, so
+	// `forwarding-table { export p1; } forwarding-table { export p2; }` inside
+	// ONE `routing-options` root is two nodes. The pre-#6714 FindChild read
+	// took the first block only, which left p2 invisible to BOTH halves: it was
+	// neither rendered NOR reference-checked, and the cardinality gate below
+	// could not see the ambiguity it exists to reject, so the config committed
+	// clean while exactly one of the two authored policies took effect. That is
+	// the same defect as the `export` LEAF one line down, one level up the tree.
+	//
+	// Only the plural widens. ForwardingTableExport is the value the FRR
+	// renderer installs, and master selected it from the FIRST block; keeping
+	// that binding means this change cannot move which policy renders on any
+	// config, it can only make an ambiguous one operator-visible — strict
+	// rejects at commit, tolerant load / peer-sync warns and renders the same
+	// policy as before (#1960 no-brick). Two blocks naming the SAME policy
+	// still commit clean: validateForwardingTableExportSingleStrict counts
+	// DISTINCT non-empty values (#6673).
+	for i, ftNode := range node.FindChildren("forwarding-table") {
 		for _, expNode := range ftNode.FindChildren("export") {
 			ro.ForwardingTableExports = append(ro.ForwardingTableExports, multiLeafAuthoredValues(expNode)...)
+		}
+		// The FIRST block, not the first block that HAS an export: master
+		// resolved `forwarding-table` with FindChild and then looked for an
+		// export inside whatever it got, so a leading export-less block left
+		// the scalar unset. Selecting the next block's export instead would
+		// make this change render a policy master did not, which is the one
+		// thing it must not do.
+		if i > 0 {
+			continue
 		}
 		if expNode := ftNode.FindChild("export"); expNode != nil {
 			ro.ForwardingTableExport = nodeVal(expNode)

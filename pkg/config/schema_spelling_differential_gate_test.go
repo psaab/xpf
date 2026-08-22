@@ -155,6 +155,25 @@ package config
 //     invisible; that is how #6697 hid from version two, and — via trap (4) —
 //     how it then reported the WRONG verdict at the same five sites.
 //
+// A FIFTH LIMIT, measured by #6714 rather than reasoned about: this gate
+// authors ONE statement per site. Three of #6714's four sites were not a leaf
+// SPELLING at all — a value tail riding on a block CHILD, a repeated
+// `commands` statement, and a second `forwarding-table` BLOCK — and no
+// enumeration over spellings of a single statement can emit any of them. The
+// rule they share: the parser keeps a repeated same-keyed statement as a
+// SIBLING, so a compiler that resolves it with FindChild compiles the first
+// and discards the rest. That is a `FindChild`-vs-`FindChildren` audit, not a
+// differential, and it is written up in docs/config-schema.md ("The one-sided
+// read has a SECOND half").
+//
+// A sixth spelling was measured and deliberately NOT added: `leaf { v1 v2; }`
+// (two tokens on one statement inside a value block) still drops at 30 sites,
+// all of them readers that legitimately take one key per child
+// (multiLeafAuthoredValues, addressSetMemberValues, proxyARPAddressValues).
+// Junos writes one value per statement inside a block, so adding it would
+// assert a defect at 30 sites no operator can author — the same mistake
+// notAValueList exists to avoid.
+//
 // This gate also sees ONE DIRECTION. It detects a compiler DROPPING a value. It
 // cannot detect the opposite defect — a reader PROMOTING a per-value modifier
 // keyword into the value list, the hazard #6690 had to avoid — and no detector

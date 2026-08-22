@@ -64,13 +64,17 @@ func HostInboundLifelineSet(cfg *Config) map[string]bool {
 // traffic on these would strand management or break HA. The base name (before
 // the unit suffix) is matched so "fxp0.0" / "em0.0" are caught too.
 //
-// #3682 design note (follow-up): the em0/fab* match is base-name-prefix based,
-// so a broader interface literally named "fab-foo" would also be exempted, and
-// a standalone config that merely happens to name an interface em0/fabX gets a
-// silent exception with no configured management/cluster role. Whether this
-// should be an EXACT / role-gated match rather than a prefix bypass is tracked
-// as a design question on the issue; #3682 changes VISIBILITY only, not the
-// matching semantics.
+// #5250 (A3-b2 F3): the unconditional fabric fallback is an EXACT canonical-name
+// match ("fab" + one or more digits), not the old `strings.HasPrefix(base,
+// "fab")` bypass. The daemon only ever creates fab0/fab1
+// (daemon_apply_interfaces.go, daemon_ha_fabric.go) and any operator-renamed
+// fabric link is already contributed by HostInboundLifelineSet from the
+// chassis-cluster stanza, so the prefix form bought nothing while silently
+// exempting an unrelated interface literally named "fab-foo"/"fabric-uplink"
+// from host-inbound default-deny — reachable in device-map mode (#1956), where
+// a mapped NIC may be renamed to an operator-chosen name. Narrowing the
+// fallback cannot strand a real fabric or control link: those names come from
+// config, not from this prefix.
 func HostInboundLifelineInterface(name string, lifelines map[string]bool) bool {
 	base := LifelineBaseName(name)
 	if base == "" {
@@ -79,5 +83,23 @@ func HostInboundLifelineInterface(name string, lifelines map[string]bool) bool {
 	if lifelines[base] {
 		return true
 	}
-	return base == "em0" || strings.HasPrefix(base, "fab")
+	return base == "em0" || isCanonicalFabricName(base)
+}
+
+// isCanonicalFabricName reports whether base is one of the daemon-created
+// fabric device names — the literal "fab" followed by at least one digit and
+// nothing else ("fab0", "fab1", "fab10"). "fab", "fab-foo", "fabx0" and
+// "fabric0" are NOT canonical: a configured fabric interface with such a name
+// reaches the lifeline set through HostInboundLifelineSet instead.
+func isCanonicalFabricName(base string) bool {
+	rest, ok := strings.CutPrefix(base, "fab")
+	if !ok || rest == "" {
+		return false
+	}
+	for i := 0; i < len(rest); i++ {
+		if rest[i] < '0' || rest[i] > '9' {
+			return false
+		}
+	}
+	return true
 }

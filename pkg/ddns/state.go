@@ -578,10 +578,33 @@ func quarantineBadState(path string, now time.Time) (string, error) {
 	// Colons are filesystem-hostile; use a compact, sortable stamp.
 	stamp := now.UTC().Format("20060102T150405Z")
 	dst := fmt.Sprintf("%s.corrupt-%s", path, stamp)
-	if err := os.Rename(path, dst); err != nil {
-		return "", fmt.Errorf("quarantine ddns state %s -> %s: %w", path, dst, err)
+	// #6218 item 6: os.Rename silently OVERWRITES an existing destination on
+	// POSIX. The stamp's resolution is one wall-clock SECOND, so a second
+	// quarantine event landing in the same second as an earlier one (a rapid
+	// restart loop, or two callers racing) renamed straight over the first
+	// quarantine file — destroying the only forensic copy of the FIRST
+	// corruption this mechanism exists to preserve (docs at the top of this
+	// function). Probe for a same-stamp collision and disambiguate with a
+	// numeric suffix before renaming, so no quarantine attempt can clobber an
+	// earlier one. maxAttempts is a sanity cap, not a real limit — a genuine
+	// collision run this long is unreachable in practice.
+	const maxAttempts = 1000
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		candidate := dst
+		if attempt > 0 {
+			candidate = fmt.Sprintf("%s.%d", dst, attempt)
+		}
+		if _, err := os.Lstat(candidate); err == nil {
+			continue // candidate already taken; try the next suffix
+		} else if !os.IsNotExist(err) {
+			return "", fmt.Errorf("quarantine ddns state %s -> %s: stat: %w", path, candidate, err)
+		}
+		if err := os.Rename(path, candidate); err != nil {
+			return "", fmt.Errorf("quarantine ddns state %s -> %s: %w", path, candidate, err)
+		}
+		return candidate, nil
 	}
-	return dst, nil
+	return "", fmt.Errorf("quarantine ddns state %s: exhausted %d same-second suffixes", path, maxAttempts)
 }
 
 // degradedMarkerSuffix names the DURABLE fail-closed marker written beside the

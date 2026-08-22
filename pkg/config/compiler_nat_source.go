@@ -165,6 +165,16 @@ func compileNAT(node *Node, sec *SecurityConfig) error {
 				// so a MALFORMED range that fell through the two branches above
 				// does not widen at all: it keeps master's single-value read,
 				// which is what the dataplane installed before #6659 (#6673).
+				//
+				// #6714: that fallback is still a DROP — the operator authored
+				// a list and the compiler installed one address of it with no
+				// diagnostic anywhere. Record the offending statement so the
+				// commit gate can say so; the installed set is untouched, so
+				// this cannot move a single ARP response either way.
+				if proxyARPMalformedRange(prop) {
+					entry.MalformedRangeSpecs = append(entry.MalformedRangeSpecs,
+						strings.Join(proxyARPStatementTokens(prop), " "))
+				}
 				for _, v := range proxyARPAddressValues(prop) {
 					addr := v
 					if !strings.Contains(addr, "/") {
@@ -327,6 +337,32 @@ func proxyARPMalformedRange(prop *Node) bool {
 		}
 	}
 	return false
+}
+
+// proxyARPStatementTokens flattens the whole token stream of ONE proxy-arp
+// `address` statement, in authored order, so a diagnostic can quote what the
+// operator actually wrote rather than what survived the read.
+//
+// It walks the same subtree proxyARPMalformedRange scans, for the same reason:
+// the parser spreads one statement's tokens across the node's own Keys, its
+// children's Keys and (for `address { .1 { to .9; } }`) their grandchildren's,
+// and which slot a token lands in is a property of the authoring shape, not of
+// the statement. The leading `address` keyword is dropped — Keys[0] of the
+// statement node is the leaf name, and every DEEPER node's Keys[0] is a value.
+func proxyARPStatementTokens(prop *Node) []string {
+	if prop == nil {
+		return nil
+	}
+	out := append([]string{}, prop.Keys[1:]...)
+	var walk func(*Node)
+	walk = func(n *Node) {
+		for _, c := range n.Children {
+			out = append(out, c.Keys...)
+			walk(c)
+		}
+	}
+	walk(prop)
+	return out
 }
 
 // nodeSubtreeHasKey reports whether want appears as any key of n or of any

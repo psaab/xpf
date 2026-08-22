@@ -88,14 +88,14 @@ func (s *Server) GetNATDestination(_ context.Context, _ *pb.GetNATDestinationReq
 			}
 		}
 		counts := s.countDNATSessions(zoneByID)
-		resp.TotalActiveTranslations = counts.total
+		resp.TotalActiveTranslations = clampInt32(counts.total)
 		for _, rs := range cfg.Security.NAT.Destination.RuleSets {
 			key := natRuleSetKey{rs.FromZone, rs.ToZone}
 			if cnt, ok := counts.ruleSetSessions[key]; ok {
 				resp.RuleSetSessions = append(resp.RuleSetSessions, &pb.NATRuleSetSessions{
 					FromZone: rs.FromZone,
 					ToZone:   rs.ToZone,
-					Sessions: cnt,
+					Sessions: clampInt32(cnt),
 				})
 			}
 		}
@@ -176,7 +176,7 @@ func (s *Server) GetNATPoolStats(_ context.Context, _ *pb.GetNATPoolStatsRequest
 		}
 		counts = s.countSNATSessions(zoneByID)
 	}
-	resp.TotalActiveTranslations = counts.total
+	resp.TotalActiveTranslations = clampInt32(counts.total)
 
 	// Interface-mode pools. Each interface-mode rule set must report only
 	// the SNAT sessions that traversed its own from/to zone pair, not the
@@ -190,7 +190,7 @@ func (s *Server) GetNATPoolStats(_ context.Context, _ *pb.GetNATPoolStatsRequest
 				resp.Pools = append(resp.Pools, &pb.NATPoolStats{
 					Name:        fmt.Sprintf("%s->%s", rs.FromZone, rs.ToZone),
 					Address:     "interface",
-					UsedPorts:   counts.ruleSetSessions[natRuleSetKey{rs.FromZone, rs.ToZone}],
+					UsedPorts:   clampInt32(counts.ruleSetSessions[natRuleSetKey{rs.FromZone, rs.ToZone}]),
 					IsInterface: true,
 				})
 			}
@@ -204,7 +204,7 @@ func (s *Server) GetNATPoolStats(_ context.Context, _ *pb.GetNATPoolStatsRequest
 			resp.RuleSetSessions = append(resp.RuleSetSessions, &pb.NATRuleSetSessions{
 				FromZone: rs.FromZone,
 				ToZone:   rs.ToZone,
-				Sessions: cnt,
+				Sessions: clampInt32(cnt),
 			})
 		}
 	}

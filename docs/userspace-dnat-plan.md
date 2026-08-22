@@ -445,6 +445,73 @@ bracket/repeated lists lost every prefix after the first (M02).
   the non-scoped / test wrappers pass `None` (source gate skipped), the
   production scoped callers pass `Some(..)`.
 
+### Malformed literal match prefixes rejected at commit (#7145)
+
+Every mechanism above depends on the operator's literal `match source-address` /
+`match destination-address` values being parseable, because the Go snapshot
+builders copy them to the wire VERBATIM and the Rust consumers drop, per entry,
+whatever they cannot parse:
+
+| kind | Rust parse site |
+|---|---|
+| source NAT | `parse_match_prefix` (`nat/source.rs`) |
+| destination NAT | `DnatTable::from_snapshots` (`nat/destination.rs`) |
+| static NAT | `SourceConstraint::from_list` (`nat/static_nat.rs`) |
+
+All three try `IpNet::from_str`, fall back to `IpAddr::from_str` (bare host ->
+/32 / /128), and drop the entry otherwise while recording a bounded NAT
+parse-error counter (#4718). The `*_constrained` flag is keyed on the SNAPSHOT
+LIST being non-empty, not on how many entries parsed — that is what makes the
+all-malformed case fail CLOSED rather than collapse to match-any.
+
+Fail-closed at runtime was never the complaint. The complaint (#7145) was that
+the operator boundary was SILENT about it in four of the six (kind x match leaf)
+slots, while the other two rejected the identical value. Measured at
+`bf10c6b7c` with `999.1.1.1/24`:
+
+| kind | `match source-address` | `match destination-address` |
+|---|---|---|
+| source | accepted -> **rejected** | accepted -> **rejected** |
+| destination | accepted -> **rejected** | rejected (#3228) |
+| static | accepted -> **rejected** | rejected (#3206) |
+
+`validateNATMatchAddressLiteralsStrict`
+(`pkg/config/compiler_validate_strict_nat_match_addr.go`) closes the four. It
+walks ONLY the literal leaves — `match source-address-name` /
+`destination-address-name` are address-book references whose unresolvable raw
+token is appended to the same wire list ON PURPOSE (#2416, above), so a gate
+that walked the post-resolution list would reject the fail-closed backstop
+itself.
+
+The predicate is `net.ParseCIDR` then `net.ParseIP` (`natMatchPrefixParses`,
+`compiler_nat_helpers.go`), chosen over the `netip` equivalents because
+`netip.ParsePrefix` is STRICTER than Rust on the mask text — it rejects a
+zero-padded prefix length (`1.2.3.4/024`) that Rust's `u8::from_str` reads as
+24 and installs. Rejecting a value the dataplane installs is the one direction
+a widened validator must never take.
+
+Strict on commit / commit-check (hard reject naming the kind, rule-set, rule,
+leaf, and value); lenient on load / peer-sync (warn, flag
+`lenientNATMatchAddressLiterals`, #1960 no-brick — the value COMMITTED CLEAN on
+every build before this, so the population of boxes carrying one is non-empty by
+construction). **The tolerant path KEEPS the malformed value in the compiled
+config.** Dropping it Go-side would empty an all-malformed list, clear
+`*_constrained` and collapse the rule to MATCH-ANY — turning a fail-closed
+silent break into a fail-OPEN one.
+
+Known residuals, measured, NOT closed by #7145 (they are a different value
+class from the issue's malformed CIDR):
+
+- **#7215** — an out-of-range mask (`10.0.0.0/33`) is still accepted on
+  destination-NAT `match destination-address`. That slot's own gate (#3228)
+  strips the mask and parses only the address part, while its Go builder
+  (`dnatDestinationParts`) uses `net.ParseCIDR` and skips the entry — a
+  validator/builder divergence in the OLDER gate.
+- **#7216** — an explicitly quoted empty value (`match destination-address ""`)
+  is still accepted on static-NAT `match destination-address`, where an empty
+  slot carries the deliberate #6673 "authored blank selection" meaning, so
+  closing it needs to separate a machinery-produced blank from a typed one.
+
 ### Static-NAT invalid `match destination-port` fails closed (#5101)
 
 The static-NAT typed `match destination-port` / `mapped-port` leaves are
@@ -987,8 +1054,29 @@ VIPs, so a VIP stays kernel-local and a DNAT/static match on it is still inert
 (still warns). The advisory now fires only when the address is genuinely
 kernel-local, not when it is interface-NAT-routed.
 
-**Track-2 (deferred): the full dataplane fix.** A dedicated intent map probed
+**Track-2 (NOT PLANNED): the full dataplane fix.** A dedicated intent map probed
 before the local classification (Option B) is a large, verifier-gated, HA-aware
-project deferred by the converged #5837 research plan
-(`docs/research/5837-xdp-dnat-before-local/plan.md` §0/§0a/§0b). Until it lands
-the commit warning is the honest mitigation.
+project. It was tracked as #6051 and is **plan-killed** — the commit warning is
+the terminal mitigation, not an interim one.
+
+The three reasons, all still true at HEAD:
+
+- **The verifier constraint is real and current.** `is_local_destination` lives
+  in `userspace-xdp/src/lib.rs` — the retained AF_XDP shim, which is a real eBPF
+  program under a real verifier. The eBPF *dataplane* retirement (#1373/#1476)
+  deleted `bpf/xdp/` and `bpf/tc/` but did not retire this shim, so the 1M-insn
+  cap and the tail-call ban still bind. The probe would have to live in the miss
+  arm and every degraded / binding-missing / heartbeat-stale branch and behind an
+  IPv6-AH guard, with no shimverify headroom metric to size it against.
+- **Two correctness dimensions are unsolved, not merely unimplemented**:
+  fail-closed behaviour on incomplete/failed intent-reconcile state, and
+  HA-failover generation-safety of the intent map across a primary swap.
+- **The affected population is small.** Per the interface-mode SNAT fold above,
+  the canonical masquerade + WAN-port-forward config is not affected at all. The
+  residual is a DNAT / static-NAT rule matching an interface address on an
+  interface whose zone is not the to-zone of any interface-mode source-NAT rule —
+  and it warns at commit with the workaround stated.
+
+The converged design survives on branch `research/5837-xdp-dnat-before-local`
+(`docs/research/5837-xdp-dnat-before-local/plan.md` §0b + §1-§13) if a measured
+operator report on that residual ever revives it.

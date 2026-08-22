@@ -79,8 +79,16 @@ func clusterTopologyConfigured(cfg *config.Config) bool {
 // clustered config", never a silent half-apply. The boot config LOAD does not
 // reach this guard (Store.Load -> applyConfigLocked, not commitAndApply), and a
 // bootstrap plain commit is refused earlier by the inBootstrap() gate, so no
-// legitimate boot/bootstrap path is falsely rejected. Full day-2 runtime
-// construction is the separate #5840 follow-up.
+// legitimate boot/bootstrap path is falsely rejected.
+//
+// This restart/offline workflow is the TERMINAL answer, not a placeholder. Live
+// day-2 construction/teardown of the cluster runtime was tracked as #6187 and is
+// PLAN-KILLED: it would require making d.cluster lifecycle-safe across 200+ bare
+// read sites (a population that grows with every new handler), generation-fencing
+// the dataplane clusterHA arm behind runtime readiness, and transactional rollback
+// at every construction stage — all to skip a reboot that the reference platform
+// also requires (on SRX the reboot is part of the command itself: `set chassis
+// cluster cluster-id <id> node <n> reboot`, `set chassis cluster disable reboot`).
 func clusterTopologyCommitPreflight(runtimeClusterActive bool, newCfg *config.Config) error {
 	newCluster := clusterTopologyConfigured(newCfg)
 	if newCluster == runtimeClusterActive {

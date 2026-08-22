@@ -59,8 +59,10 @@ type rssExecutor interface {
 	// /sys/class/net/<iface>/device/driver), or "" if not a PCI NIC.
 	readDriver(iface string) string
 	// readQueueCount returns the number of RX queues for iface, as
-	// enumerated from /sys/class/net/<iface>/queues/rx-*.
-	readQueueCount(iface string) int
+	// enumerated from /sys/class/net/<iface>/queues/rx-*. A non-nil error
+	// means the count is UNKNOWN — distinct from a successful read of zero
+	// queues (#5250 A7-b2 F2); callers must not treat the two alike.
+	readQueueCount(iface string) (int, error)
 	// listInterfaces returns the set of netdev names to consider (real
 	// sysfs: basenames of /sys/class/net). Injection point for tests so
 	// the top-level scan path is exercised without touching real netdevs.
@@ -86,10 +88,10 @@ func (realRSSExecutor) readDriver(iface string) string {
 	return filepath.Base(link)
 }
 
-func (realRSSExecutor) readQueueCount(iface string) int {
+func (realRSSExecutor) readQueueCount(iface string) (int, error) {
 	entries, err := os.ReadDir(filepath.Join("/sys/class/net", iface, "queues"))
 	if err != nil {
-		return 0
+		return 0, err
 	}
 	n := 0
 	for _, e := range entries {
@@ -97,7 +99,7 @@ func (realRSSExecutor) readQueueCount(iface string) int {
 			n++
 		}
 	}
-	return n
+	return n, nil
 }
 
 func (realRSSExecutor) listInterfaces() []string {
@@ -253,7 +255,35 @@ func applyRSSIndirectionOne(iface string, workers int, execer rssExecutor) {
 			"iface", iface, "driver", drv)
 		return
 	}
-	queues := execer.readQueueCount(iface)
+	queues, err := execer.readQueueCount(iface)
+	if err != nil {
+		// #5250 (A7-b2 F2): a sysfs enumeration failure used to be laundered
+		// into queues=0, which walks the "no weight vector" branch below and
+		// then FAILS its `queues > 1` restore guard — so a concentrated
+		// `[1,..,1,0,..,0]` table written by an earlier apply stayed live with
+		// nothing logged above Info. The count is UNKNOWN here, not zero: we
+		// cannot compute a weight vector and cannot compare against the
+		// default layout either (indirectionTableIsDefault needs the count),
+		// so restore the kernel default unconditionally for a real worker
+		// configuration. `ethtool -X <iface> default` is idempotent and is
+		// exactly what the kill switch already issues, so the fallback cannot
+		// leave the NIC in a worse state than the stale table it replaces.
+		slog.Warn("linksetup: rx queue count unreadable, restoring default rss indirection",
+			"iface", iface, "workers", workers, "err", err)
+		if workers >= 1 {
+			if out, rerr := execer.runEthtool("-X", iface, "default"); rerr != nil {
+				if isExecNotFound(rerr) {
+					slog.Warn("linksetup: ethtool binary not found, cannot restore default rss indirection",
+						"iface", iface)
+					return
+				}
+				slog.Warn("linksetup: ethtool -X default failed",
+					"iface", iface, "err", rerr,
+					"output", strings.TrimSpace(string(out)))
+			}
+		}
+		return
+	}
 	weights, reason := computeWeightVector(workers, queues)
 	if weights == nil {
 		slog.Info("linksetup: rss weight reshaping skipped", "iface", iface,

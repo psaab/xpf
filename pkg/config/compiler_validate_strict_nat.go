@@ -2172,10 +2172,15 @@ func validateNPTv6Strict(cfg *Config, lenient bool) ([]string, error) {
 // canonical source-prefix list on the Go and Rust wire, stable logical-
 // interface / routing-instance identity at both lookup points, symmetric
 // outbound interpretation for stateless NPTv6, and overlap-registry
-// partitioning) is a substantial wire+dataplane change deferred to a /research
-// follow-up. Until then the only correct disposition is to reject the
-// unsupported-scope NPTv6 rule LOUDLY at commit rather than silently install an
-// over-broad rewrite.
+// partitioning) is a substantial wire+dataplane change. It was tracked as #6043
+// and is PLAN-KILLED: `from zone`-only NPTv6 (#5176) is fully honored and is the
+// RFC 6296 deployment shape, so full scoped support is a demand-gated enhancement
+// whose price includes a helper capability/protocol gate to stop a newer manager
+// handing a constrained rule to an older helper that would install it globally.
+// This reject is therefore the TERMINAL disposition, not an interim one: refuse
+// the unsupported-scope NPTv6 rule LOUDLY at commit rather than silently install
+// an over-broad rewrite. The acceptance matrix in #5818 is preserved and remains
+// the correct starting point if a real operator request ever revives it.
 //
 // Reject condition (precise): an NPTv6 rule-set (one containing >= 1 nptv6-prefix
 // rule) whose FromInterface != "" OR FromRoutingInstance != "", or any NPTv6 rule
@@ -2674,6 +2679,27 @@ func validateProxyARPAddressesStrict(cfg *Config) error {
 	for _, entry := range cfg.Security.NAT.ProxyARP {
 		if entry == nil {
 			continue
+		}
+		// #6714: a statement whose range keyword neither range branch consumed.
+		// Reported BEFORE the per-address parse below, because the addresses
+		// this entry does carry are the single-value fallback — they parse
+		// fine, and reporting only them would name the one address that DID
+		// survive while staying silent about the ones that did not.
+		for _, spec := range entry.MalformedRangeSpecs {
+			return fmt.Errorf(
+				"security nat proxy-arp interface %q address %q is not a valid "+
+					"address statement: it carries the `to` range keyword in a "+
+					"position neither `address <low> to <high>` nor a plain "+
+					"address list can consume — a list MIXING discrete addresses "+
+					"with a range, a range with a missing or misplaced endpoint, "+
+					"or a range nested inside a block. The compiler installs only "+
+					"the FIRST value of such a statement and discards the rest, "+
+					"so the firewall answers ARP/ND for one address of the "+
+					"authored set and inbound traffic to the others is never "+
+					"drawn to it. Author each range as its own `address <low> to "+
+					"<high>` statement and the discrete addresses as another "+
+					"(#6714)",
+				entry.Interface, spec)
 		}
 		for _, addr := range entry.Addresses {
 			if addr == "" {

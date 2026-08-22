@@ -104,8 +104,33 @@ half-apply. The boot config LOAD never reaches this guard
 bootstrap plain commit is refused earlier by the `inBootstrap()` gate, so
 no legitimate boot/bootstrap path is falsely rejected.
 
-First-class live day-2 construction/teardown of the cluster runtime
-(the "full supervisor" contract) is tracked as a separate follow-up.
+### The restart workflow is the terminal answer
+
+First-class live day-2 construction/teardown of the cluster runtime (the
+"full supervisor" contract) is **not planned**. It was tracked as #6187
+and plan-killed, for three reasons:
+
+- **It is not a parity gap.** On SRX, enabling and disabling chassis
+  cluster are reboot-coupled commands — `set chassis cluster cluster-id
+  <id> node <n> reboot` and `set chassis cluster disable reboot`. The
+  reboot is part of the command. A live transition would *exceed* the
+  reference platform, not match it.
+- **The safety property is already achieved.** The dangerous outcome was
+  the silent half-apply (no HA plus a persistent transit outage until
+  restart); the preflight converts that into an explicit rejection naming
+  the required workflow.
+- **The cost is disproportionate and growing.** `d.cluster`
+  (`pkg/daemon/daemon.go`) is read bare from 200+ non-test sites across
+  `pkg/daemon`, `pkg/grpcapi`, `pkg/api` and `pkg/cli`, many on concurrent
+  handlers, and that count rises with every new handler. Making it
+  lifecycle-safe, generation-fencing the dataplane `clusterHA` arm behind
+  runtime readiness, and adding transactional rollback at every
+  construction stage is a large HA-critical refactor whose whole payoff is
+  skipping a reboot.
+
+If an operator is ever genuinely blocked by the reboot, the design sketch
+is preserved on #6187. Note that the `d.cluster` lifecycle-safety work is
+independently useful and can be taken on its own merits without it.
 
 ## Acceptance criteria (topology transition, #5840)
 

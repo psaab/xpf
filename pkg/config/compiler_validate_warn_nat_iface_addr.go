@@ -24,20 +24,34 @@ import (
 // already-established session are unaffected (the translation is applied once a
 // session exists); only the FIRST packet of a new flow is misrouted.
 //
-// Track-1 makes that silent bypass LOUD. The full dataplane fix (a dedicated
-// intent map probed before local classification, Option B / Track-2) is a large,
-// verifier-gated, HA-aware project deferred by the converged #5837 research plan
-// (docs/research/5837-xdp-dnat-before-local/plan.md §0/§0a). Until it lands the
-// honest mitigation is a commit-time WARNING naming the offending rule and the
-// colliding interface address.
+// Track-1 makes that silent bypass LOUD, and it is the TERMINAL answer, not an
+// interim one. The full dataplane fix (a dedicated intent map probed before local
+// classification, Option B / Track-2) was tracked as #6051 and is PLAN-KILLED: it
+// is a large, verifier-gated, HA-aware project — the shim is a real eBPF program
+// under a real verifier, so the 1M-insn cap and the tail-call ban still bind — and
+// the converged #5837 research plan left two correctness dimensions unsolved
+// (fail-closed on incomplete intent-reconcile state, and HA-failover
+// generation-safety of the intent map across a primary swap). The design survives
+// on branch research/5837-xdp-dnat-before-local
+// (docs/research/5837-xdp-dnat-before-local/plan.md §0b + §1-§13) if a measured
+// operator report ever revives it. Until then this commit-time WARNING, naming the
+// offending rule and the colliding interface address, IS the mitigation.
+//
+// Note the interface-mode SNAT fold below (#5837 rev6052): the canonical
+// masquerade + WAN-port-forward config is NOT affected by the bypass at all,
+// because those addresses live in interface_nat_v4/v6 rather than the kernel-local
+// set. The residual this advisory covers is the narrower case of a DNAT /
+// static-NAT rule on an interface whose zone is not the to-zone of any
+// interface-mode source-NAT rule.
 //
 // WARN-only on BOTH the strict commit path and the tolerant load / peer-sync
 // path (it is emitted from ValidateConfig, which runs on every compile): the
 // config is legal Junos and works for reply / established traffic, so it must
 // never reject or change forwarding — a hard reject would also brick a boot on a
-// previously-committed config (#1960 no-brick doctrine), and the config may be
-// deliberately staged for the Track-2 future. This mirrors the sibling direct
-// host-bound advisories in compiler_validate_warn_host_inbound.go.
+// previously-committed config (#1960 no-brick doctrine), and the operator may be
+// relying on the reply / established-session behaviour the advisory describes.
+// This mirrors the sibling direct host-bound advisories in
+// compiler_validate_warn_host_inbound.go.
 //
 // Scope: literal `match destination-address` host / prefix values are checked
 // (address-book-NAME-referenced matches are out of scope — resolving them needs
@@ -277,7 +291,7 @@ func validateNATInterfaceAddressCollisionWarnings(cfg *Config) []string {
 								"host instead of translated + zone-policed). Reply / "+
 								"established-session traffic is unaffected. Known first-packet "+
 								"interface-address DNAT limitation (#5837); the dataplane fix is "+
-								"deferred (Track-2). Use a non-interface public address, or "+
+								"not planned (#6051). Use a non-interface public address, or "+
 								"expect first-packet local delivery.",
 							rs.Name, rule.Name, host, iface))
 					}
@@ -319,7 +333,7 @@ func validateNATInterfaceAddressCollisionWarnings(cfg *Config) []string {
 						"is delivered to the host instead of translated + zone-policed). "+
 						"Reply / established-session traffic is unaffected. Known first-packet "+
 						"interface-address static-NAT limitation (#5837); the dataplane fix is "+
-						"deferred (Track-2). Use a non-interface external address, or expect "+
+						"not planned (#6051). Use a non-interface external address, or expect "+
 						"first-packet local delivery.",
 					rs.Name, rule.Name, host, iface))
 			}

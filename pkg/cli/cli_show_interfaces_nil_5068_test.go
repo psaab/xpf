@@ -1,7 +1,9 @@
 package cli
 
 import (
+	"net"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/psaab/xpf/pkg/config"
@@ -100,6 +102,82 @@ func TestShowInterfacesNilMapValuesNoPanic5068(t *testing.T) {
 				t.Fatalf("show interfaces %s: %v", tc.name, err)
 			}
 		})
+	}
+}
+
+// TestShowInterfacesMalformedZoneUnitSuffix6218 pins #6218 item 12. A zone
+// member naming a NON-NUMERIC unit suffix (e.g. "ge-0/0/9.abc") is hard-
+// rejected on the STRICT commit path since #5829/#5933
+// (validateInterfaceUnitReferencesStrict), but that gate is deliberately
+// DOWNGRADED to a warning on the tolerant/peer-sync load path (an older
+// binary's already-persisted config, or an HA peer's config predating the
+// gate, per the #1960 fail-closed-on-load doctrine) — so the malformed
+// reference CAN still reach ActiveConfig in memory without ever having
+// passed the strict gate. This test injects that post-load state directly
+// (mirroring the sibling nil-map-value fixture above, which does the same
+// for a defect class gated the same way) rather than fighting the lenient
+// compiler path, and drives `show interfaces` over it.
+//
+// The pre-fix `strconv.Atoi(parts[1])` with its error silently discarded
+// defaulted such a logical interface to unit 0 — a display-only
+// misattribution that could ALSO borrow the REAL unit 0's config (VLAN id,
+// address) for a zone member that names no such unit. -1 is the sentinel
+// that can never collide with a real (always >= 0) configured unit.
+//
+// RED on revert: restoring `unitNum, _ = strconv.Atoi(parts[1])` renders
+// "Logical interface lo.0" instead of "...-1", failing the assertion.
+func TestShowInterfacesMalformedZoneUnitSuffix6218(t *testing.T) {
+	// show interfaces prints "Physical interface: <name>, Not present" and
+	// SKIPS the logical-unit loop entirely for a physical name with no live
+	// kernel netdev — bind to the always-present loopback so the code path
+	// under test is actually reached (mirrors TestShowInterfacesHostInbound3654).
+	if _, err := net.InterfaceByName("lo"); err != nil {
+		t.Skip("loopback interface not present; skipping show interfaces golden test")
+	}
+	store := newConfigStore(t, filepath.Join(t.TempDir(), "xpf.conf"))
+	if err := store.EnterConfigure(); err != nil {
+		t.Fatalf("EnterConfigure() error = %v", err)
+	}
+	if err := store.LoadOverride(`
+interfaces {
+    lo { unit 0 { family inet { address 127.0.0.2/32; } } }
+}
+security {
+    zones {
+        security-zone trust {
+            interfaces { lo.0; }
+        }
+    }
+}
+`); err != nil {
+		t.Fatalf("LoadOverride() error = %v", err)
+	}
+	if _, err := store.Commit(); err != nil {
+		t.Fatalf("Commit() error = %v", err)
+	}
+	cfg := store.ActiveConfig()
+	if cfg == nil {
+		t.Fatalf("fixture missing active config")
+	}
+	zone := cfg.Security.Zones["trust"]
+	if zone == nil {
+		t.Fatalf("fixture missing trust zone")
+	}
+	// Simulate the tolerant-load-admitted malformed reference in-place, as
+	// the sibling nil-map-value fixture above does for its own defect class.
+	zone.Interfaces = []string{"lo.abc"}
+
+	c := &CLI{store: store}
+	out := captureStdout(t, func() {
+		if err := c.showInterfaces([]string{"lo"}); err != nil {
+			t.Fatalf("showInterfaces: %v", err)
+		}
+	})
+	if strings.Contains(out, "Logical interface lo.0") {
+		t.Errorf("malformed unit suffix must not display/borrow the real unit 0; got:\n%s", out)
+	}
+	if !strings.Contains(out, "Logical interface lo.-1") {
+		t.Errorf("malformed unit suffix must render the -1 sentinel, not silently default; got:\n%s", out)
 	}
 }
 

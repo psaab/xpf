@@ -116,9 +116,13 @@ func (s *Server) telemetry() dataplane.Telemetry {
 
 type natRuleSetKey struct{ from, to string }
 
+// natSessionCounts accumulates active-translation counts in int64 so a
+// session table larger than MaxInt32 cannot wrap the counter NEGATIVE while
+// it is being built (#5250 A8-b2 F3). Every protobuf hand-off saturates
+// through clampInt32 (server_nat.go) instead of a bare int32 conversion.
 type natSessionCounts struct {
-	total           int32
-	ruleSetSessions map[natRuleSetKey]int32
+	total           int64
+	ruleSetSessions map[natRuleSetKey]int64
 }
 
 func (s *Server) countSNATSessions(zoneByID map[uint16]string) natSessionCounts {
@@ -131,7 +135,7 @@ func (s *Server) countDNATSessions(zoneByID map[uint16]string) natSessionCounts 
 
 func (s *Server) countNATSessions(flag uint16, zoneByID map[uint16]string) natSessionCounts {
 	counts := natSessionCounts{
-		ruleSetSessions: make(map[natRuleSetKey]int32),
+		ruleSetSessions: make(map[natRuleSetKey]int64),
 	}
 	if !s.dataplaneLoaded() {
 		return counts
