@@ -89,7 +89,7 @@ fn forged_fabric_stamp_denied_when_claimed_zone_rg_is_local_6458() {
     // Single-primary placement: BOTH RGs forwarding-active locally.
     let ha_state = BTreeMap::from([(1, active_rg(now_secs)), (2, active_rg(now_secs))]);
     let frame = stamped_fabric_frame(TEST_LAN_ZONE_ID);
-    let meta = txn_meta_v4(21, TCP_FLAG_SYN, (frame.len() - 14) as u16);
+    let meta = txn_meta_v4(21, TCP_FLAG_SYN, frame.len() as u16);
 
     let mut binding = fabric_binding();
     let mut sessions = SessionTable::new();
@@ -155,7 +155,7 @@ fn forged_fabric_stamp_denied_for_host_inbound_when_owner_rg_remote_6458() {
     let [hi, lo] = TEST_LAN_ZONE_ID.to_be_bytes();
     frame[0..6].copy_from_slice(&[0x02, 0xbf, 0x72, 0xff, 0x00, 0x01]);
     frame[6..12].copy_from_slice(&[0x02, 0xbf, 0x72, FABRIC_ZONE_MAC_MAGIC, hi, lo]);
-    let meta = txn_meta_v4(21, TCP_FLAG_SYN, (frame.len() - 14) as u16);
+    let meta = txn_meta_v4(21, TCP_FLAG_SYN, frame.len() as u16);
 
     let mut binding = fabric_binding();
     let mut sessions = SessionTable::new();
@@ -204,7 +204,7 @@ fn legitimate_fabric_punted_host_inbound_still_admitted_6458() {
     let [hi, lo] = TEST_WAN_ZONE_ID.to_be_bytes();
     frame[0..6].copy_from_slice(&[0x02, 0xbf, 0x72, 0xff, 0x00, 0x01]);
     frame[6..12].copy_from_slice(&[0x02, 0xbf, 0x72, FABRIC_ZONE_MAC_MAGIC, hi, lo]);
-    let meta = txn_meta_v4(21, TCP_FLAG_SYN, (frame.len() - 14) as u16);
+    let meta = txn_meta_v4(21, TCP_FLAG_SYN, frame.len() as u16);
 
     let mut binding = fabric_binding();
     let mut sessions = SessionTable::new();
@@ -236,7 +236,7 @@ fn legitimate_fabric_punted_flow_still_admitted_6458() {
     // Split placement: WAN RG (1) is local; LAN RG (2) is the peer's.
     let ha_state = BTreeMap::from([(1, active_rg(now_secs))]);
     let frame = stamped_fabric_frame(TEST_LAN_ZONE_ID);
-    let meta = txn_meta_v4(21, TCP_FLAG_SYN, (frame.len() - 14) as u16);
+    let meta = txn_meta_v4(21, TCP_FLAG_SYN, frame.len() as u16);
 
     let mut binding = fabric_binding();
     let mut sessions = SessionTable::new();
@@ -289,7 +289,7 @@ fn fabric_ingress_syn_ack_seeds_no_reverse_session_6478() {
     let [hi, lo] = TEST_LAN_ZONE_ID.to_be_bytes();
     frame[0..6].copy_from_slice(&[0x02, 0xbf, 0x72, 0xff, 0x00, 0x01]);
     frame[6..12].copy_from_slice(&[0x02, 0xbf, 0x72, FABRIC_ZONE_MAC_MAGIC, hi, lo]);
-    let meta = txn_meta_v4(21, TCP_FLAG_SYN | TCP_FLAG_ACK, (frame.len() - 14) as u16);
+    let meta = txn_meta_v4(21, TCP_FLAG_SYN | TCP_FLAG_ACK, frame.len() as u16);
 
     let mut binding = fabric_binding();
     let mut sessions = SessionTable::new();
@@ -362,7 +362,7 @@ fn fabric_ingress_icmp_echo_reply_seeds_no_reverse_session_6478() {
         l3_offset: 14,
         l4_offset: 34,
         payload_offset: 42,
-        pkt_len: (frame.len() - 14) as u16,
+        pkt_len: frame.len() as u16,
         addr_family: libc::AF_INET as u8,
         protocol: PROTO_ICMP,
         config_generation: 7,

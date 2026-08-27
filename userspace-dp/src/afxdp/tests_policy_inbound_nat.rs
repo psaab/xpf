@@ -41,7 +41,7 @@ fn policy_inbound_dnat_matches_translated_destination_permit() {
         443,
         TCP_FLAG_SYN,
     );
-    let meta = txn_meta_v4(12, TCP_FLAG_SYN, (frame.len() - 14) as u16);
+    let meta = txn_meta_v4(12, TCP_FLAG_SYN, frame.len() as u16);
     let (_batch, dbg) = txn_run_descriptor(
         &mut binding,
         &mut sessions,
@@ -88,7 +88,7 @@ fn policy_inbound_dnat_denies_when_only_original_dst_permitted() {
         443,
         TCP_FLAG_SYN,
     );
-    let meta = txn_meta_v4(12, TCP_FLAG_SYN, (frame.len() - 14) as u16);
+    let meta = txn_meta_v4(12, TCP_FLAG_SYN, frame.len() as u16);
     let (_batch, dbg) = txn_run_descriptor(
         &mut binding,
         &mut sessions,
@@ -144,7 +144,7 @@ fn policy_inbound_dnat_matches_translated_destination_port() {
         443,
         TCP_FLAG_SYN,
     );
-    let meta = txn_meta_v4(12, TCP_FLAG_SYN, (frame.len() - 14) as u16);
+    let meta = txn_meta_v4(12, TCP_FLAG_SYN, frame.len() as u16);
     let (_batch, dbg) = txn_run_descriptor(
         &mut binding,
         &mut sessions,
@@ -431,7 +431,7 @@ fn static_nat_precedes_overlapping_dnat_pool_6473() {
         443,
         TCP_FLAG_SYN,
     );
-    let meta = txn_meta_v4(12, TCP_FLAG_SYN, (frame.len() - 14) as u16);
+    let meta = txn_meta_v4(12, TCP_FLAG_SYN, frame.len() as u16);
     let (_batch, dbg) = txn_run_descriptor(
         &mut binding,
         &mut sessions,
@@ -523,7 +523,7 @@ fn policy_inbound_dnat_missing_neighbor_permits_on_translated_dst() {
         443,
         TCP_FLAG_SYN,
     );
-    let meta = txn_meta_v4(12, TCP_FLAG_SYN, (frame.len() - 14) as u16);
+    let meta = txn_meta_v4(12, TCP_FLAG_SYN, frame.len() as u16);
     let (_batch, dbg) = txn_run_descriptor(
         &mut binding,
         &mut sessions,
@@ -571,7 +571,7 @@ fn policy_inbound_dnat_missing_neighbor_denies_when_only_original_dst_permitted(
         443,
         TCP_FLAG_SYN,
     );
-    let meta = txn_meta_v4(12, TCP_FLAG_SYN, (frame.len() - 14) as u16);
+    let meta = txn_meta_v4(12, TCP_FLAG_SYN, frame.len() as u16);
     let (_batch, dbg) = txn_run_descriptor(
         &mut binding,
         &mut sessions,

@@ -596,7 +596,7 @@ fn build_live_forward_request_from_frame_output_filter_reject_sends_rst_3608() {
         l3_offset: 14,
         l4_offset: 34,
         payload_offset: 54,
-        pkt_len: (frame.len() - 14) as u16,
+        pkt_len: frame.len() as u16,
         addr_family: libc::AF_INET as u8,
         protocol: PROTO_TCP,
         tcp_flags: 0x02,
@@ -783,7 +783,7 @@ fn output_filter_reject_carries_the_configured_icmp_code_6854() {
         l3_offset: 14,
         l4_offset: 34,
         payload_offset: 42,
-        pkt_len: (frame.len() - 14) as u16,
+        pkt_len: frame.len() as u16,
         addr_family: libc::AF_INET as u8,
         protocol: PROTO_UDP,
         ..UserspaceDpMeta::default()

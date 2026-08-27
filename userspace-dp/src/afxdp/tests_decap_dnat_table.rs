@@ -58,7 +58,7 @@ fn txn_non_decap_missing_neighbor_buffers_and_retries_correctly() {
     let dst = Ipv4Addr::new(10, 0, 61, 50);
     let frame =
         build_txn_tcp_syn_frame_v4(Ipv4Addr::new(10, 0, 61, 102), dst, 12345, 443, TCP_FLAG_SYN);
-    let meta = txn_meta_v4(24, TCP_FLAG_SYN, (frame.len() - 14) as u16);
+    let meta = txn_meta_v4(24, TCP_FLAG_SYN, frame.len() as u16);
     let (_batch, dbg) = txn_run_descriptor(
         &mut bindings[0],
         &mut sessions,

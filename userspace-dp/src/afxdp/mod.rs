@@ -543,6 +543,8 @@ mod tests_gre_local_delivery;
 #[cfg(test)]
 mod tests_gre_outer_bound_6748;
 #[cfg(test)]
+mod pkt_len_fixture_drift_6883_tests;
+#[cfg(test)]
 #[path = "tests_gre_version_6842.rs"]
 mod tests_gre_version_6842;
 #[cfg(test)]

@@ -634,7 +634,7 @@ fn pbr_routing_instance_reject_synthesizes_reply_on_session_miss() {
         l4_offset: 34,
         addr_family: libc::AF_INET as u8,
         protocol: PROTO_TCP,
-        pkt_len: (frame.len() - 14) as u16,
+        pkt_len: frame.len() as u16,
         ..Default::default()
     };
     let flow = SessionFlow {

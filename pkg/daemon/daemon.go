@@ -973,6 +973,22 @@ type Daemon struct {
 	// detect changes that require a comms restart (#87).
 	activeClusterTransport clusterTransportKey
 
+	// startClusterCommsFn is the startClusterComms entry point used by
+	// applyTailReconciles step 20; overridable in tests (#6878).
+	//
+	// The real startClusterComms early-returns when the store holds no committed
+	// cluster config, so in a unit harness its ABSENCE is unobservable: the three
+	// #5078 subtests watch clusterCommsGen, which stopClusterComms bumps first,
+	// and deleting the start call left the whole package green. A build that tore
+	// comms down on every endpoint change and never brought them back up passed
+	// the suite while every endpoint move silently left the cluster with no
+	// session-sync.
+	//
+	// The seam is at the CALL SITE rather than inside startClusterComms so a test
+	// can observe restart COMPLETION without standing up heartbeat/sync sockets.
+	// nil selects the real method; production never sets it.
+	startClusterCommsFn func(context.Context)
+
 	// clusterCommsMu guards the cluster-comms epoch state that is published
 	// asynchronously by the startClusterComms constructor goroutine and torn
 	// down by stopClusterComms: sessionSync, fabricRefreshCh/fabricRefreshCh1,

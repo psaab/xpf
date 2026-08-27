@@ -765,7 +765,7 @@ pub(super) fn run_input_filter_accept_log_poll(
         l3_offset: 14,
         l4_offset: 34,
         payload_offset: 54,
-        pkt_len: (frame.len() - 14) as u16,
+        pkt_len: frame.len() as u16,
         addr_family: libc::AF_INET as u8,
         protocol: PROTO_TCP,
         tcp_flags: TCP_FLAG_SYN,
@@ -1714,7 +1714,7 @@ pub(super) fn run_junos_host_permit_local_delivery(snapshot: &ConfigSnapshot) ->
         179,
         TCP_FLAG_SYN,
     );
-    let meta = txn_meta_v4(24, TCP_FLAG_SYN, (frame.len() - 14) as u16);
+    let meta = txn_meta_v4(24, TCP_FLAG_SYN, frame.len() as u16);
 
     let (tx, rx) = mpsc::sync_channel(8);
     let wake = Arc::new(TunnelWake::new().expect("eventfd"));

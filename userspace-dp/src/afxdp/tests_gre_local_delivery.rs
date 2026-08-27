@@ -112,7 +112,7 @@ fn unencapsulated_local_delivery_reinjects_slow_path_exactly_once() {
         179,
         TCP_FLAG_SYN,
     );
-    let meta = txn_meta_v4(24, TCP_FLAG_SYN, (frame.len() - 14) as u16);
+    let meta = txn_meta_v4(24, TCP_FLAG_SYN, frame.len() as u16);
 
     let (tx, rx) = mpsc::sync_channel(8);
     let wake = Arc::new(TunnelWake::new().expect("eventfd"));
@@ -168,7 +168,7 @@ fn poll_descriptor_junos_host_deny_drops_local_delivery_session_miss() {
         179,
         TCP_FLAG_SYN,
     );
-    let meta = txn_meta_v4(24, TCP_FLAG_SYN, (frame.len() - 14) as u16);
+    let meta = txn_meta_v4(24, TCP_FLAG_SYN, frame.len() as u16);
 
     let (tx, rx) = mpsc::sync_channel(8);
     let wake = Arc::new(TunnelWake::new().expect("eventfd"));
@@ -230,7 +230,7 @@ fn poll_descriptor_no_junos_host_policy_local_delivery_unchanged_session_miss() 
         179,
         TCP_FLAG_SYN,
     );
-    let meta = txn_meta_v4(24, TCP_FLAG_SYN, (frame.len() - 14) as u16);
+    let meta = txn_meta_v4(24, TCP_FLAG_SYN, frame.len() as u16);
 
     let (tx, rx) = mpsc::sync_channel(8);
     let wake = Arc::new(TunnelWake::new().expect("eventfd"));
@@ -461,7 +461,7 @@ fn poll_descriptor_host_inbound_deny_counts_local_delivery_session_miss() {
         179,
         TCP_FLAG_SYN,
     );
-    let meta = txn_meta_v4(24, TCP_FLAG_SYN, (frame.len() - 14) as u16);
+    let meta = txn_meta_v4(24, TCP_FLAG_SYN, frame.len() as u16);
 
     let (batch, dbg) = txn_run_descriptor(
         &mut binding,
@@ -516,7 +516,7 @@ fn poll_descriptor_host_inbound_deny_emits_tuple_event_session_miss() {
         179,
         TCP_FLAG_SYN,
     );
-    let meta = txn_meta_v4(24, TCP_FLAG_SYN, (frame.len() - 14) as u16);
+    let meta = txn_meta_v4(24, TCP_FLAG_SYN, frame.len() as u16);
 
     let (batch, dbg, event_handle, event_rx) = txn_run_descriptor_capturing_events(
         &mut binding,
@@ -591,7 +591,7 @@ fn poll_descriptor_host_inbound_admit_does_not_count_deny_session_miss() {
         179,
         TCP_FLAG_SYN,
     );
-    let meta = txn_meta_v4(24, TCP_FLAG_SYN, (frame.len() - 14) as u16);
+    let meta = txn_meta_v4(24, TCP_FLAG_SYN, frame.len() as u16);
 
     let (batch, dbg) = txn_run_descriptor(
         &mut binding,
@@ -653,7 +653,7 @@ fn poll_descriptor_junos_host_deny_drops_local_delivery_session_hit() {
         l3_offset: 14,
         l4_offset: 34,
         payload_offset: 54,
-        pkt_len: (frame.len() - 14) as u16,
+        pkt_len: frame.len() as u16,
         addr_family: libc::AF_INET as u8,
         protocol: PROTO_TCP,
         tcp_flags: TCP_FLAG_SYN,

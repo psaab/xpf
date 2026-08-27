@@ -1144,7 +1144,7 @@ mod filter_terminal_tests {
             protocol: PROTO_TCP,
             tcp_flags: 0x02,
             addr_family: libc::AF_INET as u8,
-            pkt_len: (frame.len() - 14) as u16,
+            pkt_len: frame.len() as u16,
             ..UserspaceDpMeta::default()
         };
         let drop = filter_terminal(
@@ -1209,7 +1209,7 @@ mod filter_terminal_tests {
             l4_offset: 34,
             addr_family: libc::AF_INET as u8,
             protocol: PROTO_ICMP,
-            pkt_len: (frame.len() - 14) as u16,
+            pkt_len: frame.len() as u16,
             ..UserspaceDpMeta::default()
         };
         let flow = SessionFlow {
@@ -1337,7 +1337,7 @@ mod filter_terminal_tests {
             addr_family: libc::AF_INET as u8,
             protocol: PROTO_TCP,
             tcp_flags: 0x02,
-            pkt_len: (frame.len() - 14) as u16,
+            pkt_len: frame.len() as u16,
             ..UserspaceDpMeta::default()
         };
         let flow = v4_flow(PROTO_TCP);

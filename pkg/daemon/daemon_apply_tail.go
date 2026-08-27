@@ -341,7 +341,15 @@ func (d *Daemon) applyTailReconciles(cfg *config.Config, networkdErr, applyErr, 
 				"old_fabric_peer", active.FabricPeerAddress,
 				"new_fabric_peer", newTransport.FabricPeerAddress)
 			d.stopClusterComms()
-			d.startClusterComms(d.daemonCtx)
+			// #6878: through the seam so a test can bind restart COMPLETION.
+			// stopClusterComms bumps clusterCommsGen first, so the generation
+			// alone cannot tell a completed restart from a teardown that never
+			// came back up.
+			start := d.startClusterCommsFn
+			if start == nil {
+				start = d.startClusterComms
+			}
+			start(d.daemonCtx)
 		}
 
 		// #4647 BUG-B: reconcile the #2239 DHCP lease-sync push loop against

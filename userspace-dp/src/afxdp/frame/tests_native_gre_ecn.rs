@@ -460,7 +460,7 @@ fn build_forwarded_frame_from_frame_recomputes_tcp_checksum_for_native_gre_snat(
         l3_offset: 14,
         l4_offset: 34,
         payload_offset: 54,
-        pkt_len: (frame.len() - 14) as u16,
+        pkt_len: frame.len() as u16,
         addr_family: libc::AF_INET as u8,
         protocol: PROTO_TCP,
         flow_src_addr: {
@@ -557,7 +557,7 @@ fn build_forwarded_frame_from_frame_clamps_tcp_mss_for_native_gre() {
         l3_offset: 14,
         l4_offset: 34,
         payload_offset: 58,
-        pkt_len: (frame.len() - 14) as u16,
+        pkt_len: frame.len() as u16,
         addr_family: libc::AF_INET as u8,
         protocol: PROTO_TCP,
         tcp_flags: TCP_FLAG_SYN,

@@ -52,7 +52,7 @@ fn txn_nat64_refusal_at_cap_drops_translated_packet() {
         l3_offset: 14,
         l4_offset: 54,
         payload_offset: 74,
-        pkt_len: (frame.len() - 14) as u16,
+        pkt_len: frame.len() as u16,
         addr_family: libc::AF_INET6 as u8,
         protocol: PROTO_TCP,
         tcp_flags: TCP_FLAG_SYN,
@@ -149,7 +149,7 @@ fn txn_nat64_translation_bumps_counter_both_directions() {
         l3_offset: 14,
         l4_offset: 54,
         payload_offset: 74,
-        pkt_len: (fwd_frame.len() - 14) as u16,
+        pkt_len: fwd_frame.len() as u16,
         addr_family: libc::AF_INET6 as u8,
         protocol: PROTO_TCP,
         tcp_flags: TCP_FLAG_SYN,
@@ -220,7 +220,7 @@ fn txn_nat64_translation_bumps_counter_both_directions() {
     const ACK: u8 = 0x10;
     let reply_frame =
         build_txn_tcp_syn_frame_v4(dst_v4, pool_v4, 443, translated_port, TCP_FLAG_SYN | ACK);
-    let reply_meta = txn_meta_v4(24, TCP_FLAG_SYN | ACK, (reply_frame.len() - 14) as u16);
+    let reply_meta = txn_meta_v4(24, TCP_FLAG_SYN | ACK, reply_frame.len() as u16);
     let (rev_batch, _rev_dbg) = txn_run_descriptor(
         &mut binding,
         &mut sessions,
@@ -271,7 +271,7 @@ fn txn_source_nat_translation_bumps_rule_counter_once() {
         443,
         TCP_FLAG_SYN,
     );
-    let meta = txn_meta_v4(24, TCP_FLAG_SYN, (frame.len() - 14) as u16);
+    let meta = txn_meta_v4(24, TCP_FLAG_SYN, frame.len() as u16);
     let (_b0, d0) = txn_run_descriptor(
         &mut binding,
         &mut sessions,
@@ -702,7 +702,7 @@ fn txn_tunnel_marked_missing_neighbor_not_buffered() {
         443,
         TCP_FLAG_SYN,
     );
-    let meta = txn_meta_v4(24, TCP_FLAG_SYN, (frame.len() - 14) as u16);
+    let meta = txn_meta_v4(24, TCP_FLAG_SYN, frame.len() as u16);
     let (_batch, dbg) = txn_run_descriptor(
         &mut binding,
         &mut sessions,
@@ -747,7 +747,7 @@ fn txn_tunnel_marked_missing_neighbor_not_buffered() {
         0,
         "HAInactive frame must NOT seed a session (second run stays on the miss path)"
     );
-    let meta2 = txn_meta_v4(24, TCP_FLAG_SYN, (frame.len() - 14) as u16);
+    let meta2 = txn_meta_v4(24, TCP_FLAG_SYN, frame.len() as u16);
     let (_batch2, dbg2) = txn_run_descriptor(
         &mut binding,
         &mut sessions,
@@ -815,7 +815,7 @@ fn txn_policy_denied_missing_neighbor_is_dropped_not_reinjected() {
     // src 10.0.61.102 (lan, ingress ifindex 24) -> dst 172.16.80.200
     // (connected wan). lan->wan is default-deny.
     let frame = build_policy_deny_tcp_syn_frame();
-    let meta = txn_meta_v4(24, TCP_FLAG_SYN, (frame.len() - 14) as u16);
+    let meta = txn_meta_v4(24, TCP_FLAG_SYN, frame.len() as u16);
     let sessions_before = sessions.len();
     let (_batch, dbg) = txn_run_descriptor(
         &mut binding,
@@ -892,7 +892,7 @@ fn txn_policy_denied_missing_neighbor_skips_neg_cache_fast_fail() {
     let mut sessions = SessionTable::new();
 
     let frame = build_policy_deny_tcp_syn_frame();
-    let meta = txn_meta_v4(24, TCP_FLAG_SYN, (frame.len() - 14) as u16);
+    let meta = txn_meta_v4(24, TCP_FLAG_SYN, frame.len() as u16);
     let (_batch, dbg) = txn_run_descriptor(
         &mut binding,
         &mut sessions,
@@ -1040,7 +1040,7 @@ fn non_nat64_missing_neighbor_still_buffers_5174() {
         443,
         TCP_FLAG_SYN,
     );
-    let meta = txn_meta_v4(24, TCP_FLAG_SYN, (frame.len() - 14) as u16);
+    let meta = txn_meta_v4(24, TCP_FLAG_SYN, frame.len() as u16);
     let (_batch, dbg) =
         txn_run_descriptor(&mut binding, &mut sessions, &forwarding, &ha_state, &frame, meta);
 

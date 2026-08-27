@@ -186,7 +186,7 @@ fn run_ingress_identity_flow_on(
     let mut meta = txn_meta_v4(
         INGRESS_PARENT_IFINDEX as u32,
         TCP_FLAG_SYN,
-        (frame.len() - 14) as u16,
+        frame.len() as u16,
     );
     meta.ingress_vlan_id = INGRESS_VLAN_ID;
 
@@ -341,7 +341,7 @@ fn run_missing_neighbor_seed_flow() -> SessionTable {
     let mut meta = txn_meta_v4(
         INGRESS_PARENT_IFINDEX as u32,
         TCP_FLAG_SYN,
-        (frame.len() - 14) as u16,
+        frame.len() as u16,
     );
     meta.ingress_vlan_id = INGRESS_VLAN_ID;
 
@@ -522,7 +522,7 @@ fn run_local_miss_identity_flow() -> SessionTable {
     let mut meta = txn_meta_v4(
         LOCAL_PARENT_IFINDEX as u32,
         TCP_FLAG_SYN,
-        (frame.len() - 14) as u16,
+        frame.len() as u16,
     );
     meta.ingress_vlan_id = LOCAL_VLAN_ID;
 

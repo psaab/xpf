@@ -129,7 +129,7 @@ fn run_ptb_dispatch_with_forwarding_and_vlan(
     req.meta.protocol = PROTO_UDP;
     req.meta.l3_offset = 14;
     req.meta.l4_offset = 34;
-    req.meta.pkt_len = (frame.len() - 14) as u16;
+    req.meta.pkt_len = frame.len() as u16;
     req.meta.ingress_vlan_id = ingress_vlan_id;
     let mut pending = vec![req];
     let mut post_recycles = Vec::new();

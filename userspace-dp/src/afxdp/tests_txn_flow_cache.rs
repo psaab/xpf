@@ -39,7 +39,7 @@ fn txn_admission_refusal_at_cap_drops_and_leaks_nothing() {
         443,
         TCP_FLAG_SYN,
     );
-    let meta = txn_meta_v4(24, TCP_FLAG_SYN, (frame.len() - 14) as u16);
+    let meta = txn_meta_v4(24, TCP_FLAG_SYN, frame.len() as u16);
     let (batch, dbg) = txn_run_descriptor(
         &mut binding,
         &mut sessions,
@@ -121,7 +121,7 @@ fn txn_new_flow_install_counts_on_the_binding_4800() {
         443,
         TCP_FLAG_SYN,
     );
-    let meta = txn_meta_v4(24, TCP_FLAG_SYN, (frame.len() - 14) as u16);
+    let meta = txn_meta_v4(24, TCP_FLAG_SYN, frame.len() as u16);
     let (batch, dbg) = txn_run_descriptor(
         &mut binding,
         &mut sessions,
@@ -903,7 +903,7 @@ fn txn_pair_admitted_at_cap_minus_two_refused_at_cap_minus_one() {
         443,
         TCP_FLAG_SYN,
     );
-    let meta = txn_meta_v4(24, TCP_FLAG_SYN, (frame.len() - 14) as u16);
+    let meta = txn_meta_v4(24, TCP_FLAG_SYN, frame.len() as u16);
     let (_b1, d1) = txn_run_descriptor(
         &mut binding,
         &mut sessions,
@@ -984,7 +984,7 @@ fn txn_pool_snat_refusal_rolls_back_allocation_and_caches_nothing() {
         443,
         TCP_FLAG_SYN,
     );
-    let meta = txn_meta_v4(24, TCP_FLAG_SYN, (frame.len() - 14) as u16);
+    let meta = txn_meta_v4(24, TCP_FLAG_SYN, frame.len() as u16);
     let (_b, dbg) = txn_run_descriptor(
         &mut binding,
         &mut sessions,
@@ -1253,7 +1253,7 @@ fn poll_descriptor_stamps_neighbor_mac_epoch_from_outer_neighbor_shard_not_logic
         443,
         0x10_u8,
     );
-    let meta = txn_meta_v4(5, 0x10_u8, (frame.len() - 14) as u16);
+    let meta = txn_meta_v4(5, 0x10_u8, frame.len() as u16);
     let (_batch, dbg) = txn_run_descriptor_with_neighbors(
         &mut binding,
         &mut sessions,
@@ -1337,7 +1337,7 @@ fn txn_refused_seed_recycles_instead_of_buffering() {
         443,
         TCP_FLAG_SYN,
     );
-    let meta = txn_meta_v4(24, TCP_FLAG_SYN, (frame.len() - 14) as u16);
+    let meta = txn_meta_v4(24, TCP_FLAG_SYN, frame.len() as u16);
     txn_run_descriptor(
         &mut binding,
         &mut sessions,
@@ -1354,7 +1354,7 @@ fn txn_refused_seed_recycles_instead_of_buffering() {
 
     // Below cap: the seed installs and the representative frame buffers.
     sessions.set_max_sessions_for_test(16);
-    let meta2 = txn_meta_v4(24, TCP_FLAG_SYN, (frame.len() - 14) as u16);
+    let meta2 = txn_meta_v4(24, TCP_FLAG_SYN, frame.len() as u16);
     txn_run_descriptor(
         &mut binding,
         &mut sessions,
@@ -1405,7 +1405,7 @@ fn missing_neighbor_recycle_exactly_once_pin() {
         443,
         TCP_FLAG_SYN,
     );
-    let meta = txn_meta_v4(24, TCP_FLAG_SYN, (frame.len() - 14) as u16);
+    let meta = txn_meta_v4(24, TCP_FLAG_SYN, frame.len() as u16);
     let (_batch, dbg) = txn_run_descriptor(
         &mut binding,
         &mut sessions,
@@ -1477,7 +1477,7 @@ fn missing_neighbor_recycle_exactly_once_pin() {
     let mut deny_binding = BindingWorker::new_for_mirror_test(0, 0, 24, 0);
     deny_binding.interface = Arc::<str>::from("reth1.0");
     let mut deny_sessions = SessionTable::new();
-    let meta3 = txn_meta_v4(24, TCP_FLAG_SYN, (frame.len() - 14) as u16);
+    let meta3 = txn_meta_v4(24, TCP_FLAG_SYN, frame.len() as u16);
     let (_batch3, dbg3) = txn_run_descriptor(
         &mut deny_binding,
         &mut deny_sessions,

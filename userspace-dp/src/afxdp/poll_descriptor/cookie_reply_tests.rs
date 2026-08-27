@@ -86,7 +86,7 @@ fn tcp_v4_syn_frame() -> (Vec<u8>, UserspaceDpMeta, SessionFlow) {
         l3_offset: 14,
         l4_offset: 34,
         payload_offset: 58,
-        pkt_len: (frame.len() - 14) as u16,
+        pkt_len: frame.len() as u16,
         addr_family: libc::AF_INET as u8,
         protocol: PROTO_TCP,
         tcp_flags: TCP_FLAG_SYN,

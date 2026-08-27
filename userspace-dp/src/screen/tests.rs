@@ -1223,7 +1223,7 @@ fn extract_screen_info_ipv6_first_fragment_extheader_after_fragment_extracts_tcp
         libc::AF_INET6 as u8,
         6,    // TCP
         0x02, // SYN — the attack-relevant flag the screens must see
-        (frame.len() - 14) as u16,
+        frame.len() as u16,
         IpAddr::V6("2001:db8::1".parse::<Ipv6Addr>().unwrap()),
         IpAddr::V6("2001:db8::2".parse::<Ipv6Addr>().unwrap()),
         12345,
@@ -1297,7 +1297,7 @@ fn extract_screen_info_ipv6_mobility_before_fragment_extracts_tcp() {
         libc::AF_INET6 as u8,
         6,    // TCP — what the fixed meta walker now reports (was 135)
         0x02, // SYN
-        (frame.len() - 14) as u16,
+        frame.len() as u16,
         IpAddr::V6("2001:db8::1".parse::<Ipv6Addr>().unwrap()),
         IpAddr::V6("2001:db8::2".parse::<Ipv6Addr>().unwrap()),
         12345,
@@ -1361,7 +1361,7 @@ fn extract_screen_info_ipv6_nonfirst_fragment_extheader_stays_flowless() {
         libc::AF_INET6 as u8,
         6,
         0x02,
-        (frame.len() - 14) as u16,
+        frame.len() as u16,
         IpAddr::V6("2001:db8::1".parse::<Ipv6Addr>().unwrap()),
         IpAddr::V6("2001:db8::2".parse::<Ipv6Addr>().unwrap()),
         12345,

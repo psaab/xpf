@@ -53,7 +53,7 @@ fn tcp_v4_syn() -> (Vec<u8>, UserspaceDpMeta, SessionFlow) {
         l3_offset: 14,
         l4_offset: 34,
         payload_offset: 54,
-        pkt_len: (frame.len() - 14) as u16,
+        pkt_len: frame.len() as u16,
         addr_family: libc::AF_INET as u8,
         protocol: PROTO_TCP,
         tcp_flags: 0x02,
@@ -187,7 +187,7 @@ fn reject_reply_dropped_by_egress_output_filter() {
         l4_offset: 34,
         addr_family: libc::AF_INET as u8,
         protocol: PROTO_ICMP,
-        pkt_len: (frame.len() - 14) as u16,
+        pkt_len: frame.len() as u16,
         ..UserspaceDpMeta::default()
     };
     let flow = SessionFlow {
@@ -345,7 +345,7 @@ fn filter_reject_non_tcp_enqueues_icmp_unreachable() {
         l4_offset: 34,
         addr_family: libc::AF_INET as u8,
         protocol: PROTO_ICMP,
-        pkt_len: (frame.len() - 14) as u16,
+        pkt_len: frame.len() as u16,
         ..UserspaceDpMeta::default()
     };
     let flow = SessionFlow {
@@ -474,7 +474,7 @@ fn filter_reject_output_filter_drop_uses_filter_counter() {
         l4_offset: 34,
         addr_family: libc::AF_INET as u8,
         protocol: PROTO_ICMP,
-        pkt_len: (frame.len() - 14) as u16,
+        pkt_len: frame.len() as u16,
         ..UserspaceDpMeta::default()
     };
     let flow = SessionFlow {
@@ -874,7 +874,7 @@ fn unreplyable_non_first_fragment_reject_untouched_3656() {
         l4_offset: 34,
         addr_family: libc::AF_INET as u8,
         protocol: PROTO_ICMP,
-        pkt_len: (frame.len() - 14) as u16,
+        pkt_len: frame.len() as u16,
         ..UserspaceDpMeta::default()
     };
     let flow = SessionFlow {
@@ -945,7 +945,7 @@ fn icmp_v4_echo() -> (Vec<u8>, UserspaceDpMeta, SessionFlow) {
         l4_offset: 34,
         addr_family: libc::AF_INET as u8,
         protocol: PROTO_ICMP,
-        pkt_len: (frame.len() - 14) as u16,
+        pkt_len: frame.len() as u16,
         ..UserspaceDpMeta::default()
     };
     let flow = SessionFlow {
@@ -1284,7 +1284,7 @@ fn reject_reply_non_tcp_sources_from_logical_vlan_ifindex_3976() {
         l4_offset: 34,
         addr_family: libc::AF_INET as u8,
         protocol: PROTO_ICMP,
-        pkt_len: (frame.len() - 14) as u16,
+        pkt_len: frame.len() as u16,
         ..UserspaceDpMeta::default()
     };
     let flow = SessionFlow {
@@ -1402,7 +1402,7 @@ fn filter_reject_non_tcp_v6_sources_from_logical_vlan_ifindex_3976() {
         l4_offset: 54,
         addr_family: libc::AF_INET6 as u8,
         protocol: PROTO_ICMPV6,
-        pkt_len: (frame.len() - 14) as u16,
+        pkt_len: frame.len() as u16,
         ..UserspaceDpMeta::default()
     };
     let flow = SessionFlow {
