@@ -304,8 +304,61 @@ func TestGatewayChangeCoalescesWithProbeTransition(t *testing.T) {
 		r.set("ge-0-0-3", "198.51.100.1")
 		e.NotifyNextHopChange()
 	}
-	time.Sleep(40 * time.Millisecond)
-	if got := actuations.Load(); got < 1 || got > 2 {
-		t.Fatalf("actuations = %d, want coalesced (1-2) for transition + gateway churn", got)
+
+	// #7650: the two halves of this assertion have different natures and the
+	// old `time.Sleep(40ms)` conflated them.
+	//
+	// The UPPER bound is the property: six notifications must collapse into at
+	// most two actuations. The LOWER bound is an anti-vacuity floor — without
+	// it the test passes having observed nothing.
+	//
+	// A fixed sleep only ever tested the property when the machine happened to
+	// be fast enough. Under load the 40 ms expired before the actuator ran at
+	// all, and the FLOOR fired with `actuations = 0` — which reads as an
+	// over-coalescing failure but is the test failing to observe, not the
+	// coalescer failing to coalesce. That is a reading of the machine, not of
+	// the subject (docs/engineering-style.md #7563).
+	//
+	// So wait on the observable that IMPLIES the floor — the actuator having
+	// run — and fail loudly naming what never arrived. Then let the engine's
+	// OWN throttle window elapse from that observed point, so any further
+	// actuation it was going to emit has had its chance before the upper bound
+	// is checked. The settle is derived from e.throttle/e.debounce rather than
+	// a literal, so retuning either cannot silently make this vacuous.
+	waitForActuation(t, &actuations, 1, 5*time.Second)
+	time.Sleep(e.throttle + e.debounce)
+	if got := actuations.Load(); got > 2 {
+		t.Fatalf("actuations = %d, want coalesced (at most 2) for transition + "+
+			"gateway churn — the debounce/throttle did not collapse the six "+
+			"notifications", got)
+	}
+}
+
+// waitForActuation blocks until the counter reaches want, or fails the test
+// naming what never arrived (#7650).
+//
+// This is the anti-vacuity floor expressed as a WAIT rather than as a sample
+// taken at a fixed wall-clock point. The distinction is the whole fix: a
+// sample can only report what the machine happened to have done by then, so on
+// a loaded box it reports zero and the floor fires for a reason that has
+// nothing to do with the property under test.
+//
+// The deadline is deliberately generous. It is not a timing assertion — it
+// exists so a genuinely broken actuator fails in seconds with a clear message
+// instead of hanging the suite.
+func waitForActuation(t *testing.T, counter *atomic.Int32, want int32, within time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(within)
+	for {
+		if got := counter.Load(); got >= want {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("actuator never reached %d actuations within %s (saw %d) — "+
+				"the engine never actuated at all, so nothing below can be "+
+				"interpreted as a coalescing result (#7650)",
+				want, within, counter.Load())
+		}
+		time.Sleep(time.Millisecond)
 	}
 }

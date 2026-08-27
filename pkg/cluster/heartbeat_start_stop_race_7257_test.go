@@ -5,6 +5,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // #7257 — StartHeartbeat published m.hbSender/m.hbReceiver under m.mu, RELEASED
@@ -31,6 +32,25 @@ import (
 
 // TestStartHeartbeatDoesNotRaceStopHeartbeat7257 is the race probe.
 //
+// WARNING (#7663): this probe currently observes NOTHING, and the change below
+// does not fix that — it only stops the degeneracy floor firing spuriously
+// under load (#7650). Measured at de6b8c85d on an idle machine, with the #7257
+// production fix reverted, `-race` reports ZERO data races, both with and
+// without the #7650 change. The fail-on-revert contract stated further down is
+// false as written.
+//
+// The cause is structural, not timing: StartHeartbeat re-checks its entry epoch
+// before publishing, StopHeartbeat bumps that epoch, and this probe runs an
+// UNBOUNDED teardown loop. Instrumenting the epoch check gives
+// `publish-window entered=0 superseded=60` against 39300 stops — every start is
+// superseded long before it reaches the derefs that carry the race. The
+// `stops >= starts` floor below is satisfied by exactly the condition that
+// guarantees the vacuity, so it cannot detect it.
+//
+// #7663 carries the fix (pace the teardown; assert the publish window was
+// entered). Do not read a green here as evidence the #7257 regression is
+// guarded.
+//
 // The BOUNDED side is the expensive one. StartHeartbeat creates two UDP
 // sockets; StopHeartbeat is nearly free. A first draft bounded the stops and
 // looped the starts "until done", and the logged rate gave it away immediately:
@@ -47,6 +67,28 @@ import (
 // RED on revert: restore the unlocked `m.hbReceiver.start()` / `m.hbSender.start()`
 // pair after the Unlock and `go test -race -run TestStartHeartbeatDoesNotRaceStopHeartbeat7257
 // ./pkg/cluster/` reports WARNING: DATA RACE naming StartHeartbeat and StopHeartbeat.
+// waitForTeardownProgress blocks until the teardown goroutine has completed at
+// least one stop, so the start loop is issued into a window that is provably
+// being contended (#7650).
+//
+// Only ONE edge, and only before the contended region. A per-start handshake
+// would be deterministic but would also establish happens-before between each
+// teardown and the start it races, which is exactly what the race detector
+// looks for the absence of — the probe would go quiet against the very bug it
+// exists to catch.
+func waitForTeardownProgress(t *testing.T, stops *atomic.Int64, within time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(within)
+	for stops.Load() == 0 {
+		if time.Now().After(deadline) {
+			t.Fatalf("the teardown goroutine completed no stops in %s — it was "+
+				"never scheduled, so every start below would run uncontended and "+
+				"the probe would be degenerate (#7650)", within)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
 func TestStartHeartbeatDoesNotRaceStopHeartbeat7257(t *testing.T) {
 	m := NewManager(0, 1)
 
@@ -84,6 +126,23 @@ func TestStartHeartbeatDoesNotRaceStopHeartbeat7257(t *testing.T) {
 			stops.Add(1)
 		}
 	}()
+	// #7650: wait until the teardown side is provably RUNNING before the
+	// starts begin.
+	//
+	// The degeneracy floor below is `stops >= starts`, and it fired on a loaded
+	// machine with 0 stops against 60 starts — not because the window was
+	// uncontended by design, but because the cheap goroutine had not been
+	// scheduled at all while the expensive one ran to completion. The floor was
+	// reading the machine.
+	//
+	// This wait is deliberately placed BEFORE the start loop and creates a
+	// happens-before edge only with stops that precede every start. It must not
+	// become a per-start handshake: an edge between a stop and the start it
+	// contends would ORDER the unlocked publish against the teardown's read and
+	// suppress the very data race this probe exists to detect. The teardown
+	// goroutine keeps running freely for the whole start loop, so each start
+	// still overlaps unordered teardowns.
+	waitForTeardownProgress(t, &stops, 5*time.Second)
 	wg.Wait()
 	m.StopHeartbeat()
 
@@ -92,7 +151,12 @@ func TestStartHeartbeatDoesNotRaceStopHeartbeat7257(t *testing.T) {
 	}
 	if stops.Load() < starts.Load() {
 		t.Fatalf("#7257 probe is degenerate: %d stops against %d starts — the teardown side "+
-			"must out-run the start side or the window is barely contended",
+			"must out-run the start side or the window is barely contended. NOTE "+
+			"(#7650): this is an anti-degeneracy PRECONDITION, not the property. "+
+			"The property is the race detector, and it did not fire. A very low "+
+			"stop count means the teardown goroutine was starved, which is a "+
+			"statement about the machine; re-run on an idle box before suspecting "+
+			"the heartbeat code",
 			stops.Load(), starts.Load())
 	}
 	t.Logf("#7257 race probe: %d starts against %d stops (%.1f stops/start)",
