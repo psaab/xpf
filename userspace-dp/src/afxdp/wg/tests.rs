@@ -2425,9 +2425,33 @@ mod framed_handshake {
             let completed = completed.clone();
             let stop = stop.clone();
             thread::spawn(move || {
-                for _ in 0..400 {
+                // #7650: loop until enough handshakes have COMPLETED, not for a
+                // fixed iteration count.
+                //
+                // The floor below ("no handshake completed — the race path was
+                // not exercised") is an anti-vacuity precondition, and with a
+                // fixed 400 iterations it was a reading of the machine: the
+                // reconciler removes the peer for part of every cycle, so on a
+                // loaded box a run can spend all 400 attempts inside removal
+                // windows, take the `continue` every time, and fire the floor
+                // with zero completions — while soundness, the actual property,
+                // was never in question.
+                //
+                // Running until the observation is made removes that
+                // sensitivity without weakening anything: the reconciler churns
+                // throughout, so every completion counted here is still a
+                // CONTENDED one. The attempt cap only stops a genuinely broken
+                // engine from hanging the suite, and is far above what a healthy
+                // run needs (a healthy run reaches the target in well under 400).
+                const TARGET_COMPLETIONS: u32 = 8;
+                const MAX_ATTEMPTS: u32 = 200_000;
+                let mut attempts = 0u32;
+                while completed.load(AOrd::Relaxed) < TARGET_COMPLETIONS && attempts < MAX_ATTEMPTS
+                {
+                    attempts += 1;
                     let mut msg1 = [0u8; WG_MSG_INIT_LEN];
                     if init.create_initiation(&resp_pub, &mut msg1).is_err() {
+                        thread::yield_now();
                         continue;
                     }
                     let mut msg2 = [0u8; WG_MSG_RESPONSE_LEN];
@@ -2435,6 +2459,7 @@ mod framed_handshake {
                         .consume_initiation_create_response(&msg1, &mut msg2)
                         .is_err()
                     {
+                        thread::yield_now();
                         continue;
                     }
                     if init.consume_response(&msg2).is_ok() {
@@ -2482,10 +2507,17 @@ mod framed_handshake {
         driver.join().unwrap();
         reconciler.join().unwrap();
 
-        // The race must have exercised real completions.
+        // The race must have exercised real completions. The driver loops until
+        // it reaches this, so a failure here means the engine could not complete
+        // a handshake in 200k contended attempts — a real defect, not a slow
+        // machine (#7650).
+        let done = completed.load(AOrd::Relaxed);
         assert!(
-            completed.load(AOrd::Relaxed) > 0,
-            "no handshake completed — the race path was not exercised"
+            done >= 8,
+            "only {done} handshakes completed in up to 200k contended attempts — \
+             the race path was not exercised, so the soundness checks below \
+             cannot be interpreted. This is an anti-vacuity PRECONDITION, not \
+             the property: nothing here says the maps are corrupt (#7650)"
         );
 
         // Soundness: after the storm, drive ONE clean handshake and a
