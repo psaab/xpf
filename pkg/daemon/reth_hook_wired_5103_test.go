@@ -219,7 +219,13 @@ func checkRethMemberCallSite(t *testing.T, fset *token.FileSet, file string,
 			"reads are never updated", file, pos, assign.Tok.String())
 		return
 	}
-	want := []string{"networkdErr", "needLinkCycleRecovery"}
+	// #7007 added the third accumulator. The property this pins is unchanged —
+	// the loop must assign EVERY accumulator straight back into the variables
+	// the apply tail reads, so none of them can be silently dropped or shadowed
+	// — and rethRollbackKeptLease is exactly such an accumulator: lose it and
+	// the apply where every member ABORTS strands its link-cycle lease to the
+	// deferred abandon, which is the failure mode #7007 rejects a refcount for.
+	want := []string{"networkdErr", "needLinkCycleRecovery", "rethRollbackKeptLease"}
 	if len(assign.Lhs) != len(want) {
 		t.Errorf("%s:%d: programRethMemberMAC's result is assigned to %d targets, want %d "+
 			"(%v)", file, pos, len(assign.Lhs), len(want), want)

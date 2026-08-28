@@ -82,7 +82,7 @@ func TestRethMemberMACRenewsTheLinkCycleLease_6871(t *testing.T) {
 			withRethOps(t, tc.ops)
 			d, lc := newAbortRecoveryDaemon(tc.prepareErr)
 
-			d.programRethMemberMAC("ge-0-0-1", virtMAC5103, nil, false)
+			d.programRethMemberMAC("ge-0-0-1", virtMAC5103, nil, false, false)
 
 			if lc.renewCalls != 1 {
 				t.Errorf("RenewLinkCycle calls = %d, want 1: this member did not renew the "+
@@ -117,7 +117,7 @@ func TestRethMemberMACSkipsRenewWithNoDataplane_6871(t *testing.T) {
 				"work on this path", r)
 		}
 	}()
-	got, needRecovery := d.programRethMemberMAC("ge-0-0-1", virtMAC5103, errPriorCommit5103, false)
+	got, needRecovery, _ := d.programRethMemberMAC("ge-0-0-1", virtMAC5103, errPriorCommit5103, false, false)
 	if got != errPriorCommit5103 {
 		t.Errorf("commit error = %v, want the prior error passed through unchanged: with no "+
 			"dataplane the hook never runs, so this member cannot enter the fail-closed "+

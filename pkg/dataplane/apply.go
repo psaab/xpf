@@ -143,6 +143,16 @@ type LinkController interface {
 	// (#5103). A void return made a failed join indistinguishable from a
 	// successful one, so the link cycled with workers still live.
 	PrepareLinkCycle() error
+	// NotifyLinkCycleKeepingLease performs the same rebind as NotifyLinkCycle
+	// but leaves the #6871 link-cycle lease HELD (#7007).
+	//
+	// It exists because acquire and release do not pair on a multi-member RETH
+	// apply: acquire is per MEMBER, inside the loop, while release was per
+	// REPAIR — so an aborted member's in-loop rollback ended a lease an
+	// already-cycled sibling still depended on. The aborted member must still
+	// rebind (its own workers are joined, its ctrl is off); it must not end the
+	// apply's lease to do it. The apply-wide site outside the loop releases.
+	NotifyLinkCycleKeepingLease() error
 	// NotifyLinkCycle sends the "rebind" that recreates the AF_XDP workers
 	// PrepareLinkCycle joined. It is the documented inverse of "stop_workers",
 	// and the daemon uses it both to finish a cycle and to unwind an aborted
@@ -350,6 +360,15 @@ func (c dataPlaneLinkController) NotifyLinkCycle() error {
 		c.dp.NotifyLinkCycle()
 	}
 	return nil
+}
+
+// NotifyLinkCycleKeepingLease is the same rebind here, because this adapter has
+// no lease to keep: the #6871 lease lives on the userspace Manager, and this
+// shim wraps a DataPlane whose NotifyLinkCycle is void. Identical behaviour is
+// therefore correct rather than a stub — there is nothing for the #7007
+// separation to separate.
+func (c dataPlaneLinkController) NotifyLinkCycleKeepingLease() error {
+	return c.NotifyLinkCycle()
 }
 
 func NewDataPlaneHAController(dp DataPlane) HAController {

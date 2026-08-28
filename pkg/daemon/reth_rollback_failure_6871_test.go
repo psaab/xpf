@@ -49,7 +49,7 @@ func TestRethRollbackRebindFailureReachesTheCommit_6871(t *testing.T) {
 	d, lc := newAbortRecoveryDaemon(errors.New("stop_workers: helper did not respond"))
 	lc.notifyErr = errRollbackRebind
 
-	linkCycled, commitErr := d.programRethMACWithWorkerJoin("ge-0-0-1", virtMAC5103)
+	linkCycled, commitErr := d.programRethMACWithWorkerJoin("ge-0-0-1", virtMAC5103, nil)
 
 	if lc.prepareCalls != 1 || lc.notifyCalls != 1 {
 		t.Fatalf("prepare=%d notify=%d, want 1/1 — the fixture must abort the cycle and "+
@@ -94,7 +94,7 @@ func TestRethRollbackSuccessDoesNotInventACommitCause_6871(t *testing.T) {
 	d, lc := newAbortRecoveryDaemon(errors.New("stop_workers: helper did not respond"))
 	lc.notifyErr = nil
 
-	_, commitErr := d.programRethMACWithWorkerJoin("ge-0-0-1", virtMAC5103)
+	_, commitErr := d.programRethMACWithWorkerJoin("ge-0-0-1", virtMAC5103, nil)
 
 	if lc.notifyCalls != 1 {
 		t.Fatalf("NotifyLinkCycle calls = %d, want 1 — this control must traverse the same "+

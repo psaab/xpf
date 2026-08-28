@@ -1106,6 +1106,31 @@ Scope of the fallback:
   ifindex egresses into, and ships it as `InterfaceSnapshot.egress_zone`.
   `populate_interfaces` reads it and adjudicates nothing.
 
+  **The wire KEY is bound by an agreement test, not by a literal on one side
+  (#7037).** Both planes spell `egress_zone` independently — Go's `json:` tag on
+  `InterfaceSnapshot.EgressZone`, Rust's `#[serde(rename = "egress_zone",
+  default)]` in `protocol/snapshot.rs` — and the Rust `default` is what makes a
+  disagreement SILENT: an absent key does not fail to decode, it fills the empty
+  String. A one-sided rename would ship a snapshot in which every interface
+  resolves egress zone `""`, while both planes still agree the version is 8, so
+  no version gate fires. `TestEgressZoneWireKeyLockstepWithRust_7037` parses
+  `snapshot.rs` and compares it to the Go tag read by REFLECTION, asserting the
+  two AGREE rather than pinning either to a literal — pinning one side encodes
+  which side you trust. A consistent rename of BOTH sides passes there and is
+  caught instead by `TestEgressZoneCrossesTheWireAndTheQuarantine_6722`, which
+  pins the Go literal against the emitted blob. Measured: a Rust-side rename, or
+  dropping the `rename` attribute altogether, reds the lockstep test and
+  **nothing else** in the Go suite.
+
+  Note what this is NOT. #7037 was filed against the version NUMBER; that premise
+  is stale — reverting `ProtocolVersion` at head reds three tests, because
+  #6691's pins landed after the issue was written. A fourth equality pin would be
+  another copy of the same literal, and a per-feature `MinProtocolEgressZone`
+  floor is ruled out by the decision recorded above in `protocol.go`: the
+  acceptance question is answered in exactly ONE place
+  (`ensureEgressZoneProtocolLocked`), and a second gate would be the divergent
+  copy #6649 forbids.
+
   **Why the decision had to move.** Rounds 4 through 9 built the answer in Rust
   by polling the rows — "do all rows on this ifindex agree?" — and exempting the
   rows whose agreement or dissent was an artefact rather than an observation.
@@ -2729,7 +2754,24 @@ declares for itself whether its verdict needs the wire, and
 `TestEveryNetdevProducerIsEnumerated` zeroes each snapshot section in turn to
 DISCOVER producers — a section that changes the emitted netdev set but not the
 enumeration reds under its own field name, so a third producer cannot repeat
-this. Round 8 hand-mirrored the builder's walk here and claimed the
+this. Until #7020 that sentence was true of the doc and not of the code: the
+sweep zeroed only `Kind()==Slice` fields and compared the emitted set's SIZE, so
+a producer reached through a map, pointer, or nested struct was never zeroed,
+and a field that swapped WHICH netdevs are emitted without changing HOW MANY
+scored equal and went unreported. It now zeroes every settable field and
+compares membership (`sweepNetdevProducers`). `TestNetdevProducerSweepWidening`
+varies the two widenings independently over a synthetic snapshot carrying one
+instance of each blind spot, so neither is inert — and its widest row calls
+`sweepNetdevProducers` itself, so narrowing production back to either bound reds
+it. The enumeration is still a FLOOR, not a census: a JOINT producer — two
+fields that both emit netdev N — stays invisible, because zeroing either alone
+leaves N emitted. That residual is asserted in every row rather than left as a
+comment. The PRIMARY assertion is membership-based and type-independent, so a
+producer the sweep never names is still covered by it (#7018 records the
+matching correction on the verdict-scope caveat: only `vote.counted()` is
+single-sourced with production, and the fallback-role classification four lines
+below it is a re-typed literal that the old "the ROLE axis" wording covered by
+implication and not in fact). Round 8 hand-mirrored the builder's walk here and claimed the
 two "cannot diverge"; a review round measured them diverging, because the mirror
 took a SECOND RTM_GETLINK dump and an xfrm device visible to the builder and gone
 by the gate produced a flagged snapshot with a silent gate — the pre-v6 helper

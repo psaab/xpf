@@ -76,6 +76,13 @@ func (c *abortRecoveryLinkController) NotifyLinkCycle() error {
 	return c.notifyErr
 }
 
+// #7007: the repair-without-release variant. This fake's lease model has
+// nothing extra to do — the point of the separation is asserted by the
+// leaseTracingLinkController in reth_multimember_lease_7007_test.go.
+func (c *abortRecoveryLinkController) NotifyLinkCycleKeepingLease() error {
+	return c.NotifyLinkCycle()
+}
+
 func (c *abortRecoveryLinkController) RenewLinkCycle() { c.renewCalls++ }
 
 // AbandonLinkCycle records the #6871 round-8 deferred release and reports
@@ -118,7 +125,7 @@ func TestRethMACAbortRebindsAfterFailedJoin_5103(t *testing.T) {
 	withRethOps(t, newRecordingRethOps(t, &events, curMAC5103, true /* force the cycle */))
 	d, lc := newAbortRecoveryDaemon(errors.New("stop_workers: helper did not respond"))
 
-	linkCycled, commitErr := d.programRethMACWithWorkerJoin("ge-0-0-1", virtMAC5103)
+	linkCycled, commitErr := d.programRethMACWithWorkerJoin("ge-0-0-1", virtMAC5103, nil)
 
 	if lc.prepareCalls != 1 {
 		t.Fatalf("PrepareLinkCycle calls = %d, want 1 — the fixture must reach the hook, "+
@@ -256,7 +263,7 @@ func TestRethMACAbortRebindsWhenCycleFailsAfterJoin_5103(t *testing.T) {
 			withRethOps(t, newFailAfterJoinOps(t, &events, tc.step))
 			d, lc := newAbortRecoveryDaemon(nil /* the join SUCCEEDS */)
 
-			linkCycled, commitErr := d.programRethMACWithWorkerJoin("ge-0-0-1", virtMAC5103)
+			linkCycled, commitErr := d.programRethMACWithWorkerJoin("ge-0-0-1", virtMAC5103, nil)
 
 			if lc.prepareCalls != 1 {
 				t.Fatalf("PrepareLinkCycle calls = %d, want 1 — the fixture must reach the "+
@@ -320,7 +327,7 @@ func TestRethMACLinkUpFailureFailsCommitWithoutDoubleRebind_5103(t *testing.T) {
 	withRethOps(t, newFailAfterJoinOps(t, &events, failSetUpAfterMAC))
 	d, lc := newAbortRecoveryDaemon(nil /* the join SUCCEEDS */)
 
-	linkCycled, commitErr := d.programRethMACWithWorkerJoin("ge-0-0-1", virtMAC5103)
+	linkCycled, commitErr := d.programRethMACWithWorkerJoin("ge-0-0-1", virtMAC5103, nil)
 
 	// #6871 F5: Errorf, not Fatalf — see the sibling above. The linkCycled and
 	// commitErr assertions below are the guard; a fixture-sequence mismatch
@@ -356,7 +363,7 @@ func TestRethMACNoRollbackWhenJoinSucceeds_5103(t *testing.T) {
 	withRethOps(t, newRecordingRethOps(t, &events, curMAC5103, true /* force the cycle */))
 	d, lc := newAbortRecoveryDaemon(nil)
 
-	linkCycled, commitErr := d.programRethMACWithWorkerJoin("ge-0-0-1", virtMAC5103)
+	linkCycled, commitErr := d.programRethMACWithWorkerJoin("ge-0-0-1", virtMAC5103, nil)
 
 	if lc.prepareCalls != 1 {
 		t.Fatalf("PrepareLinkCycle calls = %d, want 1", lc.prepareCalls)
@@ -386,7 +393,7 @@ func TestRethMACNoJoinOrRollbackOnLiveSet_5103(t *testing.T) {
 	withRethOps(t, newRecordingRethOps(t, &events, curMAC5103, false /* live set works */))
 	d, lc := newAbortRecoveryDaemon(errors.New("stop_workers: helper did not respond"))
 
-	linkCycled, commitErr := d.programRethMACWithWorkerJoin("ge-0-0-1", virtMAC5103)
+	linkCycled, commitErr := d.programRethMACWithWorkerJoin("ge-0-0-1", virtMAC5103, nil)
 
 	if linkCycled || commitErr != nil {
 		t.Errorf("live set: linkCycled=%v commitErr=%v, want false/nil", linkCycled, commitErr)
@@ -416,7 +423,7 @@ func TestRethMACOrdinaryFailureStaysWarnOnly_5103(t *testing.T) {
 	withRethOps(t, ordinaryFailureRethOps())
 	d, lc := newAbortRecoveryDaemon(errors.New("stop_workers: helper did not respond"))
 
-	linkCycled, commitErr := d.programRethMACWithWorkerJoin("ge-0-0-1", virtMAC5103)
+	linkCycled, commitErr := d.programRethMACWithWorkerJoin("ge-0-0-1", virtMAC5103, nil)
 
 	if linkCycled {
 		t.Error("a lookup failure cannot have cycled the link")

@@ -24,7 +24,7 @@ import (
 // keeps the effect from ever reaching production:
 //
 //	prevNetworkdErr := networkdErr
-//	networkdErr, needLinkCycleRecovery = d.programRethMemberMAC(
+//	networkdErr, needLinkCycleRecovery, _ = d.programRethMemberMAC(
 //	    linuxName, mac, networkdErr, needLinkCycleRecovery)
 //	networkdErr = prevNetworkdErr        // effect discarded
 //

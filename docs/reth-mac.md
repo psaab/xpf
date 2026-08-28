@@ -475,59 +475,83 @@ so the gate would have been equivalent. Ungated is still the better shape: it
 does not depend on an accumulator staying in step with the lease. But the reason
 is "no gate is needed", not "the gate would lose a case".
 
-### The lease ends at the FIRST repair of the apply, not the last (#6871 round 15)
+### The lease ends at the LAST repair of the apply (#6871 round 15, fixed in #7007)
 
-`NotifyLinkCycle` releases unconditionally, and in a **mixed** multi-member apply
-— one member cycles, a later one aborts — the aborted member's in-loop rollback
-is the first `NotifyLinkCycle`, so it ends the lease while the cycled member's
-apply is still running. Everything after it (the remaining members' tails, both
-renewals above, and step 2.6b2's own `NotifyLinkCycle`) runs with the word at
-`0`, which makes those renewals no-ops.
+**Until #7007 it ended at the FIRST.** `NotifyLinkCycle` released
+unconditionally, and in a **mixed** multi-member apply — one member cycles, a
+later one aborts — the aborted member's in-loop rollback was the first
+`NotifyLinkCycle`, so it ended the lease while the cycled member's apply was
+still running. Everything after it (the remaining members' tails, both renewals
+above, and step 2.6b2's own `NotifyLinkCycle`) ran with the word at `0`, which
+made those renewals no-ops. The measured trace, from the #7007 binder at the
+pre-fix revision:
 
-This is not fixed by refcounting acquisitions against releases, and it is worth
-saying why, because that is the obvious reading. They do not pair: an acquisition
-is per **member** (each member's `PrepareLinkCycle`), while a release is one per
-**repair** — one per aborted member's rollback, plus at most one for the whole
-apply at step 2.6b2, which sits *outside* the per-member loop and is gated on
+```
+acquire  renew  renew  prepare-failed  notify(release)
+         renew(NO-OP: lease already released) x3  notify(release)  abandon
+```
+
+**It is still NOT fixed by refcounting**, and that is worth keeping stated
+because it is the obvious reading and it was the first suggestion made.
+Acquisitions and releases do not pair: an acquisition is per **member** (each
+member's `PrepareLinkCycle`), while a release is one per **repair** — one per
+aborted member's rollback, plus at most one for the whole apply at step 2.6b2,
+which sits *outside* the per-member loop and is gated on
 `needLinkCycleRecovery`. A two-member apply where **both** members cycle
 therefore takes two leases and issues exactly one release, so a refcount would
 leave the count at 1 on the most ordinary multi-member path, strand the lease
-until the deferred `abandonLinkCycleLease`, and make that backstop log its
-"apply is leaving with a lease still held" error on every such commit.
+until the deferred `abandonLinkCycleLease`, and make that backstop log its "apply
+is leaving with a lease still held" error on every such commit. That is worse
+than the gap it would close.
 
-What actually makes the early release safe is that a rebind is **helper-global**,
-not per member: `NotifyLinkCycle` recreates every worker with fresh sockets and
-re-enables ctrl, so the state the lease protects — a torn-down helper that a 1 Hz
-tick could repopulate — has been repaired for the cycled member too by the time
-the aborted member's rollback returns. Step 2.6b2's later rebind is then the
-redundant-but-safe double rebind described above.
+**What #7007 does instead is separate REPAIR from RELEASE.** The two acts were
+fused in `NotifyLinkCycle`, and the fusion is the bug: an aborted member genuinely
+must rebind — its own workers are joined and its ctrl is off, and nothing else
+will undo that — but it has no business ending the *apply's* lease to do it. So
+the in-loop rollback now calls `NotifyLinkCycleKeepingLease`, which performs the
+identical rebind and renews the lease rather than releasing it, and the release
+moves to the apply-wide site outside the loop.
 
-The residual, stated rather than left implicit: if the rollback's rebind
-**fails**, the lease has already been released (the release deliberately precedes
-every `return` in `NotifyLinkCycle`, including that one) and the helper is not
-repaired. That is the same trade already argued for the single-member case — a
-stranded lease on a path where forwarding is down would add a frozen reconcile
-loop to an outage in progress — and the commit fails on that path regardless.
+Two arms make the release unconditional in effect:
 
-**The preconditions for that residual, written down because its trigger is map
-order.** Reaching it needs all of:
+- step 2.6b2's `NotifyLinkCycle`, when some member actually cycled
+  (`needLinkCycleRecovery`); and
+- an explicit end-of-apply `AbandonLinkCycle`, gated on
+  `rethRollbackKeptLease`, for the apply where **every** member aborts. Without
+  it that apply reaches no `NotifyLinkCycle` at all and would strand the lease to
+  the deferred abandon — arriving at the refcount's failure mode by another
+  route. `AbandonLinkCycle` rather than a second `NotifyLinkCycle`, because the
+  rollbacks already rebound: what is owed there is the release, not another
+  NIC-settle second and another worker recreate on a path where the commit is
+  failing anyway.
 
-1. **two or more RETH members** in one apply (`cfg.RethToPhysical()`);
-2. one member — call it A — whose **live MAC set is refused**, so it takes a
-   lease and completes its cycle;
-3. a **later** member B whose live set is also refused, so it takes a lease and
-   then fails after the join (a `PrepareLinkCycle` error, or a `setDown` /
-   cycled-MAC-write failure), routing it into the rollback; **and**
-4. B's rollback rebind itself failing.
+The gate stays scoped to `rethRollbackKeptLease` rather than "release whatever is
+held", so the deferred abandon keeps its teeth for the case it was written for —
+the rename-join hook, which takes a lease with no release partner at all and
+should still be reported.
 
-Steps 2 and 3 are ordered by the `rethToPhys` **Go map range**, so whether a
-given apply hits this is not deterministic across runs — the shape this document
-elsewhere calls the worst to reproduce. The end state is workers joined, ctrl
-off, and no lease.
+**The failed-rollback-rebind residual, re-decided.** The old ordering made it
+moot by accident: the lease was already gone before the rebind could fail. Under
+a last-repair release it is a real question, and the answer is that the lease is
+still released, by the end-of-apply arm above. That is deliberate and it is the
+same trade this document already argues for the single-member case: on a path
+where this node's forwarding is down, a stranded lease would add a frozen
+reconcile loop to an outage in progress. The commit fails regardless; what the
+release buys is that the 1 Hz reconcile resumes and can attempt recovery. The
+difference from before is that the protection now covers the whole apply
+*including* the failed-rebind window, instead of ending before it.
 
-It is **not a regression against master**: master had no lease at all, so it had
-neither the suppression nor this gap. It is a known limit of the lease as
-designed, recorded here rather than silently carried.
+**Bound by a multi-member fixture that had to be built.** Three existing pieces
+each blocked reusing one: `rethCallsiteConfig` is deliberately one member;
+`newRecordingRethOps` returns a single shared fake link that ignores the
+interface name, with one global `liveFail`; and `abortRecoveryLinkController`
+models the lease as a bool only `AbandonLinkCycle` clears, so it cannot observe
+"still held". `reth_multimember_lease_7007_test.go` supplies all three.
+
+Its assertions are **counts and invariants, never sequences**, because the apply
+iterates `rethToPhys` — a Go map — so member order is randomised per run. The
+error is injected by CALL order rather than by member identity, which is what
+makes the binder deterministic in either traversal instead of a 50/50 flake.
 
 **Round 7's answer was still an estimate, and round 8 stopped estimating.** The
 round-7 claim — "exactly one interval contains the only term with a hard ceiling,

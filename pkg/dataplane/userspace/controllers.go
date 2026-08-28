@@ -43,6 +43,19 @@ func (c userspaceLinkController) NotifyLinkCycle() error {
 	return nil
 }
 
+// NotifyLinkCycleKeepingLease is the #7007 repair-without-release. Same rebind,
+// same error propagation, but the apply's link-cycle lease survives it — see
+// Manager.NotifyLinkCycleKeepingLease for why an aborted RETH member must not
+// end a lease its already-cycled sibling still depends on.
+func (c userspaceLinkController) NotifyLinkCycleKeepingLease() error {
+	if c.manager != nil {
+		return c.manager.NotifyLinkCycleKeepingLease()
+	}
+	// No manager wired: nothing was joined, so there is nothing to rebind AND no
+	// lease to keep. Mirrors NotifyLinkCycle's nil-manager reading.
+	return nil
+}
+
 func (c userspaceLinkController) RenewLinkCycle() {
 	if c.manager != nil {
 		c.manager.RenewLinkCycle()

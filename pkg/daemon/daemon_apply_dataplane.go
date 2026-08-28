@@ -283,6 +283,14 @@ func (d *Daemon) applyDataplaneAndHACore(ctx context.Context, cfg *config.Config
 	// handle failover; RA goodbye packets handle IPv6 default gateway transitions.
 	// Must run AFTER networkd.Apply() so .link renames are applied first.
 	needLinkCycleRecovery := false
+	// #7007: set when an aborted member's in-loop rollback rebound WITHOUT
+	// releasing the apply's lease. It is what makes the end-of-apply release
+	// below unconditional in effect — 2.6b2 is gated on needLinkCycleRecovery,
+	// so an apply where every member ABORTS (nothing cycled) reaches no
+	// NotifyLinkCycle at all and would otherwise strand the lease to the
+	// deferred abandon, turning that backstop's ERROR into routine noise for
+	// exactly the reason the issue rejects a refcount.
+	rethRollbackKeptLease := false
 	if d.cluster != nil && cfg.Chassis.Cluster != nil {
 		cc := cfg.Chassis.Cluster
 		rethToPhys := cfg.RethToPhysical()
@@ -339,8 +347,9 @@ func (d *Daemon) applyDataplaneAndHACore(ctx context.Context, cfg *config.Config
 			ensureRethLinkOriginalName(linuxName)
 			setRethIPv6Knobs(linuxName)
 			mac := cluster.RethMAC(cc.ClusterID, rethCfg.RedundancyGroup, cc.NodeID)
-			networkdErr, needLinkCycleRecovery = d.programRethMemberMAC(
-				linuxName, mac, networkdErr, needLinkCycleRecovery)
+			networkdErr, needLinkCycleRecovery, rethRollbackKeptLease =
+				d.programRethMemberMAC(linuxName, mac, networkdErr,
+					needLinkCycleRecovery, rethRollbackKeptLease)
 			if err := d.finishRethMemberLinkTail(linuxName, mac, rethCfg); err != nil {
 				networkdErr = errors.Join(networkdErr, err)
 			}
@@ -377,11 +386,42 @@ func (d *Daemon) applyDataplaneAndHACore(ctx context.Context, cfg *config.Config
 		if d.ra != nil {
 			d.ra.ResendBurst()
 		}
+		// #7007: 2.6b2's NotifyLinkCycle above is the RELEASING repair, and it
+		// is the last one of the apply, so any lease an aborted member's
+		// rollback kept ends here.
+		rethRollbackKeptLease = false
 	} else if rt != nil && rethMACPending && !needLinkCycleRecovery {
 		// MAC set live (no link cycle) but workers were deferred.
 		// Trigger a re-apply to start workers with the now-correct MAC.
 		// This is cheaper than NotifyLinkCycle (no stop_workers/rebind).
 		d.reapplyAfterDeferredMAC(cfg)
+	}
+
+	// #7007: the LAST repair of the apply releases, and this is the arm that
+	// makes that true when step 2.6b2 did not run.
+	//
+	// 2.6b2 is gated on needLinkCycleRecovery, which only a member that actually
+	// COMPLETED a cycle arms. An apply where every member ABORTS therefore
+	// reaches no NotifyLinkCycle at all, and since #7007 the rollbacks no longer
+	// release — so without this the lease would survive to the deferred abandon
+	// and make its ERROR ("leaving with a RETH link-cycle lease still held")
+	// routine on a path that is not a bug. That is precisely the failure mode
+	// the issue rejects a refcount for; it would be no better arrived at this
+	// way.
+	//
+	// AbandonLinkCycle rather than NotifyLinkCycle, deliberately: the rollbacks
+	// already rebound, and a second rebind here would cost another NIC-settle
+	// second and a second worker recreate on a path where the commit is failing
+	// anyway. What is owed is the RELEASE, not another repair.
+	//
+	// Scoped to rethRollbackKeptLease rather than "release whatever is held", so
+	// the deferred abandon keeps its teeth for the case it was written for — the
+	// rename-join hook, which takes a lease with no release partner at all and
+	// SHOULD still be reported.
+	if rethRollbackKeptLease {
+		if rt := d.dataplane(); rt != nil {
+			rt.Link().AbandonLinkCycle()
+		}
 	}
 
 	// NOTE: stable link-local cleanup for secondary RGs is handled by
@@ -494,9 +534,20 @@ var errRethPrepareLinkCycle = errors.New("reth mac: link cycle failed after the 
 // canary is satisfied by an assignment that is unreachable, shadowed, or jumped
 // over. Here the fold runs against the same fake link seam and fake dataplane the
 // wrapper's own tests use.
+// #7007 adds the `leaseKept` accumulator alongside `needLinkCycleRecovery`.
+// Both are accumulators rather than per-member facts: they are ORed across the
+// loop.
+//
+// Widened in place rather than wrapped, for the same reason as
+// programRethMACWithWorkerJoin above: TestDaemonPassesRethBeforeCycleHook_5103
+// requires EXACTLY ONE call site of this function in the package, and routing
+// the loop through a differently named inner function left this one with zero —
+// which reddened that gate correctly, since "reached from nowhere else" is the
+// property it pins.
 func (d *Daemon) programRethMemberMAC(ifName string, mac net.HardwareAddr,
-	commitErr error, needLinkCycleRecovery bool) (error, bool) {
-	linkCycled, prepareErr := d.programRethMACWithWorkerJoin(ifName, mac)
+	commitErr error, needLinkCycleRecovery bool, leaseKept bool) (error, bool, bool) {
+	memberKeptLease := false
+	linkCycled, prepareErr := d.programRethMACWithWorkerJoin(ifName, mac, &memberKeptLease)
 	if prepareErr != nil {
 		commitErr = errors.Join(commitErr, prepareErr)
 	}
@@ -534,7 +585,7 @@ func (d *Daemon) programRethMemberMAC(ifName string, mac net.HardwareAddr,
 	// cycle anywhere — is completely unaffected, and this cannot become a way to
 	// suppress the 1 Hz reconcile with nothing obliged to release it.
 	d.renewLinkCycleLease()
-	return commitErr, needLinkCycleRecovery || linkCycled
+	return commitErr, needLinkCycleRecovery || linkCycled, leaseKept || memberKeptLease
 }
 
 // renewLinkCycleLease extends a link-cycle lease that is already held. It is the
@@ -817,7 +868,19 @@ func (d *Daemon) reconcileAfterRethLinkCycle(cfg *config.Config, needLinkCycleRe
 // notifier rejection — so a transient refusal on the cluster's own mlx5 VFs
 // enters this abort/rollback class too. What stays true is the direction:
 // fail-CLOSED throughout, ctrl is off, so transit is dropped, never passed.
-func (d *Daemon) programRethMACWithWorkerJoin(ifName string, mac net.HardwareAddr) (linkCycled bool, commitErr error) {
+// #7007 adds the `leaseKept` out-parameter: when the abort path below rebinds
+// WITHOUT releasing, it sets *leaseKept so the caller knows the apply still owns
+// a lease no NotifyLinkCycle will end. Nil is accepted, which is what the
+// single-member tests pass.
+//
+// A PARAMETER rather than a renamed wrapper, deliberately.
+// TestLinkCycleLeaseHasExactlyOneAcquisitionSite_6871 keys its allowlist on
+// `file:receiver.FuncName: expr [form]`, so splitting this into a differently
+// named inner function moved the sole production PrepareLinkCycle site and
+// reddened that gate — correctly, since a moved acquisition site is exactly what
+// it is built to notice. Adding a parameter leaves the key, and therefore the
+// gate's containment proof, untouched.
+func (d *Daemon) programRethMACWithWorkerJoin(ifName string, mac net.HardwareAddr, leaseKept *bool) (linkCycled bool, commitErr error) {
 	// joinRan, not joinFailed: set AFTER the nil-dataplane guard, so it means
 	// exactly "the hook ran, and the dataplane may be half torn down". A nil
 	// dataplane leaves it false, which keeps the joined.Link() deref below
@@ -957,7 +1020,18 @@ func (d *Daemon) programRethMACWithWorkerJoin(ifName string, mac net.HardwareAdd
 	// The commit already fails on this branch either way; the rollback error is
 	// JOINED onto the abort cause rather than replacing it, because the abort is
 	// the more actionable of the two and must not be lost.
-	if rebindErr := joined.Link().NotifyLinkCycle(); rebindErr != nil {
+	//
+	// #7007: KeepingLease. This rollback is INSIDE the per-member loop, and the
+	// lease it would otherwise end is the APPLY's, not this member's — a sibling
+	// that already cycled is still depending on it, and every renewal after this
+	// point would become a no-op against a zeroed word. The rebind still has to
+	// happen (this member's workers are joined and its ctrl is off); what moves
+	// is the release, to the apply-wide site outside the loop. See
+	// `Manager.NotifyLinkCycleKeepingLease` for why this is not a refcount.
+	if leaseKept != nil {
+		*leaseKept = true
+	}
+	if rebindErr := joined.Link().NotifyLinkCycleKeepingLease(); rebindErr != nil {
 		slog.Error("userspace: the RETH MAC rollback rebind ALSO failed; this node's "+
 			"AF_XDP workers are stopped with nothing left to re-arm them",
 			"iface", ifName, "err", rebindErr)

@@ -49,7 +49,7 @@ func TestCycledMACWriteFailureArmsTheRecoveryGate6915(t *testing.T) {
 	d, lc := newAbortRecoveryDaemon(nil /* the join SUCCEEDS */)
 
 	// needLinkCycleRecovery starts false, exactly as step 2.6 initialises it.
-	commitErr, gate := d.programRethMemberMAC("ge-0-0-1", virtMAC5103, nil, false)
+	commitErr, gate, _ := d.programRethMemberMAC("ge-0-0-1", virtMAC5103, nil, false, false)
 
 	if lc.prepareCalls != 1 {
 		t.Fatalf("PrepareLinkCycle calls = %d, want 1 — the fixture must reach the "+
@@ -94,7 +94,7 @@ func TestSetDownFailureDoesNotArmTheRecoveryGate6915(t *testing.T) {
 	withRethOps(t, newFailAfterJoinOps(t, &events, failSetDown))
 	d, lc := newAbortRecoveryDaemon(nil /* the join SUCCEEDS */)
 
-	commitErr, gate := d.programRethMemberMAC("ge-0-0-1", virtMAC5103, nil, false)
+	commitErr, gate, _ := d.programRethMemberMAC("ge-0-0-1", virtMAC5103, nil, false, false)
 
 	if lc.prepareCalls != 1 {
 		t.Fatalf("PrepareLinkCycle calls = %d, want 1", lc.prepareCalls)

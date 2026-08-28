@@ -269,6 +269,32 @@ func adapterBindingTable() map[string]adapterBinding {
 				}
 			},
 		},
+		// #7007: the repair-WITHOUT-release variant. The driver asserts BOTH
+		// halves, because either alone would pass against a severed forwarder:
+		// a body replaced with `return nil` sends no rebind, and a body that
+		// forwarded to the RELEASING NotifyLinkCycle would send the rebind but
+		// drop the lease — which is precisely the bug this method exists to fix.
+		"userspaceLinkController.NotifyLinkCycleKeepingLease": {
+			setup: func(t *testing.T, _ *Manager) { skipLinkCycleRebindSleep(t) },
+			drive: func(t *testing.T, m *Manager, srv *leaseControlServer) {
+				m.acquireLinkCycleLease()
+				t.Cleanup(m.releaseLinkCycleLease)
+				if err := m.Link().NotifyLinkCycleKeepingLease(); err != nil {
+					t.Fatalf("NotifyLinkCycleKeepingLease: %v", err)
+				}
+				if n := countRequests(srv.requests(), "rebind"); n != 1 {
+					t.Errorf("rebind requests = %d, want 1: the repair never reached the "+
+						"helper, so an aborted RETH member's workers stay joined and that "+
+						"member forwards nothing. Requests: %v", n, srv.requests())
+				}
+				if !m.linkCycleInFlight() {
+					t.Error("the lease was RELEASED by the keep-lease repair (#7007). On a " +
+						"multi-member RETH apply that ends a lease an already-cycled " +
+						"sibling still depends on, and every renewal after it becomes a " +
+						"no-op against the 0 sentinel")
+				}
+			},
+		},
 		"userspaceLinkController.RenewLinkCycle": {
 			drive: func(t *testing.T, m *Manager, _ *leaseControlServer) {
 				advance := fakeLinkCycleClock(t)

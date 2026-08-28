@@ -630,7 +630,8 @@ zone with no traffic / no flood events alike.
   carry-forward `clone()` in
   `build_forwarding_state_with_policy_counters_and_previous` is a handle on the
   LIVE map, not a copy. Binding a candidate to it mutates it **two** ways:
-  `ZoneCounterSlotMap::build` GET-OR-CREATES a block per configured zone, and
+  `ZoneCounterSlotMap::build` GET-OR-CREATES a block per SLOT-ASSIGNED zone —
+  a SUBSET of the configured set, not one per configured zone (#7040) — and
   `reconcile` DROPS the blocks for zones the candidate no longer configures. A
   snapshot the reconcile/refresh preflight REJECTS ("keeping previous forwarding
   state") must do neither — the prune would zero an operator's
@@ -638,6 +639,27 @@ zone with no traffic / no flood events alike.
   get-or-create would leave a zero-valued block behind for a candidate-only
   zone (invisible to the sparse status snapshot, but accumulating one block per
   rejected commit under ordinary config churn).
+
+  The SUBSET qualifier is load-bearing and was corrected in three code sites by
+  the same PR that introduced this block (#6832), which left the doc behind.
+  `build` filters zone id 0 out of its input and `break`s once
+  `ZONE_COUNTER_ASSIGNABLE_SLOTS` are taken, setting `overflow_active`; every
+  configured zone past that point is assigned no slot and therefore gets no
+  block. So the get-or-create half of the mutation is bounded PER APPLY by the
+  slot capacity rather than by the size of the candidate's zone set. It is not
+  bounded ACROSS applies — successive rejected commits naming different
+  candidate-only zone ids each add up to that many blocks to the zone-id-keyed
+  store — so the accumulation described above stands; only its per-commit
+  magnitude was overstated.
+
+  Code of record: `ZoneCounterSlotMap::build`
+  (`userspace-dp/src/afxdp/zone_counters.rs`), whose own doc comment states the
+  same qualifier, as do `attach_zone_counters`
+  (`afxdp/forwarding_build/mod.rs`) and `afxdp/coordinator/reconcile/snapshot.rs`.
+  The capacity stop and the `overflow_active` flag are already bound by tests in
+  `afxdp/flood_counters.rs` (`flood_and_traffic_slot_maps_cover_the_same_zones`
+  and the overflow assertions around it), so this correction needs no new test —
+  the code fact was never in doubt, only its restatement here.
 
   Both mutations therefore live in `attach_zone_counters`, which the public
   entry point calls **after** the fallible `build_fallible_forwarding_state`
@@ -735,8 +757,35 @@ zone with no traffic / no flood events alike.
   It now seeds the policy store through the production path (a clean build,
   which get-or-creates the reserved default-policy counter), carries a
   candidate-only `probe-rule` so the residue is distinguishable from the seed,
-  and asserts both halves belt-by-belt — the dup-zone belt sits above both
-  parses and leaves neither, the other three sit below and leave both.
+  and asserts both halves belt-by-belt. The enumeration is by POSITION relative
+  to the two counter-binding call sites — the policy parse
+  (`parse_policy_state_with_counters`) and the source-NAT parse
+  (`parse_source_nat_rules_with_previous`, about sixty lines below it) — and
+  since #6832 round 7 it is a THREE-way split, not two (#7042):
+
+  | belt | position | policy residue | NAT residue |
+  |---|---|---|---|
+  | `#3719` duplicate zone id | above both parses | absent | absent |
+  | `#3402` unresolvable policy zone | **between** them | **present** | **absent** |
+  | `#2240` NPTv6 | below both | present | present |
+  | `#3367` filter | below both | present | present |
+  | `#2410` CoS queue id | below both | present | present |
+
+  The middle row is the point of the set, not an extra. Over the other four the
+  two residue predicates are the SAME expression — every one of them sits either
+  above both parses or below both — so the table could not tell them apart, and
+  that was true only by coincidence of the current builder layout. A belt landing
+  anywhere in the region BETWEEN the two parses makes one of the two assertions
+  wrong, and none of the four could detect it.
+
+  `#3402`'s `UnresolvableZoneReference` rejects INSIDE the policy parse's rule
+  loop — downstream of the per-rule `rule_hit_counter` that resolves the probe
+  rule's counter, upstream of the source-NAT parse — so it occupies that region
+  and the two predicates can no longer be written as one expression without a row
+  contradicting them. It lives in `policy_parse_interior_rejection_row` and is
+  deliberately NOT folded into `zone_counter_rejection_rows`, whose four rows are
+  chosen by a different argument (span over the fallible region) that this row
+  would blur.
 
 - **POPULATE flood (#3651) now ships too.** Per-zone SYN/ICMP/UDP flood-event
   attribution is NEW drop-path accounting, not a snapshot of existing state: the

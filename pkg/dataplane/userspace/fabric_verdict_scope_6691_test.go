@@ -331,13 +331,35 @@ func TestEveryNetdevProducerIsEnumerated(t *testing.T) {
 		return out
 	}
 	// The netdevs the enumeration casts a COUNTED verdict about, split by role.
-	// The ROLE filter is netdevVote.counted, the same method
-	// buildUserspaceRefusedNetdevs applies, so the role axis of "counted here"
-	// and "tallied there" cannot drift — narrowing which roles the tally counts
-	// narrows this probe too, and the assertions below go red instead of
-	// staying silent. Scope: the ROLE axis only. The `ifindex > 0` test below
-	// is this probe's own literal, and production additionally keys its buckets
-	// on `name != ""`; neither of those axes is single-sourced here.
+	//
+	// Exactly ONE predicate below is single-sourced with production:
+	// vote.counted(), the same method buildUserspaceRefusedNetdevs applies. So
+	// narrowing which roles the tally counts narrows this probe too, and the
+	// assertions below go red instead of staying silent.
+	//
+	// Every OTHER condition deciding whether a vote contributes is re-typed
+	// here. #7018 records that enumerating by AXIS undercounted them; this list
+	// is by PREDICATE, and it is a FLOOR — what the #6691 round-15/16 legs
+	// found, not a census:
+	//
+	//	vote.ifindex > 0    re-typed. Production has TWO counterparts
+	//	                    (ingress_exclusions.go:754 and :781), so calling this
+	//	                    "the probe's own literal" understated it.
+	//	vote.role == netdevVoteFallback
+	//	                    re-typed four lines below — a ROLE-axis literal. The
+	//	                    single-sourcing above therefore covers the
+	//	                    counted-versus-not-counted split ONLY; the FALLBACK
+	//	                    classification can still drift on its own. The
+	//	                    superseded wording claimed the role axis wholesale.
+	//	name != ""          production keys its buckets on it (:746, :789); this
+	//	                    probe never models it.
+	//	vote.unbindable, tally.refused() unanimity
+	//	                    never modelled here at all.
+	//
+	// Drift on any of them is fail-safe — both #6691 review legs measured that
+	// no narrowing of counted() stays green (Codex over 8 cells, hostile Claude
+	// over the complete 8-subset role lattice). Fail-safe is not the same as
+	// bound, which is what the old sentence blurred.
 	countedVotes := func(snap *ConfigSnapshot) (all, fallback map[uint32]int) {
 		all = make(map[uint32]int)
 		fallback = make(map[uint32]int)
@@ -446,22 +468,31 @@ func TestEveryNetdevProducerIsEnumerated(t *testing.T) {
 	// with it. "Coverage" here is the COUNTED coverage above — a section that
 	// took its emission away while a counted verdict about that netdev stayed
 	// behind is a section voting on someone else's device.
-	producers := make(map[string]struct{})
-	v := reflect.ValueOf(base).Elem()
-	for i := 0; i < v.NumField(); i++ {
-		field := v.Type().Field(i)
-		if field.Type.Kind() != reflect.Slice || !v.Field(i).CanSet() {
-			continue
-		}
-		probe := *base
-		reflect.ValueOf(&probe).Elem().Field(i).Set(reflect.Zero(field.Type))
-
-		probeEmitted := emitted(&probe)
-		if len(probeEmitted) == len(baseEmitted) {
-			continue // inert for the gated set: not a producer.
-		}
-		producers[field.Name] = struct{}{}
-		probeCovered := covered(&probe)
+	//
+	// #7020 bounded the old sweep two ways, both now closed. It considered only
+	// Kind()==Slice, so a producer reached through a map, pointer, or nested
+	// struct was never zeroed; and it compared len(probe) != len(base), so a
+	// field whose zeroing SUBSTITUTED which netdevs are emitted without changing
+	// how many scored equal and went unreported. It now zeroes every settable
+	// field and compares emitted SETS. netdevProducerSweepWidening (below)
+	// proves neither widening is inert.
+	//
+	// What it still cannot see, stated rather than implied: a JOINT producer.
+	// Two fields that both emit netdev N leave N emitted when either is zeroed
+	// alone, so neither is named. The enumeration remains a floor, not a census
+	// — but the PRIMARY assertion above is membership-based and type-independent,
+	// so a producer this sweep never names is still covered by it.
+	// The sweep itself lives in sweepNetdevProducers so that
+	// TestNetdevProducerSweepWidening exercises THIS code rather than a
+	// re-typed copy of it. Narrowing it back to Kind()==Slice or to a length
+	// comparison reds that test — which a probe with its own private sweep
+	// could not do, however carefully written.
+	producerProbes, unsweepable := sweepNetdevProducers(base, emitted)
+	producers := make(map[string]struct{}, len(producerProbes))
+	for name, probe := range producerProbes {
+		producers[name] = struct{}{}
+		probeEmitted := emitted(probe)
+		probeCovered := covered(probe)
 		for ifindex := range baseEmitted {
 			_, stillEmitted := probeEmitted[ifindex]
 			_, stillCovered := probeCovered[ifindex]
@@ -471,7 +502,7 @@ func TestEveryNetdevProducerIsEnumerated(t *testing.T) {
 					"verdict belongs to something else and this producer contributes none of "+
 					"its own. Every producer must declare its own verdict (snapshotNetdevVotes), "+
 					"or the tally counts an owner that is not there and the protocol gate cannot "+
-					"see what it ships", field.Name, ifindex)
+					"see what it ships", name, ifindex)
 			}
 		}
 	}
@@ -482,10 +513,14 @@ func TestEveryNetdevProducerIsEnumerated(t *testing.T) {
 	// by identity, not by count, so a swap is not silently equal.
 	for _, want := range []string{"Interfaces", "Fabrics"} {
 		if _, ok := producers[want]; !ok {
-			t.Errorf("the probe did not detect %q as a netdev producer (found %v). Either the "+
-				"fixture stopped exercising it — which makes every assertion above vacuous — or "+
-				"it no longer feeds the gated set", want, producers)
+			t.Errorf("the probe did not detect %q as a netdev producer (found %v; unsweepable "+
+				"%v). Either the fixture stopped exercising it — which makes every assertion "+
+				"above vacuous — or it no longer feeds the gated set", want, producers, unsweepable)
 		}
+	}
+	if len(unsweepable) > 0 {
+		t.Logf("sweep could not zero these fields independently (blind to producers reached "+
+			"only through them): %v", unsweepable)
 	}
 
 	// And the GATE moves with the same producer set: on this fixture the fabric
@@ -842,5 +877,241 @@ func TestFabricRefreshCannotMoveADeviceVerdict(t *testing.T) {
 	if !sawUpdateFabrics {
 		t.Error("no update_fabrics was sent: the fabric refresh is what re-resolves " +
 			"the cross-chassis peer MAC, and refusing to send it trades one defect for another")
+	}
+}
+
+// sweepNetdevProducers is THE producer sweep — the one
+// TestEveryNetdevProducerIsEnumerated runs and the one
+// TestNetdevProducerSweepWidening proves is not inert. It exists as a shared
+// generic rather than inline in the caller for exactly that reason: a widening
+// asserted by a probe that re-types the sweep is asserted about the probe, not
+// about production (#7020).
+//
+// It zeroes every SETTABLE field of *T in turn — not only slices, so a producer
+// reached through a map, pointer, or nested struct is visible — and calls a
+// field a producer when the emitted SET changes, not merely its size, so a
+// membership substitution at constant cardinality is reported.
+//
+// A field whose zeroing panics the emitter is returned in unsweepable rather
+// than skipped: it is a blind spot the caller should name, not one to swallow.
+func sweepNetdevProducers[T any](base *T, emit func(*T) map[uint32]struct{}) (map[string]*T, []string) {
+	producers := make(map[string]*T)
+	var unsweepable []string
+
+	baseEmitted, ok := safeEmit(base, emit)
+	if !ok {
+		return producers, []string{"<base snapshot: emitter panics unmodified>"}
+	}
+
+	v := reflect.ValueOf(base).Elem()
+	for i := 0; i < v.NumField(); i++ {
+		field := v.Type().Field(i)
+		if !v.Field(i).CanSet() {
+			continue
+		}
+		probe := *base
+		reflect.ValueOf(&probe).Elem().Field(i).Set(reflect.Zero(field.Type))
+
+		probeEmitted, ok := safeEmit(&probe, emit)
+		if !ok {
+			unsweepable = append(unsweepable, field.Name)
+			continue
+		}
+		if sameNetdevSet(probeEmitted, baseEmitted) {
+			continue // inert for the gated set: not a producer.
+		}
+		producers[field.Name] = &probe
+	}
+	return producers, unsweepable
+}
+
+// safeEmit runs emit on a probe whose fields have been zeroed one at a time,
+// converting a panic into ok=false. The sweep zeroes fields the emitter may
+// dereference, and losing the whole sweep to one such field would hide every
+// producer after it.
+func safeEmit[T any](snap *T, emit func(*T) map[uint32]struct{}) (out map[uint32]struct{}, ok bool) {
+	defer func() {
+		if r := recover(); r != nil {
+			out, ok = nil, false
+		}
+	}()
+	return emit(snap), true
+}
+
+// sameNetdevSet compares MEMBERSHIP, not cardinality. The distinction is the
+// whole of #7020's second half: a field whose zeroing swaps which netdevs are
+// emitted without changing how many is inert under len(a) == len(b) and a
+// producer under this.
+func sameNetdevSet(a, b map[uint32]struct{}) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k := range a {
+		if _, ok := b[k]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
+// TestNetdevProducerSweepWidening proves the two #7020 widenings are NOT INERT.
+//
+// This is the cell the issue's "either widen the sweep or document the bound"
+// needs and does not itself supply. Measured against the real ConfigSnapshot
+// fixture, the widened sweep names exactly the two producers the old one did —
+// Interfaces and Fabrics — so on that fixture the change is indistinguishable
+// from a no-op, and shipping it as a #7020 fix on that evidence alone would be
+// a claim with no proof behind it.
+//
+// So the proof runs on a SYNTHETIC snapshot built to contain one instance of
+// each blind spot, and it varies the two widenings INDEPENDENTLY rather than
+// together. A compound cell cannot localise: turning both on at once would
+// report "the new sweep finds more" without establishing that each widening is
+// load-bearing, and one of the two could be dead weight.
+//
+// The table also pins the residual the doc now states out loud: a JOINT
+// producer stays invisible to every variant, including the widest.
+func TestNetdevProducerSweepWidening(t *testing.T) {
+	// Mapped is reached through a map, so a Kind()==Slice filter never zeroes
+	// it. Swapper emits ONE netdev either way — 801 when populated, 802 when
+	// zeroed — so it is a pure membership substitution that len() cannot see.
+	// JointA and JointB both emit 700, so zeroing either alone leaves 700
+	// emitted and neither is named by any variant.
+	type synthSnapshot struct {
+		Slice   []uint32
+		Mapped  map[string]uint32
+		Swapper []uint32
+		JointA  []uint32
+		JointB  []uint32
+		Inert   string
+	}
+	base := &synthSnapshot{
+		Slice:   []uint32{100, 101},
+		Mapped:  map[string]uint32{"a": 200},
+		Swapper: []uint32{801},
+		JointA:  []uint32{700},
+		JointB:  []uint32{700},
+		Inert:   "no netdevs here",
+	}
+	emit := func(s *synthSnapshot) map[uint32]struct{} {
+		out := make(map[uint32]struct{})
+		for _, v := range s.Slice {
+			out[v] = struct{}{}
+		}
+		for _, v := range s.Mapped {
+			out[v] = struct{}{}
+		}
+		if len(s.Swapper) > 0 {
+			out[s.Swapper[0]] = struct{}{}
+		} else {
+			out[802] = struct{}{} // same cardinality, different member
+		}
+		for _, v := range s.JointA {
+			out[v] = struct{}{}
+		}
+		for _, v := range s.JointB {
+			out[v] = struct{}{}
+		}
+		return out
+	}
+
+	// sweep runs the PRODUCTION sweep when both widenings are on, and a locally
+	// narrowed copy otherwise. That asymmetry is the point: the post-7020 row
+	// binds sweepNetdevProducers itself, so narrowing it back to Kind()==Slice
+	// or to a length comparison reds this test. The narrowed rows only have to
+	// establish what the pre-fix shape MISSED, which is a claim about a shape
+	// that no longer exists in the tree and so cannot be bound to it.
+	sweep := func(allFields, setCompare bool) map[string]struct{} {
+		found := make(map[string]struct{})
+		if allFields && setCompare {
+			probes, unsweepable := sweepNetdevProducers(base, emit)
+			if len(unsweepable) > 0 {
+				t.Errorf("synthetic snapshot has unsweepable fields %v; none of its fields "+
+					"can panic the emitter, so this means the sweep's recover is firing on "+
+					"something else", unsweepable)
+			}
+			for name := range probes {
+				found[name] = struct{}{}
+			}
+			return found
+		}
+		baseEmitted := emit(base)
+		v := reflect.ValueOf(base).Elem()
+		for i := 0; i < v.NumField(); i++ {
+			field := v.Type().Field(i)
+			if !v.Field(i).CanSet() {
+				continue
+			}
+			if !allFields && field.Type.Kind() != reflect.Slice {
+				continue
+			}
+			probe := *base
+			reflect.ValueOf(&probe).Elem().Field(i).Set(reflect.Zero(field.Type))
+			probeEmitted := emit(&probe)
+			if setCompare {
+				if sameNetdevSet(probeEmitted, baseEmitted) {
+					continue
+				}
+			} else if len(probeEmitted) == len(baseEmitted) {
+				continue
+			}
+			found[field.Name] = struct{}{}
+		}
+		return found
+	}
+
+	has := func(m map[string]struct{}, k string) bool { _, ok := m[k]; return ok }
+
+	// Each row names the ONE field that discriminates the variant pair it
+	// belongs to. "want" is what a correct sweep at that setting reports.
+	for _, tc := range []struct {
+		name                  string
+		allFields, setCompare bool
+		wantSlice             bool
+		wantMapped            bool // needs the field-kind widening
+		wantSwapper           bool // needs the set comparison
+	}{
+		{"pre-7020 (slice-only, length)", false, false, true, false, false},
+		{"field-kind widening only", true, false, true, true, false},
+		{"set-comparison widening only", false, true, true, false, true},
+		{"post-7020 (both)", true, true, true, true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := sweep(tc.allFields, tc.setCompare)
+
+			if has(got, "Slice") != tc.wantSlice {
+				t.Errorf("Slice producer: got %v, want %v — the control is broken, so no other "+
+					"row in this table means anything", has(got, "Slice"), tc.wantSlice)
+			}
+			// The paired cell for widening 1. Mapped is a genuine producer in
+			// every variant; only the ones that zero non-slice fields can say so.
+			if has(got, "Mapped") != tc.wantMapped {
+				t.Errorf("map-reached producer: got %v, want %v. With allFields=%v this sweep "+
+					"%s zero a map field, so #7020's first bound is %s",
+					has(got, "Mapped"), tc.wantMapped, tc.allFields,
+					map[bool]string{true: "does", false: "does not"}[tc.allFields],
+					map[bool]string{true: "closed", false: "open"}[tc.allFields])
+			}
+			// The paired cell for widening 2. Swapper always changes WHICH
+			// netdev is emitted and never how many.
+			if has(got, "Swapper") != tc.wantSwapper {
+				t.Errorf("equal-cardinality substitution: got %v, want %v. With setCompare=%v "+
+					"the sweep compares %s, so a field that swaps membership at constant size "+
+					"is %s", has(got, "Swapper"), tc.wantSwapper, tc.setCompare,
+					map[bool]string{true: "sets", false: "lengths"}[tc.setCompare],
+					map[bool]string{true: "reported", false: "silently inert"}[tc.setCompare])
+			}
+			// The residual, asserted in every variant including the widest, so
+			// that "the enumeration is a floor" is a tested statement and not a
+			// hedge in a comment.
+			if has(got, "JointA") || has(got, "JointB") {
+				t.Errorf("a joint producer was named (JointA=%v JointB=%v). If the sweep can now "+
+					"see one, the doc's stated residual is stale and must be rewritten",
+					has(got, "JointA"), has(got, "JointB"))
+			}
+			if has(got, "Inert") {
+				t.Error("a field that emits no netdev was named a producer")
+			}
+		})
 	}
 }

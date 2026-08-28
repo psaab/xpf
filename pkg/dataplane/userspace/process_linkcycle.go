@@ -783,6 +783,33 @@ var linkCycleRebindSleep = time.Sleep
 // section — see the release site for why that is both the earliest and the
 // latest correct point.
 func (m *Manager) NotifyLinkCycle() error {
+	return m.notifyLinkCycle(true)
+}
+
+// NotifyLinkCycleKeepingLease is NotifyLinkCycle's repair WITHOUT the release
+// (#7007).
+//
+// The two acts were fused, and on a multi-member RETH apply that fusion is a
+// bug: acquire is per MEMBER (each member's PrepareLinkCycle, inside the loop)
+// while release was per REPAIR, so an aborted member's in-loop rollback ended a
+// lease a DIFFERENT, already-cycled member still depended on. Everything after
+// it — the remaining members' tails and all three renewal sites — ran against a
+// zeroed word, because RenewLinkCycle refuses the 0 sentinel.
+//
+// The aborted member still has to rebind: its own workers are joined and its
+// ctrl is off, and nothing else will undo that. What it must not do is end the
+// APPLY's lease to do it. This is the call that separates the two, and the
+// apply-wide site (step 2.6b2, outside the loop) is what releases.
+//
+// NOT a refcount, deliberately — see docs/reth-mac.md. Acquires and releases do
+// not pair: two members both cycling is two acquires and ONE release, so a
+// refcount would sit at 1 on the most ordinary multi-member commit, strand the
+// lease to the deferred abandon, and make that backstop's ERROR routine noise.
+func (m *Manager) NotifyLinkCycleKeepingLease() error {
+	return m.notifyLinkCycle(false)
+}
+
+func (m *Manager) notifyLinkCycle(release bool) error {
 	// Let the NIC fully tear down XSK zero-copy contexts before recreating
 	// sockets. mlx5 releases zero-copy queue resources asynchronously after
 	// socket close — binding a new socket to the same queue before teardown
@@ -820,7 +847,15 @@ func (m *Manager) NotifyLinkCycle() error {
 	// non-zero, so inside that extent expiry is not the mechanism that ends
 	// anything. The backstop is for a STARVED heartbeat, not for a missed
 	// release.
-	m.releaseLinkCycleLease()
+	if release {
+		m.releaseLinkCycleLease()
+	} else {
+		// #7007: the lease deliberately survives this repair. Renew it, so the
+		// rebind's own duration cannot be what expires it — a repair that took
+		// longer than the TTL would otherwise hand the reconcile loop a window
+		// mid-apply, which is the thing the lease exists to prevent.
+		m.RenewLinkCycle()
+	}
 	if m.proc == nil || m.proc.Process == nil {
 		return nil
 	}
