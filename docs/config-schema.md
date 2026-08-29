@@ -5248,9 +5248,15 @@ this does not disturb #3850 or #7035:
 - **The same pool named twice in one block** — nothing is discarded, so it is a
   redundancy rather than an error.
 
-`off` and `interface` are not recorded at all: they carry no value, so repeating
-either discards nothing. `compiler_nat_then_occurrences_7013_test.go` pins every
-row above, including the three legal ones.
+Repeating `off` or `interface` is likewise a redundancy: they carry no value, so
+`off off` means the same exemption twice and commits. **That is a statement about
+a REPEAT, not about the mode.** `off pool P` packs two DIFFERENT modes onto one
+run, one of them is discarded, and #7033 rejects it — the asymmetry is why the
+authored record carries modes as well as pool names.
+`compiler_nat_then_occurrences_7013_test.go` pins every row above, including the
+three legal ones, and
+`TestRepeatedValuelessModeIsARedundancyNotAContradiction_7033` pins both halves
+of the asymmetry side by side.
 
 *What the tolerant path actually does (#5717).* Only a malformed rule reaches
 the lenient arm — the strict commit path rejects it — but the two arities land

@@ -228,6 +228,37 @@ func TestPoolNamedOffIsAPoolNotAnExemption_7033(t *testing.T) {
 	}
 }
 
+// TestRepeatedValuelessModeIsARedundancyNotAContradiction_7033 pins the
+// asymmetry that decides what this check may report.
+//
+// `off` carries no value, so `off off` means the same exemption twice: nothing
+// is discarded and it commits, the same way `pool P pool P` does under #7013.
+// `off pool P` is a different matter — two modes packed onto one run lower to
+// one field and the loser vanishes. "Carries no value" therefore justifies
+// ignoring a REPEAT of a valueless mode; it never justified ignoring the mode.
+//
+// Without this cell, counting raw modes instead of distinct ones passes every
+// other case in this file and rejects a config whose meaning is unambiguous.
+func TestRepeatedValuelessModeIsARedundancyNotAContradiction_7033(t *testing.T) {
+	for _, tc := range []struct{ name, then string }{
+		{"off_twice", "then { source-nat off off; }"},
+		{"interface_twice", "then { source-nat interface interface; }"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := compileText7033(t, snat7033(tc.then)); err != nil {
+				t.Fatalf("%q repeats ONE valueless mode: both spellings mean the same "+
+					"thing, nothing is discarded, and it must commit. Got: %v", tc.then, err)
+			}
+		})
+	}
+	// And the other half of the asymmetry, so the two live side by side: the
+	// same `off`, packed against a pool, IS a contradiction.
+	if err := compileText7033(t, snat7033("then { source-nat off pool P; }")); err == nil {
+		t.Fatal("`off pool P` packs two DIFFERENT modes onto one run: one is discarded " +
+			"with no diagnostic, and it must be rejected")
+	}
+}
+
 // TestUnrecognisedContainerDoesNotFabricateAnExemption_7033 is #6820 round 6's
 // reverted regression, kept as a standing cell.
 //

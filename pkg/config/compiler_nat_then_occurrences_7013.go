@@ -44,11 +44,28 @@ package config
 // the survivor reds against a correct compiler and a buggy one alike, for
 // opposite reasons, which invites "fixing" the assertion.
 //
-// ONLY POOLS ARE RECORDED. `off` and `interface` carry no value, so writing
-// either twice discards nothing — the config means what it says and there is
-// nothing to report. Counting them would reject an idempotent typo. A rule
-// mixing DIFFERENT modes is still caught, by the mode count that follows this
-// check.
+// POOL NAMES AND MODES ARE BOTH RECORDED, and they answer two different
+// questions — this paragraph used to say only pools were recorded, which #7033
+// made false.
+//
+// The asymmetry is the part worth stating, because "`off` carries no value, so
+// repeating it discards nothing" is true and is NOT a reason to ignore `off`:
+//
+//   - `off off` in one block discards nothing. Both spellings mean the same
+//     exemption, so it is a redundancy and commits. distinctModes is what makes
+//     that so, exactly as distinctPools does for `pool P pool P`.
+//   - `off pool P` in one block DOES discard something. Two different modes
+//     packed onto one run lower to a single field, and the one that loses is
+//     gone with no diagnostic — and when the loser is `off`, what the dataplane
+//     enforces is the inverse of what was authored. That is #7033, checked on
+//     the recorded MODES.
+//
+// So "carries no value" justifies ignoring a REPEAT of one valueless mode. It
+// never justified ignoring the mode itself.
+//
+// A rule that LOWERS two distinct modes is caught earlier still, by the
+// resolved-field count; the modes recorded here are for the packed case that
+// count cannot see.
 
 // natThenAuthored is what ONE `then` container authored, before NATThen's
 // scalar collapsed it.
