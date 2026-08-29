@@ -29,6 +29,14 @@ func (c *CLI) showScreen() error {
 	for _, line := range dpuserspace.ScreenUnresolvedProfileLines(cfg) {
 		fmt.Println(line)
 	}
+	// #7059: and the THIRD state — a zone whose profile IS defined but enables
+	// no checks. That resolves, so the block above stays silent, yet the
+	// dataplane publishes no snapshot and enforces nothing. Without this the
+	// profile renders with its zone list and an empty check inventory, which
+	// reads as "trust is screened".
+	for _, line := range dpuserspace.ScreenInertProfileLines(cfg) {
+		fmt.Println(line)
+	}
 
 	if len(cfg.Security.Screen) == 0 {
 		fmt.Println("No screen profiles configured")

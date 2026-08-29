@@ -241,6 +241,40 @@ func (c *xpfCollector) collectScreenUnresolvedProfileZones(ch chan<- prometheus.
 	}
 }
 
+// collectScreenInertProfileZones emits xpf_screen_inert_profile_zones (#7059):
+// a 1 per {zone, profile} whose screen reference RESOLVES to a defined profile
+// that enables no checks, so buildScreenSnapshots publishes nothing for the zone
+// and the dataplane enforces none of its screen checks.
+//
+// This is the third state. Before #7059 it was reported by no surface at all —
+// not this metric (the zone resolves, so it is absent from the unresolved set),
+// not the status block, not the dataplane's runtime WARN. An operator saw a
+// screened zone. It is also strictly MORE reachable than the unresolved case
+// that already had a series: `set security screen ids-option p
+// alarm-without-drop` with nothing else passes strict commit with zero
+// warnings, whereas a dangling reference is strict-rejected and only reachable
+// through the tolerant paths.
+//
+// The SSOT is dpuserspace.ScreenInertProfileRefs, which asks the real snapshot
+// builder what it published rather than re-deriving the emit gate, so this
+// series cannot disagree with what the dataplane will enforce.
+//
+// Config-derived (no dataplane dependency), so Collect calls this BEFORE the
+// dataplane gate.
+func (c *xpfCollector) collectScreenInertProfileZones(ch chan<- prometheus.Metric) {
+	if c.srv == nil || c.srv.store == nil {
+		return
+	}
+	cfg := c.srv.store.ActiveConfig()
+	if cfg == nil {
+		return
+	}
+	for _, r := range dpuserspace.ScreenInertProfileRefs(cfg) {
+		ch <- prometheus.MustNewConstMetric(c.screenInertProfileZones,
+			prometheus.GaugeValue, 1, r.Zone, r.Profile)
+	}
+}
+
 // collectHostInboundAddresslessZones emits xpf_host_inbound_addressless_zones
 // (#3698): a 1 per configured host-inbound-enforcing zone currently in the
 // transient fail-open admit window — it has a non-lifeline interface but no

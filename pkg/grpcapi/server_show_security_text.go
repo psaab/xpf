@@ -413,6 +413,21 @@ func (s *Server) showSecurityAlarms(cfg *config.Config, topic string, buf *strin
 
 func (s *Server) showScreenIDSOption(req *pb.ShowTextRequest, cfg *config.Config, buf *strings.Builder) (*pb.ShowTextResponse, error) {
 	profileName := strings.TrimPrefix(req.Topic, "screen-ids-option:")
+	// #7060: the per-profile query is the natural next command after seeing a
+	// zone reference a profile, and it was the one surface that did not answer.
+	// Both blocks are emitted BEFORE the empty-inventory / not-found line for the
+	// same reason the wide renderers do it: an operator who reads "No screen
+	// profiles configured" or "not found" first has already been told nothing is
+	// there, and a correction printed below it is not the same signal. Filtered
+	// to the queried profile, through the same SSOT the wide renderers use.
+	for _, line := range dpuserspace.ScreenUnresolvedProfileLinesFor(cfg, profileName) {
+		buf.WriteString(line)
+		buf.WriteString("\n")
+	}
+	for _, line := range dpuserspace.ScreenInertProfileLinesFor(cfg, profileName) {
+		buf.WriteString(line)
+		buf.WriteString("\n")
+	}
 	if cfg == nil || len(cfg.Security.Screen) == 0 {
 		buf.WriteString("No screen profiles configured\n")
 	} else {
@@ -646,6 +661,16 @@ func (s *Server) showScreenStatisticsAll(cfg *config.Config, buf *strings.Builde
 
 func (s *Server) showScreenIDSOptionDetail(req *pb.ShowTextRequest, cfg *config.Config, buf *strings.Builder) (*pb.ShowTextResponse, error) {
 	profileName := strings.TrimPrefix(req.Topic, "screen-ids-option-detail:")
+	// #7060: same as showScreenIDSOption — both blocks ahead of the
+	// empty-inventory / not-found line, filtered to the queried profile.
+	for _, line := range dpuserspace.ScreenUnresolvedProfileLinesFor(cfg, profileName) {
+		buf.WriteString(line)
+		buf.WriteString("\n")
+	}
+	for _, line := range dpuserspace.ScreenInertProfileLinesFor(cfg, profileName) {
+		buf.WriteString(line)
+		buf.WriteString("\n")
+	}
 	if cfg == nil || len(cfg.Security.Screen) == 0 {
 		buf.WriteString("No screen profiles configured\n")
 	} else {
@@ -789,6 +814,12 @@ func (s *Server) showScreen(cfg *config.Config, buf *strings.Builder) {
 	// security policy still evaluates the packet normally; only the screen checks
 	// are skipped. The comment shipped the removed wording anyway.
 	for _, line := range dpuserspace.ScreenUnresolvedProfileLines(cfg) {
+		buf.WriteString(line)
+		buf.WriteString("\n")
+	}
+	// #7059: the THIRD state — defined but enabling no checks. See the local-CLI
+	// renderer; same SSOT, same ordering requirement.
+	for _, line := range dpuserspace.ScreenInertProfileLines(cfg) {
 		buf.WriteString(line)
 		buf.WriteString("\n")
 	}

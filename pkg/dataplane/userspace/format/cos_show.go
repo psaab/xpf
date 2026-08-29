@@ -343,10 +343,10 @@ var CoSRewriteRuleTypes = []string{"dscp", "ieee-802.1", "inet-precedence", "exp
 // (applyCoSInterfaceLevelBindings), and its own doc records that an interface
 // with an interface-level binding but NO configured logical unit contributes no
 // unit — which is precisely the case that must not report as enforced.
-func cosBoundDSCPRewriteRules(cfg *config.Config) (bound map[string]bool, danglingRef map[string]string) {
-	bound, danglingRef = map[string]bool{}, map[string]string{}
+func cosBoundDSCPRewriteRules(cfg *config.Config) (bound map[string]bool, danglingRef, inertRef map[string]string) {
+	bound, danglingRef, inertRef = map[string]bool{}, map[string]string{}, map[string]string{}
 	if cfg == nil || cfg.ClassOfService == nil {
-		return bound, danglingRef
+		return bound, danglingRef, inertRef
 	}
 	for name, iface := range cfg.Interfaces.Interfaces {
 		if iface == nil {
@@ -364,8 +364,26 @@ func cosBoundDSCPRewriteRules(cfg *config.Config) (bound map[string]bool, dangli
 			if cosUnit == nil || cosUnit.DSCPRewriteRule == "" {
 				continue
 			}
+			// #7063: a binding is not enough. The helper builds the rewrite
+			// matrix only over the queues THIS interface materializes
+			// (build_cos_iface_config, forwarding_build/cos.rs), so a rule whose
+			// forwarding-classes do not intersect them rewrites nothing.
+			if !cosRuleTargetsUnitClass(cfg, cosUnit) {
+				if _, ok := inertRef[cosUnit.DSCPRewriteRule]; !ok {
+					inertRef[cosUnit.DSCPRewriteRule] = fmt.Sprintf("%s unit %d", name, unitNum)
+				}
+				continue
+			}
 			bound[cosUnit.DSCPRewriteRule] = true
 		}
+	}
+	// A rule bound anywhere it actually applies is enforced, whatever other
+	// interfaces do with it — so a real binding clears an inert note recorded
+	// from a different unit. Without this an operator who bound the rule
+	// correctly on one interface and pointlessly on another would be told it is
+	// not enforced.
+	for ruleName := range bound {
+		delete(inertRef, ruleName)
 	}
 	// Second pass: every CoS reference the snapshot builder will NOT read.
 	// Recorded so the operator is told WHERE the dead binding is rather than
@@ -390,7 +408,7 @@ func cosBoundDSCPRewriteRules(cfg *config.Config) (bound map[string]bool, dangli
 			}
 		}
 	}
-	return bound, danglingRef
+	return bound, danglingRef, inertRef
 }
 
 // cosRewriteRuleEnforcement renders the `Enforced:` value for one rewrite rule.
@@ -431,7 +449,7 @@ func cosBoundDSCPRewriteRules(cfg *config.Config) (bound map[string]bool, dangli
 // accepted-but-inert advisory if and only if this function returns the
 // unsupported-TYPE reason. Deleting an advisory without flipping this function
 // reds, and flipping this function without dropping the advisory reds too.
-func cosRewriteRuleEnforcement(cpType string, bound bool, danglingRef string) string {
+func cosRewriteRuleEnforcement(cpType string, bound bool, danglingRef, inertRef string) string {
 	if cpType != "dscp" {
 		return "no (accepted for Junos compatibility; the dataplane rewrites dscp only)"
 	}
@@ -442,7 +460,77 @@ func cosRewriteRuleEnforcement(cpType string, bound bool, danglingRef string) st
 		return fmt.Sprintf("no (not bound — class-of-service interfaces %s is not a "+
 			"configured logical interface unit)", danglingRef)
 	}
+	if inertRef != "" {
+		return fmt.Sprintf("no (bound on %s, but none of this rule's forwarding-classes "+
+			"are materialized there, so the helper builds no rewrite entry)", inertRef)
+	}
 	return "no (not bound — no interface unit references this rule)"
+}
+
+// cosRuleTargetsUnitClass reports whether the unit's DSCP rewrite rule names at
+// least one forwarding class the unit will actually materialize.
+//
+// This MIRRORS `dscp_rewrite_targets_iface_class` in `build_cos_iface_config`
+// (`userspace-dp/src/afxdp/forwarding_build/cos.rs`) and must keep agreeing with
+// it. #7063 filed this as needing "state the config alone does not carry"; it
+// does not. The helper's `iface_classes` is the scheduler-map's resolved classes
+// when any resolve, and the synthetic `best-effort` queue when none do — both
+// derivable here.
+//
+// The intersection is SUFFICIENT on its own, which is why no second predicate is
+// mirrored. `dscp_rewrite_targets_iface_class` is itself one of the disjuncts of
+// `contributes_usable_cos_state`, so a rule that targets a materialized class
+// admits the interface by that fact alone; and the matrix loop then finds an
+// entry for that class's queue. A rule that targets none is inert either way —
+// the interface is dropped, or the matrix comes out empty.
+func cosRuleTargetsUnitClass(cfg *config.Config, cosUnit *config.CoSInterfaceUnit) bool {
+	rule := cfg.ClassOfService.DSCPRewriteRules[cosUnit.DSCPRewriteRule]
+	if rule == nil {
+		// An undefined rule name. Not this function's question — the caller's
+		// existing dangling/unbound reporting owns it, and answering false here
+		// would relabel an undefined rule as an inert one.
+		return true
+	}
+	classes := cosUnitMaterializedClasses(cfg, cosUnit)
+	for _, e := range rule.Entries {
+		if e != nil && classes[e.ForwardingClass] {
+			return true
+		}
+	}
+	return false
+}
+
+// cosSyntheticDefaultForwardingClass is the class the helper materializes when a
+// unit's scheduler-map resolves no queues (`vec!["best-effort"]`,
+// forwarding_build/cos.rs). Named rather than inlined because
+// TestCoSSyntheticDefaultClassMatchesRust_7063 parses the Rust for it: the two
+// are one wire fact spelled in two languages, and a silent divergence would make
+// this command confidently wrong for exactly the interfaces that have no
+// scheduler map.
+const cosSyntheticDefaultForwardingClass = "best-effort"
+
+// cosUnitMaterializedClasses is the Go reading of the helper's `iface_classes`.
+func cosUnitMaterializedClasses(cfg *config.Config, cosUnit *config.CoSInterfaceUnit) map[string]bool {
+	out := map[string]bool{}
+	if sm := cfg.ClassOfService.SchedulerMaps[cosUnit.SchedulerMap]; sm != nil {
+		for className := range sm.Entries {
+			// The SHARED #6534 predicate, not a hand-rolled map lookup. The
+			// builder skips a scheduler-map entry naming an undefined class at
+			// the same call, so a copy here could drift and this command would
+			// claim enforcement against a queue the builder never materializes
+			// — the exact class of defect #7063 is about. cos_exclusion_reason.go
+			// states the one-predicate rule; pkg/showaudit's census enforces it.
+			if !config.CoSForwardingClassUndefined(cfg.ClassOfService, className) {
+				out[className] = true
+			}
+		}
+	}
+	if len(out) == 0 {
+		// scheduler_map_resolved_to_queues == false: the helper adds the
+		// synthetic default queue, so best-effort IS materialized here.
+		out[cosSyntheticDefaultForwardingClass] = true
+	}
+	return out
 }
 
 // FormatCoSRewriteRules renders `show class-of-service rewrite-rule [name <n>]
@@ -551,7 +639,7 @@ func FormatCoSRewriteRules(cfg *config.Config, nameFilter, typeFilter string) st
 		return "No class-of-service rewrite-rules configured\n"
 	}
 
-	boundDSCP, danglingDSCP := cosBoundDSCPRewriteRules(cfg)
+	boundDSCP, danglingDSCP, inertDSCP := cosBoundDSCPRewriteRules(cfg)
 
 	var b strings.Builder
 	for idx, blk := range blocks {
@@ -560,7 +648,8 @@ func FormatCoSRewriteRules(cfg *config.Config, nameFilter, typeFilter string) st
 		}
 		// Say what the operator loses, not just that a flag is off. This line
 		// is the whole point of the command: it answers "will this rule act?".
-		enforced := cosRewriteRuleEnforcement(blk.cpType, boundDSCP[blk.name], danglingDSCP[blk.name])
+		enforced := cosRewriteRuleEnforcement(blk.cpType, boundDSCP[blk.name],
+			danglingDSCP[blk.name], inertDSCP[blk.name])
 		fmt.Fprintf(&b, "Rewrite rule: %s, Code point type: %s, Enforced: %s\n",
 			blk.name, blk.cpType, enforced)
 		if !blk.modeled {

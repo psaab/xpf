@@ -7,11 +7,35 @@
 // including lo0 host-bound filter, per-interface input filter, per-interface
 // output filter, the non-routing-instance variants (filter PBR rejects),
 // the log-match diagnostic, and the routing-instance overrides. Also holds
-// the precheck `interface_filter_affects_route_lookup` because it is paired
-// with `evaluate_interface_filter_routing_instance_event_counted` at its
-// external call sites. #6927 r2: there is no longer a single one — the
-// pairing now occurs on the session-miss, fragment-association-HIT and
-// flowless-miss arms alike (poll_descriptor/mod.rs).
+// the precheck `interface_filter_affects_route_lookup` because it belongs with
+// the routing-instance evaluation it gates.
+//
+// #7053: an earlier revision said the precheck "is paired with
+// `evaluate_interface_filter_routing_instance_event_counted` at its external
+// call sites". That symbol is `#[cfg(test)]` (see its own note above the
+// definition) and has never been on a production path, so the sentence sent a
+// reader after the production contract to a test-only wrapper. PR #6835 then
+// EDITED it — "the only external call site" became "each of its external call
+// sites" — which turned one wrong reference into three without noticing the
+// symbol.
+//
+// What production actually runs, and it is two distinct pairings rather than
+// one:
+//
+//   * PBR route override: `ingress_route_table_override`
+//     (afxdp/forwarding/pbr.rs) borrows the route-lookup-affecting filter with
+//     `interface_filter_route_lookup_affecting` — whose `.is_some()` IS the
+//     precheck there, folded into the same lookup (#6236 PR-2C) — and evaluates
+//     off that borrow with the `&Filter` core
+//     `evaluate_filter_ref_routing_instance_event_counted`.
+//   * Counter ownership: the bool `interface_filter_affects_route_lookup` has
+//     its own production caller at poll_descriptor/filter.rs, deciding
+//     `routing_eval_follows` for the #2620 policy below — not the evaluation.
+//
+// The #6835 r2 observation that survives is about the ARMS, not the symbol: the
+// routing walk now follows on the session-miss, fragment-association-HIT and
+// flowless-miss arms alike (poll_descriptor/mod.rs), where it used to follow on
+// one.
 
 use super::super::*;
 use super::matching::{term_matches, term_matches_v4, term_matches_v6};
@@ -280,8 +304,12 @@ fn evaluate_filter_ref_counted_v6(
 /// The session-miss path runs this precheck for the verdict AND — only on its
 /// Accept/defer exit (`poll_descriptor/mod.rs` does `continue` on a non-Accept
 /// verdict, never reaching the routing evaluator) — the routing-instance
-/// evaluator (`evaluate_interface_filter_routing_instance_event_counted`, via
-/// `ingress_route_table_override`), which counts every matched term itself.
+/// evaluator — `evaluate_filter_ref_routing_instance_event_counted`, reached
+/// through `ingress_route_table_override` (afxdp/forwarding/pbr.rs) — which
+/// counts every matched term itself. (#7053: this named the `#[cfg(test)]`
+/// two-lookup wrapper `evaluate_interface_filter_routing_instance_event_counted`
+/// until the production symbol was checked; the wrapper's only callers are
+/// filter/tests.rs and the sibling test-only wrapper above.)
 /// So WHO owns the count depends on the per-packet exit, not just on whether
 /// the filter has a routing-instance term:
 ///
@@ -1125,12 +1153,24 @@ pub(crate) fn evaluate_interface_output_filter_counted(
 
 /// Whether the per-interface input filter for the given family carries terms
 /// that override the route lookup with a routing-instance pointer. This is
-/// the precheck paired with `evaluate_interface_filter_routing_instance_event_counted`
-/// at each of its external call sites — the session-miss, fragment-association
-/// HIT and flowless-miss arms (poll_descriptor/mod.rs), no longer a single one
-/// (#6927 r2); it
-/// lives next to the routing-instance evaluator rather than in
-/// cache_sensitive.rs because it is not a cache-coherency predicate.
+/// the precheck for the routing-instance override. It lives next to the
+/// routing-instance evaluator rather than in cache_sensitive.rs because it is
+/// not a cache-coherency predicate.
+///
+/// #7053: it is NOT "paired with
+/// `evaluate_interface_filter_routing_instance_event_counted` at each of its
+/// external call sites" — that symbol is `#[cfg(test)]`. This bool has ONE
+/// production caller, poll_descriptor/filter.rs, where it decides
+/// `routing_eval_follows` for the #2620 counter-ownership policy. The PBR path
+/// does not call it at all: `ingress_route_table_override` folds precheck and
+/// evaluation into a single lookup via
+/// `interface_filter_route_lookup_affecting` (#6236 PR-2C), so there the
+/// precheck is `.is_some()` of that borrow and the evaluator is the `&Filter`
+/// core `evaluate_filter_ref_routing_instance_event_counted`.
+///
+/// The arms claim from #6835 r2 stands on its own: the routing walk follows on
+/// the session-miss, fragment-association-HIT and flowless-miss arms alike
+/// (poll_descriptor/mod.rs), where it used to follow on one.
 pub(crate) fn interface_filter_affects_route_lookup(
     state: &FilterState,
     ifindex: i32,

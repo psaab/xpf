@@ -3274,10 +3274,10 @@ pub(super) fn poll_binding_process_descriptor(
                             Some(l3_flow),
                             meta,
                             ingress_zone_override,
-                            // #2620 counter ownership. #6927: `true`, because a
+                            // #2620 counter ownership. #6835: `true`, because a
                             // routing evaluator DOES follow on this arm now —
                             // `ingress_route_table_override` runs below. Before
-                            // #6927 nothing followed, so `false` (`Always`) was
+                            // #6835 nothing followed, so `false` (`Always`) was
                             // correct and `true` would have deferred this
                             // fragment's `then count` terms to an evaluator that
                             // never ran. Now the reverse is true: `false` would
@@ -3307,7 +3307,7 @@ pub(super) fn poll_binding_process_descriptor(
                             binding.scratch.scratch_recycle.push(desc.addr);
                             continue;
                         }
-                        // #6927: and the PBR half of the same filter. A matching
+                        // #6835: and the PBR half of the same filter. A matching
                         // term with a non-empty `routing-instance` makes
                         // `evaluate_non_pbr_input_filter` return
                         // `FilterResult::default()` — BEFORE recording its
@@ -3352,7 +3352,7 @@ pub(super) fn poll_binding_process_descriptor(
                             RouteOverride::Table(_) | RouteOverride::None => {}
                         }
                     }
-                    // #6927: an association hit inherits the STATEFUL decision,
+                    // #6835: an association hit inherits the STATEFUL decision,
                     // never the per-packet authorization behind it. Owner-RG
                     // activity is per-packet: after an RG transition the old
                     // owner still hits a same-generation association, and
@@ -3756,7 +3756,7 @@ pub(super) fn poll_binding_process_descriptor(
                         }
                     }
 
-                    // #6927: the CROSS-FAMILY sibling of the #6122 gate above,
+                    // #6835: the CROSS-FAMILY sibling of the #6122 gate above,
                     // and the one #6122's comment assumed already existed ("its
                     // own consult already drops fail-closed on a miss"). It does
                     // not. `nat64_consult_forward_fragment_assoc` returns `None`

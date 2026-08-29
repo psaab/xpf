@@ -580,7 +580,11 @@ mod worker;
 // #1807: shared poison-recovery helpers (lock_recover /
 // try_lock_recover) for every Mutex<VecDeque<WorkerCommand>> access.
 #[path = "worker_queue.rs"]
-mod worker_queue;
+// #7053: `pub(crate)` so the shared source-scan helpers in its test module
+// (blank_comments_and_strings / afxdp_rs_files / is_fixture) reach the
+// routing-instance pairing guard in filter/tests.rs. Widening the module,
+// not copying the helpers.
+pub(crate) mod worker_queue;
 #[path = "worker_runtime.rs"]
 mod worker_runtime;
 pub use self::coordinator::Coordinator;

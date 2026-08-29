@@ -99,18 +99,55 @@ func buildScreenSnapshots(cfg *config.Config) []ScreenProfileSnapshot {
 		if sp.IP.IPSweepThreshold > 0 {
 			snap.IPSweepThreshold = uint32(sp.IP.IPSweepThreshold)
 		}
-		// Only include profiles that have at least one check enabled
-		if snap.Land || snap.SynFin || snap.NoFlag || snap.FinNoAck ||
-			snap.WinNuke || snap.PingDeath || snap.ICMPFragment || snap.Teardrop ||
-			snap.SynFrag || snap.SourceRoute ||
-			snap.ICMPFloodThreshold > 0 || snap.UDPFloodThreshold > 0 ||
-			snap.SYNFloodThreshold > 0 ||
-			snap.SessionLimitSrc > 0 || snap.SessionLimitDst > 0 ||
-			snap.PortScanThreshold > 0 || snap.IPSweepThreshold > 0 {
+		// Only publish profiles that actually enforce something (#7059: this is
+		// the SAME predicate the inert-profile surface reports on — see
+		// enforcesAnyCheck).
+		if snap.enforcesAnyCheck() {
 			out = append(out, snap)
 		}
 	}
 	return out
+}
+
+// enforcesAnyCheck reports whether this snapshot enables at least one screen
+// check, i.e. whether the dataplane will enforce anything for the zone.
+//
+// It is the EMIT GATE for buildScreenSnapshots and, since #7059, the same
+// computation behind the inert-profile observability surface. Those two must
+// never disagree: a profile that is published but reported inert (or reported
+// enforcing but never published) is a security-control misreport in one
+// direction or a false alarm in the other, and BOTH are always bugs. So this is
+// single-sourced rather than bound by an agreement test — there is no
+// legitimate reason for the two readings to differ, and a shared function
+// cannot drift from itself.
+//
+// Two profile-wide leaves are deliberately NOT counted as checks:
+//
+//   - AlarmWithoutDrop (`alarm-without-drop`) is a MODIFIER. It changes the
+//     disposition of checks that trip from drop to log-only; with no check
+//     enabled there is nothing whose disposition it could change, so a profile
+//     carrying only this enforces nothing. It is a real Junos knob that commits
+//     clean on its own, which makes it the most reachable way to land in the
+//     inert state (#7059 reachability path 1).
+//   - SYNCookie is read from cfg.Security.Flow.SynFloodProtectionMode, a GLOBAL
+//     flow setting rather than a per-profile check. Counting it would make every
+//     defined profile on a syn-cookie box look enforcing regardless of its own
+//     contents.
+//
+// The syn-flood SUB-thresholds (alarm/source/destination/timeout) are likewise
+// absent, and that is correct rather than an oversight: the compiler defaults
+// AttackThreshold to 200 whenever ANY syn-flood leaf is configured, so
+// SYNFloodThreshold > 0 already covers every syn-flood shape. Measured, not
+// assumed — a profile set only to `syn-flood timeout 30` compiles with
+// AttackThreshold 200 and publishes a snapshot.
+func (s ScreenProfileSnapshot) enforcesAnyCheck() bool {
+	return s.Land || s.SynFin || s.NoFlag || s.FinNoAck ||
+		s.WinNuke || s.PingDeath || s.ICMPFragment || s.Teardrop ||
+		s.SynFrag || s.SourceRoute ||
+		s.ICMPFloodThreshold > 0 || s.UDPFloodThreshold > 0 ||
+		s.SYNFloodThreshold > 0 ||
+		s.SessionLimitSrc > 0 || s.SessionLimitDst > 0 ||
+		s.PortScanThreshold > 0 || s.IPSweepThreshold > 0
 }
 
 // ScreenMissingProfileRefs is the EXPORTED single source of truth for "which
@@ -172,7 +209,22 @@ func ScreenMissingProfileRefs(cfg *config.Config) []ScreenMissingProfileRef {
 // posture is an OPEN design decision owned by #5806; when it is settled, a grep
 // for 5806 must land on every place that asserts today's behaviour, including
 // this one.
-const ScreenUnresolvedDisposition = "the profile reference does not resolve, so no screen " +
+const ScreenUnresolvedDisposition = "the profile reference does not resolve, " +
+	screenNoEnforcementTail
+
+// screenNoEnforcementTail is the half of the disposition sentence that is TRUE
+// OF BOTH no-enforcement states and must therefore exist exactly once (#7059).
+//
+// The two dispositions differ only in WHY nothing is enforced; what happens next
+// — no screen checks, policy evaluation unaffected, pending the #5806 posture
+// decision — is identical, and if the copies ever diverged one surface would be
+// describing a consequence the other denies.
+// TestScreenUnresolvedDispositionHasOneSource enforces exactly this: it counts
+// the sentence as a source literal across pkg/ and cmd/ and requires exactly
+// one. Writing the second disposition as its own full sentence reddened that
+// guard, which is the guard working — the fix is to share the tail, not to
+// weaken the count.
+const screenNoEnforcementTail = "so no screen " +
 	"checks are applied to this zone; policy evaluation is unaffected (current " +
 	"behaviour, pending the #5806 enforcement-posture decision)"
 
@@ -193,7 +245,17 @@ const ScreenUnresolvedDisposition = "the profile reference does not resolve, so 
 // global statement about the current implementation, identical for every zone,
 // so repeating it per row would be noise.
 func ScreenUnresolvedProfileLines(cfg *config.Config) []string {
-	refs := ScreenMissingProfileRefs(cfg)
+	return ScreenUnresolvedProfileLinesFor(cfg, "")
+}
+
+// ScreenUnresolvedProfileLinesFor is ScreenUnresolvedProfileLines restricted to
+// the zones referencing ONE profile name (#7060). An empty profileName means
+// "every profile", which is what the wide renderers pass — so the narrow
+// per-profile command and the wide command render the same sentence for the same
+// condition, and a reword lands on both at once. A second hand-written block for
+// the narrow command would be a copy that could drift.
+func ScreenUnresolvedProfileLinesFor(cfg *config.Config, profileName string) []string {
+	refs := screenRefsForProfile(ScreenMissingProfileRefs(cfg), profileName)
 	if len(refs) == 0 {
 		return nil
 	}
@@ -234,23 +296,83 @@ func ScreenUnresolvedProfileLines(cfg *config.Config) []string {
 // changing either renderer's wording without revisiting this contract fails
 // here rather than silently agreeing with itself.
 func CheckScreenUnresolvedRenderOrder(out string) error {
-	const emptyInventory = "No screen profiles configured"
-	blockIdx := strings.Index(out, ScreenUnresolvedDisposition)
+	return checkScreenBlockBeforeAnchor(out, "unresolved-reference", ScreenUnresolvedDisposition, ScreenEmptyInventoryLine)
+}
+
+// ScreenEmptyInventoryLine and ScreenProfileNotFoundPrefix are the two "nothing
+// to show" lines a screen renderer can print. They are the anchors the
+// diagnostic blocks must precede: an operator who reads either one FIRST has
+// already been told nothing is there, and a correction printed below it is not
+// the same signal.
+const (
+	ScreenEmptyInventoryLine    = "No screen profiles configured"
+	ScreenProfileNotFoundPrefix = "Screen profile '"
+)
+
+// CheckScreenInertRenderOrder is CheckScreenUnresolvedRenderOrder for the #7059
+// inert block.
+func CheckScreenInertRenderOrder(out string) error {
+	return checkScreenBlockBeforeAnchor(out, "inert-profile", ScreenInertDisposition, ScreenEmptyInventoryLine)
+}
+
+// CheckScreenDiagnosticRenderOrderBefore asserts the ordering for whichever of
+// the two diagnostic blocks are PRESENT in out, against a caller-supplied anchor
+// (#7060). The per-profile renderers print "Screen profile '<name>' not found"
+// rather than the empty-inventory line, so they need the same contract with a
+// different anchor — and extending this single-sourced check is what stops a
+// third hand-written ordering assertion being written for them.
+//
+// Unlike the two functions above it does NOT require a block to be present: a
+// caller rendering a profile that is perfectly healthy has neither block, and
+// that is not an ordering violation. It DOES require the anchor, so a test that
+// forgets to drive the anchor path fails loudly instead of passing vacuously.
+func CheckScreenDiagnosticRenderOrderBefore(out, anchor string) error {
+	anchorIdx := strings.Index(out, anchor)
+	if anchorIdx < 0 {
+		return fmt.Errorf("the anchor %q is absent, so this ordering check would pass "+
+			"vacuously; rendered output:\n%s", anchor, out)
+	}
+	for _, d := range []struct{ name, disposition string }{
+		{"unresolved-reference", ScreenUnresolvedDisposition},
+		{"inert-profile", ScreenInertDisposition},
+	} {
+		idx := strings.Index(out, d.disposition)
+		if idx < 0 {
+			continue // that condition does not hold for this config
+		}
+		if idx > anchorIdx {
+			return fmt.Errorf("the %s block must be rendered BEFORE %q (block at byte "+
+				"%d, anchor at byte %d). An operator who reads the anchor first has "+
+				"already been told nothing is there; a correction printed below it is "+
+				"not the same signal. Containment assertions alone cannot see this — "+
+				"they stay green with the emit moved after the line; rendered "+
+				"output:\n%s", d.name, anchor, idx, anchorIdx, out)
+		}
+	}
+	return nil
+}
+
+// checkScreenBlockBeforeAnchor is the shared body of the two exported
+// require-both-present ordering checks. blockName is threaded through so the
+// inert caller does not report an "unresolved-reference" violation — a
+// diagnostic that names the wrong condition sends the reader to the wrong code.
+func checkScreenBlockBeforeAnchor(out, blockName, disposition, emptyInventory string) error {
+	blockIdx := strings.Index(out, disposition)
 	emptyIdx := strings.Index(out, emptyInventory)
 	if blockIdx < 0 || emptyIdx < 0 {
-		return fmt.Errorf("both the unresolved-reference disposition and %q must be "+
+		return fmt.Errorf("both the %s disposition and %q must be "+
 			"present for the ordering check to mean anything (disposition at byte %d, "+
 			"empty-inventory line at byte %d); rendered output:\n%s",
-			emptyInventory, blockIdx, emptyIdx, out)
+			blockName, emptyInventory, blockIdx, emptyIdx, out)
 	}
 	if blockIdx > emptyIdx {
-		return fmt.Errorf("the unresolved-reference block must be rendered BEFORE %q "+
+		return fmt.Errorf("the %s block must be rendered BEFORE %q "+
 			"(disposition at byte %d, empty-inventory line at byte %d). An operator who "+
 			"reads the empty-inventory line first has already been told nothing was "+
 			"configured; a correction printed below it is not the same signal. "+
 			"Containment assertions alone cannot see this — they stay green with the "+
 			"emit moved after the line; rendered output:\n%s",
-			emptyInventory, blockIdx, emptyIdx, out)
+			blockName, emptyInventory, blockIdx, emptyIdx, out)
 	}
 	return nil
 }
@@ -406,4 +528,132 @@ func userspaceSupportsScreenProfiles(cfg *config.Config) bool {
 		return false
 	}
 	return true
+}
+
+// ScreenInertDisposition describes what the dataplane does with a zone whose
+// screen profile is DEFINED but enables no checks (#7059). Worded distinctly
+// from ScreenUnresolvedDisposition on purpose: the reference resolves, so
+// telling an operator it "does not resolve" would send them looking for a
+// missing definition that is in fact present.
+const ScreenInertDisposition = "the profile is defined but enables no checks, " +
+	screenNoEnforcementTail
+
+// ScreenInertProfileRefs is the EXPORTED single source of truth for "which zones
+// resolve to a screen profile that enforces NOTHING" (#7059).
+//
+// This is the third state, and the one every #5806 surface previously reported
+// as healthy. A zone's screen reference has three outcomes, not two:
+//
+//  1. The profile is not defined — ScreenMissingProfileRefs. Strict commit
+//     REJECTS this, so it is reachable only through the tolerant paths (HA
+//     config-sync from a schema-skewed peer, tolerant load of an older or
+//     externally modified active.json).
+//  2. The profile IS defined and enables no check — this function. The
+//     dataplane publishes no snapshot for the zone, ScreenState::zones has no
+//     entry, and check_packet_with_zone_id takes the None branch. Nothing is
+//     enforced. Critically this passes STRICT commit with zero warnings, which
+//     makes it strictly more reachable than case 1.
+//  3. The profile is defined and enables at least one check — enforcing, and
+//     reported by neither surface.
+//
+// Before #7059 states 2 and 3 rendered identically: `show security screen`
+// printed the profile with its zone list and no indication that the check
+// inventory was empty, the metric was absent, and the dataplane's runtime WARN
+// was silent too (the zone is not in the missing-profile set). An operator
+// reading any of the three surfaces saw a screened zone. That is a check failing
+// to a value INDISTINGUISHABLE FROM HEALTHY — the same class as an unbound CoS
+// rewrite rule printing "Enforced: yes", which cosRewriteRuleEnforcement exists
+// to prevent.
+//
+// The membership test is deliberately "did the real publisher emit a snapshot
+// for this zone", not a re-derivation of the emit gate. buildScreenSnapshots IS
+// the authority on what the dataplane will enforce, so asking it directly means
+// this surface cannot drift from the thing it describes — including for reasons
+// that are not the gate at all, such as the len(cfg.Security.Screen) == 0 early
+// return. A copy of the gate predicate could disagree; a call to the publisher
+// cannot.
+func ScreenInertProfileRefs(cfg *config.Config) []ScreenMissingProfileRef {
+	return buildScreenInertProfileRefs(cfg)
+}
+
+func buildScreenInertProfileRefs(cfg *config.Config) []ScreenMissingProfileRef {
+	if cfg == nil || len(cfg.Security.Zones) == 0 {
+		return nil
+	}
+	// What the dataplane will actually enforce, from the authority itself.
+	published := make(map[string]struct{})
+	for _, snap := range buildScreenSnapshots(cfg) {
+		published[snap.Zone] = struct{}{}
+	}
+	// Same determinism requirement as buildScreenSnapshots (#3962) — this feeds
+	// a wire field and the snapshotContentHash dedup, so the order must be
+	// stable build-to-build.
+	zoneNames := make([]string, 0, len(cfg.Security.Zones))
+	for name := range cfg.Security.Zones {
+		zoneNames = append(zoneNames, name)
+	}
+	sort.Strings(zoneNames)
+	var out []ScreenMissingProfileRef
+	for _, name := range zoneNames {
+		zone := cfg.Security.Zones[name]
+		if zone == nil || zone.ScreenProfile == "" {
+			continue // no screen configured — legit Pass, not a finding
+		}
+		if cfg.Security.Screen[zone.ScreenProfile] == nil {
+			continue // UNDEFINED — that is ScreenMissingProfileRefs' surface, not this one
+		}
+		if _, ok := published[zone.Name]; ok {
+			continue // defined AND enforcing at least one check
+		}
+		out = append(out, ScreenMissingProfileRef{
+			Zone:    zone.Name,
+			Profile: zone.ScreenProfile,
+		})
+	}
+	return out
+}
+
+// ScreenInertProfileLines renders the operator-facing block for the inert
+// profiles, mirroring ScreenUnresolvedProfileLines' shape so the two read as
+// siblings. The profile name is QUOTED for the same reason the CoS dangling
+// reference is: a bare "enables no checks" reads as "you forgot to configure
+// it" to an operator who did configure it — just with everything under a knob
+// that turns out to be a modifier rather than a check.
+func ScreenInertProfileLines(cfg *config.Config) []string {
+	return ScreenInertProfileLinesFor(cfg, "")
+}
+
+// ScreenInertProfileLinesFor is ScreenInertProfileLines restricted to one
+// profile name (#7060); an empty profileName means every profile.
+func ScreenInertProfileLinesFor(cfg *config.Config, profileName string) []string {
+	refs := screenRefsForProfile(ScreenInertProfileRefs(cfg), profileName)
+	if len(refs) == 0 {
+		return nil
+	}
+	lines := make([]string, 0, len(refs)+2)
+	lines = append(lines, "Screen profiles enforcing nothing:")
+	for _, r := range refs {
+		lines = append(lines,
+			fmt.Sprintf("  Zone %s references screen profile '%s', which is defined but "+
+				"enables no checks — no screen checks are enforced for this zone", r.Zone, r.Profile))
+	}
+	lines = append(lines, "  Disposition: "+ScreenInertDisposition+".")
+	return lines
+}
+
+// screenRefsForProfile filters refs to those naming profileName. An empty
+// profileName is the identity filter ("all profiles"), so the wide renderers and
+// the per-profile renderers share one code path rather than one of them growing
+// a second copy of the wording.
+func screenRefsForProfile(refs []ScreenMissingProfileRef, profileName string) []ScreenMissingProfileRef {
+	if profileName == "" {
+		return refs
+	}
+	var out []ScreenMissingProfileRef
+	for _, r := range refs {
+		if r.Profile == profileName {
+			out = append(out, r)
+		}
+	}
+	return out
 }

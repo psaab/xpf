@@ -56,6 +56,7 @@ type xpfCollector struct {
 	screenDropsByReasonTotal *prometheus.Desc
 	// #5806: unresolved screen-profile references (see the descriptor).
 	screenUnresolvedProfileZones *prometheus.Desc
+	screenInertProfileZones      *prometheus.Desc
 	policyDeniesTotal            *prometheus.Desc
 	natAllocFailsTotal           *prometheus.Desc
 	nat64XlateTotal              *prometheus.Desc
@@ -733,6 +734,7 @@ func (c *xpfCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.screenDropsTotal
 	ch <- c.screenDropsByReasonTotal
 	ch <- c.screenUnresolvedProfileZones
+	ch <- c.screenInertProfileZones
 	ch <- c.policyDeniesTotal
 	ch <- c.natAllocFailsTotal
 	ch <- c.nat64XlateTotal
@@ -1319,6 +1321,7 @@ func (c *xpfCollector) Collect(ch chan<- prometheus.Metric) {
 	// the dataplane gate: a config-only / degraded boot is exactly when an
 	// unenforced security control must stay visible.
 	c.collectScreenUnresolvedProfileZones(ch)
+	c.collectScreenInertProfileZones(ch)
 
 	// #3698: configured host-inbound-enforcing zones currently in the transient
 	// fail-open admit window (a non-lifeline interface but no resolvable address

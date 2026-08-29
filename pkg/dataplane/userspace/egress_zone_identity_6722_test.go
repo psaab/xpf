@@ -1965,7 +1965,6 @@ func TestBarePortOfADifferentRethDoesNotDeferToThisOne_6722(t *testing.T) {
 			"measuring the aliasing, not the redundant-parent match")
 }
 
-
 // #7024: the OUTCOME half. A base/unit divergence must resolve FAIL-CLOSED.
 //
 // Cell P now TOLERATES a base-reference divergence, which is only defensible if

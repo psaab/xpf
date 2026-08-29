@@ -307,7 +307,7 @@ fn worker_queue_6929_drops_are_not_folded_into_poison_recoveries() {
 /// literal containing `//` (a URL, say) cannot silently blind the line scan
 /// that follows it. Bytes are replaced by spaces rather than removed so line
 /// numbers in a failure message still point at the real source line.
-pub(in crate::afxdp) fn blank_comments_and_strings(src: &str) -> String {
+pub(crate) fn blank_comments_and_strings(src: &str) -> String {
     let b = src.as_bytes();
     let mut out = vec![b' '; b.len()];
     let mut i = 0;
@@ -411,14 +411,14 @@ fn bare_worker_command_pushes(src: &str) -> Vec<(usize, String)> {
     hits
 }
 
-pub(in crate::afxdp) fn is_fixture(rel: &str) -> bool {
+pub(crate) fn is_fixture(rel: &str) -> bool {
     rel == "tests.rs"
         || rel.ends_with("/tests.rs")
         || rel.ends_with("_tests.rs")
         || rel.contains("/tests/")
 }
 
-pub(in crate::afxdp) fn afxdp_rs_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+pub(crate) fn afxdp_rs_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
     for entry in std::fs::read_dir(dir).expect("read_dir under src/afxdp") {
         let path = entry.expect("dir entry").path();
         if path.is_dir() {

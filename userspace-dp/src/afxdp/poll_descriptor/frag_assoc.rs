@@ -312,7 +312,7 @@ pub(super) fn nat_consult_forward_fragment_assoc(
 ///
 /// This is the SAME-FAMILY analog of the NAT64 sibling's fail-closed
 /// no-association drop (#4617, `nat64_frag_dropped`); NAT64 (cross-family) is
-/// out of scope here. #6927: that used to read "its own consult already drops
+/// out of scope here. #6835: that used to read "its own consult already drops
 /// fail-closed on a miss", which was not true of any code — the consult returns
 /// `None`, and `None` only means "no association". The cross-family drop is now
 /// a real gate: the Pref64-destination check on the flowless arm in

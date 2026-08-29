@@ -10151,3 +10151,107 @@ fn reject_message_type_reaches_the_filter_action_6854() {
         other => panic!("expected Reject, got {other:?}"),
     }
 }
+
+// #7053: the routing-instance pairing named in comments must be the one
+// production runs.
+//
+// This class of rot is not hypothetical here — it is what happened. `eval.rs`
+// named `evaluate_interface_filter_routing_instance_event_counted` as the
+// production pairing; the symbol is `#[cfg(test)]`. PR #6835 then EDITED that
+// sentence ("the only external call site" -> "each of its external call sites")
+// without noticing, turning one wrong reference into three. A comment cannot
+// fail, so nothing caught either revision.
+//
+// The guard is structural because the property is: "no production file calls
+// this symbol". Comments and string bodies are blanked first, so the corrected
+// comments — which QUOTE the wrong symbol in order to name it — cannot satisfy
+// or trip the scan.
+
+/// Production `.rs` sources under `userspace-dp/src`, comments and strings
+/// blanked. Test files are excluded by the same predicate the #6929 sweep uses.
+fn production_sources_7053() -> Vec<(String, String)> {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut files = Vec::new();
+    crate::afxdp::worker_queue::tests::afxdp_rs_files(&root, &mut files);
+    let mut out = Vec::new();
+    for path in files {
+        let rel = path
+            .strip_prefix(&root)
+            .expect("under src")
+            .to_string_lossy()
+            .replace('\\', "/");
+        if crate::afxdp::worker_queue::tests::is_fixture(&rel) {
+            continue;
+        }
+        let src = std::fs::read_to_string(&path).expect("read source");
+        out.push((
+            rel,
+            crate::afxdp::worker_queue::tests::blank_comments_and_strings(&src),
+        ));
+    }
+    out
+}
+
+#[test]
+fn no_production_caller_of_the_test_only_routing_instance_wrapper_7053() {
+    const TEST_ONLY: &str = "evaluate_interface_filter_routing_instance_event_counted(";
+    const PRODUCTION: &str = "evaluate_filter_ref_routing_instance_event_counted(";
+
+    let sources = production_sources_7053();
+    assert!(
+        sources.len() >= 100,
+        "only {} production sources were scanned; the walk or the fixture filter \
+         is broken and every absence below is vacuous",
+        sources.len()
+    );
+
+    // The test-only wrapper may appear ONLY in filter/engine/eval.rs, which
+    // defines it and holds the `#[cfg(test)]` wrapper that calls it. Anywhere
+    // else is a production caller of a symbol that is not in the shipped binary.
+    let mut callers: Vec<&str> = sources
+        .iter()
+        .filter(|(rel, cleaned)| rel != "filter/engine/eval.rs" && cleaned.contains(TEST_ONLY))
+        .map(|(rel, _)| rel.as_str())
+        .collect();
+    callers.sort_unstable();
+    assert!(
+        callers.is_empty(),
+        "production file(s) {callers:?} name \
+         `evaluate_interface_filter_routing_instance_event_counted`, which is \
+         `#[cfg(test)]`. Production pairs with the `&Filter` core \
+         `evaluate_filter_ref_routing_instance_event_counted`, reached through \
+         `ingress_route_table_override` (afxdp/forwarding/pbr.rs) (#7053)"
+    );
+
+    // POSITIVE CONTROL. Without it the assertion above passes if the scan reads
+    // nothing, if the needle stops matching, or if the production symbol is
+    // renamed and the whole pairing disappears.
+    let prod_callers: Vec<&str> = sources
+        .iter()
+        .filter(|(rel, cleaned)| rel != "filter/engine/eval.rs" && cleaned.contains(PRODUCTION))
+        .map(|(rel, _)| rel.as_str())
+        .collect();
+    assert!(
+        prod_callers.contains(&"afxdp/forwarding/pbr.rs"),
+        "the PRODUCTION routing-instance evaluator is not called from \
+         afxdp/forwarding/pbr.rs (found in {prod_callers:?}). Either the pairing \
+         moved — in which case the eval.rs comments naming pbr.rs are now wrong \
+         again — or this scan is matching nothing (#7053)"
+    );
+
+    // And the definition really is test-only, which is the premise the whole
+    // guard rests on.
+    let eval = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/filter/engine/eval.rs"),
+    )
+    .expect("read eval.rs");
+    let def = eval
+        .find("pub(crate) fn evaluate_interface_filter_routing_instance_event_counted")
+        .expect("the wrapper definition must exist");
+    assert!(
+        eval[..def].trim_end().ends_with("#[cfg(test)]"),
+        "`evaluate_interface_filter_routing_instance_event_counted` is no longer \
+         `#[cfg(test)]`. If it became production, the eval.rs comments corrected \
+         by #7053 need revisiting — they say it is not on a production path"
+    );
+}

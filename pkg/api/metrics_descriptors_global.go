@@ -95,6 +95,20 @@ func (c *xpfCollector) initGlobalDescriptors() {
 			"Disposition: "+dpuserspace.ScreenUnresolvedDisposition+".",
 		[]string{"zone", "profile"}, nil,
 	)
+	// #7059: a DISTINCT series, not a widening of the one above. That one's help
+	// text says "not defined", and a zone in this state resolves to a profile
+	// that IS defined — folding them would make a shipped series' documented
+	// meaning false and silently change what existing alerts match.
+	c.screenInertProfileZones = prometheus.NewDesc(
+		"xpf_screen_inert_profile_zones",
+		"1 while a security zone references a screen ids-option profile that IS "+
+			"defined but enables no checks, so the dataplane publishes no snapshot "+
+			"and enforces nothing for the zone, labeled by zone and profile name. "+
+			"Unlike xpf_screen_unresolved_profile_zones this state passes STRICT "+
+			"commit with no warning. "+
+			"Disposition: "+dpuserspace.ScreenInertDisposition+".",
+		[]string{"zone", "profile"}, nil,
+	)
 	c.policyDeniesTotal = prometheus.NewDesc(
 		"xpf_policy_denies_total",
 		"Total packets denied by policy.",
