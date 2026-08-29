@@ -5219,6 +5219,13 @@ Three properties bound the scan, each with its own cell in
   `frobnicate { off; }` keeps its ZERO-action rejection instead of yielding an
   exemption nobody wrote.
 
+A packed contradiction need not involve a pool. `then { source-nat interface
+off; }` authors an exemption and publishes an interface translation, and it is
+rejected on the same footing as the pool rows — the per-container record is
+ranked by distinct MODES first and pool names second, so a container naming no
+pool is still captured. Ranking on pool names alone made that whole class
+invisible while every pool-bearing row was correctly rejected.
+
 The check applies to the `n == 1` class only, so a block that lowers two actions
 (or none) keeps the diagnostic it already had. Two sites enforce that and either
 alone suffices — the call sits after the count's switch, and the predicate
