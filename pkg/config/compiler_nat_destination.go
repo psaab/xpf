@@ -248,7 +248,7 @@ func compileNATDestination(node *Node, sec *SecurityConfig) error {
 			// false-rejects a config the suite already pins as legal. The worst
 			// single container is the one worth reporting.
 			for _, thenNode := range ruleInst.node.FindChildren("then") {
-				if c := natThenAuthoredOccurrences(thenNode, "destination-nat"); len(c.distinctPools()) > len(rule.thenAuthored.distinctPools()) {
+				if c := natThenAuthoredOccurrences(thenNode, "destination-nat"); c.worseThan(rule.thenAuthored) {
 					rule.thenAuthored = c
 				}
 			}

@@ -123,6 +123,24 @@ func (a natThenAuthored) distinctModes() []string {
 	return out
 }
 
+// worseThan reports whether c records a more serious authored contradiction than
+// a, and is how a rule with several `then` containers picks the one to report.
+//
+// MODES RANK FIRST, POOLS SECOND, and getting that wrong is not a matter of
+// which message you get. The original ranking compared distinct POOLS only, so a
+// container with no pool at all — `then { source-nat interface off; }` — never
+// beat the zero-valued starting record, was never stored, and its packed
+// cross-mode contradiction was never seen. That rule authors an exemption and
+// publishes an interface translation: the same inversion #7033 exists to reject,
+// silently missed because every fixture in the first draft happened to name a
+// pool. Ranking on modes is what makes a pool-less contradiction visible.
+func (c natThenAuthored) worseThan(a natThenAuthored) bool {
+	if cm, am := len(c.distinctModes()), len(a.distinctModes()); cm != am {
+		return cm > am
+	}
+	return len(c.distinctPools()) > len(a.distinctPools())
+}
+
 // natThenAuthoredOccurrences records every pool and every terminal action mode
 // of `kind` that thenNode authored.
 //

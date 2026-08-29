@@ -87,6 +87,24 @@ func TestPackedCrossModeContradictionRejected_7033(t *testing.T) {
 			modes: []string{"pool", "interface"},
 		},
 		{
+			// POOL-LESS cross-mode packs. These are the rows the first draft of
+			// the fix MISSED: the per-container record was ranked by distinct
+			// POOLS, so a container naming no pool never beat the empty starting
+			// record and its contradiction was never recorded. Every other row in
+			// this table names a pool, so the table sampled the axis instead of
+			// varying it and the whole class was invisible.
+			name: "root_packed_interface_then_off", text: snat7033("then { source-nat interface off; }"),
+			modes: []string{"interface", "off"}, offDroppd: true,
+		},
+		{
+			name: "root_packed_off_then_interface", text: snat7033("then { source-nat off interface; }"),
+			modes: []string{"off", "interface"},
+		},
+		{
+			name: "child_packed_interface_then_off", text: snat7033("then { source-nat { interface off; } }"),
+			modes: []string{"interface", "off"}, offDroppd: true,
+		},
+		{
 			name: "dnat_child_packed_pool_then_off", text: dnat7033("then { destination-nat { pool PD off; } }"),
 			modes: []string{"pool", "off"}, offDroppd: true,
 		},
@@ -136,6 +154,9 @@ func TestFlatSetPackedContradictionRejected_7033(t *testing.T) {
 		{"flat_pool_then_off", "set security nat source rule-set RS rule R1 then source-nat pool P off"},
 		{"flat_off_then_pool", "set security nat source rule-set RS rule R1 then source-nat off pool P"},
 		{"flat_interface_then_pool", "set security nat source rule-set RS rule R1 then source-nat interface pool P"},
+		// Pool-less, in the shape an operator types.
+		{"flat_interface_then_off", "set security nat source rule-set RS rule R1 then source-nat interface off"},
+		{"flat_off_then_interface", "set security nat source rule-set RS rule R1 then source-nat off interface"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			tree := buildTree(t, []string{
@@ -416,6 +437,13 @@ func TestPackedActionScanShapes_7033(t *testing.T) {
 			name:      "open_world_tail_stops_the_scan",
 			node:      &Node{Keys: []string{"then", "source-nat", "pool", "P", "persistent-nat", "permit", "off"}},
 			wantModes: []string{"pool"},
+		},
+		{
+			// No pool at all. The record must still be captured, or a pool-less
+			// contradiction is invisible to the gate.
+			name:      "pool_less_cross_mode_pack",
+			node:      &Node{Keys: []string{"then", "source-nat", "interface", "off"}},
+			wantModes: []string{"interface", "off"},
 		},
 		{
 			name: "unrecognised_container_records_nothing",
