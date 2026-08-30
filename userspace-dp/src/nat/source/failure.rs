@@ -117,6 +117,24 @@ pub(crate) enum SourceNatFailureReason {
     /// that perturbs the #6812 budget walk for pools that have nothing to
     /// drain.
     PoolIfaceEgressOverlap,
+    /// #6979 F6: this pool-mode allocation was rolled back because the
+    /// `(pool address, port)` it landed on is already OWNED by a PEER pool —
+    /// a different allocator key whose pool covers the same address.
+    ///
+    /// Two pools over one address are two independent occupancy bitmaps, each
+    /// blind to the other, so without this check both mint the same translated
+    /// identity for two live flows and the reverse index cannot attribute their
+    /// replies. Measured on master, with and without the rule edit F6's text
+    /// attributes it to.
+    ///
+    /// Fails CLOSED rather than retrying elsewhere: this allocator cannot
+    /// enumerate the peer's held ports, so "pick another" is a guess, and the
+    /// config that reaches this state is one the Go #5144 strict gate already
+    /// rejects at commit (on ADDRESS overlap alone — it does not consult port
+    /// ranges). Reached only from a tolerated lenient load, a peer sync, an
+    /// older control plane, or a handcrafted snapshot: the same population
+    /// `OverBudget` exists for (#6812).
+    PoolPeerAddressOverlap,
 }
 
 impl SourceNatFailureReason {
@@ -138,6 +156,7 @@ impl SourceNatFailureReason {
             Self::InterfaceRegistryCap => "source_nat_interface_registry_cap",
             Self::InterfaceOverlapDraining => "source_nat_interface_overlap_draining",
             Self::PoolIfaceEgressOverlap => "source_nat_pool_iface_egress_overlap",
+            Self::PoolPeerAddressOverlap => "source_nat_pool_peer_address_overlap",
         }
     }
 }

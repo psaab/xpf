@@ -7,12 +7,91 @@
 //! visible here without a visibility change (a private item is visible to its
 //! module AND that module's descendants).
 //!
-//! #6988 PURE CODE MOTION: every line below was moved verbatim from
-//! `nat/source.rs` lines 2495-3241. The only edits are the visibility
-//! widenings enumerated in `source/mod.rs`; no logic, no ordering and no
-//! signature changed.
+//! #6988 was PURE CODE MOTION: every line was moved verbatim from
+//! `nat/source.rs` lines 2495-3241, with only the visibility widenings
+//! enumerated in `source/mod.rs`.
+//!
+//! That is no longer the whole story and the claim must not be left standing as
+//! though it were: #6979 F6 added `reject_peer_owned_identity` here and calls
+//! it at the three PAT allocation sites (deterministic-v4, v4 round-robin, v6
+//! round-robin). Everything else remains the moved code.
 
 use super::*;
+
+/// #6979 F6: refuse a PAT identity a PEER pool already owns, and roll ours back.
+///
+/// Two source-NAT pools that cover one address are two independent occupancy
+/// bitmaps (`SourceNatPoolAllocatorKey` carries the pool NAME), so each is blind
+/// to the other's live translations and both can publish `203.0.113.1:20000`
+/// for a different live flow — one wire identity, two sessions, replies the
+/// reverse index cannot attribute. Measured on master.
+///
+/// Called AFTER the allocation, deliberately. Check-then-mint has a window: two
+/// workers minting from two peer allocators can both see the tuple free and
+/// both take it. Mint-then-check closes it — the claiming `fetch_or` runs
+/// before either worker looks, so at least one sees the other's bit and rolls
+/// back, and if they see each other simultaneously BOTH roll back. The worst
+/// case is a refused flow, never a published duplicate.
+///
+/// # The `SeqCst` fence is what makes that argument true
+///
+/// The two workers store to DIFFERENT locations (each allocator owns its own
+/// occupancy bitmap) and then load the other's. That is the store-buffer
+/// litmus test, and it is NOT forbidden by the release/acquire pair the bitmap
+/// already uses: `AddressOccupancy::claim_offset` is `fetch_or(AcqRel)` and
+/// `is_occupied` is `load(Acquire)`, which together still permit both workers
+/// to observe the peer as free and both to publish — the exact duplicate this
+/// function exists to prevent. A `SeqCst` fence executed between the store and
+/// the load ON BOTH SIDES is the standard fix, and both sides run this code.
+///
+/// It sits AFTER the `Option::is_none` early-out, so a config with no
+/// overlapping pools — every config a strict commit accepts — never executes
+/// it.
+///
+/// Stated plainly because it cannot be bound by a test: no unit test can
+/// distinguish this fence's presence from its absence, since the reordering it
+/// forbids is architecture- and timing-dependent (on x86-64 the `lock`-prefixed
+/// `fetch_or` is already a full barrier, so the fence is a no-op there). It is
+/// here for the memory model, not for an observed failure.
+///
+/// `None` on every config with no overlapping pools — `overlap_owners` is
+/// `None` there and the whole call is one `Option::is_none`.
+fn reject_peer_owned_identity(
+    rule: &SourceNatRule,
+    flow: SourceNatFlowKey,
+    translated: TranslatedTuple,
+    now_ns: u64,
+    holder: NatHolder,
+) -> Option<SourceNatLookup> {
+    if rule.overlap_owners.is_none() {
+        return None;
+    }
+    std::sync::atomic::fence(Ordering::SeqCst);
+    if !rule.peer_holds_identity(translated.ip, translated.port) {
+        return None;
+    }
+    // Undo OUR reservation before failing, or the refused flow leaves a port
+    // held with nothing that will ever release it: the flow is never published,
+    // so no session teardown will name it.
+    //
+    // `rollback_flow` rather than `release_flow` because this is an activation
+    // being WITHDRAWN, not a flow completing — the two take different
+    // persistent-lease arms (#6528), and only rollback's is right for a
+    // translation that never went into service.
+    //
+    // The port DOES go back on the per-address recycle ring, same as any other
+    // rollback. That does not re-collide the pool's next flow: `claim()`
+    // forward-probes the monotonic fresh cursor BEFORE draining the recycle
+    // ring (#3047/#3011), and the cursor has already moved past the colliding
+    // port. Measured by
+    // `an_overlapping_pool_still_mints_an_identity_its_peer_does_not_own_6979`.
+    rule.pool_allocator
+        .rollback_flow(flow, translated, now_ns, holder);
+    Some(SourceNatLookup::Unavailable(SourceNatFailure::for_rule(
+        rule,
+        SourceNatFailureReason::PoolPeerAddressOverlap,
+    )))
+}
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn match_source_nat(
@@ -507,6 +586,20 @@ pub(crate) fn match_source_nat_result_for_tuple(
                             ));
                         }
                     };
+                    // #6979 F6: refuse an identity a peer pool over the same
+                    // address already owns. The deterministic parameters
+                    // (`host address` base, block size) are NOT part of the
+                    // allocator key, so two deterministic pools over one
+                    // address can map DIFFERENT subscribers onto the same
+                    // external block and neither can see it. And a
+                    // deterministic block is fixed per subscriber, so there is
+                    // nowhere else for the collider to go — which is exactly
+                    // why it must fail closed rather than publish a duplicate.
+                    if let Some(failure) =
+                        reject_peer_owned_identity(rule, flow, translated, now_ns, holder)
+                    {
+                        return failure;
+                    }
                     return SourceNatLookup::Matched(NatDecision {
                         rewrite_src: Some(translated.ip),
                         rewrite_dst: None,
@@ -631,6 +724,13 @@ pub(crate) fn match_source_nat_result_for_tuple(
                         ));
                     }
                 };
+                // #6979 F6: refuse an identity a peer pool over the same
+                // address already owns.
+                if let Some(failure) =
+                    reject_peer_owned_identity(rule, flow, translated, now_ns, holder)
+                {
+                    return failure;
+                }
                 return SourceNatLookup::Matched(NatDecision {
                     rewrite_src: Some(translated.ip),
                     rewrite_dst: None,
@@ -743,6 +843,13 @@ pub(crate) fn match_source_nat_result_for_tuple(
                         ));
                     }
                 };
+                // #6979 F6: refuse an identity a peer pool over the same
+                // address already owns.
+                if let Some(failure) =
+                    reject_peer_owned_identity(rule, flow, translated, now_ns, holder)
+                {
+                    return failure;
+                }
                 return SourceNatLookup::Matched(NatDecision {
                     rewrite_src: Some(translated.ip),
                     rewrite_dst: None,

@@ -88,12 +88,14 @@ mod release;
 mod synced;
 mod nat64_ports;
 mod match_rules;
+mod overlap;
 pub(crate) use failure::*;
 pub(crate) use expand::*;
 pub(crate) use release::*;
 pub(crate) use synced::*;
 pub(crate) use nat64_ports::*;
 pub(crate) use match_rules::*;
+pub(crate) use overlap::*;
 
 
 const DEFAULT_PERSISTENT_NAT_TIMEOUT_SECS: i64 = 300;
@@ -290,6 +292,19 @@ pub(crate) struct SourceNatRule {
     /// cold-path commit site clones the `Arc` and calls `.add(len)` once
     /// per committed translated forward flow.
     pub(crate) hit_counter: Option<Arc<NatRuleCounter>>,
+    /// #6979 F6: the apply-time index of pool addresses that more than one
+    /// distinct allocator covers, shared by every rule that touches one. Wired
+    /// by `wire_overlap_peers` (`source/overlap.rs`).
+    ///
+    /// The address relation is static (a property of the snapshot) so it is
+    /// resolved once, at apply. The OCCUPANCY is not — it changes with every
+    /// mint and release — so a peer's bit is read at mint time, never
+    /// snapshotted.
+    ///
+    /// `None` for every rule of a config with no overlapping pools, which is
+    /// every config a strict commit accepts (#5144). The mint-path cost there
+    /// is one `Option::is_none`.
+    pub(crate) overlap_owners: Option<Arc<PoolAddressOwners>>,
 }
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
@@ -919,6 +934,11 @@ fn resolve_pool_allocators(
             }
         }
     }
+
+    // #6979 F6: record, per rule, which PEER pools cover the same addresses.
+    // Runs last, after every allocator — retained, reused or freshly built —
+    // has been assigned, because it captures the peers' handles.
+    wire_overlap_peers(out);
 }
 
 impl SourceNatRule {

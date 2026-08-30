@@ -113,6 +113,9 @@ mod tests_iface;
 #[path = "tests_iface_pool_overlap_7717.rs"]
 mod tests_iface_pool_overlap_7717;
 #[cfg(test)]
+#[path = "tests_pool_overlap_6979.rs"]
+mod tests_pool_overlap_6979;
+#[cfg(test)]
 #[path = "tests_iface_pool_drain_7717.rs"]
 mod tests_iface_pool_drain_7717;
 #[cfg(test)]

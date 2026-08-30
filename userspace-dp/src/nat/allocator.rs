@@ -1154,9 +1154,31 @@ impl PortAllocator {
         }
     }
 
-    /// Test-only: is `port` currently occupied on pool address `addr_index`?
-    #[cfg(test)]
-    pub(crate) fn debug_is_port_occupied(&self, addr_index: usize, port: u16) -> bool {
+    /// #6979 F6: do these two handles refer to the SAME allocator?
+    ///
+    /// Allocator sharing between rules is by `Arc`, so pointer identity is the
+    /// question — not key equality. The resolver reaches a shared allocator by
+    /// several routes (an exact previous-generation key, a this-apply key
+    /// already assigned, a rename carry), and the peer-overlap wiring must
+    /// treat every one of them as "one occupancy domain, nothing to check".
+    pub(crate) fn same_allocator(&self, other: &PortAllocator) -> bool {
+        Arc::ptr_eq(&self.shared, &other.shared)
+    }
+
+    /// #6979 F6: is `port` currently OWNED on pool address `addr_index` in this
+    /// allocator?
+    ///
+    /// The occupancy bit is the sole ownership token for a PAT allocation, so
+    /// this is the question a PEER allocator over the same pool address has to
+    /// ask before it may publish that identity: two pools covering one address
+    /// are two independent bitmaps, and without this each is blind to the
+    /// other's live translations.
+    ///
+    /// A port outside this address's configured range, or an `addr_index` past
+    /// the end (an empty default allocator), answers `false` — it owns nothing
+    /// there, which is the honest answer and the fail-open direction only in
+    /// the sense that there is nothing to protect.
+    pub(crate) fn holds_port(&self, addr_index: usize, port: u16) -> bool {
         match self.shared.occupancy.get(addr_index) {
             Some(occ) => match occ.offset_of(port) {
                 Some(offset) => occ.is_occupied(offset),
@@ -1164,6 +1186,14 @@ impl PortAllocator {
             },
             None => false,
         }
+    }
+
+    /// Test-only alias of [`Self::holds_port`]. Kept as an ALIAS rather than a
+    /// second copy of the lookup so the tests that pin occupancy keep asking
+    /// the production question (#6979).
+    #[cfg(test)]
+    pub(crate) fn debug_is_port_occupied(&self, addr_index: usize, port: u16) -> bool {
+        self.holds_port(addr_index, port)
     }
 
     /// Test-only: map a bitmap `offset` to its port on pool address

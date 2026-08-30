@@ -924,6 +924,36 @@ the NAT module applies it:
   forwarding, and record recent-exception reasons such as
   `source_nat_pool_missing`, `source_nat_pool_empty`,
   `source_nat_pool_invalid_port_range`, and `source_nat_pool_exhausted`.
+  **A LOCAL PAT allocation that lands on an identity another pool's occupancy
+  bitmap already holds is rolled back and refused (#6979 F6,
+  `source_nat_pool_peer_address_overlap`).** Two source-NAT pools whose
+  addresses overlap are two independent occupancy bitmaps — the allocator key
+  carries the pool NAME — so each is blind to the other's live translations and
+  both would publish one `(pool address, port)` for two live flows. One
+  apply-time index records every `(allocator, occupancy index)` that owns each
+  SHARED pool address, and the rules that touch one hold it by `Arc`
+  (`overlap_owners`); keying the counting pass by DISTINCT ALLOCATOR rather than
+  by rule is what bounds it to #6812's aggregate address budget. Every position
+  is recorded, not just the first, because `expand_pool_address` does not
+  deduplicate and each vector POSITION gets its own bitmap. The check runs AFTER
+  the allocation, so two workers racing on two peer allocators cannot both
+  publish (at least one sees the other's bit and rolls back) — which needs a
+  `SeqCst` fence between the claiming `fetch_or` and the peer read, because the
+  two workers store to different bitmaps and then load the other's (the
+  store-buffer litmus test, which the bitmap's `AcqRel`/`Acquire` pair does not
+  forbid on its own). The fence sits after the `Option::is_none` early-out, and
+  that early-out is the whole mint-path cost for every config a strict commit
+  accepts, since the Go #5144 gate rejects overlapping pools at commit.
+  **This covers the LOCAL PAT mint only.** The address-only path
+  (`port no-translation`, port-less protocols) mints an `address_only_owners`
+  token and claims no occupancy bit; the HA synced reserve calls `reserve_flow`
+  on one allocator directly and never reaches the check; and NAT64 prefixes are
+  their own allocators. All three remain independent domains that can still emit
+  the same external tuple on a config #5144 rejects. A pool whose own configured
+  members repeat one address also still self-collides — a pre-existing
+  single-pool defect. The deterministic-v4 refusal costs the colliding
+  subscriber its whole block rather than one port, because
+  `allocate_deterministic_v4` restarts its scan at the block start.
   Per-pool `persistent-nat` lease reuse is helper-local userspace runtime
   state keyed by source tuple `(protocol, source IP, source port)` to
   translated tuple. Compatible in-process snapshot refreshes preserve it;
