@@ -222,7 +222,13 @@ pub(super) fn reverse_wire_key(forward_key: &SessionKey, nat: NatDecision) -> Se
         src_port,
         dst_port,
         discriminator: Default::default(),
-        routing_domain: forward_key.routing_domain,
+        // #7160 (#2387): REVERSE-MATCH key — deliberately domain-agnostic.
+        // See the `routing_domain` doc on SessionKey: a reply may legitimately
+        // arrive in a different routing domain than the forward direction
+        // resolved, so the bucket it is looked up under must not carry one.
+        // The isolation lives in the two-pass preference in
+        // `find_forward_nat_match`, not here.
+        routing_domain: 0,
     }
 }
 
