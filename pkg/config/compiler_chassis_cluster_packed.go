@@ -83,6 +83,7 @@ var clusterStatements = map[string]int{
 
 	// Valueless flags: the token after them genuinely opens a statement.
 	"control-link-recovery":         0,
+	"strict-session-auth":           0,
 	"configuration-synchronize":     0,
 	"nat-state-synchronization":     0,
 	"ipsec-session-synchronization": 0,

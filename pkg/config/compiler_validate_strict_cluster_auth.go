@@ -103,6 +103,43 @@ func validateClusterAuthKeyStrict(cfg *Config) error {
 		"one with `openssl rand -base64 32`)")
 }
 
+// validateStrictSessionAuthNeedsKeyStrict rejects `chassis cluster
+// strict-session-auth` on a node with no control-link PSK — #7441.
+//
+// The posture is INERT without a key: the runtime rule is "while this node is
+// keyed AND the posture is declared, an un-upgraded session-sync connection is
+// dropped", so with no key nothing is ever evicted. An operator who sets the
+// leaf and believes the hole is closed is worse off than one who is told.
+//
+// WHY IT IS ORDERED BEFORE validateClusterAuthKeyStrict, which already rejects
+// a keyless cluster on its own: that gate's message is about the control
+// channel failing open and sends the operator to add a key, saying nothing
+// about the posture leaf they just set. Both messages are true; this one
+// describes what the operator actually did. Ordering it first is the whole
+// reason it is reachable at all on the strict path.
+//
+// It honours the SAME lenient downgrade (#1960 no-brick) as its siblings. A
+// config already on disk, or pushed from a peer, must still boot: an inert
+// posture leaf is no more dangerous at runtime than not setting it, so
+// refusing to load one would brick a node over a no-op.
+func validateStrictSessionAuthNeedsKeyStrict(cfg *Config) error {
+	if cfg == nil || cfg.Chassis.Cluster == nil || !cfg.Chassis.Cluster.StrictSessionAuth {
+		return nil
+	}
+	// TrimSpace for the same reason validateClusterAuthKeyStrict trims: a
+	// whitespace-only key is "configured" to the runtime's len(key) > 0 test
+	// but is not a key. Deliberately stricter than the runtime here.
+	if strings.TrimSpace(cfg.Chassis.Cluster.ControlLinkAuthKey.Reveal()) != "" {
+		return nil
+	}
+	return fmt.Errorf("chassis cluster: `strict-session-auth` is set but " +
+		"`authentication-key` is not — the posture only evicts an unauthenticated " +
+		"session-sync connection while this node HOLDS a key, so as written it does " +
+		"nothing at all and the #6628 residual it is meant to close stays open; set " +
+		"`chassis cluster authentication-key <key>` (the SAME value on both nodes), " +
+		"or remove `strict-session-auth`")
+}
+
 // validateClusterAuthKeyOverlapStrict rejects a rotation overlap that is not
 // one (#6630).
 //

@@ -674,7 +674,15 @@ func (d *Daemon) handleConfigSync(configText string) error {
 	// under d.applySem. Without this, a local commitAndApply could
 	// interleave between the two and briefly leave store and kernel
 	// disagreeing.
-	if _, err := d.syncAndApply(context.Background(), configText, nil); err != nil {
+	// #7441: pin this node's node-local chassis leaves across the peer's push.
+	// An unauthenticated session-sync stream reaches this function on a STANDBY
+	// (the guard above refuses only on the RG0 primary), so a hostile admitted
+	// connection could otherwise push a tree that clears the very posture that
+	// exists to evict it — #5078's "an admitted peer must not re-arm the
+	// window". The hook is shared with #6629's eventual node-local posture; see
+	// preserveNodeLocalChassis for the contract.
+	if _, err := d.syncAndApply(context.Background(), configText,
+		preserveNodeLocalChassis(d.activeTreeForNodeLocal())); err != nil {
 		slog.Error("cluster: config sync apply failed", "err", err)
 		return err
 	}
@@ -1446,4 +1454,18 @@ func (d *Daemon) activeTransport() clusterTransportKey {
 	d.clusterCommsMu.Lock()
 	defer d.clusterCommsMu.Unlock()
 	return d.activeClusterTransport
+}
+
+// activeTreeForNodeLocal returns this node's active config tree for the #7441
+// node-local preservation hook, or nil when nothing is committed yet.
+//
+// A nil store, or a node that has never committed, yields nil — and
+// preserveNodeLocalChassis treats nil as "no local value to defend", which is
+// correct: a node with no committed config has no posture, and the leaf is
+// inert until it does.
+func (d *Daemon) activeTreeForNodeLocal() *config.ConfigTree {
+	if d.store == nil {
+		return nil
+	}
+	return d.store.ActiveTree()
 }

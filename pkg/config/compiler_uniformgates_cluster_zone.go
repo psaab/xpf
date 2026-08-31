@@ -390,6 +390,18 @@ func runUniformGatesClusterZone(tree *ConfigTree, cfg *Config, opts compileOpts)
 	// no more dangerous at runtime than not setting the leaf at all — it
 	// accepts one key either way — so refusing to load one would brick a node
 	// over a cosmetic mistake.
+	// #7441: ordered BEFORE the absent-key gate so an operator who set
+	// `strict-session-auth` without a key is told what THEY did, rather than
+	// being handed the generic control-channel message and sent to add a key
+	// with no hint that their posture leaf was inert. Same lenient downgrade.
+	if err := validateStrictSessionAuthNeedsKeyStrict(cfg); err != nil {
+		if opts.lenientClusterAuthKey {
+			cfg.Warnings = append(cfg.Warnings,
+				fmt.Sprintf("cluster authentication (downgraded to warning on tolerant path): %v", err))
+		} else {
+			return err
+		}
+	}
 	if err := validateClusterAuthKeyOverlapStrict(cfg); err != nil {
 		if opts.lenientClusterAuthKey {
 			cfg.Warnings = append(cfg.Warnings,

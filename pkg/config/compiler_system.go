@@ -2203,6 +2203,11 @@ func compileChassis(node *Node, ch *ChassisConfig) error {
 	if clusterNode.FindChild("control-link-recovery") != nil {
 		ch.Cluster.ControlLinkRecovery = true
 	}
+	// #7441: node-local strict session-auth posture. A bare flag leaf, like
+	// control-link-recovery above; its runtime meaning is in pkg/cluster.
+	if clusterNode.FindChild("strict-session-auth") != nil {
+		ch.Cluster.StrictSessionAuth = true
+	}
 	// #4107: compile the cluster control-channel PSK into a Secret so it is
 	// redacted on every render/log path (mirrors the IKE/interface/routing
 	// Secret compile sites). nodeVal reads the raw leaf value; it is never

@@ -2315,12 +2315,58 @@ hint rather than an instruction — one for a round still outstanding under the
 same key re-sends that round's Hello byte for byte instead of minting a new
 round, which is what keeps a forged Request from discarding one.
 
-**What is still open, and it is the reason to keep reading:** a HOSTILE stream
-admitted before the commit declines the upgrade by staying silent, and a
-decliner is indistinguishable from a legitimate peer that is not keyed yet —
-which is the rolling-upgrade case the mechanism must not break. Restarting
-`xpfd` remains the only thing that evicts such a stream. If you have reason to
-believe the control segment was hostile before you keyed it, restart.
+**The residual, and how to close it (#7441).** A HOSTILE stream admitted before
+the commit declines the upgrade by staying silent, and a decliner is
+indistinguishable from a legitimate peer that is not keyed yet — which is the
+rolling-upgrade case the mechanism must not break. The upgrade alone therefore
+cannot evict it.
+
+`set chassis cluster strict-session-auth` closes it. While it is set AND this
+node holds a control-link key, an established session-sync connection that has
+not authenticated within a short grace (`strictSessionAuthGrace`, 10s) is
+CLOSED. A legitimate keyed peer reconnects immediately and authenticates
+through `performSyncHandshake`; a hostile stream cannot, because
+`syncAuthDecision` refuses an unkeyed peer on a fresh connection.
+
+**It is a DECLARATION, not an inference, and that is the whole design.** Three
+signals look like the missing discriminator and each fails:
+
+- `HeartbeatPeerAuthSeen()` proves the LEGITIMATE peer holds the key on a
+  channel that reads it live — necessary, but not sufficient. A keyed
+  legitimate peer on an OLDER, pre-#6628 build also cannot answer the upgrade,
+  so dropping on this signal alone breaks a rolling upgrade.
+- The peer's `syncMsgPeerCapabilities` advertisement (#6650) would say whether
+  the peer is new enough to answer — except a hostile peer simply WITHHOLDS
+  it, and withholding then buys immunity. Using a peer-supplied value as the
+  arming input hands the attacker the switch.
+- Time alone is what #5078 shipped and removed.
+
+What is left is the operator, who knows the one thing neither node can observe:
+whether the cluster is homogeneous.
+
+**Operator contract.** Set it on each node, once BOTH nodes are keyed and BOTH
+are on a #6628-capable build. It is **node-local**: config-sync never carries
+it, in either direction, so you must set it on both nodes yourself. That is not
+a convenience gap — an unauthenticated stream's frames reach
+`handleConfigPayload` (`readAuthed()` gates trailer VERIFICATION only) and
+`handleConfigSync` refuses a push only on the RG0 primary, so a synced flag
+would be clearable by the very connection it exists to evict.
+
+**If you set it while the peer cannot answer**, that peer's session sync is
+dropped and re-established in a loop. The symptom is a rising
+`StrictAuthEvictions` counter with sessions not converging; the fix is to
+delete the leaf on this node, or finish upgrading the peer. Nothing else
+breaks — VRRP, heartbeat and failover are on a different channel.
+
+**Crash-loop behaviour: nothing is persisted, by design.** There is no deadline
+to persist, because the decision is recomputed from committed config on every
+evaluation, and lapsing anything fails SAFE (the connection is dropped, and a
+legitimate peer is re-admitted on reconnect). This is what #5078's window could
+not do: it failed OPEN on lapse, so its deadline had to be durable.
+
+If you have reason to believe the control segment was hostile before you keyed
+it and you have NOT set `strict-session-auth`, restarting `xpfd` still evicts
+the stream.
 
 Confirm the posture with `show chassis cluster statistics`, whose
 `Authentication:` line (`controlLinkAuthStatus`) reads

@@ -374,8 +374,14 @@ type SyncStats struct {
 	FenceAcksSent     atomic.Uint64
 	FenceAcksReceived atomic.Uint64
 	FenceAcksTimedOut atomic.Uint64
-	Errors                 atomic.Uint64
-	DeletesDropped         atomic.Uint64
+	Errors            atomic.Uint64
+	// StrictAuthEvictions counts session-sync connections closed by the #7441
+	// strict session-auth posture: admitted before the control-link key was
+	// committed, never authenticated, and past the in-place-upgrade grace.
+	// A non-zero value on a healthy cluster means the posture was declared
+	// while the peer could not answer — check the peer's build.
+	StrictAuthEvictions atomic.Uint64
+	DeletesDropped      atomic.Uint64
 	// DeletesStaleIgnored counts deletes refused by the #2170 install-
 	// generation guard: a journaled/deferred delete whose generation was
 	// strictly older than the currently-installed same-key entry. A nonzero
@@ -551,6 +557,15 @@ func (s TransferReadinessSnapshot) Reason() string {
 // SessionSync manages TCP-based session state replication between cluster
 // peers for stateful failover.
 type SessionSync struct {
+	// strictSessionAuth is the #7441 operator-declared posture, published from
+	// the config-apply path. Atomic because the enforcement tick, the
+	// commit-driven reconciler and the status readers all touch it from
+	// different goroutines, and it must never be read under a lock this
+	// package's connection paths already hold.
+	//
+	// Zero value false = pre-#7441 behaviour exactly: nothing is ever evicted.
+	strictSessionAuth strictSessionAuthState
+
 	localAddr string
 	peerAddr  string
 	sessions  dataplane.SessionStore
@@ -909,8 +924,8 @@ type SessionSync struct {
 	fenceAckMu      sync.Mutex
 	fenceAckWaiters map[uint64]chan FenceAck
 
-	zoneRGMu             sync.RWMutex
-	zoneRGMap            map[uint16]int
+	zoneRGMu  sync.RWMutex
+	zoneRGMap map[uint16]int
 
 	// ingressFoldFn resolves a session's LOCAL ingress identity to the
 	// #7095 cluster-stable fold that rides the sync wire. Injected by the

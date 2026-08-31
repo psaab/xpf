@@ -792,6 +792,15 @@ func (s *SessionSync) Start(ctx context.Context) error {
 		defer s.wg.Done()
 		s.configApplyLoop(ctx)
 	}()
+	// #7441: re-evaluate the strict session-auth posture on established
+	// connections. A tick is required rather than convenient — the eviction
+	// grace elapses strictly AFTER the commit that armed the posture, so a
+	// commit-time evaluation alone could never fire.
+	s.wg.Add(1)
+	go func() {
+		defer s.wg.Done()
+		s.strictSessionAuthLoop(ctx)
+	}()
 	return nil
 }
 

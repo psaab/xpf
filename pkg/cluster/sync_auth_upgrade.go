@@ -371,6 +371,18 @@ func (s *SessionSync) ReconcileConnectionAuth(reason string) {
 		if c == nil {
 			continue
 		}
+		// #7441: anchor the eviction grace BEFORE attempting the upgrade, and
+		// for BOTH roles — the initiator emits a Hello here, the responder a
+		// Request, and a hostile peer answers neither. Anchoring here rather
+		// than at connection setup is what makes the rule bound a connection's
+		// LIFETIME: a stream established long before the key was committed
+		// starts its grace when the key arrives. noteStrictAuthGraceStartLocked
+		// is set-once, so a later reconcile cannot push the deadline forward.
+		if ac, ok := c.(*authConn); ok && len(ac.authPSK) == 0 {
+			s.writeMu.Lock()
+			s.noteStrictAuthGraceStartLocked(ac)
+			s.writeMu.Unlock()
+		}
 		err := s.beginAuthUpgrade(c, idx, key, reason)
 		if err != nil && !errors.Is(err, errUpgradeNotApplicable) {
 			slog.Warn("cluster sync: could not start the in-place auth upgrade; the connection "+
@@ -378,6 +390,12 @@ func (s *SessionSync) ReconcileConnectionAuth(reason string) {
 				"remote", connRemoteAddrString(c))
 		}
 	}
+	// #7441: evaluate the posture on this pass too. The periodic tick is what
+	// normally fires (the grace elapses after the commit that armed it), but a
+	// commit arriving when the grace has ALREADY elapsed — a second commit, or
+	// the posture being declared on a long-established unauthenticated stream —
+	// must act now instead of waiting up to a tick.
+	s.enforceStrictSessionAuth()
 }
 
 // beginAuthUpgrade starts, or prompts for, an exchange on conn when its posture

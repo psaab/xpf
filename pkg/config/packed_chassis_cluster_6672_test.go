@@ -57,6 +57,7 @@ var clusterOracleValues = map[string]string{
 	"redundancy-group":              "1 node 0 priority 200",
 
 	"control-link-recovery":         "",
+	"strict-session-auth":           "",
 	"configuration-synchronize":     "",
 	"nat-state-synchronization":     "",
 	"ipsec-session-synchronization": "",

@@ -205,9 +205,26 @@ var gateBlindCeiling = map[gateBlindClass]int{
 	// blindness was invisible to TestCompactBlockEquivalenceInventory2419 for
 	// exactly the reason it is invisible here — that gate detects "the compact
 	// spelling drops the VALUE", and a value-less flag has none to drop.
-	gateBlindFlag:        176,
-	gateBlindErr:         43,
-	gateBlindValueMoves:  1,
+	//
+	// #7441 raised this 176 -> 177 for `chassis cluster strict-session-auth`,
+	// on the SAME reasoning and not as a concession. The leaf is a valueless
+	// flag — like `control-link-recovery`, `hitless-restart` and every other
+	// `chassis cluster` flag already inside this number, four of which the
+	// failure message samples — so the spelling differential, which works by
+	// VARYING a leaf's value, has nothing to vary. No change to the gate or to
+	// the schema can rescue it; it is in this class by construction.
+	//
+	// It is not untested. Both spellings compile
+	// (TestStrictSessionAuthCompiles7441, which asserts presence AND absence),
+	// the packed-line splitter knows its arity
+	// (TestClusterSplitterAndSchemaAgree_6672 / #6672 — that gate is what
+	// catches a valueless flag folding onto its neighbour, which is the actual
+	// hazard for this shape), the config-mode grammar offers it
+	// (TestStrictSessionAuthIsInTheSetSchema7441), and the strict/tolerant
+	// split is pinned by its own two cells.
+	gateBlindFlag:       177,
+	gateBlindErr:        43,
+	gateBlindValueMoves: 1,
 }
 
 func TestSchemaSpellingGateCoverageIsGated_7484(t *testing.T) {

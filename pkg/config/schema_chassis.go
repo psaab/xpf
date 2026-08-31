@@ -97,6 +97,24 @@ var schemaChassis = &schemaNode{desc: "Chassis configuration", children: map[str
 			children:      nil,
 		},
 		"control-link-recovery": {desc: "Control link recovery (accepted for Junos compatibility; no runtime effect)", children: nil},
+		// #7441: the operator-declared posture that lets a keyed node EVICT a
+		// session-sync connection which was admitted while unkeyed and has not
+		// upgraded (#6628). It is a declaration, not an inference, because the
+		// discriminator does not exist on the wire: a hostile peer declines the
+		// upgrade by staying silent, and that is indistinguishable from a
+		// legitimate peer which is keyed but running an older, pre-#6628 build.
+		// The operator knows the one thing neither node can observe — whether the
+		// cluster is homogeneous — so the operator supplies it.
+		//
+		// NODE-LOCAL and deliberately NOT carried by config-sync: an
+		// unauthenticated session-sync stream's frames reach handleConfigPayload
+		// (readAuthed() gates trailer VERIFICATION only, so an unauthenticated
+		// connection is a pass-through), and handleConfigSync refuses a push only
+		// on the RG0 primary — a standby accepts. A posture flag carried in synced
+		// config would therefore be clearable by the very connection it exists to
+		// evict. preserveNodeLocalChassis (pkg/daemon) pins it across every
+		// peer-sync apply. Set it per node, on each node.
+		"strict-session-auth": {desc: "Evict a session-sync connection that has not authenticated (node-local; set once both nodes are keyed and on a #6628-capable build)", children: nil},
 		// #4107: shared PSK authenticating the cluster control channel.
 		// When set on BOTH nodes, cluster heartbeat/election messages are
 		// signed with HMAC-SHA256 and a forged/unauthenticated heartbeat
