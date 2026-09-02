@@ -316,14 +316,18 @@ func (m *Manager) Compile(cfg *config.Config) (*dataplane.CompileResult, error) 
 // shim_ingress_test_precedes_the_l3_parse_8279, so the sentence above is now
 // true of every arm.
 //
-// What is still NOT covered by it, stated so the next reader does not
-// over-read it a second time: the ctrl-DISABLED path
-// (degraded_ctrl_disabled_action) never consults the ingress map at all, by
-// design — a disabled ctrl must fail closed on every attached interface. On a
-// raw-L3 netdev its local/control exemption is evaluated against a misparsed
-// header, so what it exempts there is not trustworthy. That residual is an
-// interface-ADMISSION question (a raw-L3 netdev should not be carrying this
-// shim at all) rather than an ordering one, and it is tracked on #8279.
+// The ordering fix alone did NOT cover the ctrl-DISABLED path
+// (degraded_ctrl_disabled_action), which never consults the ingress map at all
+// by design — a disabled ctrl must fail closed on every attached interface — so
+// on a raw-L3 netdev its local/control exemption was evaluated against the
+// misparse, which is fail-OPEN. Nor did it cover a raw-L3 netdev that IS in the
+// ingress set. Both are closed at the source instead: compileZones now refuses
+// to put a netdev into pendingXDP unless its link-layer type is Ethernet
+// (netdevCarriesEthernetFraming, pkg/dataplane/netdev_framing_8279.go), so the
+// shim is never attached to one and neither path can be reached. The refusal is
+// recorded as an UnarmedSurface with StillForwarding set — the netdev is UP,
+// zoned and unadjudicated, and that gap is reported rather than traded away
+// silently.
 //
 // The ATTACH half stays before the publish deliberately: the helper cannot bind
 // an AF_XDP socket to an interface with no shim, so staging it later is not

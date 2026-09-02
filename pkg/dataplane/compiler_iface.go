@@ -979,6 +979,27 @@ func (st *zoneMapState) mapZoneInterface(dp DataPlane, cfg *config.Config, resul
 			// XDP-less netdev is the policy-free-router state.
 			result.recordUnarmedSurface(
 				disabledSurfaceRecord(physName, physIface.Index, nlErr, downErr))
+		} else if encap, known := netdevFramingKnown(nl, nlErr); known && !netdevCarriesEthernetFraming(encap) {
+			// #8279: the shim parses a 14-byte Ethernet header unconditionally.
+			// On a netdev that carries no such header its bytes [12..14] are
+			// not an ethertype but the first two octets of the IP SOURCE
+			// address, so an inner source in 8.0.0.0/16 makes it parse an IPv4
+			// header 14 bytes into the real one. Refusing the ATTACH — rather
+			// than only re-ordering inside the shim — is what also covers the
+			// ctrl-DISABLED path, which never consults the ingress set by
+			// design and would otherwise evaluate its local/control exemption
+			// against that misparse.
+			//
+			// Recorded as an unarmed surface, not skipped silently: an UP,
+			// zoned netdev with no XDP is exactly the state #5275's arm-
+			// coverage proof exists to report, and this is a real adjudication
+			// gap for a tunnel (tracked as #8274 / #8276) rather than a
+			// no-op — it is simply a better gap than adjudicating on a
+			// misparsed header.
+			slog.Info("skipping XDP/TC attachment for non-Ethernet netdev",
+				"name", physName, "ifindex", physIface.Index, "encap", encap)
+			result.recordUnarmedSurface(
+				nonEthernetSurfaceRecord(physName, physIface.Index, encap))
 		} else {
 			// Defer actual XDP/TC attachment to after all compile phases
 			// so link.Update() switches to programs with fully-populated maps.

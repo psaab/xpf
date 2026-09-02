@@ -1070,14 +1070,39 @@ still-disabled ctrl drops its transit.
 > `cpumap_or_pass` would send them to a remote CPU that does not drive the
 > local L2 state machine.
 >
-> **Residual, not covered by the ordering fix.** The ctrl-DISABLED path
-> (`degraded_ctrl_disabled_action`) never consults the ingress map at all,
-> by design — a disabled ctrl must fail closed on every attached
-> interface. On a raw-L3 netdev its local/control exemption is evaluated
-> against a misparsed header, so what it exempts there is not trustworthy.
-> That is an interface-ADMISSION question — a raw-L3 netdev should not be
-> carrying this shim at all — and nothing checks a netdev's link type
-> before admitting it. Tracked on #8279. Nothing in the window between the
+> **The admission half, fixed in the same change.** The ordering fix alone
+> leaves two things: a raw-L3 netdev that IS in the ingress set (the base
+> row of a canonically spelled WireGuard tunnel is not excluded) still has
+> the misparse fed into adjudication, and the ctrl-DISABLED path
+> (`degraded_ctrl_disabled_action`) never consults the ingress map at all
+> — by design, since a disabled ctrl must fail closed on every attached
+> interface — so its local/control exemption is evaluated against the
+> misparsed header, which is fail-OPEN.
+>
+> Both close at the source: `compileZones` now refuses to put a netdev
+> into `pendingXDP` unless its link-layer type is Ethernet
+> (`netdevCarriesEthernetFraming`, `netdev_framing_8279.go`). If the shim
+> is never attached, neither the misparse nor the degraded-path exemption
+> can happen.
+>
+> The predicate keys on `netlink.LinkAttrs.EncapType`, **not** on the link
+> kind, and that distinction was measured rather than assumed — a TUN and
+> a TAP are both `Type() == "tuntap"` and differ only in the encap type
+> (`"none"` vs `"ether"`), so a kind-keyed predicate would have refused
+> the TAP too. It is a POSITIVE requirement: an unrecognised encap type,
+> and an unresolvable link, are both refused, because "I do not know the
+> framing" is not a licence to attach an Ethernet parser.
+>
+> **What this trades, stated plainly.** A refused netdev is UP, zoned and
+> now carries no XDP, so with `ip_forward=1` its traffic goes into the
+> Linux stack unadjudicated — the #5275 policy-free-router state. That is
+> a real gap and it is recorded as an `UnarmedSurface` with
+> `StillForwarding` set, so the arm-coverage proof reports it rather than
+> trading it away silently. It is deliberately preferred over the
+> alternative, which is adjudicating a header the attacker shifted: a gap
+> the operator can see beats a policy verdict computed on a 5-tuple the
+> attacker chose. Closing the gap itself is #8274 (WireGuard) and #8276
+> (IPsec). Nothing in the window between the
 old detach site and the publish reads the attachment set —
 `entryProgramsLocked` (`maps_sync.go`) is the only other `XDPLinks()`
 reader and it is status reporting — so moving the detach costs no
