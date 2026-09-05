@@ -527,7 +527,16 @@ var schemaSecurity = &schemaNode{desc: "Security configuration", children: map[s
 			}},
 		}},
 		"destination": {desc: "Destination NAT configuration", children: map[string]*schemaNode{
-			"pool": {desc: "Destination NAT pool name", args: 1, valueHint: ValueHintPoolName, placeholder: "<pool-name>", children: nil},
+			// #8800: same defect as the SOURCE pool above, at the sibling path.
+			// compileNATDestination reads `address` (parseDNATPoolAddress, which
+			// deliberately walks every token so `address <ip> port <N>` captures
+			// both), but the schema declared `children: nil`, so the head was not
+			// a schema child, the brace-elision pass was never asked about it, and
+			// `destination pool <p> address <a>;` compiled to an EMPTY address.
+			// multi: true because the grammar puts the port on the same statement.
+			"pool": {desc: "Destination NAT pool name", args: 1, valueHint: ValueHintPoolName, placeholder: "<pool-name>", children: map[string]*schemaNode{
+				"address": {desc: "Translated address (optionally with `port <n>`) for the destination NAT pool", args: 1, multi: true, placeholder: "<address>", children: nil},
+			}},
 			"rule-set": {desc: "Destination NAT rule-set name", args: 1, placeholder: "<rule-set-name>", children: map[string]*schemaNode{
 				// #3096: `from` scope by zone | interface | routing-instance.
 				// #3444: a destination-NAT rule-set has only a `from` clause —

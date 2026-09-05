@@ -159,6 +159,72 @@ func TestSourceNATPoolPackedAddress8800(t *testing.T) {
 	})
 }
 
+// The SAME defect at the sibling path. compileNATDestination reads `address`
+// under a destination NAT pool (parseDNATPoolAddress, which deliberately walks
+// every token so `address <ip> port <n>` captures both), and that pool declared
+// `children: nil`, so the packed spelling compiled to an EMPTY address exactly
+// as the source pool did.
+//
+// This is here because fixing only the source pool would have been the partial
+// fix that reads as complete: the scope entry ("pool","address") is pair-keyed
+// and so ALREADY covered this path, which meant the missing half was invisible
+// from the source side. Found by asking what other container the same compiler
+// arm shape appears in, not by a test failing.
+func TestDestinationNATPoolPackedAddress8800(t *testing.T) {
+	const zones = "security { zones { security-zone z1 { host-inbound-traffic { system-services ping; } } " +
+		"security-zone z2 { host-inbound-traffic { system-services ping; } } } "
+	mk := func(pool string) string {
+		return zones + "nat { destination { " + pool +
+			" rule-set rs1 { from zone z1; rule r1 { match { destination-address 10.0.0.0/8; } " +
+			"then { destination-nat { pool p1; } } } } } } }"
+	}
+	get := func(t *testing.T, txt string) (addr string, port int, strictRejects bool) {
+		t.Helper()
+		tr, perrs := NewParser(txt).Parse()
+		if len(perrs) > 0 {
+			t.Fatalf("parse: %v", perrs)
+		}
+		cfg, err := compileConfigWithOpts(tr, lenientCompileOpts())
+		if err != nil {
+			t.Fatalf("lenient compile: %v", err)
+		}
+		if cfg.Security.NAT.Destination != nil {
+			for _, p := range cfg.Security.NAT.Destination.Pools {
+				if p.Name == "p1" {
+					addr, port = p.Address, p.Port
+				}
+			}
+		}
+		tr2, _ := NewParser(txt).Parse()
+		_, serr := compileConfigWithOpts(tr2, compileOpts{})
+		return addr, port, serr != nil
+	}
+	for _, tc := range []struct{ name, packed, braced string }{
+		{"address", "pool p1 address 10.0.0.5/32;", "pool p1 { address 10.0.0.5/32; }"},
+		{"address-port", "pool p1 address 10.0.0.5/32 port 8080;", "pool p1 { address 10.0.0.5/32 port 8080; }"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pa, pp, pr := get(t, mk(tc.packed))
+			ba, bp, br := get(t, mk(tc.braced))
+			if pa != ba || pp != bp || pr != br {
+				t.Errorf("packed and braced DIFFER for a destination NAT pool address (#8800)\n"+
+					"  packed %q -> addr=%q port=%d strictRejects=%v\n"+
+					"  braced %q -> addr=%q port=%d strictRejects=%v\n"+
+					"MEASURED, NOT DIAGNOSED. The #8800 cause at this path was a "+
+					"MISSING SCHEMA DECLARATION (`address` was not a child of the "+
+					"destination `pool`), not the fold and not the scope entry -- "+
+					"the pair (\"pool\",\"address\") is shared with the source pool "+
+					"and was already admitted, so a scope check will look correct "+
+					"while this path is broken.",
+					tc.packed, pa, pp, pr, tc.braced, ba, bp, br)
+			}
+			if pa == "" {
+				t.Errorf("packed %q compiled to an EMPTY destination pool address", tc.packed)
+			}
+		})
+	}
+}
+
 func contains8800(xs []string, want string) bool {
 	for _, x := range xs {
 		if x == want {
