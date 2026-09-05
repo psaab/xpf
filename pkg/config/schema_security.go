@@ -405,7 +405,19 @@ var schemaSecurity = &schemaNode{desc: "Security configuration", children: map[s
 				// offered it and (b) it was not a schema child, so the brace-elision
 				// pass was never even ASKED about (pool, address) and the packed
 				// spelling `pool p1 address <a>;` compiled to a ZERO-address pool.
-				"address": {desc: "Address or range in the source NAT pool", args: 1, multi: true, placeholder: "<address>", children: nil},
+				//
+				// multi is deliberately NOT set. It is not needed -- SchemaValidate
+				// accepts the single, `<low> to <high>` range and bracket-list
+				// spellings identically with and without it, in the hierarchical and
+				// flat-set shapes, and the compiler reads Keys[1:] regardless. Setting
+				// it would make the leaf leaf-list-ELIGIBLE (isLeafListSchema requires
+				// multi), silently flipping apply-groups from OVERRIDE to token UNION
+				// for a spelling that already worked. On the destination pool, whose
+				// grammar puts the port on the same statement, that union corrupted
+				// the value outright: inheriting `address 10.0.0.2/32 port 8080;` over
+				// an inline `address 10.0.0.1/32 port 80;` compiled the ADDRESS as
+				// "8080". Measured, not assumed.
+				"address": {desc: "Address or range in the source NAT pool", args: 1, placeholder: "<address>", children: nil},
 				"port": {desc: "Source pool port block configuration", children: map[string]*schemaNode{
 					// #3906: `range <low> to <high>` (Junos) and the legacy
 					// `range low <lo> high <hi>` both collapse onto this multi
@@ -535,7 +547,7 @@ var schemaSecurity = &schemaNode{desc: "Security configuration", children: map[s
 			// `destination pool <p> address <a>;` compiled to an EMPTY address.
 			// multi: true because the grammar puts the port on the same statement.
 			"pool": {desc: "Destination NAT pool name", args: 1, valueHint: ValueHintPoolName, placeholder: "<pool-name>", children: map[string]*schemaNode{
-				"address": {desc: "Translated address (optionally with `port <n>`) for the destination NAT pool", args: 1, multi: true, placeholder: "<address>", children: nil},
+				"address": {desc: "Translated address (optionally with `port <n>`) for the destination NAT pool", args: 1, placeholder: "<address>", children: nil},
 			}},
 			"rule-set": {desc: "Destination NAT rule-set name", args: 1, placeholder: "<rule-set-name>", children: map[string]*schemaNode{
 				// #3096: `from` scope by zone | interface | routing-instance.
