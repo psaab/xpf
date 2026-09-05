@@ -406,18 +406,24 @@ var schemaSecurity = &schemaNode{desc: "Security configuration", children: map[s
 				// pass was never even ASKED about (pool, address) and the packed
 				// spelling `pool p1 address <a>;` compiled to a ZERO-address pool.
 				//
-				// multi is deliberately NOT set. It is not needed -- SchemaValidate
-				// accepts the single, `<low> to <high>` range and bracket-list
-				// spellings identically with and without it, in the hierarchical and
-				// flat-set shapes, and the compiler reads Keys[1:] regardless. Setting
-				// it would make the leaf leaf-list-ELIGIBLE (isLeafListSchema requires
-				// multi), silently flipping apply-groups from OVERRIDE to token UNION
-				// for a spelling that already worked. On the destination pool, whose
-				// grammar puts the port on the same statement, that union corrupted
-				// the value outright: inheriting `address 10.0.0.2/32 port 8080;` over
-				// an inline `address 10.0.0.1/32 port 80;` compiled the ADDRESS as
-				// "8080". Measured, not assumed.
-				"address": {desc: "Address or range in the source NAT pool", args: 1, placeholder: "<address>", children: nil},
+				// multi is REQUIRED: per docs/config-schema.md a multi leaf absorbs
+				// trailing non-sibling tokens onto its node key in the FLAT-SET
+				// shape, which is how `set ... address <low> to <high>` and the
+				// bracket-list form reach the compiler as ONE leaf. Dropping it
+				// still passes SchemaValidate -- validation is not the property it
+				// governs -- while silently changing the COMPILED result, and it
+				// reds 19 existing NAT cells (#4521, #4422, #5144, #6812 and the
+				// deterministic-NAT flat-set family).
+				//
+				// groupReplace is required WITH it, and this is the textbook case
+				// for that flag: a multi leaf that packs a SEPARATOR onto its value
+				// list is not a set, so apply-groups token-level UNION corrupts it.
+				// This leaf packs `to` for a source range and `port` for the
+				// destination grammar. Measured without the flag: inheriting
+				// `address 10.0.0.2/32 port 8080;` over an inline
+				// `address 10.0.0.1/32 port 80;` compiled the ADDRESS as "8080".
+				// With it the leaf reverts to the pre-#8800 OVERRIDE: inline wins.
+				"address": {desc: "Address or range in the source NAT pool", args: 1, multi: true, groupReplace: true, placeholder: "<address>", children: nil},
 				"port": {desc: "Source pool port block configuration", children: map[string]*schemaNode{
 					// #3906: `range <low> to <high>` (Junos) and the legacy
 					// `range low <lo> high <hi>` both collapse onto this multi
@@ -547,7 +553,7 @@ var schemaSecurity = &schemaNode{desc: "Security configuration", children: map[s
 			// `destination pool <p> address <a>;` compiled to an EMPTY address.
 			// multi: true because the grammar puts the port on the same statement.
 			"pool": {desc: "Destination NAT pool name", args: 1, valueHint: ValueHintPoolName, placeholder: "<pool-name>", children: map[string]*schemaNode{
-				"address": {desc: "Translated address (optionally with `port <n>`) for the destination NAT pool", args: 1, placeholder: "<address>", children: nil},
+				"address": {desc: "Translated address (optionally with `port <n>`) for the destination NAT pool", args: 1, multi: true, groupReplace: true, placeholder: "<address>", children: nil},
 			}},
 			"rule-set": {desc: "Destination NAT rule-set name", args: 1, placeholder: "<rule-set-name>", children: map[string]*schemaNode{
 				// #3096: `from` scope by zone | interface | routing-instance.
