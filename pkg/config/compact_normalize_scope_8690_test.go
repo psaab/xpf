@@ -2,6 +2,8 @@ package config
 
 import (
 	"fmt"
+	"os"
+	"regexp"
 	"sort"
 	"strings"
 	"testing"
@@ -348,28 +350,41 @@ func TestCompactNormalizeScopePreservesCompiledResult8690(t *testing.T) {
 			"stanza's own validator. Not a defect list; see the note above "+
 			"before treating a change in this number as one.", n)
 	}
-	// How much of the bucket is actually MEASURED. It reached zero unmeasured
-	// entries once; anything above zero is a widening that added an
-	// undecidable site without following the instruction in the message below.
-	// Reported rather than failed, because whether an unmeasured entry may land
-	// at all is a policy call across lanes rather than this cell's to make --
-	// but it is reported, because "recorded" and "measured" were previously
-	// indistinguishable here and that is what let a real disarm sit unnoticed.
-	if unmeasured := 0; true {
-		for _, v := range knownFixtureLimited8690 {
-			if v == notHandMeasured8690 {
-				unmeasured++
-			}
+	// EVERY BUCKET ENTRY MUST CARRY A HAND-MEASURED VERDICT. This is a hard
+	// failure, and it is enforceable only because the backlog was driven to
+	// zero first -- with entries outstanding it would have had to grandfather
+	// them and would have been born weak.
+	//
+	// The reason it is not a reported count: a count starts at zero and grows
+	// one entry at a time, each addition individually defensible, and the whole
+	// history of this bucket is that visible-but-unmeasured reads as clean. A
+	// category that only accumulates stops being a measurement and becomes a
+	// registration. lane-8015 measured three entries here by hand and one was a
+	// would-be gate disarm that no other guard in the tree would have caught.
+	//
+	// The escape hatch is not a threshold, it is a person: write the site out
+	// with a type-valid value and the siblings its validator needs, and record
+	// what you found. That is the same shape as `benign` -- adding an entry is
+	// recording a verdict, never a number going up.
+	var unmeasured []string
+	for site, verdict := range knownFixtureLimited8690 {
+		if verdict == notHandMeasured8690 {
+			unmeasured = append(unmeasured, site)
 		}
-		if unmeasured > 0 {
-			t.Logf("#8690: %d of %d entries in the gate-status-unknown bucket have "+
-				"NOT been hand-measured. This bucket held a real disarm before it "+
-				"was measured out; an entry here is a question, not a verdict.",
-				unmeasured, len(knownFixtureLimited8690))
-		} else {
-			t.Logf("#8690: all %d entries in the gate-status-unknown bucket carry a "+
-				"hand-measured verdict.", len(knownFixtureLimited8690))
-		}
+	}
+	sort.Strings(unmeasured)
+	if len(unmeasured) > 0 {
+		t.Errorf("%d of %d entries in the gate-status-unknown bucket have NO "+
+			"hand-measured verdict: %v.\n"+
+			"An entry here is a QUESTION, not a finding: the census fixture could "+
+			"not decide whether the pass disarms a gate at that site, and arm 2 "+
+			"passing is the absence of evidence rather than evidence. Write the "+
+			"site out with a type-valid value and the siblings its validator "+
+			"needs, compare strict compiles with the pass disabled and enabled, "+
+			"and record what you found. If it is still undecidable, say so and "+
+			"say why -- but check the FIXTURE first, because one that is wrong in "+
+			"a new way reports the same word as a site that genuinely cannot be "+
+			"decided (#8690).", len(unmeasured), len(knownFixtureLimited8690), unmeasured)
 	}
 	if len(fixtureLimited) > 0 {
 		t.Logf("#8690: %d admitted site(s) could not have their gate status "+
@@ -1069,3 +1084,194 @@ const policyMatchNoDisarm8690 = "HAND-MEASURED: NOT A DISARM, and it cannot " +
 	"nonetheless demonstrably working, visible in the error shrinking: without " +
 	"it the gate reports three missing criteria, with it two. The surviving " +
 	"criterion is the one that was folded."
+
+// #8690: the normalizer preserves the folded tail, witnessed by a gate that was
+// not built to witness anything.
+//
+// Most evidence for this pass is an equality: elided-with-pass compiles to what
+// braced compiles to. That is sound, but both sides are produced by the same
+// compiler and an equality can hold because two things are equally wrong.
+//
+// The #3044 policy gate gives an independent reading. It requires all three of
+// source-address, destination-address and application, and NAMES THE ONES IT
+// CANNOT FIND. The compact spelling can carry exactly one criterion, so the
+// policy is refused either way — but the refusal COUNTS:
+//
+//	`policies global policy p1 match source-address any;`
+//	  pass DISABLED -> missing "source-address", "destination-address", "application"
+//	  pass ENABLED  -> missing "destination-address", "application"
+//
+// The criterion that stops being missing is the one that was folded. That is a
+// direct observation of the tail surviving, from an instrument with no stake in
+// the question and no knowledge that it is being used as one — which is a
+// different kind of evidence from an assertion this lane wrote about its own
+// pass.
+//
+// It also holds on sites that can NEVER be disarms, since neither spelling is
+// ever accepted, so the reading is not entangled with the acceptance flip.
+func TestTheGateCountsTheSurvivingCriterion8690(t *testing.T) {
+	const elided = `security {
+  zones { security-zone trust { host-inbound-traffic { system-services ping; } } }
+  policies { global { policy p1 { match source-address any; then { permit; } } } }
+}`
+	compile := func(skipPass bool) string {
+		tree, perrs := NewParser(elided).Parse()
+		if len(perrs) > 0 {
+			t.Fatalf("parse: %v", perrs)
+		}
+		_, err := compileConfigWithOpts(tree, compileOpts{skipCompactNormalize: skipPass})
+		if err == nil {
+			return ""
+		}
+		return err.Error()
+	}
+	without, with := compile(true), compile(false)
+	if without == "" || with == "" {
+		t.Fatalf("both spellings must be REJECTED for this reading to mean "+
+			"anything — the evidence is which criteria the gate names, not "+
+			"whether it fires (without=%q with=%q)", without, with)
+	}
+
+	// The folded criterion must be named as missing WITHOUT the pass and not
+	// named WITH it. Asserted as a difference between the two readings rather
+	// than against literal error text, so a reworded #3044 message does not
+	// red this for the wrong reason.
+	const folded = `"source-address"`
+	if !strings.Contains(without, folded) {
+		t.Errorf("with the pass DISABLED the gate does not report %s as missing, "+
+			"so the fixture is not exercising the drop this cell is built on. "+
+			"Either the elided spelling stopped dropping the criterion or #3044 "+
+			"stopped naming it: %s", folded, without)
+	}
+	if strings.Contains(with, folded) {
+		t.Errorf("with the pass ENABLED the gate STILL reports %s as missing, so "+
+			"the folded criterion did not survive normalization. The pass is not "+
+			"preserving the tail at this site (#8690): %s", folded, with)
+	}
+	if without == with {
+		t.Error("the gate reports the SAME missing criteria with and without the " +
+			"pass, so this cell is observing nothing. It reads the DIFFERENCE " +
+			"between the two, and an identical pair means either the seam stopped " +
+			"working or the site left the normalizer's scope (#8690)")
+	}
+}
+
+// #8690: no (container, head) pair may be admitted by more than one family
+// switch, and this is a SAFETY property rather than tidiness.
+//
+// compactNormalizeInScope is a series of per-family `switch containerKeyword +
+// " " + head` blocks. Nothing stops two families listing the same pair, and 52
+// currently do.
+//
+// THE COMPILER ALREADY COVERS THE EASY HALF, which is why this cell is scoped
+// the way it is: a duplicate case WITHIN one switch is a build error ("duplicate
+// case ... in expression switch"). Only the cross-switch case is invisible, and
+// that is exactly the case that arises here, because each family was added as
+// its own switch by a different lane. So this cell is not re-checking something
+// the toolchain does; it covers the half the toolchain cannot see. Each duplicate is harmless while the answer is "admit" — but
+// the moment somebody needs to REMOVE a pair, because a measurement showed it
+// disarms a gate or truncates a read tail, they delete it from the family they
+// are working in and the OTHER switch still returns true. The exclusion looks
+// applied, the diff looks right, and the site is still normalized.
+//
+// That is not hypothetical: a mutation that deleted `"match source-address"`
+// from one switch left the pass admitting it from the other, and the mutation
+// read as a clean escape rather than as an incomplete edit.
+//
+// The existing 52 are PINNED rather than red, because they were introduced
+// across several lanes' landed families and redding them would block work for a
+// hazard this assertion exists to stop growing. A new duplicate reds; a
+// resolved one also reds, so the list shrinks as families are tidied and cannot
+// outlive its reason.
+func TestNoPairIsAdmittedByTwoFamilySwitches8690(t *testing.T) {
+	src, err := os.ReadFile("compact_normalize_8662.go")
+	if err != nil {
+		t.Fatalf("read predicate source: %v", err)
+	}
+	caseLine := regexp.MustCompile(`(?m)^\t\t"([a-z][^"]*)",?$`)
+	counts := map[string]int{}
+	for _, m := range caseLine.FindAllStringSubmatch(string(src), -1) {
+		counts[m[1]]++
+	}
+	if len(counts) == 0 {
+		t.Fatal("no case strings found in compact_normalize_8662.go — this cell " +
+			"scans source text, so a formatting change can make it silently " +
+			"measure nothing (#8690)")
+	}
+	var dup []string
+	for pair, n := range counts {
+		if n > 1 {
+			dup = append(dup, pair)
+		}
+	}
+	sort.Strings(dup)
+	if diff := diffSiteSets8690(dup, knownDuplicatePairs8690); diff != "" {
+		t.Errorf("the set of (container, head) pairs listed by MORE THAN ONE "+
+			"family switch has changed:\n%s\n"+
+			"A NEW entry means two families now admit the same pair, and removing "+
+			"it from one will not remove it from the scope — an exclusion that "+
+			"silently does not exclude. A REMOVED entry means one was tidied and "+
+			"this list should shrink with it. Prefer resolving the duplicate to "+
+			"adding it here (#8690).", diff)
+	}
+	t.Logf("#8690: %d distinct pairs across the family switches, %d of them listed twice",
+		len(counts), len(dup))
+}
+
+// knownDuplicatePairs8690 are the pairs currently listed by two family
+// switches. Each is a latent silent-non-exclusion; see the cell above. They are
+// pinned, not endorsed.
+var knownDuplicatePairs8690 = []string{
+	"address-set address",
+	"address-set address-set",
+	"daily start-time",
+	"daily stop-time",
+	"friday start-time",
+	"friday stop-time",
+	"group authentication-key",
+	"group interface",
+	"host-inbound-traffic protocols",
+	"host-inbound-traffic system-services",
+	"interface authentication-key",
+	"interface authentication-type",
+	"isis authentication-key",
+	"isis authentication-type",
+	"manual authentication-algorithm",
+	"match application",
+	"match destination-address",
+	"match destination-address-name",
+	"match destination-port",
+	"match from-zone",
+	"match protocol",
+	"match source-address",
+	"match source-address-name",
+	"match to-zone",
+	"monday start-time",
+	"monday stop-time",
+	"neighbor authentication-key",
+	"policies default-policy-log",
+	"policy description",
+	"proposal authentication-algorithm",
+	"proposal authentication-method",
+	"rip authentication-key",
+	"rip authentication-type",
+	"saturday start-time",
+	"saturday stop-time",
+	"schedulers scheduler",
+	"scheduler start-time",
+	"scheduler stop-time",
+	"security-zone description",
+	"security-zone interfaces",
+	"security-zone screen",
+	"sunday start-time",
+	"sunday stop-time",
+	"system domain-name",
+	"then log",
+	"thursday start-time",
+	"thursday stop-time",
+	"tuesday start-time",
+	"tuesday stop-time",
+	"vpn pre-shared-key",
+	"wednesday start-time",
+	"wednesday stop-time",
+}
