@@ -115,14 +115,56 @@ func decodePersistentNatLeasePayload(buf []byte) ([]userspace.IdleLeaseWire, boo
 	}
 	count := int(binary.LittleEndian.Uint32(buf))
 	off := 4
+	// #8792: SIZE THE ALLOCATION FROM THE BUFFER, NOT FROM THE WIRE.
+	//
+	// `count` is untrusted on-wire data and the make() below sizes its
+	// preallocation from it, so the loop's bounds check — one line further down
+	// — fires only AFTER the allocation it was meant to protect. A four-byte
+	// frame of `ff ff ff ff` asks for 2^32-1 records of 112 bytes each, roughly
+	// 448 GiB, before a single length prefix has been read.
+	//
+	// Every record costs at least its own 4-byte length prefix, so the body
+	// after the count can hold at most (len(buf)-4)/4 of them. A count above
+	// that cannot describe THIS frame under any encoding, so it is refused
+	// rather than clamped: a full-set push REPLACES the peer set, and this
+	// decoder's bool means "decoded COMPLETELY". Installing whatever fit would
+	// delete every lease past the point the sender's count went wrong.
+	//
+	// The DHCP sibling in sync_protocol.go CLAMPS and continues on the same
+	// input, and that divergence is deliberate: #7175 fixed it under a contract
+	// that separates a wrong COUNT from lost DATA, and
+	// TestDHCPFullSetStillToleratesAnOverDeclaredCount7175 pins the tolerance.
+	// This decoder has no such separation to make.
+	//
+	// What this is NOT: a claim about crashing. Whether the oversized make()
+	// is fatal depends on the host — 112 * (2^32-1) stays under the runtime's
+	// maxAlloc, so no makeslice panic is inherent, and under
+	// overcommit_memory=1 the mapping can succeed unbacked and the process
+	// survives to discard the frame. The invariant repaired here holds in every
+	// environment: a count the body cannot physically hold is rejected BEFORE
+	// the allocation. Note also that the receive loop's defer only disconnects;
+	// it is not a recovery boundary, so wrapping the decoder in recover() would
+	// not be a fix where the allocation IS fatal — a Go runtime OOM is a fatal
+	// error, not a panic.
+	if maxRecords := (len(buf) - 4) / 4; count < 0 || count > maxRecords {
+		return nil, false
+	}
 	out := make([]userspace.IdleLeaseWire, 0, count)
 	for i := 0; i < count; i++ {
-		if off+4 > len(buf) {
+		// Checked SUBTRACTION rather than `off+4 > len(buf)`. NOT LOAD-BEARING,
+		// and said so rather than left to look like part of the fix: with the
+		// count now bounded above, `off` and `n` are both bounded and the
+		// additive form cannot overflow on any reachable input — mutating this
+		// back to `off+n > len(buf)` does NOT red the #8792 cell. It is kept as
+		// shape hygiene, because the additive form is what overflows when one
+		// operand comes off the wire, and a future change that loosens the
+		// bound above would silently re-arm it.
+		if len(buf)-off < 4 {
 			return out, false
 		}
 		n := int(binary.LittleEndian.Uint32(buf[off:]))
 		off += 4
-		if off+n > len(buf) {
+		if n < 0 || n > len(buf)-off {
 			return out, false
 		}
 		rec, ok := decodeOnePersistentNatLease(buf[off : off+n])

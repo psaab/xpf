@@ -54,7 +54,7 @@ func validateNonEmptySecurityIdentities(nodes []*Node, lenient bool) ([]string, 
 	// `security {}` followed by a second carrying the empty identity.
 	return warnings, forEachChild(nodes, "security", func(sec *Node) error {
 		if err := forEachChild(sec.Children, "zones", func(zones *Node) error {
-			for _, z := range namedInstances(zones.FindChildren("security-zone")) {
+			for _, z := range zoneGroupInstances8794(zones.FindChildren("security-zone")) {
 				if z.name != "" {
 					continue
 				}

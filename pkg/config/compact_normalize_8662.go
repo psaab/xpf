@@ -536,6 +536,57 @@ func compactNormalizeInScope(containerKeyword, head string) bool {
 		return true
 	}
 
+	// #8755: the interface-unit family, completed.
+	//
+	// The two symptoms #8755 names -- a lost ADDRESS and a lost FILTER binding
+	// -- look like one defect and are two, and that was measured rather than
+	// assumed. They need DIFFERENT NUMBERS OF CHAIN LINKS:
+	//
+	//	family inet address 10.0.0.1/24;   ONE link.  (inet, address) was not
+	//	                                   admitted, so the pass folded NOTHING
+	//	                                   -- the whole statement stayed one node
+	//	                                   and the address never reached a reader.
+	//
+	//	family inet filter input f1;       TWO links. (inet, filter) WAS already
+	//	                                   admitted, so the pass folded once, to
+	//	                                   `family inet` + `filter input f1` --
+	//	                                   and then stopped, because
+	//	                                   (filter, input) was not admitted. The
+	//	                                   binding was still lost.
+	//
+	// The filter half is the more instructive one: a scope entry existed, it
+	// fired, and it accomplished nothing on its own, because ADMISSION IS A
+	// CHAIN and only the first link was in. An admitted pair that delivers
+	// nothing reads as coverage, which is why #8763 recorded it as
+	// `chain-incomplete` rather than leaving it to be rediscovered.
+	//
+	// PAIR REACH CHECKED AGAINST THE SCHEMA, not the inventory. Both heads
+	// exist under other containers, and the pair is what keeps them out:
+	//
+	//	filter   is also `firewall family inet filter <name>` -- args:1, children
+	//	         {term, interface-specific}. It has NO `input`/`output` child, so
+	//	         (filter, input) cannot reach it. Exactly two paths each, both the
+	//	         interface unit.
+	//	inet     is also under firewall, forwarding-options, protocols bgp and
+	//	         rib-group. None of them has an `address` child. (inet, address)
+	//	         reaches exactly ONE path.
+	//
+	// A head-only rule would have been wrong for both.
+	//
+	// Measured with the statement REMOVED as well as braced and packed, so
+	// "the two spellings agree" cannot pass a value neither of them delivers:
+	//
+	//	                         baseline   braced      packed OFF   packed ON
+	//	family inet address      addrs=[]   [10.0.0.1/24]  []         [10.0.0.1/24]
+	//	family inet filter input ""         "f1"           ""         "f1"
+	switch containerKeyword + " " + head {
+	case "inet address",
+		"inet6 address",
+		"filter input",
+		"filter output":
+		return true
+	}
+
 	// #8690 family 5: applications, services, snmp, event-options. 30 sites,
 	// every one drop shape "empty" in the inventory.
 	//

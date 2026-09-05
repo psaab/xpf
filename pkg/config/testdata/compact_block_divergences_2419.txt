@@ -207,12 +207,12 @@
 # seventh, `security nat source interface port-overloading`, declares one
 # example and a validator whose message does not enumerate.
 #
-# checked: 770
+# checked: 776
 #
 # skipped (leaf value not observable in the typed config): 167
 # skipped (a spelling did not parse or compile): 29
 # skipped (no two distinct synthesizable values): 7
-# skipped (under groups (schema re-host, duplicate coverage)): 806
+# skipped (under groups (schema re-host, duplicate coverage)): 808
 #
 bridge-domains xpfname domain-type	partial
 bridge-domains xpfname routing-interface	partial
@@ -224,16 +224,12 @@ interfaces xpfname native-vlan-id	partial
 interfaces xpfname speed	partial
 interfaces xpfname tunnel routing-instance destination	partial
 interfaces xpfname unit	partial
-interfaces xpfname unit xpfarg family inet address	empty
 interfaces xpfname unit xpfarg family inet address xpfarg vrrp-group	empty
 interfaces xpfname unit xpfarg family inet dhcp lease-time	empty
 interfaces xpfname unit xpfarg family inet dhcp retransmission-attempt	empty
 interfaces xpfname unit xpfarg family inet dhcp retransmission-interval	empty
-interfaces xpfname unit xpfarg family inet filter input	empty
-interfaces xpfname unit xpfarg family inet filter output	empty
 interfaces xpfname unit xpfarg family inet mtu	empty
 interfaces xpfname unit xpfarg family inet unnumbered-address	empty
-interfaces xpfname unit xpfarg family inet6 address	empty
 interfaces xpfname unit xpfarg family inet6 address xpfarg vrrp-group	empty
 interfaces xpfname unit xpfarg family inet6 dhcpv6-client client-ia-type	empty
 interfaces xpfname unit xpfarg family inet6 dhcpv6-client client-type	empty
@@ -241,8 +237,6 @@ interfaces xpfname unit xpfarg family inet6 dhcpv6-client prefix-delegating pref
 interfaces xpfname unit xpfarg family inet6 dhcpv6-client prefix-delegating sub-prefix-length	empty
 interfaces xpfname unit xpfarg family inet6 dhcpv6-client req-option	empty
 interfaces xpfname unit xpfarg family inet6 dhcpv6-client update-router-advertisement interface	empty
-interfaces xpfname unit xpfarg family inet6 filter input	empty
-interfaces xpfname unit xpfarg family inet6 filter output	empty
 interfaces xpfname unit xpfarg family inet6 mtu	empty
 interfaces xpfname unit xpfarg inner-vlan-id	empty
 interfaces xpfname unit xpfarg tunnel routing-instance destination	partial

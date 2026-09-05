@@ -193,7 +193,7 @@ func renderPlaintextUnadjudicatedAdvisory(findings []plaintextTunnelFinding, w p
 func forEachZoneInterfaceMemberAST(nodes []*Node, fn func(zone, member string)) {
 	_ = forEachChild(nodes, "security", func(security *Node) error {
 		return forEachChild(security.Children, "zones", func(zones *Node) error {
-			for _, inst := range namedInstances(zones.FindChildren("security-zone")) {
+			for _, inst := range zoneGroupInstances8794(zones.FindChildren("security-zone")) {
 				if inst.name == "" {
 					continue
 				}

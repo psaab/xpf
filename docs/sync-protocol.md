@@ -46,6 +46,39 @@ All multi-byte integers in the wire format are **little-endian**, matching the n
 | 25   | DHCPLeaseV4      | Primary→Secondary | count+records + 24B seq framing | Full-set v4 lease push (#2239) + (incarnation, seq) ordering trailer (#5706) |
 | 26   | DHCPLeaseV6      | Primary→Secondary | count+records + 24B seq framing | Full-set v6 lease push (#2239) + (incarnation, seq) ordering trailer (#5706) |
 
+## A wire-advertised `count` is untrusted (#7175, #8792)
+
+Every `count+records` payload in the table above begins with a 4-byte record
+count taken straight off the wire. **A decoder must prove that count is no
+greater than what the body can physically hold BEFORE any allocation sized from
+it.** Each record costs at least its own 4-byte length prefix, so the bound is
+`(len(body) - 4) / 4`.
+
+The check has to come first, not merely exist. #8792 was a decoder that had the
+bound inside its loop, one line below a `make()` sized from the raw count — so a
+four-byte frame of `ff ff ff ff` asked for 2^32-1 records before a single length
+prefix had been read. The loop's guard was correct and unreachable.
+
+**The two decoders answer an over-declared count differently, deliberately:**
+
+| decoder | on `count > bound` | why |
+|---|---|---|
+| DHCP full-set (`sync_protocol.go`) | clamp to the bound, mark malformed, keep going | #7175 separates a wrong COUNT from lost DATA; the tolerance is pinned by `TestDHCPFullSetStillToleratesAnOverDeclaredCount7175` |
+| persistent-NAT lease (`sync_persistent_nat_lease_8121.go`) | reject the frame outright | its bool means "decoded COMPLETELY", and a full-set push REPLACES the peer set — installing whatever fit would delete every lease past the point the count went wrong |
+
+**Do not assert a crash when testing this class.** Whether an oversized
+allocation is fatal is a property of the host, not the code: the sizes involved
+stay under the runtime's `maxAlloc`, so no `makeslice` panic is inherent, and
+under `overcommit_memory=1` the mapping can succeed unbacked and the process
+survives to discard the frame. Assert the invariant — rejected before the
+allocation, nothing installed, still serving — which holds in every environment.
+Measuring the ALLOCATION is what distinguishes a real fix from a bound applied
+one line too late: both produce the same return values.
+
+And note the receive loop's `defer` only disconnects; it is not a recovery
+boundary. Wrapping a decoder in `recover()` is not a fix even where the
+allocation *is* fatal, because a Go runtime OOM is a `fatal error`, not a panic.
+
 ## Session V4 Payload Layout (120 bytes)
 
 ```

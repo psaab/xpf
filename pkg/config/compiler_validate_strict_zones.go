@@ -579,7 +579,7 @@ func validateZoneInterfacesNonEmptyStrict(tree *ConfigTree) error {
 			if zonesNode.Name() != "zones" {
 				continue
 			}
-			for _, inst := range namedInstances(zonesNode.FindChildren("security-zone")) {
+			for _, inst := range zoneGroupInstances8794(zonesNode.FindChildren("security-zone")) {
 				for _, prop := range inst.node.Children {
 					if prop.Name() != "interfaces" {
 						continue
@@ -689,7 +689,7 @@ func validateZoneInterfacePackedTailStrict(tree *ConfigTree) error {
 			if zonesNode.Name() != "zones" {
 				continue
 			}
-			for _, inst := range namedInstances(zonesNode.FindChildren("security-zone")) {
+			for _, inst := range zoneGroupInstances8794(zonesNode.FindChildren("security-zone")) {
 				for _, prop := range inst.node.Children {
 					if prop.Name() != "interfaces" {
 						continue

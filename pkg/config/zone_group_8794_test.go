@@ -107,3 +107,55 @@ func TestBracketedZoneGroupCreatesEveryZone8794(t *testing.T) {
 		}
 	})
 }
+
+// TestEveryZoneEnumerationSeesTheGroup8794 pins the property my first #8794 fix
+// broke: every path that enumerates zones must see the SAME zones.
+//
+// The original fix routed compileZones through the group-aware helper and left
+// FIVE other `namedInstances(...FindChildren("security-zone"))` call sites
+// untouched — strict zone validation (x2), collectZoneNamesAST (zone IDs),
+// the empty-security-identity check, and the tunnel plaintext advisory.
+//
+// The result was WORSE THAN THE BUG in one respect. Before, every path
+// consistently saw one zone. After, the compiler saw two and the zone-ID and
+// validation paths saw one, so a zone existed in the compiled config that the
+// ID-collision machinery could not see. A uniform truncation became an internal
+// disagreement.
+//
+// This asserts agreement rather than a count, so it stays meaningful if the
+// group's cardinality changes, and it fails for ANY enumeration path that
+// regresses to namedInstances — not only the ones that existed when it was
+// written.
+func TestEveryZoneEnumerationSeesTheGroup8794(t *testing.T) {
+	const text = screenDef8794 + `zones { security-zone [ trust untrust ] { screen edge; } } }`
+	tr, perrs := NewParser(text).Parse()
+	if len(perrs) > 0 {
+		t.Fatalf("fixture must parse: %v", perrs)
+	}
+	cfg, err := compileConfigWithOpts(tr, compileOpts{})
+	if err != nil {
+		t.Fatalf("strict compile: %v", err)
+	}
+	if len(cfg.Security.Zones) < 2 {
+		t.Fatalf("the compiler itself sees %d zone(s); this cell assumes the group is "+
+			"expanded there and is measuring the OTHER paths (#8794)", len(cfg.Security.Zones))
+	}
+
+	names := map[string]struct{}{}
+	for _, ch := range tr.Children {
+		if ch.Name() == "security" {
+			collectZoneNamesAST(ch, names)
+		}
+	}
+	if len(names) != len(cfg.Security.Zones) {
+		t.Errorf("collectZoneNamesAST sees %d zone(s) but the compiler creates %d. A zone "+
+			"exists in the compiled config that the zone-ID collision machinery cannot "+
+			"see — the paths disagree, which is worse than both truncating (#8794)",
+			len(names), len(cfg.Security.Zones))
+	}
+	for zn := range cfg.Security.Zones {
+		if _, ok := names[zn]; !ok {
+			t.Errorf("zone %q is compiled but absent from collectZoneNamesAST (#8794)", zn)
+		}
+	}
+}

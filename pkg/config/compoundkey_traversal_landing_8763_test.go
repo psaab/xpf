@@ -271,15 +271,29 @@ func famOnlyCases8763() []famOnlyCase8763 {
 		{"output source-address", "", out("    output { source-address 198.51.100.79; }"), out("    output source-address 198.51.100.79;"), out("    "), recover8763},
 		{"output flow-server", "", out("    output {\n     flow-server 203.0.113.79 { }\n    }"), out("    output flow-server 203.0.113.79;"), out("    output { }"), recover8763},
 		{"prefix-limit maximum", "", bgp("      prefix-limit { maximum 51482; }"), bgp("      prefix-limit maximum 51482;"), bgp("      "), recover8763},
-		// THE TWO THAT FOLD AND STILL DELIVER NOTHING. Admission is a CHAIN:
-		// (inet, filter) is the first link and (filter, input) is the second,
-		// and only the first is admitted. The fold fires, the binding is still
-		// lost, and the interface commits with no filter -- the #8755 fail-open,
-		// unchanged by this traversal. Admitting (filter, input) as well makes
-		// folds=2 and the result equal to braced, which is what the remedy is;
-		// it is NOT taken here because that is #8755's decision, not this one.
-		{"inet filter", "", ifUnit("   family inet {\n    filter { input f4probe; }\n   }"), ifUnit("   family inet filter input f4probe;"), ifUnit("   family inet {\n   }"), chainCut8763},
-		{"inet6 filter", "", ifUnit("   family inet6 {\n    filter { input f6probe; }\n   }"), ifUnit("   family inet6 filter input f6probe;"), ifUnit("   family inet6 {\n   }"), chainCut8763},
+		// FORMERLY `chain-incomplete`, NOW A RECOVERY -- and the history is the
+		// point rather than the current value. When this traversal landed,
+		// (inet, filter) was admitted, the fold FIRED, and the interface still
+		// committed with no filter bound, because (filter, input) -- the second
+		// link -- was not admitted. A scope entry that fires and delivers
+		// nothing reads as coverage, which is why it was recorded here instead
+		// of being left to be rediscovered.
+		//
+		// #8755 admitted the missing links, so the chain completes and these are
+		// ordinary recoveries now. If either ever returns to `chain-incomplete`,
+		// a link was removed from the chain and the interface is silently
+		// running with no filter again.
+		{"inet filter", "", ifUnit("   family inet {\n    filter { input f4probe; }\n   }"), ifUnit("   family inet filter input f4probe;"), ifUnit("   family inet {\n   }"), recover8763},
+		{"inet6 filter", "", ifUnit("   family inet6 {\n    filter { input f6probe; }\n   }"), ifUnit("   family inet6 filter input f6probe;"), ifUnit("   family inet6 {\n   }"), recover8763},
+		// #8755: the four links that complete the interface-unit chains. Each is
+		// measured HERE at the compoundKey shape as well as in
+		// interface_unit_chain_8755_test.go, which measures the whole statement;
+		// these rows measure the pair in the same table as its siblings so the
+		// population cell below stays exhaustive.
+		{"filter input", "", ifUnit("   family inet {\n    filter { input f4probe; }\n   }"), ifUnit("   family inet {\n    filter input f4probe;\n   }"), ifUnit("   family inet {\n    filter { }\n   }"), recover8763},
+		{"filter output", "", ifUnit("   family inet {\n    filter { output f4probe; }\n   }"), ifUnit("   family inet {\n    filter output f4probe;\n   }"), ifUnit("   family inet {\n    filter { }\n   }"), recover8763},
+		{"inet address", "", ifUnit("   family inet {\n    address 10.9.9.1/24;\n   }"), ifUnit("   family inet address 10.9.9.1/24;"), ifUnit("   family inet {\n   }"), recover8763},
+		{"inet6 address", "", ifUnit("   family inet6 {\n    address 2001:db8::1/64;\n   }"), ifUnit("   family inet6 address 2001:db8::1/64;"), ifUnit("   family inet6 {\n   }"), recover8763},
 		// Refused in both spellings by a live gate, so nothing the fold does can
 		// change the outcome. These two are also REMOVED from the scope list by
 		// this change -- see the note in compact_normalize_8662.go.
