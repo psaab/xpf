@@ -192,7 +192,11 @@ func classifyGateBlindLeaf(g gateLeaf) gateBlindClass {
 // gate-covered rather than having moved into a blind class. The value below
 // was RE-MEASURED on the merge of the two changes, not obtained by adding one
 // to either side's number.
-const gateCoverageFloor = 702
+//
+// Then 702 -> 703 for the DESTINATION pool half of #8800: the same leaf was
+// undeclared at the sibling path, and declaring it made that spelling
+// COMPARE as well. Blind held at 364 across both steps.
+const gateCoverageFloor = 703
 
 var gateBlindCeiling = map[gateBlindClass]int{
 	// #7492 moved leaves out of `unreachable` in two rounds. The parent

@@ -990,6 +990,38 @@ var knownFixtureLimited8690 = map[string]string{
 	// and a then-block, a global address-book for the `-name` leaves, a policy
 	// with a then-block. That is what the census fixture cannot supply and why
 	// these read as undecidable to the arm.
+
+	// #8800, HAND-MEASURED INDIVIDUALLY (not part of the bulk group above).
+	// The census fixture cannot decide this one because a destination NAT
+	// pool address must be a single HOST address, so the synthesized
+	// "xpfarg" fails that validator with the pass enabled.
+	//
+	// Written out by hand with both a type-VALID and a MALFORMED value,
+	// compiled with the pass OFF and ON (skipCompactNormalize so the tree
+	// handed to the compiler is the one the probe normalised):
+	//
+	//   packed, VALID 10.0.0.5/32   OFF: REJECTED "no translated address
+	//                                    configured" (the value was dropped)
+	//                               ON:  accepted, addr=10.0.0.5/32 --
+	//                                    identical to the braced spelling
+	//   packed, MALFORMED not-an-ip OFF: REJECTED, but for the WRONG reason
+	//                                    ("no translated address")
+	//                               ON:  REJECTED for the RIGHT reason
+	//                                    ("not a single host address")
+	//   packed, no address at all    rejected both ways
+	//
+	// So NO GATE IS DISARMED. The pass never turns a rejection into an
+	// acceptance of a bad value: with a good value it makes the packed
+	// spelling agree with the braced one, and with a bad value the host-
+	// address gate still fires and merely reports the accurate reason
+	// instead of the value-was-dropped one. That is the safe direction,
+	// and it is the whole point of the #8800 fix at this path.
+	"security nat destination pool xpfarg address": "#8800: hand-measured; no gate disarmed. " +
+		"With a valid value the pass makes packed agree with braced; with a malformed " +
+		"value the single-host-address gate still REJECTS under the pass, and only the " +
+		"reason changes (from \"no translated address\", which was the value being " +
+		"dropped, to the accurate \"not a single host address\").",
+
 	"security nat destination rule-set xpfarg rule xpfarg match application":              natMatchBenign8690,
 	"security nat destination rule-set xpfarg rule xpfarg match destination-address":      natMatchBenign8690,
 	"security nat destination rule-set xpfarg rule xpfarg match destination-address-name": natMatchBenign8690,
