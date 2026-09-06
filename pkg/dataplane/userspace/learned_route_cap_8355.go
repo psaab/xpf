@@ -85,9 +85,25 @@ func LearnedRouteCapHits() uint64 { return learnedRouteCapHits.Load() }
 //
 // THE DECISION: DEGRADE TO NO IMPORT, never a bounded subset.
 //
+// #9054 CORRECTED THE PREMISE THIS ARGUMENT RESTED ON. What follows used to
+// open by asserting that neither option was an outage because the kernel kept
+// forwarding, and that had been false since #7480 landed: a NoRoute frame is
+// adjudicated against the
+// #3110 unzoned egress sentinel, no zone-pair or junos-global permit can match
+// it, and the DEFAULT action decides — deny on a Junos-default box. So the
+// degradation this function chose was not "slower", it was a silent total
+// blackhole of the dynamic FIB, with a log line telling the operator the
+// opposite.
+//
+// The cap itself is unchanged and the reasoning below still holds; what changed
+// is that the snapshot now CARRIES the fact (ConfigSnapshot.
+// LearnedRouteImportCapped), and the helper restores the slow-path delegation
+// for NoRoute while the flag is set. That makes "the kernel still forwards"
+// true again rather than merely asserted.
+//
 // Both options leave some destinations resolving `NoRoute` in the helper FIB
-// and taking the slow-path reinject, so neither is an outage — the kernel still
-// forwards. They differ in PREDICTABILITY, and that is the whole argument:
+// and taking the slow-path reinject. They differ in PREDICTABILITY, and that is
+// the whole argument:
 //
 //   - NO IMPORT is uniform. Every learned destination behaves the same way,
 //     the box is in one describable state, and an operator can reason about it
@@ -121,9 +137,11 @@ func learnedRouteCapExceeded(count int) bool {
 		"cap", limit,
 		"publish_budget", learnedRoutePublishBudget.String(),
 		"bytes_per_route", learnedRouteBytesEach,
-		"consequence", "the helper FIB keeps its config-derived routes only; every LEARNED destination resolves NoRoute and takes the slow-path reinject, so traffic still forwards through the kernel but not on the AF_XDP fast path",
+		"consequence", "the helper FIB keeps its config-derived routes only; every LEARNED destination resolves NoRoute. The snapshot carries learned_route_import_capped, so while capped the helper DELEGATES those frames to the kernel instead of adjudicating them (#7480) — traffic forwards through the kernel, not on the AF_XDP fast path. On a helper older than snapshot protocol 10 the snapshot is REFUSED outright rather than applied, because such a helper would drop them (#9054)",
+		"security_note", "while capped, a NoRoute frame reaches the kernel FIB without zone-policy adjudication — the #6664 delegation #7480 narrowed. The kernel FIB is still the authority, so a destination with no kernel route is still dropped; but a permitted-by-absence path exists that does not exist under an uncapped import",
 		"why_not_partial", "a bounded subset would be selected by emission sort order, making fast-path eligibility per-destination and unpredictable rather than a state an operator can describe",
 		"remedy", "reduce the imported table (filter what FRR installs into the kernel), or raise the publish budget if holding the control socket that long is acceptable",
+		"observability", "xpf_userspace_binding_slow_path_no_route_packets_total advances for the delegated frames; under the pre-#9054 behaviour it stayed flat while the frames were dropped as policy denials instead",
 	)
 	return true
 }

@@ -1014,3 +1014,26 @@ between two pushes is still missing from the helper FIB until the next one.
 For that reason `NoRoute` must **stay** slow-path eligible: dropping it instead
 would black-hole every learned destination for the width of that window.
 `xpf_userspace_binding_slow_path_no_route_packets_total` is the signal.
+
+**What actually happened to that requirement (#7480, then #9054).** The
+paragraph above states the requirement and the tree did not meet it. #7480 made
+a `NoRoute` frame get adjudicated against the #3110 unzoned egress sentinel
+before the slow-path chokepoint; no zone-pair or `junos-global` permit can match
+that sentinel, so the DEFAULT action decides and a Junos-default deny box DROPS
+the frame. For the narrow inter-publish window described above that was a
+deliberate, bounded trade against the #6664 kernel-delegation bypass.
+
+**The window is not always narrow.** This section does not mention the #8355
+learned-route cap, and it is the unbounded-width version of exactly the
+divergence described here: above ~65,000 kernel routes the daemon declines the
+ENTIRE learned-route import, so every dynamically learned destination resolves
+`NoRoute` until the table shrinks. Composed with #7480 that was a silent total
+blackhole of the dynamic FIB — and #8355's operator log line said traffic still
+forwarded through the kernel.
+
+#9054 closes the composition rather than either half: `buildRouteSnapshots`
+now reports whether the cap declined the import, the snapshot carries
+`learned_route_import_capped` (snapshot protocol 10 — an older helper REFUSES
+the snapshot rather than applying it and black-holing), and while the flag is
+set the helper restores the slow-path delegation for `NoRoute` frames only.
+#7480's adjudication is untouched for an uncapped snapshot.

@@ -119,7 +119,21 @@ const (
 	// WHEN THE OLD BEHAVIOUR IS THE DEFECT THE FIELD WAS ADDED TO FIX. For
 	// those, the version bump IS the mechanism that refuses the pairing, and
 	// skipping it removes the only signal.
-	ProtocolVersion = 9
+	// v10 (issue 9054): `learned_route_import_capped`. The #8355 cap declines
+	// the whole learned-route import above ~65k routes and its diagnostic said
+	// "traffic still forwards through the kernel"; #7480 had already made a
+	// NoRoute frame drop on a default-deny box, so the composition is a silent
+	// total blackhole of the dynamic FIB. The flag tells the helper the FIB it
+	// just received is deliberately incomplete so it delegates NoRoute to the
+	// kernel again while capped.
+	//
+	// BUMPED, per the rule the v9 note above records: an old helper that
+	// ignores the field keeps the pre-#9054 behaviour, and the pre-#9054
+	// behaviour IS the defect. So the answer to "is what it enforced before
+	// acceptable?" is no, and the bump is the only mechanism that refuses the
+	// mismatched pairing — the acceptance gate is exact equality, so an
+	// unbumped field is silently ignored rather than refused.
+	ProtocolVersion = 10
 
 	// MinProtocolMultiZoneScopedPolicy is the FIRST snapshot protocol version
 	// that can represent a multi-zone scoped global policy — the plural
@@ -338,6 +352,36 @@ type ConfigSnapshot struct {
 	// omitempty on the Go side + #[serde(default)] on the Rust side, so an old
 	// helper decodes a missing field as false and an old Go binary that does not
 	// emit it leaves the Rust flag false.
+	// LearnedRouteImportCapped says the #8355 learned-route cap DECLINED this
+	// build's kernel-route import (#9054). It is not telemetry — the helper
+	// changes its NoRoute disposition on it.
+	//
+	// WHY IT HAS TO BE ON THE WIRE. #7480 made a NoRoute frame get adjudicated
+	// against the #3110 unzoned egress sentinel, which no zone-pair or
+	// junos-global permit can match, so the verdict is the DEFAULT action —
+	// deny on a Junos-default box — and the frame is dropped instead of
+	// delegated to the kernel. That is sound while the helper FIB is a
+	// near-complete mirror of the kernel's, because NoRoute then really does
+	// mean "no route exists". When the #8355 cap declines the import WHOLESALE
+	// it stops meaning that and starts meaning "the daemon did not tell you",
+	// and dropping on a signal that carries no information is not fail-closed,
+	// it is just closed: every learned destination black-holes. #8355's own
+	// log line and acceptance text asserted the opposite ("traffic still
+	// forwards through the kernel"), which is the premise #7480 had already
+	// inverted.
+	//
+	// The helper therefore restores the pre-#7480 slow-path delegation for
+	// NoRoute — and ONLY while this flag is set, and only for frames that
+	// resolve NoRoute. It returns to adjudication on the next publish whose
+	// table fits.
+	//
+	// NOT skew-tolerant, and that is deliberate: a helper that ignores this
+	// field keeps black-holing, which IS the defect the field was added to fix.
+	// ProtocolVersion is bumped to 10 alongside it so a mismatched pairing is
+	// REFUSED loudly rather than silently reverting to the blackhole — the rule
+	// recorded in the v9 note above.
+	LearnedRouteImportCapped bool `json:"learned_route_import_capped,omitempty"`
+
 	DefaultLogSessionInit  bool                         `json:"default_log_session_init,omitempty"`
 	DefaultLogSessionClose bool                         `json:"default_log_session_close,omitempty"`
 	Policies               []PolicyRuleSnapshot         `json:"policies,omitempty"`

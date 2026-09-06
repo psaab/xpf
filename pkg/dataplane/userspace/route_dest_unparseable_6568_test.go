@@ -94,7 +94,7 @@ func staticRouteSnapshots(t *testing.T, dest string, discard bool) []RouteSnapsh
 	cfg.RoutingOptions.StaticRoutes = []*config.StaticRoute{
 		{Destination: dest, Discard: discard, NextHops: nil},
 	}
-	snaps, err := buildRouteSnapshots(cfg, nil, nil)
+	snaps, _, err := buildRouteSnapshots(cfg, nil, nil)
 	if err != nil {
 		t.Fatalf("buildRouteSnapshots(%q): %v", dest, err)
 	}

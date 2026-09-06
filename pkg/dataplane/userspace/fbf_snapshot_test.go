@@ -55,7 +55,7 @@ func fbfTestConfig() *config.Config {
 // land in `<ri>.inet.0` / `<ri>.inet6.0` — the table the Rust PBR
 // lookup targets — and never in the master tables.
 func TestFBFForwardingInstanceRouteSnapshots(t *testing.T) {
-	routes, err := buildRouteSnapshots(fbfTestConfig(), nil, nil)
+	routes, _, err := buildRouteSnapshots(fbfTestConfig(), nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -119,7 +119,7 @@ func TestFBFOverlayIntoForwardingInstance(t *testing.T) {
 	overlay := []config.RouteOverlayEntry{
 		{RoutingInstance: "ISP-B", Destination: "0.0.0.0/0", NextHop: "172.16.80.254", Policy: "wan-failover"},
 	}
-	routes, err := buildRouteSnapshots(fbfTestConfig(), nil, overlay)
+	routes, _, err := buildRouteSnapshots(fbfTestConfig(), nil, overlay)
 	if err != nil {
 		t.Fatal(err)
 	}

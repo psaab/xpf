@@ -736,21 +736,53 @@ routing, and only on double fault).
     change to either moves the cap with it rather than leaving a number
     wearing the shape of a budget.
     Over the cap the import is **declined entirely**, not truncated. Both
-    options leave some destinations on the `NoRoute` slow path, so
-    neither is an outage — the kernel still forwards. They differ in
-    predictability: a bounded subset would be selected by emission sort
-    order, so two prefixes to one peer land on opposite sides of the cut
-    and fast-path eligibility becomes per-destination with no rule an
-    operator can state. Declining is uniform and describable. The
-    decline logs at WARN naming the count, the cap and the consequence,
-    and increments a counter (`LearnedRouteCapHits`) so the state is
-    readable without log scraping.
-  - It **narrows a window rather than closing it.** The snapshot is
-    republished on operator commit and on ip-monitoring actuation only —
-    there is no kernel route-event subscription — so a route learned
-    between two pushes is still absent from the helper FIB until the
-    next one, and traffic for it still takes the `NoRoute` slow-path
-    reinject in the meantime. Watch
+    options leave some destinations on the `NoRoute` slow path. They
+    differ in predictability: a bounded subset would be selected by
+    emission sort order, so two prefixes to one peer land on opposite
+    sides of the cut and fast-path eligibility becomes per-destination
+    with no rule an operator can state. Declining is uniform and
+    describable. The decline logs at WARN naming the count, the cap and
+    the consequence, and increments a counter (`LearnedRouteCapHits`) so
+    the state is readable without log scraping.
+  - **What "on the `NoRoute` slow path" means, corrected by #9054.** This
+    section used to say that neither option was an outage because the
+    kernel still forwarded. That was true when #8355 was written and had
+    already been made false by #7480, which landed separately: a
+    `NoRoute` frame is adjudicated against the #3110 unzoned egress
+    sentinel, no zone-pair or `junos-global` permit can match it, and the
+    DEFAULT action decides — so on a Junos-default deny box the frame was
+    **dropped**. A capped import on a full-table eBGP edge therefore
+    black-holed the entire dynamic FIB while the WARN line above told the
+    operator traffic still forwarded, which is the worst combination:
+    total loss plus a diagnostic pointing away from the cause.
+    The snapshot now carries `learned_route_import_capped`, and while it
+    is set the helper restores the pre-#7480 slow-path delegation **for
+    `NoRoute` frames only**. So "the kernel still forwards" is true again
+    rather than merely asserted, and it is true because of a mechanism
+    you can observe:
+    `xpf_userspace_binding_slow_path_no_route_packets_total` advances for
+    exactly those frames.
+    Two consequences worth knowing before you rely on it. **The snapshot
+    protocol moved to 10**, so a helper older than that REFUSES a capped
+    snapshot outright instead of applying it and black-holing — loud and
+    fail-closed, per the rule in `pkg/dataplane/userspace/protocol.go`.
+    And **while capped, a `NoRoute` frame reaches the kernel FIB without
+    zone-policy adjudication** — the #6664 delegation that #7480
+    narrowed. The kernel FIB is still the authority, so a destination
+    with no kernel route is still dropped; but this is a real widening of
+    the delegated set, bounded to the capped state, and it is the trade
+    #9054 chose against a total blackhole. Reducing what FRR installs
+    into the kernel, or raising `learnedRoutePublishBudget`, removes both.
+  - It **narrows a window rather than closing it.** #7437 added the
+    rtnetlink route listener (`pkg/daemon/daemon_route_listener.go`), so
+    a kernel route change now drives a republish on its own — the
+    sentence that used to stand here, "there is no kernel route-event
+    subscription", described the tree before that landed. The window
+    survives anyway because the listener MARKS and the republish is
+    coalesced (debounce 1s / throttle 3s), so a route learned between two
+    pushes is still absent from the helper FIB until the next one, and
+    traffic for it still takes the `NoRoute` slow-path reinject in the
+    meantime. Watch
     `xpf_userspace_binding_slow_path_no_route_packets_total`: a
     sustained non-zero rate is the helper FIB disagreeing with the
     kernel FIB.

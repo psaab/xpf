@@ -82,7 +82,7 @@ func snapshotFor(t *testing.T, table, family, dest string, out []RouteSnapshot) 
 func TestLearnedRouteReachesTheSnapshot(t *testing.T) {
 	withLearnedRoutes(t, fixedLearned(learnedV4("10.20.30.0/24", "192.0.2.1")))
 
-	out, err := buildRouteSnapshots(&config.Config{}, nil, nil)
+	out, _, err := buildRouteSnapshots(&config.Config{}, nil, nil)
 	if err != nil {
 		t.Fatalf("build: %v", err)
 	}
@@ -114,7 +114,7 @@ func TestLearnedRouteReachesTheSnapshot(t *testing.T) {
 func TestLearnedRouteNeverOverridesAConfigRoute(t *testing.T) {
 	withLearnedRoutes(t, fixedLearned(learnedV4("0.0.0.0/0", "198.51.100.254")))
 
-	out, err := buildRouteSnapshots(cfgWithStaticDefault("192.0.2.1"), nil, nil)
+	out, _, err := buildRouteSnapshots(cfgWithStaticDefault("192.0.2.1"), nil, nil)
 	if err != nil {
 		t.Fatalf("build: %v", err)
 	}
@@ -145,7 +145,7 @@ func TestLearnedRouteGapFillIsPerTableNotGlobal(t *testing.T) {
 		},
 	))
 
-	out, err := buildRouteSnapshots(cfg, nil, nil)
+	out, _, err := buildRouteSnapshots(cfg, nil, nil)
 	if err != nil {
 		t.Fatalf("build: %v", err)
 	}
@@ -168,7 +168,7 @@ func TestLearnedRouteFromAnUnknownTableIsDropped(t *testing.T) {
 		Destination: "10.7.0.0/16", NextHops: []string{"192.0.2.1"},
 	}))
 
-	out, err := buildRouteSnapshots(&config.Config{}, nil, nil)
+	out, _, err := buildRouteSnapshots(&config.Config{}, nil, nil)
 	if err != nil {
 		t.Fatalf("build: %v", err)
 	}
@@ -200,7 +200,7 @@ func TestOverlayStillReplacesAnImportedRoute(t *testing.T) {
 		NextHop:     "198.51.100.9",
 		Policy:      "wan-failover",
 	}}
-	out, err := buildRouteSnapshots(&config.Config{}, nil, overlay)
+	out, _, err := buildRouteSnapshots(&config.Config{}, nil, overlay)
 	if err != nil {
 		t.Fatalf("build: %v", err)
 	}
@@ -223,7 +223,7 @@ func TestLearnedRouteImportFailureFailsTheSnapshotClosed(t *testing.T) {
 		return nil, sentinel
 	})
 
-	out, err := buildRouteSnapshots(cfgWithStaticDefault("192.0.2.1"), nil, nil)
+	out, _, err := buildRouteSnapshots(cfgWithStaticDefault("192.0.2.1"), nil, nil)
 	if !errors.Is(err, sentinel) {
 		t.Fatalf("error = %v, want it to wrap %v", err, sentinel)
 	}
@@ -242,13 +242,13 @@ func TestEmptyAndDisabledImportsProduceIdenticalSnapshots(t *testing.T) {
 	cfg := cfgWithStaticDefault("192.0.2.1")
 
 	withLearnedRoutes(t, nil)
-	disabled, err := buildRouteSnapshots(cfg, nil, nil)
+	disabled, _, err := buildRouteSnapshots(cfg, nil, nil)
 	if err != nil {
 		t.Fatalf("build (disabled): %v", err)
 	}
 
 	withLearnedRoutes(t, fixedLearned())
-	empty, err := buildRouteSnapshots(cfg, nil, nil)
+	empty, _, err := buildRouteSnapshots(cfg, nil, nil)
 	if err != nil {
 		t.Fatalf("build (empty): %v", err)
 	}
@@ -270,13 +270,13 @@ func TestLearnedRouteEmissionIsOrderIndependent(t *testing.T) {
 	c := learnedV4("10.3.0.0/16", "192.0.2.3")
 
 	withLearnedRoutes(t, fixedLearned(a, b, c))
-	first, err := buildRouteSnapshots(&config.Config{}, nil, nil)
+	first, _, err := buildRouteSnapshots(&config.Config{}, nil, nil)
 	if err != nil {
 		t.Fatalf("build: %v", err)
 	}
 
 	withLearnedRoutes(t, fixedLearned(c, a, b))
-	second, err := buildRouteSnapshots(&config.Config{}, nil, nil)
+	second, _, err := buildRouteSnapshots(&config.Config{}, nil, nil)
 	if err != nil {
 		t.Fatalf("build: %v", err)
 	}
@@ -304,7 +304,7 @@ func TestGapFillMatchesANonCanonicalConfigPrefix(t *testing.T) {
 	}
 	withLearnedRoutes(t, fixedLearned(learnedV4("10.20.30.0/24", "198.51.100.254")))
 
-	out, err := buildRouteSnapshots(cfg, nil, nil)
+	out, _, err := buildRouteSnapshots(cfg, nil, nil)
 	if err != nil {
 		t.Fatalf("build: %v", err)
 	}

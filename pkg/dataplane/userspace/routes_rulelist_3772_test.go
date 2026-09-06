@@ -23,7 +23,7 @@ func TestBuildRouteSnapshotsSurfacesRuleListError(t *testing.T) {
 	}
 
 	cfg := &config.Config{}
-	if _, err := buildRouteSnapshots(cfg, nil, nil); err == nil {
+	if _, _, err := buildRouteSnapshots(cfg, nil, nil); err == nil {
 		t.Fatal("buildRouteSnapshots swallowed a RuleList failure; want a surfaced error")
 	}
 }
@@ -39,7 +39,7 @@ func TestBuildRouteSnapshotsRuleListSuccessNoError(t *testing.T) {
 	cfg.RoutingOptions.StaticRoutes = []*config.StaticRoute{
 		{Destination: "10.0.0.0/8", NextHops: []config.NextHopEntry{{Address: "10.1.1.1"}}},
 	}
-	routes, err := buildRouteSnapshots(cfg, nil, nil)
+	routes, _, err := buildRouteSnapshots(cfg, nil, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -71,7 +71,7 @@ func TestRouteOverlaySkipsUnparseableDestination(t *testing.T) {
 	overlay := []config.RouteOverlayEntry{
 		{Destination: "garbage", NextHop: "1.2.3.4", Policy: "p"},
 	}
-	routes, err := buildRouteSnapshots(cfg, nil, overlay)
+	routes, _, err := buildRouteSnapshots(cfg, nil, overlay)
 	if err != nil {
 		t.Fatal(err)
 	}

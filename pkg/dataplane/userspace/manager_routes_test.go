@@ -26,7 +26,7 @@ func TestBuildRouteSnapshotsNormalizesFamilyFromDestination(t *testing.T) {
 			},
 		},
 	}
-	routes, err := buildRouteSnapshots(cfg, nil, nil)
+	routes, _, err := buildRouteSnapshots(cfg, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -42,7 +42,7 @@ func TestBuildRouteSnapshotsNormalizesFamilyFromDestination(t *testing.T) {
 }
 
 func TestBuildRouteSnapshotsIncludesConnectedPrefixes(t *testing.T) {
-	routes, err := buildRouteSnapshots(&config.Config{}, []InterfaceSnapshot{
+	routes, _, err := buildRouteSnapshots(&config.Config{}, []InterfaceSnapshot{
 		{
 			Name: "reth1.0",
 			Addresses: []InterfaceAddressSnapshot{

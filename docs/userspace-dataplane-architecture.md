@@ -3682,7 +3682,22 @@ is [`userspace-dataplane-gaps.md`](userspace-dataplane-gaps.md).
   the to-zone is the #3110 unzoned sentinel and the verdict is the DEFAULT
   action: a zone-pair or `junos-global` permit does NOT rescue it. It stays
   slow-path eligible because #7409 bounds the kernel/helper FIB divergence
-  without closing it, so a PERMITTED NoRoute frame must still be delegated. `PolicyDenied`, `HAInactive`, `DiscardRoute` and — since #6664 —
+  without closing it, so a PERMITTED NoRoute frame must still be delegated.
+  **#9054 gives that bound a precondition and enforces it.** The adjudication
+  is sound only while `NoRoute` carries information — i.e. while the helper FIB
+  is a near-complete mirror of the kernel's. The #8355 learned-route cap
+  suspends that: above ~65,000 kernel routes the daemon declines the ENTIRE
+  learned-route import, so every dynamically learned destination resolves
+  `NoRoute` for a reason that has nothing to do with the destination, and
+  adjudicating there black-holes the whole dynamic FIB on a Junos-default deny
+  box — while #8355's own WARN line told the operator traffic still forwarded
+  through the kernel. The snapshot now carries `learned_route_import_capped`
+  (snapshot protocol **10**; an older helper REFUSES a capped snapshot rather
+  than applying it and black-holing), the arm calls
+  `noroute_policy_denial_gated`, and while the flag is set the frame keeps the
+  pre-#7480 delegation. Nothing else changes: an uncapped snapshot adjudicates
+  exactly as before, and the flag never reaches an ordinary zone-pair verdict.
+  `PolicyDenied`, `HAInactive`, `DiscardRoute` and — since #6664 —
   `NextTableUnsupported` are NOT eligible: reinjecting them would hand the
   packet to the kernel FIB and silently bypass a zone-policy DENY / HA gate
   / discard route (#1913), or forward an unresolvable inter-VRF next-table

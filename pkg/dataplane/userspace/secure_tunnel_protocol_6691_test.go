@@ -57,7 +57,12 @@ const preSecureTunnelProtocolVersion = 4
 // What the equality below still buys after that bump: the two planes must
 // agree on the number, and the number must move whenever the meaning does.
 // Both survive; only the literal moved.
-const secureTunnelSnapshotProtocolVersion = 9
+//
+// Issue 9054 moved it 9 -> 10, and the reasoning is identical to 8892's: the
+// bump is for `learned_route_import_capped`, not for secure_tunnel. A v9 helper
+// still handles secure_tunnel correctly, so MinProtocolSecureTunnelRefusal (7)
+// is again untouched.
+const secureTunnelSnapshotProtocolVersion = 10
 
 // preV5HelperAcceptsSnapshot models the exact-equality version gate a pre-v5
 // helper applies before touching any dataplane state

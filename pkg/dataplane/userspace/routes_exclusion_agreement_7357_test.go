@@ -45,7 +45,7 @@ func TestStaticRouteExclusionsAgreeWithTheBuilder_7357(t *testing.T) {
 			excl[installed], excl[plain])
 	}
 
-	snaps, err := buildRouteSnapshots(cfg, nil, nil)
+	snaps, _, err := buildRouteSnapshots(cfg, nil, nil)
 	if err != nil {
 		t.Fatalf("buildRouteSnapshots() error = %v", err)
 	}
@@ -98,7 +98,7 @@ func TestStaticRouteWindowExclusionsAgreeWithTheBuilder_7357(t *testing.T) {
 	cfg.RoutingInstances = []*config.RoutingInstanceConfig{{Name: "vrf-a"}}
 
 	excl := config.StaticRouteExclusions(cfg)
-	snaps, err := buildRouteSnapshots(cfg, nil, nil)
+	snaps, _, err := buildRouteSnapshots(cfg, nil, nil)
 	if err != nil {
 		t.Fatalf("buildRouteSnapshots() error = %v", err)
 	}

@@ -286,6 +286,7 @@
     "generated_at": "1970-01-01T00:00:00Z",
     "generation": 0,
     "interfaces": [],
+    "learned_route_import_capped": false,
     "map_pins": {
       "bindings": "",
       "conntrack_v4": "",

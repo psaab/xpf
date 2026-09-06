@@ -48,7 +48,7 @@ func TestBuildRouteSnapshotsDropsPerInstanceNextTable_5830(t *testing.T) {
 		{Name: "target", TableID: 102},
 	}
 
-	routes, err := buildRouteSnapshots(cfg, nil, nil)
+	routes, _, err := buildRouteSnapshots(cfg, nil, nil)
 	if err != nil {
 		t.Fatalf("buildRouteSnapshots: %v", err)
 	}
@@ -85,7 +85,7 @@ func TestBuildRouteSnapshotsKeepsGlobalNextTable_5830(t *testing.T) {
 		{Name: "Comcast", TableID: 201},
 	}
 
-	routes, err := buildRouteSnapshots(cfg, nil, nil)
+	routes, _, err := buildRouteSnapshots(cfg, nil, nil)
 	if err != nil {
 		t.Fatalf("buildRouteSnapshots: %v", err)
 	}

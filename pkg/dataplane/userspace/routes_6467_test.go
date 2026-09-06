@@ -42,7 +42,7 @@ func TestBuildRouteSnapshotsCapsConfigStaticNextTableLeaks(t *testing.T) {
 			})
 	}
 
-	routes, err := buildRouteSnapshots(cfg, nil, nil)
+	routes, _, err := buildRouteSnapshots(cfg, nil, nil)
 	if err != nil {
 		t.Fatalf("buildRouteSnapshots: %v", err)
 	}
@@ -84,7 +84,7 @@ func TestBuildRouteSnapshotsUncappedBelowWindow(t *testing.T) {
 			})
 	}
 
-	routes, err := buildRouteSnapshots(cfg, nil, nil)
+	routes, _, err := buildRouteSnapshots(cfg, nil, nil)
 	if err != nil {
 		t.Fatalf("buildRouteSnapshots: %v", err)
 	}
@@ -147,7 +147,7 @@ func TestBuildRouteSnapshotsFIBEligibilityMirrorsApplier(t *testing.T) {
 			})
 	}
 
-	routes, err := buildRouteSnapshots(cfg, nil, nil)
+	routes, _, err := buildRouteSnapshots(cfg, nil, nil)
 	if err != nil {
 		t.Fatalf("buildRouteSnapshots: %v", err)
 	}
@@ -200,7 +200,7 @@ func TestBuildRouteSnapshotsSkipsMalformedCIDRNextTable(t *testing.T) {
 		{Destination: "10.3.0.0/16", NextTable: "blue"}, // valid → published
 	}
 
-	routes, err := buildRouteSnapshots(cfg, nil, nil)
+	routes, _, err := buildRouteSnapshots(cfg, nil, nil)
 	if err != nil {
 		t.Fatalf("buildRouteSnapshots: %v", err)
 	}

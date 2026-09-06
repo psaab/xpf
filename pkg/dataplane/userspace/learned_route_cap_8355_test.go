@@ -119,7 +119,7 @@ func importWithSyntheticKernelTable(t *testing.T, n int) []RouteSnapshot {
 	// below is a learned one. That is asserted by construction rather than
 	// filtered: a config-derived route leaking in would inflate the under-cap
 	// and over-cap counts identically and hide a truncation.
-	snaps, err := buildRouteSnapshots(&config.Config{}, nil, nil)
+	snaps, _, err := buildRouteSnapshots(&config.Config{}, nil, nil)
 	if err != nil {
 		t.Fatalf("buildRouteSnapshots: %v", err)
 	}

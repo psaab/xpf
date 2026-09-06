@@ -61,7 +61,7 @@ func TestBuildRouteSnapshotsSkipsPBRBandRule(t *testing.T) {
 		{Name: "blue", TableID: tableID},
 	}
 
-	routes, err := buildRouteSnapshots(cfg, nil, nil)
+	routes, _, err := buildRouteSnapshots(cfg, nil, nil)
 	if err != nil {
 		t.Fatalf("buildRouteSnapshots: %v", err)
 	}
@@ -105,7 +105,7 @@ func TestBuildRouteSnapshotsIngestsRouteLeakBandRule(t *testing.T) {
 		{Name: "blue", TableID: tableID},
 	}
 
-	routes, err := buildRouteSnapshots(cfg, nil, nil)
+	routes, _, err := buildRouteSnapshots(cfg, nil, nil)
 	if err != nil {
 		t.Fatalf("buildRouteSnapshots: %v", err)
 	}

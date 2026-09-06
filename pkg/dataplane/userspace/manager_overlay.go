@@ -195,7 +195,14 @@ func (m *Manager) PublishRouteOverlaySnapshot(cfg *config.Config, overlay []conf
 	// overlay publish (fail-closed). The deferred commit above leaves
 	// m.routeOverlay at the last-applied baseline on a non-nil err, so the
 	// next actuator sweep rebuilds and re-publishes (#3757 dirty-retry).
-	next.Routes, err = buildRouteSnapshots(cfg, next.Interfaces, desiredOverlay)
+	// #9054: recompute the cap flag on THIS build, never inherit it. `next :=
+	// *m.lastSnapshot` copies the previous value, and a route-only republish is
+	// exactly when the kernel table size can have crossed the cap in either
+	// direction — the #7437 rtnetlink listener drives one on every route change.
+	// Carrying a stale `true` keeps the helper delegating NoRoute after the
+	// table shrank back under the cap; carrying a stale `false` re-opens the
+	// blackhole this issue is about.
+	next.Routes, next.LearnedRouteImportCapped, err = buildRouteSnapshots(cfg, next.Interfaces, desiredOverlay)
 	if err != nil {
 		return false, fmt.Errorf("build route overlay snapshot: %w", err)
 	}

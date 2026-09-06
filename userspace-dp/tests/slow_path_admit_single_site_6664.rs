@@ -285,4 +285,21 @@ fn noroute_arm_adjudicates_before_reinjecting_7480() {
          existing chokepoint refuse the frame and account the fail-closed drop. \
          Evaluating without downgrading is a policy check whose result is discarded."
     );
+    // #9054: the adjudication's soundness has a PRECONDITION, and the arm must
+    // go through the entry point that checks it. `noroute_policy_denial` alone
+    // answers "does policy deny this?"; it cannot answer "does NoRoute mean
+    // anything right now?", and above the #8355 learned-route cap it does not —
+    // the daemon declined the entire kernel import, so every dynamically learned
+    // destination resolves NoRoute for a reason that has nothing to do with the
+    // destination. Calling the ungated function here restores the total
+    // blackhole this guard's sibling cells cannot see.
+    assert!(
+        arm.contains("noroute_policy_denial_gated"),
+        "the NoRoute arm calls the UNGATED adjudication. It must call \
+         noroute_policy_denial_gated, which delegates to the kernel while \
+         ConfigSnapshot.learned_route_import_capped says the daemon withheld the \
+         learned-route table (#9054). Adjudicating a FIB the daemon deliberately \
+         left incomplete black-holes every learned destination on a default-deny \
+         box, and #8355's operator log line says the opposite."
+    );
 }

@@ -51,7 +51,7 @@ func TestBuildRouteSnapshotsCapturesRibGroupPerPrefixLeak(t *testing.T) {
 		{Name: "dmz-vr", TableID: 101},
 	}
 
-	routes, err := buildRouteSnapshots(cfg, nil, nil)
+	routes, _, err := buildRouteSnapshots(cfg, nil, nil)
 	if err != nil {
 		t.Fatalf("buildRouteSnapshots: %v", err)
 	}
@@ -100,7 +100,7 @@ func TestBuildRouteSnapshotsSkipsDstlessRibGroupRule(t *testing.T) {
 		{Name: "dmz-vr", TableID: 101},
 	}
 
-	routes, err := buildRouteSnapshots(cfg, nil, nil)
+	routes, _, err := buildRouteSnapshots(cfg, nil, nil)
 	if err != nil {
 		t.Fatalf("buildRouteSnapshots: %v", err)
 	}

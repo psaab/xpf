@@ -45,7 +45,7 @@ func TestQualifiedNextHopPreferenceLowersAsDistinctStandby_5678(t *testing.T) {
 		},
 	}
 
-	routes, err := buildRouteSnapshots(cfg, nil, nil)
+	routes, _, err := buildRouteSnapshots(cfg, nil, nil)
 	if err != nil {
 		t.Fatalf("buildRouteSnapshots: %v", err)
 	}
@@ -117,7 +117,7 @@ func TestPlainNextHopListStaysECMP_5678(t *testing.T) {
 		},
 	}
 
-	routes, err := buildRouteSnapshots(cfg, nil, nil)
+	routes, _, err := buildRouteSnapshots(cfg, nil, nil)
 	if err != nil {
 		t.Fatalf("buildRouteSnapshots: %v", err)
 	}
@@ -164,7 +164,7 @@ func TestQualifiedNextHopsSamePreferenceGroupECMP_5678(t *testing.T) {
 		},
 	}
 
-	routes, err := buildRouteSnapshots(cfg, nil, nil)
+	routes, _, err := buildRouteSnapshots(cfg, nil, nil)
 	if err != nil {
 		t.Fatalf("buildRouteSnapshots: %v", err)
 	}

@@ -4949,6 +4949,26 @@ pub(super) fn poll_binding_process_descriptor(
                             // drops. That is the intended fix and it is
                             // availability-visible on upgrade.
                             //
+                            // #9054 BOUNDS THAT — in `noroute_policy_denial_gated`,
+                            // which returns None (delegate) whenever the snapshot
+                            // says the daemon WITHHELD the kernel route table.
+                            //
+                            // This is not a softening of #7480. The paragraph above
+                            // justifies adjudicating rather than delegating on the
+                            // grounds that the divergence window is NARROW — a route
+                            // learned between two coalesced republishes. That
+                            // argument needs `NoRoute` to mean "there is no route",
+                            // which holds only while this FIB is a near-complete
+                            // mirror of the kernel's. The #8355 learned-route cap
+                            // breaks exactly that premise: above ~65k routes the
+                            // daemon declines the ENTIRE import, `NoRoute` starts
+                            // meaning "the daemon did not tell you", and dropping on
+                            // a signal that carries no information black-holes the
+                            // whole dynamic FIB — while #8355's own log line told
+                            // the operator traffic still forwarded through the
+                            // kernel. The delegation is restored for precisely that
+                            // state and closes on the first publish that fits.
+                            //
                             // Flow-backed vs flowless mirrors #3291/#4024: a real flow
                             // is evaluated with its ports and `l4_present = true`, so a
                             // port-bearing permit term still matches and a permitted
@@ -4994,8 +5014,8 @@ pub(super) fn poll_binding_process_descriptor(
                                 });
                                 let policy_icmp = policy_packet_icmp(packet_frame, meta);
                                 if let Some(policy_result) =
-                                    crate::afxdp::forwarding::noroute_policy_denial(
-                                        &worker_ctx.forwarding.policy,
+                                    crate::afxdp::forwarding::noroute_policy_denial_gated(
+                                        worker_ctx.forwarding,
                                         from_zone_id,
                                         to_zone_id,
                                         adj_flow.src_ip,

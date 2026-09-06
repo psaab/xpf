@@ -77,7 +77,7 @@ func buildSnapshotWithSchedulerStateAndNATCounters(cfg *config.Config, ucfg conf
 	// #3772 (M9): a kernel ip-rule enumeration failure fails the snapshot
 	// closed so the apply path retains the prior dataplane state rather
 	// than shipping a snapshot missing every route-leak route.
-	routes, err := buildRouteSnapshots(cfg, interfaces, routeOverlay)
+	routes, learnedRoutesCapped, err := buildRouteSnapshots(cfg, interfaces, routeOverlay)
 	if err != nil {
 		return nil, err
 	}
@@ -101,8 +101,11 @@ func buildSnapshotWithSchedulerStateAndNATCounters(cfg *config.Config, ucfg conf
 		TunnelEndpoints: buildTunnelEndpointSnapshots(cfg, interfaces),
 		Neighbors:       buildNeighborSnapshots(cfg),
 		Routes:          routes,
-		Flow:            buildFlowSnapshot(cfg),
-		DefaultPolicy:   policyActionString(cfg.Security.DefaultPolicy),
+		// #9054: the helper needs to know the FIB it just received is
+		// DELIBERATELY incomplete. See ConfigSnapshot.LearnedRouteImportCapped.
+		LearnedRouteImportCapped: learnedRoutesCapped,
+		Flow:                     buildFlowSnapshot(cfg),
+		DefaultPolicy:            policyActionString(cfg.Security.DefaultPolicy),
 		// #3534: thread the implicit-default-policy RT_FLOW log selection to the
 		// dataplane so a default-PERMIT session emits session-init/close records.
 		DefaultLogSessionInit:  cfg.Security.DefaultPolicyLogSessionInit,

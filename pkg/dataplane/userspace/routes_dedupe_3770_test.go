@@ -28,7 +28,7 @@ func TestRouteSnapshotDedupeKeepsDiscardAndConnected(t *testing.T) {
 		},
 	}
 
-	routes, err := buildRouteSnapshots(cfg, ifaces, nil)
+	routes, _, err := buildRouteSnapshots(cfg, ifaces, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -74,7 +74,7 @@ func TestRouteSnapshotDedupeKeepsDistinctPreference(t *testing.T) {
 		{Destination: "10.5.0.0/16", NextTable: "blue", Preference: 5},
 		{Destination: "10.5.0.0/16", NextTable: "blue", Preference: 0},
 	}
-	routes, err := buildRouteSnapshots(cfg, nil, nil)
+	routes, _, err := buildRouteSnapshots(cfg, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -122,11 +122,11 @@ func TestRouteSnapshotSortIsDeterministic(t *testing.T) {
 		{Destination: "10.5.0.0/16", NextTable: "aaa"},
 	}
 
-	got1, err := buildRouteSnapshots(forward, nil, nil)
+	got1, _, err := buildRouteSnapshots(forward, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	got2, err := buildRouteSnapshots(reverse, nil, nil)
+	got2, _, err := buildRouteSnapshots(reverse, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -154,7 +154,7 @@ func TestRouteOverlayCarriesStaticPreference(t *testing.T) {
 	overlay := []config.RouteOverlayEntry{
 		{Destination: "0.0.0.0/0", NextHop: "172.16.80.1", Policy: "wan-failover"},
 	}
-	routes, err := buildRouteSnapshots(cfg, nil, overlay)
+	routes, _, err := buildRouteSnapshots(cfg, nil, overlay)
 	if err != nil {
 		t.Fatal(err)
 	}

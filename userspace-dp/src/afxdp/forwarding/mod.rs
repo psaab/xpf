@@ -156,6 +156,58 @@ pub(in crate::afxdp) fn noroute_policy_denial(
     }
 }
 
+/// #9054: `noroute_policy_denial` with the one precondition its soundness
+/// depends on made explicit.
+///
+/// `noroute_policy_denial` answers "does the operator's policy deny this?" and
+/// #7480's arm acts on the answer by DROPPING. That is right only while
+/// `NoRoute` carries information — i.e. while the helper FIB is a
+/// near-complete mirror of the kernel's, so a destination missing from it is
+/// genuinely unroutable.
+///
+/// The #8355 learned-route cap suspends that. Above ~65,000 kernel routes the
+/// daemon declines the ENTIRE learned-route import rather than a subset, so
+/// every dynamically learned destination resolves `NoRoute` for a reason that
+/// has nothing to do with the destination. Adjudicating there does not fail
+/// closed; it black-holes the whole dynamic FIB, and #8355's own operator log
+/// line asserted the opposite ("traffic still forwards through the kernel"),
+/// so the first diagnostic an operator reads points away from the cause.
+///
+/// So when the snapshot says the import was withheld, this returns `None` and
+/// the frame keeps the pre-#7480 slow-path delegation. Nothing else changes:
+/// an uncapped snapshot takes the identical path it took before.
+///
+/// The gate is a wrapper rather than an `if` in the caller because the caller
+/// (`poll_binding_process_descriptor`'s `NoRoute` arm) is not drivable from any
+/// in-crate test — `slow_path_admit_single_site_6664.rs` guards it by reading
+/// source. A function is testable; an inline branch there would not have been.
+pub(in crate::afxdp) fn noroute_policy_denial_gated(
+    forwarding: &ForwardingState,
+    from_zone_id: u16,
+    to_zone_id: u16,
+    src_ip: std::net::IpAddr,
+    dst_ip: std::net::IpAddr,
+    protocol: u8,
+    ports: Option<(u16, u16)>,
+    policy_icmp: Option<(u8, u8)>,
+    packet_len: u64,
+) -> Option<crate::policy::PolicyEvaluationResult> {
+    if forwarding.learned_route_import_capped {
+        return None;
+    }
+    noroute_policy_denial(
+        &forwarding.policy,
+        from_zone_id,
+        to_zone_id,
+        src_ip,
+        dst_ip,
+        protocol,
+        ports,
+        policy_icmp,
+        packet_len,
+    )
+}
+
 pub(super) fn zone_pair_ids_for_flow_with_override(
     forwarding: &ForwardingState,
     ingress_ifindex: i32,
@@ -284,3 +336,7 @@ mod tests_icmp_family_7520;
 #[cfg(test)]
 #[path = "tests_noroute_adjudication_7480.rs"]
 mod tests_noroute_adjudication_7480;
+// #9054: NoRoute under a DECLINED learned-route import.
+#[cfg(test)]
+#[path = "tests_noroute_capped_import_9054.rs"]
+mod tests_noroute_capped_import_9054;

@@ -560,6 +560,31 @@ pub(crate) struct ConfigSnapshot {
     pub config: serde_json::Value,
     #[serde(rename = "defer_workers", default)]
     pub defer_workers: bool,
+    /// #9054: the daemon's #8355 learned-route cap DECLINED this build's kernel
+    /// route import, so the FIB in this snapshot is deliberately incomplete.
+    ///
+    /// It is not telemetry. The `NoRoute` arm of `poll_binding_process_descriptor`
+    /// adjudicates against the #3110 unzoned egress sentinel (#7480), which no
+    /// zone-pair or `junos-global` permit can match, so the verdict is the
+    /// DEFAULT action — deny on a Junos-default box — and the frame is dropped
+    /// rather than delegated to the kernel. That is sound while this FIB is a
+    /// near-complete mirror of the kernel's, because `NoRoute` then really does
+    /// mean "no route exists". While this flag is set it does not: it means
+    /// "the daemon withheld the whole dynamic table", and dropping on a signal
+    /// that carries no information black-holes every learned destination.
+    ///
+    /// So while it is set the arm restores the pre-#7480 slow-path delegation
+    /// for `NoRoute` — and only for `NoRoute`, and only while set.
+    ///
+    /// NOT skew-tolerant, unlike `node_id` above, and the difference is the
+    /// whole point of that field's comment: an older helper that ignores this
+    /// one keeps black-holing, and black-holing IS the defect it was added to
+    /// fix. `CONFIG_SNAPSHOT_PROTOCOL_VERSION` is bumped to 10 alongside it so
+    /// a mismatched pairing is refused loudly instead of silently reverting.
+    /// Go-side mirror: `pkg/dataplane/userspace/protocol.go`
+    /// `LearnedRouteImportCapped bool json:"learned_route_import_capped,omitempty"`.
+    #[serde(rename = "learned_route_import_capped", default)]
+    pub learned_route_import_capped: bool,
     /// #6311: the chassis-cluster node id this helper runs on (0 or 1; 0 when
     /// the node is standalone or the field is absent). It becomes the high bit
     /// of every worker's session-id namespace

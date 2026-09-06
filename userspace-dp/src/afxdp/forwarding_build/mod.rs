@@ -602,6 +602,9 @@ fn build_fallible_forwarding_state(
     // extraction into the session tuple) is a deferred feature. Carried here so
     // `show security flow` reflects real plumbed state, not a phantom field.
     state.gre_acceleration = snapshot.flow.gre_acceleration;
+    // #9054: a TOP-LEVEL snapshot field, not a `flow` one — it describes the
+    // route set in this snapshot, not a flow-processing option.
+    state.learned_route_import_capped = snapshot.learned_route_import_capped;
     // #7342: the three `security flow tcp-session` windows #6539 documented as
     // accepted-only now arrive on the wire. Named fields rather than three more
     // positional `u64`s — see `TcpSessionWindowSecs`. Each `0` leaves its window

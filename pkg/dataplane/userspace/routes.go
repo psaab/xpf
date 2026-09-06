@@ -32,9 +32,16 @@ var ruleListFn = netlink.RuleList
 // drops every route-leak route for that family while the kernel/FRR leak
 // path stays up — a divergence with no signal. Mirrors #3731's
 // surface-don't-swallow contract on the RuleAdd (write) side.
-func buildRouteSnapshots(cfg *config.Config, interfaces []InterfaceSnapshot, overlay []config.RouteOverlayEntry) ([]RouteSnapshot, error) {
+// The second return value reports whether the #8355 learned-route cap DECLINED
+// the import (#9054). It is not a diagnostic: the helper's NoRoute adjudication
+// (#7480) decides whether to drop or delegate a frame whose destination is not
+// in its FIB, and that decision is only sound while the FIB is a near-complete
+// mirror of the kernel's. When the cap declines the import wholesale, NoRoute
+// stops meaning "there is no route" and starts meaning "we did not tell you" —
+// so the caller must put the fact on the wire.
+func buildRouteSnapshots(cfg *config.Config, interfaces []InterfaceSnapshot, overlay []config.RouteOverlayEntry) ([]RouteSnapshot, bool, error) {
 	if cfg == nil {
-		return nil, nil
+		return nil, false, nil
 	}
 	out := make([]RouteSnapshot, 0)
 	seen := make(map[string]struct{})
@@ -268,7 +275,7 @@ func buildRouteSnapshots(cfg *config.Config, interfaces []InterfaceSnapshot, ove
 			// #3772 (M9): do NOT swallow. A partial snapshot missing this
 			// family's route-leak routes would blackhole or policy-bypass
 			// inter-VRF traffic that the kernel/FRR still routes.
-			return nil, fmt.Errorf("route snapshot: list ip-rules for family %d: %w", family, err)
+			return nil, false, fmt.Errorf("route snapshot: list ip-rules for family %d: %w", family, err)
 		}
 		for _, rule := range rules {
 			// A Dst-less rule (`from all lookup <table>`) cannot be
@@ -358,8 +365,9 @@ func buildRouteSnapshots(cfg *config.Config, interfaces []InterfaceSnapshot, ove
 	// Do not restate the position as a safety property: it is not one, and a
 	// comment claiming a guarantee the code does not depend on is how the
 	// next reader stops looking for the guarantee that matters.
-	if err := addLearnedRouteSnapshots(cfg, out, addSnapshot); err != nil {
-		return nil, err
+	capped, err := addLearnedRouteSnapshots(cfg, out, addSnapshot)
+	if err != nil {
+		return nil, false, err
 	}
 
 	out = applyRouteOverlay(out, overlay)
@@ -398,7 +406,7 @@ func buildRouteSnapshots(cfg *config.Config, interfaces []InterfaceSnapshot, ove
 		}
 		return a.Preference < b.Preference
 	})
-	return out, nil
+	return out, capped, nil
 }
 
 // applyRouteOverlay folds the winner-resolved ip-monitoring overlay
@@ -717,9 +725,14 @@ const learnedRouteMainTableID = 254
 // reasoning as the ip-rule enumeration above — a snapshot silently missing
 // a subset of learned destinations is a FIB that disagrees with the kernel
 // in exactly the way this issue exists to stop.
-func addLearnedRouteSnapshots(cfg *config.Config, existing []RouteSnapshot, addSnapshot func(RouteSnapshot)) error {
+// The bool reports whether the #8355 cap DECLINED the import. It is distinct
+// from "nothing was imported": an empty kernel table and a refused 100k-route
+// table both add zero routes, and only the second one leaves the helper FIB
+// deliberately incomplete. #9054 is what happens when the two are conflated
+// downstream.
+func addLearnedRouteSnapshots(cfg *config.Config, existing []RouteSnapshot, addSnapshot func(RouteSnapshot)) (bool, error) {
 	if learnedRouteImportFn == nil {
-		return nil
+		return false, nil
 	}
 	instByTableID := make(map[int]string)
 	instanceTableIDs := make([]int, 0, len(cfg.RoutingInstances))
@@ -734,16 +747,16 @@ func addLearnedRouteSnapshots(cfg *config.Config, existing []RouteSnapshot, addS
 
 	learned, err := learnedRouteImportFn(routing.LearnedRouteTableIDs(instanceTableIDs))
 	if err != nil {
-		return fmt.Errorf("route snapshot: %w", err)
+		return false, fmt.Errorf("route snapshot: %w", err)
 	}
 	if len(learned) == 0 {
-		return nil
+		return false, nil
 	}
 	// #8355: refuse a table larger than one publish can carry, rather than
 	// importing a prefix of it. See learned_route_cap_8355.go for why this
 	// degrades to NO import instead of a bounded subset.
 	if learnedRouteCapExceeded(len(learned)) {
-		return nil
+		return true, nil
 	}
 
 	covered := make(map[string]struct{}, len(existing))
@@ -810,7 +823,7 @@ func addLearnedRouteSnapshots(cfg *config.Config, existing []RouteSnapshot, addS
 			Preference:  routing.LearnedRouteImportPreference,
 		})
 	}
-	return nil
+	return false, nil
 }
 
 // learnedRouteGapKey is the (table, family, destination) identity the

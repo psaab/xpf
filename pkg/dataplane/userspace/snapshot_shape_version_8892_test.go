@@ -74,13 +74,21 @@ func shapeDigest8892(t *testing.T) (string, int) {
 	return hex.EncodeToString(sum[:]), len(lines)
 }
 
-// snapshotShapeGolden8892 is the digest of the wire shape AT ProtocolVersion 9.
+// snapshotShapeGolden8892 is the digest of the wire shape AT ProtocolVersion 10.
 // If it moves, the shape changed: either bump ProtocolVersion and update this
 // value in the same commit, or explain in the commit message why the change is
 // invisible to a helper.
+//
+// v10 (issue 9054): `ConfigSnapshot.LearnedRouteImportCapped`. ProtocolVersion
+// WAS bumped alongside it, deliberately, and the reason is the one this cell's
+// header states: an old helper that ignores the field keeps black-holing every
+// learned destination whenever the #8355 cap trips, and black-holing IS the
+// defect the field was added to fix. That is the "is what it enforced before
+// acceptable?" question answering no, so the exact-equality gate must REFUSE
+// the pairing rather than let it degrade silently.
 const (
-	snapshotShapeGolden8892  = "6710fc812597de75be7681d16a99672bbd90992d1442cfffe738fc763b96160a"
-	snapshotShapeVersion8892 = 9
+	snapshotShapeGolden8892  = "952c3f04216e800c73f8e20468e6574104b4072e51f3c175a2de720671ab26fa"
+	snapshotShapeVersion8892 = 10
 )
 
 func TestSnapshotShapeIsPinnedToProtocolVersion8892(t *testing.T) {
