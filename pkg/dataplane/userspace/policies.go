@@ -58,6 +58,11 @@ type policyRuleSlot struct {
 	FromZone    string
 	ToZone      string
 	Policy      *config.Policy
+	// Global is true for a `security policies global` rule. It is carried
+	// because FromZone/ToZone cannot say it: a global rule gets the
+	// `junos-global` sentinel on both sides, and so does a leniently-loaded
+	// zone-pair stanza that names it on both sides (#9570).
+	Global bool
 }
 
 func (s policyRuleSlot) policyID() uint32 {
@@ -131,6 +136,7 @@ func walkPolicyRuleSlots(cfg *config.Config, fn func(slot policyRuleSlot) error)
 			FromZone:    "junos-global",
 			ToZone:      "junos-global",
 			Policy:      pol,
+			Global:      true,
 		}); err != nil {
 			return err
 		}

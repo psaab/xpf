@@ -716,6 +716,8 @@ equal to `junos-global` and reclassifies the policy as a global fallback
 (`JUNOS_GLOBAL_ZONE_ID = u16::MAX`) evaluated for EVERY flow, so an
 operator-defined zone of that name silently turns its zone-scoped policies into
 device-wide permits across unrelated zone pairs — a security-boundary escape.
+(That match was on EITHER side until #9570; it now requires BOTH, and the
+snapshot builder poisons a zone-pair rule that names the sentinel — see below.)
 `any`/`junos-host` are reserved policy context tokens that must likewise never
 be a real zone name. `validateReservedZoneNamesStrict`
 (`compiler_validate_strict.go`) hard-rejects such a definition at commit. The
@@ -734,6 +736,34 @@ named-zone use. The tolerant load/peer-sync path downgrades the definition gate
 to a warning (`lenientReservedZoneNames`) so an already-persisted or peer-synced
 config an older binary accepted still boots — #1960 no-brick doctrine, same as
 #3066/#2401.
+
+**A zone-pair stanza naming `junos-global` fails closed on the tolerant path
+(#9570).** The #2401 reference gate rejects `from-zone junos-global` /
+`to-zone junos-global` at commit with a dedicated error that names the reserved
+global-policy context instead of telling the operator to define a zone #3055
+forbids (`ZonePairGlobalSentinelSide` is the shared predicate). The tolerant
+load / peer-sync / upgrade path only warns, and before #9570 the stanza then
+reached the helper verbatim, where `from_zone == "junos-global" || to_zone ==
+"junos-global"` enforced it as a device-wide GLOBAL rule for every zone pair.
+`show security match-policies` meanwhile reported the half spellings refused and
+returned the default verdict for the both-sided one. Two changes close it:
+
+- the helper classifies a rule as global only when BOTH sides carry the
+  sentinel, so a half-sentinel rule takes the zone-pair arm and is refused as an
+  unresolvable zone (#3402);
+- the both-sided spelling is wire-identical to a real `security policies global`
+  rule, so the userspace snapshot builder, the only layer that knows which list
+  a rule came from, poisons every zone-pair rule naming the sentinel with the
+  #5575 `__unsupported__` application sentinel. The helper refuses the whole
+  snapshot (previous-good retained, fresh-boot default-deny), and
+  `PolicyContentRejectionReasons` reports one dedicated reason per rule, so the
+  simulator agrees for all three spellings.
+
+A real `security policies global` rule is never asked the question and is
+unchanged. Coverage: `pkg/config/zone_pair_global_sentinel_9570_test.go`,
+`pkg/dataplane/userspace/policies_reject_global_sentinel_9570_test.go`,
+`pkg/policymatch/zone_pair_global_sentinel_9570_test.go`,
+`userspace-dp/src/policy_junos_global_9570_tests.rs`.
 
 **Wildcard from-zone/to-zone `any` is committed AND enforced (#3090):** an
 ordinary zone-pair policy whose `from-zone` or `to-zone` is the literal Junos

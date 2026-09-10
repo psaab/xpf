@@ -1520,7 +1520,8 @@ pub(crate) struct PolicyState {
     /// tier), in config order. Matches every defined zone pair. Consulted after
     /// the single-wildcard tier and before global rules.
     both_any_indices: Vec<usize>,
-    /// Indices of global rules (from_zone or to_zone = "junos-global").
+    /// Indices of global rules (from_zone AND to_zone = "junos-global"; #9570
+    /// narrowed this from "or").
     global_indices: Vec<usize>,
     /// #3783: the concrete (interface-assignable) zone-id universe for THIS
     /// snapshot — every non-zero, non-reserved id in `zone_name_to_id`, sorted
@@ -2360,7 +2361,21 @@ pub(crate) fn parse_policy_state_with_counters(
             hit_counter: counter_store.rule_hit_counter(&rule_id),
         };
         let idx = state.rules.len();
-        let is_global = rule.from_zone == "junos-global" || rule.to_zone == "junos-global";
+        // #9570: a rule is GLOBAL only when BOTH structural sides carry the
+        // `junos-global` sentinel, which is the only shape the Go builder emits
+        // for a `security policies global` rule (walkPolicyRuleSlots). This was
+        // `||`, so a HALF-sentinel rule (a leniently-loaded zone-pair stanza
+        // `from-zone junos-global to-zone trust`, or its to-side mirror) was
+        // indexed into the global tier with an `Any` scope and enforced for
+        // EVERY zone pair, while the Go #9410 mirror, which already used `&&`,
+        // reported the snapshot refused. A half-sentinel rule now takes the
+        // zone-pair arm below, where `junos-global` resolves to no zone and the
+        // snapshot fails closed with `UnresolvableZoneReference` (#3402), the
+        // verdict the Go mirror already reported. The BOTH-sided zone-pair
+        // spelling is wire-identical to a real global rule and cannot be told
+        // apart here; the Go snapshot builder poisons it instead
+        // (pkg/dataplane/userspace/policies_reject_global_sentinel_9570.go).
+        let is_global = rule.from_zone == "junos-global" && rule.to_zone == "junos-global";
         state.rules.push(rule);
 
         // #3019: arm the LocalDelivery junos-host policy gate iff a rule
@@ -4153,3 +4168,7 @@ mod tests;
 #[cfg(test)]
 #[path = "policy_verdict_corpus_9167.rs"]
 mod policy_verdict_corpus_9167;
+
+#[cfg(test)]
+#[path = "policy_junos_global_9570_tests.rs"]
+mod policy_junos_global_9570_tests;

@@ -65,6 +65,18 @@ func TestPolicyZoneRejectionCatchesEveryUnresolvablePath9410(t *testing.T) {
 		{"global scope unresolvable to", []PolicyRuleSnapshot{globalRule9410("g", nil, []string{"ghost"})}, "ghost"},
 		{"global scope unresolvable BESIDE a resolvable sibling",
 			[]PolicyRuleSnapshot{globalRule9410("g", []string{"trust", "ghost"}, nil)}, "ghost"},
+		// #9570: a HALF-sentinel zone-pair rule as DECODED from the wire, with no
+		// build-time marker. The helper's global predicate is `&&`, so it takes the
+		// zone-pair arm and refuses `junos-global` as an unresolvable zone, and
+		// these rows say the same. Before #9570 the helper used `||` and enforced
+		// this rule for every zone pair while these rows already said "refused".
+		{"zone-pair from junos-global (decoded, no marker)", []PolicyRuleSnapshot{zonePairRule9410("r", "junos-global", "untrust")}, "junos-global"},
+		{"zone-pair to junos-global (decoded, no marker)", []PolicyRuleSnapshot{zonePairRule9410("r", "trust", "junos-global")}, "junos-global"},
+		// #9570: the builder's marker. Every spelling gets the dedicated reason,
+		// including the both-sided one the zone strings alone cannot identify.
+		{"zone-pair from junos-global (builder-marked)", []PolicyRuleSnapshot{markedSentinelRule9570("r", "junos-global", "untrust")}, "junos-global"},
+		{"zone-pair to junos-global (builder-marked)", []PolicyRuleSnapshot{markedSentinelRule9570("r", "trust", "junos-global")}, "junos-global"},
+		{"zone-pair both junos-global (builder-marked)", []PolicyRuleSnapshot{markedSentinelRule9570("r", "junos-global", "junos-global")}, "junos-global"},
 		{
 			// #6464: an empty element inside a NON-wildcard set is not the `any`
 			// wildcard. build_global_zone_scope fails it closed explicitly rather
@@ -92,6 +104,16 @@ func TestPolicyZoneRejectionCatchesEveryUnresolvablePath9410(t *testing.T) {
 			"zone-pair to junos-host", []PolicyRuleSnapshot{zonePairRule9410("r", "trust", "junos-host")}, "",
 		},
 		{"global scope naming junos-host", []PolicyRuleSnapshot{globalRule9410("g", nil, []string{"junos-host"})}, ""},
+		{
+			// #9570 THE WIRE BOUND, pinned rather than hidden: a both-sided rule
+			// with no marker has exactly a real global rule's zone strings, so
+			// neither the helper nor this mirror can refuse it. The builder poisons
+			// the zone-pair spelling before it reaches the wire
+			// (TestZonePairGlobalSentinelIsPoisonedOnTheTolerantPath9570); this row
+			// is why it has to.
+			"both-sided sentinel with no marker reads as an unscoped global",
+			[]PolicyRuleSnapshot{zonePairRule9410("r", "junos-global", "junos-global")}, "",
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got := collectPolicyZoneRejections(tc.rules, zs)
@@ -125,6 +147,11 @@ func TestPolicyZoneRejectionCatchesEveryUnresolvablePath9410(t *testing.T) {
 				t.Errorf("#9410: the reason does not say the whole SNAPSHOT is refused. "+
 					"Per-rule wording would imply the other policies still apply, which is "+
 					"the opposite of what the helper does: %s", got[0])
+			}
+			if strings.Contains(tc.name, "builder-marked") && !strings.Contains(got[0], "reserved global-policy context") {
+				t.Errorf("#9570: a builder-marked rule must get the dedicated reserved-context reason, not "+
+					"the generic undefined-zone one: the helper refuses it on the poison, before any zone "+
+					"is indexed: %s", got[0])
 			}
 		})
 	}

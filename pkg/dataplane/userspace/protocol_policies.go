@@ -382,4 +382,15 @@ type PolicyRuleSnapshot struct {
 	rejectedSourceAddresses []string
 	rejectedDestAddresses   []string
 	rejectedApplications    []string
+	// #9570: build-time-only, like the three above (no JSON tag, never on the
+	// wire). poisonZonePairGlobalSentinel sets it when a ZONE-PAIR stanza names
+	// the reserved `junos-global` sentinel on one or both structural sides, to
+	// config.ZonePairGlobalSentinelSide's answer. It exists because the
+	// both-sided spelling is WIRE-IDENTICAL to a real `security policies global`
+	// rule, so FromZone/ToZone alone cannot tell the content-rejection mirror,
+	// or the reason's scope rendering, which of the two a rule is. A decoded
+	// snapshot leaves it "" and reads as global: that is the honest bound of the
+	// wire, and the reason the builder poisons the rule instead of relying on
+	// the helper to tell them apart.
+	zonePairGlobalSentinelSide string
 }

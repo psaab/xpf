@@ -109,6 +109,13 @@ func buildPolicySnapshotsWithSchedulerStateAndFeeds(cfg *config.Config, activeSt
 	if err := walkPolicyRuleSlots(cfg, func(slot policyRuleSlot) error {
 		policyID := slot.policyID()
 		snap := buildOneRuleSnapshot(cfg, nameToID, addrRepresentable, slot.Policy, slot.FromZone, slot.ToZone, policyID, activeState)
+		// #9570: a ZONE-PAIR stanza naming the reserved `junos-global` sentinel
+		// must fail closed rather than be enforced as a device-wide global rule.
+		// Only the builder can decide this, because only it knows which list the
+		// rule came from.
+		if !slot.Global {
+			poisonZonePairGlobalSentinel(&snap)
+		}
 		out = append(out, snap)
 		return nil
 	}); err != nil {

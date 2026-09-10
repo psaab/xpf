@@ -62,6 +62,15 @@ func collectPolicyContentRejections(policies []PolicyRuleSnapshot) []string {
 				break
 			}
 		}
+		// #9570: the reserved-sentinel poison uses the application sentinel only
+		// as its wire carrier. Its reason is reported by the zone arm
+		// (collectPolicyZoneRejections), which names the real cause; reporting it
+		// here as well would tell the operator that `application any` is
+		// unrepresentable. An application that is independently bad still
+		// records its own offending tokens, so it is still reported.
+		if appBad && rule.zonePairGlobalSentinelSide != "" && len(rule.rejectedApplications) == 0 {
+			appBad = false
+		}
 		srcBad := addressListHasSentinel(rule.SourceLiterals) || addressListHasSentinel(rule.SourceAddresses)
 		dstBad := addressListHasSentinel(rule.DestinationLiterals) || addressListHasSentinel(rule.DestinationAddresses)
 		if !appBad && !srcBad && !dstBad {
@@ -176,7 +185,7 @@ func PolicyContentRejectionReasons(cfg *config.Config, feedOverlay map[string][]
 // name alone is ambiguous because duplicate policy names across distinct zone
 // pairs / global scope are valid and common.
 func policyRejectionScope(rule *PolicyRuleSnapshot) string {
-	if rule.FromZone == "junos-global" && rule.ToZone == "junos-global" {
+	if isGlobalPolicyRule9410(rule) {
 		// #4626 M03: render the FULL scoped-global zone SET (from the plural
 		// wire fields, singular fallback). ZoneScopeSetLabel maps an empty side
 		// to "any", preserving the pre-#4626 "" -> "any" fallback.

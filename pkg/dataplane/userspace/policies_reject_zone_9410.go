@@ -102,6 +102,16 @@ func collectPolicyZoneRejections(policies []PolicyRuleSnapshot, zones []ZoneSnap
 	var reasons []string
 	for i := range policies {
 		rule := &policies[i]
+		// #9570: a zone-pair stanza naming the reserved `junos-global` sentinel.
+		// Checked FIRST, because the both-sided spelling satisfies the global
+		// predicate's zone strings and the half spelling would otherwise be
+		// reported as an ordinary undefined zone. Neither describes what the
+		// helper does with the builder's poison: it refuses the snapshot on the
+		// sentinel application term before it indexes any zone.
+		if rule.zonePairGlobalSentinelSide != "" {
+			reasons = append(reasons, globalSentinelZoneRejectionReason9570(rule))
+			continue
+		}
 		if isGlobalPolicyRule9410(rule) {
 			// GLOBAL: both scope SETS go through build_global_zone_scope.
 			// An empty set or one containing "any" is GlobalZoneScope::Any and
@@ -133,12 +143,16 @@ func collectPolicyZoneRejections(policies []PolicyRuleSnapshot, zones []ZoneSnap
 	return reasons
 }
 
-// isGlobalPolicyRule9410 is the same predicate policyRejectionScope uses to
-// pick the global rendering, kept as one expression so the two cannot drift:
-// a global rule keeps the junos-global sentinel on BOTH structural sides and
-// carries its real scope out-of-band in the Match* fields.
+// isGlobalPolicyRule9410 is the predicate policyRejectionScope also calls to
+// pick the global rendering, so the two cannot drift: a global rule keeps the
+// junos-global sentinel on BOTH structural sides and carries its real scope
+// out-of-band in the Match* fields. #9570: a zone-pair stanza that names the
+// sentinel on both sides has the same zone strings, so the build-time marker
+// excludes it; a decoded snapshot has no marker and reads as global.
 func isGlobalPolicyRule9410(rule *PolicyRuleSnapshot) bool {
-	return rule.FromZone == "junos-global" && rule.ToZone == "junos-global"
+	return rule.FromZone == config.JunosGlobalZoneName &&
+		rule.ToZone == config.JunosGlobalZoneName &&
+		rule.zonePairGlobalSentinelSide == ""
 }
 
 // effectiveGlobalScope9410 mirrors the helper's additive-wire-field
