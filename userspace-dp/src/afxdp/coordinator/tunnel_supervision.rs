@@ -863,6 +863,9 @@ impl super::Coordinator {
         let spawned_ifindex = endpoint.logical_ifindex;
         let listen_port = endpoint.wg_listen_port;
         let kernel_transport = self.wg_kernel_transport_for_endpoint(id);
+        // #9594: the same worker-visible runtime handle the GRE local-tunnel
+        // source threads receive (#1881 D.1), for the kernel-path posture.
+        let shared_runtime = self.ha.runtime_reader();
         let stop = Arc::new(AtomicBool::new(false));
         let stop_clone = stop.clone();
         let recent_exceptions = self.recent_exceptions.clone();
@@ -904,6 +907,7 @@ impl super::Coordinator {
                     engine,
                     listen_port,
                     kernel_transport,
+                    shared_runtime,
                     outer_mtu,
                     thread_per_peer_outer_mtu,
                     endpoint_hosts,

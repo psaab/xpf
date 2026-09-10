@@ -9193,3 +9193,191 @@ fn wg_resteering_restarts_control_threads_with_the_new_decision_9521() {
     assert_eq!(wg9521_decision(&coordinator, 2), Some(Deliver));
     coordinator.stop();
 }
+
+/// #9594 end to end, through the real spawn path: `spawn_one_wg_control_thread`
+/// hands the thread the runtime view, `wg_control_loop` builds the PRODUCTION
+/// posture view (`ShimMapsKernelPathView`), and that view — here reading the
+/// per-tunnel map seam instead of bpffs — decides. The steered endpoint's ingress
+/// (loopback) is placed in the shim's adjudicated set, so its record is a
+/// degraded-window arrival: transit must be refused and counted, and the same
+/// record addressed to the firewall must still be delivered.
+///
+/// This is the cell that dies if `wg_control_loop` ever runs the loop without the
+/// shim-map view: every loop-level cell drives the loop directly with a fake.
+#[test]
+fn wg_steered_endpoint_refuses_degraded_transit_end_to_end_9594() {
+    use crate::afxdp::coordinator::wg_control::kernel_path::{
+        TEST_SHIM_MAPS_9594, TestShimMaps9594, inner_destination,
+    };
+    use crate::afxdp::coordinator::wg_control::{
+        inner_v4_9521, register_tun_standin_9521, tun_standin_recv_9521,
+    };
+    use crate::afxdp::types::WgKernelTransport;
+    use std::sync::atomic::Ordering;
+
+    let lo = unsafe { libc::if_nametoindex(c"lo".as_ptr()) };
+    assert!(lo > 0, "setup: the loopback interface has no ifindex");
+    let (peer_priv, peer_pub) = crate::afxdp::wg::tests::keypair();
+    let peer_hex: String = peer_pub.iter().map(|b| format!("{b:02x}")).collect();
+    // #9549: listen ports come from test_ports, never fixed numbers. This cell first
+    // bound 51971/51972 — the #9521 resteering cell's pair before #9606 moved it.
+    let (steered_port, other_port) = (
+        crate::test_ports::reserve_ephemeral_udp_port(),
+        crate::test_ports::reserve_ephemeral_udp_port(),
+    );
+    let snap = wg9521_snapshot(
+        ["wgt9594s", "wgt9594o"],
+        [4541, 4542],
+        [steered_port, other_port],
+        steered_port,
+        &peer_hex,
+    );
+    let tun = register_tun_standin_9521("wgt9594s");
+    let _other_tun = register_tun_standin_9521("wgt9594o");
+    let inner = inner_v4_9521();
+    let inner_dst = inner_destination(&inner).expect("parseable inner");
+    let set_maps = |local: bool| {
+        let mut seam = TEST_SHIM_MAPS_9594.lock().unwrap_or_else(|e| e.into_inner());
+        seam.retain(|(name, _)| name != "wgt9594s");
+        let mut maps = TestShimMaps9594::default();
+        maps.ingress.insert(lo);
+        if local {
+            maps.local.insert(inner_dst);
+        }
+        seam.push(("wgt9594s".to_string(), maps));
+    };
+    set_maps(false);
+
+    let mut coordinator = Coordinator::new();
+    coordinator
+        .refresh_runtime_snapshot(&snap)
+        .expect("refresh_runtime_snapshot must succeed");
+    assert_eq!(wg9521_decision(&coordinator, 1), Some(WgKernelTransport::Deliver));
+
+    let allowed: Vec<ipnet::IpNet> =
+        vec!["10.95.21.0/24".parse().unwrap(), "fd95:21::/64".parse().unwrap()];
+    let engine = coordinator
+        .forwarding
+        .wg_engines
+        .get(&1)
+        .cloned()
+        .expect("the snapshot built a WireGuard engine for the steered endpoint");
+    let init =
+        crate::afxdp::wg::tests::established_initiator_for(&engine, peer_priv, peer_pub, allowed);
+    let resp_pub = engine.local_public_key();
+    let dst: std::net::SocketAddr = format!("127.0.0.1:{steered_port}").parse().unwrap();
+    let sender = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+    let send_until = |want_delivery: bool| -> (Option<Vec<u8>>, bool) {
+        thread::sleep(Duration::from_millis(200));
+        while tun_standin_recv_9521(&tun).is_some() {}
+        let before = engine.counters().rx_degraded_transit_drops.load(Ordering::Relaxed);
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while std::time::Instant::now() < deadline {
+            let mut wire = vec![0u8; 2048];
+            let enc = init.try_encap(&resp_pub, &inner, &mut wire).expect("initiator encap");
+            let _ = sender.send_to(&wire[..enc.len], dst);
+            thread::sleep(Duration::from_millis(40));
+            if let Some(bytes) = tun_standin_recv_9521(&tun) {
+                return (Some(bytes), false);
+            }
+            if !want_delivery
+                && engine.counters().rx_degraded_transit_drops.load(Ordering::Relaxed) > before
+            {
+                thread::sleep(Duration::from_millis(100));
+                return (tun_standin_recv_9521(&tun), true);
+            }
+        }
+        (None, false)
+    };
+
+    let (delivered, dropped) = send_until(false);
+    assert!(
+        dropped,
+        "the steered endpoint's spawned thread never counted a degraded-transit drop for a record \
+         on an adjudicated ingress — either the record never arrived, or the thread is running \
+         without the shim-map posture view"
+    );
+    assert!(
+        delivered.is_none(),
+        "the steered endpoint's spawned thread wrote degraded-window TRANSIT plaintext to its \
+         wgN TUN (#9594)"
+    );
+
+    set_maps(true);
+    let (delivered, _) = send_until(true);
+    assert_eq!(
+        delivered.as_deref(),
+        Some(&inner[..]),
+        "positive control through the same spawned thread: a record addressed to the firewall \
+         must still be delivered on an adjudicated ingress"
+    );
+
+    TEST_SHIM_MAPS_9594
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .retain(|(name, _)| name != "wgt9594s");
+    drop(coordinator);
+}
+
+/// #9594: the PRODUCTION posture view places an ingress the way the fix depends
+/// on — in the shim's ingress set is covered (degraded arrival); a CONFIGURED
+/// interface outside it is uncovered, #8274's residual, and must stay delivered;
+/// an ifindex that is neither cannot be placed. The middle case is the one a
+/// regression would hide in: if the view stopped consulting the runtime
+/// forwarding state, every uncovered ingress would read as unplaceable and its
+/// transit would be silently dropped — no loop cell sees that, because they all
+/// drive the loop with a fixed view.
+#[test]
+fn shim_maps_view_places_configured_uncovered_ingress_9594() {
+    use crate::afxdp::coordinator::wg_control::kernel_path::{
+        ShimMapsKernelPathView, TEST_SHIM_MAPS_9594, TestShimMaps9594, WgKernelPathIngress,
+        WgKernelPathView,
+    };
+    let (_peer_priv, peer_pub) = crate::afxdp::wg::tests::keypair();
+    let peer_hex: String = peer_pub.iter().map(|b| format!("{b:02x}")).collect();
+    // #9549: the snapshot spawns real control threads that bind these ports.
+    let (port_k, port_l) = (
+        crate::test_ports::reserve_ephemeral_udp_port(),
+        crate::test_ports::reserve_ephemeral_udp_port(),
+    );
+    let snap = wg9521_snapshot(
+        ["wgt9594k", "wgt9594l"],
+        [4551, 4552],
+        [port_k, port_l],
+        port_k,
+        &peer_hex,
+    );
+    let mut coordinator = Coordinator::new();
+    coordinator
+        .refresh_runtime_snapshot(&snap)
+        .expect("refresh_runtime_snapshot must succeed");
+    assert!(
+        coordinator.forwarding.ifindex_to_name.contains_key(&4551),
+        "setup: ifindex 4551 must be a configured interface in the runtime forwarding state"
+    );
+    {
+        let mut seam = TEST_SHIM_MAPS_9594.lock().unwrap_or_else(|e| e.into_inner());
+        seam.retain(|(name, _)| name != "wgt9594-view");
+        let mut maps = TestShimMaps9594::default();
+        maps.ingress.insert(4552);
+        seam.push(("wgt9594-view".to_string(), maps));
+    }
+    let view = ShimMapsKernelPathView::new("wgt9594-view".to_string(), coordinator.ha.runtime_reader());
+    assert_eq!(view.ingress(Some(4552)), WgKernelPathIngress::Covered, "in the shim's ingress set");
+    assert_eq!(
+        view.ingress(Some(4551)),
+        WgKernelPathIngress::Uncovered,
+        "a configured interface the shim does not adjudicate is #8274's residual and must be \
+         delivered — reading it as unplaceable would drop its transit silently"
+    );
+    assert_eq!(
+        view.ingress(Some(999_999)),
+        WgKernelPathIngress::Unknown,
+        "an ifindex neither adjudicated nor configured cannot be placed"
+    );
+    assert_eq!(view.ingress(None), WgKernelPathIngress::Unknown, "no pktinfo cmsg");
+    TEST_SHIM_MAPS_9594
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .retain(|(name, _)| name != "wgt9594-view");
+}

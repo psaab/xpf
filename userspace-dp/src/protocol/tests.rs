@@ -2523,6 +2523,7 @@ fn process_status_wg_tunnels_roundtrip_and_compat() {
         decap_drops_malformed_inner: 24,
         decap_drops_buffer: 25,
         rx_unsteered_transport_drops: 55,
+        rx_degraded_transit_drops: 91,
         encap_packets: 26,
         encap_bytes: 27,
         encap_drops_no_session: 28,
@@ -2609,6 +2610,7 @@ fn process_status_wg_tunnels_roundtrip_and_compat() {
     assert_eq!(b.hs_initiations_created, 1);
     assert_eq!(b.decap_drops_buffer, 25);
     assert_eq!(b.rx_unsteered_transport_drops, 55);
+    assert_eq!(b.rx_degraded_transit_drops, 91);
     assert_eq!(b.tun_rx_drops_no_endpoint, 35);
     assert_eq!(b.encap_drops_expired, 36);
     assert_eq!(b.decap_drops_expired, 37);

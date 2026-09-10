@@ -1,6 +1,7 @@
 package format
 
 import (
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -226,5 +227,23 @@ func TestFormatWireguardUnsteeredPortDrops9521(t *testing.T) {
 	}
 	if out := FormatWireguardStatus(st, true, now); !strings.Contains(out, "unsteered-port           6") {
 		t.Errorf("detail reason table must name the unsteered-port drops:\n%s", out)
+	}
+}
+
+// #9594: the steered port's degraded-window TRANSIT drops (records that reached
+// its control thread through the kernel on an ingress the XDP shim adjudicates)
+// are the operator's only runtime evidence that a failover window refused
+// tunnel transit instead of forwarding it. Same rule as #9521: counted in the
+// summary's receive total AND named in the detail table.
+func TestFormatWireguardDegradedTransitDrops9594(t *testing.T) {
+	now := time.Unix(1_770_000_090, 0)
+	st := wgFmtFixture()
+	st.WgTunnels[0].RxDegradedTransitDrops = 7
+	if out := FormatWireguardStatus(st, false, now); !strings.Contains(out, "Drops:              9 receive,") {
+		t.Errorf("summary receive-drop total must include the 7 degraded-transit drops (2 replay + 7):\n%s", out)
+	}
+	out := FormatWireguardStatus(st, true, now)
+	if !regexp.MustCompile(`(?m)^\s*degraded-transit\s+7\s*$`).MatchString(out) {
+		t.Errorf("detail reason table must name the degraded-transit drops:\n%s", out)
 	}
 }

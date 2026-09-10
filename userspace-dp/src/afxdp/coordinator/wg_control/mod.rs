@@ -80,6 +80,7 @@ use std::os::fd::AsRawFd;
 
 mod attempt;
 mod dispatch;
+pub(super) mod kernel_path;
 mod mtu;
 mod sock;
 
@@ -133,6 +134,9 @@ pub(super) fn wg_control_loop(
     // #9521: may a transport record's plaintext received on this socket be
     // written to the TUN? Decided by the coordinator at spawn.
     kernel_transport: crate::afxdp::types::WgKernelTransport,
+    // #9594: the worker-visible runtime view, so the kernel-path posture can ask
+    // whether a record's ingress is a configured interface.
+    shared_runtime: crate::afxdp::types::RuntimeViewReader,
     outer_mtu: usize,
     per_peer_outer_mtu: std::collections::HashMap<[u8; 32], usize>,
     // #7158: peers whose endpoint was authored as a DNS hostname, as
@@ -226,7 +230,12 @@ pub(super) fn wg_control_loop(
         resolver_telemetry,
     );
 
-    run_wg_control_loop(
+    // #9594: the production kernel-path posture — the XDP shim's own pinned
+    // ingress and local-address maps. Built here, on the control thread that
+    // uses it.
+    let kernel_path_view =
+        kernel_path::ShimMapsKernelPathView::new(tunnel_name.clone(), shared_runtime);
+    run_wg_control_loop_with_kernel_path(
         &tunnel_name,
         &engine,
         &socket,
@@ -238,10 +247,47 @@ pub(super) fn wg_control_loop(
         &recent_exceptions,
         &stop,
         kernel_transport,
+        &kernel_path_view,
     );
     // #1866 D3: clean stop-flag exit (teardown) — rare, one line.
     eprintln!("xpf-userspace-dp: WG control thread stopped tun={tunnel_name}");
     let _ = tunnel_endpoint_id;
+}
+
+/// #9594: the loop with NO kernel-path posture view — every kernel-path record
+/// is handled as arriving on an UNCOVERED ingress, which is the pre-#9594
+/// behavior the older loop cells were written against. Test-only by
+/// construction: a production caller would be a silent fail-open, so it does not
+/// exist outside `cfg(test)`; `wg_control_loop` passes the shim-map view.
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+fn run_wg_control_loop(
+    tunnel_name: &str,
+    engine: &crate::afxdp::wg::WgEngine,
+    socket: &UdpSocket,
+    socket_is_v6: bool,
+    tun: std::fs::File,
+    outer_mtu: usize,
+    per_peer_outer_mtu: &std::collections::HashMap<[u8; 32], usize>,
+    endpoint_resolver: Option<&crate::afxdp::wg::endpoint_resolver::WgEndpointResolver>,
+    recent_exceptions: &Arc<Mutex<ExceptionEventRing>>,
+    stop: &AtomicBool,
+    kernel_transport: crate::afxdp::types::WgKernelTransport,
+) {
+    run_wg_control_loop_with_kernel_path(
+        tunnel_name,
+        engine,
+        socket,
+        socket_is_v6,
+        tun,
+        outer_mtu,
+        per_peer_outer_mtu,
+        endpoint_resolver,
+        recent_exceptions,
+        stop,
+        kernel_transport,
+        &kernel_path::UncoveredKernelPathView,
+    );
 }
 
 /// #9521 test seam: pre-opened stand-ins for the wgN TUN, keyed by tunnel name.
@@ -349,7 +395,7 @@ pub(super) fn inner_v6_9521() -> Vec<u8> {
 /// logic is unit-testable without a real TUN device (the production
 /// caller binds the socket and attaches the persistent wgN TUN above).
 #[allow(clippy::too_many_arguments)]
-fn run_wg_control_loop(
+fn run_wg_control_loop_with_kernel_path(
     tunnel_name: &str,
     engine: &crate::afxdp::wg::WgEngine,
     socket: &UdpSocket,
@@ -361,8 +407,14 @@ fn run_wg_control_loop(
     recent_exceptions: &Arc<Mutex<ExceptionEventRing>>,
     stop: &AtomicBool,
     kernel_transport: crate::afxdp::types::WgKernelTransport,
+    kernel_path_view: &dyn kernel_path::WgKernelPathView,
 ) {
     use std::collections::HashMap;
+    // #9594: ask the kernel for each datagram's receiving interface. Set HERE,
+    // inside the loop, rather than beside `set_recv_tos_options` in
+    // `wg_control_loop`, so every path that runs the loop — including the cells
+    // that drive it directly — exercises the option the posture depends on.
+    sock::set_recv_pktinfo_options(socket.as_raw_fd(), socket_is_v6);
     // #1434 multi-peer: the control loop tracks PER-PEER state. The
     // effective endpoint (configured initiator endpoint, or the source
     // LEARNED from an authenticated inbound datagram for a responder-only
@@ -438,6 +490,7 @@ fn run_wg_control_loop(
                     len,
                     from,
                     outer_ecn,
+                    ingress_ifindex,
                 }) if len > 0 => {
                     did_work = true;
                     // Learn / refresh the peer endpoint from `from` ONLY
@@ -458,6 +511,8 @@ fn run_wg_control_loop(
                         tunnel_name,
                         recent_exceptions,
                         kernel_transport,
+                        ingress_ifindex,
+                        kernel_path_view,
                     );
                     // #1434: learn THIS peer's endpoint from `from` (WG
                     // endpoint roaming is per-peer). Only the

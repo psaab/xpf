@@ -152,6 +152,13 @@ pub(crate) struct WgCounters {
     /// with no zone policy. Counted after authentication, so an unauthenticated
     /// sender cannot move it.
     pub(crate) rx_unsteered_transport_drops: AtomicU64,
+    /// #9594: authenticated transport records for the STEERED listen port that
+    /// reached its control thread through the kernel on an ingress the XDP shim
+    /// adjudicates — which happens only while the dataplane is degraded — whose
+    /// inner packet was TRANSIT. Dropped instead of written to the wgN TUN, where
+    /// the kernel would have forwarded it with no zone policy. Inner packets
+    /// addressed to the firewall itself are still delivered.
+    pub(crate) rx_degraded_transit_drops: AtomicU64,
 
     // --- transport encap (egress) ---
     pub(crate) encap_packets: AtomicU64,

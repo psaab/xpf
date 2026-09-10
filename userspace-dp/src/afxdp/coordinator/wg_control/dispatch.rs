@@ -69,6 +69,10 @@ pub(super) fn dispatch_inbound(
     tunnel_name: &str,
     recent_exceptions: &Arc<Mutex<ExceptionEventRing>>,
     kernel_transport: crate::afxdp::types::WgKernelTransport,
+    // #9594: the interface the kernel received this datagram on, and the posture
+    // that places it relative to the XDP shim's adjudicated ingress set.
+    ingress_ifindex: Option<u32>,
+    kernel_path_view: &dyn super::kernel_path::WgKernelPathView,
 ) -> InboundOutcome {
     let Some(&wg_type) = datagram.first() else {
         return InboundOutcome::Unauthenticated;
@@ -177,6 +181,27 @@ pub(super) fn dispatch_inbound(
                     if kernel_transport == crate::afxdp::types::WgKernelTransport::DropUnsteered {
                         WgCounters::bump(&engine.counters().rx_unsteered_transport_drops);
                         return InboundOutcome::Authenticated(outcome.peer_pubkey);
+                    }
+                    // #9594: the STEERED port's record. #8274 kept this TUN write
+                    // for ingress the XDP shim does not adjudicate. On an ingress
+                    // it DOES adjudicate, a healthy shim claims the record for the
+                    // worker, so reaching this socket means the shim took a
+                    // degraded arm. Apply the shim's own degraded posture to the
+                    // decapsulated packet: traffic addressed to the firewall is
+                    // delivered (it meets the nftables input chains), transit is
+                    // dropped and counted (it would ride the open forward hook with
+                    // no zone policy). See `kernel_path.rs`.
+                    let ingress = kernel_path_view.ingress(ingress_ifindex);
+                    if ingress != super::kernel_path::WgKernelPathIngress::Uncovered {
+                        let inner_is_local =
+                            super::kernel_path::inner_destination(&decap_buf[..outcome.len])
+                                .is_some_and(|dst| kernel_path_view.destination_is_local(dst));
+                        if super::kernel_path::kernel_path_disposition(ingress, inner_is_local)
+                            == super::kernel_path::WgKernelPathDisposition::DropDegradedTransit
+                        {
+                            WgCounters::bump(&engine.counters().rx_degraded_transit_drops);
+                            return InboundOutcome::Authenticated(outcome.peer_pubkey);
+                        }
                     }
                     // #2317: RFC 6040 §4.2 decap-side ECN combine. The
                     // outer ECN was captured out-of-band via recvmsg's

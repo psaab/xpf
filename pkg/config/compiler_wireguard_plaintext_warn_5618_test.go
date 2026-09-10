@@ -81,12 +81,15 @@ func TestWGPlaintextWarningScopesTheZoneToTheDataplanePath(t *testing.T) {
 		`security-zone "vpn"`,
 		// The zone governs the dataplane path, and the advisory says so ...
 		"which governs its traffic on the dataplane path but NOT on the kernel path",
-		// ... names the kernel path, both ways onto it, and the owner of the
-		// degraded half ...
+		// ... names the kernel path's forwarding case (uncovered ingress) ...
 		"written straight to the wgN TUN",
 		"on an ingress interface the dataplane does not attach to",
-		"while the dataplane is degraded",
-		"#9594",
+		// ... and says a degraded window's arrivals on adjudicated ingress have
+		// their transit REFUSED (#9594). Re-anchored by #9594: this cell used to
+		// require "while the dataplane is degraded" as one of the ways ONTO the
+		// forwarding path, which #9594 made false.
+		"While the dataplane is degraded",
+		"transit is dropped and counted as a degraded-transit receive drop (#9594)",
 		// ... and does not tell a multi-port operator that a refused tunnel leaks.
 		"A record for any other listen port is dropped on that path (#9521)",
 	} {
@@ -101,6 +104,9 @@ func TestWGPlaintextWarningScopesTheZoneToTheDataplanePath(t *testing.T) {
 		"NOT ENFORCED",
 		"does NOT govern its decapsulated traffic",
 		"decapsulated traffic on WireGuard tunnels is NOT evaluated",
+		// The pre-#9594 account, which listed a degraded window as a way onto
+		// the TUN write.
+		"or while the dataplane is degraded",
 	} {
 		if strings.Contains(adv, stale) {
 			t.Errorf("advisory still carries the pre-#8274 claim %q, false since the "+
