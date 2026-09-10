@@ -423,11 +423,11 @@ fn ssh(flags: u8, arrival: i32) -> (Vec<u8>, UserspaceDpMeta) {
     tcp(REAL, LAN_ADDRESS, 40000, 22, flags, arrival)
 }
 
-/// The owner control and the foreign packets use SEPARATE tables on purpose. On
-/// this fixture the owner's own first ACK already tears the host-bound session
-/// down, through the #8356 re-derivation judging it by a zone pair; that is not
-/// this cell's subject and is #9563. Sequencing the control before
-/// the foreign packet would make this cell measure that instead.
+/// The owner control and the foreign packets use SEPARATE tables on purpose.
+/// Before #9563 the owner's own first ACK tore this host-bound session down,
+/// through the #8356 re-derivation judging it by a zone pair. The re-derivation
+/// now declines host-bound sessions. Separate tables still keep this cell
+/// independent of any revocation the owner's own packets could cause.
 #[test]
 fn a_foreign_zone_is_held_to_its_own_host_inbound_services_9519() {
     let fw = forwarding(Posture {
@@ -519,7 +519,8 @@ fn a_foreign_packet_is_not_counted_against_the_owners_rule_9519() {
 
 /// The `to-zone junos-host` half of host-bound authority. dmz's services admit
 /// SSH, so the coarse gate passes; dmz's own junos-host policy denies it. The
-/// question must be asked FROM dmz. The owner never sends an ACK here (#9563).
+/// question must be asked FROM dmz. The owner never sends an ACK here; before
+/// #9563 that ACK would have revoked the session by zone pair.
 #[test]
 fn a_foreign_zone_is_held_to_its_own_junos_host_policy_9519() {
     let fw = forwarding(Posture {

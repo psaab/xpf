@@ -711,6 +711,14 @@ one and comes from the same place: `upsert_synced` stamps `0`, which is never
 live, so an import re-derives against THIS node's policy on the first packet it
 forwards after promotion.
 
+Host-bound sessions are declined (#9563). A `LocalDelivery` resolution sets
+`egress_ifindex` to the local interface, so the zone pair re-derived for such a
+session is `from -> the local interface's own zone`. Host-inbound admission
+never consulted that pair, and re-deriving it revoked host-bound sessions on
+their owner's first ACK. Their authority is the host-inbound gate plus
+`to-zone junos-host` policy, which the established-hit path re-evaluates on
+every host-bound packet.
+
 **Scope is EVERY session, not only peer-synced imports.** The narrow scope would
 need a peer-synced marker on the entry, which does not exist; the broad one
 needs nothing new and removes the asymmetry rather than preserving it.

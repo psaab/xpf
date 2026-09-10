@@ -37,10 +37,11 @@ struct Fixture {
     /// Replace wan's host-inbound system-services (default: any-service).
     wan_services: Option<&'static [&'static str]>,
     junos_host: Vec<PolicyRuleSnapshot>,
-    /// A wan -> lan permit naming the local address. The #8356 re-derivation
-    /// judges a host-bound session by that transit pair and would otherwise
-    /// revoke it on its first ACK (#9563); the hit-path cells need the ACK to
-    /// reach the host-bound gates.
+    /// A wan -> lan permit naming the local address. Before #9563 the #8356
+    /// re-derivation judged a host-bound session by that transit pair and, without
+    /// this permit, revoked it on its first ACK before the hit-path cells could
+    /// reach the host-bound gates. The re-derivation now declines host-bound
+    /// sessions. The flag is kept so these cells do not depend on that decline.
     permit_wan_to_local: bool,
 }
 

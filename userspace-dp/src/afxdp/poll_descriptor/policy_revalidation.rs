@@ -16,6 +16,16 @@
 //! FILTER; not doing the same when a commit narrows ZONE POLICY is the
 //! asymmetry, not a safe default.
 //!
+//! # Host-bound sessions (#9563)
+//!
+//! A `LocalDelivery` session is declined. Every local-delivery resolution sets
+//! `egress_ifindex` to the LOCAL interface, so a zone-pair re-derivation would ask
+//! `from -> the local interface's own zone`. Host-inbound admission never
+//! consulted that pair, and the re-derivation revoked the session on its owner's
+//! first ACK. Host-bound authority is the host-inbound gate plus `to-zone
+//! junos-host` policy, and the established-hit path re-evaluates both on every
+//! host-bound packet.
+//!
 //! # ICMP scope (#8618)
 //!
 //! #8356 shipped declining ICMP outright, leaving #7323's residual open for
@@ -259,6 +269,17 @@ pub(super) fn revalidate_zone_policy_on_session_hit(
     // already taking the slow path, and steady-state established traffic never
     // reaches this function at all. Pay the hash, keep the diff narrow; the
     // threading is a measured optimisation if a profile ever asks for it.
+    // #9563: a host-bound (LocalDelivery) session is not judged by a transit zone
+    // pair. Its authority is the host-inbound gate plus `to-zone junos-host` policy,
+    // and the established-hit path re-evaluates both on every host-bound packet.
+    // Every local-delivery resolution sets `egress_ifindex` to the LOCAL interface,
+    // so re-deriving here asked `from -> the local interface's own zone`, a pair
+    // host-inbound admission never consulted. The default policy then denied it and
+    // the owner's own first ACK revoked the session. Declined before the revalidation
+    // lookup, so host-bound hits pay nothing for it.
+    if decision.resolution.disposition == super::ForwardingDisposition::LocalDelivery {
+        return None;
+    }
     let canonical_key = match sessions.policy_revalidation_target(session_key) {
         PolicyRevalidationTarget::Fresh => return None,
         // No entry this tuple may safely name (#2120 transient synced hit, or a

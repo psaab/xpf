@@ -574,6 +574,10 @@ mod tests_session_hit_authority_9519;
 #[cfg(test)]
 #[path = "tests_host_bound_post_dnat_9529.rs"]
 mod tests_host_bound_post_dnat_9529;
+// #9563: the #8356 re-derivation declines host-bound (LocalDelivery) sessions.
+#[cfg(test)]
+#[path = "tests_host_bound_revalidation_9563.rs"]
+mod tests_host_bound_revalidation_9563;
 // #7160 (#2387): the routing-domain stamp on the REAL poll path — the WIRING,
 // which no unit-level cell can reach.
 #[cfg(test)]
