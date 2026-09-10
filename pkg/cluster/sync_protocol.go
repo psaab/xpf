@@ -1290,56 +1290,83 @@ func encodeDHCPLeasePayload(leases []dhcpserver.SyncLease) []byte {
 // caller must retain its prior set when this is false rather than storing a
 // partial one — the same disposition the stale-sequence guard already applies
 // one branch above ("standby retains newer set").
+// minDHCPLeaseRecordLen is the smallest record that can carry a real lease
+// (#9507): the #2239 layout with a one-byte address and every other string empty.
+// That is 1 family, a 2-byte address length plus 1 address byte, 12 bytes of
+// SubnetID/ValidLife/Remaining, 1 state, three 2-byte hwaddr/clientid/duid
+// lengths, 4 IAID, a 2-byte lease-type length, 4 prefix length, a 2-byte hostname
+// length and 1 FQDN flags byte: 36. #5073 later appended PreferredRemaining (4). A
+// rolling upgrade can still deliver the #2239 form, so the floor stays there. A
+// record with an EMPTY address (35 bytes) is rejected separately, so a shorter
+// record could only carry a truncated lease.
+const minDHCPLeaseRecordLen = 36
+
 func decodeDHCPLeasePayload(payload []byte) ([]dhcpserver.SyncLease, bool) {
 	if len(payload) < 4 {
 		return nil, false
 	}
 	count := int(binary.LittleEndian.Uint32(payload[:4]))
-	off := 4
-	malformed := false
-	// Clamp the preallocation to what the payload can physically hold: count
-	// is untrusted on-wire data, and each record consumes at least its 4-byte
-	// length prefix, so there can be at most len(payload)/4 records. Without
-	// this, a corrupt/malicious frame claiming count=0xFFFFFFFF would attempt
-	// a ~hundreds-of-GB make() (SyncLease is ~160 bytes) and panic before the
-	// loop's truncation guard fires. Valid payloads are unaffected (a real
-	// count is always <= len(payload)/4). Clamping count also bounds the loop.
+	// count is untrusted on-wire data. Each record consumes at least its 4-byte
+	// length prefix, so a frame holds at most len(payload)/4 of them.
 	// #7175: a count exceeding what the payload can physically hold is not a
-	// short valid set — no encoder produces it. The clamp still bounds the
-	// allocation, and the frame is now reported as malformed rather than
-	// silently reduced to whatever fit.
+	// short valid set; no encoder produces it, so the frame is malformed.
+	// #9507: say so BEFORE allocating anything. The result (nil, false) is the one
+	// the pre-#9507 clamp-then-loop reached anyway, after a len/4-sized make().
 	if maxRecords := len(payload) / 4; count > maxRecords {
-		count = maxRecords
-		malformed = true
+		return nil, false
 	}
-	out := make([]dhcpserver.SyncLease, 0, count)
+	// #9507 pass 1: validate the framing of every record the count names, with
+	// NO allocation. The old decoder preallocated `count` 168-byte leases before
+	// reading a record, and accepted zero-length records, so 4 wire bytes bought
+	// a retained lease: 42x the frame, about 672 MiB at the 16 MiB cap.
+	whole := 0
+	off := 4
 	for i := 0; i < count; i++ {
 		if off+4 > len(payload) {
 			// The buffer ended while the count still expected records. Every
-			// record that DID arrive is whole — only the sender's count was
-			// wrong — so this stays recoverable, which is the contract
+			// record that DID arrive is whole; only the sender's count was
+			// wrong. So this stays recoverable, which is the contract
 			// TestDHCPLeasePayload_TruncatedStream pins. Deliberately NOT
-			// promoted to malformed: nothing was lost mid-record.
+			// malformed: nothing was lost mid-record.
 			break
 		}
 		recLen := int(binary.LittleEndian.Uint32(payload[off:]))
 		off += 4
-		if recLen < 0 || off+recLen > len(payload) {
-			// A record is CUT: its declared length runs past the buffer, so
-			// part of a lease is gone. This is the C179-075 case — the full-set
-			// push REPLACES the peer set, so returning the prefix would delete
-			// every lease after the cut on the standby.
-			malformed = true
-			break
+		if recLen < minDHCPLeaseRecordLen {
+			// #9507: shorter than any record an encoder has ever emitted (a
+			// zero-length record is the 42x lever). Corrupt data, not a short
+			// set.
+			return nil, false
 		}
+		if off+recLen > len(payload) {
+			// A record is CUT: its declared length runs past the buffer, so part
+			// of a lease is gone. This is the C179-075 case. The full-set push
+			// REPLACES the peer set, so returning the prefix would delete every
+			// lease after the cut on the standby.
+			return nil, false
+		}
+		// #9507: every encoder writes the lease's address first, after the
+		// family byte. A record whose address is empty, or overruns the record,
+		// decodes to a lease with no address, which is not a lease.
+		if addrLen := int(binary.LittleEndian.Uint16(payload[off+1:])); addrLen == 0 || 3+addrLen > recLen {
+			return nil, false
+		}
+		off += recLen
+		whole++
+	}
+	// Pass 2: decode exactly the records pass 1 validated, into exact capacity.
+	// A retained lease therefore costs at least 4+minDHCPLeaseRecordLen wire bytes
+	// (168/40, about 4.2x the frame), and an impossible frame allocates nothing.
+	// Trailing bytes after the last record are NOT malformed: the #5073 full-set
+	// seq trailer is appended exactly so an old decoder walks its records and
+	// ignores the remainder (TestFullSetSeqDHCPTrailerIgnoredByOldDecoder).
+	out := make([]dhcpserver.SyncLease, 0, whole)
+	off = 4
+	for i := 0; i < whole; i++ {
+		recLen := int(binary.LittleEndian.Uint32(payload[off:]))
+		off += 4
 		out = append(out, decodeOneLease(payload[off:off+recLen]))
 		off += recLen
-	}
-	// NOTE: trailing bytes after the last record are NOT malformed. The #5073
-	// full-set seq trailer is appended exactly so an old decoder walks its
-	// records and ignores the remainder (TestFullSetSeqDHCPTrailerIgnoredByOldDecoder).
-	if malformed {
-		return nil, false
 	}
 	return out, true
 }
