@@ -23,6 +23,8 @@ mod session;
 mod slowpath;
 #[cfg(test)]
 mod test_zone_ids;
+#[cfg(test)]
+mod test_ports;
 mod state_writer;
 mod tcp_flags;
 #[allow(dead_code)]

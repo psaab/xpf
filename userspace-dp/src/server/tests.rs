@@ -138,6 +138,64 @@ fn req(request_type: &str) -> ControlRequest {
 /// down the write side so a body WITHOUT a terminating newline still
 /// reaches EOF (the `take` cap, not the missing newline, must be what
 /// bounds the read).
+/// #9549: `run_request`, but the WireGuard secrets survive the socket.
+///
+/// `wg_local_privkey_hex` is `#[serde(default, skip_serializing)]` so the key never
+/// reaches the state file on disk, and the Go control plane writes it into the JSON
+/// it sends. `run_request` serializes the request with serde, so the key is dropped
+/// on the wire. The handler then hydrates no WireGuard endpoint at all, and any
+/// assertion that no WG thread spawned passes because there was nothing to spawn.
+/// This helper re-inserts each secret from the in-memory request before sending,
+/// which is what the real control plane delivers.
+fn run_request_delivering_wg_secrets(
+    state: Arc<Mutex<ServerState>>,
+    request: ControlRequest,
+) -> ControlResponse {
+    let mut payload = serde_json::to_value(&request).expect("request to json");
+    if let Some(snapshot) = request.snapshot.as_ref() {
+        let endpoints = payload
+            .get_mut("snapshot")
+            .and_then(|s| s.get_mut("tunnel_endpoints"))
+            .and_then(|e| e.as_array_mut())
+            .expect("serialized snapshot carries tunnel_endpoints");
+        for (ep, ep_json) in snapshot.tunnel_endpoints.iter().zip(endpoints.iter_mut()) {
+            if !ep.wg_local_privkey_hex.is_empty() {
+                ep_json["wg_local_privkey_hex"] =
+                    serde_json::Value::String(ep.wg_local_privkey_hex.clone());
+            }
+            if let Some(peers) = ep_json.get_mut("wg_peers").and_then(|p| p.as_array_mut()) {
+                for (peer, peer_json) in ep.wg_peers.iter().zip(peers.iter_mut()) {
+                    if !peer.wg_preshared_key_hex.is_empty() {
+                        peer_json["wg_preshared_key_hex"] =
+                            serde_json::Value::String(peer.wg_preshared_key_hex.clone());
+                    }
+                }
+            }
+        }
+    }
+    let state_file = unique_state_file(&request.request_type);
+    let (mut client, server) =
+        std::os::unix::net::UnixStream::pair().expect("control socket pair");
+    let running = Arc::new(AtomicBool::new(true));
+    let session_domain = state.lock().expect("state").afxdp.session_domain().clone();
+    let handle = {
+        let state_file = state_file.clone();
+        std::thread::spawn(move || {
+            handle_stream(server, &state_file, state, running, session_domain)
+        })
+    };
+    serde_json::to_writer(&mut client, &payload).expect("write request");
+    std::io::Write::write_all(&mut client, b"\n").expect("newline");
+    let response: ControlResponse =
+        serde_json::from_reader(std::io::BufReader::new(client)).expect("read response");
+    handle
+        .join()
+        .expect("handler thread")
+        .expect("handler result");
+    let _ = std::fs::remove_file(&state_file);
+    response
+}
+
 fn run_raw(state: Arc<Mutex<ServerState>>, payload: &[u8]) -> Result<(), String> {
     use std::io::Write as _;
     let state_file = unique_state_file("raw");
@@ -3042,7 +3100,13 @@ fn bindings_settled_registered_needs_ready_or_error() {
 #[test]
 fn wg1866_disarmed_same_plan_apply_does_not_hold_wg_ports() {
     use crate::{ConfigSnapshot, CONFIG_SNAPSHOT_PROTOCOL_VERSION};
-    let port: u16 = 51879;
+    // Hold the WG port for the whole test: a disarmed helper must not even
+    // ATTEMPT a bind (Codex code-r2 — the transient spawn/bind would surface
+    // here as a wg_bind_listen_port exception), so this blocker must never be
+    // hit. #9549: the port is EPHEMERAL, read back from the holder. The property
+    // needs a port this test holds, not a particular number, and a fixed number
+    // collided with any second copy of this suite on the host.
+    let (_blocker, _blocker_v4, port) = crate::test_ports::hold_ephemeral_udp_port();
     let wg_snapshot = |generation: u64| ConfigSnapshot {
         version: CONFIG_SNAPSHOT_PROTOCOL_VERSION,
         generation,
@@ -3076,28 +3140,28 @@ fn wg1866_disarmed_same_plan_apply_does_not_hold_wg_ports() {
     };
     // forwarding_armed defaults to false: disarmed throughout.
     let state = new_state(ProcessStatus::default());
-    // Pre-bind the WG port for the whole test: a disarmed helper must
-    // not even ATTEMPT a bind (Codex code-r2 — the transient
-    // spawn/bind would surface here as a wg_bind_listen_port
-    // exception), so this blocker must never be hit.
-    let _blocker = std::net::UdpSocket::bind(("::", port)).expect("pre-bind");
-    // Codex code-r3 portability nit: on bindv6only=1 hosts the v6
-    // blocker does not cover the v4 fallback bind — add a v4 blocker
-    // opportunistically (it fails AddrInUse on dual-stack hosts, which
-    // is fine: the v6 blocker already covers both there).
-    let _blocker_v4 = std::net::UdpSocket::bind(("0.0.0.0", port)).ok();
     // Apply 1: NOT-same-plan (no previous snapshot) — the disarmed
     // reconcile path stops everything.
     let mut first = req("apply_snapshot");
     first.snapshot = Some(wg_snapshot(1));
-    let response = run_request(state.clone(), first);
+    let response = run_request_delivering_wg_secrets(state.clone(), first);
     assert!(response.ok, "first apply: {}", response.error);
     // Apply 2: same-plan — takes the (disarmed) refresh leg.
     let mut second = req("apply_snapshot");
     second.snapshot = Some(wg_snapshot(2));
-    let response = run_request(state.clone(), second);
+    let response = run_request_delivering_wg_secrets(state.clone(), second);
     assert!(response.ok, "second apply: {}", response.error);
     let guard = state.lock().expect("state");
+    // #9549 precondition: the same-plan refresh must hold a WireGuard engine for
+    // this endpoint. Without one the checks below pass vacuously: there is nothing a
+    // disarmed helper could spawn, so they cannot see a revert of the #1866 rule.
+    // Delivering the private key through the socket is what makes this hold.
+    assert_eq!(
+        guard.afxdp.wg_engine_count_for_test(),
+        1,
+        "precondition: the refresh holds no WireGuard engine, so the no-spawn checks below \
+         would be vacuous (was the private key dropped on the control socket?)"
+    );
     assert!(
         guard.afxdp.wg_control_threads.is_empty(),
         "disarmed helper must hold no WG control entries after a same-plan apply"

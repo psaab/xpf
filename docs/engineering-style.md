@@ -881,6 +881,43 @@ issue: the rate may simply be below 1-in-100. It does mean "timing-sensitive"
 stays an unconfirmed hypothesis rather than becoming an inherited fact, and
 that a fix must be justified by reading the test, not by the premise.
 
+## Ports in tests (#9549)
+
+A unit test that binds a FIXED port goes red whenever a second copy of the suite
+runs on the same host, and a mutation matrix runs two copies by design. The
+panic names a bind, so it reads like a product defect. #9549 found thirteen
+such cells in the `userspace-dp` WireGuard control-thread tests. It then
+reproduced the failure on demand, on those cells alone:
+
+- With an external process holding their ports, 4 of the 13 cells failed.
+- With 8 concurrent copies run 5 times, 36 of the 40 copies had a failure.
+
+The other 9 cells stayed green while their listener could not bind. That is the
+worse outcome, because they silently stopped exercising a bound listener.
+
+Before #9549 landed, an unrelated change (#9592) merged two more WireGuard cells
+with fixed ports. That is why this is a written rule rather than a one-time
+cleanup. All fifteen cells now take their ports from `crate::test_ports`.
+
+**Take every port a `userspace-dp` test binds from `crate::test_ports`**
+(`userspace-dp/src/test_ports.rs`):
+
+- `hold_ephemeral_udp_port()` when the test needs the port HELD, as a blocker
+  that makes the code under test fail its own bind.
+- `reserve_ephemeral_udp_port()` when the code under test binds the port itself.
+  The port is released before the call returns, and the same port is never
+  handed out twice in one process, so parallel tests cannot collide. One risk
+  remains: another process can take a released port in the milliseconds before
+  the code under test binds it. That is far rarer than a fixed port, but not
+  zero.
+
+A literal port in a snapshot field or an endpoint string is fine as long as
+nothing binds it; the rule is about binds. In Go the same remedy applies:
+listen on port 0 and read the assigned port back from the listener.
+
+This is the same class as "Time in tests" above with a different shared
+resource. Both turn another lane's activity on the machine into this lane's red.
+
 ## Verification discipline (#8348)
 
 Two rules earned by a defect that stayed invisible for four months while every
