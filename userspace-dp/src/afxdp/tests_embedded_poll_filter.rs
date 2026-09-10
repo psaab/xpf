@@ -5826,3 +5826,305 @@ fn embedded_icmp_session_match_resolves_a_pptp_call_9298() {
          `Unparseable` can never equal a session carrying Pptp(handle)"
     );
 }
+
+// #9528: the two flowless ICMP-error arms (#6472 NAT64 translation, #5690
+// same-family reversal) `continue` with the descriptor consumed. The #6472 arm
+// ran before the interface input filter, and both ran before the PBR verdict,
+// so a `discard` term did not drop the error and its counter did not advance.
+// Each drop cell carries a no-filter control in the SAME harness that must
+// still forward, so a harness that never translated cannot pass the drop cell.
+
+const G9528_FILTER: &str = "wan-in-9528";
+
+fn g9528_attach(snapshot: &mut ConfigSnapshot, on_wan: bool, term: FirewallTermSnapshot) {
+    snapshot.filters.push(FirewallFilterSnapshot {
+        name: G9528_FILTER.to_string(),
+        family: "inet".to_string(),
+        terms: vec![term],
+    });
+    for iface in snapshot.interfaces.iter_mut() {
+        if (on_wan && iface.ifindex == 12) || (!on_wan && iface.ifindex == 24) {
+            iface.filter_input_v4 = G9528_FILTER.to_string();
+        }
+    }
+}
+
+fn g9528_term(action: &str, routing_instance: &str) -> FirewallTermSnapshot {
+    FirewallTermSnapshot {
+        name: "t-9528".to_string(),
+        action: action.to_string(),
+        routing_instance: routing_instance.to_string(),
+        count: "hits-9528".to_string(),
+        ..Default::default()
+    }
+}
+
+fn g9528_packets(forwarding: &ForwardingState) -> u64 {
+    let filter = forwarding
+        .filter_state
+        .filters
+        .get(&format!("inet:{G9528_FILTER}"))
+        .expect("the input filter compiled");
+    filter.terms[0].counter.packets.load(Ordering::Relaxed)
+}
+
+fn g9528_v4(ip: Ipv4Addr) -> [u8; 16] {
+    let mut a = [0u8; 16];
+    a[..4].copy_from_slice(&ip.octets());
+    a
+}
+
+/// Runs a v4 PTB quoting the live NAT64 session's forward wire packet through
+/// the flowless arm. Returns (forwards queued, descriptors recycled, the filter
+/// term's packet count or None without a filter).
+fn g9528_run_nat64(term: Option<FirewallTermSnapshot>) -> (usize, usize, Option<u64>) {
+    let router_ip = Ipv4Addr::new(172, 16, 80, 1);
+    let mut frame = build_icmp_te_frame_v4(
+        router_ip,
+        n6472_pool_v4(),
+        n6472_server_v4(),
+        N6472_XLATED_PORT,
+        N6472_SERVER_PORT,
+        PROTO_TCP,
+    );
+    n6472_patch_ptb(&mut frame, 34);
+    let mut snapshot = nat64_snapshot(lan_to_wan_permit("8.8.8.8/32", "permit-nat64-v4"));
+    let with_filter = term.is_some();
+    if let Some(term) = term {
+        g9528_attach(&mut snapshot, true, term);
+    }
+    let forwarding = build_forwarding_state(&snapshot);
+    let ha_state = txn_ha_state();
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, 12, 0);
+    binding.interface = Arc::<str>::from("reth0.80");
+    let mut sessions = SessionTable::new();
+    n6472_install_sessions(&mut sessions, 123_000_000_000);
+    let meta = UserspaceDpMeta {
+        magic: USERSPACE_META_MAGIC,
+        version: USERSPACE_META_VERSION,
+        length: std::mem::size_of::<UserspaceDpMeta>() as u16,
+        ingress_ifindex: 12,
+        l3_offset: 14,
+        l4_offset: 34,
+        payload_offset: 42,
+        pkt_len: frame.len() as u16,
+        addr_family: libc::AF_INET as u8,
+        protocol: PROTO_ICMP,
+        config_generation: 7,
+        fib_generation: 9,
+        // The L3 identity the shim stamps. Left zero, the enforcement context is
+        // None and the filter and PBR are skipped on EVERY path, so every drop
+        // cell below would pass against a broken order (the #7359 warning).
+        flow_src_addr: g9528_v4(router_ip),
+        flow_dst_addr: g9528_v4(n6472_pool_v4()),
+        ..UserspaceDpMeta::default()
+    };
+    txn_run_descriptor(&mut binding, &mut sessions, &forwarding, &ha_state, &frame, meta);
+    let count = with_filter.then(|| g9528_packets(&forwarding));
+    (
+        binding.scratch.scratch_forwards.len(),
+        binding.scratch.scratch_recycle.len(),
+        count,
+    )
+}
+
+/// Runs a v4 Time-Exceeded quoting a live SNAT session through the #5690
+/// same-family reversal (allow-embedded-icmp on). Same return as above.
+fn g9528_run_same_family(term: Option<FirewallTermSnapshot>) -> (usize, usize, Option<u64>) {
+    let router_ip = Ipv4Addr::new(10, 0, 0, 1);
+    let snat_ip = Ipv4Addr::new(172, 16, 80, 8);
+    let client_ip = Ipv4Addr::new(10, 0, 61, 102);
+    let server_ip = Ipv4Addr::new(1, 1, 1, 1);
+    let snat_port: u16 = 40000;
+    let client_port: u16 = 12345;
+    let frame = build_icmp_te_frame_v4(router_ip, snat_ip, server_ip, snat_port, 80, PROTO_TCP);
+    let mut snapshot = nat_snapshot();
+    snapshot.flow.allow_embedded_icmp = true;
+    // The reversed error egresses toward the client on the LAN unit.
+    // `..Default::default()`, not an exhaustive literal: NeighborSnapshot is an
+    // additive wire struct (the #7689 ratchet).
+    snapshot.neighbors.push(NeighborSnapshot {
+        interface: "ge-0-0-1".to_string(),
+        ifindex: 24,
+        family: "inet".to_string(),
+        ip: client_ip.to_string(),
+        mac: "aa:bb:cc:dd:ee:ff".to_string(),
+        state: "reachable".to_string(),
+        ..Default::default()
+    });
+    let with_filter = term.is_some();
+    if let Some(term) = term {
+        g9528_attach(&mut snapshot, true, term);
+    }
+    let forwarding = build_forwarding_state(&snapshot);
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, 12, 0);
+    binding.interface = Arc::<str>::from("reth0.80");
+    let mut sessions = SessionTable::new();
+    assert!(sessions.install_with_protocol(
+        SessionKey {
+            addr_family: libc::AF_INET as u8,
+            protocol: PROTO_TCP,
+            src_ip: IpAddr::V4(client_ip),
+            dst_ip: IpAddr::V4(server_ip),
+            src_port: client_port,
+            dst_port: 80,
+            discriminator: Default::default(),
+            routing_domain: 0,
+        },
+        SessionDecision {
+            resolution: ForwardingResolution {
+                disposition: ForwardingDisposition::ForwardCandidate,
+                local_ifindex: 0,
+                egress_ifindex: 12,
+                tx_ifindex: 12,
+                tunnel_endpoint_id: 0,
+                next_hop: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 1))),
+                neighbor_mac: Some([0x00, 0x11, 0x22, 0x33, 0x44, 0x55]),
+                src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]),
+                tx_vlan_id: 80,
+            },
+            nat: NatDecision {
+                rewrite_src: Some(IpAddr::V4(snat_ip)),
+                rewrite_dst: None,
+                rewrite_src_port: Some(snat_port),
+                rewrite_dst_port: None,
+                nat64: false,
+                nptv6: false,
+            },
+        },
+        SessionMetadata {
+            ingress_zone: TEST_LAN_ZONE_ID,
+            egress_zone: TEST_WAN_ZONE_ID,
+            ingress_ifindex: 0,
+            ingress_vlan_id: 0,
+            owner_rg_id: 0,
+            fabric_ingress: false,
+            is_reverse: false,
+            nat64_reverse: None,
+            log_session_init: false,
+            log_session_close: false,
+            policy_id: 0,
+            inactivity_timeout_ns: None,
+            policy_counter_idx: 0,
+            policy_counter: None,
+        },
+        123_000_000_000,
+        PROTO_TCP,
+        0x18,
+    ));
+    let meta = UserspaceDpMeta {
+        magic: USERSPACE_META_MAGIC,
+        version: USERSPACE_META_VERSION,
+        length: std::mem::size_of::<UserspaceDpMeta>() as u16,
+        ingress_ifindex: 12,
+        l3_offset: 14,
+        l4_offset: 34,
+        payload_offset: 42,
+        pkt_len: frame.len() as u16,
+        addr_family: libc::AF_INET as u8,
+        protocol: PROTO_ICMP,
+        config_generation: 7,
+        fib_generation: 9,
+        flow_src_addr: g9528_v4(router_ip),
+        flow_dst_addr: g9528_v4(snat_ip),
+        ..UserspaceDpMeta::default()
+    };
+    txn_run_descriptor(&mut binding, &mut sessions, &forwarding, &BTreeMap::new(), &frame, meta);
+    let count = with_filter.then(|| g9528_packets(&forwarding));
+    (
+        binding.scratch.scratch_forwards.len(),
+        binding.scratch.scratch_recycle.len(),
+        count,
+    )
+}
+
+#[test]
+fn nat64_icmp_error_is_dropped_by_an_input_filter_discard_9528() {
+    assert_eq!(
+        g9528_run_nat64(None).0,
+        1,
+        "control: with no filter the NAT64 error must be translated and queued, \
+         or the drop below proves nothing"
+    );
+    let (forwards, recycled, count) = g9528_run_nat64(Some(g9528_term("discard", "")));
+    assert_eq!(
+        forwards, 0,
+        "an input `discard` must drop a NAT64-translated ICMP error; the #6472 arm \
+         ran before the input filter and queued it (#9528)"
+    );
+    assert_eq!(recycled, 1, "the dropped descriptor is recycled");
+    assert_eq!(count, Some(1), "the discard term's counter advances exactly once");
+}
+
+#[test]
+fn nat64_icmp_error_is_dropped_by_a_pbr_discard_9528() {
+    let (forwards, recycled, count) = g9528_run_nat64(Some(g9528_term("discard", "scrub")));
+    assert_eq!(
+        forwards, 0,
+        "a `then {{ routing-instance scrub; discard; }}` term must drop a NAT64-translated \
+         ICMP error; its verdict lives only in the PBR evaluator the arm skipped (#9528)"
+    );
+    assert_eq!(recycled, 1, "the dropped descriptor is recycled");
+    assert_eq!(count, Some(1), "the PBR term's counter advances exactly once");
+}
+
+#[test]
+fn same_family_reversal_is_dropped_by_a_pbr_discard_9528() {
+    assert_eq!(
+        g9528_run_same_family(None).0,
+        1,
+        "control: with no filter the #5690 reversal must queue the reversed error, \
+         or the drop below proves nothing"
+    );
+    let (forwards, recycled, count) =
+        g9528_run_same_family(Some(g9528_term("discard", "scrub")));
+    assert_eq!(
+        forwards, 0,
+        "a PBR `discard` must drop an embedded-ICMP reversal; the #5690 arm ran \
+         before the PBR verdict and queued it (#9528)"
+    );
+    assert_eq!(recycled, 1, "the dropped descriptor is recycled");
+    assert_eq!(count, Some(1), "the PBR term's counter advances exactly once");
+}
+
+/// Hoisted, not duplicated: a term that ACCEPTS (or only steers) still counts
+/// exactly once, and the error is still delivered. A steer is not applied to an
+/// error an arm queues; it goes to the quoted session's owner.
+#[test]
+fn icmp_error_arms_count_a_matching_term_exactly_once_9528() {
+    for (what, run) in [
+        ("NAT64", g9528_run_nat64 as fn(Option<FirewallTermSnapshot>) -> (usize, usize, Option<u64>)),
+        ("same-family", g9528_run_same_family),
+    ] {
+        let (forwards, _, count) = run(Some(g9528_term("accept", "")));
+        assert_eq!(forwards, 1, "{what}: an accepting input term must not stop the error");
+        assert_eq!(count, Some(1), "{what}: an accepting input term counts exactly once");
+        let (forwards, _, count) = run(Some(g9528_term("", "scrub")));
+        assert_eq!(forwards, 1, "{what}: a PBR steer must not stop or redirect the error");
+        assert_eq!(count, Some(1), "{what}: a PBR steer term counts exactly once");
+    }
+}
+
+/// The hoist moved the PBR verdict above the ICMP-error arms, and the flowless
+/// transit path below consumes it. A non-first fragment on that path must still
+/// evaluate the PBR term exactly once, not once at the hoisted site and again
+/// at the old one.
+#[test]
+fn flowless_fragment_evaluates_pbr_exactly_once_9528() {
+    let mut snapshot = nat_snapshot();
+    snapshot.neighbors.push(frag_transit_wan_neighbor());
+    g9528_attach(&mut snapshot, false, g9528_term("", "scrub"));
+    let forwarding = build_forwarding_state(&snapshot);
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, 24, 0);
+    binding.interface = Arc::<str>::from("reth1.0");
+    let mut sessions = SessionTable::new();
+    let frame = frag_v4_transit_frame();
+    let mut meta = frag_v4_transit_meta();
+    meta.pkt_len = frame.len() as u16;
+    txn_run_descriptor(&mut binding, &mut sessions, &forwarding, &BTreeMap::new(), &frame, meta);
+    assert_eq!(
+        g9528_packets(&forwarding),
+        1,
+        "the flowless path must evaluate the PBR term exactly once"
+    );
+}

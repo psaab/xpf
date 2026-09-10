@@ -3944,58 +3944,12 @@ pub(super) fn poll_binding_process_descriptor(
                     );
                     hit
                 } else {
-                    // #6472: NAT64 (cross-family) ICMP error translation
-                    // (RFC 7915 §4.2/§5.2), wired HERE on the flowless arm —
-                    // the path an ICMP error actually takes (#3290 below).
-                    // Tried BEFORE the same-family #5690 reversal and NOT
-                    // gated on `allow_embedded_icmp`: translating errors for
-                    // the translator's OWN admitted sessions is core NAT64
-                    // behavior, and the same-family arm's NAT64 matches
-                    // decline anyway (its single-family builders reject a
-                    // cross-family `original_src`), so nothing it serves is
-                    // stolen. A non-NAT64 deployment exits on the
-                    // empty-prefix gate before any parse; a match queues the
-                    // translated error as a prebuilt forward and consumes
-                    // the descriptor; a miss falls through to the #5690
-                    // reversal and normal flowless enforcement, unchanged.
-                    let is_nat64_icmp_error = !worker_ctx.forwarding.nat64.prefixes.is_empty()
-                        && matches!(meta.protocol, PROTO_ICMP | PROTO_ICMPV6)
-                        && packet_frame
-                            .get(meta.l4_offset as usize)
-                            .copied()
-                            .map(|icmp_type| is_icmp_error(meta.protocol, icmp_type))
-                            .unwrap_or(false);
-                    if is_nat64_icmp_error {
-                        match try_translate_nat64_icmp_error(
-                            desc,
-                            // #8271: the frame to PARSE is the decapped inner
-                            // one, which is what `meta` describes. `raw_frame`
-                            // here is still the encapsulated outer frame.
-                            packet_frame,
-                            meta,
-                            binding_index,
-                            sessions,
-                            worker_ctx,
-                            &mut binding.scratch.scratch_forwards,
-                            now_ns,
-                            now_secs,
-                        ) {
-                            EmbeddedIcmpReversal::Queued => {
-                                telemetry.counters.touched = true;
-                                continue;
-                            }
-                            EmbeddedIcmpReversal::Dropped => {
-                                telemetry.counters.touched = true;
-                                binding.scratch.scratch_recycle.push(desc.addr);
-                                continue;
-                            }
-                            EmbeddedIcmpReversal::NotHandled => {}
-                        }
-                    }
                     // #7359: build the L3 identity and run the INTERFACE INPUT
-                    // FILTER here, BEFORE the embedded-ICMP NAT reversal below,
-                    // because that reversal `continue`s with the descriptor
-                    // consumed and used to skip this entirely. An operator who
+                    // FILTER here, BEFORE both ICMP-error arms below (#6472
+                    // NAT64 translation and #5690 same-family reversal),
+                    // because each `continue`s with the descriptor consumed and
+                    // used to skip this entirely. #7359 hoisted it above the
+                    // #5690 arm only; #9528 lifted it above the #6472 arm too. An operator who
                     // attaches `filter input` to an interface expects it to see
                     // every packet arriving there; a reverse-translated ICMP
                     // error was a hole in that — a discard term did not drop it,
@@ -4053,7 +4007,99 @@ pub(super) fn poll_binding_process_descriptor(
                         }
                     }
 
-
+                    // #9528: the PBR half of the same filter runs HERE too, before
+                    // both ICMP-error arms, for the reason #6835 gave for the
+                    // association hit: a matching term with a non-empty
+                    // `routing-instance` makes `evaluate_non_pbr_input_filter`
+                    // return Accept before recording its counter or applying its
+                    // action, so its verdict lives only in
+                    // `ingress_route_table_override`, which both arms used to
+                    // skip. A `then { routing-instance X; discard; }` therefore
+                    // could not drop a translated or reversed ICMP error, and its
+                    // `count` never advanced. The override is EVALUATED once, here,
+                    // and CONSUMED below by the flowless base resolution; a
+                    // non-drop steer is not applied to an error an arm queues,
+                    // which goes to the quoted session's owner (the association
+                    // hit's reasoning). Hoisted, not duplicated: a second call
+                    // would count every PBR term twice.
+                    // #4392: on the flowless path a PBR `then { routing-instance
+                    // X; reject | discard; }` term is still a DENY. Pass no
+                    // reject sink — a flowless deny is a silent drop (a non-first
+                    // fragment / L3-only packet has no L4 header to reflect),
+                    // identical to the flowless non-PBR input-filter deny above.
+                    // On `RouteOverride::Drop` recycle the frame and skip the
+                    // override/route-lookup/forward.
+                    let route_table_override = match l3_ctx
+                        .as_ref()
+                        .map(|l3_flow| {
+                            ingress_route_table_override(
+                                worker_ctx.forwarding,
+                                packet_frame,
+                                meta,
+                                l3_flow,
+                                ingress_zone_override,
+                                worker_ctx.event_stream,
+                                now_ns,
+                                None,
+                            )
+                        })
+                        .unwrap_or(RouteOverride::None)
+                    {
+                        RouteOverride::Drop => {
+                            binding.scratch.scratch_recycle.push(desc.addr);
+                            continue;
+                        }
+                        RouteOverride::Table(table) => Some(table),
+                        RouteOverride::None => None,
+                    };
+                    // #6472: NAT64 (cross-family) ICMP error translation
+                    // (RFC 7915 §4.2/§5.2), wired HERE on the flowless arm —
+                    // the path an ICMP error actually takes (#3290 below).
+                    // Tried BEFORE the same-family #5690 reversal and NOT
+                    // gated on `allow_embedded_icmp`: translating errors for
+                    // the translator's OWN admitted sessions is core NAT64
+                    // behavior, and the same-family arm's NAT64 matches
+                    // decline anyway (its single-family builders reject a
+                    // cross-family `original_src`), so nothing it serves is
+                    // stolen. A non-NAT64 deployment exits on the
+                    // empty-prefix gate before any parse; a match queues the
+                    // translated error as a prebuilt forward and consumes
+                    // the descriptor; a miss falls through to the #5690
+                    // reversal and normal flowless enforcement, unchanged.
+                    let is_nat64_icmp_error = !worker_ctx.forwarding.nat64.prefixes.is_empty()
+                        && matches!(meta.protocol, PROTO_ICMP | PROTO_ICMPV6)
+                        && packet_frame
+                            .get(meta.l4_offset as usize)
+                            .copied()
+                            .map(|icmp_type| is_icmp_error(meta.protocol, icmp_type))
+                            .unwrap_or(false);
+                    if is_nat64_icmp_error {
+                        match try_translate_nat64_icmp_error(
+                            desc,
+                            // #8271: the frame to PARSE is the decapped inner
+                            // one, which is what `meta` describes. `raw_frame`
+                            // here is still the encapsulated outer frame.
+                            packet_frame,
+                            meta,
+                            binding_index,
+                            sessions,
+                            worker_ctx,
+                            &mut binding.scratch.scratch_forwards,
+                            now_ns,
+                            now_secs,
+                        ) {
+                            EmbeddedIcmpReversal::Queued => {
+                                telemetry.counters.touched = true;
+                                continue;
+                            }
+                            EmbeddedIcmpReversal::Dropped => {
+                                telemetry.counters.touched = true;
+                                binding.scratch.scratch_recycle.push(desc.addr);
+                                continue;
+                            }
+                            EmbeddedIcmpReversal::NotHandled => {}
+                        }
+                    }
                     // #5690: an inbound non-query ICMP error referencing a NAT'd
                     // flow is FLOWLESS (#3290 discards its metadata pseudo-port so
                     // it never seeds a session). Attempt the generic embedded-ICMP
@@ -4146,36 +4192,6 @@ pub(super) fn poll_binding_process_descriptor(
                     //     term must reach LocalDelivery, NOT be steered into an
                     //     override table that has no local route (→ NoRoute →
                     //     drop). The override governs only the transit fallback.
-                    // #4392: on the flowless path a PBR `then { routing-instance
-                    // X; reject | discard; }` term is still a DENY. Pass no
-                    // reject sink — a flowless deny is a silent drop (a non-first
-                    // fragment / L3-only packet has no L4 header to reflect),
-                    // identical to the flowless non-PBR input-filter deny above.
-                    // On `RouteOverride::Drop` recycle the frame and skip the
-                    // override/route-lookup/forward.
-                    let route_table_override = match l3_ctx
-                        .as_ref()
-                        .map(|l3_flow| {
-                            ingress_route_table_override(
-                                worker_ctx.forwarding,
-                                packet_frame,
-                                meta,
-                                l3_flow,
-                                ingress_zone_override,
-                                worker_ctx.event_stream,
-                                now_ns,
-                                None,
-                            )
-                        })
-                        .unwrap_or(RouteOverride::None)
-                    {
-                        RouteOverride::Drop => {
-                            binding.scratch.scratch_recycle.push(desc.addr);
-                            continue;
-                        }
-                        RouteOverride::Table(table) => Some(table),
-                        RouteOverride::None => None,
-                    };
                     let base_resolution = match l3_ctx.as_ref() {
                         Some(l3_flow) => flowless_base_resolution(
                             worker_ctx.forwarding,
