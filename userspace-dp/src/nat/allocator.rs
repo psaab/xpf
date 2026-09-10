@@ -1353,6 +1353,24 @@ pub(super) fn port_allocator_build_count() -> usize {
     PORT_ALLOCATOR_BUILDS.with(|c| c.get())
 }
 
+
+/// #9536: the three outcomes of offering a flow an existing persistent lease on
+/// the PORT-BEARING path (`reuse_existing_lease_locked`).
+///
+/// A bare `Option` could say "reused" or "not reused", and "not reused" made the
+/// caller mint and insert a fresh lease over the key. That is right when no
+/// usable lease exists and wrong when a LIVE address-only lease does, so the
+/// caller needs the third answer.
+enum LeaseReuse {
+    /// The flow joined the live, same-mode lease.
+    Reused(TranslatedTuple),
+    /// No usable lease: none existed, or an idle one was torn down. Mint one.
+    NoLease,
+    /// A LIVE address-only lease holds this source. It is left standing, and the
+    /// caller must serve the flow WITHOUT persistence (no lease insert).
+    LiveModeMismatch,
+}
+
 impl PortAllocator {
     pub(crate) fn new(num_addresses: usize, port_low: u16, port_high: u16) -> Self {
         #[cfg(test)]
@@ -2020,10 +2038,10 @@ impl PortAllocator {
             return Err(super::source::SourceNatFailureReason::AllocatorExhausted);
         }
 
-        let persistent_key =
+        let mut persistent_key =
             persistent_nat.then(|| flow.persistent_source_key(persistent_nat_permit));
         if let Some(key) = persistent_key {
-            if let Some(translated) = self.reuse_existing_lease_locked(
+            match self.reuse_existing_lease_locked(
                 &mut live,
                 key,
                 flow,
@@ -2031,7 +2049,18 @@ impl PortAllocator {
                 now_ns,
                 holder,
             ) {
-                return Ok(translated);
+                LeaseReuse::Reused(translated) => return Ok(translated),
+                LeaseReuse::NoLease => {}
+                // #9536: an ADDRESS-ONLY lease is LIVE for this source -- a
+                // `port no-translation` flip under a flow that is still using it.
+                // The lease is left standing and this PAT flow is served WITHOUT
+                // persistence: it still claims its own occupancy bit below
+                // (#8597 K10), but it inserts no lease over the key and joins
+                // none, so `unlink_live_allocation_locked` frees that bit when
+                // the flow releases (`persistent_key.is_none()`). Without this,
+                // the insert below would overwrite the live lease even if the
+                // reuse function had kept it -- the #9158 trap.
+                LeaseReuse::LiveModeMismatch => persistent_key = None,
             }
         }
 
@@ -2153,13 +2182,14 @@ impl PortAllocator {
         // pre-#6522 single-holder contract and is what the test entry points
         // and the read-only fragment probe pass.
         holder: NatHolder,
-    ) -> Option<TranslatedTuple> {
+    ) -> LeaseReuse {
         if !live.persistent_by_source.contains_key(&key) {
-            return None;
+            return LeaseReuse::NoLease;
         }
         let mut reusable = None;
         let mut expired = None;
         let mut remove_expiry = None;
+        let mut live_mode_mismatch = false;
         if let Some(lease) = live.persistent_by_source.get_mut(&key) {
             // #8597 K10: the lease's MODE must agree with this path's, and this
             // is the port-bearing one. An ADDRESS-ONLY lease owns no occupancy
@@ -2174,9 +2204,10 @@ impl PortAllocator {
             // and range and does NOT include `no_translation`, so flipping that
             // leaf keeps the SAME allocator and carries the leases across.
             //
-            // A disagreeing lease falls to the `expired` arm below, which
-            // already receives `lease.address_only` and tears it down
-            // mode-correctly. It is not silently ignored and it is not freed by
+            // A disagreeing IDLE lease falls to the `expired` arm below, which
+            // receives `lease.address_only` and tears it down mode-correctly. A
+            // disagreeing LIVE address-only lease is left standing (#9536, the
+            // arm below). Neither is silently ignored, and neither is freed by
             // the wrong path.
             if !lease.address_only && (lease.active_flows > 0 || lease.expires_at_ns > now_ns) {
                 let translated = lease.translated;
@@ -2192,6 +2223,27 @@ impl PortAllocator {
                     now_ns.saturating_add(persistent_nat_timeout_ns.max(NS_PER_SEC));
                 lease.expires_at_ns = expires_at_ns;
                 reusable = Some((translated, addr_index));
+            } else if lease.address_only && lease.active_flows > 0 {
+                // #9536: MODE MISMATCH UNDER A LIVE ADDRESS-ONLY LEASE -- the
+                // mirror of #9158's arm in `reserve_address_only_persistent`.
+                //
+                // Neither other arm is correct:
+                //
+                //   * REUSE is what #8597 K10 forbids: an address-only lease owns
+                //     no occupancy bit, so a PAT decision built on it would publish
+                //     an `(address, port)` nothing holds.
+                //   * TEAR DOWN (this function's behaviour before #9536) forgets
+                //     the subscriber's pinned public address while a flow is still
+                //     using it, so the next flow for the same `PersistentSourceKey`
+                //     can land on a different pool address. For
+                //     `permit any-remote-host` that pinning is the feature.
+                //
+                // So the lease is LEFT STANDING and the caller serves this flow
+                // unpinned. Nothing leaks in either direction: an address-only
+                // lease owns no port bit, and the unpinned PAT flow's own bit is
+                // freed when it releases. Once the lease's flows drain it expires
+                // normally, and the next PAT flow for the source re-pins.
+                live_mode_mismatch = true;
             } else {
                 expired = Some((
                     lease.translated,
@@ -2203,6 +2255,9 @@ impl PortAllocator {
         }
         if let Some((addr_index, expires_at_ns)) = remove_expiry {
             Self::remove_lease_expiration_locked(live, addr_index, expires_at_ns, key);
+        }
+        if live_mode_mismatch {
+            return LeaseReuse::LiveModeMismatch;
         }
         if let Some((translated, addr_index)) = reusable {
             live.live_by_flow.insert(
@@ -2225,7 +2280,7 @@ impl PortAllocator {
                 },
             );
             self.shared.reuses_total.fetch_add(1, Ordering::Relaxed);
-            return Some(translated);
+            return LeaseReuse::Reused(translated);
         }
         if let Some((translated, addr_index, expires_at_ns, address_only)) = expired {
             Self::remove_lease_expiration_locked(live, addr_index, expires_at_ns, key);
@@ -2239,7 +2294,7 @@ impl PortAllocator {
             }
             live.persistent_by_source.remove(&key);
         }
-        None
+        LeaseReuse::NoLease
     }
 
     /// #8121: the idle-lease import needs the same expiry registration a mint
@@ -4444,6 +4499,22 @@ impl PortAllocator {
         live.live_by_flow
             .get(flow)
             .map(|rec| (rec.persistent_key, rec.address_only))
+    }
+
+    /// Test-only: the translated tuple a live flow's record holds.
+    ///
+    /// #9536: releasing a flow through the allocator's own `release_flow` needs
+    /// the tuple the allocator STORED, and for an address-only flow that is not
+    /// derivable from the decision alone. Reading it back is what lets a test
+    /// drain a lease deterministically instead of guessing the tuple and
+    /// releasing nothing.
+    #[cfg(test)]
+    pub(super) fn debug_live_flow_translated(
+        &self,
+        flow: &SourceNatFlowKey,
+    ) -> Option<TranslatedTuple> {
+        let live = self.shared.live.lock().unwrap_or_else(|e| e.into_inner());
+        live.live_by_flow.get(flow).map(|rec| rec.translated)
     }
 
     /// Test-only: snapshot the address-only reverse-identity ownership map so a
