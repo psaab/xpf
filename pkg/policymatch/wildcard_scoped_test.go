@@ -32,6 +32,12 @@ func TestWildcardZoneAndScopedGlobalPrecedence(t *testing.T) {
 		wantAction config.PolicyAction
 		wantName   string // "" => default (no match)
 		wantGlobal bool
+		// wantContentRejected: the helper refuses the WHOLE snapshot for this
+		// config (#9410), so there is no enforced verdict to compare. Asserted
+		// rather than folded into wantName=="" because "no match" and "no
+		// snapshot" are different facts and the operator is told different
+		// things.
+		wantContentRejected bool
 	}{
 		{
 			// #3283 example 1: `from-zone any to-zone untrust deny` is invisible
@@ -157,9 +163,33 @@ func TestWildcardZoneAndScopedGlobalPrecedence(t *testing.T) {
 			wantAction: config.PolicyDeny, wantName: "scoped-deny", wantGlobal: true,
 		},
 		{
-			// An unresolved (typo'd / undefined) global scope fails closed —
-			// it matches nothing and the verdict is the default.
-			name: "undefined global scope fails closed",
+			// #9410 RE-ANCHORED THIS CASE, and the old expectation was wrong in the
+			// direction its own name denied.
+			//
+			// It asserted that an unresolved (typo'd) global scope "fails closed —
+			// it matches nothing and the verdict is the default", with
+			// DefaultPolicy PERMIT and wantAction PolicyPermit. Falling through to
+			// a default PERMIT is failing OPEN, not closed, and more importantly it
+			// is not what the dataplane does. `build_global_zone_scope`
+			// (userspace-dp/src/policy.rs:343-380) on a single-element set that is
+			// neither empty nor "any" resolves the element, gets None, and returns
+			// Err(SnapshotIntegrityError::UnresolvableZoneReference) — so
+			// snapshot.rs sets response.ok = false and the helper REFUSES THE WHOLE
+			// SNAPSHOT, retaining previous-good or fresh-booting default-deny. It
+			// never serves this config's default at all.
+			//
+			// So the old expectation encoded a Go-only behaviour and pinned it as
+			// correct. docs/userspace-dataplane-architecture.md called the same
+			// thing a "deliberate divergence" that "neither path ever serves"
+			// because "a typo can never commit" — false on the tolerant
+			// Store.Load / Store.SyncApply path, which is how this is reachable.
+			// That paragraph is corrected in the same change.
+			//
+			// The case is KEPT rather than deleted because its subject is still
+			// load-bearing: an undefined global scope must not match and must not
+			// produce a fabricated verdict. Only the expected FORM of "no verdict"
+			// moved, from "the default" to "content rejected".
+			name: "undefined global scope is CONTENT-REJECTED, not served as the default",
 			cfg: cfgWith(config.SecurityConfig{
 				DefaultPolicy: config.PolicyPermit,
 				Zones:         zones("trust", "untrust"),
@@ -169,7 +199,8 @@ func TestWildcardZoneAndScopedGlobalPrecedence(t *testing.T) {
 				},
 			}, config.ApplicationsConfig{}),
 			q:          Query{FromZone: "trust", ToZone: "untrust"},
-			wantAction: config.PolicyPermit, wantName: "",
+			wantAction: config.PolicyDeny, wantName: "",
+			wantContentRejected: true,
 		},
 		{
 			// An empty/"any" global scope still applies to every zone pair.
@@ -190,6 +221,22 @@ func TestWildcardZoneAndScopedGlobalPrecedence(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			res := Match(tt.cfg, tt.q)
+			if res.ContentRejected != tt.wantContentRejected {
+				t.Errorf("ContentRejected = %v, want %v (reasons %v)",
+					res.ContentRejected, tt.wantContentRejected, res.ContentRejectionReasons)
+			}
+			if tt.wantContentRejected {
+				// The gate returns before any tier runs, so the remaining columns
+				// describe nothing. Assert only that no policy was attributed.
+				if res.Matched || res.PolicyName != "" {
+					t.Errorf("a content-rejected config still attributed policy %q (Matched=%v)",
+						res.PolicyName, res.Matched)
+				}
+				if res.Action != tt.wantAction {
+					t.Errorf("Action = %v, want %v", res.Action, tt.wantAction)
+				}
+				return
+			}
 			if res.Action != tt.wantAction {
 				t.Errorf("Action = %v, want %v", res.Action, tt.wantAction)
 			}

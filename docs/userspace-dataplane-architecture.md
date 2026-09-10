@@ -2057,10 +2057,42 @@ case-for-case — both-sides-match fires the scoped global, a mismatched side
 falls through to the default, empty/explicit-`any` applies to every pair, and an
 exact zone-pair (Tier 1) or a both-any wildcard (Tier 3) OUTRANKS a matching
 global (Tier 4) — so the operator's test output can never permit/deny
-differently than the wire. One deliberate divergence: a typo'd (undefined) scope
-fails closed to the default in the Go simulator (which runs on
-already-committed config) but fails the whole snapshot closed at build in Rust
-(#3402); a typo can never commit, so neither path ever serves it.
+differently than the wire.
+
+**There is no longer a deliberate divergence here, and the sentence that claimed
+one was false in both halves (#9410).** It read:
+
+> One deliberate divergence: a typo'd (undefined) scope fails closed to the
+> default in the Go simulator (which runs on already-committed config) but fails
+> the whole snapshot closed at build in Rust (#3402); a typo can never commit, so
+> neither path ever serves it.
+
+- *"fails closed to the default in the Go simulator"* — falling through to the
+  configured default is failing **open** when that default is `permit-all`, and
+  it is exactly the behaviour #3402 removed from Rust
+  (`policy_tests.rs unknown_zone_pair_fails_closed`: *"under `default-policy
+  permit-all` a stale `deny` became an ALLOW (fail-OPEN) … Rejecting the snapshot
+  keeps the previous good state"*). The Go half of this SSOT matrix was pinning,
+  on the operator-facing `show` surface, the fail-open the dataplane had already
+  been fixed not to have. It was also only true for a SINGLE-element scope:
+  `globalScopeSetMatches` `continue`s past an undefined element, so a
+  multi-element scope kept matching its surviving siblings and returned a
+  CONCRETE verdict.
+- *"a typo can never commit, so neither path ever serves it"* — it cannot commit,
+  but `CompileConfigLenient` downgrades the zone gate to a warning and
+  `Store.Load` (boot from the persisted DB), `Store.SyncApply` (HA peer sync) and
+  `cmd/xpfd/upgrade.go` all use it. A persisted config from a binary predating
+  #2401/#3148, or an HA standby fed by an un-upgraded primary, is served.
+
+#9410 gave the Go-side fail-closed mirror its zone-resolution arm
+(`pkg/dataplane/userspace/policies_reject_zone_9410.go`), so both halves now
+refuse an unresolvable zone reference and the matrix agrees case-for-case with no
+exception. The simulator reports `ContentRejected` with a reason naming the
+offending token instead of a permit/deny the helper never loaded. The mirror reads
+the ZONE SNAPSHOT rather than `cfg.Security.Zones`, because
+`zone_name_to_id_from_snapshot` drops a zone with id 0, an empty name, or an id at
+or above the reserved floor — a config-side predicate would answer "resolvable"
+for a zone the helper cannot resolve.
 
 **Unknown-zone guard (#3110).** Zone id `0` is the reserved "unknown / no
 zone" sentinel — assigned to interfaces not bound to any security zone. (The

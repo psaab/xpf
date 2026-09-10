@@ -148,6 +148,17 @@ func PolicyContentRejectionReasons(cfg *config.Config, feedOverlay map[string][]
 		return []string{fmt.Sprintf("policy snapshot cannot be built (fail-closed): %v", err)}
 	}
 	reasons := collectPolicyContentRejections(policies)
+	// #9410: the ZONE-RESOLUTION arm. The helper rejects the WHOLE snapshot on an
+	// unresolvable policy zone reference (SnapshotIntegrityError::Unresolvable-
+	// ZoneReference), not just the offending rule, so without this arm the
+	// simulator certified a concrete permit/deny for a config the dataplane
+	// enforces no part of. Appended to the same slice so every existing caller --
+	// pkg/policymatch's single gate included -- inherits the arm unchanged.
+	//
+	// It reads the ZONE SNAPSHOT rather than cfg.Security.Zones on purpose; see
+	// policies_reject_zone_9410.go for why a config-side predicate answers the
+	// wrong question.
+	reasons = append(reasons, collectPolicyZoneRejections(policies, buildZoneSnapshots(cfg))...)
 	if len(reasons) == 0 {
 		if _, cerr := buildAppCatalogSnapshot(cfg); cerr != nil {
 			reasons = append(reasons, fmt.Sprintf(

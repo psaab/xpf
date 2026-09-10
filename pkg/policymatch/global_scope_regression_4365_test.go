@@ -39,6 +39,10 @@ func TestSharedMatcherGlobalScopeRegressionMatrix(t *testing.T) {
 		wantName    string // "" => default (no policy matched)
 		wantFrom    string // expected Result.FromZone scope (only checked when matched)
 		wantTo      string // expected Result.ToZone scope (only checked when matched)
+		// wantContentRejected: the helper refuses the WHOLE snapshot for this
+		// config (#9410), so this matrix's remaining columns describe nothing and
+		// only the absence of an attributed verdict is asserted.
+		wantContentRejected bool
 		// idSet/idSlice are the [policySetID, sliceIndex] RuntimePolicyIDs
 		// coordinate of the matched rule. For a global match idSet is IGNORED and
 		// the runtime set index is derived as len(cfg.Security.Policies); for a
@@ -108,9 +112,41 @@ func TestSharedMatcherGlobalScopeRegressionMatrix(t *testing.T) {
 			wantMatched: false, wantDefault: true, wantAction: config.PolicyPermit,
 		},
 		{
-			// (b'') An undefined/typo'd scope fails CLOSED — it matches nothing and
-			// never silently widens to all-zones, so the verdict is the default.
-			name: "undefined global scope fails closed to default",
+			// (b'') An undefined/typo'd scope must match nothing and must never
+			// silently widen to all-zones.
+			//
+			// #9410 RE-ANCHORED THIS ROW, and it is the row that made this matrix's
+			// headline claim false.
+			//
+			// This matrix is cited in docs/userspace-dataplane-architecture.md as a
+			// cross-language SSOT whose two halves "assert the same matrix
+			// case-for-case ... so the operator's test output can never permit/deny
+			// differently than the wire", with ONE named exception: a typo'd scope
+			// "fails closed to the default in the Go simulator ... but fails the
+			// whole snapshot closed at build in Rust (#3402); a typo can never
+			// commit, so neither path ever serves it."
+			//
+			// Both halves of that excuse are false, and the second is the serious
+			// one. A typo CAN be served: CompileConfigLenient downgrades the zone
+			// gate to a warning and Store.Load / Store.SyncApply / cmd/xpfd/upgrade
+			// all use it. And what this row asserted — fall through to a default
+			// PERMIT — is precisely the fail-OPEN the Rust side eliminated in #3402.
+			// policy_tests.rs unknown_zone_pair_fails_closed says so in as many
+			// words: "under `default-policy permit-all` a stale `deny` became an
+			// ALLOW (fail-OPEN) ... Rejecting the snapshot keeps the previous good
+			// state." So the Go half of the SSOT matrix was pinning, on the
+			// operator-facing `show` surface, the behaviour the dataplane had
+			// already been fixed not to have.
+			//
+			// With #9410's zone arm the two halves agree here with NO exception, so
+			// the doc's "one deliberate divergence" sentence is removed rather than
+			// reworded — the divergence is gone, not mis-described.
+			//
+			// The row is KEPT because its subject is still load-bearing: an
+			// undefined global scope must not match and must not yield a fabricated
+			// verdict. Only the FORM of "no verdict" moved, from "the default" to
+			// "the snapshot is refused".
+			name: "undefined global scope is CONTENT-REJECTED (was: fails closed to default)",
 			cfg: cfgWith(config.SecurityConfig{
 				DefaultPolicy: config.PolicyPermit,
 				GlobalPolicies: []*config.Policy{
@@ -118,7 +154,8 @@ func TestSharedMatcherGlobalScopeRegressionMatrix(t *testing.T) {
 				},
 			}, config.ApplicationsConfig{}),
 			q:           Query{FromZone: "trust", ToZone: "untrust"},
-			wantMatched: false, wantDefault: true, wantAction: config.PolicyPermit,
+			wantMatched: false, wantDefault: false, wantAction: config.PolicyDeny,
+			wantContentRejected: true,
 		},
 		{
 			// (c) An empty (unset) scope applies to EVERY zone. FromZone/ToZone in
@@ -226,6 +263,10 @@ func TestSharedMatcherGlobalScopeRegressionMatrix(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			res := Match(tt.cfg, tt.q)
+			if res.ContentRejected != tt.wantContentRejected {
+				t.Fatalf("ContentRejected = %v, want %v (reasons %v)",
+					res.ContentRejected, tt.wantContentRejected, res.ContentRejectionReasons)
+			}
 			if res.Matched != tt.wantMatched {
 				t.Fatalf("Matched = %v, want %v (res=%+v)", res.Matched, tt.wantMatched, res)
 			}
