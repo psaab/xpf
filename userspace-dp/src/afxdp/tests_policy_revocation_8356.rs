@@ -633,38 +633,45 @@ fn the_type_constrained_predicate_is_per_protocol_8618() {
     );
 }
 
-/// Binds the `PolicyAction::Permit` filter on the #8618 arming, which an
-/// escaped mutation showed nothing else could see.
+/// A `lan -> wan` junos-ping-shaped DENY, optionally with a broader `lan -> wan`
+/// permit BEHIND it.
 ///
-/// Only a PERMIT can overturn a type-blind DENY. A type-constrained DENY that
-/// `packet_icmp = None` gates OFF can only make the walk fall through to a
-/// later permit — i.e. more permissive, "do not revoke", which is the residual
-/// staying open exactly as it does today. It can never manufacture the false
-/// DENY the gate exists to prevent, so arming on it would decline for no reason
-/// and leave #7323's residual open on configs that never needed it.
-///
-/// Dropping `&& matches!(.., Permit)` from the arming loop leaves every other
-/// #8618 cell green; this one goes red.
-#[test]
-fn a_type_constrained_deny_does_not_suppress_the_icmp_re_derivation_8618() {
+/// #9386: the zone pair is the load-bearing detail. The cell below used to copy
+/// its deny from `junos_ping_permit()`, which is `dmz -> wan`, while driving a
+/// `lan -> wan` session — so the deny could not participate in the walk at all
+/// and the flow revoked by DEFAULT-DENY whether or not the deny was consulted.
+/// Putting the deny on the DRIVEN pair is what makes it observable, and adding a
+/// broader permit behind it is what makes the two outcomes distinguishable.
+fn ping_deny_on_the_driven_pair_9386(with_broader_permit: bool) -> ForwardingState {
     let mut snapshot = policy_deny_snapshot();
     snapshot.generation = 7;
     snapshot.fib_generation = 9;
-    // A junos-ping-shaped DENY, and NO type-constrained permit anywhere.
     let mut ping_deny = junos_ping_permit();
     ping_deny.name = "ping-deny".into();
     ping_deny.action = "deny".into();
+    // THE DRIVEN PAIR, not `dmz -> wan`.
+    ping_deny.from_zone = "lan".into();
     snapshot.policies.push(ping_deny);
-    let forwarding = build_forwarding_state(&snapshot);
+    if with_broader_permit {
+        // Pushed AFTER the deny, so the deny is first in the zone-pair chain and
+        // a fully-informed walk would match it. `application any` matches every
+        // ICMP message regardless of type, so this permit is type-BLIND.
+        snapshot.policies.push(PolicyRuleSnapshot {
+            name: "lan-out-any".into(),
+            from_zone: "lan".into(),
+            to_zone: "wan".into(),
+            source_addresses: vec!["any".into()],
+            destination_addresses: vec!["any".into()],
+            applications: vec!["any".into()],
+            application_terms: Vec::new(),
+            action: "permit".into(),
+            ..Default::default()
+        });
+    }
+    build_forwarding_state(&snapshot)
+}
 
-    assert!(
-        !forwarding
-            .policy
-            .icmp_verdict_may_depend_on_type(PROTO_ICMP),
-        "a type-constrained DENY cannot manufacture a false DENY, so it must \
-         NOT make the verdict type-dependent"
-    );
-
+fn drive_icmp_against_9386(forwarding: &ForwardingState) -> u64 {
     let mut binding = BindingWorker::new_for_mirror_test(0, 0, LAN_IFINDEX, 0);
     binding.interface = Arc::<str>::from("reth1.0");
     let ha_state = txn_ha_state();
@@ -678,6 +685,8 @@ fn a_type_constrained_deny_does_not_suppress_the_icmp_re_derivation_8618() {
         PROTO_ICMP,
         0,
     ));
+    // An echo REQUEST, type 8 — the type the junos-ping term constrains on, so a
+    // fully-informed evaluation WOULD match the deny.
     let frame = build_icmp_echo_frame_v4(SRC, DST, 64);
     let mut meta = txn_meta_v4(LAN_IFINDEX as u32, 0, frame.len() as u16);
     meta.protocol = PROTO_ICMP;
@@ -685,15 +694,107 @@ fn a_type_constrained_deny_does_not_suppress_the_icmp_re_derivation_8618() {
     let (_batch, dbg) = txn_run_descriptor(
         &mut binding,
         &mut sessions,
-        &forwarding,
+        forwarding,
         &ha_state,
         &frame,
         meta,
     );
     assert_eq!(
-        dbg.policy_revoked_sessions, 1,
-        "a type-constrained DENY must not suppress the re-derivation — the \
-         residual would stay open on configs that never needed it"
+        dbg.session_hit, 1,
+        "the ICMP packet must HIT the installed session, or every assertion \
+         about the re-derivation is vacuous (#9386)"
+    );
+    dbg.policy_revoked_sessions
+}
+
+/// Binds the `PolicyAction::Permit` filter on the #8618 arming, which an
+/// escaped mutation showed nothing else could see.
+///
+/// Only a PERMIT can overturn a type-blind DENY. A type-constrained DENY that
+/// `packet_icmp = None` gates OFF can only make the walk fall through to a
+/// later permit — i.e. more permissive, "do not revoke". It can never manufacture
+/// the false DENY the gate exists to prevent, so arming on it would decline for
+/// no reason and leave #7323's residual open on configs that never needed it.
+///
+/// #9386 MOVED THE DENY ONTO THE DRIVEN ZONE PAIR. It used to be copied from
+/// `junos_ping_permit()`, i.e. `dmz -> wan`, while the driven session is
+/// `lan -> wan` — so the second half of this cell revoked by DEFAULT-DENY
+/// regardless of the deny, and bound nothing. Only the predicate assertion was
+/// doing work.
+///
+/// WHAT THE SECOND HALF BINDS NOW, stated so it is not over-read: it binds the
+/// ARMING, not enforcement. With no broader permit behind the deny, an ARMED gate
+/// declines (0) and an UNARMED gate runs and revokes by default-deny (1), so the
+/// two outcomes differ. It is NOT evidence that the constrained deny itself was
+/// enforced — that is the residual, and
+/// `a_type_constrained_deny_is_skipped_and_the_session_survives_9386` is where it
+/// is pinned.
+///
+/// Dropping `&& matches!(.., Permit)` from the arming loop reds BOTH halves.
+#[test]
+fn a_type_constrained_deny_does_not_suppress_the_icmp_re_derivation_8618() {
+    let forwarding = ping_deny_on_the_driven_pair_9386(false);
+    assert!(
+        !forwarding
+            .policy
+            .icmp_verdict_may_depend_on_type(PROTO_ICMP),
+        "a type-constrained DENY cannot manufacture a false DENY, so it must \
+         NOT make the verdict type-dependent"
+    );
+    assert_eq!(
+        drive_icmp_against_9386(&forwarding),
+        1,
+        "a type-constrained DENY must not suppress the re-derivation: with the \
+         gate UNARMED the walk runs, skips the type-constrained deny, finds no \
+         other rule and revokes by default-deny. 0 here means the gate ARMED on a \
+         constrained DENY and declined, which leaves #7323's residual open for \
+         every ICMP flow on any box carrying a constrained deny anywhere — the \
+         predicate is whole-snapshot (#8618/#9386)"
+    );
+}
+
+/// THE ACCEPTED RESIDUAL, and the cell that replaces the vacuous half. Same zone
+/// pair, the type-constrained DENY FIRST, a type-blind broader permit BEHIND it.
+///
+/// A fully-informed walk matches the deny (the packet IS an echo request, type 8)
+/// and would revoke. The type-blind walk this derivation performs fails the
+/// constrained term closed for `packet_icmp = None`, falls through to the permit,
+/// and the session SURVIVES. That is the residual #9386 names, and it is accepted
+/// rather than closed — see `PolicyState::icmp_verdict_may_depend_on_type` for
+/// why, in one line: arming the gate on a constrained DENY would not change this
+/// outcome (the derivation would decline instead of deriving Permit, and either
+/// way the session lives) and would cost #8356 coverage for every ICMP flow on
+/// the box, while closing it properly needs the packet's type/code — which this
+/// derivation's frame-INDEPENDENCE contract forbids, because one packet's type is
+/// not the flow's property.
+///
+/// SO THIS IS A CHANGE DETECTOR, NOT A DEFECT GUARD, and the distinction is
+/// deliberate. Together with the cell above it is TOTAL over the three candidate
+/// contracts: accept (predicate false, 1, 0 — today), arm on any constrained term
+/// (the cell above reds twice), supply the packet type (THIS cell reds, because
+/// the deny would then match and revoke).
+#[test]
+fn a_type_constrained_deny_is_skipped_and_the_session_survives_9386() {
+    let forwarding = ping_deny_on_the_driven_pair_9386(true);
+    // Non-vacuity: the gate must be UNARMED, or the derivation declines for a
+    // different reason and this cell stops measuring the skip.
+    assert!(
+        !forwarding
+            .policy
+            .icmp_verdict_may_depend_on_type(PROTO_ICMP),
+        "the snapshot carries no type-constrained PERMIT, so the gate must be \
+         unarmed and the re-derivation must RUN — otherwise this cell measures a \
+         decline rather than the skip (#9386)"
+    );
+    assert_eq!(
+        drive_icmp_against_9386(&forwarding),
+        0,
+        "the type-blind walk fails the constrained deny closed and falls through \
+         to the broader permit, so the session survives. This is the ACCEPTED \
+         residual: a type-constrained ICMP DENY is not enforced on the \
+         established-session path. 1 here means the derivation became \
+         frame-DEPENDENT for ICMP, which is a contract change and must be a \
+         deliberate one (#9386)"
     );
 }
 

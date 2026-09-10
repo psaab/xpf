@@ -1625,11 +1625,36 @@ impl PolicyState {
     /// rather than the policy's real answer. A caller that acts on DENY must
     /// decline when this is true.
     ///
-    /// False is the common case and the useful one: with no type-constrained
-    /// permit anywhere, `None` yields exactly the verdict a fully-informed
-    /// evaluation would, because `packet_icmp` is read in exactly one arm of
-    /// `CompiledApplications::matches` — the `icmp_constraints` arm — and that
-    /// arm is inert when no term populates it.
+    /// False is the common case and the useful one. #9386 CORRECTS WHAT IT
+    /// GUARANTEES, because the previous wording claimed VERDICT EQUIVALENCE and
+    /// that is false: it said that with no type-constrained permit anywhere,
+    /// `None` "yields exactly the verdict a fully-informed evaluation would,
+    /// because `packet_icmp` is read in exactly one arm of
+    /// `CompiledApplications::matches` ... and that arm is inert when no term
+    /// populates it". The arm is not action-scoped — a type-constrained term on a
+    /// **DENY** rule populates it too, and `matches` then fails that term closed
+    /// for `packet_icmp = None` exactly as it does for a permit. This predicate
+    /// tests only for a constrained PERMIT, so a constrained DENY leaves it
+    /// false and the type-blind walk SKIPS that deny.
+    ///
+    /// What is actually guaranteed, and it is the property the gate exists for:
+    /// **a type-blind evaluation can never manufacture a false DENY.** Skipping a
+    /// constrained term can only make the walk fall through to a LATER rule, i.e.
+    /// more permissive. So acting on a DENY returned here is safe; acting on a
+    /// PERMIT is not an assertion that a fully-informed walk would agree.
+    ///
+    /// The ACCEPTED CONSEQUENCE, pinned by
+    /// `a_type_constrained_deny_is_skipped_and_the_session_survives_9386`: on the
+    /// established-session path a type-constrained DENY placed ahead of a broader
+    /// permit is not enforced — the walk falls through to the permit and the
+    /// session survives. Arming this predicate on a constrained DENY as well
+    /// would NOT change that outcome (the derivation would decline instead of
+    /// deriving Permit, and either way the session lives); it would only give up
+    /// #8356 coverage for every ICMP flow on any box that has a constrained deny
+    /// anywhere, because the predicate is whole-snapshot. Closing the residual
+    /// means supplying the packet's type/code to that derivation, which its own
+    /// contract forbids: it is deliberately frame-INDEPENDENT, because one
+    /// packet's type is not the flow's property.
     pub(crate) fn icmp_verdict_may_depend_on_type(&self, protocol: u8) -> bool {
         match protocol {
             PROTO_ICMP => self.icmp_type_constrained_permit[0],

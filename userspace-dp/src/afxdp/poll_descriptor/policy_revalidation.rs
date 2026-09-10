@@ -20,13 +20,19 @@
 //!
 //! #8356 shipped declining ICMP outright, leaving #7323's residual open for
 //! that protocol alone. #8618 narrows the decline to the configs where it is
-//! actually earned. `packet_icmp` is read in exactly ONE place in policy
+//! actually earned: `packet_icmp` is read in exactly ONE place in policy
 //! evaluation — the `icmp_constraints` arm of `CompiledApplications::matches`
-//! (#3020, junos-ping) — so when no active PERMIT rule carries a
-//! type-constrained term, that arm is inert and this derivation's type-blind
-//! `None` returns precisely the verdict a fully-informed evaluation would.
-//! There is nothing to be dishonest about, and declining would leave the
-//! residual open for no reason.
+//! (#3020, junos-ping) — and the gate arms when an active PERMIT rule carries a
+//! type-constrained term.
+//!
+//! #9386: what the type-blind `None` guarantees is that it can never
+//! MANUFACTURE a false DENY, NOT that the verdict equals a fully-informed one.
+//! The `icmp_constraints` arm is action-BLIND, so a type-constrained DENY
+//! populates it too and is SKIPPED here; the walk then falls through to a later,
+//! more permissive rule. The accepted consequence is that a type-constrained
+//! DENY ahead of a broader permit is not enforced on the established path. See
+//! `PolicyState::icmp_verdict_may_depend_on_type` for why arming on a
+//! constrained DENY would not change that outcome and would cost coverage.
 //!
 //! Where such a permit DOES exist the decline stands, and it must: a type-blind
 //! evaluation would fail to match the type-specific permit, manufacture a DENY,
@@ -187,11 +193,25 @@ pub(super) fn revalidate_zone_policy_on_session_hit(
     //
     // #8618 narrows the decline to the case that reasoning actually describes.
     // `packet_icmp` is read in exactly ONE place in policy evaluation — the
-    // `icmp_constraints` arm of `CompiledApplications::matches`. When no active
-    // PERMIT rule carries a type-constrained term, that arm is inert and a
-    // type-blind evaluation returns exactly the verdict a fully-informed one
-    // would. There is then nothing to be dishonest about, and declining would
-    // leave #7323's residual open for no reason.
+    // `icmp_constraints` arm of `CompiledApplications::matches` — and the
+    // predicate arms on a type-constrained PERMIT.
+    //
+    // #9386 CORRECTS THE CLAIM THAT USED TO BE HERE. This said that with no
+    // type-constrained PERMIT, "a type-blind evaluation returns exactly the
+    // verdict a fully-informed one would". That is verdict EQUIVALENCE and it is
+    // false: the `icmp_constraints` arm is action-BLIND, so a type-constrained
+    // term on a DENY rule populates it too and `matches` fails that term closed
+    // for `None` just the same. The guarantee is the weaker, sufficient one — a
+    // type-blind walk can never MANUFACTURE a false DENY, because skipping a
+    // constrained term can only fall through to a later, more permissive rule.
+    // Acting on a DENY here is therefore safe; a PERMIT is not a claim that a
+    // fully-informed walk would agree.
+    //
+    // The accepted residual: a type-constrained DENY ahead of a broader permit is
+    // not enforced on this path — the walk falls to the permit and the session
+    // survives. See `PolicyState::icmp_verdict_may_depend_on_type` for why
+    // widening the arming would not change that outcome and would cost #8356
+    // coverage, and for what closing it would actually require.
     //
     // The predicate is whole-snapshot and therefore conservative (see
     // `PolicyState::icmp_verdict_may_depend_on_type`): one junos-ping permit
@@ -405,10 +425,12 @@ fn zone_policy_deny_on_session_hit(
         policy_dst_port,
         // Frame-INDEPENDENT, like #7212's static walk: no ICMP type/code is
         // supplied. #8618: an ICMP flow only reaches here when the snapshot has
-        // no type-constrained PERMIT term, so `None` is not a loss of
-        // information — the `icmp_constraints` arm it would feed is inert and
-        // the verdict is identical to a fully-informed evaluation. Gate 1b
-        // declines the flows for which that is not true.
+        // no type-constrained PERMIT term. #9386: that is NOT the same as "the
+        // verdict is identical to a fully-informed evaluation" — a
+        // type-constrained DENY also feeds the `icmp_constraints` arm and is
+        // SKIPPED here. What it does guarantee is that `None` cannot manufacture
+        // a false DENY, which is what makes acting on a DENY safe. Gate 1b
+        // declines the case where a PERMIT could be missed.
         None,
         // Byte count is used only by policers/counters, neither of which this
         // side-effect-free derivation touches.
