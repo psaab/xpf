@@ -4171,9 +4171,16 @@ impl PortAllocator {
         }
 
         // Resolve the lease's pinned address: reuse a still-valid lease, tear down
-        // an expired-idle one, else pick fresh.
+        // a reclaimable one, else pick fresh.
         let mut reuse_addr: Option<(IpAddr, usize)> = None;
-        let mut expired: Option<(usize, u64)> = None;
+        // #9158: the teardown tuple now carries the lease's PORT and its MODE,
+        // mirroring the port-bearing `expired` tuple in
+        // `reuse_persistent_lease_locked`. Before this it was
+        // `(addr_index, expires_at_ns)` and the arm freed nothing, so every
+        // PAT -> address-only flip orphaned the lease's occupancy bit.
+        let mut expired: Option<(TranslatedTuple, usize, u64, bool)> = None;
+        // #9158: a LIVE PAT lease must be left standing. See the arm below.
+        let mut live_mode_mismatch = false;
         if let Some(lease) = live.persistent_by_source.get(&key).copied() {
             // #8597 K10, the mirror of the port-bearing gate: this is the
             // ADDRESS-ONLY path, so a PAT lease must not be reused here either.
@@ -4183,14 +4190,69 @@ impl PortAllocator {
             // expired arm, which tears down mode-correctly.
             if lease.address_only && (lease.active_flows > 0 || lease.expires_at_ns > now_ns) {
                 reuse_addr = Some((lease.translated.ip, lease.addr_index));
+            } else if !lease.address_only && lease.active_flows > 0 {
+                // #9158: MODE MISMATCH UNDER A LIVE LEASE. An ordinary operator
+                // commit reaches here -- `allocator_key()` is built from the pool
+                // name, addresses and range and does NOT include
+                // `no_translation`, so flipping that leaf keeps the SAME
+                // allocator and carries the leases across (stated at
+                // `reuse_persistent_lease_locked`).
+                //
+                // Neither other arm is correct here, and both are harmful:
+                //
+                //   * REUSE is what #8597 K10 forbids: an address-only flow
+                //     adopting a PAT lease leaves the two modes' bookkeeping
+                //     disagreeing about who owns the identity.
+                //   * TEAR DOWN cannot free the port, because a live PAT flow is
+                //     still forwarding on it -- freeing the bit would let
+                //     `claim()` hand the same `(address, port)` to a second flow,
+                //     the duplicate this allocator exists to prevent. And NOT
+                //     freeing it is the #9158 leak: removing the record puts the
+                //     bit beyond BOTH recovery paths
+                //     (`reclaim_expired_lease_locked` starts from
+                //     `persistent_by_source.get(&key)`, and
+                //     `unlink_live_allocation_locked` frees a port only when
+                //     `persistent_key.is_none()`), so it is held for the
+                //     allocator's lifetime. Measured, not inferred: the #9158
+                //     cell sweeps GC 10000 s past every timeout AND releases the
+                //     live flow, and the bit survives both.
+                //
+                // So the lease is LEFT STANDING and this flow is served without
+                // persistence: `persistent_key: None` below, no lease insert, no
+                // refcount. The lease keeps owning its bit until its own flows
+                // drain, at which point `complete_persistent_lease_locked` takes
+                // `active_flows` to 0, the lease enters `lease_expirations` and
+                // `reclaim_expired_lease_locked` frees the port correctly.
+                //
+                // The cost is bounded and it is the right one: this flow loses
+                // its ADDRESS PINNING until the stale lease drains. It is not
+                // dropped, nothing is over-released, and the state converges with
+                // no operator action. Refusing the flow instead would turn a
+                // supported config edit into an outage.
+                live_mode_mismatch = true;
             } else {
-                expired = Some((lease.addr_index, lease.expires_at_ns));
+                expired = Some((
+                    lease.translated,
+                    lease.addr_index,
+                    lease.expires_at_ns,
+                    lease.address_only,
+                ));
             }
         }
-        if let Some((addr_index, expires_at_ns)) = expired {
-            // Idle + past its inactivity window: drop it (an address-only lease
-            // holds NO port bit to free) so a fresh address is picked below.
+        if let Some((translated, addr_index, expires_at_ns, address_only)) = expired {
+            // Reclaimable: idle and past its inactivity window, or an IDLE lease
+            // in the other mode. Drop it so a fresh address is picked below.
             Self::remove_lease_expiration_locked(&mut live, addr_index, expires_at_ns, key);
+            // #9158: free the bit a PAT lease owns, exactly as the port-bearing
+            // mirror does. An ADDRESS-ONLY lease holds no pool port -- its
+            // per-flow reverse-identity tokens were cleared when each flow
+            // released -- so freeing `translated.port` for one would clear an
+            // UNRELATED PAT flow's bit that happens to share the offset (#6041).
+            // Every lease reaching here is idle by the arms above, so no live
+            // flow is forwarding on the port being freed.
+            if !address_only {
+                self.free_translated_port(addr_index, translated.port, true);
+            }
             live.persistent_by_source.remove(&key);
         }
 
@@ -4263,7 +4325,13 @@ impl PortAllocator {
         // Lease-table pressure cap for a FRESH lease, mirroring
         // `allocate_translation_locked`: one bounded GC pass, then treat a still-
         // full table as exhaustion.
-        if !reusing && live.persistent_by_source.len() >= self.shared.max_tracked_flows {
+        // #9158: `live_mode_mismatch` inserts NO lease (see the arm above), so the
+        // LEASE-table pressure cap does not apply to it -- gating it here would
+        // refuse a flow on behalf of a table it is not about to grow.
+        if !reusing
+            && !live_mode_mismatch
+            && live.persistent_by_source.len() >= self.shared.max_tracked_flows
+        {
             self.gc_expired_locked(&mut live, now_ns, PRESSURE_GC_BUDGET);
             if live.persistent_by_source.len() >= self.shared.max_tracked_flows {
                 self.shared.exhaustion_total.fetch_add(1, Ordering::Relaxed);
@@ -4300,6 +4368,16 @@ impl PortAllocator {
                 Self::remove_lease_expiration_locked(&mut live, idx, old_expires_at_ns, key);
             }
             self.shared.reuses_total.fetch_add(1, Ordering::Relaxed);
+        } else if live_mode_mismatch {
+            // #9158: the stale PAT lease is STILL IN THE MAP and still owns its
+            // occupancy bit. Inserting here would overwrite that record under the
+            // same `PersistentSourceKey` -- the same orphan this fix removes,
+            // reached by a different route. This flow is served unpinned instead;
+            // `persistent_key: None` below keeps its teardown from touching a
+            // lease it does not own.
+            //
+            // `allocations_total` is deliberately NOT bumped: it counts LEASES
+            // minted, and this path mints none.
         } else {
             live.persistent_by_source.insert(
                 key,
@@ -4325,7 +4403,14 @@ impl PortAllocator {
             flow,
             LiveAllocation {
                 translated,
-                persistent_key: Some(key),
+                // #9158: a flow served AROUND a live mode-mismatched lease owns no
+                // lease, so it must not name one. With `Some(key)` its release
+                // would run `complete_persistent_lease_locked` against the
+                // SURVIVING PAT lease and decrement a refcount this flow never
+                // incremented -- driving `active_flows` to 0 while that lease's
+                // own PAT flows are still forwarding, which hands the lease to GC
+                // and frees a port still in use.
+                persistent_key: if live_mode_mismatch { None } else { Some(key) },
                 addr_index,
                 deterministic: false,
                 address_only: true,
@@ -4341,6 +4426,24 @@ impl PortAllocator {
             },
         );
         Ok(translated)
+    }
+
+    /// Test-only: a live flow's `(persistent_key, address_only)` pair.
+    ///
+    /// #9158: `live_by_flow` is private (unlike its sibling
+    /// `persistent_by_source`), and whether a record NAMES a lease is exactly
+    /// what distinguishes a flow served AROUND a live mode-mismatched lease from
+    /// one that joined it. The outer `None` means no record for that flow, which
+    /// a test must be able to tell from "a record that names no lease".
+    #[cfg(test)]
+    pub(super) fn debug_live_flow_lease(
+        &self,
+        flow: &SourceNatFlowKey,
+    ) -> Option<(Option<PersistentSourceKey>, bool)> {
+        let live = self.shared.live.lock().unwrap_or_else(|e| e.into_inner());
+        live.live_by_flow
+            .get(flow)
+            .map(|rec| (rec.persistent_key, rec.address_only))
     }
 
     /// Test-only: snapshot the address-only reverse-identity ownership map so a
