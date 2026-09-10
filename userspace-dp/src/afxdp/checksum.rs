@@ -268,6 +268,15 @@ pub(super) fn dnat_v6_key_bytes(
 /// `bpf_map_update_elem` / `bpf_map_delete_elem` SYSCALL for the same row, and
 /// only for sessions that carry a source rewrite. It is not on the per-packet
 /// path; it is per NAT'd session install and close.
+///
+/// A REPLACEMENT MUST RELEASE WHAT IT REPLACES (#9514). A hold is keyed by the
+/// `(key, nat)` pair that published it, and a release drops only the pair it is
+/// given. A publisher that replaces a session under the SAME key with a
+/// DIFFERENT SNAT tuple must therefore release the previous tuple itself: the
+/// eventual close names only the newest decision, so a replace that never names
+/// the old one strands a hold that keeps its row non-empty and refuses every
+/// later session's delete of that row. `upsert_synced_session` does this. A
+/// same-row refresh must NOT, because it re-acquires the very same hold.
 static DNAT_STEERING_HOLDERS: std::sync::LazyLock<
     std::sync::Mutex<std::collections::HashMap<DnatSteeringKey, Vec<crate::session::SessionKey>>>,
 > = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));

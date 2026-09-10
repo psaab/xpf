@@ -577,7 +577,9 @@ impl crate::afxdp::ha::SessionDomain {
         // passive reverse-NAT steering map that must be ready the instant this
         // node becomes active, and inbound SNAT-return traffic does not reach
         // the standby anyway, so an early entry is inert until failover. The
-        // matching delete is `delete_synced_session_gen`'s teardown. The
+        // matching release is `delete_synced_session_gen`'s teardown, plus the
+        // #9514 holder migration below when a same-key replacement moves the
+        // row. The
         // process-global `dnat_table` map is a single shared object, so this
         // once-per-synced-session publish (not per worker) mirrors the primary.
         if !entry.metadata.is_reverse {
@@ -595,6 +597,29 @@ impl crate::afxdp::ha::SessionDomain {
                 // entry. Count it via the shared static (no per-binding context
                 // here) so `dnat_publish_errors_total` stays honest.
                 DNAT_PUBLISH_ERRORS_SHARED.fetch_add(1, Ordering::Relaxed);
+            }
+            // #9514: MIGRATE the steering hold on a same-key replacement that
+            // MOVES the row. A hold is `(key, nat)`-shaped and
+            // `release_dnat_steering_holder` drops only the pair it is given,
+            // while the final teardown (`delete_synced_session_gen`) names the
+            // STORED -- newest -- decision. So a replacement from SNAT tuple A
+            // to B, left alone, strands `(key, A)`: the delete releases only B,
+            // and every later session on row A then has its map delete refused,
+            // because the stranded hold keeps the row non-empty. Measured
+            // through this function before the fix (see docs/log/9514.md).
+            //
+            // Released THROUGH `delete_dnat_table_entry`, never with a raw map
+            // delete: the row is shared (#6745), so this drops only THIS key's
+            // hold and deletes the row only if that was the last one.
+            //
+            // Gated on the row CHANGING. A same-row refresh re-acquires the hold
+            // idempotently in the publish above; releasing it here would drop
+            // the hold of a session that is still live and delete its row.
+            if let Some(previous) = previous_entry.as_ref()
+                && crate::afxdp::checksum::dnat_steering_key(&previous.key, previous.decision.nat)
+                    != crate::afxdp::checksum::dnat_steering_key(&entry.key, entry.decision.nat)
+            {
+                delete_dnat_table_entry(&dnat_fds, &previous.key, previous.decision.nat);
             }
         }
         // Keep the immediate BPF publish aligned with the worker-side
