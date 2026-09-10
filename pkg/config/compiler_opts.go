@@ -1268,6 +1268,19 @@ type compileOpts struct {
 	// merging them, so a leniently-loaded config is already inert. Same
 	// doctrine as lenientNextTableRefs.
 	lenientForwardingInstanceProtocols bool
+
+	// lenientDHCPRelayDHCPv6 (#9411) downgrades validateDHCPRelayDHCPv6AST from
+	// a hard compile error to a cfg.Warnings entry. `forwarding-options
+	// dhcp-relay dhcpv6` was accepted on all four config channels and compiled to
+	// NOTHING -- there is no DHCPv6 relay agent -- because the schema walk is
+	// open-world under dhcp-relay and compileDHCPRelay reads only server-group and
+	// group. The strict commit / commit-check path rejects so the absent feature
+	// is operator-visible; the tolerant load / peer-sync paths warn so a persisted
+	// or peer-synced config carrying the stanza still BOOTS (#1960). Safe only
+	// because compileForwardingOptions no longer compiles the `dhcp-relay dhcpv6
+	// { … }` spelling as the DHCPv4 relay (dhcpRelayV4Node9411) -- before that it
+	// installed the DHCPv6 groups as DHCPv4 relays, so the stanza was not inert.
+	lenientDHCPRelayDHCPv6 bool
 	// lenientRoutingRuleWindows (#5854) downgrades the next-table / rib-group
 	// ip-rule window over-subscription gate (validateRoutingRuleWindowsStrict)
 	// from a hard compile error to a cfg.Warnings entry. The runtime applier
@@ -2737,6 +2750,7 @@ func lenientCompileOpts() compileOpts {
 		lenientRibGroupRefs:                    true,
 		lenientNextTableRefs:                   true,
 		lenientForwardingInstanceProtocols:     true,
+		lenientDHCPRelayDHCPv6:                 true,
 		lenientRoutingRuleWindows:              true,
 		lenientPolicyRouteMapSeq:               true,
 		lenientRouteDispositionConflict:        true,

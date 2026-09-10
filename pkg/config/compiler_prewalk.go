@@ -267,6 +267,17 @@ func runPreWalkGates(tree *ConfigTree, opts compileOpts) ([]string, error) {
 	}
 	fwFilterFamilyWarnings = append(fwFilterFamilyWarnings, riChildWarnings...)
 
+	// #9411 `forwarding-options dhcp-relay dhcpv6`. Same AST-level reason as the
+	// gates above: there is no DHCPv6 relay agent, the stanza compiles to nothing,
+	// and by the time cfg.ForwardingOptions.DHCPRelay exists there is no trace of
+	// it left to validate. Scoped to the dhcpv6 token by POSITION so a DHCPv4
+	// relay group or server-group NAMED `dhcpv6` still commits.
+	dhcpv6RelayWarnings, err := validateDHCPRelayDHCPv6AST(tree.Children, opts.lenientDHCPRelayDHCPv6)
+	if err != nil {
+		return nil, err
+	}
+	fwFilterFamilyWarnings = append(fwFilterFamilyWarnings, dhcpv6RelayWarnings...)
+
 	// #4296 firewall-filter family-any specific-match gate. #4287 dual-compiles a
 	// `family any` filter into BOTH the inet and inet6 pools; a family-specific
 	// match under `family any` (a v4/v6 source/destination-address literal or a
