@@ -219,6 +219,7 @@ Last updated: 2026-02-13
 | **MAP-E/MAP-T** | Mapping of Address and Port (IPv4/IPv6 translation) | Complex | No |
 | **IPv6 Firewall Authentication** | User-based auth for IPv6 traffic | Complex | No |
 | **DHCPv6 Prefix Delegation** | Full PD support with sub-prefix assignment to downstream routers | Medium | Parsed (`PrefixDelegatingPrefixLen`, `PrefixDelegatingSubPrefLen`, `ClientIATypes`) but not wired |
+| **DHCPv6 Relay** | RFC 8415 Relay-Forw / Relay-Reply agent (`forwarding-options dhcp-relay dhcpv6`) | Medium | No — no agent exists; `pkg/dhcprelay` is DHCPv4-only. The stanza is refused at commit and warned on the tolerant path (#9411) |
 | **IPv6 Multicast (MLD)** | Multicast Listener Discovery for IPv6 | Medium | No |
 | **IPv6 Neighbor Discovery Inspection** | ND security features (RA guard, etc.) | Medium | No |
 

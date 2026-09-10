@@ -682,6 +682,15 @@ link-local source and the relay replies to that link-local unicast (or
 `ff02::1:2`), so there is no "reply to an unconfigured global address via
 ND" failure mode. This fix is strictly DHCPv4.
 
+**Authoring the Junos DHCPv6 relay stanza is refused (#9411).** Before #9411,
+`forwarding-options dhcp-relay dhcpv6 { … }` committed clean on every config
+channel and was either discarded or — in the elided spelling
+`dhcp-relay dhcpv6 { group g6 { … } }` — compiled AS A DHCPv4 relay group, which
+also hid a real DHCPv4 relay block authored after it. The config compiler now
+refuses the stanza at commit (warning on the tolerant load / peer-sync path) and
+never reads the dhcpv6 spelling as this package's DHCPv4 relay; see
+`docs/config-schema.md`. An RFC 8415 relay agent is separate, larger work.
+
 ### HA master-state gate (#2456)
 
 On a chassis cluster a shared client segment is reachable from BOTH the

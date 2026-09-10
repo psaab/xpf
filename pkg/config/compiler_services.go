@@ -1450,7 +1450,16 @@ func compileForwardingOptions(node *Node, fo *ForwardingOptionsConfig) error {
 		}
 	}
 
-	relayNode := node.FindChild("dhcp-relay")
+	// #9411: never compile the `dhcp-relay dhcpv6 { … }` spelling as the DHCPv4
+	// relay. That elided spelling puts `dhcpv6` on the relay node's OWN Keys, so
+	// its `group` children are direct children of a node named `dhcp-relay` and
+	// FindChild returned it: measured at the base, a DHCPv6 relay group compiled
+	// as a DHCPv4 relay group on every channel, and when that block came first the
+	// operator's real DHCPv4 relay block after it was never compiled. Select the
+	// first dhcp-relay node that is NOT the dhcpv6 spelling;
+	// validateDHCPRelayDHCPv6AST reports the dhcpv6 one (refused strict, warned
+	// tolerant).
+	relayNode := dhcpRelayV4Node9411(node)
 	if relayNode != nil {
 		if err := compileDHCPRelay(relayNode, fo); err != nil {
 			return err
