@@ -241,14 +241,18 @@ func validateApplicationSpecsStrict(cfg *Config) error {
 				name, app.Protocol)
 		}
 		// #3373: a source-port/destination-port constraint is only meaningful on a
-		// port-bearing transport (TCP/UDP/SCTP). The protocol is already known
+		// port-bearing transport (TCP/UDP, protocolIsPortBearing). The protocol is already known
 		// resolvable here (filterProtocolResolvable passed above), so a port on any
 		// OTHER protocol — icmp/icmpv6/gre/ospf/esp/ah/vrrp/igmp/pim/ip-in-ip — is a
 		// silent operator error: the userspace matcher (userspace-dp src/policy.rs)
 		// indexes every application term by protocol number and keys port terms on
-		// src_port/dst_port, but a non-port protocol always presents ports of 0, so
-		// the term becomes a never-match. For a deny rule that fails OPEN; for a
-		// permit rule it fails CLOSED. Junos does not couple ports to non-port
+		// src_port/dst_port. A non-port protocol presents no destination port, so a
+		// destination-port term never matches (a deny fails OPEN, a permit fails
+		// CLOSED). ICMP/ICMPv6 are the exception on the SOURCE side:
+		// parse_flow_ports presents the query Identifier as src_port, so a
+		// source-port term matches whichever senders choose that Identifier
+		// (#9525). On the tolerant path config.ApplicationReferenceMatchDrops makes
+		// the userspace expansion refuse a referencing policy either way. Junos does not couple ports to non-port
 		// protocols, so reject at COMMIT (the same strict-at-commit / #1960
 		// fail-closed doctrine as the protocol-less #3109 and unresolvable-protocol
 		// #3150 cases above). The call site downgrades this to a warning on the
@@ -259,18 +263,20 @@ func validateApplicationSpecsStrict(cfg *Config) error {
 				return fmt.Errorf(
 					"application %q: destination-port %q is set on protocol %q, which "+
 						"does not carry L4 ports — source-port/destination-port are valid "+
-						"only on tcp/udp (the dataplane keys port terms on the "+
-						"packet's ports, which are always 0 for a non-port protocol, so the "+
-						"term would never match; remove the port or change the protocol)",
+						"only on tcp/udp (a non-port protocol presents no destination port "+
+						"to the dataplane, so the term would never match; remove the port or "+
+						"change the protocol)",
 					name, port, app.Protocol)
 			}
 			if port := app.SourcePort; port != "" {
 				return fmt.Errorf(
 					"application %q: source-port %q is set on protocol %q, which does "+
 						"not carry L4 ports — source-port/destination-port are valid only "+
-						"on tcp/udp (the dataplane keys port terms on the packet's "+
-						"ports, which are always 0 for a non-port protocol, so the term "+
-						"would never match; remove the port or change the protocol)",
+						"on tcp/udp (for icmp/icmpv6 the dataplane compares a source-port "+
+						"term with the ICMP query Identifier, a value the sender chooses, so "+
+						"the term would match only senders that pick it; on any other "+
+						"non-port protocol it would never match; remove the port or change "+
+						"the protocol)",
 					name, port, app.Protocol)
 			}
 		}

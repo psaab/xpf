@@ -743,9 +743,14 @@ type compileOpts struct {
 	// warning so an already-persisted or peer-synced config carrying a bad app
 	// def still BOOTS (#1960 no-brick) — the dataplane independently skips the
 	// unparsable port, and the runtime #2124 capability gate
-	// (expandUserspacePolicyApplications) fails the snapshot closed
-	// (ForwardingSupported=false) for a referenced app it cannot represent, so
-	// a leniently-loaded bad app is inert rather than silently mis-matching.
+	// (expandUserspacePolicyApplications) refuses a referenced app it cannot
+	// represent (the #3261 __unsupported__ sentinel; the helper refuses the
+	// snapshot), so a leniently-loaded bad app is inert rather than silently
+	// mis-matching. #9525: until then that held only for the drops the
+	// expansion could see; config.ApplicationReferenceMatchDrops now names the
+	// rest (a port on a non-port protocol, a dropped or misplaced icmp field,
+	// a dangling or conflicting match leaf, a discarded direct body). An
+	// unrecognized statement is still installed as compiled (#6524, #9595).
 	// Commit stays strict so the operator's next edit fails loudly. This is an
 	// AST/typed-config compile decision and deliberately does NOT live in
 	// SchemaValidate (applications stay opaque there). Same doctrine as

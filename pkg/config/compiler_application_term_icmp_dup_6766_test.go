@@ -254,12 +254,10 @@ func TestApplicationTermICMPDup_ApplyGroups_Rejected(t *testing.T) {
 // covered; it is just not covered HERE, which is what the claim got wrong.
 //
 // It asserts on the COMPILED STRUCT, not on a policy decision. It does not
-// exercise either matcher, so it cannot by itself show that the surviving
-// value is what gets enforced or that the discarded value escapes the deny.
-// That enforcement claim is proven separately, at the verdict, in
-// pkg/policymatch/app_inline_term_icmp_dup_6766_test.go, which drives
-// policymatch.Match and asserts the discarded type/code falls through to
-// `default-policy permit-all`. Keep this comment's claim and that file's in
+// exercise either matcher, so it says nothing about what the tolerant path
+// enforces for this application. That is proven separately, at the verdict,
+// in pkg/policymatch/app_inline_term_icmp_dup_6766_test.go, which drives
+// policymatch.Match. Keep this comment's claim and that file's in
 // sync — do not restate the enforcement conclusion here.
 func TestApplicationTermICMPDup_ReferencedDeny_StrictRejects_LenientNarrows(t *testing.T) {
 	src := `
@@ -316,8 +314,8 @@ applications {
 	//
 	// That is worth naming rather than quietly rewording: it is the exact
 	// defect class this PR exists to fix — a claim that a check discriminates
-	// something it never reaches — turned inward on the PR's own test file. The
-	// fall-through IS proven, at the verdict, by
+	// something it never reaches — turned inward on the PR's own test file. What the
+	// tolerant path enforces is proven, at the verdict, by
 	// pkg/policymatch/app_inline_term_icmp_dup_6766_test.go.
 	cfg, lerr := CompileConfigLenient(tree)
 	if lerr != nil {
@@ -369,7 +367,7 @@ func TestApplicationTermICMPDup_LenientKeepsLastCode(t *testing.T) {
 		}
 		t.Fatalf("keep-last narrowing characterization: want ICMPCode=2 (the silently-retained "+
 			"LAST value), got %s — a keep-FIRST regression reports 1 here and silently "+
-			"changes which ICMP traffic a referenced deny covers", got)
+			"changes which ICMP code the compiled term carries", got)
 	}
 	// The type is untouched by the code conflict.
 	if app.ICMPType == nil || *app.ICMPType != 3 {
