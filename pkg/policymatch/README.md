@@ -446,7 +446,11 @@ tokens), and `ictype=`/`iccode=` (gRPC `test policy` topic).
 snapshot builder's `classifyPolicyAddresses`: a match-all keyword (`any`, `any4`,
 `any6`, `any-ipv4`, `any-ipv6`, per `config.IsPolicyAddressWildcardKeyword`)
 first; then an address-book address, address-set or dynamic-address feed
-binding by NAME; then a literal CIDR or IP. Before #9523 the keyword test ran
+binding by NAME; then a literal CIDR or IP. The keyword set and each keyword's
+families come from `config.PolicyAddressWildcardFamilies`, the helper the
+snapshot builder uses, so the two cannot recognise different keywords (#9574).
+The compiled config also keeps `any-ipv4` / `any-ipv6` raw since #9574, so an
+object named `0.0.0.0/0` cannot capture them either. Before #9523 the keyword test ran
 after the name lookup, so an object literally named `any` captured the keyword
 here exactly as it did on the wire, and the simulator agreed with the narrowed
 enforcement instead of flagging it. Name-before-literal is unchanged for every

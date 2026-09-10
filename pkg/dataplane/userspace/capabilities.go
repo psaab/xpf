@@ -262,6 +262,11 @@ func expandUserspacePolicyAddresses(cfg *config.Config, addrs []string) ([]strin
 		switch {
 		case addr == "" || addr == "any":
 			addUnique("any")
+		case config.IsPolicyAddressWildcardKeyword(addr):
+			// #9574: a family keyword, which the compiled config now keeps, goes
+			// on the legacy wire as its CIDR exactly as it did before the rewrite
+			// moved out of compilePolicy.
+			addUnique(config.PolicyAddressKeywordLiteral(addr))
 		case isUserspaceLiteralAddress(addr):
 			addUnique(normalizeUserspaceLiteralAddress(addr))
 		default:

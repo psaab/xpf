@@ -168,8 +168,10 @@ func resolveZoneLocalAddressBooks(sec *SecurityConfig) {
 			return
 		}
 		for i, t := range tokens {
-			switch t {
-			case "", "any", "any4", "any6":
+			// #9574: every match-all keyword stays a keyword, including the
+			// `any-ipv4` / `any-ipv6` the compiled config now keeps, so a
+			// zone-local object named after one cannot capture it.
+			if t == "" || IsPolicyAddressWildcardKeyword(t) {
 				continue
 			}
 			if localDefines(zone, t) {

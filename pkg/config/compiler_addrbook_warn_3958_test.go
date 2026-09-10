@@ -44,8 +44,8 @@ func policyAddrBookWarnings(cfg *Config) []string {
 // reference form that is not a plain address-book name:
 //
 //   - a literal IPv4/IPv6 address or CIDR,
-//   - the any / any-ipv4 / any-ipv6 wildcards (any-ipv4/any-ipv6 also surface as
-//     the literal 0.0.0.0/0 / ::/0 after compilePolicy normalization),
+//   - the any / any-ipv4 / any-ipv6 wildcards (kept as keywords in the compiled
+//     config since #9574; the snapshot builder writes 0.0.0.0/0 / ::/0),
 //   - a dynamic-address feed binding name (a direct #2049/#3294 feed reference),
 //   - an address-book address-set name.
 //

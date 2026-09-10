@@ -91,12 +91,19 @@ func TestPolicyMatchAddressExcludedDefaultFalse(t *testing.T) {
 	}
 }
 
-// TestPolicyMatchAnyIPv4IPv6Normalize asserts the Junos family-scoped
-// wildcards `any-ipv4` / `any-ipv6` are normalized to concrete CIDRs
-// at compile time (#2008 H11). Before the fix the tokens passed
-// through verbatim and failed CIDR parsing in the dataplane, so a
-// policy keyed on `any-ipv4` never matched v4 traffic.
-func TestPolicyMatchAnyIPv4IPv6Normalize(t *testing.T) {
+// TestPolicyMatchAnyIPv4IPv6KeptAsKeywords pins where the Junos family-scoped
+// wildcards `any-ipv4` / `any-ipv6` are turned into CIDRs.
+//
+// #2008 H11 rewrote them to `0.0.0.0/0` / `::/0` HERE, at compile time, because
+// the tokens otherwise reached the dataplane as opaque strings that failed CIDR
+// parsing, so a policy keyed on `any-ipv4` never matched v4 traffic. That reason
+// still holds, and the dataplane still receives the CIDR. #9574 moved the rewrite
+// into the userspace snapshot builder, AFTER the token is classified as a keyword
+// (TestAnyIPv4KeywordReachesTheWireAsCIDR9574). The compile-time position was
+// the defect: the keyword became `0.0.0.0/0` before address-book resolution, so
+// an object NAMED `0.0.0.0/0` captured every `any-ipv4`. The compiled config
+// therefore keeps the keyword.
+func TestPolicyMatchAnyIPv4IPv6KeptAsKeywords(t *testing.T) {
 	cfg := buildPolicyConfig(t, []string{
 		"set security zones security-zone trust",
 		"set security zones security-zone untrust",
@@ -106,11 +113,11 @@ func TestPolicyMatchAnyIPv4IPv6Normalize(t *testing.T) {
 		"set security policies from-zone trust to-zone untrust policy v4only then permit",
 	})
 	pol := findPolicy(t, cfg, "trust", "untrust", "v4only")
-	if len(pol.Match.SourceAddresses) != 1 || pol.Match.SourceAddresses[0] != "0.0.0.0/0" {
-		t.Errorf("SourceAddresses = %v, want [0.0.0.0/0] (any-ipv4 normalized)", pol.Match.SourceAddresses)
+	if len(pol.Match.SourceAddresses) != 1 || pol.Match.SourceAddresses[0] != "any-ipv4" {
+		t.Errorf("SourceAddresses = %v, want [any-ipv4] (the keyword is kept until the snapshot, #9574)", pol.Match.SourceAddresses)
 	}
-	if len(pol.Match.DestinationAddresses) != 1 || pol.Match.DestinationAddresses[0] != "::/0" {
-		t.Errorf("DestinationAddresses = %v, want [::/0] (any-ipv6 normalized)", pol.Match.DestinationAddresses)
+	if len(pol.Match.DestinationAddresses) != 1 || pol.Match.DestinationAddresses[0] != "any-ipv6" {
+		t.Errorf("DestinationAddresses = %v, want [any-ipv6] (the keyword is kept until the snapshot, #9574)", pol.Match.DestinationAddresses)
 	}
 }
 

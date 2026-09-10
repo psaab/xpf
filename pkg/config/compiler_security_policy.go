@@ -151,33 +151,13 @@ func compilePolicies(node *Node, sec *SecurityConfig) error {
 	return nil
 }
 
-// normalizePolicyAddrToken rewrites the Junos wildcard policy-match
-// address keywords `any-ipv4` and `any-ipv6` into their concrete CIDR
-// equivalents (`0.0.0.0/0` and `::/0`). Without this rewrite the
-// tokens reach the dataplane as opaque strings that fail CIDR parsing
-// and are silently dropped, so a policy keyed on `any-ipv4` would
-// never match v4 traffic (#2008 H11). The plain `any` keyword is left
-// intact — the dataplane already treats it as match-any on both
-// families. All other tokens (address-book names, literal CIDRs) pass
-// through unchanged.
-func normalizePolicyAddrToken(tok string) string {
-	switch tok {
-	case "any-ipv4":
-		return "0.0.0.0/0"
-	case "any-ipv6":
-		return "::/0"
-	default:
-		return tok
-	}
-}
-
-func normalizePolicyAddrTokens(toks []string) []string {
-	out := make([]string, 0, len(toks))
-	for _, t := range toks {
-		out = append(out, normalizePolicyAddrToken(t))
-	}
-	return out
-}
+// #9574: the `any-ipv4` / `any-ipv6` -> `0.0.0.0/0` / `::/0` rewrite
+// (normalizePolicyAddrToken, #2008 H11) used to run here, while the policy was
+// compiled and BEFORE any address-book resolution, so an address-book object
+// named `0.0.0.0/0` captured the keyword. The compiled config now keeps the
+// keyword, and the userspace snapshot builder writes the CIDR the dataplane
+// parses (config.PolicyAddressKeywordLiteral) after it has classified the token
+// as a keyword.
 
 // policyMatchChildren returns the children of EVERY `match {}` block under a
 // security-policy term, flattened in declaration order. #3842: a policy
@@ -261,11 +241,11 @@ func compilePolicy(polInst struct {
 				// exclusive), but a `source-address a1 { a2; }` node carrying
 				// members in BOTH slots dropped the child members. Reading both
 				// removes that divergence and shares one reader with the gates.
-				pol.Match.SourceAddresses = append(pol.Match.SourceAddresses, normalizePolicyAddrTokens(firewallMatchValues(m))...)
+				pol.Match.SourceAddresses = append(pol.Match.SourceAddresses, firewallMatchValues(m)...)
 			case "destination-address":
 				// #4121: read BOTH slots via the firewallMatchValues SSOT (see
 				// the source-address arm).
-				pol.Match.DestinationAddresses = append(pol.Match.DestinationAddresses, normalizePolicyAddrTokens(firewallMatchValues(m))...)
+				pol.Match.DestinationAddresses = append(pol.Match.DestinationAddresses, firewallMatchValues(m)...)
 			case "source-address-excluded":
 				pol.Match.SourceAddressExcluded = true
 			case "destination-address-excluded":

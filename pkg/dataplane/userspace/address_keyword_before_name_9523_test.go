@@ -33,8 +33,13 @@ func TestClassifyPolicyAddressesKeywordBeforeName9523(t *testing.T) {
 			t.Fatalf("fixture premise broken: no book named %q, so this cell cannot observe a capture", kw)
 		}
 		ids, lits := classifyPolicyAddresses(cfg, nameToID, []string{kw})
-		if len(ids) != 0 || !reflect.DeepEqual(lits, []string{kw}) {
+		// #9574: a family keyword goes on the wire as its CIDR, written by the
+		// classifier after the keyword test; `any` stays `any`.
+		want := []string{config.PolicyAddressKeywordLiteral(kw)}
+		if len(ids) != 0 {
 			t.Errorf("#9523: keyword %q was captured by the same-named book: ids=%v literals=%v", kw, ids, lits)
+		} else if !reflect.DeepEqual(lits, want) {
+			t.Errorf("keyword %q wire literal = %v, want %v", kw, lits, want)
 		}
 	}
 	// Name-before-literal is documented (Junos resolves a policy address by its
