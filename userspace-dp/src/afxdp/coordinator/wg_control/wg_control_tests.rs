@@ -1216,6 +1216,7 @@ fn observe_one_record_9594(
     let (tun, tun_test_end) = super::tun_standin_pair_9521();
     let exceptions = std::sync::Arc::new(Mutex::new(ExceptionEventRing::new()));
     let stop = std::sync::Arc::new(AtomicBool::new(false));
+    let raw_fd = socket.as_raw_fd();
     let (engine_t, stop_t, exc_t, view_t) = (resp.clone(), stop.clone(), exceptions.clone(), view.clone());
     let handle = std::thread::spawn(move || {
         run_wg_control_loop_with_kernel_path(
@@ -1233,6 +1234,35 @@ fn observe_one_record_9594(
             &*view_t,
         );
     });
+    // The loop enables pktinfo on its first line, and a datagram queued before
+    // that carries no receiving interface. Observed under load: the send won the
+    // race and the ingress assertion saw `None` for a reason that had nothing to do
+    // with the code under test. Wait (bounded) until the option is on, so that
+    // assertion observes the loop and not the race. If the loop never sets it, the
+    // wait expires and the assertion fails exactly as it should.
+    let (opt_level, opt_name) = if outer_v6 {
+        (libc::IPPROTO_IPV6, libc::IPV6_RECVPKTINFO)
+    } else {
+        (libc::IPPROTO_IP, libc::IP_PKTINFO)
+    };
+    let armed_deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while std::time::Instant::now() < armed_deadline {
+        let mut val: libc::c_int = 0;
+        let mut len = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+        let rc = unsafe {
+            libc::getsockopt(
+                raw_fd,
+                opt_level,
+                opt_name,
+                &mut val as *mut libc::c_int as *mut libc::c_void,
+                &mut len,
+            )
+        };
+        if rc == 0 && val != 0 {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
 
     let mut wire = vec![0u8; 2048];
     let enc = init.try_encap(&resp_pub, inner, &mut wire).expect("initiator encap");
@@ -1354,4 +1384,37 @@ fn unsteered_port_is_refused_before_the_degraded_posture_is_consulted_9594() {
     assert_eq!(obs.degraded_drops, 0, "an unsteered record was counted as a degraded drop");
     assert!(obs.asked.is_empty(), "the posture was consulted for an unsteered port: {:?}", obs.asked);
     assert!(obs.delivered.is_none(), "unsteered plaintext reached the TUN");
+}
+
+/// #9594: the production socket must already be asking for the receiving
+/// interface when `bind_wg_socket` returns — before the control loop's first line
+/// runs. Otherwise a record queued in between reads as an unplaceable ingress and
+/// is counted as a degraded-transit drop on a healthy box at every control-thread
+/// spawn under traffic.
+#[test]
+fn bind_wg_socket_requests_pktinfo_before_any_datagram_9594() {
+    let (socket, is_v6) = bind_wg_socket(0).expect("bind an ephemeral WireGuard socket");
+    let (level, name) = if is_v6 {
+        (libc::IPPROTO_IPV6, libc::IPV6_RECVPKTINFO)
+    } else {
+        (libc::IPPROTO_IP, libc::IP_PKTINFO)
+    };
+    let mut val: libc::c_int = 0;
+    let mut len = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+    let rc = unsafe {
+        libc::getsockopt(
+            socket.as_raw_fd(),
+            level,
+            name,
+            &mut val as *mut libc::c_int as *mut libc::c_void,
+            &mut len,
+        )
+    };
+    assert_eq!(rc, 0, "getsockopt failed: {}", std::io::Error::last_os_error());
+    assert_ne!(
+        val, 0,
+        "bind_wg_socket returned a socket that does not yet request the receiving interface \
+         (v6={is_v6}): records queued before the loop enables it would be counted as \
+         degraded-transit drops on a healthy box"
+    );
 }

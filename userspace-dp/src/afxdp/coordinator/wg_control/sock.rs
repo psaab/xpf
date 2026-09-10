@@ -99,7 +99,12 @@ pub(super) fn poll_timeout_ms(next_deadline_ns: u64, now_ns: u64) -> i32 {
 pub(super) fn bind_wg_socket(port: u16) -> io::Result<(UdpSocket, bool)> {
     match bind_dual_stack_v6(port) {
         Ok(sock) => Ok((sock, true)),
-        Err(_) => UdpSocket::bind((std::net::Ipv4Addr::UNSPECIFIED, port)).map(|s| (s, false)),
+        // #9594: the v4 fallback cannot set the option before bind, so it is set
+        // immediately after — the window is the two syscalls between.
+        Err(_) => UdpSocket::bind((std::net::Ipv4Addr::UNSPECIFIED, port)).map(|s| {
+            set_recv_pktinfo_options(s.as_raw_fd(), false);
+            (s, false)
+        }),
     }
 }
 
@@ -133,6 +138,12 @@ pub(super) fn bind_dual_stack_v6(port: u16) -> io::Result<UdpSocket> {
     if rc != 0 {
         return Err(io::Error::last_os_error());
     }
+    // #9594: ask for the receiving interface BEFORE bind, so no datagram can be
+    // queued without it. A record queued first carries no pktinfo, reads as an
+    // unplaceable ingress, and would have its transit refused and counted as a
+    // degraded-transit drop on a healthy box every time a control thread spawns
+    // under traffic — a false operator signal, not just a lost packet.
+    set_recv_pktinfo_options(fd, true);
     // bind([::]:port)
     let addr = libc::sockaddr_in6 {
         sin6_family: libc::AF_INET6 as libc::sa_family_t,
