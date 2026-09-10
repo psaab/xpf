@@ -214,6 +214,69 @@ The same distinction explains why the multi-site admission ratchet walks
 admitted *pairs* only: a node-declared opt-in is outside its population by
 construction, not by omission.
 
+### Multi-site admissions are adjudicated per site, not parent-qualified (#8921)
+
+`compactNormalizeInScope` takes no parent context, so an admitted
+`(container, head)` pair is live at every site where a container of that keyword
+declares that head. `testdata/multisite_admissions_8921.txt` records where: 202
+pairs over 531 (pair, site) cells. Each pair was adjudicated at one site, and
+`multisite_adjudication_8921_test.go` now adjudicates **every recorded cell**.
+
+**The per-site question is structural.** The pair decides only *whether* the
+fold fires. Where the container's identity ends (its `args`, a `compoundKey`
+sub-key) and what the head's statement is are read from the schema node at that
+site, and those are the inputs two sites sharing a keyword can disagree on. So
+the cell asks whether normalizing `C <id> H <value>;` builds exactly the tree the
+parser builds for `C <id> { H <value>; }`, comparing every `Node` field except
+source position. Both compile entries prune inactive nodes and then normalize
+before anything else reads the tree, and `SchemaValidateWithDefinitions`
+normalizes before its walk, so an identical tree compiles and validates
+identically **for every value** -- including the cells whose value the #2419
+census cannot observe. Measured at this change: 531 of 531.
+`TestMultisiteCellsAgreeWithTheCompiledCensus8921` cross-checks that premise
+against the compiled census (393 cells ruled equivalent, 0 divergent); a
+divergent cell there would mean some reader runs before the normalizer.
+
+**So item 1 is decided: the predicate stays keyword-keyed.** Parent
+qualification would put a parent term on every entry to guard against a
+structural mismatch that is measured absent at every live site and now fails by
+name if one appears. Measured at this change, 58 of the 202 pairs are multi-site
+only because one `schemaNode` is reachable by more than one path (for example
+`protocols` and `routing-instances <ri> protocols`), where a parent term would
+discriminate nothing. The case that *would* need parent qualification is a
+different one: admitting a pair at one site while deliberately refusing the
+elided spelling at another, for policy reasons -- the shape of the #6662
+login-body and #3043 policy-terminal-action exclusions. Structure cannot see
+that. The rejection-vs-acceptance arm of
+`TestCompactNormalizeScopePreservesCompiledResult8690` measures a disarmed gate
+at every site the pass normalizes, and a pair wanted at one such site and not
+another is the point at which to build parent qualification.
+
+**Comparing every field found a defect no census could.** The fold moved `Keys`
+into the new statement and left `KeysQuoted` / `KeysBracketed` behind: the
+container kept a mask longer than its `Keys` (breaking the `ast.go` invariant)
+and the statement carried none. The #9027 self-repeat gate reads the quote bit,
+so `protocols bgp group g1 export A "export";` was refused at commit while
+`group g1 { export A "export"; }` committed, and the same held at
+`web-management api-auth api-key`. The fold and `splitBracedPackedChildren8886`
+now split both masks with the keys. Every census fixture value is an unquoted
+token, which is why no census could see it; the adjudication fixtures carry an
+authored quote and, for a multi-value leaf, a bracketed list, and assert that
+they do.
+
+**A statement directly under an instance slot is never consulted.**
+`normalizeCompactNodes` asks the predicate with `Keys[0]`, and under a wildcard
+slot that is the operator's instance name. The ratchet walk therefore records
+nothing at a slot. It used to carry the parent's keyword into the slot and
+recorded `interfaces unit` as live at `interfaces/*`, where the fold does not
+fire and the #2419 census rules the site divergent.
+
+**On the counts.** The issue was filed at 223 of 547; the ratchet landed at 163
+because it excludes `groups`, which mirrors the whole schema and makes every
+pair multi-site by construction; an independent walk later reported 112 of 494.
+The registry is the maintained population, and it has grown with later
+admissions.
+
 
 **Issue 8904 is the same trio with only the middle decision missing.** `interfaces
 <i> [unit <n>] tunnel` and `firewall policer <p> if-exceeding` had the pair
