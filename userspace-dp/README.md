@@ -481,6 +481,38 @@ logging rules, not these specific hot-path constants.
     the counting site for a host-bound packet, and the established-hit
     path skips its own re-count for `LocalDelivery` because of that.
 
+  - **A zone of 0 is EVALUATED; only an unresolved INTERFACE declines
+    (#9513).** The decline arm used to be
+    `if to_id == 0 || from_id == 0 { return None; }`, justified by a
+    paragraph that was wrong in every clause after the first: it claimed
+    `ifindex_unambiguous_zone_id` is filled by `populate_egress` "only for
+    interfaces with a resolvable link-layer address". It is filled by
+    `populate_interfaces`, it is not conditioned on a link-layer address
+    at all, and #6722 is the change that made a correctly-zoned `xfrmi`
+    resolve to its REAL zone — the comment restated the PRE-#6722 bug as
+    current behaviour.
+
+    A zero zone on a RESOLVED ifindex means the box does not consider that
+    interface to be in any zone: an operator de-zone, a #7509 contested
+    ifindex, or an uncorroborated Go claim. New flows there already fall
+    to the default policy, so declining to re-judge established ones was
+    exactly the asymmetry #8356 exists to remove.
+
+    The fix is NOT "revoke on zero". Zero has a fourth cause that must
+    keep declining — **no egress ifindex at all**, which is a flow with no
+    route or a peer-synced import for an inactive RG (`upsert_synced`
+    leaves `NoRoute`/0). Revoking there tears down the standby population
+    at the moment of promotion. The split needs no new state:
+    `egress_ifindex == 0` is the lookup failure, `arrival_logical == 0` is
+    its ingress twin (fabric ingress keeps the entry's zone, so its twin
+    is `metadata.ingress_zone == 0`), and everything else is EVALUATED.
+
+    Evaluated, not special-cased: `evaluate_policy_result_*` (#3110)
+    refuses to match any zone-pair or `junos-global` rule against the 0
+    sentinel and falls to the default action — the same verdict a NEW flow
+    on that interface gets. So it is automatically right under both
+    postures: `default-policy deny` revokes, `permit-all` keeps.
+
   `security policies policy-rematch` is the COMMIT-time mitigation for
   the same class, and it is off by default
   (`pkg/config/types_security.go`), so on a stock box this module is the

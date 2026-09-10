@@ -357,39 +357,61 @@ fn zone_policy_deny_on_session_hit(
         packet_fabric_ingress.then_some(metadata.ingress_zone),
         egress_ifindex,
     );
-    // DECLINE on an unknown zone. `egress_zone_id` is `unwrap_or(0)` and policy
-    // evaluation refuses to match ANY rule against the 0 sentinel, so the flow
-    // would fall to the default policy — i.e. deny. That is a LOOKUP FAILURE,
-    // not a verdict, and revoking on it would tear down sessions for a missing
-    // ledger entry.
+    // #9513: DECLINE on a LOOKUP FAILURE — an interface this packet has no
+    // identity for — and NOT on a zone of 0.
     //
-    // Reachable, not defensive: `egress_zone_id` reads
-    // `ifindex_unambiguous_zone_id`, which `populate_egress` fills only for
-    // interfaces with a resolvable link-layer address. A MAC-less egress — the
-    // canonical case being an IPsec `xfrmi` secure tunnel, #6722 — is absent
-    // from it and resolves to 0 even though the interface itself is perfectly
-    // routable and correctly zoned by the operator. Bound by
-    // `an_unresolvable_egress_declines_rather_than_denying_8356`, whose fixture
-    // routes through exactly such an interface.
+    // This arm used to be `if to_id == 0 || from_id == 0 { return None; }`, and
+    // the paragraph justifying it was wrong in every clause after the first. It
+    // said `ifindex_unambiguous_zone_id` is filled by `populate_egress` "only for
+    // interfaces with a resolvable link-layer address", and that a MAC-less
+    // IPsec `xfrmi` is therefore absent from it. Measured at this base:
     //
-    // An `egress_ifindex` of 0 lands here too (it resolves to no zone), so it
-    // needs no separate guard. An earlier revision had one; it was removed after
-    // a mutation showed nothing could red it — the established-hit arm never
-    // sees an unresolved decision, because the poll path re-resolves it and a
-    // flow with no route exits before this point.
+    //   * the map is filled by `populate_interfaces`
+    //     (`forwarding_build/interfaces.rs`, the `egress_zone_claim` loop), which
+    //     `populate_egress` only READS;
+    //   * the fill is not conditioned on a link-layer address in any way — it
+    //     reads `iface.egress_zone` corroborated by `iface.zone`, both pure
+    //     config;
+    //   * #6722 is the change that made a correctly-zoned xfrmi resolve to its
+    //     REAL zone, so the comment restated the PRE-#6722 bug as current
+    //     behaviour. It was already wrong when it was written.
     //
-    // #9384 RESIDUAL, stated because the from-zone is now live and this arm now
-    // catches a case it could not before: an interface moved out of every zone
-    // (to NO zone) DECLINES rather than revoking. That is deliberate. `from_id`
-    // 0 is a LOOKUP FAILURE, and this arm exists precisely because revoking on a
-    // lookup failure is the mass-teardown risk (#6722's MAC-less egress is the
-    // reachable case). An ingress in no zone is also not an ordinary
-    // configuration — every interface in the config is expected to carry a zone
-    // — whereas an unresolvable EGRESS is. Closing the residual would mean
-    // distinguishing "this interface is deliberately unzoned" from "the ledger
-    // has no row yet", which the snapshot does not currently express. Pinned by
-    // `an_ingress_moved_to_no_zone_declines_rather_than_revoking_9384`.
-    if to_id == 0 || from_id == 0 {
+    // So a zero zone on a RESOLVED ifindex does not mean "the ledger cannot see
+    // this interface". It means the box does not consider that ifindex to be in
+    // any zone — an operator de-zone, a #7509 contested ifindex, or an
+    // uncorroborated Go claim (`EgressZoneClaim::resolve` -> None). All three are
+    // states in which NEW flows already fall to the default policy, so declining
+    // to re-judge established ones is the asymmetry #8356 exists to remove: after
+    // an operator removes an egress interface from its zone, new flows correctly
+    // default-deny while existing ones keep forwarding through it indefinitely.
+    //
+    // THE FIX IS NOT "REVOKE ON ZERO". Zero has a fourth cause that must keep
+    // declining: no egress ifindex at all — a flow with no route, or a
+    // peer-synced import for an INACTIVE redundancy group, which
+    // `upsert_synced` deliberately leaves at `NoRoute`/0. Revoking there would
+    // tear down the whole standby population at exactly the moment of promotion.
+    // The two are separable today with no new state: `egress_ifindex == 0` is
+    // exactly the lookup failure, and a non-zero ifindex whose zone is 0 is
+    // exactly the unzoned case.
+    //
+    // Past this arm a zero zone is simply EVALUATED. `evaluate_policy_result_*`
+    // (#3110) refuses to match any zone-pair OR `junos-global` rule against the 0
+    // sentinel and falls through to the default action — which is precisely the
+    // verdict a NEW flow on that interface gets. That is why this needs no
+    // "revoke" branch of its own, and why it is automatically right under both
+    // postures: `default-policy deny` revokes the session, `permit-all` keeps it,
+    // and in each case the established flow is treated exactly as a new one would
+    // be.
+    let egress_unresolved = egress_ifindex == 0;
+    // The ingress half is the same split. A FABRIC packet keeps the ENTRY's zone
+    // (#9384), so its lookup failure is an entry that was never zone-adjudicated;
+    // for every other packet it is an arrival with no interface identity at all.
+    let ingress_unresolved = if packet_fabric_ingress {
+        metadata.ingress_zone == 0
+    } else {
+        arrival_logical == 0
+    };
+    if egress_unresolved || ingress_unresolved {
         return None;
     }
     // #9382: judge the POST-TRANSLATION destination, the tuple admission judges
