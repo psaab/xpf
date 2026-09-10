@@ -334,6 +334,45 @@ ck "the Rust anchor still counts collection under parallelism" \
 ck "the Rust anchor still counts the failure under parallelism" \
 	"1" "$(mutation_rust_failed "$W/rust-parallel.log")"
 
+# ---------------------------------------------------------------------------
+# #9158 pre-flight: refuse to mutate a target that has uncommitted changes.
+#
+# TWO DIRECTIONS, because a guard that only ever fires proves nothing and a
+# guard that never fires proves less. The middle row is the one that makes the
+# pair meaningful: identical predicate, identical caller, and the ONLY
+# difference is whether the target was dirty.
+#
+# Fixture text rather than a repo, so this stays hermetic.
+# ---------------------------------------------------------------------------
+echo "== pre-flight dirty-target refusal (#9158) =="
+
+ck "a clean target set returns 0" "0" \
+	"$(mutation_dirty_targets "" >/dev/null 2>&1; echo $?)"
+ck "a clean target set prints nothing" "" \
+	"$(mutation_dirty_targets "" 2>/dev/null)"
+
+ck "a MODIFIED target returns 1" "1" \
+	"$(mutation_dirty_targets " M userspace-dp/src/nat/allocator.rs" >/dev/null 2>&1; echo $?)"
+ck "and names the file it refused on" " M userspace-dp/src/nat/allocator.rs" \
+	"$(mutation_dirty_targets " M userspace-dp/src/nat/allocator.rs" 2>/dev/null)"
+
+# STAGED-but-uncommitted is dirty too: `git diff --quiet` (the applied-check
+# this guard protects) compares against HEAD, so a staged change defeats it
+# exactly as an unstaged one does.
+ck "a STAGED target is dirty too" "1" \
+	"$(mutation_dirty_targets "M  pkg/api/metrics.go" >/dev/null 2>&1; echo $?)"
+
+# Whitespace-only output is what `git status --porcelain` yields for a clean
+# tree through a shell that appends a newline. It must NOT read as dirty --
+# that would refuse every clean run and make the guard useless.
+ck "a blank line is not dirty" "0" \
+	"$(mutation_dirty_targets "
+" >/dev/null 2>&1; echo $?)"
+
+ck "two dirty targets are both reported" "2" \
+	"$(mutation_dirty_targets " M a.go
+ M b.rs" 2>/dev/null | wc -l | tr -d ' ')"
+
 echo
 if [ "$fails" -eq 0 ]; then
 	echo "mutate-selftest: all checks passed"

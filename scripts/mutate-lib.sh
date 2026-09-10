@@ -50,6 +50,43 @@
 #          mutation_verdict_for_target.
 
 # mutation_lang_of FILE -> go|rust|unknown
+# #9158: REFUSE to mutate a file that has uncommitted changes.
+#
+# THE FAILURE THIS PREVENTS, measured. A mutation driver rewrites the file under
+# test and restores it afterwards. If the pre-mutation content lives only in the
+# WORKING TREE, that content is one interrupted cell away from gone -- a timeout
+# kill, a session death or a Ctrl-C between apply and restore leaves the MUTANT
+# on disk and the original nowhere git can reach. `docs/log/` already records the
+# sibling shape: a dead lane's worktree carrying an applied mutant.
+#
+# It is worse than a lost file, because of how it SCORES. A driver that reverts
+# with `git checkout --` (as an ad-hoc one did during #9158) restores to HEAD,
+# so an uncommitted fix is destroyed by the FIRST cell and every later cell then
+# runs against a pristine tree. The matrix comes back all-VOID "not applied" --
+# including the CONTROL, which is the tell -- and that reads as "my anchors are
+# wrong", which is hours of looking in the wrong place.
+#
+# `scripts/mutate.sh` restores by `cp` rather than `checkout`, so it does not
+# destroy work on the happy path. It carried this rule as a COMMENT ("Commit
+# before running: a harness that rewrites files WILL eat uncommitted work"), and
+# a comment is not a mechanism: it cannot fire. This is that comment as a gate.
+#
+# Committing first also makes any interruption recoverable with a single
+# `git checkout -- <file>`, which is the property that actually matters.
+#
+# Takes `git status --porcelain` OUTPUT rather than calling git, so the selftest
+# can drive both directions from fixture text with no repo (`make
+# test-mutate-lib` is hermetic and must stay that way). Prints the offending
+# lines and returns 1 when dirty; prints nothing and returns 0 when clean.
+mutation_dirty_targets() {
+	local porcelain="$1"
+	local dirty
+	dirty="$(printf '%s\n' "$porcelain" | sed '/^[[:space:]]*$/d')"
+	[ -z "$dirty" ] && return 0
+	printf '%s\n' "$dirty"
+	return 1
+}
+
 mutation_lang_of() {
 	case "$1" in
 	*.go) printf 'go\n' ;;

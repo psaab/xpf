@@ -31,6 +31,48 @@ mkdir -p "$WORK"
 # list is REFUSED rather than scored -- the property the whole design exists for.
 CONFIGURED_GATES="${MUTATE_GATES:-go rust}"
 
+# #9158 PRE-FLIGHT: refuse to start when a file this spec mutates already has
+# uncommitted changes.
+#
+# The rule was a COMMENT at the top of this file ("Commit before running: a
+# harness that rewrites files WILL eat uncommitted work"). A comment cannot fire.
+#
+# THE SHARP REASON is not the lost work, it is that a dirty target silently
+# DISABLES this harness's own applied-check. Below, APPLIED is inferred from
+#
+#	git -C "$REPO" diff --quiet -- "$file" && applied=no
+#
+# i.e. "the file differs from HEAD". If the file was ALREADY dirty before the
+# cell ran, that is true whether or not the mutation text landed -- so every
+# cell reports `applied=yes`, including one that changed nothing. The check that
+# exists to stop a no-op mutation being scored as a green revert is the exact
+# check a dirty tree turns off.
+#
+# Second reason: committing first makes an interrupted cell recoverable with one
+# `git checkout -- <file>`. A timeout kill or session death between apply and
+# restore otherwise leaves the MUTANT in the tree with the original only in
+# $WORK -- the "dead lane's worktree carrying an applied mutant" shape.
+#
+# Refusal, not a warning: the failure it prevents is a whole matrix of
+# indistinguishable results, and a warning scrolls past.
+preflight_files="$(awk -F'\t' '!/^#/ && NF >= 2 { print $2 }' "$SPEC" | sort -u)"
+if [ -n "$preflight_files" ]; then
+	# shellcheck disable=SC2086
+	preflight_status="$(git -C "$REPO" status --porcelain -- $preflight_files 2>/dev/null)"
+	if ! preflight_dirty="$(mutation_dirty_targets "$preflight_status")"; then
+		echo "mutate.sh: REFUSING - these mutation targets have uncommitted changes:" >&2
+		printf '%s\n' "$preflight_dirty" | sed 's/^/    /' >&2
+		echo "Commit them first. A dirty target makes the applied-check below report" >&2
+		echo "applied=yes for every cell, including one that changed nothing, and an" >&2
+		echo "interrupted cell leaves the mutant with no git baseline to restore from." >&2
+		echo "Override only if you know why: MUTATE_ALLOW_DIRTY=1" >&2
+		[ "${MUTATE_ALLOW_DIRTY:-0}" = "1" ] || exit 2
+		echo "mutate.sh: MUTATE_ALLOW_DIRTY=1 set - continuing against a dirty tree" >&2
+	else
+		echo "mutate.sh: pre-flight ok - $(printf '%s\n' "$preflight_files" | wc -l) target(s) clean at HEAD"
+	fi
+fi
+
 # Per-cell wall-clock budget. A HANG is the one void shape that leaves no trace
 # in the log AND consumes the budget of every LATER cell -- one contract change
 # can be recorded as a screen full of escapes nobody earned (#7611). Bounding
