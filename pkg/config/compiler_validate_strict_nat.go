@@ -2588,6 +2588,23 @@ func validateNAT64PrefixStrict(cfg *Config, lenient bool) ([]string, error) {
 		}
 	}
 
+	// #9555: a rule-set under the same /96 as an earlier built rule-set is
+	// UNREACHABLE. Warned in BOTH modes (the tail gate appends these to
+	// cfg.Warnings and the CLI prints them at commit): a second rule-set whose
+	// pool is silently never used is exactly the failure an operator cannot see,
+	// but a same-pool duplicate is harmless and #5144 deliberately accepts it, so
+	// it is a warning rather than a reject.
+	shadowed := nat64ShadowedRuleSets(cfg)
+	for _, rs := range cfg.Security.NAT.NAT64 {
+		earlier, ok := shadowed[rs]
+		if !ok {
+			continue
+		}
+		warnings = append(warnings, fmt.Sprintf(
+			"security nat nat64 rule-set %q (prefix %q) is UNREACHABLE: rule-set %q earlier in the configuration has the same /96 prefix, and the dataplane resolves a destination to the FIRST matching rule-set, so %q never translates and its source-pool %q is never used; give each rule-set a distinct prefix or remove one (#9555)",
+			rs.Name, rs.Prefix, earlier.Name, rs.Name, rs.SourcePool))
+	}
+
 	return warnings, nil
 }
 
@@ -4135,10 +4152,14 @@ type natV6Interval struct {
 //     <name>` rule references (all such rules share the pool-name-keyed
 //     allocator). Unreferenced pools build no allocator and are out of scope
 //     (mirrors validateSourceNATAggregateCardinalityStrict's scoping).
-//   - NAT64: one owner per DISTINCT (prefix, source-pool) pair a `nat64
-//     rule-set` references. Two rule-sets differing only in name share one
-//     allocator (one owner); two sharing a pool under different prefixes are
-//     independent (two owners).
+//   - NAT64: one owner per REACHABLE rule-set, deduped on (prefix, source-pool).
+//     Reachable means the first built rule-set, in CONFIG order, for its
+//     canonical /96 (#9555): the dataplane selects by first match, so a later
+//     rule-set under the same prefix never mints and is not an owner. (Before
+//     #9555 this said two same-prefix rule-sets "share one allocator"; measured,
+//     Rust builds one per rule-set on first apply, and only the first is ever
+//     selected.) Two rule-sets sharing a pool under DIFFERENT prefixes are
+//     independent owners.
 //
 // Every owner's pool members (pool.Address + pool.Addresses, ranges already
 // expanded to /32s by appendPoolAddresses) are turned into family-scoped numeric
@@ -4214,8 +4235,15 @@ func validateNATPoolExternalTupleOverlapStrict(cfg *Config, lenient bool) ([]str
 		return nat64RuleSets[i].Name < nat64RuleSets[j].Name
 	})
 	nat64Seen := make(map[string]bool)
+	// #9555: a rule-set shadowed by an earlier one under the same /96 never
+	// mints, so it is not an allocator owner. See nat64ShadowedRuleSets for why
+	// "earlier" is config order, not the name order this loop walks in.
+	nat64Shadowed := nat64ShadowedRuleSets(cfg)
 	for _, rs := range nat64RuleSets {
 		if rs == nil || rs.SourcePool == "" {
+			continue
+		}
+		if _, shadowed := nat64Shadowed[rs]; shadowed {
 			continue
 		}
 		pool := pools[rs.SourcePool]
@@ -4359,6 +4387,79 @@ func nat64PrefixOwnerKey(prefix string) (string, bool) {
 		return parts[0] + "/96", true
 	}
 	return netip.PrefixFrom(addr, 96).Masked().String(), true
+}
+
+// nat64ShadowedRuleSets maps every NAT64 rule-set the dataplane can NEVER select
+// to the earlier rule-set that shadows it (#9555).
+//
+// The dataplane resolves a NAT64 destination to the FIRST built rule-set whose
+// /96 prefix matches (`Nat64State::match_ipv6_dest`), and the HA standby reserve
+// narrows the same way. So a later rule-set under the same canonical prefix never
+// translates, never mints from its source pool, and is not an occupancy domain.
+//
+// ORDER IS CONFIG ORDER, deliberately. `buildNAT64Snapshots` emits
+// `cfg.Security.NAT.NAT64` in slice order and Rust keeps it; the #5144 owner loop
+// sorts by NAME for deterministic messages. Picking the shadowing rule-set by name
+// could choose the one the dataplane never uses and drop the reachable one from
+// the owner set, which is an UNDER-refusal of a real collision.
+//
+// CONSERVATIVE on "built". An earlier rule-set shadows only if Rust definitely
+// builds it (nat64RuleSetDefinitelyBuilt). If it might be skipped, it shadows
+// nothing, so a later rule-set stays an owner: over-refusal, never under-refusal.
+func nat64ShadowedRuleSets(cfg *Config) map[*NAT64RuleSet]*NAT64RuleSet {
+	shadowed := make(map[*NAT64RuleSet]*NAT64RuleSet)
+	if cfg == nil {
+		return shadowed
+	}
+	first := make(map[string]*NAT64RuleSet)
+	for _, rs := range cfg.Security.NAT.NAT64 {
+		if rs == nil || rs.Prefix == "" {
+			continue
+		}
+		key, ok := nat64PrefixOwnerKey(rs.Prefix)
+		if !ok {
+			continue
+		}
+		if earlier, seen := first[key]; seen {
+			shadowed[rs] = earlier
+			continue
+		}
+		if nat64RuleSetDefinitelyBuilt(cfg, rs) {
+			first[key] = rs
+		}
+	}
+	return shadowed
+}
+
+// nat64RuleSetDefinitelyBuilt reports whether the Rust NAT64 build keeps `rs`
+// (the caller has already checked its prefix through nat64PrefixOwnerKey). Rust
+// skips a rule whose prefix address does not parse, and skips the WHOLE rule when
+// ANY source-pool member fails `parse_pool_v4` (#3888); isNAT64PoolHostAddress
+// mirrors that parse exactly. A missing or empty pool IS built, with an empty
+// allocator that fails closed, so it still matches first.
+func nat64RuleSetDefinitelyBuilt(cfg *Config, rs *NAT64RuleSet) bool {
+	addrPart, _, _ := strings.Cut(rs.Prefix, "/")
+	if _, err := netip.ParseAddr(addrPart); err != nil {
+		return false
+	}
+	if rs.SourcePool == "" {
+		return true
+	}
+	pool := cfg.Security.NAT.SourcePools[rs.SourcePool]
+	if pool == nil {
+		return true
+	}
+	members := make([]string, 0, len(pool.Addresses)+1)
+	if pool.Address != "" {
+		members = append(members, pool.Address)
+	}
+	members = append(members, pool.Addresses...)
+	for _, m := range members {
+		if host, _ := isNAT64PoolHostAddress(m); !host {
+			return false
+		}
+	}
+	return true
 }
 
 // poolMemberTexts returns a source pool's translated-address members: the single
