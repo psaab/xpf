@@ -235,7 +235,8 @@ var schemaSystem = &schemaNode{desc: "System configuration", children: map[strin
 			// #4303 S-1: host-only modifiers wired into the runtime syslog
 			// client (source-address, port). log-prefix / facility-override /
 			// routing-instance / exclude-hostname are recognized so a valid
-			// vSRX config commits (not yet enforced — S-5 advisory territory).
+			// vSRX config commits. They are not enforced, and compileSystem
+			// raises a commit advisory for each at its skip arm (#9414).
 			children: syslogDestinationModifiers(map[string]*schemaNode{
 				"source-address": {desc: "Local source address for outgoing syslog", args: 1, placeholder: "<ip>",
 					valueType: ValueIPAddress, valueDesc: "IPv4 or IPv6 source address",

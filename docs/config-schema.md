@@ -14595,8 +14595,9 @@ enum and rejected (an IP is not a severity).
   switches on the known modifier keywords before the pair fallback. Host
   `source-address`/`port` are captured into `SyslogHostConfig.SourceAddress`
   / `.Port`; `match`/`structured-data`/`explicit-priority`/`log-prefix`/
-  `facility-override` are recognized-and-skipped, and `archive` is
-  recognized-recorded-and-warned (see #7146 below). The
+  `facility-override` are recognized-and-skipped (each skip now raises a
+  commit advisory, #9414: see "Grouped system/SNMP inert knobs"), and
+  `archive` is recognized-recorded-and-warned (see #7146 below). The
   `syslogFacilitySeverity` helper extracts the pair (flat `Keys[0]/Keys[1]`
   or hierarchical `Keys[0]` + child) and returns ok=false for a valueless
   leaf, so a bare/garbage keyword is dropped instead of appended as a
@@ -14800,6 +14801,25 @@ is never echoed into a warning.
   boot-server` / `authentication-key` / `source-address`, and
   `internet-options` leaves beyond `no-ipv6-reject-zero-hop-limit`. Also the
   S-4 `services ssh rate-limit` (no sshd equivalent).
+- **SNMP, the rest of the family (#9414)** — these passed all four channels
+  with zero signal. `v3`: every statement except `usm local-engine user`
+  (`vacm`, `notify`, `notify-filter`, `target-address`, `target-parameters`,
+  `snmp-community`, `usm remote-engine`, ...), computed as the COMPLEMENT of what
+  `compileSNMPv3` reads and read by POSITION in every AST shape
+  (`snmpV3InertWarnings9414`), so a USM user NAMED `vacm` is not reported. Top
+  level: `engine-id` (the agent derives its engine ID, #5283), `name` (sysName is
+  the host name), `arp`, `filter-duplicates`, `nonvolatile`, `proxy`. The
+  top-level population is the in-tree Junos capture's 20 `snmp` keywords, and a
+  cell holds every one of them to "compiled" or "advised".
+- **syslog destination modifiers (#9414)** — every modifier the host / file /
+  user arms recognize and SKIP (`match`, `match-strings`, `structured-data`,
+  `explicit-priority`, `log-prefix`, `facility-override`, `routing-instance`,
+  `exclude-hostname`, and `allow-duplicates` on file and user) is recorded AT
+  the skip (`syslogSkippedModifiers9414`) and reported once per destination kind
+  and keyword. There is no second list to keep in step: a modifier later wired
+  into the runtime leaves its skip arm and stops being reported. The population
+  cell takes the modifier set from `setSchema`, so a new schema modifier without
+  a compiler arm reds instead of committing silently.
 - These are advisory-only by design: the knobs already committed clean
   (unknown keys under a known container are accepted-inert by the opt-in
   typed-leaf gate), so no valid config is newly rejected. The security-relevant
@@ -14808,7 +14828,10 @@ is never echoed into a warning.
   surprise. Note: SNMP community `clients` source-IP restriction is tracked
   separately (S-3, not this change).
 - **tests** — `pkg/config/compiler_inert_knobs_4306_test.go` (advisories fire,
-  no secret echoed).
+  no secret echoed); `pkg/config/snmp_syslog_inert_9414_test.go` and
+  `pkg/configstore/snmp_syslog_inert_checktext_9414_test.go` (#9414: every
+  spelling on both compile paths and at commit check, the load-bearing silent
+  rows, both populations, no value echoed).
 
 ## `system dataplane control-socket` typed as a socket path (#5839)
 

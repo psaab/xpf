@@ -552,13 +552,25 @@ func compileSystem(node *Node, sys *SystemConfig, cfg *Config, opts compileOpts)
 			}
 		case "syslog":
 			sys.Syslog = &SystemSyslogConfig{}
+			// #9414: every modifier the destination arms below recognize and
+			// SKIP is recorded at the skip and reported once the walk is done.
+			skipped := syslogSkippedModifiers9414{}
 			for _, slInst := range namedInstances(child.FindChildren("host")) {
 				host := &SyslogHostConfig{Address: slInst.name}
 				// #6684: `host 10.0.0.1 any any;` packs the whole body onto the
 				// host node's Keys, leaving Children empty — the host compiled
 				// with ZERO facilities and shipped nothing, silently.
-				for _, prop := range packedBodyChildren(slInst.node,
-					schemaForPath("system", "syslog", "host")) {
+				// #9414: hoistAndSplitRun8939, because a flat-set line carrying
+				// two host statements (`set ... host X allow-duplicates
+				// exclude-hostname`) is built by SetPath as a NESTED chain, and
+				// the trailing statement was dropped unread (#8939). It was
+				// invisible while every skipped modifier was inert; the #9414
+				// advisory made the loss observable. Hoisted against the
+				// destination schema WITHOUT its facility wildcard; see
+				// syslogDestinationHoistSchema9414.
+				hostSchema := schemaForPath("system", "syslog", "host")
+				for _, prop := range hoistAndSplitRun8939(
+					packedBodyChildren(slInst.node, hostSchema), syslogDestinationHoistSchema9414("host")) {
 					// #4303 S-1: switch on the KNOWN host sub-statements
 					// before the facility/severity fallback. Without this
 					// every non-`allow-duplicates` child (source-address,
@@ -584,8 +596,10 @@ func compileSystem(node *Node, sys *SystemConfig, cfg *Config, opts compileOpts)
 						"routing-instance", "exclude-hostname":
 						// Recognized Junos host modifiers that are NOT
 						// facility/severity pairs. Accepted so a valid
-						// config commits; not (yet) wired into the runtime
-						// syslog client — see the S-5 advisory path.
+						// config commits; not wired into the runtime syslog
+						// client. #9414: recorded here, at the skip, so the
+						// advisory names exactly what this arm drops.
+						skipped.note("host", prop.Name())
 					default:
 						if fac, sev, ok := syslogFacilitySeverity(prop); ok {
 							host.Facilities = append(host.Facilities, SyslogFacility{
@@ -600,7 +614,9 @@ func compileSystem(node *Node, sys *SystemConfig, cfg *Config, opts compileOpts)
 			for _, fileInst := range namedInstances(child.FindChildren("file")) {
 				file := &SyslogFileConfig{Name: fileInst.name}
 				archiveKnobs := map[string]bool{}
-				for _, prop := range fileInst.node.Children {
+				// #9414 / #8939: read every statement of a flat-set chain.
+				for _, prop := range hoistAndSplitRun8939(fileInst.node.Children,
+					syslogDestinationHoistSchema9414("file")) {
 					switch prop.Name() {
 					case "archive":
 						// #7146: the whole `archive` block (files, size,
@@ -622,6 +638,8 @@ func compileSystem(node *Node, sys *SystemConfig, cfg *Config, opts compileOpts)
 						"explicit-priority", "allow-duplicates":
 						// #4303 S-1: recognized file modifiers, not a
 						// facility/severity pair — do not append as one.
+						// #9414: recorded at the skip for the advisory.
+						skipped.note("file", prop.Name())
 					default:
 						if fac, sev, ok := syslogFacilitySeverity(prop); ok {
 							// #7187: APPEND. This assigned, so a file naming two
@@ -644,11 +662,15 @@ func compileSystem(node *Node, sys *SystemConfig, cfg *Config, opts compileOpts)
 			// Parse user destinations: user * { any emergency; }
 			for _, userInst := range namedInstances(child.FindChildren("user")) {
 				user := &SyslogUserConfig{User: userInst.name}
-				for _, prop := range userInst.node.Children {
+				// #9414 / #8939: read every statement of a flat-set chain.
+				for _, prop := range hoistAndSplitRun8939(userInst.node.Children,
+					syslogDestinationHoistSchema9414("user")) {
 					switch prop.Name() {
 					case "match", "match-strings", "structured-data",
 						"explicit-priority", "allow-duplicates":
 						// #4303 S-1: recognized user modifiers, not a pair.
+						// #9414: recorded at the skip for the advisory.
+						skipped.note("user", prop.Name())
 					default:
 						if fac, sev, ok := syslogFacilitySeverity(prop); ok {
 							// #7187: APPEND, for the same reason as the file
@@ -659,6 +681,9 @@ func compileSystem(node *Node, sys *SystemConfig, cfg *Config, opts compileOpts)
 					}
 				}
 				sys.Syslog.Users = append(sys.Syslog.Users, user)
+			}
+			if cfg != nil {
+				cfg.Warnings = append(cfg.Warnings, skipped.warnings()...)
 			}
 		}
 	}
@@ -2257,6 +2282,26 @@ func snmpInertKnobWarnings(node *Node) []string {
 			add("snmp interface / filter-interfaces: restricting which interfaces the SNMP agent answers on is accepted but NOT enforced (the agent answers on every interface); use `community <c> clients` or `client-list-name` to restrict by SOURCE address instead")
 		case "routing-instance-access":
 			add("snmp routing-instance-access: accepted but NOT enforced (the agent serves the default routing instance only)")
+		case "v3":
+			// #9414: compileSNMPv3 reads only `usm local-engine user`; name
+			// everything else under v3 by position (snmpV3InertWarnings9414).
+			for _, msg := range snmpV3InertWarnings9414(child) {
+				add(msg)
+			}
+		case "engine-id":
+			// #9414: the engine ID is DERIVED (pkg/snmp buildEngineID, #5283).
+			add("snmp engine-id: accepted but NOT applied — the SNMPv3 agent derives its authoritative engine ID from a persisted per-device identifier and the system host name (#5283), so a configured `local` ID, `use-mac-address` or `use-default-ip-address` is ignored and managers see the derived ID (#9414)")
+		case "name":
+			// #9414: sysName is os.Hostname() (pkg/snmp agent.go).
+			add("snmp name: accepted but NOT applied — sysName always reports the system host name (#9414)")
+		case "arp":
+			add("snmp arp: accepted but NOT implemented (no-op) (#9414)")
+		case "filter-duplicates":
+			add("snmp filter-duplicates: accepted but NOT implemented — requests with a duplicate source address/port and request ID are not filtered (#9414)")
+		case "nonvolatile":
+			add("snmp nonvolatile: accepted but NOT implemented (no-op: the agent serves no writable objects, so no SET request is persisted) (#9414)")
+		case "proxy":
+			add("snmp proxy: accepted but NOT implemented — the agent does not proxy SNMP requests to other devices (#9414)")
 		}
 	}
 	return warnings

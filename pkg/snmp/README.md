@@ -493,6 +493,22 @@ now correct regardless of provider order.
 `sort.Search` on an unsorted slice returns silently wrong answers, so that guard
 is load-bearing rather than stylistic.
 
+## Configuration accepted but not implemented (#9414)
+
+These commit clean and raise a commit-time advisory (`snmpInertKnobWarnings`,
+`pkg/config`) because the agent does not implement them. They are listed here so
+this module states the divergence, not only the compiler.
+
+| statement | what the agent does instead |
+|---|---|
+| `v3 vacm` | applies no per-user or per-group MIB view |
+| `v3 notify`, `notify-filter`, `target-address`, `target-parameters` | sends nothing from them; traps go only to `trap-group` targets (`traps.go`) |
+| `v3 usm remote-engine` | creates no users for a remote engine; only `usm local-engine user` accounts exist |
+| `engine-id` | ignores it; the engine ID is derived (see "Authoritative EngineID derivation") |
+| `name` | ignores it; sysName is `os.Hostname()` |
+| `arp`, `filter-duplicates`, `nonvolatile`, `proxy` | does not implement them |
+| `view`, community `view`, `interface` / `filter-interfaces`, `routing-instance-access`, `health-monitor`, `rmon`, `trap-options source-address` | does not enforce them (#4306, #9416) |
+
 ## Entry points
 
 - `Agent` — `agent.go`.
