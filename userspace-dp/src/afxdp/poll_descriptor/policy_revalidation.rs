@@ -70,11 +70,29 @@
 //! arrival re-ask once per interface.) See
 //! `SessionEntry::policy_revalidated_gen`.
 //!
-//! **3. Side-effect freedom is STRUCTURAL, not a flag.** The filter needed
-//! `NonRoutingCountPolicy::Never` because its evaluator counts internally.
-//! `evaluate_policy_result_with_icmp` takes `&PolicyState` and RETURNS a counter
-//! handle (`policy_counter_idx`) for the caller to bump; it cannot count, log or
-//! meter by itself. This module simply never bumps what it is handed.
+//! **3. Side-effect freedom is a property of the CALL, enforced by a test — it
+//! is NOT structural (#9385).** This item used to say the opposite, and the
+//! reasoning was half right in a way that mattered: `evaluate_policy_result_*`
+//! does take `&PolicyState` and does RETURN a counter handle
+//! (`policy_counter_idx`) for the caller to bump, and this module never bumps
+//! what it is handed. But the EVALUATION counts internally — `try_match_rule`
+//! calls `rule.hit_counter.add` on every match and the implicit-default path
+//! calls `state.default_counter.add` — and `&PolicyState` does not prevent it,
+//! because those counters are ATOMICS behind shared references, so an immutable
+//! borrow is not the guarantee the claim rested on. Passing `packet_len = 0` did
+//! not help either: the zero-length gate in `HitCounter::add` covers BYTES only
+//! and the packet increment is unconditional. So every re-derivation recorded a
+//! PHANTOM hit on whichever rule (or the implicit default) it matched, inflating
+//! `show security policies hit-count` by up to one packet per live session per
+//! config generation — arriving at exactly the moment an operator is watching
+//! hit-count to confirm a narrowing took effect.
+//!
+//! The filter needed `NonRoutingCountPolicy::Never` for precisely this reason
+//! and this module now needs the same thing: it calls
+//! `evaluate_policy_result_without_counting` (`PolicyHitCount::Never`), and the
+//! freedom is bound by a counter-DELTA assertion with a positive control, not by
+//! a type signature. A stated structural guarantee that is not structural is
+//! worse than no claim, because it invites the next side effect into this path.
 //!
 //! # The revoke predicate is PERMIT-or-not, and `reject` tears down SILENTLY (#9381)
 //!
@@ -134,7 +152,7 @@
 //! calls the routing evaluator). #8356 does not re-open #2620.
 
 use super::*;
-use crate::policy::evaluate_policy_result_with_icmp;
+use crate::policy::evaluate_policy_result_without_counting;
 use crate::session::{PolicyRevalidationTarget, SessionKey};
 
 /// A zone-policy re-derivation that came back NON-PERMIT (`Deny` or `Reject`,
@@ -414,7 +432,7 @@ fn zone_policy_deny_on_session_hit(
         .nat
         .rewrite_dst_port
         .unwrap_or(flow.forward_key.dst_port);
-    let result = evaluate_policy_result_with_icmp(
+    let result = evaluate_policy_result_without_counting(
         &forwarding.policy,
         from_id,
         to_id,
@@ -432,9 +450,6 @@ fn zone_policy_deny_on_session_hit(
         // a false DENY, which is what makes acting on a DENY safe. Gate 1b
         // declines the case where a PERMIT could be missed.
         None,
-        // Byte count is used only by policers/counters, neither of which this
-        // side-effect-free derivation touches.
-        0,
     );
     // #9381: the revoke predicate is PERMIT-or-not, mirroring admission
     // (`poll_descriptor/mod.rs`: `if let PolicyAction::Permit = policy_result.action`).
