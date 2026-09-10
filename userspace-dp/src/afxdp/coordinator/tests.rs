@@ -2992,8 +2992,10 @@ fn aggregate_cos_statuses_max_merges_sojourn_across_worker_snapshots() {
 // spawns an actual control thread that binds the listen UDP port and
 // then fails open_tun (no TUN device in the test environment) and
 // exits — which is exactly the early-exit shape the tombstone
-// machinery must handle. Each test uses a unique listen port so the
-// suite can run in parallel.
+// machinery must handle. Each test takes its listen port from
+// `crate::test_ports` (#9549): unique within the suite, so it can run in
+// parallel, and ephemeral rather than a fixed number, so a second copy of
+// the suite on the same host (a mutation matrix runs two) cannot collide.
 // ---------------------------------------------------------------------
 
 const WG1866_PRIVKEY_A: &str =
@@ -3057,7 +3059,7 @@ fn wg1866_wait_tombstone(coordinator: &mut Coordinator, id: u16, timeout_ms: u64
 #[test]
 fn wg1866_removal_refresh_prunes_thread_and_releases_port() {
     let mut coordinator = Coordinator::new();
-    let port: u16 = 51871;
+    let port = crate::test_ports::reserve_ephemeral_udp_port();
     coordinator.refresh_runtime_snapshot(&wg1866_snapshot(1, 4242, "wgt1866a", port, WG1866_PRIVKEY_A)).expect("refresh_runtime_snapshot must succeed");
     assert!(
         coordinator.wg_control_threads.contains_key(&1),
@@ -3083,10 +3085,9 @@ fn wg1866_removal_refresh_prunes_thread_and_releases_port() {
 #[test]
 fn wg1866_eaddrinuse_tombstone_backoff_and_retry() {
     let mut coordinator = Coordinator::new();
-    let port: u16 = 51872;
     // Rig the failure: a dual-stack [::]:port blocker occupies the port
     // for BOTH of bind_wg_socket's attempts (v6 preferred, v4 fallback).
-    let blocker = std::net::UdpSocket::bind(("::", port)).expect("pre-bind");
+    let (blocker, blocker_v4, port) = crate::test_ports::hold_ephemeral_udp_port();
     let snap = wg1866_snapshot(1, 4242, "wgt1866b", port, WG1866_PRIVKEY_A);
     coordinator.refresh_runtime_snapshot(&snap).expect("refresh_runtime_snapshot must succeed");
     assert!(
@@ -3105,6 +3106,7 @@ fn wg1866_eaddrinuse_tombstone_backoff_and_retry() {
         .last_spawn_attempt_ns;
     // Within the backoff window: no respawn even with a coherent
     // snapshot and the port now free.
+    drop(blocker_v4);
     drop(blocker);
     coordinator.reconcile_wg_control_liveness(Some(&snap));
     let entry = coordinator.wg_control_threads.get(&1).expect("entry kept");
@@ -3134,7 +3136,7 @@ fn wg1866_eaddrinuse_tombstone_backoff_and_retry() {
 #[test]
 fn wg1866_remove_then_readd_same_identity_respawns() {
     let mut coordinator = Coordinator::new();
-    let port: u16 = 51873;
+    let port = crate::test_ports::reserve_ephemeral_udp_port();
     let snap = wg1866_snapshot(1, 4242, "wgt1866c", port, WG1866_PRIVKEY_A);
     coordinator.refresh_runtime_snapshot(&snap).expect("refresh_runtime_snapshot must succeed");
     assert!(coordinator.wg_control_threads.contains_key(&1));
@@ -3154,7 +3156,7 @@ fn wg1866_remove_then_readd_same_identity_respawns() {
 #[test]
 fn wg1866_sweep_cannot_spawn_after_stop() {
     let mut coordinator = Coordinator::new();
-    let port: u16 = 51874;
+    let port = crate::test_ports::reserve_ephemeral_udp_port();
     let snap = wg1866_snapshot(1, 4242, "wgt1866d", port, WG1866_PRIVKEY_A);
     coordinator.refresh_runtime_snapshot(&snap).expect("refresh_runtime_snapshot must succeed");
     assert!(coordinator.wg_control_threads.contains_key(&1));
@@ -3175,7 +3177,7 @@ fn wg1866_sweep_cannot_spawn_after_stop() {
 #[test]
 fn wg1866_defer_prune_releases_port_and_sweep_does_not_resurrect() {
     let mut coordinator = Coordinator::new();
-    let port: u16 = 51875;
+    let port = crate::test_ports::reserve_ephemeral_udp_port();
     let snap = wg1866_snapshot(1, 4242, "wgt1866e", port, WG1866_PRIVKEY_A);
     coordinator.refresh_runtime_snapshot(&snap).expect("refresh_runtime_snapshot must succeed");
     assert!(coordinator.wg_control_threads.contains_key(&1));
@@ -3209,7 +3211,7 @@ fn wg1866_defer_prune_releases_port_and_sweep_does_not_resurrect() {
 #[test]
 fn wg1866_sweep_suppresses_stale_identity_respawn_under_defer() {
     let mut coordinator = Coordinator::new();
-    let port: u16 = 51876;
+    let port = crate::test_ports::reserve_ephemeral_udp_port();
     let snap_a = wg1866_snapshot(1, 4242, "wgt1866f", port, WG1866_PRIVKEY_A);
     coordinator.refresh_runtime_snapshot(&snap_a).expect("refresh_runtime_snapshot must succeed");
     assert!(wg1866_wait_tombstone(&mut coordinator, 1, 2_000), "open_tun failure tombstones");
@@ -3240,7 +3242,7 @@ fn wg1866_sweep_suppresses_stale_identity_respawn_under_defer() {
 #[test]
 fn wg1866_sweep_suppresses_stale_attachment_respawn_under_defer() {
     let mut coordinator = Coordinator::new();
-    let port: u16 = 51877;
+    let port = crate::test_ports::reserve_ephemeral_udp_port();
     let snap_a = wg1866_snapshot(1, 4242, "wgt1866g", port, WG1866_PRIVKEY_A);
     coordinator.refresh_runtime_snapshot(&snap_a).expect("refresh_runtime_snapshot must succeed");
     assert!(wg1866_wait_tombstone(&mut coordinator, 1, 2_000), "open_tun failure tombstones");
@@ -3266,7 +3268,7 @@ fn wg1866_sweep_suppresses_stale_attachment_respawn_under_defer() {
 #[test]
 fn wg1866_apply_time_rename_restarts_thread_on_new_attachment() {
     let mut coordinator = Coordinator::new();
-    let port: u16 = 51878;
+    let port = crate::test_ports::reserve_ephemeral_udp_port();
     coordinator.refresh_runtime_snapshot(&wg1866_snapshot(1, 4242, "wgt1866i", port, WG1866_PRIVKEY_A)).expect("refresh_runtime_snapshot must succeed");
     let entry = coordinator.wg_control_threads.get(&1).expect("entry");
     assert_eq!(entry.spawned_tunnel_name, "wgt1866i");
@@ -3289,7 +3291,7 @@ fn wg1866_apply_time_rename_restarts_thread_on_new_attachment() {
 #[test]
 fn wg1866_sweep_respawns_with_empty_linux_name_rows() {
     let mut coordinator = Coordinator::new();
-    let port: u16 = 51880;
+    let port = crate::test_ports::reserve_ephemeral_udp_port();
     let mut snap = wg1866_snapshot(1, 4244, "wgt1866k", port, WG1866_PRIVKEY_A);
     snap.interfaces[0].linux_name = String::new();
     snap.tunnel_endpoints[0].linux_name = String::new();
@@ -3396,7 +3398,7 @@ fn wg2921_snapshot(
 #[test]
 fn wg2921_outer_mtu_change_restarts_control_thread() {
     let mut coordinator = Coordinator::new();
-    let port: u16 = 51890;
+    let port = crate::test_ports::reserve_ephemeral_udp_port();
     // First apply: peer reachable via ge2921wan @ MTU 1400.
     coordinator.refresh_runtime_snapshot(&wg2921_snapshot(1, 4242, "wgt2921a", port, 1400)).expect("refresh_runtime_snapshot must succeed");
     let entry = coordinator.wg_control_threads.get(&1).expect("entry");
@@ -3440,7 +3442,7 @@ fn wg2921_outer_mtu_change_restarts_control_thread() {
 #[test]
 fn wg2921_unchanged_outer_mtu_keeps_control_thread() {
     let mut coordinator = Coordinator::new();
-    let port: u16 = 51891;
+    let port = crate::test_ports::reserve_ephemeral_udp_port();
     coordinator.refresh_runtime_snapshot(&wg2921_snapshot(1, 4242, "wgt2921b", port, 1400)).expect("refresh_runtime_snapshot must succeed");
     let entry = coordinator.wg_control_threads.get(&1).expect("entry");
     assert_eq!(entry.spawned_outer_mtu, 1400, "resolved underlay MTU captured");
@@ -3788,7 +3790,7 @@ fn gre1881_mode_flip_to_wireguard_prunes_gre_entry() {
     coordinator.refresh_runtime_snapshot(&gre1881_snapshot(1, 36287, "gre1881f", "198.51.100.7")).expect("refresh_runtime_snapshot must succeed");
     assert!(coordinator.tunnel_sources.contains_key(&1));
     coordinator
-        .refresh_runtime_snapshot(&wg1866_snapshot(1, 36287, "gre1881f", 51899, WG1866_PRIVKEY_A)).expect("refresh_runtime_snapshot must succeed");
+        .refresh_runtime_snapshot(&wg1866_snapshot(1, 36287, "gre1881f", crate::test_ports::reserve_ephemeral_udp_port(), WG1866_PRIVKEY_A)).expect("refresh_runtime_snapshot must succeed");
     assert!(
         !coordinator.tunnel_sources.contains_key(&1),
         "mode flip prunes the GRE local-origin entry"
@@ -9037,7 +9039,8 @@ fn wg_unsteered_endpoint_refuses_kernel_transport_end_to_end_9521() {
 
     let (peer_priv, peer_pub) = crate::afxdp::wg::tests::keypair();
     let peer_hex: String = peer_pub.iter().map(|b| format!("{b:02x}")).collect();
-    let (steered_port, unsteered_port) = (51961u16, 51962u16);
+    // #9549: listen ports come from test_ports; the test only needs two distinct ports.
+    let (steered_port, unsteered_port) = (crate::test_ports::reserve_ephemeral_udp_port(), crate::test_ports::reserve_ephemeral_udp_port());
     let snap = wg9521_snapshot(
         ["wgt9521s", "wgt9521u"],
         [4531, 4532],
@@ -9161,7 +9164,8 @@ fn wg_resteering_restarts_control_threads_with_the_new_decision_9521() {
     use crate::afxdp::types::WgKernelTransport::{Deliver, DropUnsteered};
     let (_, peer_pub) = crate::afxdp::wg::tests::keypair();
     let peer_hex: String = peer_pub.iter().map(|b| format!("{b:02x}")).collect();
-    let (names, ifindexes, ports) = (["wgt9521r1", "wgt9521r2"], [4541, 4542], [51971u16, 51972u16]);
+    // #9549: listen ports come from test_ports; the test only needs two distinct ports.
+    let (names, ifindexes, ports) = (["wgt9521r1", "wgt9521r2"], [4541, 4542], [crate::test_ports::reserve_ephemeral_udp_port(), crate::test_ports::reserve_ephemeral_udp_port()]);
 
     let mut coordinator = Coordinator::new();
     coordinator

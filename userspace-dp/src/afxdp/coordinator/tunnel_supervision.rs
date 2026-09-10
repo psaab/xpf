@@ -19,6 +19,14 @@ use super::*;
 pub(crate) const WG_SPAWN_BACKOFF_NS: u64 = 3_000_000_000;
 
 impl super::Coordinator {
+    /// #9549: how many WireGuard engines the current forwarding state holds. A
+    /// server-level cell asserts this before trusting a "no WG thread was spawned"
+    /// check, which is vacuous when there was no engine to spawn from.
+    #[cfg(test)]
+    pub(crate) fn wg_engine_count_for_test(&self) -> usize {
+        self.forwarding.wg_engines.len()
+    }
+
     /// #1881: reconcile GRE local-origin threads against the current
     /// `forwarding.tunnel_endpoints`. Called from initial worker
     /// bring-up AND every armed `refresh_runtime_snapshot` — tunnel
