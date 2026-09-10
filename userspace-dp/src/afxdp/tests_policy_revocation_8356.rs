@@ -1590,3 +1590,300 @@ fn a_default_policy_of_reject_does_not_revoke_a_permitted_flow_9381() {
     );
     assert_eq!(session_count(&sessions), 1);
 }
+
+// ---------------------------------------------------------------------------
+// #9385: the re-derivation records NO policy hit.
+// ---------------------------------------------------------------------------
+//
+// The module header used to state side-effect freedom as a STRUCTURAL property:
+// `evaluate_policy_result_with_icmp` "takes `&PolicyState` and RETURNS a counter
+// handle ...; it cannot count, log or meter by itself." True of the HANDLE,
+// false of the EVALUATION. `try_match_rule` calls `rule.hit_counter.add` on
+// every match and the implicit-default path calls `state.default_counter.add`,
+// and `&PolicyState` does not prevent either: the counters are ATOMICS behind
+// shared references, so an immutable borrow is not the guarantee the claim
+// rested on. Passing `packet_len = 0` did not help — the zero-length gate in
+// `HitCounter::add` covers BYTES only and the packet increment is
+// unconditional.
+//
+// So every re-derivation recorded a PHANTOM hit on whichever rule (or the
+// implicit default) it matched: up to one packet per live session per config
+// generation, bytes unchanged. No forwarding effect, and it is kept visible for
+// two reasons — hit-count is exactly what an operator watches to confirm a
+// narrowing took effect, so the noise arrives at the worst moment; and a stated
+// structural guarantee that is not structural invites the next side effect into
+// this path.
+//
+// WHY EACH CELL HAS A POSITIVE CONTROL. "Assert a zero counter delta" is
+// satisfied perfectly by a counter nobody ever bumps — by a broken fixture, a
+// rule that never matched, or a handle read off the wrong rule. Every cell below
+// therefore pairs its zero-delta assertion with a run of the ORDINARY admission
+// path over the same fixture, which must move the same counter. Without that,
+// this whole group is the "negative cell that fails to a healthy value" shape.
+
+/// Read the per-rule hit counters and the implicit-default counter out of a
+/// built snapshot, by rule NAME so a reorder cannot re-point the assertion.
+fn policy_hit_counts_9385(forwarding: &ForwardingState) -> (u64, u64) {
+    named_policy_hit_counts_9385(forwarding, "lan-out")
+}
+
+/// The same reader, for a rule named something else — the positive controls
+/// below run on a different fixture and therefore a different rule.
+fn named_policy_hit_counts_9385(forwarding: &ForwardingState, name: &str) -> (u64, u64) {
+    let rule = forwarding
+        .policy
+        .rules
+        .iter()
+        .find(|r| r.rule_id.contains(name))
+        .map(|r| r.hit_counter.test_packet_count())
+        .unwrap_or(u64::MAX);
+    (rule, forwarding.policy.default_counter.test_packet_count())
+}
+
+/// THE CELL. Drive one ESTABLISHED-session packet whose live policy still
+/// PERMITS it — so the re-derivation runs to completion, matches the `lan-out`
+/// rule, and takes the re-stamp exit — and assert the matched rule's packet
+/// count did not move.
+///
+/// Its POSITIVE CONTROL is the second half: a session-MISS packet of a different
+/// flow through the same snapshot, which must move that same counter. If the
+/// control does not move it, the zero delta above measured a counter nothing can
+/// bump and says nothing about the re-derivation.
+#[test]
+fn the_re_derivation_records_no_hit_on_the_matched_rule_9385() {
+    let forwarding = forwarding_with_lan_rule(Some("permit"));
+    let (rule_before, default_before) = policy_hit_counts_9385(&forwarding);
+    assert_ne!(
+        rule_before,
+        u64::MAX,
+        "the `lan-out` rule must exist in the built snapshot, or the delta below \
+         is measured on a counter that is not there (#9385)"
+    );
+
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, LAN_IFINDEX, 0);
+    binding.interface = Arc::<str>::from("reth1.0");
+    let ha_state = txn_ha_state();
+    let mut sessions = SessionTable::new();
+    assert!(sessions.install_with_protocol_with_origin(
+        flow_key_to(DST),
+        decision(WAN_IFINDEX),
+        metadata(false),
+        SessionOrigin::ForwardFlow,
+        122_000_000_000,
+        PROTO_TCP,
+        0,
+    ));
+    let frame = build_txn_tcp_syn_frame_v4(SRC, DST, SPORT, DPORT, TCP_ACK);
+    let meta = txn_meta_v4(LAN_IFINDEX as u32, TCP_ACK, frame.len() as u16);
+    let (_batch, dbg) = txn_run_descriptor(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &frame,
+        meta,
+    );
+    assert_eq!(
+        dbg.session_hit, 1,
+        "the packet must HIT the session so the RE-DERIVATION is what ran — a \
+         session MISS would count legitimately and the delta would be about \
+         admission, not about #9385"
+    );
+    assert_eq!(
+        dbg.policy_revoked_sessions, 0,
+        "the flow is still permitted; the re-derivation must take the re-stamp \
+         exit, which is the exit that matched a rule and therefore the exit that \
+         used to count"
+    );
+
+    let (rule_after, default_after) = policy_hit_counts_9385(&forwarding);
+    assert_eq!(
+        rule_after, rule_before,
+        "the re-derivation matched `lan-out` and must NOT have bumped its hit \
+         counter. A +1 is the phantom hit: up to one packet per live session per \
+         config generation on `show security policies hit-count`, arriving \
+         exactly when an operator is watching it to confirm a narrowing took \
+         effect (#9385)"
+    );
+    assert_eq!(
+        default_after, default_before,
+        "and the implicit-default counter must not move either — the walk did not \
+         reach it, and a fix that only gated the per-rule bump would pass the \
+         assertion above and fail here on the default-verdict path (#9385)"
+    );
+}
+
+/// THE POSITIVE CONTROL for the cell above, and it is not optional.
+///
+/// WHY IT USES A DIFFERENT FIXTURE, stated plainly because it is a real
+/// weakening. The obvious control — a session MISS through
+/// `forwarding_with_lan_rule` — DOES NOT WORK, and that is measured, not
+/// assumed: it was written that way first, and on BASE code it read a delta of
+/// 0 and failed. `policy_deny_snapshot` has never had a MISS driven through it
+/// (every other cell in this file PRE-INSTALLS a decision carrying a
+/// `neighbor_mac`), so such a packet never reaches the counting
+/// `try_match_rule` walk at all — `tx == 0` and `policy_deny == 0`. Adding a
+/// neighbour to that snapshot was tried and did not fix it; the instrument
+/// caught that attempt too.
+///
+/// So the control runs on `inbound_dnat_snapshot`, which is PROVEN to admit and
+/// forward: `tests_policy_inbound_nat`'s shipped cells and the #9382 two-phase
+/// cells both assert `tx == 1` on exactly this fixture and pass. Building a
+/// positive control on measured ground beats building it on a fixture that
+/// merely looks equivalent.
+///
+/// WHAT IT DOES AND DOES NOT ESTABLISH. It establishes that the counter-reading
+/// instrument observes a bump when the ordinary admission path runs, i.e. that a
+/// zero delta above means "the re-derivation did not count" rather than "nothing
+/// in this harness can count". It does NOT establish that on the SAME rule in
+/// the SAME fixture, which a same-fixture control would. That gap is the price
+/// of the fixture limitation above and is recorded rather than papered over.
+#[test]
+fn the_ordinary_admission_path_does_record_a_hit_9385() {
+    let snapshot = inbound_dnat_snapshot(wan_to_lan_permit("10.0.61.102/32", "permit-internal"));
+    let forwarding = build_forwarding_state(&snapshot);
+    let (rule_before, _) = named_policy_hit_counts_9385(&forwarding, "permit-internal");
+    assert_ne!(
+        rule_before,
+        u64::MAX,
+        "the `permit-internal` rule must exist, or the delta is read off nothing"
+    );
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, 12, 0);
+    binding.interface = Arc::<str>::from("reth0.80");
+    let ha_state = txn_ha_state();
+    // An EMPTY session table: this packet is a session MISS and takes admission.
+    let mut sessions = SessionTable::new();
+    let frame = build_txn_tcp_syn_frame_v4(
+        Ipv4Addr::new(198, 51, 100, 10),
+        Ipv4Addr::new(172, 16, 80, 8),
+        54321,
+        443,
+        TCP_FLAG_SYN,
+    );
+    let meta = txn_meta_v4(12, TCP_FLAG_SYN, frame.len() as u16);
+    let (_batch, dbg) = txn_run_descriptor(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &frame,
+        meta,
+    );
+    assert_eq!(
+        dbg.session_hit, 0,
+        "this packet must be a session MISS, or it is not exercising admission"
+    );
+    // THE INSTRUMENT THAT WAS MISSING THE FIRST TIME. `session_hit == 0` says the
+    // packet missed; it does NOT say the miss reached the counting policy walk.
+    // Without this, a control that silently stops reaching the site it controls
+    // for reads a zero and looks like a real measurement.
+    assert_eq!(
+        dbg.tx, 1,
+        "the control must ADMIT and forward, or it never reached the counting \
+         policy walk and its delta says nothing (#9385)"
+    );
+    let (rule_after, _) = named_policy_hit_counts_9385(&forwarding, "permit-internal");
+    assert_eq!(
+        rule_after,
+        rule_before + 1,
+        "the ORDINARY admission path must still count exactly one packet against \
+         the admitting rule. If this is 0, the #9385 change suppressed counting \
+         everywhere and `show security policies hit-count` is dead — and the \
+         zero-delta cell above would be passing vacuously (#9385)"
+    );
+}
+
+/// The DEFAULT-VERDICT path, which is a different exit from `try_match_rule` and
+/// is the one a per-rule-only fix would miss. No `lan -> wan` rule at all, so the
+/// re-derivation falls to the implicit default, DENIES, and revokes — and must
+/// still not bump the default counter.
+#[test]
+fn the_re_derivation_records_no_hit_on_the_implicit_default_9385() {
+    let forwarding = forwarding_with_lan_rule(None);
+    let (_, default_before) = policy_hit_counts_9385(&forwarding);
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, LAN_IFINDEX, 0);
+    binding.interface = Arc::<str>::from("reth1.0");
+    let ha_state = txn_ha_state();
+    let mut sessions = SessionTable::new();
+    assert!(sessions.install_with_protocol_with_origin(
+        flow_key_to(DST),
+        decision(WAN_IFINDEX),
+        metadata(false),
+        SessionOrigin::ForwardFlow,
+        122_000_000_000,
+        PROTO_TCP,
+        0,
+    ));
+    let frame = build_txn_tcp_syn_frame_v4(SRC, DST, SPORT, DPORT, TCP_ACK);
+    let meta = txn_meta_v4(LAN_IFINDEX as u32, TCP_ACK, frame.len() as u16);
+    let (_batch, dbg) = txn_run_descriptor(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &frame,
+        meta,
+    );
+    assert_eq!(dbg.session_hit, 1, "the packet must hit the session");
+    assert_eq!(
+        dbg.policy_revoked_sessions, 1,
+        "no rule permits this flow, so the re-derivation must reach the IMPLICIT
+         DEFAULT and revoke — that is the exit whose counter this cell measures"
+    );
+    let (_, default_after) = policy_hit_counts_9385(&forwarding);
+    assert_eq!(
+        default_after, default_before,
+        "the implicit default-policy counter must NOT move for a re-derivation. \
+         A +1 here inflates the `default-policy` row of \
+         `show security policies hit-count`, which is the row an operator reads \
+         to see what the fallback is catching (#9385)"
+    );
+}
+
+/// THE POSITIVE CONTROL for the default-counter cell, on the same PROVEN fixture
+/// as the control above and for the same reason.
+///
+/// A policy covering only the PRE-translation VIP does not cover the post-DNAT
+/// destination, so this MISS falls to the implicit default and is DENIED — the
+/// shape the shipped `policy_inbound_dnat_denies_when_only_original_dst_permitted`
+/// already asserts reaches `policy_deny >= 1`. `tx` is the wrong instrument for a
+/// denied packet; `policy_deny` is the positive statement that the walk reached
+/// the implicit-default exit, which is the exit whose counter this measures.
+#[test]
+fn the_ordinary_admission_path_does_record_a_default_hit_9385() {
+    let snapshot =
+        inbound_dnat_snapshot(wan_to_lan_permit("172.16.80.8/32", "permit-public-vip"));
+    let forwarding = build_forwarding_state(&snapshot);
+    let default_before = forwarding.policy.default_counter.test_packet_count();
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, 12, 0);
+    binding.interface = Arc::<str>::from("reth0.80");
+    let ha_state = txn_ha_state();
+    let mut sessions = SessionTable::new();
+    let frame = build_txn_tcp_syn_frame_v4(
+        Ipv4Addr::new(198, 51, 100, 10),
+        Ipv4Addr::new(172, 16, 80, 8),
+        54322,
+        443,
+        TCP_FLAG_SYN,
+    );
+    let meta = txn_meta_v4(12, TCP_FLAG_SYN, frame.len() as u16);
+    let (_batch, dbg) = txn_run_descriptor(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &frame,
+        meta,
+    );
+    assert_eq!(dbg.session_hit, 0, "this packet must be a session MISS");
+    assert!(
+        dbg.policy_deny >= 1,
+        "the default-verdict control must reach the implicit-default DENY exit, \
+         or its delta says nothing (#9385)"
+    );
+    assert!(
+        forwarding.policy.default_counter.test_packet_count() > default_before,
+        "the ordinary admission path must still count the implicit-default \
+         verdict. If it does not, the zero-delta cell above is vacuous (#9385)"
+    );
+}

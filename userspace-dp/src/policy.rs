@@ -656,6 +656,19 @@ impl PolicyRuleCounter {
         }
     }
 
+    /// #9385: `add` with the count POLICY applied. Note the zero-length gate in
+    /// `add` covers BYTES only — the packet increment is unconditional — so a
+    /// caller passing `packet_len = 0` to mean "do not count me" was still
+    /// bumping `packets`. That is the whole defect: `#6304`'s own doc relies on
+    /// the zero-length-still-counts behaviour as a distinguisher, so `add` cannot
+    /// be changed; the decision has to be threaded instead.
+    #[inline]
+    fn add_if(&self, packet_len: u64, hit_count: PolicyHitCount) {
+        if hit_count.enabled() {
+            self.add(packet_len);
+        }
+    }
+
     /// #3073: coalesced multi-packet add used by the per-worker hit-count
     /// flush (`flush_recorded_policy_hit_counters`). Folds a whole batch of
     /// established-session fast-path packets into ONE pair of relaxed
@@ -2797,6 +2810,41 @@ pub(crate) fn evaluate_policy_result_with_len(
     )
 }
 
+/// #9385: whether a policy evaluation may BUMP the per-rule and
+/// implicit-default hit counters it walks past.
+///
+/// The filter engine already carries this distinction as `NonRoutingCountPolicy`
+/// (#2620/#7212) and the rationale transfers verbatim: a re-derivation on the
+/// ESTABLISHED-session path is not a new arrival at the policy — it was counted
+/// when the flow was admitted — so counting it again inflates
+/// `show security policies hit-count` by up to one packet per live session per
+/// config generation, and hit-count is exactly what an operator watches to
+/// confirm a narrowing took effect.
+///
+/// An exhaustive `match` rather than a bare `bool`: a third variant added later
+/// has to classify itself instead of inheriting whichever answer a negated
+/// comparison happened to give it. That is the failure
+/// `NonRoutingCountPolicy::counting` records for its own third variant.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PolicyHitCount {
+    /// The ordinary forwarding path: this packet is a new arrival at the policy
+    /// and is counted exactly once, here or on the established fast path.
+    Count,
+    /// A side-effect-free derivation — #8356's established-session zone-policy
+    /// re-derivation. Bumps nothing.
+    Never,
+}
+
+impl PolicyHitCount {
+    #[inline]
+    fn enabled(self) -> bool {
+        match self {
+            Self::Count => true,
+            Self::Never => false,
+        }
+    }
+}
+
 /// #3020: ICMP-aware policy evaluation. `packet_icmp` is the packet's
 /// ICMP/ICMPv6 `(type, code)` for ICMP-family flows whose L4 header was safely
 /// readable, else `None`. It gates the icmp-type-constrained application terms
@@ -2849,6 +2897,78 @@ pub(crate) fn evaluate_policy_result_l3_aware(
     packet_len: u64,
     l4_present: bool,
 ) -> PolicyEvaluationResult {
+    evaluate_policy_result_counted(
+        state,
+        from_id,
+        to_id,
+        src_ip,
+        dst_ip,
+        protocol,
+        src_port,
+        dst_port,
+        packet_icmp,
+        packet_len,
+        l4_present,
+        PolicyHitCount::Count,
+    )
+}
+
+/// #9385: evaluate WITHOUT bumping any hit counter.
+///
+/// The entry point for #8356's established-session zone-policy re-derivation,
+/// whose contract is side-effect freedom. The module header used to claim that
+/// freedom was STRUCTURAL — that `evaluate_policy_result_with_icmp` "takes
+/// `&PolicyState` and RETURNS a counter handle ...; it cannot count, log or meter
+/// by itself". That is true of the HANDLE and false of the EVALUATION: the
+/// counters are atomics behind shared references, so `&PolicyState` is not a
+/// guarantee, and the walk bumped `rule.hit_counter` / `state.default_counter`
+/// internally on whatever it matched. The freedom is a property of the CALL, and
+/// this is how the call expresses it.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn evaluate_policy_result_without_counting(
+    state: &PolicyState,
+    from_id: u16,
+    to_id: u16,
+    src_ip: IpAddr,
+    dst_ip: IpAddr,
+    protocol: u8,
+    src_port: u16,
+    dst_port: u16,
+    packet_icmp: Option<(u8, u8)>,
+) -> PolicyEvaluationResult {
+    evaluate_policy_result_counted(
+        state,
+        from_id,
+        to_id,
+        src_ip,
+        dst_ip,
+        protocol,
+        src_port,
+        dst_port,
+        packet_icmp,
+        // Bytes are meaningless for a derivation that counts nothing, and the
+        // byte field is separately gated on a non-zero length anyway.
+        0,
+        true,
+        PolicyHitCount::Never,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn evaluate_policy_result_counted(
+    state: &PolicyState,
+    from_id: u16,
+    to_id: u16,
+    src_ip: IpAddr,
+    dst_ip: IpAddr,
+    protocol: u8,
+    src_port: u16,
+    dst_port: u16,
+    packet_icmp: Option<(u8, u8)>,
+    packet_len: u64,
+    l4_present: bool,
+    hit_count: PolicyHitCount,
+) -> PolicyEvaluationResult {
     // #3110: zone id 0 is the reserved "unknown / no zone" sentinel
     // (assigned to interfaces not bound to any security zone, and to the
     // over-cap-zone collapse-to-0 path, #2391). A flow whose ingress OR
@@ -2898,6 +3018,7 @@ pub(crate) fn evaluate_policy_result_l3_aware(
                     packet_icmp,
                     packet_len,
                     l4_present,
+                    hit_count,
                 ) {
                     Some(mut result) => {
                         // #3073: 1-based handle so the fast path can re-count
@@ -2973,6 +3094,7 @@ pub(crate) fn evaluate_policy_result_l3_aware(
                 packet_icmp,
                 packet_len,
                 l4_present,
+                hit_count,
             ) {
                 Some(mut result) => {
                     result.policy_counter_idx = (idx as u32).saturating_add(1);
@@ -3003,6 +3125,7 @@ pub(crate) fn evaluate_policy_result_l3_aware(
                 packet_icmp,
                 packet_len,
                 l4_present,
+                hit_count,
             ) {
                 Some(mut result) => {
                     result.policy_counter_idx = (idx as u32).saturating_add(1);
@@ -3048,6 +3171,7 @@ pub(crate) fn evaluate_policy_result_l3_aware(
                 packet_icmp,
                 packet_len,
                 l4_present,
+                hit_count,
             ) {
                 Some(mut result) => {
                     // #3073: 1-based handle (see zone-pair branch above).
@@ -3119,7 +3243,7 @@ pub(crate) fn evaluate_policy_result_l3_aware(
     // the first-packet count and the established fast path re-counts the rest
     // via the reserved handle below. Mirrors the per-rule `rule.hit_counter.add`
     // in `try_match_rule`.
-    state.default_counter.add(packet_len);
+    state.default_counter.add_if(packet_len, hit_count);
     PolicyEvaluationResult {
         action: state.default_action,
         // #3057: the implicit default-policy carries a reserved sentinel ID,
@@ -3252,6 +3376,13 @@ pub(crate) fn evaluate_junos_host_policy(
 /// unaffected for every flow that does not overlap a deny. The L4 path never
 /// records a skip, so it stays byte-identical.
 #[allow(clippy::too_many_arguments)]
+/// #9385: this walker passes `PolicyHitCount::Count` at each `try_match_rule`
+/// site and that is correct, not an oversight. It is the `to-zone junos-host`
+/// (host-inbound) evaluation, and #3706 deliberately makes it the counting site
+/// for a host-bound packet — the established-hit path SKIPS its own re-count for
+/// LocalDelivery precisely because this re-eval already counted the packet. Only
+/// #8356's zone-policy re-derivation is side-effect-free, and it does not come
+/// through here.
 pub(crate) fn evaluate_junos_host_policy_l3_aware(
     state: &PolicyState,
     from_id: u16,
@@ -3289,6 +3420,7 @@ pub(crate) fn evaluate_junos_host_policy_l3_aware(
                 // LocalDelivery arm (a non-first fragment); port-bearing
                 // application terms then fail closed.
                 l4_present,
+                PolicyHitCount::Count,
             ) {
                 Some(mut result) => {
                     // #3073: 1-based handle (see `evaluate_policy_result_with_icmp`).
@@ -3337,6 +3469,7 @@ pub(crate) fn evaluate_junos_host_policy_l3_aware(
                 // LocalDelivery arm (a non-first fragment); port-bearing
                 // application terms then fail closed.
                 l4_present,
+                PolicyHitCount::Count,
             ) {
                 Some(mut result) => {
                     result.policy_counter_idx = (idx as u32).saturating_add(1);
@@ -3386,6 +3519,7 @@ pub(crate) fn evaluate_junos_host_policy_l3_aware(
             packet_icmp,
             packet_len,
             l4_present,
+            PolicyHitCount::Count,
         ) {
             Some(mut result) => {
                 result.policy_counter_idx = (idx as u32).saturating_add(1);
@@ -3707,6 +3841,10 @@ fn try_match_rule(
     packet_icmp: Option<(u8, u8)>,
     packet_len: u64,
     l4_present: bool,
+    // #9385: threaded rather than inferred from `packet_len`. A zero length means
+    // "no bytes", not "no packet" -- `HitCounter::add` bumps `packets`
+    // unconditionally and #6304's doc depends on that.
+    hit_count: PolicyHitCount,
 ) -> Option<PolicyEvaluationResult> {
     if rule.inactive {
         return None;
@@ -3722,7 +3860,7 @@ fn try_match_rule(
     // inversion, per-family fail-closed, book membership, and the NAT64
     // cross-family arm — see `rule_l3_matches`.
     if rule_l3_matches(rule, state, src_ip, dst_ip) {
-        rule.hit_counter.add(packet_len);
+        rule.hit_counter.add_if(packet_len, hit_count);
         Some(PolicyEvaluationResult {
             action: rule.action,
             policy_id: rule.policy_id,

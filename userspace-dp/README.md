@@ -456,6 +456,31 @@ logging rules, not these specific hot-path constants.
       not a verdict. That is a stated residual: an interface moved out of
       every zone is not torn down.
 
+  - **Side-effect freedom here is a property of the CALL, not of the type
+    signature (#9385).** This invariant used to be stated STRUCTURALLY —
+    that `evaluate_policy_result_*` "takes `&PolicyState` and RETURNS a
+    counter handle; it cannot count, log or meter by itself". True of the
+    HANDLE, false of the EVALUATION: `try_match_rule` bumps
+    `rule.hit_counter` on every match and the implicit-default path bumps
+    `state.default_counter`, and `&PolicyState` does not prevent it
+    because those counters are ATOMICS behind shared references. Passing
+    `packet_len = 0` does not help either — the zero-length gate in
+    `HitCounter::add` covers BYTES only and the packet increment is
+    unconditional. So every re-derivation recorded a phantom hit, up to
+    one packet per live session per config generation, arriving exactly
+    when an operator is watching hit-count to confirm a narrowing took
+    effect.
+
+    The derivation now calls `evaluate_policy_result_without_counting`
+    (`PolicyHitCount::Never`), mirroring the filter engine's
+    `NonRoutingCountPolicy`. `HitCounter::add` was deliberately NOT
+    changed to treat a zero length as "do not count": #6304's test
+    accessor depends on zero-length-still-counts as a distinguisher, and
+    `add` is on every counting path in the crate. The
+    `to-zone junos-host` walker passes `Count` on purpose — #3706 makes it
+    the counting site for a host-bound packet, and the established-hit
+    path skips its own re-count for `LocalDelivery` because of that.
+
   `security policies policy-rematch` is the COMMIT-time mitigation for
   the same class, and it is off by default
   (`pkg/config/types_security.go`), so on a stock box this module is the
