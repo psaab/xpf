@@ -182,7 +182,7 @@ Last updated: 2026-02-13
 | **J-Web GUI** | Full web-based management interface with dashboard, wizards, monitoring | Complex | No — xpf has basic REST API |
 | **Security Director** | Centralized multi-device policy management (Junos Space) | Complex | No (N/A — cloud/controller feature) |
 | **SNMP Traps/Notifications** | SNMP v2c/v3 trap sending on events | Medium | No — xpf has SNMP agent (GET) but no traps |
-| **SNMP v3** | SNMPv3 with authentication and encryption | Medium | No — xpf has basic SNMP v2c only |
+| **SNMP v3** | SNMPv3 with authentication and encryption | Medium | Partial — USM `local-engine` users with authentication and privacy; `vacm`, notifications (`notify` / `target-*`), `usm remote-engine` and `engine-id` are accepted with a commit advisory and NOT implemented (#9414) |
 | **XML API** | `show | display xml` config export/import | Medium | No |
 | **Junos Automation (SLAX/Python)** | On-box scripting for event handling, commit scripts, op scripts | Complex | No |
 | **Event Policies** | Automatic actions triggered by system events (syslog patterns) | Medium | Partial — xpf has `pkg/eventengine` but unclear feature parity |

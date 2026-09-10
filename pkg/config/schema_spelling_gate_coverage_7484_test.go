@@ -517,14 +517,32 @@ var gateBlindCeiling = map[gateBlindClass]int{
 	//
 	// ATTRIBUTED: origin/master runs this cell green at the branch point and
 	// the only schema edit on this branch is the shared-node swap.
-	gateBlindUnreachable: 153,
+	// #9414: 153 -> 138, a pure RECLASSIFICATION of fifteen leaves into
+	// `advisory` (named at that ceiling), not a shrink: nothing about the leaves
+	// changed, the measurement did -- they now change output through the #9414
+	// advisory, the #8830 shape. ATTRIBUTED: origin/master ran this cell green
+	// at the branch point, and #9414 is the only change on the branch touching
+	// pkg/config. The `structured-data brief` leaves stay here: the advisory
+	// names `structured-data` whether or not `brief` is present, so `brief`
+	// still changes nothing.
+	gateBlindUnreachable: 138,
 	// #8830: read, value deliberately ignored, advisory says so. Measured at
 	// this head: vrrp-group track-interface priority-cost (inet and inet6),
 	// security log stream transport tls-profile, system dataplane
 	// cores/memory/socket-mem, system services ssh rate-limit. This is a
 	// CEILING like the others -- it may shrink freely, and it shrinks when a
 	// knob stops being ignored, which is a real implementation landing.
-	gateBlindAdvisory: 7,
+	// #9414 raises this 7 -> 22, DELIBERATELY, and names the fifteen because a
+	// raise without them is slack: `system syslog file <*>` allow-duplicates,
+	// explicit-priority, match, match-strings; `system syslog host <*>`
+	// exclude-hostname, explicit-priority, facility-override, log-prefix, match,
+	// match-strings, routing-instance; `system syslog user <*>`
+	// allow-duplicates, explicit-priority, match, match-strings. Each is read and
+	// deliberately not applied, and its advisory says so: the same definition as
+	// the seven above. The blind TOTAL did not move (427); these left
+	// `unreachable`, where they were silent. They leave THIS class only when a
+	// modifier is actually implemented.
+	gateBlindAdvisory: 22,
 	// #7132 raised this 175 -> 176 for `system ntp server ... prefer`.
 	//
 	// Raised deliberately, and it is the one kind of raise that is not a

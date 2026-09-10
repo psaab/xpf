@@ -1147,7 +1147,7 @@ COMPARED	system services web-management api-auth user <*> password
 COMPARED	system services web-management http interface
 COMPARED	system services web-management https interface
 flag (read, but value-less)	system services web-management https system-generated-certificate
-unreachable (leaf changed nothing)	system syslog file <*> allow-duplicates
+advisory (read, value ignored, warning says so)	system syslog file <*> allow-duplicates
 flag (read, but value-less)	system syslog file <*> archive archive-sites
 flag (read, but value-less)	system syslog file <*> archive files
 flag (read, but value-less)	system syslog file <*> archive no-world-readable
@@ -1155,24 +1155,24 @@ flag (read, but value-less)	system syslog file <*> archive size
 flag (read, but value-less)	system syslog file <*> archive start-time
 flag (read, but value-less)	system syslog file <*> archive transfer-interval
 flag (read, but value-less)	system syslog file <*> archive world-readable
-unreachable (leaf changed nothing)	system syslog file <*> explicit-priority
-unreachable (leaf changed nothing)	system syslog file <*> match
-unreachable (leaf changed nothing)	system syslog file <*> match-strings
+advisory (read, value ignored, warning says so)	system syslog file <*> explicit-priority
+advisory (read, value ignored, warning says so)	system syslog file <*> match
+advisory (read, value ignored, warning says so)	system syslog file <*> match-strings
 unreachable (leaf changed nothing)	system syslog file <*> structured-data brief
 flag (read, but value-less)	system syslog host <*> allow-duplicates
-unreachable (leaf changed nothing)	system syslog host <*> exclude-hostname
-unreachable (leaf changed nothing)	system syslog host <*> explicit-priority
-unreachable (leaf changed nothing)	system syslog host <*> facility-override
-unreachable (leaf changed nothing)	system syslog host <*> log-prefix
-unreachable (leaf changed nothing)	system syslog host <*> match
-unreachable (leaf changed nothing)	system syslog host <*> match-strings
+advisory (read, value ignored, warning says so)	system syslog host <*> exclude-hostname
+advisory (read, value ignored, warning says so)	system syslog host <*> explicit-priority
+advisory (read, value ignored, warning says so)	system syslog host <*> facility-override
+advisory (read, value ignored, warning says so)	system syslog host <*> log-prefix
+advisory (read, value ignored, warning says so)	system syslog host <*> match
+advisory (read, value ignored, warning says so)	system syslog host <*> match-strings
 COMPARED	system syslog host <*> port
-unreachable (leaf changed nothing)	system syslog host <*> routing-instance
+advisory (read, value ignored, warning says so)	system syslog host <*> routing-instance
 COMPARED	system syslog host <*> source-address
 unreachable (leaf changed nothing)	system syslog host <*> structured-data brief
-unreachable (leaf changed nothing)	system syslog user <*> allow-duplicates
-unreachable (leaf changed nothing)	system syslog user <*> explicit-priority
-unreachable (leaf changed nothing)	system syslog user <*> match
-unreachable (leaf changed nothing)	system syslog user <*> match-strings
+advisory (read, value ignored, warning says so)	system syslog user <*> allow-duplicates
+advisory (read, value ignored, warning says so)	system syslog user <*> explicit-priority
+advisory (read, value ignored, warning says so)	system syslog user <*> match
+advisory (read, value ignored, warning says so)	system syslog user <*> match-strings
 unreachable (leaf changed nothing)	system syslog user <*> structured-data brief
 COMPARED	system time-zone
