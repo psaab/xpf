@@ -3104,10 +3104,12 @@ pub(super) fn poll_binding_process_descriptor(
                                             tcp_flags: meta.tcp_flags,
                                             // Local forward-flow learn (#2170): no peer gen.
                                             generation: 0,
-                                            // #5212: local-origin shared publish; the id
-                                            // rides the wire off the live entry via the
-                                            // Open delta, not this replica (0 here).
-                                            session_id: 0,
+                                            // #9582: carry the installer's stable id, so every
+                                            // worker replica ADOPTS it instead of minting one.
+                                            // A replica can then announce a close it alone
+                                            // sees with the same id the Open delta, the mirror
+                                            // row and the #9412 sender memo use (#5212).
+                                            session_id: sessions.session_id_for(&flow.forward_key),
                                             tcp_close_class: 0,
                                         };
                                         // #1789: count failed publishes so
@@ -6076,8 +6078,9 @@ pub(super) fn poll_binding_process_descriptor(
                                             tcp_flags: meta.tcp_flags,
                                             // Local missing-neighbor seed (#2170): no peer gen.
                                             generation: 0,
-                                            // #5212: local-origin seed; no carried id (0).
-                                            session_id: 0,
+                                            // #9582: carry the seed's stable id, so replicas
+                                            // adopt it (see the forward-flow publish above).
+                                            session_id: sessions.session_id_for(&flow.forward_key),
                                             tcp_close_class: 0,
                                         };
                                         publish_shared_session(

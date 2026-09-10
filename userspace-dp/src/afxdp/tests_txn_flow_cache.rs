@@ -155,6 +155,46 @@ fn txn_new_flow_install_counts_on_the_binding_4800() {
 }
 
 
+/// #9582 WIRING: a transit forward install publishes its STABLE session id into the
+/// shared map. Every worker replica is cloned from that entry, so this is where each
+/// replica gets the installer's id. With 0 each replica minted its own, and a close it
+/// alone saw could not be announced under the id the peer and the #9412 memo know.
+#[test]
+fn txn_transit_install_publishes_the_installer_session_id_9582() {
+    let forwarding = build_forwarding_state(&nat_snapshot());
+    let ha_state = txn_ha_state();
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, 24, 0);
+    binding.interface = Arc::<str>::from("reth1.0");
+    let mut sessions = SessionTable::new();
+    sessions.set_session_id_namespace(0, 3);
+    let frame = build_txn_tcp_syn_frame_v4(
+        Ipv4Addr::new(10, 0, 61, 102),
+        Ipv4Addr::new(8, 8, 8, 8),
+        12345,
+        443,
+        TCP_FLAG_SYN,
+    );
+    let meta = txn_meta_v4(24, TCP_FLAG_SYN, frame.len() as u16);
+    let (batch, dbg, published) =
+        txn_run_descriptor_capturing_shared(&mut binding, &mut sessions, &forwarding, &ha_state, &frame, meta);
+    assert_eq!(dbg.tx, 1, "FIXTURE: the SYN must forward");
+    assert_eq!(batch.session_creates, 2, "FIXTURE: the SYN must install the forward/reverse pair");
+    let forward: Vec<_> = published.iter().filter(|e| e.origin == SessionOrigin::ForwardFlow).collect();
+    assert_eq!(forward.len(), 1, "FIXTURE: the install must publish exactly one ForwardFlow shared entry");
+    let installed_id = sessions.session_id_for(&forward[0].key);
+    assert!(
+        installed_id != 0 && installed_id >> 48 == 3,
+        "FIXTURE: the installer must mint in its own namespace, got {installed_id:#x}"
+    );
+    assert_eq!(
+        forward[0].session_id, installed_id,
+        "#9582: the transit install published session id {:#x}, not the installer's {installed_id:#x}, \
+         so every replica would mint its own",
+        forward[0].session_id
+    );
+}
+
+
 /// #3777 RED-on-revert: an interface INPUT filter `then count` must count EVERY
 /// packet of a cacheable flow, not just the seed. Packet 1 (SYN) counts on the
 /// cold path and seeds the flow cache; packet 2 (same 5-tuple) hits the flow

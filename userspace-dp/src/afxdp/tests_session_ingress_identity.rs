@@ -498,6 +498,13 @@ fn poll_descriptor_reverse_companion_carries_no_ingress_identity_4983() {
 /// poll takes the missing-neighbor branch and installs a
 /// `MissingNeighborSeed` forward session instead.
 fn run_missing_neighbor_seed_flow() -> SessionTable {
+    run_missing_neighbor_seed_flow_capturing_shared(0).0
+}
+
+/// `run_missing_neighbor_seed_flow`, with the table in worker `worker`'s session-id
+/// namespace (0 leaves it unset, exactly as before), also returning what the seed
+/// published into the shared session map (#9582).
+fn run_missing_neighbor_seed_flow_capturing_shared(worker: u32) -> (SessionTable, Vec<SyncedSessionEntry>) {
     let mut snapshot = ingress_identity_snapshot();
     // Drop the reachable 172.16.80.1 entry: the default route's next hop no
     // longer resolves, which is the ordinary cold-start case (first packet of
@@ -523,7 +530,10 @@ fn run_missing_neighbor_seed_flow() -> SessionTable {
     binding.interface = Arc::<str>::from("ge-0-0-0");
     let ha_state = txn_ha_state();
     let mut sessions = SessionTable::new();
-    txn_run_descriptor(
+    if worker != 0 {
+        sessions.set_session_id_namespace(0, worker);
+    }
+    let (_batch, _dbg, published) = txn_run_descriptor_capturing_shared(
         &mut binding,
         &mut sessions,
         &forwarding,
@@ -531,7 +541,29 @@ fn run_missing_neighbor_seed_flow() -> SessionTable {
         &frame,
         meta,
     );
-    sessions
+    (sessions, published)
+}
+
+/// #9582 WIRING: a missing-neighbor seed publishes its STABLE session id into the
+/// shared map, so the replicas cloned from it adopt that id.
+#[test]
+fn poll_descriptor_missing_neighbor_seed_publishes_its_session_id_9582() {
+    let (sessions, published) = run_missing_neighbor_seed_flow_capturing_shared(5);
+    let seeds: Vec<_> = published
+        .iter()
+        .filter(|e| e.origin == SessionOrigin::MissingNeighborSeed)
+        .collect();
+    assert_eq!(seeds.len(), 1, "FIXTURE: the seed must publish exactly one shared entry");
+    let installed_id = sessions.session_id_for(&seeds[0].key);
+    assert!(
+        installed_id != 0 && installed_id >> 48 == 5,
+        "FIXTURE: the seed must install under this worker's namespace, got {installed_id:#x}"
+    );
+    assert_eq!(
+        seeds[0].session_id, installed_id,
+        "#9582: the missing-neighbor seed published session id {:#x}, not its own {installed_id:#x}",
+        seeds[0].session_id
+    );
 }
 
 /// #4983 PRODUCER fail-on-revert (missing-neighbor seed install). A flow whose

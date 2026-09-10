@@ -489,6 +489,94 @@ fn promote_republishes_the_live_close_class_9412() {
     }
 }
 
+/// #9582: a promote republishes the session's STABLE id, so replicas and shared-map
+/// materializations ADOPT it instead of minting their own.
+///
+/// With 0 there, a replica on another worker could not announce a close it alone
+/// sees under the id the peer adopted (#5212) and the #9412 sender memo keys on.
+#[test]
+fn promote_republishes_the_session_id_for_replicas_to_adopt_9582() {
+    // A peer node's id: node bit set, unlike this table's own namespace.
+    const PEER_ID: u64 = 0x8001_0000_0000_0077;
+    let mut sessions = SessionTable::new();
+    sessions.set_session_id_namespace(0, 1);
+    let key = test_key();
+    let decision = test_decision();
+    let metadata = test_metadata();
+    assert!(sessions.upsert_synced_with_origin(
+        SessionInstall {
+            key: key.clone(),
+            decision,
+            metadata: metadata.clone(),
+            origin: SessionOrigin::SyncImport,
+            now_ns: 1_000_000,
+            protocol: PROTO_TCP,
+            tcp_flags: 0x10,
+            session_id: PEER_ID,
+            tcp_close_class: 0,
+        },
+        false,
+    ));
+    assert_eq!(sessions.session_id_for(&key), PEER_ID, "FIXTURE: the import must adopt the peer's id");
+
+    let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
+    let peer_worker_commands: Vec<Arc<Mutex<VecDeque<WorkerCommand>>>> =
+        vec![Arc::new(Mutex::new(VecDeque::new()))];
+    let forwarding = test_forwarding_state_with_fabric();
+    let shared = super::SharedSessionRefs {
+        sessions: &shared_sessions,
+        nat_sessions: &shared_nat_sessions,
+        forward_wire_sessions: &shared_forward_wire_sessions,
+        owner_rg_indexes: &shared_owner_rg_indexes,
+    };
+    let _ = maybe_promote_synced_session(
+        &mut sessions,
+        -1,
+        shared,
+        &peer_worker_commands,
+        &forwarding,
+        &key,
+        decision,
+        metadata,
+        SessionOrigin::SyncImport,
+        false,
+        2_000_000,
+        PROTO_TCP,
+        0x10,
+    );
+    assert_eq!(sessions.session_id_for(&key), PEER_ID, "FIXTURE: the promote must keep the live entry's id");
+    let published = shared_sessions
+        .lock()
+        .expect("shared sessions")
+        .get(&key)
+        .cloned()
+        .expect("FIXTURE: the promote must republish into the shared map");
+    assert_eq!(published.origin, SessionOrigin::SharedPromote, "FIXTURE: the shared entry is the promote's");
+    assert_eq!(
+        published.session_id, PEER_ID,
+        "#9582: the promote republished session id {:#x}, not the live id, so a \
+         materialization would mint its own",
+        published.session_id
+    );
+    let replica_ids: Vec<u64> = peer_worker_commands[0]
+        .lock()
+        .expect("commands")
+        .iter()
+        .filter_map(|cmd| match cmd {
+            WorkerCommand::UpsertSynced(entry) if entry.key == key => Some(entry.session_id),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        replica_ids,
+        vec![PEER_ID],
+        "#9582: the replica queued for the other worker must carry the promoted session's id"
+    );
+}
+
 #[test]
 fn maybe_promote_synced_session_skips_worker_local_import() {
     let mut sessions = SessionTable::new();

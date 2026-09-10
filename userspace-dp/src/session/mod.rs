@@ -1994,6 +1994,17 @@ impl SessionTable {
         self.entry_by_key(key).map(|e| e.session_id).unwrap_or(0)
     }
 
+    /// #9582: true when `session_id` was minted by ANOTHER worker and carried here.
+    ///
+    /// `alloc_session_id` puts this table's namespace, `(node_bit << 15 | worker_id)
+    /// << 48`, in the high 16 bits of every id it mints. So a non-zero id whose high
+    /// bits differ was adopted from the publisher (for a local session's replica,
+    /// the installer). An id minted here, or 0, is not carried.
+    pub(in crate::session) fn session_id_carried_from_another_worker(&self, session_id: u64) -> bool {
+        const NAMESPACE_MASK: u64 = 0xFFFF_u64 << 48;
+        session_id != 0 && (session_id & NAMESPACE_MASK) != self.session_id_worker_hi
+    }
+
     /// #9412: the live entry's close class on the HA wire (`0` if open or
     /// absent), for the Open deltas that re-announce an existing session.
     pub(crate) fn close_class_wire_for(&self, key: &SessionKey) -> u8 {
@@ -2217,7 +2228,19 @@ impl SessionTable {
         let Some(forward) = self.entry_by_key(&forward_key) else {
             return;
         };
-        if forward.metadata.is_reverse || forward.origin.is_peer_synced() {
+        if forward.metadata.is_reverse {
+            return;
+        }
+        // #9582: a worker REPLICA of a session this node owns (`WorkerLocalImport`)
+        // announces too, because a close it alone sees (the server's FIN or RST on
+        // another RSS queue) reaches no other worker. It announces only with the
+        // installer's CARRIED id: announcing with an id this worker minted would hand
+        // the #9412 sender memo a foreign id, which drops the installer's record and
+        // lets the next sweep resend class 0. Peer imports stay silent.
+        if forward.origin.is_peer_synced()
+            && !(forward.origin == SessionOrigin::WorkerLocalImport
+                && self.session_id_carried_from_another_worker(forward.session_id))
+        {
             return;
         }
         // The metadata clone bumps the bound policy-counter Arc (#5445). That is
@@ -3329,6 +3352,11 @@ mod tcp_flags_zero_on_sync_path_9412_tests;
 #[cfg(test)]
 #[path = "close_state_sync_9412_acceptance_tests.rs"]
 mod close_state_sync_9412_acceptance_tests;
+// #9582: a close seen only by a worker replica of a local session is announced, with
+// the installer's id. Written before the fix.
+#[cfg(test)]
+#[path = "replica_close_announce_9582_tests.rs"]
+mod replica_close_announce_9582_tests;
 
 // #7212: the static input-filter revalidation stamp lifecycle. Its own file
 // rather than another block in the 8k-line `tests.rs`, per the modularity rule

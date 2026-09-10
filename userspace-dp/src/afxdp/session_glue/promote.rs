@@ -128,11 +128,11 @@ pub(in crate::afxdp::session_glue) fn maybe_promote_synced_session(
             tcp_flags,
             // Local shared-promote: no peer install generation (#2170).
             generation: 0,
-            // #5212: promote re-publishes an entry already live in the table;
-            // its stable id is preserved on the entry itself (the promote Open
-            // delta reads it via `entry_by_key`), so this shared replica needs
-            // no id (0 = "alloc a fresh local id" on any re-import).
-            session_id: 0,
+            // #9582: carry the promoted session's stable id (preserved on the live
+            // entry, #5212), so replicas and shared-map materializations ADOPT it.
+            // With 0 each re-import minted its own id, and a replica could not
+            // announce a close under the id the peer and the #9412 memo know.
+            session_id: sessions.session_id_for(key),
             // #9412: republish the promoted session with its LIVE close class, so
             // a worker materializing it from the shared maps keeps the close state.
             tcp_close_class: sessions.close_class_wire_for(key),

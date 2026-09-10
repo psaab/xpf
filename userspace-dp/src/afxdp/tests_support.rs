@@ -1196,6 +1196,57 @@ pub(super) fn txn_run_descriptor_with_deliveries(
     meta: UserspaceDpMeta,
     local_tunnel_deliveries: &Arc<ArcSwap<BTreeMap<i32, LocalTunnelDelivery>>>,
 ) -> (BatchCounters, DebugPollCounters) {
+    let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+    txn_run_descriptor_inner(
+        binding,
+        sessions,
+        forwarding,
+        ha_state,
+        frame,
+        meta,
+        local_tunnel_deliveries,
+        &shared_sessions,
+    )
+}
+
+/// `txn_run_descriptor`, also returning every entry the run published into the
+/// shared session map (#9582).
+pub(super) fn txn_run_descriptor_capturing_shared(
+    binding: &mut BindingWorker,
+    sessions: &mut SessionTable,
+    forwarding: &ForwardingState,
+    ha_state: &BTreeMap<i32, HAGroupRuntime>,
+    frame: &[u8],
+    meta: UserspaceDpMeta,
+) -> (BatchCounters, DebugPollCounters, Vec<SyncedSessionEntry>) {
+    let local_tunnel_deliveries = Arc::new(ArcSwap::from_pointee(BTreeMap::new()));
+    let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let (batch, dbg) = txn_run_descriptor_inner(
+        binding,
+        sessions,
+        forwarding,
+        ha_state,
+        frame,
+        meta,
+        &local_tunnel_deliveries,
+        &shared_sessions,
+    );
+    let published = shared_sessions.lock().expect("shared sessions").values().cloned().collect();
+    (batch, dbg, published)
+}
+
+/// The descriptor driver itself. The shared session map is a PARAMETER so a pin can
+/// read what a local install published into it (#9582: the replicated id).
+pub(super) fn txn_run_descriptor_inner(
+    binding: &mut BindingWorker,
+    sessions: &mut SessionTable,
+    forwarding: &ForwardingState,
+    ha_state: &BTreeMap<i32, HAGroupRuntime>,
+    frame: &[u8],
+    meta: UserspaceDpMeta,
+    local_tunnel_deliveries: &Arc<ArcSwap<BTreeMap<i32, LocalTunnelDelivery>>>,
+    shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+) -> (BatchCounters, DebugPollCounters) {
     let meta_len = std::mem::size_of::<UserspaceDpMeta>();
     let frame_offset = 128;
     let meta_offset = frame_offset - meta_len;
@@ -1226,7 +1277,6 @@ pub(super) fn txn_run_descriptor_with_deliveries(
     let binding_lookup = WorkerBindingLookup::from_bindings(std::slice::from_ref(binding));
     let mirror_targets = MirrorTargetMap::default();
     let dynamic_neighbors = Arc::new(ShardedNeighborMap::default());
-    let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
@@ -1246,7 +1296,7 @@ pub(super) fn txn_run_descriptor_with_deliveries(
         ha_state,
         dynamic_neighbors: &dynamic_neighbors,
         neighbor_resolver: None,
-        shared_sessions: &shared_sessions,
+        shared_sessions,
         shared_nat_sessions: &shared_nat_sessions,
         shared_forward_wire_sessions: &shared_forward_wire_sessions,
         shared_owner_rg_indexes: &shared_owner_rg_indexes,

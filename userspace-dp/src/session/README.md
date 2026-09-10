@@ -1381,15 +1381,31 @@ A TCP session that closed on the node that owns it used to stay OPEN on the peer
   - The Go sender never resends a lower class for the same incarnation. The sweep
     and bulk resends come from the BPF mirror, whose row carries `0`. See
     `docs/session-sync-architecture.md`, "TCP Close Class".
-- **Bound (#9582).** Only the worker that installed a session announces its
-  transitions. A worker replica (`WorkerLocalImport`, excluded by
-  `is_peer_synced()`) mints its own `session_id`, so an Update from it would flip
-  the peer's adopted id (#5212).
-  - A close that only a replica sees is not announced. That is typically the
-    server's FIN or RST, arriving on the other interface's RSS queue.
-  - The client's FIN reaches the installer, so CLOSING is announced.
-  - TIME_WAIT shares CLOSING's 30 s default window.
-  - A server-only RST stays on the established window.
+- **Replicas announce too (#9582).** A close that only a worker replica sees,
+  typically the server's FIN or RST on the other interface's RSS queue, reaches the
+  peer.
+  - **Replicas share the installer's id.** The local shared publishes (the transit
+    ForwardFlow install, the missing-neighbor seed and the promote republish) stamp
+    `session_id_for(key)`. `synced_replica_entry` clones it, and
+    `upsert_synced_with_origin` ADOPTS a non-zero id, so every worker's copy carries
+    the installer's id. That is the id the Open delta, the conntrack mirror row
+    (written only on install) and the #9412 sender memo use.
+  - **Who may announce.** `emit_close_state_update` lets a `WorkerLocalImport`
+    replica announce only when `session_id_carried_from_another_worker` holds: a
+    non-zero id whose high 16 bits differ from this table's own namespace
+    (`alloc_session_id` stamps `(node_bit << 15 | worker_id) << 48`).
+    - A replica holding an id minted HERE stays silent. Announcing it would hand the
+      #9412 memo a foreign id, which drops the installer's record, and the next
+      sweep would resend class 0.
+    - Peer imports (`SyncImport`, `SharedMaterialize`) never announce.
+  - **Bounds that remain.**
+    - Several workers may announce the same class for one session. The memo is
+      monotone per (tuple, id), and the peer import is idempotent.
+    - TIME_WAIT needs both FIN bits on ONE worker's entry. With the directions on
+      different queues, each worker announces CLOSING, which shares TIME_WAIT's
+      30 s default window.
+    - A replica announcing a lower class than the installer sent is raised back by
+      the memo for the same id.
 
 Every hop is length-gated or `serde(default)`, so an old peer sends and reads `0`,
 which is today's behaviour. Acceptance lives in
