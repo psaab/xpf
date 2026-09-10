@@ -665,6 +665,14 @@ pub(crate) fn worker_loop(
                 );
             let purge_input_dscp_v4 = dscp_changed_v4 || per_packet_changed_v4;
             let purge_input_dscp_v6 = dscp_changed_v6 || per_packet_changed_v6;
+            // #9526: compare BEFORE assignment. The Go commit sweep cannot clear
+            // the literal first policy's sessions (policy_id 0 is overloaded on
+            // the wire), so when this rotation removes the old snapshot's
+            // policy_id-0 rule, the sessions bound to it are purged below.
+            // Worker-local old vs new, like the cold-path slot compare: a worker
+            // that skipped intermediate generations still sees the rule vanish.
+            let deleted_first_policy =
+                deleted_first_policy_rule_id(&forwarding.policy, &new_forwarding.policy);
 
             // Use NEW values for dependent state updates (forwarding-site
             // ordering — old `forwarding` is stale once rotated).
@@ -750,6 +758,32 @@ pub(crate) fn worker_loop(
                     worker_id,
                     purged_input_dscp,
                 );
+            }
+            if let Some(rule_id) = deleted_first_policy.as_deref() {
+                let purged_first_policy = purge_sessions_bound_to_deleted_first_policy(
+                    &mut sessions,
+                    session_map_fd,
+                    conntrack_v4_fd,
+                    conntrack_v6_fd,
+                    &shared_sessions,
+                    &shared_nat_sessions,
+                    &shared_forward_wire_sessions,
+                    &shared_owner_rg_indexes,
+                    &peer_worker_commands,
+                    &worker_commands_by_id,
+                    &forwarding,
+                    rule_id,
+                    loop_now_ns,
+                    worker_id,
+                );
+                if purged_first_policy > 0 {
+                    debug_log!(
+                        "DELETED_FIRST_POLICY_PURGE: worker={} rule={} sessions={}",
+                        worker_id,
+                        rule_id,
+                        purged_first_policy,
+                    );
+                }
             }
             let republished = republish_local_delivery_sessions_for_lo0_filter(
                 &sessions,

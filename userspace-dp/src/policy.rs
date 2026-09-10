@@ -1805,6 +1805,37 @@ impl PolicyState {
         }
     }
 
+    /// #9526: the stable `rule_id` of the literal FIRST policy in this snapshot
+    /// (the one rule holding positional `policy_id` 0), or `None` when no rule
+    /// holds it or more than one does. Several rules at 0 is the all-zero shape
+    /// of a snapshot whose producer never assigned ids (the pre-#3056 shape
+    /// `DuplicatePolicyId` M01 tolerates), which names no first policy.
+    ///
+    /// The Go commit sweep cannot clear this policy's sessions: wire value 0 is
+    /// also what host-local, neighbor-seed, fabric, tunnel and older-peer
+    /// sessions carry, so `deletedPolicyRuntimeIDs` excludes it
+    /// (pkg/daemon/daemon_policy_invalidate.go). The helper can, because a
+    /// session this rule admitted binds the rule's counter handle and those
+    /// sessions bind none (see `reresolve_session_policy_id`).
+    pub(crate) fn first_policy_rule_id(&self) -> Option<&str> {
+        let mut first = None;
+        for rule in &self.rules {
+            if rule.policy_id == 0 {
+                if first.is_some() {
+                    return None;
+                }
+                first = Some(rule.rule_id.as_str());
+            }
+        }
+        first
+    }
+
+    /// #9526: whether this snapshot still contains the rule with stable id
+    /// `rule_id`.
+    pub(crate) fn has_rule_id(&self, rule_id: &str) -> bool {
+        self.rules.iter().any(|rule| rule.rule_id == rule_id)
+    }
+
     /// #1635/#3783: the set of concrete `(from_zone_id, to_zone_id)` pairs the
     /// configured policy can distinguish, used to build the cold-path
     /// histogram's direct slot map. The recording site
