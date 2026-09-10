@@ -101,7 +101,10 @@ func TestBatchDeleteV4RetriesTailAfterMissingKey(t *testing.T) {
 	}
 	store := dataPlaneSessionStore{dp: dp}
 
-	deleted, err := store.batchDeleteV4(keys)
+	// #9364: batchDeleteV4 now takes scoped keys. Domain 0 throughout, which is
+	// exactly the bare/default case this cell has always exercised — the #5448
+	// retry contract is orthogonal to the domain and must stay so.
+	deleted, err := store.batchDeleteV4(scopedV4(keys))
 	if err != nil {
 		t.Fatalf("batchDeleteV4 returned error: %v", err)
 	}
@@ -148,7 +151,7 @@ func TestBatchDeleteV6RetriesTailAfterMissingKey(t *testing.T) {
 	}
 	store := dataPlaneSessionStore{dp: dp}
 
-	deleted, err := store.batchDeleteV6(keys)
+	deleted, err := store.batchDeleteV6(scopedV6(keys))
 	if err != nil {
 		t.Fatalf("batchDeleteV6 returned error: %v", err)
 	}
@@ -172,7 +175,7 @@ func TestBatchDeleteV4PropagatesRealError(t *testing.T) {
 	realErr := errors.New("map delete failed")
 	dp := &batchDeleteErrDP{err: realErr}
 	store := dataPlaneSessionStore{dp: dp}
-	_, err := store.batchDeleteV4([]SessionKey{{Protocol: 6, SrcPort: 1}})
+	_, err := store.batchDeleteV4([]ScopedSessionKey{{Key: SessionKey{Protocol: 6, SrcPort: 1}}})
 	if !errors.Is(err, realErr) {
 		t.Fatalf("batchDeleteV4 error = %v, want %v", err, realErr)
 	}
@@ -189,4 +192,23 @@ func (m *batchDeleteErrDP) BatchDeleteSessions(keys []SessionKey) (int, error) {
 
 func (m *batchDeleteErrDP) BatchDeleteSessionsV6(keys []SessionKeyV6) (int, error) {
 	return 0, m.err
+}
+
+// scopedV4 / scopedV6 lift bare keys onto the #9364 scoped signature with domain
+// 0. Helpers rather than inline literals so this cell keeps reading as a
+// statement about the RETRY contract, which is what it is for.
+func scopedV4(keys []SessionKey) []ScopedSessionKey {
+	out := make([]ScopedSessionKey, 0, len(keys))
+	for _, k := range keys {
+		out = append(out, ScopedSessionKey{Key: k})
+	}
+	return out
+}
+
+func scopedV6(keys []SessionKeyV6) []ScopedSessionKeyV6 {
+	out := make([]ScopedSessionKeyV6, 0, len(keys))
+	for _, k := range keys {
+		out = append(out, ScopedSessionKeyV6{Key: k})
+	}
+	return out
 }

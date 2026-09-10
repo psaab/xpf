@@ -314,6 +314,18 @@ func deleteScopeVal(routingDomain uint32) *dataplane.SessionValue {
 	return &dataplane.SessionValue{RoutingDomain: routingDomain}
 }
 
+// deleteScopeValV6 is the IPv6 analogue of deleteScopeVal (#9146/#9364).
+//
+// #9146 wrote its V6 scope inline in syncDeleteV6Locked; #9364 needs the same
+// derivation from a second call site, and two copies of "nil at 0, else a
+// domain-only value" is the drift the one-formula rule exists to prevent.
+func deleteScopeValV6(routingDomain uint32) *dataplane.SessionValueV6 {
+	if routingDomain == 0 {
+		return nil
+	}
+	return &dataplane.SessionValueV6{RoutingDomain: routingDomain}
+}
+
 func (m *Manager) DeleteSession(key dataplane.SessionKey) error {
 	// Look up the session value BEFORE deleting from the BPF map so we
 	// can retrieve the ReverseKey for the pre-installed companion (#351).
@@ -387,8 +399,8 @@ func (m *Manager) DeleteSessionV6(key dataplane.SessionKeyV6) error {
 // syncDeleteV6Locked is the IPv6 analogue of syncDeleteV4Locked (#9146).
 func (m *Manager) syncDeleteV6Locked(key dataplane.SessionKeyV6, val dataplane.SessionValueV6, haveVal bool) {
 	scope := (*dataplane.SessionValueV6)(nil)
-	if haveVal && val.RoutingDomain != 0 {
-		scope = &dataplane.SessionValueV6{RoutingDomain: val.RoutingDomain}
+	if haveVal {
+		scope = deleteScopeValV6(val.RoutingDomain)
 	}
 	_ = m.syncSessionV6Locked("delete", key, scope)
 	if haveVal && val.ReverseKey.Protocol != 0 {
@@ -432,6 +444,45 @@ func (m *Manager) BatchDeleteSessions(keys []dataplane.SessionKey) (int, error) 
 	// instead (ClearAllSessions, #5881).
 	_ = m.deleteHelperSessionsV4(keys)
 	return deleted, err
+}
+
+// BatchDeleteSessionsScoped is the #9364 domain-carrying batch delete.
+//
+// The BPF mirror has no domain axis (#7160), so it takes the bare keys exactly as
+// before; the domain matters only on the HELPER wire, where a bare 5-tuple is
+// resolved by probing every routing instance and REFUSED when two tenants match
+// (#8636). This is the highest-volume delete path on a running box — the
+// conntrack GC retires sessions through it continuously — so it was the half of
+// #9146 that mattered more and the half that was left bare.
+func (m *Manager) BatchDeleteSessionsScoped(scoped []dataplane.ScopedSessionKey) (int, error) {
+	deleted, err := m.bpfShim.BatchDeleteSessions(bareKeysV4(scoped))
+	// Same best-effort contract as BatchDeleteSessions below: attempt the helper
+	// delete regardless of the mirror result, and discard the helper IPC error.
+	_ = m.deleteHelperSessionsScopedV4(scoped)
+	return deleted, err
+}
+
+// BatchDeleteSessionsScopedV6 is the IPv6 analogue (#9364).
+func (m *Manager) BatchDeleteSessionsScopedV6(scoped []dataplane.ScopedSessionKeyV6) (int, error) {
+	deleted, err := m.bpfShim.BatchDeleteSessionsV6(bareKeysV6(scoped))
+	_ = m.deleteHelperSessionsScopedV6(scoped)
+	return deleted, err
+}
+
+func bareKeysV4(scoped []dataplane.ScopedSessionKey) []dataplane.SessionKey {
+	keys := make([]dataplane.SessionKey, 0, len(scoped))
+	for _, sk := range scoped {
+		keys = append(keys, sk.Key)
+	}
+	return keys
+}
+
+func bareKeysV6(scoped []dataplane.ScopedSessionKeyV6) []dataplane.SessionKeyV6 {
+	keys := make([]dataplane.SessionKeyV6, 0, len(scoped))
+	for _, sk := range scoped {
+		keys = append(keys, sk.Key)
+	}
+	return keys
 }
 
 // BatchDeleteSessionsV6 is the IPv6 analogue of BatchDeleteSessions (#5096).
@@ -536,6 +587,20 @@ func (m *Manager) ClearAllSessions() (int, int, error) {
 // discard it; ClearAllSessions propagates it so a failed authoritative
 // revocation is reported rather than reported as success (#5881).
 func (m *Manager) deleteHelperSessionsV4(keys []dataplane.SessionKey) error {
+	// #9364: the BARE form, kept for the callers that genuinely have no value —
+	// ClearAllSessions, which is exactly the caller #8636's ambiguous-delete
+	// refusal was designed for. It maps onto the scoped implementation with
+	// domain 0 rather than duplicating the chunking, so the #5380 fast-fail and
+	// the #5448 contract cannot drift between the two forms.
+	scoped := make([]dataplane.ScopedSessionKey, 0, len(keys))
+	for _, k := range keys {
+		scoped = append(scoped, dataplane.ScopedSessionKey{Key: k})
+	}
+	return m.deleteHelperSessionsScopedV4(scoped)
+}
+
+// deleteHelperSessionsScopedV4 is the #9364 domain-carrying helper delete.
+func (m *Manager) deleteHelperSessionsScopedV4(keys []dataplane.ScopedSessionKey) error {
 	if len(keys) == 0 {
 		return nil
 	}
@@ -552,7 +617,12 @@ func (m *Manager) deleteHelperSessionsV4(keys []dataplane.SessionKey) error {
 		}
 		reqs := make([]SessionSyncRequest, 0, end-start)
 		for i := start; i < end; i++ {
-			reqs = append(reqs, m.buildSessionSyncRequestV4("delete", keys[i], nil))
+			// #9364: name the domain the row was installed under, so the
+			// helper does not have to probe for it and cannot refuse the delete
+			// as ambiguous. deleteScopeVal returns nil at domain 0, which is the
+			// pre-#9364 bare request, bit-identical.
+			reqs = append(reqs, m.buildSessionSyncRequestV4(
+				"delete", keys[i].Key, deleteScopeVal(keys[i].RoutingDomain)))
 		}
 		if err := m.syncSessionRequestsLocked(reqs...); err != nil {
 			if firstErr == nil {
@@ -571,6 +641,17 @@ func (m *Manager) deleteHelperSessionsV4(keys []dataplane.SessionKey) error {
 
 // deleteHelperSessionsV6 is the IPv6 analogue of deleteHelperSessionsV4 (#5096).
 func (m *Manager) deleteHelperSessionsV6(keys []dataplane.SessionKeyV6) error {
+	// #9364: the BARE form — see deleteHelperSessionsV4.
+	scoped := make([]dataplane.ScopedSessionKeyV6, 0, len(keys))
+	for _, k := range keys {
+		scoped = append(scoped, dataplane.ScopedSessionKeyV6{Key: k})
+	}
+	return m.deleteHelperSessionsScopedV6(scoped)
+}
+
+// deleteHelperSessionsScopedV6 is the IPv6 analogue of
+// deleteHelperSessionsScopedV4 (#9364).
+func (m *Manager) deleteHelperSessionsScopedV6(keys []dataplane.ScopedSessionKeyV6) error {
 	if len(keys) == 0 {
 		return nil
 	}
@@ -587,7 +668,9 @@ func (m *Manager) deleteHelperSessionsV6(keys []dataplane.SessionKeyV6) error {
 		}
 		reqs := make([]SessionSyncRequest, 0, end-start)
 		for i := start; i < end; i++ {
-			reqs = append(reqs, m.buildSessionSyncRequestV6("delete", keys[i], nil))
+			// #9364: name the domain — see the V4 twin.
+			reqs = append(reqs, m.buildSessionSyncRequestV6(
+				"delete", keys[i].Key, deleteScopeValV6(keys[i].RoutingDomain)))
 		}
 		if err := m.syncSessionRequestsLocked(reqs...); err != nil {
 			if firstErr == nil {

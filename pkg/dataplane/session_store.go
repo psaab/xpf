@@ -87,6 +87,78 @@ type ClusterBulkReconcileResult struct {
 	DeletedV6 int
 }
 
+// ScopedSessionKey is a session key plus the ROUTING DOMAIN the row was
+// installed under (#9364). It exists because `SessionKey` deliberately has no
+// domain axis (#7160), so a batch delete that carries only keys has already lost
+// the one thing the helper needs to make the delete land.
+//
+// A bare delete reaches the helper as `routing_domain = 0`, which it reads as
+// WIRE_ABSENT and resolves by PROBING every routing instance for the 5-tuple.
+// When two tenants hold that tuple the probe is ambiguous and the helper REFUSES
+// (#8636). #9146 fixed the SINGULAR delete this way; the batch path — which is
+// the one that retires sessions continuously, from the conntrack GC — still
+// stripped the value.
+//
+// `RoutingDomain == 0` means "no domain to name", which is both the default
+// instance and "the caller had no value". Both want the pre-#9364 bare delete, so
+// one value serves both and no reserved sentinel is needed.
+type ScopedSessionKey struct {
+	Key           SessionKey
+	RoutingDomain uint32
+}
+
+// ScopedSessionKeyV6 is the IPv6 analogue of ScopedSessionKey (#9364).
+type ScopedSessionKeyV6 struct {
+	Key           SessionKeyV6
+	RoutingDomain uint32
+}
+
+// sessionDomainBatchDeleter is the #9364 optional capability: a dataplane that
+// can carry a routing domain on each key of a BATCH delete.
+//
+// !! THIS PLUMBING IS CURRENTLY INERT ON THE REAL PATH (#9546). !!
+//
+// It carries whatever domain it is GIVEN, correctly — but every production caller
+// of `DeleteBatchKnownV4/V6` sources its `SessionEntry` values from
+// `store.ForEachV4`, i.e. `dp.BatchIterateSessions`, i.e. a BatchLookup over the
+// BPF session mirror. The BPF `session_value` ABI has NO routing-domain field, so
+// those values always carry 0. Measured, with a positive control in the same
+// probe: `RoutingDomain 100007 -> 0` while `TCPState 3 -> 3` and
+// `Timeout 300 -> 300` survive
+// (`routing_domain_mirror_inert_9364_test.go`).
+//
+// The same is true of #9146's singular delete, whose own acceptance cell has been
+// FAILING on master since it landed — it writes real BPF maps, so it SKIPS
+// without CAP_BPF and nobody saw it (#9337).
+//
+// So this is a prerequisite, not the fix: it is what a real remedy for #9546
+// plugs into. Do not read the #9364 cells as evidence the GC's deletes name a
+// domain today — they prove that a domain SUPPLIED here reaches the wire, which
+// is a different claim.
+//
+// The house pattern, matching clusterSyncedSessionInstaller below: a narrow
+// interface resolved by type assertion, implemented only by the userspace
+// dataplane, with the existing key-only `BatchDeleteSessions` as the fallback for
+// anything that does not implement it. That keeps the wide `DataPlane` interface
+// unchanged and leaves `ClearAllSessions` — which has no values by construction
+// and is exactly the caller #8636's refusal was designed for — sending bare
+// deletes.
+//
+// THE SEAM THIS CREATES IS THE ONE #9482 WAS ABOUT, so it is bolted shut at
+// compile time in scoped_batch_delete_published_9364.go rather than left to a
+// runtime assertion. #9344 moved a daemon-side interface to a new method and did
+// not add it to `*LegacyDataPlaneAdapter` — the type the userspace backend
+// actually publishes, and the type this store is constructed with
+// (`NewDataPlaneSessionStore(NewLegacyDataPlaneAdapter(m))`). The assertion then
+// failed silently on the only type it was ever handed and the HA cold prime never
+// ran. An optional interface whose miss is a silent downgrade to the OLD
+// behaviour has exactly that failure mode: the fix would be inert and every test
+// that supplies its own double would still pass.
+type sessionDomainBatchDeleter interface {
+	BatchDeleteSessionsScoped([]ScopedSessionKey) (int, error)
+	BatchDeleteSessionsScopedV6([]ScopedSessionKeyV6) (int, error)
+}
+
 type clusterSyncedSessionInstaller interface {
 	SetClusterSyncedSessionV4(SessionKey, SessionValue) error
 	SetClusterSyncedSessionV6(SessionKeyV6, SessionValueV6) error
@@ -417,7 +489,7 @@ func (s dataPlaneSessionStore) DeleteBatchKnownV4(entries []SessionEntryV4, _ De
 		return 0, nil
 	}
 
-	reverseKeys := make([]SessionKey, 0, len(entries))
+	reverseKeys := make([]ScopedSessionKey, 0, len(entries))
 	for _, entry := range entries {
 		val := entry.Value
 		s.preservePersistentNATV4(entry.Key, val)
@@ -427,7 +499,13 @@ func (s dataPlaneSessionStore) DeleteBatchKnownV4(entries []SessionEntryV4, _ De
 			}
 		}
 		if val.ReverseKey.Protocol != 0 {
-			reverseKeys = append(reverseKeys, val.ReverseKey)
+			// #9364: the reverse companion is the SAME flow in the SAME tenant,
+			// so it carries the same domain — the identical derivation #9146's
+			// syncDeleteV4Locked uses for the singular path.
+			reverseKeys = append(reverseKeys, ScopedSessionKey{
+				Key:           val.ReverseKey,
+				RoutingDomain: val.RoutingDomain,
+			})
 		}
 	}
 
@@ -435,9 +513,12 @@ func (s dataPlaneSessionStore) DeleteBatchKnownV4(entries []SessionEntryV4, _ De
 		return 0, err
 	}
 
-	forwardKeys := make([]SessionKey, 0, len(entries))
+	forwardKeys := make([]ScopedSessionKey, 0, len(entries))
 	for _, entry := range entries {
-		forwardKeys = append(forwardKeys, entry.Key)
+		forwardKeys = append(forwardKeys, ScopedSessionKey{
+			Key:           entry.Key,
+			RoutingDomain: entry.Value.RoutingDomain,
+		})
 	}
 	deleted, err := s.batchDeleteV4(forwardKeys)
 	if err != nil {
@@ -454,7 +535,7 @@ func (s dataPlaneSessionStore) DeleteBatchKnownV6(entries []SessionEntryV6, _ De
 		return 0, nil
 	}
 
-	reverseKeys := make([]SessionKeyV6, 0, len(entries))
+	reverseKeys := make([]ScopedSessionKeyV6, 0, len(entries))
 	for _, entry := range entries {
 		val := entry.Value
 		s.preservePersistentNATV6(entry.Key, val)
@@ -464,7 +545,11 @@ func (s dataPlaneSessionStore) DeleteBatchKnownV6(entries []SessionEntryV6, _ De
 			}
 		}
 		if val.ReverseKey.Protocol != 0 {
-			reverseKeys = append(reverseKeys, val.ReverseKey)
+			// #9364: same tenant as its forward half — see the V4 twin.
+			reverseKeys = append(reverseKeys, ScopedSessionKeyV6{
+				Key:           val.ReverseKey,
+				RoutingDomain: val.RoutingDomain,
+			})
 		}
 	}
 
@@ -472,9 +557,12 @@ func (s dataPlaneSessionStore) DeleteBatchKnownV6(entries []SessionEntryV6, _ De
 		return 0, err
 	}
 
-	forwardKeys := make([]SessionKeyV6, 0, len(entries))
+	forwardKeys := make([]ScopedSessionKeyV6, 0, len(entries))
 	for _, entry := range entries {
-		forwardKeys = append(forwardKeys, entry.Key)
+		forwardKeys = append(forwardKeys, ScopedSessionKeyV6{
+			Key:           entry.Key,
+			RoutingDomain: entry.Value.RoutingDomain,
+		})
 	}
 	deleted, err := s.batchDeleteV6(forwardKeys)
 	if err != nil {
@@ -491,7 +579,7 @@ func (s dataPlaneSessionStore) DeleteBatchKnownV6(entries []SessionEntryV6, _ De
 // not-found error, retry the chunk remainder one key at a time before
 // advancing, so the unattempted tail is not silently dropped (#5448) — a
 // dropped tail leaks stale peer-synced sessions after HA bulk reconcile.
-func (s dataPlaneSessionStore) batchDeleteV4(keys []SessionKey) (int, error) {
+func (s dataPlaneSessionStore) batchDeleteV4(keys []ScopedSessionKey) (int, error) {
 	deleted := 0
 	for len(keys) > 0 {
 		n := sessionDeleteBatchSize
@@ -499,7 +587,7 @@ func (s dataPlaneSessionStore) batchDeleteV4(keys []SessionKey) (int, error) {
 			n = len(keys)
 		}
 		chunk := keys[:n]
-		chunkDeleted, err := s.dp.BatchDeleteSessions(chunk)
+		chunkDeleted, err := s.batchDeleteChunkV4(chunk)
 		if chunkDeleted < 0 {
 			chunkDeleted = 0
 		} else if chunkDeleted > len(chunk) {
@@ -513,8 +601,13 @@ func (s dataPlaneSessionStore) batchDeleteV4(keys []SessionKey) (int, error) {
 			// Batch stopped at the first missing key (index chunkDeleted):
 			// that key is already gone, but chunk[chunkDeleted+1:] were never
 			// attempted. Finish the remainder per-key so nothing is dropped.
-			for _, k := range chunk[chunkDeleted:] {
-				if delErr := s.dp.DeleteSession(k); delErr == nil {
+			// #9364: the per-key retry is UNCHANGED and is already
+			// domain-correct. `DeleteSession` on the userspace manager fetches
+			// the row's own value and names its domain (#9146), so re-scoping it
+			// here would be redundant, and passing a scope it did not ask for
+			// would be a second derivation of the same fact.
+			for _, sk := range chunk[chunkDeleted:] {
+				if delErr := s.dp.DeleteSession(sk.Key); delErr == nil {
 					deleted++
 				}
 			}
@@ -525,7 +618,7 @@ func (s dataPlaneSessionStore) batchDeleteV4(keys []SessionKey) (int, error) {
 }
 
 // batchDeleteV6 is the IPv6 variant of batchDeleteV4 (#5448).
-func (s dataPlaneSessionStore) batchDeleteV6(keys []SessionKeyV6) (int, error) {
+func (s dataPlaneSessionStore) batchDeleteV6(keys []ScopedSessionKeyV6) (int, error) {
 	deleted := 0
 	for len(keys) > 0 {
 		n := sessionDeleteBatchSize
@@ -533,7 +626,7 @@ func (s dataPlaneSessionStore) batchDeleteV6(keys []SessionKeyV6) (int, error) {
 			n = len(keys)
 		}
 		chunk := keys[:n]
-		chunkDeleted, err := s.dp.BatchDeleteSessionsV6(chunk)
+		chunkDeleted, err := s.batchDeleteChunkV6(chunk)
 		if chunkDeleted < 0 {
 			chunkDeleted = 0
 		} else if chunkDeleted > len(chunk) {
@@ -544,8 +637,9 @@ func (s dataPlaneSessionStore) batchDeleteV6(keys []SessionKeyV6) (int, error) {
 			if !sessionNotFound(err) {
 				return deleted, err
 			}
-			for _, k := range chunk[chunkDeleted:] {
-				if delErr := s.dp.DeleteSessionV6(k); delErr == nil {
+			// #9364: unchanged, and already domain-correct — see the V4 twin.
+			for _, sk := range chunk[chunkDeleted:] {
+				if delErr := s.dp.DeleteSessionV6(sk.Key); delErr == nil {
 					deleted++
 				}
 			}
@@ -553,6 +647,47 @@ func (s dataPlaneSessionStore) batchDeleteV6(keys []SessionKeyV6) (int, error) {
 		keys = keys[n:]
 	}
 	return deleted, nil
+}
+
+// batchDeleteChunkV4 issues ONE chunk of v4 deletes, preferring the #9364 scoped
+// capability and falling back to the key-only call.
+//
+// Extracted rather than inlined so the CHOICE is drivable by a cell: the callers
+// above read and write real BPF maps, so a cell for them skips wherever CAP_BPF
+// is unavailable — and a skipping cell scores every mutation as SURVIVED, which
+// is the reading that argues for deleting a guard doing its job. #9146 split
+// `syncDeleteV4Locked` out of `DeleteSession` for the same reason.
+func (s dataPlaneSessionStore) batchDeleteChunkV4(chunk []ScopedSessionKey) (int, error) {
+	if scoped, ok := s.dp.(sessionDomainBatchDeleter); ok {
+		return scoped.BatchDeleteSessionsScoped(chunk)
+	}
+	return s.dp.BatchDeleteSessions(bareSessionKeys(chunk))
+}
+
+// batchDeleteChunkV6 is the IPv6 analogue of batchDeleteChunkV4 (#9364).
+func (s dataPlaneSessionStore) batchDeleteChunkV6(chunk []ScopedSessionKeyV6) (int, error) {
+	if scoped, ok := s.dp.(sessionDomainBatchDeleter); ok {
+		return scoped.BatchDeleteSessionsScopedV6(chunk)
+	}
+	return s.dp.BatchDeleteSessionsV6(bareSessionKeysV6(chunk))
+}
+
+// bareSessionKeys strips the domain for a dataplane that cannot carry one.
+func bareSessionKeys(scoped []ScopedSessionKey) []SessionKey {
+	keys := make([]SessionKey, 0, len(scoped))
+	for _, sk := range scoped {
+		keys = append(keys, sk.Key)
+	}
+	return keys
+}
+
+// bareSessionKeysV6 is the IPv6 analogue of bareSessionKeys (#9364).
+func bareSessionKeysV6(scoped []ScopedSessionKeyV6) []SessionKeyV6 {
+	keys := make([]SessionKeyV6, 0, len(scoped))
+	for _, sk := range scoped {
+		keys = append(keys, sk.Key)
+	}
+	return keys
 }
 
 func (s dataPlaneSessionStore) DeleteWithCompanionsV4(key SessionKey, reason DeleteReason) error {
