@@ -51,6 +51,7 @@ pub(in crate::afxdp) mod reject_reply;
 mod resolver_enqueue;
 mod rx_telemetry;
 mod session_admission;
+mod session_hit_authority;
 
 use debug_log_throttle::{policy_deny_debug_log_allowed, session_miss_debug_log_allowed};
 use embedded_icmp::{EmbeddedIcmpReversal, try_reverse_embedded_icmp_error};
@@ -72,6 +73,9 @@ use host_inbound_policy::{
 use nat64_icmp_error::try_translate_nat64_icmp_error;
 use rx_telemetry::record_rx_descriptor_telemetry;
 use session_admission::{new_flow_session_limit_drop, strict_syn_check_drops_new_flow};
+use session_hit_authority::{
+    ForeignHitVerdict, HitAuthority, foreign_hit_verdict, session_hit_authority,
+};
 
 use super::poll_stages::{
     FabricIngressOutcome, IpsecPassthroughOutcome, ScreenCheckOutcome, StageOutcome,
@@ -566,6 +570,31 @@ pub(super) fn poll_binding_process_descriptor(
                     ) {
                         telemetry.counters.session_hits += 1;
                         telemetry.dbg.session_hit += 1;
+                        // #9519: may THIS packet act for the session it hit? A
+                        // session belongs to the zone that admitted it. A packet
+                        // from another zone is FOREIGN: it is judged by its own
+                        // zone's policy below and may not revoke, re-stamp,
+                        // tear down or cache the entry — except from the
+                        // session's own admitting interface, which only a commit
+                        // can have moved (#9384). See `session_hit_authority.rs`.
+                        let (foreign_arrival_zone, may_revoke) = match session_hit_authority(
+                            worker_ctx.forwarding,
+                            &resolved.metadata,
+                            resolved.origin,
+                            meta,
+                            packet_fabric_ingress,
+                        ) {
+                            HitAuthority::Owner => (None, true),
+                            HitAuthority::Foreign {
+                                arrival_zone,
+                                on_admitting_interface,
+                            } => (Some(arrival_zone), on_admitting_interface),
+                        };
+                        // The zone the filter and host-inbound consumers below
+                        // judge by: the entry's for an owner, exactly as before
+                        // #9519; the arrival zone for a foreign packet.
+                        let authority_zone =
+                            foreign_arrival_zone.unwrap_or(resolved.metadata.ingress_zone);
                         // #3073: re-count this established-session packet against
                         // the admitting policy's hit counter. The cold path
                         // counts the first packet in `try_match_rule`; this
@@ -629,8 +658,11 @@ pub(super) fn poll_binding_process_descriptor(
                                 .bound_policy_counter_for(&flow.forward_key)
                                 .cloned(),
                         };
+                        // #9519: a foreign packet is not the admitting rule's
+                        // traffic, whatever its own zone decides below.
                         if resolved.decision.resolution.disposition
                             != ForwardingDisposition::LocalDelivery
+                            && foreign_arrival_zone.is_none()
                         {
                             if let Some(counter) =
                                 worker_ctx.forwarding.policy.resolve_session_hit_counter(
@@ -641,7 +673,12 @@ pub(super) fn poll_binding_process_descriptor(
                                 crate::policy::record_policy_hit_counter(counter, desc.len as u64);
                             }
                         }
-                        flow_cache_install_failed = resolved.install_failed;
+                        // #9519: never seed the flow cache from a FOREIGN packet.
+                        // The cache keys on logical ingress (#5139), so a descriptor
+                        // seeded here would serve that zone's later packets with no
+                        // authority check at all.
+                        flow_cache_install_failed =
+                            resolved.install_failed || foreign_arrival_zone.is_some();
                         if resolved.created {
                             telemetry.counters.session_creates += 1;
                             telemetry.dbg.session_create += 1;
@@ -742,7 +779,7 @@ pub(super) fn poll_binding_process_descriptor(
                             packet_frame,
                             Some(flow),
                             meta,
-                            Some(resolved.metadata.ingress_zone),
+                            Some(authority_zone),
                         ) {
                             let input_filter_eval = input_filter_hit.eval;
                             let input_filter_revoked_key = input_filter_hit.revoked_key;
@@ -789,7 +826,12 @@ pub(super) fn poll_binding_process_descriptor(
                                 );
                             }
                             if input_filter_eval.action != crate::filter::FilterAction::Accept {
-                                if let Some(revoked_key) = input_filter_revoked_key {
+                                // #9519: a FOREIGN packet's filter verdict drops
+                                // that packet; it cannot revoke a session another
+                                // zone admitted.
+                                if let Some(revoked_key) = input_filter_revoked_key
+                                    && may_revoke
+                                {
                                     // #7212: the verdict came from a STATIC
                                     // input-filter revalidation, so the filter
                                     // now denies this FLOW, not merely this
@@ -908,21 +950,49 @@ pub(super) fn poll_binding_process_descriptor(
                         // `policy_revalidation.rs` for the three ways this does
                         // NOT mirror #7212, the reverse-companion trap in
                         // particular.
-                        if let Some(revocation) = revalidate_zone_policy_on_session_hit(
-                            worker_ctx.forwarding,
-                            sessions,
-                            &resolved.key,
-                            &resolved.metadata,
-                            resolved.decision,
-                            Some(flow),
-                            meta,
-                            // #9384: THIS packet's fabric ingress. The from-zone
-                            // is resolved live from the arrival interface, and a
-                            // fabric-punted packet arrives on the fabric link —
-                            // not in the flow's zone — so it keeps the entry's
-                            // recorded zone instead.
-                            packet_fabric_ingress,
-                        ) {
+                        // #9519: only an OWNER re-derives (#8356). A FOREIGN
+                        // packet is judged by the policy of the zone it arrived in,
+                        // and revokes only from the session's own admitting
+                        // interface (#9384). Either way the revocation takes the
+                        // one teardown below.
+                        let zone_policy_revocation = match foreign_arrival_zone {
+                            None => revalidate_zone_policy_on_session_hit(
+                                    worker_ctx.forwarding,
+                                    sessions,
+                                    &resolved.key,
+                                    &resolved.metadata,
+                                    resolved.decision,
+                                    Some(flow),
+                                    meta,
+                                    // #9384: THIS packet's fabric ingress. The from-zone
+                                    // is resolved live from the arrival interface, and a
+                                    // fabric-punted packet arrives on the fabric link —
+                                    // not in the flow's zone — so it keeps the entry's
+                                    // recorded zone instead.
+                                    packet_fabric_ingress,
+                            ),
+                            Some(arrival_zone) => match foreign_hit_verdict(
+                                worker_ctx.forwarding,
+                                sessions,
+                                &resolved.key,
+                                &resolved.metadata,
+                                resolved.decision,
+                                flow,
+                                meta,
+                                packet_frame,
+                                arrival_zone,
+                                may_revoke,
+                            ) {
+                                ForeignHitVerdict::Forward => None,
+                                ForeignHitVerdict::Drop => {
+                                    telemetry.dbg.foreign_authority_drops += 1;
+                                    binding.scratch.scratch_recycle.push(desc.addr);
+                                    continue;
+                                }
+                                ForeignHitVerdict::Revoke(revocation) => Some(revocation),
+                            },
+                        };
+                        if let Some(revocation) = zone_policy_revocation {
                             // The live zone policy denies this FLOW. Same
                             // pair-aware teardown the filter revocation uses
                             // (#5622): forward AND reverse deleted, source-NAT /
@@ -996,7 +1066,7 @@ pub(super) fn poll_binding_process_descriptor(
                             match host_inbound_gated_lo0_action(
                                 worker_ctx.forwarding,
                                 ingress_logical,
-                                resolved.metadata.ingress_zone,
+                                authority_zone,
                                 resolved.key.dst_port,
                                 matches!(flow.dst_ip, IpAddr::V6(_)),
                                 // #3171: first L4 byte = ICMP/ICMPv6 type, so an
@@ -1019,31 +1089,34 @@ pub(super) fn poll_binding_process_descriptor(
                                 ),
                                 flow,
                                 meta,
-                                Some(resolved.metadata.ingress_zone),
+                                Some(authority_zone),
                                 now_ns,
                             ) {
                                 None => {
                                     // Host-inbound denied: silent drop, tear down
                                     // the established host-bound session.
-                                    delete_terminal_filtered_session(
-                                        sessions,
-                                        binding.bpf_maps.session_map_fd,
-                                        conntrack_v4_fd,
-                                        conntrack_v6_fd,
-                                        worker_ctx.shared_sessions,
-                                        worker_ctx.shared_nat_sessions,
-                                        worker_ctx.shared_forward_wire_sessions,
-                                        &worker_ctx.shared_owner_rg_indexes,
-                                        worker_ctx.peer_worker_commands,
-                                        worker_ctx.worker_commands_by_id,
-                                        worker_ctx.forwarding,
-                                        &resolved.key,
-                                        resolved.decision,
-                                        &resolved.metadata,
-                                        resolved.origin,
-                                        now_ns,
-                                        worker_id,
-                                    );
+                                    // #9519: only a packet that may act for the session tears it down.
+                                    if may_revoke {
+                                        delete_terminal_filtered_session(
+                                            sessions,
+                                            binding.bpf_maps.session_map_fd,
+                                            conntrack_v4_fd,
+                                            conntrack_v6_fd,
+                                            worker_ctx.shared_sessions,
+                                            worker_ctx.shared_nat_sessions,
+                                            worker_ctx.shared_forward_wire_sessions,
+                                            &worker_ctx.shared_owner_rg_indexes,
+                                            worker_ctx.peer_worker_commands,
+                                            worker_ctx.worker_commands_by_id,
+                                            worker_ctx.forwarding,
+                                            &resolved.key,
+                                            resolved.decision,
+                                            &resolved.metadata,
+                                            resolved.origin,
+                                            now_ns,
+                                            worker_id,
+                                        );
+                                    }
                                     telemetry.dbg.local += 1;
                                     // #3610/M07: account the host-inbound deny on
                                     // its OWN debug counter, NOT `policy_deny` —
@@ -1069,7 +1142,7 @@ pub(super) fn poll_binding_process_descriptor(
                                         worker_ctx.event_stream,
                                         flow,
                                         meta,
-                                        resolved.metadata.ingress_zone,
+                                        authority_zone,
                                         now_ns,
                                     );
                                     binding.scratch.scratch_recycle.push(desc.addr);
@@ -1097,25 +1170,28 @@ pub(super) fn poll_binding_process_descriptor(
                                         lo0_log,
                                         now_ns,
                                     ) {
-                                        delete_terminal_filtered_session(
-                                            sessions,
-                                            binding.bpf_maps.session_map_fd,
-                                            conntrack_v4_fd,
-                                            conntrack_v6_fd,
-                                            worker_ctx.shared_sessions,
-                                            worker_ctx.shared_nat_sessions,
-                                            worker_ctx.shared_forward_wire_sessions,
-                                            &worker_ctx.shared_owner_rg_indexes,
-                                            worker_ctx.peer_worker_commands,
-                                            worker_ctx.worker_commands_by_id,
-                                            worker_ctx.forwarding,
-                                            &resolved.key,
-                                            resolved.decision,
-                                            &resolved.metadata,
-                                            resolved.origin,
-                                            now_ns,
-                                            worker_id,
-                                        );
+                                        // #9519: only a packet that may act for the session tears it down.
+                                        if may_revoke {
+                                            delete_terminal_filtered_session(
+                                                sessions,
+                                                binding.bpf_maps.session_map_fd,
+                                                conntrack_v4_fd,
+                                                conntrack_v6_fd,
+                                                worker_ctx.shared_sessions,
+                                                worker_ctx.shared_nat_sessions,
+                                                worker_ctx.shared_forward_wire_sessions,
+                                                &worker_ctx.shared_owner_rg_indexes,
+                                                worker_ctx.peer_worker_commands,
+                                                worker_ctx.worker_commands_by_id,
+                                                worker_ctx.forwarding,
+                                                &resolved.key,
+                                                resolved.decision,
+                                                &resolved.metadata,
+                                                resolved.origin,
+                                                now_ns,
+                                                worker_id,
+                                            );
+                                        }
                                         telemetry.dbg.local += 1;
                                         telemetry.dbg.policy_deny += 1;
                                         binding.scratch.scratch_recycle.push(desc.addr);
@@ -1148,32 +1224,35 @@ pub(super) fn poll_binding_process_descriptor(
                                     telemetry.counters,
                                     flow,
                                     meta,
-                                    resolved.metadata.ingress_zone,
+                                    authority_zone,
                                     desc.len as u64,
                                     now_ns,
                                 ),
                                 JunosHostLocalPolicy::Dropped
                             )
                         {
-                            delete_terminal_filtered_session(
-                                sessions,
-                                binding.bpf_maps.session_map_fd,
-                                conntrack_v4_fd,
-                                conntrack_v6_fd,
-                                worker_ctx.shared_sessions,
-                                worker_ctx.shared_nat_sessions,
-                                worker_ctx.shared_forward_wire_sessions,
-                                &worker_ctx.shared_owner_rg_indexes,
-                                worker_ctx.peer_worker_commands,
-                                worker_ctx.worker_commands_by_id,
-                                worker_ctx.forwarding,
-                                &resolved.key,
-                                resolved.decision,
-                                &resolved.metadata,
-                                resolved.origin,
-                                now_ns,
-                                worker_id,
-                            );
+                            // #9519: only a packet that may act for the session tears it down.
+                            if may_revoke {
+                                delete_terminal_filtered_session(
+                                    sessions,
+                                    binding.bpf_maps.session_map_fd,
+                                    conntrack_v4_fd,
+                                    conntrack_v6_fd,
+                                    worker_ctx.shared_sessions,
+                                    worker_ctx.shared_nat_sessions,
+                                    worker_ctx.shared_forward_wire_sessions,
+                                    &worker_ctx.shared_owner_rg_indexes,
+                                    worker_ctx.peer_worker_commands,
+                                    worker_ctx.worker_commands_by_id,
+                                    worker_ctx.forwarding,
+                                    &resolved.key,
+                                    resolved.decision,
+                                    &resolved.metadata,
+                                    resolved.origin,
+                                    now_ns,
+                                    worker_id,
+                                );
+                            }
                             telemetry.dbg.local += 1;
                             telemetry.dbg.policy_deny += 1;
                             binding.scratch.scratch_recycle.push(desc.addr);

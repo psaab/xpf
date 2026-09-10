@@ -1489,6 +1489,15 @@ impl SessionTable {
         }
     }
 
+    /// #9519: the CANONICAL key a WIRE tuple resolves to, through the same
+    /// resolution the revalidation probes use, or `None` when it names no live
+    /// local entry. For a revocation decided outside the policy stamp — a
+    /// foreign packet on the session's own admitting interface — which has no
+    /// `PolicyRevalidationTarget::Stale(key)` to read the key from.
+    pub(crate) fn revalidation_canonical_key(&self, key: &SessionKey) -> Option<SessionKey> {
+        self.revalidation_record(key).map(|record| record.key.clone())
+    }
+
     /// #7212 test view: the CANONICAL key the probe resolves, or `None` when it
     /// does not resolve a stale entry. A view over
     /// [`SessionTable::filter_revalidation_target`], not a second

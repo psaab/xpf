@@ -566,6 +566,10 @@ mod tests_filter_revocation_7212;
 #[cfg(test)]
 #[path = "tests_policy_revocation_8356.rs"]
 mod tests_policy_revocation_8356;
+// #9519: session-hit ingress AUTHORITY through the real poll path.
+#[cfg(test)]
+#[path = "tests_session_hit_authority_9519.rs"]
+mod tests_session_hit_authority_9519;
 // #7160 (#2387): the routing-domain stamp on the REAL poll path — the WIRING,
 // which no unit-level cell can reach.
 #[cfg(test)]
