@@ -502,6 +502,15 @@ the helper. It covers every fail-closed policy-content axis:
   wire-identical to a real global rule and the helper cannot tell them apart.
   The reason names the side and renders the ZONE-PAIR scope
   (`junos-global->junos-global/p1`), never `global/p1`.
+- **Duplicate rule identity (#9584)** — two rules that resolve to one stable
+  identity (`<from>-><to>/<name>`, or the explicit wire `rule_id`), or that share
+  a non-zero `policy_id`. Strict commit rejects a duplicate policy name (#3473),
+  but the tolerant load path keeps one written in separate stanzas (two
+  `security {}` roots, two stanzas for one zone pair, two `policies` or `global`
+  blocks) unmerged, because the #8752 fold only merges within one stanza. The
+  helper refuses such a snapshot (`DuplicateRuleId` / `DuplicatePolicyId`,
+  #3713); the mirror follows its order, identity first, and reports each
+  duplicate once.
 
 Before this, `matchApp` / `matchAddr` SILENTLY SKIPPED the unrepresentable term
 (a per-term no-match) and fell through to a later rule / the configured
