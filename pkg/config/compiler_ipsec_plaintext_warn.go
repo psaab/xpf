@@ -100,7 +100,7 @@ import ()
 // #7949 NARROWED WHAT "AN OPERATOR WHO ZONES A VPN INTERFACE HAS BEEN TOLD
 // SOMETHING UNTRUE" MEANS, and the direction matters. This advisory is about
 // the INGRESS half — the plaintext the kernel XFRM stack delivers ON the
-// xfrmi, which is still kernel-forwarded and still unadjudicated (#8276 owns
+// xfrmi, which is still kernel-forwarded and still unadjudicated (#9506 owns
 // that half; the exclusion above is what makes it so). It is NOT about the
 // EGRESS half. Before #7949 a `bind-interface`-only tunnel produced no
 // interface row at all, so its LAN -> tunnel direction resolved NoRoute and was
