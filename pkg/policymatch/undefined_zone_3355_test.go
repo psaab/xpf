@@ -97,10 +97,31 @@ func TestDefinedZoneStillMatchesWildcard(t *testing.T) {
 // config is built directly (NOT via cfgWith, which injects the standard suite
 // zones) so Security.Zones is genuinely empty.
 //
-// FAIL-ON-REVERT: restoring the `if len(cfg.Security.Zones) == 0 { return true }`
-// leniency in zoneKnown makes this trust->untrust query match the permit
-// (Matched=true), reintroducing the exact simulator-vs-runtime drift #3355
-// closes.
+// #9410 MOVED THE ATTRIBUTION, NOT THE VERDICT, and the fail-on-revert below had
+// to be re-established rather than just re-worded.
+//
+// This fixture's policy names `trust`/`untrust` while Security.Zones is EMPTY, so
+// it is simultaneously (a) a query whose from-zone is unknown and (b) a config
+// whose policy carries an unresolvable zone reference. Those are different facts
+// and #9410 made the second one observable: the helper refuses the WHOLE snapshot
+// on an unresolvable zone, so `Match` now reports ContentRejected before any tier
+// or zone check runs.
+//
+// ContentRejected is the CORRECT attribution here. UnzonedIngress describes what
+// the runtime does to a query when a snapshot IS loaded; on a config whose
+// snapshot the helper refuses, reporting it would be a verdict for something that
+// was never loaded — the exact fabrication #9410 closes. The Action is unchanged
+// (PolicyDeny), and this cell's primary property — a no-zones config must match
+// NOTHING in the transit tiers — is unchanged and still asserted first.
+//
+// THE FAIL-ON-REVERT WAS HOLLOWED BY THAT CHANGE AND IS REBUILT BELOW. Measured:
+// with #9410's arm in place, restoring the `len(cfg.Security.Zones) == 0` leniency
+// in zoneKnown no longer reds this fixture, because the content-rejection gate
+// returns before zoneKnown is ever called. A guard whose mutation its own cell
+// can no longer see is not a guard, so TestNoZonesDefinedNoTransitMatchZoneGate
+// below carries #3355's property on a fixture the new gate does NOT intercept:
+// the policy's zones are DEFINED (so the snapshot resolves) and only the QUERY
+// names an unknown zone.
 func TestNoZonesDefinedNoTransitMatch(t *testing.T) {
 	cfg := &config.Config{
 		Security: config.SecurityConfig{
@@ -129,10 +150,84 @@ func TestNoZonesDefinedNoTransitMatch(t *testing.T) {
 	if res.Matched {
 		t.Fatalf("no-zones config matched a transit rule the runtime would never evaluate (#3355 drift); res = %+v", res)
 	}
-	// #8318: with NO zones defined, "trust" is unknown on both sides; the FROM
-	// check runs first, so this is the unzoned-ingress deny. Verdict unchanged.
+	// #9410: the policy's own zone references are unresolvable, so the helper
+	// refuses the snapshot and the simulator must say so instead of attributing a
+	// query-level verdict to a snapshot that was never loaded. Action unchanged.
+	if !res.ContentRejected || res.Action != config.PolicyDeny {
+		t.Fatalf("want a content-rejected deny for a no-zones config whose policy names "+
+			"undefined zones, got %+v", res)
+	}
+	if res.PolicyName != "" {
+		t.Fatalf("a content-rejected config attributed policy %q", res.PolicyName)
+	}
+}
+
+// TestNoZonesDefinedNoTransitMatchZoneGate carries #3355's property on a fixture
+// the #9410 content-rejection gate does NOT intercept.
+//
+// #3355 is about the simulator mirroring policy.rs's unconditional
+// `from_id != 0 && to_id != 0` transit gate: a query naming a zone the runtime
+// resolves to id 0 must match nothing, with no empty-Zones leniency in zoneKnown.
+// The original fixture expressed that with an EMPTY Zones map, which #9410 now
+// content-rejects first — so the mutation that cell existed to catch became
+// invisible to it (measured, not assumed).
+//
+// Here every zone the POLICY names is defined, so the snapshot resolves cleanly
+// and the content gate stays silent; only the QUERY's from-zone is unknown. That
+// isolates zoneKnown, which is what #3355 guards.
+//
+// FAIL-ON-REVERT: restoring `if len(cfg.Security.Zones) == 0 { return true }` in
+// zoneKnown does NOT red this cell (Zones is non-empty here) — the leniency that
+// matters for this fixture is any that treats an UNKNOWN query zone as known, so
+// the mutation is `zoneKnown` returning true unconditionally, which makes the
+// unknown-ingress query match the permit.
+func TestNoZonesDefinedNoTransitMatchZoneGate(t *testing.T) {
+	cfg := &config.Config{
+		Security: config.SecurityConfig{
+			DefaultPolicy: config.PolicyDeny,
+			// DEFINED, so #9410's zone arm has nothing to report.
+			Zones: map[string]*config.ZoneConfig{
+				"trust":   {Name: "trust"},
+				"untrust": {Name: "untrust"},
+			},
+			Policies: []*config.ZonePairPolicies{
+				{
+					FromZone: "trust",
+					ToZone:   "untrust",
+					Policies: []*config.Policy{{
+						Name:   "allow-all",
+						Action: config.PolicyPermit,
+						Match: config.PolicyMatch{
+							SourceAddresses:      []string{"any"},
+							DestinationAddresses: []string{"any"},
+							Applications:         []string{"any"},
+						},
+					}},
+				},
+			},
+		},
+		Applications: config.ApplicationsConfig{},
+	}
+
+	// POSITIVE CONTROL: the content gate must be SILENT on this fixture, or the
+	// assertions below would pass for the wrong reason and this cell would be a
+	// duplicate of the one above rather than the zone-gate isolation it claims.
+	if res := Match(cfg, Query{FromZone: "trust", ToZone: "untrust", Protocol: "tcp", DstPort: 80}); res.ContentRejected {
+		t.Fatalf("POSITIVE CONTROL: the #9410 content gate fired on a fixture whose policy "+
+			"zones are all DEFINED (%v); this cell can no longer isolate zoneKnown",
+			res.ContentRejectionReasons)
+	} else if !res.Matched || res.Action != config.PolicyPermit {
+		t.Fatalf("POSITIVE CONTROL: the defined-zone query did not match the permit; res = %+v", res)
+	}
+
+	// The property: an UNKNOWN ingress zone matches nothing in the transit tiers.
+	res := Match(cfg, Query{FromZone: "nosuchzone", ToZone: "untrust", Protocol: "tcp", DstPort: 80})
+	if res.Matched {
+		t.Fatalf("an unknown ingress zone matched a transit rule the runtime would never "+
+			"evaluate (#3355 drift); res = %+v", res)
+	}
 	if !res.UnzonedIngress || res.Action != config.PolicyDeny {
-		t.Fatalf("want unzoned-ingress deny for a no-zones config, got %+v", res)
+		t.Fatalf("want the unzoned-ingress deny (#8318) for an unknown query zone, got %+v", res)
 	}
 }
 
