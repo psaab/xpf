@@ -101,7 +101,13 @@ use super::snapshot::{ConfigSnapshot, FabricSnapshot, NeighborSnapshot, Userspac
 /// degrading to the old behaviour is a sound argument for a FEATURE; it is not
 /// sound when the old behaviour IS the defect the field was added to fix, and
 /// for those the bump is the only mechanism that refuses the pairing.
-pub(crate) const CONFIG_SNAPSHOT_PROTOCOL_VERSION: i32 = 11;
+// v12 (#9546): the conntrack mirror value gained `routing_domain`
+// (144 -> 152 / 192 -> 200). This process WRITES that struct, so a daemon/helper
+// size mismatch copies past the buffer into the slot a new reader trusts; exact
+// equality on this constant is what refuses the pairing. See pkg/dataplane/
+// userspace/protocol.go's v12 note. Keep the line below in this exact form: the
+// Go lockstep guard parses it.
+pub(crate) const CONFIG_SNAPSHOT_PROTOCOL_VERSION: i32 = 12;
 
 /// #9344: the owner-RG session export paging contract this helper implements.
 ///

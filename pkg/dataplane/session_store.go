@@ -116,25 +116,27 @@ type ScopedSessionKeyV6 struct {
 // sessionDomainBatchDeleter is the #9364 optional capability: a dataplane that
 // can carry a routing domain on each key of a BATCH delete.
 //
-// !! THIS PLUMBING IS CURRENTLY INERT ON THE REAL PATH (#9546). !!
+// LIVE SINCE #9546. Until then this plumbing was inert on the real path: every
+// production caller of `DeleteBatchKnownV4/V6` sources its `SessionEntry`
+// values from `store.ForEachV4` -> `dp.BatchIterateSessions` -> a BatchLookup
+// over the BPF session mirror, and the `session_value` ABI had no routing-domain
+// slot, so those values always carried 0 (measured: `RoutingDomain 100007 -> 0`
+// while `TCPState` and `Timeout` survived the same round trip). #9546 appended
+// `routing_domain` to the on-map ABI, stamped by both mirror writers, and the
+// round trip now preserves it (`routing_domain_mirror_9546_test.go`).
 //
-// It carries whatever domain it is GIVEN, correctly — but every production caller
-// of `DeleteBatchKnownV4/V6` sources its `SessionEntry` values from
-// `store.ForEachV4`, i.e. `dp.BatchIterateSessions`, i.e. a BatchLookup over the
-// BPF session mirror. The BPF `session_value` ABI has NO routing-domain field, so
-// those values always carry 0. Measured, with a positive control in the same
-// probe: `RoutingDomain 100007 -> 0` while `TCPState 3 -> 3` and
-// `Timeout 300 -> 300` survive
-// (`routing_domain_mirror_inert_9364_test.go`).
+// The END-TO-END proof is privileged, because the mirror is a real BPF map:
+// `TestBatchDeleteNamesTheMirroredDomainOnTheWire9546` seeds a tenant row, reads
+// it back through ForEachV4 exactly as the GC does, deletes it through this path
+// and asserts the helper delete names the domain. Its singular twin,
+// `TestDeleteSessionItselfNamesTheDomainOnTheWire9146`, failed on master until
+// #9546 and passes now. Both SKIP without CAP_BPF (#9337), so an ordinary run
+// cannot see them — run them with CAP_BPF and `XPF_REQUIRE_MEMLOCK_GUARDS=1`.
 //
-// The same is true of #9146's singular delete, whose own acceptance cell has been
-// FAILING on master since it landed — it writes real BPF maps, so it SKIPS
-// without CAP_BPF and nobody saw it (#9337).
-//
-// So this is a prerequisite, not the fix: it is what a real remedy for #9546
-// plugs into. Do not read the #9364 cells as evidence the GC's deletes name a
-// domain today — they prove that a domain SUPPLIED here reaches the wire, which
-// is a different claim.
+// What it still cannot do (#7160, out of scope here): the BPF key has no domain
+// axis, so two tenants holding one 5-tuple share ONE mirror row. This path
+// deletes the surviving row's tenant exactly instead of refusing both as
+// ambiguous; it does not recover the other tenant's row.
 //
 // The house pattern, matching clusterSyncedSessionInstaller below: a narrow
 // interface resolved by type assertion, implemented only by the userspace

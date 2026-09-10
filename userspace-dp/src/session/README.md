@@ -1662,6 +1662,16 @@ it but is far broader (every pinned dataplane map plus the FRR managed routes).
 Either way there is brief downtime and the next load recreates the map at the
 new size.
 
+**#9546 is the same crossing again.** `routing_domain` was appended after
+`ingress_vlan_id` (so no offset above moved), growing `session_value` 144 -> 152
+and `session_value_v6` 192 -> 200. The helper stamps it for FORWARD rows only
+(`publish_conntrack::conntrack_row_routing_domain`); a reverse row states
+`WIRE_ABSENT`, because its key is the deliberately domain-agnostic reverse-match
+key (#7160) and encoding that 0 would falsely claim the default instance. Unlike
+#4983 this also bumped the snapshot protocol to 12: the helper writes this struct
+and has no value-size guard of its own, so a size-mismatched daemon/helper pair
+would copy past the helper's buffer into the slot a new reader trusts.
+
 Whether a plain RESTART is enough is MODE-DEPENDENT, exactly as the paragraph
 above this one says — do not restate it here as "it is NOT a restart" (#6928).
 That categorical form was as wrong as the "a reload" it replaced: a HITLESS

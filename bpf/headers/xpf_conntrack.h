@@ -21,7 +21,8 @@ struct session_value {
 				* (0x100), which does not fit a __u8 (#5460). The
 				* compiler inserts one pad byte after `state` and
 				* two after `is_reverse`; the C/Rust/Go layouts
-				* stay byte-identical (size-asserted 144/192 -- 136/184
+				* stay byte-identical (size-asserted 152/200 -- 144/192
+				* before #9546 appended routing_domain, 136/184
 				* before #4983 appended the ingress-identity pair). */
 	__u8  tcp_state;       /* TCP-specific sub-state */
 	__u8  is_reverse;      /* 1 if this is the reverse direction entry */
@@ -83,7 +84,8 @@ struct session_value {
 	 * population here (#6928): this struct's size is part of the shim ABI
 	 * pre-flight's checked set, and validateUserspaceShimLivePins hard-refuses
 	 * a ValueSize mismatch against the live pin, so a new reader never sees an
-	 * old writer's 136/184-byte rows. Consumers MUST treat
+	 * old writer's shorter rows (136/184
+	 * before #4983, 144/192 before #9546). Consumers MUST treat
 	 * 0 as "fall back to the zone approximation", never as "matches
 	 * nothing" or "matches everything". */
 	__u32 ingress_ifindex;
@@ -108,6 +110,15 @@ struct session_value {
 	 * pad" (what remains unused) describe the SAME layout from either end.
 	 * sizeof grows 136 -> 144, not 136 -> 152. */
 	__u16 ingress_vlan_id;
+	/* #9546: the session's ROUTING DOMAIN in the #7239 wire encoding
+	 * (0 = not stated, 1 = default instance, else a reserved-band domain).
+	 * The Go delete paths read it back so a helper delete names the domain the
+	 * row was installed under (#9146 singular, #9364 batch); before this field
+	 * existed the mirror dropped it and both were inert. Appended AFTER
+	 * ingress_vlan_id so no existing offset moves: a __u32 needs a 4-byte
+	 * boundary, so it skips the 2 unused pad bytes and lands at 144, and the
+	 * 8-byte alignment grows sizeof 144 -> 152. */
+	__u32 routing_domain;
 };
 
 /* IPv6 session key -- 5-tuple with 128-bit addresses. */
@@ -179,6 +190,9 @@ struct session_value_v6 {
 	 * 0 is BOTH untagged and 802.1p priority-tagged (real tag, VID 0); this
 	 * bare VID does not distinguish them (#6928). sizeof grows 184 -> 192. */
 	__u16 ingress_vlan_id;
+	/* #9546: routing domain -- see session_value.routing_domain. Lands at 192;
+	 * sizeof grows 192 -> 200. */
+	__u32 routing_domain;
 };
 
 /* TCP state machine transition. Returns new state. */

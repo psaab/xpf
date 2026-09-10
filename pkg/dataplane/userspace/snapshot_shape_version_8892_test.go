@@ -189,9 +189,23 @@ func shapeDigest8892(t *testing.T) (string, int) {
 // The snapshot handler gates on EXACT version equality, so bumping for a field
 // no helper can observe would make a mixed-base pair refuse every snapshot in
 // exchange for nothing -- spending the one signal that says the wire moved.
+// v12 BUMPED (issue 9546): `session_value.routing_domain` was appended to the
+// on-map conntrack ABI (144 -> 152 / 192 -> 200). The digest above did NOT move
+// -- the BPF value is not a snapshot struct -- so this cell fired on its VERSION
+// pin alone, which is the correct behaviour, and the entry is recorded rather
+// than waved through.
+//
+// It is the mirror image of the STANDS entries above, and they supply the test:
+// is the change OBSERVABLE to a mismatched helper? For those, measurably not.
+// Here, measurably yes, and harmfully. The helper WRITES the struct: a new
+// daemon creates the map at 152 bytes, an old helper hands bpf_map_update_elem
+// a 144-byte buffer, and the kernel copies value_size bytes -- 8 past the
+// helper's struct, into the routing_domain slot a new reader trusts. That is a
+// garbage domain on a delete, which can name ANOTHER TENANT's row. Exact-
+// equality refusal is the only mechanism that stops the pairing.
 const (
 	snapshotShapeGolden8892  = "9f2fc4a986b0049610502fd566289b81aa063d6e753f61a3b93ea0732bb0caa0"
-	snapshotShapeVersion8892 = 11
+	snapshotShapeVersion8892 = 12
 )
 
 func TestSnapshotShapeIsPinnedToProtocolVersion8892(t *testing.T) {

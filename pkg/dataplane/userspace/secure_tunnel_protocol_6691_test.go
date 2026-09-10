@@ -67,7 +67,13 @@ const preSecureTunnelProtocolVersion = 4
 // `ScreenMissingProfileRef.alarm_without_drop`, not for secure_tunnel. A v10
 // helper still handles secure_tunnel correctly, so
 // MinProtocolSecureTunnelRefusal (7) is untouched a third time.
-const secureTunnelSnapshotProtocolVersion = 11
+//
+// Issue 9546 moved it 11 -> 12, and this one is not for a SNAPSHOT field at
+// all: the on-map conntrack value gained `routing_domain`, and because the
+// helper WRITES that struct a daemon/helper size mismatch copies past the
+// helper's buffer. A v11 helper still handles secure_tunnel correctly, so
+// MinProtocolSecureTunnelRefusal (7) is untouched a fourth time.
+const secureTunnelSnapshotProtocolVersion = 12
 
 // preV5HelperAcceptsSnapshot models the exact-equality version gate a pre-v5
 // helper applies before touching any dataplane state
