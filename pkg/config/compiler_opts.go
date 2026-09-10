@@ -1469,6 +1469,17 @@ type compileOpts struct {
 	// no-brick); the fold's no-clobber guard keeps such a config from silently
 	// overwriting an operator entry. Same doctrine as lenientZoneCount.
 	lenientAddressBookNames bool
+	// lenientReservedAddressNames (#9523) downgrades the reserved address-name
+	// gate (validateReservedAddressNamesStrict) from a hard compile error to a
+	// cfg.Warnings entry. The strict commit / commit-check path rejects an
+	// address-book address or address-set (global or zone-local) or a
+	// dynamic-address address-name named after a policy match-all keyword
+	// (`any`, `any4`, `any6`, `any-ipv4`, `any-ipv6`). The tolerant load /
+	// peer-sync paths keep the object with a warning (#1960 no-brick); the
+	// keyword still matches every address there, because every resolver asks
+	// IsPolicyAddressWildcardKeyword before it looks the token up as a name.
+	// Same doctrine as lenientReservedZoneNames.
+	lenientReservedAddressNames bool
 	// lenientAddressBookNameCollision (#5676) downgrades the same-name
 	// `address` + `address-set` collision gate
 	// (validateAddressBookNameCollisionStrict) from a hard compile error to a
@@ -2767,6 +2778,7 @@ func lenientCompileOpts() compileOpts {
 		lenientZoneIDCollision:                 true,
 		lenientRoutingInstanceTableIDCollision: true,
 		lenientAddressBookNames:                true,
+		lenientReservedAddressNames:            true,
 		lenientAddressBookNameCollision:        true,
 		lenientZoneInterfaceMembership:         true,
 		lenientZoneInterfaceDefined:            true,

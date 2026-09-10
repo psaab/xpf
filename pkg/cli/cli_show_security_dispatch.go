@@ -149,7 +149,14 @@ func joinDisplayAddressNames(addrs []string) string {
 
 // resolveAddressDetail looks up the CIDR for a named address in the global
 // address book, falling back to the name itself if not found.
+//
+// #9523: a match-all keyword is never looked up as a name (see
+// config.IsPolicyAddressWildcardKeyword), so the detail shows the keyword the
+// dataplane enforces rather than a tolerant-loaded object of the same name.
 func resolveAddressDetail(cfg *config.Config, name string) string {
+	if config.IsPolicyAddressWildcardKeyword(name) {
+		return name
+	}
 	ab := cfg.Security.AddressBook
 	if ab != nil {
 		if addr, ok := ab.Addresses[name]; ok && addr.Value != "" {

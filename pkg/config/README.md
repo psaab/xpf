@@ -565,6 +565,25 @@ own address-book-only set: a feed binding nested in an address-set stays
 deliberately NOT strict-accepted (#3294 anti-Option-C), so it is not added to the
 member-check set.
 
+**Policy match-all address keywords are reserved (#9523):** `any`,
+`any-ipv4` and `any-ipv6` (and the internal short forms `any4` / `any6`) mean
+"every address" in a policy `source-address` / `destination-address`. Junos
+reserves them, so no address-book object can capture them. xpf resolved a policy
+address token by NAME first, which is deliberate and stays in force for every
+other token (an entry named `10.0.1.0/24` with another value is still resolved by
+name). For these keywords it was a hijack: an address, address-set or
+dynamic-address binding literally named `any` turned every `match ... any` in
+every policy into a match on that object's prefixes, on all four config channels,
+with no warning. `validateReservedAddressNamesStrict`
+(`policy_address_keywords_9523.go`, run on the pristine books before the
+zone-local fold) now rejects such an object at commit, naming it; the tolerant
+load / peer-sync path keeps it with a warning (`lenientReservedAddressNames`,
+#1960 no-brick). Every resolver asks `IsPolicyAddressWildcardKeyword` before any
+name lookup: the snapshot builder (`classifyPolicyAddresses`), the
+`match-policies` simulator (`resolveToken`), and the CLI / gRPC detail renderers.
+So on the tolerant path the keyword keeps matching every address, and every
+surface shows what is enforced. `0.0.0.0/0` remains a legal object name.
+
 **Zone-local address books (#3061):** Junos supports both the global
 `security address-book global { ... }` and a per-zone book attached inline
 under `security zones security-zone <z> address-book { address ...;

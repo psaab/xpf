@@ -7685,3 +7685,52 @@ fn unzoned_egress_still_falls_through_to_default_6682() {
         "a zero EGRESS zone must not be counted as an unzoned-ingress deny",
     );
 }
+
+/// #9523: the Go builder now emits a match-all keyword as a LITERAL even when an
+/// address-book object carries the keyword's name. This pins what the helper
+/// does with that wire, beside the book it no longer references, and contrasts
+/// it with the pre-#9523 wire, where the same rule named the book id and matched
+/// only the book's prefixes.
+#[test]
+fn literal_any_matches_every_address_beside_a_same_named_book_9523() {
+    let books = vec![AddressBookSnapshot {
+        id: 7,
+        name: "any".to_string(),
+        prefixes_v4: vec!["10.99.0.0/16".to_string()],
+        prefixes_v6: Vec::new(),
+    }];
+    let rule = |by_book: bool| PolicyRuleSnapshot {
+        name: "d1".to_string(),
+        from_zone: "lan".to_string(),
+        to_zone: "wan".to_string(),
+        source_literals: if by_book { Vec::new() } else { vec!["any".to_string()] },
+        destination_literals: if by_book { Vec::new() } else { vec!["any".to_string()] },
+        source_book_ids: if by_book { vec![7] } else { Vec::new() },
+        destination_book_ids: if by_book { vec![7] } else { Vec::new() },
+        applications: vec!["any".to_string()],
+        action: "deny".to_string(),
+        ..Default::default()
+    };
+    let zones = test_zone_name_to_id();
+    let eval_outside = |by_book: bool| {
+        let store = PolicyCounterStore::default();
+        let state = parse_policy_state_with_counters("permit", &[rule(by_book)], &zones, &books, &store)
+            .expect("well-formed snapshot");
+        evaluate_policy(
+            &state,
+            TEST_LAN_ZONE_ID,
+            TEST_WAN_ZONE_ID,
+            "1.2.3.4".parse().expect("src"),
+            "5.6.7.8".parse().expect("dst"),
+            PROTO_TCP,
+            40000,
+            23,
+        )
+    };
+    assert_eq!(eval_outside(false), PolicyAction::Deny, "literal `any` must match every address");
+    assert_eq!(
+        eval_outside(true),
+        PolicyAction::Permit,
+        "control: the pre-#9523 wire (book id) matched only the book, so traffic outside it fell to the default"
+    );
+}
