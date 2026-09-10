@@ -88,7 +88,8 @@ func mergeDuplicateBlocks9023(tree *ConfigTree) []string {
 			if n.Name() != site.parent {
 				continue
 			}
-			for _, name := range mergeInstancesUnder(n, site.keyword) {
+			names, _ := mergeInstancesUnder(n, site.keyword, askNone9571)
+			for _, name := range names {
 				merged = append(merged, site.parent+" "+site.keyword+" "+name)
 			}
 		}

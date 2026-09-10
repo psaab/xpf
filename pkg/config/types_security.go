@@ -556,6 +556,13 @@ type Policy struct {
 	// default-deny) — an action-agnostic fail-CLOSED that turns the widened
 	// permit (and a symmetric over-broad deny) into never-match instead of
 	// match-any.
+	//
+	// #9571 adds one cause that is not a dropped LEAF: the tolerant #8752 fold
+	// merged repeated same-named statements into a policy that PERMITS although
+	// one statement said deny or reject. The merge drops the first-match boundary
+	// that kept the permit off the denied traffic, which is the same harm (a
+	// permit broader than the operator configured), so it carries the same flag.
+	// markFoldWidenedPolicies9571 sets it after the compile.
 	LenientContentDropped bool
 }
 

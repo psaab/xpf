@@ -366,7 +366,11 @@ func compilePolicy(polInst struct {
 	// fails closed; the strict commit path rejects the actionless policy
 	// outright (terminalActions is empty). Conflicting actions keep the
 	// pre-existing last-wins runtime value so a leniently-loaded config
-	// still boots; the strict gate rejects the conflict at commit.
+	// still boots; the strict gate rejects the conflict at commit. That
+	// last-wins was decided for ONE policy with conflicting `then` blocks. When
+	// the #8752 duplicate-name fold would use it to turn an earlier statement's
+	// deny into a permit, the merged policy is poisoned instead (#9571,
+	// markFoldWidenedPolicies9571).
 	if len(pol.terminalActions) == 0 {
 		pol.Action = PolicyDeny
 	}
