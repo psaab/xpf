@@ -9219,7 +9219,12 @@ fn wg_steered_endpoint_refuses_degraded_transit_end_to_end_9594() {
     assert!(lo > 0, "setup: the loopback interface has no ifindex");
     let (peer_priv, peer_pub) = crate::afxdp::wg::tests::keypair();
     let peer_hex: String = peer_pub.iter().map(|b| format!("{b:02x}")).collect();
-    let (steered_port, other_port) = (51971u16, 51972u16);
+    // #9549: listen ports come from test_ports, never fixed numbers. This cell first
+    // bound 51971/51972 — the #9521 resteering cell's pair before #9606 moved it.
+    let (steered_port, other_port) = (
+        crate::test_ports::reserve_ephemeral_udp_port(),
+        crate::test_ports::reserve_ephemeral_udp_port(),
+    );
     let snap = wg9521_snapshot(
         ["wgt9594s", "wgt9594o"],
         [4541, 4542],
@@ -9330,11 +9335,16 @@ fn shim_maps_view_places_configured_uncovered_ingress_9594() {
     };
     let (_peer_priv, peer_pub) = crate::afxdp::wg::tests::keypair();
     let peer_hex: String = peer_pub.iter().map(|b| format!("{b:02x}")).collect();
+    // #9549: the snapshot spawns real control threads that bind these ports.
+    let (port_k, port_l) = (
+        crate::test_ports::reserve_ephemeral_udp_port(),
+        crate::test_ports::reserve_ephemeral_udp_port(),
+    );
     let snap = wg9521_snapshot(
         ["wgt9594k", "wgt9594l"],
         [4551, 4552],
-        [51981, 51982],
-        51981,
+        [port_k, port_l],
+        port_k,
         &peer_hex,
     );
     let mut coordinator = Coordinator::new();
