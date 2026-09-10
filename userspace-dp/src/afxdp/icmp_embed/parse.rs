@@ -1,5 +1,5 @@
 use super::*;
-use crate::afxdp::gre_discriminator::gre_transit_discriminator;
+use crate::afxdp::gre_discriminator::{gre_transit_discriminator, pptp_call_id};
 use crate::session::TunnelDiscriminator;
 
 /// Parsed embedded inner IPv4 header + first 8 bytes of L4 (enough to
@@ -23,6 +23,22 @@ pub(in crate::afxdp::icmp_embed) struct EmbeddedV4Header {
     /// `None` for every non-GRE protocol, which is exactly what those sessions
     /// carry — so this field leaves every other protocol's identity unchanged.
     pub discriminator: TunnelDiscriminator,
+    /// #9298: the QUOTED PPTP Call ID, when the quote is a version-1 (PPTP
+    /// enhanced) GRE header.
+    ///
+    /// Extraction only -- this stays a PURE byte read, which is why it is a
+    /// call id and not a discriminator. `TunnelDiscriminator::Pptp` carries a
+    /// LOCALLY DERIVED handle, not the wire value: RFC 2637 s4.1 has each side
+    /// allocate its own Call ID naming the peer it sends to, so the two
+    /// directions of one call carry DIFFERENT wire values and a discriminator
+    /// built from the wire would never match its reverse companion. Turning
+    /// this id into a handle needs the per-worker association table, which the
+    /// parser deliberately does not take; `session_match` does that, where
+    /// `sessions` is already in scope.
+    ///
+    /// `None` for every non-GRE protocol and for a version-0 GRE quote, whose
+    /// identity `discriminator` above already carries.
+    pub pptp_call_id: Option<u16>,
     pub src: Ipv4Addr,
     pub dst: Ipv4Addr,
     pub l4_off: usize,
@@ -42,6 +58,8 @@ pub(in crate::afxdp::icmp_embed) struct EmbeddedV6Header {
     pub proto: u8,
     /// #9031: see EmbeddedV4Header::discriminator.
     pub discriminator: TunnelDiscriminator,
+    /// #9298: see EmbeddedV4Header::pptp_call_id.
+    pub pptp_call_id: Option<u16>,
     pub src_wire: Ipv6Addr,
     pub dst: IpAddr,
     pub l4_off: usize,
@@ -143,9 +161,25 @@ pub(in crate::afxdp::icmp_embed) fn parse_embedded_v4(
     } else {
         TunnelDiscriminator::None
     };
+    // #9298: the QUOTED PPTP Call ID, extracted with the SAME `inner_declared_end`
+    // bound the discriminator above uses -- the #2361 rule applied to the quote,
+    // so slack beyond the quoted datagram can never be read as a header field.
+    // `pptp_call_id` is the extractor the transit path uses, reused rather than
+    // re-spelled, and it refuses on its own terms (version != 1, Routing set,
+    // Key clear) by returning `None`.
+    //
+    // A minimal quote is enough: the classic "IP header + 8 bytes of L4" spans
+    // flags(2) proto(2) payload-length(2) call-id(2), so the id is the last two
+    // bytes an RFC 792 quote is guaranteed to carry.
+    let quoted_pptp_call_id = if proto == PROTO_GRE {
+        pptp_call_id(frame, l4_off, inner_declared_end)
+    } else {
+        None
+    };
     Some(EmbeddedV4Header {
         proto,
         discriminator,
+        pptp_call_id: quoted_pptp_call_id,
         src,
         dst,
         l4_off,
@@ -269,9 +303,25 @@ pub(in crate::afxdp::icmp_embed) fn parse_embedded_v6(
     } else {
         TunnelDiscriminator::None
     };
+    // #9298: the QUOTED PPTP Call ID, extracted with the SAME `inner_declared_end`
+    // bound the discriminator above uses -- the #2361 rule applied to the quote,
+    // so slack beyond the quoted datagram can never be read as a header field.
+    // `pptp_call_id` is the extractor the transit path uses, reused rather than
+    // re-spelled, and it refuses on its own terms (version != 1, Routing set,
+    // Key clear) by returning `None`.
+    //
+    // A minimal quote is enough: the classic "IP header + 8 bytes of L4" spans
+    // flags(2) proto(2) payload-length(2) call-id(2), so the id is the last two
+    // bytes an RFC 792 quote is guaranteed to carry.
+    let quoted_pptp_call_id = if proto == PROTO_GRE {
+        pptp_call_id(frame, l4_off, inner_declared_end)
+    } else {
+        None
+    };
     Some(EmbeddedV6Header {
         proto,
         discriminator,
+        pptp_call_id: quoted_pptp_call_id,
         src_wire,
         dst,
         l4_off,
@@ -735,7 +785,9 @@ mod embedded_gre_discriminator_9031_tests {
     /// header is refused before the discriminator is ever read. A fixture short
     /// of that would make these cells assert about a parse that never happened.
     /// The declared total-length COVERS the payload, so it is inside the quote.
-    fn quoted_v4_gre(flags_version: u16, tail: &[u8]) -> Vec<u8> {
+    // #9298: `pub(super)` so the sibling PPTP module reuses ONE quote
+    // fixture. Two copies would be two silent claims about the wire shape.
+    pub(super) fn quoted_v4_gre(flags_version: u16, tail: &[u8]) -> Vec<u8> {
         let mut p = vec![0u8; 20];
         p[0] = 0x45; // IPv4, IHL 5
         p[9] = PROTO_GRE;
@@ -755,7 +807,9 @@ mod embedded_gre_discriminator_9031_tests {
     /// A quote whose DECLARED total-length stops after `declared_extra` bytes of
     /// GRE header, with `slack` appended beyond it. Models outer L2 pad or
     /// attacker-supplied bytes that the quoted datagram does not cover.
-    fn quoted_v4_gre_with_slack(flags_version: u16, declared_extra: &[u8], slack: &[u8]) -> Vec<u8> {
+    // #9298: `pub(super)` so the sibling PPTP module reuses ONE quote
+    // fixture. Two copies would be two silent claims about the wire shape.
+    pub(super) fn quoted_v4_gre_with_slack(flags_version: u16, declared_extra: &[u8], slack: &[u8]) -> Vec<u8> {
         let mut p = vec![0u8; 20];
         p[0] = 0x45;
         p[9] = PROTO_GRE;
@@ -773,7 +827,9 @@ mod embedded_gre_discriminator_9031_tests {
         p
     }
 
-    fn quoted_v6_gre(flags_version: u16, tail: &[u8]) -> Vec<u8> {
+    // #9298: `pub(super)` so the sibling PPTP module reuses ONE quote
+    // fixture. Two copies would be two silent claims about the wire shape.
+    pub(super) fn quoted_v6_gre(flags_version: u16, tail: &[u8]) -> Vec<u8> {
         let mut p = vec![0u8; 40];
         p[0] = 0x60;
         p[6] = PROTO_GRE;
@@ -1086,7 +1142,20 @@ mod embedded_discriminator_wiring_9031_tests {
                 if t.starts_with("discriminator: Default::default()") {
                     offenders.push(format!("{name}:{}", i + 1));
                 }
+                // #9298 RE-ANCHOR. The four forward-key constructors no
+                // longer spell the wired value `hdr.discriminator`: they pass
+                // it through `resolve_quoted_pptp_discriminator` first, which
+                // upgrades an `Unparseable` PPTP quote to the live call's
+                // handle and returns every other class untouched. That is the
+                // SAME quoted discriminator, resolved — so the site is still
+                // wired and this counter must still see it.
+                //
+                // Re-anchored rather than relaxed: the accepted spellings are
+                // an explicit list, so a site that silently reverts to
+                // `Default::default()` is still an offender above and a site
+                // that drops the field entirely still lowers this count.
                 if t.starts_with("discriminator: hdr.discriminator")
+                    || t.starts_with("discriminator: quoted_discriminator")
                     || t == "discriminator,"
                 {
                     wired += 1;
@@ -1107,11 +1176,157 @@ mod embedded_discriminator_wiring_9031_tests {
         // NON-VACUITY: an empty scan passes the assertion above for free. This
         // is the count that would have caught a guard reading the wrong files.
         assert!(
-            wired >= 5,
-            "#9031: only {wired} wired discriminator sites found across the \
-             same-family embedded sources; expected at least 5 (four forward \
-             keys plus embedded_reply_key's field init). A guard that scans \
-             nothing reports no offenders."
+            wired >= 7,
+            "#9031/#9298: only {wired} wired discriminator sites found across \
+             the same-family embedded sources; expected at least 7 (four \
+             forward keys plus three parse-side field inits). A guard that \
+             scans nothing reports no offenders — this is the count that would \
+             have caught a guard reading the wrong files, and #9298 raised it \
+             from 5 after confirming the true figure by inspection."
         );
+    }
+}
+
+
+/// #9298: the QUOTED PPTP Call ID must reach the parser's output.
+///
+/// This module is the PURE half of the #9298 split. `gre_transit_discriminator`
+/// refuses every version-1 header — correctly, because version 1 re-purposes the
+/// 32 bits after the flags as `Payload Length | Call ID`, and reading them as an
+/// RFC 2890 Key would promote a per-packet-varying length into a stable tunnel
+/// identity. So the quote's discriminator is `Unparseable`, and the Call ID has
+/// to travel out of the parser as raw BYTES for
+/// `resolve_quoted_pptp_discriminator` to turn into a handle where the
+/// association table is in scope.
+///
+/// The two halves are asserted TOGETHER below, because the failure mode of
+/// getting this wrong is not a missing field — it is `Keyed(payload_len << 16 |
+/// call_id)`, a plausible-looking identity that differs for every packet.
+#[cfg(test)]
+mod pptp_quote_call_id_9298_tests {
+    use super::*;
+
+    /// K bit (0x2000) + version 1 (0x0001), RFC 2637 §4.1.
+    const PPTP_FLAGS_V1: u16 = 0x3001;
+    /// The per-packet payload length that shares the 32-bit word with the id.
+    const PAYLOAD_LEN: [u8; 2] = [0x05, 0xdc];
+
+    fn quoted_v4_pptp(call_id: u16) -> Vec<u8> {
+        let mut tail = PAYLOAD_LEN.to_vec();
+        tail.extend_from_slice(&call_id.to_be_bytes());
+        super::embedded_gre_discriminator_9031_tests::quoted_v4_gre(PPTP_FLAGS_V1, &tail)
+    }
+
+    #[test]
+    fn a_quoted_pptp_header_yields_the_call_id_and_stays_unparseable_9298() {
+        let hdr = parse_embedded_v4(&quoted_v4_pptp(0x0202), 0).expect("parse");
+        assert_eq!(hdr.proto, PROTO_GRE);
+        assert_eq!(
+            hdr.pptp_call_id,
+            Some(0x0202),
+            "#9298: the quoted Call ID must reach the caller. Without it the \
+             ICMP error for a PPTP data tunnel has nothing to resolve against \
+             the association table"
+        );
+        assert_eq!(
+            hdr.discriminator,
+            TunnelDiscriminator::Unparseable,
+            "#9298: the discriminator field itself must STAY Unparseable here. \
+             The Call ID is not a tunnel identity on its own — it is a wire \
+             value that differs per direction — so the parser must not \
+             manufacture one. Only `resolve_quoted_pptp_discriminator`, which \
+             can see the association table, may upgrade it"
+        );
+        // THE FAILURE MODE THIS GUARDS: reading the whole 32-bit word as a Key.
+        let as_key = u32::from_be_bytes([PAYLOAD_LEN[0], PAYLOAD_LEN[1], 0x02, 0x02]);
+        assert_ne!(
+            hdr.discriminator,
+            TunnelDiscriminator::Keyed(as_key),
+            "#9298: the 32 bits after a version-1 flags word are `Payload \
+             Length | Call ID`, and the length varies per packet. Read as an \
+             RFC 2890 Key, every packet of one call gets a different identity"
+        );
+    }
+
+    /// A VERSION-0 quote must yield NO call id. The two dialects share a header
+    /// shape and mean different things by it; this is the row that would red if
+    /// the extractor stopped checking the version.
+    #[test]
+    fn a_version_0_keyed_quote_yields_no_call_id_9298() {
+        let p = super::embedded_gre_discriminator_9031_tests::quoted_v4_gre(
+            0x2000,
+            &0xDEAD_BEEFu32.to_be_bytes(),
+        );
+        let hdr = parse_embedded_v4(&p, 0).expect("parse");
+        assert_eq!(
+            hdr.pptp_call_id, None,
+            "#9298: an RFC 2890 Key is NOT a PPTP Call ID. Treating one as the \
+             other would resolve a keyed-GRE quote against the PPTP \
+             association table and cross two unrelated identity spaces"
+        );
+        assert_eq!(hdr.discriminator, TunnelDiscriminator::Keyed(0xDEAD_BEEF));
+    }
+
+    /// BOUNDED BY THE DECLARED QUOTE (#2361), same rule as the Key extractor.
+    #[test]
+    fn a_call_id_in_slack_past_the_declared_quote_is_not_read_9298() {
+        let mut slack = PAYLOAD_LEN.to_vec();
+        slack.extend_from_slice(&0x0202u16.to_be_bytes());
+        let p = super::embedded_gre_discriminator_9031_tests::quoted_v4_gre_with_slack(
+            PPTP_FLAGS_V1,
+            &[],
+            &slack,
+        );
+        let declared = u16::from_be_bytes([p[2], p[3]]) as usize;
+        assert!(
+            p.len() > declared,
+            "fixture: the slack must lie OUTSIDE the declared quote, or this \
+             cell is not about slack at all"
+        );
+        let hdr = parse_embedded_v4(&p, 0).expect("parse");
+        assert_eq!(
+            hdr.pptp_call_id, None,
+            "#9298: bytes beyond the quoted datagram's declared total-length \
+             were read as a Call ID. That is an attacker-chosen handle into the \
+             association table, from slack the quoted datagram does not cover"
+        );
+    }
+
+    /// NON-GRE COMPATIBILITY CONTROL: adding this field must not change any
+    /// other protocol's parse.
+    #[test]
+    fn non_gre_quotes_carry_no_call_id_9298() {
+        for proto in [PROTO_TCP, PROTO_UDP, PROTO_ICMP] {
+            let mut p = vec![0u8; 20];
+            p[0] = 0x45;
+            p[9] = proto;
+            p[12..16].copy_from_slice(&[10, 0, 1, 7]);
+            p[16..20].copy_from_slice(&[10, 0, 2, 8]);
+            // Bytes that WOULD read as flags 0x3001 + a call id if the parser
+            // stopped checking the protocol.
+            p.extend_from_slice(&[0x30, 0x01, 0x88, 0x0b, 0x05, 0xdc, 0x02, 0x02]);
+            let total = p.len() as u16;
+            p[2..4].copy_from_slice(&total.to_be_bytes());
+            let hdr = parse_embedded_v4(&p, 0).expect("parse");
+            assert_eq!(
+                hdr.pptp_call_id, None,
+                "#9298: protocol {proto} must carry no Call ID — the bytes at \
+                 that offset are a TCP/UDP/ICMP header, not a GRE one"
+            );
+        }
+    }
+
+    /// The IPv6 parser reads it too. PPTP over IPv6 is the same enhanced-GRE
+    /// header, and a v4-only parse leaves every IPv6 PTB for a PPTP tunnel
+    /// unresolvable.
+    #[test]
+    fn the_ipv6_quote_parser_reads_the_call_id_too_9298() {
+        let mut tail = PAYLOAD_LEN.to_vec();
+        tail.extend_from_slice(&0x0202u16.to_be_bytes());
+        let p = super::embedded_gre_discriminator_9031_tests::quoted_v6_gre(PPTP_FLAGS_V1, &tail);
+        let hdr = parse_embedded_v6(&p, 0).expect("parse v6");
+        assert_eq!(hdr.proto, PROTO_GRE);
+        assert_eq!(hdr.pptp_call_id, Some(0x0202));
+        assert_eq!(hdr.discriminator, TunnelDiscriminator::Unparseable);
     }
 }

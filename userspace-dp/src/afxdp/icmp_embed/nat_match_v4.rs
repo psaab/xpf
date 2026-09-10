@@ -33,6 +33,14 @@ pub(in crate::afxdp::icmp_embed) fn match_outer_v4(
         meta.ingress_vlan_id,
         None,
     );
+    // #9298: upgrade an `Unparseable` PPTP quote to the live call's handle.
+    // No-op for every other quote; a miss stays `Unparseable`.
+    let quoted_discriminator = super::resolve_quoted_pptp_discriminator(
+        ctx.sessions,
+        hdr.discriminator,
+        hdr.pptp_call_id,
+        emb_dst,
+    );
     let embedded_key = SessionKey {
         addr_family: libc::AF_INET as u8,
         protocol: hdr.proto,
@@ -43,7 +51,7 @@ pub(in crate::afxdp::icmp_embed) fn match_outer_v4(
         // #9031: the QUOTED tunnel's discriminator, not None. SessionKey's
         // Hash/Eq include it (#7188), so a hard-coded None made every
         // exact index probe for a GRE quote MISS.
-        discriminator: hdr.discriminator,
+        discriminator: quoted_discriminator,
         routing_domain: embedded_routing_domain,
     };
     let reverse_key = embedded_reply_key(
@@ -53,7 +61,7 @@ pub(in crate::afxdp::icmp_embed) fn match_outer_v4(
         emb_dst,
         hdr.src_port,
         hdr.dst_port,
-        hdr.discriminator,
+        quoted_discriminator,
         // #9162: the SAME domain the forward `embedded_key` above carries, not
         // a hardcoded 0. This key is probed against both kinds of index and a
         // real domain is right for both — the exact

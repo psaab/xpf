@@ -5350,3 +5350,462 @@ fn the_as_is_embedded_key_does_not_cross_tunnels_9031() {
          the other's session"
     );
 }
+
+
+// ---------------------------------------------------------------------------
+// #9298 END-TO-END: an ICMP error quoting a PPTP data packet must resolve
+// against the live call's session, through the real production arms.
+//
+// WHY THESE EXIST ON TOP OF THE UNIT CELLS. The five
+// `pptp_embedded_9298` cells in `icmp_embed/mod.rs` pin
+// `resolve_quoted_pptp_discriminator` itself. They cannot see the WIRING: the
+// three key constructors (`nat_match_v4`, `nat_match_v6`, `session_match`) each
+// call the resolver and drop the result into `SessionKey.discriminator`, and
+// reverting any ONE of those call sites back to `hdr.discriminator` leaves every
+// unit cell green — the function still behaves, nobody asks it. That is the
+// exact shape that let two mutants survive earlier in this campaign, and it is
+// why #9031's own acceptance asked for a resolved-frame observation rather than
+// a key comparison.
+//
+// Each cell below therefore drives `try_embedded_icmp_nat_match_from_frame` and
+// asserts on the RECOVERED PRE-NAT SOURCE, which is the thing the endpoint
+// needs and the thing that is unavailable when the probe misses.
+// ---------------------------------------------------------------------------
+
+/// A PPTP association plus a live GRE session carrying its handle.
+///
+/// The call ids are deliberately DIFFERENT per direction (RFC 2637 §4.1: each
+/// side allocates its own id naming the peer it sends to), so a fixture that
+/// accidentally worked by reading the wire value would only work in one
+/// direction.
+const PPTP_9298_CLIENT_CALL_ID: u16 = 0x0101;
+const PPTP_9298_SERVER_CALL_ID: u16 = 0x0202;
+
+fn install_pptp_association_9298(
+    sessions: &mut SessionTable,
+    client: IpAddr,
+    server: IpAddr,
+) -> u32 {
+    let call = crate::session::pptp::PptpCall::new(
+        client,
+        PPTP_9298_CLIENT_CALL_ID,
+        server,
+        PPTP_9298_SERVER_CALL_ID,
+    );
+    let control = crate::session::pptp::ControlChannelId::new(client, 49_152, server, 1723);
+    sessions
+        .pptp_mut()
+        .install(call, control, 1_000)
+        .expect("fixture: the PPTP association must install")
+}
+
+#[allow(clippy::too_many_arguments)]
+fn publish_pptp_gre_session_9298(
+    shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_nat_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_forward_wire_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    client: IpAddr,
+    server: IpAddr,
+    snat: IpAddr,
+    handle: u32,
+    egress_ifindex: i32,
+) {
+    let entry = SyncedSessionEntry {
+        key: SessionKey {
+            addr_family: if client.is_ipv4() {
+                libc::AF_INET as u8
+            } else {
+                libc::AF_INET6 as u8
+            },
+            protocol: PROTO_GRE,
+            src_ip: client,
+            dst_ip: server,
+            src_port: 0,
+            dst_port: 0,
+            // The live PPTP session carries the LOCALLY DERIVED handle
+            // (#7188 decision 6 / #7699), never a wire call id — the two
+            // directions of one call carry different wire values.
+            discriminator: TunnelDiscriminator::Pptp(handle),
+            routing_domain: 0,
+        },
+        decision: SessionDecision {
+            resolution: ForwardingResolution {
+                disposition: ForwardingDisposition::ForwardCandidate,
+                local_ifindex: 0,
+                egress_ifindex,
+                tx_ifindex: egress_ifindex,
+                tunnel_endpoint_id: 0,
+                next_hop: None,
+                neighbor_mac: Some([0x00, 0x11, 0x22, 0x33, 0x44, 0x55]),
+                src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x50, 0x08]),
+                tx_vlan_id: 80,
+            },
+            nat: NatDecision {
+                // ADDRESS-ONLY source NAT: `match_rules.rs` routes a protocol
+                // with no L4 ports to `reserve_address_only`, which is how GRE
+                // genuinely reaches same-family SNAT.
+                rewrite_src: Some(snat),
+                rewrite_dst: None,
+                rewrite_src_port: None,
+                rewrite_dst_port: None,
+                nat64: false,
+                nptv6: false,
+            },
+        },
+        metadata: SessionMetadata {
+            ingress_zone: TEST_LAN_ZONE_ID,
+            egress_zone: TEST_WAN_ZONE_ID,
+            ingress_ifindex: 0,
+            ingress_vlan_id: 0,
+            owner_rg_id: 0,
+            fabric_ingress: false,
+            is_reverse: false,
+            nat64_reverse: None,
+            log_session_init: false,
+            log_session_close: false,
+            policy_id: 0,
+            inactivity_timeout_ns: None,
+            policy_counter_idx: 0,
+            policy_counter: None,
+        },
+        origin: SessionOrigin::SyncImport,
+        protocol: PROTO_GRE,
+        tcp_flags: 0,
+        generation: 0,
+        session_id: 0,
+    };
+    let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
+    publish_shared_session(
+        shared_sessions,
+        shared_nat_sessions,
+        shared_forward_wire_sessions,
+        &shared_owner_rg_indexes,
+        &entry,
+    );
+}
+
+/// FAIL-ON-REVERT (IPv4 arm). Sever `nat_match_v4`'s call to
+/// `resolve_quoted_pptp_discriminator` — put `hdr.discriminator` back in the
+/// key — and this reds: the quote carries `Unparseable`, the live session
+/// carries `Pptp(handle)`, `SessionKey`'s Eq includes the field (#7188), and the
+/// probe misses.
+#[test]
+fn embedded_icmp_resolves_a_pptp_call_v4_9298() {
+    let router_ip = Ipv4Addr::new(10, 0, 0, 1);
+    let snat_ip = Ipv4Addr::new(172, 16, 80, 8);
+    let client_ip = Ipv4Addr::new(10, 0, 61, 102);
+    let server_ip = Ipv4Addr::new(1, 1, 1, 1);
+
+    // The quote is of a packet the firewall SENT to the server, so it carries
+    // the call id the SERVER allocated.
+    let frame = build_icmp_te_frame_v4_pptp(router_ip, snat_ip, server_ip, PPTP_9298_SERVER_CALL_ID);
+    let meta = UserspaceDpMeta {
+        magic: USERSPACE_META_MAGIC,
+        version: USERSPACE_META_VERSION,
+        length: std::mem::size_of::<UserspaceDpMeta>() as u16,
+        l3_offset: 14,
+        l4_offset: 34,
+        addr_family: libc::AF_INET as u8,
+        protocol: PROTO_ICMP,
+        ..UserspaceDpMeta::default()
+    };
+
+    let mut sessions = SessionTable::new();
+    let handle = install_pptp_association_9298(
+        &mut sessions,
+        IpAddr::V4(client_ip),
+        IpAddr::V4(server_ip),
+    );
+    let forwarding = build_forwarding_state(&nat_snapshot());
+    let neighbors = Arc::new(ShardedNeighborMap::new());
+    learn_dynamic_neighbor(
+        &forwarding,
+        &neighbors,
+        24,
+        0,
+        IpAddr::V4(client_ip),
+        [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff],
+    );
+    let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
+    publish_pptp_gre_session_9298(
+        &shared_sessions,
+        &shared_nat_sessions,
+        &shared_forward_wire_sessions,
+        IpAddr::V4(client_ip),
+        IpAddr::V4(server_ip),
+        IpAddr::V4(snat_ip),
+        handle,
+        12,
+    );
+
+    let icmp_match = try_embedded_icmp_nat_match_from_frame(
+        &frame,
+        meta,
+        &mut sessions,
+        &forwarding,
+        &neighbors,
+        &shared_sessions,
+        &shared_nat_sessions,
+        &shared_forward_wire_sessions,
+        1_000_000,
+    )
+    .expect(
+        "#9298: the ICMP error quoting a PPTP data packet found NO session. \
+         `gre_transit_discriminator` returns Unparseable for EVERY version-1 \
+         header, so without resolving the quoted Call ID against the \
+         association table the probe carries a discriminator that equals no \
+         live session — PMTUD and unreachable signalling stay suppressed for \
+         every PPTP tunnel, which is the half #9031 left open",
+    );
+
+    // THE RECOVERED TUPLE, not just a key hit.
+    assert_eq!(
+        icmp_match.original_src,
+        IpAddr::V4(client_ip),
+        "#9298: the quoted source must be un-translated back to the client"
+    );
+    assert_eq!(icmp_match.nat.rewrite_src, Some(IpAddr::V4(snat_ip)));
+    assert_eq!(icmp_match.embedded_proto, PROTO_GRE);
+    assert_eq!(
+        icmp_match.resolution.egress_ifindex, 24,
+        "the error must be returned toward the client's ingress interface"
+    );
+    assert_eq!(
+        icmp_match.resolution.neighbor_mac,
+        Some([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff])
+    );
+}
+
+/// FAIL-ON-REVERT (IPv6 arm). `nat_match_v6` is a SEPARATE key constructor; a
+/// v4-only cell leaves it free to be reverted with every test still green.
+#[test]
+fn embedded_icmp_resolves_a_pptp_call_v6_9298() {
+    let router_v6: Ipv6Addr = "2001:559:8585:ef00::fe".parse().expect("router v6");
+    let snat_v6: Ipv6Addr = "2001:559:8585:80::8".parse().expect("snat v6");
+    let client_v6: Ipv6Addr = "2001:559:8585:bf01::102".parse().expect("client v6");
+    let server_v6: Ipv6Addr = "2606:4700:4700::1111".parse().expect("server v6");
+
+    let frame =
+        build_icmpv6_te_frame_pptp(router_v6, snat_v6, server_v6, PPTP_9298_SERVER_CALL_ID);
+    let meta = UserspaceDpMeta {
+        magic: USERSPACE_META_MAGIC,
+        version: USERSPACE_META_VERSION,
+        length: std::mem::size_of::<UserspaceDpMeta>() as u16,
+        l3_offset: 14,
+        l4_offset: 54,
+        addr_family: libc::AF_INET6 as u8,
+        protocol: PROTO_ICMPV6,
+        ..UserspaceDpMeta::default()
+    };
+
+    let mut sessions = SessionTable::new();
+    let handle = install_pptp_association_9298(
+        &mut sessions,
+        IpAddr::V6(client_v6),
+        IpAddr::V6(server_v6),
+    );
+    let forwarding = build_forwarding_state(&nat_snapshot());
+    let neighbors = Arc::new(ShardedNeighborMap::new());
+    let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
+    publish_pptp_gre_session_9298(
+        &shared_sessions,
+        &shared_nat_sessions,
+        &shared_forward_wire_sessions,
+        IpAddr::V6(client_v6),
+        IpAddr::V6(server_v6),
+        IpAddr::V6(snat_v6),
+        handle,
+        12,
+    );
+
+    let icmp_match = try_embedded_icmp_nat_match_from_frame(
+        &frame,
+        meta,
+        &mut sessions,
+        &forwarding,
+        &neighbors,
+        &shared_sessions,
+        &shared_nat_sessions,
+        &shared_forward_wire_sessions,
+        1_000_000,
+    )
+    .expect(
+        "#9298: the IPv6 arm must resolve a quoted PPTP Call ID too. PPTP over \
+         IPv6 is the same enhanced-GRE header; leaving `nat_match_v6` on \
+         `hdr.discriminator` makes it miss for exactly the same reason the v4 \
+         arm did",
+    );
+    assert_eq!(
+        icmp_match.original_src,
+        IpAddr::V6(client_v6),
+        "#9298: the quoted source must be un-translated back to the client"
+    );
+    assert_eq!(icmp_match.nat.rewrite_src, Some(IpAddr::V6(snat_v6)));
+    assert_eq!(icmp_match.embedded_proto, PROTO_GRE);
+}
+
+/// FAIL-OPEN GUARD: a quote naming a DIFFERENT call must NOT resolve against
+/// this session.
+///
+/// This one does NOT distinguish fixed from broken — it returns `None` before
+/// and after — and it is not here to. It guards the direction a careless remedy
+/// takes: wildcarding the discriminator, or resolving an unknown Call ID to
+/// "whatever association is around", would satisfy the two cells above while
+/// attributing one call's ICMP error to another call's session. PPTP tunnels
+/// between one address pair are distinguished by nothing else.
+#[test]
+fn embedded_icmp_does_not_cross_pptp_calls_9298() {
+    let router_ip = Ipv4Addr::new(10, 0, 0, 1);
+    let snat_ip = Ipv4Addr::new(172, 16, 80, 8);
+    let client_ip = Ipv4Addr::new(10, 0, 61, 102);
+    let server_ip = Ipv4Addr::new(1, 1, 1, 1);
+
+    // A call id the association table has never seen.
+    let frame = build_icmp_te_frame_v4_pptp(router_ip, snat_ip, server_ip, 0x0999);
+    let meta = UserspaceDpMeta {
+        magic: USERSPACE_META_MAGIC,
+        version: USERSPACE_META_VERSION,
+        length: std::mem::size_of::<UserspaceDpMeta>() as u16,
+        l3_offset: 14,
+        l4_offset: 34,
+        addr_family: libc::AF_INET as u8,
+        protocol: PROTO_ICMP,
+        ..UserspaceDpMeta::default()
+    };
+
+    let mut sessions = SessionTable::new();
+    let handle = install_pptp_association_9298(
+        &mut sessions,
+        IpAddr::V4(client_ip),
+        IpAddr::V4(server_ip),
+    );
+    let forwarding = build_forwarding_state(&nat_snapshot());
+    let neighbors = Arc::new(ShardedNeighborMap::new());
+    let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
+    publish_pptp_gre_session_9298(
+        &shared_sessions,
+        &shared_nat_sessions,
+        &shared_forward_wire_sessions,
+        IpAddr::V4(client_ip),
+        IpAddr::V4(server_ip),
+        IpAddr::V4(snat_ip),
+        handle,
+        12,
+    );
+
+    assert!(
+        try_embedded_icmp_nat_match_from_frame(
+            &frame,
+            meta,
+            &mut sessions,
+            &forwarding,
+            &neighbors,
+            &shared_sessions,
+            &shared_nat_sessions,
+            &shared_forward_wire_sessions,
+            1_000_000,
+        )
+        .is_none(),
+        "#9298: an ICMP error quoting an UNKNOWN PPTP Call ID must not resolve \
+         against a live call. Attributing it would rewrite the error to the \
+         wrong endpoint"
+    );
+}
+
+/// THE THIRD CALL SITE. `session_match` is the same-family plain-lookup arm.
+///
+/// It has no non-test caller today (`afxdp/mod.rs` imports its wrapper under
+/// `#[cfg(test)]`), so a mutant at its call site would be INERT in production —
+/// but it is test-REACHABLE, and this cell is what makes reverting it red
+/// instead of survive. That distinction matters: the reason the resolve is
+/// there at all is so whoever wires this path does not inherit one that
+/// silently misses every PPTP quote, and an unbound copy would rot out of step
+/// with the two production arms without anything noticing.
+#[test]
+fn embedded_icmp_session_match_resolves_a_pptp_call_9298() {
+    let router_ip = Ipv4Addr::new(10, 0, 0, 1);
+    let tunnel_src = Ipv4Addr::new(172, 16, 80, 8);
+    let tunnel_dst = Ipv4Addr::new(1, 1, 1, 1);
+
+    let frame =
+        build_icmp_te_frame_v4_pptp(router_ip, tunnel_src, tunnel_dst, PPTP_9298_SERVER_CALL_ID);
+    let meta = UserspaceDpMeta {
+        magic: USERSPACE_META_MAGIC,
+        version: USERSPACE_META_VERSION,
+        length: std::mem::size_of::<UserspaceDpMeta>() as u16,
+        l3_offset: 14,
+        l4_offset: 34,
+        addr_family: libc::AF_INET as u8,
+        protocol: PROTO_ICMP,
+        ..UserspaceDpMeta::default()
+    };
+
+    let mut sessions = SessionTable::new();
+    let handle = install_pptp_association_9298(
+        &mut sessions,
+        IpAddr::V4(tunnel_src),
+        IpAddr::V4(tunnel_dst),
+    );
+    // Keyed EXACTLY on the quoted tuple, so only the as-is `embedded_key` — the
+    // forward constructor under test — can find it.
+    assert!(sessions.install_with_protocol(
+        SessionKey {
+            addr_family: libc::AF_INET as u8,
+            protocol: PROTO_GRE,
+            src_ip: IpAddr::V4(tunnel_src),
+            dst_ip: IpAddr::V4(tunnel_dst),
+            src_port: 0,
+            dst_port: 0,
+            discriminator: TunnelDiscriminator::Pptp(handle),
+            routing_domain: 0,
+        },
+        SessionDecision {
+            resolution: ForwardingResolution {
+                disposition: ForwardingDisposition::ForwardCandidate,
+                local_ifindex: 0,
+                egress_ifindex: 12,
+                tx_ifindex: 12,
+                tunnel_endpoint_id: 0,
+                next_hop: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 1))),
+                neighbor_mac: Some([0x00, 0x11, 0x22, 0x33, 0x44, 0x55]),
+                src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]),
+                tx_vlan_id: 80,
+            },
+            nat: NatDecision::default(),
+        },
+        SessionMetadata {
+            ingress_zone: TEST_LAN_ZONE_ID,
+            egress_zone: TEST_WAN_ZONE_ID,
+            ingress_ifindex: 0,
+            ingress_vlan_id: 0,
+            owner_rg_id: 0,
+            fabric_ingress: false,
+            is_reverse: false,
+            nat64_reverse: None,
+            log_session_init: false,
+            log_session_close: false,
+            policy_id: 0,
+            inactivity_timeout_ns: None,
+            policy_counter_idx: 0,
+            policy_counter: None,
+        },
+        123_000_000_000,
+        PROTO_GRE,
+        0,
+    ));
+
+    assert!(
+        try_embedded_icmp_session_match_from_frame(&frame, meta, &mut sessions, 123_100_000_000, 0)
+            .is_some(),
+        "#9298: the as-is embedded key found no session for a quoted PPTP data \
+         packet whose session is keyed on exactly that tuple. SessionKey's Eq \
+         includes the discriminator, so a forward key left on the quote's \
+         `Unparseable` can never equal a session carrying Pptp(handle)"
+    );
+}
