@@ -192,6 +192,20 @@ type Daemon struct {
 	// ipsecInitiateFn overrides the swanctl initiate call. Test seam only
 	// (#9139); nil in production. See Daemon.ipsecInitiate.
 	ipsecInitiateFn func(name string) error
+	// ipsecSAIndex caches the #9511 SA name index per active config, so a
+	// takeover wave does not re-render every VPN once per redundancy group.
+	ipsecSAIndex atomic.Pointer[ipsecSAIndexCache]
+	// ipsecSAIndexMu serialises cache MISSES in cachedIPsecSANameIndex, so
+	// the per-RG re-initiate goroutines of one takeover wave build and warn
+	// once instead of once each. Leaf lock: it is taken only there, and
+	// while it is held only store.mu (read) and slog handler locks are taken.
+	ipsecSAIndexMu sync.Mutex
+	// ipsecLoadedCfg is the config whose IPsec section strongSwan has actually
+	// LOADED from this process (#9511), recorded by applyIPsecTracked. HA IPsec
+	// attribution reads it rather than the promoted config, because a failed
+	// render or reload leaves the previous generation loaded. Nil until the
+	// first successful load in this process.
+	ipsecLoadedCfg atomic.Pointer[config.Config]
 	// ipsecActiveNamesFn overrides the swanctl active-SA read. Test seam only
 	// (#9139); nil in production. See Daemon.ipsecActiveNames — it exists so
 	// the ADVERTISE GATE'S CALL SITE is observable, not just the gate function.

@@ -42,7 +42,7 @@ All multi-byte integers in the wire format are **little-endian**, matching the n
 | 6    | BulkEnd          | Primary→Secondary | 8 or 24 bytes       | Marks end of bulk transfer: 8B epoch, plus the sender's 16B boot incarnation (#9174) when it has one |
 | 7    | Heartbeat        | Bidirectional     | 0                   | Keepalive (sent on 30s idle) |
 | 8    | Config           | Primary→Secondary | Variable (UTF-8) + 16B gen framing | Full config text + monotonic config generation (#3931) |
-| 9    | IPsecSA          | Primary→Secondary | Variable (UTF-8) + 1B delim + 24B seq framing | Newline-separated connection names + `\n` delimiter + full-set (incarnation, seq) ordering trailer (#5706) |
+| 9    | IPsecSA          | Primary→Secondary | Variable (UTF-8) + 1B delim + 24B seq framing | Newline-separated SA names (child SA names; the IKE connection name only for an IKE SA with no child yet, #9511) + `\n` delimiter + full-set (incarnation, seq) ordering trailer (#5706) |
 | 25   | DHCPLeaseV4      | Primary→Secondary | count+records + 24B seq framing | Full-set v4 lease push (#2239) + (incarnation, seq) ordering trailer (#5706) |
 | 26   | DHCPLeaseV6      | Primary→Secondary | count+records + 24B seq framing | Full-set v6 lease push (#2239) + (incarnation, seq) ordering trailer (#5706) |
 
@@ -1205,7 +1205,9 @@ refused). New sender → old receiver:
 
 ## IPsec SA Payload (Variable)
 
-Newline-separated (`\n`) list of strongSwan connection names (e.g., `vpn-gw1\nvpn-gw2`), followed by a single `\n` delimiter and then the 24-byte #5706 (incarnation, seq) ordering trailer — i.e. `vpn-gw1\nvpn-gw2\n<trailer>`. The delimiter keeps the trailer from fusing onto the last name for an old newline-decoder (see the mixed-version note above); a new receiver strips both the trailer and the delimiter. On failover, the new primary calls `swanctl --initiate` for each name.
+Newline-separated (`\n`) list of the SA names `swanctl --list-sas` reports on the sender (`ipsec.ActiveConnectionNames`), followed by a single `\n` delimiter and then the 24-byte #5706 (incarnation, seq) ordering trailer — i.e. `vpn-gw1\nsite-a-ts1\nsite-a-ts2\n<trailer>`. The delimiter keeps the trailer from fusing onto the last name for an old newline-decoder (see the mixed-version note above); a new receiver strips both the trailer and the delimiter.
+
+The names are **SA names, normally CHILD SA names**, not VPN names (#9511). A VPN with no `traffic-selector` has one child named after the VPN (`vpn-gw1`); a VPN with `traffic-selector` entries has one child `<vpn>-<selector>` per selector and no child named `<vpn>` (`site-a-ts1`, `site-a-ts2`). The IKE SA name (= the VPN name) appears only for an IKE SA that has no child yet, and for a multi-selector VPN that name cannot be initiated with `--child`, because no child section carries it. On failover the taking node calls `swanctl --initiate --child <name>` for each name it owns, which is why the field carries child names and must keep doing so; the receiver maps a name back to its VPN (for per-redundancy-group attribution) through `ipsec.BuildSANameIndex`, not through the wire.
 
 ## Sync Algorithms
 

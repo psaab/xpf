@@ -2468,7 +2468,7 @@ func (d *Daemon) advertiseIPsecSAOnce(lastFP string, force bool) string {
 	}
 	names, err := d.ipsecActiveNames()
 	if err != nil {
-		slog.Debug("cluster: failed to get IPsec connection names", "err", err)
+		slog.Debug("cluster: failed to get IPsec SA names", "err", err)
 		return lastFP
 	}
 	push, fp := ipsecSASyncAdvertise(names, lastFP, force)
@@ -2568,14 +2568,16 @@ func (d *Daemon) reinitiateIPsecSAs() {
 //
 // Split from the effect so the DECISION can be driven without swanctl.
 func (d *Daemon) ipsecSAsToReinitiate(names []string) []string {
-	var cfg *config.Config
-	if d.store != nil {
-		cfg = d.store.ActiveConfig()
-	}
+	// #9511: attribute against the generation strongSwan has LOADED, not the
+	// promoted config; they differ after a failed IPsec render or reload.
+	cfg := d.ipsecAttributionConfig()
+	// #9511: one index per active config, not per name or per pass; building it
+	// renders every VPN.
+	idx := d.cachedIPsecSANameIndex(cfg)
 	owned := make([]string, 0, len(names))
 	var skipped []string
 	for _, name := range names {
-		if d.ownsIPsecConn(cfg, name) {
+		if d.ownsIPsecConn(cfg, idx, name) {
 			owned = append(owned, name)
 		} else {
 			skipped = append(skipped, name)

@@ -434,7 +434,7 @@ switch ("standby retains newer set").
 | 6 | BulkEnd | Primary -> Secondary | End of bulk transfer |
 | 7 | Heartbeat | Bidirectional | Keepalive |
 | 8 | Config | Primary -> Secondary | Full config text |
-| 9 | IPsecSA | Primary -> Secondary | IPsec connection names |
+| 9 | IPsecSA | Primary -> Secondary | IPsec SA names from `swanctl --list-sas`: child SA names, or the IKE connection name for an IKE SA with no child yet (#9511) |
 | 10 | Failover | Bidirectional | Remote failover request |
 | 11 | Fence | Bidirectional | Peer fencing |
 | 12 | ClockSync | Bidirectional | Monotonic clock exchange |

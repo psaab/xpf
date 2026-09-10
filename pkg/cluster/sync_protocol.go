@@ -807,7 +807,8 @@ func decodeSessionV6Payload(payload []byte) (dataplane.SessionKeyV6, dataplane.S
 	return key, val, true
 }
 
-// encodeIPsecSAPayload encodes a list of IPsec connection names as
+// encodeIPsecSAPayload encodes a list of IPsec SA names (child SA names; the IKE
+// connection name only for an IKE SA with no child yet, #9511) as
 // newline-separated bytes.
 func encodeIPsecSAPayload(names []string) []byte {
 	if len(names) == 0 {
