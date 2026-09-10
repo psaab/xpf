@@ -3025,6 +3025,26 @@ mechanism (PATH C of `docs/research/2239-dhcp-ha-lease-sync/plan.md`):
   are far below it (#4892). The wire format is unchanged; the decoder
   (`getLeaseString`) is untouched — the writer just never emits an oversized
   field.
+- **Decode bound (#9507)** — the receiver VALIDATES BEFORE IT ALLOCATES.
+  - **Why.** A frame is unauthenticated when the cluster has no key, and the old
+    decoder preallocated the wire count, clamped only to `len/4`. It also accepted
+    zero-length records, so 4 wire bytes bought a retained 168-byte lease: 42x the
+    frame, about 672 MiB per family at the 16 MiB cap.
+  - **Pass 1, with no allocation.** `decodeDHCPLeasePayload` walks every record the
+    count names. It refuses the frame (`nil, false`, so the full-set REPLACE is
+    suppressed and the standby keeps its set) on any of:
+    - a count above `len/4`;
+    - a record shorter than `minDHCPLeaseRecordLen` = 36, the #2239 layout with a
+      one-byte address;
+    - a cut record;
+    - an empty or record-overrunning address.
+  - **Pass 2** allocates exactly the validated records.
+  - **#7175 unchanged.** An over-declared count on whole records still decodes, and
+    a cut record still refuses the set.
+  - **The bound.** A retained lease costs at least 40 wire bytes, so lease structs
+    are at most about 4.2x the frame (plus its string bytes), and an impossible frame
+    allocates nothing. `dhcp_lease_decode_bound_9507_test.go` pins it, including a
+    full-frame legitimate set that must still decode completely.
 - **Full-set ordering (#5706)** — like IPsec SA sync, each v4/v6 lease push is a
   wholesale REPLACE, so a reorder across the two concurrent fabric `receiveLoop`s
   could regress the held set. `QueueDHCPLeases` appends a per-family

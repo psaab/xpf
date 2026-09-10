@@ -626,7 +626,8 @@ change (#1960 no-brick).
 
 The advisories make the gap VISIBLE; they do not close it. For IPsec,
 enforcement needs the kernel → userspace capture bridge that the #7167
-adjudication selected (Option B2), which is not built. For WireGuard, the
+adjudication selected (Option B2), which is not built; #9506 owns it. For
+WireGuard, the
 degraded-dataplane half of the kernel path is #9594; the uncovered-ingress half
 was kept deliberately, because on such an ingress the TUN write is the only
 path and dropping it black-holes the tunnel (`docs/log/8274.md`).

@@ -1002,9 +1002,11 @@ func (st *zoneMapState) mapZoneInterface(dp DataPlane, cfg *config.Config, resul
 			// Recorded as an unarmed surface, not skipped silently: an UP,
 			// zoned netdev with no XDP is exactly the state #5275's arm-
 			// coverage proof exists to report, and this is a real adjudication
-			// gap for a tunnel (tracked as #8274 / #8276) rather than a
-			// no-op — it is simply a better gap than adjudicating on a
-			// misparsed header.
+			// gap for a tunnel rather than a no-op — it is simply a better gap
+			// than adjudicating on a misparsed header. Owners: the IPsec gap is
+			// #9506. WireGuard's main path no longer enters through its TUN
+			// (#8274 decapsulates on the underlay binding); what still does is
+			// its kernel-path residual, #9594 for degraded windows.
 			slog.Info("skipping XDP/TC attachment for non-Ethernet netdev",
 				"name", physName, "ifindex", physIface.Index, "encap", encap)
 			result.recordUnarmedSurface(
