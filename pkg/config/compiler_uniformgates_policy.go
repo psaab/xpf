@@ -133,8 +133,12 @@ func runUniformGatesPolicy(tree *ConfigTree, cfg *Config, opts compileOpts) erro
 	// counter, so hit-count observability breaks (the two rules cannot be told
 	// apart) and removing one duplicate transfers its accumulated hits to the
 	// survivor. Lenient on load / peer-sync (warn so an already-persisted or
-	// peer-synced config still boots — #1960 no-brick; first-match enforcement is
-	// still correct, only the shared-counter observability bug remains). The
+	// peer-synced config still boots — #1960 no-brick). This used to add that
+	// "first-match enforcement is still correct, only the shared-counter
+	// observability bug remains"; that is historical. On the tolerant path the
+	// #8752 fold merges a repeated name into ONE policy (last action, union of the
+	// match criteria), and a merge that would turn a statement's deny into a
+	// permit is poisoned so the snapshot is refused (#9571). The
 	// validator reads the already-aggregated typed Policies/GlobalPolicies slices,
 	// so a duplicate split across two `security {}` blocks is still caught
 	// (compileSecurity runs for every `security` root). Runs after the policy

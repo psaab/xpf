@@ -429,6 +429,26 @@ path downgrades to a warning AND `compilePolicy` defaults an actionless
 policy's `Action` to `PolicyDeny`, so a leniently-loaded bad config fails
 closed rather than open. See `docs/config-schema.md` "#3043".
 
+**A duplicate policy name never turns a deny into a permit on load (#9571):**
+a strict commit rejects two policies that share a name in one context (#3473).
+The tolerant load / peer-sync / upgrade path instead folds the repeated
+`policy <name>` statements into the first occurrence (#8752,
+`dup_instance_merge_8752.go`), and the merged policy takes the LAST terminal
+action and the UNION of the statements' match criteria. When one statement said
+`deny` or `reject` and the merged policy permits, the merge would admit traffic
+that statement denied. Such a policy is still merged but is marked
+`LenientContentDropped` (`markFoldWidenedPolicies9571`): the snapshot builder
+poisons it, the helper refuses the whole snapshot (previous-good retained,
+fresh-boot default-deny), `show security match-policies` reports the refusal,
+and `commit confirmed` will not arm a rollback to it (#6707). Before the fold the
+same text was refused as well, by the helper's duplicate-rule-id check. The
+narrowing direction (a later `deny` over an earlier `permit`, the #8752 fixture)
+still folds without poison, and so do duplicates whose actions agree. Both
+compile entry points apply it; the actions are read by calling `compilePolicy`,
+not by re-parsing `then`. Coverage: `dup_policy_fold_widening_9571_test.go`,
+`pkg/dataplane/userspace/dup_policy_fold_widening_9571_test.go`,
+`pkg/policymatch/fold_widening_9571_test.go`.
+
 **Security-policy `then log` requires session-init/session-close (#3060):**
 the schema accepts a bare `then log`, and `compilePolicy` compiles it to a
 non-nil `PolicyLog` with both `SessionInit` and `SessionClose` false. The

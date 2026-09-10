@@ -1853,8 +1853,9 @@ type compileOpts struct {
 	// buildPolicyRuleCounterIndex is last-write-wins on the RuleID. The tolerant
 	// load / peer-sync paths downgrade to a warning so an already-persisted or
 	// peer-synced config an older binary accepted still BOOTS (#1960 no-brick);
-	// first-match enforcement is still correct on that path (only the shared-
-	// counter observability bug remains). Same doctrine as lenientPolicyLogAction.
+	// on that path the #8752 fold merges a repeated name into one policy, and a
+	// merge that would turn a statement's deny into a permit is poisoned rather
+	// than enforced (#9571). Same doctrine as lenientPolicyLogAction.
 	lenientDuplicatePolicyNames bool
 	// lenientScreenProfileRefs (#3066) downgrades the zone screen-profile
 	// reference gate (validateScreenProfileReferencesStrict) from a hard

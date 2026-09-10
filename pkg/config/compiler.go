@@ -234,8 +234,15 @@ func compileConfigWithOpts(tree *ConfigTree, opts compileOpts) (*Config, error) 
 				"first occurrence (#9023); previously the later block replaced the earlier "+
 				"one and its configuration was discarded")
 	}
+	// #9571: the fold also reports every policy it merged into a PERMIT although
+	// one of the statements said deny or reject. Those are poisoned right after
+	// the compile below (markFoldWidenedPolicies9571), so the load is refused
+	// rather than admitting traffic a statement denied.
+	var foldWidened []foldWidenedPolicy9571
 	if opts.lenientDuplicatePolicyNames {
-		for _, what := range mergeDuplicateNamedInstances(tree) {
+		var merged []string
+		merged, foldWidened = mergeDuplicateNamedInstances(tree)
+		for _, what := range merged {
 			// The wording deliberately carries "duplicate policy name" and
 			// "#3473": that is the existing contract for this diagnostic, and
 			// the #3473 cell matches on it. Merging must not silently retire a
@@ -245,6 +252,9 @@ func compileConfigWithOpts(tree *ConfigTree, opts compileOpts) (*Config, error) 
 					"into the first occurrence on the tolerant path so the configuration "+
 					"loads as authored; a strict commit rejects the duplicate instead "+
 					"(#3473/#8752)")
+		}
+		for _, w := range foldWidened {
+			dupMergeWarnings = append(dupMergeWarnings, foldWidenedWarning9571(w))
 		}
 	}
 
@@ -418,6 +428,10 @@ func compileConfigWithOpts(tree *ConfigTree, opts compileOpts) (*Config, error) 
 	if usedNodeFallback {
 		cfg.Warnings = append(cfg.Warnings, `apply-groups "${node}" resolved using default node0 context during generic compile`)
 	}
+	// #9571: poison what the fold widened. After the compile, because the flag
+	// lives on the compiled policy; before return, because the snapshot builder
+	// and the #6707 rollback preflight both read it from the returned cfg.
+	markFoldWidenedPolicies9571(cfg, foldWidened)
 	cfg.Warnings = append(cfg.Warnings, tunnelIDWarnings...)
 	cfg.Warnings = append(cfg.Warnings, dupMergeWarnings...)
 	cfg.Warnings = append(cfg.Warnings, zoneIDWarnings...)
@@ -521,8 +535,15 @@ func compileConfigForNodeWithOpts(tree *ConfigTree, nodeID int, opts compileOpts
 				"first occurrence (#9023); previously the later block replaced the earlier "+
 				"one and its configuration was discarded")
 	}
+	// #9571: the fold also reports every policy it merged into a PERMIT although
+	// one of the statements said deny or reject. Those are poisoned right after
+	// the compile below (markFoldWidenedPolicies9571), so the load is refused
+	// rather than admitting traffic a statement denied.
+	var foldWidened []foldWidenedPolicy9571
 	if opts.lenientDuplicatePolicyNames {
-		for _, what := range mergeDuplicateNamedInstances(tree) {
+		var merged []string
+		merged, foldWidened = mergeDuplicateNamedInstances(tree)
+		for _, what := range merged {
 			// The wording deliberately carries "duplicate policy name" and
 			// "#3473": that is the existing contract for this diagnostic, and
 			// the #3473 cell matches on it. Merging must not silently retire a
@@ -532,6 +553,9 @@ func compileConfigForNodeWithOpts(tree *ConfigTree, nodeID int, opts compileOpts
 					"into the first occurrence on the tolerant path so the configuration "+
 					"loads as authored; a strict commit rejects the duplicate instead "+
 					"(#3473/#8752)")
+		}
+		for _, w := range foldWidened {
+			dupMergeWarnings = append(dupMergeWarnings, foldWidenedWarning9571(w))
 		}
 	}
 
@@ -683,6 +707,10 @@ func compileConfigForNodeWithOpts(tree *ConfigTree, nodeID int, opts compileOpts
 		return nil, err
 	}
 
+	// #9571: poison what the fold widened. After the compile, because the flag
+	// lives on the compiled policy; before return, because the snapshot builder
+	// and the #6707 rollback preflight both read it from the returned cfg.
+	markFoldWidenedPolicies9571(cfg, foldWidened)
 	cfg.Warnings = append(cfg.Warnings, tunnelIDWarnings...)
 	cfg.Warnings = append(cfg.Warnings, dupMergeWarnings...)
 	cfg.Warnings = append(cfg.Warnings, zoneIDWarnings...)
