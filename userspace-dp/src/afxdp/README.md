@@ -736,6 +736,22 @@ sync.
     extracted `queue_prebuilt_embedded_icmp_error` tail with the #5690 arm
     (HA/fabric finalizer, CoS classify with `flow_key = None`, prebuilt
     forward, never seeds a session).
+  - **#9528 — both ICMP-error arms run AFTER the interface input filter and
+    the PBR verdict:** each arm `continue`s with the descriptor consumed, and
+    each used to run ahead of a gate below it. The #6472 arm ran before the
+    input filter, and both ran before `ingress_route_table_override`. So an
+    `input` `discard` did not drop a translated error, a `then {
+    routing-instance X; discard; }` term could not drop either arm's error,
+    and neither term's counter advanced. The flowless `else` arm now builds
+    the L3 context, evaluates the non-PBR input filter, then evaluates the PBR
+    verdict (`Drop` recycles the frame), and only then tries the #6472 and
+    #5690 arms. Both evaluators are HOISTED, not duplicated: the flowless
+    transit enforcement below consumes the same `route_table_override`, so
+    every term counts once. A non-drop steer is not applied to an error an arm
+    queues, which goes to the quoted session's owner (the #6835
+    association-hit reasoning). Cells are `*_9528` in
+    `tests_embedded_poll_filter.rs`, driven through `poll_binding` with a
+    no-filter control each.
   - **#9162 — the embedded-ICMP reply key carries the ROUTING DOMAIN:**
     `icmp_embed::parse::embedded_reply_key` hardcoded `routing_domain: 0`,
     justified by the domain-agnostic convention in `session/key.rs`. THE
