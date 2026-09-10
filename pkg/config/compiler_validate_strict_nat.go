@@ -4103,7 +4103,8 @@ type natV6Interval struct {
 // validateNATPoolExternalTupleOverlapStrict (#5144) rejects a config in which
 // two INDEPENDENT source-NAT / NAT64 allocators can mint the same external
 // tuple. The Rust dataplane keys the source-NAT PortAllocator by pool name +
-// address vector (userspace-dp/src/nat/source.rs) and the NAT64 allocator by
+// address vectors + port range (SourceNatPoolAllocatorKey,
+// userspace-dp/src/nat/source/mod.rs) and the NAT64 allocator by
 // (prefix_bytes, pool_v4) (userspace-dp/src/nat64.rs) — so differently-named
 // overlapping source pools, a source pool that also backs a NAT64 rule-set, two
 // NAT64 rule-sets sharing a pool under different prefixes, and duplicate members
@@ -4121,7 +4122,14 @@ type natV6Interval struct {
 // collision because the vulnerable config never reaches the dataplane.
 //
 // Allocator instances (owners) are enumerated exactly as the Rust helper keys
-// its allocators, so Go and the dataplane agree on what is "one allocator":
+// its allocators, so Go and the dataplane agree on what is "one allocator".
+// For source-NAT this is ENFORCED (#9428), not only asserted:
+// TestSourceNATOwnerKeyMatchesRustAllocatorKey9428 (pkg/dataplane/userspace)
+// derives the owner dedupe key below and every SourceNatPoolAllocatorKey field
+// from source and checks they agree. #9062 made this sentence false for
+// several hours with every suite green, because nothing but this comment said
+// it. Change the dedupe key and that cell tells you what the Rust key needs.
+// The NAT64 half of the sentence is not covered by it.
 //
 //   - source-NAT: one owner per DISTINCT pool a pool-mode `then source-nat pool
 //     <name>` rule references (all such rules share the pool-name-keyed

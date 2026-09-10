@@ -1853,7 +1853,7 @@ on revert of the peer gate (node0 accepts the peer-only SNAT error).
 ### Source-NAT / NAT64 external-tuple overlap (#5144)
 
 The Rust dataplane keys the source-NAT `PortAllocator` by pool name + address
-vector (`userspace-dp/src/nat/source.rs`) and the NAT64 allocator by
+vectors + port range (`SourceNatPoolAllocatorKey`, `userspace-dp/src/nat/source/mod.rs`) and the NAT64 allocator by
 `(prefix_bytes, pool_v4)` (`userspace-dp/src/nat64.rs`). Nothing tied those
 independent allocators together, so four config shapes each gave two allocators
 an overlapping claim on the same translated IPv4/IPv6 address: differently-named
@@ -1904,6 +1904,23 @@ the standby lenient-load the vulnerable independent allocators — the same
 divergent-commit fail-open #5876 closes for the other source-NAT gates. Run
 strict there (`lenient=false`), it rejects the node1-only overlap at a node0
 commit.
+
+**The source-NAT owner/key agreement is ENFORCED, not asserted (#9428).** The
+gate's soundness depends on its owner enumeration (one owner per referenced pool
+NAME) agreeing with `SourceNatPoolAllocatorKey`. Until #9428 only a comment said
+so, and #9062 made it false for several hours with every suite green (it added
+`from_routing_instance` to the Rust key; #9389 removed it).
+`TestSourceNATOwnerKeyMatchesRustAllocatorKey9428`
+(`pkg/dataplane/userspace/snat_owner_key_parity_9428_test.go`) derives both
+sides from source and checks two containments. First, every Rust key field comes
+from a snapshot field the Go builder fills ONLY from the pool looked up by name;
+otherwise the dataplane splits one gate owner and the gate UNDER-refuses.
+Second, every dimension of the Go owner key reaches a field the Rust key
+carries; otherwise the gate OVER-refuses. It traces all four `allocator_key_for`
+call sites, including the two apply-path ones that take their ports from
+`PendingPoolAllocator`. Fixture cells plant each kind of disagreement into the
+real sources and require a message naming the field and the side. NAT64 owner
+parity is the same shape and is NOT covered by it.
 
 **Interface-mode SNAT egress addresses are a THIRD owner domain (#6751 §5.7).**
 Interface mode draws no pool — it translates onto the egress interface's own

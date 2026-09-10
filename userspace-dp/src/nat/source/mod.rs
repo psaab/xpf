@@ -278,6 +278,17 @@ pub(crate) struct SourceNatRule {
     pub(crate) overlap_owners: Option<Arc<PoolAddressOwners>>,
 }
 
+/// One source-NAT allocator identity: two rules sharing this key share one
+/// `PortAllocator`.
+///
+/// #9428: the Go #5144 overlap gate (`validateNATPoolExternalTupleOverlapStrict`)
+/// counts ONE allocator owner per referenced pool NAME, and is only sound while
+/// every field here is a function of the pool that name selects.
+/// `TestSourceNATOwnerKeyMatchesRustAllocatorKey9428`
+/// (`pkg/dataplane/userspace`) derives these fields -- through
+/// `allocator_key_for`, every call site, and the snapshot parse -- and fails
+/// naming the field if one is not. Adding a field that is NOT pool-scoped
+/// (#9062 added a routing instance) needs the Go owner key widened too.
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
 pub(crate) struct SourceNatPoolAllocatorKey {
     pool_name: String,
