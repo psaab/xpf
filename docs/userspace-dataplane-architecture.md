@@ -1953,7 +1953,10 @@ probes per cold-path evaluation — no N×N materialization of concrete pairs. A
 `from-zone any to-zone junos-host` rule is enforced on the host-bound path too
 (`evaluate_junos_host_policy`); `to-zone any` / `from-zone any to-zone any` are
 deliberately not applied to host-bound traffic to preserve the management
-lifeline guarantee. This lifted the #3018 interim commit reject.
+lifeline guarantee. This lifted the #3018 interim commit reject. Host-bound
+evaluation uses the POST-destination-translation address and port, the same tuple
+transit policy is judged on (#2345, #9529); the reject reply and the deny record
+stay on the wire tuple.
 
 **Cold-path histogram slot coverage for wildcard/global policies (#3783).**
 The first-packet latency histogram (#1635, sparse slot map since #3075) is

@@ -69,6 +69,10 @@ pub(super) fn policy_packet_icmp(packet_frame: &[u8], meta: UserspaceDpMeta) -> 
 pub(super) fn junos_host_policy_eval(
     forwarding: &ForwardingState,
     flow: &SessionFlow,
+    // #9529: the destination the policy is asked about — post-translation for a
+    // host-bound packet that only reached the firewall through a DNAT. See
+    // [`host_bound_policy_dst`].
+    policy_dst: (IpAddr, u16),
     from_zone_id: u16,
     packet_len: u64,
     l4_present: bool,
@@ -78,10 +82,10 @@ pub(super) fn junos_host_policy_eval(
         &forwarding.policy,
         from_zone_id,
         flow.src_ip,
-        flow.dst_ip,
+        policy_dst.0,
         flow.forward_key.protocol,
         flow.forward_key.src_port,
-        flow.forward_key.dst_port,
+        policy_dst.1,
         packet_icmp,
         packet_len,
         l4_present,
@@ -181,6 +185,63 @@ pub(super) fn emit_host_inbound_deny(
     );
 }
 
+/// #9529: the destination the HOST-BOUND gates judge — the host-inbound service
+/// gate's port and `to-zone junos-host` policy's address and port.
+///
+/// Post-translation, because a packet DNATed to a firewall-local address is
+/// host-bound only BY VIRTUE of that translation: the kernel listener sees the
+/// translated tuple, and transit policy already judges it (#2345). Judging the
+/// wire tuple let a fine deny written on the firewall address or the translated
+/// port match nothing, and the kernel's `iifname`-scoped DROP rules cannot catch
+/// it either, because the reinject arrives on the slow-path TUN.
+///
+/// Two things deliberately stay on the WIRE tuple: the `lo0` filter (Junos
+/// filters are pre-NAT; its caller keeps passing the frame and `flow`), and the
+/// reject reply and deny record `junos_host_local_policy` emits, because the
+/// client is addressing the pre-translation tuple.
+///
+/// Same-family only. A NAT64 target is a different address family from the
+/// packet, and host-bound NAT64 is not what this governs, so the address falls
+/// back to the wire value; the port still follows the translation. With no
+/// translation both fall back to the wire, so direct-to-local traffic is
+/// judged exactly as before.
+#[inline]
+pub(super) fn host_bound_policy_dst(
+    flow: &SessionFlow,
+    wire_dst_port: u16,
+    translated_dst: Option<IpAddr>,
+    translated_dst_port: Option<u16>,
+) -> (IpAddr, u16) {
+    let ip = match translated_dst {
+        Some(ip) if ip.is_ipv4() == flow.dst_ip.is_ipv4() => ip,
+        _ => flow.dst_ip,
+    };
+    (ip, translated_dst_port.unwrap_or(wire_dst_port))
+}
+
+/// #9529: [`host_bound_policy_dst`] for an established hit, from the translation
+/// the session recorded at admission.
+///
+/// Both directions, unlike #9382's forward-only re-derivation: that rule exists
+/// because a reverse companion carries SWAPPED zones, which says nothing about a
+/// gate asking what the local listener receives. A host-bound reverse companion
+/// the AF_XDP path could hit does not arise in practice (the firewall's own
+/// replies leave through the kernel), so a direction branch here would be code no
+/// cell can reach.
+#[inline]
+pub(super) fn session_host_bound_policy_dst(
+    flow: &SessionFlow,
+    wire_dst_port: u16,
+    decision: crate::session::SessionDecision,
+) -> (IpAddr, u16) {
+    host_bound_policy_dst(
+        flow,
+        wire_dst_port,
+        decision.nat.rewrite_dst,
+        decision.nat.rewrite_dst_port,
+    )
+}
+
 #[inline]
 #[allow(clippy::too_many_arguments)]
 pub(super) fn junos_host_local_policy(
@@ -192,6 +253,10 @@ pub(super) fn junos_host_local_policy(
     counters: &mut BatchCounters,
     flow: &SessionFlow,
     meta: UserspaceDpMeta,
+    // #9529: evaluated post-translation. The reject reply and the deny record
+    // below still use `flow` — the client is talking to the pre-translation
+    // address, and the reply must come back from it.
+    policy_dst: (IpAddr, u16),
     from_zone_id: u16,
     packet_len: u64,
     now_ns: u64,
@@ -200,6 +265,7 @@ pub(super) fn junos_host_local_policy(
     match junos_host_policy_eval(
         forwarding,
         flow,
+        policy_dst,
         from_zone_id,
         packet_len,
         // Flow-backed host-bound traffic always carries a real L4 header.
@@ -244,3 +310,7 @@ pub(super) fn junos_host_local_policy(
         None => JunosHostLocalPolicy::NoMatch,
     }
 }
+
+#[cfg(test)]
+#[path = "host_bound_policy_dst_9529_tests.rs"]
+mod host_bound_policy_dst_9529_tests;

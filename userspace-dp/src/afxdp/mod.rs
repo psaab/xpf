@@ -570,6 +570,10 @@ mod tests_policy_revocation_8356;
 #[cfg(test)]
 #[path = "tests_session_hit_authority_9519.rs"]
 mod tests_session_hit_authority_9519;
+// #9529: host-bound gates judge the post-destination-translation tuple.
+#[cfg(test)]
+#[path = "tests_host_bound_post_dnat_9529.rs"]
+mod tests_host_bound_post_dnat_9529;
 // #7160 (#2387): the routing-domain stamp on the REAL poll path — the WIRING,
 // which no unit-level cell can reach.
 #[cfg(test)]
