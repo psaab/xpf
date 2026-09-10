@@ -4051,6 +4051,25 @@ outside the monitor loop:
   unlatched race window where the floor reads 0 because no heartbeat has landed,
   arms nothing.
 
+  **A CHANGED BULKSTART BOOT ID re-arms it too (#9618).** The same reboot has a
+  second classifier, and it runs in the opposite order: when the replacement's
+  BulkStart (carrying its new boot id, #5084/#6910) arrives before any heartbeat
+  has raised the epoch, `installConn` sees an empty-slot install with nothing
+  to classify, and the reboot is recognised afterwards by
+  `applyPeerIncarnationSwitchLocked`, which advances the incarnation, rebases
+  the epoch baseline and evicts the corpse. #9174 V014 armed the obligation on
+  the epoch edge only, so this order retired the dead incarnation and owed
+  nothing: `needColdPrime` stayed false, the prior incarnation's sticky
+  `outboundBulkAcked` suppressed the ordinary resend, and the survivor never
+  sent its table to the empty replacement. `applyPeerIncarnationSwitchLocked`
+  now arms `needColdPrime` itself, so retiring an incarnation on boot-id
+  evidence and owing the replacement a prime are one transition; the sweep's
+  owed-cold-prime re-drive discharges it on success only. The first
+  incarnated prime (zero -> X) never reaches the switch (`priorInc.known()`),
+  and a same-boot BulkStart on the peer's second fabric is not a switch, so
+  neither arms. When both signals observe the same reboot, the cost is one
+  redundant, idempotent bulk.
+
   **Atomicity of the ack is bound, not merely asserted (#5718 fold r3).** Every
   scenario test calls `installConn` and `handleMessage` in sequence, so none of
   them opens the window `s.mu` exists to close — an implementation that checks

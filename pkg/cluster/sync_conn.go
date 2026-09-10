@@ -277,6 +277,19 @@ func (s *SessionSync) applyPeerIncarnationSwitchLocked(keepIdx int) bool {
 	// observes the reboot first consumes it.
 	s.rebaseEpochBaselineLocked()
 	evicted := s.evictStaleIncarnationConnsLocked(keepIdx)
+	// #9618: retiring an incarnation on boot-id evidence OWES the replacement a
+	// cold prime, exactly as installConn's epoch arm does since #9174 V014. The
+	// two classifiers see the same reboot in opposite orders, and #9174 armed
+	// the obligation on only one of them. A rebooted peer's session table is
+	// EMPTY; this path has just evicted the corpse, so no later install
+	// consumes the obligation, and the prior incarnation's sticky
+	// outboundBulkAcked suppresses the ordinary resend. Without the latch the
+	// survivor never sends its authoritative table, and the next failover to
+	// the replacement blackholes every established flow: the #5480 blackhole,
+	// reached through the boot-id edge. The sweep's owed-cold-prime re-drive
+	// discharges it, on success only. When both signals observe one reboot the
+	// cost is one redundant, idempotent bulk.
+	s.needColdPrime.Store(true)
 	// Stamp AFTER the advance, exactly as installConn does, so the priming
 	// connection belongs to the incarnation it established rather than to the
 	// one just retired.
