@@ -753,6 +753,116 @@ the colon-strict family hint is the SOLE guard against a v4 address being tested
 against `::/0`; every production call site derives that hint from the same raw
 string it parses the IP from.
 
+## Independent oracle: the shared policy-verdict corpus (#9167)
+
+`show security match-policies` had no independent oracle, and the demonstrated
+escape says exactly why. PR #6505 taught the Rust junos-host gate the #4569
+fragment-associated deny by changing `userspace-dp/src/policy.rs`,
+`policy_snapshot_error.rs`, `policy_tests.rs`, `_Log.md` and
+`docs/feature-gaps.md` — **no Go at all** — and this package kept reporting
+PERMIT for a host-bound fragment the box DROPS until #6576 wrote a second hand
+mirror.
+
+**The issue's account of the mechanism is corrected here.** It names three
+sub-verdicts that call `pkg/dataplane/userspace` helpers (`RuntimePolicyIDs`,
+`ClassifyHostInboundForInterface`, `PolicyContentRejectionReasons`) as an oracle
+that cannot disagree with the implementation. Those calls share code with the Go
+**write** path, and that sharing is correct: the simulator must report the same
+policy ids and the same fail-closed set the write path computes. The gap is one
+layer out — the Go write path and this simulator are BOTH mirrors of
+`policy.rs`, and nothing compared either one to the enforcer. #6505's file list
+is the measurement.
+
+### Design
+
+| piece | produced by | read by |
+|---|---|---|
+| `testdata/policy_verdict_corpus.txt` — configs, query tuples, **expected verdicts** | authored | the Go simulator test **and** the Rust enforcer test |
+| `testdata/policy_verdict_corpus_snapshots.json` — the snapshot Go puts on the wire for each config | the Go generator (`UPDATE_9167=1`), freshness-gated | the Rust enforcer test |
+
+- **The oracle is the expectation column.** It is authored from the Junos
+  semantics and produced by neither implementation. Go compiles the config with
+  strict `config.CompileConfig` and runs `Match`; Rust parses the snapshot with
+  the enforcer's own `parse_policy_state_with_counters` and evaluates with the
+  enforcer's own entry points — `evaluate_policy_result_l3_aware` for a transit
+  pair, `evaluate_junos_host_policy_l3_aware` for `to-zone junos-host`. Each
+  compares to the column; neither calls the other.
+- **Host-bound and fragment rows.** A `to-zone junos-host` row goes through the
+  host gate, where no matching rule means local delivery (written `-`), and a
+  `frag` row is a non-first fragment evaluated with no L4 header. Together they
+  are the #6505 escape itself: `junos-host-fragment-associated-deny`.
+- **The expectations reach Rust from the text, not through Go.** The generator
+  emits only snapshots, so a Go misreading of an expected verdict cannot be
+  transcribed into what Rust asserts.
+- **Compared:** the action, matched-versus-default, and on the Rust side the
+  runtime policy id. The id check turns `RuntimePolicyIDs` from an unchecked
+  shared helper into a checked one: the id this package shows is compared with
+  the id the enforcer resolves.
+
+### The fixture reproduces the production wire shape
+
+The first generated file carried `"address_books": null`, and the Rust decoder
+refused it. Normalising `nil` to `[]` in the generator would have made the
+fixture MORE well-formed than the real producer — which can hide exactly the
+Go/Rust mismatch this differential exists to catch. The producer was measured
+instead: `ConfigSnapshot.Zones`, `.Policies` and `.AddressBooks` are all
+`,omitempty`, as is every slice field of `PolicyRuleSnapshot`,
+`AddressBookSnapshot` and `ZoneSnapshot`, and the Rust decoder marks each one
+`#[serde(default)]`. Production therefore sends an **absent key**, never `null`.
+The `null` came from the generator's own wrapper, which lacked `,omitempty`. The
+wrapper now carries the same tags, and
+`TestPolicyCorpusSnapshotMirrorsTheWireShape9167` pins them to `ConfigSnapshot`'s
+by reflection. (The null-tolerant class is real in this tree — #2214's
+`null_tolerant_vec` exists for NAT64 `pool_addresses` and filter `terms`, which
+carry no `,omitempty` — but none of those fields is part of this snapshot.)
+
+### The honest bound
+
+The snapshot handed to Rust is built by Go's snapshot **builder**, so the builder
+is shared input. That is not a blind spot for the tier walk: this simulator reads
+the *config*, not the snapshot, so a builder that drops or mangles a rule makes
+the two halves disagree. What stays invisible is a builder defect that the
+expectation column was **also** written to match — which is why the column is
+authored from the Junos semantics rather than transcribed from a run.
+
+### Measured: what the corpus catches
+
+Every mutant below changes PRODUCTION code, is confirmed applied by occurrence
+count, and is scored by the NAME of the failing Go test (`go test -json`) or by
+the corpus row the Rust panic names.
+
+| escape mutant | Rust half | Go half |
+|---|---|---|
+| revert the Rust #6505 junos-host fragment deny | **FAIL**, names `junos-host-fragment-associated-deny` | PASS |
+| revert the Go #6576 mirror (`matchJunosHost` fragment override) | PASS | **FAIL**, names `junos-host-fragment-associated-deny` |
+
+| tier-walk mutant | Rust (`policy.rs`) | Go (`policymatch.go`) |
+|---|---|---|
+| widen a scoped global to all zones | KILLED: `scoped-global-applies-only-in-scope` | KILLED: `scoped-global-applies-only-in-scope` |
+| switch off the exact zone-pair tier | KILLED: `exact-zone-pair-permit` | KILLED: `exact-zone-pair-permit` and 3 more rows |
+| reverse first-match-wins inside a pair | KILLED: `first-match-wins-within-a-pair` | KILLED: `first-match-wins-within-a-pair` |
+
+The halves are independent, which the escape rows show: each is sensitive only
+to its own implementation. Drift is loud because the EXPECTATION is shared: a
+change to either implementation that the corpus disagrees with reds that half,
+and changing an expectation to match one implementation reds the other half until
+it agrees.
+
+### The wiring is bound from the Go side
+
+The Rust half is a `#[path]` test module declared in `policy.rs`. Delete that
+declaration and `cargo test` stays green; the corpus test simply stops executing
+(measured). A test cannot notice its own absence, so
+`TestPolicyVerdictCorpusRustHalfIsRegistered9167` (`pkg/dataplane/userspace`,
+beside the generator) pins the declaration and both `include_str!` paths, and
+reds when the declaration is severed (measured).
+
+### Adding a row
+
+Add it to `testdata/policy_verdict_corpus.txt` and regenerate the snapshots with
+`UPDATE_9167=1 go test ./pkg/dataplane/userspace/ -run 9167`. Both languages then
+assert it; a row only one side knows about cannot exist.
+
 ## Not modeled
 
 Scheduler-driven policy `inactive` state is not applied — a scheduled policy is

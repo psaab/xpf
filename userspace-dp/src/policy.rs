@@ -4146,3 +4146,10 @@ fn port_ranges_match(ranges: &[PortRange], port: u16) -> bool {
 #[cfg(test)]
 #[path = "policy_tests.rs"]
 mod tests;
+
+// #9167: the Rust half of the shared policy-verdict corpus differential. Kept a
+// sibling submodule of policy.rs (not of policy_tests.rs) so it reaches the
+// pub(crate) evaluator directly, the same way policy_tests.rs does.
+#[cfg(test)]
+#[path = "policy_verdict_corpus_9167.rs"]
+mod policy_verdict_corpus_9167;
