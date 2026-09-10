@@ -279,6 +279,9 @@ func TestConntrackCHeaderFieldOffsets6984(t *testing.T) {
 		{"session_value", "ingress_vlan_id", 140},
 		{"session_value_v6", "ingress_ifindex", 184},
 		{"session_value_v6", "ingress_vlan_id", 188},
+		// #9546: appended after the ingress pair, so none of the four above moved.
+		{"session_value", "routing_domain", 144},
+		{"session_value_v6", "routing_domain", 192},
 	} {
 		got, ok := structs[tc.strct].offsets[tc.field]
 		if !ok {

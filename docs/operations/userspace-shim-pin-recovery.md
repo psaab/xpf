@@ -64,3 +64,30 @@ or DNAT reverse mappings.
   (`Manager.Close`), so a restart reproduces this refusal — that is when you
   need this runbook. A **non-hitless** HA shutdown runs `Manager.Teardown`,
   which unpins everything, so a restart alone already clears it.
+- **#9546 is such a crossing.** It appended `routing_domain` to the on-map
+  conntrack value, growing `sessions` 144 -> 152 and `sessions_v6` 192 -> 200
+  bytes, so a node whose pins predate it refuses exactly as above for those two
+  maps, and the same targeted unlink of just those two pins applies. It is the
+  third growth of this struct to need it (#5460 flags widen, #4983 ingress
+  identity).
+- **No deploy path crosses it on its own, the loss cluster's included.**
+  Measured: `make cluster-deploy` refused at its pre-flight with
+  `ValueSize embedded=152 pinned=144`. The pre-flight LOADS anonymous maps
+  only, but `verify-dataplane` READS the live pins
+  (`validateUserspaceShimLivePins`), and it runs before `deploy_vm` reaches
+  `xpfd cleanup`. The deploy wrapper's closing ERROR still blames #1864 and
+  suggests `make generate`; for this refusal it is wrong (#9558).
+- **Crossing a two-node cluster, as measured on the loss cluster.** Inside one
+  `with-cluster.sh` cell, for the SECONDARY first and then the primary:
+  confirm the two pins still read the old size, unlink ONLY those two, then run
+  that node's deploy (`make cluster-deploy NODE=<n>`) at once. The old daemon
+  keeps forwarding on its fd-held maps for the seconds its pre-flight takes,
+  and the deploy's own stop follows. Do not unlink both nodes up front. That
+  leaves the primary without its pin paths for the whole secondary deploy, and
+  a helper restarted in that window cannot open its pins. This order skips
+  step 2 above on purpose, because the deploy pre-flight must run before
+  anything stops the daemon. Afterwards a plain rolling `make cluster-deploy`
+  passes the pre-flight with no intervention.
+- **The refusal is symmetric.** A build from before #9546 deployed onto pins
+  that have crossed refuses with `embedded=144 pinned=152`, and needs the same
+  targeted unlink.

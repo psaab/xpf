@@ -15,8 +15,9 @@ import (
 // value sizes — the Go map registration MUST match them, not sizeOf[SessionValue]
 // (which is larger due to sync-only trailing fields, #2360).
 const (
-	conntrackValueSizeV4 = 144
-	conntrackValueSizeV6 = 192
+	// #9546 appended routing_domain: 144/192 -> 152/200.
+	conntrackValueSizeV4 = 152
+	conntrackValueSizeV6 = 200
 )
 
 // TestBPFSessionValueMatchesConntrackABI pins the dedicated on-map ABI types to
@@ -356,6 +357,9 @@ const (
 	conntrackIngressVlanIDOffV4  = 140
 	conntrackIngressIfindexOffV6 = 184
 	conntrackIngressVlanIDOffV6  = 188
+	// #9546: appended after the ingress pair; no existing offset moved.
+	conntrackRoutingDomainOffV4 = 144
+	conntrackRoutingDomainOffV6 = 192
 )
 
 // TestBPFSessionValueIngressIdentityOffsets pins WHERE the #4983 identity pair

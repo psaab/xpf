@@ -62,6 +62,9 @@ pub(crate) use discriminator::{TunnelDiscriminator, WireDiscriminator};
 mod routing_domain_wire;
 pub(crate) use routing_domain_wire::{
     WireRoutingDomain, routing_domain_from_wire, routing_domain_to_wire,
+    // #9546: named at the crate level so the conntrack mirror states absence
+    // with the codec's own constant rather than a bare literal.
+    WIRE_ABSENT as ROUTING_DOMAIN_WIRE_ABSENT,
 };
 pub(crate) use key::*;
 mod entry;

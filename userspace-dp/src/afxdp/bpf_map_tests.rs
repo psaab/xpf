@@ -203,9 +203,12 @@ fn bpf_conntrack_struct_sizes_match_c() {
     // marshal path) is asserted to the same 144/192 in
     // pkg/dataplane/bpf_session_value_test.go.
     assert_eq!(core::mem::size_of::<BpfSessionKeyV4>(), 16);
-    assert_eq!(core::mem::size_of::<BpfSessionValueV4>(), 144);
+    // #9546 appended `routing_domain` (u32) after `ingress_vlan_id`: it skips
+    // the 2 unused pad bytes to a 4-byte boundary, lands at 144/192, and the
+    // 8-byte alignment grows the structs 144->152 / 192->200.
+    assert_eq!(core::mem::size_of::<BpfSessionValueV4>(), 152);
     assert_eq!(core::mem::size_of::<BpfSessionKeyV6>(), 40);
-    assert_eq!(core::mem::size_of::<BpfSessionValueV6>(), 192);
+    assert_eq!(core::mem::size_of::<BpfSessionValueV6>(), 200);
 }
 
 // #5460: SESS_FLAG_NPTV6 is bit 8 (0x100 = 256), which does not fit the

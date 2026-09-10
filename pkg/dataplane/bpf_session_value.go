@@ -7,7 +7,8 @@ import "unsafe"
 // BPF HASH maps. They EXCLUDE the sync-only Generation field — they mirror the
 // C `struct session_value` / `session_value_v6` (bpf/headers/xpf_conntrack.h)
 // and the Rust `BpfSessionValueV4` / `BpfSessionValueV6` (size-asserted at
-// 144 / 192 in userspace-dp/src/afxdp/bpf_map_tests.rs; 136 / 184 before the
+// 152 / 200 in userspace-dp/src/afxdp/bpf_map_tests.rs (144 / 192 before the
+// #9546 routing_domain append); 136 / 184 before the
 // #4983 ingress-identity growth, 128 / 176 before the #5460 flags widen from
 // __u8 to __u16).
 //
@@ -25,8 +26,8 @@ var (
 //
 // The shared kernel-visible `sessions` / `sessions_v6` BPF HASH maps store the
 // C `struct session_value` / `struct session_value_v6` layout (bpf/headers/
-// xpf_conntrack.h), which the Rust helper mirrors as BpfSessionValueV4 (144
-// bytes) / BpfSessionValueV6 (192 bytes) — test-asserted at
+// xpf_conntrack.h), which the Rust helper mirrors as BpfSessionValueV4 (152
+// bytes) / BpfSessionValueV6 (200 bytes) — test-asserted at
 // userspace-dp/src/afxdp/bpf_map_tests.rs.
 //
 // SessionValue / SessionValueV6 (types.go) carry EXTRA sync-only trailing
@@ -39,7 +40,7 @@ var (
 //
 // Registering the map at sizeof(SessionValue) (the previous behaviour) made the
 // kernel value_size larger than every reader/writer's on-map struct. A
-// bpf_map_lookup_elem from the Rust side into its 144/192-byte buffer then has
+// bpf_map_lookup_elem from the Rust side into its 152/200-byte buffer then has
 // the kernel copy the larger value_size bytes into the smaller buffer — a
 // stack out-of-bounds write (latent because the trailing bytes are usually
 // zero). See issue #2360.
@@ -51,12 +52,12 @@ var (
 // Go-facing accessors convert at the boundary; Generation never touches the
 // BPF map (it is sourced from the Go session table / sync path).
 
-// bpfSessionValue mirrors C `struct session_value` exactly (144 bytes; 136
+// bpfSessionValue mirrors C `struct session_value` exactly (152 bytes; 144 before the #9546 routing_domain append, 136
 // before the #4983 ingress-identity growth, 128 before the #5460 __u16 flags
 // widen). It is SessionValue without the sync-only trailing fields. Keep
 // field-for-field in sync with both SessionValue (types.go) and the C struct
 // (xpf_conntrack.h); the parity test in bpf_session_value_test.go fails if the
-// size drifts from 144.
+// size drifts from 152.
 //
 // EXPLICIT PADDING (#6082): every byte the C/Go compiler inserts as implicit
 // alignment padding is declared as a named `_ [N]byte` gap. This is NOT
@@ -70,7 +71,7 @@ var (
 // kernel value bytes and failed the whole batch
 // with "unmarshaling []dataplane.bpfSessionValue doesn't consume all data",
 // breaking the 60s HA session-sync sweep. Making the padding explicit keeps
-// binary.Size == unsafe.Sizeof (144 today, post-#4983) (blank `_` fields ARE counted by
+// binary.Size == unsafe.Sizeof (152 today, post-#9546) (blank `_` fields ARE counted by
 // encoding/binary yet do NOT count as "unexported" for the fast path), so the
 // zero-copy path stays engaged. The on-map ABI bytes are unchanged: these pads
 // occupy the exact offsets the compiler already padded, so unsafe.Sizeof and
@@ -130,10 +131,16 @@ type bpfSessionValue struct {
 	// It lands inside the tail padding IngressIfindex already forced, so the
 	// pair costs 8 bytes total, not 16.
 	IngressVlanID uint16
-	_             [2]byte // pad: C tail-pads the struct to its 8-byte alignment (#6082)
+	_             [2]byte // pad: C aligns __u32 routing_domain to a 4-byte boundary (#9546)
+	// RoutingDomain is the #9546 on-map copy of SessionValue.RoutingDomain (the
+	// #7239 wire-encoded domain). See that field for the contract; the layout
+	// reason it is appended here, not inserted earlier, is that no existing
+	// offset may move.
+	RoutingDomain uint32
+	_             [4]byte // pad: C tail-pads the struct to its 8-byte alignment (#6082)
 }
 
-// bpfSessionValueV6 mirrors C `struct session_value_v6` exactly (192 bytes; 184
+// bpfSessionValueV6 mirrors C `struct session_value_v6` exactly (200 bytes; 192 before the #9546 routing_domain append, 184
 // before the #4983 ingress-identity growth, 176 before the #5460 __u16 flags
 // widen). It is SessionValueV6 without the
 // sync-only trailing fields. The head padding is declared explicitly for the
@@ -194,7 +201,13 @@ type bpfSessionValueV6 struct {
 	// It lands inside the tail padding IngressIfindex already forced, so the
 	// pair costs 8 bytes total, not 16.
 	IngressVlanID uint16
-	_             [2]byte // pad: C tail-pads the struct to its 8-byte alignment (#6082)
+	_             [2]byte // pad: C aligns __u32 routing_domain to a 4-byte boundary (#9546)
+	// RoutingDomain is the #9546 on-map copy of SessionValue.RoutingDomain (the
+	// #7239 wire-encoded domain). See that field for the contract; the layout
+	// reason it is appended here, not inserted earlier, is that no existing
+	// offset may move.
+	RoutingDomain uint32
+	_             [4]byte // pad: C tail-pads the struct to its 8-byte alignment (#6082)
 }
 
 // toBPF projects a SessionValue onto the on-map ABI layout, dropping the
@@ -234,6 +247,7 @@ func (v SessionValue) toBPF() bpfSessionValue {
 		// round-trips in BOTH directions (unlike the sync-only trailing fields).
 		IngressIfindex: v.IngressIfindex,
 		IngressVlanID:  v.IngressVlanID,
+		RoutingDomain:  v.RoutingDomain,
 	}
 }
 
@@ -275,6 +289,7 @@ func (v bpfSessionValue) sessionValue() SessionValue {
 		// round-trips in BOTH directions (unlike the sync-only trailing fields).
 		IngressIfindex: v.IngressIfindex,
 		IngressVlanID:  v.IngressVlanID,
+		RoutingDomain:  v.RoutingDomain,
 	}
 }
 
@@ -315,6 +330,7 @@ func (v SessionValueV6) toBPF() bpfSessionValueV6 {
 		// round-trips in BOTH directions (unlike the sync-only trailing fields).
 		IngressIfindex: v.IngressIfindex,
 		IngressVlanID:  v.IngressVlanID,
+		RoutingDomain:  v.RoutingDomain,
 	}
 }
 
@@ -355,6 +371,7 @@ func (v bpfSessionValueV6) sessionValue() SessionValueV6 {
 		// round-trips in BOTH directions (unlike the sync-only trailing fields).
 		IngressIfindex: v.IngressIfindex,
 		IngressVlanID:  v.IngressVlanID,
+		RoutingDomain:  v.RoutingDomain,
 	}
 }
 

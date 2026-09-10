@@ -151,6 +151,30 @@ pub(super) fn publish_v4_session(
     }
 }
 
+/// #9546: the routing domain stamped into a conntrack mirror row.
+///
+/// FORWARD rows state the session key's domain in the #7239 wire encoding --
+/// the SAME encoding the event stream puts on the session delta
+/// (`event_stream/codec/session_sync.rs`), so a Go delete that reads it back
+/// names exactly what the install named. The default instance encodes as the
+/// non-zero `WIRE_DEFAULT_INSTANCE` marker, never 0.
+///
+/// REVERSE rows state NOTHING (`WIRE_ABSENT`). Their key is the reverse-match
+/// key, which `reverse_wire_key` / `reverse_canonical_key` deliberately build
+/// with `routing_domain: 0` because a reply may legitimately arrive in another
+/// domain (#7160). Encoding that 0 would yield `WIRE_DEFAULT_INSTANCE` -- a
+/// confident claim that a tenant flow's reply half lives in the default
+/// instance, which is false. Absence is the truthful value, and no delete path
+/// needs more: the #9146 singular and #9364 batch deletes both scope the
+/// reverse companion with the FORWARD row's domain.
+pub(super) fn conntrack_row_routing_domain(key: &SessionKey, metadata: &SessionMetadata) -> u32 {
+    if metadata.is_reverse {
+        crate::session::ROUTING_DOMAIN_WIRE_ABSENT
+    } else {
+        crate::session::routing_domain_to_wire(key.routing_domain)
+    }
+}
+
 /// #5213: build the v4 conntrack `BpfSessionValueV4` mirrored for `show security
 /// flow session`. Pure (no map I/O) so the `session_id` stamping is unit-testable
 /// without a BPF map fd. Returns `None` when the reverse key resolves cross-family
@@ -260,6 +284,8 @@ pub(super) fn build_conntrack_value_v4(
         // import); the Go filter falls back to the zone approximation for it.
         ingress_ifindex: metadata.ingress_ifindex,
         ingress_vlan_id: metadata.ingress_vlan_id,
+        // #9546: see conntrack_row_routing_domain.
+        routing_domain: conntrack_row_routing_domain(key, metadata),
     })
 }
 
@@ -465,6 +491,8 @@ pub(super) fn build_conntrack_value_v6(
         // import); the Go filter falls back to the zone approximation for it.
         ingress_ifindex: metadata.ingress_ifindex,
         ingress_vlan_id: metadata.ingress_vlan_id,
+        // #9546: see conntrack_row_routing_domain.
+        routing_domain: conntrack_row_routing_domain(key, metadata),
     })
 }
 
@@ -761,5 +789,174 @@ mod publish_chokepoint_6923_tests {
              hole: the walker learns a type, the copy does not, and the refusal silently stops \
              covering it"
         );
+    }
+}
+
+#[cfg(test)]
+mod routing_domain_row_9546_tests {
+    //! #9546 — a conntrack mirror row must state the session's routing domain,
+    //! and state it TRUTHFULLY.
+    //!
+    //! The Go delete paths read `routing_domain` back out of this row to name the
+    //! domain on the helper delete (#9146 singular, #9364 batch). The unprivileged
+    //! Go round-trip cells and the privileged Go mirror cells cover rows the GO
+    //! writer produces; these cover the rows the HELPER produces, which is the
+    //! writer for every helper-owned local session and therefore the dominant
+    //! source of the rows the conntrack GC deletes.
+    //!
+    //! They drive the BUILDERS, not just the pure helper. A cell on
+    //! `conntrack_row_routing_domain` alone stays green if a builder stops calling
+    //! it and writes `routing_domain: 0` in its literal — which would restore the
+    //! exact inertness this issue removes.
+    use super::{build_conntrack_value_v4, build_conntrack_value_v6, conntrack_row_routing_domain};
+    use crate::afxdp::{ForwardingDisposition, ForwardingResolution};
+    use crate::ip_proto::PROTO_TCP;
+    use crate::nat::NatDecision;
+    use crate::session::{
+        routing_domain_from_wire, routing_domain_to_wire, SessionDecision, SessionKey,
+        SessionMetadata, WireRoutingDomain, ROUTING_DOMAIN_WIRE_ABSENT,
+    };
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+
+    const TENANT: u32 = 100_007;
+
+    fn decision() -> SessionDecision {
+        SessionDecision {
+            resolution: ForwardingResolution {
+                disposition: ForwardingDisposition::ForwardCandidate,
+                local_ifindex: 0,
+                egress_ifindex: 0,
+                tx_ifindex: 0,
+                tunnel_endpoint_id: 0,
+                next_hop: None,
+                neighbor_mac: None,
+                src_mac: None,
+                tx_vlan_id: 0,
+            },
+            nat: NatDecision::default(),
+        }
+    }
+
+    fn metadata(is_reverse: bool) -> SessionMetadata {
+        SessionMetadata {
+            ingress_zone: 1,
+            egress_zone: 2,
+            ingress_ifindex: 0,
+            ingress_vlan_id: 0,
+            owner_rg_id: 1,
+            fabric_ingress: false,
+            is_reverse,
+            nat64_reverse: None,
+            log_session_init: false,
+            log_session_close: false,
+            policy_id: 0,
+            inactivity_timeout_ns: None,
+            policy_counter_idx: 0,
+            policy_counter: None,
+        }
+    }
+
+    fn key_v4(domain: u32) -> SessionKey {
+        SessionKey {
+            addr_family: libc::AF_INET as u8,
+            protocol: PROTO_TCP,
+            src_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 61, 102)),
+            dst_ip: IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200)),
+            src_port: 55068,
+            dst_port: 5201,
+            discriminator: Default::default(),
+            routing_domain: domain,
+        }
+    }
+
+    fn key_v6(domain: u32) -> SessionKey {
+        SessionKey {
+            addr_family: libc::AF_INET6 as u8,
+            protocol: PROTO_TCP,
+            src_ip: IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 1, 0, 0, 0, 0x102)),
+            dst_ip: IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 80, 0, 0, 0, 0x200)),
+            src_port: 55068,
+            dst_port: 5201,
+            discriminator: Default::default(),
+            routing_domain: domain,
+        }
+    }
+
+    #[test]
+    fn forward_row_states_the_tenant_domain_9546() {
+        let got = conntrack_row_routing_domain(&key_v4(TENANT), &metadata(false));
+        assert!(
+            matches!(routing_domain_from_wire(got), WireRoutingDomain::Present(d) if d == TENANT),
+            "a forward row must state its tenant domain in the #7239 wire encoding; got {got}"
+        );
+    }
+
+    /// The default instance is a STATEMENT, not an absence. A forward row whose
+    /// key is in the default instance must carry the non-zero default marker, so
+    /// the Go delete names it and the helper does an exact lookup instead of the
+    /// probe #8636 refuses when ambiguous.
+    #[test]
+    fn forward_default_instance_row_states_the_default_marker_not_absence_9546() {
+        let got = conntrack_row_routing_domain(&key_v4(0), &metadata(false));
+        assert_eq!(got, routing_domain_to_wire(0));
+        assert_ne!(
+            got, ROUTING_DOMAIN_WIRE_ABSENT,
+            "a default-instance forward row must not read as 'not stated'"
+        );
+        assert!(matches!(routing_domain_from_wire(got), WireRoutingDomain::Present(0)));
+    }
+
+    /// LOAD-BEARING CONTROL, both directions. A reverse row's key is the
+    /// reverse-match key, deliberately domain-agnostic (#7160). Encoding its 0
+    /// would claim the default instance for a tenant flow's reply half — false.
+    /// It must state ABSENCE, and must do so even if a key somehow carried a
+    /// tenant, because the row's direction, not the key's field, is the truth.
+    #[test]
+    fn reverse_row_states_absence_not_a_guessed_domain_9546() {
+        for key_domain in [0, TENANT] {
+            let got = conntrack_row_routing_domain(&key_v4(key_domain), &metadata(true));
+            assert_eq!(
+                got, ROUTING_DOMAIN_WIRE_ABSENT,
+                "a reverse row (key domain {key_domain}) must state absence, got {got}"
+            );
+            assert!(matches!(routing_domain_from_wire(got), WireRoutingDomain::Absent));
+        }
+    }
+
+    #[test]
+    fn built_v4_forward_row_carries_the_domain_9546() {
+        let row = build_conntrack_value_v4(
+            &key_v4(TENANT), decision(), &metadata(false), 0, 1, 2, 0, 0, 0, 0, 0,
+        )
+        .expect("a same-family v4 key must build a row");
+        assert_eq!(
+            row.routing_domain, TENANT,
+            "build_conntrack_value_v4 wrote routing_domain={}, want {TENANT} — the Go GC reads \
+             this back to scope its delete; 0 here restores the #9546 inertness",
+            row.routing_domain
+        );
+    }
+
+    #[test]
+    fn built_v6_forward_row_carries_the_domain_9546() {
+        let row = build_conntrack_value_v6(
+            &key_v6(TENANT), decision(), &metadata(false), 0, 1, 2, 0, 0, 0, 0, 0,
+        )
+        .expect("a same-family v6 key must build a row");
+        assert_eq!(
+            row.routing_domain, TENANT,
+            "build_conntrack_value_v6 wrote routing_domain={}, want {TENANT} — V6 has its own \
+             builder and can regress on its own",
+            row.routing_domain
+        );
+    }
+
+    #[test]
+    fn built_reverse_row_states_absence_9546() {
+        let row = build_conntrack_value_v4(
+            &key_v4(0), decision(), &metadata(true), 0, 1, 2, 0, 0, 0, 0, 0,
+        )
+        .expect("a same-family v4 key must build a row");
+        assert_eq!(row.routing_domain, ROUTING_DOMAIN_WIRE_ABSENT);
     }
 }

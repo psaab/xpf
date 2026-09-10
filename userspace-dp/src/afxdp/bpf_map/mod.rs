@@ -156,8 +156,9 @@ struct BpfSessionValueV4 {
     // __u16 to fit SESS_FLAG_NPTV6 (bit 8, 0x100), which overflows a u8 (#5460).
     // The compiler inserts one pad byte after `state` and two before
     // `app_timeout`; the layout matches C `struct session_value` and the Go
-    // `bpfSessionValue` mirror (size-asserted at 144 in bpf_map_tests.rs --
-    // 136 before #4983 added the ingress-identity pair below).
+    // `bpfSessionValue` mirror (size-asserted at 152 in bpf_map_tests.rs --
+    // 144 before #9546 appended `routing_domain`, 136 before #4983 added the
+    // ingress-identity pair below).
     flags: u16,
     tcp_state: u8,
     is_reverse: u8,
@@ -210,6 +211,16 @@ struct BpfSessionValueV4 {
     /// already resolves the EGRESS interface name by, so two VLAN units of one
     /// trunk NIC are distinguishable rather than aliased onto the NIC.
     ingress_vlan_id: u16,
+    /// #9546: the session's ROUTING DOMAIN in the #7239 wire encoding (0 = not
+    /// stated, 1 = default instance, else a reserved-band domain). Stamped by
+    /// `publish_conntrack::conntrack_row_routing_domain`. The Go delete paths
+    /// read it back to name the domain on the helper delete (#9146 singular,
+    /// #9364 batch); before it existed every mirrored value carried 0 and both
+    /// were inert. Appended after `ingress_vlan_id` so NO existing offset moves:
+    /// the u32 needs a 4-byte boundary, skips the 2 unused pad bytes, lands at
+    /// 144/192, and the 8-byte alignment grows the struct 144 -> 152 (v4) /
+    /// 192 -> 200 (v6).
+    routing_domain: u32,
 }
 
 /// Mirrors C `struct session_key_v6` — 40 bytes, packed.
@@ -281,8 +292,9 @@ fn bpf_session_key_v6(
 struct BpfSessionValueV6 {
     state: u8,
     // __u16 to fit SESS_FLAG_NPTV6 (bit 8), see BpfSessionValueV4::flags (#5460).
-    // Layout matches C `struct session_value_v6` (size-asserted at 192 -- 184
-    // before #4983 added the ingress-identity pair below).
+    // Layout matches C `struct session_value_v6` (size-asserted at 200 -- 192
+    // before #9546 appended `routing_domain`, 184 before #4983 added the
+    // ingress-identity pair below).
     flags: u16,
     tcp_state: u8,
     is_reverse: u8,
@@ -335,13 +347,23 @@ struct BpfSessionValueV6 {
     /// already resolves the EGRESS interface name by, so two VLAN units of one
     /// trunk NIC are distinguishable rather than aliased onto the NIC.
     ingress_vlan_id: u16,
+    /// #9546: the session's ROUTING DOMAIN in the #7239 wire encoding (0 = not
+    /// stated, 1 = default instance, else a reserved-band domain). Stamped by
+    /// `publish_conntrack::conntrack_row_routing_domain`. The Go delete paths
+    /// read it back to name the domain on the helper delete (#9146 singular,
+    /// #9364 batch); before it existed every mirrored value carried 0 and both
+    /// were inert. Appended after `ingress_vlan_id` so NO existing offset moves:
+    /// the u32 needs a 4-byte boundary, skips the 2 unused pad bytes, lands at
+    /// 144/192, and the 8-byte alignment grows the struct 144 -> 152 (v4) /
+    /// 192 -> 200 (v6).
+    routing_domain: u32,
 }
 
 // #4983: WHERE the ingress-identity pair sits, not just how big the struct is.
 //
 // `bpf_conntrack_struct_sizes_match_c` cannot see a REORDER. Swapping the two
 // fields in both structs puts the u16 at 136/184 and the u32 at 140/188, and
-// `size_of` stays 144/192 — so the size test passes and the whole crate suite
+// `size_of` is unchanged (144/192 then, 152/200 since #9546) — so the size test passes and the whole crate suite
 // passes. That was measured, not reasoned: the transposed tree ran the full
 // suite green. Nothing else catches it either — the
 // `build_conntrack_value_stamps_ingress_identity_*` tests compare struct
@@ -366,6 +388,10 @@ const _: [(); 136] = [(); std::mem::offset_of!(BpfSessionValueV4, ingress_ifinde
 const _: [(); 140] = [(); std::mem::offset_of!(BpfSessionValueV4, ingress_vlan_id)];
 const _: [(); 184] = [(); std::mem::offset_of!(BpfSessionValueV6, ingress_ifindex)];
 const _: [(); 188] = [(); std::mem::offset_of!(BpfSessionValueV6, ingress_vlan_id)];
+// #9546: the routing domain appended after that pair. Pinned for the same
+// transposition reason, at the offsets C and the Go mirror also pin.
+const _: [(); 144] = [(); std::mem::offset_of!(BpfSessionValueV4, routing_domain)];
+const _: [(); 192] = [(); std::mem::offset_of!(BpfSessionValueV6, routing_domain)];
 
 /// Session flag constants matching C SESS_FLAG_* defines. `u16` because the
 /// `session_value.flags` field is `__u16` (SESS_FLAG_NPTV6 is bit 8, #5460).

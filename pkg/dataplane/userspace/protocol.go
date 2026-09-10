@@ -148,7 +148,19 @@ const (
 	// exactly this regression — the acceptance gate is exact equality, so an
 	// unbumped field is silently ignored rather than refused, and the operator
 	// would see audit mode configured, committed clean, and inverted.
-	ProtocolVersion = 11
+	//
+	// v12 (issue 9546): the on-map conntrack value gained `routing_domain`
+	// (session_value 144 -> 152, session_value_v6 192 -> 200). No snapshot field
+	// changed, so snapshot_shape_version_8892_test's digest did NOT move; this
+	// bump is on the merits, by the test the v10/v11 notes apply. The helper
+	// WRITES that struct, so a mismatched pair is not a benign degradation: a new
+	// daemon creates the map at 152 bytes, an old helper hands
+	// bpf_map_update_elem a 144-byte buffer, and the kernel copies value_size
+	// bytes -- 8 past the helper's struct, into the very routing_domain slot a
+	// new reader trusts. A garbage domain on a delete can name ANOTHER TENANT's
+	// row. Exact equality refuses that pairing: an old helper receives no
+	// snapshot, so it installs no session and never reaches publish_conntrack.
+	ProtocolVersion = 12
 
 	// MinProtocolMultiZoneScopedPolicy is the FIRST snapshot protocol version
 	// that can represent a multi-zone scoped global policy — the plural

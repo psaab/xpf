@@ -242,6 +242,36 @@ type SessionValue struct {
 	// Also part of the on-map C conntrack ABI.
 	IngressVlanID uint16
 
+	// RoutingDomain is the #7239 (#7160/#2387) session-key ROUTING DOMAIN.
+	//
+	// #9546: it is ALSO part of the on-map C conntrack ABI
+	// (session_value.routing_domain, appended after ingress_vlan_id), which is
+	// why it sits HERE in the shared prefix instead of among the sync-only
+	// trailing fields below. Until #9546 the BPF mirror had no slot for it, so
+	// every value read back out of the mirror carried 0 — measured, with
+	// TCPState and Timeout surviving the same round trip — and that made the
+	// #9146 singular and #9364 batch delete scoping inert on the real path.
+	// Both writers now stamp it: Go (SetSessionV4 -> toBPF) copies this value
+	// as-is, and the helper (publish_conntrack) states it for FORWARD rows
+	// only. The cluster sync wire is UNCHANGED: pkg/cluster/sync_protocol.go
+	// encodes this field explicitly at its own length-gated trailing
+	// position, never by struct layout.
+	//
+	// It exists because the peer used to DERIVE the domain from IngressIfaceFold,
+	// and that fold is computed on the SEND path against the CURRENT config
+	// (#7239) — so an ifindex recycled onto a sibling between install and sync
+	// folded to the sibling's name and the session was imported into the
+	// sibling's routing domain. If the two interfaces are in different routing
+	// instances that is a cross-tenant mis-file, and a CONFIDENT one, because
+	// the helper's two-pass reverse preference matches a reply in the wrong
+	// tenant's domain on pass 1.
+	//
+	// Carried OPAQUELY: this is the #7239 encoded value, not a raw domain. 0
+	// means the sender did not state one, and the default instance has its own
+	// non-zero marker, so absence and default-instance stay distinguishable
+	// across every hop. Only the helper encodes and decodes it.
+	RoutingDomain uint32
+
 	// Generation is a per-(sender,key) monotonic install generation used
 	// by the HA session-sync deferred-delete guard (#2170). It is
 	// userspace-sync-only metadata — like the LogFlagUserspace* bits — and
@@ -339,25 +369,6 @@ type SessionValue struct {
 	// It is HA-wire metadata only and is not part of the on-map C conntrack
 	// ABI.
 	IngressIfaceFold uint32
-	// RoutingDomain is the #7239 (#7160/#2387) session-key ROUTING DOMAIN,
-	// carried as a length-gated trailing sync-only field like IngressIfaceFold
-	// above. It is NOT part of the BPF ABI: the helper stamps it at INSTALL and
-	// it reaches here on the session delta, so no C struct moves.
-	//
-	// It exists because the peer used to DERIVE the domain from IngressIfaceFold,
-	// and that fold is computed on the SEND path against the CURRENT config
-	// (#7239) — so an ifindex recycled onto a sibling between install and sync
-	// folded to the sibling's name and the session was imported into the
-	// sibling's routing domain. If the two interfaces are in different routing
-	// instances that is a cross-tenant mis-file, and a CONFIDENT one, because
-	// the helper's two-pass reverse preference matches a reply in the wrong
-	// tenant's domain on pass 1.
-	//
-	// Carried OPAQUELY: this is the #7239 encoded value, not a raw domain. 0
-	// means the sender did not state one, and the default instance has its own
-	// non-zero marker, so absence and default-instance stay distinguishable
-	// across every hop. Only the helper encodes and decodes it.
-	RoutingDomain uint32
 
 	// TunnelDiscriminator is the #7188 tunnel session-identity discriminator,
 	// as encoded by the Rust helper's TunnelDiscriminator::to_wire
@@ -623,6 +634,36 @@ type SessionValueV6 struct {
 	// Also part of the on-map C conntrack ABI.
 	IngressVlanID uint16
 
+	// RoutingDomain is the #7239 (#7160/#2387) session-key ROUTING DOMAIN.
+	//
+	// #9546: it is ALSO part of the on-map C conntrack ABI
+	// (session_value.routing_domain, appended after ingress_vlan_id), which is
+	// why it sits HERE in the shared prefix instead of among the sync-only
+	// trailing fields below. Until #9546 the BPF mirror had no slot for it, so
+	// every value read back out of the mirror carried 0 — measured, with
+	// TCPState and Timeout surviving the same round trip — and that made the
+	// #9146 singular and #9364 batch delete scoping inert on the real path.
+	// Both writers now stamp it: Go (SetSessionV4 -> toBPF) copies this value
+	// as-is, and the helper (publish_conntrack) states it for FORWARD rows
+	// only. The cluster sync wire is UNCHANGED: pkg/cluster/sync_protocol.go
+	// encodes this field explicitly at its own length-gated trailing
+	// position, never by struct layout.
+	//
+	// It exists because the peer used to DERIVE the domain from IngressIfaceFold,
+	// and that fold is computed on the SEND path against the CURRENT config
+	// (#7239) — so an ifindex recycled onto a sibling between install and sync
+	// folded to the sibling's name and the session was imported into the
+	// sibling's routing domain. If the two interfaces are in different routing
+	// instances that is a cross-tenant mis-file, and a CONFIDENT one, because
+	// the helper's two-pass reverse preference matches a reply in the wrong
+	// tenant's domain on pass 1.
+	//
+	// Carried OPAQUELY: this is the #7239 encoded value, not a raw domain. 0
+	// means the sender did not state one, and the default instance has its own
+	// non-zero marker, so absence and default-instance stay distinguishable
+	// across every hop. Only the helper encodes and decodes it.
+	RoutingDomain uint32
+
 	// Generation: see SessionValue.Generation. Userspace-sync-only HA
 	// deferred-delete guard metadata (#2170), not in the BPF C struct.
 	Generation uint64
@@ -692,25 +733,6 @@ type SessionValueV6 struct {
 	// through their own encoder and decoder; wiring only the v4 pair leaves
 	// every IPv6 session degraded after a failover.
 	IngressIfaceFold uint32
-	// RoutingDomain is the #7239 (#7160/#2387) session-key ROUTING DOMAIN,
-	// carried as a length-gated trailing sync-only field like IngressIfaceFold
-	// above. It is NOT part of the BPF ABI: the helper stamps it at INSTALL and
-	// it reaches here on the session delta, so no C struct moves.
-	//
-	// It exists because the peer used to DERIVE the domain from IngressIfaceFold,
-	// and that fold is computed on the SEND path against the CURRENT config
-	// (#7239) — so an ifindex recycled onto a sibling between install and sync
-	// folded to the sibling's name and the session was imported into the
-	// sibling's routing domain. If the two interfaces are in different routing
-	// instances that is a cross-tenant mis-file, and a CONFIDENT one, because
-	// the helper's two-pass reverse preference matches a reply in the wrong
-	// tenant's domain on pass 1.
-	//
-	// Carried OPAQUELY: this is the #7239 encoded value, not a raw domain. 0
-	// means the sender did not state one, and the default instance has its own
-	// non-zero marker, so absence and default-instance stay distinguishable
-	// across every hop. Only the helper encodes and decodes it.
-	RoutingDomain uint32
 
 	// TunnelDiscriminator is the #7188 tunnel session-identity discriminator,
 	// as encoded by the Rust helper's TunnelDiscriminator::to_wire
