@@ -402,6 +402,20 @@ type SessionValue struct {
 	// Generation must be the FIRST field past the on-map conntrack layout —
 	// TestSessionValueCarriesSyncOnlyGeneration asserts that offset exactly —
 	// so every sync-only field added later belongs behind it, not between.
+	// TCPCloseClass (#9412) is the TCP close class the owning node's helper
+	// states for this session: 0 = not carried or not closing, 1 = CLOSING,
+	// 2 = TIME_WAIT, 3 = RST. It mirrors the helper's TcpCloseClass.
+	//
+	// It exists so a session that closes on the primary AFTER it was synced
+	// reaps on the close window on the standby after a failover, rather than on
+	// the established window. It is userspace-sync-only HA metadata, like
+	// TunnelDiscriminator: a length-gated trailing byte on the cluster wire,
+	// never part of the BPF/C conntrack ABI. 0 is what a peer predating the
+	// field sends, and it means today's behaviour.
+	//
+	// It is deliberately NOT TCPState. That is the BPF mirror's own field and
+	// keeps its original meaning (#9412: add a field, never redefine one).
+	TCPCloseClass uint8
 }
 
 // SessionKeyV6 mirrors the C struct session_key_v6 (5-tuple with 128-bit IPs).
@@ -767,6 +781,20 @@ type SessionValueV6 struct {
 	// TestSessionValueCarriesSyncOnlyGeneration asserts that offset exactly —
 	// so every sync-only field added later belongs behind it, not between.
 
+	// TCPCloseClass (#9412) is the TCP close class the owning node's helper
+	// states for this session: 0 = not carried or not closing, 1 = CLOSING,
+	// 2 = TIME_WAIT, 3 = RST. It mirrors the helper's TcpCloseClass.
+	//
+	// It exists so a session that closes on the primary AFTER it was synced
+	// reaps on the close window on the standby after a failover, rather than on
+	// the established window. It is userspace-sync-only HA metadata, like
+	// TunnelDiscriminator: a length-gated trailing byte on the cluster wire,
+	// never part of the BPF/C conntrack ABI. 0 is what a peer predating the
+	// field sends, and it means today's behaviour.
+	//
+	// It is deliberately NOT TCPState. That is the BPF mirror's own field and
+	// keeps its original meaning (#9412: add a field, never redefine one).
+	TCPCloseClass uint8
 }
 
 // ZoneConfig mirrors the C struct zone_config.

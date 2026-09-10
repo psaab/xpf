@@ -8352,6 +8352,7 @@ fn f4_seed_shared_only(
         tcp_flags: 0,
         generation: 0,
         session_id: 0,
+        tcp_close_class: 0,
     };
     crate::afxdp::shared_ops::lock_shared_recover(&coordinator.sessions.synced)
         .insert(key.clone(), entry);

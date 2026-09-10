@@ -927,19 +927,11 @@ pub(super) fn apply_worker_commands(
                      local origin would have pushed an HA delta on the old \
                      install path"
                 );
+                // #5212 / #9412: the shared mapping preserves the entry's id (a
+                // local-tunnel replica carries 0 => fresh local alloc) and its
+                // close class.
                 let installed = sessions.upsert_synced_with_origin(
-                    SessionInstall {
-                        key: entry.key,
-                        decision: entry.decision,
-                        metadata: entry.metadata,
-                        origin: entry.origin,
-                        now_ns,
-                        protocol: entry.protocol,
-                        tcp_flags: entry.tcp_flags,
-                        // #5212: preserve the entry's id (a local-tunnel replica
-                        // carries 0 => fresh local alloc, the pre-#5212 behavior).
-                        session_id: entry.session_id,
-                    },
+                    entry.into_session_install(now_ns),
                     /* allow_replace_local = */ true,
                 );
                 // The only false exit is the local-clobber guard, which
@@ -1655,6 +1647,10 @@ fn materialize_shared_session_hit(
                 // shared entry's id — the peer's id for a synced session (so the
                 // eventual close correlates), 0 for a local entry (fresh alloc).
                 session_id: replica.session_id,
+                // #9412: a materialized shared hit keeps the synced close class, so
+                // a closing peer copy is not reset to the established window by the
+                // worker that happens to see its next packet.
+                tcp_close_class: replica.tcp_close_class,
             },
             false,
         );

@@ -1137,9 +1137,15 @@ type SessionSync struct {
 	genSentMu  sync.Mutex
 	genSentV4  map[dataplane.SessionKey]uint64
 	genSentV6  map[dataplane.SessionKeyV6]uint64
-	recvGenMu  sync.Mutex
-	recvGenV4  map[dataplane.SessionKey]uint64
-	recvGenV6  map[dataplane.SessionKeyV6]uint64
+	// #9412: per tuple, the TCP close class this node last SENT for one session
+	// incarnation (matched on SessionID), so a mirror-sourced resend cannot
+	// regress it. Guarded by genSentMu, beside the generation maps it mirrors;
+	// see stampCloseClassLocked.
+	closeClassSentV4 map[dataplane.SessionKey]sentCloseClass
+	closeClassSentV6 map[dataplane.SessionKeyV6]sentCloseClass
+	recvGenMu        sync.Mutex
+	recvGenV4        map[dataplane.SessionKey]uint64
+	recvGenV6        map[dataplane.SessionKeyV6]uint64
 
 	// #3931 config-sync ordering guard.
 	//
@@ -1486,6 +1492,8 @@ func (s *SessionSync) initGenState() {
 	s.genCounter.Store(seed)
 	s.genSentV4 = make(map[dataplane.SessionKey]uint64)
 	s.genSentV6 = make(map[dataplane.SessionKeyV6]uint64)
+	s.closeClassSentV4 = make(map[dataplane.SessionKey]sentCloseClass)
+	s.closeClassSentV6 = make(map[dataplane.SessionKeyV6]sentCloseClass)
 	s.recvGenV4 = make(map[dataplane.SessionKey]uint64)
 	s.recvGenV6 = make(map[dataplane.SessionKeyV6]uint64)
 	// #3931: seed the config generation from the same monotonic base so the

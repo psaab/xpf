@@ -272,6 +272,7 @@ fn update_ha_state_prewarms_split_rg_reverse_sessions_on_activation() {
         // #2170 test fixture: no peer install generation.
         generation: 0,
         session_id: 0,
+        tcp_close_class: 0,
     };
     publish_shared_session(
         &coordinator.sessions.synced,
@@ -382,6 +383,7 @@ fn update_ha_state_demotion_recovers_from_poisoned_worker_command_mutex() {
         // #2170 test fixture: no peer install generation.
         generation: 0,
         session_id: 0,
+        tcp_close_class: 0,
     };
     publish_shared_session(
         &coordinator.sessions.synced,
@@ -501,6 +503,7 @@ fn prewarm_recovers_from_poisoned_shared_session_mutex() {
         tcp_flags: 0x10,
         generation: 0,
         session_id: 0,
+        tcp_close_class: 0,
     };
     publish_shared_session(
         &coordinator.sessions.synced,
@@ -661,6 +664,7 @@ fn synced_entry_with_generation(generation: u64) -> SyncedSessionEntry {
         tcp_flags: 0,
         generation,
         session_id: 0,
+        tcp_close_class: 0,
     }
 }
 
@@ -880,6 +884,7 @@ fn synced_entry_port(port: u16, generation: u64) -> SyncedSessionEntry {
         tcp_flags: 0x10,
         generation,
         session_id: 0,
+        tcp_close_class: 0,
     }
 }
 
@@ -1499,6 +1504,7 @@ fn synced_snat_entry() -> SyncedSessionEntry {
         tcp_flags: 0,
         generation: 0,
         session_id: 0,
+        tcp_close_class: 0,
     }
 }
 
@@ -1676,6 +1682,7 @@ fn coordinator_with_tunnel_session(tunnel_endpoint_id: u16) -> (Coordinator, Ses
         tcp_flags: 0x10,
         generation: 0,
         session_id: 0,
+        tcp_close_class: 0,
     };
     publish_shared_session(
         &coordinator.sessions.synced,
@@ -2317,6 +2324,7 @@ fn reserve6600_entry(src_port: u16, pool_port: u16) -> SyncedSessionEntry {
         tcp_flags: 0x10,
         generation: 0,
         session_id: 0,
+        tcp_close_class: 0,
     }
 }
 
@@ -2532,6 +2540,7 @@ fn upsert_synced_session_rolls_back_source_nat_when_nat64_refuses_6600() {
         tcp_flags: 0x10,
         generation: 0,
         session_id: 0,
+        tcp_close_class: 0,
     };
 
     // Occupy the NAT64 translated identity with a DIFFERENT flow, so the
@@ -3400,6 +3409,7 @@ fn a_deleted_synced_session_leaves_no_reverse_prewarm_key_after_a_route_moves_72
         tcp_flags: 0x10,
         generation: 0,
         session_id: 0,
+        tcp_close_class: 0,
     };
     assert_eq!(
         coordinator.upsert_synced_session(entry.clone()),
@@ -3489,6 +3499,7 @@ fn deleting_one_synced_session_leaves_its_neighbours_in_the_reverse_prewarm_inde
         tcp_flags: 0x10,
         generation: 0,
         session_id: 0,
+        tcp_close_class: 0,
     };
     // Same source, different port: a distinct key that lands in the SAME two
     // buckets, which is the only arrangement in which an over-broad sweep is
@@ -3584,6 +3595,7 @@ fn a_route_move_adds_the_new_prewarm_filing_and_delete_clears_all_of_them_7209()
         tcp_flags: 0x10,
         generation: 0,
         session_id: 0,
+        tcp_close_class: 0,
     };
     assert_eq!(
         coordinator.upsert_synced_session(entry.clone()),
@@ -3669,6 +3681,7 @@ fn a_removal_outside_the_delete_verb_still_unfiles_the_prewarm_key_7209() {
             tcp_flags: 0x10,
             generation: 0,
             session_id: 0,
+            tcp_close_class: 0,
         };
         assert_eq!(
             coordinator.upsert_synced_session(entry.clone()),
@@ -3746,6 +3759,7 @@ fn a_promoted_then_deleted_synced_session_leaves_no_prewarm_key_7209() {
         tcp_flags: 0x10,
         generation: 0,
         session_id: 0,
+        tcp_close_class: 0,
     };
     assert_eq!(
         coordinator.upsert_synced_session(entry.clone()),
@@ -3839,6 +3853,7 @@ fn a_refresh_never_drops_a_prewarm_filing_the_current_fib_cannot_rederive_7209()
         tcp_flags: 0x10,
         generation: 0,
         session_id: 0,
+        tcp_close_class: 0,
     };
     assert_eq!(
         coordinator.upsert_synced_session(entry.clone()),
@@ -3969,6 +3984,7 @@ fn an_import_under_an_emptied_forwarding_table_publishes_a_dead_reverse_companio
         tcp_flags: 0x10,
         generation: 0,
         session_id: 0,
+        tcp_close_class: 0,
     };
     let reverse_key = reverse_session_key(&entry.key, entry.decision.nat);
 
@@ -4120,6 +4136,7 @@ fn the_reconcile_replay_rederives_a_dead_reverse_companion_7209() {
         tcp_flags: 0x10,
         generation: 0,
         session_id: 0,
+        tcp_close_class: 0,
     };
     let reverse_key = reverse_session_key(&entry.key, entry.decision.nat);
     assert_eq!(
@@ -4274,6 +4291,7 @@ fn stop_inner_empties_the_forwarding_table_that_a_released_lock_would_expose_720
         tcp_flags: 0x10,
         generation: 0,
         session_id: 0,
+        tcp_close_class: 0,
     };
     assert_eq!(
         coordinator.upsert_synced_session(entry.clone()),

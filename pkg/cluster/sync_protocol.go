@@ -99,7 +99,9 @@ func encodeSessionV4Payload(key dataplane.SessionKey, val dataplane.SessionValue
 	// the #5212 RTFlowSessionID, +4 for the #7095 IngressIfaceFold, +8 for the
 	// #7188 TunnelDiscriminator. All length-gated: an old decoder stops after
 	// the field it knows and ignores the rest.
-	buf := make([]byte, keySize+valSize+8+8+8+8+4+8)
+	// #7239 RoutingDomain (4) and #9412 TCPCloseClass (1) ride behind the
+	// fields above. Over-allocating is harmless: the result is buf[:off].
+	buf := make([]byte, keySize+valSize+8+8+8+8+4+8+4+1)
 	off := 0
 	copy(buf[off:], key.SrcIP[:])
 	off += 4
@@ -238,6 +240,12 @@ func encodeSessionV4Payload(key dataplane.SessionKey, val dataplane.SessionValue
 	// SessionSyncWireVersion.
 	binary.LittleEndian.PutUint32(buf[off:], val.RoutingDomain)
 	off += 4
+	// #9412: the TCP close class (u8), length-gated after the routing domain.
+	// 0 = not carried or not closing. A decoder that predates this byte stops
+	// after RoutingDomain and imports the session exactly as before. Like every
+	// trailing field since #2170 it does NOT bump SessionSyncWireVersion.
+	buf[off] = val.TCPCloseClass
+	off++
 	return buf[:off]
 }
 func encodeSessionV6(key dataplane.SessionKeyV6, val dataplane.SessionValueV6) []byte {
@@ -384,6 +392,12 @@ func encodeSessionV6Payload(key dataplane.SessionKeyV6, val dataplane.SessionVal
 	// SessionSyncWireVersion.
 	binary.LittleEndian.PutUint32(buf[off:], val.RoutingDomain)
 	off += 4
+	// #9412: the TCP close class (u8), length-gated after the routing domain.
+	// 0 = not carried or not closing. A decoder that predates this byte stops
+	// after RoutingDomain and imports the session exactly as before. Like every
+	// trailing field since #2170 it does NOT bump SessionSyncWireVersion.
+	buf[off] = val.TCPCloseClass
+	off++
 	return buf[:off]
 }
 
@@ -611,6 +625,12 @@ func decodeSessionV4Payload(payload []byte) (dataplane.SessionKey, dataplane.Ses
 		val.RoutingDomain = binary.LittleEndian.Uint32(payload[off:])
 		off += 4
 	}
+	// #9412: length-gated trailing close class. Absent => 0 (not carried),
+	// which is what a peer predating this field sends.
+	if off+1 <= len(payload) {
+		val.TCPCloseClass = payload[off]
+		off++
+	}
 	return key, val, true
 }
 
@@ -777,6 +797,12 @@ func decodeSessionV6Payload(payload []byte) (dataplane.SessionKeyV6, dataplane.S
 	if off+4 <= len(payload) {
 		val.RoutingDomain = binary.LittleEndian.Uint32(payload[off:])
 		off += 4
+	}
+	// #9412: length-gated trailing close class. Absent => 0 (not carried),
+	// which is what a peer predating this field sends.
+	if off+1 <= len(payload) {
+		val.TCPCloseClass = payload[off]
+		off++
 	}
 	return key, val, true
 }

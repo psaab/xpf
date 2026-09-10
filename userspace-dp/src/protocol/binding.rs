@@ -1406,6 +1406,14 @@ pub(crate) struct SessionDeltaInfo {
     /// (`pkg/dataplane/userspace/protocol_ha.go`, `SessionDeltaInfo`).
     #[serde(rename = "tunnel_discriminator", default)]
     pub tunnel_discriminator: u64,
+    /// #9412: the session's TCP close class (`0` = open or not carried,
+    /// 1 = CLOSING, 2 = TIME_WAIT, 3 = RST). Set on open and close-state
+    /// "update" deltas. Additive: an old daemon ignores the key.
+    ///
+    /// The rename MUST match the Go struct tag
+    /// (`pkg/dataplane/userspace/protocol_ha.go`, `SessionDeltaInfo`).
+    #[serde(rename = "tcp_close_class", default)]
+    pub tcp_close_class: u8,
 }
 
 

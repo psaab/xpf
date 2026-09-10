@@ -89,6 +89,10 @@ impl SessionTable {
         // touch self.wheel via push_to_wheel. Without this scoping
         // the &mut record would conflict with the second &mut self
         // via self.wheel.
+        // #9412: the matched entry's close class BEFORE this packet (wire form),
+        // captured inside the borrow below so a TRANSITION can be announced to
+        // the peer once the borrow has ended.
+        let mut close_class_before = 0u8;
         let (result, actual_key, propagate) = {
             let record = self.entries.get_mut(handle as usize)?;
             // #964 Step 1: path-specific validation defends against
@@ -109,6 +113,7 @@ impl SessionTable {
             }
             let is_tcp = matches!(key.protocol, PROTO_TCP);
             let entry = &mut record.entry;
+            close_class_before = entry.tcp_close_class_wire();
             let do_close = is_tcp && is_closing(tcp_flags);
             if do_close {
                 if !entry.closing {
@@ -240,8 +245,18 @@ impl SessionTable {
         // from the matched CANONICAL key (`actual_key`, not the alias lookup
         // `key`) + its own nat, exactly as `account_packet` hops reverse→forward.
         // Skipped entirely when there is nothing to propagate.
+        let closed_this_packet = propagate.close;
         if propagate.close || propagate.established || propagate.handshake_completed {
             self.propagate_tcp_state_to_companion(&actual_key, now_ns, propagate);
+        }
+        // #9412: a closing packet may have moved the session to a new close
+        // class. Announce it to the peer, which otherwise keeps its install-time
+        // copy and reaps it on the established window after a failover. Runs
+        // after the companion propagation, so a TIME_WAIT reached through the
+        // other half is seen. `emit_close_state_update` emits only on a real
+        // class change, and only for a session this node owns.
+        if closed_this_packet {
+            self.emit_close_state_update(&actual_key, close_class_before);
         }
         // Push the canonical key (NOT the alias lookup `key`) into
         // the wheel. push_to_wheel re-reads the record to compute

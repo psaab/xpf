@@ -10,16 +10,15 @@
 //! close-state from the carried tcp_flags" — a mechanism that does not exist —
 //! and prose is not falsifiable, so nothing could have caught that.
 //!
-//! WHAT IT ASSERTS, and it is a KNOWN-BROKEN state on purpose: an imported
-//! session's close bits are ALL FALSE no matter what the primary's session was
-//! doing, so it ages on the ESTABLISHED window (300 s) rather than its close
-//! window (30 s CLOSING / 30 s TIME_WAIT / 2 s RST). That is #9412, which is OPEN.
-//!
-//! SO THIS CELL IS TWO-SIDED, like `known_gap` in `test/incus/test-failover.sh`.
-//! While the defect stands it passes and documents the mechanism. The day #9412 is
-//! implemented it FAILS — loudly, naming itself — instead of silently continuing
-//! to assert a state that is no longer true. A cell that merely passed would let
-//! the fix land while the code still claimed close-state cannot cross.
+//! WHAT IT ASSERTS. The imported entry's `tcp_flags` stay a hard zero, so the
+//! close bits install.rs derives FROM `tcp_flags` are all false. That was #9412's
+//! mechanism. #9412 is now implemented WITHOUT touching this: close state rides
+//! its own wire field, `SessionSyncRequest.tcp_close_class`, and
+//! `upsert_synced_with_origin` applies it (see
+//! `close_state_sync_9412_acceptance_tests.rs`). Adding a field instead of
+//! redefining one is the decision this cell now defends. If `tcp_flags` ever
+//! starts carrying real flags on this path, close state would have two carriers
+//! that can disagree, and this cell fails, naming itself.
 //!
 //! It drives the REAL constructor, `build_synced_session_entry`, rather than
 //! asserting a literal of my own. A cell that compared a local `const
@@ -32,9 +31,8 @@ use crate::session::{has_fin, has_rst, is_closing};
 use crate::test_zone_ids::*;
 use crate::SessionSyncRequest;
 
-/// A minimal TCP peer-sync record. The point is what it does NOT carry: there is
-/// no field on `SessionSyncRequest` through which a sender could state close
-/// state, which is the defect.
+/// A minimal TCP peer-sync record. It states no close class, so this cell sees
+/// only the `tcp_flags` carrier. #9412's own carrier is `tcp_close_class`.
 fn tcp_sync_req() -> SessionSyncRequest {
     SessionSyncRequest {
         operation: "upsert".to_string(),
@@ -75,9 +73,9 @@ fn production_sync_import_carries_no_tcp_flags_9412() {
     );
     assert!(
         !closing && !reset && !fin_own,
-        "#9412: an imported session's close bits derive from `tcp_flags`, so with \
-         the hard zero they are all false and the entry ages on the ESTABLISHED \
-         window. closing={closing} reset={reset} fin_own={fin_own}"
+        "#9412: the close bits derived from `tcp_flags` must stay false on the sync \
+         path. Close state crosses on `tcp_close_class` instead, so a set bit here \
+         means a second, competing carrier. closing={closing} reset={reset} fin_own={fin_own}"
     );
 }
 

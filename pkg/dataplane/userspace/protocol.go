@@ -160,7 +160,18 @@ const (
 	// new reader trusts. A garbage domain on a delete can name ANOTHER TENANT's
 	// row. Exact equality refuses that pairing: an old helper receives no
 	// snapshot, so it installs no session and never reaches publish_conntrack.
-	ProtocolVersion = 12
+	//
+	// v13 (issue 9412): the TCP close class now crosses the HA session-sync
+	// path. It rides SessionDeltaInfo and SessionSyncRequest `tcp_close_class`,
+	// the open-frame trailing byte, and the new close-state UPDATE frame.
+	// Every hop is additive, and an old peer degrades to 0. By the v9 rule that
+	// is still not enough, because the old behaviour IS the defect: a v12 helper
+	// under a v13 daemon would never emit a close-state update, and would import
+	// every closing session on the established window, while this daemon
+	// believes close state crosses. The session-sync messages are not snapshot
+	// structs, so the #8892 digest did not move; like v12, this bump is on the
+	// merits.
+	ProtocolVersion = 13
 
 	// MinProtocolMultiZoneScopedPolicy is the FIRST snapshot protocol version
 	// that can represent a multi-zone scoped global policy — the plural

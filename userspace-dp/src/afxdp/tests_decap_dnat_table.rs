@@ -220,6 +220,7 @@ fn replay_filter_drops_purged_forward_and_derived_reverse_companion() {
             // #2170 test fixture: no peer install generation.
             generation: 0,
             session_id: 0,
+            tcp_close_class: 0,
         };
     let unrelated_key = SessionKey {
         src_port: 23456,
@@ -334,6 +335,7 @@ fn replay_filter_preserves_order_and_survivors_across_many_drops() {
             tcp_flags: 0,
             generation: 0,
             session_id: 0,
+            tcp_close_class: 0,
         }
     };
 

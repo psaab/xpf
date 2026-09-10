@@ -1584,6 +1584,14 @@ func decodeSessionEvent(payload []byte) (SessionDeltaInfo, bool) {
 		d.RoutingDomain = binary.LittleEndian.Uint32(payload[off : off+4])
 		off += 4
 	}
+	// #9412: trailing close class (u8), length-gated after the routing domain.
+	// The helper writes it on every open and close-state update frame: 0 = not
+	// carried or not closing, 1 = CLOSING, 2 = TIME_WAIT, 3 = RST. An old
+	// helper omits it => 0, and the session syncs exactly as before.
+	if off+1 <= len(payload) {
+		d.TCPCloseClass = payload[off]
+		off++
+	}
 
 	return d, true
 }

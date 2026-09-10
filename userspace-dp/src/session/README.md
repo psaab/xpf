@@ -1320,6 +1320,83 @@ omits the fields decodes to `false` (no per-policy log) — bit-identical to
 pre-#2785 behavior. The JSON RPC-fallback delta (`SessionDeltaInfo` in
 `protocol/binding.rs`) carries the same fields at parity with the binary frame.
 
+### TCP close class on the session-sync wire (#9412)
+
+A TCP session that closed on the node that owns it used to stay OPEN on the peer.
+- **Why the peer's copy never changed.** A sync delta was produced only at install
+  and at removal. The incremental sweep re-sends only sessions created since its
+  last tick. So the standby's copy kept its install-time state.
+- **What that did at failover.** With no further traffic, the copy reaped on the
+  ESTABLISHED window (300 s by default) instead of its close window.
+- **Why the import could not recover it.** It had nothing to derive close state
+  from: the production constructor carries `tcp_flags: 0`.
+
+#9412 carries the close class explicitly, as a NEW field. It never reuses
+`tcp_flags`, or the BPF mirror's `TCPState`.
+
+- **Wire value.** `TcpCloseClass::to_wire`: `0` = open or not carried,
+  `1` = CLOSING, `2` = TIME_WAIT, `3` = RST. It is direction-neutral, because a
+  delta names only the forward key while `fin_own`/`fin_peer` are relative to
+  each half.
+- **Producer.**
+  - `lookup_with_origin` captures the matched entry's class before the packet.
+  - After the companion propagation, `emit_close_state_update` pushes a
+    `SessionDeltaKind::Update` for the FORWARD entry. It does so only if the
+    class changed, and only for a session this node owns.
+  - A retransmitted FIN in the same class emits nothing, so a session emits at
+    most three: CLOSING, TIME_WAIT, RST.
+- **Open deltas carry it too** (install, promote, bulk re-export, HA export).
+  That way the #2442 loss-of-sync resync, which is an Open re-export, also
+  restores a dropped Update.
+- **Transport.**
+  - An Update uses the open record layout on `MSG_SESSION_UPDATE` (type 3).
+  - Every open-layout frame ends with a close-class byte after the #7239
+    routing domain.
+  - The JSON leg carries `tcp_close_class`.
+  - RT_FLOW SESSION_CREATE and the close teardown both key on the exact kind, so
+    an Update triggers neither.
+- **Go.** `SessionDeltaInfo.TCPCloseClass` becomes `SessionValue{,V6}.TCPCloseClass`
+  (sync-only). That rides the cluster wire as a trailing byte and arrives as
+  `SessionSyncRequest.tcp_close_class`. The walker syncs `"update"` exactly like
+  `"open"`.
+- **Import.** `upsert_synced_with_origin` sets:
+  - `closing`;
+  - `reset` for RST;
+  - BOTH FIN bits for TIME_WAIT;
+  - NEITHER FIN bit for CLOSING, because the wire does not say which direction
+    FINed and a guess would misclassify the other side's later FIN.
+  The expiry comes from `tcp_close_window_ns`. A materialized shared hit keeps
+  the class too.
+
+- **Companions, promote and resends.** The class must survive every path that
+  re-installs or re-sends the session, not only the first import.
+  - `synthesized_synced_reverse_entry` gives the reverse companion the forward
+    entry's class. It serves the import fan-out, the takeover prewarm and the
+    reconcile replay. With `0` there, the standby re-installed the reverse half on
+    the established window. `companion_keeps_alive` does not read `closing`, so
+    that companion can hold the closing forward alive. This is read from the code:
+    the live probe could not observe the reverse half.
+  - `maybe_promote_synced_session` republishes the session's LIVE class
+    (`close_class_wire_for`) into the shared maps and to peer workers.
+  - The Go sender never resends a lower class for the same incarnation. The sweep
+    and bulk resends come from the BPF mirror, whose row carries `0`. See
+    `docs/session-sync-architecture.md`, "TCP Close Class".
+- **Bound (#9582).** Only the worker that installed a session announces its
+  transitions. A worker replica (`WorkerLocalImport`, excluded by
+  `is_peer_synced()`) mints its own `session_id`, so an Update from it would flip
+  the peer's adopted id (#5212).
+  - A close that only a replica sees is not announced. That is typically the
+    server's FIN or RST, arriving on the other interface's RSS queue.
+  - The client's FIN reaches the installer, so CLOSING is announced.
+  - TIME_WAIT shares CLOSING's 30 s default window.
+  - A server-only RST stays on the established window.
+
+Every hop is length-gated or `serde(default)`, so an old peer sends and reads `0`,
+which is today's behaviour. Acceptance lives in
+`close_state_sync_9412_acceptance_tests.rs` and the Go
+`close_state_sync_9412_acceptance_test.go` files. A golden UPDATE frame, shared by
+the Rust encoder and the Go decoder, pins the byte in both languages.
+
 ### Policy attribution is single-sourced across both session-delta legs (#6949)
 
 A session delta leaves the helper on two wires, and both must describe the same

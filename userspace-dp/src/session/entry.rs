@@ -472,6 +472,13 @@ impl SessionOrigin {
 pub(crate) enum SessionDeltaKind {
     Open,
     Close,
+    /// #9412: a live session's TCP close class changed on the node that owns
+    /// it. It carries the same record as an Open, plus `tcp_close_class`, so
+    /// the peer re-upserts its copy with the close state.
+    ///
+    /// It is NOT an Open. The RT_FLOW SESSION_CREATE export and the close
+    /// teardown both key on the exact kind, so neither fires for it.
+    Update,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -548,6 +555,14 @@ pub(crate) struct SessionDelta {
     /// caller is the worker loop's chunked export), and a new call site cannot
     /// get it wrong because it does not choose.
     pub(crate) bulk_resync: bool,
+    /// #9412: the session's TCP close class on the HA wire when this delta was
+    /// produced. `0` means open or not carried; otherwise it is
+    /// `TcpCloseClass::to_wire`.
+    ///
+    /// Open and Update deltas take it from the live entry. That lets the #2442
+    /// loss-of-sync resync, which is an Open re-export, also restore a dropped
+    /// Update. Close deltas carry `0`.
+    pub(crate) tcp_close_class: u8,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

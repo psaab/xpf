@@ -3108,6 +3108,7 @@ pub(super) fn poll_binding_process_descriptor(
                                             // rides the wire off the live entry via the
                                             // Open delta, not this replica (0 here).
                                             session_id: 0,
+                                            tcp_close_class: 0,
                                         };
                                         // #1789: count failed publishes so
                                         // map-at-capacity / stale-fd
@@ -3569,6 +3570,7 @@ pub(super) fn poll_binding_process_descriptor(
                                             // RT_FLOW (is_reverse skip) and gets its own
                                             // fresh id at install — no carried id.
                                             session_id: 0,
+                                            tcp_close_class: 0,
                                         };
                                         publish_shared_session(
                                             worker_ctx.shared_sessions,
@@ -6060,6 +6062,7 @@ pub(super) fn poll_binding_process_descriptor(
                                             generation: 0,
                                             // #5212: local-origin seed; no carried id (0).
                                             session_id: 0,
+                                            tcp_close_class: 0,
                                         };
                                         publish_shared_session(
                                             worker_ctx.shared_sessions,

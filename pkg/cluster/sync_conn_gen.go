@@ -164,6 +164,12 @@ func (s *SessionSync) stampInstallGenV4(key dataplane.SessionKey, val *dataplane
 	if !putGenBounded(s.genSentV4, key, g) {
 		s.stats.GenMapOverflow.Add(1)
 	}
+	// #9412: keep this frame from regressing the close class already sent for
+	// the same incarnation (a mirror-sourced resend carries 0). Same lock.
+	if s.closeClassSentV4 == nil {
+		s.closeClassSentV4 = make(map[dataplane.SessionKey]sentCloseClass)
+	}
+	stampCloseClassLocked(s.closeClassSentV4, key, val.SessionID, &val.TCPCloseClass)
 	s.genSentMu.Unlock()
 }
 
@@ -184,6 +190,12 @@ func (s *SessionSync) stampInstallGenV6(key dataplane.SessionKeyV6, val *datapla
 	if !putGenBounded(s.genSentV6, key, g) {
 		s.stats.GenMapOverflow.Add(1)
 	}
+	// #9412: keep this frame from regressing the close class already sent for
+	// the same incarnation (a mirror-sourced resend carries 0). Same lock.
+	if s.closeClassSentV6 == nil {
+		s.closeClassSentV6 = make(map[dataplane.SessionKeyV6]sentCloseClass)
+	}
+	stampCloseClassLocked(s.closeClassSentV6, key, val.SessionID, &val.TCPCloseClass)
 	s.genSentMu.Unlock()
 }
 
@@ -213,6 +225,9 @@ func (s *SessionSync) stampInstallGenV6(key dataplane.SessionKeyV6, val *datapla
 func (s *SessionSync) takeDeleteGenV4(key dataplane.SessionKey) uint64 {
 	s.genSentMu.Lock()
 	defer s.genSentMu.Unlock()
+	// #9412: the incarnation is being deleted; forget its close class. Before the
+	// early return, so a key with no generation stamp is still evicted.
+	delete(s.closeClassSentV4, key)
 	if _, ok := s.genSentV4[key]; !ok {
 		return 0
 	}
@@ -223,6 +238,9 @@ func (s *SessionSync) takeDeleteGenV4(key dataplane.SessionKey) uint64 {
 func (s *SessionSync) takeDeleteGenV6(key dataplane.SessionKeyV6) uint64 {
 	s.genSentMu.Lock()
 	defer s.genSentMu.Unlock()
+	// #9412: the incarnation is being deleted; forget its close class. Before the
+	// early return, so a key with no generation stamp is still evicted.
+	delete(s.closeClassSentV6, key)
 	if _, ok := s.genSentV6[key]; !ok {
 		return 0
 	}

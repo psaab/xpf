@@ -73,6 +73,7 @@ fn delta_with_session_id(session_id: u64) -> SessionDelta {
         observed_tcp_flags: 0,
         session_id,
         bulk_resync: false,
+        tcp_close_class: 0,
     }
 }
 
@@ -244,9 +245,12 @@ fn binary_attribution(delta: &SessionDelta) -> BinaryAttribution {
         &zones,
         delta.fabric_redirect_sync,
         delta.session_id,
+        0, // #9412: tcp_close_class
     );
     let payload = &frame.as_bytes()[FRAME_HEADER_SIZE..];
-    let n = payload.len();
+    // #9412: discount the trailing close-class byte. The fields below are read
+    // end-relative, and the open frame now ends one byte after the routing domain.
+    let n = payload.len() - 1;
     let u32_at = |off: usize| -> u32 {
         u32::from_le_bytes(payload[off..off + 4].try_into().expect("4 bytes"))
     };
@@ -618,9 +622,12 @@ fn session_delta_json_and_binary_agree_on_the_routing_domain_7239() {
         &FxHashMap::default(),
         delta.fabric_redirect_sync,
         delta.session_id,
+        0, // #9412: tcp_close_class
     );
     let payload = &frame.as_bytes()[FRAME_HEADER_SIZE..];
-    let n = payload.len();
+    // #9412: discount the trailing close-class byte. The fields below are read
+    // end-relative, and the open frame now ends one byte after the routing domain.
+    let n = payload.len() - 1;
     let binary = u32::from_le_bytes(payload[n - 4..n].try_into().expect("4 bytes"));
 
     let info = session_delta_info(&test_binding_identity(), &delta, &zone_names());
@@ -650,4 +657,25 @@ fn session_delta_json_and_binary_agree_on_the_routing_domain_7239() {
         "fixture check: the domain must be non-default, or a leg that dropped the \
          field entirely would still compare equal"
     );
+}
+
+// --- #9412: the JSON leg carries the close class and names an update ---
+
+/// Fail-on-revert: drop `tcp_close_class: delta.tcp_close_class` from
+/// `session_delta_info` and every session recovered through the JSON resync leg
+/// reads as open. A close-state Update then never reaches the peer as closing
+/// on that leg, even though the binary frame carries it.
+///
+/// The Update must also be NAMED `"update"`, the event the Go walker syncs like
+/// an open. Any other string falls through the walker's switch silently.
+#[test]
+fn session_delta_info_carries_the_close_class_and_names_an_update_9412() {
+    let mut delta = delta_with_session_id(1);
+    delta.kind = crate::session::SessionDeltaKind::Update;
+    delta.tcp_close_class = 2;
+    let info = session_delta_info(&test_binding_identity(), &delta, &zone_names());
+    assert_eq!(info.tcp_close_class, 2, "the JSON leg must carry the close class (#9412)");
+    assert_eq!(info.event, "update", "a close-state Update must be named \"update\" on the JSON leg (#9412)");
+    // Positive control: this really is the delta -> JSON conversion.
+    assert_eq!(info.src_port, 12345, "conversion produced the delta's tuple");
 }

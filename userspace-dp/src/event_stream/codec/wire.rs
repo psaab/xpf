@@ -19,7 +19,6 @@ pub(crate) const FRAME_HEADER_SIZE: usize = 16;
 
 pub(crate) const MSG_SESSION_OPEN: u8 = 1;
 pub(crate) const MSG_SESSION_CLOSE: u8 = 2;
-#[allow(dead_code)]
 pub(crate) const MSG_SESSION_UPDATE: u8 = 3;
 pub(crate) const MSG_ACK: u8 = 4;
 pub(crate) const MSG_PAUSE: u8 = 5;

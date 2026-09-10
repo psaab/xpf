@@ -21,9 +21,61 @@ impl EventFrame {
         key: &SessionKey,
         decision: &SessionDecision,
         metadata: &SessionMetadata,
+        zone_name_to_id: &FxHashMap<String, u16>,
+        fabric_redirect_sync: bool,
+        session_id: u64,
+        tcp_close_class: u8,
+    ) -> Self {
+        Self::encode_session_record(
+            MSG_SESSION_OPEN,
+            seq,
+            key,
+            decision,
+            metadata,
+            zone_name_to_id,
+            fabric_redirect_sync,
+            session_id,
+            tcp_close_class,
+        )
+    }
+
+    /// #9412: a close-state update. It uses the OPEN record layout on
+    /// `MSG_SESSION_UPDATE`, so the Go decoder upserts the peer's copy, and it
+    /// is never an RT_FLOW SESSION_CREATE.
+    pub(crate) fn encode_session_update(
+        seq: u64,
+        key: &SessionKey,
+        decision: &SessionDecision,
+        metadata: &SessionMetadata,
+        zone_name_to_id: &FxHashMap<String, u16>,
+        fabric_redirect_sync: bool,
+        session_id: u64,
+        tcp_close_class: u8,
+    ) -> Self {
+        Self::encode_session_record(
+            MSG_SESSION_UPDATE,
+            seq,
+            key,
+            decision,
+            metadata,
+            zone_name_to_id,
+            fabric_redirect_sync,
+            session_id,
+            tcp_close_class,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn encode_session_record(
+        msg_type: u8,
+        seq: u64,
+        key: &SessionKey,
+        decision: &SessionDecision,
+        metadata: &SessionMetadata,
         _zone_name_to_id: &FxHashMap<String, u16>,
         fabric_redirect_sync: bool,
         session_id: u64,
+        tcp_close_class: u8,
     ) -> Self {
         let mut buf = [0u8; 256];
         let mut pos = FRAME_HEADER_SIZE; // skip header, fill later
@@ -241,9 +293,18 @@ impl EventFrame {
             .copy_from_slice(&crate::session::routing_domain_to_wire(key.routing_domain).to_le_bytes());
         pos += 4;
 
+        // #9412: [+36] the session's TCP close class (u8), trailing and
+        // length-gated after the #7239 routing domain, like every field since
+        // #3301. `0` = open or not carried, which is also what a Go decoder that
+        // predates the byte reads. Written on BOTH message types this layout
+        // serves: an Update exists to carry it, and an Open carries the current
+        // class so a resync re-export restores a dropped Update.
+        buf[pos] = tcp_close_class;
+        pos += 1;
+
         // Write header
         let payload_len = (pos - FRAME_HEADER_SIZE) as u32;
-        write_header(&mut buf, payload_len, MSG_SESSION_OPEN, seq);
+        write_header(&mut buf, payload_len, msg_type, seq);
 
         EventFrame {
             data: buf,

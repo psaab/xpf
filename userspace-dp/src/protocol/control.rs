@@ -105,9 +105,15 @@ use super::snapshot::{ConfigSnapshot, FabricSnapshot, NeighborSnapshot, Userspac
 // (144 -> 152 / 192 -> 200). This process WRITES that struct, so a daemon/helper
 // size mismatch copies past the buffer into the slot a new reader trusts; exact
 // equality on this constant is what refuses the pairing. See pkg/dataplane/
-// userspace/protocol.go's v12 note. Keep the line below in this exact form: the
-// Go lockstep guard parses it.
-pub(crate) const CONFIG_SNAPSHOT_PROTOCOL_VERSION: i32 = 12;
+// userspace/protocol.go's v12 note.
+// v13 (#9412): the TCP close class now crosses the HA session-sync path
+// (`SessionSyncRequest`/`SessionDeltaInfo.tcp_close_class`, the open-frame
+// trailing byte, `MSG_SESSION_UPDATE`). Additive, but under the v9 rule that is
+// not enough, because the old behaviour IS the defect: a v12 helper would never
+// announce a close and would import closing sessions on the established window.
+// Exact equality refuses that pairing. The #8892 digest did not move.
+// Keep the line below in this exact form: the Go lockstep guard parses it.
+pub(crate) const CONFIG_SNAPSHOT_PROTOCOL_VERSION: i32 = 13;
 
 /// #9344: the owner-RG session export paging contract this helper implements.
 ///
@@ -840,6 +846,16 @@ pub(crate) struct SessionSyncRequest {
     /// the call ids of the canonically-lower and -higher peer address.
     #[serde(rename = "pptp_call_ids", default)]
     pub pptp_call_ids: u64,
+    /// #9412: the TCP close class the owning node stated (`0` = open or not
+    /// carried, 1 = CLOSING, 2 = TIME_WAIT, 3 = RST).
+    /// `upsert_synced_with_origin` imports a closing session with its close
+    /// bits set and on its close window, and `0` imports exactly as before. A
+    /// value this build does not know is treated as not carried.
+    ///
+    /// The rename MUST match the Go struct tag
+    /// (`pkg/dataplane/userspace/protocol_ha.go`, `SessionSyncRequest`).
+    #[serde(rename = "tcp_close_class", default)]
+    pub tcp_close_class: u8,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]

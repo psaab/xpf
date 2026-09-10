@@ -647,7 +647,10 @@ func (d *Daemon) walkUserspaceSessionDeltas(
 	n := 0
 	for _, delta := range deltas {
 		switch strings.ToLower(delta.Event) {
-		case "open":
+		// #9412: "update" is a close-state update for a live session. It carries
+		// the same record as an open and syncs the same way: the peer upserts it
+		// with the new close class.
+		case "open", "update":
 			switch delta.AddrFamily {
 			case dataplane.AFInet:
 				key, val, ok := userspaceSessionFromDeltaV4(delta, zoneIDs)

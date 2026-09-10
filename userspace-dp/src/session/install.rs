@@ -289,6 +289,12 @@ impl SessionTable {
                 // SESSION_CLOSE will.
                 session_id,
                 bulk_resync: false,
+                // #9412: a session installed BY a closing packet is already closing.
+                tcp_close_class: if matches!(protocol, PROTO_TCP) && is_closing(tcp_flags) {
+                    TcpCloseClass::from_packet(tcp_flags).to_wire()
+                } else {
+                    0
+                },
             });
         }
         true
@@ -318,6 +324,8 @@ impl SessionTable {
                 // the receiver allocs a fresh node-local one (the real HA path
                 // threads the peer's id via `handle_upsert_synced`).
                 session_id: 0,
+                // #9412: nor a close class; the real HA path threads it the same way.
+                tcp_close_class: 0,
             },
             allow_replace_local,
         )
@@ -338,7 +346,15 @@ impl SessionTable {
             protocol,
             tcp_flags,
             session_id: wire_session_id,
+            tcp_close_class: wire_close_class,
         } = req;
+        // #9412: the close class the owning node stated. `None` (0, or a class
+        // this build does not know) imports exactly as before.
+        let wire_close = if matches!(protocol, PROTO_TCP) {
+            TcpCloseClass::from_wire(wire_close_class)
+        } else {
+            None
+        };
         // Reject peer data that would clobber a locally-owned session
         // unless explicitly allowed (e.g. during HA activation).
         if matches!(self.entry_by_key(&key), Some(existing) if !existing.origin.is_peer_synced())
@@ -415,13 +431,14 @@ impl SessionTable {
                 // `tcp_flags`" path. It does not. The production import
                 // constructor hardcodes `tcp_flags: 0`
                 // (`server/helpers/session_sync.rs`), so on a peer-synced entry
-                // there is nothing to derive FROM: `closing`, `reset` and
-                // `fin_own` below are ALWAYS false, and an imported session that
-                // was closing on the primary reaps on the ESTABLISHED window
-                // (300 s) rather than its close window (30 s / 2 s). That is
-                // #9412, which is OPEN and needs an explicit wire field — see
-                // `tcp_flags_zero_on_sync_path_9412_tests.rs`, which pins the
-                // hard zero so this comment cannot drift back.
+                // there is nothing to derive FROM: the `closing`, `reset` and
+                // `fin_own` bits derived from `tcp_flags` below are ALWAYS false.
+                // Before #9412 that meant a session closing on the primary
+                // imported as open and reaped on the ESTABLISHED window (300 s).
+                // #9412 carries close state on its OWN wire field,
+                // `tcp_close_class`, which is applied below. It never rides
+                // `tcp_flags`, and `tcp_flags_zero_on_sync_path_9412_tests.rs`
+                // pins the hard zero so that stays true.
                 //
                 // #3152's CONCLUSION is unaffected and its reasoning still
                 // stands on its own: were the flags ever carried, deriving
@@ -458,32 +475,47 @@ impl SessionTable {
                 // `filter_revalidated` gets, for the verdict #7323 accepted as a
                 // residual and this issue closes.
                 policy_revalidated_gen: 0,
-                expires_after_ns: session_timeout_ns(
-                    protocol,
-                    tcp_flags,
-                    // #3152: imported ESTABLISHED (see above).
-                    true,
-                    &self.timeouts,
-                    // #3227: per-application idle timeout override (None = global).
-                    metadata.inactivity_timeout_ns,
-                    // #3527: a peer-synced session is imported ESTABLISHED, so
-                    // the OPENING branch is never taken and the per-zone
-                    // half-open override is irrelevant here. Passing `None`
-                    // (rather than re-deriving from this node's config) makes
-                    // explicit that the override never crosses the HA wire — it
-                    // is re-derived per node and only governs locally-received
-                    // bare-SYN floods (§11.1 of the #3315 plan).
-                    None,
-                ),
-                closing: matches!(protocol, PROTO_TCP) && is_closing(tcp_flags),
-                reset: matches!(protocol, PROTO_TCP) && has_rst(tcp_flags),
+                // #9412: a peer-stated close class puts the copy on its close
+                // window, through the same formula the owning node used. Without
+                // one, it imports ESTABLISHED exactly as before (#3152).
+                expires_after_ns: match wire_close {
+                    Some(class) => tcp_close_window_ns(class, &self.timeouts),
+                    None => session_timeout_ns(
+                        protocol,
+                        tcp_flags,
+                        // #3152: imported ESTABLISHED (see above).
+                        true,
+                        &self.timeouts,
+                        // #3227: per-application idle timeout override (None = global).
+                        metadata.inactivity_timeout_ns,
+                        // #3527: a peer-synced session is imported ESTABLISHED, so
+                        // the OPENING branch is never taken and the per-zone
+                        // half-open override is irrelevant here. Passing `None`
+                        // (rather than re-deriving from this node's config) makes
+                        // explicit that the override never crosses the HA wire — it
+                        // is re-derived per node and only governs locally-received
+                        // bare-SYN floods (§11.1 of the #3315 plan).
+                        None,
+                    ),
+                },
+                closing: wire_close.is_some() || (matches!(protocol, PROTO_TCP) && is_closing(tcp_flags)),
+                reset: matches!(wire_close, Some(TcpCloseClass::Reset))
+                    || (matches!(protocol, PROTO_TCP) && has_rst(tcp_flags)),
                 // #7342: a fresh install has seen exactly one packet, so at most
                 // one direction can have FINed and the companion's is unknown.
                 // A session installed BY a closing packet is therefore CLOSING,
                 // never TIME_WAIT — which is also the window it reaped on before
                 // the state existed.
-                fin_own: matches!(protocol, PROTO_TCP) && has_fin(tcp_flags),
-                fin_peer: false,
+                //
+                // #9412: TIME_WAIT is a statement about BOTH directions, so a
+                // peer-stated TIME_WAIT sets both FIN bits. CLOSING sets NEITHER:
+                // the wire does not say which direction FINed, and guessing would
+                // misclassify the other side's later FIN. `tcp_close_class` still
+                // reads CLOSING, because `closing` is set and neither `reset` nor
+                // both FIN bits are.
+                fin_own: matches!(wire_close, Some(TcpCloseClass::TimeWait))
+                    || (matches!(protocol, PROTO_TCP) && has_fin(tcp_flags)),
+                fin_peer: matches!(wire_close, Some(TcpCloseClass::TimeWait)),
                 wheel_tick: 0,
                 // #2120: a re-imported synced entry leaves the held world
                 // with a fresh `last_seen_ns`, so it carries no carried-over
@@ -557,7 +589,11 @@ impl SessionTable {
         // (`encode_session_open`) and the JSON `SessionDeltaInfo`
         // (`rt_flow_session_id`, populated by `afxdp::session_delta_info`).
         let session_id = self.session_id_for(&key);
+        // #9412: the live entry's close class, so this re-export also restores a
+        // close-state Update the incremental stream dropped.
+        let tcp_close_class = self.close_class_wire_for(&key);
         self.push_delta(SessionDelta {
+            tcp_close_class,
             kind: SessionDeltaKind::Open,
             key,
             decision,
@@ -626,6 +662,7 @@ impl SessionTable {
             // carries the real id off the expiring entry.
             session_id: 0,
             bulk_resync: false,
+            tcp_close_class: 0,
         });
     }
 
