@@ -755,7 +755,10 @@ func (d *Daemon) commitConfirmedAndApply(ctx context.Context, authority configst
 			// unconfirmed candidate, and the rollback is ANNOUNCED as done.
 			// Decide it here, while the operator is still connected and
 			// nothing has been promoted.
-			if rerr := rollbackTargetAppliablePreflight(d.store.ActiveConfig()); rerr != nil {
+			// #9588: the Go refusal mirror decides, with the LIVE feed overlay
+			// for this target (representability is feed-aware).
+			rollbackTarget := d.store.ActiveConfig()
+			if rerr := rollbackTargetAppliablePreflight(rollbackTarget, d.feedSnapshotsForConfig(rollbackTarget)); rerr != nil {
 				return rerr
 			}
 			return d.deviceMapCommitPreflight(cand, d.store.ActiveConfig())
