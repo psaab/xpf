@@ -1330,3 +1330,84 @@ mod pptp_quote_call_id_9298_tests {
         assert_eq!(hdr.discriminator, TunnelDiscriminator::Unparseable);
     }
 }
+
+
+/// #9298 STRUCTURAL: every same-family FORWARD lookup key must carry the
+/// RESOLVED quote, not the raw one.
+///
+/// WHY STRUCTURAL — measured, not assumed. The mutation matrix for #9298 severed
+/// each forward-key constructor back to `discriminator: hdr.discriminator` and
+/// all three SURVIVED every behavioural cell, including the dedicated PPTP
+/// end-to-end ones. The reason is an index rule, not a fixture gap:
+/// `SessionTable::index_forward_nat_key` puts every forward entry's reverse wire
+/// key into `nat_reverse_index` ALWAYS, NAT or not. So while the REPLY key is
+/// wired, `lookup_forward_nat_across_scopes` (in `nat_match_v4`/`v6`) and
+/// `find_forward_nat_match` (the third fallback in `session_match`) reach the
+/// live session before the as-is forward key is consulted, and a broken forward
+/// key has no match/no-match signal. The reply keys DO have one, and the
+/// end-to-end cells kill their reverts.
+///
+/// This is the same conclusion #9031's guard above reached for `Default::default()`,
+/// re-measured for the #9298 shape. It needs its own guard because the #9031 one
+/// ACCEPTS `hdr.discriminator` — which was the correct spelling until this change,
+/// and is now exactly the defect: for a PPTP quote the raw value is `Unparseable`
+/// on every packet.
+///
+/// Scoped to the three same-family match modules; `parse.rs` field inits are the
+/// raw value by design (the parser stays pure), and `nat64_match.rs` is excluded
+/// for the reason the #9031 guard gives.
+#[cfg(test)]
+mod embedded_forward_key_resolve_wiring_9298_tests {
+    const MATCH_SOURCES: [(&str, &str, usize); 3] = [
+        // (file, source, forward keys it builds)
+        ("nat_match_v4.rs", include_str!("nat_match_v4.rs"), 1),
+        ("nat_match_v6.rs", include_str!("nat_match_v6.rs"), 1),
+        ("session_match.rs", include_str!("session_match.rs"), 2),
+    ];
+
+    #[test]
+    fn every_same_family_forward_key_carries_the_resolved_quote_9298() {
+        let mut raw = Vec::new();
+        let mut total_resolved = 0usize;
+        for (name, src, want) in MATCH_SOURCES {
+            let mut resolved = 0usize;
+            let mut calls = 0usize;
+            for (i, line) in src.lines().enumerate() {
+                let t = line.trim();
+                if t.starts_with("discriminator: hdr.discriminator") {
+                    raw.push(format!("{name}:{}", i + 1));
+                }
+                if t.starts_with("discriminator: quoted_discriminator") {
+                    resolved += 1;
+                }
+                if t.contains("resolve_quoted_pptp_discriminator(") {
+                    calls += 1;
+                }
+            }
+            assert_eq!(
+                resolved, want,
+                "#9298: {name} builds {want} forward lookup key(s) but only \
+                 {resolved} carry `discriminator: quoted_discriminator`. A key \
+                 left on the raw quote is `Unparseable` for every PPTP packet \
+                 and can never equal a live session's `Pptp(handle)`"
+            );
+            assert_eq!(
+                calls, want,
+                "#9298: {name} must call `resolve_quoted_pptp_discriminator` once \
+                 per match arm ({want}), found {calls}. The forward keys above \
+                 are only correct if the value they carry was resolved"
+            );
+            total_resolved += resolved;
+        }
+        assert!(
+            raw.is_empty(),
+            "#9298: {raw:?} build a forward lookup key from the RAW quote \
+             (`hdr.discriminator`). Before #9298 that was correct; now the raw \
+             value is `Unparseable` for every PPTP packet, so the key misses. \
+             Use `quoted_discriminator`. No behavioural cell can see this — the \
+             reply key reaches the session first (see the module doc)."
+        );
+        // NON-VACUITY: a scan that read nothing would pass `raw.is_empty()`.
+        assert_eq!(total_resolved, 4, "#9298: expected exactly 4 wired forward keys");
+    }
+}

@@ -5361,11 +5361,16 @@ fn the_as_is_embedded_key_does_not_cross_tunnels_9031() {
 // `resolve_quoted_pptp_discriminator` itself. They cannot see the WIRING: the
 // three key constructors (`nat_match_v4`, `nat_match_v6`, `session_match`) each
 // call the resolver and drop the result into `SessionKey.discriminator`, and
-// reverting any ONE of those call sites back to `hdr.discriminator` leaves every
-// unit cell green — the function still behaves, nobody asks it. That is the
-// exact shape that let two mutants survive earlier in this campaign, and it is
-// why #9031's own acceptance asked for a resolved-frame observation rather than
-// a key comparison.
+// reverting a call site back to `hdr.discriminator` leaves every unit cell
+// green — the function still behaves, nobody asks it.
+//
+// WHAT THESE CATCH, AS MEASURED BY MUTATION (not as hoped): a revert of the
+// resolver's ARGUMENTS or of a REPLY key reds the v4/v6 cells. A revert of a
+// FORWARD key alone does NOT — `nat_reverse_index` holds every forward entry's
+// reverse wire key, so the reply key reaches the session first and a broken
+// forward key has no match/no-match signal. Those three reverts are caught by
+// the structural guard `every_same_family_forward_key_carries_the_resolved_quote_9298`
+// in `icmp_embed/parse.rs`, which explains the index rule in full.
 //
 // Each cell below therefore drives `try_embedded_icmp_nat_match_from_frame` and
 // asserts on the RECOVERED PRE-NAT SOURCE, which is the thing the endpoint
@@ -5484,11 +5489,12 @@ fn publish_pptp_gre_session_9298(
     );
 }
 
-/// FAIL-ON-REVERT (IPv4 arm). Sever `nat_match_v4`'s call to
-/// `resolve_quoted_pptp_discriminator` — put `hdr.discriminator` back in the
-/// key — and this reds: the quote carries `Unparseable`, the live session
-/// carries `Pptp(handle)`, `SessionKey`'s Eq includes the field (#7188), and the
-/// probe misses.
+/// FAIL-ON-REVERT (IPv4 arm): reds if `nat_match_v4`'s REPLY key goes back to
+/// the raw quote, or if the resolver is asked about the wrong peer. The quote
+/// then carries `Unparseable`, the live session carries `Pptp(handle)`,
+/// `SessionKey`'s Eq includes the field (#7188), and the forward-NAT probe
+/// misses. (A FORWARD-key-only revert is invisible here; see the section
+/// header.)
 #[test]
 fn embedded_icmp_resolves_a_pptp_call_v4_9298() {
     let router_ip = Ipv4Addr::new(10, 0, 0, 1);
@@ -5580,6 +5586,7 @@ fn embedded_icmp_resolves_a_pptp_call_v4_9298() {
 
 /// FAIL-ON-REVERT (IPv6 arm). `nat_match_v6` is a SEPARATE key constructor; a
 /// v4-only cell leaves it free to be reverted with every test still green.
+/// Reds on a revert of either v6 REPLY key (the fallback path builds a second).
 #[test]
 fn embedded_icmp_resolves_a_pptp_call_v6_9298() {
     let router_v6: Ipv6Addr = "2001:559:8585:ef00::fe".parse().expect("router v6");
@@ -5721,12 +5728,17 @@ fn embedded_icmp_does_not_cross_pptp_calls_9298() {
 /// THE THIRD CALL SITE. `session_match` is the same-family plain-lookup arm.
 ///
 /// It has no non-test caller today (`afxdp/mod.rs` imports its wrapper under
-/// `#[cfg(test)]`), so a mutant at its call site would be INERT in production —
-/// but it is test-REACHABLE, and this cell is what makes reverting it red
-/// instead of survive. That distinction matters: the reason the resolve is
-/// there at all is so whoever wires this path does not inherit one that
-/// silently misses every PPTP quote, and an unbound copy would rot out of step
-/// with the two production arms without anything noticing.
+/// `#[cfg(test)]`), so a mutant at its call site would be INERT in production.
+/// The resolve is there so whoever wires this path does not inherit one that
+/// silently misses every PPTP quote.
+///
+/// What this cell does and does NOT bind, as measured: it pins that a PPTP
+/// quote REACHES the session through this module. It does NOT red when the
+/// module's FORWARD keys revert to the raw quote — an earlier draft of this
+/// comment claimed it did, and the mutation matrix refuted that. With the reply
+/// key wired, `find_forward_nat_match` (the third fallback) still finds the
+/// session. The forward keys are bound by the structural guard
+/// `every_same_family_forward_key_carries_the_resolved_quote_9298` instead.
 #[test]
 fn embedded_icmp_session_match_resolves_a_pptp_call_9298() {
     let router_ip = Ipv4Addr::new(10, 0, 0, 1);
