@@ -341,6 +341,15 @@ func ValidateConfig(cfg *Config) []string {
 			if entry == nil { // #3494: tolerant/HA-sync path may carry a nil address
 				continue
 			}
+			if entry.Value != "" && len(entry.UnimplementedForms) > 0 {
+				// #9524: a prefix PLUS an unimplemented value form. The prefix
+				// used to be enforced alone with no warning on any channel;
+				// the entry now resolves to no usable address (UsableValue).
+				warnings = append(warnings, fmt.Sprintf(
+					"address-book %q: %s is not implemented, so this entry resolves to no usable address (its prefix %q alone would under-cover what it names)",
+					name, strings.Join(entry.UnimplementedForms, ", "), entry.Value))
+				continue
+			}
 			if entry.Value == "" {
 				// An `address <name>` entry with no compiled prefix —
 				// either no prefix at all, or only an as-yet-uncompiled

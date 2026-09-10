@@ -27,6 +27,20 @@ func runUniformGatesClusterZone(tree *ConfigTree, cfg *Config, opts compileOpts)
 		}
 	}
 
+	// #9524: an address that configures a prefix AND an unimplemented value
+	// form (dns-name / wildcard-address / range-address). Strict on commit /
+	// commit-check. The tolerant load / peer-sync path warns (#1960 no-brick),
+	// and there Address.UsableValue makes a referencing policy fail closed like
+	// the sole-value case, instead of enforcing the prefix alone.
+	if err := validateAddressUnimplementedFormsStrict(cfg); err != nil {
+		if opts.lenientAddressUnimplementedForms {
+			cfg.Warnings = append(cfg.Warnings,
+				fmt.Sprintf("address value form (downgraded to warning on tolerant path; the entry resolves to no usable address): %v", err))
+		} else {
+			return err
+		}
+	}
+
 	// #3440 H2 flow-aging gate. Strict on commit / commit-check (hard-reject
 	// an unknown `security flow aging` leaf or a low-watermark >=
 	// high-watermark cross-field violation that the opaque untyped subtree
