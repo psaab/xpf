@@ -3123,8 +3123,38 @@ Current sequence (`prepareUserspaceRGDemotionWithTimeout()`):
    connection and delaying the barrier ack; it is restarted if the barrier fails.
 4. Write a single ordered peer barrier (`WaitForPeerBarrier`) and wait for the
    ack. The barrier shares the same FIFO `sendCh` as all sync messages, so the
-   ack proves the peer has processed everything queued ahead of it. The actual
-   demotion then happens atomically in `UpdateRGActive(false)`.
+   ack proves the peer has processed everything queued ahead of it ON THE
+   CONNECTION THE BARRIER TRAVELLED ON. The actual demotion then happens
+   atomically in `UpdateRGActive(false)`.
+
+   **Barrier fence (#9508).** `sendLoop` writes each message on whichever fabric
+   connection is active when it is dequeued. The ordered stream therefore moves
+   between connections on a partial drop, or when the preferred fabric connects
+   with no fault at all. Frames written on the old connection can still be
+   unprocessed, or be lost with it, while a barrier is acked on the new one. An
+   ack alone would then admit a demotion that loses those sessions. The fence
+   (`pkg/cluster/sync_barrier_fence_9508.go`) works as follows:
+   - The first ordered-stream write (a `sendLoop` message or a BulkStart) on a
+     different connection bumps a fence epoch under `writeMu`, BEFORE it writes.
+     No ack for a frame on the new connection can be observed without the bump.
+   - `WaitForPeerBarrier` fails a barrier that was pending across a bump, and
+     refuses every later barrier while the fence is armed.
+   - The move releases pending barrier waiters and starts one single-flight
+     re-prime; every refused barrier re-kicks it. This cannot be left to the
+     daemon, whose prime-retry loop restarts after a failed barrier only while
+     the peer is still unprimed.
+   - Only the ack of a bulk that captured the current epoch BEFORE reading its
+     session source discharges the fence. A snapshot read after the move holds
+     every delta written before it, on either connection. `doBulkSync` captures
+     before `BulkSnapshotSource`. The store walk reads during the window, so it
+     captures at BulkStart. A caller-read snapshot captures nothing. A move after
+     the capture leaves the fence armed.
+
+   The refusal surfaces as `demotion peer barrier failed: session sync barrier
+   fenced ...`, which manual failover already classifies as retryable. Not
+   claimed: a frame from a superseded connection that is still up can reach the
+   peer after the re-prime and be applied after it. That ordering exists without
+   the fence and is unchanged.
 
 Manual failover uses the same demotion-prep path via
 `prepareUserspaceManualFailover()`, but wraps failures as

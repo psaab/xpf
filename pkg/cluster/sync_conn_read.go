@@ -433,6 +433,8 @@ func (s *SessionSync) handleMessage(conn net.Conn, msgType uint8, payload []byte
 		epoch := binary.LittleEndian.Uint64(payload[:8])
 		stats := s.Stats()
 		slog.Info("cluster sync: bulk ack received", "epoch", epoch, "local", connLocalAddrString(conn), "remote", connRemoteAddrString(conn), "sessions_sent", stats.SessionsSent, "sessions_received", stats.SessionsReceived, "sessions_installed", stats.SessionsInstalled, "queue_len", len(s.sendCh), "queue_cap", cap(s.sendCh))
+		// #9508: load the capture BEFORE the pending epoch (barrierFence.pendingBulk).
+		fenceCapture := s.fence.pendingBulk.Load()
 		pending := s.pendingBulkAckEpoch.Load()
 		// #9177 V053: `!=`, not `<`. The authority here is LOCAL --
 		// pendingBulkAckEpoch is set by our OWN send path under bulkSendMu
@@ -469,6 +471,7 @@ func (s *SessionSync) handleMessage(conn net.Conn, msgType uint8, payload []byte
 		// survivor fabric independently of whether an inbound bulk (which also
 		// sets bulkEverCompleted at syncMsgBulkEnd) completed first.
 		s.outboundBulkAcked.Store(true)
+		s.dischargeBarrierFence(fenceCapture)
 		if s.OnBulkSyncAckReceived != nil {
 			go s.OnBulkSyncAckReceived()
 		}
