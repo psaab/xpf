@@ -76,7 +76,15 @@ const preSecureTunnelProtocolVersion = 4
 // Issue 9412 moved it 12 -> 13, for the HA session-sync close class, where the
 // old behaviour is the defect. It is another move not made for a snapshot field,
 // and the equality this constant feeds is unchanged.
-const secureTunnelSnapshotProtocolVersion = 13
+//
+// Issue 9521 moved it 13 -> 14, for `ConfigSnapshot.wg_steered_listen_port`:
+// the one WireGuard listen port the shim steers, which the helper uses to
+// refuse writing any other port's kernel-path transport plaintext to its wgN
+// TUN. An old helper ignores it and keeps writing, which is the bypass the field
+// closes. #9521 had claimed 13 and #9412 landed it first, so the v8 rule moves
+// it past both. Nothing about secure_tunnel changed, so
+// MinProtocolSecureTunnelRefusal (7) is untouched again.
+const secureTunnelSnapshotProtocolVersion = 14
 
 // preV5HelperAcceptsSnapshot models the exact-equality version gate a pre-v5
 // helper applies before touching any dataplane state

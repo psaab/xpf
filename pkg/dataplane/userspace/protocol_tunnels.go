@@ -156,6 +156,10 @@ type WgTunnelStatus struct {
 	DecapDropsAllowedIPs      uint64 `json:"decap_drops_allowed_ips,omitempty"`
 	DecapDropsMalformedInner  uint64 `json:"decap_drops_malformed_inner,omitempty"`
 	DecapDropsBuffer          uint64 `json:"decap_drops_buffer,omitempty"`
+	// #9521: transport records that reached an UNSTEERED listen port's socket
+	// through the kernel and were dropped instead of being written to the wgN
+	// TUN, where the kernel would have forwarded them with no zone policy.
+	RxUnsteeredTransportDrops uint64 `json:"rx_unsteered_transport_drops,omitempty"`
 
 	EncapPackets            uint64 `json:"encap_packets,omitempty"`
 	EncapBytes              uint64 `json:"encap_bytes,omitempty"`

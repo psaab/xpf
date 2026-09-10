@@ -1682,25 +1682,25 @@ func snapshotHasNativeGRE(snapshot *ConfigSnapshot) bool {
 	return false
 }
 
-// snapshotWgListenPort returns the WireGuard listen port for the shim
-// ctrl block (#1432 S2a). S2a supports a single WG tunnel, so the first
-// configured mode=="wireguard" endpoint's listen port wins. 0 means no
-// WG tunnel (the shim's per-CPU wg_rx gate stays off). The shim packs
-// this into the low 16 bits of UserspaceCtrl.wg_listen_port and steers
-// local-destination UDP on this port to the kernel.
+// snapshotWgListenPort returns the WireGuard listen port for the shim ctrl
+// block (#1432 S2a): the ONE port the shim steers onto the AF_XDP WireGuard
+// path. 0 means no WireGuard tunnel (the shim's WG_RX gate stays off). The shim
+// packs it into the low 16 bits of UserspaceCtrl.wg_listen_port.
+//
+// #9521: it reads ConfigSnapshot.WgSteeredListenPort and nothing else. It used
+// to return the first WireGuard row of snapshot.TunnelEndpoints, and those rows
+// are the configured endpoints INTERSECTED with the live interface rows — so a
+// missing netdev for the warned tunnel promoted the next tunnel's port, the one
+// the commit warning had just called unsteered. The field is derived once, from
+// the configuration (config.SteeredWireGuardListenPort), and the helper decides
+// from the SAME field which control threads may deliver kernel-path transport
+// plaintext; the shim, the helper and the warning therefore cannot name
+// different ports. Do not re-derive it here from the endpoint rows.
 func snapshotWgListenPort(snapshot *ConfigSnapshot) uint32 {
 	if snapshot == nil {
 		return 0
 	}
-	for _, endpoint := range snapshot.TunnelEndpoints {
-		if endpoint.ID == 0 || endpoint.Mode != "wireguard" {
-			continue
-		}
-		if endpoint.WgListenPort != 0 {
-			return uint32(endpoint.WgListenPort)
-		}
-	}
-	return 0
+	return uint32(snapshot.WgSteeredListenPort)
 }
 
 func buildNATTranslatedLocalAddressExclusions(snapshot *ConfigSnapshot) (map[uint32]bool, map[[16]byte]bool) {

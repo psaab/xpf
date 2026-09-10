@@ -39,6 +39,9 @@ pub(super) fn populate_tunnel_endpoints(
             }
         }
     }
+    // #9521: carried for the WireGuard control-thread spawn, which decides from
+    // it which threads may deliver kernel-path transport plaintext.
+    state.wg_steered_listen_port = snapshot.wg_steered_listen_port;
     for endpoint in &snapshot.tunnel_endpoints {
         if endpoint.id == 0 || endpoint.ifindex <= 0 {
             continue;

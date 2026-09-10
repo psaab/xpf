@@ -453,6 +453,16 @@ pub(crate) struct ConfigSnapshot {
     pub flow: FlowSnapshot,
     #[serde(rename = "default_policy", default)]
     pub default_policy: String,
+    /// #9521: the ONE WireGuard listen port the AF_XDP shim steers, derived by
+    /// the Go control plane from the configuration
+    /// (`config.SteeredWireGuardListenPort`) — the same value it programs into
+    /// `UserspaceCtrl.wg_listen_port`. The WireGuard control-thread spawn lets
+    /// only this port's thread write kernel-path transport plaintext to its wgN
+    /// TUN. A missing key decodes to 0, which delivers for NO endpoint (fail
+    /// closed); CONFIG_SNAPSHOT_PROTOCOL_VERSION 13 refuses the older daemon
+    /// that would omit it.
+    #[serde(rename = "wg_steered_listen_port", default)]
+    pub wg_steered_listen_port: u16,
     /// #3534: RT_FLOW session logging for the IMPLICIT default-policy verdict
     /// (`security policies default-policy-log session-init|session-close`).
     /// Stamped onto a default-PERMIT session's metadata so it emits

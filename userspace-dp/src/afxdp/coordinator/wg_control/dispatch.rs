@@ -68,6 +68,7 @@ pub(super) fn dispatch_inbound(
     response_buf: &mut [u8],
     tunnel_name: &str,
     recent_exceptions: &Arc<Mutex<ExceptionEventRing>>,
+    kernel_transport: crate::afxdp::types::WgKernelTransport,
 ) -> InboundOutcome {
     let Some(&wg_type) = datagram.first() else {
         return InboundOutcome::Unauthenticated;
@@ -164,6 +165,19 @@ pub(super) fn dispatch_inbound(
         crate::afxdp::wg::WG_TYPE_DATA => {
             match engine.try_decap(datagram, decap_buf) {
                 Ok(outcome) => {
+                    // #9521: an UNSTEERED listen port's transport record. The
+                    // shim claims transport data for exactly one port — the
+                    // steered one — so a record for any other port reaches this
+                    // socket on every path, and writing its plaintext to the TUN
+                    // hands it to the kernel's forwarding path with no zone
+                    // policy, no session and no counters. `try_decap` has
+                    // already authenticated it, so key confirmation, the replay
+                    // window and endpoint roaming behave as for a keepalive; the
+                    // plaintext is dropped and counted instead of written.
+                    if kernel_transport == crate::afxdp::types::WgKernelTransport::DropUnsteered {
+                        WgCounters::bump(&engine.counters().rx_unsteered_transport_drops);
+                        return InboundOutcome::Authenticated(outcome.peer_pubkey);
+                    }
                     // #2317: RFC 6040 §4.2 decap-side ECN combine. The
                     // outer ECN was captured out-of-band via recvmsg's
                     // IP_RECVTOS / IPV6_RECVTCLASS cmsg (the kernel UDP

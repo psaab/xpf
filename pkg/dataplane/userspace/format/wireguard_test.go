@@ -211,3 +211,20 @@ func TestWireguardDetailOmitsEndpointResolutionWhenNoResolver7936(t *testing.T) 
 		t.Errorf("the one-glance view must stay one-glance:\n%s", brief)
 	}
 }
+
+// #9521: an unsteered listen port's kernel-path transport records are dropped
+// by the helper instead of being written to the wgN TUN, and this is the
+// operator's runtime view of that. The drops must be counted in the summary's
+// receive total AND named in the detail table: a drop that lands in neither
+// reads as a tunnel that simply receives nothing.
+func TestFormatWireguardUnsteeredPortDrops9521(t *testing.T) {
+	now := time.Unix(1_770_000_090, 0)
+	st := wgFmtFixture()
+	st.WgTunnels[0].RxUnsteeredTransportDrops = 6
+	if out := FormatWireguardStatus(st, false, now); !strings.Contains(out, "Drops:              8 receive,") {
+		t.Errorf("summary receive-drop total must include the 6 unsteered-port drops (2 replay + 6):\n%s", out)
+	}
+	if out := FormatWireguardStatus(st, true, now); !strings.Contains(out, "unsteered-port           6") {
+		t.Errorf("detail reason table must name the unsteered-port drops:\n%s", out)
+	}
+}

@@ -585,6 +585,15 @@ impl super::Coordinator {
                         // change moves no scalar, so compare the whole map so
                         // every peer's TUN-origin guard stays current.
                         Some("outer_mtu_changed")
+                    } else if self.wg_kernel_transport_for_endpoint(*id)
+                        != entry.spawned_kernel_transport
+                    {
+                        // #9521: the snapshot re-steered WireGuard (a tunnel
+                        // that sorts first was added or removed), so this
+                        // thread's permission to deliver kernel-path transport
+                        // plaintext changed. The decision is captured by value
+                        // at spawn, so only a restart applies it.
+                        Some("kernel_transport_changed")
                     } else {
                         None
                     }
@@ -695,6 +704,22 @@ impl super::Coordinator {
                 entry.spawned_tunnel_name
             );
         }
+    }
+
+    /// #9521: may endpoint `id`'s control thread write kernel-path transport
+    /// plaintext to its wgN TUN? ONE decision, read at spawn and by the stale
+    /// prune, so a snapshot that re-steers WireGuard restarts exactly the
+    /// threads whose answer changed.
+    fn wg_kernel_transport_for_endpoint(&self, id: u16) -> crate::afxdp::types::WgKernelTransport {
+        let listen_port = self
+            .forwarding
+            .tunnel_endpoints
+            .get(&id)
+            .map_or(0, |endpoint| endpoint.wg_listen_port);
+        crate::afxdp::types::WgKernelTransport::for_listen_port(
+            listen_port,
+            self.forwarding.wg_steered_listen_port,
+        )
     }
 
     /// #1866 pass 3 helper: one spawn ATTEMPT for endpoint `id` against
@@ -829,6 +854,7 @@ impl super::Coordinator {
         };
         let spawned_ifindex = endpoint.logical_ifindex;
         let listen_port = endpoint.wg_listen_port;
+        let kernel_transport = self.wg_kernel_transport_for_endpoint(id);
         let stop = Arc::new(AtomicBool::new(false));
         let stop_clone = stop.clone();
         let recent_exceptions = self.recent_exceptions.clone();
@@ -859,7 +885,7 @@ impl super::Coordinator {
             .unwrap_or_default();
         let thread_resolver_telemetry = Arc::clone(&resolver_telemetry);
         eprintln!(
-            "xpf-userspace-dp: spawning WG control thread endpoint={id} tun={tunnel_name} port={listen_port}"
+            "xpf-userspace-dp: spawning WG control thread endpoint={id} tun={tunnel_name} port={listen_port} kernel_transport={kernel_transport:?}"
         );
         let join = spawn_supervised_aux(
             format!("xpf-wg-control-{tunnel_name}"),
@@ -869,6 +895,7 @@ impl super::Coordinator {
                     id,
                     engine,
                     listen_port,
+                    kernel_transport,
                     outer_mtu,
                     thread_per_peer_outer_mtu,
                     endpoint_hosts,
@@ -904,6 +931,7 @@ impl super::Coordinator {
             WgControlEntry {
                 handle,
                 engine_ptr,
+                spawned_kernel_transport: kernel_transport,
                 spawned_ifindex,
                 spawned_tunnel_name: tunnel_name,
                 spawned_outer_mtu: outer_mtu,

@@ -35,15 +35,23 @@ func wgMultiportTree9016(t *testing.T, ports ...string) *Config {
 }
 
 // #9016: the advisory told the operator the unsteered tunnel was "dead while
-// appearing configured" and that "no handshake ever completes". Both are false.
-// The host-inbound filter admits EVERY configured listen-port (see
+// appearing configured" and that "no handshake ever completes". Both were
+// false: the host-inbound filter admits EVERY configured listen-port (see
 // TestHostInboundAdmitsEveryWireGuardPort9016 in pkg/daemon) and the helper
-// binds a socket per wireguard endpoint, so the unsteered port is served by the
-// KERNEL path — not by nothing. An operator told a live tunnel is dead leaves
-// it in place.
+// binds a socket per wireguard endpoint, so the unsteered port was served by
+// the KERNEL path — not by nothing — and its plaintext was forwarded by the
+// kernel with no zone policy.
 //
-// Nothing bound this text before, which is how a false security-relevant claim
-// survived in a warning that reads as authoritative.
+// #9521 closed that bypass: the helper now DROPS a transport record that
+// reaches an unsteered port's socket. That does not make "dead" or "no
+// handshake ever" true — the tunnel still handshakes and still sends — so both
+// stay forbidden. What changes is the description of the unsteered posture:
+// #9016's "served by the KERNEL path" was the truth until the drop landed, and
+// left in place it would now tell an operator their inbound traffic is being
+// forwarded.
+//
+// Nothing bound this text before #9016, which is how a false security-relevant
+// claim survived in a warning that reads as authoritative.
 func TestMultiportAdvisoryDoesNotClaimTheTunnelIsDead9016(t *testing.T) {
 	cfg := wgMultiportTree9016(t, "51820", "51821")
 	adv := validateWireguardSingleSteeredPort(cfg)
@@ -60,55 +68,48 @@ func TestMultiportAdvisoryDoesNotClaimTheTunnelIsDead9016(t *testing.T) {
 		"no inbound WireGuard transport reaches",
 		"silently down",
 		"and works",
+		// #9521: the pre-drop description of the unsteered port. True under
+		// #9016, false once the helper stopped delivering that plaintext.
+		"served by the KERNEL path",
+		"still receives inbound transport",
 	} {
 		if strings.Contains(text, forbidden) {
-			t.Fatalf("advisory still claims %q; the unsteered tunnel receives inbound "+
-				"transport and its socket decapsulates it — telling the operator it is "+
-				"dead points them away from the real posture.\n\n%s", forbidden, text)
+			t.Fatalf("advisory still claims %q, which is not what the unsteered port does:\n\n%s",
+				forbidden, text)
 		}
 	}
 
-	// What it must say instead: the port is unsteered, NOT inert.
-	for _, required := range []string{"51821", "KERNEL path", "steered"} {
+	// What it must say instead: the port is unsteered, its kernel-path transport
+	// is DROPPED, and it is NOT inert — it still handshakes.
+	for _, required := range []string{"51821", "steered", "DROPPED", "Handshakes still complete"} {
 		if !strings.Contains(text, required) {
 			t.Fatalf("advisory omits %q:\n\n%s", required, text)
 		}
 	}
 
-	// THE ASYMMETRY. This assertion is INVERTED from what it originally
-	// required, and the inversion is the point of the change that brought it.
+	// THE ASYMMETRY. This assertion was inverted once already, and the
+	// inversion is the lesson.
 	//
 	// It used to demand that the advisory deny any difference — "no WireGuard
 	// tunnel's plaintext is zone-adjudicated, steered or not". That was written
-	// from the #5618 advisory, which describes the PRE-#8274 world. Three
-	// independent statements in this tree say it is false at HEAD:
+	// from the #5618 advisory, which describes the PRE-#8274 world. #8274 moved
+	// the steered port's transport data into the worker, where it is adjudicated
+	// under the tunnel's logical ingress zone (userspace-xdp/src/lib.rs, the
+	// #8274 step 3 arm; poll_descriptor/mod.rs at the stage_wg_decap call).
 	//
-	//  1. userspace-xdp/src/lib.rs, the #8274 step 3 arm: "a WireGuard
-	//     TRANSPORT-DATA record for a configured local listener is NOT local
-	//     delivery any more — the worker decaps it and adjudicates the inner
-	//     packet under the tunnel's logical ingress zone."
-	//  2. userspace-dp poll_descriptor/mod.rs at the stage_wg_decap call:
-	//     "Everything downstream then sees the INNER packet — flow parse,
-	//     screen, session, policy, NAT, forward build ... instead of being
-	//     written to the wgN TUN for the kernel to forward with no zone policy
-	//     at all."
-	//  3. maps_sync.go: userspaceCtrlFlagWgRx is set iff at least one WireGuard
-	//     tunnel is configured, so the gate those two describe is armed exactly
-	//     when this advisory can fire.
-	//
-	// The steered port IS adjudicated and an unsteered port is NOT. Requiring
-	// the advisory to deny that erased the only difference an operator needs to
-	// see, in the one message that reads as authoritative on the subject — and
-	// a cell demanding the denial is what would have kept it there.
+	// So the steered port IS adjudicated, and the other ports are different —
+	// under #9016 because their plaintext was kernel-forwarded, under #9521
+	// because it is dropped. Either way an advisory that denied the difference
+	// would erase the one fact an operator needs, in the one message that reads
+	// as authoritative on the subject.
 	for _, required := range []string{
-		"NOT THE SAME",
 		"adjudicated under the tunnel's ingress zone",
-		"forwarded by the KERNEL with no zone policy",
+		"REFUSED rather than forwarded unadjudicated",
+		"instead of being written to its wgN TUN",
 	} {
 		if !strings.Contains(text, required) {
-			t.Fatalf("advisory must state the steered/unsteered SECURITY asymmetry "+
-				"(missing %q). Denying it tells an operator the bypass is not a "+
-				"bypass:\n\n%s", required, text)
+			t.Fatalf("advisory must state what differs between the steered and the "+
+				"unsteered port (missing %q):\n\n%s", required, text)
 		}
 	}
 	if strings.Contains(text, "steered or not") {

@@ -161,6 +161,10 @@ func buildSnapshotWithSchedulerStateAndNATCounters(cfg *config.Config, ucfg conf
 	// leaving the rest of the config intact (#1960 no-brick). The stashed
 	// collisions ride up to ApplyConfig, which fires the operator alarm and
 	// stamps the status/metric.
+	// #9521: the ONE steered WireGuard listen port, derived from the
+	// configuration — never from snap.TunnelEndpoints, which drop a tunnel whose
+	// netdev is absent. See ConfigSnapshot.WgSteeredListenPort.
+	snap.WgSteeredListenPort, _ = config.SteeredWireGuardListenPort(cfg)
 	snap.zoneIDCollisions = quarantineCollidingZones(snap)
 	if len(snap.zoneIDCollisions) > 0 {
 		// Keep the operator-facing counts equal to what is actually published.

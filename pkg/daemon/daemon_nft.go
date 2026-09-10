@@ -1453,11 +1453,20 @@ func emitHostInboundICMPAccepts(rules *[]string) {
 // kernel (nothing steers that port up)". It is NOT a no-op. The rule is what
 // ADMITS that port's traffic to the host, where the second tunnel's own bound
 // socket (the helper spawns a control thread per wireguard endpoint) receives
-// and decapsulates it. Unsteered means "not on the AF_XDP fast path", not
-// "inert" — and reading it as inert is what let a live path look dead. Admitting
-// all configured ports is therefore load-bearing today, as well as ready for the
-// deferred multi-tunnel steering (#1434 Increment 2). No-op when WG is not
-// configured.
+// it. Unsteered means "not on the AF_XDP fast path", not "inert".
+//
+// #9521: what that socket does with it changed. Handshake and cookie records
+// are processed as before, so admitting every configured port is still
+// load-bearing — without it an unsteered tunnel could not complete even a
+// passive handshake to a restricted zone. A TRANSPORT record that reaches an
+// unsteered port's socket is now dropped by the helper instead of being
+// decrypted onto the wgN TUN for the kernel to forward with no zone policy.
+// This filter is deliberately NOT where that is enforced: an input-hook admit
+// list cannot refuse `ct established` traffic answering a handshake xpf itself
+// initiated (the chain accepts established traffic ahead of this rule), a zone
+// that admits every host-inbound service accepts the port regardless, and no
+// table is installed at all when nothing needs one. The helper's socket is the
+// one place every such record converges. No-op when WG is not configured.
 func emitHostInboundWireGuardAccept(rules *[]string, wgListenPorts []uint16) {
 	if len(wgListenPorts) == 0 {
 		return

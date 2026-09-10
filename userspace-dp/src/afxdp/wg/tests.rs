@@ -23,7 +23,7 @@ use std::sync::Arc;
 
 /// Generate a fresh X25519 keypair using snow's resolver. Slow
 /// path — fine for tests.
-pub(super) fn keypair() -> ([u8; 32], [u8; 32]) {
+pub(crate) fn keypair() -> ([u8; 32], [u8; 32]) {
     let kp = Builder::new(super::WG_NOISE_PATTERN.parse().unwrap())
         .generate_keypair()
         .unwrap();
@@ -142,6 +142,64 @@ pub(crate) fn established_pair(
     resp_engine.promote_next_for_test(&init_pub, &resp_session);
 
     (init_engine, resp_engine, init_pub, resp_pub)
+}
+
+/// #9521: drive the IK handshake against an EXISTING responder engine — one the
+/// caller did not build, such as the engine a coordinator built from a
+/// snapshot — and return an initiator engine holding a session to it. The same
+/// steps as `established_pair`, which cannot be reused because it constructs
+/// both engines itself.
+pub(crate) fn established_initiator_for(
+    resp_engine: &WgEngine,
+    init_priv: [u8; 32],
+    init_pub: [u8; 32],
+    init_allowed_for_resp: Vec<ipnet::IpNet>,
+) -> WgEngine {
+    let resp_pub = resp_engine.local_public_key();
+    let init_engine = WgEngine::new(WgEngineConfig {
+        local_private_key: init_priv.into(),
+        listen_port: 0,
+        peers: vec![WgPeerConfig {
+            pubkey: resp_pub,
+            endpoint: None,
+            persistent_keepalive: 0,
+            allowed_ips: init_allowed_for_resp,
+            preshared_key: [0u8; 32].into(),
+        }],
+    });
+    let mut init_hs = init_engine.build_initiator_handshake(&resp_pub).unwrap();
+    let mut resp_hs = resp_engine.build_responder_handshake().unwrap();
+    let mut buf = [0u8; 1024];
+    let mut sink = [0u8; 1024];
+    let n1 = init_hs.write_message(&[], &mut buf).unwrap();
+    resp_hs.read_message(&buf[..n1], &mut sink).unwrap();
+    let n2 = resp_hs.write_message(&[], &mut buf).unwrap();
+    init_hs.read_message(&buf[..n2], &mut sink).unwrap();
+    let init_xport = init_hs.into_stateless_transport_mode().unwrap();
+    let resp_xport = resp_hs.into_stateless_transport_mode().unwrap();
+    let init_local_index = 0xaaaa_9521;
+    let resp_local_index = 0xbbbb_9521;
+    let init_session = Arc::new(WgSession::new_with_role(
+        init_xport,
+        init_local_index,
+        resp_local_index,
+        resp_pub,
+        super::session::SessionRole::Initiator,
+        super::counters::monotonic_now_ns(),
+    ));
+    let resp_session = Arc::new(WgSession::new_with_role(
+        resp_xport,
+        resp_local_index,
+        init_local_index,
+        init_pub,
+        super::session::SessionRole::Responder,
+        super::counters::monotonic_now_ns(),
+    ));
+    resp_session.mark_confirmed();
+    init_engine.install_session(&resp_pub, init_session).unwrap();
+    resp_engine.install_session(&init_pub, resp_session.clone()).unwrap();
+    resp_engine.promote_next_for_test(&init_pub, &resp_session);
+    init_engine
 }
 
 /// Build a minimal IPv4 packet with the given src/dst and a 20-byte
