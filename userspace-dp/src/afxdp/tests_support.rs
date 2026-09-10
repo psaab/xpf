@@ -2682,3 +2682,125 @@ pub(super) fn gre_to_self_outer_meta_v6(vlan_id: u16, frame_len: usize) -> Users
         ..UserspaceDpMeta::default()
     }
 }
+
+
+/// #9298: an ICMPv4 Time Exceeded quoting a PPTP (RFC 2637 enhanced GRE,
+/// VERSION 1) data packet.
+///
+/// A separate builder rather than another `embedded_proto` arm on
+/// `build_icmp_te_frame_v4`, because the two GRE dialects differ in the field
+/// that matters: version 0's 32 bits after the flags are an RFC 2890 Key, and
+/// version 1 re-purposes the same 32 bits as `Payload Length | Call ID`. One
+/// builder emitting both from one `snat_port` argument would make it easy to
+/// write a cell that looks like it is about PPTP and is really about a Key.
+///
+/// Layout of the quoted GRE header, RFC 2637 s4.1:
+///   [0..2] flags|version  K bit set (0x2000) + version 1 (0x0001) = 0x3001
+///   [2..4] protocol type  0x880B (PPP)
+///   [4..6] payload length VARIES PER PACKET - deliberately non-zero here, so a
+///                         reader that took the whole 32-bit word as a Key
+///                         would produce a different identity per packet
+///   [6..8] call id        the id the DESTINATION allocated
+pub(super) fn build_icmp_te_frame_v4_pptp(
+    router_ip: Ipv4Addr,
+    snat_ip: Ipv4Addr,
+    server_ip: Ipv4Addr,
+    call_id: u16,
+) -> Vec<u8> {
+    let mut frame = Vec::new();
+    write_eth_header(
+        &mut frame,
+        [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff],
+        [0x00, 0x25, 0x90, 0x12, 0x34, 0x56],
+        0,
+        0x0800,
+    );
+    let ip_start = frame.len();
+
+    let mut embedded = Vec::new();
+    embedded.extend_from_slice(&[
+        0x45, 0x00, 0x00, 0x00, // version/IHL, DSCP, total length (filled below)
+        0x00, 0x01, 0x00, 0x00, // ID, flags, fragment offset
+        64, PROTO_GRE, 0x00, 0x00, // TTL, protocol, checksum (filled below)
+    ]);
+    embedded.extend_from_slice(&snat_ip.octets());
+    embedded.extend_from_slice(&server_ip.octets());
+    embedded.extend_from_slice(&[0x30, 0x01, 0x88, 0x0b]); // K + version 1, PPP
+    embedded.extend_from_slice(&[0x05, 0xdc]); // payload length (per-packet)
+    embedded.extend_from_slice(&call_id.to_be_bytes());
+    let emb_total = embedded.len() as u16;
+    embedded[2..4].copy_from_slice(&emb_total.to_be_bytes());
+    embedded[10..12].copy_from_slice(&[0, 0]);
+    let emb_ip_csum = checksum16(&embedded[..20]);
+    embedded[10..12].copy_from_slice(&emb_ip_csum.to_be_bytes());
+
+    let mut icmp = Vec::new();
+    icmp.extend_from_slice(&[11, 0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]);
+    icmp.extend_from_slice(&embedded);
+    icmp[2..4].copy_from_slice(&[0, 0]);
+    let icmp_csum = checksum16(&icmp);
+    icmp[2..4].copy_from_slice(&icmp_csum.to_be_bytes());
+
+    let outer_total_len = (20 + icmp.len()) as u16;
+    frame.extend_from_slice(&[0x45, 0x00]);
+    frame.extend_from_slice(&outer_total_len.to_be_bytes());
+    frame.extend_from_slice(&[0x00, 0x02, 0x00, 0x00, 64, PROTO_ICMP, 0x00, 0x00]);
+    frame.extend_from_slice(&router_ip.octets());
+    frame.extend_from_slice(&snat_ip.octets());
+    frame[ip_start + 10..ip_start + 12].copy_from_slice(&[0, 0]);
+    let ip_csum = checksum16(&frame[ip_start..ip_start + 20]);
+    frame[ip_start + 10..ip_start + 12].copy_from_slice(&ip_csum.to_be_bytes());
+    frame.extend_from_slice(&icmp);
+    frame
+}
+
+
+/// #9298: the IPv6 counterpart of [`build_icmp_te_frame_v4_pptp`].
+///
+/// `nat_match_v6` is a SEPARATE production arm with its own key constructor, so
+/// a v4-only cell leaves the v6 call site free to be reverted with every test
+/// still green.
+pub(super) fn build_icmpv6_te_frame_pptp(
+    router_ip: Ipv6Addr,
+    snat_ip: Ipv6Addr,
+    server_ip: Ipv6Addr,
+    call_id: u16,
+) -> Vec<u8> {
+    let mut frame = Vec::new();
+    write_eth_header(
+        &mut frame,
+        [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff],
+        [0x00, 0x25, 0x90, 0x12, 0x34, 0x56],
+        0,
+        0x86dd,
+    );
+
+    let mut embedded = Vec::new();
+    embedded.extend_from_slice(&[0x60, 0x00, 0x00, 0x00]);
+    embedded.extend_from_slice(&8u16.to_be_bytes()); // 8 bytes of GRE
+    embedded.push(PROTO_GRE);
+    embedded.push(64);
+    embedded.extend_from_slice(&snat_ip.octets());
+    embedded.extend_from_slice(&server_ip.octets());
+    embedded.extend_from_slice(&[0x30, 0x01, 0x88, 0x0b]);
+    embedded.extend_from_slice(&[0x05, 0xdc]);
+    embedded.extend_from_slice(&call_id.to_be_bytes());
+
+    let mut icmp6 = Vec::new();
+    icmp6.extend_from_slice(&[3, 0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]);
+    icmp6.extend_from_slice(&embedded);
+
+    let payload_len = icmp6.len() as u16;
+    frame.extend_from_slice(&[0x60, 0x00, 0x00, 0x00]);
+    frame.extend_from_slice(&payload_len.to_be_bytes());
+    frame.push(PROTO_ICMPV6);
+    frame.push(64);
+    frame.extend_from_slice(&router_ip.octets());
+    frame.extend_from_slice(&snat_ip.octets());
+
+    icmp6[2..4].copy_from_slice(&[0, 0]);
+    let csum = checksum16_ipv6(router_ip, snat_ip, PROTO_ICMPV6, &icmp6);
+    icmp6[2..4].copy_from_slice(&csum.to_be_bytes());
+    frame.extend_from_slice(&icmp6);
+    frame
+}

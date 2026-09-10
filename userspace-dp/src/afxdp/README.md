@@ -414,11 +414,46 @@ sync.
     (`frame::tcp_payload_offset`). "Off the hot path" buys the parse, not the
     test for whether to parse.
 
-    **Still not wired after this:** the DATA-channel resolve. A GRE
-    version-1 packet does not consult the association table —
-    `gre_discriminator.rs` returns `None` for `TunnelDiscriminator::Pptp(_)` —
-    so `PptpAssociations::resolve_and_touch` and the `unassociated` counter
-    have no production caller, and the `pptp` `alg_type` does not exist.
+    **The DATA-channel resolve is wired** (`gre_discriminator::
+    pptp_data_session_flow`, called from `poll_descriptor/mod.rs`). A version-1
+    GRE packet resolves `(dst, call_id)` against the association table via
+    `PptpAssociations::resolve_and_touch` and gets
+    `TunnelDiscriminator::Pptp(handle)`; an unresolved one is counted
+    (`unassociated`) and forwarded flowless, never dropped. This paragraph
+    previously said the opposite — that the resolve had no production caller —
+    which was true when #7699's control-segment dispatch landed and was
+    hollowed by #7699's own later data-channel work (#9298 corrected it). The
+    `pptp` `alg_type` still does not exist.
+
+  - **#9298 — the QUOTED Call ID, for ICMP errors about a PPTP tunnel.**
+    Because the data path above gives a live PPTP call
+    `TunnelDiscriminator::Pptp(handle)`, and `SessionKey`'s Hash/Eq include the
+    discriminator (#7188), an ICMP error QUOTING such a packet has to arrive at
+    the same handle or its lookup misses. It could not:
+    `gre_transit_discriminator` returns `Unparseable` for every version-1
+    header, deliberately (version 1 re-purposes the 32 bits after the flags as
+    `Payload Length | Call ID`, and reading them as an RFC 2890 Key would
+    promote a per-packet-varying length into a tunnel identity). #9031 closed
+    the RFC 2890 half of the embedded lookup and named this half as remaining.
+
+    The split, mirroring the transit path: `icmp_embed/parse.rs` extracts the
+    quoted Call ID as raw BYTES (`EmbeddedV4Header::pptp_call_id` /
+    `EmbeddedV6Header::pptp_call_id`, bounded by the quoted datagram's DECLARED
+    end per #2361), and `icmp_embed::resolve_quoted_pptp_discriminator` turns
+    it into a handle where the association table is in scope. It upgrades ONLY
+    `Unparseable` — a correctly-parsed RFC 2890 identity is returned untouched
+    — and a Call ID that resolves to nothing STAYS `Unparseable` rather than
+    matching anything, because PPTP calls between one address pair are
+    distinguished by nothing else. It uses non-touching `resolve`, not
+    `resolve_and_touch`: an ICMP error is traffic ABOUT the call, not on it, so
+    refreshing on it would let errors keep a dead association alive and hold a
+    16-bit id against reuse.
+
+    A miss here is a MISS, not a drop: `try_reverse_embedded_icmp_error`
+    returns `NotHandled` and the caller falls through to normal flowless
+    enforcement. What the miss costs is the NAT reversal — PMTUD and
+    unreachables for the tunnel — which is the same loss #9031 measured for
+    keyed GRE.
 
   The screen and
   SYN-cookie stages decide the L3 offset (14 vs 18) on tag PRESENCE

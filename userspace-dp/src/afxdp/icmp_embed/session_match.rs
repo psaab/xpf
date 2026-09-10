@@ -43,6 +43,17 @@ pub(in crate::afxdp::icmp_embed) fn try_embedded_icmp_session_match_from_frame(
             let hdr = parse_embedded_v4(frame, embedded_ip_start)?;
             let emb_src = IpAddr::V4(hdr.src);
             let emb_dst = IpAddr::V4(hdr.dst);
+            // #9298: kept in step with the two PRODUCTION arms
+            // (`nat_match_v4` / `nat_match_v6`). This function has no non-test
+            // caller, so the resolve here changes nothing today -- it is here so
+            // whoever wires it does not inherit a path that silently misses
+            // every PPTP quote.
+            let quoted_discriminator = super::resolve_quoted_pptp_discriminator(
+                sessions,
+                hdr.discriminator,
+                hdr.pptp_call_id,
+                emb_dst,
+            );
             let embedded_key = SessionKey {
                 addr_family: libc::AF_INET as u8,
                 protocol: hdr.proto,
@@ -50,13 +61,14 @@ pub(in crate::afxdp::icmp_embed) fn try_embedded_icmp_session_match_from_frame(
                 dst_ip: emb_dst,
                 src_port: hdr.src_port,
                 dst_port: hdr.dst_port,
-                            // #9031: the QUOTED tunnel's discriminator, not None. SessionKey's
-        // Hash/Eq include it (#7188), so a hard-coded None made every
-        // exact index probe for a GRE quote MISS.
-        discriminator: hdr.discriminator,
-                            // #9162: the arriving interface's domain, not 0. See
-                            // the doc comment above.
-                            routing_domain,
+                // #9031: the QUOTED tunnel's discriminator, not None.
+                // SessionKey's Hash/Eq include it (#7188), so a hard-coded
+                // None made every exact index probe for a GRE quote MISS.
+                // #9298: with the PPTP upgrade applied, above.
+                discriminator: quoted_discriminator,
+                // #9162: the arriving interface's domain, not 0. See
+                // the doc comment above.
+                routing_domain,
             };
             let reverse_key = embedded_reply_key(
                 libc::AF_INET as u8,
@@ -65,7 +77,7 @@ pub(in crate::afxdp::icmp_embed) fn try_embedded_icmp_session_match_from_frame(
                 emb_dst,
                 hdr.src_port,
                 hdr.dst_port,
-                hdr.discriminator,
+                quoted_discriminator,
                 routing_domain,
             );
             lookup_embedded_session(sessions, &embedded_key, &reverse_key, now_ns)
@@ -73,6 +85,13 @@ pub(in crate::afxdp::icmp_embed) fn try_embedded_icmp_session_match_from_frame(
         PROTO_ICMPV6 => {
             let hdr = parse_embedded_v6(frame, embedded_ip_start)?;
             let emb_src = IpAddr::V6(hdr.src_wire);
+            // #9298: see the v4 arm.
+            let quoted_discriminator = super::resolve_quoted_pptp_discriminator(
+                sessions,
+                hdr.discriminator,
+                hdr.pptp_call_id,
+                hdr.dst,
+            );
             let embedded_key = SessionKey {
                 addr_family: libc::AF_INET6 as u8,
                 protocol: hdr.proto,
@@ -80,13 +99,14 @@ pub(in crate::afxdp::icmp_embed) fn try_embedded_icmp_session_match_from_frame(
                 dst_ip: hdr.dst,
                 src_port: hdr.src_port,
                 dst_port: hdr.dst_port,
-                            // #9031: the QUOTED tunnel's discriminator, not None. SessionKey's
-        // Hash/Eq include it (#7188), so a hard-coded None made every
-        // exact index probe for a GRE quote MISS.
-        discriminator: hdr.discriminator,
-                            // #9162: the arriving interface's domain, not 0. See
-                            // the doc comment above.
-                            routing_domain,
+                // #9031: the QUOTED tunnel's discriminator, not None.
+                // SessionKey's Hash/Eq include it (#7188), so a hard-coded
+                // None made every exact index probe for a GRE quote MISS.
+                // #9298: with the PPTP upgrade applied, above.
+                discriminator: quoted_discriminator,
+                // #9162: the arriving interface's domain, not 0. See
+                // the doc comment above.
+                routing_domain,
             };
             let reverse_key = embedded_reply_key(
                 libc::AF_INET6 as u8,
@@ -95,7 +115,7 @@ pub(in crate::afxdp::icmp_embed) fn try_embedded_icmp_session_match_from_frame(
                 hdr.dst,
                 hdr.src_port,
                 hdr.dst_port,
-                hdr.discriminator,
+                quoted_discriminator,
                 routing_domain,
             );
             lookup_embedded_session(sessions, &embedded_key, &reverse_key, now_ns)
