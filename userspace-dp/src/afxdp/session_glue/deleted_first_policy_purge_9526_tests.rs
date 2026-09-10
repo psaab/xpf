@@ -5,8 +5,9 @@
 // positional id is 0, the value host-local, neighbor-seed, fabric, tunnel and
 // older-peer sessions also carry, so `deletedPolicyRuntimeIDs` skips it. The
 // helper can, because a session the policy admitted binds the rule's counter
-// handle. These cells bind the choice of rule, the discriminator, the full
-// pair teardown, and the worker-loop wiring.
+// handle. These cells bind the choice of rule, the discriminator and the full
+// pair teardown. The worker-loop wiring is bound BEHAVIOURALLY, through a real
+// `worker_loop` rotation, in worker/loop_body/first_policy_purge_rotation_9526_tests.rs.
 use super::*;
 use crate::policy::{
     parse_policy_state_with_counters, PolicyCounterStore, PolicyRuleCounter, PolicyState,
@@ -255,43 +256,4 @@ fn purge_removes_both_halves_of_the_deleted_first_policys_sessions_only_9526() {
     assert_eq!(deltas.len(), 1, "one close delta; the reverse half's is suppressed");
     assert_eq!(deltas[0].kind, SessionDeltaKind::Close);
     assert_eq!(deltas[0].key, first_fwd);
-}
-
-/// The purge runs from the worker loop's forwarding-rotation block, which has
-/// no unit harness, so its wiring is bound on the source: the old-vs-new
-/// comparison must precede the assignment (after it both sides are the new
-/// snapshot and nothing is ever purged), and the purge must follow it inside
-/// the same block.
-#[test]
-fn worker_rotation_wires_the_first_policy_purge_9526() {
-    let src = include_str!("../worker/loop_body/mod.rs");
-    let start = src
-        .find("if let Some(new_forwarding) = new_forwarding_opt {")
-        .expect("the rotation block moved; re-bind this cell");
-    let assign = start
-        + src[start..]
-            .find("forwarding = new_forwarding;")
-            .expect("the assignment inside the rotation block");
-    assert!(
-        src[start..assign]
-            .contains("deleted_first_policy_rule_id(&forwarding.policy, &new_forwarding.policy)"),
-        "the old-vs-new compare must run BEFORE `forwarding = new_forwarding;`"
-    );
-    let after = &src[assign..];
-    let guard_at = after
-        .find("if let Some(rule_id) = deleted_first_policy.as_deref() {")
-        .expect("the purge must be driven by the compare's answer");
-    let purge_at = after
-        .find("purge_sessions_bound_to_deleted_first_policy(")
-        .expect("the purge must run after the rotation");
-    let block_end = after.find("if cos_changed {").expect("the rotation block's CoS reset");
-    assert!(
-        guard_at < purge_at && purge_at < block_end,
-        "the purge must sit under the compare's answer, inside the same rotation block"
-    );
-    let call = &after[purge_at..block_end];
-    assert!(
-        call.contains("&forwarding,\n                    rule_id,"),
-        "the purge must tear down under the NEW forwarding state, keyed on the deleted rule id"
-    );
 }
