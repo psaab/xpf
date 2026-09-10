@@ -88,8 +88,11 @@ func resolveAppName(proto uint8, dstPort uint16, cfg *config.Config) string {
 }
 
 // resolveAddress looks up a named address in the global address book and returns its CIDR suffix.
+//
+// #9523: a match-all keyword is never looked up as a name (see
+// config.IsPolicyAddressWildcardKeyword).
 func resolveAddress(cfg *config.Config, name string) string {
-	if name == "any" {
+	if config.IsPolicyAddressWildcardKeyword(name) {
 		return ""
 	}
 	ab := cfg.Security.AddressBook

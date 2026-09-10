@@ -440,6 +440,18 @@ unaffected. The surfaces accept the type/code as `icmp_type`/`icmp_code` (REST
 query, gRPC `MatchPolicies` optional fields), `icmp-type`/`icmp-code` (CLI
 tokens), and `ictype=`/`iccode=` (gRPC `test policy` topic).
 
+## Address token precedence (#9523)
+
+`resolveToken` resolves a policy address token in the same order as the
+snapshot builder's `classifyPolicyAddresses`: a match-all keyword (`any`, `any4`,
+`any6`, `any-ipv4`, `any-ipv6`, per `config.IsPolicyAddressWildcardKeyword`)
+first; then an address-book address, address-set or dynamic-address feed
+binding by NAME; then a literal CIDR or IP. Before #9523 the keyword test ran
+after the name lookup, so an object literally named `any` captured the keyword
+here exactly as it did on the wire, and the simulator agreed with the narrowed
+enforcement instead of flagging it. Name-before-literal is unchanged for every
+other token.
+
 ## Content-rejected verdict (#3727, #4394)
 
 A policy that references content the userspace matcher cannot represent makes the

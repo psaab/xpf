@@ -451,8 +451,12 @@ func hostInboundStatusToProto(s dpuserspace.HostInboundStatus) pb.HostInboundAdm
 }
 
 // grpcResolveAddress looks up a named address in the global address book and returns its CIDR suffix.
+//
+// #9523: a match-all keyword is never looked up as a name, so the text detail
+// shows what the dataplane enforces even when a tolerant-loaded object carries
+// the keyword's name.
 func grpcResolveAddress(cfg *config.Config, name string) string {
-	if name == "any" {
+	if config.IsPolicyAddressWildcardKeyword(name) {
 		return ""
 	}
 	ab := cfg.Security.AddressBook

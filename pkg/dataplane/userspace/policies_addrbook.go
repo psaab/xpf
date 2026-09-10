@@ -74,6 +74,14 @@ var addressBookContentHash64 = func(canon []byte) uint64 {
 // classifyPolicyAddresses splits the policy's address-token list
 // into (book IDs, free-form CIDR literals). #1606. The returned
 // bookIDs are sorted + deduped.
+//
+// Precedence, in order: a match-all keyword (`any`, `any4`, `any6`,
+// `any-ipv4`, `any-ipv6`) is always a literal; then a known book name; then a
+// free-form literal. #9523 moved the keyword test FIRST. Before it, an address,
+// address-set or dynamic-address binding literally named `any` resolved to a
+// book ID here, so every `match ... any` in every policy matched only that
+// object's prefixes. Name-before-literal is kept for every other token (an
+// entry named `10.0.1.0/24` with another value is still resolved by name).
 func classifyPolicyAddresses(cfg *config.Config, nameToID map[string]uint32, addrs []string) ([]uint32, []string) {
 	if len(addrs) == 0 {
 		return nil, nil
@@ -85,12 +93,14 @@ func classifyPolicyAddresses(cfg *config.Config, nameToID map[string]uint32, add
 		if tok == "" {
 			continue
 		}
-		if id, ok := nameToID[tok]; ok {
-			bookSet[id] = struct{}{}
-			continue
+		if !config.IsPolicyAddressWildcardKeyword(tok) {
+			if id, ok := nameToID[tok]; ok {
+				bookSet[id] = struct{}{}
+				continue
+			}
 		}
-		// Not a known book name → treat as a free-form literal.
-		// Includes "any", "any4", "any6", or a CIDR/IP literal.
+		// A match-all keyword, or not a known book name → a free-form literal:
+		// "any", "any4", "any6", "any-ipv4", "any-ipv6", or a CIDR/IP literal.
 		if _, dup := seen[tok]; dup {
 			continue
 		}

@@ -1866,6 +1866,19 @@ func resolveToken(cfg *config.Config, overlay map[string][]string, tok string) (
 		return nil, nil, false, false
 	}
 
+	// #9523: a match-all keyword is never a name, so it is tested BEFORE the
+	// book lookup, exactly as classifyPolicyAddresses does. Before #9523 the
+	// switch below ran after isBookName, and an address named `any` turned every
+	// `match ... any` into a match on its prefixes here as in the dataplane.
+	switch tok {
+	case "any":
+		return nil, nil, true, true
+	case "any-ipv4", "any4":
+		return nil, nil, true, false
+	case "any-ipv6", "any6":
+		return nil, nil, false, true
+	}
+
 	// Book-name precedence (classifyPolicyAddresses): a token that names a
 	// static address/address-set OR a feed-overlay address-name is resolved as
 	// a book reference, never as a literal.
@@ -1880,15 +1893,6 @@ func resolveToken(cfg *config.Config, overlay map[string][]string, tok string) (
 			addCIDRValue(val, &v4nets, &v6nets, &anyV4, &anyV6)
 		}
 		return v4nets, v6nets, anyV4, anyV6
-	}
-
-	switch tok {
-	case "any":
-		return nil, nil, true, true
-	case "any-ipv4", "any4":
-		return nil, nil, true, false
-	case "any-ipv6", "any6":
-		return nil, nil, false, true
 	}
 
 	addCIDRValue(tok, &v4nets, &v6nets, &anyV4, &anyV6)

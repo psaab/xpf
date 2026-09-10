@@ -90,6 +90,22 @@ func runEarlyStrictAndFolds(cfg *Config, opts compileOpts) error {
 			return err
 		}
 	}
+	// #9523 — reject an address-book address / address-set (global or
+	// zone-local) or a dynamic-address address-name named after a policy
+	// match-all keyword. On the pristine books, for the same reason as the gate
+	// above: a zone-local object must be reported under its authored name.
+	// Strict on commit / commit-check; tolerant load / peer-sync keep the object
+	// with a warning (#1960 no-brick), and the keyword keeps matching every
+	// address because IsPolicyAddressWildcardKeyword is asked before any name
+	// lookup.
+	if err := validateReservedAddressNamesStrict(cfg); err != nil {
+		if opts.lenientReservedAddressNames {
+			cfg.Warnings = append(cfg.Warnings,
+				fmt.Sprintf("reserved address name (downgraded to warning on tolerant path; the keyword still matches every address): %v", err))
+		} else {
+			return err
+		}
+	}
 	// #5676 — reject a same-name `address` + `address-set` collision within one
 	// address book (global or zone-local). The two kinds share one operator-
 	// visible namespace but land in separate maps, so a plain address silently
