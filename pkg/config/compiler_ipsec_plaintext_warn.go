@@ -174,21 +174,62 @@ func warnSecureTunnelPlaintextUnadjudicatedAST(nodes []*Node) []string {
 	})
 
 	// ONE aggregated advisory per commit, the zoned/unzoned partition, the sort,
-	// the group headings and the #6682 unzoned caveat are the SHARED shape
-	// (renderPlaintextUnadjudicatedAdvisory, compiler_tunnel_plaintext_advisory.go)
-	// — the #5618 WireGuard advisory renders through the same function, so the
-	// two accounts of one mechanism cannot diverge in structure. Only the
-	// protocol-specific sentences live here.
-	return renderPlaintextUnadjudicatedAdvisory(findings, plaintextAdvisoryWording{
+	// and the rule that the unzoned caveat appears only when a tunnel IS
+	// unzoned are the SHARED shape (renderPlaintextUnadjudicatedAdvisory,
+	// compiler_tunnel_plaintext_advisory.go) — the #5618 WireGuard advisory
+	// renders through the same function, so the two cannot diverge in
+	// structure. Every sentence lives here, the group headings and the #6682
+	// unzoned caveat included: since #8274 a WireGuard tunnel's zone is enforced
+	// on its dataplane path and an IPsec tunnel's is not, so the two advisories
+	// no longer share those sentences (#9251).
+	return renderPlaintextUnadjudicatedAdvisory(findings, secureTunnelPlaintextAdvisoryWording())
+}
+
+// IPsec's group headings and unzoned caveat. Moved here from
+// compiler_tunnel_plaintext_advisory.go by #9251 with their TEXT UNCHANGED:
+// they are still exactly true for route-based IPsec, whose plaintext never
+// reaches the dataplane. They stopped being shared because they are false for
+// WireGuard (see plaintextAdvisoryWording).
+const (
+	// ipsecPlaintextZonedHeading introduces the ACUTE group. A zoned tunnel is
+	// worse than an unimplemented feature: the zone assignment commits cleanly
+	// and nothing distinguishes it from a zone that is enforced, so the
+	// operator has been told something specific and untrue.
+	ipsecPlaintextZonedHeading = "ASSIGNED A ZONE THAT IS NOT ENFORCED — this reads as protected and is not:"
+
+	// ipsecPlaintextUnzonedHeading introduces the plain-statement group.
+	ipsecPlaintextUnzonedHeading = "NOT ZONE-ADJUDICATED:"
+
+	// ipsecPlaintextUnzonedCaveat is emitted only when at least one tunnel is
+	// unzoned. Leaving a tunnel out of a zone is NOT a mitigation, and an
+	// operator reading only the zoned paragraph could conclude that it is.
+	// #6682: this sentence used to say an unzoned interface resolves to zone id
+	// 0 "which a `from-zone any to-zone any permit` rule matches". That was
+	// never true -- the #3110 guard has fenced every rule tier, wildcard tiers
+	// included, against zone 0 since before the claim was written -- and #6682
+	// went further and made an unzoned INGRESS an explicit deny. The conclusion
+	// survives; only the mechanism was wrong, and it is the mechanism an
+	// operator would act on.
+	ipsecPlaintextUnzonedCaveat = "An UNZONED tunnel is not safer: leaving it out of a zone does " +
+		"not bring its plaintext under policy, it only leaves it unadjudicated by a different route " +
+		"(#6682)."
+)
+
+// secureTunnelPlaintextAdvisoryWording is the #5619 advisory's text.
+func secureTunnelPlaintextAdvisoryWording() plaintextAdvisoryWording {
+	return plaintextAdvisoryWording{
 		lead: "security ipsec: decrypted traffic on route-based IPsec secure tunnels is " +
 			"NOT evaluated against xpf security policies (#5619).",
-		zonedSuffix: "but that zone does NOT govern its decrypted traffic",
+		zonedHeading:   ipsecPlaintextZonedHeading,
+		zonedSuffix:    "but that zone does NOT govern its decrypted traffic",
+		unzonedHeading: ipsecPlaintextUnzonedHeading,
 		mechanism: "Route-based IPsec decrypts in the kernel XFRM stack and the plaintext is " +
 			"forwarded by Linux routing, which xpf does not adjudicate: no zone policy, no " +
 			"session, no NAT and no screen are applied to it.",
+		unzonedCaveat: ipsecPlaintextUnzonedCaveat,
 		remedy: "Restrict what the tunnel can reach with routing or with the peer's own " +
 			"policy until this is enforced.",
-	})
+	}
 }
 
 // collectZoneInterfaceRefsAST maps each `security zones security-zone <z>

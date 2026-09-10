@@ -9,10 +9,15 @@ import (
 // compiler_tunnel_plaintext_advisory.go holds the pieces the #5619 IPsec and
 // #5618 WireGuard plaintext advisories SHARE.
 //
-// The two advisories describe the same operator-visible fact about two
-// different protocols: a tunnel's decapsulated inner traffic leaves the xpf
-// dataplane's adjudication and is forwarded by the Linux kernel, so the zone
-// the operator put the tunnel interface in does not govern it.
+// The two advisories used to describe ONE fact about two protocols: a tunnel's
+// decapsulated inner traffic leaves the xpf dataplane's adjudication and is
+// forwarded by the Linux kernel, so the zone the operator put the tunnel
+// interface in does not govern it. It is still exactly that for route-based
+// IPsec. For WireGuard, #8274 moved transport decapsulation into the AF_XDP
+// worker, which adjudicates the inner packet under the tunnel's zone, and left
+// a kernel-path residual (docs/log/8274.md "The residual, stated rather than
+// closed"; #9594). So since #9251 the two advisories render DIFFERENT facts
+// through one shared shape.
 //
 // WHAT IS SHARED HERE and what is deliberately NOT:
 //
@@ -29,14 +34,10 @@ import (
 //   - renderPlaintextUnadjudicatedAdvisory — the AGGREGATION SHAPE. Exactly
 //     ONE advisory per commit however many tunnels are affected; a stable sort
 //     so both HA nodes render the identical string; the zoned/unzoned
-//     partition; and the #6682 unzoned caveat emitted only when there IS an
-//     unzoned tunnel. If one advisory fired per tunnel while the other
-//     aggregated, or one dropped the #6682 caveat, the operator would read two
-//     contradictory accounts of one mechanism.
-//
-//   - The group HEADINGS and the #6682 caveat sentence. They are statements
-//     about zone id 0 and about what "zoned" means, not about IPsec or
-//     WireGuard. Two spellings of one fact is a bug.
+//     partition; and the unzoned caveat emitted only when there IS an unzoned
+//     tunnel. If one advisory fired per tunnel while the other aggregated, or
+//     one dropped its unzoned caveat, the operator would read two
+//     differently-shaped accounts of tunnel plaintext on one commit.
 //
 // NOT shared, because a divergence is LEGITIMATE:
 //
@@ -46,68 +47,74 @@ import (
 //     mode wireguard` and are joined by interface reference. Different
 //     hierarchies, different identity, different join key.
 //
-//   - Every protocol-specific SENTENCE (plaintextAdvisoryWording). The
-//     mechanism differs (kernel XFRM stack vs the userspace helper's WireGuard
-//     control thread writing to a TUN), and so does the remedy an operator can
-//     reach for. Forcing one wording would make at least one of them false.
+//   - Every SENTENCE (plaintextAdvisoryWording), the group HEADINGS and the
+//     unzoned caveat included. The mechanism differs (the kernel XFRM stack
+//     vs the AF_XDP worker, with a kernel-path residual through the helper's
+//     WireGuard control thread), and so does the remedy an operator can reach
+//     for. Forcing one wording would make at least one of them false.
+//
+//     The headings and the caveat were SHARED until #9251, on the argument
+//     that they were "statements about zone id 0 and about what 'zoned'
+//     means, not about IPsec or WireGuard". #8274 hollowed that premise: what
+//     a zone means for a tunnel's plaintext depends on WHERE the protocol
+//     decapsulates. An IPsec tunnel's zone is not enforced on its plaintext at
+//     all. A WireGuard tunnel's zone IS enforced on the dataplane path and not
+//     on the kernel path, and an unzoned WireGuard tunnel's transit is DENIED
+//     on the dataplane path (#6682) rather than "unadjudicated by a different
+//     route". The shared heading rendered IPsec's account for WireGuard —
+//     "ASSIGNED A ZONE THAT IS NOT ENFORCED" for a zone the dataplane
+//     enforces — which is the defect #9251 reports.
 //
 // NEITHER advisory can reject. Both entry points return only []string — no
 // error, no `lenient` flag — so the #1960 no-brick property is STRUCTURAL
 // rather than a convention a later edit could quietly invert.
 
 // plaintextTunnelFinding is one tunnel whose decapsulated inner traffic is not
-// zone-adjudicated.
+// zone-adjudicated: on any path (IPsec), or on the kernel path (WireGuard).
 //
 //   - ref is the operator-facing interface reference (`st0.0`, `wg0.0`).
 //   - detail is the config path that DECLARED the tunnel, rendered in the
 //     parenthetical so the operator can find the stanza to edit.
 //   - zone is the security zone the interface is a member of, or "" when it is
-//     in none. "" is not a mitigation — see plaintextAdvisoryUnzonedCaveat.
+//     in none. What "" means is protocol-specific — see each advisory's
+//     unzonedCaveat.
 type plaintextTunnelFinding struct {
 	ref    string
 	detail string
 	zone   string
 }
 
-// plaintextAdvisoryWording carries the protocol-specific sentences.
-// Everything not in here is structure, and structure is shared.
+// plaintextAdvisoryWording carries every protocol-specific sentence, the group
+// headings and the unzoned caveat included (#9251). Everything not in here is
+// structure, and structure is shared.
+//
+// EVERY field is required, and there is deliberately no default. A default
+// heading or caveat would be ONE protocol's account of its own decapsulation
+// path, and an advisory that left the field empty would render that account as
+// its own — which is the #9251 defect exactly: WireGuard rendering IPsec's
+// "ASSIGNED A ZONE THAT IS NOT ENFORCED" for a zone the dataplane enforces.
+// TestPlaintextAdvisoryWordingsAreCompleteAndDistinct is the guard.
 type plaintextAdvisoryWording struct {
 	// lead is the first sentence, and it must carry the issue number the
 	// operator (and the tests) grep for.
 	lead string
+	// zonedHeading introduces the group of tunnels that ARE in a zone.
+	zonedHeading string
 	// zonedSuffix completes `<ref> (<detail>) is assigned to security-zone
 	// "<zone>", <zonedSuffix>`.
 	zonedSuffix string
-	// mechanism states HOW the plaintext escapes adjudication.
+	// unzonedHeading introduces the group of tunnels that are in no zone.
+	unzonedHeading string
+	// mechanism states where the plaintext is, and is not, adjudicated.
 	mechanism string
-	// remedy states what the operator can do until enforcement lands.
+	// unzonedCaveat follows the mechanism when at least one tunnel is unzoned:
+	// what leaving THIS protocol's tunnel out of a zone does and does not
+	// change, so an operator reading only the zoned group cannot conclude
+	// something false about the unzoned one.
+	unzonedCaveat string
+	// remedy states what the operator can do about the unadjudicated path.
 	remedy string
 }
-
-const (
-	// plaintextAdvisoryZonedHeading introduces the ACUTE group. A zoned tunnel
-	// is worse than an unimplemented feature: the zone assignment commits
-	// cleanly and nothing distinguishes it from a zone that is enforced, so the
-	// operator has been told something specific and untrue.
-	plaintextAdvisoryZonedHeading = "ASSIGNED A ZONE THAT IS NOT ENFORCED — this reads as protected and is not:"
-
-	// plaintextAdvisoryUnzonedHeading introduces the plain-statement group.
-	plaintextAdvisoryUnzonedHeading = "NOT ZONE-ADJUDICATED:"
-
-	// plaintextAdvisoryUnzonedCaveat is emitted only when at least one tunnel
-	// is unzoned. Leaving a tunnel out of a zone is NOT a mitigation, and an
-	// operator reading only the zoned paragraph could conclude that it is.
-	// #6682: this sentence used to say an unzoned interface resolves to zone id
-	// 0 "which a `from-zone any to-zone any permit` rule matches". That was
-	// never true -- the #3110 guard has fenced every rule tier, wildcard tiers
-	// included, against zone 0 since before the claim was written -- and #6682
-	// went further and made an unzoned INGRESS an explicit deny. The conclusion
-	// survives; only the mechanism was wrong, and it is the mechanism an
-	// operator would act on.
-	plaintextAdvisoryUnzonedCaveat = "An UNZONED tunnel is not safer: leaving it out of a zone does " +
-		"not bring its plaintext under policy, it only leaves it unadjudicated by a different route " +
-		"(#6682)."
-)
 
 // renderPlaintextUnadjudicatedAdvisory folds every finding into ONE advisory.
 //
@@ -116,7 +123,8 @@ const (
 // the same reason compiler_system.go folds several inert knobs into a single
 // message. The affected tunnels are named inside it.
 //
-// The two groups are worded differently on purpose: see the heading constants.
+// The two groups are worded differently on purpose, and differently per
+// protocol: see plaintextAdvisoryWording.
 //
 // The sort is stable and total over (ref, detail) so the rendered string is a
 // pure function of the config — both HA nodes emit byte-identical text, and a
@@ -149,21 +157,21 @@ func renderPlaintextUnadjudicatedAdvisory(findings []plaintextTunnelFinding, w p
 	var b strings.Builder
 	b.WriteString(w.lead)
 	if len(zoned) > 0 {
-		b.WriteString("\n  " + plaintextAdvisoryZonedHeading)
+		b.WriteString("\n  " + w.zonedHeading)
 		for _, f := range zoned {
 			fmt.Fprintf(&b, "\n    %s (%s) is assigned to security-zone %q, %s",
 				f.ref, f.detail, f.zone, w.zonedSuffix)
 		}
 	}
 	if len(unzoned) > 0 {
-		b.WriteString("\n  " + plaintextAdvisoryUnzonedHeading)
+		b.WriteString("\n  " + w.unzonedHeading)
 		for _, f := range unzoned {
 			fmt.Fprintf(&b, "\n    %s (%s)", f.ref, f.detail)
 		}
 	}
 	b.WriteString("\n  " + w.mechanism)
 	if len(unzoned) > 0 {
-		b.WriteString(" " + plaintextAdvisoryUnzonedCaveat)
+		b.WriteString(" " + w.unzonedCaveat)
 	}
 	b.WriteString(" " + w.remedy)
 

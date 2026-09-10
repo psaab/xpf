@@ -54,12 +54,19 @@ func plaintextWarnings5618(cfg *Config) []string {
 	return out
 }
 
-// TestWGPlaintextWarningNamesTheContradictedZone is the acute #5618 case: the
-// operator put the WireGuard tunnel in a security zone, the commit ACCEPTED it,
-// and nothing distinguishes it from a zone that is enforced — so they have been
-// told something specific and untrue. Exactly ONE advisory, naming the
-// interface and the zone.
-func TestWGPlaintextWarningNamesTheContradictedZone(t *testing.T) {
+// TestWGPlaintextWarningScopesTheZoneToTheDataplanePath re-anchors what was
+// TestWGPlaintextWarningNamesTheContradictedZone (#9251).
+//
+// That cell pinned the pre-#8274 escalation: a zoned WireGuard tunnel had been
+// "told something specific and untrue", so the advisory had to say "reads as
+// protected and is not" and "does NOT govern its decapsulated traffic". #8274
+// moved transport decap into the AF_XDP worker, which adjudicates the inner
+// packet under the tunnel's zone (worker_decap_presents_inner_under_the_tunnel_
+// zone_8274, poll_loop_adjudicates_wg_inner_plaintext_under_the_tunnel_zone_8274)
+// — so that escalation became the untrue statement. What the prior decision
+// protected survives: exactly ONE advisory, naming the interface and its zone,
+// and telling the operator precisely where that zone does NOT reach.
+func TestWGPlaintextWarningScopesTheZoneToTheDataplanePath(t *testing.T) {
 	lines := wgTunnel5618("wg0", 0, 51820, wgKeyA, wgKeyB)
 	lines = append(lines, "set security zones security-zone vpn interfaces wg0.0")
 	cfg := compileWarn5618(t, lines...)
@@ -72,20 +79,38 @@ func TestWGPlaintextWarningNamesTheContradictedZone(t *testing.T) {
 	for _, want := range []string{
 		"wg0.0",
 		`security-zone "vpn"`,
-		"does NOT govern its decapsulated traffic",
-		"NOT evaluated against xpf security policies",
+		// The zone governs the dataplane path, and the advisory says so ...
+		"which governs its traffic on the dataplane path but NOT on the kernel path",
+		// ... names the kernel path, both ways onto it, and the owner of the
+		// degraded half ...
+		"written straight to the wgN TUN",
+		"on an ingress interface the dataplane does not attach to",
+		"while the dataplane is degraded",
+		"#9594",
+		// ... and does not tell a multi-port operator that a refused tunnel leaks.
+		"A record for any other listen port is dropped on that path (#9521)",
 	} {
 		if !strings.Contains(adv, want) {
 			t.Errorf("advisory missing %q; got: %s", want, adv)
 		}
 	}
-	if !strings.Contains(adv, "reads as protected and is not") {
-		t.Errorf("the ZONED case must ESCALATE — the operator has been told something "+
-			"specific and untrue, and the wording must say so; got: %s", adv)
+	// The pre-#8274 account must be GONE. Each of these was once REQUIRED by
+	// this cell; each is false for a zone the dataplane enforces.
+	for _, stale := range []string{
+		"reads as protected and is not",
+		"NOT ENFORCED",
+		"does NOT govern its decapsulated traffic",
+		"decapsulated traffic on WireGuard tunnels is NOT evaluated",
+	} {
+		if strings.Contains(adv, stale) {
+			t.Errorf("advisory still carries the pre-#8274 claim %q, false since the "+
+				"worker adjudicates WireGuard decap under the tunnel's zone (#8274, "+
+				"#9251); got: %s", stale, adv)
+		}
 	}
 	// The zoned tunnel must NOT also be reported as unzoned, and the #6682
 	// caveat must not fire when every tunnel carries a zone.
-	if strings.Contains(adv, plaintextAdvisoryUnzonedHeading) {
+	if strings.Contains(adv, wgPlaintextUnzonedHeading) {
 		t.Errorf("the unzoned group must be omitted entirely when empty: %s", adv)
 	}
 	if strings.Contains(adv, "#6682") {
@@ -96,13 +121,23 @@ func TestWGPlaintextWarningNamesTheContradictedZone(t *testing.T) {
 // TestWGPlaintextWarningFiresForUnzonedTunnel: the advisory fires whenever a
 // WireGuard tunnel is configured, NOT only when one carries a zone.
 //
-// Leaving the tunnel out of a zone is not a mitigation — an interface in no
-// zone resolves to zone id 0 and a `from-zone any to-zone any permit` rule
-// never reaches zone policy at all, whether or not the interface is zoned
-// (#6682: the older "matches zone-pair (0,0) with no zone guard" claim was
-// wrong — #3110 fenced every tier against zone 0, and #6682 made an unzoned
-// ingress an explicit deny) — so gating on zoning
-// would tell exactly this operator nothing.
+// Leaving the tunnel out of a zone does not close the KERNEL path — the control
+// thread's TUN write consults no zone — so gating on zoning would tell exactly
+// this operator nothing.
+//
+// #9251 re-anchored the caveat this cell pins. It used to require the shared
+// "An UNZONED tunnel is not safer ... it only leaves it unadjudicated by a
+// different route" sentence. That is still true of IPsec, and it is FALSE of
+// WireGuard's dataplane path: build_logical_ingress_packet resolves an unzoned
+// tunnel to zone id 0 and #6682 denies transit from it, even under
+// `default-policy permit-all` with a both-any permit
+// (poll_loop_denies_unzoned_wg_tunnel_transit_under_permit_all_9251). The
+// caveat must now state both halves.
+//
+// (#6682: the older "an interface in no zone resolves to zone id 0 and a
+// `from-zone any to-zone any permit` rule matches zone-pair (0,0) with no zone
+// guard" claim was wrong — #3110 fenced every tier against zone 0, and #6682
+// made an unzoned ingress an explicit deny.)
 func TestWGPlaintextWarningFiresForUnzonedTunnel(t *testing.T) {
 	cfg := compileWarn5618(t, wgTunnel5618("wg0", 0, 51820, wgKeyA, wgKeyB)...)
 
@@ -111,20 +146,30 @@ func TestWGPlaintextWarningFiresForUnzonedTunnel(t *testing.T) {
 		t.Fatalf("want exactly 1 #5618 advisory, got %d: %v", len(got), cfg.Warnings)
 	}
 	adv := got[0]
-	idx := strings.Index(adv, plaintextAdvisoryUnzonedHeading)
+	idx := strings.Index(adv, wgPlaintextUnzonedHeading)
 	if idx < 0 {
-		t.Fatalf("an unzoned WireGuard tunnel must land in the NOT ZONE-ADJUDICATED "+
-			"group; got: %s", adv)
+		t.Fatalf("an unzoned WireGuard tunnel must land in the %q group; got: %s",
+			wgPlaintextUnzonedHeading, adv)
 	}
 	if !strings.Contains(adv[idx:], "wg0.0") {
 		t.Errorf("the unzoned tunnel must be named in that group: %s", adv)
 	}
-	if strings.Contains(adv, plaintextAdvisoryZonedHeading) {
+	if strings.Contains(adv, wgPlaintextZonedHeading) {
 		t.Errorf("the zoned group must be omitted entirely when empty: %s", adv)
 	}
-	if !strings.Contains(adv, "#6682") {
-		t.Errorf("with an unzoned tunnel present the advisory must say that unzoning is "+
-			"NOT a mitigation (zone id 0 is matchable by a wildcard permit, #6682): %s", adv)
+	for _, want := range []string{
+		"DENIED on the dataplane path (#6682)",
+		"does not close the kernel path",
+	} {
+		if !strings.Contains(adv, want) {
+			t.Errorf("with an unzoned tunnel present the caveat must state both halves "+
+				"(denied on the dataplane path; the kernel path untouched by zoning); "+
+				"missing %q in: %s", want, adv)
+		}
+	}
+	if strings.Contains(adv, "unadjudicated by a different route") {
+		t.Errorf("the WireGuard advisory rendered IPsec's unzoned caveat, which is false "+
+			"on WireGuard's dataplane path (#6682 denies an unzoned ingress): %s", adv)
 	}
 }
 
@@ -136,7 +181,7 @@ func TestWGPlaintextWarningFiresForUnzonedTunnel(t *testing.T) {
 // CHILD of wg0.0. A reader that took only `iface.Name()` would see wg0.0 alone,
 // so wg1.0 would silently fall into the UNZONED group — the advisory would
 // still fire, would still be exactly one, and would still name both interfaces,
-// yet it would have dropped the escalation for the second tunnel. The zone-
+// yet it would have reported the second tunnel as in no zone. The zone-
 // clause COUNT is what separates those two worlds, so that is what is asserted.
 func TestWGPlaintextWarningReadsBracketedZoneList(t *testing.T) {
 	var lines []string
@@ -160,7 +205,7 @@ func TestWGPlaintextWarningReadsBracketedZoneList(t *testing.T) {
 			"tail of `interfaces [ wg0.0 wg1.0 ]` was dropped, so it was reported as "+
 			"unzoned: %s", n, adv)
 	}
-	if strings.Contains(adv, plaintextAdvisoryUnzonedHeading) {
+	if strings.Contains(adv, wgPlaintextUnzonedHeading) {
 		t.Errorf("both members are zoned, so the unzoned group must be absent: %s", adv)
 	}
 }
@@ -251,8 +296,9 @@ func TestWGPlaintextWarningIsAggregatedToOne(t *testing.T) {
 	}
 }
 
-// TestWGPlaintextWarningSeparatesZonedFromUnzoned pins the escalation the zoned
-// case earns and the #6682 note the unzoned case earns, in ONE advisory.
+// TestWGPlaintextWarningSeparatesZonedFromUnzoned pins the zoned group and the
+// unzoned caveat, each for the right tunnel, in ONE advisory. #9251 re-anchored
+// both from the IPsec headings to WireGuard's own.
 func TestWGPlaintextWarningSeparatesZonedFromUnzoned(t *testing.T) {
 	var lines []string
 	lines = append(lines, wgTunnel5618("wg0", 0, 51820, wgKeyA, wgKeyB)...)
@@ -266,14 +312,14 @@ func TestWGPlaintextWarningSeparatesZonedFromUnzoned(t *testing.T) {
 	}
 	adv := got[0]
 
-	zoneIdx := strings.Index(adv, plaintextAdvisoryZonedHeading)
-	plainIdx := strings.Index(adv, plaintextAdvisoryUnzonedHeading)
+	zoneIdx := strings.Index(adv, wgPlaintextZonedHeading)
+	plainIdx := strings.Index(adv, wgPlaintextUnzonedHeading)
 	if zoneIdx < 0 || plainIdx < 0 {
 		t.Fatalf("advisory must carry BOTH groups; got: %s", adv)
 	}
 	zonedSection := adv[zoneIdx:plainIdx]
 	if !strings.Contains(zonedSection, "wg0.0") {
-		t.Errorf("the zoned tunnel must be in the escalated group: %s", adv)
+		t.Errorf("the zoned tunnel must be in the zoned group: %s", adv)
 	}
 	if strings.Contains(zonedSection, "wg1.0") {
 		t.Errorf("the UNZONED tunnel must not be reported as zoned: %s", adv)
@@ -281,9 +327,9 @@ func TestWGPlaintextWarningSeparatesZonedFromUnzoned(t *testing.T) {
 	if !strings.Contains(adv[plainIdx:], "wg1.0") {
 		t.Errorf("the unzoned tunnel must be named: %s", adv)
 	}
-	if !strings.Contains(adv, "#6682") {
-		t.Errorf("with an unzoned tunnel present the advisory must say that unzoning is "+
-			"NOT a mitigation (#6682): %s", adv)
+	if !strings.Contains(adv, "DENIED on the dataplane path (#6682)") {
+		t.Errorf("with an unzoned tunnel present the advisory must carry WireGuard's "+
+			"unzoned caveat (#6682): %s", adv)
 	}
 }
 
@@ -294,8 +340,9 @@ func TestWGPlaintextWarningSeparatesZonedFromUnzoned(t *testing.T) {
 // by every unit (Config.TunnelNameMap), so a zone on `wg0.0` governs that same
 // TUN even though the tunnel is declared on bare `wg0`. Conversely a BARE zone
 // member means "every unit of wg0", so it governs a per-unit tunnel on `wg0.0`.
-// Reporting either as unzoned would drop the escalation in exactly the case
-// that earns it.
+// Reporting either as unzoned would tell the operator the tunnel's transit is
+// DENIED on the dataplane path (the unzoned caveat) when that zone in fact
+// admits it under policy.
 func TestWGPlaintextWarningMatchesZoneAcrossSpellings(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
@@ -315,11 +362,11 @@ func TestWGPlaintextWarningMatchesZoneAcrossSpellings(t *testing.T) {
 			if len(got) != 1 {
 				t.Fatalf("want exactly 1 advisory, got %d: %v", len(got), got)
 			}
-			if !strings.Contains(got[0], plaintextAdvisoryZonedHeading) {
+			if !strings.Contains(got[0], wgPlaintextZonedHeading) {
 				t.Errorf("a WireGuard tunnel declared at unit=%d with a zone on %q must "+
-					"land in the ESCALATED group — they are the same wgN TUN, and "+
-					"reporting it as unzoned drops the escalation exactly where the "+
-					"operator has been told something untrue. Got: %s",
+					"land in the ZONED group — they are the same wgN TUN, and "+
+					"reporting it as unzoned would tell the operator its transit is "+
+					"denied when that zone admits it. Got: %s",
 					tc.unit, tc.zoneRef, got[0])
 			}
 			if strings.Contains(got[0], "#6682") {
@@ -350,7 +397,7 @@ func TestWGPlaintextWarningDoesNotFanAZoneSideways(t *testing.T) {
 		t.Fatalf("want exactly 1 advisory, got %d: %v", len(got), got)
 	}
 	adv := got[0]
-	plainIdx := strings.Index(adv, plaintextAdvisoryUnzonedHeading)
+	plainIdx := strings.Index(adv, wgPlaintextUnzonedHeading)
 	if plainIdx < 0 {
 		t.Fatalf("wg0.1 carries no zone of its own and must be reported as unzoned; "+
 			"got: %s", adv)

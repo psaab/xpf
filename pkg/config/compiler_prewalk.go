@@ -344,14 +344,17 @@ func runPreWalkGates(tree *ConfigTree, opts compileOpts) ([]string, error) {
 	// (#1960 no-brick).
 	plaintextWarnings := warnSecureTunnelPlaintextUnadjudicatedAST(tree.Children)
 
-	// #5618 WireGuard plaintext advisory. The XDP shim steers inbound WireGuard
-	// transport to the kernel (#5582) and the helper's WG control thread writes
-	// the decapsulated inner packet straight to the wgN TUN, where Linux routing
-	// forwards it — xpf adjudicates none of it: no zone policy, no session, no
-	// NAT, no screen. The interface row is Tunnel=true, so
-	// userspaceSkipsIngressInterface excludes it from the ingress-adjudication
-	// map and the AF_XDP binding plan. A zone on `wg0.0` nevertheless commits
-	// cleanly and READS as enforced. This states the truth at commit.
+	// #5618 WireGuard plaintext advisory. Since #8274 the AF_XDP worker
+	// decapsulates WireGuard transport and adjudicates the inner packet under
+	// the tunnel's zone (an unzoned tunnel's transit is denied there, #6682).
+	// What is NOT adjudicated is the kernel path: a transport record for the
+	// steered listen port that reaches the firewall through the kernel —
+	// ingress the shim does not attach to (#8274's residual), or a degraded
+	// dataplane (#9594) — is written to the wgN TUN by the helper's WG control
+	// thread and forwarded by Linux with no zone policy, session, NAT or screen
+	// (other listen ports are dropped there, #9521). The advisory states both
+	// halves; it used to say the zone was not enforced at all, which #8274 made
+	// false (#9251).
 	//
 	// WARNING ONLY, on EVERY path — same structural no-brick posture as the
 	// #5619 arm above: no lenient flag and no error return, because WireGuard is
