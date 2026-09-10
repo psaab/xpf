@@ -459,9 +459,15 @@ pub(crate) struct ConfigSnapshot {
     /// `UserspaceCtrl.wg_listen_port`. The WireGuard control-thread spawn lets
     /// only this port's thread write kernel-path transport plaintext to its wgN
     /// TUN. A missing key decodes to 0, which delivers for NO endpoint (fail
-    /// closed); CONFIG_SNAPSHOT_PROTOCOL_VERSION 13 refuses the older daemon
-    /// that would omit it.
-    #[serde(rename = "wg_steered_listen_port", default)]
+    /// closed); CONFIG_SNAPSHOT_PROTOCOL_VERSION 14 refuses the older daemon
+    /// that would omit it. Serialized only when non-zero, mirroring the Go
+    /// side's `omitempty`, so a snapshot with no WireGuard tunnel keeps the
+    /// default specimen byte-identical (`protocol_wire_v1.json`).
+    #[serde(
+        rename = "wg_steered_listen_port",
+        default,
+        skip_serializing_if = "crate::protocol::u16_is_zero"
+    )]
     pub wg_steered_listen_port: u16,
     /// #3534: RT_FLOW session logging for the IMPLICIT default-policy verdict
     /// (`security policies default-policy-log session-init|session-close`).
