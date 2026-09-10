@@ -602,6 +602,27 @@ for the keyword set and its families. Name-before-literal is unchanged: a litera
 security policies detail` renders `any-ipv4(global): 0.0.0.0/0`, and the REST and
 gRPC inventories show the keyword the operator wrote instead of the CIDR.
 
+**An address takes one value form; a mixed entry is rejected (#9524):** a Junos
+`address` is a prefix OR a `dns-name` / `wildcard-address` / `range-address`, and
+xpf implements only the prefix. An entry carrying BOTH used to compile to the
+prefix alone on all four config channels with no warning, so a `deny` naming the
+object silently under-covered it by exactly the form that was dropped (measured:
+a host named by the object's `range-address` fell through the deny to a
+`permit-all` default). `mergeAddressNode` now records the form on
+`Address.UnimplementedForms`, in both parser shapes, and the zone-local fold
+carries it. `validateAddressUnimplementedFormsStrict` rejects the mixed entry at
+commit, naming the prefix and the dropped form; the tolerant load / peer-sync path
+warns (`lenientAddressUnimplementedForms`). `Address.UsableValue()` returns `""`
+for such an entry, and the resolvers that decide representability (userspace
+`nameRepresentability` and the junos-host deny projection) read it, so on the
+tolerant path a referencing policy fails closed exactly like the sole-value case
+(#2229, #3261): the `__unsupported_address__` sentinel then replaces the rule's
+addresses on both wire shapes, which is why the legacy expansion needs no change. A sole
+unimplemented form is valid Junos and is unchanged: warned, and strict-rejected
+only when referenced (#3149). `Value` is kept, so show surfaces still render the
+configured prefix. Not switched: static-NAT `prefix-name` resolution, which takes
+one scalar translation target and already refuses an address with no prefix.
+
 **Zone-local address books (#3061):** Junos supports both the global
 `security address-book global { ... }` and a per-zone book attached inline
 under `security zones security-zone <z> address-book { address ...;

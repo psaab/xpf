@@ -135,7 +135,10 @@ func resolveZoneLocalAddressBooks(sec *SecurityConfig) {
 			if _, exists := gb.Addresses[q]; exists {
 				continue // no-clobber (see zoneLocalNamePrefix); strict path never hits this
 			}
-			gb.Addresses[q] = &Address{Name: q, Value: addr.Value, Description: addr.Description}
+			// #9524: carry the unimplemented-form taint, or a zone-local mixed
+			// entry would resolve to its prefix alone once folded.
+			gb.Addresses[q] = &Address{Name: q, Value: addr.Value, Description: addr.Description,
+				UnimplementedForms: append([]string(nil), addr.UnimplementedForms...)}
 		}
 		for name, set := range z.AddressBook.AddressSets {
 			q := zoneLocalQualify(zoneName, name)
@@ -435,6 +438,14 @@ func mergeAddressNode(addr *Address, node *Node) {
 		return
 	}
 
+	// #9524: a flat-set `address <name> dns-name <fqdn>` (or wildcard-address /
+	// range-address) lands the form keyword at Keys[2]. Record it: the compiler
+	// implements none of these, and dropping it silently is what let a mixed
+	// entry enforce its prefix alone.
+	if len(node.Keys) >= 3 && unimplementedAddressForms9524[node.Keys[2]] {
+		addr.UnimplementedForms = appendUniqueForm9524(addr.UnimplementedForms, node.Keys[2])
+	}
+
 	// Prefix-bearing leaf: Keys[2] is the prefix iff it parses as an IP/CIDR.
 	if len(node.Keys) >= 3 && looksLikeIPOrCIDR(node.Keys[2]) {
 		addr.Value = node.Keys[2]
@@ -453,6 +464,12 @@ func mergeAddressNode(addr *Address, node *Node) {
 				addr.Description = d
 			}
 		default:
+			// #9524: an unimplemented value form in the hierarchical block is
+			// recorded rather than ignored, for the reason given above.
+			if unimplementedAddressForms9524[sub.Name()] {
+				addr.UnimplementedForms = appendUniqueForm9524(addr.UnimplementedForms, sub.Name())
+				continue
+			}
 			// A bare value leaf (the hierarchical block prefix) parses as a
 			// single token that is an IP/CIDR. Anything else is an unknown
 			// sub-stanza and is intentionally ignored (preserves the prior

@@ -1417,6 +1417,29 @@ type Address struct {
 	// after it. validateAddressBookTrailingStrict rejects these at commit
 	// (lenient downgrade on the tolerant load / peer-sync path).
 	TrailingTokens []string
+	// UnimplementedForms records the Junos address value forms the compiler
+	// does not implement (`dns-name`, `wildcard-address`, `range-address`)
+	// when they appear on this entry (#9524). A Junos address takes ONE value
+	// form. Before #9524 an entry carrying a prefix AND one of these compiled to
+	// the prefix alone and dropped the other form with no signal on any channel,
+	// so a `deny` naming the object under-covered it.
+	// validateAddressUnimplementedFormsStrict rejects such a mixed entry at
+	// commit, and UsableValue makes the policy resolvers treat it as
+	// unresolvable, exactly like an entry whose only form is unimplemented.
+	UnimplementedForms []string
+}
+
+// UsableValue returns the prefix a policy resolver may enforce for this entry:
+// Value, or "" when the entry has no prefix or ALSO carries an unimplemented
+// value form (#9524). "" is the existing "resolves to no usable address" signal
+// (#2229, #3149, #3261), so a mixed entry fails closed exactly like the
+// sole-value case instead of silently enforcing its prefix alone. Value itself
+// is kept, so show surfaces still render what the operator configured.
+func (a *Address) UsableValue() string {
+	if a == nil || len(a.UnimplementedForms) > 0 {
+		return ""
+	}
+	return a.Value
 }
 
 // AddressSet is a named group of addresses and/or nested address-sets.

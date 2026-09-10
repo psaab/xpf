@@ -112,7 +112,7 @@ func junosHostResolveAddrSet(cfg *Config, tokens []string, feedBound map[string]
 		}
 		if ab != nil {
 			if a, found := ab.Addresses[tok]; found {
-				addCIDR(a.Value)
+				addCIDR(a.UsableValue())
 				continue
 			}
 			if _, found := ab.AddressSets[tok]; found {
@@ -123,7 +123,7 @@ func junosHostResolveAddrSet(cfg *Config, tokens []string, feedBound map[string]
 				}
 				for _, n := range names {
 					if a, f := ab.Addresses[n]; f {
-						addCIDR(a.Value)
+						addCIDR(a.UsableValue())
 					} else {
 						ok = false
 					}

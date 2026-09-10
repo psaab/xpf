@@ -1929,6 +1929,11 @@ type compileOpts struct {
 	// config is no different from before the gate. Same doctrine as
 	// lenientScreenUnknown.
 	lenientTrailingTokens bool
+	// lenientAddressUnimplementedForms (#9524) downgrades the mixed address
+	// value-form gate (validateAddressUnimplementedFormsStrict) to a warning on the
+	// tolerant load / peer-sync path (#1960 no-brick). There the entry still
+	// resolves to no usable address, so a referencing policy fails closed.
+	lenientAddressUnimplementedForms bool
 	// lenientFlowAging (#3440 H2) downgrades the flow-aging gate
 	// (validateFlowAgingStrict) from a hard compile error to a cfg.Warnings
 	// entry. The strict commit / commit-check path hard-rejects an unknown
@@ -2808,6 +2813,7 @@ func lenientCompileOpts() compileOpts {
 		lenientScreenNumeric:                   true,
 		lenientScreenUnknown:                   true,
 		lenientTrailingTokens:                  true,
+		lenientAddressUnimplementedForms:       true,
 		lenientFlowAging:                       true,
 		lenientChassisRG:                       true,
 		lenientVRRPGroupID:                     true,
