@@ -204,12 +204,22 @@ func shapeDigest8892(t *testing.T) (string, int) {
 // garbage domain on a delete, which can name ANOTHER TENANT's row. Exact-
 // equality refusal is the only mechanism that stops the pairing.
 const (
-	snapshotShapeGolden8892 = "9f2fc4a986b0049610502fd566289b81aa063d6e753f61a3b93ea0732bb0caa0"
+	snapshotShapeGolden8892 = "1e0db79c167e34b8d74902968508ebca3b9b1378481e68fab85795f999bfaec4"
 	// v13 BUMPED (issue 9412) against the SAME digest. The TCP close class
 	// crosses the HA session-sync path, and the old behaviour is the defect it
 	// fixes, so the v9 rule requires the bump. The session-sync messages are not
 	// snapshot structs, which is why the digest below did not move.
-	snapshotShapeVersion8892 = 13
+	// v13 -> v14 BUMPED (issue 9521), and this one DID move the digest above:
+	// `ConfigSnapshot.WgSteeredListenPort` is a real, transmitted field. It is the
+	// one WireGuard listen port the shim steers, and the helper uses it to refuse
+	// writing any OTHER port's kernel-path transport plaintext to that tunnel's
+	// wgN TUN, plaintext the kernel would otherwise forward with no zone policy.
+	// An old helper ignores the field and keeps writing it, and that IS the
+	// defect; a new helper under an old daemon reads 0 and refuses kernel-path
+	// transport for every endpoint — the v10/v11 arm, not a STANDS entry. #9521
+	// had claimed 13 against v12; #9412 took 13 first, so by the v8 rule this
+	// change moves past both numbers.
+	snapshotShapeVersion8892 = 14
 )
 
 func TestSnapshotShapeIsPinnedToProtocolVersion8892(t *testing.T) {

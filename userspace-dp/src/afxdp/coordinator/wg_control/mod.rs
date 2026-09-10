@@ -23,6 +23,12 @@
 //! coupling is the relaxed-atomic NoSession handshake-request edge that
 //! `WgEngine::request_handshake` records and this thread consumes.
 //!
+//! That was S2a. Since #8274 the shim claims TRANSPORT-DATA records for the
+//! steered listen port and the worker decapsulates them in the pipeline, so on
+//! a shim-covered ingress this socket sees that port's handshake and cookie
+//! records only. It still sees every record for any OTHER configured listen
+//! port, because the shim steers exactly one (#9521, `WgKernelTransport`).
+//!
 //! ## Directions
 //!
 //!   - **Inbound** (kernel socket → engine → TUN): dispatch on the WG
@@ -30,7 +36,10 @@
 //!     the response; type 2 → `consume_response`; type 3 (cookie) →
 //!     drop+count (S7); type 4 (transport) → `try_decap` (the engine
 //!     AllowedIPs-gates the inner src) → write the plaintext inner IP to
-//!     the `wgN` TUN, where the kernel routes/firewalls it.
+//!     the `wgN` TUN, where the kernel routes it — ONLY on the steered
+//!     port's thread. Any other port's thread drops the authenticated
+//!     record and counts `rx_unsteered_transport_drops` (#9521), because
+//!     the kernel would forward that plaintext with no zone policy.
 //!   - **Egress** (TUN → engine → kernel socket): inner IP packets the
 //!     kernel routes onto `wgN` are read, `try_encap`'d, and sent to the
 //!     peer endpoint. The transit AF_XDP egress is the other encap site
@@ -121,6 +130,9 @@ pub(super) fn wg_control_loop(
     tunnel_endpoint_id: u16,
     engine: Arc<crate::afxdp::wg::WgEngine>,
     listen_port: u16,
+    // #9521: may a transport record's plaintext received on this socket be
+    // written to the TUN? Decided by the coordinator at spawn.
+    kernel_transport: crate::afxdp::types::WgKernelTransport,
     outer_mtu: usize,
     per_peer_outer_mtu: std::collections::HashMap<[u8; 32], usize>,
     // #7158: peers whose endpoint was authored as a DNS hostname, as
@@ -176,7 +188,7 @@ pub(super) fn wg_control_loop(
 
     // Attach to the persistent wgN TUN (Go pre-created it; open_tun
     // attaches to the existing device by name). Non-blocking.
-    let mut tun = match open_tun(&tunnel_name) {
+    let mut tun = match open_wg_tun(&tunnel_name) {
         Ok((file, _actual_name)) => file,
         Err(err) => {
             eprintln!(
@@ -225,10 +237,112 @@ pub(super) fn wg_control_loop(
         endpoint_resolver.as_ref(),
         &recent_exceptions,
         &stop,
+        kernel_transport,
     );
     // #1866 D3: clean stop-flag exit (teardown) — rare, one line.
     eprintln!("xpf-userspace-dp: WG control thread stopped tun={tunnel_name}");
     let _ = tunnel_endpoint_id;
+}
+
+/// #9521 test seam: pre-opened stand-ins for the wgN TUN, keyed by tunnel name.
+///
+/// A test cannot create a TUN device without CAP_NET_ADMIN, so a control thread
+/// spawned by the real coordinator path exits at `open_tun` — which left every
+/// hop between the spawn decision and the TUN write unobservable. A test that
+/// registers a stand-in here (a datagram socketpair keeps TUN packet boundaries)
+/// drives the whole path, spawn included. Compiled out of production builds.
+#[cfg(test)]
+pub(super) static TEST_WG_TUN_STANDINS: Mutex<Vec<(String, std::fs::File)>> = Mutex::new(Vec::new());
+
+fn open_wg_tun(tunnel_name: &str) -> Result<(std::fs::File, String), String> {
+    #[cfg(test)]
+    {
+        let mut standins = TEST_WG_TUN_STANDINS.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(pos) = standins.iter().position(|(name, _)| name == tunnel_name) {
+            let (name, file) = standins.remove(pos);
+            return Ok((file, name));
+        }
+    }
+    open_tun(tunnel_name)
+}
+
+/// #9521 test helper: a datagram socketpair standing in for the wgN TUN, as
+/// (thread end, test end). SOCK_DGRAM keeps packet boundaries the way a TUN
+/// does. Both ends are non-blocking: the production caller makes the real TUN
+/// non-blocking before the loop runs, and a blocking stand-in hangs the loop in
+/// its TUN read.
+#[cfg(test)]
+pub(super) fn tun_standin_pair_9521() -> (std::fs::File, std::fs::File) {
+    use std::os::fd::FromRawFd;
+    let mut fds = [0i32; 2];
+    let rc = unsafe {
+        libc::socketpair(libc::AF_UNIX, libc::SOCK_DGRAM | libc::SOCK_CLOEXEC, 0, fds.as_mut_ptr())
+    };
+    assert_eq!(rc, 0, "socketpair");
+    set_fd_nonblocking(fds[0]).expect("thread end non-blocking");
+    set_fd_nonblocking(fds[1]).expect("test end non-blocking");
+    unsafe { (std::fs::File::from_raw_fd(fds[0]), std::fs::File::from_raw_fd(fds[1])) }
+}
+
+/// #9521 test helper: register a stand-in for `tunnel_name` so a thread the
+/// coordinator spawns gets it instead of a real TUN; returns the test end.
+#[cfg(test)]
+pub(super) fn register_tun_standin_9521(tunnel_name: &str) -> std::fs::File {
+    let (thread_end, test_end) = tun_standin_pair_9521();
+    TEST_WG_TUN_STANDINS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .push((tunnel_name.to_string(), thread_end));
+    test_end
+}
+
+/// #9521 test helper: one datagram from a stand-in's test end, if any.
+#[cfg(test)]
+pub(super) fn tun_standin_recv_9521(test_end: &std::fs::File) -> Option<Vec<u8>> {
+    let mut buf = vec![0u8; 65_535];
+    let n = unsafe {
+        libc::recv(
+            test_end.as_raw_fd(),
+            buf.as_mut_ptr() as *mut libc::c_void,
+            buf.len(),
+            libc::MSG_DONTWAIT,
+        )
+    };
+    if n <= 0 {
+        return None;
+    }
+    buf.truncate(n as usize);
+    Some(buf)
+}
+
+/// #9521 test helper: an inner IPv4 UDP packet 10.95.21.7 -> 10.95.21.1.
+#[cfg(test)]
+pub(super) fn inner_v4_9521() -> Vec<u8> {
+    let mut p = vec![0u8; 28];
+    p[0] = 0x45;
+    p[2..4].copy_from_slice(&28u16.to_be_bytes());
+    p[8] = 64;
+    p[9] = 17;
+    p[12..16].copy_from_slice(&[10, 95, 21, 7]);
+    p[16..20].copy_from_slice(&[10, 95, 21, 1]);
+    p[24..26].copy_from_slice(&8u16.to_be_bytes());
+    p
+}
+
+/// #9521 test helper: an inner IPv6 UDP packet fd95:21::7 -> fd95:21::1.
+#[cfg(test)]
+pub(super) fn inner_v6_9521() -> Vec<u8> {
+    let mut p = vec![0u8; 48];
+    p[0] = 0x60;
+    p[4..6].copy_from_slice(&8u16.to_be_bytes());
+    p[6] = 17;
+    p[7] = 64;
+    let src: std::net::Ipv6Addr = "fd95:21::7".parse().unwrap();
+    let dst: std::net::Ipv6Addr = "fd95:21::1".parse().unwrap();
+    p[8..24].copy_from_slice(&src.octets());
+    p[24..40].copy_from_slice(&dst.octets());
+    p[44..46].copy_from_slice(&8u16.to_be_bytes());
+    p
 }
 
 /// The per-tunnel control loop proper, on pre-opened fds so the loop
@@ -246,6 +360,7 @@ fn run_wg_control_loop(
     endpoint_resolver: Option<&crate::afxdp::wg::endpoint_resolver::WgEndpointResolver>,
     recent_exceptions: &Arc<Mutex<ExceptionEventRing>>,
     stop: &AtomicBool,
+    kernel_transport: crate::afxdp::types::WgKernelTransport,
 ) {
     use std::collections::HashMap;
     // #1434 multi-peer: the control loop tracks PER-PEER state. The
@@ -342,6 +457,7 @@ fn run_wg_control_loop(
                         &mut encap_buf,
                         tunnel_name,
                         recent_exceptions,
+                        kernel_transport,
                     );
                     // #1434: learn THIS peer's endpoint from `from` (WG
                     // endpoint roaming is per-peer). Only the

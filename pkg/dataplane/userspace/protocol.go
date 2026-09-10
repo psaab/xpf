@@ -171,7 +171,27 @@ const (
 	// believes close state crosses. The session-sync messages are not snapshot
 	// structs, so the #8892 digest did not move; like v12, this bump is on the
 	// merits.
-	ProtocolVersion = 13
+	//
+	// v14 (issue 9521): `ConfigSnapshot.WgSteeredListenPort`, the ONE WireGuard
+	// listen port the shim steers, derived from the configuration. The helper
+	// reads it to decide which WireGuard control threads may write kernel-path
+	// transport plaintext to their wgN TUN: only the steered port's may, and
+	// every other port's is dropped, because the kernel would otherwise forward
+	// that plaintext with no zone policy.
+	//
+	// BUMPED, by the test the v10/v11 notes apply. An old helper ignores the
+	// field and keeps writing every port's plaintext to its TUN, and that IS the
+	// defect the field closes, so "is what it enforced before acceptable?" is
+	// no. The reverse pairing fails the other way: a new helper under an old
+	// daemon reads 0 and refuses kernel-path transport for every WireGuard
+	// endpoint, the steered one included. Exact equality refuses both.
+	//
+	// #9521 was written against v12 and claimed 13; #9412 landed v13 first for a
+	// different wire change. The v8 rule applies: the merged wire carries BOTH
+	// contracts, so it cannot reuse either branch's number — a v13 helper built
+	// from #9412 alone would accept this daemon's snapshots and ignore the field.
+	// 14 was never shipped by either side.
+	ProtocolVersion = 14
 
 	// MinProtocolMultiZoneScopedPolicy is the FIRST snapshot protocol version
 	// that can represent a multi-zone scoped global policy — the plural
@@ -395,6 +415,16 @@ type ConfigSnapshot struct {
 	Routes          []RouteSnapshot          `json:"routes,omitempty"`
 	Flow            FlowSnapshot             `json:"flow,omitempty"`
 	DefaultPolicy   string                   `json:"default_policy,omitempty"`
+	// WgSteeredListenPort (#9521) is the ONE WireGuard listen port the shim
+	// steers onto its AF_XDP WireGuard path: config.SteeredWireGuardListenPort,
+	// derived from the configuration rather than from TunnelEndpoints (which are
+	// intersected with the live interface rows), so it is the port the commit
+	// warning names even when that tunnel's netdev is absent. Two readers:
+	// snapshotWgListenPort programs the shim ctrl block from it, and the helper
+	// lets only this port's WireGuard control thread write kernel-path transport
+	// plaintext to its wgN TUN; every other port's is dropped, because the kernel
+	// would forward it with no zone policy. 0 = no WireGuard tunnel.
+	WgSteeredListenPort uint16 `json:"wg_steered_listen_port,omitempty"`
 	// DefaultLogSessionInit / DefaultLogSessionClose carry
 	// `security policies default-policy-log session-init|session-close` (#3534).
 	// They request RT_FLOW session logging for the IMPLICIT default-policy

@@ -51,12 +51,27 @@ full reconcile), plus a tombstone-only periodic liveness pass from
 Differences that matter (#1881):
 
 - WG threads restart when the engine Arc identity OR attachment
-  changes; GRE threads restart ONLY on attachment drift — endpoint
+  changes — and also on an underlay outer-MTU change (#2921) and when a
+  snapshot changes whether the thread may deliver kernel-path transport
+  plaintext (`kernel_transport_changed`, #9521); GRE threads restart ONLY
+  on attachment drift — endpoint
   content (destination/source/key, routes, CoS) reaches the live GRE
   loop through the shared `ha.runtime` ArcSwap (one
   `load_forwarding_if_changed` per loop iteration, the #1188 pattern —
   it compares the view's NESTED forwarding Arc, so a validation-only
   publish correctly reads as no change).
+- A WG thread whose listen port is not the snapshot's
+  `wg_steered_listen_port` DROPS a transport record that reaches its
+  socket through the kernel (counted as `rx_unsteered_transport_drops`)
+  instead of writing the plaintext to its wgN TUN (#9521). The shim claims
+  transport data for the steered port only, so those records never reach
+  the worker, and the TUN write handed them to the kernel's forwarding
+  path with no zone policy. The decision is `WgKernelTransport`, computed
+  once per spawn (`wg_kernel_transport_for_endpoint`) and fail-closed: a
+  snapshot naming no steered port delivers for no endpoint. The steered
+  port's thread keeps delivering, per #8274's stated residual. Tests reach a
+  spawned thread's packet path through the `#[cfg(test)]` TUN stand-in
+  registry in `wg_control/mod.rs` (a real TUN needs CAP_NET_ADMIN).
 - The GRE loop carries a rotation gate (`endpoint_attachment_valid`,
   `tunnel.rs`): on every forwarding-Arc rotation it re-validates that
   the loaded state still describes its TUN attachment (id present,

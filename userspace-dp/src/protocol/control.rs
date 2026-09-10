@@ -112,8 +112,14 @@ use super::snapshot::{ConfigSnapshot, FabricSnapshot, NeighborSnapshot, Userspac
 // not enough, because the old behaviour IS the defect: a v12 helper would never
 // announce a close and would import closing sessions on the established window.
 // Exact equality refuses that pairing. The #8892 digest did not move.
+// v14 (#9521): `ConfigSnapshot.wg_steered_listen_port`, the one WireGuard listen
+// port the shim steers. This process reads it to refuse writing any OTHER port's
+// kernel-path transport plaintext to its wgN TUN; an old helper ignores it and
+// keeps writing, which is the bypass the field closes. #9521 had claimed 13 and
+// #9412 landed it first, so this moves past both (the v8 rule). See protocol.go's
+// v14 note.
 // Keep the line below in this exact form: the Go lockstep guard parses it.
-pub(crate) const CONFIG_SNAPSHOT_PROTOCOL_VERSION: i32 = 13;
+pub(crate) const CONFIG_SNAPSHOT_PROTOCOL_VERSION: i32 = 14;
 
 /// #9344: the owner-RG session export paging contract this helper implements.
 ///
@@ -455,6 +461,9 @@ pub(crate) struct WgTunnelStatus {
     pub decap_drops_malformed_inner: u64,
     #[serde(rename = "decap_drops_buffer", default)]
     pub decap_drops_buffer: u64,
+    /// #9521: see `WgCounters::rx_unsteered_transport_drops`.
+    #[serde(rename = "rx_unsteered_transport_drops", default)]
+    pub rx_unsteered_transport_drops: u64,
     // --- transport encap ---
     #[serde(rename = "encap_packets", default)]
     pub encap_packets: u64,

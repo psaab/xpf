@@ -154,6 +154,9 @@ impl Coordinator {
                 decap_drops_allowed_ips: c.decap_drops_allowed_ips.load(Ordering::Relaxed),
                 decap_drops_malformed_inner: c.decap_drops_malformed_inner.load(Ordering::Relaxed),
                 decap_drops_buffer: c.decap_drops_buffer.load(Ordering::Relaxed),
+                rx_unsteered_transport_drops: c
+                    .rx_unsteered_transport_drops
+                    .load(Ordering::Relaxed),
                 encap_packets: c.encap_packets.load(Ordering::Relaxed),
                 encap_bytes: c.encap_bytes.load(Ordering::Relaxed),
                 encap_drops_no_session: c.encap_drops_no_session.load(Ordering::Relaxed),

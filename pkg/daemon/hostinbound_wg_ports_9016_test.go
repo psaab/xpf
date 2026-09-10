@@ -8,9 +8,14 @@ import (
 // #9016: the comment on emitHostInboundWireGuardAccept called the second port's
 // rule "a no-op at the kernel (nothing steers that port up)". It is not a
 // no-op — it is precisely what ADMITS that port's traffic to the host, where
-// the second tunnel's own bound socket decapsulates it. That misreading is what
+// the second tunnel's own bound socket receives it. That misreading is what
 // made a live path look inert, and it fed the pkg/config advisory's false
 // "dead tunnel" claim.
+//
+// #9521 changed what that socket does with a TRANSPORT record — the helper now
+// drops it rather than writing its plaintext to the wgN TUN — but not the need
+// for this rule: the unsteered tunnel's handshakes still arrive here, and a
+// passive handshake to a restricted zone would be dropped without the admit.
 //
 // This cell pins the behaviour the corrected comment asserts: EVERY configured
 // listen-port is admitted, not just the steered one.

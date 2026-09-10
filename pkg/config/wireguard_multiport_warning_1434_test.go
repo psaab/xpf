@@ -25,8 +25,11 @@ func wgSteeringWarnings(cfg *Config) []string {
 // (UserspaceCtrl.wg_listen_port, compared in wg_steer_to_kernel), fed by
 // snapshotWgListenPort, which returns the FIRST configured WireGuard endpoint's
 // port. A config with two WireGuard tunnels on DISTINCT listen ports commits
-// clean, but only the first port is ever programmed — the second tunnel never
-// receives inbound transport and is permanently, silently down.
+// clean, but only the first port is ever programmed. This comment used to add
+// that the second tunnel "never receives inbound transport and is permanently,
+// silently down". #9016 showed that was false — the port was live and its
+// plaintext was forwarded by the kernel — and #9521 made the helper drop that
+// transport instead; compiler_validate_wireguard_multiport.go has the mechanism.
 //
 // This asserts the commit now SAYS so, and says it precisely enough to act on:
 // exactly one advisory, naming BOTH ports, BOTH tunnels, which one survives,
@@ -68,7 +71,8 @@ func TestWireGuardDistinctListenPortsWarnsAtCommit_1434(t *testing.T) {
 	w := got[0]
 
 	// Both ports and both tunnel refs must appear — an advisory that names
-	// only the dead port leaves the operator guessing which tunnel is live.
+	// only the unsteered port leaves the operator guessing which tunnel is the
+	// adjudicated one.
 	for _, want := range []string{"51820", "51900", "wg0", "wg1", "#1434"} {
 		if !strings.Contains(w, want) {
 			t.Errorf("advisory does not mention %q: %s", want, w)

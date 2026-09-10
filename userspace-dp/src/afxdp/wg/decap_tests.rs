@@ -697,3 +697,30 @@ fn worker_decap_keepalive_clears_t7_and_roams_together_9018() {
          marked alive while its endpoint stayed stale"
     );
 }
+
+/// #9521 closes the CONTROL THREAD's kernel-path delivery for unsteered ports
+/// and must not reach this stage. The worker matches every configured listen
+/// port (`wg_endpoint_for_listen_port`), and which records reach it is decided
+/// by the shim, not by the steered scalar alone: a listener on an
+/// interface-mode source-NAT address is not `is_local_destination`, so its
+/// records are redirected to the worker whatever their port. Gating this stage
+/// on the steered port would black-hole those tunnels and close nothing, so a
+/// snapshot that steers some OTHER port must leave worker decap untouched.
+#[test]
+fn worker_decap_is_not_gated_by_the_steered_port_9521() {
+    let allowed: Vec<ipnet::IpNet> = vec!["10.123.0.0/24".parse().unwrap()];
+    let (init, resp, _init_pub, resp_pub) = established_pair(allowed.clone(), allowed);
+    let (mut forwarding, _id) = forwarding_with_engine(resp);
+    forwarding.wg_steered_listen_port = WG_PORT.wrapping_add(1);
+
+    let inner = inner_v4([10, 123, 0, 5], [10, 0, 61, 102]);
+    let mut wire = vec![0u8; 2048];
+    let enc = init.try_encap(&resp_pub, &inner, &mut wire).expect("initiator encap");
+    let frame = outer_frame(&wire[..enc.len], WG_PORT);
+    let meta = outer_meta(frame.len());
+    let scratch = WgWorkerScratch::new(4096);
+    let decapped = super::decap::try_wg_decap_from_frame(&frame, meta, &forwarding, &scratch)
+        .expect("worker decap must not depend on which port the shim's scalar steers");
+    assert_eq!(decapped.meta.ingress_zone, TEST_SFMIX_ZONE_ID);
+    assert_eq!(&decapped.frame[14..], &inner[..]);
+}

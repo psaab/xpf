@@ -535,6 +535,7 @@ fn wg_tunnel_status_carries_endpoint_resolver_counters_7936() {
             spawned_outer_mtu: 1420,
             spawned_per_peer_outer_mtu: std::collections::HashMap::new(),
             last_spawn_attempt_ns: 0,
+            spawned_kernel_transport: crate::afxdp::types::WgKernelTransport::Deliver,
             resolver_telemetry: Some(std::sync::Arc::clone(&telemetry)),
         },
     );

@@ -11,7 +11,7 @@ import (
 
 // steeredPortRe pulls the port the commit advisory tells the operator WILL be
 // programmed out of the warning text the operator actually reads.
-var steeredPortRe = regexp.MustCompile(`listen-port (\d+) \([^)]+\) IS steered`)
+var steeredPortRe = regexp.MustCompile(`listen-port (\d+) \(([^)]+)\) IS steered`)
 
 // TestWireGuardSteeringAdvisoryNamesTheProgrammedPort_1434 is the cross-package
 // parity binding for the #1434 commit advisory.
@@ -20,14 +20,20 @@ var steeredPortRe = regexp.MustCompile(`listen-port (\d+) \([^)]+\) IS steered`)
 // operator WHICH WireGuard listen port survives the dataplane's single steering
 // scalar. That claim is only worth anything if it agrees with the code that
 // actually fills the scalar — snapshotWgListenPort, whose value the shim
-// compares in wg_steer_to_kernel. Both derive their order from
-// config.EmitTunnelEndpointNames today, but they are different functions in
-// different packages: nothing structural stops one from being re-ordered.
+// compares when it decides whether the worker claims a record.
 //
 // So: compile a two-port config, read the port the ADVISORY names, build the
 // dataplane snapshot from the same config, and require snapshotWgListenPort to
 // return exactly that port. If they ever diverge the advisory becomes a
 // confident lie — worse than the silence it replaced — and this reds.
+//
+// #9521: this cell used to assemble the snapshot by hand, with a live interface
+// row fabricated for EVERY emitted endpoint. That is the one arrangement in
+// which the old reader and the advisory could not disagree, and the defect lived
+// in the arrangement it did not build: when the warned tunnel's netdev was
+// absent the reader promoted the next tunnel's port. It now uses the manager's
+// real builder and checks the programmed port with every netdev present, with
+// the warned tunnel's netdev absent, and with none present.
 func TestWireGuardSteeringAdvisoryNamesTheProgrammedPort_1434(t *testing.T) {
 	const (
 		keyA = "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
@@ -35,7 +41,7 @@ func TestWireGuardSteeringAdvisoryNamesTheProgrammedPort_1434(t *testing.T) {
 	)
 	// wg1 (higher port) authored first, wg0 (lower port) second — so a gate
 	// that reported authoring order instead of emitter order would name 51900,
-	// and the snapshot would program 51820. That mismatch is what this catches.
+	// and the dataplane would program 51820. That mismatch is what this catches.
 	lines := []string{
 		"set interfaces wg1 tunnel mode wireguard",
 		"set interfaces wg1 tunnel wireguard listen-port 51900",
@@ -82,26 +88,41 @@ func TestWireGuardSteeringAdvisoryNamesTheProgrammedPort_1434(t *testing.T) {
 	if convErr != nil {
 		t.Fatalf("steered port %q is not numeric: %v", m[1], convErr)
 	}
+	warnedRef := m[2]
 
-	// Build the snapshot the way the manager does: emitter refs become the
-	// live interface rows, then buildTunnelEndpointSnapshots + the same
-	// snapshotWgListenPort the ctrl-block writer calls.
-	emitted := config.EmitTunnelEndpointNames(cfg)
-	ifaces := make([]InterfaceSnapshot, 0, len(emitted))
-	for i, ep := range emitted {
-		ifaces = append(ifaces, InterfaceSnapshot{
-			Name:      ep.Name,
-			LinuxName: ep.Name,
-			Ifindex:   100 + i,
-		})
+	snap, err := buildSnapshot(cfg, config.UserspaceConfig{Workers: 1}, 1, 0)
+	if err != nil {
+		t.Fatalf("buildSnapshot: %v", err)
 	}
-	snap := &ConfigSnapshot{TunnelEndpoints: buildTunnelEndpointSnapshots(cfg, ifaces)}
-	programmed := snapshotWgListenPort(snap)
-	if programmed == 0 {
-		t.Fatalf("snapshot programmed no WireGuard port; endpoints: %+v", snap.TunnelEndpoints)
+
+	var allRows, withoutWarned []InterfaceSnapshot
+	for i, ep := range config.EmitTunnelEndpointNames(cfg) {
+		row := InterfaceSnapshot{Name: ep.Name, LinuxName: ep.Name, Ifindex: 100 + i}
+		allRows = append(allRows, row)
+		if ep.Name != warnedRef {
+			withoutWarned = append(withoutWarned, row)
+		}
 	}
-	if uint32(claimed) != programmed {
-		t.Fatalf("commit advisory claims listen-port %d is steered, but the dataplane programs %d — the advisory is wrong: %s",
-			claimed, programmed, advisory)
+	if len(allRows) != 2 || len(withoutWarned) != 1 {
+		t.Fatalf("fixture: want 2 emitted endpoints and exactly the warned one (%q) dropped, got %d and %d",
+			warnedRef, len(allRows), len(withoutWarned))
+	}
+	for _, tc := range []struct {
+		name string
+		rows []InterfaceSnapshot
+	}{
+		{"every tunnel netdev present", allRows},
+		{"the warned tunnel's netdev absent", withoutWarned},
+		{"no tunnel netdev present", nil},
+	} {
+		snap.TunnelEndpoints = buildTunnelEndpointSnapshots(cfg, tc.rows)
+		programmed := snapshotWgListenPort(snap)
+		if programmed == 0 {
+			t.Fatalf("%s: snapshot programmed no WireGuard port; endpoints: %+v", tc.name, snap.TunnelEndpoints)
+		}
+		if uint32(claimed) != programmed {
+			t.Fatalf("%s: commit advisory claims listen-port %d is steered, but the dataplane programs %d — "+
+				"the advisory is wrong: %s", tc.name, claimed, programmed, advisory)
+		}
 	}
 }

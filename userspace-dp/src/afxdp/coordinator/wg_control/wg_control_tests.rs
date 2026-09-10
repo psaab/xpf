@@ -220,6 +220,7 @@ fn spawn_poll_loop(
             None,
             &exceptions,
             &stop,
+            crate::afxdp::types::WgKernelTransport::Deliver,
         );
     })
 }
@@ -382,6 +383,7 @@ fn wg_tun_origin_egress_uses_per_peer_outer_mtu_5291() {
             None,
             &exceptions,
             &stop_thread,
+            crate::afxdp::types::WgKernelTransport::Deliver,
         );
     });
     std::thread::sleep(Duration::from_millis(120)); // reach the idle poll
@@ -1013,4 +1015,143 @@ fn keepalives_are_not_marked_7758() {
         "a keepalive has no inner packet, so its outer DS must stay 0; a non-zero \
          value means a send site grew a TOS copy it has no source for"
     );
+}
+
+// =======================================================================
+// #9521: an UNSTEERED listen port's kernel-path transport plaintext is
+// dropped, not written to the wgN TUN.
+// =======================================================================
+
+struct LoopObservation9521 {
+    delivered: Option<Vec<u8>>,
+    unsteered_drops: u64,
+    decap_packets: u64,
+}
+
+/// Run the real control loop with `kernel_transport`, send it ONE authenticated
+/// transport record over IPv4 or IPv6, and report what happened to it.
+fn observe_one_record_9521(
+    kernel_transport: crate::afxdp::types::WgKernelTransport,
+    outer_v6: bool,
+    inner: &[u8],
+) -> LoopObservation9521 {
+    use std::sync::atomic::Ordering;
+    let allowed: Vec<ipnet::IpNet> =
+        vec!["10.95.21.0/24".parse().unwrap(), "fd95:21::/64".parse().unwrap()];
+    let (init, resp, _init_pub, resp_pub) =
+        crate::afxdp::wg::tests::established_pair(allowed.clone(), allowed);
+    let resp = std::sync::Arc::new(resp);
+    let loopback = if outer_v6 { "[::1]:0" } else { "127.0.0.1:0" };
+    let socket = UdpSocket::bind(loopback).expect("bind the control socket");
+    socket.set_nonblocking(true).unwrap();
+    let dst = socket.local_addr().unwrap();
+    let (tun, tun_test_end) = super::tun_standin_pair_9521();
+    let exceptions = std::sync::Arc::new(Mutex::new(ExceptionEventRing::new()));
+    let stop = std::sync::Arc::new(AtomicBool::new(false));
+    let (engine_t, stop_t, exc_t) = (resp.clone(), stop.clone(), exceptions.clone());
+    let handle = std::thread::spawn(move || {
+        run_wg_control_loop(
+            "wg-test-9521",
+            &engine_t,
+            &socket,
+            outer_v6,
+            tun,
+            WG_DEFAULT_OUTER_MTU,
+            &std::collections::HashMap::new(),
+            None,
+            &exc_t,
+            &stop_t,
+            kernel_transport,
+        );
+    });
+
+    let mut wire = vec![0u8; 2048];
+    let enc = init.try_encap(&resp_pub, inner, &mut wire).expect("initiator encap");
+    let sender = UdpSocket::bind(loopback).unwrap();
+    sender.send_to(&wire[..enc.len], dst).unwrap();
+
+    // Wait until the record is ACCOUNTED FOR one way or the other. Silence alone
+    // is not an observation: a record that never arrived also writes nothing.
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let mut delivered = None;
+    while std::time::Instant::now() < deadline {
+        if let Some(bytes) = super::tun_standin_recv_9521(&tun_test_end) {
+            delivered = Some(bytes);
+            break;
+        }
+        if resp.counters().rx_unsteered_transport_drops.load(Ordering::Relaxed) > 0 {
+            // A write racing the counter would land here.
+            std::thread::sleep(Duration::from_millis(50));
+            delivered = super::tun_standin_recv_9521(&tun_test_end);
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    stop.store(true, Ordering::Relaxed);
+    handle.join().expect("control loop thread");
+    LoopObservation9521 {
+        delivered,
+        unsteered_drops: resp.counters().rx_unsteered_transport_drops.load(Ordering::Relaxed),
+        decap_packets: resp.counters().decap_packets.load(Ordering::Relaxed),
+    }
+}
+
+/// #9521: the control thread is where an unsteered port's plaintext left the
+/// dataplane. The shim claims transport data for one listen port only, so a
+/// record for any other port reaches this socket on every path, and the loop
+/// used to decrypt it straight onto the wgN TUN for the kernel to forward with
+/// no zone policy. Now it authenticates the record and drops the plaintext.
+///
+/// Both outer families, because the socket is dual-stack and a v4-only cell
+/// would say nothing about the v6 path an operator's peers may use. The steered
+/// run is the positive control in each family: the same record through the same
+/// loop DOES reach the TUN, so the unsteered run's silence is the gate and not
+/// a broken fixture — and the drop counter plus `decap_packets` prove the record
+/// arrived and authenticated before it was dropped.
+#[test]
+fn unsteered_port_kernel_transport_is_dropped_not_written_9521() {
+    use crate::afxdp::types::WgKernelTransport;
+    for (outer_v6, inner) in [(false, super::inner_v4_9521()), (true, super::inner_v6_9521())] {
+        let family = if outer_v6 { "IPv6" } else { "IPv4" };
+
+        let steered = observe_one_record_9521(WgKernelTransport::Deliver, outer_v6, &inner);
+        assert_eq!(
+            steered.delivered.as_deref(),
+            Some(&inner[..]),
+            "{family}: the STEERED port's control thread must still deliver kernel-path \
+             transport plaintext — #8274 kept that path for ingress the shim does not cover"
+        );
+        assert_eq!(steered.unsteered_drops, 0, "{family}: the steered port counted an unsteered drop");
+
+        let unsteered = observe_one_record_9521(WgKernelTransport::DropUnsteered, outer_v6, &inner);
+        assert_eq!(
+            unsteered.decap_packets, 1,
+            "{family}: the unsteered record never authenticated, so this run observed nothing"
+        );
+        assert_eq!(
+            unsteered.unsteered_drops, 1,
+            "{family}: an authenticated record on an unsteered port must be counted as an \
+             unsteered-port drop"
+        );
+        assert!(
+            unsteered.delivered.is_none(),
+            "{family}: an UNSTEERED port's plaintext reached the wgN TUN, where the kernel \
+             forwards it with no zone policy (#9521): {:?}",
+            unsteered.delivered
+        );
+    }
+}
+
+/// #9521: a snapshot that names no steered port delivers for NO endpoint.
+#[test]
+fn kernel_transport_decision_fails_closed_9521() {
+    use crate::afxdp::types::WgKernelTransport;
+    assert_eq!(WgKernelTransport::for_listen_port(51820, 51820), WgKernelTransport::Deliver);
+    assert_eq!(WgKernelTransport::for_listen_port(51821, 51820), WgKernelTransport::DropUnsteered);
+    assert_eq!(
+        WgKernelTransport::for_listen_port(51820, 0),
+        WgKernelTransport::DropUnsteered,
+        "no steered port named must fail closed, not deliver for every port"
+    );
+    assert_eq!(WgKernelTransport::for_listen_port(0, 0), WgKernelTransport::DropUnsteered);
 }

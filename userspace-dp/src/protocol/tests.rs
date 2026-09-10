@@ -2522,6 +2522,7 @@ fn process_status_wg_tunnels_roundtrip_and_compat() {
         decap_drops_allowed_ips: 23,
         decap_drops_malformed_inner: 24,
         decap_drops_buffer: 25,
+        rx_unsteered_transport_drops: 55,
         encap_packets: 26,
         encap_bytes: 27,
         encap_drops_no_session: 28,
@@ -2607,6 +2608,7 @@ fn process_status_wg_tunnels_roundtrip_and_compat() {
     );
     assert_eq!(b.hs_initiations_created, 1);
     assert_eq!(b.decap_drops_buffer, 25);
+    assert_eq!(b.rx_unsteered_transport_drops, 55);
     assert_eq!(b.tun_rx_drops_no_endpoint, 35);
     assert_eq!(b.encap_drops_expired, 36);
     assert_eq!(b.decap_drops_expired, 37);
@@ -3063,4 +3065,27 @@ fn process_status_session_delete_replica_counters_roundtrip_8586() {
         serde_json::from_value(legacy_value).expect("pre-#8586 payload decodes");
     assert_eq!(legacy.session_delete_replica_dropped, 0);
     assert_eq!(legacy.session_delete_replica_drop_repaired, 0);
+}
+
+/// #9521: the Go daemon sends `ConfigSnapshot.WgSteeredListenPort` as
+/// `wg_steered_listen_port` (pinned Go-side by
+/// TestSnapshotWgSteeredListenPortWireKey9521). A misspelling on either side
+/// decodes as 0, and 0 makes every WireGuard control thread refuse kernel-path
+/// transport, so the key is pinned from both sides.
+#[test]
+fn wg_steered_listen_port_wire_key_9521() {
+    let mut value =
+        serde_json::to_value(ConfigSnapshot::default()).expect("serialize a default snapshot");
+    value["wg_steered_listen_port"] = serde_json::json!(51820);
+    let snap: ConfigSnapshot = serde_json::from_value(value.clone()).expect("decode with the key");
+    assert_eq!(snap.wg_steered_listen_port, 51820);
+    value
+        .as_object_mut()
+        .expect("snapshot serializes as an object")
+        .remove("wg_steered_listen_port");
+    let absent: ConfigSnapshot = serde_json::from_value(value).expect("decode without the key");
+    assert_eq!(
+        absent.wg_steered_listen_port, 0,
+        "a daemon that omits the key must decode to 0, which fails closed"
+    );
 }

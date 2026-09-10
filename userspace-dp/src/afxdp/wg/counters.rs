@@ -146,6 +146,12 @@ pub(crate) struct WgCounters {
     /// peeled off into `decap_keepalives` above.
     pub(crate) decap_drops_malformed_inner: AtomicU64,
     pub(crate) decap_drops_buffer: AtomicU64,
+    /// #9521: authenticated TRANSPORT records that reached an UNSTEERED listen
+    /// port's control-thread socket and were dropped instead of being written
+    /// to the wgN TUN, where the kernel would have forwarded their plaintext
+    /// with no zone policy. Counted after authentication, so an unauthenticated
+    /// sender cannot move it.
+    pub(crate) rx_unsteered_transport_drops: AtomicU64,
 
     // --- transport encap (egress) ---
     pub(crate) encap_packets: AtomicU64,
