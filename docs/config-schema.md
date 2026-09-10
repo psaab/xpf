@@ -1886,7 +1886,7 @@ empty-prefix rule-set vs a live source-NAT owner). The canonical key means two
 rule-sets naming one pool under the SAME /96 in different valid spellings —
 `64:ff9b::/96` vs `0064:ff9b:0:0:0:0:0:0/96` vs a leading-zero `64:ff9b::/096`
 (which `validateNAT64PrefixStrict` and Rust's numeric mask parse both accept, but
-a raw `netip.ParsePrefix` rejects) — are ONE runtime allocator, so keying on raw
+a raw `netip.ParsePrefix` rejects) — are the same prefix to the dataplane (its first-match selection shadows the second rule-set, #9555), so keying on raw
 text would FALSELY reject them. Each owner's members (`pool.Address` +
 `pool.Addresses`, ranges already expanded to /32s) become family-scoped numeric
 intervals — v4 vs v6 bucketed by the colon-strict textual family
@@ -1904,6 +1904,24 @@ the standby lenient-load the vulnerable independent allocators — the same
 divergent-commit fail-open #5876 closes for the other source-NAT gates. Run
 strict there (`lenient=false`), it rejects the node1-only overlap at a node0
 commit.
+
+**A second NAT64 rule-set under the same /96 is UNREACHABLE (#9555).** The
+dataplane resolves a NAT64 destination to the FIRST built rule-set, in
+configuration order, whose prefix matches (`Nat64State::match_ipv6_dest`), and the
+HA standby reserve narrows the same way. A later rule-set under the same canonical
+prefix never translates, and its source pool is never used. Before #9555, Go
+modelled NAT64 owners as independent `(prefix, pool name)` pairs, and that
+disagreed with the dataplane in both directions. It REJECTED two
+differently-named pools with identical addresses as a double-mint, although
+only the first can mint. It ACCEPTED two same-prefix rule-sets with disjoint
+pools SILENTLY. Now a shadowed rule-set is not an allocator owner
+(`nat64ShadowedRuleSets`), and every commit warns that it is UNREACHABLE.
+"Earlier" is CONFIG order, not the name order the owner loop sorts by: choosing by
+name would drop the reachable rule-set from the owner set and accept a real
+collision. An earlier rule-set shadows only when the dataplane definitely builds
+it (a parseable prefix address, and every pool member passing `parse_pool_v4`);
+a rule-set the dataplane skips shadows nothing. The Rust premise is pinned in
+`nat64_selects_the_first_built_rule_set_for_a_shared_prefix_9555`.
 
 **The source-NAT owner/key agreement is ENFORCED, not asserted (#9428).** The
 gate's soundness depends on its owner enumeration (one owner per referenced pool

@@ -7300,3 +7300,54 @@ fn embedded_v4_to_v6_fragment_header_shortens_rather_than_drops_9129() {
         "the identification survives the shortening"
     );
 }
+
+/// #9555 PREMISE for the Go #5144 NAT64 owner model (`nat64ShadowedRuleSets`).
+///
+/// Go now treats a later NAT64 rule-set under the same /96 as unreachable and not
+/// an allocator owner. That is sound ONLY while the dataplane (1) selects the FIRST
+/// built rule-set in SNAPSHOT order and (2) skips a rule-set whole when a pool
+/// member fails `parse_pool_v4`, so a skipped rule-set shadows nothing. If either
+/// changes, the Go gate's reasoning is stale, and this is where that shows up.
+#[test]
+fn nat64_selects_the_first_built_rule_set_for_a_shared_prefix_9555() {
+    let first = NAT64RuleSnapshot {
+        name: "Z".to_string(),
+        prefix: "64:ff9b::/96".to_string(),
+        pool_addresses: vec!["100.64.0.7".to_string()],
+        no_v6_frag_header: false,
+        ..Default::default()
+    };
+    let second = NAT64RuleSnapshot {
+        name: "A".to_string(),
+        pool_addresses: vec!["100.64.0.8".to_string()],
+        ..first.clone()
+    };
+    let dst: std::net::Ipv6Addr = "64:ff9b::808:808".parse().unwrap();
+
+    let state = Nat64State::from_snapshots(&[first.clone(), second.clone()]);
+    assert_eq!(state.prefixes.len(), 2, "both same-prefix rule-sets are built");
+    let (idx, _) = state.match_ipv6_dest(dst).expect("the shared prefix matches");
+    assert_eq!(
+        state.prefixes[idx].pool_v4,
+        vec![std::net::Ipv4Addr::new(100, 64, 0, 7)],
+        "#9555 premise (1): the FIRST rule-set in snapshot order is selected -- not the one \
+         that sorts first by name (\"A\")"
+    );
+
+    let skipped = NAT64RuleSnapshot {
+        pool_addresses: vec!["100.65.0.0/24".to_string()],
+        ..first
+    };
+    let state2 = Nat64State::from_snapshots(&[skipped, second]);
+    assert_eq!(
+        state2.prefixes.len(),
+        1,
+        "#9555 premise (2): a rule-set with a non-host pool member is skipped WHOLE (#3888)"
+    );
+    let (idx2, _) = state2.match_ipv6_dest(dst).expect("the later rule-set now matches");
+    assert_eq!(
+        state2.prefixes[idx2].pool_v4,
+        vec![std::net::Ipv4Addr::new(100, 64, 0, 8)],
+        "#9555 premise (2): a skipped earlier rule-set shadows nothing"
+    );
+}

@@ -240,8 +240,12 @@ func TestNAT5144CrossFamilyNoOverlapAccepted(t *testing.T) {
 }
 
 // TestNAT5144NAT64SamePrefixSamePoolAccepted: two NAT64 rule-sets sharing the
-// SAME (prefix, pool) resolve to one allocator (deduped), so they must not
-// false-positive.
+// SAME (prefix, pool) must not false-positive. #9555 corrected the reason: they do
+// NOT resolve to one allocator. Measured, Rust builds one per rule-set on first
+// apply, and both can mint the same tuple. But the dataplane selects the FIRST
+// rule-set by prefix, so the second never mints; it is not an owner and cannot
+// collide. The verdict stands, and the config now also carries an UNREACHABLE
+// warning (#9555).
 func TestNAT5144NAT64SamePrefixSamePoolAccepted(t *testing.T) {
 	cmds := []string{
 		"set security nat source pool P address 100.64.0.7/32",
@@ -267,9 +271,10 @@ func TestNAT5144UnreferencedOverlapAccepted(t *testing.T) {
 // --- MEDIUM (#6414 fold): NAT64 prefix keyed on CANONICAL bytes, not raw text ---
 
 // TestNAT5144NAT64EquivalentPrefixSpellingAccepted: two NAT64 rule-sets naming
-// the SAME pool under the SAME /96 prefix in DIFFERENT valid spellings resolve to
-// ONE runtime allocator (the Rust nat64.rs canonical-bytes first-match), so they
-// must NOT false-positive. Before the canonical-key fix the raw-text key treated
+// the SAME pool under the SAME /96 prefix in DIFFERENT valid spellings must NOT
+// false-positive: to the dataplane they are the same prefix, and its first-match
+// selection makes the second rule-set unreachable (#9555 -- not "ONE runtime
+// allocator": Rust builds one per rule-set, and only the first is ever selected). Before the canonical-key fix the raw-text key treated
 // the two spellings as two owners with identical members → wrongly rejected.
 func TestNAT5144NAT64EquivalentPrefixSpellingAccepted(t *testing.T) {
 	cmds := []string{
@@ -286,7 +291,8 @@ func TestNAT5144NAT64EquivalentPrefixSpellingAccepted(t *testing.T) {
 
 // TestNAT5144NAT64LeadingZeroMaskSpellingAccepted: `/96` and `/096` (leading-zero
 // mask, accepted by validateNAT64PrefixStrict and Rust's numeric parse) on the
-// SAME pool are ONE allocator. The owner key normalizes the mask so they dedup —
+// SAME pool are the same prefix, so the second is shadowed (#9555; not literally
+// "ONE allocator"). The owner key normalizes the mask so they dedup —
 // keying via a raw netip.ParsePrefix (which rejects `/096`) would split them into
 // two owners and false-reject.
 func TestNAT5144NAT64LeadingZeroMaskSpellingAccepted(t *testing.T) {
