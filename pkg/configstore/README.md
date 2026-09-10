@@ -254,6 +254,29 @@ inline archive-site passwords).
   the `grpc.MaxRecvMsgSize` / `http.MaxBytesReader` transport caps for the
   HA peer-sync path and any non-transport caller. Real configs are well
   under 1 MiB, so the ceiling never rejects a legitimate config.
+
+  **The same ceiling bounds every artifact the store WRITES (#9617).** The
+  bullet above is an INPUT bound, and a config that passes it can still
+  serialize past 16 MiB: a JSON tree is many times its config text (18x for
+  a run of small `groups` stanzas). Every tree and record the store persists
+  is read back under `ReadBoundedFile(path, MaxConfigSize)` — `active.json`
+  at `Load`, `rollback.N.json`, `candidate.json`, and `confirm.json` at boot
+  recovery — and before #9617 no writer checked. An accepted commit could
+  therefore write an `active.json` the next `Load` refuses
+  (`ErrConfigDBUnreadable`: the daemon does not come back), and a successful
+  `commit confirmed` could write a `confirm.json` the next boot refuses (the
+  rollback window silently lost). `writeTreeMarked` and `WriteConfirm` (via
+  `encodeConfirm`) now refuse bytes over the ceiling with
+  `ErrPersistExceedsReadCeiling`, using the reader's exact boundary
+  (`len > max`, pinned by `TestPersistSizeGateMatchesReaderBoundary_9617`).
+  The check runs on the envelope-wrapped, possibly-encrypted bytes — exactly
+  what the reader counts — and BEFORE the write, so the file on disk stays the
+  previous readable generation. `Commit` and `CommitConfirmed` fail
+  pre-promotion with the candidate intact. The degrade-not-fail writers (HA
+  `SyncApply`, confirm recovery, the persist retry loop) record the refusal as
+  `persistDegraded` exactly as they record any other failed write, because
+  their in-memory apply is the safety property; the retry cannot succeed until
+  a smaller config is applied, and its warning carries the refusal text.
 - `DB` — `db.go`. Low-level durable file I/O (via `pkg/fsatomic`).
   `NewDB` sweeps crash-leaked `.*.tmp-*` temps from `.configdb`.
 - `History` — `history.go`. Bounded ring of recent commits.
@@ -764,6 +787,18 @@ per-path:
   `pkg/daemon/README.md`, "The recovered commit-confirmed rollback fires against
   a HALF-BUILT daemon (#6739)". The startup-readiness gate that would move the
   dispatch point is work item G, held in #7675 with H and H2.
+- **A commit-confirmed record the next boot would refuse is never written
+  (#9617).** The active DB's size does not bound its confirm record:
+  `confirm.json` nests the rollback target one indentation level deeper than
+  `active.json` (`MarshalIndent`, two bytes per line), so a readable active DB
+  can have an unreadable record, and the record is written only after
+  promotion. `commitConfirmedLocked` therefore encodes the exact record it will
+  write — the same rollback target, the same deadline (hoisted above the
+  preflight), the guarded hash of the tree about to become active — through
+  the same `encodeConfirm` the write uses, BEFORE `writeActive`, and refuses
+  the commit with the candidate intact if the record would exceed
+  `MaxConfigSize`. Only the size refusal rejects; any other encode failure
+  keeps the #9014 degraded arm path.
 - **A degenerate `confirm.json` is rejected, never treated as a valid
   pending confirm (#5637, codex-review-181 M29).** `ReadConfirm` now
   validates the record's shape and fields, mirroring the #5474

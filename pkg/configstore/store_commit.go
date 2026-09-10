@@ -488,6 +488,34 @@ func (s *Store) commitConfirmedLocked(minutes int) (*config.Config, error) {
 	// (promote, arm the timer, return compiled) and flag degraded
 	// durability, rather than report REJECTED while a restart would activate
 	// C. Rationale (converge-to-C over restore-A) is in CommitWithDescription.
+	// #9617: preflight the commit-confirmed RECORD before anything is
+	// promoted. confirm.json nests the rollback target one indentation level
+	// deeper than active.json (MarshalIndent adds two bytes per line), so a
+	// readable active DB does not bound its own confirm record, and the record
+	// is only written after promotion (writeConfirmState below). Without this, a
+	// record ReadConfirm will refuse is reported as an armed, crash-surviving
+	// window, and a restart inside it keeps the unconfirmed config with no
+	// timer. The record encoded here is the one writeConfirmState writes: the
+	// same rollback target, the same deadline (hoisted for exactly this reason)
+	// and the guarded hash of the tree about to become active; the encrypted
+	// length is a function of the plaintext length. Only the size refusal
+	// rejects the commit. Any other encode failure keeps the #9014 degraded
+	// arm path it has today.
+	deadline := time.Now().Add(time.Duration(minutes) * time.Minute)
+	if s.db != nil {
+		prevTree, prevFirst := s.active, !everCommittedOnEntry
+		if s.confirmTimer != nil {
+			prevTree, prevFirst = s.confirmPrevTree, s.confirmPrevFirst
+		}
+		if _, err := s.db.encodeConfirm(&confirmRecord{
+			Deadline:    deadline,
+			PrevTree:    prevTree,
+			FirstCommit: prevFirst,
+			GuardedHash: guardedConfigHash(s.candidate),
+		}); errors.Is(err, ErrPersistExceedsReadCeiling) {
+			return nil, fmt.Errorf("commit confirmed failed: the rollback record would not survive a restart: %w", err)
+		}
+	}
 	if err := s.writeActive(s.candidate); err != nil {
 		if !isPostRenameDurabilityFailure(err) {
 			return nil, fmt.Errorf("commit confirmed failed: persist active config: %w", err)
@@ -586,7 +614,6 @@ func (s *Store) commitConfirmedLocked(minutes int) (*config.Config, error) {
 	// performAutoRollback.
 	s.confirmGen++
 	gen := s.confirmGen
-	deadline := time.Now().Add(time.Duration(minutes) * time.Minute)
 	s.confirmTimer = time.AfterFunc(time.Duration(minutes)*time.Minute, func() {
 		s.fireConfirmTimer(gen)
 	})
