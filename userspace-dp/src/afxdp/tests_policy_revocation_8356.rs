@@ -235,6 +235,60 @@ fn drive_one_packet_with_action(
     }
 }
 
+/// #9513 case iv: a fixture with NO route to the driven destination at all, so
+/// the poll path's re-resolution cannot supply an egress ifindex.
+///
+/// `forwarding_with_lan_rule` adds a `198.51.100.0/24` route via `st0.0`, which
+/// is exactly why the cell that thought it was testing an unresolvable egress was
+/// not. This one REMOVES that route, which is the difference between "resolves to
+/// an unzoned interface" (cases i-iii) and "does not resolve" (case iv).
+fn drive_one_packet_no_route_9513() -> Outcome {
+    let mut snapshot = policy_deny_snapshot();
+    snapshot.generation = 7;
+    snapshot.fib_generation = 9;
+    // No `st0.0`, no `198.51.100.0/24` route, and no `lan -> wan` permit — so if
+    // the derivation were reached it would revoke, which is what makes the
+    // `revoked == 0` assertion meaningful rather than incidental.
+    let forwarding = build_forwarding_state(&snapshot);
+    let dst = Ipv4Addr::new(198, 51, 100, 77);
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, LAN_IFINDEX, 0);
+    binding.interface = Arc::<str>::from("reth1.0");
+    let ha_state = txn_ha_state();
+    let mut sessions = SessionTable::new();
+    assert!(
+        sessions.install_with_protocol_with_origin(
+            flow_key_to(dst),
+            // Installed with NO egress ifindex, the shape `upsert_synced` leaves
+            // on a peer-synced import for an inactive RG.
+            decision(0),
+            metadata(false),
+            SessionOrigin::ForwardFlow,
+            122_000_000_000,
+            PROTO_TCP,
+            0,
+        ),
+        "the fixture must install the session, or the assertion is vacuous"
+    );
+    let frame = build_txn_tcp_syn_frame_v4(SRC, dst, SPORT, DPORT, TCP_ACK);
+    let meta = txn_meta_v4(LAN_IFINDEX as u32, TCP_ACK, frame.len() as u16);
+    let (_batch, dbg) = txn_run_descriptor(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &frame,
+        meta,
+    );
+    assert_eq!(
+        dbg.session_hit, 1,
+        "the packet must HIT the session, or the revoke assertion is vacuous"
+    );
+    Outcome {
+        sessions,
+        revoked: dbg.policy_revoked_sessions,
+    }
+}
+
 fn session_count(sessions: &SessionTable) -> usize {
     let mut n = 0;
     sessions.iter_with_origin(|_k, _d, _m, _o| n += 1);
@@ -388,35 +442,82 @@ fn an_explicit_deny_rule_revokes_the_established_session_9381() {
     assert_eq!(session_count(&out.sessions), 0);
 }
 
-/// An egress that does not resolve to a zone yields the sentinel 0, against
-/// which policy matches no rule and the flow falls to `default_policy: deny`.
-/// That is a LOOKUP FAILURE, not a verdict.
+/// #9513 RE-ANCHORED, and the rename is the point: this cell never tested an
+/// unresolvable egress. It was called
+/// `an_unresolvable_egress_declines_rather_than_denying_8356` and its comment
+/// said "198.51.100.77 ... has no route, so the egress genuinely does not
+/// resolve". MEASURED at this base, through the same helper the poll path uses:
 ///
-/// It is a REACHABLE state, not a hypothetical: a peer-synced import for an
-/// INACTIVE redundancy group keeps its incoming `NoRoute` / `egress_ifindex ==
-/// 0` resolution, because `session_glue/commands/upsert_synced.rs` overwrites
-/// the resolution only when the re-resolved disposition is not `HAInactive`.
-/// Treating it as a deny would revoke exactly the standby population this
-/// feature protects, at the moment of promotion — a mass teardown at failover,
-/// which is the outcome #7323 chose option B to avoid.
+/// ```text
+/// re-resolve 198.51.100.77: disposition=ForwardCandidate egress_ifindex=77
+///                           -> egress_zone_id=0
+/// ```
+///
+/// The egress resolves perfectly well, to `st0.0` (ifindex 77), because the
+/// fixture adds a `198.51.100.0/24` route through it. What is zero is the ZONE,
+/// and it is zero because the fixture leaves `egress_zone` at its `Default` of
+/// `""` — NOT because the interface is MAC-less, which is what both this cell's
+/// comment and the arm's comment claimed. `ifindex_to_zone_id[77]` is `Some(wan)`
+/// while `egress_zone_id(77)` is 0, which is exactly the split.
+///
+/// That `(zone: "wan", egress_zone: "")` pair is a REAL production state — what a
+/// contested ifindex produces under `stampEgressZones` rule 1 / #7509 — so the
+/// cell is not vacuous and is not deleted. It is renamed to say what it
+/// exercises, and its expectation is INVERTED, because #9513 is precisely the
+/// decision that this state must be re-judged rather than skipped: new flows out
+/// of an unzoned egress already fall to the default policy.
+///
+/// The two contradictory comments in the tree are also settled by that
+/// measurement. The ARM said "the established-hit arm never sees an unresolved
+/// decision, because the poll path re-resolves it"; the CELL said "the egress
+/// genuinely does not resolve". The arm was right.
 #[test]
-fn an_unresolvable_egress_declines_rather_than_denying_8356() {
-    // 198.51.100.77 is outside every connected subnet in the fixture and has
-    // no route, so the egress genuinely does not resolve — the poll path
-    // RE-RESOLVES a session's decision on a hit, so an entry merely INSTALLED
-    // with `egress_ifindex: 0` is not enough to reach this state.
+fn an_unzoned_egress_is_re_judged_rather_than_skipped_9513() {
     let out = drive_one_packet_to(false, false, MACLESS_IFINDEX, Ipv4Addr::new(198, 51, 100, 77));
     assert_eq!(
+        out.revoked, 1,
+        "the egress RESOLVES (to st0.0) but the box puts it in no zone, so a new \
+         flow through it would fall to `default_policy: deny`. An established one \
+         must be judged the same way. 0 here is the #9513 defect: a de-zoned \
+         egress keeps carrying live sessions indefinitely while new ones are \
+         denied (#9513)"
+    );
+    assert_eq!(
+        session_count(&out.sessions),
+        0,
+        "the session through the unzoned egress must be torn down"
+    );
+}
+
+/// THE CONTROL THAT KEEPS #9513 FROM BEING A MASS TEARDOWN, and the case the old
+/// blanket arm was actually protecting: a genuine LOOKUP FAILURE — no egress
+/// ifindex at all.
+///
+/// This is the state `tests_policy_revocation_8356`'s own fixture comment names:
+/// "a peer-synced import for an INACTIVE redundancy group keeps `NoRoute`/0",
+/// because `upsert_synced` overwrites the resolution only when the re-resolved
+/// disposition is not `HAInactive`. Revoking there would tear down the entire
+/// standby population at the moment of promotion — the mass-teardown-at-failover
+/// #7323 chose option B to avoid.
+///
+/// It is driven with a destination the fixture has NO route to at all, so the
+/// re-resolution cannot rescue an ifindex the way it does for the cell above.
+/// Deleting the `egress_ifindex == 0` half of the #9513 split reds this and
+/// nothing else.
+#[test]
+fn an_egress_that_does_not_resolve_at_all_still_declines_9513() {
+    let out = drive_one_packet_no_route_9513();
+    assert_eq!(
         out.revoked, 0,
-        "an egress that resolves to no zone must DECLINE, not deny. Note this \
-         fixture does NOT permit the flow — so a re-derivation that treated the \
-         unknown-zone sentinel as a verdict would revoke here, and that is \
-         exactly the mass-teardown-at-failover this asserts against (#8356)"
+        "there is no egress ifindex at all, which is a LOOKUP FAILURE and not a \
+         verdict. #9513 re-judges an UNZONED egress; it must not re-judge an \
+         UNRESOLVED one, or every peer-synced import on an inactive RG is torn \
+         down at promotion (#9513)"
     );
     assert_eq!(
         session_count(&out.sessions),
         1,
-        "the session must survive an egress the node cannot yet resolve"
+        "the unresolved-egress session must survive"
     );
 }
 
@@ -1408,30 +1509,88 @@ fn an_unmoved_interface_in_an_unpermitted_zone_revokes_9384() {
     assert_eq!(session_count(&out.sessions), 0);
 }
 
-/// THE RESIDUAL, pinned as a DECISION rather than left to be discovered. An
-/// interface moved out of EVERY zone resolves to the unknown-zone sentinel 0, and
-/// the pre-existing `from_id == 0` arm DECLINES rather than revoking.
+/// #9513 RE-ANCHORED — and this cell did the job it was written for. #9384 landed
+/// it as an explicit CHANGE DETECTOR pinning a residual: an interface moved out
+/// of EVERY zone DECLINED rather than revoking, because the arm treated a zero
+/// zone as a lookup failure. Its doc said "a future change to it is deliberate
+/// and visible". #9513 is that change, and this is the cell that made it visible.
 ///
-/// That arm exists because a zone lookup failure is not a verdict, and revoking
-/// on one is the mass-teardown risk (#6722's MAC-less egress is the reachable
-/// case). An ingress in no zone is also not an ordinary configuration. This cell
-/// is a CHANGE DETECTOR, not a defect guard: it states what the tree does today
-/// so that a future change to it is deliberate and visible.
+/// The #9384 rationale it recorded is now RETRACTED as too pessimistic, and the
+/// retraction is scoped to the half that was wrong. It claimed closing the
+/// residual "would mean distinguishing 'this interface is deliberately unzoned'
+/// from 'the ledger has no row yet', which the snapshot does not currently
+/// express". The snapshot does not need to: the poll path already carries the
+/// distinction as `arrival_logical == 0` versus a resolved ifindex whose zone is
+/// 0. The other half of that rationale — that revoking on a genuine lookup
+/// failure is a mass-teardown risk — was right, and is now carried by
+/// `an_egress_that_does_not_resolve_at_all_still_declines_9513` and by the cell
+/// below.
 #[test]
-fn an_ingress_moved_to_no_zone_declines_rather_than_revoking_9384() {
+fn an_ingress_moved_to_no_zone_is_re_judged_rather_than_skipped_9513() {
     let out = drive_moved_interface_9384(TEST_LAN_ZONE_ID, "", true);
     assert_eq!(
-        out.revoked, 0,
-        "an arrival interface in NO zone resolves to the unknown-zone sentinel, \
-         which is a LOOKUP FAILURE and not a verdict, so the derivation DECLINES. \
-         This is the documented #9384 residual, not an accident — see the \
-         `from_id == 0` arm's comment (#9384)"
+        out.revoked, 1,
+        "the arrival interface RESOLVES but the box puts it in no zone, so a new \
+         flow arriving on it would fall to the default policy — #6682 refuses to \
+         admit transit from an unzoned ingress at all. An established flow must be \
+         judged the same way. 0 here means #9384's live from-zone is still being \
+         swallowed by the zero-zone decline on exactly the operator action #9384 \
+         exists to catch (#9513)"
     );
     assert_eq!(
         session_count(&out.sessions),
-        1,
-        "the session survives an unzoned arrival"
+        0,
+        "the session arriving on the de-zoned interface must be torn down"
     );
+}
+
+/// THE INGRESS-SIDE lookup-failure control, symmetric with the egress one. A
+/// packet with NO arrival interface identity at all must still DECLINE.
+///
+/// `meta.ingress_ifindex == 0` makes `arrival_logical` 0, which is the ingress
+/// half of the #9513 split. Deleting that half reds this and nothing else, and
+/// without it "re-judge a zero ingress zone" would be indistinguishable from
+/// "revoke whenever the arrival cannot be identified".
+#[test]
+fn an_arrival_with_no_interface_identity_still_declines_9513() {
+    let forwarding = forwarding_with_ingress_zone_9384("lan", true);
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, LAN_IFINDEX, 0);
+    binding.interface = Arc::<str>::from("reth1.0");
+    let ha_state = txn_ha_state();
+    let mut sessions = SessionTable::new();
+    // The ENTRY records a zone, so a derivation that reached evaluation would
+    // have a pair to judge; only the ARRIVAL identity is missing.
+    let metadata = SessionMetadata {
+        ingress_zone: TEST_LAN_ZONE_ID,
+        egress_zone: TEST_WAN_ZONE_ID,
+        ..metadata(false)
+    };
+    assert!(sessions.install_with_protocol_with_origin(
+        flow_key_to(DST),
+        decision(WAN_IFINDEX),
+        metadata,
+        SessionOrigin::ForwardFlow,
+        122_000_000_000,
+        PROTO_TCP,
+        0,
+    ));
+    let frame = build_txn_tcp_syn_frame_v4(SRC, DST, SPORT, DPORT, TCP_ACK);
+    // ifindex 0: no arrival interface identity at all.
+    let meta = txn_meta_v4(0, TCP_ACK, frame.len() as u16);
+    let (_batch, dbg) = txn_run_descriptor(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &frame,
+        meta,
+    );
+    assert_eq!(
+        dbg.policy_revoked_sessions, 0,
+        "an arrival with no interface identity is a LOOKUP FAILURE, not an \
+         unzoned interface, and must DECLINE (#9513)"
+    );
+    assert_eq!(session_count(&sessions), 1, "the session must survive");
 }
 
 // ---------------------------------------------------------------------------
