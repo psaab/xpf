@@ -837,56 +837,6 @@ func (m *Manager) ReconcileVIPs() {
 	}
 }
 
-// reconcileVIP re-adds this instance's VIPs if it is currently MASTER, then
-// forces a GARP burst — but only if the instance is STILL the current-generation
-// MASTER after the netlink add completes (#5082). ReconcileVIPs runs on the
-// manager goroutine while becomeMaster/becomeBackup run on the run-loop, so the
-// old `if getState()==StateMaster { addVIPs() }` was a check-then-act TOCTOU: a
-// superior advert transitioning us to BACKUP could interleave between the state
-// check and the netlink add, re-adding VIPs and forcing GARP while BACKUP
-// (duplicate address, ARP/ND, split routing).
-//
-// The fix holds vipMu across "state check + generation capture + netlink add +
-// revalidation". becomeBackup's removeVIPs also takes vipMu, so it cannot
-// interleave the add; and setState bumps ownerGen independently of vipMu, so the
-// post-add revalidation observes a racing demotion even though it happened while
-// we held vipMu. On a superseding transition we roll back exactly the VIPs we
-// re-added and suppress the forced GARP — a BACKUP never announces VIPs.
-func (vi *vrrpInstance) reconcileVIP() {
-	vi.vipMu.Lock()
-	if vi.getState() != StateMaster {
-		vi.vipMu.Unlock()
-		return
-	}
-	gen := vi.ownerGen.Load()
-	res := vi.addVIPsLocked()
-	// Revalidate under vipMu: a becomeBackup that raced in bumped ownerGen (and
-	// flipped state). If superseded, undo the re-added VIPs and do NOT GARP —
-	// announcing a VIP we no longer own is the split-routing hazard this closes.
-	if vi.getState() != StateMaster || vi.ownerGen.Load() != gen {
-		// Best-effort rollback; the Warn below reports the rolled-back set.
-		_ = vi.removeVIPsLocked(res.applied)
-		vi.vipMu.Unlock()
-		slog.Warn("vrrp: ReconcileVIPs superseded by demotion; rolled back re-added VIPs, GARP suppressed",
-			"key", vi.key(), "rolled_back", res.applied)
-		return
-	}
-	// Bump garpEpoch so the epoch-dedup in sendGARP() doesn't block this send.
-	// ReconcileVIPs is called after programRethMAC (link DOWN/UP) which changes
-	// the MAC — GARP is critical here.
-	vi.garpEpoch.Add(1)
-	suppress := vi.suppressGARP.Load()
-	vi.vipMu.Unlock()
-	if !suppress {
-		// force=true: bypass the 500ms time dampener. The epoch bump above
-		// defeats the epoch-dedup, but the dampener would STILL suppress this
-		// burst if any routine GARP was emitted in the prior 500ms — leaving
-		// peers with a stale ARP entry for the just-changed RETH virtual MAC
-		// until it ages out (#2081).
-		vi.sendGARP(true)
-	}
-}
-
 // SetGARPSuppression enables or disables GARP/NA suppression for all VRRP
 // instances belonging to the given redundancy group. Used by strict-vip-ownership
 // mode to prevent duplicate GARP/NA during failover windows.

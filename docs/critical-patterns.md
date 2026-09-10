@@ -236,7 +236,19 @@ See the deploy backing table in
   services trust an owner that cannot receive VIP traffic. On any required-VIP
   failure `becomeMaster` rolls back partial adds, reverts to `StateBackup`, and
   returns `false` WITHOUT advertising/emitting — the run-loop then re-arms the
-  master-down timer (`rearmForRetry`) to retry the election. The clean success
+  master-down timer (`rearmForRetry`) to retry the election.
+  - **A failed rollback delete is surfaced (#9509)**, exactly as `becomeBackup`
+    surfaces its removal. `surfaceStaleVIP` bumps `vipRemoveFailures`, sets
+    `vipDiverged`, and schedules the generation-fenced reconcile. It is called
+    after `setState(StateBackup)` and after releasing `vipMu`, and it is called
+    unconditionally, so a clean rollback clears a stale flag.
+  - Without it the stranded VIP was permanent: the master-down retry never fires
+    while a healthy peer adverts.
+  - `ReconcileVIPs`' own superseded rollback stays log-only. The only transition
+    that can supersede it is `becomeBackup`, which always follows with a full,
+    surfaced removal.
+
+  The clean success
   path is unchanged (the `vipMu` lock is uncontended), so ~60ms failover timing
   is preserved. A monotonic **ownership generation** (`ownerGen`, bumped by
   `setState` on every real transition) is captured before the netlink add and

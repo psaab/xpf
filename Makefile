@@ -201,13 +201,12 @@ test-shim-run:
 GOTESTJSON ?=
 
 test-go: test-race-dp
-	# go vet gate scoped to pkg/flowexport (#2224): catches the
-	# atomic.Uint64-copy regression class (ExportConfig embeds the live
-	# 1-in-N sampleCounter and must never be copied by value). NOT
-	# tree-wide yet — two pre-existing vet diagnostics live outside this
-	# package (cmd/cli protobuf MessageState copy, pkg/cli unreachable
-	# code); widen to ./... once those are resolved.
-	$(GO) vet ./pkg/flowexport/...
+	# go vet gate, tree-wide (#9590): the tree is vet-clean, so any new
+	# diagnostic in any package fails make test-go. It catches the #2224
+	# atomic.Uint64-copy class wherever it reappears, not only in
+	# pkg/flowexport. An exception must be a named, reasoned carve-out,
+	# never a quiet re-narrowing of this scope.
+	$(GO) vet ./...
 	# #8231: truncate the side file ONCE per invocation, before the first leg.
 	# The legs below APPEND (test-go has two), so without this a second
 	# `make test-go GOTESTJSON=x` would attribute over the union of both runs —

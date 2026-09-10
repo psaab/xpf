@@ -308,6 +308,22 @@ paths rather than asserting it.
     added (a MASTER self-blackhole). The old bare `removeVIPs` checked state
     OUTSIDE the lock, leaving a TOCTOU window between the check and the lock
     acquisition.
+  - **A failed MASTER-side rollback is surfaced too (#9509).** Suppose
+    `becomeMaster`'s fail-closed arm cannot delete a VIP it had added. The
+    node would then publish BACKUP while holding that VIP, and nothing
+    converges it: `ReconcileVIPs` acts only on a MASTER, and the master-down
+    retry never fires while a healthy peer adverts.
+    - The arm captures the rollback error and calls
+      `surfaceStaleVIP(rollbackErr, "becomeMaster-rollback")` after
+      `setState(StateBackup)` and after releasing `vipMu`. That order is
+      required: the reconcile captures `ownerGen` when it is scheduled, and it
+      takes the lock.
+    - The call is unconditional, so a clean rollback clears a flag that an
+      earlier, now-superseded reconcile left set.
+    - `ReconcileVIPs`' own superseded rollback stays log-only. The only
+      transition that can supersede it is `becomeBackup`, which then removes
+      all configured VIPs and surfaces the result
+      (`TestSupersededReconcileRollbackIsCoveredByBecomeBackup_9509`).
 - GARP suppression gates: `sendGARP(force)` has two gates — a per-epoch
   dedup (`garpEpoch`/`lastGARPEpoch`, one burst per transition) and a
   500 ms time dampener (`lastGARPTime`/`garpDampened`, storm control for
