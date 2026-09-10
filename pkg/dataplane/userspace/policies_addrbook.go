@@ -99,13 +99,16 @@ func classifyPolicyAddresses(cfg *config.Config, nameToID map[string]uint32, add
 				continue
 			}
 		}
-		// A match-all keyword, or not a known book name → a free-form literal:
-		// "any", "any4", "any6", "any-ipv4", "any-ipv6", or a CIDR/IP literal.
-		if _, dup := seen[tok]; dup {
+		// A match-all keyword, or not a known book name → a free-form literal.
+		// #9574: a family keyword goes on the wire as its CIDR (`0.0.0.0/0` /
+		// `::/0`), the form compilePolicy used to produce, so the snapshot is
+		// byte-identical for every config with no object named after it.
+		lit := config.PolicyAddressKeywordLiteral(tok)
+		if _, dup := seen[lit]; dup {
 			continue
 		}
-		seen[tok] = struct{}{}
-		literals = append(literals, tok)
+		seen[lit] = struct{}{}
+		literals = append(literals, lit)
 	}
 	if len(bookSet) == 0 {
 		return nil, literals

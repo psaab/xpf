@@ -285,6 +285,10 @@ func printPolicyMatchAddresses(cfg *config.Config, pol *config.Policy) {
 			if addr == "any" {
 				fmt.Printf("    any-ipv4(global): 0.0.0.0/0\n")
 				fmt.Printf("    any-ipv6(global): ::/0\n")
+			} else if config.IsPolicyAddressWildcardKeyword(addr) {
+				// #9574: the compiled config keeps `any-ipv4` / `any-ipv6`; render
+				// the family line the `any` arm renders, not the keyword as a name.
+				fmt.Printf("    %s(global): %s\n", addr, config.PolicyAddressKeywordLiteral(addr))
 			} else {
 				resolved := resolveAddressDetail(cfg, addr)
 				// #3358: a zone-local address book (#3061) is folded into the

@@ -5,19 +5,6 @@ import (
 	"sort"
 )
 
-// policyAddressWildcardKeywords are the policy source/destination-address tokens
-// that mean "every address" (both families, or one): the Junos keywords `any`,
-// `any-ipv4` and `any-ipv6`, and the internal short forms `any4` / `any6` that the
-// userspace matcher also reads as family wildcards (policy.rs
-// parse_v3_literal_set).
-var policyAddressWildcardKeywords = map[string]struct{}{
-	"any":      {},
-	"any4":     {},
-	"any6":     {},
-	"any-ipv4": {},
-	"any-ipv6": {},
-}
-
 // IsPolicyAddressWildcardKeyword reports whether tok is a match-all keyword
 // (#9523).
 //
@@ -35,8 +22,12 @@ var policyAddressWildcardKeywords = map[string]struct{}{
 // validateReservedAddressNamesStrict rejects such an object at commit; this
 // predicate is what keeps the keyword a keyword on the tolerant path, where the
 // object loads with a warning.
+//
+// The keyword set itself is PolicyAddressWildcardFamilies (#9574): the Junos
+// keywords `any`, `any-ipv4` and `any-ipv6`, and the internal short forms `any4`
+// / `any6` that the userspace matcher also reads as family wildcards.
 func IsPolicyAddressWildcardKeyword(tok string) bool {
-	_, ok := policyAddressWildcardKeywords[tok]
+	_, _, ok := PolicyAddressWildcardFamilies(tok)
 	return ok
 }
 

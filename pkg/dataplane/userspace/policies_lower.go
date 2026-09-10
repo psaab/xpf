@@ -54,18 +54,17 @@ func buildPolicySnapshotsWithSchedulerStateAndFeeds(cfg *config.Config, activeSt
 	// under-denying it.
 	addrRepresentable := func(tok string) bool {
 		switch tok {
-		// `any4`/`any6` are the internal short forms; `any-ipv4`/`any-ipv6` are
-		// the Junos config keywords. A committed config never carries the Junos
-		// keywords raw — compilePolicy rewrites them to 0.0.0.0/0 // ::/0
-		// (compiler_security_policy.go normalizePolicyAddrToken) — but a lenient /
-		// HA-synced / hand-built snapshot can, and the Rust matcher accepts the
-		// WHOLE set as a family wildcard (policy.rs parse_v3_literal_set:
-		// `"any4" | "any-ipv4" => any_v4`). Accept the same set so the
-		// representability gate never emits a false __unsupported_address__
-		// sentinel (a spurious whole-snapshot fail-close) for a token the matcher
-		// actually honors — which would also make the #4394 match-policies
-		// simulator falsely report ContentRejected for a raw `any-ipv4` policy.
-		case "", "any", "any4", "any6", "any-ipv4", "any-ipv6":
+		case "":
+			return true
+		}
+		// Every match-all keyword is representable. Since #9574 the compiled config
+		// keeps `any-ipv4` / `any-ipv6` raw (the CIDR rewrite moved out of
+		// compilePolicy into the snapshot builder), so this is the common path, not
+		// only a lenient or hand-built one. The Rust matcher reads every keyword as a
+		// wildcard (policy.rs parse_v3_literal_set); a false __unsupported_address__
+		// sentinel here would be a spurious whole-snapshot fail-close and a false
+		// ContentRejected in the #4394 simulator.
+		if config.IsPolicyAddressWildcardKeyword(tok) {
 			return true
 		}
 		if isUserspaceLiteralAddress(tok) {

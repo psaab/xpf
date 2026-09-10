@@ -1870,13 +1870,8 @@ func resolveToken(cfg *config.Config, overlay map[string][]string, tok string) (
 	// book lookup, exactly as classifyPolicyAddresses does. Before #9523 the
 	// switch below ran after isBookName, and an address named `any` turned every
 	// `match ... any` into a match on its prefixes here as in the dataplane.
-	switch tok {
-	case "any":
-		return nil, nil, true, true
-	case "any-ipv4", "any4":
-		return nil, nil, true, false
-	case "any-ipv6", "any6":
-		return nil, nil, false, true
+	if v4, v6, ok := config.PolicyAddressWildcardFamilies(tok); ok {
+		return nil, nil, v4, v6
 	}
 
 	// Book-name precedence (classifyPolicyAddresses): a token that names a

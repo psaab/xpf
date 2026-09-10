@@ -546,9 +546,8 @@ they stay warn-only). Same fail-closed-on-load doctrine as #3144/#3146.
 not in address-book` advisory for a policy address token it does not recognize.
 It previously excluded only the bare `any` keyword and address-book entry names,
 so it drew a FALSE warning for every OTHER valid reference form on a perfectly
-good policy: a literal IPv4/IPv6 address or CIDR (`10.0.0.0/8`, `2001:db8::/32`
-— including the `0.0.0.0/0` / `::/0` that `compilePolicy` normalizes `any-ipv4` /
-`any-ipv6` to), the `any-ipv4` / `any-ipv6` wildcards, and a dynamic-address
+good policy: a literal IPv4/IPv6 address or CIDR (`10.0.0.0/8`, `2001:db8::/32`),
+the `any-ipv4` / `any-ipv6` wildcards, and a dynamic-address
 FEED binding name (a direct #2049/#3294 reference). Spurious warnings on normal
 commits train operators to ignore validation output (alarm fatigue), burying a
 REAL undefined-reference warning. The strict commit gate
@@ -583,6 +582,25 @@ name lookup: the snapshot builder (`classifyPolicyAddresses`), the
 `match-policies` simulator (`resolveToken`), and the CLI / gRPC detail renderers.
 So on the tolerant path the keyword keeps matching every address, and every
 surface shows what is enforced. `0.0.0.0/0` remains a legal object name.
+
+**`any-ipv4` / `any-ipv6` stay keywords until the snapshot is built (#9574):**
+`compilePolicy` used to rewrite `any-ipv4` / `any-ipv6` to `0.0.0.0/0` / `::/0`
+while compiling the policy (#2008 H11), BEFORE any address-book resolution. So
+the keyword had already become a CIDR string by the time it was classified, and
+an address, address-set or zone-local object NAMED `0.0.0.0/0` (legal in Junos
+and in xpf) captured every `any-ipv4` in every policy, with a clean strict
+commit. #9523's keyword check could not reach it, because by then there was no
+keyword left to test. The compiled config now keeps the keyword. Every resolver
+classifies it as a keyword first, and only the userspace snapshot builder
+(`classifyPolicyAddresses`, and the legacy `expandUserspacePolicyAddresses`)
+writes the CIDR the dataplane parses, via `PolicyAddressKeywordLiteral`. The wire
+is byte-identical to before for any config without such an object. The #2008 H11
+reason for the rewrite (the dataplane must receive a parseable CIDR) still holds;
+only its position moved. `PolicyAddressWildcardFamilies` is now the single source
+for the keyword set and its families. Name-before-literal is unchanged: a literal
+`0.0.0.0/0` typed in a policy still resolves to an object of that name. `show
+security policies detail` renders `any-ipv4(global): 0.0.0.0/0`, and the REST and
+gRPC inventories show the keyword the operator wrote instead of the CIDR.
 
 **Zone-local address books (#3061):** Junos supports both the global
 `security address-book global { ... }` and a per-zone book attached inline
