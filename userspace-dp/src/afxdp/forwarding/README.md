@@ -380,6 +380,23 @@ forward-direction collision.
   (`Coordinator::routing_domains`) rather than missing a VRF session.
   (c) Per-VRF default FIB — the thing that would make the reply direction
   symmetric by construction — is Track B-ext and remains out of scope.
+  (d) **#9517: the XDP steering map (`userspace_sessions`) is keyed on a BARE
+  5-tuple.** `UserspaceSessionMapKey` (`afxdp/bpf_map/mod.rs`) carries neither
+  `routing_domain` nor the GRE `discriminator`, so two sessions the
+  authoritative `SessionKey` keeps apart produce byte-identical 40-byte rows —
+  measured, with a `src_port` positive control, in
+  `bpf_map_tests.rs::steering_key_aliases_routing_domain_and_gre_discriminator_9517`.
+  Publish is an identity-blind `BPF_ANY` overwrite and delete is keyed on the
+  same bare tuple. #9517 closed the OVERWRITE arm that could flip a sibling
+  session's `REDIRECT` row to `PASS_TO_KERNEL`: a node with routing domains no
+  longer publishes `PASS_TO_KERNEL` at all, and neither does any session whose
+  key carries a tunnel discriminator. The GRE arm needs no routing domains —
+  two keyed tunnels between one endpoint pair alias on a single-instance box.
+  The DELETE arm is NOT closed (#9560): two aliased sessions still share one
+  row, so either one's ordinary teardown removes it, and with an `lo0` input
+  filter the survivor's next packet misses, reaches the kernel and skips the
+  filter. Closing it needs identity in the key, and the shim cannot compute
+  the domain inside the #1864 verifier budget.
 - **PBR `then routing-instance` is the ONLY per-VRF forwarding path.** An
   interface's native `routing_instance` selects only the connected-route
   table NAME (#2388 above) — it does NOT scope a transit packet's
@@ -424,10 +441,16 @@ forward-direction collision.
   flow. The invariant the real fix must restore: **a cached fast-path
   decision is only reused for a flow in the same scope it was admitted
   under.**
-- **The conntrack table is now the SOLE collision surface.** The flow cache
-  used to alias too; it is keyed on the LOGICAL (VLAN unit) ingress ifindex
-  since `42bc6bc88`, so two units of one parent no longer share a cache
-  entry. Only the ifindex-less conntrack table remains.
+- **There are TWO ifindex-less collision surfaces, not one (#9517).** This
+  line used to read "The conntrack table is now the SOLE collision surface",
+  and that completeness claim was false: the XDP steering map is a second one
+  (residual (d) above). It is corrected rather than softened because a
+  completeness claim in a module README is how the next reader decides not to
+  look — which is how the steering map was missed. The flow cache used to
+  alias too; it is keyed on the LOGICAL (VLAN unit) ingress ifindex since
+  `42bc6bc88`, so two units of one parent no longer share a cache entry. What
+  remains are the ifindex-less conntrack table and the bare-5-tuple XDP
+  steering map.
 - **Interim mitigation + candidate real fix (UNDECIDED).** The Go compiler
   emits a commit WARNING (`validateVRFOverlap`, `pkg/config`) when two
   distinct routing-instances carry overlapping L3 address space, so the

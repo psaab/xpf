@@ -2307,6 +2307,7 @@ pub(super) fn poll_binding_process_descriptor(
                                 now_ns,
                                 meta.protocol,
                                 meta.tcp_flags,
+                                worker_ctx.forwarding.has_routing_domains,
                             ) {
                                 telemetry.counters.session_creates += 1;
                                 telemetry.dbg.session_create += 1;
@@ -3640,6 +3641,7 @@ pub(super) fn poll_binding_process_descriptor(
                                     now_ns,
                                     meta.protocol,
                                     meta.tcp_flags,
+                                    worker_ctx.forwarding.has_routing_domains,
                                 );
                             }
                         }
@@ -5966,6 +5968,7 @@ pub(super) fn poll_binding_process_descriptor(
                                             &flow.forward_key,
                                             pending_decision,
                                             &entry.metadata,
+                                            worker_ctx.forwarding.has_routing_domains,
                                         )
                                         .is_err()
                                         {

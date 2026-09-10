@@ -26,6 +26,22 @@ fn local_delivery_decision(tunnel_endpoint_id: u16) -> SessionDecision {
     }
 }
 
+/// #9517: the predicate now reads the session KEY, because the steering map
+/// cannot tell tunnel discriminators apart. The cells that predate that exercise
+/// a non-tunnel session, so they pass this plain key.
+fn plain_key() -> SessionKey {
+    SessionKey {
+        addr_family: libc::AF_INET as u8,
+        protocol: 6,
+        src_ip: std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 61, 102)),
+        dst_ip: std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 61, 1)),
+        src_port: 40000,
+        dst_port: 22,
+        discriminator: crate::session::TunnelDiscriminator::None,
+        routing_domain: 0,
+    }
+}
+
 fn synced_forward_metadata() -> SessionMetadata {
     SessionMetadata {
         ingress_zone: TEST_TRUST_ZONE_ID,
@@ -49,14 +65,18 @@ fn synced_forward_metadata() -> SessionMetadata {
 fn kernel_local_session_map_entry_requires_zero_tunnel_endpoint() {
     let metadata = synced_forward_metadata();
     assert!(uses_kernel_local_session_map_entry(
+        &plain_key(),
         local_delivery_decision(0),
         &metadata,
         SessionOrigin::SyncImport,
+        false,
     ));
     assert!(!uses_kernel_local_session_map_entry(
+        &plain_key(),
         local_delivery_decision(7),
         &metadata,
         SessionOrigin::SyncImport,
+        false,
     ));
 }
 
@@ -65,6 +85,7 @@ fn kernel_local_session_map_entry_rejects_non_kernel_local_cases() {
     let metadata = synced_forward_metadata();
     // Not local delivery → rejected
     assert!(!uses_kernel_local_session_map_entry(
+        &plain_key(),
         SessionDecision {
             resolution: ForwardingResolution {
                 disposition: ForwardingDisposition::ForwardCandidate,
@@ -74,23 +95,119 @@ fn kernel_local_session_map_entry_rejects_non_kernel_local_cases() {
         },
         &metadata,
         SessionOrigin::SyncImport,
+        false,
     ));
 
     // Non-peer-synced origin → rejected
     assert!(!uses_kernel_local_session_map_entry(
+        &plain_key(),
         local_delivery_decision(0),
         &metadata,
         SessionOrigin::ForwardFlow,
+        false,
     ));
 
     // Reverse session → rejected
     let mut reverse_metadata = synced_forward_metadata();
     reverse_metadata.is_reverse = true;
     assert!(!uses_kernel_local_session_map_entry(
+        &plain_key(),
         local_delivery_decision(0),
         &reverse_metadata,
         SessionOrigin::SyncImport,
+        false,
     ));
+}
+
+/// #9517: a node WITH routing domains never publishes a `PASS_TO_KERNEL` row.
+///
+/// The XDP steering map is keyed on a bare 5-tuple, so two sessions in different
+/// routing domains share one row and the publish is an identity-blind `BPF_ANY`
+/// overwrite. An aliased peer-synced publish could therefore flip another
+/// domain's `REDIRECT` row to `PASS_TO_KERNEL`, sending that flow to the kernel
+/// forward path where no zone policy runs — a harm a clean MISS cannot produce.
+///
+/// The pair is the cell: the SAME decision, metadata and origin that the cell
+/// above proves IS kernel-local on a single-instance box must NOT be kernel-local
+/// once `has_routing_domains` is set. Only the flag differs, so the flag is what
+/// is bound. Deleting `!has_routing_domains &&` from the predicate reds the
+/// second assertion and nothing else.
+#[test]
+fn routing_domains_demote_kernel_local_to_redirect_9517() {
+    let metadata = synced_forward_metadata();
+    assert!(
+        uses_kernel_local_session_map_entry(
+            &plain_key(),
+            local_delivery_decision(0),
+            &metadata,
+            SessionOrigin::SyncImport,
+            false,
+        ),
+        "control: on a single-instance box this exact session IS kernel-local, \
+         or the demotion assertion below is vacuous (#9517)"
+    );
+    assert!(
+        !uses_kernel_local_session_map_entry(
+            &plain_key(),
+            local_delivery_decision(0),
+            &metadata,
+            SessionOrigin::SyncImport,
+            true,
+        ),
+        "with routing domains the steering key aliases across domains, so a \
+         PASS_TO_KERNEL row could overwrite another domain's REDIRECT row and \
+         bypass zone policy. It must be demoted to REDIRECT (#9517)"
+    );
+}
+
+/// #9517, the GRE arm: the steering key drops the tunnel discriminator, so on a
+/// SINGLE-instance box two keyed GRE tunnels between one endpoint pair already
+/// share a row. Every non-`None` class must be demoted, `Unkeyed` included —
+/// an unkeyed tunnel and a keyed one between the same endpoints sit on the same
+/// bare tuple, so either one's `PASS_TO_KERNEL` row would overwrite the other's.
+#[test]
+fn tunnel_discriminators_demote_kernel_local_to_redirect_9517() {
+    use crate::session::TunnelDiscriminator;
+    let metadata = synced_forward_metadata();
+    let gre = |discriminator| SessionKey {
+        protocol: 47,
+        src_port: 0,
+        dst_port: 0,
+        discriminator,
+        ..plain_key()
+    };
+    assert!(
+        uses_kernel_local_session_map_entry(
+            &gre(TunnelDiscriminator::None),
+            local_delivery_decision(0),
+            &metadata,
+            SessionOrigin::SyncImport,
+            false,
+        ),
+        "control: with no discriminator this single-instance session IS kernel-local, \
+         or every demotion below is vacuous (#9517)"
+    );
+    for discriminator in [
+        TunnelDiscriminator::Unkeyed,
+        TunnelDiscriminator::Keyed(0),
+        TunnelDiscriminator::Keyed(7),
+        TunnelDiscriminator::Pptp(3),
+        TunnelDiscriminator::Unparseable,
+    ] {
+        assert!(
+            !uses_kernel_local_session_map_entry(
+                &gre(discriminator),
+                local_delivery_decision(0),
+                &metadata,
+                SessionOrigin::SyncImport,
+                false,
+            ),
+            "a {discriminator:?} session shares its 40-byte steering row with every \
+             other tunnel between the same endpoints, so a PASS_TO_KERNEL row here \
+             could overwrite a sibling tunnel's REDIRECT row. It must be demoted even \
+             with no routing domains (#9517)"
+        );
+    }
 }
 
 #[test]
@@ -1090,5 +1207,81 @@ fn an_unobserved_session_volume_high_water_stays_off_the_wire_7919() {
         "an absent key decodes to the Rust zero value; the GO side is where \
          absent-vs-zero is preserved, via a pointer (see \
          metrics_session_volume_high_water_7919_test.go)"
+    );
+}
+
+/// #9517: the ESTABLISHED half of the issue, measured — the XDP steering key
+/// ALIASES two sessions the authoritative `SessionKey` keeps apart.
+///
+/// This is a CHARACTERIZATION, not a defect guard, and it is labelled so. It pins
+/// the known collision surface so that (a) the README's corrected residual list
+/// rests on an executed fact rather than a reading, and (b) a future change that
+/// widens the key has to update this cell deliberately instead of the aliasing
+/// disappearing — or reappearing — unnoticed.
+///
+/// THE POSITIVE CONTROL is what makes it a measurement rather than a tautology: a
+/// field the key DOES carry (`src_port`) must separate two keys. Without it,
+/// "the bytes are equal" is satisfied by an encoder that ignores every field.
+#[test]
+fn steering_key_aliases_routing_domain_and_gre_discriminator_9517() {
+    fn key_bytes(k: &SessionKey) -> Vec<u8> {
+        let mk = session_map_key(k);
+        let n = std::mem::size_of::<UserspaceSessionMapKey>();
+        unsafe {
+            std::slice::from_raw_parts((&mk as *const UserspaceSessionMapKey).cast::<u8>(), n)
+                .to_vec()
+        }
+    }
+    let base = SessionKey {
+        addr_family: libc::AF_INET as u8,
+        protocol: 47,
+        src_ip: std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 0, 5)),
+        dst_ip: std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 0, 9)),
+        src_port: 0,
+        dst_port: 0,
+        discriminator: crate::session::TunnelDiscriminator::Keyed(1),
+        routing_domain: 0,
+    };
+
+    assert_eq!(
+        std::mem::size_of::<UserspaceSessionMapKey>(),
+        40,
+        "the steering key is 40 bytes; a size change is a shim ABI change \
+         (`loader_userspace_shim.go`) and must not happen by accident (#9517)"
+    );
+
+    // Arm 1: routing_domain. Authoritatively DIFFERENT, byte-identical row.
+    let other_domain = SessionKey { routing_domain: 100_007, ..base.clone() };
+    assert_ne!(base, other_domain, "the authoritative keys must differ");
+    assert_eq!(
+        key_bytes(&base),
+        key_bytes(&other_domain),
+        "two sessions in different routing domains share ONE steering row — the \
+         aliasing #9517 measured (#9517)"
+    );
+
+    // Arm 2: the GRE discriminator. DETERMINISTIC: needs no routing domains at
+    // all, because two RFC 2890 keyed tunnels between the same endpoints are both
+    // protocol 47 with no L4 ports.
+    let other_gre_key = SessionKey {
+        discriminator: crate::session::TunnelDiscriminator::Keyed(2),
+        ..base.clone()
+    };
+    assert_ne!(base, other_gre_key, "the authoritative keys must differ");
+    assert_eq!(
+        key_bytes(&base),
+        key_bytes(&other_gre_key),
+        "two keyed GRE tunnels between the same endpoints share ONE steering row, \
+         on a single-VRF box, with no crafted traffic (#9517)"
+    );
+
+    // POSITIVE CONTROL: a field the key DOES carry must separate.
+    let other_port = SessionKey { src_port: 1235, ..base.clone() };
+    assert_ne!(
+        key_bytes(&base),
+        key_bytes(&other_port),
+        "control: `src_port` is carried by the steering key, so it MUST separate. \
+         If this is equal, the encoder ignores every field and the two aliasing \
+         assertions above are vacuous (#9517)"
     );
 }

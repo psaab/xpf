@@ -1,11 +1,65 @@
 use super::*;
 
+/// #9517: `has_routing_domains` DEMOTES a `PASS_TO_KERNEL` row to `REDIRECT`,
+/// for the same reason the `lo0`-filter gate in `session_glue` already does.
+///
+/// The XDP steering map is keyed on a BARE 5-TUPLE
+/// (`UserspaceSessionMapKey` below): it drops `routing_domain` (#7160/#2387) and
+/// the GRE `discriminator` (#7188/#8103), both of which the authoritative
+/// `SessionKey` carries by explicit design. So two sessions the authoritative
+/// `PartialEq` reports as DIFFERENT produce byte-identical 40-byte rows, and the
+/// publish is an identity-blind `BPF_ANY` overwrite.
+///
+/// The arm that gate closes is the one a MISS cannot produce: an aliased
+/// peer-synced publish replacing a `REDIRECT` row with `PASS_TO_KERNEL` sends the
+/// flow to `cpumap_or_pass` — the kernel forward path, where per the #304 note
+/// "ip_forward=1 and an all-accept nft ruleset forward them with no zone policy
+/// evaluated at all". A miss would have redirected it to the policy engine
+/// instead.
+///
+/// WHY THIS AND NOT "ADD `routing_domain` TO THE KEY". Key size is not the
+/// blocker (40 -> 44 bytes is well inside limits); the SHIM CANNOT COMPUTE THE
+/// DOMAIN. It would need a per-packet ifindex->domain map lookup plus logical-unit
+/// resolution on the hottest path, and `userspace-xdp/src/lib.rs` records that
+/// "the second HASH lookup pushed `xdp_userspace_prog` over the 1M-insn BPF
+/// verifier cap (#1864 complexity gate)". It would also require `make generate`
+/// and a shim ABI change. This gate costs none of that, is byte-identical on
+/// every single-instance deployment, and fails in the SAFE direction: the worst
+/// case is one extra userspace hop for host-inbound traffic on a VRF node, not a
+/// dropped packet. A "fail closed = drop" prescription would be a packet-loss bug
+/// here, because the unaliased case is ordinary local delivery.
+///
+/// THE SAME DEMOTION COVERS THE TUNNEL DISCRIMINATOR. The steering key drops
+/// `SessionKey::discriminator` as well as `routing_domain`, and that arm needs
+/// no routing domains at all: two RFC 2890 keyed GRE tunnels between one pair
+/// of outer endpoints are both protocol 47 with no ports, so their 40-byte rows
+/// are byte-identical on a single-instance box, always. Any non-`None` class
+/// can alias with another — `Unkeyed` with `Keyed(_)` included, since both sit
+/// on the same bare tuple — so a session whose key carries ANY discriminator is
+/// published `REDIRECT` too. Same fail-safe direction, same cost: an extra
+/// helper hop for host-inbound GRE/PPTP on the peer-synced owner.
+///
+/// WHAT THIS DOES **NOT** CLOSE, stated because a partial fix that reads as a
+/// whole one is worse than none: the DELETE is keyed on the same bare tuple, so
+/// two aliased sessions still share one row and either one's ordinary teardown
+/// removes it. With an `lo0` input filter configured that makes the survivor's
+/// next packet MISS, reach the kernel, and skip the filter. Demoting to
+/// `REDIRECT` does not help there — both rows are `REDIRECT` and still collide.
+/// Closing that half needs identity IN THE KEY, which is what the verifier budget
+/// forbids; it is tracked as #9560. See `docs/log/9517.md` for the two remedies
+/// that were tried and
+/// rejected, and `afxdp/forwarding/README.md` for the corrected collision-surface
+/// list.
 pub(super) fn uses_kernel_local_session_map_entry(
+    key: &SessionKey,
     decision: SessionDecision,
     metadata: &SessionMetadata,
     origin: SessionOrigin,
+    has_routing_domains: bool,
 ) -> bool {
-    origin.is_peer_synced()
+    !has_routing_domains
+        && key.discriminator.is_none()
+        && origin.is_peer_synced()
         && !metadata.is_reverse
         && decision.resolution.disposition == ForwardingDisposition::LocalDelivery
         && decision.resolution.tunnel_endpoint_id == 0
@@ -45,11 +99,48 @@ pub(super) fn session_map_key(key: &SessionKey) -> UserspaceSessionMapKey {
     }
 }
 
+/// #9517 test seam: one write to the XDP steering map, as the dataplane
+/// ATTEMPTED it. `value` is the action byte for an update and `None` for a
+/// delete. Recorded before the syscall, so a cell can drive a real publish path
+/// with a map fd an unprivileged `cargo test` could never have created — the
+/// same shape as `CONNTRACK_PUBLISHES` below. Without it the only thing a cell
+/// can bind is the predicate, and a call site that reads the wrong flag is
+/// invisible (the #9517 wiring mutant survived exactly that way).
+#[cfg(test)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct SessionMapWriteRecord {
+    pub(super) key: SessionKey,
+    pub(super) value: Option<u8>,
+}
+
+#[cfg(test)]
+thread_local! {
+    static SESSION_MAP_WRITES: std::cell::RefCell<Vec<SessionMapWriteRecord>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+#[cfg(test)]
+pub(super) fn clear_session_map_writes() {
+    SESSION_MAP_WRITES.with(|records| records.borrow_mut().clear());
+}
+
+#[cfg(test)]
+pub(super) fn session_map_writes() -> Vec<SessionMapWriteRecord> {
+    SESSION_MAP_WRITES.with(|records| records.borrow().clone())
+}
+
 pub(super) fn publish_session_map_key(
     map_fd: c_int,
     key: &SessionKey,
     value: u8,
 ) -> io::Result<()> {
+    #[cfg(test)]
+    SESSION_MAP_WRITES.with(|records| {
+        records.borrow_mut().push(SessionMapWriteRecord {
+            key: key.clone(),
+            value: Some(value),
+        })
+    });
     let map_key = session_map_key(key);
     let rc = unsafe {
         libbpf_sys::bpf_map_update_elem(
@@ -904,6 +995,7 @@ pub(super) fn publish_session_map_entry_for_session(
     key: &SessionKey,
     decision: SessionDecision,
     metadata: &SessionMetadata,
+    has_routing_domains: bool,
 ) -> io::Result<()> {
     publish_session_map_entry_for_session_with_origin(
         map_fd,
@@ -911,6 +1003,7 @@ pub(super) fn publish_session_map_entry_for_session(
         decision,
         metadata,
         SessionOrigin::ForwardFlow,
+        has_routing_domains,
     )
 }
 
@@ -920,9 +1013,16 @@ pub(super) fn publish_session_map_entry_for_session_with_origin(
     decision: SessionDecision,
     metadata: &SessionMetadata,
     origin: SessionOrigin,
+    has_routing_domains: bool,
 ) -> io::Result<()> {
     publish_session_map_entry_for_session_with_conntrack(
-        map_fd, key, decision, metadata, origin, None,
+        map_fd,
+        key,
+        decision,
+        metadata,
+        origin,
+        has_routing_domains,
+        None,
     )
 }
 
@@ -932,9 +1032,12 @@ pub(super) fn publish_session_map_entry_for_session_with_conntrack(
     decision: SessionDecision,
     metadata: &SessionMetadata,
     origin: SessionOrigin,
+    // #9517: the SECOND publish site, which does not go through the `lo0`
+    // downgrade in `session_glue`. A fix at that site alone is partial.
+    has_routing_domains: bool,
     ct: Option<ConntrackCtx<'_>>,
 ) -> io::Result<()> {
-    if uses_kernel_local_session_map_entry(decision, metadata, origin) {
+    if uses_kernel_local_session_map_entry(key, decision, metadata, origin, has_routing_domains) {
         publish_kernel_local_session_key(map_fd, key)?;
         // For SNATed local-delivery sessions (e.g., ICMP to an interface-NAT
         // address), the reply packet arrives with the SNAT address as
@@ -998,6 +1101,13 @@ pub(super) fn verify_session_key_in_bpf(map_fd: c_int, key: &SessionKey) -> bool
 }
 
 pub(super) fn delete_live_session_key(map_fd: c_int, key: &SessionKey) {
+    #[cfg(test)]
+    SESSION_MAP_WRITES.with(|records| {
+        records.borrow_mut().push(SessionMapWriteRecord {
+            key: key.clone(),
+            value: None,
+        })
+    });
     let map_key = session_map_key(key);
     let _ = unsafe {
         libbpf_sys::bpf_map_delete_elem(
