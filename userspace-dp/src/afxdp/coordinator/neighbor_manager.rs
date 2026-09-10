@@ -255,6 +255,12 @@ impl NeighborManager {
 /// is the anti-rot half of this fix. An eleventh spawner added without the
 /// guard makes them fail loudly, naming the missing lock, instead of failing as
 /// an off-by-one delta that reads like a real leak.
+///
+/// #9556: that precondition WAITS (bounded) for the count to reach zero rather
+/// than sampling it once. A monitor the previous test correctly joined can still
+/// be listed in `/proc/self/task` for milliseconds after `join()` returns, so an
+/// instant sample reported `before=1` in a serial suite with no leak and no
+/// unlocked spawner. A thread still listed when the wait ends is a real one.
 #[cfg(test)]
 pub(crate) fn neigh_monitor_test_serial() -> std::sync::MutexGuard<'static, ()> {
     use std::sync::Mutex;
