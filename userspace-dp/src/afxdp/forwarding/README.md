@@ -572,6 +572,21 @@ share the same per-zone token set; keep the Go nft token→match mapping
 (`hostInboundServiceMatches`/`hostInboundProtocolMatches`) in sync with the
 Rust classifier here.**
 
+**The gate judges the POST-translation tuple (#9529).** Most traffic that reaches
+this secondary path is host-bound only BECAUSE of a destination translation
+(DNAT-to-self, static NAT to a firewall service), so which tuple it is judged on
+decides the verdict. The service gate's port and `to-zone junos-host` policy's
+address and port are the post-translation ones (`host_bound_policy_dst` in
+`poll_descriptor/host_inbound_policy.rs`): the tuple the local listener actually
+receives, and the one transit policy already judges (#2345). Judging the wire tuple
+let a fine deny written on the firewall address or on the translated port match
+nothing, and the kernel cannot catch that miss, because its fine DROP rules are
+`iifname`-scoped to the zone's physical netdevs and the reinject arrives on the
+slow-path TUN. Some things stay on the WIRE tuple on purpose: the `lo0` filter
+(Junos filters are pre-NAT), and the reject reply and deny record, because the
+client is addressing the pre-translation tuple. A translation that changes address
+family (NAT64) keeps the wire address.
+
 **ident-reset (#3310).** `system-services ident-reset` is special-cased: Junos
 does NOT permit the ident (auth/TCP-113) service, it actively RESETS inbound
 ident probes. On the PRIMARY (kernel) path the nft chain emits

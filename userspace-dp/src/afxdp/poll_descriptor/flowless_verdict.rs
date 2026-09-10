@@ -141,7 +141,18 @@ pub(super) fn flowless_local_delivery_verdict(
     // logging-only), so a permit simply falls through to Deliver with no
     // metadata to carry — only a deny/reject drives the flowless filter drop.
     if let Some(result) =
-        junos_host_policy_eval(forwarding, flow, from_zone_id, packet_len, false, packet_icmp)
+        junos_host_policy_eval(
+            forwarding,
+            flow,
+            // #9529: the flowless arm applies no destination translation (a
+            // translated flow's later fragments follow fragment association,
+            // not this arm), so its wire destination IS its post-translation one.
+            (flow.dst_ip, flow.forward_key.dst_port),
+            from_zone_id,
+            packet_len,
+            false,
+            packet_icmp,
+        )
     {
         if !matches!(result.action, PolicyAction::Permit) {
             emit_junos_host_deny(

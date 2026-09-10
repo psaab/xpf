@@ -68,7 +68,8 @@ use flowless_verdict::{
     ipv6_ext_header_over_limit_drop,
 };
 use host_inbound_policy::{
-    JunosHostLocalPolicy, emit_host_inbound_deny, junos_host_local_policy, policy_packet_icmp,
+    JunosHostLocalPolicy, emit_host_inbound_deny, host_bound_policy_dst, junos_host_local_policy,
+    policy_packet_icmp, session_host_bound_policy_dst,
 };
 use nat64_icmp_error::try_translate_nat64_icmp_error;
 use rx_telemetry::record_rx_descriptor_telemetry;
@@ -1067,7 +1068,14 @@ pub(super) fn poll_binding_process_descriptor(
                                 worker_ctx.forwarding,
                                 ingress_logical,
                                 authority_zone,
-                                resolved.key.dst_port,
+                                // #9529: the service port after destination
+                                // translation; lo0 below stays on the wire frame.
+                                session_host_bound_policy_dst(
+                                    flow,
+                                    resolved.key.dst_port,
+                                    resolved.decision,
+                                )
+                                .1,
                                 matches!(flow.dst_ip, IpAddr::V6(_)),
                                 // #3171: first L4 byte = ICMP/ICMPv6 type, so an
                                 // error/PMTUD control message stays admitted on a
@@ -1224,6 +1232,12 @@ pub(super) fn poll_binding_process_descriptor(
                                     telemetry.counters,
                                     flow,
                                     meta,
+                                    // #9529: post-translation destination.
+                                    session_host_bound_policy_dst(
+                                        flow,
+                                        resolved.key.dst_port,
+                                        resolved.decision,
+                                    ),
                                     authority_zone,
                                     desc.len as u64,
                                     now_ns,
@@ -2168,7 +2182,15 @@ pub(super) fn poll_binding_process_descriptor(
                                 // the raw physical `meta.ingress_ifindex`.
                                 ingress_logical,
                                 from_zone_id,
-                                flow.forward_key.dst_port,
+                                // #9529: the same post-translation port transit
+                                // policy judges (`policy_dst_port`, #2345).
+                                host_bound_policy_dst(
+                                    flow,
+                                    flow.forward_key.dst_port,
+                                    Some(policy_dst_ip),
+                                    Some(policy_dst_port),
+                                )
+                                .1,
                                 matches!(flow.dst_ip, IpAddr::V6(_)),
                                 // #3171: first L4 byte = ICMP/ICMPv6 type, so
                                 // error/PMTUD control messages are admitted on a
@@ -2273,6 +2295,13 @@ pub(super) fn poll_binding_process_descriptor(
                                 telemetry.counters,
                                 flow,
                                 meta,
+                                // #9529: post-translation destination.
+                                host_bound_policy_dst(
+                                    flow,
+                                    flow.forward_key.dst_port,
+                                    Some(policy_dst_ip),
+                                    Some(policy_dst_port),
+                                ),
                                 from_zone_id,
                                 desc.len as u64,
                                 now_ns,
