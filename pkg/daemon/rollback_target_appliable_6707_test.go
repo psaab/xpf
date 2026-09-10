@@ -58,7 +58,13 @@ func poisonedTarget6707(t *testing.T) *config.Config {
 
 func cleanTarget6707(t *testing.T) *config.Config {
 	t.Helper()
+	// #9588: the zones are declared. Once the gate asks the whole refusal
+	// mirror, a policy naming undeclared zones is correctly refused (#9410:
+	// the helper rejects an unresolvable zone reference), so a fixture that was
+	// "clean" only under the old LenientContentDropped-only predicate would no
+	// longer be clean at all.
 	tree, perrs := config.NewParser(`security {
+  zones { security-zone trust; security-zone untrust; }
   policies {
     from-zone trust to-zone untrust {
       policy rollback-ok {
@@ -84,7 +90,7 @@ func cleanTarget6707(t *testing.T) *config.Config {
 
 func TestRollbackTargetAppliablePreflight6707(t *testing.T) {
 	t.Run("poisoned target is refused", func(t *testing.T) {
-		err := rollbackTargetAppliablePreflight(poisonedTarget6707(t))
+		err := rollbackTargetAppliablePreflight(poisonedTarget6707(t), nil)
 		if err == nil {
 			t.Fatal("a rollback target the dataplane is guaranteed to refuse was ACCEPTED; " +
 				"`commit confirmed` would arm a safety net that reverts the store without " +
@@ -104,7 +110,7 @@ func TestRollbackTargetAppliablePreflight6707(t *testing.T) {
 	})
 
 	t.Run("clean target is accepted", func(t *testing.T) {
-		if err := rollbackTargetAppliablePreflight(cleanTarget6707(t)); err != nil {
+		if err := rollbackTargetAppliablePreflight(cleanTarget6707(t), nil); err != nil {
 			t.Fatalf("a clean rollback target was refused: %v — over-gating denies an "+
 				"operator the confirmed-commit safety net they are entitled to", err)
 		}
@@ -114,7 +120,7 @@ func TestRollbackTargetAppliablePreflight6707(t *testing.T) {
 		// The timeout path handles a nil rollback target by reverting to
 		// bootstrap mode (#1922 Item 1b); refusing here would block the FIRST
 		// commit-confirmed on a fresh store — a brick, not a fence.
-		if err := rollbackTargetAppliablePreflight(nil); err != nil {
+		if err := rollbackTargetAppliablePreflight(nil, nil); err != nil {
 			t.Fatalf("nil rollback target refused: %v", err)
 		}
 	})

@@ -181,16 +181,35 @@ for device-map safety (#1956 R-8/V-3), cluster topology (#5840) and cluster
 identity (#6192).
 
 `rollbackTargetAppliablePreflight` (`rollback_target_appliable_6707.go`) adds
-the missing property: the target must be **appliable at all**. A config whose
-policy compile silently dropped a match / `then permit` constraint on the
-tolerant path carries `config.Policy.LenientContentDropped` (#5575); the
-snapshot lowering stamps such a rule with the `__unsupported__` application
-sentinel and the Rust integrity pre-flight then rejects the WHOLE snapshot. So
-the flag is a local, allocation-free proof that the helper will refuse this
-config — no round trip, and no dependence on helper liveness at arm time.
-`config.LenientDroppedPolicyLocator` is the predicate; it walks BOTH the
-zone-pair and the global policy shapes, because both reach the poison through
-the same `compilePolicy` path.
+the missing property: the target must be **appliable at all**. The predicate is
+`dpuserspace.PolicyContentRejectionReasons`, the Go single source of truth for
+"the helper refuses this WHOLE policy snapshot", which `show security
+match-policies` also gates on. #6707 first keyed on
+`config.LenientDroppedPolicyLocator` alone: the #5575 poison, where a tolerant
+compile dropped a match / `then permit` constraint and the lowering stamped the
+`__unsupported__` sentinel. That was one refusal class of several, so every
+other class still armed a rollback that reverts the store but not forwarding:
+- an undefined or unrepresentable address or application (#3261), including
+  #9524's mixed address forms and #9525's changed application matches;
+- an unresolvable zone (#9410);
+- a zone-pair stanza naming `junos-global` (#9570);
+- a duplicate rule identity (#9584).
+
+Since #9588 the gate asks the mirror, so a class added there reaches `commit
+confirmed` with no edit here, and the two lists cannot drift. It is still a
+local prediction: no round trip, and no dependence on helper liveness at arm
+time.
+
+The call passes the daemon's LIVE feed overlay for the rollback target
+(`d.feedSnapshotsForConfig(rollbackTarget)`), the same source the apply path
+hands the manager (`SetFeedSnapshots`). Address representability is
+feed-aware. With a nil overlay, a declared `dynamic-address` binding reads as
+unrepresentable, so a nil there would refuse `commit confirmed` on every box
+that uses feeds. One consequence is deliberate: while a referenced binding has
+a feed with no installed snapshot yet, `SnapshotForBindings` omits it and the
+mirror fails it closed (#5645). The helper would refuse that snapshot now, so
+`commit confirmed` is refused until the feed is ready. A plain `commit` is
+unaffected.
 
 Without the gate the #6707 sequence is: boot from a persisted config A whose
 policy hits the poison (a lenient boot load, or a peer-sync `SyncApply` — a
@@ -212,9 +231,19 @@ compiled config, so there is nothing to validate.
 
 Regression coverage: `rollback_target_appliable_6707_test.go` (gate behaviour
 plus an AST wiring guard that the call is reached from `commitConfirmedAndApply`
-and absent from the plain-commit entry points) and
-`pkg/config/lenient_dropped_locator_6707_test.go` (both policy shapes, compiled
-by the real tolerant compiler rather than asserted into a struct literal).
+and absent from the plain-commit entry points),
+`rollback_target_mirror_9588_test.go` (one tolerant-compiled row per refusal
+class, each first confirmed to be a strict reject; a feed-backed target that
+arms with the live overlay and is refused without it; the unready-feed refusal;
+and an AST guard that the call passes `feedSnapshotsForConfig` for the same
+target) and `pkg/config/lenient_dropped_locator_6707_test.go` (both policy
+shapes, compiled by the real tolerant compiler rather than asserted into a
+struct literal).
+
+Not covered: a window that `Store.Load` re-arms at boot (#4577) is not
+re-checked against the running binary's refusal classes. The commit was
+accepted before the restart, and refusing to re-arm would make an unconfirmed
+commit permanent, so that path needs a decision rather than this gate.
 
 ### The recovered commit-confirmed rollback fires against a HALF-BUILT daemon (#6739)
 
