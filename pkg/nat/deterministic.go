@@ -487,7 +487,18 @@ func poolParams(pool *config.NATPool, nat64Referenced bool) (detParams, *LookupE
 		if ones == 64 {
 			p.wordOffset = 8
 		}
-		p.hostCount = uint32(len(poolV4)) * uint32(bpi)
+		// #9498: the NAT64 capacity product in 64 bits. The Rust
+		// `build_deterministic_v6` computes it with `checked_mul` and, on
+		// overflow, DOWNGRADES the rule to round-robin. Go used to wrap to a
+		// small, wrong capacity and keep answering as if the pool were
+		// deterministic, so the two planes disagreed about what is deterministic.
+		hostCount := uint64(len(poolV4)) * uint64(bpi)
+		if hostCount > math.MaxUint32 {
+			return p, lerrf(ErrCodeNotDeterministic,
+				"deterministic NAT64 capacity (%d pool addresses x %d blocks) exceeds the 32-bit subscriber space; the dataplane downgrades this pool to round-robin",
+				len(poolV4), bpi)
+		}
+		p.hostCount = uint32(hostCount)
 		return p, nil
 	}
 	return p, lerrf(ErrCodeNotDeterministic, "unsupported deterministic NAT mode %d", mode)
@@ -732,10 +743,21 @@ func lookupReverseInPool(p detParams, poolName string, natIP net.IP, natPort uin
 	if blockIdx >= uint32(p.blocksPerIP) {
 		return nil, lerrf(ErrCodeNotFound, "translated port %d is outside the deterministic block range", natPort)
 	}
-	subIdx := uint32(ipIdx)*uint32(p.blocksPerIP) + blockIdx
-	if subIdx >= p.hostCount {
+	// #9498: widen BEFORE multiplying. `uint32(ipIdx)*uint32(blocksPerIP)` wraps
+	// for a pool with more than 66,576 addresses at 64,512 blocks per address,
+	// and the wrapped index can land BELOW hostCount -- so the lookup returned
+	// the WRONG subscriber instead of failing closed (measured on a
+	// commit-accepted /16 + /21 pool: 10.1.4.16:17408 attributed to 100.64.0.0,
+	// whose real block is 10.0.0.0:1024). This is the lawful-intercept
+	// attribution surface. A product past 2^32 is necessarily >= hostCount
+	// (which is at most 2^32 - 1), so the comparison below fails closed exactly
+	// where the Rust `reverse_deterministic_v4` `checked_mul`/`checked_add`
+	// return None.
+	sub64 := uint64(ipIdx)*uint64(p.blocksPerIP) + uint64(blockIdx)
+	if sub64 >= uint64(p.hostCount) {
 		return nil, lerrf(ErrCodeNotFound, "no subscriber maps to %s:%d", ip4, natPort)
 	}
+	subIdx := uint32(sub64)
 	low, high := blockPorts(p, blockIdx)
 
 	var subscriber string

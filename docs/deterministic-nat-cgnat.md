@@ -46,7 +46,8 @@ This allocates:
 - Block size 2016 = 32 blocks per IP
 - 4 IPs x 32 blocks = 128 subscriber slots
 - 100.64.0.0/25 = 128 hosts (must fit within the 128 blocks -- validated at
-  compile: `totalBlocks >= subscriberCount`). A larger prefix such as
+  compile: `totalBlocks >= subscriberCount`, where `totalBlocks` counts EXPANDED
+  pool hosts, so a CIDR member counts every host it enumerates -- #9498). A larger prefix such as
   `/22` (1024 hosts) is rejected `insufficient capacity (128 blocks) for
   1024 subscribers` -- widen the pool (more public IPs) or shrink the
   block-size to add blocks.
@@ -108,6 +109,16 @@ exact `/128`), and both APIs carry it: REST `internal_prefix_len`, gRPC
 `internal_prefix_len`. It is 0 in IPv4 mode, where the recovered value IS an
 exact host.
 
+**The reverse index arithmetic cannot wrap (#9498).** A reverse lookup computes
+the subscriber index as `pool_index x blocks_per_ip + block_index`. Go computed
+that in 32 bits, so a pool larger than 66,576 addresses (at the widest 64,512
+blocks per address) wrapped, and the wrapped index could land INSIDE the
+subscriber range. The lookup then named the WRONG subscriber instead of failing
+closed. The smallest commit-accepted config that reached it was a `/16` plus a
+`/21` with `block-size 1` and a `/32` subscriber. The index is now computed in 64
+bits, so any index past the subscriber range fails closed, exactly as the Rust
+reverse path (`checked_mul` / `checked_add`) does.
+
 The source must lie **inside the configured subscriber prefix**: the subscriber
 index is derived from the 32-bit word alone, so a source in a DIFFERENT prefix
 that happens to share that word would otherwise be mapped into the in-prefix
@@ -137,7 +148,10 @@ range (1024-65535, the per-prefix allocator range in `userspace-dp/src/nat64.rs`
 (which the NAT64 allocator ignores). The subscriber count is bounded by pool
 capacity (`num_pool_ips * blocks_per_ip`): an IPv6 subscriber word extends far
 beyond the pool, so a subscriber past that capacity fails CLOSED rather than
-aliasing another subscriber's block.
+aliasing another subscriber's block. Go computes that product in 64 bits: a pool
+whose capacity exceeds the 32-bit subscriber space is reported NOT deterministic,
+matching the Rust `build_deterministic_v6` downgrade, rather than wrapping to a
+small, wrong capacity (#9498).
 
 ### Pool Utilization Alarm (#2079)
 

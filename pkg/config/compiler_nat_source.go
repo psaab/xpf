@@ -3,6 +3,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"math"
 	"net"
 	"strconv"
 	"strings"
@@ -900,7 +901,23 @@ func compileNATSource(node *Node, sec *SecurityConfig) error {
 			return fmt.Errorf("pool %q: block-size %d exceeds port range %d", pool.Name, det.BlockSize, portRange)
 		}
 		blocksPerIP := portRange / det.BlockSize
-		totalBlocks := len(pool.Addresses) * blocksPerIP
+		// #9498: capacity is EXPANDED pool hosts x blocks-per-address -- the unit
+		// the allocator and the reverse lookup index by. It counted address
+		// STATEMENTS, so a CIDR member counted once and a pool whose hosts really
+		// had the capacity was rejected (an over-refusal), and the singular
+		// `pool.Address` was not counted at all. Saturating, like the #5877
+		// aggregate gate that shares `sourceNATPoolMemberHostCount`.
+		var poolHosts uint64
+		if pool.Address != "" {
+			poolHosts = checkedAddU64(poolHosts, sourceNATPoolMemberHostCount(pool.Address))
+		}
+		for _, a := range pool.Addresses {
+			poolHosts = checkedAddU64(poolHosts, sourceNATPoolMemberHostCount(a))
+		}
+		totalBlocks := uint64(math.MaxUint64)
+		if poolHosts <= math.MaxUint64/uint64(blocksPerIP) {
+			totalBlocks = poolHosts * uint64(blocksPerIP)
+		}
 
 		if bits == 128 {
 			// IPv6 host address — validate word-aligned prefix
@@ -913,7 +930,7 @@ func compileNATSource(node *Node, sec *SecurityConfig) error {
 			}
 		} else {
 			// IPv4 host address
-			hostCount := 1 << uint(bits-ones)
+			hostCount := uint64(1) << uint(bits-ones)
 			if totalBlocks < hostCount {
 				return fmt.Errorf("pool %q: insufficient capacity (%d blocks) for %d subscribers", pool.Name, totalBlocks, hostCount)
 			}
