@@ -109,6 +109,8 @@ func (m *Manager) buildSessionSyncRequestV4(op string, key dataplane.SessionKey,
 		// A keyed-GRE synced session is retracted by its idle timeout rather
 		// than by an explicit delete.
 		req.TunnelDiscriminator = val.TunnelDiscriminator
+		// #9412: forward the close class so the standby imports the close state.
+		req.TCPCloseClass = val.TCPCloseClass
 		if val.Flags&dataplane.SessFlagSNAT == 0 {
 			req.NATSrcIP = ""
 			req.NATSrcPort = 0
@@ -207,6 +209,8 @@ func (m *Manager) buildSessionSyncRequestV6(op string, key dataplane.SessionKeyV
 		req.RTFlowSessionID = val.RTFlowSessionID
 		// #7188: carry the tunnel session-identity discriminator (see V4).
 		req.TunnelDiscriminator = val.TunnelDiscriminator
+		// #9412: forward the close class so the standby imports the close state.
+		req.TCPCloseClass = val.TCPCloseClass
 		if val.Flags&dataplane.SessFlagSNAT == 0 {
 			req.NATSrcIP = ""
 			req.NATSrcPort = 0

@@ -116,21 +116,11 @@ pub(in crate::afxdp::session_glue) fn handle_upsert_synced(
     // it: delete-sync releases the CURRENT decision, which no longer names that
     // port.
     let previous_reservation = sessions.entry_with_origin(&key);
-    if sessions.upsert_synced_with_origin(
-        SessionInstall {
-            key: entry.key,
-            decision: entry.decision,
-            metadata: entry.metadata,
-            origin: entry.origin,
-            now_ns,
-            protocol: entry.protocol,
-            tcp_flags: entry.tcp_flags,
-            // #5212: carry the peer's stable RT_FLOW id from the synced entry so
-            // the standby ADOPTS it (non-zero on a wire import; 0 => local alloc).
-            session_id: entry.session_id,
-        },
-        allow_replace_local,
-    ) {
+    // #9412: the Copy fields read after the install, captured before
+    // `into_session_install` consumes the entry. It carries the peer's stable
+    // RT_FLOW id (#5212) and close class (#9412) onto the install.
+    let (entry_origin, entry_decision) = (entry.origin, entry.decision);
+    if sessions.upsert_synced_with_origin(entry.into_session_install(now_ns), allow_replace_local) {
         // #6979 F3: release the replaced session's reservation when the new
         // entry will NOT re-reserve this flow. Mirrors `handle_delete_synced`'s
         // teardown exactly — same helpers, same holder id — because it is the
@@ -140,9 +130,9 @@ pub(in crate::afxdp::session_glue) fn handle_upsert_synced(
         // port is never released twice and a same-tuple refresh keeps its
         // holder bit (a release/re-reserve would open a window where another
         // worker's local allocation could steal the port).
-        let new_entry_reserves = entry.origin.is_peer_synced()
+        let new_entry_reserves = entry_origin.is_peer_synced()
             && !metadata.is_reverse
-            && entry.decision.nat.rewrite_src.is_some();
+            && entry_decision.nat.rewrite_src.is_some();
         if !new_entry_reserves {
             if let Some((prev_decision, prev_metadata, _)) = previous_reservation {
                 release_source_nat_allocation_for_worker(
@@ -174,12 +164,12 @@ pub(in crate::afxdp::session_glue) fn handle_upsert_synced(
         // pool source port; a local-origin entry already allocated its port on
         // the active path). The reservation is freed by the standard teardown
         // (`release_source_nat_allocation`) on reap or delete-sync.
-        if entry.origin.is_peer_synced() && !metadata.is_reverse {
+        if entry_origin.is_peer_synced() && !metadata.is_reverse {
             reserve_synced_source_nat_allocation_for_worker(
                 &forwarding.iface_nat_allocators,
                 &forwarding.source_nat_rules,
                 &key,
-                entry.decision.nat,
+                entry_decision.nat,
                 metadata.is_reverse,
                 // #6211: the active's zone pair, so the reservation lands in
                 // the allocator the active used when two rules share a pool
@@ -208,7 +198,7 @@ pub(in crate::afxdp::session_glue) fn handle_upsert_synced(
             crate::nat64::reserve_synced_nat64_allocation_for_worker(
                 &forwarding.nat64,
                 &key,
-                entry.decision.nat,
+                entry_decision.nat,
                 metadata.is_reverse,
                 // #6528: same clock, same reason as the source-NAT reserve.
                 now_ns,
@@ -219,9 +209,9 @@ pub(in crate::afxdp::session_glue) fn handle_upsert_synced(
             session_map_fd,
             forwarding,
             &key,
-            entry.decision,
+            entry_decision,
             &metadata,
-            entry.origin,
+            entry_origin,
             allow_replace_local,
         );
     }

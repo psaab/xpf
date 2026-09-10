@@ -181,6 +181,12 @@ type SessionSyncRequest struct {
 	// shape, for the same reason. `userspace-dp/src/session/routing_domain_wire.rs`
 	// owns the encoding; the only correct thing to do here is carry it unchanged.
 	RoutingDomain uint32 `json:"routing_domain,omitempty"`
+	// TCPCloseClass (#9412): forwarded from SessionValue{,V6}.TCPCloseClass so
+	// the standby's helper imports a session that closed on the primary with
+	// its close bits set and on its close window. 0 = not carried or not
+	// closing, which imports exactly as before. userspace-dp's
+	// SessionSyncRequest declares the same key.
+	TCPCloseClass uint8 `json:"tcp_close_class,omitempty"`
 }
 
 // SessionDeltaInfo is the HA session-open/close delta as it reaches this
@@ -345,4 +351,10 @@ type SessionDeltaInfo struct {
 	// sender did not state a domain, and the default instance has its own
 	// non-zero marker. Carried opaquely; Go never decodes it.
 	RoutingDomain uint32 `json:"routing_domain,omitempty"`
+	// TCPCloseClass (#9412): the helper's close class for this session, carried
+	// as the trailing byte after RoutingDomain on the binary frame. 0 = not
+	// carried or not closing, 1 = CLOSING, 2 = TIME_WAIT, 3 = RST.
+	// A close-state "update" delta carries the session's new class. An open
+	// carries its current class, so a bulk resync can restore a dropped update.
+	TCPCloseClass uint8 `json:"tcp_close_class,omitempty"`
 }

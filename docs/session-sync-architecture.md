@@ -1416,6 +1416,105 @@ keys and different discriminators both ride the window.
   session only with `gre-performance-acceleration` on — i.e. only in the
   configuration this field exists to serve.
 
+### TCP Close Class (#9412)
+
+A session that CLOSES on the owning node after it was synced used to stay open on
+the peer. The incremental sweep only sends sessions CREATED since its last tick
+(`val.Created >= threshold`), so it cannot carry a mid-life change. Nothing else
+did either. After a failover with no traffic, the standby's copy reaped on the
+ESTABLISHED window instead of its close window.
+
+**Wire value.** `TcpCloseClass::to_wire`:
+
+| value | meaning |
+|---|---|
+| `0` | open, or not carried |
+| `1` | CLOSING |
+| `2` | TIME_WAIT |
+| `3` | RST |
+
+The value is direction-neutral. The carrier is a NEW field. It is not
+`SessionValue.TCPState`, which keeps its meaning as the BPF mirror's own field,
+and not the synced `tcp_flags`, which stay `0`.
+
+**Producer.** `emit_close_state_update` pushes a `SessionDeltaKind::Update` for
+the forward entry when a packet changes the session's close class on the node
+that owns it. Open deltas carry the entry's current class, so a resync re-export
+restores a dropped Update. An Update emits no RT_FLOW SESSION_CREATE.
+
+**Carriage.** Like `TunnelDiscriminator` above, it is a length-gated trailing field
+on every hop:
+1. The helper writes it as the trailing byte of the open-layout frame. An Update
+   uses that layout on type 3, `MSG_SESSION_UPDATE`. The JSON RPC-fallback leg
+   carries it as `SessionDeltaInfo.tcp_close_class`.
+2. The daemon decodes it into `SessionDeltaInfo.TCPCloseClass` and stamps
+   `SessionValue{,V6}.TCPCloseClass`. The walker syncs `"update"` like `"open"`.
+3. `SessionSync` encodes it as a trailing byte after `RoutingDomain`, with no
+   `SessionSyncWireVersion` bump.
+4. The peer daemon forwards it on `SessionSyncRequest.tcp_close_class`.
+5. `upsert_synced_with_origin` imports the copy with its close bits set and its
+   expiry from `tcp_close_window_ns`. TIME_WAIT sets both FIN bits. CLOSING sets
+   neither, because the wire does not say which direction FINed.
+
+An old peer on either side sends and reads `0`, which is the pre-#9412 behaviour.
+Volume: at most one Update per class transition, so no more than three per
+session over its life.
+
+**Resends never regress the class.** The live acceptance found the sender itself
+undoing an Update.
+- `syncSweep` and the bulk window resend a session FROM THE MIRROR, and the mirror
+  row's `TCPCloseClass` is always `0`.
+- So a session that closed inside one sweep window sent Open(0), then Update(1),
+  then a sweep frame with 0, and the peer's copy went back to the established
+  window.
+- The fix: `stampInstallGenV4/V6`, the one stamp every session frame passes
+  (delta, sweep and bulk), consults a memo of the class already sent.
+
+The memo:
+- **Identity.** Keyed by (tuple, `SessionID`).
+  - The install generation cannot key it, because every send draws a fresh one.
+  - `SessionID` is the helper's stable id on the mirror row (#6666). On the delta
+    path it is the same id whenever the helper supplied one
+    (`adoptedOrLocalSyncedSessionID`).
+  - A reused tuple has a new id, so it misses the old record in any arrival order.
+  - A mismatch, or `SessionID` 0 ("no identity"), makes the memo not apply. That
+    fails toward class 0, never toward an early reap.
+- **Semantics.**
+  - Within one incarnation the class only progresses.
+  - The record is evicted in `takeDeleteGenV4/V6`.
+  - It is bounded by `genGuardMapCap`; at the cap no new record is written, which
+    again fails toward 0.
+  - It lives under `genSentMu`, inside critical sections that already held it.
+- **The order identity cannot see** is the OLD incarnation's own closing frame
+  arriving after a reused tuple's newer frame.
+  - The receiver's install-generation guard refuses it as strictly older.
+  - `TestLateOldIncarnationCloseFrameIsRefused9412` pins that dependency, with an
+    in-order control.
+
+**Companions and promote.**
+- `synthesized_synced_reverse_entry` gives the reverse companion the forward
+  entry's class.
+- A promote republishes the session's live class into the shared maps.
+- With `0` in either, the standby re-installed the reverse half on the established
+  window. `companion_keeps_alive` does not read `closing`, so that companion can
+  hold the closing forward alive.
+- This is read from the code. The live probe's exact-key query never matched the
+  reverse half, so the companion was not observed live.
+
+**Bound: replica workers (#9582).** Only the worker that installed a session
+announces its transitions. A worker replica (`WorkerLocalImport`) mints its own
+`session_id`, so an Update from it would flip the peer's adopted id (#5212) and
+miss the sender memo.
+
+A close that only a replica sees is therefore not announced. That is typically
+the server's FIN or RST on the other interface's RSS queue.
+
+| Close seen by | Announced? | Effect on the peer |
+|---|---|---|
+| installer (the client's FIN) | yes | CLOSING is announced |
+| replica only: server FIN reaching TIME_WAIT | no | small, because TIME_WAIT shares CLOSING's 30 s default window |
+| replica only: server RST | no | stays on the established window until the next announcement or delete |
+
 ### Node-Local BPF-ABI Session Id (#6198)
 
 `SessionValue{,V6}.SessionID` is the *other*, node-local id: the on-map BPF

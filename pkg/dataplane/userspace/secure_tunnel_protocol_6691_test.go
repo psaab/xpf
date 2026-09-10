@@ -73,7 +73,10 @@ const preSecureTunnelProtocolVersion = 4
 // helper WRITES that struct a daemon/helper size mismatch copies past the
 // helper's buffer. A v11 helper still handles secure_tunnel correctly, so
 // MinProtocolSecureTunnelRefusal (7) is untouched a fourth time.
-const secureTunnelSnapshotProtocolVersion = 12
+// Issue 9412 moved it 12 -> 13, for the HA session-sync close class, where the
+// old behaviour is the defect. It is another move not made for a snapshot field,
+// and the equality this constant feeds is unchanged.
+const secureTunnelSnapshotProtocolVersion = 13
 
 // preV5HelperAcceptsSnapshot models the exact-equality version gate a pre-v5
 // helper applies before touching any dataplane state

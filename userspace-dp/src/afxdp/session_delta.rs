@@ -261,6 +261,8 @@ pub(in crate::afxdp) fn session_delta_info(
         // withhold a protocol-47 session from a peer that cannot express it
         // instead of importing it aliased onto another tunnel's key.
         tunnel_discriminator: delta.key.discriminator.to_wire(),
+        // #9412: the close class, on the JSON leg exactly as on the binary frame.
+        tcp_close_class: delta.tcp_close_class,
     }
 }
 
@@ -581,5 +583,7 @@ fn session_delta_event(kind: SessionDeltaKind) -> &'static str {
     match kind {
         SessionDeltaKind::Open => "open",
         SessionDeltaKind::Close => "close",
+        // #9412: the JSON leg names it; the Go walker syncs it like an open.
+        SessionDeltaKind::Update => "update",
     }
 }

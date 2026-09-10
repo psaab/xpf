@@ -46,6 +46,9 @@ pub(crate) struct SessionInstall {
     /// receiver falls back to `alloc_session_id()` (pre-#5212 behavior,
     /// rolling-upgrade safe). Only `upsert_synced_with_origin` consults it.
     pub(crate) session_id: u64,
+    /// #9412: the TCP close class a peer stated for this session on the HA wire
+    /// (`0` = open or not carried). Only `upsert_synced_with_origin` consults it.
+    pub(crate) tcp_close_class: u8,
 }
 
 /// In-place update or promotion of an existing session. Carries a

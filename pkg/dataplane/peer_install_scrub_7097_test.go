@@ -442,8 +442,17 @@ func TestSessionValueFieldCountIsPinned7097(t *testing.T) {
 		// node-local and names a different NIC on the peer, which is why #6928
 		// declined to sync one and why #7095 had to invent a name fold instead.
 		// A cluster-stable number needs no scrub.
-		{"SessionValue", reflect.TypeOf(SessionValue{}), 38},
-		{"SessionValueV6", reflect.TypeOf(SessionValueV6{}), 39},
+		//
+		// 39/40 since #9412 added TCPCloseClass, classified NOT node-local. It is
+		// the OWNING node's TCP close class (0 open, 1 CLOSING, 2 TIME_WAIT,
+		// 3 RST), computed from the packets that node saw, and carried to the
+		// peer precisely so the peer's copy reaps on the right window after a
+		// failover. It names no local resource: no ifindex, no FIB result, no
+		// MAC. It means the same thing on either node. Scrubbing it would
+		// reintroduce #9412, where a session that closed on the primary imports
+		// on the established window.
+		{"SessionValue", reflect.TypeOf(SessionValue{}), 39},
+		{"SessionValueV6", reflect.TypeOf(SessionValueV6{}), 40},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := tc.typ.NumField(); got != tc.want {

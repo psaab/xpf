@@ -133,6 +133,9 @@ pub(in crate::afxdp::session_glue) fn maybe_promote_synced_session(
             // delta reads it via `entry_by_key`), so this shared replica needs
             // no id (0 = "alloc a fresh local id" on any re-import).
             session_id: 0,
+            // #9412: republish the promoted session with its LIVE close class, so
+            // a worker materializing it from the shared maps keeps the close state.
+            tcp_close_class: sessions.close_class_wire_for(key),
         };
         publish_shared_session(
             shared.sessions,

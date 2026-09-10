@@ -429,6 +429,31 @@ impl TcpCloseClass {
             Self::Closing
         }
     }
+
+    /// #9412: the HA wire encoding of a close class. `0` is reserved for "not
+    /// carried / not closing", so an older peer's absent byte reads as today's
+    /// behaviour and no class ever encodes to it.
+    #[inline]
+    pub(crate) fn to_wire(self) -> u8 {
+        match self {
+            Self::Closing => 1,
+            Self::TimeWait => 2,
+            Self::Reset => 3,
+        }
+    }
+
+    /// #9412: decode a wire close class. `0`, and any value this build does not
+    /// know, is `None` ("not carried"), so a class a newer peer invents imports
+    /// as not-closing rather than on a guessed window.
+    #[inline]
+    pub(crate) fn from_wire(wire: u8) -> Option<Self> {
+        match wire {
+            1 => Some(Self::Closing),
+            2 => Some(Self::TimeWait),
+            3 => Some(Self::Reset),
+            _ => None,
+        }
+    }
 }
 
 impl SessionEntry {
@@ -444,6 +469,16 @@ impl SessionEntry {
             TcpCloseClass::TimeWait
         } else {
             TcpCloseClass::Closing
+        }
+    }
+
+    /// #9412: this entry's close class on the HA wire, `0` while it is open.
+    #[inline]
+    pub(crate) fn tcp_close_class_wire(&self) -> u8 {
+        if self.closing {
+            self.tcp_close_class().to_wire()
+        } else {
+            0
         }
     }
 }
@@ -1959,6 +1994,12 @@ impl SessionTable {
         self.entry_by_key(key).map(|e| e.session_id).unwrap_or(0)
     }
 
+    /// #9412: the live entry's close class on the HA wire (`0` if open or
+    /// absent), for the Open deltas that re-announce an existing session.
+    pub(crate) fn close_class_wire_for(&self, key: &SessionKey) -> u8 {
+        self.entry_by_key(key).map(|e| e.tcp_close_class_wire()).unwrap_or(0)
+    }
+
     /// #8125: the session's OWN inactivity window, in whole seconds, for the
     /// `Timeout:` column of `show security flow session`.
     ///
@@ -2147,6 +2188,60 @@ impl SessionTable {
     /// and adjacent — the repeated-parameter-cluster shape this repo's API rule
     /// says to fold into a context struct, and one where a transposition
     /// between `close`, `reset` and `fin` would be silent.
+    /// #9412: push a close-state `Update` for the session `matched_key` belongs
+    /// to, iff its close class changed from `class_before` (wire form).
+    ///
+    /// Keyed on the FORWARD entry, which is what every sync delta names. A FIN
+    /// seen on the reverse half resolves its forward companion the way
+    /// `propagate_tcp_state_to_companion` does.
+    ///
+    /// A peer-synced copy never announces: that would echo the owner's own
+    /// state back to it, the same sync loop the install-time Open avoids.
+    ///
+    /// Volume, against #8593: at most one delta per class TRANSITION, and a
+    /// retransmitted FIN in the same class emits nothing. A session can
+    /// therefore emit at most three over its life (CLOSING, TIME_WAIT, RST).
+    pub(in crate::session) fn emit_close_state_update(&mut self, matched_key: &SessionKey, class_before: u8) {
+        let Some(matched) = self.entry_by_key(matched_key) else {
+            return;
+        };
+        let class_after = matched.tcp_close_class_wire();
+        if class_after == class_before {
+            return;
+        }
+        let forward_key = if matched.metadata.is_reverse {
+            reverse_session_key(matched_key, matched.decision.nat)
+        } else {
+            matched_key.clone()
+        };
+        let Some(forward) = self.entry_by_key(&forward_key) else {
+            return;
+        };
+        if forward.metadata.is_reverse || forward.origin.is_peer_synced() {
+            return;
+        }
+        // The metadata clone bumps the bound policy-counter Arc (#5445). That is
+        // acceptable here only because this runs on a class transition, never
+        // on the per-packet path.
+        let delta = SessionDelta {
+            kind: SessionDeltaKind::Update,
+            key: forward_key.clone(),
+            decision: forward.decision,
+            metadata: forward.metadata.clone(),
+            origin: forward.origin,
+            fabric_redirect_sync: false,
+            created_ns: forward.created_ns,
+            last_seen_ns: forward.last_seen_ns,
+            counters: SessionCounters::default(),
+            observed_tos: forward.observed_tos,
+            observed_tcp_flags: forward.observed_tcp_flags,
+            session_id: forward.session_id,
+            bulk_resync: false,
+            tcp_close_class: class_after,
+        };
+        self.push_delta(delta);
+    }
+
     pub(in crate::session) fn propagate_tcp_state_to_companion(
         &mut self,
         matched_key: &SessionKey,
@@ -2494,7 +2589,11 @@ impl SessionTable {
             // same entry as created_ns/counters), so the Open delta announcing
             // the new local ownership carries the id already assigned at import.
             let session_id = self.entry_by_key(key).map(|e| e.session_id).unwrap_or(0);
+            // #9412: a promote re-announces the session, so it carries the close
+            // class the entry already holds.
+            let tcp_close_class = self.close_class_wire_for(key);
             self.push_delta(SessionDelta {
+                tcp_close_class,
                 kind: SessionDeltaKind::Open,
                 key: key.clone(),
                 decision,
@@ -3224,6 +3323,12 @@ mod tcp_close_state_7342_tests;
 #[cfg(test)]
 #[path = "tcp_flags_zero_on_sync_path_9412_tests.rs"]
 mod tcp_flags_zero_on_sync_path_9412_tests;
+
+// #9412 ACCEPTANCE: install OPEN, close on the primary, fail over with no
+// traffic, reap on the close window. Written before the fix; compiles at base.
+#[cfg(test)]
+#[path = "close_state_sync_9412_acceptance_tests.rs"]
+mod close_state_sync_9412_acceptance_tests;
 
 // #7212: the static input-filter revalidation stamp lifecycle. Its own file
 // rather than another block in the 8k-line `tests.rs`, per the modularity rule

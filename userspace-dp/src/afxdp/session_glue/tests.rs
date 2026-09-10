@@ -410,6 +410,85 @@ fn maybe_promote_synced_session_sets_fabric_ingress_on_fabric_hit() {
     assert!(promoted.fabric_ingress);
 }
 
+/// #9412: a promote republishes the session with its LIVE close class.
+///
+/// `maybe_promote_synced_session` mirrors the promoted entry into the shared maps
+/// and to peer workers. With 0 there, a worker materializing it went back to the
+/// established window, and a later sweep of that copy re-announced class 0.
+/// Class 0 is the control.
+#[test]
+fn promote_republishes_the_live_close_class_9412() {
+    for class in [0u8, 1, 2, 3] {
+        let mut sessions = SessionTable::new();
+        let key = test_key();
+        let decision = test_decision();
+        let metadata = test_metadata();
+        assert!(sessions.upsert_synced_with_origin(
+            SessionInstall {
+                key: key.clone(),
+                decision,
+                metadata: metadata.clone(),
+                origin: SessionOrigin::SyncImport,
+                now_ns: 1_000_000,
+                protocol: PROTO_TCP,
+                tcp_flags: 0x10,
+                session_id: 0,
+                tcp_close_class: class,
+            },
+            false,
+        ));
+        assert_eq!(
+            sessions.close_class_wire_for(&key),
+            class,
+            "FIXTURE: the seeded import must carry close class {class} before the promote"
+        );
+
+        let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+        let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
+        let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
+        let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
+        let peer_worker_commands: Vec<Arc<Mutex<VecDeque<WorkerCommand>>>> = Vec::new();
+        let forwarding = test_forwarding_state_with_fabric();
+        let shared = super::SharedSessionRefs {
+            sessions: &shared_sessions,
+            nat_sessions: &shared_nat_sessions,
+            forward_wire_sessions: &shared_forward_wire_sessions,
+            owner_rg_indexes: &shared_owner_rg_indexes,
+        };
+        let _ = maybe_promote_synced_session(
+            &mut sessions,
+            -1,
+            shared,
+            &peer_worker_commands,
+            &forwarding,
+            &key,
+            decision,
+            metadata,
+            SessionOrigin::SyncImport,
+            false,
+            2_000_000,
+            PROTO_TCP,
+            0x10,
+        );
+        let published = shared_sessions
+            .lock()
+            .expect("shared sessions")
+            .get(&key)
+            .cloned()
+            .expect("FIXTURE: the promote must republish the session into the shared map");
+        assert_eq!(
+            published.origin,
+            SessionOrigin::SharedPromote,
+            "FIXTURE: the shared entry must be the promote's republish"
+        );
+        assert_eq!(
+            published.tcp_close_class, class,
+            "#9412: the promote republished close class {} instead of the live class {class}",
+            published.tcp_close_class
+        );
+    }
+}
+
 #[test]
 fn maybe_promote_synced_session_skips_worker_local_import() {
     let mut sessions = SessionTable::new();
@@ -513,6 +592,7 @@ fn resolve_flow_session_decision_promotes_stale_fabric_shared_hit_to_local_owner
         // #2170 test fixture: no peer install generation.
         generation: 0,
         session_id: 0,
+        tcp_close_class: 0,
     };
     publish_shared_session(
         &shared_sessions,
@@ -593,6 +673,7 @@ fn lookup_session_across_scopes_returns_shared_entry() {
         // #2170 test fixture: no peer install generation.
         generation: 0,
         session_id: 0,
+        tcp_close_class: 0,
     };
     let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
@@ -669,6 +750,7 @@ fn lookup_session_across_scopes_returns_shared_forward_wire_entry() {
         // #2170 test fixture: no peer install generation.
         generation: 0,
         session_id: 0,
+        tcp_close_class: 0,
     };
     let translated_key = forward_wire_key(&key, decision.nat);
     let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
@@ -770,6 +852,7 @@ fn lookup_session_across_scopes_prefers_shared_entry_over_fabric_wire_placeholde
         // #2170 test fixture: no peer install generation.
         generation: 0,
         session_id: 0,
+        tcp_close_class: 0,
     };
     let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
@@ -827,6 +910,7 @@ fn lookup_forward_nat_across_scopes_returns_shared_nat_entry() {
         // #2170 test fixture: no peer install generation.
         generation: 0,
         session_id: 0,
+        tcp_close_class: 0,
     };
     let reply_key = reverse_session_key(&key, decision.nat);
     let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
@@ -888,6 +972,7 @@ fn lookup_forward_nat_across_scopes_prefers_shared_entry_over_fabric_wire_placeh
         // #2170 test fixture: no peer install generation.
         generation: 0,
         session_id: 0,
+        tcp_close_class: 0,
     };
     let reply_key = reverse_session_key(&key, decision.nat);
     let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
@@ -978,6 +1063,7 @@ fn lookup_forward_nat_across_scopes_returns_shared_canonical_reverse_entry() {
         // #2170 test fixture: no peer install generation.
         generation: 0,
         session_id: 0,
+        tcp_close_class: 0,
     };
     let canonical_reply = reverse_canonical_key(&key, decision.nat);
     let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
@@ -1027,6 +1113,7 @@ fn publish_and_remove_shared_session_tracks_forward_wire_alias() {
         // #2170 test fixture: no peer install generation.
         generation: 0,
         session_id: 0,
+        tcp_close_class: 0,
     };
     let translated_key = forward_wire_key(&key, decision.nat);
 
@@ -1079,6 +1166,7 @@ fn publish_and_remove_shared_session_tracks_canonical_reverse_alias() {
         // #2170 test fixture: no peer install generation.
         generation: 0,
         session_id: 0,
+        tcp_close_class: 0,
     };
     let canonical_reply = reverse_canonical_key(&key, decision.nat);
 
@@ -1128,6 +1216,7 @@ fn publish_and_remove_shared_session_tracks_owner_rg_indexes() {
         // #2170 test fixture: no peer install generation.
         generation: 0,
         session_id: 0,
+        tcp_close_class: 0,
     };
     let forward_wire = forward_wire_key(&key, decision.nat);
     let reverse_wire = reverse_session_key(&key, decision.nat);
@@ -1221,6 +1310,7 @@ fn publish_shared_session_reindexes_owner_rg_on_replace() {
         // #2170 test fixture: no peer install generation.
         generation: 0,
         session_id: 0,
+        tcp_close_class: 0,
     };
 
     publish_shared_session(
@@ -1274,6 +1364,7 @@ fn publish_shared_session_heals_missing_owner_rg_index_on_same_owner_update() {
         // #2170 test fixture: no peer install generation.
         generation: 0,
         session_id: 0,
+        tcp_close_class: 0,
     };
 
     publish_shared_session(
@@ -1331,6 +1422,7 @@ fn resolve_flow_session_decision_uses_canonical_key_for_translated_forward_hit()
         // #2170 test fixture: no peer install generation.
         generation: 0,
         session_id: 0,
+        tcp_close_class: 0,
     };
     let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
@@ -1410,6 +1502,7 @@ fn resolve_flow_session_decision_promotes_translated_shared_hit_on_active_fabric
         // #2170 test fixture: no peer install generation.
         generation: 0,
         session_id: 0,
+        tcp_close_class: 0,
     };
     let mut forwarding = test_forwarding_state_with_fabric();
     forwarding.connected_v4.push(ConnectedRouteV4 {
@@ -1600,6 +1693,7 @@ fn resolve_flow_session_decision_keeps_translated_shared_hit_transient_on_inacti
         // #2170 test fixture: no peer install generation.
         generation: 0,
         session_id: 0,
+        tcp_close_class: 0,
     };
     let mut forwarding = test_forwarding_state_with_fabric();
     forwarding.connected_v4.push(ConnectedRouteV4 {
@@ -1687,6 +1781,7 @@ fn resolve_flow_session_decision_keeps_translated_shared_hit_transient_on_inacti
         // #2170 test fixture: no peer install generation.
         generation: 0,
         session_id: 0,
+        tcp_close_class: 0,
     };
     let mut forwarding = test_forwarding_state_with_fabric();
     forwarding.connected_v4.push(ConnectedRouteV4 {
@@ -1863,6 +1958,7 @@ fn apply_worker_commands_replaces_stale_local_session_for_inactive_owner_rg() {
             // #2170 test fixture: no peer install generation.
             generation: 0,
             session_id: 0,
+            tcp_close_class: 0,
         }));
     let mut ha_state = BTreeMap::new();
     ha_state.insert(1, inactive_ha_runtime(0));
@@ -1931,6 +2027,7 @@ fn apply_worker_commands_preserves_local_session_for_active_owner_rg() {
             // #2170 test fixture: no peer install generation.
             generation: 0,
             session_id: 0,
+            tcp_close_class: 0,
         }));
     let mut ha_state = BTreeMap::new();
     ha_state.insert(1, active_ha_runtime(monotonic_nanos() / 1_000_000_000));
@@ -2056,6 +2153,7 @@ fn apply_worker_commands_still_deletes_peer_synced_session_9048() {
             protocol: PROTO_TCP,
             tcp_flags: 0x10,
             session_id: 0,
+            tcp_close_class: 0,
         },
         /* allow_replace_local = */ true,
     ));
@@ -2740,6 +2838,7 @@ fn demote_shared_owner_rgs_preserves_reverse_entries_and_marks_all_synced() {
         // #2170 test fixture: no peer install generation.
         generation: 0,
         session_id: 0,
+        tcp_close_class: 0,
     };
     let reverse = SyncedSessionEntry {
         key: reverse_session_key(&forward.key, forward.decision.nat),
@@ -2756,6 +2855,7 @@ fn demote_shared_owner_rgs_preserves_reverse_entries_and_marks_all_synced() {
         // #2170 test fixture: no peer install generation.
         generation: 0,
         session_id: 0,
+        tcp_close_class: 0,
     };
     publish_shared_session(
         &shared_sessions,
@@ -2826,6 +2926,7 @@ fn demoted_shared_local_forward_session_enters_reverse_prewarm_index() {
         // #2170 test fixture: no peer install generation.
         generation: 0,
         session_id: 0,
+        tcp_close_class: 0,
     };
     entry.metadata.owner_rg_id = 1;
 
@@ -2881,6 +2982,7 @@ fn prewarm_reverse_synced_sessions_after_demotion_recomputes_split_owner_reverse
         // #2170 test fixture: no peer install generation.
         generation: 0,
         session_id: 0,
+        tcp_close_class: 0,
     };
     entry.metadata.owner_rg_id = 1;
 
@@ -3594,6 +3696,7 @@ fn synthesized_synced_reverse_entry_preserves_fabric_ingress_and_reverse_flag() 
         // #2170 test fixture: no peer install generation.
         generation: 0,
         session_id: 0,
+        tcp_close_class: 0,
     };
 
     let reverse = synthesized_synced_reverse_entry(
@@ -3655,6 +3758,7 @@ fn synthesized_synced_reverse_entry_carries_no_ingress_identity_7917() {
         tcp_flags: 0x10,
         generation: 0,
         session_id: 0,
+        tcp_close_class: 0,
     };
 
     let reverse = synthesized_synced_reverse_entry(
@@ -3739,6 +3843,7 @@ fn synthesized_synced_reverse_entry_inherits_nat64_reverse_4565() {
         tcp_flags: 0x10,
         generation: 0,
         session_id: 0,
+        tcp_close_class: 0,
     };
 
     let reverse = synthesized_synced_reverse_entry(
@@ -3800,6 +3905,7 @@ fn reverse_companion_inherits_forward_inactivity_timeout_5153() {
         tcp_flags: 0x10,
         generation: 0,
         session_id: 0,
+        tcp_close_class: 0,
     };
 
     let reverse =
@@ -3813,6 +3919,41 @@ fn reverse_companion_inherits_forward_inactivity_timeout_5153() {
         "reverse companion must inherit the forward session's per-app idle \
          timeout, not fall back to the global timeout"
     );
+}
+
+/// #9412: the reverse companion of a peer import carries the forward entry's close
+/// class.
+///
+/// With 0 here, every close-state Update, the takeover reverse prewarm and the
+/// reconcile replay re-installed the reverse half on the established window, and
+/// `companion_keeps_alive` (which ignores `closing`) can hold the closing forward
+/// alive with it. Read from the code; the live probe cannot see the reverse half.
+/// Class 0 is the control: the companion invents nothing.
+#[test]
+fn reverse_companion_inherits_forward_close_class_9412() {
+    let forwarding = test_forwarding_state();
+    let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
+    for class in [0u8, 1, 2, 3] {
+        let entry = SyncedSessionEntry {
+            key: test_key(),
+            decision: test_decision(),
+            metadata: test_metadata(),
+            origin: SessionOrigin::SyncImport,
+            protocol: PROTO_TCP,
+            tcp_flags: 0x10,
+            generation: 0,
+            session_id: 0,
+            tcp_close_class: class,
+        };
+        let reverse =
+            synthesized_synced_reverse_entry(&forwarding, &BTreeMap::new(), &dynamic_neighbors, &entry, 1)
+                .expect("reverse companion");
+        assert!(reverse.metadata.is_reverse, "FIXTURE: the synthesizer must build the reverse half");
+        assert_eq!(
+            reverse.tcp_close_class, class,
+            "#9412: the reverse companion must carry the forward import's close class {class}"
+        );
+    }
 }
 
 // #5153: the direct `build_reverse_session_from_forward_match` builder must
@@ -3884,6 +4025,7 @@ fn synthesized_synced_reverse_entry_tracks_local_client_when_owner_rg_active() {
         // #2170 test fixture: no peer install generation.
         generation: 0,
         session_id: 0,
+        tcp_close_class: 0,
     };
     let mut ha_state = BTreeMap::new();
     ha_state.insert(1, active_ha_runtime(1));
@@ -3917,6 +4059,7 @@ fn synthesized_synced_reverse_entry_uses_fabric_redirect_when_client_rg_inactive
         // #2170 test fixture: no peer install generation.
         generation: 0,
         session_id: 0,
+        tcp_close_class: 0,
     };
     let mut ha_state = BTreeMap::new();
     ha_state.insert(1, active_ha_runtime(1));
@@ -4152,6 +4295,7 @@ fn prewarm_reverse_synced_sessions_for_owner_rgs_adds_reverse_companion() {
         // #2170 test fixture: no peer install generation.
         generation: 0,
         session_id: 0,
+        tcp_close_class: 0,
     };
     publish_shared_session(
         &shared_sessions,
@@ -4222,6 +4366,7 @@ fn prewarm_reverse_synced_sessions_for_owner_rgs_restores_shared_promote_forward
         // #2170 test fixture: no peer install generation.
         generation: 0,
         session_id: 0,
+        tcp_close_class: 0,
     };
     publish_shared_session(
         &shared_sessions,
@@ -4302,6 +4447,7 @@ fn prewarm_reverse_synced_sessions_recomputes_when_reverse_owner_rg_activates() 
         // #2170 test fixture: no peer install generation.
         generation: 0,
         session_id: 0,
+        tcp_close_class: 0,
     };
     entry.metadata.owner_rg_id = 1;
     publish_shared_session(
@@ -4369,6 +4515,7 @@ fn reverse_prewarm_index_tracks_split_reverse_owner_rg_candidate() {
         // #2170 test fixture: no peer install generation.
         generation: 0,
         session_id: 0,
+        tcp_close_class: 0,
     };
     entry.metadata.owner_rg_id = 1;
 
@@ -4480,6 +4627,7 @@ fn republish_bpf_session_entries_covers_all_sessions_in_owner_rg_index() {
         // #2170 test fixture: no peer install generation.
         generation: 0,
         session_id: 0,
+        tcp_close_class: 0,
     };
     // Publish to shared table + sessions index (but NOT reverse_prewarm).
     publish_shared_session(
@@ -4583,6 +4731,7 @@ fn synced_session_hit_recomputes_local_resolution_after_failover() {
             // #2170 test fixture: no peer install generation.
             generation: 0,
             session_id: 0,
+            tcp_close_class: 0,
         },
     );
     let peer_worker_commands = Vec::new();
@@ -4707,6 +4856,7 @@ fn reverse_materialized_shared_hit_adopts_replica_session_id_6313() {
                 // #2170 test fixture: no peer install generation.
                 generation: 0,
                 session_id,
+                tcp_close_class: 0,
             },
         );
     }
@@ -4858,6 +5008,7 @@ fn apply_worker_commands_dispatch_order_pin_with_demote_dedup() {
         // #2170 test fixture: no peer install generation.
         generation: 0,
         session_id: 0,
+        tcp_close_class: 0,
     };
 
     // Build a minimal TxRequest for the EnqueueShapedLocal step.
@@ -5126,6 +5277,7 @@ fn test_synced_entry() -> SyncedSessionEntry {
         // #2170 test fixture: no peer install generation.
         generation: 0,
         session_id: 0,
+        tcp_close_class: 0,
     }
 }
 
@@ -5269,6 +5421,7 @@ fn w3_forward_entry(src_host: u8, src_port: u16, snat_ip: Ipv4Addr) -> SyncedSes
         // #2170 test fixture: no peer install generation.
         generation: 0,
         session_id: 0,
+        tcp_close_class: 0,
     }
 }
 
@@ -5451,6 +5604,7 @@ fn shared_nat_displacement_counter_counts_collisions_not_republishes() {
         // #2170 test fixture: no peer install generation.
         generation: 0,
         session_id: 0,
+        tcp_close_class: 0,
     };
     let mut direct = dnat.clone();
     direct.key.dst_ip = backend;
@@ -5590,6 +5744,7 @@ fn local_tunnel_pair() -> (SyncedSessionEntry, SyncedSessionEntry) {
         // #2170 test fixture: no peer install generation.
         generation: 0,
         session_id: 0,
+        tcp_close_class: 0,
     };
     let reverse = synthesized_synced_reverse_entry(
         &forwarding,
@@ -5848,6 +6003,7 @@ fn flush_session_deltas_without_binding_reaches_global_consumers() {
         tcp_flags: 0x10,
         generation: 0,
         session_id: 0,
+        tcp_close_class: 0,
     };
     publish_shared_session(
         &shared_sessions,
@@ -5882,6 +6038,7 @@ fn flush_session_deltas_without_binding_reaches_global_consumers() {
         observed_tcp_flags: 0,
         session_id: 0,
         bulk_resync: false,
+        tcp_close_class: 0,
     };
 
     // Synthesize a binding identity with labels only — exactly what the
@@ -6005,6 +6162,7 @@ fn flush_session_deltas_rt_flow_app_id_uses_post_nat_dst_port() {
         observed_tcp_flags: 0,
         session_id: 0,
         bulk_resync: false,
+        tcp_close_class: 0,
     };
 
     // Drive the production drain loop and return the stamped application_id off
@@ -6154,6 +6312,7 @@ fn flush_session_deltas_session_close_reresolves_policy_id_after_reorder() {
         observed_tcp_flags: 0,
         session_id: 0,
         bulk_resync: false,
+        tcp_close_class: 0,
     };
 
     let (handle, rx) = crate::event_stream::test_worker_handle(
@@ -6261,6 +6420,7 @@ fn flush_session_deltas_event_stream_drop_latches_out_of_sync() {
         observed_tcp_flags: 0,
         session_id: 0,
         bulk_resync: false,
+        tcp_close_class: 0,
     };
 
     let ident = BindingIdentity {
@@ -6364,6 +6524,7 @@ fn flush_session_deltas_full_queue_send_is_bounded_and_latches_out_of_sync() {
         observed_tcp_flags: 0,
         session_id: 0,
         bulk_resync: false,
+        tcp_close_class: 0,
     };
 
     // Saturate the channel: fill every slot with a best-effort filler push so the
@@ -6489,6 +6650,7 @@ fn resync_export_aggregate_lossless_wait_is_bounded_below_heartbeat() {
         observed_tcp_flags: 0,
         session_id: 0,
         bulk_resync: false,
+        tcp_close_class: 0,
     };
     for _ in 0..capacity {
         handle.push_delta(&open, &forwarding.zone_name_to_id);
@@ -6610,6 +6772,7 @@ fn close_delta_deletes_dnat_table_entry_for_snat_flow() {
             observed_tcp_flags: 0,
             session_id: 0,
             bulk_resync: false,
+            tcp_close_class: 0,
         }
     };
 
@@ -7644,6 +7807,7 @@ fn handle_upsert_synced_resolves_active_zone_pair_for_snat_reserve_6211() {
         tcp_flags: 0,
         generation: 0,
         session_id: 0,
+        tcp_close_class: 0,
     };
 
     let mut sessions = SessionTable::new();
@@ -7759,6 +7923,7 @@ fn delete_synced_frees_both_allocators_end_to_end_6211() {
         tcp_flags: 0,
         generation: 0,
         session_id: 0,
+        tcp_close_class: 0,
     };
 
     let mut sessions = SessionTable::new();
@@ -7864,6 +8029,7 @@ fn nat_reverse_fixture_7169() -> (
         tcp_flags: 0,
         generation: 0,
         session_id: 0,
+        tcp_close_class: 0,
     };
     let reply_key = reverse_session_key(&key, decision.nat);
     let shared = Arc::new(Mutex::new(FastMap::default()));
@@ -8367,6 +8533,7 @@ fn f3_entry_6979(nat: NatDecision) -> SyncedSessionEntry {
         tcp_flags: 0,
         generation: 0,
         session_id: 0,
+        tcp_close_class: 0,
     }
 }
 
@@ -9014,6 +9181,7 @@ fn delta_8593(key: &SessionKey, bulk_resync: bool) -> SessionDelta {
         observed_tcp_flags: 0,
         session_id: 0,
         bulk_resync,
+        tcp_close_class: 0,
     }
 }
 
@@ -9135,6 +9303,7 @@ fn publish8586(
             tcp_flags: 0x10,
             generation: 0,
             session_id: 0,
+            tcp_close_class: 0,
         },
     );
 }
@@ -9285,6 +9454,7 @@ fn only_a_refused_delete_moves_the_worker_epoch_8586() {
                 tcp_flags: 0x10,
                 generation: 0,
                 session_id: 0,
+                tcp_close_class: 0,
             }),
         );
         assert!(
@@ -9892,4 +10062,106 @@ fn force_live_test_key_9517() -> SessionKey {
         discriminator: crate::session::TunnelDiscriminator::None,
         routing_domain: 0,
     }
+}
+
+/// #9412: a close-state `Update` must reach the peer and must NOT become an
+/// RT_FLOW SESSION_CREATE. The issue called out that a reused Open would emit a
+/// spurious CREATE, which is the regression this pins.
+///
+/// The delta carries `log_session_init = true`, the one input that makes an
+/// Open emit CREATE. POSITIVE CONTROL: the identical delta as an Open DOES emit
+/// one, so "no CREATE" below cannot be a harness that never emits any.
+#[test]
+fn flush_session_deltas_update_syncs_without_an_rt_flow_create_9412() {
+    let forwarding = ForwardingState::default();
+    let key = SessionKey {
+        addr_family: libc::AF_INET as u8,
+        protocol: PROTO_TCP,
+        src_ip: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 50)),
+        dst_ip: IpAddr::V4(Ipv4Addr::new(203, 0, 113, 10)),
+        src_port: 51000,
+        dst_port: 443,
+        discriminator: Default::default(),
+        routing_domain: 0,
+    };
+    let mut metadata = test_metadata();
+    metadata.log_session_init = true;
+    let make_delta = |kind| SessionDelta {
+        kind,
+        key: key.clone(),
+        decision: test_decision(),
+        metadata: metadata.clone(),
+        origin: SessionOrigin::ForwardFlow,
+        fabric_redirect_sync: false,
+        created_ns: 0,
+        last_seen_ns: 0,
+        counters: crate::session::SessionCounters::default(),
+        observed_tos: 0,
+        observed_tcp_flags: 0,
+        session_id: 77,
+        bulk_resync: false,
+        tcp_close_class: 2,
+    };
+    let flush = |delta: SessionDelta| {
+        let (handle, rx) = // CONNECTED, so the lossless peer-sync push can queue; the unconnected handle
+        // refuses it before any frame reaches the channel.
+        crate::event_stream::test_worker_handle_connected(
+            8,
+            crate::event_stream::DataplaneEventRateLimitConfig { events_per_second: 0, burst: 0 },
+        );
+        let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+        let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
+        let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
+        let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
+        let recent_session_deltas = Arc::new(Mutex::new(VecDeque::new()));
+        let peer_worker_commands: Vec<Arc<Mutex<VecDeque<WorkerCommand>>>> = Vec::new();
+        let ident = BindingIdentity {
+            slot: 0,
+            queue_id: 0,
+            worker_id: 0,
+            interface: Arc::<str>::from("ge-0-0-2"),
+            ifindex: 7,
+        };
+        let dnat_fds = crate::afxdp::checksum::DnatTableFds::default();
+        let mut worker_lossless_wedged = false;
+        flush_session_deltas(
+            &ident,
+            None,
+            -1,
+            -1,
+            -1,
+            &dnat_fds,
+            &[delta],
+            &shared_sessions,
+            &shared_nat_sessions,
+            &shared_forward_wire_sessions,
+            &shared_owner_rg_indexes,
+            &recent_session_deltas,
+            &peer_worker_commands,
+            crate::afxdp::empty_worker_commands_by_id(),
+            &Some(handle),
+            &forwarding,
+            &mut worker_lossless_wedged,
+        );
+        std::iter::from_fn(|| rx.try_recv().ok()).collect::<Vec<_>>()
+    };
+
+    let open = flush(make_delta(SessionDeltaKind::Open));
+    assert!(
+        open.iter().filter_map(|f| f.dataplane_event_payload()).any(|p| p[52] == 1),
+        "CONTROL: an Open with log_session_init must emit an RT_FLOW SESSION_CREATE in this harness"
+    );
+
+    let update = flush(make_delta(SessionDeltaKind::Update));
+    assert!(
+        update.iter().all(|f| f.dataplane_event_payload().is_none()),
+        "#9412: a close-state Update emitted an RT_FLOW record, a spurious SESSION_CREATE"
+    );
+    let sync: Vec<_> = update.iter().filter(|f| f.as_bytes()[4] == 3 /* MSG_SESSION_UPDATE; the #9412 golden lockstep pins this byte in both languages */).collect();
+    assert_eq!(sync.len(), 1, "#9412: the Update must be queued to the peer exactly once as MSG_SESSION_UPDATE");
+    assert_eq!(
+        *sync[0].as_bytes().last().expect("a non-empty frame"),
+        2,
+        "#9412: the queued Update must end with its close class"
+    );
 }

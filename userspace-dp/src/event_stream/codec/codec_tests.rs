@@ -654,6 +654,7 @@ fn test_encode_session_open_v4() {
         &zones,
         false,
         0,
+        0, // #9412: tcp_close_class
     );
 
     // Check header
@@ -696,7 +697,7 @@ fn test_encode_session_open_zone_id_above_255() {
     md.ingress_zone = 300;
     md.egress_zone = 1000;
     let frame =
-        EventFrame::encode_session_open(1, &test_key_v4(), &test_decision(), &md, &zones, false, 0);
+        EventFrame::encode_session_open(1, &test_key_v4(), &test_decision(), &md, &zones, false, 0, 0);
     let p = &frame.data[FRAME_HEADER_SIZE..];
     assert_eq!(u16::from_le_bytes([p[27], p[28]]), 300); // IngressZoneID u16
     assert_eq!(u16::from_le_bytes([p[29], p[30]]), 1000); // EgressZoneID u16
@@ -724,7 +725,7 @@ fn test_encode_session_open_carries_log_flags() {
     md.log_session_init = true;
     md.log_session_close = true;
     let frame =
-        EventFrame::encode_session_open(1, &test_key_v4(), &test_decision(), &md, &zones, false, 0);
+        EventFrame::encode_session_open(1, &test_key_v4(), &test_decision(), &md, &zones, false, 0, 0);
     let p = &frame.data[FRAME_HEADER_SIZE..];
     assert_eq!(
         p[26] & FLAG_LOG_SESSION_INIT,
@@ -748,6 +749,7 @@ fn test_encode_session_open_carries_log_flags() {
         &zones,
         false,
         0,
+        0, // #9412: tcp_close_class
     );
     let pc = &frame_close.data[FRAME_HEADER_SIZE..];
     assert_eq!(pc[26] & FLAG_LOG_SESSION_INIT, 0);
@@ -762,6 +764,7 @@ fn test_encode_session_open_carries_log_flags() {
         &zones,
         false,
         0,
+        0, // #9412: tcp_close_class
     );
     let pn = &frame_none.data[FRAME_HEADER_SIZE..];
     assert_eq!(pn[26] & (FLAG_LOG_SESSION_INIT | FLAG_LOG_SESSION_CLOSE), 0);
@@ -792,7 +795,7 @@ fn test_encode_session_open_carries_nat64_flag_and_snat_v4() {
             discriminator: Default::default(),
             routing_domain: 0,
     };
-    let frame = EventFrame::encode_session_open(1, &key, &decision, &md, &zones, false, 0);
+    let frame = EventFrame::encode_session_open(1, &key, &decision, &md, &zones, false, 0, 0);
     let payload = &frame.data[FRAME_HEADER_SIZE..frame.len as usize];
     assert_eq!(
         payload[26] & FLAG_NAT64,
@@ -803,7 +806,7 @@ fn test_encode_session_open_carries_nat64_flag_and_snat_v4() {
     // first: #7239 routing_domain 4, #7188 discriminator 8, #5212 session_id 8
     // — so snat_v4 is three fields from the end. Every append behind it moves
     // this window, which is why the total is spelled out rather than assumed.
-    let n = payload.len();
+    let n = payload.len() - 1; // #9412: discount the trailing close-class byte; the reads below are end-relative
     assert_eq!(
         &payload[n - 24..n - 20],
         &[203, 0, 113, 5],
@@ -813,10 +816,10 @@ fn test_encode_session_open_carries_nat64_flag_and_snat_v4() {
 
     // A non-NAT64 v4 session: flag clear, snat_v4 all-zero.
     let frame_plain =
-        EventFrame::encode_session_open(2, &test_key_v4(), &test_decision(), &md, &zones, false, 0);
+        EventFrame::encode_session_open(2, &test_key_v4(), &test_decision(), &md, &zones, false, 0, 0);
     let pp = &frame_plain.data[FRAME_HEADER_SIZE..frame_plain.len as usize];
     assert_eq!(pp[26] & FLAG_NAT64, 0, "non-nat64 must leave the flag clear");
-    let m = pp.len();
+    let m = pp.len() - 1; // #9412: discount the trailing close-class byte; the reads below are end-relative
     assert_eq!(&pp[m - 20..m - 16], &[0, 0, 0, 0], "non-nat64 snat is zero");
 }
 
@@ -841,9 +844,10 @@ fn test_encode_session_open_carries_session_id_5212() {
         &zones,
         false,
         session_id,
+        0, // #9412: tcp_close_class
     );
     let payload = &frame.data[FRAME_HEADER_SIZE..frame.len as usize];
-    let n = payload.len();
+    let n = payload.len() - 1; // #9412: discount the trailing close-class byte; the reads below are end-relative
     // The session id is now THIRD from last: #7188 appended an 8-byte
     // discriminator behind it and #7239 a 4-byte routing domain behind that, so
     // it sits at [n-20 .. n-12]. The 4 bytes before it are the #4565 snat_v4
@@ -870,9 +874,10 @@ fn test_encode_session_open_carries_session_id_5212() {
         &zones,
         false,
         0,
+        0, // #9412: tcp_close_class
     );
     let p0 = &frame0.data[FRAME_HEADER_SIZE..frame0.len as usize];
-    let n0 = p0.len();
+    let n0 = p0.len() - 1; // #9412: discount the trailing close-class byte
     assert_eq!(
         u64::from_le_bytes(p0[n0 - 20..n0 - 12].try_into().unwrap()),
         0,
@@ -893,7 +898,7 @@ fn test_encode_session_open_carries_policy_fields_3301() {
     md.policy_counter_idx = 7;
     md.inactivity_timeout_ns = Some(30 * 1_000_000_000);
     let frame =
-        EventFrame::encode_session_open(1, &test_key_v4(), &test_decision(), &md, &zones, false, 0);
+        EventFrame::encode_session_open(1, &test_key_v4(), &test_decision(), &md, &zones, false, 0, 0);
     let p = &frame.data[FRAME_HEADER_SIZE..frame.len as usize];
     // #3301 trailing block: policy_id, policy_counter_idx, inactivity_timeout
     // (seconds), each u32 LE. Everything appended AFTER it, newest last:
@@ -901,7 +906,7 @@ fn test_encode_session_open_carries_policy_fields_3301() {
     // routing_domain 4 = 24 trailing bytes. So the policy block is at
     // [n-36 .. n-24], snat_v4 = [n-24 .. n-20], id = [n-20 .. n-12],
     // discriminator = [n-12 .. n-4], routing_domain = last 4.
-    let n = p.len();
+    let n = p.len() - 1; // #9412: discount the trailing close-class byte; the reads below are end-relative
     let policy_id = u32::from_le_bytes(p[n - 36..n - 32].try_into().unwrap());
     let counter_idx = u32::from_le_bytes(p[n - 32..n - 28].try_into().unwrap());
     let inact_secs = u32::from_le_bytes(p[n - 28..n - 24].try_into().unwrap());
@@ -918,9 +923,10 @@ fn test_encode_session_open_carries_policy_fields_3301() {
         &zones,
         false,
         0,
+        0, // #9412: tcp_close_class
     );
     let pn = &frame_none.data[FRAME_HEADER_SIZE..frame_none.len as usize];
-    let m = pn.len();
+    let m = pn.len() - 1; // #9412: discount the trailing close-class byte; the reads below are end-relative
     // Shifted by the #4565 snat_v4 (4) + #5212 session_id (8) + #7188 tunnel
     // discriminator (8) trailing fields.
     assert_eq!(u32::from_le_bytes(pn[m - 32..m - 28].try_into().unwrap()), 0);
@@ -939,6 +945,7 @@ fn test_encode_session_open_v6() {
         &zones,
         false,
         0,
+        0, // #9412: tcp_close_class
     );
 
     let p = &frame.data[FRAME_HEADER_SIZE..];
@@ -997,7 +1004,7 @@ fn test_encode_session_open_high_ifindex_v4() {
     metadata.owner_rg_id = 40000; // > i16::MAX
 
     let frame =
-        EventFrame::encode_session_open(1, &test_key_v4(), &decision, &metadata, &zones, false, 0);
+        EventFrame::encode_session_open(1, &test_key_v4(), &decision, &metadata, &zones, false, 0, 0);
     let p = &frame.data[FRAME_HEADER_SIZE..];
 
     // i32 LE reads recover the exact values; an i16 encode could not.
@@ -1079,6 +1086,7 @@ fn test_close_flags() {
         observed_tcp_flags: 0,
         session_id: 0,
         bulk_resync: false,
+        tcp_close_class: 0,
     };
     let flags = close_flags(&delta);
     assert_eq!(flags & FLAG_FABRIC_REDIRECT, FLAG_FABRIC_REDIRECT);
@@ -1147,13 +1155,14 @@ fn session_open_frames_carry_distinct_tunnel_discriminators_7188() {
             &zones,
             false,
             0,
+            0, // #9412: tcp_close_class
         )
     };
     let first = encode(100);
     let second = encode(200);
 
     let tail = |frame: &EventFrame| {
-        let end = frame.len as usize;
+        let end = frame.len as usize - 1; // #9412: discount the trailing close-class byte; the reads below are end-relative
         u64::from_le_bytes(frame.data[end - 12..end - 4].try_into().unwrap())
     };
     assert_eq!(
@@ -1172,7 +1181,7 @@ fn session_open_frames_carry_distinct_tunnel_discriminators_7188() {
     // frames differ ONLY in these 8 bytes. #7239 appended a further 4 behind
     // it, so the common prefix now stops 12 from the end.
     let body =
-        |frame: &EventFrame| frame.data[FRAME_HEADER_SIZE..frame.len as usize - 12].to_vec();
+        |frame: &EventFrame| frame.data[FRAME_HEADER_SIZE..frame.len as usize - 13] /* #9412: + the close-class byte */.to_vec();
     assert_eq!(
         body(&first),
         body(&second),
@@ -1202,8 +1211,9 @@ fn session_open_frames_carry_the_routing_domain_7239() {
         &FxHashMap::default(),
         false,
         0,
+        0, // #9412: tcp_close_class
     );
-    let end = frame.len as usize;
+    let end = frame.len as usize - 1; // #9412: discount the trailing close-class byte; the reads below are end-relative
     assert_eq!(
         u32::from_le_bytes(frame.data[end - 4..end].try_into().unwrap()),
         100_007,
@@ -1261,8 +1271,9 @@ fn session_open_frames_state_none_explicitly_for_non_tunnel_protocols_7188() {
         &zones,
         false,
         0,
+        0, // #9412: tcp_close_class
     );
-    let end = frame.len as usize;
+    let end = frame.len as usize - 1; // #9412: discount the trailing close-class byte; the reads below are end-relative
     let tail = u64::from_le_bytes(frame.data[end - 12..end - 4].try_into().unwrap());
     assert_ne!(
         tail, 0,
@@ -1286,6 +1297,7 @@ fn v6_session_open_frame_still_fits_the_buffer_7188() {
         &zones,
         false,
         0,
+        0, // #9412: tcp_close_class
     );
     assert!(
         (frame.len as usize) <= frame.data.len(),
@@ -1293,4 +1305,54 @@ fn v6_session_open_frame_still_fits_the_buffer_7188() {
         frame.len,
         frame.data.len()
     );
+}
+
+/// #9412 LOCKSTEP. The close-state UPDATE frame is compared byte for byte
+/// against a golden file that the Go decoder reads too
+/// (`pkg/dataplane/userspace/testdata/session_update_frame_9412.hex`). So
+/// neither language can move or rename the close-class byte on its own: the
+/// encoder must still produce these bytes, and the decoder must still read the
+/// class out of them. Regenerate the golden only for a deliberate layout change,
+/// with `XPF_WRITE_GOLDEN_9412=1`.
+#[test]
+fn test_encode_session_update_matches_the_shared_golden_9412() {
+    let zones = test_zone_map();
+    let frame = EventFrame::encode_session_update(
+        42,
+        &test_key_v4(),
+        &test_decision(),
+        &test_metadata(),
+        &zones,
+        false,
+        0x5EED,
+        2,
+    );
+    assert_eq!(frame.data[4], MSG_SESSION_UPDATE);
+    let bytes = &frame.data[..frame.len as usize];
+    assert_eq!(bytes[bytes.len() - 1], 2, "#9412: the close class must be the frame's last byte");
+    let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../pkg/dataplane/userspace/testdata/session_update_frame_9412.hex"
+    );
+    if std::env::var_os("XPF_WRITE_GOLDEN_9412").is_some() {
+        std::fs::write(path, format!("{hex}\n")).expect("write golden");
+    }
+    let golden = std::fs::read_to_string(path).expect("read the shared golden");
+    assert_eq!(
+        hex,
+        golden.trim(),
+        "#9412: the UPDATE frame no longer matches the golden the Go decoder is pinned to"
+    );
+}
+
+/// #9412: an OPEN frame carries the session's current close class too, so a
+/// resync re-export restores a dropped Update.
+#[test]
+fn test_encode_session_open_carries_the_close_class_9412() {
+    let zones = test_zone_map();
+    let frame =
+        EventFrame::encode_session_open(7, &test_key_v4(), &test_decision(), &test_metadata(), &zones, false, 0, 1);
+    assert_eq!(frame.data[4], MSG_SESSION_OPEN);
+    assert_eq!(frame.data[frame.len as usize - 1], 1);
 }

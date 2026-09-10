@@ -3482,6 +3482,30 @@ outside the monitor loop:
   check→Put→record apply sequence is not held under one `recvGenMu` acquisition;
   it is safe because the per-peer receive path is single-threaded over the single
   active fabric (#2198 F3).
+- **Close-class resend memo (#9412)**: `stampInstallGenV4/V6` also keeps a resend
+  from REGRESSING a session's TCP close class.
+  - **Why.** The sweep and the bulk window send from the BPF mirror, whose
+    `TCPCloseClass` is always `0`. Without the memo, a session that closed inside
+    one sweep window reached the peer as Open(0), then Update(CLOSING), then a
+    sweep frame with 0: back to the established window.
+  - **What.** The memo (`closeClassSentV4/V6`, `sync_close_class_9412.go`) is
+    keyed by (key, `SessionID`). It raises a lower class to the one already sent
+    for the SAME incarnation.
+  - **`SessionID` is used for identity EQUALITY only, never for ordering.** The
+    caution above against ordering by it still stands.
+    - Since #6198/#6311, no two incarnations share an id.
+    - The delta path (`adoptedOrLocalSyncedSessionID`) and the mirror row
+      (`publish_conntrack.rs`) carry the same helper id.
+    - A mismatch or `0` makes the memo not apply. That fails toward class 0 (the
+      pre-#9412 window), never toward an early reap.
+  - **Not the generation.** The generation cannot key it, because every send draws
+    a fresh one.
+  - **Lifetime and locking.** Evicted in `takeDeleteGenV4/V6`. Bounded by
+    `genGuardMapCap`, where a new record skip-records at the cap. Held under
+    `genSentMu`, inside the sections that already took it.
+  - **The one arrival order identity cannot see.** An old incarnation's own
+    closing frame can land after a reused tuple's newer frame. The install guard
+    above refuses it (`TestLateOldIncarnationCloseFrameIsRefused9412`).
 - **The generation guards are REORDERING guards, not ownership guards (#9048)**:
   and reading them as the latter is the natural mistake, because on a
   dual-primary split they are the thing standing where an ownership guard

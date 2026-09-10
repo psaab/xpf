@@ -140,6 +140,7 @@ fn embedded_icmp_nat_match_uses_shared_nat_session_for_ipv4() {
         // #2170 test fixture: no peer install generation.
         generation: 0,
         session_id: 0,
+        tcp_close_class: 0,
     };
     let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
@@ -3455,6 +3456,7 @@ fn poll_descriptor_lo0_filter_drops_cached_local_delivery_session_hit() {
         // #2170 test fixture: no peer install generation.
         generation: 0,
         session_id: 0,
+        tcp_close_class: 0,
     };
     publish_shared_session(
         &shared_sessions,
@@ -4995,6 +4997,7 @@ fn embedded_icmp_resolves_a_translated_gre_tunnel_9031() {
         tcp_flags: 0,
         generation: 0,
         session_id: 0,
+        tcp_close_class: 0,
     };
     let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
@@ -5135,6 +5138,7 @@ fn embedded_icmp_does_not_resolve_a_different_gre_tunnel_9031() {
         tcp_flags: 0,
         generation: 0,
         session_id: 0,
+        tcp_close_class: 0,
     };
     entry.key.discriminator = TunnelDiscriminator::Keyed(session_key_value as u32);
     let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
@@ -5478,6 +5482,7 @@ fn publish_pptp_gre_session_9298(
         tcp_flags: 0,
         generation: 0,
         session_id: 0,
+        tcp_close_class: 0,
     };
     let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
     publish_shared_session(

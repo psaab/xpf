@@ -395,6 +395,7 @@ impl SessionTable {
                                 // SESSION_CREATE did — the correlatable key.
                                 session_id: removed.session_id,
                                 bulk_resync: false,
+                                tcp_close_class: 0,
                             });
                         }
                         expired_entries.push(ExpiredSession {

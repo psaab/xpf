@@ -92,6 +92,10 @@ use cos::{
 mod loop_body;
 pub(crate) use loop_body::worker_loop;
 
+// #9412: the synced session entry and its install mapping live in their own file.
+mod synced_entry;
+pub(crate) use synced_entry::SyncedSessionEntry;
+
 // #6241: typed worker-launch bundles that replace the 38-parameter
 // positional `worker_loop` protocol. Grouped named fields (constructed
 // via `from_coord` / `new` builders) eliminate the positional
@@ -405,35 +409,6 @@ pub(crate) fn fabric_queue_hash_seeded(
     mix(&mut seed, src_port as u64);
     mix(&mut seed, dst_port as u64);
     seed
-}
-
-#[derive(Clone, Debug)]
-pub(crate) struct SyncedSessionEntry {
-    pub(crate) key: SessionKey,
-    pub(crate) decision: SessionDecision,
-    pub(crate) metadata: SessionMetadata,
-    pub(crate) origin: SessionOrigin,
-    pub(crate) protocol: u8,
-    pub(crate) tcp_flags: u8,
-    /// #2170 HA install generation, mirrored from the Go cluster apply
-    /// layer. 0 means unknown/legacy. The local-origin entries (forwarding
-    /// learn, tunnel, promote, etc.) leave this 0 — only SyncImport entries
-    /// from the peer carry a meaningful generation, and the guards only act
-    /// when BOTH the stored and incoming generations are non-zero, so
-    /// local-origin entries fall back to today's unconditional behavior.
-    pub(crate) generation: u64,
-    /// #5212: the originating node's STABLE RT_FLOW session id (`alloc_session_id`
-    /// namespace) carried across the HA session-sync wire. Populated (non-zero)
-    /// only on a peer-synced FORWARD import off the wire (`build_synced_session_entry`),
-    /// where it is threaded onto the imported entry so the standby ADOPTS the
-    /// peer's id instead of minting a fresh local one — the standby's
-    /// SESSION_CLOSE RT_FLOW then correlates with the primary's SESSION_CREATE
-    /// across HA nodes. Local-origin publishes (forwarding learn, tunnel,
-    /// promote) and synthesized reverse companions leave this 0: the incremental
-    /// Open delta carries the real id straight off the live entry
-    /// (`install_with_protocol_with_origin`), and a 0 here on any import path
-    /// falls back to `alloc_session_id()` (rolling-upgrade safe).
-    pub(crate) session_id: u64,
 }
 
 impl BindingWorker {

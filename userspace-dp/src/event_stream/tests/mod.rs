@@ -128,6 +128,7 @@ fn test_close_delta(kind: crate::session::SessionDeltaKind) -> crate::session::S
         observed_tcp_flags: 0x13,
         session_id: 0,
         bulk_resync: false,
+        tcp_close_class: 0,
     }
 }
 

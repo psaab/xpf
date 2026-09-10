@@ -110,6 +110,7 @@ impl crate::afxdp::Coordinator {
                         // SyncedSessionEntry carries no session id. 0 (unknown).
                         session_id: 0,
                         bulk_resync: false,
+                        tcp_close_class: 0,
                     });
                 }
             }

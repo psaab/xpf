@@ -964,6 +964,7 @@ impl crate::afxdp::ha::SessionDomain {
             tcp_flags: 0,
             generation: 0,
             session_id: 0,
+            tcp_close_class: 0,
         });
     }
 }

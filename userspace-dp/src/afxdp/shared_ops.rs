@@ -1037,6 +1037,11 @@ pub(super) fn synthesized_synced_reverse_entry(
         // generation so a delete refusal is consistent across both halves.
         generation: entry.generation,
         session_id: 0,
+        // #9412: the reverse half carries the SAME close class as the forward
+        // import. With 0, every close-state Update (and the takeover prewarm)
+        // re-installed the reverse copy on the established window, and
+        // `companion_keeps_alive` then held the closing forward alive with it.
+        tcp_close_class: entry.tcp_close_class,
     })
 }
 
@@ -1136,6 +1141,7 @@ pub(super) fn install_reverse_session_from_forward_match(
             // Local reverse-flow learning: no peer install generation (#2170).
             generation: 0,
             session_id: 0,
+            tcp_close_class: 0,
         };
         publish_shared_session(
             shared_sessions,

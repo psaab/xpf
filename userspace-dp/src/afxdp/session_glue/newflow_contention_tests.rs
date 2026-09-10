@@ -117,6 +117,7 @@ fn entry(src_port: u16) -> SyncedSessionEntry {
         tcp_flags: TCP_FLAG_ACK_LOCAL,
         generation: 0,
         session_id: 0,
+        tcp_close_class: 0,
     }
 }
 

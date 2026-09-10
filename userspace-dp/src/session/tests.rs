@@ -477,6 +477,7 @@ fn adopted_peer_id_cannot_collide_with_a_local_id_6311() {
             protocol: PROTO_TCP,
             tcp_flags: 0x10,
             session_id: peer_id,
+            tcp_close_class: 0,
         },
         false,
     ));
@@ -595,6 +596,7 @@ fn synced_import_adopts_peer_session_id_5212() {
             protocol: PROTO_TCP,
             tcp_flags: 0x10,
             session_id: peer_id,
+            tcp_close_class: 0,
         },
         false,
     ));
@@ -618,6 +620,7 @@ fn synced_import_adopts_peer_session_id_5212() {
             protocol: PROTO_UDP,
             tcp_flags: 0,
             session_id: 0,
+            tcp_close_class: 0,
         },
         false,
     ));
@@ -1656,6 +1659,13 @@ fn tcp_fin_keeps_session_until_closing_timeout() {
             decision: decision(),
             metadata: metadata(),
         })
+    );
+    // #9412: the FIN moves the session to CLOSING, which is announced once so
+    // the peer's copy reaps on the same window.
+    let closing = table.drain_deltas(8);
+    assert_eq!(
+        closing.iter().map(|d| (d.kind, d.tcp_close_class)).collect::<Vec<_>>(),
+        vec![(SessionDeltaKind::Update, 1)]
     );
     assert!(table.lookup(&key, now + 2_000_000, 0x10).is_some());
     table.last_gc_ns = now + TCP_CLOSING_TIMEOUT_NS;
@@ -4031,6 +4041,8 @@ fn reference_update_session(
     table.restore_entry(key.clone(), entry);
     table.push_to_wheel(key, now_ns);
     if was_peer_synced && !origin.is_peer_synced() && !metadata.is_reverse {
+        // #9412: production's promote stamps the entry's close class; mirror it.
+        let tcp_close_class = table.close_class_wire_for(key);
         table.push_delta(SessionDelta {
             kind: SessionDeltaKind::Open,
             key: key.clone(),
@@ -4045,6 +4057,7 @@ fn reference_update_session(
             observed_tcp_flags: 0,
             session_id: 0,
             bulk_resync: false,
+            tcp_close_class,
         });
     }
     true
@@ -6251,6 +6264,7 @@ fn session_limit_ha_import_promote_demote_count() {
             protocol: PROTO_TCP,
             tcp_flags: 0x10,
             session_id: 0,
+            tcp_close_class: 0,
         },
         false,
     ));
@@ -6333,6 +6347,7 @@ fn session_limit_synced_sessions_enforced_after_failover() {
                 protocol: PROTO_TCP,
                 tcp_flags: 0x10,
                 session_id: 0,
+                tcp_close_class: 0,
             },
             false,
         ));
@@ -6381,6 +6396,7 @@ fn session_limit_synced_reimport_nets_to_one() {
                 protocol: PROTO_TCP,
                 tcp_flags: 0x10,
                 session_id: 0,
+                tcp_close_class: 0,
             },
             true,
         ));
@@ -6418,6 +6434,7 @@ fn session_limit_synced_reverse_import_excluded() {
             protocol: PROTO_TCP,
             tcp_flags: 0x10,
             session_id: 0,
+            tcp_close_class: 0,
         },
         false,
     ));
@@ -6590,6 +6607,7 @@ fn session_limit_counts_match_live_counted_entries_invariant() {
             protocol: PROTO_TCP,
             tcp_flags: 0x10,
             session_id: 0,
+            tcp_close_class: 0,
         },
         false,
     );
@@ -6796,6 +6814,7 @@ fn session_limit_backcount_on_enable_covers_preexisting_sessions() {
             protocol: PROTO_TCP,
             tcp_flags: 0x10,
             session_id: 0,
+            tcp_close_class: 0,
         },
         false,
     );
@@ -7171,6 +7190,7 @@ fn open_delta(key: SessionKey) -> SessionDelta {
         observed_tcp_flags: 0,
         session_id: 0,
         bulk_resync: false,
+        tcp_close_class: 0,
     }
 }
 

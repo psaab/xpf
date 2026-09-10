@@ -133,6 +133,7 @@ pub(in crate::afxdp) fn install_helper_local_session_on_miss(
         // (`emit_open_delta_with_origin`), not via this shared replica — so 0
         // here (a cross-worker materialize of this entry re-allocs a local id).
         session_id: 0,
+        tcp_close_class: 0,
     };
     // #1789: count a failed helper-local session publish (same
     // shim-missing-key consequence as every other publish site).
