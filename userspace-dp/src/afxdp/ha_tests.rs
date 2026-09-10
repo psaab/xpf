@@ -4956,3 +4956,202 @@ fn owner_rg_export_exact_fit_reports_no_more() {
         "the buffers are empty, so there is no remainder to page for"
     );
 }
+
+// ---------------------------------------------------------------------------
+// #9514 — an HA same-key replacement with a CHANGED NAT decision must not strand
+// the old decision's reverse-NAT steering holder.
+//
+// Two written claims contradicted each other about byte-identical code: #9514
+// said the old holder is stranded and later refuses row reclamation; a validated
+// external report recorded "FIXED: synchronized same-key NAT replacement cleanup
+// releases prior steering holders". Measured through the production import path
+// at 5fafce23f, before this fix: the A->B holder survived the replacement AND the
+// delete (a_after_delete=1), and a later session on row A had its map delete
+// refused (later_row_a_deletes=0). The report was wrong about this code.
+//
+// THE FIXTURE MUST MOVE THE STEERING ROW. A holder row is keyed on
+// `(protocol, SNAT source address, SNAT source port)` only, so a replacement
+// that keeps the same SNAT tuple re-acquires the very holder a release would
+// drop and cannot distinguish the claims. A and B differ in `rewrite_src_port`.
+//
+// Rows are unique to these cells (203.0.113.95, ports 49514-49519): the holder
+// registry is process-global, and #8291 is the history of cells trampling each
+// other's rows.
+//
+// Observable: the holder accounting plus the test-only DNAT_DELETE_ATTEMPTS
+// counter, bumped immediately before the `bpf_map_delete_elem` syscall. Real BPF
+// maps cannot be created under `cargo test`; the refusal being pinned happens in
+// the accounting, before that syscall.
+// ---------------------------------------------------------------------------
+
+fn snat_row_9514(port: u16) -> NatDecision {
+    NatDecision {
+        rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 95))),
+        rewrite_src_port: Some(port),
+        ..NatDecision::default()
+    }
+}
+
+fn synced_with_nat_9514(key: SessionKey, nat: NatDecision, generation: u64) -> SyncedSessionEntry {
+    let mut e = synced_entry_with_generation(generation);
+    e.key = key;
+    e.decision.nat = nat;
+    e
+}
+
+fn coordinator_with_dnat_fd_9514() -> Coordinator {
+    let coordinator = Coordinator::new();
+    coordinator.bpf_maps.store(std::sync::Arc::new(crate::afxdp::coordinator::BpfMaps {
+        dnat_table_fd: Some(OwnedFd { fd: -1 }),
+        ..Default::default()
+    }));
+    coordinator
+}
+
+/// A second session on the SAME steering row as `key`: the row carries no
+/// remote endpoint, so differing only in the remote lands on it.
+fn same_row_sibling_9514(key: &SessionKey) -> SessionKey {
+    let mut k2 = key.clone();
+    k2.dst_ip = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 95));
+    k2
+}
+
+/// FAIL-ON-REVERT: A -> B (different rows), delete, then a later session on row A.
+/// Before the fix: a_after_replace=1, a_after_delete=1, later_row_a_deletes=0.
+#[test]
+fn ha_same_key_replace_changing_the_snat_row_releases_the_old_holder_9514() {
+    use crate::afxdp::checksum::{dnat_steering_holder_count, DNAT_DELETE_ATTEMPTS};
+    let _g = crate::afxdp::checksum::dnat_counter_guard();
+    let coordinator = coordinator_with_dnat_fd_9514();
+    let key = test_key();
+    let (a, b) = (snat_row_9514(49514), snat_row_9514(49515));
+    assert_ne!(
+        crate::afxdp::checksum::dnat_steering_key(&key, a),
+        crate::afxdp::checksum::dnat_steering_key(&key, b),
+        "precondition: A and B must be DIFFERENT steering rows, or this cell cannot \
+         distinguish a released holder from a re-acquired one"
+    );
+    assert_eq!(dnat_steering_holder_count(&key, a), 0, "row A must start empty");
+
+    coordinator.upsert_synced_session(synced_with_nat_9514(key.clone(), a, 1));
+    assert_eq!(dnat_steering_holder_count(&key, a), 1, "precondition: import holds row A");
+
+    coordinator.upsert_synced_session(synced_with_nat_9514(key.clone(), b, 2));
+    let a_after_replace = dnat_steering_holder_count(&key, a);
+    let b_after_replace = dnat_steering_holder_count(&key, b);
+    assert_eq!(b_after_replace, 1, "precondition: the replacement landed and holds row B");
+
+    coordinator.delete_synced_session(key.clone());
+    let a_after_delete = dnat_steering_holder_count(&key, a);
+    let b_after_delete = dnat_steering_holder_count(&key, b);
+
+    // A later, unrelated session lands on row A and closes.
+    let k2 = same_row_sibling_9514(&key);
+    coordinator.upsert_synced_session(synced_with_nat_9514(k2.clone(), a, 1));
+    let d1 = DNAT_DELETE_ATTEMPTS.load(Ordering::Relaxed);
+    coordinator.delete_synced_session(k2.clone());
+    let later_row_a_deletes = DNAT_DELETE_ATTEMPTS.load(Ordering::Relaxed) - d1;
+
+    assert!(
+        a_after_replace == 0 && a_after_delete == 0 && b_after_delete == 0 && later_row_a_deletes == 1,
+        "#9514: a same-key HA replacement that MOVES the steering row must release the old \
+         row's holder. Measured: a_after_replace={a_after_replace} a_after_delete={a_after_delete} \
+         b_after_delete={b_after_delete} later_row_a_deletes={later_row_a_deletes} (1 = a later \
+         session on row A reclaims it; 0 = the stranded holder refuses the map delete)"
+    );
+}
+
+/// DOUBLE-RELEASE CONTROL: A -> A. It cannot distinguish the #9514 claims (the
+/// replacement re-acquires the holder a release would drop), and that is why the
+/// fix is gated on the row changing: releasing here would drop a LIVE session's
+/// hold and delete its row.
+#[test]
+fn ha_same_key_replace_with_the_same_snat_row_holds_exactly_once_9514() {
+    use crate::afxdp::checksum::{dnat_steering_holder_count, DNAT_DELETE_ATTEMPTS};
+    let _g = crate::afxdp::checksum::dnat_counter_guard();
+    let coordinator = coordinator_with_dnat_fd_9514();
+    let key = test_key();
+    let a = snat_row_9514(49516);
+    assert_eq!(dnat_steering_holder_count(&key, a), 0, "row must start empty");
+
+    coordinator.upsert_synced_session(synced_with_nat_9514(key.clone(), a, 1));
+    let d0 = DNAT_DELETE_ATTEMPTS.load(Ordering::Relaxed);
+    coordinator.upsert_synced_session(synced_with_nat_9514(key.clone(), a, 2));
+    let deletes_on_refresh = DNAT_DELETE_ATTEMPTS.load(Ordering::Relaxed) - d0;
+    let after_refresh = dnat_steering_holder_count(&key, a);
+    let d1 = DNAT_DELETE_ATTEMPTS.load(Ordering::Relaxed);
+    coordinator.delete_synced_session(key.clone());
+    let deletes_on_delete = DNAT_DELETE_ATTEMPTS.load(Ordering::Relaxed) - d1;
+    let after_delete = dnat_steering_holder_count(&key, a);
+    assert_eq!(
+        (after_refresh, deletes_on_refresh),
+        (1, 0),
+        "#9514: a same-row refresh must keep its single hold and delete NOTHING; releasing \
+         it would blackhole a live session's return traffic until it republished"
+    );
+    assert_eq!(after_delete, 0, "the delete must release the single hold");
+    assert_eq!(deletes_on_delete, 1, "the last holder's delete must issue exactly one map delete");
+}
+
+/// OVER-RELEASE CONTROL: migrating K off a SHARED row must leave the sibling's
+/// hold intact. The migration releases through the holder accounting, never with
+/// a raw map delete, so row A survives while K2 still steers through it.
+#[test]
+fn ha_replace_migrating_off_a_shared_row_keeps_the_siblings_hold_9514() {
+    use crate::afxdp::checksum::{dnat_steering_holder_count, DNAT_DELETE_ATTEMPTS};
+    let _g = crate::afxdp::checksum::dnat_counter_guard();
+    let coordinator = coordinator_with_dnat_fd_9514();
+    let key = test_key();
+    let k2 = same_row_sibling_9514(&key);
+    let (a, b) = (snat_row_9514(49517), snat_row_9514(49518));
+    assert_eq!(dnat_steering_holder_count(&key, a), 0, "row A must start empty");
+
+    coordinator.upsert_synced_session(synced_with_nat_9514(key.clone(), a, 1));
+    coordinator.upsert_synced_session(synced_with_nat_9514(k2.clone(), a, 1));
+    assert_eq!(dnat_steering_holder_count(&key, a), 2, "precondition: both sessions hold row A");
+
+    let d0 = DNAT_DELETE_ATTEMPTS.load(Ordering::Relaxed);
+    coordinator.upsert_synced_session(synced_with_nat_9514(key.clone(), b, 2));
+    let deletes_on_migrate = DNAT_DELETE_ATTEMPTS.load(Ordering::Relaxed) - d0;
+    let row_a_after_migrate = dnat_steering_holder_count(&k2, a);
+    assert_eq!(
+        (row_a_after_migrate, deletes_on_migrate),
+        (1, 0),
+        "#9514: K migrating off shared row A must release only K's hold and must NOT delete \
+         the row -- K2 still steers through it (#6745)"
+    );
+
+    let d1 = DNAT_DELETE_ATTEMPTS.load(Ordering::Relaxed);
+    coordinator.delete_synced_session(k2.clone());
+    assert_eq!(
+        DNAT_DELETE_ATTEMPTS.load(Ordering::Relaxed) - d1,
+        1,
+        "once the sibling closes, row A is nobody's and must be deleted"
+    );
+    assert_eq!(dnat_steering_holder_count(&k2, a), 0);
+    coordinator.delete_synced_session(key.clone());
+    assert_eq!(dnat_steering_holder_count(&key, b), 0, "K's close releases row B");
+}
+
+/// The migration also covers a replacement that DROPS the source rewrite: the
+/// new decision publishes no row at all, so the old one must be released.
+#[test]
+fn ha_same_key_replace_dropping_snat_releases_the_old_row_9514() {
+    use crate::afxdp::checksum::{dnat_steering_holder_count, DNAT_DELETE_ATTEMPTS};
+    let _g = crate::afxdp::checksum::dnat_counter_guard();
+    let coordinator = coordinator_with_dnat_fd_9514();
+    let key = test_key();
+    let a = snat_row_9514(49519);
+    assert_eq!(dnat_steering_holder_count(&key, a), 0, "row A must start empty");
+
+    coordinator.upsert_synced_session(synced_with_nat_9514(key.clone(), a, 1));
+    let d0 = DNAT_DELETE_ATTEMPTS.load(Ordering::Relaxed);
+    coordinator.upsert_synced_session(synced_with_nat_9514(key.clone(), NatDecision::default(), 2));
+    let deletes_on_replace = DNAT_DELETE_ATTEMPTS.load(Ordering::Relaxed) - d0;
+    assert_eq!(
+        (dnat_steering_holder_count(&key, a), deletes_on_replace),
+        (0, 1),
+        "#9514: a replacement that drops SNAT must release the old row and delete it -- \
+         nothing will ever close under decision A again"
+    );
+}
