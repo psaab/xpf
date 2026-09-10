@@ -1501,19 +1501,30 @@ The memo:
 - This is read from the code. The live probe's exact-key query never matched the
   reverse half, so the companion was not observed live.
 
-**Bound: replica workers (#9582).** Only the worker that installed a session
-announces its transitions. A worker replica (`WorkerLocalImport`) mints its own
-`session_id`, so an Update from it would flip the peer's adopted id (#5212) and
-miss the sender memo.
+**Replica workers announce (#9582).** A close that only a worker replica sees,
+typically the server's FIN or RST on the other interface's RSS queue, is announced
+to the peer under the installer's id.
 
-A close that only a replica sees is therefore not announced. That is typically
-the server's FIN or RST on the other interface's RSS queue.
+- **One id per session on every worker.** The local shared publishes (the transit
+  ForwardFlow install, the missing-neighbor seed, the promote republish) carry the
+  installer's `session_id`, and replicas adopt it.
+  - This id has to match: the conntrack mirror row is written only on install with
+    that id, and the sender memo above keys on it.
+  - A replica announcing under its own minted id would not match. The memo would
+    drop the installer's record, and the next sweep would resend class 0. The peer
+    would also adopt the flipped id (#5212).
+- **Who announces.** A `WorkerLocalImport` replica, which by `worker_replica_origin()`
+  is a replica of a session this node owns, and only when its id was carried from
+  another worker. Carried means non-zero, with high 16 bits unlike this table's own
+  namespace. Peer-import replicas stay silent.
 
 | Close seen by | Announced? | Effect on the peer |
 |---|---|---|
-| installer (the client's FIN) | yes | CLOSING is announced |
-| replica only: server FIN reaching TIME_WAIT | no | small, because TIME_WAIT shares CLOSING's 30 s default window |
-| replica only: server RST | no | stays on the established window until the next announcement or delete |
+| installer (the client's FIN or RST) | yes | the close window |
+| replica only: server RST | yes, class 3, installer's id | the RST window |
+| replica only: server FIN | yes, CLOSING | CLOSING's window |
+| client FIN on one worker, server FIN on another | each announces CLOSING; nobody announces TIME_WAIT | CLOSING's window, which shares TIME_WAIT's 30 s default |
+| a replica holding an id minted locally | no (guard) | whatever the installer announced |
 
 ### Node-Local BPF-ABI Session Id (#6198)
 
