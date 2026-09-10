@@ -520,15 +520,18 @@ func TestPersistRetryDoesNotReserializeARefusedTree_9617(t *testing.T) {
 		}
 		return tr
 	}
-	var bigCmds []string
-	for i := 0; i < 9; i++ {
-		bigCmds = append(bigCmds, fmt.Sprintf("set interfaces ge-0/0/%d description %s", i, strings.Repeat("x", 2<<20)))
-	}
-	big := tree(bigCmds...)
+	// The refusal is injected through the write seam so an attempt costs
+	// nothing: a real >16 MiB marshal takes about as long as the observation
+	// window, which would let a retry-every-tick loop show one attempt too.
+	// The real writer's refusal is pinned by the cells above.
+	big := tree("set system host-name refused9617")
 	var attempts atomic.Int32
 	s.mu.Lock()
 	s.writeActiveMarkerFn = func(tr *config.ConfigTree, committed bool) error {
 		attempts.Add(1)
+		if tr == big {
+			return checkPersistSize("active.json", MaxConfigSize+1)
+		}
 		return s.db.WriteActiveMarker(tr, committed)
 	}
 	s.active = big
@@ -560,5 +563,58 @@ func TestPersistRetryDoesNotReserializeARefusedTree_9617(t *testing.T) {
 	}
 	if degraded {
 		t.Errorf("#9617: a different, persistable active tree did not resume retries and heal persistence (attempts=%d)", attempts.Load())
+	}
+}
+
+// Any failure to PRODUCE the record refuses the commit before promotion, not
+// only a size refusal. The prior tree carries a master-password, so its record
+// is encrypted; the candidate drops it, so the active write needs no key. With
+// the key unreadable, only the record encode fails — a commit that promoted
+// here would arm a window with no durable rollback.
+func TestCommitConfirmedRejectsAnUnencodableRollbackRecord_9617(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config")
+	s := newTestStoreAt(t, path)
+	stopTimers9617(t, s)
+	if err := s.EnterConfigure(); err != nil {
+		t.Fatal(err)
+	}
+	for _, cmd := range []string{"system master-password pseudorandom-function sha256", "system host-name enc9617"} {
+		if err := s.SetFromInput(cmd); err != nil {
+			t.Fatalf("%s: %v", cmd, err)
+		}
+	}
+	if _, err := s.Commit(); err != nil {
+		t.Fatalf("encrypted prior generation: %v", err)
+	}
+	keyPath := s.db.masterKeyPath()
+	if _, err := os.Stat(keyPath); err != nil {
+		t.Fatalf("fixture: the encrypted commit must have created %s: %v", keyPath, err)
+	}
+	if err := s.DeleteFromInput("system master-password"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetFromInput("system host-name plain9617"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(keyPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(keyPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	_, err := s.CommitConfirmed(10)
+	if err == nil || !strings.Contains(err.Error(), "master key") {
+		t.Fatalf("#9617: CommitConfirmed returned %v; the rollback record is encrypted under the prior tree's "+
+			"master-password and its key cannot be read, so the record cannot be produced — the commit must be "+
+			"refused before promotion", err)
+	}
+	if s.confirmTimer != nil {
+		t.Errorf("#9617: a commit confirmed with an unproducible rollback record armed a timer")
+	}
+	if strings.Contains(s.active.Format(), "plain9617") {
+		t.Errorf("#9617: a commit confirmed with an unproducible rollback record PROMOTED its candidate")
+	}
+	if _, serr := os.Stat(s.db.confirmPath()); !os.IsNotExist(serr) {
+		t.Errorf("#9617: a refused commit confirmed left a confirm.json behind (stat: %v)", serr)
 	}
 }
