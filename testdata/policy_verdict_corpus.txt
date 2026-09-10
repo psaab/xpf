@@ -1,0 +1,223 @@
+# #9167: the SHARED policy-verdict corpus.
+#
+# One file, read by BOTH the Go simulator's test (pkg/policymatch) and the Rust
+# enforcer's test (userspace-dp/src/policy_verdict_corpus_9167.rs). It is the
+# policy-tier equivalent of testdata/nat_match_prefix_corpus.txt (#7481).
+#
+# WHY THIS EXISTS. `show security match-policies` had no independent oracle.
+# Where pkg/policymatch does not share code with the Go write path it mirrors
+# userspace-dp/src/policy.rs's tier walk BY HAND, and a hand mirror drifts:
+# #6505 taught the Rust junos-host gate the #4569 fragment-associated deny and
+# touched userspace-dp/src/policy.rs, policy_snapshot_error.rs, policy_tests.rs,
+# _Log.md and docs/feature-gaps.md -- NO Go at all. The Go simulator kept
+# reporting PERMIT / "local delivery" for a host-bound fragment the box DROPS,
+# and it was fixed 71 commits later by writing ANOTHER hand mirror (#6576),
+# which re-creates the same dependency on someone remembering two places.
+#
+# THE ORACLE IS THIS FILE'S EXPECTATION COLUMN, and that is the whole point: it
+# is authored from the Junos semantics and produced by NEITHER implementation.
+# Go compiles the config and runs pkg/policymatch.Match; Rust parses the
+# snapshot and runs evaluate_policy_result_with_icmp; each compares to the
+# column. Neither calls the other, so neither can agree with the other by
+# construction -- the vacuity the issue names.
+#
+# WHAT IS COMPARED, and it is deliberately the operator-visible triple:
+#   action     permit | deny | reject   -- the verdict the show surface prints
+#   policy     the matched policy NAME, or `-` for the default-policy verdict
+# The Rust side additionally checks the runtime POLICY ID agrees with the id the
+# Go side stamps, which is what makes `RuntimePolicyIDs` a CHECKED shared helper
+# rather than an unchecked one.
+#
+# FORMAT
+#   case <name>              start a case
+#   set ...                  a config line (flat-set syntax, applied in order)
+#   q <from> <to> <src> <dst> <proto> <sport> <dport> <action> <policy>
+#   ... [frag]               an optional 10th token marking a NON-FIRST FRAGMENT:
+#                            Go sets Query.NonFirstFragment, Rust evaluates with
+#                            l4_present = false. Its ports are ignored.
+#   A query whose <to> is `junos-host` is HOST-BOUND: Go routes it through
+#   matchJunosHost, Rust through evaluate_junos_host_policy_l3_aware (whose `None`
+#   is local delivery, written here as `permit -`).
+#   end                      end of case
+# Blank lines and #-comments are ignored. `-` in the policy column means the
+# default-policy verdict (no rule matched).
+#
+# ADDING A ROW: add it here and BOTH languages assert it. A row only one side
+# knows about cannot exist, which is the property two hand-maintained lists do
+# not have.
+
+# ---------------------------------------------------------------- tier 1
+case exact-zone-pair-permit
+set interfaces ge-0/0/0 unit 0 family inet address 10.0.1.1/24
+set interfaces ge-0/0/1 unit 0 family inet address 10.0.2.1/24
+set security zones security-zone trust interfaces ge-0/0/0.0
+set security zones security-zone untrust interfaces ge-0/0/1.0
+set security policies default-policy deny-all
+set security policies from-zone trust to-zone untrust policy p-allow match source-address any
+set security policies from-zone trust to-zone untrust policy p-allow match destination-address any
+set security policies from-zone trust to-zone untrust policy p-allow match application any
+set security policies from-zone trust to-zone untrust policy p-allow then permit
+q trust untrust 10.0.1.5 10.0.2.5 tcp 1234 80 permit p-allow
+q untrust trust 10.0.2.5 10.0.1.5 tcp 1234 80 deny -
+end
+
+# The default-policy verdict on BOTH postures. Without the permit-all row a
+# corpus can pass while the default action is hard-wired to deny.
+case default-policy-permit-all
+set interfaces ge-0/0/0 unit 0 family inet address 10.0.1.1/24
+set interfaces ge-0/0/1 unit 0 family inet address 10.0.2.1/24
+set security zones security-zone trust interfaces ge-0/0/0.0
+set security zones security-zone untrust interfaces ge-0/0/1.0
+set security policies default-policy permit-all
+q trust untrust 10.0.1.5 10.0.2.5 tcp 1234 80 permit -
+end
+
+# ---------------------------------------------------------------- tier ordering
+# First-match-wins WITHIN a zone pair: the deny is authored first and must win
+# over the later permit for the port it names, while the permit still takes
+# every other port. A reader that sorted or last-won would pass the first row
+# and fail the second.
+case first-match-wins-within-a-pair
+set interfaces ge-0/0/0 unit 0 family inet address 10.0.1.1/24
+set interfaces ge-0/0/1 unit 0 family inet address 10.0.2.1/24
+set security zones security-zone trust interfaces ge-0/0/0.0
+set security zones security-zone untrust interfaces ge-0/0/1.0
+set security policies default-policy deny-all
+set applications application app-ssh protocol tcp
+set applications application app-ssh destination-port 22
+set security policies from-zone trust to-zone untrust policy p-deny-ssh match source-address any
+set security policies from-zone trust to-zone untrust policy p-deny-ssh match destination-address any
+set security policies from-zone trust to-zone untrust policy p-deny-ssh match application app-ssh
+set security policies from-zone trust to-zone untrust policy p-deny-ssh then deny
+set security policies from-zone trust to-zone untrust policy p-allow match source-address any
+set security policies from-zone trust to-zone untrust policy p-allow match destination-address any
+set security policies from-zone trust to-zone untrust policy p-allow match application any
+set security policies from-zone trust to-zone untrust policy p-allow then permit
+q trust untrust 10.0.1.5 10.0.2.5 tcp 1234 22 deny p-deny-ssh
+q trust untrust 10.0.1.5 10.0.2.5 tcp 1234 80 permit p-allow
+end
+
+# An exact zone-pair (tier 1) OUTRANKS a scoped global (tier 4) that also
+# matches the same tuple.
+case exact-pair-outranks-scoped-global
+set interfaces ge-0/0/0 unit 0 family inet address 10.0.1.1/24
+set interfaces ge-0/0/1 unit 0 family inet address 10.0.2.1/24
+set security zones security-zone trust interfaces ge-0/0/0.0
+set security zones security-zone untrust interfaces ge-0/0/1.0
+set security policies default-policy deny-all
+set security policies from-zone trust to-zone untrust policy zp-allow match source-address any
+set security policies from-zone trust to-zone untrust policy zp-allow match destination-address any
+set security policies from-zone trust to-zone untrust policy zp-allow match application any
+set security policies from-zone trust to-zone untrust policy zp-allow then permit
+set security policies global policy g-deny match from-zone trust
+set security policies global policy g-deny match to-zone untrust
+set security policies global policy g-deny match source-address any
+set security policies global policy g-deny match destination-address any
+set security policies global policy g-deny match application any
+set security policies global policy g-deny then deny
+q trust untrust 10.0.1.5 10.0.2.5 tcp 1234 80 permit zp-allow
+end
+
+# A scoped global applies where its scope matches and NOT elsewhere. The second
+# row is the one that fails if a scope set is read as the all-zones wildcard.
+case scoped-global-applies-only-in-scope
+set interfaces ge-0/0/0 unit 0 family inet address 10.0.1.1/24
+set interfaces ge-0/0/1 unit 0 family inet address 10.0.2.1/24
+set interfaces ge-0/0/2 unit 0 family inet address 10.0.3.1/24
+set security zones security-zone trust interfaces ge-0/0/0.0
+set security zones security-zone untrust interfaces ge-0/0/1.0
+set security zones security-zone dmz interfaces ge-0/0/2.0
+set security policies default-policy permit-all
+set security policies global policy g-deny match from-zone trust
+set security policies global policy g-deny match source-address any
+set security policies global policy g-deny match destination-address any
+set security policies global policy g-deny match application any
+set security policies global policy g-deny then deny
+q trust untrust 10.0.1.5 10.0.2.5 tcp 1234 80 deny g-deny
+q dmz untrust 10.0.3.5 10.0.2.5 tcp 1234 80 permit -
+end
+
+# An UNSCOPED global applies to every zone pair.
+case unscoped-global-applies-everywhere
+set interfaces ge-0/0/0 unit 0 family inet address 10.0.1.1/24
+set interfaces ge-0/0/1 unit 0 family inet address 10.0.2.1/24
+set interfaces ge-0/0/2 unit 0 family inet address 10.0.3.1/24
+set security zones security-zone trust interfaces ge-0/0/0.0
+set security zones security-zone untrust interfaces ge-0/0/1.0
+set security zones security-zone dmz interfaces ge-0/0/2.0
+set security policies default-policy permit-all
+set security policies global policy g-deny-all match source-address any
+set security policies global policy g-deny-all match destination-address any
+set security policies global policy g-deny-all match application any
+set security policies global policy g-deny-all then deny
+q trust untrust 10.0.1.5 10.0.2.5 tcp 1234 80 deny g-deny-all
+q dmz untrust 10.0.3.5 10.0.2.5 tcp 1234 80 deny g-deny-all
+end
+
+# ---------------------------------------------------------------- wildcards
+# `from-zone any` / `to-zone any` zone-pair rules (tier 2/3) and their
+# precedence over the global tier.
+case zone-pair-wildcards
+set interfaces ge-0/0/0 unit 0 family inet address 10.0.1.1/24
+set interfaces ge-0/0/1 unit 0 family inet address 10.0.2.1/24
+set interfaces ge-0/0/2 unit 0 family inet address 10.0.3.1/24
+set security zones security-zone trust interfaces ge-0/0/0.0
+set security zones security-zone untrust interfaces ge-0/0/1.0
+set security zones security-zone dmz interfaces ge-0/0/2.0
+set security policies default-policy permit-all
+set security policies from-zone any to-zone untrust policy any-to-untrust-deny match source-address any
+set security policies from-zone any to-zone untrust policy any-to-untrust-deny match destination-address any
+set security policies from-zone any to-zone untrust policy any-to-untrust-deny match application any
+set security policies from-zone any to-zone untrust policy any-to-untrust-deny then deny
+q trust untrust 10.0.1.5 10.0.2.5 tcp 1234 80 deny any-to-untrust-deny
+q dmz untrust 10.0.3.5 10.0.2.5 tcp 1234 80 deny any-to-untrust-deny
+q trust dmz 10.0.1.5 10.0.3.5 tcp 1234 80 permit -
+end
+
+# ---------------------------------------------------------------- addresses
+# A source-scoped rule: the address book is part of the snapshot, and a reader
+# that ignored the address match would permit both rows.
+case source-address-scoping
+set interfaces ge-0/0/0 unit 0 family inet address 10.0.1.1/24
+set interfaces ge-0/0/1 unit 0 family inet address 10.0.2.1/24
+set security zones security-zone trust interfaces ge-0/0/0.0
+set security zones security-zone untrust interfaces ge-0/0/1.0
+set security policies default-policy deny-all
+set security address-book global address a-lab 10.0.1.100/32
+set security policies from-zone trust to-zone untrust policy p-lab match source-address a-lab
+set security policies from-zone trust to-zone untrust policy p-lab match destination-address any
+set security policies from-zone trust to-zone untrust policy p-lab match application any
+set security policies from-zone trust to-zone untrust policy p-lab then permit
+q trust untrust 10.0.1.100 10.0.2.5 tcp 1234 80 permit p-lab
+q trust untrust 10.0.1.101 10.0.2.5 tcp 1234 80 deny -
+end
+
+# ---------------------------------------------------------------- the #6576 escape
+# THE demonstrated escape this corpus exists for. #6505 taught the RUST junos-host
+# gate the #4569 fragment-associated deny and touched no Go, so the Go simulator
+# reported PERMIT for a host-bound NON-FIRST FRAGMENT the box DROPS. A non-first
+# fragment carries no L4 header, so the port-bearing `junos-ssh` DENY cannot match
+# it and the walk falls through to the later permit -- UNLESS the skipped deny's
+# L3 OVERLAPS the fragment, in which case the permit is failed closed and the drop
+# is attributed to that deny. The last row is the control: a fragment whose source
+# does NOT overlap the deny is still delivered.
+case junos-host-fragment-associated-deny
+set interfaces ge-0/0/0 unit 0 family inet address 10.0.1.1/24
+set interfaces ge-0/0/1 unit 0 family inet address 10.0.2.1/24
+set security zones security-zone trust interfaces ge-0/0/0.0
+set security zones security-zone untrust interfaces ge-0/0/1.0
+set security policies default-policy deny-all
+set security address-book global address trust-net 10.0.0.0/8
+set security policies from-zone trust to-zone junos-host policy block-host-ssh match source-address trust-net
+set security policies from-zone trust to-zone junos-host policy block-host-ssh match destination-address any
+set security policies from-zone trust to-zone junos-host policy block-host-ssh match application junos-ssh
+set security policies from-zone trust to-zone junos-host policy block-host-ssh then deny
+set security policies from-zone trust to-zone junos-host policy permit-host-all match source-address any
+set security policies from-zone trust to-zone junos-host policy permit-host-all match destination-address any
+set security policies from-zone trust to-zone junos-host policy permit-host-all match application any
+set security policies from-zone trust to-zone junos-host policy permit-host-all then permit
+q trust junos-host 10.0.1.5 10.0.1.1 tcp 1234 22 deny block-host-ssh
+q trust junos-host 10.0.1.5 10.0.1.1 tcp 1234 80 permit permit-host-all
+q trust junos-host 10.0.1.5 10.0.1.1 tcp 0 0 deny block-host-ssh frag
+q trust junos-host 192.168.9.9 10.0.1.1 tcp 0 0 permit permit-host-all frag
+end
