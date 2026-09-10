@@ -12457,3 +12457,203 @@ fn a_flow_served_around_a_live_mode_mismatched_lease_owns_no_lease_9158() {
         "the live PAT flow must keep its port across the flip"
     );
 }
+
+// ---------------------------------------------------------------------------
+// #9536 — the port-bearing mirror of #9158: a PAT flow arriving under a LIVE
+// ADDRESS-ONLY lease (a `port no-translation` flip) must not destroy that lease.
+//
+// Before #9536, `reuse_existing_lease_locked` sent EVERY mode-mismatched lease to
+// its `expired` arm regardless of `active_flows`. The arm removed the record, and
+// the caller then minted a PAT lease and INSERTED it over the key. So the
+// subscriber's pinned public address was forgotten while a flow was still using
+// it. The harm is smaller than #9158's: an address-only lease owns no port bit,
+// so nothing leaked. What was lost is the PINNING, which for
+// `permit any-remote-host` is the feature itself.
+// ---------------------------------------------------------------------------
+
+/// FAIL-ON-REVERT. The live address-only lease survives the flip with its pinning
+/// intact; the PAT flow is served UNPINNED and still holds its own bit (#8597 K10).
+#[test]
+fn flipping_a_live_address_only_lease_to_pat_leaves_it_standing_9536() {
+    let rules = shared_mode_persistent_rules_k10();
+    let ao = expect_snat_decision(snat_lookup_6528(
+        &rules, "lan", "10.0.1.80", 40010, "9.9.9.9", 443,
+    ));
+    assert_eq!(ao.rewrite_src_port, None, "precondition: an ADDRESS-ONLY lease");
+    let pinned = ao
+        .rewrite_src
+        .expect("precondition: address-only translates the address");
+    {
+        let live = rules[0].pool_allocator.debug_live();
+        let lease = live
+            .persistent_by_source
+            .values()
+            .next()
+            .expect("precondition: exactly one lease");
+        assert!(lease.address_only, "precondition: the lease is address-only");
+        assert_eq!(
+            lease.active_flows, 1,
+            "precondition: the lease must be LIVE -- an idle one has its own cell"
+        );
+    }
+
+    // THE FLIP: the same source now matches the PAT rule.
+    let pat = expect_snat_decision(snat_lookup_6528(
+        &rules, "lan2", "10.0.1.80", 40010, "8.8.8.8", 443,
+    ));
+    let port = pat
+        .rewrite_src_port
+        .expect("the PAT rule must translate a port");
+
+    {
+        let live = rules[0].pool_allocator.debug_live();
+        assert_eq!(
+            live.persistent_by_source.len(),
+            1,
+            "one PersistentSourceKey holds one lease"
+        );
+        // IDENTITY, not count: `insert` REPLACES, so `len() == 1` holds before
+        // and after an overwrite (#9158 mutation N5 found exactly that blind spot).
+        let lease = live.persistent_by_source.values().next().unwrap();
+        assert!(
+            lease.address_only && lease.active_flows == 1 && lease.translated.ip == pinned,
+            "#9536: the LIVE address-only lease must survive a PAT flow for the same \
+             source with its pinning intact. Got address_only={} active_flows={} \
+             translated_ip={} (pinned was {pinned}). A PAT lease here means the flip \
+             destroyed the live lease and inserted over the key: the subscriber's pinned \
+             address is forgotten while a flow still uses it",
+            lease.address_only,
+            lease.active_flows,
+            lease.translated.ip
+        );
+    }
+    assert!(
+        rules[0].pool_allocator.debug_is_port_occupied(0, port),
+        "#8597 K10 must still hold: the PAT decision published port {port} and must own \
+         its occupancy bit, or `claim()` can hand the same (address, port) to another flow"
+    );
+    let (persistent_key, record_address_only) = rules[0]
+        .pool_allocator
+        .debug_live_flow_lease(&flow_key_9158("10.0.1.80", 40010, "8.8.8.8", 443))
+        .expect("the PAT flow must have a live record");
+    assert!(
+        persistent_key.is_none(),
+        "#9536: the PAT flow served around the live address-only lease must name NO \
+         lease. With `Some(key)`, its release would run `complete_persistent_lease_locked` \
+         against the address-only lease and decrement a refcount it never incremented"
+    );
+    assert!(!record_address_only, "precondition: the PAT flow's record is port-bearing");
+}
+
+/// NO LEAK, NO REFCOUNT DAMAGE. Releasing the unpinned PAT flow frees its own bit
+/// (`unlink_live_allocation_locked` frees exactly when `persistent_key.is_none()`)
+/// and leaves the address-only lease's `active_flows` untouched.
+#[test]
+fn releasing_the_unpinned_pat_flow_frees_its_port_and_leaves_the_lease_9536() {
+    let rules = shared_mode_persistent_rules_k10();
+    let _ao = expect_snat_decision(snat_lookup_6528(
+        &rules, "lan", "10.0.1.81", 40011, "9.9.9.9", 443,
+    ));
+    let pat = expect_snat_decision(snat_lookup_6528(
+        &rules, "lan2", "10.0.1.81", 40011, "8.8.8.8", 443,
+    ));
+    let port = pat.rewrite_src_port.expect("PAT translates a port");
+    let pat_ip = pat.rewrite_src.expect("PAT translates the address");
+    assert!(
+        rules[0].pool_allocator.debug_is_port_occupied(0, port),
+        "precondition: the PAT flow holds its bit"
+    );
+
+    rules[0].pool_allocator.release_flow(
+        flow_key_9158("10.0.1.81", 40011, "8.8.8.8", 443),
+        TranslatedTuple { ip: pat_ip, port },
+        20_000 * NS_PER_SEC,
+        NatHolder::Untracked,
+    );
+
+    assert!(
+        !rules[0].pool_allocator.debug_is_port_occupied(0, port),
+        "#9536 LEAK: releasing the unpinned PAT flow left port {port} occupied. An \
+         unpinned flow owns its bit, so its release must free it"
+    );
+    let live = rules[0].pool_allocator.debug_live();
+    let lease = live
+        .persistent_by_source
+        .values()
+        .next()
+        .expect("the address-only lease must still exist");
+    assert!(
+        lease.address_only && lease.active_flows == 1,
+        "#9536: releasing the PAT flow must not touch the address-only lease. Got \
+         address_only={} active_flows={} -- a decrement here means the PAT flow was \
+         attached to a lease it never joined",
+        lease.address_only,
+        lease.active_flows
+    );
+}
+
+/// OVER-RETENTION CONTROL. An IDLE address-only lease is still replaced by a pinned
+/// PAT lease. Without this, "never tear down a mismatched lease" would pass the two
+/// cells above while pinning an idle address forever and never re-pinning the
+/// source in PAT mode.
+#[test]
+fn an_idle_address_only_lease_is_still_replaced_by_a_pinned_pat_lease_9536() {
+    let rules = shared_mode_persistent_rules_k10();
+    let _ao = expect_snat_decision(snat_lookup_6528(
+        &rules, "lan", "10.0.1.82", 40012, "9.9.9.9", 443,
+    ));
+    let ao_flow = flow_key_9158("10.0.1.82", 40012, "9.9.9.9", 443);
+    // The translated tuple the allocator actually stored, read back rather than
+    // guessed, so the release below reaches the record.
+    let ao_translated = rules[0]
+        .pool_allocator
+        .debug_live_flow_translated(&ao_flow)
+        .expect("precondition: the address-only flow has a live record");
+    rules[0].pool_allocator.release_flow(
+        ao_flow,
+        ao_translated,
+        1_000 * NS_PER_SEC,
+        NatHolder::Untracked,
+    );
+    {
+        let live = rules[0].pool_allocator.debug_live();
+        let lease = live
+            .persistent_by_source
+            .values()
+            .next()
+            .expect("precondition: the drained address-only lease still exists");
+        assert!(
+            lease.address_only && lease.active_flows == 0,
+            "precondition: the address-only lease must be IDLE (address_only={} \
+             active_flows={}); if the release did not reach it this cell measures nothing",
+            lease.address_only,
+            lease.active_flows
+        );
+    }
+
+    let pat = expect_snat_decision(snat_lookup_6528(
+        &rules, "lan2", "10.0.1.82", 40012, "8.8.8.8", 443,
+    ));
+    let port = pat.rewrite_src_port.expect("PAT translates a port");
+    {
+        let live = rules[0].pool_allocator.debug_live();
+        assert_eq!(live.persistent_by_source.len(), 1, "one lease for the source");
+        let lease = live.persistent_by_source.values().next().unwrap();
+        assert!(
+            !lease.address_only && lease.translated.port == port && lease.active_flows == 1,
+            "#9536: an IDLE address-only lease must still give way to a pinned PAT lease. \
+             Got address_only={} port={} active_flows={} (PAT port {port})",
+            lease.address_only,
+            lease.translated.port,
+            lease.active_flows
+        );
+    }
+    let (persistent_key, _) = rules[0]
+        .pool_allocator
+        .debug_live_flow_lease(&flow_key_9158("10.0.1.82", 40012, "8.8.8.8", 443))
+        .expect("the PAT flow must have a live record");
+    assert!(
+        persistent_key.is_some(),
+        "#9536: with the idle lease gone, the PAT flow must be PINNED (name its lease)"
+    );
+}
