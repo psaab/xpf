@@ -7734,3 +7734,30 @@ fn literal_any_matches_every_address_beside_a_same_named_book_9523() {
         "control: the pre-#9523 wire (book id) matched only the book, so traffic outside it fell to the default"
     );
 }
+
+/// #9584: the helper refuses the wire the Go builder emits for a duplicate
+/// policy name split across two `security {}` stanzas. The fixture is written by
+/// `TestDuplicateRuleIdentityWireFixtureIsFresh9584` from the Go builder's own
+/// output, not transcribed by hand, so this asserts the refusal of exactly what
+/// production publishes. The Go content-rejection mirror is asserted against
+/// the same condition on the Go side.
+#[test]
+fn go_built_split_duplicate_wire_is_refused_9584() {
+    const WIRE: &str = include_str!("../../testdata/policy_duplicate_rule_id_9584.json");
+    let rules: Vec<PolicyRuleSnapshot> = serde_json::from_str(WIRE).expect("fixture decodes");
+    assert_eq!(rules.len(), 2, "fixture premise: two rules");
+    assert_eq!(rules[0].rule_id, rules[1].rule_id, "fixture premise: one identity");
+    assert_ne!(rules[0].policy_id, rules[1].policy_id, "fixture premise: distinct policy_ids");
+    let store = PolicyCounterStore::default();
+    match parse_policy_state_with_counters("deny", &rules, &test_zone_name_to_id(), &[], &store) {
+        Err(err @ SnapshotIntegrityError::DuplicateRuleId { .. }) => {
+            let text = err.to_string();
+            assert!(
+                text.contains("duplicate policy rule_id \"trust->untrust/p1\""),
+                "unexpected refusal text: {text}"
+            );
+        }
+        Ok(_) => panic!("#9584: the helper accepted the Go-built duplicate wire"),
+        Err(other) => panic!("#9584: refused for the wrong reason: {other:?}"),
+    }
+}

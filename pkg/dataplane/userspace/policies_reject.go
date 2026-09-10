@@ -168,6 +168,13 @@ func PolicyContentRejectionReasons(cfg *config.Config, feedOverlay map[string][]
 	// policies_reject_zone_9410.go for why a config-side predicate answers the
 	// wrong question.
 	reasons = append(reasons, collectPolicyZoneRejections(policies, buildZoneSnapshots(cfg))...)
+	// #9584: the RULE-IDENTITY arm. The helper also rejects the whole snapshot
+	// when two rules resolve to one stable identity (DuplicateRuleId) or share a
+	// non-zero policy_id (DuplicatePolicyId). A duplicate policy name written in
+	// separate stanzas loads on the tolerant path unmerged, so without this arm
+	// the simulator and every #3261 surface reported a snapshot the helper
+	// refuses as healthy. See policies_reject_identity_9584.go.
+	reasons = append(reasons, collectPolicyIdentityRejections(policies)...)
 	if len(reasons) == 0 {
 		if _, cerr := buildAppCatalogSnapshot(cfg); cerr != nil {
 			reasons = append(reasons, fmt.Sprintf(

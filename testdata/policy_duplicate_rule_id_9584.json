@@ -1,0 +1,47 @@
+[
+  {
+    "rule_id": "trust-\u003euntrust/p1",
+    "name": "p1",
+    "from_zone": "trust",
+    "to_zone": "untrust",
+    "source_addresses": [
+      "any"
+    ],
+    "destination_addresses": [
+      "any"
+    ],
+    "source_literals": [
+      "any"
+    ],
+    "destination_literals": [
+      "any"
+    ],
+    "applications": [
+      "any"
+    ],
+    "action": "deny"
+  },
+  {
+    "rule_id": "trust-\u003euntrust/p1",
+    "policy_id": 256,
+    "name": "p1",
+    "from_zone": "trust",
+    "to_zone": "untrust",
+    "source_addresses": [
+      "any"
+    ],
+    "destination_addresses": [
+      "any"
+    ],
+    "source_literals": [
+      "any"
+    ],
+    "destination_literals": [
+      "any"
+    ],
+    "applications": [
+      "any"
+    ],
+    "action": "permit"
+  }
+]
