@@ -1130,8 +1130,10 @@ still-disabled ctrl drops its transit.
 > trading it away silently. It is deliberately preferred over the
 > alternative, which is adjudicating a header the attacker shifted: a gap
 > the operator can see beats a policy verdict computed on a 5-tuple the
-> attacker chose. Closing the gap itself is #8274 (WireGuard) and #8276
-> (IPsec). Nothing in the window between the
+> attacker chose. Who owns closing it: for IPsec, #9506. For WireGuard,
+> #8274 moved the main path off the TUN (decapsulation on the underlay's
+> binding); what still enters through the TUN is the kernel-path residual,
+> #9594 for degraded windows. Nothing in the window between the
 old detach site and the publish reads the attachment set —
 `entryProgramsLocked` (`maps_sync.go`) is the only other `XDPLinks()`
 reader and it is status reporting — so moving the detach costs no
