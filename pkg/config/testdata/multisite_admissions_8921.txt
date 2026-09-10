@@ -97,7 +97,6 @@ interface metric	protocols/isis/interface,routing-instances/*/protocols/isis/int
 interface priority	protocols/ospf/area/interface,protocols/ospf3/area/interface,routing-instances/*/protocols/ospf/area/interface,routing-instances/*/protocols/ospf3/area/interface
 interface retransmit-interval	protocols/ospf/area/interface,protocols/ospf3/area/interface,routing-instances/*/protocols/ospf/area/interface,routing-instances/*/protocols/ospf3/area/interface
 interface-routes rib-group	routing-instances/*/interface-routes,routing-instances/*/routing-options/interface-routes,routing-options/interface-routes
-interfaces unit	class-of-service/interfaces,interfaces/*
 isis authentication-key	protocols/isis,routing-instances/*/protocols/isis
 isis authentication-type	protocols/isis,routing-instances/*/protocols/isis
 isis export	protocols/isis,routing-instances/*/protocols/isis
