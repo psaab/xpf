@@ -4069,6 +4069,17 @@ outside the monitor loop:
   and a same-boot BulkStart on the peer's second fabric is not a switch, so
   neither arms. When both signals observe the same reboot, the cost is one
   redundant, idempotent bulk.
+  The switch also dispatches `OnPeerConnected` (outside `s.mu`, as
+  `handleNewConnection` does): a retired incarnation is a new peer process, the
+  epoch-first order of the same reboot reaches that callback through
+  `installConn`'s cold-prime arm, and without it the replacement gets no
+  DHCP-lease or IPsec-SA sync nudge and no config reconcile. **What this does
+  not close**, because every arm shares it: the obligation is discharged by the
+  survivor's LOCAL write rather than the replacement's `BulkAck`, the latch is an
+  unversioned boolean an older bulk can clear, and the re-sent table covers only
+  RGs the survivor is primary for (#9626). A delayed BulkStart from the dead
+  incarnation's socket that switches the boot namespace back (the hazard
+  `sync_boot_incarnation.go` documents) now also costs one redundant bulk.
 
   **Atomicity of the ack is bound, not merely asserted (#5718 fold r3).** Every
   scenario test calls `installConn` and `handleMessage` in sequence, so none of

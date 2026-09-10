@@ -334,13 +334,26 @@ func (s *SessionSync) handleMessage(conn net.Conn, msgType uint8, payload []byte
 		// boot — which is the routine second-fabric case #5718's tests exist to
 		// protect. So the remedy needs "we knew a DIFFERENT boot before", which
 		// `switched` alone does not say.
-		var evictedStale bool
+		var evictedStale, retired bool
 		if switched && priorInc.known() {
 			s.mu.Lock()
 			if idx := s.fabricIdxForConnLocked(conn); idx >= 0 {
 				evictedStale = s.applyPeerIncarnationSwitchLocked(idx)
+				retired = true
 			}
 			s.mu.Unlock()
+		}
+		// #9618: a retired incarnation is a new peer process, so the survivor
+		// owes it what installConn's cold-prime arm gives the epoch-first order
+		// of the same reboot: the OnPeerConnected dispatch (connection epoch,
+		// DHCP-lease and IPsec-SA sync nudges, config reconcile) as well as the
+		// session table. applyPeerIncarnationSwitchLocked armed the table debt;
+		// the sweep's owed-cold-prime re-drive sends it. Dispatched outside
+		// s.mu, exactly as handleNewConnection does.
+		if retired && s.OnPeerConnected != nil {
+			slog.Info("cluster sync: peer incarnation retired on boot id; scheduling OnPeerConnected callback",
+				"remote", connRemoteAddrString(conn))
+			go s.OnPeerConnected()
 		}
 		slog.Info("cluster sync: bulk transfer starting", "epoch", epoch,
 			"peer_boot_incarnation", inc.String(), "incarnation_switched", switched,

@@ -1,6 +1,13 @@
 package cluster
 
-import "testing"
+import (
+	"encoding/binary"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/psaab/xpf/pkg/dataplane"
+)
 
 // #9618: a peer reboot classified by the BulkStart BOOT ID (the order #9174
 // V014 did not cover) must owe the replacement a cold prime.
@@ -83,9 +90,16 @@ func TestFirstIncarnatedPrimeDoesNotArmColdPrime_9618(t *testing.T) {
 // it is routine, not a reboot. It must not arm, and must not evict fabric 0.
 func TestSameBootSecondFabricBulkStartDoesNotArmColdPrime_9618(t *testing.T) {
 	ss := primedPair9618(t)
+	var peerConnected atomic.Int32
+	ss.OnPeerConnected = func() { peerConnected.Add(1) }
 	c1 := pipeConn(t)
 	ss.installConn(1, c1)
+	peerConnected.Store(0)
 	ss.handleMessage(c1, syncMsgBulkStart, bulkStartPayload(2, &incA9618))
+	time.Sleep(50 * time.Millisecond)
+	if n := peerConnected.Load(); n != 0 {
+		t.Errorf("#9618 control: a same-boot BulkStart on the second fabric dispatched OnPeerConnected %d times", n)
+	}
 	ss.mu.Lock()
 	c0Live := ss.conn0 != nil
 	ss.mu.Unlock()
@@ -104,7 +118,14 @@ func TestSameBootSecondFabricBulkStartDoesNotArmColdPrime_9618(t *testing.T) {
 // replacement's connection and clear the latch.
 func TestBootIDRebootColdPrimeIsDrivenToTheReplacement_9618(t *testing.T) {
 	ss := NewSessionSync(":0", "10.0.0.2:4785", nil)
-	ss.SetRuntime(&mockSweepDP{})
+	established := dataplane.SessionKey{SrcIP: [4]byte{10, 0, 7, 1}, DstIP: [4]byte{10, 0, 8, 1}, Protocol: 6, SrcPort: 1200, DstPort: 80}
+	ss.SetRuntime(&mockSweepDP{
+		v4sessions:     map[dataplane.SessionKey]dataplane.SessionValue{established: {IngressZone: 2}},
+		sessionCounter: 1,
+	})
+	ss.IsPrimaryFn = func() bool { return true }
+	peerConnected := make(chan struct{}, 4)
+	ss.OnPeerConnected = func() { peerConnected <- struct{}{} }
 	c0, c1 := newBulkCaptureConn(), newBulkCaptureConn()
 	t.Cleanup(func() { c0.Close(); c1.Close() })
 
@@ -119,9 +140,19 @@ func TestBootIDRebootColdPrimeIsDrivenToTheReplacement_9618(t *testing.T) {
 	if ss.needColdPrime.Load() {
 		t.Fatalf("attribution: the empty-slot install armed the cold prime, so this cell would not isolate the boot-id path")
 	}
+	for len(peerConnected) > 0 {
+		<-peerConnected // installs before the reboot is classified
+	}
 	ss.handleMessage(c1, syncMsgBulkStart, bulkStartPayload(1, &incB9618))
 	if !ss.needColdPrime.Load() {
 		t.Fatalf("#9618: the boot-id switch did not arm the cold prime")
+	}
+	select {
+	case <-peerConnected:
+	case <-time.After(2 * time.Second):
+		t.Errorf("#9618: the boot-id switch retired the incarnation but never dispatched OnPeerConnected; " +
+			"the epoch-first order of the same reboot does, and without it the new peer process gets no " +
+			"DHCP-lease or IPsec-SA sync nudge and no config reconcile")
 	}
 
 	ss.handleDisconnect(c0)
@@ -132,7 +163,6 @@ func TestBootIDRebootColdPrimeIsDrivenToTheReplacement_9618(t *testing.T) {
 		t.Fatalf("attribution: the replacement on fabric 1 must still be connected")
 	}
 
-	ss.IsPrimaryFn = func() bool { return true }
 	ss.lastSweepTime = monotonicSeconds()
 	for i := 0; i < 3 && ss.needColdPrime.Load(); i++ {
 		ss.syncSweep()
@@ -146,7 +176,31 @@ func TestBootIDRebootColdPrimeIsDrivenToTheReplacement_9618(t *testing.T) {
 	if starts, ends := countBulkMarkers(t, c1.bytes()); starts == 0 || ends == 0 {
 		t.Errorf("#9618: no bulk window reached the REPLACEMENT's connection (starts=%d ends=%d)", starts, ends)
 	}
+	if n := countFrames9618(t, c1.bytes(), syncMsgSessionV4); n == 0 {
+		t.Errorf("#9618: the re-sent window reached the replacement but carried no session; the established flow is still missing there")
+	}
 	if starts, _ := countBulkMarkers(t, c0.bytes()); starts != 0 {
 		t.Errorf("attribution: a bulk was sent to the evicted corpse (starts=%d)", starts)
 	}
+}
+
+func countFrames9618(t *testing.T, buf []byte, typ uint8) int {
+	t.Helper()
+	n := 0
+	for len(buf) > 0 {
+		if len(buf) < syncHeaderSize {
+			t.Fatalf("truncated frame header: %d bytes left", len(buf))
+		}
+		ft := buf[4]
+		pl := binary.LittleEndian.Uint32(buf[8:12])
+		buf = buf[syncHeaderSize:]
+		if uint32(len(buf)) < pl {
+			t.Fatalf("truncated payload: want %d, have %d", pl, len(buf))
+		}
+		buf = buf[pl:]
+		if ft == typ {
+			n++
+		}
+	}
+	return n
 }
