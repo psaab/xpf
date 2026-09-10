@@ -729,15 +729,24 @@ would take a box down:
   set, hits the default deny and revokes — so every established session in the
   box would die on the first packet after ANY commit.
 * **GENERATION-ONLY stamp**, where `FilterRevalidationStamp` is keyed
-  `(generation, logical ingress ifindex)`. A policy verdict is a function of the
-  (from_zone, to_zone) pair, and both come from the ENTRY —
-  `metadata.ingress_zone` and `decision.resolution.egress_ifindex` — never from
-  the interface a given packet arrived on. Keying by ifindex would only make the
-  stamp go spuriously stale and re-walk terms that cannot change verdict.
-* **Side-effect freedom is STRUCTURAL, not a flag.** The filter needs
-  `NonRoutingCountPolicy::Never` because its evaluator counts internally.
-  `evaluate_policy_result_with_icmp` takes `&PolicyState` and RETURNS a counter
-  handle for the caller to bump; it cannot count, log or meter by itself.
+  `(generation, logical ingress ifindex)`. This bullet used to say both zones
+  "come from the ENTRY ... never from the interface a given packet arrived on".
+  #9384 made the from-zone come from the arrival interface and the sentence was
+  not re-checked; by then a packet from ANOTHER zone could re-derive the entry,
+  revoking it on a deny and re-stamping it on a permit (#9519). The stamp is
+  still generation-only, for a reason that now holds by construction: only an
+  OWNER reaches the re-derivation (`afxdp/poll_descriptor/session_hit_authority.rs`),
+  and an owner arrived in the entry's own zone or over the fabric, which keeps the
+  entry's zone. Every packet that reads or writes the stamp judges from the same
+  from-zone within a generation, so an ifindex in the key would only re-walk
+  terms for a LAG member or an ECMP path in that zone.
+* **Side-effect freedom is a property of the CALL, not of the type signature.**
+  This bullet used to call it structural, saying `evaluate_policy_result_with_icmp`
+  "cannot count, log or meter by itself". That was false: the rule and default hit
+  counters are atomics behind the shared reference, and every re-derivation
+  recorded a phantom hit until #9385 moved it to
+  `evaluate_policy_result_without_counting`, the policy sibling of the filter's
+  `NonRoutingCountPolicy::Never`.
 
 Two populations are DECLINED rather than adjudicated, both because the
 derivation cannot honestly produce a verdict for them:
@@ -747,13 +756,14 @@ derivation cannot honestly produce a verdict for them:
   derivation is frame-independent, so it has no type to offer. Evaluating with
   none would fail to match a type-specific term and manufacture a DENY. The
   #7323 residual stays open for ICMP alone.
-* **An egress that resolves to no zone.** `egress_zone_id` is `unwrap_or(0)` and
-  policy matches no rule against the 0 sentinel, so the flow would fall to the
-  default policy. That is a lookup failure, not a verdict. Reachable rather than
-  defensive: `ifindex_unambiguous_zone_id` is populated only for interfaces with
-  a resolvable link-layer address, so a MAC-less egress (an IPsec `xfrmi` secure
-  tunnel, #6722) resolves to 0 while being perfectly routable and correctly
-  zoned.
+* **An egress interface that does not resolve at all** (`egress_ifindex == 0`:
+  no route, or a peer-synced import for an inactive RG). That is a lookup
+  failure, not a verdict. This bullet used to decline every egress ZONE of 0, on
+  the claim that `ifindex_unambiguous_zone_id` is populated only for interfaces
+  with a resolvable link-layer address. It is filled by `populate_interfaces` and
+  is not conditioned on a link-layer address. #9513 narrowed the decline to the
+  unresolved interface; a resolved interface in no zone is now EVALUATED and falls
+  to the default policy, exactly as a new flow there would.
 
 **What this does NOT cover.** `to_id` comes from the egress interface resolved
 at install/import time, read through the LIVE zone ledger. A commit that moves
@@ -764,7 +774,9 @@ forbids — that path is the sole counter for its packet precisely because it
 never calls the routing evaluator. #8356 does not re-open #2620.
 
 Operator-visible signal: `policy_revoked_sessions`, the sibling of
-`filter_revoked_sessions`. A non-zero value right after a commit is the
+`filter_revoked_sessions`. Its #9519 neighbour `foreign_authority_drops` counts
+PACKETS refused because they hit a session from a zone that did not admit it and
+their own zone's policy does not permit them; it revokes nothing. A non-zero value right after a commit is the
 expected, intended reading — it is what the operator's narrowed policy did.
 
 Regression coverage: `session/policy_revalidation_8356_tests.rs` (stamp

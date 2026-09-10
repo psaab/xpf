@@ -220,9 +220,18 @@ fn txn_nat64_translation_bumps_counter_both_directions() {
     const ACK: u8 = 0x10;
     let reply_frame =
         build_txn_tcp_syn_frame_v4(dst_v4, pool_v4, 443, translated_port, TCP_FLAG_SYN | ACK);
-    let reply_meta = txn_meta_v4(24, TCP_FLAG_SYN | ACK, reply_frame.len() as u16);
+    // #9519: the reply arrives where it really does, on the WAN interface the
+    // forward flow left through (reth0.80, ifindex 12), not on the lan binding
+    // the v6 SYN used. Before #9519 the session-hit path never read the arrival
+    // interface, so delivering it on ifindex 24 was a harmless shortcut. Now a
+    // reply from a zone the flow did not go to is refused (#7169's rule, applied
+    // to the direct hit), and on ifindex 24 this cell would measure that refusal
+    // instead of the translation counter.
+    let mut wan_binding = BindingWorker::new_for_mirror_test(0, 0, 12, 0);
+    wan_binding.interface = Arc::<str>::from("reth0.80");
+    let reply_meta = txn_meta_v4(12, TCP_FLAG_SYN | ACK, reply_frame.len() as u16);
     let (rev_batch, _rev_dbg) = txn_run_descriptor(
-        &mut binding,
+        &mut wan_binding,
         &mut sessions,
         &forwarding,
         &ha_state,

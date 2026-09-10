@@ -601,6 +601,15 @@ pub(in crate::afxdp) struct DebugPollCounters {
     /// Counted once per revoked session, not per dropped packet.
     #[allow(dead_code)]
     pub(in crate::afxdp) policy_revoked_sessions: u64,
+    /// #9519: packets DROPPED because they hit an established session from a
+    /// zone other than the one that admitted it, and their own zone's policy
+    /// does not permit them. Per packet, not per session: nothing is revoked,
+    /// because the session belongs to the zone that admitted it. Distinct from
+    /// `policy_deny` (a NEW flow at the session-miss path) and from
+    /// `policy_revoked_sessions` (an owner's session its own policy no longer
+    /// admits).
+    #[allow(dead_code)]
+    pub(in crate::afxdp) foreign_authority_drops: u64,
     #[allow(dead_code)]
     pub(in crate::afxdp) ha_inactive: u64,
     #[allow(dead_code)]

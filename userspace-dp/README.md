@@ -513,6 +513,41 @@ logging rules, not these specific hot-path constants.
     on that interface gets. So it is automatically right under both
     postures: `default-policy deny` revokes, `permit-all` keeps.
 
+  - **Only the session's OWNER may re-derive it; a packet from another
+    zone is adjudicated, never trusted (#9519).** `SessionKey` has no zone
+    and no logical ingress, so the authoritative lookup hands the same entry
+    to a packet from ANY zone that presents the tuple. Nothing checked, and
+    #9384 made that exploitable: with the from-zone read off the packet's
+    arrival interface, one ACK spoofed onto a DENIED zone re-derived another
+    zone's session and REVOKED it (measured on `3b24fe26e`:
+    `policy_revoked_sessions = 1`, zero rows left). A packet from a
+    PERMITTED zone re-stamped the entry fresh instead, shielding it from its
+    own zone's narrowed policy, and a Fresh entry skipped the question and
+    forwarded the foreign packet under the owner's permit and NAT.
+
+    `poll_descriptor/session_hit_authority.rs` now decides, on every hit and
+    before anything acts on it, whether the packet is the OWNER: its live
+    arrival zone, resolved exactly as admission resolves it, equals
+    `metadata.ingress_zone`, or it arrived over the fabric. A FOREIGN packet
+    is judged by the policy of the zone it ARRIVED in — the post-DNAT
+    destination for a forward entry, the wire destination for a reply, the
+    arrival zone's host-inbound set for a host-bound session — forwarded on
+    a permit and dropped on a deny (`foreign_authority_drops`). Either way it
+    may not revoke, re-stamp, tear down or cache the entry. The one
+    exception is #9384's own case: a foreign packet on the session's
+    ADMITTING interface (the install-time `(ingress_ifindex, vlan)`, trusted
+    only for locally-stamped origins) still revokes, because only a commit
+    can move that interface between zones.
+
+    Two shapes were rejected. An ordinary MISS: the table holds one entry
+    per key and an install REPLACES it, so the foreign zone would overwrite
+    the owner's session and reallocate its NAT. And an identity fast path
+    that treats a packet on the admitting interface as the owner without a
+    zone lookup: after a re-zone it gives one entry two owners with
+    different from-zones under a single generation-only stamp, so a second
+    interface in the old zone could re-stamp the entry and shield the moved
+    interface from revocation.
+
   `security policies policy-rematch` is the COMMIT-time mitigation for
   the same class, and it is off by default
   (`pkg/config/types_security.go`), so on a stock box this module is the
