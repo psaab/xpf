@@ -579,6 +579,20 @@ func validatePolicyZoneReferencesStrict(cfg *Config) error {
 				"security policy from-zone %q to-zone %q: from-zone junos-host (host-originated / locally-generated traffic) is not supported — such traffic egresses via the kernel TX path, not the AF_XDP RX gate, so the rule would commit but silently never match; remove the junos-host from-zone (#3611 Piece A, #4230)",
 				zpp.FromZone, zpp.ToZone)
 		}
+		// #9570: `junos-global` is the reserved GLOBAL-policy context, not a
+		// zone. The generic undefined-zone text below would tell the operator to
+		// define `security-zone junos-global` (which #3055 rejects) and would
+		// claim the rule is "silently never matched", which was false for this
+		// token: the helper classified a zone-pair naming it as a device-wide
+		// GLOBAL rule. Name the context instead. The tolerant path downgrades
+		// this to a warning (lenientPolicyZoneRefs) and the snapshot builder then
+		// poisons the rule so the helper refuses the whole snapshot
+		// (pkg/dataplane/userspace/policies_reject_global_sentinel_9570.go).
+		if side := ZonePairGlobalSentinelSide(zpp.FromZone, zpp.ToZone); side != "" {
+			return fmt.Errorf(
+				"security policy from-zone %q to-zone %q names %q as its %s: that is the reserved global-policy context, not a security zone, and a zone-pair stanza cannot reference it — write the policy under `security policies global` instead (#3055, #9570)",
+				zpp.FromZone, zpp.ToZone, JunosGlobalZoneName, side)
+		}
 		if !defined(zpp.FromZone) {
 			return fmt.Errorf(
 				"security policy from-zone %q to-zone %q references undefined from-zone %q; define `set security zones security-zone %s` in the same commit or the rule is silently never matched (zone-pair falls through to the default policy)",

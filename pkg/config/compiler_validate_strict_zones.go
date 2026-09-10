@@ -19,7 +19,10 @@ import (
 // reference-exempt). Adding "junos-global" to the reference-exempt set would
 // silently re-open the device-wide-permit class this gate closes, because the
 // dataplane (userspace-dp/src/policy.rs:1021) classifies a "junos-global"
-// reference as a device-wide global rule.
+// reference as a device-wide global rule. (Until #9570 it did so for a
+// reference on EITHER side; it now requires both, and the userspace snapshot
+// builder poisons any zone-pair rule naming the sentinel on the tolerant path
+// — see ZonePairGlobalSentinelSide.)
 //
 //   - "junos-global" — the device-wide global-policy sentinel. The userspace
 //     dataplane (userspace-dp/src/policy.rs) string-matches a from-zone/to-zone
@@ -90,7 +93,8 @@ var policyZoneSpecialTokens = map[string]struct{}{
 //
 // The bug: compileZones accepts any zone name, and the userspace dataplane
 // (userspace-dp/src/policy.rs) string-matches a from-zone/to-zone literally
-// equal to "junos-global" and reclassifies the policy as a device-wide global
+// equal to "junos-global" (either side until #9570, both sides since) and
+// reclassifies the policy as a device-wide global
 // fallback (JUNOS_GLOBAL_ZONE_ID = u16::MAX) evaluated for every flow. So an
 // operator-defined zone named "junos-global" turns its zone-scoped policies
 // into device-wide fallbacks that can permit traffic for unrelated zone pairs —

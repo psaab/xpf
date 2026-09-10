@@ -2063,7 +2063,9 @@ type compileOpts struct {
 	// "junos-global" is reclassified by the userspace dataplane
 	// (userspace-dp/src/policy.rs) as a device-wide global fallback evaluated
 	// for every flow, so its zone-scoped policies silently permit traffic for
-	// unrelated zone pairs — a security-boundary escape. The tolerant load /
+	// unrelated zone pairs — a security-boundary escape. (Since #9570 the
+	// snapshot builder poisons a zone-pair rule naming the sentinel, so on this
+	// path such a config fails closed instead.) The tolerant load /
 	// peer-sync paths downgrade to a warning so an already-persisted or
 	// peer-synced config an older binary accepted still BOOTS (#1960 no-brick).
 	// Same doctrine as lenientPolicyZoneRefs.

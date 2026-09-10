@@ -480,6 +480,12 @@ the helper. It covers every fail-closed policy-content axis:
   (`addrRepresentable` false → `__unsupported_address__`). The scan is feed-aware
   (`q.FeedOverlay`): a healthy dynamic-address feed policy resolves through the
   overlay and is NOT falsely flagged.
+- **Zone-pair stanza naming `junos-global` (#9570)** — reachable only on the
+  tolerant load path, since strict commit rejects it. The snapshot builder
+  poisons the rule with `__unsupported__`, because the both-sided spelling is
+  wire-identical to a real global rule and the helper cannot tell them apart.
+  The reason names the side and renders the ZONE-PAIR scope
+  (`junos-global->junos-global/p1`), never `global/p1`.
 
 Before this, `matchApp` / `matchAddr` SILENTLY SKIPPED the unrepresentable term
 (a per-term no-match) and fell through to a later rule / the configured

@@ -33,8 +33,15 @@ func runUniformGatesPolicy(tree *ConfigTree, cfg *Config, opts compileOpts) erro
 	// zone-pair lookup so the pair falls through to the default action,
 	// failing OPEN under a permit default); lenient on load / peer-sync
 	// (warn so an already-persisted or peer-synced config with a stale zone
-	// reference still boots — #1960 no-brick; the dataplane drops the
-	// unindexed rule on its own, so a leniently-loaded bad config is inert).
+	// reference still boots — #1960 no-brick). A leniently-loaded bad reference
+	// is NOT inert. This comment used to say "the dataplane drops the unindexed
+	// rule on its own"; that is historical. Since #3402 the helper's integrity
+	// preflight refuses the WHOLE policy snapshot on an unresolvable zone
+	// (previous-good retained, fresh-boot default-deny). One token was covered by
+	// neither reading: a zone-pair stanza naming the reserved `junos-global`
+	// sentinel was classified by the helper as a device-wide GLOBAL rule and
+	// enforced for every zone pair (#9570). The snapshot builder now poisons such
+	// a rule, so it fails closed the same way.
 	// Exempts the `any` / `junos-host` / empty special tokens. Validates
 	// zone-pair from/to zones AND (as of #3148) a global policy's optional
 	// `match from-zone`/`match to-zone` context. Runs AFTER the policy match-address gate so a
