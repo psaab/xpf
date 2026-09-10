@@ -7382,6 +7382,12 @@ fn neigh_monitor_thread_count() -> usize {
 ///
 /// The teardown direction does not need this — `stop()` JOINS — but it polls
 /// through the same helper so both directions read one implementation.
+///
+/// The same race exists at the other end (#9556): `join()` returns while the
+/// exiting task is still listed in `/proc/self/task`, so a gate's STARTING count
+/// must wait for zero too. A standalone probe measured 43 of 5000 joined threads
+/// still listed at load 9 and 394 of 5000 with a busy loop per core, lingering up
+/// to 34 ms.
 fn await_neigh_monitor_count(want: usize) -> usize {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     loop {
@@ -7391,6 +7397,44 @@ fn await_neigh_monitor_count(want: usize) -> usize {
         }
         std::thread::sleep(std::time::Duration::from_millis(5));
     }
+}
+
+/// #9556 control: leave a TRANSIENT `neigh-monitor` thread for the next serial-lock
+/// holder, which is a #6637 gate.
+///
+/// Under `--test-threads=1` libtest runs tests in name order. Each caller's name sorts
+/// immediately before the gate it precedes, so that gate starts while this stand-in is
+/// still listed in `/proc/self/task`. That is the same window a correctly JOINED monitor
+/// leaves before the kernel unhashes it, stretched to about one second so it is
+/// deterministic. The gate's bounded wait for zero outlasts it. An instant `before` sample
+/// reads 1 and fails, which is what makes a revert of either gate's call site observable.
+/// A thread that never exits is still caught: it is listed when the 5 s wait ends.
+fn leave_a_transient_neigh_monitor_for_the_next_gate_9556() {
+    let _neigh_serial = crate::afxdp::neigh_monitor_test_serial();
+    let (started_tx, started_rx) = std::sync::mpsc::channel();
+    std::thread::Builder::new()
+        .name("neigh-monitor".to_string())
+        .spawn(move || {
+            let _ = started_tx.send(());
+            std::thread::sleep(std::time::Duration::from_millis(1000));
+        })
+        .expect("spawn the stand-in neigh-monitor thread");
+    started_rx.recv().expect("the stand-in thread started");
+    assert!(
+        await_neigh_monitor_count(1) >= 1,
+        "control precondition: the stand-in must be visible in /proc/self/task before the \
+         lock is released, or the next gate could start without seeing it"
+    );
+}
+
+#[test]
+fn coordinator_bringup_does_not_leak_a_neigh_monitor_thread_0_lingering_monitor_control_9556() {
+    leave_a_transient_neigh_monitor_for_the_next_gate_9556();
+}
+
+#[test]
+fn stopped_coordinator_guard_joins_the_neigh_monitor_on_drop_0_lingering_monitor_control_9556() {
+    leave_a_transient_neigh_monitor_for_the_next_gate_9556();
 }
 
 /// #6637 fail-on-revert gate: a coordinator bringup must not leave a
@@ -7410,14 +7454,22 @@ fn coordinator_bringup_does_not_leak_a_neigh_monitor_thread_6637() {
     // gates read the PROCESS-WIDE count of those. Held for the whole body so a
     // parallel sibling cannot move that count inside their window.
     let _neigh_serial = crate::afxdp::neigh_monitor_test_serial();
-    let before = neigh_monitor_thread_count();
+    // #9556: WAIT for the starting count, as the `during` and `after` reads do.
+    // A monitor that the previous test JOINED can still be listed in
+    // /proc/self/task for milliseconds after join() returns, because the kernel
+    // unhashes an exiting task after it wakes the joiner. Measured: 43 of 5000
+    // joins still listed at load 9, 394 of 5000 with a busy loop per core,
+    // lingering up to 34 ms. An instant sample read that as `before=1` in a
+    // serial suite with no leak. A thread that is still there when the bounded
+    // wait ends is a real leak or an unlocked spawner, and still fails below.
+    let before = await_neigh_monitor_count(0);
     // #7413 anti-rot precondition. The guard above makes this hold; an
     // ELEVENTH spawner added without taking it breaks it, and this fails
     // naming the missing lock instead of failing later as an off-by-one delta
     // that reads like a real monitor leak.
     assert_eq!(
         before, 0,
-        "a neigh-monitor thread is already running when this gate started \
+        "a neigh-monitor thread was still running after waiting for it to exit when this gate started \
          (before={before}). Either a sibling test spawned one without taking \
          neigh_monitor_test_serial(), or a previous test leaked one; both make \
          the deltas below measure the wrong thing (#7413)"
@@ -7466,14 +7518,22 @@ fn stopped_coordinator_guard_joins_the_neigh_monitor_on_drop_6637() {
     // gates read the PROCESS-WIDE count of those. Held for the whole body so a
     // parallel sibling cannot move that count inside their window.
     let _neigh_serial = crate::afxdp::neigh_monitor_test_serial();
-    let before = neigh_monitor_thread_count();
+    // #9556: WAIT for the starting count, as the `during` and `after` reads do.
+    // A monitor that the previous test JOINED can still be listed in
+    // /proc/self/task for milliseconds after join() returns, because the kernel
+    // unhashes an exiting task after it wakes the joiner. Measured: 43 of 5000
+    // joins still listed at load 9, 394 of 5000 with a busy loop per core,
+    // lingering up to 34 ms. An instant sample read that as `before=1` in a
+    // serial suite with no leak. A thread that is still there when the bounded
+    // wait ends is a real leak or an unlocked spawner, and still fails below.
+    let before = await_neigh_monitor_count(0);
     // #7413 anti-rot precondition. The guard above makes this hold; an
     // ELEVENTH spawner added without taking it breaks it, and this fails
     // naming the missing lock instead of failing later as an off-by-one delta
     // that reads like a real monitor leak.
     assert_eq!(
         before, 0,
-        "a neigh-monitor thread is already running when this gate started \
+        "a neigh-monitor thread was still running after waiting for it to exit when this gate started \
          (before={before}). Either a sibling test spawned one without taking \
          neigh_monitor_test_serial(), or a previous test leaked one; both make \
          the deltas below measure the wrong thing (#7413)"
