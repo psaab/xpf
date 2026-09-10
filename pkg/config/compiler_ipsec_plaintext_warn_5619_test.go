@@ -361,10 +361,17 @@ func TestPlaintextWarningIsAggregatedToOne(t *testing.T) {
 // TestPlaintextWarningSeparatesZonedFromUnzoned pins the escalation the zoned
 // case earns, and the #6682 note the unzoned case earns.
 //
-// Leaving a tunnel out of a zone is NOT a mitigation: an interface in no zone
-// resolves to zone id 0 and a `from-zone any to-zone any permit` rule matches
-// zone-pair (0,0). An operator reading only the zoned paragraph could otherwise
-// conclude that unzoning is the safe option.
+// Leaving a tunnel out of a zone is NOT a mitigation: IPsec plaintext never
+// reaches zone policy at all, so zoning the interface or not changes nothing. An
+// operator reading only the zoned paragraph could otherwise conclude that
+// unzoning is the safe option.
+//
+// #6682 / #9251: this comment used to give the mechanism as "an interface in no
+// zone resolves to zone id 0 and a `from-zone any to-zone any permit` rule
+// matches zone-pair (0,0)". That was never true — #3110 fenced every rule tier
+// against zone 0, and #6682 made an unzoned ingress an explicit deny. The
+// advisory's caveat was corrected by #6682; this cell's comment and message were
+// not, and #9251 corrected them. The assertion is unchanged.
 func TestPlaintextWarningSeparatesZonedFromUnzoned(t *testing.T) {
 	cfg := compileWarn5619(t,
 		"set security ipsec vpn zoned bind-interface st0.0",
@@ -394,7 +401,7 @@ func TestPlaintextWarningSeparatesZonedFromUnzoned(t *testing.T) {
 	}
 	if !strings.Contains(adv, "#6682") {
 		t.Errorf("with an unzoned tunnel present the advisory must say that unzoning is "+
-			"NOT a mitigation (zone id 0 is matchable by a wildcard permit, #6682): %s", adv)
+			"NOT a mitigation (#6682): %s", adv)
 	}
 }
 

@@ -565,13 +565,21 @@ fn run_unzoned_wiring_9251(forwarding: &ForwardingState, init: &WgEngine, rpub: 
 /// WireGuard tunnel's decapsulated transit is "DENIED on the dataplane path
 /// (#6682)". This cell is that sentence's proof, through the poll loop.
 ///
-/// It composes two facts no single cell pinned together. The decap stage hands
-/// `build_logical_ingress_packet` the TUNNEL's logical ifindex, which resolves
-/// through `ifindex_to_zone_id` and falls back to zone id 0 when the tunnel is
-/// in no zone; and `policy.rs` refuses transit from ingress zone 0 before the
-/// implicit default (#6682). A stage that fell back to the UNDERLAY's zone
-/// instead would adjudicate the inner flow under the WAN's policy, and the
-/// both-any permit below would forward it.
+/// It composes facts no single cell pinned together. The decap call site puts
+/// the TUNNEL's logical ifindex on the inner meta's `ingress_ifindex`
+/// (`build_logical_ingress_packet`). The policy stage resolves the from-zone
+/// from that ifindex — `zone_pair_ids_for_flow_with_override`: the fabric
+/// override, else `ifindex_to_zone_id[ingress_ifindex]`, else 0 — so a tunnel in
+/// no zone is zone 0. And `policy.rs` refuses transit from ingress zone 0 before
+/// the implicit default (#6682). A call site that passed the UNDERLAY's ifindex
+/// would adjudicate the inner flow under the WAN's zone, and a fallback that
+/// yielded any real zone instead of 0 would let the both-any permit forward it.
+///
+/// What this cell does NOT bind: the `ingress_zone` value
+/// `build_logical_ingress_packet` STAMPS on the meta. The policy stage does not
+/// read it for this packet — a mutant that made only the stamp fall back to a
+/// configured zone survived this cell (#9251), and this paragraph used to name
+/// the stamp as the mechanism.
 ///
 /// The posture is chosen so that ONLY the #6682 guard can refuse, and the
 /// POSITIVE CONTROL proves it: the same record, the same posture, the tunnel

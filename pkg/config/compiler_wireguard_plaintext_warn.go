@@ -17,11 +17,12 @@ import (
 //	                listen port to the AF_XDP worker (wg_worker_claims_record,
 //	                #8274). The worker decapsulates it
 //	                (userspace-dp/src/afxdp/wg/decap.rs), rebinds the inner
-//	                packet to the tunnel's logical ifindex and zone
+//	                packet to the tunnel's logical ifindex
 //	                (logical_ingress::build_logical_ingress_packet) and runs
-//	                screen, session, policy and NAT on it. A tunnel in no zone
-//	                resolves to zone id 0 there, and #6682 DENIES transit from
-//	                an unzoned ingress.
+//	                screen, session, policy and NAT on it. Policy resolves the
+//	                from-zone from that ifindex; a tunnel in no zone has none and
+//	                is zone id 0, and #6682 DENIES transit from an unzoned
+//	                ingress.
 //	kernel path     A record that reaches the firewall through the Linux kernel
 //	                instead — on an ingress interface the shim does not attach
 //	                to (#8274's stated residual), or while the dataplane is
@@ -72,8 +73,11 @@ import (
 // and not merely on "is a tunnel".
 //
 // Coupling to the dataplane exclusion, which is also why the kernel path is
-// unadjudicated: the wgN TUN the control thread writes to is never AF_XDP-bound,
-// so a packet written to it is seen only by the kernel. The row that carries a
+// unadjudicated: the wgN TUN the control thread writes to is excluded from
+// ingress adjudication and from the binding plan, so what is written there is
+// left to the kernel. (One row escapes the exclusion — the BASE row under the
+// canonical `unit 0` spelling, #8279, docs/userspace-dataplane-gaps.md — and
+// that is a defect of its own, not an adjudication path.) The row that carries a
 // WireGuard tunnel
 // is `Tunnel=true` in its InterfaceSnapshot (buildInterfaceSnapshotsFrom sets
 // `Tunnel: iface.Tunnel != nil` on the base row and `iface.Tunnel != nil ||
@@ -127,9 +131,11 @@ import (
 // control thread's TUN write consults no zone, so zoning or not zoning the
 // interface does not change it. On the dataplane path the two DO differ, and
 // the advisory says how: a zoned tunnel's traffic is adjudicated under its
-// zone, and an unzoned tunnel's transit is DENIED — build_logical_ingress_packet
-// resolves it to zone id 0 and #6682 refuses it before the implicit default
-// policy, pinned end to end through the poll loop by
+// zone, and an unzoned tunnel's transit is DENIED — the policy stage resolves
+// the from-zone from the tunnel's logical ifindex
+// (zone_pair_ids_for_flow_with_override), finds no zone, uses zone id 0, and
+// #6682 refuses it before the implicit default policy. Pinned end to end through
+// the poll loop by
 // poll_loop_denies_unzoned_wg_tunnel_transit_under_permit_all_9251.
 //
 // #6682: this comment used to add that an unzoned interface resolves to zone id

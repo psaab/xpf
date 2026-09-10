@@ -128,8 +128,8 @@ func TestWGPlaintextWarningScopesTheZoneToTheDataplanePath(t *testing.T) {
 // #9251 re-anchored the caveat this cell pins. It used to require the shared
 // "An UNZONED tunnel is not safer ... it only leaves it unadjudicated by a
 // different route" sentence. That is still true of IPsec, and it is FALSE of
-// WireGuard's dataplane path: build_logical_ingress_packet resolves an unzoned
-// tunnel to zone id 0 and #6682 denies transit from it, even under
+// WireGuard's dataplane path: the policy stage resolves an unzoned tunnel's
+// logical ifindex to zone id 0 and #6682 denies transit from it, even under
 // `default-policy permit-all` with a both-any permit
 // (poll_loop_denies_unzoned_wg_tunnel_transit_under_permit_all_9251). The
 // caveat must now state both halves.

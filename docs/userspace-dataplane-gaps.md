@@ -534,7 +534,7 @@ The two supported VPN modes no longer share one answer.
 | Protocol / path | Where decapsulation happens | Adjudicated? |
 |-----------------|-----------------------------|--------------|
 | Route-based IPsec (#5619) | The kernel XFRM stack; the plaintext is delivered on the `xfrmi` netdev. | **No.** There is no path to hand a plaintext frame back INTO an `xfrmi` for the egress direction, so the dataplane cannot own the interface end-to-end. |
-| WireGuard, dataplane path (#8274) | The AF_XDP worker. The shim's `wg_worker_claims_record` hands a transport-data record for the steered listen port to the worker (a listener on an interface-mode SNAT address is claimed on any configured port); `userspace-dp/src/afxdp/wg/decap.rs` decapsulates it and `logical_ingress::build_logical_ingress_packet` rebinds the inner packet to the tunnel's `logical_ifindex`. | **Yes**, under the tunnel's zone: screen, session, policy, NAT. An **unzoned** tunnel resolves to zone id 0 and its transit is **denied** by the #6682 unzoned-ingress guard, even under `default-policy permit-all` with a both-any permit (`poll_loop_denies_unzoned_wg_tunnel_transit_under_permit_all_9251`). |
+| WireGuard, dataplane path (#8274) | The AF_XDP worker. The shim's `wg_worker_claims_record` hands a transport-data record for the steered listen port to the worker; the worker itself matches every configured listen port, so a record that reaches it by another route (for example, to an interface-mode SNAT address) is decapsulated there too. `userspace-dp/src/afxdp/wg/decap.rs` decapsulates it and `logical_ingress::build_logical_ingress_packet` rebinds the inner packet to the tunnel's `logical_ifindex`. | **Yes**, under the tunnel's zone: screen, session, policy, NAT. An **unzoned** tunnel resolves to zone id 0 and its transit is **denied** by the #6682 unzoned-ingress guard, even under `default-policy permit-all` with a both-any permit (`poll_loop_denies_unzoned_wg_tunnel_transit_under_permit_all_9251`). |
 | WireGuard, kernel path | `userspace-dp/src/afxdp/coordinator/wg_control/dispatch.rs`. A transport record reaches the control thread's UDP socket through the kernel when it arrives on an ingress interface the shim does not attach to (#8274's residual, `docs/log/8274.md`), or while the dataplane is degraded and the shim passes local-destination traffic to the kernel — helper start, redundancy-group transition, reth link cycle, missing or not-ready binding, stale heartbeat (#9594). | **No, for the steered listen port:** the thread authenticates the record, enforces the peer's `allowed-ips` against the inner SOURCE address, and writes the plaintext to the `wgN` TUN for the kernel to forward. **Refused for every other port:** the thread drops it (`rx_unsteered_transport_drops`, #9521). |
 
 Both tunnel netdevs are excluded from the ingress-adjudication set:
@@ -544,8 +544,9 @@ IPsec through the `SecureTunnel` class, so the row is left out of
 `buildUserspaceIngressIfindexes` and of the AF_XDP binding plan, and
 `syncInterfaceAttachments` detaches the shim from the netdev. For IPsec that is
 the whole story. For WireGuard it is why the kernel path is unadjudicated: the
-dataplane path decapsulates on the UNDERLAY's binding, and a packet written to
-the never-bound `wgN` TUN is seen only by the kernel.
+dataplane path decapsulates on the UNDERLAY's binding, while the `wgN` TUN the
+control thread writes to is excluded from adjudication, so what is written there
+is left to the kernel. The exclusion has one known hole, stated next.
 
 > **That is not true of the WireGuard BASE row under the canonical spelling
 > (#8279).** The base row's flag is `Tunnel: iface.Tunnel != nil`
