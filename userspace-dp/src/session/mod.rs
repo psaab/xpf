@@ -3206,6 +3206,13 @@ mod tests;
 #[path = "tcp_close_state_7342_tests.rs"]
 mod tcp_close_state_7342_tests;
 
+// #9412: pins that the production HA import path carries `tcp_flags: 0`, so the
+// close bits derived from it are vacuous and an imported session ages on the
+// ESTABLISHED window. Deliberately two-sided — it FAILS when #9412 is fixed.
+#[cfg(test)]
+#[path = "tcp_flags_zero_on_sync_path_9412_tests.rs"]
+mod tcp_flags_zero_on_sync_path_9412_tests;
+
 // #7212: the static input-filter revalidation stamp lifecycle. Its own file
 // rather than another block in the 8k-line `tests.rs`, per the modularity rule
 // on test files.

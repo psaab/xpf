@@ -93,6 +93,38 @@ purpose (#2749, so NetFlow's `tcpControlBits` reports the whole flow), so
 detector built on it would put every half-closed session straight into TIME_WAIT
 — and every single-FIN test would still pass.
 
+**Close state does NOT cross the HA session-sync wire (#9412, OPEN).** All four
+bits are node-local, so an imported session has `closing` / `reset` / `fin_own` /
+`fin_peer` FALSE regardless of what the primary's session was doing, and
+`install.rs` ages it on the ESTABLISHED window (300 s) instead of the close
+windows above. A flow that closed within its close window of a failover and then
+went SILENT therefore holds a table slot for up to 300 s on the new active.
+
+Two things bound it, and they are why the severity is Low: the primary's own reap
+emits a Close delta that removes the standby copy in steady state, and the first
+post-promotion packet re-marks `closing` and recomputes the window through
+`tcp_close_window_ns` on the `lookup.rs` read path. The residual is the
+intersection — closed near a failover, then silent.
+
+Two traps recorded because both look like the fix and are not:
+
+- **Re-deriving from the synced `tcp_flags` is vacuous.** The production import
+  constructor hardcodes `tcp_flags: 0`
+  (`server/helpers/session_sync.rs`), so there is nothing to derive from. The
+  #3152 comment block in `install.rs` used to describe those flags as
+  "install-time flags", which reads as though real flags arrive and #3152 declines
+  to trust them; that wording is corrected, and
+  `tcp_flags_zero_on_sync_path_9412_tests.rs` pins the hard zero so it cannot
+  drift back. That cell is deliberately TWO-SIDED: it FAILS when #9412 is fixed,
+  so the fix cannot land while the code still claims close-state cannot cross.
+- **Carrying close-state on the existing delta is not sufficient by itself.** The
+  close transition happens on the `lookup.rs` read path, which pushes NO delta,
+  and the incremental sweep re-sends only sessions whose `Created` is newer than
+  the last tick (`pkg/cluster/sync_conn_sweep.go`) — so a mid-life state change is
+  never re-sent. A working fix needs a state-update push as well as a wire field,
+  and that push must not emit a spurious `RT_FLOW_SESSION_CREATE` (SessionDelta
+  feeds the RT_FLOW exporter too) or overrun the #8593 loss-of-sync latch.
+
 **Compatibility.** `tcp_closing_ns` and `tcp_time_wait_ns` both default to the
 window every post-FIN close already used, `0` on the wire means unset, and the
 three carriers are `omitempty` / `serde(default)`. An operator who sets neither
