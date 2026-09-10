@@ -498,21 +498,29 @@ func (s *Store) commitConfirmedLocked(minutes int) (*config.Config, error) {
 	// timer. The record encoded here is the one writeConfirmState writes: the
 	// same rollback target, the same deadline (hoisted for exactly this reason)
 	// and the guarded hash of the tree about to become active; the encrypted
-	// length is a function of the plaintext length. Only the size refusal
-	// rejects the commit. Any other encode failure keeps the #9014 degraded
-	// arm path it has today.
+	// length is a function of the plaintext length.
 	deadline := time.Now().Add(time.Duration(minutes) * time.Minute)
 	if s.db != nil {
 		prevTree, prevFirst := s.active, !everCommittedOnEntry
 		if s.confirmTimer != nil {
 			prevTree, prevFirst = s.confirmPrevTree, s.confirmPrevFirst
 		}
+		// Encode the TOMBSTONE form (Resolved: true). #8565 re-writes the record
+		// with `resolved` before removing it, so that form is the larger of the
+		// two this window will write, and a window that arms must also be
+		// resolvable: a tombstone refused at the ceiling, followed by a failed
+		// removal, would leave the unresolved record to re-arm a confirmed
+		// window on reboot. Any encode failure rejects, with the candidate
+		// intact: a window whose rollback record cannot be produced now has no
+		// rollback to offer, and discovering that after promotion is the defect
+		// this preflight exists to remove.
 		if _, err := s.db.encodeConfirm(&confirmRecord{
 			Deadline:    deadline,
 			PrevTree:    prevTree,
 			FirstCommit: prevFirst,
 			GuardedHash: guardedConfigHash(s.candidate),
-		}); errors.Is(err, ErrPersistExceedsReadCeiling) {
+			Resolved:    true,
+		}); err != nil {
 			return nil, fmt.Errorf("commit confirmed failed: the rollback record would not survive a restart: %w", err)
 		}
 	}

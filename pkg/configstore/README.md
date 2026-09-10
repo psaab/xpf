@@ -255,28 +255,34 @@ inline archive-site passwords).
   HA peer-sync path and any non-transport caller. Real configs are well
   under 1 MiB, so the ceiling never rejects a legitimate config.
 
-  **The same ceiling bounds every artifact the store WRITES (#9617).** The
-  bullet above is an INPUT bound, and a config that passes it can still
-  serialize past 16 MiB: a JSON tree is many times its config text (18x for
-  a run of small `groups` stanzas). Every tree and record the store persists
-  is read back under `ReadBoundedFile(path, MaxConfigSize)` — `active.json`
-  at `Load`, `rollback.N.json`, `candidate.json`, and `confirm.json` at boot
-  recovery — and before #9617 no writer checked. An accepted commit could
-  therefore write an `active.json` the next `Load` refuses
-  (`ErrConfigDBUnreadable`: the daemon does not come back), and a successful
-  `commit confirmed` could write a `confirm.json` the next boot refuses (the
-  rollback window silently lost). `writeTreeMarked` and `WriteConfirm` (via
-  `encodeConfirm`) now refuse bytes over the ceiling with
-  `ErrPersistExceedsReadCeiling`, using the reader's exact boundary
-  (`len > max`, pinned by `TestPersistSizeGateMatchesReaderBoundary_9617`).
-  The check runs on the envelope-wrapped, possibly-encrypted bytes — exactly
-  what the reader counts — and BEFORE the write, so the file on disk stays the
-  previous readable generation. `Commit` and `CommitConfirmed` fail
-  pre-promotion with the candidate intact. The degrade-not-fail writers (HA
-  `SyncApply`, confirm recovery, the persist retry loop) record the refusal as
-  `persistDegraded` exactly as they record any other failed write, because
-  their in-memory apply is the safety property; the retry cannot succeed until
-  a smaller config is applied, and its warning carries the refusal text.
+  **The same ceiling bounds every tree and record the store WRITES into
+  `.configdb` (#9617).** The bullet above is an INPUT bound, and a config
+  that passes it can still serialize past 16 MiB: a JSON tree is many times
+  its config text (18x for a run of small `groups` stanzas). `active.json`,
+  `candidate.json`, `rollback.N.json` and `confirm.json` are all read back
+  under `ReadBoundedFile(path, MaxConfigSize)`, and before #9617 no writer
+  checked. An accepted commit could therefore write an `active.json` the next
+  `Load` refuses (`ErrConfigDBUnreadable`: the daemon does not come back), and
+  a successful `commit confirmed` could write a `confirm.json` the next boot
+  refuses (#8566 reports that as degraded health, but the rollback window is
+  gone). `writeTreeMarked` and `WriteConfirm` (via `encodeConfirm`) now refuse
+  bytes over the ceiling with `ErrPersistExceedsReadCeiling`, using the
+  reader's exact boundary (`len > max`). The check runs on the
+  envelope-wrapped, possibly-encrypted bytes, exactly what the reader counts
+  (`TestWriteActiveBoundaryIsTheReadersExactBytes_9617`), and BEFORE the
+  write, so the file on disk stays the previous readable generation. `Commit`
+  and `CommitConfirmed` fail pre-promotion with the candidate intact. The
+  degrade-not-fail writers (HA `SyncApply`, confirm recovery, the timeout
+  rollback) record the refusal as `persistDegraded` like any other failed
+  write, because their in-memory apply is the safety property. The persist
+  retry loop logs a size refusal once and does not re-attempt that tree (no
+  retry can succeed); persistence stays degraded until a different active
+  config is written. **Not gated:** the text renderings beside the DB — the
+  `config.N` rollback files and the rescue config — are written from
+  `Format()` without this check. Their readers also use `ReadBoundedFile`,
+  and an over-ceiling rendering fails only that read: the rollback slot loads
+  as a tombstone that `rollback N` rejects (#4810), and the rescue load
+  returns an error.
 - `DB` — `db.go`. Low-level durable file I/O (via `pkg/fsatomic`).
   `NewDB` sweeps crash-leaked `.*.tmp-*` temps from `.configdb`.
 - `History` — `history.go`. Bounded ring of recent commits.
@@ -792,13 +798,13 @@ per-path:
   `confirm.json` nests the rollback target one indentation level deeper than
   `active.json` (`MarshalIndent`, two bytes per line), so a readable active DB
   can have an unreadable record, and the record is written only after
-  promotion. `commitConfirmedLocked` therefore encodes the exact record it will
-  write — the same rollback target, the same deadline (hoisted above the
-  preflight), the guarded hash of the tree about to become active — through
-  the same `encodeConfirm` the write uses, BEFORE `writeActive`, and refuses
-  the commit with the candidate intact if the record would exceed
-  `MaxConfigSize`. Only the size refusal rejects; any other encode failure
-  keeps the #9014 degraded arm path.
+  promotion. `commitConfirmedLocked` therefore encodes the record BEFORE
+  `writeActive`, through the same `encodeConfirm` the write uses: the same
+  rollback target (the ORIGINAL one for a nested re-arm), the same deadline
+  (hoisted above the preflight), the guarded hash of the tree about to become
+  active, and `resolved: true` — the #8565 tombstone form, the larger of the
+  two shapes the window writes — so a window that arms can also be resolved.
+  Any encode failure refuses the commit with the candidate intact.
 - **A degenerate `confirm.json` is rejected, never treated as a valid
   pending confirm (#5637, codex-review-181 M29).** `ReadConfirm` now
   validates the record's shape and fields, mirroring the #5474
