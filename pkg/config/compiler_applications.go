@@ -117,7 +117,7 @@ var applicationDirectLeafKeywords = map[string]bool{
 // `term` is emitted as a leaf and terminates the scan: the rest of the run is
 // the term's own opaque token stream, which parseApplicationTerms flattens (and
 // guards with UnknownTermLeaves, #3352).
-func applicationDirectLeaves(appNode *Node) (leaves []*Node, unknown []string) {
+func applicationDirectLeaves(appNode *Node) (leaves []*Node, unknown []string, unknownTokens []string) {
 	var walk func(nodes []*Node)
 	walk = func(nodes []*Node) {
 		for _, n := range nodes {
@@ -149,6 +149,12 @@ func applicationDirectLeaves(appNode *Node) (leaves []*Node, unknown []string) {
 					// neighbouring `protocol tcp` line compiled exactly as master
 					// compiled it.
 					unknown = append(unknown, kw)
+					// #9595: keep every token of the poisoned run (the keyword,
+					// its value, and anything a flat-set chain parked below it),
+					// so the tolerant path can tell a lost match constraint from a
+					// harmless stray statement by the value's shape.
+					unknownTokens = append(unknownTokens, n.Keys[i:]...)
+					unknownTokens = appendSubtreeKeys9595(unknownTokens, n.Children)
 					descend = false
 					break
 				}
@@ -238,6 +244,7 @@ func applicationDirectLeaves(appNode *Node) (leaves []*Node, unknown []string) {
 					// RECOVER `protocol tcp`, which would arm a TCP permit where
 					// master left the application protocol-less.
 					unknown = append(unknown, vals[1:]...)
+					unknownTokens = append(unknownTokens, vals[1:]...)
 					poisoned = true
 				}
 				if start == 0 {
@@ -271,7 +278,7 @@ func applicationDirectLeaves(appNode *Node) (leaves []*Node, unknown []string) {
 		}
 	}
 	walk(appNode.Children)
-	return leaves, unknown
+	return leaves, unknown, unknownTokens
 }
 
 // applicationTermKeys reassembles the token stream of an inline `term` node
@@ -308,7 +315,7 @@ func applicationTermKeys(prop *Node) []string {
 // so a term reached through a flat-set CHAIN is found in both AST shapes. It is
 // the enumeration half of the term contract shared with applicationTermKeys.
 func applicationTermNodes(appNode *Node) []*Node {
-	leaves, _ := applicationDirectLeaves(appNode)
+	leaves, _, _ := applicationDirectLeaves(appNode)
 	var terms []*Node
 	for _, leaf := range leaves {
 		if leaf.Name() == "term" {
@@ -366,8 +373,9 @@ func compileApplications(node *Node, apps *ApplicationsConfig) error {
 		// shape the leaves form a CHAIN (`protocol tcp` -> `destination-port
 		// 8080`), not siblings, so iterating inst.node.Children alone saw only
 		// the first leaf and compiled the application protocol-only.
-		directLeaves, unknownDirect := applicationDirectLeaves(inst.node)
+		directLeaves, unknownDirect, unknownDirectTokens := applicationDirectLeaves(inst.node)
 		app.UnknownDirectLeaves = unknownDirect
+		app.UnknownDirectTokens = unknownDirectTokens
 		for _, prop := range directLeaves {
 			// #8339: a RECOGNIZED value-taking leaf with no value. Checked once
 			// here rather than as an `else` on each arm, mirroring the term
@@ -528,6 +536,7 @@ func compileApplications(node *Node, apps *ApplicationsConfig) error {
 				// Description is carried, mirroring how parseApplicationTerms
 				// already lands UnknownTermLeaves on each term (#3352).
 				t.UnknownDirectLeaves = app.UnknownDirectLeaves
+				t.UnknownDirectTokens = app.UnknownDirectTokens
 				// #8339: carried for the SAME reason and it is not optional —
 				// this branch discards `app`, so a dangling direct leaf on a
 				// term-bearing application would escape the strict gate
@@ -592,6 +601,9 @@ func compileApplications(node *Node, apps *ApplicationsConfig) error {
 				// path) instead of compiling an under-populated set.
 				if kw := member.Name(); kw != "" {
 					as.UnknownMembers = append(as.UnknownMembers, kw)
+					// #9595: keep the value too; a value that resolves as an
+					// application marks a misspelled member reference.
+					as.UnknownMemberValues = append(as.UnknownMemberValues, applicationSetMemberValues(member)...)
 				}
 			}
 		}

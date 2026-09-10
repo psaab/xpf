@@ -32,12 +32,14 @@ import "fmt"
 // helper rejects the whole snapshot (a running node keeps its previous one)
 // and the mirror names the application.
 //
-// Deliberately NOT a drop here: an UNRECOGNIZED statement (UnknownDirectLeaves,
-// UnknownTermLeaves, an application-set's UnknownMembers). #6524's
-// TestStrayStatementDoesNotDisarmSiblingLeaves decided that a stray statement
-// must leave an otherwise well-formed application armed on the tolerant path;
-// that decision is not overridden here. Nor are the settings leaves below
-// (a bad or conflicting timeout or alg), which do not change what matches.
+// An UNRECOGNIZED statement (UnknownDirectLeaves, UnknownTermLeaves, an
+// application-set's UnknownMembers) is a drop only on the structural line
+// #9595 draws (application_unknown_statement_9595.go): a constraint-shaped
+// value on an application that is otherwise protocol-wide, or a misspelled set
+// member that names a real application. #6524's stray statement beside a
+// well-formed match stays armed. The settings leaves below (a bad or
+// conflicting timeout or alg) are not drops either; they do not change what
+// matches.
 
 // applicationMatchLeaves9525 names the value-taking application leaves whose
 // value decides WHICH packets a term matches; applicationSettingLeaves9525
@@ -105,6 +107,9 @@ func ApplicationMatchDrops(app *Application) []string {
 		"conflicting %q values, of which only the last is enforced")
 	out = appendMatchLeafDrops9525(out, app.DuplicateTermLeaves,
 		"conflicting %q values inside a term, of which only the last is enforced")
+	if reason := unknownStatementProtocolWide9595(app); reason != "" {
+		out = append(out, reason)
+	}
 	return out
 }
 
@@ -163,6 +168,11 @@ func ApplicationReferenceMatchDrops(name string, apps *ApplicationsConfig) []str
 		set, ok := lookupApplicationSet(setName, apps.ApplicationSets)
 		if !ok {
 			return
+		}
+		for _, ref := range unknownMemberReferences9595(set, apps) {
+			out = append(out, fmt.Sprintf(
+				"application-set %q: an unrecognized member statement names %q, which resolves as an application, so the set is missing a member",
+				setName, ref))
 		}
 		for _, member := range set.Applications {
 			if memberIsNestedSet(member, apps) {

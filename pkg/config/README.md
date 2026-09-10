@@ -1640,11 +1640,29 @@ the application.
 Only MATCH leaves count. `applicationMatchLeaves9525` and
 `applicationSettingLeaves9525` partition `valueTakingApplicationLeaves`, so a
 bad, dangling or conflicting timeout or `alg`, which does not change what
-matches, is still installed. An UNRECOGNIZED statement (`UnknownDirectLeaves`,
-`UnknownTermLeaves`, `UnknownMembers`) is also still installed as compiled.
-#6524's `TestStrayStatementDoesNotDisarmSiblingLeaves` decided that a stray
-statement must not disarm a well-formed application, and the widening that
-leaves is tracked in #9595. NAT application terms are lowered separately
+matches, is still installed.
+
+An UNRECOGNIZED statement (`UnknownDirectLeaves`, `UnknownTermLeaves`,
+`UnknownMembers`) is refused only on the structural line #9595 measured
+(`application_unknown_statement_9595.go`):
+- the application is otherwise protocol-wide on a dimension its protocol has
+  (tcp/udp with no port, icmp/icmpv6 with no icmp-type), AND the unrecognized
+  run carries a constraint-shaped token (a port spec, a decimal integer or
+  range, an ICMP type) — a misspelled `destination-poort 22` on `protocol tcp`
+  would otherwise install as tcp-any; or
+- an application-set's unrecognized member statement names a real
+  application or application-set (a misspelled member reference).
+
+The compiler records the whole unrecognized run (`UnknownDirectTokens`) and
+each member's value (`UnknownMemberValues`) for this. #6524's
+`TestStrayStatementDoesNotDisarmSiblingLeaves` shape (a stray `bogus value`
+beside a retained port) stays armed. The measured limits: a constraint lost
+BESIDE a retained one (`destination-port 80; source-poort 1024`) is left
+installed, because structure cannot tell it from a numeric stray beside a
+retained constraint without keyword similarity (decision: #9603); and a
+numeric or named-port stray on a protocol-wide application (`protocol tcp;
+bogus 8080;`) is refused, because it is structurally a lost port. NAT
+application terms are lowered separately
 (`buildSourceNATAppTerms`, `appTermFor`) and are unchanged.
 
 **C struct alignment:** when mirroring C BPF structs in Go, match `sizeof`

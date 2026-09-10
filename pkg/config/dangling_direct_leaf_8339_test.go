@@ -123,7 +123,7 @@ func TestValueTakingLeavesCoverEveryDirectConsumingArm8339(t *testing.T) {
 		t.Fatalf("read compiler_applications.go: %v", err)
 	}
 	body := string(src)
-	start := strings.Index(body, "directLeaves, unknownDirect := applicationDirectLeaves")
+	start := strings.Index(body, "directLeaves, unknownDirect, unknownDirectTokens := applicationDirectLeaves")
 	if start < 0 {
 		t.Fatal("the direct-body loop was not found; this gate is bound to it by the " +
 			"applicationDirectLeaves call and must be re-pointed if that moves")

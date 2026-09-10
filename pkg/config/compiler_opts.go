@@ -750,7 +750,10 @@ type compileOpts struct {
 	// expansion could see; config.ApplicationReferenceMatchDrops now names the
 	// rest (a port on a non-port protocol, a dropped or misplaced icmp field,
 	// a dangling or conflicting match leaf, a discarded direct body). An
-	// unrecognized statement is still installed as compiled (#6524, #9595).
+	// unrecognized statement is refused only on the #9595 structural line (a
+	// constraint-shaped value on an otherwise protocol-wide application, or a
+	// set member statement naming a real application); #6524's stray beside a
+	// retained constraint stays armed, and the residual is the #9603 decision.
 	// Commit stays strict so the operator's next edit fails loudly. This is an
 	// AST/typed-config compile decision and deliberately does NOT live in
 	// SchemaValidate (applications stay opaque there). Same doctrine as
