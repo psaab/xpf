@@ -614,7 +614,7 @@ func (d *Daemon) deleteInvalidatedSessions(c capturedSessions, reason dataplane.
 // policy is not covered by the helper's #9526 purge, which keys on the rule
 // vanishing from the snapshot: its sessions are left to the next-packet
 // re-derivation, which declines reverse packets, so a one-way reverse-sustained
-// flow keeps its old verdict (#9596).
+// flow keeps its old verdict (#9604).
 //
 // oldSched / newSched are the per-scheduler active-state maps under the old and
 // new configs, evaluated at the same commit-time instant (nil when a config has

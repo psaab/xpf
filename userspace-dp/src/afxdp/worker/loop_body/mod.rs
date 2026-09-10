@@ -49,6 +49,10 @@ mod debug_report;
 // no-call-boundary note above constrains.
 mod idle_poll;
 
+#[cfg(test)]
+#[path = "first_policy_purge_rotation_9526_tests.rs"]
+mod first_policy_purge_rotation_9526_tests;
+
 /// #6592: refresh the worker's per-tick `(validation, forwarding)` view from
 /// ONE `ArcSwap` load, so the two halves can never come from different
 /// generations.

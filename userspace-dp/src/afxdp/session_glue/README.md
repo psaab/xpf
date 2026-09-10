@@ -274,9 +274,15 @@ The comparison costs O(rules) per rotation, and the session walk runs only
 when the first policy actually vanished. A snapshot whose rules all carry 0
 (ids never assigned) names no first policy and purges nothing. Only the
 deleted half is covered: a MODIFIED first policy keeps its stable id, so
-policy-rematch still leaves it to the re-derivation (#9596). The cells are in
-`deleted_first_policy_purge_9526_tests.rs`. The worker-loop wiring has no unit
-harness, so it is bound on the source.
+policy-rematch leaves it to the #8356 re-derivation. That covers every flow
+that sends a forward packet (measured in #9596); the reverse-only residual is
+#9604. The cells are in
+`deleted_first_policy_purge_9526_tests.rs`. The worker-loop wiring is bound
+behaviourally in `worker/loop_body/first_policy_purge_rotation_9526_tests.rs`:
+the cells run the real `worker_loop` with an empty binding plan (no AF_XDP,
+`BusyPoll`), install a bound session pair and an unbound id-0 session with
+`UpsertLocal`, publish a real forwarding rotation, and read the coordinator's
+shared HA map. A control rotation that keeps the first policy purges nothing.
 ## Transient synced-hit purge (`purge_translated_synced_hit`, #5295)
 
 When a packet hits a peer-synced translated FORWARD session whose RG is
