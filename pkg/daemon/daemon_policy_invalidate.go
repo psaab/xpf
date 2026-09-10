@@ -49,12 +49,21 @@ import (
 // and during a rolling upgrade an old peer syncs its WHOLE table with
 // policy_id 0, so a first-policy delete would wipe it (mass loss / TCP resets
 // on failover, the #1960 rolling-upgrade class, amplified by the #2468
-// delete-sync propagation). Excluding 0 is a fail-SAFE under-clear: only the
-// literal first policy's OWN sessions idle out instead of clearing (identical
-// to the pre-#4234 behavior for that one policy); every OTHER deleted policy
-// (id >= 1) still clears correctly, and no should-be-denied session that a
-// DIFFERENT deleted policy covered is kept — so it is not a security
-// regression.
+// delete-sync propagation). Excluding 0 here does NOT leave the first policy's
+// sessions to idle out. An earlier revision of this comment said it did, and
+// that was false for a one-way flow: the next-packet re-derivation declines a
+// reverse packet (#8356 GATE 1) and, while a type-constrained ICMP permit
+// exists, an ICMP one (GATE 1b), and reverse packets keep the forward half
+// alive (companion_keeps_alive), so a reverse-sustained flow kept transiting
+// under the deleted policy (#9526). The first policy's sessions are cleared by
+// the HELPER instead, where a discriminator exists: a session that policy
+// admitted binds the rule's counter handle, and none of the overloaded-zero
+// sessions above binds one. On the forwarding-snapshot rotation that removes
+// the old snapshot's policy_id-0 rule, each worker purges the forward sessions
+// bound to it together with their reverse companions
+// (purge_sessions_bound_to_deleted_first_policy, userspace-dp
+// afxdp/session_glue). So excluding 0 from this set stays correct, and every
+// OTHER deleted policy (id >= 1) still clears here.
 //
 // This set is only meaningful against rows that still carry the OLD numbering,
 // which is why the invalidation READS the session table before the dataplane
@@ -601,7 +610,11 @@ func (d *Daemon) deleteInvalidatedSessions(c capturedSessions, reason dataplane.
 // sessions were stamped under the old config and carry it (identical rationale
 // to deletedPolicyRuntimeIDs). policy_id 0 is excluded for the same overloaded-
 // wire-value reason documented there (host-inbound / fabric / tunnel / synced
-// sessions and old HA peers all carry 0).
+// sessions and old HA peers all carry 0). Unlike a deletion, a MODIFIED first
+// policy is not covered by the helper's #9526 purge, which keys on the rule
+// vanishing from the snapshot: its sessions are left to the next-packet
+// re-derivation, which declines reverse packets, so a one-way reverse-sustained
+// flow keeps its old verdict (#9596).
 //
 // oldSched / newSched are the per-scheduler active-state maps under the old and
 // new configs, evaluated at the same commit-time instant (nil when a config has

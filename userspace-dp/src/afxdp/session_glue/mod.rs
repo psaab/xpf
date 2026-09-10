@@ -443,6 +443,95 @@ pub(super) fn purge_sessions_for_input_dscp_filter_revalidation(
     purged
 }
 
+/// #9526: the stable rule id of the OLD snapshot's literal first policy (the
+/// rule at positional `policy_id` 0) when the NEW snapshot no longer contains
+/// it, because that policy was deleted or renamed (a rename is delete + add by
+/// stable id). `None` otherwise, including when the old snapshot names no
+/// single first policy (`PolicyState::first_policy_rule_id`).
+///
+/// Only this one policy needs the helper. The Go commit sweep clears every
+/// other deleted policy's sessions by `policy_id`, and it must skip 0 because
+/// host-local, neighbor-seed, fabric, tunnel and older-peer sessions carry 0
+/// too (pkg/daemon/daemon_policy_invalidate.go). Left alone, the first
+/// policy's sessions are NOT reliably reaped: the #8356 re-derivation declines
+/// every reverse packet, and reverse traffic keeps the forward half alive
+/// (`companion_keeps_alive`), so a one-way reverse-sustained flow kept
+/// transiting under the deleted policy.
+pub(super) fn deleted_first_policy_rule_id(
+    old_policy: &crate::policy::PolicyState,
+    new_policy: &crate::policy::PolicyState,
+) -> Option<String> {
+    let rule_id = old_policy.first_policy_rule_id()?;
+    if new_policy.has_rule_id(rule_id) {
+        return None;
+    }
+    Some(rule_id.to_string())
+}
+
+/// #9526: purge every forward session bound to `rule_id` (a deleted first
+/// policy, see `deleted_first_policy_rule_id`) together with its reverse
+/// companion. The discriminator is the admitting rule's counter handle a
+/// session binds at install; host-local, neighbor-seed, fabric, tunnel and
+/// peer-synced sessions bind none, so they are never touched. Teardown is
+/// `delete_terminal_filtered_session`, the same full-pair path the DSCP purge
+/// uses: NAT release, BPF and conntrack aliases, the shared HA maps, the
+/// cross-worker `DeleteSynced`, and a close delta the daemon turns into an HA
+/// peer delete. Returns the number of forward sessions purged.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn purge_sessions_bound_to_deleted_first_policy(
+    sessions: &mut SessionTable,
+    session_map_fd: c_int,
+    conntrack_v4_fd: c_int,
+    conntrack_v6_fd: c_int,
+    shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_nat_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_forward_wire_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_owner_rg_indexes: &SharedSessionOwnerRgIndexes,
+    peer_worker_commands: &[Arc<Mutex<VecDeque<WorkerCommand>>>],
+    worker_commands_by_id: &BTreeMap<u32, Arc<Mutex<VecDeque<WorkerCommand>>>>,
+    forwarding: &ForwardingState,
+    rule_id: &str,
+    now_ns: u64,
+    worker_id: u32,
+) -> usize {
+    let mut bound = Vec::new();
+    sessions.iter_with_origin(|key, decision, metadata, origin| {
+        if metadata.is_reverse {
+            return;
+        }
+        if metadata
+            .policy_counter
+            .as_ref()
+            .is_some_and(|counter| counter.rule_id() == rule_id)
+        {
+            bound.push((key.clone(), decision, metadata.clone(), origin));
+        }
+    });
+    let purged = bound.len();
+    for (key, decision, metadata, origin) in bound {
+        delete_terminal_filtered_session(
+            sessions,
+            session_map_fd,
+            conntrack_v4_fd,
+            conntrack_v6_fd,
+            shared_sessions,
+            shared_nat_sessions,
+            shared_forward_wire_sessions,
+            shared_owner_rg_indexes,
+            peer_worker_commands,
+            worker_commands_by_id,
+            forwarding,
+            &key,
+            decision,
+            &metadata,
+            origin,
+            now_ns,
+            worker_id,
+        );
+    }
+    purged
+}
+
 pub(in crate::afxdp::session_glue) fn publish_worker_session_map_entry(
     session_map_fd: c_int,
     forwarding: &ForwardingState,
@@ -1994,6 +2083,10 @@ pub(super) fn enforce_session_ha_resolution(
 #[cfg(test)]
 #[path = "tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "deleted_first_policy_purge_9526_tests.rs"]
+mod deleted_first_policy_purge_9526_tests;
 // #4800: publish + sibling-replication contention accounting for the
 // new-flow-install ceiling harness. Kept in its own file rather than
 // appended to `tests.rs` (already ~7k lines).
