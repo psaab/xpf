@@ -513,6 +513,31 @@ Two defenses, both fail-safe rather than manufacturing a false winner:
   conflict). Yielding both nodes to SECONDARY produces a clean, obvious,
   loudly-logged outage instead of subtle duplicate-address corruption.
 
+## Readiness barrier fence (#9508)
+
+`WaitForPeerBarrier` is demotion readiness: the peer processed every delta queued
+before the barrier. A BarrierAck proves that only for the connection the barrier
+travelled on, and `barrierAckSeq` is global. `sendLoop` picks the active
+connection per message, so the stream moves between fabric connections on a
+partial drop, or when the preferred fabric connects with no fault.
+
+- **Arming.** The first ordered-stream write (`sendLoop` message or BulkStart) on a
+  different connection bumps `fence.epoch` under `writeMu`, BEFORE the write.
+- **Refusal.** A barrier pending across a bump fails with `session sync barrier
+  fenced`. Later barriers are refused while `fence.epoch != fence.cleared`. The
+  daemon wraps the refusal as `demotion peer barrier failed`, a
+  `RetryablePreFailoverError`.
+- **Recovery.** A move releases pending barrier waiters and starts one
+  single-flight re-prime (`doBulkSync`); every refused barrier re-kicks it.
+- **Discharge.** Only a BulkAck for a bulk that captured the epoch BEFORE reading its
+  session source advances `cleared`. `doBulkSync` captures before
+  `BulkSnapshotSource`; the store walk captures at BulkStart; `BulkSyncSnapshot`
+  with a caller-read snapshot captures nothing. The capture is stored after
+  `pendingBulkAckEpoch` and loaded before it, so an ACK never pairs one bulk's
+  epoch with a newer bulk's capture.
+- Full reasoning and the stated non-claim: `docs/session-sync-architecture.md`,
+  Graceful Demotion.
+
 ## Session-sync fail-closed authentication (#5078)
 
 The session-sync TCP stream (`sync_auth.go`) authenticates with the SAME

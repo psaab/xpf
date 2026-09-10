@@ -58,12 +58,17 @@ func (s *SessionSync) doBulkSync() error {
 		}
 	}
 	if src := s.BulkSnapshotSource; src != nil {
+		// #9508: capture the fence BEFORE the snapshot is read; only a snapshot
+		// read after the capture holds every delta written before it.
+		fence := s.captureBarrierFenceForBulk()
 		snap, err := src()
 		if err != nil {
 			// Fail closed — see the doc comment above.
 			return fmt.Errorf("bulk sync table-truth snapshot: %w", err)
 		}
-		return s.BulkSyncSnapshot(snap)
+		walk := snapshotBulkWalk(snap)
+		walk.fence = fence
+		return s.bulkSyncWindow(walk)
 	}
 	return s.BulkSync()
 }
@@ -111,10 +116,17 @@ type bulkWalk struct {
 	source string
 	// skipped counts entries the walk's own filter dropped, for the same logs.
 	skipped int
+	// fence is the #9508 barrier-fence capture this window may discharge
+	// (epoch+1; 0 = none). It must be taken BEFORE the source is read: a caller
+	// that read its snapshot first gets none unless it captured first, as
+	// doBulkSync does. readsDuringWindow walks read after BulkStart, so the
+	// window captures for them there.
+	fence             uint64
+	readsDuringWindow bool
 }
 
 func (s *SessionSync) storeBulkWalk() *bulkWalk {
-	w := &bulkWalk{source: "store-mirror"}
+	w := &bulkWalk{source: "store-mirror", readsDuringWindow: true}
 	w.forEachV4 = func(yield func(dataplane.SessionKey, dataplane.SessionValue) bool) error {
 		return s.sessions.ForEachV4(func(key dataplane.SessionKey, val dataplane.SessionValue) bool {
 			if val.IsReverse != 0 {
@@ -202,8 +214,15 @@ func (s *SessionSync) bulkSyncWindow(walk *bulkWalk) error {
 	// with an unknown incarnation.
 	startPayload := appendBootIncarnation(epochBuf[:], localBootIncarnation())
 	s.writeMu.Lock()
+	moved := s.noteStreamConnLocked(conn) // #9508
+	if walk.readsDuringWindow {
+		walk.fence = s.fence.epoch.Load() + 1
+	}
 	err := writeMsg(conn, syncMsgBulkStart, startPayload)
 	s.writeMu.Unlock()
+	if moved {
+		s.onStreamMoved(false)
+	}
 	if err != nil {
 		s.pendingBulkAckEpoch.Store(0)
 		s.pendingBulkAckSince.Store(0)
@@ -288,6 +307,7 @@ func (s *SessionSync) bulkSyncWindow(walk *bulkWalk) error {
 	// manual failover (#3912). Recording first guarantees the ack can only
 	// ever observe the pending epoch already in place.
 	s.pendingBulkAckEpoch.Store(epoch)
+	s.fence.pendingBulk.Store(walk.fence) // #9508: AFTER the epoch; see barrierFence.pendingBulk
 	s.pendingBulkAckSince.Store(time.Now().UnixNano())
 
 	// Send bulk end marker with matching epoch, plus this node's boot
@@ -456,6 +476,13 @@ func (s *SessionSync) WaitForPeerBarrier(timeout time.Duration) error {
 	if !s.stats.Connected.Load() {
 		return fmt.Errorf("session sync not connected")
 	}
+	// #9508: snapshot the fence epoch BEFORE checking it, so a move between the
+	// two is still seen at wake-up.
+	fence := s.fence.epoch.Load()
+	if s.barrierFenced() {
+		s.scheduleBarrierFenceReprime("barrier refused")
+		return barrierFencedError(0)
+	}
 	seq := s.barrierSeq.Add(1)
 	waiter := make(chan struct{})
 	s.barrierWaitMu.Lock()
@@ -491,6 +518,15 @@ func (s *SessionSync) WaitForPeerBarrier(timeout time.Duration) error {
 		// The waiter channel can be closed by either completeBarrierWait
 		// (barrier acked) or handleDisconnect (connection lost). Check
 		// whether the barrier was actually acknowledged.
+		//
+		// #9508: an ACK proves the peer processed the stream on ONE connection.
+		// If the stream moved while this barrier was pending, earlier frames may
+		// be on another connection, unprocessed or lost, so the ACK is not
+		// readiness.
+		if s.fence.epoch.Load() != fence {
+			s.scheduleBarrierFenceReprime("barrier refused")
+			return barrierFencedError(seq)
+		}
 		if s.barrierAckSeq.Load() >= seq {
 			return nil
 		}

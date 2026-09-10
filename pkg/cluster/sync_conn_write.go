@@ -328,8 +328,12 @@ func (s *SessionSync) sendLoop(ctx context.Context) {
 				continue
 			}
 			s.writeMu.Lock()
+			moved := s.noteStreamConnLocked(conn) // #9508: before the write
 			err := writeFull(conn, msg)
 			s.writeMu.Unlock()
+			if moved {
+				s.onStreamMoved(true)
+			}
 			if err != nil {
 				slog.Debug("cluster sync: send error", "err", err)
 				s.stats.Errors.Add(1)
