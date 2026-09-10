@@ -115,15 +115,22 @@ func (vi *vrrpInstance) becomeMaster() bool {
 		// with the run-loop's masterDownTimer retry — no parallel state system.
 		// (superseded is captured before the setState bump below so the log
 		// reflects the true reason, not the revert's own generation bump.)
-		// Rollback is best-effort — a failure is reported by the fail-closed Error
-		// log below (applied/failed lists) and we are already reverting to BACKUP,
-		// so there is no control-flow decision to make on it.
-		_ = vi.removeVIPsLocked(res.applied)
+		// #9509: a failed rollback leaves a VIP on a node that is about to publish
+		// BACKUP, a duplicate-address hazard against the peer. Nothing else sweeps
+		// it: the master-down retry never fires while a healthy peer adverts. It is
+		// surfaced below exactly as becomeBackup surfaces its removal: after BACKUP
+		// is set (the reconcile's generation fence names this tenure) and vipMu is
+		// released (the reconcile takes it). The Error log's applied/failed lists
+		// describe the ADD, not this removal, so they could never report it.
+		rollbackErr := vi.removeVIPsLocked(res.applied)
 		vi.setState(StateBackup)
 		vi.vipMu.Unlock()
 		slog.Error("vrrp: VIP actuation failed, not claiming ownership (fail-closed)",
 			"key", vi.key(), "failed", res.failed, "applied", res.applied,
-			"link_err", res.linkErr, "superseded", superseded)
+			"link_err", res.linkErr, "superseded", superseded, "rollback_err", rollbackErr)
+		// Unconditional, like becomeBackup: a clean rollback clears a divergence
+		// flag an earlier, now-superseded reconcile could no longer clear.
+		vi.surfaceStaleVIP(rollbackErr, "becomeMaster-rollback")
 		// Publish the honest BACKUP state so dependent services never trust an
 		// ownership we could not back.
 		vi.emitEvent()
