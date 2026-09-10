@@ -974,6 +974,20 @@ closed"). Worker decapsulation is not gated by the steered port — the worker
 matches every configured listen port — so a record the shim hands to the
 worker for any other reason is still adjudicated normally.
 
+**The steered port's kernel path while degraded (#9594).** The steered port's
+thread still delivers, but not everything. A healthy shim claims the steered
+port's transport for the worker, so a record that reaches the thread on an
+ingress the shim adjudicates means the dataplane is in a degraded window
+(helper start, a redundancy-group transition, a reth link cycle, a stale
+heartbeat). The thread then applies the shim's own degraded posture to the
+decapsulated packet: traffic addressed to the firewall is delivered, and
+transit is dropped and counted as `rx_degraded_transit_drops` — the
+`degraded-transit` receive-drop reason in `show security wireguard detail`, and
+`xpf_userspace_wg_transport_drops_total{direction="decap",reason="degraded_transit"}`.
+The ingress comes from `IP_PKTINFO`; coverage and locality are read from the
+shim's own pinned maps. Ingress the shim does not adjudicate (#8274's residual)
+is delivered exactly as before.
+
 So a second tunnel on a distinct port completes handshakes and sends, and gets
 no inbound traffic through the kernel path. It is refused, not dead: this
 section once called it dead (false — it was live, which was the bypass, #9016),
@@ -1037,7 +1051,11 @@ control threads, IPv4 and IPv6),
 `kernel_transport_decision_fails_closed_9521`,
 `wg_resteering_restarts_control_threads_with_the_new_decision_9521`,
 `worker_decap_is_not_gated_by_the_steered_port_9521` and
-`wg_steered_listen_port_wire_key_9521`.
+`wg_steered_listen_port_wire_key_9521`. #9594 adds
+`steered_port_kernel_transport_gets_the_degraded_posture_on_covered_ingress_9594`,
+`unsteered_port_is_refused_before_the_degraded_posture_is_consulted_9594` and
+`wg_steered_endpoint_refuses_degraded_transit_end_to_end_9594` (real spawned
+control thread, production posture view).
 
 ## Host-inbound admission of the WG listen port (#5582)
 
