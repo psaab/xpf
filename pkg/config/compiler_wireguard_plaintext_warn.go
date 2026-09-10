@@ -7,38 +7,78 @@ import (
 )
 
 // compiler_wireguard_plaintext_warn.go carries the #5618 commit-time WARNING
-// that a WireGuard tunnel's decapsulated plaintext is not zone-adjudicated.
+// that a WireGuard tunnel's decapsulated plaintext is not zone-adjudicated on
+// every path.
 //
-// The defect it makes visible. The XDP shim deliberately steers inbound UDP on
-// the configured WireGuard listen port to the KERNEL (userspace-xdp
-// wg_steer_to_kernel, #5582) so the helper's WireGuard control thread can
-// receive the outer transport on its own UDP socket. That thread authenticates
-// and decrypts the record, enforces the peer's `allowed-ips` against the inner
-// SOURCE address, and then writes the plaintext inner IP packet straight to the
-// wgN TUN — `crate::slowpath::write_packet_nonblocking(tun.as_raw_fd(), ...)`
-// in userspace-dp/src/afxdp/coordinator/wg_control/dispatch.rs. The in-source
-// comment at that write states the consequence affirmatively: "the kernel
-// routes/firewalls it (NOT the AF_XDP policy engine)".
+// WHAT IS TRUE NOW (#8274, #9521; restated by #9251). Inbound WireGuard
+// transport reaches one of two paths:
 //
-// From there the packet is on the kernel's forwarding path. xpf force-enables
-// ip_forward and installs only nftables `hook input` chains, so the plaintext
-// is routed by Linux with no zone policy, no session, no NAT and no screen.
+//	dataplane path  The XDP shim hands a transport-data record for the steered
+//	                listen port to the AF_XDP worker (wg_worker_claims_record,
+//	                #8274). The worker decapsulates it
+//	                (userspace-dp/src/afxdp/wg/decap.rs), rebinds the inner
+//	                packet to the tunnel's logical ifindex
+//	                (logical_ingress::build_logical_ingress_packet) and runs
+//	                screen, session, policy and NAT on it. Policy resolves the
+//	                from-zone from that ifindex; a tunnel in no zone has none and
+//	                is zone id 0, and #6682 DENIES transit from an unzoned
+//	                ingress.
+//	kernel path     A record that reaches the firewall through the Linux kernel
+//	                instead — on an ingress interface the shim does not attach
+//	                to (#8274's stated residual), or while the dataplane is
+//	                degraded and the shim passes local-destination traffic to
+//	                the kernel (helper start, redundancy-group transition, reth
+//	                link cycle, missing binding, stale heartbeat; #9594) — lands
+//	                on the helper's WireGuard control thread socket. For the
+//	                STEERED listen port that thread writes the plaintext to the
+//	                wgN TUN (`write_packet_nonblocking` in
+//	                userspace-dp/src/afxdp/coordinator/wg_control/dispatch.rs)
+//	                and the kernel forwards it with no zone policy, no session,
+//	                no NAT and no screen. For every OTHER listen port the thread
+//	                drops it (#9521).
+//
+// So the zone an operator gives a WireGuard tunnel IS enforced on the dataplane
+// path and is NOT enforced on the kernel path. This advisory used to say the
+// zone was not enforced at all — "ASSIGNED A ZONE THAT IS NOT ENFORCED — this
+// reads as protected and is not" — which described the pre-#8274 dataplane and
+// became false when #8274 landed (#9251). It now states both halves.
+//
+// Why it still fires for EVERY WireGuard tunnel rather than only the steered
+// one. The kernel-path write belongs to the tunnel on the steered listen port,
+// and the steered port has exactly one derivation, SteeredWireGuardListenPort,
+// which reads the TYPED Config. This advisory runs in the AST pre-walk, before
+// that Config exists, and a second, AST-level derivation of the steered port is
+// the divergence #9521 removed. With one listen port — the case the shim steers
+// completely until #9587 — every tunnel is on it. With several, the multi-port
+// warning (validateWireguardSingleSteeredPort) names the steered tunnel and the
+// refused ones from the derivation the dataplane uses, and the mechanism
+// sentence below scopes the residual to the steered port.
+//
+// xpf keeps ip_forward at 1 while the dataplane is armed and installs only
+// nftables `hook input` chains, so nothing between the TUN write and the
+// kernel's forwarding decision consults a zone.
 //
 // `allowed-ips` is not a substitute. It is a cryptographic peer/source
 // ownership gate — it answers "may this peer claim this inner source address",
 // not "may this source reach this destination". It has no destination, no
 // zone-pair, no application and no direction.
 //
-// This is NOT the same as GRE. Native GRE decap happens INSIDE the worker
+// This is NOT the same as GRE. Native GRE decap happens ONLY inside the worker
 // pipeline (userspace-dp/src/afxdp/gre.rs): it rebinds `ingress_ifindex` to the
 // tunnel's `logical_ifindex`, derives `ingress_zone` from
 // `ForwardingState.ifindex_to_zone_id`, reparses the inner flow, and continues
-// through screen, session, route, filters and zone-pair policy. So a GRE tunnel
-// IS adjudicated and must not be warned about. WireGuard is the one tunnel mode
-// whose inner traffic leaves the dataplane entirely, which is why this advisory
-// keys on the MODE and not merely on "is a tunnel".
+// through screen, session, route, filters and zone-pair policy. WireGuard's
+// dataplane path now does the same; what GRE lacks is a second, kernel-side
+// decap path, and WireGuard has one. That is why this advisory keys on the MODE
+// and not merely on "is a tunnel".
 //
-// Coupling to the dataplane exclusion. The row that carries a WireGuard tunnel
+// Coupling to the dataplane exclusion, which is also why the kernel path is
+// unadjudicated: the wgN TUN the control thread writes to is excluded from
+// ingress adjudication and from the binding plan, so what is written there is
+// left to the kernel. (One row escapes the exclusion — the BASE row under the
+// canonical `unit 0` spelling, #8279, docs/userspace-dataplane-gaps.md — and
+// that is a defect of its own, not an adjudication path.) The row that carries a
+// WireGuard tunnel
 // is `Tunnel=true` in its InterfaceSnapshot (buildInterfaceSnapshotsFrom sets
 // `Tunnel: iface.Tunnel != nil` on the base row and `iface.Tunnel != nil ||
 // unit.Tunnel != nil` on the unit row, pkg/dataplane/userspace/interfaces.go).
@@ -87,24 +127,30 @@ import (
 // renderPlaintextUnadjudicatedAdvisory.
 //
 // It fires whenever a WireGuard tunnel is configured, NOT only when one carries
-// a zone. Leaving the tunnel out of a zone is not a mitigation: the decrypted
-// inner packet is written straight to the wgN TUN and routed by the kernel, so
-// it never reaches zone policy at all — zoning or not zoning the interface does
-// not change that. Gating this advisory on zoning would tell that operator
-// nothing at all.
+// a zone. Leaving the tunnel out of a zone does not close the kernel path: the
+// control thread's TUN write consults no zone, so zoning or not zoning the
+// interface does not change it. On the dataplane path the two DO differ, and
+// the advisory says how: a zoned tunnel's traffic is adjudicated under its
+// zone, and an unzoned tunnel's transit is DENIED — the policy stage resolves
+// the from-zone from the tunnel's logical ifindex
+// (zone_pair_ids_for_flow_with_override), finds no zone, uses zone id 0, and
+// #6682 refuses it before the implicit default policy. Pinned end to end through
+// the poll loop by
+// poll_loop_denies_unzoned_wg_tunnel_transit_under_permit_all_9251.
 //
 // #6682: this comment used to add that an unzoned interface resolves to zone id
 // 0 and could be "affirmatively PERMITTED by a wildcard rule". That was never
 // true — #3110 has fenced every rule tier, wildcard tiers included, against
 // zone 0 since before the claim was written — and #6682 made an unzoned INGRESS
-// an explicit deny on top of that. The advisory still fires for the reason
-// above.
+// an explicit deny on top of that.
 //
-// The two groups are worded differently on purpose. A ZONED tunnel is the acute
-// case and reads as an escalation, because `set security zones security-zone
-// vpn interfaces wg0.0` commits cleanly, is accepted, and nothing in the CLI or
-// the commit output distinguishes it from a zone that is enforced. Everything
-// READS as enforced. An unzoned tunnel is a plain statement of the gap.
+// The two groups are worded differently on purpose, and neither is an
+// escalation any more. Before #8274 a zoned tunnel was the acute case: the zone
+// committed cleanly and governed nothing, so the heading said "this reads as
+// protected and is not". Since #8274 the zone governs the dataplane path, so
+// that heading would itself be the untrue statement. The zoned group now says
+// where the zone applies and where it does not, and the unzoned caveat says
+// what the absence of a zone does on each path (#9251).
 //
 // An AST pre-walk (like warnSecureTunnelPlaintextUnadjudicatedAST) rather than
 // a typed-Config pass, so it runs on the group-expanded, inactive-pruned tree
@@ -169,19 +215,61 @@ func warnWireGuardPlaintextUnadjudicatedAST(nodes []*Node) []string {
 		return nil
 	})
 
-	return renderPlaintextUnadjudicatedAdvisory(findings, plaintextAdvisoryWording{
-		lead: "interfaces: decapsulated traffic on WireGuard tunnels is NOT evaluated " +
-			"against xpf security policies (#5618).",
-		zonedSuffix: "but that zone does NOT govern its decapsulated traffic",
-		mechanism: "The userspace helper's WireGuard control thread writes the decrypted " +
-			"inner packet straight to the wgN TUN, where the Linux kernel routes and " +
-			"forwards it: no zone policy, no session, no NAT and no screen are applied " +
-			"to it. A peer's `allowed-ips` is a cryptographic check on the inner SOURCE " +
+	return renderPlaintextUnadjudicatedAdvisory(findings, wireGuardPlaintextAdvisoryWording())
+}
+
+// WireGuard's group headings and unzoned caveat (#9251). They are not IPsec's:
+// see plaintextAdvisoryWording for why those stopped being shared.
+const (
+	// wgPlaintextZonedHeading introduces tunnels that ARE in a zone. It is not
+	// an escalation: the zone is enforced on the dataplane path, and the
+	// heading says where it is not.
+	wgPlaintextZonedHeading = "IN A SECURITY ZONE — enforced on the dataplane path, NOT on the kernel path:"
+
+	// wgPlaintextUnzonedHeading introduces tunnels that are in no zone.
+	wgPlaintextUnzonedHeading = "IN NO SECURITY ZONE:"
+
+	// wgPlaintextUnzonedCaveat is emitted only when at least one tunnel is
+	// unzoned. It carries both halves because each alone misleads: the
+	// dataplane half is a DENY rather than a gap (#6682), so "unzoning is no
+	// different from zoning" is false; and the kernel half is unchanged by
+	// zoning, so "unzoning is safe" is false too.
+	wgPlaintextUnzonedCaveat = "An UNZONED WireGuard tunnel's decapsulated transit is DENIED on " +
+		"the dataplane path (#6682), but leaving it out of a zone does not close the kernel " +
+		"path, which consults no zone at all."
+)
+
+// wireGuardPlaintextAdvisoryWording is the #5618 advisory's text.
+//
+// The lead and the zoned suffix state the SPLIT: evaluated on the dataplane
+// path, not on the kernel path. The mechanism names both ways onto the kernel
+// path — ingress the dataplane does not attach to (#8274's residual) and a
+// degraded dataplane (#9594) — scopes the TUN write to the steered listen port,
+// and says every other port is dropped there (#9521), so an operator with
+// several ports is not told that a refused tunnel leaks.
+func wireGuardPlaintextAdvisoryWording() plaintextAdvisoryWording {
+	return plaintextAdvisoryWording{
+		lead: "interfaces: decapsulated traffic on WireGuard tunnels is evaluated against " +
+			"xpf security policies on the dataplane path only, NOT on the kernel path (#5618).",
+		zonedHeading:   wgPlaintextZonedHeading,
+		zonedSuffix:    "which governs its traffic on the dataplane path but NOT on the kernel path",
+		unzonedHeading: wgPlaintextUnzonedHeading,
+		mechanism: "The AF_XDP dataplane decapsulates WireGuard transport records in its " +
+			"worker and evaluates the inner packet under the tunnel's security zone (#8274). " +
+			"A record for the steered listen port that reaches the firewall through the Linux " +
+			"kernel instead — on an ingress interface the dataplane does not attach to, or " +
+			"while the dataplane is degraded (helper start, a redundancy-group transition, a " +
+			"reth link cycle, a stale helper heartbeat; #9594) — is decrypted by the helper's " +
+			"WireGuard control thread and written straight to the wgN TUN, where the kernel " +
+			"routes and forwards it: no zone policy, no session, no NAT and no screen are " +
+			"applied to it. A record for any other listen port is dropped on that path " +
+			"(#9521). A peer's `allowed-ips` is a cryptographic check on the inner SOURCE " +
 			"address, not a security policy — it has no destination, zone-pair or " +
 			"application scope.",
-		remedy: "Restrict what the tunnel can reach with routing, with the peer's " +
-			"`allowed-ips`, or with the peer's own policy until this is enforced.",
-	})
+		unzonedCaveat: wgPlaintextUnzonedCaveat,
+		remedy: "On the kernel path, restrict what the tunnel can reach with routing, with " +
+			"the peer's `allowed-ips`, or with the peer's own policy.",
+	}
 }
 
 // wgZoneRefIndex maps a zone-member interface reference to its zone name, and

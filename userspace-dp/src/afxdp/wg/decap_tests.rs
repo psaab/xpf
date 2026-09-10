@@ -492,6 +492,149 @@ fn poll_loop_denies_wg_inner_plaintext_with_no_permitting_policy_8274() {
 }
 
 // ---------------------------------------------------------------------------
+// #9251: an UNZONED WireGuard tunnel on the dataplane path is DENIED.
+// ---------------------------------------------------------------------------
+
+/// The `wiring_fixture` record path under a posture in which ONLY the #6682
+/// unzoned-ingress guard can refuse the inner flow: `default-policy permit` and
+/// a both-any permit rule. `zoned` keeps the tunnel in `sfmix`; otherwise the
+/// tunnel's interface row and endpoint carry no zone.
+fn unzoned_wiring_fixture_9251(zoned: bool) -> (ForwardingState, WgEngine, [u8; 32]) {
+    let allowed: Vec<ipnet::IpNet> = vec!["10.123.0.0/24".parse().unwrap()];
+    let (init, resp, _ipub, rpub) = established_pair(allowed.clone(), allowed);
+    let mut snap = wg_outer_mtu_snapshot();
+    if !zoned {
+        for iface in snap
+            .interfaces
+            .iter_mut()
+            .filter(|i| i.ifindex == TUNNEL_LOGICAL_IFINDEX)
+        {
+            iface.zone = String::new();
+        }
+        for ep in snap.tunnel_endpoints.iter_mut() {
+            ep.zone = String::new();
+        }
+    }
+    snap.default_policy = "permit".to_string();
+    snap.policies = vec![crate::PolicyRuleSnapshot {
+        name: "both-any-permit".to_string(),
+        from_zone: "any".to_string(),
+        to_zone: "any".to_string(),
+        source_addresses: vec!["any".to_string()],
+        destination_addresses: vec!["any".to_string()],
+        applications: vec!["any".to_string()],
+        application_terms: Vec::new(),
+        action: "permit".to_string(),
+        ..Default::default()
+    }];
+    let mut forwarding = build_forwarding_state(&snap);
+    let id = *forwarding.wg_engines.keys().next().expect("wg tunnel");
+    forwarding.wg_engines.insert(id, std::sync::Arc::new(resp));
+    (forwarding, init, rpub)
+}
+
+/// Run one authenticated record through the poll loop; return the debug
+/// counters, the tunnel-ingress session count and the #6682 counter delta.
+fn run_unzoned_wiring_9251(forwarding: &ForwardingState, init: &WgEngine, rpub: &[u8; 32]) -> (DebugPollCounters, usize, u64) {
+    let frame = wiring_record(init, rpub);
+    let meta = wiring_meta(frame.len());
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, 12, 0);
+    binding.interface = std::sync::Arc::<str>::from("ge-0-0-2.80");
+    let ha_state = txn_ha_state();
+    let mut sessions = SessionTable::new();
+    let before = crate::policy::UNZONED_INGRESS_DENIED.load(Ordering::Relaxed);
+    let (_batch, dbg) = txn_run_descriptor(
+        &mut binding,
+        &mut sessions,
+        forwarding,
+        &ha_state,
+        &frame,
+        meta,
+    );
+    let after = crate::policy::UNZONED_INGRESS_DENIED.load(Ordering::Relaxed);
+    let mut tunnel_sessions = 0usize;
+    sessions.iter_with_origin(|_k, _d, m, _o| {
+        if m.ingress_ifindex == TUNNEL_LOGICAL_IFINDEX as u32 {
+            tunnel_sessions += 1;
+        }
+    });
+    (dbg, tunnel_sessions, after.saturating_sub(before))
+}
+
+/// #9251: the #5618 commit advisory now tells an operator that an UNZONED
+/// WireGuard tunnel's decapsulated transit is "DENIED on the dataplane path
+/// (#6682)". This cell is that sentence's proof, through the poll loop.
+///
+/// It composes facts no single cell pinned together. The decap call site puts
+/// the TUNNEL's logical ifindex on the inner meta's `ingress_ifindex`
+/// (`build_logical_ingress_packet`). The policy stage resolves the from-zone
+/// from that ifindex — `zone_pair_ids_for_flow_with_override`: the fabric
+/// override, else `ifindex_to_zone_id[ingress_ifindex]`, else 0 — so a tunnel in
+/// no zone is zone 0. And `policy.rs` refuses transit from ingress zone 0 before
+/// the implicit default (#6682). A call site that passed the UNDERLAY's ifindex
+/// would adjudicate the inner flow under the WAN's zone, and a fallback that
+/// yielded any real zone instead of 0 would let the both-any permit forward it.
+///
+/// What this cell does NOT bind: the `ingress_zone` value
+/// `build_logical_ingress_packet` STAMPS on the meta. The policy stage does not
+/// read it for this packet — a mutant that made only the stamp fall back to a
+/// configured zone survived this cell (#9251), and this paragraph used to name
+/// the stamp as the mechanism.
+///
+/// The posture is chosen so that ONLY the #6682 guard can refuse, and the
+/// POSITIVE CONTROL proves it: the same record, the same posture, the tunnel
+/// zoned, installs a tunnel session. Without that arm, "no session" would also
+/// be what a rule that matches nothing on this path produces.
+#[test]
+fn poll_loop_denies_unzoned_wg_tunnel_transit_under_permit_all_9251() {
+    let (forwarding, init, rpub) = unzoned_wiring_fixture_9251(true);
+    assert!(
+        forwarding
+            .ifindex_to_zone_id
+            .get(&TUNNEL_LOGICAL_IFINDEX)
+            .is_some(),
+        "setup: the zoned arm's tunnel must resolve to a zone"
+    );
+    let (_dbg, zoned_sessions, _) = run_unzoned_wiring_9251(&forwarding, &init, &rpub);
+    assert!(
+        zoned_sessions >= 1,
+        "positive control: with the tunnel ZONED, default-policy permit plus a \
+         both-any permit must admit the inner flow and install a tunnel session. \
+         If it does not, the unzoned deny below is not evidence of anything"
+    );
+
+    let (forwarding, init, rpub) = unzoned_wiring_fixture_9251(false);
+    assert_eq!(
+        forwarding.ifindex_to_zone_id.get(&TUNNEL_LOGICAL_IFINDEX),
+        None,
+        "setup: the unzoned arm's tunnel must really be in no zone"
+    );
+    let (dbg, unzoned_sessions, unzoned_denies) = run_unzoned_wiring_9251(&forwarding, &init, &rpub);
+    // ORDER MATTERS. The security assertion comes first so a mutant that lets the
+    // flow through is reported as what it is. With the non-vacuity check first,
+    // a PERMITTED flow (zero policy denies) would be reported as "never reached
+    // policy" — the wrong cause, in the direction that sends a reader looking at
+    // the fixture instead of the zone.
+    assert_eq!(
+        unzoned_sessions, 0,
+        "an UNZONED WireGuard tunnel's inner transit installed a session under a \
+         permit-all posture: the decap stage adjudicated it in some zone other than \
+         zone 0, and the #5618 advisory's 'DENIED on the dataplane path' is false"
+    );
+    assert!(
+        dbg.policy_deny >= 1,
+        "no session, but zero policy denies either: the record never reached \
+         policy, so the no-session assertion above held for free"
+    );
+    assert!(
+        unzoned_denies >= 1,
+        "the deny must be the #6682 unzoned-ingress guard. Anything else refusing \
+         here contradicts the posture (permit default, both-any permit), and the \
+         advisory's sentence names #6682"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // #9018: the worker's declined-but-AUTHENTICATED arms must still roam the peer.
 // ---------------------------------------------------------------------------
 

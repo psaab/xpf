@@ -9,10 +9,17 @@ import (
 // listen-port STEERING. Selection is by the property the operator cares about
 // ("wireguard" + "steered"), not by the exact sentence the current gate emits,
 // so a reworded advisory is still found and a REMOVED advisory still reds.
+//
+// #9251: the #5618 plaintext advisory now names "the steered listen port" too —
+// since #9521 its kernel-path residual belongs to that port — and its tunnel
+// details say "tunnel mode wireguard", so it carries both words without being a
+// steering advisory. It is excluded by its IDENTITY (#5618, which its lead
+// always carries), not by rewording it to dodge this selector; for every other
+// warning the selection stays exactly as loose as it was.
 func wgSteeringWarnings(cfg *Config) []string {
 	var out []string
 	for _, w := range cfg.Warnings {
-		if strings.Contains(w, "wireguard") && strings.Contains(w, "steered") {
+		if strings.Contains(w, "wireguard") && strings.Contains(w, "steered") && !strings.Contains(w, "#5618") {
 			out = append(out, w)
 		}
 	}

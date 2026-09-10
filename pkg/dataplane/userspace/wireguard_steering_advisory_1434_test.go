@@ -70,7 +70,11 @@ func TestWireGuardSteeringAdvisoryNamesTheProgrammedPort_1434(t *testing.T) {
 
 	var advisory string
 	for _, w := range cfg.Warnings {
-		if strings.Contains(w, "wireguard") && strings.Contains(w, "steered") {
+		// #9251: the #5618 plaintext advisory also names "the steered listen
+		// port" (since #9521 its kernel-path residual belongs to that port) and
+		// says "tunnel mode wireguard". Exclude it by its identity rather than
+		// narrowing what counts as a steering advisory.
+		if strings.Contains(w, "wireguard") && strings.Contains(w, "steered") && !strings.Contains(w, "#5618") {
 			if advisory != "" {
 				t.Fatalf("more than one WireGuard steering advisory: %v", cfg.Warnings)
 			}

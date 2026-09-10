@@ -500,6 +500,17 @@ Two limits on the claim, so this section is not read as more than it is:
   TUN write. GRE has a `local_tunnel_deliveries` seam for this; WireGuard does
   not, and building one is separate work.
 
+> **Later changes to those limits (#9521, #9594, #9251).** The control
+> thread's TUN write is no longer made for every listen port: since #9521 a
+> kernel-path transport record for any port other than the steered one is
+> dropped (`rx_unsteered_transport_drops`). For the steered port, the
+> uncovered-ingress path above has a second way onto the same write — a
+> degraded dataplane on COVERED ingress (helper start, redundancy-group
+> transition, reth link cycle, stale heartbeat), tracked as #9594. #9251
+> rewrote the #5618 commit advisory to state that split instead of the
+> pre-#8274 "zone not enforced" account. The host-inbound bullet above is as
+> #8274 wrote it and was not re-verified by those changes.
+
 ### 4.1 Step 2 as BUILT (#8274), and two things it corrected
 
 Landed. The classification lives in `userspace-xdp/src/wg_classify.rs`, a
