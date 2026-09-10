@@ -2383,6 +2383,7 @@ fn helper_local_session_on_miss_stays_out_of_shared_alias_maps() {
         1_000_000,
         PROTO_TCP,
         0x10,
+        false,
     ));
     assert!(sessions.lookup(&key, 1_000_000, 0x10).is_some());
     assert!(
@@ -2487,6 +2488,7 @@ fn helper_local_session_on_miss_clears_stale_shared_aliases() {
         2_000_000,
         PROTO_TCP,
         0x10,
+        false,
     ));
     assert!(
         shared_sessions

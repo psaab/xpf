@@ -489,6 +489,7 @@ pub(super) fn prewarm_reverse_synced_sessions_for_owner_rgs(
                 &forward.key,
                 forward.decision,
                 &forward.metadata,
+                forwarding.has_routing_domains,
             )
             .is_err()
         {
@@ -532,6 +533,7 @@ pub(super) fn prewarm_reverse_synced_sessions_for_owner_rgs(
                 &reverse.key,
                 reverse.decision,
                 &reverse.metadata,
+                forwarding.has_routing_domains,
             )
             .is_err()
             {
@@ -562,6 +564,9 @@ pub(super) fn republish_bpf_session_entries_for_owner_rgs(
     shared_owner_rg_indexes: &SharedSessionOwnerRgIndexes,
     session_map_fd: c_int,
     owner_rgs: &[i32],
+    // #9517: this republishes peer-synced sessions on RG activation, which is
+    // exactly where PASS_TO_KERNEL rows come from.
+    has_routing_domains: bool,
 ) -> u32 {
     if owner_rgs.is_empty() {
         return 0;
@@ -588,7 +593,15 @@ pub(super) fn republish_bpf_session_entries_for_owner_rgs(
     let mut published = 0u32;
     let mut errors = 0u32;
     for (key, decision, metadata) in &entries {
-        if publish_session_map_entry_for_session(session_map_fd, key, *decision, metadata).is_ok() {
+        if publish_session_map_entry_for_session(
+            session_map_fd,
+            key,
+            *decision,
+            metadata,
+            has_routing_domains,
+        )
+        .is_ok()
+        {
             published += 1;
         } else {
             errors += 1;

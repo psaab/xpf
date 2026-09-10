@@ -2105,19 +2105,23 @@ fn apply_worker_commands_still_deletes_local_session_when_rg_inactive_9048() {
 #[test]
 fn worker_synced_local_delivery_forces_live_redirect_on_standby() {
     assert!(force_live_redirect_for_worker_synced_entry(
+        &force_live_test_key_9517(),
         test_local_delivery_decision(),
         &test_metadata(),
         SessionOrigin::SyncImport,
         true,
+        false,
     ));
 }
 
 #[test]
 fn worker_synced_local_delivery_keeps_default_publish_on_active_owner() {
     assert!(!force_live_redirect_for_worker_synced_entry(
+        &force_live_test_key_9517(),
         test_local_delivery_decision(),
         &test_metadata(),
         SessionOrigin::SyncImport,
+        false,
         false,
     ));
 }
@@ -4514,6 +4518,7 @@ fn republish_bpf_session_entries_covers_all_sessions_in_owner_rg_index() {
         &shared_owner_rg_indexes,
         -1,
         &[1],
+        false,
     );
     assert_eq!(count, 0, "fd=-1 should produce 0 successful publishes");
 
@@ -4523,6 +4528,7 @@ fn republish_bpf_session_entries_covers_all_sessions_in_owner_rg_index() {
         &shared_owner_rg_indexes,
         -1,
         &[2],
+        false,
     );
     assert_eq!(count, 0, "should find 0 sessions for RG2");
 }
@@ -6690,8 +6696,10 @@ fn close_delta_deletes_dnat_table_entry_for_snat_flow() {
 //
 // The publish disposition is fully determined by
 // `force_live_redirect_for_worker_synced_entry(decision, metadata, origin,
-// allow_replace_local)` — `true` => live REDIRECT, `false` (with a kernel-local
-// entry) => PASS_TO_KERNEL. Unprivileged `cargo test` cannot create a BPF map
+// allow_replace_local, has_routing_domains)` — `true` => live REDIRECT, `false`
+// (with a kernel-local entry) => PASS_TO_KERNEL. #9517 added the last argument;
+// these cells pass `false` because they pin the single-instance behaviour, and
+// the routing-domain demotion is bound separately in `bpf_map_tests.rs`. Unprivileged `cargo test` cannot create a BPF map
 // (`unprivileged_bpf_disabled=2`), so we assert the computed
 // `allow_replace_local` that `collect_refresh_owner_rgs_items` produces — the
 // single site feeding that argument on the activation path — rather than
@@ -6775,10 +6783,12 @@ fn refresh_owner_rgs_standby_local_delivery_forces_live_redirect_4805() {
     );
     assert!(
         force_live_redirect_for_worker_synced_entry(
+            &force_live_test_key_9517(),
             *decision,
             metadata,
             *origin,
             *allow_replace_local,
+            false,
         ),
         "standby-owned synced LocalDelivery must publish the LIVE REDIRECT entry, \
          not a kernel-local PASS_TO_KERNEL entry (#4805)"
@@ -6830,10 +6840,12 @@ fn refresh_owner_rgs_active_owner_local_delivery_publishes_kernel_local_4805() {
     );
     assert!(
         !force_live_redirect_for_worker_synced_entry(
+            &force_live_test_key_9517(),
             *decision,
             metadata,
             *origin,
             *allow_replace_local,
+            false,
         ),
         "owner-active synced LocalDelivery keeps the kernel-local publish path"
     );
@@ -9864,4 +9876,20 @@ fn a_reply_on_the_zoned_trunk_unit_still_installs_one_9383() {
         "forward + synthesized reverse: the #7169 install must still happen for a \
          correctly-zoned arrival"
     );
+}
+
+/// #9517: `force_live_redirect_for_worker_synced_entry` now takes the session key,
+/// because the steering map cannot tell tunnel discriminators apart. The cells that
+/// call it predate that and exercise non-tunnel sessions, so they pass a plain key.
+fn force_live_test_key_9517() -> SessionKey {
+    SessionKey {
+        addr_family: libc::AF_INET as u8,
+        protocol: 6,
+        src_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 61, 102)),
+        dst_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 61, 1)),
+        src_port: 40000,
+        dst_port: 22,
+        discriminator: crate::session::TunnelDiscriminator::None,
+        routing_domain: 0,
+    }
 }

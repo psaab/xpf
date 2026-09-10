@@ -324,12 +324,15 @@ impl WorkerCommandResults {
 }
 
 fn force_live_redirect_for_worker_synced_entry(
+    key: &SessionKey,
     decision: SessionDecision,
     metadata: &SessionMetadata,
     origin: SessionOrigin,
     allow_replace_local: bool,
+    has_routing_domains: bool,
 ) -> bool {
-    allow_replace_local && uses_kernel_local_session_map_entry(decision, metadata, origin)
+    allow_replace_local
+        && uses_kernel_local_session_map_entry(key, decision, metadata, origin, has_routing_domains)
 }
 
 pub(super) fn session_key_has_lo0_filter(forwarding: &ForwardingState, key: &SessionKey) -> bool {
@@ -453,7 +456,11 @@ pub(in crate::afxdp::session_glue) fn publish_worker_session_map_entry(
         return;
     }
     let has_lo0_filter = session_key_has_lo0_filter(forwarding, key);
-    let uses_kernel_local = uses_kernel_local_session_map_entry(decision, metadata, origin);
+    // #9517: on a node WITH routing domains this is always false, so the row is
+    // published as REDIRECT and an aliased publish can no longer flip a peer's
+    // REDIRECT row to PASS_TO_KERNEL.
+    let uses_kernel_local =
+        uses_kernel_local_session_map_entry(key, decision, metadata, origin, forwarding.has_routing_domains);
     if uses_kernel_local && has_lo0_filter {
         // A PASS_TO_KERNEL session-map entry cannot re-run userspace lo0
         // filters. Keep the packet visible to the helper while lo0
@@ -473,10 +480,12 @@ pub(in crate::afxdp::session_glue) fn publish_worker_session_map_entry(
     // publish outcome is counted; `delete_live_session_entry` below is a
     // removal, not a publish, and keeps its existing semantics.
     let publish_result = if force_live_redirect_for_worker_synced_entry(
+        key,
         decision,
         metadata,
         origin,
         allow_replace_local,
+        forwarding.has_routing_domains,
     ) {
         publish_live_session_entry(session_map_fd, key, decision.nat, metadata.is_reverse)
     } else {
@@ -489,6 +498,7 @@ pub(in crate::afxdp::session_glue) fn publish_worker_session_map_entry(
             decision,
             metadata,
             origin,
+            forwarding.has_routing_domains,
         )
     };
     if publish_result.is_err() {
@@ -1994,6 +2004,11 @@ mod tests;
 #[cfg(test)]
 #[path = "newflow_contention_tests.rs"]
 mod newflow_contention_tests;
+// #9517: the worker publish path's routing-domain WIRING, driven against the
+// `bpf_map` write recorder. Its own file for the same reason as the one above.
+#[cfg(test)]
+#[path = "routing_domain_publish_9517_tests.rs"]
+mod routing_domain_publish_9517_tests;
 
 // #6600: the coordinator's pre-publish NAT reservation resolves the synced zone
 // pair through the SAME helper the worker-side upsert uses, so the two cannot

@@ -86,6 +86,11 @@ pub(in crate::afxdp) fn install_helper_local_session_on_miss(
     now_ns: u64,
     protocol: u8,
     tcp_flags: u8,
+    // #9517: threaded, not a constant. The publish wrapper this reaches fixes
+    // `SessionOrigin::ForwardFlow`, so the kernel-local predicate is inert here
+    // TODAY -- but a constant would silently become the wrong answer if that
+    // origin ever changed, and every other publish site carries the real flag.
+    has_routing_domains: bool,
 ) -> bool {
     if let Some(previous) = sessions.take_synced_local(key) {
         remove_shared_session(
@@ -131,8 +136,14 @@ pub(in crate::afxdp) fn install_helper_local_session_on_miss(
     };
     // #1789: count a failed helper-local session publish (same
     // shim-missing-key consequence as every other publish site).
-    if publish_session_map_entry_for_session(session_map_fd, key, decision, &local_entry.metadata)
-        .is_err()
+    if publish_session_map_entry_for_session(
+        session_map_fd,
+        key,
+        decision,
+        &local_entry.metadata,
+        has_routing_domains,
+    )
+    .is_err()
     {
         crate::afxdp::bpf_map::SESSION_PUBLISH_ERRORS_SHARED
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
