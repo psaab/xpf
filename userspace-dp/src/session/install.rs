@@ -403,13 +403,31 @@ impl SessionTable {
                 // short opening window is a FORWARDING-NODE protection against
                 // a locally-received bare-SYN flood; the standby never
                 // receives that flood directly (it receives synced sessions),
-                // so it must not apply the short window. Crucially, the synced
-                // `tcp_flags` are the install-time flags (the opening SYN for a
-                // SYN-created flow) and are not guaranteed to be re-published
-                // as the primary's handshake completes, so deriving OPENING
-                // here could misclassify a LIVE established flow on the standby
-                // and reap its synced copy at the short stale-synced ceiling
-                // (`STALE_SYNCED_CEILING_MULT × opening`), breaking failover
+                // so it must not apply the short window.
+                //
+                // #9412 CORRECTION. This comment used to continue "Crucially, the
+                // synced `tcp_flags` are the install-time flags (the opening SYN
+                // for a SYN-created flow) and are not guaranteed to be
+                // re-published as the primary's handshake completes". That reads
+                // as though the sync path carries real flags that #3152 chooses
+                // not to trust, and it is what sent an external review down the
+                // "the import re-derives close-state from the carried
+                // `tcp_flags`" path. It does not. The production import
+                // constructor hardcodes `tcp_flags: 0`
+                // (`server/helpers/session_sync.rs`), so on a peer-synced entry
+                // there is nothing to derive FROM: `closing`, `reset` and
+                // `fin_own` below are ALWAYS false, and an imported session that
+                // was closing on the primary reaps on the ESTABLISHED window
+                // (300 s) rather than its close window (30 s / 2 s). That is
+                // #9412, which is OPEN and needs an explicit wire field — see
+                // `tcp_flags_zero_on_sync_path_9412_tests.rs`, which pins the
+                // hard zero so this comment cannot drift back.
+                //
+                // #3152's CONCLUSION is unaffected and its reasoning still
+                // stands on its own: were the flags ever carried, deriving
+                // OPENING from them could misclassify a LIVE established flow on
+                // the standby and reap its synced copy at the short stale-synced
+                // ceiling (`STALE_SYNCED_CEILING_MULT × opening`), breaking failover
                 // for any flow older than that ceiling. Importing as
                 // ESTABLISHED preserves the exact pre-#3152 standby behaviour
                 // (full established timeout + #2120 standby retention). The
