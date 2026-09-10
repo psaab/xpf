@@ -244,6 +244,39 @@ halves in turn stays correct. Before #5622 the helper deleted only the
 supplied key and released nothing, leaking the same-worker companion
 entry and the pool port on every translated LocalDelivery terminal deny.
 
+
+## Deleted first-policy purge (`purge_sessions_bound_to_deleted_first_policy`, #9526)
+
+The daemon's commit sweep clears a deleted policy's sessions by `policy_id`
+(`pkg/daemon/daemon_policy_invalidate.go`), but it must skip id 0. The
+literal first policy's id is also the value host-local, neighbor-seed, fabric,
+tunnel and older-peer sessions carry. Those sessions were said to idle out.
+For a one-way flow they did not: the #8356 re-derivation declines every
+reverse packet, and reverse traffic keeps the forward half alive
+(`companion_keeps_alive`), so a reverse-sustained flow kept transiting under
+the deleted policy.
+
+The helper has the discriminator the daemon lacks. A session a policy
+admitted binds that rule's counter handle, and the overloaded-zero sessions
+bind none. So on each forwarding-snapshot rotation the worker loop runs two
+steps:
+
+- **Before** assigning the new state, it asks
+  `deleted_first_policy_rule_id(old, new)`. The answer is the old snapshot's
+  single `policy_id` 0 rule, when the new snapshot no longer contains its
+  stable id (the rule was deleted or renamed).
+- **After** the assignment, it purges the forward sessions bound to that rule
+  id with `delete_terminal_filtered_session`: both halves, NAT release, the
+  shared HA maps, `DeleteSynced`, and a close delta the daemon turns into an HA
+  peer delete.
+
+The comparison costs O(rules) per rotation, and the session walk runs only
+when the first policy actually vanished. A snapshot whose rules all carry 0
+(ids never assigned) names no first policy and purges nothing. Only the
+deleted half is covered: a MODIFIED first policy keeps its stable id, so
+policy-rematch still leaves it to the re-derivation (#9596). The cells are in
+`deleted_first_policy_purge_9526_tests.rs`. The worker-loop wiring has no unit
+harness, so it is bound on the source.
 ## Transient synced-hit purge (`purge_translated_synced_hit`, #5295)
 
 When a packet hits a peer-synced translated FORWARD session whose RG is

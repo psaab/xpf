@@ -8,42 +8,38 @@ import (
 	"github.com/psaab/xpf/pkg/config"
 )
 
-// #6766 review fold — the VERDICT-level guard on inline-term ICMP duplicate
-// narrowing.
+// #6766 review fold — the VERDICT-level guard on inline-term ICMP duplicates.
 //
 // The strict gate rejects a conflicting `icmp-type` / `icmp-code` repeat inside
 // one inline term, but the TOLERANT path (boot load / HA SyncApply) downgrades
-// that reject to a warning and keeps enforcing whatever compiled. So on the
-// path that actually forwards packets, WHICH of the conflicting values survives
-// is an enforcement outcome, not bookkeeping: the surviving value is the only
-// one the deny covers, and every other value falls through to
-// `default-policy permit-all`.
+// that reject to a warning. The compiled term keeps only the LAST value, so what
+// the tolerant path does with that term is an enforcement outcome, not
+// bookkeeping: under `default-policy permit-all` every discarded value would
+// escape the deny.
 //
-// The pkg/config tests assert on the compiled Application struct. That binds the
-// compiler but not the matcher, and it left the icmp-CODE last-writer
-// unconstrained entirely: a production edit that retained the FIRST conflicting
-// code instead of the last would satisfy every strict-rejection test, because
-// those only assert that a conflict is refused, never which value wins when it
-// is tolerated. These tests pin the surviving value for type AND code by
-// driving the real matcher, so a keep-first regression flips a concrete
-// permit/deny verdict rather than a struct field.
+// #6766 and #6814 pinned the keep-last narrowing here, at the verdict, so that a
+// keep-first regression flipped a concrete permit/deny. #9525 changed the
+// verdict: the userspace expansion now refuses an application whose conflicting
+// match leaf kept only one value (config.ApplicationReferenceMatchDrops), the
+// policy lowers to the #3261 sentinel, and the simulator reports the snapshot as
+// REFUSED for the last and the first value alike. Which value survives no longer
+// reaches a traffic decision; it is still pinned at the compiled struct in
+// pkg/config/compiler_application_term_icmp_dup_6766_test.go.
 //
-// RED-on-revert: drop the #6766 duplicate tracking and the strict gate stops
-// rejecting, but these tests still hold — they characterize the tolerated
-// narrowing, which is the thing the gate exists to prevent. Change the
-// surviving value (keep-first instead of keep-last) and every subtest below
-// inverts: the value expected to be DENIED is permitted and vice versa.
+// RED-on-revert: delete the #6766 duplicate tracking, or the #9525 duplicate
+// arms, and nothing refuses the policy: the last value is denied again and the
+// first falls through, so every refusal assertion below fails.
 
 // inlineICMPDupCfg builds a deny policy referencing an application whose single
 // inline term repeats an ICMP leaf with conflicting values, then compiles it on
 // the TOLERANT path.
 //
-// It also BINDS THE DUPLICATE RECORDING (#6814 gate): without the two checks
-// below, deleting the #6766 tracking outright leaves these tests green, because
-// the compiled values — and therefore every verdict — are identical whether or
-// not the conflict was recorded. The recording is what makes strict reject and
-// what puts the operator-visible warning on the tolerant path, so both are
-// asserted here rather than assumed.
+// It also BINDS THE DUPLICATE RECORDING (#6814 gate). Before #9525, deleting the
+// #6766 tracking outright left every verdict unchanged, because the compiled
+// values were identical whether or not the conflict was recorded, so the two
+// checks below were the only binding. The refusal now depends on the recording
+// too, and the checks stay: the recording is also what makes strict reject and
+// what puts the operator-visible warning on the tolerant path.
 func inlineICMPDupCfg(t *testing.T, appLine, leaf string) *config.Config {
 	t.Helper()
 	tree := &config.ConfigTree{}
@@ -118,97 +114,53 @@ func icmpQuery(icmpType, icmpCode *uint8) Query {
 	}
 }
 
-// TestInlineTermICMPTypeDupNarrowsEnforcement_6766 pins which conflicting
-// icmp-TYPE survives on the tolerant path, at the verdict.
-func TestInlineTermICMPTypeDupNarrowsEnforcement_6766(t *testing.T) {
-	// Authored `icmp-type 8` then `icmp-type 3`: last-writer-wins keeps 3.
+// TestInlineTermICMPTypeDupRefusedOnTolerantPath_6766 pins what the tolerant
+// path does with a conflicting inline icmp-TYPE, at the verdict: it refuses the
+// policy for the LAST authored type (which it used to deny) and for the FIRST
+// (which used to fall through to permit-all).
+func TestInlineTermICMPTypeDupRefusedOnTolerantPath_6766(t *testing.T) {
+	// Authored `icmp-type 8` then `icmp-type 3`: the compiled term keeps 3.
 	cfg := inlineICMPDupCfg(t,
 		"set applications application badapp term t1 protocol icmp icmp-type 8 icmp-type 3",
 		"icmp-type")
-
-	t.Run("last authored type is the one enforced", func(t *testing.T) {
-		res := Match(cfg, icmpQuery(u8(3), nil))
-		if res.DefaultUsed {
-			t.Fatalf("ICMP type 3 must be denied by the POLICY, not by a default; got default_used=true action=%v", res.Action)
-		}
-		if !res.Matched || res.Action != config.PolicyDeny {
-			t.Fatalf("ICMP type 3 (the LAST authored icmp-type) must hit the deny; "+
-				"got matched=%v action=%v default_used=%v. If type 3 is NOT denied "+
-				"while type 8 IS, the compiler kept the FIRST conflicting value and "+
-				"the last-writer contract these tests pin has inverted",
-				res.Matched, res.Action, res.DefaultUsed)
-		}
-	})
-
-	t.Run("first authored type escapes into default permit-all", func(t *testing.T) {
-		res := Match(cfg, icmpQuery(u8(8), nil))
-		assertFellThroughToDefaultPermit(t, res, "ICMP type 8 (the FIRST authored icmp-type)")
-	})
+	assertRefused6766(t, Match(cfg, icmpQuery(u8(3), nil)), "ICMP type 3 (the LAST authored icmp-type)")
+	assertRefused6766(t, Match(cfg, icmpQuery(u8(8), nil)), "ICMP type 8 (the FIRST authored icmp-type)")
 }
 
-// TestInlineTermICMPCodeDupNarrowsEnforcement_6766 is the icmp-CODE analogue,
-// and is the specific gap the strict-rejection tests left open: nothing
-// anywhere constrained which conflicting CODE survives.
-func TestInlineTermICMPCodeDupNarrowsEnforcement_6766(t *testing.T) {
+// TestInlineTermICMPCodeDupRefusedOnTolerantPath_6766 is the icmp-CODE analogue.
+func TestInlineTermICMPCodeDupRefusedOnTolerantPath_6766(t *testing.T) {
 	// Authored `icmp-code 1` then `icmp-code 2` under a fixed type 3.
 	cfg := inlineICMPDupCfg(t,
 		"set applications application badapp term t1 protocol icmp icmp-type 3 icmp-code 1 icmp-code 2",
 		"icmp-code")
-
-	t.Run("last authored code is the one enforced", func(t *testing.T) {
-		res := Match(cfg, icmpQuery(u8(3), u8(2)))
-		if res.DefaultUsed {
-			t.Fatalf("ICMP type 3 code 2 must be denied by the POLICY, not by a default; got default_used=true action=%v", res.Action)
-		}
-		if !res.Matched || res.Action != config.PolicyDeny {
-			t.Fatalf("ICMP type 3 code 2 (the LAST authored icmp-code) must hit the deny; "+
-				"got matched=%v action=%v default_used=%v. A production edit that "+
-				"retained the FIRST conflicting code would land here",
-				res.Matched, res.Action, res.DefaultUsed)
-		}
-	})
-
-	t.Run("first authored code escapes into default permit-all", func(t *testing.T) {
-		res := Match(cfg, icmpQuery(u8(3), u8(1)))
-		assertFellThroughToDefaultPermit(t, res, "ICMP type 3 code 1 (the FIRST authored icmp-code)")
-	})
+	assertRefused6766(t, Match(cfg, icmpQuery(u8(3), u8(2))), "ICMP type 3 code 2 (the LAST authored icmp-code)")
+	assertRefused6766(t, Match(cfg, icmpQuery(u8(3), u8(1))), "ICMP type 3 code 1 (the FIRST authored icmp-code)")
 }
 
-// assertFellThroughToDefaultPermit asserts that a query reached the configured
-// default policy and was permitted there.
-//
-// #6814 gate: `config.PolicyPermit` is the ZERO value of PolicyAction
-// (types_security.go), and so is `Matched=false`. An assertion built only on
-// "action is permit" is therefore satisfied by a Result that was never
-// populated at all — a path that produced NOTHING looks identical to a genuine
-// fall-through. `DefaultUsed` is the only field here that carries non-default
-// evidence: it is true ONLY because the default-policy branch actually ran. It
-// is asserted FIRST for that reason.
-//
-// `Matched=false` is asserted explicitly rather than left implied, and the shape
-// it independently binds is `Matched=true, DefaultUsed=true, Action=permit` — a
-// Result claiming BOTH a concrete policy match and a default fall-through, which
-// is incoherent and would otherwise pass. It does NOT carry
-// `Matched=true, DefaultUsed=false`: that input fails at the `DefaultUsed` check
-// above and never reaches here. Stated precisely because the two legs look
-// redundant and are not — the mutation that proves this one sets Matched on the
-// default-branch Result, and a later reader trimming the "redundant" check would
-// delete the only assertion binding it.
-func assertFellThroughToDefaultPermit(t *testing.T, res Result, what string) {
+// assertRefused6766 asserts the simulator reports the snapshot as refused and
+// names the application. ContentRejected is set only by the content-rejection
+// gate, so unlike an "action is permit" check (PolicyPermit is the zero value,
+// the #6814 trap) it cannot be satisfied by a Result nothing populated.
+func assertRefused6766(t *testing.T, res Result, what string) {
 	t.Helper()
-	if !res.DefaultUsed {
-		t.Fatalf("%s must FALL THROUGH to default-policy permit-all: want DefaultUsed=true, "+
-			"got default_used=false matched=%v action=%v. DefaultUsed is the only "+
-			"non-zero-valued evidence that the default branch ran at all — permit and "+
-			"unmatched are both zero values and prove nothing on their own",
-			what, res.Matched, res.Action)
+	if !res.ContentRejected {
+		t.Fatalf("%s: want ContentRejected — the tolerant path must refuse a policy whose "+
+			"application kept only one of two conflicting values (#9525) instead of enforcing "+
+			"the narrowed term; got matched=%v action=%v default_used=%v",
+			what, res.Matched, res.Action, res.DefaultUsed)
 	}
-	if res.Matched {
-		t.Fatalf("%s must not match a concrete policy: want Matched=false, got matched=true "+
-			"action=%v (a policy PERMIT is not the same outcome as falling through)",
-			what, res.Action)
+	if res.Matched || res.DefaultUsed {
+		t.Fatalf("%s: a refused snapshot must not also report a policy or default verdict; "+
+			"got matched=%v default_used=%v", what, res.Matched, res.DefaultUsed)
 	}
-	if res.Action != config.PolicyPermit {
-		t.Fatalf("%s reached the default policy but was not permitted: action=%v", what, res.Action)
+	named := false
+	for _, r := range res.ContentRejectionReasons {
+		if strings.Contains(r, `application "badapp"`) {
+			named = true
+		}
+	}
+	if !named {
+		t.Fatalf("%s: the refusal must name application \"badapp\"; reasons: %v",
+			what, res.ContentRejectionReasons)
 	}
 }
