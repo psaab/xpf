@@ -12131,3 +12131,329 @@ fn a_short_circuited_claim_counts_no_recycle_walk_9392() {
         "and no pops either — the short-circuit returns before the walk",
     );
 }
+
+// ---------------------------------------------------------------------------
+// #9158 - flipping a source-NAT rule to ADDRESS-ONLY orphans a PAT lease's
+// translated port bit, and under a LIVE lease also tears the lease down.
+//
+// #8597 K10 closed the damaging direction (a PAT flow adopting an address-only
+// lease, which publishes an identity nothing holds). Its own header says it
+// fixed "only the damaging direction". This is the other one.
+//
+// THE MECHANISM, and why the orphan never recovers. The address-only path's mode
+// gate sent a mode-mismatched lease to the `expired` arm REGARDLESS of
+// `active_flows`, and that arm carried only `(addr_index, expires_at_ns)` - not
+// the lease's port, and not `address_only`. It removed the lease record AND its
+// expiry-index entry while freeing nothing, which puts the bit beyond both
+// recovery paths:
+//
+//   * `reclaim_expired_lease_locked` is the only GC site that frees a lease's
+//     port, and it begins `persistent_by_source.get(&key)` - the record is gone.
+//   * `unlink_live_allocation_locked` frees a port only when
+//     `persistent_key.is_none()`; a persistent flow's port belongs to the LEASE,
+//     so releasing the live PAT flow frees nothing either.
+//
+// The port-bearing mirror (`reuse_persistent_lease_locked`) is the in-file
+// positive control: its `expired` tuple carries `address_only` and it calls
+// `free_translated_port` when `!address_only`.
+// ---------------------------------------------------------------------------
+
+/// Reconstruct the `SourceNatFlowKey` `snat_lookup_6528` builds internally, so a
+/// live flow can be released through the allocator's own release path.
+fn flow_key_9158(src_ip: &str, src_port: u16, dst_ip: &str, dst_port: u16) -> SourceNatFlowKey {
+    SourceNatFlowKey {
+        protocol: PROTO_TCP,
+        src_ip: src_ip.parse().unwrap(),
+        dst_ip: dst_ip.parse().unwrap(),
+        src_port,
+        dst_port,
+        routing_scope: 0,
+    }
+}
+
+/// THE DEFECT, and the BOUND on it: the orphan is permanent, not transient.
+///
+/// Four legs, and the two middle ones are what make this a LEAK rather than a
+/// transient inconsistency:
+///   1. the live lease must SURVIVE the flip, and its port must still be HELD
+///      (those pull opposite ways - see the leg);
+///   2. a GC sweep far past every timeout must not leave it held;
+///   3. nor must releasing the live PAT flow;
+///   4. so after all of it the port is free.
+///
+/// A defect that recovered on release would be a different defect with a
+/// different remedy, so the distinction is MEASURED here rather than assumed.
+///
+/// FAIL-ON-REVERT: restore the `expired: Option<(usize, u64)>` arm and leg 4 reds
+/// with the port still occupied and no lease referencing it.
+#[test]
+fn flipping_a_live_pat_lease_to_address_only_does_not_orphan_its_port_9158() {
+    let rules = shared_mode_persistent_rules_k10();
+
+    // Mint a PAT lease: port-translating rule, one LIVE flow on it.
+    let pat = expect_snat_decision(snat_lookup_6528(
+        &rules, "lan2", "10.0.1.70", 40003, "8.8.8.8", 443,
+    ));
+    let port = pat
+        .rewrite_src_port
+        .expect("precondition: the PAT rule must translate a port");
+    assert!(
+        rules[0].pool_allocator.debug_is_port_occupied(0, port),
+        "precondition: a PAT decision must hold its occupancy bit"
+    );
+    {
+        let live = rules[0].pool_allocator.debug_live();
+        let lease = live
+            .persistent_by_source
+            .values()
+            .next()
+            .expect("precondition: exactly one lease");
+        assert!(
+            !lease.address_only,
+            "precondition: the lease must be PAT, or this cell tests the \
+             direction #8597 K10 already fixed"
+        );
+        assert_eq!(
+            lease.active_flows, 1,
+            "precondition: the lease must be LIVE. An idle lease torn down on a \
+             mode flip is a lesser harm, and it has its own cell"
+        );
+        assert_eq!(
+            lease.translated.port, port,
+            "precondition: the lease must own the port the decision published"
+        );
+    }
+
+    // THE FLIP. The same source now matches the `port no-translation` rule, so
+    // the address-only path runs against the PAT lease - an ordinary operator
+    // commit (`allocator_key()` excludes `no_translation`, so the allocator and
+    // its leases carry across).
+    let ao = expect_snat_decision(snat_lookup_6528(
+        &rules, "lan", "10.0.1.70", 40003, "9.9.9.9", 443,
+    ));
+    assert_eq!(
+        ao.rewrite_src_port, None,
+        "precondition: the flipped rule must be ADDRESS-ONLY, or no mode \
+         mismatch occurred and this cell measures nothing"
+    );
+
+    // LEG 1 - the LIVE lease still standing, and its port still held.
+    //
+    // Both halves matter and they pull in OPPOSITE directions. Destroying the
+    // lease is what orphans the bit; FREEING the bit while the PAT flow is still
+    // forwarding on it is an over-release that lets `claim()` hand the same
+    // (address, port) to a second flow. The only correct state here is "lease
+    // intact, bit still held", so a fix that went too far either way reds.
+    {
+        let live = rules[0].pool_allocator.debug_live();
+        let lease = live
+            .persistent_by_source
+            .values()
+            .find(|l| !l.address_only)
+            .expect(
+                "the LIVE PAT lease must survive a mode flip. Destroying it is \
+                 what puts its occupancy bit beyond every recovery path (#9158)",
+            );
+        assert_eq!(
+            lease.active_flows, 1,
+            "the surviving lease must keep its refcount: the address-only flow \
+             owns no share of it and must not have joined or reset it"
+        );
+        assert_eq!(
+            lease.translated.port, port,
+            "the surviving lease must still own the port it minted"
+        );
+    }
+    assert!(
+        rules[0].pool_allocator.debug_is_port_occupied(0, port),
+        "OVER-RELEASE: port {port} was freed while a live PAT flow is still \
+         forwarding on it. `claim()` can now hand the same (address, port) to a \
+         second flow - the duplicate translated identity this allocator exists \
+         to prevent. Freeing the bit is correct only once the lease is idle \
+         (#9158)"
+    );
+
+    // LEG 2 - a GC sweep 10000 s past every inactivity timeout (300 s).
+    // `reclaim_expired_lease_locked` frees a port only for a lease it can still
+    // find, so a flip that removed the record makes this sweep structurally
+    // unable to reach the bit.
+    rules[0]
+        .pool_allocator
+        .debug_gc_expired_chunked(10_000 * NS_PER_SEC, 4096);
+
+    // LEG 3 - and releasing the LIVE flow, because a persistent flow's port
+    // belongs to the lease rather than to the flow record.
+    rules[0].pool_allocator.release_flow(
+        flow_key_9158("10.0.1.70", 40003, "8.8.8.8", 443),
+        TranslatedTuple {
+            ip: "203.0.113.7".parse().unwrap(),
+            port,
+        },
+        20_000 * NS_PER_SEC,
+        NatHolder::Untracked,
+    );
+    rules[0]
+        .pool_allocator
+        .debug_gc_expired_chunked(30_000 * NS_PER_SEC, 4096);
+
+    let referenced = {
+        let live = rules[0].pool_allocator.debug_live();
+        live.persistent_by_source
+            .values()
+            .any(|l| !l.address_only && l.translated.port == port)
+    };
+    assert!(
+        !rules[0].pool_allocator.debug_is_port_occupied(0, port),
+        "LEAK: port {port} is still marked occupied after the mode flip, a GC \
+         sweep 10000 s past every timeout, a release of the live PAT flow, and a \
+         second sweep. referenced_by_a_pat_lease={referenced}. Neither recovery \
+         path can reach the bit: `reclaim_expired_lease_locked` starts from \
+         `persistent_by_source.get(&key)` and the flip removed that record, and \
+         `unlink_live_allocation_locked` frees a port only when \
+         `persistent_key.is_none()`. The bit is held for the allocator's \
+         lifetime, so repeated mode flips leak monotonically and the pool alarm \
+         eventually fires on capacity nothing is using (#9158)"
+    );
+}
+
+/// CONTROL - the IDLE mode-flip teardown must still happen, and still free.
+///
+/// Without this the fix could be "never tear down a mode-mismatched lease",
+/// which trades the leak for a lease that pins an address forever. The idle case
+/// is the one the arm's own comment describes and it must keep working.
+///
+/// Note this cell ALSO failed before the fix, which the issue did not state: the
+/// arm freed nothing in EITHER case, so the port orphan was never conditional on
+/// liveness. Liveness only adds the second harm (a live translation torn down).
+#[test]
+fn flipping_an_idle_pat_lease_to_address_only_frees_its_port_9158() {
+    let rules = shared_mode_persistent_rules_k10();
+    let pat = expect_snat_decision(snat_lookup_6528(
+        &rules, "lan2", "10.0.1.71", 40004, "8.8.8.8", 443,
+    ));
+    let port = pat.rewrite_src_port.expect("PAT translates a port");
+
+    // Drain the flow so the lease is IDLE (active_flows == 0) but still present.
+    rules[0].pool_allocator.release_flow(
+        flow_key_9158("10.0.1.71", 40004, "8.8.8.8", 443),
+        TranslatedTuple {
+            ip: "203.0.113.7".parse().unwrap(),
+            port,
+        },
+        2 * NS_PER_SEC,
+        NatHolder::Untracked,
+    );
+    {
+        let live = rules[0].pool_allocator.debug_live();
+        let lease = live
+            .persistent_by_source
+            .values()
+            .next()
+            .expect("precondition: the idle lease must survive the release");
+        assert_eq!(
+            lease.active_flows, 0,
+            "precondition: the lease must be IDLE for this control"
+        );
+    }
+
+    // Flip to address-only. The lease is idle and mode-mismatched, so tearing it
+    // down is correct - and its port must come back.
+    let ao = expect_snat_decision(snat_lookup_6528(
+        &rules, "lan", "10.0.1.71", 40004, "9.9.9.9", 443,
+    ));
+    assert_eq!(ao.rewrite_src_port, None, "precondition: address-only");
+
+    assert!(
+        !rules[0].pool_allocator.debug_is_port_occupied(0, port),
+        "an IDLE mode-mismatched lease must be torn down AND its port freed. \
+         Port {port} is still held, so either the teardown was suppressed or it \
+         still frees nothing (#9158)"
+    );
+}
+
+/// The degraded flow must be SERVED, and must not own the lease it stepped around.
+///
+/// The remedy for a live mode mismatch is to leave the PAT lease standing and
+/// serve the address-only flow WITHOUT persistence. Two things could go wrong
+/// that the leak cells above cannot see:
+///   * refusing the flow - which turns a supported config edit into an outage,
+///     and is why "return an error" was not the fix;
+///   * serving it with `persistent_key: Some(key)` - whose release would then
+///     decrement the SURVIVING lease's refcount to 0 while that lease's own PAT
+///     flows are still forwarding, handing it to GC and freeing a port in use.
+///
+/// The second is the subtle one: it yields a correct-looking decision and an
+/// over-release one release later.
+#[test]
+fn a_flow_served_around_a_live_mode_mismatched_lease_owns_no_lease_9158() {
+    let rules = shared_mode_persistent_rules_k10();
+    let pat = expect_snat_decision(snat_lookup_6528(
+        &rules, "lan2", "10.0.1.72", 40008, "8.8.8.8", 443,
+    ));
+    let port = pat.rewrite_src_port.expect("PAT translates a port");
+
+    // SERVED, not refused: `expect_snat_decision` fails the cell on a refusal.
+    let ao = expect_snat_decision(snat_lookup_6528(
+        &rules, "lan", "10.0.1.72", 40008, "9.9.9.9", 443,
+    ));
+    assert_eq!(ao.rewrite_src_port, None, "precondition: address-only");
+
+    {
+        let live = rules[0].pool_allocator.debug_live();
+        // Exactly ONE lease - the surviving PAT one. One PersistentSourceKey
+        // holds one lease, so an insert here would have OVERWRITTEN the PAT
+        // record and orphaned its port by a different route than the arm above.
+        assert_eq!(
+            live.persistent_by_source.len(),
+            1,
+            "the address-only flow must not have minted a SECOND lease (#9158)"
+        );
+        // #9158 mutation N5 found this: `len() == 1` ALONE cannot see an
+        // overwrite, because one `PersistentSourceKey` holds one lease and
+        // `insert` REPLACES -- the count is 1 before and after. A mutant that
+        // let the degraded path fall through to the lease insert was therefore
+        // caught only by the sibling live-flip cell, not by this one, even
+        // though "the flow must not mint a lease" is precisely this cell's
+        // subject. The surviving lease's IDENTITY is the observable that can
+        // tell replacement from absence.
+        let lease = live
+            .persistent_by_source
+            .values()
+            .next()
+            .expect("exactly one lease, asserted above");
+        assert!(
+            !lease.address_only,
+            "the surviving lease must still be the PAT one. An address-only \
+             lease here means the degraded flow inserted over the PAT record \
+             under the same key -- which orphans the PAT port and is the #9158 \
+             leak reached by a second route (#9158)"
+        );
+        assert_eq!(
+            lease.translated.port, port,
+            "and it must still own the port it minted, so an overwrite that \
+             happened to preserve the mode is caught too"
+        );
+    }
+    let flow = flow_key_9158("10.0.1.72", 40008, "9.9.9.9", 443);
+    let (persistent_key, record_address_only) = rules[0]
+        .pool_allocator
+        .debug_live_flow_lease(&flow)
+        .expect("the address-only flow must have a live record");
+    assert!(
+        persistent_key.is_none(),
+        "the degraded flow must name NO lease. With `Some(key)` its release runs \
+         `complete_persistent_lease_locked` against the surviving PAT lease and \
+         decrements a refcount it never incremented - taking `active_flows` to 0 \
+         while that lease's PAT flow is still forwarding, which hands the lease \
+         to GC and frees port {port} in use (#9158)"
+    );
+    assert!(
+        record_address_only,
+        "precondition: the degraded record is an address-only one"
+    );
+
+    assert!(
+        rules[0].pool_allocator.debug_is_port_occupied(0, port),
+        "the live PAT flow must keep its port across the flip"
+    );
+}
