@@ -376,6 +376,17 @@ func expandUserspacePolicyApplications(cfg *config.Config, apps []string) ([]Pol
 		if !ok || len(resolved) == 0 {
 			return nil, false
 		}
+		// #9525: an application the tolerant compile could only WARN about may
+		// still resolve and parse here while matching something other than
+		// what was authored (a port on a protocol with no L4 ports, a dropped
+		// icmp-type, a dangling or conflicting match leaf, a discarded direct
+		// body). Refuse the reference so the policy lowers to the #3261
+		// __unsupported__ sentinel instead of installing that term. The set of
+		// drops, and what is deliberately left out, is documented on
+		// config.ApplicationReferenceMatchDrops.
+		if len(config.ApplicationReferenceMatchDrops(appName, &cfg.Applications)) > 0 {
+			return nil, false
+		}
 		for _, resolvedName := range resolved {
 			app, ok := config.ResolveApplication(resolvedName, cfg.Applications.Applications)
 			if !ok || app == nil {

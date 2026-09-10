@@ -1574,12 +1574,11 @@ records the offending leaf on `Application.DuplicateTermLeaves`. (#6766: the
 `icmp-code` repeat overwrote the pointer with no record and a referenced DENY
 enforced only the LAST type/code — a silent narrowing of the deny match, the
 inline-term analogue of the #5574 direct-body ICMP tracking. On the TOLERANT
-path the conflict is only a warning, so whichever value survives is the one
-actually enforced: that keep-LAST outcome is pinned for both `icmp-type` and
-`icmp-code` at the verdict — the discarded value falling through to
-`default-policy permit-all` — in
-`pkg/policymatch/app_inline_term_icmp_dup_6766_test.go`, and at the compiled
-struct in `compiler_application_term_icmp_dup_6766_test.go`.) An IDEMPOTENT
+path the conflict is only a warning. The compiled term keeps the LAST value
+(pinned at the compiled struct in `compiler_application_term_icmp_dup_6766_test.go`),
+but since #9525 a policy referencing it is refused rather than enforcing that
+narrowed term (pinned at the verdict, for both leaves, in
+`pkg/policymatch/app_inline_term_icmp_dup_6766_test.go`).) An IDEMPOTENT
 same-value repeat (e.g. the `timeout` / `inactivity-timeout` aliases both set to
 the same number) is harmless and accepted, and a repeated `protocol` is the
 documented multi-protocol-term syntax (one application per unique protocol) and
@@ -1615,6 +1614,38 @@ synthesized for term-bearing applications never carry `UnknownMembers`, so they
 are unaffected. Distinct from #2068 (a dropped NESTED-set member — a valid
 keyword the old switch already handled) and the #3144/#3146/#3434 empty-set gate
 (a set that resolves by name but expands to zero members).
+
+**Tolerant-path application drops refuse the policy (#9525):** the application
+gates above are strict on commit / commit-check and downgrade to a warning on
+the tolerant load / peer-sync path (`lenientApplicationSpecs`). Several members
+still left a well-formed-looking term on the wire that matched something other
+than what was authored, with `PolicyContentRejectionReasons` empty:
+- a `destination-port` on a protocol with no L4 ports (icmp, gre, sctp) never
+  matches;
+- a `source-port` on icmp/icmpv6 is compared with the ICMP query Identifier,
+  which the sender chooses;
+- a malformed `icmp-type`/`icmp-code` is dropped, so the term matches every type
+  or code;
+- an icmp field on a non-ICMP protocol, or a code without a type, is refused by
+  the helper (#3712) while the simulator certified a verdict;
+- a dangling or conflicting match leaf is dropped or keeps only its last value;
+- a direct body mixed with `term` blocks is discarded.
+
+`config.ApplicationReferenceMatchDrops` names these, walking nested sets as the
+expansion does. `expandUserspacePolicyApplications` then refuses the reference,
+so the policy lowers to the #3261 `__unsupported__` sentinel. The helper refuses
+the whole snapshot (a running node keeps its previous one), and the mirror names
+the application.
+
+Only MATCH leaves count. `applicationMatchLeaves9525` and
+`applicationSettingLeaves9525` partition `valueTakingApplicationLeaves`, so a
+bad, dangling or conflicting timeout or `alg`, which does not change what
+matches, is still installed. An UNRECOGNIZED statement (`UnknownDirectLeaves`,
+`UnknownTermLeaves`, `UnknownMembers`) is also still installed as compiled.
+#6524's `TestStrayStatementDoesNotDisarmSiblingLeaves` decided that a stray
+statement must not disarm a well-formed application, and the widening that
+leaves is tracked in #9595. NAT application terms are lowered separately
+(`buildSourceNATAppTerms`, `appTermFor`) and are unchanged.
 
 **C struct alignment:** when mirroring C BPF structs in Go, match `sizeof`
 exactly with trailing `Pad [N]byte` fields. cilium/ebpf serializes map

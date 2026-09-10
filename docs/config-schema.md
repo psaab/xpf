@@ -13863,6 +13863,43 @@ ICMP/ICMPv6. Regression coverage: `userspace-dp/src/policy_tests.rs`
 `valid_icmp_type_and_code_still_compiles_and_matches`,
 `valid_icmpv6_type_and_code_still_compiles`).
 
+### #9525 — the tolerant application-spec downgrade no longer installs a different term
+
+The #3373 port gate, the #3348 icmp gates, the #6564 / #8339 dangling-leaf
+gates and the #3366 / #6766 structure gates are strict on `CompileConfig` and
+`configstore.CheckText`. They downgrade to a warning on `CompileConfigLenient`
+(`lenientApplicationSpecs`). Before this change, measured on that tolerant
+channel through the policy wire, `PolicyContentRejectionReasons` and
+`policymatch.Match`:
+
+| member | installed term | effect |
+|---|---|---|
+| `destination-port` on icmp / gre / sctp | a port term on a protocol that presents no destination port | never matches: a deny never fires |
+| `source-port` on icmp / icmpv6 | a `src_port` term; the helper presents the ICMP query Identifier there | a deny fires only for senders choosing that Identifier |
+| malformed `icmp-type` / `icmp-code` (`UnknownICMP`) | constraint dropped | every type, or every code, matches: a permit widens |
+| icmp field on a non-ICMP protocol; code without type | as authored | the helper refuses the snapshot (#3712) while the simulator certified a verdict |
+| dangling match leaf (`IncompleteDirectLeaves` / `IncompleteTermLeaves`) | constraint dropped | a permit widens (e.g. to every TCP port) |
+| conflicting match leaf (`DuplicateDirectLeaves` / `DuplicateTermLeaves`) | last value only | a deny under-covers |
+| direct body mixed with terms (`MixedDirectTermApps`) | terms only, also through a nested set | a deny under-covers |
+
+In every row `PolicyContentRejectionReasons` was empty.
+`config.ApplicationReferenceMatchDrops` now names each drop, and
+`expandUserspacePolicyApplications` refuses the reference, so the rule lowers to
+the #3261 `__unsupported__` sentinel. The helper refuses the whole snapshot,
+keeping its previous one, and the mirror names the application. The malformed
+port, missing protocol and unresolvable protocol members were already refused
+this way and are unchanged.
+
+Left installed, deliberately:
+- a bad, dangling or conflicting timeout or `alg`: the match is unchanged
+  (`applicationSettingLeaves9525`);
+- an unrecognized statement (`UnknownDirectLeaves`, `UnknownTermLeaves`,
+  `UnknownMembers`), which #6524's over-reach guard keeps armed. The widening
+  that leaves is #9595.
+
+The strict text for a `source-port` on a non-port protocol now names the ICMP
+Identifier instead of claiming that such a protocol presents ports of 0.
+
 ### #3352 / #3353 — unknown inline-`term` leaf + per-application `alg` validation
 
 An inline `applications application <a> term <t> { ... }` is declared as an
