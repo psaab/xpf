@@ -737,6 +737,38 @@ func (a *LegacyDataPlaneAdapter) ExportOwnerRGSessionsPaged(rgIDs []int) ([]Sess
 	return m.ExportOwnerRGSessionsPaged(rgIDs)
 }
 
+// BatchDeleteSessionsScoped forwards the #9364 domain-carrying batch delete.
+//
+// THIS FORWARDER IS THE WHOLE POINT, and its omission is #9482. `Manager.Sessions()`
+// constructs the store as
+// `dataplane.NewDataPlaneSessionStore(NewLegacyDataPlaneAdapter(m))`, so the value
+// the store type-asserts against `sessionDomainBatchDeleter` is THIS adapter, not
+// the Manager that grew the method. #9344 made exactly that mistake on the
+// owner-RG export interface and the HA cold-prime bulk sync silently never ran.
+//
+// Here the failure would be quieter still: `sessionDomainBatchDeleter` is an
+// OPTIONAL capability whose miss falls back to the key-only call, so a missing
+// forwarder would not error — it would just restore the bare delete this issue
+// exists to remove, with every test green. That is why
+// `scoped_batch_delete_published_9364.go` bolts the assertion shut at compile
+// time instead of trusting the runtime miss to be noticed.
+func (a *LegacyDataPlaneAdapter) BatchDeleteSessionsScoped(scoped []dataplane.ScopedSessionKey) (int, error) {
+	m, err := a.managerOrErr()
+	if err != nil {
+		return 0, err
+	}
+	return m.BatchDeleteSessionsScoped(scoped)
+}
+
+// BatchDeleteSessionsScopedV6 forwards the IPv6 analogue (#9364).
+func (a *LegacyDataPlaneAdapter) BatchDeleteSessionsScopedV6(scoped []dataplane.ScopedSessionKeyV6) (int, error) {
+	m, err := a.managerOrErr()
+	if err != nil {
+		return 0, err
+	}
+	return m.BatchDeleteSessionsScopedV6(scoped)
+}
+
 func (a *LegacyDataPlaneAdapter) SessionSyncSweepProfile() (bool, time.Duration, time.Duration) {
 	m, err := a.managerOrErr()
 	if err != nil {
