@@ -13894,8 +13894,12 @@ Left installed, deliberately:
 - a bad, dangling or conflicting timeout or `alg`: the match is unchanged
   (`applicationSettingLeaves9525`);
 - an unrecognized statement (`UnknownDirectLeaves`, `UnknownTermLeaves`,
-  `UnknownMembers`), which #6524's over-reach guard keeps armed. The widening
-  that leaves is #9595.
+  `UnknownMembers`), unless it is on the structural line #9595 draws: a
+  constraint-shaped value on an otherwise protocol-wide application, or a set
+  member statement naming a real application. Those are refused. #6524's stray
+  statement beside a retained port stays armed. A constraint lost beside a
+  retained one stays installed; separating it from a numeric stray needs
+  keyword similarity and is the #9603 decision.
 
 The strict text for a `source-port` on a non-port protocol now names the ICMP
 Identifier instead of claiming that such a protocol presents ports of 0.

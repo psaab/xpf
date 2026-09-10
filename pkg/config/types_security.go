@@ -1484,6 +1484,12 @@ type ApplicationSet struct {
 	// gate (validateApplicationSyntaxStrict) hard-rejects the first one on the
 	// strict commit path / warns on the tolerant load / peer-sync path (#3890).
 	UnknownMembers []string
+	// UnknownMemberValues holds the value tokens of the UnknownMembers
+	// statements, in order (#9595). A misspelled `applicaton junos-ssh` records
+	// "applicaton" in UnknownMembers and "junos-ssh" here. A value that resolves
+	// as an application or application-set marks a lost member reference, which
+	// the userspace expansion refuses on the tolerant path.
+	UnknownMemberValues []string
 }
 
 // Application defines a network application by protocol and port.
@@ -1665,6 +1671,13 @@ type Application struct {
 	// on the strict commit path / warns on the tolerant load / peer-sync path
 	// (#1960 no-brick).
 	UnknownDirectLeaves []string
+	// UnknownDirectTokens holds EVERY token of each unrecognized direct-body run,
+	// keyword first, plus anything a flat-set chain parked below it (#9595). The
+	// keyword alone (UnknownDirectLeaves) cannot tell a lost match constraint
+	// (`destination-poort 22`) from a harmless stray (`bogus value`); the value
+	// shape, together with the compiled match, can. Strict-commit error text still
+	// reads UnknownDirectLeaves only.
+	UnknownDirectTokens []string
 }
 
 // IPsecConfig holds IPsec VPN configuration.
