@@ -254,6 +254,7 @@ func (c *xpfCollector) emitWireguardTelemetry(ch chan<- prometheus.Metric, statu
 			{"malformed_inner", t.DecapDropsMalformedInner},
 			{"buffer", t.DecapDropsBuffer},
 			{"unsteered_port", t.RxUnsteeredTransportDrops},
+			{"degraded_transit", t.RxDegradedTransitDrops},
 			{"expired", t.DecapDropsExpired},
 		} {
 			counter(c.wgTransportDropsTotal, r.v, t.Tunnel, "decap", r.reason)

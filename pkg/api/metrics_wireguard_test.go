@@ -98,6 +98,7 @@ func TestEmitWireguardTelemetrySeriesSet(t *testing.T) {
 			DecapDropsMalformedInner:  24,
 			DecapDropsBuffer:          25,
 			RxUnsteeredTransportDrops: 55,
+			RxDegradedTransitDrops:    91,
 			EncapPackets:              26,
 			EncapBytes:                27,
 			EncapDropsNoSession:       28,
@@ -190,6 +191,7 @@ func TestEmitWireguardTelemetrySeriesSet(t *testing.T) {
 		"xpf_userspace_wg_transport_drops_total,direction=decap,reason=malformed_inner,tunnel=wg0":  24,
 		"xpf_userspace_wg_transport_drops_total,direction=decap,reason=buffer,tunnel=wg0":           25,
 		"xpf_userspace_wg_transport_drops_total,direction=decap,reason=unsteered_port,tunnel=wg0":   55,
+		"xpf_userspace_wg_transport_drops_total,direction=decap,reason=degraded_transit,tunnel=wg0": 91,
 		"xpf_userspace_wg_transport_drops_total,direction=encap,reason=no_session,tunnel=wg0":       28,
 		"xpf_userspace_wg_transport_drops_total,direction=encap,reason=unconfirmed,tunnel=wg0":      29,
 		"xpf_userspace_wg_transport_drops_total,direction=encap,reason=rekey_required,tunnel=wg0":   30,
@@ -313,7 +315,8 @@ func TestEmitWireguardTelemetryNeverHandshakedGauge(t *testing.T) {
 	// (under_load_no_mac2 + cookie_reply_budget) + 3 cookie-reply events
 	// #4094 (sent + mac2_ok [PR-A] + consumed [PR-B]) = 51;
 	// + 4 endpoint-resolution outcomes (#7936) = 55;
-	// + 1 unsteered-port decap drop reason (#9521) = 56.
+	// + 1 unsteered-port decap drop reason (#9521) = 56;
+	// + 1 degraded-transit decap drop reason (#9594) = 57.
 	//
 	// The four #7936 series are emitted for a zeroed tunnel ON PURPOSE, and
 	// this count is where that decision is pinned. A tunnel whose peers are all
@@ -322,8 +325,8 @@ func TestEmitWireguardTelemetryNeverHandshakedGauge(t *testing.T) {
 	// indistinguishable from "the exporter does not know about this tunnel",
 	// which is the difference between a dashboard reading zero and a dashboard
 	// reading nothing.
-	if count != 56 {
-		t.Errorf("emitted %d series for a zeroed tunnel, want 56 (zeros are real signals)", count)
+	if count != 57 {
+		t.Errorf("emitted %d series for a zeroed tunnel, want 57 (zeros are real signals)", count)
 	}
 }
 

@@ -157,6 +157,7 @@ impl Coordinator {
                 rx_unsteered_transport_drops: c
                     .rx_unsteered_transport_drops
                     .load(Ordering::Relaxed),
+                rx_degraded_transit_drops: c.rx_degraded_transit_drops.load(Ordering::Relaxed),
                 encap_packets: c.encap_packets.load(Ordering::Relaxed),
                 encap_bytes: c.encap_bytes.load(Ordering::Relaxed),
                 encap_drops_no_session: c.encap_drops_no_session.load(Ordering::Relaxed),

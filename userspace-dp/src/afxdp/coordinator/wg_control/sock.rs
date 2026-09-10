@@ -388,6 +388,90 @@ pub(super) fn set_recv_tos_options(fd: i32, socket_is_v6: bool) {
     }
 }
 
+/// #9594: enable ingress-interface ancillary delivery (`IP_PKTINFO`, which also
+/// covers the v4-mapped datagrams a dual-stack v6 socket delivers, and
+/// `IPV6_RECVPKTINFO` for native v6 peers) so a kernel-path transport record can
+/// be placed relative to the XDP shim's adjudicated ingress set. Called from the
+/// control loop itself, so every path that runs the loop receives it.
+///
+/// A kernel that rejects the option delivers no pktinfo cmsg; the record's
+/// ingress is then unknown, which the posture treats as covered — fail closed
+/// for transit, host-inbound still delivered. Logged once per socket.
+pub(super) fn set_recv_pktinfo_options(fd: i32, socket_is_v6: bool) {
+    let on: libc::c_int = 1;
+    let rc = unsafe {
+        libc::setsockopt(
+            fd,
+            libc::IPPROTO_IP,
+            libc::IP_PKTINFO,
+            &on as *const _ as *const libc::c_void,
+            std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+        )
+    };
+    if rc != 0 {
+        eprintln!(
+            "xpf-wg: IP_PKTINFO not enabled (fd {fd}): {} — v4 kernel-path ingress is unknown, \
+             so its transit is refused while delivered host-inbound is kept (#9594)",
+            io::Error::last_os_error()
+        );
+    }
+    if socket_is_v6 {
+        let rc6 = unsafe {
+            libc::setsockopt(
+                fd,
+                libc::IPPROTO_IPV6,
+                libc::IPV6_RECVPKTINFO,
+                &on as *const _ as *const libc::c_void,
+                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+            )
+        };
+        if rc6 != 0 {
+            eprintln!(
+                "xpf-wg: IPV6_RECVPKTINFO not enabled (fd {fd}): {} — v6 kernel-path ingress is \
+                 unknown, so its transit is refused while delivered host-inbound is kept (#9594)",
+                io::Error::last_os_error()
+            );
+        }
+    }
+}
+
+/// #9594: the receiving interface from an `IP_PKTINFO` / `IPV6_PKTINFO` cmsg,
+/// or `None` when none is present (or its payload is short). The payload is read
+/// with `read_unaligned`: `CMSG_DATA` is aligned for the header, not for
+/// `in6_pktinfo`'s `u32` field.
+pub(super) fn parse_ingress_ifindex_from_cmsg(msg: &libc::msghdr) -> Option<u32> {
+    // SAFETY: as `parse_outer_ecn_from_cmsg` — a recvmsg-populated msghdr over the
+    // 8-byte-aligned `CmsgBuf` (#2334); every payload read is guarded by
+    // `cmsg_len` covering the whole struct.
+    unsafe {
+        let mut cmsg = libc::CMSG_FIRSTHDR(msg);
+        while !cmsg.is_null() {
+            let level = (*cmsg).cmsg_level;
+            let ctype = (*cmsg).cmsg_type;
+            let data = libc::CMSG_DATA(cmsg);
+            let data_off = data as usize - cmsg as usize;
+            let cmsg_len = (*cmsg).cmsg_len as usize;
+            if level == libc::IPPROTO_IP && ctype == libc::IP_PKTINFO {
+                if cmsg_len >= data_off + std::mem::size_of::<libc::in_pktinfo>() {
+                    let info = std::ptr::read_unaligned(data as *const libc::in_pktinfo);
+                    if info.ipi_ifindex > 0 {
+                        return Some(info.ipi_ifindex as u32);
+                    }
+                }
+            } else if level == libc::IPPROTO_IPV6 && ctype == libc::IPV6_PKTINFO {
+                if cmsg_len >= data_off + std::mem::size_of::<libc::in6_pktinfo>() {
+                    let info = std::ptr::read_unaligned(data as *const libc::in6_pktinfo);
+                    if info.ipi6_ifindex > 0 {
+                        return Some(info.ipi6_ifindex);
+                    }
+                }
+            }
+            cmsg = libc::CMSG_NXTHDR(msg, cmsg);
+        }
+    }
+    None
+}
+
 /// #2317: outcome of a single `recvmsg` on the WG socket — the datagram
 /// length plus the 2-bit outer ECN parsed from the `IP_RECVTOS` /
 /// `IPV6_RECVTCLASS` ancillary data (None when no TOS cmsg arrived, e.g.
@@ -397,6 +481,11 @@ pub(super) struct WgRecv {
     pub(super) len: usize,
     pub(super) from: SocketAddr,
     pub(super) outer_ecn: Option<u8>,
+    /// #9594: the interface the kernel received the datagram on (`IP_PKTINFO` /
+    /// `IPV6_PKTINFO`), or `None` when no pktinfo cmsg arrived. Decides whether a
+    /// kernel-path record entered on an ingress the shim adjudicates
+    /// (`kernel_path.rs`).
+    pub(super) ingress_ifindex: Option<u32>,
 }
 
 /// #2334: 256-byte recvmsg control buffer, over-aligned to 8 bytes so the
@@ -465,15 +554,19 @@ pub(super) fn wg_recvmsg(socket: &UdpSocket, buf: &mut [u8]) -> io::Result<WgRec
     // The 256-byte control buffer is sized so this never triggers for a
     // single ~20-byte TOS cmsg, but skip defensively rather than walk a
     // partial chain (worst case: the decap combine is skipped this once).
-    let outer_ecn = if msg.msg_flags & libc::MSG_CTRUNC != 0 {
-        None
+    // #9594: the same truncation rule covers the ingress interface. A partial
+    // chain yields `None`, which the kernel-path posture treats as an ingress it
+    // cannot place (fail closed for transit) — never as an uncovered one.
+    let (outer_ecn, ingress_ifindex) = if msg.msg_flags & libc::MSG_CTRUNC != 0 {
+        (None, None)
     } else {
-        parse_outer_ecn_from_cmsg(&msg)
+        (parse_outer_ecn_from_cmsg(&msg), parse_ingress_ifindex_from_cmsg(&msg))
     };
     Ok(WgRecv {
         len,
         from,
         outer_ecn,
+        ingress_ifindex,
     })
 }
 

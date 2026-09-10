@@ -160,6 +160,11 @@ type WgTunnelStatus struct {
 	// through the kernel and were dropped instead of being written to the wgN
 	// TUN, where the kernel would have forwarded them with no zone policy.
 	RxUnsteeredTransportDrops uint64 `json:"rx_unsteered_transport_drops,omitempty"`
+	// #9594: transport records for the STEERED listen port that reached its
+	// control thread through the kernel on an ingress the XDP shim adjudicates
+	// (only while the dataplane is degraded) and carried TRANSIT, so they were
+	// dropped instead of being forwarded by the kernel with no zone policy.
+	RxDegradedTransitDrops uint64 `json:"rx_degraded_transit_drops,omitempty"`
 
 	EncapPackets            uint64 `json:"encap_packets,omitempty"`
 	EncapBytes              uint64 `json:"encap_bytes,omitempty"`

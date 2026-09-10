@@ -72,7 +72,7 @@ func FormatWireguardStatus(status userspace.ProcessStatus, detail bool, now time
 		decapDrops := t.DecapDropsMalformedHeader + t.DecapDropsUnknownSession +
 			t.DecapDropsCounterCeiling + t.DecapDropsCrypto + t.DecapDropsReplay +
 			t.DecapDropsAllowedIPs + t.DecapDropsMalformedInner + t.DecapDropsBuffer +
-			t.RxUnsteeredTransportDrops
+			t.RxUnsteeredTransportDrops + t.RxDegradedTransitDrops
 		encapDrops := t.EncapDropsNoSession + t.EncapDropsUnconfirmed +
 			t.EncapDropsRekeyRequired + t.EncapDropsOther + t.EncapMtuDrops
 		hsDrops := t.HsRxDropsMac1Mismatch + t.HsRxDropsMalformed + t.HsRxDropsCrypto +
@@ -117,6 +117,7 @@ func FormatWireguardStatus(status userspace.ProcessStatus, detail bool, now time
 			{"malformed-inner", t.DecapDropsMalformedInner},
 			{"buffer", t.DecapDropsBuffer},
 			{"unsteered-port", t.RxUnsteeredTransportDrops},
+			{"degraded-transit", t.RxDegradedTransitDrops},
 		})
 		b.WriteString("  Transmit drops by reason:\n")
 		writeWgReasonRows(&b, []wgReasonRow{

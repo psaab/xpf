@@ -464,6 +464,9 @@ pub(crate) struct WgTunnelStatus {
     /// #9521: see `WgCounters::rx_unsteered_transport_drops`.
     #[serde(rename = "rx_unsteered_transport_drops", default)]
     pub rx_unsteered_transport_drops: u64,
+    /// #9594: see `WgCounters::rx_degraded_transit_drops`.
+    #[serde(rename = "rx_degraded_transit_drops", default)]
+    pub rx_degraded_transit_drops: u64,
     // --- transport encap ---
     #[serde(rename = "encap_packets", default)]
     pub encap_packets: u64,

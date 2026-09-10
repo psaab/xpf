@@ -1155,3 +1155,203 @@ fn kernel_transport_decision_fails_closed_9521() {
     );
     assert_eq!(WgKernelTransport::for_listen_port(0, 0), WgKernelTransport::DropUnsteered);
 }
+
+// =======================================================================
+// #9594: the STEERED port's kernel-path transport gets the XDP shim's own
+// degraded posture when it arrives on an ingress the shim adjudicates.
+// =======================================================================
+
+struct FixedKernelPathView9594 {
+    ingress: super::kernel_path::WgKernelPathIngress,
+    local: std::collections::HashSet<std::net::IpAddr>,
+    asked: Mutex<Vec<Option<u32>>>,
+}
+
+impl super::kernel_path::WgKernelPathView for FixedKernelPathView9594 {
+    fn ingress(&self, ifindex: Option<u32>) -> super::kernel_path::WgKernelPathIngress {
+        self.asked.lock().unwrap_or_else(|e| e.into_inner()).push(ifindex);
+        self.ingress
+    }
+    fn destination_is_local(&self, dst: std::net::IpAddr) -> bool {
+        self.local.contains(&dst)
+    }
+}
+
+struct LoopObservation9594 {
+    delivered: Option<Vec<u8>>,
+    degraded_drops: u64,
+    unsteered_drops: u64,
+    decap_packets: u64,
+    asked: Vec<Option<u32>>,
+}
+
+/// `observe_one_record_9521` with a posture view: run the real loop, send ONE
+/// authenticated transport record over loopback, report what happened to it.
+fn observe_one_record_9594(
+    kernel_transport: crate::afxdp::types::WgKernelTransport,
+    ingress: super::kernel_path::WgKernelPathIngress,
+    inner_is_local: bool,
+    outer_v6: bool,
+    inner: &[u8],
+) -> LoopObservation9594 {
+    use std::sync::atomic::Ordering;
+    let allowed: Vec<ipnet::IpNet> =
+        vec!["10.95.21.0/24".parse().unwrap(), "fd95:21::/64".parse().unwrap()];
+    let (init, resp, _init_pub, resp_pub) =
+        crate::afxdp::wg::tests::established_pair(allowed.clone(), allowed);
+    let resp = std::sync::Arc::new(resp);
+    let mut local = std::collections::HashSet::new();
+    if inner_is_local {
+        local.insert(super::kernel_path::inner_destination(inner).expect("parseable inner"));
+    }
+    let view = std::sync::Arc::new(FixedKernelPathView9594 {
+        ingress,
+        local,
+        asked: Mutex::new(Vec::new()),
+    });
+    let loopback = if outer_v6 { "[::1]:0" } else { "127.0.0.1:0" };
+    let socket = UdpSocket::bind(loopback).expect("bind the control socket");
+    socket.set_nonblocking(true).unwrap();
+    let dst = socket.local_addr().unwrap();
+    let (tun, tun_test_end) = super::tun_standin_pair_9521();
+    let exceptions = std::sync::Arc::new(Mutex::new(ExceptionEventRing::new()));
+    let stop = std::sync::Arc::new(AtomicBool::new(false));
+    let (engine_t, stop_t, exc_t, view_t) = (resp.clone(), stop.clone(), exceptions.clone(), view.clone());
+    let handle = std::thread::spawn(move || {
+        run_wg_control_loop_with_kernel_path(
+            "wg-test-9594",
+            &engine_t,
+            &socket,
+            outer_v6,
+            tun,
+            WG_DEFAULT_OUTER_MTU,
+            &std::collections::HashMap::new(),
+            None,
+            &exc_t,
+            &stop_t,
+            kernel_transport,
+            &*view_t,
+        );
+    });
+
+    let mut wire = vec![0u8; 2048];
+    let enc = init.try_encap(&resp_pub, inner, &mut wire).expect("initiator encap");
+    let sender = UdpSocket::bind(loopback).unwrap();
+    sender.send_to(&wire[..enc.len], dst).unwrap();
+
+    let counted = |r: &crate::afxdp::wg::WgEngine| {
+        r.counters().rx_degraded_transit_drops.load(Ordering::Relaxed)
+            + r.counters().rx_unsteered_transport_drops.load(Ordering::Relaxed)
+    };
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let mut delivered = None;
+    while std::time::Instant::now() < deadline {
+        if let Some(bytes) = super::tun_standin_recv_9521(&tun_test_end) {
+            delivered = Some(bytes);
+            break;
+        }
+        if counted(&resp) > 0 {
+            std::thread::sleep(Duration::from_millis(50));
+            delivered = super::tun_standin_recv_9521(&tun_test_end);
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    stop.store(true, Ordering::Relaxed);
+    handle.join().expect("control loop thread");
+    let asked = view.asked.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    LoopObservation9594 {
+        delivered,
+        degraded_drops: resp.counters().rx_degraded_transit_drops.load(Ordering::Relaxed),
+        unsteered_drops: resp.counters().rx_unsteered_transport_drops.load(Ordering::Relaxed),
+        decap_packets: resp.counters().decap_packets.load(Ordering::Relaxed),
+        asked,
+    }
+}
+
+/// #9594: while the dataplane is degraded the shim passes a steered-port record
+/// addressed to the firewall up to the kernel, and the steered port's thread
+/// used to write its plaintext to the wgN TUN whatever it was — so inner TRANSIT
+/// rode the kernel's open forward hook while every other transit packet was
+/// being dropped. On an ingress the shim adjudicates, the thread now applies the
+/// shim's own degraded posture to the decapsulated packet.
+///
+/// Every arm runs in both outer families, and three controls sit beside the
+/// refusal: the #8274 uncovered-ingress record is still delivered (positive
+/// control), a covered record addressed to the firewall is still delivered (the
+/// posture is not a blanket drop), and the record's REAL receiving interface —
+/// the loopback ifindex, from the kernel's pktinfo cmsg through `wg_recvmsg` —
+/// is what the posture was asked about, so the decision is not being made on a
+/// value the loop never learned.
+#[test]
+fn steered_port_kernel_transport_gets_the_degraded_posture_on_covered_ingress_9594() {
+    use super::kernel_path::WgKernelPathIngress::{Covered, Uncovered, Unknown};
+    use crate::afxdp::types::WgKernelTransport::Deliver;
+    let lo = unsafe { libc::if_nametoindex(c"lo".as_ptr()) };
+    assert!(lo > 0, "setup: the loopback interface has no ifindex");
+    for (outer_v6, inner) in [(false, super::inner_v4_9521()), (true, super::inner_v6_9521())] {
+        let family = if outer_v6 { "IPv6" } else { "IPv4" };
+
+        let uncovered = observe_one_record_9594(Deliver, Uncovered, false, outer_v6, &inner);
+        assert_eq!(
+            uncovered.delivered.as_deref(),
+            Some(&inner[..]),
+            "{family}: an UNCOVERED ingress must still deliver the steered port's plaintext — \
+             #8274 kept that path because it is the only one there (positive control)"
+        );
+        assert_eq!(uncovered.degraded_drops, 0, "{family}: uncovered ingress counted a degraded drop");
+        assert_eq!(
+            uncovered.asked,
+            vec![Some(lo)],
+            "{family}: the posture must be asked about the record's real receiving interface \
+             (the kernel's pktinfo cmsg for loopback). Anything else means the loop is deciding \
+             on a value it never learned — no pktinfo option, a dropped cmsg parse, or a \
+             dispatch that does not pass the ifindex through"
+        );
+
+        let transit = observe_one_record_9594(Deliver, Covered, false, outer_v6, &inner);
+        assert_eq!(
+            transit.decap_packets, 1,
+            "{family}: the covered-ingress record never authenticated, so this run observed nothing"
+        );
+        assert_eq!(
+            transit.degraded_drops, 1,
+            "{family}: transit on a covered ingress must be counted as a degraded-transit drop"
+        );
+        assert!(
+            transit.delivered.is_none(),
+            "{family}: the steered port wrote degraded-window TRANSIT plaintext to the wgN TUN, \
+             where the kernel forwards it with no zone policy (#9594): {:?}",
+            transit.delivered
+        );
+
+        let host_inbound = observe_one_record_9594(Deliver, Covered, true, outer_v6, &inner);
+        assert_eq!(
+            host_inbound.delivered.as_deref(),
+            Some(&inner[..]),
+            "{family}: a covered-ingress record addressed to the firewall must still be delivered — \
+             the shim's degraded posture passes local traffic, and a blanket drop would cut \
+             management over the VPN during a failover"
+        );
+        assert_eq!(host_inbound.degraded_drops, 0, "{family}: host-inbound counted a degraded drop");
+
+        let unknown = observe_one_record_9594(Deliver, Unknown, false, outer_v6, &inner);
+        assert_eq!(unknown.degraded_drops, 1, "{family}: an unplaceable ingress must fail closed for transit");
+        assert!(unknown.delivered.is_none(), "{family}: unplaceable-ingress transit reached the TUN");
+    }
+}
+
+/// #9594: an UNSTEERED port is refused by #9521 before the degraded posture is
+/// consulted, and is counted as #9521 counts it — not double-counted, and not
+/// relabelled as a degraded drop.
+#[test]
+fn unsteered_port_is_refused_before_the_degraded_posture_is_consulted_9594() {
+    use super::kernel_path::WgKernelPathIngress::Covered;
+    use crate::afxdp::types::WgKernelTransport::DropUnsteered;
+    let inner = super::inner_v4_9521();
+    let obs = observe_one_record_9594(DropUnsteered, Covered, false, false, &inner);
+    assert_eq!(obs.unsteered_drops, 1, "the unsteered record must be counted by #9521");
+    assert_eq!(obs.degraded_drops, 0, "an unsteered record was counted as a degraded drop");
+    assert!(obs.asked.is_empty(), "the posture was consulted for an unsteered port: {:?}", obs.asked);
+    assert!(obs.delivered.is_none(), "unsteered plaintext reached the TUN");
+}

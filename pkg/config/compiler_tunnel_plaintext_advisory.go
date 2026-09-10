@@ -16,7 +16,8 @@ import (
 // IPsec. For WireGuard, #8274 moved transport decapsulation into the AF_XDP
 // worker, which adjudicates the inner packet under the tunnel's zone, and left
 // a kernel-path residual (docs/log/8274.md "The residual, stated rather than
-// closed"; #9594). So since #9251 the two advisories render DIFFERENT facts
+// closed"), which #9594 narrowed to ingress the shim does not adjudicate. So
+// since #9251 the two advisories render DIFFERENT facts
 // through one shared shape.
 //
 // WHAT IS SHARED HERE and what is deliberately NOT:

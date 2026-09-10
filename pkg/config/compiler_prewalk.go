@@ -348,11 +348,13 @@ func runPreWalkGates(tree *ConfigTree, opts compileOpts) ([]string, error) {
 	// decapsulates WireGuard transport and adjudicates the inner packet under
 	// the tunnel's zone (an unzoned tunnel's transit is denied there, #6682).
 	// What is NOT adjudicated is the kernel path: a transport record for the
-	// steered listen port that reaches the firewall through the kernel —
-	// ingress the shim does not attach to (#8274's residual), or a degraded
-	// dataplane (#9594) — is written to the wgN TUN by the helper's WG control
-	// thread and forwarded by Linux with no zone policy, session, NAT or screen
-	// (other listen ports are dropped there, #9521). The advisory states both
+	// steered listen port that reaches the firewall through the kernel on an
+	// ingress the shim does not attach to (#8274's residual) is written to the
+	// wgN TUN by the helper's WG control thread and forwarded by Linux with no
+	// zone policy, session, NAT or screen. While the dataplane is degraded, a
+	// record on an ingress the shim does attach to has its transit dropped
+	// (#9594), and other listen ports are dropped there (#9521). The advisory
+	// states both
 	// halves; it used to say the zone was not enforced at all, which #8274 made
 	// false (#9251).
 	//

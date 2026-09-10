@@ -24,21 +24,28 @@ import (
 //	                is zone id 0, and #6682 DENIES transit from an unzoned
 //	                ingress.
 //	kernel path     A record that reaches the firewall through the Linux kernel
-//	                instead — on an ingress interface the shim does not attach
-//	                to (#8274's stated residual), or while the dataplane is
-//	                degraded and the shim passes local-destination traffic to
-//	                the kernel (helper start, redundancy-group transition, reth
-//	                link cycle, missing binding, stale heartbeat; #9594) — lands
-//	                on the helper's WireGuard control thread socket. For the
-//	                STEERED listen port that thread writes the plaintext to the
-//	                wgN TUN (`write_packet_nonblocking` in
-//	                userspace-dp/src/afxdp/coordinator/wg_control/dispatch.rs)
-//	                and the kernel forwards it with no zone policy, no session,
-//	                no NAT and no screen. For every OTHER listen port the thread
-//	                drops it (#9521).
+//	                instead lands on the helper's WireGuard control thread
+//	                socket. For every listen port other than the steered one the
+//	                thread drops it (#9521). For the STEERED port it depends on
+//	                where the record entered, which the thread learns from
+//	                IP_PKTINFO (#9594):
+//	                  - an ingress the shim does not adjudicate (#8274's stated
+//	                    residual): the plaintext is written to the wgN TUN
+//	                    (`write_packet_nonblocking` in
+//	                    userspace-dp/src/afxdp/coordinator/wg_control/dispatch.rs)
+//	                    and the kernel forwards it with no zone policy, no
+//	                    session, no NAT and no screen;
+//	                  - an ingress it DOES adjudicate, which only happens while
+//	                    the dataplane is degraded (helper start, redundancy-group
+//	                    transition, reth link cycle, missing binding, stale
+//	                    heartbeat): the shim's own degraded posture is applied to
+//	                    the decapsulated packet, so traffic addressed to the
+//	                    firewall is delivered and transit is DROPPED and counted
+//	                    (wg_control/kernel_path.rs).
 //
 // So the zone an operator gives a WireGuard tunnel IS enforced on the dataplane
-// path and is NOT enforced on the kernel path. This advisory used to say the
+// path and is NOT enforced on the kernel path through an ingress the shim does
+// not adjudicate. This advisory used to say the
 // zone was not enforced at all — "ASSIGNED A ZONE THAT IS NOT ENFORCED — this
 // reads as protected and is not" — which described the pre-#8274 dataplane and
 // became false when #8274 landed (#9251). It now states both halves.
@@ -242,11 +249,12 @@ const (
 // wireGuardPlaintextAdvisoryWording is the #5618 advisory's text.
 //
 // The lead and the zoned suffix state the SPLIT: evaluated on the dataplane
-// path, not on the kernel path. The mechanism names both ways onto the kernel
-// path — ingress the dataplane does not attach to (#8274's residual) and a
-// degraded dataplane (#9594) — scopes the TUN write to the steered listen port,
-// and says every other port is dropped there (#9521), so an operator with
-// several ports is not told that a refused tunnel leaks.
+// path, not on the kernel path. The mechanism names the kernel path's one
+// forwarding case — the steered port on ingress the dataplane does not attach
+// to (#8274's residual) — says that a degraded dataplane's arrivals on ingress
+// it does attach to have their transit dropped (#9594), and says every other
+// port is dropped there (#9521), so an operator is told neither that a refused
+// tunnel leaks nor that a failover window forwards plaintext.
 func wireGuardPlaintextAdvisoryWording() plaintextAdvisoryWording {
 	return plaintextAdvisoryWording{
 		lead: "interfaces: decapsulated traffic on WireGuard tunnels is evaluated against " +
@@ -257,13 +265,16 @@ func wireGuardPlaintextAdvisoryWording() plaintextAdvisoryWording {
 		mechanism: "The AF_XDP dataplane decapsulates WireGuard transport records in its " +
 			"worker and evaluates the inner packet under the tunnel's security zone (#8274). " +
 			"A record for the steered listen port that reaches the firewall through the Linux " +
-			"kernel instead — on an ingress interface the dataplane does not attach to, or " +
-			"while the dataplane is degraded (helper start, a redundancy-group transition, a " +
-			"reth link cycle, a stale helper heartbeat; #9594) — is decrypted by the helper's " +
-			"WireGuard control thread and written straight to the wgN TUN, where the kernel " +
-			"routes and forwards it: no zone policy, no session, no NAT and no screen are " +
-			"applied to it. A record for any other listen port is dropped on that path " +
-			"(#9521). A peer's `allowed-ips` is a cryptographic check on the inner SOURCE " +
+			"kernel instead, on an ingress interface the dataplane does not attach to, is " +
+			"decrypted by the helper's WireGuard control thread and written straight to the " +
+			"wgN TUN, where the kernel routes and forwards it: no zone policy, no session, no " +
+			"NAT and no screen are applied to it. While the dataplane is degraded (helper " +
+			"start, a redundancy-group transition, a reth link cycle, a stale helper " +
+			"heartbeat), a record arriving on an ingress it does attach to is not forwarded " +
+			"that way: traffic addressed to the firewall is delivered, and transit is dropped " +
+			"and counted as a degraded-transit receive drop (#9594). A record for any other " +
+			"listen port is dropped on that path (#9521). A peer's `allowed-ips` is a " +
+			"cryptographic check on the inner SOURCE " +
 			"address, not a security policy — it has no destination, zone-pair or " +
 			"application scope.",
 		unzonedCaveat: wgPlaintextUnzonedCaveat,
