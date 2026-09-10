@@ -370,10 +370,11 @@ logging rules, not these specific hot-path constants.
   review pressure worth keeping.
 
 - **Zone-policy re-derivation on the established-session hit path (#8356 /
-  #8618 / #9381)** — `src/afxdp/poll_descriptor/policy_revalidation.rs`
+  #8618 / #9381 / #9563)** — `src/afxdp/poll_descriptor/policy_revalidation.rs`
   re-asks zone policy for a session that was admitted under an older
   config generation, at most once per session per generation, on the
-  forward direction only. It is the zone-policy sibling of #7212's
+  forward direction only, and never for a host-bound (`LocalDelivery`)
+  session (#9563). It is the zone-policy sibling of #7212's
   input-filter revalidation, and it exists because #5858/#7212 already
   tears down a live flow when a commit narrows an input FILTER — not
   doing the same when a commit narrows ZONE POLICY is the asymmetry, not
