@@ -84,7 +84,11 @@ const preSecureTunnelProtocolVersion = 4
 // closes. #9521 had claimed 13 and #9412 landed it first, so the v8 rule moves
 // it past both. Nothing about secure_tunnel changed, so
 // MinProtocolSecureTunnelRefusal (7) is untouched again.
-const secureTunnelSnapshotProtocolVersion = 14
+//
+// Issue 9520 moved it 14 -> 15, for `ConfigSnapshot.content_digest`, which the
+// helper compares when an apply reuses its installed generation. Nothing about
+// secure_tunnel changed, so MinProtocolSecureTunnelRefusal (7) is untouched.
+const secureTunnelSnapshotProtocolVersion = 15
 
 // preV5HelperAcceptsSnapshot models the exact-equality version gate a pre-v5
 // helper applies before touching any dataplane state

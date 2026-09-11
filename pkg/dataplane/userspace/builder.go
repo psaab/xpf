@@ -185,7 +185,11 @@ func buildSnapshotWithSchedulerStateAndNATCounters(cfg *config.Config, ucfg conf
 // snapshotContentHash computes a SHA-256 hash over the stable content of a
 // snapshot, excluding volatile fields (Generation, FIBGeneration, GeneratedAt)
 // that change on every build even when the forwarding-relevant content is
-// identical. Used to skip redundant control-socket publishes.
+// identical. Used to skip redundant control-socket publishes, and since #9520
+// as ConfigSnapshot.ContentDigest, the content identity the helper compares
+// when an apply_snapshot reuses its installed generation. Config is excluded
+// because the helper never reads it; a helper change that starts reading it
+// must bring it back into this hash.
 func snapshotContentHash(snap *ConfigSnapshot) ([32]byte, bool) {
 	// Create a shallow copy with volatile fields zeroed, then JSON-encode.
 	// This is cheaper than a custom hasher and reuses the existing JSON tags.
@@ -193,6 +197,9 @@ func snapshotContentHash(snap *ConfigSnapshot) ([32]byte, bool) {
 	tmp.Generation = 0
 	tmp.FIBGeneration = 0
 	tmp.GeneratedAt = time.Time{}
+	// #9520: the digest is stamped onto the snapshot it describes, so it must
+	// not be an input to itself.
+	tmp.ContentDigest = ""
 	tmp.Config = nil // exclude raw config from content hash to avoid churn from non-forwarding metadata
 	// #1197 (Copilot review): hash only PUBLISHABLE neighbors so
 	// the dedup compares against what userspace-dp actually sees.

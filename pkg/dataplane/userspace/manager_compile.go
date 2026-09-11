@@ -502,6 +502,8 @@ func (m *Manager) applyCompiledSnapshot(
 		return result, err
 	}
 	m.logWgEndpointSetTransitionLocked(&publishSnap, "apply")
+	// #9520: a content-conflict republish moves the snapshot to a fresh generation.
+	m.adoptPublishedGenerationLocked(snap, publishSnap.Generation)
 	m.lastSnapshot = snap
 	// #5485: apply_snapshot landed and the retained authority has advanced, so
 	// the obsolete XDP/TC attachments may now be reconciled away. Placed
@@ -596,7 +598,12 @@ func (m *Manager) applyCompiledSnapshot(
 //
 //   - IN-BAND REFUSAL (errHelperRejected): the helper decoded the request, ran
 //     its non-mutating integrity preflight and answered {"ok":false}. Only here
-//     does "the helper still holds m.lastSnapshot" follow. The maps are rolled
+//     is the helper's state known to be unchanged by the request. That is not
+//     "the helper holds m.lastSnapshot": after a republish whose response was
+//     lost, it holds that republish (#9520). Rolling the maps back to
+//     m.lastSnapshot is safe for a separate reason: every republish path copies
+//     m.lastSnapshot's classifier plan and changes only routes, scheduler bits
+//     or DeferWorkers. The maps are rolled
 //     BACK to m.lastSnapshot, which restores the exact plan the retained
 //     snapshot expects, so ctrl stays enabled and there is no window in which
 //     neither snapshot forwards transit (#6707 acceptance criterion 1). If the
@@ -610,7 +617,7 @@ func (m *Manager) applyCompiledSnapshot(
 // which already programmed ctrl.Enabled=0 before this publish, so a publish
 // error is already fail-closed and the error is returned unchanged.
 func (m *Manager) publishSnapshotFailClosedLocked(publishSnap *ConfigSnapshot, status *ProcessStatus, mapsMutatedInPlace bool) error {
-	if err := m.requestLocked(ControlRequest{Type: "apply_snapshot", Snapshot: publishSnap}, status); err != nil {
+	if err := m.requestApplySnapshotLocked(publishSnap, status); err != nil {
 		publishErr := fmt.Errorf("publish userspace snapshot: %w", err)
 		// #7468: a rejected publish must never return with the manager lacking
 		// a reconcile worker. On the samePlanRefresh path the loop is already
@@ -874,7 +881,7 @@ func (m *Manager) UpdatePolicyScheduleState(cfg *config.Config, activeState map[
 		// report failure so the transition retries.
 		return fmt.Errorf("userspace: disarm before unsupported-config policy scheduler publish: %w", err)
 	}
-	if err := m.requestLocked(ControlRequest{Type: "apply_snapshot", Snapshot: &publishSnap}, &status); err != nil {
+	if err := m.requestApplySnapshotLocked(&publishSnap, &status); err != nil {
 		slog.Warn("userspace: failed to publish policy scheduler state", "err", err)
 		// #3780: THE fail-open path from the issue. apply_snapshot did
 		// not land, so the helper keeps the OLD inactive bits — a permit
@@ -883,7 +890,9 @@ func (m *Manager) UpdatePolicyScheduleState(cfg *config.Config, activeState map[
 		return fmt.Errorf("userspace: publish policy scheduler snapshot: %w", err)
 	}
 	m.logWgEndpointSetTransitionLocked(&publishSnap, "policy-scheduler")
-	m.generation = nextGeneration
+	// #9520: commit the generation apply_snapshot carried, which a content-conflict
+	// republish moves past nextGeneration.
+	m.adoptPublishedGenerationLocked(&next, publishSnap.Generation)
 	m.lastSnapshot = &next
 	m.rebuildNeighborIndex()
 	m.rebuildMonitoredIfindexes()

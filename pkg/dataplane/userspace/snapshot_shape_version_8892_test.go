@@ -204,7 +204,7 @@ func shapeDigest8892(t *testing.T) (string, int) {
 // garbage domain on a delete, which can name ANOTHER TENANT's row. Exact-
 // equality refusal is the only mechanism that stops the pairing.
 const (
-	snapshotShapeGolden8892 = "1e0db79c167e34b8d74902968508ebca3b9b1378481e68fab85795f999bfaec4"
+	snapshotShapeGolden8892 = "6ba8027754216f49b2b20319239563c63ff2c7a45a4edfa70b442d37ddc1fdde"
 	// v13 BUMPED (issue 9412) against the SAME digest. The TCP close class
 	// crosses the HA session-sync path, and the old behaviour is the defect it
 	// fixes, so the v9 rule requires the bump. The session-sync messages are not
@@ -219,7 +219,12 @@ const (
 	// transport for every endpoint — the v10/v11 arm, not a STANDS entry. #9521
 	// had claimed 13 against v12; #9412 took 13 first, so by the v8 rule this
 	// change moves past both numbers.
-	snapshotShapeVersion8892 = 14
+	// v14 -> v15 BUMPED (issue 9520), and it moved the digest:
+	// `ConfigSnapshot.ContentDigest` is transmitted. The helper compares it when an
+	// apply reuses its installed generation; an old helper ignores it and keeps
+	// admitting that apply content-blind, which IS the defect, so this is the
+	// v10/v11 arm again.
+	snapshotShapeVersion8892 = 15
 )
 
 func TestSnapshotShapeIsPinnedToProtocolVersion8892(t *testing.T) {

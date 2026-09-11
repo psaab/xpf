@@ -191,7 +191,15 @@ const (
 	// contracts, so it cannot reuse either branch's number — a v13 helper built
 	// from #9412 alone would accept this daemon's snapshots and ignore the field.
 	// 14 was never shipped by either side.
-	ProtocolVersion = 14
+	//
+	// v15 (issue 9520): `ConfigSnapshot.ContentDigest`, which the helper compares
+	// when an apply reuses its installed generation. BUMPED, by the test the
+	// v10/v11 notes apply: an old helper ignores the field and keeps admitting a
+	// reused generation content-blind, and that IS the defect the field closes.
+	// A new helper under an old daemon sees an empty digest on both sides and
+	// admits as v14 did, while that daemon cannot react to a conflict refusal.
+	// Exact equality refuses both pairings.
+	ProtocolVersion = 15
 
 	// MinProtocolMultiZoneScopedPolicy is the FIRST snapshot protocol version
 	// that can represent a multi-zone scoped global policy — the plural
@@ -568,6 +576,16 @@ type ConfigSnapshot struct {
 	// sampling (256× CPU cost) — operator must pass both
 	// --cold-path-sample-mask 0 and --enable-cold-path-1-in-1-sampling.
 	ColdPathSampleMask *uint64 `json:"cold_path_sample_mask,omitempty"`
+	// ContentDigest (#9520) is hex SHA-256 over this snapshot's content, from
+	// snapshotContentHash: Generation, FIBGeneration, GeneratedAt, Config and
+	// ContentDigest itself are excluded, and neighbours count only if
+	// publishable. requestApplySnapshotLocked stamps it immediately before
+	// every apply_snapshot. The helper refuses an apply that reuses its
+	// installed generation with a different digest: a retried republish
+	// rebuilds its content, and installing new content under a generation
+	// whose flow-cache and session-policy decisions were made for the old
+	// content leaves those decisions fresh.
+	ContentDigest string `json:"content_digest,omitempty"`
 	// zoneIDCollisions is the manager-facing (#3719) record of every security
 	// zone the snapshot builder QUARANTINED because its StableZoneID collided
 	// with an earlier-sorting zone. It is unexported so it never rides the wire

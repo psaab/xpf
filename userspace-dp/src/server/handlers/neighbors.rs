@@ -53,6 +53,12 @@ pub(super) fn update(
             generation,
             guard.afxdp.last_applied_manager_neighbor_generation()
         );
+    } else if let Some(snapshot) = guard.snapshot.as_mut() {
+        // #9520: the helper now enforces neighbours the installed full apply
+        // did not carry, so that apply's content digest no longer describes
+        // what is enforced and must not vouch for a same-generation retry of it
+        // (handlers/snapshot.rs refuses one against an empty installed digest).
+        snapshot.content_digest.clear();
     }
     refresh_status(guard);
 }

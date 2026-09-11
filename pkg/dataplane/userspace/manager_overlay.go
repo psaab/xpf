@@ -232,8 +232,10 @@ func (m *Manager) PublishRouteOverlaySnapshot(cfg *config.Config, overlay []conf
 
 	// Duplicate-publish skip: identical content (e.g. the actuator ran
 	// twice for the same overlay) does not need a control-socket
-	// round-trip. The content hash excludes Generation/FIBGeneration.
-	if h, ok := snapshotContentHash(&next); ok && h == m.lastSnapshotHash {
+	// round-trip. The content hash excludes Generation/FIBGeneration. Not while an
+	// earlier apply's outcome is unknown (#9520): the hash then describes what Go
+	// last sent, not what the helper holds.
+	if h, ok := snapshotContentHash(&next); ok && h == m.lastSnapshotHash && !m.applySnapshotOutcomeUnknown {
 		slog.Debug("userspace: route overlay publish skipped (content unchanged)")
 		return false, nil
 	}
@@ -245,11 +247,13 @@ func (m *Manager) PublishRouteOverlaySnapshot(cfg *config.Config, overlay []conf
 	if err := m.disarmBeforeUnsupportedPublishLocked(&next); err != nil {
 		return false, err
 	}
-	if err := m.requestLocked(ControlRequest{Type: "apply_snapshot", Snapshot: &publishSnap}, &status); err != nil {
+	if err := m.requestApplySnapshotLocked(&publishSnap, &status); err != nil {
 		return false, fmt.Errorf("publish route overlay snapshot: %w", err)
 	}
 	m.logWgEndpointSetTransitionLocked(&publishSnap, "route-overlay")
-	m.generation = nextGeneration
+	// #9520: commit the generation apply_snapshot carried, which a content-conflict
+	// republish moves past nextGeneration.
+	m.adoptPublishedGenerationLocked(&next, publishSnap.Generation)
 	m.lastSnapshot = &next
 	m.rebuildNeighborIndex()
 	m.rebuildMonitoredIfindexes()

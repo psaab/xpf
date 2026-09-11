@@ -77,13 +77,14 @@ func (m *Manager) retryDeferredWorkerArmLocked() error {
 		return err
 	}
 	var status ProcessStatus
-	if err := m.requestLocked(ControlRequest{Type: "apply_snapshot", Snapshot: &publishSnap}, &status); err != nil {
+	if err := m.requestApplySnapshotLocked(&publishSnap, &status); err != nil {
 		// Debt stays set — the status loop retries on the next tick.
 		return fmt.Errorf("re-arm deferred workers: %w", err)
 	}
 	m.logWgEndpointSetTransitionLocked(&publishSnap, "deferred-worker-arm")
-	// Publish succeeded — commit the generation bump now.
-	m.generation = nextGeneration
+	// Publish succeeded — commit the generation it carried (#9520: a
+	// content-conflict republish moves it past nextGeneration).
+	m.adoptPublishedGenerationLocked(&next, publishSnap.Generation)
 	m.lastSnapshot = &next
 	m.rebuildNeighborIndex()
 	m.rebuildMonitoredIfindexes()
