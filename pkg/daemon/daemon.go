@@ -114,8 +114,9 @@ type Daemon struct {
 
 	// dataplaneArmed is the #5275 arm state: true ONLY while the runtime
 	// dataplane has been proven to have STARTED (rt.Start /
-	// LoadUserspaceShim returned nil) in this daemon's lifetime. It is the
-	// predicate the kernel transit-forwarding gate keys off — see
+	// LoadUserspaceShim returned nil) in this daemon's lifetime. It is one
+	// conjunct of the kernel transit-forwarding gate's predicate (transitOpen,
+	// which also needs a live attached shim XDP link) — see
 	// daemon_transit_gate.go for the full contract, the two knobs it owns,
 	// and why an unarmed node must not route transit.
 	//
@@ -125,6 +126,18 @@ type Daemon struct {
 	// torn-down backend published on purpose (#6741), so a non-nil cell is
 	// not proof of an armed forwarding path.
 	dataplaneArmed atomic.Bool
+
+	// transitGateMu (#9725) serialises every transit-gate state change with both
+	// gate legs, so a reading taken before a close is never actuated after it.
+	transitGateMu sync.Mutex
+	// transitWasOpen (#9725) is the gate state the last actuation left, so a
+	// change is logged once. Guarded by transitGateMu.
+	transitWasOpen bool
+	// transitBarrierInstallFailing and transitBarrierRemoveFailing (#9725) mark a
+	// barrier install or remove failure in progress, so a persistent one is logged
+	// once per episode rather than on every apply. Guarded by transitGateMu.
+	transitBarrierInstallFailing bool
+	transitBarrierRemoveFailing  bool
 
 	// #9239: whether the LAST DHCP lease-change pass saw a delegated prefix
 	// mapped to an RA interface.

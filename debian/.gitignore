@@ -9,6 +9,10 @@
 # staged unit copies (generated in override_dh_auto_build from sources)
 /xpf.xpfd.service
 /xpf.xpf-day0-config.service
+/xpf.xpf-transit-closed.service
+/xpf.xpf-uefi-slots.service
+/xpf.xpf-kernel-promote.service
+/xpf.xpf-kernel-promote-failed.service
 # the per-package build trees dpkg assembles
 /xpf/
 /xpf-appliance/

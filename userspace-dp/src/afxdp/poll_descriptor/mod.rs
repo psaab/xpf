@@ -5104,8 +5104,8 @@ pub(super) fn poll_binding_process_descriptor(
                             // it is reinjected to xpf-usp0 and the kernel forwards it
                             // with no zone policy, session, NAT or screen — and
                             // nothing downstream catches it: there is no nftables
-                            // `hook forward` chain at all, ip_forward is force-enabled
-                            // while armed, and rp_filter is deliberately 0 on the TUN.
+                            // `hook forward` drop while kernel transit is open, and ip_forward is 1
+                            // then (#9725: armed with a live link); rp_filter is deliberately 0 on the TUN.
                             // The destination is attacker-chosen, so this is the
                             // steerable half of #6664.
                             //

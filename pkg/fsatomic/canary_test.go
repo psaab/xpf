@@ -33,8 +33,8 @@ import (
 var allowedFunctions = map[string]string{
 	// pkg/daemon — sysctl / procfs knobs.
 	"daemon::Daemon.applyKernelTuning":    "procfs sysctls (rp_filter etc.)",
-	"daemon::enableForwarding":            "procfs sysctl forwarding bundle",
-	"daemon::writeTransitForwardSysctls":  "procfs transit-forwarding knobs (#5275 arm gate)",
+	"daemon::applyHostForwardingPosture":  "procfs sysctl host forwarding posture bundle",
+	"daemon::writeTransitForwardSysctls":  "procfs transit-forwarding knobs (#5275/#9725 transit gate)",
 	"daemon::realHostTunableFS.writeFile": "sysfs governor/neigh knob writer",
 	// pkg/daemon — DNS bind-mount fallback (rename onto a bind mount is
 	// EXDEV/EBUSY; in-place write is the only option).

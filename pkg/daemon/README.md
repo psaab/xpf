@@ -385,7 +385,7 @@ startup-phase and shutdown ordering is untouched:
   requires a `dataplane.NewRuntimeDataPlane` call in it.
 - `daemon_run_bringup.go` — startup bring-up phases: `initManagers`,
   `loadAndBootstrapConfig`, `setupDataplaneAndInitialConfig`,
-  `enableForwarding`.
+  `applyHostForwardingPosture`.
 - `daemon_run_naming.go` — startup interface naming/enumeration:
   `setupInterfaceNaming`, `namingParamsFromConfig`,
   `applyStartupNamingForConfig`, `maybeReapplyConfigArrivalNaming`,
@@ -1820,18 +1820,20 @@ never lock an operator out of a remote box it manages.
     set govern the rename + apply sweeps and the fresh-install case; they are
     not what keeps a *previously* managed box reachable here.
     - **Transit is still fail-closed** — do not read "freeze" as "the firewall
-      keeps forwarding." Bootstrap mode suppresses `enableForwarding` and the
-      dataplane arm (`dp.Start`), and since #5275 it also explicitly WRITES
+      keeps forwarding." Bootstrap mode suppresses the bring-up forwarding
+      posture and the dataplane arm (`dp.Start`), and since #5275 it also
+      explicitly WRITES
       `ip_forward` / `ipv6.conf.all.forwarding` to `0`
       (`applyBootTransitPolicy`), so the daemon itself forwards no transit in
       this state. The explicit close is load-bearing, not belt-and-braces:
       sysctls outlive the process, so a daemon *restart* into this state used
       to inherit `ip_forward=1` from the previous armed run and route transit
-      with no policy attached. A cold reboot carries NO transit until the
-      operator commits a compilable config; only a daemon restart that leaves
+      with no policy attached. A cold reboot carries no routed transit until the
+      operator commits a compilable config (bridged frames are the exception
+      until xpfd starts, #9852); only a daemon restart that leaves
       an already-armed dataplane *process* running keeps enforcing the
-      last-known-good policy in the interim. Either way no traffic is forwarded
-      under an unknown/no policy — what persists is interface identity + mgmt
+      last-known-good policy in the interim. Either way no routed transit is
+      forwarded under an unknown/no policy — what persists is interface identity + mgmt
       reachability, not unpoliced forwarding.
   - **In-band recovery is real (not just "repair the DB").** On compile failure
     `Store.Load` keeps `compiled` nil (the fail-closed signal) but retains the
@@ -1902,7 +1904,8 @@ never lock an operator out of a remote box it manages.
       window further but is a separable follow-up, not required for the Go fix.
 - **Bootstrap mode** (`d.bootstrapMode` atomic): runs gRPC/REST/CLI normally
   but SUPPRESSES interface takeover ACTIONS — the full rename loop, host
-  tunables, `enableForwarding`, dataplane arm (`dp.Start`), the boot-time
+  tunables, `applyHostForwardingPosture`, dataplane arm (`dp.Start`), the
+  boot-time
   `applyConfig`, and the #2079 NAT pool-alarm monitor start (#2114: the
   monitor samples the dataplane cell, which a bootstrap-exit arm failure
   clears, so it must not run during the bootstrap window). Managers are
@@ -2023,9 +2026,10 @@ never lock an operator out of a remote box it manages.
   detaches the dataplane — instead of applying an empty config — and the
   store persists the never-committed marker so a restart re-enters
   bootstrap. The detach also drops the #5275 armed flag and closes kernel
-  transit forwarding: the node is un-armed by that step, so leaving
-  `ip_forward=1` would let the next apply tail keep routing transit for a
-  dataplane that is no longer attached.
+  transit forwarding: the node is un-armed by that step, so the transit gate
+  (`transitOpen`) is closed, and the knobs are driven to match at once rather
+  than routing transit for a dataplane that is no longer attached until the
+  next re-evaluation.
 
 ## Notable gotchas
 
@@ -2100,11 +2104,14 @@ never lock an operator out of a remote box it manages.
   a signature/ownership change rather than a bound. Filed as #8660.
 
 - **An unarmed dataplane stops kernel transit forwarding (#5275).** Kernel
-  transit forwarding is CONDITIONAL on the dataplane being armed. The daemon
-  tracks that as `Daemon.dataplaneArmed` (accessor `DataplaneArmed()`), set
-  true only after `rt.Start()` (→ `LoadUserspaceShim`) returns nil, and the
-  gate in `daemon_transit_gate.go` drives `/proc/sys/net/ipv4/ip_forward` and
-  `/proc/sys/net/ipv6/conf/all/forwarding` to match it.
+  transit forwarding is CONDITIONAL on `transitOpen`: the dataplane armed AND
+  at least one live attached shim XDP link, re-read at every re-evaluation and
+  not latched. The daemon tracks the arm as `Daemon.dataplaneArmed` (accessor
+  `DataplaneArmed()`), set true only after `rt.Start()` (→ `LoadUserspaceShim`)
+  returns nil, and the gate in `daemon_transit_gate.go` drives
+  `/proc/sys/net/ipv4/ip_forward` and `/proc/sys/net/ipv6/conf/all/forwarding`
+  to `transitOpen`. The attached-link conjunct is #9725 ("Transit waits for an
+  attached link as well as the arm", below).
   - **Why.** A successful config *compile* followed by an *arm* failure took a
     branch that logged "running in config-only mode", cleared the dataplane
     cell, and fell through to `applyConfig` — while bring-up had already
@@ -2118,13 +2125,18 @@ never lock an operator out of a remote box it manages.
     `rt.Start` failure (`armBootstrapExitDataplane`), and both retired-backend
     arms (`ErrDPDKBackendRetired` / `ErrEBPFBackendRetired`); the two states
     that never arm at all (bootstrap mode and `--no-dataplane`, via
-    `applyBootTransitPolicy`); and the first-commit-confirmed rollback, whose
+    `applyBootTransitPolicy`); the first-commit-confirmed rollback, whose
     `runBootstrapTeardownSteps` step 4 DETACHES an already-armed dataplane
-    without passing through either arm writer.
-  - **When it re-opens.** A successful arm. Recovery does NOT need a daemon
-    restart on the bootstrap path: the bootstrap-exit arm on the first
-    compilable `commit confirmed` (or cluster `SyncApply`) re-enables both
-    knobs. There is, however, **no re-arm path after a NON-bootstrap boot arm
+    without passing through either arm writer; the #9686 HA fail-closed stop,
+    which closes transit before the dataplane detach; and, since #9725, any
+    re-evaluation that finds an armed node with no live attached link.
+  - **When it re-opens.** When a re-evaluation finds both conjuncts: the
+    dataplane armed and a live attached shim XDP link (#9725). It is not
+    latched: a later re-evaluation with no live link closes it again.
+    Recovery does NOT need a daemon restart on the bootstrap path: the
+    bootstrap-exit arm on the first compilable `commit confirmed` (or cluster
+    `SyncApply`) is followed by an apply, and the re-evaluation after it
+    re-enables both knobs if that apply left a link attached. There is, however, **no re-arm path after a NON-bootstrap boot arm
     failure** — `rt.Start` has exactly two call sites (boot and bootstrap
     exit), and the boot one runs once — so that node stays transit-closed
     until xpfd restarts. Fixing the config and re-committing is not enough;
@@ -2140,36 +2152,87 @@ never lock an operator out of a remote box it manages.
     #7191 nftables barrier is likewise forward-hook only and carries no
     management exemption *because it needs none* — management is INPUT.
   - **How deep the barrier goes (#7191).** The gate is no longer the sysctl
-    alone. While unarmed the daemon also installs `xpf_transit_barrier`, an
-    unconditional forward-hook DROP, in **both** the `inet` and `bridge`
-    families (`pkg/nftables/transit_barrier.go`). The bridge leg exists
-    because `ip_forward` does not govern bridged frames at all, and this repo
-    creates bridge domains. Before #7191 the repo had **zero** `hook forward`
-    chains, so a single sysctl — raisable by a `sysctl.d` drop-in, a systemd
-    unit, an operator, or any future code path — was the only thing between an
-    unarmed box and kernel routing.
+    alone. While transit is closed the daemon also installs
+    `xpf_transit_barrier`, an unconditional forward-hook DROP, in **both** the
+    `inet` and `bridge` families (`pkg/nftables/transit_barrier.go`). The
+    bridge leg exists because `ip_forward` does not govern bridged frames at
+    all, and this repo creates bridge domains. Before #7191 the repo had
+    **zero** `hook forward` chains, so a single sysctl — raisable by a
+    `sysctl.d` drop-in, a systemd unit, an operator, or any future code path —
+    was the only thing between an unarmed box and kernel routing.
 
-    The barrier is installed and removed from the same `mark*` helpers that
-    drive the sysctls, and re-asserted on every apply tail, so a stale barrier
-    self-heals rather than silently black-holing armed transit. It is scoped
-    strictly to the unarmed window, which is the window `ip_forward=0` already
-    covers — so it closes nothing that was open. That scoping is not a detail:
-    several ARMED paths deliberately rely on an open kernel forward hook
-    (route-based IPsec plaintext off an xfrm interface, SNAT'd frames passed up
-    for kernel routing, the #7409 slow-path reinject), and a barrier live while
-    armed would drop all three.
+    The barrier is installed and removed together with the sysctls, by the
+    same `mark*` helpers and, since #9725, the transit gate, and it is
+    re-asserted on every apply tail, so a stale barrier self-heals rather than
+    silently black-holing armed transit. It is live exactly while transit is
+    closed (`transitOpen`, #9725). Closing installs it first and then writes
+    `ip_forward=0`; once both have landed, the inet leg is a second lock on
+    routed transit. Bridged frames ignore `ip_forward`, so the bridge leg is the
+    only thing that stops them. That scoping is
+    not a detail: several ARMED paths deliberately rely on an open kernel forward
+    hook (route-based IPsec plaintext off an xfrm interface, SNAT'd frames
+    passed up for kernel routing, the #7409 slow-path reinject), and a barrier
+    live while transit is open would drop all three.
 
     Plan §6's third leg, a flowtable disable, is a deliberate no-op: xpf creates
     no flowtable, so there is nothing to flush.
     `TestNoFlowtableIsEverCreated7191` pins that assumption.
-  - **The per-interface attach is now part of the arm state (#7191).**
+  - **Transit waits for an attached link as well as the arm (#9725).** `rt.Start()`
+    loads the shim but attaches no interface: the per-interface XDP attach runs
+    inside the first `ApplyConfig`. Opening transit at Start left static non-VIP
+    addresses and FRR routes forwarding through the kernel, with no program and
+    no barrier, until that apply. Kernel transit is now open only while the
+    dataplane is armed AND at least one shim XDP program is attached
+    (`transitOpen`, `transit_closed_until_attach_9725.go`):
+    - the signal is a live read of the dataplane's attached XDP links
+      (`AttachedXDPLinkCount`, `pkg/dataplane/attached_links_9725.go`), not an
+      event. `ApplyConfig` can succeed with nothing attached and fail after an
+      attach; an attach pass can skip interfaces, and the #5485 reconcile can
+      detach what it attached. The daemon re-reads the links after every
+      `ApplyConfig`, whatever it returned, and at the apply tail;
+    - a link whose device the kernel unregistered is not counted, but the
+      links are read at applies only. If every XDP-bearing device goes away
+      between applies (a driver reload, a VF re-creation), transit stays open
+      until the next apply, as master kept it open for the whole armed run
+      (#9848);
+    - bridged frames ignore `ip_forward`, so the boot oneshot does not close
+      them. networkd recreates persisted bridge domains before xpfd starts,
+      and a bridge domain forwards with no barrier until bring-up installs it
+      (#9852);
+    - it is not latched: an apply that leaves no link attached closes transit
+      again;
+    - one attached link opens `ip_forward` for every interface; per-surface
+      coverage is the #7191 proof's job, inert on the published runtime (#9804);
+    - bring-up closes both legs explicitly, which covers an older image's
+      `sysctl.d` default and a restart after an armed run;
+    - every gate state change and both legs run under one mutex, so an apply
+      that outlives the shutdown drain cannot reopen transit after the stop;
+    - the #7178 RG arm track still follows the arm alone, so a restarting node
+      regains full weight at Start, before anything is attached (#9842).
+
+    The armed fast path never needed `ip_forward`. The paths that `XDP_PASS` to
+    the kernel (route-based IPsec plaintext, SNAT'd frames, the #7409 slow-path
+    reinject) wait for an attach after every start or restart, and stay closed
+    on a node with nothing attached. The kernel is also closed from boot until
+    xpfd starts: the appliance image (`scripts/image/bake.py`) and the test VMs
+    (`test/incus/setup.sh`, `cluster-setup.sh`) write forwarding `0` into
+    `sysctl.d`. The package also ships `xpf-transit-closed.service`
+    (`scripts/image/xpf-transit-closed.service`, enabled by `debian/rules` and
+    `bake.py`), a boot-only oneshot that writes both knobs to `0` after
+    `systemd-sysctl` and before networkd, FRR and xpfd, whatever an older
+    image's `sysctl.d` says. It is not a `sysctl.d` file, because
+    `systemd-sysctl` re-applies every `sysctl.d` file whenever it runs, which
+    would close transit under a running, attached xpfd.
+  - **The per-interface attach is now part of the arm state (#7191), but that
+    is inactive on the published runtime (#9804, below).**
     `dataplaneArmed` used to track only the `rt.Start()` boundary, so a box
     where Start succeeded but an individual interface failed to attach reported
     itself armed and kept `ip_forward=1` with nothing adjudicating that
     interface. The post-attach arm-coverage proof
     (`pkg/dataplane/armproof.go`), previously observe-only, is now consulted on
     the apply tail and disarms through the SAME `markDataplaneArmFailed` path a
-    Start failure uses — one arm state, one set of side effects.
+    Start failure uses — one arm state, one set of side effects, once the
+    published runtime exposes the proof (#9804).
 
     The gate is one-way (it can only disarm) and three-state: a report that has
     never been published, or one that could not classify, does **not** disarm,
@@ -2178,6 +2241,12 @@ never lock an operator out of a remote box it manages.
     link's identity could not be read", so a readback fault disarms like a real
     attach failure — the conservative direction, recorded in
     `daemon_arm_coverage_7191.go`.
+
+    **Not in effect on the published runtime (#9804).** The runtime
+    `dpuserspace.Boot()` publishes, `LegacyDataPlaneAdapter`, does not expose
+    `ArmCoverageSummary`, so `evaluateArmCoverage` never reads a proof. The live
+    proof also counts a GRE interface's #8279 raw-L3 refusal as uncovered. So
+    #9725 does not use this proof as its attach signal.
   - **The gate is only as good as the verdict it reads, and an ABORTED apply
     used to leave it describing a different one (#7289 R1).**
     `ProveArmCoverage` is the sole publisher of the coverage cell and it runs at
@@ -2211,21 +2280,19 @@ never lock an operator out of a remote box it manages.
     advertise routes, so peers may keep steering transit at it (a blackhole
     rather than an open router: strictly the safer failure, but still a gap).
     That half of #5275 is HA-coupled and split to a successor issue. The
-    `ip_forward=0` here is also only one leg of the full transit barrier in
-    `docs/research/5275-arm-failclosed/plan.md` §6 (which adds an inet FORWARD
-    drop, a bridge-family barrier, and a flowtable disable), and the arm
-    boundary tracked is `Start`/`LoadUserspaceShim`, not the later
-    per-interface AF_XDP attach inside the first `ApplyConfig` (see the
-    observe-only proof in `pkg/dataplane/armproof.go`).
-  - **Armed behaviour is unchanged.** The armed desired value is `1`,
-    byte-identical to the pre-#5275 unconditional write. The AF_XDP fast path
-    does not itself need `ip_forward` (measured in `docs/image-validation.md`:
-    with both knobs at 0 an armed appliance still moved 4.29 Gbit/s v4 /
-    3.02 Gbit/s v6 at 0% loss), but several ARMED paths `XDP_PASS` to the
-    kernel and do rely on it — route-based-VPN plaintext off an xfrm
+    barrier's other legs from `docs/research/5275-arm-failclosed/plan.md` §6
+    landed in #7191 (above), and since #9725 the gate also needs a live
+    attached link (above).
+  - **What an armed node needs from the kernel.** The AF_XDP fast path does
+    not itself need `ip_forward`. `docs/image-validation.md` measured it: with
+    both knobs at 0, an armed appliance still moved 4.29 Gbit/s v4 and
+    3.02 Gbit/s v6 at 0% loss. But several ARMED paths `XDP_PASS` to the
+    kernel and do rely on it: route-based-VPN plaintext off an xfrm
     interface, and SNAT'd frames passed up for kernel routing (the reason
-    `enableForwarding` also sets `accept_local`). The gate never lowers the
-    knob while armed.
+    `applyHostForwardingPosture` sets `accept_local`). While transit is open,
+    the desired value is `1`, byte-identical to the pre-#5275 unconditional
+    write. When the #9725 gate closes transit on an armed node, those paths
+    wait for an attach.
   - Tests: `pkg/daemon/transit_forwarding_failclosed_5275_test.go`.
 
 - ISSU (in-service software upgrade) preserves sessions across the upgrade

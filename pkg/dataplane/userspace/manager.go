@@ -750,3 +750,13 @@ func (m *Manager) ArmCoverageSummary() (uncovered, total int, ran, seen bool) {
 	}
 	return m.bpfShim.ArmCoverageSummary()
 }
+
+// AttachedXDPLinkCount forwards the bpf shim's live attached-link count, which
+// the daemon's #9725 transit gate reads. Like ArmCoverageSummary, the userspace
+// manager keeps no state of its own.
+func (m *Manager) AttachedXDPLinkCount() int {
+	if m == nil || m.bpfShim == nil {
+		return 0
+	}
+	return m.bpfShim.AttachedXDPLinkCount()
+}

@@ -24,7 +24,7 @@ import (
 //
 //	armBootDataplane failure branch  -> TestBootArmFailureClosesTransit5275
 //	applyKernelTuning gate           -> TestApplyKernelTuningHonoursArmGate5275
-//	armBootDataplane success branch  -> TestBootArmSuccessKeepsTransit5275
+//	armBootDataplane success branch  -> TestBootArmSuccessOpensTransitAtTheFirstAttach5275
 //	armBootstrapExitDataplane re-arm -> TestRearmAfterArmFailureRestoresTransit5275
 //
 // These tests swap the package-level sysctl path vars, so none of them may
@@ -62,7 +62,7 @@ func assertTransitForwarding(t *testing.T, v4, v6, want, when string) {
 			t.Fatalf("read %s: %v", tc.path, err)
 		}
 		if got := strings.TrimSpace(string(b)); got != want {
-			t.Errorf("%s = %q %s, want %q: an unarmed dataplane must not leave the "+
+			t.Errorf("%s = %q %s, want %q: a closed transit gate must not leave the "+
 				"kernel routing transit with no policy (#5275)", tc.family, got, when, want)
 		}
 	}
@@ -93,8 +93,8 @@ func TestBootArmFailureClosesTransit5275(t *testing.T) {
 // Deliberately INDEPENDENT of the bring-up writer — it never calls
 // armBootDataplane — so reverting the bring-up close cannot red it and a red
 // here localises to applyKernelTuning alone. Both directions are asserted in
-// one test because they are one expression: the gate must FOLLOW the arm
-// state, not be pinned either way.
+// one test because they are one expression: the knobs must FOLLOW the gate
+// state (arm AND attached link), not be pinned either way.
 func TestApplyKernelTuningHonoursArmGate5275(t *testing.T) {
 	v4, v6 := withTempTransitForwardSysctls(t, "1")
 
@@ -105,12 +105,24 @@ func TestApplyKernelTuningHonoursArmGate5275(t *testing.T) {
 	assertTransitForwarding(t, v4, v6, "0",
 		"after applyKernelTuning ran on an UNARMED daemon")
 
-	// Same call on an ARMED daemon must raise them again — proving the gate
-	// reads the arm state and is not simply pinned off.
+	// #9725: armed but not yet attached, the tail keeps them closed.
 	d.markDataplaneArmed("test")
 	d.applyKernelTuning(&config.Config{})
+	assertTransitForwarding(t, v4, v6, "0",
+		"after applyKernelTuning ran on an ARMED daemon whose first apply has not attached")
+
+	// Once an apply has attached, the same call must raise them again —
+	// proving the gate reads the state and is not simply pinned off. The knobs
+	// are lowered by hand first, so only the tail can raise them.
+	attachForTest9725(d)
+	for _, p := range []string{v4, v6} {
+		if err := os.WriteFile(p, []byte("0\n"), 0o644); err != nil {
+			t.Fatalf("lower %s: %v", p, err)
+		}
+	}
+	d.applyKernelTuning(&config.Config{})
 	assertTransitForwarding(t, v4, v6, "1",
-		"after applyKernelTuning ran on an ARMED daemon")
+		"after applyKernelTuning ran on an ARMED, attached daemon")
 }
 
 // TestArmFailureSurvivesApplyTail5275 is the END-TO-END sequence the defect
@@ -135,18 +147,16 @@ func TestArmFailureSurvivesApplyTail5275(t *testing.T) {
 }
 
 // TestBootTransitPolicyClosesWhenNeverArming5275 binds the BOOT-POLICY
-// decision for the two states that never arm. #1922 already suppressed
-// enableForwarding in bootstrap, but suppression is not closure: the sysctls
-// outlive the process, so a daemon restart into bootstrap (or into the #1960
-// compile-failed boot, which forces bootstrap) inherited ip_forward=1 from
-// the previous armed run.
+// decision for the two states that never arm. #1922 suppressed the bring-up
+// forwarding enable in bootstrap (and #9725 later removed that enable), but
+// suppression is not closure: the sysctls outlive the process, so a daemon
+// restart into bootstrap (or into the #1960 compile-failed boot, which forces
+// bootstrap) inherited ip_forward=1 from a previous run with transit open.
 //
-// Only the two CLOSING cases are driven. The default (arming) branch calls
-// enableForwarding, which writes five further host-posture sysctls
-// (accept_ra, l3mdev_accept, accept_local) to the real /proc — deliberately
-// not exercised from a unit test. That branch's outcome is covered instead by
-// TestBootArmSuccessKeepsTransit5275 and the armed leg of
-// TestApplyKernelTuningHonoursArmGate5275.
+// Only the two never-arming cases are driven here. The default branch, which
+// since #9725 closes transit too, is driven by
+// TestBootKeepsTransitClosedUntilTheFirstAttach9725 against a temp-dir
+// host posture, so it never writes the real /proc.
 func TestBootTransitPolicyClosesWhenNeverArming5275(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
@@ -171,11 +181,13 @@ func TestBootTransitPolicyClosesWhenNeverArming5275(t *testing.T) {
 	}
 }
 
-// TestBootArmSuccessKeepsTransit5275 is the negative control: a SUCCESSFUL
-// arm must leave kernel transit forwarding enabled. Without it, "always
-// closed" would pass every other test in this file while breaking every
-// XDP_PASS-to-kernel path (route-based-VPN plaintext, SNAT'd frames).
-func TestBootArmSuccessKeepsTransit5275(t *testing.T) {
+// TestBootArmSuccessOpensTransitAtTheFirstAttach5275 is the negative control: a
+// SUCCESSFUL arm must end with kernel transit forwarding enabled after a link is
+// attached following the arm. Without it, "always closed" would pass every
+// other test in this file while breaking every XDP_PASS-to-kernel path
+// (route-based-VPN plaintext, SNAT'd frames). Since #9725 the arm alone keeps
+// transit closed, because no interface is attached at Start.
+func TestBootArmSuccessOpensTransitAtTheFirstAttach5275(t *testing.T) {
 	// Seed "0" so the enable is an observable WRITE, not a pre-existing value.
 	v4, v6 := withTempTransitForwardSysctls(t, "0")
 
@@ -190,16 +202,20 @@ func TestBootArmSuccessKeepsTransit5275(t *testing.T) {
 	if !d.DataplaneArmed() {
 		t.Error("DataplaneArmed() = false after a successful boot arm, want true")
 	}
-	assertTransitForwarding(t, v4, v6, "1", "after a SUCCESSFUL boot arm")
+	assertTransitForwarding(t, v4, v6, "0", "after a SUCCESSFUL boot arm, before any apply attached")
+
+	attachForTest9725(d)
+	assertTransitForwarding(t, v4, v6, "1", "after a link is attached following a SUCCESSFUL boot arm")
 }
 
 // TestBootstrapExitArmFailureClosesTransit5275 binds the SECOND arm-failure
-// writer. runBootstrapExitStartup calls enableForwarding in ANTICIPATION of
-// the arm that follows it, so a bootstrap-exit arm failure leaves the knobs
-// freshly raised — this is the one site where the pre-#5275 code raised
-// forwarding and then failed to arm within the same function.
+// writer. Before #9725, runBootstrapExitStartup raised the knobs in
+// ANTICIPATION of the arm that follows it, so a bootstrap-exit arm failure left
+// them freshly raised — the one site where the pre-#5275 code raised forwarding
+// and then failed to arm within the same function. The cell seeds that state,
+// so it still binds the close.
 func TestBootstrapExitArmFailureClosesTransit5275(t *testing.T) {
-	// "1" is what runBootstrapExitStartup's enableForwarding just wrote.
+	// "1" is what the pre-#9725 runBootstrapExitStartup wrote.
 	v4, v6 := withTempTransitForwardSysctls(t, "1")
 
 	d := &Daemon{}
@@ -222,7 +238,7 @@ func TestBootstrapExitArmFailureClosesTransit5275(t *testing.T) {
 // (enterBootstrapMode -> runBootstrapTeardownSteps step 4) without going
 // through either arm writer, so an armed node becomes unarmed while the
 // knobs are still open. Without the close, the very next apply tail would
-// read a stale armed=true and keep the kernel routing transit for a
+// read a stale open gate and keep the kernel routing transit for a
 // dataplane that is no longer attached.
 func TestBootstrapRollbackClosesTransit5275(t *testing.T) {
 	v4, v6 := withTempTransitForwardSysctls(t, "1")
@@ -240,10 +256,11 @@ func TestBootstrapRollbackClosesTransit5275(t *testing.T) {
 	d.bootstrapMode.Store(false)
 	t.Cleanup(d.stopAndDiscardNATPoolAlarm)
 
-	// Arm first, so the rollback has something to un-arm.
+	// Arm and attach first, so the rollback has open transit to close.
 	d.setDataplane(&armedRecorderDP{})
 	d.armBootDataplane(d.dataplane())
-	assertTransitForwarding(t, v4, v6, "1", "after a successful arm")
+	attachForTest9725(d)
+	assertTransitForwarding(t, v4, v6, "1", "after a successful arm and first attach")
 
 	if err := d.enterBootstrapMode(); err != nil {
 		t.Fatalf("enterBootstrapMode: %v", err)
@@ -262,7 +279,8 @@ func TestBootstrapRollbackClosesTransit5275(t *testing.T) {
 
 // TestRearmAfterArmFailureRestoresTransit5275 binds recovery: the
 // bootstrap-exit arm is the one production re-arm path, and a node that came
-// up unarmed must regain transit on it without a daemon restart.
+// up unarmed must regain transit once a link attaches, without a daemon
+// restart.
 func TestRearmAfterArmFailureRestoresTransit5275(t *testing.T) {
 	v4, v6 := withTempTransitForwardSysctls(t, "1")
 
@@ -283,5 +301,9 @@ func TestRearmAfterArmFailureRestoresTransit5275(t *testing.T) {
 	if !d.DataplaneArmed() {
 		t.Error("DataplaneArmed() = false after a successful re-arm, want true")
 	}
-	assertTransitForwarding(t, v4, v6, "1", "after a successful RE-ARM")
+	assertTransitForwarding(t, v4, v6, "0", "after a successful RE-ARM, before the apply that follows it attached")
+
+	// #9725: transit re-opens once a link is attached after the re-arm.
+	attachForTest9725(d)
+	assertTransitForwarding(t, v4, v6, "1", "after a link is attached following a successful RE-ARM")
 }

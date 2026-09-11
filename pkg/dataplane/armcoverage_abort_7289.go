@@ -13,12 +13,12 @@ package dataplane
 //   - FIRST apply aborts: the cell has never been published, so
 //     `ArmCoverageSummary` reports seen=false, `classifyArmCoverageVerdict`
 //     returns armCoverageUnknown — and `evaluateArmCoverage`'s switch has NO
-//     case for unknown. Nothing disarms, and the apply tail then writes
-//     `writeTransitForwardSysctls(d.DataplaneArmed())` with the box still
-//     armed. On a fresh boot the runtime is armed before the first
-//     per-interface attach, so this is an armed, open kernel transit path over
-//     an interface carrying no XDP shim: the policy-free-router state #7191
-//     exists to prevent.
+//     case for unknown. Nothing disarms, and before #9725 the apply tail then
+//     wrote `writeTransitForwardSysctls(d.DataplaneArmed())` with the box still
+//     armed; the tail now writes the transit gate (transitOpen). On a fresh boot
+//     the runtime is armed before the first per-interface attach, so this was
+//     an armed, open kernel transit path over an interface carrying no XDP
+//     shim: the policy-free-router state #7191 exists to prevent.
 //
 //   - a LATER apply aborts: the cell still holds the PREVIOUS generation's
 //     report, which said Ran=true, Uncovered=0. The gate classifies

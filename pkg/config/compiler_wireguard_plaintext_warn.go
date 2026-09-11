@@ -61,8 +61,9 @@ import (
 // refused ones from the derivation the dataplane uses, and the mechanism
 // sentence below scopes the residual to the steered port.
 //
-// xpf keeps ip_forward at 1 while the dataplane is armed and installs only
-// nftables `hook input` chains, so nothing between the TUN write and the
+// While transit is open (the daemon's transit gate), ip_forward is 1 and no
+// forward-hook rule covers the plaintext; the #7191 forward-hook barrier exists
+// only while transit is closed. So nothing between the TUN write and the
 // kernel's forwarding decision consults a zone.
 //
 // `allowed-ips` is not a substitute. It is a cryptographic peer/source

@@ -199,9 +199,10 @@ func (d *Daemon) runShutdownSequence(wg *sync.WaitGroup, stop func(), runErr err
 	// out re-opens them.
 	//
 	// It keys on hitless alone, not on a published runtime: forwarding can be
-	// open from an earlier arm whether or not a dataplane is still published. A
-	// hitless stop (standalone, or `hitless-restart`) keeps the dataplane
-	// attached and the shim dropping transit, so it leaves forwarding as it is.
+	// open from an earlier open gate whether or not a dataplane is still
+	// published. A hitless stop (standalone, or `hitless-restart`) keeps the
+	// dataplane attached and the shim dropping transit, so it leaves forwarding
+	// as it is.
 	if !hitless {
 		d.markDataplaneNotArmed("shutdown", "HA fail-closed stop: closing kernel transit before the dataplane detach")
 	}

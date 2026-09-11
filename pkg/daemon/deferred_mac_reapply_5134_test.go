@@ -59,6 +59,7 @@ func (d *deferredMACReapplyTestDP) RecordDeferredWorkerArmDebt() { d.debtRecords
 // stays published while the commit reports success (the silent forwarding
 // outage).
 func TestReapplyAfterDeferredMACRecordsDebtOnFailure(t *testing.T) {
+	withTempTransitForwardSysctls(t, "1") // #9725: the reapply re-reads the transit gate
 	dp := &deferredMACReapplyTestDP{applyErr: errors.New("helper rejected apply_snapshot")}
 	d := &Daemon{}
 	d.setDataplane(dp) // #2114: publish through the cell
@@ -77,6 +78,7 @@ func TestReapplyAfterDeferredMACRecordsDebtOnFailure(t *testing.T) {
 // debt: a successful re-apply arms the workers directly, so there is nothing
 // for the reconcile loop to retry.
 func TestReapplyAfterDeferredMACNoDebtOnSuccess(t *testing.T) {
+	withTempTransitForwardSysctls(t, "1") // #9725: the reapply re-reads the transit gate
 	dp := &deferredMACReapplyTestDP{}
 	d := &Daemon{}
 	d.setDataplane(dp) // #2114: publish through the cell

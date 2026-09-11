@@ -12,8 +12,8 @@ import (
 //
 // The OVER-REJECTION controls are the load-bearing cells here, not the defect
 // cells. A forward-hook DROP is a reject-direction change whose worst case is a
-// silent black hole rather than a loud error, so "the armed case still
-// forwards" matters more than "the unarmed case drops".
+// silent black hole rather than a loud error, so "the armed case with a live
+// link still forwards" matters more than "the unarmed case drops".
 
 func withBarrierRecorder(t *testing.T) *fakeNftInstaller {
 	t.Helper()
@@ -31,46 +31,50 @@ func lastBarrierCall(f *fakeNftInstaller) string {
 	return f.barrierCalls[len(f.barrierCalls)-1]
 }
 
-// OVER-REJECTION CONTROL. An armed daemon must end with the barrier REMOVED.
+// OVER-REJECTION CONTROL. An armed daemon whose first apply attached (#9725)
+// must end with the barrier REMOVED.
 // If this ever fails, armed transit is being dropped — route-based IPsec
 // plaintext off an xfrm interface, SNAT'd frames passed up for kernel routing,
 // and the #7409 slow-path reinject all rely on an OPEN kernel forward hook, and
-// daemon_transit_gate.go names them as the reason the gate never lowers the
-// knob while armed.
+// daemon_transit_gate.go names them as the reason the barrier is removed
+// whenever transit is open.
 func TestArmedStateRemovesTheBarrier7191(t *testing.T) {
 	withTempTransitForwardSysctls(t, "0")
 	f := withBarrierRecorder(t)
 
 	d := &Daemon{}
 	d.markDataplaneArmed("test")
+	attachForTest9725(d) // #9725: transit opens only once a link is attached, not at Start alone
 
 	if got := lastBarrierCall(f); got != "remove" {
-		t.Fatalf("arming must REMOVE the barrier, last call = %q (calls: %v). "+
-			"A barrier that survives arming black-holes IPsec plaintext and SNAT'd "+
+		t.Fatalf("an armed, attached daemon must REMOVE the barrier, last call = %q (calls: %v). "+
+			"A barrier that survives the gate opening black-holes IPsec plaintext and SNAT'd "+
 			"frames, which is worse than the hole this change closes", got, f.barrierCalls)
 	}
 }
 
 // The same control on the repeating path. The apply tail runs on EVERY commit,
-// so a barrier re-asserted there against an armed daemon would black-hole the
-// box on the next unrelated config change rather than at arm time.
+// so a barrier re-asserted there against a daemon armed with a live link would
+// black-hole the box on the next unrelated config change rather than when the
+// gate opens.
 func TestApplyTailKeepsTheBarrierOffWhileArmed7191(t *testing.T) {
 	withTempTransitForwardSysctls(t, "0")
 	f := withBarrierRecorder(t)
 
 	d := &Daemon{}
 	d.markDataplaneArmed("test")
+	attachForTest9725(d) // #9725
 	f.barrierCalls = nil // isolate the tail's own decision
 
 	d.applyKernelTuning(&config.Config{})
 
 	if got := lastBarrierCall(f); got != "remove" {
-		t.Errorf("the apply tail on an ARMED daemon must keep the barrier off, last call = %q (calls: %v)",
+		t.Errorf("the apply tail on an ARMED, attached daemon must keep the barrier off, last call = %q (calls: %v)",
 			got, f.barrierCalls)
 	}
 	for _, c := range f.barrierCalls {
 		if c == "install" {
-			t.Errorf("the apply tail installed the barrier on an ARMED daemon: %v", f.barrierCalls)
+			t.Errorf("the apply tail installed the barrier on an ARMED, attached daemon: %v", f.barrierCalls)
 		}
 	}
 }
@@ -111,6 +115,7 @@ func TestBarrierRemoveFailureDoesNotDisarm7191(t *testing.T) {
 
 	d := &Daemon{}
 	d.markDataplaneArmed("test")
+	attachForTest9725(d) // #9725: the remove is attempted whenever the gate is re-evaluated open
 
 	if !d.DataplaneArmed() {
 		t.Error("a barrier REMOVE failure must not disarm the dataplane")
@@ -125,11 +130,16 @@ type fakeCoverageDP struct {
 	total     int
 	ran       bool
 	seen      bool
+	links     int
 }
 
 func (f *fakeCoverageDP) ArmCoverageSummary() (int, int, bool, bool) {
 	return f.uncovered, f.total, f.ran, f.seen
 }
+
+// #9725: the attached-link count, for cells that attach before judging coverage.
+func (f *fakeCoverageDP) AttachedXDPLinkCount() int  { return f.links }
+func (f *fakeCoverageDP) setTestAttachedLinks(n int) { f.links = n }
 
 func TestArmCoverageVerdictIsThreeState7191(t *testing.T) {
 	for _, tc := range []struct {
@@ -166,6 +176,7 @@ func TestCompleteCoverageKeepsTheBoxArmed7191(t *testing.T) {
 		uncovered: 0, total: 3, ran: true, seen: true,
 	})
 	d.markDataplaneArmed("test")
+	attachForTest9725(d) // #9725
 
 	d.evaluateArmCoverage("apply")
 
@@ -203,6 +214,8 @@ func TestUncoveredInterfaceDisarmsAndClosesTransit7191(t *testing.T) {
 		uncovered: 1, total: 3, ran: true, seen: true,
 	})
 	d.markDataplaneArmed("test")
+	attachForTest9725(d) // #9725: open transit, so the disarm has something to close
+	assertTransitForwarding(t, v4, v6, "1", "premise: armed and attached")
 	f.barrierCalls = nil
 
 	d.applyKernelTuning(&config.Config{})

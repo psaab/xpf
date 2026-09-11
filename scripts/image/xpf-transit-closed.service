@@ -1,0 +1,26 @@
+[Unit]
+Description=xpf #9725 - keep kernel transit forwarding closed from boot until xpfd starts
+Documentation=https://github.com/psaab/xpf/issues/9725
+# Runs once per boot, after systemd-sysctl has applied every sysctl.d file
+# (including an older image's forwarding=1) and before any interface is
+# configured or routed, so the kernel routes no transit from boot until xpfd
+# starts. xpfd's transit gate owns both knobs from then on. This closes the
+# routed knobs only; bridged frames ignore them (#9852).
+# Deliberately a oneshot, not a sysctl.d file: systemd-sysctl re-applies every
+# sysctl.d file whenever it runs, which would close transit under a running xpfd.
+# ExecStart attempts both writes and exits non-zero if either fails ($$ is
+# systemd's literal dollar sign).
+DefaultDependencies=no
+After=systemd-sysctl.service
+Before=network-pre.target systemd-networkd.service frr.service xpfd.service
+Wants=network-pre.target
+Conflicts=shutdown.target
+Before=shutdown.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/sh -c 'rc=0; echo 0 > /proc/sys/net/ipv4/ip_forward || rc=1; echo 0 > /proc/sys/net/ipv6/conf/all/forwarding || rc=1; exit $$rc'
+
+[Install]
+WantedBy=sysinit.target

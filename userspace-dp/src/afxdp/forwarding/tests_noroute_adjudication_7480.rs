@@ -99,7 +99,7 @@ fn noroute_is_denied_on_a_default_deny_box_7480() {
         "a NoRoute frame on a default-deny box must be DENIED, not handed to the \
          kernel FIB. Delegating it is the #6664 policy bypass: the kernel forwards \
          with no zone policy, session, NAT or screen, and there is no nftables \
-         `hook forward` chain, ip_forward is force-enabled while armed, and \
+         `hook forward` drop while kernel transit is open, ip_forward is 1 then, and \
          rp_filter is 0 on the TUN — nothing downstream catches it."
     );
 }

@@ -172,7 +172,12 @@ func (d *Daemon) applyDataplaneAndHACore(ctx context.Context, cfg *config.Config
 	var applyResult *dataplane.ApplyResult
 	if rt := d.dataplane(); rt != nil {
 		var err error
-		if applyResult, err = rt.ApplyConfig(context.Background(), cfg); err != nil {
+		applyResult, err = rt.ApplyConfig(context.Background(), cfg)
+		// #9725: re-read the attached links whatever err is, before the error
+		// handling below can return. An apply can attach and then fail, or
+		// succeed with nothing attached.
+		d.reassertTransitGate("apply")
+		if err != nil {
 			d.recordCompileFailure(err)
 			if compileErrorMustAbortApply(err) {
 				return commitOverlay, networkdErr, nil, err
@@ -1095,7 +1100,11 @@ func (d *Daemon) reapplyAfterDeferredMAC(cfg *config.Config) {
 	if rt == nil {
 		return
 	}
-	if _, err := rt.ApplyConfig(context.Background(), cfg); err != nil {
+	_, err := rt.ApplyConfig(context.Background(), cfg)
+	// #9725: this is the second ApplyConfig caller, so it re-reads the attached
+	// links too, whatever err is: a reapply can detach the last link.
+	d.reassertTransitGate("deferred-mac-reapply")
+	if err != nil {
 		slog.Warn("failed to re-apply after deferred MAC; recording worker-arm debt for retry",
 			"err", err)
 		d.recordDataplaneWorkerArmDebt()

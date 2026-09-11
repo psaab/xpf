@@ -63,6 +63,10 @@ override_dh_auto_build:
 	grep -q '^ExecStartPre=/usr/local/sbin/xpfd verify-dataplane$$' debian/xpf.xpfd.service || \
 	    { echo "FATAL: ExecStartPre verify-dataplane injection failed (xpfd.service ExecStart line not matched)" >&2; exit 1; }
 	cp scripts/image/xpf-day0-config.service debian/xpf.xpf-day0-config.service
+	@# #9725: the boot-only oneshot that keeps kernel transit closed from boot
+	@# until xpfd starts (xpfd's transit gate owns it from then on), whatever an
+	@# older image's sysctl.d says.
+	cp scripts/image/xpf-transit-closed.service debian/xpf.xpf-transit-closed.service
 	@# #1930 LANE-1 kernel channel: stage the two oneshot units under the
 	@# package-canonical names so dh_installsystemd enables them. These ship in
 	@# the .deb (not only the bake) so foreign-host / manual installs get the
@@ -148,6 +152,9 @@ override_dh_auto_install:
 override_dh_installsystemd:
 	dh_installsystemd --no-stop-on-upgrade --name=xpfd
 	dh_installsystemd --no-stop-on-upgrade --name=xpf-day0-config
+	@# #9725: enable the boot-only transit close. --no-start: starting it on a
+	@# running firewall would close transit under an attached xpfd.
+	dh_installsystemd --no-start --no-stop-on-upgrade --name=xpf-transit-closed
 	@# #1930: enable the two LANE-1 oneshots. They are best-effort + non-fatal
 	@# (degrade to "LANE 1 unavailable" on non-UEFI / read-only NVRAM) and are
 	@# NOT ordered Before=xpfd, so enabling them cannot block the daemon.
@@ -162,6 +169,7 @@ override_dh_installsystemd:
 
 override_dh_clean:
 	rm -f debian/xpf.xpfd.service debian/xpf.xpf-day0-config.service \
+	      debian/xpf.xpf-transit-closed.service \
 	      debian/xpf.xpf-uefi-slots.service debian/xpf.xpf-kernel-promote.service \
 	      debian/xpf.xpf-kernel-promote-failed.service
 	dh_clean

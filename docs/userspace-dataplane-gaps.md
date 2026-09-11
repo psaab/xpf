@@ -585,10 +585,11 @@ the forwarding decision.
 **Operator-visible consequence.** Where tunnel plaintext is not adjudicated —
 every route-based IPsec tunnel, and WireGuard's kernel path — inter-zone
 authority is delegated to the kernel FIB plus nftables, and xpf installs only
-`hook input` chains while keeping `ip_forward` at 1 for as long as the dataplane
-is armed (#5275's arm gate makes the knob conditional on `dataplaneArmed`, and
-its comment names *this* path as the reason it must never be lowered while
-armed) — so that transit is forwarded unfiltered. `allowed-ips` is not a
+`hook input` chains while keeping `ip_forward` at 1 for as long as the transit
+gate is open (armed, with a live attached link; #5275, #9725). The gate's
+comment names *this* path as a reason the knob is 1 while the gate is open, and
+the gate lowers it on an armed node with no live link — so while the gate is
+open that transit is forwarded unfiltered. `allowed-ips` is not a
 substitute: it is a cryptographic peer/source ownership gate on the inner source
 address, with no destination, no zone-pair, no application and no direction.
 Leaving the tunnel out of a zone is not a mitigation either: IPsec plaintext

@@ -1315,9 +1315,9 @@ and the RSS allowlist — and `syncInterfaceAttachments`
 (`pkg/dataplane/userspace/manager_compile.go`) then calls `DetachXDP` on every
 ifindex outside the allowed set, so the shim is detached from the xfrmi rather
 than attached to it. There is no kernel substitute: no `hook forward` rule
-covers it and `ip_forward` is 1 whenever the dataplane is armed (since #5275
-that knob is armed-conditional — an UNARMED node forwards no transit at all,
-plaintext included, which closes this gap only by closing everything).
+covers it and `ip_forward` is 1 whenever the transit gate is open (armed, with
+a live attached link; #5275, #9725). A closed gate forwards no transit at all,
+plaintext included, which closes this gap only by closing everything.
 
 The problem this advisory solves is not the gap itself but the FALSE
 affirmation around it. `set security zones security-zone vpn interfaces st0.0`

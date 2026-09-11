@@ -34,10 +34,11 @@ import (
 //     pre-#7480 behaviour and still describes a POLICY-PERMITTED frame,
 //     which is delegated by design. The kernel then forwards it via the
 //     learned route with no zone policy, no session, no NAT and no screen —
-//     and nothing downstream catches it (there is no nftables `hook
-//     forward` chain at all, ip_forward is force-enabled while armed, and
-//     rp_filter is deliberately 0 on the TUN). That is the #7409 policy
-//     bypass.
+//     and nothing downstream catches it (while transit is open, per the
+//     daemon's transit gate, ip_forward is 1 and no forward-hook rule covers
+//     it, since the #7191 forward-hook barrier exists only while transit is
+//     closed; and rp_filter is deliberately 0 on the TUN). That is the #7409
+//     policy bypass.
 //   - A config default DOES cover it -> the helper forwards to the STATIC
 //     default's next-hop instead of the learned one. Policy is evaluated,
 //     so this is not a bypass, but the traffic silently takes the wrong

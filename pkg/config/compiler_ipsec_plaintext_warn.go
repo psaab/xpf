@@ -12,10 +12,11 @@ import ()
 // snapshot's SecureTunnel flag; #6691 round 5 stopped it calling
 // IsSecureTunnelIfName, and the Rust mirror is_secure_tunnel_ifname was
 // deleted rather than re-derived) because there is no path to hand a plaintext
-// frame back INTO an xfrmi for the egress direction. xpf installs only
-// `hook input` nftables chains and force-enables ip_forward, so the plaintext
-// is forwarded by the kernel with no zone policy, no session, no NAT and no
-// screen.
+// frame back INTO an xfrmi for the egress direction. While transit is open (the
+// daemon's transit gate), ip_forward is 1 and no forward-hook rule covers the
+// plaintext; the #7191 forward-hook barrier exists only while transit is closed.
+// So the plaintext is forwarded by the kernel with no zone policy, no session,
+// no NAT and no screen.
 //
 // Why a warning and not a rejection. Route-based (st0/XFRM) IPsec is the ONLY
 // IPsec model xpf supports — policy-based `then permit tunnel` is hard-rejected

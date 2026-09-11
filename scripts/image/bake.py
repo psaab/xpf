@@ -90,10 +90,13 @@ RUNTIME_PACKAGES = [
     "cloud-guest-utils", "e2fsprogs",
 ]
 
+# #9725: kernel transit forwarding starts CLOSED. xpfd's transit gate opens it
+# when the dataplane is armed with a live attached link; a 1 here would forward
+# transit, with no program adjudicating it, from boot until then.
 SYSCTL_CONF = (
     "net.core.bpf_jit_enable=1\n"
-    "net.ipv4.ip_forward=1\n"
-    "net.ipv6.conf.all.forwarding=1\n"
+    "net.ipv4.ip_forward=0\n"
+    "net.ipv6.conf.all.forwarding=0\n"
     "net.ipv6.conf.all.accept_ra=0\n"
     "net.ipv6.conf.default.accept_ra=0\n"
 )
@@ -576,6 +579,10 @@ def virt_customize(work_qcow, xpf_deb):
         "--copy-in", f"{HERE}/grub.d/09_xpf:/etc/grub.d",
         "--run-command", "chmod 0755 /etc/grub.d/09_xpf",
         "--copy-in", f"{HERE}/xpf-uefi-slots:/usr/local/sbin",
+        # #9725: keep kernel transit closed from boot until xpfd starts; xpfd's
+        # transit gate owns it from then on.
+        "--copy-in", f"{HERE}/xpf-transit-closed.service:/usr/lib/systemd/system",
+        "--run-command", "systemctl enable xpf-transit-closed.service",
         "--copy-in", f"{HERE}/xpf-uefi-slots.service:/usr/lib/systemd/system",
         "--run-command", "chmod 0755 /usr/local/sbin/xpf-uefi-slots",
         "--run-command", "systemctl enable xpf-uefi-slots.service",

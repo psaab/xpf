@@ -9,10 +9,11 @@ import (
 )
 
 // TransitBarrierTableName is the table installed on BOTH the inet and bridge
-// families while the dataplane is UNARMED (#7191).
+// families while kernel transit is closed (#7191; the daemon's transitOpen,
+// #9725).
 const TransitBarrierTableName = "xpf_transit_barrier"
 
-// #7191: the nftables half of the unarmed transit barrier.
+// #7191: the nftables half of the transit barrier.
 //
 // WHY IT EXISTS. PR #7189 shipped the `ip_forward=0` leg of the barrier
 // specified in docs/research/5275-arm-failclosed/plan.md §6. That leaves a
@@ -22,21 +23,25 @@ const TransitBarrierTableName = "xpf_transit_barrier"
 // this change the repo had ZERO `hook forward` chains, verified on a live node:
 // `nft list ruleset | grep -c "hook forward"` returned 0.
 //
-// WHY IT IS SCOPED STRICTLY TO THE UNARMED WINDOW. This is the constraint that
-// makes the barrier safe, and getting it wrong is the difference between
-// defence-in-depth and a black hole. Several ARMED paths deliberately rely on
-// the kernel forward path being OPEN and UNFILTERED, and daemon_transit_gate.go
-// names them: route-based-VPN plaintext leaving an xfrm interface (which is
-// excluded from AF_XDP binding, so nothing adjudicates it in userspace), SNAT'd
-// frames passed up for kernel routing (the reason `accept_local` is set), and
-// the #7409 slow-path reinject. A forward drop that is live while ARMED breaks
-// all three.
+// WHY IT IS SCOPED STRICTLY TO THE CLOSED-TRANSIT WINDOW. This is the
+// constraint that makes the barrier safe, and getting it wrong is the difference
+// between defence-in-depth and a black hole. Several ARMED paths deliberately
+// rely on the kernel forward path being OPEN and UNFILTERED while transit is
+// open, and daemon_transit_gate.go names them: route-based-VPN plaintext leaving
+// an xfrm interface (which is excluded from AF_XDP binding, so nothing
+// adjudicates it in userspace), SNAT'd frames passed up for kernel routing (the
+// reason `accept_local` is set), and the #7409 slow-path reinject. A forward
+// drop that is live while transit is open breaks all three. The daemon installs
+// the barrier exactly while its transitOpen is false (#9725): unarmed, or armed
+// with no shim XDP link attached.
 //
-// Because the barrier is installed only while unarmed — exactly the window in
-// which `ip_forward` is already 0 — it CLOSES NOTHING THAT WAS OPEN. It is belt
-// to the sysctl's braces over the same interval, not a new reject surface. That
+// Closing installs the barrier first and then writes `ip_forward=0`. Once both
+// have landed, the inet leg is belt to the sysctl's braces for ROUTED transit.
+// The bridge leg is different: bridged frames ignore `ip_forward`, so it is the
+// only thing that closes them. That
 // bounds the blast radius: the worst case of a bug here is that the barrier
-// fails to install (no worse than today), not that armed transit is dropped.
+// fails to install (no worse than without it), not that transit is dropped while
+// open.
 //
 // WHY BOTH FAMILIES. `ip_forward` does not govern bridged frames at all, and
 // this repo creates Linux bridge domains (compiler_iface.go), so an inet
@@ -110,8 +115,9 @@ func (in *netlinkInstaller) installBarrierFamily(family nftables.TableFamily) er
 
 // RemoveTransitBarrier removes the barrier from every family. Idempotent:
 // absent -> nil. A genuine kernel failure IS returned, because a barrier that
-// could not be removed leaves the box transit-closed while armed — the black
-// hole this design exists to avoid — and the caller must be able to see it.
+// could not be removed leaves the box transit-closed while the gate is open —
+// the black hole this design exists to avoid — and the caller must be able to
+// see it.
 func (in *netlinkInstaller) RemoveTransitBarrier() error {
 	var errs []error
 	for _, family := range transitBarrierFamilies() {

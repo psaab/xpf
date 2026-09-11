@@ -63,13 +63,15 @@ type Installer interface {
 	// kernel/permission failure -> error, preserving the fail-closed teardown
 	// contract #5790).
 	DeleteTable(name string) error
-	// InstallTransitBarrier installs the #7191 unarmed forward-hook DROP in the
-	// inet and bridge families. Idempotent. Installed ONLY while the dataplane
-	// is unarmed -- see the scoping argument in transit_barrier.go.
+	// InstallTransitBarrier installs the #7191 forward-hook DROP in the inet and
+	// bridge families. Idempotent. The daemon installs it ONLY while kernel
+	// transit is closed (its transitOpen, #9725) -- see the scoping argument in
+	// transit_barrier.go.
 	InstallTransitBarrier() error
 	// RemoveTransitBarrier removes it from both families. Idempotent; a genuine
-	// failure is returned because a barrier that survives arming would drop
-	// armed transit (IPsec plaintext, SNAT'd frames, #7409 reinject).
+	// failure is returned because a barrier that survives the gate opening would
+	// drop transit the kernel forwards (IPsec plaintext, SNAT'd frames, #7409
+	// reinject).
 	RemoveTransitBarrier() error
 }
 

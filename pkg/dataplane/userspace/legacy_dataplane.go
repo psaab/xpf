@@ -103,6 +103,18 @@ func (a *LegacyDataPlaneAdapter) ReadAllPolicyCounters(cfg *config.Config) (map[
 	return m.ReadAllPolicyCounters(cfg)
 }
 
+// AttachedXDPLinkCount forwards the #9725 attached-link count. The daemon
+// publishes this adapter, not the manager, so a capability that is not forwarded
+// here is invisible to the daemon. That is exactly why the #7191 arm-coverage
+// proof never gates (#9804).
+func (a *LegacyDataPlaneAdapter) AttachedXDPLinkCount() int {
+	m, err := a.managerOrErr()
+	if err != nil {
+		return 0
+	}
+	return m.AttachedXDPLinkCount()
+}
+
 func (a *LegacyDataPlaneAdapter) IsLoaded() bool {
 	m, err := a.managerOrErr()
 	if err != nil || m.bpfShim == nil {

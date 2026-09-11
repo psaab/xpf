@@ -14,7 +14,8 @@ use super::*;
 /// peer-synced publish replacing a `REDIRECT` row with `PASS_TO_KERNEL` sends the
 /// flow to `cpumap_or_pass` — the kernel forward path, where per the #304 note
 /// "ip_forward=1 and an all-accept nft ruleset forward them with no zone policy
-/// evaluated at all". A miss would have redirected it to the policy engine
+/// evaluated at all" (true while the daemon's transit gate is open, #9725). A miss
+/// would have redirected it to the policy engine
 /// instead.
 ///
 /// WHY THIS AND NOT "ADD `routing_domain` TO THE KEY". Key size is not the

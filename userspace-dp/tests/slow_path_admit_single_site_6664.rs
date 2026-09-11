@@ -230,8 +230,8 @@ fn raw_reinject_primitive_caller_set_is_pinned_7480() {
         files, expected,
         "the raw reinject primitive's production caller set changed. Found {listed:?}.\n\
          Every caller of this primitive can hand an unadjudicated frame to the \
-         kernel FIB, where there is no nftables `hook forward` chain, ip_forward \
-         is force-enabled while armed, and rp_filter is 0 on the TUN — so nothing \
+         kernel FIB, where, while kernel transit is open (#9725), there is no nftables \
+         `hook forward` drop, ip_forward is 1, and rp_filter is 0 on the TUN — so nothing \
          downstream re-checks it. A new site must be classified filtered vs \
          unfiltered, listed here, AND reflected in the primitive's doc block, \
          which is what a future caller reads before bypassing the predicate."

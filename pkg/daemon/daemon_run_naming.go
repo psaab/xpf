@@ -222,11 +222,16 @@ func (d *Daemon) runBootstrapExitStartup(cfg *config.Config) {
 		slog.Warn("bootstrap exit: interface naming failed", "err", err)
 	}
 
-	// Enable IP forwarding (suppressed in bootstrap).
-	enableForwarding()
+	// Host forwarding posture (suppressed in bootstrap). Kernel transit stays
+	// closed: bootstrap closed it, and the arm below does not open it by itself.
+	// It opens when a re-evaluation finds the dataplane armed with a live attached
+	// link, whatever the apply before it returned, and it is not latched
+	// (transitOpen, #9725).
+	applyHostForwardingPosture()
 
-	// Arm the dataplane (AF_XDP attach) — the backend object was
-	// constructed at boot (C1) but never started in bootstrap mode.
+	// Arm the dataplane (load the shim; the per-interface attach runs in the
+	// apply that follows) — the backend object was constructed at boot (C1)
+	// but never started in bootstrap mode.
 	d.armBootstrapExitDataplane(nodeID)
 	slog.Info("bootstrap exit: startup takeover complete; applying first config")
 }
@@ -262,19 +267,19 @@ func (d *Daemon) armBootstrapExitDataplane(nodeID int) {
 		slog.Warn("bootstrap exit: failed to start dataplane, running in config-only mode",
 			"err", err)
 		d.setDataplane(nil)
-		// #5275: runBootstrapExitStartup just called enableForwarding in
-		// anticipation of this arm. The arm failed, so the node has no
-		// policy enforcement and must not carry transit — close the knobs
-		// again, before the reconcile this exit precedes.
+		// #5275: the arm failed, so the node has no policy enforcement and
+		// must not carry transit. Record the failure and assert the closed
+		// knobs before the reconcile this exit precedes.
 		d.markDataplaneArmFailed("bootstrap exit: dataplane start failed",
 			"check `journalctl -u xpfd` for the shim/AF_XDP attach error, then "+
 				"correct the config and re-commit, or restart xpfd", err)
 		return
 	}
 	// #5275: the RE-ARM path. Boot left the knobs closed (bootstrap is
-	// transit-off), so recovery has to re-open them here — otherwise the
-	// first good commit would leave a correctly-armed node forwarding
-	// nothing until a daemon restart.
+	// transit-off). This records the arm and re-evaluates the gate. Transit
+	// re-opens when a re-evaluation finds the dataplane armed with a live
+	// attached link, normally after the apply that follows attaches the
+	// interfaces, and it is not latched (#9725). No daemon restart is needed.
 	d.markDataplaneArmed("bootstrap exit")
 	if seeder, ok := rt.(natSeeder); ok {
 		seeder.SeedNATPortCounters()

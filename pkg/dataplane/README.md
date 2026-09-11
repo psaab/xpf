@@ -628,9 +628,10 @@ All three `pass_local_control` for proven local/control traffic and
 `XDP_DROP` transit, so a crashed node BLACKHOLES rather than routing
 unadjudicated packets. That is the safer failure, and it is the same
 direction #7189 (#5275) establishes for the never-armed case — but by a
-DIFFERENT mechanism: #7189 gates the `ip_forward` sysctls on the arm
-state, and a post-arm crash leaves the daemon armed, so those sysctls
-stay 1 and the shim's degraded gates are what hold the line.
+DIFFERENT mechanism: the `ip_forward` sysctls follow the transit gate
+(armed AND a live attached link; #7189, #9725), and they stay 1 after a
+helper crash because the daemon stays armed and the XDP links stay
+attached, so the shim's degraded gates are what hold the line.
 
 **What was actually broken is honesty, and that is the HA-relevant
 half.** `takeoverReadyLocked` gates on `m.proc == nil` and on

@@ -973,28 +973,32 @@ func (d *Daemon) applyKernelTuning(cfg *config.Config) {
 		}
 	}
 
-	// Kernel TRANSIT forwarding, gated on the dataplane being armed (#5275).
+	// Kernel TRANSIT forwarding, gated on the arm (#5275) and, since #9725, an
+	// attached shim XDP link (transitOpen).
 	//
 	// This is the load-bearing half of the gate: the tail runs at EVERY
 	// apply, so an unconditional "1" here re-opened policy-free kernel
 	// routing on the next commit even after bring-up had failed closed —
 	// which is how a node whose AF_XDP shim never attached stayed an open
-	// router. Writing the armed state (rather than skipping the write when
-	// unarmed) is deliberate: it also RE-ASSERTS the closure against
+	// router. Writing the gate's state (rather than skipping the write when
+	// closed) is deliberate: it also RE-ASSERTS the closure against
 	// anything else that raised the knob since the last apply.
 	// #7191: consult the post-attach arm-coverage proof BEFORE asserting the
 	// knobs. It runs first because a disarm verdict changes DataplaneArmed(),
-	// and the two writes below must assert the corrected state rather than the
+	// and the writes below must assert the corrected state rather than the
 	// stale one. ApplyConfig has already run the per-interface attach by this
-	// point, so the proof describes the attachment that just happened.
+	// point, so the proof describes the attachment that just happened. (On the
+	// published runtime the proof is not reachable yet, so this does not gate:
+	// #9804.)
 	d.evaluateArmCoverage("apply")
 
-	writeTransitForwardSysctls(d.DataplaneArmed())
-	// #7191: re-assert the nftables barrier on the same cadence and from the
-	// same predicate. This is what makes a stale barrier self-healing — a
-	// failed remove at arm time is corrected on the next commit rather than
-	// silently black-holing armed transit until a restart.
-	d.applyTransitBarrier(d.DataplaneArmed())
+	// #9725: both legs follow transitOpen, the arm AND a live attached link. No
+	// apply opens transit that no attached program adjudicates, and an apply
+	// that left none attached closes it. The #7191 barrier is re-asserted on the
+	// same cadence and from the same predicate, which is what makes a stale
+	// barrier self-healing: a failed remove is corrected on the next commit
+	// rather than silently black-holing armed transit until a restart.
+	d.reassertTransitGate("apply-tail")
 }
 
 // sshKnownHostsPath is the OpenSSH global known-hosts file xpfd owns and fully

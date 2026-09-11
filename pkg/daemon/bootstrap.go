@@ -652,12 +652,13 @@ func (d *Daemon) runBootstrapTeardownSteps() []bootstrapTeardownStep {
 	}
 	// #5275: the detach above UN-ARMS this node — the shim is no longer
 	// attached, so nothing adjudicates transit. Close the kernel transit
-	// path to match, and drop the armed flag so the next apply tail
-	// (applyKernelTuning) does not re-open it. Unconditional: a rollback
-	// that found no published backend is equally unarmed, and the write is
-	// a no-op when the knobs are already closed. Reversed by the
-	// bootstrap-exit arm when a corrected commit re-arms the retained
-	// object.
+	// path to match, and drop the armed flag so the transit gate stays
+	// closed at the next apply tail (applyKernelTuning), whatever link count
+	// it reads. Unconditional: a rollback that found no published backend is
+	// equally unarmed, and the write is a no-op when the knobs are already
+	// closed. The bootstrap-exit arm, when a corrected commit re-arms the
+	// retained object, reopens nothing by itself: the gate reopens only when
+	// a re-evaluation finds the dataplane armed with a live attached link.
 	d.markDataplaneNotArmed("bootstrap rollback",
 		"dataplane detached; first commit confirmed timed out")
 

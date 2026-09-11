@@ -532,7 +532,8 @@ func (d *Daemon) setupDataplaneAndInitialConfig() error {
 			// the fall-through that made an unarmed node an open router. The
 			// arm decision above has already driven the transit knobs, so by
 			// the time this apply reaches its tail (applyKernelTuning) the
-			// gate reads the real arm state instead of re-opening forwarding.
+			// gate re-reads its real state (transitOpen) instead of re-opening
+			// forwarding.
 			if cfg := d.store.ActiveConfig(); cfg != nil {
 				slog.Info("applying active configuration")
 				// #6716: re-reads the active config under applySem rather than
@@ -565,21 +566,28 @@ func (d *Daemon) setupDataplaneAndInitialConfig() error {
 // the decision is drivable in a test against the sysctl seam rather than
 // buried behind the manager-construction block.
 //
-// Three cases, and the two closing ones are the decision this function
-// exists to state explicitly:
+// Three cases. All three close kernel transit; the first two also record that
+// the dataplane never arms:
 //
-//   - --no-dataplane: there is no dataplane at all. Bring-up already declined
-//     to enable forwarding here; closing the knob makes the apply tail agree
-//     with bring-up instead of contradicting it.
+//   - --no-dataplane: there is no dataplane at all. No bring-up forwarding
+//     enable exists any more (since #9725 bring-up closes transit in every
+//     branch); recording the not-armed state keeps the apply tail closed to
+//     match.
 //   - bootstrap mode: no committed config, so no policy to enforce. #1922
-//     already SUPPRESSED enableForwarding — but suppression is not closure,
-//     because the sysctls outlive the process: a daemon restart into
-//     bootstrap (or into the #1960 compile-failed boot, which forces
-//     bootstrap) inherits ip_forward=1 from the previous armed run and routes
-//     transit under no policy. pkg/daemon/README.md already asserts transit
-//     is fail-closed in this state; this is what makes that true.
-//   - otherwise: enable, provisionally. The arm has not happened yet;
-//     setupDataplaneAndInitialConfig closes the knobs again if it fails.
+//     suppressed the bring-up forwarding enable here, and #9725 removed it
+//     entirely — but not enabling is not closure, because the sysctls outlive
+//     the process: a daemon restart into bootstrap (or into the #1960
+//     compile-failed boot, which forces bootstrap) inherits ip_forward=1 from
+//     the previous armed run and routes transit under no policy.
+//     pkg/daemon/README.md already asserts transit is fail-closed in this
+//     state; this is what makes that true.
+//   - otherwise: apply the host forwarding posture and keep transit CLOSED
+//     (#9725). The arm has not happened yet, and even a successful arm
+//     attaches no interface: transit opens when a re-evaluation finds the
+//     dataplane armed with a live attached link, and can close again
+//     (transit_closed_until_attach_9725.go). Closing explicitly, rather than
+//     leaving the knobs as found, covers the image's sysctl.d default and a
+//     restart after an armed run, which both leave them at 1.
 func (d *Daemon) applyBootTransitPolicy() {
 	switch {
 	case d.opts.NoDataplane:
@@ -587,7 +595,8 @@ func (d *Daemon) applyBootTransitPolicy() {
 	case d.inBootstrap():
 		d.markDataplaneNotArmed("boot", "bootstrap mode: no committed config to enforce")
 	default:
-		enableForwarding()
+		applyHostForwardingPosture()
+		d.closeTransitUntilAttached("boot")
 	}
 }
 
@@ -603,9 +612,11 @@ func (d *Daemon) applyBootTransitPolicy() {
 // ONE dataplane snapshot the surrounding boot block shares (#2114 plan
 // §5.3 rule 3) rather than re-reading the cell here.
 //
-// Both outcomes drive the #5275 transit gate: a successful arm leaves
-// kernel transit forwarding enabled, a failed arm closes it BEFORE the
-// caller's applyConfig runs.
+// Both outcomes drive the #5275 transit gate. A failed arm closes it BEFORE
+// the caller's applyConfig runs. A successful arm re-evaluates it: transit
+// opens when a re-evaluation finds the dataplane armed with a live attached
+// link, normally the one after the caller's applyConfig attaches the
+// interfaces, and it can close again (#9725).
 func (d *Daemon) armBootDataplane(rt dataplane.RuntimeDataPlane) {
 	if rt == nil {
 		return
@@ -641,36 +652,38 @@ func (d *Daemon) armBootDataplane(rt dataplane.RuntimeDataPlane) {
 	}
 }
 
-// isInteractive returns true if stdin is a real terminal (not /dev/null or a pipe).
-// enableForwarding enables IPv4 and IPv6 forwarding via sysctl
-// and disables RA acceptance on all interfaces.
-// A firewall must forward packets between interfaces; without this,
-// the kernel drops all transit traffic. A firewall must not accept
-// RAs — it uses its own configured routes exclusively.
-func enableForwarding() {
-	// #5275: the two TRANSIT knobs are owned by the arm gate
-	// (daemon_transit_gate.go) so bring-up and the apply tail cannot drift
-	// into disagreeing about which sysctls admit transit. The rest of this
-	// bundle is host posture that does not admit transit on its own and
-	// stays unconditional.
-	writeTransitForwardSysctls(true)
-	sysctls := map[string]string{
-		"/proc/sys/net/ipv6/conf/all/accept_ra":     "0",
-		"/proc/sys/net/ipv6/conf/default/accept_ra": "0",
-		// l3mdev_accept: allow accepting TCP/UDP connections on management VRF
-		// interfaces from sockets not bound to the VRF (needed for SSH).
-		"/proc/sys/net/ipv4/tcp_l3mdev_accept": "1",
-		"/proc/sys/net/ipv4/udp_l3mdev_accept": "1",
-		// accept_local: allow packets with a source IP that is local to the
-		// machine on a different interface. Required when XDP SNAT rewrites
-		// src to a tunnel endpoint IP and XDP_PASS to kernel for routing —
-		// kernel would otherwise reject the packet as a martian.
-		"/proc/sys/net/ipv4/conf/all/accept_local": "1",
-	}
-	for path, val := range sysctls {
+// hostForwardingPostureSysctls is the host posture a firewall needs whether or
+// not transit is open. None of these knobs admits transit on its own, so they
+// are written at bring-up and on bootstrap exit, while the two transit knobs
+// stay with the transit gate (transitForwardSysctlPaths; #5275, #9725).
+//
+// A package var for the same reason as the transit knob paths: tests point it
+// at a temp dir. Never reassigned in production.
+var hostForwardingPostureSysctls = map[string]string{
+	// A firewall must not accept RAs: it uses its own configured routes
+	// exclusively.
+	"/proc/sys/net/ipv6/conf/all/accept_ra":     "0",
+	"/proc/sys/net/ipv6/conf/default/accept_ra": "0",
+	// l3mdev_accept: allow accepting TCP/UDP connections on management VRF
+	// interfaces from sockets not bound to the VRF (needed for SSH).
+	"/proc/sys/net/ipv4/tcp_l3mdev_accept": "1",
+	"/proc/sys/net/ipv4/udp_l3mdev_accept": "1",
+	// accept_local: allow packets with a source IP that is local to the
+	// machine on a different interface. Required when XDP SNAT rewrites
+	// src to a tunnel endpoint IP and XDP_PASS to kernel for routing —
+	// kernel would otherwise reject the packet as a martian.
+	"/proc/sys/net/ipv4/conf/all/accept_local": "1",
+}
+
+// applyHostForwardingPosture writes hostForwardingPostureSysctls. It does not
+// touch the transit knobs: since #9725 they open only when a re-evaluation of
+// the transit gate finds the dataplane armed with a live attached link, and can
+// close again (transit_closed_until_attach_9725.go).
+func applyHostForwardingPosture() {
+	for path, val := range hostForwardingPostureSysctls {
 		if err := os.WriteFile(path, []byte(val), 0644); err != nil {
 			slog.Warn("failed to set sysctl", "path", path, "err", err)
 		}
 	}
-	slog.Info("IP forwarding enabled, RA acceptance disabled")
+	slog.Info("host forwarding posture applied (RA acceptance disabled); kernel transit forwarding is left to the transit gate")
 }

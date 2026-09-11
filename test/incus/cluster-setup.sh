@@ -427,10 +427,12 @@ provision_vm() {
 	# at startup — no external script needed.
 
 	info "Configuring sysctl ($vm)..."
+	# #9725: transit forwarding starts closed; xpfd's transit gate opens it when
+	# the dataplane is armed with a live attached link.
 	incus exec "$rinst" -- bash -c 'cat > /etc/sysctl.d/99-bpf.conf <<EOF
 net.core.bpf_jit_enable=1
-net.ipv4.ip_forward=1
-net.ipv6.conf.all.forwarding=1
+net.ipv4.ip_forward=0
+net.ipv6.conf.all.forwarding=0
 net.ipv6.conf.all.accept_ra=0
 net.ipv6.conf.default.accept_ra=0
 EOF'
