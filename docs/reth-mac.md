@@ -10,12 +10,14 @@ In the HA cluster, RETH interfaces use VRRP on physical member interfaces (no bo
 
 ## Solution
 
-Program a deterministic virtual MAC on RETH physical member interfaces at daemon startup. Both nodes present the same MAC for each RETH, making IPv6 link-local addresses identical and eliminating neighbor cache issues.
+Program a deterministic virtual MAC on RETH physical member interfaces at daemon startup. The MAC is **per node**: its last byte is the node id (`config.RethVirtualMAC`, which `cluster.RethMAC` returns), so the two nodes present DIFFERENT MACs for the same RETH and a failover changes the RETH's L2 identity. Recovery rides on the GARP / unsolicited-NA burst -- `ReconcileVIPs` forces one precisely because the MAC just changed (#2081). The MAC is deliberately not shared: one MAC on two member interfaces in one L2 domain makes the switch see a single address on two ports (see the comment on `cluster.RethMAC`).
+
+The stable IPv6 router identity comes from a separate address instead. `cluster.StableRethLinkLocal` gives both nodes the same link-local `fe80::bf72:CC:RR`, with no node component, and it is the RA source address, so hosts keep one router identity across a failover. It sorts below the per-node EUI-64 link-locals, so the link-local resolver prefers it.
 
 ## MAC Format
 
 ```
-02:bf:72:CC:RR:00
+02:bf:72:CC:RR:NN
 ```
 
 | Byte | Value | Meaning |
@@ -23,13 +25,16 @@ Program a deterministic virtual MAC on RETH physical member interfaces at daemon
 | 0 | `02` | Locally-administered unicast (U/L bit set) |
 | 1 | `bf` | xpf identifier |
 | 2 | `72` | ASCII 'r' (bpf**r**x) |
-| 3 | `CC` | cluster_id (from config) |
-| 4 | `RR` | redundancy_group_id |
-| 5 | `00` | Reserved |
+| 3 | `CC` | cluster_id (from config; one byte, bounded 0..255 at commit) |
+| 4 | `RR` | redundancy_group_id (0..15 after commit) |
+| 5 | `NN` | node id (0 or 1) |
 
 Example for cluster_id=1:
-- reth0 (RG1): `02:bf:72:01:01:00` -> link-local `fe80::bf:72ff:fe01:100`
-- reth1 (RG2): `02:bf:72:01:02:00` -> link-local `fe80::bf:72ff:fe01:200`
+- reth0 (RG1): node 0 `02:bf:72:01:01:00` (EUI-64 link-local `fe80::bf:72ff:fe01:100`), node 1 `02:bf:72:01:01:01` (`fe80::bf:72ff:fe01:101`)
+- reth1 (RG2): node 0 `02:bf:72:01:02:00` (`fe80::bf:72ff:fe01:200`), node 1 `02:bf:72:01:02:01` (`fe80::bf:72ff:fe01:201`)
+- shared router link-local for RG1 on both nodes: `fe80::bf72:1:1` (`StableRethLinkLocal`)
+
+Earlier revisions of this document gave byte 5 as a reserved `00` and said both nodes present the same MAC. That was never what the code built; `CLAUDE.md`'s `02:bf:72:CC:RR:NN` was right (#9248).
 
 ## Ordering
 
@@ -953,7 +958,7 @@ node never terminally publishes a workerless snapshot while reporting success.
 
 | File | Function |
 |------|----------|
-| `pkg/cluster/reth.go` | `RethMAC(clusterID, rgID)` -- returns deterministic MAC |
+| `pkg/cluster/reth.go` | `RethMAC(clusterID, rgID, nodeID)` -- returns the per-node MAC (`config.RethVirtualMAC`) |
 | `pkg/cluster/reth.go` | `IsVirtualRethMAC(mac)` -- detects virtual RETH pattern |
 | `pkg/daemon/daemon_reth.go` | `renameRethMember()` -- renames a member found by virtual MAC (down → rename → **up**, #3920); takes the same `beforeCycle` AF_XDP worker-join hook as `programRethMAC` (#6911) |
 | `pkg/daemon/daemon_reth.go` | `programRethMAC()` -- sets MAC via netlink (step 2.6 in applyConfig); takes the mandatory `beforeCycle` AF_XDP worker-join hook (#5103) |
@@ -963,5 +968,5 @@ node never terminally publishes a workerless snapshot while reporting success.
 
 - **XDP forwarding**: `bpf_fib_lookup` automatically returns the virtual MAC as `fib.smac` -- no BPF changes needed
 - **GARP/NA**: `net.InterfaceByName()` returns the virtual MAC -- no code changes needed
-- **VRRP**: advertisements use the virtual MAC -- neighbor caches stay valid across failover
-- **IPv6 link-local**: both nodes derive the same `fe80::bf:72ff:fe01:RR00` -- seamless failover
+- **VRRP**: advertisements use the sending node's own virtual MAC, so a failover CHANGES the RETH's MAC. LAN hosts' neighbor caches do not stay valid; the takeover GARP / unsolicited-NA burst refreshes them (`becomeMaster` sends one, and `ReconcileVIPs` forces one after a MAC change, #2081)
+- **IPv6 link-local**: each node derives its OWN EUI-64 link-local from its per-node MAC (`fe80::bf:72ff:fe01:100` on node 0 vs `fe80::bf:72ff:fe01:101` on node 1 for cluster 1, RG1). The router identity that survives a failover is the shared `StableRethLinkLocal` address -- see Solution above
