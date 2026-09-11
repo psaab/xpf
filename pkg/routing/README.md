@@ -10,6 +10,18 @@ kernel route table; this package owns the *interfaces* routes hang off
 of — and, since #7409, it also **reads** the kernel route table back for
 the userspace dataplane FIB (see "Kernel-learned route import" below).
 
+**Link-local next hops carry their link (#9512).** An IPv6 link-local gateway
+is meaningless without its interface. The importer publishes each such leg as
+`gateway@<netdev>` (the kernel name from the leg's `LinkIndex`), the form the
+configured-route path already uses and the helper parses. Before this, the leg's
+`LinkIndex` was dropped, and the helper bound whichever interface came first in
+its connected-prefix scan: every addressed interface contributes an `fe80::/64`,
+so every OSPFv3-learned route (RFC 5340) was bound by snapshot order. A link-local
+leg whose link cannot be named refuses the whole route (ECMP stays
+all-or-nothing), with one deduplicated warning naming the route. Global and IPv4
+gateways are unchanged: they stay scope-less, and the helper infers them from
+the connected prefix.
+
 ## Structure (#1698 domain split)
 
 `Manager` (`routing.go`) is a thin **façade**: it owns the single
