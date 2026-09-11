@@ -253,10 +253,13 @@ func (m *Manager) Compile(cfg *config.Config) (*dataplane.CompileResult, error) 
 	// the daemon. buildSnapshot* returns the error up here; ApplyConfig
 	// fails closed and the previously published snapshot / dataplane state
 	// is retained (m.lastSnapshot is not advanced on the error path).
+	// #9684: read before the build samples the kernel (resampleForCompileLocked).
+	partialEpoch := m.partialUpdateEpoch.Load()
 	snap, err := buildSnapshotWithSchedulerStateAndNATCounters(cfg, ucfg, m.bumpGeneration(), m.readFIBGeneration(), activeState, m.routeOverlaySnapshot(), m.feedSnapshotOverlay(), result.NATCounterIDs)
 	if err != nil {
 		return nil, fmt.Errorf("userspace: build config snapshot: %w", err)
 	}
+	snap.partialUpdateEpoch = partialEpoch
 	// #1620: stamp the cold-path sample mask onto the snapshot. The
 	// daemon called SetColdPathSampleMask once at startup with the
 	// validated CLI flag value (or nil for "use default"). A nil
@@ -340,6 +343,10 @@ func (m *Manager) applyCompiledSnapshot(
 ) (*dataplane.CompileResult, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	// #9684: snap was built outside m.mu, so a partial update can have run after
+	// it sampled its sections. Re-sample what that update may have moved, before
+	// anything below reads the snapshot.
+	resampled := m.resampleForCompileLocked(snap)
 	// #3261: record whether this snapshot carries unrepresentable policy
 	// content BEFORE the publish, so the diagnostic is captured even when the
 	// helper rejects the snapshot (the publish path returns early on the
@@ -526,6 +533,8 @@ func (m *Manager) applyCompiledSnapshot(
 	if h, ok := snapshotContentHash(snap); ok {
 		m.lastSnapshotHash = h
 	}
+	// #9684: the helper now holds exactly the sections re-sampled above.
+	m.resolvePartialOutcomesLocked(resampled)
 	if err := m.applyHelperStatusLocked(&status); err != nil {
 		return result, fmt.Errorf("sync helper status: %w", err)
 	}
@@ -857,6 +866,7 @@ func (m *Manager) UpdatePolicyScheduleState(cfg *config.Config, activeState map[
 	next.FIBGeneration = m.readFIBGeneration()
 	next.GeneratedAt = time.Now().UTC()
 	next.Config = cfg
+	resampled := m.resampleUnresolvedSectionsLocked(&next) // #9684
 	// #6480: rebuild the schedule-affected policy + address-book sections
 	// (threading the cached feed overlay, #2049) and re-apply the StableZoneID
 	// zone quarantine's policy scrub via the shared helper, so this scheduler-only
@@ -903,6 +913,7 @@ func (m *Manager) UpdatePolicyScheduleState(cfg *config.Config, activeState map[
 	if h, ok := snapshotContentHash(&next); ok {
 		m.lastSnapshotHash = h
 	}
+	m.resolvePartialOutcomesLocked(resampled)
 	if err := m.applyHelperStatusLocked(&status); err != nil {
 		// #3780: the snapshot DID land (generation bumped, lastSnapshot
 		// updated above) — the schedule transition converged. A status
