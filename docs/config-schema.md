@@ -10918,11 +10918,11 @@ reserved for whole-dataplane selection where a rewrite shim
   `"${node}"` group the node0 retry on the same tree, as
   `compileConfigWithOpts` does) and each cluster node's expansion (node0 and
   node1, plus the requested node when a node compile passes any other ID,
-  since `compileConfigForNodeWithOpts` accepts one). An expansion that fails
-  contributes nothing, because the compile that performs it refuses the
-  config. Every view is computed on both nodes from the same candidate, so
-  both nodes decide identically. Earlier revisions approximated expansion
-  without running it (reachable groups, merge contexts,
+  negative ones included, since `compileConfigForNodeWithOpts` accepts any
+  integer). An expansion that fails contributes nothing, because the compile
+  that performs it refuses the config. Every view is computed on both nodes
+  from the same candidate, so both nodes decide identically. Earlier revisions
+  approximated expansion without running it (reachable groups, merge contexts,
   `apply-groups-except`), and each approximation disagreed with expansion
   somewhere; the expansion views are exact by construction. The lenient
   warning no longer names a quarantined instance: the union spans every view,

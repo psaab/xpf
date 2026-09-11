@@ -159,8 +159,8 @@ func emitNodeExpandedRoutingInstanceNames(tree *ConfigTree, nodeID int, out map[
 // upgraded node still boots (#1960 no-brick); compileRoutingInstances then
 // QUARANTINES the later-sorting colliding instance (see QuarantinedRoutingInstanceNames)
 // so the two never actually share a kernel table.
-func validateRoutingInstanceTableIDCollisionAST(tree *ConfigTree, nodeID int, lenient bool) ([]string, error) {
-	names := routingInstanceNameUnionAST(tree, nodeID)
+func validateRoutingInstanceTableIDCollisionAST(tree *ConfigTree, compiledNode *int, lenient bool) ([]string, error) {
+	names := routingInstanceNameUnionAST(tree, compiledNode)
 	sorted := make([]string, 0, len(names))
 	for name := range names {
 		// #9622: a reserved name never gets a table. compileRoutingInstances
@@ -266,8 +266,8 @@ func QuarantinedRoutingInstanceNames(names []string) map[string]struct{} {
 //     group a retry with node0 on the same, already-expanded tree).
 //   - The names after each cluster node's expansion (node0, node1), as
 //     compileConfigForNodeWithOpts expands them, plus the requested node's own
-//     expansion when a node compile passes any other ID (nodeID < 0 for the
-//     generic compile).
+//     expansion when a node compile passes any other ID, negative ones
+//     included (compiledNode is nil for the generic compile).
 //
 // Every view is computed on both nodes from the same candidate, so both nodes
 // decide identically. An expansion that fails contributes nothing: the compile
@@ -279,7 +279,7 @@ func QuarantinedRoutingInstanceNames(names []string) map[string]struct{} {
 // applies, groups applied under another stanza, honoured and ignored
 // exclusions, literal "${node}" groups. The expansion views are exact by
 // construction.
-func routingInstanceNameUnionAST(tree *ConfigTree, nodeID int) map[string]struct{} {
+func routingInstanceNameUnionAST(tree *ConfigTree, compiledNode *int) map[string]struct{} {
 	names := make(map[string]struct{})
 	for _, ri := range tree.FindChildren("routing-instances") {
 		collectRoutingInstanceNamesAST(ri, names)
@@ -287,10 +287,11 @@ func routingInstanceNameUnionAST(tree *ConfigTree, nodeID int) map[string]struct
 	emitGenericExpandedRoutingInstanceNames(tree, names)
 	emitNodeExpandedRoutingInstanceNames(tree, 0, names)
 	emitNodeExpandedRoutingInstanceNames(tree, 1, names)
-	// compileConfigForNodeWithOpts accepts any node ID and expands that node's
-	// own groups, so a node compile for any other ID counts its own view too.
-	if nodeID > 1 {
-		emitNodeExpandedRoutingInstanceNames(tree, nodeID, names)
+	// compileConfigForNodeWithOpts accepts any integer node ID, negative ones
+	// included, and expands that node's own groups (`node%d`), so a node compile
+	// for any other ID counts its own view too. A generic compile passes nil.
+	if compiledNode != nil && *compiledNode != 0 && *compiledNode != 1 {
+		emitNodeExpandedRoutingInstanceNames(tree, *compiledNode, names)
 	}
 	return names
 }
