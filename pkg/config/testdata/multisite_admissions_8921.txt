@@ -48,6 +48,7 @@ from dscp	firewall/family/any/filter/term/from,firewall/family/inet/filter/term/
 from icmp-code	firewall/family/any/filter/term/from,firewall/family/inet/filter/term/from,firewall/family/inet6/filter/term/from
 from icmp-type	firewall/family/any/filter/term/from,firewall/family/inet/filter/term/from,firewall/family/inet6/filter/term/from
 from interface	security/nat/destination/rule-set/from,security/nat/source/rule-set/from,security/nat/static/rule-set/from
+from next-header	firewall/family/any/filter/term/from,firewall/family/inet/filter/term/from,firewall/family/inet6/filter/term/from
 from protocol	firewall/family/any/filter/term/from,firewall/family/inet/filter/term/from,firewall/family/inet6/filter/term/from,policy-options/policy-statement/term/from
 from routing-instance	security/nat/destination/rule-set/from,security/nat/source/rule-set/from,security/nat/static/rule-set/from
 from source-address	firewall/family/any/filter/term/from,firewall/family/inet/filter/term/from,firewall/family/inet6/filter/term/from

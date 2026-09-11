@@ -195,9 +195,10 @@ pub(in crate::afxdp) static WG_DECAP_ECN_ILLEGAL_DROPS: AtomicU64 = AtomicU64::n
 /// `mtu_signalled`, and SKIPS the encap build — so this counter is NOT
 /// bumped in that case (no double-drop / double-count). This drop+bump now
 /// fires only for the residual case where no PTB is owed but the outer is
-/// still oversized: a non-DF IPv4 inner (downstream-fragmentable, so #2301/
-/// #2330 keep `Forward` to preserve pre-#2301 behaviour) whose encapped
-/// outer nonetheless exceeds the DF-set transport MTU.
+/// still oversized: a non-DF IPv4 inner (`ForwardOversizeNoDf`: no PTB, since
+/// the sender permits fragmentation, but this dataplane does not fragment
+/// before encapsulation, #9758) whose encapped outer exceeds the DF-set
+/// transport MTU.
 pub(in crate::afxdp) static GRE_ENCAP_DF_OVERSIZE_DROPS: AtomicU64 = AtomicU64::new(0);
 
 /// #2782: count of native-GRE decap frames DROPPED because the
@@ -1036,8 +1037,9 @@ pub(super) fn encapsulate_native_gre_frame(
     // the ordering: #2330 LANDED the signalling in the TX dispatcher, whose
     // pre-build post_transform_inner_mtu decision fires first and skips this
     // build whenever a PTB is owed. What reaches this drop is the residual
-    // where none is owed -- a non-DF IPv4 inner, downstream-fragmentable by
-    // design (#8942: "deferred" alone read as an outstanding gap).
+    // where none is owed -- a non-DF IPv4 inner (`ForwardOversizeNoDf`: the
+    // sender permits fragmentation, but this dataplane does not fragment before
+    // encapsulation, #9758) (#8942: "deferred" alone read as an outstanding gap).
     let outer_l3_len = gre_encapped_outer_len(outer_ip_len, gre_len, inner_packet.len());
     let outer_mtu = tunnel_outer_mtu(forwarding, decision, endpoint);
     if outer_l3_len > outer_mtu {

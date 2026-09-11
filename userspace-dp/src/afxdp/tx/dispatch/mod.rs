@@ -212,24 +212,18 @@ fn compute_forwarded_egress_ptb(
         let egress_decision =
             forwarded_egress_mtu_decision(source_frame, l3, meta.addr_family, mtu);
         // #9328: an oversized DF-CLEAR IPv4 datagram is still forwarded at full
-        // length — the behaviour is unchanged — but it is no longer booked as a
-        // plain successful forward. It used to be indistinguishable from a frame
-        // that FITS: same `Forward` value, then `enqueue_ok`, `enqueue_copy`,
-        // `pending_copy_tx_packets` and `tx_bytes_total`, and no exception. An
-        // operator debugging the downstream blackhole saw a healthy counter.
+        // length, but it is no longer booked as a plain successful forward. It
+        // used to be indistinguishable from a frame that FITS: same `Forward`
+        // value, then `enqueue_ok`, `enqueue_copy`, `pending_copy_tx_packets`
+        // and `tx_bytes_total`, and no exception.
         //
-        // The asymmetry this closes is with the TCP arm of the same outcome,
-        // which has recorded `tcp_segmentation_miss` since #1282 with the reason
-        // spelled out — "the dispatcher falls back to forwarding the original
-        // oversized frame, which the NIC/switch/peer then drops — black-holing
-        // the flow". The consequence is identical for UDP, ICMP, ESP, GRE and
-        // every forwarded IPv4 fragment; only the counter was missing.
+        // The TCP arm of an oversized forward has recorded
+        // `tcp_segmentation_miss` since #1282; this is the non-TCP counterpart,
+        // for UDP, ICMP, ESP, GRE and every forwarded IPv4 fragment.
         //
-        // Recorded, NOT dropped. Whether to fragment (RFC 791 permits it),
-        // drop-and-count, or keep forwarding is a policy decision this does not
-        // take: the wire-level fate of the oversize submission is unmeasured, so
-        // changing behaviour on it could break a path that works today. This
-        // counter is what makes that decision answerable.
+        // Recorded, NOT dropped (#9395). What happens next on each path is
+        // stated once, on `EgressMtuDecision::ForwardOversizeNoDf`. The
+        // exception is a sampled record, delivered or not.
         if matches!(egress_decision, EgressMtuDecision::ForwardOversizeNoDf) {
             record_exception(
                 recent_exceptions,
@@ -1484,7 +1478,8 @@ fn count_forwarded_tcp_segmentation_miss_if_needed(
 ///
 /// #1282: when segmentation is needed but both frame builders return
 /// `None`, the dispatcher falls back to forwarding the original oversized
-/// frame, which the NIC/switch/peer then drops — black-holing the flow.
+/// frame whole; for a DF-clear IPv4 frame, what then happens is stated on
+/// `EgressMtuDecision::ForwardOversizeNoDf`.
 /// The `dbg.seg_needed_but_none` counter that records this is
 /// `pub(in crate::afxdp)` and is never exported to Go/CLI, so it is not an
 /// operator-visible signal. We record a first-class `tcp_segmentation_miss`

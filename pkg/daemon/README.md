@@ -2780,6 +2780,21 @@ never lock an operator out of a remote box it manages.
   their fn, and are OMITTED rather than published as `0` when unwired — the #6828
   absent-vs-zero distinction).
 
+  **Routing reconcile retry owner (#9693).** Every apply reconciles the kernel
+  policy-routing rules (`applyPolicyRoutingRules`: next-table, rib-group and
+  firewall-filter PBR) and then republishes the userspace route snapshot from that
+  kernel state (`reconcileRouteLeakSnapshot`). #5844 and #5696 made both
+  failures deferred commit errors, but nothing re-ran them. A transient failure
+  left stale or missing cross-VRF policy in the kernel and a FIB built from it
+  until an unrelated apply, and on the applies nobody waits on (boot, DHCP lease,
+  feed, config-poll) it was only logged. The apply now latches
+  `routingReconcileDebt` (`noteRoutingReconcileResult`). The always-on
+  `routingReconcileReassertLoop` re-runs both reconciles every 30 s while the
+  debt is owed. Like its siblings, it takes `applySem` before reading the active
+  config and re-checks the debt inside. It never re-runs the FRR apply, whose
+  manager owns its own degraded retry. `RoutingReconcileDebt()` reports the
+  latch, a monotonic failure count and the last error.
+
   **Managed service-file reload debt (#6800, the recovery half of #6791/#6793
   applied to the two managed-FILE appliers):** `applySyslogFiles` and
   `applySystemNTP` converge an on-disk service configuration and then gate a

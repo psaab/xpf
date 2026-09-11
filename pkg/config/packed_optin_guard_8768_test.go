@@ -214,6 +214,28 @@ func packedOptInCases8768() map[string]packedOptInCase8768 {
 				return fmt.Sprintf("pw=%q keys=%v", ra.EncryptedPassword.Reveal(), ra.SSHKeys)
 			},
 		},
+		// #9620 (M5): the snmp community container opted into packedStatements.
+		"snmp/community": {
+			prefix: "snmp { ",
+			open:   "community public",
+			closer: " }",
+			stmts: map[string]string{
+				"clients": "clients 10.0.0.0/8",
+			},
+			second: map[string]string{
+				"clients": "clients 192.0.2.0/24",
+			},
+			read: func(c *Config) string {
+				if c.System.SNMP == nil {
+					return "<no snmp>"
+				}
+				out := ""
+				for _, cm := range c.System.SNMP.Communities {
+					out += fmt.Sprintf("name=%q auth=%q clients=%v", cm.Name, cm.Authorization, cm.Clients)
+				}
+				return out
+			},
+		},
 		"snmp/trap-group": {
 			prefix: "snmp { ",
 			open:   "trap-group tg1",
@@ -333,6 +355,31 @@ func packedOptInCases8768() map[string]packedOptInCase8768 {
 		// compact-normalize scope, so fixtures for them would be inert and the
 		// reverse check at the end of this cell rejects them. Six admitted
 		// leaves, all args:1 and non-multi, so no `second` is required.
+		// #9620 (M6): the interfaces unit container opted into packedStatements.
+		"interfaces/*/unit": {
+			prefix: "interfaces { ge-0/0/0 { flexible-vlan-tagging; ",
+			open:   "unit 0",
+			closer: " } }",
+			stmts: map[string]string{
+				"description": "description u0",
+				"vlan-id":     "vlan-id 10",
+			},
+			second: map[string]string{
+				"description": "description u1",
+				"vlan-id":     "vlan-id 11",
+			},
+			read: func(c *Config) string {
+				ifc := c.Interfaces.Interfaces["ge-0/0/0"]
+				if ifc == nil {
+					return "<no interface>"
+				}
+				out := ""
+				for n, u := range ifc.Units {
+					out += fmt.Sprintf("unit=%d desc=%q vlan=%d inner=%d ", n, u.Description, u.VlanID, u.InnerVlanID)
+				}
+				return out
+			},
+		},
 		"interfaces/*/tunnel": {
 			prefix: "interfaces { gr-0/0/0 { ",
 			open:   "tunnel",
@@ -974,6 +1021,9 @@ func TestPackedOptInHoldsForEveryLeafPair8768(t *testing.T) {
 	// wired the comparison becomes live and the stale check below fails, which
 	// is the signal to delete the entry and let the leaf be measured.
 	sameLeafUnobservable := map[string]string{
+		// #9620 (M6): the interfaces unit container opted into packedStatements.
+		"interfaces/*/unit description+description": "scalar binding: the compiler keeps the FIRST statement's value, so one instance and two read alike (measured #9620: `description u0; description u1;` reads desc=\"u0\")",
+		"interfaces/*/unit vlan-id+vlan-id":         "scalar binding: the compiler keeps the FIRST statement's value, so one instance and two read alike (measured #9620: `description u0; description u1;` reads desc=\"u0\")",
 		// issue 8939: the class-of-service BINDING containers. Every binding is
 		// a SCALAR field -- CoSInterfaceUnit.DSCPClassifier is one string, not a
 		// list -- so a repeated statement OVERWRITES rather than accumulating,
