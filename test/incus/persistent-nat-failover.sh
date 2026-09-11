@@ -78,14 +78,23 @@ TARGET="${TARGET:-$IPERF_TARGET4}"
 POOL_NAME="${POOL_NAME:-pnat7360}"
 # A pool range distinct from anything the default config uses, so a leftover
 # binding from another smoke cannot be mistaken for ours.
-# The pool address must be one the upstream ROUTES BACK, or the SNAT'd flow's
-# reply never returns and the smoke measures a broken path rather than the
-# lease. An arbitrary in-subnet address (172.16.50.90) is not assigned to any
-# interface and nothing answers ARP for it — measured: every connect failed
-# while the pool was applied, on a target that is otherwise reachable. The WAN
-# VIP follows the primary and is the address interface-mode SNAT would have
-# used, so return traffic lands exactly as it does today.
-POOL_ADDR="${POOL_ADDR:-$WAN_VIP4}"
+# The pool address must be one the TARGET's segment ROUTES BACK to the firewall,
+# or the SNAT'd flow's reply never returns and the smoke measures a broken path
+# rather than the lease. An arbitrary in-subnet address (172.16.50.90) failed
+# that way. So did WAN_VIP4, the previous default: on the loss userspace cluster
+# the iperf target 172.16.80.200 sits behind reth0.80, and a SYN translated to
+# 172.16.50.6 was never answered (#9729's first ledger run: CONNECT-FAILED, no
+# binding minted).
+#
+# So by default the pool is DISCOVERED, not assumed. resolve_pool reuses the
+# committed source pool whose /32 is proxy-ARPed on the interface unit carrying
+# TARGET, and adds only persistent-nat to it for the run. On this cluster that
+# is pool-snat-pool at 172.16.80.7, the pool #8573's accepted manual run used.
+# Setting POOL_ADDR selects dedicated mode instead: a fresh POOL_NAME at that
+# address with ports POOL_LOW-POOL_HIGH.
+POOL_MODE="reuse"
+if [ -n "${POOL_ADDR:-}" ]; then POOL_MODE="dedicated"; fi
+POOL_ADDR="${POOL_ADDR:-}"
 POOL_LOW="${POOL_LOW:-51000}"
 POOL_HIGH="${POOL_HIGH:-51099}"
 PNAT_TIMEOUT="${PNAT_TIMEOUT:-300}"
@@ -110,6 +119,46 @@ fail() { echo "  FAIL  $*"; FAIL=$((FAIL + 1)); ERRORS+=("$*"); }
 die()  { echo "FATAL: $*" >&2; exit 2; }
 
 fw_cli() { incus exec "$1" -- /usr/local/sbin/cli -c "$2" 2>/dev/null; }
+
+# reachable_source_pool <node> prints "<pool> <address>" for the first committed
+# source pool whose /32 address is proxy-ARPed on an interface unit whose subnet
+# contains $TARGET. It prints nothing when there is none (#9729).
+reachable_source_pool() {
+	fw_cli "$1" "show configuration | display set" | TARGET="$TARGET" python3 -c '
+import ipaddress, os, re, sys
+target = ipaddress.ip_address(os.environ["TARGET"])
+lines = sys.stdin.read().splitlines()
+nets = {}
+for l in lines:
+    m = re.match(r"set interfaces (\S+) unit (\d+) family inet address (\S+)", l)
+    if m:
+        nets.setdefault(m.group(1) + "." + m.group(2), []).append(ipaddress.ip_interface(m.group(3)).network)
+arped = set()
+for l in lines:
+    m = re.match(r"set security nat proxy-arp interface (\S+) address (\S+)", l)
+    if m and any(target in n for n in nets.get(m.group(1), [])):
+        arped.add(m.group(2).split("/")[0])
+for l in lines:
+    m = re.match(r"set security nat source pool (\S+) address (\S+)/32$", l)
+    if m and m.group(2) in arped:
+        print(m.group(1), m.group(2))
+        break
+'
+}
+
+# resolve_pool settles POOL_NAME and POOL_ADDR before anything is committed.
+resolve_pool() {
+	if [ "$POOL_MODE" = "dedicated" ]; then
+		info "pool: dedicated ${POOL_NAME} at ${POOL_ADDR}/32, ports ${POOL_LOW}-${POOL_HIGH} (POOL_ADDR set)"
+		return
+	fi
+	local found
+	found="$(reachable_source_pool "$FW0" || true)"
+	[ -n "$found" ] || die "no committed source pool is proxy-ARPed on the interface carrying $TARGET, so no pool address is known to route back; set POOL_ADDR to one that does"
+	POOL_NAME="${found%% *}"
+	POOL_ADDR="${found##* }"
+	info "pool: reusing ${POOL_NAME} at ${POOL_ADDR}/32 (proxy-ARPed on the unit carrying $TARGET); persistent-nat is added for this run only"
+}
 fw_sh()  { incus exec "$1" -- bash -lc "$2"; }
 
 # The persistent-NAT binding for our client, as the node reports it.
@@ -167,9 +216,17 @@ pnat_config_session() {
 	cat <<EOF
 configure
 rollback 0
+EOF
+	# A REUSED pool keeps its committed address and ports (#9729); only a
+	# dedicated pool is created here.
+	if [ "$POOL_MODE" = "dedicated" ]; then
+		cat <<EOF
 delete security nat source pool ${POOL_NAME}
 set security nat source pool ${POOL_NAME} address ${POOL_ADDR}/32
 set security nat source pool ${POOL_NAME} port range low ${POOL_LOW} high ${POOL_HIGH}
+EOF
+	fi
+	cat <<EOF
 set security nat source pool ${POOL_NAME} persistent-nat permit any-remote-host
 set security nat source pool ${POOL_NAME} persistent-nat inactivity-timeout ${PNAT_TIMEOUT}
 delete security nat source rule-set ${SNAT_RULESET} rule ${SNAT_RULE} then source-nat interface
@@ -213,6 +270,7 @@ apply_pnat_config() {
 	info "roles: RG0 primary=$PRIMARY standby=$STANDBY"
 	info "Retargeting ${SNAT_RULESET}/${SNAT_RULE} at a persistent-NAT pool on the PRIMARY ($PRIMARY)"
 	local out="${PNAT_TMP}/apply.out"
+	resolve_pool
 	pnat_config_session | incus exec "$PRIMARY" -- /usr/local/sbin/cli >"$out" 2>&1 || true
 	# Gate on the marker, never the exit status (#6440).
 	cos_require_markers "persistent-nat apply on $PRIMARY" "$out" \
@@ -234,6 +292,12 @@ restore_config() {
 	# over), and whichever node is secondary simply refuses with a message we
 	# discard. Attempting both is what makes the restore independent of where
 	# the primary ended up.
+	# #9729: a REUSED pool is the cluster's own and must survive; only the
+	# persistent-nat this run added is removed. A dedicated pool is deleted.
+	local restore_pool_line="delete security nat source pool ${POOL_NAME}"
+	if [ "$POOL_MODE" = "reuse" ]; then
+		restore_pool_line="delete security nat source pool ${POOL_NAME} persistent-nat"
+	fi
 	local node
 	for node in "$FW0" "$FW1"; do
 		incus exec "$node" -- /usr/local/sbin/cli >/dev/null 2>&1 <<EOF || true
@@ -241,7 +305,7 @@ configure
 rollback 0
 delete security nat source rule-set ${SNAT_RULESET} rule ${SNAT_RULE} then source-nat pool
 set security nat source rule-set ${SNAT_RULESET} rule ${SNAT_RULE} then source-nat interface
-delete security nat source pool ${POOL_NAME}
+${restore_pool_line}
 commit
 exit
 quit
