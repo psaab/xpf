@@ -1615,10 +1615,12 @@ pub(super) fn poll_binding_process_descriptor(
                         // `effective_resolution_target`, so the zone is correct;
                         // these bindings carry the translated address + port into
                         // the policy-match call so the address/port match also
-                        // runs on the post-translation tuple. Only port-based
-                        // DNAT carries a destination-port rewrite; static-DNAT
-                        // and NPTv6 preserve the L4 port, so the original port
-                        // flows through for those.
+                        // runs on the post-translation tuple. Port-based DNAT
+                        // carries a destination-port rewrite, and so does a
+                        // static-DNAT rule that maps a port (`static_nat.rs` sets
+                        // `rewrite_dst_port` from the rule's `mapped_port`). A
+                        // whole-address static rule and NPTv6 leave it unset, so
+                        // the original port flows through only for those (#9694).
                         //
                         // #2358: NAT64 inbound now also matches the
                         // POST-translation destination — the real internal IPv4

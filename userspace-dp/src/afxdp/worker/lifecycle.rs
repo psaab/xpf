@@ -115,8 +115,10 @@ pub(super) fn poll_binding(
                 shared_recycles,
             );
             // Critical: drain fill ring even under backpressure so the NIC can
-            // still receive packets. Without this, fill ring starvation causes
-            // mlx5 to fall back to non-XSK NAPI, leaking packets to the kernel.
+            // still receive packets. With no free fill-ring frames, mlx5 cannot
+            // post RX WQEs: it counts `rx_xsk_buff_alloc_err` and drops the
+            // incoming packets (see `maybe_wake_rx` in `tx/rings.rs`). There is
+            // no fallback to the regular RQ in upstream v6.18 (#9695).
             let _ = drain_pending_fill(binding, now_ns);
             counters.flush(&binding.live);
             update_binding_debug_state(binding);
