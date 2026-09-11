@@ -8872,6 +8872,17 @@ pre-#4070 OVERRIDE. `isLeafListSchema` therefore requires `multi && children==ni
   leaf-list) still unions — the flag lives on the `then community` node, so the
   from/then keyword collision is resolved by schema CONTEXT, not by keyword.
 
+**A self-repeating run is carried, not deduplicated (#9627).** A group member
+equal to the leaf's own keyword and unquoted (`export [ A export ]`) is the
+ambiguous #9027 shape. The union appends it to the merged node's keys whatever
+the inline leaf's shape, and never deduplicates it, so the #9027 gate on the
+group-expanded tree refuses it (strict) or warns (lenient). That matches what
+happens when the same run is authored inline or inherited with no inline leaf.
+The union used to read group members through `firewallMatchValues`, which drops
+that token, so an inline leaf of the same name made the ambiguity vanish before
+the gate could see it. A QUOTED member named like the keyword is an ordinary
+value: it is unioned with its quote kept, where it used to be dropped.
+
 **Implementation.** `mergeNodes(dst, src, ancestorPath)` threads the from-root
 key path (the same `ancestorPath` `expandGroupsRecursive` already builds for
 group-context walking). `isLeafListSchema(ancestorPath, key)` walks `setSchema`
