@@ -10875,19 +10875,19 @@ reserved for whole-dataplane selection where a rewrite shim
   reserved name at strict commit and commit-check (`CheckText`), on both
   compiler cores (`CompileConfig*` and `CompileConfigForNode*`). It judges the
   same three-view name union as the `#3855` table-id gate
-  (`routingInstanceNameUnionAST`): every top-level `routing-instances` root
-  and every `groups` block an `apply-groups` reaches (#9657) before expansion,
-  plus the node0 and node1 expansions. Both cluster nodes therefore decide
-  identically. The union now includes the brace-elided leaf spelling
-  `routing-instances { mgmt instance-type virtual-router; }` (#8787), which
-  the compiler builds an instance from. The shared name scan used to skip
-  every leaf, so neither gate saw a packed instance. At `bdc238675` two packed
-  instances folding to one table pass the strict gate and the runtime then
-  quarantines one with a warning; the widened scan rejects them. That view
-  used to count instances in `groups` blocks nothing applies as well, in both
-  spellings, refusing configs whose effective instances do not collide; #9657
-  restricted it to groups an `apply-groups` reaches. The tolerant load and
-  peer-sync paths skip the gate (`lenientReservedRoutingInstanceName`), and
+  (`routingInstanceNameUnionAST`): every top-level `routing-instances` root,
+  plus the names the generic compile's and each cluster node's group expansion
+  land (#9657). Both cluster nodes therefore decide identically. The union now
+  includes the brace-elided leaf spelling `routing-instances { mgmt
+  instance-type virtual-router; }` (#8787), which the compiler builds an
+  instance from. The shared name scan used to skip every leaf, so neither gate
+  saw a packed instance. At `bdc238675` two packed instances folding to one
+  table pass the strict gate and the runtime then quarantines one with a
+  warning; the widened scan rejects them. The union used to count instances in
+  `groups` blocks nothing applies as well, in both spellings, refusing configs
+  whose effective instances do not collide; #9657 replaced that pre-expansion
+  view with the compile paths' own expansions. The tolerant load and peer-sync
+  paths skip the gate (`lenientReservedRoutingInstanceName`), and
   `compileRoutingInstances` QUARANTINES the instance with one warning, so the
   node boots and the daemon never plans it. The daemon also skips a reserved
   name as a second line of defence; no test covers that part. The quarantine
@@ -10904,43 +10904,35 @@ reserved for whole-dataplane selection where a rewrite shim
   hierarchical including brace-elided, both compiler cores, the collision
   ordering, packed-leaf collisions) and
   `pkg/configstore/check_reserved_ri_9622_test.go` (`CheckText`).
-- **#9657 (the routing-instance collision view counts only groups something
-  applies):** the `#3855` routing-instance table-id gate's pre-expansion view
-  counted instances in every `groups` block, including groups nothing applies.
-  Group expansion drops such a group, so an instance declared only there never
-  compiles on either node. The strict path still refused a config whose
-  effective instances do not collide (`ri7` plus a `ri116` in an unapplied
-  group, both folding to table 957120), and the lenient warning named the
-  active `ri7` as quarantined while the runtime kept it.
-  `reachableGroupNamesAST` (`pkg/config/groups_reachable_9657.go`) now
-  computes, without expanding, the groups whose `routing-instances` subtree
-  expansion can merge. It seeds from applications at the top level or directly
-  under a `routing-instances` stanza: expansion walks a group only down to the
-  context of its `apply-groups`, so a group applied under `system` adds no
-  instance. It counts each reference unresolved and resolved for node0 and
-  node1, so both nodes compute the same set (a compile without node variables
-  expands a group literally named `${node}` as is), and it searches each
-  reached group's own body the same way. An `apply-groups-except` that group
-  expansion honours (`#9422`) drops a group from the count: a top-level
-  application excluded at the top level or at any `routing-instances` root, or
-  an application directly under a root excluded at every root. Where the
-  exclusion cannot be decided without expanding, the group is still counted,
-  which can only refuse a config: a group also reached through another group's
-  body, a `${node}` name, or the flat `set` spelling that expansion does not
-  read (`#9685`). The pre-expansion view counts only those groups; the node0
-  and node1 expansion views are unchanged. A collision against an applied
-  group, a `${node}` group applied on either node, or a reachable group when
-  no expansion succeeds is still refused. The lenient warning no longer names
-  a quarantined instance: the union spans both nodes' views, so it cannot know
-  which instance this node drops, and the runtime quarantine warns naming the
-  one it does. An unquoted `apply-groups`, `apply-groups-except` or
+- **#9657 (the routing-instance collision gate counts only instances some
+  compile path lands):** the `#3855` routing-instance table-id gate's
+  pre-expansion view counted instances in every `groups` block, including
+  groups nothing applies. Group expansion drops such a group, so an instance
+  declared only there never compiles on either node. The strict path still
+  refused a config whose effective instances do not collide (`ri7` plus a
+  `ri116` in an unapplied group, both folding to table 957120), and the
+  lenient warning named the active `ri7` as quarantined while the runtime kept
+  it. `routingInstanceNameUnionAST` now unions every top-level
+  `routing-instances` root with the names each compile path's own group
+  expansion lands: the generic compile (no node variables, and on an undefined
+  `"${node}"` group the node0 retry on the same tree, as
+  `compileConfigWithOpts` does) and each cluster node's expansion (node0,
+  node1). An expansion that fails contributes nothing, because the compile
+  that performs it refuses the config. Every view is computed on both nodes
+  from the same candidate, so both nodes decide identically. Earlier revisions
+  approximated expansion without running it (reachable groups, merge contexts,
+  `apply-groups-except`), and each approximation disagreed with expansion
+  somewhere; the expansion views are exact by construction. The lenient
+  warning no longer names a quarantined instance: the union spans every view,
+  so it cannot know which instance this node drops, and the runtime quarantine
+  warns naming the one it does. An `apply-groups`, `apply-groups-except` or
   `apply-macro` statement under `routing-instances` is not a routing instance.
   Expansion strips only `apply-groups`, and `compileRoutingInstances` built a
   routing instance, and a VRF, named `apply-macro` or `apply-groups-except`
-  from the other two. That phantom could also quarantine a real instance whose
+  from the other two; that phantom could also quarantine a real instance whose
   table id collided with it while the strict gate saw nothing. The compiler
   and the collision scan now skip them through one predicate
-  (`isApplyStatementNode`); the predicate goes by name, quoted or not, because
+  (`isApplyStatementNode`). The predicate goes by name, quoted or not, because
   group expansion and the `#9323` validator also go by name and a quote does
   not survive rendering, which an HA peer reparses. An instance therefore
   cannot take one of these names. A one-key stanza under such a name that
@@ -10951,7 +10943,7 @@ reserved for whole-dataplane selection where a rewrite shim
   apply-macro interface k v`) has the same shape, so the shape cannot prove an
   instance was meant. A two-key statement such as `apply-macro M { interface
   ...; }` is neither warned nor refused. The zone (`#3075`) and tunnel
-  (`#1873`) gates' pre-expansion views still count every `groups` block.
+  (`#1873`) gates still count every `groups` block before expansion.
   Regression coverage:
   `pkg/config/routinginstanceid_unapplied_groups_9657_test.go`.
 - **#3444 (destination-NAT rule-set `to` scope reject):** a Junos

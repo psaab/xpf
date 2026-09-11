@@ -93,8 +93,8 @@ func TestTableIDGateReachabilityInFlatSetForm_9657(t *testing.T) {
 		t.Errorf("#9657 flat set: once the group is applied the collision must be refused, got %v", err)
 	}
 	failing := append(append([]string{}, base...), "set apply-groups unused", "set apply-groups missing9657")
-	if _, err := CompileConfig(setTree9622(t, failing...)); err == nil || !strings.Contains(err.Error(), "table-id collision") {
-		t.Errorf("#9657 flat set: a reachable group must be counted when no expansion succeeds, got %v", err)
+	if _, err := CompileConfig(setTree9622(t, failing...)); err == nil {
+		t.Errorf("#9657 flat set: a config whose expansion fails must be refused")
 	}
 }
 
@@ -116,13 +116,11 @@ func TestTableIDGateStillRejectsAReachableGroup_9657(t *testing.T) {
 	}
 }
 
-// When no node's expansion succeeds, the pre-expansion view is the only one that
-// sees a group. Each case applies an undefined group as well, and the gate runs
-// before expansion, so a collision error here can only come from that view: it
-// must still count a group reached directly, through ${node}, transitively, or
-// from a nested apply-groups.
-func TestTableIDGateCountsReachableGroupsWhenExpansionFails_9657(t *testing.T) {
-	assertFixtureCollides9657(t)
+// When a group expansion fails, the compile path that performs it refuses the
+// whole config, so nothing declared in a group can land. That is why the name
+// union needs no pre-expansion approximation of the groups (#9657). Each case
+// also applies an undefined group, and each must be refused.
+func TestConfigWithAFailingExpansionIsRefused_9657(t *testing.T) {
 	for _, tc := range []struct{ name, text string }{
 		{"direct", group9657("g1", false) + "apply-groups [ g1 missing9657 ];\n" + activeRI7_9657},
 		{"through ${node} to node0", group9657("node0", false) + "apply-groups [ \"${node}\" missing9657 ];\n" + activeRI7_9657},
@@ -132,16 +130,8 @@ func TestTableIDGateCountsReachableGroupsWhenExpansionFails_9657(t *testing.T) {
 		{"from a nested apply-groups", group9657("g1", false) +
 			"routing-instances {\n    apply-groups [ g1 missing9657 ];\n    ri7 {\n        instance-type virtual-router;\n    }\n}\n"},
 	} {
-		_, err := compile9657(t, tc.text, false)
-		if err == nil || !strings.Contains(err.Error(), "table-id collision") {
-			t.Errorf("#9657 %s: the group holding ri116 is reachable but no expansion succeeds; the pre-expansion "+
-				"view must still report the collision, got %v", tc.name, err)
-		}
-		// Control: without the colliding instance the same config fails on the
-		// undefined group, so the collision above is the pre-expansion view's.
-		ctl := strings.Replace(tc.text, "ri116", "ri9657control", 1)
-		if _, err := compile9657(t, ctl, false); err == nil || strings.Contains(err.Error(), "table-id collision") {
-			t.Errorf("control %s: without ri116 the config must fail on something other than a collision, got %v", tc.name, err)
+		if _, err := compile9657(t, tc.text, false); err == nil {
+			t.Errorf("#9657 %s: an expansion that fails must refuse the whole config", tc.name)
 		}
 	}
 }
@@ -204,37 +194,6 @@ func TestLenientCollisionWarningNeverNamesAKeptInstance_9657(t *testing.T) {
 	}
 	if !collision {
 		t.Errorf("control: the collision across the two nodes' views must still be reported; warnings=%v", cfg.Warnings)
-	}
-}
-
-// The union also accepts a groups node that carries the group name in its own
-// Keys (Node{Keys:["groups","g1"]}). Neither the hierarchical parser nor
-// SetPath builds that shape for these spellings (both nest the group name as a
-// child), so it is constructed directly and the reachability check on that
-// branch is exercised rather than assumed.
-func TestRoutingInstanceUnionFiltersTheMergedGroupShape_9657(t *testing.T) {
-	body, errs := NewParser("routing-instances {\n    ri116 {\n        instance-type virtual-router;\n    }\n}\n").Parse()
-	if len(errs) > 0 {
-		t.Fatalf("fixture must parse: %v", errs)
-	}
-	build := func(apply bool) *ConfigTree {
-		active, errs := NewParser(activeRI7_9657).Parse()
-		if len(errs) > 0 {
-			t.Fatalf("fixture must parse: %v", errs)
-		}
-		tree := &ConfigTree{}
-		tree.Children = append(tree.Children, &Node{Keys: []string{"groups", "g1"}, Children: body.Clone().Children})
-		if apply {
-			tree.Children = append(tree.Children, &Node{Keys: []string{"apply-groups", "g1"}, IsLeaf: true})
-		}
-		tree.Children = append(tree.Children, active.Children...)
-		return tree
-	}
-	if _, ok := routingInstanceNameUnionAST(build(false))["ri116"]; ok {
-		t.Errorf("#9657: the merged groups shape counts an instance from a group nothing applies")
-	}
-	if _, ok := routingInstanceNameUnionAST(build(true))["ri116"]; !ok {
-		t.Errorf("#9657: the merged groups shape drops an instance from an applied group")
 	}
 }
 
@@ -478,5 +437,61 @@ func TestTableIDGateHonoursAnExcludedGroup_9657(t *testing.T) {
 	}
 	if _, err := CompileConfig(setTree9622(t, flat...)); err == nil || !strings.Contains(err.Error(), "table-id collision") {
 		t.Errorf("#9657: group expansion ignores the flat exclusion (#9685), so ri116 lands and the collision must be refused, got %v", err)
+	}
+}
+
+// The union reads each compile path's own expansion, so an exclusion counts only
+// where expansion honours it. On a routing-instances root with extra keys the
+// exclusion is not honoured (siblingsExcludeGroup needs the same keys). Here the
+// node0 and node1 expansions fail on the undefined resolved groups, the generic
+// compile expands the literal "${node}" group, and G's ri116 lands beside ri7,
+// so the collision must be refused.
+func TestTableIDGateCountsAnExclusionExpansionDoesNotHonour_9657(t *testing.T) {
+	assertFixtureCollides9657(t)
+	text := "groups {\n    G {\n        " + braced116_9657 + "    }\n    \"${node}\" {\n        system {\n            host-name x;\n        }\n    }\n}\n" +
+		"apply-groups [ G \"${node}\" ];\nrouting-instances extra {\n    apply-groups-except G;\n    ri7 {\n        instance-type virtual-router;\n    }\n}\n"
+	if _, err := compile9657(t, text, false); err == nil || !strings.Contains(err.Error(), "table-id collision") {
+		t.Errorf("#9657: expansion does not honour the named root's exclusion, so ri116 lands and the collision must be "+
+			"refused, got %v", err)
+	}
+	cfg, err := compile9657(t, text, true)
+	if err != nil {
+		t.Fatalf("lenient compile: %v", err)
+	}
+	quarantined := false
+	for _, w := range cfg.Warnings {
+		if strings.Contains(w, "QUARANTINED") {
+			quarantined = true
+		}
+	}
+	if !quarantined {
+		t.Errorf("control: the runtime must land both instances and quarantine one; instances=%v", riNames9657(cfg))
+	}
+}
+
+// compileConfigWithOpts retries a failed "${node}" expansion with node0 on the
+// SAME, already-expanded tree. A group applied before the failure can therefore
+// add a node0 group that neither a fresh generic expansion nor a fresh node0
+// expansion sees. The generic view mirrors the retry, so what lands is counted.
+func TestTableIDGateMirrorsTheGenericNodeRetry_9657(t *testing.T) {
+	assertFixtureCollides9657(t)
+	text := "groups {\n    inj {\n        groups {\n            node0 {\n                " + braced116_9657 +
+		"            }\n        }\n    }\n}\napply-groups [ inj \"${node}\" ];\n" + activeRI7_9657
+	cfg, err := compile9657(t, text, true)
+	if err != nil {
+		t.Fatalf("fixture: the lenient compile must succeed through the node0 retry: %v", err)
+	}
+	quarantined := false
+	for _, w := range cfg.Warnings {
+		if strings.Contains(w, "QUARANTINED") {
+			quarantined = true
+		}
+	}
+	if !quarantined {
+		t.Fatalf("fixture: the retry must land the injected ri116 beside ri7 and quarantine one; instances=%v warnings=%v",
+			riNames9657(cfg), cfg.Warnings)
+	}
+	if _, err := compile9657(t, text, false); err == nil || !strings.Contains(err.Error(), "table-id collision") {
+		t.Errorf("#9657: the generic retry lands ri116, so the collision must be refused on the strict path, got %v", err)
 	}
 }
