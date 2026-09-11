@@ -188,8 +188,8 @@ func (d *Daemon) applyVRFReconcile(ctx context.Context, cfg *config.Config) (ctx
 	// earlier design where external VRFs were left alone; the
 	// namespace-claim policy in this code supersedes that plan. See
 	// the godoc on routing.ReconcileVRFs for the current contract.)
-	const mgmtVRFName = "mgmt"
-	const mgmtTableID = 999
+	const mgmtVRFName = config.ManagementVRFInstanceName // #9622: the one definition
+	const mgmtTableID = config.ManagementVRFTableID
 	mgmtIfaces := managementVRFIfaceSet(cfg)
 
 	if d.routing != nil {
@@ -197,6 +197,13 @@ func (d *Daemon) applyVRFReconcile(ctx context.Context, cfg *config.Config) (ctx
 		for _, ri := range cfg.RoutingInstances {
 			if ri.InstanceType == "forwarding" {
 				slog.Info("forwarding instance, skipping VRF creation",
+					"instance", ri.Name)
+				continue
+			}
+			if config.IsReservedRoutingInstanceName(ri.Name) {
+				// #9622 belt: pkg/config quarantines this on every compile path;
+				// never plan a second VRF of a reserved name if one slips through.
+				slog.Warn("routing instance uses a reserved VRF name, skipping VRF creation",
 					"instance", ri.Name)
 				continue
 			}
@@ -306,7 +313,7 @@ func (d *Daemon) rebindManagementVRFIfaces() error {
 	}
 	var errs []error
 	for ifName := range mgmtSet {
-		if err := d.routing.BindInterfaceToVRF(ifName, "mgmt"); err != nil {
+		if err := d.routing.BindInterfaceToVRF(ifName, config.ManagementVRFInstanceName); err != nil {
 			slog.Warn("failed to re-bind interface to management VRF",
 				"interface", ifName, "err", err)
 			errs = append(errs, fmt.Errorf("re-bind %s to management VRF: %w", ifName, err))
@@ -338,7 +345,7 @@ func (d *Daemon) bindRoutingInstanceMembers(cfg *config.Config) {
 	}
 	tunMap := cfg.TunnelNameMap()
 	for _, ri := range cfg.RoutingInstances {
-		if ri.InstanceType == "forwarding" {
+		if ri.InstanceType == "forwarding" || config.IsReservedRoutingInstanceName(ri.Name) {
 			continue
 		}
 		for _, ifaceName := range ri.Interfaces {

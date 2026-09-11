@@ -5,6 +5,8 @@ import (
 
 	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
+
+	"github.com/psaab/xpf/pkg/config"
 )
 
 // #7409 — the kernel-learned route importer.
@@ -83,10 +85,9 @@ import (
 // carries the same meaning it does everywhere else in the tree.
 const LearnedRouteImportPreference = 200
 
-// mgmtVRFTableID is the kernel routing table backing the management VRF.
-// Its SSOT is the ReconcileVRFs call in pkg/daemon daemon_apply.go
-// (mgmtTableID); it is duplicated here only to hard-exclude the table from
-// the import.
+// mgmtVRFTableID is the kernel routing table backing the management VRF
+// (config.ManagementVRFTableID, #9622), named here to hard-exclude the table
+// from the import.
 //
 // Management-interface (fxp*/fab*/em*) DHCP leases are NOT owned by FRR —
 // pkg/daemon collectDHCPRoutes skips them and programs them directly via
@@ -95,7 +96,7 @@ const LearnedRouteImportPreference = 200
 // are not part of the #7409 exposure. Importing them would be actively
 // harmful: it would hand the transit fast path a route to the management
 // gateway that the kernel path would never have used.
-const mgmtVRFTableID = 999
+const mgmtVRFTableID = config.ManagementVRFTableID
 
 // learnedRouteListFn is the netlink route enumerator, indirected so tests
 // can drive the importer against synthetic kernel tables and assert a

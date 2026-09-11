@@ -1463,6 +1463,14 @@ type compileOpts struct {
 	// later-sorting instance so the two never actually share a table. Same
 	// doctrine as lenientZoneIDCollision; mirrors the #3075 / #1873 id gates.
 	lenientRoutingInstanceTableIDCollision bool
+	// lenientReservedRoutingInstanceName (#9622) skips the reserved
+	// routing-instance name gate (validateReservedRoutingInstanceNamesAST).
+	// Strict commit rejects an instance named for a daemon-reserved VRF (the
+	// management VRF). The tolerant load / peer-sync paths skip the gate so an
+	// already-persisted config still BOOTS (#1960 no-brick), and
+	// compileRoutingInstances quarantines the instance with the one warning
+	// that reports it.
+	lenientReservedRoutingInstanceName bool
 	// lenientAddressBookNames (#3061, narrowed in #4340) downgrades the
 	// address-book / zone name gate (validateAddressBookEntryNamesStrict) from a
 	// hard compile error to a cfg.Warnings entry. The strict commit /
@@ -2790,6 +2798,7 @@ func lenientCompileOpts() compileOpts {
 		lenientWebManagementAuth:               true,
 		lenientZoneIDCollision:                 true,
 		lenientRoutingInstanceTableIDCollision: true,
+		lenientReservedRoutingInstanceName:     true,
 		lenientAddressBookNames:                true,
 		lenientReservedAddressNames:            true,
 		lenientAddressBookNameCollision:        true,

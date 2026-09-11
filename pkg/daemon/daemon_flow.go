@@ -213,10 +213,9 @@ func (d *Daemon) collectDHCPRoutes() []frr.DHCPRoute {
 	return routes
 }
 
-// mgmtVRFTableID is the kernel routing table backing the management VRF.
-// Its SSOT is the ReconcileVRFs call in daemon_apply.go (mgmtTableID); it is
-// duplicated here only for the netlink route reconcile below.
-const mgmtVRFTableID = 999
+// mgmtVRFTableID is the kernel routing table backing the management VRF, for
+// the netlink route reconcile below (#9622: config.ManagementVRFTableID).
+const mgmtVRFTableID = config.ManagementVRFTableID
 
 // The management-VRF route reconcile (applyMgmtVRFRoutes / applyMgmtVRFRoutesTo /
 // reconcileMgmtVRFRouteDeletes) programs the DHCP-learned routes for the

@@ -10849,6 +10849,51 @@ reserved for whole-dataplane selection where a rewrite shim
   interface node is still detected independently, matching
   `compileInterfaces`). Regression coverage:
   `pkg/config/interface_prewalk_all_roots_5744_test.go`.
+- **#9622 (reserved routing-instance names):** the daemon creates its own
+  management VRF under the instance name `mgmt` (`vrf-mgmt`, kernel table
+  999). Before #9622 nothing in `pkg/config` knew the name was taken: a
+  `routing-instances mgmt` stanza committed clean, and every apply then
+  planned two VRF specs of that name with different tables. That deleted and
+  re-created `vrf-mgmt` and bound the operator's members and the management
+  NICs to one device. `config.ManagementVRFInstanceName`,
+  `ManagementVRFDeviceName` and `ManagementVRFTableID` are now the one
+  definition of the name, device and table. The daemon's VRF planning and
+  binding, the networkd compiler, the HA socket wiring, the management route
+  reconcile and the FIB importer all read them.
+  `validateReservedRoutingInstanceNamesAST` rejects a routing instance of a
+  reserved name at strict commit and commit-check (`CheckText`), on both
+  compiler cores (`CompileConfig*` and `CompileConfigForNode*`). It judges the
+  same three-view name union as the `#3855` table-id gate
+  (`routingInstanceNameUnionAST`): every top-level `routing-instances` root
+  and every `groups` block before expansion, plus the node0 and node1
+  expansions. Both cluster nodes therefore decide identically. The union now
+  includes the brace-elided leaf spelling `routing-instances { mgmt
+  instance-type virtual-router; }` (#8787), which the compiler builds an
+  instance from. The shared name scan used to skip every leaf, so neither gate
+  saw a packed instance. At `bdc238675` two packed instances folding to one
+  table pass the strict gate and the runtime then quarantines one with a
+  warning; the widened scan rejects them. The table-id gate's pre-expansion
+  view also counts instances in `groups` blocks nothing applies, in both
+  spellings, so it can refuse a config whose effective instances do not
+  collide. That over-approximation predates #9622 and is tracked on #9657. The
+  tolerant load and peer-sync paths skip the gate
+  (`lenientReservedRoutingInstanceName`), and `compileRoutingInstances`
+  QUARANTINES the instance with one warning, so the node boots and the daemon
+  never plans it. The daemon also skips a reserved name as a second line of
+  defence; no test covers that part. The quarantine runs before the `#3855`
+  collision pass, and the table-id gate leaves reserved names out of its union
+  to match. A reserved instance therefore never claims a table or displaces an
+  instance that shares its hash (`mgmt` and `z1061437` fold to one id). **This
+  is an xpf reservation, not Junos parity:** Junos reserves `mgmt_junos`,
+  which exists only under `system management-instance`. xpf has no such knob
+  and always uses `mgmt`, so a Junos config with an ordinary instance named
+  `mgmt` must be renamed. Names are case-sensitive and the VRF device is
+  `vrf-` + the name, so `MGMT`, `mgmt1` and `vrf-mgmt` stay ordinary
+  instances. Regression coverage:
+  `pkg/config/routinginstance_reserved_name_9622_test.go` (flat-set and
+  hierarchical including brace-elided, both compiler cores, the collision
+  ordering, packed-leaf collisions) and
+  `pkg/configstore/check_reserved_ri_9622_test.go` (`CheckText`).
 - **#3444 (destination-NAT rule-set `to` scope reject):** a Junos
   destination-NAT rule-set has only a `from` clause (zone | interface |
   routing-instance) — DNAT translates the destination on inbound, so there

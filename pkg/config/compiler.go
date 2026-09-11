@@ -290,6 +290,14 @@ func compileConfigWithOpts(tree *ConfigTree, opts compileOpts) (*Config, error) 
 	if riTableIDErr != nil {
 		return nil, riTableIDErr
 	}
+	// #9622: reserved routing-instance name gate — same three-view name union
+	// as the table-id gate above. Strict only: the lenient paths skip it and
+	// compileRoutingInstances quarantines the instance with one warning.
+	if !opts.lenientReservedRoutingInstanceName {
+		if err := validateReservedRoutingInstanceNamesAST(tree); err != nil {
+			return nil, err
+		}
+	}
 
 	// #5180: duplicate hierarchical named-block gate. Runs PRE-expansion on the
 	// top-level stanzas (never a group body — apply-groups deep-merges rather
@@ -583,6 +591,14 @@ func compileConfigForNodeWithOpts(tree *ConfigTree, nodeID int, opts compileOpts
 		tree, opts.lenientRoutingInstanceTableIDCollision)
 	if riTableIDErr != nil {
 		return nil, riTableIDErr
+	}
+	// #9622: reserved routing-instance name gate — same three-view name union
+	// as the table-id gate above. Strict only: the lenient paths skip it and
+	// compileRoutingInstances quarantines the instance with one warning.
+	if !opts.lenientReservedRoutingInstanceName {
+		if err := validateReservedRoutingInstanceNamesAST(tree); err != nil {
+			return nil, err
+		}
 	}
 
 	// #5180: duplicate hierarchical named-block gate — see compileConfigWithOpts.

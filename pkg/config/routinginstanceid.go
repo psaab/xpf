@@ -14,7 +14,7 @@ import (
 //
 // The band sits ABOVE every other reserved kernel-table constant this project
 // uses — the kernel-reserved local/main/default tables (253/254/255), the mgmt
-// VRF table (999, pkg/daemon), and the RPM probe-pin band (ProbeTableBase
+// VRF table (999, ManagementVRFTableID), and the RPM probe-pin band (ProbeTableBase
 // 7000..7049) — so a stable routing-instance table can never collide with any
 // of them. It also stays >= 100 (the historical routing-instance table floor
 // several callers and tests still assume) by construction.
@@ -57,14 +57,24 @@ func StableRoutingInstanceTableID(name string) int {
 
 // collectRoutingInstanceNamesAST appends the routing-instance names declared
 // under a "routing-instances" node into out. Mirrors compileRoutingInstances
-// (compiler_routing.go): each non-leaf child's Keys[0] is the instance name in
-// both the hierarchical and flat-set AST shapes.
+// (compiler_routing.go): Keys[0] is the instance name in both the hierarchical
+// and flat-set AST shapes, and that includes the brace-elided spelling
+// `routing-instances { ri1 instance-type forwarding; }`, a LEAF whose Keys tail
+// carries the body (#8787). The compiler builds an instance from that leaf, so
+// this scan must see it: before #9622 it skipped every leaf, and neither the
+// table-id gate nor the reserved-name gate saw a packed instance (two packed
+// instances folding to one table passed the strict gate, and the runtime then
+// quarantined one with a warning). A bare `routing-instances { ri1; }` carries no properties,
+// compiles to nothing, and is still skipped. routingInstanceNameUnionAST's
+// pre-expansion view also counts instances in groups nothing applies; that
+// over-approximation predates this scan and now covers both spellings alike
+// (#9657).
 func collectRoutingInstanceNamesAST(riNode *Node, out map[string]struct{}) {
 	if riNode == nil {
 		return
 	}
 	for _, child := range riNode.Children {
-		if child.IsLeaf || len(child.Keys) == 0 {
+		if len(child.Keys) == 0 || (child.IsLeaf && len(child.Keys) < 2) {
 			continue
 		}
 		if name := child.Keys[0]; name != "" {
@@ -124,44 +134,21 @@ func emitNodeExpandedRoutingInstanceNames(tree *ConfigTree, nodeID int, out map[
 // QUARANTINES the later-sorting colliding instance (see QuarantinedRoutingInstanceNames)
 // so the two never actually share a kernel table.
 func validateRoutingInstanceTableIDCollisionAST(tree *ConfigTree, lenient bool) ([]string, error) {
-	names := make(map[string]struct{})
-	// View 1 — pre-expansion presence union (main + every groups block). Union
-	// across EVERY top-level `routing-instances` root (#5691): a split config can
-	// declare instances in a second stanza, and compileSections compiles them
-	// all, so a first-root-only scan would miss a collision spanning the roots.
-	for _, ri := range tree.FindChildren("routing-instances") {
-		collectRoutingInstanceNamesAST(ri, names)
-	}
-	for _, child := range tree.Children {
-		if child.Name() != "groups" {
-			continue
-		}
-		for _, group := range child.Children {
-			// Node{Keys:["groups","node0"]} merges the group name into
-			// Keys[1]; the children are then the group body. The other shape
-			// nests the group name as a child node.
-			if len(child.Keys) >= 2 {
-				for _, ri := range child.FindChildren("routing-instances") {
-					collectRoutingInstanceNamesAST(ri, names)
-				}
-				break
-			}
-			for _, ri := range group.FindChildren("routing-instances") {
-				collectRoutingInstanceNamesAST(ri, names)
-			}
-		}
-	}
-	// Views 2/3 — post-expansion instance names for node0 and node1. Both
-	// computed on both nodes from the shared candidate, so the union stays
-	// HA-symmetric; per-node expansion errors contribute the empty set.
-	emitNodeExpandedRoutingInstanceNames(tree, 0, names)
-	emitNodeExpandedRoutingInstanceNames(tree, 1, names)
-	if len(names) < 2 {
-		return nil, nil
-	}
+	names := routingInstanceNameUnionAST(tree)
 	sorted := make([]string, 0, len(names))
 	for name := range names {
+		// #9622: a reserved name never gets a table. compileRoutingInstances
+		// quarantines it BEFORE its own collision pass, so judging it here would
+		// report a collision the runtime never has, name the wrong instance as
+		// quarantined, and on the strict path reject with a table-id error
+		// instead of the reserved-name one.
+		if IsReservedRoutingInstanceName(name) {
+			continue
+		}
 		sorted = append(sorted, name)
+	}
+	if len(sorted) < 2 {
+		return nil, nil
 	}
 	sort.Strings(sorted)
 	byID := make(map[int]string, len(sorted))
@@ -242,4 +229,47 @@ func QuarantinedRoutingInstanceNames(names []string) map[string]struct{} {
 		owner[id] = name
 	}
 	return quarantined
+}
+
+// routingInstanceNameUnionAST is the three-view union of routing-instance names
+// the name gates judge (#3855, #9622): View 1 — the PRE-expansion presence union
+// across every top-level "routing-instances" root AND every "groups" block;
+// Views 2/3 — the names that survive expanding the candidate for node0 and
+// node1. It is a pure function of the candidate config, so a verdict built on
+// it is identical on both chassis-cluster nodes. One definition for every gate
+// that asks "which routing-instance names can this config create".
+func routingInstanceNameUnionAST(tree *ConfigTree) map[string]struct{} {
+	names := make(map[string]struct{})
+	// View 1 — pre-expansion presence union (main + every groups block). Union
+	// across EVERY top-level `routing-instances` root (#5691): a split config can
+	// declare instances in a second stanza, and compileSections compiles them
+	// all, so a first-root-only scan would miss a collision spanning the roots.
+	for _, ri := range tree.FindChildren("routing-instances") {
+		collectRoutingInstanceNamesAST(ri, names)
+	}
+	for _, child := range tree.Children {
+		if child.Name() != "groups" {
+			continue
+		}
+		for _, group := range child.Children {
+			// Node{Keys:["groups","node0"]} merges the group name into
+			// Keys[1]; the children are then the group body. The other shape
+			// nests the group name as a child node.
+			if len(child.Keys) >= 2 {
+				for _, ri := range child.FindChildren("routing-instances") {
+					collectRoutingInstanceNamesAST(ri, names)
+				}
+				break
+			}
+			for _, ri := range group.FindChildren("routing-instances") {
+				collectRoutingInstanceNamesAST(ri, names)
+			}
+		}
+	}
+	// Views 2/3 — post-expansion instance names for node0 and node1. Both
+	// computed on both nodes from the shared candidate, so the union stays
+	// HA-symmetric; per-node expansion errors contribute the empty set.
+	emitNodeExpandedRoutingInstanceNames(tree, 0, names)
+	emitNodeExpandedRoutingInstanceNames(tree, 1, names)
+	return names
 }

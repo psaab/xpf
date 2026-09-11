@@ -34,12 +34,12 @@ func (d *Daemon) resolveClusterVRFDevice(cc *config.ClusterConfig) string {
 	// have run but mgmtVRFInterfaces is empty due to VRF creation failure).
 	vrfDevice := ""
 	if len(d.mgmtVRFIfaceSet()) > 0 {
-		vrfDevice = "vrf-mgmt"
+		vrfDevice = config.ManagementVRFDeviceName
 	} else if cc.ControlInterface != "" {
 		// Control/fabric interfaces (em*, fab*) are always placed in
 		// vrf-mgmt by the compiler. Check if the VRF device exists.
-		if _, err := net.InterfaceByName("vrf-mgmt"); err == nil {
-			vrfDevice = "vrf-mgmt"
+		if _, err := net.InterfaceByName(config.ManagementVRFDeviceName); err == nil {
+			vrfDevice = config.ManagementVRFDeviceName
 		}
 	}
 	return vrfDevice
