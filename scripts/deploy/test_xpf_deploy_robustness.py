@@ -277,14 +277,15 @@ class VirshProbeThreeStateTests(unittest.TestCase):
                 got = xpf_deploy._virsh_domain_state("fw1")
             self.assertEqual(got, want, f"rc={rc} stderr={err!r}")
 
-    def test_missing_virsh_is_genuine_absence_8977(self):
-        # A MISSING BINARY is real absence -- virsh is not installed, so no
-        # libvirt domain can exist. That tolerance is correct and must survive;
-        # what must not is extending it to a tool that IS installed and failed
-        # to answer.
+    def test_missing_virsh_is_unknown_9325(self):
+        # #9325 reversed this cell. #8977 kept a missing binary as ABSENT on the
+        # claim "virsh is not installed, so no libvirt domain can exist". virsh
+        # is a CLIENT: a restricted unit PATH, sudo's secure_path or a half-done
+        # package upgrade raise FileNotFoundError while libvirtd runs the
+        # domain, and ABSENT is the state that lets teardown unlink its disk.
         with mock.patch.object(subprocess, "run", side_effect=FileNotFoundError()):
             self.assertEqual(xpf_deploy._virsh_domain_state("fw1"),
-                             xpf_deploy.DOMAIN_ABSENT)
+                             xpf_deploy.DOMAIN_UNKNOWN)
 
     def test_destroy_refuses_to_unlink_when_state_unknown_8977(self):
         removed = []

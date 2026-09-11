@@ -57,6 +57,11 @@ bake still signs, but the signed `xpf-<ver>.manifest` records `validated: false`
 (a full bake records `validated: true`). `scripts/dist/publish.py` refuses any
 image whose provenance is not `validated: true`, so an unvalidated dev/emergency
 image can never carry a release signature past the fail-closed publish boundary.
+The deploy side reads the same signed field (#9325): `xpf-deploy.py fetch`
+refuses to download, and `image-roll` refuses to roll, an image whose sidecar
+records `validated: false` unless `--allow-unvalidated` is passed, so a dev
+image that reaches a host outside the publish boundary is not installed or
+rolled silently.
 
 **An `XPF_ALLOW_UNPINNED_BASE=1` (unpinned) bake is likewise non-publishable
 (#5815).** Such a bake signs `base_image_pinned: false` into the same

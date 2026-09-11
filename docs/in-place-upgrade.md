@@ -2131,6 +2131,10 @@ node from a new baked image ONE AT A TIME (built on the existing per-node
    a missing/unsigned/mismatched manifest STOPS the roll (there is no
    `--allow-session-drop`-style bypass of the signature — that flag relaxes
    only the compatibility verdict, never the authentication of the input).
+   The same verified manifest's `validated` field is read too (#9325): an
+   image whose manifest records `validated: false` (a `--skip-validate`
+   bake) STOPS the roll unless `--allow-unvalidated` is passed, and a
+   manifest from a bake that predates the field is rolled with a warning.
    (mirrored in the driver, unit-tested in Go): sessions survive **iff**
    the peer's HA protocol is within the new image's
    `[min-compat, version]` window AND the session-sync protocol matches
