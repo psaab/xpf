@@ -105,7 +105,8 @@ class LibvirtNoStartTests(unittest.TestCase):
         self.assertIn("--print-xml", virt)
         vdef = _find_call(r.calls, "virsh")
         self.assertIsNotNone(vdef, "virsh define was not invoked for --no-start")
-        self.assertEqual(vdef[:2], ["virsh", "define"])
+        # #9669: virsh names the system URI, where the disks live.
+        self.assertEqual(vdef[:4], ["virsh", "-c", xpf_deploy.LIBVIRT_SYSTEM_URI, "define"])
 
     def test_start_path_boots_without_print_xml_or_virsh_define(self):
         r = RecordingRunner()
@@ -142,7 +143,9 @@ class DestroyVerbTests(unittest.TestCase):
         self.assertIn("virsh", progs)
         # destroy + undefine + overlay rm are all planned.
         joined = [" ".join(c) for c in r.calls]
-        self.assertTrue(any("virsh undefine" in j for j in joined))
+        # #9669: every virsh argv names its URI, and teardown plans both.
+        for uri in xpf_deploy.LIBVIRT_PROBE_URIS:
+            self.assertTrue(any(j.startswith(f"virsh -c {uri} undefine") for j in joined), joined)
         self.assertTrue(any(j.startswith("rm -f") and ".qcow2" in j
                             for j in joined))
 
@@ -239,8 +242,6 @@ class CleanupOnFailureTests(unittest.TestCase):
         self.assertEqual(deletes[0], ["incus", "delete", "--force", "fw-clean"])
 
 
-if __name__ == "__main__":
-    unittest.main()
 
 
 class VirshProbeThreeStateTests(unittest.TestCase):
@@ -292,8 +293,9 @@ class VirshProbeThreeStateTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             overlay = os.path.join(td, "fw1.qcow2")
             open(overlay, "w").close()
-            with mock.patch.object(xpf_deploy, "_virsh_domain_state",
-                                   return_value=xpf_deploy.DOMAIN_UNKNOWN), \
+            # #9669: destroy / cleanup ask _virsh_domain_locate (both URIs) first.
+            with mock.patch.object(xpf_deploy, "_virsh_domain_locate",
+                                   return_value=(xpf_deploy.DOMAIN_UNKNOWN, [])), \
                  mock.patch.object(xpf_deploy, "libvirt_overlay_path",
                                    return_value=overlay), \
                  mock.patch.object(xpf_deploy, "day0_iso_path",
@@ -319,8 +321,9 @@ class VirshProbeThreeStateTests(unittest.TestCase):
             overlay = os.path.join(td, "fw1.qcow2")
             iso = os.path.join(td, "fw1.iso")
             open(overlay, "w").close()
-            with mock.patch.object(xpf_deploy, "_virsh_domain_state",
-                                   return_value=xpf_deploy.DOMAIN_ABSENT), \
+            # #9669: destroy asks _virsh_domain_locate (both URIs) first.
+            with mock.patch.object(xpf_deploy, "_virsh_domain_locate",
+                                   return_value=(xpf_deploy.DOMAIN_ABSENT, [])), \
                  mock.patch.object(xpf_deploy, "libvirt_overlay_path",
                                    return_value=overlay), \
                  mock.patch.object(xpf_deploy, "day0_iso_path", return_value=iso), \
@@ -349,8 +352,9 @@ class VirshProbeThreeStateTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             overlay = os.path.join(td, "fw1.qcow2")
             open(overlay, "w").close()
-            with mock.patch.object(xpf_deploy, "_virsh_domain_state",
-                                   return_value=xpf_deploy.DOMAIN_UNKNOWN), \
+            # #9669: destroy / cleanup ask _virsh_domain_locate (both URIs) first.
+            with mock.patch.object(xpf_deploy, "_virsh_domain_locate",
+                                   return_value=(xpf_deploy.DOMAIN_UNKNOWN, [])), \
                  mock.patch.object(os, "remove", side_effect=removed.append):
                 xpf_deploy._cleanup_libvirt("fw1", overlay)
         self.assertEqual(removed, [],
@@ -358,3 +362,11 @@ class VirshProbeThreeStateTests(unittest.TestCase):
                          "domain's existence was UNKNOWN. This path escalates to "
                          "`sudo rm -f` when the unlink is refused, so it is the "
                          "one that gets past a permissions barrier")
+
+
+# #9669: the guard runs LAST. It used to sit above the #8977 class, and
+# `python3 <file>` (how scripts/run-selftests.sh runs it) exits inside
+# unittest.main() before that class is defined, so its five cells never ran
+# in `make selftest`.
+if __name__ == "__main__":
+    unittest.main()
