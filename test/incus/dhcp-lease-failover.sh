@@ -233,8 +233,11 @@ SCRIPT
 }
 
 # ns_up <ns> <ifname>: a namespace holding a macvlan over DHCP_CLIENT_IFACE.
+# Every command inside a namespace goes through `nsenter --net=/run/netns/<ns>`,
+# never `ip netns exec`: the latter remounts /sys, which the unprivileged LAN host
+# container refuses ("mount of /sys failed: Operation not permitted", #9729).
 ns_up() {
-	ssh_fw "$DHCP_CLIENT" "ip netns del '$1' 2>/dev/null; ip link del '$2' 2>/dev/null; ip netns add '$1' && ip link add '$2' link '$DHCP_CLIENT_IFACE' type macvlan mode bridge && ip link set '$2' netns '$1' && ip netns exec '$1' ip link set lo up && ip netns exec '$1' ip link set '$2' up"
+	ssh_fw "$DHCP_CLIENT" "ip netns del '$1' 2>/dev/null; ip link del '$2' 2>/dev/null; ip netns add '$1' && ip link add '$2' link '$DHCP_CLIENT_IFACE' type macvlan mode bridge && ip link set '$2' netns '$1' && nsenter --net=/run/netns/'$1' ip link set lo up && nsenter --net=/run/netns/'$1' ip link set '$2' up"
 }
 
 # ns_dhclient <ns> <ifname> [dhclient args]: one v4 attempt inside the
@@ -242,12 +245,12 @@ ns_up() {
 ns_dhclient() {
 	local ns="$1" ifn="$2"
 	shift 2
-	ssh_fw "$DHCP_CLIENT" "timeout 90 ip netns exec '$ns' dhclient -1 -v -sf '$CLIENT_SCRIPT' -pf '/run/dhclient-$ns.pid' -lf '/run/dhclient-$ns.leases' $* '$ifn' 2>&1"
+	ssh_fw "$DHCP_CLIENT" "timeout 90 nsenter --net=/run/netns/'$ns' dhclient -1 -v -sf '$CLIENT_SCRIPT' -pf '/run/dhclient-$ns.pid' -lf '/run/dhclient-$ns.leases' $* '$ifn' 2>&1"
 }
 
 # ns_addr4 <ns> <ifname> prints the namespace interface's IPv4 address, if any.
 ns_addr4() {
-	ssh_fw "$DHCP_CLIENT" "ip netns exec '$1' ip -4 -o addr show dev '$2' | awk '{print \$4}' | cut -d/ -f1 | head -1" || true
+	ssh_fw "$DHCP_CLIENT" "nsenter --net=/run/netns/'$1' ip -4 -o addr show dev '$2' | awk '{print \$4}' | cut -d/ -f1 | head -1" || true
 }
 
 # ns_down <ns> stops the namespace's clients and deletes it (the macvlan goes with it).
@@ -294,7 +297,7 @@ main() {
 	[[ -n "$addr4" ]] || die "client A acquired no v4 address"
 	pass "client A acquired v4 lease $addr4"
 	if [ "$DHCP_V6" = "1" ]; then
-		ssh_fw "$DHCP_CLIENT" "timeout 90 ip netns exec '$NS_A' dhclient -6 -1 -v -pf '/run/dhclient6-$NS_A.pid' -lf '/run/dhclient6-$NS_A.leases' '$IF_A'" || die "v6 DHCP SOLICIT failed (DHCP_V6=1)"
+		ssh_fw "$DHCP_CLIENT" "timeout 90 nsenter --net=/run/netns/'$NS_A' dhclient -6 -1 -v -pf '/run/dhclient6-$NS_A.pid' -lf '/run/dhclient6-$NS_A.leases' '$IF_A'" || die "v6 DHCP SOLICIT failed (DHCP_V6=1)"
 		pass "client A acquired a v6 lease"
 	fi
 
@@ -361,7 +364,7 @@ main() {
 	fi
 
 	info "6) (b) client A re-requests its address from the promoted node: REQUEST + ACK, no NAK, no DISCOVER"
-	ssh_fw "$DHCP_CLIENT" "ip netns exec '$NS_A' dhclient -x -sf '$CLIENT_SCRIPT' -pf '/run/dhclient-$NS_A.pid' -lf '/run/dhclient-$NS_A.leases' '$IF_A'" >/dev/null 2>&1 || true
+	ssh_fw "$DHCP_CLIENT" "nsenter --net=/run/netns/'$NS_A' dhclient -x -sf '$CLIENT_SCRIPT' -pf '/run/dhclient-$NS_A.pid' -lf '/run/dhclient-$NS_A.leases' '$IF_A'" >/dev/null 2>&1 || true
 	local renew addr4b
 	renew="$(ns_dhclient "$NS_A" "$IF_A" || true)"
 	addr4b="$(ns_addr4 "$NS_A" "$IF_A")"
