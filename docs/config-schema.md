@@ -214,6 +214,115 @@ The same distinction explains why the multi-site admission ratchet walks
 admitted *pairs* only: a node-declared opt-in is outside its population by
 construction, not by omission.
 
+### Multi-site admissions are adjudicated per site, not parent-qualified (#8921)
+
+`compactNormalizeInScope` takes no parent context, so an admitted
+`(container, head)` pair is live at every site where a container of that keyword
+declares that head. `testdata/multisite_admissions_8921.txt` records where: 202
+pairs over 531 (pair, site) cells. Each pair was adjudicated at one site, and
+`multisite_adjudication_8921_test.go` now adjudicates **every recorded cell**.
+
+**The per-site question is structural.** The pair decides only *whether* the
+fold fires. Where the container's identity ends (its `args`, a `compoundKey`
+sub-key) and what the head's statement is are read from the schema node at that
+site, and those are the inputs two sites sharing a keyword can disagree on. So
+the cell asks whether normalizing `C <id> H <value>;` builds exactly the tree the
+parser builds for `C <id> { H <value>; }` -- the braced spelling **as parsed**,
+which must itself be a fixed point of the pass -- comparing every `Node` field
+except source position. Both compile entries prune inactive nodes and then
+normalize before group expansion and every validator, and commit-check now does
+the same (see below), so an identical tree compiles and validates identically
+for that value -- including the cells whose value the #2419 census cannot
+observe. Measured at this change: 531 of 531.
+`TestMultisiteCellsAgreeWithTheCompiledCensus8921` cross-checks that premise
+against the compiled census (393 cells ruled equivalent, 0 divergent); a
+divergent cell there would mean some reader runs before the normalizer.
+
+**"For that value", not "for every value".** Where the container splits a packed
+run into statements (`packedStatements`), the split depends on the value tokens:
+a value that spells a sibling statement keyword can end a statement early. So the
+per-site result is a statement about values that do not spell a sibling keyword,
+and the value-dependent case is issue #9635 (below).
+
+**Commit-check used to expand groups before normalizing.**
+`schemaValidateExpandedTreeForNode` ran `ExpandGroups` on the tree as authored,
+and group expansion merges by statement SHAPE. With the admitted pair
+`(neighbor, hold-time)`, a group body `neighbor 192.0.2.1 hold-time 2;` packed
+did not meet the inline `neighbor 192.0.2.1 { hold-time 30; }`, was appended
+instead of overridden, and was refused as an invalid hold-time, while the braced
+group body merged, the override won, and the config validated clean; the
+compiler accepted both. Commit-check now runs strip inactive -> normalize ->
+expand, the compiler's order (see `pkg/configstore/README.md`). **Strip comes
+first for a reason:** the fold declines when the next sibling continues the
+container it would build (#8880), so an `inactive:` sibling the compiler never
+sees made commit-check decline a fold the compiler performs. The compiled census
+could not see either ordering defect, because it compiles through the compiler's
+own ordering.
+
+**Not fixed here: #9635.** `splitPackedStatements8768` ends a multi-value
+statement at the first token that names a sibling statement, so `security ike
+policy P1 { proposals [ P "proposal-set" ]; }` -- a reference to a proposal named
+`proposal-set` -- becomes `proposals P;` plus a bogus `proposal-set;`, in the
+braced spelling as well as the elided one. A decline keyed on the quote/bracket
+masks was tried and withdrawn: the #8437 fusion gate still refused the spelling
+at commit, and declining on any quoted token regressed `pre-shared-key
+ascii-text "s" "mode" aggressive;`, which master splits and accepts because a
+quoted statement head is valid. The masks are now carried onto every split
+statement, which a fix for both needs.
+
+**So item 1 is decided: the predicate stays keyword-keyed.** Parent
+qualification would put a parent term on every entry to guard against a
+structural mismatch that is measured absent at every live site and now fails by
+name if one appears. Measured at this change, 58 of the 202 pairs are multi-site
+only because one `schemaNode` is reachable by more than one path (for example
+`protocols` and `routing-instances <ri> protocols`), where a parent term would
+discriminate nothing. The case that *would* need parent qualification is a
+different one: admitting a pair at one site while deliberately refusing the
+elided spelling at another, for policy reasons -- the shape of the #6662
+login-body and #3043 policy-terminal-action exclusions. Structure cannot see
+that. The rejection-vs-acceptance arm of
+`TestCompactNormalizeScopePreservesCompiledResult8690` compiles one elided
+spelling per examinable site with the pass off and on, and its own comment lists
+what that cannot see: a gate that fires on a duplicate, a gate that fires on a
+trailing token, and content lost across a multi-statement body. A pair wanted at
+one site and refused at another is the point at which to build parent
+qualification.
+
+**Comparing every field found a defect no census could.** The fold moved `Keys`
+into the new statement and left `KeysQuoted` / `KeysBracketed` behind: the
+container kept a mask longer than its `Keys` (breaking the `ast.go` invariant)
+and the statement carried none. The #9027 self-repeat gate reads the quote bit,
+so `protocols bgp group g1 export A "export";` was refused at commit while
+`group g1 { export A "export"; }` committed, and the same held at
+`web-management api-auth api-key`. The fold and `splitBracedPackedChildren8886`
+now split both masks with the keys. Every census fixture value is an unquoted
+token, which is why no census could see it; the adjudication fixtures carry an
+authored quote and, for a multi-value leaf, a bracketed list, and assert that
+they do.
+
+**A statement directly under an instance slot is consulted only by name
+collision.** `normalizeCompactNodes` asks the predicate with `Keys[0]`, and under
+a wildcard slot that is the operator's instance name, so the parent's keyword is
+never the one asked. A pair matches there only when an instance is named exactly
+like an admitted container keyword -- an interface named `interfaces` asks
+`("interfaces", "unit")` -- and the fold then builds that statement's braced
+tree (`TestInstanceNamedLikeAnAdmittedKeyword8921`). The ratchet walk therefore
+records nothing at a slot. It used to carry the parent's keyword into the slot and
+recorded `interfaces unit` as live at `interfaces/*` for every interface, where
+the fold does not fire and the #2419 census rules the site divergent.
+
+**Not covered here: #9627.** A self-repeating multi-value run inherited from a
+group is refused on its own and accepted once an inline leaf of the same name
+exists -- a group-union path the #9027 gate does not see. It was found while
+checking whether group expansion also drops the quote mask, and is filed
+separately.
+
+**On the counts.** The issue was filed at 223 of 547; the ratchet landed at 163
+because it excludes `groups`, which mirrors the whole schema and makes every
+pair multi-site by construction; an independent walk later reported 112 of 494.
+The registry is the maintained population, and it has grown with later
+admissions.
+
 
 **Issue 8904 is the same trio with only the middle decision missing.** `interfaces
 <i> [unit <n>] tunnel` and `firewall policer <p> if-exceeding` had the pair

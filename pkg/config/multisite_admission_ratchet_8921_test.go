@@ -14,10 +14,11 @@ import (
 // measuring a single fixture at a single site.
 //
 // This is #8921's item 3 -- the cheapest of its three asks and the one that
-// stops the population growing while the other two are open. It does NOT
-// adjudicate the extra sites (item 2) and does NOT parent-qualify the
-// predicate (item 1). It makes a new multi-site admission impossible to land
-// silently.
+// stops the population growing while the other two are open. It makes a new
+// multi-site admission impossible to land silently. It does not itself
+// adjudicate anything: every cell it records is adjudicated by
+// multisite_adjudication_8921_test.go (item 2), and docs/config-schema.md
+// records why that settles item 1 without parent-qualifying the predicate.
 //
 // WHY THAT IS THE USEFUL BOUNDARY. Items 1 and 2 are large: parent-qualifying
 // means giving the predicate context it does not have and adding a parent term
@@ -97,10 +98,19 @@ func sameSites8921(a, b []string) bool {
 // (container keyword, head) pair, records the paths where a container of that
 // keyword DECLARES that head.
 //
-// Descends into `wildcard` nodes carrying the PARENT's keyword, because an
-// instance slot is a name and not a container keyword -- the same traversal
-// the #8880 ratchet documents, and an earlier version of that walk silently
-// missed pairs reachable only through an instance slot.
+// Descends into `wildcard` nodes, because an earlier version of the #8880
+// walk silently missed pairs reachable only through an instance slot -- but
+// records NOTHING at the slot itself. A statement directly under a wildcard
+// slot has the operator's INSTANCE NAME in Keys[0], and normalizeCompactNodes
+// asks the predicate with Keys[0] -- so the parent's keyword is never the one
+// asked, and a pair is consulted there only when an operator names an instance
+// exactly like an admitted container keyword (an interface named `interfaces`).
+// The fold then builds the braced tree of that statement
+// (TestInstanceNamedLikeAnAdmittedKeyword8921), so the slot has nothing of its
+// own to adjudicate. This walk used to carry the parent's keyword into the slot
+// and recorded `interfaces unit` as live at `interfaces/*` for every interface;
+// measured, the fold does not fire on `interfaces { ge-0/0/0 unit 0; }`, and the
+// #2419 census rules that site divergent for exactly that reason.
 //
 // EXCLUDES `groups`, which mirrors the whole schema. Including it makes every
 // admitted pair multi-site by construction -- measured at 575 of 575 -- and
@@ -125,7 +135,7 @@ func admittedDeclaringSites8921() map[string][]string {
 			walk(path+"/"+name, name, c)
 		}
 		if n.wildcard != nil {
-			walk(path+"/*", kw, n.wildcard)
+			walk(path+"/*", "", n.wildcard)
 		}
 	}
 	for k, c := range setSchema.children {

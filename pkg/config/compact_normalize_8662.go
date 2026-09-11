@@ -169,6 +169,17 @@ func normalizeCompactNodes(nodes []*Node, schema *schemaNode, inScope func(conta
 				}
 				tail := append([]string(nil), node.Keys[identity:]...)
 				body := node.Children
+				// #8921: KeysQuoted and KeysBracketed are PER-KEY masks (ast.go:
+				// nil, or exactly len(Keys)), so they have to move with the keys
+				// or they describe the wrong tokens. This fold used to move only
+				// Keys: the container kept a mask longer than its own Keys and
+				// every statement it created carried none. The authored quote was
+				// therefore gone by the time the #9027 self-repeat gate read it,
+				// and `group g1 export A "export";` was REFUSED at commit while
+				// `group g1 { export A "export"; }` committed -- two spellings of
+				// one statement, split by the pass whose job is to make them one.
+				quoted := keyMask8921(node.KeysQuoted, len(node.Keys))
+				bracketed := keyMask8921(node.KeysBracketed, len(node.Keys))
 				node.Keys = append([]string(nil), node.Keys[:identity]...)
 				node.Children = nil
 				node.IsLeaf = false
@@ -191,8 +202,17 @@ func normalizeCompactNodes(nodes []*Node, schema *schemaNode, inScope func(conta
 					node.Keys = append(node.Keys, tail...)
 					node.Children = body
 				} else {
+					node.setKeysQuoted(maskSlice8921(quoted, 0, identity))
+					node.setKeysBracketed(maskSlice8921(bracketed, 0, identity))
+					// splitPackedStatements8768 returns consecutive slices of
+					// tail, so each statement's mask starts where the previous
+					// statement's keys ended.
+					off := identity
 					for i, stmt := range stmts {
 						child := &Node{Keys: stmt, IsLeaf: true}
+						child.setKeysQuoted(maskSlice8921(quoted, off, off+len(stmt)))
+						child.setKeysBracketed(maskSlice8921(bracketed, off, off+len(stmt)))
+						off += len(stmt)
 						// The braced body belongs to the LAST packed statement --
 						// the deepest node the run names. Attaching it to the
 						// container, or to every statement, invents structure the
@@ -360,13 +380,24 @@ func splitBracedPackedChildren8886(node *Node, container *schemaNode) int {
 			out = append(out, ch)
 			continue
 		}
+		// #8921: the per-key masks travel with the keys onto every statement
+		// built from a slice of ch.Keys, which otherwise loses the authored
+		// quote/bracket bit of each token. (The split DECISION does not read
+		// them yet; that, together with the #8437 fusion gate, is issue 9635.)
+		quoted := keyMask8921(ch.KeysQuoted, len(ch.Keys))
+		bracketed := keyMask8921(ch.KeysBracketed, len(ch.Keys))
 		stmts := splitPackedStatements8768(ch.Keys, container)
 		if len(stmts) < 2 {
 			out = append(out, ch)
 			continue
 		}
+		off := 0
 		for _, st := range stmts {
-			out = append(out, &Node{Keys: append([]string(nil), st...), IsLeaf: true})
+			stmt := &Node{Keys: append([]string(nil), st...), IsLeaf: true}
+			stmt.setKeysQuoted(maskSlice8921(quoted, off, off+len(st)))
+			stmt.setKeysBracketed(maskSlice8921(bracketed, off, off+len(st)))
+			off += len(st)
+			out = append(out, stmt)
 		}
 		changed++
 	}
@@ -395,6 +426,25 @@ func splitBracedPackedChildren8886(node *Node, container *schemaNode) int {
 //
 // It never mutates the argument -- callers hold trees that get persisted -- and
 // returns the original when nothing folds.
+// keyMask8921 returns m when it is a per-key mask over n keys, and nil
+// otherwise. A mask of any other length is not provenance (see ast.go), so it
+// must not be sliced as if it were.
+func keyMask8921(m []bool, n int) []bool {
+	if len(m) != n {
+		return nil
+	}
+	return m
+}
+
+// maskSlice8921 is m[from:to], or nil when m carries no provenance. The
+// setKeysQuoted / setKeysBracketed setters copy and normalize the result.
+func maskSlice8921(m []bool, from, to int) []bool {
+	if m == nil || from < 0 || from > to || to > len(m) {
+		return nil
+	}
+	return m[from:to]
+}
+
 func NormalizeCompactForScan(tree *ConfigTree) *ConfigTree {
 	return normalizeCompactForValidation(tree)
 }
