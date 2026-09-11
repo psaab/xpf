@@ -222,8 +222,14 @@ func TestRibGroupRulesApply_Fake(t *testing.T) {
 	if ops.hasTable(unix.AF_INET, 100) {
 		t.Errorf("self-only should not leak table 100, rules=%v", ops.rules[unix.AF_INET])
 	}
-	if got := ops.count(unix.AF_INET); got != 1 {
-		t.Errorf("expected exactly 1 IPv4 rule, got %d", got)
+	// #9819: dmz-vr's leak also installs the iif/oif return pair at
+	// ribGroupReturnRulePriority, so the family holds 1 leak rule + 2. The leak
+	// window is counted on its own, and the total still rejects a stray rule.
+	if got := rulesInWindow9819(ops, unix.AF_INET, ribGroupLeakRulePriority, ribGroupLeakRulePriority+maxRibGroupLeakRules); got != 1 {
+		t.Errorf("expected exactly 1 IPv4 leak rule, got %d", got)
+	}
+	if got := ops.count(unix.AF_INET); got != 3 {
+		t.Errorf("expected 1 IPv4 leak rule + the #9819 return pair, got %d rules", got)
 	}
 
 	// Re-applying must clear the prior rules first (clear-then-add), so
@@ -232,8 +238,8 @@ func TestRibGroupRulesApply_Fake(t *testing.T) {
 	if err := rg.Apply(ribGroups, instances, connected); err != nil {
 		t.Fatalf("Apply (second): %v", err)
 	}
-	if got := ops.count(unix.AF_INET); got != 1 {
-		t.Errorf("after re-apply expected 1 IPv4 rule, got %d", got)
+	if got := ops.count(unix.AF_INET); got != 3 {
+		t.Errorf("after re-apply expected 1 IPv4 leak rule + the #9819 return pair, got %d rules", got)
 	}
 	if ops.dels == 0 {
 		t.Error("expected re-apply to delete the prior rules (clear-then-add)")
@@ -649,10 +655,15 @@ func TestRibGroupRulesPriorityCap(t *testing.T) {
 		if err := rg.Apply(ribGroups, instances, connected); err != nil {
 			t.Fatalf("Apply: %v", err)
 		}
-		if got := ops.count(unix.AF_INET); got != maxRibGroupLeakRules {
-			t.Fatalf("expected exactly %d rules at the limit, got %d", maxRibGroupLeakRules, got)
+		// #9819: the leak also installs the iif/oif return pair, outside the
+		// leak window but inside a priority clear() scans.
+		if got := rulesInWindow9819(ops, unix.AF_INET, ribGroupLeakRulePriority, ribGroupLeakRulePriority+maxRibGroupLeakRules); got != maxRibGroupLeakRules {
+			t.Fatalf("expected exactly %d leak rules at the limit, got %d", maxRibGroupLeakRules, got)
 		}
-		assertAllRulesInRange(t, ops, ribGroupLeakRulePriority, ribGroupLeakRulePriority+maxRibGroupLeakRules)
+		if got := ops.count(unix.AF_INET); got != maxRibGroupLeakRules+2 {
+			t.Fatalf("expected %d leak rules + the #9819 return pair, got %d rules", maxRibGroupLeakRules, got)
+		}
+		assertRibGroupRulesInClearedWindows9819(t, ops)
 	})
 
 	t.Run("over-limit", func(t *testing.T) {
@@ -663,10 +674,13 @@ func TestRibGroupRulesPriorityCap(t *testing.T) {
 		if err := rg.Apply(ribGroups, instances, connected); err == nil {
 			t.Fatal("over-limit Apply must return a degraded error naming the cap")
 		}
-		if got := ops.count(unix.AF_INET); got != maxRibGroupLeakRules {
-			t.Fatalf("expected cap to hold at %d rules, got %d", maxRibGroupLeakRules, got)
+		if got := rulesInWindow9819(ops, unix.AF_INET, ribGroupLeakRulePriority, ribGroupLeakRulePriority+maxRibGroupLeakRules); got != maxRibGroupLeakRules {
+			t.Fatalf("expected cap to hold at %d leak rules, got %d", maxRibGroupLeakRules, got)
 		}
-		assertAllRulesInRange(t, ops, ribGroupLeakRulePriority, ribGroupLeakRulePriority+maxRibGroupLeakRules)
+		if got := ops.count(unix.AF_INET); got != maxRibGroupLeakRules+2 {
+			t.Fatalf("expected %d leak rules + the #9819 return pair, got %d rules", maxRibGroupLeakRules, got)
+		}
+		assertRibGroupRulesInClearedWindows9819(t, ops)
 		// The rule beyond the window (pref ribGroupLeakRulePriority+1000) must be absent.
 		if hasPriority(ops, unix.AF_INET, ribGroupLeakRulePriority+maxRibGroupLeakRules) {
 			t.Errorf("a rule leaked beyond the cleared window (slot %d present)",
@@ -678,8 +692,8 @@ func TestRibGroupRulesPriorityCap(t *testing.T) {
 		if err := rg.Apply(ribGroups, instances, connected); err == nil {
 			t.Fatal("re-apply over-limit must still surface the degraded error")
 		}
-		if got := ops.count(unix.AF_INET); got != maxRibGroupLeakRules {
-			t.Fatalf("re-apply leaked rib-group rules: expected %d, got %d", maxRibGroupLeakRules, got)
+		if got := ops.count(unix.AF_INET); got != maxRibGroupLeakRules+2 {
+			t.Fatalf("re-apply leaked rib-group rules: expected %d (+ the #9819 return pair), got %d", maxRibGroupLeakRules, got)
 		}
 	})
 }
