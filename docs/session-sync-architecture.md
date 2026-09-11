@@ -2380,6 +2380,17 @@ blackholed for exactly the flows that survived the failover.
   delete byte-matches the insert. The maps are non-LRU `HASH`
   (`max_entries = MAX_SESSIONS`, `BPF_F_NO_PREALLOC`); a missing delete leaks one
   slot per removed synced SNAT session. A non-SNAT / reverse entry is a no-op.
+- **Shared alias removal is owner-checked (#9679):** `shared_nat_sessions`
+  (reverse-wire and reverse-canonical aliases) and `shared_forward_wire_sessions`
+  are single-value maps. `publish_shared_session` overwrites a colliding
+  session's alias, counted by `record_shared_nat_displacement` (#1760).
+  `remove_shared_session` deleted whatever occupied the removed session's alias
+  keys, so removing a displaced session also removed the survivor's alias. A
+  worker with no local copy of the survivor then missed both lookups and sent
+  its replies to new-flow adjudication. Each alias is now deleted only while it
+  still names the removed session (`remove_shared_alias_owned_by`). The reverse
+  order, where the removed session had displaced the survivor at publish, lost
+  the survivor's alias at that publish; removal cannot restore it.
 - **Observability:** a failed publish from this coordinator path (no per-binding
   `BindingLiveState`) bumps the shared `DNAT_PUBLISH_ERRORS_SHARED` static, which
   `Coordinator::dnat_publish_errors_total()` folds into the existing per-binding

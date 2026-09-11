@@ -1232,6 +1232,28 @@ pub(super) fn publish_shared_session(
     }
 }
 
+/// #9679: remove `alias` from a single-value shared alias map only while it
+/// still names `owner`.
+///
+/// The NAT reverse-alias and forward-wire maps hold ONE entry per alias key, and
+/// `publish_shared_session` overwrites a colliding session's alias (counted by
+/// `record_shared_nat_displacement`). Deriving the removed session's alias keys
+/// and deleting whatever sits there therefore deleted the SURVIVOR's alias
+/// whenever the removed session had been displaced. A worker with no local copy
+/// of the survivor then missed both lookups and sent its replies to new-flow
+/// adjudication.
+fn remove_shared_alias_owned_by(
+    aliases: &mut FastMap<SessionKey, SyncedSessionEntry>,
+    alias: &SessionKey,
+    owner: &SessionKey,
+) -> Option<SyncedSessionEntry> {
+    if aliases.get(alias).is_some_and(|stored| &stored.key == owner) {
+        aliases.remove(alias)
+    } else {
+        None
+    }
+}
+
 pub(super) fn remove_shared_session(
     shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
     shared_nat_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
@@ -1275,7 +1297,13 @@ pub(super) fn remove_shared_session(
         if !entry.metadata.is_reverse {
             let mut nat_sessions = lock_shared_recover(shared_nat_sessions);
             let reverse_wire = reverse_session_key(&entry.key, entry.decision.nat);
-            if let Some(removed) = nat_sessions.remove(&reverse_wire) {
+            // #9679: each alias is deleted only while it still names this session.
+            // The reverse order, where this session displaced the survivor at
+            // publish, already lost the survivor's alias there (#1760); nothing at
+            // removal can bring it back.
+            if let Some(removed) =
+                remove_shared_alias_owned_by(&mut nat_sessions, &reverse_wire, &entry.key)
+            {
                 remove_owner_rg_index_entry(
                     &shared_owner_rg_indexes.nat_sessions,
                     removed.metadata.owner_rg_id,
@@ -1284,7 +1312,8 @@ pub(super) fn remove_shared_session(
             }
             let reverse_canonical = reverse_canonical_key(&entry.key, entry.decision.nat);
             if reverse_canonical != reverse_wire
-                && let Some(removed) = nat_sessions.remove(&reverse_canonical)
+                && let Some(removed) =
+                    remove_shared_alias_owned_by(&mut nat_sessions, &reverse_canonical, &entry.key)
             {
                 remove_owner_rg_index_entry(
                     &shared_owner_rg_indexes.nat_sessions,
@@ -1297,7 +1326,11 @@ pub(super) fn remove_shared_session(
                     lock_shared_recover(shared_forward_wire_sessions);
                 let wire_key = forward_wire_key(&entry.key, entry.decision.nat);
                 if wire_key != entry.key
-                    && let Some(removed) = forward_wire_sessions.remove(&wire_key)
+                    && let Some(removed) = remove_shared_alias_owned_by(
+                        &mut forward_wire_sessions,
+                        &wire_key,
+                        &entry.key,
+                    )
                 {
                     remove_owner_rg_index_entry(
                         &shared_owner_rg_indexes.forward_wire_sessions,
