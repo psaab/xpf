@@ -1518,6 +1518,18 @@ func loginClassAdvisoryWarnings(cfg *Config) []string {
 			// #9340: the same question per ALTERNATIVE, on the surfaces where
 			// the whole pattern can fire. One enforceable alternative no longer
 			// buys silence for an argument-text alternative beside it.
+			// #9633 (V068): an allow pattern that permits nothing refuses the class
+			// everything on that surface, and nothing said so.
+			if surfaces := UnenforceableAllowSurfaces(rules); len(surfaces) > 0 {
+				if src, ok := rules.AllowSource(); ok {
+					warnings = append(warnings, fmt.Sprintf(
+						"system login class %q: allow-commands %q permits no command in the "+
+							"REGISTERED command set of %s, so every command there is refused for this "+
+							"class (#9633). (The registered set is what those surfaces declare, not a "+
+							"census of everything they can dispatch.)",
+						lc.Name, src, strings.Join(surfaces, ", ")))
+				}
+			}
 			for _, f := range UnenforceableDenyAlternatives(rules) {
 				if src, ok := rules.DenySource(); ok {
 					warnings = append(warnings, fmt.Sprintf(

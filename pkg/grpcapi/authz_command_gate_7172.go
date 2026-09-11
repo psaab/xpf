@@ -102,6 +102,14 @@ func (s *Server) authorizeRPCCommand(cfg *config.Config, class, fullMethod strin
 
 	s.warnUnenforceableDenyPatternsOnce(class, rules)
 
+	// #9633: config-mode RPCs are governed by the `*-configuration` regexes
+	// (authorizeRPCConfigMutation), exactly as the on-box CLI's dispatchConfig
+	// applies only checkConfigRegex. Denying them here as "no canonical command"
+	// locked any class with an operational pattern out of configuration over gRPC.
+	if isConfigModeMethod9633(fullMethod) {
+		return nil
+	}
+
 	cmd, resolved := rpcCanonicalCommand(fullMethod, req)
 	if !resolved {
 		return fmt.Errorf(
@@ -308,6 +316,12 @@ func (s *Server) warnUnenforceableDenyPatternsOnce(class string, rules config.Co
 	key := fmt.Sprintf("%s\x00%t\x00%s\x00%s", class, allowSet, allowSrc, denySrc)
 	if _, loaded := s.unenforceableDenyWarned.LoadOrStore(key, true); loaded {
 		return
+	}
+	if unenforceableAllowOnGRPC9633(rules) {
+		slog.Warn("login class allow-commands pattern permits no command on the gRPC surface, so every "+
+			"restricted RPC is refused for this class (#9633)",
+			"class", class,
+			"pattern", allowSrc)
 	}
 	if pats := unenforceableDenyPatterns(rules); len(pats) > 0 {
 		slog.Warn("login class deny-commands pattern cannot be enforced on the gRPC surface "+

@@ -423,11 +423,23 @@ to, and the REST API.
 > A rule enforced by whichever caller remembers to call it is the shape that
 > produced the gap.
 >
-> **`load` remains a stated gap on every surface.** It applies arbitrary content
-> whose paths are not known until parsed, so enforcing a path regex against it
-> means matching every path the loaded content touches — a different mechanism
-> from a verb gate, not something these gates quietly cover. `commit` and
-> `rollback` act on the candidate as a whole and carry no path to match.
+> **`load` and `rollback` on gRPC (#9633).** The gRPC listener adjudicates
+> `load set` and `load merge` per written path. Hierarchical content is parsed
+> and rendered as set lines, so every leaf it writes meets the class's
+> `*-configuration` regexes. `load override` and `rollback n` with n > 0
+> replace the whole candidate, and the paths they delete cannot be adjudicated
+> one by one, so a class that carries configuration regexes is refused them.
+> `rollback 0`, which returns to the committed configuration, stays available.
+> `commit` and the rest of the config-mode RPCs carry no path to match.
+>
+> The config-mode RPCs are governed by the configuration regexes only, not by
+> `*-commands`, matching the console. Before #9633 any operational pattern
+> locked a class out of configuration over gRPC: the `limited` class below
+> could configure at the console and not through the remote `cli`.
+>
+> **On the console `load` remains a stated gap.** It applies arbitrary content
+> whose paths are not known until parsed, which is a different mechanism from
+> the verb gate there.
 
 > **UPGRADE NOTE — read this before upgrading if any class carries these
 > statements. Two behaviours change in opposite directions.**

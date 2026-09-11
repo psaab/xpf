@@ -108,6 +108,38 @@ func UnenforceableDenySurfaces(rules CompiledLoginRegexes) []string {
 	return out
 }
 
+// UnenforceableAllowSurfaces reports the registered surfaces where the class's
+// ALLOW pattern permits no command (#9633, V068). With an allow source present,
+// Evaluate refuses every command the allow list does not permit, so on such a
+// surface the class is refused everything. A command the allow pattern matches
+// but a longer deny still refuses counts as not permitted: the allow pattern
+// cannot permit it either. Before this, both unenforceable-pattern advisories
+// returned early unless the class had a DENY source, so this case was silent.
+func UnenforceableAllowSurfaces(rules CompiledLoginRegexes) []string {
+	if _, ok := rules.AllowSource(); !ok {
+		return nil
+	}
+	var out []string
+	for _, s := range registeredCommandSurfaces {
+		cmds := s.commands()
+		if len(cmds) == 0 {
+			continue
+		}
+		permitted := false
+		for _, cmd := range cmds {
+			if d := rules.Evaluate(cmd); d.Allowed && d.DecidedBy == LoginRegexAllow {
+				permitted = true
+				break
+			}
+		}
+		if !permitted {
+			out = append(out, s.name)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
 // denyPatternDecides reports whether the class's DENY pattern is what refuses
 // cmd. It is not the same as "cmd is refused". A class with an allow pattern
 // also refuses every command outside its allow list, and before #9340 that
