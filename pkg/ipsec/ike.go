@@ -640,12 +640,31 @@ func (m *Manager) TerminateAllSAs() (int, error) {
 	return count, nil
 }
 
-// ActiveConnectionNames returns the names of all active/established IKE SAs.
+// ActiveConnectionNames returns the deduplicated SA names `swanctl --list-sas`
+// reports: the CHILD SA name for every connection with a child, and the IKE SA
+// name only for an IKE SA that has no child yet (parseSAOutput emits the IKE row
+// only then). It is what HA IPsec SA sync advertises and what the peer later
+// hands to InitiateConnection, which takes a CHILD name.
+//
+// It is NOT a list of VPN names (#9511). A VPN with traffic-selector entries
+// renders each selector as its own child `<vpn>-<selector>`, so once its children
+// exist its names here are those children, not `<vpn>`. Only an IKE SA with no
+// child yet contributes `<vpn>`, and for a multi-selector VPN InitiateConnection
+// cannot bring that name up, because no child section carries it. Do not "fix"
+// the child rows by publishing SAStatus.ConnectionName: that would make EVERY
+// initiate of a multi-selector VPN fail (#9075, GEMINI-050-072). A consumer that
+// needs the VPN resolves the name with BuildSANameIndex.
 func (m *Manager) ActiveConnectionNames() ([]string, error) {
 	sas, err := m.GetSAStatus()
 	if err != nil {
 		return nil, err
 	}
+	return activeSANames(sas), nil
+}
+
+// activeSANames is ActiveConnectionNames' selection, split from the swanctl exec
+// so the published names can be driven from parsed `--list-sas` output (#9511).
+func activeSANames(sas []SAStatus) []string {
 	names := make([]string, 0, len(sas))
 	seen := make(map[string]bool)
 	for _, sa := range sas {
@@ -654,7 +673,7 @@ func (m *Manager) ActiveConnectionNames() ([]string, error) {
 			names = append(names, sa.Name)
 		}
 	}
-	return names, nil
+	return names
 }
 
 // InitiateConnection initiates a single IPsec connection by name.

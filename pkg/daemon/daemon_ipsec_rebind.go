@@ -34,7 +34,7 @@ func (d *Daemon) ipsecApplyForLeaseChange(cfg *config.Config) error {
 	if d.ipsecApply != nil {
 		return d.ipsecApply(cfg)
 	}
-	return d.ipsec.Apply(ipsec.PrepareConfig(cfg))
+	return d.applyIPsecTracked(cfg)
 }
 
 // activeConfigForRebind returns the config the retry loop re-renders against —

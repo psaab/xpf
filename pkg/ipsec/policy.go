@@ -597,6 +597,101 @@ func effectiveTrafficSelectors(connName string, vpn *config.IPsecVPN) []childSel
 	return children
 }
 
+// SANameIndex maps every SA name `swanctl --list-sas` can report for a config to
+// the configured VPNs whose render produces it (#9511): each rendered connection
+// (IKE SA) name and each rendered CHILD SA name.
+//
+// It exists because ActiveConnectionNames publishes CHILD SA names, which is
+// what InitiateConnection needs (`swanctl --initiate --child <name>`), and a VPN
+// with traffic-selector entries renders one child `<vpn>-<selector>` per selector
+// (plus the #5122 disambiguator on a sanitised collision) and no child named
+// `<vpn>`. Publishing the VPN name instead would break the initiate (the #9075
+// GEMINI-050-072 adjudication), so a consumer that needs the VPN (the HA
+// per-redundancy-group attribution) inverts the render here.
+//
+// A name maps to MORE THAN ONE VPN when two renders collide: VPN `a` with
+// selector `b-c` and VPN `a-b` with selector `c` both emit child `a-b-c`, and VPN
+// `blue` with selector `red` emits child `blue-red` while VPN `blue-red` emits a
+// connection and a child of that name. Nothing in the name says which one swanctl
+// reported, so the index keeps every candidate and never picks one.
+type SANameIndex map[string][]string
+
+// BuildSANameIndex indexes the SA names ipsecCfg renders.
+//
+// Eligibility is the RENDERER's, decided ONE VPN AT A TIME. Each VPN is rendered
+// on its own, sharing every other section of ipsecCfg:
+//
+//   - the renderer SKIPS it (an unrenderable gateway, an unresolved ike-policy
+//     chain, an AH proposal): it loads nothing and contributes no name, so it
+//     cannot make a loaded VPN's name look ambiguous;
+//   - it renders: its connection name and every child the renderer emits for it
+//     (effectiveTrafficSelectors + sanitizeSwanctlValue, the render's own
+//     expansion) are indexed;
+//   - its render FAILS outright: its names are indexed anyway. Keeping them can
+//     only ADD candidates to a name, and a caller that requires every candidate
+//     (the HA attribution) can only become stricter: it may skip an initiate,
+//     never cause one. Dropping them could turn a collision this VPN takes part
+//     in back into a single answer. The daemon indexes the config strongSwan has
+//     LOADED, whose whole render succeeded, so this case arises only before the
+//     first load in a process, when it falls back to the promoted config.
+//
+// Rendering per VPN is also what keys eligibility by VPN identity: two VPN names
+// that sanitise to one connection name cannot borrow each other's result. And one
+// broken VPN cannot empty the index, which a single whole-config render would.
+//
+// Building renders every VPN and repeats the render's skip warnings, so build once
+// per config, not per name. ipsecCfg is only read. A caller holding the active
+// config indexes its IPsec section rather than PrepareConfig's output, which can
+// block on DNS; PrepareConfig derives runtime local addresses, which neither SA
+// names nor the skip decisions read.
+func BuildSANameIndex(ipsecCfg *config.IPsecConfig) SANameIndex {
+	if ipsecCfg == nil || len(ipsecCfg.VPNs) == 0 {
+		return nil
+	}
+	idx := make(SANameIndex)
+	for _, name := range sortedVPNNames(ipsecCfg.VPNs) {
+		vpn := ipsecCfg.VPNs[name]
+		one := *ipsecCfg
+		one.VPNs = map[string]*config.IPsecVPN{name: vpn}
+		if _, rendered, err := (&Manager{}).renderConfig(&one); err == nil && len(rendered) == 0 {
+			continue
+		}
+		idx.add(sanitizeSwanctlValue(name), name)
+		for _, child := range effectiveTrafficSelectors(name, vpn) {
+			idx.add(sanitizeSwanctlValue(child.Name), name)
+		}
+	}
+	return idx
+}
+
+func (x SANameIndex) add(saName, vpn string) {
+	for _, v := range x[saName] {
+		if v == vpn {
+			return
+		}
+	}
+	x[saName] = append(x[saName], vpn)
+}
+
+// VPNs returns the configured VPNs whose render produces saName, in name order,
+// or nil when no loaded VPN does. More than one entry is a render collision.
+func (x SANameIndex) VPNs(saName string) []string {
+	return append([]string(nil), x[saName]...)
+}
+
+// Collisions returns every SA name more than one VPN renders, formatted
+// `name=[vpn ...]`, in name order; nil when every name is unique.
+func (x SANameIndex) Collisions() []string {
+	var out []string
+	for name, vpns := range x {
+		if len(vpns) > 1 {
+			out = append(out, fmt.Sprintf("%s=%v", name, vpns))
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
 // childNameDisambiguator returns a short, stable hash of the ORIGINAL selector
 // name, used to make colliding sanitized child-section names injective (#5122).
 // It is a deterministic pure function of the input (fnv-1a 64-bit, low 32 bits

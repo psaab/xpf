@@ -6,7 +6,6 @@ import (
 	"log/slog"
 
 	"github.com/psaab/xpf/pkg/config"
-	"github.com/psaab/xpf/pkg/ipsec"
 	"github.com/psaab/xpf/pkg/routing"
 )
 
@@ -87,7 +86,7 @@ func (d *Daemon) applyServicesReconcile(cfg *config.Config) (error, error) {
 	// the operator SEES the degraded IPsec state instead of a false success.
 	var ipsecErr error
 	if d.ipsec != nil {
-		if err := d.ipsec.Apply(ipsec.PrepareConfig(cfg)); err != nil {
+		if err := d.applyIPsecTracked(cfg); err != nil {
 			slog.Warn("failed to apply IPsec config", "err", err)
 			ipsecErr = fmt.Errorf("apply IPsec config: %w", err)
 		}

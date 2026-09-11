@@ -1237,15 +1237,15 @@ Closed all 6 remaining HA feature gaps from docs/feature-gaps.md section 16 (exc
 - **Tests:** `TestDecodeSessionV4RoundTrip`, `TestDecodeSessionV6RoundTrip`, `TestDecodeSessionV4Short`, `TestDecodeSessionV6Short`, `TestSetDataPlane`, `TestHandleMessageDeleteV4`
 
 ### IPsec SA Synchronization (Missing → Implemented)
-- **New sync message:** `syncMsgIPsecSA = 9` — newline-separated connection names
+- **New sync message:** `syncMsgIPsecSA = 9` — newline-separated SA names (child SA names; the IKE connection name only for an IKE SA with no child yet — #9511 corrected this line)
   - `encodeIPsecSAPayload()` / `decodeIPsecSAPayload()` — strings.Join/Split with newline separator
   - `QueueIPsecSA(connectionNames)` — sends on TCP sync connection
   - `PeerIPsecSAs()` — returns latest received names (mutex-protected copy)
   - `OnIPsecSAReceived` callback — set by daemon for failover re-initiation
-- **IPsec manager:** `ActiveConnectionNames()` queries swanctl --list-sas for active connection names
+- **IPsec manager:** `ActiveConnectionNames()` queries swanctl --list-sas for active SA names (the child SA name, or the IKE connection name for an IKE SA with no child yet — #9511 corrected this line)
   - `InitiateConnection(name)` calls swanctl --initiate --child <name>
 - **Daemon wiring:**
-  - `syncIPsecSAPeriodic(ctx)` — 30s ticker on primary, sends active connection names to secondary
+  - `syncIPsecSAPeriodic(ctx)` — 30s ticker on primary, sends active SA names to secondary
   - `reinitiateIPsecSAs()` — on failover to primary, re-initiates all peer's synced connections
   - `watchClusterEvents()` triggers re-initiation on primary transition when `IPsecSASync` enabled
 - **Config:** `IPsecSASync bool` on ClusterConfig; AST `ipsec-session-synchronization` leaf

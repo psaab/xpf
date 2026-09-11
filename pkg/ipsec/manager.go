@@ -211,6 +211,21 @@ func NewWithConfigDir(dir string) *Manager {
 // forwarding child SA must correspond to a connection that was actually
 // rendered and loaded, or be actively terminated.
 func (m *Manager) Apply(ipsecCfg *config.IPsecConfig) error {
+	return m.ApplyNotifyLoaded(ipsecCfg, nil)
+}
+
+// ApplyNotifyLoaded is Apply, and additionally calls loaded (when non-nil) at the
+// moment strongSwan has LOADED ipsecCfg: immediately after the newly loaded
+// connection set is promoted, and BEFORE departed connections are torn down (#9511).
+//
+// It is never called when the render, write, reload or clear fails, because the
+// previous generation stays loaded. It IS called when the apply then returns
+// teardown debt (#6542), because that error is returned after a successful reload.
+// Calling it before the teardown matters because that teardown lists and terminates
+// SAs through swanctl and can take tens of seconds, and during that time the new
+// generation is already what charon runs. loaded runs on the caller's goroutine with
+// no Manager lock held.
+func (m *Manager) ApplyNotifyLoaded(ipsecCfg *config.IPsecConfig, loaded func()) error {
 	// loadedNames is the set of connections swanctl actually loaded on this
 	// apply. For the render path it is renderConfig's exact emitted set; for
 	// the empty-config clear path nothing is loaded, so it stays nil.
@@ -253,6 +268,9 @@ func (m *Manager) Apply(ipsecCfg *config.IPsecConfig) error {
 	// the commit result shows the degraded IPsec state — the same posture
 	// #4433 established for a failed reload.
 	removed := m.promoteConnNames(loadedNames)
+	if loaded != nil {
+		loaded()
+	}
 	failed := m.terminateRemovedConns(removed)
 	return m.recordTerminateDebt(failed)
 }

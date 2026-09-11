@@ -2937,6 +2937,70 @@ standby can re-initiate the primary's tunnels on takeover:
   narrower answer is the honest one: a node taking only a data RG while the peer
   keeps RG0 must not initiate a tunnel bound to an interface the peer still
   holds.
+
+  **The advertised names are SA names, normally CHILD SA names, not VPN names
+  (#9511).** `ActiveConnectionNames` publishes what `swanctl --list-sas` reports:
+  the child SA name for a connection with children, and the IKE connection name only
+  for an IKE SA with no child yet. A VPN with `traffic-selector` entries renders
+  one child `<vpn>-<selector>` per selector and no child named `<vpn>`. The
+  attribution lookup originally matched VPN names only, so every multi-selector VPN
+  fell to RG 0. A node taking the VPN's RG while the peer kept RG0 therefore SKIPPED
+  it (the #9139 blackhole, still live for those VPNs), and a node taking RG0 while
+  the peer kept the VPN's RG INITIATED it (a duplicate IKE SA).
+
+  `ipsecSAsToReinitiate` now attributes through `ipsec.BuildSANameIndex`, cached per
+  attribution config (`cachedIPsecSANameIndex`) so a takeover wave does not re-render
+  every VPN once per RG. The index maps each name to the VPNs whose render produces
+  it. It decides eligibility by rendering each VPN on its own: skipped VPNs
+  contribute nothing, a VPN whose render fails outright keeps its names as
+  candidates, and it expands selectors with the renderer's own code rather than by
+  parsing the name. `ipsecConnRedundancyGroups` walks every candidate VPN to its
+  reth.
+
+  The wire is deliberately unchanged. The same name is what `InitiateConnection`
+  hands to `swanctl --initiate --child`, and publishing the VPN name instead would
+  break the initiate for exactly these VPNs (#9075, GEMINI-050-072). One limitation
+  remains: an IKE-only row's connection name cannot be initiated with `--child` for
+  a multi-selector VPN.
+
+  **Attribution follows the generation strongSwan has LOADED, not the promoted
+  config.** A commit is promoted before its IPsec apply. A failed render or reload
+  leaves the previous swanctl generation loaded, so attributing from the promoted
+  config would describe tunnels charon is not running. That is how master behaves.
+  With a promoted-config index, this change was measured WORSE than master in one
+  reachable state: a deleted collision candidate plus a failed apply, on a node
+  holding only RG1 (docs/log/9511.md walks both scenarios). `applyIPsecTracked`
+  wraps both IPsec apply sites (commit and lease-change rebind, both under applySem).
+  It records the config as `ipsecLoadedCfg` from inside the apply, through
+  `ipsec.Manager.ApplyNotifyLoaded`: right after the loaded set is promoted and BEFORE
+  departed SAs are torn down. Two reasons. `Apply`'s error cannot say "loaded",
+  because teardown debt (#6542) is returned after a successful reload. And the
+  teardown can take tens of seconds, during which re-initiation (not under applySem)
+  would otherwise attribute against the previous generation.
+  `ipsecAttributionConfig` returns the loaded config, or the promoted config before
+  this process has loaded one. **Residual (#9641):** after an xpfd restart whose boot
+  IPsec apply fails, charon keeps the previous run's generation while this fallback
+  attributes from the promoted config. That is the same answer master gives, so not a
+  regression, but the same class as the failed-apply defect above. Refusing to
+  re-initiate was not adopted. A clustered node's first IPsec apply completes before
+  cluster comms start, so "nothing loaded yet" is reachable only after a FAILED first
+  apply. Whether that failure can be routine (charon not ready at boot), and whether a
+  failed apply is retried, are open questions. #9641 tracks them, and prefers reading
+  what charon actually has loaded. A name the loaded
+  generation does not render is ROUTINE, because the peer may have loaded a newer
+  generation first. It keeps the pre-#9511 lookup and the RG 0 default rather than
+  being treated as an anomaly.
+
+  **A name whose candidates span several groups is initiated only by a node owning
+  every one of them, and a declared RG0 for an unanchored candidate.** For example,
+  VPN `blue` with selector `red` and VPN `blue-red` both render `blue-red`, and
+  nothing in the name says which one the peer reported. Initiating on a subset would
+  trade a missed re-initiation for a duplicate SA on a coin flip. The undeclared-RG0
+  "primary for anything" fallback is not exclusive ownership, so it is refused for
+  such names and kept for unique ones. Collisions are logged at Warn once per active
+  config. A name no loaded VPN renders falls back to the pre-#9511 lookup by VPN
+  name, then to RG 0. If #9624 adds a commit-time rejection of such collisions, this
+  rule becomes the path for configs that arrive through tolerant load or peer sync.
 - **Empty-set / tunnel-down handling (#4385)** — a NON-EMPTY set is advertised
   every tick (a heartbeat re-push — the only mechanism that seeds a freshly
   reconnected/restarted standby, so it must keep pushing even when unchanged).

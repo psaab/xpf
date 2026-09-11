@@ -44,6 +44,28 @@ the apply path pays no fsync (the file is regenerated on every apply).
 - `SAStatus`, `TerminateAllSAs`, `InitiateConnection`, `GetSAStatus`,
   `ActiveConnectionNames` — `ike.go`.
 - `PrepareConfig(cfg *config.Config) *config.IPsecConfig` — `policy.go`.
+- `ApplyNotifyLoaded(ipsecCfg, loaded func()) error` — `manager.go`. This is `Apply`
+  (which delegates to it with a nil callback), and additionally calls `loaded` the
+  moment strongSwan has LOADED the config (#9511): right after the loaded connection
+  set is promoted, before departed connections are torn down. It is never called on a
+  render, write, reload or clear failure, which leaves the previous generation loaded.
+  It IS called when the apply then returns teardown debt (#6542). The daemon records
+  the config there for HA IPsec attribution. `SetSwanctlForTesting` (`test_seams.go`)
+  installs the swanctl exec double for other packages' tests.
+- `SANameIndex`, `BuildSANameIndex(ipsecCfg) SANameIndex`,
+  `(SANameIndex).VPNs(saName) []string`, `(SANameIndex).Collisions() []string` —
+  `policy.go`. The inverse of the render (#9511): every SA name
+  `swanctl --list-sas` can report for a config (each rendered connection name and
+  each rendered child SA name) mapped to the configured VPNs that render it.
+  `ActiveConnectionNames` publishes child names once a connection has children (a
+  multi-selector VPN's are `<vpn>-<selector>`), and the connection name only for an
+  IKE SA with no child yet, so the HA per-RG attribution maps names back here.
+  Eligibility is decided by rendering each VPN on its own: a VPN the renderer skips
+  contributes no name; a VPN whose render fails outright keeps its names as
+  candidates (a failed Apply leaves the previous swanctl config loaded); and two VPN
+  names that sanitise alike cannot borrow each other's result. A name two VPNs
+  render (`a` + selector `b-c` and `a-b` + selector `c`; or `blue` + selector `red`
+  and `blue-red`) lists both, and the index never picks one.
 
 ## Module layout (#1989)
 

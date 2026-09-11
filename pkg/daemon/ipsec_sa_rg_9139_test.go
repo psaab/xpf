@@ -77,8 +77,8 @@ func TestIPsecConnRedundancyGroupAttribution9139(t *testing.T) {
 			"than be refused — refusing would silently STOP re-initiating a " +
 			"tunnel that works today"},
 	} {
-		if got := ipsecConnRedundancyGroup(cfg, tc.conn); got != tc.want {
-			t.Errorf("ipsecConnRedundancyGroup(%q) = %d, want %d (%s)",
+		if got := ipsecConnRedundancyGroups(cfg, ipsecSANameIndex(cfg), tc.conn); len(got) != 1 || got[0] != tc.want {
+			t.Errorf("ipsecConnRedundancyGroups(%q) = %v, want [%d] (%s)",
 				tc.conn, got, tc.want, tc.why)
 		}
 	}
@@ -104,16 +104,16 @@ func TestOwnsIPsecConnScopesToOwnedRGs9139(t *testing.T) {
 	}
 	d := &Daemon{cluster: cm, store: store}
 
-	if !d.ownsIPsecConn(cfg, "vpn-rg1") {
+	if !d.ownsIPsecConn(cfg, ipsecSANameIndex(cfg), "vpn-rg1") {
 		t.Error("the connection anchored on the RG this node just took MUST be " +
 			"re-initiated — that is the outage #9139 is about")
 	}
-	if d.ownsIPsecConn(cfg, "vpn-rg2") {
+	if d.ownsIPsecConn(cfg, ipsecSANameIndex(cfg), "vpn-rg2") {
 		t.Error("#9139: the connection anchored on an RG the LIVE peer still owns " +
 			"must NOT be initiated. Both nodes would hold an SA to the same remote " +
 			"from different local addresses.")
 	}
-	if !d.ownsIPsecConn(cfg, "vpn-plain") {
+	if !d.ownsIPsecConn(cfg, ipsecSANameIndex(cfg), "vpn-plain") {
 		t.Error("an RG-less connection follows RG0, which this node owns")
 	}
 }
@@ -131,7 +131,7 @@ func TestOwnsIPsecConnOwnsNothingWhenSecondary9139(t *testing.T) {
 	}
 	d := &Daemon{cluster: cm, store: store}
 	for _, conn := range []string{"vpn-rg1", "vpn-rg2", "vpn-plain"} {
-		if d.ownsIPsecConn(cfg, conn) {
+		if d.ownsIPsecConn(cfg, ipsecSANameIndex(cfg), conn) {
 			t.Errorf("a node primary for NO redundancy group must not claim %q", conn)
 		}
 	}
@@ -143,7 +143,7 @@ func TestOwnsIPsecConnOwnsNothingWhenSecondary9139(t *testing.T) {
 func TestOwnsIPsecConnStandaloneOwnsEverything9139(t *testing.T) {
 	store := twoRGIPsecStore(t)
 	d := &Daemon{store: store} // no cluster manager
-	if !d.ownsIPsecConn(store.ActiveConfig(), "vpn-rg2") {
+	if !d.ownsIPsecConn(store.ActiveConfig(), ipsecSANameIndex(store.ActiveConfig()), "vpn-rg2") {
 		t.Error("a daemon with no cluster manager must own every connection")
 	}
 }
@@ -152,12 +152,12 @@ func TestOwnsIPsecConnStandaloneOwnsEverything9139(t *testing.T) {
 // which is the pre-#9139 behaviour, rather than an RG nobody owns — the
 // fail-direction that would silently stop re-initiating on a config-less path.
 func TestIPsecConnRedundancyGroupNilConfig9139(t *testing.T) {
-	if got := ipsecConnRedundancyGroup(nil, "vpn-rg1"); got != 0 {
-		t.Errorf("nil config must degrade to RG0 (pre-#9139 behaviour), got %d", got)
+	if got := ipsecConnRedundancyGroups(nil, nil, "vpn-rg1"); len(got) != 1 || got[0] != 0 {
+		t.Errorf("nil config must degrade to RG0 (pre-#9139 behaviour), got %v", got)
 	}
 	var cfg *config.Config
-	if got := ipsecConnRedundancyGroup(cfg, ""); got != 0 {
-		t.Errorf("empty name must degrade to RG0, got %d", got)
+	if got := ipsecConnRedundancyGroups(cfg, nil, ""); len(got) != 1 || got[0] != 0 {
+		t.Errorf("empty name must degrade to RG0, got %v", got)
 	}
 }
 
@@ -199,7 +199,7 @@ func TestOwnsIPsecConnRG0DeclaredVsNot9139(t *testing.T) {
 				"present the fallback branch is never reached and the cell is vacuous")
 		}
 		d := &Daemon{cluster: cm, store: store}
-		if !d.ownsIPsecConn(cfg, "vpn-plain") {
+		if !d.ownsIPsecConn(cfg, ipsecSANameIndex(cfg), "vpn-plain") {
 			t.Error("#9139: with RG0 undeclared, IsLocalPrimary(0) is permanently " +
 				"false, so gating on it would never re-initiate this tunnel — a " +
 				"silent regression on a legal config shape")
@@ -218,7 +218,7 @@ func TestOwnsIPsecConnRG0DeclaredVsNot9139(t *testing.T) {
 			t.Fatal("FIXTURE: this cell needs RG0 PRESENT in the manager")
 		}
 		d := &Daemon{cluster: cm, store: store}
-		if d.ownsIPsecConn(cfg, "vpn-plain") {
+		if d.ownsIPsecConn(cfg, ipsecSANameIndex(cfg), "vpn-plain") {
 			t.Error("with RG0 declared and held by the LIVE peer, a node that took " +
 				"only a data RG must not initiate a tunnel bound to an interface " +
 				"the peer still holds")
