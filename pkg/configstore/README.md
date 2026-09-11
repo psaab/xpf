@@ -800,12 +800,16 @@ per-path:
   can have an unreadable record, and the record is written only after
   promotion. `commitConfirmedLocked` therefore encodes the record BEFORE
   `writeActive`, through the same `encodeConfirm` the write uses: the same
-  rollback target (the ORIGINAL one for a nested re-arm), a deadline of the
-  same JSON width (the real deadline is still taken at the arm site, so the
-  persisted deadline and the live timer describe one window), the guarded hash
-  of the tree about to become active, and `resolved: true` — the #8565 tombstone form, the larger of the
-  two shapes the window writes — so a window that arms can also be resolved.
-  Any encode failure refuses the commit with the candidate intact.
+  rollback target (the ORIGINAL one for a nested re-arm), a stand-in deadline
+  at least as wide as any real one (`widestConfirmDeadline`: nine fractional
+  digits and a `+hh:mm` zone; a deadline read from the clock is not an upper
+  bound, because its zone suffix is `Z` at a zero UTC offset and `+hh:mm` at
+  any other, so it grows across a DST change. The real deadline is still taken
+  at the arm site, so the persisted deadline and the live timer describe one
+  window), the guarded hash of the tree about to become active, and `resolved:
+  true` — the #8565 tombstone form, the larger of the two shapes the window
+  writes — so a window that arms can also be resolved. Any encode failure
+  refuses the commit with the candidate intact.
 - **A degenerate `confirm.json` is rejected, never treated as a valid
   pending confirm (#5637, codex-review-181 M29).** `ReadConfirm` now
   validates the record's shape and fields, mirroring the #5474

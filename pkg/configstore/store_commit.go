@@ -500,10 +500,12 @@ func (s *Store) commitConfirmedLocked(minutes int) (*config.Config, error) {
 	// hash of the tree about to become active; the encrypted length is a
 	// function of the plaintext length. The real deadline is still taken at the
 	// arm site below, after the commit work, so the persisted deadline and the
-	// live timer describe ONE window: the preflight uses the widest RFC3339Nano
-	// form of that instant (nine fractional digits), so the record it sizes is
-	// never shorter than the one written.
-	preflightDeadline := time.Now().Add(time.Duration(minutes) * time.Minute).Truncate(time.Second).Add(999999999 * time.Nanosecond)
+	// live timer describe ONE window. The preflight stands in
+	// widestConfirmDeadline for it, a deadline whose JSON is as long as any
+	// deadline's can be, so the record it sizes is never shorter than the one
+	// written. A deadline read from the clock here would not be: across a DST
+	// change into a non-zero UTC offset its zone suffix grows from "Z" to
+	// "+hh:mm" between this line and the arm site.
 	if s.db != nil {
 		prevTree, prevFirst := s.active, !everCommittedOnEntry
 		if s.confirmTimer != nil {
@@ -519,7 +521,7 @@ func (s *Store) commitConfirmedLocked(minutes int) (*config.Config, error) {
 		// rollback to offer, and discovering that after promotion is the defect
 		// this preflight exists to remove.
 		if _, err := s.db.encodeConfirm(&confirmRecord{
-			Deadline:    preflightDeadline,
+			Deadline:    widestConfirmDeadline,
 			PrevTree:    prevTree,
 			FirstCommit: prevFirst,
 			GuardedHash: guardedConfigHash(s.candidate),

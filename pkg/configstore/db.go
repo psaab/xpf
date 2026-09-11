@@ -547,6 +547,16 @@ func (db *DB) writeTreeMarked(path string, tree *config.ConfigTree, committed bo
 // one. It refuses a record ReadConfirm would refuse (#9617), so the
 // commit-confirmed path can size-check the record BEFORE it promotes anything
 // (commitConfirmedLocked) using the same function the write uses.
+// widestConfirmDeadline is a deadline whose JSON is as long as any deadline's
+// can be, for sizing a confirm record before its real deadline exists (#9617).
+// time.Time marshals as RFC3339Nano: every date and clock field is fixed
+// width, the fraction drops its trailing zeros (so nine significant digits is
+// the longest), and the zone is "Z" at a zero UTC offset but "+hh:mm" at any
+// other. The zone therefore depends on the instant, not only the location: a
+// Europe/London deadline is "Z" in winter and "+01:00" in summer. This value
+// is the widest form for every clock and zone.
+var widestConfirmDeadline = time.Date(2000, 1, 1, 0, 0, 0, 999999999, time.FixedZone("", 60*60))
+
 func (db *DB) encodeConfirm(rec *confirmRecord) ([]byte, error) {
 	data, err := json.MarshalIndent(rec, "", "  ")
 	if err != nil {

@@ -435,9 +435,12 @@ func TestCommitConfirmedReservesTombstoneHeadroom_9617(t *testing.T) {
 	if _, err := s.Commit(); err != nil {
 		t.Fatal(err)
 	}
-	// The longest deadline JSON form (nine fractional digits) in the same
-	// location the store uses, so a real deadline is never longer.
-	maxDeadline := time.Date(2030, 1, 1, 0, 0, 0, 123456789, time.Local)
+	// A deadline as wide as the preflight's stand-in (nine fractional digits
+	// and a +hh:mm zone), built independently of it. The fixture below puts the
+	// tombstone EXACTLY one byte over the ceiling, so the cell also pins the
+	// stand-in's width: one byte narrower and that tombstone fits, and the
+	// window arms.
+	maxDeadline := time.Date(2030, 1, 1, 0, 0, 0, 123456789, time.FixedZone("", -5*60*60))
 	measure := func(resolved bool) int {
 		t.Helper()
 		data, err := s.db.encodeConfirm(&confirmRecord{Deadline: maxDeadline, PrevTree: s.active,
@@ -447,24 +450,28 @@ func TestCommitConfirmedReservesTombstoneHeadroom_9617(t *testing.T) {
 		}
 		return len(data)
 	}
-	u0 := measure(false)
-	delta := measure(true) - u0
-	if delta <= 9 {
-		t.Fatalf("fixture: the tombstone adds %d bytes, not more than the 9-byte deadline variance, so the window is not deterministic", delta)
+	r0 := measure(true)
+	delta := r0 - measure(false)
+	if delta < 1 {
+		t.Fatalf("fixture: the tombstone adds %d bytes; it must be larger than the unresolved record", delta)
 	}
-	filler1 := filler0 + (MaxConfigSize - 1 - u0)
+	filler1 := filler0 + (MaxConfigSize + 1 - r0)
 	applyNearCeiling9617(t, s, filler1)
 	if _, err := s.Commit(); err != nil {
 		t.Fatalf("prior generation: %v", err)
 	}
-	if u1 := measure(false); u1 != MaxConfigSize-1 {
-		t.Fatalf("fixture: the unresolved record is %d bytes, want exactly %d", u1, MaxConfigSize-1)
+	// The tombstone itself cannot be measured here: encodeConfirm refuses it.
+	// The unresolved record can, and the tombstone is delta bytes larger.
+	if u1 := measure(false); u1 != MaxConfigSize+1-delta {
+		t.Fatalf("fixture: the unresolved record is %d bytes, want exactly %d so its tombstone is one byte over the ceiling",
+			u1, MaxConfigSize+1-delta)
 	}
 	setHost("tomb9611")
 	if _, err := s.CommitConfirmed(10); !errors.Is(err, ErrPersistExceedsReadCeiling) {
-		t.Fatalf("#9617: the unresolved record fits (%d bytes) but its tombstone does not (+%d); CommitConfirmed "+
-			"returned %v, want ErrPersistExceedsReadCeiling — a window that arms here cannot be resolved, and a "+
-			"failed removal after the refused tombstone re-arms a confirmed window on reboot", MaxConfigSize-1, delta, err)
+		t.Fatalf("#9617: the unresolved record fits (%d bytes) but its widest tombstone is one byte over; "+
+			"CommitConfirmed returned %v, want ErrPersistExceedsReadCeiling — a window that arms here cannot be "+
+			"resolved, and a failed removal after the refused tombstone re-arms a confirmed window on reboot",
+			MaxConfigSize+1-delta, err)
 	}
 
 	// Positive control: with the headroom available the window arms, and
@@ -728,5 +735,60 @@ func TestPersistedConfirmDeadlineStartsAfterTheCommitWork_9617(t *testing.T) {
 		t.Errorf("#9617: the persisted deadline is %v earlier than the window measured from the end of the "+
 			"commit work; the live timer arms the full duration there, so a restart near the end of the "+
 			"window would roll back early", earliest.Sub(rec.Deadline))
+	}
+}
+
+// The preflight's stand-in deadline must be at least as long, in JSON, as any
+// deadline the store can write. One read from the clock is not: its zone suffix
+// is "Z" at a zero UTC offset and "+hh:mm" at any other, so a commit confirmed
+// that straddles a DST change into a non-zero offset (Europe/London in March)
+// writes a deadline longer than one sized a moment earlier.
+func TestConfirmPreflightDeadlineIsAsWideAsAnyDeadline_9617(t *testing.T) {
+	width := func(d time.Time) int {
+		t.Helper()
+		b, err := d.MarshalJSON()
+		if err != nil {
+			t.Fatalf("marshal %v: %v", d, err)
+		}
+		return len(b)
+	}
+	widest := width(widestConfirmDeadline)
+	zones := []*time.Location{time.UTC, time.Local, time.FixedZone("GMT", 0), time.FixedZone("BST", 60*60),
+		time.FixedZone("", -12*60*60), time.FixedZone("", 14*60*60), time.FixedZone("", -(3*60*60 + 30*60))}
+	reached := false
+	for _, loc := range zones {
+		for _, ns := range []int{0, 1, 120000000, 123456789, 999999999} {
+			for _, year := range []int{1970, 2027, 9999} {
+				d := time.Date(year, 3, 28, 1, 59, 59, ns, loc)
+				if w := width(d); w > widest {
+					t.Errorf("#9617: deadline %s marshals to %d bytes, longer than the preflight stand-in's %d; "+
+						"a record sized with the stand-in can be written over the ceiling", d.Format(time.RFC3339Nano), w, widest)
+				} else if w == widest {
+					reached = true
+				}
+			}
+		}
+	}
+	if !reached {
+		t.Errorf("#9617: no deadline reaches the stand-in's width %d, so the bound is loose and the tombstone "+
+			"fixture's one-byte margin no longer pins it", widest)
+	}
+
+	// The review's instance, from the zone database when the host has one: the
+	// last winter nanosecond and a summer deadline 123456790ns later.
+	london, err := time.LoadLocation("Europe/London")
+	if err != nil {
+		t.Logf("no Europe/London zone data (%v); the fixed-zone rows above cover both offsets", err)
+		return
+	}
+	winter := time.Date(2027, 3, 28, 0, 59, 59, 999999999, time.UTC).In(london)
+	summer := winter.Add(123456790 * time.Nanosecond)
+	if width(summer) <= width(winter) {
+		t.Fatalf("fixture: %s is not longer than %s; the DST instance did not form",
+			summer.Format(time.RFC3339Nano), winter.Format(time.RFC3339Nano))
+	}
+	if width(summer) > widest {
+		t.Errorf("#9617: the summer side of the London transition (%s, %d bytes) is longer than the stand-in (%d)",
+			summer.Format(time.RFC3339Nano), width(summer), widest)
 	}
 }
