@@ -218,8 +218,23 @@ func TestMultisiteAdmissionsFoldToTheBracedTree8921(t *testing.T) {
 				continue
 			}
 			fired := normalizeCompactStanzas(elided)
-			normalizeCompactStanzas(braced)
 			normalizeCompactStanzasWithScope(unfolded, admitNothing)
+			// THE ORACLE IS THE BRACED SPELLING AS PARSED. Normalizing it as well
+			// would let a corruption both spellings share read as agreement --
+			// which is how the packed-statement splitter's mis-split of a value
+			// spelling a sibling keyword stayed invisible. Require instead that
+			// the braced tree is already a fixed point of the pass.
+			bracedNormal := parse8921(t, cell, bracedText)
+			if bracedNormal == nil {
+				continue
+			}
+			normalizeCompactStanzas(bracedNormal)
+			if !sameTree8921(bracedNormal, braced) {
+				t.Errorf("%s: normalizing the BRACED spelling changes it, so the oracle "+
+					"is not a fixed point of the pass:\n  as parsed\n%s  normalized\n%s",
+					cell, treeText8921(braced), treeText8921(bracedNormal))
+				continue
+			}
 
 			if fired == 0 {
 				t.Errorf("%s: the fold did not fire on %s. Production never consults this "+
@@ -335,6 +350,14 @@ func TestMultisiteCellsAgreeWithTheCompiledCensus8921(t *testing.T) {
 			"ruled equivalent; the key mapping is broken and this agreement is about "+
 			"nothing", matched)
 	}
+	// One matched cell satisfies the control above, so mapper drift that dropped
+	// most of them would still pass it. When this cell was written the census
+	// reached 487 of 531 recorded cells; require that it still reaches a clear
+	// majority, or the agreement below is about a sample nobody chose.
+	if matched*4 < len(want)*3 {
+		t.Errorf("MATCHER FLOOR: the census reaches only %d of %d recorded cells; the "+
+			"mapping between the two instruments has drifted", matched, len(want))
+	}
 	sort.Strings(divergent)
 	if len(divergent) > 0 {
 		t.Errorf("#8921: the #2419 census compiles %d recorded cell(s) DIFFERENTLY in the two "+
@@ -421,6 +444,82 @@ func TestElidedQuotedValueKeepsItsQuote8921(t *testing.T) {
 	}
 }
 
+// TestInstanceNamedLikeAnAdmittedKeyword8921 is the one way a statement directly
+// under an instance slot DOES reach the predicate: production asks it with
+// Keys[0], which there is the operator's instance name, so an interface named
+// `interfaces` asks ("interfaces", "unit") -- an admitted pair. The fold then
+// builds the braced tree of that statement, which is why the multi-site ratchet
+// records no site at a slot: the collision exists and is structurally harmless.
+func TestInstanceNamedLikeAnAdmittedKeyword8921(t *testing.T) {
+	elided := parse8921(t, "elided", `interfaces { interfaces unit 0; }`)
+	braced := parse8921(t, "braced", `interfaces { interfaces { unit 0; } }`)
+	if elided == nil || braced == nil {
+		return
+	}
+	if normalizeCompactStanzas(elided) == 0 {
+		t.Fatal("CONTROL: the fold did not fire for an interface named `interfaces`, so " +
+			"this cell no longer reaches the collision it documents")
+	}
+	if !sameTree8921(elided, braced) {
+		t.Errorf("an interface named like an admitted container keyword does not fold to "+
+			"its braced tree:\n  elided\n%s  braced\n%s", treeText8921(elided), treeText8921(braced))
+	}
+}
+
+// TestPackedRunDoesNotSplitAnAuthoredValue8921: splitPackedStatements8768 ends a
+// multi-value statement at the first token that names a sibling statement, so a
+// VALUE spelling a sibling keyword was split off as a bogus statement -- in the
+// braced spelling as well as the elided one. `security ike policy <p> proposals`
+// is multi-valued and `proposal-set` is its sibling. A keyword is never quoted
+// and never continues a `[ ... ]` list, so either mark must keep the token a
+// value. One case per arm of authoredValueAt8921, and a control that a plain run
+// still splits, so the decline cannot pass by never splitting at all.
+func TestPackedRunDoesNotSplitAnAuthoredValue8921(t *testing.T) {
+	for _, c := range []struct{ name, braced, elided string }{
+		{"quoted and bracketed",
+			`security { ike { policy P1 { proposals [ P "proposal-set" ]; } } }`,
+			`security { ike { policy P1 proposals [ P "proposal-set" ]; } }`},
+		{"quoted only",
+			`security { ike { policy P1 { proposals P "proposal-set"; } } }`,
+			`security { ike { policy P1 proposals P "proposal-set"; } }`},
+		{"bracketed only",
+			`security { ike { policy P1 { proposals [ P proposal-set ]; } } }`,
+			`security { ike { policy P1 proposals [ P proposal-set ]; } }`},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			ref := parse8921(t, "reference", c.braced)
+			braced := parse8921(t, "braced", c.braced)
+			elided := parse8921(t, "elided", c.elided)
+			if ref == nil || braced == nil || elided == nil {
+				return
+			}
+			normalizeCompactStanzas(braced)
+			normalizeCompactStanzas(elided)
+			for _, got := range []struct {
+				label string
+				tree  *ConfigTree
+			}{{"braced", braced}, {"elided", elided}} {
+				if !sameTree8921(got.tree, ref) {
+					t.Errorf("%s spelling: the value `proposal-set` was split off as a statement:\n"+
+						"  want (as parsed)\n%s  got (normalized)\n%s",
+						got.label, treeText8921(ref), treeText8921(got.tree))
+				}
+			}
+		})
+	}
+	run := parse8921(t, "plain run", `security { ike { policy P1 { proposals P mode main; } } }`)
+	two := parse8921(t, "two statements", `security { ike { policy P1 { proposals P; mode main; } } }`)
+	if run == nil || two == nil {
+		return
+	}
+	normalizeCompactStanzas(run)
+	normalizeCompactStanzas(two)
+	if !sameTree8921(run, two) {
+		t.Errorf("CONTROL: a plain packed run no longer splits into its statements:\n  run\n%s  two\n%s",
+			treeText8921(run), treeText8921(two))
+	}
+}
+
 // TestBracedPackedRunKeepsItsQuotes8921 covers the second place the
 // normalization pass builds statements out of a slice of someone else's Keys:
 // splitBracedPackedChildren8886, which splits a run of statements authored on
@@ -428,23 +527,42 @@ func TestElidedQuotedValueKeepsItsQuote8921(t *testing.T) {
 // the fold -- Keys sliced, masks dropped -- and the structural cell above never
 // reaches it, because every fixture there is a single statement.
 func TestBracedPackedRunKeepsItsQuotes8921(t *testing.T) {
-	const wrap = `interfaces { gr-0/0/0 { unit 0 { tunnel { %s } } } }`
-	run := parse8921(t, "packed run", fmt.Sprintf(wrap, `source "10.0.0.1" destination 10.0.0.2;`))
-	two := parse8921(t, "two statements", fmt.Sprintf(wrap, `source "10.0.0.1"; destination 10.0.0.2;`))
-	if run == nil || two == nil {
-		return
-	}
-	if n := normalizeCompactStanzas(run); n == 0 {
-		t.Fatal("the packed run inside `tunnel { }` was not split, so this cell no longer " +
-			"reaches splitBracedPackedChildren8886")
-	}
-	normalizeCompactStanzas(two)
-	if !anyKey8921(two.Children, func(n *Node, i int) bool { return n.KeyQuoted(i) }) {
-		t.Fatal("NON-VACUITY: the reference spelling carries no authored quote")
-	}
-	if !sameTree8921(run, two) {
-		t.Errorf("a packed run split inside a braced container is not the tree of the same "+
-			"statements written separately:\n  run\n%s  separate\n%s",
-			treeText8921(run), treeText8921(two))
+	// Both statements quoted, so the SECOND statement's mask is sliced at a
+	// non-zero offset; and a bracketed list in second position, so the bracket
+	// mask is sliced there too. A splitter that reset its running offset, or
+	// carried only one of the two masks, passes a first-statement-only fixture.
+	for _, c := range []struct{ name, run, separate string }{
+		{"tunnel, both statements quoted",
+			`interfaces { gr-0/0/0 { unit 0 { tunnel { source "10.0.0.1" destination "10.0.0.2"; } } } }`,
+			`interfaces { gr-0/0/0 { unit 0 { tunnel { source "10.0.0.1"; destination "10.0.0.2"; } } } }`},
+		// The list has ONE member because a packed run declines to split through
+		// a multi-member list: each statement is placed by its declared args, and
+		// a second member names no statement (measured: `proposals p1 p2` in a run
+		// comes back whole). One bracketed member still puts a bracket mask at a
+		// non-zero offset, which is what this case exists to exercise.
+		{"ike policy, bracketed list second",
+			`security { ike { policy P1 { pre-shared-key ascii-text "k" proposals [ "p1" ]; } } }`,
+			`security { ike { policy P1 { pre-shared-key ascii-text "k"; proposals [ "p1" ]; } } }`},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			run := parse8921(t, "packed run", c.run)
+			two := parse8921(t, "separate statements", c.separate)
+			if run == nil || two == nil {
+				return
+			}
+			if n := normalizeCompactStanzas(run); n == 0 {
+				t.Fatal("the packed run was not split, so this cell no longer reaches " +
+					"splitBracedPackedChildren8886")
+			}
+			normalizeCompactStanzas(two)
+			if !anyKey8921(two.Children, func(n *Node, i int) bool { return n.KeyQuoted(i) }) {
+				t.Fatal("NON-VACUITY: the reference spelling carries no authored quote")
+			}
+			if !sameTree8921(run, two) {
+				t.Errorf("a packed run split inside a braced container is not the tree of the "+
+					"same statements written separately:\n  run\n%s  separate\n%s",
+					treeText8921(run), treeText8921(two))
+			}
+		})
 	}
 }

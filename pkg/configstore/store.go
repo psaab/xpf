@@ -731,7 +731,21 @@ func schemaValidateExpandedTreeForNode(tree *config.ConfigTree, nodeID int) erro
 	// only in an un-applied peer-node group keeps satisfying shared-section
 	// references (#1319 PR 3), with that defsSource stripped of inactive
 	// nodes inside SchemaValidateWithDefinitions.
-	stripped := tree.WithoutInactive()
+	// #8921: normalize brace-elided statements BEFORE expansion, in the same
+	// order the compile path uses (compileConfigWithOpts: strip -> normalize ->
+	// expand). ExpandGroups merges a group body into inline config by the
+	// statement's SHAPE, so a group spelling `neighbor 192.0.2.1 hold-time 2;`
+	// packed failed to meet an inline `neighbor 192.0.2.1 { hold-time 30; }`,
+	// was appended beside it instead of being overridden, and was then
+	// normalized and REFUSED as an invalid hold-time -- while the braced group
+	// body merged, the override won, and the same config validated clean. The
+	// compiler, which already normalized first, accepted both, so commit-check
+	// and compile disagreed about one config. The definitions source is
+	// normalized for the same reason: collectSchemaRefs reads definitions by
+	// shape too. NormalizeCompactForScan clones before rewriting, so the
+	// caller's tree is untouched.
+	normalized := config.NormalizeCompactForScan(tree)
+	stripped := normalized.WithoutInactive()
 	expanded := stripped.Clone()
 	if nodeID >= 0 {
 		vars := map[string]string{"node": fmt.Sprintf("node%d", nodeID)}
@@ -742,7 +756,7 @@ func schemaValidateExpandedTreeForNode(tree *config.ConfigTree, nodeID int) erro
 		// definitions source: expansion removes the groups stanza, and
 		// definitions living only in un-applied peer-node groups must
 		// keep satisfying shared-section references (#1319 PR 3).
-		return config.SchemaValidateWithDefinitions(expanded, tree, nil)
+		return config.SchemaValidateWithDefinitions(expanded, normalized, nil)
 	}
 	if err := expanded.ExpandGroups(); err != nil {
 		if strings.Contains(err.Error(), `undefined group "${node}"`) {
@@ -754,7 +768,7 @@ func schemaValidateExpandedTreeForNode(tree *config.ConfigTree, nodeID int) erro
 			return fmt.Errorf("apply-groups: %w", err)
 		}
 	}
-	return config.SchemaValidateWithDefinitions(expanded, tree, nil)
+	return config.SchemaValidateWithDefinitions(expanded, normalized, nil)
 }
 
 // SyncApply applies a config received from the cluster primary.

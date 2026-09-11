@@ -1620,6 +1620,20 @@ owned by the `journal/` subpackage.
 
 ## Gotchas
 
+- **Commit-check normalizes brace-elided statements BEFORE group expansion
+  (#8921).** `schemaValidateExpandedTreeForNode` runs strip-inactive ->
+  `config.NormalizeCompactForScan` -> `ExpandGroups` -> validate, the order the
+  compiler already used. It used to expand the tree as authored, and
+  `ExpandGroups` merges a group body into inline config by statement SHAPE: a
+  group spelling `neighbor 192.0.2.1 hold-time 2;` packed did not meet the
+  inline `neighbor 192.0.2.1 { hold-time 30; }`, was appended beside it instead
+  of being overridden, and was then normalized and refused as an invalid
+  hold-time -- while the braced group body merged, the override won, and the
+  same config validated clean (and the compiler accepted both). The
+  definitions source handed to `SchemaValidateWithDefinitions` is the same
+  normalized tree, because `collectSchemaRefs` also reads definitions by shape.
+  `TestCommitValidationNormalizesBeforeGroupExpansion8921` pins it for both
+  spellings and both node paths.
 - Durable write protocol (#1894): `fsatomic.WriteFileDurable` — temp
   file in `.configdb`, fsync, rename, parent-dir fsync. The previous
   file survives an interrupted write intact, and a completed write

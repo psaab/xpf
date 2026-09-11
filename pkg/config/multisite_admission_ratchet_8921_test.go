@@ -102,12 +102,15 @@ func sameSites8921(a, b []string) bool {
 // walk silently missed pairs reachable only through an instance slot -- but
 // records NOTHING at the slot itself. A statement directly under a wildcard
 // slot has the operator's INSTANCE NAME in Keys[0], and normalizeCompactNodes
-// asks the predicate with Keys[0], so no (keyword, head) pair is ever
-// consulted there. This walk used to carry the parent's keyword into the slot
-// and so recorded `interfaces unit` as live at `interfaces/*`; measured, the
-// fold does not fire on `interfaces { ge-0/0/0 unit 0; }`, and the #2419 census
-// rules that site divergent for exactly that reason. The pair was live at one
-// site, not two.
+// asks the predicate with Keys[0] -- so the parent's keyword is never the one
+// asked, and a pair is consulted there only when an operator names an instance
+// exactly like an admitted container keyword (an interface named `interfaces`).
+// The fold then builds the braced tree of that statement
+// (TestInstanceNamedLikeAnAdmittedKeyword8921), so the slot has nothing of its
+// own to adjudicate. This walk used to carry the parent's keyword into the slot
+// and recorded `interfaces unit` as live at `interfaces/*` for every interface;
+// measured, the fold does not fire on `interfaces { ge-0/0/0 unit 0; }`, and the
+// #2419 census rules that site divergent for exactly that reason.
 //
 // EXCLUDES `groups`, which mirrors the whole schema. Including it makes every
 // admitted pair multi-site by construction -- measured at 575 of 575 -- and

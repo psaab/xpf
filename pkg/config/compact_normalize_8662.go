@@ -183,7 +183,9 @@ func normalizeCompactNodes(nodes []*Node, schema *schemaNode, inScope func(conta
 				node.Keys = append([]string(nil), node.Keys[:identity]...)
 				node.Children = nil
 				node.IsLeaf = false
-				stmts := splitPackedStatements8768(tail, childSub)
+				stmts := splitPackedStatements8768(tail, childSub,
+					maskSlice8921(quoted, identity, identity+len(tail)),
+					maskSlice8921(bracketed, identity, identity+len(tail)))
 				// #8850: a braced body plus a MULTI-statement run is ambiguous --
 				// nothing in the tree says which statement the body belongs to.
 				// Measured: `address-book address-set s1 { address a1; } address a2
@@ -259,7 +261,7 @@ func normalizeCompactNodes(nodes []*Node, schema *schemaNode, inScope func(conta
 // and hand back the whole tail unsplit. Not guessing is the entire safety
 // argument; a partial split is worse than none because it publishes a shape the
 // operator did not write.
-func splitPackedStatements8768(tail []string, container *schemaNode) [][]string {
+func splitPackedStatements8768(tail []string, container *schemaNode, quoted, bracketed []bool) [][]string {
 	if len(tail) == 0 || container == nil || !container.packedStatements {
 		return [][]string{tail}
 	}
@@ -296,6 +298,18 @@ func splitPackedStatements8768(tail []string, container *schemaNode) [][]string 
 		// shape, so a container head costs the run its split rather than its
 		// meaning.
 		if len(childSchema.children) > 0 && n < len(rest) {
+			return [][]string{tail}
+		}
+		// #8921: a boundary may not land on a token the operator AUTHORED as a
+		// value. consumeNodeKeys stops a multi-value run at the first token that
+		// names a sibling statement, so `proposals [ P "proposal-set" ];` -- a
+		// policy referencing a proposal that happens to be named proposal-set --
+		// was split into `proposals P;` and a bogus valueless `proposal-set;`,
+		// losing the reference, in the BRACED spelling as well as the elided one.
+		// A statement keyword is never quoted and never continues a `[ ... ]`
+		// list, so either mark says the token is a value: decline the split, as
+		// for every other tail this function cannot place.
+		if at := len(tail) - len(rest) + n; at < len(tail) && authoredValueAt8921(at, quoted, bracketed) {
 			return [][]string{tail}
 		}
 		out = append(out, append([]string(nil), rest[:n]...))
@@ -380,16 +394,17 @@ func splitBracedPackedChildren8886(node *Node, container *schemaNode) int {
 			out = append(out, ch)
 			continue
 		}
-		stmts := splitPackedStatements8768(ch.Keys, container)
+		// #8921: the per-key masks travel with the keys -- into the split
+		// decision (a boundary may not land on a token authored as a value)
+		// and onto every statement built from a slice of ch.Keys, which
+		// otherwise loses the authored quote/bracket bit of each token.
+		quoted := keyMask8921(ch.KeysQuoted, len(ch.Keys))
+		bracketed := keyMask8921(ch.KeysBracketed, len(ch.Keys))
+		stmts := splitPackedStatements8768(ch.Keys, container, quoted, bracketed)
 		if len(stmts) < 2 {
 			out = append(out, ch)
 			continue
 		}
-		// #8921: split the per-key masks with the keys, as the fold above
-		// does; a statement built from a slice of ch.Keys otherwise loses the
-		// authored quote/bracket bit of every token it carries.
-		quoted := keyMask8921(ch.KeysQuoted, len(ch.Keys))
-		bracketed := keyMask8921(ch.KeysBracketed, len(ch.Keys))
 		off := 0
 		for _, st := range stmts {
 			stmt := &Node{Keys: append([]string(nil), st...), IsLeaf: true}
@@ -425,6 +440,16 @@ func splitBracedPackedChildren8886(node *Node, container *schemaNode) int {
 //
 // It never mutates the argument -- callers hold trees that get persisted -- and
 // returns the original when nothing folds.
+// authoredValueAt8921 reports whether tail[at] was authored in a way no
+// statement keyword can be: quoted, or inside the same `[ ... ]` list as the
+// token before it. The masks are aligned with tail and may be nil.
+func authoredValueAt8921(at int, quoted, bracketed []bool) bool {
+	if at < len(quoted) && quoted[at] {
+		return true
+	}
+	return at > 0 && at < len(bracketed) && bracketed[at] && bracketed[at-1]
+}
+
 // keyMask8921 returns m when it is a per-key mask over n keys, and nil
 // otherwise. A mask of any other length is not provenance (see ast.go), so it
 // must not be sliced as if it were.
