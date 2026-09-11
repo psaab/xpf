@@ -77,6 +77,9 @@ func runUniformGatesClusterZone(tree *ConfigTree, cfg *Config, opts compileOpts)
 		if opts.lenientChassisRG {
 			cfg.Warnings = append(cfg.Warnings,
 				fmt.Sprintf("chassis cluster redundancy-group (downgraded to warning on tolerant path): %v", err))
+			// #9723: a negative id aliases RG0 on the heartbeat wire; drop it
+			// rather than keep it, so the cluster never holds both.
+			cfg.Warnings = append(cfg.Warnings, dropNegativeRedundancyGroups(cfg.Chassis.Cluster)...)
 		} else {
 			return err
 		}

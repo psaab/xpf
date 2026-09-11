@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"math"
 	"net"
+	"sort"
 	"strconv"
 	"syscall"
 	"time"
@@ -481,11 +482,28 @@ func wireRGID(id int) uint8 {
 //
 // Falls back to `int(b)` when no local group matches, preserving today's
 // behaviour for a group this node does not configure.
+//
+// #9723: the answer must not depend on map order. Several local ids can
+// saturate onto one byte (every negative id onto 0, every id above 255 onto
+// 255), and ranging over `m.groups` returned whichever came first, so a node
+// holding RG0 and RG -1 attributed the peer's RG0 entry to either group. A local
+// group whose id EQUALS the byte always wins; among saturating ids the smallest
+// wins. The config's tolerant path also drops negative ids now, so RG0 cannot
+// meet one through a loaded config; this keeps the lookup deterministic for any
+// state that reaches the manager.
 func (m *Manager) localRGIDForWireByte(b uint8) int {
+	if _, ok := m.groups[int(b)]; ok {
+		return int(b)
+	}
+	var matches []int
 	for id := range m.groups {
 		if wireRGID(id) == b {
-			return id
+			matches = append(matches, id)
 		}
+	}
+	if len(matches) > 0 {
+		sort.Ints(matches)
+		return matches[0]
 	}
 	return int(b)
 }
