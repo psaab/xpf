@@ -56,16 +56,20 @@ func StableRoutingInstanceTableID(name string) int {
 }
 
 // isApplyStatementNode reports whether a child of a routing-instances stanza is
-// an apply statement rather than an instance: an UNQUOTED `apply-groups`,
+// an apply statement rather than an instance: `apply-groups`,
 // `apply-groups-except` or `apply-macro` (#9657). Group expansion strips only
 // apply-groups; the other two stay in the tree, and compileRoutingInstances used
 // to build a routing instance, and its VRF, named after the keyword. That
 // phantom could also quarantine a real instance whose stable table id collided
-// with it. A quoted name ("apply-macro") is an operator's instance name and is
-// kept. The compiler and the collision scan share this predicate so they count
-// the same instances.
+// with it. The compiler and the collision scan share this predicate so they
+// count the same instances.
+//
+// It goes by name, quoted or not. Group expansion strips apply-groups by name,
+// the #9323 child validator skips all three by name, and a quote does not
+// survive rendering, which an HA peer reparses: a quote-sensitive predicate
+// would make the two nodes compile different instances.
 func isApplyStatementNode(n *Node) bool {
-	if len(n.Keys) == 0 || (len(n.KeysQuoted) > 0 && n.KeysQuoted[0]) {
+	if len(n.Keys) == 0 {
 		return false
 	}
 	switch n.Keys[0] {
@@ -273,10 +277,12 @@ func routingInstanceNameUnionAST(tree *ConfigTree) map[string]struct{} {
 	for _, ri := range tree.FindChildren("routing-instances") {
 		collectRoutingInstanceNamesAST(ri, names)
 	}
-	// #9657: group expansion drops a group nothing applies, so an instance
-	// declared only there never compiles on either node. Counting it refused
-	// configs whose effective instances do not collide.
-	reachable := reachableGroupNamesAST(tree)
+	// #9657: group expansion drops a group nothing applies, and walks an applied
+	// group only down to the context of its apply-groups, so an instance
+	// declared in a group that never lands under routing-instances never
+	// compiles on either node. Counting it refused configs whose effective
+	// instances do not collide.
+	reachable := reachableGroupNamesAST(tree, "routing-instances")
 	for _, child := range tree.Children {
 		if child.Name() != "groups" {
 			continue

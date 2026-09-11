@@ -273,18 +273,52 @@ func TestApplyStatementsAreNotRoutingInstances_9657(t *testing.T) {
 			}
 		}
 	}
-	// A QUOTED name is the operator's instance: it compiles, and it still takes
-	// part in the collision gate.
-	quoted := "routing-instances {\n    \"apply-macro\" {\n        instance-type virtual-router;\n    }\n}\n"
-	cfg, err := compile9657(t, quoted, true)
+	// Quoting does not make the keyword an instance name. The #9323 validator
+	// skips these statements by name, and a quote does not survive rendering,
+	// which an HA peer reparses. The quoted spelling must compile like the
+	// unquoted one, before and after a render and reparse. A quoted
+	// "apply-groups" never reaches this predicate: group expansion takes it as
+	// the statement by name, so expansion owns that case.
+	for _, kw := range []string{"apply-macro", "apply-groups-except"} {
+		quoted := "routing-instances {\n    \"" + kw + "\" {\n        instance-type virtual-router;\n    }\n" +
+			"    ri7 {\n        instance-type virtual-router;\n    }\n}\n"
+		cfg, err := compile9657(t, quoted, true)
+		if err != nil {
+			t.Fatalf("lenient quoted %s: %v", kw, err)
+		}
+		if names := riNames9657(cfg); len(names) != 1 || names[0] != "ri7" {
+			t.Errorf("#9657: a quoted %q stanza must not compile as a routing instance, got %v", kw, names)
+		}
+		tree, errs := NewParser(quoted).Parse()
+		if len(errs) > 0 {
+			t.Fatalf("fixture must parse: %v", errs)
+		}
+		rendered := tree.Format()
+		rcfg, err := compile9657(t, rendered, true)
+		if err != nil {
+			t.Fatalf("lenient rendered %s: %v\n%s", kw, err, rendered)
+		}
+		if a, b := strings.Join(riNames9657(cfg), ","), strings.Join(riNames9657(rcfg), ","); a != b {
+			t.Errorf("#9657: quoted %q compiles to [%s] but its rendered text reparses to [%s]; an HA peer would disagree",
+				kw, a, b)
+		}
+	}
+}
+
+// Group expansion walks an applied group only down to the context of its
+// apply-groups statement. A group applied under system contributes its system
+// subtree; its routing-instances never land, so they are not counted.
+func TestTableIDGateIgnoresAGroupAppliedUnderAnotherStanza_9657(t *testing.T) {
+	assertFixtureCollides9657(t)
+	text := group9657("g1", false) + "system {\n    apply-groups g1;\n    host-name fw;\n}\n" + activeRI7_9657
+	if _, err := compile9657(t, text, false); err != nil {
+		t.Errorf("#9657: g1 is applied only under system, so its ri116 never lands; the strict path refused: %v", err)
+	}
+	cfg, err := compile9657(t, text, true)
 	if err != nil {
-		t.Fatalf("lenient quoted: %v", err)
+		t.Fatalf("lenient compile: %v", err)
 	}
-	if names := riNames9657(cfg); len(names) != 1 || names[0] != "apply-macro" {
-		t.Errorf("#9657: a quoted \"apply-macro\" is an instance name and must compile, got %v", names)
-	}
-	collide := "routing-instances {\n    \"apply-macro\" {\n        instance-type virtual-router;\n    }\n    ri486364 {\n        instance-type virtual-router;\n    }\n}\n"
-	if _, err := compile9657(t, collide, false); err == nil || !strings.Contains(err.Error(), "table-id collision") {
-		t.Errorf("#9657: a quoted \"apply-macro\" instance still collides with ri486364 on the strict path, got %v", err)
+	if names := riNames9657(cfg); len(names) != 1 || names[0] != "ri7" {
+		t.Errorf("fixture: the runtime must confirm that ri116 never lands, got %v", names)
 	}
 }
