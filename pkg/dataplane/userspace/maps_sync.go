@@ -1204,34 +1204,8 @@ func (m *Manager) verifyBindingsMapLocked() bool {
 	deadWorkers := deadWorkerIDSet(m.lastStatus.WorkerRuntime)
 	repaired := 0
 	for _, binding := range bindings {
-		if binding.Ifindex <= 0 {
-			continue
-		}
-		// #1666: only repair (re-assert READY for) slots whose worker is
-		// actually forwarding-live. Repairing on (Registered && Armed)
-		// would let the watchdog fight the crash-clear by rewriting
-		// READY=1 for a dead worker.
-		if !bindingForwardingLive(binding, deadWorkers) {
-			continue
-		}
-		// Queue-dimension bound guard (#4894): repair-only, log-and-skip
-		// (never unwind). A queue-id at/above the stride would alias the
-		// adjacent ifindex queue-0 slot; the dense-cap guard below cannot
-		// catch that, so skip the binding instead of repairing a wrong slot.
-		if binding.QueueID >= bindingQueuesPerIface {
-			slog.Warn("userspace: bindings watchdog: queue-id at/above stride would alias adjacent ifindex queue-0 slot, skipping (#4894)",
-				"ifindex", binding.Ifindex, "queue", binding.QueueID,
-				"stride", uint32(bindingQueuesPerIface))
-			continue
-		}
-		idx := uint32(binding.Ifindex)*bindingQueuesPerIface + binding.QueueID
-		// Call-site cap guard (#814): the watchdog is repair-only and
-		// must not unwind. Log and skip if the ifindex would overflow
-		// the BindingArrayMaxEntries dense cap.
-		if idx >= dataplane.BindingArrayMaxEntries {
-			slog.Warn("userspace: bindings watchdog: ifindex exceeds BindingArrayMaxEntries cap, skipping",
-				"ifindex", binding.Ifindex, "queue", binding.QueueID,
-				"idx", idx, "cap", dataplane.BindingArrayMaxEntries)
+		idx, ok := watchdogBindingIndex(binding, deadWorkers)
+		if !ok {
 			continue
 		}
 		var val userspaceBindingValue
