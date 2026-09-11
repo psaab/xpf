@@ -108,3 +108,11 @@ func containsLoginLeaf(list []string, leaf string) bool {
 func (c CompiledLoginRegexes) DenySource() (string, bool) {
 	return c.denySrc, c.denySet
 }
+
+// AllowSource returns the allow pattern as the operator authored it, and
+// whether an allow leaf was present. The #9340 per-alternative answer depends
+// on the allow pattern too (the precedence tiers), so a cache of that answer
+// is keyed on both sources.
+func (c CompiledLoginRegexes) AllowSource() (string, bool) {
+	return c.allowSrc, c.allowSet
+}

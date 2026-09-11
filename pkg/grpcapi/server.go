@@ -201,8 +201,11 @@ type Server struct {
 	// path — so without a dedup it would log at REQUEST rate, which this
 	// project's logging rules forbid outright for anything per-request.
 	//
-	// Keyed by class AND pattern, so a commit that CHANGES the pattern warns
-	// again rather than being suppressed by the earlier one.
+	// Keyed by class AND both pattern sources, so a commit that CHANGES a
+	// pattern warns again rather than being suppressed by the earlier one. A
+	// key is stored on the first CHECK, not only on a warning, so the #9340
+	// per-alternative analysis runs once per class and pattern, never per
+	// request.
 	unenforceableDenyWarned sync.Map
 	store                   *configstore.Store
 	dp                      grpcRuntime
