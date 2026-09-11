@@ -1111,10 +1111,19 @@ func (c *CLI) handleShowSystem(args []string) error {
 		cfg := c.store.ActiveConfig()
 		if cfg != nil {
 			warnings := config.ValidateConfig(cfg)
-			if len(warnings) == 0 {
+			// #9530: a peer config sync that discarded a local commit is an alarm too.
+			divergence := c.store.ConfigSyncDivergenceAlarm()
+			n := len(warnings)
+			if divergence != "" {
+				n++
+			}
+			if n == 0 {
 				fmt.Println("No alarms currently active")
 			} else {
-				fmt.Printf("%d active alarm(s):\n", len(warnings))
+				fmt.Printf("%d active alarm(s):\n", n)
+				if divergence != "" {
+					fmt.Printf("  CRITICAL: %s\n", divergence)
+				}
 				for _, w := range warnings {
 					fmt.Printf("  WARNING: %s\n", w)
 				}

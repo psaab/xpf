@@ -163,6 +163,8 @@ func (d *Daemon) initManagers(configCompileFailed bool) error {
 		cc := cfg.Chassis.Cluster
 		d.cluster = cluster.NewManager(cc.NodeID, cc.ClusterID)
 		d.cluster.SetSoftwareVersion(d.opts.Version)
+		// #9530: a commit made while the peer is unreachable is marked unshared.
+		d.store.SetPeerReachableFn(d.configPeerReachable)
 
 		// #1930 INC-2: if THIS boot is a kernel-candidate trial (the kernel
 		// journal is ARMED), set the unconditional election hold BEFORE the

@@ -253,7 +253,8 @@ func (s *Store) commitWithDescriptionLocked(description string) (*config.Config,
 	s.bumpCandidateGenLocked() // #5848: fresh candidate — advance the generation
 	s.compiled = compiled
 	s.dirty = false
-	s.touchConfigLockLocked() // #4476: a commit is activity — refresh the lease
+	s.touchConfigLockLocked()          // #4476: a commit is activity — refresh the lease
+	s.noteLocalActivePromotionLocked() // #9530
 
 	// #3861: a PLAIN commit during a pending commit-confirmed window is
 	// the confirmation (Junos semantics: any subsequent explicit commit
@@ -613,7 +614,8 @@ func (s *Store) commitConfirmedLocked(minutes int) (*config.Config, error) {
 	s.bumpCandidateGenLocked() // #5848: fresh candidate — advance the generation
 	s.compiled = compiled
 	s.dirty = false
-	s.touchConfigLockLocked() // #4476: a commit is activity — refresh the lease
+	s.touchConfigLockLocked()          // #4476: a commit is activity — refresh the lease
+	s.noteLocalActivePromotionLocked() // #9530
 
 	// Log to journal
 	s.journalLog(&JournalEntry{
@@ -1141,6 +1143,7 @@ func (s *Store) PromoteRollback(gen uint64) (prevCfg *config.Config, ok bool) {
 		s.bumpCandidateGenLocked() // #5848: candidate reset on auto-rollback
 	}
 	s.dirty = false
+	s.noteLocalActivePromotionLocked() // #9530: the timeout revert is a local promotion too
 
 	s.confirmTimer = nil
 	s.confirmPrevTree = nil
