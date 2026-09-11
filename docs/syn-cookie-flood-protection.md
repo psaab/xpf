@@ -456,10 +456,14 @@ skip-serialize omission is pinned by
 `syn_cookie_master_key_is_skipped_in_state_snapshot`
 (`userspace-dp/src/protocol/tests.rs`).
 
-Cookie replies are host-generated flood-control frames. They intentionally
-bypass output filters, CoS classification, DSCP rewrite, and mirroring, matching
-the legacy eBPF `XDP_TX` behavior instead of treating replies as forwarded
-transit packets.
+Cookie replies are host-generated flood-control frames, and since #2238 they are
+classified like every other generated reply: `cookie_reply.rs` runs
+`classify_generated_reply`, so the egress output filter can drop a reply
+(`syn_cookie_output_filter_drops`) and the reply carries the CoS queue and DSCP
+rewrite that classification selects. Only mirroring is bypassed
+(`mirror_clone: false`). The legacy eBPF `XDP_TX` path bypassed all four; do not
+"align" the userspace path back to that, it would reopen the #2238 output-policy
+bypass for flood-control frames.
 
 ## Prometheus Metrics
 

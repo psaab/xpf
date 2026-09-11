@@ -153,8 +153,8 @@ func (c *xpfCollector) initGlobalDescriptors() {
 	c.screenInertProfileZones = prometheus.NewDesc(
 		"xpf_screen_inert_profile_zones",
 		"1 while a security zone references a screen ids-option profile that IS "+
-			"defined but enables no checks, so the dataplane publishes no snapshot "+
-			"and enforces nothing for the zone, labeled by zone and profile name. "+
+			"defined but enables no checks, so none of the zone's configured checks "+
+			"are in effect, labeled by zone and profile name. "+
 			"Unlike xpf_screen_unresolved_profile_zones this state passes STRICT "+
 			"commit with no warning. "+
 			"Disposition: "+dpuserspace.ScreenInertDisposition+".",

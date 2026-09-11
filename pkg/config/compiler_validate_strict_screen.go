@@ -11,26 +11,27 @@ import (
 //
 // Before this gate the reference was WARNED only (ValidateConfig /
 // compiler_validate_warn.go), so the commit succeeded with an unenforceable
-// reference. At runtime the userspace dataplane fails OPEN: a missing profile
-// makes ScreenEngine::check_packet_with_zone_id return ScreenVerdict::Pass
-// (userspace-dp/src/screen/mod.rs — `let Some(profile) = self.profiles.get(zone)
-// else { return ScreenVerdict::Pass; }`), so EVERY screen check (land,
-// syn-flood, ping-death, teardrop, scans, rate limits) is silently skipped for
-// that zone. A typo'd or uncreated profile name thus leaves the zone with no
-// screen protection while the operator believes screening is active — the same
-// silent fail-OPEN commit-validation class as the closed #2401 (undefined
-// policy zone references). Junos rejects an undefined `screen ids-option`
-// reference at commit; this validator restores that fail-CLOSED parity.
+// reference. When #3066 landed, the userspace dataplane failed OPEN for a
+// missing profile (ScreenVerdict::Pass), skipping every screen check for the
+// zone. Since #7168 it no longer does: both `None` branches in
+// userspace-dp/src/screen/mod.rs call `missing_profile_verdict`
+// (userspace-dp/src/screen/unresolved.rs), which evaluates the zone against
+// `ScreenProfile::conservative_default()` — the threshold-free malformed-packet
+// checks only, with no flood, scan or session-limit thresholds. The zone keeps
+// that floor, but none of the checks the operator configured are in effect, so
+// the reference is still wrong. Junos rejects an undefined `screen ids-option`
+// reference at commit, and this validator keeps that parity (#9415).
 //
 // Strict on the commit / commit-check path (CompileConfig — hard-reject);
 // downgraded to a cfg.Warnings entry on the tolerant load / peer-sync paths
 // (CompileConfigLenient / CompileConfigForNodeLenient, flag
 // lenientScreenProfileRefs) so an already-persisted or peer-synced config that
 // an older binary accepted still BOOTS (#1960 fail-closed-on-load doctrine).
-// On that tolerant path the dataplane is NOT independently safe — the missing
-// profile fails open — so the warning is the operator's only signal; the strict
-// commit gate is the real fix that keeps a bad reference from ever reaching the
-// dataplane. Iteration is over cfg.Security.Zones in sorted name order so the
+// On that tolerant path the dataplane substitutes the conservative default
+// (#7168), so the zone keeps the malformed-packet checks but loses every
+// configured threshold; the warning is the operator's only signal that the
+// configured profile is not in effect, and the strict commit gate is what keeps
+// a bad reference from reaching the dataplane in the first place. Iteration is over cfg.Security.Zones in sorted name order so the
 // first-reported error is deterministic.
 func validateScreenProfileReferencesStrict(cfg *Config) error {
 	if cfg == nil {
@@ -48,7 +49,7 @@ func validateScreenProfileReferencesStrict(cfg *Config) error {
 		}
 		if _, ok := cfg.Security.Screen[zone.ScreenProfile]; !ok {
 			return fmt.Errorf(
-				"security zone %q references undefined screen profile %q; define `set security screen ids-option %s` in the same commit or the zone silently runs with NO screen protection (the dataplane fails open for a missing profile)",
+				"security zone %q references undefined screen profile %q; define `set security screen ids-option %s` in the same commit; otherwise none of the zone's configured screen checks are in effect and the dataplane applies only the substituted conservative default (malformed-packet checks, no flood, scan or session-limit thresholds; #7168)",
 				name, zone.ScreenProfile, zone.ScreenProfile)
 		}
 	}
