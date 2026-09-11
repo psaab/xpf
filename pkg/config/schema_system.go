@@ -1226,7 +1226,10 @@ func dhcpStaticBindingSchema() *schemaNode {
 }
 
 var schemaSNMP = &schemaNode{desc: "SNMP configuration", children: map[string]*schemaNode{
-	"community": {desc: "SNMP community", args: 1, placeholder: "<community-name>", children: map[string]*schemaNode{
+	// #9620 (M5): packedStatements splits `community public clients 10.0.0.0/8
+	// authorization read-only;`. Without it `clients` absorbed the authorization
+	// tokens as client prefixes on the lenient load, and strict refused it.
+	"community": {desc: "SNMP community", args: 1, placeholder: "<community-name>", packedStatements: true, children: map[string]*schemaNode{
 		"authorization": {
 			desc:          "Authorization level",
 			args:          1,

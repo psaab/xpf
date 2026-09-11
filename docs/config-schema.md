@@ -218,8 +218,8 @@ construction, not by omission.
 
 `compactNormalizeInScope` takes no parent context, so an admitted
 `(container, head)` pair is live at every site where a container of that keyword
-declares that head. `testdata/multisite_admissions_8921.txt` records where: 202
-pairs over 531 (pair, site) cells. Each pair was adjudicated at one site, and
+declares that head. `testdata/multisite_admissions_8921.txt` records where: 203
+pairs over 534 (pair, site) cells. Each pair was adjudicated at one site, and
 `multisite_adjudication_8921_test.go` now adjudicates **every recorded cell**.
 
 **The per-site question is structural.** The pair decides only *whether* the
@@ -233,9 +233,9 @@ except source position. Both compile entries prune inactive nodes and then
 normalize before group expansion and every validator, and commit-check now does
 the same (see below), so an identical tree compiles and validates identically
 for that value -- including the cells whose value the #2419 census cannot
-observe. Measured at this change: 531 of 531.
+observe. Measured at #9620: 534 of 534.
 `TestMultisiteCellsAgreeWithTheCompiledCensus8921` cross-checks that premise
-against the compiled census (393 cells ruled equivalent, 0 divergent); a
+against the compiled census (398 cells ruled equivalent, 0 divergent); a
 divergent cell there would mean some reader runs before the normalizer.
 
 **"For that value", not "for every value".** Where the container splits a packed
@@ -657,6 +657,48 @@ what else has to move with it:
   legitimately name a different garbage token per spelling. Allowlisting that is
   a CLAIM, so it is paired with a test asserting the commit decision is REJECT
   in BOTH spellings — otherwise the allowlist would hide a fail-open.
+
+### Packed spellings reached by an admission and opt-ins (#9620)
+
+Each spelling below was compared with its braced form in two ways: through
+`configstore.CheckText`, and through the lenient compile that the boot and
+HA-sync loaders use. "Before" is `9f520a5b2`.
+
+| Spelling | Before | After |
+|---|---|---|
+| inet6 `from next-header tcp source-address 2001:db8::/32;` | strict accepted a match-all term | strict refuses it, as it already refused the reversed order |
+| snmp `community public clients 10.0.0.0/8 authorization read-only;` | strict refused; lenient compiled garbage clients | commits and compiles like braced |
+| `unit 0 vlan-id 10 inner-vlan-id 20;` | strict refused (unknown modifier); lenient dropped the inner tag | refused by the QinQ gate, like braced; lenient carries the tag |
+| `unit 0 description u0 vlan-id 10;` | strict refused (trailing token) | commits and compiles like braced |
+
+The admitted pair is `from next-header`. The containers opted into
+`packedStatements` are interfaces `unit` and snmp `community`.
+
+The following were measured and deliberately left out. Each breaks a spelling
+that compiles correctly today:
+
+- **`term then` and `term from`.** Both are keyword-keyed, so they are also live
+  at policy-options policy-statement terms.
+  - `term t1 then accept load-balance per-packet local-preference 200;` kept
+    only `accept`, on both strict and lenient.
+  - `term t1 from protocol ospf then accept;` was refused on strict and failed
+    to compile on the lenient load.
+
+  The firewall member `term t1 then count C1 discard;` stays open for a remedy
+  scoped to the firewall term.
+- **`community authorization`.** `community public authorization read-only
+  clients 10.0.0.0/8 restrict;` is read correctly today, and so is the same line
+  with a client list. The args-bounded split left the tail on the authorization
+  leaf, which strict refused.
+- **`unit inner-vlan-id`.** `unit 0 inner-vlan-id 20;` alone commits today, while
+  dropping the tag. Admitting the pair makes the QinQ gate refuse it.
+- **`packedStatements` on the firewall `from` containers.** It would also split
+  `from { protocol tcp protocol udp; }`, which the #9027 self-repeat gate refuses
+  on purpose.
+- **`packedStatements` on `security-zone`.** It let the empty zone stanza
+  `interfaces host-inbound-traffic;` past the #6525 and #6735 empty-member gates.
+  It also made strict accept the one-line flat spelling of `description …
+  screen …` while dropping one of the two statements.
 
 ### Brace-elided routing instances
 
