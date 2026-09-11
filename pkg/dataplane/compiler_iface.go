@@ -1443,7 +1443,10 @@ func buildFabricBondModels(cfg *config.Config, result *CompileResult, seen map[s
 		if len(ifCfg.FabricMembers) <= 1 || ifCfg.LocalFabricMember != "" {
 			continue
 		}
-		bondName := ifName
+		// #9494: the bond name becomes a networkd FILE name, so it must be the
+		// Linux interface name like its own member names below. A raw ifName
+		// carrying "/" let filepath.Join escape the managed directory.
+		bondName := config.LinuxIfName(ifName)
 		if !seen[bondName] {
 			seen[bondName] = true
 			// Collect addresses from fabric interface units
