@@ -287,13 +287,14 @@ func (s *SessionSync) applyPeerIncarnationSwitchLocked(keepIdx int) bool {
 	// survivor never sends its authoritative table, and the next failover to
 	// the replacement blackholes every established flow: the #5480 blackhole,
 	// reached through the boot-id edge. The sweep's owed-cold-prime re-drive
-	// discharges it, on success only. When both signals observe one reboot the
+	// sends it, and the matching BulkAck discharges it (#9626). When both
+	// signals observe one reboot the
 	// cost is one redundant, idempotent bulk. The arm is deliberately NOT
 	// gated on having evicted something: the corpse's own receive loop can
 	// remove it after the replacement installed on the empty slot, and this
 	// switch is then the only classifier that ever sees the reboot while
 	// evicting nothing.
-	s.needColdPrime.Store(true)
+	s.armColdPrimeLocked()
 	// Stamp AFTER the advance, exactly as installConn does, so the priming
 	// connection belongs to the incarnation it established rather than to the
 	// one just retired.
@@ -600,15 +601,13 @@ func (s *SessionSync) handleNewConnection(ctx context.Context, fabricIdx int, co
 			if forcedConsumed {
 				s.forceResync.Store(true)
 			}
-		} else {
-			// #4962: the authoritative cold-prime landed on the (surviving)
-			// active connection, discharging the outstanding obligation. Consume
-			// the needColdPrime latch so routine single-fabric flips do NOT
-			// re-bulk; a later full-disconnect epoch re-arms it via installConn.
-			// On FAILURE the latch stays armed, so the next accept that becomes
-			// active re-drives the bulk instead of dropping it.
-			s.needColdPrime.Store(false)
 		}
+		// #9626: no discharge here. A nil doBulkSync means the frames through
+		// BulkEnd were WRITTEN, not that the peer holds them. The matching BulkAck
+		// discharges the latch (dischargeColdPrime), so routine single-fabric flips
+		// stop re-bulking only once the peer has the table. On FAILURE the latch
+		// stays armed, so the next accept that becomes active re-drives the bulk
+		// instead of dropping it (#4962).
 	} else if d.becameActive {
 		slog.Info("cluster sync: active fabric changed, resuming incremental sync", "fabric", fabricIdx, "remote", connRemoteAddrString(conn), "active_before", d.activeBefore, "active_after", d.activeAfter)
 	} else {
@@ -839,7 +838,7 @@ func (s *SessionSync) installConn(fabricIdx int, conn net.Conn) connColdPrimeDec
 	// peerEpochRebootLocked here would consume the observation a second time and
 	// compare against the baseline this call already advanced.
 	if d.wasDisconnected || supersededCurrent || epochReboot {
-		s.needColdPrime.Store(true)
+		s.armColdPrimeLocked()
 	}
 	d.becameActive = d.activeAfter == fabricIdx
 	// #4962: commit the decision under the lock. becameActive means this
@@ -1175,8 +1174,7 @@ func (s *SessionSync) handleDisconnect(conn net.Conn) {
 		// probe-then-enforce order for each new peer: assume healthy until
 		// the CURRENT peer proves it acks.
 		s.peerHeartbeatAckEver.Store(false)
-		s.pendingBulkAckEpoch.Store(0)
-		s.pendingBulkAckSince.Store(0)
+		s.clearPendingBulkAck()
 		s.bulkMu.Lock()
 		hadBulkInProgress := s.bulkInProgress
 		s.bulkInProgress = false
@@ -1272,20 +1270,15 @@ func (s *SessionSync) handleDisconnect(conn net.Conn) {
 				// Reset the stranded pending-ack epoch so the re-run's fresh
 				// epoch supersedes it (a latched phantom pending epoch would
 				// block manual failover, #3912).
-				s.pendingBulkAckEpoch.Store(0)
-				s.pendingBulkAckSince.Store(0)
+				s.clearPendingBulkAck()
 				if err := s.doBulkSync(); err != nil {
 					slog.Warn("cluster sync: cold-start bulk re-drive failed", "err", err)
-				} else {
-					// #5718 fold r7 BLOCKER 2: DISCHARGE the obligation here
-					// too. Without this the latch that now triggers the
-					// re-drive would stay armed after the re-drive satisfied
-					// it, so every later survivor disconnect would re-bulk a
-					// peer that is already primed — trading a lost obligation
-					// for one that can never be paid off. Same discharge, same
-					// success-only condition, as the installConn path.
-					s.needColdPrime.Store(false)
 				}
+				// #5718 fold r7 BLOCKER 2 required a discharge for this path, so a
+				// satisfied obligation does not re-bulk a primed peer on every later
+				// survivor disconnect. #9626 moves that discharge to the peer's
+				// BulkAck (dischargeColdPrime): a written BulkEnd is not a received
+				// one.
 			}()
 		}
 	}
