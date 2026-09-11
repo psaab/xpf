@@ -7,17 +7,18 @@ import (
 	"strings"
 )
 
-// routingRedistProtocolTokens is the set of bare protocol keywords that an
-// OSPF/OSPFv3/BGP/IS-IS `export` (or a RIP `redistribute`) accepts in lieu
-// of a named policy-statement. resolveRedistribute (pkg/frr/policy_render.go)
-// emits a bare `redistribute <token>` for these. It mirrors
-// knownRedistProtocols there, plus Junos's `direct` spelling for FRR's
-// `connected`. Keep the two in sync: a token accepted here but unknown to
-// the renderer would emit a line FRR rejects; a token the renderer accepts
-// but missing here would be wrongly rejected at commit.
-var routingRedistProtocolTokens = map[string]bool{
-	"connected": true, "direct": true, "static": true, "kernel": true,
-	"ospf": true, "bgp": true, "rip": true, "isis": true,
+// A bare protocol keyword an OSPF/OSPFv3/BGP/IS-IS `export` (or a RIP
+// `redistribute`) accepts in lieu of a named policy-statement is exactly what
+// FRRRoutingProtocolKeyword admits, the same domain pkg/frr renders, spelled in
+// lower case (the renderer writes the token through). This used to be a
+// separate, shorter list that lacked ospf6 and ripng, so `protocols ospf3
+// export ripng` was refused as an unknown protocol (#9667).
+func bareRedistKeyword(token string) (string, bool) {
+	kw, ok := FRRRoutingProtocolKeyword(token)
+	if !ok || (token != kw && !(token == "direct" && kw == "connected")) {
+		return "", false
+	}
+	return kw, true
 }
 
 // validateRoutingExportReferencesStrict hard-rejects a dynamic-protocol
@@ -73,15 +74,30 @@ func validateRoutingExportReferencesStrict(cfg *Config) error {
 	// must be a known protocol OR a defined policy-statement.
 	checkRedist := func(scope, proto string, exports []string) error {
 		for _, e := range exports {
-			if e == "" || routingRedistProtocolTokens[e] || defined(e) {
+			if e == "" || defined(e) {
 				continue
 			}
-			return fmt.Errorf("%s%s export %q references neither a known "+
-				"redistribution protocol (connected/direct/static/kernel/"+
-				"ospf/bgp/rip/isis) nor a defined policy-statement — the "+
-				"FRR redistribute line would be rejected or silently no-op; "+
-				"define the policy-statement or fix the export name",
-				scope, proto, e)
+			kw, ok := bareRedistKeyword(e)
+			if !ok {
+				return fmt.Errorf("%s%s export %q references neither a known "+
+					"redistribution protocol (connected/direct/static/kernel/"+
+					"ospf/ospf6/bgp/rip/ripng/isis) nor a defined policy-statement — the "+
+					"FRR redistribute line would be rejected or silently no-op; "+
+					"define the policy-statement or fix the export name",
+					scope, proto, e)
+			}
+			// #9667: a bare token is bound to its use site, so a family the use
+			// site cannot carry can be refused here. (A policy-statement's
+			// `from protocol` cannot: the same policy is valid under another
+			// router, so pkg/frr filters those per term at render, #9510.)
+			src, sok := RedistributionSourceFamilies(kw)
+			use, uok := exportUseSiteFamilies[proto]
+			if sok && uok && src&use == 0 {
+				return fmt.Errorf("%s%s export %q redistributes %s routes, which %s "+
+					"cannot carry (it redistributes %s only), so the line would never "+
+					"render; export it under a protocol that carries %s routes (#9667)",
+					scope, proto, e, src, proto, use, src)
+			}
 		}
 		return nil
 	}

@@ -164,6 +164,38 @@ func isisRedistributeLines(entries []redistEntry, isisLevel string) string {
 }
 
 func (m *Manager) redistributeEntries(export string, po *config.PolicyOptionsConfig, self string, bgpAcceptDefault map[string]bool) []redistEntry {
+	return m.redistributeEntriesAt(export, po, self, self, bgpAcceptDefault)
+}
+
+// resolveBGPIPv6Redistribute renders a BGP bare-token export into
+// `address-family ipv6 unicast` (#9667). It applies the same self and policy
+// rules as resolveRedistribute under router bgp, but filters sources by the
+// grammar installed in that address family ("bgp-ipv6"), and indents the lines
+// one level deeper to sit inside the block.
+func (m *Manager) resolveBGPIPv6Redistribute(export string, po *config.PolicyOptionsConfig, bgpAcceptDefault map[string]bool) string {
+	return indentFRRLines(formatRedistEntries(m.redistributeEntriesAt(export, po, "bgp", "bgp-ipv6", bgpAcceptDefault)), " ")
+}
+
+func indentFRRLines(s, prefix string) string {
+	if s == "" {
+		return s
+	}
+	lines := strings.SplitAfter(s, "\n")
+	var sb strings.Builder
+	for _, l := range lines {
+		if l == "" {
+			continue
+		}
+		sb.WriteString(prefix)
+		sb.WriteString(l)
+	}
+	return sb.String()
+}
+
+// redistributeEntriesAt is redistributeEntries with the render node separate
+// from the router identity: self decides the self-redistribute drop, node
+// selects the redistribute grammar a source must fit (#9667, #9510).
+func (m *Manager) redistributeEntriesAt(export string, po *config.PolicyOptionsConfig, self, node string, bgpAcceptDefault map[string]bool) []redistEntry {
 	// Junos spells directly-connected routes "direct"; FRR's redistribute
 	// keyword is "connected". A bare `export direct` must render
 	// `redistribute connected`, not the FRR-invalid `redistribute direct`
@@ -188,7 +220,7 @@ func (m *Manager) redistributeEntries(export string, po *config.PolicyOptionsCon
 		}
 		// #9510: the source must also be in a family the enclosing router's
 		// redistribute grammar lists (redistribute_afi_9510.go).
-		if !redistSourceFitsNode(export, self) {
+		if !redistSourceFitsNode(export, node) {
 			slog.Warn("FRR redistribute export skipped: source protocol is not in this router's address family",
 				"protocol", self, "source", export)
 			return nil
@@ -228,7 +260,7 @@ func (m *Manager) redistributeEntries(export string, po *config.PolicyOptionsCon
 					// router's address family is dropped here, at the use
 					// site. The same policy stays valid under a router
 					// whose grammar lists that source.
-					if !redistSourceFitsNode(proto, self) {
+					if !redistSourceFitsNode(proto, node) {
 						slog.Warn("FRR redistribute policy term skipped: source protocol is not in this router's address family",
 							"policy", export, "protocol", self, "source", proto)
 						skipped = true

@@ -435,6 +435,10 @@ func (m *Manager) generateProtocols(ospf *config.OSPFConfig, ospfv3 *config.OSPF
 		// policy so prohibited routes were advertised. Bare protocol tokens are
 		// still split out to the redistribute path below (unchanged).
 		globalExportChain := make([]string, 0, len(bgp.Export))
+		// #9667: a bare token's IPv6 routes go into `address-family ipv6
+		// unicast`, the only BGP node whose redistribute grammar lists IPv6
+		// sources. Collected here, written when that block is opened below.
+		var bgpIPv6Redist strings.Builder
 		for _, e := range bgp.Export {
 			if e == "" {
 				continue
@@ -447,7 +451,20 @@ func (m *Manager) generateProtocols(ospf *config.OSPFConfig, ospfv3 *config.OSPF
 				// redistribute. resolveRedistribute normalizes direct→
 				// connected and refuses to emit an invalid bare-name
 				// line (#2223), and drops a self-redistribute (#2943).
-				b.WriteString(m.resolveRedistribute(e, policyOptions, "bgp", bgpAcceptDefault))
+				//
+				// #9667: route each family to the node that carries it, so a
+				// dual-family source renders in both and a single-family one in
+				// its own, with no drop warning for the family it lacks. A token
+				// that is not a protocol keyword keeps today's single call and its
+				// warning; self (`export bgp`) is dropped once, by that call.
+				kw, isProto := config.FRRRoutingProtocolKeyword(e)
+				fam, _ := config.RedistributionSourceFamilies(kw)
+				if !isProto || fam&config.FamilyIPv4 != 0 || kw == "bgp" {
+					b.WriteString(m.resolveRedistribute(e, policyOptions, "bgp", bgpAcceptDefault))
+				}
+				if isProto && kw != "bgp" && fam&config.FamilyIPv6 != 0 {
+					bgpIPv6Redist.WriteString(m.resolveBGPIPv6Redistribute(e, policyOptions, bgpAcceptDefault))
+				}
 			}
 		}
 
@@ -586,7 +603,10 @@ func (m *Manager) generateProtocols(ospf *config.OSPFConfig, ospfv3 *config.OSPF
 			}
 			b.WriteString(" exit-address-family\n")
 		}
-		if len(inet6Neighbors) > 0 || bgpMaxPaths > 1 {
+		// #9667: also opened for bare-token IPv6 redistribution alone. FRR
+		// accepts the block with no IPv6 neighbor, and a later IPv6 peer then
+		// sees the routes.
+		if len(inet6Neighbors) > 0 || bgpMaxPaths > 1 || bgpIPv6Redist.Len() > 0 {
 			b.WriteString(" !\n address-family ipv6 unicast\n")
 			if bgpMaxPaths > 1 {
 				fmt.Fprintf(&b, "  maximum-paths %d\n", bgpMaxPaths)
@@ -595,6 +615,7 @@ func (m *Manager) generateProtocols(ospf *config.OSPFConfig, ospfv3 *config.OSPF
 					fmt.Fprintf(&b, "  maximum-paths ibgp %d\n", bgpMaxPaths)
 				}
 			}
+			b.WriteString(bgpIPv6Redist.String())
 			for _, n := range inet6Neighbors {
 				fmt.Fprintf(&b, "  neighbor %s activate\n", n.Address)
 				if n.DefaultOriginate {
