@@ -278,6 +278,10 @@ pub struct Coordinator {
     /// domain, handed to the session-socket thread so `sync_session` need not
     /// take the `ServerState` mutex.
     pub(crate) session_domain: crate::afxdp::SessionDomain,
+    /// #9560: owners of the steering map's rows, ONE registry for this coordinator's whole
+    /// life (`bpf_map/steering_owners.rs`). The session domain and every worker's binding
+    /// plan share it; `stop_inner` retires the workers' claims but never replaces it.
+    pub(in crate::afxdp) steering_owners: Arc<crate::afxdp::bpf_map::SteeringRowOwners>,
     pub(in crate::afxdp) ha: HaState,
     pub(crate) cos: SharedCoSState,
     pub(crate) neighbors: NeighborManager,
@@ -501,17 +505,20 @@ impl Coordinator {
         let workers = WorkerManager::new();
         #[cfg(test)]
         let synced_import_cap_override = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let steering_owners = Arc::new(crate::afxdp::bpf_map::SteeringRowOwners::default());
         let session_domain = crate::afxdp::SessionDomain::new(
             &sessions,
             &workers,
             &ha,
             &neighbors,
             &bpf_maps,
+            &steering_owners,
             #[cfg(test)]
             &synced_import_cap_override,
         );
         Self {
             session_domain,
+            steering_owners,
             bpf_maps,
             slow_path: None,
             local_tunnel_deliveries: Arc::new(ArcSwap::from_pointee(BTreeMap::new())),
@@ -859,6 +866,11 @@ impl Coordinator {
             maps.map_fd.as_ref(),
             maps.heartbeat_map_fd.as_ref(),
         );
+        // #9560: every worker is now joined, so none can claim a steering row. Retire their
+        // claims WITHOUT BPF deletes: those sessions died with their workers and their rows
+        // linger unowned, as before #9560. The registry itself is kept, so an HA delete
+        // racing this teardown and the next bringup sees one set of owners.
+        self.steering_owners.retire_workers();
         // #8558: the recorded bind-failure causes describe the worker set that
         // was just stopped, so they die with it. Clearing HERE rather than at
         // the top of `reconcile` is what covers the teardowns that never enter

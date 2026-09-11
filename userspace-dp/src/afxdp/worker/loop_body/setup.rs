@@ -270,7 +270,7 @@ pub(super) fn worker_loop_setup(
         .first()
         .map(|binding| binding.bpf_maps.session_map.clone())
         .unwrap_or_else(|| {
-            crate::afxdp::bpf_map::SteeringMapRef::new(-1, std::sync::Arc::default())
+            crate::afxdp::bpf_map::SteeringMapRef::unbound()
         });
     let conntrack_v4_fd = bindings
         .first()
@@ -412,7 +412,7 @@ mod worker_setup_harness {
             live: Arc::new(BindingLiveState::new()),
             xsk_map_fd: -1,
             heartbeat_map_fd: -1,
-            session_map: crate::afxdp::bpf_map::SteeringMapRef::new(-1, std::sync::Arc::default()),
+            session_map: crate::afxdp::bpf_map::SteeringMapRef::unbound(),
             conntrack_v4_fd: -1,
             conntrack_v6_fd: -1,
             ring_entries: 256,

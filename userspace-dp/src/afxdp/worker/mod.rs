@@ -724,10 +724,7 @@ impl BindingWorker {
             resolver_enqueue_throttle: super::types::FastMap::default(),
             bpf_maps: WorkerBpfMaps {
                 heartbeat_map_fd: -1,
-                session_map: crate::afxdp::bpf_map::SteeringMapRef::new(
-                    -1,
-                    std::sync::Arc::default(),
-                ),
+                session_map: crate::afxdp::bpf_map::SteeringMapRef::unbound(),
                 conntrack_v4_fd: -1,
                 conntrack_v6_fd: -1,
             },
@@ -844,10 +841,7 @@ impl BindingWorker {
             resolver_enqueue_throttle: super::types::FastMap::default(),
             bpf_maps: WorkerBpfMaps {
                 heartbeat_map_fd: -1,
-                session_map: crate::afxdp::bpf_map::SteeringMapRef::new(
-                    -1,
-                    std::sync::Arc::default(),
-                ),
+                session_map: crate::afxdp::bpf_map::SteeringMapRef::unbound(),
                 conntrack_v4_fd: -1,
                 conntrack_v6_fd: -1,
             },
@@ -1711,7 +1705,7 @@ mod tests {
             live: live.clone(),
             xsk_map_fd: -1,
             heartbeat_map_fd: -1,
-            session_map: crate::afxdp::bpf_map::SteeringMapRef::new(-1, std::sync::Arc::default()),
+            session_map: crate::afxdp::bpf_map::SteeringMapRef::unbound(),
             conntrack_v4_fd: -1,
             conntrack_v6_fd: -1,
             ring_entries: 2048,

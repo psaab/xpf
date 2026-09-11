@@ -144,11 +144,11 @@ pub(super) fn bring_up_workers(
     let workers = plan_workers(coord, snapshot, bindings, &fds, ring_entries);
     // Capture the values the later phases need BEFORE `fds` is moved into
     // `publish_runtime`: the session map's raw descriptor (replay) and the DNAT
-    // table fds (Copy; the worker launch bundle), and the session map's steering-row
-    // owner registry: the replay publishes through the SAME registry the workers
-    // share, or a replayed row and a worker's row would not see each other (#9560).
+    // table fds (Copy; the worker launch bundle). The replay writes as the
+    // coordinator, which claims no steering row (#9560), through the coordinator's
+    // one registry.
     let session_map_raw_fd = fds.session_map_fd.fd;
-    let session_map_owners = Arc::clone(&fds.session_map_owners);
+    let session_map_owners = Arc::clone(&coord.steering_owners);
     let dnat_fds = fds.dnat_fds;
     // Phase: PUBLISH. Move the OwnedFds onto `coord.bpf_maps` and publish the
     // mirror-target + CoS owner/active-shard maps the workers read — BEFORE any
@@ -163,6 +163,7 @@ pub(super) fn bring_up_workers(
         SteeringMap {
             fd: session_map_raw_fd,
             owners: &session_map_owners,
+            holder: crate::afxdp::bpf_map::SteeringHolder::Coordinator,
         },
     );
     // Phase: RESOLVER (best-effort, ATTEMPTED before worker launch so every
@@ -295,7 +296,6 @@ fn plan_workers(
         map_fd,
         heartbeat_map_fd,
         session_map_fd,
-        session_map_owners,
         conntrack_v4_fd,
         conntrack_v6_fd,
         ..
@@ -326,7 +326,8 @@ fn plan_workers(
                 heartbeat_map_fd: heartbeat_map_fd.fd,
                 session_map: crate::afxdp::bpf_map::SteeringMapRef::new(
                     session_map_fd.fd,
-                    session_map_owners.clone(),
+                    Arc::clone(&coord.steering_owners),
+                    crate::afxdp::bpf_map::SteeringHolder::Worker(binding.worker_id),
                 ),
                 conntrack_v4_fd: conntrack_v4_fd.as_ref().map(|f| f.fd).unwrap_or(-1),
                 conntrack_v6_fd: conntrack_v6_fd.as_ref().map(|f| f.fd).unwrap_or(-1),
@@ -405,7 +406,6 @@ fn publish_runtime(
         map_fd,
         heartbeat_map_fd,
         session_map_fd,
-        session_map_owners,
         conntrack_v4_fd,
         conntrack_v6_fd,
         dnat_table_fd,
@@ -423,7 +423,6 @@ fn publish_runtime(
             map_fd: Some(map_fd),
             heartbeat_map_fd: Some(heartbeat_map_fd),
             session_map_fd: Some(session_map_fd),
-            session_map_owners,
             conntrack_v4_fd,
             conntrack_v6_fd,
             dnat_table_fd,

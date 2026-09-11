@@ -15,15 +15,29 @@
 use super::routing_domain_publish_9517_tests::host_bound_key;
 use super::*;
 use crate::afxdp::bpf_map::{
-    RECORDER_ONLY_MAP_FD, SessionMapWriteRecord, SteeringRowOwners, clear_session_map_writes,
-    session_map_row, session_map_writes,
+    RECORDER_ONLY_MAP_FD, SessionMapWriteRecord, SteeringHolder, SteeringRowOwners,
+    clear_session_map_writes, session_map_row, session_map_writes,
 };
 use crate::session::TunnelDiscriminator;
 
+/// Worker 0's handle: the C1-C7 and C9 cells are about aliases one worker holds.
 fn steering(owners: &SteeringRowOwners) -> SteeringMap<'_> {
+    on_worker(owners, 0)
+}
+
+fn on_worker(owners: &SteeringRowOwners, worker: u32) -> SteeringMap<'_> {
     SteeringMap {
         fd: RECORDER_ONLY_MAP_FD,
         owners,
+        holder: SteeringHolder::Worker(worker),
+    }
+}
+
+fn as_coordinator(owners: &SteeringRowOwners) -> SteeringMap<'_> {
+    SteeringMap {
+        fd: RECORDER_ONLY_MAP_FD,
+        owners,
+        holder: SteeringHolder::Coordinator,
     }
 }
 
@@ -315,40 +329,135 @@ fn a_row_the_registry_never_saw_is_still_deleted_9560() {
     );
 }
 
-/// C8, registry lifetime.
+/// C8a, the round-1 defect: one entry replicated to two workers. Each worker publishes
+/// the entry's rows and reaps its replica on its own schedule (#6211). With the entry key
+/// alone as the owner, the idle replica's reap emptied every row under the worker still
+/// forwarding the flow.
 #[test]
-fn a_new_bpf_maps_starts_an_empty_owner_registry_9560() {
-    let key = host_bound_key();
-    let row = session_map_row(&key);
-    let previous = crate::afxdp::coordinator::BpfMaps::default();
-    previous.session_map_owners.add(&row, &in_domain(2));
-    let next = crate::afxdp::coordinator::BpfMaps::default();
-    assert!(
-        !std::sync::Arc::ptr_eq(&previous.session_map_owners, &next.session_map_owners),
-        "a new BpfMaps must not share the previous one's registry"
-    );
-    assert_eq!(
-        next.session_map_owners.owner_count(&row),
-        0,
-        "a new BpfMaps (bringup, or stop) must start an empty registry. The sessions \
-         that owned rows before it are gone, so their owners are stale"
-    );
+fn an_idle_replica_reap_keeps_the_rows_the_forwarding_worker_holds_9560() {
+    let owners = SteeringRowOwners::default();
+    let nat = NatDecision::default();
+    let forward = host_bound_key();
+    let reverse = reverse_session_key(&forward, nat);
+    let _ = publish_live_session_entry(on_worker(&owners, 0), &forward, nat, false);
+    let _ = publish_live_session_entry(on_worker(&owners, 1), &forward, nat, false);
+
     clear_session_map_writes();
-    delete_live_session_key(
-        SteeringMap {
-            fd: RECORDER_ONLY_MAP_FD,
-            owners: &next.session_map_owners,
-        },
-        &key,
-        &key,
+    delete_live_session_entry(on_worker(&owners, 1), &forward, nat, false);
+    let idle_reap = session_map_writes();
+    assert_eq!(
+        deletes_of(&idle_reap, &forward) + deletes_of(&idle_reap, &reverse),
+        0,
+        "worker 1's reap of its idle replica deleted steering rows worker 0 still forwards \
+         the flow on (#9560). Writes: {idle_reap:?}"
     );
+
+    clear_session_map_writes();
+    delete_live_session_entry(on_worker(&owners, 0), &forward, nat, false);
+    let last_reap = session_map_writes();
+    assert!(
+        deletes_of(&last_reap, &forward) >= 1 && deletes_of(&last_reap, &reverse) >= 1,
+        "the last replica's reap must delete the rows. Writes: {last_reap:?}"
+    );
+}
+
+/// C8b. The coordinator (HA import and delete, bringup replay, RG activation) claims
+/// nothing: its publish leaves the rows unowned, and its delete removes a row only while
+/// no worker holds it. The workers' own DeleteSynced fan-out releases their claims.
+#[test]
+fn the_coordinator_claims_nothing_and_its_delete_skips_a_worker_held_row_9560() {
+    let owners = SteeringRowOwners::default();
+    let nat = NatDecision::default();
+    let imported = host_bound_key();
+    let held = SessionKey {
+        src_port: imported.src_port.wrapping_add(1),
+        ..host_bound_key()
+    };
+    let _ = publish_live_session_entry(as_coordinator(&owners), &imported, nat, false);
+    assert_eq!(
+        owners.owner_count(&session_map_row(&imported)),
+        0,
+        "a coordinator publish claimed its row; nothing would ever release that claim, and it \
+         would block the row's delete (#9560)"
+    );
+    let _ = publish_live_session_entry(on_worker(&owners, 0), &held, nat, false);
+
+    clear_session_map_writes();
+    delete_live_session_entry(as_coordinator(&owners), &held, nat, false);
+    delete_live_session_entry(as_coordinator(&owners), &imported, nat, false);
     let writes = session_map_writes();
     assert_eq!(
-        deletes_of(&writes, &key),
-        1,
-        "a row owned only in the previous bringup's registry is Unregistered in the \
-         new one and must be deleted, never blocked by a stale owner. \
+        deletes_of(&writes, &held),
+        0,
+        "the coordinator's delete removed a row a worker still holds; that worker's \
+         DeleteSynced releases its own claim (#9560). Writes: {writes:?}"
+    );
+    assert!(
+        deletes_of(&writes, &imported) >= 1,
+        "the coordinator's delete must remove a row no worker holds, as before #9560. \
          Writes: {writes:?}"
+    );
+}
+
+/// C8c. A same-key republish with a new NAT decision moves the worker's claims: the rows
+/// only the old decision named are released, so they neither leak as REDIRECT rows nor
+/// block a later owner's delete. The entry's own row stays.
+#[test]
+fn a_same_key_nat_change_releases_the_rows_only_the_old_decision_named_9560() {
+    let owners = SteeringRowOwners::default();
+    let key = host_bound_key();
+    let snat = |last: u8| NatDecision {
+        rewrite_src: Some(std::net::IpAddr::V4(std::net::Ipv4Addr::new(203, 0, 113, last))),
+        ..NatDecision::default()
+    };
+    let (nat_a, nat_b) = (snat(10), snat(20));
+    let old_only = reverse_session_key(&key, nat_a);
+    assert_ne!(
+        session_map_row(&old_only),
+        session_map_row(&reverse_session_key(&key, nat_b)),
+        "control: the two SNAT decisions must derive different reverse rows"
+    );
+    let _ = publish_live_session_entry(steering(&owners), &key, nat_a, false);
+
+    clear_session_map_writes();
+    let _ = publish_live_session_entry(steering(&owners), &key, nat_b, false);
+    let writes = session_map_writes();
+    assert!(
+        deletes_of(&writes, &old_only) >= 1,
+        "a same-key republish with a new NAT kept the old decision's reverse row: it leaks as \
+         a REDIRECT row and its stale claim blocks the next owner's delete (#9560). \
+         Writes: {writes:?}"
+    );
+    assert_eq!(
+        deletes_of(&writes, &key),
+        0,
+        "the republish deleted the entry's own row, which the new decision still names. \
+         Writes: {writes:?}"
+    );
+    assert_eq!(owners.owner_count(&session_map_row(&old_only)), 0);
+}
+
+/// C8d. A claim is recorded only after its write succeeded: a publish that fails leaves no
+/// owner behind to block the row's later delete.
+#[test]
+fn a_failed_publish_claims_nothing_9560() {
+    let owners = SteeringRowOwners::default();
+    let key = host_bound_key();
+    // The #9517 cells' never-open descriptor: the update syscall fails.
+    let failing = SteeringMap {
+        fd: i32::MAX,
+        owners: &owners,
+        holder: SteeringHolder::Worker(0),
+    };
+    assert!(
+        publish_live_session_entry(failing, &key, NatDecision::default(), false).is_err(),
+        "control: a write to a descriptor that is not a map must fail"
+    );
+    assert_eq!(
+        owners.owner_count(&session_map_row(&key)),
+        0,
+        "a failed publish left a claim on its row, which would block that row's delete for as \
+         long as the claim lives (#9560)"
     );
 }
 

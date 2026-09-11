@@ -8600,6 +8600,7 @@ fn bringup_replay_reads_the_live_map_and_still_filters_purged_tunnels_8157() {
         crate::afxdp::bpf_map::SteeringMap {
             fd: -1,
             owners: &Default::default(),
+            holder: crate::afxdp::bpf_map::SteeringHolder::Coordinator,
         },
     );
 
@@ -8621,103 +8622,50 @@ fn bringup_replay_reads_the_live_map_and_still_filters_purged_tunnels_8157() {
     );
 }
 
-/// #9560 (C8): the bringup replay publishes preserved synced sessions before any
-/// worker exists, through the registry `bring_up_workers` also hands the workers.
-/// A replayed session that is not registered as an owner is invisible to a worker's
-/// later aliased teardown, which would find the row `Emptied` and delete it.
+/// #9560: one steering-row owner registry for the coordinator's whole life. The session
+/// domain (HA import and delete) shares it with the workers, `stop` keeps it, and `stop`
+/// retires every claim once the workers are joined. A registry replaced at stop would hide
+/// the next bringup's claims from an HA delete that raced the teardown (`sync_session` runs
+/// without the `ServerState` mutex, #7209); a claim carried across would block the row's
+/// legitimate delete for the life of the process.
 #[test]
-fn the_bringup_replay_registers_each_replayed_session_as_a_row_owner_9560() {
-    use std::collections::BTreeMap;
-    const PURGED_TUNNEL: u16 = 7;
+fn stop_retires_every_steering_claim_and_keeps_the_one_registry_9560() {
     let mut coordinator = Coordinator::new();
-    let survivor_key = f4_key();
-    f4_seed_shared_only(
-        &coordinator,
-        &survivor_key,
-        crate::nat::TranslatedTuple {
-            ip: "203.0.113.1".parse().unwrap(),
-            port: 40000,
-        },
-    );
-    let mut purged_key = f4_key();
-    purged_key.src_port = survivor_key.src_port.wrapping_add(1);
-    f4_seed_shared_only(
-        &coordinator,
-        &purged_key,
-        crate::nat::TranslatedTuple {
-            ip: "203.0.113.1".parse().unwrap(),
-            port: 40001,
-        },
-    );
-    {
-        let mut shared = crate::afxdp::lock_shared_recover(&coordinator.sessions.synced);
-        shared
-            .get_mut(&purged_key)
-            .expect("the purged fixture entry is in shared authority")
-            .decision
-            .resolution
-            .tunnel_endpoint_id = PURGED_TUNNEL;
-    }
-    let owners = crate::afxdp::bpf_map::SteeringRowOwners::default();
-    let workers: BTreeMap<u32, Vec<crate::afxdp::BindingPlan>> =
-        BTreeMap::from([(0u32, Vec::new())]);
-    super::reconcile::bringup::replay_preserved_sessions(
-        &mut coordinator,
-        &workers,
-        &[PURGED_TUNNEL],
-        crate::afxdp::bpf_map::SteeringMap {
-            fd: crate::afxdp::bpf_map::RECORDER_ONLY_MAP_FD,
-            owners: &owners,
-        },
-    );
-    let row = crate::afxdp::bpf_map::session_map_row;
+    let registry = Arc::clone(&coordinator.steering_owners);
     assert!(
-        owners.owner_count(&row(&survivor_key)) >= 1,
-        "the replayed survivor is not registered as an owner of its steering row in \
-         the registry the workers share, so a worker's aliased teardown would delete \
-         it (#9560)"
+        Arc::ptr_eq(&registry, &coordinator.session_domain().steering_owners),
+        "the session domain must share the coordinator's registry, or an HA delete consults \
+         owners no worker claims in (#9560)"
     );
-    assert_eq!(
-        owners.owner_count(&row(&purged_key)),
-        0,
-        "control: the session the replay filtered out must register nothing"
-    );
-}
-
-/// #9560 (C8): `stop` stores a fresh `BpfMaps`, and with it a fresh steering-row
-/// owner registry. Every session that owned a row died with the stopped workers,
-/// so an owner carried across would block the next bringup's legitimate delete of
-/// that row for as long as the process lives.
-#[test]
-fn stop_starts_an_empty_steering_row_owner_registry_9560() {
-    let mut coordinator = Coordinator::new();
     let key = f4_key();
     let row = crate::afxdp::bpf_map::session_map_row(&key);
-    coordinator
-        .bpf_maps
-        .load()
-        .session_map_owners
-        .add(&row, &key);
+    registry
+        .publish_row(
+            &row,
+            &key,
+            crate::afxdp::bpf_map::SteeringHolder::Worker(0),
+            || Ok(()),
+        )
+        .expect("a worker claim");
     assert_eq!(
-        coordinator
-            .bpf_maps
-            .load()
-            .session_map_owners
-            .owner_count(&row),
+        registry.owner_count(&row),
         1,
-        "control: the owner must be registered before stop, or the assertion below \
-         cannot tell a fresh registry from an unused one"
+        "control: the claim must be recorded before stop, or the retirement below is \
+         unobserved"
     );
+
     coordinator.stop();
+
+    assert!(
+        Arc::ptr_eq(&registry, &coordinator.steering_owners),
+        "stop replaced the steering-row owner registry; an HA delete holding the old one would \
+         not see the next bringup's claims (#9560)"
+    );
     assert_eq!(
-        coordinator
-            .bpf_maps
-            .load()
-            .session_map_owners
-            .owner_count(&row),
+        registry.owner_count(&row),
         0,
-        "stop must replace the steering-row owner registry along with the map \
-         descriptors: the owners it held belong to sessions that no longer exist"
+        "stop joined every worker, so their steering claims must be retired; a claim carried \
+         across blocks the row's delete for the life of the process (#9560)"
     );
 }
 

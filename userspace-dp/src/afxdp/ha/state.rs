@@ -159,7 +159,8 @@ impl crate::afxdp::Coordinator {
         let maps = self.bpf_maps.load();
         let session_map = SteeringMap {
             fd: maps.session_map_fd.as_ref().map(|fd| fd.fd).unwrap_or(-1),
-            owners: &maps.session_map_owners,
+            owners: &self.steering_owners,
+            holder: crate::afxdp::bpf_map::SteeringHolder::Coordinator,
         };
 
         // RG activation is still allowed to be a narrow ownership transition,

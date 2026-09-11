@@ -125,8 +125,6 @@ pub(in crate::afxdp) struct ReconcileSnapshotFds {
     pub(super) map_fd: OwnedFd,
     pub(super) heartbeat_map_fd: OwnedFd,
     pub(super) session_map_fd: OwnedFd,
-    /// #9560: owners of the steering map's rows, created with this bringup's fds.
-    pub(super) session_map_owners: std::sync::Arc<crate::afxdp::bpf_map::SteeringRowOwners>,
     pub(super) conntrack_v4_fd: Option<OwnedFd>,
     pub(super) conntrack_v6_fd: Option<OwnedFd>,
     pub(super) dnat_table_fd: Option<OwnedFd>,

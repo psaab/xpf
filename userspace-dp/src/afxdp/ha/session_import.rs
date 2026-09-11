@@ -346,7 +346,8 @@ impl crate::afxdp::ha::SessionDomain {
         if publish_live_session_entry(
             SteeringMap {
                 fd: session_map_fd.fd,
-                owners: &maps.session_map_owners,
+                owners: &self.steering_owners,
+                holder: crate::afxdp::bpf_map::SteeringHolder::Coordinator,
             },
             key,
             nat,
@@ -805,7 +806,8 @@ impl crate::afxdp::ha::SessionDomain {
                 delete_session_map_entry_for_removed_session(
                     SteeringMap {
                         fd: session_map_fd.fd,
-                        owners: &maps.session_map_owners,
+                        owners: &self.steering_owners,
+                        holder: crate::afxdp::bpf_map::SteeringHolder::Coordinator,
                     },
                     &entry.key,
                     entry.decision,
