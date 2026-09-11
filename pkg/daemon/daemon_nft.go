@@ -1279,11 +1279,15 @@ func buildHostInboundFilterPayload(views []dpuserspace.ZoneHostInboundView, unzo
 	for _, typ := range xnft.HostInboundAcceptCounterTypes {
 		addCounter(xnft.HostInboundAcceptCounterName(typ))
 	}
+	// #9637: a view's ingress-zone rules reference the same per-zone/family
+	// counter, possibly in a family where the view has no address of its own, so
+	// the declaration covers them too.
+	ingressV4, ingressV6 := hostInboundIngressDestinations(views, unzonedV4, unzonedV6)
 	for _, v := range views {
-		if hostInboundEmitsDrop(v, v.V4Addrs) {
+		if hostInboundEmitsDrop(v, v.V4Addrs) || hostInboundEmitsIngressDrop(v, ingressV4) {
 			addCounter(xnft.HostInboundDenyCounterName(v.Zone, "ip"))
 		}
-		if hostInboundEmitsDrop(v, v.V6Addrs) {
+		if hostInboundEmitsDrop(v, v.V6Addrs) || hostInboundEmitsIngressDrop(v, ingressV6) {
 			addCounter(xnft.HostInboundDenyCounterName(v.Zone, "ip6"))
 		}
 	}
@@ -1382,6 +1386,18 @@ func buildHostInboundFilterPayload(views []dpuserspace.ZoneHostInboundView, unzo
 		emitHostInboundWireGuardAccept(&rules, wgListenPorts)
 	}
 
+	// #9637: the ingress-zone rules come first. A packet that arrives on a
+	// view's own netdev is judged by that view's zone, whichever judged address
+	// it names, and ends here: a listed service accepts it, or the drop does. A
+	// packet on any other netdev matches none of these rules and meets the
+	// destination-address rules below, which are unchanged. A netdev the scope
+	// leaves out is judged exactly as before, and no packet reaches the accept
+	// policy that did not before, because both rule sets judge the same
+	// destination addresses.
+	for _, v := range views {
+		emitHostInboundZoneIngress(&rules, v, "ip", ingressV4)
+		emitHostInboundZoneIngress(&rules, v, "ip6", ingressV6)
+	}
 	for _, v := range views {
 		emitHostInboundZone(&rules, v, "ip", v.V4Addrs)
 		emitHostInboundZone(&rules, v, "ip6", v.V6Addrs)
