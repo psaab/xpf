@@ -552,11 +552,11 @@ func runPreWalkGates(tree *ConfigTree, opts compileOpts) ([]string, error) {
 		return nil, err
 	}
 
-	// #9656: a security-zone statement that names two or more zones without a
-	// braced body compiles as its first zone alone. Strict refuses it, naming
-	// the zones; lenient warns.
-	zoneGroupWarnings, err := validateZoneGroupsHaveBody9656(
-		tree.Children, opts.lenientZoneGroupBody9656)
+	// #9656, #9788: a security-zone statement with no braced body compiles only
+	// its first key as the zone. Strict refuses one whose later keys would be
+	// dropped, naming the zone and the dropped text; lenient warns.
+	zoneGroupWarnings, err := validateZoneStatementTails9656(
+		tree.Children, opts.lenientZoneStatementTail9656)
 	if err != nil {
 		return nil, err
 	}

@@ -517,6 +517,24 @@ func TestCompactNormalizeScopePreservesCompiledResult8690(t *testing.T) {
 			"\"feed-server \\\"f1\\\" resolves to an empty endpoint (no url or hostname, or a " +
 			"slash-only url)\"; with the pass enabled it survives and the same gate " +
 			"accepts. Braced is accepted either way.",
+		// #9656 (M40): the zone-statement gate refuses a childless `security-zone`
+		// statement whose keys after the zone name are dropped. HAND-MEASURED with
+		// type-VALID values through compileConfigWithOpts, skipCompactNormalize
+		// off and on:
+		//
+		//	BRACED passDisabled=true   <nil>      <- the config is legitimate
+		//	BRACED passDisabled=false  <nil>
+		//	ELIDED passDisabled=true   REJECTED   <- "only zone "trust" compiles, and "description d" is dropped"
+		//	ELIDED passDisabled=false  <nil>      <- the fold moves the statement into a body
+		"security zones security-zone xpfarg description": "the gate refuses the CONSEQUENCE of the drop. " +
+			"With the pass disabled, `security-zone trust description d;` stays a childless statement, every " +
+			"zone reader keeps only Keys[1], and the #9656 gate refuses it naming the dropped text. With the pass " +
+			"enabled the fold moves the statement into a body and the gate accepts. The braced spelling is " +
+			"accepted either way.",
+		"security zones security-zone xpfarg tcp-rst": "the gate refuses the CONSEQUENCE of the drop, measured " +
+			"the same way as the description site: `security-zone trust tcp-rst;` is refused with the pass " +
+			"disabled, because the flag is dropped, and accepted with it enabled. The braced spelling is " +
+			"accepted either way.",
 		"system services dhcp-local-server group xpfarg pool xpfarg static-binding xpfarg fixed-address": "the gate refuses the CONSEQUENCE of the " +
 			"drop. Measured with the pass disabled, elided `static-binding b1 " +
 			"fixed-address 10.0.1.50;` loses the address and the compiler rejects with " +
@@ -1044,6 +1062,23 @@ func dedupe8690(in []string) []string {
 // admitting a new one is a decision someone makes rather than a number that
 // moves.
 var knownFixtureLimited8690 = map[string]string{
+
+	// #9656 (M40), HAND-MEASURED INDIVIDUALLY. The census fixture cannot grade
+	// these two sites: its synthesized "xpfarg" names an interface and a screen
+	// profile that do not exist, so the value fails a different validator with
+	// the pass enabled. Written out with a defined interface (ge-0/0/0 unit 0)
+	// and a defined screen profile, and compiled with skipCompactNormalize off
+	// and on, both have the benign shape of the #9656 zone-statement gate:
+	//
+	//	BRACED passDisabled=true/false   <nil>
+	//	ELIDED passDisabled=true         REJECTED  (the statement is dropped)
+	//	ELIDED passDisabled=false        <nil>     (the fold repairs it)
+	"security zones security-zone xpfarg interfaces": "HAND-MEASURED with interface ge-0/0/0.0 defined: the " +
+		"elided spelling is refused by the #9656 zone-statement gate with the pass disabled and accepted with it " +
+		"enabled; the braced spelling is accepted both ways. The gate refuses the drop the pass repairs.",
+	"security zones security-zone xpfarg screen": "HAND-MEASURED with screen profile edge defined: the elided " +
+		"spelling is refused by the #9656 zone-statement gate with the pass disabled and accepted with it enabled; " +
+		"the braced spelling is accepted both ways. The gate refuses the drop the pass repairs.",
 
 	// HAND-MEASURED IN BULK. Each was written out with a type-VALID value and
 	// the siblings its validator needs -- a NAT rule-set with a from/to zone

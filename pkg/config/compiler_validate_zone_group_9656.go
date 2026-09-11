@@ -5,60 +5,41 @@ import (
 	"strings"
 )
 
-// zonesSchema9656 is the `security zones` schema node.
-var zonesSchema9656 = schemaSecurity.children["zones"]
-
-// zoneGroupMembers9656 counts the zones that a body-less security-zone
-// statement names. They are the tokens after `security-zone`, up to the first
-// keyword the security-zone schema declares or an apply statement keyword. #9685
-// declares no apply keyword inside a zone.
+// validateZoneStatementTails9656 refuses a security-zone statement whose keys
+// after the zone name would be dropped.
 //
-// Brackets are not consulted. Format drops them from every node and FormatSet
-// drops them from a leaf, so a peer compiling the rendered text must reach the
-// same verdict.
-func zoneGroupMembers9656(ch *Node, zone *schemaNode) int {
-	j := 1
-	for j < len(ch.Keys) && zone.children[ch.Keys[j]] == nil && !isApplyStatementKeyword(ch.Keys[j]) {
-		j++
-	}
-	return j - 1
-}
-
-// validateZoneGroupsHaveBody9656 refuses a security-zone statement that names
-// two or more zones without a non-empty braced body.
+// Every reader of a zone goes through bracketedGroupInstances8794. For a
+// statement with no braced body, that reads only Keys[1], so whatever follows
+// the name reaches no compiler. That covers both further zone names and a
+// statement the #8662 fold did not move into a body. Measured at 6cf4305ab,
+// after normalization and group expansion:
 //
-// #9656 (M40): measured at e09f425dd, strict commit accepted each of these. Each
-// compiled only zone zga, through namedInstances:
+//	security-zone [ zga zgb ] screen edge;          only zga, without its screen (#9656 M40)
+//	security-zone [ zga zgb ];                      only zga
+//	security-zone [ zga zgb ] { }                   only zga
+//	security-zone [ zga zgb ] { apply-groups G; }   only zga; expansion empties the body
+//	security-zone [ tcp-rst zgb ];                  only tcp-rst
+//	security-zone trust apply-groups G;             trust without G (#9788)
+//	security-zone trust scren edge;                 trust; the mistyped statement is dropped
 //
-//	security-zone [ zga zgb ] screen edge;          zga without its screen, no zgb
-//	security-zone [ zga zgb ];                      no zgb
-//	security-zone [ zga zgb ] { }                   no zgb
-//	security-zone [ zga zgb ] { apply-groups G; }   no zgb; expansion empties the body
+// Three kinds of statement are left alone:
+//   - A statement the fold moves into a body, such as
+//     `security-zone trust screen edge;`, already has a child by the time this
+//     runs.
+//   - A braced group is compiled for every member by
+//     bracketedGroupInstances8794 (#8794).
+//   - A repeat of the name, as in `security-zone [ zga zga ];`, loses nothing.
 //
-// A group with a non-empty body is left alone. bracketedGroupInstances8794
-// compiles it for every member (#8794).
+// Why a refusal: an earlier cut expanded groups in the normalizer, and three
+// review rounds found the per-member statements it materialised colliding with
+// the node budgets downstream. The #9656 acceptance allows a strict refusal that
+// names the spelling.
 //
-// Why refuse rather than expand: an earlier cut expanded each group into one
-// statement per zone in the #8662 normalizer. Three review rounds found the
-// per-member statements it materialised colliding with the node budgets
-// downstream:
-//   - clones with no bound;
-//   - a budget kept per `zones` node;
-//   - a group subtree pushed past the apply-groups work budget, so one cluster
-//     node's tolerant load failed;
-//   - cloned bodies that grew again under normalization;
-//   - a second normalization with a fresh budget.
-//
-// The braced spelling already compiles for every member, and the #9656
-// acceptance allows a strict refusal that names the spelling.
-//
-// This check reads the group-expanded, inactive-pruned tree that
-// runPreWalkGates is given. A body that group expansion emptied is therefore
-// refused, and an inactive group is not. Strict commit refuses. The tolerant
-// load and peer-sync paths warn and compile the statement as before, so a
-// persisted configuration still boots (#1960).
-func validateZoneGroupsHaveBody9656(nodes []*Node, lenient bool) ([]string, error) {
-	zone := zonesSchema9656.children["security-zone"]
+// This check reads the group-expanded, inactive-pruned tree that runPreWalkGates
+// is given. Strict commit refuses. The tolerant load and peer-sync paths warn
+// and compile the statement as before, so a persisted configuration still boots
+// (#1960).
+func validateZoneStatementTails9656(nodes []*Node, lenient bool) ([]string, error) {
 	var warnings []string
 	for _, sec := range nodes {
 		if sec == nil || len(sec.Keys) != 1 || sec.Keys[0] != "security" {
@@ -72,11 +53,10 @@ func validateZoneGroupsHaveBody9656(nodes []*Node, lenient bool) ([]string, erro
 				if ch == nil || len(ch.Keys) < 3 || ch.Keys[0] != "security-zone" || len(ch.Children) > 0 {
 					continue
 				}
-				members := zoneGroupMembers9656(ch, zone)
-				if members < 2 {
+				if !zoneTailDropsKeys9656(ch) {
 					continue
 				}
-				msg := zoneGroupMessage9656(ch, members)
+				msg := zoneTailMessage9656(ch)
 				if !lenient {
 					return nil, fmt.Errorf("%s", msg)
 				}
@@ -87,26 +67,27 @@ func validateZoneGroupsHaveBody9656(nodes []*Node, lenient bool) ([]string, erro
 	return warnings, nil
 }
 
-// zoneGroupMessage9656 names the statement, the zones it names (at most three),
-// and the spellings that compile every one of them.
-func zoneGroupMessage9656(ch *Node, members int) string {
-	names := ch.Keys[1 : 1+members]
-	shown := strings.Join(names[:min(len(names), 3)], " ")
-	if len(names) > 3 {
-		shown += " …"
+// zoneTailDropsKeys9656 reports whether a childless security-zone statement
+// carries a key after the name that is not a repeat of the name.
+func zoneTailDropsKeys9656(ch *Node) bool {
+	for _, k := range ch.Keys[2:] {
+		if k != ch.Keys[1] {
+			return true
+		}
 	}
-	stmt := strings.Join(ch.Keys, " ")
-	if len(stmt) > 120 {
-		stmt = stmt[:120] + " …"
+	return false
+}
+
+// zoneTailMessage9656 names the zone that compiles and the text that is dropped.
+func zoneTailMessage9656(ch *Node) string {
+	rest := strings.Join(ch.Keys[2:], " ")
+	if len(rest) > 80 {
+		rest = rest[:80] + " …"
 	}
-	body := "without a braced body"
+	written := "without a braced body"
 	if !ch.IsLeaf {
-		body = "with an empty braced body"
+		written = "with an empty braced body"
 	}
-	fix := "Write one security-zone statement per zone."
-	if tail := strings.Join(ch.Keys[1+members:], " "); tail != "" {
-		fix = fmt.Sprintf("Put the shared statement in braces, security-zone [ %s ] { %s; }, or write one statement per zone.", shown, tail)
-	}
-	return fmt.Sprintf("security zones %s: names %d zones (%s) %s, and would compile only zone %q. %s (#9656)",
-		stmt, members, shown, body, names[0], fix)
+	return fmt.Sprintf("security zones security-zone %s: written %s, only zone %q compiles, and %q is dropped. Group zones with a braced body (security-zone [ a b ] { … }), write each zone as its own statement, or put the statement in braces (#9656)",
+		ch.Keys[1], written, ch.Keys[1], rest)
 }
