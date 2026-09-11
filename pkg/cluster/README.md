@@ -3113,6 +3113,16 @@ operator-facing table.
   or a negative ack all proceed with the takeover, each recorded to
   `EventFence` with its reason. `SendFenceAwait` returns immediately when there
   is no active connection, so the ordinary dead-peer takeover pays nothing.
+- **The first election after peer loss is the one after the fence (#9640).**
+  `handlePeerTimeout` clears a manual failover with `manualFailoverRestoreWeightLocked`
+  (the non-electing helper `electRG` already uses), not `recalcWeight`. `recalcWeight` elects, and with `peerAlive` already false it promoted
+  every group BEFORE `awaitPeerFenceLocked`. The single `electSingleNode` after the fence
+  elects them now. Under `disable-rg` and no fencing that election still precedes any
+  fence, so their events and end state are unchanged.
+  - `TestManualFailoverAtPeerTimeoutElectsOnlyAfterTheConfirmedFence9640` and its
+    two-group sibling pin the ordering.
+  - `TestPeerLossWithManualFailoverKeepsTodaysOutcome9640` pins the other policies to
+    master's measured events.
 - **A CONFIRMED ack proves dataplane suppression, not relinquishment (#9120).**
   `fenceAllRedundancyGroups` drives `rg_active=false` and re-arms the RG state
   machine. It does not release VIPs (the peer keeps answering ARP/ND and keeps
