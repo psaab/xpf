@@ -104,7 +104,16 @@ func TestRedistNodeAFICoversEveryCallSite_9510(t *testing.T) {
 	}
 	callRE := regexp.MustCompile(`\.resolveRedistribute\(`)
 	litRE := regexp.MustCompile(`\.resolveRedistribute\([^,()]+,\s*[^,()]+,\s*"([a-z0-9]*)",`)
+	// #9666: IS-IS renders through resolveISISRedistribute, which takes the
+	// router's level rather than a self literal and hard-codes self "isis"
+	// into redistributeEntries. Its call sites count as "isis" ONLY if that
+	// hard-coding is proven below, and redistributeEntries may have no caller
+	// but the two wrappers, so a third path cannot slip past this census.
+	isisCallRE := regexp.MustCompile(`\.resolveISISRedistribute\(`)
+	isisSelfRE := regexp.MustCompile(`func \(m \*Manager\) resolveISISRedistribute\([^)]*\) string \{\s*return isisRedistributeLines\(m\.redistributeEntries\([^,()]+,\s*[^,()]+,\s*"isis",`)
+	entriesCallRE := regexp.MustCompile(`\.redistributeEntries\(`)
 	calls, lits := 0, map[string]int{}
+	isisCalls, isisSelfProven, entriesCalls := 0, false, 0
 	for _, f := range files {
 		if strings.HasSuffix(f, "_test.go") {
 			continue
@@ -117,6 +126,19 @@ func TestRedistNodeAFICoversEveryCallSite_9510(t *testing.T) {
 		for _, mm := range litRE.FindAllSubmatch(b, -1) {
 			lits[string(mm[1])]++
 		}
+		isisCalls += len(isisCallRE.FindAllIndex(b, -1))
+		isisSelfProven = isisSelfProven || isisSelfRE.Match(b)
+		entriesCalls += len(entriesCallRE.FindAllIndex(b, -1))
+	}
+	if isisCalls > 0 {
+		if !isisSelfProven {
+			t.Fatalf("found %d resolveISISRedistribute calls but could not prove it passes self \"isis\" to redistributeEntries", isisCalls)
+		}
+		calls += isisCalls
+		lits["isis"] += isisCalls
+	}
+	if entriesCalls != 2 {
+		t.Fatalf("redistributeEntries has %d callers, want exactly the two wrappers (resolveRedistribute, resolveISISRedistribute); another caller would be a router this census cannot see", entriesCalls)
 	}
 	n := 0
 	for _, c := range lits {

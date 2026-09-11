@@ -75,7 +75,95 @@ func knownRedistProtocol(name string) bool {
 // (#9510). redistSourceFitsNode filters that on BOTH paths, at the use site,
 // rather than rejecting the policy at commit: a policy-statement is reusable,
 // and `from protocol ospf6` is valid under `router ospf6`.
+// redistEntry is one source a `redistribute` export resolves to under an
+// enclosing router: the FRR source protocol, and the route-map to attach
+// ("" for a bare protocol token).
+type redistEntry struct {
+	proto    string
+	routeMap string
+}
+
+// resolveRedistribute renders an export as OSPF/RIP/BGP-shaped
+// `redistribute <proto> [route-map X]` lines. IS-IS has a different grammar
+// and uses resolveISISRedistribute instead (#9666).
 func (m *Manager) resolveRedistribute(export string, po *config.PolicyOptionsConfig, self string, bgpAcceptDefault map[string]bool) string {
+	return formatRedistEntries(m.redistributeEntries(export, po, self, bgpAcceptDefault))
+}
+
+func formatRedistEntries(entries []redistEntry) string {
+	var sb strings.Builder
+	for _, e := range entries {
+		if e.routeMap == "" {
+			fmt.Fprintf(&sb, " redistribute %s\n", sanitizeFRRValue(e.proto))
+			continue
+		}
+		fmt.Fprintf(&sb, " redistribute %s route-map %s\n", sanitizeFRRValue(e.proto), frrName(e.routeMap))
+	}
+	return sb.String()
+}
+
+// resolveISISRedistribute renders an export in isisd's grammar (#9666):
+//
+//	redistribute <ipv4|ipv6> <proto> <level-1|level-2> [route-map X]
+//
+// isisd installs only that form (isis_cli.c isis_redistribute_cmd). The
+// address-family keyword and the level are mandatory, so the OSPF-shaped
+// `redistribute <proto>` resolveRedistribute renders was rejected for EVERY
+// IS-IS export, and one rejected line fails the whole managed reload (#9510).
+//
+// The families come from the source's lib/route_types.txt columns
+// (frrRedistSourceAFI): ospf/rip are IPv4 only, ospf6/ripng IPv6 only, the
+// rest both. xpf enables both `ip router isis` and `ipv6 router isis` on its
+// circuits (#8450), so a dual-family source is redistributed into both.
+//
+// The levels come from the router's is-type, through the same canonicalizer
+// the is-type line uses (#8446): level-1 -> level-1; level-1-2 -> one line per
+// level, since a router in both levels redistributes into both and each FRR
+// line names one; everything else -> the narrow level-2 default.
+func (m *Manager) resolveISISRedistribute(export string, po *config.PolicyOptionsConfig, isisLevel string, bgpAcceptDefault map[string]bool) string {
+	return isisRedistributeLines(m.redistributeEntries(export, po, "isis", bgpAcceptDefault), isisLevel)
+}
+
+func isisRedistributeLines(entries []redistEntry, isisLevel string) string {
+	level, ok := config.CanonicalISISLevel(isisLevel)
+	if !ok {
+		level = config.DefaultISISLevel
+	}
+	var levels []string
+	switch level {
+	case "level-1":
+		levels = []string{"level-1"}
+	case "level-1-2":
+		levels = []string{"level-1", "level-2"}
+	default:
+		levels = []string{"level-2"}
+	}
+	var sb strings.Builder
+	for _, e := range entries {
+		afi, known := frrRedistSourceAFI[e.proto]
+		if !known {
+			afi = afiBoth
+		}
+		for _, fam := range []struct {
+			bit  redistAFI
+			name string
+		}{{afiV4, "ipv4"}, {afiV6, "ipv6"}} {
+			if afi&fam.bit == 0 {
+				continue
+			}
+			for _, lv := range levels {
+				if e.routeMap == "" {
+					fmt.Fprintf(&sb, " redistribute %s %s %s\n", fam.name, sanitizeFRRValue(e.proto), lv)
+				} else {
+					fmt.Fprintf(&sb, " redistribute %s %s %s route-map %s\n", fam.name, sanitizeFRRValue(e.proto), lv, frrName(e.routeMap))
+				}
+			}
+		}
+	}
+	return sb.String()
+}
+
+func (m *Manager) redistributeEntries(export string, po *config.PolicyOptionsConfig, self string, bgpAcceptDefault map[string]bool) []redistEntry {
 	// Junos spells directly-connected routes "direct"; FRR's redistribute
 	// keyword is "connected". A bare `export direct` must render
 	// `redistribute connected`, not the FRR-invalid `redistribute direct`
@@ -96,14 +184,14 @@ func (m *Manager) resolveRedistribute(export string, po *config.PolicyOptionsCon
 		if self != "" && export == self {
 			slog.Warn("FRR redistribute export skipped: protocol cannot redistribute itself",
 				"protocol", self)
-			return ""
+			return nil
 		}
 		// #9510: the source must also be in a family the enclosing router's
 		// redistribute grammar lists (redistribute_afi_9510.go).
 		if !redistSourceFitsNode(export, self) {
 			slog.Warn("FRR redistribute export skipped: source protocol is not in this router's address family",
 				"protocol", self, "source", export)
-			return ""
+			return nil
 		}
 		// #8597 (muse-004 K87): sanitized for PARITY, not because this site is
 		// reachable with a dirty operand.
@@ -116,7 +204,7 @@ func (m *Manager) resolveRedistribute(export string, po *config.PolicyOptionsCon
 		// widens the allowlist does not silently open the hole.
 		//
 		// The two-operand site below is the one that WAS reachable.
-		return fmt.Sprintf(" redistribute %s\n", sanitizeFRRValue(export))
+		return []redistEntry{{proto: export}}
 	}
 
 	if po != nil && po.PolicyStatements != nil {
@@ -165,7 +253,7 @@ func (m *Manager) resolveRedistribute(export string, po *config.PolicyOptionsCon
 				if policyNeedsRedistAlias(export, ps, bgpAcceptDefault) {
 					rmName = redistFailClosedRouteMap(export)
 				}
-				var sb strings.Builder
+				entries := make([]redistEntry, 0, len(sorted))
 				for _, proto := range sorted {
 					// #8597 (muse-004 K87): both operands are RAW CONFIG
 					// STRINGS — `proto` comes from term.FromProtocols and
@@ -191,10 +279,11 @@ func (m *Manager) resolveRedistribute(export string, po *config.PolicyOptionsCon
 					// change with its own over-rejection question. What this
 					// closes is a newline or NUL splitting one statement into
 					// two.
-					fmt.Fprintf(&sb, " redistribute %s route-map %s\n",
-						sanitizeFRRValue(proto), frrName(rmName))
+					// The belts are applied where the line is written
+					// (formatRedistEntries, isisRedistributeLines).
+					entries = append(entries, redistEntry{proto: proto, routeMap: rmName})
 				}
-				return sb.String()
+				return entries
 			}
 			if skipped {
 				// Every `from protocol` was filtered above, as self or as
@@ -202,7 +291,7 @@ func (m *Manager) resolveRedistribute(export string, po *config.PolicyOptionsCon
 				// the operator looking for a term that already exists.
 				slog.Warn("FRR redistribute export skipped: no `from protocol` in the policy-statement applies under this router",
 					"policy", export, "protocol", self)
-				return ""
+				return nil
 			}
 			// Defined policy-statement with no resolvable source protocol:
 			// nothing valid to redistribute. Skip + warn rather than emit
@@ -211,7 +300,7 @@ func (m *Manager) resolveRedistribute(export string, po *config.PolicyOptionsCon
 			slog.Warn("FRR redistribute export skipped: policy-statement has no `from protocol`",
 				"policy", export,
 				"hint", "redistribute requires a source protocol; add `from protocol <proto>` to the policy or use a bare protocol token")
-			return ""
+			return nil
 		}
 	}
 
@@ -223,7 +312,7 @@ func (m *Manager) resolveRedistribute(export string, po *config.PolicyOptionsCon
 	slog.Warn("FRR redistribute export skipped: not a known protocol or defined policy-statement",
 		"export", export,
 		"hint", "use a known protocol (connected/static/ospf/bgp/rip/isis/kernel) or a defined policy-statement with a `from protocol`")
-	return ""
+	return nil
 }
 
 // isDefinedPolicyStatement reports whether name resolves to a defined
