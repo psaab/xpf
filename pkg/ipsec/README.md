@@ -44,14 +44,23 @@ the apply path pays no fsync (the file is regenerated on every apply).
 - `SAStatus`, `TerminateAllSAs`, `InitiateConnection`, `GetSAStatus`,
   `ActiveConnectionNames` — `ike.go`.
 - `PrepareConfig(cfg *config.Config) *config.IPsecConfig` — `policy.go`.
-- `ApplyNotifyLoaded(ipsecCfg, loaded func()) error` — `manager.go`. This is `Apply`
-  (which delegates to it with a nil callback), and additionally calls `loaded` the
-  moment strongSwan has LOADED the config (#9511): right after the loaded connection
-  set is promoted, before departed connections are torn down. It is never called on a
-  render, write, reload or clear failure, which leaves the previous generation loaded.
-  It IS called when the apply then returns teardown debt (#6542). The daemon records
-  the config there for HA IPsec attribution. `SetSwanctlForTesting` (`test_seams.go`)
-  installs the swanctl exec double for other packages' tests.
+- `ApplyWithHooks(ipsecCfg, hooks ApplyHooks) error`, `ApplyHooks{Written, Loaded}` and
+  `ApplyNotifyLoaded(ipsecCfg, loaded func()) error` — `manager.go`. `Apply` with callbacks
+  at the two points where the on-disk swanctl config and what charon runs can diverge.
+  `ApplyNotifyLoaded` is `ApplyWithHooks` with only `Loaded`.
+  - `Written` runs once the on-disk config has CHANGED (the new file written, or removed
+    for an empty config) and BEFORE the reload. From then until a successful reload,
+    charon runs a generation that is not the file on disk, and its own next start or
+    reload (`strongswan.service` `ExecStartPost`/`ExecReload` `swanctl --load-all`) loads
+    the file. That is the #9511 stopgap window. It does not run on a render or write
+    failure.
+  - `Loaded` runs the moment strongSwan has LOADED the config: right after the loaded
+    connection set is promoted and before departed connections are torn down (#9511).
+    It does not run on a failed reload, and it does run when the apply then returns
+    teardown debt (#6542).
+  - The daemon records the loaded config for HA IPsec attribution from these hooks.
+    `SetSwanctlForTesting` (`test_seams.go`) installs the swanctl exec double for other
+    packages' tests.
 - `SANameIndex`, `BuildSANameIndex(ipsecCfg) SANameIndex`,
   `(SANameIndex).VPNs(saName) []string`, `(SANameIndex).Collisions() []string` —
   `policy.go`. The inverse of the render (#9511): every SA name

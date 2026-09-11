@@ -21,6 +21,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -688,5 +690,79 @@ func TestApplyActiveConfigRecordsTheLoadedIPsecGeneration9511(t *testing.T) {
 	if active := d.store.ActiveConfig(); active == nil || d.ipsecLoadedCfg.Load() != active {
 		t.Error("the boot apply loaded the IPsec config but did not record it; after every " +
 			"restart attribution would stay on the promoted fallback until the next commit")
+	}
+}
+
+// ── FAILED-RELOAD WINDOW (#9511 stopgap) ──────────────────────────────────────
+//
+// THE WINDOW: xpfd writes the new swanctl file, then its reload FAILS. charon keeps
+// running the previous generation C0, but the new file C1 stays on disk, and charon's
+// own next start or reload (strongswan.service ExecStartPost/ExecReload
+// `swanctl --load-all`, Restart=on-abnormal) loads it. A record still naming C0 would
+// attribute against a generation charon no longer runs, which is worse than master.
+// Inside this window attribution must equal the PROMOTED-config answer, which is
+// master's answer and the generation charon will load.
+func TestFailedReloadWindowAttributesLikeThePromotedConfig9511(t *testing.T) {
+	c0 := storeWith9511(t, append(append([]string{}, blueOnRG1_9511...),
+		"set security ipsec vpn blue-red ike gateway gw-rg2")...)
+	c1 := storeWith9511(t, blueOnRG1_9511...)
+	names := []string{"blue-red", "blue"}
+
+	m := ipsec.NewWithConfigDir(t.TempDir())
+	m.SetSwanctlForTesting(func(args ...string) ([]byte, error) {
+		if len(args) > 0 && args[0] == "--load-all" {
+			return nil, errors.New("charon vici socket refused")
+		}
+		return nil, nil
+	})
+	d := &Daemon{cluster: clusterOwning9511(t, c1, 1), store: c1, ipsec: m}
+	d.ipsecLoadedCfg.Store(c0.ActiveConfig()) // a previous successful load of C0
+
+	if err := d.applyIPsecTracked(c1.ActiveConfig()); err == nil {
+		t.Fatal("FIXTURE: the reload of C1 must fail")
+	}
+	if got := d.ipsecLoadedCfg.Load(); got != nil {
+		t.Fatalf("THE WINDOW: C1 was written and its reload failed, so charon's next "+
+			"start or reload loads C1; the record must be cleared, still holds %p", got)
+	}
+
+	got := d.ipsecSAsToReinitiate(names)
+	master := (&Daemon{cluster: clusterOwning9511(t, c1, 1), store: c1}).ipsecSAsToReinitiate(names)
+	sort.Strings(got)
+	sort.Strings(master)
+	if strings.Join(got, ",") != strings.Join(master, ",") {
+		t.Errorf("THE WINDOW: attribution %v must equal the promoted-config answer %v", got, master)
+	}
+}
+
+// CONTROL: a WRITE failure changes nothing on disk. charon and the file both still hold
+// C0, so the record must stay C0; clearing it here would give up a correct answer.
+func TestWriteFailureKeepsTheLoadedRecord9511(t *testing.T) {
+	c0 := storeWith9511(t, blueOnRG1_9511...)
+	c1 := storeWith9511(t, append(append([]string{}, blueOnRG1_9511...),
+		"set security ipsec vpn newx ike gateway gw-rg1")...)
+	blocker := filepath.Join(t.TempDir(), "not-a-dir")
+	if err := os.WriteFile(blocker, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	m := ipsec.NewWithConfigDir(filepath.Join(blocker, "conf.d"))
+	reloads := 0
+	m.SetSwanctlForTesting(func(args ...string) ([]byte, error) {
+		if len(args) > 0 && args[0] == "--load-all" {
+			reloads++
+		}
+		return nil, nil
+	})
+	d := &Daemon{store: c1, ipsec: m}
+	d.ipsecLoadedCfg.Store(c0.ActiveConfig())
+
+	if err := d.applyIPsecTracked(c1.ActiveConfig()); err == nil {
+		t.Fatal("FIXTURE: the write into an unwritable config dir must fail")
+	}
+	if reloads != 0 {
+		t.Fatalf("FIXTURE: a write failure must not reach the reload, got %d reloads", reloads)
+	}
+	if d.ipsecLoadedCfg.Load() != c0.ActiveConfig() {
+		t.Error("a write failure left the on-disk config and charon on C0; the record must stay C0")
 	}
 }
