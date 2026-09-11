@@ -840,6 +840,13 @@ func (d *Daemon) executeConfirmedRollback(gen uint64) {
 	// added must drop that policy's sessions, same as any commit.
 	oldActive := d.store.ActiveConfig()
 
+	// #9615: a window recovered across a restart, possibly by a newer build,
+	// was never pre-flighted here, and a feed-bound target may simply not be
+	// ready yet. Decide before PromoteRollback, while nothing is promoted.
+	if d.confirmRollbackTargetHandledAtFire(gen) {
+		return
+	}
+
 	prevCfg, ok := d.store.PromoteRollback(gen)
 	if !ok {
 		// Superseded (nested CommitConfirmed / ConfirmCommit) or no
@@ -908,8 +915,10 @@ func (d *Daemon) executeConfirmedRollback(gen uint64) {
 	// #1956 V-3/OQ-15.2: the non-nil rollback target is applied
 	// UNCONDITIONALLY here — never aborted for device-map safety. Its
 	// device-map safety was validated at commit-confirmed time (the R-8
-	// pre-flight checks BOTH candidate and rollback target), so by the time
-	// this fires the target is KNOWN-safe. Aborting here would diverge the
+	// pre-flight checks BOTH candidate and rollback target) for a window armed
+	// in THIS process. A window Store.Load recovered was never pre-flighted
+	// here, so #9615 re-runs the appliability check above, before promotion;
+	// by the time control reaches this apply the target has passed it. Aborting here would diverge the
 	// already-promoted store from the running dataplane (split-brain), which
 	// is strictly worse than applying a validated target.
 	//

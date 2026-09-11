@@ -846,6 +846,11 @@ type Daemon struct {
 	// exercise the semaphore contract through the real applyConfig
 	// / commitAndApply paths without standing up the full dataplane.
 	applyBodyForTest func(*config.Config)
+	// confirmFeedDeferrals counts, per commit-confirmed generation, how often a
+	// timed-out rollback was deferred because its target waits on a
+	// dynamic-address feed (#9615). Read and written only by
+	// executeConfirmedRollback, under applySem.
+	confirmFeedDeferrals map[uint64]int
 	// preApplyHookForTest fires in a background apply CALLBACK after it has
 	// finished reading config for its own decisions and immediately before it
 	// hands off to applyActiveConfig / applyActiveConfigResult.

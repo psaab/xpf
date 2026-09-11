@@ -351,6 +351,11 @@ func (s *Store) recoverPendingConfirmLocked() error {
 	s.confirmTimer = time.AfterFunc(remaining, func() {
 		s.fireConfirmTimer(gen)
 	})
+	// #9615: this window was armed by an earlier process (possibly an older
+	// build), so its target was never pre-flighted here. The daemon checks it.
+	s.confirmDeadline = rec.Deadline
+	s.confirmRecovered = true
+	s.confirmAlarm = ""
 	slog.Info("restored pending commit-confirmed window after restart; auto-rollback re-armed",
 		"remaining", remaining.String(), "issue", "#4577")
 	return nil
