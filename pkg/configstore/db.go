@@ -4,6 +4,7 @@ package configstore
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -227,13 +228,9 @@ func (db *DB) confirmPath() string {
 // transient recovery state, not a committed config, and confirmRecord evolves
 // via additive JSON fields.
 func (db *DB) WriteConfirm(rec *confirmRecord) error {
-	data, err := json.MarshalIndent(rec, "", "  ")
+	data, err := db.encodeConfirm(rec)
 	if err != nil {
-		return fmt.Errorf("marshal confirm state: %w", err)
-	}
-	data, err = db.maybeEncryptTreeJSON(data, rec.PrevTree, nil)
-	if err != nil {
-		return fmt.Errorf("encrypt confirm state: %w", err)
+		return err
 	}
 	// #9014: through the rbWriteFileDurable seam, not fsatomic directly, so a
 	// test can fail the ARM write. Until this issue there was no way to
@@ -520,6 +517,19 @@ func (db *DB) writeTreeMarked(path string, tree *config.ConfigTree, committed bo
 	out = append(out, header...)
 	data = append(out, data...)
 
+	// #9617: refuse bytes the reader will refuse. Load, rollback and candidate
+	// reads all go through ReadBoundedFile(path, MaxConfigSize), and a JSON
+	// tree can be many times its config text (18x for a run of small groups
+	// stanzas), so a config that passes every INPUT bound (the parse budget,
+	// checkConfigSize) can still serialize past the ceiling. Checked on the
+	// envelope-wrapped, possibly-encrypted bytes, which are exactly what the
+	// reader counts, and BEFORE the write: the file on disk stays the previous
+	// readable generation, and a commit fails pre-promotion with its candidate
+	// intact instead of succeeding into a DB the next Load refuses.
+	if err := checkPersistSize(path, len(data)); err != nil {
+		return err
+	}
+
 	// Owner-only 0600 (#4056): active.json / candidate.json /
 	// rollback.N.json carry the full config, including secret leaves (IKE
 	// PSK, WireGuard/auth keys, SNMP community). When master-password is
@@ -528,6 +538,61 @@ func (db *DB) writeTreeMarked(path string, tree *config.ConfigTree, committed bo
 	// runs as the owner, so 0600 does not affect read-back.
 	if err := fsatomic.WriteFileDurable(path, data, 0600); err != nil {
 		return fmt.Errorf("persist %s: %w", path, err)
+	}
+	return nil
+}
+
+// encodeConfirm produces the exact bytes WriteConfirm persists: the indented
+// record, encrypted under the rollback target's master-password when it has
+// one. It refuses a record ReadConfirm would refuse (#9617), so the
+// commit-confirmed path can size-check the record BEFORE it promotes anything
+// (commitConfirmedLocked) using the same function the write uses.
+// widestConfirmDeadline is a deadline whose JSON is as long as any deadline's
+// can be, for sizing a confirm record before its real deadline exists (#9617).
+// time.Time marshals as RFC3339Nano: every date and clock field is fixed
+// width, the fraction drops its trailing zeros (so nine significant digits is
+// the longest), and the zone is "Z" at a zero UTC offset but "+hh:mm" at any
+// other. The zone therefore depends on the instant, not only the location: a
+// Europe/London deadline is "Z" in winter and "+01:00" in summer. This value
+// is the widest form for every clock and zone.
+var widestConfirmDeadline = time.Date(2000, 1, 1, 0, 0, 0, 999999999, time.FixedZone("", 60*60))
+
+func (db *DB) encodeConfirm(rec *confirmRecord) ([]byte, error) {
+	data, err := json.MarshalIndent(rec, "", "  ")
+	if err != nil {
+		return nil, fmt.Errorf("marshal confirm state: %w", err)
+	}
+	data, err = db.maybeEncryptTreeJSON(data, rec.PrevTree, nil)
+	if err != nil {
+		return nil, fmt.Errorf("encrypt confirm state: %w", err)
+	}
+	if err := checkPersistSize(db.confirmPath(), len(data)); err != nil {
+		return nil, err
+	}
+	return data, nil
+}
+
+// ErrPersistExceedsReadCeiling reports that an artifact the store is about to
+// persist is larger than the ceiling its own reader enforces (#9617).
+//
+// Every tree and record this package writes is read back through
+// ReadBoundedFile(path, MaxConfigSize): active.json at Load, rollback.N.json,
+// candidate.json, and confirm.json at boot recovery. Before #9617 no writer
+// checked the bytes it was about to persist against that ceiling, so an
+// accepted commit could write an active DB the next Load refuses
+// (ErrConfigDBUnreadable: the daemon does not come back), and a successful
+// commit confirmed could write a confirm.json the next boot refuses (the
+// rollback window is silently lost). A writer's domain must be a subset of its
+// reader's; this is the writer half of that invariant.
+var ErrPersistExceedsReadCeiling = errors.New("refusing to persist an artifact its reader would refuse")
+
+// checkPersistSize applies the reader's exact boundary: ReadBounded refuses
+// len > max and accepts len == max, so this refuses n > MaxConfigSize and
+// nothing else. TestPersistSizeGateMatchesReaderBoundary_9617 pins the pair.
+func checkPersistSize(path string, n int) error {
+	if n > MaxConfigSize {
+		return fmt.Errorf("%w: %s would be %d bytes, over the %d byte ceiling enforced when it is read back, so the next load would reject it",
+			ErrPersistExceedsReadCeiling, filepath.Base(path), n, MaxConfigSize)
 	}
 	return nil
 }

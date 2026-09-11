@@ -123,7 +123,12 @@ type Store struct {
 	persistDegraded            bool
 	persistRetryActive         bool
 	persistRetryInitialBackoff time.Duration
-	persistRetryMaxBackoff     time.Duration
+	// persistRefusedTree is the active tree the persist retry loop last saw
+	// refused by the read ceiling (#9617). The loop does not re-attempt that
+	// tree; any promotion installs a new tree object and resumes retries.
+	// Guarded by mu.
+	persistRefusedTree     *config.ConfigTree
+	persistRetryMaxBackoff time.Duration
 
 	// persistMarkerCommitted records the #1922 step-0 committed flag the
 	// degraded-persist retry loop must re-write. Defaults true; set false

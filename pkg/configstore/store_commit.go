@@ -488,6 +488,48 @@ func (s *Store) commitConfirmedLocked(minutes int) (*config.Config, error) {
 	// (promote, arm the timer, return compiled) and flag degraded
 	// durability, rather than report REJECTED while a restart would activate
 	// C. Rationale (converge-to-C over restore-A) is in CommitWithDescription.
+	// #9617: preflight the commit-confirmed RECORD before anything is
+	// promoted. confirm.json nests the rollback target one indentation level
+	// deeper than active.json (MarshalIndent adds two bytes per line), so a
+	// readable active DB does not bound its own confirm record, and the record
+	// is only written after promotion (writeConfirmState below). Without this, a
+	// record ReadConfirm will refuse is reported as an armed, crash-surviving
+	// window, and a restart inside it keeps the unconfirmed config with no
+	// timer. The record encoded here is the one writeConfirmState writes: the
+	// same rollback target, a deadline of the same JSON WIDTH, and the guarded
+	// hash of the tree about to become active; the encrypted length is a
+	// function of the plaintext length. The real deadline is still taken at the
+	// arm site below, after the commit work, so the persisted deadline and the
+	// live timer describe ONE window. The preflight stands in
+	// widestConfirmDeadline for it, a deadline whose JSON is as long as any
+	// deadline's can be, so the record it sizes is never shorter than the one
+	// written. A deadline read from the clock here would not be: across a DST
+	// change into a non-zero UTC offset its zone suffix grows from "Z" to
+	// "+hh:mm" between this line and the arm site.
+	if s.db != nil {
+		prevTree, prevFirst := s.active, !everCommittedOnEntry
+		if s.confirmTimer != nil {
+			prevTree, prevFirst = s.confirmPrevTree, s.confirmPrevFirst
+		}
+		// Encode the TOMBSTONE form (Resolved: true). #8565 re-writes the record
+		// with `resolved` before removing it, so that form is the larger of the
+		// two this window will write, and a window that arms must also be
+		// resolvable: a tombstone refused at the ceiling, followed by a failed
+		// removal, would leave the unresolved record to re-arm a confirmed
+		// window on reboot. Any encode failure rejects, with the candidate
+		// intact: a window whose rollback record cannot be produced now has no
+		// rollback to offer, and discovering that after promotion is the defect
+		// this preflight exists to remove.
+		if _, err := s.db.encodeConfirm(&confirmRecord{
+			Deadline:    widestConfirmDeadline,
+			PrevTree:    prevTree,
+			FirstCommit: prevFirst,
+			GuardedHash: guardedConfigHash(s.candidate),
+			Resolved:    true,
+		}); err != nil {
+			return nil, fmt.Errorf("commit confirmed failed: the rollback record would not survive a restart: %w", err)
+		}
+	}
 	if err := s.writeActive(s.candidate); err != nil {
 		if !isPostRenameDurabilityFailure(err) {
 			return nil, fmt.Errorf("commit confirmed failed: persist active config: %w", err)

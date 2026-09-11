@@ -1,0 +1,794 @@
+package configstore
+
+import (
+	"bytes"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/psaab/xpf/pkg/config"
+	"github.com/psaab/xpf/pkg/fsatomic"
+)
+
+// #9617: every configstore writer must refuse what its reader refuses. The
+// reader is ReadBoundedFile(path, MaxConfigSize); before #9617 no writer
+// checked, so a commit could persist an active DB the next Load rejects and a
+// commit confirmed could persist a confirm.json the next boot rejects.
+
+func TestPersistSizeGateMatchesReaderBoundary_9617(t *testing.T) {
+	dir := t.TempDir()
+	for _, n := range []int{MaxConfigSize, MaxConfigSize + 1} {
+		p := filepath.Join(dir, fmt.Sprintf("f%d", n))
+		if err := os.WriteFile(p, make([]byte, n), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		_, rerr := ReadBoundedFile(p, MaxConfigSize)
+		werr := checkPersistSize(p, n)
+		readerAccepts, writerAccepts := rerr == nil, werr == nil
+		if readerAccepts != writerAccepts {
+			t.Errorf("#9617: at %d bytes the reader accepts=%v (%v) but the writer accepts=%v (%v) — a writer "+
+				"that accepts what its reader refuses persists an artifact the next load rejects, and one "+
+				"that refuses what the reader accepts rejects a config the store can load",
+				n, readerAccepts, rerr, writerAccepts, werr)
+		}
+		if want := n <= MaxConfigSize; writerAccepts != want {
+			t.Errorf("#9617: checkPersistSize(%d) accepts=%v, want %v at the %d byte ceiling", n, writerAccepts, want, MaxConfigSize)
+		}
+		if werr != nil && !errors.Is(werr, ErrPersistExceedsReadCeiling) {
+			t.Errorf("#9617: the refusal at %d bytes is not ErrPersistExceedsReadCeiling: %v", n, werr)
+		}
+	}
+}
+
+func bigDescription9617(i, n int) string {
+	return fmt.Sprintf("interfaces ge-0/0/%d description M9617-%d-%s", i, i, strings.Repeat("x", n))
+}
+
+func fileSize9617(t *testing.T, path string) int64 {
+	t.Helper()
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat %s: %v", path, err)
+	}
+	return fi.Size()
+}
+
+func TestCommitRefusesAnActiveDBTheNextLoadWouldRefuse_9617(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config")
+	s := newTestStoreAt(t, path)
+	if err := s.EnterConfigure(); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetFromInput("system host-name before9617"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Commit(); err != nil {
+		t.Fatalf("prior commit: %v", err)
+	}
+	activePath := s.db.activePath()
+	before := fileSize9617(t, activePath)
+
+	// Nine 2 MiB leaves: every Set is legal, the composition serializes to
+	// ~18 MiB.
+	for i := 0; i < 9; i++ {
+		if err := s.SetFromInput(bigDescription9617(i, 2<<20)); err != nil {
+			t.Fatalf("set %d: %v", i, err)
+		}
+	}
+	_, err := s.Commit()
+	if !errors.Is(err, ErrPersistExceedsReadCeiling) {
+		t.Fatalf("#9617: Commit of an ~18 MiB tree returned %v, want ErrPersistExceedsReadCeiling — "+
+			"before #9617 it SUCCEEDED and the next Store.Load refused the DB (exceeds size limit), "+
+			"so the daemon did not come back", err)
+	}
+	if got := s.active.Format(); !strings.Contains(got, "before9617") || strings.Contains(got, "M9617-") {
+		t.Errorf("#9617: the refused commit PROMOTED — active no longer reads as the prior generation")
+	}
+	if !strings.Contains(s.candidate.Format(), "M9617-8-") {
+		t.Errorf("#9617: the refused commit discarded the candidate; it must stay intact so the operator can trim it")
+	}
+	if after := fileSize9617(t, activePath); after != before || after == 0 {
+		t.Errorf("#9617: active.json changed %d -> %d bytes on a refused commit; the refusal must precede the write", before, after)
+	}
+
+	s2 := newTestStoreAt(t, path)
+	if err := s2.Load(); err != nil {
+		t.Fatalf("#9617: fresh Load after a refused commit failed: %v", err)
+	}
+	if got := s2.active.Format(); !strings.Contains(got, "before9617") || strings.Contains(got, "M9617-") {
+		t.Errorf("#9617: fresh Load did not return the prior generation")
+	}
+}
+
+// Positive control: the gate must not refuse a large config the reader accepts.
+func TestCommitUnderTheCeilingStillCommitsAndLoads_9617(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config")
+	s := newTestStoreAt(t, path)
+	if err := s.EnterConfigure(); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 7; i++ {
+		if err := s.SetFromInput(bigDescription9617(i, 2<<20)); err != nil {
+			t.Fatalf("set %d: %v", i, err)
+		}
+	}
+	if _, err := s.Commit(); err != nil {
+		t.Fatalf("#9617 positive control: a ~14 MiB config must still commit: %v", err)
+	}
+	if n := fileSize9617(t, s.db.activePath()); n <= 14<<20 || n > MaxConfigSize {
+		t.Fatalf("fixture drifted: active.json is %d bytes, want in (14 MiB, %d]", n, MaxConfigSize)
+	}
+	s2 := newTestStoreAt(t, path)
+	if err := s2.Load(); err != nil {
+		t.Fatalf("#9617 positive control: fresh Load of a ~14 MiB DB: %v", err)
+	}
+	if !strings.Contains(s2.active.Format(), "M9617-6-") {
+		t.Errorf("#9617 positive control: the loaded active config lost its content")
+	}
+}
+
+func TestCommitConfirmedRefusesARecordTheNextBootWouldRefuse_9617(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config")
+	var stores []*Store
+	open := func() *Store {
+		st := newTestStoreAt(t, path)
+		stores = append(stores, st)
+		return st
+	}
+	t.Cleanup(func() {
+		for _, st := range stores {
+			if st.confirmTimer != nil {
+				st.confirmTimer.Stop()
+			}
+		}
+	})
+	s := open()
+	if err := s.EnterConfigure(); err != nil {
+		t.Fatal(err)
+	}
+	// ~14k JSON lines, so the record nests the tree ~28 KiB deeper than
+	// active.json, plus seven 2 MiB leaves and a filler to calibrate against.
+	var groups strings.Builder
+	for i := 0; i < 400; i++ {
+		fmt.Fprintf(&groups, "groups g%d { system { host-name h%d; } }\n", i, i)
+	}
+	if err := s.LoadMerge(groups.String()); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 7; i++ {
+		if err := s.SetFromInput(bigDescription9617(i, 2<<20)); err != nil {
+			t.Fatalf("set %d: %v", i, err)
+		}
+	}
+	setFiller := func(n int) {
+		t.Helper()
+		if err := s.SetFromInput("interfaces ge-0/0/9 description F9617-" + strings.Repeat("y", n)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	commit := func(what string) {
+		t.Helper()
+		if _, err := s.Commit(); err != nil {
+			t.Fatalf("%s: %v", what, err)
+		}
+	}
+	const filler0 = 1 << 20
+	setFiller(filler0)
+	commit("calibration commit")
+	a0 := fileSize9617(t, s.db.activePath())
+	// JSON of the filler is 1:1 with its length, so this lands active.json
+	// exactly 8 KiB under the ceiling.
+	filler1 := filler0 + int(int64(MaxConfigSize-8<<10)-a0)
+	setFiller(filler1)
+	commit("prior-generation commit")
+	a1 := fileSize9617(t, s.db.activePath())
+	if a1 > MaxConfigSize || a1 < MaxConfigSize-16<<10 {
+		t.Fatalf("fixture: active.json is %d bytes, want within 16 KiB under %d", a1, MaxConfigSize)
+	}
+	if err := open().Load(); err != nil {
+		t.Fatalf("fixture: the prior generation must itself be loadable: %v", err)
+	}
+
+	// The confirmed candidate is TINY: every large leaf is deleted. Its own
+	// active DB is nowhere near the ceiling, so the only thing that can refuse
+	// this commit is the record's rollback target — the prior generation.
+	if err := s.DeleteFromInput("interfaces"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetFromInput("system host-name confirmed9617"); err != nil {
+		t.Fatal(err)
+	}
+	_, err := s.CommitConfirmed(10)
+	if !errors.Is(err, ErrPersistExceedsReadCeiling) {
+		t.Fatalf("#9617: CommitConfirmed over a readable %d-byte prior generation returned %v, want "+
+			"ErrPersistExceedsReadCeiling — before #9617 it SUCCEEDED, wrote a confirm.json over the ceiling, "+
+			"and a restart inside the window kept the unconfirmed config with no rollback timer", a1, err)
+	}
+	if s.confirmTimer != nil {
+		t.Errorf("#9617: a refused commit confirmed armed a rollback timer")
+	}
+	if _, serr := os.Stat(s.db.confirmPath()); !os.IsNotExist(serr) {
+		t.Errorf("#9617: a refused commit confirmed left a confirm.json behind (stat: %v)", serr)
+	}
+	if strings.Contains(s.active.Format(), "confirmed9617") {
+		t.Errorf("#9617: the refused commit confirmed PROMOTED its candidate")
+	}
+	if !strings.Contains(s.candidate.Format(), "confirmed9617") {
+		t.Errorf("#9617: the refused commit confirmed discarded the candidate")
+	}
+	if got := fileSize9617(t, s.db.activePath()); got != a1 {
+		t.Errorf("#9617: active.json changed %d -> %d bytes on a refused commit confirmed", a1, got)
+	}
+	s2 := open()
+	if err := s2.Load(); err != nil {
+		t.Fatalf("#9617: fresh Load after a refused commit confirmed: %v", err)
+	}
+	if s2.confirmTimer != nil || s2.confirmRecoveryReadFailed {
+		t.Errorf("#9617: fresh Load timer=%v recoveryReadFailed=%v, want neither — nothing was armed",
+			s2.confirmTimer != nil, s2.confirmRecoveryReadFailed)
+	}
+	if strings.Contains(s2.active.Format(), "confirmed9617") {
+		t.Errorf("#9617: fresh Load returned the refused candidate")
+	}
+
+	// Positive control: shrink the prior generation so its record fits; the
+	// same state machine arms, and a restart re-arms.
+	for i := 0; i < 7; i++ {
+		if err := s.SetFromInput(bigDescription9617(i, 2<<20)); err != nil {
+			t.Fatalf("re-set %d: %v", i, err)
+		}
+	}
+	setFiller(filler1 - 64<<10)
+	if err := s.SetFromInput("system host-name plain9617"); err != nil {
+		t.Fatal(err)
+	}
+	commit("shrunk prior-generation commit")
+	if err := s.DeleteFromInput("interfaces"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetFromInput("system host-name confirmed9617b"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.CommitConfirmed(10); err != nil {
+		t.Fatalf("#9617 positive control: a record under the ceiling must arm: %v", err)
+	}
+	if n := fileSize9617(t, s.db.confirmPath()); n > MaxConfigSize {
+		t.Fatalf("#9617 positive control: armed confirm.json is %d bytes, over %d", n, MaxConfigSize)
+	}
+	s3 := open()
+	if err := s3.Load(); err != nil {
+		t.Fatalf("#9617 positive control: fresh Load: %v", err)
+	}
+	if s3.confirmTimer == nil {
+		t.Errorf("#9617 positive control: a readable confirm record did not re-arm after restart (recoveryReadFailed=%v)", s3.confirmRecoveryReadFailed)
+	}
+	if !strings.Contains(s3.active.Format(), "confirmed9617b") {
+		t.Errorf("#9617 positive control: fresh Load did not return the confirmed candidate")
+	}
+}
+
+// The writer's boundary is the reader's EXACT bytes. The envelope header (and
+// any encryption) counts, so a check on the bare JSON body would admit a file
+// the reader refuses by a header's width. Ceiling accepted, ceiling+1 refused,
+// both measured as the file the reader opens.
+func TestWriteActiveBoundaryIsTheReadersExactBytes_9617(t *testing.T) {
+	s := newTestStoreAt(t, filepath.Join(t.TempDir(), "config"))
+	tree := func(n int) *config.ConfigTree {
+		t.Helper()
+		tr := &config.ConfigTree{}
+		for _, cmd := range []string{
+			"set system host-name edge9617",
+			"set interfaces ge-0/0/0 description " + strings.Repeat("x", n),
+		} {
+			p, err := config.ParseSetCommand(cmd)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := tr.SetPath(p); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return tr
+	}
+	path := s.db.activePath()
+	const l0 = 1 << 20
+	if err := s.db.WriteActive(tree(l0)); err != nil {
+		t.Fatal(err)
+	}
+	overhead := fileSize9617(t, path) - l0
+	atCeiling := int(int64(MaxConfigSize) - overhead)
+	if err := s.db.WriteActive(tree(atCeiling)); err != nil {
+		t.Fatalf("#9617: an active.json of exactly the %d byte ceiling was refused: %v", MaxConfigSize, err)
+	}
+	if n := fileSize9617(t, path); n != MaxConfigSize {
+		t.Fatalf("fixture: want an active.json of exactly %d bytes, got %d", MaxConfigSize, n)
+	}
+	if _, err := ReadBoundedFile(path, MaxConfigSize); err != nil {
+		t.Fatalf("fixture: the reader refused the exact-ceiling file: %v", err)
+	}
+	err := s.db.WriteActive(tree(atCeiling + 1))
+	if !errors.Is(err, ErrPersistExceedsReadCeiling) {
+		t.Fatalf("#9617: an active.json of %d bytes (ceiling+1, counted with its envelope header) "+
+			"returned %v, want ErrPersistExceedsReadCeiling — the reader refuses that file", MaxConfigSize+1, err)
+	}
+	if n := fileSize9617(t, path); n != MaxConfigSize {
+		t.Errorf("#9617: the refused write changed active.json to %d bytes", n)
+	}
+}
+
+// applyNearCeiling9617 stages ~14k JSON lines (400 groups), seven 2 MiB leaves
+// and a filler of fillerLen bytes into s's candidate.
+func applyNearCeiling9617(t *testing.T, s *Store, fillerLen int) {
+	t.Helper()
+	var groups strings.Builder
+	for i := 0; i < 400; i++ {
+		fmt.Fprintf(&groups, "groups g%d { system { host-name h%d; } }\n", i, i)
+	}
+	if err := s.LoadMerge(groups.String()); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 7; i++ {
+		if err := s.SetFromInput(bigDescription9617(i, 2<<20)); err != nil {
+			t.Fatalf("set %d: %v", i, err)
+		}
+	}
+	if err := s.SetFromInput("interfaces ge-0/0/9 description F9617-" + strings.Repeat("y", fillerLen)); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func stopTimers9617(t *testing.T, stores ...*Store) {
+	t.Cleanup(func() {
+		for _, st := range stores {
+			if st.confirmTimer != nil {
+				st.confirmTimer.Stop()
+			}
+		}
+	})
+}
+
+// A NESTED commit confirmed keeps the ORIGINAL rollback target, so its record
+// must be sized from that target and not from the tree the first window made
+// active. Here the first window's candidate C1 is near the ceiling and its own
+// record would overflow, while the original target P is tiny: the nested arm
+// must succeed, and its record must still carry P.
+func TestNestedCommitConfirmedSizesTheOriginalRollbackTarget_9617(t *testing.T) {
+	const filler0 = 1 << 20
+	// Calibrate C1 on a throwaway store: active.json 8 KiB under the ceiling.
+	cal := newTestStoreAt(t, filepath.Join(t.TempDir(), "config"))
+	stopTimers9617(t, cal)
+	if err := cal.EnterConfigure(); err != nil {
+		t.Fatal(err)
+	}
+	applyNearCeiling9617(t, cal, filler0)
+	if _, err := cal.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	filler1 := filler0 + int(int64(MaxConfigSize-8<<10)-fileSize9617(t, cal.db.activePath()))
+	applyNearCeiling9617(t, cal, filler1)
+	if _, err := cal.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cal.db.encodeConfirm(&confirmRecord{Deadline: time.Now(), PrevTree: cal.active, GuardedHash: guardedConfigHash(cal.active)}); !errors.Is(err, ErrPersistExceedsReadCeiling) {
+		t.Fatalf("fixture: C1's OWN record must exceed the ceiling (so sizing the wrong tree is observable), got %v", err)
+	}
+
+	path := filepath.Join(t.TempDir(), "config")
+	s := newTestStoreAt(t, path)
+	stopTimers9617(t, s)
+	if err := s.EnterConfigure(); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetFromInput("system host-name original9617"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Commit(); err != nil {
+		t.Fatalf("P: %v", err)
+	}
+	applyNearCeiling9617(t, s, filler1)
+	if _, err := s.CommitConfirmed(10); err != nil {
+		t.Fatalf("first window over a tiny rollback target must arm: %v", err)
+	}
+	if err := s.SetFromInput("system host-name nested9617"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.CommitConfirmed(10); err != nil {
+		t.Fatalf("#9617: the NESTED commit confirmed was refused (%v) — its record carries the original "+
+			"rollback target, which is tiny; sizing the first window's near-ceiling tree instead refuses a "+
+			"window that would have been written and read back fine", err)
+	}
+	if n := fileSize9617(t, s.db.confirmPath()); n > 1<<20 {
+		t.Errorf("#9617: the nested window's confirm.json is %d bytes; its rollback target is the tiny original, not C1", n)
+	}
+	rec, err := s.db.ReadConfirm()
+	if err != nil || rec == nil || rec.PrevTree == nil || !strings.Contains(rec.PrevTree.Format(), "original9617") {
+		t.Errorf("#9617: the nested record does not carry the original rollback target (err=%v)", err)
+	}
+}
+
+// A window that arms must also be RESOLVABLE. #8565 re-writes confirm.json with
+// `resolved: true` before removing it, which is ~20 bytes larger; the preflight
+// sizes that form, so a record whose tombstone would be refused never arms.
+func TestCommitConfirmedReservesTombstoneHeadroom_9617(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config")
+	s := newTestStoreAt(t, path)
+	stopTimers9617(t, s)
+	if err := s.EnterConfigure(); err != nil {
+		t.Fatal(err)
+	}
+	const filler0 = 1 << 20
+	// Every generation carries a host-name of the same length, so the tree
+	// measured below is byte-for-byte the shape of every later prior generation.
+	setHost := func(v string) {
+		t.Helper()
+		if err := s.SetFromInput("system host-name " + v); err != nil {
+			t.Fatal(err)
+		}
+	}
+	setHost("tomb9610")
+	applyNearCeiling9617(t, s, filler0)
+	if _, err := s.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	// A deadline as wide as the preflight's stand-in (nine fractional digits
+	// and a +hh:mm zone), built independently of it. The fixture below puts the
+	// tombstone EXACTLY one byte over the ceiling, so the cell also pins the
+	// stand-in's width: one byte narrower and that tombstone fits, and the
+	// window arms.
+	maxDeadline := time.Date(2030, 1, 1, 0, 0, 0, 123456789, time.FixedZone("", -5*60*60))
+	measure := func(resolved bool) int {
+		t.Helper()
+		data, err := s.db.encodeConfirm(&confirmRecord{Deadline: maxDeadline, PrevTree: s.active,
+			GuardedHash: guardedConfigHash(s.active), Resolved: resolved})
+		if err != nil {
+			t.Fatalf("measure(resolved=%v): %v", resolved, err)
+		}
+		return len(data)
+	}
+	r0 := measure(true)
+	delta := r0 - measure(false)
+	if delta < 1 {
+		t.Fatalf("fixture: the tombstone adds %d bytes; it must be larger than the unresolved record", delta)
+	}
+	filler1 := filler0 + (MaxConfigSize + 1 - r0)
+	applyNearCeiling9617(t, s, filler1)
+	if _, err := s.Commit(); err != nil {
+		t.Fatalf("prior generation: %v", err)
+	}
+	// The tombstone itself cannot be measured here: encodeConfirm refuses it.
+	// The unresolved record can, and the tombstone is delta bytes larger.
+	if u1 := measure(false); u1 != MaxConfigSize+1-delta {
+		t.Fatalf("fixture: the unresolved record is %d bytes, want exactly %d so its tombstone is one byte over the ceiling",
+			u1, MaxConfigSize+1-delta)
+	}
+	setHost("tomb9611")
+	if _, err := s.CommitConfirmed(10); !errors.Is(err, ErrPersistExceedsReadCeiling) {
+		t.Fatalf("#9617: the unresolved record fits (%d bytes) but its widest tombstone is one byte over; "+
+			"CommitConfirmed returned %v, want ErrPersistExceedsReadCeiling — a window that arms here cannot be "+
+			"resolved, and a failed removal after the refused tombstone re-arms a confirmed window on reboot",
+			MaxConfigSize+1-delta, err)
+	}
+
+	// Positive control: with the headroom available the window arms, and
+	// confirming it writes the tombstone and removes the record.
+	var tombstones int
+	prev := rbWriteFileDurable
+	rbWriteFileDurable = func(p string, data []byte, perm os.FileMode, opts ...fsatomic.Option) error {
+		if strings.HasSuffix(p, "confirm.json") && bytes.Contains(data, []byte(`"resolved": true`)) {
+			tombstones++
+		}
+		return prev(p, data, perm, opts...)
+	}
+	t.Cleanup(func() { rbWriteFileDurable = prev })
+	applyNearCeiling9617(t, s, filler1-delta-16)
+	setHost("tomb9612")
+	if _, err := s.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	setHost("tomb9613")
+	if _, err := s.CommitConfirmed(10); err != nil {
+		t.Fatalf("#9617 positive control: with tombstone headroom the window must arm: %v", err)
+	}
+	if err := s.ConfirmCommit(); err != nil {
+		t.Fatalf("#9617 positive control: ConfirmCommit: %v", err)
+	}
+	if tombstones != 1 {
+		t.Errorf("#9617 positive control: want exactly one tombstone write when the window was confirmed, got %d", tombstones)
+	}
+	if _, err := os.Stat(s.db.confirmPath()); !os.IsNotExist(err) {
+		t.Errorf("#9617 positive control: confirm.json survived its confirmation (stat: %v)", err)
+	}
+}
+
+// The persist retry loop must not re-serialize a tree the ceiling refused: the
+// refusal is deterministic, and each attempt marshals a >16 MiB config and
+// warns. A tolerant ingress (HA SyncApply from an older peer, confirm
+// recovery) can install such a tree in memory; persistence stays degraded, and
+// a different, persistable active tree resumes retries and heals it.
+func TestPersistRetryDoesNotReserializeARefusedTree_9617(t *testing.T) {
+	s := newTestStoreAt(t, filepath.Join(t.TempDir(), "config"))
+	s.SetPersistRetryBackoffForTesting(2*time.Millisecond, 4*time.Millisecond)
+	tree := func(cmds ...string) *config.ConfigTree {
+		t.Helper()
+		tr := &config.ConfigTree{}
+		for _, cmd := range cmds {
+			p, err := config.ParseSetCommand(cmd)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := tr.SetPath(p); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return tr
+	}
+	// The refusal is injected through the write seam so an attempt costs
+	// nothing: a real >16 MiB marshal takes about as long as the observation
+	// window, which would let a retry-every-tick loop show one attempt too.
+	// The real writer's refusal is pinned by the cells above.
+	big := tree("set system host-name refused9617")
+	var attempts atomic.Int32
+	s.mu.Lock()
+	s.writeActiveMarkerFn = func(tr *config.ConfigTree, committed bool) error {
+		attempts.Add(1)
+		if tr == big {
+			return checkPersistSize("active.json", MaxConfigSize+1)
+		}
+		return s.db.WriteActiveMarker(tr, committed)
+	}
+	s.active = big
+	s.noteActivePersistFailureLocked("test_ingress", checkPersistSize("active.json", MaxConfigSize+1))
+	s.mu.Unlock()
+
+	time.Sleep(150 * time.Millisecond)
+	s.mu.Lock()
+	degraded := s.persistDegraded
+	s.mu.Unlock()
+	if n := attempts.Load(); n != 1 {
+		t.Errorf("#9617: the retry loop attempted the refused tree %d times in 150ms at a 4ms backoff, want exactly 1 — "+
+			"a size refusal cannot succeed on retry, and every attempt re-serializes a >16 MiB config", n)
+	}
+	if !degraded {
+		t.Errorf("#9617: persistence must stay degraded while the active tree cannot be persisted")
+	}
+
+	s.mu.Lock()
+	s.active = tree("set system host-name healed9617")
+	s.mu.Unlock()
+	for deadline := time.Now().Add(2 * time.Second); time.Now().Before(deadline); time.Sleep(5 * time.Millisecond) {
+		s.mu.Lock()
+		degraded = s.persistDegraded
+		s.mu.Unlock()
+		if !degraded {
+			break
+		}
+	}
+	if degraded {
+		t.Errorf("#9617: a different, persistable active tree did not resume retries and heal persistence (attempts=%d)", attempts.Load())
+	}
+	waitRetryLoopReleases9617(t, s)
+}
+
+// waitRetryLoopReleases9617 waits for the persist retry loop to exit and
+// asserts it no longer retains a refused tree.
+func waitRetryLoopReleases9617(t *testing.T, s *Store) {
+	t.Helper()
+	var active, retained bool
+	for deadline := time.Now().Add(2 * time.Second); time.Now().Before(deadline); time.Sleep(5 * time.Millisecond) {
+		s.mu.Lock()
+		active, retained = s.persistRetryActive, s.persistRefusedTree != nil
+		s.mu.Unlock()
+		if !active {
+			break
+		}
+	}
+	if active || retained {
+		t.Errorf("#9617: after healing, the retry loop active=%v and still retains the refused tree=%v — "+
+			"the skip must not keep a rejected multi-MiB AST alive for the Store's lifetime", active, retained)
+	}
+}
+
+// A COMMIT that heals persistence between retry ticks leaves the loop exiting
+// at its top check without reaching the retry leg; the refused tree must be
+// released there too.
+func TestPersistRetryReleasesTheRefusedTreeWhenACommitHeals_9617(t *testing.T) {
+	s := newTestStoreAt(t, filepath.Join(t.TempDir(), "config"))
+	s.SetPersistRetryBackoffForTesting(2*time.Millisecond, 4*time.Millisecond)
+	if err := s.EnterConfigure(); err != nil {
+		t.Fatal(err)
+	}
+	big := &config.ConfigTree{}
+	p, err := config.ParseSetCommand("set system host-name refused9617c")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := big.SetPath(p); err != nil {
+		t.Fatal(err)
+	}
+	s.mu.Lock()
+	s.writeActiveMarkerFn = func(tr *config.ConfigTree, committed bool) error {
+		if tr == big {
+			return checkPersistSize("active.json", MaxConfigSize+1)
+		}
+		return s.db.WriteActiveMarker(tr, committed)
+	}
+	s.active = big
+	s.noteActivePersistFailureLocked("test_ingress", checkPersistSize("active.json", MaxConfigSize+1))
+	s.mu.Unlock()
+	for deadline := time.Now().Add(2 * time.Second); time.Now().Before(deadline); time.Sleep(2 * time.Millisecond) {
+		s.mu.Lock()
+		refused := s.persistRefusedTree == big
+		s.mu.Unlock()
+		if refused {
+			break
+		}
+	}
+	s.mu.Lock()
+	refused := s.persistRefusedTree == big
+	s.mu.Unlock()
+	if !refused {
+		t.Fatalf("fixture: the retry loop never recorded the refused tree")
+	}
+	if err := s.SetFromInput("system host-name healed-by-commit9617"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Commit(); err != nil {
+		t.Fatalf("healing commit: %v", err)
+	}
+	waitRetryLoopReleases9617(t, s)
+}
+
+// Any failure to PRODUCE the record refuses the commit before promotion, not
+// only a size refusal. The prior tree carries a master-password, so its record
+// is encrypted; the candidate drops it, so the active write needs no key. With
+// the key unreadable, only the record encode fails — a commit that promoted
+// here would arm a window with no durable rollback.
+func TestCommitConfirmedRejectsAnUnencodableRollbackRecord_9617(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config")
+	s := newTestStoreAt(t, path)
+	stopTimers9617(t, s)
+	if err := s.EnterConfigure(); err != nil {
+		t.Fatal(err)
+	}
+	for _, cmd := range []string{"system master-password pseudorandom-function sha256", "system host-name enc9617"} {
+		if err := s.SetFromInput(cmd); err != nil {
+			t.Fatalf("%s: %v", cmd, err)
+		}
+	}
+	if _, err := s.Commit(); err != nil {
+		t.Fatalf("encrypted prior generation: %v", err)
+	}
+	keyPath := s.db.masterKeyPath()
+	if _, err := os.Stat(keyPath); err != nil {
+		t.Fatalf("fixture: the encrypted commit must have created %s: %v", keyPath, err)
+	}
+	if err := s.DeleteFromInput("system master-password"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetFromInput("system host-name plain9617"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(keyPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(keyPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	_, err := s.CommitConfirmed(10)
+	if err == nil || !strings.Contains(err.Error(), "master key") {
+		t.Fatalf("#9617: CommitConfirmed returned %v; the rollback record is encrypted under the prior tree's "+
+			"master-password and its key cannot be read, so the record cannot be produced — the commit must be "+
+			"refused before promotion", err)
+	}
+	if s.confirmTimer != nil {
+		t.Errorf("#9617: a commit confirmed with an unproducible rollback record armed a timer")
+	}
+	if strings.Contains(s.active.Format(), "plain9617") {
+		t.Errorf("#9617: a commit confirmed with an unproducible rollback record PROMOTED its candidate")
+	}
+	if _, serr := os.Stat(s.db.confirmPath()); !os.IsNotExist(serr) {
+		t.Errorf("#9617: a refused commit confirmed left a confirm.json behind (stat: %v)", serr)
+	}
+}
+
+// The persisted deadline and the live timer must describe ONE window. The live
+// timer arms the full duration at the arm site, after the commit's own work, so
+// the persisted deadline must be taken there too: a deadline taken before a
+// slow persist would make a restart near the end of the window roll back
+// earlier than the live timer would.
+func TestPersistedConfirmDeadlineStartsAfterTheCommitWork_9617(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config")
+	s := newTestStoreAt(t, path)
+	stopTimers9617(t, s)
+	if err := s.EnterConfigure(); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetFromInput("system host-name before9617d"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetFromInput("system host-name window9617"); err != nil {
+		t.Fatal(err)
+	}
+	var afterPersist time.Time
+	s.writeActiveFn = func(tree *config.ConfigTree) error {
+		time.Sleep(300 * time.Millisecond) // a slow active persist, as a large config is
+		err := s.db.WriteActive(tree)
+		afterPersist = time.Now()
+		return err
+	}
+	if _, err := s.CommitConfirmed(10); err != nil {
+		t.Fatal(err)
+	}
+	rec, err := s.db.ReadConfirm()
+	if err != nil || rec == nil {
+		t.Fatalf("read confirm: %v", err)
+	}
+	if earliest := afterPersist.Add(10 * time.Minute); rec.Deadline.Before(earliest) {
+		t.Errorf("#9617: the persisted deadline is %v earlier than the window measured from the end of the "+
+			"commit work; the live timer arms the full duration there, so a restart near the end of the "+
+			"window would roll back early", earliest.Sub(rec.Deadline))
+	}
+}
+
+// The preflight's stand-in deadline must be at least as long, in JSON, as any
+// deadline the store can write. One read from the clock is not: its zone suffix
+// is "Z" at a zero UTC offset and "+hh:mm" at any other, so a commit confirmed
+// that straddles a DST change into a non-zero offset (Europe/London in March)
+// writes a deadline longer than one sized a moment earlier.
+func TestConfirmPreflightDeadlineIsAsWideAsAnyDeadline_9617(t *testing.T) {
+	width := func(d time.Time) int {
+		t.Helper()
+		b, err := d.MarshalJSON()
+		if err != nil {
+			t.Fatalf("marshal %v: %v", d, err)
+		}
+		return len(b)
+	}
+	widest := width(widestConfirmDeadline)
+	zones := []*time.Location{time.UTC, time.Local, time.FixedZone("GMT", 0), time.FixedZone("BST", 60*60),
+		time.FixedZone("", -12*60*60), time.FixedZone("", 14*60*60), time.FixedZone("", -(3*60*60 + 30*60))}
+	reached := false
+	for _, loc := range zones {
+		for _, ns := range []int{0, 1, 120000000, 123456789, 999999999} {
+			for _, year := range []int{1970, 2027, 9999} {
+				d := time.Date(year, 3, 28, 1, 59, 59, ns, loc)
+				if w := width(d); w > widest {
+					t.Errorf("#9617: deadline %s marshals to %d bytes, longer than the preflight stand-in's %d; "+
+						"a record sized with the stand-in can be written over the ceiling", d.Format(time.RFC3339Nano), w, widest)
+				} else if w == widest {
+					reached = true
+				}
+			}
+		}
+	}
+	if !reached {
+		t.Errorf("#9617: no deadline reaches the stand-in's width %d, so the bound is loose and the tombstone "+
+			"fixture's one-byte margin no longer pins it", widest)
+	}
+
+	// The review's instance, from the zone database when the host has one: the
+	// last winter nanosecond and a summer deadline 123456790ns later.
+	london, err := time.LoadLocation("Europe/London")
+	if err != nil {
+		t.Logf("no Europe/London zone data (%v); the fixed-zone rows above cover both offsets", err)
+		return
+	}
+	winter := time.Date(2027, 3, 28, 0, 59, 59, 999999999, time.UTC).In(london)
+	summer := winter.Add(123456790 * time.Nanosecond)
+	if width(summer) <= width(winter) {
+		t.Fatalf("fixture: %s is not longer than %s; the DST instance did not form",
+			summer.Format(time.RFC3339Nano), winter.Format(time.RFC3339Nano))
+	}
+	if width(summer) > widest {
+		t.Errorf("#9617: the summer side of the London transition (%s, %d bytes) is longer than the stand-in (%d)",
+			summer.Format(time.RFC3339Nano), width(summer), widest)
+	}
+}

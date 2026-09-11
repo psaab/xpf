@@ -573,6 +573,7 @@ func (s *Store) persistRetryLoop(backoff, maxBackoff time.Duration) {
 			// A successful write on a commit/sync path already persisted the
 			// current active config, no stale confirm.json removal is owed, and
 			// no armed window is missing its durable record.
+			s.persistRefusedTree = nil // #9617: a heal between ticks exits here
 			s.persistRetryActive = false
 			s.mu.Unlock()
 			return
@@ -621,7 +622,16 @@ func (s *Store) persistRetryLoop(backoff, maxBackoff time.Duration) {
 			}
 		}
 
-		if s.persistDegraded {
+		// #9617: the refused tree is only needed while it is still the active
+		// one. Drop the reference as soon as a different tree is installed, so a
+		// rejected multi-MiB AST is not kept alive by the skip that exists to
+		// avoid re-serializing it. (The bottom exit needs no clear: the loop
+		// holds s.mu from the top check to it, so a heal reaching it went
+		// through this line first.)
+		if s.persistRefusedTree != nil && s.persistRefusedTree != s.active {
+			s.persistRefusedTree = nil
+		}
+		if s.persistDegraded && s.persistRefusedTree != s.active {
 			// #1922: re-write with the marker the failing path requested
 			// (committed=false only for a first-commit rollback). For every
 			// other path persistMarkerCommitted is true, so this matches the
@@ -641,6 +651,16 @@ func (s *Store) persistRetryLoop(backoff, maxBackoff time.Duration) {
 					Detail: "active config persisted after earlier write failure",
 				})
 				slog.Info("active config persisted after earlier write failure", "issue", "#1799")
+			} else if errors.Is(err, ErrPersistExceedsReadCeiling) {
+				// #9617: a size refusal is deterministic for this tree, so
+				// retrying it only re-serializes a >16 MiB config every tick
+				// and warns each time. Record the refused tree and stop
+				// attempting it; persistence stays degraded until a DIFFERENT
+				// active config is written. Every promotion installs a new tree
+				// object, so the pointer compare resumes retries on its own.
+				s.persistRefusedTree = s.active
+				slog.Error("active config cannot be persisted: it serializes past the read ceiling, so no retry can succeed; persistence stays degraded until a smaller config is applied",
+					"err", err, "issue", "#9617")
 			} else {
 				slog.Warn("active config persist retry failed", "err", err, "retry_in", backoff*2)
 			}
