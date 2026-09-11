@@ -3016,18 +3016,26 @@ standby can re-initiate the primary's tunnels on takeover:
     (`ipsecApplyActive` and `ipsecApplySeq` bracket `applyIPsecTracked`). After an
     overlap, the pass re-reads the record.
 
-  A generation resolves first from the last few this process wrote (a commit-confirmed
-  rollback drops the rolled-back tree from the store), then from the store's retained
-  trees, which are recompiled after Load's retired-syntax rewrite. Every other outcome
+  A generation resolves first from the one this process last loaded and the last few it
+  wrote (a commit-confirmed rollback drops the rolled-back tree from the store, and failed
+  writes must not evict what charon still runs), then from the store's retained trees,
+  which are recompiled after Load's retired-syntax rewrite. Every other outcome
   keeps the promoted config, the pre-#9641 answer: charon unreachable, no marker (a file
   from an older xpf), an unknown or unretained generation, a promoted config or
   generation whose local addresses came from the kernel or DNS, or a mismatch. The record
   is consulted first because it is exact whenever it is set, and asking costs two
   swanctl calls. A generation resolved from history is compiled once per marker
   (`retainedIPsecGeneration`), and the outcome is logged only when it changes.
-  **Residual:** an IPsec apply that starts after the pass and completes before its
-  initiate calls changes charon under an answer already given. Attribution before #9641
-  has the same window.
+  **Residuals:**
+  1. An IPsec apply that starts after the pass and completes before its initiate calls
+     changes charon under an answer already given. Attribution before #9641 has the same
+     window.
+  2. Identical connections across two generations that are not the promoted one. An
+     interrupted load updates only the marker to C1, over connections loaded from C0
+     that render identically. A promoted C2 then re-maps that VPN to another RG while
+     rendering it identically, changes another connection, and fails its reload
+     completely. The VPN follows C1's RG, not the applied C2's. Closing it means
+     choosing the RG source per VPN rather than per generation.
 
   **A name whose candidates span several groups is initiated only by a node owning
   every one of them, and a declared RG0 for an unanchored candidate.** For example,

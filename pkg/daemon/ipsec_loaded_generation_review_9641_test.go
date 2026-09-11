@@ -8,6 +8,7 @@ package daemon
 
 import (
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/psaab/xpf/pkg/configstore"
@@ -208,5 +209,50 @@ func TestAttributionResolvesAGenerationTheStoreDropped9641(t *testing.T) {
 	}
 	if initiates9641(d, "blue-red") {
 		t.Error("charon still runs C1, which this process wrote; attribution could not resolve it and used the promoted C0")
+	}
+}
+
+// CODEX RE-CHECK, finding 2. charon runs C1, which this process loaded. A rollback's
+// reload then fails, and so do ipsecWrittenMax+1 more applies of distinct generations.
+// Their writes push C1 out of the written list, yet charon still runs C1. Unguarded, C1
+// no longer resolves and the pass falls back to the promoted config.
+func TestAttributionResolvesTheLastLoadedGenerationAfterManyFailedWrites9641(t *testing.T) {
+	withC1, _, d1 := generations9641(t)
+	ch := &charon9641{}
+	d := daemonAskingCharon9641(t, withC1, ch, 1)
+	if err := d.applyIPsecTracked(withC1.ActiveConfig()); err != nil {
+		t.Fatalf("FIXTURE: applying C1 must succeed: %v", err)
+	}
+	ch.loadFile(t)
+	ch.conns = listBlue9641 + listBlueRed9641
+	if ch.marker != d1 {
+		t.Fatalf("FIXTURE: charon must name C1, got %q", ch.marker)
+	}
+
+	rolledBack := storeWith9511(t, blueOnRG1_9511...)
+	d.store = rolledBack
+	d.cluster = clusterOwning9511(t, rolledBack, 1)
+	ch.loadErr = errors.New("charon vici socket refused")
+	for i := 0; i <= ipsecWrittenMax; i++ {
+		if err := rolledBack.SetFromInput(fmt.Sprintf("system host-name failed-%d", i)); err != nil {
+			t.Fatalf("FIXTURE: SetFromInput: %v", err)
+		}
+		if _, err := rolledBack.Commit(); err != nil {
+			t.Fatalf("FIXTURE: Commit: %v", err)
+		}
+		if err := d.applyIPsecTracked(rolledBack.ActiveConfig()); err == nil {
+			t.Fatal("FIXTURE: every reload must fail")
+		}
+	}
+	if list := d.ipsecWritten.Load(); list != nil {
+		for _, c := range *list {
+			if c.gen == d1 {
+				t.Fatal("FIXTURE: the failed writes must have pushed C1 out of the written list")
+			}
+		}
+	}
+	if initiates9641(d, "blue-red") {
+		t.Error("charon still runs C1, the generation this process last loaded; a run of failed " +
+			"writes evicted it and attribution used the promoted config")
 	}
 }

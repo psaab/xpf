@@ -105,7 +105,10 @@ func (d *Daemon) applyIPsecTracked(cfg *config.Config) error {
 			d.ipsecLoadedCfg.Store(nil)
 			d.rememberWrittenIPsecGeneration(gen, cfg)
 		},
-		Loaded: func() { d.ipsecLoadedCfg.Store(cfg) },
+		Loaded: func() {
+			d.ipsecLoadedCfg.Store(cfg)
+			d.rememberLoadedIPsecGeneration(gen, cfg)
+		},
 	})
 }
 

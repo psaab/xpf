@@ -33,9 +33,18 @@ package daemon
 //     starting or finishing before it ends, can change what charon runs under it. The
 //     caller then re-reads the record and the promoted config.
 //
-// A generation is resolved from the ones this process wrote first (a commit-confirmed
-// rollback drops the rolled-back tree from the store), then from the store's retained
-// trees.
+// A generation is resolved first from the one this process last loaded and the ones it
+// recently wrote (a commit-confirmed rollback drops the rolled-back tree from the store),
+// then from the store's retained trees.
+//
+// RESIDUAL (Codex re-check). Identical connections across two generations that are NOT
+// the promoted one. Consider an interrupted load that updates only the marker to C1, over
+// connections loaded from C0 that render identically to C1's. A promoted C2 then
+// re-maps that same VPN to another redundancy group while rendering it identically,
+// changes some other connection, and its reload fails completely. The marker names C1
+// and validates, so the VPN follows C1's redundancy group rather than the applied C2's.
+// Closing it means choosing the redundancy-group source per VPN (the promoted config for
+// a VPN whose connection renders identically there) rather than per generation.
 
 import (
 	"errors"
@@ -82,6 +91,16 @@ func (d *Daemon) rememberWrittenIPsecGeneration(gen string, cfg *config.Config) 
 		}
 	}
 	d.ipsecWritten.Store(&next)
+}
+
+// rememberLoadedIPsecGeneration pins the generation this process last loaded
+// successfully. The failed writes that follow can push it out of ipsecWritten, yet
+// charon keeps running it until a reload succeeds.
+func (d *Daemon) rememberLoadedIPsecGeneration(gen string, cfg *config.Config) {
+	if gen == ipsec.UnknownGeneration || cfg == nil {
+		return
+	}
+	d.ipsecLastLoaded.Store(&ipsecGenerationCache{gen: gen, cfg: cfg})
 }
 
 // ipsecStableMarkedGeneration is ipsecMarkedGeneration, trusted only when no IPsec apply
@@ -162,9 +181,12 @@ func (d *Daemon) retainedIPsecGeneration(gen string) *config.Config {
 	return cfg
 }
 
-// writtenIPsecGeneration returns the config this process wrote under gen, if it is
-// still among the most recent ipsecWrittenMax.
+// writtenIPsecGeneration returns the config this process last LOADED under gen, or wrote
+// under gen if that is still among the most recent ipsecWrittenMax.
 func (d *Daemon) writtenIPsecGeneration(gen string) *config.Config {
+	if c := d.ipsecLastLoaded.Load(); c != nil && c.gen == gen {
+		return c.cfg
+	}
 	if list := d.ipsecWritten.Load(); list != nil {
 		for _, c := range *list {
 			if c.gen == gen {

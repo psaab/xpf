@@ -221,6 +221,10 @@ type Daemon struct {
 	// rollback drops the rolled-back tree from the store, yet charon keeps running it
 	// if the rollback's own reload fails.
 	ipsecWritten atomic.Pointer[[]ipsecGenerationCache]
+	// ipsecLastLoaded pins the generation this process last LOADED successfully
+	// (#9641). A run of failed writes can push it out of ipsecWritten while charon
+	// still runs it.
+	ipsecLastLoaded atomic.Pointer[ipsecGenerationCache]
 	// ipsecApplyActive and ipsecApplySeq bracket applyIPsecTracked (#9641).
 	// Attribution trusts charon's marker only when no apply was running as its pass
 	// started and none started or finished before the pass ended.

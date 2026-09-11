@@ -156,6 +156,29 @@ fix has a cell built so that the unguarded code gives the other answer.
 Remaining window, the same as before #9641: an IPsec apply that starts after the pass
 and completes before its initiate calls.
 
+## Revision 3e: Codex re-check of the review fixes
+
+The re-check returned FIX 1,2.
+
+- **R2-2, FIXED.** A run of `ipsecWrittenMax`+1 failed writes of distinct generations
+  pushed the last generation this process LOADED out of the written list, while charon
+  still ran it. The Loaded hook now pins that generation (`ipsecLastLoaded`), and
+  resolution consults the pin before the written list. The cell evicts C1 through five
+  failed writes and still attributes against it.
+- **R2-1, RESIDUAL (documented, lead's call).** Identical connections across two
+  generations that are not the promoted one. The trigger needs all of these:
+  - an interrupted load that updates only the marker to C1, over connections loaded
+    from C0 that render identically to C1's;
+  - a promoted C2 that re-maps that same VPN to another RG while rendering it
+    identically;
+  - a C2 that also changes some other connection;
+  - a C2 reload that fails completely.
+
+  The VPN then follows C1's RG instead of the applied C2's. This is the one state where
+  the answer can differ from the pre-#9641 answer. Closing it means choosing the RG
+  source per VPN: the promoted config for a VPN whose connection renders identically
+  there, otherwise the marked generation. That is a redesign of the attribution path.
+
 ## Tests
 
 - **Render:** the marker pool is present with the supplied digest, and no connection
