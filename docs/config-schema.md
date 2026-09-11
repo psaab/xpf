@@ -10876,35 +10876,58 @@ reserved for whole-dataplane selection where a rewrite shim
   compiler cores (`CompileConfig*` and `CompileConfigForNode*`). It judges the
   same three-view name union as the `#3855` table-id gate
   (`routingInstanceNameUnionAST`): every top-level `routing-instances` root
-  and every `groups` block before expansion, plus the node0 and node1
-  expansions. Both cluster nodes therefore decide identically. The union now
-  includes the brace-elided leaf spelling `routing-instances { mgmt
-  instance-type virtual-router; }` (#8787), which the compiler builds an
-  instance from. The shared name scan used to skip every leaf, so neither gate
-  saw a packed instance. At `bdc238675` two packed instances folding to one
-  table pass the strict gate and the runtime then quarantines one with a
-  warning; the widened scan rejects them. The table-id gate's pre-expansion
-  view also counts instances in `groups` blocks nothing applies, in both
-  spellings, so it can refuse a config whose effective instances do not
-  collide. That over-approximation predates #9622 and is tracked on #9657. The
-  tolerant load and peer-sync paths skip the gate
-  (`lenientReservedRoutingInstanceName`), and `compileRoutingInstances`
-  QUARANTINES the instance with one warning, so the node boots and the daemon
-  never plans it. The daemon also skips a reserved name as a second line of
-  defence; no test covers that part. The quarantine runs before the `#3855`
-  collision pass, and the table-id gate leaves reserved names out of its union
-  to match. A reserved instance therefore never claims a table or displaces an
-  instance that shares its hash (`mgmt` and `z1061437` fold to one id). **This
-  is an xpf reservation, not Junos parity:** Junos reserves `mgmt_junos`,
-  which exists only under `system management-instance`. xpf has no such knob
-  and always uses `mgmt`, so a Junos config with an ordinary instance named
-  `mgmt` must be renamed. Names are case-sensitive and the VRF device is
-  `vrf-` + the name, so `MGMT`, `mgmt1` and `vrf-mgmt` stay ordinary
-  instances. Regression coverage:
+  and every `groups` block an `apply-groups` reaches (#9657) before expansion,
+  plus the node0 and node1 expansions. Both cluster nodes therefore decide
+  identically. The union now includes the brace-elided leaf spelling
+  `routing-instances { mgmt instance-type virtual-router; }` (#8787), which
+  the compiler builds an instance from. The shared name scan used to skip
+  every leaf, so neither gate saw a packed instance. At `bdc238675` two packed
+  instances folding to one table pass the strict gate and the runtime then
+  quarantines one with a warning; the widened scan rejects them. That view
+  used to count instances in `groups` blocks nothing applies as well, in both
+  spellings, refusing configs whose effective instances do not collide; #9657
+  restricted it to groups an `apply-groups` reaches. The tolerant load and
+  peer-sync paths skip the gate (`lenientReservedRoutingInstanceName`), and
+  `compileRoutingInstances` QUARANTINES the instance with one warning, so the
+  node boots and the daemon never plans it. The daemon also skips a reserved
+  name as a second line of defence; no test covers that part. The quarantine
+  runs before the `#3855` collision pass, and the table-id gate leaves
+  reserved names out of its union to match. A reserved instance therefore
+  never claims a table or displaces an instance that shares its hash (`mgmt`
+  and `z1061437` fold to one id). **This is an xpf reservation, not Junos
+  parity:** Junos reserves `mgmt_junos`, which exists only under `system
+  management-instance`. xpf has no such knob and always uses `mgmt`, so a
+  Junos config with an ordinary instance named `mgmt` must be renamed. Names
+  are case-sensitive and the VRF device is `vrf-` + the name, so `MGMT`,
+  `mgmt1` and `vrf-mgmt` stay ordinary instances. Regression coverage:
   `pkg/config/routinginstance_reserved_name_9622_test.go` (flat-set and
   hierarchical including brace-elided, both compiler cores, the collision
   ordering, packed-leaf collisions) and
   `pkg/configstore/check_reserved_ri_9622_test.go` (`CheckText`).
+- **#9657 (the routing-instance collision view counts only groups something
+  applies):** the `#3855` routing-instance table-id gate's pre-expansion view
+  counted instances in every `groups` block, including groups nothing applies.
+  Group expansion drops such a group, so an instance declared only there never
+  compiles on either node. The strict path still refused a config whose
+  effective instances do not collide (`ri7` plus a `ri116` in an unapplied
+  group, both folding to table 957120), and the lenient warning named the
+  active `ri7` as quarantined while the runtime kept it.
+  `reachableGroupNamesAST` (`pkg/config/groups_reachable_9657.go`) now
+  computes, without expanding, the groups some `apply-groups` reaches: seeds
+  anywhere outside the `groups` stanza including nested stanzas, `${node}`
+  resolved to both node0 and node1 so both nodes compute the same set, and
+  each reached group's own body searched the same way. The pre-expansion view
+  counts only those groups; the node0 and node1 expansion views are unchanged.
+  A collision against an applied group, a `${node}` group applied on either
+  node, or a reachable group when no expansion succeeds is still refused. The
+  lenient warning no longer names a quarantined instance: the union spans both
+  nodes' views, so it cannot know which instance this node drops, and the
+  runtime quarantine warns naming the one it does. The same scan also skips
+  `apply-groups`, `apply-groups-except` and `apply-macro` statements under
+  `routing-instances`; after `#9622` widened it to two-key leaves, they were
+  counted as instance names. The zone (`#3075`) and tunnel (`#1873`) gates'
+  pre-expansion views still count every `groups` block. Regression coverage:
+  `pkg/config/routinginstanceid_unapplied_groups_9657_test.go`.
 - **#3444 (destination-NAT rule-set `to` scope reject):** a Junos
   destination-NAT rule-set has only a `from` clause (zone | interface |
   routing-instance) — DNAT translates the destination on inbound, so there

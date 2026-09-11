@@ -65,16 +65,20 @@ func StableRoutingInstanceTableID(name string) int {
 // table-id gate nor the reserved-name gate saw a packed instance (two packed
 // instances folding to one table passed the strict gate, and the runtime then
 // quarantined one with a warning). A bare `routing-instances { ri1; }` carries no properties,
-// compiles to nothing, and is still skipped. routingInstanceNameUnionAST's
-// pre-expansion view also counts instances in groups nothing applies; that
-// over-approximation predates this scan and now covers both spellings alike
-// (#9657).
+// compiles to nothing, and is still skipped.
 func collectRoutingInstanceNamesAST(riNode *Node, out map[string]struct{}) {
 	if riNode == nil {
 		return
 	}
 	for _, child := range riNode.Children {
 		if len(child.Keys) == 0 || (child.IsLeaf && len(child.Keys) < 2) {
+			continue
+		}
+		// This scan runs before group expansion removes apply statements. Under
+		// a routing-instances stanza they are two-key leaves, the same shape as
+		// a brace-elided instance, so they are skipped by name (#9657).
+		switch child.Keys[0] {
+		case "apply-groups", "apply-groups-except", "apply-macro":
 			continue
 		}
 		if name := child.Keys[0]; name != "" {
@@ -116,7 +120,8 @@ func emitNodeExpandedRoutingInstanceNames(tree *ConfigTree, nodeID int, out map[
 // validateTunnelEndpointIDCollisionAST (#1873):
 //
 //	View 1 — the PRE-expansion presence union across the main "routing-instances"
-//	  hierarchy AND every "groups" block. It runs on the pre-expansion tree so
+//	  hierarchy AND every "groups" block an apply-groups statement reaches
+//	  (#9657; a group nothing applies never compiles). It runs on the pre-expansion tree so
 //	  the check covers the union of instance names across all groups, keeping the
 //	  accept/reject decision identical on both chassis-cluster nodes.
 //	View 2 — the instance names that survive expanding the candidate for node0.
@@ -166,15 +171,15 @@ func validateRoutingInstanceTableIDCollisionAST(tree *ConfigTree, lenient bool) 
 		if !lenient {
 			return nil, fmt.Errorf("routing-instances: %s", msg)
 		}
-		// Lenient: keep booting but QUARANTINE the later-sorting instance
-		// (QuarantinedRoutingInstanceNames) so two routing-instances never
-		// share a kernel table. Word the warning so the operator knows the box
-		// is running degraded: the quarantined instance is dropped, its VRF is
-		// not created and its routes/PBR/next-table leaks are not programmed
-		// until one instance is renamed.
-		warnings = append(warnings, fmt.Sprintf("%s; the later-sorting instance %q is QUARANTINED"+
-			" (no VRF created, its routes and inter-VRF leaks not programmed) —"+
-			" its forwarding is DISABLED until one instance is renamed", msg, name))
+		// Lenient: keep booting. This union spans both nodes' views, so it
+		// cannot say which instance THIS node drops, or whether it drops one at
+		// all: an instance may be in effect only on the peer. The runtime pass in
+		// compileRoutingInstances (QuarantinedRoutingInstanceNames) quarantines
+		// on the tree this node compiles and warns naming the instance it drops,
+		// with its VRF, routes and inter-VRF leaks; this warning names the
+		// collision and leaves that claim to it (#9657).
+		warnings = append(warnings, fmt.Sprintf("%s; a node where both instances are in effect quarantines one"+
+			" of them and warns which", msg))
 	}
 	return warnings, nil
 }
@@ -240,13 +245,18 @@ func QuarantinedRoutingInstanceNames(names []string) map[string]struct{} {
 // that asks "which routing-instance names can this config create".
 func routingInstanceNameUnionAST(tree *ConfigTree) map[string]struct{} {
 	names := make(map[string]struct{})
-	// View 1 — pre-expansion presence union (main + every groups block). Union
+	// View 1 — pre-expansion presence union (main + every groups block that an
+	// apply-groups statement reaches, #9657). Union
 	// across EVERY top-level `routing-instances` root (#5691): a split config can
 	// declare instances in a second stanza, and compileSections compiles them
 	// all, so a first-root-only scan would miss a collision spanning the roots.
 	for _, ri := range tree.FindChildren("routing-instances") {
 		collectRoutingInstanceNamesAST(ri, names)
 	}
+	// #9657: group expansion drops a group nothing applies, so an instance
+	// declared only there never compiles on either node. Counting it refused
+	// configs whose effective instances do not collide.
+	reachable := reachableGroupNamesAST(tree)
 	for _, child := range tree.Children {
 		if child.Name() != "groups" {
 			continue
@@ -256,10 +266,22 @@ func routingInstanceNameUnionAST(tree *ConfigTree) map[string]struct{} {
 			// Keys[1]; the children are then the group body. The other shape
 			// nests the group name as a child node.
 			if len(child.Keys) >= 2 {
-				for _, ri := range child.FindChildren("routing-instances") {
-					collectRoutingInstanceNamesAST(ri, names)
+				if _, ok := reachable[child.Keys[1]]; ok {
+					for _, ri := range child.FindChildren("routing-instances") {
+						collectRoutingInstanceNamesAST(ri, names)
+					}
 				}
 				break
+			}
+			if len(group.Keys) == 0 {
+				continue
+			}
+			name := group.Keys[0]
+			if len(group.Keys) > 1 {
+				name = group.Keys[1]
+			}
+			if _, ok := reachable[name]; !ok {
+				continue
 			}
 			for _, ri := range group.FindChildren("routing-instances") {
 				collectRoutingInstanceNamesAST(ri, names)
