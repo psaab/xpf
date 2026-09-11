@@ -180,10 +180,13 @@ score "posture wan/telnet" "$(hi_zone_service_verdict "$ZONE_SETS" wan telnet AB
 # #9637: every probe arrives on the LAN host's segment, reth1. The ssh cells
 # below are scored against that zone's posture, so the zone must own reth1.
 PROBER_ZONE=lan
-if grep -qxF "set security zones security-zone ${PROBER_ZONE} interfaces reth1.0" <<<"$ZONE_SETS"; then
-	pass "posture ${PROBER_ZONE}/reth1.0: the prober's ingress interface is in ${PROBER_ZONE}, whose posture scores every ssh cell"
+# The committed config spells the member either `reth1` or `reth1.0`, and an
+# interface-level host-inbound override follows it on the same line (the loss
+# cluster's own config reads `... interfaces reth1 host-inbound-traffic ...`).
+if grep -qE "^set security zones security-zone ${PROBER_ZONE} interfaces reth1(\.0)?( |$)" <<<"$ZONE_SETS"; then
+	pass "posture ${PROBER_ZONE}/reth1: the prober's ingress interface is in ${PROBER_ZONE}, whose posture scores every ssh cell"
 else
-	fail "posture ${PROBER_ZONE}/reth1.0: ${PROBER_ZONE} no longer owns the prober's ingress interface — the ssh cells would be scored against the wrong zone"
+	fail "posture ${PROBER_ZONE}/reth1: ${PROBER_ZONE} no longer owns the prober's ingress interface — the ssh cells would be scored against the wrong zone"
 fi
 for tagged in reth0.50 reth0.80; do
 	if grep -qxF "set security zones security-zone wan interfaces ${tagged}" <<<"$ZONE_SETS"; then
