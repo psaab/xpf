@@ -1138,6 +1138,21 @@ dataplane reuses this Go walker, and do NOT try to consolidate them.
 
 - Use the **non-VIP** primary IP as source on advertisements. Sourcing
   from the VIP would self-filter peer adverts.
+- **An untagged unit of a VLAN-tagged RETH binds to the VLAN PARENT, and the
+  parent needs an IPv4 source (#9721).** `CollectRethInstances` builds one
+  instance per addressed unit of a `vlan-tagging` RETH. It goes on
+  `<member>.<vlan-id>`, or on the member itself when the unit has no
+  `vlan-id`. The advert source is `resolveLocalIPv4`, the lowest non-VIP IPv4
+  on that device. The networkd render gives every RETH device the
+  `169.254.<rg>.<node+1>/32` source, and gives it to a VLAN parent only when
+  such an untagged unit exists (`VLANParentAddresses`, built by
+  `vlanParentVRRPSource` in `pkg/dataplane/compiler_iface_vlan_parent.go`).
+  Before #9721 the parent never got it:
+  that instance had no source, sent no IPv4 advertisement, and both nodes could
+  take MASTER for the unit's VIPs. The device name is pinned from both sides,
+  in `reth_untagged_unit_binding_9721_test.go` here and
+  `reth_vlan_untagged_unit_9721_test.go` in `pkg/dataplane`, because
+  `pkg/dataplane` cannot import this package.
 - **`accept-data` is accepted for Junos config compatibility but is a
   no-op (#4080).** The leaf parses and compiles into `AcceptData`
   (`schema_interfaces.go`, `compiler_interfaces.go`), but no non-test
