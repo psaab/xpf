@@ -14,6 +14,7 @@
 // shell can call into `server::lifecycle::run`.
 
 use super::super::*;
+use std::time::Instant;
 
 // Target for the kernel socket-buffer sysctls, in bytes. MUST match the Go
 // control plane's `tuneSocketBuffers` target (`pkg/dataplane/userspace/
@@ -551,9 +552,21 @@ pub(crate) fn run() -> Result<(), String> {
         thread::Builder::new()
             .name("session-socket".to_string())
             .spawn(move || {
+                let mut backoff = AcceptBackoff::new();
                 while running.load(Ordering::SeqCst) {
-                    match session_listener.accept() {
-                        Ok((stream, _)) => {
+                    let decision = accept_step(
+                        session_listener.accept(),
+                        Duration::from_millis(10),
+                        "session socket",
+                        &mut backoff,
+                        Instant::now(),
+                        true,
+                    );
+                    if let Some(line) = decision.log {
+                        eprintln!("xpf-userspace-dp: {line}");
+                    }
+                    match decision.step {
+                        AcceptStep::Serve((stream, _)) => {
                             // #9003: prove the peer before dispatching. A
                             // connectable session socket installs and reads
                             // sessions.
@@ -582,12 +595,13 @@ pub(crate) fn run() -> Result<(), String> {
                                 eprintln!("xpf-userspace-dp: session request failed: {err}");
                             }
                         }
-                        Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
-                            thread::sleep(Duration::from_millis(10));
-                        }
-                        Err(err) => {
-                            eprintln!("xpf-userspace-dp: accept session: {err}");
-                            continue;
+                        AcceptStep::Sleep(delay) => thread::sleep(delay),
+                        // Unreachable with retry_unclassified = true; kept so a
+                        // future change to accept_step cannot turn it into a
+                        // hot loop or a process exit from this thread.
+                        AcceptStep::Fail(msg) => {
+                            eprintln!("xpf-userspace-dp: {msg}");
+                            thread::sleep(AcceptBackoff::MAX);
                         }
                     }
                 }
@@ -595,9 +609,21 @@ pub(crate) fn run() -> Result<(), String> {
             .map_err(|e| format!("spawn session thread: {e}"))?
     };
 
+    let mut backoff = AcceptBackoff::new();
     while running.load(Ordering::SeqCst) {
-        match listener.accept() {
-            Ok((stream, _)) => {
+        let decision = accept_step(
+            listener.accept(),
+            Duration::from_millis(50),
+            "control socket",
+            &mut backoff,
+            Instant::now(),
+            false,
+        );
+        if let Some(line) = decision.log {
+            eprintln!("xpf-userspace-dp: {line}");
+        }
+        match decision.step {
+            AcceptStep::Serve((stream, _)) => {
                 // #9003: prove the peer before dispatching. This socket carries
                 // apply_snapshot — the WireGuard private key and every preshared
                 // key — and its handlers run no caller check of their own.
@@ -621,10 +647,8 @@ pub(crate) fn run() -> Result<(), String> {
                     eprintln!("xpf-userspace-dp: control request failed: {err}");
                 }
             }
-            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
-                thread::sleep(Duration::from_millis(50));
-            }
-            Err(err) => return Err(format!("accept: {err}")),
+            AcceptStep::Sleep(delay) => thread::sleep(delay),
+            AcceptStep::Fail(msg) => return Err(msg),
         }
     }
 
@@ -653,6 +677,165 @@ pub(crate) fn run() -> Result<(), String> {
         eprintln!("xpf-userspace-dp: session socket cleanup {session_socket}: {e}");
     }
     Ok(())
+}
+
+/// #9172 (V031): what one `accept()` result tells an accept loop to do.
+///
+/// The control loop used to turn every non-`WouldBlock` accept error into
+/// `Err`, which `main` turns into `process::exit(1)` -- and the helper is the
+/// only forwarding path. On a listening AF_UNIX socket the errors the kernel's
+/// accept path returns under descriptor or memory pressure are EMFILE / ENFILE
+/// (no descriptor) and ENOBUFS / ENOMEM (no socket). Exiting on those turned
+/// transient pressure into a supervisor crash-loop with up to 60 s of no
+/// forwarding per cycle. The session thread had the opposite defect: it
+/// `continue`d with no sleep and spun a core on a persistent EMFILE.
+///
+/// So resource errors are RETRIED on both loops, on a backoff that doubles from
+/// 50 ms to a 1 s ceiling, with one journal line when an episode starts and one
+/// when a successful accept ends it. There is deliberately NO time bound that
+/// exits the helper: a bound on "no successful accept" cannot tell a descriptor
+/// leak from fluctuating pressure, because the kernel reserves the result
+/// descriptor before looking at the backlog -- an EMPTY listener returns EMFILE
+/// at the limit and EAGAIN once one descriptor frees, with no accept in between
+/// (measured). Recovering a helper wedged by a genuine leak is issue 9651.
+///
+/// Any other error is handled per loop, because errno does not say where it came
+/// from (an LSM hook runs before `unix_accept` and its errno is propagated
+/// unchanged). The CONTROL loop fails on it, which is its behaviour before this
+/// change. The SESSION loop retries it the same way: it has no path to end the
+/// process, and exiting would take forwarding down with the HA session socket.
+///
+/// EINTR is deliberately absent: std's `accept` already retries it (`cvt_r`),
+/// so it cannot reach this function.
+#[derive(Debug)]
+pub(crate) enum AcceptStep<T> {
+    /// A connection to serve.
+    Serve(T),
+    /// Nothing to serve yet, or a failure being retried: sleep this long and
+    /// accept again.
+    Sleep(Duration),
+    /// Stop accepting (control loop only).
+    Fail(String),
+}
+
+/// One accept decision plus the journal line, if any, the loop should write.
+/// Returning the line instead of printing it is what lets the log VOLUME be
+/// tested: a persistent failure must produce one onset line and no more.
+#[derive(Debug)]
+pub(crate) struct AcceptDecision<T> {
+    pub(crate) step: AcceptStep<T>,
+    pub(crate) log: Option<String>,
+}
+
+/// Whether an accept error is one the accept path returns under descriptor or
+/// memory pressure.
+pub(crate) fn accept_error_is_transient(err: &std::io::Error) -> bool {
+    matches!(
+        err.raw_os_error(),
+        Some(libc::EMFILE | libc::ENFILE | libc::ENOBUFS | libc::ENOMEM)
+    )
+}
+
+/// State across one episode of retried accept failures: a backoff of 50 ms
+/// doubling to a 1 s ceiling, reset by the next successful accept.
+pub(crate) struct AcceptBackoff {
+    failures: u64,
+    delay: Duration,
+    last_failure: Option<Instant>,
+}
+
+impl AcceptBackoff {
+    pub(crate) const INITIAL: Duration = Duration::from_millis(50);
+    pub(crate) const MAX: Duration = Duration::from_secs(1);
+    /// During an episode the loop retries at most [`Self::MAX`] apart. A longer
+    /// quiet stretch between two failures means the first episode ended without
+    /// a successful accept to say so; the next failure starts a new episode, and
+    /// its onset line says so, rather than the ending going unrecorded.
+    pub(crate) const EPISODE_GAP: Duration = Duration::from_secs(5);
+
+    pub(crate) fn new() -> Self {
+        Self {
+            failures: 0,
+            delay: Self::INITIAL,
+            last_failure: None,
+        }
+    }
+
+    fn reset(&mut self) {
+        self.failures = 0;
+        self.delay = Self::INITIAL;
+        self.last_failure = None;
+    }
+}
+
+/// The single decision both accept loops make on every `accept()` result.
+/// `idle` is the loop's poll interval for a non-blocking listener with nothing
+/// pending. `retry_unclassified` is true for the session loop, which retries
+/// every error, and false for the control loop, which fails on an error that is
+/// not a resource error. `now` is passed in so the episode logic is testable
+/// without sleeping.
+pub(crate) fn accept_step<T>(
+    result: std::io::Result<T>,
+    idle: Duration,
+    socket: &str,
+    backoff: &mut AcceptBackoff,
+    now: Instant,
+    retry_unclassified: bool,
+) -> AcceptDecision<T> {
+    match result {
+        Ok(conn) => {
+            let log = (backoff.failures > 0).then(|| {
+                format!(
+                    "accept on {socket} recovered after {} failure(s)",
+                    backoff.failures
+                )
+            });
+            backoff.reset();
+            AcceptDecision {
+                step: AcceptStep::Serve(conn),
+                log,
+            }
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => AcceptDecision {
+            step: AcceptStep::Sleep(idle),
+            log: None,
+        },
+        Err(err) if accept_error_is_transient(&err) || retry_unclassified => {
+            let mut ended = None;
+            if let Some(last) = backoff.last_failure {
+                if now.saturating_duration_since(last) > AcceptBackoff::EPISODE_GAP {
+                    ended = Some(backoff.failures);
+                    backoff.reset();
+                }
+            }
+            backoff.last_failure = Some(now);
+            let log = (backoff.failures == 0).then(|| {
+                let kind = if accept_error_is_transient(&err) {
+                    "retrying with backoff"
+                } else {
+                    "retrying with backoff; this loop does not exit the helper"
+                };
+                match ended {
+                    Some(n) => format!(
+                        "accept on {socket}: {err}; {kind} (#9172; the previous episode of \
+                         {n} failure(s) ended without a successful accept)"
+                    ),
+                    None => format!("accept on {socket}: {err}; {kind} (#9172)"),
+                }
+            });
+            backoff.failures += 1;
+            let delay = backoff.delay;
+            backoff.delay = (backoff.delay * 2).min(AcceptBackoff::MAX);
+            AcceptDecision {
+                step: AcceptStep::Sleep(delay),
+                log,
+            }
+        }
+        Err(err) => AcceptDecision {
+            step: AcceptStep::Fail(format!("accept on {socket}: {err}")),
+            log: None,
+        },
+    }
 }
 
 /// Derive the session socket path from the control socket path.
@@ -1123,3 +1306,7 @@ mod peer_uid_refusal_9171_tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "lifecycle_accept_step_tests_9172.rs"]
+mod accept_step_tests_9172;
