@@ -1233,6 +1233,13 @@ type compileOpts struct {
 	// refuses such a policy, so a leniently-loaded bad config is no worse off,
 	// now flagged. Same doctrine as lenientPolicyMatchApplications.
 	lenientPolicyMatchAddressSetMembers bool
+
+	// lenientAddressSetMembersDefined (#9490) downgrades the address-set member
+	// reference gate (validateAddressSetMembersDefinedStrict) to a warning on the
+	// tolerant load / peer-sync paths, so a persisted config an older binary
+	// accepted still boots (#1960). The runtime resolver drops the dangling
+	// member either way.
+	lenientAddressSetMembersDefined bool
 	// lenientRibGroupRefs (#2226) downgrades the rib-group import-rib
 	// cross-reference gate (validateRibGroupImportRibReferencesStrict) from a
 	// hard compile error to a cfg.Warnings entry. An `import-rib` naming a rib
@@ -2789,6 +2796,7 @@ func lenientCompileOpts() compileOpts {
 		lenientPolicyMatchApplications:         true,
 		lenientNATMatchApplications:            true,
 		lenientPolicyMatchAddressSetMembers:    true,
+		lenientAddressSetMembersDefined:        true,
 		lenientRibGroupRefs:                    true,
 		lenientNextTableRefs:                   true,
 		lenientForwardingInstanceProtocols:     true,

@@ -286,7 +286,7 @@ var schemaSystem = &schemaNode{desc: "System configuration", children: map[strin
 		// the compiler can produce the actionable rejection rather than an
 		// opaque "unknown statement".
 		"class": {desc: "Login class definition", args: 1, placeholder: "<class-name>", closedWorld: true, children: map[string]*schemaNode{
-			"permissions":         {desc: "Permission bits granted to the class", args: 1, multi: true, placeholder: "<permission>", children: nil},
+			"permissions":         {desc: "Permission bits granted to the class", args: 1, multi: true, placeholder: "<permission>", valueType: ValueEnumOf, valueExamples: LoginPermissionFlags(), validator: ValidateLoginPermission, children: nil},
 			"idle-timeout":        {desc: "Idle timeout (minutes)", args: 1, placeholder: "<minutes>", valueType: ValueInteger, validator: ValidateInteger(0, 4294967295), children: nil},
 			"allow-commands":      {desc: "Regex of operational commands to allow", args: 1, placeholder: "<regex>", children: nil},
 			"deny-commands":       {desc: "Regex of operational commands to deny", args: 1, placeholder: "<regex>", children: nil},

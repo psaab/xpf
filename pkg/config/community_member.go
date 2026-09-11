@@ -41,12 +41,17 @@ func CommunityMemberIsRegex(member string) bool {
 // got (#8449).
 //
 // SCOPE, deliberately narrow. A member that renders and compiles today keeps
-// committing: this gate rejects only what provably breaks the reload. It does
-// NOT enumerate the well-known community names, and it must not: that is a
-// claim about ANOTHER PROGRAM'S grammar which nothing in this repo can verify,
-// and a gate that over-approximates would false-reject working configs — a
-// worse failure than the one being fixed. That reasoning was sound when it was
-// written and it still is.
+// committing: this gate rejects only what provably breaks the reload. It used
+// not to enumerate the well-known community names, because that was a claim
+// about ANOTHER PROGRAM'S grammar that nothing in this repo could verify, and a
+// gate that over-approximates would false-reject working configs.
+//
+// #9490 retires that constraint with evidence rather than overriding it: FRR
+// stable/10.6's own parser (bgpd/bgp_community.c community_gettoken and
+// community_valid) is the source for frrStandardCommunityLiteral. So a non-regex
+// member is now checked against exactly what that parser accepts, and an
+// alphanumeric token FRR rejects (`xpfbogus9206`, the Junos-only
+// `no-export-subconfed`, a large community A:B:C) no longer commits.
 //
 // What did NOT survive is the assumption that the excluded class was
 // unreachable. The original note said "FRR would reject a bogus literal too"
@@ -88,13 +93,28 @@ func ValidCommunityMember(member string) error {
 		// The regex branch is covered by the CompilePOSIX check below.
 		if bad, ok := badLiteralCharCommunityMember(member); ok {
 			return fmt.Errorf("contains %q, which cannot appear in a community "+
-				"literal (ASN:VALUE, a large-community A:B:C, or a well-known "+
-				"name -- alphanumerics, `:`, `-` and `_`). It carries no regex "+
+				"literal (ASN:VALUE or a well-known name -- alphanumerics, `:`, "+
+				"`-` and `_`). It carries no regex "+
 				"metacharacter (%s) so it renders into an FRR `standard` "+
 				"community-list, which FRR rejects at config load -- and a "+
 				"single rejected line exits the whole vtysh add-batch non-zero, "+
 				"failing the ENTIRE frr-reload and leaving every dynamic routing "+
 				"change stale", bad, CommunityRegexChars)
+		}
+		// #9490: the character check admits any alphanumeric token, so
+		// `members [ 65000:1 xpfbogus9206 ]` committed and rendered
+		// `bgp community-list standard C permit xpfbogus9206`, which FRR
+		// rejects. The note on badLiteralCharCommunityMember left the name
+		// enumeration to "whoever has FRR's grammar in hand". It is now read
+		// from FRR stable/10.6 bgpd/bgp_community.c (community_gettoken,
+		// community_valid), and frrStandardCommunityLiteral mirrors it.
+		if !frrStandardCommunityLiteral(member) {
+			return fmt.Errorf("%q is not a community FRR accepts in a `standard` "+
+				"community-list: each word must be ASN:VALUE with both parts "+
+				"0..65535, or one of %s (FRR stable/10.6 community_gettoken). "+
+				"A large community A:B:C or an extended community is neither, "+
+				"and the rejected line fails the whole frr-reload",
+				member, strings.Join(frrWellKnownCommunities, ", "))
 		}
 		return nil
 	}
@@ -113,15 +133,15 @@ func ValidCommunityMember(member string) error {
 // The allowed set is deliberately the union of the characters every literal
 // form is SPELLED WITH, rather than an enumeration of the forms:
 //
-//   - `ASN:VALUE` and large-community `A:B:C` -- digits and `:`
+//   - `ASN:VALUE` -- digits and `:`
 //   - well-known names (`no-export`, `no-advertise`, `no-export-subconfed`,
 //     `local-AS`, `internet`, `graceful-shutdown`, ...) -- letters, `-`, `_`
 //
-// Enumerating the NAMES would be a claim about FRR's grammar that this repo
-// cannot verify, and getting it wrong false-rejects a working config. Naming
-// the CHARACTERS is verifiable here and is strictly weaker: every literal FRR
-// accepts is spelled from this set, so a member outside it is not one of them.
-// It leaves the enumeration available to whoever has FRR's grammar in hand.
+// Naming the CHARACTERS was verifiable here when FRR's grammar was not, and it
+// is strictly weaker than the enumeration: every literal FRR accepts is spelled
+// from this set. It is kept as the first check because its message names the
+// offending character. The enumeration it deferred is frrStandardCommunityLiteral
+// (#9490), transcribed from FRR's parser.
 func badLiteralCharCommunityMember(member string) (string, bool) {
 	for _, r := range member {
 		switch {
@@ -144,4 +164,70 @@ func badLiteralCharCommunityMember(member string) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+// frrWellKnownCommunities is the exact well-known name set FRR stable/10.6's
+// community_gettoken recognises (bgpd/bgp_community.c). The match there is a
+// prefix strncmp, but whatever follows the name is parsed as the next token,
+// so `no-export-subconfed` (the Junos spelling) is rejected, and `internet` is
+// not in the set at all.
+var frrWellKnownCommunities = []string{
+	"accept-own", "accept-own-nexthop", "blackhole", "graceful-shutdown",
+	"llgr-stale", "local-AS", "no-advertise", "no-export", "no-llgr", "no-peer",
+	"route-filter-translated-v4", "route-filter-translated-v6",
+	"route-filter-v4", "route-filter-v6",
+}
+
+// frrStandardCommunityLiteral reports whether a non-regex member parses as
+// FRR's `standard` community-list argument. That argument is one or more
+// whitespace-separated communities, each a well-known name or ASN:VALUE with
+// exactly one `:` and both parts 0..65535 (community_valid). Control bytes
+// count as separators, which is what sanitizeFRRValue turns them into at
+// render.
+func frrStandardCommunityLiteral(member string) bool {
+	mapped := strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return ' '
+		}
+		return r
+	}, member)
+	words := strings.Fields(mapped)
+	if len(words) == 0 {
+		return false
+	}
+	for _, w := range words {
+		if !frrCommunityWord(w) {
+			return false
+		}
+	}
+	return true
+}
+
+func frrCommunityWord(w string) bool {
+	for _, n := range frrWellKnownCommunities {
+		if w == n {
+			return true
+		}
+	}
+	asn, val, ok := strings.Cut(w, ":")
+	return ok && communityPart16(asn) && communityPart16(val)
+}
+
+// communityPart16 reports whether p is a non-empty decimal 0..65535.
+func communityPart16(p string) bool {
+	if p == "" {
+		return false
+	}
+	n := 0
+	for i := 0; i < len(p); i++ {
+		c := p[i]
+		if c < '0' || c > '9' {
+			return false
+		}
+		n = n*10 + int(c-'0')
+		if n > 65535 {
+			return false
+		}
+	}
+	return true
 }

@@ -189,6 +189,19 @@ func runUniformGatesSamplingAppSet(tree *ConfigTree, cfg *Config, opts compileOp
 			return err
 		}
 	}
+	// #9490: an address-set member that names nothing, checked for every set
+	// and not only sets a policy references. It runs AFTER the policy-side
+	// gate, so a dangling member of a set a policy uses keeps that gate's
+	// message, which names the policy (#3149); this one catches the rest. Strict on commit / commit-check;
+	// warn on load / peer-sync (#1960).
+	if err := validateAddressSetMembersDefinedStrict(cfg); err != nil {
+		if opts.lenientAddressSetMembersDefined {
+			cfg.Warnings = append(cfg.Warnings,
+				fmt.Sprintf("address-set members (downgraded to warning on tolerant path): %v", err))
+		} else {
+			return err
+		}
+	}
 
 	return nil
 }

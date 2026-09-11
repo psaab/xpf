@@ -218,9 +218,17 @@ func TestMultiLeafAbsorptionPopulation9206(t *testing.T) {
 	//
 	// Filed as #9490 rather than fixed here: the remedy is a per-leaf validator for
 	// validateMultiValueLeaf to run (#2497), a different change from arming a
-	// container's keyword world, and `system login class permissions` needs its
-	// MappedPermissions semantics settled before anyone picks a direction.
-	const wantAbsorbing, wantDistinct = 39, 27
+	// container's keyword world.
+	//
+	// #9490 then closed all four, in two places:
+	//   - `system login class permissions` became a TYPED multi leaf with a
+	//     validator, so it is refused at THIS walk. It left the census at both
+	//     positions, top-level and the `groups` rehost: 39 -> 37 absorbing,
+	//     27 -> 26 distinct.
+	//   - community members and address-set members are refused at COMPILE
+	//     (ValidCommunityMember, validateAddressSetMembersDefinedStrict). They
+	//     still absorb at the schema walk, so they stay in the count.
+	const wantAbsorbing, wantDistinct = 37, 26
 	if absorbing != wantAbsorbing || distinct != wantDistinct {
 		t.Errorf("#9206: %d sites absorb at the schema walk (%d excluding `groups` "+
 			"rehosts), want %d (%d).\n  %s\n\n"+
