@@ -3649,9 +3649,20 @@ outside the monitor loop:
   install/delete arrival order; a genuinely newer incarnation (re-stamped by a
   later sweep) carries a higher generation and still installs (last-writer-wins).
   A `gen == 0` (legacy) delete still evicts. The generation maps are bounded by
-  `genGuardMapCap` (200000); on overflow the map is NEVER cleared (#2198 F1) — an
-  existing key updates in place, a new key skip-records (degrades to safe gen-0)
-  and bumps `GenMapOverflow`. The receiver also RESETS `recvGenV4/V6` when the
+  `genGuardMapCap` (200000). On overflow the map is NEVER cleared (#2198 F1): an
+  existing key updates in place, and a live entry is never dropped.
+  **Tombstones age out oldest-first (#9719).**
+  - A tombstone never frees its entry. So a long-lived connection used to fill the
+    receiver map with tombstones of closed sessions, then skip-record every NEW
+    key, leaving the ordering guards off for all new sessions until the next bulk.
+  - Now a new key at the cap first evicts the OLDEST tombstone
+    (`genTombstoneOrder`, counted in `GenTombstonesEvicted`) and is recorded.
+    Only when no tombstone is left does it skip-record (degrading to safe gen-0)
+    and bump `GenMapOverflow`.
+  - Evicting the oldest tombstone re-opens only that old key's reorder window.
+  - The sender's stamp map has the matching arm. Once it has overflowed, a
+    delete for an unstamped key carries a fresh generation instead of 0, because
+    the key may be a live session whose stamp was skipped. The receiver also RESETS `recvGenV4/V6` when the
   peer begins a bulk transfer (`resetRecvGen` from the `syncMsgBulkStart`
   handler, #2198 F2) so a rebooted peer — whose monotonic-seeded counter
   legitimately restarts lower — has its cold-start bulk re-prime accepted instead
