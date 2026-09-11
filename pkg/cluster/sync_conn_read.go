@@ -334,23 +334,26 @@ func (s *SessionSync) handleMessage(conn net.Conn, msgType uint8, payload []byte
 		// boot — which is the routine second-fabric case #5718's tests exist to
 		// protect. So the remedy needs "we knew a DIFFERENT boot before", which
 		// `switched` alone does not say.
-		var evictedStale, retired bool
+		var evictedStale bool
 		if switched && priorInc.known() {
 			s.mu.Lock()
 			if idx := s.fabricIdxForConnLocked(conn); idx >= 0 {
 				evictedStale = s.applyPeerIncarnationSwitchLocked(idx)
-				retired = true
 			}
 			s.mu.Unlock()
 		}
-		// #9618: a retired incarnation is a new peer process, so the survivor
-		// owes it what installConn's cold-prime arm gives the epoch-first order
-		// of the same reboot: the OnPeerConnected dispatch (connection epoch,
-		// DHCP-lease and IPsec-SA sync nudges, config reconcile) as well as the
-		// session table. applyPeerIncarnationSwitchLocked armed the table debt;
-		// the sweep's owed-cold-prime re-drive sends it. Dispatched outside
-		// s.mu, exactly as handleNewConnection does.
-		if retired && s.OnPeerConnected != nil {
+		// #9618: when this switch evicted the corpse it is the first classifier
+		// to see the reboot, so the survivor owes the new peer process what
+		// installConn's cold-prime arm gives the epoch-first order: the
+		// OnPeerConnected dispatch (connection epoch, DHCP-lease and IPsec-SA
+		// sync nudges, config reconcile) as well as the session table, whose
+		// debt applyPeerIncarnationSwitchLocked armed. When it evicted nothing,
+		// handleNewConnection already dispatched for this reboot, and the
+		// callback is not idempotent (it bumps the daemon's sync connection
+		// epoch and can re-arm the readiness timer), so it must not fire twice.
+		// Dispatched outside s.mu, exactly as handleNewConnection does.
+		if evictedStale && s.OnPeerConnected != nil {
+			s.peerConnectedDispatches.Add(1)
 			slog.Info("cluster sync: peer incarnation retired on boot id; scheduling OnPeerConnected callback",
 				"remote", connRemoteAddrString(conn))
 			go s.OnPeerConnected()

@@ -4067,8 +4067,11 @@ outside the monitor loop:
   owed-cold-prime re-drive discharges it on success only. The first
   incarnated prime (zero -> X) never reaches the switch (`priorInc.known()`),
   and a same-boot BulkStart on the peer's second fabric is not a switch, so
-  neither arms. When both signals observe the same reboot, the cost is one
-  redundant, idempotent bulk.
+  neither arms. The arm, and the `OnPeerConnected` dispatch below, are gated on
+  this switch having EVICTED the corpse, which is what makes it the first
+  classifier to see the reboot: when the epoch was seen first, `installConn`
+  already retired the corpse, owed the prime and dispatched, and the later
+  boot-id classification of the same reboot does neither again.
   The switch also dispatches `OnPeerConnected` (outside `s.mu`, as
   `handleNewConnection` does): a retired incarnation is a new peer process, the
   epoch-first order of the same reboot reaches that callback through
@@ -4079,7 +4082,9 @@ outside the monitor loop:
   unversioned boolean an older bulk can clear, and the re-sent table covers only
   RGs the survivor is primary for (#9626). A delayed BulkStart from the dead
   incarnation's socket that switches the boot namespace back (the hazard
-  `sync_boot_incarnation.go` documents) now also costs one redundant bulk.
+  `sync_boot_incarnation.go` documents) evicts the live replacement, so it also
+  arms a redundant bulk and dispatches the callback; that hazard predates this
+  change.
 
   **Atomicity of the ack is bound, not merely asserted (#5718 fold r3).** Every
   scenario test calls `installConn` and `handleMessage` in sequence, so none of

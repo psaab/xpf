@@ -288,8 +288,14 @@ func (s *SessionSync) applyPeerIncarnationSwitchLocked(keepIdx int) bool {
 	// the replacement blackholes every established flow: the #5480 blackhole,
 	// reached through the boot-id edge. The sweep's owed-cold-prime re-drive
 	// discharges it, on success only. When both signals observe one reboot the
-	// cost is one redundant, idempotent bulk.
-	s.needColdPrime.Store(true)
+	// cost would be one redundant bulk, so the arm is gated on this switch
+	// having EVICTED the corpse: eviction is what makes it the first
+	// classifier to see the reboot. When it evicts nothing, installConn
+	// already retired the corpse on the epoch, supersession or disconnect
+	// edge and owed the prime there.
+	if evicted {
+		s.needColdPrime.Store(true)
+	}
 	// Stamp AFTER the advance, exactly as installConn does, so the priming
 	// connection belongs to the incarnation it established rather than to the
 	// one just retired.
@@ -540,6 +546,7 @@ func (s *SessionSync) handleNewConnection(ctx context.Context, fabricIdx int, co
 		slog.Info("cluster sync: driving authoritative cold-prime bulk on active connection", "fabric", fabricIdx, "remote", connRemoteAddrString(conn), "cold_start", coldStart, "was_disconnected", d.wasDisconnected)
 		s.flushDeleteJournal()
 		if s.OnPeerConnected != nil {
+			s.peerConnectedDispatches.Add(1)
 			slog.Info("cluster sync: scheduling OnPeerConnected callback", "fabric", fabricIdx)
 			go s.OnPeerConnected()
 		}
