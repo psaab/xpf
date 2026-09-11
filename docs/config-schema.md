@@ -10849,6 +10849,26 @@ reserved for whole-dataplane selection where a rewrite shim
   interface node is still detected independently, matching
   `compileInterfaces`). Regression coverage:
   `pkg/config/interface_prewalk_all_roots_5744_test.go`.
+- **#9622 (reserved routing-instance names):** the daemon creates its own
+  management VRF under the instance name `mgmt` (`vrf-mgmt`, kernel table
+  999), and before #9622 nothing in `pkg/config` knew the name was taken: a
+  `routing-instances mgmt` stanza committed clean, and every apply then
+  planned two VRF specs of that name with different tables, deleting and
+  re-creating `vrf-mgmt` and binding the operator's members and the
+  management NICs to one device. `config.ManagementVRFInstanceName` is now
+  the one definition of the name (the daemon reads it), and
+  `validateReservedRoutingInstanceNamesAST` refuses a routing instance of a
+  reserved name on the same three-view name union as the `#3855` table-id
+  gate (`routingInstanceNameUnionAST`: every top-level `routing-instances`
+  root and every `groups` block, pre-expansion, plus the node0 and node1
+  expansions), so a `groups`-defined instance is caught and both cluster
+  nodes decide identically. Strict commit rejects; the tolerant load /
+  peer-sync path warns (`lenientReservedRoutingInstanceName`) and
+  `compileRoutingInstances` QUARANTINES the instance, so it never reaches the
+  daemon; the daemon also skips a reserved name as a belt. Names are
+  case-sensitive and the VRF device is `vrf-` + the name, so `MGMT`,
+  `mgmt1` and `vrf-mgmt` stay ordinary instances. Regression coverage:
+  `pkg/config/routinginstance_reserved_name_9622_test.go`.
 - **#3444 (destination-NAT rule-set `to` scope reject):** a Junos
   destination-NAT rule-set has only a `from` clause (zone | interface |
   routing-instance) — DNAT translates the destination on inbound, so there

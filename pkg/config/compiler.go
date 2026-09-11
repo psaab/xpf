@@ -290,6 +290,14 @@ func compileConfigWithOpts(tree *ConfigTree, opts compileOpts) (*Config, error) 
 	if riTableIDErr != nil {
 		return nil, riTableIDErr
 	}
+	// #9622: reserved routing-instance name gate — same three-view name union
+	// as the table-id gate above; strict rejects, lenient warns (and
+	// compileRoutingInstances quarantines the instance).
+	riReservedWarnings, riReservedErr := validateReservedRoutingInstanceNamesAST(
+		tree, opts.lenientReservedRoutingInstanceName)
+	if riReservedErr != nil {
+		return nil, riReservedErr
+	}
 
 	// #5180: duplicate hierarchical named-block gate. Runs PRE-expansion on the
 	// top-level stanzas (never a group body — apply-groups deep-merges rather
@@ -436,6 +444,7 @@ func compileConfigWithOpts(tree *ConfigTree, opts compileOpts) (*Config, error) 
 	cfg.Warnings = append(cfg.Warnings, dupMergeWarnings...)
 	cfg.Warnings = append(cfg.Warnings, zoneIDWarnings...)
 	cfg.Warnings = append(cfg.Warnings, riTableIDWarnings...)
+	cfg.Warnings = append(cfg.Warnings, riReservedWarnings...)
 	cfg.Warnings = append(cfg.Warnings, dupBlockWarnings...)
 	cfg.Warnings = append(cfg.Warnings, dupNATRuleWarnings...)
 	cfg.Warnings = append(cfg.Warnings, dupNATRuleSetWarnings...)
@@ -584,6 +593,14 @@ func compileConfigForNodeWithOpts(tree *ConfigTree, nodeID int, opts compileOpts
 	if riTableIDErr != nil {
 		return nil, riTableIDErr
 	}
+	// #9622: reserved routing-instance name gate — same three-view name union
+	// as the table-id gate above; strict rejects, lenient warns (and
+	// compileRoutingInstances quarantines the instance).
+	riReservedWarnings, riReservedErr := validateReservedRoutingInstanceNamesAST(
+		tree, opts.lenientReservedRoutingInstanceName)
+	if riReservedErr != nil {
+		return nil, riReservedErr
+	}
 
 	// #5180: duplicate hierarchical named-block gate — see compileConfigWithOpts.
 	// Pre-expansion, top-level stanzas only; strict rejects, lenient warns. Also
@@ -715,6 +732,7 @@ func compileConfigForNodeWithOpts(tree *ConfigTree, nodeID int, opts compileOpts
 	cfg.Warnings = append(cfg.Warnings, dupMergeWarnings...)
 	cfg.Warnings = append(cfg.Warnings, zoneIDWarnings...)
 	cfg.Warnings = append(cfg.Warnings, riTableIDWarnings...)
+	cfg.Warnings = append(cfg.Warnings, riReservedWarnings...)
 	cfg.Warnings = append(cfg.Warnings, dupBlockWarnings...)
 	cfg.Warnings = append(cfg.Warnings, dupNATRuleWarnings...)
 	cfg.Warnings = append(cfg.Warnings, dupNATRuleSetWarnings...)

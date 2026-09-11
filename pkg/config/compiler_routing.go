@@ -737,6 +737,26 @@ func compileRoutingInstances(node *Node, cfg *Config) error {
 		cfg.RoutingInstances = append(cfg.RoutingInstances, ri)
 	}
 
+	// #9622: a routing instance named for a daemon-reserved VRF (the management
+	// VRF) never reaches the daemon. The strict commit gate
+	// (validateReservedRoutingInstanceNamesAST) rejects it outright; on a lenient
+	// path (tolerant load / peer-sync / a config an older binary persisted) drop
+	// it here, so the daemon never plans a second vrf-mgmt with a different table.
+	if len(cfg.RoutingInstances) > 0 {
+		kept := cfg.RoutingInstances[:0]
+		for _, ri := range cfg.RoutingInstances {
+			if IsReservedRoutingInstanceName(ri.Name) {
+				cfg.Warnings = append(cfg.Warnings, fmt.Sprintf(
+					"routing-instance %q QUARANTINED: the name is reserved for %s — no VRF created,"+
+						" its members are not bound and its routes are not programmed until it is renamed (#9622)",
+					ri.Name, reservedRoutingInstanceNames[ri.Name]))
+				continue
+			}
+			kept = append(kept, ri)
+		}
+		cfg.RoutingInstances = kept
+	}
+
 	// #3855: enforce the never-share-a-table invariant. StableRoutingInstanceTableID
 	// folds into a 900k-slot reserved band so a collision is astronomically
 	// rare, and the strict commit gate (validateRoutingInstanceTableIDCollisionAST)
