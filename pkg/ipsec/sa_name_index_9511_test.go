@@ -259,8 +259,15 @@ func TestSANameIndexSurvivesAnUnrelatedRenderError9511(t *testing.T) {
 
 // Eligibility is keyed by VPN IDENTITY, not by the sanitised connection name. Two
 // VPN names that sanitise to one connection name (`x y`, and x<TAB>y whose tab
-// becomes a space) must not borrow each other's result: here only `x y` renders,
-// and the skipped one must not be indexed under the name the rendered one set.
+// becomes a space) must not borrow each other's result.
+//
+// #9495 changed what this cell can observe, not the property. The only way two
+// distinct VPN names sanitise alike is a C0 byte becoming a space, and a space in a
+// swanctl section header makes strongSwan discard the whole file (measured,
+// docs/log/9495.md). The render belt therefore skips BOTH names, so neither is
+// indexed and neither can borrow the other's eligibility. Before #9495 `x y`
+// rendered; it only ever produced a file strongSwan refused. The per-VPN keying
+// itself stays pinned by the unrelated-render-error cell above.
 func TestSANameIndexKeysEligibilityByVPNNotSanitizedName9511(t *testing.T) {
 	tabbed := "x" + string(rune(9)) + "y"
 	cfg := &config.IPsecConfig{
@@ -274,15 +281,14 @@ func TestSANameIndexKeysEligibilityByVPNNotSanitizedName9511(t *testing.T) {
 		t.Fatalf("FIXTURE: the tabbed name must sanitise to `x y`, got %q", sanitizeSwanctlValue(tabbed))
 	}
 	_, rendered, err := (&Manager{}).renderConfig(cfg)
-	if err != nil || len(rendered) != 1 || !rendered["x y"] {
-		t.Fatalf("FIXTURE: expected exactly connection `x y` rendered with the tabbed VPN "+
-			"skipped, got %v (err %v)", rendered, err)
+	if err != nil || len(rendered) != 0 {
+		t.Fatalf("both section-breaking names must be skipped (#9495), got rendered %v (err %v)", rendered, err)
 	}
 
 	idx := BuildSANameIndex(cfg)
-	if got := idx.VPNs("x y"); len(got) != 1 || got[0] != "x y" {
-		t.Errorf("the skipped VPN borrowed the rendered one's eligibility through the shared "+
-			"sanitised connection name: idx.VPNs(`x y`) = %q, want [\"x y\"]", got)
+	if got := idx.VPNs("x y"); len(got) != 0 {
+		t.Errorf("a VPN the renderer skips was indexed under the shared sanitised name: "+
+			"idx.VPNs(`x y`) = %q, want none", got)
 	}
 }
 
