@@ -807,6 +807,13 @@ So the export pages:
 - the loop is bounded (`maxOwnerRGExportPages`) and fails CLOSED past it. A
   partial window is exactly what the receiver turns into deleted sessions, so
   "return what we have" is not an option here;
+- every other error exit returns no window either (#9699). A helper-status
+  apply that fails after a page used to return the deltas collected so far
+  BESIDE the error. So did the same failure in the unpaged fallback and in the
+  one-shot `ExportOwnerRGSessions`, and the runtime passthrough wrapped those
+  deltas into a snapshot it returned with the error. Both production callers
+  discard deltas on error, so no receiver was fed one, but the contract is one
+  complete window OR an error, never both, and the API now keeps it;
 - a helper that does not report the paging contract
   (`session_export_paging_protocol_version`) still gets the unbounded request.
   Such a helper honours `max` by TRUNCATING and reports no more-bit, so paging

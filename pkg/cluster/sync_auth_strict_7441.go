@@ -207,6 +207,89 @@ func (s *SessionSync) enforceStrictSessionAuth() int {
 	return len(doomed)
 }
 
+// UnauthenticatedSessionConns returns the remote address of every installed
+// session-sync connection that has never authenticated, when this node holds a
+// control-link key (#9717).
+//
+// It returns nil when the node is unkeyed. An unkeyed cluster authenticates
+// nothing by the operator's choice, and listing every connection there would
+// read as an alarm about a posture nobody asked for.
+//
+// Same population and locking as enforceStrictSessionAuth: the connections are
+// read under s.mu, and authPSK under s.writeMu, which the upgrade exchange writes
+// it under. readKey is not consulted, for the race reason given there.
+func (s *SessionSync) UnauthenticatedSessionConns() []string {
+	if len(s.authKey()) == 0 {
+		return nil
+	}
+	s.mu.Lock()
+	conns := []net.Conn{s.conn0, s.conn1}
+	s.mu.Unlock()
+
+	var out []string
+	s.writeMu.Lock()
+	for _, c := range conns {
+		ac, ok := c.(*authConn)
+		if !ok || ac == nil || len(ac.authPSK) > 0 {
+			continue
+		}
+		out = append(out, connRemoteAddrString(c))
+	}
+	s.writeMu.Unlock()
+	return out
+}
+
+// warnUnauthenticatedResidual warns once per connection about the residual that
+// strict-session-auth exists to close, when that posture is OFF (#9717).
+//
+// It fires when all of these hold:
+//   - this node holds a control-link key;
+//   - strict-session-auth is off (with it on, enforceStrictSessionAuth evicts
+//     the connection instead);
+//   - an established session-sync connection has never authenticated;
+//   - the grace since its anchor has elapsed.
+//
+// Such a connection's frames are accepted without HMAC for as long as it lives,
+// and with the posture off nothing evicts it. The grace gate keeps a legitimate
+// live keying quiet while the peer's in-place upgrade is still in flight. The
+// once flag keeps the periodic tick from repeating the line, per the project rule
+// against Warn inside a periodic loop. It returns how many connections it warned
+// about.
+func (s *SessionSync) warnUnauthenticatedResidual() int {
+	if s.strictSessionAuth.Load() || len(s.authKey()) == 0 {
+		return 0
+	}
+	now := MonotonicNanos()
+	s.mu.Lock()
+	conns := []net.Conn{s.conn0, s.conn1}
+	s.mu.Unlock()
+
+	var warn []net.Conn
+	s.writeMu.Lock()
+	for _, c := range conns {
+		ac, ok := c.(*authConn)
+		if !ok || ac == nil || len(ac.authPSK) > 0 || ac.authResidualWarned {
+			continue
+		}
+		if ac.strictGraceStart == 0 || now-ac.strictGraceStart < strictSessionAuthGrace.Nanoseconds() {
+			continue
+		}
+		ac.authResidualWarned = true
+		warn = append(warn, c)
+	}
+	s.writeMu.Unlock()
+
+	for _, c := range warn {
+		slog.Warn("cluster sync: a session-sync connection established before the control-link key "+
+			"has not authenticated, and strict-session-auth is off (#9717). Its frames are still "+
+			"accepted without HMAC until it authenticates. Set `chassis cluster strict-session-auth` "+
+			"on both nodes to evict it, or restart xpfd",
+			"remote", connRemoteAddrString(c), "grace", strictSessionAuthGrace)
+		s.stats.StrictAuthResidualWarnings.Add(1)
+	}
+	return len(warn)
+}
+
 // strictSessionAuthLoop re-evaluates the posture on established connections.
 //
 // A periodic tick is required, not merely convenient: the grace elapses
@@ -223,6 +306,7 @@ func (s *SessionSync) strictSessionAuthLoop(ctx context.Context) {
 			return
 		case <-ticker.C:
 			s.enforceStrictSessionAuth()
+			s.warnUnauthenticatedResidual() // #9717: the posture-off half
 		}
 	}
 }

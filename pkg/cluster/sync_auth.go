@@ -197,6 +197,12 @@ type authConn struct {
 	bootIncarnation    bootIncarnation
 	unincarnatedWarned bool
 
+	// authResidualWarned makes the #9717 notice ONE line per connection. The
+	// notice fires when this node is keyed, strict-session-auth is off, and the
+	// connection has still not authenticated after the grace. Written and read
+	// under SessionSync.writeMu, like authPSK.
+	authResidualWarned bool
+
 	// authPSK is the control-link PSK this connection's authentication was
 	// established under — the staleness test the #6628 reconciler uses. Nil on
 	// an unauthenticated connection. It is what lets ReconcileConnectionAuth
@@ -375,14 +381,21 @@ func (a *authConn) verifyFrame(header, payload, trailer []byte) error {
 // it. So "the key never applies retroactively to an established stream" is no
 // longer true for a peer that answers.
 //
-// It is still true for a peer that does NOT answer, and that residual is
-// OPEN. A hostile stream admitted before the commit declines the upgrade by
-// staying silent, and a decliner is indistinguishable from a legitimate peer
-// that is not keyed yet — which is the rolling-upgrade case none of this may
-// break. Closing it needs a bounded window after which an un-upgraded
-// connection is dropped, i.e. the mechanism this file records as shipped and
-// then REMOVED, with the three constraints any replacement must answer. Do not
-// read the upgrade as closing it.
+// It is still true for a peer that does NOT answer. A hostile stream admitted
+// before the commit declines the upgrade by staying silent, and a decliner is
+// indistinguishable from a legitimate peer that is not keyed yet — which is the
+// rolling-upgrade case none of this may break. Do not read the upgrade as
+// closing it.
+//
+// #7441 closes it by DECLARATION. With `strict-session-auth` set on a keyed
+// node, a connection still unauthenticated after strictSessionAuthGrace is
+// evicted (sync_auth_strict_7441.go). The posture is off by default, and with it
+// off the residual stays open.
+//
+// #9717 makes that open residual visible rather than silent:
+//   - the Authentication status line names such a connection instead of
+//     claiming rejection;
+//   - a one-time warning fires once the grace has passed.
 func syncAuthDecision(keyConfigured, peerAdvertised, peerKeyed, proofOK bool) (mode syncAuthMode, accept bool, reason string) {
 	if !keyConfigured {
 		return syncAuthUnauthenticated, true, ""

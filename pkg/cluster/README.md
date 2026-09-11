@@ -2506,6 +2506,17 @@ CLOSED. A legitimate keyed peer reconnects immediately and authenticates
 through `performSyncHandshake`; a hostile stream cannot, because
 `syncAuthDecision` refuses an unkeyed peer on a fresh connection.
 
+**With the posture off (the default), the residual stays open, but it is not
+silent (#9717).**
+- Once the grace has passed, a one-time `slog.Warn` names each established
+  session-sync connection that still has not authenticated. These warnings are
+  counted in `StrictAuthResidualWarnings`.
+- The `Authentication:` status line below names such a connection instead of
+  claiming rejection.
+- For a NEW deployment, key both nodes before they first join. A connection
+  established after the key authenticates at its handshake, so the residual
+  never arises.
+
 **It is a DECLARATION, not an inference, and that is the whole design.** Three
 signals look like the missing discriminator and each fails:
 
@@ -2547,12 +2558,15 @@ it and you have NOT set `strict-session-auth`, restarting `xpfd` still evicts
 the stream.
 
 Confirm the posture with `show chassis cluster statistics`, whose
-`Authentication:` line (`controlLinkAuthStatus`) reads
-`engaged (peer authenticated; unauthenticated frames rejected)` once both
-nodes are keyed — `dual-accept (...)` means the channel is still
-unauthenticated in practice. Note this line reflects the heartbeat/fabric
-posture; it does not tell you whether an existing session-sync connection
-predates the key.
+`Authentication:` line (`controlLinkAuthStatus`) reads as follows:
+- `engaged (peer authenticated; unauthenticated frames rejected)` once both
+  nodes are keyed and no pre-key session-sync connection survives;
+- `dual-accept (...)` means the channel is still unauthenticated in practice;
+- since #9717 the line also covers the session-sync channel. While an
+  established session-sync connection has not authenticated, it reads
+  `heartbeat engaged (peer authenticated); N session-sync connection(s) NOT
+  authenticated, frames still accepted without HMAC: <remote>, ...` and names
+  each such connection.
 
 **Rolling BACK is not symmetric.** `peerAuthSeen` is sticky in memory and
 clears only on an **xpfd restart** — since #5086 it lives on the `Manager`,

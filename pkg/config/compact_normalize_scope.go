@@ -498,6 +498,12 @@ func compactNormalizeInScope(containerKeyword, head string) bool {
 	// commits today into one that does not. Right outcome, different decision,
 	// and it belongs with #8755's introduces-rejection class rather than in a
 	// slice justified as "unblocked".
+	//
+	// #9620 re-measured this at 9f520a5b2 and the premise still holds:
+	// `unit 0 inner-vlan-id 20;` alone commits and drops the tag, and admitting
+	// the pair makes the QinQ gate refuse it. The `vlan-id`-first run is folded
+	// by `unit vlan-id` and split by the `unit` container's packedStatements
+	// opt-in, and it was already refused.
 	switch containerKeyword + " " + head {
 	case "unit description",
 		"unit vlan-id":
@@ -590,6 +596,14 @@ func compactNormalizeInScope(containerKeyword, head string) bool {
 		"rpm probe",
 		"snmp community",
 		"snmp trap-group",
+		// #9620 (M5): with `clients` first, the multi-value leaf absorbed
+		// `authorization read-only` as client prefixes. The snmp `community`
+		// container opts into packedStatements, which splits that run.
+		// `community authorization` is deliberately NOT admitted: the community
+		// scanner already reads authorization-first runs correctly, including
+		// `clients 10.0.0.0/8 restrict` and client lists. The args-bounded
+		// splitter cannot split those, and folding them left the tail on the
+		// authorization leaf, which strict refused.
 		"community clients",
 		"trap-group categories",
 		"trap-group targets",
@@ -1002,7 +1016,7 @@ func compactNormalizeInScope(containerKeyword, head string) bool {
 		"port-mirroring instance",
 		"sampling instance":
 		return true
-	// firewall: 34 pairs.
+	// firewall: 35 pairs.
 	case "filter term",
 		"firewall family",
 		"firewall policer",
@@ -1014,6 +1028,14 @@ func compactNormalizeInScope(containerKeyword, head string) bool {
 		"from dscp",
 		"from icmp-code",
 		"from icmp-type",
+		// #9620 (H10): `from next-header tcp source-address …` on one line never
+		// folded, so the term compiled with no match condition, a match-all
+		// accepted on strict. Folded, the run reaches the #8883 multi-leaf gate,
+		// which refuses it on strict as it already refuses the reversed order.
+		// The `from` containers deliberately do NOT opt into packedStatements:
+		// that would also split `from { protocol tcp protocol udp; }`, which the
+		// #9027 self-repeat gate refuses on purpose.
+		"from next-header",
 		"from protocol",
 		"from source-address",
 		"from source-port",
@@ -1039,6 +1061,19 @@ func compactNormalizeInScope(containerKeyword, head string) bool {
 		"single-rate committed-burst-size",
 		"single-rate committed-information-rate",
 		"single-rate excess-burst-size",
+		// #9620: `term then` and `term from` are deliberately NOT admitted. Both are
+		// keyword-keyed, so they are also live at policy-options policy-statement
+		// terms, and there each breaks a spelling that compiles correctly at
+		// 9f520a5b2:
+		//   - `term t1 from protocol ospf then accept;`: the fold puts `then accept`
+		//     under `from`, strict refuses the config, and the lenient load fails
+		//     to compile it.
+		//   - `term t1 then accept load-balance per-packet local-preference 200;`:
+		//     the fold leaves the actions after `accept` on the `then` node's keys,
+		//     and the policy compiler keeps only `accept`, on strict and lenient
+		//     alike.
+		// The firewall member (`term t1 then count C1 discard;`, #9620 H9) needs a
+		// remedy scoped to the firewall term, not this pair.
 		"then count",
 		"then dscp",
 		"then forwarding-class",
