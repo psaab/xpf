@@ -3959,6 +3959,38 @@ outside the monitor loop:
   sent none. That is what makes `show security flow session` and RT_FLOW render
   one id for one session.
 
+- **A synced session's timestamps are rebased by the clock offset of the
+  connection that carried it, and an impossible peer clock is refused
+  (#9653).** Each peer connection opens with a `syncMsgClockSync` frame
+  carrying the peer's `CLOCK_MONOTONIC` seconds. The receiver stores
+  `local - peer`, and every `syncMsgSessionV4`/`V6` install rebases `Created`
+  and `LastSeen` through `rebaseTimestamp`, clamping a negative result to 0.
+  - The offset used to be stored with no bound. A reading of `2^63-1` rebased
+    every later install to `Created = LastSeen = 0`, so the standby aged the
+    sessions out. A reading of `0` against a long local uptime put them in the
+    future, so they never aged. `plausiblePeerMonoSeconds` now refuses a reading
+    below 1 s or above a century. The previous offset stays in force,
+    `ClockSyncsRefused` counts the refusal (cluster status renders it when
+    nonzero), and the warning names the remote.
+  - A bound cannot tell a plausible false reading from a true one. The offset
+    was also global, so one ClockSync on ANY session-sync connection rebased
+    the sessions every other connection carried. Each connection now keeps the
+    offset its own ClockSync established (`authConn.clockOffset`), and
+    `clockOffsetFor` rebases a session with the offset of the connection that
+    carried it. A connection that has not synced yet uses the last accepted
+    offset, which is what every session used before.
+  - Not done here: authenticating the reading. On the default dual-accept
+    posture, an unauthenticated connection can still send a false but plausible
+    offset for the sessions it carries itself, and it could inject those
+    sessions directly anyway; `strict-session-auth` is the control for that
+    reach. ClockSync on an unauthenticated connection is deliberately NOT refused
+    when a key is configured: during a key rollout the peer's connection stays
+    unauthenticated until the in-place upgrade, and ClockSync is sent once per
+    connection, so the offset would stay unset and synced sessions would age by
+    the difference between the two nodes' uptimes.
+
+  Cells: `sync_clocksync_bound_9653_test.go`.
+
 - **The peer heartbeat-ack capability is peer-INCARNATION scoped, not
   process-sticky (#5718 C01a).** `SessionSync.peerHeartbeatAckEver` latches
   when the connected peer replies `syncMsgHeartbeatAck`, and that latch is what
