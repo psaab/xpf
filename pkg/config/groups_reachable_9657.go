@@ -14,8 +14,10 @@ package config
 //
 //   - Seeds are apply-groups statements at the top level and directly under a
 //     top-level `stanza` node.
-//   - A `${node}` reference reaches BOTH node0 and node1, so both nodes compute
-//     the same set from the same candidate.
+//   - A reference is counted unresolved AND resolved for node0 and node1. A
+//     compile without node variables expands it unresolved (a group literally
+//     named `${node}` lands as is), and each cluster node expands its own
+//     resolution, so both nodes compute the same set from the same candidate.
 //   - A reached group's own body is searched the same way, so a group applied
 //     from inside another reached group is reached too. Each group is searched
 //     once, so a cycle terminates here; group expansion reports it.
@@ -60,8 +62,11 @@ func reachableGroupNamesAST(tree *ConfigTree, stanza string) map[string]struct{}
 	var pending []string
 	reach := func(apply *Node) {
 		for _, key := range apply.Keys[1:] {
-			for _, node := range []string{"node0", "node1"} {
-				name := resolveVars(key, map[string]string{"node": node})
+			for _, name := range []string{
+				key,
+				resolveVars(key, map[string]string{"node": "node0"}),
+				resolveVars(key, map[string]string{"node": "node1"}),
+			} {
 				if _, seen := reached[name]; !seen {
 					reached[name] = struct{}{}
 					pending = append(pending, name)

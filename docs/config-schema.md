@@ -10917,17 +10917,18 @@ reserved for whole-dataplane selection where a rewrite shim
   expansion can merge. It seeds from applications at the top level or directly
   under a `routing-instances` stanza: expansion walks a group only down to the
   context of its `apply-groups`, so a group applied under `system` adds no
-  instance. It resolves `${node}` to both node0 and node1, so both nodes
-  compute the same set, and it searches each reached group's own body the same
-  way. It errs toward counting, which can only refuse a config:
-  `apply-groups-except` is ignored, because it is enforced per destination
-  during the merge (`#9422`). The pre-expansion view counts only those groups;
-  the node0 and node1 expansion views are unchanged. A collision against an
-  applied group, a `${node}` group applied on either node, or a reachable
-  group when no expansion succeeds is still refused. The lenient warning no
-  longer names a quarantined instance: the union spans both nodes' views, so
-  it cannot know which instance this node drops, and the runtime quarantine
-  warns naming the one it does. An unquoted `apply-groups`,
+  instance. It counts each reference unresolved and resolved for node0 and
+  node1, so both nodes compute the same set (a compile without node variables
+  expands a group literally named `${node}` as is), and it searches each
+  reached group's own body the same way. It errs toward counting, which can
+  only refuse a config: `apply-groups-except` is ignored, because it is
+  enforced per destination during the merge (`#9422`). The pre-expansion view
+  counts only those groups; the node0 and node1 expansion views are unchanged.
+  A collision against an applied group, a `${node}` group applied on either
+  node, or a reachable group when no expansion succeeds is still refused. The
+  lenient warning no longer names a quarantined instance: the union spans both
+  nodes' views, so it cannot know which instance this node drops, and the
+  runtime quarantine warns naming the one it does. An unquoted `apply-groups`,
   `apply-groups-except` or `apply-macro` statement under `routing-instances`
   is not a routing instance. Expansion strips only `apply-groups`, and
   `compileRoutingInstances` built a routing instance, and a VRF, named
@@ -10937,7 +10938,13 @@ reserved for whole-dataplane selection where a rewrite shim
   them through one predicate (`isApplyStatementNode`); the predicate goes by
   name, quoted or not, because group expansion and the `#9323` validator also
   go by name and a quote does not survive rendering, which an HA peer
-  reparses. The zone (`#3075`) and tunnel (`#1873`) gates' pre-expansion views
+  reparses. An instance therefore cannot take one of these names. A one-key
+  stanza under such a name that carries routing-instance keywords (an instance
+  written there) is refused at strict commit and warned on the tolerant paths
+  (`validateRoutingInstanceChildTokensAST`, the `#9323` validator), because it
+  would otherwise vanish on a clean commit. A two-key statement such as
+  `apply-macro M { interface ...; }` still commits, whatever keys the macro
+  carries. The zone (`#3075`) and tunnel (`#1873`) gates' pre-expansion views
   still count every `groups` block. Regression coverage:
   `pkg/config/routinginstanceid_unapplied_groups_9657_test.go`.
 - **#3444 (destination-NAT rule-set `to` scope reject):** a Junos

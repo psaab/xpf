@@ -289,6 +289,18 @@ func TestApplyStatementsAreNotRoutingInstances_9657(t *testing.T) {
 		if names := riNames9657(cfg); len(names) != 1 || names[0] != "ri7" {
 			t.Errorf("#9657: a quoted %q stanza must not compile as a routing instance, got %v", kw, names)
 		}
+		if _, err := compile9657(t, quoted, false); err == nil || !strings.Contains(err.Error(), "cannot name a routing instance") {
+			t.Errorf("#9657: a %q stanza carrying routing-instance keywords vanishes unless strict refuses it, got %v", kw, err)
+		}
+		warned := false
+		for _, w := range cfg.Warnings {
+			if strings.Contains(w, "cannot name a routing instance") {
+				warned = true
+			}
+		}
+		if !warned {
+			t.Errorf("#9657: the lenient path must warn that %q cannot name a routing instance, got %v", kw, cfg.Warnings)
+		}
 		tree, errs := NewParser(quoted).Parse()
 		if len(errs) > 0 {
 			t.Fatalf("fixture must parse: %v", errs)
@@ -320,5 +332,64 @@ func TestTableIDGateIgnoresAGroupAppliedUnderAnotherStanza_9657(t *testing.T) {
 	}
 	if names := riNames9657(cfg); len(names) != 1 || names[0] != "ri7" {
 		t.Errorf("fixture: the runtime must confirm that ri116 never lands, got %v", names)
+	}
+}
+
+// Every real spelling of the statements still commits, including a macro whose
+// key happens to be a routing-instance keyword. Only a one-key stanza carrying
+// routing-instance keywords, an instance written under the keyword's name, is
+// refused, and its flat spelling has the same one-key shape as the flat
+// statement: the keyword child is what tells them apart.
+func TestApplyStatementSpellingsStillCommit_9657(t *testing.T) {
+	for _, tc := range []struct{ name, text string }{
+		{"braced macro", "routing-instances {\n    apply-macro M {\n        k v;\n    }\n}\n"},
+		{"braced macro with an interface key", "routing-instances {\n    apply-macro M {\n        interface ge-0/0/0.0;\n    }\n}\n"},
+		{"packed macro", "routing-instances {\n    apply-macro M k v;\n}\n"},
+	} {
+		if _, err := compile9657(t, tc.text, false); err != nil {
+			t.Errorf("#9657 %s: a valid apply statement must commit, got %v", tc.name, err)
+		}
+	}
+	for _, tc := range []struct {
+		name string
+		cmds []string
+	}{
+		{"flat macro", []string{"set routing-instances apply-macro M k v"}},
+		{"flat apply-groups-except", []string{"set groups g2 system host-name x", "set routing-instances apply-groups-except g2"}},
+	} {
+		if _, err := CompileConfig(setTree9622(t, tc.cmds...)); err != nil {
+			t.Errorf("#9657 %s: a valid apply statement must commit, got %v", tc.name, err)
+		}
+	}
+	if _, err := CompileConfig(setTree9622(t, "set routing-instances apply-macro instance-type virtual-router")); err == nil ||
+		!strings.Contains(err.Error(), "cannot name a routing instance") {
+		t.Errorf("#9657: a flat instance written under the apply-macro name must be refused, got %v", err)
+	}
+}
+
+// A compile without node variables expands a reference unresolved, so a group
+// literally named "${node}" applied by `apply-groups "${node}"` lands as is.
+// Neither node0's nor node1's expansion finds that group, so the pre-expansion
+// view must count the unresolved reference or the collision passes strict.
+func TestTableIDGateCountsALiteralNodeVariableGroup_9657(t *testing.T) {
+	assertFixtureCollides9657(t)
+	text := group9657("\"${node}\"", false) + "apply-groups \"${node}\";\n" + activeRI7_9657
+	if _, err := compile9657(t, text, false); err == nil || !strings.Contains(err.Error(), "table-id collision") {
+		t.Errorf("#9657: the group literally named ${node} lands on a compile without node variables, so ri116 "+
+			"collides with ri7 and the strict path must refuse, got %v", err)
+	}
+	cfg, err := compile9657(t, text, true)
+	if err != nil {
+		t.Fatalf("lenient compile: %v", err)
+	}
+	quarantined := false
+	for _, w := range cfg.Warnings {
+		if strings.Contains(w, "QUARANTINED") {
+			quarantined = true
+		}
+	}
+	if !quarantined {
+		t.Errorf("control: the runtime must see both instances and quarantine one; instances=%v warnings=%v",
+			riNames9657(cfg), cfg.Warnings)
 	}
 }
