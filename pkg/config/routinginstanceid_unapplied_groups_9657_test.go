@@ -311,9 +311,9 @@ func keywordNameWarned9657(c *Config) bool {
 // Every real spelling of the statements commits, in both compiler cores. A
 // two-key statement is never warned, including a macro whose key is a
 // routing-instance keyword. A one-key stanza carrying a routing-instance
-// keyword is warned but never refused: a flat statement whose macro or group is
-// named after a routing-instance keyword has exactly that shape: it commits,
-// with the same warning.
+// keyword is warned but never refused. Before #9685 a flat statement whose
+// macro or group is named after a routing-instance keyword built that one-key
+// shape and was warned; it now builds the two-key statement and is not.
 func TestApplyStatementSpellingsStillCommit_9657(t *testing.T) {
 	for _, tc := range []struct{ name, text string }{
 		{"braced macro", "routing-instances {\n    apply-macro M {\n        k v;\n    }\n}\n"},
@@ -329,6 +329,16 @@ func TestApplyStatementSpellingsStillCommit_9657(t *testing.T) {
 			t.Errorf("#9657 %s: a two-key apply statement is always the statement and must not be warned: %v", tc.name, cfg.Warnings)
 		}
 	}
+	// The one-key stanza is still warned: a braced `apply-macro { ... }` with no
+	// name, carrying a routing-instance keyword, may be an instance the operator
+	// wrote under the keyword's name.
+	oneKey, err := compile9657(t, "routing-instances {\n    apply-macro {\n        instance-type virtual-router;\n    }\n}\n", false)
+	if err != nil {
+		t.Fatalf("#9657 braced one-key apply-macro: must commit (warned, not refused), got %v", err)
+	}
+	if !keywordNameWarned9657(oneKey) {
+		t.Errorf("#9657 braced one-key apply-macro carrying a routing-instance keyword must be warned: %v", oneKey.Warnings)
+	}
 	const yes, no = "yes", "no"
 	for _, tc := range []struct {
 		name string
@@ -337,9 +347,14 @@ func TestApplyStatementSpellingsStillCommit_9657(t *testing.T) {
 	}{
 		{"flat macro", []string{"set routing-instances apply-macro M k v"}, no},
 		{"flat apply-groups-except", []string{"set groups g2 system host-name x", "set routing-instances apply-groups-except g2"}, no},
-		{"flat macro named after a routing-instance keyword", []string{"set routing-instances apply-macro interface k v"}, yes},
-		{"flat apply-groups-except naming a keyword-named group", []string{"set groups interface system host-name x", "set routing-instances apply-groups-except interface"}, yes},
-		{"flat instance written under the apply-macro name", []string{"set routing-instances apply-macro instance-type virtual-router"}, yes},
+		// #9685: a flat apply statement now builds the same two-key statement as
+		// its braced spelling (the name stays on the statement's own keys), so
+		// these are the statement and are not warned, like the braced cases
+		// above. Before #9685 they built the one-key shape below, which is why
+		// they used to warn.
+		{"flat macro named after a routing-instance keyword", []string{"set routing-instances apply-macro interface k v"}, no},
+		{"flat apply-groups-except naming a keyword-named group", []string{"set groups interface system host-name x", "set routing-instances apply-groups-except interface"}, no},
+		{"flat instance written under the apply-macro name", []string{"set routing-instances apply-macro instance-type virtual-router"}, no},
 	} {
 		for _, core := range []string{"CompileConfig", "CompileConfigForNode"} {
 			var cfg *Config
@@ -436,8 +451,17 @@ func TestTableIDGateHonoursAnExcludedGroup_9657(t *testing.T) {
 		"set routing-instances apply-groups-except g1",
 		"set routing-instances ri7 instance-type virtual-router",
 	}
-	if _, err := CompileConfig(setTree9622(t, flat...)); err == nil || !strings.Contains(err.Error(), "table-id collision") {
-		t.Errorf("#9657: group expansion ignores the flat exclusion (#9685), so ri116 lands and the collision must be refused, got %v", err)
+	// #9685: the flat exclusion is now honoured exactly like the braced one
+	// above, so ri116 never lands and there is no collision to refuse.
+	if _, err := CompileConfig(setTree9622(t, flat...)); err != nil {
+		t.Errorf("#9685: the flat `apply-groups-except g1` excludes g1, so ri116 never lands; the strict path refused: %v", err)
+	}
+	fcfg, err := CompileConfigLenient(setTree9622(t, flat...))
+	if err != nil {
+		t.Fatalf("lenient flat compile: %v", err)
+	}
+	if names := riNames9657(fcfg); len(names) != 1 || names[0] != "ri7" {
+		t.Errorf("#9685: the flat exclusion must keep only ri7, like the braced spelling, got %v", names)
 	}
 }
 

@@ -73,10 +73,7 @@ func normalizeCompactNodes(nodes []*Node, schema *schemaNode, inScope func(conta
 			continue
 		}
 		kw := node.Keys[0]
-		child := schema.children[kw]
-		if child == nil {
-			child = schema.wildcard
-		}
+		child := schemaChildFor(schema, kw) // #9685
 		if child == nil {
 			continue
 		}
