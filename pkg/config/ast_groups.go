@@ -633,38 +633,94 @@ func leafListPeer(dst []*Node, key string) *Node {
 
 // mergeLeafListInto unions the members of a group leaf-list node src into an
 // existing inline leaf-list node dst. Members are read across both AST shapes
-// via the #2419 firewallMatchValues SSOT (Keys[1:] AND child leaves). Inline
-// members keep their position; group members not already present are appended
-// in group order, deduplicated. The dst node's shape is preserved — a
-// collapsed leaf grows on Keys, a block container gains one child leaf per
-// added member — so the result is exactly ONE node for the key regardless of
-// the two inputs' shapes.
+// (Keys[1:] AND child leaves), with their quote provenance. Inline members keep
+// their position; group members not already present are appended in group
+// order, deduplicated. The dst node's shape is preserved -- a collapsed leaf
+// grows on Keys, a block container gains one child leaf per added member -- so
+// the result is exactly ONE node for the key regardless of the two inputs'
+// shapes.
+//
+// #9627: an UNQUOTED repeat of the leaf's own keyword in src is the ambiguous
+// #9027 shape, and it is carried onto dst's Keys whatever dst's shape, never
+// deduplicated. The #9027 gate runs on this merged tree and scans Keys, so it
+// refuses the run (strict) or warns (lenient) exactly as it does for the same
+// run authored inline, or inherited with no inline leaf. The union used to read
+// src through firewallMatchValues, which DROPS that token, so a group's
+// ambiguous run was silently resolved -- and hidden from the gate -- whenever an
+// inline leaf of the same name existed. A QUOTED repeat is an ordinary member.
 func mergeLeafListInto(dst, src *Node) {
+	self := dst.Keys[0]
 	seen := make(map[string]bool)
-	for _, v := range firewallMatchValues(dst) {
-		seen[v] = true
+	for _, m := range leafListMembers9627(dst) {
+		if m.value != self || m.quoted {
+			seen[m.value] = true
+		}
 	}
-	for _, v := range firewallMatchValues(src) {
-		if seen[v] {
+	for _, m := range leafListMembers9627(src) {
+		if m.value == self && !m.quoted {
+			dst.Keys = append(dst.Keys, m.value)
+			appendKeyQuoted9627(dst, false)
 			continue
 		}
-		seen[v] = true
+		if seen[m.value] {
+			continue
+		}
+		seen[m.value] = true
 		if dst.IsLeaf {
-			dst.Keys = append(dst.Keys, v)
-			// #6673: the inherited member arrives as a VALUE with no authored
-			// token of its own on dst. Extend the mask only when dst already
-			// carries one, so the length invariant holds and the union never
-			// upgrades an inherited value into an authored quote.
-			if len(dst.KeysQuoted) == len(dst.Keys)-1 {
-				dst.KeysQuoted = append(dst.KeysQuoted, false)
-			}
+			dst.Keys = append(dst.Keys, m.value)
+			appendKeyQuoted9627(dst, m.quoted)
 		} else {
-			dst.Children = append(dst.Children, &Node{
-				Keys:          []string{v},
+			child := &Node{
+				Keys:          []string{m.value},
 				IsLeaf:        true,
 				InheritedFrom: src.InheritedFrom,
-			})
+			}
+			if m.quoted {
+				child.KeysQuoted = []bool{true}
+			}
+			dst.Children = append(dst.Children, child)
 		}
+	}
+}
+
+// leafListMember9627 is one member of a leaf-list node, with the quote its own
+// authoring gave it.
+type leafListMember9627 struct {
+	value  string
+	quoted bool
+}
+
+// leafListMembers9627 reads a leaf-list node's members across both AST shapes.
+// Unlike firewallMatchValues it KEEPS a repeat of the leaf's own keyword: the
+// union must not decide the #9027 ambiguity on the gate's behalf (#9627).
+func leafListMembers9627(n *Node) []leafListMember9627 {
+	var out []leafListMember9627
+	for i := 1; i < len(n.Keys); i++ {
+		if n.Keys[i] != "" {
+			out = append(out, leafListMember9627{value: n.Keys[i], quoted: n.KeyQuoted(i)})
+		}
+	}
+	for _, vn := range n.Children {
+		for i, k := range vn.Keys {
+			if k != "" {
+				out = append(out, leafListMember9627{value: k, quoted: vn.KeyQuoted(i)})
+			}
+		}
+	}
+	return out
+}
+
+// appendKeyQuoted9627 records the quote of the member just appended to n.Keys,
+// keeping the mask invariant (nil, or one bit per key). A group member keeps the
+// quote its own authoring gave it: that is its provenance, and #6673's rule is
+// only that the union never MINTS a quote a value did not have.
+func appendKeyQuoted9627(n *Node, quoted bool) {
+	switch {
+	case len(n.KeysQuoted) == len(n.Keys)-1:
+		n.KeysQuoted = append(n.KeysQuoted, quoted)
+	case quoted && len(n.KeysQuoted) == 0:
+		n.KeysQuoted = make([]bool, len(n.Keys))
+		n.KeysQuoted[len(n.Keys)-1] = true
 	}
 }
 
