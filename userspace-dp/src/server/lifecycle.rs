@@ -314,6 +314,13 @@ pub(crate) fn run() -> Result<(), String> {
         .set_nonblocking(true)
         .map_err(|e| format!("set nonblocking session listener: {e}"))?;
     eprintln!("xpf-userspace-dp: session socket at {}", session_socket);
+    // #9726: name the libraries this binary linked, once.
+    eprintln!(
+        "xpf-userspace-dp: linked libxdp {} and vendored libbpf {}; the build host's libbpf (pkg-config) was {}",
+        env!("XPF_LINKED_LIBXDP_VERSION"),
+        env!("XPF_LINKED_LIBBPF_VERSION"),
+        env!("XPF_BUILD_HOST_LIBBPF_VERSION"),
+    );
 
     let state_writer = Arc::new(StateWriter::new());
     let running = Arc::new(AtomicBool::new(true));
@@ -325,6 +332,9 @@ pub(crate) fn run() -> Result<(), String> {
             session_export_paging_protocol_version: SESSION_EXPORT_PAGING_PROTOCOL_VERSION,
             session_delta_schema_fingerprint:
                 crate::protocol::session_delta_schema::session_delta_schema_fingerprint(),
+            linked_libxdp_version: env!("XPF_LINKED_LIBXDP_VERSION").to_string(),
+            linked_libbpf_version: env!("XPF_LINKED_LIBBPF_VERSION").to_string(),
+            build_host_libbpf_version: env!("XPF_BUILD_HOST_LIBBPF_VERSION").to_string(),
             started_at: Utc::now(),
             control_socket: args.control_socket.clone(),
             state_file: args.state_file.clone(),

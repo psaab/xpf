@@ -30,6 +30,16 @@ mod tcp_flags;
 #[allow(dead_code)]
 mod xsk_ffi;
 
+// #9726: build.rs's linked-library checks. build.rs includes the same file with
+// `#[path]`; including it here under cfg(test) puts those checks, and the
+// versions the build recorded, under `cargo test`. No production code uses it.
+#[cfg(test)]
+#[path = "../build_support/libversions.rs"]
+mod build_libversions;
+#[cfg(test)]
+#[path = "build_libversions_tests.rs"]
+mod build_libversions_tests;
+
 // #5192: test-only drop-order probe. `WorkerUmemInner` must destroy
 // its `Umem` (xsk_umem__delete) before the `MmapArea` that backs it
 // (munmap); Rust has no compile-time drop-order assertion, so the two

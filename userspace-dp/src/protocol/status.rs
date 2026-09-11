@@ -55,6 +55,19 @@ pub(crate) struct ProcessStatus {
     /// helper is fenced rather than bricked (#1960 no-brick doctrine).
     #[serde(rename = "session_delta_schema_fingerprint", default)]
     pub session_delta_schema_fingerprint: u64,
+    /// #9726: the libraries build.rs recorded for this binary.
+    /// `linked_libxdp_version` is the build host's libxdp (pkg-config), whose
+    /// archive the build confirmed is the one linked. `linked_libbpf_version` is
+    /// the full version of the vendored libbpf it linked. `build_host_libbpf_version`
+    /// is the build host's libbpf (pkg-config); it is not linked, and it does not
+    /// identify what libxdp was compiled against. Empty from a helper that
+    /// predates the fields.
+    #[serde(rename = "linked_libxdp_version", default)]
+    pub linked_libxdp_version: String,
+    #[serde(rename = "linked_libbpf_version", default)]
+    pub linked_libbpf_version: String,
+    #[serde(rename = "build_host_libbpf_version", default)]
+    pub build_host_libbpf_version: String,
     #[serde(rename = "started_at")]
     pub started_at: DateTime<Utc>,
     #[serde(rename = "control_socket")]

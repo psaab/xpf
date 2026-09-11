@@ -40,9 +40,18 @@ build:
 build-ctl:
 	CGO_ENABLED=0 $(GO) build -o cli ./cmd/cli
 
+# #9726: build.rs re-records the linked libxdp/libbpf versions, and so relinks,
+# when libxdp.a, libxdp.pc or libbpf.pc changes. Cargo compares only mtimes, so
+# a replacement carrying an older mtime is missed. So every cargo run in
+# build-userspace-dp, build-userspace-dp-debug-log and test-rust passes
+# XPF_LINKED_LIBS_STAMP, those files' content hash from
+# userspace-dp/build_support/linked-libs-stamp.sh, and build.rs re-runs when it
+# changes. The script fails when it cannot resolve or read a file, and `&&`
+# then fails the recipe line. A raw `cargo build` relies on mtimes alone.
+
 # Build the userspace dataplane helper
 build-userspace-dp:
-	$(CARGO) build --manifest-path userspace-dp/Cargo.toml --release
+	stamp=$$(sh userspace-dp/build_support/linked-libs-stamp.sh) && XPF_LINKED_LIBS_STAMP=$$stamp $(CARGO) build --manifest-path userspace-dp/Cargo.toml --release
 	install -m 0755 userspace-dp/target/release/xpf-userspace-dp ./xpf-userspace-dp
 
 # Manual build check for the diagnostic `debug-log` feature (#1678).
@@ -54,7 +63,7 @@ build-userspace-dp:
 # #1678 because nothing compiled it) can be revalidated with one
 # command before a commit. Compile-only; does not install.
 build-userspace-dp-debug-log:
-	$(CARGO) build --manifest-path userspace-dp/Cargo.toml --release --features debug-log
+	stamp=$$(sh userspace-dp/build_support/linked-libs-stamp.sh) && XPF_LINKED_LIBS_STAMP=$$stamp $(CARGO) build --manifest-path userspace-dp/Cargo.toml --release --features debug-log
 
 # Generate protobuf/gRPC code
 proto:
@@ -333,10 +342,10 @@ test-race-dp:
 # add with overflow" (docs/log/9499.md). Measured on a loaded host: ~3.5 min
 # cold build, ~65 s run (2489 tests).
 test-rust:
-	$(CARGO) check --manifest-path userspace-dp/Cargo.toml --benches
-	$(CARGO) test --manifest-path userspace-dp/Cargo.toml --release \
+	stamp=$$(sh userspace-dp/build_support/linked-libs-stamp.sh) && XPF_LINKED_LIBS_STAMP=$$stamp $(CARGO) check --manifest-path userspace-dp/Cargo.toml --benches
+	stamp=$$(sh userspace-dp/build_support/linked-libs-stamp.sh) && XPF_LINKED_LIBS_STAMP=$$stamp $(CARGO) test --manifest-path userspace-dp/Cargo.toml --release \
 		--bins --tests -- --test-threads=1
-	$(CARGO) test --manifest-path userspace-dp/Cargo.toml \
+	stamp=$$(sh userspace-dp/build_support/linked-libs-stamp.sh) && XPF_LINKED_LIBS_STAMP=$$stamp $(CARGO) test --manifest-path userspace-dp/Cargo.toml \
 		--bins --tests -- --test-threads=1 frame nat session checksum
 
 # Standalone convenience view of the refactoring-heatmap drift (#1661

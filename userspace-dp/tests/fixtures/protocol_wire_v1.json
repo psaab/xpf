@@ -867,6 +867,7 @@
   },
   "process_status": {
     "bindings": [],
+    "build_host_libbpf_version": "",
     "capabilities": {
       "forwarding_supported": false,
       "unsupported_reasons": []
@@ -932,6 +933,8 @@
     "last_cache_flush_at": 0,
     "last_fib_generation": 0,
     "last_snapshot_generation": 0,
+    "linked_libbpf_version": "",
+    "linked_libxdp_version": "",
     "manager_neighbor_generation": 0,
     "max_sessions": 0,
     "nat64_frag_cross_domain_misses_total": 0,

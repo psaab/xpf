@@ -1232,3 +1232,75 @@ fn xsk_ring_abi_matches_libxdp_contract() {
     assert_eq!(offset_of!(XskRingCons, ring), 32, "cons.ring");
     assert_eq!(offset_of!(XskRingCons, flags), 40, "cons.flags");
 }
+
+// #9726: the helper attaches its own XDP program, so every socket config the
+// bridge hands libxdp must carry the header's INHIBIT_PROG_LOAD. The bridge's
+// test-only seam routes both create functions to captures that sit where libxdp's
+// functions would, record the libxdp_flags of the config they were passed, and
+// return -EINVAL without creating a socket. So a create function that passes 0,
+// another flag, or a config its fill did not set reds this cell.
+#[test]
+fn socket_create_passes_inhibit_prog_load_to_libxdp_9726() {
+    use core::ptr::null_mut;
+    type CreateFn = unsafe extern "C" fn(
+        *mut *mut XskSocketOpaque,
+        *const c_char,
+        u32,
+        *mut XskUmemOpaque,
+        *mut XskRingCons,
+        *mut XskRingProd,
+        *mut XskRingProd,
+        *mut XskRingCons,
+        u32,
+        u32,
+        u16,
+    ) -> c_int;
+    let creates: [(&str, CreateFn); 2] = [
+        ("private", bridge_xsk_socket_create_private),
+        ("shared", bridge_xsk_socket_create_shared),
+    ];
+
+    let header = unsafe { bridge_xsk_libxdp_inhibit_prog_load_flag() } as u32;
+    let captured: Vec<(&str, c_int, u32)> = creates
+        .into_iter()
+        .map(|(name, create)| {
+            let mut xsk: *mut XskSocketOpaque = null_mut();
+            // Enabling resets the captured flags, so each read belongs to this call.
+            unsafe { bridge_xsk_capture_socket_create_for_test(1) };
+            let rc = unsafe {
+                create(
+                    &mut xsk,
+                    c"xpf-9726-capture".as_ptr(),
+                    0,
+                    null_mut(),
+                    null_mut(),
+                    null_mut(),
+                    null_mut(),
+                    null_mut(),
+                    0,
+                    0,
+                    0,
+                )
+            };
+            (name, rc, unsafe { bridge_xsk_captured_libxdp_flags() })
+        })
+        .collect();
+    // Restore libxdp's functions before an assertion can unwind past this cell.
+    unsafe { bridge_xsk_capture_socket_create_for_test(0) };
+
+    for (name, rc, flags) in captured {
+        assert_eq!(
+            rc,
+            -libc::EINVAL,
+            "the {name} create did not reach libxdp through the capture seam"
+        );
+        assert_ne!(
+            flags, 0,
+            "the {name} create lets libxdp load its own XDP program"
+        );
+        assert_eq!(
+            flags, header,
+            "the {name} create passes libxdp_flags {flags:#x}, not INHIBIT_PROG_LOAD {header:#x}"
+        );
+    }
+}
