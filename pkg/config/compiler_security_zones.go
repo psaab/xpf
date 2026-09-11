@@ -204,7 +204,9 @@ func compileZones(node *Node, sec *SecurityConfig) error {
 			sec.Zones[inst.name] = zone
 		}
 
-		for _, prop := range inst.node.Children {
+		// #9792: a packed one-line run reaches this reader on the lenient path
+		// (Store.Load / Store.SyncApply); expand it as #9235 does. Lenient path only.
+		for _, prop := range expandResolvingRuns9792(inst.node.Children, securityZoneSchema9792()) {
 			switch prop.Name() {
 			case "interfaces":
 				// #6525: iterate the NORMALIZED member nodes, not prop.Children
