@@ -415,7 +415,13 @@ type SyncStats struct {
 	// A non-zero value on a healthy cluster means the posture was declared
 	// while the peer could not answer — check the peer's build.
 	StrictAuthEvictions atomic.Uint64
-	DeletesDropped      atomic.Uint64
+	// StrictAuthResidualWarnings counts #9717 notices. Each is one per connection:
+	// this node is keyed, strict-session-auth is OFF, and an established
+	// session-sync connection has still not authenticated after the grace, so its
+	// frames are accepted without HMAC. With the posture off nothing evicts such a
+	// connection; this counter makes it visible.
+	StrictAuthResidualWarnings atomic.Uint64
+	DeletesDropped             atomic.Uint64
 	// DeletesStaleIgnored counts deletes refused by the #2170 install-
 	// generation guard: a journaled/deferred delete whose generation was
 	// strictly older than the currently-installed same-key entry. A nonzero
