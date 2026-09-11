@@ -16,17 +16,22 @@ func (s *Server) GetDHCPLeases(_ context.Context, _ *pb.GetDHCPLeasesRequest) (*
 	if s.dhcp == nil {
 		return &pb.GetDHCPLeasesResponse{}, nil
 	}
-	return buildDHCPLeasesResponse(s.dhcp.Leases(), s.dhcp.DelegatedPrefixes()), nil
+	return BuildDHCPLeasesResponse(s.dhcp.Leases(), s.dhcp.DelegatedPrefixes()), nil
 }
 
-// buildDHCPLeasesResponse aggregates DHCP address leases (IA_NA) and IPv6
+// BuildDHCPLeasesResponse aggregates DHCP address leases (IA_NA) and IPv6
 // delegated prefixes (IA_PD) into the GetDHCPLeases response. A delegated
 // prefix is attached to the matching inet6 address lease when one exists;
 // otherwise it is surfaced as a standalone PD-only lease entry so a
 // prefix-delegation-only interface (IA_PD present, no IA_NA address) still
 // reports its delegated prefix (#5382). Extracted as a pure function so the
 // aggregation is unit-testable without a live dhcp.Manager.
-func buildDHCPLeasesResponse(leases []*dhcp.Lease, pds []dhcp.DelegatedPrefix) *pb.GetDHCPLeasesResponse {
+//
+// #9413: it is the SINGLE lease aggregation behind both surfaces. The REST
+// GET /api/v1/dhcp/leases handler maps this response rather than keeping its own
+// loop, because that separate loop is how REST came to omit delegated prefixes
+// (and the PD-only row) while gRPC reported them.
+func BuildDHCPLeasesResponse(leases []*dhcp.Lease, pds []dhcp.DelegatedPrefix) *pb.GetDHCPLeasesResponse {
 	resp := &pb.GetDHCPLeasesResponse{}
 	for _, l := range leases {
 		family := "inet"

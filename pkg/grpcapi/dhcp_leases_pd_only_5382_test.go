@@ -30,7 +30,7 @@ func TestBuildDHCPLeasesResponse_PDOnlyReported(t *testing.T) {
 	}}
 
 	// No IA_NA leases: a legitimate PD-only client.
-	resp := buildDHCPLeasesResponse(nil, pds)
+	resp := BuildDHCPLeasesResponse(nil, pds)
 
 	if len(resp.Leases) != 1 {
 		t.Fatalf("PD-only interface: expected 1 standalone lease entry, got %d (delegated prefix dropped)", len(resp.Leases))
@@ -67,7 +67,7 @@ func TestBuildDHCPLeasesResponse_PDAttachesToInetLease(t *testing.T) {
 		Prefix:    prefix,
 	}}
 
-	resp := buildDHCPLeasesResponse(leases, pds)
+	resp := BuildDHCPLeasesResponse(leases, pds)
 
 	if len(resp.Leases) != 1 {
 		t.Fatalf("expected 1 lease entry (PD attached to IA_NA lease), got %d", len(resp.Leases))
@@ -91,7 +91,7 @@ func TestBuildDHCPLeasesResponse_MultiPDOnlyGrouped(t *testing.T) {
 		{Interface: "ge-0-0-3", Prefix: p2},
 	}
 
-	resp := buildDHCPLeasesResponse(nil, pds)
+	resp := BuildDHCPLeasesResponse(nil, pds)
 
 	if len(resp.Leases) != 1 {
 		t.Fatalf("expected 1 grouped standalone entry for the PD-only interface, got %d", len(resp.Leases))

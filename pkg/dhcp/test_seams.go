@@ -22,6 +22,19 @@ func (m *Manager) SeedLeaseForTesting(ifaceName string, af AddressFamily, lease 
 	m.leases[clientKey{iface: ifaceName, family: af}] = lease
 }
 
+// SeedDelegatedPrefixesForTesting installs the IA_PD delegations recorded for
+// ifaceName, replacing any already held for it. It lets a caller outside pkg/dhcp
+// (the #9413 REST handler cell) drive DelegatedPrefixes() without real DHCPv6
+// traffic. Callers must not use this from production code paths.
+func (m *Manager) SeedDelegatedPrefixesForTesting(ifaceName string, pds []DelegatedPrefix) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.delegatedPDs == nil {
+		m.delegatedPDs = make(map[string][]DelegatedPrefix)
+	}
+	m.delegatedPDs[ifaceName] = append([]DelegatedPrefix(nil), pds...)
+}
+
 // NewManagerForTesting builds a Manager without a netlink handle and
 // with the per-client run goroutine replaced by runClient, so reconcile
 // and registry behavior can be tested without real DHCP traffic or

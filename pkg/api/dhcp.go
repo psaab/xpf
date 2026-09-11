@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"time"
+
+	"github.com/psaab/xpf/pkg/dhcp"
+	"github.com/psaab/xpf/pkg/grpcapi"
 )
 
 func (s *Server) dhcpLeasesHandler(w http.ResponseWriter, _ *http.Request) {
@@ -14,33 +16,44 @@ func (s *Server) dhcpLeasesHandler(w http.ResponseWriter, _ *http.Request) {
 		writeOK(w, []DHCPLeaseInfo{})
 		return
 	}
+	writeOK(w, restDHCPLeases(s.dhcp.Leases(), s.dhcp.DelegatedPrefixes()))
+}
 
-	leases := s.dhcp.Leases()
-	result := make([]DHCPLeaseInfo, len(leases))
-	for i, l := range leases {
-		family := "inet"
-		if l.Family == 6 {
-			family = "inet6"
-		}
+// restDHCPLeases renders the REST lease table from the SAME aggregation the gRPC
+// GetDHCPLeases RPC uses (grpcapi.BuildDHCPLeasesResponse), so the two surfaces
+// cannot disagree about a lease again (#9413). Before this, REST built its rows
+// from Leases() alone and never consulted DelegatedPrefixes(), so a DHCPv6
+// prefix-delegation-only interface reported an empty lease table over REST while
+// gRPC and the CLI showed the delegation. Pure, so it is testable without a live
+// dhcp.Manager.
+func restDHCPLeases(leases []*dhcp.Lease, pds []dhcp.DelegatedPrefix) []DHCPLeaseInfo {
+	resp := grpcapi.BuildDHCPLeasesResponse(leases, pds)
+	result := make([]DHCPLeaseInfo, 0, len(resp.Leases))
+	for _, l := range resp.Leases {
 		info := DHCPLeaseInfo{
 			Interface: l.Interface,
-			Family:    family,
-			Address:   l.Address.String(),
-			LeaseTime: l.LeaseTime.String(),
-			Obtained:  l.Obtained.Format(time.RFC3339),
-		}
-		if l.Gateway.IsValid() {
-			info.Gateway = l.Gateway.String()
-		}
-		for _, dns := range l.DNS {
-			info.DNS = append(info.DNS, dns.String())
+			Family:    l.Family,
+			Address:   l.Address,
+			Gateway:   l.Gateway,
+			DNS:       l.Dns,
+			LeaseTime: l.LeaseTime,
+			Obtained:  l.Obtained,
 		}
 		if info.DNS == nil {
 			info.DNS = []string{}
 		}
-		result[i] = info
+		for _, dp := range l.DelegatedPrefixes {
+			info.DelegatedPrefixes = append(info.DelegatedPrefixes, DHCPDelegatedPrefixInfo{
+				Interface:         dp.Interface,
+				Prefix:            dp.Prefix,
+				PreferredLifetime: dp.PreferredLifetime,
+				ValidLifetime:     dp.ValidLifetime,
+				Obtained:          dp.Obtained,
+			})
+		}
+		result = append(result, info)
 	}
-	writeOK(w, result)
+	return result
 }
 
 func (s *Server) dhcpIdentifiersHandler(w http.ResponseWriter, _ *http.Request) {
