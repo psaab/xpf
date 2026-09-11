@@ -17,28 +17,39 @@ package daemon
 // generation charon is not running. Now every file xpf writes names its generation in
 // charon (ipsec.ApplyGeneration, an inert marker pool), and this file reads it back.
 //
-// The marker is IDENTITY, not proof: `swanctl --load-all` is not a transaction, so a
-// partial load can leave the marker and the connections at different generations. The
-// named generation is used only when charon's loaded connections are exactly what that
-// generation renders (ipsec.ExpectedLoadedConns). Every other outcome (charon cannot be
-// asked, no marker or an unknown one, a generation this node no longer retains, one
-// whose local addresses cannot be replayed, or a mismatch) falls back to the promoted
-// config, which is exactly what attribution did before.
+// The marker may OVERRIDE the promoted config only when all of these hold. Every other
+// outcome keeps the promoted config, which is exactly what attribution did before:
 //
-// RESIDUAL. A generation change that renders IDENTICAL connections (an RG move that
-// keeps an explicit local address) combined with a partial load that loaded the pools
-// but not the connections: validation cannot tell the two generations apart. It needs
-// both a partial load and a render-identical change.
+//   - IDENTITY, NOT PROOF. `swanctl --load-all` is not a transaction, so a partial load
+//     can leave the marker and the connections at different generations. The named
+//     generation is used only when charon's loaded connections are exactly what it
+//     renders (ipsec.ExpectedLoadedConns).
+//   - PROVABLY NOT THE PROMOTED CONFIG. When charon's loaded connections are exactly
+//     what the promoted config renders, or that cannot be computed, the promoted config
+//     stands. Connections that render identically carry no generation of their own: a
+//     redundancy-group move that keeps an explicit local address changes only xpf's
+//     interface config, which the apply's earlier steps took from the promoted config.
+//   - NO APPLY OVERLAPPED THE PASS. An IPsec apply running when the pass starts, or
+//     starting or finishing before it ends, can change what charon runs under it. The
+//     caller then re-reads the record and the promoted config.
+//
+// A generation is resolved from the ones this process wrote first (a commit-confirmed
+// rollback drops the rolled-back tree from the store), then from the store's retained
+// trees.
 
 import (
+	"errors"
 	"log/slog"
 
 	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/ipsec"
 )
 
-// ipsecGenerationCache pairs a generation marker token with the compiled config the
-// store resolved it to.
+// ipsecWrittenMax bounds ipsecWritten. One rollback's worth of history is the case it
+// exists for; a few more cost a pointer each.
+const ipsecWrittenMax = 4
+
+// ipsecGenerationCache pairs a generation marker token with its compiled config.
 type ipsecGenerationCache struct {
 	gen string
 	cfg *config.Config
@@ -56,59 +67,112 @@ func (d *Daemon) ipsecApplyGeneration(cfg *config.Config) string {
 	return ipsec.UnknownGeneration
 }
 
-// ipsecMarkedGeneration returns the config of the generation charon's marker names, when
-// this node still retains that generation AND charon's loaded connections are exactly
-// what it renders. nil means charon cannot tell us, and the caller keeps its fallback.
-// It asks charon twice (list-pools, list-conns), so it runs only when there is no record.
-func (d *Daemon) ipsecMarkedGeneration() *config.Config {
+// rememberWrittenIPsecGeneration records that the swanctl file on disk now names gen for
+// cfg, newest first. The list is replaced, never mutated, so readers need no lock.
+func (d *Daemon) rememberWrittenIPsecGeneration(gen string, cfg *config.Config) {
+	if gen == ipsec.UnknownGeneration || cfg == nil {
+		return
+	}
+	next := []ipsecGenerationCache{{gen: gen, cfg: cfg}}
+	if prev := d.ipsecWritten.Load(); prev != nil {
+		for _, c := range *prev {
+			if c.gen != gen && len(next) < ipsecWrittenMax {
+				next = append(next, c)
+			}
+		}
+	}
+	d.ipsecWritten.Store(&next)
+}
+
+// ipsecStableMarkedGeneration is ipsecMarkedGeneration, trusted only when no IPsec apply
+// was running as the pass started and none started or finished before it ended. nil
+// means the caller keeps its fallback.
+func (d *Daemon) ipsecStableMarkedGeneration() *config.Config {
 	if d.ipsec == nil || d.store == nil {
 		return nil
 	}
-	gen, err := d.ipsec.LoadedGeneration()
-	if err != nil {
-		d.noteIPsecGeneration("charon names no single generation", err)
+	seq := d.ipsecApplySeq.Load()
+	if d.ipsecApplyActive.Load() != 0 {
+		d.noteIPsecGeneration("an IPsec apply is in progress", nil)
 		return nil
 	}
-	if gen == ipsec.UnknownGeneration {
-		d.noteIPsecGeneration("charon's marker names an unknown generation", nil)
-		return nil
+	cfg, reason, err := d.ipsecMarkedGeneration()
+	if cfg != nil && (d.ipsecApplySeq.Load() != seq || d.ipsecApplyActive.Load() != 0) {
+		cfg, reason, err = nil, "an IPsec apply overlapped the pass", nil
 	}
-	cfg := d.retainedIPsecGeneration(gen)
-	if cfg == nil {
-		d.noteIPsecGeneration("charon's generation is not retained on this node", nil)
-		return nil
-	}
-	want, err := ipsec.ExpectedLoadedConns(cfg)
-	if err != nil {
-		d.noteIPsecGeneration("charon's generation cannot be validated", err)
-		return nil
-	}
-	have, err := d.ipsec.ListLoadedConns()
-	if err != nil {
-		d.noteIPsecGeneration("charon's loaded connections are unavailable", err)
-		return nil
-	}
-	if !have.Equal(want) {
-		d.noteIPsecGeneration("charon's loaded connections do not match its marked generation", nil)
-		return nil
-	}
-	d.noteIPsecGeneration("", nil)
+	d.noteIPsecGeneration(reason, err)
 	return cfg
 }
 
-// retainedIPsecGeneration resolves a marker token to a compiled config through the
-// store, caching the last hit so a takeover wave (one pass per redundancy group)
-// recompiles an older generation once. A miss is not cached: it is re-asked next pass.
+// ipsecMarkedGeneration returns the config of the generation charon's marker names, or
+// nil with the reason attribution keeps its fallback. It asks charon twice (list-pools,
+// list-conns), so it runs only when there is no record.
+func (d *Daemon) ipsecMarkedGeneration() (*config.Config, string, error) {
+	gen, err := d.ipsec.LoadedGeneration()
+	if err != nil {
+		return nil, "charon names no single generation", err
+	}
+	if gen == ipsec.UnknownGeneration {
+		return nil, "charon's marker names an unknown generation", nil
+	}
+	have, err := d.ipsec.ListLoadedConns()
+	if err != nil {
+		return nil, "charon's loaded connections are unavailable", err
+	}
+	promoted := d.store.ActiveConfig()
+	if promoted == nil {
+		return nil, "there is no promoted config to compare with", nil
+	}
+	switch pw, perr := ipsec.ExpectedLoadedConns(promoted); {
+	case perr == nil && have.Equal(pw):
+		return nil, "charon runs the promoted config's connections", nil
+	case errors.Is(perr, ipsec.ErrGenerationUnvalidatable):
+		return nil, "the promoted config's connections cannot be compared", perr
+	}
+	cfg := d.retainedIPsecGeneration(gen)
+	if cfg == nil {
+		return nil, "charon's generation is not retained on this node", nil
+	}
+	want, err := ipsec.ExpectedLoadedConns(cfg)
+	if err != nil {
+		return nil, "charon's generation cannot be validated", err
+	}
+	if !have.Equal(want) {
+		return nil, "charon's loaded connections do not match its marked generation", nil
+	}
+	return cfg, "", nil
+}
+
+// retainedIPsecGeneration resolves a marker token to a compiled config: from the
+// generations this process wrote, then through the store. The last hit is cached so a
+// takeover wave (one pass per redundancy group) recompiles an older generation once. A
+// miss is not cached: it is re-asked next pass.
 func (d *Daemon) retainedIPsecGeneration(gen string) *config.Config {
 	if c := d.ipsecGeneration.Load(); c != nil && c.gen == gen {
 		return c.cfg
 	}
-	cfg, ok := d.store.RetainedGeneration(gen)
-	if !ok {
-		return nil
+	cfg := d.writtenIPsecGeneration(gen)
+	if cfg == nil {
+		var ok bool
+		if cfg, ok = d.store.RetainedGeneration(gen); !ok {
+			return nil
+		}
 	}
 	d.ipsecGeneration.Store(&ipsecGenerationCache{gen: gen, cfg: cfg})
 	return cfg
+}
+
+// writtenIPsecGeneration returns the config this process wrote under gen, if it is
+// still among the most recent ipsecWrittenMax.
+func (d *Daemon) writtenIPsecGeneration(gen string) *config.Config {
+	if list := d.ipsecWritten.Load(); list != nil {
+		for _, c := range *list {
+			if c.gen == gen {
+				return c.cfg
+			}
+		}
+	}
+	return nil
 }
 
 // noteIPsecGeneration logs whether attribution followed charon's marker, and if not,
@@ -123,7 +187,7 @@ func (d *Daemon) noteIPsecGeneration(fallback string, err error) {
 		slog.Info("cluster: IPsec attribution follows the generation charon reports loaded")
 		return
 	}
-	slog.Info("cluster: IPsec attribution falls back to the promoted config",
+	slog.Info("cluster: IPsec attribution keeps the promoted config",
 		"reason", fallback, "err", err)
 }
 

@@ -216,6 +216,16 @@ type Daemon struct {
 	// ipsecGenerationNote is the attribution outcome the last pass logged (#9641),
 	// so a takeover wave logs a changed outcome once rather than once per RG.
 	ipsecGenerationNote atomic.Pointer[string]
+	// ipsecWritten lists the generations this process most recently wrote into the
+	// swanctl file (#9641), newest first, at most ipsecWrittenMax. A commit-confirmed
+	// rollback drops the rolled-back tree from the store, yet charon keeps running it
+	// if the rollback's own reload fails.
+	ipsecWritten atomic.Pointer[[]ipsecGenerationCache]
+	// ipsecApplyActive and ipsecApplySeq bracket applyIPsecTracked (#9641).
+	// Attribution trusts charon's marker only when no apply was running as its pass
+	// started and none started or finished before the pass ended.
+	ipsecApplyActive atomic.Int32
+	ipsecApplySeq    atomic.Uint64
 	// ipsecActiveNamesFn overrides the swanctl active-SA read. Test seam only
 	// (#9139); nil in production. See Daemon.ipsecActiveNames — it exists so
 	// the ADVERTISE GATE'S CALL SITE is observable, not just the gate function.

@@ -87,11 +87,25 @@ func ipsecSANameIndex(cfg *config.Config) ipsec.SANameIndex {
 // While the record is empty, in this window or after an xpfd restart, attribution asks
 // charon which generation it loaded and validates the answer against charon's loaded
 // connections. When charon cannot tell, it falls back to the promoted config, the
-// generation charon will load next (ipsec_loaded_generation_9641.go).
+// generation charon will load next (ipsec_loaded_generation_9641.go). The apply is
+// bracketed (ipsecApplyActive, ipsecApplySeq) so a pass can tell that an apply
+// overlapped it, and Written remembers the generation it put on disk
+// (rememberWrittenIPsecGeneration) for a charon still running a tree the store has
+// since dropped.
 func (d *Daemon) applyIPsecTracked(cfg *config.Config) error {
-	return d.ipsec.ApplyGeneration(ipsec.PrepareConfig(cfg), d.ipsecApplyGeneration(cfg), ipsec.ApplyHooks{
-		Written: func() { d.ipsecLoadedCfg.Store(nil) },
-		Loaded:  func() { d.ipsecLoadedCfg.Store(cfg) },
+	d.ipsecApplyActive.Add(1)
+	d.ipsecApplySeq.Add(1)
+	defer func() {
+		d.ipsecApplySeq.Add(1)
+		d.ipsecApplyActive.Add(-1)
+	}()
+	gen := d.ipsecApplyGeneration(cfg)
+	return d.ipsec.ApplyGeneration(ipsec.PrepareConfig(cfg), gen, ipsec.ApplyHooks{
+		Written: func() {
+			d.ipsecLoadedCfg.Store(nil)
+			d.rememberWrittenIPsecGeneration(gen, cfg)
+		},
+		Loaded: func() { d.ipsecLoadedCfg.Store(cfg) },
 	})
 }
 
@@ -100,8 +114,9 @@ func (d *Daemon) applyIPsecTracked(cfg *config.Config) error {
 //
 //  1. the generation strongSwan has LOADED from this process (ipsecLoadedCfg, #9511);
 //  2. with no record, the generation charon itself reports loaded, when this node
-//     retains it and charon's loaded connections validate it (ipsecMarkedGeneration,
-//     #9641);
+//     retains it, charon's loaded connections validate it and are provably not the
+//     promoted config's, and no IPsec apply overlapped the pass
+//     (ipsecStableMarkedGeneration, #9641);
 //  3. otherwise the promoted config, which is what attribution read before #9641.
 //
 // The record comes first because it is exact whenever it is set: Written clears it as
@@ -119,7 +134,11 @@ func (d *Daemon) applyIPsecTracked(cfg *config.Config) error {
 func (d *Daemon) ipsecAttributionConfig() *config.Config {
 	cfg := d.ipsecLoadedCfg.Load()
 	if cfg == nil {
-		cfg = d.ipsecMarkedGeneration()
+		cfg = d.ipsecStableMarkedGeneration()
+	}
+	if cfg == nil {
+		// An apply that finished during the pass may have recorded what charon loaded.
+		cfg = d.ipsecLoadedCfg.Load()
 	}
 	if cfg == nil && d.store != nil {
 		cfg = d.store.ActiveConfig()

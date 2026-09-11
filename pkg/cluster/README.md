@@ -3006,15 +3006,28 @@ standby can re-initiate the primary's tunnels on takeover:
   `--load-all` is not a transaction, so the marker is identity only. It is used only when
   charon's loaded connections equal what that generation renders, children and
   local/remote addresses included (`ipsec.ExpectedLoadedConns`, with local addresses
-  replayed from configuration alone). Every other outcome falls back to the promoted
-  config, the pre-#9641 answer: charon unreachable, no marker (a file from an older xpf),
-  an unknown or unretained generation, a generation whose local addresses came from the
-  kernel or DNS, or a mismatch. The record is consulted first because it is exact whenever
-  it is set, and asking costs two swanctl calls. A generation resolved from history is
-  compiled once per marker (`retainedIPsecGeneration`), and the outcome is logged only
-  when it changes. **Residual:** a change that renders identical connections (an RG move
-  that keeps an explicit local address) combined with a partial load of the pools but not
-  the connections cannot be told apart.
+  replayed from configuration alone). The marker overrides the promoted config only when
+  two further conditions hold:
+  - charon's loaded connections are provably NOT what the promoted config renders.
+    Connections that render identically carry no generation: an RG move that keeps an
+    explicit local address changes only the interface config, which the apply's earlier
+    steps took from the promoted config;
+  - no IPsec apply was running when the pass started, or started or finished during it
+    (`ipsecApplyActive` and `ipsecApplySeq` bracket `applyIPsecTracked`). After an
+    overlap, the pass re-reads the record.
+
+  A generation resolves first from the last few this process wrote (a commit-confirmed
+  rollback drops the rolled-back tree from the store), then from the store's retained
+  trees, which are recompiled after Load's retired-syntax rewrite. Every other outcome
+  keeps the promoted config, the pre-#9641 answer: charon unreachable, no marker (a file
+  from an older xpf), an unknown or unretained generation, a promoted config or
+  generation whose local addresses came from the kernel or DNS, or a mismatch. The record
+  is consulted first because it is exact whenever it is set, and asking costs two
+  swanctl calls. A generation resolved from history is compiled once per marker
+  (`retainedIPsecGeneration`), and the outcome is logged only when it changes.
+  **Residual:** an IPsec apply that starts after the pass and completes before its
+  initiate calls changes charon under an answer already given. Attribution before #9641
+  has the same window.
 
   **A name whose candidates span several groups is initiated only by a node owning
   every one of them, and a declared RG0 for an unanchored candidate.** For example,

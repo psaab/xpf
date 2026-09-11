@@ -22,9 +22,10 @@ func (s *Store) ActiveDigestFor(cfg *config.Config) string {
 // turns the generation charon's marker names back into a config after this node has
 // promoted newer ones, or restarted: rollback history is reloaded from disk at boot.
 //
-// A history tree is recompiled from a copy with the tolerant compiler Load and SyncApply
-// use, because every retained tree was accepted once already. ok is false when no
-// retained tree matches or the match no longer compiles.
+// A history tree is recompiled from a copy, after Load's retired-syntax rewrite, with the
+// tolerant compiler Load and SyncApply use, because every retained tree was accepted once
+// already, possibly by an older xpf. ok is false when no retained tree matches or the
+// match no longer compiles.
 //
 // A miss formats every retained tree, so it is for rare callers (an HA re-initiation
 // pass), not a hot path.
@@ -48,6 +49,11 @@ func (s *Store) RetainedGeneration(digest string) (*config.Config, bool) {
 			continue
 		}
 		tree := e.Config.Clone()
+		// A slot read from disk skipped Load's preprocessing, and a newer xpf may have
+		// retired syntax the slot still carries (Codex review of #9641). Apply Load's
+		// retired-dataplane rewrite to the copy; control characters are already tolerated
+		// by the lenient compiler (#1798). The digest was matched on the original above.
+		rewriteRetiredDataplaneType(tree, LoadCaller)
 		// compileTreeLenient reads the node identity, which SetNodeID writes under s.mu.
 		s.mu.RLock()
 		cfg, err := s.compileTreeLenient(tree)

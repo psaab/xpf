@@ -187,7 +187,9 @@ inline archive-site passwords).
   else `""`. The daemon names charon's marker pool with it, and a concurrent promotion
   cannot pair `cfg` with another tree's digest. `RetainedGeneration` turns a digest back
   into a compiled config: the active config itself, else a tolerant recompile
-  (`compileTreeLenient`, from a copy) of the most recent matching rollback-history tree.
+  (`compileTreeLenient`, from a copy) of the most recent matching rollback-history tree,
+  after Load's retired-dataplane rewrite. A slot read from disk skips Load's
+  preprocessing, and an older xpf may have written syntax this one retired.
   History is reloaded from the rollback files at boot, so a digest named before an xpfd
   restart still resolves after it. A miss formats every retained tree, so it is for rare
   callers (an HA re-initiation pass).

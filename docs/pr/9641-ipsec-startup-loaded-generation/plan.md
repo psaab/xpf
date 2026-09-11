@@ -125,10 +125,36 @@ the generation read at query time. Master attributes from the promoted config re
 attribution time, so it has the same window. This is master-equivalent, not a
 regression.
 
-A render-IDENTICAL RG move (explicit local-address unchanged) combined with a pools-only
-partial load: the loaded connections are byte-identical across the two generations, so
-validation cannot tell them apart. Documented, not solved; it needs a partial load AND a
-render-identical RG change.
+~~A render-IDENTICAL RG move (explicit local-address unchanged) combined with a pools-only
+partial load cannot be told apart.~~ Resolved in revision 3d: when charon's connections
+equal what the promoted config renders, the promoted config stands.
+
+## Revision 3d: implementation review (Codex)
+
+Codex's review of the implementation found four issues. All four are fixed, and each
+fix has a cell built so that the unguarded code gives the other answer.
+
+1. **An apply overlapping the pass.** A commit's IPsec apply can complete between the
+   marker query and the answer. `applyIPsecTracked` is now bracketed by `ipsecApplyActive`
+   and `ipsecApplySeq`. The marker answer is dropped if an apply was running when the
+   pass started, or if one started or finished before it ended. The pass then re-reads
+   the record and the promoted config.
+2. **Identical connections carry no generation.** The marker may override the promoted
+   config only when charon's loaded connections are provably NOT what the promoted
+   config renders. When they are, or when that cannot be computed (kernel- or
+   DNS-derived local addresses), the promoted config stands. RG ownership for identical
+   connections comes from the interface config, which the apply's earlier steps took from
+   the promoted config.
+3. **A generation the store dropped.** A commit-confirmed rollback discards the
+   rolled-back tree, but charon keeps running it if the rollback's reload fails. The
+   daemon now remembers the last few generations it wrote (`ipsecWritten`) and resolves
+   from them before the store.
+4. **History slots skip Load's preprocessing.** `RetainedGeneration` applies Load's
+   retired-dataplane rewrite to the copy before compiling. Control characters are
+   already tolerated by the lenient compiler (#1798).
+
+Remaining window, the same as before #9641: an IPsec apply that starts after the pass
+and completes before its initiate calls.
 
 ## Tests
 
