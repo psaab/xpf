@@ -143,6 +143,18 @@ type Manager struct {
 	// pre-#9068 test; scSplit then falls back to `swanctl` (treating its
 	// output as stdout) or to runSwanctlSplit.
 	swanctlSplit func(args ...string) (stdout, stderr []byte, err error)
+
+	// statePath persists prevConnNames and the teardown debt across xpfd
+	// restarts (#9687, conn_state_9687.go). Empty disables persistence, which
+	// is what NewWithConfigDir and directly-constructed Managers get; New sets
+	// DefaultConnStatePath.
+	statePath string
+	// stateSeeded records that the persisted state was folded in, which
+	// happens once, at this Manager's first promotion.
+	stateSeeded bool
+	// inflight counts removals a promotion handed to terminateRemovedConns
+	// that have not settled. They are persisted as debt until they settle.
+	inflight map[string]int
 }
 
 // scSplit is the STDOUT-ONLY exec used by the parsed call (#9068).
@@ -174,7 +186,9 @@ func (m *Manager) sc(args ...string) ([]byte, error) {
 
 // New creates a new IPsec manager.
 func New() *Manager {
-	return NewWithConfigDir(DefaultSwanctlDir)
+	m := NewWithConfigDir(DefaultSwanctlDir)
+	m.statePath = DefaultConnStatePath // #9687
+	return m
 }
 
 // NewWithConfigDir creates an IPsec manager that writes its swanctl
@@ -308,7 +322,7 @@ func (m *Manager) ApplyGeneration(ipsecCfg *config.IPsecConfig, generation strin
 		hooks.Loaded()
 	}
 	failed := m.terminateRemovedConns(removed)
-	return m.recordTerminateDebt(failed)
+	return m.recordTerminateDebt(removed, failed)
 }
 
 // Clear removes the xpf config and reloads strongSwan, terminating the live
@@ -322,7 +336,7 @@ func (m *Manager) Clear() error {
 	}
 	removed := m.promoteConnNames(nil)
 	failed := m.terminateRemovedConns(removed)
-	return m.recordTerminateDebt(failed)
+	return m.recordTerminateDebt(removed, failed)
 }
 
 // applyConfig renders + atomically writes the swanctl snippet and reloads.
@@ -429,6 +443,7 @@ func (m *Manager) reload() error {
 func (m *Manager) promoteConnNames(newNames map[string]bool) []string {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.seedFromStateLocked() // #9687
 	var removed []string
 	seen := make(map[string]bool, len(m.prevConnNames))
 	for name := range m.prevConnNames {
@@ -444,6 +459,14 @@ func (m *Manager) promoteConnNames(newNames map[string]bool) []string {
 	}
 	m.prevConnNames = newNames
 	m.pendingTerminate = nil
+	// #9687: a removal is debt from here until recordTerminateDebt settles it.
+	for _, name := range removed {
+		if m.inflight == nil {
+			m.inflight = make(map[string]int, len(removed))
+		}
+		m.inflight[name]++
+	}
+	m.persistStateLocked()
 	return removed
 }
 
@@ -457,18 +480,30 @@ func (m *Manager) promoteConnNames(newNames map[string]bool) []string {
 // re-render both call Apply) could otherwise clobber the other's debt. A
 // stale union member is harmless — promoteConnNames filters the debt by the
 // loaded set before any terminate is issued.
-func (m *Manager) recordTerminateDebt(failed []string) error {
-	if len(failed) == 0 {
-		return nil
-	}
+//
+// #9687: it also settles removed, the set the matching promotion counted as
+// in flight, and persists the result. That write happens on success too, so a
+// completed teardown leaves no debt on disk.
+func (m *Manager) recordTerminateDebt(removed, failed []string) error {
 	m.mu.Lock()
-	if m.pendingTerminate == nil {
+	for _, name := range removed {
+		if m.inflight[name] <= 1 {
+			delete(m.inflight, name)
+		} else {
+			m.inflight[name]--
+		}
+	}
+	if len(failed) > 0 && m.pendingTerminate == nil {
 		m.pendingTerminate = make(map[string]bool, len(failed))
 	}
 	for _, name := range failed {
 		m.pendingTerminate[name] = true
 	}
+	m.persistStateLocked()
 	m.mu.Unlock()
+	if len(failed) == 0 {
+		return nil
+	}
 	sort.Strings(failed)
 	return fmt.Errorf("terminate stale IPsec SAs for removed connection(s) "+
 		"%s: teardown retried on next commit", strings.Join(failed, ", "))

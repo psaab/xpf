@@ -236,59 +236,142 @@ func (c *CLI) showDynamicAddress() error {
 		fmt.Println("No active configuration")
 		return nil
 	}
-
-	if len(cfg.Security.DynamicAddress.FeedServers) == 0 {
-		fmt.Println("No dynamic address feeds configured")
-		return nil
-	}
-
 	// Get runtime feed status if available.
 	var runtimeFeeds map[string]feeds.FeedInfo
 	if c.feedsFn != nil {
 		runtimeFeeds = c.feedsFn()
 	}
+	renderDynamicAddress(os.Stdout, cfg, runtimeFeeds)
+	return nil
+}
 
-	fmt.Println("Dynamic Address Feed Servers:")
-	for name, fs := range cfg.Security.DynamicAddress.FeedServers {
+// renderDynamicAddress writes the `show security dynamic-address` body.
+//
+// #9689: the show surface must agree with what is enforced.
+//   - An omitted hold-interval RETAINS last-good indefinitely (the feeds code
+//     and the schema's own description). This used to print a 7200s default
+//     that nothing applied.
+//   - A feed dropped by its hold-interval, or serving a stale last-good set, is
+//     reported as such.
+//   - Each binding reports what the dataplane is enforcing for it, mirroring
+//     feeds.Manager.SnapshotForBindings: current or stale prefixes; an empty or
+//     partial set under `fail-mode drop`; or unresolved, in which case policies
+//     referencing it are rejected and the previous-good policy set stays
+//     enforced.
+//
+// It takes an io.Writer so the rows can be asserted without a configstore.
+func renderDynamicAddress(w io.Writer, cfg *config.Config, runtimeFeeds map[string]feeds.FeedInfo) {
+	if len(cfg.Security.DynamicAddress.FeedServers) == 0 {
+		fmt.Fprintln(w, "No dynamic address feeds configured")
+		return
+	}
+
+	fmt.Fprintln(w, "Dynamic Address Feed Servers:")
+	serverNames := make([]string, 0, len(cfg.Security.DynamicAddress.FeedServers))
+	for name := range cfg.Security.DynamicAddress.FeedServers {
+		serverNames = append(serverNames, name)
+	}
+	sort.Strings(serverNames)
+	for _, name := range serverNames {
+		fs := cfg.Security.DynamicAddress.FeedServers[name]
 		updateInt := fs.UpdateInterval
 		if updateInt == 0 {
 			updateInt = 3600
 		}
-		holdInt := fs.HoldInterval
-		if holdInt == 0 {
-			holdInt = 7200
-		}
-		fmt.Printf("  Feed Server: %s\n", name)
+		fmt.Fprintf(w, "  Feed Server: %s\n", name)
 		if fs.URL != "" {
 			// Redact embedded basic-auth userinfo / query-string token before
-			// printing to the on-box console — the credentialed feed URL would
-			// otherwise land in terminal scrollback / support bundles (#5521).
-			fmt.Printf("    URL: %s\n", config.RedactURL(fs.URL))
+			// printing to the on-box console (#5521).
+			fmt.Fprintf(w, "    URL: %s\n", config.RedactURL(fs.URL))
 		}
 		if fs.FeedName != "" {
-			fmt.Printf("    Feed name: %s\n", fs.FeedName)
+			fmt.Fprintf(w, "    Feed name: %s\n", fs.FeedName)
 		}
-		fmt.Printf("    Update interval: %d seconds\n", updateInt)
-		fmt.Printf("    Hold interval:   %d seconds\n", holdInt)
+		fmt.Fprintf(w, "    Update interval: %d seconds\n", updateInt)
+		if fs.HoldInterval > 0 {
+			fmt.Fprintf(w, "    Hold interval:   %d seconds, then the last-good set is dropped\n", fs.HoldInterval)
+		} else {
+			fmt.Fprintf(w, "    Hold interval:   none (last-good set retained indefinitely)\n")
+		}
 
 		if fi, ok := runtimeFeeds[name]; ok {
-			fmt.Printf("    Prefixes: %d\n", fi.Prefixes)
+			fmt.Fprintf(w, "    Prefixes: %d\n", fi.Prefixes)
 			if !fi.LastFetch.IsZero() {
 				age := time.Since(fi.LastFetch).Truncate(time.Second)
-				fmt.Printf("    Last fetch: %s (%s ago)\n", fi.LastFetch.Format("2006-01-02 15:04:05"), age)
+				fmt.Fprintf(w, "    Last fetch: %s (%s ago)\n", fi.LastFetch.Format("2006-01-02 15:04:05"), age)
 			} else {
-				fmt.Printf("    Last fetch: never\n")
+				fmt.Fprintf(w, "    Last fetch: never\n")
+			}
+			switch {
+			case fi.HoldDropped:
+				fmt.Fprintf(w, "    HOLD-DROPPED: fetches failed past the hold interval; the last-good set was dropped\n")
+			case !fi.StaleSince.IsZero():
+				fmt.Fprintf(w, "    STALE since %s: fetches failing; last-good set retained\n", fi.StaleSince.Format("2006-01-02 15:04:05"))
 			}
 			if fi.Degraded {
-				fmt.Printf("    DEGRADED: %d invalid line(s) skipped (partial set installed)\n", fi.InvalidLines)
+				fmt.Fprintf(w, "    DEGRADED: %d invalid line(s) skipped (partial set installed)\n", fi.InvalidLines)
 				if len(fi.InvalidSample) > 0 {
-					fmt.Printf("      Sample: %s\n", strings.Join(fi.InvalidSample, ", "))
+					fmt.Fprintf(w, "      Sample: %s\n", strings.Join(fi.InvalidSample, ", "))
 				}
 			}
 		}
 	}
 
-	return nil
+	bindings := cfg.Security.DynamicAddress.AddressBindings
+	if len(bindings) == 0 {
+		return
+	}
+	names := make([]string, 0, len(bindings))
+	for name := range bindings {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	fmt.Fprintln(w, "Dynamic Address Bindings:")
+	for _, name := range names {
+		b := bindings[name]
+		if b == nil {
+			continue
+		}
+		mode := b.FailMode
+		if mode == "" {
+			mode = "retain"
+		}
+		fmt.Fprintf(w, "  %s: feeds %s, fail-mode %s\n", name, strings.Join(b.FeedNames, ", "), mode)
+		fmt.Fprintf(w, "    Enforced: %s\n", dynamicAddressBindingEnforcement(b, runtimeFeeds))
+	}
+}
+
+// dynamicAddressBindingEnforcement says what the dataplane enforces for a
+// binding. It mirrors feeds.Manager.SnapshotForBindings (#5645, #9689).
+func dynamicAddressBindingEnforcement(b *config.AddressBinding, runtimeFeeds map[string]feeds.FeedInfo) string {
+	if runtimeFeeds == nil {
+		return "unknown (no runtime feed status)"
+	}
+	ready, dropped, stale := 0, 0, 0
+	for _, feedName := range b.FeedNames {
+		fi, ok := runtimeFeeds[feedName]
+		switch {
+		case ok && fi.Prefixes > 0:
+			ready++
+			if !fi.StaleSince.IsZero() {
+				stale++
+			}
+		case ok && fi.HoldDropped:
+			dropped++
+		default:
+			return "unresolved: a feed has no snapshot yet, so policies referencing this name are rejected and the previous-good policy set stays enforced"
+		}
+	}
+	if dropped > 0 {
+		if b.FailMode == "drop" {
+			return fmt.Sprintf("%d feed(s) dropped by hold-interval, publishing the other %d feed(s)' prefixes (fail-mode drop)", dropped, ready)
+		}
+		return "unresolved: a feed was dropped by its hold-interval under fail-mode retain, so policies referencing this name are rejected and the previous-good policy set stays enforced"
+	}
+	if stale > 0 {
+		return fmt.Sprintf("last-good prefixes, %d feed(s) stale", stale)
+	}
+	return "current prefixes"
 }
 
 func (c *CLI) showALG() error {

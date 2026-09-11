@@ -1585,6 +1585,9 @@ func compactNormalizeInScope(containerKeyword, head string) bool {
 		"pool routing-instance",
 		"port-scan threshold",
 		"profile feed-name",
+		// #9689: the binding's second leaf, measured with the same #2419
+		// compact/block differential that admitted feed-name.
+		"profile fail-mode",
 		"profile stream-name",
 		"proposal authentication-algorithm",
 		"proposal authentication-method",

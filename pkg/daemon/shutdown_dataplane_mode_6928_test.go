@@ -97,6 +97,8 @@ func TestShutdownModeChoosesCloseOrTeardown6928(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			// #9686: the fail-closed arm now closes kernel transit first.
+			seamTransitClose9686(t)
 			store, err := configstore.New(filepath.Join(t.TempDir(), "xpf.conf"))
 			if err != nil {
 				t.Fatalf("configstore.New: %v", err)

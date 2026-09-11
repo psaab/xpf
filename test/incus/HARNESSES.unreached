@@ -33,8 +33,6 @@ test/incus/test-mouse-latency.sh             GATE: one #905 mouse-latency rep. M
 test/incus/test-mouse-latency-same-class.sh  GATE: same-class 1 Gbps variant of the #905 rep — the control for the cross-class default.
 test/incus/test-fbf-steering.sh              GATE: #1827 two-upstream FBF steering smoke. `make test-fbf-steering-lib` runs fbf-steering-selftest.sh, not this — registered via a DIFFERENT TARGET's name.
 test/incus/cc-rollback-functional.sh         GATE: #1922 commit-confirmed auto-revert must re-apply to the DATAPLANE; a store-only revert is exactly the bug and only a live run can see it.
-test/incus/dhcp-lease-failover.sh            GATE: #2261 Kea lease survives a hard failover; pins the memfile CSV header against a real Kea 3.0.x.
-test/incus/persistent-nat-failover.sh        GATE: #7360 persistent-NAT binding survives promotion via live session sync.
 test/incus/wg-interop.sh                     GATE: #1736 WireGuard interop against an INDEPENDENT kernel-WireGuard peer.
 test/incus/reverse-key-collision-probe.sh    GATE: #1760 W2 live-fire NAT reverse-key collision watch.
 test/incus/cos-simul-load-smoke.sh           GATE: #1614 all-11-class simul-load acceptance gates. Calls cos-gate1-small-four-alone.sh, and the pair is collectively unreached.

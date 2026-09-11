@@ -93,21 +93,13 @@ func runTailGates(cfg *Config, opts compileOpts) error {
 	// using these leaves commits and the operator is told what is/ isn't honoured.
 	cfg.Warnings = append(cfg.Warnings, validateScreenSynFloodSubThresholds(cfg)...)
 
-	// #2387 (Track A.1): warn when two DISTINCT routing-instances carry
-	// overlapping L3 address space. The userspace-dp session/flow identity is the
-	// bare 5-tuple with no VRF discriminator, so overlapping-address flows in
-	// different routing-instances collide in the conntrack map — LIVE under PBR
-	// `then routing-instance` (the established-session fast path runs before the
-	// PBR table override, so a second colliding flow inherits the first's cached
-	// egress / NAT / policy). A WARNING, never a reject: overlapping-subnet
-	// multi-tenant VRF via PBR is a legitimate working design; the config still
-	// commits, the operator is told it is not session-isolated. Whether to widen
-	// the session identity (Track B — a routing-domain id in SessionKey) is an
-	// OPEN #2387 decision, so the warning states the limitation and points at
-	// the issue rather than promising a fix.
-	// #7924: now returns an error for the NARROW cross-tenant case (overlap AND a
-	// PBR `then routing-instance` term). The warnings are appended either way, so
-	// the lenient path keeps the pre-#7924 advisory verbatim.
+	// #2387 / #7924: warn when two DISTINCT routing-instances carry overlapping
+	// L3 address space, and refuse that overlap combined with a PBR `then
+	// routing-instance` term. Since #7160 the session identity separates flows
+	// on member interfaces by routing domain; flows PBR steers in from
+	// default-instance ingress stay domain 0 and can still share an entry, which
+	// is the residual the refusal covers (validateVRFOverlap's doc, #9809). The
+	// warnings are appended either way, so the lenient path keeps the advisory.
 	vrfOverlapWarnings, _, err := validateVRFOverlap(cfg, opts.lenientVRFOverlapPBR)
 	cfg.Warnings = append(cfg.Warnings, vrfOverlapWarnings...)
 	if err != nil {

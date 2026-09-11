@@ -243,6 +243,8 @@ func (m *Manager) statusLoop(ctx context.Context) {
 			prevActiveSig := activeHAGroupSignature(m.haGroups)
 			var status ProcessStatus
 			if err := m.requestLocked(ControlRequest{Type: "status"}, &status); err == nil {
+				// #9651: an answered poll resets the wedge count.
+				m.noteStatusPollResultLocked(nil, time.Now())
 				// #6034: the helper's replace-generation fence can outlive this
 				// Manager (for example across a future reconnect/ISSU). Resume from
 				// its applied generation before any reconciliation on this tick can
@@ -318,6 +320,11 @@ func (m *Manager) statusLoop(ctx context.Context) {
 				}
 			} else {
 				slog.Warn("userspace dataplane status poll failed", "err", err)
+				// #9651: a helper that answers nothing for long enough is killed,
+				// and the supervisor fails closed and restarts it.
+				if now := time.Now(); m.noteStatusPollResultLocked(err, now) {
+					m.killWedgedHelperLocked(now)
+				}
 			}
 			// Keep the targeted kernel prewarm during initial startup. After
 			// startup, continue a throttled standby-only neighbor prewarm so HA

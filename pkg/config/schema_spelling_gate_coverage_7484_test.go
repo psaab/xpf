@@ -359,7 +359,7 @@ func gateLeafChangesWarnings(g gateLeaf, pre string, epath []string) bool {
 // returning to a population that never included them, rather than shrinking past
 // one that did. Identical in shape to the #8939 registration recorded in
 // notAValueList, which cost 14 sites (1098/706 -> 1076/692) for the same reason.
-const gateCoverageFloor = 740
+const gateCoverageFloor = 741
 
 var gateBlindCeiling = map[gateBlindClass]int{
 	// #7492 moved leaves out of `unreachable` in two rounds. The parent

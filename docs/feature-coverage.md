@@ -286,6 +286,30 @@ the userspace dataplane admission boundary is in
   conflicts and MAC flapping as the switch sees one address on two ports. The
   per-node MAC trades RFC conformance for a deterministic L2 topology. See
   `RethMAC` in `pkg/cluster/reth.go`.
+- **Legacy RETH VRRP reserves VRIDs 101-115 on every RETH member segment
+  (#9724).**
+  - **When it applies.** RETH VRRP runs only under `set chassis cluster
+    no-private-rg-election`. The compiler default, private-RG election, elects
+    over the control link and builds no RETH VRRP instance at all, so none of
+    this applies to it.
+  - **The VRIDs.** In the legacy mode each RETH redundancy group runs VRRPv3 with
+    **VRID = 100 + its redundancy-group id**, on a fixed base that is not
+    configurable. Redundancy-group ids are 1..15: `MaxRedundancyGroups` is 16
+    dataplane slots, and group 0 is the control plane. So the VRIDs in use are
+    101-115.
+  - **No cluster identity.** An advertisement is accepted on its arrival
+    interface, TTL 255, a source that is not one of this node's own addresses,
+    its VRID and packet integrity. Nothing checks which cluster sent it: the
+    heartbeat rejects a foreign cluster id, and VRRP does not.
+  - **The rules**, on every segment a RETH member attaches to:
+    - No other VRRP speaker, such as a third-party router, may use VRID
+      100 + <rg> for a redundancy group with a RETH on that segment. A
+      higher-priority advertisement from it makes this cluster's master step
+      down, and a priority-0 one makes the backup take over at once.
+    - Two legacy-mode clusters may share the segment only if their
+      redundancy-group ids are disjoint.
+
+  Put other VRRP on VRIDs 1-100 or 116-255, or on another segment.
 - **Session sync**: incremental 1s sweep + ring buffer + GC delete
   callbacks, TCP on fabric link.
 - **Config sync**: primary → secondary with `${node}` variable expansion,

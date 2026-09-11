@@ -189,25 +189,38 @@ func TestLeafRunDifferentialGate9156(t *testing.T) {
 	flatCompared := 0
 	reachable := 0
 	for _, s := range sites {
+		// #9792: a fixture supplies what the generated placeholders cannot
+		// (leaf_run_fixtures_9792_test.go). The zero value changes nothing.
+		fx := leafRunFixtures9156[s.key()]
+		container := s.container
+		if fx.container != nil {
+			container = fx.container
+		}
 		hv, ok := leafValue9156(s.headNode)
+		if fx.headVal != "" {
+			hv, ok = fx.headVal, true
+		}
 		if !ok {
 			skipNoVal = append(skipNoVal, s.key()+" (head)")
 			continue
 		}
 		tv, ok := leafValue9156(s.tailNode)
+		if fx.tailVal != "" {
+			tv, ok = fx.tailVal, true
+		}
 		if !ok {
 			skipNoVal = append(skipNoVal, s.key()+" (tail)")
 			continue
 		}
-		ctx := contextFor(s.container)
+		ctx := contextFor(container) + fx.ctx
 		headStmt := statement9156(s.head, s.headNode, hv)
 		tailStmt := statement9156(s.tail, s.tailNode, tv)
 
 		// ONE LINE: the run. The braced rendering of a flat-set run is the
 		// nested chain SetPath builds, which is what the reader sees.
-		runText := nest(s.container, ctx+headStmt+" "+tailStmt+";")
+		runText := fx.render(container, ctx+headStmt+" "+tailStmt+";")
 		// SEPARATE LINES: the oracle.
-		sepText := nest(s.container, ctx+headStmt+"; "+tailStmt+";")
+		sepText := fx.render(container, ctx+headStmt+"; "+tailStmt+";")
 
 		sep, sepErr := gateCompileBrace(sepText)
 		if sepErr != nil {
@@ -234,8 +247,12 @@ func TestLeafRunDifferentialGate9156(t *testing.T) {
 		// and lose on the other. #9156's own defect is on the FLAT-SET axis, and
 		// the braced-only version of this gate stayed GREEN when that fix was
 		// reverted: it was blind to its own subject.
-		flatSep, flatSepErr := gateCompileFlatSet9156(s.container, ctx, headStmt, tailStmt, false)
-		flatRun, flatRunErr := gateCompileFlatSet9156(s.container, ctx, headStmt, tailStmt, true)
+		flatBase := ""
+		if fx.wrap != nil || fx.preamble != "" || strings.TrimSpace(ctx) != "" {
+			flatBase = fx.render(container, ctx)
+		}
+		flatSep, flatSepErr := gateCompileFlatSet9156(container, flatBase, headStmt, tailStmt, false)
+		flatRun, flatRunErr := gateCompileFlatSet9156(container, flatBase, headStmt, tailStmt, true)
 		flatDriven := flatSepErr == nil && flatRunErr == nil
 		if !flatDriven {
 			skipFlat = append(skipFlat, s.key())
@@ -277,7 +294,7 @@ func TestLeafRunDifferentialGate9156(t *testing.T) {
 		//
 		// Hand-measuring 26 rows one at a time to learn that is the expensive
 		// way to ask a question the walker can answer for every row at once.
-		if strictAdmitsLeafRun9156(s.container, ctx, headStmt, tailStmt) {
+		if strictAdmitsLeafRun9156(runText) {
 			axis += " {strict-admits}"
 			reachable++
 		} else {
@@ -344,6 +361,7 @@ func TestLeafRunDifferentialGate9156(t *testing.T) {
 	report("one-line form did not compile", skipRunNC)
 	report("ORACLE did not compile", skipSepNC)
 	report("flat-set arm not compilable (braced arm still compared)", skipFlat)
+	checkLeafRunFixtureOutcomes9792(t, skipNoVal, skipRunNC, skipSepNC)
 
 	// RATCHET. The register below is a DEBT REGISTER, not an acceptance: the
 	// gate fails on any container that starts differing AND on any recorded one
@@ -568,25 +586,35 @@ func TestTunnelSchemaResolvesBothPositions9156(t *testing.T) {
 // starts agreeing while still listed — so the register cannot outlive the
 // defect it describes.
 var leafRunKnownDiffer9156 = map[string]bool{
-	"bridge-domains xpfname [domain-type -> routing-interface] {braced+flat} {lenient-only}":                                                   true,
-	"class-of-service interfaces xpfarg [output-traffic-control-profile -> priority-low-min-share] {braced+flat} {lenient-only}":               true,
-	"forwarding-options sampling instance xpfarg family inet output flow-server xpfarg [source-address -> port] {braced+flat} {lenient-only}":  true,
-	"forwarding-options sampling instance xpfarg family inet6 output flow-server xpfarg [source-address -> port] {braced+flat} {lenient-only}": true,
-	"interfaces xpfname [bandwidth -> description] {braced+flat} {lenient-only}":                                                               true,
-	"interfaces xpfname aggregated-ether-options [link-speed -> minimum-links] {braced+flat} {lenient-only}":                                   true,
-	"interfaces xpfname gigether-options [802.3ad -> redundant-parent] {braced+flat} {lenient-only}":                                           true,
-	"interfaces xpfname tunnel wireguard [private-key -> listen-port] {braced+flat} {lenient-only}":                                            true,
-	"interfaces xpfname tunnel wireguard peer xpfarg [endpoint -> persistent-keepalive] {braced+flat} {lenient-only}":                          true,
-	"protocols bgp group xpfarg neighbor xpfarg [authentication-key -> description] {braced+flat} {lenient-only}":                              true,
-	"routing-instances xpfname [description -> instance-type] {braced+flat} {lenient-only}":                                                    true,
-	"routing-instances xpfname protocols bgp group xpfarg neighbor xpfarg [authentication-key -> description] {braced+flat} {lenient-only}":    true,
-	"security dynamic-address feed-server xpfarg [hostname -> hold-interval] {braced+flat} {lenient-only}":                                     true,
-	"security flow traceoptions packet-filter xpfarg [destination-prefix -> protocol] {braced+flat} {lenient-only}":                            true,
-	"security nat nat64 rule-set xpfarg [prefix -> source-pool] {braced+flat} {lenient-only}":                                                  true,
-	"security screen ids-option xpfarg limit-session [destination-ip-based -> source-ip-based] {braced+flat} {lenient-only}":                   true,
-	"security screen ids-option xpfarg tcp syn-flood [alarm-threshold -> attack-threshold] {braced+flat} {lenient-only}":                       true,
-	"security zones security-zone xpfarg [description -> screen] {braced+flat} {lenient-only}":                                                 true,
-	"system ntp server xpfarg [routing-instance -> key] {braced} {lenient-only}":                                                               true,
+	// #9792 part 1: these five sat in skip buckets until
+	// leaf_run_fixtures_9792_test.go gave their oracles fixtures the validators
+	// accept. Measured on first comparison, all five are {lenient-only}: the
+	// strict walk refuses the one-line spelling, so a commit cannot reach the
+	// loss. They join #9792's part 2 population with the rows below.
+	"security policies from-zone xpfarg xpfarg xpfarg policy xpfarg [description -> scheduler-name] {braced+flat} {lenient-only}":                                true,
+	"security policies global policy xpfarg [description -> scheduler-name] {braced+flat} {lenient-only}":                                                        true,
+	"services ip-monitoring policy xpfarg then preferred-route route xpfarg [next-hop -> preferred-metric] {braced+flat} {lenient-only}":                         true,
+	"services ip-monitoring policy xpfarg then preferred-route routing-instance xpfarg route xpfarg [next-hop -> preferred-metric] {braced+flat} {lenient-only}": true,
+	"system [dataplane-type -> domain-name] {braced+flat} {lenient-only}":                                                                                        true,
+	"bridge-domains xpfname [domain-type -> routing-interface] {braced+flat} {lenient-only}":                                                                     true,
+	"class-of-service interfaces xpfarg [output-traffic-control-profile -> priority-low-min-share] {braced+flat} {lenient-only}":                                 true,
+	"forwarding-options sampling instance xpfarg family inet output flow-server xpfarg [source-address -> port] {braced+flat} {lenient-only}":                    true,
+	"forwarding-options sampling instance xpfarg family inet6 output flow-server xpfarg [source-address -> port] {braced+flat} {lenient-only}":                   true,
+	"interfaces xpfname [bandwidth -> description] {braced+flat} {lenient-only}":                                                                                 true,
+	"interfaces xpfname aggregated-ether-options [link-speed -> minimum-links] {braced+flat} {lenient-only}":                                                     true,
+	"interfaces xpfname gigether-options [802.3ad -> redundant-parent] {braced+flat} {lenient-only}":                                                             true,
+	"interfaces xpfname tunnel wireguard [private-key -> listen-port] {braced+flat} {lenient-only}":                                                              true,
+	"interfaces xpfname tunnel wireguard peer xpfarg [endpoint -> persistent-keepalive] {braced+flat} {lenient-only}":                                            true,
+	"protocols bgp group xpfarg neighbor xpfarg [authentication-key -> description] {braced+flat} {lenient-only}":                                                true,
+	"routing-instances xpfname [description -> instance-type] {braced+flat} {lenient-only}":                                                                      true,
+	"routing-instances xpfname protocols bgp group xpfarg neighbor xpfarg [authentication-key -> description] {braced+flat} {lenient-only}":                      true,
+	"security dynamic-address feed-server xpfarg [hostname -> hold-interval] {braced+flat} {lenient-only}":                                                       true,
+	"security flow traceoptions packet-filter xpfarg [destination-prefix -> protocol] {braced+flat} {lenient-only}":                                              true,
+	"security nat nat64 rule-set xpfarg [prefix -> source-pool] {braced+flat} {lenient-only}":                                                                    true,
+	"security screen ids-option xpfarg limit-session [destination-ip-based -> source-ip-based] {braced+flat} {lenient-only}":                                     true,
+	"security screen ids-option xpfarg tcp syn-flood [alarm-threshold -> attack-threshold] {braced+flat} {lenient-only}":                                         true,
+	"security zones security-zone xpfarg [description -> screen] {braced+flat} {lenient-only}":                                                                   true,
+	"system ntp server xpfarg [routing-instance -> key] {braced} {lenient-only}":                                                                                 true,
 	// #9235 REMOVED the two `static-binding` rows that stood here:
 	//
 	//	system services dhcp-local-server   group <g> pool <p> static-binding <m>

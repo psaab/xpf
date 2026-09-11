@@ -106,6 +106,8 @@ type xpfCollector struct {
 	napiProbeTargetSkipsTotal *prometheus.Desc
 	bindingWedgeGiveupsTotal  *prometheus.Desc
 	learnedRouteCapHitsTotal  *prometheus.Desc
+	// #9654: capped NOW, from helper status; emitted only when known.
+	learnedRouteImportCapped *prometheus.Desc
 
 	// #9040: dataplane drops taken on a degraded path, by reason. Sparse and
 	// status-dependent; see metrics_degraded_path_9040.go.
@@ -827,6 +829,7 @@ func (c *xpfCollector) Describe(ch chan<- *prometheus.Desc) {
 	c.describeAdmissionRefusals(ch)
 	c.describeAuthzDenials(ch)
 	c.describeDataplaneSilentSkips(ch)
+	c.describeLearnedRouteImportCapped(ch)
 	ch <- c.degradedPathTotal
 	ch <- c.ifacePacketsTotal
 	ch <- c.ifaceBytesTotal

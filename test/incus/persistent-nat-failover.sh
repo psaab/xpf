@@ -28,29 +28,17 @@
 # the assertions would be vacuous there). It applies its own pool rule inside
 # the lock cell and restores the prior config on exit — see RESTORE below.
 #
-# STATUS: NOT YET RUN GREEN. Stated plainly because a smoke nobody has seen
-# pass is a claim, not evidence, and the next person must not mistake one for
-# the other.
-#
-# What HAS been established on the live loss cluster:
-#   * the config applies and commits on the PRIMARY, and HA config sync carries
-#     it to the peer (the secondary refuses `configure` outright);
-#   * the marker gate works — every wrong config so far was caught by the
-#     absent "commit complete" rather than by a false pass;
-#   * the anti-vacuity guard works — it REFUSES to run the downstream
-#     assertions when the active minted no binding, so this script has never
-#     reported a pass it did not earn.
-#
-# What BLOCKS it, and it is a topology question rather than a dataplane one:
-# while a source-NAT POOL is applied, the LAN client cannot complete a
-# connection to the WAN target (`CONNECT-FAILED`), on a path that is otherwise
-# reachable — measured immediately afterwards: ports 5200/5201/5202 all connect
-# and ping is 0% loss once interface-mode SNAT is restored. Tried and still
-# failing: an arbitrary in-subnet pool address (172.16.50.90 — nothing answers
-# ARP for it) and the WAN VIP (172.16.50.6). Whoever picks this up should start
-# by establishing which pool address this cluster's upstream will route return
-# traffic for, or whether pool-mode SNAT needs something else here that
-# interface mode does not. Everything above that point is settled.
+# STATUS (#9729): an earlier revision recorded this as not yet run green,
+# blocked by the pool-mode SNAT return path on this cluster. Per #8573 and
+# #8621 that topology blocker is gone and the acceptance was met once by a
+# manual lab run. The script is now a Makefile gate
+# (`make test-persistent-nat-failover`) that records a ledger row. It derives
+# the RG0 primary and standby itself, and it asserts that the reboot really
+# promoted the standby: with fw1 already primary at start (an ordinary
+# leftover state on the shared cluster, #9452), the old hardcoded-fw0 flow
+# compared the primary with itself, rebooted the standby and re-read an
+# uninterrupted primary. That was a PASS that exercised neither sync nor
+# promotion.
 #
 # The unit-level coverage does NOT depend on this: #7360's mechanism is bound by
 # seven fail-on-revert cells in `userspace-dp/src/nat/tests_pool.rs` and a
@@ -90,14 +78,23 @@ TARGET="${TARGET:-$IPERF_TARGET4}"
 POOL_NAME="${POOL_NAME:-pnat7360}"
 # A pool range distinct from anything the default config uses, so a leftover
 # binding from another smoke cannot be mistaken for ours.
-# The pool address must be one the upstream ROUTES BACK, or the SNAT'd flow's
-# reply never returns and the smoke measures a broken path rather than the
-# lease. An arbitrary in-subnet address (172.16.50.90) is not assigned to any
-# interface and nothing answers ARP for it — measured: every connect failed
-# while the pool was applied, on a target that is otherwise reachable. The WAN
-# VIP follows the primary and is the address interface-mode SNAT would have
-# used, so return traffic lands exactly as it does today.
-POOL_ADDR="${POOL_ADDR:-$WAN_VIP4}"
+# The pool address must be one the TARGET's segment ROUTES BACK to the firewall,
+# or the SNAT'd flow's reply never returns and the smoke measures a broken path
+# rather than the lease. An arbitrary in-subnet address (172.16.50.90) failed
+# that way. So did WAN_VIP4, the previous default: on the loss userspace cluster
+# the iperf target 172.16.80.200 sits behind reth0.80, and a SYN translated to
+# 172.16.50.6 was never answered (#9729's first ledger run: CONNECT-FAILED, no
+# binding minted).
+#
+# So by default the pool is DISCOVERED, not assumed. resolve_pool reuses the
+# committed source pool whose /32 is proxy-ARPed on the interface unit carrying
+# TARGET, and adds only persistent-nat to it for the run. On this cluster that
+# is pool-snat-pool at 172.16.80.7, the pool #8573's accepted manual run used.
+# Setting POOL_ADDR selects dedicated mode instead: a fresh POOL_NAME at that
+# address with ports POOL_LOW-POOL_HIGH.
+POOL_MODE="reuse"
+if [ -n "${POOL_ADDR:-}" ]; then POOL_MODE="dedicated"; fi
+POOL_ADDR="${POOL_ADDR:-}"
 POOL_LOW="${POOL_LOW:-51000}"
 POOL_HIGH="${POOL_HIGH:-51099}"
 PNAT_TIMEOUT="${PNAT_TIMEOUT:-300}"
@@ -122,6 +119,46 @@ fail() { echo "  FAIL  $*"; FAIL=$((FAIL + 1)); ERRORS+=("$*"); }
 die()  { echo "FATAL: $*" >&2; exit 2; }
 
 fw_cli() { incus exec "$1" -- /usr/local/sbin/cli -c "$2" 2>/dev/null; }
+
+# reachable_source_pool <node> prints "<pool> <address>" for the first committed
+# source pool whose /32 address is proxy-ARPed on an interface unit whose subnet
+# contains $TARGET. It prints nothing when there is none (#9729).
+reachable_source_pool() {
+	fw_cli "$1" "show configuration | display set" | TARGET="$TARGET" python3 -c '
+import ipaddress, os, re, sys
+target = ipaddress.ip_address(os.environ["TARGET"])
+lines = sys.stdin.read().splitlines()
+nets = {}
+for l in lines:
+    m = re.match(r"set interfaces (\S+) unit (\d+) family inet address (\S+)", l)
+    if m:
+        nets.setdefault(m.group(1) + "." + m.group(2), []).append(ipaddress.ip_interface(m.group(3)).network)
+arped = set()
+for l in lines:
+    m = re.match(r"set security nat proxy-arp interface (\S+) address (\S+)", l)
+    if m and any(target in n for n in nets.get(m.group(1), [])):
+        arped.add(m.group(2).split("/")[0])
+for l in lines:
+    m = re.match(r"set security nat source pool (\S+) address (\S+)/32$", l)
+    if m and m.group(2) in arped:
+        print(m.group(1), m.group(2))
+        break
+'
+}
+
+# resolve_pool settles POOL_NAME and POOL_ADDR before anything is committed.
+resolve_pool() {
+	if [ "$POOL_MODE" = "dedicated" ]; then
+		info "pool: dedicated ${POOL_NAME} at ${POOL_ADDR}/32, ports ${POOL_LOW}-${POOL_HIGH} (POOL_ADDR set)"
+		return
+	fi
+	local found
+	found="$(reachable_source_pool "$FW0" || true)"
+	[ -n "$found" ] || die "no committed source pool is proxy-ARPed on the interface carrying $TARGET, so no pool address is known to route back; set POOL_ADDR to one that does"
+	POOL_NAME="${found%% *}"
+	POOL_ADDR="${found##* }"
+	info "pool: reusing ${POOL_NAME} at ${POOL_ADDR}/32 (proxy-ARPed on the unit carrying $TARGET); persistent-nat is added for this run only"
+}
 fw_sh()  { incus exec "$1" -- bash -lc "$2"; }
 
 # The persistent-NAT binding for our client, as the node reports it.
@@ -179,9 +216,17 @@ pnat_config_session() {
 	cat <<EOF
 configure
 rollback 0
+EOF
+	# A REUSED pool keeps its committed address and ports (#9729); only a
+	# dedicated pool is created here.
+	if [ "$POOL_MODE" = "dedicated" ]; then
+		cat <<EOF
 delete security nat source pool ${POOL_NAME}
 set security nat source pool ${POOL_NAME} address ${POOL_ADDR}/32
 set security nat source pool ${POOL_NAME} port range low ${POOL_LOW} high ${POOL_HIGH}
+EOF
+	fi
+	cat <<EOF
 set security nat source pool ${POOL_NAME} persistent-nat permit any-remote-host
 set security nat source pool ${POOL_NAME} persistent-nat inactivity-timeout ${PNAT_TIMEOUT}
 delete security nat source rule-set ${SNAT_RULESET} rule ${SNAT_RULE} then source-nat interface
@@ -203,10 +248,29 @@ primary_node() {
 	if [ "$secondary" = "0" ]; then echo "$FW1"; else echo "$FW0"; fi
 }
 
+# rg0_primary_node <query-node> prints the node holding RG0 primary as seen from
+# <query-node>, or nothing when the RG0 row cannot be read. Unlike primary_node
+# it never defaults to fw0: asked on the survivor right after the primary was
+# rebooted, a silent default would report "fw0 is primary" and fail a real
+# promotion, or pass a missing one (#9729).
+rg0_primary_node() {
+	local status row0 row1
+	status="$(fw_cli "$1" "show chassis cluster status" || true)"
+	row0="$(printf '%s\n' "$status" | awk '/^Redundancy group:[[:space:]]/ {rg=$3; next} rg=="0" && $1=="node0" {print tolower($3); exit}')"
+	row1="$(printf '%s\n' "$status" | awk '/^Redundancy group:[[:space:]]/ {rg=$3; next} rg=="0" && $1=="node1" {print tolower($3); exit}')"
+	case "$row0/$row1" in
+	primary*/*) echo "$FW0" ;;
+	*/primary*) echo "$FW1" ;;
+	esac
+}
+
 apply_pnat_config() {
 	PRIMARY="$(primary_node)"
+	if [ "$PRIMARY" = "$FW0" ]; then STANDBY="$FW1"; else STANDBY="$FW0"; fi
+	info "roles: RG0 primary=$PRIMARY standby=$STANDBY"
 	info "Retargeting ${SNAT_RULESET}/${SNAT_RULE} at a persistent-NAT pool on the PRIMARY ($PRIMARY)"
 	local out="${PNAT_TMP}/apply.out"
+	resolve_pool
 	pnat_config_session | incus exec "$PRIMARY" -- /usr/local/sbin/cli >"$out" 2>&1 || true
 	# Gate on the marker, never the exit status (#6440).
 	cos_require_markers "persistent-nat apply on $PRIMARY" "$out" \
@@ -228,6 +292,12 @@ restore_config() {
 	# over), and whichever node is secondary simply refuses with a message we
 	# discard. Attempting both is what makes the restore independent of where
 	# the primary ended up.
+	# #9729: a REUSED pool is the cluster's own and must survive; only the
+	# persistent-nat this run added is removed. A dedicated pool is deleted.
+	local restore_pool_line="delete security nat source pool ${POOL_NAME}"
+	if [ "$POOL_MODE" = "reuse" ]; then
+		restore_pool_line="delete security nat source pool ${POOL_NAME} persistent-nat"
+	fi
 	local node
 	for node in "$FW0" "$FW1"; do
 		incus exec "$node" -- /usr/local/sbin/cli >/dev/null 2>&1 <<EOF || true
@@ -235,7 +305,7 @@ configure
 rollback 0
 delete security nat source rule-set ${SNAT_RULESET} rule ${SNAT_RULE} then source-nat pool
 set security nat source rule-set ${SNAT_RULESET} rule ${SNAT_RULE} then source-nat interface
-delete security nat source pool ${POOL_NAME}
+${restore_pool_line}
 commit
 exit
 quit
@@ -290,26 +360,38 @@ did not exercise persistent NAT, so every assertion below would be vacuous"
 		summary
 		return
 	fi
-	pass "active $FW0 holds a binding for $src_ip -> port $natport_before"
+	pass "active $PRIMARY holds a binding for $src_ip -> port $natport_before"
 
 	# (a) THE DIRECT ASSERTION. Before #7360 this is empty however many sessions
 	#     the standby imported.
 	sleep 3
 	local standby_port standby_count
-	standby_count="$(binding_count "$FW1" || echo 0)"
-	standby_port="$(binding_natport "$FW1" "$src_ip" || true)"
+	standby_count="$(binding_count "$STANDBY" || echo 0)"
+	standby_port="$(binding_natport "$STANDBY" "$src_ip" || true)"
 	if [ "$standby_port" = "$natport_before" ]; then
-		pass "standby $FW1 reconstructed the binding ($src_ip -> $standby_port)"
+		pass "standby $STANDBY reconstructed the binding ($src_ip -> $standby_port)"
 	else
-		fail "standby $FW1 has no matching persistent-NAT binding for $src_ip \
+		fail "standby $STANDBY has no matching persistent-NAT binding for $src_ip \
 (count=$standby_count, port='${standby_port:-none}', expected $natport_before). \
 This is #7360: the synced reserve published the session without joining a lease."
 	fi
 
 	# (b) Fail over, then a NEW connection from the same client.
-	info "Failing over: rebooting $FW0"
-	incus restart "$FW0" --force >/dev/null 2>&1 || die "could not restart $FW0"
+	info "Failing over: rebooting the RG0 primary $PRIMARY"
+	incus restart "$PRIMARY" --force >/dev/null 2>&1 || die "could not restart $PRIMARY"
 	sleep "$REBOOT_WAIT"
+
+	# #9729: the downstream port assertion is only meaningful if the standby was
+	# PROMOTED. Ask the survivor, and refuse to go on without a promotion.
+	local promoted
+	promoted="$(rg0_primary_node "$STANDBY")"
+	if [ "$promoted" = "$STANDBY" ]; then
+		pass "the standby $STANDBY was promoted to RG0 primary"
+	else
+		fail "no promotion observed: RG0 primary reads '${promoted:-unreadable}' on $STANDBY after rebooting $PRIMARY -- the translated-port assertion would be vacuous"
+		summary
+		return
+	fi
 
 	info "Opening a NEW connection from the same client on the promoted node"
 	incus exec "$LAN_CLIENT" -- bash -lc \
@@ -317,7 +399,7 @@ This is #7360: the synced reserve published the session without joining a lease.
 	sleep 2
 
 	local natport_after
-	natport_after="$(binding_natport "$FW1" "$src_ip" || true)"
+	natport_after="$(binding_natport "$STANDBY" "$src_ip" || true)"
 	if [ "$natport_after" = "$natport_before" ]; then
 		pass "the client kept its translated port across the failover ($natport_after)"
 	else
@@ -333,7 +415,9 @@ session's own translation."
 summary() {
 	echo
 	echo "======================================"
-	echo "  PASS: $PASS   FAIL: $FAIL"
+	# #9729: the canonical "<n> passed, <n> failed" line the ha-smoke ledger
+	# adapter parses; the old "PASS: n FAIL: n" form was recorded as VOID.
+	echo "  Persistent-NAT failover test: $PASS passed, $FAIL failed"
 	for e in "${ERRORS[@]:-}"; do [ -n "$e" ] && echo "  - $e"; done
 	echo "======================================"
 	[ "$FAIL" -eq 0 ] || exit 1

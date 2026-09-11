@@ -780,6 +780,14 @@ routing, and only on double fault).
     you can observe:
     `xpf_userspace_binding_slow_path_no_route_packets_total` advances for
     exactly those frames.
+    To see whether the box is capped **now**, read
+    `xpf_learned_route_import_capped` (#9654). It is 1 while the forwarding
+    state the helper's live workers serve is capped and 0 while it is not.
+    It is **absent** when that is unknown: no live helper worker, or a helper
+    older than the field. Alert on the value and on `absent()` separately,
+    and do not read absent as 0. `xpf_learned_route_cap_hits_total` counts
+    capped builds and stays non-zero after the import comes back under the
+    cap, so it cannot answer this.
     Two consequences worth knowing before you rely on it. **The snapshot
     protocol moved to 10**, so a helper older than that REFUSES a capped
     snapshot outright instead of applying it and black-holing — loud and

@@ -135,7 +135,7 @@ because both ship signal to a future reader, but they fail in
 | 1 | #840 | reverted | runtime NIC RSS indirection-table tuning can't fix cross-binding skew with long-lived flows |
 | 2 | #1215 | PLAN-KILL | local-stall mechanism: head-of-line blocking on a single worker doesn't compose across workers |
 | 3 | #836 | PLAN-KILL | shared HOL queue: AF_XDP UMEM ownership prevents cross-worker descriptor sharing |
-| 4 | #840 / #1203 | PLAN-KILL | RSS steering at AF_XDP-ZC binding time is permanent physics — kernel pins flow→queue at bind |
+| 4 | #840 / #1203 | PLAN-KILL | Recorded reason: "RSS steering at AF_XDP-ZC binding time is permanent physics — kernel pins flow→queue at bind". Corrected by #9488: the kernel pins each socket to its RX queue, not a flow to a queue, and an ntuple rule moves an established flow to another queue (measured in `docs/fairness-regimes.md` "Hardware steering and the floor"). Whether that move is safe is open in #9778. |
 | 5 | #937 | PLAN-KILL | Cross-queue AF_XDP ZC redirect: kernel `XSKMAP` redirect *exists*, but ZC delivery requires `xs->queue_id == xdp->rxq->queue_index` (`net/xdp/xsk.c::xsk_rcv_check`). Cross-queue ZC needs a copy, defeating ZC. Not a kernel-feature-gap; a fundamental ZC-semantics constraint. |
 | 6 | #1211 | PLAN-KILL | Path 2 race-safe AFD overlay: closed 2026-05-07 after 8 Codex rounds + 3 Gemini rounds. PR #1220 empirical PASS on the motivating workload made the design solving a non-existent problem. See `docs/per-5-tuple/path2-archive/CLOSING-RATIONALE.md` for full rationale. |
 | 7 | #1236 | PLAN-KILL | v6 global per-flow cap: MQFQ fallback loophole — `cos_queue_min_finish_bucket` falls back to lowest-finish bucket when all over-cap, so the cap is silently ignored. Plan-killed 2026-05-08. |

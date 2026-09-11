@@ -522,6 +522,9 @@ pub(crate) fn refresh_status(state: &mut ServerState) {
         state.afxdp.fabric_link_skipped_malformed_total();
     state.status.fabric_link_unresolved_peer_total =
         state.afxdp.fabric_link_unresolved_peer_total();
+    // #9654: capped NOW, from the published runtime view and only while a live
+    // worker serves it. None (key omitted) when no worker is live.
+    state.status.learned_route_import_capped = state.afxdp.learned_route_import_capped_now();
 }
 
 pub(crate) fn forwarding_unsupported_error(cap: &UserspaceCapabilities) -> String {

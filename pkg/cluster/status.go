@@ -576,6 +576,11 @@ func (m *Manager) FormatInformation() string {
 		if syncStats.BulkEndsDeadIncarnationDropped > 0 {
 			fmt.Fprintf(&b, "  Bulk ends dead-incarnation-dropped: %d\n", syncStats.BulkEndsDeadIncarnationDropped)
 		}
+		// #9653: same posture. A nonzero value means something on the session-sync
+		// link sent a peer clock no running peer can read, and it was refused.
+		if syncStats.ClockSyncsRefused > 0 {
+			fmt.Fprintf(&b, "  Clock syncs refused: %d\n", syncStats.ClockSyncsRefused)
+		}
 		// #9716: the connection fence, and the fail-open completions it covers.
 		// Same posture: counters an operator can see, not a health annotation.
 		if syncStats.BulkEndsForeignConnDropped > 0 {
@@ -726,9 +731,14 @@ func (m *Manager) FormatControlPlaneStatistics() string {
 // It does NOT track the session-sync channel. #5078 removed peerAuthSeen from
 // syncAuthDecision, so sync admission no longer consults the sticky flag this
 // string is built from; naming syncAuthDecision here would assert a coupling
-// that no longer exists. pkg/cluster/README.md, "Rolling it onto a live
-// unkeyed cluster", scopes the operator-facing line accordingly — it does not
-// tell you whether an existing session-sync connection predates the key.
+// that no longer exists.
+//
+// #9717: the line used to stop there. It read "unauthenticated frames rejected"
+// from heartbeat evidence alone, while a session-sync connection established
+// BEFORE the key could still be accepted without HMAC; with strict-session-auth
+// off, nothing evicts it. The line now asks the session-sync provider for exactly
+// those connections, and when there are any it names them instead of claiming
+// rejection.
 //
 // It only inspects len(key) and never renders the secret.
 func (m *Manager) controlLinkAuthStatus() string {
@@ -739,6 +749,15 @@ func (m *Manager) controlLinkAuthStatus() string {
 		// not-yet-keyed side of a rolling upgrade — dual-accept grace.
 		return "dual-accept (no control-link key configured)"
 	case m.HeartbeatPeerAuthSeen():
+		// #9717: the heartbeat's peer has proven the key, but an established
+		// session-sync connection that predates it may still be unauthenticated,
+		// with its frames accepted without HMAC. Name it rather than claim
+		// rejection for a channel the heartbeat fact does not describe.
+		if unauth := m.unauthenticatedSessionConns(); len(unauth) > 0 {
+			return fmt.Sprintf("heartbeat engaged (peer authenticated); %d session-sync connection(s) "+
+				"NOT authenticated, frames still accepted without HMAC: %s",
+				len(unauth), strings.Join(unauth, ", "))
+		}
 		// Both nodes are known-keyed and the peer has proven it: an
 		// unauthenticated frame is now rejected as a downgrade attack.
 		return "engaged (peer authenticated; unauthenticated frames rejected)"

@@ -114,6 +114,7 @@ func (s *Store) Load() error {
 	// #6538: the recovery can leave the store with a nil compiled config (its
 	// rollback target failed even the lenient compile). Load MUST NOT report
 	// success in that state — see recoverPendingConfirmLocked.
+	s.loadUnsharedMarkLocked() // #9530
 	return s.recoverPendingConfirmLocked()
 }
 

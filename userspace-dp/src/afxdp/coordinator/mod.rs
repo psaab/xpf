@@ -5,6 +5,7 @@ mod cos_state;
 mod ha_state;
 mod idle_lease_sync_8121;
 mod inject;
+mod learned_route_capped_now;
 mod neighbor_manager;
 mod reconcile;
 mod refresh_bindings;

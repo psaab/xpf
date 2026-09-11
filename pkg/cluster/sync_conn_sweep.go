@@ -124,7 +124,7 @@ func (s *SessionSync) syncSweep() int {
 			s.forceResync.Store(true)
 			slog.Warn("cluster sync: forced resync bulk failed, will retry", "err", err)
 		}
-	} else if s.needColdPrime.Load() && s.bulkRedriveInFlight.CompareAndSwap(false, true) {
+	} else if s.needColdPrime.Load() && !s.coldPrimeAckAwaited() && s.bulkRedriveInFlight.CompareAndSwap(false, true) {
 		// #82: an OWED cold prime had exactly two consumers — installConn (a
 		// reconnect) and handleDisconnect's survivor re-drive. Both are
 		// disconnect-edge triggered, so a first bulk that failed WITHOUT
@@ -144,8 +144,14 @@ func (s *SessionSync) syncSweep() int {
 		// started is permanently invisible to it — and only a BulkStart ->
 		// BulkEnd window drives the peer's authoritative
 		// reconcileStaleSessions. Re-drive here, past the s.sessions nil guard
-		// above so the store is known wired, discharging on success and
-		// leaving the arm in place on failure so the next tick retries.
+		// above so the store is known wired. The peer's matching BulkAck
+		// discharges the arm (#9626), and a failure leaves it in place so the
+		// next tick retries.
+		//
+		// #9626: because the discharge now waits for the peer, a bulk already
+		// sent for THIS debt and still inside BulkAckPendingRetryAfter is not
+		// re-sent every tick (coldPrimeAckAwaited). Past that bound the ack is
+		// treated as lost and the bulk goes again.
 		//
 		// else-if, not a second independent block: a forced resync sends the
 		// same authoritative snapshot, so at most one bulk leaves per tick.
@@ -159,8 +165,6 @@ func (s *SessionSync) syncSweep() int {
 		s.bulkRedriveInFlight.Store(false)
 		if err != nil {
 			slog.Warn("cluster sync: owed cold-prime re-drive failed, will retry", "err", err)
-		} else {
-			s.needColdPrime.Store(false)
 		}
 	}
 	if s.lastSweepEmpty && !s.syncBackfillNeeded.Load() {

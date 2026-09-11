@@ -546,7 +546,6 @@ var converseAdjudicated8807 = map[string]converseVerdict8807{
 	"policy / scheduler-name": {"unmeasured", "NOT MEASURED."},
 	"pool / dns-server":       {"unmeasured", "DHCP pool; NOT MEASURED."},
 	"pool / static-binding":   {"unmeasured", "DHCP pool; NOT MEASURED."},
-	"profile / feed-name":     {"unmeasured", "NOT MEASURED."},
 	"route / policy":          {"unmeasured", "NOT MEASURED."},
 	"schedulers / scheduler":  {"unmeasured", "NOT MEASURED."},
 	"vpn / traffic-selector":  {"unmeasured", "IPsec VPN; the compiler may read it through a helper rather than a .Name() clause. NOT MEASURED."},
@@ -664,7 +663,7 @@ func TestConversePredicateIsPinned8807(t *testing.T) {
 // as findings would have over-reported by 40%. A category that only accumulates
 // stops being a measurement and becomes a registration, which is why this is a
 // ratcheting ceiling and not a logged number.
-const converseUnmeasured8807 = 8
+const converseUnmeasured8807 = 7
 
 // TestConversePredicateControl8807 is #8807's second acceptance control: the
 // instrument must report #8785. Both halves run, because "reports it" alone is

@@ -435,6 +435,8 @@ type Manager struct {
 	configuredMode     DataplaneMode // user-configured desired mode (from config)
 	lastHASyncTime     time.Time     // throttle HA watchdog sync to avoid control socket contention
 	lastRGActivateTime time.Time     // wall clock of last update_ha_state; statusLoop skips HA sync for 2s
+	// liveness counts consecutive unanswered status polls (#9651). Guarded by mu.
+	liveness helperLiveness
 
 	rgTransitionInFlight atomic.Bool // set before syncHAStateLocked, cleared on completion
 

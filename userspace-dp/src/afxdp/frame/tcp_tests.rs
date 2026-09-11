@@ -640,6 +640,22 @@ fn reject_rst_v4_for_syn_acks_seq_plus_one_with_macs_and_ips_swapped() {
     assert_eq!(checksum_tcp_v4([10, 0, 0, 2], [10, 0, 0, 1], tcp), 0xFFFF);
 }
 
+/// #9499: a SYN at the top of the sequence space wraps the RST's ack to 0.
+///
+/// The ack is `seq.wrapping_add(consumed)`. An unchecked `+` there computes the
+/// same wrapped value in a release build without overflow checks, so every
+/// value assertion in this file stays green on the release leg; only a leg
+/// with overflow checks turns it into a failure, and only if a test drives
+/// the addition across `u32::MAX`. This is that test.
+#[test]
+fn reject_rst_v4_for_syn_at_seq_max_wraps_ack_to_zero_9499() {
+    let frame = reject_v4_tcp_frame(TCP_FLAG_SYN, u32::MAX, 0);
+    let out = build_reject_rst_frame(&frame).expect("RST for SYN");
+    let tcp = &out[ETH_HDR_LEN + IPV4_HDR_LEN..ETH_HDR_LEN + IPV4_HDR_LEN + 20];
+    assert_eq!(u32::from_be_bytes([tcp[8], tcp[9], tcp[10], tcp[11]]), 0);
+    assert_eq!(tcp[13], TCP_FLAG_RST | TCP_FLAG_ACK);
+}
+
 #[test]
 fn reject_rst_v4_for_ack_uses_inbound_ack_no_ack_flag() {
     // ACK-bearing inbound (no SYN): RST seq=inbound_ack, flags RST only.
