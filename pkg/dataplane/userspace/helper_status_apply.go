@@ -511,6 +511,16 @@ func (m *Manager) applyPrimaryBindingRowsLocked(
 				binding.QueueID, uint32(bindingQueuesPerIface), binding.Ifindex,
 			))
 		}
+		// Ifindex-dimension bound (#9698), BEFORE the multiply. An ifindex of
+		// 2^28 or more wraps uint32(ifindex)*stride back inside the dense cap
+		// (and 2^32 or more truncates in the conversion), so the #814 check
+		// below passes and the row lands on another (ifindex, queue).
+		if !bindingIfindexInRange(binding.Ifindex) {
+			return newBindingIndices, m.failClosedUserspaceCtrlLocked(ctrlMap, ctrl, fmt.Errorf(
+				"update userspace_bindings: ifindex=%d exceeds cap MaxInterfaces=%d (queue=%d); ifindex*stride would wrap the uint32 composed index onto another interface's row — raise MAX_INTERFACES in bpf/headers/xpf_common.h if the ifindex is real (#9698)",
+				binding.Ifindex, dataplane.MaxInterfaces, binding.QueueID,
+			))
+		}
 		idx := uint32(binding.Ifindex)*bindingQueuesPerIface + binding.QueueID
 		// Call-site cap guard (#814): the aya Array is sized to
 		// dataplane.BindingArrayMaxEntries = MaxInterfaces *
