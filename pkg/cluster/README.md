@@ -4239,8 +4239,8 @@ outside the monitor loop:
   installed, and the switch is then the only classifier that ever sees the
   reboot. The first incarnated prime (zero -> X) never reaches the switch
   (`priorInc.known()`), and a same-boot BulkStart on the peer's second fabric is
-  not a switch, so neither arms. When both signals observe one reboot the cost
-  is at most one redundant, idempotent bulk.
+  not a switch, so neither arms. When both signals observe one reboot, the
+  second consumes the first's record and arms nothing (#9636, below).
 
   **The PEER discharges the obligation, not a local write (#9626).** Every arm
   above used to be paid off when `doBulkSync` returned nil. That means the
@@ -4281,17 +4281,61 @@ outside the monitor loop:
   guards. Closing it means exporting standby copies on the owner-RG export path.
   That path's owner is the daemon's session export, not this latch.
 
-  **What this does not close.** The two classifiers are still not reconciled
-  (#9636): a boot-id-first reboot gets no `OnPeerConnected` dispatch (DHCP-lease
-  and IPsec-SA sync nudges, config reconcile), and a healthy second fabric that
-  installs between the epoch classification and the replacement's BulkStart is
-  evicted as a corpse. Adding the dispatch to the switch fires the
-  non-idempotent callback twice when the epoch was seen first, and gating on an
-  eviction has both a false negative and a false positive, so that fix needs a
-  per-reboot identity rather than either shortcut. The consumer semantics every
-  arm shares — discharge on a local write rather than `BulkAck`, an unversioned
-  latch an older bulk can clear, a re-sent table limited to survivor-primary
-  RGs — are #9626.
+  **The two classifiers consume each other's evidence (#9636).** `installConn`
+  retires an incarnation on a raised heartbeat boot epoch, and the BulkStart arm
+  (`classifyPrimeLocked`) retires it on a changed boot id. One reboot produces
+  both signals, in either order, and each classifier used to act on its own
+  evidence alone:
+  - epoch first, then the replacement's second fabric, then its BulkStart: the
+    switch advanced the incarnation a second time and evicted that healthy
+    second fabric as a corpse;
+  - boot id first, then a second fabric that installs after the heartbeat has
+    landed: `installConn` read the late raise as a second reboot and evicted the
+    fabric the switch had just established;
+  - boot id first: the switch dispatched no `OnPeerConnected`, so the new process
+    got no DHCP-lease or IPsec-SA sync nudge and no config reconcile.
+
+  The discriminator is the reboot's identity, recorded by whichever classifier
+  retires the incarnation (`rebootAwaiting`, keyed to the incarnation, so any
+  later advance voids it):
+  - the epoch arm records that the incarnation it established awaits its boot id;
+  - a switch that retires an incarnation before the raise has landed records
+    that the incarnation awaits its epoch.
+
+  The other classifier consumes the record: it adopts the signal without
+  advancing, evicting, arming or dispatching. Three rules keep a record from
+  swallowing a real reboot:
+  - a daemon restart raises the epoch but keeps the boot id, which changes only
+    on an OS boot. So a prime with an unchanged boot id from an installed
+    connection settles the record. A BulkStart the evicted corpse had already
+    read carries the old boot id too, but it is not installed and settles nothing;
+  - an epoch that has raised again since the retirement means a newer process
+    exists, so the boot-id change is retired as a new reboot;
+  - a supersession is independent evidence and still advances on its own.
+
+  When the switch retires an incarnation it dispatches `OnPeerConnected`, unless
+  the connection's own install already did. That happens when the replacement
+  became the active fabric while a cold prime was owed. The callback is not
+  idempotent: on a cold start it bumps the readiness-timer generation outside
+  the timer mutex. An epoch-first reboot is announced by its install, and its
+  BulkStart is consumed.
+
+  **Residual.** A record the peer never settles can consume a later reboot's
+  signal. That takes a daemon restart whose new process never primes, then an OS
+  reboot whose BulkStart is handled before its first heartbeat raises the epoch.
+  The consumed reboot is then not retired: its corpse stays installed until its
+  receive loop gives up, and no cold prime is owed for it.
+
+  A second shape stays open, and it predates this change: a connection from the
+  new process that installed before ANY evidence of the reboot is stamped with
+  the old incarnation, so whichever classifier retires the incarnation later
+  evicts it as a corpse. Nothing it carries at install time names its process,
+  so closing it needs a per-connection process identity (#9818). Cells:
+  `sync_reboot_classifiers_9636_test.go`, one per ordering, each asserting the
+  incarnation advances, the installed connections, `needColdPrime` with the
+  number of arms, and the `OnPeerConnected` dispatches. The consumer semantics
+  every arm shares (discharge on the peer's `BulkAck`, a generation the ack must
+  match, a re-sent table limited to survivor-primary RGs) are #9626.
 
   **Atomicity of the ack is bound, not merely asserted (#5718 fold r3).** Every
   scenario test calls `installConn` and `handleMessage` in sequence, so none of

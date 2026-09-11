@@ -275,7 +275,18 @@ func (s *SessionSync) applyPeerIncarnationSwitchLocked(keepIdx int) bool {
 	//
 	// The two reboot signals must therefore share one baseline: whichever
 	// observes the reboot first consumes it.
+	//
+	// #9636: the rebase reconciles the two only when the heartbeat has ALREADY
+	// raised the epoch. A replacement that primes before its heartbeat lands
+	// leaves the floor where the retired incarnation had it, and the next
+	// install reads the late raise as a second reboot. So a switch that has
+	// not seen the raise leaves the new incarnation awaiting its epoch, and
+	// installConn consumes that raise instead of retiring it again.
+	epochSeen := s.peerEpochRaisedLocked()
 	s.rebaseEpochBaselineLocked()
+	if !epochSeen {
+		s.awaitRebootEvidenceLocked(rebootAwaitingEpoch)
+	}
 	evicted := s.evictStaleIncarnationConnsLocked(keepIdx)
 	// #9618: retiring an incarnation on boot-id evidence OWES the replacement a
 	// cold prime, exactly as installConn's epoch arm does since #9174 V014. The
@@ -288,8 +299,8 @@ func (s *SessionSync) applyPeerIncarnationSwitchLocked(keepIdx int) bool {
 	// the replacement blackholes every established flow: the #5480 blackhole,
 	// reached through the boot-id edge. The sweep's owed-cold-prime re-drive
 	// sends it, and the matching BulkAck discharges it (#9626). When both
-	// signals observe one reboot the
-	// cost is one redundant, idempotent bulk. The arm is deliberately NOT
+	// signals observe one reboot, the second consumes the first's record and
+	// arms nothing (#9636). The arm is deliberately NOT
 	// gated on having evicted something: the corpse's own receive loop can
 	// remove it after the replacement installed on the empty slot, and this
 	// switch is then the only classifier that ever sees the reboot while
@@ -305,6 +316,122 @@ func (s *SessionSync) applyPeerIncarnationSwitchLocked(keepIdx int) bool {
 		s.conn1Gen = s.peerIncarnation
 	}
 	return evicted
+}
+
+// rebootEvidence is the half of a peer reboot's evidence that an incarnation is
+// still waiting for (#9636).
+type rebootEvidence uint8
+
+const (
+	rebootAwaitingNothing rebootEvidence = iota
+	// rebootAwaitingBootID: installConn retired the prior incarnation on a
+	// raised boot epoch. If the reboot was an OS boot, the new process's
+	// BulkStart carries a changed boot id, and that change is this reboot.
+	rebootAwaitingBootID
+	// rebootAwaitingEpoch: the BulkStart switch retired the prior incarnation on
+	// a changed boot id before the heartbeat raised the epoch. The raise that
+	// lands later is this reboot's.
+	rebootAwaitingEpoch
+)
+
+func (s *SessionSync) awaitRebootEvidenceLocked(ev rebootEvidence) {
+	s.rebootAwaiting = ev
+	s.rebootAwaitingInc = s.peerIncarnation
+}
+
+// rebootAwaitingLocked reports whether the CURRENT incarnation still awaits ev.
+// A record made for an earlier incarnation is void: a later advance retired the
+// incarnation it belonged to.
+func (s *SessionSync) rebootAwaitingLocked(ev rebootEvidence) bool {
+	return s.rebootAwaiting == ev && s.rebootAwaitingInc == s.peerIncarnation
+}
+
+func (s *SessionSync) settleRebootEvidenceLocked() {
+	s.rebootAwaiting = rebootAwaitingNothing
+}
+
+// peerEpochRaisedLocked reports what peerEpochRebootLocked would, without
+// recording the observation (#9636): whether the peer's boot epoch has raised
+// past the floor recorded for the current incarnation.
+func (s *SessionSync) peerEpochRaisedLocked() bool {
+	if s.PeerBootEpochFn == nil {
+		return false
+	}
+	epoch, latched := s.PeerBootEpochFn()
+	return latched && s.peerEpochAtIncarnation != 0 && epoch > s.peerEpochAtIncarnation
+}
+
+// primeClassification is what one accepted BulkStart did to the peer
+// incarnation (#6910, #9636).
+type primeClassification struct {
+	retired  bool // it retired the prior incarnation on a changed boot id
+	evicted  bool // and that evicted a connection of the retired incarnation
+	consumed bool // the change belonged to a reboot installConn had already retired
+	announce bool // the caller must dispatch OnPeerConnected for the new process
+}
+
+// classifyPrimeLocked is the BulkStart half of peer-reboot classification.
+// switched and priorKnown are notePeerBootIncarnation's result and whether a
+// boot id had been recorded before it.
+//
+// #9636. One reboot reaches installConn's epoch arm and this switch in either
+// order, and each used to act on its own evidence:
+//   - epoch first: installConn retired the incarnation, and the BulkStart that
+//     followed retired it AGAIN. The peer's second fabric, installed in between
+//     and stamped with the first advance, was left one incarnation behind, and
+//     evictStaleIncarnationConnsLocked dropped it as a corpse;
+//   - boot id first: the switch retired it and dispatched nothing, so the new
+//     process got no OnPeerConnected (DHCP-lease and IPsec-SA sync nudges,
+//     config reconcile).
+//
+// The discriminator is the reboot's identity, recorded by whichever classifier
+// retires the incarnation (rebootAwaiting), not a side effect of the switch.
+// Gating on an eviction was refuted both ways: the corpse can leave on its own
+// before the BulkStart (a false negative), and the eviction can be of the
+// healthy sibling (a false positive).
+//
+// An epoch retirement waits for a boot-id change that may never come: a daemon
+// restart raises the epoch and keeps the boot id, which changes only on an OS
+// boot. So a prime with an UNCHANGED boot id settles the record, if it comes
+// from an installed connection. Every installed connection belongs to the
+// current incarnation, because the retirement evicted the rest. A BulkStart
+// the evicted corpse had already read carries the old boot id too, but it is
+// not installed and settles nothing.
+//
+// The record is consumed only while the epoch has not raised again since the
+// retirement. A raise since then says a newer process exists, so the boot-id
+// change is retired as a new reboot.
+func (s *SessionSync) classifyPrimeLocked(conn net.Conn, switched, priorKnown bool) primeClassification {
+	var c primeClassification
+	idx := s.fabricIdxForConnLocked(conn)
+	if idx < 0 {
+		return c
+	}
+	if !switched || !priorKnown {
+		// The boot id is unchanged, or this is the first incarnated prime. Either
+		// way the recorded boot id is now the current incarnation's, and no
+		// boot-id change is coming for it.
+		if s.rebootAwaitingLocked(rebootAwaitingBootID) {
+			s.settleRebootEvidenceLocked()
+		}
+		return c
+	}
+	if s.rebootAwaitingLocked(rebootAwaitingBootID) && !s.peerEpochRaisedLocked() {
+		s.settleRebootEvidenceLocked()
+		c.consumed = true
+		return c
+	}
+	c.retired = true
+	c.evicted = s.applyPeerIncarnationSwitchLocked(idx)
+	// A connection whose own install drove an owed cold prime has already had
+	// its OnPeerConnected, and the callback is not idempotent: on a cold start
+	// it bumps the readiness-timer generation outside the timer mutex.
+	announced := s.conn0Announced
+	if idx == 1 {
+		announced = s.conn1Announced
+	}
+	c.announce = !announced
+	return c
 }
 
 // peerEpochRebootLocked reports whether the peer's boot epoch has RAISED since
@@ -785,10 +912,23 @@ func (s *SessionSync) installConn(fabricIdx int, conn net.Conn) connColdPrimeDec
 	// supersededCurrent) so the observation is RECORDED on every install,
 	// which is what keeps the next comparison's baseline current.
 	epochReboot := s.peerEpochRebootLocked()
+	// #9636: a raise the BulkStart switch is awaiting belongs to the reboot it
+	// already retired, whose replacement primed before its heartbeat landed.
+	// Consume it rather than retire the incarnation a second time, which would
+	// evict the connection that switch established. A supersession is
+	// independent evidence and still advances on its own.
+	if epochReboot && s.rebootAwaitingLocked(rebootAwaitingEpoch) {
+		s.settleRebootEvidenceLocked()
+		epochReboot = false
+	}
 	if supersededCurrent || epochReboot {
 		s.peerIncarnation++
 		s.peerHeartbeatAckEver.Store(false)
 		s.evictStaleIncarnationConnsLocked(fabricIdx)
+		if epochReboot {
+			// A changed boot id on this reboot's BulkStart is this reboot too.
+			s.awaitRebootEvidenceLocked(rebootAwaitingBootID)
+		}
 	}
 	// Stamp the slot AFTER any advance, so this connection belongs to the
 	// incarnation it actually established.
@@ -846,6 +986,14 @@ func (s *SessionSync) installConn(fabricIdx int, conn net.Conn) connColdPrimeDec
 	// for this connected epoch has not yet succeeded. Both are read here, atomic
 	// with the install above.
 	d.shouldColdPrime = d.becameActive && s.needColdPrime.Load()
+	// #9636: handleNewConnection dispatches OnPeerConnected exactly when
+	// shouldColdPrime is true. Record it for classifyPrimeLocked.
+	switch fabricIdx {
+	case 0:
+		s.conn0Announced = d.shouldColdPrime
+	case 1:
+		s.conn1Announced = d.shouldColdPrime
+	}
 	return d
 }
 
