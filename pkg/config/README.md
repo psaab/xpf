@@ -1682,3 +1682,31 @@ application terms are lowered separately
 exactly with trailing `Pad [N]byte` fields. cilium/ebpf serializes map
 values in native endian, not big-endian, so use `binary.NativeEndian`
 when packing IP addresses (already in network byte order on the wire).
+
+**Group expansion of named-instance leaves (#9801, #9831):** `mergeNodes`
+(`ast_groups.go`) treats a named instance written as a leaf, such as
+`security-zone trust;` or `system syslog host 10.0.0.2;`, as the instance it
+names.
+- A group's named-instance leaf is matched against the inline node naming the
+  same instance: the keyword plus the instance keys (`sameInstancePeer9831`).
+  Before #9831 it matched on the keyword alone, so an inline
+  `security-zone trust;` overrode, and dropped, a group's `security-zone zga;`.
+- A group leaf that carries keys past the instance it names is not overridden
+  by that instance's inline node, because the override would drop the extra
+  keys. Examples are `security-zone [ zga zgb ];` and a mistyped
+  `security-zone trust scren edge;`.
+  - A braced peer takes a packed statement through #7648; otherwise the leaf
+    is adopted.
+  - Beside a leaf zone, the leaf is adopted too, so #9656 judges it as it
+    would the same text written inline.
+  - Any other leaf instance keeps the override. Adopting
+    `host 10.0.0.1 any any;` beside `host 10.0.0.1;` would compile a second
+    syslog destination.
+- A `<*>` group reaches a zone written as a leaf. The leaf becomes the empty
+  container its braced spelling is (`zoneLeafTakesWildcard9801`). Before #9801
+  the wildcard merge visited only non-leaf destinations, so
+  `security-zone trust;` lost a group's screen that `security-zone trust { }`
+  took.
+- The wildcard change is scoped to zones. An interface or routing instance
+  written as a leaf compiles no instance at all (#9838), so a wildcard group
+  must not turn one into an instance.

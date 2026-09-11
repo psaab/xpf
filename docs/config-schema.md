@@ -604,10 +604,15 @@ paths warn instead, and compile the statement as before (#1960).
 
   Quotes and brackets do not survive rendering (#9635), so the check cannot tell
   a zone name from the statement. This predates #9656.
-- **Group expansion can discard a leaf zone before the check runs.** A group's
-  `security-zone zga;` is dropped whenever the configuration has any inline
-  leaf `security-zone …;`, because the override matches only the keyword. This
-  predates #9656 and is tracked in #9831.
+- **Group expansion matches a named instance by identity.** Before #9831, a
+  group's `security-zone zga;` was dropped, before this check could see it,
+  whenever the configuration had any inline leaf `security-zone …;`: the
+  override matched only the keyword. Group expansion now matches the keyword
+  plus the instance keys, so the group's zone survives. A group statement that
+  carries keys past the zone name, such as `security-zone [ zga zgb ];`, is
+  adopted beside the inline zone it names, whether that zone is braced or a
+  leaf, unless #7648 expands it into the braced body. So it reaches this check
+  and is refused.
 - **Why a refusal and not an expansion.** An earlier cut of #9656 expanded each
   group into one statement per zone in the #8662 normalizer. Three review rounds
   found the per-member statements it materialised colliding with the node

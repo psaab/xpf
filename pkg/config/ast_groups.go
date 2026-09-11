@@ -414,7 +414,13 @@ func mergeNodes(dst *[]*Node, src []*Node, ancestorPath [][]string, budget *grou
 			if len(s.Keys) > 0 {
 				key = s.Keys[0]
 			}
-			if peer := leafListPeer(*dst, key); peer != nil {
+			// #9831: a named-instance leaf names ONE instance, so its inline peer is
+			// the node naming that instance, not any node sharing the keyword.
+			peer := leafListPeer(*dst, key)
+			if cs := groupNamedInstanceSchema9831(ancestorPath, key); cs != nil {
+				peer = sameInstancePeer9831(ancestorPath, *dst, s, cs.args)
+			}
+			if peer != nil {
 				// #7648: a COMPACT group leaf whose key names a schema
 				// CONTAINER, matched against a container peer, is the block
 				// spelling wearing a leaf's shape. Expand it and merge, so the
@@ -452,7 +458,10 @@ func mergeNodes(dst *[]*Node, src []*Node, ancestorPath [][]string, budget *grou
 		if keysContainWildcard(s.Keys) {
 			// Wildcard merge: apply to all matching containers in dst.
 			for _, d := range *dst {
-				if !d.IsLeaf && keysMatchWildcard(d.Keys, s.Keys) {
+				if keysMatchWildcard(d.Keys, s.Keys) && (!d.IsLeaf || zoneLeafTakesWildcard9801(ancestorPath, d)) {
+					// #9801: a zone written as a leaf becomes the empty container its
+					// braced spelling is, and takes the group the same way.
+					d.IsLeaf = false
 					// #6767: THIS is the fan-out. One wildcard source is cloned
 					// into every matching destination container, so the cost is
 					// the product, not the reference count. Charge the clone's
