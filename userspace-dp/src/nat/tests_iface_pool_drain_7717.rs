@@ -325,7 +325,7 @@ fn nat64_mint_fails_closed_while_a_pool_drains_the_same_address_7799() {
     // makes the refusal below attributable to the DRAIN rather than to the
     // rule set, the pool, or the allocator being unusable in the first place.
     nat64
-        .allocate_source_for_worker(0, TCP, client, dst_v4, 6000, 443, 0, 0, &gen1)
+        .allocate_source_for_worker(0, TCP, client, dst_v4, 6000, 443, 0, 0, &gen1, 0)
         .expect("control: with no draining pool a NAT64 mint on E must succeed");
 
     // Quarantine the pool. Its allocator is RETAINED, so it is still holding
@@ -346,7 +346,7 @@ fn nat64_mint_fails_closed_while_a_pool_drains_the_same_address_7799() {
         "setup: still draining, not drained"
     );
 
-    match nat64.allocate_source_for_worker(0, TCP, client, dst_v4, 6001, 443, 0, 0, &draining) {
+    match nat64.allocate_source_for_worker(0, TCP, client, dst_v4, 6001, 443, 0, 0, &draining, 0) {
         Err(SourceNatFailureReason::Nat64OverlapDraining) => {}
         other => panic!(
             "#7799: a NAT64 mint on an address a quarantined pool is still draining must fail \
@@ -392,7 +392,7 @@ fn nat64_deterministic_mint_also_fails_closed_while_draining_7799() {
 
     // CONTROL: the deterministic path mints fine while nothing is draining.
     nat64
-        .allocate_source_for_worker(0, TCP, client, dst_v4, 6000, 443, 0, 0, &gen1)
+        .allocate_source_for_worker(0, TCP, client, dst_v4, 6000, 443, 0, 0, &gen1, 0)
         .expect("control: a deterministic NAPT64 mint must succeed with no draining pool");
 
     let draining = parse_source_nat_rules_with_previous(
@@ -401,7 +401,7 @@ fn nat64_deterministic_mint_also_fails_closed_while_draining_7799() {
         &NatCounterStore::default(),
         0,
     );
-    match nat64.allocate_source_for_worker(0, TCP, client, dst_v4, 6001, 443, 0, 0, &draining) {
+    match nat64.allocate_source_for_worker(0, TCP, client, dst_v4, 6001, 443, 0, 0, &draining, 0) {
         Err(SourceNatFailureReason::Nat64OverlapDraining) => {}
         other => panic!(
             "#7799: the DETERMINISTIC NAPT64 mint path allocates from the same pool and must \

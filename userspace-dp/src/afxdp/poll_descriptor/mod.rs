@@ -2622,6 +2622,10 @@ pub(super) fn poll_binding_process_descriptor(
                                         // told which addresses a DRAINING
                                         // source-NAT pool still holds.
                                         &worker_ctx.forwarding.source_nat_rules,
+                                        // #9680: the flow's routing domain keys the
+                                        // NAT64 BIB; release and the HA synced reserve
+                                        // read the same field off the session key.
+                                        flow.forward_key.routing_domain,
                                     ) {
                                         Ok((snat_v4, translated_port)) => {
                                             decision.nat = Nat64State::forward_decision(
