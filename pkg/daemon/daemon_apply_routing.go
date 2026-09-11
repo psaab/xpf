@@ -227,6 +227,28 @@ func (d *Daemon) applyRoutingRules(cfg *config.Config, commitOverlay []config.Ro
 		}
 	}
 
+	// #9693: the kernel policy-routing (ip rule) reconciles live in
+	// applyPolicyRoutingRules so the routing reconcile retry owner re-runs
+	// exactly these, and never the FRR apply above (the FRR manager owns its own
+	// degraded retry).
+	if err := d.applyPolicyRoutingRules(cfg); err != nil {
+		routingErrs = append(routingErrs, err)
+	}
+
+	// Fail-closed but COMPLETE: every rule type above ran regardless of an
+	// earlier failure; surface the joined error so a partial ip-rule reconcile
+	// fails the commit instead of being silently acknowledged (#5844).
+	return errors.Join(routingErrs...)
+}
+
+// applyPolicyRoutingRules reconciles the kernel policy-routing (ip rule) layer:
+// next-table, rib-group and firewall-filter PBR rules. Every rule type runs even
+// after an earlier one fails, and the joined error is returned (#5844's
+// fail-closed but complete rule). Extracted from applyRoutingRules (#9693) so
+// the commit path and the routing reconcile retry owner run the same reconcile.
+func (d *Daemon) applyPolicyRoutingRules(cfg *config.Config) error {
+	var errs []error
+
 	// 3b. Apply next-table policy routing rules (ip rule)
 	if d.routing != nil {
 		// Collect all static routes from main + per-rib. Build the combined
@@ -249,7 +271,7 @@ func (d *Daemon) applyRoutingRules(cfg *config.Config, commitOverlay []config.Ro
 		ingressIfaces := routing.DefaultInstanceIngressIfaces(cfg)
 		if err := d.routing.ApplyNextTableRules(allRoutes, cfg.RoutingInstances, ingressIfaces); err != nil {
 			slog.Warn("failed to apply next-table rules", "err", err)
-			routingErrs = append(routingErrs, fmt.Errorf("apply next-table rules: %w", err))
+			errs = append(errs, fmt.Errorf("apply next-table rules: %w", err))
 		}
 	}
 
@@ -277,7 +299,7 @@ func (d *Daemon) applyRoutingRules(cfg *config.Config, commitOverlay []config.Ro
 		connectedPrefixes := config.RibGroupConnectedPrefixes(cfg)
 		if err := d.routing.ApplyRibGroupRules(cfg.RoutingOptions.RibGroups, cfg.RoutingInstances, connectedPrefixes); err != nil {
 			slog.Warn("failed to apply rib-group rules", "err", err)
-			routingErrs = append(routingErrs, fmt.Errorf("apply rib-group rules: %w", err))
+			errs = append(errs, fmt.Errorf("apply rib-group rules: %w", err))
 		}
 	}
 
@@ -329,14 +351,11 @@ func (d *Daemon) applyRoutingRules(cfg *config.Config, commitOverlay []config.Ro
 		// joined into the commit-error (fail-closed).
 		if err := d.routing.ApplyPBRRules(pbrRules); err != nil {
 			slog.Warn("failed to apply PBR rules", "err", err)
-			routingErrs = append(routingErrs, fmt.Errorf("apply PBR rules: %w", err))
+			errs = append(errs, fmt.Errorf("apply PBR rules: %w", err))
 		}
 	}
 
-	// Fail-closed but COMPLETE: every rule type above ran regardless of an
-	// earlier failure; surface the joined error so a partial ip-rule reconcile
-	// fails the commit instead of being silently acknowledged (#5844).
-	return errors.Join(routingErrs...)
+	return errors.Join(errs...)
 }
 
 // reconcileRouteLeakSnapshot republishes the userspace route snapshot after
