@@ -1934,8 +1934,29 @@ the standby applies — and re-runs the registered strict SUBJECTS against that
 peer-effective `*Config`. A peer-only source-NAT error is now rejected at the
 origin commit, naming the peer node and the offending pool, so BOTH
 node-effective source-NAT outputs are proven representable before promotion.
-A peer view that will not compile at all is left to the peer's own load path (no
-false-reject of the origin commit).
+The registry on its own leaves a peer view that will not compile at all
+unadjudicated; since #9619 that case, and every strict gate the registry does
+not name, is refused by the whole-pipeline peer check described next.
+
+**The whole strict pipeline on the peer view (#9619).** The registry covered two
+subjects, so any other strict gate was a peer-only hole: `groups node1 system
+dataplane ring-entries 16385` or `groups node1 chassis cluster
+reth-advertise-interval 40960` committed green on node0 (whose view is valid)
+although node1's own commit rejects the value, and config-sync installed it on
+node1 through the tolerant ingress. `configstore.compileTreeStrict` now follows
+the registry with `validatePeerStrictPipeline`
+(`pkg/configstore/peer_strict_pipeline_9619.go`), which runs the same steps as
+the local commit on the peer's `${node}` expansion: typed-leaf schema
+validation, `CompileConfigForNode`, and the #4525 router-advertisement ratio
+check. The error names the peer node and wraps the gate's own error. The tree
+it checks is the #6861 F2 clone with retired `dataplane-type` leaves rewritten,
+because that is what the standby compiles. The #4185 node-identity cross-check
+is not run for the peer: it compares the leaf with the checking host's node-id
+file, and a config authored for one node with a literal `node 0` leaf is an
+accepted check-config input there. Standalone commits and the tolerant
+`Store.Load` / `Store.SyncApply` ingresses are unchanged, so a config already on
+disk that is invalid for this node still loads with warnings. The registry
+still runs first, so its two subjects keep their specific messages.
 
 **Subjects, not one gate (#4785).** The peer view is a FULL compile, so it is
 built ONCE and every registered subject runs against it; a second standalone

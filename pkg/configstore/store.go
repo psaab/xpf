@@ -526,15 +526,15 @@ func compileTreeStrict(tree *config.ConfigTree, nodeID int) (*config.Config, err
 	}
 	// #5876 + #4785: a chassis-cluster commit must adjudicate the REGISTERED
 	// peer-effective concerns on BOTH node-effective views before promotion, not
-	// only the submitting node's. Two qualifiers, both load-bearing. "The
-	// registered concerns", because the registry holds exactly two subjects
-	// (source NAT and the emitted-IPIP endpoint) — "adjudicates the
-	// peer-effective view" would claim a completeness it does not have (#6861
-	// re-gate C2). And "adjudicate", not "prove installable": the peer gate
-	// below is conditional on the peer view COMPILING, and a peer view that does
-	// not compile is deliberately left unadjudicated (see
-	// ValidatePeerEffectiveStrict, and the #6861 F2 paragraph further down for
-	// the case where that swallow bit).
+	// only the submitting node's. "The registered concerns", because the registry
+	// holds exactly two subjects (source NAT and the emitted-IPIP endpoint), and
+	// the registry on its own is conditional on the peer view COMPILING — a peer
+	// view that does not compile is left unadjudicated by
+	// ValidatePeerEffectiveStrict (see the #6861 F2 paragraph further down for
+	// the case where that swallow bit). #9619 closes both limits at this call
+	// site: validatePeerStrictPipeline, after the registry, runs every strict
+	// step of this function on the peer's view, so neither an unregistered gate
+	// nor an uncompilable peer view passes a shared commit.
 	// This gate compiles for the local node alone (CompileConfigForNode above),
 	// so a ${node} apply-group substitution / per-node rewrite that selects a
 	// source-NAT pool valid on the origin but invalid on the peer — or a
@@ -567,6 +567,13 @@ func compileTreeStrict(tree *config.ConfigTree, nodeID int) (*config.Config, err
 	peerTree := tree.Clone()
 	rewriteRetiredDataplaneType(peerTree, SyncCaller)
 	if err := config.ValidatePeerEffectiveStrict(peerTree, nodeID); err != nil {
+		return nil, err
+	}
+	// #9619: the registry above runs FIRST so its two subjects keep their
+	// specific messages; this then runs the whole strict pipeline on the same
+	// rewritten peer tree, which covers every other strict gate and also the
+	// peer view that does not compile at all (the registry's skip arm).
+	if err := validatePeerStrictPipeline(peerTree, nodeID); err != nil {
 		return nil, err
 	}
 	return compiled, nil
