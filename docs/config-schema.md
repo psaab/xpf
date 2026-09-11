@@ -10920,34 +10920,39 @@ reserved for whole-dataplane selection where a rewrite shim
   instance. It counts each reference unresolved and resolved for node0 and
   node1, so both nodes compute the same set (a compile without node variables
   expands a group literally named `${node}` as is), and it searches each
-  reached group's own body the same way. It errs toward counting, which can
-  only refuse a config: `apply-groups-except` is ignored, because it is
-  enforced per destination during the merge (`#9422`). The pre-expansion view
-  counts only those groups; the node0 and node1 expansion views are unchanged.
-  A collision against an applied group, a `${node}` group applied on either
-  node, or a reachable group when no expansion succeeds is still refused. The
-  lenient warning no longer names a quarantined instance: the union spans both
-  nodes' views, so it cannot know which instance this node drops, and the
-  runtime quarantine warns naming the one it does. An unquoted `apply-groups`,
-  `apply-groups-except` or `apply-macro` statement under `routing-instances`
-  is not a routing instance. Expansion strips only `apply-groups`, and
-  `compileRoutingInstances` built a routing instance, and a VRF, named
-  `apply-macro` or `apply-groups-except` from the other two. That phantom
-  could also quarantine a real instance whose table id collided with it while
-  the strict gate saw nothing. The compiler and the collision scan now skip
-  them through one predicate (`isApplyStatementNode`); the predicate goes by
-  name, quoted or not, because group expansion and the `#9323` validator also
-  go by name and a quote does not survive rendering, which an HA peer
-  reparses. An instance therefore cannot take one of these names. A one-key
-  stanza under such a name that carries a routing-instance keyword gets a
-  commit warning on every path (`validateRoutingInstanceChildTokensAST`, the
-  `#9323` validator) instead of vanishing silently. It is not refused: a flat
-  `set` statement whose macro or group is named after a routing-instance
-  keyword (`set routing-instances apply-macro interface k v`) has the same
-  shape, so the shape cannot prove an instance was meant. A two-key statement
-  such as `apply-macro M { interface ...; }` is neither warned nor refused.
-  The zone (`#3075`) and tunnel (`#1873`) gates' pre-expansion views still
-  count every `groups` block. Regression coverage:
+  reached group's own body the same way. An `apply-groups-except` that group
+  expansion honours (`#9422`) drops a group from the count: a top-level
+  application excluded at the top level or at any `routing-instances` root, or
+  an application directly under a root excluded at every root. Where the
+  exclusion cannot be decided without expanding, the group is still counted,
+  which can only refuse a config: a group also reached through another group's
+  body, a `${node}` name, or the flat `set` spelling that expansion does not
+  read (`#9685`). The pre-expansion view counts only those groups; the node0
+  and node1 expansion views are unchanged. A collision against an applied
+  group, a `${node}` group applied on either node, or a reachable group when
+  no expansion succeeds is still refused. The lenient warning no longer names
+  a quarantined instance: the union spans both nodes' views, so it cannot know
+  which instance this node drops, and the runtime quarantine warns naming the
+  one it does. An unquoted `apply-groups`, `apply-groups-except` or
+  `apply-macro` statement under `routing-instances` is not a routing instance.
+  Expansion strips only `apply-groups`, and `compileRoutingInstances` built a
+  routing instance, and a VRF, named `apply-macro` or `apply-groups-except`
+  from the other two. That phantom could also quarantine a real instance whose
+  table id collided with it while the strict gate saw nothing. The compiler
+  and the collision scan now skip them through one predicate
+  (`isApplyStatementNode`); the predicate goes by name, quoted or not, because
+  group expansion and the `#9323` validator also go by name and a quote does
+  not survive rendering, which an HA peer reparses. An instance therefore
+  cannot take one of these names. A one-key stanza under such a name that
+  carries a routing-instance keyword gets a commit warning on every path
+  (`validateRoutingInstanceChildTokensAST`, the `#9323` validator) instead of
+  vanishing silently. It is not refused: a flat `set` statement whose macro or
+  group is named after a routing-instance keyword (`set routing-instances
+  apply-macro interface k v`) has the same shape, so the shape cannot prove an
+  instance was meant. A two-key statement such as `apply-macro M { interface
+  ...; }` is neither warned nor refused. The zone (`#3075`) and tunnel
+  (`#1873`) gates' pre-expansion views still count every `groups` block.
+  Regression coverage:
   `pkg/config/routinginstanceid_unapplied_groups_9657_test.go`.
 - **#3444 (destination-NAT rule-set `to` scope reject):** a Junos
   destination-NAT rule-set has only a `from` clause (zone | interface |

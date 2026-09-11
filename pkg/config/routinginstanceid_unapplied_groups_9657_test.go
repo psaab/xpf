@@ -352,8 +352,8 @@ func keywordNameWarned9657(c *Config) bool {
 // two-key statement is never warned, including a macro whose key is a
 // routing-instance keyword. A one-key stanza carrying a routing-instance
 // keyword is warned but never refused: a flat statement whose macro or group is
-// named after a routing-instance keyword has exactly that shape, so for those
-// spellings only "commits" is asserted.
+// named after a routing-instance keyword has exactly that shape: it commits,
+// with the same warning.
 func TestApplyStatementSpellingsStillCommit_9657(t *testing.T) {
 	for _, tc := range []struct{ name, text string }{
 		{"braced macro", "routing-instances {\n    apply-macro M {\n        k v;\n    }\n}\n"},
@@ -369,7 +369,7 @@ func TestApplyStatementSpellingsStillCommit_9657(t *testing.T) {
 			t.Errorf("#9657 %s: a two-key apply statement is always the statement and must not be warned: %v", tc.name, cfg.Warnings)
 		}
 	}
-	const any, yes, no = "any", "yes", "no"
+	const yes, no = "yes", "no"
 	for _, tc := range []struct {
 		name string
 		cmds []string
@@ -377,8 +377,8 @@ func TestApplyStatementSpellingsStillCommit_9657(t *testing.T) {
 	}{
 		{"flat macro", []string{"set routing-instances apply-macro M k v"}, no},
 		{"flat apply-groups-except", []string{"set groups g2 system host-name x", "set routing-instances apply-groups-except g2"}, no},
-		{"flat macro named after a routing-instance keyword", []string{"set routing-instances apply-macro interface k v"}, any},
-		{"flat apply-groups-except naming a keyword-named group", []string{"set groups interface system host-name x", "set routing-instances apply-groups-except interface"}, any},
+		{"flat macro named after a routing-instance keyword", []string{"set routing-instances apply-macro interface k v"}, yes},
+		{"flat apply-groups-except naming a keyword-named group", []string{"set groups interface system host-name x", "set routing-instances apply-groups-except interface"}, yes},
 		{"flat instance written under the apply-macro name", []string{"set routing-instances apply-macro instance-type virtual-router"}, yes},
 	} {
 		for _, core := range []string{"CompileConfig", "CompileConfigForNode"} {
@@ -424,5 +424,59 @@ func TestTableIDGateCountsALiteralNodeVariableGroup_9657(t *testing.T) {
 	if !quarantined {
 		t.Errorf("control: the runtime must see both instances and quarantine one; instances=%v warnings=%v",
 			riNames9657(cfg), cfg.Warnings)
+	}
+}
+
+// #9422: an apply-groups-except at the routing-instances stanza stops a
+// top-level application of that group there, and group expansion honours it.
+// The pre-expansion view must not count the excluded group's instances. Where
+// expansion does NOT honour the exclusion, the collision is still refused.
+func TestTableIDGateHonoursAnExcludedGroup_9657(t *testing.T) {
+	assertFixtureCollides9657(t)
+	ri7Excluding := func(group string) string {
+		return "routing-instances {\n    apply-groups-except " + group + ";\n    ri7 {\n        instance-type virtual-router;\n    }\n}\n"
+	}
+	excluded := group9657("g1", false) + "apply-groups g1;\n" + ri7Excluding("g1")
+	if _, err := compile9657(t, excluded, false); err != nil {
+		t.Errorf("#9657: g1 is excluded at routing-instances, so its ri116 never lands; the strict path refused: %v", err)
+	}
+	cfg, err := compile9657(t, excluded, true)
+	if err != nil {
+		t.Fatalf("lenient compile: %v", err)
+	}
+	if names := riNames9657(cfg); len(names) != 1 || names[0] != "ri7" {
+		t.Errorf("fixture: the runtime must honour the exclusion and keep only ri7, got %v", names)
+	}
+	for _, tc := range []struct{ name, text string }{
+		{"the exclusion names another group", group9657("g1", false) + "apply-groups g1;\n" + ri7Excluding("g2")},
+		{"g1 is also reached through another group's body",
+			"groups {\n    g0 {\n        apply-groups g1;\n    }\n    g1 {\n        " + braced116_9657 + "    }\n}\n" +
+				"apply-groups [ g0 g1 ];\n" + ri7Excluding("g1")},
+	} {
+		if _, err := compile9657(t, tc.text, false); err == nil || !strings.Contains(err.Error(), "table-id collision") {
+			t.Errorf("#9657 %s: ri116 still lands, so the collision must be refused, got %v", tc.name, err)
+		}
+		lcfg, err := compile9657(t, tc.text, true)
+		if err != nil {
+			t.Fatalf("lenient %s: %v", tc.name, err)
+		}
+		landed := false
+		for _, w := range lcfg.Warnings {
+			if strings.Contains(w, "QUARANTINED") {
+				landed = true
+			}
+		}
+		if !landed {
+			t.Errorf("control %s: the runtime must see both instances and quarantine one; instances=%v", tc.name, riNames9657(lcfg))
+		}
+	}
+	flat := []string{
+		"set groups g1 routing-instances ri116 instance-type virtual-router",
+		"set apply-groups g1",
+		"set routing-instances apply-groups-except g1",
+		"set routing-instances ri7 instance-type virtual-router",
+	}
+	if _, err := CompileConfig(setTree9622(t, flat...)); err == nil || !strings.Contains(err.Error(), "table-id collision") {
+		t.Errorf("#9657: group expansion ignores the flat exclusion (#9685), so ri116 lands and the collision must be refused, got %v", err)
 	}
 }
