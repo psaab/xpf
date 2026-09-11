@@ -58,28 +58,22 @@ func TestDualPathAdmittedPairsAreTheMeasuredSix8763(t *testing.T) {
 	//
 	//	pair                     folds  elided(off) vs braced  elided(ON) vs braced
 	//	from protocol              1     SAME                   SAME    reads-but-inert
-	//	term then                  1     SAME                   SAME    reads-but-inert
 	//	then count                 1     SAME                   SAME    reads-but-inert
 	//	then log                   1     SAME                   SAME    reads-but-inert
 	//	then loss-priority         1     SAME                   SAME    reads-but-inert
 	//	version-ipfix template     1     DIFF                   SAME    clean recovery
 	//	version9 template          1     DIFF                   SAME    clean recovery
 	//
-	// The first five are already read out of the packed tail by the firewall
+	// The first four are already read out of the packed tail by the firewall
 	// filter compiler (packedBodyChildren), so the fold fires and changes
 	// nothing. The last two are a genuine #8755-class silent drop under
 	// `family inet` that the fold repairs exactly.
 	//
-	// #9620 added `term then`, measured the same way with a one-statement
-	// tail: inert, like the pairs above. A multi-statement
-	// `term t1 then count C1 discard;` is where the fold repairs a silent drop.
-	//
-	// All seven are BENIGN at the family shape, so the blocker dissolves and no
+	// All six are BENIGN at the family shape, so the blocker dissolves and no
 	// path context is needed. If this list changes, that conclusion does not
 	// carry to the new member and the measurement has to be retaken.
 	want := []string{
 		"from protocol",
-		"term then",
 		"then count",
 		"then log",
 		"then loss-priority",

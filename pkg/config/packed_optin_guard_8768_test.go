@@ -220,12 +220,10 @@ func packedOptInCases8768() map[string]packedOptInCase8768 {
 			open:   "community public",
 			closer: " }",
 			stmts: map[string]string{
-				"authorization": "authorization read-only",
-				"clients":       "clients 10.0.0.0/8",
+				"clients": "clients 10.0.0.0/8",
 			},
 			second: map[string]string{
-				"authorization": "authorization read-write",
-				"clients":       "clients 192.0.2.0/24",
+				"clients": "clients 192.0.2.0/24",
 			},
 			read: func(c *Config) string {
 				if c.System.SNMP == nil {
@@ -363,14 +361,12 @@ func packedOptInCases8768() map[string]packedOptInCase8768 {
 			open:   "unit 0",
 			closer: " } }",
 			stmts: map[string]string{
-				"description":   "description u0",
-				"inner-vlan-id": "inner-vlan-id 20",
-				"vlan-id":       "vlan-id 10",
+				"description": "description u0",
+				"vlan-id":     "vlan-id 10",
 			},
 			second: map[string]string{
-				"description":   "description u1",
-				"inner-vlan-id": "inner-vlan-id 21",
-				"vlan-id":       "vlan-id 11",
+				"description": "description u1",
+				"vlan-id":     "vlan-id 11",
 			},
 			read: func(c *Config) string {
 				ifc := c.Interfaces.Interfaces["ge-0/0/0"]
@@ -1026,9 +1022,8 @@ func TestPackedOptInHoldsForEveryLeafPair8768(t *testing.T) {
 	// is the signal to delete the entry and let the leaf be measured.
 	sameLeafUnobservable := map[string]string{
 		// #9620 (M6): the interfaces unit container opted into packedStatements.
-		"interfaces/*/unit description+description":     "scalar binding: the compiler keeps the FIRST statement's value, so one instance and two read alike (measured #9620: `description u0; description u1;` reads desc=\"u0\")",
-		"interfaces/*/unit inner-vlan-id+inner-vlan-id": "scalar binding: the compiler keeps the FIRST statement's value, so one instance and two read alike (measured #9620: `description u0; description u1;` reads desc=\"u0\")",
-		"interfaces/*/unit vlan-id+vlan-id":             "scalar binding: the compiler keeps the FIRST statement's value, so one instance and two read alike (measured #9620: `description u0; description u1;` reads desc=\"u0\")",
+		"interfaces/*/unit description+description": "scalar binding: the compiler keeps the FIRST statement's value, so one instance and two read alike (measured #9620: `description u0; description u1;` reads desc=\"u0\")",
+		"interfaces/*/unit vlan-id+vlan-id":         "scalar binding: the compiler keeps the FIRST statement's value, so one instance and two read alike (measured #9620: `description u0; description u1;` reads desc=\"u0\")",
 		// issue 8939: the class-of-service BINDING containers. Every binding is
 		// a SCALAR field -- CoSInterfaceUnit.DSCPClassifier is one string, not a
 		// list -- so a repeated statement OVERWRITES rather than accumulating,

@@ -8,70 +8,56 @@ import (
 	"github.com/psaab/xpf/pkg/config"
 )
 
-// #9620: packed one-line spellings that the #8662 fold did not reach, or reached
-// and left on one leaf. Each cell compares the elided spelling with the braced
-// one through CheckText, the strict commit gate, and through the lenient compile
-// that the boot and HA-sync paths use.
+// #9620: packed one-line spellings that the #8662 fold either did not reach or
+// reached and left on one leaf. Each cell compares the elided spelling with the
+// braced one through CheckText, the strict commit gate. Where a cell sets a
+// lenient field, it also compares them through the lenient compile the boot and
+// HA-sync loaders use.
 //
-// Measured at 9f520a5b2, before the admissions and opt-ins this file pins:
+// Measured at 9f520a5b2, before the admission and opt-ins pinned here:
 //
-//	H9   firewall `term t1 then count C1 discard;`       strict ACCEPT, lenient compiled no action
-//	H9   policy `term t1 then next-hop self accept;`      strict ACCEPT, lenient differed from braced
-//	H10  inet6 `from next-header tcp source-address …;`   strict ACCEPT, lenient compiled a match-all
-//	M5   snmp `community public clients … authorization …` strict refused, lenient garbage clients
-//	M6   `unit 0 vlan-id 10 inner-vlan-id 20;`            strict refused (unknown modifier), lenient dropped the tag
+//	H10  inet6 `from next-header tcp source-address …;`      strict accepted a match-all term
+//	M5   snmp `community public clients … authorization …;`  strict refused, lenient compiled garbage clients
+//	M6   `unit 0 vlan-id 10 inner-vlan-id 20;`               strict refused (unknown modifier), lenient dropped the tag
+//	U1   `unit 0 description u0 vlan-id 10;`                 strict refused (trailing token), lenient differed
 //
-// Two cells pin what was deliberately NOT changed, each for a measured reason:
-//   - the firewall `from` container does not opt into packedStatements, so the
-//     #9027 refusal of `from { protocol tcp protocol udp; }` still holds;
-//   - `term from` is not admitted, so a policy-statement `term t1 from protocol
-//     ospf then accept;` that compiles correctly today still commits.
+// The controls pin spellings that compile correctly at 9f520a5b2. A broader
+// change was measured to break each of them:
+//   - `term then` and `term from` break policy-statement terms written as
+//     `then accept …` or `from … then …`;
+//   - `community authorization` breaks authorization-first snmp communities
+//     with `restrict` or a client list;
+//   - a firewall `from` opt-in breaks the #9027 refusal of a repeated keyword.
 func TestPackedFoldMembersMeetTheBracedCommitGate9620(t *testing.T) {
 	fw := func(family, term string) string {
 		return `firewall { family ` + family + ` { filter f1 { ` + term + ` } } }`
 	}
-	pol := func(term string) string { return `policy-options { policy-statement P { ` + term + ` } }` }
+	pol := func(pre, term string) string {
+		return `policy-options { ` + pre + ` policy-statement P { ` + term + ` } }`
+	}
+	ifu := func(unit string) string {
+		return `interfaces { ge-0/0/0 { flexible-vlan-tagging; ` + unit + ` } }`
+	}
 	cells := []struct {
 		name, elided, braced string
 		// mode: "commit" both commit; "elided-refused" only the elided spelling
 		// is refused; "both-refused" both are refused.
 		mode    string
 		refusal string // substring the refusal must name
-		// lenientEqual requires the lenient compiles to be identical.
+		// lenientCompiles requires both lenient compiles to succeed.
+		lenientCompiles bool
+		// lenientEqual requires the two lenient compiles to be identical.
 		lenientEqual bool
-		// lenientHas are substrings the braced AND elided lenient JSON must contain.
+		// lenientHas lists substrings that both lenient JSON renderings must contain.
 		lenientHas []string
 	}{
 		{
-			name:         "H9 firewall then count discard",
-			elided:       fw("inet", `term t1 then count C1 discard;`),
-			braced:       fw("inet", `term t1 { then { count C1; discard; } }`),
-			mode:         "commit",
-			lenientEqual: true,
-			lenientHas:   []string{`"Action":"discard"`, `"Count":"C1"`},
-		},
-		{
-			name:         "H9 firewall then discard count",
-			elided:       fw("inet", `term t1 then discard count C1;`),
-			braced:       fw("inet", `term t1 { then { discard; count C1; } }`),
-			mode:         "commit",
-			lenientEqual: true,
-			lenientHas:   []string{`"Action":"discard"`, `"Count":"C1"`},
-		},
-		{
-			name:         "H9 policy then next-hop self accept",
-			elided:       pol(`term t1 then next-hop self accept;`),
-			braced:       pol(`term t1 { then { next-hop self; accept; } }`),
-			mode:         "elided-refused",
-			refusal:      "next-hop",
-			lenientEqual: true,
-		},
-		{
-			name:    "H10 inet6 from next-header then source-address",
-			elided:  fw("inet6", `term t1 { from next-header tcp source-address 2001:db8::/32; then accept; }`),
-			braced:  fw("inet6", `term t1 { from { next-header tcp; source-address 2001:db8::/32; } then accept; }`),
-			mode:    "elided-refused",
-			refusal: "source-address",
+			name:            "H10 inet6 from next-header then source-address",
+			elided:          fw("inet6", `term t1 { from next-header tcp source-address 2001:db8::/32; then accept; }`),
+			braced:          fw("inet6", `term t1 { from { next-header tcp; source-address 2001:db8::/32; } then accept; }`),
+			mode:            "elided-refused",
+			refusal:         "source-address",
+			lenientCompiles: true,
 		},
 		{
 			name:         "M5 snmp community clients then authorization",
@@ -82,7 +68,24 @@ func TestPackedFoldMembersMeetTheBracedCommitGate9620(t *testing.T) {
 			lenientHas:   []string{`"Prefix":"10.0.0.0/8"`, `"Authorization":"read-only"`},
 		},
 		{
-			name:         "M5 snmp community authorization then clients",
+			name:         "M6 unit vlan-id then inner-vlan-id",
+			elided:       ifu(`unit 0 vlan-id 10 inner-vlan-id 20;`),
+			braced:       ifu(`unit 0 { vlan-id 10; inner-vlan-id 20; }`),
+			mode:         "both-refused",
+			refusal:      "QinQ",
+			lenientEqual: true,
+			lenientHas:   []string{`"VlanID":10`, `"InnerVlanID":20`},
+		},
+		{
+			name:         "U1 unit description then vlan-id",
+			elided:       ifu(`unit 0 description u0 vlan-id 10;`),
+			braced:       ifu(`unit 0 { description u0; vlan-id 10; }`),
+			mode:         "commit",
+			lenientEqual: true,
+			lenientHas:   []string{`"Description":"u0"`, `"VlanID":10`},
+		},
+		{
+			name:         "control: snmp authorization then clients",
 			elided:       `snmp { community public authorization read-only clients 10.0.0.0/8; }`,
 			braced:       `snmp { community public { authorization read-only; clients 10.0.0.0/8; } }`,
 			mode:         "commit",
@@ -90,24 +93,39 @@ func TestPackedFoldMembersMeetTheBracedCommitGate9620(t *testing.T) {
 			lenientHas:   []string{`"Prefix":"10.0.0.0/8"`, `"Authorization":"read-only"`},
 		},
 		{
-			name:         "M6 unit vlan-id then inner-vlan-id",
-			elided:       `interfaces { ge-0/0/0 { flexible-vlan-tagging; unit 0 vlan-id 10 inner-vlan-id 20; } }`,
-			braced:       `interfaces { ge-0/0/0 { flexible-vlan-tagging; unit 0 { vlan-id 10; inner-vlan-id 20; } } }`,
-			mode:         "both-refused",
-			refusal:      "QinQ",
+			name:         "control: snmp authorization then clients restrict",
+			elided:       `snmp { community public authorization read-only clients 10.0.0.0/8 restrict; }`,
+			braced:       `snmp { community public { authorization read-only; clients 10.0.0.0/8 restrict; } }`,
+			mode:         "commit",
 			lenientEqual: true,
-			lenientHas:   []string{`"VlanID":10`, `"InnerVlanID":20`},
 		},
 		{
-			// Only this order exercises the `unit inner-vlan-id` admission: with
-			// vlan-id first, the run folds through the existing `unit vlan-id` pair.
-			name:         "M6 unit inner-vlan-id then vlan-id",
-			elided:       `interfaces { ge-0/0/0 { flexible-vlan-tagging; unit 0 inner-vlan-id 20 vlan-id 10; } }`,
-			braced:       `interfaces { ge-0/0/0 { flexible-vlan-tagging; unit 0 { inner-vlan-id 20; vlan-id 10; } } }`,
-			mode:         "both-refused",
-			refusal:      "QinQ",
+			name:         "control: snmp authorization then a clients list",
+			elided:       `snmp { community public authorization read-only clients [ 10.0.0.0/8 192.0.2.0/24 ]; }`,
+			braced:       `snmp { community public { authorization read-only; clients [ 10.0.0.0/8 192.0.2.0/24 ]; } }`,
+			mode:         "commit",
 			lenientEqual: true,
-			lenientHas:   []string{`"VlanID":10`, `"InnerVlanID":20`},
+		},
+		{
+			name:         "control: policy then accept load-balance local-preference",
+			elided:       pol("", `term t1 then accept load-balance per-packet local-preference 200;`),
+			braced:       pol("", `term t1 { then { accept; load-balance per-packet; local-preference 200; } }`),
+			mode:         "commit",
+			lenientEqual: true,
+		},
+		{
+			name:         "control: policy then accept community add",
+			elided:       pol(`community C members 65000:1;`, `term t1 then accept community add C;`),
+			braced:       pol(`community C members 65000:1;`, `term t1 { then { accept; community add C; } }`),
+			mode:         "commit",
+			lenientEqual: true,
+		},
+		{
+			name:         "control: policy term from then accept",
+			elided:       pol("", `term t1 from protocol ospf then accept;`),
+			braced:       pol("", `term t1 { from protocol ospf; then accept; }`),
+			mode:         "commit",
+			lenientEqual: true,
 		},
 		{
 			name:    "control: #9027 still refuses a repeated from keyword",
@@ -115,13 +133,6 @@ func TestPackedFoldMembersMeetTheBracedCommitGate9620(t *testing.T) {
 			braced:  fw("inet", `term t1 { from { protocol tcp; protocol udp; } then { discard; } }`),
 			mode:    "elided-refused",
 			refusal: "repeats its own keyword",
-		},
-		{
-			name:         "control: a policy term from then accept still commits",
-			elided:       pol(`term t1 from protocol ospf then accept;`),
-			braced:       pol(`term t1 { from protocol ospf; then accept; }`),
-			mode:         "commit",
-			lenientEqual: true,
 		},
 	}
 	for _, c := range cells {
@@ -154,7 +165,7 @@ func TestPackedFoldMembersMeetTheBracedCommitGate9620(t *testing.T) {
 			default:
 				t.Fatalf("unknown mode %q", c.mode)
 			}
-			if !c.lenientEqual && len(c.lenientHas) == 0 {
+			if !c.lenientCompiles && !c.lenientEqual && len(c.lenientHas) == 0 {
 				return
 			}
 			ej := lenientJSON9620(t, "elided", c.elided)
@@ -177,9 +188,9 @@ func TestPackedFoldMembersMeetTheBracedCommitGate9620(t *testing.T) {
 	}
 }
 
-// lenientJSON9620 compiles text on the lenient path the boot and HA-sync
-// loaders use, and renders the result without warnings, whose text differs by
-// spelling.
+// lenientJSON9620 compiles text on the lenient path used by the boot and HA-sync
+// loaders. It renders the result without warnings, because warning text differs
+// between the two spellings.
 func lenientJSON9620(t *testing.T, label, text string) string {
 	t.Helper()
 	tree, perrs := config.NewParser(text).Parse()

@@ -188,7 +188,6 @@ static-binding host-name	system/services/dhcp-local-server/group/pool/static-bin
 template flow-active-timeout	services/flow-monitoring/version-ipfix/template,services/flow-monitoring/version9/template
 template flow-inactive-timeout	services/flow-monitoring/version-ipfix/template,services/flow-monitoring/version9/template
 template-refresh-rate seconds	services/flow-monitoring/version-ipfix/template/template-refresh-rate,services/flow-monitoring/version9/template/template-refresh-rate
-term then	firewall/family/any/filter/term,firewall/family/inet/filter/term,firewall/family/inet6/filter/term,policy-options/policy-statement/term
 then count	firewall/family/any/filter/term/then,firewall/family/inet/filter/term/then,firewall/family/inet6/filter/term/then,security/policies/from-zone/policy/then,security/policies/global/policy/then
 then dscp	firewall/family/any/filter/term/then,firewall/family/inet/filter/term/then,firewall/family/inet6/filter/term/then
 then forwarding-class	firewall/family/any/filter/term/then,firewall/family/inet/filter/term/then,firewall/family/inet6/filter/term/then

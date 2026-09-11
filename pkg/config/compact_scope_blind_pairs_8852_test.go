@@ -196,12 +196,10 @@ var knownBlindScopePairs8852 = map[string]string{
 	"security ike":             "plain-container",
 	"security nat":             "plain-container",
 	"system syslog":            "plain-container",
-	// #9620, shapes derived by the sentinel method.
-	"term then":              "plain-container",
-	"policy then":            "plain-container",
-	"routing-options static": "plain-container",
-	"security alg":           "plain-container",
-	"security flow":          "plain-container",
+	"policy then":              "plain-container",
+	"routing-options static":   "plain-container",
+	"security alg":             "plain-container",
+	"security flow":            "plain-container",
 	// #8850 admitted ("firewall","family") so an elided `firewall family inet
 	// { filter ... }` compiles its filters instead of silently producing zero.
 	// `family` is args:0 with children and no wildcard, so blindShape8852
