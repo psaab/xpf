@@ -576,6 +576,14 @@ func (m *Manager) FormatInformation() string {
 		if syncStats.BulkEndsDeadIncarnationDropped > 0 {
 			fmt.Fprintf(&b, "  Bulk ends dead-incarnation-dropped: %d\n", syncStats.BulkEndsDeadIncarnationDropped)
 		}
+		// #9716: the connection fence, and the fail-open completions it covers.
+		// Same posture: counters an operator can see, not a health annotation.
+		if syncStats.BulkEndsForeignConnDropped > 0 {
+			fmt.Fprintf(&b, "  Bulk ends foreign-connection-dropped: %d\n", syncStats.BulkEndsForeignConnDropped)
+		}
+		if syncStats.BulkEndsEpochOnlyMatched > 0 {
+			fmt.Fprintf(&b, "  Bulk ends matched on epoch alone: %d\n", syncStats.BulkEndsEpochOnlyMatched)
+		}
 	} else {
 		fmt.Fprintln(&b, "  Not configured")
 	}

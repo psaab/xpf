@@ -1090,6 +1090,42 @@ cannot send the field" from "peer suppressing the field" without a negotiated
 capability, and a negotiated capability has nowhere to live on the unkeyed path.
 Both are decisions well outside #5084.
 
+### `BulkEnd` is accepted only on its `BulkStart`'s connection (#9716)
+
+The incarnation check above fails open whenever either side is un-incarnated, and
+in that case completion was still matched on the epoch alone. Every peer process
+restarts its epoch at 1, so the V013 hazard survived exactly where the check
+cannot judge. A legacy `BulkEnd` buffered on a dead peer process's
+still-ESTABLISHED socket could complete the bulk its replacement had just started
+on the other fabric. The replacement's incarnated `BulkStart` is accepted even at
+a colliding epoch, because zero → X counts as a switch.
+
+`BulkSync` pins one connection for a whole bulk, so a legitimate end marker never
+arrives on any other. The receiver therefore:
+
+- records the connection that carried the accepted `BulkStart` (`bulkRecvConn`,
+  beside `bulkRecvEpoch` and `bulkRecvIncarnation` under `bulkMu`, and cleared
+  with them on a full disconnect);
+- ignores a `BulkEnd` that arrives on a different connection. The live bulk stays
+  open for its own end marker.
+
+The check runs AFTER the incarnation check, so a dead-incarnation refusal is still
+counted as one.
+
+This needs no wire change and refuses nothing a conforming peer sends: a legacy
+peer's bulk, started and ended on one connection, completes exactly as before.
+Two counters make the fence visible:
+
+- `BulkEndsForeignConnDropped` (`Bulk ends foreign-connection-dropped`): end
+  markers refused because they arrived on another connection.
+- `BulkEndsEpochOnlyMatched` (`Bulk ends matched on epoch alone`): completions the
+  incarnation check could not judge, matched on epoch and connection alone. A
+  climbing value means a peer, or a bulk, without an incarnation.
+
+Not changed: an un-incarnated `BulkStart` between bulks is still accepted. With no
+incarnation on the wire, a rebooted peer restarting its counter and a stale frame
+are the same bytes, and refusing it would strand an older peer's re-prime.
+
 ### Observability — a status field and counters, NOT a health state
 
 A silent fail-open is how a half-upgraded cluster hides, so both halves are
@@ -1100,6 +1136,12 @@ counted and rendered by `show chassis cluster information`:
   disappears in exactly that case would hide it.
 - `Primes without incarnation: N` — the fail-open fallback is active.
 - `Configs dead-incarnation-dropped: N` — the fence did its job.
+- `Bulk ends dead-incarnation-dropped: N` — a `BulkEnd` from a retired peer boot
+  was refused (#9174 V013).
+- `Bulk ends foreign-connection-dropped: N` — a `BulkEnd` on a connection other
+  than its bulk's `BulkStart` was refused (#9716).
+- `Bulk ends matched on epoch alone: N` — completions no incarnation could judge
+  (#9716).
 
 Plus one `slog.Warn` per CONNECTION (not per frame) when a peer primes without
 an incarnation.
