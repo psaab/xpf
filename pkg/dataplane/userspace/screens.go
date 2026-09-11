@@ -282,7 +282,8 @@ func ScreenUnresolvedProfileLinesFor(cfg *config.Config, profileName string) []s
 	for _, r := range refs {
 		lines = append(lines,
 			fmt.Sprintf("  Zone %s references undefined screen profile '%s' "+
-				"— no screen checks are enforced for this zone", r.Zone, r.Profile))
+				"— none of its configured checks are in effect; the substituted "+
+				"conservative default below applies", r.Zone, r.Profile))
 	}
 	lines = append(lines, "  Disposition: "+ScreenUnresolvedDisposition+".")
 	return lines
@@ -668,7 +669,8 @@ func ScreenInertProfileLinesFor(cfg *config.Config, profileName string) []string
 	for _, r := range refs {
 		lines = append(lines,
 			fmt.Sprintf("  Zone %s references screen profile '%s', which is defined but "+
-				"enables no checks — no screen checks are enforced for this zone", r.Zone, r.Profile))
+				"enables no checks — none of its configured checks are in effect; the "+
+				"substituted conservative default below applies", r.Zone, r.Profile))
 	}
 	lines = append(lines, "  Disposition: "+ScreenInertDisposition+".")
 	return lines

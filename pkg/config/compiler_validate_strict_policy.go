@@ -595,12 +595,12 @@ func validatePolicyZoneReferencesStrict(cfg *Config) error {
 		}
 		if !defined(zpp.FromZone) {
 			return fmt.Errorf(
-				"security policy from-zone %q to-zone %q references undefined from-zone %q; define `set security zones security-zone %s` in the same commit or the rule is silently never matched (zone-pair falls through to the default policy)",
+				"security policy from-zone %q to-zone %q references undefined from-zone %q; define `set security zones security-zone %s` in the same commit; on a tolerant load the userspace helper refuses the WHOLE policy snapshot for an unresolvable zone (#3402), so none of the config's policies is enforced",
 				zpp.FromZone, zpp.ToZone, zpp.FromZone, zpp.FromZone)
 		}
 		if !defined(zpp.ToZone) {
 			return fmt.Errorf(
-				"security policy from-zone %q to-zone %q references undefined to-zone %q; define `set security zones security-zone %s` in the same commit or the rule is silently never matched (zone-pair falls through to the default policy)",
+				"security policy from-zone %q to-zone %q references undefined to-zone %q; define `set security zones security-zone %s` in the same commit; on a tolerant load the userspace helper refuses the WHOLE policy snapshot for an unresolvable zone (#3402), so none of the config's policies is enforced",
 				zpp.FromZone, zpp.ToZone, zpp.ToZone, zpp.ToZone)
 		}
 	}
@@ -662,14 +662,14 @@ func validatePolicyZoneReferencesStrict(cfg *Config) error {
 			}
 			if !defined(z) {
 				return fmt.Errorf(
-					"security policies global policy %q match from-zone %q references undefined zone; define `set security zones security-zone %s` in the same commit or the global policy is silently never matched (the dataplane fails closed for an unknown match zone)",
+					"security policies global policy %q match from-zone %q references undefined zone; define `set security zones security-zone %s` in the same commit; on a tolerant load the userspace helper refuses the WHOLE policy snapshot for an unresolvable zone (#3402), so none of the config's policies is enforced",
 					pol.Name, z, z)
 			}
 		}
 		for _, z := range pol.Match.ToZones {
 			if !defined(z) {
 				return fmt.Errorf(
-					"security policies global policy %q match to-zone %q references undefined zone; define `set security zones security-zone %s` in the same commit or the global policy is silently never matched (the dataplane fails closed for an unknown match zone)",
+					"security policies global policy %q match to-zone %q references undefined zone; define `set security zones security-zone %s` in the same commit; on a tolerant load the userspace helper refuses the WHOLE policy snapshot for an unresolvable zone (#3402), so none of the config's policies is enforced",
 					pol.Name, z, z)
 			}
 		}
