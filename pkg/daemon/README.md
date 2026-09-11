@@ -63,7 +63,12 @@ usable. Two consequences the code makes explicit:
   exporter from the cell on every call, so a full resync after a rollback
   + corrected re-arm exports from the CURRENT backend rather than the
   torn-down one (#6743 r2-B8, bound by
-  `full_resync_per_call_6743_test.go`). Behavioural guards live in
+  `full_resync_per_call_6743_test.go`). Its export and queueing are one
+  transaction (#9766, #9767): the frame is acknowledged only when every
+  install reached the send queue, the fallback loop's drain is held off
+  meanwhile, and a failed attempt backs off before it exports again (see
+  `docs/session-sync-architecture.md`, "Bulk Owner-RG Export").
+  Behavioural guards live in
   `daemon_dp_escape_test.go` (gRPC) and `daemon_dp_escape_rest_test.go`
   (REST); `daemon_ha_userspace_stream_live_test.go` drives the event-stream
   loop across a `setDataplane(nil)`, across a stream replacement, and —

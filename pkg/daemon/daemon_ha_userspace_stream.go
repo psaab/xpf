@@ -397,8 +397,21 @@ func (d *Daemon) handleEventStreamFullResync() bool {
 	if len(rgIDs) == 0 {
 		return false
 	}
-	if _, err := d.exportUserspaceOwnerRGSessionsWithConfig(exporter, cfg, rgIDs); err != nil {
-		slog.Warn("userspace event stream: full resync export failed", "err", err)
+	// #9767: the event stream retries a withheld FullResync on every later frame
+	// and every ACK tick. Inside the backoff after a failed attempt, decline
+	// without re-running the export.
+	if d.fullResyncHeldOff(time.Now()) {
+		return false
+	}
+	// #9766: hold the fallback loop's drain off the whole export-and-queue
+	// transaction; see full_resync_transaction_9767.go.
+	d.userspaceDeltaSyncMu.Lock()
+	_, err := d.exportUserspaceOwnerRGSessionsWithConfig(exporter, cfg, rgIDs)
+	d.userspaceDeltaSyncMu.Unlock()
+	if err != nil {
+		d.holdOffFullResync(time.Now())
+		slog.Warn("userspace event stream: full resync export failed; the frame is not acknowledged",
+			"err", err, "retry_after", fullResyncRetryBackoff)
 		return false
 	}
 	return true
@@ -482,9 +495,7 @@ func (d *Daemon) eventStreamFallbackLoop(ctx context.Context, wired *dpuserspace
 			if cfg == nil {
 				continue
 			}
-			d.userspaceDeltaSyncMu.Lock()
-			n, _ := d.drainUserspaceSessionDeltasWithConfig(drainer, cfg, 1)
-			d.userspaceDeltaSyncMu.Unlock()
+			n, _ := d.drainUserspaceSessionDeltasLocked(drainer, cfg)
 			if n > 0 {
 				slog.Info("userspace: reconciliation drain caught missed deltas", "count", n)
 			}
@@ -507,9 +518,7 @@ func (d *Daemon) eventStreamFallbackLoop(ctx context.Context, wired *dpuserspace
 		if cfg == nil {
 			continue
 		}
-		d.userspaceDeltaSyncMu.Lock()
-		_, _ = d.drainUserspaceSessionDeltasWithConfig(drainer, cfg, 1)
-		d.userspaceDeltaSyncMu.Unlock()
+		_, _ = d.drainUserspaceSessionDeltasLocked(drainer, cfg)
 	}
 }
 
@@ -730,9 +739,10 @@ func (d *Daemon) queueUserspaceSessionDeltas(
 	if ss == nil {
 		return 0
 	}
-	// #7194 fail-closed gate. This is the ONE chokepoint all three producers
-	// funnel through -- the binary event stream, the JSON drain fallback, and
-	// the FullResync export -- so gating here covers every leg with one check.
+	// #7194 fail-closed gate. The binary event stream and the JSON drain
+	// fallback queue through here. The FullResync export queues through
+	// queueUserspaceSessionDeltasComplete, which applies the same gate and
+	// reports a withheld batch as a failure (#9767).
 	if !d.userspaceDeltaSchemaAdmits(len(deltas)) {
 		return 0
 	}
