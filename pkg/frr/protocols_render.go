@@ -711,7 +711,8 @@ func (m *Manager) generateProtocols(ospf *config.OSPFConfig, ospfv3 *config.OSPF
 			b.WriteString(" is-type level-2-only\n")
 		}
 		for _, export := range isis.Export {
-			b.WriteString(m.resolveRedistribute(export, policyOptions, "isis", bgpAcceptDefault))
+			// #9666: isisd's grammar, not the OSPF-shaped line.
+			b.WriteString(m.resolveISISRedistribute(export, policyOptions, isis.Level, bgpAcceptDefault))
 		}
 		if isis.WideMetricsOnly {
 			b.WriteString(" metric-style wide\n")

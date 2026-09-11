@@ -1402,3 +1402,15 @@ step. Both are required — neither sees the other's case:
   case in the outcome switch: the gauge stayed 0, no retry debt was armed,
   and live FRR kept the stale forwarding state until the next commit or a
   daemon restart while the operator's commit reported success.
+
+**IS-IS redistribute uses isisd's grammar (#9666).** isisd installs only
+`redistribute <ipv4|ipv6> <proto> <level-1|level-2> [route-map X]`. The address
+family and the level are mandatory, so the OSPF-shaped `redistribute <proto>` was
+rejected for every `protocols isis export`, and one rejected line fails the whole
+managed reload (the #9510 mechanism). `resolveISISRedistribute` renders the isisd
+form from the same resolved sources (`redistributeEntries`) the other routers use:
+- the families come from `frrRedistSourceAFI` (ospf/rip IPv4 only, ospf6/ripng IPv6
+  only, the rest both);
+- the levels come from the router's is-type, through the same `CanonicalISISLevel`
+  the is-type line uses. level-1 renders level-1, level-1-2 renders one line per
+  level, and anything else renders the narrow level-2 default.
