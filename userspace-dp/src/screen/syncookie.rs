@@ -534,7 +534,8 @@ impl SynCookieKeyRing {
     /// always been: following a backward clock step would re-accept cookies from
     /// epochs this node has already left, so a recorded ACK could validate again.
     /// Derived keys cover every epoch, so no step leaves the latch without a key.
-    /// What the latch costs an HA peer on a different clock is #9712.
+    /// The cost to an HA peer on a different clock is accepted policy (#9712;
+    /// docs/syn-cookie-flood-protection.md, "Rollback policy").
     pub(super) fn latch(&mut self, latched: u64, raw: u64) -> u64 {
         let epoch = latched.max(raw);
         self.refresh(epoch);
