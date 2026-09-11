@@ -79,10 +79,19 @@ drop-in for xdpilone), and tracks frame budgets per binding.
   mitigation below, which is cheap and shipped, but the next decision
   someone makes on the strength of an unverified premise.
 
-  The mitigation (#209), which stands either way: the XDP shim
-  replaces every `XDP_PASS` path with a cpumap redirect
-  (`USERSPACE_CPUMAP`), which frees the XSK frame immediately while
-  still delivering the packet to the kernel stack. Bind flags try
+  The mitigation (#209) covers IP frames only, and only while the
+  cpumap flag is set: those local-delivery paths take a cpumap redirect
+  (`USERSPACE_CPUMAP`) instead of `XDP_PASS`, which frees the XSK frame
+  immediately while still delivering the packet to the kernel stack.
+  Two shim paths still return `XDP_PASS` (#9695):
+  - every non-IP frame, through `pass_non_ip_l2_direct`, deliberately,
+    because a cpumap redirect breaks ARP neighbor resolution;
+  - `cpumap_or_pass`, whenever the cpumap flag is unset or the redirect
+    fails.
+
+  So if the #9043 premise holds, the mitigation does not cover those
+  paths, and the non-IP arm is exactly the unrate-limited ARP/LLDP path
+  #9043 was worried about. Bind flags try
   zero-copy first and fall back to copy mode if the driver doesn't
   support it; copy mode is unaffected because `XDP_PASS` there
   operates on kernel DMA buffers, not UMEM frames.

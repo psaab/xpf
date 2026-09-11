@@ -327,11 +327,21 @@ When the userspace poll loop cannot refill frames fast enough, the fill ring
 runs dry.  The driver counter `rx_xsk_buff_alloc_err` climbs to 102M+ during
 a single transfer.
 
-When no fill ring frames are available, mlx5 falls back to the regular
-(non-XSK) NAPI RX path.  These leaked packets bypass AF_XDP entirely and
-reach the kernel TCP stack via VLAN sub-interfaces.  The kernel finds no
-socket for the SNAT'd IP addresses and emits TCP RSTs to the server, which
-tears down the connection.
+The incident record: TCP RSTs toward the server tore down the connection.
+That is consistent with the kernel stack seeing packets for SNAT'd addresses
+it has no socket for. **How those packets reached the kernel was not
+established.**
+
+An earlier version of this section named the mechanism as mlx5 handing RX to
+the regular NAPI path when the fill ring is empty (#9695). Upstream v6.18 mlx5e
+has no such path:
+- `en/rx_res.c` points RSS at the XSK RQ while XSK is enabled.
+- `en/xsk/rx.c` counts `rx_xsk_buff_alloc_err` and posts fewer WQEs.
+
+`tx/rings.rs` likewise records the driver dropping. The known shim paths to the
+kernel are the non-IP `XDP_PASS` arm and the cpumap fallback; see
+`userspace-dp/src/afxdp/umem/README.md`. A vendor kernel or VF firmware could
+behave differently, and that was not measured.
 
 ### Contributing factors
 
