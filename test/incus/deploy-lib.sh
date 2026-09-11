@@ -575,8 +575,11 @@ DEPLOY_PREFLIGHT_PATH="/tmp/xpfd.preflight"
 # A preflight placed after `systemctl stop xpfd` proves the same fact but has
 # already taken the box down to learn it, which is the bug.
 #
-# The probe loads anonymous maps only — no pins, no attach — so the live
-# dataplane is untouched by a PASS.
+# The probe LOADS anonymous maps only — no pin writes, no attach — so the live
+# dataplane is untouched. Its spec validation does READ the live pins
+# (validateUserspaceShimLivePins): a pinned-map ABI mismatch refuses with exit 1,
+# which is not the #1864 verifier reject (exit 3), and the two print different
+# remediation below (#9558).
 #
 # CPU contract: the verifier walk costs ~17s of one core on a REJECT. Running
 # that on an AF_XDP worker core would stall forwarding on a box that is still
@@ -594,7 +597,8 @@ deploy_verify_dataplane_preflight() {
 	incus file push "$local_xpfd" "${rinst}${DEPLOY_PREFLIGHT_PATH}" --mode 0755 \
 		|| die "verify-dataplane pre-flight: failed to stage $local_xpfd at ${DEPLOY_PREFLIGHT_PATH} on $rinst — deploy aborted, old daemon untouched"
 
-	if ! incus exec "$rinst" -- bash -c '
+	local verify_rc=0
+	incus exec "$rinst" -- bash -c '
 		set -u
 		free_cpus() {
 			# Worker threads pin themselves to exactly one CPU each
@@ -630,11 +634,23 @@ deploy_verify_dataplane_preflight() {
 			exec nice -n 19 taskset -c "$MASK" '"$DEPLOY_PREFLIGHT_PATH"' verify-dataplane
 		fi
 		exec nice -n 19 '"$DEPLOY_PREFLIGHT_PATH"' verify-dataplane
-	'; then
+	' || verify_rc=$?
+	if (( verify_rc != 0 )); then
 		deploy_preflight_cleanup "$rinst"
-		die "verify-dataplane REJECTED the new binary's embedded shim on $rinst — deploy aborted, old daemon untouched.
+		# #9558: verify-dataplane exits 3 ONLY for the #1864 kernel-verifier
+		# reject (dataplane.ErrUserspaceShimVerifierReject). Every other refusal
+		# exits 1, including a live pinned-map ABI mismatch, and rebuilding the
+		# shim cannot fix those. Print the #1864 remediation for exit 3 only;
+		# for anything else, point at verify-dataplane's own message.
+		if (( verify_rc == 3 )); then
+			die "verify-dataplane REJECTED the new binary's embedded shim on $rinst — deploy aborted, old daemon untouched.
   This is the #1864 failure mode. Rebuild with the pinned toolchain (make generate) or restore the tracked object:
     git checkout -- pkg/dataplane/userspace_xdp_bpfel.o && make build"
+		fi
+		die "verify-dataplane refused the new binary on $rinst (exit $verify_rc) — deploy aborted, old daemon untouched.
+  This is NOT the #1864 kernel-verifier reject (that exits 3), so rebuilding the shim will not help.
+  The cause and its remediation are in verify-dataplane's own message above (for example, a live
+  pinned-map ABI mismatch needs the stale pin cleared)."
 	fi
 	deploy_preflight_cleanup "$rinst"
 	info "Pre-flight PASS: the new xpfd's embedded shim loads on $rinst's kernel."

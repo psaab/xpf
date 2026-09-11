@@ -566,6 +566,45 @@ test_preflight_cleans_up_on_reject() {
 	rm -f "$lb"; teardown_fake_vm
 }
 
+# #9558: the two refusal arms must print DIFFERENT remediation. verify-dataplane
+# exits 3 ONLY for the #1864 kernel-verifier reject; every other refusal (for
+# example a live pinned-map ABI mismatch) exits 1, and "make generate" cannot fix
+# it. A presence check alone would pass the pre-fix wrapper, which printed the
+# #1864 text for BOTH, so the exit-1 cell asserts that remediation is ABSENT.
+test_preflight_verifier_reject_prescribes_1864_remediation() {
+	setup_fake_vm
+	local lb; lb=$(mktemp); make_local_bin "$lb" "BAD-SHIM"
+	FAKE_VERIFY_RC=3
+	local out rc=0
+	out=$( ( deploy_verify_dataplane_preflight vm "$lb" ) 2>&1 ) || rc=$?
+	if [[ $rc -eq 0 ]]; then
+		bad "preflight #9558: exit 3 (kernel-verifier REJECT) must hard-fail"
+	elif [[ "$out" != *"#1864 failure mode"* || "$out" != *"make generate"* ]]; then
+		bad "preflight #9558: exit 3 must print the #1864 make-generate remediation; got: $out"
+	else
+		ok "preflight #9558: exit 3 (kernel-verifier REJECT) prints the #1864 make-generate remediation"
+	fi
+	rm -f "$lb"; teardown_fake_vm
+}
+
+test_preflight_other_refusal_prescribes_no_make_generate() {
+	setup_fake_vm
+	local lb; lb=$(mktemp); make_local_bin "$lb" "PIN-ABI-MISMATCH"
+	FAKE_VERIFY_RC=1
+	local out rc=0
+	out=$( ( deploy_verify_dataplane_preflight vm "$lb" ) 2>&1 ) || rc=$?
+	if [[ $rc -eq 0 ]]; then
+		bad "preflight #9558: exit 1 (non-verifier refusal) must hard-fail"
+	elif [[ "$out" == *"make generate"* || "$out" == *"#1864 failure mode"* ]]; then
+		bad "preflight #9558: exit 1 printed the #1864 make-generate remediation, which cannot fix a non-verifier refusal; got: $out"
+	elif [[ "$out" != *"(exit 1)"* ]]; then
+		bad "preflight #9558: an exit-1 refusal must name its exit status; got: $out"
+	else
+		ok "preflight #9558: exit 1 (non-verifier refusal) names its exit and prescribes no make generate"
+	fi
+	rm -f "$lb"; teardown_fake_vm
+}
+
 test_preflight_missing_local_binary_hardfails() {
 	setup_fake_vm
 	FAKE_VERIFY_RC=0
@@ -1299,6 +1338,8 @@ test_preflight_reject_hardfails
 test_preflight_reject_touches_nothing
 test_preflight_cleans_up_on_pass
 test_preflight_cleans_up_on_reject
+test_preflight_verifier_reject_prescribes_1864_remediation
+test_preflight_other_refusal_prescribes_no_make_generate
 test_preflight_missing_local_binary_hardfails
 test_preflight_precedes_destructive_steps_standalone
 test_preflight_precedes_destructive_steps_cluster

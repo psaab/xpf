@@ -251,8 +251,12 @@ func main() {
 	case cmdVerifyDataplane:
 		// #1864 deploy-time pre-flight: run the kernel BPF verifier against
 		// the shim object EMBEDDED IN THIS BINARY without touching any
-		// production state (anonymous maps, no pins, no attach, nothing
-		// detached — a running daemon's loaded program keeps forwarding).
+		// production state (anonymous maps, no pin writes, no attach, nothing
+		// detached — a running daemon's loaded program keeps forwarding). Its
+		// spec validation does READ the live pins for ABI compatibility.
+		// Exit 3 is ONLY the kernel-verifier reject; any other refusal (for
+		// example a live pinned-map ABI mismatch) exits 1. Deploy tooling
+		// branches its remediation on that distinction (#9558).
 		// Deploy tooling pushes the NEW binary to a temp path and runs
 		// this BEFORE stopping the old daemon; a REJECT refuses the deploy
 		// instead of killing the dataplane (the 2026-06-10 incident shape).
