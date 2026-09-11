@@ -15018,7 +15018,11 @@ is never echoed into a warning.
 
 - **SNMP** (`snmpInertKnobWarnings`, `compiler_system.go`) — `view` /
   community `view` (MIB view scoping is NOT enforced → full ifTable exposure),
-  `trap-options source-address` (traps use the default egress IP),
+  every `trap-options` statement (#9562): `source-address` (traps use the
+  default egress IP), `routing-instance` (traps leave through the default
+  routing instance), `context-oid` (no context varbind is added),
+  `agent-address` (ignored; the SNMPv1 agent-addr is already the per-target
+  source address) and any other statement (a no-op),
   `health-monitor`, `rmon` (no-ops).
 - **system** (`systemInertKnobWarnings`) — `login message` / `announcement`
   (banners not applied), `login retry-options` (lockout not enforced), `ntp
