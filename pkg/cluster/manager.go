@@ -421,6 +421,21 @@ type Manager struct {
 	// carries it unchanged and it can never describe a different heartbeat than
 	// hbLocalAddr/hbPeerAddr do.
 	hbControlIface string // last StartHeartbeat controlIface (for restart)
+	// hbRestartOwed records that a RestartHeartbeat exhausted its bind retries
+	// and left the heartbeat stopped (#9751). Before it, a later
+	// RestartHeartbeat saw "not running" and returned at once, so one failed
+	// restart latched the heartbeat dead until comms restarted; a later
+	// RestartHeartbeat now retries while this is set. hbRestartOwedSeed keeps
+	// the last heartbeat the stopped receiver had seen, so the retry's
+	// replacement still detects a peer that died in the meantime (armRestart,
+	// #9722). A deliberate StopHeartbeat clears both, and so does a start that
+	// publishes.
+	hbRestartOwed     bool
+	hbRestartOwedSeed int64
+	// hbDeliberateStops counts exported StopHeartbeat calls. A failed restart
+	// records its debt only if none landed while it retried: a comms teardown
+	// in that window stopped the heartbeat on purpose (#9751).
+	hbDeliberateStops uint64
 
 	// Sync stats provider (set by daemon after sessionSync creation).
 	syncStats SyncStatsProvider

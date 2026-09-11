@@ -113,6 +113,17 @@ Every apply that rebinds the management VRF calls `RestartHeartbeat`, and for
 
 See `pkg/cluster/README.md`, "A heartbeat RESTART is not a cold boot".
 
+The same addendum covers #9751. A `RestartHeartbeat` whose five bind retries
+all failed used to leave the heartbeat stopped for good: later restarts saw
+"not running", and the apply discarded the result. Now:
+
+- the failed restart records a debt, and the next restart retries it with the
+  pre-failure seed;
+- a deliberate `StopHeartbeat` clears the debt;
+- the apply joins the failure into its networkd error.
+
+See "A failed heartbeat restart is owed, not latched" in the same README.
+
 ### Addendum (#4033, 2026-07): heartbeat goroutine-leak / double-fire on comms restart
 
 Two coupled defects survived along the comms-restart path (transport

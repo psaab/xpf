@@ -450,6 +450,35 @@ Two receivers are never armed and keep the cold-boot floor on both arms:
 
 Cells: `heartbeat_restart_grace_9722_test.go`.
 
+### A failed heartbeat restart is owed, not latched (#9751)
+
+`RestartHeartbeat` retries the bind five times, a second apart. If all five
+fail, it returns false with the sender and receiver both torn down. Before
+#9751, every later `RestartHeartbeat` saw "not running" and returned at once,
+and the apply discarded the result. The heartbeat stayed dead across later
+applies until comms restarted. This node sent no heartbeats, so the peer
+declared it lost while this node, with no receiver, noticed nothing.
+
+A restart that exhausts its retries now records a debt.
+- `hbRestartOwed` marks it, and `hbRestartOwedSeed` keeps the seed the restart
+  could not install. `HeartbeatRestartOwed()` reports it.
+- The next `RestartHeartbeat` retries while the debt stands. It uses that seed,
+  so the retry's replacement is armed like any restart (`armRestart`, #9722)
+  and still detects a peer that died meanwhile.
+- A start that publishes settles the debt.
+- An exported `StopHeartbeat` is the deliberate stop (a comms teardown). It
+  clears the debt and is counted (`hbDeliberateStops`), so a restart that such a
+  stop overtakes records no debt. Neither case can be resurrected by the next
+  apply.
+- The start and restart paths tear down through the internal `stopHeartbeat`,
+  which is not a deliberate stop.
+
+The apply reports the failure: `restartHeartbeatAfterRebind` (`pkg/daemon`)
+joins it into the networkd error, as the management rebind failure already is.
+
+Cells: `heartbeat_restart_owed_9751_test.go`, and in `pkg/daemon`
+`heartbeat_restart_report_9751_test.go`.
+
 ### The gate's third case: the peer has YIELDED (#9452)
 
 The readiness gate had a two-case taxonomy and needed three. `electSingleNode`'s
