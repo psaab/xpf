@@ -14105,9 +14105,41 @@ Left installed, deliberately:
   `UnknownMembers`), unless it is on the structural line #9595 draws: a
   constraint-shaped value on an otherwise protocol-wide application, or a set
   member statement naming a real application. Those are refused. #6524's stray
-  statement beside a retained port stays armed. A constraint lost beside a
-  retained one stays installed; separating it from a numeric stray needs
-  keyword similarity and is the #9603 decision.
+  statement beside a retained port stays armed.
+
+#9603 refuses one more class, a real Junos application statement xpf does not
+implement, whatever its value and wherever it stands. The class is a closed,
+exact, case-sensitive table (`junosApplicationLeavesNotImplemented9603`):
+
+- `application-protocol`
+- `ether-type`
+- `icmp6-type`
+- `icmp6-code`
+- `rpc-program-number`
+- `uuid`
+
+The table is taken from Juniper's SRX grammar, `junos-es-conf-applications@2024-01-01`
+(github.com/Juniper/yang, 24.4R2).
+
+So `protocol tcp; destination-port 135; uuid ...;` no longer installs as every
+MS-RPC interface on tcp/135. The table reads every token of the unrecognized
+run, direct and term, not only its first keyword, so a table statement written
+after an unrecognized keyword in the same statement is still seen. The two DNS ALG translation switches
+(`do-not-translate-A-query-to-AAAA-query` and its reverse) stay out: they change
+translation, not which packets match. Statements from other Junos families'
+application grammar, such as the MX services `snmp-command`, are not SRX grammar
+and stay on the #9595 line.
+
+A MISSPELLED constraint beside a retained one (`source-poort 1024` beside
+`destination-port 80`, `icmp-cod 0` beside `icmp-type 8`, an `applicaton`
+member) stays installed as the documented residual. Separating it from a
+numeric stray would need keyword similarity. It is a residual rather than a gap
+because no strict commit channel admits it: `CompileConfig`,
+`compileTreeStrict` (behind every commit and commit check) and `CheckText` all
+reject each spelling, naming the token.
+`pkg/configstore/app_misspelling_strict_channels_9603_test.go` pins that. Such
+text reaches the tolerant path only from a looser build's database or HA sync.
+The measurement is in `docs/log/9603.md`.
 
 The strict text for a `source-port` on a non-port protocol now names the ICMP
 Identifier instead of claiming that such a protocol presents ports of 0.
