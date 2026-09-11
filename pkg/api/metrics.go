@@ -675,6 +675,7 @@ type xpfCollector struct {
 	fairnessRSSExpectation                    *prometheus.Desc
 	fairnessRSSExpectationValue               *prometheus.Desc
 	fairnessRSSSkewViolation                  *prometheus.Desc
+	fairnessRSSIndeterminate                  *prometheus.Desc
 	fairnessSaturated                         *prometheus.Desc
 	fairnessObservedCoV                       *prometheus.Desc
 	fairnessStarvedFlows                      *prometheus.Desc
@@ -1101,6 +1102,7 @@ func (c *xpfCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.fairnessRSSExpectation
 	ch <- c.fairnessRSSExpectationValue
 	ch <- c.fairnessRSSSkewViolation
+	ch <- c.fairnessRSSIndeterminate
 	ch <- c.fairnessSaturated
 	ch <- c.fairnessObservedCoV
 	ch <- c.fairnessStarvedFlows

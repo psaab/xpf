@@ -53,7 +53,12 @@ func (c *xpfCollector) initFairnessDescriptors() {
 	)
 	c.fairnessRSSSkewViolation = prometheus.NewDesc(
 		"xpf_fairness_rss_skew_violation",
-		"1 when the configured RSS/workload expectation fails for this egress CoS queue; 0 when it passes (#1247).",
+		"1 when the configured RSS/workload expectation fails for this egress CoS queue; 0 when it passes (#1247). Absent while the expectation is indeterminate (#9369).",
+		[]string{"ifindex", "queue_id", "kind"}, nil,
+	)
+	c.fairnessRSSIndeterminate = prometheus.NewDesc(
+		"xpf_fairness_rss_expectation_indeterminate",
+		"1 when the configured RSS/workload expectation cannot be judged because the CoS active-flow snapshot was truncated, so xpf_fairness_rss_skew_violation is withheld; 0 otherwise (#9369).",
 		[]string{"ifindex", "queue_id", "kind"}, nil,
 	)
 	c.fairnessSaturated = prometheus.NewDesc(

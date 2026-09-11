@@ -107,6 +107,25 @@ func (c *xpfCollector) emitFairnessRSSExpectationGauges(
 				result.ExpectationKind,
 			)
 		}
+		// #9369: an indeterminate expectation (truncated snapshot) emits NO
+		// violation sample. A 0 would read as a clean fairness board and a 1 as
+		// a false alarm; the truncated prefix supports neither. The
+		// indeterminate gauge says why the violation series is missing.
+		indeterminate := 0.0
+		if result.Indeterminate {
+			indeterminate = 1
+		}
+		ch <- prometheus.MustNewConstMetric(
+			c.fairnessRSSIndeterminate,
+			prometheus.GaugeValue,
+			indeterminate,
+			ifindexLabel,
+			queueLabel,
+			result.ExpectationKind,
+		)
+		if result.Indeterminate {
+			continue
+		}
 		violation := 1.0
 		if result.Pass {
 			violation = 0

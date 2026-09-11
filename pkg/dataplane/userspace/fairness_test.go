@@ -161,3 +161,88 @@ func TestEvaluateFairnessRSSExpectationsUnresolvedInterface(t *testing.T) {
 		t.Fatalf("unresolved reason = %q, want not present in dataplane status", results[0].Reason)
 	}
 }
+
+// #9369: an rss-expectation verdict must be INDETERMINATE when the CoS
+// active-flow snapshot is truncated. The coordinator retains the first 4096
+// sorted (ifindex, queue, worker) triples and flags more than that. The witness
+// is the issue's: 4095 lower-key triples fill the snapshot, and the target
+// queue keeps only worker 0's count of 1 while worker 1's count of 3 is cut. A
+// truncated prefix flips the verdict in BOTH directions (cstruct-max:0.1 and
+// balanced would falsely PASS, max-worker-flow-share:0.8 would falsely FAIL), so
+// every constrained kind must be indeterminate and never PASS.
+//
+// The controls stop this cell from passing on a gate that suppresses or
+// declares everything indeterminate:
+//   - complete [1,0,...] must PASS cstruct-max:0.1, determinately;
+//   - complete [1,3,0,...] must FAIL cstruct-max:0.1, determinately;
+//   - `any` constrains nothing and still PASSES on the truncated snapshot.
+func TestRSSExpectationIsIndeterminateOnTruncatedSnapshot_9369(t *testing.T) {
+	const workers = 16
+	binding := []BindingStatus{{Interface: "reth0", Ifindex: 80}}
+	filler := make([]CoSActiveFlowCountStatus, 0, 4095)
+	for i := 0; len(filler) < 4095; i++ {
+		filler = append(filler, CoSActiveFlowCountStatus{
+			Ifindex: 1 + i/(8*workers), QueueID: uint8((i / workers) % 8), WorkerID: uint32(i % workers), ActiveFlowCount: 1,
+		})
+	}
+	truncatedRows := append(append([]CoSActiveFlowCountStatus(nil), filler...),
+		CoSActiveFlowCountStatus{Ifindex: 80, QueueID: 4, WorkerID: 0, ActiveFlowCount: 1})
+	truncated := ProcessStatus{Workers: workers, Bindings: binding, CoSActiveFlowCounts: truncatedRows, CoSActiveFlowCountsTruncated: true}
+
+	results := EvaluateFairnessRSSExpectations(truncated, []FairnessRSSExpectation{
+		{Interface: "reth0", QueueID: 4, RSSExpectation: "cstruct-max:0.1"},
+		{Interface: "reth0", QueueID: 4, RSSExpectation: "balanced"},
+		{Interface: "reth0", QueueID: 4, RSSExpectation: "max-worker-flow-share:0.8"},
+		{Interface: "reth0", QueueID: 4, RSSExpectation: "any"},
+	})
+	if len(results) != 4 {
+		t.Fatalf("results len = %d, want 4 (presence is part of the contract): %+v", len(results), results)
+	}
+	byExpectation := map[string]FairnessRSSExpectationResult{}
+	for _, r := range results {
+		byExpectation[r.Expectation] = r
+	}
+	for _, want := range []string{"cstruct-max:0.1", "balanced", "max-worker-flow-share:0.8"} {
+		r, ok := byExpectation[want]
+		if !ok {
+			t.Fatalf("no result row for %q: %+v", want, results)
+		}
+		if !r.Resolved || r.Ifindex != 80 {
+			t.Fatalf("%q must evaluate the resolved target queue (ifindex 80): %+v", want, r)
+		}
+		if !r.Indeterminate || r.Pass {
+			t.Fatalf("#9369: %q on a TRUNCATED snapshot must be INDETERMINATE and not PASS; got Indeterminate=%v Pass=%v Reason=%q",
+				want, r.Indeterminate, r.Pass, r.Reason)
+		}
+		if !strings.Contains(r.Reason, "indeterminate") {
+			t.Fatalf("%q indeterminate reason = %q", want, r.Reason)
+		}
+	}
+	if r := byExpectation["any"]; !r.Pass || r.Indeterminate {
+		t.Fatalf("`any` constrains nothing and must still PASS on a truncated snapshot: %+v", r)
+	}
+
+	// CONTROLS on complete (untruncated) data.
+	for _, tc := range []struct {
+		name     string
+		counts   []uint32
+		wantPass bool
+	}{
+		{name: "complete [1,0,...] passes cstruct-max:0.1", counts: []uint32{1, 0}, wantPass: true},
+		{name: "complete [1,3,0,...] fails cstruct-max:0.1", counts: []uint32{1, 3}, wantPass: false},
+	} {
+		rows := []CoSActiveFlowCountStatus{}
+		for w, c := range tc.counts {
+			rows = append(rows, CoSActiveFlowCountStatus{Ifindex: 80, QueueID: 4, WorkerID: uint32(w), ActiveFlowCount: c})
+		}
+		st := ProcessStatus{Workers: workers, Bindings: binding, CoSActiveFlowCounts: rows}
+		got := EvaluateFairnessRSSExpectations(st, []FairnessRSSExpectation{{Interface: "reth0", QueueID: 4, RSSExpectation: "cstruct-max:0.1"}})
+		if len(got) != 1 {
+			t.Fatalf("%s: results len = %d, want 1", tc.name, len(got))
+		}
+		if got[0].Indeterminate || got[0].Pass != tc.wantPass {
+			t.Fatalf("%s: got Pass=%v Indeterminate=%v Reason=%q, want Pass=%v determinate",
+				tc.name, got[0].Pass, got[0].Indeterminate, got[0].Reason, tc.wantPass)
+		}
+	}
+}
