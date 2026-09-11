@@ -496,10 +496,14 @@ func (s *Store) commitConfirmedLocked(minutes int) (*config.Config, error) {
 	// record ReadConfirm will refuse is reported as an armed, crash-surviving
 	// window, and a restart inside it keeps the unconfirmed config with no
 	// timer. The record encoded here is the one writeConfirmState writes: the
-	// same rollback target, the same deadline (hoisted for exactly this reason)
-	// and the guarded hash of the tree about to become active; the encrypted
-	// length is a function of the plaintext length.
-	deadline := time.Now().Add(time.Duration(minutes) * time.Minute)
+	// same rollback target, a deadline of the same JSON WIDTH, and the guarded
+	// hash of the tree about to become active; the encrypted length is a
+	// function of the plaintext length. The real deadline is still taken at the
+	// arm site below, after the commit work, so the persisted deadline and the
+	// live timer describe ONE window: the preflight uses the widest RFC3339Nano
+	// form of that instant (nine fractional digits), so the record it sizes is
+	// never shorter than the one written.
+	preflightDeadline := time.Now().Add(time.Duration(minutes) * time.Minute).Truncate(time.Second).Add(999999999 * time.Nanosecond)
 	if s.db != nil {
 		prevTree, prevFirst := s.active, !everCommittedOnEntry
 		if s.confirmTimer != nil {
@@ -515,7 +519,7 @@ func (s *Store) commitConfirmedLocked(minutes int) (*config.Config, error) {
 		// rollback to offer, and discovering that after promotion is the defect
 		// this preflight exists to remove.
 		if _, err := s.db.encodeConfirm(&confirmRecord{
-			Deadline:    deadline,
+			Deadline:    preflightDeadline,
 			PrevTree:    prevTree,
 			FirstCommit: prevFirst,
 			GuardedHash: guardedConfigHash(s.candidate),
@@ -622,6 +626,7 @@ func (s *Store) commitConfirmedLocked(minutes int) (*config.Config, error) {
 	// performAutoRollback.
 	s.confirmGen++
 	gen := s.confirmGen
+	deadline := time.Now().Add(time.Duration(minutes) * time.Minute)
 	s.confirmTimer = time.AfterFunc(time.Duration(minutes)*time.Minute, func() {
 		s.fireConfirmTimer(gen)
 	})

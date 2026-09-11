@@ -688,3 +688,45 @@ func TestCommitConfirmedRejectsAnUnencodableRollbackRecord_9617(t *testing.T) {
 		t.Errorf("#9617: a refused commit confirmed left a confirm.json behind (stat: %v)", serr)
 	}
 }
+
+// The persisted deadline and the live timer must describe ONE window. The live
+// timer arms the full duration at the arm site, after the commit's own work, so
+// the persisted deadline must be taken there too: a deadline taken before a
+// slow persist would make a restart near the end of the window roll back
+// earlier than the live timer would.
+func TestPersistedConfirmDeadlineStartsAfterTheCommitWork_9617(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config")
+	s := newTestStoreAt(t, path)
+	stopTimers9617(t, s)
+	if err := s.EnterConfigure(); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetFromInput("system host-name before9617d"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetFromInput("system host-name window9617"); err != nil {
+		t.Fatal(err)
+	}
+	var afterPersist time.Time
+	s.writeActiveFn = func(tree *config.ConfigTree) error {
+		time.Sleep(300 * time.Millisecond) // a slow active persist, as a large config is
+		err := s.db.WriteActive(tree)
+		afterPersist = time.Now()
+		return err
+	}
+	if _, err := s.CommitConfirmed(10); err != nil {
+		t.Fatal(err)
+	}
+	rec, err := s.db.ReadConfirm()
+	if err != nil || rec == nil {
+		t.Fatalf("read confirm: %v", err)
+	}
+	if earliest := afterPersist.Add(10 * time.Minute); rec.Deadline.Before(earliest) {
+		t.Errorf("#9617: the persisted deadline is %v earlier than the window measured from the end of the "+
+			"commit work; the live timer arms the full duration there, so a restart near the end of the "+
+			"window would roll back early", earliest.Sub(rec.Deadline))
+	}
+}
