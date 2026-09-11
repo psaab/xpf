@@ -2205,8 +2205,9 @@ func compileSNMP(node *Node, sys *SystemConfig, cfg *Config, lenient bool) error
 // `snmp` knobs xpf recognizes but does not enforce (#4306 S-5). The
 // security-relevant ones are called out explicitly: a MIB `view` (on a
 // community or standalone) is NOT enforced, so a view-scoped community is
-// silently promoted to full ifTable exposure; `trap-options source-address`
-// is NOT bound, so traps leave from the default egress IP. Messages are built
+// silently promoted to full ifTable exposure; no `trap-options` statement is
+// honoured (#9562, see snmpTrapOptionsAdvisory9562), and `source-address` in
+// particular is NOT bound, so traps leave from the default egress IP. Messages are built
 // from the node IDENTITY (keywords) only — never the community NAME (an SNMP
 // community string is a secret). Deterministic, deduplicated output.
 func snmpInertKnobWarnings(node *Node) []string {
@@ -2240,8 +2241,11 @@ func snmpInertKnobWarnings(node *Node) []string {
 		case "view":
 			add("snmp view: MIB view scoping is accepted but NOT enforced by the SNMP agent (the full ifTable MIB is exposed regardless)")
 		case "trap-options":
-			if nodeHasSub(child, "source-address") {
-				add("snmp trap-options source-address: accepted but NOT enforced (traps are sent from the default egress IP)")
+			// #9562: compileSNMP reads NOTHING under trap-options, so every
+			// statement there gets an advisory, not only source-address. A
+			// statement nobody has listed is covered by construction.
+			for _, kw := range snmpTrapOptionsStatements9562(child) {
+				add(snmpTrapOptionsAdvisory9562(kw))
 			}
 		case "health-monitor":
 			add("snmp health-monitor: accepted but NOT implemented (no-op)")
