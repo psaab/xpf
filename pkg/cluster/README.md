@@ -423,6 +423,82 @@ still promotes once the grace elapses (`neverSeenConfirmed` returns true at
 sets `peerEverSeen` and runs `electSingleNode`; `election.go` bypasses the
 readiness gate when `!peerAlive`, so the surviving node takes over.
 
+### A heartbeat RESTART is not a cold boot (#9722)
+
+`RestartHeartbeat` replaces the receiver on every config apply that rebinds the
+management VRF. On an HA node with a management interface that means every
+operator commit and every peer-synced apply. The replacement used to arm the
+same 30s cold-boot floor. The seen-then-lost arm returns inside that floor
+before it checks staleness, so a peer that died within 30s after a commit was
+declared lost up to 30s late. In the default private-RG mode, that delay is the
+promotion delay.
+
+A replacement for a receiver that had SEEN the peer is now armed before it
+starts (`armRestart`):
+- it carries the replaced receiver's `lastSeen`;
+- its seen-then-lost floor (`seenThenLostGrace`) is `heartbeatRestartGrace`
+  (5s, the restart path's own bind-retry window), not `heartbeatStartupGrace`.
+
+After that, the ordinary `threshold*interval` staleness applies. A live peer
+whose heartbeats are briefly lost past the restart grace is still covered by the
+sync-recency guard that `handlePeerTimeout` consults
+(`shouldSuppressPeerHeartbeatTimeout`, #1792).
+
+Two receivers are never armed and keep the cold-boot floor on both arms:
+- a replacement for a receiver that had NEVER seen the peer;
+- any receiver started by `StartHeartbeat` (boot, comms restart).
+
+Cells: `heartbeat_restart_grace_9722_test.go`.
+
+**A restart never SHORTENS a grace still in progress.** The config apply at
+BOOT restarts the heartbeat too, about a second after the cold start, while the
+node is still inside the 30s cold-boot floor that exists for exactly that
+apply's disruption (#4386). The first version of this change held that
+replacement for only the 5s restart grace, and the loss-cluster failover gate
+caught it:
+- fw1 cold-started its heartbeat at 12:57:02 and its boot-time VRF rebind
+  restarted it at 12:57:03;
+- at 12:57:16, still booting, fw1 declared fw0 lost and took RG0-2 while fw0
+  held RG0-1;
+- the deploy reassert could not move RG2 back.
+
+The replacement now inherits the END of the grace its predecessor was inside
+(`inheritedHold` = the predecessor's `startedAt` plus its `seenThenLostGrace`,
+read under `m.mu`). `checkTimeout` holds while either the restart grace or the
+inherited hold is running. A steady-state commit restarts a receiver whose
+boot grace ended long ago, so it still holds for only 5s. A failed restart's
+debt (#9751 below) carries the hold into its retry. Cells:
+`heartbeat_restart_boot_grace_9722_test.go`.
+
+### A failed heartbeat restart is owed, not latched (#9751)
+
+`RestartHeartbeat` retries the bind five times, a second apart. If all five
+fail, it returns false with the sender and receiver both torn down. Before
+#9751, every later `RestartHeartbeat` saw "not running" and returned at once,
+and the apply discarded the result. The heartbeat stayed dead across later
+applies until comms restarted. This node sent no heartbeats, so the peer
+declared it lost while this node, with no receiver, noticed nothing.
+
+A restart that exhausts its retries now records a debt.
+- `hbRestartOwed` marks it, and `hbRestartOwedSeed` keeps the seed the restart
+  could not install. `HeartbeatRestartOwed()` reports it.
+- The next `RestartHeartbeat` retries while the debt stands. It uses that seed,
+  so the retry's replacement is armed like any restart (`armRestart`, #9722)
+  and still detects a peer that died meanwhile.
+- A start that publishes settles the debt.
+- An exported `StopHeartbeat` is the deliberate stop (a comms teardown). It
+  clears the debt and is counted (`hbDeliberateStops`), so a restart that such a
+  stop overtakes records no debt. Neither case can be resurrected by the next
+  apply.
+- The start and restart paths tear down through the internal `stopHeartbeat`,
+  which is not a deliberate stop.
+
+The apply reports the failure: `restartHeartbeatAfterRebind` (`pkg/daemon`)
+joins it into the networkd error, as the management rebind failure already is.
+
+Cells: `heartbeat_restart_owed_9751_test.go`, and in `pkg/daemon`
+`heartbeat_restart_report_9751_test.go`.
+
 ### The gate's third case: the peer has YIELDED (#9452)
 
 The readiness gate had a two-case taxonomy and needed three. `electSingleNode`'s

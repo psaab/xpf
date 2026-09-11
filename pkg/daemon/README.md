@@ -2997,7 +2997,12 @@ never lock an operator out of a remote box it manages.
   bind failures; `applyDataplaneAndHACore` joins them into `networkdErr` (like the
   #1956 device-map-teardown joins), so a genuine management-VRF bind failure also
   fails the commit closed. A failed commit is the retry owner (the next apply
-  re-reconciles). Deliberately LEFT best-effort (WARN, not surfaced): the
+  re-reconciles). The heartbeat restart that follows the rebind is surfaced the
+  same way (#9751): `restartHeartbeatAfterRebind` joins a restart that exhausted
+  its bind retries into `networkdErr`. That restart leaves the heartbeat stopped,
+  owing a retry the next apply performs. The old call discarded
+  `RestartHeartbeat`'s result. `HeartbeatRestartOwed` separates that case from a
+  heartbeat that was never running, which is not an error. Deliberately LEFT best-effort (WARN, not surfaced): the
   routing-instance member binds (they run BEFORE `applyInterfaceReconcile` creates
   tunnel/xfrmi members, so a not-yet-created member is an EXPECTED transient
   absence, not a permanent failure) and the pre-networkd management bind (stripped
