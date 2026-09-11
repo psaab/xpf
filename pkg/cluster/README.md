@@ -3553,6 +3553,29 @@ outside the monitor loop:
 - `Ready` and `TransferReady` are different gates. `Ready` allows VRRP to
   participate in election; `TransferReady` is the stricter gate for
   explicit operator-initiated `request chassis cluster failover`.
+- **Every handover that promotes the peer refuses a config-stale peer
+  (#9569).** The #5563 config-stale gate lives in `TransferReady`, which only
+  the node that becomes primary evaluates, through `RequestPeerFailover`. The
+  node-targeted form reaches it. The untargeted `request chassis cluster
+  failover redundancy-group N`, `ManualFailoverBatch`, and `ForceSecondary` (the
+  ISSU drain and `request system software in-service-upgrade`) demote THIS node
+  instead and never consulted it. For RG0 the stale standby was then promoted,
+  refused the newer config the old primary pushed, and pushed its own older
+  config back over the committed one.
+  - The demoting node cannot read the peer's `ConfigStale`: heartbeats carry only
+    per-RG priority, weight and state. It does hold the one signal that covers the
+    reachable windows. A standby whose stored config is still older either failed
+    to apply the newest push or dropped it from a full apply queue, and both send a
+    config-apply nack for that generation (#7328).
+    `SessionSync.PeerConfigStale` is true while the last nack matches
+    `lastSentConfigGen`; a newer successful push supersedes it.
+  - `ManualFailover`, `ManualFailoverBatch` and `ForceSecondary` evaluate the
+    predicate (`SetPeerConfigStaleFunc`, wired by the daemon) outside `m.mu` and
+    refuse with `ErrPeerConfigStale`. A refusal clears the in-progress mark.
+  - A push the standby is still applying sends no nack and is not refused. That is
+    safe, because `SyncApply` makes the new tree active before applying it. With no
+    session sync there is no push that could have failed, so the handover proceeds
+    as before. Crash takeover stays ungated by design.
 - `TakeoverHoldTime` adds extra delay before election when this node would
   immediately preempt. Used to avoid election thrash on simultaneous boot.
 - **Removing an RG must stop its armed hold timer (#5245).** `SetRGReady`

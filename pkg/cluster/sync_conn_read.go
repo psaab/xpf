@@ -523,6 +523,9 @@ func (s *SessionSync) handleMessage(conn net.Conn, msgType uint8, payload []byte
 			return
 		}
 		s.stats.ConfigApplyNacksReceived.Add(1)
+		// #9569: the peer still holds an older config. A handover onto it is refused
+		// until a newer push supersedes this generation.
+		s.peerConfigNackedGen.Store(nackedGen)
 		slog.Warn("cluster sync: peer did not apply the config generation we pushed — re-arming the push marker",
 			"gen", nackedGen)
 		if s.OnPeerConfigApplyFailed != nil {

@@ -496,6 +496,9 @@ type Manager struct {
 	// transferReadinessFn reports whether explicit manual failover can be
 	// attempted for the local RG right now and, if not, why.
 	transferReadinessFn func(rgID int) (bool, []string)
+	// peerConfigStaleFn reports whether the peer failed to apply the newest
+	// config generation this node sent (#9569). Evaluated outside mu.
+	peerConfigStaleFn func() (bool, string)
 
 	// rgForwardingFn reports the DATAPLANE-side view of a redundancy group —
 	// applied rg_active and VRRP mastership. Supplied by the daemon, which owns
