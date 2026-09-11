@@ -409,7 +409,14 @@ main() {
 	done
 	if [ "$loaded" = "1" ]; then
 		pass "Kea on $STANDBY logged a memfile lease-file load after the failover"
-		if ssh_fw "$STANDBY" "journalctl -u kea-dhcp4-server --since @$since 2>/dev/null | grep -iE 'ROW_ERROR|error|parse|malformed'"; then
+		# Match Kea's memfile LOAD failures by message id, not any line carrying
+		# "error". #9791 lab run 4 failed this cell on DHCP4_BUFFER_RECEIVE_FAIL
+		# ("Value of the length of the IP header must not be lower than 5
+		# words"): a packet-receive error on the raw socket, unrelated to loading
+		# the lease file. DHCPSRV_MEMFILE_* is the memfile backend's id family, so
+		# its ERROR/FAIL members, a discarded row, and a server init or config
+		# load failure are what (a) is about.
+		if ssh_fw "$STANDBY" "journalctl -u kea-dhcp4-server --since @$since 2>/dev/null | grep -E 'DHCPSRV_MEMFILE_[A-Z_]*(ERROR|FAIL)|ROW_ERROR|DHCP4_(INIT_FAIL|CONFIG_LOAD_FAIL)'"; then
 			fail "Kea reported a memfile load error on the promoted node"
 		else
 			pass "no Kea memfile load error on the promoted node since the failover"
