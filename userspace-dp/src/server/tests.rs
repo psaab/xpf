@@ -2015,6 +2015,10 @@ fn apply_snapshot_rejects_generation_rollback_5169() {
 /// partial-republish Go paths recompute the SAME generation after a timed-out
 /// apply that actually landed and must be ACKed ok, not fail-closed into a
 /// non-converging loop). This mirrors `bump_fib`, which admits an equal fib.
+///
+/// #9520: the retry is admitted only when it also carries the same NON-EMPTY
+/// content digest, which is what a Go retry of the same content does. The other
+/// half is `apply_snapshot_refuses_reused_generation_with_different_content_9520`.
 #[test]
 fn apply_snapshot_admits_generation_reuse_5169() {
     use crate::{ConfigSnapshot, CONFIG_SNAPSHOT_PROTOCOL_VERSION};
@@ -2028,6 +2032,7 @@ fn apply_snapshot_admits_generation_reuse_5169() {
             generation: 6,
             fib_generation: 5,
             generated_at: chrono::Utc::now(),
+            content_digest: "digest-6".to_string(),
             ..ConfigSnapshot::default()
         });
         assert!(run_request(state.clone(), request).ok);
@@ -2039,6 +2044,7 @@ fn apply_snapshot_admits_generation_reuse_5169() {
         generation: 6,
         fib_generation: 5,
         generated_at: chrono::Utc::now(),
+        content_digest: "digest-6".to_string(),
         ..ConfigSnapshot::default()
     });
     let response = run_request(state.clone(), request);
@@ -2053,6 +2059,279 @@ fn apply_snapshot_admits_generation_reuse_5169() {
     assert_eq!(guard.snapshot.as_ref().map(|s| s.generation), Some(6));
 }
 
+/// #9520: a snapshot that REUSES the installed generation but carries a
+/// DIFFERENT content digest is refused before any mutation, with the
+/// machine-readable prefix the Go control plane reacts to. This is the
+/// timeout-but-landed shape: a republish landed content A at gen 6 while Go saw
+/// a deadline error, and Go's retry rebuilt content B and re-sent gen 6. The
+/// equal pair used to be admitted content-blind, installing B under the
+/// identity A's flow-cache entries and session policy stamps were minted under.
+///
+/// RED-on-revert: delete the content identity gate and the second apply is
+/// ACKed, the installed digest and default policy flip to B, and B is persisted.
+#[test]
+fn apply_snapshot_refuses_reused_generation_with_different_content_9520() {
+    use crate::{ConfigSnapshot, CONFIG_SNAPSHOT_PROTOCOL_VERSION, SNAPSHOT_CONTENT_CONFLICT_PREFIX};
+    let state = new_state(ProcessStatus::default());
+    let state_file = unique_state_file("apply-content-conflict-9520");
+    let snapshot = |digest: &str, default_policy: &str| ConfigSnapshot {
+        version: CONFIG_SNAPSHOT_PROTOCOL_VERSION,
+        generation: 6,
+        fib_generation: 5,
+        generated_at: chrono::Utc::now(),
+        content_digest: digest.to_string(),
+        default_policy: default_policy.to_string(),
+        ..ConfigSnapshot::default()
+    };
+
+    let mut request = req("apply_snapshot");
+    request.snapshot = Some(snapshot("digest-a", "permit"));
+    assert!(run_request_on_file(state.clone(), request, &state_file).ok);
+
+    let mut request = req("apply_snapshot");
+    request.snapshot = Some(snapshot("digest-b", "deny"));
+    let response = run_request_on_file(state.clone(), request, &state_file);
+    assert!(
+        !response.ok,
+        "gen 6 is installed with digest-a; a gen 6 apply carrying digest-b must be refused"
+    );
+    assert!(
+        response.error.starts_with(SNAPSHOT_CONTENT_CONFLICT_PREFIX),
+        "the refusal must carry the prefix Go matches, or Go cannot tell that the helper \
+         holds gen 6 and re-sends it forever: {}",
+        response.error
+    );
+
+    let guard = state.lock().expect("state");
+    assert_eq!(guard.status.last_snapshot_generation, 6);
+    assert_eq!(guard.status.last_fib_generation, 5);
+    let installed = guard.snapshot.as_ref().expect("installed snapshot");
+    assert_eq!(
+        installed.content_digest, "digest-a",
+        "the refused content must not replace the installed snapshot"
+    );
+    assert_eq!(
+        installed.default_policy, "permit",
+        "the refused content must not be enforced under gen 6"
+    );
+    drop(guard);
+
+    let bytes = std::fs::read(&state_file).expect("read persisted state file");
+    let persisted: serde_json::Value =
+        serde_json::from_slice(&bytes).expect("parse persisted state file");
+    assert_eq!(
+        persisted["snapshot"]["content_digest"].as_str(),
+        Some("digest-a"),
+        "the refused content must not become the boot baseline"
+    );
+    assert_eq!(persisted["snapshot"]["default_policy"].as_str(), Some("permit"));
+    let _ = std::fs::remove_file(&state_file);
+}
+
+/// #9520: the content identity gate covers a reused generation at ANY fib, not
+/// only the exact (generation, fib) pair. (6, 7) passes the #5169 gate as a fib
+/// advance under a reused config, but the session policy stamp and the #8356
+/// re-derivation are keyed on the config generation alone, so different content
+/// at (6, 7) is exactly as unsafe as at (6, 5).
+///
+/// RED-on-revert: narrow the gate to `fib_generation == cur_fib` and this apply
+/// is ACKed with the new content.
+#[test]
+fn apply_snapshot_refuses_reused_generation_with_different_content_at_advanced_fib_9520() {
+    use crate::{ConfigSnapshot, CONFIG_SNAPSHOT_PROTOCOL_VERSION, SNAPSHOT_CONTENT_CONFLICT_PREFIX};
+    let state = new_state(ProcessStatus::default());
+    let snapshot = |fib: u32, digest: &str, default_policy: &str| ConfigSnapshot {
+        version: CONFIG_SNAPSHOT_PROTOCOL_VERSION,
+        generation: 6,
+        fib_generation: fib,
+        generated_at: chrono::Utc::now(),
+        content_digest: digest.to_string(),
+        default_policy: default_policy.to_string(),
+        ..ConfigSnapshot::default()
+    };
+
+    let mut request = req("apply_snapshot");
+    request.snapshot = Some(snapshot(5, "digest-a", "permit"));
+    assert!(run_request(state.clone(), request).ok);
+
+    let mut request = req("apply_snapshot");
+    request.snapshot = Some(snapshot(7, "digest-b", "deny"));
+    let response = run_request(state.clone(), request);
+    assert!(
+        !response.ok && response.error.starts_with(SNAPSHOT_CONTENT_CONFLICT_PREFIX),
+        "a gen 6 apply at an advanced fib carrying different content must be refused with \
+         the conflict prefix: ok={} error={}",
+        response.ok,
+        response.error
+    );
+    let guard = state.lock().expect("state");
+    assert_eq!(guard.status.last_fib_generation, 5, "the refused apply must not advance fib");
+    let installed = guard.snapshot.as_ref().expect("installed snapshot");
+    assert_eq!(installed.content_digest, "digest-a");
+    assert_eq!(installed.default_policy, "permit");
+}
+
+/// #9520 positive controls: the gate refuses only DIFFERENT content under a
+/// REUSED generation. The #4036 idempotent retry (same digest, fresh
+/// generated_at), a fib advance carrying the same digest, and a generation
+/// advance carrying different content must all still be ACKed.
+///
+/// RED-on-revert of an over-strict gate: refusing every same-generation apply,
+/// or comparing a field outside the digest, reds the first or second step.
+#[test]
+fn apply_snapshot_admits_reused_generation_with_identical_content_9520() {
+    use crate::{ConfigSnapshot, CONFIG_SNAPSHOT_PROTOCOL_VERSION};
+    let state = new_state(ProcessStatus::default());
+    let snapshot = |generation: u64, fib: u32, digest: &str, default_policy: &str| ConfigSnapshot {
+        version: CONFIG_SNAPSHOT_PROTOCOL_VERSION,
+        generation,
+        fib_generation: fib,
+        generated_at: chrono::Utc::now(),
+        content_digest: digest.to_string(),
+        default_policy: default_policy.to_string(),
+        ..ConfigSnapshot::default()
+    };
+    let steps = [
+        ("first apply", snapshot(6, 5, "digest-a", "permit")),
+        ("idempotent retry, same digest", snapshot(6, 5, "digest-a", "permit")),
+        ("fib advance, same digest", snapshot(6, 7, "digest-a", "permit")),
+        ("generation advance, different content", snapshot(7, 7, "digest-b", "deny")),
+    ];
+    for (step, snap) in steps {
+        let mut request = req("apply_snapshot");
+        request.snapshot = Some(snap);
+        let response = run_request(state.clone(), request);
+        assert!(response.ok, "{step} must be admitted: {}", response.error);
+    }
+    let guard = state.lock().expect("state");
+    assert_eq!(guard.status.last_snapshot_generation, 7);
+    assert_eq!(guard.status.last_fib_generation, 7);
+    let installed = guard.snapshot.as_ref().expect("installed snapshot");
+    assert_eq!(installed.content_digest, "digest-b");
+    assert_eq!(installed.default_policy, "deny");
+}
+
+/// #9520: an EMPTY content digest never proves identity at a reused
+/// generation. Two applies that carry none compare equal as strings whatever
+/// their content, which is exactly the content-blind admission the gate closes.
+/// A first apply and a generation advance without a digest are still admitted.
+///
+/// RED-on-revert: drop the `installed_digest.is_empty()` arm and the second
+/// apply is ACKed with the new content.
+#[test]
+fn apply_snapshot_refuses_reused_generation_without_a_digest_9520() {
+    use crate::{ConfigSnapshot, CONFIG_SNAPSHOT_PROTOCOL_VERSION, SNAPSHOT_CONTENT_CONFLICT_PREFIX};
+    let state = new_state(ProcessStatus::default());
+    let apply = |generation: u64, digest: &str, default_policy: &str| {
+        let mut request = req("apply_snapshot");
+        request.snapshot = Some(ConfigSnapshot {
+            version: CONFIG_SNAPSHOT_PROTOCOL_VERSION,
+            generation,
+            fib_generation: 5,
+            generated_at: chrono::Utc::now(),
+            content_digest: digest.to_string(),
+            default_policy: default_policy.to_string(),
+            ..ConfigSnapshot::default()
+        });
+        run_request(state.clone(), request)
+    };
+
+    let first = apply(6, "", "permit");
+    assert!(first.ok, "a first apply has no baseline to conflict with: {}", first.error);
+    let bare_retry = apply(6, "", "deny");
+    assert!(
+        !bare_retry.ok && bare_retry.error.starts_with(SNAPSHOT_CONTENT_CONFLICT_PREFIX),
+        "two gen 6 applies without a digest must not be taken as identical: ok={} error={}",
+        bare_retry.ok,
+        bare_retry.error
+    );
+    let stamped_retry = apply(6, "digest-a", "deny");
+    assert!(
+        !stamped_retry.ok && stamped_retry.error.starts_with(SNAPSHOT_CONTENT_CONFLICT_PREFIX),
+        "an installed snapshot without a digest cannot vouch for a retry that carries one: ok={} error={}",
+        stamped_retry.ok,
+        stamped_retry.error
+    );
+    let advance = apply(7, "", "deny");
+    assert!(advance.ok, "a generation advance needs no digest: {}", advance.error);
+    let guard = state.lock().expect("state");
+    assert_eq!(guard.status.last_snapshot_generation, 7);
+    assert_eq!(guard.snapshot.as_ref().map(|s| s.default_policy.as_str()), Some("deny"));
+}
+
+/// #9520: a partial update that changes content the helper enforces stops the
+/// installed digest vouching for a retry. `update_fabrics` rewrites the stored
+/// snapshot's fabrics and `update_neighbors` changes the coordinator's
+/// neighbours; after either, the full apply the digest came from must not be
+/// accepted again at the same generation. The identical retry BEFORE the partial
+/// update is the positive control: it is ACKed, so the later refusal is the
+/// update's doing.
+///
+/// RED-on-revert: drop either `content_digest.clear()` and that arm's retry is
+/// ACKed.
+#[test]
+fn a_partial_update_stops_the_installed_digest_vouching_for_a_retry_9520() {
+    use crate::{
+        ConfigSnapshot, FabricSnapshot, NeighborSnapshot, CONFIG_SNAPSHOT_PROTOCOL_VERSION,
+        SNAPSHOT_CONTENT_CONFLICT_PREFIX,
+    };
+    let full_apply = || {
+        let mut request = req("apply_snapshot");
+        request.snapshot = Some(ConfigSnapshot {
+            version: CONFIG_SNAPSHOT_PROTOCOL_VERSION,
+            generation: 6,
+            fib_generation: 5,
+            generated_at: chrono::Utc::now(),
+            content_digest: "digest-a".to_string(),
+            ..ConfigSnapshot::default()
+        });
+        request
+    };
+    for arm in ["update_fabrics", "update_neighbors"] {
+        let state = new_state(ProcessStatus::default());
+        let baseline = run_request(state.clone(), full_apply());
+        assert!(baseline.ok, "{arm}: baseline apply: {}", baseline.error);
+        let control = run_request(state.clone(), full_apply());
+        assert!(
+            control.ok,
+            "{arm}: before any partial update the identical retry must be ACKed: {}",
+            control.error
+        );
+
+        let mut partial = req(arm);
+        if arm == "update_fabrics" {
+            partial.fabrics = Some(vec![FabricSnapshot::default()]);
+        } else {
+            partial.neighbors = Some(vec![NeighborSnapshot {
+                ifindex: 5,
+                ip: "10.0.61.2".to_string(),
+                mac: "02:00:00:00:00:02".to_string(),
+                state: "reachable".to_string(),
+                ..NeighborSnapshot::default()
+            }]);
+            partial.neighbor_generation = 1;
+        }
+        let _ = run_request(state.clone(), partial);
+        {
+            let guard = state.lock().expect("state");
+            assert_eq!(
+                guard.snapshot.as_ref().map(|s| s.content_digest.as_str()),
+                Some(""),
+                "{arm}: the partial update must clear the installed digest"
+            );
+        }
+
+        let replay = run_request(state.clone(), full_apply());
+        assert!(
+            !replay.ok && replay.error.starts_with(SNAPSHOT_CONTENT_CONFLICT_PREFIX),
+            "{arm}: after the partial update a same-generation replay of the full apply must be \
+             refused: ok={} error={}",
+            replay.ok,
+            replay.error
+        );
+    }
+}
+
 /// #5169 (review fold): a FIB ROLLBACK under a reused config (config == cur,
 /// fib < cur_fib) must be REFUSED. This is the second rollback axis — the fib
 /// half of the pair rolling back re-publishes a superseded pair whose stale
@@ -2061,6 +2340,9 @@ fn apply_snapshot_admits_generation_reuse_5169() {
 ///
 /// RED-on-revert: neutralize the guard and the (6, 6) rollback publishes over
 /// the (6, 7) baseline — the assertions below flip.
+/// #9520: every apply here carries the SAME content digest, because "config
+/// reused" means the same content. A reused generation with a different or empty
+/// digest is refused before this #5169 gate's fib comparison matters.
 #[test]
 fn apply_snapshot_rejects_fib_rollback_5169() {
     use crate::{ConfigSnapshot, CONFIG_SNAPSHOT_PROTOCOL_VERSION};
@@ -2074,6 +2356,7 @@ fn apply_snapshot_rejects_fib_rollback_5169() {
             generation: 6,
             fib_generation: 5,
             generated_at: chrono::Utc::now(),
+            content_digest: "digest-6".to_string(),
             ..ConfigSnapshot::default()
         });
         assert!(run_request(state.clone(), request).ok);
@@ -2086,6 +2369,7 @@ fn apply_snapshot_rejects_fib_rollback_5169() {
             generation: 6,
             fib_generation: 7,
             generated_at: chrono::Utc::now(),
+            content_digest: "digest-6".to_string(),
             ..ConfigSnapshot::default()
         });
         assert!(run_request(state.clone(), request).ok);
@@ -2097,6 +2381,7 @@ fn apply_snapshot_rejects_fib_rollback_5169() {
         generation: 6,
         fib_generation: 6,
         generated_at: chrono::Utc::now(),
+        content_digest: "digest-6".to_string(),
         ..ConfigSnapshot::default()
     });
     let response = run_request(state.clone(), request);
@@ -2167,6 +2452,9 @@ fn apply_snapshot_monotonic_config_advance_applies_5169() {
 /// guard. The pair-monotonicity relation is lexicographic strict-greater, so
 /// (config==cur && fib>cur.fib) applies. Any advance of either generation
 /// changes the flow-cache equality key and correctly invalidates the cache.
+/// #9520: every apply here carries the SAME content digest, because "config
+/// reused" means the same content. A reused generation with a different or empty
+/// digest is refused before this #5169 gate's fib comparison matters.
 #[test]
 fn apply_snapshot_fib_only_advance_admitted_5169() {
     use crate::{ConfigSnapshot, CONFIG_SNAPSHOT_PROTOCOL_VERSION};
@@ -2180,6 +2468,7 @@ fn apply_snapshot_fib_only_advance_admitted_5169() {
             generation: 6,
             fib_generation: 5,
             generated_at: chrono::Utc::now(),
+            content_digest: "digest-6".to_string(),
             ..ConfigSnapshot::default()
         });
         assert!(run_request(state.clone(), request).ok);
@@ -2191,6 +2480,7 @@ fn apply_snapshot_fib_only_advance_admitted_5169() {
         generation: 6,
         fib_generation: 6,
         generated_at: chrono::Utc::now(),
+        content_digest: "digest-6".to_string(),
         ..ConfigSnapshot::default()
     });
     let response = run_request(state.clone(), request);

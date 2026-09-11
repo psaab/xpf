@@ -31,7 +31,10 @@ func (m *Manager) syncSnapshotLocked() error {
 	// reports says anything about what it holds. A fresh Manager therefore
 	// falls through to the publish path below, which is what the fresh-Manager
 	// path in manager_compile.go already does unconditionally.
-	if m.publishedSnapshot != 0 && m.lastStatus.LastSnapshotGeneration >= m.lastSnapshot.Generation {
+	// #9520: a generation proves nothing about content while an earlier apply's
+	// outcome is unknown, so the catch-up stands down and the publish below runs.
+	if m.publishedSnapshot != 0 && m.lastStatus.LastSnapshotGeneration >= m.lastSnapshot.Generation &&
+		!m.applySnapshotOutcomeUnknown {
 		// #1197 v7 (Codex code-review v6): status-loop catch-up
 		// path. Helper has the snapshot; mirror the FULL
 		// successful-apply_snapshot bookkeeping, otherwise
@@ -90,7 +93,8 @@ func (m *Manager) syncSnapshotLocked() error {
 	// This eliminates redundant publishes during route convergence where
 	// BumpFIBGeneration fires repeatedly but routes/neighbors are unchanged.
 	hash, hashOK := snapshotContentHash(m.lastSnapshot)
-	if hashOK && hash == m.lastSnapshotHash && m.publishedSnapshot != 0 {
+	// #9520: not while an earlier apply's outcome is unknown; see the catch-up above.
+	if hashOK && hash == m.lastSnapshotHash && m.publishedSnapshot != 0 && !m.applySnapshotOutcomeUnknown {
 		// Still update the published generation so subsequent checks pass.
 		m.publishedSnapshot = m.lastSnapshot.Generation
 		return nil
@@ -141,6 +145,8 @@ func (m *Manager) syncSnapshotLocked() error {
 	// path too. Compile() defers when XSK is starting up; this
 	// is where the snapshot actually lands in userspace-dp.
 	m.logWgEndpointSetTransitionLocked(&publishSnap, "deferred-sync")
+	// #9520: a content-conflict republish moves the snapshot to a fresh generation.
+	m.adoptPublishedGenerationLocked(m.lastSnapshot, publishSnap.Generation)
 	m.rebuildNeighborIndex()
 	m.rebuildMonitoredIfindexes()
 	m.publishedSnapshot = m.lastSnapshot.Generation

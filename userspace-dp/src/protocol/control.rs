@@ -118,8 +118,21 @@ use super::snapshot::{ConfigSnapshot, FabricSnapshot, NeighborSnapshot, Userspac
 // keeps writing, which is the bypass the field closes. #9521 had claimed 13 and
 // #9412 landed it first, so this moves past both (the v8 rule). See protocol.go's
 // v14 note.
+// v15 (#9520): `ConfigSnapshot.content_digest`, compared when an apply reuses the
+// installed generation. An old helper ignores it and keeps admitting a reused
+// generation content-blind, which is the defect the field closes. See
+// protocol.go's v15 note.
 // Keep the line below in this exact form: the Go lockstep guard parses it.
-pub(crate) const CONFIG_SNAPSHOT_PROTOCOL_VERSION: i32 = 14;
+pub(crate) const CONFIG_SNAPSHOT_PROTOCOL_VERSION: i32 = 15;
+
+/// #9520: the machine-readable prefix of the refusal `apply` sends when a
+/// snapshot reuses the installed generation with a different content digest.
+/// The Go control plane matches it (`snapshotContentConflictPrefix` in
+/// `pkg/dataplane/userspace`) as proof that the helper HOLDS that generation,
+/// and republishes on the next one. A Go test reads this constant from this
+/// file, so rename both sides together.
+pub(crate) const SNAPSHOT_CONTENT_CONFLICT_PREFIX: &str =
+    "snapshot content conflict at reused generation:";
 
 /// #9344: the owner-RG session export paging contract this helper implements.
 ///

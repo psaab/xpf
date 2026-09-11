@@ -2369,6 +2369,23 @@ long-standing pattern in `buildZoneSnapshots` (`zones.go`) and
 zone-host-inbound builders already sorted; the NAT / tunnel / neighbor
 builders range config SLICES (already ordered), so they were never affected.
 
+**The same hash is the apply_snapshot content identity (#9520).**
+`requestApplySnapshotLocked` stamps `snapshotContentHash` onto every
+`apply_snapshot` as `ConfigSnapshot.ContentDigest`, and the helper refuses an
+apply that reuses its installed generation with a different or empty digest. A
+republish retried after a timeout-but-landed apply rebuilds its content, and new
+content under the landed generation would leave that generation's flow-cache
+entries and session policy stamps fresh. The refusal carries
+`SNAPSHOT_CONTENT_CONFLICT_PREFIX`; Go reads it as proof the helper holds that
+generation and republishes once on the next one (mechanism:
+`docs/flow-cache-simplification.md`). This raises the cost of a
+non-deterministic builder: two builds of unchanged content now look like
+different content at one generation, so a retry costs a round trip on a fresh
+generation instead of only a redundant publish. And after an apply whose outcome
+is unknown, the hash stops describing the helper at all: the overlay dedup and
+`syncSnapshotLocked`'s dedup and generation-only catch-up stand down until an
+apply succeeds (`recordApplySnapshotOutcomeLocked`).
+
 **Dynamic-address feed overlay (#2049).** The snapshot's address books carry
 the live `security dynamic-address` feed prefixes, not just the static
 `security address-book`. The daemon joins each `address-name ... profile
@@ -2421,8 +2438,13 @@ update.
 
 - **In-band refusal** (`errHelperRejected` — the helper decoded the request, ran
   its non-mutating integrity preflight and answered `{"ok":false}`): this is the
-  only class from which "the helper still holds `m.lastSnapshot`" follows. The
-  classifier maps are rolled **back** to `m.lastSnapshot`
+  only class that proves the request changed nothing in the helper. It does not
+  prove the helper holds `m.lastSnapshot`: after a republish whose response was
+  lost, it holds that republish (#9520). Rolling back is safe for a separate
+  reason, an invariant of the republish paths: each copies `m.lastSnapshot`'s
+  classifier plan and changes only routes, scheduler bits or `DeferWorkers`. The
+  classifier maps are rolled **back** to
+  `m.lastSnapshot`
   (`retainPreviousClassifierPlanLocked`), which restores the exact plan the
   retained snapshot expects, so `ctrl` stays enabled and there is no window in
   which neither snapshot forwards transit. This is the atomic retain #6707

@@ -276,6 +276,10 @@ type Manager struct {
 	lastRSTAttempt          time.Time
 	lastRSTInstallOK        bool
 	lastSnapshotHash        [32]byte // content hash of last published snapshot (excludes volatile fields)
+	// applySnapshotOutcomeUnknown (#9520) is set while the helper may hold content
+	// this Manager never saw it accept, so lastSnapshot and lastSnapshotHash may
+	// not describe it. See recordApplySnapshotOutcomeLocked.
+	applySnapshotOutcomeUnknown bool
 	// #1866 D3: canonical summary of the WG endpoint set in the last
 	// successfully published snapshot, for publish-boundary transition
 	// logging (logWgEndpointSetTransitionLocked).

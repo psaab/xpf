@@ -160,6 +160,17 @@ while the version stayed at 3, so a pre-#4626 helper at the same advertised
 version read only the singular field and NARROWED a multi-zone global deny (a
 rolling-upgrade fail-open).
 
+`ConfigSnapshot.content_digest` (#9520, v15) binds a generation to its content.
+The Go control plane stamps its content hash on every `apply_snapshot`, and
+`apply` refuses a snapshot that reuses the installed generation when the two
+digests differ or either is empty, before any mutation and at any
+`fib_generation`. The error starts with `SNAPSHOT_CONTENT_CONFLICT_PREFIX`
+(`protocol/control.rs`), which Go reads as proof that this process holds the
+generation and answers by republishing on the next one. `update_fabrics` and
+`update_neighbors` clear the installed digest when they change enforced
+content. The helper never recomputes the digest, so it needs no canonical
+serialization here; `docs/flow-cache-simplification.md` has the mechanism.
+
 A bump is owed for a SEMANTIC change too, not only a new field: #6691 moved
 5 -> 6 for a refusal rule that reinterpreted existing rows (no field changed),
 then 6 -> 7 for `FabricSnapshot.parent_unbindable`. That last field exists

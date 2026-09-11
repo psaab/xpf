@@ -620,7 +620,9 @@ it was withdrawn. That is a fail-OPEN, the exact defect #3767 H5 closed for
   (an equal pair equality-matches only the CURRENT published pair, whose cache
   entries are already valid), and refusing it would break the #4036
   "timeout-but-landed" IDEMPOTENT RETRY: the partial-republish Go paths
-  (`Compile`, `PublishRouteOverlaySnapshot`, `retryDeferredWorkerArmLocked`)
+  (`UpdatePolicyScheduleState`, `PublishRouteOverlaySnapshot`,
+  `retryDeferredWorkerArmLocked`; an earlier revision listed `Compile`, which
+  bumps the generation inline and never reuses one, #9520)
   commit `m.generation` only on Go-observed success and do not consult
   `lastStatus.LastSnapshotGeneration`, so a timed-out-but-landed apply of gen G
   leaves `m.generation` at G-1 and the retry re-sends the IDENTICAL (G, fib)
@@ -655,6 +657,52 @@ re-apply is ADMITTED — the #4036 idempotent-retry path),
 applies), and `apply_snapshot_fib_only_advance_admitted_5169` (a fib-only advance
 with config reused is admitted, guarding against an over-strict gate that would
 break route-only overlays).
+
+## Content identity for a reused generation (#9520)
+
+The #5169 gate admits an exact-equal pair because it "revives nothing". That
+holds only when the CONTENT is equal too. The republish paths above rebuild
+their content before a retry (routes, policy-scheduler bits), so a retry after a
+timeout-but-landed apply can carry different content at the landed generation.
+Flow-cache entries are stamped with the pair, and session policy stamps and the
+#8356 re-derivation with the config generation alone, so admitting that retry
+left every decision made for the landed content fresh.
+
+- **Wire digest.** Every `apply_snapshot` carries `content_digest`
+  (`ConfigSnapshot.ContentDigest`, snapshot protocol v15): hex SHA-256 from Go's
+  `snapshotContentHash`, which excludes `generation`, `fib_generation`,
+  `generated_at`, the raw `config` (the helper never reads it) and the digest
+  itself. `requestApplySnapshotLocked` (`pkg/dataplane/userspace`) is the only
+  send site, and it stamps the digest over the exact struct it sends.
+- **Helper gate.** `server/handlers/snapshot.rs::apply` refuses, before any
+  mutation, an apply whose generation equals the installed one when the digests
+  differ or either is empty, at ANY fib. A `(G, F' > F)` apply passes #5169 as a
+  fib advance, but the generation-only policy stamp makes different content
+  there as unsafe as at `(G, F)`; the same content at an advanced fib is still
+  admitted. The error starts with `SNAPSHOT_CONTENT_CONFLICT_PREFIX`
+  (`protocol/control.rs`). `update_fabrics` and `update_neighbors` clear the
+  installed digest when they change enforced content, so a same-generation
+  replay of the older full apply is refused as well.
+- **Go reaction.** Only that refusal proves the helper holds the generation, so
+  `requestApplySnapshotLocked` consumes it (raises `m.generation` to it) and
+  republishes once on the next generation, and every caller commits the
+  generation actually sent. No other failure moves `m.generation` (#5134). The
+  retry is skipped once `BeginControlShutdown` has latched.
+- **Unknown outcomes.** A failure other than an in-band refusal may have landed,
+  so it marks the helper's content unknown until an apply succeeds. While it is
+  marked, the publish shortcuts that trust Go's bookkeeping stand down: the
+  route-overlay content-hash dedup, and `syncSnapshotLocked`'s hash dedup and
+  generation-only catch-up. Without that, content B landed by a lost response
+  stays enforced when the desired content reverts to A, because A's hash still
+  matches `m.lastSnapshotHash`.
+
+The published generation then advances, so the flow cache misses and the #8356
+re-derivation re-asks policy for every session stamped under the landed content.
+An identical, non-empty digest at the same generation (the #4036 idempotent
+retry) is still ACKed, and `>=` was not tightened.
+
+Validation: the `_9520` cells in `server/tests.rs` and
+`pkg/dataplane/userspace/apply_snapshot_identity_9520_test.go`.
 
 ## Recommended Next Step
 

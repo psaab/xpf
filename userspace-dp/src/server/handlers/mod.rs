@@ -224,6 +224,12 @@ pub(crate) fn handle_stream(
                     if let Some(snapshot) = guard.snapshot.as_mut() {
                         if snapshot.fabrics != *fabrics {
                             snapshot.fabrics = fabrics.clone();
+                            // #9520: the stored snapshot is no longer the full
+                            // apply its content digest describes, so it must not
+                            // vouch for a same-generation retry of that apply
+                            // (handlers/snapshot.rs refuses one against an empty
+                            // installed digest).
+                            snapshot.content_digest.clear();
                             persist_state = true;
                         }
                     }

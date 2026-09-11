@@ -459,7 +459,7 @@ pub(crate) struct ConfigSnapshot {
     /// `UserspaceCtrl.wg_listen_port`. The WireGuard control-thread spawn lets
     /// only this port's thread write kernel-path transport plaintext to its wgN
     /// TUN. A missing key decodes to 0, which delivers for NO endpoint (fail
-    /// closed); CONFIG_SNAPSHOT_PROTOCOL_VERSION 14 refuses the older daemon
+    /// closed); CONFIG_SNAPSHOT_PROTOCOL_VERSION 14 and later refuse the older daemon
     /// that would omit it. Serialized only when non-zero, mirroring the Go
     /// side's `omitempty`, so a snapshot with no WireGuard tunnel keeps the
     /// default specimen byte-identical (`protocol_wire_v1.json`).
@@ -639,6 +639,18 @@ pub(crate) struct ConfigSnapshot {
     #[serde(rename = "cold_path_sample_mask", default,
             skip_serializing_if = "Option::is_none")]
     pub cold_path_sample_mask: Option<u64>,
+    /// #9520: the Go control plane's content digest of this snapshot, hex
+    /// SHA-256 over it with `generation`, `fib_generation`, `generated_at`,
+    /// `config` and this field excluded (Go `snapshotContentHash`).
+    /// `server/handlers/snapshot.rs::apply` compares it with the installed
+    /// snapshot's and refuses a REUSED generation that carries different
+    /// content. Opaque here: the helper never recomputes it, so it needs no
+    /// canonical Rust serialization. `config` is outside it because the helper
+    /// does not read that field; a change that starts reading it must add it
+    /// back on the Go side. Serialized only when non-empty, so the default
+    /// specimen stays byte-identical (`protocol_wire_v1.json`).
+    #[serde(rename = "content_digest", default, skip_serializing_if = "String::is_empty")]
+    pub content_digest: String,
 }
 
 /// Default MTU floor for the slow-path TUN (#2408). The kernel creates a TUN

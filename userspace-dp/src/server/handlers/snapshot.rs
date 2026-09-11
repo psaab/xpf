@@ -9,7 +9,10 @@ use super::super::helpers::{
     same_plan_apply_needs_binding_reconcile, should_run_afxdp, snapshot_binding_plan_key,
 };
 use super::super::ServerState;
-use crate::{ConfigSnapshot, ControlResponse, CONFIG_SNAPSHOT_PROTOCOL_VERSION};
+use crate::{
+    ConfigSnapshot, ControlResponse, CONFIG_SNAPSHOT_PROTOCOL_VERSION,
+    SNAPSHOT_CONTENT_CONFLICT_PREFIX,
+};
 
 pub(super) fn apply(
     guard: &mut ServerState,
@@ -60,15 +63,26 @@ pub(super) fn apply(
     // already valid, so re-publishing it changes no validity. The revival
     // fail-open requires re-publishing a SUPERSEDED (strictly-less) pair, which
     // the `<` refusal still catches. Admitting exact-equal also restores the
-    // #4036 "timeout-but-landed" IDEMPOTENT RETRY: the partial-republish Go
-    // paths (Compile, PublishRouteOverlaySnapshot, retryDeferredWorkerArmLocked)
-    // commit `m.generation` only on Go-observed success and do NOT consult
-    // `lastStatus.LastSnapshotGeneration`, so a timeout-but-landed apply of gen
-    // G leaves `m.generation` at G-1 and the retry re-sends the IDENTICAL
-    // (G, fib) pair — which must be ACKed ok, not fail-closed into a
-    // non-converging loop. This mirrors `bump_fib`, which refuses a
-    // STRICTLY-less fib and admits an equal one
-    // (`Coordinator::bump_fib_generation`, `<` not `<=`).
+    // #4036 "timeout-but-landed" IDEMPOTENT RETRY: the republish Go paths
+    // (UpdatePolicyScheduleState, PublishRouteOverlaySnapshot,
+    // retryDeferredWorkerArmLocked) commit `m.generation` only on Go-observed
+    // success and do NOT consult `lastStatus.LastSnapshotGeneration`, so a
+    // timeout-but-landed apply of gen G leaves `m.generation` at G-1 and the
+    // retry re-sends gen G — which must be ACKed ok when it carries the SAME
+    // content, not fail-closed into a non-converging loop. This mirrors
+    // `bump_fib`, which refuses a STRICTLY-less fib and admits an equal one
+    // (`Coordinator::bump_fib_generation`, `<` not `<=`). An earlier revision
+    // of this comment also listed Compile; that was wrong (#9520): Compile
+    // bumps the generation inline at build time and never reuses one.
+    //
+    // #9520: "the SAME content" is CHECKED, not assumed — see the content
+    // identity gate after the rollback refusal below. The retry REBUILDS its
+    // content (routes, scheduler bits), and the equal pair used to be admitted
+    // on the claim that it "revives nothing". That holds only for equal
+    // CONTENT: flow-cache entries are stamped with the pair, and session policy
+    // stamps and the #8356 re-derivation with the config generation alone, so
+    // new content under a reused generation leaves every decision made for the
+    // old content fresh.
     //
     // Compare against the last PUBLISHED pair in `guard.status`, not the afxdp
     // ValidationState: config_generation has no coordinator accessor (only fib
@@ -103,6 +117,48 @@ pub(super) fn apply(
                 cur_fib_generation
             );
             return;
+        }
+        // #9520: content identity for a REUSED generation. Every Go full apply
+        // puts new content on a generation no earlier successful apply used
+        // (Compile bumps inline, the republish paths send m.generation + 1, the
+        // deferred sync publishes m.lastSnapshot at a generation assigned by
+        // m.generation++), so a same-generation apply is only ever a retry of
+        // an attempt that landed without Go observing it. Refuse it when its
+        // digest differs from the installed snapshot's, at ANY fib: a
+        // (G, F' > F) apply passes the gate above as a fib advance, but the
+        // session policy stamp is generation-only, so different content there
+        // is as unsafe as at (G, F). The refusal precedes every mutation, and
+        // its prefix proves to Go that this helper HOLDS the generation, which
+        // is what lets Go advance past it instead of re-sending it forever. An
+        // identical, non-empty digest (the #4036 retry) falls through and is
+        // ACKed.
+        if snapshot.generation == cur_generation {
+            let installed_digest = guard
+                .snapshot
+                .as_ref()
+                .map_or("", |installed| installed.content_digest.as_str());
+            // An EMPTY digest never proves identity: two applies without one
+            // compare equal as strings whatever their content, which is the
+            // content-blind admission this gate closes. `update_fabrics` and
+            // `update_neighbors` clear the installed digest when they change
+            // enforced content, so an empty one also means the installed
+            // snapshot vouches for no full apply. Go stamps every apply_snapshot,
+            // so a real Go retry never trips this arm.
+            if installed_digest.is_empty() || installed_digest != snapshot.content_digest {
+                response.ok = false;
+                response.error = format!(
+                    "{} generation {} is installed with content digest {:?}; this apply carries {:?}",
+                    SNAPSHOT_CONTENT_CONFLICT_PREFIX,
+                    cur_generation,
+                    installed_digest,
+                    snapshot.content_digest
+                );
+                eprintln!(
+                    "CTRL_REQ: apply_snapshot rejected (content conflict): {}",
+                    response.error
+                );
+                return;
+            }
         }
     }
     // #1606 (AGY r2 finding 4.1): preflight policy-state validation
