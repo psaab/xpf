@@ -936,6 +936,19 @@ canonical config:
   double-launch): a knob-ON commit (re)launches it against the live comms
   context, a knob-OFF commit stops it, without a restart.
 
+
+### One owner per address in the takeover pre-seed (#9791)
+
+`mergeLeasesByIdentity` builds the memfile a promoted node's Kea loads. It first
+unions the local and peer sets by identity (address + client), where the local
+row wins the same binding, and then keeps ONE row per address: the binding with
+the most recent grant (`ValidLife - Remaining`, falling back to the later expiry
+when a row lacks its valid lifetime), a tie keeping the local row. Before this,
+a stale local row for an address the peer had re-granted to a new client was
+written first beside the peer's row, and the current holder was refused its
+renewal after failover (#9729 run 6). A v6 key includes the lease type and
+prefix length.
+
 ## Callers
 
 `pkg/daemon` (constructs the always-on `DDNSManager`, runs the reconcile
