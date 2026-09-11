@@ -76,6 +76,41 @@ impl Coordinator {
             );
         }
     }
+
+    /// #9714 test seam: register worker `worker_id` with a command queue a server-side
+    /// cell cannot otherwise reach, and return a reader of how many `DeleteSynced`
+    /// commands have been queued to it.
+    pub(crate) fn register_counting_worker_for_test(
+        &mut self,
+        worker_id: u32,
+    ) -> Box<dyn Fn() -> usize> {
+        let commands = Arc::new(Mutex::new(VecDeque::new()));
+        self.workers.register(
+            worker_id,
+            WorkerRuntimeRecord::for_test(WorkerHandle {
+                stop: Arc::new(AtomicBool::new(false)),
+                heartbeat: Arc::new(AtomicU64::new(0)),
+                commands: commands.clone(),
+                session_export_ack: Arc::new(AtomicU64::new(0)),
+                cos_status: Arc::new(ArcSwap::from_pointee(Vec::new())),
+                runtime_atomics: Arc::new(
+                    crate::afxdp::worker_runtime::WorkerRuntimeAtomics::new(),
+                ),
+                cold_path_atomics: Arc::new(
+                    crate::afxdp::cold_path_hist::WorkerColdPathAtomics::new(),
+                ),
+            }),
+            None,
+        );
+        Box::new(move || {
+            commands.lock().map_or(0, |queue| {
+                queue
+                    .iter()
+                    .filter(|command| matches!(command, WorkerCommand::DeleteSynced(_)))
+                    .count()
+            })
+        })
+    }
 }
 
 use crate::INJECT_PACKET_TUPLE_PROTOCOL_VERSION;

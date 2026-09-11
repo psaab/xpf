@@ -5327,6 +5327,7 @@ mod routing_domain_delete_7160 {
                 )
                 .expect("build the local entry");
                 afxdp.seed_live_local_session_for_test(forward, 7, true);
+                let queued_deletes = afxdp.register_counting_worker_for_test(0);
                 assert_eq!(
                     afxdp.synced_session_entry_count_for_test(),
                     2,
@@ -5347,11 +5348,6 @@ mod routing_domain_delete_7160 {
 
                 let response = run_request(state.clone(), request);
 
-                assert!(
-                    response.ok,
-                    "({arm}, peer_delete={peer_delete}) the delete must not fail: {:?}",
-                    response.error
-                );
                 assert_eq!(
                     synced_key_count(&state),
                     if peer_delete { 2 } else { 0 },
@@ -5359,6 +5355,34 @@ mod routing_domain_delete_7160 {
                      whose owner RG is active must be refused, and an UNMARKED one (an operator \
                      clear) must still remove it (#9714)"
                 );
+                if peer_delete {
+                    assert!(
+                        !response.ok
+                            && response.error == "synced-delete-refused:peer-delete-local-owned",
+                        "({arm}) a refused peer delete must be answered in-band with its token, or \
+                         the Go side deletes its own mirror and DNAT rows for a flow the helper \
+                         kept (#9714); got ok={} error={:?}",
+                        response.ok,
+                        response.error
+                    );
+                    assert_eq!(
+                        queued_deletes(),
+                        0,
+                        "({arm}) a refused peer delete still fanned DeleteSynced out to the \
+                         workers, whose no-entry arm deletes the live flow's steering row (#9714)"
+                    );
+                } else {
+                    assert!(
+                        response.ok,
+                        "({arm}) an unmarked delete must succeed: {:?}",
+                        response.error
+                    );
+                    assert!(
+                        queued_deletes() > 0,
+                        "({arm}) control: an applied delete must fan DeleteSynced out, or the \
+                         refused arm's zero proves nothing"
+                    );
+                }
             }
         }
     }

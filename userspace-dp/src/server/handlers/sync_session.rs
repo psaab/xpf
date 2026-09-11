@@ -151,15 +151,18 @@ pub(super) fn handle(
             Ok(key) => {
                 // #9714: a delete the Go side marked as made on behalf of the PEER
                 // is refused for a live local session whose owner RG is locally
-                // active; every other delete stays authoritative.
+                // active; every other delete stays authoritative. `delete` reports a
+                // refusal, answered in-band below so the Go side keeps its own mirror
+                // and DNAT rows for the flow the helper kept.
                 let delete = |key| {
                     if sync_req.peer_delete {
-                        domain.delete_peer_synced_session(key);
+                        domain.delete_peer_synced_session(key)
                     } else {
                         domain.delete_synced_session(key);
+                        false
                     }
                 };
-                delete(key.clone());
+                let mut refused = false;
                 // #7160 (#2387): a bare-5-tuple delete (the `clear security
                 // flow session` / batch-revoke path) carries no ingress
                 // identity, so the key above resolved domain 0 and the exact
@@ -202,8 +205,18 @@ pub(super) fn handle(
                 // toward keeping a session too long rather than tearing down
                 // another tenant's, which is the direction that makes it
                 // acceptable rather than merely small.
-                if key.routing_domain == 0 {
-                    let mut matched: Vec<u32> = Vec::new();
+                //
+                // #9714: probe BEFORE deleting anything. The exact delete used to run
+                // first, and with no entry at the bare key it still fanned
+                // DeleteSynced out to every worker, whose no-entry arm deletes the
+                // tuple's steering row: the row a live routing-instance session still
+                // forwards on. A peer delete the scoped retry then refused, and an
+                // ambiguous clear this refuses, had already removed it. So the exact
+                // key is deleted only when shared authority holds it, or when no
+                // routing instance does (a plain miss keeps its kernel-row cleanup).
+                let bare = key.routing_domain == 0;
+                let mut matched: Vec<u32> = Vec::new();
+                if bare {
                     for rd in view.routing_domains() {
                         let mut scoped = key.clone();
                         scoped.routing_domain = rd;
@@ -211,6 +224,11 @@ pub(super) fn handle(
                             matched.push(rd);
                         }
                     }
+                }
+                if !bare || matched.is_empty() || domain.synced_session_contains(&key) {
+                    refused |= delete(key.clone());
+                }
+                if bare {
                     match matched.as_slice() {
                         // No routing-instance copy. The exact delete above was
                         // the whole job; empty in every deployment with no
@@ -223,7 +241,7 @@ pub(super) fn handle(
                         [rd] => {
                             let mut scoped = key.clone();
                             scoped.routing_domain = *rd;
-                            delete(scoped);
+                            refused |= delete(scoped);
                         }
                         // Ambiguous: the tuple names a live session in more
                         // than one tenant and nothing in this request says
@@ -238,6 +256,11 @@ pub(super) fn handle(
                             );
                         }
                     }
+                }
+                if refused && response.ok {
+                    response.ok = false;
+                    response.error =
+                        format!("{SYNCED_DELETE_REFUSED_PREFIX}peer-delete-local-owned");
                 }
             }
             Err(err) => {

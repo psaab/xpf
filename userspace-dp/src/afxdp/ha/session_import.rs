@@ -753,8 +753,11 @@ impl crate::afxdp::ha::SessionDomain {
     /// (`handle_delete_synced`), with the same predicate, so it fires only in a
     /// dual-primary split. Otherwise, and for every authoritative delete, it
     /// behaves exactly as `delete_synced_session`.
-    pub fn delete_peer_synced_session(&self, key: SessionKey) {
-        self.delete_synced_session_gen_marked(key, 0, true);
+    ///
+    /// Returns whether it REFUSED. The handler answers a refusal in-band, so the Go
+    /// side keeps its own mirror and DNAT rows for the flow the helper kept.
+    pub fn delete_peer_synced_session(&self, key: SessionKey) -> bool {
+        self.delete_synced_session_gen_marked(key, 0, true)
     }
 
     /// #2170 delete-side guard (belt-and-suspenders for any helper-side delete
@@ -771,7 +774,12 @@ impl crate::afxdp::ha::SessionDomain {
         self.delete_synced_session_gen_marked(key, delete_gen, false);
     }
 
-    fn delete_synced_session_gen_marked(&self, key: SessionKey, delete_gen: u64, peer_delete: bool) {
+    fn delete_synced_session_gen_marked(
+        &self,
+        key: SessionKey,
+        delete_gen: u64,
+        peer_delete: bool,
+    ) -> bool {
         // #7209: ONE load of the published view, bound for the whole call. Two
         // loads inside one import can straddle a publish and resolve the
         // session's zones against one generation and its NAT against another —
@@ -798,7 +806,7 @@ impl crate::afxdp::ha::SessionDomain {
             self.sessions
                 .delete_stale_ignored
                 .fetch_add(1, Ordering::Relaxed);
-            return;
+            return false;
         }
         // #9714: refuse a PEER delete of a live local session whose owner RG is
         // locally active, before any kernel, DNAT or shared delete and before the
@@ -813,7 +821,7 @@ impl crate::afxdp::ha::SessionDomain {
             )
         {
             PEER_DELETE_REFUSED_LOCAL_OWNED.fetch_add(1, Ordering::Relaxed);
-            return;
+            return true;
         }
         let reverse_key = removed_entry.as_ref().and_then(|entry| {
             if entry.metadata.is_reverse {
@@ -941,6 +949,7 @@ impl crate::afxdp::ha::SessionDomain {
                 self.release_dropped_delete_for_worker(entry, &key, *worker_id);
             }
         }
+        false
     }
 
     /// #6979 F4: run the NAT teardown a worker will never run itself, because

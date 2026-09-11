@@ -5499,12 +5499,17 @@ fn a_peer_delete_of_a_live_local_session_is_refused_9714() {
     let refused_before = PEER_DELETE_REFUSED_LOCAL_OWNED.load(Ordering::Relaxed);
     crate::afxdp::bpf_map::clear_session_map_writes();
 
-    fixture
+    let refused = fixture
         .coordinator
         .session_domain()
         .delete_peer_synced_session(fixture.forward.key.clone());
 
     let writes = crate::afxdp::bpf_map::session_map_writes();
+    assert!(
+        refused,
+        "the refusal must be reported, or the handler answers ok and the Go side deletes its \
+         mirror and DNAT rows for a flow the helper kept (#9714)"
+    );
     assert!(
         fixture.shared_has(&fixture.forward.key) && fixture.shared_has(&fixture.reverse_key),
         "a peer delete removed the shared rows of a live local session; bulk export would then drop it \
@@ -5565,12 +5570,17 @@ fn a_peer_delete_with_the_owner_rg_inactive_still_deletes_9714() {
     let fixture = fixture_9714(false);
     crate::afxdp::bpf_map::clear_session_map_writes();
 
-    fixture
+    let refused = fixture
         .coordinator
         .session_domain()
         .delete_peer_synced_session(fixture.forward.key.clone());
 
     let writes = crate::afxdp::bpf_map::session_map_writes();
+    assert!(
+        !refused,
+        "an applied peer delete reported a refusal; the Go side would keep mirror and DNAT rows \
+         for a session the helper removed (#9714)"
+    );
     assert!(
         !fixture.shared_has(&fixture.forward.key) && !fixture.shared_has(&fixture.reverse_key),
         "with the owner RG inactive this node does not own the flow, so the peer delete must remove the \
@@ -5594,12 +5604,17 @@ fn a_peer_delete_of_a_peer_synced_session_still_deletes_with_the_owner_rg_active
     let fixture = fixture_9714_with_origin(true, SessionOrigin::SyncImport);
     crate::afxdp::bpf_map::clear_session_map_writes();
 
-    fixture
+    let refused = fixture
         .coordinator
         .session_domain()
         .delete_peer_synced_session(fixture.forward.key.clone());
 
     let writes = crate::afxdp::bpf_map::session_map_writes();
+    assert!(
+        !refused,
+        "an applied peer delete reported a refusal; the Go side would keep mirror and DNAT rows \
+         for a session the helper removed (#9714)"
+    );
     assert!(
         !fixture.shared_has(&fixture.forward.key) && !fixture.shared_has(&fixture.reverse_key),
         "a peer delete of a PEER-SYNCED entry must remove the shared rows even with the owner RG \
@@ -5612,5 +5627,46 @@ fn a_peer_delete_of_a_peer_synced_session_still_deletes_with_the_owner_rg_active
     assert!(
         fixture.queued_delete(&fixture.forward.key),
         "a peer delete of a peer-synced entry must fan DeleteSynced out"
+    );
+}
+
+/// #9714 review F6: a marked delete of the REVERSE key of a live local forward is
+/// refused too. The Go side deletes a flow's reverse companion as well, so a refusal
+/// that exempted reverse entries would tear down the flow's reply direction.
+#[test]
+fn a_peer_delete_of_the_reverse_key_of_a_live_local_session_is_refused_9714() {
+    let fixture = fixture_9714(true);
+    let holds_before = fixture.dnat_holds();
+    crate::afxdp::bpf_map::clear_session_map_writes();
+
+    let refused = fixture
+        .coordinator
+        .session_domain()
+        .delete_peer_synced_session(fixture.reverse_key.clone());
+
+    let writes = crate::afxdp::bpf_map::session_map_writes();
+    assert!(
+        refused,
+        "a peer delete of the reverse key of a live local session must be refused and say so \
+         (#9714)"
+    );
+    assert!(
+        fixture.shared_has(&fixture.forward.key) && fixture.shared_has(&fixture.reverse_key),
+        "a peer delete of the REVERSE key removed a live local session's shared rows (#9714)"
+    );
+    assert!(
+        !writes
+            .iter()
+            .any(|w| w.value.is_none() && w.key == fixture.reverse_key),
+        "a peer delete of the reverse key removed its kernel steering row. Writes: {writes:?}"
+    );
+    assert_eq!(
+        fixture.dnat_holds(),
+        holds_before,
+        "a refused peer delete of the reverse key released the flow's DNAT steering hold (#9714)"
+    );
+    assert!(
+        !fixture.queued_delete(&fixture.forward.key) && !fixture.queued_delete(&fixture.reverse_key),
+        "a refused peer delete of the reverse key still sent DeleteSynced to the workers (#9714)"
     );
 }

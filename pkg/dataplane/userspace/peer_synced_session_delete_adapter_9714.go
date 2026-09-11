@@ -21,8 +21,8 @@ var (
 // peerSyncedSessionDeleter mirrors pkg/dataplane's unexported interface of the
 // same name; pkg/dataplane's half of the belt keeps the two from drifting apart.
 type peerSyncedSessionDeleter interface {
-	BatchDeletePeerSyncedSessionsScoped([]dataplane.ScopedSessionKey) (int, error)
-	BatchDeletePeerSyncedSessionsScopedV6([]dataplane.ScopedSessionKeyV6) (int, error)
-	DeletePeerSyncedSession(dataplane.SessionKey) error
-	DeletePeerSyncedSessionV6(dataplane.SessionKeyV6) error
+	BatchDeletePeerSyncedSessionsScoped([]dataplane.ScopedSessionKey) (int, []dataplane.ScopedSessionKey, error)
+	BatchDeletePeerSyncedSessionsScopedV6([]dataplane.ScopedSessionKeyV6) (int, []dataplane.ScopedSessionKeyV6, error)
+	DeletePeerSyncedSession(dataplane.SessionKey) (bool, error)
+	DeletePeerSyncedSessionV6(dataplane.SessionKeyV6) (bool, error)
 }

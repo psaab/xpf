@@ -52,3 +52,38 @@ func TestThePeerDeleteWireKeyMatchesTheHelper9714(t *testing.T) {
 		}
 	}
 }
+
+// #9714 review F1: the refusal token Go matches is the one the helper sends. If the
+// two drift, every refused peer delete reads as applied and Go deletes the mirror and
+// DNAT rows of the flow the helper kept.
+func TestThePeerDeleteRefusalTokenMatchesTheHelper9714(t *testing.T) {
+	strip := func(path string) string {
+		src, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		var out strings.Builder
+		for _, line := range strings.Split(string(src), "\n") {
+			if strings.HasPrefix(strings.TrimSpace(line), "//") {
+				out.WriteString("\n")
+				continue
+			}
+			out.WriteString(line)
+			out.WriteString("\n")
+		}
+		return out.String()
+	}
+	const prefix = "synced-delete-refused:"
+	importSrc := strip("../../../userspace-dp/src/afxdp/ha/session_import.rs")
+	handlerSrc := strip("../../../userspace-dp/src/server/handlers/sync_session.rs")
+	if !strings.Contains(importSrc, `pub const SYNCED_DELETE_REFUSED_PREFIX: &str = "`+prefix+`";`) {
+		t.Errorf("the helper's SYNCED_DELETE_REFUSED_PREFIX is no longer %q", prefix)
+	}
+	if !strings.Contains(handlerSrc, `format!("{SYNCED_DELETE_REFUSED_PREFIX}peer-delete-local-owned")`) {
+		t.Errorf("the sync_session handler no longer answers a refused peer delete with " +
+			"{SYNCED_DELETE_REFUSED_PREFIX}peer-delete-local-owned")
+	}
+	if peerDeleteRefusedLocalOwned != prefix+"peer-delete-local-owned" {
+		t.Errorf("Go matches %q, the helper sends %q", peerDeleteRefusedLocalOwned, prefix+"peer-delete-local-owned")
+	}
+}

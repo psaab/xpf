@@ -73,7 +73,20 @@ func (m *Manager) syncSessionRequestLocked(req SessionSyncRequest) error {
 // mirror is best-effort — the periodic sweep retries once the helper is healthy
 // again.
 func sendSessionSyncBatch(reqs []SessionSyncRequest, send func(ControlRequest) error) error {
-	var firstErr error
+	for _, err := range sendSessionSyncBatchOutcomes(reqs, send) {
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// sendSessionSyncBatchOutcomes is sendSessionSyncBatch keeping every request's
+// result (#9714): outcomes[i] is reqs[i]'s error, nil if it applied. It stops at
+// the first transport failure exactly as sendSessionSyncBatch does (#5380); a
+// request after that one was never sent and reports nil.
+func sendSessionSyncBatchOutcomes(reqs []SessionSyncRequest, send func(ControlRequest) error) []error {
+	outcomes := make([]error, len(reqs))
 	for i := range reqs {
 		ctrlReq := ControlRequest{
 			Type:           "sync_session",
@@ -82,18 +95,28 @@ func sendSessionSyncBatch(reqs []SessionSyncRequest, send func(ControlRequest) e
 		}
 		if err := send(ctrlReq); err != nil {
 			slog.Debug("userspace session sync mirror failed", "operation", reqs[i].Operation, "err", err)
-			if firstErr == nil {
-				firstErr = err
-			}
+			outcomes[i] = err
 			// Helper unreachable/hung: abort the batch instead of paying the
 			// per-request deadline once per remaining request (#5380).
 			if errors.Is(err, errSessionHelperUnreachable) {
 				break
 			}
-			continue
 		}
 	}
-	return firstErr
+	return outcomes
+}
+
+// syncSessionRequestOutcomesLocked is syncSessionRequestsLocked keeping every
+// request's result (#9714); see sendSessionSyncBatchOutcomes. The m.mu discipline
+// is the same: one unlock around the socket I/O, reacquired before returning.
+func (m *Manager) syncSessionRequestOutcomesLocked(reqs ...SessionSyncRequest) []error {
+	if len(reqs) == 0 {
+		return nil
+	}
+	m.mu.Unlock()
+	outcomes := sendSessionSyncBatchOutcomes(reqs, m.requestSessionSync)
+	m.mu.Lock()
+	return outcomes
 }
 
 // syncSessionRequestsLocked transmits one or more PRE-BUILT session-sync

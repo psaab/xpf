@@ -15,10 +15,10 @@ package dataplane
 var _ = peerSyncedSessionDeleter(nil)
 
 type peerSyncedSessionDeleteContract interface {
-	BatchDeletePeerSyncedSessionsScoped([]ScopedSessionKey) (int, error)
-	BatchDeletePeerSyncedSessionsScopedV6([]ScopedSessionKeyV6) (int, error)
-	DeletePeerSyncedSession(SessionKey) error
-	DeletePeerSyncedSessionV6(SessionKeyV6) error
+	BatchDeletePeerSyncedSessionsScoped([]ScopedSessionKey) (int, []ScopedSessionKey, error)
+	BatchDeletePeerSyncedSessionsScopedV6([]ScopedSessionKeyV6) (int, []ScopedSessionKeyV6, error)
+	DeletePeerSyncedSession(SessionKey) (bool, error)
+	DeletePeerSyncedSessionV6(SessionKeyV6) (bool, error)
 }
 
 func assertPeerSyncedSessionDeleteContract(c peerSyncedSessionDeleteContract) peerSyncedSessionDeleter {

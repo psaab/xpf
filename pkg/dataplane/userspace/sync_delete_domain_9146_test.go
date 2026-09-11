@@ -50,6 +50,17 @@ type syncRec9146 struct {
 	ln   net.Listener
 	mu   sync.Mutex
 	reqs []SessionSyncRequest
+	// refusal, when set, is the in-band error the FIRST request is answered with
+	// (#9714); every other request is answered OK.
+	refusal string
+}
+
+// refuseFirst makes the recorder answer its first request with the in-band error
+// refusal, as the helper answers a delete it refused (#9714).
+func (r *syncRec9146) refuseFirst(refusal string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.refusal = refusal
 }
 
 func (r *syncRec9146) all() []SessionSyncRequest {
@@ -78,12 +89,16 @@ func startSyncRec9146(t *testing.T, sock string) *syncRec9146 {
 				if json.NewDecoder(conn).Decode(&req) != nil {
 					return
 				}
+				resp := ControlResponse{OK: true}
 				if req.SessionSync != nil {
 					r.mu.Lock()
 					r.reqs = append(r.reqs, *req.SessionSync)
+					if len(r.reqs) == 1 && r.refusal != "" {
+						resp = ControlResponse{OK: false, Error: r.refusal}
+					}
 					r.mu.Unlock()
 				}
-				_ = json.NewEncoder(conn).Encode(ControlResponse{OK: true})
+				_ = json.NewEncoder(conn).Encode(resp)
 			}()
 		}
 	}()
