@@ -99,6 +99,20 @@ All heartbeat/sync liveness timestamps were also moved off wall-clock
 so NTP steps / VM pause-resume can no longer fire false peer-loss
 (#1792).
 
+### Addendum (#9722, 2026-09): the post-restart grace is no longer 30 s
+
+Item 2 above relied on the replacement receiver re-arming the 30 s cold-boot
+grace. That grace also hid a peer that died just after an ordinary commit.
+Every apply that rebinds the management VRF calls `RestartHeartbeat`, and for
+30 s afterwards the seen-then-lost arm returned before checking staleness.
+
+- A replacement for a receiver that had seen the peer now gets the seed before
+  it starts, with the 5 s `heartbeatRestartGrace`.
+- A replacement for one that never saw the peer, and every `StartHeartbeat`,
+  keep the 30 s floor.
+
+See `pkg/cluster/README.md`, "A heartbeat RESTART is not a cold boot".
+
 ### Addendum (#4033, 2026-07): heartbeat goroutine-leak / double-fire on comms restart
 
 Two coupled defects survived along the comms-restart path (transport

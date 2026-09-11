@@ -53,6 +53,15 @@ func heartbeatUDPNetwork(addr string) string {
 // the previous goroutines — their stopCh is never closed, so N restarts leak
 // N heartbeat goroutines and duplicate the on-wire heartbeat rate (#4033).
 func (m *Manager) StartHeartbeat(localAddr, peerAddr, vrfDevice, controlIface string) error {
+	return m.startHeartbeat(localAddr, peerAddr, vrfDevice, controlIface, 0)
+}
+
+// startHeartbeat is StartHeartbeat plus the replacement-receiver seed
+// RestartHeartbeat passes (#9722). A non-zero restartSeed arms the new receiver
+// (armRestart) with the replaced receiver's last-seen heartbeat and the short
+// restart grace, before the receiver starts. StartHeartbeat passes 0, which is
+// a cold start.
+func (m *Manager) startHeartbeat(localAddr, peerAddr, vrfDevice, controlIface string, restartSeed int64) error {
 	// Serialize the whole stop-previous + create + install sequence so
 	// concurrent callers cannot interleave and both install a heartbeat.
 	// hbStartMu is distinct from m.mu: StopHeartbeat below takes m.mu and
@@ -152,6 +161,9 @@ func (m *Manager) StartHeartbeat(localAddr, peerAddr, vrfDevice, controlIface st
 	}
 	sender := newHeartbeatSender(m, sendConn, peer, interval)
 	receiver := newHeartbeatReceiver(m, recvConn, threshold, interval, peer)
+	// #9722: arm BEFORE start(), so the timeout goroutine never observes the
+	// replacement without its seed or with the cold-boot grace.
+	receiver.armRestart(restartSeed)
 	m.hbSender = sender
 	m.hbReceiver = receiver
 	m.hbLocalAddr = localAddr
@@ -325,11 +337,19 @@ func (m *Manager) heartbeatTimingDivergedLocked() bool {
 //
 //   - Local side: lastSeen carries over to the replacement receiver (same
 //     CLOCK_MONOTONIC domain, same process) so a peer that dies while our
-//     sockets are down is still detected once the post-restart 30s startup
-//     grace expires. Without the seed the new receiver starts at
-//     lastSeen=0, whose timeout path only invokes handlePeerNeverSeen — a
-//     no-op once peerEverSeen is set — and a peer death during the restart
-//     window would never be detected.
+//     sockets are down is still detected. Without the seed the new receiver
+//     starts at lastSeen=0, whose timeout path only invokes
+//     handlePeerNeverSeen — a no-op once peerEverSeen is set — and a peer
+//     death during the restart window would never be detected.
+//
+//   - #9722: the seed is installed BEFORE the replacement starts, together
+//     with heartbeatRestartGrace (armRestart). The replacement used to arm
+//     the 30s cold-boot grace, so a peer that died within 30s after any
+//     apply that rebinds the management VRF was declared lost up to 30s
+//     late. It now holds for the restart grace only, and then the ordinary
+//     threshold*interval staleness applies. A replaced receiver that had
+//     never seen the peer passes no seed, so its replacement keeps the
+//     cold-boot semantics.
 func (m *Manager) RestartHeartbeat() bool {
 	m.mu.RLock()
 	running := m.hbSender != nil || m.hbReceiver != nil
@@ -364,7 +384,7 @@ func (m *Manager) RestartHeartbeat() bool {
 	m.StopHeartbeat()
 
 	for i := 0; i < 5; i++ {
-		if err := m.StartHeartbeat(localAddr, peerAddr, vrfDevice, controlIface); err != nil {
+		if err := m.startHeartbeat(localAddr, peerAddr, vrfDevice, controlIface, lastSeenSeed); err != nil {
 			slog.Warn("cluster: heartbeat restart bind failed, retrying",
 				"err", err, "attempt", i+1)
 			// Keep the peer's suppression guard fed (2s recency window)
@@ -374,16 +394,6 @@ func (m *Manager) RestartHeartbeat() bool {
 			}
 			time.Sleep(1 * time.Second)
 			continue
-		}
-		// Seed the replacement receiver with the pre-restart timestamp
-		// unless it has already seen a live heartbeat.
-		if lastSeenSeed != 0 {
-			m.mu.RLock()
-			newReceiver := m.hbReceiver
-			m.mu.RUnlock()
-			if newReceiver != nil {
-				newReceiver.lastSeen.CompareAndSwap(0, lastSeenSeed)
-			}
 		}
 		return true
 	}

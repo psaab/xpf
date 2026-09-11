@@ -423,6 +423,33 @@ still promotes once the grace elapses (`neverSeenConfirmed` returns true at
 sets `peerEverSeen` and runs `electSingleNode`; `election.go` bypasses the
 readiness gate when `!peerAlive`, so the surviving node takes over.
 
+### A heartbeat RESTART is not a cold boot (#9722)
+
+`RestartHeartbeat` replaces the receiver on every config apply that rebinds the
+management VRF. On an HA node with a management interface that means every
+operator commit and every peer-synced apply. The replacement used to arm the
+same 30s cold-boot floor. The seen-then-lost arm returns inside that floor
+before it checks staleness, so a peer that died within 30s after a commit was
+declared lost up to 30s late. In the default private-RG mode, that delay is the
+promotion delay.
+
+A replacement for a receiver that had SEEN the peer is now armed before it
+starts (`armRestart`):
+- it carries the replaced receiver's `lastSeen`;
+- its seen-then-lost floor (`seenThenLostGrace`) is `heartbeatRestartGrace`
+  (5s, the restart path's own bind-retry window), not `heartbeatStartupGrace`.
+
+After that, the ordinary `threshold*interval` staleness applies. A live peer
+whose heartbeats are briefly lost past the restart grace is still covered by the
+sync-recency guard that `handlePeerTimeout` consults
+(`shouldSuppressPeerHeartbeatTimeout`, #1792).
+
+Two receivers are never armed and keep the cold-boot floor on both arms:
+- a replacement for a receiver that had NEVER seen the peer;
+- any receiver started by `StartHeartbeat` (boot, comms restart).
+
+Cells: `heartbeat_restart_grace_9722_test.go`.
+
 ### The gate's third case: the peer has YIELDED (#9452)
 
 The readiness gate had a two-case taxonomy and needed three. `electSingleNode`'s
