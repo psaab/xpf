@@ -625,6 +625,22 @@ identically on both. A deny written against **argument text**
 A pattern that can never fire on the gRPC surface is reported for the class, so
 this is visible rather than inferred.
 
+The same holds for each alternative of a combined pattern (#9340). Take
+`^(show route table secret-vrf|request system reboot)$`. It is enforced on both
+surfaces for `request system reboot` and only on the box for
+`show route table secret-vrf`, and the commit output names that alternative.
+Before #9340 the enforceable half silenced the warning for the whole pattern.
+The alternatives come from the parsed pattern: alternations and optional groups,
+however they are spelled or anchored. So the report does not depend on how the
+rule was written. A pattern with more than 64 alternatives is not split and
+keeps the whole-pattern answer.
+
+"Can fire" means the deny pattern is what refuses a command. A class with an
+`allow-commands` pattern also refuses every command outside its allow list.
+Before #9340, those refusals counted as the deny firing, so allow `^show` with
+deny `^show route table secret-vrf` reported nothing, although that deny decides
+nothing on the gRPC surface.
+
 #### The `*-regexps` family is NOT implemented (#7971)
 
 Junos has a **second**, parallel family of command/configuration restrictions:

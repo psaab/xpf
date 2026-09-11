@@ -78,6 +78,11 @@ func RegisterCommandSurface(name string, commands func() []string) {
 // A surface reporting ZERO commands is skipped, not reported as unenforceable:
 // an empty set makes every pattern vacuously unmatched, which is the false
 // advisory in the dangerous direction.
+//
+// The question is EXISTENTIAL over the whole pattern, so one enforceable
+// alternative answers it for the rest. UnenforceableDenyAlternatives
+// (login_deny_alternatives_9340.go) asks it per alternative, on exactly the
+// surfaces this function does not report.
 func UnenforceableDenySurfaces(rules CompiledLoginRegexes) []string {
 	if _, ok := rules.DenySource(); !ok {
 		return nil
@@ -90,7 +95,7 @@ func UnenforceableDenySurfaces(rules CompiledLoginRegexes) []string {
 		}
 		matched := false
 		for _, cmd := range cmds {
-			if !rules.Evaluate(cmd).Allowed {
+			if denyPatternDecides(rules, cmd) {
 				matched = true
 				break
 			}
@@ -101,4 +106,16 @@ func UnenforceableDenySurfaces(rules CompiledLoginRegexes) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// denyPatternDecides reports whether the class's DENY pattern is what refuses
+// cmd. It is not the same as "cmd is refused". A class with an allow pattern
+// also refuses every command outside its allow list, and before #9340 that
+// allow-list refusal counted as the deny pattern firing. So allow `^show` with
+// deny `^show route table secret-vrf` reported nothing: `request system reboot`
+// is refused on the gRPC surface, by the allow list, although the deny pattern
+// can never decide anything there.
+func denyPatternDecides(rules CompiledLoginRegexes, cmd string) bool {
+	d := rules.Evaluate(cmd)
+	return !d.Allowed && d.DecidedBy == LoginRegexDeny
 }

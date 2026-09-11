@@ -1515,6 +1515,20 @@ func loginClassAdvisoryWarnings(cfg *Config) []string {
 						pluralSurface(len(surfaces))))
 				}
 			}
+			// #9340: the same question per ALTERNATIVE, on the surfaces where
+			// the whole pattern can fire. One enforceable alternative no longer
+			// buys silence for an argument-text alternative beside it.
+			for _, f := range UnenforceableDenyAlternatives(rules) {
+				if src, ok := rules.DenySource(); ok {
+					warnings = append(warnings, fmt.Sprintf(
+						"system login class %q: deny-commands %q is only partly enforceable on %s: "+
+							"its alternatives %q match no command in the REGISTERED command set of %s, "+
+							"so they restrict the on-box CLI only; the other alternatives apply on both. "+
+							"(The registered set is what that surface declares, not a census of everything "+
+							"it can dispatch.)",
+						lc.Name, src, f.Surface, f.Alternatives, f.Surface))
+				}
+			}
 		}
 	}
 	return warnings
