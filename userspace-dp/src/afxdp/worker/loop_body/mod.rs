@@ -250,7 +250,7 @@ pub(crate) fn worker_loop(
         mut bindings,
         binding_lookup,
         mut interrupt_poll_fds,
-        session_map_fd,
+        session_map,
         conntrack_v4_fd,
         conntrack_v6_fd,
         mut last_cos_status_ns,
@@ -353,7 +353,7 @@ pub(crate) fn worker_loop(
                     flush_session_deltas(
                         &ident,
                         Some(&binding.live),
-                        binding.bpf_maps.session_map_fd,
+                        binding.bpf_maps.session_map.handle(),
                         conntrack_v4_fd,
                         conntrack_v6_fd,
                         &dnat_fds,
@@ -381,7 +381,7 @@ pub(crate) fn worker_loop(
                     flush_session_deltas(
                         &ident,
                         None,
-                        session_map_fd,
+                        session_map.handle(),
                         conntrack_v4_fd,
                         conntrack_v6_fd,
                         &dnat_fds,
@@ -744,7 +744,7 @@ pub(crate) fn worker_loop(
             forwarding = new_forwarding;
             let purged_input_dscp = purge_sessions_for_input_dscp_filter_revalidation(
                 &mut sessions,
-                session_map_fd,
+                session_map.handle(),
                 conntrack_v4_fd,
                 conntrack_v6_fd,
                 &shared_sessions,
@@ -769,7 +769,7 @@ pub(crate) fn worker_loop(
             if let Some(rule_id) = deleted_first_policy.as_deref() {
                 let purged_first_policy = purge_sessions_bound_to_deleted_first_policy(
                     &mut sessions,
-                    session_map_fd,
+                    session_map.handle(),
                     conntrack_v4_fd,
                     conntrack_v6_fd,
                     &shared_sessions,
@@ -794,7 +794,7 @@ pub(crate) fn worker_loop(
             }
             let republished = republish_local_delivery_sessions_for_lo0_filter(
                 &sessions,
-                session_map_fd,
+                session_map.handle(),
                 &forwarding,
             );
             if republished > 0 {
@@ -912,7 +912,7 @@ pub(crate) fn worker_loop(
             apply_worker_commands(
                 &commands,
                 &mut sessions,
-                session_map_fd,
+                session_map.handle(),
                 conntrack_v4_fd,
                 conntrack_v6_fd,
                 &forwarding,
@@ -985,7 +985,7 @@ pub(crate) fn worker_loop(
                     // aliases immediately or XDP will keep steering packets to
                     // the old node after RG handoff.
                     delete_session_map_redirect_for_session(
-                        session_map_fd,
+                        session_map.handle(),
                         key,
                         decision,
                         &metadata,
@@ -1058,7 +1058,7 @@ pub(crate) fn worker_loop(
             &mut bindings,
             &expired_entries,
             forwarding.as_ref(),
-            session_map_fd,
+            session_map.handle(),
             conntrack_v4_fd,
             conntrack_v6_fd,
             loop_now_ns,
@@ -1803,7 +1803,7 @@ fn reap_expired_sessions(
     bindings: &mut [BindingWorker],
     expired_entries: &[crate::session::ExpiredSession],
     forwarding: &ForwardingState,
-    session_map_fd: c_int,
+    session_map: SteeringMap<'_>,
     conntrack_v4_fd: c_int,
     conntrack_v6_fd: c_int,
     now_ns: u64,
@@ -1839,7 +1839,7 @@ fn reap_expired_sessions(
             worker_id,
         );
         delete_session_map_entry_for_removed_session_with_origin(
-            session_map_fd,
+            session_map,
             &expired_entry.key,
             expired_entry.decision,
             &expired_entry.metadata,
@@ -2170,7 +2170,7 @@ mod flow_cache_invalidation_tests {
             std::slice::from_mut(&mut binding),
             &[expired(key.clone(), None)],
             &forwarding,
-            -1,
+            SteeringMap::unshared_for_test(-1),
             -1,
             -1,
             1_000_000_000,
@@ -2205,7 +2205,7 @@ mod flow_cache_invalidation_tests {
             std::slice::from_mut(&mut binding),
             &[expired(key.clone(), Some(20001))],
             &forwarding,
-            -1,
+            SteeringMap::unshared_for_test(-1),
             -1,
             -1,
             1_000_000_000,
@@ -2238,7 +2238,7 @@ mod flow_cache_invalidation_tests {
             std::slice::from_mut(&mut binding),
             &[expired(reaped.clone(), None)],
             &forwarding,
-            -1,
+            SteeringMap::unshared_for_test(-1),
             -1,
             -1,
             1_000_000_000,
@@ -2800,7 +2800,7 @@ mod gc_reap_source_nat_release_tests_6901 {
             &mut [],
             &[expired_for(1111, POOL_A, 40000)],
             &forwarding,
-            -1,
+            SteeringMap::unshared_for_test(-1),
             -1,
             -1,
             1_000_000_000,
@@ -2849,7 +2849,7 @@ mod gc_reap_source_nat_release_tests_6901 {
             &mut [],
             &[expired_for(1111, POOL_A, 40000)],
             &forwarding,
-            -1,
+            SteeringMap::unshared_for_test(-1),
             -1,
             -1,
             1_000_000_000,
@@ -2965,7 +2965,16 @@ mod gc_reap_nat64_release_tests_7740 {
     }
 
     fn reap(forwarding: &ForwardingState, entries: &[ExpiredSession]) {
-        reap_expired_sessions(&mut [], entries, forwarding, -1, -1, -1, 1_000_000_000, 0);
+        reap_expired_sessions(
+            &mut [],
+            entries,
+            forwarding,
+            SteeringMap::unshared_for_test(-1),
+            -1,
+            -1,
+            1_000_000_000,
+            0,
+        );
     }
 
     /// The reap returns the NAT64 translated port. The observable is the one

@@ -35,6 +35,9 @@ pub(crate) struct BpfMaps {
     pub(crate) map_fd: Option<OwnedFd>,
     pub(crate) heartbeat_map_fd: Option<OwnedFd>,
     pub(crate) session_map_fd: Option<OwnedFd>,
+    /// #9560: owners of the steering map's rows. A new `BpfMaps` (every bringup, and
+    /// `Default` on stop) starts an empty registry.
+    pub(crate) session_map_owners: std::sync::Arc<crate::afxdp::bpf_map::SteeringRowOwners>,
     pub(crate) conntrack_v4_fd: Option<OwnedFd>,
     pub(crate) conntrack_v6_fd: Option<OwnedFd>,
     pub(crate) dnat_table_fd: Option<OwnedFd>,

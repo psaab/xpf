@@ -19,7 +19,7 @@ use super::super::*;
 /// control-plane delete rate, never per-packet.
 pub(in crate::afxdp::session_glue) fn handle_delete_synced(
     sessions: &mut SessionTable,
-    session_map_fd: c_int,
+    session_map: SteeringMap<'_>,
     forwarding: &ForwardingState,
     // #9048: the local HA view, so a peer delete cannot tear down a session
     // this node is actively forwarding for. Same two inputs the sibling
@@ -116,12 +116,12 @@ pub(in crate::afxdp::session_glue) fn handle_delete_synced(
             worker_id,
         );
         delete_session_map_entry_for_removed_session(
-            session_map_fd,
+            session_map,
             &key,
             lookup.decision,
             &lookup.metadata,
         );
     } else {
-        delete_live_session_key(session_map_fd, &key);
+        delete_live_session_key(session_map, &key, &key);
     }
 }

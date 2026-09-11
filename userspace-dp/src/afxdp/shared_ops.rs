@@ -395,7 +395,7 @@ pub(super) fn prewarm_reverse_synced_sessions_for_owner_rgs(
     shared_forward_wire_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
     shared_owner_rg_indexes: &SharedSessionOwnerRgIndexes,
     worker_commands: &[Arc<Mutex<VecDeque<WorkerCommand>>>],
-    session_map_fd: c_int,
+    session_map: SteeringMap<'_>,
     forwarding: &ForwardingState,
     ha_state: &BTreeMap<i32, HAGroupRuntime>,
     dynamic_neighbors: &Arc<ShardedNeighborMap>,
@@ -405,7 +405,7 @@ pub(super) fn prewarm_reverse_synced_sessions_for_owner_rgs(
     if owner_rgs.is_empty() {
         return;
     }
-    let publish_session_map = session_map_fd >= 0;
+    let publish_session_map = session_map.fd >= 0;
     let owner_rg_set: std::collections::BTreeSet<i32> = owner_rgs.iter().copied().collect();
     // #4069: dedup the forward and reverse-prewarm key sets in O(N+M) via a
     // hash set (see merge_owner_rg_candidate_keys) instead of the former
@@ -485,7 +485,7 @@ pub(super) fn prewarm_reverse_synced_sessions_for_owner_rgs(
     for forward in &forward_entries {
         if publish_session_map
             && publish_session_map_entry_for_session(
-                session_map_fd,
+                session_map,
                 &forward.key,
                 forward.decision,
                 &forward.metadata,
@@ -529,7 +529,7 @@ pub(super) fn prewarm_reverse_synced_sessions_for_owner_rgs(
             // path was still swallowed with `let _ =`; count it like the
             // forward loop above.
             if publish_session_map_entry_for_session(
-                session_map_fd,
+                session_map,
                 &reverse.key,
                 reverse.decision,
                 &reverse.metadata,
@@ -562,7 +562,7 @@ pub(super) fn prewarm_reverse_synced_sessions_for_owner_rgs(
 pub(super) fn republish_bpf_session_entries_for_owner_rgs(
     shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
     shared_owner_rg_indexes: &SharedSessionOwnerRgIndexes,
-    session_map_fd: c_int,
+    session_map: SteeringMap<'_>,
     owner_rgs: &[i32],
     // #9517: this republishes peer-synced sessions on RG activation, which is
     // exactly where PASS_TO_KERNEL rows come from.
@@ -594,7 +594,7 @@ pub(super) fn republish_bpf_session_entries_for_owner_rgs(
     let mut errors = 0u32;
     for (key, decision, metadata) in &entries {
         if publish_session_map_entry_for_session(
-            session_map_fd,
+            session_map,
             key,
             *decision,
             metadata,
@@ -1083,7 +1083,7 @@ pub(super) fn reverse_resolution_for_session(
 
 pub(super) fn install_reverse_session_from_forward_match(
     sessions: &mut SessionTable,
-    session_map_fd: c_int,
+    session_map: SteeringMap<'_>,
     shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
     shared_nat_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
     shared_forward_wire_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
@@ -1126,8 +1126,7 @@ pub(super) fn install_reverse_session_from_forward_match(
     if installed {
         // #1789: count failed reverse-install publishes (was `let _ =`).
         // No binding context in this shared-ops path — shared counter.
-        if publish_live_session_entry(session_map_fd, reverse_key, reverse.decision.nat, true)
-            .is_err()
+        if publish_live_session_entry(session_map, reverse_key, reverse.decision.nat, true).is_err()
         {
             SESSION_PUBLISH_ERRORS_SHARED.fetch_add(1, Ordering::Relaxed);
         }

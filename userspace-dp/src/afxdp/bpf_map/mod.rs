@@ -99,6 +99,66 @@ pub(super) fn session_map_key(key: &SessionKey) -> UserspaceSessionMapKey {
     }
 }
 
+/// #9560: the steering-map row `key` occupies, as the 40 bytes the shim looks up. Keys
+/// that differ only in `routing_domain` or `discriminator` encode to the SAME row (#9517),
+/// which is why a row has owners (`SteeringRowOwners`).
+pub(super) fn session_map_row(key: &SessionKey) -> SteeringRow {
+    const _: () = assert!(
+        std::mem::size_of::<UserspaceSessionMapKey>() == std::mem::size_of::<SteeringRow>(),
+        "the steering row is the shim's 40-byte key"
+    );
+    // SAFETY: `UserspaceSessionMapKey` is `repr(C)` with fields at offsets 0, 1, 2, 4, 6, 8 and
+    // 24 and a total size of 40 (asserted above), so it has no padding and every byte copied
+    // is initialised.
+    unsafe { std::mem::transmute::<UserspaceSessionMapKey, SteeringRow>(session_map_key(key)) }
+}
+
+/// #9560: the steering map as the helper writes it: its fd plus the registry of which entries
+/// own each row. Owned, so it can live in `BindingPlan`, `WorkerBpfMaps` and `BpfMaps`, and
+/// be cloned with them. One registry lives exactly as long as one `BpfMaps` (see
+/// `steering_owners.rs`).
+#[derive(Clone)]
+pub(crate) struct SteeringMapRef {
+    pub(crate) fd: c_int,
+    pub(crate) owners: std::sync::Arc<SteeringRowOwners>,
+}
+
+impl SteeringMapRef {
+    pub(crate) fn new(fd: c_int, owners: std::sync::Arc<SteeringRowOwners>) -> Self {
+        Self { fd, owners }
+    }
+
+    /// A borrowed handle for one call chain.
+    pub(crate) fn handle(&self) -> SteeringMap<'_> {
+        SteeringMap { fd: self.fd, owners: &self.owners }
+    }
+}
+
+/// #9560: a borrowed steering-map handle. Every steering write and delete takes one, so no
+/// path can reach the BPF map without the registry.
+#[derive(Clone, Copy)]
+pub(crate) struct SteeringMap<'a> {
+    pub(crate) fd: c_int,
+    pub(crate) owners: &'a SteeringRowOwners,
+}
+
+#[cfg(test)]
+impl SteeringMap<'static> {
+    /// A handle on `fd` with its OWN empty owner registry, leaked so the handle
+    /// outlives any call it is passed to. No other call can register an owner in
+    /// that registry, so a delete through it is never suppressed as `Remaining`:
+    /// exactly what a bare descriptor did before #9560. Pass `-1` for "no map"
+    /// (the `< 0` early returns fire), or a non-negative never-open descriptor to
+    /// reach the syscall and the write recorder. A cell that exercises row
+    /// sharing must build ONE `SteeringRowOwners` and hand it to every call.
+    pub(crate) fn unshared_for_test(fd: c_int) -> Self {
+        SteeringMap {
+            fd,
+            owners: Box::leak(Box::default()),
+        }
+    }
+}
+
 /// #9517 test seam: one write to the XDP steering map, as the dataplane
 /// ATTEMPTED it. `value` is the action byte for an update and `None` for a
 /// delete. Recorded before the syscall, so a cell can drive a real publish path
@@ -111,6 +171,8 @@ pub(super) fn session_map_key(key: &SessionKey) -> UserspaceSessionMapKey {
 pub(super) struct SessionMapWriteRecord {
     pub(super) key: SessionKey,
     pub(super) value: Option<u8>,
+    /// Whether the row's owner-shard lock was held when the write was issued (#9560).
+    pub(super) owner_lock_held: bool,
 }
 
 #[cfg(test)]
@@ -129,60 +191,89 @@ pub(super) fn session_map_writes() -> Vec<SessionMapWriteRecord> {
     SESSION_MAP_WRITES.with(|records| records.borrow().clone())
 }
 
+/// A descriptor the steering primitives treat, in tests only, as a map on which every
+/// write succeeds: the recorder sees it and no syscall is made. `NOT_A_MAP_FD` (#9517)
+/// makes the syscall fail, which stops an entry publish at its first row (`?`), so
+/// only this one lets a cell see the owner every derived row is registered under.
+#[cfg(test)]
+pub(super) const RECORDER_ONLY_MAP_FD: c_int = i32::MAX - 1;
+
 pub(super) fn publish_session_map_key(
-    map_fd: c_int,
+    map: SteeringMap<'_>,
     key: &SessionKey,
     value: u8,
+    owner: &SessionKey,
 ) -> io::Result<()> {
-    #[cfg(test)]
-    SESSION_MAP_WRITES.with(|records| {
-        records.borrow_mut().push(SessionMapWriteRecord {
-            key: key.clone(),
-            value: Some(value),
-        })
-    });
-    let map_key = session_map_key(key);
-    let rc = unsafe {
-        libbpf_sys::bpf_map_update_elem(
-            map_fd,
-            (&map_key as *const UserspaceSessionMapKey).cast::<c_void>(),
-            (&value as *const u8).cast::<c_void>(),
-            libbpf_sys::BPF_ANY as u64,
-        )
-    };
-    if rc < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(())
+    // #9560: register the owner and write the row under one shard lock, so a sibling's
+    // teardown can neither see this row ownerless while the write lands nor delete it
+    // right after (`SteeringRowOwners::add_then`).
+    map.owners.add_then(&session_map_row(key), owner, || {
+        #[cfg(test)]
+        SESSION_MAP_WRITES.with(|records| {
+            records.borrow_mut().push(SessionMapWriteRecord {
+                key: key.clone(),
+                value: Some(value),
+                owner_lock_held: map.owners.shard_is_locked(&session_map_row(key)),
+            })
+        });
+        #[cfg(test)]
+        if map.fd == RECORDER_ONLY_MAP_FD {
+            return Ok(());
+        }
+        let map_key = session_map_key(key);
+        let rc = unsafe {
+            libbpf_sys::bpf_map_update_elem(
+                map.fd,
+                (&map_key as *const UserspaceSessionMapKey).cast::<c_void>(),
+                (&value as *const u8).cast::<c_void>(),
+                libbpf_sys::BPF_ANY as u64,
+            )
+        };
+        if rc < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    })
 }
 
-pub(super) fn publish_live_session_key(map_fd: c_int, key: &SessionKey) -> io::Result<()> {
-    publish_session_map_key(map_fd, key, USERSPACE_SESSION_ACTION_REDIRECT)
+pub(super) fn publish_live_session_key(
+    map: SteeringMap<'_>,
+    key: &SessionKey,
+    owner: &SessionKey,
+) -> io::Result<()> {
+    publish_session_map_key(map, key, USERSPACE_SESSION_ACTION_REDIRECT, owner)
 }
 
-pub(super) fn publish_kernel_local_session_key(map_fd: c_int, key: &SessionKey) -> io::Result<()> {
-    publish_session_map_key(map_fd, key, USERSPACE_SESSION_ACTION_PASS_TO_KERNEL)
+pub(super) fn publish_kernel_local_session_key(
+    map: SteeringMap<'_>,
+    key: &SessionKey,
+    owner: &SessionKey,
+) -> io::Result<()> {
+    publish_session_map_key(map, key, USERSPACE_SESSION_ACTION_PASS_TO_KERNEL, owner)
 }
 
 pub(super) fn publish_live_session_entry(
-    map_fd: c_int,
+    map: SteeringMap<'_>,
     key: &SessionKey,
     nat: NatDecision,
     is_reverse: bool,
 ) -> io::Result<()> {
-    publish_live_session_key(map_fd, key)?;
+    // #9560: `key` owns every row written here. Never the derived row key:
+    // `reverse_canonical_key` zeroes `routing_domain` (#7160), so two domains' rows are
+    // identical SessionKeys, and owning by row key would merge their owners.
+    publish_live_session_key(map, key, key)?;
     if !is_reverse {
         let wire_key = forward_wire_key(key, nat);
         if wire_key != *key {
-            publish_live_session_key(map_fd, &wire_key)?;
+            publish_live_session_key(map, &wire_key, key)?;
         }
         let reverse_wire = reverse_session_key(key, nat);
         if reverse_wire != *key {
-            publish_live_session_key(map_fd, &reverse_wire)?;
+            publish_live_session_key(map, &reverse_wire, key)?;
         }
         let reverse_canonical = reverse_canonical_key(key, nat);
         if reverse_canonical != *key && reverse_canonical != reverse_wire {
-            publish_live_session_key(map_fd, &reverse_canonical)?;
+            publish_live_session_key(map, &reverse_canonical, key)?;
         }
     }
     Ok(())
@@ -991,14 +1082,14 @@ pub(super) fn refresh_bpf_conntrack_last_seen(
 }
 
 pub(super) fn publish_session_map_entry_for_session(
-    map_fd: c_int,
+    map: SteeringMap<'_>,
     key: &SessionKey,
     decision: SessionDecision,
     metadata: &SessionMetadata,
     has_routing_domains: bool,
 ) -> io::Result<()> {
     publish_session_map_entry_for_session_with_origin(
-        map_fd,
+        map,
         key,
         decision,
         metadata,
@@ -1008,7 +1099,7 @@ pub(super) fn publish_session_map_entry_for_session(
 }
 
 pub(super) fn publish_session_map_entry_for_session_with_origin(
-    map_fd: c_int,
+    map: SteeringMap<'_>,
     key: &SessionKey,
     decision: SessionDecision,
     metadata: &SessionMetadata,
@@ -1016,7 +1107,7 @@ pub(super) fn publish_session_map_entry_for_session_with_origin(
     has_routing_domains: bool,
 ) -> io::Result<()> {
     publish_session_map_entry_for_session_with_conntrack(
-        map_fd,
+        map,
         key,
         decision,
         metadata,
@@ -1027,7 +1118,7 @@ pub(super) fn publish_session_map_entry_for_session_with_origin(
 }
 
 pub(super) fn publish_session_map_entry_for_session_with_conntrack(
-    map_fd: c_int,
+    map: SteeringMap<'_>,
     key: &SessionKey,
     decision: SessionDecision,
     metadata: &SessionMetadata,
@@ -1038,7 +1129,7 @@ pub(super) fn publish_session_map_entry_for_session_with_conntrack(
     ct: Option<ConntrackCtx<'_>>,
 ) -> io::Result<()> {
     if uses_kernel_local_session_map_entry(key, decision, metadata, origin, has_routing_domains) {
-        publish_kernel_local_session_key(map_fd, key)?;
+        publish_kernel_local_session_key(map, key, key)?;
         // For SNATed local-delivery sessions (e.g., ICMP to an interface-NAT
         // address), the reply packet arrives with the SNAT address as
         // destination. Publish the reverse session key so the XDP shim
@@ -1047,7 +1138,7 @@ pub(super) fn publish_session_map_entry_for_session_with_conntrack(
         if decision.nat.rewrite_src.is_some() {
             let reverse_wire = reverse_session_key(key, decision.nat);
             if reverse_wire != *key {
-                publish_live_session_key(map_fd, &reverse_wire)?;
+                publish_live_session_key(map, &reverse_wire, key)?;
             }
         }
         // Also mirror to conntrack for session display.
@@ -1067,7 +1158,7 @@ pub(super) fn publish_session_map_entry_for_session_with_conntrack(
         }
         return Ok(());
     }
-    let result = publish_live_session_entry(map_fd, key, decision.nat, metadata.is_reverse);
+    let result = publish_live_session_entry(map, key, decision.nat, metadata.is_reverse);
     // Mirror to conntrack for session display.
     if let Some(ctx) = ct {
         publish_bpf_conntrack_entry(
@@ -1100,42 +1191,53 @@ pub(super) fn verify_session_key_in_bpf(map_fd: c_int, key: &SessionKey) -> bool
     rc == 0
 }
 
-pub(super) fn delete_live_session_key(map_fd: c_int, key: &SessionKey) {
-    #[cfg(test)]
-    SESSION_MAP_WRITES.with(|records| {
-        records.borrow_mut().push(SessionMapWriteRecord {
-            key: key.clone(),
-            value: None,
-        })
+pub(super) fn delete_live_session_key(map: SteeringMap<'_>, key: &SessionKey, owner: &SessionKey) {
+    // #9560: the BPF row goes only when its LAST owner does, and the delete runs under the
+    // same shard lock as the ownership decision. A row the registry never saw
+    // (`Unregistered`) is deleted as before.
+    map.owners.remove_then(&session_map_row(key), owner, || {
+        #[cfg(test)]
+        SESSION_MAP_WRITES.with(|records| {
+            records.borrow_mut().push(SessionMapWriteRecord {
+                key: key.clone(),
+                value: None,
+                owner_lock_held: map.owners.shard_is_locked(&session_map_row(key)),
+            })
+        });
+        #[cfg(test)]
+        if map.fd == RECORDER_ONLY_MAP_FD {
+            return;
+        }
+        let map_key = session_map_key(key);
+        let _ = unsafe {
+            libbpf_sys::bpf_map_delete_elem(
+                map.fd,
+                (&map_key as *const UserspaceSessionMapKey).cast::<c_void>(),
+            )
+        };
     });
-    let map_key = session_map_key(key);
-    let _ = unsafe {
-        libbpf_sys::bpf_map_delete_elem(
-            map_fd,
-            (&map_key as *const UserspaceSessionMapKey).cast::<c_void>(),
-        )
-    };
 }
 
 pub(super) fn delete_live_session_entry(
-    map_fd: c_int,
+    map: SteeringMap<'_>,
     key: &SessionKey,
     nat: NatDecision,
     is_reverse: bool,
 ) {
-    delete_live_session_key(map_fd, key);
+    // #9560: `key` gives up every row it owns; a row another entry still owns stays.
+    delete_live_session_key(map, key, key);
     if !is_reverse {
         let wire_key = forward_wire_key(key, nat);
         if wire_key != *key {
-            delete_live_session_key(map_fd, &wire_key);
+            delete_live_session_key(map, &wire_key, key);
         }
         let reverse_wire = reverse_session_key(key, nat);
         if reverse_wire != *key {
-            delete_live_session_key(map_fd, &reverse_wire);
+            delete_live_session_key(map, &reverse_wire, key);
         }
         let reverse_canonical = reverse_canonical_key(key, nat);
         if reverse_canonical != *key && reverse_canonical != reverse_wire {
-            delete_live_session_key(map_fd, &reverse_canonical);
+            delete_live_session_key(map, &reverse_canonical, key);
         }
     }
 }
@@ -1181,19 +1283,23 @@ fn session_map_redirect_keys_for_session(
 }
 
 pub(super) fn delete_session_map_redirect_for_session(
-    map_fd: c_int,
+    map: SteeringMap<'_>,
     key: &SessionKey,
     decision: SessionDecision,
     metadata: &SessionMetadata,
     origin: SessionOrigin,
 ) {
+    // #9560: the walk also names derived rows this entry never published (the kernel-local
+    // publish writes only `key` and, under SNAT, `reverse_wire`). For those the entry is not
+    // an owner, so a row a sibling owns stays (`Remaining`) and an ownerless row is deleted
+    // as before (`Unregistered`).
     for_each_session_map_redirect_key(key, decision, metadata, origin, |redirect_key| {
-        delete_live_session_key(map_fd, &redirect_key);
+        delete_live_session_key(map, &redirect_key, key);
     });
 }
 
 pub(super) fn delete_session_map_entry_for_removed_session(
-    map_fd: c_int,
+    map: SteeringMap<'_>,
     key: &SessionKey,
     decision: SessionDecision,
     metadata: &SessionMetadata,
@@ -1201,7 +1307,7 @@ pub(super) fn delete_session_map_entry_for_removed_session(
     // Default to SyncImport for backwards-compatible callers where
     // the session being deleted is always from a sync path.
     delete_session_map_entry_for_removed_session_with_origin(
-        map_fd,
+        map,
         key,
         decision,
         metadata,
@@ -1212,7 +1318,7 @@ pub(super) fn delete_session_map_entry_for_removed_session(
 }
 
 pub(super) fn delete_session_map_entry_for_removed_session_with_origin(
-    map_fd: c_int,
+    map: SteeringMap<'_>,
     key: &SessionKey,
     decision: SessionDecision,
     metadata: &SessionMetadata,
@@ -1229,7 +1335,7 @@ pub(super) fn delete_session_map_entry_for_removed_session_with_origin(
     // (only the map VALUE differs — `USERSPACE_SESSION_ACTION_PASS_TO_KERNEL`),
     // and a BPF delete addresses the row by KEY, so the redirect walk below
     // removes the kernel-local row and the live row alike.
-    delete_session_map_redirect_for_session(map_fd, key, decision, metadata, origin);
+    delete_session_map_redirect_for_session(map, key, decision, metadata, origin);
     delete_bpf_conntrack_entry(conntrack_v4_fd, conntrack_v6_fd, key);
 }
 
@@ -1252,7 +1358,9 @@ mod publish_conntrack;
 mod ha;
 mod metrics;
 mod pin;
+mod steering_owners;
 
 pub(in crate::afxdp) use ha::*;
 pub(in crate::afxdp) use metrics::*;
 pub(in crate::afxdp) use pin::*;
+pub(in crate::afxdp) use steering_owners::*;

@@ -547,7 +547,7 @@ fn prewarm_recovers_from_poisoned_shared_session_mutex() {
         &coordinator.sessions.forward_wire,
         &coordinator.sessions.owner_rg_indexes,
         std::slice::from_ref(&worker_commands),
-        -1,
+        SteeringMap::unshared_for_test(-1),
         &coordinator.forwarding,
         &ha_state,
         coordinator.dynamic_neighbors_ref(),
@@ -4172,7 +4172,11 @@ fn the_reconcile_replay_rederives_a_dead_reverse_companion_7209() {
     let queues: BTreeMap<u32, Arc<Mutex<VecDeque<WorkerCommand>>>> =
         BTreeMap::from([(0u32, Arc::new(Mutex::new(VecDeque::new())))]);
     let before = coordinator.synced_reverse_rederived_total();
-    let replayed = coordinator.replay_synced_sessions(&replay_entries, &queues, -1);
+    let replayed = coordinator.replay_synced_sessions(
+        &replay_entries,
+        &queues,
+        SteeringMap::unshared_for_test(-1),
+    );
     assert!(replayed > 0, "the replay processed nothing");
 
     // (2) the SHARED MAP — the authority — is what must be repaired.
@@ -4235,7 +4239,11 @@ fn the_reconcile_replay_rederives_a_dead_reverse_companion_7209() {
     // (3) CONTROL: replaying again, with nothing changed, must be inert.
     let steady_entries = coordinator.snapshot_shared_session_entries();
     let steady_before = coordinator.synced_reverse_rederived_total();
-    coordinator.replay_synced_sessions(&steady_entries, &queues, -1);
+    coordinator.replay_synced_sessions(
+        &steady_entries,
+        &queues,
+        SteeringMap::unshared_for_test(-1),
+    );
     assert_eq!(
         coordinator.synced_reverse_rederived_total(),
         steady_before,

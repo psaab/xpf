@@ -732,7 +732,7 @@ fn worker_queue_6929_the_wiring_scan_can_actually_see_a_bare_push_back() {
 // `core::mem::take` and dispatched every command in one uninterrupted loop,
 // never touching its AF_XDP rings until the batch was done. Measured at the
 // #6929 cap of 4096 commands that is 3.85 ms of unserviced rings — a LOWER
-// bound (the measurement ran at `session_map_fd = -1`, so the map syscalls
+// bound (the measurement ran at a steering-map fd of `-1`, so the map syscalls
 // failed at the fd check without paying the kernel-side insert) — against a
 // 4096-slot RX ring that fills in ~1.97 ms at 25 Gbps with 1500 B frames. The
 // burst arrives at RG activation, when the node has just become

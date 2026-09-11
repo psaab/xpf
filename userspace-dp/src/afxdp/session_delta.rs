@@ -306,7 +306,7 @@ pub(in crate::afxdp) fn session_delta_info(
 pub(super) fn flush_session_deltas(
     ident: &BindingIdentity,
     live: Option<&BindingLiveState>,
-    session_map_fd: c_int,
+    session_map: SteeringMap<'_>,
     conntrack_v4_fd: c_int,
     conntrack_v6_fd: c_int,
     // #2979: the reverse-NAT dnat_table / dnat_table_v6 fds so a closing SNAT
@@ -500,11 +500,11 @@ pub(super) fn flush_session_deltas(
                     delta.key.dst_port,
                     delta.decision.nat.rewrite_src,
                     delta.decision.nat.rewrite_dst,
-                    count_bpf_session_entries(session_map_fd),
+                    count_bpf_session_entries(session_map.fd),
                 );
             }
             delete_live_session_entry(
-                session_map_fd,
+                session_map,
                 &delta.key,
                 delta.decision.nat,
                 delta.metadata.is_reverse,
@@ -527,7 +527,7 @@ pub(super) fn flush_session_deltas(
                 &delta.key,
             );
             let reverse_key = reverse_session_key(&delta.key, delta.decision.nat);
-            delete_live_session_entry(session_map_fd, &reverse_key, delta.decision.nat, true);
+            delete_live_session_entry(session_map, &reverse_key, delta.decision.nat, true);
             delete_bpf_conntrack_entry(conntrack_v4_fd, conntrack_v6_fd, &reverse_key);
             remove_shared_session(
                 shared_sessions,
@@ -564,7 +564,7 @@ pub(super) fn flush_session_deltas(
             if cfg!(feature = "debug-log") {
                 debug_log!(
                     "SESS_DELETE_DONE: bpf_entries_after={}",
-                    count_bpf_session_entries(session_map_fd),
+                    count_bpf_session_entries(session_map.fd),
                 );
             }
         }

@@ -1271,8 +1271,10 @@ directly:
     does not touch its AF_XDP RX/TX rings while it dispatches commands,
     so batch size is wall-clock time the rings go unserviced. Draining
     a full 4096-command queue measured **3.85 ms** — a LOWER bound, at
-    `session_map_fd = -1` where the `bpf_map_update_elem` calls fail at
-    the fd check without paying the kernel-side insert. A 4096-slot RX
+    a steering-map fd of `-1`, where the `bpf_map_update_elem` calls fail
+    at the fd check without paying the kernel-side insert (measured before
+    #9560 put an owner-registry shard lock around each steering write, which
+    a `-1` run also pays). A 4096-slot RX
     ring (`ring_entries`, `server/lifecycle.rs`) fills in ~1.97 ms at
     25 Gbps with 1500 B frames. The burst arrives at RG activation, the
     moment the node has just become forwarding-authoritative — hence

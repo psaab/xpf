@@ -343,7 +343,17 @@ impl crate::afxdp::ha::SessionDomain {
         // shim takes the NO_SESSION degraded path). No binding context here, so
         // bump the shared counter. Distinct from the absent-map arm above: this
         // one HAD a map and the kernel refused the write.
-        if publish_live_session_entry(session_map_fd.fd, key, nat, is_reverse).is_err() {
+        if publish_live_session_entry(
+            SteeringMap {
+                fd: session_map_fd.fd,
+                owners: &maps.session_map_owners,
+            },
+            key,
+            nat,
+            is_reverse,
+        )
+        .is_err()
+        {
             SESSION_PUBLISH_ERRORS_SHARED.fetch_add(1, Ordering::Relaxed);
         }
     }
@@ -793,7 +803,10 @@ impl crate::afxdp::ha::SessionDomain {
             let maps = self.bpf_maps.load();
             if let Some(session_map_fd) = maps.session_map_fd.as_ref() {
                 delete_session_map_entry_for_removed_session(
-                    session_map_fd.fd,
+                    SteeringMap {
+                        fd: session_map_fd.fd,
+                        owners: &maps.session_map_owners,
+                    },
                     &entry.key,
                     entry.decision,
                     &entry.metadata,

@@ -133,7 +133,7 @@ fn off_policy_clears_stale_shared_status() {
         live: Arc::new(BindingLiveState::new()),
         xsk_map_fd: -1,
         heartbeat_map_fd: -1,
-        session_map_fd: -1,
+        session_map: crate::afxdp::bpf_map::SteeringMapRef::new(-1, std::sync::Arc::default()),
         conntrack_v4_fd: -1,
         conntrack_v6_fd: -1,
         ring_entries: 256,

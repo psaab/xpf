@@ -29,7 +29,8 @@ use core::ffi::c_int;
 /// coordinator's already-validated `OwnedFd` opens.
 pub(crate) struct WorkerBpfMaps {
     pub(crate) heartbeat_map_fd: c_int,
-    pub(crate) session_map_fd: c_int,
+    /// #9560: the steering map's fd and its row-owner registry.
+    pub(crate) session_map: crate::afxdp::bpf_map::SteeringMapRef,
     pub(crate) conntrack_v4_fd: c_int,
     pub(crate) conntrack_v6_fd: c_int,
 }

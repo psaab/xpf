@@ -392,11 +392,25 @@ forward-direction collision.
   longer publishes `PASS_TO_KERNEL` at all, and neither does any session whose
   key carries a tunnel discriminator. The GRE arm needs no routing domains —
   two keyed tunnels between one endpoint pair alias on a single-instance box.
-  The DELETE arm is NOT closed (#9560): two aliased sessions still share one
-  row, so either one's ordinary teardown removes it, and with an `lo0` input
-  filter the survivor's next packet misses, reaches the kernel and skips the
-  filter. Closing it needs identity in the key, and the shim cannot compute
-  the domain inside the #1864 verifier budget.
+  The DELETE arm is handled in the helper by #9560, again without identity in
+  the key (the shim cannot compute the domain inside the #1864 verifier
+  budget). A row-owner registry (`SteeringRowOwners`,
+  `afxdp/bpf_map/steering_owners.rs`) sits beside the map: every publish
+  registers the session ENTRY key as an owner of each row it writes, and a
+  delete removes only its own ownership, issuing the BPF delete when the last
+  owner goes, or when the registry never saw the row (`Unregistered`, deleted
+  as before). The owner is the entry key, never the row key:
+  `reverse_canonical_key` zeroes `routing_domain` (#7160), so two domains
+  derive the identical `SessionKey` for their shared reverse row. The
+  ownership decision and the syscall run under one shard lock, so a sibling's
+  publish cannot land between a teardown's decision and its delete. There is
+  one registry per `BpfMaps`: replay, workers and HA publish through the
+  bringup's registry, and worker-local sessions die at bringup, so a new one
+  starts empty and a row the previous generation left is deleted as before.
+  Until #9560 two aliased sessions shared one row and either one's ordinary
+  teardown removed it; with an `lo0` input filter the survivor's next packet
+  missed, reached the kernel and skipped the filter. Cells:
+  `session_glue/steering_row_owners_9560_tests.rs`.
 - **PBR `then routing-instance` is the ONLY per-VRF forwarding path.** An
   interface's native `routing_instance` selects only the connected-route
   table NAME (#2388 above) — it does NOT scope a transit packet's
@@ -450,7 +464,9 @@ forward-direction collision.
   alias too; it is keyed on the LOGICAL (VLAN unit) ingress ifindex since
   `42bc6bc88`, so two units of one parent no longer share a cache entry. What
   remains are the ifindex-less conntrack table and the bare-5-tuple XDP
-  steering map.
+  steering map. The steering map's two aliasing arms are neutralised in the
+  helper rather than in the key: #9517 (no `PASS_TO_KERNEL` overwrite where
+  rows can alias) and #9560 (a shared row is deleted only by its last owner).
 - **Interim mitigation + candidate real fix (UNDECIDED).** The Go compiler
   emits a commit WARNING (`validateVRFOverlap`, `pkg/config`) when two
   distinct routing-instances carry overlapping L3 address space, so the

@@ -42,7 +42,7 @@ pub(super) struct WorkerLoopSetup {
     pub(super) bindings: Vec<BindingWorker>,
     pub(super) binding_lookup: WorkerBindingLookup,
     pub(super) interrupt_poll_fds: Vec<libc::pollfd>,
-    pub(super) session_map_fd: c_int,
+    pub(super) session_map: crate::afxdp::bpf_map::SteeringMapRef,
     pub(super) conntrack_v4_fd: c_int,
     pub(super) conntrack_v6_fd: c_int,
     pub(super) last_cos_status_ns: u64,
@@ -266,10 +266,12 @@ pub(super) fn worker_loop_setup(
         Vec::new()
     };
     // Cache BPF map FDs — they don't change during the worker's lifetime.
-    let session_map_fd = bindings
+    let session_map = bindings
         .first()
-        .map(|binding| binding.bpf_maps.session_map_fd)
-        .unwrap_or(-1);
+        .map(|binding| binding.bpf_maps.session_map.clone())
+        .unwrap_or_else(|| {
+            crate::afxdp::bpf_map::SteeringMapRef::new(-1, std::sync::Arc::default())
+        });
     let conntrack_v4_fd = bindings
         .first()
         .map(|binding| binding.bpf_maps.conntrack_v4_fd)
@@ -306,7 +308,7 @@ pub(super) fn worker_loop_setup(
         bindings,
         binding_lookup,
         interrupt_poll_fds,
-        session_map_fd,
+        session_map,
         conntrack_v4_fd,
         conntrack_v6_fd,
         last_cos_status_ns,
@@ -410,7 +412,7 @@ mod worker_setup_harness {
             live: Arc::new(BindingLiveState::new()),
             xsk_map_fd: -1,
             heartbeat_map_fd: -1,
-            session_map_fd: -1,
+            session_map: crate::afxdp::bpf_map::SteeringMapRef::new(-1, std::sync::Arc::default()),
             conntrack_v4_fd: -1,
             conntrack_v6_fd: -1,
             ring_entries: 256,

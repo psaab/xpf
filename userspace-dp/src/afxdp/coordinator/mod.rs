@@ -1103,7 +1103,7 @@ impl Coordinator {
         &self,
         entries: &[SyncedSessionEntry],
         worker_command_queues: &BTreeMap<u32, Arc<Mutex<VecDeque<WorkerCommand>>>>,
-        session_map_fd: c_int,
+        session_map: SteeringMap<'_>,
     ) -> usize {
         if entries.is_empty() {
             return 0;
@@ -1132,7 +1132,7 @@ impl Coordinator {
             // prefix of synced state after reconcile (was `let _ =`). No
             // binding context here — shared counter.
             if publish_live_session_entry(
-                session_map_fd,
+                session_map,
                 &entry.key,
                 entry.decision.nat,
                 entry.metadata.is_reverse,

@@ -24,11 +24,11 @@ use crate::test_zone_ids::*;
 use std::net::Ipv4Addr;
 
 /// Not negative, so `publish_worker_session_map_entry` does not take its
-/// `session_map_fd < 0` early return; never an open BPF map, so every syscall
+/// `session_map.fd < 0` early return; never an open BPF map, so every syscall
 /// fails harmlessly after the recorder has seen it.
 const NOT_A_MAP_FD: c_int = i32::MAX;
 
-fn host_bound_key() -> SessionKey {
+pub(super) fn host_bound_key() -> SessionKey {
     SessionKey {
         addr_family: libc::AF_INET as u8,
         protocol: PROTO_TCP,
@@ -95,7 +95,7 @@ fn worker_publish_writes_for(
     };
     clear_session_map_writes();
     publish_worker_session_map_entry(
-        NOT_A_MAP_FD,
+        SteeringMap::unshared_for_test(NOT_A_MAP_FD),
         &forwarding,
         &key,
         local_delivery(),
