@@ -548,11 +548,45 @@ func (m *Manager) reconcileFamilyRestart(svc string, restartInactive bool) error
 			"service", svc, "err", qerr)
 	}
 	if restartInactive || active || qerr != nil {
-		if err := m.runSystemctl("restart", svc); err != nil {
-			errs = append(errs, fmt.Errorf("restart %s: %w", svc, err))
+		if err := m.restartClearingStartLimit(svc); err != nil {
+			errs = append(errs, err)
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// restartClearingStartLimit restarts svc, and if that fails, clears the
+// unit's failed state with `systemctl reset-failed` and restarts it once more
+// (#9601).
+//
+// systemd refuses a start once a unit has been started more than
+// StartLimitBurst times within StartLimitIntervalSec ("start of the service was
+// attempted too often") and keeps refusing until the interval passes or the
+// failed state is reset. A node that takes several redundancy groups in one
+// second enqueues one MASTER apply per edge, and each apply restarts Kea, so a
+// burst can trip the limit on the node that must now serve DHCP. The #6535
+// converger's retry then hit the same refusal a few seconds later, and Kea
+// stayed down until an unrelated commit restarted it.
+//
+// The rate limit exists to stop a crash loop, and this controller already
+// bounds its own retries (applyRetryInterval), so resetting it here trades
+// nothing: a unit that fails for another reason fails the second restart too,
+// the combined error is returned, and the apply stays failed and retryable.
+// Exactly one reset and one extra restart per apply, never a loop.
+func (m *Manager) restartClearingStartLimit(svc string) error {
+	err := m.runSystemctl("restart", svc)
+	if err == nil {
+		return nil
+	}
+	first := fmt.Errorf("restart %s: %w", svc, err)
+	if rerr := m.runSystemctl("reset-failed", svc); rerr != nil {
+		return errors.Join(first, fmt.Errorf("reset-failed %s: %w", svc, rerr))
+	}
+	if err := m.runSystemctl("restart", svc); err != nil {
+		return errors.Join(first, fmt.Errorf("restart %s after reset-failed: %w", svc, err))
+	}
+	slog.Info("Kea unit restarted after clearing its failed state", "service", svc, "first_error", err)
+	return nil
 }
 
 // clearFamilyLocked stops one Kea unit if systemd reports it active
