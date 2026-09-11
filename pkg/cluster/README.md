@@ -2920,7 +2920,13 @@ standby can re-initiate the primary's tunnels on takeover:
   per stream (`ipsecRecvSeq`, a `fullSetSeqGuard`), strips the delimiter
   (`stripIPsecFullSetDelim`), and drops a stale reorder (`IPsecSAStaleIgnored`).
   The guard is reset on a peer bulk re-prime (`resetRecvGen`) so an OS-rebooted
-  peer's fresh set (lower monotonic incarnation) is re-accepted. A legacy peer
+  peer's fresh set (lower monotonic incarnation) is re-accepted. Every full-set
+  guard is reset from ONE list, `fullSetGuardsLocked` (#9634). The IPsec and
+  DHCP resets used to be written out one by one, and #8121's
+  `persistentNatLeaseRecvSeq` never got one, so a rebooted peer's persistent-NAT
+  lease sets were dropped as stale until its epoch passed the old one. A
+  reflection cell now enumerates every `fullSetSeqGuard` field and requires it
+  to be reset. A legacy peer
   sends no trailer → `(0,0)` → accept-always (mixed-version compat). See
   `docs/sync-protocol.md` "Full-set state-sync ordering (#5706)".
 - **Re-initiate on takeover** — `reinitiateIPsecSAs` reads `PeerIPsecSAs()`,

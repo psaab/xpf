@@ -1372,8 +1372,10 @@ type SessionSync struct {
 	// incarnation (the construction seed, constant for the process lifetime;
 	// see initGenState) and the per-type counters give a strictly-monotonic
 	// sequence PER stream. The receiver tracks the last-applied (incarnation,
-	// seq) per stream (ipsecRecvSeq / dhcpV4RecvSeq / dhcpV6RecvSeq, guarded by
-	// recvSeqMu because both receiveLoops touch them) and admits only a
+	// seq) per stream (ipsecRecvSeq / dhcpV4RecvSeq / dhcpV6RecvSeq /
+	// persistentNatLeaseRecvSeq, guarded by recvSeqMu because both receiveLoops
+	// touch them; resetRecvGen resets every one of them through
+	// fullSetGuardsLocked, #9634) and admits only a
 	// strictly-newer pair (fullSetSeqGuard.admit); a stale reorder is dropped
 	// and counted. A legacy peer sends no trailer -> (0,0) -> accept-always
 	// (mixed-version compat). The receiver guards are reset on a peer bulk
