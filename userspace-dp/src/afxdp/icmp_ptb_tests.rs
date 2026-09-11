@@ -4,7 +4,7 @@
 //     with the correct next-hop MTU and the quoted original packet,
 //   - oversized forwarded IPv6 -> Packet Too Big (type 2 code 0) with MTU,
 //   - in-MTU frames -> Forward (no PTB),
-//   - non-DF oversized IPv4 -> Forward (pre-#2301 behaviour preserved),
+//   - non-DF oversized IPv4 -> ForwardOversizeNoDf (forwarded, no PTB; #9328),
 //   - RFC suppression: non-first fragment + inbound ICMP error -> no PTB.
 
 use super::*;
@@ -236,8 +236,8 @@ fn in_mtu_v6_forwards_unchanged() {
 
 #[test]
 fn oversized_v4_without_df_forwards() {
-    // Oversized but DF clear: the downstream may fragment. Preserve the
-    // pre-#2301 forward behaviour rather than PTB-storming the flow.
+    // Oversized but DF clear: no PTB, because the sender did not set DF (the
+    // #2301 decision). What then happens to it is `ForwardOversizeNoDf`.
     //
     // #9328 SPLIT WHAT THIS CELL WAS ASSERTING. The claim above is unchanged
     // and still holds: the frame is FORWARDED and no PTB is emitted, because
@@ -246,10 +246,13 @@ fn oversized_v4_without_df_forwards() {
     // outcome is INDISTINGUISHABLE from a frame that fits — both were the same
     // `Forward` value, so the dispatcher booked an oversize submission as
     // `enqueue_ok` + `tx_bytes_total` with no exception, and an operator
-    // debugging the downstream blackhole saw a healthy counter.
+    // investigating a downstream loss saw a healthy counter.
     //
     // That half was not a decision anyone took; it was the absence of a
     // distinction. The variant is now separate, the behaviour is not.
+    //
+    // #9395 then DECIDED the behaviour: "still FORWARD" is the chosen policy,
+    // not a placeholder (see `ForwardOversizeNoDf`).
     let (frame, meta) = inbound_v4_udp(1500, false);
     let l3 = meta.l3_offset as usize;
     let decision = forwarded_egress_mtu_decision(&frame, l3, meta.addr_family, 1400);
@@ -258,13 +261,13 @@ fn oversized_v4_without_df_forwards() {
         EgressMtuDecision::ForwardOversizeNoDf,
         "non-DF oversized IPv4 must still FORWARD (no PTB — the sender did not \
          set DF and would not act on one), but it must be distinguishable from \
-         a frame that fits so the dispatcher can count it"
+         a frame that fits so the dispatcher can record it"
     );
     assert_ne!(
         decision,
         EgressMtuDecision::EmitPacketTooBig { next_hop_mtu: 1400 },
         "PTB-storming a DF-clear flow is the regression #2301's Forward branch \
-         exists to avoid; #9328 adds a counter, not a PTB"
+         exists to avoid; #9328 adds an exception record, not a PTB"
     );
 
     // CONTROL: a frame that FITS is still the plain `Forward`, or the new

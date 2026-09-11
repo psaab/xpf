@@ -115,7 +115,7 @@ CoS guarantee-guard.
   `(ptb_reply, mtu_signalled)`; the caller drops the oversized original
   when `mtu_signalled` and enqueues `ptb_reply` at the finalizer.
 
-  **The DF-CLEAR IPv4 oversize case is FORWARDED and now COUNTED (#9328).**
+  **The DF-CLEAR IPv4 oversize case is FORWARDED and now RECORDED (#9328).**
   There is no IPv4 transit fragmenter in this dataplane. Verified by a
   positive-controlled grep for MF/offset WRITERS: it finds the three in
   `nat64.rs` (which copy MF and offset verbatim from an existing IPv6
@@ -124,14 +124,14 @@ CoS guarantee-guard.
   an MTU. The only length guard on the forward path is
   `copy_frame_is_oversized`, which tests the UMEM chunk (4096), not the
   egress MTU. So an oversized DF-clear datagram is submitted at full
-  length and the NIC, switch or next hop drops it.
+  length; what happens to it next is stated on `ForwardOversizeNoDf`.
 
   Before #9328 that outcome was the SAME `EgressMtuDecision::Forward`
   value as a frame that fits, so it was booked as `enqueue_ok`,
   `enqueue_copy`, `pending_copy_tx_packets` and `tx_bytes_total` with no
-  exception at all — an operator debugging the blackhole saw a healthy
-  counter, a wrong diagnostic rather than a missing one. The asymmetry
-  was with the TCP arm of the identical outcome, which has recorded
+  exception at all — an operator debugging a loss saw a healthy counter,
+  a wrong diagnostic rather than a missing one. The asymmetry was with the
+  TCP arm of an oversized forward, which has recorded
   `tcp_segmentation_miss` since #1282.
 
   `EgressMtuDecision::ForwardOversizeNoDf` now distinguishes it and the
@@ -139,10 +139,7 @@ CoS guarantee-guard.
   unchanged** — the frame still forwards, and no PTB is sent, because ICMP
   Fragmentation-Needed is meaningful only to a sender that set DF.
 
-  The POLICY is deliberately not decided here: fragmenting per RFC 791,
-  dropping-and-counting, or continuing to forward are all open, and the
-  wire-level fate of the oversize submission is unmeasured — changing
-  behaviour on that unknown could break a path that works today. The
-  counter is what makes the decision answerable. Note every
-  already-fragmented IPv4 datagram is DF-clear by construction, so
-  forwarded non-first fragments are entirely inside this population.
+  **The POLICY is decided: keep forwarding, and record the exception (#9395).**
+  The decision,
+  the plain-forward measurement it rests on, and what it does not cover are
+  stated once, on `EgressMtuDecision::ForwardOversizeNoDf` in `icmp_ptb.rs`.

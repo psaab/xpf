@@ -268,7 +268,7 @@ fn forwarded_tcp_may_need_segmentation_uses_declared_len_not_backing() {
 /// #5159 RED-on-revert: the admission gate must use the ACTUAL egress MTU. A
 /// valid IPv4 egress MTU of 900 (below the wrongly-applied 1280 IPv6-link-MTU
 /// floor) with a declared 1100-byte datagram (in the (real_mtu, 1280]
-/// blackhole band) MUST be flagged for segmentation. Restoring the `.max(1280)`
+/// oversize band) MUST be flagged for segmentation. Restoring the `.max(1280)`
 /// floor raises the MTU to 1280, so 1100 <= 1280 and the gate returns false —
 /// the datagram is submitted OVERSIZE to AF_XDP TX. RED.
 #[test]
@@ -333,7 +333,7 @@ fn forwarded_tcp_may_need_segmentation_unknown_egress_mtu_does_not_flag_5159() {
 fn segment_forwarded_tcp_frames_into_prepared_honors_sub_1280_ipv4_egress_mtu_5159() {
     let egress_mtu = 900usize;
     // 20 (IP) + 20 (TCP, no options) + 1060 payload = 1100-byte L3 datagram,
-    // in the (real_mtu, 1280] blackhole band.
+    // in the (real_mtu, 1280] oversize band.
     let tcp_payload_len = 1060usize;
     let total_len = (20 + 20 + tcp_payload_len) as u16;
     let src_port = 47308u16;
@@ -510,7 +510,7 @@ fn forwarded_tcp_may_need_segmentation_rejects_ipv6_fragment_header() {
 fn prepared_tx_segments_a_fin_bearing_oversized_frame_9116() {
     let egress_mtu = 900usize;
     // 20 (IP) + 20 (TCP, no options) + 1060 payload = 1100-byte L3 datagram,
-    // in the (real_mtu, 1280] blackhole band.
+    // in the (real_mtu, 1280] oversize band.
     let tcp_payload_len = 1060usize;
     let total_len = (20 + 20 + tcp_payload_len) as u16;
     let src_port = 47308u16;
