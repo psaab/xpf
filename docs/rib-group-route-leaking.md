@@ -43,6 +43,59 @@ existing `rule.Dst != nil` + table→instance loop auto-captures each as a
 `NextTable` leak into the main table (`pkg/dataplane/userspace/routes.go`) —
 putting the leak into the **userspace FIB** as well as the kernel FIB.
 
+### A VRF lookup that misses ends there; a source's return path is main (#9819)
+
+The kernel's `l3mdev` rule at priority 1000 is a **lookup** rule. A lookup in
+VRF context that missed its own table used to continue down the rule list,
+first into this band and then into `main`. Measured in a private network
+namespace, and pinned by `TestVRFMissTerminatorOnRealKernel9819`:
+
+| Lookup | Before #9819 | After |
+|---|---|---|
+| A miss on a VRF slave, or from a VRF-bound socket | resolved by `main` | `Network is unreachable` |
+| A VRF lookup for a prefix another instance leaked | resolved in that source's table | `Network is unreachable` |
+| `main` to a leaked prefix | the source's table | the source's table |
+| The return lookup from the leak source | `main`, by falling through | `main`, by a rule |
+| A VRF's own connected, static or default route | resolves | resolves |
+
+Two rule sets produce the right-hand column:
+
+- **The miss terminator**, `ip rule add pref 2000 l3mdev unreachable`, once per
+  family. `vrfManager.Reconcile` installs it before creating any VRF device. It
+  uses the kernel rule's own `l3mdev` selector, so it matches exactly the
+  lookups that consulted a VRF table and missed. It is the rule form of the
+  per-VRF `unreachable default` route the kernel's VRF documentation
+  recommends. A rule was chosen over a route because a route would sit in each
+  VRF table, which FRR's zebra, systemd-networkd and the FBF harness all
+  enumerate.
+- **Return rules for a leak source**, `ip rule add pref 1500 iif|oif
+  vrf-<instance> lookup main`, in each family whose leak installs. A source's
+  table has no route to the hosts that use its leaked prefixes, because `main`
+  is what reaches them. With the terminator alone, `main`'s lookup of a leaked
+  address failed its reverse-path check (`EINVAL`), and the return lookup was
+  unreachable.
+
+The return rules are a **named reliance**: *a rib-group source's misses resolve
+in `main`.* The fall-through already did that before #9819. It is now narrower,
+because `lookup main` is a table action: a lookup that also misses `main` meets
+the terminator, never this band or another instance's table. A source with its
+own covering route, such as its own default, never consults them.
+
+What an operator can observe:
+
+- **A management-VRF miss is unreachable.** Management traffic to a destination
+  that table 999 (`vrf-mgmt`) does not cover used to leave through `main`, that
+  is, through the data plane. That happens when there is no default route in the
+  management table, a DHCP lease carries no router, or a lease is lost. That
+  traffic now fails.
+- **A VRF-bound daemon loses a peer it could reach only through `main`.** This
+  covers FRR peering, DHCP relay, syslog, RPM probes and IPsec. Route the peer
+  inside the instance.
+- Priorities 1000-2000 are reserved for VRF-context rules that must run after
+  the VRF's table and before the terminator. Their order relative to the
+  kernel's rule and to this band is checked at compile time
+  (`pkg/routing/rib_group_return_9819.go`).
+
 ## Why the pre-#3876 behavior was a no-op
 
 The old applier installed a single blanket rule per leaking source table:
@@ -256,12 +309,17 @@ Three consequences an operator can observe:
    VRF-bound daemon (FRR peering, DHCP relay, syslog, RPM probes, IPsec). This
    is a deliberate narrowing, recorded here rather than left to be rediscovered.
 
-The **AF_XDP fast path was never exposed**: the userspace FIB follows a
-`next_table` leak only when the route is found in the ingress instance's own
-table (`userspace-dp/src/afxdp/forwarding/fib.rs`), so it is instance-scoped by
-construction. The exposure was the Linux path — host-originated traffic,
-slow-path `XDP_PASS` packets, local delivery, and any interface without native
-XDP where `redirect_capable` falls back to kernel forwarding.
+The **AF_XDP fast path is instance-scoped only for PBR-steered traffic.** The
+userspace FIB follows a `next_table` route found in whichever table a lookup
+runs in (`userspace-dp/src/afxdp/forwarding/fib.rs`). A transit lookup runs in
+a per-instance table only when a PBR interface filter steers it there. Without
+PBR it runs in the global `inet.0`/`inet6.0`, whatever instance the ingress
+interface belongs to, so the fast path does no per-instance destination-FIB
+selection at all (`userspace-dp/src/afxdp/forwarding/README.md`, "PBR `then
+routing-instance` is the ONLY per-VRF forwarding path"). The exposure #9420
+closed was on the Linux path: host-originated traffic, slow-path `XDP_PASS`
+packets, local delivery, and any interface without native XDP where
+`redirect_capable` falls back to kernel forwarding.
 
 ### Strict rejection — undefined `next-table` target (#5693)
 
