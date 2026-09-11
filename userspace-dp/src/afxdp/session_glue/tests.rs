@@ -9593,7 +9593,7 @@ fn only_a_refused_delete_moves_the_worker_epoch_8586() {
 // Ignored by default (it is a measurement, not an assertion); run with
 //   cargo test --release --bin xpf-userspace-dp reconcile_cost_9327 -- --ignored --nocapture
 #[test]
-#[ignore]
+#[ignore = "MEASUREMENT: #9327 reconcile sweep cost; prints numbers, asserts nothing (run with --release --ignored --nocapture)"]
 fn reconcile_cost_9327() {
     use std::time::Instant;
     eprintln!("size_of::<SessionKey>() = {}", std::mem::size_of::<SessionKey>());

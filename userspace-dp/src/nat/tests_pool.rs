@@ -11268,7 +11268,7 @@ fn releasing_the_reusing_worker_first_must_not_free_9145() {
 // Ignored by default (a measurement, not an assertion):
 //   cargo test --bin xpf-userspace-dp recycle_amortization_9327 -- --ignored --nocapture
 #[test]
-#[ignore]
+#[ignore = "MEASUREMENT: #9327 recycle amortization cost; prints numbers, asserts nothing (run with --ignored --nocapture)"]
 fn recycle_amortization_9327() {
     for (k, f) in [(15usize, 1usize), (12, 4)] {
         let pool_ip: Ipv4Addr = "203.0.113.1".parse().unwrap();
