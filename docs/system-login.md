@@ -360,6 +360,12 @@ maps the Junos `permissions` token set onto xpf's coarse permission model at
 compile (`LoginClass.MappedPermissions`, consulted at runtime by
 `resolveClassPerms`).
 
+The `permissions` tokens are validated at commit (#9490) against the Junos
+login-class permission flag set, plus xpf's `super-user` alias. A misspelled
+flag used to commit and silently fold to view-only, so the class was not the
+one written. A config persisted before the gate still loads, because the
+tolerant path does not run the schema validators.
+
 Because xpf's runtime RBAC is **coarse** (view/clear/control/config/maintenance/
 all) it cannot faithfully represent every fine-grained Junos permission or the
 per-command allow/deny regexes. The **permission mapping** is therefore

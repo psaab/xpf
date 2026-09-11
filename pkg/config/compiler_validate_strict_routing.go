@@ -1484,7 +1484,7 @@ func validatePolicyCommunityRegexStrict(cfg *Config) error {
 		for _, member := range cd.Members {
 			if err := ValidCommunityMember(member); err != nil {
 				return fmt.Errorf("policy-options community %s members %q: %v — xpf "+
-					"renders `bgp community-list expanded %s permit %s`, which "+
+					"renders `bgp community-list <standard|expanded> %s permit %s`, which "+
 					"frr-reload rejects, failing the entire FRR config load; "+
 					"write the member as a QUOTED value if it is meant as a "+
 					"literal, e.g. `set policy-options community %s members "+

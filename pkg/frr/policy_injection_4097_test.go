@@ -59,9 +59,15 @@ func TestGeneratePolicyOptions_InjectionSanitized_4097(t *testing.T) {
 	if !strings.Contains(got, wantASPathEvil) {
 		t.Errorf("as-path regex not sanitized onto one line; want %q in:\n%s", wantASPathEvil, got)
 	}
-	wantCommEvil := "bgp community-list standard evilc permit 65000:100  router bgp 65000\n"
-	if !strings.Contains(got, wantCommEvil) {
-		t.Errorf("community member not sanitized onto one line; want %q in:\n%s", wantCommEvil, got)
+	// #9490: a community member that is not an FRR community literal now OMITS
+	// its definition at render, through the shared ValidCommunityMember
+	// predicate, instead of collapsing onto one line. The collapsed line
+	// `... permit 65000:100  router bgp 65000` was itself rejected by FRR's
+	// community parser (`router` is no community), failing the whole reload.
+	// Omission is strictly stronger, and the no-injected-line assertion above
+	// still holds.
+	if strings.Contains(got, "community-list standard evilc") || strings.Contains(got, "community-list expanded evilc") {
+		t.Errorf("an injected community member must omit its definition, got:\n%s", got)
 	}
 
 	// The normal values render unchanged — a legitimate space is preserved.
