@@ -2,6 +2,8 @@ package cluster
 
 import (
 	"encoding/binary"
+	"io"
+	"net"
 	"testing"
 
 	"github.com/psaab/xpf/pkg/dataplane"
@@ -15,13 +17,24 @@ var (
 	incB9618 = bootIncarnation{0xb0, 0xb1}
 )
 
+// drainedPipe9618 is a net.Pipe whose far end is read and discarded, so frames
+// the SessionSync writes (a BulkAck, a capabilities exchange) never block on a
+// peer that does not read.
+func drainedPipe9618(t *testing.T) net.Conn {
+	t.Helper()
+	local, peer := net.Pipe()
+	go func() { _, _ = io.Copy(io.Discard, peer) }()
+	t.Cleanup(func() { local.Close(); peer.Close() })
+	return local
+}
+
 // primedPair9618 is an established, primed and acked HA pair on fabric 0.
 func primedPair9618(t *testing.T) *SessionSync {
 	t.Helper()
 	ss := newAckTestSync(t)
 	src := &epochSource{epoch: 100, latched: true}
 	ss.PeerBootEpochFn = src.fn
-	c0 := pipeConn(t)
+	c0 := drainedPipe9618(t)
 	ss.installConn(0, c0)
 	ss.handleMessage(c0, syncMsgBulkStart, bulkStartPayload(1, &incA9618))
 	ss.handleMessage(c0, syncMsgBulkEnd, bulkStartPayload(1, &incA9618))
@@ -36,7 +49,7 @@ func TestBootIDRebootArmsColdPrime_9618(t *testing.T) {
 
 	// The replacement dials the EMPTY alternate slot before any heartbeat
 	// raised the epoch, so installConn has nothing to classify on.
-	c1 := pipeConn(t)
+	c1 := drainedPipe9618(t)
 	d := ss.installConn(1, c1)
 	if ss.needColdPrime.Load() || d.shouldColdPrime {
 		t.Fatalf("attribution: the empty-slot install already armed the cold prime "+
@@ -74,7 +87,7 @@ func TestBootIDRebootArmsColdPrime_9618(t *testing.T) {
 // exactly the reboot this issue is about.
 func TestBootIDRebootArmsAfterTheCorpseAlreadyLeft_9618(t *testing.T) {
 	ss := primedPair9618(t)
-	c1 := pipeConn(t)
+	c1 := drainedPipe9618(t)
 	ss.installConn(1, c1)
 	if ss.needColdPrime.Load() {
 		t.Fatalf("attribution: the empty-slot install armed the cold prime")
@@ -101,7 +114,7 @@ func TestBootIDRebootArmsAfterTheCorpseAlreadyLeft_9618(t *testing.T) {
 // (#6910's distinction). It must not arm.
 func TestFirstIncarnatedPrimeDoesNotArmColdPrime_9618(t *testing.T) {
 	ss := newAckTestSync(t)
-	c0 := pipeConn(t)
+	c0 := drainedPipe9618(t)
 	ss.installConn(0, c0)
 	ss.needColdPrime.Store(false)
 	incBefore := ss.peerIncarnation
@@ -119,7 +132,7 @@ func TestFirstIncarnatedPrimeDoesNotArmColdPrime_9618(t *testing.T) {
 // it is routine, not a reboot. It must not arm, and must not evict fabric 0.
 func TestSameBootSecondFabricBulkStartDoesNotArmColdPrime_9618(t *testing.T) {
 	ss := primedPair9618(t)
-	c1 := pipeConn(t)
+	c1 := drainedPipe9618(t)
 	ss.installConn(1, c1)
 	ss.handleMessage(c1, syncMsgBulkStart, bulkStartPayload(2, &incA9618))
 	ss.mu.Lock()

@@ -4067,7 +4067,7 @@ outside the monitor loop:
   reboot. The first incarnated prime (zero -> X) never reaches the switch
   (`priorInc.known()`), and a same-boot BulkStart on the peer's second fabric is
   not a switch, so neither arms. When both signals observe one reboot the cost
-  is one redundant, idempotent bulk.
+  is at most one redundant, idempotent bulk.
 
   **What this does not close.** The two classifiers are still not reconciled
   (#9636): a boot-id-first reboot gets no `OnPeerConnected` dispatch (DHCP-lease
