@@ -145,8 +145,11 @@ func TestGeneratePolicyOptions_SetClauseAndPrefixListSanitized_4482(t *testing.T
 		{"set community (replace)", " set community 65000:1  neighbor 6.6.6.6 remote-as 65000\n"},
 		{"set as-path prepend", " set as-path prepend 65001  router bgp 65000 65001\n"},
 		{"match source-protocol", " match source-protocol bgp  router bgp 65000\n"},
-		{"match community", " match community cm1  neighbor 7.7.7.7 remote-as 65000\n"},
-		{"match as-path", " match as-path ap1  router bgp 65000\n"},
+		// #9493: the three NAME slots (match community, match as-path, set
+		// comm-list) render through frrName, not sanitizeFRRValue, and are
+		// asserted below. Collapsing a name onto one line still split it into
+		// extra FRR arguments, so FRR rejected the line; frrName renders it as
+		// one token.
 		{"set ip next-hop", " set ip next-hop 1.2.3.4  router bgp 65000\n"},
 		// NOTE: `set origin` moved OUT of this sanitize-onto-one-line list by
 		// #4919. The origin slot is now fail-closed by the validBGPOrigin
@@ -156,12 +159,20 @@ func TestGeneratePolicyOptions_SetClauseAndPrefixListSanitized_4482(t *testing.T
 		// separately below. (Parity with the route-filter CIDR fail-closed belt
 		// already documented in this test.)
 		{"set community additive", " set community 65000:2  neighbor 8.8.8.8 remote-as 65000 additive\n"},
-		{"set comm-list delete", " set comm-list clist1  neighbor 9.9.9.9 remote-as 65000 delete\n"},
 		{"set ipv6 next-hop", " set ipv6 next-hop global 2001:db8::1  router bgp 65000\n"},
 	}
 	for _, tc := range wantOnOneLine {
 		if !strings.Contains(got, tc.want) {
 			t.Errorf("%s not sanitized onto one line (want %q), got:\n%s", tc.slot, tc.want, got)
+		}
+	}
+	for _, tc := range []struct{ slot, want string }{
+		{"match community", " match community " + frrName("cm1\n neighbor 7.7.7.7 remote-as 65000") + "\n"},
+		{"match as-path", " match as-path " + frrName("ap1\n router bgp 65000") + "\n"},
+		{"set comm-list delete", " set comm-list " + frrName("clist1\n neighbor 9.9.9.9 remote-as 65000") + " delete\n"},
+	} {
+		if !strings.Contains(got, tc.want) {
+			t.Errorf("%s did not render as one token (want %q), got:\n%s", tc.slot, tc.want, got)
 		}
 	}
 

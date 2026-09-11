@@ -192,7 +192,7 @@ func (m *Manager) resolveRedistribute(export string, po *config.PolicyOptionsCon
 					// closes is a newline or NUL splitting one statement into
 					// two.
 					fmt.Fprintf(&sb, " redistribute %s route-map %s\n",
-						sanitizeFRRValue(proto), sanitizeFRRValue(rmName))
+						sanitizeFRRValue(proto), frrName(rmName))
 				}
 				return sb.String()
 			}

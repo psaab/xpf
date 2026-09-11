@@ -173,9 +173,9 @@ func renderRouteFilterEntry(b *strings.Builder, plName string, idx int, rf *conf
 		return false
 	}
 	if isV6 {
-		fmt.Fprintf(b, "ipv6 prefix-list %s seq %d permit %s", plName, (idx+1)*5, sanitizeFRRValue(rf.Prefix))
+		fmt.Fprintf(b, "ipv6 prefix-list %s seq %d permit %s", frrName(plName), (idx+1)*5, sanitizeFRRValue(rf.Prefix))
 	} else {
-		fmt.Fprintf(b, "ip prefix-list %s seq %d permit %s", plName, (idx+1)*5, sanitizeFRRValue(rf.Prefix))
+		fmt.Fprintf(b, "ip prefix-list %s seq %d permit %s", frrName(plName), (idx+1)*5, sanitizeFRRValue(rf.Prefix))
 	}
 	if matchStr != "" {
 		fmt.Fprintf(b, " %s", matchStr)

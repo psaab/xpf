@@ -212,6 +212,45 @@ as the literal operand `all`). Advisory rather than gate, per #1960: the
 tolerant load / HA config-sync paths must still accept a config the strict
 interface set does not explain.
 
+### Six operand classes have a commit validator AND a render belt (#9493)
+
+These operands reached the managed section with neither a commit-time
+validator nor a render belt:
+- BGP `local-address` (`update-source`);
+- the OSPF `virtual-link` neighbor and transit area;
+- IS-IS `net`;
+- OSPF/OSPFv3 `cost`;
+- BGP `multihop`;
+- object NAMES: policy-statement, term, prefix-list, community and as-path.
+
+A malformed value committed GREEN, and FRR rejected the rendered line, which
+fails the whole managed reload.
+
+The commit gate is one schema validator per leaf
+(`pkg/config/schema_validators_frr_operand_9493.go`). SchemaValidate runs on
+commit and commit-check only, so a persisted value still boots (#1960). A
+schema `validator:` runs only on a TYPED leaf, which is why the string leaves
+carry a `valueType`.
+
+The render belts cover the path the gate cannot reach:
+
+- **Omit with a warning:** a malformed `update-source`, `virtual-link` or `net`.
+- **Clamp:** `cost` to 65535 and `multihop` to 255. Omitting them would fall
+  back to FRR's defaults and pull traffic onto the link or drop a multihop
+  session.
+- **Alias:** every route-map / prefix-list / community-list / as-path name goes
+  through `frrName`. A safe name comes back unchanged, so renders stay
+  byte-identical. An unsafe one renders under a deterministic single-token
+  alias: the `sanitizeFRRIdent` fragment plus a hash of the full name, which
+  keeps `a b` and `a_b` apart. Names are aliased rather than omitted because
+  omitting `neighbor X route-map NAME out` REMOVES the outbound filter.
+  Access-list names are already hashed and sanitized by `routeFilterACLName`.
+
+`TestEveryRenderedObjectNameIsOneTokenAndResolves9493` is a behavioural census,
+not a list of sites. It renders a config whose every name carries a space and
+checks every reference against the definitions. A missed definition or
+reference site therefore shows up as a raw name or a dangling reference.
+
 ### BGP neighbor identity is a single FRR token (#6796)
 
 `n.Address` is rendered RAW at 24 sites in `protocols_render.go` — unlike every

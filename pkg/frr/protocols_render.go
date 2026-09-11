@@ -95,6 +95,14 @@ func (m *Manager) generateProtocols(ospf *config.OSPFConfig, ospfv3 *config.OSPF
 				}
 			}
 			for _, vl := range area.VirtualLinks {
+				// #9493: both operands are raw config strings. Omit a link the
+				// commit gate would refuse rather than emit a line FRR rejects.
+				if !validRouterID(vl.NeighborID) || config.ValidateOSPFArea(vl.TransitArea, nil) != nil ||
+					!frrOperandOrOmit("ospf virtual-link transit-area", vl.TransitArea) {
+					slog.Warn("frr: omitting an OSPF virtual-link with a malformed neighbor or transit area (#9493)",
+						"neighbor", sanitizeFRRValue(vl.NeighborID), "transit_area", sanitizeFRRValue(vl.TransitArea))
+					continue
+				}
 				fmt.Fprintf(&b, " area %s virtual-link %s\n", vl.TransitArea, vl.NeighborID)
 			}
 		}
@@ -115,7 +123,7 @@ func (m *Manager) generateProtocols(ospf *config.OSPFConfig, ospfv3 *config.OSPF
 			for _, iface := range area.Interfaces {
 				fmt.Fprintf(&b, "interface %s\n", iface.Name)
 				if iface.Cost > 0 {
-					fmt.Fprintf(&b, " ip ospf cost %d\n", iface.Cost)
+					fmt.Fprintf(&b, " ip ospf cost %d\n", frrClampInt("ospf cost", iface.Cost, 65535))
 				}
 				// Adjacency timers + DR priority (#4285). hello/dead MUST
 				// match the neighbor or the adjacency never forms; FRR keeps
@@ -207,7 +215,7 @@ func (m *Manager) generateProtocols(ospf *config.OSPFConfig, ospfv3 *config.OSPF
 						b.WriteString(" ipv6 ospf6 passive\n")
 					}
 					if iface.Cost > 0 {
-						fmt.Fprintf(&b, " ipv6 ospf6 cost %d\n", iface.Cost)
+						fmt.Fprintf(&b, " ipv6 ospf6 cost %d\n", frrClampInt("ospf3 cost", iface.Cost, 65535))
 					}
 					// Adjacency timers + DR priority (#4285): hello/dead must
 					// match the neighbor. HasPriority gates the priority line;
@@ -333,7 +341,8 @@ func (m *Manager) generateProtocols(ospf *config.OSPFConfig, ospfv3 *config.OSPF
 			// session sourced from the loopback the peer has a `neighbor`
 			// statement for, not the egress interface IP — otherwise the peer
 			// rejects the connection and the session never establishes.
-			if n.LocalAddress != "" {
+			// #9493: a spaced value survived sanitizeFRRValue and split the line.
+			if n.LocalAddress != "" && frrOperandOrOmit("bgp update-source", n.LocalAddress) {
 				fmt.Fprintf(&b, " neighbor %s update-source %s\n", n.Address, sanitizeFRRValue(n.LocalAddress))
 			}
 			// passive (#4286): do not initiate — wait for the peer to connect.
@@ -354,7 +363,7 @@ func (m *Manager) generateProtocols(ospf *config.OSPFConfig, ospfv3 *config.OSPF
 				fmt.Fprintf(&b, " neighbor %s description %s\n", n.Address, sanitizeFRRValue(n.Description))
 			}
 			if n.MultihopTTL > 0 {
-				fmt.Fprintf(&b, " neighbor %s ebgp-multihop %d\n", n.Address, n.MultihopTTL)
+				fmt.Fprintf(&b, " neighbor %s ebgp-multihop %d\n", n.Address, frrClampInt("bgp ebgp-multihop", n.MultihopTTL, 255))
 			}
 			if n.AuthPassword != "" {
 				if tok, ok := authTokenOrOmit("bgp", n.AuthPassword.Reveal()); ok {
@@ -553,7 +562,7 @@ func (m *Manager) generateProtocols(ospf *config.OSPFConfig, ospfv3 *config.OSPF
 				// Junos policy chain (#5277) instead of dropping all but the
 				// last.
 				if rm := bgpNeighborExportRef(n, bgp, globalExportChain, policyOptions); rm != "" {
-					fmt.Fprintf(&b, "  neighbor %s route-map %s out\n", n.Address, rm)
+					fmt.Fprintf(&b, "  neighbor %s route-map %s out\n", n.Address, frrName(rm))
 				}
 				// Junos `then next-hop self` is lowered per-term INSIDE the
 				// export route-map as `set ip/ipv6 next-hop peer-address`
@@ -572,7 +581,7 @@ func (m *Manager) generateProtocols(ospf *config.OSPFConfig, ospfv3 *config.OSPF
 				// route-map, and a chain of >= 2 references the composed
 				// route-map preserving the ordered inbound policy chain.
 				if rm := bgpNeighborImportRef(n, bgp, globalImportChain, policyOptions); rm != "" {
-					fmt.Fprintf(&b, "  neighbor %s route-map %s in\n", n.Address, rm)
+					fmt.Fprintf(&b, "  neighbor %s route-map %s in\n", n.Address, frrName(rm))
 				}
 			}
 			b.WriteString(" exit-address-family\n")
@@ -596,7 +605,7 @@ func (m *Manager) generateProtocols(ospf *config.OSPFConfig, ospfv3 *config.OSPF
 				}
 				// Outbound filter (#2539/#5277) — see the ipv4 block above.
 				if rm := bgpNeighborExportRef(n, bgp, globalExportChain, policyOptions); rm != "" {
-					fmt.Fprintf(&b, "  neighbor %s route-map %s out\n", n.Address, rm)
+					fmt.Fprintf(&b, "  neighbor %s route-map %s out\n", n.Address, frrName(rm))
 				}
 				// `then next-hop self` is lowered per-term in the export
 				// route-map as `set ip/ipv6 next-hop peer-address`, NOT a
@@ -604,7 +613,7 @@ func (m *Manager) generateProtocols(ospf *config.OSPFConfig, ospfv3 *config.OSPF
 				// block above.
 				// Inbound filter (#2490/#5277) — see the ipv4 block above.
 				if rm := bgpNeighborImportRef(n, bgp, globalImportChain, policyOptions); rm != "" {
-					fmt.Fprintf(&b, "  neighbor %s route-map %s in\n", n.Address, rm)
+					fmt.Fprintf(&b, "  neighbor %s route-map %s in\n", n.Address, frrName(rm))
 				}
 			}
 			b.WriteString(" exit-address-family\n")
@@ -665,8 +674,13 @@ func (m *Manager) generateProtocols(ospf *config.OSPFConfig, ospfv3 *config.OSPF
 
 	if isis != nil {
 		fmt.Fprintf(&b, "router isis xpf%s\n", vrfSuffix)
+		// #9493: the NET was rendered verbatim, spaces and all.
 		if isis.NET != "" {
-			fmt.Fprintf(&b, " net %s\n", isis.NET)
+			if config.ValidISISNET(isis.NET) {
+				fmt.Fprintf(&b, " net %s\n", isis.NET)
+			} else {
+				slog.Warn("frr: omitting a malformed IS-IS NET (#9493)", "net", sanitizeFRRValue(isis.NET))
+			}
 		}
 		// #8446: canonicalize through the SHARED predicate the commit gate
 		// uses (config.CanonicalISISLevel) rather than switching on the raw
