@@ -677,8 +677,11 @@ validated against:
   statement means written on one line inside braces, so `vrf-target export
   target:65000:1` stays one statement.
 - An apply statement (`apply-groups`, `apply-groups-except`, `apply-macro`)
-  ends the statement before it and is a statement of its own, so group
-  expansion sees it as it does inside braces.
+  ends the value statement before it and is a statement of its own, so group
+  expansion sees it as it does inside braces. `apply-macro` also owns the rest of
+  the run and its braced body, which are its arguments. Inside a container's or
+  an undeclared keyword's run, an apply keyword stays in that run, as on the
+  one-line braced spelling.
 - Quotes and brackets never move a boundary. `show configuration`, HA sync,
   `load merge` and rollback files render the tree without them, so a split
   that read them would give a peer different VRF membership. Whether an

@@ -34,10 +34,14 @@ package config
 //     commit, and a split after the declared value refused `target:65000:1` as
 //     an undeclared keyword.
 //   - An apply statement (apply-groups, apply-groups-except, apply-macro) ends
-//     the statement before it and is a statement of its own, so group expansion
-//     sees it as it does inside braces. Absorbed into the value before it,
-//     `ri1 instance-type vrf apply-groups MISSING;` committed where the braced
-//     spelling refuses the undefined group.
+//     the value statement before it and is a statement of its own, so group
+//     expansion sees it as it does inside braces. Absorbed into the value before
+//     it, `ri1 instance-type vrf apply-groups MISSING;` committed where the
+//     braced spelling refuses the undefined group. apply-macro also owns the
+//     rest of the run and its braced body, which are its arguments:
+//     `ri1 apply-macro M { interface ge-0/0/1.0; }` must not bind an interface.
+//     Inside a container's or an undeclared keyword's run, an apply keyword
+//     stays in that run, as it does on the one-line braced spelling.
 //   - Quotes and brackets never move a boundary. show configuration, HA sync,
 //     `load merge` and rollback files render the tree without them, so a split
 //     that read them would bind `interface [ ge-0/0/0.0 protocols ]` into the VRF
@@ -75,7 +79,9 @@ func normalizeElidedRoutingInstance9620(node *Node, instance *schemaNode) int {
 	for i := 1; i < n; {
 		kw := instance.children[node.Keys[i]]
 		apply := routingInstanceApplyMetaKeyword9323(node.Keys[i])
-		if !apply && (kw == nil || len(kw.children) > 0 || kw.wildcard != nil) {
+		// apply-macro carries its own arguments and an optional braced body, so it
+		// owns the rest of the run as a container does.
+		if node.Keys[i] == "apply-macro" || (!apply && (kw == nil || len(kw.children) > 0 || kw.wildcard != nil)) {
 			spans = append(spans, span{i, n})
 			ownsBody = true
 			break

@@ -80,6 +80,18 @@ func TestElidedRoutingInstanceMeetsTheBracedCommitGate9620(t *testing.T) {
 			},
 		},
 		{
+			name:   "apply-macro body does not bind an interface",
+			prefix: `interfaces { ge-0/0/1 { unit 0 { family inet { address 10.1.0.1/24; } } } } `,
+			elided: `ri1 instance-type virtual-router apply-macro M { interface ge-0/0/1.0; }`,
+			braced: `ri1 { instance-type virtual-router; apply-macro M { interface ge-0/0/1.0; } }`,
+			check: func(cfg *config.Config) string {
+				if len(cfg.RoutingInstances) != 1 || len(cfg.RoutingInstances[0].Interfaces) != 0 {
+					return "want no instance interfaces: the macro's argument was bound into the VRF, got " + json9620(cfg.RoutingInstances)
+				}
+				return ""
+			},
+		},
+		{
 			name:    "undeclared keyword first",
 			elided:  `ri1 bogus-kw foo instance-type virtual-router;`,
 			braced:  `ri1 { bogus-kw foo instance-type virtual-router; }`,
