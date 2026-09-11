@@ -1388,6 +1388,12 @@ type compileOpts struct {
 	// the MAC), so a leniently-loaded bad binding is inert. Same doctrine as
 	// lenientPolicyMatchAddress.
 	lenientDHCPStaticBindings bool
+	// lenientDHCPPoolSubnets (#9785) downgrades the duplicate pool-subnet gate
+	// (validateDHCPPoolSubnetsUniqueStrict) to a cfg.Warnings entry on the
+	// tolerant load / peer-sync paths, so a persisted config carrying two pools
+	// with one subnet still boots (#1960). The Kea renderer skips the later
+	// pool, so Kea still loads.
+	lenientDHCPPoolSubnets bool
 	// lenientWireguardPeers (#1434 multi-peer) downgrades the WireGuard
 	// per-peer gate (validateWireguardPeersStrict) from a hard compile
 	// error to a cfg.Warnings entry. The strict commit / commit-check
@@ -2839,6 +2845,7 @@ func lenientCompileOpts() compileOpts {
 		lenientPolicyRouteMapSeq:               true,
 		lenientRouteDispositionConflict:        true,
 		lenientDHCPStaticBindings:              true,
+		lenientDHCPPoolSubnets:                 true,
 		lenientWireguardPeers:                  true,
 		lenientTunnelOuterFamily:               true,
 		lenientIpipTunnelMode:                  true,

@@ -724,11 +724,16 @@ func TestWarnAmbiguousSubnetSelection(t *testing.T) {
 	t.Run("same subnet, one multi-interface group warns", func(t *testing.T) {
 		warned := run(t, mkCfg("10.0.1.0/24", "10.0.1.0/24",
 			[]string{"ge-0-0-0", "ge-0-0-1"}, []string{"ge-0-0-2"}))
-		if len(warned) != 1 {
-			t.Fatalf("want 1 warning, got %d: %v", len(warned), warned)
+		// #9785: an identical prefix also draws the renderer's skip warning,
+		// because Kea refuses a second subnet with the same prefix. This row
+		// is about the ambiguity warning, so it counts those and pins the skip
+		// warning separately.
+		ambiguous, skipped := splitWarnings9785(warned)
+		if len(ambiguous) != 1 || len(skipped) != 1 || len(warned) != 2 {
+			t.Fatalf("want 1 ambiguity and 1 #9785 skip warning, got %d: %v", len(warned), warned)
 		}
-		if !strings.Contains(warned[0], "ga") || !strings.Contains(warned[0], "gb") {
-			t.Errorf("warning should name both groups: %q", warned[0])
+		if !strings.Contains(ambiguous[0], "ga") || !strings.Contains(ambiguous[0], "gb") {
+			t.Errorf("warning should name both groups: %q", ambiguous[0])
 		}
 	})
 
@@ -751,8 +756,13 @@ func TestWarnAmbiguousSubnetSelection(t *testing.T) {
 	t.Run("both groups with selectors do not warn", func(t *testing.T) {
 		warned := run(t, mkCfg("10.0.1.0/24", "10.0.1.0/24",
 			[]string{"ge-0-0-0"}, []string{"ge-0-0-2"}))
-		if len(warned) != 0 {
-			t.Errorf("unexpected warning when both subnets carry selectors: %v", warned)
+		// #9785: selectors do not make an identical prefix loadable. Kea
+		// refused the second subnet with both groups on one interface, and its
+		// message names only the prefix, so the renderer skips it and says so.
+		// There is still no ambiguity warning.
+		ambiguous, skipped := splitWarnings9785(warned)
+		if len(ambiguous) != 0 || len(skipped) != 1 || len(warned) != 1 {
+			t.Errorf("want no ambiguity warning and 1 #9785 skip warning when both subnets carry selectors, got %v", warned)
 		}
 	})
 }

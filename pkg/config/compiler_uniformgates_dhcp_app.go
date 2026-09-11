@@ -31,6 +31,22 @@ func runUniformGatesDHCPApp(tree *ConfigTree, cfg *Config, opts compileOpts) err
 		}
 	}
 
+	// #9785 duplicate pool-subnet gate. Strict on commit / commit-check: two
+	// pools of one DHCP server with the same subnet render two Kea subnet
+	// entries for one prefix, Kea refuses the whole config, and the node stops
+	// serving every pool while the commit reports success. The tolerant load /
+	// peer-sync paths warn so a persisted config still boots (#1960); the Kea
+	// renderer keeps the first such pool in its stable order and skips the rest
+	// (claimPoolSubnet), so Kea still loads.
+	if err := validateDHCPPoolSubnetsUniqueStrict(cfg); err != nil {
+		if opts.lenientDHCPPoolSubnets {
+			cfg.Warnings = append(cfg.Warnings,
+				fmt.Sprintf("DHCP pool subnet (downgraded to warning on tolerant path): %v", err))
+		} else {
+			return err
+		}
+	}
+
 	// #2142 application-definition port/protocol fail-open gate. Strict on
 	// commit / commit-check (hard-reject a `set applications application` whose
 	// destination-port / source-port is malformed or whose protocol is unknown

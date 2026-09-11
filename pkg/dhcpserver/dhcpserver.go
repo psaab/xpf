@@ -1171,6 +1171,7 @@ func (m *Manager) generateKea4Config(cfg *config.DHCPServerConfig) error {
 
 	var subnets []keaSubnet4
 	usedIDs := make(map[int]bool)
+	seenSubnets := make(map[netip.Prefix]string) // #9785: claimPoolSubnet
 	// #5041/#2668/#5203: assign Kea subnet_id from a STABLE hash of the subnet
 	// CIDR, walking a DETERMINISTIC (sorted-group, sorted-pool) order. Kea binds
 	// memfile leases (kea-leases4.csv) to subnets by the subnet_id column. The
@@ -1184,6 +1185,11 @@ func (m *Manager) generateKea4Config(cfg *config.DHCPServerConfig) error {
 	// on both nodes (#5203).
 	for _, group := range stableGroups(cfg.DHCPLocalServer.Groups) {
 		for _, pool := range stablePools(group.Pools) {
+			if kept, dup := claimPoolSubnet(seenSubnets, group.Name, pool); dup {
+				m.warn("skipping DHCP pool whose subnet duplicates one already rendered (Kea refuses a second subnet with the same prefix)",
+					"group", group.Name, "pool", pool.Name, "subnet", pool.Subnet, "kept", kept)
+				continue
+			}
 			id := resolveSubnetID(pool.Subnet, usedIDs)
 			usedIDs[id] = true
 			sub := keaSubnet4{
@@ -1307,6 +1313,7 @@ func (m *Manager) generateKea6Config(cfg *config.DHCPServerConfig) error {
 
 	var subnets []keaSubnet6
 	usedIDs := make(map[int]bool)
+	seenSubnets := make(map[netip.Prefix]string) // #9785: claimPoolSubnet
 	// #5041/#2668/#5203: same stable-hash subnet_id assignment as the v4 path.
 	// Kea binds kea-leases6.csv leases by subnet_id, so a positional counter
 	// over each node's MASTER-filtered subset gave one subnet different ids on
@@ -1316,6 +1323,11 @@ func (m *Manager) generateKea6Config(cfg *config.DHCPServerConfig) error {
 	// pair still resolves identically on both nodes (#5203).
 	for _, group := range stableGroups(cfg.DHCPv6LocalServer.Groups) {
 		for _, pool := range stablePools(group.Pools) {
+			if kept, dup := claimPoolSubnet(seenSubnets, group.Name, pool); dup {
+				m.warn("skipping DHCP pool whose subnet duplicates one already rendered (Kea refuses a second subnet with the same prefix)",
+					"group", group.Name, "pool", pool.Name, "subnet", pool.Subnet, "kept", kept)
+				continue
+			}
 			id := resolveSubnetID(pool.Subnet, usedIDs)
 			usedIDs[id] = true
 			sub := keaSubnet6{
