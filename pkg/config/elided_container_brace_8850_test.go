@@ -209,7 +209,7 @@ func TestElidedBraceLeavesPayloadsAlone8850(t *testing.T) {
 // Declining must be a NO-OP, not an early exit. The decline sits inside the
 // per-node loop whose LAST statement recurses into the node's children:
 //
-//	n += normalizeCompactNodesPass9656(node.Children, childSub, inScope, pass)
+//	n += normalizeCompactNodes(node.Children, childSub, inScope)
 //
 // so leaving the branch with `continue` skips it, and every elided container
 // inside the declined node's BODY stays unfolded. That is a change master does
@@ -266,7 +266,7 @@ func TestDeclinedFoldStillRecursesIntoBody8850(t *testing.T) {
 		t.Errorf("address-set inside a DECLINED node's braced body lost its "+
 			"members: got %v, want [a1] (#8850)\n"+
 			"The decline branch must restore the node and fall THROUGH to "+
-			"normalizeCompactNodesPass9656(node.Children, ...). Leaving with `continue` "+
+			"normalizeCompactNodes(node.Children, ...). Leaving with `continue` "+
 			"keeps the set and drops its contents, and no other cell in this "+
 			"package sees it.", set.Addresses)
 	}

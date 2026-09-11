@@ -2,192 +2,109 @@ package configstore
 
 import (
 	"encoding/json"
-	"fmt"
 	"strings"
 	"testing"
 
 	"github.com/psaab/xpf/pkg/config"
 )
 
-// #9656 (M40): a security-zone group must meet the SAME commit gate as the
-// longhand spelling, one statement per zone. Measured through CheckText at
-// e09f425dd:
+// #9656 (M40): a security-zone statement that names two or more zones without a
+// non-empty braced body is refused at strict commit, and the refusal names the
+// zones. The tolerant load path warns. Measured through CheckText at e09f425dd,
+// each of these committed and compiled only zone zga:
 //
-//	security-zone [ zga zgb ] screen edge;   committed, zga with no screen, no zgb
-//	security-zone [ zga zgb ];               committed, no zgb; a policy naming zgb was refused
-//	security-zone [ zga zgb ] { }            committed, no zgb
-//	security-zone [ zga zgb ] apply-groups G;       committed, no zgb, and zga without the group
-//	security-zone [ zga zgb ] { apply-groups G; }   committed, no zgb, and zga without the group
+//	security-zone [ zga zgb ] screen edge;
+//	security-zone [ zga zgb ];
+//	security-zone [ zga zgb ] { }
 //
-// Each cell requires the two spellings to reach the same verdict and to
-// compile identically on the lenient path. It also checks substrings that both
-// lenient compiles must carry, so a change that broke both spellings the same
-// way cannot pass.
-func TestZoneGroupMeetsTheLonghandCommitGate9656(t *testing.T) {
+// The rendered text of a refused spelling is refused too. Format drops the
+// brackets, and a cluster peer compiles that text.
+func TestZoneGroupWithoutBodyIsRefusedAtCommit9656(t *testing.T) {
 	const screens = `security { screen { ids-option edge { icmp { ping-death; } } } } `
-	const policy = `security { policies { from-zone zgb to-zone zga { policy p { match { source-address any; destination-address any; application any; } then { permit; } } } } } `
-	const groupG = `groups { G { security { zones { security-zone <*> { tcp-rst; } } } } } `
-	const tcpRstPolicy = `security { policies { from-zone tcp-rst to-zone zga { policy p { match { source-address any; destination-address any; application any; } then { permit; } } } } } `
-	const hitPolicy = `security { policies { from-zone host-inbound-traffic to-zone zga { policy p { match { source-address any; destination-address any; application any; } then { permit; } } } } } `
 	zones := func(body string) string { return `security { zones { ` + body + ` } }` }
-	cells := []struct {
-		name, group, longhand string
-		refusal               string // substring both refusals must name; "" means both must commit
-		has                   []string
-	}{
-		{
-			name:     "packed body",
-			group:    screens + zones(`security-zone [ zga zgb ] screen edge;`),
-			longhand: screens + zones(`security-zone zga { screen edge; } security-zone zgb { screen edge; }`),
-			has:      []string{`"zgb":{"Name":"zgb"`, `"ScreenProfile":"edge"`},
-		},
-		{
-			name:     "bare leaf, with a policy naming zgb",
-			group:    policy + zones(`security-zone [ zga zgb ];`),
-			longhand: policy + zones(`security-zone zga; security-zone zgb;`),
-			has:      []string{`"zgb":{"Name":"zgb"`},
-		},
-		{
-			name:     "braced empty body",
-			group:    zones(`security-zone [ zga zgb ] { }`),
-			longhand: zones(`security-zone zga { } security-zone zgb { }`),
-			has:      []string{`"zgb":{"Name":"zgb"`},
-		},
-		{
-			name:     "packed apply-groups",
-			group:    groupG + zones(`security-zone [ zga zgb ] apply-groups G;`),
-			longhand: groupG + zones(`security-zone zga { apply-groups G; } security-zone zgb { apply-groups G; }`),
-			has:      []string{`"zgb":{"Name":"zgb"`, `"TCPRst":true`},
-		},
-		{
-			name:     "braced apply-groups",
-			group:    groupG + zones(`security-zone [ zga zgb ] { apply-groups G; }`),
-			longhand: groupG + zones(`security-zone zga { apply-groups G; } security-zone zgb { apply-groups G; }`),
-			has:      []string{`"zgb":{"Name":"zgb"`, `"TCPRst":true`},
-		},
-		{
-			// CONTROL for the reading a braced body forces. At e09f425dd this
-			// committed with all three zones. The first #9656 cut read
-			// `tcp-rst` as a packed head and lost the zone, so the policy was
-			// refused.
-			name:     "braced group naming a zone after a flag keyword",
-			group:    tcpRstPolicy + zones(`security-zone [ zga zgb tcp-rst ] { tcp-rst; }`),
-			longhand: tcpRstPolicy + zones(`security-zone zga { tcp-rst; } security-zone zgb { tcp-rst; } security-zone tcp-rst { tcp-rst; }`),
-			has:      []string{`"tcp-rst":{"Name":"tcp-rst"`, `"zgb":{"Name":"zgb"`},
-		},
-		{
-			// CONTROL: a zone named after a keyword that CAN hold a body. At
-			// 304920d71 this committed with all three zones; round 2 of the
-			// #9656 review measured the second cut losing it.
-			name:     "braced group naming a zone after a body-holding keyword",
-			group:    hitPolicy + zones(`security-zone [ zga zgb host-inbound-traffic ] { tcp-rst; }`),
-			longhand: hitPolicy + zones(`security-zone zga { tcp-rst; } security-zone zgb { tcp-rst; } security-zone host-inbound-traffic { tcp-rst; }`),
-			has:      []string{`"host-inbound-traffic":{"Name":"host-inbound-traffic"`, `"zgb":{"Name":"zgb"`},
-		},
-		{
-			name:     "packed body naming an undefined screen",
-			group:    zones(`security-zone [ zga zgb ] screen missing;`),
-			longhand: zones(`security-zone zga { screen missing; } security-zone zgb { screen missing; }`),
-			refusal:  "missing",
-		},
-	}
-	for _, c := range cells {
+	for _, c := range []struct{ name, text string }{
+		{"packed tail", screens + zones(`security-zone [ zga zgb ] screen edge;`)},
+		{"bare leaf", zones(`security-zone [ zga zgb ];`)},
+		{"empty braces", zones(`security-zone [ zga zgb ] { }`)},
+	} {
 		t.Run(c.name, func(t *testing.T) {
-			_, gerr := CheckText(c.group, -1)
-			_, lerr := CheckText(c.longhand, -1)
-			if c.refusal != "" {
-				if lerr == nil || !strings.Contains(lerr.Error(), c.refusal) {
-					t.Errorf("CONTROL longhand %q: want a refusal naming %q, got %v", c.longhand, c.refusal, lerr)
-				}
-				if gerr == nil || !strings.Contains(gerr.Error(), c.refusal) {
-					t.Errorf("group %q: want the longhand's refusal naming %q, got %v (#9656)", c.group, c.refusal, gerr)
-				}
-				return
+			const want = "names 2 zones (zga zgb)"
+			if _, err := CheckText(c.text, -1); err == nil || !strings.Contains(err.Error(), want) {
+				t.Errorf("strict: want the #9656 refusal naming %q, got %v", want, err)
 			}
-			if lerr != nil {
-				t.Errorf("CONTROL longhand %q: want a commit, got %v", c.longhand, lerr)
+			tree, perrs := config.NewParser(c.text).Parse()
+			if len(perrs) > 0 {
+				t.Fatalf("fixture must parse: %v", perrs)
 			}
-			if gerr != nil {
-				t.Errorf("group %q: want a commit, as the longhand gets; got %v (#9656)", c.group, gerr)
+			rendered := tree.Format()
+			if _, err := CheckText(rendered, -1); err == nil || !strings.Contains(err.Error(), want) {
+				t.Errorf("strict, rendered text %q: want the same refusal, got %v (#9656)", rendered, err)
 			}
-			gj := lenientJSON9656(t, "group", c.group)
-			lj := lenientJSON9656(t, "longhand", c.longhand)
-			if gj == "" || lj == "" {
-				return
+			cfg, err := config.CompileConfigLenient(tree)
+			if err != nil {
+				t.Fatalf("lenient: want a warning, not the error %v (#9656)", err)
 			}
-			for _, want := range c.has {
-				if !strings.Contains(lj, want) {
-					t.Errorf("CONTROL longhand %q: lenient compile lacks %s", c.longhand, want)
-				}
-				if !strings.Contains(gj, want) {
-					t.Errorf("group %q: lenient compile lacks %s, which the longhand carries (#9656)", c.group, want)
+			for _, w := range cfg.Warnings {
+				if strings.Contains(w, want) {
+					return
 				}
 			}
-			if gj != lj {
-				t.Errorf("group %q and longhand %q compile differently on the lenient path (#9656)", c.group, c.longhand)
-			}
+			t.Errorf("lenient: no warning naming %q among %q (#9656)", want, cfg.Warnings)
 		})
 	}
 }
 
-// lenientJSON9656 compiles text on the lenient path the boot and HA-sync
-// loaders use. It renders the result without warnings.
-func lenientJSON9656(t *testing.T, label, text string) string {
-	t.Helper()
-	tree, perrs := config.NewParser(text).Parse()
-	if len(perrs) > 0 {
-		t.Errorf("%s %q: fixture must parse: %v", label, text, perrs)
-		return ""
+// CONTROLS: spellings the refusal must leave committing, each compiled with
+// every zone it names.
+func TestZoneGroupWithBodyStillCommits9656(t *testing.T) {
+	const screens = `security { screen { ids-option edge { icmp { ping-death; } } } } `
+	zones := func(body string) string { return `security { zones { ` + body + ` } }` }
+	for _, c := range []struct {
+		name, text string
+		has        []string
+	}{
+		{"braced body", screens + zones(`security-zone [ zga zgb ] { screen edge; }`), []string{`"zga":{"Name":"zga"`, `"zgb":{"Name":"zgb"`, `"ScreenProfile":"edge"`}},
+		{"braced body naming a flag-keyword zone", zones(`security-zone [ zga zgb tcp-rst ] { tcp-rst; }`), []string{`"tcp-rst":{"Name":"tcp-rst"`, `"zgb":{"Name":"zgb"`}},
+		{"braced body naming a body-holding keyword zone", zones(`security-zone [ zga zgb host-inbound-traffic ] { tcp-rst; }`), []string{`"host-inbound-traffic":{"Name":"host-inbound-traffic"`}},
+		{"single zone with a packed statement", screens + zones(`security-zone trust screen edge;`), []string{`"trust":{"Name":"trust"`, `"ScreenProfile":"edge"`}},
+		{"inactive group", zones(`inactive: security-zone [ zga zgb ]; security-zone trust;`), []string{`"trust":{"Name":"trust"`}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			if _, err := CheckText(c.text, -1); err != nil {
+				t.Errorf("strict: %q: want a commit, got %v (#9656)", c.text, err)
+			}
+			tree, perrs := config.NewParser(c.text).Parse()
+			if len(perrs) > 0 {
+				t.Fatalf("fixture must parse: %v", perrs)
+			}
+			cfg, err := config.CompileConfigLenient(tree)
+			if err != nil {
+				t.Fatalf("lenient: %v", err)
+			}
+			b, _ := json.Marshal(cfg.Security.Zones)
+			for _, want := range c.has {
+				if !strings.Contains(string(b), want) {
+					t.Errorf("%q: compiled zones lack %s (#9656)", c.text, want)
+				}
+			}
+		})
 	}
-	cfg, err := config.CompileConfigLenient(tree)
-	if err != nil {
-		t.Errorf("%s %q: lenient compile: %v", label, text, err)
-		return ""
-	}
-	cfg.Warnings = nil
-	b, err := json.Marshal(cfg)
-	if err != nil {
-		t.Errorf("%s %q: marshal: %v", label, text, err)
-		return ""
-	}
-	return string(b)
-}
-
-// A group whose fan-out does not fit the configuration's node budget must not
-// commit as its first zone alone. 100,001 members with a `tcp-rst` tail cost
-// 200,002 nodes, over maxParseNodes, and parse to one node. Strict commit
-// refuses it by name; the tolerant load path compiles it with a warning.
-func TestOverBudgetZoneGroupIsRefusedAtCommit9656(t *testing.T) {
-	const want = "a group of 100001 zones was not expanded"
-	var b strings.Builder
-	b.WriteString("security { zones { security-zone [")
-	for i := 0; i <= 100000; i++ {
-		fmt.Fprintf(&b, " z%d", i)
-	}
-	b.WriteString(" ] tcp-rst; } }")
-	text := b.String()
-	clip := func(err error) string {
-		msg := fmt.Sprint(err)
-		if len(msg) > 600 {
-			msg = msg[:600] + "…(clipped)"
+	// The flat-set spelling with a statement builds a node WITH a child, which
+	// renders braced, so it commits like the braced body.
+	tree := &config.ConfigTree{}
+	for _, cmd := range []string{
+		`set security screen ids-option edge icmp ping-death`,
+		`set security zones security-zone [ zga zgb ] screen edge`,
+	} {
+		path, quoted, grouped, err := config.ParseSetCommandGrouped(cmd)
+		if err != nil {
+			t.Fatalf("ParseSetCommandGrouped(%q): %v", cmd, err)
 		}
-		return msg
-	}
-	if _, err := CheckText(text, -1); err == nil || !strings.Contains(err.Error(), want) {
-		t.Errorf("strict: want the #9656 budget refusal naming %q, got %s", want, clip(err))
-	}
-	tree, perrs := config.NewParser(text).Parse()
-	if len(perrs) > 0 {
-		t.Fatalf("fixture must parse: %v", perrs)
-	}
-	cfg, err := config.CompileConfigLenient(tree)
-	if err != nil {
-		t.Fatalf("lenient: want a warning, not the error %s (#9656)", clip(err))
-	}
-	for _, w := range cfg.Warnings {
-		if strings.Contains(w, want) {
-			return
+		if err := tree.SetPathQuotedGrouped(path, quoted, grouped); err != nil {
+			t.Fatalf("SetPathQuotedGrouped(%q): %v", cmd, err)
 		}
 	}
-	t.Errorf("lenient: no warning naming %q among %d warnings (#9656)", want, len(cfg.Warnings))
+	if _, err := CheckText(tree.Format(), -1); err != nil {
+		t.Errorf("flat-set group with a statement, rendered %q: want a commit, got %v (#9656)", tree.Format(), err)
+	}
 }

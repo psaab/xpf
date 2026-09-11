@@ -60,19 +60,10 @@ func normalizeCompactStanzasWithScope(tree *ConfigTree, inScope func(containerKe
 	if tree == nil {
 		return 0
 	}
-	return normalizeCompactNodesPass9656(tree.Children, setSchema, inScope, newZoneGroupPass9656())
+	return normalizeCompactNodes(tree.Children, setSchema, inScope)
 }
 
-// normalizeCompactNodes normalizes one forest in a pass of its own. A caller
-// normalizing a whole tree goes through normalizeCompactStanzasWithScope, so
-// every `zones` node in the tree shares one #9656 fan-out budget.
 func normalizeCompactNodes(nodes []*Node, schema *schemaNode, inScope func(containerKeyword, head string) bool) int {
-	return normalizeCompactNodesPass9656(nodes, schema, inScope, newZoneGroupPass9656())
-}
-
-// normalizeCompactNodesPass9656 is normalizeCompactNodes carrying the state
-// that one normalization of a tree shares: the #9656 zone-group fan-out budget.
-func normalizeCompactNodesPass9656(nodes []*Node, schema *schemaNode, inScope func(containerKeyword, head string) bool, pass *zoneGroupPass9656) int {
 	if schema == nil {
 		return 0
 	}
@@ -238,13 +229,8 @@ func normalizeCompactNodesPass9656(nodes []*Node, schema *schemaNode, inScope fu
 				}
 			}
 		}
-		// #9656 (M40): fan a security-zone group out into one zone statement per
-		// member, before the statements under `zones` are folded and validated.
-		if childSub == zonesSchema9656 {
-			n += expandZoneGroups9656(node, childSub.children["security-zone"], pass)
-		}
 		n += splitBracedPackedChildren8886(node, childSub)
-		n += normalizeCompactNodesPass9656(node.Children, childSub, inScope, pass)
+		n += normalizeCompactNodes(node.Children, childSub, inScope)
 	}
 	return n
 }

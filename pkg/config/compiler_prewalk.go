@@ -552,11 +552,11 @@ func runPreWalkGates(tree *ConfigTree, opts compileOpts) ([]string, error) {
 		return nil, err
 	}
 
-	// #9656: a security-zone group the normalizer left unexpanded, because the
-	// fan-out budget was spent, would compile as its first zone alone. Strict
-	// refuses it; lenient warns.
-	zoneGroupWarnings, err := validateZoneGroupsExpanded9656(
-		tree.Children, opts.lenientZoneGroupExpansion9656)
+	// #9656: a security-zone statement that names two or more zones without a
+	// braced body compiles as its first zone alone. Strict refuses it, naming
+	// the zones; lenient warns.
+	zoneGroupWarnings, err := validateZoneGroupsHaveBody9656(
+		tree.Children, opts.lenientZoneGroupBody9656)
 	if err != nil {
 		return nil, err
 	}
