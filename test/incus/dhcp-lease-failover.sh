@@ -89,7 +89,8 @@ NS_B="dhcp9729b"
 IF_A="dhc9729a"
 IF_B="dhc9729b"
 CLIENT_SCRIPT="/run/dhclient-9729-script"
-PROVISIONED=0
+PROVISIONED_KNOB=0
+PROVISIONED_GROUP=0
 
 # Golden Kea 3.0.x headers — MUST stay in lockstep with the Go golden
 # (pkg/dhcpserver/lease_sync.go keaMemfileHeader{4,6} + the
@@ -150,30 +151,41 @@ EOF
 	provision_dhcp
 }
 
-dhcp_config_session() {
-	cat <<EOF
-configure
-rollback 0
-set chassis cluster dhcp-lease-synchronization
-set system services dhcp-local-server group ${DHCP_GROUP} interface ${DHCP_LAN_UNIT}
-set system services dhcp-local-server group ${DHCP_GROUP} pool ${DHCP_POOL} subnet ${DHCP_SUBNET}
-set system services dhcp-local-server group ${DHCP_GROUP} pool ${DHCP_POOL} address-range low ${DHCP_RANGE_LOW} high ${DHCP_RANGE_HIGH}
-commit
-exit
-quit
-EOF
+dhcp_config_session() { # <with_group 0|1>
+	echo configure
+	echo "rollback 0"
+	echo "set chassis cluster dhcp-lease-synchronization"
+	if [ "$1" = "1" ]; then
+		echo "set system services dhcp-local-server group ${DHCP_GROUP} interface ${DHCP_LAN_UNIT}"
+		echo "set system services dhcp-local-server group ${DHCP_GROUP} pool ${DHCP_POOL} subnet ${DHCP_SUBNET}"
+		echo "set system services dhcp-local-server group ${DHCP_GROUP} pool ${DHCP_POOL} address-range low ${DHCP_RANGE_LOW} high ${DHCP_RANGE_HIGH}"
+	fi
+	echo commit
+	echo exit
+	echo quit
 }
 
 # provision_dhcp commits the fixture on the RG0 primary; config sync carries it.
+#
+# It adds ONLY what is missing. The loss lab already serves 10.0.61.0/24 from its
+# own dhcp-local-server group, and a second group for the same subnet commits
+# clean but makes Kea refuse its whole config ("subnet with the prefix of
+# '10.0.61.0/24' already exists"), so no DHCP is served at all (#9729 run 3).
+# So the group is added only when the lab has none, and the knob always.
 provision_dhcp() {
-	local node out
+	local node out with_group=0 existing
 	node="$(rg0_primary_node "$FW0")"
 	[ -n "$node" ] || node="$(rg0_primary_node "$FW1")"
 	[ -n "$node" ] || die "cannot read the RG0 primary to commit the DHCP fixture on"
+	existing="$(ssh_fw "$node" '/usr/local/sbin/cli -c "show configuration system services dhcp-local-server | display set" 2>/dev/null' || true)"
+	if ! grep -q "dhcp-local-server group .* pool .* subnet" <<<"$existing"; then
+		with_group=1
+	fi
 	out="$(mktemp)"
 	# Set before the attempt, so a commit that fails half-way is still rolled back.
-	PROVISIONED=1
-	dhcp_config_session | incus exec "$node" -- /usr/local/sbin/cli >"$out" 2>&1 || true
+	PROVISIONED_KNOB=1
+	PROVISIONED_GROUP=$with_group
+	dhcp_config_session "$with_group" | incus exec "$node" -- /usr/local/sbin/cli >"$out" 2>&1 || true
 	# Gate on the marker, never the exit status (#6440).
 	if ! cos_require_markers "dhcp fixture apply on $node" "$out" "$COS_MARKER_COMMIT"; then
 		cat "$out" >&2
@@ -181,7 +193,11 @@ provision_dhcp() {
 		die "committing the DHCP fixture failed on $node"
 	fi
 	rm -f "$out"
-	pass "DHCP fixture committed on $node for this run: lease-sync knob, group ${DHCP_GROUP} on ${DHCP_LAN_UNIT}, ${DHCP_RANGE_LOW}-${DHCP_RANGE_HIGH}"
+	if [ "$with_group" = "1" ]; then
+		pass "DHCP fixture committed on $node for this run: lease-sync knob, group ${DHCP_GROUP} on ${DHCP_LAN_UNIT}, ${DHCP_RANGE_LOW}-${DHCP_RANGE_HIGH}"
+	else
+		pass "lease-sync knob committed on $node for this run; the lab's own dhcp-local-server group serves the clients"
+	fi
 	sleep 10
 }
 
@@ -192,19 +208,21 @@ restore_dhcp() {
 	ns_down "$NS_A"
 	ns_down "$NS_B"
 	incus exec "$DHCP_CLIENT" -- rm -f "$CLIENT_SCRIPT" >/dev/null 2>&1 || true
-	[ "$PROVISIONED" = "1" ] || return 0
-	info "Restoring: removing the DHCP fixture this run committed"
+	[ "$PROVISIONED_KNOB" = "1" ] || return 0
+	info "Restoring: removing what this run committed (knob; group=${PROVISIONED_GROUP})"
 	local node
 	for node in "$FW0" "$FW1"; do
-		incus exec "$node" -- /usr/local/sbin/cli >/dev/null 2>&1 <<EOF || true
-configure
-rollback 0
-delete chassis cluster dhcp-lease-synchronization
-delete system services dhcp-local-server group ${DHCP_GROUP}
-commit
-exit
-quit
-EOF
+		{
+			echo configure
+			echo "rollback 0"
+			echo "delete chassis cluster dhcp-lease-synchronization"
+			if [ "$PROVISIONED_GROUP" = "1" ]; then
+				echo "delete system services dhcp-local-server group ${DHCP_GROUP}"
+			fi
+			echo commit
+			echo exit
+			echo quit
+		} | incus exec "$node" -- /usr/local/sbin/cli >/dev/null 2>&1 || true
 	done
 }
 
