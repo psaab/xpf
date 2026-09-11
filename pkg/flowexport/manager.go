@@ -76,7 +76,9 @@ type ExportConfig struct {
 	SamplingZones       map[uint16]SamplingDir // zone ID -> sampling directions
 	SamplingRate        int                    // 1-in-N sampling (0 = export all)
 	// ServesInet / ServesInet6 record which address families this instance
-	// configured a flow-server for (#2462). ServesFamily uses them to
+	// has a SURVIVING collector group for (#2462, narrowed by #9172): a family
+	// whose only group names an undefined template is not served, because
+	// nothing would export its records. ServesFamily uses them to
 	// attribute a flow to the right instance: an instance with only inet
 	// collectors must not export an IPv6 flow. An instance that configured
 	// neither (no flow-servers for this version) produces no ExportConfig at
@@ -470,6 +472,38 @@ type collectorGroupKey struct {
 // `family inet { flow-server A }` and `family inet6 { flow-server B }` produced
 // ONE group holding A and B, and every export to that group reached both — IPv4
 // records to the IPv6-only collector and vice versa.
+// narrowToSurvivingFamilies9172 narrows an instance's family flags to the
+// families that still have a template group AFTER the undefined-template drop
+// in both resolvers (#9172, V076).
+//
+// collectInstanceVersionCollectors derives ServesInet / ServesInet6 from every
+// eligible flow-server, and the resolvers then drop a group whose template is
+// not defined. So an instance whose only inet6 group named an undefined
+// template still claimed ServesInet6: an IPv6 record passed the instance-level
+// gate, consumed a 1-in-N slot on the instance's shared counter, found no inet6
+// group, and was exported nowhere. The surviving inet group's effective rate
+// was diluted below the configured 1-in-N -- the rate an IPFIX collector is
+// told by the #3748 sampler Options record and uses to scale volume (NetFlow v9
+// carries no such record, but its records were diluted the same way) --
+// exactly what the ServesInet/ServesInet6 contract exists to prevent
+// ("a record of a family the instance does not serve must not consume a 1-in-N
+// sampling slot"). Reachable on the tolerant load / peer-sync population; the
+// strict commit gate rejects an undefined template reference.
+func narrowToSurvivingFamilies9172(keys []collectorGroupKey, servesInet, servesInet6 bool, defined func(string) bool) (bool, bool) {
+	var inet, inet6 bool
+	for _, k := range keys {
+		if k.Template != "" && !defined(k.Template) {
+			continue
+		}
+		if k.IsV6 {
+			inet6 = true
+		} else {
+			inet = true
+		}
+	}
+	return servesInet && inet, servesInet6 && inet6
+}
+
 func groupCollectorsByTemplateAndFamily(collectors []CollectorConfig) ([]collectorGroupKey, map[collectorGroupKey][]CollectorConfig) {
 	groups := make(map[collectorGroupKey][]CollectorConfig)
 	for _, c := range collectors {
@@ -551,6 +585,8 @@ func ResolveV9TemplateGroups(svc *config.ServicesConfig, fo *config.ForwardingOp
 		rate := inst.InputRate
 		shared := &atomic.Uint64{} // per-INSTANCE counter (#2462)
 		keys, groups := groupCollectorsByTemplateAndFamily(collectors)
+		servesInet, servesInet6 = narrowToSurvivingFamilies9172(keys, servesInet, servesInet6,
+			func(name string) bool { _, ok := defined[name]; return ok })
 		for _, key := range keys {
 			name := key.Template
 			ctx := defaultCtx
@@ -616,6 +652,8 @@ func ResolveIPFIXTemplateGroups(svc *config.ServicesConfig, fo *config.Forwardin
 		rate := inst.InputRate
 		shared := &atomic.Uint64{} // per-INSTANCE counter (#2462)
 		keys, groups := groupCollectorsByTemplateAndFamily(collectors)
+		servesInet, servesInet6 = narrowToSurvivingFamilies9172(keys, servesInet, servesInet6,
+			func(name string) bool { _, ok := defined[name]; return ok })
 		for _, key := range keys {
 			name := key.Template
 			ctx := defaultCtx

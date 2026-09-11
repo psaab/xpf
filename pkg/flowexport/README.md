@@ -1079,12 +1079,26 @@ grouping key is `(instance, version, template)`:
   is the address family: the interface `family inet { sampling { input; } }`
   stanza is a plain boolean and there is **no per-interface
   sampling-instance selector** in the config model. So `ServesInet` /
-  `ServesInet6` record which families an instance configured a collector
-  for, and `ExportConfig.ServesFamily(isIPv6)` gates a record — an
+  `ServesInet6` record which families an instance has a surviving collector
+  group for (a group whose template is undefined does not count; see the
+  #9172 bullet below), and `ExportConfig.ServesFamily(isIPv6)` gates a record — an
   inet-only instance never exports an IPv6 flow. The daemon callback walks
   the contiguous per-instance run of groups, applies the family gate + the
   single per-instance sampling decision, then fans to that instance's
   groups.
+- **The family flags describe the groups that SURVIVE (#9172, V076).** Both
+  resolvers drop a template group whose template is undefined (the strict
+  commit gate rejects the reference; the tolerant load / peer-sync path
+  drops it). `collectInstanceVersionCollectors` derives the flags from every
+  eligible flow-server, before that drop, so an instance whose only inet6
+  group named an undefined template used to keep `ServesInet6`: an IPv6
+  record passed the family gate, consumed a 1-in-N slot on the instance's
+  shared counter, and was exported nowhere, diluting the inet group's
+  effective rate below the configured 1-in-N (the rate an IPFIX collector
+  reads from the #3748 sampler Options record; NetFlow v9 has no such record
+  and is diluted the same way).
+  `narrowToSurvivingFamilies9172` now clears a family with no surviving
+  group, in both resolvers.
 - **Determinism.** Instances are resolved in lexical name order
   (`sortedInstanceNames`), so restarts produce identical wiring.
 
