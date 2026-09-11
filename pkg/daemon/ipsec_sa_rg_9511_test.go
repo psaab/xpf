@@ -220,8 +220,11 @@ func TestIPsecSAsToReinitiateSkipsMultiSelectorVPNOnRG0Takeover9511(t *testing.T
 // reported, so a node may initiate it only if it owns BOTH candidates' groups.
 // Resolving the exact VPN name first (the first version of this fix) answered
 // RG2 alone, and a node owning only RG2 would initiate blue's child as well.
+//
+// #9624 rejects this config at commit; syncedStore9511 installs it the way it can
+// still arrive.
 func TestIPsecSANameRenderedByTwoVPNsNeedsEveryCandidateRG9511(t *testing.T) {
-	store := testStoreWithSetConfig(t, append(append([]string{}, clusterTwoRethIPsec9511...),
+	store := syncedStore9511(t, append(append([]string{}, clusterTwoRethIPsec9511...),
 		"set security ipsec vpn blue ike gateway gw-rg1",
 		"set security ipsec vpn blue traffic-selector red local-ip 10.0.1.0/24",
 		"set security ipsec vpn blue traffic-selector red remote-ip 10.9.1.0/24",
@@ -262,7 +265,7 @@ func TestIPsecSANameRenderedByTwoVPNsNeedsEveryCandidateRG9511(t *testing.T) {
 // only RG1 must not initiate a name that may be the live peer's unanchored
 // tunnel. A UNIQUE unanchored name keeps the historical fallback (the control).
 func TestAmbiguousSANameNeedsDeclaredRG0_9511(t *testing.T) {
-	store := testStoreWithSetConfig(t, []string{
+	store := syncedStore9511(t, []string{
 		"set chassis cluster cluster-id 1",
 		"set chassis cluster node 0",
 		"set chassis cluster authentication-key test-cluster-psk-9511",
@@ -409,7 +412,45 @@ func TestCachedIPsecSANameIndexColdMissesBuildOnce9511(t *testing.T) {
 
 func storeWith9511(t *testing.T, vpnLines ...string) *configstore.Store {
 	t.Helper()
-	return testStoreWithSetConfig(t, append(append([]string{}, clusterTwoRethIPsec9511...), vpnLines...))
+	return syncedStore9511(t, append(append([]string{}, clusterTwoRethIPsec9511...), vpnLines...))
+}
+
+// syncedStore9511 installs lines as the active config through the HA config-sync
+// ingress (Store.SyncApply), which compiles leniently, and leaves the store in
+// configure mode like testStoreWithSetConfig.
+//
+// Several cells need a config in which two VPNs render one SA name: VPN blue's
+// child blue-red beside VPN blue-red. Since #9624 a commit rejects that config, so
+// it reaches a node only the tolerant way: synced from a peer, or loaded from a
+// config persisted before the gate. The every-candidate-RG rule is the belt for
+// exactly that config, so these cells install it the same way. A tolerant compile
+// would also turn any OTHER fixture mistake into a warning, so the strict compile
+// must fail on the #9624 collision or not at all.
+func syncedStore9511(t *testing.T, lines []string) *configstore.Store {
+	t.Helper()
+	tr := &config.ConfigTree{}
+	for _, l := range lines {
+		p, err := config.ParseSetCommand(l)
+		if err != nil {
+			t.Fatalf("parse %q: %v", l, err)
+		}
+		if err := tr.SetPath(p); err != nil {
+			t.Fatalf("setpath %q: %v", l, err)
+		}
+	}
+	if _, err := config.CompileConfig(tr.Clone()); err != nil &&
+		!strings.Contains(err.Error(), "all render the swanctl SA name") {
+		t.Fatalf("FIXTURE: the strict compile may fail only on the #9624 SA-name collision; "+
+			"anything else is a broken fixture the tolerant path would hide: %v", err)
+	}
+	store := newConfigStore(t, filepath.Join(t.TempDir(), "config"))
+	if err := store.EnterConfigure(); err != nil {
+		t.Fatalf("EnterConfigure: %v", err)
+	}
+	if _, err := store.SyncApply(tr.Format(), nil); err != nil {
+		t.Fatalf("SyncApply: %v", err)
+	}
+	return store
 }
 
 var blueOnRG1_9511 = []string{
