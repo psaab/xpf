@@ -295,6 +295,29 @@ the mechanics, so this section is sequencing only.
    | NAT / screens / filter / VLAN / IPsec | above | exercise that feature end-to-end from a test host | session / hit counters advance; negative case drops |
    | HA / VRRP / session sync / fabric | `make cluster-deploy` | `make test-failover` + `make test-ha-crash` | 0 / very low packet loss across failover/failback, both nodes converge |
 
+   **Which HA smoke is required, and which are compared against a baseline
+   (#9728).**
+   - `make test-failover` and `make test-ha-crash` are required for every HA,
+     VRRP, session-sync or fabric change. They are the gates `harness-compare`
+     judges against a band, so each must keep at least three green
+     both-node-attested rows (`exe_scope`) at the loss userspace env
+     (`docs/harness-ledger.md`).
+   - Every other destructive HA smoke target (`test-double-failover`,
+     `test-stress-failover`, `test-chained-crash`, `test-active-active`,
+     `test-private-rg`, `test-restart-connectivity`, and any later HA
+     acceptance gate) is required only when a change targets the behaviour that
+     smoke exists for:
+     - back-to-back or chained failovers;
+     - repeated rapid moves;
+     - split per-RG ownership;
+     - private-RG election;
+     - daemon restart in HA mode;
+     - a specific synced feature.
+
+     Each still records a ledger row when run, but none is baseline-compared by
+     default. A NO-BASELINE verdict for them is expected, not a gap, until a
+     change makes one routine.
+
    **Use 5211, not 5203, for the throughput row — and the two are not
    interchangeable (#7610).** The same row tells you to apply
    `test/incus/cos-iperf-config.set` first, and in that fixture the port IS the

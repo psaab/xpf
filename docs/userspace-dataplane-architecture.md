@@ -3797,6 +3797,19 @@ is [`userspace-dataplane-gaps.md`](userspace-dataplane-gaps.md).
   `noroute_policy_denial_gated`, and while the flag is set the frame keeps the
   pre-#7480 delegation. Nothing else changes: an uncapped snapshot adjudicates
   exactly as before, and the flag never reaches an ordinary zone-pair verdict.
+  **#9654: whether the box is capped NOW is reported, not inferred.** Helper
+  status carries `learned_route_import_capped`, projected by
+  `Coordinator::learned_route_import_capped_now`. The value comes from the
+  PUBLISHED runtime view (the state workers load, not the coordinator's
+  candidate `forwarding`), and it is reported only while at least one worker
+  record is live. With no live worker the key is omitted, and absence means
+  unknown. That covers a teardown, the time before the first worker
+  registers, a first-worker spawn failure, and every worker dead. The daemon
+  decodes the field as `*bool` and exports `xpf_learned_route_import_capped`
+  only when it is present, so a helper that predates the field reads as
+  unknown, never as "not capped". `xpf_learned_route_cap_hits_total` still
+  counts capped builds, but it cannot answer this: it stays non-zero after the
+  import comes back under the cap.
   `PolicyDenied`, `HAInactive`, `DiscardRoute` and — since #6664 —
   `NextTableUnsupported` are NOT eligible: reinjecting them would hand the
   packet to the kernel FIB and silently bypass a zone-policy DENY / HA gate

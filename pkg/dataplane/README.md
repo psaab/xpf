@@ -746,6 +746,38 @@ the only trace. That is a separate requirement, tracked as #8397, and it must
 not be conflated with the bullet — shipping it instead would leave the bullet
 unmet while looking done.
 
+### A helper that answers nothing is restarted from the Go side (#9651)
+
+The supervisor above acts on an EXIT, and a wedged helper does not exit. Since
+#9172 (V031) the helper's control-socket accept loop retries resource errors,
+so transient fd or memory pressure no longer drops forwarding. A genuine
+descriptor leak at `RLIMIT_NOFILE` therefore leaves the helper alive and
+forwarding on its last state, with a control socket that accepts nothing, and
+before #9651 the only trace was a status-poll warning.
+
+The helper cannot recover this itself: an accept result does not distinguish a
+leak from recovering pressure (#9651 records three designs that failed on
+that). The daemon's 1/s status poll observes the condition directly, so
+`helper_liveness_9651.go` counts consecutive polls that got **no answer at
+all**:
+
+- an answered poll resets the count, and so does an in-band refusal, because a
+  refusal is an answer. So a helper under recovering pressure, which gets any
+  poll through, is never restarted;
+- a helper is wedged only after `helperWedgeFailedPolls` (30) unanswered polls
+  **and** `helperWedgeMinSpan` (30 s) since the first. The count binds when
+  polls fail slowly, at their deadline; the span binds when they fail fast;
+- within `helperWedgeRGGrace` (10 s) of an `update_ha_state` the kill waits,
+  so a failover's own control-socket load does not become a restart mid-flight;
+- a wedged helper is **killed** with SIGKILL, and recovery belongs to the
+  supervisor: the unexpected-exit path above disarms the shim, records the
+  crash and restarts it with the bounded backoff. Nothing in #9651 restarts a
+  helper itself.
+
+Bound by `helper_liveness_9651_test.go`. The kill cell drives the real
+supervisor (crash recorded, restart scheduled, takeover not ready), and a
+source cell binds `statusLoop`'s wiring.
+
 ## Armed-state admission contract (#2114 A3)
 
 `Manager.loaded` is an `atomic.Bool` admission bit, and every
