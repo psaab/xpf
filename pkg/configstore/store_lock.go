@@ -54,10 +54,41 @@ func (s *Store) ensureHolderLocked(sessionID string) error {
 		return nil // not in config mode; candidate==nil is reported by the caller
 	}
 	holder := s.effectiveHolderLocked()
-	if holder == "" || holder == sessionID {
+	if holder == "" {
+		// #9632: the empty-holder pass (#5059) is for sessions that never held
+		// this lock. A session whose lease was reclaimed would otherwise keep
+		// writing, and committing, into the candidate that replaced its own.
+		if _, reclaimed := s.reclaimedHolders[sessionID]; reclaimed {
+			return fmt.Errorf("%w: this session's configuration lock was reclaimed after the %s idle lease; re-enter configure mode",
+				ErrConfigLockedByOther, configLockLeaseTTL)
+		}
+		return nil
+	}
+	if holder == sessionID {
 		return nil
 	}
 	return fmt.Errorf("%w", ErrConfigLockedByOther)
+}
+
+// reclaimedHoldersCap bounds reclaimedHolders. A reclaim fires only for a lock
+// idle past the lease, so the set grows slowly; past the cap an arbitrary
+// entry is dropped.
+const reclaimedHoldersCap = 64
+
+func (s *Store) markReclaimedHolderLocked(holder string) {
+	if holder == "" {
+		return
+	}
+	if s.reclaimedHolders == nil {
+		s.reclaimedHolders = make(map[string]struct{})
+	}
+	if _, ok := s.reclaimedHolders[holder]; !ok && len(s.reclaimedHolders) >= reclaimedHoldersCap {
+		for k := range s.reclaimedHolders {
+			delete(s.reclaimedHolders, k)
+			break
+		}
+	}
+	s.reclaimedHolders[holder] = struct{}{}
 }
 
 // configLockLeaseTTL bounds how long a config lock may sit idle — with no edit
@@ -105,6 +136,8 @@ func (s *Store) reclaimStaleLockLocked() bool {
 		"holder", s.effectiveHolderLocked(),
 		"idle_for", time.Since(s.configLockAt).Round(time.Second),
 		"lease_ttl", configLockLeaseTTL)
+	// #9632: remember whose lock this was before clearing it.
+	s.markReclaimedHolderLocked(s.effectiveHolderLocked())
 	s.candidate = nil
 	s.bumpCandidateGenLocked() // #5848: candidate discarded — advance the generation
 	s.configDir = false
@@ -160,6 +193,7 @@ func (s *Store) EnterConfigureSession(sessionID string) error {
 	s.dirty = false
 	s.exclusiveHolder = ""
 	s.configHolder = sessionID
+	delete(s.reclaimedHolders, sessionID) // #9632: re-entered, so no longer refused
 	// #6808: the config lock changed hands — advance the holder epoch so a
 	// commit authorized under the previous holder cannot promote here.
 	s.holderEpoch++
@@ -219,6 +253,7 @@ func (s *Store) EnterConfigureExclusive(holder string) error {
 	s.dirty = false
 	s.configHolder = ""
 	s.exclusiveHolder = holder
+	delete(s.reclaimedHolders, holder) // #9632: re-entered, so no longer refused
 	// #6808: the config lock changed hands — advance the holder epoch so a
 	// commit authorized under the previous holder cannot promote here.
 	s.holderEpoch++

@@ -608,6 +608,14 @@ another session enters and stages different edits — and the in-flight commit
 would snapshot and promote the **new** holder's candidate under the **original**
 holder's authorization.
 
+A session whose lease is reclaimed stays out (#9632). The reclaim records the evicted session in
+`reclaimedHolders`, and `ensureHolderLocked` refuses it while the lock has no recorded holder, which
+is the internal / local `EnterConfigure()` state. Without that refusal, #5059's empty-holder pass
+(which deliberately lets other user sessions edit a local-CLI candidate) let the evicted session
+keep writing, and committing, into the candidate that replaced its own. The refusal wraps
+`ErrConfigLockedByOther` and says to re-enter configure. Re-entering, shared or exclusive, clears
+it. The set is capped at 64 entries.
+
 Generation binding does not close it, and the retry loop makes it worse. A
 turnover that completes *before* the daemon's `CompileCandidateGen` — i.e. while
 the commit waits on the apply semaphore, which is where a busy daemon actually

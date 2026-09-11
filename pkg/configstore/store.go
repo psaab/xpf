@@ -273,8 +273,16 @@ type Store struct {
 	exclusiveHolder string // who holds exclusive lock (empty = unlocked)
 
 	// Config lock tracking: session ID of the holder (for auto-release on disconnect)
-	configHolder string    // unique session ID of the config lock holder
-	configLockAt time.Time // when the lock was acquired
+	configHolder string // unique session ID of the config lock holder
+	// reclaimedHolders records the sessions whose lock reclaimStaleLockLocked
+	// took on the idle lease (#9632). ensureHolderLocked refuses them while the
+	// lock has no recorded holder: that empty holder is the internal / local
+	// EnterConfigure() path, and #5059 deliberately lets OTHER user sessions
+	// edit it. The session that was reclaimed must not ride that pass straight
+	// back into the candidate that replaced its own. A session leaves the set
+	// when it re-enters configure. Bounded by reclaimedHoldersCap.
+	reclaimedHolders map[string]struct{}
+	configLockAt     time.Time // when the lock was acquired
 
 	// holderEpoch advances on every config-lock ACQUISITION and RELEASE, so a
 	// commit authorized for one holder can detect that the lock turned over
