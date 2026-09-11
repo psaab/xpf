@@ -1289,6 +1289,13 @@ type compileOpts struct {
 	// { … }` spelling as the DHCPv4 relay (dhcpRelayV4Node9411) -- before that it
 	// installed the DHCPv6 groups as DHCPv4 relays, so the stanza was not inert.
 	lenientDHCPRelayDHCPv6 bool
+	// lenientDHCPRelayChildTokens (#9552) downgrades
+	// validateDHCPRelayChildTokensAST from a hard compile error to a cfg.Warnings
+	// entry on the tolerant load / peer-sync paths, so a persisted or peer-synced
+	// config carrying an undeclared dhcp-relay child still BOOTS (#1960). The
+	// child is inert either way: compileDHCPRelay reads only server-group and
+	// group.
+	lenientDHCPRelayChildTokens bool
 	// lenientRoutingRuleWindows (#5854) downgrades the next-table / rib-group
 	// ip-rule window over-subscription gate (validateRoutingRuleWindowsStrict)
 	// from a hard compile error to a cfg.Warnings entry. The runtime applier
@@ -2786,6 +2793,7 @@ func lenientCompileOpts() compileOpts {
 		lenientNextTableRefs:                   true,
 		lenientForwardingInstanceProtocols:     true,
 		lenientDHCPRelayDHCPv6:                 true,
+		lenientDHCPRelayChildTokens:            true,
 		lenientRoutingRuleWindows:              true,
 		lenientPolicyRouteMapSeq:               true,
 		lenientRouteDispositionConflict:        true,

@@ -278,6 +278,17 @@ func runPreWalkGates(tree *ConfigTree, opts compileOpts) ([]string, error) {
 	}
 	fwFilterFamilyWarnings = append(fwFilterFamilyWarnings, dhcpv6RelayWarnings...)
 
+	// #9552 undeclared `forwarding-options dhcp-relay` child keyword. The wider
+	// question #9411 left open: any child but server-group and group compiled to
+	// nothing. Scoped to the dhcp-relay level (NOT closedWorld, which would
+	// inherit into group and overrides), the permitted set is read from the
+	// schema, and dhcpv6 is left to #9411's more specific message above.
+	dhcpRelayChildWarnings, err := validateDHCPRelayChildTokensAST(tree.Children, opts.lenientDHCPRelayChildTokens)
+	if err != nil {
+		return nil, err
+	}
+	fwFilterFamilyWarnings = append(fwFilterFamilyWarnings, dhcpRelayChildWarnings...)
+
 	// #4296 firewall-filter family-any specific-match gate. #4287 dual-compiles a
 	// `family any` filter into BOTH the inet and inet6 pools; a family-specific
 	// match under `family any` (a v4/v6 source/destination-address literal or a
