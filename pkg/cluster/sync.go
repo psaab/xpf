@@ -1294,7 +1294,10 @@ type SessionSync struct {
 	// (QueueConfig). Distinct from configGenCounter, which is the next value to
 	// draw: a nack naming an older generation is a straggler for a push already
 	// superseded and must not re-arm the marker for the current one.
-	lastSentConfigGen    atomic.Uint64
+	lastSentConfigGen atomic.Uint64
+	// peerConfigNackedGen is the generation of the last config-apply nack that
+	// matched lastSentConfigGen when it arrived (#9569). See PeerConfigStale.
+	peerConfigNackedGen  atomic.Uint64
 	configGenCounter     atomic.Uint64
 	lastAppliedConfigGen atomic.Uint64
 	// applyingConfigGen is the apply-in-progress config fence (#6284, item 2).
