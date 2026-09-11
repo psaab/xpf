@@ -239,11 +239,14 @@ func populatedCoverageStatus() dpuserspace.ProcessStatus {
 	v1Alias := make([]bool, 16)
 	v1Alias[3] = true
 
+	capped9654 := true
 	return dpuserspace.ProcessStatus{
-		SessionTableEntries: 12,
-		MaxSessions:         1000,
-		FlowCacheCapacity:   4096,
-		CoSInterfaces:       []dpuserspace.CoSInterfaceStatus{cosIface},
+		// #9654: a known flag, so the conditional gauge is emitted and covered.
+		LearnedRouteImportCapped: &capped9654,
+		SessionTableEntries:      12,
+		MaxSessions:              1000,
+		FlowCacheCapacity:        4096,
+		CoSInterfaces:            []dpuserspace.CoSInterfaceStatus{cosIface},
 		// #1865: one populated WG tunnel row so emitWireguardTelemetry's
 		// whole descriptor family is exercised by the canary (the
 		// zone/policy lesson at the top of this file: families that
@@ -553,6 +556,7 @@ func TestCollectorDescriptorCoverage(t *testing.T) {
 		"xpf_pbr_rules_installed",                                          // #4422 PBR/FBF build health
 		"xpf_pbr_degraded_terms",                                           // #4422 PBR/FBF degraded terms
 		"xpf_userspace_worker_dead",                                        // emitWorkerRuntime
+		"xpf_learned_route_import_capped",                                  // #9654 capped-now gauge (emitted only when known)
 		"xpf_userspace_worker_cold_path_samples_v3_total",                  // cold-path v3
 		"xpf_cos_drain_invocations_total",                                  // CoS owner profile
 		"xpf_userspace_three_color_policer_drops_total",                    // three-color policer

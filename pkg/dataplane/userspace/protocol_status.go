@@ -704,6 +704,12 @@ type ProcessStatus struct {
 	// compat with older helpers (default 0).
 	FabricLinkSkippedMalformedTotal uint64 `json:"fabric_link_skipped_malformed_total,omitempty"`
 	FabricLinkUnresolvedPeerTotal   uint64 `json:"fabric_link_unresolved_peer_total,omitempty"`
+	// #9654: whether the learned-route import is capped in the forwarding state
+	// the helper's live workers serve NOW. A pointer because absence must read
+	// as UNKNOWN. The helper omits the key when no worker is live. A helper that
+	// predates the field never sends it, yet still enforces capped forwarding.
+	// A plain bool would report both as "not capped".
+	LearnedRouteImportCapped *bool `json:"learned_route_import_capped,omitempty"`
 }
 
 // MarshalJSON intentionally uses a value receiver so both ProcessStatus values
