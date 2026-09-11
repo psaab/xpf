@@ -1105,7 +1105,16 @@ For production observability, xpf MUST export:
   threshold.
 - **`xpf_fairness_rss_skew_violation{ifindex=..., queue_id=..., kind=...}`**
   gauge: 1 when the configured RSS/workload expectation fails for the
-  egress CoS queue; 0 when it passes.
+  egress CoS queue; 0 when it passes. It is ABSENT while the expectation
+  is indeterminate (#9369).
+- **`xpf_fairness_rss_expectation_indeterminate{ifindex=..., queue_id=..., kind=...}`**
+  gauge: 1 when the expectation cannot be judged because the CoS
+  active-flow snapshot was truncated; 0 otherwise. A truncated snapshot
+  keeps only a prefix of the sorted `(ifindex, queue, worker)` rows, and a
+  verdict computed from that prefix can be a false PASS or a false FAIL. So
+  every constrained kind is withheld rather than guessed; `any` still
+  evaluates. `show chassis cluster data-plane fairness` prints the same
+  verdict as `INDETERMINATE` in the `Result` column.
 - **`xpf_fairness_saturated{ifindex=..., queue_id=...}`** Prometheus gauge: 0 or
   1. Computed from the daemon's rolling 30-second per-flow byte
   window as aggregate queue throughput vs the configured CoS queue

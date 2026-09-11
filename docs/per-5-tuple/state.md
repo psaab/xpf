@@ -410,7 +410,8 @@ Configured expectations are rendered under
 
 - `xpf_fairness_rss_expectation_configured{ifindex,queue_id,kind}`
 - `xpf_fairness_rss_expectation_value{ifindex,queue_id,kind}`
-- `xpf_fairness_rss_skew_violation{ifindex,queue_id,kind}`
+- `xpf_fairness_rss_skew_violation{ifindex,queue_id,kind}`, which is absent while the expectation is indeterminate
+- `xpf_fairness_rss_expectation_indeterminate{ifindex,queue_id,kind}` (#9369): 1 when a truncated CoS active-flow snapshot makes the verdict unknowable; `show` prints `INDETERMINATE`
 
 The `kind` label is one of the stable expectation kinds (`any`,
 `balanced`, `at-least-active-workers`, `max-worker-flow-share`, or

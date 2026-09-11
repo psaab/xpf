@@ -683,9 +683,12 @@ func TestFormatFairnessRSS(t *testing.T) {
 		"RSS expectations:",
 		"Interface",
 		"reth0",
-		"balanced                     false",
-		"balanced: active_workers=2 expected",
-		"max-worker-flow-share:0.5    true",
+		// #9369: the snapshot is truncated, so both constrained expectations are
+		// INDETERMINATE rather than a PASS/FAIL computed from a partial prefix.
+		"Result",
+		"balanced                     INDETERMINATE",
+		"max-worker-flow-share:0.5    INDETERMINATE",
+		"indeterminate: CoS active-flow snapshot truncated",
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("fairness output missing %q:\n%s", want, out)
@@ -707,12 +710,45 @@ func TestFormatFairnessRSSShowsExpectationsWithoutRows(t *testing.T) {
 		"RSS expectations:",
 		"reth0",
 		"cstruct-max:0.25",
-		"false",
+		"FAIL",
 		"cstruct-max: no active flows observed",
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("fairness output missing %q:\n%s", want, out)
 		}
+	}
+}
+
+// #9369: the RSS expectations table renders a tri-state verdict. PASS and FAIL
+// come from a complete snapshot; INDETERMINATE only from a truncated one.
+func TestFormatFairnessRSSRendersTriStateVerdict_9369(t *testing.T) {
+	complete := userspace.ProcessStatus{
+		Workers:  2,
+		Bindings: []userspace.BindingStatus{{Interface: "reth0", Ifindex: 80}},
+		CoSActiveFlowCounts: []userspace.CoSActiveFlowCountStatus{
+			{Ifindex: 80, QueueID: 4, WorkerID: 0, ActiveFlowCount: 5},
+			{Ifindex: 80, QueueID: 4, WorkerID: 1, ActiveFlowCount: 5},
+		},
+	}
+	out := FormatFairnessRSS(complete, []userspace.FairnessRSSExpectation{
+		{Interface: "reth0", QueueID: 4, RSSExpectation: "balanced"},
+		{Interface: "reth0", QueueID: 4, RSSExpectation: "max-worker-flow-share:0.4"},
+	})
+	for _, want := range []string{"balanced                     PASS", "max-worker-flow-share:0.4    FAIL"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("complete snapshot missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "INDETERMINATE") {
+		t.Fatalf("a complete snapshot must never render INDETERMINATE:\n%s", out)
+	}
+	truncated := complete
+	truncated.CoSActiveFlowCountsTruncated = true
+	out = FormatFairnessRSS(truncated, []userspace.FairnessRSSExpectation{
+		{Interface: "reth0", QueueID: 4, RSSExpectation: "balanced"},
+	})
+	if !strings.Contains(out, "balanced                     INDETERMINATE") {
+		t.Fatalf("truncated snapshot must render INDETERMINATE:\n%s", out)
 	}
 }
 

@@ -46,10 +46,16 @@ type FairnessRSSExpectationResult struct {
 	ExpectationValue    float64
 	HasExpectationValue bool
 	Pass                bool
-	Reason              string
-	ActiveFlows         uint64
-	ActiveWorkers       uint64
-	Cstruct             float64
+	// Indeterminate reports that neither PASS nor FAIL can be established:
+	// the CoS active-flow snapshot was truncated (#9369), so this queue's
+	// per-worker distribution may be incomplete. A truncated prefix can flip
+	// the verdict in EITHER direction, so it must not be reported as an
+	// ordinary FAIL either. Pass is false whenever Indeterminate is true.
+	Indeterminate bool
+	Reason        string
+	ActiveFlows   uint64
+	ActiveWorkers uint64
+	Cstruct       float64
 }
 
 type cosFairnessRSSKey struct {
@@ -268,6 +274,7 @@ func EvaluateFairnessRSSExpectations(
 			)
 		}
 		result := fairnesscontract.RSSExpectationResult{Pass: false, Reason: errString(err)}
+		indeterminate := false
 		canonical := expectation.RSSExpectation
 		kind := "invalid"
 		var value float64
@@ -294,6 +301,24 @@ func EvaluateFairnessRSSExpectations(
 				summary.Cstruct,
 				fairnessRSSTotalWorkers(status.Workers, len(summary.WorkerFlowCounts)),
 			)
+			// #9369: a truncated snapshot retains only a PREFIX of the sorted
+			// (ifindex, queue, worker) rows, so a resolved queue can arrive with
+			// part of its distribution missing, or with none of it. A verdict
+			// computed from that prefix can be a false PASS or a false FAIL, so
+			// every constrained expectation is INDETERMINATE while the snapshot is
+			// truncated. `any` constrains nothing and still evaluates. This is the
+			// same posture as the throughput path, which excludes truncated
+			// active-worker counts (fairness_throughput.go). The flag is
+			// snapshot-global, so a queue whose rows were fully retained is also
+			// held indeterminate: conservative, never wrong.
+			if summary.SourceRowsTruncated && parsed.Kind != fairnesscontract.RSSExpectationAny {
+				indeterminate = true
+				result = fairnesscontract.RSSExpectationResult{
+					Pass: false,
+					Reason: "indeterminate: CoS active-flow snapshot truncated; this queue's per-worker " +
+						"distribution may be incomplete, so neither PASS nor FAIL can be established",
+				}
+			}
 		}
 		out = append(out, FairnessRSSExpectationResult{
 			Interface:           expectation.Interface,
@@ -305,6 +330,7 @@ func EvaluateFairnessRSSExpectations(
 			ExpectationValue:    value,
 			HasExpectationValue: hasValue,
 			Pass:                result.Pass,
+			Indeterminate:       indeterminate,
 			Reason:              result.Reason,
 			ActiveFlows:         summary.ActiveFlows,
 			ActiveWorkers:       summary.ActiveWorkers,

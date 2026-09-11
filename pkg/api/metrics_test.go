@@ -2507,6 +2507,12 @@ func TestEmitFairnessRSSExpectationGauges(t *testing.T) {
 			[]string{"ifindex", "queue_id", "kind"},
 			nil,
 		),
+		fairnessRSSIndeterminate: prometheus.NewDesc(
+			"xpf_fairness_rss_expectation_indeterminate",
+			"test desc",
+			[]string{"ifindex", "queue_id", "kind"},
+			nil,
+		),
 	}
 	status := dpuserspace.ProcessStatus{
 		Workers: 4,
@@ -2538,8 +2544,9 @@ func TestEmitFairnessRSSExpectationGauges(t *testing.T) {
 	for m := range ch {
 		got = append(got, m)
 	}
-	if len(got) != 7 {
-		t.Fatalf("expected 7 expectation metrics, got %d", len(got))
+	// 3 configured + 1 value (cstruct-max) + 3 violation + 3 indeterminate (#9369).
+	if len(got) != 10 {
+		t.Fatalf("expected 10 expectation metrics, got %d", len(got))
 	}
 	labelsQ4 := map[string]string{"ifindex": "80", "queue_id": "4", "kind": "balanced"}
 	assertGaugeClose(t, got, c.fairnessRSSExpectation, labelsQ4, 1)
@@ -2553,6 +2560,55 @@ func TestEmitFairnessRSSExpectationGauges(t *testing.T) {
 	assertGaugeClose(t, got, c.fairnessRSSExpectation, labelsQ6, 1)
 	assertGaugeClose(t, got, c.fairnessRSSExpectationValue, labelsQ6, 0.25)
 	assertGaugeClose(t, got, c.fairnessRSSSkewViolation, labelsQ6, 1)
+	for _, l := range []map[string]string{labelsQ4, labelsQ5, labelsQ6} {
+		assertGaugeClose(t, got, c.fairnessRSSIndeterminate, l, 0)
+	}
+}
+
+// #9369: on a truncated snapshot a constrained expectation is INDETERMINATE.
+// It emits xpf_fairness_rss_expectation_indeterminate=1 and NO violation
+// sample: a 0 would read as a clean fairness board, and a 1 as a false alarm.
+func TestEmitFairnessRSSExpectationGaugesIndeterminateOnTruncation_9369(t *testing.T) {
+	desc := func(name string) *prometheus.Desc {
+		return prometheus.NewDesc(name, "test desc", []string{"ifindex", "queue_id", "kind"}, nil)
+	}
+	c := &xpfCollector{
+		fairnessRSSExpectation:      desc("xpf_fairness_rss_expectation_configured"),
+		fairnessRSSExpectationValue: desc("xpf_fairness_rss_expectation_value"),
+		fairnessRSSSkewViolation:    desc("xpf_fairness_rss_skew_violation"),
+		fairnessRSSIndeterminate:    desc("xpf_fairness_rss_expectation_indeterminate"),
+	}
+	status := dpuserspace.ProcessStatus{
+		Workers:                      4,
+		Bindings:                     []dpuserspace.BindingStatus{{Interface: "reth0", Ifindex: 80}},
+		CoSActiveFlowCountsTruncated: true,
+		CoSActiveFlowCounts: []dpuserspace.CoSActiveFlowCountStatus{
+			{Ifindex: 80, QueueID: 4, WorkerID: 0, ActiveFlowCount: 1},
+		},
+	}
+	ch := make(chan prometheus.Metric)
+	go func() {
+		c.emitFairnessRSSExpectationGauges(ch, status, []dpuserspace.FairnessRSSExpectation{
+			{Interface: "reth0", QueueID: 4, RSSExpectation: "cstruct-max:0.1"},
+		})
+		close(ch)
+	}()
+	var got []prometheus.Metric
+	for m := range ch {
+		got = append(got, m)
+	}
+	labels := map[string]string{"ifindex": "80", "queue_id": "4", "kind": "cstruct-max"}
+	assertGaugeClose(t, got, c.fairnessRSSExpectation, labels, 1)
+	assertGaugeClose(t, got, c.fairnessRSSIndeterminate, labels, 1)
+	for _, m := range got {
+		if m.Desc() == c.fairnessRSSSkewViolation {
+			t.Fatalf("#9369: an indeterminate expectation must emit NO violation sample, got %v", m)
+		}
+	}
+	// configured + value + indeterminate; no violation.
+	if len(got) != 3 {
+		t.Fatalf("expected 3 metrics for an indeterminate expectation, got %d", len(got))
+	}
 }
 
 // fairnessExpectationCollector adapts emitFairnessRSSExpectationGauges to

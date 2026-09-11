@@ -150,14 +150,22 @@ func FormatFairnessRSS(status userspace.ProcessStatus, expectations []userspace.
 	if results := userspace.EvaluateFairnessRSSExpectations(status, expectations); len(results) > 0 {
 		fmt.Fprintln(&b)
 		fmt.Fprintln(&b, "RSS expectations:")
-		fmt.Fprintf(&b, "  %-12s %-7s %-28s %-6s %-11s %-13s %-10s %s\n",
-			"Interface", "Queue", "Expectation", "Pass", "ActiveFlows", "ActiveWorkers", "Cstruct", "Reason")
+		fmt.Fprintf(&b, "  %-12s %-7s %-28s %-13s %-11s %-13s %-10s %s\n",
+			"Interface", "Queue", "Expectation", "Result", "ActiveFlows", "ActiveWorkers", "Cstruct", "Reason")
 		for _, result := range results {
-			fmt.Fprintf(&b, "  %-12s %-7d %-28s %-6t %-11d %-13d %-10.6f %s\n",
+			// #9369: a tri-state verdict. INDETERMINATE must not read as FAIL (or PASS).
+			verdict := "FAIL"
+			switch {
+			case result.Indeterminate:
+				verdict = "INDETERMINATE"
+			case result.Pass:
+				verdict = "PASS"
+			}
+			fmt.Fprintf(&b, "  %-12s %-7d %-28s %-13s %-11d %-13d %-10.6f %s\n",
 				result.Interface,
 				result.QueueID,
 				result.Expectation,
-				result.Pass,
+				verdict,
 				result.ActiveFlows,
 				result.ActiveWorkers,
 				result.Cstruct,
