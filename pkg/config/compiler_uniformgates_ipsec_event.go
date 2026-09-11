@@ -197,5 +197,22 @@ func runUniformGatesIPsecEvent(tree *ConfigTree, cfg *Config, opts compileOpts) 
 		}
 	}
 
+	// #9623: reject an IPsec name that becomes a swanctl SA identifier but is
+	// not display-safe (a C1 control, a line or paragraph separator, or invalid
+	// UTF-8). The name renders raw into the swanctl config, but GetSAStatus
+	// display-escapes it (#6584), so HA IPsec SA sync publishes a DIFFERENT
+	// string and the peer's `swanctl --initiate --child` / `--terminate --ike`
+	// never matches it: that tunnel is not re-initiated on failover. Strict on
+	// commit / commit-check; lenient on load / peer-sync (warn so the config
+	// still boots).
+	if err := validateIPsecSANamesDisplaySafeStrict(cfg); err != nil {
+		if opts.lenientIPsecSANameDisplay {
+			cfg.Warnings = append(cfg.Warnings,
+				fmt.Sprintf("ipsec SA name display safety (downgraded to warning on tolerant path): %v", err))
+		} else {
+			return err
+		}
+	}
+
 	return nil
 }

@@ -616,6 +616,20 @@ all files stay in `package ipsec`, so the public API is unchanged.
   `validateIPsecManualKeyStrict` now hard-rejects it at commit with a "use
   an IKE-negotiated VPN" message (lenient warn on load — the block was
   already inert).
+- **VPN names must be display-safe (#9623).** A VPN name reaches strongSwan
+  raw: it is the connection name, the child name of a VPN with no traffic
+  selector, and the prefix of every other child. But `GetSAStatus`
+  display-sanitizes every `SAStatus` field (#6584). For a name with a C1
+  control, a line or paragraph separator, or invalid UTF-8,
+  `ActiveConnectionNames` therefore published, and `TerminateAllSAs`
+  terminated, a different string than the one swanctl knows, so HA failover
+  never re-initiated that tunnel. `validateIPsecSANamesDisplaySafeStrict`
+  (`pkg/config`) now hard-rejects such a name at commit, with a lenient warning
+  on load. `termsafe.DisplaySafe` is exactly the condition under which the two
+  spellings agree. Traffic-selector names cannot diverge, because
+  `sanitizeChildName` maps them to `[A-Za-z0-9._-]`. `terminateIKENames` is
+  `TerminateAllSAs`' name selection, split out like `activeSANames` so the whole
+  path can be driven from parsed `--list-sas` output.
 - **`establish-tunnels` enum validated (#4301, fable-167 V-5).** The leaf
   was untyped, so a typo (`on-tarffic`) or a newer value stored verbatim and
   silently degraded to on-traffic. It is now

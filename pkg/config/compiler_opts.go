@@ -531,6 +531,17 @@ type compileOpts struct {
 	// Same doctrine as lenientIPsecGatewayRefs.
 	lenientIPsecManualKey bool
 
+	// lenientIPsecSANameDisplay (#9623) downgrades the IPsec SA name
+	// display-safety reject (validateIPsecSANamesDisplaySafeStrict) from a
+	// hard error to a warning on the tolerant load / peer-sync paths. Such a
+	// name renders raw into swanctl but is published over HA IPsec SA sync
+	// display-escaped, so failover can never re-initiate or terminate that
+	// tunnel. Commit / commit-check hard-reject it; an already-persisted or
+	// peer-synced config still boots (warn), with that tunnel's HA
+	// re-initiation no more broken than before. Same doctrine as
+	// lenientIPsecManualKey.
+	lenientIPsecSANameDisplay bool
+
 	// lenientLogProfileStreamRef (#2008 H7) downgrades the
 	// `security log profile <name> stream-name <stream>` cross-reference
 	// from a hard error to a warning on the tolerant load / peer-sync
@@ -2744,6 +2755,7 @@ func lenientCompileOpts() compileOpts {
 		lenientLoginClassShadowsBuiltin:        true,
 		lenientIPsecProposalProtocol:           true,
 		lenientIPsecManualKey:                  true,
+		lenientIPsecSANameDisplay:              true,
 		lenientLogProfileStreamRef:             true,
 		lenientAuthTypeAbsent:                  true,
 		lenientMultiLeafSelfRepeat:             true,
