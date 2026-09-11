@@ -671,6 +671,28 @@ func packedOptInCases8768() map[string]packedOptInCase8768 {
 				return out
 			},
 		},
+		// #9689: `profile` opted into packedStatements when it gained its second
+		// scalar leaf, fail-mode.
+		"security/dynamic-address/address-name/profile": {
+			prefix: "security { dynamic-address { feed-server partners { url http://example.test/partners; } address-name allow-partners { ",
+			open:   "profile",
+			closer: " } } }",
+			stmts: map[string]string{
+				"feed-name": "feed-name partners",
+				"fail-mode": "fail-mode drop",
+			},
+			second: map[string]string{
+				"feed-name": "feed-name threats",
+				"fail-mode": "fail-mode retain",
+			},
+			read: func(c *Config) string {
+				b := c.Security.DynamicAddress.AddressBindings["allow-partners"]
+				if b == nil {
+					return "<no binding>"
+				}
+				return fmt.Sprintf("feeds=%v fail-mode=%q", b.FeedNames, b.FailMode)
+			},
+		},
 		"security/ipsec/proposal": {
 			prefix: "security { ipsec { ",
 			open:   "proposal ip1",
