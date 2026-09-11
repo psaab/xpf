@@ -110,6 +110,11 @@ Every apply that rebinds the management VRF calls `RestartHeartbeat`, and for
   it starts, with the 5 s `heartbeatRestartGrace`.
 - A replacement for one that never saw the peer, and every `StartHeartbeat`,
   keep the 30 s floor.
+- A restart never shortens a grace still in progress. The boot-time config
+  apply restarts the heartbeat about a second after the cold start. The
+  replacement inherits the rest of the 30 s boot grace (`inheritedHold`). The
+  first version of this change did not, and the loss-cluster gate saw fw1
+  declare a still-booting fw0 lost 13 s after that restart and take every RG.
 
 See `pkg/cluster/README.md`, "A heartbeat RESTART is not a cold boot".
 

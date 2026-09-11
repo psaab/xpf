@@ -1359,6 +1359,15 @@ type heartbeatReceiver struct {
 	// the peer (#9722). Written only before start(), so the timeout goroutine
 	// reads it without a lock.
 	seenGrace time.Duration
+	// inheritedHold is the end of a grace the REPLACED receiver was still inside
+	// when it was restarted (#9722). A restart never shortens a grace in
+	// progress. The boot-time config apply restarts the heartbeat about a second
+	// after the cold start. Holding that replacement for only
+	// heartbeatRestartGrace declared a still-booting peer lost: on the loss
+	// cluster, gate f6433a59a, fw1 marked fw0 lost 13s after the boot-time
+	// restart and took every RG. Zero when there is nothing to inherit. Written
+	// only before start().
+	inheritedHold time.Time
 
 	// peerAddr is the configured control-link peer, used to drop datagrams
 	// from any other source before they cost a MAC verification (#6888).
@@ -1563,7 +1572,10 @@ func newHeartbeatReceiver(mgr *Manager, conn *net.UDPConn, threshold int, interv
 // BEFORE start(): the last heartbeat the replaced receiver saw, and the short
 // restart grace (#9722). Only a receiver that replaced one which had seen the
 // peer is armed; lastSeen == 0 leaves the cold-boot semantics in place.
-func (r *heartbeatReceiver) armRestart(lastSeen int64) {
+// inheritedHold is the end of any grace the replaced receiver was still inside,
+// so the restart does not shorten it (see heartbeatReceiver.inheritedHold).
+func (r *heartbeatReceiver) armRestart(lastSeen int64, inheritedHold time.Time) {
+	r.inheritedHold = inheritedHold
 	if lastSeen == 0 {
 		return
 	}
@@ -1850,8 +1862,10 @@ func (r *heartbeatReceiver) checkTimeout() {
 	// #9722: a receiver that replaced one which had already seen the peer is
 	// not booting, so it holds only for heartbeatRestartGrace
 	// (seenThenLostGrace). Holding 30s there hid a peer that died just after a
-	// commit for up to 30s.
-	if time.Since(r.startedAt) < r.seenThenLostGrace() {
+	// commit for up to 30s. It still keeps whatever remained of a grace its
+	// predecessor was inside (inheritedHold). At boot, that is the cold-boot
+	// grace, which the boot-time apply's restart must not cut short.
+	if time.Since(r.startedAt) < r.seenThenLostGrace() || time.Now().Before(r.inheritedHold) {
 		return
 	}
 	// Compare in the CLOCK_MONOTONIC domain. The previous

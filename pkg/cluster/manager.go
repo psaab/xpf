@@ -432,6 +432,9 @@ type Manager struct {
 	// publishes.
 	hbRestartOwed     bool
 	hbRestartOwedSeed int64
+	// hbRestartOwedHold is the grace end the failed restart was carrying
+	// (#9722): the retry's replacement inherits it.
+	hbRestartOwedHold time.Time
 	// hbDeliberateStops counts exported StopHeartbeat calls. A failed restart
 	// records its debt only if none landed while it retried: a comms teardown
 	// in that window stopped the heartbeat on purpose (#9751).

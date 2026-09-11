@@ -39,7 +39,7 @@ func TestRestartedReceiverDeclaresAStalePeerLostAfterTheRestartGrace_9722(t *tes
 		t.Fatalf("fixture: %v after the restart must still be inside the %v cold-boot grace", sinceRestart, heartbeatStartupGrace)
 	}
 	m, r := seenPeerManager9722(t)
-	r.armRestart(MonotonicNanos() - staleAge9722.Nanoseconds())
+	r.armRestart(MonotonicNanos()-staleAge9722.Nanoseconds(), time.Time{}) // a steady-state restart: nothing to inherit
 	r.startedAt = time.Now().Add(-sinceRestart)
 
 	r.checkTimeout()
@@ -52,7 +52,7 @@ func TestRestartedReceiverDeclaresAStalePeerLostAfterTheRestartGrace_9722(t *tes
 
 func TestRestartedReceiverHoldsInsideTheRestartGraceAndForAResumedPeer_9722(t *testing.T) {
 	m, r := seenPeerManager9722(t)
-	r.armRestart(MonotonicNanos() - staleAge9722.Nanoseconds())
+	r.armRestart(MonotonicNanos()-staleAge9722.Nanoseconds(), time.Time{})
 	r.startedAt = time.Now().Add(-time.Second) // inside the restart grace
 
 	r.checkTimeout()
@@ -83,7 +83,7 @@ func TestColdStartReceiverKeepsTheStartupGrace_9722(t *testing.T) {
 
 	// armRestart(0) is a cold start too: the replaced receiver never saw the peer.
 	r2 := newHeartbeatReceiver(m, nil, DefaultHeartbeatThreshold, DefaultHeartbeatInterval, nil)
-	r2.armRestart(0)
+	r2.armRestart(0, time.Time{})
 	if r2.seenGrace != 0 || r2.lastSeen.Load() != 0 {
 		t.Errorf("armRestart(0) armed the receiver (seenGrace=%v lastSeen=%d); a restart whose "+
 			"predecessor never saw the peer must stay a cold start", r2.seenGrace, r2.lastSeen.Load())

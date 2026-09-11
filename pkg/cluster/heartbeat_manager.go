@@ -53,15 +53,16 @@ func heartbeatUDPNetwork(addr string) string {
 // the previous goroutines — their stopCh is never closed, so N restarts leak
 // N heartbeat goroutines and duplicate the on-wire heartbeat rate (#4033).
 func (m *Manager) StartHeartbeat(localAddr, peerAddr, vrfDevice, controlIface string) error {
-	return m.startHeartbeat(localAddr, peerAddr, vrfDevice, controlIface, 0)
+	return m.startHeartbeat(localAddr, peerAddr, vrfDevice, controlIface, 0, time.Time{})
 }
 
 // startHeartbeat is StartHeartbeat plus the replacement-receiver seed
 // RestartHeartbeat passes (#9722). A non-zero restartSeed arms the new receiver
 // (armRestart) with the replaced receiver's last-seen heartbeat and the short
 // restart grace, before the receiver starts. StartHeartbeat passes 0, which is
-// a cold start.
-func (m *Manager) startHeartbeat(localAddr, peerAddr, vrfDevice, controlIface string, restartSeed int64) error {
+// a cold start. inheritedHold is the end of any grace the replaced receiver was
+// still inside; the new receiver keeps it (#9722).
+func (m *Manager) startHeartbeat(localAddr, peerAddr, vrfDevice, controlIface string, restartSeed int64, inheritedHold time.Time) error {
 	// Serialize the whole stop-previous + create + install sequence so
 	// concurrent callers cannot interleave and both install a heartbeat.
 	// hbStartMu is distinct from m.mu: StopHeartbeat below takes m.mu and
@@ -165,7 +166,7 @@ func (m *Manager) startHeartbeat(localAddr, peerAddr, vrfDevice, controlIface st
 	receiver := newHeartbeatReceiver(m, recvConn, threshold, interval, peer)
 	// #9722: arm BEFORE start(), so the timeout goroutine never observes the
 	// replacement without its seed or with the cold-boot grace.
-	receiver.armRestart(restartSeed)
+	receiver.armRestart(restartSeed, inheritedHold)
 	m.hbSender = sender
 	m.hbReceiver = receiver
 	m.hbLocalAddr = localAddr
@@ -175,6 +176,7 @@ func (m *Manager) startHeartbeat(localAddr, peerAddr, vrfDevice, controlIface st
 	// #9751: a published start settles any restart debt.
 	m.hbRestartOwed = false
 	m.hbRestartOwedSeed = 0
+	m.hbRestartOwedHold = time.Time{}
 	// Start the LOCALS, and start them INSIDE the critical section (#7257).
 	// Locals because the pre-#7257 code re-read m.hbReceiver/m.hbSender after
 	// unlocking, which raced StopHeartbeat nilling them — a nil-deref panic if
@@ -249,6 +251,7 @@ func (m *Manager) StopHeartbeat() {
 	m.hbDeliberateStops++
 	m.hbRestartOwed = false
 	m.hbRestartOwedSeed = 0
+	m.hbRestartOwedHold = time.Time{}
 	m.mu.Unlock()
 	m.stopHeartbeat()
 }
@@ -405,6 +408,15 @@ func (m *Manager) RestartHeartbeat() bool {
 	controlIface := m.hbControlIface
 	notify := m.hbRestartNotifyFn
 	receiver := m.hbReceiver
+	// #9722: the end of the grace the running receiver is still inside, read
+	// under the same lock start() publishes startedAt under. The replacement
+	// inherits it, so a restart never shortens a grace in progress. With no
+	// receiver (a failed restart left the heartbeat stopped), the end that
+	// restart was carrying is inherited instead.
+	inheritedHold := m.hbRestartOwedHold
+	if receiver != nil {
+		inheritedHold = receiver.startedAt.Add(receiver.seenThenLostGrace())
+	}
 	m.mu.RUnlock()
 
 	// #9751: a heartbeat a failed restart left stopped is owed a retry, which
@@ -434,7 +446,7 @@ func (m *Manager) RestartHeartbeat() bool {
 	m.stopHeartbeat()
 
 	for i := 0; i < 5; i++ {
-		if err := m.startHeartbeat(localAddr, peerAddr, vrfDevice, controlIface, lastSeenSeed); err != nil {
+		if err := m.startHeartbeat(localAddr, peerAddr, vrfDevice, controlIface, lastSeenSeed, inheritedHold); err != nil {
 			slog.Warn("cluster: heartbeat restart bind failed, retrying",
 				"err", err, "attempt", i+1)
 			// Keep the peer's suppression guard fed (2s recency window)
@@ -456,6 +468,7 @@ func (m *Manager) RestartHeartbeat() bool {
 	if owedNow {
 		m.hbRestartOwed = true
 		m.hbRestartOwedSeed = lastSeenSeed
+		m.hbRestartOwedHold = inheritedHold
 	}
 	m.mu.Unlock()
 	slog.Error("cluster: heartbeat restart failed after retries; the next restart retries it",

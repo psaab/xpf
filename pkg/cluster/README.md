@@ -450,6 +450,26 @@ Two receivers are never armed and keep the cold-boot floor on both arms:
 
 Cells: `heartbeat_restart_grace_9722_test.go`.
 
+**A restart never SHORTENS a grace still in progress.** The config apply at
+BOOT restarts the heartbeat too, about a second after the cold start, while the
+node is still inside the 30s cold-boot floor that exists for exactly that
+apply's disruption (#4386). The first version of this change held that
+replacement for only the 5s restart grace, and the loss-cluster failover gate
+caught it:
+- fw1 cold-started its heartbeat at 12:57:02 and its boot-time VRF rebind
+  restarted it at 12:57:03;
+- at 12:57:16, still booting, fw1 declared fw0 lost and took RG0-2 while fw0
+  held RG0-1;
+- the deploy reassert could not move RG2 back.
+
+The replacement now inherits the END of the grace its predecessor was inside
+(`inheritedHold` = the predecessor's `startedAt` plus its `seenThenLostGrace`,
+read under `m.mu`). `checkTimeout` holds while either the restart grace or the
+inherited hold is running. A steady-state commit restarts a receiver whose
+boot grace ended long ago, so it still holds for only 5s. A failed restart's
+debt (#9751 below) carries the hold into its retry. Cells:
+`heartbeat_restart_boot_grace_9722_test.go`.
+
 ### A failed heartbeat restart is owed, not latched (#9751)
 
 `RestartHeartbeat` retries the bind five times, a second apart. If all five
