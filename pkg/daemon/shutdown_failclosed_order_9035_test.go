@@ -65,6 +65,9 @@ func TestFailClosedShutdownActionsPrecedeBlockingTeardowns9035(t *testing.T) {
 				switch fun.Sel.Name {
 				case "SetRGActive":
 					failClosed = append(failClosed, site{"SetRGActive(false)", call.Pos()})
+				case "markDataplaneNotArmed":
+					// #9686: the fail-closed stop closes kernel transit.
+					failClosed = append(failClosed, site{"markDataplaneNotArmed()", call.Pos()})
 				case "Shutdown":
 					// d.dhcpServer.Shutdown() — the #6787 Kea stop.
 					if id, ok := fun.X.(*ast.SelectorExpr); ok && id.Sel.Name == "dhcpServer" {
@@ -83,9 +86,10 @@ func TestFailClosedShutdownActionsPrecedeBlockingTeardowns9035(t *testing.T) {
 	// FIXTURE CHECKS FIRST. If either set is empty the ordering assertion below
 	// is vacuously true, which would read as a clean board for a file this
 	// cell never actually examined.
-	if len(failClosed) != 2 {
-		t.Fatalf("#9035: expected exactly 2 fail-closed call sites in %s "+
-			"(SetRGActive(false) and dhcpServer.Shutdown()), found %d: %v. "+
+	if len(failClosed) != 3 {
+		t.Fatalf("#9035: expected exactly 3 fail-closed call sites in %s "+
+			"(markDataplaneNotArmed() since #9686, SetRGActive(false) and "+
+			"dhcpServer.Shutdown()), found %d: %v. "+
 			"Fix this guard's model of the shutdown before trusting its verdict.",
 			file, len(failClosed), failClosed)
 	}
@@ -104,7 +108,7 @@ func TestFailClosedShutdownActionsPrecedeBlockingTeardowns9035(t *testing.T) {
 	for _, b := range blocking {
 		if b.pos < lastFailClosed.pos {
 			t.Errorf("#9035: %s runs at %s, BEFORE the fail-closed action %s at %s.\n"+
-				"Both fail-closed actions must complete before any teardown that can "+
+				"Every fail-closed action must complete before any teardown that can "+
 				"block, because systemd SIGKILLs at TimeoutStopSec wherever we are. "+
 				"A telemetry drain that outlives the budget then leaves this node "+
 				"forwarding and answering DHCP while the peer promotes onto the same "+
