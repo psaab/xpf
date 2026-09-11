@@ -22,7 +22,9 @@ import (
 //     node 0's real priority.
 //
 // A malformed identity therefore silently mis-assigns cluster OWNERSHIP /
-// priority instead of being rejected. This is DISTINCT from the sibling
+// priority instead of being rejected. (A negative numeric token is the one
+// exception to "defaults to 0": Atoi accepts it, so compileChassis keeps the
+// negative id; see validID below and #9723.) This is DISTINCT from the sibling
 // validateChassisClusterStrict (compiler_validate_strict_chassis.go), which
 // gates the COMPILED int (RG count, RG id range 0..255, node-priority range) —
 // by the time that runs the malformed token has already collapsed to 0, which
@@ -65,10 +67,14 @@ func validateChassisClusterIdentitiesAST(nodes []*Node, lenient bool) ([]string,
 		warnings = append(warnings, msg)
 		return nil
 	}
-	// validID mirrors compileChassis's Atoi-then-default: a token that Atoi
-	// accepts as a non-negative integer is what compileChassis reads; anything
-	// else (non-numeric, empty, or negative) collapses to the zero default and
-	// aliases id 0.
+	// validID accepts what compileChassis reads as a usable id: a token Atoi
+	// parses to a non-negative integer. A non-numeric or empty token collapses
+	// to the zero default and aliases id 0. A NEGATIVE numeric token does not
+	// collapse: Atoi succeeds, so compileChassis keeps the negative value
+	// (#9723). For a redundancy group that value saturates to heartbeat wire
+	// byte 0 and aliases RG0 anyway, so the tolerant path drops it
+	// (dropNegativeRedundancyGroups); a negative RG-scoped node token is kept as
+	// a priority for a node that does not exist.
 	validID := func(tok string) bool {
 		n, err := strconv.Atoi(tok)
 		return err == nil && n >= 0
