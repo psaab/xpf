@@ -10253,3 +10253,101 @@ fn flush_session_deltas_update_syncs_without_an_rt_flow_create_9412() {
         "#9412: the queued Update must end with its close class"
     );
 }
+
+// #9679: removing a session whose shared aliases were displaced by a colliding
+// session must leave the survivor's aliases in place. Before the fix
+// `remove_shared_session` deleted whatever sat at the removed session's alias
+// keys.
+//
+// Which alias slots a pair shares depends on the collision shape, so each pair
+// is checked on every slot it actually shares, and the pairs together must cover
+// all three slots. Otherwise a construction that stopped colliding would let a
+// slot's ownership check go untested silently.
+#[test]
+fn removing_a_displaced_session_keeps_the_survivors_shared_aliases_9679() {
+    let snat_ip = Ipv4Addr::new(172, 16, 80, 8);
+    // Interface SNAT: two internal hosts, same source port and destination.
+    let snat_pair = (
+        w3_forward_entry(101, 40_000, snat_ip),
+        w3_forward_entry(102, 40_000, snat_ip),
+    );
+    // Identical 5-tuples in two routing instances: the keys that zero the
+    // routing domain collide.
+    let mut domain_a = w3_forward_entry(101, 40_000, snat_ip);
+    let mut domain_b = w3_forward_entry(101, 40_000, snat_ip);
+    domain_a.key.routing_domain = 7;
+    domain_b.key.routing_domain = 9;
+    let domain_pair = (domain_a, domain_b);
+
+    let slots = |e: &SyncedSessionEntry| {
+        [
+            ("reverse-wire", reverse_session_key(&e.key, e.decision.nat), true),
+            ("reverse-canonical", reverse_canonical_key(&e.key, e.decision.nat), true),
+            ("forward-wire", forward_wire_key(&e.key, e.decision.nat), false),
+        ]
+    };
+    let mut covered = std::collections::BTreeSet::new();
+    for (label, (removed, survivor)) in [("snat", &snat_pair), ("routing-domain", &domain_pair)] {
+        assert_ne!(removed.key, survivor.key, "{label}: the pair must be two sessions");
+        let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+        let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
+        let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
+        let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
+        for entry in [removed, survivor] {
+            publish_shared_session(
+                &shared_sessions,
+                &shared_nat_sessions,
+                &shared_forward_wire_sessions,
+                &shared_owner_rg_indexes,
+                entry,
+            );
+        }
+        let owner = |slot: &SessionKey, nat: bool| {
+            let map = if nat { &shared_nat_sessions } else { &shared_forward_wire_sessions };
+            map.lock().expect("alias map").get(slot).map(|entry| entry.key.clone())
+        };
+        let removed_slots = slots(removed);
+        let survivor_slots = slots(survivor);
+        let shared: Vec<_> = removed_slots
+            .iter()
+            .zip(survivor_slots.iter())
+            .filter(|((name, key, _), (_, other, _))| key == other && !(*name == "forward-wire" && key == &removed.key))
+            .map(|((name, key, nat), _)| (*name, key.clone(), *nat))
+            .collect();
+        remove_shared_session(
+            &shared_sessions,
+            &shared_nat_sessions,
+            &shared_forward_wire_sessions,
+            &shared_owner_rg_indexes,
+            &removed.key,
+        );
+        for (name, key, nat) in &shared {
+            covered.insert(*name);
+            assert_eq!(
+                owner(key, *nat),
+                Some(survivor.key.clone()),
+                "{label}: removing the displaced session deleted the survivor's {name} alias"
+            );
+        }
+        // Control: removing the owner still deletes every alias it holds.
+        remove_shared_session(
+            &shared_sessions,
+            &shared_nat_sessions,
+            &shared_forward_wire_sessions,
+            &shared_owner_rg_indexes,
+            &survivor.key,
+        );
+        for (name, key, nat) in &survivor_slots {
+            if *name == "forward-wire" && key == &survivor.key {
+                continue;
+            }
+            assert_eq!(owner(key, *nat), None, "{label}: the owner's removal left its {name} alias behind");
+        }
+    }
+    assert_eq!(
+        covered.into_iter().collect::<Vec<_>>(),
+        vec!["forward-wire", "reverse-canonical", "reverse-wire"],
+        "the collision pairs must share every alias slot between them, or a slot's ownership check is untested"
+    );
+}
+
