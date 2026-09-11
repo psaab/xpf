@@ -278,6 +278,9 @@ func (s *SessionSync) handleMessage(conn net.Conn, msgType uint8, payload []byte
 		// can be matched on more than the epoch. Recorded on the accepted path
 		// only, beside the epoch it belongs to.
 		s.bulkRecvIncarnation = inc
+		// #9716: and WHICH CONNECTION carried it. Its BulkEnd is accepted only
+		// there; see the BulkEnd arm.
+		s.bulkRecvConn = conn
 		s.bulkRecvV4 = make(map[dataplane.SessionKey]struct{})
 		s.bulkRecvV6 = make(map[dataplane.SessionKeyV6]struct{})
 		s.bulkZoneSnapshot = zoneSnap
@@ -415,6 +418,29 @@ func (s *SessionSync) handleMessage(conn net.Conn, msgType uint8, payload []byte
 				"bulk_started_by", started.String(),
 				"local", connLocalAddrString(conn), "remote", connRemoteAddrString(conn))
 			break
+		}
+		// #9716: the incarnation check above fails open whenever either side is
+		// un-incarnated: a peer on an older build, or a bulk primed without one.
+		// Every peer process restarts its epoch at 1, so a BulkEnd buffered on a
+		// dead peer process's still-ESTABLISHED socket then completes the live
+		// bulk on a colliding epoch.
+		//
+		// The connection closes that without a wire change. BulkSync pins one
+		// connection for a whole bulk, so a legitimate end marker never arrives
+		// on another one. A legacy peer's bulk, started and ended on one
+		// connection, still completes.
+		if s.bulkRecvConn != nil && conn != s.bulkRecvConn {
+			s.bulkMu.Unlock()
+			s.stats.BulkEndsForeignConnDropped.Add(1)
+			slog.Warn("cluster sync: ignoring BulkEnd on a connection other than the one that started the bulk",
+				"epoch", epoch, "end_incarnation", endInc.String(),
+				"local", connLocalAddrString(conn), "remote", connRemoteAddrString(conn))
+			break
+		}
+		// #9716: a completion the incarnation check could not judge is matched on
+		// epoch and connection alone. Count it, so a half-upgraded pair is visible.
+		if !endInc.known() || !s.bulkRecvIncarnation.known() {
+			s.stats.BulkEndsEpochOnlyMatched.Add(1)
 		}
 		s.bulkMu.Unlock()
 		s.stats.BulkSyncEndTime.Store(time.Now().UnixNano())
