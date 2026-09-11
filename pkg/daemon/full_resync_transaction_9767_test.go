@@ -203,48 +203,61 @@ func TestFullResyncRetryInsideTheBackoffDoesNotReExport_9767(t *testing.T) {
 }
 
 func TestFullResyncPacesAnExportLargerThanTheFreeQueue_9767(t *testing.T) {
-	first, second, third := transitOpen9767(), transitOpen9767(), transitOpenV6_9767()
-	second.SrcPort = 39907
-	d, ss, exporter := resyncFixture9767(t, first, second, third)
-	d.fullResyncInstallWaitForTest = 5 * time.Second
-	fillers := ss.FillSendQueueForTesting()
+	v4b := transitOpen9767()
+	v4b.SrcPort = 39907
+	for _, tc := range []struct {
+		name   string
+		deltas []dpuserspace.SessionDeltaInfo
+		want   []string
+	}{
+		{"v4", []dpuserspace.SessionDeltaInfo{transitOpen9767(), v4b}, []string{"session_v4", "session_v4"}},
+		{"v6", []dpuserspace.SessionDeltaInfo{transitOpenV6_9767()}, []string{"session_v6"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d, ss, exporter := resyncFixture9767(t, tc.deltas...)
+			d.fullResyncInstallWaitForTest = 5 * time.Second
+			fillers := ss.FillSendQueueForTesting()
 
-	// The writer frees room only after the export has taken its snapshot, so
-	// every install meets a full queue. A lossy enqueue drops all three at once.
-	exported := make(chan struct{})
-	exporter.during = func() { close(exported) }
-	var got []string
-	writerDone := make(chan struct{})
-	go func() {
-		defer close(writerDone)
-		<-exported
-		time.Sleep(100 * time.Millisecond)
-		for {
-			typ, ok := ss.TakeQueuedMessageTypeForTesting(time.Second)
-			if !ok {
-				return
+			// The writer frees room only after the export has taken its snapshot,
+			// so the export's FIRST install meets a full queue, and a lossy
+			// enqueue drops it at once. Each family gets its own subtest: once
+			// the writer is running, a later install finds room either way.
+			exported := make(chan struct{})
+			exporter.during = func() { close(exported) }
+			var got []string
+			writerDone := make(chan struct{})
+			go func() {
+				defer close(writerDone)
+				<-exported
+				time.Sleep(100 * time.Millisecond)
+				for {
+					typ, ok := ss.TakeQueuedMessageTypeForTesting(time.Second)
+					if !ok {
+						return
+					}
+					got = append(got, typ)
+				}
+			}()
+
+			if !d.handleEventStreamFullResync() {
+				t.Fatal("#9767: the writer freed room within the install wait, so the whole export must go " +
+					"through, paced; the resync was declined instead")
 			}
-			got = append(got, typ)
-		}
-	}()
-
-	if !d.handleEventStreamFullResync() {
-		t.Fatal("#9767: the writer freed room within the install wait, so the whole export must go through, " +
-			"paced; the resync was declined instead")
-	}
-	<-writerDone
-	if len(got) != fillers+3 {
-		t.Fatalf("the writer saw %d messages, want %d fillers and the 3 exported sessions", len(got), fillers)
-	}
-	exportedTypes := []string{"session_v4", "session_v4", "session_v6"}
-	for i, typ := range got {
-		want := "filler"
-		if i >= fillers {
-			want = exportedTypes[i-fillers]
-		}
-		if typ != want {
-			t.Fatalf("send-queue message %d = %q, want %q: the export must follow what was queued before it, in order", i, typ, want)
-		}
+			<-writerDone
+			if len(got) != fillers+len(tc.want) {
+				t.Fatalf("the writer saw %d messages, want %d fillers and then %v", len(got), fillers, tc.want)
+			}
+			for i, typ := range got {
+				want := "filler"
+				if i >= fillers {
+					want = tc.want[i-fillers]
+				}
+				if typ != want {
+					t.Fatalf("send-queue message %d = %q, want %q: the export must follow what was queued "+
+						"before it, in order", i, typ, want)
+				}
+			}
+		})
 	}
 }
 
