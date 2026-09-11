@@ -142,10 +142,12 @@ class TeardownNeedsAffirmativeAbsence9325(unittest.TestCase):
     transient domain. Only the re-probe can tell the two apart."""
 
     def _virsh(self):
+        # #9669: every virsh argv names its URI (`virsh -c <uri> <verb> ...`).
         def run(argv, *a, **kw):
-            if argv[:2] == ["virsh", "destroy"]:
+            verb = argv[3] if argv[:2] == ["virsh", "-c"] and len(argv) > 3 else None
+            if verb == "destroy":
                 return _completed(1, "error: Failed to destroy domain 'fw1'")
-            if argv[:2] == ["virsh", "undefine"]:
+            if verb == "undefine":
                 return _completed(0)
             raise AssertionError(f"unexpected command {argv}")
         return run
@@ -154,10 +156,16 @@ class TeardownNeedsAffirmativeAbsence9325(unittest.TestCase):
         overlay, iso = os.path.join(td, "fw1.qcow2"), os.path.join(td, "fw1.iso")
         for f in (overlay, iso):
             open(f, "w").close()
-        seq = iter(states)
+        # #9669: the first probe is the both-URI locate (state + the URIs holding
+        # the domain); the re-probe after teardown is the aggregated state. The
+        # cells' state sequences keep their #9325 meaning: states[0] is the
+        # first answer, the rest are the re-probes.
+        first, rest = states[0], iter(states[1:])
+        located = (first, [xd.LIBVIRT_SYSTEM_URI] if first == PRESENT else [])
         with mock.patch.object(xd, "libvirt_overlay_path", return_value=overlay), \
              mock.patch.object(xd, "day0_iso_path", return_value=iso), \
-             mock.patch.object(xd, "_virsh_domain_state", side_effect=lambda n: next(seq)), \
+             mock.patch.object(xd, "_virsh_domain_locate", side_effect=lambda n: located), \
+             mock.patch.object(xd, "_virsh_domain_state", side_effect=lambda n: next(rest)), \
              mock.patch.object(xd.subprocess, "run", side_effect=self._virsh()), _quiet():
             if fn == "destroy":
                 xd.destroy_libvirt({"name": "fw1"}, xd.Runner(dry=False))

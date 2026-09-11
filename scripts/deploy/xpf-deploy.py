@@ -611,8 +611,54 @@ DOMAIN_ABSENT = "absent"
 DOMAIN_UNKNOWN = "unknown"
 
 
+# #9669: libvirt keeps a SEPARATE domain namespace per connection URI, and virsh
+# / virt-install used to run with no --connect, so they spoke to whichever URI
+# the invoking user's default resolved to. The golden and overlay disks are
+# hard-wired to system scope (/var/lib/libvirt/images), so the tool now names
+# the URI: `deploy` defines the domain at LIBVIRT_SYSTEM_URI. Teardown can no
+# longer trust ONE probe: a domain an operator deployed non-root lives in the
+# session URI, and a probe against the system URI reports it ABSENT, which is
+# exactly the answer that lets teardown delete its disks (#9325). So every
+# presence question asks BOTH URIs. A domain present in either is present,
+# and it is torn down through the URI that holds it. Absence needs both.
+LIBVIRT_SYSTEM_URI = "qemu:///system"
+LIBVIRT_SESSION_URI = "qemu:///session"
+LIBVIRT_PROBE_URIS = (LIBVIRT_SYSTEM_URI, LIBVIRT_SESSION_URI)
+
+
+def _virsh_domain_locate(name):
+    """(state, uris) for a libvirt domain across LIBVIRT_PROBE_URIS (#9669).
+
+    PRESENT with every URI that holds the domain; otherwise UNKNOWN if ANY URI
+    could not answer (an unreachable URI might hold it); otherwise ABSENT.
+    """
+    states = {uri: _virsh_domain_state_at(name, uri) for uri in LIBVIRT_PROBE_URIS}
+    present = [uri for uri in LIBVIRT_PROBE_URIS if states[uri] == DOMAIN_PRESENT]
+    if present:
+        return DOMAIN_PRESENT, present
+    if any(st == DOMAIN_UNKNOWN for st in states.values()):
+        return DOMAIN_UNKNOWN, []
+    return DOMAIN_ABSENT, []
+
+
 def _virsh_domain_state(name):
-    """PRESENT / ABSENT / UNKNOWN for a libvirt domain (query-only).
+    """PRESENT / ABSENT / UNKNOWN for a libvirt domain across both URIs (#9669)."""
+    return _virsh_domain_locate(name)[0]
+
+
+def _virsh_teardown_domain(name, uris):
+    """destroy + undefine the domain through each URI that holds it (#9669)."""
+    for uri in uris:
+        subprocess.run(["virsh", "-c", uri, "destroy", name], capture_output=True, text=True)
+        r = subprocess.run(["virsh", "-c", uri, "undefine", "--nvram", name],
+                           capture_output=True, text=True)
+        if r.returncode != 0:   # domains without NVRAM reject --nvram
+            subprocess.run(["virsh", "-c", uri, "undefine", name],
+                           capture_output=True, text=True)
+
+
+def _virsh_domain_state_at(name, uri):
+    """PRESENT / ABSENT / UNKNOWN for a libvirt domain at ONE URI (query-only).
 
     UNKNOWN is the state that did not exist before #8977, and it is the one the
     destructive callers must refuse on.
@@ -629,7 +675,7 @@ def _virsh_domain_state(name):
     read that rather than the exit code, which cannot separate them.
     """
     try:
-        r = subprocess.run(["virsh", "dominfo", name],
+        r = subprocess.run(["virsh", "-c", uri, "dominfo", name],
                            capture_output=True, text=True)
     except OSError:
         # FileNotFoundError included (#9325): a virsh this process cannot run
@@ -1223,13 +1269,13 @@ def _virsh_define(runner, name, xml):
     stopped, so the pinned-guest-PCI workflow (edit slots via `virsh edit`
     BEFORE first boot) works (fable-165 H-26)."""
     if runner.dry:
-        runner.run(["virsh", "define", f"{name}.xml"])
+        runner.run(["virsh", "-c", LIBVIRT_SYSTEM_URI, "define", f"{name}.xml"])
         return
     fd, path = tempfile.mkstemp(suffix=".xml", prefix=f"xpf-{name}-")
     try:
         with os.fdopen(fd, "w") as f:
             f.write(xml)
-        runner.run(["virsh", "define", path])
+        runner.run(["virsh", "-c", LIBVIRT_SYSTEM_URI, "define", path])
     finally:
         os.unlink(path)
 
@@ -1257,7 +1303,7 @@ def _cleanup_libvirt(name, overlay):
     """Best-effort teardown of a half-created libvirt VM: destroy+undefine the
     domain (if it got defined) and remove the per-VM overlay. Tolerant of a
     missing domain / file (fable-165 H-27)."""
-    state = _virsh_domain_state(name)
+    state, uris = _virsh_domain_locate(name)
     if state == DOMAIN_UNKNOWN:
         # #8977: this is the cleanup path of a FAILED deploy, so it must not
         # itself destroy anything it cannot account for. If libvirtd is
@@ -1274,12 +1320,7 @@ def _cleanup_libvirt(name, overlay):
     if state == DOMAIN_PRESENT:
         print(f"==> deploy of '{name}' failed; cleaning up the libvirt domain "
               f"so a re-run starts clean")
-        subprocess.run(["virsh", "destroy", name], capture_output=True, text=True)
-        r = subprocess.run(["virsh", "undefine", "--nvram", name],
-                           capture_output=True, text=True)
-        if r.returncode != 0:   # domains without NVRAM reject --nvram
-            subprocess.run(["virsh", "undefine", name],
-                           capture_output=True, text=True)
+        _virsh_teardown_domain(name, uris)
         after = _virsh_domain_state(name)
         if after != DOMAIN_ABSENT:
             # #9325: neither exit status above is evidence the overlay is free.
@@ -1303,7 +1344,7 @@ def _cleanup_libvirt(name, overlay):
 def _deploy_libvirt_inner(ap, runner, start, iso):
     name = ap["name"]
     disk = libvirt_disk(ap, runner)
-    argv = ["virt-install", "--name", name, "--memory", str(memory_mb(ap["memory"])),
+    argv = ["virt-install", "--connect", LIBVIRT_SYSTEM_URI, "--name", name, "--memory", str(memory_mb(ap["memory"])),
             "--vcpus", str(ap["cpu"]), "--import",
             "--disk", f"path={disk}",
             "--osinfo", "ubuntu26.04", "--noautoconsole"]
@@ -1413,11 +1454,12 @@ def destroy_libvirt(ap, runner):
     overlay = libvirt_overlay_path(name)
     iso = day0_iso_path(name)
     if runner.dry:
-        runner.run(["virsh", "destroy", name])
-        runner.run(["virsh", "undefine", "--nvram", name])
+        for uri in LIBVIRT_PROBE_URIS:
+            runner.run(["virsh", "-c", uri, "destroy", name])
+            runner.run(["virsh", "-c", uri, "undefine", "--nvram", name])
         runner.run(["rm", "-f", overlay])
         return
-    state = _virsh_domain_state(name)
+    state, uris = _virsh_domain_locate(name)
     if state == DOMAIN_UNKNOWN:
         # #8977: REFUSE. The probe could not reach libvirtd, so the domain may
         # be RUNNING. The destroy is survivable to skip; the unlink below is
@@ -1435,11 +1477,8 @@ def destroy_libvirt(ap, runner):
     if state == DOMAIN_PRESENT:
         print(f"==> destroying libvirt domain '{name}'")
         # destroy (power off) is best-effort — the domain may already be stopped.
-        subprocess.run(["virsh", "destroy", name], capture_output=True, text=True)
-        r = subprocess.run(["virsh", "undefine", "--nvram", name],
-                           capture_output=True, text=True)
-        if r.returncode != 0:   # domains without NVRAM reject --nvram
-            run_capture(["virsh", "undefine", name])
+        print(f"==> via {', '.join(uris)}")
+        _virsh_teardown_domain(name, uris)
         after = _virsh_domain_state(name)
         if after != DOMAIN_ABSENT:
             # #9325: as in _cleanup_libvirt, only an affirmative ABSENT frees the
@@ -1449,8 +1488,9 @@ def destroy_libvirt(ap, runner):
                 f"destroy and undefine (probe: {after}).\n"
                 f"    REFUSING to remove {overlay} or {iso} -- a running domain "
                 f"survives undefine as a transient domain and still uses them.\n"
-                f"    Stop it (virsh destroy {name}), confirm `virsh dominfo {name}` "
-                f"reports it missing, then re-run destroy.")
+                f"    Stop it (virsh -c <uri> destroy {name}), confirm `virsh -c "
+                f"{LIBVIRT_SYSTEM_URI} dominfo {name}` and `virsh -c {LIBVIRT_SESSION_URI} "
+                f"dominfo {name}` both report it missing, then re-run destroy.")
     else:
         print(f"==> libvirt domain '{name}' not present (nothing to destroy)")
     for f in (overlay, iso):
