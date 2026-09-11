@@ -283,3 +283,110 @@ fn cos_flow_hash_seed_from_os_never_returns_zero() {
         );
     }
 }
+
+// #9645: a key that differs from another ONLY by routing domain or ONLY by
+// tunnel discriminator is a different session, and must not share a flow-fair
+// bucket by construction. Before the fix such keys hashed identically for EVERY
+// seed, so this scan can never find a separating seed on the reverted code; on
+// the fixed code a chance collision survives 256 independent seeds with
+// probability about (1/4096)^256.
+fn first_separating_seed_9645(a: &SessionKey, b: &SessionKey) -> Option<u64> {
+    (0u64..256).find(|&seed| {
+        cos_flow_bucket_index(seed, Some(a)) != cos_flow_bucket_index(seed, Some(b))
+    })
+}
+
+#[test]
+fn flow_fair_bucket_separates_identical_tuples_in_different_routing_domains_9645() {
+    let default_domain = test_session_key(9000, 5201);
+    let mut tenant_a = default_domain.clone();
+    tenant_a.routing_domain = 0x5a5a_0001;
+    let mut tenant_b = default_domain.clone();
+    tenant_b.routing_domain = 0x5a5a_0002;
+    // Two ids that differ only in their upper half: FNV-1a ids are 32-bit, so
+    // this is a real shape, and a single mix of the whole u32 cannot see it.
+    let mut high_a = default_domain.clone();
+    high_a.routing_domain = 0x0001_0000;
+    let mut high_b = default_domain.clone();
+    high_b.routing_domain = 0x0002_0000;
+    for (label, a, b) in [
+        ("default vs tenant", &default_domain, &tenant_a),
+        ("tenant vs tenant", &tenant_a, &tenant_b),
+        ("upper-half-only ids", &high_a, &high_b),
+    ] {
+        assert!(
+            first_separating_seed_9645(a, b).is_some(),
+            "{label}: identical 5-tuples in different routing domains share one flow-fair bucket for every seed"
+        );
+    }
+}
+
+#[test]
+fn flow_fair_bucket_separates_tunnel_discriminators_9645() {
+    let mut base = test_session_key(0, 0);
+    base.protocol = 47; // GRE: no L4 ports, the discriminator is the identity.
+    let classes = [
+        TunnelDiscriminator::None,
+        TunnelDiscriminator::Unkeyed,
+        TunnelDiscriminator::Keyed(1),
+        TunnelDiscriminator::Keyed(2),
+        TunnelDiscriminator::Keyed(0x0001_0000),
+        TunnelDiscriminator::Keyed(0x0002_0000),
+        TunnelDiscriminator::Pptp(1),
+        TunnelDiscriminator::Unparseable,
+    ];
+    for (i, da) in classes.iter().enumerate() {
+        for db in &classes[i + 1..] {
+            let mut a = base.clone();
+            a.discriminator = *da;
+            let mut b = base.clone();
+            b.discriminator = *db;
+            assert!(
+                first_separating_seed_9645(&a, &b).is_some(),
+                "GRE keys differing only by discriminator ({da:?} vs {db:?}) share one flow-fair bucket for every seed"
+            );
+        }
+    }
+}
+
+/// The pre-#9645 bucket function, kept verbatim so the cell below can prove
+/// the default key space did not move.
+fn legacy_exact_cos_flow_bucket_9645(queue_seed: u64, flow_key: &SessionKey) -> u16 {
+    let mut seed = queue_seed ^ (flow_key.protocol as u64) ^ ((flow_key.addr_family as u64) << 8);
+    for ip in [flow_key.src_ip, flow_key.dst_ip] {
+        match ip {
+            IpAddr::V4(ip) => mix_cos_flow_bucket(&mut seed, u32::from(ip) as u64),
+            IpAddr::V6(ip) => {
+                for chunk in ip.octets().chunks_exact(8) {
+                    mix_cos_flow_bucket(&mut seed, u64::from_be_bytes(chunk.try_into().unwrap()));
+                }
+            }
+        }
+    }
+    mix_cos_flow_bucket(&mut seed, flow_key.src_port as u64);
+    mix_cos_flow_bucket(&mut seed, flow_key.dst_port as u64);
+    seed as u16
+}
+
+#[test]
+fn flow_fair_bucket_is_unchanged_for_default_domain_without_discriminator_9645() {
+    let mut v6 = test_session_key(0, 443);
+    v6.src_ip = IpAddr::V6("2001:db8::10".parse().unwrap());
+    v6.dst_ip = IpAddr::V6("2001:db8::20".parse().unwrap());
+    v6.addr_family = libc::AF_INET6 as u8;
+    for seed in [0u64, 1, 0x9e37_79b9_7f4a_7c15, u64::MAX] {
+        for port in 0u16..512 {
+            let v4 = test_session_key(20_000 + port, 5201);
+            let mut v6p = v6.clone();
+            v6p.src_port = 30_000 + port;
+            for key in [&v4, &v6p] {
+                assert_eq!(
+                    exact_cos_flow_bucket(seed, Some(key)),
+                    legacy_exact_cos_flow_bucket_9645(seed, key),
+                    "the default routing domain with no discriminator must keep the pre-#9645 bucket (seed {seed:#x}, key {key:?})"
+                );
+            }
+        }
+    }
+}
+
