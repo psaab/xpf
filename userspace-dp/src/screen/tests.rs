@@ -7650,6 +7650,95 @@ fn syn_cookie_backward_step_does_not_resurrect_a_past_cookie_9173() {
 }
 
 #[test]
+fn syn_cookie_backward_step_past_one_epoch_splits_the_nodes_both_ways_9712() {
+    // #9712 keeps the latch. After a backward wall-clock step this node mints and
+    // validates at its latched epoch, while a peer whose clock is right uses the
+    // true epoch. Each accepts only its own epoch plus or minus one. So the nodes
+    // validate each other's cookies after a one-epoch step, and refuse them in
+    // both directions after a longer one, while the two epochs stay more than one
+    // apart.
+    //
+    // With the ring, steps stay inside one rotation period, so a refusal comes
+    // from the epoch window and not from a key the peer never derived. The legacy
+    // codec (no ring) keys every epoch alike, so there even a step of several
+    // periods can only be refused by the window.
+    let wall = RING_FIRST_EPOCH_9173 + 3;
+    for ring in [published_ring_9173(), SynCookieKeyRing::default()] {
+        let far = if ring.is_present() {
+            None
+        } else {
+            Some((3 * RING_PERIOD_EPOCHS_9173, false))
+        };
+        for (step, agree) in [(1, true), (2, false)].into_iter().chain(far) {
+            let latched = wall + step;
+            let what = if agree { "validate" } else { "refuse" };
+            let codec = if ring.is_present() { "ring" } else { "legacy" };
+
+            let mut node = latched_ring_state_9173(ring.clone(), latched, wall);
+            let node_ack = ack_for_isn_9173(mint_challenge_isn_at_step_9173(
+                &mut node,
+                " on the latched node",
+            ));
+            let mut at_latch = ring_state_9173(ring.clone(), latched);
+            assert_eq!(
+                ring_verdict_9173(&mut at_latch, &node_ack),
+                SynCookieAckVerdict::Validated,
+                "premise ({codec}): after a {step}-epoch step the node mints at its latched epoch {latched}"
+            );
+            let mut peer = ring_state_9173(ring.clone(), wall);
+            assert_eq!(
+                ring_verdict_9173(&mut peer, &node_ack) == SynCookieAckVerdict::Validated,
+                agree,
+                "({codec}) after a {step}-epoch backward step, a peer on the true clock (epoch {wall}) must {what} the latched node's cookie"
+            );
+
+            let mut minter = ring_state_9173(ring.clone(), wall);
+            let peer_ack = ack_for_isn_9173(mint_challenge_isn_at_step_9173(
+                &mut minter,
+                " on the true-clock peer",
+            ));
+            let mut validator = latched_ring_state_9173(ring.clone(), latched, wall);
+            // ring_verdict_9173 passes now_secs = 128: pin the clock gate to it so the
+            // validation reads the stepped-back wall, not the host's real clock.
+            validator.syn_cookie_epoch_clock_mono_secs = 128;
+            assert_eq!(
+                ring_verdict_9173(&mut validator, &peer_ack) == SynCookieAckVerdict::Validated,
+                agree,
+                "({codec}) after a {step}-epoch backward step, the latched node (epoch {latched}) must {what} a cookie the true-clock peer minted at {wall}"
+            );
+        }
+    }
+}
+
+#[test]
+fn syn_cookie_backward_step_holds_the_latched_window_open_9712() {
+    // The accepted cost of keeping the latch (#9712), pinned so it cannot change
+    // silently. For as long as a backward step lasts, the validation window stays
+    // at the latched epoch. A cookie from the latched window therefore stays
+    // valid instead of expiring about two epochs after it was minted, and each
+    // accepted replay of its ACK refreshes its source's whitelist entry for
+    // another epoch.
+    let latched = RING_FIRST_EPOCH_9173 + 20;
+    for ring in [published_ring_9173(), SynCookieKeyRing::default()] {
+        let key = if ring.is_present() {
+            ring_key_9173(RING_ROTATION_9173)
+        } else {
+            LEGACY_KEY_9173
+        };
+        let ack = ring_ack_9173(key, latched - 1);
+        let mut state = latched_ring_state_9173(ring, latched, latched - 10);
+        state.syn_cookie_epoch_clock_mono_secs = 128;
+        assert_eq!(
+            ring_verdict_9173(&mut state, &ack),
+            SynCookieAckVerdict::Validated,
+            "ten epochs into a backward step, a cookie from the latched window (epoch {}) must still validate: \
+             the window stays at the latch for the length of the step",
+            latched - 1
+        );
+    }
+}
+
+#[test]
 fn syn_cookie_mixed_version_pair_disagrees_from_the_first_boundary_9173() {
     // An older helper ignores the ring and keeps the key of the period its last
     // full snapshot was built in, here key(R). A newer helper picks a key by the
