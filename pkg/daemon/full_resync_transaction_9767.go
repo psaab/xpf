@@ -5,9 +5,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/psaab/xpf/pkg/cluster"
 	"github.com/psaab/xpf/pkg/config"
-	"github.com/psaab/xpf/pkg/dataplane"
 	dpuserspace "github.com/psaab/xpf/pkg/dataplane/userspace"
 )
 
@@ -94,46 +92,4 @@ func (d *Daemon) queueUserspaceSessionDeltasComplete(
 			sink.missed, sink.installs)
 	}
 	return n, nil
-}
-
-// pacedQueueDeltaSink is queueDeltaSink for the FullResync export. Each install
-// waits for room in the send queue, and the sink counts the installs that did
-// not reach it. A delete is queued as queueDeltaSink queues it: one that finds
-// the queue full is journaled, and the next connected sweep flushes the journal
-// (#3926), so it is not lost.
-type pacedQueueDeltaSink struct {
-	ss       *cluster.SessionSync
-	wait     time.Duration
-	installs int
-	missed   int
-}
-
-// installWait is the next install's wait: none once an install has timed out.
-func (p *pacedQueueDeltaSink) installWait() time.Duration {
-	if p.missed > 0 {
-		return 0
-	}
-	return p.wait
-}
-
-func (p *pacedQueueDeltaSink) openV4(key dataplane.SessionKey, val dataplane.SessionValue) {
-	p.installs++
-	if !p.ss.QueueSessionV4Paced(key, val, p.installWait()) {
-		p.missed++
-	}
-}
-
-func (p *pacedQueueDeltaSink) openV6(key dataplane.SessionKeyV6, val dataplane.SessionValueV6) {
-	p.installs++
-	if !p.ss.QueueSessionV6Paced(key, val, p.installWait()) {
-		p.missed++
-	}
-}
-
-func (p *pacedQueueDeltaSink) deleteV4(key dataplane.SessionKey, _ dataplane.SessionValue) {
-	p.ss.QueueDeleteV4(key)
-}
-
-func (p *pacedQueueDeltaSink) deleteV6(key dataplane.SessionKeyV6, _ dataplane.SessionValueV6) {
-	p.ss.QueueDeleteV6(key)
 }
