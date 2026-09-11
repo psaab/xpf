@@ -104,14 +104,41 @@ func generations9641(t *testing.T) (*configstore.Store, string, string) {
 	return store, d0, d1
 }
 
+// syncApplyC1Plus9641 installs C1 (C0 plus blue-red on RG2) together with any extra
+// set lines on the SAME store, so earlier generations stay in its history. C1 renders
+// the swanctl SA name blue-red twice, which a commit refuses since #9624, and a commit
+// re-validates the whole candidate, so every generation built on C1 has to arrive the
+// tolerant way too: synced from a peer, or persisted before the gate. It uses the same
+// config-sync ingress as syncedStore9511, including its check that the strict compile
+// fails on the #9624 collision and nothing else.
+func syncApplyC1Plus9641(t *testing.T, store *configstore.Store, extra ...string) {
+	t.Helper()
+	lines := append(append(append([]string{}, clusterTwoRethIPsec9511...), blueOnRG1_9511...),
+		"set security ipsec vpn blue-red ike gateway gw-rg2")
+	lines = append(lines, extra...)
+	tr := &config.ConfigTree{}
+	for _, l := range lines {
+		p, err := config.ParseSetCommand(l)
+		if err != nil {
+			t.Fatalf("FIXTURE: parse %q: %v", l, err)
+		}
+		if err := tr.SetPath(p); err != nil {
+			t.Fatalf("FIXTURE: setpath %q: %v", l, err)
+		}
+	}
+	if _, err := config.CompileConfig(tr.Clone()); err == nil ||
+		!strings.Contains(err.Error(), "all render the swanctl SA name") {
+		t.Fatalf("FIXTURE: a C1-based generation must fail the strict compile on the #9624 SA-name collision alone, got %v", err)
+	}
+	if _, err := store.SyncApply(tr.Format(), nil); err != nil {
+		t.Fatalf("FIXTURE: SyncApply: %v", err)
+	}
+}
+
+// commitBlueRed9641 installs C1 on the store (see syncApplyC1Plus9641).
 func commitBlueRed9641(t *testing.T, store *configstore.Store) {
 	t.Helper()
-	if err := store.SetFromInput("security ipsec vpn blue-red ike gateway gw-rg2"); err != nil {
-		t.Fatalf("FIXTURE: SetFromInput: %v", err)
-	}
-	if _, err := store.Commit(); err != nil {
-		t.Fatalf("FIXTURE: Commit: %v", err)
-	}
+	syncApplyC1Plus9641(t, store)
 }
 
 func initiates9641(d *Daemon, name string) bool {

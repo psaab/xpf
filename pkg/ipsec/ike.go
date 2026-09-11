@@ -621,6 +621,21 @@ func (m *Manager) TerminateAllSAs() (int, error) {
 		return 0, err
 	}
 	count := 0
+	for _, ikeName := range terminateIKENames(sas) {
+		if out, err := runSwanctl("--terminate", "--ike", ikeName); err != nil {
+			slog.Warn("swanctl terminate failed", "ike", ikeName, "err", err, "output", string(out))
+		} else {
+			count++
+		}
+	}
+	return count, nil
+}
+
+// terminateIKENames is TerminateAllSAs' selection, split from the swanctl exec so the names it
+// terminates can be driven from parsed `--list-sas` output (#9623): each SA's IKE connection
+// name, else its own name, deduplicated in listing order.
+func terminateIKENames(sas []SAStatus) []string {
+	names := make([]string, 0, len(sas))
 	seen := make(map[string]bool)
 	for _, sa := range sas {
 		ikeName := sa.ConnectionName
@@ -631,13 +646,9 @@ func (m *Manager) TerminateAllSAs() (int, error) {
 			continue
 		}
 		seen[ikeName] = true
-		if out, err := runSwanctl("--terminate", "--ike", ikeName); err != nil {
-			slog.Warn("swanctl terminate failed", "ike", ikeName, "err", err, "output", string(out))
-		} else {
-			count++
-		}
+		names = append(names, ikeName)
 	}
-	return count, nil
+	return names
 }
 
 // ActiveConnectionNames returns the deduplicated SA names `swanctl --list-sas`
