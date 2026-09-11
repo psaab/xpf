@@ -304,6 +304,214 @@ func (d *Daemon) startGRPCServer(ctx context.Context, wg *sync.WaitGroup, eventB
 // no ordering dependency (same code, same call point, still guarded by the
 // d.opts.APIAddr check in Run).
 func (d *Daemon) startHTTPServer(ctx context.Context, wg *sync.WaitGroup, eventBuf *logging.EventBuffer) {
+	apiCfg := d.apiServerConfig(eventBuf)
+	// #5866: the management HTTP/HTTPS listener is owned by
+	// managementReconciler. apiCfg here carries only the runtime deps; the
+	// reconciler re-derives the bind/port/TLS/auth from each ACTIVE config
+	// (resolveAPIBinds) so it can start the listener now AND, on every day-2
+	// commit, reconcile the live listener + authentication snapshot without a
+	// restart — make-before-break rebind on a bind/port/TLS change, live auth
+	// swap on an unchanged bind. Before #5866 the server was constructed once
+	// here and never reconciled, so a committed bind/TLS/port/auth change (e.g.
+	// a revoked credential) sat inert until a daemon restart.
+	// #6719: publish the reconciler ATOMICALLY, and BEFORE start() runs. The
+	// readers are already live — startClusterComms is ~190 lines earlier in Run,
+	// so a peer sync can reach reconcileWebManagement before this line. The
+	// atomic makes that read safe; publishing before start() also means such a
+	// reconcile finds a non-nil reconciler and is merely no-opped by the
+	// `m.srv == nil` gate rather than dropped at the daemon level — and start()
+	// then derives its snapshot from the store UNDER m.mu, so the promotion that
+	// reconcile carried is picked up rather than lost. (#6827 round 5 published
+	// this under staleCertMu; the atomic supersedes that and covers every
+	// reader, not just the stale-cert path.)
+	mgmt := newManagementReconciler(d, apiCfg)
+	d.mgmt.Store(mgmt)
+	if err := mgmt.start(ctx); err != nil {
+		// A boot bind failure is non-fatal (matches the pre-#5866 async
+		// srv.Run error log): the daemon keeps running and the next commit's
+		// reconcileWebManagement retries the bind.
+		slog.Error("HTTP API server initial start failed", "err", err)
+	}
+	// #6827: the boot config apply (startup phase 4) runs BEFORE this
+	// constructor, so a `system host-name` applied at boot reached a nil
+	// reconciler and parked itself. Deliver it now that an HTTPS leg may be
+	// serving — this is the earliest point at which the diagnostic has a real
+	// certificate to judge, and the name is still the one the operator set.
+	d.deliverStaleMgmtCertDiagnosis()
+	// Drain the management serve goroutines on daemon shutdown: ctx cancel
+	// triggers the api.Server graceful drain (5s deadline, not a wall-clock
+	// bound — see api.legDrainTimeout), and wait() joins every
+	// live + retiring listener goroutine so none leak past Run.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		<-ctx.Done()
+		d.mgmt.Load().wait()
+	}()
+	slog.Info("HTTP API server started", "addr", d.opts.APIAddr)
+}
+
+// resolveAPIBinds finalizes the HTTP/HTTPS listen addresses, TLS flag, and
+// api-auth on apiCfg from the active web-management config, then applies the
+// #4047/#5127 loopback fail-safe clamp. It is split out of startHTTPServer so
+// the bind/auth/clamp decision is unit-testable without opening a socket.
+//
+// cfg is the active config; it may be nil or lack a `system services
+// web-management` stanza. The KEY invariant (#5127): the loopback clamp runs
+// UNCONDITIONALLY — even when no web-management block exists — because
+// apiCfg.Addr defaults to the `--api-addr` flag, which an operator can point
+// off-loopback with no web-management stanza at all. Before #5127 the clamp
+// lived INSIDE the web-management block, so that flag path bound the mutating
+// REST/config API (set / commit / rollback / DHCP / system-action) to the
+// network UNAUTHENTICATED, defeating the #4047 fail-safe.
+func (d *Daemon) resolveAPIBinds(apiCfg *api.Config, cfg *config.Config) {
+	if cfg != nil && cfg.System.Services != nil &&
+		cfg.System.Services.WebManagement != nil {
+		wm := cfg.System.Services.WebManagement
+		// #5715: an explicitly configured `web-management http` binds the
+		// canonical Junos J-Web port TCP/80 (webmgmt SSOT — the SAME port the
+		// host-inbound `http` service token admits, so the listener and the
+		// admission agree), on the configured interface address or loopback.
+		// With NO `web-management http` stanza (wm.HTTP false — e.g. an
+		// api-auth-only block) apiCfg.Addr is left untouched at the -api-addr
+		// default (127.0.0.1:8080), a loopback-only diagnostic path that is never
+		// host-inbound-admitted; that path must NOT be silently moved to port 80.
+		if wm.HTTP {
+			httpBindIP := "127.0.0.1"
+			if wm.HTTPInterface != "" {
+				httpBindIP = resolveInterfaceAddr(cfg, wm.HTTPInterface, "127.0.0.1")
+			}
+			// net.JoinHostPort (not string-concat) so an IPv6 interface
+			// address is bracketed ("[2001:db8::1]:80") — a bare
+			// "2001:db8::1:80" is unparseable by net.SplitHostPort (the
+			// clamp below) and net.Listen, blackholing an IPv6-only mgmt bind.
+			apiCfg.Addr = net.JoinHostPort(httpBindIP, webmgmt.HTTPPortString())
+			slog.Info("HTTP web-management bound", "interface", wm.HTTPInterface, "addr", apiCfg.Addr)
+		}
+		// Enable HTTPS if configured — bind the canonical TCP/443 (webmgmt SSOT).
+		if wm.HTTPS {
+			httpsBindIP := "127.0.0.1"
+			if wm.HTTPSInterface != "" {
+				httpsBindIP = resolveInterfaceAddr(cfg, wm.HTTPSInterface, "127.0.0.1")
+			}
+			apiCfg.TLS = true
+			apiCfg.HTTPSAddr = net.JoinHostPort(httpsBindIP, webmgmt.HTTPSPortString())
+			slog.Info("HTTPS web-management bound", "interface", wm.HTTPSInterface, "addr", apiCfg.HTTPSAddr)
+		}
+		// API authentication
+		if wm.APIAuth != nil && (len(wm.APIAuth.Users) > 0 || len(wm.APIAuth.APIKeys) > 0) {
+			authCfg := &api.AuthConfig{
+				Users:   make(map[string]string),
+				APIKeys: make(map[string]bool),
+			}
+			// #5636: never wire an EMPTY Basic password or empty api-key into
+			// the runtime AuthConfig. A quoted-empty secret parses as a real
+			// credential row but is not a valid credential — wiring it would let
+			// a request presenting `username:` (no password) or an empty
+			// Bearer / X-API-Key token authenticate, an auth bypass on an
+			// off-loopback bind. The commit gate rejects such a config, but an
+			// already-persisted / peer-synced config is lenient-loaded (#1960),
+			// so drop the empty credential here too (defense in depth; the
+			// middleware also rejects an empty configured secret).
+			for _, u := range wm.APIAuth.Users {
+				if pw := u.Password.Reveal(); pw != "" {
+					authCfg.Users[u.Username] = pw
+				}
+			}
+			for _, k := range wm.APIAuth.APIKeys {
+				if key := k.Reveal(); key != "" {
+					authCfg.APIKeys[key] = true
+				}
+			}
+			// Only enable auth when at least one USABLE credential survived; an
+			// all-empty api-auth stanza leaves apiCfg.Auth nil so the #4047
+			// runtime clamp still pulls a non-loopback bind back to loopback.
+			if len(authCfg.Users) > 0 || len(authCfg.APIKeys) > 0 {
+				apiCfg.Auth = authCfg
+				slog.Info("HTTP API authentication enabled", "users", len(authCfg.Users), "api_keys", len(authCfg.APIKeys))
+			} else {
+				slog.Warn("HTTP API api-auth configured with only empty secrets; ignoring (no valid credential) — #5636")
+			}
+		}
+	}
+
+	// #4047 part B / #5127: runtime fail-safe clamp, applied on EVERY path
+	// (whether or not a web-management stanza exists). The commit gate
+	// (validateWebManagementAuthStrict, pkg/config) rejects a NEW web-management
+	// config that binds the unauthenticated REST/config API off-loopback without
+	// api-auth, but an ALREADY-PERSISTED such config is lenient-loaded (warn, no
+	// brick — #1960), AND the `--api-addr` flag has no commit gate at all
+	// (#5127). Either can bind non-loopback UNAUTHENTICATED, exposing the
+	// mutating config endpoints (set / commit / rollback / DHCP / system-action)
+	// to the network. clampBindToLoopback is a no-op when the bind is already
+	// loopback OR api-auth is configured, so the default 127.0.0.1:8080 path and
+	// an authenticated off-loopback web-management bind are unaffected; it only
+	// pulls a non-loopback + no-auth bind back to a same-family loopback and
+	// WARNs. The daemon still boots and the web API stays reachable on loopback,
+	// with the console/SSH the lifeline (device-map §9.6 posture) until the
+	// operator adds api-auth (which restores the non-loopback bind).
+	hasAuth := apiCfg.Auth != nil
+	if clamped, ok := clampBindToLoopback(apiCfg.Addr, hasAuth); ok {
+		slog.Warn("HTTP API bind is non-loopback without api-auth; clamping to loopback (add `set system services web-management api-auth` to bind off-loopback) — #4047/#5127",
+			"requested", apiCfg.Addr, "clamped", clamped)
+		apiCfg.Addr = clamped
+	}
+	if apiCfg.TLS {
+		if clamped, ok := clampBindToLoopback(apiCfg.HTTPSAddr, hasAuth); ok {
+			slog.Warn("HTTPS API bind is non-loopback without api-auth; clamping to loopback — #4047/#5127",
+				"requested", apiCfg.HTTPSAddr, "clamped", clamped)
+			apiCfg.HTTPSAddr = clamped
+		}
+	}
+}
+
+// helperCrashEpisodes reports how many userspace-dataplane helper crash
+// episodes this daemon has recovered from, for #8397's
+// xpf_dataplane_helper_crash_episodes_total.
+//
+// Returns 0 when the userspace manager is absent — a daemon with no helper has
+// had no helper crashes, and 0 is the honest answer rather than a missing
+// series. An absent series reads as healthy to an alert, which is the same
+// failure this metric exists to correct.
+func (d *Daemon) helperCrashEpisodes() int {
+	// Reuses the same adapter assertion the #8121 lease sync uses; the
+	// userspace Manager is reachable only through the published dataplane.
+	mgr := d.persistentNatLeaseManager()
+	if mgr == nil {
+		return 0
+	}
+	_, total := mgr.HelperCrashHistory()
+	return total
+}
+
+// forwardingSupported reports whether the userspace dataplane is forwarding
+// transit, for #8447's xpf_dataplane_forwarding_supported.
+//
+// Returns TRUE when there is no userspace manager. That is the deliberate
+// choice and it is worth stating: this metric answers "has a capability gate
+// disarmed forwarding", and a daemon with no userspace manager has no such
+// gate. Reporting 0 there would fire the alert on every config-only daemon and
+// on every moment before the dataplane is published, which is how a signal
+// gets muted.
+//
+// The metric is omitted entirely when the accessor is not wired (see
+// collectForwardingSupported), so "we cannot see" and "forwarding is live"
+// stay distinguishable at the surface even though both are true here.
+func (d *Daemon) forwardingSupported() bool {
+	mgr := d.persistentNatLeaseManager()
+	if mgr == nil {
+		return true
+	}
+	return mgr.ForwardingSupported()
+}
+
+// apiServerConfig builds the api.Config the HTTP API server runs with. It is its
+// own method so TestAPIServerConfigBindsEveryHook_9443 can see every hook
+// assignment: while the literal lived inline in startHTTPServer, which no test
+// calls, deleting any one hook still compiled and failed no test (#9443). Keep
+// every api.Config hook assigned HERE; the test fails on any func field left nil
+// that is not a documented injection seam.
+func (d *Daemon) apiServerConfig(eventBuf *logging.EventBuffer) api.Config {
 	// #2114 (r4): the LIVE indirection, for the same reason as gRPC above —
 	// api.Server keeps Config.DP for the daemon's lifetime, so a startup
 	// snapshot outlived every setDataplane(nil). liveDataPlane satisfies the
@@ -315,7 +523,7 @@ func (d *Daemon) startHTTPServer(ctx context.Context, wg *sync.WaitGroup, eventB
 	if live, ok := d.liveDataplane(); ok {
 		apiDP = live
 	}
-	apiCfg := api.Config{
+	return api.Config{
 		Addr:     d.opts.APIAddr,
 		Store:    d.store,
 		DP:       apiDP,
@@ -652,202 +860,4 @@ func (d *Daemon) startHTTPServer(ctx context.Context, wg *sync.WaitGroup, eventB
 			return d.grpcSrv
 		},
 	}
-	// #5866: the management HTTP/HTTPS listener is owned by
-	// managementReconciler. apiCfg here carries only the runtime deps; the
-	// reconciler re-derives the bind/port/TLS/auth from each ACTIVE config
-	// (resolveAPIBinds) so it can start the listener now AND, on every day-2
-	// commit, reconcile the live listener + authentication snapshot without a
-	// restart — make-before-break rebind on a bind/port/TLS change, live auth
-	// swap on an unchanged bind. Before #5866 the server was constructed once
-	// here and never reconciled, so a committed bind/TLS/port/auth change (e.g.
-	// a revoked credential) sat inert until a daemon restart.
-	// #6719: publish the reconciler ATOMICALLY, and BEFORE start() runs. The
-	// readers are already live — startClusterComms is ~190 lines earlier in Run,
-	// so a peer sync can reach reconcileWebManagement before this line. The
-	// atomic makes that read safe; publishing before start() also means such a
-	// reconcile finds a non-nil reconciler and is merely no-opped by the
-	// `m.srv == nil` gate rather than dropped at the daemon level — and start()
-	// then derives its snapshot from the store UNDER m.mu, so the promotion that
-	// reconcile carried is picked up rather than lost. (#6827 round 5 published
-	// this under staleCertMu; the atomic supersedes that and covers every
-	// reader, not just the stale-cert path.)
-	mgmt := newManagementReconciler(d, apiCfg)
-	d.mgmt.Store(mgmt)
-	if err := mgmt.start(ctx); err != nil {
-		// A boot bind failure is non-fatal (matches the pre-#5866 async
-		// srv.Run error log): the daemon keeps running and the next commit's
-		// reconcileWebManagement retries the bind.
-		slog.Error("HTTP API server initial start failed", "err", err)
-	}
-	// #6827: the boot config apply (startup phase 4) runs BEFORE this
-	// constructor, so a `system host-name` applied at boot reached a nil
-	// reconciler and parked itself. Deliver it now that an HTTPS leg may be
-	// serving — this is the earliest point at which the diagnostic has a real
-	// certificate to judge, and the name is still the one the operator set.
-	d.deliverStaleMgmtCertDiagnosis()
-	// Drain the management serve goroutines on daemon shutdown: ctx cancel
-	// triggers the api.Server graceful drain (5s deadline, not a wall-clock
-	// bound — see api.legDrainTimeout), and wait() joins every
-	// live + retiring listener goroutine so none leak past Run.
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		<-ctx.Done()
-		d.mgmt.Load().wait()
-	}()
-	slog.Info("HTTP API server started", "addr", d.opts.APIAddr)
-}
-
-// resolveAPIBinds finalizes the HTTP/HTTPS listen addresses, TLS flag, and
-// api-auth on apiCfg from the active web-management config, then applies the
-// #4047/#5127 loopback fail-safe clamp. It is split out of startHTTPServer so
-// the bind/auth/clamp decision is unit-testable without opening a socket.
-//
-// cfg is the active config; it may be nil or lack a `system services
-// web-management` stanza. The KEY invariant (#5127): the loopback clamp runs
-// UNCONDITIONALLY — even when no web-management block exists — because
-// apiCfg.Addr defaults to the `--api-addr` flag, which an operator can point
-// off-loopback with no web-management stanza at all. Before #5127 the clamp
-// lived INSIDE the web-management block, so that flag path bound the mutating
-// REST/config API (set / commit / rollback / DHCP / system-action) to the
-// network UNAUTHENTICATED, defeating the #4047 fail-safe.
-func (d *Daemon) resolveAPIBinds(apiCfg *api.Config, cfg *config.Config) {
-	if cfg != nil && cfg.System.Services != nil &&
-		cfg.System.Services.WebManagement != nil {
-		wm := cfg.System.Services.WebManagement
-		// #5715: an explicitly configured `web-management http` binds the
-		// canonical Junos J-Web port TCP/80 (webmgmt SSOT — the SAME port the
-		// host-inbound `http` service token admits, so the listener and the
-		// admission agree), on the configured interface address or loopback.
-		// With NO `web-management http` stanza (wm.HTTP false — e.g. an
-		// api-auth-only block) apiCfg.Addr is left untouched at the -api-addr
-		// default (127.0.0.1:8080), a loopback-only diagnostic path that is never
-		// host-inbound-admitted; that path must NOT be silently moved to port 80.
-		if wm.HTTP {
-			httpBindIP := "127.0.0.1"
-			if wm.HTTPInterface != "" {
-				httpBindIP = resolveInterfaceAddr(cfg, wm.HTTPInterface, "127.0.0.1")
-			}
-			// net.JoinHostPort (not string-concat) so an IPv6 interface
-			// address is bracketed ("[2001:db8::1]:80") — a bare
-			// "2001:db8::1:80" is unparseable by net.SplitHostPort (the
-			// clamp below) and net.Listen, blackholing an IPv6-only mgmt bind.
-			apiCfg.Addr = net.JoinHostPort(httpBindIP, webmgmt.HTTPPortString())
-			slog.Info("HTTP web-management bound", "interface", wm.HTTPInterface, "addr", apiCfg.Addr)
-		}
-		// Enable HTTPS if configured — bind the canonical TCP/443 (webmgmt SSOT).
-		if wm.HTTPS {
-			httpsBindIP := "127.0.0.1"
-			if wm.HTTPSInterface != "" {
-				httpsBindIP = resolveInterfaceAddr(cfg, wm.HTTPSInterface, "127.0.0.1")
-			}
-			apiCfg.TLS = true
-			apiCfg.HTTPSAddr = net.JoinHostPort(httpsBindIP, webmgmt.HTTPSPortString())
-			slog.Info("HTTPS web-management bound", "interface", wm.HTTPSInterface, "addr", apiCfg.HTTPSAddr)
-		}
-		// API authentication
-		if wm.APIAuth != nil && (len(wm.APIAuth.Users) > 0 || len(wm.APIAuth.APIKeys) > 0) {
-			authCfg := &api.AuthConfig{
-				Users:   make(map[string]string),
-				APIKeys: make(map[string]bool),
-			}
-			// #5636: never wire an EMPTY Basic password or empty api-key into
-			// the runtime AuthConfig. A quoted-empty secret parses as a real
-			// credential row but is not a valid credential — wiring it would let
-			// a request presenting `username:` (no password) or an empty
-			// Bearer / X-API-Key token authenticate, an auth bypass on an
-			// off-loopback bind. The commit gate rejects such a config, but an
-			// already-persisted / peer-synced config is lenient-loaded (#1960),
-			// so drop the empty credential here too (defense in depth; the
-			// middleware also rejects an empty configured secret).
-			for _, u := range wm.APIAuth.Users {
-				if pw := u.Password.Reveal(); pw != "" {
-					authCfg.Users[u.Username] = pw
-				}
-			}
-			for _, k := range wm.APIAuth.APIKeys {
-				if key := k.Reveal(); key != "" {
-					authCfg.APIKeys[key] = true
-				}
-			}
-			// Only enable auth when at least one USABLE credential survived; an
-			// all-empty api-auth stanza leaves apiCfg.Auth nil so the #4047
-			// runtime clamp still pulls a non-loopback bind back to loopback.
-			if len(authCfg.Users) > 0 || len(authCfg.APIKeys) > 0 {
-				apiCfg.Auth = authCfg
-				slog.Info("HTTP API authentication enabled", "users", len(authCfg.Users), "api_keys", len(authCfg.APIKeys))
-			} else {
-				slog.Warn("HTTP API api-auth configured with only empty secrets; ignoring (no valid credential) — #5636")
-			}
-		}
-	}
-
-	// #4047 part B / #5127: runtime fail-safe clamp, applied on EVERY path
-	// (whether or not a web-management stanza exists). The commit gate
-	// (validateWebManagementAuthStrict, pkg/config) rejects a NEW web-management
-	// config that binds the unauthenticated REST/config API off-loopback without
-	// api-auth, but an ALREADY-PERSISTED such config is lenient-loaded (warn, no
-	// brick — #1960), AND the `--api-addr` flag has no commit gate at all
-	// (#5127). Either can bind non-loopback UNAUTHENTICATED, exposing the
-	// mutating config endpoints (set / commit / rollback / DHCP / system-action)
-	// to the network. clampBindToLoopback is a no-op when the bind is already
-	// loopback OR api-auth is configured, so the default 127.0.0.1:8080 path and
-	// an authenticated off-loopback web-management bind are unaffected; it only
-	// pulls a non-loopback + no-auth bind back to a same-family loopback and
-	// WARNs. The daemon still boots and the web API stays reachable on loopback,
-	// with the console/SSH the lifeline (device-map §9.6 posture) until the
-	// operator adds api-auth (which restores the non-loopback bind).
-	hasAuth := apiCfg.Auth != nil
-	if clamped, ok := clampBindToLoopback(apiCfg.Addr, hasAuth); ok {
-		slog.Warn("HTTP API bind is non-loopback without api-auth; clamping to loopback (add `set system services web-management api-auth` to bind off-loopback) — #4047/#5127",
-			"requested", apiCfg.Addr, "clamped", clamped)
-		apiCfg.Addr = clamped
-	}
-	if apiCfg.TLS {
-		if clamped, ok := clampBindToLoopback(apiCfg.HTTPSAddr, hasAuth); ok {
-			slog.Warn("HTTPS API bind is non-loopback without api-auth; clamping to loopback — #4047/#5127",
-				"requested", apiCfg.HTTPSAddr, "clamped", clamped)
-			apiCfg.HTTPSAddr = clamped
-		}
-	}
-}
-
-// helperCrashEpisodes reports how many userspace-dataplane helper crash
-// episodes this daemon has recovered from, for #8397's
-// xpf_dataplane_helper_crash_episodes_total.
-//
-// Returns 0 when the userspace manager is absent — a daemon with no helper has
-// had no helper crashes, and 0 is the honest answer rather than a missing
-// series. An absent series reads as healthy to an alert, which is the same
-// failure this metric exists to correct.
-func (d *Daemon) helperCrashEpisodes() int {
-	// Reuses the same adapter assertion the #8121 lease sync uses; the
-	// userspace Manager is reachable only through the published dataplane.
-	mgr := d.persistentNatLeaseManager()
-	if mgr == nil {
-		return 0
-	}
-	_, total := mgr.HelperCrashHistory()
-	return total
-}
-
-// forwardingSupported reports whether the userspace dataplane is forwarding
-// transit, for #8447's xpf_dataplane_forwarding_supported.
-//
-// Returns TRUE when there is no userspace manager. That is the deliberate
-// choice and it is worth stating: this metric answers "has a capability gate
-// disarmed forwarding", and a daemon with no userspace manager has no such
-// gate. Reporting 0 there would fire the alert on every config-only daemon and
-// on every moment before the dataplane is published, which is how a signal
-// gets muted.
-//
-// The metric is omitted entirely when the accessor is not wired (see
-// collectForwardingSupported), so "we cannot see" and "forwarding is live"
-// stay distinguishable at the surface even though both are true here.
-func (d *Daemon) forwardingSupported() bool {
-	mgr := d.persistentNatLeaseManager()
-	if mgr == nil {
-		return true
-	}
-	return mgr.ForwardingSupported()
 }
