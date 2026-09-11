@@ -2620,9 +2620,20 @@ func validateNAT64PrefixStrict(cfg *Config, lenient bool) ([]string, error) {
 // Both previously committed cleanly and installed a static NAT with no
 // translation (silent broken 1:1). NPTv6 rules are skipped (their Then holds the
 // nptv6 prefix and buildStaticNATSnapshots handles them on a separate path).
-// Strict on commit / commit-check (hard reject); the call site downgrades to a
-// warning on the tolerant load / peer-sync path (#1960) where the dataplane then
-// fails closed (the empty prefix does not parse as an IP → no translation).
+// Strict on commit / commit-check (hard reject). The call site downgrades to a
+// warning on the tolerant load / peer-sync path (#1960), and there NOTHING
+// downstream holds the rule closed:
+//
+//   - StaticNATRuleExcludedReason does not drop an empty target, so the
+//     snapshot carries InternalIP "";
+//   - the Rust dataplane's parse_nat_prefix fails on that value
+//     (userspace-dp/src/nat/static_nat.rs), and the rule is counted as a parse
+//     error and SKIPPED;
+//   - the packet keeps its original destination and forwards UNTRANSLATED if
+//     policy and routing allow it, as this function's own error string says.
+//
+// The strict reject is the only fail-closed step, which is why this gate
+// hard-rejects rather than relying on a dataplane backstop (#9532).
 // Rule-sets are walked in slice order for a deterministic first error.
 func validateStaticNATThenTargetStrict(cfg *Config) error {
 	if cfg == nil {
