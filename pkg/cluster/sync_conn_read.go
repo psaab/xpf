@@ -489,8 +489,8 @@ func (s *SessionSync) handleMessage(conn net.Conn, msgType uint8, payload []byte
 			slog.Debug("cluster sync: ignoring BulkAck with no pending outbound bulk", "got", epoch, "pending", pending)
 			return
 		}
-		s.pendingBulkAckEpoch.Store(0)
-		s.pendingBulkAckSince.Store(0)
+		owed := s.pendingBulkOwed.Load() // #9626: the debt this bulk was sent to pay
+		s.clearPendingBulkAck()
 		s.bulkEverCompleted.Store(true)
 		// #4360: the peer acked OUR outbound bulk — record it on the
 		// outbound-only flag so a stranded outbound bulk can be re-driven on a
@@ -498,6 +498,9 @@ func (s *SessionSync) handleMessage(conn net.Conn, msgType uint8, payload []byte
 		// sets bulkEverCompleted at syncMsgBulkEnd) completed first.
 		s.outboundBulkAcked.Store(true)
 		s.dischargeBarrierFence(fenceCapture)
+		// #9626: the peer now holds the table this bulk carried, which is what
+		// discharges an owed cold prime, and only the one the bulk was sent for.
+		s.dischargeColdPrime(owed)
 		if s.OnBulkSyncAckReceived != nil {
 			go s.OnBulkSyncAckReceived()
 		}

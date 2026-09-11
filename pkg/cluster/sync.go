@@ -1077,6 +1077,16 @@ type SessionSync struct {
 	// holds our full table and incremental sync keeps it fresh across
 	// reconnects, so it is never reset.
 	outboundBulkAcked atomic.Bool
+	// pendingBulkOwed is the cold-prime generation the pending outbound bulk was
+	// sent to pay (#9626): coldPrimeGen as it stood when that bulk STARTED, or 0
+	// when no cold prime was owed then. It is recorded beside
+	// pendingBulkAckEpoch and cleared with it (clearPendingBulkAck), and the
+	// matching BulkAck discharges exactly that generation (dischargeColdPrime).
+	pendingBulkOwed atomic.Uint64
+	// coldPrimeGen numbers the cold-prime arms (#9626). Every arm runs under s.mu
+	// and bumps it (armColdPrimeLocked), so a discharge that compares it under
+	// s.mu cannot clear a debt armed after the bulk it acknowledges started.
+	coldPrimeGen atomic.Uint64
 	// bulkRedriveInFlight guards the survivor-fabric cold-start bulk
 	// re-drive (#4090). A single fabric dropping mid-cold-start-bulk while
 	// the other fabric is up leaves the bulk stranded — pinned to the dead
@@ -1090,7 +1100,8 @@ type SessionSync struct {
 	// needColdPrime latches the outstanding cold-prime obligation across the
 	// per-accept goroutines (#4962). It is armed under s.mu on a full
 	// disconnect -> connect transition (both fabric slots were empty) and
-	// consumed (cleared) only when a cold-prime bulk actually SUCCEEDS. Because
+	// consumed (cleared) only when the PEER acknowledges a cold-prime bulk
+	// (#9626; see the end of this comment). Because
 	// handleNewConnection now runs per-accept (post-#4370), two same-fabric
 	// accepts can race: the first observes the empty registry and installs, the
 	// second observes the first's connection and supersedes it — closing it and
@@ -1100,10 +1111,18 @@ type SessionSync struct {
 	// cold-prime: the peer never received the authoritative session table and
 	// blackholed established flows on the next failover. The latch lets the
 	// surviving connection INHERIT the obligation and re-drive the bulk. Like
-	// forceResync it is a plain atomic.Bool; the narrow window where a newer
-	// full-disconnect epoch's arm is cleared by an older epoch's success
-	// self-heals via forceResync / the #4090 survivor re-drive / the next
-	// reconnect.
+	// forceResync it is a plain atomic.Bool.
+	//
+	// #9626: it is discharged by the PEER, not by a local write. A bulk whose
+	// BulkEnd was written can still die in the kernel before the peer consumes
+	// it, so only the matching BulkAck (sync_conn_read.go) clears the latch, and
+	// only if no newer arm has happened since that bulk started. Every arm bumps
+	// coldPrimeGen under s.mu, the bulk carries the generation it was sent to
+	// pay (pendingBulkOwed), and the ack compares the two under s.mu. The success
+	// paths that used to clear it (handleNewConnection, the survivor re-drive,
+	// the sweep's owed re-drive) no longer do. The sweep instead waits up to
+	// BulkAckPendingRetryAfter for the ack of a bulk sent for the current debt
+	// before re-driving.
 	needColdPrime  atomic.Bool
 	bulkMu         sync.Mutex
 	bulkInProgress bool

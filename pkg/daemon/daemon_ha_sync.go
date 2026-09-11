@@ -208,7 +208,8 @@ func (d *Daemon) startSessionSyncPrimeRetry(gen uint64) {
 	}
 	go func() {
 		intervals := []time.Duration{10 * time.Second, 20 * time.Second, 30 * time.Second, 30 * time.Second, 30 * time.Second, 30 * time.Second}
-		const retryWhileAckPendingAfter = 35 * time.Second
+		// #9626: the same bound the sweep's owed cold-prime re-drive waits for.
+		retryWhileAckPendingAfter := cluster.BulkAckPendingRetryAfter
 		maxAttempts := len(intervals)
 		baseline := ss.Stats()
 		slog.Info("cluster: starting session sync bulk-prime retry loop",

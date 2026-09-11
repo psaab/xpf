@@ -2199,9 +2199,9 @@ connection is authenticated, then seals every subsequent frame.
   failover). `installConn` now wires the connection into `conn0`/`conn1`
   and computes the cold-prime decision under the **same** `s.mu`
   acquisition, gated on a `needColdPrime` latch (armed on a
-  full-disconnect→connect edge, consumed only when a bulk succeeds) so the
-  surviving accept **inherits** the outstanding obligation and re-drives
-  the bulk. See `docs/session-sync-architecture.md` → "Atomic Install +
+  full-disconnect→connect edge, consumed only when the PEER acknowledges a
+  bulk sent for that debt, #9626) so the surviving accept **inherits** the
+  outstanding obligation and re-drives the bulk. See `docs/session-sync-architecture.md` → "Atomic Install +
   Cold-Prime Decision (#4962)".
 
 ## Operating the control-link PSK (#6611)
@@ -4139,14 +4139,54 @@ outside the monitor loop:
   the epoch baseline and evicts the corpse. #9174 V014 armed the obligation on
   the epoch edge only, so this order retired the dead incarnation and owed
   nothing. `applyPeerIncarnationSwitchLocked` now arms `needColdPrime` whenever
-  the switch applies, and the sweep's owed-cold-prime re-drive discharges it on
-  success only. The arm is deliberately NOT gated on the switch having evicted
+  the switch applies. The sweep's owed-cold-prime re-drive sends the bulk, and
+  the replacement's BulkAck discharges the debt (#9626, below). The arm is
+  deliberately NOT gated on the switch having evicted
   anything: the corpse's own receive loop can remove it after the replacement
   installed, and the switch is then the only classifier that ever sees the
   reboot. The first incarnated prime (zero -> X) never reaches the switch
   (`priorInc.known()`), and a same-boot BulkStart on the peer's second fabric is
   not a switch, so neither arms. When both signals observe one reboot the cost
   is at most one redundant, idempotent bulk.
+
+  **The PEER discharges the obligation, not a local write (#9626).** Every arm
+  above used to be paid off when `doBulkSync` returned nil. That means the
+  frames through BulkEnd were WRITTEN, not received: a fabric that dies after
+  the kernel took them leaves the debt cleared and the peer's table empty. It
+  was also an unversioned flag, cleared with `Store(false)` outside `s.mu`, so a
+  bulk that finished after a newer reboot was classified cleared the newer
+  debt. Both are closed by one mechanism:
+  - every arm goes through `armColdPrimeLocked`, which bumps `coldPrimeGen`
+    under `s.mu`;
+  - a bulk takes the generation of the debt outstanding when it STARTS
+    (`coldPrimeOwedGen`) and records it beside its pending epoch
+    (`pendingBulkOwed`, stamped before the epoch);
+  - only the matching BulkAck discharges, through `dischargeColdPrime`, which
+    clears the flag under `s.mu` only if that stamp is still the current
+    generation;
+  - the three success paths no longer clear anything, and every abandon of a
+    pending bulk goes through `clearPendingBulkAck`, which drops the stamp too.
+
+  Because the discharge now waits for the peer, the sweep's owed re-drive skips
+  while the bulk sent for the current debt is younger than
+  `BulkAckPendingRetryAfter` (`coldPrimeAckAwaited`). Past that bound the ack is
+  treated as lost and the bulk goes again. The bound is the daemon's
+  bulk-prime retry bound (35 s), exported so there is one number. Cells:
+  `sync_cold_prime_ack_9626_test.go`.
+
+  **Accepted limitation, with its owner (#9626 item 3).** A cold prime carries
+  only the redundancy groups this node is PRIMARY for when the bulk is built:
+  `storeBulkWalk` filters by `ShouldSyncZone`, and the table-truth snapshot
+  comes from the owner-RG export (`primaryOwnerRGIDs`,
+  `pkg/daemon/daemon_ha_userspace_export.go`). A survivor that is still
+  SECONDARY for an RG when a table-losing replacement reconnects sends none of
+  that RG's standby copies. The window is narrow: heartbeat loss (`~1 s`) makes
+  the survivor primary for every RG, and `handlePeerTimeout` clears manual
+  failover pins, before a restarted peer's sync connects. It stays open only
+  when peer loss is not declared first: a table-losing restart faster than
+  detection, or a timeout suppressed by the sync-recency or transfer-commit
+  guards. Closing it means exporting standby copies on the owner-RG export path.
+  That path's owner is the daemon's session export, not this latch.
 
   **What this does not close.** The two classifiers are still not reconciled
   (#9636): a boot-id-first reboot gets no `OnPeerConnected` dispatch (DHCP-lease
