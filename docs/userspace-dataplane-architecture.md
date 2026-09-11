@@ -2364,9 +2364,9 @@ state). `buildScreenSnapshots` and its siblings `buildScreenMissingProfileRefs` 
 `buildScreenInertProfileRefs` (`screens.go`, feeding `Screens` /
 `ScreenMissingProfiles` / `ScreenInertProfiles`) now collect the
 zone names, `sort.Strings` them, and range in sorted order — matching the
-long-standing pattern in `buildZoneSnapshots` (`zones.go`) and
-`synCookieScreenedZones` (the SYN-cookie key's zone list). The SYN-cookie key derivation and all
-zone-host-inbound builders already sorted; the NAT / tunnel / neighbor
+long-standing pattern in `buildZoneSnapshots` (`zones.go`). The
+zone-host-inbound builders already sorted, and the SYN-cookie key no longer
+reads zone names at all (#9740); the NAT / tunnel / neighbor
 builders range config SLICES (already ordered), so they were never affected.
 
 **The same hash is the apply_snapshot content identity (#9520).**

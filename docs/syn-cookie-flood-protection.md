@@ -244,10 +244,12 @@ does ONE `zones` lookup instead of re-hashing the zone name into each table.
 zone's in-flight counters and reconciling its threshold-gated sub-state
 (`ZoneScreenState::reconcile_substate`) — the same allocate-on-enable /
 free-on-disable / preserve-across-unrelated-edit behaviour as before. The
-global SYN-cookie codec, validated cache, and epoch cache stay separate
-`ScreenState` fields (they are cross-zone, keyed by `zone_id`), as do the per-IP
-scan/sweep trackers and the `missing_profile_*` bookkeeping. String zone-name
-keys are retained; numeric zone-id keying is deferred to #4421.
+global SYN-cookie codec, validated cache, and cached epoch clock stay separate
+`ScreenState` fields, as do the per-IP scan/sweep trackers and the
+`missing_profile_*` bookkeeping. They are cross-zone: the codec and the epoch
+clock are not keyed by zone at all, and the validated cache keys each entry by
+the zone's name tag and its SYN-cookie profile generation (#9740). String
+zone-name keys are retained; numeric zone-id keying is deferred to #4421.
 
 Memory (per worker): `RateCounter` ≈ 16 B. The per-destination sketch costs
 `ROWS*DST_COLS*16 = 64 KiB` and is allocated only when `destination-threshold`
@@ -410,9 +412,9 @@ over-throttle is protective or benign rather than a bug (see `screen/rate.rs` an
 Invalid ACKs outside a local active flood window remain ordinary session-miss
 traffic instead of being counted as cookie failures.
 
-The validated-client cache is keyed by `(zone_id, profile_generation, 4-tuple)`
-(#2446). Each zone carries a SYN-cookie profile generation that is bumped
-whenever a SYN-cookie-relevant profile field changes — the `syn-cookie`
+The validated-client cache is keyed by `(zone tag, profile generation,
+source-scoped client)` (#2446, #9419, #9740). Each zone carries a SYN-cookie
+profile generation that is bumped whenever a SYN-cookie-relevant profile field changes — the `syn-cookie`
 enable/disable toggle or the `syn-flood` threshold, plus the zone gaining or
 losing a profile (how a zone→profile rebinding manifests). The current
 generation is stamped into an entry on insert and compared on consume: an entry
@@ -423,14 +425,39 @@ validated under the old profile bypass the new profile's flood gate until the
 cache TTL expired. The master-key-rotation clear (`set_hash_keys`) remains as
 defense in depth, and unrelated profile edits (e.g. stateless screens,
 scan/sweep thresholds) do NOT bump the generation, so they cause no
-re-validation churn.
+re-validation churn. Generations come from one counter for the whole screen
+state, not from a per-zone count (#9740): the cache outlives a removed zone for
+up to one cookie epoch, and a per-zone count gave every incarnation of a
+re-created zone the same generation, so a client validated before the removal
+bypassed the new zone's gate.
 
 ### Key derivation and rotation (#9173)
 
 The cookie key is derived in two steps. `buildSYNCookieKeys`
 (`pkg/dataplane/userspace/screens.go`) computes a **base**: `HMAC-SHA256` over a
-domain label, the cluster identity and the screened (zone, profile) pairs, each
-field length-prefixed so no name can frame the bytes of a different set. A period's **key** is
+domain label and the length-prefixed cluster identity. The screened zones are not
+an input (#9740). In the base, they made nodes that screen different zones
+disagree on every key, and made a commit that adds or removes a screened zone
+invalidate every cookie minted before it. A screened zone still has to exist for
+any key to be built.
+
+Zone separation now lives in each cookie instead. The cookie MAC, its epoch
+secret and the validated-client entry are bound to a tag of the zone NAME: the
+first 128 bits of SHA-256 over a domain label and the length-prefixed name
+(`syn_cookie_zone_tag`, `userspace-dp/src/screen/syncookie.rs`). They are not
+bound to the 16-bit StableZoneID, whose fold collides. The tag is computed once
+per profile update and kept in the zone's state, so the packet path hashes
+nothing. As a result:
+
+- a cookie minted in one zone never validates in another, not even one whose
+  zone ID collides;
+- a cookie still validates on a peer that has the same zone.
+
+The base no longer separates two clusters that share an authentication-key and
+a cluster-id, whatever zones they screen, so give each cluster its own
+authentication-key.
+
+A period's **key** is
 `HMAC-SHA256(base, "xpf-syncookie\0v3-epoch\0" || rotation epoch)`, truncated to
 16 bytes. The key is no longer a function of the root password verifier. A base,
 and every key derived from it, is still an offline check on guesses at the
@@ -448,8 +475,6 @@ the #9520 content digest):
 if the validating node holds the minting node's primary base. That takes:
 
 - the same cluster-id;
-- the same screened (zone, profile) set, which node-specific configuration can
-  break (#9740);
 - the minting node's `authentication-key`, held by the validating node as its
   own `authentication-key` or, during a #6630 rotation, as its
   `additional-authentication-key`. That second form is an accept-only base,
@@ -492,14 +517,16 @@ options.
 
 `syn_cookie_master_key` keeps its meaning: the key to mint and validate with. A
 new control plane sets it to the key of the period the snapshot was built in, so
-an older helper that ignores the ring still works, but it does not rotate: it
-keeps that key until its next full snapshot. From the first period boundary after
-that snapshot, an older and a newer helper disagree in both directions: the older
-one signs later epochs with the old period's key, and the newer one picks the new
-period's key by the cookie's epoch. A later full snapshot hands the older helper
-the then-current period's key and restores the pair until the next boundary. So
-until both nodes run this release, a handshake that straddles a failover between
-them is refused from each boundary until the older helper's next full snapshot. An ABSENT ring (an older control
+an older helper that ignores the ring still mints and validates its own cookies,
+but it does not rotate: it keeps that key until its next full snapshot.
+
+Two helpers agree on a cookie only if they share its format as well as its key.
+Every helper from before #9740, including every helper that ignores the ring,
+absorbs the 16-bit zone id into the MAC and the per-epoch secret, where this
+release absorbs the zone tag. So an older helper and this one refuse each other's
+cookies from the first one, in both directions, whatever key they hold: until
+both nodes run this release, a handshake that straddles a failover between them
+is refused. An ABSENT ring (an older control
 plane) leaves `syn_cookie_master_key` in charge. A PRESENT ring is
 authoritative: one with no usable base -- empty, a malformed base, or a period
 that is not a whole number of cookie epochs -- fails every cookie closed
@@ -509,8 +536,8 @@ contents: an omitted ring is absent, and an explicitly empty or `null` one is
 present and fails closed.
 
 The helper holds the base, so a compromise of the helper's memory yields every
-period's key until the base changes (a PSK or cluster-id change, a screened-zone
-change, or a daemon restart on a node without an authentication-key), not only
+period's key until the base changes (a PSK or cluster-id change, or a daemon
+restart on a node without an authentication-key), not only
 the adjacent periods' keys.
 
 **PSK rotation (#6630).** While `additional-authentication-key` is set, the
@@ -541,7 +568,7 @@ forge valid SYN cookies and defeat source validation.
 
 Nothing needs to be persisted: the Go control plane derives the key material
 (on a keyed cluster deterministically from the chassis cluster
-authentication-key + cluster-id + screened zones, and on a standalone or
+authentication-key + cluster-id, and on a standalone or
 unkeyed node from a per-daemon-start random secret that is never persisted;
 `buildSYNCookieKeys`, `pkg/dataplane/userspace/screens.go`) and re-delivers it
 on every config push over the control socket (`apply_snapshot`). The helper
@@ -625,7 +652,7 @@ that state — the application calls `connect()` again, which allocates a **new
 ephemeral source port**. So the only shape in which the recovery step can
 occur is a NEW connection from the same client.
 
-The whitelist is therefore keyed on `(zone_id, profile_gen, src_ip, dst_ip,
+The whitelist is therefore keyed on `(zone_tag, profile_gen, src_ip, dst_ip,
 dst_port)` — deliberately **no source port** — and a hit does **not** consume
 the entry. It is bounded instead by:
 
