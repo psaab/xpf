@@ -71,6 +71,13 @@ type InterfaceConfig struct {
 	VRFName          string   // VRF device name (e.g. "vrf-mgmt") — emits [Network] VRF= so networkctl reconfigure preserves binding
 	BridgeMaster     string   // bridge device name to join (e.g. "br-bd0")
 	IsBridge         bool     // true = this is a bridge device (needs .netdev file)
+
+	// VLANParentAddresses are addresses a VLAN parent carries ITSELF. Addresses
+	// is ignored for a VLAN parent, so a sub-interface's addresses cannot leak
+	// onto it; this field is the explicit exception. Its one producer is the
+	// VRRP advert source of a VRRP-backed RETH whose untagged unit binds its
+	// instance to the parent device (#9721).
+	VLANParentAddresses []string
 }
 
 // Manager handles systemd-networkd .link and .network file generation.
@@ -894,6 +901,16 @@ func (m *Manager) generateNetwork(ifc InterfaceConfig) string {
 			for _, addr := range addrs {
 				fmt.Fprintf(&b, "Address=%s\n", addr)
 			}
+		}
+	}
+
+	// #9721: a VLAN parent's OWN addresses, the VRRP advert source of a
+	// VRRP-backed RETH whose untagged unit binds its instance to this device.
+	// Addresses stays ignored above for a VLAN parent; only this explicit
+	// field renders on one.
+	if ifc.IsVLANParent {
+		for _, addr := range ifc.VLANParentAddresses {
+			fmt.Fprintf(&b, "Address=%s\n", addr)
 		}
 	}
 

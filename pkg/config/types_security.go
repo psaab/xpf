@@ -127,6 +127,13 @@ type FeedEntry struct {
 type AddressBinding struct {
 	Name      string
 	FeedNames []string // feed-names referenced in the profile
+	// FailMode is the profile's `fail-mode` (#9689). "" or "retain" keeps the
+	// #5645 behaviour: a binding with an unready feed is omitted, so its
+	// policies fail closed and the previous-good snapshot stays enforced. "drop"
+	// publishes the binding anyway once every unready feed was dropped by its
+	// hold-interval, so an allowlist becomes permit-none and a denylist
+	// deny-none, and later commits are not blocked by it.
+	FailMode string
 }
 
 // SecurityConfig holds all security-related configuration.

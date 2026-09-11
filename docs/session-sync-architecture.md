@@ -1588,8 +1588,9 @@ tiny queue indices), so the two writers can never alias. That reservation is a
 cross-language invariant, and it is ENFORCED on the Rust side rather than merely
 recorded: `SessionTable::set_worker_id` asserts a worker id never lands on
 `CONTROL_PLANE_SESSION_ID_WORKER_HI`. A hard `assert!`, not `debug_assert!` —
-`make test-rust` and the shipped helper both build `--release`, where a debug
-assertion is stripped and would guard nothing — and worker setup is config time,
+the shipped helper builds `--release`, and so does `make test-rust`'s main leg
+(its #9499 debug-profile leg covers only the frame, NAT, session and checksum
+tests), where a debug assertion is stripped and would guard nothing — and worker setup is config time,
 where `docs/engineering-style.md` prefers crash-start over running with a wrong
 invariant. The counter never
 returns `0` — that is the established "unknown id" sentinel that makes

@@ -203,6 +203,22 @@ all files stay in `package ipsec`, so the public API is unchanged.
 
   Covered by `terminate_debt_6542_test.go`.
 
+
+- **The teardown record survives an xpfd restart (#9687).** `prevConnNames`
+  and `pendingTerminate` were memory-only, and the daemon builds a fresh
+  `Manager` on every start. A restart between a failed terminate (#6542), a
+  failed reload that deferred a removal (#4898), or a teardown still running,
+  and its retry, forgot the departed connection; strongSwan's SAs survive the
+  restart, so its child SA kept forwarding. `New()` now persists both to
+  `DefaultConnStatePath` (`/var/lib/xpf/ipsec-conn-state.json`,
+  `conn_state_9687.go`) with a durable write at every promotion and every
+  settle. A removal counts as debt from its promotion until its terminate
+  settles, and a fresh `Manager` folds the file in once, at its first
+  promotion. The daemon applies IPsec on every config apply, even with no
+  VPNs, so the first apply after a restart retries the teardown. A missing,
+  unreadable or oversized file is ignored with a warning (the old behaviour),
+  and a failed write is logged rather than failing the apply.
+  `NewWithConfigDir` Managers do not persist.
 - **The diff keys off the RENDERED set, not the raw VPN name (#5494 —
   FLIPS the prior #3941 name-keyed behavior).** `renderConfig` returns the
   EXACT set of connection names it emitted; `Apply` diffs THAT. A VPN that
@@ -648,11 +664,41 @@ all files stay in `package ipsec`, so the public API is unchanged.
   `validateIPsecManualKeyStrict` now hard-rejects it at commit with a "use
   an IKE-negotiated VPN" message (lenient warn on load — the block was
   already inert).
+- **VPN names must be display-safe (#9623).** A VPN name reaches strongSwan
+  raw: it is the connection name, the child name of a VPN with no traffic
+  selector, and the prefix of every other child. But `GetSAStatus`
+  display-sanitizes every `SAStatus` field (#6584). For a name with a C1
+  control, a line or paragraph separator, or invalid UTF-8,
+  `ActiveConnectionNames` therefore published, and `TerminateAllSAs`
+  terminated, a different string than the one swanctl knows, so HA failover
+  never re-initiated that tunnel. `validateIPsecSANamesDisplaySafeStrict`
+  (`pkg/config`) now hard-rejects such a name at commit, with a lenient warning
+  on load. `termsafe.DisplaySafe` is exactly the condition under which the two
+  spellings agree. Traffic-selector names cannot diverge, because
+  `sanitizeChildName` maps them to `[A-Za-z0-9._-]`. `terminateIKENames` is
+  `TerminateAllSAs`' name selection, split out like `activeSANames` so the whole
+  path can be driven from parsed `--list-sas` output.
 - **`establish-tunnels` enum validated (#4301, fable-167 V-5).** The leaf
   was untyped, so a typo (`on-tarffic`) or a newer value stored verbatim and
   silently degraded to on-traffic. It is now
   `ValidateEnum([immediately, on-traffic, responder-only])` in
   `setSchema` — a typo fails closed at commit.
+- **Two VPNs may not render the same SA name (#9624).** The renderer keeps
+  child names unique only within one VPN (#5122). Across VPNs, two
+  ordinary-looking configs collide:
+  - VPN `a` with selector `b-c` and VPN `a-b` with selector `c` both render
+    child `a-b-c`;
+  - VPN `blue` with selector `red` renders child `blue-red`, which VPN
+    `blue-red` also uses for its connection and child.
+
+  `swanctl --initiate --child` identifies a child by name alone, so HA failover
+  could not say which tunnel it brings up. `validateIPsecSANameCollisionsStrict`
+  (`pkg/config`) now rejects such a config at commit, naming the VPNs and the SA
+  name, with a lenient warning on load. The name derivation lives in
+  `pkg/ipsecname`, and both this renderer (`effectiveTrafficSelectors`) and the
+  gate call it, so the gate checks exactly what renders.
+  `TestSANameDerivationMatchesTheRenderIndex9624` pins the gate to
+  `BuildSANameIndex`.
 - **AES-GCM IKE PRF + ICV-suffix canonicalization (#2125).** The
   load-bearing fix: a strongSwan IKEv2 AEAD (AES-GCM) proposal MUST
   name a PRF explicitly — an AEAD cipher carries no integrity algorithm
@@ -825,3 +871,18 @@ all files stay in `package ipsec`, so the public API is unchanged.
   name still collides. Unlike the #4098 gate this does NOT reject the
   config: two selectors with distinct legal Junos names are valid, so the
   fix makes both render (vSRX parity) rather than failing the commit.
+
+## Section names: the #9495 allowlist and render belt
+
+An IPsec VPN name is written raw as a swanctl section header: the connection, the child of a VPN with no traffic selector, the prefix of every other child, and the `ike-<name>` secret.
+
+Measured on the pinned strongSwan (`docs/log/9495.md`):
+- **Whole file unparsable, so every tunnel is lost:** whitespace, `{`, `}`, `#`, `=`, `,`, `"` or `.` in a VPN name.
+- **Structure injection:** `x { children { p { mode = transport } } } y` loads two connections, and the injected setting is applied.
+- **Silent rename:** `:` loads the tunnel under another name (section inheritance).
+- **Refused:** `%` and non-ASCII.
+
+Three pieces close this:
+- **Commit allowlist.** `ipsecname.SectionSafe` accepts only ASCII letters, digits, `-` and `_`. `validateIPsecSectionNamesStrict` refuses anything else at commit and commit-check, naming the VPN. On the tolerant load / peer-sync path it warns instead (`lenientIPsecSectionName`), so a persisted or synced config still boots.
+- **Render belt.** `ipsecname.SectionBreaking` is the narrower set measured to break the file. `renderConfig` skips such a VPN, and its secret with it, and logs a warning, so one hostile persisted name cannot take down the other tunnels. It is deliberately narrower than the allowlist: a name that loads today (for example `a/b`) is refused at commit but keeps rendering when persisted, so an upgrade does not take down a working tunnel.
+- **Selector names.** `ipsecname.ChildBase` maps `.` to `-`, like every other character outside `[A-Za-z0-9_-]`. A dotted selector (`sel` with `t.s`) rendered child `sel-t.s`, which strongSwan could not parse. Such a child never loaded, so no working config changes, and the #9624 collision derivation shares `ChildBase`.

@@ -1312,7 +1312,9 @@ func buildInterfaceNetworkdModels(cfg *config.Config, result *CompileResult, see
 		}
 
 		if effectiveCfg.VlanTagging {
-			// VLAN parent: no addresses, just rename
+			// VLAN parent: none of its units' addresses, just rename. The one
+			// exception is the VRRP advert source (#9721, vlanParentVRRPSource).
+			parentAddrs := vlanParentVRRPSource(effectiveCfg, isVRRPReth, clusterNodeID)
 			if !seen[linuxName] {
 				seen[linuxName] = true
 				result.ManagedInterfaces = append(result.ManagedInterfaces, networkd.InterfaceConfig{
@@ -1325,6 +1327,13 @@ func buildInterfaceNetworkdModels(cfg *config.Config, result *CompileResult, see
 					Duplex:       ifCfg.Duplex,
 					MTU:          ifCfg.MTU,
 					Description:  ifCfg.Description,
+					// #9721: the advert source, plus KeepAddresses so a
+					// networkctl reload keeps the VIPs VRRP adds to this
+					// device, as on every other RETH device. Both only when the
+					// parent carries the source: a tagged-only parent renders
+					// exactly as before.
+					VLANParentAddresses: parentAddrs,
+					KeepAddresses:       len(parentAddrs) > 0,
 				})
 			}
 			// VLAN sub-interfaces get their own .network file

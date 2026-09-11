@@ -36,6 +36,14 @@ func (s *SessionSync) noteHelperMirrorResult(af string, warned *atomic.Bool, err
 // gen-0 (unconditional delete / unconditional install), which is always SAFE
 // — gen-0 never causes a wrongful delete of a *different* live incarnation,
 // it only loses the stale-delete protection for that one new key.
+//
+// #9719: two arms of that safety valve were permanent rather than momentary.
+//   - Receiver: a tombstone never frees its entry, so churn filled the map with
+//     tombstones and then skip-recorded every new key until the next bulk. A new
+//     key at the cap now evicts the oldest tombstone first (genTombstoneOrder).
+//   - Sender: above the cap a new key was not stamped, so its delete went out
+//     with generation 0. After an overflow, a missing stamp now draws a fresh
+//     generation (takeDeleteGenV4).
 const genGuardMapCap = 200000
 
 // putGenBounded records gen for key in m without ever clearing the map or
@@ -163,6 +171,9 @@ func (s *SessionSync) stampInstallGenV4(key dataplane.SessionKey, val *dataplane
 	}
 	if !putGenBounded(s.genSentV4, key, g) {
 		s.stats.GenMapOverflow.Add(1)
+		// #9719: from now on a missing stamp no longer means "never sent in this
+		// boot"; see takeDeleteGenV4.
+		s.genSentOverflowV4 = true
 	}
 	// #9412: keep this frame from regressing the close class already sent for
 	// the same incarnation (a mirror-sourced resend carries 0). Same lock.
@@ -189,6 +200,7 @@ func (s *SessionSync) stampInstallGenV6(key dataplane.SessionKeyV6, val *datapla
 	}
 	if !putGenBounded(s.genSentV6, key, g) {
 		s.stats.GenMapOverflow.Add(1)
+		s.genSentOverflowV6 = true // #9719: see stampInstallGenV4.
 	}
 	// #9412: keep this frame from regressing the close class already sent for
 	// the same incarnation (a mirror-sourced resend carries 0). Same lock.
@@ -222,6 +234,13 @@ func (s *SessionSync) stampInstallGenV6(key dataplane.SessionKeyV6, val *datapla
 // A key never installed in this boot (no stamp recorded) returns 0 (legacy
 // fallback → unconditional delete in the apply guard), which is the safe
 // behavior and preserves rolling-upgrade compatibility.
+//
+// #9719: once the stamp map has overflowed, a missing stamp no longer implies
+// that. The key may be a live session whose stamp was skipped at the cap, and 0
+// would make its delete unconditional on the receiver. So after an overflow a
+// missing stamp draws a fresh generation too. The receiver refuses such a
+// delete only while it holds a NEWER generation for the key, which is the
+// correct answer.
 func (s *SessionSync) takeDeleteGenV4(key dataplane.SessionKey) uint64 {
 	s.genSentMu.Lock()
 	defer s.genSentMu.Unlock()
@@ -229,6 +248,13 @@ func (s *SessionSync) takeDeleteGenV4(key dataplane.SessionKey) uint64 {
 	// early return, so a key with no generation stamp is still evicted.
 	delete(s.closeClassSentV4, key)
 	if _, ok := s.genSentV4[key]; !ok {
+		if s.genSentOverflowV4 {
+			// #9719: the stamp map has overflowed in this process, so this key may
+			// be a LIVE session whose stamp was skipped at the cap. Sending 0 would
+			// make the receiver apply the delete unconditionally. A fresh generation
+			// keeps the ordering guard, and still out-ranks every install of the key.
+			return s.nextInstallGen()
+		}
 		return 0
 	}
 	delete(s.genSentV4, key)
@@ -242,6 +268,9 @@ func (s *SessionSync) takeDeleteGenV6(key dataplane.SessionKeyV6) uint64 {
 	// early return, so a key with no generation stamp is still evicted.
 	delete(s.closeClassSentV6, key)
 	if _, ok := s.genSentV6[key]; !ok {
+		if s.genSentOverflowV6 {
+			return s.nextInstallGen() // #9719: see takeDeleteGenV4.
+		}
 		return 0
 	}
 	delete(s.genSentV6, key)
@@ -327,7 +356,17 @@ func (s *SessionSync) recordInstalledGenV4(key dataplane.SessionKey, gen uint64)
 	if s.recvGenV4 == nil {
 		s.recvGenV4 = make(map[dataplane.SessionKey]uint64)
 	}
-	if !putGenBounded(s.recvGenV4, key, gen) {
+	// #9719: a new key at the cap first evicts the oldest tombstone, so churn
+	// cannot starve live keys of their ordering guard.
+	stored, evicted := putGenEvictingTombstones(s.recvGenV4, &s.recvTombV4, key, gen)
+	if evicted {
+		s.stats.GenTombstonesEvicted.Add(1)
+	}
+	if stored {
+		// The key is live again; a tombstone it held is superseded by this
+		// generation, which the install guard already required to be >= it.
+		s.recvTombV4.forget(key)
+	} else {
 		s.stats.GenMapOverflow.Add(1)
 	}
 	s.recvGenMu.Unlock()
@@ -341,7 +380,14 @@ func (s *SessionSync) recordInstalledGenV6(key dataplane.SessionKeyV6, gen uint6
 	if s.recvGenV6 == nil {
 		s.recvGenV6 = make(map[dataplane.SessionKeyV6]uint64)
 	}
-	if !putGenBounded(s.recvGenV6, key, gen) {
+	// #9719: see the v4 twin.
+	stored, evicted := putGenEvictingTombstones(s.recvGenV6, &s.recvTombV6, key, gen)
+	if evicted {
+		s.stats.GenTombstonesEvicted.Add(1)
+	}
+	if stored {
+		s.recvTombV6.forget(key)
+	} else {
 		s.stats.GenMapOverflow.Add(1)
 	}
 	s.recvGenMu.Unlock()
@@ -363,9 +409,14 @@ func (s *SessionSync) recordInstalledGenV6(key dataplane.SessionKeyV6, gen uint6
 // incarnation re-established and re-stamped by a later sweep carries a higher
 // generation and still applies (incoming > tombstone). A gen-0 (legacy) delete
 // evicts (no tombstone to record) — the legacy unconditional path is unchanged.
-// Tombstones are bounded by genGuardMapCap (putGenBounded) and cleared by the
-// bulk barrier (resetRecvGen), so a churning workload cannot grow the map
-// without limit and a cross-boot generation regression is handled at BulkStart.
+// Tombstones are bounded by genGuardMapCap and cleared by the bulk barrier
+// (resetRecvGen), so a churning workload cannot grow the map without limit and
+// a cross-boot generation regression is handled at BulkStart.
+//
+// #9719: a tombstone never frees its entry, so between bulks the map used to
+// fill with tombstones of closed sessions and then skip-record every NEW key.
+// The oldest tombstone is now evicted to make room (genTombstoneOrder); a live
+// entry never is.
 func (s *SessionSync) deleteGenGuardV4(key dataplane.SessionKey, deleteGen uint64) bool {
 	s.recvGenMu.Lock()
 	defer s.recvGenMu.Unlock()
@@ -379,11 +430,19 @@ func (s *SessionSync) deleteGenGuardV4(key dataplane.SessionKey, deleteGen uint6
 		if s.recvGenV4 == nil {
 			s.recvGenV4 = make(map[dataplane.SessionKey]uint64)
 		}
-		if !putGenBounded(s.recvGenV4, key, deleteGen) {
+		stored, evicted := putGenEvictingTombstones(s.recvGenV4, &s.recvTombV4, key, deleteGen)
+		if evicted {
+			s.stats.GenTombstonesEvicted.Add(1)
+		}
+		if stored {
+			// #9719: the newest tombstone, and so the last to be evicted.
+			s.recvTombV4.mark(key)
+		} else {
 			s.stats.GenMapOverflow.Add(1)
 		}
 	} else {
 		delete(s.recvGenV4, key)
+		s.recvTombV4.forget(key)
 	}
 	return true
 }
@@ -399,11 +458,18 @@ func (s *SessionSync) deleteGenGuardV6(key dataplane.SessionKeyV6, deleteGen uin
 		if s.recvGenV6 == nil {
 			s.recvGenV6 = make(map[dataplane.SessionKeyV6]uint64)
 		}
-		if !putGenBounded(s.recvGenV6, key, deleteGen) {
+		stored, evicted := putGenEvictingTombstones(s.recvGenV6, &s.recvTombV6, key, deleteGen)
+		if evicted {
+			s.stats.GenTombstonesEvicted.Add(1)
+		}
+		if stored {
+			s.recvTombV6.mark(key) // #9719: see the v4 twin.
+		} else {
 			s.stats.GenMapOverflow.Add(1)
 		}
 	} else {
 		delete(s.recvGenV6, key)
+		s.recvTombV6.forget(key)
 	}
 	return true
 }
@@ -433,6 +499,8 @@ func (s *SessionSync) resetRecvGen() {
 	s.recvGenMu.Lock()
 	s.recvGenV4 = make(map[dataplane.SessionKey]uint64)
 	s.recvGenV6 = make(map[dataplane.SessionKeyV6]uint64)
+	s.recvTombV4.reset() // #9719: the tombstone order describes the maps just cleared.
+	s.recvTombV6.reset()
 	s.recvGenMu.Unlock()
 	s.applyMu.Unlock()
 	// #3931: also reset the last-applied config generation. A reconnecting
@@ -476,11 +544,30 @@ func (s *SessionSync) resetRecvGen() {
 	// full-set re-push (nudged on reconnect) as stale and strand the standby on
 	// the pre-reboot set. Resetting to the zero state admits the next push
 	// unconditionally — it is always the peer's CURRENT set.
+	//
+	// #9634: EVERY full-set guard, from one list. The three resets used to be
+	// written out one per line, and the fourth guard (#8121's persistent-NAT
+	// lease set) was declared without one. A rebooted peer's lease sets were then
+	// dropped as stale until its monotonic epoch passed the dead process's.
 	s.recvSeqMu.Lock()
-	s.ipsecRecvSeq.reset()
-	s.dhcpV4RecvSeq.reset()
-	s.dhcpV6RecvSeq.reset()
+	for _, g := range s.fullSetGuardsLocked() {
+		g.reset()
+	}
 	s.recvSeqMu.Unlock()
+}
+
+// fullSetGuardsLocked returns every full-set receive guard on SessionSync
+// (#9634). resetRecvGen resets exactly this list. TestEveryFullSetGuardIsResetOnRePrime_9634
+// enumerates the fullSetSeqGuard fields of SessionSync by reflection and requires
+// every one of them to be reset, so a new full-set family cannot be added
+// without joining this list. The caller holds recvSeqMu.
+func (s *SessionSync) fullSetGuardsLocked() []*fullSetSeqGuard {
+	return []*fullSetSeqGuard{
+		&s.ipsecRecvSeq,
+		&s.dhcpV4RecvSeq,
+		&s.dhcpV6RecvSeq,
+		&s.persistentNatLeaseRecvSeq,
+	}
 }
 
 // Apply atomicity (#2198 F3, corrected by #9715).

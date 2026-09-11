@@ -643,6 +643,21 @@ close the divergence, but it changes the tolerant path from "converge with the
 peer, refuse to arm" to "refuse the config" — a deliberate #1960 behaviour choice
 that does not belong in a bug fix.
 
+**A partition commit the peer never held is alarmed, not lost silently (#9530).**
+The store marks a local commit made while the peer is unreachable (see
+`pkg/configstore`, "A commit the cluster peer never held"). The daemon supplies
+its three inputs (`config_divergence_9530.go`):
+- `configPeerReachable` (heartbeat alive and session sync connected), wired with
+  `SetPeerReachableFn` at cluster bring-up;
+- `noteConfigSharedWithPeer` after every config push (the commit push, the
+  reconcile push, and its test seam). It counts only when the peer reads RG0
+  secondary: in the dual-active heal window the peer is still primary and
+  rejects the push;
+- `reportConfigSyncDivergence` after a successful `handleConfigSync`, which
+  raises the divergence once as an `EventConfigSync` cluster event naming the
+  rollback slot. `show system alarms` lists it as CRITICAL, on the local CLI and
+  over gRPC.
+
 **Startup ordering and publication (#6719).** `d.mgmt` is an
 `atomic.Pointer[managementReconciler]`, not a plain field, and the type is doing
 real work rather than being defensive. `startClusterComms` runs at
@@ -2997,7 +3012,12 @@ never lock an operator out of a remote box it manages.
   bind failures; `applyDataplaneAndHACore` joins them into `networkdErr` (like the
   #1956 device-map-teardown joins), so a genuine management-VRF bind failure also
   fails the commit closed. A failed commit is the retry owner (the next apply
-  re-reconciles). Deliberately LEFT best-effort (WARN, not surfaced): the
+  re-reconciles). The heartbeat restart that follows the rebind is surfaced the
+  same way (#9751): `restartHeartbeatAfterRebind` joins a restart that exhausted
+  its bind retries into `networkdErr`. That restart leaves the heartbeat stopped,
+  owing a retry the next apply performs. The old call discarded
+  `RestartHeartbeat`'s result. `HeartbeatRestartOwed` separates that case from a
+  heartbeat that was never running, which is not an error. Deliberately LEFT best-effort (WARN, not surfaced): the
   routing-instance member binds (they run BEFORE `applyInterfaceReconcile` creates
   tunnel/xfrmi members, so a not-yet-created member is an EXPECTED transient
   absence, not a permanent failure) and the pre-networkd management bind (stripped

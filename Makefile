@@ -316,10 +316,28 @@ test-race-dp:
 #
 # Cheap: cold ~2.5 min (shared with the --release artifacts below only
 # partially, since this is a dev-profile check), warm ~0s.
+#
+# #9499 member 1: a THIRD leg makes integer overflow an executed failure
+# oracle. The --release leg is the only other leg that runs tests, and a
+# release build has overflow-checks OFF, so a wrap was caught only when a
+# test happened to assert the exact wrapped value. This leg runs the frame,
+# NAT, session and checksum tests in the default test profile, where
+# overflow checks and debug assertions are on. It is filtered rather than
+# whole-suite because it is a second full build; widen the filter rather
+# than dropping the leg.
+#
+# It is not decoration: with `parsed.seq.wrapping_add(seg_len)` in
+# afxdp/frame/tcp.rs mutated to `parsed.seq + seg_len`, the --release leg
+# stays green and this leg fails
+# reject_rst_v4_for_syn_at_seq_max_wraps_ack_to_zero_9499 with "attempt to
+# add with overflow" (docs/log/9499.md). Measured on a loaded host: ~3.5 min
+# cold build, ~65 s run (2489 tests).
 test-rust:
 	$(CARGO) check --manifest-path userspace-dp/Cargo.toml --benches
 	$(CARGO) test --manifest-path userspace-dp/Cargo.toml --release \
 		--bins --tests -- --test-threads=1
+	$(CARGO) test --manifest-path userspace-dp/Cargo.toml \
+		--bins --tests -- --test-threads=1 frame nat session checksum
 
 # Standalone convenience view of the refactoring-heatmap drift (#1661
 # item 8). Regenerates scripts/refactoring-audit.sh output to a temp
@@ -582,7 +600,7 @@ clean:
 # The standalone instance name defaults to xpf-fw; override it for an
 # ad-hoc/renamed VM with `XPF_INSTANCE=<name> make test-deploy` (#2162). The
 # env var flows through to setup.sh (INSTANCE_NAME=${XPF_INSTANCE:-xpf-fw}).
-.PHONY: test-env-init test-vm standalone-test-vm test-ct test-deploy test-deploy-lib test-mutate-lib test-cluster-lock-lib test-target-services-lib test-cluster-env-lib test-iperf-throughput-lib test-cos-apply-lib test-mouse-elephant-lib test-fbf-steering-lib test-host-inbound-lib test-host-inbound test-host-inbound-failover test-ssh test-destroy test-status test-start test-stop test-restart test-logs test-journal test-screen-probe-lib mouse-target-up mouse-target-status mouse-target-destroy
+.PHONY: test-env-init test-vm standalone-test-vm test-ct test-deploy test-deploy-lib test-mutate-lib test-cluster-lock-lib test-target-services-lib test-cluster-env-lib test-iperf-throughput-lib test-cos-apply-lib test-mouse-elephant-lib test-fbf-steering-lib test-host-inbound-lib test-host-inbound test-host-inbound-failover test-persistent-nat-failover test-dhcp-lease-failover test-ssh test-destroy test-status test-start test-stop test-restart test-logs test-journal test-screen-probe-lib mouse-target-up mouse-target-status mouse-target-destroy
 
 test-env-init:
 	./test/incus/setup.sh init
@@ -978,6 +996,22 @@ test-ha-crash:
 	BPFRX_CLUSTER_ENV=$(CLUSTER_ENV) ./test/incus/harness-result.sh run \
 		--gate test-ha-crash --adapter ha-smoke --env $(HARNESS_ENV) --cluster \
 		-- ./test/incus/test-ha-crash.sh
+
+# #9729: persistent-NAT binding survives promotion (#7360). DESTRUCTIVE and
+# self-locking: applies a persistent-NAT pool on the RG0 primary, reboots it,
+# and restores interface-mode SNAT on exit.
+test-persistent-nat-failover:
+	BPFRX_CLUSTER_ENV=$(CLUSTER_ENV) ./test/incus/harness-result.sh run \
+		--gate test-persistent-nat-failover --adapter ha-smoke --env $(HARNESS_ENV) --cluster \
+		-- ./test/incus/persistent-nat-failover.sh
+
+# #9729: a Kea lease survives a hard failover (#2261). DESTRUCTIVE and
+# self-locking. Needs the lab DHCP fixture (dhcp-lease-synchronization plus a
+# dhcp-local-server pool); without it the preflight refuses and the row is VOID.
+test-dhcp-lease-failover:
+	BPFRX_CLUSTER_ENV=$(CLUSTER_ENV) ./test/incus/harness-result.sh run \
+		--gate test-dhcp-lease-failover --adapter ha-smoke --env $(HARNESS_ENV) --cluster \
+		-- ./test/incus/dhcp-lease-failover.sh
 
 # Chained hard-reset failover test (fw0 crash → fw1 crash → both rejoin — requires cluster + iperf3 server)
 test-chained-crash:

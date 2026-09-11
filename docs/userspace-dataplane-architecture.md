@@ -2386,6 +2386,52 @@ is unknown, the hash stops describing the helper at all: the overlay dedup and
 `syncSnapshotLocked`'s dedup and generation-only catch-up stand down until an
 apply succeeds (`recordApplySnapshotOutcomeLocked`).
 
+**A partial update's outcome can be unknown too (#9684).** `update_neighbors`
+and `update_fabrics` write their section into `m.lastSnapshot` only after a
+successful round trip, and a lost response can follow an applied update. Four
+publishes start from `m.lastSnapshot`: the scheduler and overlay republishes,
+the #5134 worker-arm re-apply and `syncSnapshotLocked`'s deferred publish. Any
+of them would re-send the old section, and `apply_snapshot` replaces the
+helper's manager-neighbor keys and fabric rows wholesale, rolling it back.
+- Go marks the section unknown on any failure except an in-band refusal.
+- Each of those publishes re-samples a marked section with the builder the
+  partial update uses, instead of inheriting it.
+- A partial update whose response proves it applied unmarks the section. For
+  `update_neighbors` that means an ACK of exactly the generation sent; an ACK
+  above it is a fence (#9696). A successful apply of a re-sampled copy also
+  unmarks it.
+- Compile builds its snapshot outside the manager lock, so a partial update can
+  run between its build and its publish. The build's older sample would roll
+  back that update, whether its response was lost or it landed.
+  - A partial-update epoch advances on every `update_neighbors` /
+    `update_fabrics` request, and on every re-sample into another publish, which
+    can send newer content and clear a mark Compile saw. Compile reads the epoch
+    before its build.
+  - Under the lock, Compile re-samples both sections if the epoch moved, and
+    otherwise only the marked ones. It unmarks what it re-sampled once its
+    publish lands.
+  - The kernel is therefore sampled under the lock only when one of those ran in
+    that window.
+- While a section is marked, the shortcuts that infer the helper's content from
+  `m.lastSnapshot` stand down: the partial updates' neighbor equality check, the
+  overlay content-hash dedup, and `syncSnapshotLocked`'s generation catch-up and
+  hash dedup.
+- A fabric re-sample takes every field of the fresh row except the plan half,
+  which stays the published snapshot's: the parent interface and netdev, the
+  netdev's ifindex and queue count, and the device verdict. Both planes' binding
+  plan keys and the classifier maps read that half, so no re-sample moves the
+  binding plan. The rest, including the overlay netdev the helper recognises
+  fabric ingress by, comes from the sample. The helper also uses the parent
+  ifindex as live forwarding identity, so a lost `update_fabrics` that moved it
+  (a re-created parent netdev) is still rolled back by a republish, as before.
+  That `update_fabrics` carries plan fields at all is #9803. A test classifies every
+  `FabricSnapshot` field, so a new field has to be placed in one half or the
+  other.
+- `syncSnapshotLocked` re-samples only after its XSK-startup plan gate passes,
+  so a deferred tick samples nothing.
+
+Nothing is held and no round trip is added (`partial_update_outcome_9684.go`).
+
 **Dynamic-address feed overlay (#2049).** The snapshot's address books carry
 the live `security dynamic-address` feed prefixes, not just the static
 `security address-book`. The daemon joins each `address-name ... profile
@@ -2442,7 +2488,13 @@ update.
   prove the helper holds `m.lastSnapshot`: after a republish whose response was
   lost, it holds that republish (#9520). Rolling back is safe for a separate
   reason, an invariant of the republish paths: each copies `m.lastSnapshot`'s
-  classifier plan and changes only routes, scheduler bits or `DeferWorkers`. The
+  classifier plan and changes only routes, scheduler bits or `DeferWorkers`.
+  #9684's re-sampled sections do not change it either: neighbors are not part of
+  the plan, and a fabric re-sample keeps each row's plan half (the parent
+  interface and netdev, the netdev's ifindex and queue count, and the device
+  verdict) and refreshes every other field (`refreshFabricRowsKeepingPlan`). A
+  plan-half change needs the full apply that re-derives the plan; #9803 is
+  `update_fabrics` storing one without it. The
   classifier maps are rolled **back** to
   `m.lastSnapshot`
   (`retainPreviousClassifierPlanLocked`), which restores the exact plan the

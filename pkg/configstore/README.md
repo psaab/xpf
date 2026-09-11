@@ -31,6 +31,7 @@ re-created 0600 on the next commit.
 |------|------|------|--------|
 | Active / candidate / rollback DB | `.configdb/{active,candidate,rollback.N}.json` | 0600 | `db.go writeTreeMarked` |
 | Pending commit-confirmed state (#4577) | `.configdb/confirm.json` | 0600 | `db.go WriteConfirm` |
+| Unshared-commit mark (#9530) | `.configdb/unshared.json` | 0600 | `unshared_9530.go WriteUnshared` |
 | `master.key` | `.configdb/master.key` | 0600 | `crypto.go readOrCreateMasterKey` |
 | Text rollback slots | `<config>.N` (e.g. `xpf.conf.1`) | 0600 | `store_commit.go saveRollbackFiles` |
 | Rescue config | `rescue.conf` | 0600 | `store_persist.go SaveRescueConfig` |
@@ -309,6 +310,45 @@ inline archive-site passwords).
   bytes) from a randomly-generated `master.key` file in the
   configstore directory. The "master-password" naming is an HKDF
   info string only — it isn't a user-supplied password.
+
+### A commit the cluster peer never held (#9530)
+
+During a control-link partition both nodes self-elect RG0 primary, so both
+stores are writable. A commit on the node that yields at the heal is then
+replaced by the winner's older config. `SyncApply` had no notion of such a
+commit: it returned nil, and the commit survived only in rollback history.
+
+A node cannot recognise that from its own history alone:
+- "active differs from the last sync" is also true after every routine RG0
+  failover in which the old primary committed;
+- "the push was written" proves nothing in the heal window, because the peer is
+  still primary there and rejects it.
+
+So the store keeps a mark (`unshared_9530.go`):
+- **Mark.** Every local promotion of the active config (commit, commit
+  confirmed, the commit-confirmed timeout revert) made while the peer is
+  unreachable (`SetPeerReachableFn`, wired by the daemon) records the new
+  active's digest in `.configdb/unshared.json`. The mark is sticky: a later local
+  commit carries it to the new active, even with the peer back.
+- **Clear.** `NoteActiveSharedWithPeer` clears it when the daemon pushed exactly
+  that content while it was RG0 primary and the peer read secondary. A sync of
+  exactly the marked content also clears it, because the peer evidently holds it.
+- **Divergence.** `SyncApply` classifies under its existing mutex, before it
+  replaces the active config. A sync that replaces a still-marked active records
+  a `SyncDivergence` and logs it at Error. `ConfigSyncDivergence` names the
+  rollback slot that holds the discarded config now (0 once it ages out of
+  history), and `ConfigSyncDivergenceAlarm` renders it for `show system alarms`.
+  The alarm holds until a different config becomes active; a converged re-push
+  keeps it.
+- A mark naming content this node no longer runs (for example after a boot-time
+  commit-confirmed revert) names nothing, and a sync clears it.
+
+The heal still adopts the winner's config. This is the issue's option (b): alarm
+loudly and name the slot, rather than refuse the sync on a node that has already
+yielded.
+
+Residual: a push counted as shared but dropped before delivery, followed by a
+demotion before the reconciler re-pushes, is a false negative.
 
 ### At-rest crypto hardening notes (#4579 A4-05/A4-06, #4705, #5231, #5638)
 

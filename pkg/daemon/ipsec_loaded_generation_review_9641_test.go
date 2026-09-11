@@ -159,19 +159,14 @@ func TestAttributionKeepsThePromotedConfigForIdenticalConnections9641(t *testing
 // initiated.
 func TestAttributionKeepsThePromotedConfigWhenItCannotBeCompared9641(t *testing.T) {
 	store, d0, _ := generations9641(t)
-	for _, line := range []string{
-		"interfaces ge-0/0/4 unit 0 family inet dhcp",
-		"security ike gateway gw-dhcp address 198.51.100.7",
-		"security ike gateway gw-dhcp external-interface ge-0/0/4.0",
-		"security ipsec vpn dyn ike gateway gw-dhcp",
-	} {
-		if err := store.SetFromInput(line); err != nil {
-			t.Fatalf("FIXTURE: SetFromInput %q: %v", line, err)
-		}
-	}
-	if _, err := store.Commit(); err != nil {
-		t.Fatalf("FIXTURE: Commit: %v", err)
-	}
+	// C2 = C1 plus a DHCP-backed VPN. C1 carries the #9624 collision, so C2 arrives the
+	// tolerant way like C1 (syncApplyC1Plus9641).
+	syncApplyC1Plus9641(t, store,
+		"set interfaces ge-0/0/4 unit 0 family inet dhcp",
+		"set security ike gateway gw-dhcp address 198.51.100.7",
+		"set security ike gateway gw-dhcp external-interface ge-0/0/4.0",
+		"set security ipsec vpn dyn ike gateway gw-dhcp",
+	)
 	if _, err := ipsec.ExpectedLoadedConns(store.ActiveConfig()); err == nil {
 		t.Fatal("FIXTURE: the promoted config must be uncomparable (a DHCP-derived local address)")
 	}

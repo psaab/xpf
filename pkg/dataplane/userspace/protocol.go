@@ -603,6 +603,10 @@ type ConfigSnapshot struct {
 	// stamps it onto ProcessStatus.ZoneIDCollisions and fires the one-shot
 	// operator alarm. Empty means no collision (the common case).
 	zoneIDCollisions []ZoneIDCollision
+	// partialUpdateEpoch (#9684) is Manager.partialUpdateEpoch as Compile read it
+	// before building this snapshot (resampleForCompileLocked). Unexported, so it
+	// never reaches the wire or the content hash.
+	partialUpdateEpoch uint64
 }
 
 // AddressBookSnapshot is #1606: one row of the deduplicated address-book

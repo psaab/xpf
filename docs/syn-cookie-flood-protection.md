@@ -510,10 +510,58 @@ already makes: node clocks agree to well within the 64-second cookie epoch. The
 helper's cookie epoch never steps backward: following a backward clock step would
 re-accept cookies from epochs the node has already left, so a recorded ACK could
 validate again. Derived keys cover every epoch, so no clock step leaves the latch
-without a key. The cost falls on the other node: after a backward step of more
-than one cookie epoch, an HA peer on a different clock cannot validate this
-node's cookies until time catches up. #9712 records that trade-off and the
-options.
+without a key. What a backward step costs is under "Rollback policy", below.
+
+**Rollback policy: keep the latch (#9712).** A node cannot tell locally whether
+its latched epoch or its new wall reading is the correct one. Keeping the latch
+is the only policy that does all three of these:
+
+- keeps local SYN-cookie service;
+- never re-accepts a cookie from an epoch the node has already left;
+- needs no new coordination.
+
+It has two costs:
+
+- **The nodes can split.** A node accepts only cookies within one epoch of its
+  current epoch, and a latched node's current epoch is its latch. So a latched
+  node and its HA peer refuse each other's cookies, in both directions, for as
+  long as their current epochs are more than one apart. That needs node clocks
+  more than one epoch apart, before or after the step, which already breaks the
+  assumption HA makes about node clocks. For example:
+  - a backward step of more than one epoch, on one node that had the true time,
+    opens a split;
+  - stepping a fast node back to the true time keeps the split it already had,
+    until the true time comes within one epoch of its latch;
+  - the same step on both nodes opens none.
+- **The latched window stays open.** The node's validation window stays at the
+  latched epoch, so a cookie minted in that window stays valid for about the
+  length of the step longer than usual. Each accepted replay of its ACK
+  refreshes the source's whitelist entry for one epoch (64 seconds), so repeated
+  replays can hold the entry for as long as the cookie validates, and for up to
+  64 seconds after the last one.
+
+The alternatives each give up more:
+
+- **Following the clock back.** A peer on that clock can validate. But the node
+  re-accepts cookies from epochs it has already left. And if the backward step
+  is itself the fault and leaves the nodes' current epochs more than one apart,
+  the nodes split anyway.
+- **Failing closed while the wall epoch is more than one below the latch.** No
+  cookie is minted that a peer cannot verify, and no window is held open. But
+  SYN-cookie service on that node stops for as long as the wall epoch is more
+  than one below the latch.
+- **Mixing a rollback generation into the key.** Both nodes must agree on the
+  generation, which needs control-plane coordination the helper does not have.
+
+Three tests pin the policy:
+
+- `syn_cookie_backward_step_does_not_resurrect_a_past_cookie_9173`: no epoch the
+  node has left validates again.
+- `syn_cookie_backward_step_past_one_epoch_splits_the_nodes_both_ways_9712`: the
+  split, in both directions, and its one-epoch bound. It covers the ring and the
+  legacy codec.
+- `syn_cookie_backward_step_holds_the_latched_window_open_9712`: the latched
+  window stays valid through the step.
 
 `syn_cookie_master_key` keeps its meaning: the key to mint and validate with. A
 new control plane sets it to the key of the period the snapshot was built in, so

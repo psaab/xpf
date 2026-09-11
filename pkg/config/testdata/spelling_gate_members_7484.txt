@@ -715,6 +715,7 @@ unreachable (leaf changed nothing)	security alg dns
 unreachable (leaf changed nothing)	security alg ftp
 unreachable (leaf changed nothing)	security alg sip
 unreachable (leaf changed nothing)	security alg tftp
+COMPARED	security dynamic-address address-name <*> profile fail-mode
 COMPARED	security dynamic-address address-name <*> profile feed-name
 COMPARED	security dynamic-address feed-server <*> feed-name <*> path
 COMPARED	security dynamic-address feed-server <*> hold-interval

@@ -208,7 +208,8 @@ func (d *Daemon) startSessionSyncPrimeRetry(gen uint64) {
 	}
 	go func() {
 		intervals := []time.Duration{10 * time.Second, 20 * time.Second, 30 * time.Second, 30 * time.Second, 30 * time.Second, 30 * time.Second}
-		const retryWhileAckPendingAfter = 35 * time.Second
+		// #9626: the same bound the sweep's owed cold-prime re-drive waits for.
+		retryWhileAckPendingAfter := cluster.BulkAckPendingRetryAfter
 		maxAttempts := len(intervals)
 		baseline := ss.Stats()
 		slog.Info("cluster: starting session sync bulk-prime retry loop",
@@ -442,6 +443,7 @@ func (d *Daemon) pushConfigToPeer() {
 		return
 	}
 	ss.QueueConfig(configText)
+	d.noteConfigSharedWithPeer(configText) // #9530
 	// #5863: record the reconcile marker so the level-triggered reconciler
 	// treats this generation as already pushed on the current connection
 	// epoch and does not redundantly re-push it. Only mark when a peer
@@ -591,9 +593,11 @@ func (d *Daemon) reconcileConfigSyncToPeer(reason string) {
 		"reason", reason, "epoch", epoch, "generation", gen, "size", len(configText))
 	if d.configSyncPushForTest != nil {
 		d.configSyncPushForTest()
+		d.noteConfigSharedWithPeer(configText)
 		return
 	}
 	ss.QueueConfig(configText)
+	d.noteConfigSharedWithPeer(configText) // #9530
 }
 
 // configSyncReconcileLoop is the low-frequency level-triggered safety net for
@@ -695,6 +699,8 @@ func (d *Daemon) handleConfigSync(configText string) error {
 	// secondary-side promoter mutating s.active in the release window can no
 	// longer make the marker key the wrong, unapplied active digest (#6296).
 	slog.Info("cluster: config sync applied successfully")
+	// #9530: raise a divergence this sync caused (a discarded unshared commit).
+	d.reportConfigSyncDivergence()
 	return nil
 }
 

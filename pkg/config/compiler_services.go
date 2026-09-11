@@ -851,12 +851,22 @@ func compileDynamicAddress(node *Node, sec *SecurityConfig) error {
 
 	for _, inst := range namedInstances(node.FindChildren("address-name")) {
 		ab := &AddressBinding{Name: inst.name}
-		if profile := inst.node.FindChild("profile"); profile != nil {
-			for _, c := range profile.Children {
-				if c.Name() == "feed-name" {
+		// #9689: every `profile` statement, not the first. Two sibling statements
+		// (`profile feed-name f; profile fail-mode drop;`) leave two profile nodes,
+		// and FindChild returned only the first, silently dropping the second
+		// leaf on a commit that reports success.
+		for _, profile := range inst.node.FindChildren("profile") {
+			// #9689: split a packed or nested one-line run (see
+			// dynamicAddressProfileSchema9689) before matching leaves by name.
+			for _, c := range hoistAndSplitRun8939(profile.Children, dynamicAddressProfileSchema9689()) {
+				switch c.Name() {
+				case "feed-name":
 					if fn := nodeVal(c); fn != "" {
 						ab.FeedNames = append(ab.FeedNames, fn)
 					}
+				case "fail-mode":
+					// #9689: retain (default) or drop.
+					ab.FailMode = nodeVal(c)
 				}
 			}
 		}

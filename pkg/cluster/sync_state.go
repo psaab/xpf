@@ -13,6 +13,12 @@ type SyncStatsProvider interface {
 	// drain gate unable to fire, which is indistinguishable from a healthy
 	// pair. The compiler asks the question instead.
 	PeerSessionSyncWireVersion() uint16
+	// UnauthenticatedSessionConns lists the remote address of every established
+	// session-sync connection that has never authenticated while this node holds
+	// a control-link key (#9717), or nil when it holds none. It is on THIS
+	// interface for the reason above: an assertion that silently failed would list
+	// no connections, which reads exactly like the all-authenticated state.
+	UnauthenticatedSessionConns() []string
 }
 
 // SetSyncReady marks session sync as ready (bulk sync received, or the
@@ -139,4 +145,21 @@ func (m *Manager) PeerSessionSyncWireVersion() uint16 {
 		return 0
 	}
 	return p.PeerSessionSyncWireVersion()
+}
+
+// unauthenticatedSessionConns reports, through the sync-stats provider, the
+// established session-sync connections that have never authenticated (#9717),
+// or nil when no provider is set. A Manager with no provider has no session-sync
+// connection to report.
+func (m *Manager) unauthenticatedSessionConns() []string {
+	if m == nil {
+		return nil
+	}
+	m.mu.RLock()
+	p := m.syncStats
+	m.mu.RUnlock()
+	if p == nil {
+		return nil
+	}
+	return p.UnauthenticatedSessionConns()
 }

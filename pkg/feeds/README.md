@@ -118,6 +118,42 @@ unaffected. Only the referencing security **policy** path is gated this way; NAT
 rules that reference an unready feed still fall back to the static subset (out of
 scope for the deny fail-open this issue names).
 
+## Hold-interval fail mode per binding (#9689)
+
+An explicit `hold-interval` drops a failing feed's last-good snapshot to empty,
+and under #5645 the binding built on it is then **omitted**. Every policy that
+references it becomes unrepresentable, and the whole snapshot is rejected, so
+the previous-good snapshot stays enforced. That is the right fail direction for
+a denylist, and it has three costs:
+
+- an **allowlist** keeps permitting the addresses the feed stopped publishing;
+- **later commits** are not enforced either, because every snapshot carries
+  the same unrepresentable rule;
+- `show security dynamic-address` reported the cleared live set while the
+  last-good one was enforced.
+
+`set security dynamic-address address-name <n> profile fail-mode drop` lets the
+operator choose the other direction for a binding:
+
+- `retain` (the default, and what an omitted leaf means) keeps the behaviour
+  above;
+- `drop`: once **every** unready constituent was dropped by its hold-interval,
+  `SnapshotForBindings` publishes the binding with the remaining feeds'
+  prefixes, possibly none. Policy lowering already treats a present empty row as
+  match-none (#2049), so an allowlist becomes permit-none and a denylist
+  deny-none, and the rest of the snapshot is enforced.
+
+`drop` never covers a feed with **no first snapshot**, or an unknown feed name.
+Those keep #5645's fail-closed omission, because nothing was ever enforced for
+them to drop. `feedState.holdDropped` is what tells a hold drop from a
+never-fetched feed; it is set in `recordFailure`'s drop branch and cleared by
+the next successful install.
+
+The show surface now prints the hold interval as it is applied (an omitted
+`hold-interval` retains indefinitely; the 7200s default it used to print was
+never enforced). It also prints `HOLD-DROPPED` or `STALE` per feed, and each
+binding's fail mode and enforced state.
+
 ## Publication-debt retry — a rejected apply is retried, not swallowed (#5646)
 
 The `onUpdate` callback drives the daemon to APPLY the fetched feed content to

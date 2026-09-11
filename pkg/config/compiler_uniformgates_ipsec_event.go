@@ -111,6 +111,22 @@ func runUniformGatesIPsecEvent(tree *ConfigTree, cfg *Config, opts compileOpts) 
 		}
 	}
 
+	// #9624: reject two IPsec VPNs that render the same swanctl SA name
+	// (child/child or connection/child). The renderer keeps child names unique
+	// only within one VPN (#5122), and `swanctl --initiate --child` identifies a
+	// child by name alone, so HA failover could not say which tunnel it brings
+	// up. The names come from pkg/ipsecname, the same derivation the renderer
+	// uses. Strict on commit / commit-check; lenient on load / peer-sync (warn
+	// so the config still boots).
+	if err := validateIPsecSANameCollisionsStrict(cfg); err != nil {
+		if opts.lenientIPsecSANameCollision {
+			cfg.Warnings = append(cfg.Warnings,
+				fmt.Sprintf("ipsec SA name collision (downgraded to warning on tolerant path): %v", err))
+		} else {
+			return err
+		}
+	}
+
 	// #9008 IKE/IPsec proposal `lifetime-seconds` value gate. The schema's
 	// ValidateIntegerMin(1) on both leaves is enforced only by SchemaValidate,
 	// which compileTreeStrict runs and compileTreeLenient downgrades — so a
@@ -176,6 +192,36 @@ func runUniformGatesIPsecEvent(tree *ConfigTree, cfg *Config, opts compileOpts) 
 		if opts.lenientIPsecManualKey {
 			cfg.Warnings = append(cfg.Warnings,
 				fmt.Sprintf("ipsec manual-key SA (downgraded to warning on tolerant path): %v", err))
+		} else {
+			return err
+		}
+	}
+
+	// #9623: reject an IPsec name that becomes a swanctl SA identifier but is
+	// not display-safe (a C1 control, a line or paragraph separator, or invalid
+	// UTF-8). The name renders raw into the swanctl config, but GetSAStatus
+	// display-escapes it (#6584), so HA IPsec SA sync publishes a DIFFERENT
+	// string and the peer's `swanctl --initiate --child` / `--terminate --ike`
+	// never matches it: that tunnel is not re-initiated on failover. Strict on
+	// commit / commit-check; lenient on load / peer-sync (warn so the config
+	// still boots).
+	if err := validateIPsecSANamesDisplaySafeStrict(cfg); err != nil {
+		if opts.lenientIPsecSANameDisplay {
+			cfg.Warnings = append(cfg.Warnings,
+				fmt.Sprintf("ipsec SA name display safety (downgraded to warning on tolerant path): %v", err))
+		} else {
+			return err
+		}
+	}
+
+	// #9495: an IPsec VPN name is written raw as a swanctl section header, and a name outside
+	// letters, digits, '-' and '_' can make strongSwan discard every tunnel in the file, inject
+	// settings, or rename the tunnel. Strict on commit / commit-check; lenient on load / peer-sync
+	// (warn, and the pkg/ipsec render belt skips a name that would actually break the file).
+	if err := validateIPsecSectionNamesStrict(cfg); err != nil {
+		if opts.lenientIPsecSectionName {
+			cfg.Warnings = append(cfg.Warnings,
+				fmt.Sprintf("ipsec VPN section name (downgraded to warning on tolerant path): %v", err))
 		} else {
 			return err
 		}

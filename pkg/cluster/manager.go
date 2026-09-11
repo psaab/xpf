@@ -421,6 +421,24 @@ type Manager struct {
 	// carries it unchanged and it can never describe a different heartbeat than
 	// hbLocalAddr/hbPeerAddr do.
 	hbControlIface string // last StartHeartbeat controlIface (for restart)
+	// hbRestartOwed records that a RestartHeartbeat exhausted its bind retries
+	// and left the heartbeat stopped (#9751). Before it, a later
+	// RestartHeartbeat saw "not running" and returned at once, so one failed
+	// restart latched the heartbeat dead until comms restarted; a later
+	// RestartHeartbeat now retries while this is set. hbRestartOwedSeed keeps
+	// the last heartbeat the stopped receiver had seen, so the retry's
+	// replacement still detects a peer that died in the meantime (armRestart,
+	// #9722). A deliberate StopHeartbeat clears both, and so does a start that
+	// publishes.
+	hbRestartOwed     bool
+	hbRestartOwedSeed int64
+	// hbRestartOwedHold is the grace end the failed restart was carrying
+	// (#9722): the retry's replacement inherits it.
+	hbRestartOwedHold time.Time
+	// hbDeliberateStops counts exported StopHeartbeat calls. A failed restart
+	// records its debt only if none landed while it retried: a comms teardown
+	// in that window stopped the heartbeat on purpose (#9751).
+	hbDeliberateStops uint64
 
 	// Sync stats provider (set by daemon after sessionSync creation).
 	syncStats SyncStatsProvider
@@ -478,6 +496,9 @@ type Manager struct {
 	// transferReadinessFn reports whether explicit manual failover can be
 	// attempted for the local RG right now and, if not, why.
 	transferReadinessFn func(rgID int) (bool, []string)
+	// peerConfigStaleFn reports whether the peer failed to apply the newest
+	// config generation this node sent (#9569). Evaluated outside mu.
+	peerConfigStaleFn func() (bool, string)
 
 	// rgForwardingFn reports the DATAPLANE-side view of a redundancy group —
 	// applied rg_active and VRRP mastership. Supplied by the daemon, which owns

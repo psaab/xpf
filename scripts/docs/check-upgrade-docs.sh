@@ -19,7 +19,9 @@
 #      pkg/upgrade/manifest/manifest.go, reachable only via the exported
 #      accessors All() / Names() / LockstepNames(). Docs that tell a
 #      maintainer to edit `manifest.Managed` send them to a phantom symbol.
-#      Banned across all of docs/.
+#      Banned across docs/, except the generated history archives
+#      (docs/issues/, docs/log/, docs/reviews/), which quote it while
+#      recording its removal (#9783).
 #
 # This is a docs-only grep guard, deliberately standalone (run via
 # `make docs-check`) and NOT wired into `make test` — same posture as the
@@ -33,7 +35,9 @@ set -euo pipefail
 # any CWD (Makefile target, CI, manual run).
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "$script_dir/../.." && pwd)"
-cd "$repo_root"
+# DOCS_CHECK_ROOT points the guard at a fixture tree instead (#9783,
+# scripts/docs/check-upgrade-docs-selftest.sh). Unset, it is the repo.
+cd "${DOCS_CHECK_ROOT:-$repo_root}"
 
 status=0
 
@@ -59,7 +63,7 @@ elif grep -nF -- "$phrase_staging" "$doc_install"; then
 	status=1
 fi
 
-# Phrase 2: banned across all docs. manifest.Managed is a phantom symbol;
+# Phrase 2: banned across all live docs. manifest.Managed is a phantom symbol;
 # the SSOT is the unexported `managed` slice + All()/Names()/LockstepNames().
 phrase_symbol="manifest.Managed"
 docs_dir="docs"
@@ -75,6 +79,16 @@ else
 	# message. `|| rc=$?` keeps the captured grep from tripping `set -e`.
 	rc=0
 	matches="$(grep -rnF -- "$phrase_symbol" "$docs_dir/")" || rc=$?
+	# #9783: the generated history archives (docs/issues/, docs/log/,
+	# docs/reviews/) QUOTE the phantom symbol while recording its removal.
+	# Scanning them kept this guard red on a tree with no live-doc hit: a
+	# failure nobody could fix, and a red nobody reads hides a real
+	# reintroduction. Filter by PATH PREFIX rather than --exclude-dir, which
+	# matches a directory base name at any depth and would also skip, say,
+	# docs/guide/log/.
+	if [ "$rc" -eq 0 ]; then
+		matches="$(printf '%s\n' "$matches" | grep -Ev "^$docs_dir/(issues|log|reviews)/")" || rc=1
+	fi
 	case "$rc" in
 		0)
 			# Match(es) found — the banned symbol is present.

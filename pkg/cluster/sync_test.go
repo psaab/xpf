@@ -5508,7 +5508,12 @@ func TestOwedColdPrimeRedrivesOnSurvivorDespitePriorIncarnationAck_5718(t *testi
 	// The sticky ack a PRIOR incarnation earned, and the CURRENT incarnation's
 	// cold-prime still owed because its active-fabric bulk is failing now.
 	ss.outboundBulkAcked.Store(true)
-	ss.needColdPrime.Store(true)
+	// #9626: arm it the way production does, under a generation, so the
+	// re-drive's ack below has a debt to match. A bare Store(true) leaves the
+	// generation at 0, and the ack of a bulk stamped 0 pays nothing.
+	ss.mu.Lock()
+	ss.armColdPrimeLocked()
+	ss.mu.Unlock()
 	// Attribution sentinel: only the re-drive goroutine zeroes this on the path
 	// this test takes, and only before doBulkSync stamps its own epoch.
 	const redriveSentinel = 4242
@@ -5552,13 +5557,25 @@ func TestOwedColdPrimeRedrivesOnSurvivorDespitePriorIncarnationAck_5718(t *testi
 		t.Fatal("attribution: the bulk override never sampled the epoch")
 	}
 	// DISCHARGE: a satisfied obligation must not stay armed, or every later
-	// survivor disconnect re-bulks an already-primed peer.
+	// survivor disconnect re-bulks an already-primed peer. #9626: "satisfied"
+	// means the peer ACKNOWLEDGED the re-driven bulk. So wait for the bulk to
+	// record its pending epoch, deliver that ack on the survivor, and then the
+	// obligation must clear.
 	deadline := time.Now().Add(2 * time.Second)
-	for ss.needColdPrime.Load() && time.Now().Before(deadline) {
+	var pendingEpoch uint64
+	for time.Now().Before(deadline) {
+		if e, _, ok := ss.PendingBulkAck(); ok {
+			pendingEpoch = e
+			break
+		}
 		time.Sleep(5 * time.Millisecond)
 	}
+	if pendingEpoch == 0 {
+		t.Fatal("the re-driven bulk never recorded a pending ack")
+	}
+	ss.handleMessage(c1local, syncMsgBulkAck, epochPayload9626(pendingEpoch))
 	if ss.needColdPrime.Load() {
-		t.Fatal("a successful re-drive must DISCHARGE needColdPrime — leaving it armed " +
+		t.Fatal("a re-drive the peer acknowledged must DISCHARGE needColdPrime — leaving it armed " +
 			"trades a lost obligation for one that can never be paid off")
 	}
 	ss.Stop()

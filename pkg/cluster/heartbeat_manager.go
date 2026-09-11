@@ -53,6 +53,16 @@ func heartbeatUDPNetwork(addr string) string {
 // the previous goroutines — their stopCh is never closed, so N restarts leak
 // N heartbeat goroutines and duplicate the on-wire heartbeat rate (#4033).
 func (m *Manager) StartHeartbeat(localAddr, peerAddr, vrfDevice, controlIface string) error {
+	return m.startHeartbeat(localAddr, peerAddr, vrfDevice, controlIface, 0, time.Time{})
+}
+
+// startHeartbeat is StartHeartbeat plus the replacement-receiver seed
+// RestartHeartbeat passes (#9722). A non-zero restartSeed arms the new receiver
+// (armRestart) with the replaced receiver's last-seen heartbeat and the short
+// restart grace, before the receiver starts. StartHeartbeat passes 0, which is
+// a cold start. inheritedHold is the end of any grace the replaced receiver was
+// still inside; the new receiver keeps it (#9722).
+func (m *Manager) startHeartbeat(localAddr, peerAddr, vrfDevice, controlIface string, restartSeed int64, inheritedHold time.Time) error {
 	// Serialize the whole stop-previous + create + install sequence so
 	// concurrent callers cannot interleave and both install a heartbeat.
 	// hbStartMu is distinct from m.mu: StopHeartbeat below takes m.mu and
@@ -62,7 +72,9 @@ func (m *Manager) StartHeartbeat(localAddr, peerAddr, vrfDevice, controlIface st
 
 	// Stop any heartbeat that is already running before installing a new one.
 	// Safe to call unconditionally — it is a no-op when nothing is running.
-	m.StopHeartbeat()
+	// Not the deliberate StopHeartbeat: starting is not a request to stay
+	// stopped (#9751).
+	m.stopHeartbeat()
 
 	// #7257: the lifecycle tenure this start belongs to.
 	//
@@ -152,12 +164,19 @@ func (m *Manager) StartHeartbeat(localAddr, peerAddr, vrfDevice, controlIface st
 	}
 	sender := newHeartbeatSender(m, sendConn, peer, interval)
 	receiver := newHeartbeatReceiver(m, recvConn, threshold, interval, peer)
+	// #9722: arm BEFORE start(), so the timeout goroutine never observes the
+	// replacement without its seed or with the cold-boot grace.
+	receiver.armRestart(restartSeed, inheritedHold)
 	m.hbSender = sender
 	m.hbReceiver = receiver
 	m.hbLocalAddr = localAddr
 	m.hbPeerAddr = peerAddr
 	m.hbVRFDevice = vrfDevice
 	m.hbControlIface = controlIface
+	// #9751: a published start settles any restart debt.
+	m.hbRestartOwed = false
+	m.hbRestartOwedSeed = 0
+	m.hbRestartOwedHold = time.Time{}
 	// Start the LOCALS, and start them INSIDE the critical section (#7257).
 	// Locals because the pre-#7257 code re-read m.hbReceiver/m.hbSender after
 	// unlocking, which raced StopHeartbeat nilling them — a nil-deref panic if
@@ -210,8 +229,36 @@ func (m *Manager) HeartbeatRunning() bool {
 	return m.hbSender != nil || m.hbReceiver != nil
 }
 
+// HeartbeatRestartOwed reports whether a RestartHeartbeat failed and left the
+// heartbeat stopped, owing a retry (#9751). The apply uses it to tell a failed
+// restart from a heartbeat that was never running: RestartHeartbeat returns
+// false for both.
+func (m *Manager) HeartbeatRestartOwed() bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.hbRestartOwed
+}
+
 // StopHeartbeat halts heartbeat sender and receiver goroutines.
+//
+// #9751: this is the DELIBERATE stop (comms teardown, tests). It clears a
+// restart debt, so a later RestartHeartbeat cannot resurrect a heartbeat that
+// was stopped on purpose, and it is counted, so a restart retrying at the same
+// moment records no debt. StartHeartbeat and RestartHeartbeat tear down through
+// stopHeartbeat, which does neither.
 func (m *Manager) StopHeartbeat() {
+	m.mu.Lock()
+	m.hbDeliberateStops++
+	m.hbRestartOwed = false
+	m.hbRestartOwedSeed = 0
+	m.hbRestartOwedHold = time.Time{}
+	m.mu.Unlock()
+	m.stopHeartbeat()
+}
+
+// stopHeartbeat is the teardown itself, shared by StopHeartbeat and by the
+// start and restart paths.
+func (m *Manager) stopHeartbeat() {
 	m.mu.Lock()
 	sender := m.hbSender
 	receiver := m.hbReceiver
@@ -304,6 +351,11 @@ func (m *Manager) heartbeatTimingDivergedLocked() bool {
 	return liveInterval != m.hbInterval || liveThreshold != m.hbThreshold
 }
 
+// heartbeatRestartRetryDelay is the pause between RestartHeartbeat bind
+// attempts. A variable only so the #9751 cells can exhaust the retries without
+// sleeping 5s; production never writes it.
+var heartbeatRestartRetryDelay = time.Second
+
 // RestartHeartbeat stops and restarts the heartbeat with the same parameters.
 // This is needed when the control interface's VRF binding changes (e.g. during
 // DHCP-triggered recompile) which invalidates the existing UDP sockets.
@@ -325,29 +377,59 @@ func (m *Manager) heartbeatTimingDivergedLocked() bool {
 //
 //   - Local side: lastSeen carries over to the replacement receiver (same
 //     CLOCK_MONOTONIC domain, same process) so a peer that dies while our
-//     sockets are down is still detected once the post-restart 30s startup
-//     grace expires. Without the seed the new receiver starts at
-//     lastSeen=0, whose timeout path only invokes handlePeerNeverSeen — a
-//     no-op once peerEverSeen is set — and a peer death during the restart
-//     window would never be detected.
+//     sockets are down is still detected. Without the seed the new receiver
+//     starts at lastSeen=0, whose timeout path only invokes
+//     handlePeerNeverSeen — a no-op once peerEverSeen is set — and a peer
+//     death during the restart window would never be detected.
+//
+//   - #9722: the seed is installed BEFORE the replacement starts, together
+//     with heartbeatRestartGrace (armRestart). The replacement used to arm
+//     the 30s cold-boot grace, so a peer that died within 30s after any
+//     apply that rebinds the management VRF was declared lost up to 30s
+//     late. It now holds for the restart grace only, and then the ordinary
+//     threshold*interval staleness applies. A replaced receiver that had
+//     never seen the peer passes no seed, so its replacement keeps the
+//     cold-boot semantics.
+//
+//   - #9751: a restart that exhausts its retries records a debt
+//     (HeartbeatRestartOwed), with the seed it could not install. The next
+//     RestartHeartbeat retries it instead of returning "not running". A
+//     deliberate StopHeartbeat clears the debt, and a failed restart that a
+//     deliberate stop overtook records none.
 func (m *Manager) RestartHeartbeat() bool {
 	m.mu.RLock()
 	running := m.hbSender != nil || m.hbReceiver != nil
+	owed := m.hbRestartOwed
+	owedSeed := m.hbRestartOwedSeed
+	deliberateStops := m.hbDeliberateStops
 	localAddr := m.hbLocalAddr
 	peerAddr := m.hbPeerAddr
 	vrfDevice := m.hbVRFDevice
 	controlIface := m.hbControlIface
 	notify := m.hbRestartNotifyFn
 	receiver := m.hbReceiver
+	// #9722: the end of the grace the running receiver is still inside, read
+	// under the same lock start() publishes startedAt under. The replacement
+	// inherits it, so a restart never shortens a grace in progress. With no
+	// receiver (a failed restart left the heartbeat stopped), the end that
+	// restart was carrying is inherited instead.
+	inheritedHold := m.hbRestartOwedHold
+	if receiver != nil {
+		inheritedHold = receiver.startedAt.Add(receiver.seenThenLostGrace())
+	}
 	m.mu.RUnlock()
 
-	if !running || localAddr == "" {
+	// #9751: a heartbeat a failed restart left stopped is owed a retry, which
+	// is not the same as "not running".
+	if (!running && !owed) || localAddr == "" {
 		return false
 	}
 
 	// Preserve the old receiver's last-seen heartbeat timestamp
-	// (CLOCK_MONOTONIC nanos — comparable across an in-process restart).
-	var lastSeenSeed int64
+	// (CLOCK_MONOTONIC nanos — comparable across an in-process restart). When
+	// a failed restart left no receiver, the seed that restart could not
+	// install carries over instead (#9751).
+	lastSeenSeed := owedSeed
 	if receiver != nil {
 		lastSeenSeed = receiver.lastSeen.Load()
 	}
@@ -361,10 +443,10 @@ func (m *Manager) RestartHeartbeat() bool {
 		notify()
 	}
 
-	m.StopHeartbeat()
+	m.stopHeartbeat()
 
 	for i := 0; i < 5; i++ {
-		if err := m.StartHeartbeat(localAddr, peerAddr, vrfDevice, controlIface); err != nil {
+		if err := m.startHeartbeat(localAddr, peerAddr, vrfDevice, controlIface, lastSeenSeed, inheritedHold); err != nil {
 			slog.Warn("cluster: heartbeat restart bind failed, retrying",
 				"err", err, "attempt", i+1)
 			// Keep the peer's suppression guard fed (2s recency window)
@@ -372,22 +454,25 @@ func (m *Manager) RestartHeartbeat() bool {
 			if notify != nil {
 				notify()
 			}
-			time.Sleep(1 * time.Second)
+			time.Sleep(heartbeatRestartRetryDelay)
 			continue
-		}
-		// Seed the replacement receiver with the pre-restart timestamp
-		// unless it has already seen a live heartbeat.
-		if lastSeenSeed != 0 {
-			m.mu.RLock()
-			newReceiver := m.hbReceiver
-			m.mu.RUnlock()
-			if newReceiver != nil {
-				newReceiver.lastSeen.CompareAndSwap(0, lastSeenSeed)
-			}
 		}
 		return true
 	}
-	slog.Error("cluster: heartbeat restart failed after retries")
+	// #9751: record the debt, unless a deliberate StopHeartbeat landed while we
+	// retried (or something else started a heartbeat). Without it the next
+	// RestartHeartbeat saw "not running" and returned at once, and the heartbeat
+	// stayed dead until comms restarted.
+	m.mu.Lock()
+	owedNow := m.hbDeliberateStops == deliberateStops && m.hbSender == nil && m.hbReceiver == nil
+	if owedNow {
+		m.hbRestartOwed = true
+		m.hbRestartOwedSeed = lastSeenSeed
+		m.hbRestartOwedHold = inheritedHold
+	}
+	m.mu.Unlock()
+	slog.Error("cluster: heartbeat restart failed after retries; the next restart retries it",
+		"restart_owed", owedNow)
 	return false
 }
 

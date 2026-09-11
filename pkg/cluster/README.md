@@ -423,6 +423,82 @@ still promotes once the grace elapses (`neverSeenConfirmed` returns true at
 sets `peerEverSeen` and runs `electSingleNode`; `election.go` bypasses the
 readiness gate when `!peerAlive`, so the surviving node takes over.
 
+### A heartbeat RESTART is not a cold boot (#9722)
+
+`RestartHeartbeat` replaces the receiver on every config apply that rebinds the
+management VRF. On an HA node with a management interface that means every
+operator commit and every peer-synced apply. The replacement used to arm the
+same 30s cold-boot floor. The seen-then-lost arm returns inside that floor
+before it checks staleness, so a peer that died within 30s after a commit was
+declared lost up to 30s late. In the default private-RG mode, that delay is the
+promotion delay.
+
+A replacement for a receiver that had SEEN the peer is now armed before it
+starts (`armRestart`):
+- it carries the replaced receiver's `lastSeen`;
+- its seen-then-lost floor (`seenThenLostGrace`) is `heartbeatRestartGrace`
+  (5s, the restart path's own bind-retry window), not `heartbeatStartupGrace`.
+
+After that, the ordinary `threshold*interval` staleness applies. A live peer
+whose heartbeats are briefly lost past the restart grace is still covered by the
+sync-recency guard that `handlePeerTimeout` consults
+(`shouldSuppressPeerHeartbeatTimeout`, #1792).
+
+Two receivers are never armed and keep the cold-boot floor on both arms:
+- a replacement for a receiver that had NEVER seen the peer;
+- any receiver started by `StartHeartbeat` (boot, comms restart).
+
+Cells: `heartbeat_restart_grace_9722_test.go`.
+
+**A restart never SHORTENS a grace still in progress.** The config apply at
+BOOT restarts the heartbeat too, about a second after the cold start, while the
+node is still inside the 30s cold-boot floor that exists for exactly that
+apply's disruption (#4386). The first version of this change held that
+replacement for only the 5s restart grace, and the loss-cluster failover gate
+caught it:
+- fw1 cold-started its heartbeat at 12:57:02 and its boot-time VRF rebind
+  restarted it at 12:57:03;
+- at 12:57:16, still booting, fw1 declared fw0 lost and took RG0-2 while fw0
+  held RG0-1;
+- the deploy reassert could not move RG2 back.
+
+The replacement now inherits the END of the grace its predecessor was inside
+(`inheritedHold` = the predecessor's `startedAt` plus its `seenThenLostGrace`,
+read under `m.mu`). `checkTimeout` holds while either the restart grace or the
+inherited hold is running. A steady-state commit restarts a receiver whose
+boot grace ended long ago, so it still holds for only 5s. A failed restart's
+debt (#9751 below) carries the hold into its retry. Cells:
+`heartbeat_restart_boot_grace_9722_test.go`.
+
+### A failed heartbeat restart is owed, not latched (#9751)
+
+`RestartHeartbeat` retries the bind five times, a second apart. If all five
+fail, it returns false with the sender and receiver both torn down. Before
+#9751, every later `RestartHeartbeat` saw "not running" and returned at once,
+and the apply discarded the result. The heartbeat stayed dead across later
+applies until comms restarted. This node sent no heartbeats, so the peer
+declared it lost while this node, with no receiver, noticed nothing.
+
+A restart that exhausts its retries now records a debt.
+- `hbRestartOwed` marks it, and `hbRestartOwedSeed` keeps the seed the restart
+  could not install. `HeartbeatRestartOwed()` reports it.
+- The next `RestartHeartbeat` retries while the debt stands. It uses that seed,
+  so the retry's replacement is armed like any restart (`armRestart`, #9722)
+  and still detects a peer that died meanwhile.
+- A start that publishes settles the debt.
+- An exported `StopHeartbeat` is the deliberate stop (a comms teardown). It
+  clears the debt and is counted (`hbDeliberateStops`), so a restart that such a
+  stop overtakes records no debt. Neither case can be resurrected by the next
+  apply.
+- The start and restart paths tear down through the internal `stopHeartbeat`,
+  which is not a deliberate stop.
+
+The apply reports the failure: `restartHeartbeatAfterRebind` (`pkg/daemon`)
+joins it into the networkd error, as the management rebind failure already is.
+
+Cells: `heartbeat_restart_owed_9751_test.go`, and in `pkg/daemon`
+`heartbeat_restart_report_9751_test.go`.
+
 ### The gate's third case: the peer has YIELDED (#9452)
 
 The readiness gate had a two-case taxonomy and needed three. `electSingleNode`'s
@@ -2199,9 +2275,9 @@ connection is authenticated, then seals every subsequent frame.
   failover). `installConn` now wires the connection into `conn0`/`conn1`
   and computes the cold-prime decision under the **same** `s.mu`
   acquisition, gated on a `needColdPrime` latch (armed on a
-  full-disconnect→connect edge, consumed only when a bulk succeeds) so the
-  surviving accept **inherits** the outstanding obligation and re-drives
-  the bulk. See `docs/session-sync-architecture.md` → "Atomic Install +
+  full-disconnect→connect edge, consumed only when the PEER acknowledges a
+  bulk sent for that debt, #9626) so the surviving accept **inherits** the
+  outstanding obligation and re-drives the bulk. See `docs/session-sync-architecture.md` → "Atomic Install +
   Cold-Prime Decision (#4962)".
 
 ## Operating the control-link PSK (#6611)
@@ -2506,6 +2582,17 @@ CLOSED. A legitimate keyed peer reconnects immediately and authenticates
 through `performSyncHandshake`; a hostile stream cannot, because
 `syncAuthDecision` refuses an unkeyed peer on a fresh connection.
 
+**With the posture off (the default), the residual stays open, but it is not
+silent (#9717).**
+- Once the grace has passed, a one-time `slog.Warn` names each established
+  session-sync connection that still has not authenticated. These warnings are
+  counted in `StrictAuthResidualWarnings`.
+- The `Authentication:` status line below names such a connection instead of
+  claiming rejection.
+- For a NEW deployment, key both nodes before they first join. A connection
+  established after the key authenticates at its handshake, so the residual
+  never arises.
+
 **It is a DECLARATION, not an inference, and that is the whole design.** Three
 signals look like the missing discriminator and each fails:
 
@@ -2547,12 +2634,15 @@ it and you have NOT set `strict-session-auth`, restarting `xpfd` still evicts
 the stream.
 
 Confirm the posture with `show chassis cluster statistics`, whose
-`Authentication:` line (`controlLinkAuthStatus`) reads
-`engaged (peer authenticated; unauthenticated frames rejected)` once both
-nodes are keyed — `dual-accept (...)` means the channel is still
-unauthenticated in practice. Note this line reflects the heartbeat/fabric
-posture; it does not tell you whether an existing session-sync connection
-predates the key.
+`Authentication:` line (`controlLinkAuthStatus`) reads as follows:
+- `engaged (peer authenticated; unauthenticated frames rejected)` once both
+  nodes are keyed and no pre-key session-sync connection survives;
+- `dual-accept (...)` means the channel is still unauthenticated in practice;
+- since #9717 the line also covers the session-sync channel. While an
+  established session-sync connection has not authenticated, it reads
+  `heartbeat engaged (peer authenticated); N session-sync connection(s) NOT
+  authenticated, frames still accepted without HMAC: <remote>, ...` and names
+  each such connection.
 
 **Rolling BACK is not symmetric.** `peerAuthSeen` is sticky in memory and
 clears only on an **xpfd restart** — since #5086 it lives on the `Manager`,
@@ -2906,7 +2996,13 @@ standby can re-initiate the primary's tunnels on takeover:
   per stream (`ipsecRecvSeq`, a `fullSetSeqGuard`), strips the delimiter
   (`stripIPsecFullSetDelim`), and drops a stale reorder (`IPsecSAStaleIgnored`).
   The guard is reset on a peer bulk re-prime (`resetRecvGen`) so an OS-rebooted
-  peer's fresh set (lower monotonic incarnation) is re-accepted. A legacy peer
+  peer's fresh set (lower monotonic incarnation) is re-accepted. Every full-set
+  guard is reset from ONE list, `fullSetGuardsLocked` (#9634). The IPsec and
+  DHCP resets used to be written out one by one, and #8121's
+  `persistentNatLeaseRecvSeq` never got one, so a rebooted peer's persistent-NAT
+  lease sets were dropped as stale until its epoch passed the old one. A
+  reflection cell now enumerates every `fullSetSeqGuard` field and requires it
+  to be reset. A legacy peer
   sends no trailer → `(0,0)` → accept-always (mixed-version compat). See
   `docs/sync-protocol.md` "Full-set state-sync ordering (#5706)".
 - **Re-initiate on takeover** — `reinitiateIPsecSAs` reads `PeerIPsecSAs()`,
@@ -3457,6 +3553,29 @@ outside the monitor loop:
 - `Ready` and `TransferReady` are different gates. `Ready` allows VRRP to
   participate in election; `TransferReady` is the stricter gate for
   explicit operator-initiated `request chassis cluster failover`.
+- **Every handover that promotes the peer refuses a config-stale peer
+  (#9569).** The #5563 config-stale gate lives in `TransferReady`, which only
+  the node that becomes primary evaluates, through `RequestPeerFailover`. The
+  node-targeted form reaches it. The untargeted `request chassis cluster
+  failover redundancy-group N`, `ManualFailoverBatch`, and `ForceSecondary` (the
+  ISSU drain and `request system software in-service-upgrade`) demote THIS node
+  instead and never consulted it. For RG0 the stale standby was then promoted,
+  refused the newer config the old primary pushed, and pushed its own older
+  config back over the committed one.
+  - The demoting node cannot read the peer's `ConfigStale`: heartbeats carry only
+    per-RG priority, weight and state. It does hold the one signal that covers the
+    reachable windows. A standby whose stored config is still older either failed
+    to apply the newest push or dropped it from a full apply queue, and both send a
+    config-apply nack for that generation (#7328).
+    `SessionSync.PeerConfigStale` is true while the last nack matches
+    `lastSentConfigGen`; a newer successful push supersedes it.
+  - `ManualFailover`, `ManualFailoverBatch` and `ForceSecondary` evaluate the
+    predicate (`SetPeerConfigStaleFunc`, wired by the daemon) outside `m.mu` and
+    refuse with `ErrPeerConfigStale`. A refusal clears the in-progress mark.
+  - A push the standby is still applying sends no nack and is not refused. That is
+    safe, because `SyncApply` makes the new tree active before applying it. With no
+    session sync there is no push that could have failed, so the handover proceeds
+    as before. Crash takeover stays ungated by design.
 - `TakeoverHoldTime` adds extra delay before election when this node would
   immediately preempt. Used to avoid election thrash on simultaneous boot.
 - **Removing an RG must stop its armed hold timer (#5245).** `SetRGReady`
@@ -3649,9 +3768,20 @@ outside the monitor loop:
   install/delete arrival order; a genuinely newer incarnation (re-stamped by a
   later sweep) carries a higher generation and still installs (last-writer-wins).
   A `gen == 0` (legacy) delete still evicts. The generation maps are bounded by
-  `genGuardMapCap` (200000); on overflow the map is NEVER cleared (#2198 F1) — an
-  existing key updates in place, a new key skip-records (degrades to safe gen-0)
-  and bumps `GenMapOverflow`. The receiver also RESETS `recvGenV4/V6` when the
+  `genGuardMapCap` (200000). On overflow the map is NEVER cleared (#2198 F1): an
+  existing key updates in place, and a live entry is never dropped.
+  **Tombstones age out oldest-first (#9719).**
+  - A tombstone never frees its entry. So a long-lived connection used to fill the
+    receiver map with tombstones of closed sessions, then skip-record every NEW
+    key, leaving the ordering guards off for all new sessions until the next bulk.
+  - Now a new key at the cap first evicts the OLDEST tombstone
+    (`genTombstoneOrder`, counted in `GenTombstonesEvicted`) and is recorded.
+    Only when no tombstone is left does it skip-record (degrading to safe gen-0)
+    and bump `GenMapOverflow`.
+  - Evicting the oldest tombstone re-opens only that old key's reorder window.
+  - The sender's stamp map has the matching arm. Once it has overflowed, a
+    delete for an unstamped key carries a fresh generation instead of 0, because
+    the key may be a live session whose stamp was skipped. The receiver also RESETS `recvGenV4/V6` when the
   peer begins a bulk transfer (`resetRecvGen` from the `syncMsgBulkStart`
   handler, #2198 F2) so a rebooted peer — whose monotonic-seeded counter
   legitimately restarts lower — has its cold-start bulk re-prime accepted instead
@@ -3851,6 +3981,38 @@ outside the monitor loop:
   peer-synced session; a node-local id is minted only for a legacy peer that
   sent none. That is what makes `show security flow session` and RT_FLOW render
   one id for one session.
+
+- **A synced session's timestamps are rebased by the clock offset of the
+  connection that carried it, and an impossible peer clock is refused
+  (#9653).** Each peer connection opens with a `syncMsgClockSync` frame
+  carrying the peer's `CLOCK_MONOTONIC` seconds. The receiver stores
+  `local - peer`, and every `syncMsgSessionV4`/`V6` install rebases `Created`
+  and `LastSeen` through `rebaseTimestamp`, clamping a negative result to 0.
+  - The offset used to be stored with no bound. A reading of `2^63-1` rebased
+    every later install to `Created = LastSeen = 0`, so the standby aged the
+    sessions out. A reading of `0` against a long local uptime put them in the
+    future, so they never aged. `plausiblePeerMonoSeconds` now refuses a reading
+    below 1 s or above a century. The previous offset stays in force,
+    `ClockSyncsRefused` counts the refusal (cluster status renders it when
+    nonzero), and the warning names the remote.
+  - A bound cannot tell a plausible false reading from a true one. The offset
+    was also global, so one ClockSync on ANY session-sync connection rebased
+    the sessions every other connection carried. Each connection now keeps the
+    offset its own ClockSync established (`authConn.clockOffset`), and
+    `clockOffsetFor` rebases a session with the offset of the connection that
+    carried it. A connection that has not synced yet uses the last accepted
+    offset, which is what every session used before.
+  - Not done here: authenticating the reading. On the default dual-accept
+    posture, an unauthenticated connection can still send a false but plausible
+    offset for the sessions it carries itself, and it could inject those
+    sessions directly anyway; `strict-session-auth` is the control for that
+    reach. ClockSync on an unauthenticated connection is deliberately NOT refused
+    when a key is configured: during a key rollout the peer's connection stays
+    unauthenticated until the in-place upgrade, and ClockSync is sent once per
+    connection, so the offset would stay unset and synced sessions would age by
+    the difference between the two nodes' uptimes.
+
+  Cells: `sync_clocksync_bound_9653_test.go`.
 
 - **The peer heartbeat-ack capability is peer-INCARNATION scoped, not
   process-sticky (#5718 C01a).** `SessionSync.peerHeartbeatAckEver` latches
@@ -4125,26 +4287,110 @@ outside the monitor loop:
   the epoch baseline and evicts the corpse. #9174 V014 armed the obligation on
   the epoch edge only, so this order retired the dead incarnation and owed
   nothing. `applyPeerIncarnationSwitchLocked` now arms `needColdPrime` whenever
-  the switch applies, and the sweep's owed-cold-prime re-drive discharges it on
-  success only. The arm is deliberately NOT gated on the switch having evicted
+  the switch applies. The sweep's owed-cold-prime re-drive sends the bulk, and
+  the replacement's BulkAck discharges the debt (#9626, below). The arm is
+  deliberately NOT gated on the switch having evicted
   anything: the corpse's own receive loop can remove it after the replacement
   installed, and the switch is then the only classifier that ever sees the
   reboot. The first incarnated prime (zero -> X) never reaches the switch
   (`priorInc.known()`), and a same-boot BulkStart on the peer's second fabric is
-  not a switch, so neither arms. When both signals observe one reboot the cost
-  is at most one redundant, idempotent bulk.
+  not a switch, so neither arms. When both signals observe one reboot, the
+  second consumes the first's record and arms nothing (#9636, below).
 
-  **What this does not close.** The two classifiers are still not reconciled
-  (#9636): a boot-id-first reboot gets no `OnPeerConnected` dispatch (DHCP-lease
-  and IPsec-SA sync nudges, config reconcile), and a healthy second fabric that
-  installs between the epoch classification and the replacement's BulkStart is
-  evicted as a corpse. Adding the dispatch to the switch fires the
-  non-idempotent callback twice when the epoch was seen first, and gating on an
-  eviction has both a false negative and a false positive, so that fix needs a
-  per-reboot identity rather than either shortcut. The consumer semantics every
-  arm shares — discharge on a local write rather than `BulkAck`, an unversioned
-  latch an older bulk can clear, a re-sent table limited to survivor-primary
-  RGs — are #9626.
+  **The PEER discharges the obligation, not a local write (#9626).** Every arm
+  above used to be paid off when `doBulkSync` returned nil. That means the
+  frames through BulkEnd were WRITTEN, not received: a fabric that dies after
+  the kernel took them leaves the debt cleared and the peer's table empty. It
+  was also an unversioned flag, cleared with `Store(false)` outside `s.mu`, so a
+  bulk that finished after a newer reboot was classified cleared the newer
+  debt. Both are closed by one mechanism:
+  - every arm goes through `armColdPrimeLocked`, which bumps `coldPrimeGen`
+    under `s.mu`;
+  - a bulk takes the generation of the debt outstanding when it STARTS
+    (`coldPrimeOwedGen`) and records it beside its pending epoch
+    (`pendingBulkOwed`, stamped before the epoch);
+  - only the matching BulkAck discharges, through `dischargeColdPrime`, which
+    clears the flag under `s.mu` only if that stamp is still the current
+    generation;
+  - the three success paths no longer clear anything, and every abandon of a
+    pending bulk goes through `clearPendingBulkAck`, which drops the stamp too.
+
+  Because the discharge now waits for the peer, the sweep's owed re-drive skips
+  while the bulk sent for the current debt is younger than
+  `BulkAckPendingRetryAfter` (`coldPrimeAckAwaited`). Past that bound the ack is
+  treated as lost and the bulk goes again. The bound is the daemon's
+  bulk-prime retry bound (35 s), exported so there is one number. Cells:
+  `sync_cold_prime_ack_9626_test.go`.
+
+  **Accepted limitation, with its owner (#9626 item 3).** A cold prime carries
+  only the redundancy groups this node is PRIMARY for when the bulk is built:
+  `storeBulkWalk` filters by `ShouldSyncZone`, and the table-truth snapshot
+  comes from the owner-RG export (`primaryOwnerRGIDs`,
+  `pkg/daemon/daemon_ha_userspace_export.go`). A survivor that is still
+  SECONDARY for an RG when a table-losing replacement reconnects sends none of
+  that RG's standby copies. The window is narrow: heartbeat loss (`~1 s`) makes
+  the survivor primary for every RG, and `handlePeerTimeout` clears manual
+  failover pins, before a restarted peer's sync connects. It stays open only
+  when peer loss is not declared first: a table-losing restart faster than
+  detection, or a timeout suppressed by the sync-recency or transfer-commit
+  guards. Closing it means exporting standby copies on the owner-RG export path.
+  That path's owner is the daemon's session export, not this latch.
+
+  **The two classifiers consume each other's evidence (#9636).** `installConn`
+  retires an incarnation on a raised heartbeat boot epoch, and the BulkStart arm
+  (`classifyPrimeLocked`) retires it on a changed boot id. One reboot produces
+  both signals, in either order, and each classifier used to act on its own
+  evidence alone:
+  - epoch first, then the replacement's second fabric, then its BulkStart: the
+    switch advanced the incarnation a second time and evicted that healthy
+    second fabric as a corpse;
+  - boot id first, then a second fabric that installs after the heartbeat has
+    landed: `installConn` read the late raise as a second reboot and evicted the
+    fabric the switch had just established;
+  - boot id first: the switch dispatched no `OnPeerConnected`, so the new process
+    got no DHCP-lease or IPsec-SA sync nudge and no config reconcile.
+
+  The discriminator is the reboot's identity, recorded by whichever classifier
+  retires the incarnation (`rebootAwaiting`, keyed to the incarnation, so any
+  later advance voids it):
+  - the epoch arm records that the incarnation it established awaits its boot id;
+  - a switch that retires an incarnation before the raise has landed records
+    that the incarnation awaits its epoch.
+
+  The other classifier consumes the record: it adopts the signal without
+  advancing, evicting, arming or dispatching. Three rules keep a record from
+  swallowing a real reboot:
+  - a daemon restart raises the epoch but keeps the boot id, which changes only
+    on an OS boot. So a prime with an unchanged boot id from an installed
+    connection settles the record. A BulkStart the evicted corpse had already
+    read carries the old boot id too, but it is not installed and settles nothing;
+  - an epoch that has raised again since the retirement means a newer process
+    exists, so the boot-id change is retired as a new reboot;
+  - a supersession is independent evidence and still advances on its own.
+
+  When the switch retires an incarnation it dispatches `OnPeerConnected`, unless
+  the connection's own install already did. That happens when the replacement
+  became the active fabric while a cold prime was owed. The callback is not
+  idempotent: on a cold start it bumps the readiness-timer generation outside
+  the timer mutex. An epoch-first reboot is announced by its install, and its
+  BulkStart is consumed.
+
+  **Residual.** A record the peer never settles can consume a later reboot's
+  signal. That takes a daemon restart whose new process never primes, then an OS
+  reboot whose BulkStart is handled before its first heartbeat raises the epoch.
+  The consumed reboot is then not retired: its corpse stays installed until its
+  receive loop gives up, and no cold prime is owed for it.
+
+  A second shape stays open, and it predates this change: a connection from the
+  new process that installed before ANY evidence of the reboot is stamped with
+  the old incarnation, so whichever classifier retires the incarnation later
+  evicts it as a corpse. Nothing it carries at install time names its process,
+  so closing it needs a per-connection process identity (#9818). Cells:
+  `sync_reboot_classifiers_9636_test.go`, one per ordering, each asserting the
+  incarnation advances, the installed connections, `needColdPrime` with the
+  number of arms, and the `OnPeerConnected` dispatches. The consumer semantics
+  every arm shares (discharge on the peer's `BulkAck`, a generation the ack must
+  match, a re-sent table limited to survivor-primary RGs) are #9626.
 
   **Atomicity of the ack is bound, not merely asserted (#5718 fold r3).** Every
   scenario test calls `installConn` and `handleMessage` in sequence, so none of
