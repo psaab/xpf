@@ -1757,6 +1757,17 @@ they repeatedly bite:
     target test in an optional 5th TAB column, refines the verdict with
     `mutation_verdict_for_target`.
 
+    **A name is not a reason (#9564).** A guard with a LIVENESS fatal ("the
+    parser found no anchors") and a violation branch scores KILLED by name
+    whichever branch fired, so a mutant that merely broke the fixture reads as
+    covered. An optional 6th TAB column gives a fixed substring the target's
+    own failure output must contain. `mutation_verdict_for_message` matches it
+    against the jq-DECODED `Output` of the target and its subtests only (so a
+    `"` in the message matches, and a sibling test's message cannot satisfy it).
+    A target that failed without it scores `KILLED-WRONG-MSG`: not KILLED,
+    because the reason is unproven, and not ESCAPED, because the target did
+    fail. An empty column leaves every verdict byte-identical.
+
     **Do not close the attribution gap by converting the driver to
     `go test -json` instead. That narrows the gate.** Gating through `make` is
     why a mutation cell carries `go vet`, the targeted `-race` runs with

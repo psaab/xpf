@@ -304,6 +304,55 @@ mutation_verdict_for_target() {
 	printf 'ESCAPED(other tests failed: %s)\n' "$*"
 }
 
+# mutation_target_output_has JSONLOG TARGET EXPECT -> status 0 when EXPECT occurs
+# in the DECODED Output of TARGET or one of its subtests (TARGET/...).
+#
+# Decoded, not grepped: `Output` is a JSON string, so a `"` or `\` in the
+# message is escaped on disk, and a raw grep for the operator's text misses it.
+# Scoped to the target's own events, not the whole stream: a sibling test's
+# message must not satisfy another cell's expectation (#9564).
+#
+# The output is captured before matching. The selftest runs under pipefail,
+# and `jq ... | grep -q` fails with SIGPIPE exactly when grep matches early.
+mutation_target_output_has() {
+	local out
+	out=$(jq -r --arg t "$2" \
+		'select(.Action=="output") | select(.Test != null) | select(.Test == $t or (.Test | startswith($t + "/"))) | .Output' \
+		<"$1") || return 1
+	case "$out" in
+	*"$3"*) return 0 ;;
+	esac
+	return 1
+}
+
+# mutation_verdict_for_message VERDICT TARGET EXPECT JSONLOG -> refined verdict
+#
+# The MESSAGE half of attribution (#9564). mutation_verdict_for_target proves
+# the NAMED test failed, which is not the same as failing for the reason the cell
+# exists. A guard with a LIVENESS fatal ("the parser found no anchors") and a
+# VIOLATION branch scores KILLED by name whichever fired. With an expected
+# message:
+#
+#   KILLED            - the target's own output contains EXPECT.
+#   KILLED-WRONG-MSG  - the target failed, but not with EXPECT. It is not KILLED,
+#                       because the reason is unproven, and not ESCAPED, because
+#                       the target did fail.
+#
+# Refines only KILLED, and only when EXPECT is non-empty. Every other verdict,
+# and every spec without the column, is returned byte-identical.
+mutation_verdict_for_message() {
+	local verdict="$1" target="$2" expect="$3" jsonlog="$4"
+	if [ "$verdict" != KILLED ] || [ -z "$expect" ]; then
+		printf '%s\n' "$verdict"
+		return
+	fi
+	if mutation_target_output_has "$jsonlog" "$target" "$expect"; then
+		printf 'KILLED\n'
+		return
+	fi
+	printf 'KILLED-WRONG-MSG\n'
+}
+
 # mutation_score_log LANG LOG APPLIED -> "BUILT COLLECTED FAILED VERDICT"
 # mutation_score_log LANG LOG APPLIED [TIMEDOUT] -> "BUILT COLLECTED FAILED VERDICT"
 #
