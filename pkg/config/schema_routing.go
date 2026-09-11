@@ -954,25 +954,25 @@ var schemaRoutingInstances = &schemaNode{desc: "Routing instance configuration",
 		// undeclared rejects nothing at all, because no fixture writes them. A
 		// targeted probe is what found it.
 		//
-		// All four are admitted by the COMPILER (isRoutingInstanceKeyword8787,
-		// compiler_routing.go), and `description` is read into
+		// All four are admitted by the COMPILER (compileRoutingInstances), and
+		// `description` is read into
 		// RoutingInstanceConfig.Description, so rejecting it would refuse a value
 		// the tree stores. The other three are accepted-and-inert — standard Junos
 		// L3VPN keywords the compiler admits and compiles to no field, exactly as
-		// routingInstanceKeywordOwnsBody9055 records. Their descs say so, so
+		// #9055 recorded. Their descs say so, so
 		// completion offers them with their real status rather than implying
 		// support (the `interface-specific` convention in schema_cos.go).
 		//
-		// The schema and isRoutingInstanceKeyword8787 must now agree EXACTLY;
-		// TestRoutingInstanceSchemaAndCompilerAgree9323 binds that, which is the
-		// drift the #8787 note beside that function warns about but nothing
-		// enforced.
+		// Since #9620 these declarations also split a brace-elided instance
+		// (normalizeElidedRoutingInstance9620), so the compiler keeps no keyword
+		// list of its own to drift from. TestRoutingInstanceSchemaAndCompilerAgree9323
+		// binds that every keyword the compiler reads is declared.
 		// #9323: MEASURED, not derived. `interface-routes` appears DIRECTLY under a
 		// routing instance in the shipped contract — `set routing-instances dmz-vr
 		// interface-routes rib-group inet dmz-leak` is the #2226 rib-group
 		// reference test's own spelling, in both AST shapes — while the schema
 		// declared it only under `routing-options` and
-		// `isRoutingInstanceKeyword8787` does not name it at all. Neither of those
+		// the compiler's packed-run keyword list (removed in #9620) did not name it. Neither of those
 		// two sources is the admissible set; the corpus is. Enumerating it is what
 		// found this (and `apply-macro`, handled as a universal meta keyword in the
 		// gate rather than declared here).

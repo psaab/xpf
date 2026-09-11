@@ -53,10 +53,12 @@ import (
 //
 // THE PERMITTED SET IS READ FROM THE SCHEMA, not hardcoded (#9017's rule): a
 // keyword declared under the routing-instance wildcard is permitted here
-// automatically, so there is no second place to remember. The schema and the
-// compiler's own `isRoutingInstanceKeyword8787` are held to the SAME SET by
-// TestRoutingInstanceSchemaAndCompilerAgree9323 — before #9323 they had
-// already drifted, the schema declaring 4 of the compiler's 8.
+// automatically, so there is no second place to remember. Since #9620 the same
+// declarations also split a brace-elided instance into its statements
+// (normalizeElidedRoutingInstance9620), so the compiler keeps no keyword list of
+// its own. TestRoutingInstanceSchemaAndCompilerAgree9323 binds that every
+// keyword the compiler reads is declared; before #9323 the schema declared 4 of
+// the compiler's 8.
 
 // routingInstanceChildTokens9323 returns the keywords the
 // `routing-instances <name>` wildcard declares, sorted, for use in the gate and

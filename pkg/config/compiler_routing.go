@@ -518,45 +518,6 @@ func parseNextTableInstance(table string) string {
 	return table
 }
 
-// isRoutingInstanceKeyword8787 names the property keywords a packed
-// routing-instance tail can contain, so a multi-value run knows where to stop.
-// Kept beside the switch it mirrors; a keyword added to one and not the other
-// is exactly the drift that made the packed spelling lose its whole instance.
-func isRoutingInstanceKeyword8787(tok string) bool {
-	switch tok {
-	case "instance-type", "description", "interface", "routing-options",
-		"protocols", "vrf-target", "vrf-table-label", "route-distinguisher":
-		return true
-	}
-	return false
-}
-
-// routingInstanceKeywordOwnsBody9055 reports whether a routing-instance
-// keyword is followed by a BRACED BODY rather than by a value.
-//
-// #9055: the distinction matters only for the brace-elided spelling. A
-// value-bearing keyword (`instance-type vrf`) packs its value onto the same
-// Keys run and is read by the loop above; a body-bearing one puts its body in
-// the node's Children, where the property loop mistakes it for the instance's
-// own properties.
-//
-// Derived from `isRoutingInstanceKeyword8787` rather than restated: a keyword
-// that is not admitted at all cannot reach here, and this answers only the
-// second question about the ones that are. `vrf-target`,
-// `route-distinguisher` and `vrf-table-label` are admitted, take values, and
-// currently compile to no field at all -- accepted-but-inert, with no
-// braced/elided divergence to fix and none introduced here.
-func routingInstanceKeywordOwnsBody9055(tok string) bool {
-	if !isRoutingInstanceKeyword8787(tok) {
-		return false
-	}
-	switch tok {
-	case "routing-options", "protocols":
-		return true
-	}
-	return false
-}
-
 func compileRoutingInstances(node *Node, cfg *Config) error {
 	// Assign each routing-instance a STABLE kernel routing table id derived from
 	// its NAME (#3855), never a positional counter. Positional assignment
@@ -587,11 +548,13 @@ func compileRoutingInstances(node *Node, cfg *Config) error {
 		// creation, so a dropped value creates a VRF the operator asked NOT to
 		// have and moves interfaces into it.
 		//
-		// NOT FIXABLE BY THE #8690 NORMALIZER, which is why this is handled
-		// here. That pass is scoped per (container, head) pair, and the pair it
-		// asks for this site is ("ri1", "instance-type") -- the operator's
-		// INSTANCE NAME, not a keyword. No scope entry can name it. Measured:
-		// admit-all folds the node, the real predicate cannot be made to.
+		// The #8690 normalizer's scoped fold cannot reach this site: its pair
+		// would be ("ri1", "instance-type"), the operator's INSTANCE NAME, and no
+		// scope entry can name it. Since #9620 that normalizer rewrites the elided
+		// instance into its braced shape anyway (normalizeElidedRoutingInstance9620),
+		// before group expansion and SchemaValidate, so this loop reads only
+		// `ri1 { ... }`. Reading the Keys run here instead, after both, compiled an
+		// elided body that validation and expansion had never seen.
 		//
 		// A bare `routing-instances { ri1; }` carries no properties and is
 		// still skipped.
@@ -604,72 +567,7 @@ func compileRoutingInstances(node *Node, cfg *Config) error {
 			TableID: StableRoutingInstanceTableID(instanceName),
 		}
 
-		// The elided spelling packs the body onto this node's Keys tail. Read
-		// it with the SAME keyword set the switch below handles, so the two
-		// spellings cannot drift: a keyword added there and not here would
-		// silently work braced and not packed, which is how this defect
-		// started.
-		for i := 1; i < len(child.Keys); i++ {
-			switch child.Keys[i] {
-			case "instance-type":
-				if i+1 < len(child.Keys) {
-					ri.InstanceType = child.Keys[i+1]
-					i++
-				}
-			case "description":
-				if i+1 < len(child.Keys) {
-					ri.Description = child.Keys[i+1]
-					i++
-				}
-			case "interface":
-				// Multi-value (#3904): consume the whole run, or a packed
-				// `interface a b` would strand every port after the first
-				// OUTSIDE the instance -- the VRF isolation break that note
-				// records.
-				j := i + 1
-				for j < len(child.Keys) && !isRoutingInstanceKeyword8787(child.Keys[j]) {
-					ri.Interfaces = append(ri.Interfaces, child.Keys[j])
-					j++
-				}
-				i = j - 1
-			}
-		}
-
-		// #9055: an elided BODY-BEARING keyword puts its NAME on the Keys tail
-		// and its BODY in Children, so the property loop below sees the body's
-		// contents instead of the keyword.
-		//
-		//	braced   [ri1] > [routing-options] > [static] > [route ...]
-		//	elided   [ri1 routing-options] > [static] > [route ...]
-		//
-		// Measured before this fix, through configstore.CheckText -- the commit
-		// gate, not CompileConfig -- both spellings ACCEPTED with no error and
-		// no warning:
-		//
-		//	routing-options   braced static=1   elided static=0
-		//	protocols         braced ospf=true  elided ospf=false, ifs=[ge-0/0/1.0]
-		//
-		// The protocols row is NOT a plain drop, it is KEYWORD THEFT: the OSPF
-		// area's interface token fell through to the `interface` case above and
-		// was bound as a VRF member. One accepted statement produced two wrong
-		// outcomes -- OSPF vanished AND an interface silently changed routing
-		// table, which is an isolation change rather than only a routing one.
-		//
-		// Re-dispatch through the SAME readers rather than adding a second set:
-		// the keyword list drifted once already (#8787 stopped this switch at
-		// three of the eight its own admission helper names), and two
-		// implementations of one keyword is how it drifts again.
-		props := child.Children
-		if n := len(child.Keys); n >= 2 && routingInstanceKeywordOwnsBody9055(child.Keys[n-1]) {
-			props = []*Node{{
-				Keys:     []string{child.Keys[n-1]},
-				Children: child.Children,
-				Line:     child.Line,
-				Column:   child.Column,
-			}}
-		}
-
-		for _, prop := range props {
+		for _, prop := range child.Children {
 			switch prop.Name() {
 			case "description":
 				ri.Description = nodeVal(prop)

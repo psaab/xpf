@@ -658,6 +658,63 @@ what else has to move with it:
   a CLAIM, so it is paired with a test asserting the commit decision is REJECT
   in BOTH spellings — otherwise the allowlist would hide a fail-open.
 
+### Brace-elided routing instances
+
+`routing-instances { ri1 instance-type virtual-router; }` packs the instance's
+statements onto a node whose first key is the operator's INSTANCE NAME. The
+scoped fold admits by (container keyword, head) pair, and no scope entry can
+name an instance (#8787). So `normalizeCompactNodes` hands `routing-instances`
+children to `normalizeElidedRoutingInstance9620`. That rewrites the node into
+the braced shape the parser builds for the same statements. The scoped fold
+then folds each statement's own packed tail, as it does inside a braced
+instance.
+
+The run is split by the instance schema, the grammar the braced spelling is
+validated against:
+
+- A keyword that is not a container takes its declared values, then every
+  further token up to the next declared instance keyword. That is what the same
+  statement means written on one line inside braces, so `vrf-target export
+  target:65000:1` stays one statement. An authored quoted or bracketed token is
+  always a value.
+- A container keyword (`routing-options`, `protocols`, `interface-routes`)
+  takes the rest of the run and the braced body. So does an undeclared keyword,
+  which can only start the run. It arrives as a child named by that keyword, so
+  the #9323 gate refuses it, as it refuses the braced spelling.
+- An undeclared token after a declared statement extends that statement, as it
+  does inside braces. There it also commits today; that is #9736.
+- A braced body after a value keyword stays a list of instance statements.
+- Apply statements are not instances and are left alone (#9657).
+
+**Why the normalizer and not the compiler (#9620).** The compiler used to read
+this Keys run itself (#8787, #9055). It ran after group expansion and after
+`SchemaValidate`, so an elided body was compiled from a node neither of them had
+seen. Measured through `configstore.CheckText` at `0e950bd5b`:
+
+- `ri1 protocols { bgp { group G { hold-time 1; ... } } }` committed with
+  `HoldTime=1`. The braced spelling is refused, because FRR rejects the timers
+  line.
+- `apply-groups` under an elided `routing-options` body resolved against the
+  wrong path, and compiled a route with no next-hop.
+- A body packed past its keyword compiled nothing, and the instance loop read
+  the body's own tokens as instance properties. `ri2 instance-type
+  virtual-router protocols ospf area 0.0.0.0 interface ge-0/0/1.0;` bound
+  `ge-0/0/1.0` into the VRF and configured no OSPF.
+
+Every compile core and the `SchemaValidate` walk normalize before they read the
+tree. Rewriting in the normalizer therefore removes the whole class, and the
+compiler no longer keeps a keyword list of its own.
+
+Regression coverage:
+
+- `pkg/config/routing_instance_elided_normalize_9620_test.go`: the elided and
+  braced spellings normalize to one tree, at top level and inside `groups`;
+  apply statements are untouched; the compiled fields match on both spellings.
+- `pkg/configstore/routing_instance_elided_commit_gate_9620_test.go`: both
+  spellings reach the same commit-gate verdict. That covers refusals for
+  `hold-time 1` and for an undeclared first keyword, a next-hop inherited from
+  a group, and a multi-token `vrf-target`.
+
 ### Where it is NOT done
 
 Expansion is deliberately not done in the parser. `show configuration` renders
@@ -6717,14 +6774,15 @@ declaring a new routing-instance keyword permits it automatically.
 **Four keywords were declared BEFORE the gate landed, because gating without
 them is a regression the suite cannot see.** `description`, `vrf-target`,
 `vrf-table-label` and `route-distinguisher` are all admitted by the compiler
-(`isRoutingInstanceKeyword8787`) and `description` is compiled into
+(`compileRoutingInstances`) and `description` is compiled into
 `RoutingInstanceConfig.Description` — but the schema declared only four of the
 compiler's eight. Measured: with the gate armed and those four still undeclared,
 `go test ./...` rejects nothing at all, because no fixture writes any of them; a
 targeted probe is what found it.
-`TestRoutingInstanceSchemaAndCompilerAgree9323` now holds the schema and
-`isRoutingInstanceKeyword8787` to the SAME SET in both directions — the drift
-the #8787 note beside that function warns about in prose, asserted.
+`TestRoutingInstanceSchemaAndCompilerAgree9323` holds that every keyword the
+compiler reads or accepts is declared. Since #9620 the compiler keeps no keyword
+list of its own: a brace-elided instance is split by these same declarations
+(see "Brace-elided routing instances"), so there is no second set to drift.
 
 ## `forwarding-options dhcp-relay dhcpv6` — refused, and never compiled as the DHCPv4 relay (#9411)
 
