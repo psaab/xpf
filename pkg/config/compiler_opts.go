@@ -542,6 +542,13 @@ type compileOpts struct {
 	// lenientIPsecManualKey.
 	lenientIPsecSANameDisplay bool
 
+	// lenientIPsecSectionName (#9495) downgrades the IPsec VPN section-name
+	// allowlist reject (validateIPsecSectionNamesStrict) to a warning on the
+	// tolerant load / peer-sync paths, so a persisted or synced config still
+	// boots. A name that would actually break the swanctl file is skipped at
+	// render (pkg/ipsec), so the other tunnels keep loading.
+	lenientIPsecSectionName bool
+
 	// lenientLogProfileStreamRef (#2008 H7) downgrades the
 	// `security log profile <name> stream-name <stream>` cross-reference
 	// from a hard error to a warning on the tolerant load / peer-sync
@@ -2773,6 +2780,7 @@ func lenientCompileOpts() compileOpts {
 		lenientIPsecProposalProtocol:           true,
 		lenientIPsecManualKey:                  true,
 		lenientIPsecSANameDisplay:              true,
+		lenientIPsecSectionName:                true,
 		lenientLogProfileStreamRef:             true,
 		lenientAuthTypeAbsent:                  true,
 		lenientMultiLeafSelfRepeat:             true,

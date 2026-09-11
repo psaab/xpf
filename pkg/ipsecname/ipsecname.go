@@ -30,7 +30,7 @@ func ChildBase(name string) string {
 	for _, r := range name {
 		switch {
 		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9',
-			r == '-' || r == '_' || r == '.':
+			r == '-' || r == '_':
 			b = append(b, r)
 		default:
 			b = append(b, '-')
@@ -109,4 +109,53 @@ func SANames(vpn string, selectors []string) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// SectionSafe reports whether name may be committed as an IPsec VPN name (#9495). It is an
+// ALLOWLIST: non-empty, ASCII letters, digits, '-' and '_' only. The VPN name is written raw
+// into swanctl section headers (the connection, the child of a selector-less VPN, the prefix
+// of every other child, and the `ike-<name>` secret), and a denylist would have to anticipate
+// every character strongSwan's parser or a later consumer treats specially.
+func SectionSafe(name string) bool {
+	if name == "" {
+		return false
+	}
+	for i := 0; i < len(name); i++ {
+		c := name[i]
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9', c == '-', c == '_':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// SectionBreaking reports whether name, written as a swanctl section header, breaks the file or
+// what it means (#9495). It is deliberately NARROWER than SectionSafe: it is the render belt for
+// names that reach the renderer anyway (a persisted or peer-synced config), and it must not drop
+// a tunnel that loads today. Measured on the pinned strongSwan (docs/log/9495.md):
+//   - the whole file becomes unparsable, so every tunnel is lost: whitespace, '{', '}', '#', '=',
+//     ',', '"', '.';
+//   - the tunnel is refused: '%' and any non-ASCII byte;
+//   - the tunnel loads under a DIFFERENT name: ':' (section inheritance);
+//   - control bytes and DEL: sanitizeSwanctlValue already maps them to a space, which breaks the
+//     section the same way.
+//
+// Characters that loaded verbatim in the same measurement ('/', '@', '+' and similar) are not
+// breaking. SectionSafe refuses them at commit, and this belt leaves an existing one rendering.
+func SectionBreaking(name string) bool {
+	if name == "" {
+		return true
+	}
+	for i := 0; i < len(name); i++ {
+		c := name[i]
+		switch {
+		case c < 0x20 || c == 0x7f || c >= 0x80:
+			return true
+		case c == ' ', c == '{', c == '}', c == '#', c == '=', c == ',', c == '"', c == '.', c == '%', c == ':':
+			return true
+		}
+	}
+	return false
 }
