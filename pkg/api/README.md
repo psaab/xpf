@@ -1915,8 +1915,12 @@ the drop fails loudly instead of going quietly vacuous.
   progressing*, which neither a full-speed loopback client nor a stalled conn
   can be, so `stalledConn6809` gained `slowRate`/`slowWindow`: bytes move, at a
   rate, honouring the armed deadline. `TestLargeEventSurvivesASlowButProgressingReader7632`
-  now reds on the revert (truncated after 3 676 of 262 144 payload bytes) and
-  passes with the chunking.
+  now reds on the revert (truncated after 3 841 of 1 048 576 payload bytes) and
+  passes with the chunking. Its margins are wall-clock (#9807): a 400 ms
+  deadline over 40 ms chunks leaves 360 ms per chunk, and the 32-chunk payload
+  (1.28 s) still cannot fit one window. The first version used 100 ms and 8
+  chunks, and a scheduler stall on a loaded host ate its 60 ms margin and
+  failed the cell with the #7654 message.
 
   Worth knowing for anyone changing `sseWriteChunk`: net/http's own 4 KiB
   `conn.bufw` means the **socket** sees ~4 KiB writes whatever the chunk size

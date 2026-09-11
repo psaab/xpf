@@ -575,11 +575,17 @@ func TestIdleSSEStreamIsNotResetOnHTTP2_7632(t *testing.T) {
 // client sees a truncated stream.
 func TestLargeEventSurvivesASlowButProgressingReader7632(t *testing.T) {
 	const (
-		deadline = 100 * time.Millisecond
+		// #9807: 400ms, not 100ms. One chunk costs 40ms, so the per-chunk
+		// margin is 360ms of wall clock rather than 60ms; a scheduler stall
+		// on a loaded host (other `make test` runs, a cluster build) ate the
+		// old margin and failed this cell with the #7654 message.
+		deadline = 400 * time.Millisecond
 		// 32 KiB costs 40ms: one chunk fits comfortably inside one window,
-		// the whole 8-chunk payload (320ms) cannot.
+		// the whole 32-chunk payload (1.28s) cannot, so a single-window write
+		// still expires mid-payload.
 		rate   = 32 * 1024
 		window = 40 * time.Millisecond
+		chunks = 32
 	)
 	restore := sseWriteDeadline
 	sseWriteDeadline = deadline
@@ -611,7 +617,7 @@ func TestLargeEventSurvivesASlowButProgressingReader7632(t *testing.T) {
 	}
 
 	// A payload many chunks long: one window under the mutation, many with it.
-	big := strings.Repeat("A", 8*sseWriteChunk)
+	big := strings.Repeat("A", chunks*sseWriteChunk)
 
 	// #7655: read the HEADER BLOCK first, then publish ONCE.
 	//
@@ -652,7 +658,9 @@ func TestLargeEventSurvivesASlowButProgressingReader7632(t *testing.T) {
 			t.Fatalf("a %d-byte event to a CONTINUOUSLY reading client failed after "+
 				"%d payload bytes: %v — the write budget is measuring elapsed time "+
 				"rather than progress, so one large event severs a healthy reader "+
-				"(#7654 review A, finding 2)", len(big), seen, err)
+				"(#7654 review A, finding 2). Per-chunk margin was %v; a stall "+
+				"longer than that inside one chunk reads the same way (#9807)",
+				len(big), seen, err, deadline-window)
 		}
 	}
 }
