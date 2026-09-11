@@ -245,6 +245,41 @@ re-checked against the running binary's refusal classes. The commit was
 accepted before the restart, and refusing to re-arm would make an unconfirmed
 commit permanent, so that path needs a decision rather than this gate.
 
+### A recovered commit-confirmed target is pre-flighted too (#9615)
+
+The #6707/#9588 pre-flight above runs when `commit confirmed` ARMS a window in
+this process. `Store.Load` also re-arms a window that was still live at restart
+(#4577), and that path never ran the pre-flight. The timeout then applied the
+target unconditionally, citing "validated at commit-confirmed time". For a
+recovered window that premise is false in two ways:
+- the box may have upgraded inside the window, and the new build's refusal
+  classes can cover the old config;
+- a target that binds a dynamic-address feed has no installed snapshot right
+  after a restart.
+
+Refusing to re-arm would make the unconfirmed commit permanent, so the window
+always stays armed and the check runs twice:
+
+- **At boot** (`checkRecoveredConfirmTarget`, startup phase
+  `recovered-confirm-preflight`, after manager-init so the feed manager
+  exists). If the recovered target fails the pre-flight, the daemon logs an
+  error naming the reasons and the deadline. It records the same text as a
+  journal entry (`confirm_rollback_target_refused`) and as the local CLI's
+  pending-window `[ALARM: …]` line (`Store.ConfirmAlarm`), so the operator can
+  confirm or re-commit before the timer fires. The remote CLI's pending flag
+  does not carry the text.
+- **When the timer fires** (`confirmRollbackTargetHandledAtFire`, called from
+  `executeConfirmedRollback` BEFORE `PromoteRollback`, so nothing is promoted
+  yet):
+  - A target refused only because a feed has no snapshot (the refusal
+    disappears once every binding resolves) is deferred: `Store.DeferConfirmTimer`
+    re-arms the same generation for 5 s, at most 24 times.
+  - Any other refusal, or a feed still unready at the cap, promotes the store to
+    the target (persisted as committed, as #6538 does for a recovered target
+    that no longer compiles). The daemon then enters the bootstrap/lifeline safe
+    state instead of applying a target the dataplane refuses.
+  - An appliable target rolls back and applies exactly as before.
+
 ### The recovered commit-confirmed rollback fires against a HALF-BUILT daemon (#6739)
 
 `Store.Load` restores a still-live `commit confirmed` window by re-arming

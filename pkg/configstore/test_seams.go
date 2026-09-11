@@ -56,6 +56,16 @@ func (s *Store) InvokeRollbackTimerForTesting(gen uint64) {
 	s.fireConfirmTimer(gen)
 }
 
+// CancelConfirmTimerForTesting stops a pending commit-confirmed timer without
+// resolving or persisting anything, so a test that loads a SECOND store from the
+// same files (to model a restart) does not leave the first store's timer running
+// (#9615). Not for production callers.
+func (s *Store) CancelConfirmTimerForTesting() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.cancelPendingConfirmTimerLocked()
+}
+
 // SetPersistRetryBackoffForTesting overrides the degraded-persist
 // retry loop's initial/max backoff (#1799) so tests can drive the
 // loop deterministically with tiny intervals. Must be called BEFORE

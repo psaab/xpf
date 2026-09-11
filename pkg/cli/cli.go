@@ -581,6 +581,9 @@ func (c *CLI) Run() error {
 		}
 		if c.store.IsConfirmPending() {
 			fmt.Println("[commit confirmed pending - issue 'commit' to confirm]")
+			if alarm := c.store.ConfirmAlarm(); alarm != "" {
+				fmt.Println("[ALARM: " + alarm + "]")
+			}
 		}
 		line, err := c.rl.Readline()
 		if err != nil {

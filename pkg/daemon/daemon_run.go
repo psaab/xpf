@@ -171,6 +171,12 @@ func (d *Daemon) Run(ctx context.Context) error {
 		{"manager-init", func(context.Context) error {
 			return d.initManagers(configCompileFailed)
 		}},
+		// #9615: after manager-init so the feed manager exists; an alarm only,
+		// never a refusal to keep the recovered window armed.
+		{"recovered-confirm-preflight", func(context.Context) error {
+			d.checkRecoveredConfirmTarget()
+			return nil
+		}},
 		{"dataplane-setup", func(context.Context) error {
 			return d.setupDataplaneAndInitialConfig()
 		}},
