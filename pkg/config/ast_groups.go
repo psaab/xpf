@@ -414,11 +414,11 @@ func mergeNodes(dst *[]*Node, src []*Node, ancestorPath [][]string, budget *grou
 			if len(s.Keys) > 0 {
 				key = s.Keys[0]
 			}
-			// #9831: a named-instance leaf names ONE instance, so its inline peer is
-			// the node naming that instance, not any node sharing the keyword.
+			// #9831: a group zone statement names ONE zone, so its inline peer is the
+			// statement naming that zone, not any statement sharing the keyword.
 			peer := leafListPeer(*dst, key)
-			if cs := groupNamedInstanceSchema9831(ancestorPath, key); cs != nil {
-				peer = sameInstancePeer9831(ancestorPath, *dst, s, cs.args)
+			if groupZoneLeaf9831(ancestorPath, s) {
+				peer = zoneGroupLeafPeer9831(ancestorPath, *dst, s)
 			}
 			if peer != nil {
 				// #7648: a COMPACT group leaf whose key names a schema

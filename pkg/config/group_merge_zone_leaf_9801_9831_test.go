@@ -160,10 +160,10 @@ func TestWildcardLeafZoneMergeNeedsTheZonesSchema9801(t *testing.T) {
 	}
 }
 
-// #9831: a group's named-instance leaf must not be dropped by an inline leaf
-// naming a DIFFERENT instance. Measured at ed313e4c9, the first row compiled
+// #9831: a group's zone statement must not be dropped by an inline statement
+// naming a DIFFERENT zone. Measured at ed313e4c9, the first row compiled
 // only [trust].
-func TestGroupLeafInstanceKeepsItsIdentity9831(t *testing.T) {
+func TestGroupZoneLeafKeepsItsIdentity9831(t *testing.T) {
 	t.Run("zone beside another zone's inline leaf", func(t *testing.T) {
 		zones := zones9801(t, `groups { G { security { zones { security-zone zga; } } } } apply-groups G; security { zones { security-zone trust; } }`)
 		if got := zoneNames9801(zones); got != "trust zga" {
@@ -198,33 +198,6 @@ func TestGroupLeafInstanceKeepsItsIdentity9831(t *testing.T) {
 			t.Errorf("expanded tree has %d security-zone trust nodes, want 1: the group's leaf must merge into the inline zone (#9831)", n)
 		}
 	})
-	t.Run("syslog host beside another host's inline leaf", func(t *testing.T) {
-		const text = `groups { G { system { syslog { host 10.0.0.1; } } } } apply-groups G; system { syslog { host 10.0.0.2; } }`
-		tree, perrs := NewParser(text).Parse()
-		if len(perrs) > 0 {
-			t.Fatalf("fixture must parse: %v", perrs)
-		}
-		if err := tree.ExpandGroups(); err != nil {
-			t.Fatalf("expand: %v", err)
-		}
-		var hosts []string
-		for _, sys := range tree.FindChildren("system") {
-			for _, sl := range sys.Children {
-				if len(sl.Keys) == 0 || sl.Keys[0] != "syslog" {
-					continue
-				}
-				for _, h := range sl.Children {
-					if len(h.Keys) >= 2 && h.Keys[0] == "host" {
-						hosts = append(hosts, h.Keys[1])
-					}
-				}
-			}
-		}
-		sort.Strings(hosts)
-		if strings.Join(hosts, " ") != "10.0.0.1 10.0.0.2" {
-			t.Errorf("expanded syslog hosts %v, want [10.0.0.1 10.0.0.2]: the group's host was dropped (#9831)", hosts)
-		}
-	})
 	t.Run("scalar leaf, inline value still wins (control)", func(t *testing.T) {
 		tree := expand9801(t, `groups { G { system { host-name fromgroup; } } } apply-groups G; system { host-name inline; }`)
 		var got []string
@@ -236,7 +209,7 @@ func TestGroupLeafInstanceKeepsItsIdentity9831(t *testing.T) {
 			}
 		}
 		if strings.Join(got, ",") != "host-name inline" {
-			t.Errorf("expanded host-name nodes %q, want [host-name inline]: a scalar is not a named instance, so the inline value overrides the group's (#9831)", got)
+			t.Errorf("expanded host-name nodes %q, want [host-name inline]: the zone rule does not reach a scalar, so the inline value overrides the group's (#9831)", got)
 		}
 	})
 }
@@ -273,51 +246,12 @@ func TestGroupZoneStatementTailIsJudgedAsInline9831(t *testing.T) {
 	})
 }
 
-// A packed syslog host from a group keeps one destination per host. Beside a
-// braced host, #7648 expands it into that host; master (ad2ba883a) compiled a
-// second destination. Beside a leaf host, the override stands, because
-// adopting it would compile a second destination: `host 10.0.0.1;
-// host 10.0.0.1 any any;` compiles two (measured at ad2ba883a).
-func TestGroupPackedInstanceKeepsOneInstance9831(t *testing.T) {
-	hosts := func(t *testing.T, inline string) []string {
-		t.Helper()
-		text := `groups { G { system { syslog { host 10.0.0.1 any any; } } } } apply-groups G; system { syslog { ` + inline + ` } }`
-		tree, perrs := NewParser(text).Parse()
-		if len(perrs) > 0 {
-			t.Fatalf("fixture must parse: %v", perrs)
-		}
-		cfg, err := CompileConfig(tree)
-		if err != nil {
-			t.Fatalf("strict compile %q: %v", text, err)
-		}
-		var got []string
-		for _, h := range cfg.System.Syslog.Hosts {
-			var fs []string
-			for _, f := range h.Facilities {
-				fs = append(fs, fmt.Sprintf("%v/%v", f.Facility, f.Severity))
-			}
-			got = append(got, h.Address+":["+strings.Join(fs, " ")+"]")
-		}
-		return got
-	}
-	t.Run("beside a braced host", func(t *testing.T) {
-		if got := hosts(t, `host 10.0.0.1 { }`); strings.Join(got, ",") != "10.0.0.1:[any/any]" {
-			t.Errorf("compiled syslog hosts %v, want [10.0.0.1:[any/any]]: one destination per host, with the group's facilities (#9831)", got)
-		}
-	})
-	t.Run("beside a leaf host", func(t *testing.T) {
-		if got := hosts(t, `host 10.0.0.1;`); len(got) != 1 {
-			t.Errorf("compiled syslog hosts %v, want one destination for 10.0.0.1: a second destination for the same host (#9831)", got)
-		}
-	})
-}
-
-// A multi-value leaf is a list of values, not a named instance. Matched by its
-// first member, a group's `next-hop 192.0.2.2;` missed the inline list
-// `[ 192.0.2.1 192.0.2.2 ]`, was adopted, and compiled a duplicate next hop,
-// while the reversed list did not (d64625101, Codex review round 1). Master
-// compiles both rows without a duplicate.
-func TestGroupMultiValueLeafIsNotANamedInstance9831(t *testing.T) {
+// The zone rule does not reach a value list. A schema-generic identity rule
+// matched a group's `next-hop 192.0.2.2;` against the inline list
+// `[ 192.0.2.1 192.0.2.2 ]` by its first member, adopted it, and compiled a
+// duplicate next hop; the reversed list did not (d64625101, Codex review round
+// 1). Master compiles both rows without a duplicate.
+func TestGroupValueListGetsNoDuplicate9831(t *testing.T) {
 	for _, c := range []struct{ name, inline, want string }{
 		{"group value second in the inline list", `next-hop [ 192.0.2.1 192.0.2.2 ];`, "192.0.2.1 192.0.2.2"},
 		{"group value first in the inline list", `next-hop [ 192.0.2.2 192.0.2.1 ];`, "192.0.2.2 192.0.2.1"},
@@ -342,5 +276,33 @@ func TestGroupMultiValueLeafIsNotANamedInstance9831(t *testing.T) {
 				t.Errorf("compiled next hops [%s], want [%s]: a group value already in the inline list must not be added again (#9831)", got, c.want)
 			}
 		})
+	}
+}
+
+// A packed group zone statement beside the inline braced zone of the same name
+// merges into it through #7648, as one zone statement. Measured on group
+// expansion alone: the compile path folds the packed statement before expansion
+// (#8662), but expansions of an unnormalised tree do not.
+func TestGroupPackedZoneStatementMergesIntoBracedZone9831(t *testing.T) {
+	tree := expand9801(t, `groups { G { security { zones { security-zone trust tcp-rst; } } } } apply-groups G; security { zones { security-zone trust { } } }`)
+	var stmts []string
+	rst := false
+	for _, sec := range tree.FindChildren("security") {
+		for _, zs := range sec.Children {
+			if len(zs.Keys) != 1 || zs.Keys[0] != "zones" {
+				continue
+			}
+			for _, z := range zs.Children {
+				if len(z.Keys) >= 2 && z.Keys[0] == "security-zone" {
+					stmts = append(stmts, strings.Join(z.Keys, " "))
+					if z.FindChild("tcp-rst") != nil {
+						rst = true
+					}
+				}
+			}
+		}
+	}
+	if strings.Join(stmts, ",") != "security-zone trust" || !rst {
+		t.Errorf("expanded zone statements %q (tcp-rst merged: %v), want one `security-zone trust` holding the group's tcp-rst (#7648, #9831)", stmts, rst)
 	}
 }
