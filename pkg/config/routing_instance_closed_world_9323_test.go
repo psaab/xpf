@@ -104,7 +104,7 @@ func TestEveryCompilerAdmittedRoutingInstanceKeywordStillCommits9323(t *testing.
 		t.Run(tc.name, func(t *testing.T) {
 			if err := validate9323(t, tc.line); err != nil {
 				t.Fatalf("%q was REJECTED by the closed world: %v.\nThe compiler admits "+
-					"this keyword (isRoutingInstanceKeyword8787), so refusing it at "+
+					"this keyword, so refusing it at "+
 					"commit is a regression, not a fix", tc.line, err)
 			}
 		})
@@ -142,24 +142,19 @@ func TestRoutingInstanceDescriptionStillCompiles9323(t *testing.T) {
 
 // THE ANTI-DRIFT GUARD, and the one that outlives this change.
 //
-// The relation between the schema and the compiler's
-// `isRoutingInstanceKeyword8787` is ONE-DIRECTIONAL, and an earlier version of
-// this cell asserted it in both directions — which was WRONG, and the corpus
-// disproved it.
+// Since #9620 a brace-elided instance is split by the schema's own declarations
+// (normalizeElidedRoutingInstance9620), so the compiler keeps no packed-run
+// keyword list that could drift from them. What remains to bind is the
+// direction that always mattered: every keyword the compiler READS OR ACCEPTS
+// must be DECLARED, because the gate's permitted set is the schema and anything
+// undeclared is rejected at commit. Before #9323 the schema declared 4 of the
+// compiler's 8, so `description`, which the compiler reads into
+// RoutingInstanceConfig.Description, would have been refused.
 //
-// The direction that MUST hold: every keyword the compiler's packed-tail reader
-// admits must be DECLARED, because the gate's permitted set is the schema and
-// anything undeclared is now rejected at commit. Before #9323 the schema
-// declared 4 of the helper's 8, so `description` — which the compiler reads
-// into RoutingInstanceConfig.Description — would have been refused.
-//
-// The direction that must NOT be asserted: schema ⊆ helper. `isRoutingInstance
-// Keyword8787` is not the admissible set — it is only where a PACKED multi-value
-// run stops. MEASURED counterexample: `interface-routes` appears directly under
-// an instance in the shipped #2226 rib-group contract, is declared here, and is
-// absent from the helper. Asserting equality would force either a false reject
-// of that config or a bogus helper entry that changes where packed runs
-// terminate.
+// The converse must NOT be asserted. MEASURED counterexample: `interface-routes`
+// appears directly under an instance in the shipped #2226 rib-group contract
+// and is declared here, while the compiler's old packed-run keyword list never
+// named it.
 func TestRoutingInstanceSchemaAndCompilerAgree9323(t *testing.T) {
 	ri := setSchema.children["routing-instances"]
 	if ri == nil || ri.wildcard == nil {
@@ -178,18 +173,14 @@ func TestRoutingInstanceSchemaAndCompilerAgree9323(t *testing.T) {
 		declaredSet[tok] = true
 	}
 
-	// EVERY keyword the compiler's packed reader admits must be declared.
-	helper := []string{
+	// EVERY keyword the compiler reads or accepts must be declared.
+	read := []string{
 		"instance-type", "description", "interface", "routing-options",
 		"protocols", "vrf-target", "vrf-table-label", "route-distinguisher",
 	}
-	for _, tok := range helper {
-		if !isRoutingInstanceKeyword8787(tok) {
-			t.Fatalf("fixture: %q is no longer admitted by isRoutingInstanceKeyword8787, "+
-				"so this list has gone stale and the direction below is untested", tok)
-		}
+	for _, tok := range read {
 		if !declaredSet[tok] {
-			t.Errorf("the compiler's packed reader admits %q but the schema does not "+
+			t.Errorf("the compiler reads or accepts %q but the schema does not "+
 				"declare it — the #9323 gate now REJECTS it at commit", tok)
 		}
 	}
@@ -201,11 +192,6 @@ func TestRoutingInstanceSchemaAndCompilerAgree9323(t *testing.T) {
 		t.Errorf("`interface-routes` is no longer declared under the routing-instance " +
 			"wildcard; the #2226 rib-group contract writes it DIRECTLY under an " +
 			"instance, so the gate would reject a shipped spelling")
-	}
-	if isRoutingInstanceKeyword8787("interface-routes") {
-		t.Logf("NOTE: isRoutingInstanceKeyword8787 now admits \"interface-routes\" too. " +
-			"The one-directional relation this cell documents may have become an " +
-			"equality; re-derive rather than assuming either.")
 	}
 }
 

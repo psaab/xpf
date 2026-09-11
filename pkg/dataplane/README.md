@@ -1042,6 +1042,26 @@ is outside that fail-closed surface entirely: with no XDP program and
 unadjudicated by xpf, while the daemon reports the previous-good
 snapshot as enforced.
 
+> **#9646 — a local-address set past the shim map capacity is refused, not
+> failed closed.** `userspace_local_v4` and `userspace_local_v6` hold 8192
+> entries each. `syncUserspaceClassifierMapsLocked` now checks the desired
+> local-address set against that capacity before any classifier map is written.
+> The set is the snapshot's local addresses plus the host addresses the netlink
+> enumeration adds, including VRRP VIPs. An oversized set returns
+> `localAddressCapacityError`, which names the map and the capacity, and it
+> leaves every map on the plan the helper enforces. So two paths keep ctrl as
+> it is instead of dropping all transit:
+> - the same-plan fail-closed sync;
+> - the status poll, which alarms once per transition.
+>
+> Every other classifier-sync failure still fails closed. The retain/rollback
+> path also still fails closed on this error, because a refused publish has
+> already left the maps a mix of two plans. A new-plan bootstrap programs ctrl
+> disabled before the classifier sync, so there the named error only replaces
+> an anonymous map-update failure. `userspaceLocalAddressMapCapacity` is bound
+> to both `with_max_entries` declarations by
+> `TestLocalAddressMapCapacityMatchesTheShim9646`.
+
 > **#9337.** "Because the maps then match what the helper is enforcing" is
 > the precondition, and until #9337 the code did not check it. The retain
 > used `m.lastSnapshot` as "what the helper is enforcing". That is true at

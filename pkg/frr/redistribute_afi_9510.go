@@ -1,5 +1,7 @@
 package frr
 
+import "github.com/psaab/xpf/pkg/config"
+
 // #9510: FRR's `redistribute` grammar is per ADDRESS FAMILY. A source keyword
 // the enclosing node's grammar does not list is rejected at parse, exactly like
 // a typo, not accepted and ignored. `from protocol ospf6` committed clean and
@@ -20,8 +22,9 @@ package frr
 // bgpd/bgp_vty.c installs only the *_ipv4_hidden redistribute commands there,
 // built from FRR_IP_REDIST_STR_BGPD. The IPv6 grammar is installed only under
 // `address-family ipv6 unicast` (BGP_IPV6_NODE), so `redistribute ospf6` under
-// `router bgp` is rejected the same way it is under `router ospf`. Rendering
-// IPv6 sources into that address family is #9667.
+// `router bgp` is rejected the same way it is under `router ospf`. Since #9667
+// the BGP renderer writes a bare token's IPv6 routes into that address family,
+// through the "bgp-ipv6" node row.
 type redistAFI uint8
 
 const (
@@ -30,24 +33,33 @@ const (
 	afiBoth = afiV4 | afiV6
 )
 
-var frrRedistSourceAFI = map[string]redistAFI{
-	"kernel":    afiBoth,
-	"connected": afiBoth,
-	"static":    afiBoth,
-	"rip":       afiV4,
-	"ripng":     afiV6,
-	"ospf":      afiV4,
-	"ospf6":     afiV6,
-	"isis":      afiBoth,
-	"bgp":       afiBoth,
-}
+// frrRedistSourceAFI is derived from config's family table (#9667), which the
+// strict commit gate reads too, so the gate and this filter cannot disagree.
+var frrRedistSourceAFI = func() map[string]redistAFI {
+	out := make(map[string]redistAFI)
+	for _, kw := range config.RedistributionSourceKeywords() {
+		fam, _ := config.RedistributionSourceFamilies(kw)
+		var a redistAFI
+		if fam&config.FamilyIPv4 != 0 {
+			a |= afiV4
+		}
+		if fam&config.FamilyIPv6 != 0 {
+			a |= afiV6
+		}
+		out[kw] = a
+	}
+	return out
+}()
 
 var frrRedistNodeAFI = map[string]redistAFI{
 	"ospf":  afiV4, // ospfd: FRR_REDIST_STR_OSPFD
 	"ospf6": afiV6, // ospf6d: FRR_REDIST_STR_OSPF6D
 	"rip":   afiV4, // ripd: FRR_REDIST_STR_RIPD
 	"bgp":   afiV4, // BGP_NODE: FRR_IP_REDIST_STR_BGPD only, see above
-	"isis":  afiBoth,
+	// BGP_IPV6_NODE, `address-family ipv6 unicast`: FRR_IP6_REDIST_STR_BGPD.
+	// Written by resolveBGPIPv6Redistribute (#9667).
+	"bgp-ipv6": afiV6,
+	"isis":     afiBoth,
 }
 
 // redistSourceFitsNode reports whether the redistribute grammar at the router

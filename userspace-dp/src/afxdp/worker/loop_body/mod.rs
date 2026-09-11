@@ -686,7 +686,10 @@ pub(crate) fn worker_loop(
             // dangling screen reference starts WARNing (and a fixed one stops).
             screen_state.update_missing_profiles(new_forwarding.screen_missing_profiles.clone());
             screen_state.update_inert_profiles(new_forwarding.screen_inert_profiles.clone());
-            screen_state.update_syn_cookie_master_key(new_forwarding.syn_cookie_master_key.0);
+            screen_state.update_syn_cookie_keys(
+                new_forwarding.syn_cookie_master_key.0,
+                new_forwarding.syn_cookie_key_ring.clone(),
+            );
             sessions.set_timeouts(new_forwarding.session_timeouts);
             // #3527: re-apply the per-screened-zone half-open overrides on every
             // runtime forwarding-snapshot rotation. `set_opening_overrides` is a

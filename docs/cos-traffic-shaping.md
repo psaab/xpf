@@ -1198,8 +1198,10 @@ Important current behavior:
   active worker to the slowest sampled per-active-SFQ-bucket grant rate once
   every active worker is sampled, every active sampled worker is materially
   utilizing its prior fair share, and the target has survived the valid-streak
-  guard. If multiple 5-tuples hash into one SFQ bucket they are counted as one
-  bucket for this cap. When the sample is incomplete, low-demand, or stale, the
+  guard. If multiple flows hash into one SFQ bucket they are counted as one
+  bucket for this cap. The bucket key is the 5-tuple plus the routing domain
+  and tunnel discriminator (#9645), so identical 5-tuples in two routing
+  instances share a bucket only by chance. When the sample is incomplete, low-demand, or stale, the
   mode fails open to the normal work-conserving v8 behavior and reports the
   bounded fail-open reason in status/Prometheus.
 - `per-unit-scheduler` is not implemented

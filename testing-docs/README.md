@@ -28,7 +28,7 @@ AF_XDP dataplane plus legacy eBPF regression coverage.
 
 | Document | Status |
 |----------|--------|
-| [ha-failover-validation.md](ha-failover-validation.md) | Historical March 2026 HA investigation notes only. Current userspace HA validation must use `failover-testing.md`, `userspace-fabric-failover.md`, `scripts/userspace-ha-validation.sh`, and `scripts/userspace-ha-failover-validation.sh`; legacy `xdp_main_prog` fallback is not a userspace pass condition. |
+| [ha-failover-validation.md](ha-failover-validation.md) | Historical March 2026 HA investigation notes only. Current HA gates are the Makefile smokes (`make test-failover` plus `make test-ha-crash`, per `docs/engineering-style.md`). `failover-testing.md` and `userspace-fabric-failover.md` are the operational references, and `scripts/userspace-ha-validation.sh` and `scripts/userspace-ha-failover-validation.sh` are diagnostic walkthroughs, not gates (`test/incus/HARNESSES.unreached`); legacy `xdp_main_prog` fallback is not a userspace pass condition. |
 
 ## Quick Reference
 

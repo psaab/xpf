@@ -38,8 +38,17 @@ xpf_enter_destructive_cluster_cell "test-stress-failover $*" "$0" "$@"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=test/incus/cluster-env.sh
 source "${SCRIPT_DIR}/cluster-env.sh"
+# shellcheck source=test/incus/iperf-throughput-lib.sh
+source "${SCRIPT_DIR}/iperf-throughput-lib.sh"
 
 IPERF_TARGET="${IPERF_TARGET:-$IPERF_TARGET4}"
+# #9691: measure the UNSHAPED class. iperf3 defaults to port 5201, which
+# cos-iperf-config.set classifies as iperf-100m (transmit-rate 100m exact) on
+# the reth0.80 path to IPERF_TARGET4, so this gate's throughput verdict depended
+# on whether CoS was left applied on the shared cluster. #7673 fixed the same
+# in test-failover.sh; iperf-throughput-selftest.sh asserts, for every HA smoke,
+# that this port still maps to an unshaped class.
+IPERF_PORT="${IPERF_PORT:-5211}"
 IPERF_STREAMS="${IPERF_STREAMS:-8}"
 FAILOVER_INTERVAL="${FAILOVER_INTERVAL:-60}"   # seconds between failovers
 TOTAL_CYCLES="${TOTAL_CYCLES:-10}"
@@ -163,7 +172,7 @@ sleep 1
 info "Phase 1: Starting iperf3 -P${IPERF_STREAMS} -t${IPERF_DURATION} → ${IPERF_TARGET}"
 
 incus exec "$CLUSTER_LAN_HOST" -- bash -c \
-	"iperf3 --forceflush --connect-timeout 5000 -t ${IPERF_DURATION} -c ${IPERF_TARGET} -P ${IPERF_STREAMS} > ${LOG} 2>&1 &"
+	"iperf3 --forceflush --connect-timeout 5000 -t ${IPERF_DURATION} -c ${IPERF_TARGET} -p ${IPERF_PORT} -P ${IPERF_STREAMS} > ${LOG} 2>&1 &"
 
 sleep 8  # all parallel streams must be fully established
 
@@ -284,21 +293,17 @@ fi
 incus exec "$CLUSTER_LAN_HOST" -- pkill -9 iperf3 2>/dev/null || true
 sleep 1
 
-# Extract throughput from the last SUM line (iperf3 may still be running)
-last_sum=$(incus exec "$CLUSTER_LAN_HOST" -- grep 'SUM' "$LOG" 2>/dev/null | tail -1 || true)
-throughput=""
-if echo "$last_sum" | grep -qiE "[0-9.]+ Gbits"; then
-	throughput=$(echo "$last_sum" | grep -oiE "[0-9.]+ Gbits" | grep -oP '[\d.]+')
-elif echo "$last_sum" | grep -qiE "[0-9.]+ Mbits"; then
-	mbits=$(echo "$last_sum" | grep -oiE "[0-9.]+ Mbits" | grep -oP '[\d.]+')
-	throughput=$(awk "BEGIN{printf \"%.3f\", $mbits / 1000}")
-fi
-
-if [[ -n "$throughput" ]] && awk "BEGIN{exit !($throughput >= $MIN_THROUGHPUT)}"; then
-	pass "throughput: ${throughput} Gbps (>= ${MIN_THROUGHPUT} Gbps)"
-else
-	fail "throughput too low: ${throughput:-0} Gbps (expected >= ${MIN_THROUGHPUT} Gbps)"
-fi
+# Extract throughput from the last SUM line. iperf3 was killed above, so this
+# is the last interval sum rather than a sender summary.
+# #9690/#9691: parsed and judged by iperf-throughput-lib.sh, the shared TOTAL
+# verdict, whose cell text the ha-smoke ledger adapter reads as throughput_gbps.
+sum_line=$(incus exec "$CLUSTER_LAN_HOST" -- grep 'SUM' "$LOG" 2>/dev/null | tail -1 || true)
+throughput_verdict=$(iperf_throughput_verdict "$MIN_THROUGHPUT" "$sum_line")
+case "$throughput_verdict" in
+PASS\ *) pass "${throughput_verdict#PASS }" ;;
+FAIL\ *) fail "${throughput_verdict#FAIL }" ;;
+*) fail "iperf3 throughput: unexpected verdict '${throughput_verdict}'" ;;
+esac
 
 # ── Results ──────────────────────────────────────────────────────────
 

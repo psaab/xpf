@@ -336,7 +336,7 @@ func TestUnsplittablePairRatchet8880(t *testing.T) {
 		// #8928 admitted `ip-monitoring policy`, so exactly one more pair is
 		// in scope and therefore one more is unsplittable. Re-derived by
 		// running the cell at this base, not by adding one to the old value.
-		wantArgs1 = 454
+		wantArgs1 = 452
 	)
 	pairs2, _ := unsplittablePairs8880(2)
 	pairs1, conflict1 := unsplittablePairs8880(1)

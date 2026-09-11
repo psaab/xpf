@@ -218,8 +218,8 @@ construction, not by omission.
 
 `compactNormalizeInScope` takes no parent context, so an admitted
 `(container, head)` pair is live at every site where a container of that keyword
-declares that head. `testdata/multisite_admissions_8921.txt` records where: 202
-pairs over 531 (pair, site) cells. Each pair was adjudicated at one site, and
+declares that head. `testdata/multisite_admissions_8921.txt` records where: 203
+pairs over 534 (pair, site) cells. Each pair was adjudicated at one site, and
 `multisite_adjudication_8921_test.go` now adjudicates **every recorded cell**.
 
 **The per-site question is structural.** The pair decides only *whether* the
@@ -233,9 +233,9 @@ except source position. Both compile entries prune inactive nodes and then
 normalize before group expansion and every validator, and commit-check now does
 the same (see below), so an identical tree compiles and validates identically
 for that value -- including the cells whose value the #2419 census cannot
-observe. Measured at this change: 531 of 531.
+observe. Measured at #9620: 534 of 534.
 `TestMultisiteCellsAgreeWithTheCompiledCensus8921` cross-checks that premise
-against the compiled census (393 cells ruled equivalent, 0 divergent); a
+against the compiled census (398 cells ruled equivalent, 0 divergent); a
 divergent cell there would mean some reader runs before the normalizer.
 
 **"For that value", not "for every value".** Where the container splits a packed
@@ -657,6 +657,116 @@ what else has to move with it:
   legitimately name a different garbage token per spelling. Allowlisting that is
   a CLAIM, so it is paired with a test asserting the commit decision is REJECT
   in BOTH spellings — otherwise the allowlist would hide a fail-open.
+
+### Packed spellings reached by an admission and opt-ins (#9620)
+
+Each spelling below was compared with its braced form in two ways: through
+`configstore.CheckText`, and through the lenient compile that the boot and
+HA-sync loaders use. "Before" is `9f520a5b2`.
+
+| Spelling | Before | After |
+|---|---|---|
+| inet6 `from next-header tcp source-address 2001:db8::/32;` | strict accepted a match-all term | strict refuses it, as it already refused the reversed order |
+| snmp `community public clients 10.0.0.0/8 authorization read-only;` | strict refused; lenient compiled garbage clients | commits and compiles like braced |
+| `unit 0 vlan-id 10 inner-vlan-id 20;` | strict refused (unknown modifier); lenient dropped the inner tag | refused by the QinQ gate, like braced; lenient carries the tag |
+| `unit 0 description u0 vlan-id 10;` | strict refused (trailing token) | commits and compiles like braced |
+
+The admitted pair is `from next-header`. The containers opted into
+`packedStatements` are interfaces `unit` and snmp `community`.
+
+The following were measured and deliberately left out. Each breaks a spelling
+that compiles correctly today:
+
+- **`term then` and `term from`.** Both are keyword-keyed, so they are also live
+  at policy-options policy-statement terms.
+  - `term t1 then accept load-balance per-packet local-preference 200;` kept
+    only `accept`, on both strict and lenient.
+  - `term t1 from protocol ospf then accept;` was refused on strict and failed
+    to compile on the lenient load.
+
+  The firewall member `term t1 then count C1 discard;` stays open for a remedy
+  scoped to the firewall term.
+- **`community authorization`.** `community public authorization read-only
+  clients 10.0.0.0/8 restrict;` is read correctly today, and so is the same line
+  with a client list. The args-bounded split left the tail on the authorization
+  leaf, which strict refused.
+- **`unit inner-vlan-id`.** `unit 0 inner-vlan-id 20;` alone commits today, while
+  dropping the tag. Admitting the pair makes the QinQ gate refuse it.
+- **`packedStatements` on the firewall `from` containers.** It would also split
+  `from { protocol tcp protocol udp; }`, which the #9027 self-repeat gate refuses
+  on purpose.
+- **`packedStatements` on `security-zone`.** It let the empty zone stanza
+  `interfaces host-inbound-traffic;` past the #6525 and #6735 empty-member gates.
+  It also made strict accept the one-line flat spelling of `description …
+  screen …` while dropping one of the two statements.
+
+### Brace-elided routing instances
+
+`routing-instances { ri1 instance-type virtual-router; }` packs the instance's
+statements onto a node whose first key is the operator's INSTANCE NAME. The
+scoped fold admits by (container keyword, head) pair, and no scope entry can
+name an instance (#8787). So `normalizeCompactNodes` hands `routing-instances`
+children to `normalizeElidedRoutingInstance9620`. That rewrites the node into
+the braced shape the parser builds for the same statements. The scoped fold
+then folds each statement's own packed tail, as it does inside a braced
+instance.
+
+The run is split by the instance schema, the grammar the braced spelling is
+validated against:
+
+- A keyword that is not a container takes its declared values, then every
+  further token up to the next declared instance keyword. That is what the same
+  statement means written on one line inside braces, so `vrf-target export
+  target:65000:1` stays one statement.
+- An apply statement (`apply-groups`, `apply-groups-except`, `apply-macro`)
+  ends the value statement before it and is a statement of its own, so group
+  expansion sees it as it does inside braces. `apply-macro` also owns the rest of
+  the run and its braced body, which are its arguments. Inside a container's or
+  an undeclared keyword's run, an apply keyword stays in that run, as on the
+  one-line braced spelling.
+- Quotes and brackets never move a boundary. `show configuration`, HA sync,
+  `load merge` and rollback files render the tree without them, so a split
+  that read them would give a peer different VRF membership. Whether an
+  authored value that spells a keyword should stay a value is #9635.
+- A container keyword (`routing-options`, `protocols`, `interface-routes`)
+  takes the rest of the run and the braced body. So does an undeclared keyword,
+  which can only start the run. It arrives as a child named by that keyword, so
+  the #9323 gate refuses it, as it refuses the braced spelling.
+- An undeclared token after a declared statement extends that statement, as it
+  does inside braces. There it also commits today; that is #9736.
+- A braced body after a value keyword stays a list of instance statements.
+- Apply statements are not instances and are left alone (#9657).
+
+**Why the normalizer and not the compiler (#9620).** The compiler used to read
+this Keys run itself (#8787, #9055). It ran after group expansion and after
+`SchemaValidate`, so an elided body was compiled from a node neither of them had
+seen. Measured through `configstore.CheckText` at `0e950bd5b`:
+
+- `ri1 protocols { bgp { group G { hold-time 1; ... } } }` committed with
+  `HoldTime=1`. The braced spelling is refused, because FRR rejects the timers
+  line.
+- `apply-groups` under an elided `routing-options` body resolved against the
+  wrong path, and compiled a route with no next-hop.
+- A body packed past its keyword compiled nothing, and the instance loop read
+  the body's own tokens as instance properties. `ri2 instance-type
+  virtual-router protocols ospf area 0.0.0.0 interface ge-0/0/1.0;` bound
+  `ge-0/0/1.0` into the VRF and configured no OSPF.
+
+Every compile core and the `SchemaValidate` walk normalize before they read the
+tree. Rewriting in the normalizer therefore removes the whole class, and the
+compiler no longer keeps a keyword list of its own.
+
+Regression coverage:
+
+- `pkg/config/routing_instance_elided_normalize_9620_test.go`: the elided and
+  braced spellings normalize to one tree, at top level and inside `groups`;
+  apply statements are untouched; quotes and brackets do not move a boundary;
+  the compiled fields match on both spellings.
+- `pkg/configstore/routing_instance_elided_commit_gate_9620_test.go`: both
+  spellings reach the same commit-gate verdict. That covers refusals for
+  `hold-time 1`, for an undeclared first keyword and for an inline
+  `apply-groups` naming an undefined group; a next-hop and a description
+  inherited from a group; and a multi-token `vrf-target`.
 
 ### Where it is NOT done
 
@@ -6717,14 +6827,15 @@ declaring a new routing-instance keyword permits it automatically.
 **Four keywords were declared BEFORE the gate landed, because gating without
 them is a regression the suite cannot see.** `description`, `vrf-target`,
 `vrf-table-label` and `route-distinguisher` are all admitted by the compiler
-(`isRoutingInstanceKeyword8787`) and `description` is compiled into
+(`compileRoutingInstances`) and `description` is compiled into
 `RoutingInstanceConfig.Description` — but the schema declared only four of the
 compiler's eight. Measured: with the gate armed and those four still undeclared,
 `go test ./...` rejects nothing at all, because no fixture writes any of them; a
 targeted probe is what found it.
-`TestRoutingInstanceSchemaAndCompilerAgree9323` now holds the schema and
-`isRoutingInstanceKeyword8787` to the SAME SET in both directions — the drift
-the #8787 note beside that function warns about in prose, asserted.
+`TestRoutingInstanceSchemaAndCompilerAgree9323` holds that every keyword the
+compiler reads or accepts is declared. Since #9620 the compiler keeps no keyword
+list of its own: a brace-elided instance is split by these same declarations
+(see "Brace-elided routing instances"), so there is no second set to drift.
 
 ## `forwarding-options dhcp-relay dhcpv6` — refused, and never compiled as the DHCPv4 relay (#9411)
 

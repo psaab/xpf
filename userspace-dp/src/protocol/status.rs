@@ -982,4 +982,18 @@ pub(crate) struct ProcessStatus {
     /// distinct, non-malformed state per #3773.
     #[serde(rename = "fabric_link_unresolved_peer_total", default)]
     pub fabric_link_unresolved_peer_total: u64,
+    /// #9654: whether the learned-route import is capped (#8355, #9054) in the
+    /// forwarding state the live workers serve NOW, as projected by
+    /// `Coordinator::learned_route_import_capped_now`.
+    ///
+    /// `None` omits the key, and absence means UNKNOWN: no worker is live, so
+    /// nothing serves any published state. A helper that predates the field
+    /// omits it too, while still enforcing capped forwarding. So the daemon
+    /// must read absence as unknown, never as "not capped".
+    #[serde(
+        rename = "learned_route_import_capped",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub learned_route_import_capped: Option<bool>,
 }

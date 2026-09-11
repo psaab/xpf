@@ -6853,6 +6853,7 @@ fn nat64_7094_rollback_for_worker_frees_only_that_holder() {
             3,
             0,
             &[],
+            0,
         )
         .expect("a fresh flow still allocates");
     assert_ne!(
@@ -6895,6 +6896,7 @@ fn nat64_7094_rollback_is_a_noop_on_the_reverse_entry() {
             1,
             0,
             &[],
+            0,
         )
         .unwrap();
     let key = crate::session::SessionKey {
@@ -6926,6 +6928,7 @@ fn nat64_7094_rollback_is_a_noop_on_the_reverse_entry() {
             3,
             0,
             &[],
+            0,
         )
         .unwrap();
     assert_eq!(
@@ -7351,3 +7354,187 @@ fn nat64_selects_the_first_built_rule_set_for_a_shared_prefix_9555() {
         "#9555 premise (2): a skipped earlier rule-set shadows nothing"
     );
 }
+
+// #9680: the NAT64 BIB is keyed by routing domain. Before the fix the
+// allocation, release and synced-reserve sites all pinned routing scope 0, so
+// identical IPv6 5-tuples arriving in two routing instances shared one
+// translated `(pool v4, port)` binding.
+const TENANT_A_9680: u32 = 0x5a5a_0001;
+const TENANT_B_9680: u32 = 0x5a5a_0002;
+
+fn nat64_domain_key_9680(domain: u32) -> crate::session::SessionKey {
+    let mut key = nat64_synced_key("2001:db8::1");
+    key.src_port = 6000;
+    key.routing_domain = domain;
+    key
+}
+
+fn nat64_alloc_in_domain_9680(state: &Nat64State, now_ns: u64, domain: u32) -> (Ipv4Addr, u16) {
+    state
+        .allocate_source_for_worker(
+            0,
+            crate::ip_proto::PROTO_TCP,
+            "2001:db8::1".parse().unwrap(),
+            Ipv4Addr::new(8, 8, 8, 8),
+            6000,
+            443,
+            now_ns,
+            0,
+            &[],
+            domain,
+        )
+        .expect("NAT64 allocation")
+}
+
+#[test]
+fn nat64_identical_tuples_in_two_routing_domains_get_distinct_bindings_9680() {
+    let state = Nat64State::from_snapshots(&[single_addr_prefix()]);
+    let a = nat64_alloc_in_domain_9680(&state, 1, TENANT_A_9680);
+    let b = nat64_alloc_in_domain_9680(&state, 2, TENANT_B_9680);
+    assert_ne!(
+        a, b,
+        "identical IPv6 5-tuples in two routing domains share one translated binding {a:?}"
+    );
+    assert_eq!(
+        nat64_alloc_in_domain_9680(&state, 3, TENANT_A_9680),
+        a,
+        "control: the same flow in the same routing domain must reuse its live binding"
+    );
+}
+
+#[test]
+fn nat64_release_is_keyed_by_routing_domain_9680() {
+    let state = Nat64State::from_snapshots(&[single_addr_prefix()]);
+    let dst_v4 = Ipv4Addr::new(8, 8, 8, 8);
+    let a = nat64_alloc_in_domain_9680(&state, 1, TENANT_A_9680);
+    let b = nat64_alloc_in_domain_9680(&state, 2, TENANT_B_9680);
+
+    // A release keyed by the DIFFERENT domain must not free tenant B's binding.
+    release_nat64_allocation_for_worker(
+        &state,
+        &nat64_domain_key_9680(TENANT_A_9680),
+        Nat64State::forward_decision(b.0, dst_v4, b.1),
+        false,
+        3,
+        0,
+    );
+    assert_eq!(
+        nat64_alloc_in_domain_9680(&state, 4, TENANT_B_9680),
+        b,
+        "a release keyed by tenant A freed tenant B's live binding"
+    );
+
+    // Tenant A's own release frees A (a fresh port on re-allocation, the
+    // #4381 idiom) and leaves B live.
+    release_nat64_allocation_for_worker(
+        &state,
+        &nat64_domain_key_9680(TENANT_A_9680),
+        Nat64State::forward_decision(a.0, dst_v4, a.1),
+        false,
+        5,
+        0,
+    );
+    assert_ne!(
+        nat64_alloc_in_domain_9680(&state, 6, TENANT_A_9680),
+        a,
+        "tenant A's release did not free its binding: the release key's routing \
+         scope does not match the allocation's, so the pool entry leaks"
+    );
+    assert_eq!(
+        nat64_alloc_in_domain_9680(&state, 7, TENANT_B_9680),
+        b,
+        "releasing tenant A's binding freed tenant B's"
+    );
+}
+
+#[test]
+fn nat64_synced_reserve_is_keyed_by_routing_domain_9680() {
+    let state = Nat64State::from_snapshots(&[single_addr_prefix()]);
+    let dst_v4 = Ipv4Addr::new(8, 8, 8, 8);
+    let snat = Ipv4Addr::new(198, 51, 100, 1);
+    let synced = Nat64State::forward_decision(snat, dst_v4, 1024);
+    assert!(
+        reserve_synced_nat64_allocation_for_worker(
+            &state,
+            &nat64_domain_key_9680(TENANT_A_9680),
+            synced,
+            false,
+            1,
+            0
+        ),
+        "precondition: tenant A's synced flow reserves (snat, 1024)"
+    );
+    // A local tenant-B flow with the identical tuple is a different BIB entry:
+    // it must not be handed tenant A's reserved binding.
+    let b = nat64_alloc_in_domain_9680(&state, 2, TENANT_B_9680);
+    assert_ne!(
+        b,
+        (snat, 1024),
+        "tenant B's identical 5-tuple was handed tenant A's synced binding"
+    );
+    // The HA reserve for tenant B's session must key tenant B's allocation,
+    // not tenant A's reservation.
+    let b_synced = Nat64State::forward_decision(b.0, dst_v4, b.1);
+    assert!(
+        reserve_synced_nat64_allocation_for_worker(
+            &state,
+            &nat64_domain_key_9680(TENANT_B_9680),
+            b_synced,
+            false,
+            3,
+            1
+        ),
+        "tenant B's synced reserve must join tenant B's own live allocation"
+    );
+    assert_eq!(
+        nat64_alloc_in_domain_9680(&state, 4, TENANT_B_9680),
+        b,
+        "tenant B's binding moved after its synced reserve"
+    );
+}
+
+// #9680: bind the WIRING. The cells above drive `allocate_source_for_worker`
+// directly, so they pass whatever the poll path hands it; a poll path that kept
+// passing 0 would still share one binding between tenants in production. There
+// is exactly one production caller, and its routing-scope argument must be the
+// flow's own routing domain.
+#[test]
+fn nat64_poll_path_passes_the_flow_routing_domain_9680() {
+    let src = include_str!("afxdp/poll_descriptor/mod.rs");
+    let name = "allocate_source_for_worker(";
+    let calls: Vec<usize> = src.match_indices(name).map(|(i, _)| i).collect();
+    assert_eq!(
+        calls.len(),
+        1,
+        "expected exactly one production NAT64 allocate call in poll_descriptor"
+    );
+    let open = calls[0] + name.len() - 1;
+    let mut depth = 0usize;
+    let mut close = open;
+    for (i, ch) in src[open..].char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    close = open + i;
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let args = &src[open + 1..close];
+    let last_arg = args
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with("//"))
+        .last()
+        .unwrap_or("");
+    assert_eq!(
+        last_arg, "flow.forward_key.routing_domain,",
+        "the poll path's NAT64 allocation must key the BIB by the flow's routing domain; \
+         its last argument is {last_arg:?}"
+    );
+}
+

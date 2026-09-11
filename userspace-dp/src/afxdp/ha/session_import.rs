@@ -541,6 +541,41 @@ impl crate::afxdp::ha::SessionDomain {
         // racing local allocation to guard against, and an `Untracked`
         // reservation that no worker ever adopts has no one to release it. Same
         // shape as the zero-ceiling carve-out above, and for the same reason.
+        // #9678: decide LOCAL OWNERSHIP before anything below touches the
+        // allocator or the shared maps.
+        //
+        // The worker refuses a peer upsert that would replace a locally-owned
+        // session while that session's owner RG is locally forwarding-active
+        // (`upsert_synced_with_origin` + `synced_entry_allows_local_replace` in
+        // `handle_upsert_synced`). The reservation below ran first, and
+        // `reserve_flow` retires an incumbent `live_by_flow` record holding a
+        // DIFFERENT translated tuple. So a same-flow peer upsert evicted the live
+        // local allocation T1, reserved an `Untracked` T2, and the worker then
+        // kept forwarding on T1 with no allocator record behind it: T1 could be
+        // handed to another flow. Every refusal inside the reserve also happened
+        // after that unlink, so even a `RejectedReserve` import had freed T1.
+        //
+        // Skipping only the reservation would still publish the peer's decision
+        // into the shared maps, which is the #6600 shape: a shared entry naming a
+        // port this node does not hold. So the whole import stops here, before
+        // the reservation, the shared publish and the worker fan-out, using the
+        // same predicate the worker applies. That mirrors the worker's refusal,
+        // which is silent too, and it is why this reports `Applied` rather than
+        // a new refusal the control plane would surface as a peer error. Once
+        // the RG is no longer locally active, the next sync of this flow imports
+        // normally.
+        if entry.origin.is_peer_synced()
+            && previous_entry
+                .as_ref()
+                .is_some_and(|previous| !previous.origin.is_peer_synced())
+            && !synced_entry_allows_local_replace(
+                ha_state.as_ref(),
+                entry.metadata.owner_rg_id,
+                now_secs,
+            )
+        {
+            return SyncedImportOutcome::Applied;
+        }
         if entry.origin.is_peer_synced()
             && !entry.metadata.is_reverse
             && !worker_records.is_empty()

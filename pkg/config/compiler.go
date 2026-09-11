@@ -456,6 +456,7 @@ func compileConfigWithOpts(tree *ConfigTree, opts compileOpts) (*Config, error) 
 	appendClusterNTPAdvisoryLocked(cfg, opts)
 	appendContestedTrunkZoneAdvisoryLocked(cfg, opts)
 	appendSharedDeviceUnzonedUnitAdvisoryLocked(cfg, opts)
+	appendUserspaceRxMTUAdvisoryLocked(cfg, opts)
 	cfg.Warnings = append(cfg.Warnings, loginShadowWarnings...)
 	// #6706: record that a `system login` path was authored packed, so the
 	// daemon can tell "RBAC never configured" from "RBAC configured and dropped"
@@ -744,6 +745,7 @@ func compileConfigForNodeWithOpts(tree *ConfigTree, nodeID int, opts compileOpts
 	appendClusterNTPAdvisoryLocked(cfg, opts)
 	appendContestedTrunkZoneAdvisoryLocked(cfg, opts)
 	appendSharedDeviceUnzonedUnitAdvisoryLocked(cfg, opts)
+	appendUserspaceRxMTUAdvisoryLocked(cfg, opts)
 	cfg.Warnings = append(cfg.Warnings, loginShadowWarnings...)
 	// #6706: record that a `system login` path was authored packed, so the
 	// daemon can tell "RBAC never configured" from "RBAC configured and dropped"

@@ -8909,3 +8909,110 @@ fn learned_link_local_next_hop_binds_its_own_link_in_any_order_9512() {
         assert_eq!(legs("2001:db8:ab::"), vec![102], "{label}: a scope-less global gateway still infers its connected link");
     }
 }
+
+// #9173: the published key-ring bases reach the forwarding state, and one
+// malformed base leaves the ring present with no base, so it fails closed.
+#[test]
+fn syn_cookie_key_ring_from_snapshot_reaches_forwarding_state_9173() {
+    const PRIMARY: &str = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
+    const OLD: &str = "ffeeddccbbaa99887766554433221100ffeeddccbbaa99887766554433221100";
+    let base = |hex: &str, accept_only: bool| crate::protocol::SynCookieKeyBaseSnapshot {
+        base: hex.into(),
+        accept_only,
+    };
+    let ring = |bases| {
+        Some(crate::protocol::SynCookieKeyRingSnapshot {
+            period_secs: 56 * 64,
+            bases,
+        })
+    };
+    let snapshot = ConfigSnapshot {
+        syn_cookie_master_key: "00112233445566778899aabbccddeeff".into(),
+        syn_cookie_key_ring: ring(vec![base(PRIMARY, false), base(OLD, true)]),
+        ..Default::default()
+    };
+    let rendered = format!("{:?}", build_forwarding_state(&snapshot).syn_cookie_key_ring);
+    assert!(
+        rendered.contains("present: true")
+            && rendered.contains("period_epochs: 56")
+            && rendered.contains("bases: 2 <redacted>"),
+        "{rendered}"
+    );
+
+    // Non-hex, and a 32-hex key where a 64-hex base belongs, are both malformed.
+    for bad in ["not-hex", "00112233445566778899aabbccddeeff"] {
+        let state = build_forwarding_state(&ConfigSnapshot {
+            syn_cookie_master_key: "00112233445566778899aabbccddeeff".into(),
+            syn_cookie_key_ring: ring(vec![base(PRIMARY, false), base(bad, false)]),
+            ..Default::default()
+        });
+        let rendered = format!("{:?}", state.syn_cookie_key_ring);
+        assert!(
+            rendered.contains("present: true") && rendered.contains("bases: 0 <redacted>"),
+            "a malformed base {bad:?} must leave the ring present with no base, which fails \
+             closed, not absent, which would fall back to the legacy key: {rendered}"
+        );
+        assert!(
+            state.syn_cookie_master_key.0.is_some(),
+            "the legacy key itself still parses"
+        );
+    }
+
+    // A snapshot from an older control plane carries no ring at all.
+    let absent = build_forwarding_state(&ConfigSnapshot {
+        syn_cookie_master_key: "00112233445566778899aabbccddeeff".into(),
+        ..Default::default()
+    });
+    let rendered = format!("{:?}", absent.syn_cookie_key_ring);
+    assert!(
+        rendered.contains("present: false"),
+        "a snapshot without a ring must read as absent: {rendered}"
+    );
+
+    // A PRESENT but empty ring is a published ring with no usable base.
+    let empty = build_forwarding_state(&ConfigSnapshot {
+        syn_cookie_master_key: "00112233445566778899aabbccddeeff".into(),
+        syn_cookie_key_ring: Some(crate::protocol::SynCookieKeyRingSnapshot::default()),
+        ..Default::default()
+    });
+    let rendered = format!("{:?}", empty.syn_cookie_key_ring);
+    assert!(
+        rendered.contains("present: true") && rendered.contains("bases: 0 <redacted>"),
+        "an explicit empty ring must fail closed, not fall back to the legacy key: {rendered}"
+    );
+}
+
+// #9173: BIND THE WIRING. The ring only reaches the dataplane through the two
+// worker sites that hand forwarding state to `ScreenState`. A site still calling
+// `update_syn_cookie_master_key` would leave that worker on the legacy key with
+// every screen-level cell green, so both are pinned here.
+#[test]
+fn worker_sites_publish_the_syn_cookie_key_ring_9173() {
+    fn code(src: &str) -> String {
+        src.lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .flat_map(|line| line.chars().filter(|c| !c.is_whitespace()))
+            .collect()
+    }
+    for (site, src, call) in [
+        (
+            "worker/loop_body/setup.rs",
+            code(include_str!("../worker/loop_body/setup.rs")),
+            "update_syn_cookie_keys(forwarding.syn_cookie_master_key.0,forwarding.syn_cookie_key_ring.clone()",
+        ),
+        (
+            "worker/loop_body/mod.rs",
+            code(include_str!("../worker/loop_body/mod.rs")),
+            "update_syn_cookie_keys(new_forwarding.syn_cookie_master_key.0,new_forwarding.syn_cookie_key_ring.clone()",
+        ),
+    ] {
+        assert!(
+            src.contains(call),
+            "{site} must publish the SYN-cookie key ring with the key"
+        );
+        assert!(
+            !src.contains("update_syn_cookie_master_key("),
+            "{site} must not publish the key without the ring"
+        );
+    }
+}

@@ -245,6 +245,41 @@ re-checked against the running binary's refusal classes. The commit was
 accepted before the restart, and refusing to re-arm would make an unconfirmed
 commit permanent, so that path needs a decision rather than this gate.
 
+### A recovered commit-confirmed target is pre-flighted too (#9615)
+
+The #6707/#9588 pre-flight above runs when `commit confirmed` ARMS a window in
+this process. `Store.Load` also re-arms a window that was still live at restart
+(#4577), and that path never ran the pre-flight. The timeout then applied the
+target unconditionally, citing "validated at commit-confirmed time". For a
+recovered window that premise is false in two ways:
+- the box may have upgraded inside the window, and the new build's refusal
+  classes can cover the old config;
+- a target that binds a dynamic-address feed has no installed snapshot right
+  after a restart.
+
+Refusing to re-arm would make the unconfirmed commit permanent, so the window
+always stays armed and the check runs twice:
+
+- **At boot** (`checkRecoveredConfirmTarget`, startup phase
+  `recovered-confirm-preflight`, after manager-init so the feed manager
+  exists). If the recovered target fails the pre-flight, the daemon logs an
+  error naming the reasons and the deadline. It records the same text as a
+  journal entry (`confirm_rollback_target_refused`) and as the local CLI's
+  pending-window `[ALARM: …]` line (`Store.ConfirmAlarm`), so the operator can
+  confirm or re-commit before the timer fires. The remote CLI's pending flag
+  does not carry the text.
+- **When the timer fires** (`confirmRollbackTargetHandledAtFire`, called from
+  `executeConfirmedRollback` BEFORE `PromoteRollback`, so nothing is promoted
+  yet):
+  - A target refused only because a feed has no snapshot (the refusal
+    disappears once every binding resolves) is deferred: `Store.DeferConfirmTimer`
+    re-arms the same generation for 5 s, at most 24 times.
+  - Any other refusal, or a feed still unready at the cap, promotes the store to
+    the target (persisted as committed, as #6538 does for a recovered target
+    that no longer compiles). The daemon then enters the bootstrap/lifeline safe
+    state instead of applying a target the dataplane refuses.
+  - An appliable target rolls back and applies exactly as before.
+
 ### The recovered commit-confirmed rollback fires against a HALF-BUILT daemon (#6739)
 
 `Store.Load` restores a still-live `commit confirmed` window by re-arming
@@ -362,12 +397,22 @@ startup-phase and shutdown ordering is untouched:
   `runShutdownSequence`, `runHAShutdownUpdate`.
 
   **The fail-closed actions run FIRST (#9035).** `TimeoutStopSec=20`, and
-  systemd SIGKILLs there wherever the teardown has got to. Exactly TWO actions
+  systemd SIGKILLs there wherever the teardown has got to. Exactly THREE actions
   must have completed by then, because only they are fail-closed — everything
   else is best-effort cleanup whose loss costs telemetry, not correctness:
 
-  1. **`rg_active` cleared**, so this node stops forwarding; and
-  2. **the Kea units stopped** (#6787), so it stops answering DHCP.
+  1. **kernel transit closed** (#9686), on the non-hitless (fail-closed) stop
+     only: `markDataplaneNotArmed` installs the #7191 barrier and writes
+     `ip_forward` and `conf.all.forwarding` to 0, before `Teardown` detaches
+     every XDP program. Without it the "fail-closed" stop ended with the kernel
+     routing any transit that still reached the node (surviving interface
+     addresses, static/BGP or link-local next hops) with no policy, session or
+     NAT, for the whole downtime. It keys on `hitless` alone, not on a
+     published runtime, and nothing on the way out re-opens it. A hitless stop
+     keeps the dataplane attached with the shim dropping transit, so it leaves
+     forwarding as it was;
+  2. **`rg_active` cleared**, so this node stops forwarding; and
+  3. **the Kea units stopped** (#6787), so it stops answering DHCP.
 
   Miss either and the peer promotes onto a segment this node is still serving:
   duplicate OFFERs from two lease databases with neither aware of the other.
@@ -2744,6 +2789,21 @@ never lock an operator out of a remote box it manages.
   `pkg/api/metrics_hostinbound_conntrack_revoke_6802_test.go` (both series track
   their fn, and are OMITTED rather than published as `0` when unwired — the #6828
   absent-vs-zero distinction).
+
+  **Routing reconcile retry owner (#9693).** Every apply reconciles the kernel
+  policy-routing rules (`applyPolicyRoutingRules`: next-table, rib-group and
+  firewall-filter PBR) and then republishes the userspace route snapshot from that
+  kernel state (`reconcileRouteLeakSnapshot`). #5844 and #5696 made both
+  failures deferred commit errors, but nothing re-ran them. A transient failure
+  left stale or missing cross-VRF policy in the kernel and a FIB built from it
+  until an unrelated apply, and on the applies nobody waits on (boot, DHCP lease,
+  feed, config-poll) it was only logged. The apply now latches
+  `routingReconcileDebt` (`noteRoutingReconcileResult`). The always-on
+  `routingReconcileReassertLoop` re-runs both reconciles every 30 s while the
+  debt is owed. Like its siblings, it takes `applySem` before reading the active
+  config and re-checks the debt inside. It never re-runs the FRR apply, whose
+  manager owns its own degraded retry. `RoutingReconcileDebt()` reports the
+  latch, a monotonic failure count and the last error.
 
   **Managed service-file reload debt (#6800, the recovery half of #6791/#6793
   applied to the two managed-FILE appliers):** `applySyslogFiles` and

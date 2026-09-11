@@ -632,6 +632,9 @@ func (s *Store) commitConfirmedLocked(minutes int) (*config.Config, error) {
 	s.confirmTimer = time.AfterFunc(time.Duration(minutes)*time.Minute, func() {
 		s.fireConfirmTimer(gen)
 	})
+	s.confirmDeadline = deadline // #9615
+	s.confirmRecovered = false
+	s.confirmAlarm = ""
 
 	// #4577: persist the pending-confirm state so the auto-rollback deadline
 	// survives a daemon crash/reboot inside the window. The in-memory timer
@@ -987,6 +990,9 @@ func (s *Store) cancelPendingConfirmTimerLocked() bool {
 	s.confirmPrevTree = nil
 	s.confirmPrevCfg = nil
 	s.confirmPrevFirst = false
+	s.confirmDeadline = time.Time{} // #9615
+	s.confirmRecovered = false
+	s.confirmAlarm = ""
 	return true
 }
 
@@ -1152,6 +1158,9 @@ func (s *Store) PromoteRollback(gen uint64) (prevCfg *config.Config, ok bool) {
 	// boot into bootstrap.
 	firstCommitRollback := s.confirmPrevFirst
 	s.confirmPrevFirst = false
+	s.confirmDeadline = time.Time{} // #9615
+	s.confirmRecovered = false
+	s.confirmAlarm = ""
 
 	// Persist reverted config to disk. Option B (#1799): the rollback
 	// ALWAYS proceeds in memory — reverting the running config is the

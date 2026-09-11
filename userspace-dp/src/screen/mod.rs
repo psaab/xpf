@@ -196,7 +196,7 @@ pub(crate) use unresolved::InertProfileRef;
 pub(crate) use packet::ScreenParseError;
 pub(crate) use syncookie::{
     SYN_COOKIE_MSS_VALUES, SynCookieAckVerdict, SynCookieChallenge, SynCookieCodec,
-    SynCookieClientKey, SynCookieTuple, SynCookieValidation,
+    SynCookieClientKey, SynCookieKeyRing, SynCookieTuple, SynCookieValidation,
 };
 
 // Test-only re-exports — screen/tests.rs constructs SipHash24 and
@@ -281,6 +281,10 @@ pub(crate) struct ScreenState {
     zones: FxHashMap<String, ZoneScreenState>,
     // --- Global SYN-cookie machinery (NOT per-zone) ---
     syn_cookie_codec: Option<SynCookieCodec>,
+    /// #9173: key bases that derive each rotation period's key; consulted only
+    /// while `syn_cookie_codec` (the legacy key) is present, so a cleared key
+    /// still fails closed.
+    syn_cookie_key_ring: SynCookieKeyRing,
     syn_cookie_validated: SynCookieValidatedCache,
     syn_cookie_last_full_epoch: u64,
     /// #3032: Unix wall-clock seconds cached for SYN-cookie epoch math,
@@ -396,6 +400,7 @@ impl ScreenState {
         Self {
             zones: FxHashMap::default(),
             syn_cookie_codec: None,
+            syn_cookie_key_ring: SynCookieKeyRing::default(),
             syn_cookie_validated: SynCookieValidatedCache::default(),
             syn_cookie_last_full_epoch: 0,
             syn_cookie_epoch_wall_secs: 0,
@@ -606,7 +611,23 @@ impl ScreenState {
         }
     }
 
-    /// Current SYN-cookie full epoch, latched non-decreasing.
+    /// #9173: install the legacy key and the key ring (its bases) together, as
+    /// every snapshot delivery does. Only the legacy key sets the validated-client
+    /// cache hash keys, and `set_hash_keys` clears the cache only when they change.
+    /// A snapshot newly built in a later period carries that period's key and so
+    /// clears it; a republish of the last snapshot keeps its key, and rotation
+    /// between snapshots (`SynCookieKeyRing::refresh`) is local, so neither does.
+    /// Entries live one 64-second cookie epoch, so the cost is a re-challenge.
+    pub(crate) fn update_syn_cookie_keys(
+        &mut self,
+        master_key: Option<[u8; 16]>,
+        ring: SynCookieKeyRing,
+    ) {
+        self.update_syn_cookie_master_key(master_key);
+        self.syn_cookie_key_ring = ring;
+    }
+
+    /// Current SYN-cookie full epoch, latched non-decreasing (SynCookieKeyRing::latch).
     ///
     /// `mono_now_secs` is the batch-cached `CLOCK_MONOTONIC` second already
     /// threaded into `check_packet_with_zone_id` / the standby-ACK path. It
@@ -621,6 +642,7 @@ impl ScreenState {
     fn current_syn_cookie_full_epoch(&mut self, mono_now_secs: u64) -> u64 {
         #[cfg(test)]
         if let Some(epoch) = self.syn_cookie_full_epoch_override {
+            self.syn_cookie_key_ring.refresh(epoch);
             return epoch;
         }
         if self.syn_cookie_epoch_clock_mono_secs != mono_now_secs {
@@ -628,7 +650,11 @@ impl ScreenState {
             self.syn_cookie_epoch_clock_mono_secs = mono_now_secs;
         }
         let epoch = SynCookieCodec::current_full_epoch(self.syn_cookie_epoch_wall_secs);
-        self.syn_cookie_last_full_epoch = self.syn_cookie_last_full_epoch.max(epoch);
+        // #9173: non-decreasing (SynCookieKeyRing::latch), which also derives
+        // this period's keys.
+        self.syn_cookie_last_full_epoch = self
+            .syn_cookie_key_ring
+            .latch(self.syn_cookie_last_full_epoch, epoch);
         self.syn_cookie_last_full_epoch
     }
 
@@ -943,10 +969,17 @@ impl ScreenState {
                             return ScreenVerdict::Drop("syn-flood");
                         }
                         SynFloodGate::MintChallenge => {
-                            let Some(codec) = self.syn_cookie_codec else {
+                            let Some(legacy_codec) = self.syn_cookie_codec else {
                                 return ScreenVerdict::Drop("syn-cookie-unavailable");
                             };
                             let full_epoch = self.current_syn_cookie_full_epoch(now_secs);
+                            // #9173: SynCookieKeyRing::mint_codec_or_legacy.
+                            let Some(codec) = self
+                                .syn_cookie_key_ring
+                                .mint_codec_or_legacy(full_epoch, legacy_codec)
+                            else {
+                                return ScreenVerdict::Drop("syn-cookie-unavailable");
+                            };
                             let cookie_isn = codec.mint_isn(
                                 SynCookieTuple::from_packet(pkt),
                                 zone_id,
@@ -1314,7 +1347,7 @@ impl ScreenState {
                 SynCookieAckVerdict::NotApplicable
             };
         }
-        let Some(codec) = self.syn_cookie_codec else {
+        let Some(legacy_codec) = self.syn_cookie_codec else {
             return if locally_active {
                 SynCookieAckVerdict::Invalid
             } else {
@@ -1336,10 +1369,14 @@ impl ScreenState {
         // source-scoped (#9419) because the client that comes back does so on
         // a different ephemeral port.
         let tuple = SynCookieTuple::from_packet(pkt);
-        if codec
-            .validate_isn(tuple, zone_id, current_epoch, cookie_isn)
-            .is_some()
-        {
+        // #9173: the cookie is checked against the key for ITS OWN period
+        // (SynCookieKeyRing::validates).
+        let validated = SynCookieCodec::cookie_full_epoch(current_epoch, cookie_isn)
+            .is_some_and(|full_epoch| {
+                self.syn_cookie_key_ring
+                    .validates(legacy_codec, tuple, zone_id, full_epoch, cookie_isn)
+            });
+        if validated {
             let profile_gen = self.syn_cookie_profile_gen(zone);
             self.syn_cookie_validated.insert(
                 zone_id,

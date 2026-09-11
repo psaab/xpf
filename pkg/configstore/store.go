@@ -252,6 +252,12 @@ type Store struct {
 	// inferring it later from a value that means two things, is what makes the
 	// two states distinguishable to every consumer.
 	confirmPrevFirst bool
+	// #9615: the pending window's deadline, whether Load re-armed it from
+	// confirm.json (so the daemon never pre-flighted its target), and the
+	// operator alarm raised about that target. All cleared with the window.
+	confirmDeadline  time.Time
+	confirmRecovered bool
+	confirmAlarm     string
 
 	// rollbackExecutor is the daemon-registered transaction that owns
 	// the WHOLE commit-confirmed timeout rollback (#1922 Item 1a). When

@@ -3091,3 +3091,93 @@ fn wg_steered_listen_port_wire_key_9521() {
         "a daemon that omits the key must decode to 0, which fails closed"
     );
 }
+
+/// #9173: `syn_cookie_key_ring` is an ADDED, SECRET field. It must stay out of
+/// the world-readable state.json, still populate from control-socket delivery,
+/// and be additive in both directions for a mixed-version pair.
+#[test]
+fn syn_cookie_key_ring_is_secret_and_additive_both_ways_9173() {
+    let snap = ConfigSnapshot {
+        syn_cookie_key_ring: Some(SynCookieKeyRingSnapshot {
+            period_secs: 3584,
+            bases: vec![SynCookieKeyBaseSnapshot {
+                base: "0badc0ffee0badc0ffee0badc0ffee420badc0ffee0badc0ffee0badc0ffee42".into(),
+                accept_only: true,
+            }],
+        }),
+        ..Default::default()
+    };
+    let json = serde_json::to_string(&snap).expect("serialize snapshot");
+    assert!(
+        !json.contains("syn_cookie_key_ring") && !json.contains("0badc0ffee"),
+        "the ring must be skip_serializing, got: {json}"
+    );
+    assert!(
+        !format!("{snap:?}").contains("0badc0ffee"),
+        "ring bases must not render through Debug"
+    );
+
+    let header = r#""version": 3, "generation": 1, "generated_at": "2024-01-01T00:00:00Z",
+        "summary": {"host_name":"h","dataplane_type":"userspace","interface_count":0,
+                    "zone_count":0,"policy_count":0,"scheduler_count":0,"ha_enabled":false},
+        "syn_cookie_master_key": "00112233445566778899aabbccddeeff""#;
+
+    // NEW reader, NEW payload: control-socket delivery populates the ring.
+    let with_ring = format!(
+        r#"{{{header}, "syn_cookie_key_ring": {{"period_secs": 3584, "bases": [
+            {{"base": "ffeeddccbbaa99887766554433221100ffeeddccbbaa99887766554433221100", "accept_only": true}},
+            {{"base": "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"}}]}}}}"#
+    );
+    let parsed: ConfigSnapshot =
+        serde_json::from_str(&with_ring).expect("decode a snapshot carrying the ring");
+    let ring = parsed
+        .syn_cookie_key_ring
+        .as_ref()
+        .expect("a delivered ring must decode as present");
+    assert_eq!(ring.period_secs, 3584);
+    assert_eq!(ring.bases.len(), 2);
+    assert!(
+        ring.bases[0].accept_only && !ring.bases[1].accept_only,
+        "an absent accept_only must default to false (a primary base)"
+    );
+    assert_eq!(
+        &*ring.bases[1].base,
+        "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
+    );
+
+    // NEW reader, OLD payload: an older control plane sends no ring.
+    let parsed: ConfigSnapshot = serde_json::from_str(&format!("{{{header}}}"))
+        .expect("an old payload without the ring must parse");
+    assert!(
+        parsed.syn_cookie_key_ring.is_none(),
+        "an omitted ring must decode as absent"
+    );
+    assert_eq!(parsed.syn_cookie_master_key, "00112233445566778899aabbccddeeff");
+
+    // NEW reader, a PRESENT but empty ring: a published ring, not an older
+    // control plane, so it must not decode as absent.
+    let empty = format!(r#"{{{header}, "syn_cookie_key_ring": {{}}}}"#);
+    let parsed: ConfigSnapshot = serde_json::from_str(&empty).expect("an empty ring must parse");
+    assert_eq!(
+        parsed.syn_cookie_key_ring,
+        Some(SynCookieKeyRingSnapshot::default()),
+        "an explicit empty ring must stay present so the dataplane fails it closed"
+    );
+
+    // A present `null` is a published ring too: only an OMITTED field is absent.
+    let null = format!(r#"{{{header}, "syn_cookie_key_ring": null}}"#);
+    let parsed: ConfigSnapshot = serde_json::from_str(&null).expect("a null ring must parse");
+    assert_eq!(
+        parsed.syn_cookie_key_ring,
+        Some(SynCookieKeyRingSnapshot::default()),
+        "an explicit null ring must stay present so the dataplane fails it closed"
+    );
+
+    // OLD reader, NEW payload: an older helper must IGNORE the ring. That rests
+    // on ConfigSnapshot not denying unknown fields, simulated as in #6853 with a
+    // field this binary does not declare either.
+    let future = format!(r#"{{{header}, "a_syn_cookie_field_from_the_future": {{"bases": []}}}}"#);
+    let parsed: ConfigSnapshot = serde_json::from_str(&future)
+        .expect("an unknown field must be ignored, or an older helper breaks on this upgrade");
+    assert_eq!(parsed.syn_cookie_master_key, "00112233445566778899aabbccddeeff");
+}

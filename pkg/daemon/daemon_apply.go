@@ -519,6 +519,14 @@ func (d *Daemon) applyConfigLocked(ctx context.Context, cfg *config.Config) (ret
 	// the stale leak on a "successful" commit.
 	routeLeakErr := d.reconcileRouteLeakSnapshot(cfg, commitOverlay)
 
+	// #9693: latch (or discharge) the routing reconcile debt. The two errors
+	// above fail the commit closed, but nothing RE-RAN the reconcile: a transient
+	// ip-rule or republish failure left stale cross-VRF policy in the kernel and
+	// the userspace FIB until an unrelated apply, and applies nobody waits on
+	// (boot, DHCP lease, feed, config-poll) only logged it at Warn.
+	// routingReconcileReassertLoop re-runs both until they succeed.
+	d.noteRoutingReconcileResult(routingRuleErr, routeLeakErr)
+
 	ipsecErr, dhcpServerErr := d.applyServicesReconcile(cfg)
 
 	// Steps 8–21: tail reconcile dispatches (VRRP, system config, syslog,

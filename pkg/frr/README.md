@@ -1247,19 +1247,29 @@ step. Both are required — neither sees the other's case:
   `lib/route_types.pl` builds each daemon's source list with
   `collect($daemon, ipv4, ipv6)`, so `ospf6`/`ripng` are not in ospfd's or
   ripd's list and `ospf`/`rip` are not in ospf6d's. Such a line is rejected
-  at parse exactly like a typo. The commit gate cannot catch this, because a
-  `from protocol` token is valid or not per USE SITE, not per policy: the
-  same policy is valid under `router ospf6`. So both render paths filter at
-  the use site through `redistSourceFitsNode` (`redistribute_afi_9510.go`),
-  and a policy whose every `from protocol` was filtered says so in its warning
-  instead of claiming it has none. **BGP is the easy row to get wrong.** bgpd
-  is dual-stack, but a bare-token export is written directly under
-  `router bgp` (BGP_NODE), where `bgp_vty.c` installs only the IPv4 grammar
-  (`FRR_IP_REDIST_STR_BGPD`). `redistribute ospf6` is rejected there too;
-  the IPv6 grammar exists only under `address-family ipv6 unicast`, and this
-  renderer does not write redistribution there (#9667). IS-IS lists both
-  families, so nothing is filtered under `router isis`, but the plain
-  `redistribute <proto>` form is not IS-IS grammar at all (#9666).
+  at parse exactly like a typo. The commit gate cannot catch this for a
+  policy, because a `from protocol` token is valid or not per USE SITE, not
+  per policy: the same policy is valid under `router ospf6`. So both render
+  paths filter at the use site through `redistSourceFitsNode`
+  (`redistribute_afi_9510.go`), and a policy whose every `from protocol` was
+  filtered says so in its warning instead of claiming it has none. A BARE
+  token is bound to its use site, so since #9667 the strict commit gate
+  refuses one whose family its router cannot carry (`protocols ospf export
+  ospf6`, `protocols ospf3 export ospf`; downgraded to a warning on the
+  tolerant path). The source families live in one table in `pkg/config`
+  (`RedistributionSourceFamilies`), which both the gate and
+  `frrRedistSourceAFI` read. **BGP is the easy row to get wrong.** bgpd is
+  dual-stack, but `router bgp` (BGP_NODE) installs only the IPv4 grammar
+  (`FRR_IP_REDIST_STR_BGPD`); the IPv6 grammar exists only under
+  `address-family ipv6 unicast` (BGP_IPV6_NODE). Since #9667 a bare-token BGP
+  export renders each family where its grammar lives: IPv4 sources under
+  `router bgp`, IPv6 sources under `address-family ipv6 unicast` through
+  `resolveBGPIPv6Redistribute` (node row `bgp-ipv6`). So `export static`
+  renders in both, and `export ospf6` renders in the IPv6 family. That block
+  is opened whenever an IPv6 redistribute line exists, with or without an
+  IPv6 neighbor. IS-IS lists both families, so nothing is filtered under
+  `router isis`, but the plain `redistribute <proto>` form is not IS-IS
+  grammar at all (#9666).
 - **A policied family-less IPv6 BGP neighbor activates under ipv6 unicast,
   not ipv4 (#2941).** The "default-activate a family-less policied neighbor
   under ipv4 unicast" fall-through (#2473/#2490) is correct ONLY for an IPv4

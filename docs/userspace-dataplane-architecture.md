@@ -2365,7 +2365,7 @@ state). `buildScreenSnapshots` and its siblings `buildScreenMissingProfileRefs` 
 `ScreenMissingProfiles` / `ScreenInertProfiles`) now collect the
 zone names, `sort.Strings` them, and range in sorted order — matching the
 long-standing pattern in `buildZoneSnapshots` (`zones.go`) and
-`buildSYNCookieMasterKey`. The syn-cookie master-key hash and all
+`synCookieScreenedZones` (the SYN-cookie key's zone list). The SYN-cookie key derivation and all
 zone-host-inbound builders already sorted; the NAT / tunnel / neighbor
 builders range config SLICES (already ordered), so they were never affected.
 
@@ -3716,9 +3716,12 @@ is [`userspace-dataplane-gaps.md`](userspace-dataplane-gaps.md).
   explicit userspace capability gate because persistent leases are not
   synchronized. Helper-restart reset and mixed-backend selector parity are
   documented contracts, not active #1377 blockers.
-- SYN-cookie flood protection closeout: bounded SYN-ACK/RST TX,
-  root-auth-derived snapshot key publication, fail-closed missing-secret
-  behavior, status counters, and gate removal are wired. Any final live
+- SYN-cookie flood protection closeout: bounded SYN-ACK/RST TX, snapshot key
+  publication (#9173: an HMAC base from the cluster authentication-key, or a
+  per-daemon-start random secret on a standalone or unkeyed node, from which
+  the helper derives a key that rotates just under hourly), fail-closed behavior
+  when a published ring has no usable base, status counters, and gate removal
+  are wired. Any final live
   HA/flood artifact belongs with #1477 on the source-removal candidate.
 - RFC 2697/2698 three-color policer closeout: #1375 now preserves
   token/counter state across compatible in-process snapshot refreshes and
@@ -3794,6 +3797,19 @@ is [`userspace-dataplane-gaps.md`](userspace-dataplane-gaps.md).
   `noroute_policy_denial_gated`, and while the flag is set the frame keeps the
   pre-#7480 delegation. Nothing else changes: an uncapped snapshot adjudicates
   exactly as before, and the flag never reaches an ordinary zone-pair verdict.
+  **#9654: whether the box is capped NOW is reported, not inferred.** Helper
+  status carries `learned_route_import_capped`, projected by
+  `Coordinator::learned_route_import_capped_now`. The value comes from the
+  PUBLISHED runtime view (the state workers load, not the coordinator's
+  candidate `forwarding`), and it is reported only while at least one worker
+  record is live. With no live worker the key is omitted, and absence means
+  unknown. That covers a teardown, the time before the first worker
+  registers, a first-worker spawn failure, and every worker dead. The daemon
+  decodes the field as `*bool` and exports `xpf_learned_route_import_capped`
+  only when it is present, so a helper that predates the field reads as
+  unknown, never as "not capped". `xpf_learned_route_cap_hits_total` still
+  counts capped builds, but it cannot answer this: it stays non-zero after the
+  import comes back under the cap.
   `PolicyDenied`, `HAInactive`, `DiscardRoute` and — since #6664 —
   `NextTableUnsupported` are NOT eligible: reinjecting them would hand the
   packet to the kernel FIB and silently bypass a zone-policy DENY / HA gate

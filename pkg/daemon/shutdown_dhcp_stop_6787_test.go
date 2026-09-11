@@ -108,6 +108,8 @@ func clusterDaemon6787(t *testing.T, cluster bool) (*Daemon, *keaRecorder6787) {
 		t.Fatalf("configstore.New: %v", err)
 	}
 	if cluster {
+		// #9686: a cluster shutdown can reach the transit close.
+		seamTransitClose9686(t)
 		// A cluster stanza with NO redundancy groups: enough to make haMode
 		// true without entering the rg_active loop, which would need a live HA
 		// controller. hitless-restart is set so the teardown takes the hitless

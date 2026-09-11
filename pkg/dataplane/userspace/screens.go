@@ -1,10 +1,16 @@
 package userspace
 
 import (
+	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha256"
+	"encoding/binary"
+	"encoding/hex"
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/psaab/xpf/pkg/config"
 )
@@ -464,16 +470,190 @@ func buildScreenMissingProfileRefs(cfg *config.Config) []ScreenMissingProfileRef
 	return out
 }
 
-func buildSYNCookieMasterKey(cfg *config.Config) string {
-	if !userspaceSynCookieProtectionActive(cfg) {
-		return ""
-	}
-	secretMaterial := synCookieSecretMaterial(cfg)
-	if secretMaterial == "" {
-		return ""
-	}
+// synCookieEpochSecs mirrors SynCookieCodec::EPOCH_SECS in userspace-dp: the
+// cookie epoch every minted ISN carries.
+const synCookieEpochSecs = 64
 
-	var zones []string
+// synCookieKeyPeriodSecs is the SYN-cookie key rotation period (#9173): just
+// under an hour, and a whole number of cookie epochs, so each cookie's own epoch
+// names exactly one rotation period. The helper fails closed a ring whose period
+// is not such a multiple.
+const synCookieKeyPeriodSecs = 56 * synCookieEpochSecs
+
+// synCookieNow is the clock the SYN-cookie keys are built from; tests replace it.
+var synCookieNow = time.Now
+
+// synCookieProcessSecret is the random secret a node with no chassis cluster
+// authentication-key derives its SYN-cookie keys from (#9173). It is drawn once
+// per daemon start and never persisted, so that node's key changes across a
+// restart. A keyed cluster deliberately does not use it, so its nodes can
+// validate each other's cookies after a failover; docs/syn-cookie-flood-protection.md
+// ("When two nodes agree") lists what else that takes.
+var synCookieProcessSecret = sync.OnceValue(newSynCookieProcessSecret)
+
+func newSynCookieProcessSecret() []byte {
+	secret := make([]byte, 32)
+	// Since Go 1.24 crypto/rand.Read never returns an error; it aborts the
+	// process instead, so the secret is never silently left zero.
+	_, _ = rand.Read(secret)
+	return secret
+}
+
+// synCookieDigestSalt keys the fingerprints that stand in for SYN-cookie keys
+// inside snapshotContentHash (#9173). Drawn once per daemon start and never
+// persisted.
+var synCookieDigestSalt = sync.OnceValue(newSynCookieProcessSecret)
+
+// synCookieDigestFingerprint replaces a hex key with an HMAC of it under the
+// per-start digest salt. An empty key stays empty.
+func synCookieDigestFingerprint(key string) string {
+	if key == "" {
+		return ""
+	}
+	mac := hmac.New(sha256.New, synCookieDigestSalt())
+	mac.Write([]byte("xpf-syncookie-digest\x00"))
+	mac.Write([]byte(key))
+	return hex.EncodeToString(mac.Sum(nil))
+}
+
+// synCookieRingDigestFingerprint copies ring with every base fingerprinted. The
+// period and accept-only marks are not secret and are kept.
+func synCookieRingDigestFingerprint(ring *SYNCookieKeyRingSnapshot) *SYNCookieKeyRingSnapshot {
+	if ring == nil {
+		return nil
+	}
+	out := &SYNCookieKeyRingSnapshot{PeriodSecs: ring.PeriodSecs, Bases: make([]SYNCookieKeyBaseSnapshot, len(ring.Bases))}
+	for i, b := range ring.Bases {
+		b.Base = synCookieDigestFingerprint(b.Base)
+		out.Bases[i] = b
+	}
+	return out
+}
+
+// buildSYNCookieKeys derives the snapshot's SYN-cookie key material (#9173).
+//
+// A BASE is HMAC-SHA256 over a domain label, the cluster identity and the
+// screened zones. A keyed cluster keys it with `chassis cluster
+// authentication-key`; anything else uses synCookieProcessSecret. A period's key
+// is HMAC-SHA256 of the base over a second label and the rotation epoch (unix
+// seconds / synCookieKeyPeriodSecs), truncated to 16 bytes: deriveSYNCookieEpochKey
+// here, and SynCookieKeyRing in the helper, which derives every period's key
+// itself. Keys therefore rotate on the wall clock with no control-plane
+// republish, and two nodes holding one base derive the same key for the same
+// period (which nodes hold one: docs/syn-cookie-flood-protection.md, "When two
+// nodes agree").
+//
+// None of it is a function of the root password verifier. On a keyed cluster a
+// base, and every key derived from it, is still an offline check on guesses at
+// the authentication-key, so it is only as strong as that key's entropy. Every
+// base must stay secret: skip_serializing on the helper wire, redacted in Debug,
+// and only a salted HMAC of it in the #9520 content digest.
+//
+// The first result is now's period key. It keeps the meaning
+// syn_cookie_master_key always had -- the key to mint and validate with -- so an
+// older helper that ignores the ring still works, on the key of the period its
+// last full snapshot was built in. The ring holds the primary base, plus an
+// accept-only base derived from `additional-authentication-key` while a #6630
+// PSK rotation window is open.
+func buildSYNCookieKeys(cfg *config.Config, now time.Time) (string, *SYNCookieKeyRingSnapshot) {
+	if !userspaceSynCookieProtectionActive(cfg) {
+		return "", nil
+	}
+	zones := synCookieScreenedZones(cfg)
+	if len(zones) == 0 {
+		return "", nil
+	}
+	primary, additional, identity := synCookieKeyMaterial(cfg)
+	primaryBase := deriveSYNCookieBase(primary, identity, zones)
+	ring := &SYNCookieKeyRingSnapshot{
+		PeriodSecs: synCookieKeyPeriodSecs,
+		Bases:      []SYNCookieKeyBaseSnapshot{{Base: hex.EncodeToString(primaryBase)}},
+	}
+	if len(additional) > 0 {
+		ring.Bases = append(ring.Bases, SYNCookieKeyBaseSnapshot{
+			Base:       hex.EncodeToString(deriveSYNCookieBase(additional, identity, zones)),
+			AcceptOnly: true,
+		})
+	}
+	return deriveSYNCookieEpochKey(primaryBase, synCookieRotationEpoch(now)), ring
+}
+
+// synCookieKeyMaterial returns the secret to mint with, a secret whose cookies
+// are also accepted (nil outside a #6630 rotation window), and the identity mixed
+// into the derivation.
+func synCookieKeyMaterial(cfg *config.Config) (primary, additional []byte, identity string) {
+	cluster := cfg.Chassis.Cluster
+	if cluster == nil {
+		return synCookieProcessSecret(), nil, "standalone"
+	}
+	identity = fmt.Sprintf("cluster-id=%d", cluster.ClusterID)
+	// Emptiness is tested the way the control channel tests it (len > 0), so a
+	// node keys its cookies from the PSK exactly when its heartbeats are keyed.
+	// The additional key follows the heartbeat's #6630 widening as an accept-only
+	// base: it validates and never mints. Whether that lets two nodes validate
+	// each other's cookies is docs/syn-cookie-flood-protection.md, "When two nodes
+	// agree".
+	key := cluster.ControlLinkAuthKey.Reveal()
+	if key == "" {
+		// An unkeyed cluster (the lenient load path; the strict commit gate
+		// refuses one) has no shared secret, so its cookies do not survive a
+		// failover. Config validation warns.
+		return synCookieProcessSecret(), nil, identity
+	}
+	if alt := cluster.ControlLinkAuthKeyAlt.Reveal(); alt != "" {
+		additional = []byte(alt)
+	}
+	return []byte(key), additional, identity
+}
+
+func synCookieRotationEpoch(now time.Time) uint64 {
+	secs := now.Unix()
+	if secs < 0 {
+		return 0
+	}
+	return uint64(secs) / synCookieKeyPeriodSecs
+}
+
+// deriveSYNCookieBase is the base every period's key derives from: one per keyed
+// cluster, or one per daemon start. Every variable-length field is
+// length-prefixed, so no identity or zone/profile name -- a quoted identifier may
+// contain a NUL -- can frame the same bytes as a different screened-zone set.
+func deriveSYNCookieBase(secret []byte, identity string, zones [][2]string) []byte {
+	mac := hmac.New(sha256.New, secret)
+	mac.Write([]byte("xpf-syncookie\x00v3-base\x00"))
+	var n [4]byte
+	field := func(s string) {
+		binary.BigEndian.PutUint32(n[:], uint32(len(s)))
+		mac.Write(n[:])
+		mac.Write([]byte(s))
+	}
+	field(identity)
+	binary.BigEndian.PutUint32(n[:], uint32(len(zones)))
+	mac.Write(n[:])
+	for _, zone := range zones {
+		field(zone[0])
+		field(zone[1])
+	}
+	return mac.Sum(nil)
+}
+
+// deriveSYNCookieEpochKey is one rotation epoch's key, as 32 hex characters.
+// userspace-dp's SynCookieKeyRing derives the same bytes; the known-answer
+// vector in TestSYNCookieEpochKeyMatchesTheHelper9173 and its Rust twin pins
+// both.
+func deriveSYNCookieEpochKey(base []byte, epoch uint64) string {
+	mac := hmac.New(sha256.New, base)
+	mac.Write([]byte("xpf-syncookie\x00v3-epoch\x00"))
+	var epochBytes [8]byte
+	binary.BigEndian.PutUint64(epochBytes[:], epoch)
+	mac.Write(epochBytes[:])
+	return hex.EncodeToString(mac.Sum(nil)[:16])
+}
+
+// synCookieScreenedZones lists (zone, profile) for every zone whose screen profile
+// has a SYN-flood attack threshold, sorted so the key is deterministic.
+func synCookieScreenedZones(cfg *config.Config) [][2]string {
+	var zones [][2]string
 	for _, zone := range cfg.Security.Zones {
 		if zone == nil || zone.ScreenProfile == "" {
 			continue
@@ -483,39 +663,15 @@ func buildSYNCookieMasterKey(cfg *config.Config) string {
 			profile.TCP.SynFlood.AttackThreshold <= 0 {
 			continue
 		}
-		zones = append(zones, zone.Name+"\x00"+zone.ScreenProfile)
+		zones = append(zones, [2]string{zone.Name, zone.ScreenProfile})
 	}
-	if len(zones) == 0 {
-		return ""
-	}
-	sort.Strings(zones)
-
-	h := sha256.New()
-	h.Write([]byte("xpf-userspace-syn-cookie-v1\x00"))
-	if cfg.Chassis.Cluster != nil {
-		fmt.Fprintf(h, "cluster-id=%d\x00", cfg.Chassis.Cluster.ClusterID)
-	} else {
-		h.Write([]byte("standalone\x00"))
-	}
-	h.Write([]byte("root-auth-encrypted-password\x00"))
-	h.Write([]byte(secretMaterial))
-	h.Write([]byte{0})
-	for _, zone := range zones {
-		h.Write([]byte(zone))
-		h.Write([]byte{0})
-	}
-	sum := h.Sum(nil)
-	return fmt.Sprintf("%x", sum[:16])
-}
-
-func synCookieSecretMaterial(cfg *config.Config) string {
-	if cfg == nil || cfg.System.RootAuthentication == nil {
-		return ""
-	}
-	// Use already cluster-synced secret material. Do not use
-	// system master-password: it is a PRF selector for configstore
-	// at-rest encryption, not a dataplane secret.
-	return cfg.System.RootAuthentication.EncryptedPassword.Reveal()
+	sort.Slice(zones, func(i, j int) bool {
+		if zones[i][0] != zones[j][0] {
+			return zones[i][0] < zones[j][0]
+		}
+		return zones[i][1] < zones[j][1]
+	})
+	return zones
 }
 
 func userspaceSynCookieProtectionActive(cfg *config.Config) bool {
@@ -533,20 +689,6 @@ func userspaceSynCookieProtectionActive(cfg *config.Config) bool {
 		}
 	}
 	return false
-}
-
-// userspaceSupportsScreenProfiles returns true if the configured screen
-// profiles only use checks that the userspace dataplane implements.
-// Port scan detection, IP sweep detection, and per-IP session limiting
-// are now implemented in the userspace dataplane.
-func userspaceSupportsScreenProfiles(cfg *config.Config) bool {
-	if cfg == nil || len(cfg.Security.Screen) == 0 {
-		return true
-	}
-	if userspaceSynCookieProtectionActive(cfg) && synCookieSecretMaterial(cfg) == "" {
-		return false
-	}
-	return true
 }
 
 // ScreenInertDisposition describes what the dataplane does with a zone whose

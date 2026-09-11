@@ -370,6 +370,10 @@ pub(in crate::afxdp) struct ForwardingState {
     /// because the two select different runtime WARN texts.
     pub(in crate::afxdp) screen_inert_profiles: FastMap<String, InertProfileRef>,
     pub(in crate::afxdp) syn_cookie_master_key: SynCookieMasterKey,
+    /// #9173: the key ring from `ConfigSnapshot::syn_cookie_key_ring`, resolved:
+    /// the published bases, from which the helper derives each rotation period's
+    /// key itself. Its `Debug` renders no key bytes.
+    pub(in crate::afxdp) syn_cookie_key_ring: crate::screen::SynCookieKeyRing,
     pub(in crate::afxdp) tunnel_interfaces: FastSet<i32>,
     pub(in crate::afxdp) filter_state: crate::filter::FilterState,
     pub(in crate::afxdp) cos: CoSState,

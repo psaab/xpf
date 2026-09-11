@@ -199,6 +199,29 @@ The reservation is now tri-state (`SyncedReserveOutcome`): `Reserved`,
 `NothingToReserve` is answered exactly like the long-standing
 `rewrite_src == None` early return one line above it.
 
+**#9678 — local ownership is decided before the reservation.** The #6600
+reservation runs before the worker's ownership check. The worker refuses a
+peer upsert that would replace a locally-owned session while that session's
+owner RG is locally forwarding-active (`upsert_synced_with_origin` with
+`synced_entry_allows_local_replace`). But `reserve_flow` retires an incumbent
+`live_by_flow` record holding a DIFFERENT translated tuple. So a same-flow peer
+upsert in a dual-primary window, or in a failover race, evicted the local
+flow's live allocation T1 and reserved an `Untracked` T2. The worker then kept
+forwarding on T1 with no allocator record behind it, and T1 could be handed to
+another flow. Every refusal inside the reserve happens after that unlink, so
+even a `RejectedReserve` import had already freed T1.
+
+`upsert_synced_session` now applies the worker's own predicate first: the
+shared map holds a local-origin entry for the key AND the incoming owner RG
+does not allow a local replace. In that case the import stops before the
+reservation, the shared publish and the worker fan-out, and it reports
+`Applied`, mirroring the worker's refusal, which is silent too. Skipping only
+the reservation would still have published the peer's decision into the shared
+maps, which is the #6600 shape of a shared entry naming a port this node does
+not hold. Once the RG is no longer locally active, the next sync of the flow
+imports normally. An active node with no local session for the flow still
+reserves before it publishes.
+
 **#7209 — an admitted import with no kernel session map is now visible.** After
 the reservation, `upsert_synced_session` publishes the row to the kernel session
 map. That publish sat behind one conjunction:
@@ -784,6 +807,13 @@ So the export pages:
 - the loop is bounded (`maxOwnerRGExportPages`) and fails CLOSED past it. A
   partial window is exactly what the receiver turns into deleted sessions, so
   "return what we have" is not an option here;
+- every other error exit returns no window either (#9699). A helper-status
+  apply that fails after a page used to return the deltas collected so far
+  BESIDE the error. So did the same failure in the unpaged fallback and in the
+  one-shot `ExportOwnerRGSessions`, and the runtime passthrough wrapped those
+  deltas into a snapshot it returned with the error. Both production callers
+  discard deltas on error, so no receiver was fed one, but the contract is one
+  complete window OR an error, never both, and the API now keeps it;
 - a helper that does not report the paging contract
   (`session_export_paging_protocol_version`) still gets the unbounded request.
   Such a helper honours `max` by TRUNCATING and reports no more-bit, so paging
@@ -2357,6 +2387,17 @@ blackholed for exactly the flows that survived the failover.
   delete byte-matches the insert. The maps are non-LRU `HASH`
   (`max_entries = MAX_SESSIONS`, `BPF_F_NO_PREALLOC`); a missing delete leaks one
   slot per removed synced SNAT session. A non-SNAT / reverse entry is a no-op.
+- **Shared alias removal is owner-checked (#9679):** `shared_nat_sessions`
+  (reverse-wire and reverse-canonical aliases) and `shared_forward_wire_sessions`
+  are single-value maps. `publish_shared_session` overwrites a colliding
+  session's alias, counted by `record_shared_nat_displacement` (#1760).
+  `remove_shared_session` deleted whatever occupied the removed session's alias
+  keys, so removing a displaced session also removed the survivor's alias. A
+  worker with no local copy of the survivor then missed both lookups and sent
+  its replies to new-flow adjudication. Each alias is now deleted only while it
+  still names the removed session (`remove_shared_alias_owned_by`). The reverse
+  order, where the removed session had displaced the survivor at publish, lost
+  the survivor's alias at that publish; removal cannot restore it.
 - **Observability:** a failed publish from this coordinator path (no per-binding
   `BindingLiveState`) bumps the shared `DNAT_PUBLISH_ERRORS_SHARED` static, which
   `Coordinator::dnat_publish_errors_total()` folds into the existing per-binding

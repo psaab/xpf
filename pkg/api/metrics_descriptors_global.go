@@ -87,6 +87,15 @@ func (c *xpfCollector) initGlobalDescriptors() {
 			"including at zero (#9019).",
 		nil, nil,
 	)
+	c.learnedRouteImportCapped = prometheus.NewDesc(
+		"xpf_learned_route_import_capped",
+		"1 while the forwarding state the userspace helper's live workers serve "+
+			"has the learned-route import capped (NoRoute frames are delegated to "+
+			"the kernel FIB, #9054), 0 while it does not. ABSENT when unknown: no "+
+			"live helper worker, a helper that predates the field, or no helper "+
+			"status (#9654).",
+		nil, nil,
+	)
 	c.degradedPathTotal = prometheus.NewDesc(
 		"xpf_dataplane_degraded_path_total",
 		"Packets the dataplane handled on a DEGRADED path, by reason "+
