@@ -68,7 +68,9 @@ func (d *Daemon) exportUserspaceOwnerRGSessionsWithConfig(
 	if err != nil {
 		return 0, err
 	}
-	return d.queueUserspaceSessionDeltas(buildZoneIDs(cfg), deltas), nil
+	// #9767: a nil error acknowledges the FullResync frame, so it must also mean
+	// the schema gate admitted the batch and every install reached the queue.
+	return d.queueUserspaceSessionDeltasComplete(buildZoneIDs(cfg), deltas, d.fullResyncInstallWait())
 }
 
 // userspaceBulkSnapshotWithConfig gathers the authoritative, owner-RG-filtered

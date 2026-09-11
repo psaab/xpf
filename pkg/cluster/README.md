@@ -589,6 +589,28 @@ Two defenses, both fail-safe rather than manufacturing a false winner:
   conflict). Yielding both nodes to SECONDARY produces a clean, obvious,
   loudly-logged outage instead of subtle duplicate-address corruption.
 
+## Paced session installs (#9767)
+
+`QueueSessionV4`/`V6` never block. A full send queue (4096 entries) drops the
+message, counts a send error and arms the sweep backfill. That suits the
+incremental producers, because the sweep re-sends their sessions.
+
+A producer that must know its whole batch was queued uses
+`QueueSessionV4Paced`/`V6Paced` instead:
+
+- It waits up to `maxWait` for room, re-checking the connection every 10 ms,
+  and reports whether the session was queued.
+- A disconnect ends the wait at once.
+- An expired wait makes one final lossy enqueue, so a drop is counted the same
+  way.
+
+The one caller is the daemon's FullResync export, whose frame is acknowledged
+to the helper only when every install was queued
+(`pkg/daemon/full_resync_transaction_9767.go`). The test seams
+`SetConnectedForTesting`, `FillSendQueueForTesting` and
+`TakeQueuedMessageTypeForTesting` let a test drive the send queue with no peer
+and no writer.
+
 ## Readiness barrier fence (#9508)
 
 `WaitForPeerBarrier` is demotion readiness: the peer processed every delta queued
