@@ -807,6 +807,13 @@ So the export pages:
 - the loop is bounded (`maxOwnerRGExportPages`) and fails CLOSED past it. A
   partial window is exactly what the receiver turns into deleted sessions, so
   "return what we have" is not an option here;
+- every other error exit returns no window either (#9699). A helper-status
+  apply that fails after a page used to return the deltas collected so far
+  BESIDE the error. So did the same failure in the unpaged fallback and in the
+  one-shot `ExportOwnerRGSessions`, and the runtime passthrough wrapped those
+  deltas into a snapshot it returned with the error. Both production callers
+  discard deltas on error, so no receiver was fed one, but the contract is one
+  complete window OR an error, never both, and the API now keeps it;
 - a helper that does not report the paging contract
   (`session_export_paging_protocol_version`) still gets the unbounded request.
   Such a helper honours `max` by TRUNCATING and reports no more-bit, so paging
@@ -2380,6 +2387,17 @@ blackholed for exactly the flows that survived the failover.
   delete byte-matches the insert. The maps are non-LRU `HASH`
   (`max_entries = MAX_SESSIONS`, `BPF_F_NO_PREALLOC`); a missing delete leaks one
   slot per removed synced SNAT session. A non-SNAT / reverse entry is a no-op.
+- **Shared alias removal is owner-checked (#9679):** `shared_nat_sessions`
+  (reverse-wire and reverse-canonical aliases) and `shared_forward_wire_sessions`
+  are single-value maps. `publish_shared_session` overwrites a colliding
+  session's alias, counted by `record_shared_nat_displacement` (#1760).
+  `remove_shared_session` deleted whatever occupied the removed session's alias
+  keys, so removing a displaced session also removed the survivor's alias. A
+  worker with no local copy of the survivor then missed both lookups and sent
+  its replies to new-flow adjudication. Each alias is now deleted only while it
+  still names the removed session (`remove_shared_alias_owned_by`). The reverse
+  order, where the removed session had displaced the survivor at publish, lost
+  the survivor's alias at that publish; removal cannot restore it.
 - **Observability:** a failed publish from this coordinator path (no per-binding
   `BindingLiveState`) bumps the shared `DNAT_PUBLISH_ERRORS_SHARED` static, which
   `Coordinator::dnat_publish_errors_total()` folds into the existing per-binding

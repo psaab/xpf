@@ -585,8 +585,8 @@ pub(super) fn wg_encap_frame(
         // `mtu_signalled` skips the encap build, and this site is never
         // reached for that case — so the PTB and this drop counter never
         // both fire. This guard remains the backstop for a non-DF IPv4
-        // inner (kept `Forward` to preserve fragmentable behaviour) whose
-        // encapped outer still exceeds the MTU.
+        // inner (`ForwardOversizeNoDf`: no PTB, and no fragmentation before
+        // encapsulation, #9758) whose padded encapsulation exceeds the MTU.
         crate::afxdp::wg::counters::WgCounters::bump(&engine.counters().encap_mtu_drops);
         return None;
     }

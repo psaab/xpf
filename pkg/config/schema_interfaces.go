@@ -115,7 +115,10 @@ var schemaInterfaces = &schemaNode{desc: "Interface configuration", wildcard: &s
 	// silently discarding the unit (and its firewall filters) later. keyValidator
 	// alone gates the identity arg (schema_walk validateKeySlot); valueHint stays
 	// for dynamic unit-number completion.
-	"unit": {desc: "Logical unit number", args: 1, valueHint: ValueHintUnitNumber, placeholder: "<unit-number>", keyValidator: ValidateLogicalUnit, children: map[string]*schemaNode{
+	// #9620 (M6): packedStatements splits `unit 0 vlan-id 10 inner-vlan-id 20;`.
+	// Without it `inner-vlan-id` stayed on the vlan-id leaf: strict refused it as
+	// an unknown modifier and the lenient load dropped the inner tag.
+	"unit": {desc: "Logical unit number", args: 1, valueHint: ValueHintUnitNumber, placeholder: "<unit-number>", keyValidator: ValidateLogicalUnit, packedStatements: true, children: map[string]*schemaNode{
 		"description":    {desc: "Text description", args: 1, scalar: true, placeholder: "<text>", children: nil},
 		"point-to-point": {desc: "Point-to-point interface", children: nil},
 		// 802.1Q VID is a 12-bit wire field: 0 is the compiler's

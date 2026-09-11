@@ -653,19 +653,17 @@ fn ptb_buildable_respects_and_consumes_token_5567() {
 }
 
 /// #9328: an oversized DF-CLEAR IPv4 datagram is FORWARDED at full length and
-/// must now be COUNTED, not booked as a plain successful forward.
+/// must now be RECORDED, not booked as a plain successful forward.
 ///
 /// This binds the CALL SITE. Measured: with only the decision-level cell in
 /// `icmp_ptb_tests.rs`, severing the `record_exception` in the dispatcher
 /// SURVIVED — that cell proves the decision is distinguishable and says nothing
 /// about whether anything acts on it. Fifth instance of that shape in this
-/// campaign, and the reason the counter is the whole deliverable here: a
+/// campaign, and the reason the exception record is the whole deliverable here: a
 /// distinguishable decision nothing records is exactly the silence being fixed.
 ///
-/// Behaviour is deliberately UNCHANGED: the frame still forwards, and no PTB is
-/// generated (ICMP Fragmentation-Needed is meaningful only to a sender that set
-/// DF, and this one did not). What changes is that the outcome stops looking
-/// healthy.
+/// #9328 changed no behaviour: it made the outcome stop looking healthy. The
+/// behaviour itself is stated on `EgressMtuDecision::ForwardOversizeNoDf`.
 #[test]
 fn oversized_no_df_is_forwarded_and_counted_9328() {
     let (bindings, _dbg, _counters, reasons) =
@@ -677,7 +675,7 @@ fn oversized_no_df_is_forwarded_and_counted_9328() {
             .any(|r| r == "egress_mtu_exceeded_forwarded_no_df"),
         "#9328: an oversized DF-clear datagram forwarded at full length must be \
          recorded. Before this it bumped enqueue_ok / tx_bytes_total and nothing \
-         else, so an operator debugging the downstream blackhole saw a HEALTHY \
+         else, so an operator investigating a downstream loss saw a HEALTHY \
          counter — a wrong diagnostic, not a missing one. reasons: {reasons:?}"
     );
     // NO PTB: the sender did not set DF and would not act on one. This is the
@@ -690,18 +688,15 @@ fn oversized_no_df_is_forwarded_and_counted_9328() {
     assert!(
         !reasons.iter().any(|r| r == "egress_mtu_exceeded"),
         "the DF-set exception must NOT fire for a DF-clear frame, or the two \
-         populations are indistinguishable in the counters too: {reasons:?}"
+         populations are indistinguishable in the exception records too: {reasons:?}"
     );
-    // STILL FORWARDED. The policy question (fragment / drop / keep forwarding)
-    // is not taken here, so the frame must still reach the egress binding —
-    // silently changing it to a drop on an unmeasured population is how a
-    // counter-only fix becomes a forwarding regression.
+    // STILL FORWARDED, by decision (#9395; see `ForwardOversizeNoDf`).
     let egress_tx = bindings[1].tx_pipeline.pending_tx_local.len()
         + bindings[1].tx_pipeline.pending_tx_prepared.len();
     assert_eq!(
         egress_tx, 1,
-        "the oversized DF-clear frame must still be forwarded — #9328 adds a \
-         counter, not a drop"
+        "the oversized DF-clear frame must still be forwarded: #9395 decided to keep \
+         forwarding it (see ForwardOversizeNoDf)"
     );
 }
 

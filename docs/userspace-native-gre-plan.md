@@ -227,9 +227,9 @@ Coordination with this drop guard: when a PTB is owed (inner IPv4 DF or
 IPv6) the decision sets `mtu_signalled` and SKIPS the encap build, so
 `GRE_ENCAP_DF_OVERSIZE_DROPS` is NOT bumped — no double-drop / double-
 count. The guard's drop+count now fires only for the residual case where
-no PTB is owed (a non-DF IPv4 inner, kept `Forward` to preserve
-fragmentable behaviour) whose encapped outer still exceeds the DF-set
-transport MTU. Inner TCP-segment sizing remains #2329.
+no PTB is owed (a non-DF IPv4 inner, `ForwardOversizeNoDf`; this dataplane
+does not fragment it before encapsulation, #9758) whose encapped outer
+still exceeds the DF-set transport MTU. Inner TCP-segment sizing remains #2329.
 
 ### 4. Session Model
 

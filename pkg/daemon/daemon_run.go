@@ -673,6 +673,17 @@ func (d *Daemon) Run(ctx context.Context) error {
 		d.serviceReloadDebtReassertLoop(ctx)
 	}()
 
+	// #9693: the always-on retry owner for the commit-tail routing reconcile
+	// (next-table / rib-group / PBR ip rules plus the route-leak snapshot
+	// republish). Both only ever ran from a config apply, so a transient failure
+	// persisted until an unrelated commit. The gate is one boolean under a
+	// mutex, so the loop costs nothing on a node that owes nothing.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		d.routingReconcileReassertLoop(ctx)
+	}()
+
 	// #1387 inc-2: start the always-on DHCP dynamic-DNS reconcile loop. It
 	// is constructed UNCONDITIONALLY (idle when disabled) so an
 	// enabled→disabled commit can still withdraw published records; the loop

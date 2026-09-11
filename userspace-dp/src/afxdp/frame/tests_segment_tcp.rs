@@ -809,7 +809,7 @@ fn segment_forwarded_tcp_frames_keeps_ipv4_tcp_ports_after_vlan_snat() {
 
 /// #5159 RED-on-revert: a valid IPv4 egress MTU BELOW the wrongly-applied 1280
 /// IPv6-link-MTU floor must actually chunk a non-DF TCP datagram. Egress MTU
-/// 900; a ~1100-byte L3 TCP datagram (in the (real_mtu, 1280] blackhole band):
+/// 900; a ~1100-byte L3 TCP datagram (in the (real_mtu, 1280] oversize band):
 /// the builder MUST segment it into >=2 pieces each <= 900. Restoring the
 /// builder's `.max(1280)` floor raises the MTU to 1280, so the 1100-byte
 /// datagram is `<= mtu` and the builder returns None (no segmentation) — RED.
@@ -825,7 +825,7 @@ fn segment_forwarded_tcp_frames_honors_sub_1280_ipv4_egress_mtu_5159() {
     let total_len = (20 + 20 + tcp_payload_len) as u16;
     assert!(
         (egress_mtu as u16) < total_len && total_len <= 1280,
-        "datagram must sit in the (real_mtu, 1280] blackhole band"
+        "datagram must sit in the (real_mtu, 1280] oversize band"
     );
 
     let mut frame = Vec::new();

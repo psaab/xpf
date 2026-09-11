@@ -22,7 +22,8 @@ cluster context, use [ha-cluster.md](ha-cluster.md).
 This doc covers three failover test families:
 
 1. Userspace HA RG-move testing on the `loss-userspace-cluster`
-2. Legacy eBPF HA failover/crash testing on the local Incus HA cluster
+2. The Makefile HA smoke gates (`make test-failover`, `make test-ha-crash` and the
+   specialised smokes), which run on the loss userspace cluster by default
 3. Manual scenario testing when the scripted harness is not enough
 
 It does not cover:
@@ -55,24 +56,35 @@ It does not cover:
 
 ## Tools And Scripts
 
-### Userspace failover scripts
+### HA gates (the Makefile smokes)
+
+These are the gates. `docs/engineering-style.md` requires `make test-failover`
+plus `make test-ha-crash` for any HA, VRRP, session-sync or fabric change.
+
+Run them through `make`, not by script path: the targets take the shared
+cluster lock (#1875) and record a ledger row (`docs/harness-ledger.md`). They
+run on the loss userspace cluster by default; `CLUSTER_ENV=` selects the local
+legacy cluster for regression runs.
+
+- `make test-failover` (`test/incus/test-failover.sh`)
+  - reboot/failback survival
+- `make test-ha-crash` (`test/incus/test-ha-crash.sh`)
+  - force-stop, daemon stop, and crash cycles
+- `make test-double-failover`, `make test-stress-failover`,
+  `make test-chained-crash`
+  - specialised stress smokes
+
+### Diagnostic walkthroughs (not gates)
+
+`test/incus/HARNESSES.unreached` declares both of these DIAGNOSTIC and
+superseded as gates by the Makefile smokes above. Use them to investigate a
+failure or to walk a scenario by hand. A green walkthrough is not an HA pass.
 
 - `scripts/userspace-ha-failover-validation.sh`
-  - hardened RG move validation
-  - primary failover script for userspace HA continuity
+  - hardened RG move validation under load
 - `scripts/userspace-ha-validation.sh`
   - broader userspace health suite
   - run before blaming failover if steady-state is already broken
-
-### Legacy eBPF failover scripts
-
-- `test/incus/test-failover.sh`
-  - reboot/failback survival
-- `test/incus/test-ha-crash.sh`
-  - force-stop, daemon stop, and crash cycles
-- `test/incus/test-double-failover.sh`
-- `test/incus/test-stress-failover.sh`
-- `test/incus/test-chained-crash.sh`
 
 ## Preflight
 
@@ -184,6 +196,9 @@ Purpose:
 
 - prove the active node is healthy before introducing failover
 
+This scenario uses a diagnostic walkthrough, not an HA gate (see "HA gates"
+above).
+
 Command:
 
 ```bash
@@ -205,6 +220,9 @@ Pass:
 Purpose:
 
 - validate RG move and failback while traffic is already established
+
+This scenario uses a diagnostic walkthrough, not an HA gate (see "HA gates"
+above).
 
 Baseline command:
 
@@ -398,14 +416,15 @@ Recommended:
 - run crash/rejoin cycles after a successful RG move cycle
 - run split-RG crash in both directions
 
-## Legacy eBPF Failover Tests
+## Makefile HA Smoke Gates
 
-Use these when validating the non-userspace cluster.
+These are the required gates (see "HA gates" above). They run on the loss
+userspace cluster by default.
 
 ### Reboot/failback survival
 
 ```bash
-./test/incus/test-failover.sh
+make test-failover
 ```
 
 This covers:
@@ -419,7 +438,7 @@ This covers:
 ### Crash / daemon-stop / multi-cycle
 
 ```bash
-./test/incus/test-ha-crash.sh
+make test-ha-crash
 ```
 
 This covers:
@@ -431,9 +450,9 @@ This covers:
 ### Stress scripts
 
 ```bash
-./test/incus/test-double-failover.sh
-./test/incus/test-stress-failover.sh
-./test/incus/test-chained-crash.sh
+make test-double-failover
+make test-stress-failover
+make test-chained-crash
 ```
 
 Use these after the basic reboot/crash paths pass.
@@ -527,9 +546,12 @@ wait for convergence instead of doing an unnecessary redeploy.
 ## Recommended Execution Order For Release Validation
 
 Use this order when validating HA/failover for a serious userspace change.
+Steps 1 and 2 are the required gates. The rest are manual scenarios that add
+coverage the gates do not have. The two diagnostic walkthroughs are optional
+pre-checks when steady state is in doubt; they do not replace step 1 or 2.
 
-1. `scripts/userspace-ha-validation.sh`
-2. one-cycle `scripts/userspace-ha-failover-validation.sh`
+1. `make test-failover`
+2. `make test-ha-crash`
 3. manual CLI RG move under forward `iperf3 -P 8`
 4. manual CLI RG move under reverse `iperf3 -P 8 -R`
 5. hard crash of the active primary with traffic running

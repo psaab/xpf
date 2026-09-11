@@ -354,7 +354,11 @@ func (m *Manager) ExportOwnerRGSessions(rgIDs []int, max uint32) ([]SessionDelta
 	if resp.Status != nil {
 		status = *resp.Status
 		if err := m.applyHelperStatusLocked(&status); err != nil {
-			return resp.SessionDeltas, status, err
+			// #9699: never deltas together with an error; the owner-RG export
+			// contract is one complete window or an error. (DrainSessionDeltas
+			// keeps its own shape: drained deltas are consumed and must not be
+			// discarded.)
+			return nil, status, err
 		}
 	}
 	return resp.SessionDeltas, status, nil

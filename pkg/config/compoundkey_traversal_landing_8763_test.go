@@ -235,6 +235,7 @@ func famOnlyCases8763() []famOnlyCase8763 {
 		fw("from destination-port-except", tcp, "\n    from { destination-port-except 51478; }", "\n    from destination-port-except 51478;", inert8763),
 		fw("from dscp", acc, "\n    from { dscp 37; }", "\n    from dscp 37;", inert8763),
 		fw("from icmp-type", icmp, "\n    from { icmp-type 13; }", "\n    from icmp-type 13;", inert8763),
+		fw("from next-header", acc, "\n    from { next-header tcp; }", "\n    from next-header tcp;", inert8763),
 		fw("from icmp-code", icmp, "\n    from { icmp-code 7; }", "\n    from icmp-code 7;", inert8763),
 		fw("from tcp-flags", tcp, "\n    from { tcp-flags syn; }", "\n    from tcp-flags syn;", inert8763),
 		fw("from traffic-class", acc, "\n    from { traffic-class 5; }", "\n    from traffic-class 5;", inert8763),
