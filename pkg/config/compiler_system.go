@@ -2389,7 +2389,25 @@ func compileSNMPv3(node *Node, snmp *SNMPConfig) {
 	}
 
 	// Hierarchical form: v3 -> usm -> local-engine -> user <name> { ... }
-	usmNode := node.FindChild("usm")
+	//
+	// #9561: look `usm` up through packedBodyChildren, not FindChild. The
+	// brace-elided spellings put the path on v3's OWN Keys:
+	//
+	//	v3 usm { local-engine { user u1 { ... } } }   Keys=[v3 usm]
+	//	v3 usm local-engine { user u1 { ... } }       Keys=[v3 usm local-engine]
+	//	v3 usm local-engine user u1 { ... }           Keys=[v3 usm local-engine user u1]
+	//
+	// None has a `usm` CHILD, and none reaches the 8-key packed branch above,
+	// so every one compiled to ZERO users with no warning. packedBodyChildren
+	// rebuilds each into the braced chain, with the body attached under the
+	// deepest node (#6818), and returns a braced v3's children unchanged.
+	var usmNode *Node
+	for _, c := range packedBodyChildren(node, schemaForPath("snmp", "v3")) {
+		if c.Name() == "usm" {
+			usmNode = c
+			break
+		}
+	}
 	if usmNode == nil {
 		return
 	}
