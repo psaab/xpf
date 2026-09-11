@@ -65,7 +65,7 @@ func ipsecSANameIndex(cfg *config.Config) ipsec.SANameIndex {
 // applyIPsecTracked applies cfg's IPsec section and records cfg as the generation HA
 // IPsec attribution reads, at the moment strongSwan LOADED it (#9511).
 //
-// The record is made from inside the apply, through ipsec.Manager.ApplyWithHooks.
+// The record is made from inside the apply, through ipsec.Manager.ApplyGeneration.
 // Loaded stores cfg right after the loaded connection set is promoted and BEFORE
 // departed connections are torn down. That is the only correct point: Apply's error
 // cannot say whether the reload succeeded (teardown debt, #6542, is returned after
@@ -78,32 +78,37 @@ func ipsecSANameIndex(cfg *config.Config) ipsec.SANameIndex {
 // strongswan.service loads it on charon's own next start or reload (ExecStartPost and
 // ExecReload run `swanctl --load-all`, Restart=on-abnormal). A record still naming the
 // previous generation would then describe a config charon no longer runs, which is
-// worse than master. With the record cleared, attribution falls back to the promoted
-// config, which is master's answer and the generation charon will load. A render or
-// write failure changes nothing on disk, so Written does not run and the previous
-// record stays, still matching both the file and charon. #9641 replaces this with a
-// charon query on every re-initiation pass.
+// worse than master. With the record cleared, attribution stops trusting it. A render
+// or write failure changes nothing on disk, so Written does not run and the previous
+// record stays, still matching both the file and charon.
+//
+// GENERATION MARKER (#9641). The written file also names cfg's generation inside
+// charon (ipsecApplyGeneration: the store's digest when cfg is its active config).
+// While the record is empty, in this window or after an xpfd restart, attribution asks
+// charon which generation it loaded and validates the answer against charon's loaded
+// connections. When charon cannot tell, it falls back to the promoted config, the
+// generation charon will load next (ipsec_loaded_generation_9641.go).
 func (d *Daemon) applyIPsecTracked(cfg *config.Config) error {
-	return d.ipsec.ApplyWithHooks(ipsec.PrepareConfig(cfg), ipsec.ApplyHooks{
+	return d.ipsec.ApplyGeneration(ipsec.PrepareConfig(cfg), d.ipsecApplyGeneration(cfg), ipsec.ApplyHooks{
 		Written: func() { d.ipsecLoadedCfg.Store(nil) },
 		Loaded:  func() { d.ipsecLoadedCfg.Store(cfg) },
 	})
 }
 
-// ipsecAttributionConfig is the config HA IPsec attribution reads: the generation
-// strongSwan has LOADED from this process (ipsecLoadedCfg), or the promoted config
-// before this process has loaded one.
+// ipsecAttributionConfig resolves the config one HA IPsec attribution pass reads, and
+// records it as the latest resolution (ipsecAttribution):
 //
-// RESIDUAL (#9641). After an xpfd restart, charon keeps the previous run's generation.
-// If the boot IPsec apply then fails, this fallback attributes from the promoted
-// config, which is exactly the one charon did not take. Master gives the same answer
-// in that state, so this is not a regression, but it is the same class as the
-// failed-apply attribution #9511 fixes. Refusing to re-initiate was not adopted here.
-// A clustered node's first IPsec apply completes before cluster comms start, so
-// "nothing loaded yet" is reachable only after a FAILED first apply. Whether that
-// failure can be routine (charon not ready at boot) and whether a failed apply is
-// retried, so that a refusal would lift, are open questions tracked in #9641, which
-// prefers asking charon what it has actually loaded.
+//  1. the generation strongSwan has LOADED from this process (ipsecLoadedCfg, #9511);
+//  2. with no record, the generation charon itself reports loaded, when this node
+//     retains it and charon's loaded connections validate it (ipsecMarkedGeneration,
+//     #9641);
+//  3. otherwise the promoted config, which is what attribution read before #9641.
+//
+// The record comes first because it is exact whenever it is set: Written clears it as
+// soon as a new file is on disk, so a record names the file charon loaded and would
+// reload. Asking charon costs two swanctl calls, so it is kept for the states with no
+// record: after an xpfd restart whose boot IPsec apply failed (charon still runs the
+// previous process's generation), and in the failed-reload window.
 //
 // A name the loaded generation does not render is ROUTINE, not anomalous. It happens
 // whenever the peer loaded a newer generation first (config-sync lag) or still
@@ -112,13 +117,15 @@ func (d *Daemon) applyIPsecTracked(cfg *config.Config) error {
 // loaded cannot be initiated in any case, and that failure is logged by
 // reinitiateIPsecSAs.
 func (d *Daemon) ipsecAttributionConfig() *config.Config {
-	if cfg := d.ipsecLoadedCfg.Load(); cfg != nil {
-		return cfg
+	cfg := d.ipsecLoadedCfg.Load()
+	if cfg == nil {
+		cfg = d.ipsecMarkedGeneration()
 	}
-	if d.store != nil {
-		return d.store.ActiveConfig()
+	if cfg == nil && d.store != nil {
+		cfg = d.store.ActiveConfig()
 	}
-	return nil
+	d.ipsecAttribution.Store(cfg)
+	return cfg
 }
 
 // ipsecSAIndexCache pairs an SA name index with the attribution config it was
@@ -130,9 +137,10 @@ type ipsecSAIndexCache struct {
 
 // cachedIPsecSANameIndex returns the SA name index for cfg, rebuilding it only
 // when the attribution config (ipsecAttributionConfig) changed since the last build.
-// Both of its sources are immutable snapshots: the store installs a new
-// *config.Config on every promotion, and applyIPsecTracked records the pointer it
-// applied. So the pointer is the generation. A takeover wave runs one
+// Its sources are immutable snapshots: the store installs a new *config.Config on
+// every promotion, applyIPsecTracked records the pointer it applied, and a generation
+// charon names is compiled once and cached (retainedIPsecGeneration). So the pointer
+// is the generation. A takeover wave runs one
 // re-initiate pass per redundancy group; without the cache every pass would
 // re-render every VPN, repeat the render's skip warnings, and repeat the
 // collision warning below.
@@ -140,9 +148,9 @@ type ipsecSAIndexCache struct {
 // Misses are serialised (ipsecSAIndexMu) and re-checked under the lock: the
 // per-RG re-initiate goroutines of one takeover wave start together, and without
 // it each would miss, render every VPN and log the same warning. A pass holding a
-// config the store has already REPLACED is answered but not installed, so it can
-// neither overwrite the newer entry nor announce collisions for a config that is
-// no longer active.
+// config that is no longer current (isCurrentIPsecAttribution, which never asks
+// charon) is answered but not installed, so it can neither overwrite the newer entry
+// nor announce collisions for a config that is no longer active.
 func (d *Daemon) cachedIPsecSANameIndex(cfg *config.Config) ipsec.SANameIndex {
 	if cfg == nil {
 		return nil
@@ -156,7 +164,7 @@ func (d *Daemon) cachedIPsecSANameIndex(cfg *config.Config) ipsec.SANameIndex {
 		return c.idx
 	}
 	idx := ipsecSANameIndex(cfg)
-	if d.ipsecAttributionConfig() != cfg {
+	if !d.isCurrentIPsecAttribution(cfg) {
 		return idx
 	}
 	if coll := idx.Collisions(); len(coll) > 0 {

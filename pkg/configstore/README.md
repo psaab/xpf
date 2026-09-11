@@ -181,6 +181,16 @@ inline archive-site passwords).
   what used to be a post-semaphore-release window can no longer make the marker
   key a different, never-applied tree. `ActiveDigest` returns exactly the value
   `ActiveApplied` compares against (`configTextDigest(s.active.Format())`).
+- `ActiveDigestFor(cfg)` / `RetainedGeneration(digest)` — `store_generation.go`, the
+  IPsec generation marker (#9641). `ActiveDigestFor` returns `ActiveDigest()` only when
+  `cfg` IS the compiled active config (pointer identity and digest read under one lock),
+  else `""`. The daemon names charon's marker pool with it, and a concurrent promotion
+  cannot pair `cfg` with another tree's digest. `RetainedGeneration` turns a digest back
+  into a compiled config: the active config itself, else a tolerant recompile
+  (`compileTreeLenient`, from a copy) of the most recent matching rollback-history tree.
+  History is reloaded from the rollback files at boot, so a digest named before an xpfd
+  restart still resolves after it. A miss formats every retained tree, so it is for rare
+  callers (an HA re-initiation pass).
 - **`InvalidateAppliedDigest` — a FAILED apply un-records the marker (#9175).**
   "The marker is keyed on config text, so a stale value can only cause an
   idempotent re-apply, never a false convergence" USED TO STAND HERE, and it was

@@ -1,0 +1,8 @@
+proof-la: IKEv1/2, no reauthentication, rekeying every 14400s
+  local:  192.0.2.61[500]
+  remote: 198.51.100.63[500]
+  local pre-shared key authentication:
+  remote pre-shared key authentication:
+  proof-la-ts1: TUNNEL, rekeying every 3600s
+    local:  10.63.1.0/24
+    remote: 10.64.1.0/24

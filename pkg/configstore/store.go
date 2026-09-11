@@ -646,8 +646,10 @@ func crossCheckRAIntervals(compiled *config.Config) error {
 // downgrades enabled (config.CompileConfigLenient /
 // CompileConfigForNodeLenient: #1798 control-char sanitize, lenient
 // VRRP track duplicates). It is used ONLY by the passive load
-// (Store.Load) and HA peer-sync (Store.SyncApply) ingress paths, NOT by
-// any operator-driven candidate commit / commit-check path.
+// (Store.Load) and HA peer-sync (Store.SyncApply) ingress paths, and by
+// RetainedGeneration (#9641) to recompile a retained tree that one of those
+// paths or a commit already accepted, NOT by any operator-driven candidate
+// commit / commit-check path.
 //
 // Rationale: Store.Load and Store.SyncApply compile a config the operator
 // did NOT just author — a persisted active config on local boot, or a
