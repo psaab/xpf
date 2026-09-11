@@ -44,6 +44,21 @@ func TestZoneGroupNormalizesToLonghand9656(t *testing.T) {
 		{"bracketed packed body",
 			`security-zone [ zga zgb ] interfaces [ ge-0/0/0.0 ge-0/0/1.0 ];`,
 			`security-zone zga { interfaces [ ge-0/0/0.0 ge-0/0/1.0 ]; } security-zone zgb { interfaces [ ge-0/0/0.0 ge-0/0/1.0 ]; }`},
+		{"braced group naming a zone after a flag keyword",
+			`security-zone [ zga zgb tcp-rst ] { tcp-rst; }`,
+			`security-zone zga { tcp-rst; } security-zone zgb { tcp-rst; } security-zone tcp-rst { tcp-rst; }`},
+		{"braced group naming a zone after a leaf keyword",
+			`security-zone [ zga zgb screen ] { screen edge; }`,
+			`security-zone zga { screen edge; } security-zone zgb { screen edge; } security-zone screen { screen edge; }`},
+		{"braced group naming a zone after an apply keyword",
+			`security-zone [ zga zgb apply-groups ] { tcp-rst; }`,
+			`security-zone zga { tcp-rst; } security-zone zgb { tcp-rst; } security-zone apply-groups { tcp-rst; }`},
+		{"packed wildcard head with a braced body",
+			`security-zone [ zga zgb ] interfaces ge-0/0/0.0 { host-inbound-traffic { system-services { ping; } } }`,
+			`security-zone zga { interfaces ge-0/0/0.0 { host-inbound-traffic { system-services { ping; } } } } security-zone zgb { interfaces ge-0/0/0.0 { host-inbound-traffic { system-services { ping; } } } }`},
+		{"packed apply-macro head with a braced body",
+			`security-zone [ zga zgb ] apply-macro M { k v; }`,
+			`security-zone zga { apply-macro M { k v; } } security-zone zgb { apply-macro M { k v; } }`},
 		{"inactive group",
 			`inactive: security-zone [ zga zgb ] screen edge;`,
 			`inactive: security-zone zga { screen edge; } inactive: security-zone zgb { screen edge; }`},
@@ -161,6 +176,43 @@ func TestZoneGroupFlatSetNormalizesToLonghand9656(t *testing.T) {
 					c.group, c.longhand, treeText8921(g), treeText8921(l))
 			}
 		})
+	}
+}
+
+// A fan-out whose clones would exceed the node budget is not performed. The
+// statement is left as parsed, and bracketedGroupInstances8794 compiles it with
+// one shared body, as it did before #9656. The #9656 Codex review measured the
+// unbounded version: 10,000 members over a 10,000-statement body cloned about
+// 100 million nodes.
+func TestZoneGroupFanOutRespectsNodeBudget9656(t *testing.T) {
+	const body = `security { zones { security-zone [ za zb zc ] { tcp-rst; description d; } } }`
+	const tail = `security { zones { security-zone [ za zb zc ] tcp-rst; } }`
+	// body: 3 members × (1 zone node + 2 body nodes) = 9 nodes.
+	// tail: 3 members × (1 zone node + 1 tail node) = 6 nodes.
+	for _, c := range []struct {
+		text         string
+		budget, want int
+	}{{body, 8, 1}, {body, 9, 3}, {tail, 5, 1}, {tail, 6, 3}} {
+		text := c.text
+		tr := parse8921(t, "group", text)
+		if tr == nil {
+			return
+		}
+		var zones *Node
+		for _, sec := range tr.FindChildren("security") {
+			for _, z := range sec.Children {
+				if len(z.Keys) == 1 && z.Keys[0] == "zones" {
+					zones = z
+				}
+			}
+		}
+		if zones == nil {
+			t.Fatalf("fixture: no zones node in %q", text)
+		}
+		expandZoneGroupsWithin9656(zones, zonesSchema9656.children["security-zone"], c.budget)
+		if got := len(zones.Children); got != c.want {
+			t.Errorf("%q with budget %d: %d zone statement(s) after the fan-out, want %d (#9656)", text, c.budget, got, c.want)
+		}
 	}
 }
 

@@ -23,16 +23,37 @@ var zonesSchema9656 = schemaSecurity.children["zones"]
 // count as three zones. The remaining keys are a packed body, placed under each
 // member. That body owns the braced body when the statement has one.
 //
-// Brackets are not consulted. The renderers drop them on a leaf, so a peer that
-// re-parses `show configuration` must reach the same zones without them.
+// A braced body decides how a keyword tail reads. The tail is a packed head
+// only when zoneTailHoldsBody9656 says the body can hang under it; otherwise
+// every token names a zone, which is how #8794 read a braced group.
+// `security-zone [ zga zgb tcp-rst ] { tcp-rst; }` is three zones, because a
+// `tcp-rst` flag cannot hold a body. A leaf, or an empty `{ }` that FormatSet
+// cannot distinguish from one, has no body to decide with, so its keyword tail
+// is always a statement.
+//
+// Brackets are not consulted. Format drops them from every node and FormatSet
+// from a leaf, so a peer that re-parses the rendered text must reach the same
+// zones without them.
 //
 // A node with a single member is left for the scoped fold.
 func expandZoneGroups9656(zones *Node, zone *schemaNode) int {
+	return expandZoneGroupsWithin9656(zones, zone, maxParseNodes)
+}
+
+// expandZoneGroupsWithin9656 is expandZoneGroups9656 with the node budget as a
+// parameter, so a test can reach the limit without building a 200,000-node body.
+//
+// Every member gets its own clone of the body, so a group costs members × body
+// nodes. The whole cost is charged before anything is cloned (countNodes), the
+// same way group expansion charges a clone. A group over the budget is left as
+// parsed and compiles through bracketedGroupInstances8794, which shares one
+// body between the members.
+func expandZoneGroupsWithin9656(zones *Node, zone *schemaNode, budget int) int {
 	if zones == nil || zone == nil {
 		return 0
 	}
 	var out []*Node
-	changed := 0
+	changed, spent := 0, 0
 	for _, ch := range zones.Children {
 		n := 0
 		if ch != nil {
@@ -46,10 +67,23 @@ func expandZoneGroups9656(zones *Node, zone *schemaNode) int {
 		for j < n && zone.children[ch.Keys[j]] == nil && !isApplyStatementKeyword(ch.Keys[j]) {
 			j++
 		}
-		if j-1 < 2 {
+		if j < n && len(ch.Children) > 0 && !zoneTailHoldsBody9656(ch.Keys[j:], zone) {
+			j = n
+		}
+		members := j - 1
+		if members < 2 {
 			out = append(out, ch)
 			continue
 		}
+		perMember := 1 + countNodes(ch.Children)
+		if j < n {
+			perMember++
+		}
+		if spent+members*perMember > budget {
+			out = append(out, ch)
+			continue
+		}
+		spent += members * perMember
 		quoted := keyMask8921(ch.KeysQuoted, n)
 		bracketed := keyMask8921(ch.KeysBracketed, n)
 		for k := 1; k < j; k++ {
@@ -92,4 +126,31 @@ func expandZoneGroups9656(zones *Node, zone *schemaNode) int {
 		zones.Children = out
 	}
 	return changed
+}
+
+// zoneTailHoldsBody9656 reports whether tail, the keys after a group's members,
+// reads as one complete statement under the security-zone schema that ends at a
+// node able to hold a braced body. Examples are `interfaces`,
+// `interfaces ge-0/0/0.0`, `host-inbound-traffic`, `address-book` and
+// `apply-macro M`.
+//
+// A tail that fails this check, such as `tcp-rst` or `screen`, cannot be the
+// head of the braced body. The #9656 Codex review measured the cost of reading
+// it as one anyway: `security-zone [ zga zgb tcp-rst ] { tcp-rst; }` created
+// three zones at e09f425dd and lost zone `tcp-rst` under the first cut.
+func zoneTailHoldsBody9656(tail []string, zone *schemaNode) bool {
+	if isApplyStatementKeyword(tail[0]) {
+		return tail[0] == "apply-macro" && len(tail) == 2
+	}
+	cur := zone
+	for len(tail) > 0 {
+		child := resolveSchemaChild(cur, tail[0])
+		if child == nil {
+			return false
+		}
+		k, refined := consumeNodeKeys(tail, child)
+		tail = tail[k:]
+		cur = refined
+	}
+	return cur.children != nil || cur.wildcard != nil
 }

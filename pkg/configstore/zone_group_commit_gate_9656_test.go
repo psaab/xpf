@@ -26,6 +26,7 @@ func TestZoneGroupMeetsTheLonghandCommitGate9656(t *testing.T) {
 	const screens = `security { screen { ids-option edge { icmp { ping-death; } } } } `
 	const policy = `security { policies { from-zone zgb to-zone zga { policy p { match { source-address any; destination-address any; application any; } then { permit; } } } } } `
 	const groupG = `groups { G { security { zones { security-zone <*> { tcp-rst; } } } } } `
+	const tcpRstPolicy = `security { policies { from-zone tcp-rst to-zone zga { policy p { match { source-address any; destination-address any; application any; } then { permit; } } } } } `
 	zones := func(body string) string { return `security { zones { ` + body + ` } }` }
 	cells := []struct {
 		name, group, longhand string
@@ -61,6 +62,16 @@ func TestZoneGroupMeetsTheLonghandCommitGate9656(t *testing.T) {
 			group:    groupG + zones(`security-zone [ zga zgb ] { apply-groups G; }`),
 			longhand: groupG + zones(`security-zone zga { apply-groups G; } security-zone zgb { apply-groups G; }`),
 			has:      []string{`"zgb":{"Name":"zgb"`, `"TCPRst":true`},
+		},
+		{
+			// CONTROL for the reading a braced body forces. At e09f425dd this
+			// committed with all three zones. The first #9656 cut read
+			// `tcp-rst` as a packed head and lost the zone, so the policy was
+			// refused.
+			name:     "braced group naming a zone after a flag keyword",
+			group:    tcpRstPolicy + zones(`security-zone [ zga zgb tcp-rst ] { tcp-rst; }`),
+			longhand: tcpRstPolicy + zones(`security-zone zga { tcp-rst; } security-zone zgb { tcp-rst; } security-zone tcp-rst { tcp-rst; }`),
+			has:      []string{`"tcp-rst":{"Name":"tcp-rst"`, `"zgb":{"Name":"zgb"`},
 		},
 		{
 			name:     "packed body naming an undefined screen",
