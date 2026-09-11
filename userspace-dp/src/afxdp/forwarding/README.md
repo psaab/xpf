@@ -395,22 +395,47 @@ forward-direction collision.
   The DELETE arm is handled in the helper by #9560, again without identity in
   the key (the shim cannot compute the domain inside the #1864 verifier
   budget). A row-owner registry (`SteeringRowOwners`,
-  `afxdp/bpf_map/steering_owners.rs`) sits beside the map: every publish
-  registers the session ENTRY key as an owner of each row it writes, and a
-  delete removes only its own ownership, issuing the BPF delete when the last
-  owner goes, or when the registry never saw the row (`Unregistered`, deleted
-  as before). The owner is the entry key, never the row key:
-  `reverse_canonical_key` zeroes `routing_domain` (#7160), so two domains
-  derive the identical `SessionKey` for their shared reverse row. The
-  ownership decision and the syscall run under one shard lock, so a sibling's
-  publish cannot land between a teardown's decision and its delete. There is
-  one registry per `BpfMaps`: replay, workers and HA publish through the
-  bringup's registry, and worker-local sessions die at bringup, so a new one
-  starts empty and a row the previous generation left is deleted as before.
+  `afxdp/bpf_map/steering_owners.rs`) sits beside the map, and a row is deleted
+  only when its LAST owner goes, or when no owner holds it (deleted as before).
+  An owner is an ENTRY key held by a WORKER:
+  - the entry key, never the row key: `reverse_canonical_key` zeroes
+    `routing_domain` (#7160), so two domains derive the identical `SessionKey`
+    for their shared reverse row;
+  - held by a worker, because every session is replicated to every worker
+    (`replicate_session_upsert`) and each replica is reaped on its own schedule
+    (#6211). Owned by the key alone, the first idle replica's reap deleted the
+    row under the worker still forwarding.
+
+  A row stores each entry key once with a worker bitmask (the #6211 F2
+  128-worker cap). The registry also records, per key, the rows each worker
+  holds. So a republish releases the rows the new decision no longer names (a
+  NAT change, a kernel-local <-> live row set), and a teardown releases every
+  row still held.
+
+  The coordinator (HA import and delete, bringup replay, RG activation) claims
+  nothing. Its writes leave rows unowned, and its delete skips a row any worker
+  holds; that worker's `DeleteSynced` releases the claim.
+
+  A claim is recorded only after its write succeeded. Every write and delete
+  runs under the row's shard lock, so a sibling's publish cannot land between
+  a teardown's decision and its delete.
+
+  There is ONE registry per `Coordinator`, shared with the session domain:
+  `sync_session` runs without the `ServerState` mutex (#7209), so an HA delete
+  can race a bringup. `stop_inner` retires every claim, without a BPF delete,
+  once the workers are joined.
+
+  Residuals:
+  - From a coordinator write until a worker applies the queued upsert, the row
+    is unowned, and an alias's teardown deletes it as before #9560.
+  - A panicked worker is not respawned, and its claims stay until the next
+    `stop_inner`.
+
   Until #9560 two aliased sessions shared one row and either one's ordinary
   teardown removed it; with an `lo0` input filter the survivor's next packet
   missed, reached the kernel and skipped the filter. Cells:
-  `session_glue/steering_row_owners_9560_tests.rs`.
+  `session_glue/steering_row_owners_9560_tests.rs`, `bpf_map/steering_owners.rs`,
+  `coordinator/tests.rs` and `ha_tests.rs`.
 - **PBR `then routing-instance` is the ONLY per-VRF forwarding path.** An
   interface's native `routing_instance` selects only the connected-route
   table NAME (#2388 above) — it does NOT scope a transit packet's

@@ -5377,3 +5377,39 @@ fn peer_upsert_still_reserves_on_an_active_node_with_no_local_flow_9678() {
     );
 }
 
+/// #9560: an HA import publishes as the COORDINATOR and claims no steering row; each
+/// worker the entry fans out to claims its own. A coordinator claim would never be
+/// released by any worker's teardown, so it would block the row's delete for good.
+#[test]
+fn an_ha_import_publishes_without_claiming_a_steering_row_9560() {
+    let mut coordinator = Coordinator::new();
+    coordinator.set_forwarding_for_test(reserve6600_forwarding());
+    coordinator
+        .bpf_maps
+        .store(Arc::new(crate::afxdp::coordinator::BpfMaps {
+            session_map_fd: Some(crate::afxdp::bpf_map::OwnedFd {
+                fd: crate::afxdp::bpf_map::RECORDER_ONLY_MAP_FD,
+            }),
+            ..Default::default()
+        }));
+    let entry = reserve6600_entry(40960, 50960);
+    let key = entry.key.clone();
+    crate::afxdp::bpf_map::clear_session_map_writes();
+
+    let _ = coordinator.upsert_synced_session(entry);
+
+    let writes = crate::afxdp::bpf_map::session_map_writes();
+    assert!(
+        writes.iter().any(|w| w.value.is_some() && w.key == key),
+        "control: the import must publish the entry's steering row, or the claim count below \
+         observes nothing. Writes: {writes:?}"
+    );
+    assert_eq!(
+        coordinator
+            .steering_owners
+            .owner_count(&crate::afxdp::bpf_map::session_map_row(&key)),
+        0,
+        "an HA import claimed its steering row; no worker teardown releases a coordinator \
+         claim, so the row could never be deleted (#9560)"
+    );
+}
