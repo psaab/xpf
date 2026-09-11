@@ -20,8 +20,9 @@ use crate::afxdp::mirror::MIRROR_TX_FRAME_RESERVE;
 use crate::afxdp::neighbor::monotonic_nanos;
 use crate::afxdp::types::{
     COS_PRIORITY_LEVELS, CoSInterfaceRuntime, CoSOversubscriptionPolicy, CoSPendingTxItem,
-    CoSQueueRuntime, ExactLocalScratchTxRequest, ExactPreparedScratchTxRequest, PreparedTxRecycle,
-    PreparedTxRequest, SharedCoSExactBacklog, TxRequest, WorkerCoSQueueFastPath,
+    CoSQueueRuntime, ExactDemandQueueMask, ExactLocalScratchTxRequest,
+    ExactPreparedScratchTxRequest, PreparedTxRecycle, PreparedTxRequest, SharedCoSExactBacklog,
+    TxRequest, WorkerCoSQueueFastPath,
 };
 use crate::afxdp::umem::MmapArea;
 use crate::afxdp::worker::BindingWorker;
@@ -29,13 +30,15 @@ use crate::afxdp::{FastMap, TX_BATCH_SIZE, tx_frame_capacity};
 use crate::xsk_ffi::xdp::XdpDesc;
 
 use super::{
-    COS_MIN_BURST_BYTES, CoSQueueLeaseAcquireTelemetry, cos_exact_queue_serviceable, cos_item_len,
+    COS_MIN_BURST_BYTES, CoSQueueLeaseAcquireTelemetry, cos_item_len,
     cos_queue_clear_orphan_snapshot_after_drop, cos_queue_front, cos_queue_front_with_cap,
-    cos_queue_is_empty, cos_queue_peek_min_bucket, cos_queue_pop_known_bucket, cos_queue_push_front,
-    cos_queue_v_min_consume_suspension, cos_queue_v_min_continue, cos_refill_ns_until,
-    maybe_top_up_cos_queue_lease, publish_committed_queue_vtime, refill_cos_tokens,
+    cos_queue_is_empty, cos_queue_peek_min_bucket, cos_queue_pop_known_bucket,
+    cos_queue_push_front, cos_queue_v_min_consume_suspension, cos_queue_v_min_continue,
+    cos_refill_ns_until, maybe_top_up_cos_queue_lease, publish_committed_queue_vtime,
+    refill_cos_tokens,
 };
 // #1229 v7 per-bucket TX accounting + threshold-gated EWMA.
+use super::exact_demand::{exact_demand_rate_bytes_for_mask, serviceable_exact_demand_mask};
 use super::fairness::account_flow_bucket_tx;
 use super::flow_hash::cos_flow_bucket_index;
 
@@ -276,7 +279,7 @@ fn build_nonexact_cos_batch(
         .and_then(|iface_fast| iface_fast.shared_exact_backlog.as_ref());
     let peer_exact_demand_mask = shared_exact_backlog
         .map(|backlog| backlog.peer_exact_demand_queue_mask(binding.slot))
-        .unwrap_or(0);
+        .unwrap_or(ExactDemandQueueMask::EMPTY);
     // #4265 (R-2): the non-exact guarantee refill now routes through the
     // shared queue lease (when the coordinator built one for a sharded
     // non-exact guaranteed queue) so admission is metered class-wide
@@ -321,7 +324,7 @@ fn build_nonexact_cos_batch(
                 // consume only the residual root rate after backlogged exact
                 // guarantee rates are reserved.
                 let exact_demand_mask =
-                    root_exact_demand_queue_mask(root) | peer_exact_demand_mask;
+                    serviceable_exact_demand_mask(root) | peer_exact_demand_mask;
                 let exact_demand_rate = exact_demand_rate_bytes_for_mask(root, exact_demand_mask);
                 let nonexact_budget = nonexact_surplus_budget_under_exact_demand(
                     root,
@@ -344,52 +347,6 @@ fn build_nonexact_cos_batch(
         refresh_cos_interface_activity(binding, root_ifindex);
     }
     selected
-}
-
-#[inline]
-fn root_exact_demand_queue_mask(root: &CoSInterfaceRuntime) -> u64 {
-    // #hb166 T-6(b): reserve residual best-effort surplus ONLY for exact
-    // guarantee queues that are actually SERVICEABLE (can ship their head
-    // right now). A v8-starved / token-parked exact class shipping zero
-    // bytes must NOT zero the BE residual while the link idles — gate on
-    // the same serviceability predicate the shared_exact backlog already
-    // publishes (`serviceable_exact_backlog_bytes`) instead of the loose
-    // `!cos_queue_is_empty`.
-    let root_tokens = root.tokens;
-    root.queues
-        .iter()
-        .enumerate()
-        .filter(|(_, queue)| {
-            queue.config.exact
-                && queue.config.guarantee_enabled
-                && cos_exact_queue_serviceable(root_tokens, queue)
-        })
-        .fold(0u64, |acc, (queue_idx, _)| {
-            if queue_idx < u64::BITS as usize {
-                acc | (1u64 << queue_idx)
-            } else {
-                u64::MAX
-            }
-        })
-}
-
-#[inline]
-fn exact_demand_rate_bytes_for_mask(root: &CoSInterfaceRuntime, exact_demand_mask: u64) -> u64 {
-    if exact_demand_mask == 0 {
-        return 0;
-    }
-    root.queues
-        .iter()
-        .enumerate()
-        .filter(|(queue_idx, queue)| {
-            queue.config.exact
-                && queue.config.guarantee_enabled
-                && (*queue_idx >= u64::BITS as usize
-                    || (exact_demand_mask & (1u64 << *queue_idx)) != 0)
-        })
-        .fold(0u64, |acc, (_, queue)| {
-            acc.saturating_add(queue.transmit_rate_bytes())
-        })
 }
 
 #[inline]

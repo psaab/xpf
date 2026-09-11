@@ -6,8 +6,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 // continues to find them as `super::types::SharedCoS*`.
 mod shared_cos_lease;
 pub(super) use shared_cos_lease::{
-    AcquireV8ShortfallCause, NOT_PARTICIPATING, PaddedVtimeSlot, SharedCoSExactBacklog,
-    SharedCoSQueueLease, SharedCoSQueueVtimeFloor, SharedCoSRootLease, V8RateMode,
+    AcquireV8ShortfallCause, ExactDemandQueueMask, NOT_PARTICIPATING, PaddedVtimeSlot,
+    SharedCoSExactBacklog, SharedCoSQueueLease, SharedCoSQueueVtimeFloor, SharedCoSRootLease,
+    V8RateMode,
 };
 
 // Issue 68.1: CoS shaper / queue / flow-fair / runtime types extracted
