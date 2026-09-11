@@ -117,12 +117,12 @@ func validateRoutingInstanceChildTokensAST(nodes []*Node, lenient bool) ([]strin
 				// quoted or not, which is what the compiler and the collision scan
 				// do too. A one-key stanza under the keyword's name may be an
 				// instance the operator wrote there, and a routing-instance keyword
-				// among its children suggests it. It is WARNED, not refused, on every
-				// path: a flat `set` statement whose macro or group is named after a
-				// routing-instance keyword (`set routing-instances apply-macro
-				// interface k v`) has exactly this shape, so the shape cannot prove
-				// that an instance was meant. The two-key form (`apply-macro M { ... }`)
-				// is always the statement and is not warned.
+				// among its children suggests it. It is WARNED, not refused: the shape
+				// cannot prove that an instance was meant. The two-key form
+				// (`apply-macro M { ... }`) is always the statement and is not warned.
+				// Since #9685 a flat `set routing-instances apply-macro interface k v`
+				// builds that two-key form too (the name stays on the statement's
+				// keys), so only a braced one-key stanza reaches this warning.
 				if len(inst.Keys) == 1 {
 					for _, ch := range inst.Children {
 						if ch == nil || !permitted[ch.Name()] {

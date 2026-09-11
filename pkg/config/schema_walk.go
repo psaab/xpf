@@ -890,14 +890,10 @@ func validateScalarValueLeaf(node *Node, leafSchema *schemaNode, parentPath []st
 
 // resolveSchemaChild returns the schema node for keyword under parent:
 // an exact child match, else the wildcard (dynamic instance name slot),
-// else nil.
+// else nil. An apply statement at a wildcard slot resolves to the statement,
+// not to an instance name (#9685, schemaChildFor).
 func resolveSchemaChild(parent *schemaNode, keyword string) *schemaNode {
-	if parent.children != nil {
-		if s, ok := parent.children[keyword]; ok {
-			return s
-		}
-	}
-	return parent.wildcard
+	return schemaChildFor(parent, keyword)
 }
 
 // consumeNodeKeys computes how many leading tokens of keys belong to a
