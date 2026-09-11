@@ -7203,3 +7203,500 @@ fn teardrop_eight_byte_fragment_passes_either_way_9426() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// #9173: the SYN-cookie key ring. The helper derives each period's key from a
+// published base and picks a key by each cookie's own epoch.
+// ---------------------------------------------------------------------------
+
+const RING_PERIOD_EPOCHS_9173: u64 = 56;
+const RING_PERIOD_SECS_9173: u64 = RING_PERIOD_EPOCHS_9173 * SynCookieCodec::EPOCH_SECS;
+/// The rotation epoch the cells run in, and its first cookie epoch.
+const RING_ROTATION_9173: u64 = 1000;
+const RING_FIRST_EPOCH_9173: u64 = RING_ROTATION_9173 * RING_PERIOD_EPOCHS_9173;
+const LEGACY_KEY_9173: [u8; 16] = [0xee; 16];
+const RING_BASE_9173: [u8; 32] = [0x5a; 32];
+
+/// The key the published base derives for `rotation_epoch`.
+fn ring_key_9173(rotation_epoch: u64) -> [u8; 16] {
+    SynCookieKeyRing::derive_epoch_key(&RING_BASE_9173, rotation_epoch)
+}
+
+/// What a control plane publishes: one primary base, whatever the period.
+fn published_ring_9173() -> SynCookieKeyRing {
+    SynCookieKeyRing::new(RING_PERIOD_SECS_9173, [(RING_BASE_9173, false)])
+}
+
+fn ring_state_9173(ring: SynCookieKeyRing, full_epoch: u64) -> ScreenState {
+    let mut profile = ScreenProfile::default();
+    profile.syn_flood_threshold = 1;
+    profile.syn_cookie = true;
+    let mut state = make_state("trust", profile);
+    state.update_syn_cookie_keys(Some(LEGACY_KEY_9173), ring);
+    state.set_syn_cookie_full_epoch_for_test(full_epoch);
+    state
+}
+
+fn ring_syn_9173() -> ScreenPacketInfo {
+    tcp_pkt(
+        IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10)),
+        IpAddr::V4(Ipv4Addr::new(198, 51, 100, 20)),
+        49152,
+        443,
+        TCP_SYN,
+    )
+}
+
+/// The ACK completing a handshake whose cookie `key` minted in `full_epoch`.
+fn ring_ack_9173(key: [u8; 16], full_epoch: u64) -> ScreenPacketInfo {
+    let syn = ring_syn_9173();
+    let cookie_isn = SynCookieCodec::new(key).mint_isn(
+        SynCookieTuple::from_packet(&syn),
+        7,
+        full_epoch,
+        syn.tcp_mss,
+    );
+    let mut ack = syn.clone();
+    ack.tcp_flags = TCP_ACK;
+    ack.tcp_seq = 2;
+    ack.tcp_ack = cookie_isn.wrapping_add(1);
+    ack
+}
+
+fn ring_verdict_9173(state: &mut ScreenState, ack: &ScreenPacketInfo) -> SynCookieAckVerdict {
+    state.validate_syn_cookie_ack_on_session_miss("trust", 7, ack, 128 * NS, 128)
+}
+
+/// Drive SYNs through the flood gate until it answers with a cookie challenge.
+fn mint_challenge_isn_9173(state: &mut ScreenState) -> u32 {
+    mint_challenge_isn_at_step_9173(state, "")
+}
+
+/// As `mint_challenge_isn_9173`, naming `step` in the panic, so a cell that mints
+/// more than once says which mint failed.
+fn mint_challenge_isn_at_step_9173(state: &mut ScreenState, step: &str) -> u32 {
+    let syn = ring_syn_9173();
+    for _ in 0..8 {
+        if let ScreenVerdict::SynCookieChallenge(challenge) =
+            state.check_packet_with_zone_id("trust", 7, &syn, 100)
+        {
+            return challenge.cookie_isn;
+        }
+    }
+    panic!("the SYN-flood gate never minted a cookie challenge{step}");
+}
+
+fn minted_by_9173(key: [u8; 16], full_epoch: u64, cookie_isn: u32) -> bool {
+    SynCookieCodec::new(key)
+        .validate_isn_at_epoch(
+            SynCookieTuple::from_packet(&ring_syn_9173()),
+            7,
+            full_epoch,
+            cookie_isn,
+        )
+        .is_some()
+}
+
+#[test]
+fn syn_cookie_ring_accepts_the_previous_periods_key_across_the_boundary_9173() {
+    // Minted in the LAST cookie epoch of the previous period ...
+    let ack = ring_ack_9173(
+        ring_key_9173(RING_ROTATION_9173 - 1),
+        RING_FIRST_EPOCH_9173 - 1,
+    );
+    // ... and validated in the FIRST cookie epoch of the current one.
+    let mut state = ring_state_9173(published_ring_9173(), RING_FIRST_EPOCH_9173);
+    assert_eq!(
+        ring_verdict_9173(&mut state, &ack),
+        SynCookieAckVerdict::Validated,
+        "key(e-1) must still validate a cookie minted in its own period"
+    );
+}
+
+#[test]
+fn syn_cookie_ring_accepts_a_cookie_from_the_next_period_9173() {
+    // A peer whose clock is just ahead minted in the FIRST cookie epoch of the
+    // next period, while this node is still in the LAST cookie epoch of this one.
+    let next_first = RING_FIRST_EPOCH_9173 + RING_PERIOD_EPOCHS_9173;
+    let ack = ring_ack_9173(ring_key_9173(RING_ROTATION_9173 + 1), next_first);
+    let mut state = ring_state_9173(published_ring_9173(), next_first - 1);
+    assert_eq!(
+        ring_verdict_9173(&mut state, &ack),
+        SynCookieAckVerdict::Validated,
+        "key(e+1) must validate a cookie a peer just across the boundary minted in its own period"
+    );
+}
+
+#[test]
+fn syn_cookie_ring_refuses_a_key_two_periods_old_9173() {
+    let epoch = RING_FIRST_EPOCH_9173 + 3;
+    let mut control = ring_state_9173(published_ring_9173(), epoch);
+    assert_eq!(
+        ring_verdict_9173(
+            &mut control,
+            &ring_ack_9173(ring_key_9173(RING_ROTATION_9173), epoch)
+        ),
+        SynCookieAckVerdict::Validated,
+        "premise: the current period's key validates in this state"
+    );
+    let mut state = ring_state_9173(published_ring_9173(), epoch);
+    assert_ne!(
+        ring_verdict_9173(
+            &mut state,
+            &ring_ack_9173(ring_key_9173(RING_ROTATION_9173 - 2), epoch)
+        ),
+        SynCookieAckVerdict::Validated,
+        "key(e-2) must be refused"
+    );
+    // That refusal holds by epoch selection alone: a cookie's epoch stays within
+    // one cookie epoch of the clock, so no accepted cookie names period e-2. The
+    // doc also says key(e-2) is never DERIVED, which only this pins.
+    assert_eq!(
+        state.syn_cookie_key_ring.derived_rotation_epochs(),
+        vec![
+            RING_ROTATION_9173 - 1,
+            RING_ROTATION_9173,
+            RING_ROTATION_9173 + 1
+        ],
+        "refresh must derive only the adjacent periods: key(e-2) is never derived"
+    );
+}
+
+#[test]
+fn syn_cookie_ring_key_validates_only_its_own_period_9173() {
+    let epoch = RING_FIRST_EPOCH_9173 + 3;
+    for (key, what) in [
+        (ring_key_9173(RING_ROTATION_9173 - 1), "the previous period's key"),
+        (ring_key_9173(RING_ROTATION_9173 + 1), "the next period's key"),
+        (LEGACY_KEY_9173, "the legacy key, in a period the ring covers"),
+    ] {
+        let mut state = ring_state_9173(published_ring_9173(), epoch);
+        assert_ne!(
+            ring_verdict_9173(&mut state, &ring_ack_9173(key, epoch)),
+            SynCookieAckVerdict::Validated,
+            "{what} must not validate a cookie minted in the current period: one key \
+             per period keeps a forger at one MAC per ACK"
+        );
+    }
+}
+
+#[test]
+fn syn_cookie_ring_mints_with_the_current_periods_key_9173() {
+    let epoch = RING_FIRST_EPOCH_9173 + 3;
+    let mut state = ring_state_9173(published_ring_9173(), epoch);
+    let isn = mint_challenge_isn_9173(&mut state);
+    assert!(
+        minted_by_9173(ring_key_9173(RING_ROTATION_9173), epoch, isn),
+        "a ring covering this period must mint with that period's key"
+    );
+    assert!(
+        !minted_by_9173(LEGACY_KEY_9173, epoch, isn),
+        "a ring covering this period must not mint with the legacy key"
+    );
+}
+
+#[test]
+fn syn_cookie_ring_psk_window_accepts_the_old_key_but_never_mints_with_it_9173() {
+    let epoch = RING_FIRST_EPOCH_9173 + 3;
+    let old_base = [0x0d; 32];
+    let old_key = SynCookieKeyRing::derive_epoch_key(&old_base, RING_ROTATION_9173);
+    let new_key = ring_key_9173(RING_ROTATION_9173);
+    // The accept-only base comes FIRST, so minting must skip its key, not take it.
+    let window_ring = || {
+        SynCookieKeyRing::new(
+            RING_PERIOD_SECS_9173,
+            [(old_base, true), (RING_BASE_9173, false)],
+        )
+    };
+    let mut state = ring_state_9173(window_ring(), epoch);
+    assert_eq!(
+        ring_verdict_9173(&mut state, &ring_ack_9173(old_key, epoch)),
+        SynCookieAckVerdict::Validated,
+        "an additional-authentication-key cookie must validate during a #6630 rotation window"
+    );
+    let mut minting = ring_state_9173(window_ring(), epoch);
+    let isn = mint_challenge_isn_9173(&mut minting);
+    assert!(
+        minted_by_9173(new_key, epoch, isn),
+        "mint must use the primary key"
+    );
+    assert!(
+        !minted_by_9173(old_key, epoch, isn),
+        "an accept-only key must never mint"
+    );
+}
+
+/// Drive SYNs through the flood gate and return every verdict.
+fn mint_verdicts_9173(state: &mut ScreenState) -> Vec<ScreenVerdict> {
+    let syn = ring_syn_9173();
+    (0..8)
+        .map(|_| state.check_packet_with_zone_id("trust", 7, &syn, 100))
+        .collect()
+}
+
+#[test]
+fn syn_cookie_ring_rotates_without_a_republish_9173() {
+    // One ring, published three periods ago and never republished.
+    let early = RING_FIRST_EPOCH_9173 - 3 * RING_PERIOD_EPOCHS_9173;
+    let mut state = ring_state_9173(published_ring_9173(), early);
+    let isn = mint_challenge_isn_at_step_9173(
+        &mut state,
+        ": premise, in the period the ring was published in",
+    );
+    assert!(
+        minted_by_9173(ring_key_9173(RING_ROTATION_9173 - 3), early, isn),
+        "premise: the ring mints with the key of the period it was published in"
+    );
+    let epoch = RING_FIRST_EPOCH_9173 + 3;
+    state.set_syn_cookie_full_epoch_for_test(epoch);
+    let isn = mint_challenge_isn_at_step_9173(
+        &mut state,
+        ": after rotating three periods without a republish",
+    );
+    assert!(
+        minted_by_9173(ring_key_9173(RING_ROTATION_9173), epoch, isn),
+        "the same ring must derive and mint with the current period's key: rotation needs no republish"
+    );
+    assert!(
+        !minted_by_9173(ring_key_9173(RING_ROTATION_9173 - 3), epoch, isn),
+        "it must not keep minting with the key it derived three periods ago"
+    );
+}
+
+#[test]
+fn syn_cookie_present_ring_without_a_base_fails_closed_9173() {
+    let empty = || SynCookieKeyRing::new(RING_PERIOD_SECS_9173, std::iter::empty::<([u8; 32], bool)>());
+    let epoch = RING_FIRST_EPOCH_9173 + 3;
+    let mut minting = ring_state_9173(empty(), epoch);
+    let verdicts = mint_verdicts_9173(&mut minting);
+    assert!(
+        verdicts.contains(&ScreenVerdict::Drop("syn-cookie-unavailable"))
+            && !verdicts
+                .iter()
+                .any(|v| matches!(v, ScreenVerdict::SynCookieChallenge(_))),
+        "a published ring with no base must fail closed, not mint with the legacy key: {verdicts:?}"
+    );
+    let mut state = ring_state_9173(empty(), epoch);
+    assert_ne!(
+        ring_verdict_9173(&mut state, &ring_ack_9173(LEGACY_KEY_9173, epoch)),
+        SynCookieAckVerdict::Validated,
+        "the legacy key must not validate through a present ring with no base"
+    );
+}
+
+#[test]
+fn syn_cookie_absent_ring_uses_the_legacy_key_9173() {
+    // An older control plane sends no ring at all.
+    let epoch = RING_FIRST_EPOCH_9173 + 3;
+    let mut minting = ring_state_9173(SynCookieKeyRing::default(), epoch);
+    let isn = mint_challenge_isn_9173(&mut minting);
+    assert!(
+        minted_by_9173(LEGACY_KEY_9173, epoch, isn),
+        "an absent ring must mint with the legacy key"
+    );
+    let mut state = ring_state_9173(SynCookieKeyRing::default(), epoch);
+    assert_eq!(
+        ring_verdict_9173(&mut state, &ring_ack_9173(LEGACY_KEY_9173, epoch)),
+        SynCookieAckVerdict::Validated,
+        "an absent ring must validate with the legacy key"
+    );
+}
+
+#[test]
+fn syn_cookie_ring_with_a_period_off_the_cookie_epoch_fails_closed_9173() {
+    for period_secs in [0, 100, SynCookieCodec::EPOCH_SECS + 1] {
+        let mut ring = SynCookieKeyRing::new(period_secs, [([1; 32], false)]);
+        ring.refresh(0);
+        assert!(
+            ring.is_present() && ring.mint_codec(0).is_none(),
+            "a {period_secs}s period is not a whole number of cookie epochs: the ring must stay present with no usable key"
+        );
+        let mut state = ring_state_9173(ring, 0);
+        let verdicts = mint_verdicts_9173(&mut state);
+        assert!(
+            !verdicts
+                .iter()
+                .any(|v| matches!(v, ScreenVerdict::SynCookieChallenge(_))),
+            "a malformed ring must fail closed, not fall back to the legacy key: {verdicts:?}"
+        );
+    }
+}
+
+#[test]
+fn syn_cookie_cleared_legacy_key_fails_closed_even_with_a_ring_9173() {
+    let epoch = RING_FIRST_EPOCH_9173 + 3;
+    let mut profile = ScreenProfile::default();
+    profile.syn_flood_threshold = 1;
+    profile.syn_cookie = true;
+    let mut state = make_state("trust", profile);
+    state.update_syn_cookie_keys(None, published_ring_9173());
+    state.set_syn_cookie_full_epoch_for_test(epoch);
+    let syn = ring_syn_9173();
+    let verdicts: Vec<_> = (0..4)
+        .map(|_| state.check_packet_with_zone_id("trust", 7, &syn, 100))
+        .collect();
+    assert!(
+        !verdicts
+            .iter()
+            .any(|v| matches!(v, ScreenVerdict::SynCookieChallenge(_))),
+        "no legacy key must mean no cookie, ring or not: {verdicts:?}"
+    );
+    assert_ne!(
+        ring_verdict_9173(
+            &mut state,
+            &ring_ack_9173(ring_key_9173(RING_ROTATION_9173), epoch)
+        ),
+        SynCookieAckVerdict::Validated
+    );
+}
+
+#[test]
+fn syn_cookie_ring_debug_never_renders_a_key_9173() {
+    let mut ring = SynCookieKeyRing::new(RING_PERIOD_SECS_9173, [([0xab; 32], false)]);
+    ring.refresh(RING_FIRST_EPOCH_9173);
+    let rendered = format!("{ring:?}");
+    assert!(
+        rendered.contains("<redacted>") && !rendered.contains("171"),
+        "{rendered}"
+    );
+}
+
+#[test]
+fn syn_cookie_epoch_key_matches_the_control_plane_derivation_9173() {
+    // TestSYNCookieEpochKeyMatchesTheHelper9173 asserts the same vector in Go.
+    let mut base = [0u8; 32];
+    for (i, byte) in base.iter_mut().enumerate() {
+        *byte = i as u8;
+    }
+    let hex: String = SynCookieKeyRing::derive_epoch_key(&base, 502_232)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    assert_eq!(
+        hex, "a028081b51656faa6cd12471864df2c5",
+        "the helper must derive the control plane's period key"
+    );
+}
+
+/// A state whose cookie epoch comes from the latch and a test-set wall clock,
+/// not from the epoch override.
+fn latched_ring_state_9173(ring: SynCookieKeyRing, latched_epoch: u64, wall_epoch: u64) -> ScreenState {
+    let mut profile = ScreenProfile::default();
+    profile.syn_flood_threshold = 1;
+    profile.syn_cookie = true;
+    let mut state = make_state("trust", profile);
+    state.update_syn_cookie_keys(Some(LEGACY_KEY_9173), ring);
+    state.syn_cookie_last_full_epoch = latched_epoch;
+    state.syn_cookie_epoch_wall_secs = wall_epoch * SynCookieCodec::EPOCH_SECS + 1;
+    // The mints below pass now_secs = 100, so the wall clock is not re-read.
+    state.syn_cookie_epoch_clock_mono_secs = 100;
+    state
+}
+
+/// The ACK completing a handshake whose challenge minted `cookie_isn`.
+fn ack_for_isn_9173(cookie_isn: u32) -> ScreenPacketInfo {
+    let mut ack = ring_syn_9173();
+    ack.tcp_flags = TCP_ACK;
+    ack.tcp_seq = 2;
+    ack.tcp_ack = cookie_isn.wrapping_add(1);
+    ack
+}
+
+#[test]
+fn syn_cookie_latch_never_steps_back_9173() {
+    // Derived keys cover every epoch, so the latch holds through any backward
+    // step and mints with its own latched period's key.
+    let wall = RING_FIRST_EPOCH_9173 + 3;
+    for step in [1, 2, 3 * RING_PERIOD_EPOCHS_9173] {
+        let latched = wall + step;
+        let mut state = latched_ring_state_9173(published_ring_9173(), latched, wall);
+        let isn = mint_challenge_isn_9173(&mut state);
+        assert!(
+            minted_by_9173(ring_key_9173(latched / RING_PERIOD_EPOCHS_9173), latched, isn),
+            "after a {step}-epoch backward step the latch must hold and mint with its own period's key"
+        );
+    }
+}
+
+#[test]
+fn syn_cookie_backward_step_does_not_resurrect_a_past_cookie_9173() {
+    // A cookie minted at `wall`; the node's clock then advanced to `latched` and
+    // stepped back to `wall`. Re-accepting the cookie would let a recorded ACK
+    // validate again and re-install its source's whitelist entry.
+    let wall = RING_FIRST_EPOCH_9173 + 3;
+    for ring in [published_ring_9173(), SynCookieKeyRing::default()] {
+        let key = if ring.is_present() {
+            ring_key_9173(RING_ROTATION_9173)
+        } else {
+            LEGACY_KEY_9173
+        };
+        let ack = ring_ack_9173(key, wall);
+        let mut control = ring_state_9173(ring.clone(), wall);
+        assert_eq!(
+            ring_verdict_9173(&mut control, &ack),
+            SynCookieAckVerdict::Validated,
+            "premise: the cookie validates in the epoch it was minted in"
+        );
+        let mut state = latched_ring_state_9173(ring, wall + 5, wall);
+        // ring_verdict_9173 passes now_secs = 128: pin the clock gate to it so the
+        // validation reads the stepped-back `wall`, not the host's real clock.
+        state.syn_cookie_epoch_clock_mono_secs = 128;
+        assert_ne!(
+            ring_verdict_9173(&mut state, &ack),
+            SynCookieAckVerdict::Validated,
+            "after a backward clock step, a cookie from an epoch this node already left must not validate again"
+        );
+    }
+}
+
+#[test]
+fn syn_cookie_mixed_version_pair_disagrees_from_the_first_boundary_9173() {
+    // An older helper ignores the ring and keeps the key of the period its last
+    // full snapshot was built in, here key(R). A newer helper picks a key by the
+    // cookie's own epoch, so the two agree inside period R and disagree from the
+    // first epoch of R + 1, in both directions.
+    let old_key = ring_key_9173(RING_ROTATION_9173);
+    let state = |legacy: [u8; 16], ring: SynCookieKeyRing, epoch: u64| {
+        let mut profile = ScreenProfile::default();
+        profile.syn_flood_threshold = 1;
+        profile.syn_cookie = true;
+        let mut state = make_state("trust", profile);
+        state.update_syn_cookie_keys(Some(legacy), ring);
+        state.set_syn_cookie_full_epoch_for_test(epoch);
+        state
+    };
+    let old = |epoch: u64| state(old_key, SynCookieKeyRing::default(), epoch);
+    let new = |epoch: u64| state(LEGACY_KEY_9173, published_ring_9173(), epoch);
+    let crosses = |mut minter: ScreenState, mut validator: ScreenState| {
+        let isn = mint_challenge_isn_9173(&mut minter);
+        ring_verdict_9173(&mut validator, &ack_for_isn_9173(isn)) == SynCookieAckVerdict::Validated
+    };
+
+    let inside = RING_FIRST_EPOCH_9173 + 3;
+    assert!(
+        crosses(old(inside), new(inside)) && crosses(new(inside), old(inside)),
+        "premise: inside the older helper's period the pair agrees both ways"
+    );
+    let boundary = RING_FIRST_EPOCH_9173 + RING_PERIOD_EPOCHS_9173;
+    assert!(
+        !crosses(old(boundary), new(boundary)),
+        "from the first boundary a newer helper refuses the older helper's cookie: the documented mixed-version window"
+    );
+    assert!(
+        !crosses(new(boundary), old(boundary)),
+        "from the first boundary an older helper refuses the newer helper's cookie: the documented mixed-version window"
+    );
+    // A later full snapshot hands the older helper the then-current period's key,
+    // which restores the pair until the NEXT boundary, and the window repeats.
+    let refreshed = |epoch: u64| state(ring_key_9173(RING_ROTATION_9173 + 1), SynCookieKeyRing::default(), epoch);
+    assert!(
+        crosses(refreshed(boundary), new(boundary)) && crosses(new(boundary), refreshed(boundary)),
+        "after a full snapshot in period R + 1 the pair must agree again"
+    );
+    let next_boundary = boundary + RING_PERIOD_EPOCHS_9173;
+    assert!(
+        !crosses(refreshed(next_boundary), new(next_boundary))
+            && !crosses(new(next_boundary), refreshed(next_boundary)),
+        "the refreshed pair must disagree again from the next boundary, until the next full snapshot"
+    );
+}

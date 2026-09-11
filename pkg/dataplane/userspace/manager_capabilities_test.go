@@ -6,6 +6,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/psaab/xpf/pkg/config"
 )
@@ -359,7 +360,11 @@ func TestDeriveUserspaceCapabilitiesAllowsSynCookieScreen(t *testing.T) {
 	}
 }
 
-func TestDeriveUserspaceCapabilitiesRejectsSynCookieWithoutRootSecret(t *testing.T) {
+// TestDeriveUserspaceCapabilitiesAllowsSynCookieWithoutRootSecret9173: the
+// userspace SYN-cookie key no longer derives from root-authentication, so an
+// active SYN-cookie screen on a box with no root password is forwarding-capable
+// (it used to be refused as missing secret material).
+func TestDeriveUserspaceCapabilitiesAllowsSynCookieWithoutRootSecret9173(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.Security.Flow.SynFloodProtectionMode = "syn-cookie"
 	cfg.Security.Zones = map[string]*config.ZoneConfig{
@@ -372,13 +377,12 @@ func TestDeriveUserspaceCapabilitiesRejectsSynCookieWithoutRootSecret(t *testing
 		},
 	}
 	caps := deriveUserspaceCapabilities(cfg)
-	if caps.ForwardingSupported {
-		t.Fatal("ForwardingSupported = true, want false without SYN-cookie secret material")
-	}
-	if len(caps.UnsupportedReasons) != 1 ||
-		!strings.Contains(caps.UnsupportedReasons[0], "root-authentication") {
-		t.Fatalf("UnsupportedReasons = %+v, want SYN-cookie root-authentication reason",
+	if !caps.ForwardingSupported {
+		t.Fatalf("ForwardingSupported = false, reasons: %+v; want true without root-authentication",
 			caps.UnsupportedReasons)
+	}
+	if key, _ := buildSYNCookieKeys(cfg, time.Unix(1_800_000_000, 0)); len(key) != 32 {
+		t.Fatalf("premise: SYN-cookie protection must be active here, got key %q", key)
 	}
 }
 

@@ -2607,6 +2607,19 @@ one would turn a rotation from "no outage" into "no outage on the heartbeat,
 to see. **Session sync does not widen**: its authentication is fixed per
 connection at handshake time, which is #6628's territory, not this one.
 
+The userspace **SYN-cookie key** widens with them (#9173). It derives from
+`authentication-key`, and while an additional key is set each node's snapshot
+also carries an accept-only cookie-key base derived from that key. So at every
+step of the procedure below, when both nodes run a helper that reads the key
+ring and share the cluster-id and screened (zone, profile) set (#9740), a cookie
+minted by either node validates on its peer after a failover: each node derives
+the peer's signing key from a primary or an accept-only base.
+A helper that predates the ring ignores the accept-only base, so during a
+rolling upgrade a handshake that straddles a failover mid-rotation can be
+refused. The client has already sent its ACK, so it does not resend the SYN:
+that connection fails and the application must reconnect. See docs/syn-cookie-flood-protection.md, "Key
+derivation and rotation".
+
 #### Procedure — rotate A to B
 
 No maintenance window. Liveness is never lost at any step; each is a state the
