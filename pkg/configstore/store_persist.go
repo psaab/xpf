@@ -573,6 +573,7 @@ func (s *Store) persistRetryLoop(backoff, maxBackoff time.Duration) {
 			// A successful write on a commit/sync path already persisted the
 			// current active config, no stale confirm.json removal is owed, and
 			// no armed window is missing its durable record.
+			s.persistRefusedTree = nil // #9617: a heal between ticks exits here
 			s.persistRetryActive = false
 			s.mu.Unlock()
 			return
@@ -621,6 +622,15 @@ func (s *Store) persistRetryLoop(backoff, maxBackoff time.Duration) {
 			}
 		}
 
+		// #9617: the refused tree is only needed while it is still the active
+		// one. Drop the reference as soon as a different tree is installed, so a
+		// rejected multi-MiB AST is not kept alive by the skip that exists to
+		// avoid re-serializing it. (The bottom exit needs no clear: the loop
+		// holds s.mu from the top check to it, so a heal reaching it went
+		// through this line first.)
+		if s.persistRefusedTree != nil && s.persistRefusedTree != s.active {
+			s.persistRefusedTree = nil
+		}
 		if s.persistDegraded && s.persistRefusedTree != s.active {
 			// #1922: re-write with the marker the failing path requested
 			// (committed=false only for a first-commit rollback). For every

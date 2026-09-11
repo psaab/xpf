@@ -564,6 +564,76 @@ func TestPersistRetryDoesNotReserializeARefusedTree_9617(t *testing.T) {
 	if degraded {
 		t.Errorf("#9617: a different, persistable active tree did not resume retries and heal persistence (attempts=%d)", attempts.Load())
 	}
+	waitRetryLoopReleases9617(t, s)
+}
+
+// waitRetryLoopReleases9617 waits for the persist retry loop to exit and
+// asserts it no longer retains a refused tree.
+func waitRetryLoopReleases9617(t *testing.T, s *Store) {
+	t.Helper()
+	var active, retained bool
+	for deadline := time.Now().Add(2 * time.Second); time.Now().Before(deadline); time.Sleep(5 * time.Millisecond) {
+		s.mu.Lock()
+		active, retained = s.persistRetryActive, s.persistRefusedTree != nil
+		s.mu.Unlock()
+		if !active {
+			break
+		}
+	}
+	if active || retained {
+		t.Errorf("#9617: after healing, the retry loop active=%v and still retains the refused tree=%v — "+
+			"the skip must not keep a rejected multi-MiB AST alive for the Store's lifetime", active, retained)
+	}
+}
+
+// A COMMIT that heals persistence between retry ticks leaves the loop exiting
+// at its top check without reaching the retry leg; the refused tree must be
+// released there too.
+func TestPersistRetryReleasesTheRefusedTreeWhenACommitHeals_9617(t *testing.T) {
+	s := newTestStoreAt(t, filepath.Join(t.TempDir(), "config"))
+	s.SetPersistRetryBackoffForTesting(2*time.Millisecond, 4*time.Millisecond)
+	if err := s.EnterConfigure(); err != nil {
+		t.Fatal(err)
+	}
+	big := &config.ConfigTree{}
+	p, err := config.ParseSetCommand("set system host-name refused9617c")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := big.SetPath(p); err != nil {
+		t.Fatal(err)
+	}
+	s.mu.Lock()
+	s.writeActiveMarkerFn = func(tr *config.ConfigTree, committed bool) error {
+		if tr == big {
+			return checkPersistSize("active.json", MaxConfigSize+1)
+		}
+		return s.db.WriteActiveMarker(tr, committed)
+	}
+	s.active = big
+	s.noteActivePersistFailureLocked("test_ingress", checkPersistSize("active.json", MaxConfigSize+1))
+	s.mu.Unlock()
+	for deadline := time.Now().Add(2 * time.Second); time.Now().Before(deadline); time.Sleep(2 * time.Millisecond) {
+		s.mu.Lock()
+		refused := s.persistRefusedTree == big
+		s.mu.Unlock()
+		if refused {
+			break
+		}
+	}
+	s.mu.Lock()
+	refused := s.persistRefusedTree == big
+	s.mu.Unlock()
+	if !refused {
+		t.Fatalf("fixture: the retry loop never recorded the refused tree")
+	}
+	if err := s.SetFromInput("system host-name healed-by-commit9617"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Commit(); err != nil {
+		t.Fatalf("healing commit: %v", err)
+	}
+	waitRetryLoopReleases9617(t, s)
 }
 
 // Any failure to PRODUCE the record refuses the commit before promotion, not
