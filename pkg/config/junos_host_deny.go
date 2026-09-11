@@ -181,6 +181,10 @@ type junosHostTerm struct {
 	l4            []JunosHostDenyL4
 	appAny        bool
 	representable bool
+	// lenientDropped marks a PERMIT whose tolerant-path compile silently dropped
+	// a match / then-permit constraint (#5575 LenientContentDropped). Its empty
+	// dimension would resolve to `any` here, so it contributes nothing (#9572).
+	lenientDropped bool
 }
 
 // BuildJunosHostDenyProjection projects every configured ingress zone's
@@ -417,6 +421,25 @@ func containsZone(zs []string, z string) bool {
 // predicate) but NOT for a permit — see the destination block below.
 func junosHostProjectTerm(cfg *Config, key string, p *Policy, feedBound map[string]bool) junosHostTerm {
 	t := junosHostTerm{key: key, action: p.Action, representable: true}
+	// A #5575-poisoned PERMIT contributes no subtraction (#9572). The tolerant
+	// compile left a dimension it dropped EMPTY, and every resolver below reads
+	// an empty dimension as `any`: an omitted `application` became an
+	// application-any permit and an omitted `source-address` a permit for every
+	// source, so the permitAll arm erased every later deny from the kernel
+	// program. The userspace snapshot builder refuses the same policy
+	// (policies_lower.go), yet the daemon still installs this program from the
+	// refused config — and on the host-bound path this program IS the
+	// enforcement. The operator's real carve is unknowable from the dropped
+	// content, so the permit is skipped entirely: later denies render as
+	// authored, which can only drop MORE host-bound traffic than configured,
+	// never admit traffic a deny names. It is skipped before resolution, so an
+	// un-representable leftover dimension cannot empty the zone's program
+	// either. A poisoned DENY is not changed here: its empty dimension widens a
+	// DROP, the fail-closed direction.
+	if p.LenientContentDropped && p.Action == PolicyPermit {
+		t.lenientDropped = true
+		return t
+	}
 	// Reject is the §6.5 follow-up slice; scheduler-gated policies are
 	// time-windowed and cannot be an always-on static rule (§6.2).
 	if p.Action == PolicyReject || p.SchedulerName != "" {
@@ -491,6 +514,9 @@ func junosHostProjectProgram(zone string, ifaceRefs []string, terms []junosHostT
 	permitAllV4, permitAllV6 := false, false
 	sawDeny := false
 	for _, t := range terms {
+		if t.action == PolicyPermit && t.lenientDropped {
+			continue // #9572: a #5575-poisoned permit carves nothing.
+		}
 		if t.action == PolicyPermit {
 			// A permit can only be projected as a source SUBTRACTION of later
 			// denies. That is faithful ONLY for an application-any, non-excluded
