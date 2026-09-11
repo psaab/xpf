@@ -31,7 +31,7 @@ use std::net::IpAddr;
 use super::packet::{PROTO_ICMP, PROTO_ICMPV6, PROTO_UDP, ScreenPacketInfo, ScreenProfile};
 use super::rate::{RateCounter, TokenBucket};
 use super::syn_rate::SynRateSketch;
-use super::syncookie::SynCookieCodec;
+use super::syncookie::{SynCookieCodec, SynCookieZoneTag, syn_cookie_zone_tag};
 
 /// #4112: multiplier for the per-zone ICMP/UDP flood aggregate SECONDARY
 /// ceiling. Junos measures the ICMP/UDP flood rate PER DESTINATION, so the
@@ -111,7 +111,14 @@ pub(super) struct ZoneScreenState {
     /// current generation is stamped into a validated-cache entry on insert and
     /// compared on consume, so a tuple validated under an old profile is a cache
     /// miss after the profile changes and is re-validated under the new one.
+    /// Values come from `ScreenState`'s single generation counter, so a zone that
+    /// is removed and re-created never reuses a generation its previous
+    /// incarnation's validated entries carry (#9740).
     pub(super) syn_cookie_profile_gen: u64,
+    /// #9740: this zone's SYN-cookie identity, `syn_cookie_zone_tag` of its name.
+    /// Computed once, here, so the cookie MAC, the per-epoch secret and the
+    /// validated-client key read it instead of hashing the name per packet.
+    pub(super) syn_cookie_zone_tag: SynCookieZoneTag,
     /// #3315 last second a SYN-flood alarm was raised for the zone, enforcing
     /// the ≤1/sec/zone cadence. `u64::MAX` = never emitted; only consulted when
     /// `syn_flood_alarm_threshold > 0`.
@@ -163,7 +170,8 @@ impl ZoneScreenState {
     /// screened path. Aggregate counters and cookie fields start at their cold
     /// defaults (`TokenBucket`/`RateCounter::default`, active-until 0, gen 0,
     /// alarm-last `u64::MAX`). `Some ⟺ threshold configured` is the invariant.
-    pub(super) fn from_profile(profile: ScreenProfile) -> Self {
+    /// `zone` is the zone's name; its SYN-cookie tag is derived from it here.
+    pub(super) fn from_profile(zone: &str, profile: ScreenProfile) -> Self {
         let icmp_dst_sketch =
             (profile.icmp_flood_threshold > 0).then(SynRateSketch::for_flood_dst);
         let udp_dst_sketch =
@@ -183,6 +191,7 @@ impl ZoneScreenState {
             syn_cookie_active_until_secs: 0,
             syn_cookie_standby_ack_counter: TokenBucket::default(),
             syn_cookie_profile_gen: 0,
+            syn_cookie_zone_tag: syn_cookie_zone_tag(zone),
             syn_alarm_last_emit_sec: u64::MAX,
         }
     }
