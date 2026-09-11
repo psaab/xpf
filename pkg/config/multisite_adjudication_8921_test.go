@@ -29,7 +29,11 @@ import (
 // compileConfigForNodeWithOpts) prune inactive nodes and then normalize before
 // anything else reads the tree, and SchemaValidateWithDefinitions normalizes
 // before its walk. An identical tree therefore compiles and validates
-// identically for EVERY value, observable or not.
+// identically whether or not the value is observable in the typed config.
+// The claim is about the RENDERED value: where a container splits a packed
+// run into statements, a value that spells a sibling statement keyword can end
+// a statement early, and that value-dependent case is outside this cell (it
+// is issue 9635, with the #8437 gate).
 //
 // WHY STRUCTURE IS THE PER-SITE QUESTION. The pair decides only WHETHER the fold
 // fires. Where the container's identity ends (its args, a compoundKey sub-key)
@@ -463,60 +467,6 @@ func TestInstanceNamedLikeAnAdmittedKeyword8921(t *testing.T) {
 	if !sameTree8921(elided, braced) {
 		t.Errorf("an interface named like an admitted container keyword does not fold to "+
 			"its braced tree:\n  elided\n%s  braced\n%s", treeText8921(elided), treeText8921(braced))
-	}
-}
-
-// TestPackedRunDoesNotSplitAnAuthoredValue8921: splitPackedStatements8768 ends a
-// multi-value statement at the first token that names a sibling statement, so a
-// VALUE spelling a sibling keyword was split off as a bogus statement -- in the
-// braced spelling as well as the elided one. `security ike policy <p> proposals`
-// is multi-valued and `proposal-set` is its sibling. A keyword is never quoted
-// and never continues a `[ ... ]` list, so either mark must keep the token a
-// value. One case per arm of authoredValueAt8921, and a control that a plain run
-// still splits, so the decline cannot pass by never splitting at all.
-func TestPackedRunDoesNotSplitAnAuthoredValue8921(t *testing.T) {
-	for _, c := range []struct{ name, braced, elided string }{
-		{"quoted and bracketed",
-			`security { ike { policy P1 { proposals [ P "proposal-set" ]; } } }`,
-			`security { ike { policy P1 proposals [ P "proposal-set" ]; } }`},
-		{"quoted only",
-			`security { ike { policy P1 { proposals P "proposal-set"; } } }`,
-			`security { ike { policy P1 proposals P "proposal-set"; } }`},
-		{"bracketed only",
-			`security { ike { policy P1 { proposals [ P proposal-set ]; } } }`,
-			`security { ike { policy P1 proposals [ P proposal-set ]; } }`},
-	} {
-		t.Run(c.name, func(t *testing.T) {
-			ref := parse8921(t, "reference", c.braced)
-			braced := parse8921(t, "braced", c.braced)
-			elided := parse8921(t, "elided", c.elided)
-			if ref == nil || braced == nil || elided == nil {
-				return
-			}
-			normalizeCompactStanzas(braced)
-			normalizeCompactStanzas(elided)
-			for _, got := range []struct {
-				label string
-				tree  *ConfigTree
-			}{{"braced", braced}, {"elided", elided}} {
-				if !sameTree8921(got.tree, ref) {
-					t.Errorf("%s spelling: the value `proposal-set` was split off as a statement:\n"+
-						"  want (as parsed)\n%s  got (normalized)\n%s",
-						got.label, treeText8921(ref), treeText8921(got.tree))
-				}
-			}
-		})
-	}
-	run := parse8921(t, "plain run", `security { ike { policy P1 { proposals P mode main; } } }`)
-	two := parse8921(t, "two statements", `security { ike { policy P1 { proposals P; mode main; } } }`)
-	if run == nil || two == nil {
-		return
-	}
-	normalizeCompactStanzas(run)
-	normalizeCompactStanzas(two)
-	if !sameTree8921(run, two) {
-		t.Errorf("CONTROL: a plain packed run no longer splits into its statements:\n  run\n%s  two\n%s",
-			treeText8921(run), treeText8921(two))
 	}
 }
 

@@ -1623,7 +1623,11 @@ owned by the `journal/` subpackage.
 - **Commit-check normalizes brace-elided statements BEFORE group expansion
   (#8921).** `schemaValidateExpandedTreeForNode` runs strip-inactive ->
   `config.NormalizeCompactForScan` -> `ExpandGroups` -> validate, the order the
-  compiler already used. It used to expand the tree as authored, and
+  compiler already used. Strip MUST come first: the fold declines when the next
+  sibling continues the container it would build, so an `inactive:` sibling the
+  compiler never sees would make commit-check decline a fold the compiler
+  performs (measured: an inline `neighbor 192.0.2.1 hold-time 30; inactive:
+  hold-time 9;` failed to override the group's value again). It used to expand the tree as authored, and
   `ExpandGroups` merges a group body into inline config by statement SHAPE: a
   group spelling `neighbor 192.0.2.1 hold-time 2;` packed did not meet the
   inline `neighbor 192.0.2.1 { hold-time 30; }`, was appended beside it instead
@@ -1631,9 +1635,10 @@ owned by the `journal/` subpackage.
   hold-time -- while the braced group body merged, the override won, and the
   same config validated clean (and the compiler accepted both). The
   definitions source handed to `SchemaValidateWithDefinitions` is the same
-  normalized tree, because `collectSchemaRefs` also reads definitions by shape.
+  stripped, normalized pre-expansion tree, because `collectSchemaRefs` also
+  reads definitions by shape.
   `TestCommitValidationNormalizesBeforeGroupExpansion8921` pins it for both
-  spellings and both node paths.
+  group-body spellings, the inactive-sibling case, and both node paths.
 - Durable write protocol (#1894): `fsatomic.WriteFileDurable` — temp
   file in `.configdb`, fsync, rename, parent-dir fsync. The previous
   file survives an interrupted write intact, and a completed write

@@ -242,7 +242,7 @@ divergent cell there would mean some reader runs before the normalizer.
 run into statements (`packedStatements`), the split depends on the value tokens:
 a value that spells a sibling statement keyword can end a statement early. So the
 per-site result is a statement about values that do not spell a sibling keyword,
-plus the authored-value rule below, which covers the ones an operator marked.
+and the value-dependent case is issue #9635 (below).
 
 **Commit-check used to expand groups before normalizing.**
 `schemaValidateExpandedTreeForNode` ran `ExpandGroups` on the tree as authored,
@@ -251,20 +251,24 @@ and group expansion merges by statement SHAPE. With the admitted pair
 did not meet the inline `neighbor 192.0.2.1 { hold-time 30; }`, was appended
 instead of overridden, and was refused as an invalid hold-time, while the braced
 group body merged, the override won, and the config validated clean; the
-compiler accepted both. Commit-check now normalizes first (see
-`pkg/configstore/README.md`). The compiled census could not see this, because it
-compiles through the compiler's own ordering.
+compiler accepted both. Commit-check now runs strip inactive -> normalize ->
+expand, the compiler's order (see `pkg/configstore/README.md`). **Strip comes
+first for a reason:** the fold declines when the next sibling continues the
+container it would build (#8880), so an `inactive:` sibling the compiler never
+sees made commit-check decline a fold the compiler performs. The compiled census
+could not see either ordering defect, because it compiles through the compiler's
+own ordering.
 
-**A packed run never splits at a token authored as a value.**
-`splitPackedStatements8768` ends a multi-value statement at the first token that
-names a sibling statement, so `security ike policy P1 { proposals [ P
-"proposal-set" ]; }` -- a reference to a proposal named `proposal-set` -- became
-`proposals P;` plus a bogus valueless `proposal-set;`, in the braced spelling as
-well as the elided one. A statement keyword is never quoted and never continues a
-`[ ... ]` list, so a boundary on a quoted token, or between two bracketed tokens,
-now declines the split. That rule uses the same quote/bracket masks the next
-paragraph describes, which is why it could not be written before they were
-carried.
+**Not fixed here: #9635.** `splitPackedStatements8768` ends a multi-value
+statement at the first token that names a sibling statement, so `security ike
+policy P1 { proposals [ P "proposal-set" ]; }` -- a reference to a proposal named
+`proposal-set` -- becomes `proposals P;` plus a bogus `proposal-set;`, in the
+braced spelling as well as the elided one. A decline keyed on the quote/bracket
+masks was tried and withdrawn: the #8437 fusion gate still refused the spelling
+at commit, and declining on any quoted token regressed `pre-shared-key
+ascii-text "s" "mode" aggressive;`, which master splits and accepts because a
+quoted statement head is valid. The masks are now carried onto every split
+statement, which a fix for both needs.
 
 **So item 1 is decided: the predicate stays keyword-keyed.** Parent
 qualification would put a parent term on every entry to guard against a

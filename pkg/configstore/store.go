@@ -727,13 +727,13 @@ func schemaValidateExpandedTreeForNode(tree *config.ConfigTree, nodeID int) erro
 	// not only inside SchemaValidateWithDefinitions, which runs AFTER
 	// expansion — makes the marker actually deactivate group inheritance.
 	// WithoutInactive is a no-op (no clone) on the all-active path; the
-	// pre-strip tree is still passed as defsSource so a definition living
-	// only in an un-applied peer-node group keeps satisfying shared-section
-	// references (#1319 PR 3), with that defsSource stripped of inactive
-	// nodes inside SchemaValidateWithDefinitions.
-	// #8921: normalize brace-elided statements BEFORE expansion, in the same
-	// order the compile path uses (compileConfigWithOpts: strip -> normalize ->
-	// expand). ExpandGroups merges a group body into inline config by the
+	// stripped, normalized PRE-EXPANSION tree is passed as defsSource so a
+	// definition living only in an un-applied peer-node group keeps
+	// satisfying shared-section references (#1319 PR 3), and is collected in
+	// whichever spelling it was authored (#8921).
+	// #8921: normalize brace-elided statements BEFORE expansion and AFTER
+	// stripping inactive nodes -- the order the compile path uses
+	// (compileConfigWithOpts: strip -> normalize -> expand). ExpandGroups merges a group body into inline config by the
 	// statement's SHAPE, so a group spelling `neighbor 192.0.2.1 hold-time 2;`
 	// packed failed to meet an inline `neighbor 192.0.2.1 { hold-time 30; }`,
 	// was appended beside it instead of being overridden, and was then
@@ -744,8 +744,13 @@ func schemaValidateExpandedTreeForNode(tree *config.ConfigTree, nodeID int) erro
 	// normalized for the same reason: collectSchemaRefs reads definitions by
 	// shape too. NormalizeCompactForScan clones before rewriting, so the
 	// caller's tree is untouched.
-	normalized := config.NormalizeCompactForScan(tree)
-	stripped := normalized.WithoutInactive()
+	//
+	// STRIP FIRST, and it is not cosmetic: the fold declines when the NEXT
+	// sibling continues the container it would build (#8880), so an inactive
+	// sibling the compiler never sees -- `neighbor 192.0.2.1 hold-time 30;
+	// inactive: hold-time 9;` -- made commit-check decline a fold the compiler
+	// performs, and the same override failed to merge again.
+	stripped := config.NormalizeCompactForScan(tree.WithoutInactive())
 	expanded := stripped.Clone()
 	if nodeID >= 0 {
 		vars := map[string]string{"node": fmt.Sprintf("node%d", nodeID)}
@@ -756,7 +761,7 @@ func schemaValidateExpandedTreeForNode(tree *config.ConfigTree, nodeID int) erro
 		// definitions source: expansion removes the groups stanza, and
 		// definitions living only in un-applied peer-node groups must
 		// keep satisfying shared-section references (#1319 PR 3).
-		return config.SchemaValidateWithDefinitions(expanded, normalized, nil)
+		return config.SchemaValidateWithDefinitions(expanded, stripped, nil)
 	}
 	if err := expanded.ExpandGroups(); err != nil {
 		if strings.Contains(err.Error(), `undefined group "${node}"`) {
@@ -768,7 +773,7 @@ func schemaValidateExpandedTreeForNode(tree *config.ConfigTree, nodeID int) erro
 			return fmt.Errorf("apply-groups: %w", err)
 		}
 	}
-	return config.SchemaValidateWithDefinitions(expanded, normalized, nil)
+	return config.SchemaValidateWithDefinitions(expanded, stripped, nil)
 }
 
 // SyncApply applies a config received from the cluster primary.
