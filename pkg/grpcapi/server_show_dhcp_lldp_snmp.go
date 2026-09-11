@@ -275,7 +275,10 @@ func (s *Server) showDHCPDynamicDNS(cfg *config.Config, buf *strings.Builder, de
 		fmt.Fprintf(buf, "  Domain:          %s\n", ddns.Domain)
 	}
 	if ddns.UpdateServer != "" {
-		fmt.Fprintf(buf, "  Update server:   %s\n", ddns.UpdateServer)
+		// #9497: RedactURL, like show configuration / String / MarshalJSON and the
+		// #5521 feed-URL render. This topic is PermView, and a userinfo-bearing
+		// value would otherwise reach read-only clients and support bundles.
+		fmt.Fprintf(buf, "  Update server:   %s\n", config.RedactURL(ddns.UpdateServer))
 	}
 	if ddns.ConflictPolicy != "" {
 		fmt.Fprintf(buf, "  Conflict policy: %s\n", ddns.ConflictPolicy)
@@ -360,7 +363,7 @@ func (s *Server) showServicesDynamicDNS(cfg *config.Config, buf *strings.Builder
 				if backend == "" {
 					backend = "rfc2136"
 				}
-				fmt.Fprintf(buf, "    %s: backend=%s update-server=%s", n, backend, p.UpdateServer)
+				fmt.Fprintf(buf, "    %s: backend=%s update-server=%s", n, backend, config.RedactURL(p.UpdateServer)) // #9497
 				if p.TSIGKeyName != "" {
 					fmt.Fprintf(buf, " tsig-key=%s (secret redacted)", p.TSIGKeyName)
 				}
