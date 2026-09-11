@@ -1673,6 +1673,8 @@ func ValidateConfig(cfg *Config) []string {
 	// the QoS action is inert. Same principle as #2486 (ipsec-vpn): never
 	// silently accept config the dataplane cannot enforce.
 	warnings = append(warnings, validateFilterLossPriorityWarnings(cfg)...)
+	// #9503: a three-color policer marking action applies meter-only; say so.
+	warnings = append(warnings, validateThreeColorPolicerMarkingWarnings(cfg)...)
 
 	// #4316 (fable-167 F-3a): `firewall filter <n> interface-specific` is
 	// accepted but xpf keeps a single shared counter (not per-interface

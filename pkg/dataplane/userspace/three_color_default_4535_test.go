@@ -52,7 +52,7 @@ func TestThreeColorPolicerUnspecifiedKeepsForwarding4535(t *testing.T) {
 		t.Fatalf("ForwardingSupported = false for unspecified-color three-color policer; want true (color-blind default). Reasons: %+v",
 			caps.UnsupportedReasons)
 	}
-	if slices.Contains(caps.UnsupportedReasons, "userspace three-color policers require color-blind mode and then discard") {
+	if slices.Contains(caps.UnsupportedReasons, "userspace three-color policers require color-blind mode and a supported then action") {
 		t.Fatalf("unspecified-color policer must not carry the three-color disarm reason: %+v", caps.UnsupportedReasons)
 	}
 }
@@ -65,7 +65,7 @@ func TestThreeColorPolicerColorAwareStillDisarms4535(t *testing.T) {
 	if caps.ForwardingSupported {
 		t.Fatal("ForwardingSupported = true for explicit color-aware policer; want fail-closed disarm")
 	}
-	if !slices.Contains(caps.UnsupportedReasons, "userspace three-color policers require color-blind mode and then discard") {
+	if !slices.Contains(caps.UnsupportedReasons, "userspace three-color policers require color-blind mode and a supported then action") {
 		t.Fatalf("color-aware policer must carry the three-color disarm reason, got: %+v", caps.UnsupportedReasons)
 	}
 }

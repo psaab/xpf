@@ -539,8 +539,18 @@ fn build_three_color_policer_state(
     }
 }
 
+/// #9503: `loss-priority <level>` is admitted as METER-ONLY:
+/// `treatments_from_then_action` gives it the no-drop default, the same
+/// posture a plain policer's marking action has. Refusing it here failed the
+/// referencing terms closed (every packet dropped), and on the Go side the
+/// matching capability refusal disarmed forwarding on every binding. An
+/// action neither side knows still fails closed, as a drift guard; the Go
+/// mirror is `threeColorThenActionSupported`.
 fn snapshot_three_color_shape_supported(snap: &ThreeColorPolicerSnapshot) -> bool {
-    snap.color_blind && (snap.then_action.is_empty() || snap.then_action == "discard")
+    snap.color_blind
+        && (snap.then_action.is_empty()
+            || snap.then_action == "discard"
+            || snap.then_action.starts_with("loss-priority "))
 }
 
 fn treatments_from_then_action(action: &str) -> ThreeColorTreatments {
