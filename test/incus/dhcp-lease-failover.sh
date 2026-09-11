@@ -277,7 +277,10 @@ ns_addr4() {
 
 # ns_down <ns> stops the namespace's clients and deletes it (the macvlan goes with it).
 ns_down() {
-	ssh_fw "$DHCP_CLIENT" "for f in /run/dhclient-$1.pid /run/dhclient6-$1.pid; do [ -f \$f ] && kill \$(cat \$f) 2>/dev/null; rm -f \$f; done; rm -f /run/dhclient-$1.leases /run/dhclient6-$1.leases; ip netns del '$1' 2>/dev/null; true" >/dev/null 2>&1 || true
+	# #9729: RELEASE the v4 lease first. Every run's client is a fresh random MAC,
+	# and an unreleased lease stays bound for its full lifetime (86400s in the lab),
+	# so reruns filled the pool with dead owners whose addresses got reused.
+	ssh_fw "$DHCP_CLIENT" "if [ -e /run/netns/'$1' ] && [ -f /run/dhclient-$1.leases ]; then timeout 15 nsenter --net=/run/netns/'$1' dhclient -r -sf '$CLIENT_SCRIPT' -pf /run/dhclient-$1.pid -lf /run/dhclient-$1.leases \$(nsenter --net=/run/netns/'$1' ls /sys/class/net | grep -v '^lo\$' | head -1) 2>/dev/null; fi; for f in /run/dhclient-$1.pid /run/dhclient6-$1.pid; do [ -f \$f ] && kill \$(cat \$f) 2>/dev/null; rm -f \$f; done; rm -f /run/dhclient-$1.leases /run/dhclient6-$1.leases; ip netns del '$1' 2>/dev/null; true" >/dev/null 2>&1 || true
 }
 
 # ---------------------------------------------------------------------------
@@ -323,28 +326,19 @@ main() {
 		pass "client A acquired a v6 lease"
 	fi
 
-	info "2) Wait for the lease-sync push to pre-seed the standby, then gate byte-exactness"
-	# #9729 run 4: a fixed 3s sleep read the standby memfile before the
-	# asynchronous push landed, and the post-failover cells then proved the
-	# lease HAD synced. Poll for the leased address instead of guessing.
-	local seeded=0 waited=0
-	while [ "$waited" -lt "$LEASE_SYNC_WAIT" ]; do
-		if ssh_fw "$STANDBY" "grep -q '^${addr4},' '$KEA_MEMFILE4'" 2>/dev/null; then
-			seeded=1
-			break
-		fi
-		sleep 1
-		waited=$((waited + 1))
-	done
+	info "2) Gate the standby memfile header byte-exactness (Kea 3.0.x golden)"
+	# #9729 run 6: this step used to also look for the leased address in the
+	# standby memfile before the failover, and passed on a row for the SAME address
+	# held by a previous run's client. The standby rewrites that file only at
+	# takeover (the #5040 pre-seed), so no pre-takeover row check can see this
+	# lease. The binding is asserted after promotion instead (step 4b).
 	assert_memfile_header "$STANDBY" "$KEA_MEMFILE4" "$GOLDEN_HEADER4" 4
 	if [ "$DHCP_V6" = "1" ]; then
 		assert_memfile_header "$STANDBY" "$KEA_MEMFILE6" "$GOLDEN_HEADER6" 6
 	fi
-	if [ "$seeded" = "1" ]; then
-		pass "leased address $addr4 present in standby pre-seed memfile after ${waited}s"
-	else
-		fail "leased address $addr4 not present in standby pre-seed memfile after ${LEASE_SYNC_WAIT}s"
-	fi
+	local mac_a
+	mac_a="$(ssh_fw "$DHCP_CLIENT" "nsenter --net=/run/netns/'$NS_A' cat /sys/class/net/'$IF_A'/address" 2>/dev/null || true)"
+	[[ -n "$mac_a" ]] || die "cannot read client A's MAC"
 
 	info "3) Hard failover — reboot the RG0 primary ($PRIMARY)"
 	local since
@@ -380,6 +374,18 @@ main() {
 		fi
 	else
 		fail "no Kea memfile lease-file load event on $STANDBY within ${REBOOT_WAIT}s of the failover (kea-dhcp4-server ActiveEnterTimestamp: $(ssh_fw "$STANDBY" 'systemctl show -p ActiveEnterTimestamp --value kea-dhcp4-server' 2>/dev/null || echo unknown)); (a) cannot be judged on a load that did not happen"
+	fi
+
+	info "4b) the promoted node's lease file binds $addr4 to client A ($mac_a)"
+	# The pre-seed writes the union of the local and held peer leases at takeover;
+	# the LAST row for an address is the binding Kea keeps. A row naming another
+	# MAC is a stale owner, which then refuses client A's renewal (#9791).
+	local last_row
+	last_row="$(ssh_fw "$STANDBY" "grep '^${addr4},' '$KEA_MEMFILE4' | tail -1" 2>/dev/null || true)"
+	if [[ "$(cut -d, -f2 <<<"$last_row")" == "$mac_a" ]]; then
+		pass "promoted lease file binds $addr4 to client A ($mac_a)"
+	else
+		fail "promoted lease file binds $addr4 to '$(cut -d, -f2 <<<"$last_row")', not client A ($mac_a); a stale owner would refuse A's renewal (#9791)"
 	fi
 
 	info "5) (c) a second client must NOT be handed client A's in-use address by the promoted node"
