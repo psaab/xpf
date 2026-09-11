@@ -262,22 +262,6 @@ pub(crate) struct Nat64Prefix {
     pub(crate) overlap_owners: Option<std::sync::Arc<crate::nat::PoolAddressOwners>>,
 }
 
-/// #9062: the `SourceNatFlowKey.routing_scope` NAT64 uses, for both the
-/// allocation and the release site.
-///
-/// Zero, deliberately, and the two sites must agree or the release silently
-/// stops matching the allocation and leaks the pool entry -- which is a worse
-/// outcome than the cross-tenant collision #9062 is about.
-///
-/// NAT64 pools are per-PREFIX and are not the shape that issue describes: two
-/// source-NAT rule-sets in different routing instances naming the SAME pool.
-/// The NAT64 allocation path also carries no routing domain in its signature,
-/// so threading one here would mean widening several frames for a distinction
-/// this translation does not currently make. Zero preserves today's behaviour
-/// exactly. If NAT64 prefixes ever become VRF-scoped, BOTH sites change
-/// together and this constant is where to start.
-const NAT64_ROUTING_SCOPE_9062: u32 = 0;
-
 impl Nat64Prefix {
     /// #7092: minimal constructor for tests that need a prefix holding a live
     /// allocator. `pool_index` is private, so a struct literal cannot be built
@@ -1268,6 +1252,8 @@ impl Nat64State {
             now_ns,
             crate::nat::NatHolder::Untracked,
             &[],
+            // #9680: the default routing instance; every caller is a test.
+            0,
         )
     }
 
@@ -1291,6 +1277,10 @@ impl Nat64State {
         // #7799: the live source-NAT rules, so a NAT64 mint can refuse an
         // address a DRAINING pool still holds allocations on.
         draining_rules: &[crate::nat::SourceNatRule],
+        // #9680: the flow's routing domain (`SessionKey.routing_domain`). It keys
+        // the BIB, so identical IPv6 5-tuples in two routing instances get two
+        // translated bindings instead of sharing one.
+        routing_scope: u32,
     ) -> Result<(Ipv4Addr, u16), SourceNatFailureReason> {
         self.allocate_source_with_holder(
             prefix_idx,
@@ -1302,6 +1292,7 @@ impl Nat64State {
             now_ns,
             crate::nat::NatHolder::Worker(worker_id),
             draining_rules,
+            routing_scope,
         )
     }
 
@@ -1338,6 +1329,7 @@ impl Nat64State {
         holder: crate::nat::NatHolder,
         // #7799: see `Nat64OverlapDraining`.
         draining_rules: &[crate::nat::SourceNatRule],
+        routing_scope: u32,
     ) -> Result<(Ipv4Addr, u16), SourceNatFailureReason> {
         let prefix = self
             .prefixes
@@ -1370,7 +1362,11 @@ impl Nat64State {
             dst_ip: IpAddr::V4(dst_v4),
             src_port,
             dst_port,
-            routing_scope: NAT64_ROUTING_SCOPE_9062,
+            // #9680: the routing domain keys the BIB. #9062 scoped the v4
+            // source-NAT allocator and deferred NAT64; release and the synced
+            // reserve read the same field off the session key, so all three
+            // sites agree and a release never misses its allocation.
+            routing_scope,
         };
         // #4559: a deterministic NAPT64 pool maps the IPv6 subscriber to a fixed
         // external IPv4 + port block (reversible without per-flow state) instead
@@ -1485,7 +1481,8 @@ fn release_nat64_allocation_with_mode(
         dst_ip: nat.rewrite_dst.unwrap_or(key.dst_ip),
         src_port: key.src_port,
         dst_port: key.dst_port,
-        routing_scope: NAT64_ROUTING_SCOPE_9062,
+        // #9680: the scope the allocation keyed (see allocate_source_with_holder).
+        routing_scope: key.routing_domain,
     };
     // #6876: no first-hit `break` — see the doc comment above. A flow can be
     // held in more than one prefix's allocator, and a prefix that does not hold
@@ -1762,7 +1759,8 @@ fn reserve_synced_nat64_allocation_with_holder(
         dst_ip: nat.rewrite_dst.unwrap_or(key.dst_ip),
         src_port: key.src_port,
         dst_port: key.dst_port,
-        routing_scope: NAT64_ROUTING_SCOPE_9062,
+        // #9680: the scope the allocation keyed (see allocate_source_with_holder).
+        routing_scope: key.routing_domain,
     };
     // #6892: narrow to the prefix the ACTIVE node would have used, by the SAME
     // discriminator it uses, BEFORE falling back to the pool scan below.
