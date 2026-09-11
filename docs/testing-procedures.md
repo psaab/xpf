@@ -142,7 +142,11 @@ Tests with private-rg-election disabled:
 
 ### 6. Restart Connectivity Test (`make test-restart-connectivity`)
 
-Validates zero packet loss during daemon restart (hitless restart).
+Restarts xpfd on fw0 in HA mode while pinging through the cluster, and
+asserts no more than `MAX_LOST_PINGS` (default 2) lost pings per restart, over
+`RESTART_CYCLES` (default 3). It guards the #75 regression (neighbor prewarm
+must run after VRRP MASTER). It is not a zero-loss or hitless-restart gate:
+HA mode does not do hitless restart.
 
 ## Known Issues and Workarounds
 
