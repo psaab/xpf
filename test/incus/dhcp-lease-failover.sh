@@ -405,7 +405,12 @@ main() {
 		! grep -qE "DHCPNAK|DHCPDISCOVER" <<<"$renew" && [[ "$addr4b" == "$addr4" ]]; then
 		pass "client A kept $addr4 across the failover by REQUEST/ACK, with no NAK and no DISCOVER"
 	else
-		fail "client A did not keep $addr4 by REQUEST/ACK (now '${addr4b:-none}'); exchange: $(tr '\n' ' ' <<<"$renew" | cut -c1-400)"
+		fail "client A did not keep $addr4 by REQUEST/ACK (now '${addr4b:-none}'); DHCP messages: $(grep -E 'DHCP(DISCOVER|OFFER|REQUEST|ACK|NAK|DECLINE|RELEASE)' <<<"$renew" | tr '\n' ';' | cut -c1-600)"
+		# #9729 run 5: diagnose rather than guess. Show the client's MAC and what the
+		# promoted node's Kea holds for both addresses at this moment.
+		echo "  -- client A MAC: $(ssh_fw "$DHCP_CLIENT" "nsenter --net=/run/netns/'$NS_A' ip -br link show dev '$IF_A'" 2>/dev/null | awk '{print $3}')" >&2
+		echo "  -- promoted Kea memfile rows for $addr4 / ${addr4b:-none}:" >&2
+		ssh_fw "$STANDBY" "grep -E '^(${addr4}|${addr4b:-0.0.0.0}),' '$KEA_MEMFILE4' | tail -6" >&2 || true
 	fi
 
 	echo
