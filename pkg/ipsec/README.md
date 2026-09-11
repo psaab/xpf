@@ -621,6 +621,22 @@ all files stay in `package ipsec`, so the public API is unchanged.
   silently degraded to on-traffic. It is now
   `ValidateEnum([immediately, on-traffic, responder-only])` in
   `setSchema` — a typo fails closed at commit.
+- **Two VPNs may not render the same SA name (#9624).** The renderer keeps
+  child names unique only within one VPN (#5122). Across VPNs, two
+  ordinary-looking configs collide:
+  - VPN `a` with selector `b-c` and VPN `a-b` with selector `c` both render
+    child `a-b-c`;
+  - VPN `blue` with selector `red` renders child `blue-red`, which VPN
+    `blue-red` also uses for its connection and child.
+
+  `swanctl --initiate --child` identifies a child by name alone, so HA failover
+  could not say which tunnel it brings up. `validateIPsecSANameCollisionsStrict`
+  (`pkg/config`) now rejects such a config at commit, naming the VPNs and the SA
+  name, with a lenient warning on load. The name derivation lives in
+  `pkg/ipsecname`, and both this renderer (`effectiveTrafficSelectors`) and the
+  gate call it, so the gate checks exactly what renders.
+  `TestSANameDerivationMatchesTheRenderIndex9624` pins the gate to
+  `BuildSANameIndex`.
 - **AES-GCM IKE PRF + ICV-suffix canonicalization (#2125).** The
   load-bearing fix: a strongSwan IKEv2 AEAD (AES-GCM) proposal MUST
   name a PRF explicitly — an AEAD cipher carries no integrity algorithm

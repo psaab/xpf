@@ -3,12 +3,12 @@ package ipsec
 import (
 	"errors"
 	"fmt"
-	"hash/fnv"
 	"log/slog"
 	"sort"
 	"strings"
 
 	"github.com/psaab/xpf/pkg/config"
+	"github.com/psaab/xpf/pkg/ipsecname"
 	"github.com/psaab/xpf/pkg/rendersafe"
 )
 
@@ -538,35 +538,17 @@ func effectiveTrafficSelectors(connName string, vpn *config.IPsecVPN) []childSel
 	}
 	sort.Strings(names)
 
-	// sanitizeChildName is not injective: it maps every disallowed rune to a
-	// single '-', so two distinct selector names differing only in sanitized
-	// characters (e.g. `site/a` and `site:a`, both legal Junos identifier
-	// chars) both collapse to `site-a` and render DUPLICATE swanctl child
-	// sections. strongSwan then rejects the config or silently merges/loses
-	// one child — a selector-specific site-to-site outage (#5122). Detect any
-	// base name shared by two or more selectors and append a stable hash of
-	// the ORIGINAL selector name to EACH colliding entry so every configured
-	// selector renders a UNIQUE child section. Non-colliding names are left
-	// byte-for-byte unchanged (no churn), and the disambiguator is a pure
-	// function of the original name, so the same config renders identically
-	// across renders and across HA nodes (config-sync + idempotent commit).
-	bases := make([]string, len(names))
-	counts := make(map[string]int, len(names))
-	for i, name := range names {
-		bases[i] = sanitizeChildName(name)
-		counts[bases[i]]++
-	}
-	// Reserve every non-colliding base first so a disambiguated collided name
-	// can never land on a name a distinct selector already owns.
-	used := make(map[string]bool, len(names))
-	for i := range names {
-		if counts[bases[i]] == 1 {
-			used[bases[i]] = true
-		}
-	}
-
+	// Child names come from ipsecname.ChildNames, the ONE derivation the commit-time
+	// SA-name collision gate (#9624) also uses, so what commit checks is what renders.
+	// It maps each selector onto swanctl's child alphabet and makes bases that collide
+	// WITHIN this VPN injective (#5122). Two distinct selector names that differ only in
+	// disallowed characters (e.g. `site/a` and `site:a`) would otherwise render DUPLICATE
+	// child sections, which strongSwan rejects or silently merges. Non-colliding names
+	// are unchanged, and the disambiguator is a pure function of the original name, so
+	// the same config renders identically across renders and HA nodes.
+	childNames := ipsecname.ChildNames(connName, names)
 	children := make([]childSelector, 0, len(names))
-	for i, name := range names {
+	for _, name := range names {
 		ts := vpn.TrafficSelectors[name]
 		localTS := vpn.LocalID
 		remoteTS := vpn.RemoteID
@@ -576,20 +558,8 @@ func effectiveTrafficSelectors(connName string, vpn *config.IPsecVPN) []childSel
 		if ts.RemoteIP != "" {
 			remoteTS = ts.RemoteIP
 		}
-		childName := bases[i]
-		if counts[bases[i]] > 1 {
-			childName = bases[i] + "-" + childNameDisambiguator(name)
-			// Astronomically unlikely: the disambiguated name still collides
-			// (a hash collision, or a distinct selector literally named
-			// `<base>-<hash>`). Extend deterministically until unique so the
-			// injectivity guarantee is absolute.
-			for used[childName] {
-				childName += "x"
-			}
-			used[childName] = true
-		}
 		children = append(children, childSelector{
-			Name:     connName + "-" + childName,
+			Name:     childNames[name],
 			LocalTS:  localTS,
 			RemoteTS: remoteTS,
 		})
@@ -692,18 +662,6 @@ func (x SANameIndex) Collisions() []string {
 	return out
 }
 
-// childNameDisambiguator returns a short, stable hash of the ORIGINAL selector
-// name, used to make colliding sanitized child-section names injective (#5122).
-// It is a deterministic pure function of the input (fnv-1a 64-bit, low 32 bits
-// as 8 hex chars), so distinct original names that sanitize to the same base
-// receive distinct suffixes, and the same config renders the same name on every
-// node — a prerequisite for HA config-sync and idempotent commits.
-func childNameDisambiguator(original string) string {
-	h := fnv.New64a()
-	_, _ = h.Write([]byte(original))
-	return fmt.Sprintf("%08x", uint32(h.Sum64()))
-}
-
 // sanitizeSwanctlValue replaces every ASCII control byte (C0, 0x00-0x1F, which
 // includes newline, plus DEL 0x7F) with a SPACE before the value is interpolated
 // into a generated swanctl.conf line. Render-side belt for #1798.
@@ -755,32 +713,6 @@ func escapeSwanctlQuoted(s string) string {
 	s = strings.ReplaceAll(s, `\`, `\\`)
 	s = strings.ReplaceAll(s, `"`, `\"`)
 	return s
-}
-
-func sanitizeChildName(name string) string {
-	if name == "" {
-		return "traffic-selector"
-	}
-	var b strings.Builder
-	for _, r := range name {
-		switch {
-		case r >= 'a' && r <= 'z':
-			b.WriteRune(r)
-		case r >= 'A' && r <= 'Z':
-			b.WriteRune(r)
-		case r >= '0' && r <= '9':
-			b.WriteRune(r)
-		case r == '-' || r == '_' || r == '.':
-			b.WriteRune(r)
-		default:
-			b.WriteByte('-')
-		}
-	}
-	out := b.String()
-	if out == "" {
-		return "traffic-selector"
-	}
-	return out
 }
 
 // pskIDSelectors returns the ordered list of swanctl secret `id-<n>`

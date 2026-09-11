@@ -363,6 +363,15 @@ type compileOpts struct {
 	// fail-closed-on-load doctrine. Same doctrine as lenientIPsecGatewayRefs.
 	lenientIPsecEndpoints bool
 
+	// lenientIPsecSANameCollision (#9624) downgrades the IPsec SA-name
+	// collision reject (validateIPsecSANameCollisionsStrict) from a hard error
+	// to a warning on the tolerant load / peer-sync paths. Two VPNs rendering
+	// the same swanctl SA name leave `swanctl --initiate --child` unable to say
+	// which tunnel it brings up. Commit / commit-check hard-reject it; an
+	// already-persisted or peer-synced config still boots (warn), no more
+	// ambiguous than before. Same doctrine as lenientIPsecEndpoints.
+	lenientIPsecSANameCollision bool
+
 	// lenientIPsecProposalLifetime (#9008) downgrades the IKE/IPsec proposal
 	// `lifetime-seconds` value gate (validateIPsecProposalLifetimesStrict)
 	// from a hard compile error to a cfg.Warnings entry on the tolerant load
@@ -2723,6 +2732,7 @@ func lenientCompileOpts() compileOpts {
 		lenientIPsecGatewayRefs:                true,
 		lenientIKEPolicyChainRef:               true,
 		lenientIPsecEndpoints:                  true,
+		lenientIPsecSANameCollision:            true,
 		lenientIPsecProposalLifetime:           true,
 		lenientIPsecTrafficSelectors:           true,
 		lenientReservedProposalSetNames:        true,
