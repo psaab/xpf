@@ -874,11 +874,6 @@ type SessionSync struct {
 	OnBulkSyncAckReceived func()
 	// OnPeerConnected fires when a peer sync connection is established.
 	OnPeerConnected func()
-	// peerConnectedDispatches counts OnPeerConnected dispatches, taken
-	// synchronously at each dispatch site before the callback's goroutine
-	// starts, so a test can prove the callback did NOT fire without sleeping
-	// (#9618).
-	peerConnectedDispatches atomic.Uint64
 	// OnPeerDisconnected fires when all fabric connections are lost.
 	OnPeerDisconnected func()
 	peerIPsecSAs       []string

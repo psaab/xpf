@@ -342,22 +342,6 @@ func (s *SessionSync) handleMessage(conn net.Conn, msgType uint8, payload []byte
 			}
 			s.mu.Unlock()
 		}
-		// #9618: when this switch evicted the corpse it is the first classifier
-		// to see the reboot, so the survivor owes the new peer process what
-		// installConn's cold-prime arm gives the epoch-first order: the
-		// OnPeerConnected dispatch (connection epoch, DHCP-lease and IPsec-SA
-		// sync nudges, config reconcile) as well as the session table, whose
-		// debt applyPeerIncarnationSwitchLocked armed. When it evicted nothing,
-		// handleNewConnection already dispatched for this reboot, and the
-		// callback is not idempotent (it bumps the daemon's sync connection
-		// epoch and can re-arm the readiness timer), so it must not fire twice.
-		// Dispatched outside s.mu, exactly as handleNewConnection does.
-		if evictedStale && s.OnPeerConnected != nil {
-			s.peerConnectedDispatches.Add(1)
-			slog.Info("cluster sync: peer incarnation retired on boot id; scheduling OnPeerConnected callback",
-				"remote", connRemoteAddrString(conn))
-			go s.OnPeerConnected()
-		}
 		slog.Info("cluster sync: bulk transfer starting", "epoch", epoch,
 			"peer_boot_incarnation", inc.String(), "incarnation_switched", switched,
 			"evicted_stale_incarnation_conn", evictedStale,

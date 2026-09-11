@@ -4059,32 +4059,27 @@ outside the monitor loop:
   `applyPeerIncarnationSwitchLocked`, which advances the incarnation, rebases
   the epoch baseline and evicts the corpse. #9174 V014 armed the obligation on
   the epoch edge only, so this order retired the dead incarnation and owed
-  nothing: `needColdPrime` stayed false, the prior incarnation's sticky
-  `outboundBulkAcked` suppressed the ordinary resend, and the survivor never
-  sent its table to the empty replacement. `applyPeerIncarnationSwitchLocked`
-  now arms `needColdPrime` itself, so retiring an incarnation on boot-id
-  evidence and owing the replacement a prime are one transition; the sweep's
-  owed-cold-prime re-drive discharges it on success only. The first
-  incarnated prime (zero -> X) never reaches the switch (`priorInc.known()`),
-  and a same-boot BulkStart on the peer's second fabric is not a switch, so
-  neither arms. The arm, and the `OnPeerConnected` dispatch below, are gated on
-  this switch having EVICTED the corpse, which is what makes it the first
-  classifier to see the reboot: when the epoch was seen first, `installConn`
-  already retired the corpse, owed the prime and dispatched, and the later
-  boot-id classification of the same reboot does neither again.
-  The switch also dispatches `OnPeerConnected` (outside `s.mu`, as
-  `handleNewConnection` does): a retired incarnation is a new peer process, the
-  epoch-first order of the same reboot reaches that callback through
-  `installConn`'s cold-prime arm, and without it the replacement gets no
-  DHCP-lease or IPsec-SA sync nudge and no config reconcile. **What this does
-  not close**, because every arm shares it: the obligation is discharged by the
-  survivor's LOCAL write rather than the replacement's `BulkAck`, the latch is an
-  unversioned boolean an older bulk can clear, and the re-sent table covers only
-  RGs the survivor is primary for (#9626). A delayed BulkStart from the dead
-  incarnation's socket that switches the boot namespace back (the hazard
-  `sync_boot_incarnation.go` documents) evicts the live replacement, so it also
-  arms a redundant bulk and dispatches the callback; that hazard predates this
-  change.
+  nothing. `applyPeerIncarnationSwitchLocked` now arms `needColdPrime` whenever
+  the switch applies, and the sweep's owed-cold-prime re-drive discharges it on
+  success only. The arm is deliberately NOT gated on the switch having evicted
+  anything: the corpse's own receive loop can remove it after the replacement
+  installed, and the switch is then the only classifier that ever sees the
+  reboot. The first incarnated prime (zero -> X) never reaches the switch
+  (`priorInc.known()`), and a same-boot BulkStart on the peer's second fabric is
+  not a switch, so neither arms. When both signals observe one reboot the cost
+  is one redundant, idempotent bulk.
+
+  **What this does not close.** The two classifiers are still not reconciled
+  (#9636): a boot-id-first reboot gets no `OnPeerConnected` dispatch (DHCP-lease
+  and IPsec-SA sync nudges, config reconcile), and a healthy second fabric that
+  installs between the epoch classification and the replacement's BulkStart is
+  evicted as a corpse. Adding the dispatch to the switch fires the
+  non-idempotent callback twice when the epoch was seen first, and gating on an
+  eviction has both a false negative and a false positive, so that fix needs a
+  per-reboot identity rather than either shortcut. The consumer semantics every
+  arm shares — discharge on a local write rather than `BulkAck`, an unversioned
+  latch an older bulk can clear, a re-sent table limited to survivor-primary
+  RGs — are #9626.
 
   **Atomicity of the ack is bound, not merely asserted (#5718 fold r3).** Every
   scenario test calls `installConn` and `handleMessage` in sequence, so none of
