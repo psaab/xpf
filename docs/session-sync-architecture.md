@@ -199,6 +199,29 @@ The reservation is now tri-state (`SyncedReserveOutcome`): `Reserved`,
 `NothingToReserve` is answered exactly like the long-standing
 `rewrite_src == None` early return one line above it.
 
+**#9678 — local ownership is decided before the reservation.** The #6600
+reservation runs before the worker's ownership check. The worker refuses a
+peer upsert that would replace a locally-owned session while that session's
+owner RG is locally forwarding-active (`upsert_synced_with_origin` with
+`synced_entry_allows_local_replace`). But `reserve_flow` retires an incumbent
+`live_by_flow` record holding a DIFFERENT translated tuple. So a same-flow peer
+upsert in a dual-primary window, or in a failover race, evicted the local
+flow's live allocation T1 and reserved an `Untracked` T2. The worker then kept
+forwarding on T1 with no allocator record behind it, and T1 could be handed to
+another flow. Every refusal inside the reserve happens after that unlink, so
+even a `RejectedReserve` import had already freed T1.
+
+`upsert_synced_session` now applies the worker's own predicate first: the
+shared map holds a local-origin entry for the key AND the incoming owner RG
+does not allow a local replace. In that case the import stops before the
+reservation, the shared publish and the worker fan-out, and it reports
+`Applied`, mirroring the worker's refusal, which is silent too. Skipping only
+the reservation would still have published the peer's decision into the shared
+maps, which is the #6600 shape of a shared entry naming a port this node does
+not hold. Once the RG is no longer locally active, the next sync of the flow
+imports normally. An active node with no local session for the flow still
+reserves before it publishes.
+
 **#7209 — an admitted import with no kernel session map is now visible.** After
 the reservation, `upsert_synced_session` publishes the row to the kernel session
 map. That publish sat behind one conjunction:
