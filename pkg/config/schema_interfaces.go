@@ -564,7 +564,11 @@ func tunnelSchemaChildren() map[string]*schemaNode {
 			validator:     ValidateInteger(1, 255),
 			children:      nil,
 		},
-		"routing-instance": {desc: "Routing instance", children: map[string]*schemaNode{
+		// packedTail (#9172 V044): the compiler reads the packed tail
+		// (packedTunnelRoutingInstance8936), so the commit gate validates it:
+		// a packed `routing-instance destination;` with no name is refused
+		// exactly as the braced `routing-instance { destination; }` is.
+		"routing-instance": {desc: "Routing instance", packedTail: true, children: map[string]*schemaNode{
 			"destination": {desc: "Destination routing instance", args: 1, placeholder: "<name>", children: nil},
 		}},
 		"wireguard": wireguardSchemaNode(),

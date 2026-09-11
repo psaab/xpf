@@ -243,7 +243,7 @@ func compileInterfaces(node *Node, ifaces *InterfacesConfig, opts compileOpts, w
 					// routing-instance { destination <name>; }
 					if destNode := prop.FindChild("destination"); destNode != nil {
 						tc.RoutingInstance = nodeVal(destNode)
-					} else if v := packedTunnelRoutingInstance8936(prop); v != "" {
+					} else if v, packed := packedTunnelRoutingInstance8936(prop); packed {
 						tc.RoutingInstance = v
 					} else if v := nodeVal(prop); v != "" {
 						tc.RoutingInstance = v
@@ -335,7 +335,7 @@ func compileInterfaces(node *Node, ifaces *InterfacesConfig, opts compileOpts, w
 					case "routing-instance":
 						if destNode := prop.FindChild("destination"); destNode != nil {
 							tc.RoutingInstance = nodeVal(destNode)
-						} else if v := packedTunnelRoutingInstance8936(prop); v != "" {
+						} else if v, packed := packedTunnelRoutingInstance8936(prop); packed {
 							tc.RoutingInstance = v
 						} else if v := nodeVal(prop); v != "" {
 							tc.RoutingInstance = v
@@ -1570,8 +1570,9 @@ func fabricMemberValues(n *Node) []string {
 }
 
 // packedTunnelRoutingInstance8936 reads the instance name out of a
-// BRACE-ELIDED `tunnel { routing-instance destination <name>; }`, and returns
-// "" for every other shape so the callers' existing branches are unchanged.
+// BRACE-ELIDED `tunnel { routing-instance destination <name>; }` and reports
+// whether the node has that packed shape at all. For every other shape it
+// returns ("", false), so the callers' existing branches are unchanged.
 //
 // The braced spelling gives `routing-instance` a CHILD named `destination`, and
 // the callers read it with FindChild. The elided spelling packs the whole tail
@@ -1589,12 +1590,22 @@ func fabricMemberValues(n *Node) []string {
 // "something consumed the tail". Something did -- and it was this defect, not a
 // reader entitled to it. Fixing the consumer is what makes the two spellings
 // agree; no scope admission is involved.
-func packedTunnelRoutingInstance8936(prop *Node) string {
-	if prop == nil || len(prop.Keys) < 3 {
-		return ""
+//
+// #9172 (V044): the packed shape with NO name -- `routing-instance
+// destination;` -- is still this shape, and the shape is what callers branch
+// on. This used to require three keys, so the bare spelling fell through to the
+// callers' nodeVal fallback, which returned Keys[1]: the literal keyword
+// "destination" again, the exact wrong binding #8936 fixed for the named
+// spelling. The braced `routing-instance { destination; }` compiles to no
+// binding and is refused at commit; the packed bare spelling now compiles to no
+// binding too, and the schema node's packedTail opt-in gives it the same
+// commit-time refusal.
+func packedTunnelRoutingInstance8936(prop *Node) (string, bool) {
+	if prop == nil || len(prop.Keys) < 2 || prop.Keys[1] != "destination" {
+		return "", false
 	}
-	if prop.Keys[1] != "destination" {
-		return ""
+	if len(prop.Keys) < 3 {
+		return "", true
 	}
-	return prop.Keys[2]
+	return prop.Keys[2], true
 }
