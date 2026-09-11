@@ -28,29 +28,17 @@
 # the assertions would be vacuous there). It applies its own pool rule inside
 # the lock cell and restores the prior config on exit — see RESTORE below.
 #
-# STATUS: NOT YET RUN GREEN. Stated plainly because a smoke nobody has seen
-# pass is a claim, not evidence, and the next person must not mistake one for
-# the other.
-#
-# What HAS been established on the live loss cluster:
-#   * the config applies and commits on the PRIMARY, and HA config sync carries
-#     it to the peer (the secondary refuses `configure` outright);
-#   * the marker gate works — every wrong config so far was caught by the
-#     absent "commit complete" rather than by a false pass;
-#   * the anti-vacuity guard works — it REFUSES to run the downstream
-#     assertions when the active minted no binding, so this script has never
-#     reported a pass it did not earn.
-#
-# What BLOCKS it, and it is a topology question rather than a dataplane one:
-# while a source-NAT POOL is applied, the LAN client cannot complete a
-# connection to the WAN target (`CONNECT-FAILED`), on a path that is otherwise
-# reachable — measured immediately afterwards: ports 5200/5201/5202 all connect
-# and ping is 0% loss once interface-mode SNAT is restored. Tried and still
-# failing: an arbitrary in-subnet pool address (172.16.50.90 — nothing answers
-# ARP for it) and the WAN VIP (172.16.50.6). Whoever picks this up should start
-# by establishing which pool address this cluster's upstream will route return
-# traffic for, or whether pool-mode SNAT needs something else here that
-# interface mode does not. Everything above that point is settled.
+# STATUS (#9729): an earlier revision recorded this as not yet run green,
+# blocked by the pool-mode SNAT return path on this cluster. Per #8573 and
+# #8621 that topology blocker is gone and the acceptance was met once by a
+# manual lab run. The script is now a Makefile gate
+# (`make test-persistent-nat-failover`) that records a ledger row. It derives
+# the RG0 primary and standby itself, and it asserts that the reboot really
+# promoted the standby: with fw1 already primary at start (an ordinary
+# leftover state on the shared cluster, #9452), the old hardcoded-fw0 flow
+# compared the primary with itself, rebooted the standby and re-read an
+# uninterrupted primary. That was a PASS that exercised neither sync nor
+# promotion.
 #
 # The unit-level coverage does NOT depend on this: #7360's mechanism is bound by
 # seven fail-on-revert cells in `userspace-dp/src/nat/tests_pool.rs` and a
@@ -203,8 +191,26 @@ primary_node() {
 	if [ "$secondary" = "0" ]; then echo "$FW1"; else echo "$FW0"; fi
 }
 
+# rg0_primary_node <query-node> prints the node holding RG0 primary as seen from
+# <query-node>, or nothing when the RG0 row cannot be read. Unlike primary_node
+# it never defaults to fw0: asked on the survivor right after the primary was
+# rebooted, a silent default would report "fw0 is primary" and fail a real
+# promotion, or pass a missing one (#9729).
+rg0_primary_node() {
+	local status row0 row1
+	status="$(fw_cli "$1" "show chassis cluster status" || true)"
+	row0="$(printf '%s\n' "$status" | awk '/^Redundancy group:[[:space:]]/ {rg=$3; next} rg=="0" && $1=="node0" {print tolower($3); exit}')"
+	row1="$(printf '%s\n' "$status" | awk '/^Redundancy group:[[:space:]]/ {rg=$3; next} rg=="0" && $1=="node1" {print tolower($3); exit}')"
+	case "$row0/$row1" in
+	primary*/*) echo "$FW0" ;;
+	*/primary*) echo "$FW1" ;;
+	esac
+}
+
 apply_pnat_config() {
 	PRIMARY="$(primary_node)"
+	if [ "$PRIMARY" = "$FW0" ]; then STANDBY="$FW1"; else STANDBY="$FW0"; fi
+	info "roles: RG0 primary=$PRIMARY standby=$STANDBY"
 	info "Retargeting ${SNAT_RULESET}/${SNAT_RULE} at a persistent-NAT pool on the PRIMARY ($PRIMARY)"
 	local out="${PNAT_TMP}/apply.out"
 	pnat_config_session | incus exec "$PRIMARY" -- /usr/local/sbin/cli >"$out" 2>&1 || true
@@ -290,26 +296,38 @@ did not exercise persistent NAT, so every assertion below would be vacuous"
 		summary
 		return
 	fi
-	pass "active $FW0 holds a binding for $src_ip -> port $natport_before"
+	pass "active $PRIMARY holds a binding for $src_ip -> port $natport_before"
 
 	# (a) THE DIRECT ASSERTION. Before #7360 this is empty however many sessions
 	#     the standby imported.
 	sleep 3
 	local standby_port standby_count
-	standby_count="$(binding_count "$FW1" || echo 0)"
-	standby_port="$(binding_natport "$FW1" "$src_ip" || true)"
+	standby_count="$(binding_count "$STANDBY" || echo 0)"
+	standby_port="$(binding_natport "$STANDBY" "$src_ip" || true)"
 	if [ "$standby_port" = "$natport_before" ]; then
-		pass "standby $FW1 reconstructed the binding ($src_ip -> $standby_port)"
+		pass "standby $STANDBY reconstructed the binding ($src_ip -> $standby_port)"
 	else
-		fail "standby $FW1 has no matching persistent-NAT binding for $src_ip \
+		fail "standby $STANDBY has no matching persistent-NAT binding for $src_ip \
 (count=$standby_count, port='${standby_port:-none}', expected $natport_before). \
 This is #7360: the synced reserve published the session without joining a lease."
 	fi
 
 	# (b) Fail over, then a NEW connection from the same client.
-	info "Failing over: rebooting $FW0"
-	incus restart "$FW0" --force >/dev/null 2>&1 || die "could not restart $FW0"
+	info "Failing over: rebooting the RG0 primary $PRIMARY"
+	incus restart "$PRIMARY" --force >/dev/null 2>&1 || die "could not restart $PRIMARY"
 	sleep "$REBOOT_WAIT"
+
+	# #9729: the downstream port assertion is only meaningful if the standby was
+	# PROMOTED. Ask the survivor, and refuse to go on without a promotion.
+	local promoted
+	promoted="$(rg0_primary_node "$STANDBY")"
+	if [ "$promoted" = "$STANDBY" ]; then
+		pass "the standby $STANDBY was promoted to RG0 primary"
+	else
+		fail "no promotion observed: RG0 primary reads '${promoted:-unreadable}' on $STANDBY after rebooting $PRIMARY -- the translated-port assertion would be vacuous"
+		summary
+		return
+	fi
 
 	info "Opening a NEW connection from the same client on the promoted node"
 	incus exec "$LAN_CLIENT" -- bash -lc \
@@ -317,7 +335,7 @@ This is #7360: the synced reserve published the session without joining a lease.
 	sleep 2
 
 	local natport_after
-	natport_after="$(binding_natport "$FW1" "$src_ip" || true)"
+	natport_after="$(binding_natport "$STANDBY" "$src_ip" || true)"
 	if [ "$natport_after" = "$natport_before" ]; then
 		pass "the client kept its translated port across the failover ($natport_after)"
 	else
@@ -333,7 +351,9 @@ session's own translation."
 summary() {
 	echo
 	echo "======================================"
-	echo "  PASS: $PASS   FAIL: $FAIL"
+	# #9729: the canonical "<n> passed, <n> failed" line the ha-smoke ledger
+	# adapter parses; the old "PASS: n FAIL: n" form was recorded as VOID.
+	echo "  Persistent-NAT failover test: $PASS passed, $FAIL failed"
 	for e in "${ERRORS[@]:-}"; do [ -n "$e" ] && echo "  - $e"; done
 	echo "======================================"
 	[ "$FAIL" -eq 0 ] || exit 1

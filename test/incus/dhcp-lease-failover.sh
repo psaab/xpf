@@ -21,7 +21,11 @@
 #   (b) the client KEEPS its address + remaining lifetime (no re-DISCOVER);
 #   (c) the promoted node does NOT re-hand the in-use address to a 2nd client
 #       (the duplicate-allocation window is closed by the pre-seed).
-# Validate v4, v6, and an IA_PD lease where the LAN fixture supports it.
+# What is automated (#9729): (a) and (b) for a v4 lease; the v6 memfile header
+# and a v6 lease only with DHCP_V6=1 on a fixture that answers DHCPv6. IA_PD and
+# (c), which needs a second DHCP client on the segment, are NOT automated, so
+# this gate does not claim them. Roles are derived from the RG0 row, not assumed,
+# and the promotion is asserted before (a) and (b) are read on the survivor.
 #
 # Usage:
 #   ./test/incus/dhcp-lease-failover.sh
@@ -52,6 +56,7 @@ DHCP_CLIENT_IFACE="${DHCP_CLIENT_IFACE:-eth0}"
 KEA_MEMFILE4="${KEA_MEMFILE4:-/var/lib/kea/kea-leases4.csv}"
 KEA_MEMFILE6="${KEA_MEMFILE6:-/var/lib/kea/kea-leases6.csv}"
 REBOOT_WAIT="${REBOOT_WAIT:-60}"
+DHCP_V6="${DHCP_V6:-0}"
 
 # Golden Kea 3.0.x headers — MUST stay in lockstep with the Go golden
 # (pkg/dhcpserver/lease_sync.go keaMemfileHeader{4,6} + the
@@ -69,6 +74,19 @@ fail() { echo "  FAIL  $*"; FAIL=$((FAIL + 1)); ERRORS+=("$*"); }
 die()  { echo "FATAL: $*" >&2; exit 2; }
 
 ssh_fw() { incus exec "$1" -- bash -lc "$2"; }
+
+# rg0_primary_node <query-node> prints the node holding RG0 primary as seen from
+# <query-node>, or nothing when the RG0 row cannot be read (#9729).
+rg0_primary_node() {
+	local status row0 row1
+	status="$(ssh_fw "$1" '/usr/local/sbin/cli -c "show chassis cluster status" 2>/dev/null' || true)"
+	row0="$(printf '%s\n' "$status" | awk '/^Redundancy group:[[:space:]]/ {rg=$3; next} rg=="0" && $1=="node0" {print tolower($3); exit}')"
+	row1="$(printf '%s\n' "$status" | awk '/^Redundancy group:[[:space:]]/ {rg=$3; next} rg=="0" && $1=="node1" {print tolower($3); exit}')"
+	case "$row0/$row1" in
+	primary*/*) echo "$FW0" ;;
+	*/primary*) echo "$FW1" ;;
+	esac
+}
 
 # ---------------------------------------------------------------------------
 # Preflight — the lab prerequisites this smoke cannot self-provision.
@@ -117,30 +135,50 @@ assert_memfile_header() {
 main() {
 	preflight
 
-	info "1) LAN client DISCOVERs a lease from the MASTER ($FW0) Kea"
+	PRIMARY="$(rg0_primary_node "$FW0")"
+	[ -n "$PRIMARY" ] || PRIMARY="$(rg0_primary_node "$FW1")"
+	[ -n "$PRIMARY" ] || die "cannot read the RG0 primary from either node"
+	if [ "$PRIMARY" = "$FW0" ]; then STANDBY="$FW1"; else STANDBY="$FW0"; fi
+	info "roles: RG0 primary=$PRIMARY standby=$STANDBY"
+
+	info "1) LAN client DISCOVERs a lease from the RG0 primary ($PRIMARY) Kea"
 	ssh_fw "$DHCP_CLIENT" "dhclient -1 -v '$DHCP_CLIENT_IFACE'" || die "v4 DHCP DISCOVER failed"
 	local addr4
 	addr4="$(ssh_fw "$DHCP_CLIENT" "ip -4 -o addr show dev '$DHCP_CLIENT_IFACE' | awk '{print \$4}' | cut -d/ -f1")"
 	[[ -n "$addr4" ]] || die "no v4 address acquired"
 	pass "client acquired v4 lease $addr4"
-	# v6 / IA_PD acquisition (dhclient -6 / -6 -P) goes here where the fixture supports it.
+	if [ "$DHCP_V6" = "1" ]; then
+		ssh_fw "$DHCP_CLIENT" "dhclient -6 -1 -v '$DHCP_CLIENT_IFACE'" || die "v6 DHCP SOLICIT failed (DHCP_V6=1)"
+		pass "client acquired a v6 lease"
+	fi
 
 	info "2) Wait for the lease-sync push + standby pre-seed, then gate byte-exactness"
 	sleep 3
-	assert_memfile_header "$FW1" "$KEA_MEMFILE4" "$GOLDEN_HEADER4" 4
-	assert_memfile_header "$FW1" "$KEA_MEMFILE6" "$GOLDEN_HEADER6" 6
-	if ! ssh_fw "$FW1" "grep -q '^${addr4},' '$KEA_MEMFILE4'"; then
+	assert_memfile_header "$STANDBY" "$KEA_MEMFILE4" "$GOLDEN_HEADER4" 4
+	if [ "$DHCP_V6" = "1" ]; then
+		assert_memfile_header "$STANDBY" "$KEA_MEMFILE6" "$GOLDEN_HEADER6" 6
+	fi
+	if ! ssh_fw "$STANDBY" "grep -q '^${addr4},' '$KEA_MEMFILE4'"; then
 		fail "leased address $addr4 not present in standby pre-seed memfile"
 	else
 		pass "leased address $addr4 present in standby pre-seed memfile"
 	fi
 
-	info "3) Hard failover — reboot the primary ($FW0)"
-	incus restart "$FW0" --force || die "reboot $FW0 failed"
+	info "3) Hard failover — reboot the RG0 primary ($PRIMARY)"
+	incus restart "$PRIMARY" --force || die "reboot $PRIMARY failed"
+	sleep "$REBOOT_WAIT"
+	local promoted
+	promoted="$(rg0_primary_node "$STANDBY")"
+	if [ "$promoted" != "$STANDBY" ]; then
+		fail "no promotion observed: RG0 primary reads '${promoted:-unreadable}' on $STANDBY after rebooting $PRIMARY"
+		echo "  DHCP lease-failover test: $PASS passed, $FAIL failed"
+		exit 1
+	fi
+	pass "the standby $STANDBY was promoted to RG0 primary"
 
-	info "4) (a) promoted node ($FW1) Kea must have loaded the memfile with no parse error"
+	info "4) (a) promoted node ($STANDBY) Kea must have loaded the memfile with no parse error"
 	# Kea logs a CSV parse error on a header/column mismatch; assert none.
-	if ssh_fw "$FW1" "journalctl -u kea-dhcp4-server --since '-2 min' 2>/dev/null | grep -iE 'error|parse|malformed'"; then
+	if ssh_fw "$STANDBY" "journalctl -u kea-dhcp4-server --since '-2 min' 2>/dev/null | grep -iE 'error|parse|malformed'"; then
 		fail "Kea reported a memfile load error on the promoted node"
 	else
 		pass "no Kea memfile parse error on promoted node"
@@ -156,12 +194,13 @@ main() {
 		fail "client address changed across failover: $addr4 -> $addr4b (lease NOT synced)"
 	fi
 
-	info "6) (c) promoted node must NOT re-hand the in-use address to a 2nd client"
-	# A second DHCP client on the same segment must get a DIFFERENT address.
-	# (Wire a distinct client here in the lab; documented, not auto-provisioned.)
+	# (c) — the promoted node must not re-hand the in-use address to a second
+	# client — needs a second DHCP client on the segment and is NOT automated
+	# here; the header says so rather than letting a step name imply a check.
 
 	echo
-	echo "==== DHCP lease-failover smoke: PASS=$PASS FAIL=$FAIL ===="
+	# #9729: the canonical line the ha-smoke ledger adapter parses.
+	echo "  DHCP lease-failover test: $PASS passed, $FAIL failed"
 	if ((FAIL > 0)); then
 		printf ' - %s\n' "${ERRORS[@]}" >&2
 		exit 1
