@@ -855,8 +855,25 @@ tree:
 
 | Mode | Collector | Selected when |
 |---|---|---|
-| VRRP-backed | `CollectRethInstances` | default (RETH VRRP instances synthesized) |
-| Direct | `RethVIPsForRG` | `no-reth-vrrp` or `private-rg-election` |
+| VRRP-backed | `CollectRethInstances` | `no-private-rg-election` without `no-reth-vrrp` (legacy) |
+| Direct | `RethVIPsForRG` | `private-rg-election` (the compiler default) or `no-reth-vrrp` |
+
+This table used to call the VRRP-backed mode the default. It stopped being the
+default when private-RG election became the compiler default
+(`compiler_system.go` sets `PrivateRGElection = true` unless
+`no-private-rg-election` is configured).
+
+**VRID reservation in the VRRP-backed mode (#9724).**
+- `CollectRethInstances` sets `GroupID = 100 + rgID`, a fixed base
+  (`config.RethVRRPGroupIDBase`).
+- Redundancy-group ids are 1..15 (`config.MaxRedundancyGroups`), so the mode
+  uses VRIDs 101-115 on RETH member segments.
+- The receive path checks the arrival interface, TTL, the self-address set and
+  the VRID, but no cluster identity. Another VRRP speaker on those VRIDs
+  therefore takes part in the election.
+
+That is an operator constraint. It is documented in `docs/feature-coverage.md`,
+in the bullet after "VRRP L2 identity".
 
 Both dereferenced interface, unit, and (VRRP mode) redundancy-group map values
 raw, so a present-but-nil slot would nil-deref on the HA ownership path. Their
