@@ -23,12 +23,15 @@ func readFile9156(p string) (string, error) {
 //
 // `oneLine` selects the run: true puts both statements on one `set` line, false
 // puts them on separate lines — the oracle.
-func gateCompileFlatSet9156(container []string, ctx, headStmt, tailStmt string, oneLine bool) (string, error) {
+// gateCompileFlatSet9156 applies the set lines onto base, the brace text of the
+// fixture's context: empty for none, else the container's context as the
+// braced arm renders it (#9792 fixtures included).
+func gateCompileFlatSet9156(container []string, base, headStmt, tailStmt string, oneLine bool) (string, error) {
 	var tree *ConfigTree
-	if strings.TrimSpace(ctx) == "" {
+	if strings.TrimSpace(base) == "" {
 		tree = &ConfigTree{}
 	} else {
-		p := NewParser(nest(container, ctx))
+		p := NewParser(base)
 		t, errs := p.Parse()
 		if len(errs) > 0 {
 			return "", fmt.Errorf("context parse: %v", errs)
@@ -99,8 +102,10 @@ func ratchetLeafRunDiffers9156(differed []string) (unrecorded, fixed []string) {
 //
 // It walks the same SchemaValidateWithDefinitions the commit path runs, on the
 // braced rendering, so it is the gate's own verdict rather than a model of it.
-func strictAdmitsLeafRun9156(container []string, ctx, headStmt, tailStmt string) bool {
-	tree, errs := NewParser(nest(container, ctx+headStmt+" "+tailStmt+";")).Parse()
+// strictAdmitsLeafRun9156 reports whether the strict walk admits runText, the
+// one-line spelling exactly as the braced arm compiled it.
+func strictAdmitsLeafRun9156(runText string) bool {
+	tree, errs := NewParser(runText).Parse()
 	if len(errs) > 0 {
 		return false
 	}
