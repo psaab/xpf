@@ -115,26 +115,24 @@ func validateRoutingInstanceChildTokensAST(nodes []*Node, lenient bool) ([]strin
 			if isApplyStatementNode(inst) {
 				// #9657: the node is read as the statement, never as an instance,
 				// quoted or not, which is what the compiler and the collision scan
-				// do too. A one-key stanza under the keyword's name can still be an
-				// instance the operator wrote there: a flat `set` statement has the
-				// same one-key shape, and a routing-instance keyword among its
-				// children is what gives the instance away. Refuse it rather than
-				// let the instance vanish on a clean commit. The two-key form
-				// (`apply-macro M { ... }`) is always the statement, whatever keys
-				// the macro carries.
+				// do too. A one-key stanza under the keyword's name may be an
+				// instance the operator wrote there, and a routing-instance keyword
+				// among its children suggests it. It is WARNED, not refused, on every
+				// path: a flat `set` statement whose macro or group is named after a
+				// routing-instance keyword (`set routing-instances apply-macro
+				// interface k v`) has exactly this shape, so the shape cannot prove
+				// that an instance was meant. The two-key form (`apply-macro M { ... }`)
+				// is always the statement and is not warned.
 				if len(inst.Keys) == 1 {
 					for _, ch := range inst.Children {
 						if ch == nil || !permitted[ch.Name()] {
 							continue
 						}
-						msg := fmt.Sprintf("routing-instances: %q is a statement keyword and cannot name a routing "+
-							"instance; the stanza carries %q, which would be dropped with no instance created — "+
-							"rename the instance (#9657)", instName, ch.Name())
-						if lenient {
-							warnings = append(warnings, msg)
-							break
-						}
-						return warnings, fmt.Errorf("%s", msg)
+						warnings = append(warnings, fmt.Sprintf("routing-instances: %q is a statement keyword and "+
+							"cannot name a routing instance; the stanza is read as that statement, so if %q under it "+
+							"was meant as a routing-instance setting, no instance is created — rename the instance (#9657)",
+							instName, ch.Name()))
+						break
 					}
 				}
 				continue

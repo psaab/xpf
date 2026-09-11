@@ -289,17 +289,21 @@ func TestApplyStatementsAreNotRoutingInstances_9657(t *testing.T) {
 		if names := riNames9657(cfg); len(names) != 1 || names[0] != "ri7" {
 			t.Errorf("#9657: a quoted %q stanza must not compile as a routing instance, got %v", kw, names)
 		}
-		if _, err := compile9657(t, quoted, false); err == nil || !strings.Contains(err.Error(), "cannot name a routing instance") {
-			t.Errorf("#9657: a %q stanza carrying routing-instance keywords vanishes unless strict refuses it, got %v", kw, err)
+		scfg, err := compile9657(t, quoted, false)
+		if err != nil {
+			t.Errorf("#9657: the shape cannot prove an instance was meant, so strict must not refuse the %q stanza: %v", kw, err)
 		}
-		warned := false
-		for _, w := range cfg.Warnings {
-			if strings.Contains(w, "cannot name a routing instance") {
-				warned = true
+		for _, c := range []struct {
+			path string
+			cfg  *Config
+		}{{"strict", scfg}, {"lenient", cfg}} {
+			if c.cfg == nil {
+				continue
 			}
-		}
-		if !warned {
-			t.Errorf("#9657: the lenient path must warn that %q cannot name a routing instance, got %v", kw, cfg.Warnings)
+			if !keywordNameWarned9657(c.cfg) {
+				t.Errorf("#9657: the %s path must warn that %q cannot name a routing instance, or the instance vanishes "+
+					"silently; got %v", c.path, kw, c.cfg.Warnings)
+			}
 		}
 		tree, errs := NewParser(quoted).Parse()
 		if len(errs) > 0 {
@@ -335,35 +339,64 @@ func TestTableIDGateIgnoresAGroupAppliedUnderAnotherStanza_9657(t *testing.T) {
 	}
 }
 
-// Every real spelling of the statements still commits, including a macro whose
-// key happens to be a routing-instance keyword. Only a one-key stanza carrying
-// routing-instance keywords, an instance written under the keyword's name, is
-// refused, and its flat spelling has the same one-key shape as the flat
-// statement: the keyword child is what tells them apart.
+func keywordNameWarned9657(c *Config) bool {
+	for _, w := range c.Warnings {
+		if strings.Contains(w, "cannot name a routing instance") {
+			return true
+		}
+	}
+	return false
+}
+
+// Every real spelling of the statements commits, in both compiler cores. A
+// two-key statement is never warned, including a macro whose key is a
+// routing-instance keyword. A one-key stanza carrying a routing-instance
+// keyword is warned but never refused: a flat statement whose macro or group is
+// named after a routing-instance keyword has exactly that shape, so for those
+// spellings only "commits" is asserted.
 func TestApplyStatementSpellingsStillCommit_9657(t *testing.T) {
 	for _, tc := range []struct{ name, text string }{
 		{"braced macro", "routing-instances {\n    apply-macro M {\n        k v;\n    }\n}\n"},
 		{"braced macro with an interface key", "routing-instances {\n    apply-macro M {\n        interface ge-0/0/0.0;\n    }\n}\n"},
 		{"packed macro", "routing-instances {\n    apply-macro M k v;\n}\n"},
 	} {
-		if _, err := compile9657(t, tc.text, false); err != nil {
+		cfg, err := compile9657(t, tc.text, false)
+		if err != nil {
 			t.Errorf("#9657 %s: a valid apply statement must commit, got %v", tc.name, err)
+			continue
+		}
+		if keywordNameWarned9657(cfg) {
+			t.Errorf("#9657 %s: a two-key apply statement is always the statement and must not be warned: %v", tc.name, cfg.Warnings)
 		}
 	}
+	const any, yes, no = "any", "yes", "no"
 	for _, tc := range []struct {
 		name string
 		cmds []string
+		warn string
 	}{
-		{"flat macro", []string{"set routing-instances apply-macro M k v"}},
-		{"flat apply-groups-except", []string{"set groups g2 system host-name x", "set routing-instances apply-groups-except g2"}},
+		{"flat macro", []string{"set routing-instances apply-macro M k v"}, no},
+		{"flat apply-groups-except", []string{"set groups g2 system host-name x", "set routing-instances apply-groups-except g2"}, no},
+		{"flat macro named after a routing-instance keyword", []string{"set routing-instances apply-macro interface k v"}, any},
+		{"flat apply-groups-except naming a keyword-named group", []string{"set groups interface system host-name x", "set routing-instances apply-groups-except interface"}, any},
+		{"flat instance written under the apply-macro name", []string{"set routing-instances apply-macro instance-type virtual-router"}, yes},
 	} {
-		if _, err := CompileConfig(setTree9622(t, tc.cmds...)); err != nil {
-			t.Errorf("#9657 %s: a valid apply statement must commit, got %v", tc.name, err)
+		for _, core := range []string{"CompileConfig", "CompileConfigForNode"} {
+			var cfg *Config
+			var err error
+			if core == "CompileConfig" {
+				cfg, err = CompileConfig(setTree9622(t, tc.cmds...))
+			} else {
+				cfg, err = CompileConfigForNode(setTree9622(t, tc.cmds...), 0)
+			}
+			if err != nil {
+				t.Errorf("#9657 %s (%s): an apply statement must never be refused, got %v", tc.name, core, err)
+				continue
+			}
+			if got := keywordNameWarned9657(cfg); (tc.warn == yes && !got) || (tc.warn == no && got) {
+				t.Errorf("#9657 %s (%s): keyword-name warning = %v, want %s; warnings=%v", tc.name, core, got, tc.warn, cfg.Warnings)
+			}
 		}
-	}
-	if _, err := CompileConfig(setTree9622(t, "set routing-instances apply-macro instance-type virtual-router")); err == nil ||
-		!strings.Contains(err.Error(), "cannot name a routing instance") {
-		t.Errorf("#9657: a flat instance written under the apply-macro name must be refused, got %v", err)
 	}
 }
 

@@ -10939,13 +10939,15 @@ reserved for whole-dataplane selection where a rewrite shim
   name, quoted or not, because group expansion and the `#9323` validator also
   go by name and a quote does not survive rendering, which an HA peer
   reparses. An instance therefore cannot take one of these names. A one-key
-  stanza under such a name that carries routing-instance keywords (an instance
-  written there) is refused at strict commit and warned on the tolerant paths
-  (`validateRoutingInstanceChildTokensAST`, the `#9323` validator), because it
-  would otherwise vanish on a clean commit. A two-key statement such as
-  `apply-macro M { interface ...; }` still commits, whatever keys the macro
-  carries. The zone (`#3075`) and tunnel (`#1873`) gates' pre-expansion views
-  still count every `groups` block. Regression coverage:
+  stanza under such a name that carries a routing-instance keyword gets a
+  commit warning on every path (`validateRoutingInstanceChildTokensAST`, the
+  `#9323` validator) instead of vanishing silently. It is not refused: a flat
+  `set` statement whose macro or group is named after a routing-instance
+  keyword (`set routing-instances apply-macro interface k v`) has the same
+  shape, so the shape cannot prove an instance was meant. A two-key statement
+  such as `apply-macro M { interface ...; }` is neither warned nor refused.
+  The zone (`#3075`) and tunnel (`#1873`) gates' pre-expansion views still
+  count every `groups` block. Regression coverage:
   `pkg/config/routinginstanceid_unapplied_groups_9657_test.go`.
 - **#3444 (destination-NAT rule-set `to` scope reject):** a Junos
   destination-NAT rule-set has only a `from` clause (zone | interface |
