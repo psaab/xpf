@@ -771,6 +771,35 @@ queues. See PR #1243's kill record for why i40e doesn't reshape.
 
 ## Gotchas
 
+- **An accept error does not crash-loop the helper (#9172, V031).** Both accept
+  loops in `lifecycle.rs` (the control socket on the main thread, the session
+  socket on its own thread) decide through `accept_step`, which also returns the
+  journal line to write, so log volume is tested rather than assumed.
+  - `WouldBlock` keeps each loop's poll interval.
+  - EMFILE / ENFILE / ENOBUFS / ENOMEM -- what the accept path returns under
+    descriptor or memory pressure -- are RETRIED on both loops: 50 ms doubling to
+    1 s, reset by the next successful accept. An episode writes one onset line
+    and one recovery line; a quiet gap of more than 5 s between failures starts a
+    new episode, and its onset line says the previous one ended.
+  - There is deliberately **no time bound** that exits the helper. A bound on "no
+    successful accept" cannot tell a descriptor leak from fluctuating pressure:
+    the kernel reserves the result descriptor before looking at the backlog, so
+    an EMPTY listener returns EMFILE at the limit and EAGAIN once one descriptor
+    frees, with no accept in between (measured). A helper wedged by a genuine
+    leak therefore stays up, forwarding on its last applied state with a deaf
+    control socket; how to recover that is #9651.
+  - Any other error: the CONTROL loop returns `Err`, which `main` turns into
+    `exit(1)` for the supervisor -- its behaviour before this change. The SESSION
+    loop retries it the same way and says once that it is not exiting: errno does
+    not say where an error came from (an LSM hook runs before `unix_accept` and
+    its errno is propagated unchanged), the thread has no path to end the
+    process, and exiting would take forwarding down with the HA session socket.
+
+  Before this, the control loop exited on every non-`WouldBlock` error, so fd
+  pressure became a supervisor crash-loop with no forwarding for up to 60 s per
+  cycle, and the session thread `continue`d with no sleep and spun a core on a
+  persistent EMFILE. EINTR never reaches `accept_step`: std's `accept` retries
+  it.
 - `reconcile_status_bindings` has two arms. When `should_run_afxdp`
   holds it runs `Coordinator::reconcile` and returns its
   `Result<(), afxdp::ReconcileError>` (#3789): a pre-teardown abort
