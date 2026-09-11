@@ -32,8 +32,18 @@ package config
 //     `vrf-target export target:65000:1` stays one statement, and so does
 //     `interface ge-0/0/1.0 ge-0/0/2.0`. Measured: the braced one-line spellings
 //     commit, and a split after the declared value refused `target:65000:1` as
-//     an undeclared keyword. An authored quoted or bracketed token is always a
-//     value, so `interface [ description protocols ]` names two interfaces.
+//     an undeclared keyword.
+//   - An apply statement (apply-groups, apply-groups-except, apply-macro) ends
+//     the statement before it and is a statement of its own, so group expansion
+//     sees it as it does inside braces. Absorbed into the value before it,
+//     `ri1 instance-type vrf apply-groups MISSING;` committed where the braced
+//     spelling refuses the undefined group.
+//   - Quotes and brackets never move a boundary. show configuration, HA sync,
+//     `load merge` and rollback files render the tree without them, so a split
+//     that read them would bind `interface [ ge-0/0/0.0 protocols ]` into the VRF
+//     here and only `ge-0/0/0.0` on a peer that parsed the rendered text. The
+//     scoped fold is provenance-blind for the same reason. Whether an authored
+//     value that spells a keyword should stay a value is #9635.
 //   - A container keyword (routing-options, protocols, interface-routes) takes
 //     the rest of the run and the braced body. So does an undeclared keyword,
 //     which can only START the run, since any later one extends the statement
@@ -55,8 +65,8 @@ func normalizeElidedRoutingInstance9620(node *Node, instance *schemaNode) int {
 	}
 	quoted := keyMask8921(node.KeysQuoted, n)
 	bracketed := keyMask8921(node.KeysBracketed, n)
-	authored := func(i int) bool {
-		return (quoted != nil && quoted[i]) || (bracketed != nil && bracketed[i])
+	boundary := func(tok string) bool {
+		return instance.children[tok] != nil || routingInstanceApplyMetaKeyword9323(tok)
 	}
 
 	type span struct{ from, to int }
@@ -64,16 +74,21 @@ func normalizeElidedRoutingInstance9620(node *Node, instance *schemaNode) int {
 	ownsBody := false
 	for i := 1; i < n; {
 		kw := instance.children[node.Keys[i]]
-		if kw == nil || len(kw.children) > 0 || kw.wildcard != nil {
+		apply := routingInstanceApplyMetaKeyword9323(node.Keys[i])
+		if !apply && (kw == nil || len(kw.children) > 0 || kw.wildcard != nil) {
 			spans = append(spans, span{i, n})
 			ownsBody = true
 			break
 		}
-		j := i + 1 + kw.args
+		args := 1 // an apply statement names at least one group or macro
+		if kw != nil {
+			args = kw.args
+		}
+		j := i + 1 + args
 		if j > n {
 			j = n
 		}
-		for j < n && (authored(j) || instance.children[node.Keys[j]] == nil) {
+		for j < n && !boundary(node.Keys[j]) {
 			j++
 		}
 		spans = append(spans, span{i, j})

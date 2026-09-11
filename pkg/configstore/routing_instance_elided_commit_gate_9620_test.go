@@ -62,6 +62,24 @@ func TestElidedRoutingInstanceMeetsTheBracedCommitGate9620(t *testing.T) {
 			check:  nextHopInherited9620,
 		},
 		{
+			name:    "apply-groups after a value names an undefined group",
+			elided:  `ri1 instance-type virtual-router apply-groups MISSING;`,
+			braced:  `ri1 { instance-type virtual-router; apply-groups MISSING; }`,
+			refusal: "MISSING",
+		},
+		{
+			name:   "apply-groups after a value inherits from its group",
+			prefix: `groups { D { routing-instances { ri1 { description inherited; } } } } `,
+			elided: `ri1 instance-type virtual-router apply-groups D;`,
+			braced: `ri1 { instance-type virtual-router; apply-groups D; }`,
+			check: func(cfg *config.Config) string {
+				if len(cfg.RoutingInstances) != 1 || cfg.RoutingInstances[0].Description != "inherited" {
+					return "want description inherited from group D, got " + json9620(cfg.RoutingInstances)
+				}
+				return ""
+			},
+		},
+		{
 			name:    "undeclared keyword first",
 			elided:  `ri1 bogus-kw foo instance-type virtual-router;`,
 			braced:  `ri1 { bogus-kw foo instance-type virtual-router; }`,

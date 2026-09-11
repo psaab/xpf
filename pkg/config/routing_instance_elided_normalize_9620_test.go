@@ -2,7 +2,9 @@ package config
 
 import (
 	"encoding/json"
+	"fmt"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -45,9 +47,18 @@ var elidedInstanceCells9620 = []struct {
 	{"interface run then a property then a body",
 		`ri1 interface ge-0/0/1.0 ge-0/0/2.0 instance-type virtual-router routing-options static route 10.9.0.0/16 next-hop 10.0.0.2;`,
 		`ri1 { interface ge-0/0/1.0 ge-0/0/2.0; instance-type virtual-router; routing-options static route 10.9.0.0/16 next-hop 10.0.0.2; }`},
-	{"bracketed interface members spelled as keywords",
-		`ri1 interface [ description protocols ];`,
-		`ri1 { interface [ description protocols ]; }`},
+	{"apply-groups after a value",
+		`ri1 instance-type vrf apply-groups G;`,
+		`ri1 { instance-type vrf; apply-groups G; }`},
+	{"apply-groups-except before a body",
+		`ri1 apply-groups-except G routing-options static route 10.9.0.0/16 next-hop 10.0.0.2;`,
+		`ri1 { apply-groups-except G; routing-options static route 10.9.0.0/16 next-hop 10.0.0.2; }`},
+	{"apply group named like a keyword",
+		`ri1 apply-groups description instance-type vrf;`,
+		`ri1 { apply-groups description; instance-type vrf; }`},
+	{"bracketed interface list",
+		`ri1 interface [ ge-0/0/1.0 ge-0/0/2.0 ] instance-type vrf;`,
+		`ri1 { interface [ ge-0/0/1.0 ge-0/0/2.0 ]; instance-type vrf; }`},
 	{"keyword last with a braced body",
 		`ri1 routing-options { static { route 10.9.0.0/16 next-hop 10.0.0.2; } }`,
 		`ri1 { routing-options { static { route 10.9.0.0/16 next-hop 10.0.0.2; } } }`},
@@ -95,6 +106,48 @@ func TestElidedRoutingInstanceNormalizesToTheBracedTree9620(t *testing.T) {
 			})
 		}
 	}
+}
+
+// Quotes and brackets must not move a statement boundary. The text renderings
+// (show configuration, HA sync, rollback files) drop leaf provenance, so a split
+// that read it would bind `interface [ ge-0/0/0.0 protocols ]` into the VRF on
+// this node and only `ge-0/0/0.0` on a peer that parsed the rendered text.
+// Whether an authored value that spells a keyword should stay a value is #9635.
+func TestElidedRoutingInstanceSplitIgnoresAuthoredProvenance9620(t *testing.T) {
+	for _, c := range []struct{ authored, plain string }{
+		{`ri1 instance-type vrf interface [ ge-0/0/0.0 protocols ];`, `ri1 instance-type vrf interface ge-0/0/0.0 protocols;`},
+		{`ri1 instance-type vrf interface ge-0/0/0.0 "protocols";`, `ri1 instance-type vrf interface ge-0/0/0.0 protocols;`},
+		{`ri1 interface [ description protocols ];`, `ri1 interface description protocols;`},
+	} {
+		a := parse8921(t, "authored", `routing-instances { `+c.authored+` }`)
+		p := parse8921(t, "plain", `routing-instances { `+c.plain+` }`)
+		if a == nil || p == nil {
+			continue
+		}
+		normalizeCompactStanzas(a)
+		normalizeCompactStanzas(p)
+		if got, want := keysShape9620(a.Children), keysShape9620(p.Children); got != want {
+			t.Errorf("quotes or brackets moved a statement boundary (#9620)\n authored %q ->\n%s plain %q ->\n%s",
+				c.authored, got, c.plain, want)
+		}
+	}
+}
+
+// keysShape9620 renders the Keys structure only, without quote or bracket masks.
+func keysShape9620(nodes []*Node) string {
+	var b strings.Builder
+	var walk func(ns []*Node, depth int)
+	walk = func(ns []*Node, depth int) {
+		for _, n := range ns {
+			if n == nil {
+				continue
+			}
+			fmt.Fprintf(&b, "%s%q\n", strings.Repeat("  ", depth), n.Keys)
+			walk(n.Children, depth+1)
+		}
+	}
+	walk(nodes, 0)
+	return b.String()
 }
 
 // An apply statement under routing-instances is not an instance (#9657). The

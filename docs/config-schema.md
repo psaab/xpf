@@ -675,8 +675,14 @@ validated against:
 - A keyword that is not a container takes its declared values, then every
   further token up to the next declared instance keyword. That is what the same
   statement means written on one line inside braces, so `vrf-target export
-  target:65000:1` stays one statement. An authored quoted or bracketed token is
-  always a value.
+  target:65000:1` stays one statement.
+- An apply statement (`apply-groups`, `apply-groups-except`, `apply-macro`)
+  ends the statement before it and is a statement of its own, so group
+  expansion sees it as it does inside braces.
+- Quotes and brackets never move a boundary. `show configuration`, HA sync,
+  `load merge` and rollback files render the tree without them, so a split
+  that read them would give a peer different VRF membership. Whether an
+  authored value that spells a keyword should stay a value is #9635.
 - A container keyword (`routing-options`, `protocols`, `interface-routes`)
   takes the rest of the run and the braced body. So does an undeclared keyword,
   which can only start the run. It arrives as a child named by that keyword, so
@@ -709,11 +715,13 @@ Regression coverage:
 
 - `pkg/config/routing_instance_elided_normalize_9620_test.go`: the elided and
   braced spellings normalize to one tree, at top level and inside `groups`;
-  apply statements are untouched; the compiled fields match on both spellings.
+  apply statements are untouched; quotes and brackets do not move a boundary;
+  the compiled fields match on both spellings.
 - `pkg/configstore/routing_instance_elided_commit_gate_9620_test.go`: both
   spellings reach the same commit-gate verdict. That covers refusals for
-  `hold-time 1` and for an undeclared first keyword, a next-hop inherited from
-  a group, and a multi-token `vrf-target`.
+  `hold-time 1`, for an undeclared first keyword and for an inline
+  `apply-groups` naming an undefined group; a next-hop and a description
+  inherited from a group; and a multi-token `vrf-target`.
 
 ### Where it is NOT done
 

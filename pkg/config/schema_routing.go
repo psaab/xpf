@@ -944,6 +944,10 @@ var schemaRoutingInstances = &schemaNode{desc: "Routing instance configuration",
 		// (which builds a chain and compiles correctly) -- so the boot and HA-sync
 		// paths, not the CLI.
 		//
+		// Since #9620 the #8662 normalizer splits a packed instance run by these
+		// declarations (normalizeElidedRoutingInstance9620), before group expansion
+		// and validation; the compiler reads only the braced shape.
+		//
 		// `interface` is multi: the compiler reads it with firewallMatchValues,
 		// and the #3904 note there records that reading only the first value
 		// stranded the remaining ports outside the instance -- a VRF isolation

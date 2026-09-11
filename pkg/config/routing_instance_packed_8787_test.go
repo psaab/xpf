@@ -118,10 +118,12 @@ func TestPackedRoutingInstanceSurvives8787(t *testing.T) {
 // TestRoutingInstanceLeavesAreOffered8787 pins the SECOND, separable half of
 // the #8787 change, because mutation showed it does not affect the first.
 //
-// Removing the schema declarations of `instance-type` and `interface` leaves
-// every assertion in TestPackedRoutingInstanceSurvives8787 passing — the
-// compiler fix carries that on its own. What the declarations do is measured
-// here instead: completion and `?` help offer the leaves. Without them the
+// When this cell was written, removing the schema declarations of
+// `instance-type` and `interface` left every assertion in
+// TestPackedRoutingInstanceSurvives8787 passing, because the compiler read the
+// packed tail on its own. Since #9620 the normalizer splits a packed instance
+// by these same declarations, so they now carry that cell too. This cell pins
+// the other half: completion and `?` help offer the leaves. Without them the
 // operator is offered 2 completions and neither is the one they need.
 //
 // Kept as its own cell so the two halves cannot be confused. #8785 is the

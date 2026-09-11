@@ -195,11 +195,11 @@ func validateRoutingInstanceChildTokensAST(nodes []*Node, lenient bool) ([]strin
 //	VRF-A protocols { ospf { area 0.0.0.0 { interface ge-0/0/1.0; } } }
 //	  -> REJECTED: "ospf" is not a routing-instance keyword
 //
-// Both are valid configuration. This is #9055's lesson, which the COMPILER
-// already learned at the sibling site ("an elided BODY-BEARING keyword puts its
-// NAME on the Keys tail and its BODY in Children, so the property loop sees the
-// body's contents instead of the keyword") — and which this gate had to learn
-// separately because it splits the node itself.
+// Both are valid configuration. Since #9620 the prewalk receives the
+// #8662-normalized tree, where normalizeElidedRoutingInstance9620 has already
+// rewritten a brace-elided instance into the braced shape, so on the compile
+// and commit paths this third shape no longer reaches the gate. The branch below
+// stays for any caller that hands it an un-normalized tree.
 //
 // So the two sources are EXCLUSIVE, not additive: a node whose Keys carry a
 // tail is a packed/elided instance keyword and its Children belong to that
