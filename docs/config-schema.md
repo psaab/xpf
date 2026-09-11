@@ -573,34 +573,40 @@ spelling parses to, so every strict gate reads it as longhand:
 
 The rules:
 
-- **Members versus body.** Members are the tokens before the first keyword the
-  `security-zone` schema node declares, or before `apply-groups`,
-  `apply-groups-except` or `apply-macro`. setSchema does not declare those inside
-  a zone (#9685), so without the stop `security-zone trust apply-groups G;` would
-  be three zones. The remaining tokens are a packed body, placed under each
-  member. That body owns the braced body when the statement has one. A
-  statement with a single member is left to the scoped fold.
-- **A braced body decides how a keyword tail reads.** With a non-empty body, the
-  tail is a packed head only when it is one complete statement whose last node
-  can hold a body. Examples: `interfaces`, `interfaces ge-0/0/0.0`,
-  `host-inbound-traffic`, `address-book`, `apply-macro M`. Otherwise every
-  token names a zone, which is how #8794 read a braced group:
-  `security-zone [ zga zgb tcp-rst ] { tcp-rst; }` is three zones, because a
-  `tcp-rst` flag cannot hold a body. A leaf has no body to decide with, and
-  neither has an empty `{ }`, which FormatSet renders the same as a leaf. Their
-  keyword tail is always a statement, so `security-zone [ zga zgb tcp-rst ];`
-  is two zones with `tcp-rst`. A zone named after a zone keyword in a leaf group
-  needs the longhand.
+- **Members and tail.** A statement with a non-empty braced body names a zone
+  with every token, as #8794 read a braced group, so
+  `security-zone [ zga zgb host-inbound-traffic ] { tcp-rst; }` is three zones.
+  Two review rounds found that reading a keyword before the body as the body's
+  head loses the zone named after that keyword (`tcp-rst`, `screen`,
+  `host-inbound-traffic`, `interfaces`, `apply-macro`). A body therefore admits
+  no tail at all. A leaf has no body to decide with, and neither does an empty
+  `{ }`, which FormatSet renders the same way. Their members are the tokens
+  before the first keyword the `security-zone` schema node declares, or before
+  `apply-groups`, `apply-groups-except` or `apply-macro`, which setSchema does
+  not declare inside a zone (#9685). The remaining tokens are a packed
+  statement tail placed under each member. So `security-zone [ zga zgb tcp-rst ];`
+  is two zones with `tcp-rst`, and naming a zone after a zone keyword in a leaf
+  group needs the longhand or a braced body. A statement with a single member
+  is left to the scoped fold.
 - **Brackets are not consulted.** `Format` drops the bracket mask from every
   node, and `FormatSet` from a leaf. `show configuration` renders
   `security-zone [ zga zgb ] screen edge;` as `security-zone zga zgb screen
   edge;`, and a cluster peer compiles that text, so both spellings must reach
   the same zones.
-- **Clones are budgeted.** Each member gets its own copy of the body, so a group
-  costs members × body nodes. The cost is charged against `maxParseNodes`
-  (`countNodes`) before anything is cloned. A group over the budget is left as
-  parsed and compiles through `bracketedGroupInstances8794`, which shares one
-  body.
+- **The fan-out is budgeted across the whole tree.** Each member gets the tail
+  or its own copy of the body, so a group costs members × (1 + body nodes +
+  tail). One normalization pass charges every group it reaches, in every
+  `zones` node, against `maxParseNodes` before anything is cloned
+  (`countNodes`). A group that does not fit is left as parsed. Strict commit
+  refuses it by name, and the tolerant load and peer-sync paths warn (#1960);
+  left unexpanded, a leaf group would compile only its first zone.
+- **A packed head before a braced body reads as zone names.** For example
+  `security-zone [ zga zgb ] interfaces { ge-0/0/0.0; }`, or
+  `… host-inbound-traffic system-services { ping; }`. This is unchanged from
+  before #9656. The #9656 review measured the second example as four zones
+  with `ping` lost. `FormatSet` replays such a body as a chain, which reads the
+  head as a statement, so the two renderings disagree for this spelling. That
+  disagreement also predates #9656.
 - **What ignoring brackets costs.** A mistyped keyword reads as a member:
   `security-zone trust scren edge;` now creates the empty zones `scren` and
   `edge`. Before #9656 the same line committed as zone `trust` with the
@@ -610,7 +616,7 @@ The rules:
   views, the strict zone gates, the empty-identity gate and the plaintext
   advisories all read the normalized tree, so they see the same zones.
   `bracketedGroupInstances8794` is unchanged. It still serves the interface
-  callers, and a braced group in an un-normalized tree or over the clone budget.
+  callers, and a braced group in an un-normalized tree.
 - **Editing and path-scoped reads do not.** They address the parsed statement,
   as they already did for a #8794 braced group:
   - `deactivate … security-zone zga` deactivates every zone in the group;
@@ -624,8 +630,8 @@ Tests:
 
 - `pkg/config/zone_group_normalize_9656_test.go` compares the tree against the
   longhand for the hierarchical, `groups`, compact-head and flat-set shapes. It
-  also checks the braced-body reading of a keyword tail, the apply-keyword stop,
-  the clone budget and zone-ID enumeration.
+  also checks that a braced body names only zones, the apply-keyword stop, the
+  tree-wide budget and its refusal, and zone-ID enumeration.
 - `pkg/configstore/zone_group_commit_gate_9656_test.go` checks the strict
   verdict and the lenient compile against the longhand.
 

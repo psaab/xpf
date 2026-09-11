@@ -2,6 +2,7 @@ package configstore
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -27,6 +28,7 @@ func TestZoneGroupMeetsTheLonghandCommitGate9656(t *testing.T) {
 	const policy = `security { policies { from-zone zgb to-zone zga { policy p { match { source-address any; destination-address any; application any; } then { permit; } } } } } `
 	const groupG = `groups { G { security { zones { security-zone <*> { tcp-rst; } } } } } `
 	const tcpRstPolicy = `security { policies { from-zone tcp-rst to-zone zga { policy p { match { source-address any; destination-address any; application any; } then { permit; } } } } } `
+	const hitPolicy = `security { policies { from-zone host-inbound-traffic to-zone zga { policy p { match { source-address any; destination-address any; application any; } then { permit; } } } } } `
 	zones := func(body string) string { return `security { zones { ` + body + ` } }` }
 	cells := []struct {
 		name, group, longhand string
@@ -72,6 +74,15 @@ func TestZoneGroupMeetsTheLonghandCommitGate9656(t *testing.T) {
 			group:    tcpRstPolicy + zones(`security-zone [ zga zgb tcp-rst ] { tcp-rst; }`),
 			longhand: tcpRstPolicy + zones(`security-zone zga { tcp-rst; } security-zone zgb { tcp-rst; } security-zone tcp-rst { tcp-rst; }`),
 			has:      []string{`"tcp-rst":{"Name":"tcp-rst"`, `"zgb":{"Name":"zgb"`},
+		},
+		{
+			// CONTROL: a zone named after a keyword that CAN hold a body. At
+			// 304920d71 this committed with all three zones; round 2 of the
+			// #9656 review measured the second cut losing it.
+			name:     "braced group naming a zone after a body-holding keyword",
+			group:    hitPolicy + zones(`security-zone [ zga zgb host-inbound-traffic ] { tcp-rst; }`),
+			longhand: hitPolicy + zones(`security-zone zga { tcp-rst; } security-zone zgb { tcp-rst; } security-zone host-inbound-traffic { tcp-rst; }`),
+			has:      []string{`"host-inbound-traffic":{"Name":"host-inbound-traffic"`, `"zgb":{"Name":"zgb"`},
 		},
 		{
 			name:     "packed body naming an undefined screen",
@@ -140,4 +151,43 @@ func lenientJSON9656(t *testing.T, label, text string) string {
 		return ""
 	}
 	return string(b)
+}
+
+// A group whose fan-out does not fit the configuration's node budget must not
+// commit as its first zone alone. 100,001 members with a `tcp-rst` tail cost
+// 200,002 nodes, over maxParseNodes, and parse to one node. Strict commit
+// refuses it by name; the tolerant load path compiles it with a warning.
+func TestOverBudgetZoneGroupIsRefusedAtCommit9656(t *testing.T) {
+	const want = "a group of 100001 zones was not expanded"
+	var b strings.Builder
+	b.WriteString("security { zones { security-zone [")
+	for i := 0; i <= 100000; i++ {
+		fmt.Fprintf(&b, " z%d", i)
+	}
+	b.WriteString(" ] tcp-rst; } }")
+	text := b.String()
+	clip := func(err error) string {
+		msg := fmt.Sprint(err)
+		if len(msg) > 600 {
+			msg = msg[:600] + "…(clipped)"
+		}
+		return msg
+	}
+	if _, err := CheckText(text, -1); err == nil || !strings.Contains(err.Error(), want) {
+		t.Errorf("strict: want the #9656 budget refusal naming %q, got %s", want, clip(err))
+	}
+	tree, perrs := config.NewParser(text).Parse()
+	if len(perrs) > 0 {
+		t.Fatalf("fixture must parse: %v", perrs)
+	}
+	cfg, err := config.CompileConfigLenient(tree)
+	if err != nil {
+		t.Fatalf("lenient: want a warning, not the error %s (#9656)", clip(err))
+	}
+	for _, w := range cfg.Warnings {
+		if strings.Contains(w, want) {
+			return
+		}
+	}
+	t.Errorf("lenient: no warning naming %q among %d warnings (#9656)", want, len(cfg.Warnings))
 }

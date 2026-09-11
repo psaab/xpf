@@ -2,6 +2,7 @@ package config
 
 import (
 	"sort"
+	"strings"
 	"testing"
 )
 
@@ -29,9 +30,6 @@ func TestZoneGroupNormalizesToLonghand9656(t *testing.T) {
 		{"braced body",
 			`security-zone [ zga zgb ] { screen edge; }`,
 			`security-zone zga { screen edge; } security-zone zgb { screen edge; }`},
-		{"packed head with a braced body",
-			`security-zone [ zga zgb ] interfaces { ge-0/0/0.0; }`,
-			`security-zone zga { interfaces { ge-0/0/0.0; } } security-zone zgb { interfaces { ge-0/0/0.0; } }`},
 		{"three members",
 			`security-zone [ za zb zc ] screen edge;`,
 			`security-zone za { screen edge; } security-zone zb { screen edge; } security-zone zc { screen edge; }`},
@@ -53,12 +51,15 @@ func TestZoneGroupNormalizesToLonghand9656(t *testing.T) {
 		{"braced group naming a zone after an apply keyword",
 			`security-zone [ zga zgb apply-groups ] { tcp-rst; }`,
 			`security-zone zga { tcp-rst; } security-zone zgb { tcp-rst; } security-zone apply-groups { tcp-rst; }`},
-		{"packed wildcard head with a braced body",
-			`security-zone [ zga zgb ] interfaces ge-0/0/0.0 { host-inbound-traffic { system-services { ping; } } }`,
-			`security-zone zga { interfaces ge-0/0/0.0 { host-inbound-traffic { system-services { ping; } } } } security-zone zgb { interfaces ge-0/0/0.0 { host-inbound-traffic { system-services { ping; } } } }`},
-		{"packed apply-macro head with a braced body",
-			`security-zone [ zga zgb ] apply-macro M { k v; }`,
-			`security-zone zga { apply-macro M { k v; } } security-zone zgb { apply-macro M { k v; } }`},
+		{"braced group naming a zone after a body-holding keyword",
+			`security-zone [ zga zgb host-inbound-traffic ] { tcp-rst; }`,
+			`security-zone zga { tcp-rst; } security-zone zgb { tcp-rst; } security-zone host-inbound-traffic { tcp-rst; }`},
+		{"braced group naming a zone after interfaces",
+			`security-zone [ zga zgb interfaces ] { tcp-rst; }`,
+			`security-zone zga { tcp-rst; } security-zone zgb { tcp-rst; } security-zone interfaces { tcp-rst; }`},
+		{"braced group naming zones after apply-macro",
+			`security-zone [ zga zgb apply-macro M ] { tcp-rst; }`,
+			`security-zone zga { tcp-rst; } security-zone zgb { tcp-rst; } security-zone apply-macro { tcp-rst; } security-zone M { tcp-rst; }`},
 		{"inactive group",
 			`inactive: security-zone [ zga zgb ] screen edge;`,
 			`inactive: security-zone zga { screen edge; } inactive: security-zone zgb { screen edge; }`},
@@ -179,11 +180,11 @@ func TestZoneGroupFlatSetNormalizesToLonghand9656(t *testing.T) {
 	}
 }
 
-// A fan-out whose clones would exceed the node budget is not performed. The
-// statement is left as parsed, and bracketedGroupInstances8794 compiles it with
-// one shared body, as it did before #9656. The #9656 Codex review measured the
-// unbounded version: 10,000 members over a 10,000-statement body cloned about
-// 100 million nodes.
+// A fan-out whose clones would exceed the pass budget is not performed. The
+// statement is left as parsed, and validateZoneGroupsExpanded9656 refuses it
+// on strict (TestUnexpandedZoneGroupIsRefused9656). The #9656 Codex review
+// measured the unbounded version: 10,000 members over a 10,000-statement body
+// cloned about 100 million nodes.
 func TestZoneGroupFanOutRespectsNodeBudget9656(t *testing.T) {
 	const body = `security { zones { security-zone [ za zb zc ] { tcp-rst; description d; } } }`
 	const tail = `security { zones { security-zone [ za zb zc ] tcp-rst; } }`
@@ -209,9 +210,85 @@ func TestZoneGroupFanOutRespectsNodeBudget9656(t *testing.T) {
 		if zones == nil {
 			t.Fatalf("fixture: no zones node in %q", text)
 		}
-		expandZoneGroupsWithin9656(zones, zonesSchema9656.children["security-zone"], c.budget)
+		expandZoneGroups9656(zones, zonesSchema9656.children["security-zone"], &zoneGroupPass9656{budget: c.budget})
 		if got := len(zones.Children); got != c.want {
 			t.Errorf("%q with budget %d: %d zone statement(s) after the fan-out, want %d (#9656)", text, c.budget, got, c.want)
+		}
+	}
+}
+
+// A group the fan-out declined, because the pass budget was spent, must not
+// compile as its first zone alone. Strict refuses it by name, and the tolerant
+// path warns (#1960). A single zone with a packed tail is not a group, and a
+// normalized tree has no group left to refuse.
+func TestUnexpandedZoneGroupIsRefused9656(t *testing.T) {
+	const text = `security { zones { security-zone [ za zb ] tcp-rst; security-zone [ zc zd ] { tcp-rst; } security-zone trust apply-groups G; } }`
+	tr := parse8921(t, "unexpanded", text)
+	if tr == nil {
+		return
+	}
+	if _, err := validateZoneGroupsExpanded9656(tr.Children, false); err == nil || !strings.Contains(err.Error(), "security-zone za zb:") {
+		t.Errorf("strict: want a refusal naming the unexpanded group `za zb`, got %v (#9656)", err)
+	}
+	warnings, err := validateZoneGroupsExpanded9656(tr.Children, true)
+	if err != nil {
+		t.Errorf("lenient: want warnings, not the error %v (#9656)", err)
+	}
+	if len(warnings) != 2 || !strings.Contains(strings.Join(warnings, "\n"), "security-zone zc zd:") {
+		t.Errorf("lenient: want 2 warnings naming `za zb` and `zc zd`, got %q (#9656)", warnings)
+	}
+	normalizeCompactStanzas(tr)
+	if w, err := validateZoneGroupsExpanded9656(tr.Children, false); err != nil || len(w) != 0 {
+		t.Errorf("after the fan-out: want nothing to refuse, got %v %q (#9656)", err, w)
+	}
+}
+
+// normalizeWithin9656 normalizes a whole tree in one pass with the given
+// fan-out budget, so a test can spend it without a 200,000-node configuration.
+func normalizeWithin9656(tree *ConfigTree, budget int) {
+	normalizeCompactNodesPass9656(tree.Children, setSchema, compactNormalizeInScope, &zoneGroupPass9656{budget: budget})
+}
+
+// zoneStatementCounts9656 counts security-zone statements under `zones` nodes,
+// separately for the top level and inside `groups`.
+func zoneStatementCounts9656(nodes []*Node, inGroups bool, top, group *int) {
+	for _, n := range nodes {
+		if n == nil || len(n.Keys) == 0 {
+			continue
+		}
+		if n.Keys[0] == "zones" && len(n.Keys) == 1 {
+			for _, z := range n.Children {
+				if z != nil && len(z.Keys) > 0 && z.Keys[0] == "security-zone" {
+					if inGroups {
+						*group++
+					} else {
+						*top++
+					}
+				}
+			}
+			continue
+		}
+		zoneStatementCounts9656(n.Children, inGroups || n.Keys[0] == "groups", top, group)
+	}
+}
+
+// The fan-out budget spans the whole tree. #9656 review round 2 measured a
+// budget kept per `zones` node letting 83 stanzas each clone up to the limit.
+// Each group here costs 3 members × (1 zone node + 1 tail node) = 6 nodes, and
+// the top-level group is walked first.
+func TestZoneGroupBudgetSpansTheTree9656(t *testing.T) {
+	const text = `security { zones { security-zone [ za zb zc ] tcp-rst; } } groups { G { security { zones { security-zone [ zd ze zf ] tcp-rst; } } } }`
+	for _, c := range []struct{ budget, wantTop, wantGroup int }{{11, 3, 1}, {12, 3, 3}} {
+		tr := parse8921(t, "two zones nodes", text)
+		if tr == nil {
+			return
+		}
+		normalizeWithin9656(tr, c.budget)
+		var top, group int
+		zoneStatementCounts9656(tr.Children, false, &top, &group)
+		if top != c.wantTop || group != c.wantGroup {
+			t.Errorf("budget %d: %d zone statement(s) at top level and %d inside groups, want %d and %d (#9656)",
+				c.budget, top, group, c.wantTop, c.wantGroup)
 		}
 	}
 }

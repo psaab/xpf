@@ -2338,6 +2338,10 @@ type compileOpts struct {
 	// already-persisted config carrying one still boots (#1960), with the
 	// widening flagged rather than silent.
 	lenientEmptySecurityIdentity bool
+	// lenientZoneGroupExpansion9656 (#9656) downgrades the refusal of a
+	// security-zone group that the fan-out budget left unexpanded to a warning
+	// on the tolerant load and peer-sync paths (#1960).
+	lenientZoneGroupExpansion9656 bool
 	// lenientPolicyCommunityRef (#2881) downgrades the policy community
 	// cross-reference gate (validatePolicyCommunityReferencesStrict) from a
 	// hard compile error to a cfg.Warnings entry. A policy term's
@@ -2907,6 +2911,7 @@ func lenientCompileOpts() compileOpts {
 		lenientPolicyValuelessMatch:            true,
 		lenientFirewallValuelessFrom:           true,
 		lenientEmptySecurityIdentity:           true,
+		lenientZoneGroupExpansion9656:          true,
 		lenientPolicyCommunityRef:              true,
 		lenientSNMPv3KeyMaterial:               true,
 		lenientSNMPv3SecurityKeyword:           true,

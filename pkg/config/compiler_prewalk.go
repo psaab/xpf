@@ -552,6 +552,15 @@ func runPreWalkGates(tree *ConfigTree, opts compileOpts) ([]string, error) {
 		return nil, err
 	}
 
+	// #9656: a security-zone group the normalizer left unexpanded, because the
+	// fan-out budget was spent, would compile as its first zone alone. Strict
+	// refuses it; lenient warns.
+	zoneGroupWarnings, err := validateZoneGroupsExpanded9656(
+		tree.Children, opts.lenientZoneGroupExpansion9656)
+	if err != nil {
+		return nil, err
+	}
+
 	// #3444: reject a `security nat destination rule-set <name> to ...`
 	// scope. A Junos destination-NAT rule-set has only a `from` clause —
 	// DNAT translates the destination on inbound, so there is no egress
@@ -705,6 +714,7 @@ func runPreWalkGates(tree *ConfigTree, opts compileOpts) ([]string, error) {
 	warnings = append(warnings, policyMissingMatchWarnings...)
 	warnings = append(warnings, firewallValuelessFromWarnings...)
 	warnings = append(warnings, emptyIdentityWarnings...)
+	warnings = append(warnings, zoneGroupWarnings...)
 	warnings = append(warnings, dnatToScopeWarnings...)
 	warnings = append(warnings, natMixedScopeWarnings...)
 	warnings = append(warnings, chassisIdentityWarnings...)
