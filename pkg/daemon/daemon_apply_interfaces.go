@@ -189,7 +189,7 @@ func (d *Daemon) applyVRFReconcile(ctx context.Context, cfg *config.Config) (ctx
 	// namespace-claim policy in this code supersedes that plan. See
 	// the godoc on routing.ReconcileVRFs for the current contract.)
 	const mgmtVRFName = config.ManagementVRFInstanceName // #9622: the one definition
-	const mgmtTableID = 999
+	const mgmtTableID = config.ManagementVRFTableID
 	mgmtIfaces := managementVRFIfaceSet(cfg)
 
 	if d.routing != nil {

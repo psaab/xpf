@@ -742,6 +742,9 @@ func compileRoutingInstances(node *Node, cfg *Config) error {
 	// (validateReservedRoutingInstanceNamesAST) rejects it outright; on a lenient
 	// path (tolerant load / peer-sync / a config an older binary persisted) drop
 	// it here, so the daemon never plans a second vrf-mgmt with a different table.
+	// This runs BEFORE the #3855 collision pass below, and the AST table-id gate
+	// leaves reserved names out of its union to match, so a reserved instance
+	// never claims a table or displaces an instance that shares its hash.
 	if len(cfg.RoutingInstances) > 0 {
 		kept := cfg.RoutingInstances[:0]
 		for _, ri := range cfg.RoutingInstances {

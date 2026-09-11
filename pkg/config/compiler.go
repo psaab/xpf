@@ -291,12 +291,12 @@ func compileConfigWithOpts(tree *ConfigTree, opts compileOpts) (*Config, error) 
 		return nil, riTableIDErr
 	}
 	// #9622: reserved routing-instance name gate — same three-view name union
-	// as the table-id gate above; strict rejects, lenient warns (and
-	// compileRoutingInstances quarantines the instance).
-	riReservedWarnings, riReservedErr := validateReservedRoutingInstanceNamesAST(
-		tree, opts.lenientReservedRoutingInstanceName)
-	if riReservedErr != nil {
-		return nil, riReservedErr
+	// as the table-id gate above. Strict only: the lenient paths skip it and
+	// compileRoutingInstances quarantines the instance with one warning.
+	if !opts.lenientReservedRoutingInstanceName {
+		if err := validateReservedRoutingInstanceNamesAST(tree); err != nil {
+			return nil, err
+		}
 	}
 
 	// #5180: duplicate hierarchical named-block gate. Runs PRE-expansion on the
@@ -444,7 +444,6 @@ func compileConfigWithOpts(tree *ConfigTree, opts compileOpts) (*Config, error) 
 	cfg.Warnings = append(cfg.Warnings, dupMergeWarnings...)
 	cfg.Warnings = append(cfg.Warnings, zoneIDWarnings...)
 	cfg.Warnings = append(cfg.Warnings, riTableIDWarnings...)
-	cfg.Warnings = append(cfg.Warnings, riReservedWarnings...)
 	cfg.Warnings = append(cfg.Warnings, dupBlockWarnings...)
 	cfg.Warnings = append(cfg.Warnings, dupNATRuleWarnings...)
 	cfg.Warnings = append(cfg.Warnings, dupNATRuleSetWarnings...)
@@ -594,12 +593,12 @@ func compileConfigForNodeWithOpts(tree *ConfigTree, nodeID int, opts compileOpts
 		return nil, riTableIDErr
 	}
 	// #9622: reserved routing-instance name gate — same three-view name union
-	// as the table-id gate above; strict rejects, lenient warns (and
-	// compileRoutingInstances quarantines the instance).
-	riReservedWarnings, riReservedErr := validateReservedRoutingInstanceNamesAST(
-		tree, opts.lenientReservedRoutingInstanceName)
-	if riReservedErr != nil {
-		return nil, riReservedErr
+	// as the table-id gate above. Strict only: the lenient paths skip it and
+	// compileRoutingInstances quarantines the instance with one warning.
+	if !opts.lenientReservedRoutingInstanceName {
+		if err := validateReservedRoutingInstanceNamesAST(tree); err != nil {
+			return nil, err
+		}
 	}
 
 	// #5180: duplicate hierarchical named-block gate — see compileConfigWithOpts.
@@ -732,7 +731,6 @@ func compileConfigForNodeWithOpts(tree *ConfigTree, nodeID int, opts compileOpts
 	cfg.Warnings = append(cfg.Warnings, dupMergeWarnings...)
 	cfg.Warnings = append(cfg.Warnings, zoneIDWarnings...)
 	cfg.Warnings = append(cfg.Warnings, riTableIDWarnings...)
-	cfg.Warnings = append(cfg.Warnings, riReservedWarnings...)
 	cfg.Warnings = append(cfg.Warnings, dupBlockWarnings...)
 	cfg.Warnings = append(cfg.Warnings, dupNATRuleWarnings...)
 	cfg.Warnings = append(cfg.Warnings, dupNATRuleSetWarnings...)

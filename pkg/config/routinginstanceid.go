@@ -57,14 +57,20 @@ func StableRoutingInstanceTableID(name string) int {
 
 // collectRoutingInstanceNamesAST appends the routing-instance names declared
 // under a "routing-instances" node into out. Mirrors compileRoutingInstances
-// (compiler_routing.go): each non-leaf child's Keys[0] is the instance name in
-// both the hierarchical and flat-set AST shapes.
+// (compiler_routing.go): Keys[0] is the instance name in both the hierarchical
+// and flat-set AST shapes, and that includes the brace-elided spelling
+// `routing-instances { ri1 instance-type forwarding; }`, a LEAF whose Keys tail
+// carries the body (#8787). The compiler builds an instance from that leaf, so
+// this scan must see it: before #9622 it skipped every leaf, and neither the
+// table-id gate nor the reserved-name gate saw a packed instance. A bare
+// `routing-instances { ri1; }` carries no properties, compiles to nothing, and
+// is still skipped.
 func collectRoutingInstanceNamesAST(riNode *Node, out map[string]struct{}) {
 	if riNode == nil {
 		return
 	}
 	for _, child := range riNode.Children {
-		if child.IsLeaf || len(child.Keys) == 0 {
+		if len(child.Keys) == 0 || (child.IsLeaf && len(child.Keys) < 2) {
 			continue
 		}
 		if name := child.Keys[0]; name != "" {
@@ -125,12 +131,20 @@ func emitNodeExpandedRoutingInstanceNames(tree *ConfigTree, nodeID int, out map[
 // so the two never actually share a kernel table.
 func validateRoutingInstanceTableIDCollisionAST(tree *ConfigTree, lenient bool) ([]string, error) {
 	names := routingInstanceNameUnionAST(tree)
-	if len(names) < 2 {
-		return nil, nil
-	}
 	sorted := make([]string, 0, len(names))
 	for name := range names {
+		// #9622: a reserved name never gets a table. compileRoutingInstances
+		// quarantines it BEFORE its own collision pass, so judging it here would
+		// report a collision the runtime never has, name the wrong instance as
+		// quarantined, and on the strict path reject with a table-id error
+		// instead of the reserved-name one.
+		if IsReservedRoutingInstanceName(name) {
+			continue
+		}
 		sorted = append(sorted, name)
+	}
+	if len(sorted) < 2 {
+		return nil, nil
 	}
 	sort.Strings(sorted)
 	byID := make(map[int]string, len(sorted))

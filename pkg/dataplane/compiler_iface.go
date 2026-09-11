@@ -1403,7 +1403,7 @@ func buildInterfaceNetworkdModels(cfg *config.Config, result *CompileResult, see
 				// strips a binding the daemon just made (or preserves one it
 				// never made).
 				if config.IsManagementIfName(ifName) {
-					vrfName = "vrf-mgmt"
+					vrfName = config.ManagementVRFDeviceName
 				}
 				result.ManagedInterfaces = append(result.ManagedInterfaces, networkd.InterfaceConfig{
 					Name:             linuxName,
@@ -1461,7 +1461,7 @@ func buildFabricBondModels(cfg *config.Config, result *CompileResult, seen map[s
 				Addresses:   addrs,
 				Description: ifCfg.Description,
 				MTU:         ifCfg.MTU,
-				VRFName:     "vrf-mgmt",
+				VRFName:     config.ManagementVRFDeviceName,
 			})
 		}
 		// Member interfaces: .network with Bond= referencing the bond
@@ -1556,7 +1556,7 @@ func stripUnmanagedInterfaces(cfg *config.Config, result *CompileResult, seen ma
 	//
 	// Skip interfaces created by the daemon itself (VRFs, tunnels, bridges).
 	daemonOwned := make(map[string]bool)
-	daemonOwned["vrf-mgmt"] = true // implicit management VRF for fxp*/fab*
+	daemonOwned[config.ManagementVRFDeviceName] = true // implicit management VRF for fxp*/fab*
 	for _, ri := range cfg.RoutingInstances {
 		if ri.InstanceType != "forwarding" {
 			daemonOwned["vrf-"+ri.Name] = true

@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -84,14 +85,8 @@ func TestReservedRoutingInstanceNameIsQuarantinedLenient_9622(t *testing.T) {
 	if len(names) != 1 || names[0] != "blue" {
 		t.Errorf("#9622 control: the unreserved sibling must survive untouched, got %v", names)
 	}
-	quarantineWarned := false
-	for _, w := range cfg.Warnings {
-		if strings.Contains(w, "QUARANTINED") && strings.Contains(w, "reserved") {
-			quarantineWarned = true
-		}
-	}
-	if !quarantineWarned {
-		t.Errorf("#9622: the quarantine must be reported in cfg.Warnings, got %v", cfg.Warnings)
+	if n := countReservedWarnings9622(cfg.Warnings); n != 1 {
+		t.Errorf("#9622: the quarantine must be reported exactly once in cfg.Warnings, got %d: %v", n, cfg.Warnings)
 	}
 }
 
@@ -111,6 +106,149 @@ func TestNearReservedRoutingInstanceNamesStillCommit_9622(t *testing.T) {
 		}
 		if len(cfg.RoutingInstances) != 1 || cfg.RoutingInstances[0].Name != name {
 			t.Errorf("#9622 control: routing instance %q did not compile as an ordinary instance", name)
+		}
+	}
+}
+
+// countReservedWarnings9622 counts the warnings that report the reserved
+// management instance name.
+func countReservedWarnings9622(warnings []string) int {
+	n := 0
+	for _, w := range warnings {
+		if strings.Contains(w, "reserved") && strings.Contains(w, fmt.Sprintf("%q", ManagementVRFInstanceName)) {
+			n++
+		}
+	}
+	return n
+}
+
+func parseText9622(t *testing.T, text string) *ConfigTree {
+	t.Helper()
+	tree, perrs := NewParser(text).Parse()
+	if len(perrs) > 0 {
+		t.Fatalf("fixture must parse: %v\n%s", perrs, text)
+	}
+	return tree
+}
+
+// The hierarchical spellings, parsed from text the way a loaded, peer-synced or
+// day-0 config file is. The brace-elided form is a LEAF whose Keys tail carries
+// the body (#8787). compileRoutingInstances builds an instance from it, so the
+// gate must see it: the shared name scan used to skip every leaf, and this
+// spelling committed clean with only the quarantine warning.
+func TestReservedRoutingInstanceNameIsRejectedHierarchical_9622(t *testing.T) {
+	for _, tc := range []struct{ name, text string }{
+		{"braced", "routing-instances {\n    mgmt {\n        instance-type virtual-router;\n    }\n}\n"},
+		{"brace-elided leaf", "routing-instances {\n    mgmt instance-type virtual-router;\n}\n"},
+		{"brace-elided in an applied group", "groups {\n    g1 {\n        routing-instances {\n" +
+			"            mgmt instance-type virtual-router;\n        }\n    }\n}\napply-groups g1;\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// Positive control: the lenient compile builds the instance and
+			// quarantines it, so the strict reject below is about a real
+			// instance and not a stanza that never compiled.
+			lcfg, err := CompileConfigLenient(parseText9622(t, tc.text))
+			if err != nil {
+				t.Fatalf("lenient compile: %v", err)
+			}
+			if countReservedWarnings9622(lcfg.Warnings) != 1 {
+				t.Fatalf("fixture: the lenient compile did not quarantine %q exactly once, so this spelling "+
+					"may never have become an instance: %v", ManagementVRFInstanceName, lcfg.Warnings)
+			}
+			if _, err := CompileConfig(parseText9622(t, tc.text)); err == nil || !strings.Contains(err.Error(), "reserved for") {
+				t.Fatalf("#9622: the %s spelling of routing instance %q must be rejected on the strict path, got %v",
+					tc.name, ManagementVRFInstanceName, err)
+			}
+		})
+	}
+}
+
+// Cluster nodes compile through CompileConfigForNode*, the second compiler core,
+// which carries its own call to the gate.
+func TestReservedRoutingInstanceNameOnTheNodeCompilePaths_9622(t *testing.T) {
+	cmds := append(append([]string{}, riBase9622...),
+		"set groups node0 routing-instances mgmt instance-type virtual-router",
+		"set groups node0 routing-instances blue instance-type virtual-router",
+		`set apply-groups "${node}"`,
+	)
+	if _, err := CompileConfigForNode(setTree9622(t, cmds...), 0); err == nil || !strings.Contains(err.Error(), "reserved for") {
+		t.Fatalf("#9622: CompileConfigForNode must reject the reserved instance on the strict path, got %v", err)
+	}
+	cfg, err := CompileConfigForNodeLenient(setTree9622(t, cmds...), 0)
+	if err != nil {
+		t.Fatalf("#9622: CompileConfigForNodeLenient must still boot: %v", err)
+	}
+	var names []string
+	for _, ri := range cfg.RoutingInstances {
+		names = append(names, ri.Name)
+	}
+	if len(names) != 1 || names[0] != "blue" {
+		t.Errorf("#9622: node0's lenient compile must drop %q and keep blue, got %v", ManagementVRFInstanceName, names)
+	}
+	if n := countReservedWarnings9622(cfg.Warnings); n != 1 {
+		t.Errorf("#9622: want exactly one warning reporting the reserved instance, got %d: %v", n, cfg.Warnings)
+	}
+}
+
+// A reserved name takes no part in the #3855 table-id collision gate. The
+// runtime quarantines it before its own collision pass, so it never claims a
+// table; the AST gate must judge the same set. "mgmt" and "z1061437" fold to
+// one stable table id.
+func TestReservedNameTakesNoPartInTableIDCollision_9622(t *testing.T) {
+	const sibling = "z1061437"
+	if a, b := StableRoutingInstanceTableID(ManagementVRFInstanceName), StableRoutingInstanceTableID(sibling); a != b {
+		t.Fatalf("fixture: %q and %q must fold to one table id, got %d and %d", ManagementVRFInstanceName, sibling, a, b)
+	}
+	cmds := append(append([]string{}, riBase9622...),
+		"set routing-instances mgmt instance-type virtual-router",
+		"set routing-instances "+sibling+" instance-type virtual-router",
+	)
+	_, err := CompileConfig(setTree9622(t, cmds...))
+	if err == nil || !strings.Contains(err.Error(), "reserved for") || strings.Contains(err.Error(), "collision") {
+		t.Fatalf("#9622: the strict path must reject the reserved name, not report a table-id collision against it: %v", err)
+	}
+	cfg, err := CompileConfigLenient(setTree9622(t, cmds...))
+	if err != nil {
+		t.Fatalf("lenient compile: %v", err)
+	}
+	var names []string
+	for _, ri := range cfg.RoutingInstances {
+		names = append(names, ri.Name)
+	}
+	if len(names) != 1 || names[0] != sibling {
+		t.Errorf("#9622: the lenient compile must keep %q and drop the reserved instance, got %v", sibling, names)
+	}
+	for _, w := range cfg.Warnings {
+		if strings.Contains(w, "#3855") || strings.Contains(w, "collision") {
+			t.Errorf("#9622: a warning reports a table-id collision the runtime never has: %q", w)
+		}
+	}
+}
+
+// The shared name scan now sees the brace-elided leaf instance, so the #3855
+// table-id collision gate sees a packed instance as well. The colliding pair is
+// found by search, not hardcoded, so the cell does not depend on one hash value.
+func TestPackedLeafInstancesJoinTheTableIDCollisionGate_9622(t *testing.T) {
+	byID := map[int]string{}
+	var a, b string
+	for i := 0; a == ""; i++ {
+		if i > 1_000_000 {
+			t.Fatal("fixture: no colliding instance-name pair found")
+		}
+		n := fmt.Sprintf("ri%d", i)
+		id := StableRoutingInstanceTableID(n)
+		if prev, ok := byID[id]; ok {
+			a, b = prev, n
+		}
+		byID[id] = n
+	}
+	braced := "routing-instances {\n    " + a + " {\n        instance-type virtual-router;\n    }\n    " +
+		b + " {\n        instance-type virtual-router;\n    }\n}\n"
+	packed := "routing-instances {\n    " + a + " instance-type virtual-router;\n    " + b + " instance-type virtual-router;\n}\n"
+	for _, tc := range []struct{ name, text string }{{"braced control", braced}, {"brace-elided", packed}} {
+		if _, err := CompileConfig(parseText9622(t, tc.text)); err == nil || !strings.Contains(err.Error(), "table-id collision") {
+			t.Errorf("#3855/#9622 %s: instances %q and %q fold to one kernel table and must be rejected on the strict "+
+				"path, got %v", tc.name, a, b, err)
 		}
 	}
 }
