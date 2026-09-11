@@ -353,9 +353,9 @@ func TestProtocolVersionMovedWithTheWire9054(t *testing.T) {
 	}
 	// This literal tracks the CURRENT snapshot version, not a #9054 floor: the
 	// `ProtocolVersion < 10` check above is the #9054 floor. It moves with any
-	// later bump (#9425 took it to 11, #9546 to 12, #9412 to 13, #9521 to 14, #9520 to 15) because what it asserts is that the two
+	// later bump (#9425 took it to 11, #9546 to 12, #9412 to 13, #9521 to 14, #9520 to 15, #9714 to 16) because what it asserts is that the two
 	// planes moved TOGETHER — a one-sided bump makes every pairing a mismatch.
-	if !strings.Contains(string(raw), "= 15;") {
+	if !strings.Contains(string(raw), "= 16;") {
 		t.Fatalf("the Rust CONFIG_SNAPSHOT_PROTOCOL_VERSION did not move with the Go one; a "+
 			"one-sided bump makes EVERY pairing a mismatch, including matched deployments. Go "+
 			"is at %d", ProtocolVersion)

@@ -199,7 +199,15 @@ const (
 	// A new helper under an old daemon sees an empty digest on both sides and
 	// admits as v14 did, while that daemon cannot react to a conflict refusal.
 	// Exact equality refuses both pairings.
-	ProtocolVersion = 15
+	//
+	// v16 (issue 9714): `SessionSyncRequest.PeerDelete`, which marks a delete sent
+	// on behalf of the peer so the helper can refuse one that would tear down a
+	// live LOCAL session whose owner RG is locally active (a dual-primary split).
+	// BUMPED on the merits, like v13: an old helper ignores the field and keeps
+	// deleting the live local session, and that IS the defect the field closes.
+	// The session-sync messages are not snapshot structs, so the #8892 digest did
+	// not move.
+	ProtocolVersion = 16
 
 	// MinProtocolMultiZoneScopedPolicy is the FIRST snapshot protocol version
 	// that can represent a multi-zone scoped global policy — the plural

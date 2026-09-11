@@ -149,7 +149,17 @@ pub(super) fn handle(
             SyncedKeyIntent::Delete,
         ) {
             Ok(key) => {
-                domain.delete_synced_session(key.clone());
+                // #9714: a delete the Go side marked as made on behalf of the PEER
+                // is refused for a live local session whose owner RG is locally
+                // active; every other delete stays authoritative.
+                let delete = |key| {
+                    if sync_req.peer_delete {
+                        domain.delete_peer_synced_session(key);
+                    } else {
+                        domain.delete_synced_session(key);
+                    }
+                };
+                delete(key.clone());
                 // #7160 (#2387): a bare-5-tuple delete (the `clear security
                 // flow session` / batch-revoke path) carries no ingress
                 // identity, so the key above resolved domain 0 and the exact
@@ -213,7 +223,7 @@ pub(super) fn handle(
                         [rd] => {
                             let mut scoped = key.clone();
                             scoped.routing_domain = *rd;
-                            domain.delete_synced_session(scoped);
+                            delete(scoped);
                         }
                         // Ambiguous: the tuple names a live session in more
                         // than one tenant and nothing in this request says

@@ -5369,3 +5369,214 @@ fn peer_upsert_still_reserves_on_an_active_node_with_no_local_flow_9678() {
     );
 }
 
+
+// #9714: under a dual-primary split a PEER delete must not tear down a flow this
+// node forwards as a LOCAL session while that session's owner RG is locally
+// active. The helper refuses before the kernel steering delete, the DNAT delete,
+// the shared-map removal and the DeleteSynced fan-out, so nothing below happens.
+// An authoritative delete of the same entry (an operator clear, GC, the tunnel
+// purge) still deletes, and a peer delete with the RG inactive still deletes.
+const RG_9714: i32 = 1;
+
+struct Fixture9714 {
+    coordinator: Coordinator,
+    worker_a: Arc<Mutex<VecDeque<WorkerCommand>>>,
+    worker_b: Arc<Mutex<VecDeque<WorkerCommand>>>,
+    forward: SyncedSessionEntry,
+    reverse_key: SessionKey,
+}
+
+/// Two workers; a LOCAL-origin forward session and its reverse published to the
+/// shared maps with a DNAT steering hold; a session map descriptor present (-1,
+/// so the kernel delete is attempted and recorded, never applied).
+fn fixture_9714(rg_active: bool) -> Fixture9714 {
+    let mut coordinator = Coordinator::new();
+    coordinator.set_forwarding_for_test(reserve6600_forwarding());
+    let worker_a = Arc::new(Mutex::new(VecDeque::new()));
+    let worker_b = Arc::new(Mutex::new(VecDeque::new()));
+    coordinator.workers.register(
+        0,
+        WorkerRuntimeRecord::for_test(test_worker_handle(worker_a.clone())),
+        None,
+    );
+    coordinator.workers.register(
+        1,
+        WorkerRuntimeRecord::for_test(test_worker_handle(worker_b.clone())),
+        None,
+    );
+    let now_secs = monotonic_nanos() / 1_000_000_000;
+    let rg = if rg_active {
+        active_ha_runtime(now_secs)
+    } else {
+        inactive_ha_runtime(0)
+    };
+    coordinator
+        .ha
+        .rg_runtime
+        .store(Arc::new(BTreeMap::from([(RG_9714, rg)])));
+    coordinator
+        .bpf_maps
+        .store(Arc::new(crate::afxdp::coordinator::BpfMaps {
+            session_map_fd: Some(crate::afxdp::bpf_map::OwnedFd { fd: -1 }),
+            ..Default::default()
+        }));
+
+    let mut forward = reserve6600_entry(40714, 50714);
+    forward.origin = SessionOrigin::ForwardFlow;
+    forward.metadata.owner_rg_id = RG_9714;
+    forward.metadata.is_reverse = false;
+    let reverse_key = reverse_session_key(&forward.key, forward.decision.nat);
+    let mut reverse = forward.clone();
+    reverse.key = reverse_key.clone();
+    reverse.origin = SessionOrigin::ReverseFlow;
+    reverse.metadata.is_reverse = true;
+    for entry in [&forward, &reverse] {
+        crate::afxdp::shared_ops::publish_shared_session(
+            &coordinator.sessions.synced,
+            &coordinator.sessions.nat,
+            &coordinator.sessions.forward_wire,
+            &coordinator.sessions.owner_rg_indexes,
+            entry,
+        );
+    }
+    crate::afxdp::checksum::add_dnat_steering_holder(&forward.key, forward.decision.nat);
+    Fixture9714 {
+        coordinator,
+        worker_a,
+        worker_b,
+        forward,
+        reverse_key,
+    }
+}
+
+impl Fixture9714 {
+    fn shared_has(&self, key: &SessionKey) -> bool {
+        self.coordinator
+            .sessions
+            .synced
+            .lock()
+            .expect("synced map")
+            .contains_key(key)
+    }
+
+    fn queued_delete(&self, key: &SessionKey) -> bool {
+        [&self.worker_a, &self.worker_b].iter().any(|queue| {
+            queue
+                .lock()
+                .expect("commands")
+                .iter()
+                .any(|cmd| matches!(cmd, WorkerCommand::DeleteSynced(k) if k == key))
+        })
+    }
+
+    fn steering_deleted(&self, writes: &[crate::afxdp::bpf_map::SessionMapWriteRecord]) -> bool {
+        writes
+            .iter()
+            .any(|w| w.value.is_none() && w.key == self.forward.key)
+    }
+
+    fn dnat_holds(&self) -> usize {
+        crate::afxdp::checksum::dnat_steering_holder_count(&self.forward.key, self.forward.decision.nat)
+    }
+}
+
+/// THE ACCEPTANCE CRITERION: a peer delete of a live local session whose owner RG
+/// is locally active changes nothing.
+#[test]
+fn a_peer_delete_of_a_live_local_session_is_refused_9714() {
+    let fixture = fixture_9714(true);
+    assert!(
+        fixture.shared_has(&fixture.forward.key) && fixture.shared_has(&fixture.reverse_key),
+        "fixture: the local forward and reverse entries must be in the shared maps"
+    );
+    let holds_before = fixture.dnat_holds();
+    assert!(holds_before >= 1, "fixture: the forward session must hold its DNAT steering row");
+    let refused_before = PEER_DELETE_REFUSED_LOCAL_OWNED.load(Ordering::Relaxed);
+    crate::afxdp::bpf_map::clear_session_map_writes();
+
+    fixture
+        .coordinator
+        .session_domain()
+        .delete_peer_synced_session(fixture.forward.key.clone());
+
+    let writes = crate::afxdp::bpf_map::session_map_writes();
+    assert!(
+        fixture.shared_has(&fixture.forward.key) && fixture.shared_has(&fixture.reverse_key),
+        "a peer delete removed the shared rows of a live local session; bulk export would then drop it \
+         and a later failover would lose the flow (#9714)"
+    );
+    assert!(
+        !fixture.steering_deleted(&writes),
+        "a peer delete removed the kernel steering row of a live local session; the non-owning RSS \
+         queues then adjudicate its packets as new flows (#9714). Writes: {writes:?}"
+    );
+    assert_eq!(
+        fixture.dnat_holds(),
+        holds_before,
+        "a peer delete released the DNAT steering hold of a live local session (#9714)"
+    );
+    assert!(
+        !fixture.queued_delete(&fixture.forward.key) && !fixture.queued_delete(&fixture.reverse_key),
+        "a peer delete sent DeleteSynced to the workers; the sibling WorkerLocalImport replicas count as \
+         peer-synced and would all be dropped (#9714)"
+    );
+    assert!(
+        PEER_DELETE_REFUSED_LOCAL_OWNED.load(Ordering::Relaxed) > refused_before,
+        "the refusal must be counted on the #9048 counter so a dual-primary split is visible"
+    );
+}
+
+/// An authoritative delete of the same entry (operator clear, GC, tunnel purge)
+/// still deletes: the refusal is for the peer's say-so only.
+#[test]
+fn an_authoritative_delete_of_the_same_live_local_session_still_deletes_9714() {
+    let fixture = fixture_9714(true);
+    crate::afxdp::bpf_map::clear_session_map_writes();
+
+    fixture
+        .coordinator
+        .session_domain()
+        .delete_synced_session(fixture.forward.key.clone());
+
+    let writes = crate::afxdp::bpf_map::session_map_writes();
+    assert!(
+        !fixture.shared_has(&fixture.forward.key),
+        "an authoritative delete (e.g. `clear security flow session`) must still remove the shared row"
+    );
+    assert!(
+        fixture.steering_deleted(&writes),
+        "an authoritative delete must still remove the kernel steering row. Writes: {writes:?}"
+    );
+    assert!(
+        fixture.queued_delete(&fixture.forward.key),
+        "an authoritative delete must still fan DeleteSynced out to the workers"
+    );
+}
+
+/// Control: with the owner RG not locally active the peer delete is the ordinary
+/// peer delete and removes everything, as before #9714.
+#[test]
+fn a_peer_delete_with_the_owner_rg_inactive_still_deletes_9714() {
+    let fixture = fixture_9714(false);
+    crate::afxdp::bpf_map::clear_session_map_writes();
+
+    fixture
+        .coordinator
+        .session_domain()
+        .delete_peer_synced_session(fixture.forward.key.clone());
+
+    let writes = crate::afxdp::bpf_map::session_map_writes();
+    assert!(
+        !fixture.shared_has(&fixture.forward.key) && !fixture.shared_has(&fixture.reverse_key),
+        "with the owner RG inactive this node does not own the flow, so the peer delete must remove the \
+         shared rows"
+    );
+    assert!(
+        fixture.steering_deleted(&writes),
+        "with the owner RG inactive the peer delete must remove the kernel steering row. Writes: {writes:?}"
+    );
+    assert!(
+        fixture.queued_delete(&fixture.forward.key),
+        "with the owner RG inactive the peer delete must fan DeleteSynced out"
+    );
+}

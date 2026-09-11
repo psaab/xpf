@@ -368,15 +368,28 @@ func (m *Manager) DeleteSession(key dataplane.SessionKey) error {
 // and a skipping cell scores a mutation as survived, which is the reading that
 // argues for deleting a guard doing its job.
 func (m *Manager) syncDeleteV4Locked(key dataplane.SessionKey, val dataplane.SessionValue, haveVal bool) {
+	m.syncDeleteV4LockedMarked(key, val, haveVal, false)
+}
+
+// syncDeleteV4LockedMarked is syncDeleteV4Locked with the #9714 peer mark set on
+// both helper requests (the key and its reverse companion).
+func (m *Manager) syncDeleteV4LockedMarked(key dataplane.SessionKey, val dataplane.SessionValue, haveVal, peer bool) {
+	if m.proc == nil {
+		return
+	}
 	scope := (*dataplane.SessionValue)(nil)
 	if haveVal {
 		scope = deleteScopeVal(val.RoutingDomain)
 	}
-	_ = m.syncSessionV4Locked("delete", key, scope)
+	req := m.buildSessionSyncRequestV4("delete", key, scope)
+	req.PeerDelete = peer
+	_ = m.syncSessionRequestLocked(req)
 	// The reverse companion is the same flow in the same tenant, so it carries
 	// the same domain.
 	if haveVal && val.ReverseKey.Protocol != 0 {
-		_ = m.syncSessionV4Locked("delete", val.ReverseKey, scope)
+		reverse := m.buildSessionSyncRequestV4("delete", val.ReverseKey, scope)
+		reverse.PeerDelete = peer
+		_ = m.syncSessionRequestLocked(reverse)
 	}
 }
 
@@ -398,14 +411,53 @@ func (m *Manager) DeleteSessionV6(key dataplane.SessionKeyV6) error {
 
 // syncDeleteV6Locked is the IPv6 analogue of syncDeleteV4Locked (#9146).
 func (m *Manager) syncDeleteV6Locked(key dataplane.SessionKeyV6, val dataplane.SessionValueV6, haveVal bool) {
+	m.syncDeleteV6LockedMarked(key, val, haveVal, false)
+}
+
+// syncDeleteV6LockedMarked is the IPv6 analogue of syncDeleteV4LockedMarked (#9714).
+func (m *Manager) syncDeleteV6LockedMarked(key dataplane.SessionKeyV6, val dataplane.SessionValueV6, haveVal, peer bool) {
+	if m.proc == nil {
+		return
+	}
 	scope := (*dataplane.SessionValueV6)(nil)
 	if haveVal {
 		scope = deleteScopeValV6(val.RoutingDomain)
 	}
-	_ = m.syncSessionV6Locked("delete", key, scope)
+	req := m.buildSessionSyncRequestV6("delete", key, scope)
+	req.PeerDelete = peer
+	_ = m.syncSessionRequestLocked(req)
 	if haveVal && val.ReverseKey.Protocol != 0 {
-		_ = m.syncSessionV6Locked("delete", val.ReverseKey, scope)
+		reverse := m.buildSessionSyncRequestV6("delete", val.ReverseKey, scope)
+		reverse.PeerDelete = peer
+		_ = m.syncSessionRequestLocked(reverse)
 	}
+}
+
+// DeletePeerSyncedSession deletes a session on behalf of the PEER (#9714): the
+// BPF mirror row exactly as DeleteSession does, and the helper delete marked so
+// the helper can refuse it for a live local session whose owner RG is locally
+// active.
+func (m *Manager) DeletePeerSyncedSession(key dataplane.SessionKey) error {
+	val, valErr := m.bpfShim.GetSessionV4(key)
+	if err := m.bpfShim.DeleteSession(key); err != nil {
+		return err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.syncDeleteV4LockedMarked(key, val, valErr == nil, true)
+	return nil
+}
+
+// DeletePeerSyncedSessionV6 is the IPv6 analogue of DeletePeerSyncedSession (#9714).
+func (m *Manager) DeletePeerSyncedSessionV6(key dataplane.SessionKeyV6) error {
+	val, valErr := m.bpfShim.GetSessionV6(key)
+	if err := m.bpfShim.DeleteSessionV6(key); err != nil {
+		return err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.syncDeleteV6LockedMarked(key, val, valErr == nil, true)
+	return nil
 }
 
 // sessionHelperDeleteChunk bounds how many per-session helper "delete" IPCs the
@@ -466,6 +518,22 @@ func (m *Manager) BatchDeleteSessionsScoped(scoped []dataplane.ScopedSessionKey)
 func (m *Manager) BatchDeleteSessionsScopedV6(scoped []dataplane.ScopedSessionKeyV6) (int, error) {
 	deleted, err := m.bpfShim.BatchDeleteSessionsV6(bareKeysV6(scoped))
 	_ = m.deleteHelperSessionsScopedV6(scoped)
+	return deleted, err
+}
+
+// BatchDeletePeerSyncedSessionsScoped is BatchDeleteSessionsScoped for deletes made
+// on behalf of the PEER (#9714): the same BPF mirror batch, and helper requests
+// marked PeerDelete so the helper can refuse one for a live local session.
+func (m *Manager) BatchDeletePeerSyncedSessionsScoped(scoped []dataplane.ScopedSessionKey) (int, error) {
+	deleted, err := m.bpfShim.BatchDeleteSessions(bareKeysV4(scoped))
+	_ = m.deleteHelperSessionsScopedV4Marked(scoped, true)
+	return deleted, err
+}
+
+// BatchDeletePeerSyncedSessionsScopedV6 is the IPv6 analogue (#9714).
+func (m *Manager) BatchDeletePeerSyncedSessionsScopedV6(scoped []dataplane.ScopedSessionKeyV6) (int, error) {
+	deleted, err := m.bpfShim.BatchDeleteSessionsV6(bareKeysV6(scoped))
+	_ = m.deleteHelperSessionsScopedV6Marked(scoped, true)
 	return deleted, err
 }
 
@@ -601,6 +669,12 @@ func (m *Manager) deleteHelperSessionsV4(keys []dataplane.SessionKey) error {
 
 // deleteHelperSessionsScopedV4 is the #9364 domain-carrying helper delete.
 func (m *Manager) deleteHelperSessionsScopedV4(keys []dataplane.ScopedSessionKey) error {
+	return m.deleteHelperSessionsScopedV4Marked(keys, false)
+}
+
+// deleteHelperSessionsScopedV4Marked is deleteHelperSessionsScopedV4 with the
+// #9714 peer mark set on every request it builds.
+func (m *Manager) deleteHelperSessionsScopedV4Marked(keys []dataplane.ScopedSessionKey, peer bool) error {
 	if len(keys) == 0 {
 		return nil
 	}
@@ -621,8 +695,10 @@ func (m *Manager) deleteHelperSessionsScopedV4(keys []dataplane.ScopedSessionKey
 			// helper does not have to probe for it and cannot refuse the delete
 			// as ambiguous. deleteScopeVal returns nil at domain 0, which is the
 			// pre-#9364 bare request, bit-identical.
-			reqs = append(reqs, m.buildSessionSyncRequestV4(
-				"delete", keys[i].Key, deleteScopeVal(keys[i].RoutingDomain)))
+			req := m.buildSessionSyncRequestV4(
+				"delete", keys[i].Key, deleteScopeVal(keys[i].RoutingDomain))
+			req.PeerDelete = peer
+			reqs = append(reqs, req)
 		}
 		if err := m.syncSessionRequestsLocked(reqs...); err != nil {
 			if firstErr == nil {
@@ -652,6 +728,12 @@ func (m *Manager) deleteHelperSessionsV6(keys []dataplane.SessionKeyV6) error {
 // deleteHelperSessionsScopedV6 is the IPv6 analogue of
 // deleteHelperSessionsScopedV4 (#9364).
 func (m *Manager) deleteHelperSessionsScopedV6(keys []dataplane.ScopedSessionKeyV6) error {
+	return m.deleteHelperSessionsScopedV6Marked(keys, false)
+}
+
+// deleteHelperSessionsScopedV6Marked is the IPv6 analogue of
+// deleteHelperSessionsScopedV4Marked (#9714).
+func (m *Manager) deleteHelperSessionsScopedV6Marked(keys []dataplane.ScopedSessionKeyV6, peer bool) error {
 	if len(keys) == 0 {
 		return nil
 	}
@@ -669,8 +751,10 @@ func (m *Manager) deleteHelperSessionsScopedV6(keys []dataplane.ScopedSessionKey
 		reqs := make([]SessionSyncRequest, 0, end-start)
 		for i := start; i < end; i++ {
 			// #9364: name the domain — see the V4 twin.
-			reqs = append(reqs, m.buildSessionSyncRequestV6(
-				"delete", keys[i].Key, deleteScopeValV6(keys[i].RoutingDomain)))
+			req := m.buildSessionSyncRequestV6(
+				"delete", keys[i].Key, deleteScopeValV6(keys[i].RoutingDomain))
+			req.PeerDelete = peer
+			reqs = append(reqs, req)
 		}
 		if err := m.syncSessionRequestsLocked(reqs...); err != nil {
 			if firstErr == nil {

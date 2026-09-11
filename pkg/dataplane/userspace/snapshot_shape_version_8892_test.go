@@ -256,7 +256,12 @@ const (
 	// Both mismatched pairings enforce something acceptable, and the coordinator's
 	// acceptance for #9173 requires an older helper to ignore the added field. A
 	// bump would instead make both pairings refuse every snapshot.
-	snapshotShapeVersion8892 = 15
+	// v15 -> v16 BUMPED (issue 9714) against the SAME digest, the v13 shape:
+	// `SessionSyncRequest.PeerDelete` crosses the HA session-sync path, and the
+	// old behaviour (delete a live local session on a peer's say-so) is the defect
+	// it closes. The session-sync messages are not snapshot structs, which is why
+	// the digest above did not move.
+	snapshotShapeVersion8892 = 16
 )
 
 func TestSnapshotShapeIsPinnedToProtocolVersion8892(t *testing.T) {

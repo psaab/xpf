@@ -743,6 +743,20 @@ impl crate::afxdp::ha::SessionDomain {
         self.delete_synced_session_gen(key, 0);
     }
 
+    /// #9714: a delete sent on behalf of the PEER (`SessionSyncRequest.peer_delete`:
+    /// the Go cluster-stale apply and the #6368 install rollback). It is refused for
+    /// a key this node holds as a LOCAL session whose owner redundancy group is
+    /// locally forwarding-active: under a dual-primary split both nodes forward the
+    /// flow, and the peer closing its copy must not remove this node's kernel,
+    /// DNAT and shared rows or send `DeleteSynced` to the sibling replicas. This is
+    /// the process-wide mirror of the worker's #9048 refusal
+    /// (`handle_delete_synced`), with the same predicate, so it fires only in a
+    /// dual-primary split. Otherwise, and for every authoritative delete, it
+    /// behaves exactly as `delete_synced_session`.
+    pub fn delete_peer_synced_session(&self, key: SessionKey) {
+        self.delete_synced_session_gen_marked(key, 0, true);
+    }
+
     /// #2170 delete-side guard (belt-and-suspenders for any helper-side delete
     /// that carries a peer install generation): refuse to remove a stored
     /// entry whose generation is strictly NEWER than the delete's, so a stale
@@ -754,6 +768,10 @@ impl crate::afxdp::ha::SessionDomain {
     /// generation-aware deletes. A delete_gen of 0, or a stored generation of
     /// 0, falls back to unconditional delete (rolling-upgrade safe).
     pub fn delete_synced_session_gen(&self, key: SessionKey, delete_gen: u64) {
+        self.delete_synced_session_gen_marked(key, delete_gen, false);
+    }
+
+    fn delete_synced_session_gen_marked(&self, key: SessionKey, delete_gen: u64, peer_delete: bool) {
         // #7209: ONE load of the published view, bound for the whole call. Two
         // loads inside one import can straddle a publish and resolve the
         // session's zones against one generation and its NAT against another —
@@ -780,6 +798,21 @@ impl crate::afxdp::ha::SessionDomain {
             self.sessions
                 .delete_stale_ignored
                 .fetch_add(1, Ordering::Relaxed);
+            return;
+        }
+        // #9714: refuse a PEER delete of a live local session whose owner RG is
+        // locally active, before any kernel, DNAT or shared delete and before the
+        // worker fan-out. Nothing below runs, so no sibling replica is dropped.
+        if peer_delete
+            && let Some(entry) = removed_entry.as_ref()
+            && !entry.origin.is_peer_synced()
+            && owner_rg_is_locally_active(
+                self.rg_runtime.load().as_ref(),
+                entry.metadata.owner_rg_id,
+                monotonic_nanos() / 1_000_000_000,
+            )
+        {
+            PEER_DELETE_REFUSED_LOCAL_OWNED.fetch_add(1, Ordering::Relaxed);
             return;
         }
         let reverse_key = removed_entry.as_ref().and_then(|entry| {

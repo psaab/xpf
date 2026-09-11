@@ -769,6 +769,45 @@ func (a *LegacyDataPlaneAdapter) BatchDeleteSessionsScopedV6(scoped []dataplane.
 	return m.BatchDeleteSessionsScopedV6(scoped)
 }
 
+// BatchDeletePeerSyncedSessionsScoped forwards the #9714 peer-delete batch. The
+// store's type assertion is handed this adapter, not the Manager (see
+// peer_synced_session_delete_adapter_9714.go), so a missing forwarder here would
+// silently restore the unmarked delete.
+func (a *LegacyDataPlaneAdapter) BatchDeletePeerSyncedSessionsScoped(scoped []dataplane.ScopedSessionKey) (int, error) {
+	m, err := a.managerOrErr()
+	if err != nil {
+		return 0, err
+	}
+	return m.BatchDeletePeerSyncedSessionsScoped(scoped)
+}
+
+// BatchDeletePeerSyncedSessionsScopedV6 forwards the IPv6 analogue (#9714).
+func (a *LegacyDataPlaneAdapter) BatchDeletePeerSyncedSessionsScopedV6(scoped []dataplane.ScopedSessionKeyV6) (int, error) {
+	m, err := a.managerOrErr()
+	if err != nil {
+		return 0, err
+	}
+	return m.BatchDeletePeerSyncedSessionsScopedV6(scoped)
+}
+
+// DeletePeerSyncedSession forwards the #9714 single-key peer delete.
+func (a *LegacyDataPlaneAdapter) DeletePeerSyncedSession(key dataplane.SessionKey) error {
+	m, err := a.managerOrErr()
+	if err != nil {
+		return err
+	}
+	return m.DeletePeerSyncedSession(key)
+}
+
+// DeletePeerSyncedSessionV6 forwards the IPv6 analogue (#9714).
+func (a *LegacyDataPlaneAdapter) DeletePeerSyncedSessionV6(key dataplane.SessionKeyV6) error {
+	m, err := a.managerOrErr()
+	if err != nil {
+		return err
+	}
+	return m.DeletePeerSyncedSessionV6(key)
+}
+
 func (a *LegacyDataPlaneAdapter) SessionSyncSweepProfile() (bool, time.Duration, time.Duration) {
 	m, err := a.managerOrErr()
 	if err != nil {
