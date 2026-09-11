@@ -643,13 +643,12 @@ func TestIPsecLeaseChangeApplyRecordsTheLoadedGeneration9511(t *testing.T) {
 	}
 }
 
-// The #9641 RESIDUAL, pinned on purpose. With nothing loaded by this process (for
-// example after an xpfd restart whose boot IPsec apply failed while charon still
-// runs C0), attribution falls back to the PROMOTED config C1. Here that makes an RG1
-// owner initiate blue-red, which is ambiguous in C0. Master gives the same answer.
-// Refusing to re-initiate was not adopted. Whether it could be, given that a failed
-// first boot apply is the only way into this state, is an open question on #9641.
-// When #9641 lands, the first half of this cell flips DELIBERATELY.
+// The FALLBACK when charon cannot be asked (#9641). With nothing loaded by this process
+// (for example after an xpfd restart whose boot IPsec apply failed while charon still
+// runs C0) and no way to ask charon (this daemon has no IPsec manager), attribution
+// falls back to the PROMOTED config C1, the pre-#9641 answer. Here that makes an RG1
+// owner initiate blue-red, which is ambiguous in C0. When charon CAN be asked, it names
+// C0 and the answer flips: TestAttributionFollowsCharonsGenerationAfterARestart9641.
 func TestAttributionFallsBackToPromotedConfigBeforeFirstLoad9511(t *testing.T) {
 	c0 := storeWith9511(t, append(append([]string{}, blueOnRG1_9511...),
 		"set security ipsec vpn blue-red ike gateway gw-rg2")...)
@@ -660,9 +659,8 @@ func TestAttributionFallsBackToPromotedConfigBeforeFirstLoad9511(t *testing.T) {
 	d := &Daemon{cluster: clusterOwning9511(t, c1, 1), store: c1}
 
 	if got := d.ipsecSAsToReinitiate([]string{"blue-red"}); len(got) != 1 || got[0] != "blue-red" {
-		t.Errorf("RESIDUAL (#9641) changed: with nothing loaded, attribution is expected to "+
-			"fall back to the promoted C1 and initiate blue-red; got %v. If #9641 landed, "+
-			"update this cell deliberately.", got)
+		t.Errorf("FALLBACK changed: with nothing loaded and charon not askable, attribution "+
+			"must fall back to the promoted C1 and initiate blue-red; got %v", got)
 	}
 
 	d.ipsecLoadedCfg.Store(c0.ActiveConfig())

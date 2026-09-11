@@ -2972,21 +2972,14 @@ standby can re-initiate the primary's tunnels on takeover:
   holding only RG1 (docs/log/9511.md walks both scenarios). `applyIPsecTracked`
   wraps both IPsec apply sites (commit and lease-change rebind, both under applySem).
   It records the config as `ipsecLoadedCfg` from inside the apply, through
-  `ipsec.Manager.ApplyNotifyLoaded`: right after the loaded set is promoted and BEFORE
+  `ipsec.Manager.ApplyGeneration`'s `Loaded` hook: right after the loaded set is promoted and BEFORE
   departed SAs are torn down. Two reasons. `Apply`'s error cannot say "loaded",
   because teardown debt (#6542) is returned after a successful reload. And the
   teardown can take tens of seconds, during which re-initiation (not under applySem)
   would otherwise attribute against the previous generation.
-  `ipsecAttributionConfig` returns the loaded config, or the promoted config before
-  this process has loaded one. **Residual (#9641):** after an xpfd restart whose boot
-  IPsec apply fails, charon keeps the previous run's generation while this fallback
-  attributes from the promoted config. That is the same answer master gives, so not a
-  regression, but the same class as the failed-apply defect above. Refusing to
-  re-initiate was not adopted. A clustered node's first IPsec apply completes before
-  cluster comms start, so "nothing loaded yet" is reachable only after a FAILED first
-  apply. Whether that failure can be routine (charon not ready at boot), and whether a
-  failed apply is retried, are open questions. #9641 tracks them, and prefers reading
-  what charon actually has loaded. A name the loaded
+  `ipsecAttributionConfig` resolves, in order: the loaded config (the record); with no
+  record, the generation charon itself reports loaded (the generation marker below,
+  #9641); otherwise the promoted config. A name the loaded
   generation does not render is ROUTINE, because the peer may have loaded a newer
   generation first. It keeps the pre-#9511 lookup and the RG 0 default rather than
   being treated as an anomaly.
@@ -2998,10 +2991,51 @@ standby can re-initiate the primary's tunnels on takeover:
   strongswan.service loads it on charon's own next start or reload (`ExecStartPost` and
   `ExecReload` run `swanctl --load-all`, `Restart=on-abnormal`). A record still naming the
   previous generation would then describe a config charon no longer runs, which is worse
-  than master. With the record cleared, attribution in that window falls back to the
-  promoted config, which is master's answer and the generation charon will load. A render
-  or write failure leaves the disk unchanged and keeps the record. #9641 replaces this with
-  a charon query on every re-initiation pass.
+  than master. With the record cleared, attribution in that window no longer trusts it. A
+  render or write failure leaves the disk unchanged and keeps the record.
+
+  **Charon's own generation marker (#9641).** Every swanctl file xpf writes ends with an
+  inert, unreferenced pool `xpf-gen-<digest>` naming the configstore digest of the active
+  config being applied (`ipsec.Manager.ApplyGeneration`, `configstore.ActiveDigestFor`;
+  `unknown` for any other config). With no record, a re-initiation pass asks charon. That
+  covers an xpfd restart whose boot IPsec apply failed, where charon still runs the
+  previous process's generation, and the failed-reload window above. The pass reads the
+  marker with `swanctl --list-pools --raw`, turns the digest back into a config with
+  `configstore.RetainedGeneration` (the active tree or the rollback history, which is
+  reloaded from disk at boot), and VALIDATES it with `swanctl --list-conns --raw`.
+  `--load-all` is not a transaction, so the marker is identity only. It is used only when
+  charon's loaded connections equal what that generation renders, children and
+  local/remote addresses included (`ipsec.ExpectedLoadedConns`, with local addresses
+  replayed from configuration alone). The marker overrides the promoted config only when
+  two further conditions hold:
+  - charon's loaded connections are provably NOT what the promoted config renders.
+    Connections that render identically carry no generation: an RG move that keeps an
+    explicit local address changes only the interface config, which the apply's earlier
+    steps took from the promoted config;
+  - no IPsec apply was running when the pass started, or started or finished during it
+    (`ipsecApplyActive` and `ipsecApplySeq` bracket `applyIPsecTracked`). After an
+    overlap, the pass re-reads the record.
+
+  A generation resolves first from the one this process last loaded and the last few it
+  wrote (a commit-confirmed rollback drops the rolled-back tree from the store, and failed
+  writes must not evict what charon still runs), then from the store's retained trees,
+  which are recompiled after Load's retired-syntax rewrite. Every other outcome
+  keeps the promoted config, the pre-#9641 answer: charon unreachable, no marker (a file
+  from an older xpf), an unknown or unretained generation, a promoted config or
+  generation whose local addresses came from the kernel or DNS, or a mismatch. The record
+  is consulted first because it is exact whenever it is set, and asking costs two
+  swanctl calls. A generation resolved from history is compiled once per marker
+  (`retainedIPsecGeneration`), and the outcome is logged only when it changes.
+  **Residuals:**
+  1. An IPsec apply that starts after the pass and completes before its initiate calls
+     changes charon under an answer already given. Attribution before #9641 has the same
+     window.
+  2. Identical connections across two generations that are not the promoted one. An
+     interrupted load updates only the marker to C1, over connections loaded from C0
+     that render identically. A promoted C2 then re-maps that VPN to another RG while
+     rendering it identically, changes another connection, and fails its reload
+     completely. The VPN follows C1's RG, not the applied C2's. Closing it means
+     choosing the RG source per VPN rather than per generation.
 
   **A name whose candidates span several groups is initiated only by a node owning
   every one of them, and a declared RG0 for an unanchored candidate.** For example,

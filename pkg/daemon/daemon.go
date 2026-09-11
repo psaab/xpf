@@ -206,6 +206,30 @@ type Daemon struct {
 	// render or reload leaves the previous generation loaded. Nil until the
 	// first successful load in this process.
 	ipsecLoadedCfg atomic.Pointer[config.Config]
+	// ipsecAttribution is the config the latest HA IPsec attribution pass resolved
+	// (#9641), so the SA index cache can tell a current pass from a stale one without
+	// asking charon again (isCurrentIPsecAttribution).
+	ipsecAttribution atomic.Pointer[config.Config]
+	// ipsecGeneration caches the retained generation charon's marker last named
+	// (#9641), so a takeover wave recompiles an older generation once.
+	ipsecGeneration atomic.Pointer[ipsecGenerationCache]
+	// ipsecGenerationNote is the attribution outcome the last pass logged (#9641),
+	// so a takeover wave logs a changed outcome once rather than once per RG.
+	ipsecGenerationNote atomic.Pointer[string]
+	// ipsecWritten lists the generations this process most recently wrote into the
+	// swanctl file (#9641), newest first, at most ipsecWrittenMax. A commit-confirmed
+	// rollback drops the rolled-back tree from the store, yet charon keeps running it
+	// if the rollback's own reload fails.
+	ipsecWritten atomic.Pointer[[]ipsecGenerationCache]
+	// ipsecLastLoaded pins the generation this process last LOADED successfully
+	// (#9641). A run of failed writes can push it out of ipsecWritten while charon
+	// still runs it.
+	ipsecLastLoaded atomic.Pointer[ipsecGenerationCache]
+	// ipsecApplyActive and ipsecApplySeq bracket applyIPsecTracked (#9641).
+	// Attribution trusts charon's marker only when no apply was running as its pass
+	// started and none started or finished before the pass ended.
+	ipsecApplyActive atomic.Int32
+	ipsecApplySeq    atomic.Uint64
 	// ipsecActiveNamesFn overrides the swanctl active-SA read. Test seam only
 	// (#9139); nil in production. See Daemon.ipsecActiveNames — it exists so
 	// the ADVERTISE GATE'S CALL SITE is observable, not just the gate function.

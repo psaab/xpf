@@ -246,11 +246,22 @@ type ApplyHooks struct {
 	Loaded func()
 }
 
-// ApplyWithHooks is Apply with the ApplyHooks callbacks. A successful apply runs
-// Written, then Loaded. A write followed by a failed reload runs only Written. A
-// render or write failure runs neither. Both run on the caller's goroutine with no
-// Manager lock held.
+// ApplyWithHooks is ApplyGeneration naming no generation (UnknownGeneration).
 func (m *Manager) ApplyWithHooks(ipsecCfg *config.IPsecConfig, hooks ApplyHooks) error {
+	return m.ApplyGeneration(ipsecCfg, UnknownGeneration, hooks)
+}
+
+// ApplyGeneration is Apply with the ApplyHooks callbacks, and the file it writes names
+// generation inside charon through the inert marker pool (#9641, generation.go).
+// generation is a config digest the caller can look up later (the daemon passes the
+// configstore digest of the active config it applies); anything else is written as
+// UnknownGeneration. Only a rendered config carries the marker: the empty-config clear
+// path removes the file, so charon then lists no marker at all.
+//
+// A successful apply runs Written, then Loaded. A write followed by a failed reload
+// runs only Written. A render or write failure runs neither. Both run on the caller's
+// goroutine with no Manager lock held.
+func (m *Manager) ApplyGeneration(ipsecCfg *config.IPsecConfig, generation string, hooks ApplyHooks) error {
 	// loadedNames is the set of connections swanctl actually loaded on this
 	// apply. For the render path it is renderConfig's exact emitted set; for
 	// the empty-config clear path nothing is loaded, so it stays nil.
@@ -259,7 +270,7 @@ func (m *Manager) ApplyWithHooks(ipsecCfg *config.IPsecConfig, hooks ApplyHooks)
 	if ipsecCfg == nil || len(ipsecCfg.VPNs) == 0 {
 		applyErr = m.clearConfig(hooks.Written)
 	} else {
-		loadedNames, applyErr = m.applyConfig(ipsecCfg, hooks.Written)
+		loadedNames, applyErr = m.applyConfig(ipsecCfg, generation, hooks.Written)
 	}
 
 	// #4898: state promotion and SA teardown are gated on reload SUCCESS. On a
@@ -320,11 +331,17 @@ func (m *Manager) Clear() error {
 // set Apply diffs against prevConnNames to decide which stale SAs to tear
 // down. On any error (render hard error, write failure, reload failure) it
 // returns a nil set so Apply's error path leaves prevConnNames untouched.
-func (m *Manager) applyConfig(ipsecCfg *config.IPsecConfig, written func()) (map[string]bool, error) {
+//
+// #9641: the written file ends with the generation marker pool naming generation. It
+// is appended to the render rather than rendered inside it, so every other consumer of
+// renderConfig (the SA name index, ExpectedLoadedConns) sees exactly
+// the connections and secrets it always did.
+func (m *Manager) applyConfig(ipsecCfg *config.IPsecConfig, generation string, written func()) (map[string]bool, error) {
 	cfg, rendered, err := m.renderConfig(ipsecCfg)
 	if err != nil {
 		return nil, err
 	}
+	cfg += "\n" + renderGenerationMarker(generation)
 
 	if err := os.MkdirAll(m.configDir, 0755); err != nil {
 		return nil, fmt.Errorf("create config dir: %w", err)
