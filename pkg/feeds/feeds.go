@@ -817,7 +817,8 @@ func parseFeed(r io.Reader) (fetchResult, error) {
 	var prefixes []string
 	var invalidLines int
 	var invalidSample []string
-	var invalidSampleBytes int // running total of retained sample-entry lengths (#4922)
+	var invalidSampleBytes int   // running total of retained sample-entry lengths (#4922)
+	var refusedDefaultRoutes int // #9248: whole-address-space lines refused
 	// Cap the total bytes buffered. Read one byte past the cap so a body that
 	// exactly fills the cap is accepted while anything larger is detected.
 	cr := &countingReader{r: io.LimitReader(r, maxFeedBodyBytes+1)}
@@ -829,7 +830,34 @@ func parseFeed(r io.Reader) (fetchResult, error) {
 			continue
 		}
 		// Validate + canonicalize as CIDR or plain IP.
-		if _, ipNet, err := net.ParseCIDR(line); err == nil {
+		if _, ipNet, err := net.ParseCIDR(line); err == nil && isDefaultRoute9248(ipNet) {
+			// #9248: a feed line naming the whole address space is refused, not
+			// installed. Feed prefixes become the address set a policy MATCHES
+			// (pkg/dataplane/userspace policies_lower / policies_addrbook), so
+			// one `0.0.0.0/0` or `::/0` line in content this box does not author
+			// turns every policy on that dynamic address into "match anything":
+			// a permit fails open and a deny drops everything. No real feed
+			// entry is the default route -- bogon lists stop at /3 and /4 -- so
+			// only /0 is refused, and it is counted and sampled exactly like a
+			// malformed line so the feed reports DEGRADED instead of a clean
+			// success. A feed whose only entry was the default route is left
+			// with no usable prefixes and fails with a reason that says so.
+			//
+			// The test is on the CANONICAL form, the string that would be
+			// installed, not on the parsed mask length: `::ffff:0:0/96` is a /96
+			// mapped-IPv6 prefix that net.IPNet renders as `0.0.0.0/0`.
+			//
+			// BOUNDARY, stated: this guards an accidental whole-space line. It is
+			// not protection from a hostile provider, which can list 0.0.0.0/1
+			// and 128.0.0.0/1 and cover the same space.
+			refusedDefaultRoutes++
+			invalidLines++
+			if len(invalidSample) < maxInvalidSample && invalidSampleBytes < maxInvalidSampleTotalBytes {
+				entry := boundInvalidSample("default route refused: " + line)
+				invalidSample = append(invalidSample, entry)
+				invalidSampleBytes += len(entry)
+			}
+		} else if err == nil {
 			// Normalize to masked network form (e.g. 192.0.2.5/24 -> 192.0.2.0/24).
 			prefixes = append(prefixes, ipNet.String())
 		} else if ip := net.ParseIP(line); ip != nil {
@@ -882,6 +910,11 @@ func parseFeed(r io.Reader) (fetchResult, error) {
 	}
 
 	canon := canonicalize(prefixes)
+	if len(canon) == 0 && refusedDefaultRoutes > 0 {
+		// #9248: say WHY, instead of the generic zero-prefix error below.
+		return fetchResult{}, fmt.Errorf("feed contained no usable prefixes: its %d whole-address-space "+
+			"entr(y/ies) (0.0.0.0/0, ::/0 or a mapped equivalent) are refused", refusedDefaultRoutes)
+	}
 	if len(canon) == 0 {
 		// Zero-prefix HTTP-200: suspect. Retain last-good rather than installing
 		// an empty set that would fail-open an enforced denylist.
@@ -894,6 +927,13 @@ func parseFeed(r io.Reader) (fetchResult, error) {
 		invalidLines:  invalidLines,
 		invalidSample: invalidSample,
 	}, nil
+}
+
+// isDefaultRoute9248 reports whether a parsed prefix is the whole IPv4 or IPv6
+// address space (#9248).
+func isDefaultRoute9248(n *net.IPNet) bool {
+	s := n.String()
+	return s == "0.0.0.0/0" || s == "::/0"
 }
 
 // boundInvalidSample renders a malformed feed line into the small, safe form

@@ -343,3 +343,32 @@ provider offers a query-string or userinfo form, prefer it — those are redacte
   is still surfaced as a config error at apply time (Go pre-flight in
   `pkg/dataplane/userspace/process.go`) rather than silently rejected by the
   helper after commit.
+
+## A default-route entry is refused (#9248)
+
+`parseFeed` refuses a line whose CANONICAL prefix -- the string that would be
+installed -- is the whole IPv4 or IPv6 address space: `0.0.0.0/0`, `::/0`, and
+mapped forms such as `::ffff:0:0/96`, which renders as `0.0.0.0/0`. Feed prefixes become the address set a policy MATCHES
+(`pkg/dataplane/userspace` `policies_lower.go` / `policies_addrbook.go`), so a
+single default-route line in content this box does not author would turn every
+policy on that dynamic address into "match anything": a permit fails open and a
+deny drops everything.
+
+- When the response ALSO carries usable prefixes, the refused line is counted
+  and sampled exactly like a malformed line (`InvalidLines`, `InvalidSample`
+  with a `default route refused:` prefix), so the installed feed reports
+  `Degraded` instead of a clean success.
+- A feed whose ONLY entries were refused default routes fails its fetch with a
+  reason that names them ("whole-address-space entries are refused"). That is
+  a fetch FAILURE, not a degraded install: it shows in `LastError`, while
+  `Degraded`, `InvalidLines` and `InvalidSample` keep describing the last-good
+  snapshot still enforced -- a clean last-good feed keeps reading
+  `Degraded=false`. The feed's existing failure handling applies: the last-good set stays enforced
+  until that handling's own hold-interval expiry drops it, as for any failing
+  feed.
+- The boundary is an accidental whole-space line, not a hostile provider: a
+  feed listing `0.0.0.0/1` and `128.0.0.0/1` covers the same space and is
+  installed.
+- Only `/0` is refused. Short but real prefixes still install -- bogon lists
+  carry `224.0.0.0/3`-shaped entries, and a higher floor would silently empty
+  them.
