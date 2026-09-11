@@ -21,15 +21,32 @@
 #   (b) the client KEEPS its address + remaining lifetime (no re-DISCOVER);
 #   (c) the promoted node does NOT re-hand the in-use address to a 2nd client
 #       (the duplicate-allocation window is closed by the pre-seed).
-# What is automated (#9729): (a) and (b) for a v4 lease; the v6 memfile header
-# and a v6 lease only with DHCP_V6=1 on a fixture that answers DHCPv6. IA_PD and
-# (c), which needs a second DHCP client on the segment, are NOT automated, so
-# this gate does not claim them. Roles are derived from the RG0 row, not assumed,
-# and the promotion is asserted before (a) and (b) are read on the survivor.
+# What is automated (#9729):
+#   - (a) is anchored on a POSITIVE Kea memfile load event on the promoted node
+#     after the failover, then on the absence of load errors since then;
+#   - (c) runs BEFORE (b). A second client DISCOVERs on the promoted node and
+#     must not be handed the first client's address. Run the other way round,
+#     the first client's own re-request would occupy that address whether or
+#     not the lease synced, and (c) could not fail;
+#   - (b) is judged on the dhclient exchange: a REQUEST for the synced address
+#     answered by an ACK, with no NAK and no fresh DISCOVER. Keeping the same
+#     address alone is weak, because an allocator can hand a returning client
+#     the first free address again;
+#   - v4 throughout. A v6 lease is asserted only with DHCP_V6=1 on a fixture
+#     that answers DHCPv6; IA_PD is not automated and is not claimed.
+# Roles are derived from the RG0 row, and the promotion is asserted before
+# (a), (b) or (c) is read on the survivor.
+#
+# Fixture: when the lab config lacks the lease-sync knob, the run commits it
+# together with a dhcp-local-server group on the LAN unit, and removes both on
+# exit (DHCP_PROVISION=0 refuses instead). The clients run in network
+# namespaces on macvlans over the LAN host's DHCP_CLIENT_IFACE, with a dhclient
+# script that only assigns the leased address. The shared LAN host's own
+# address, routes and resolv.conf are never touched.
 #
 # Usage:
 #   ./test/incus/dhcp-lease-failover.sh
-#   DHCP_CLIENT_IFACE=eth1 ./test/incus/dhcp-lease-failover.sh   # override iface
+#   DHCP_CLIENT_IFACE=eth1 ./test/incus/dhcp-lease-failover.sh   # macvlan parent on the LAN host
 
 set -euo pipefail
 
@@ -44,6 +61,8 @@ xpf_enter_destructive_cluster_cell "dhcp-lease-failover $*" "$0" "$@"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=test/incus/cluster-env.sh
 source "${SCRIPT_DIR}/cluster-env.sh"
+# shellcheck source=test/incus/cos-apply-lib.sh
+source "${SCRIPT_DIR}/cos-apply-lib.sh"
 
 # LAN DHCP client fixture (the container/host that DISCOVERs behind the reth).
 # The default smoke LAN host is a STATIC address; a lab run points this at a
@@ -57,6 +76,20 @@ KEA_MEMFILE4="${KEA_MEMFILE4:-/var/lib/kea/kea-leases4.csv}"
 KEA_MEMFILE6="${KEA_MEMFILE6:-/var/lib/kea/kea-leases6.csv}"
 REBOOT_WAIT="${REBOOT_WAIT:-60}"
 DHCP_V6="${DHCP_V6:-0}"
+# #9729 fixture provisioning (see the header).
+DHCP_PROVISION="${DHCP_PROVISION:-1}"
+DHCP_LAN_UNIT="${DHCP_LAN_UNIT:-reth1.0}"
+DHCP_SUBNET="${DHCP_SUBNET:-10.0.61.0/24}"
+DHCP_RANGE_LOW="${DHCP_RANGE_LOW:-10.0.61.150}"
+DHCP_RANGE_HIGH="${DHCP_RANGE_HIGH:-10.0.61.199}"
+DHCP_GROUP="g9729"
+DHCP_POOL="p9729"
+NS_A="dhcp9729a"
+NS_B="dhcp9729b"
+IF_A="dhc9729a"
+IF_B="dhc9729b"
+CLIENT_SCRIPT="/run/dhclient-9729-script"
+PROVISIONED=0
 
 # Golden Kea 3.0.x headers — MUST stay in lockstep with the Go golden
 # (pkg/dhcpserver/lease_sync.go keaMemfileHeader{4,6} + the
@@ -92,24 +125,134 @@ rg0_primary_node() {
 # Preflight — the lab prerequisites this smoke cannot self-provision.
 # ---------------------------------------------------------------------------
 preflight() {
-	info "Preflight: knob-ON + dhcp-local-server + a DHCP client fixture"
+	info "Preflight: lease-sync knob + dhcp-local-server (provisioned for this run when absent)"
 	local cfg
 	cfg="$(ssh_fw "$FW0" '/usr/local/sbin/cli -c "show configuration chassis cluster" 2>/dev/null' || true)"
-	if ! grep -q "dhcp-lease-synchronization" <<<"$cfg"; then
+	if grep -q "dhcp-lease-synchronization" <<<"$cfg"; then
+		pass "dhcp-lease-synchronization is already enabled on $FW0 (lab config, left as it is)"
+		return
+	fi
+	if [ "$DHCP_PROVISION" != "1" ]; then
 		cat >&2 <<EOF
-LAB PREREQUISITE MISSING: dhcp-lease-synchronization is not enabled.
-Enable it on both nodes and add a dhcp-local-server pool on the LAN, e.g.:
+LAB PREREQUISITE MISSING: dhcp-lease-synchronization is not enabled, and
+DHCP_PROVISION=0 forbids committing it for the run. Either unset DHCP_PROVISION
+or enable it on both nodes with a dhcp-local-server pool on the LAN, e.g.:
 
   set chassis cluster dhcp-lease-synchronization
   set system services dhcp-local-server group g0 interface reth1.0
-  set access address-assignment pool p0 family inet network 10.0.61.0/24
-  set access address-assignment pool p0 family inet range r0 low 10.0.61.150 high 10.0.61.200
+  set system services dhcp-local-server group g0 pool p0 subnet 10.0.61.0/24
+  set system services dhcp-local-server group g0 pool p0 address-range low 10.0.61.150 high 10.0.61.199
 
-Then re-run this smoke. See pkg/dhcpserver/README.md (#2239 lease-sync).
+See pkg/dhcpserver/README.md (#2239 lease-sync).
 EOF
-		die "prerequisites not met (knob OFF)"
+		die "prerequisites not met (knob OFF, DHCP_PROVISION=0)"
 	fi
-	pass "dhcp-lease-synchronization is enabled on $FW0"
+	provision_dhcp
+}
+
+dhcp_config_session() {
+	cat <<EOF
+configure
+rollback 0
+set chassis cluster dhcp-lease-synchronization
+set system services dhcp-local-server group ${DHCP_GROUP} interface ${DHCP_LAN_UNIT}
+set system services dhcp-local-server group ${DHCP_GROUP} pool ${DHCP_POOL} subnet ${DHCP_SUBNET}
+set system services dhcp-local-server group ${DHCP_GROUP} pool ${DHCP_POOL} address-range low ${DHCP_RANGE_LOW} high ${DHCP_RANGE_HIGH}
+commit
+exit
+quit
+EOF
+}
+
+# provision_dhcp commits the fixture on the RG0 primary; config sync carries it.
+provision_dhcp() {
+	local node out
+	node="$(rg0_primary_node "$FW0")"
+	[ -n "$node" ] || node="$(rg0_primary_node "$FW1")"
+	[ -n "$node" ] || die "cannot read the RG0 primary to commit the DHCP fixture on"
+	out="$(mktemp)"
+	# Set before the attempt, so a commit that fails half-way is still rolled back.
+	PROVISIONED=1
+	dhcp_config_session | incus exec "$node" -- /usr/local/sbin/cli >"$out" 2>&1 || true
+	# Gate on the marker, never the exit status (#6440).
+	if ! cos_require_markers "dhcp fixture apply on $node" "$out" "$COS_MARKER_COMMIT"; then
+		cat "$out" >&2
+		rm -f "$out"
+		die "committing the DHCP fixture failed on $node"
+	fi
+	rm -f "$out"
+	pass "DHCP fixture committed on $node for this run: lease-sync knob, group ${DHCP_GROUP} on ${DHCP_LAN_UNIT}, ${DHCP_RANGE_LOW}-${DHCP_RANGE_HIGH}"
+	sleep 10
+}
+
+# restore_dhcp runs on EXIT: the client namespaces always go, and the fixture is
+# removed only if this run committed it. Both nodes are tried, because the
+# primary may have moved and a secondary simply refuses.
+restore_dhcp() {
+	ns_down "$NS_A"
+	ns_down "$NS_B"
+	incus exec "$DHCP_CLIENT" -- rm -f "$CLIENT_SCRIPT" >/dev/null 2>&1 || true
+	[ "$PROVISIONED" = "1" ] || return 0
+	info "Restoring: removing the DHCP fixture this run committed"
+	local node
+	for node in "$FW0" "$FW1"; do
+		incus exec "$node" -- /usr/local/sbin/cli >/dev/null 2>&1 <<EOF || true
+configure
+rollback 0
+delete chassis cluster dhcp-lease-synchronization
+delete system services dhcp-local-server group ${DHCP_GROUP}
+commit
+exit
+quit
+EOF
+	done
+}
+
+# install_client_script puts a dhclient script on the LAN host that ONLY
+# assigns or removes the leased IPv4 address: no routes, no resolv.conf.
+install_client_script() {
+	incus exec "$DHCP_CLIENT" -- sh -c "cat > '$CLIENT_SCRIPT' && chmod 0755 '$CLIENT_SCRIPT'" <<'SCRIPT'
+#!/bin/sh
+# xpf #9729 dhclient script: assign the leased IPv4 address only.
+case "$reason" in
+PREINIT) ip link set "$interface" up ;;
+BOUND|RENEW|REBIND|REBOOT)
+	if [ -n "$old_ip_address" ] && [ "$old_ip_address" != "$new_ip_address" ]; then
+		ip -4 addr del "$old_ip_address/$old_subnet_mask" dev "$interface" 2>/dev/null
+	fi
+	ip -4 addr replace "$new_ip_address/$new_subnet_mask" dev "$interface"
+	;;
+EXPIRE|FAIL|RELEASE|STOP)
+	if [ -n "$old_ip_address" ]; then
+		ip -4 addr del "$old_ip_address/$old_subnet_mask" dev "$interface" 2>/dev/null
+	fi
+	;;
+esac
+exit 0
+SCRIPT
+}
+
+# ns_up <ns> <ifname>: a namespace holding a macvlan over DHCP_CLIENT_IFACE.
+ns_up() {
+	ssh_fw "$DHCP_CLIENT" "ip netns del '$1' 2>/dev/null; ip link del '$2' 2>/dev/null; ip netns add '$1' && ip link add '$2' link '$DHCP_CLIENT_IFACE' type macvlan mode bridge && ip link set '$2' netns '$1' && ip netns exec '$1' ip link set lo up && ip netns exec '$1' ip link set '$2' up"
+}
+
+# ns_dhclient <ns> <ifname> [dhclient args]: one v4 attempt inside the
+# namespace, printing dhclient's exchange. dhclient backgrounds itself once bound.
+ns_dhclient() {
+	local ns="$1" ifn="$2"
+	shift 2
+	ssh_fw "$DHCP_CLIENT" "timeout 90 ip netns exec '$ns' dhclient -1 -v -sf '$CLIENT_SCRIPT' -pf '/run/dhclient-$ns.pid' -lf '/run/dhclient-$ns.leases' $* '$ifn' 2>&1"
+}
+
+# ns_addr4 <ns> <ifname> prints the namespace interface's IPv4 address, if any.
+ns_addr4() {
+	ssh_fw "$DHCP_CLIENT" "ip netns exec '$1' ip -4 -o addr show dev '$2' | awk '{print \$4}' | cut -d/ -f1 | head -1" || true
+}
+
+# ns_down <ns> stops the namespace's clients and deletes it (the macvlan goes with it).
+ns_down() {
+	ssh_fw "$DHCP_CLIENT" "for f in /run/dhclient-$1.pid /run/dhclient6-$1.pid; do [ -f \$f ] && kill \$(cat \$f) 2>/dev/null; rm -f \$f; done; rm -f /run/dhclient-$1.leases /run/dhclient6-$1.leases; ip netns del '$1' 2>/dev/null; true" >/dev/null 2>&1 || true
 }
 
 # ---------------------------------------------------------------------------
@@ -133,6 +276,7 @@ assert_memfile_header() {
 }
 
 main() {
+	trap restore_dhcp EXIT
 	preflight
 
 	PRIMARY="$(rg0_primary_node "$FW0")"
@@ -141,15 +285,17 @@ main() {
 	if [ "$PRIMARY" = "$FW0" ]; then STANDBY="$FW1"; else STANDBY="$FW0"; fi
 	info "roles: RG0 primary=$PRIMARY standby=$STANDBY"
 
-	info "1) LAN client DISCOVERs a lease from the RG0 primary ($PRIMARY) Kea"
-	ssh_fw "$DHCP_CLIENT" "dhclient -1 -v '$DHCP_CLIENT_IFACE'" || die "v4 DHCP DISCOVER failed"
+	info "1) Client A DISCOVERs a lease from the RG0 primary ($PRIMARY) Kea"
+	install_client_script || die "could not install the dhclient script on $DHCP_CLIENT"
+	ns_up "$NS_A" "$IF_A" || die "could not create client namespace $NS_A on $DHCP_CLIENT"
+	ns_dhclient "$NS_A" "$IF_A" || die "v4 DHCP DISCOVER failed for client A"
 	local addr4
-	addr4="$(ssh_fw "$DHCP_CLIENT" "ip -4 -o addr show dev '$DHCP_CLIENT_IFACE' | awk '{print \$4}' | cut -d/ -f1")"
-	[[ -n "$addr4" ]] || die "no v4 address acquired"
-	pass "client acquired v4 lease $addr4"
+	addr4="$(ns_addr4 "$NS_A" "$IF_A")"
+	[[ -n "$addr4" ]] || die "client A acquired no v4 address"
+	pass "client A acquired v4 lease $addr4"
 	if [ "$DHCP_V6" = "1" ]; then
-		ssh_fw "$DHCP_CLIENT" "dhclient -6 -1 -v '$DHCP_CLIENT_IFACE'" || die "v6 DHCP SOLICIT failed (DHCP_V6=1)"
-		pass "client acquired a v6 lease"
+		ssh_fw "$DHCP_CLIENT" "timeout 90 ip netns exec '$NS_A' dhclient -6 -1 -v -pf '/run/dhclient6-$NS_A.pid' -lf '/run/dhclient6-$NS_A.leases' '$IF_A'" || die "v6 DHCP SOLICIT failed (DHCP_V6=1)"
+		pass "client A acquired a v6 lease"
 	fi
 
 	info "2) Wait for the lease-sync push + standby pre-seed, then gate byte-exactness"
@@ -165,6 +311,9 @@ main() {
 	fi
 
 	info "3) Hard failover — reboot the RG0 primary ($PRIMARY)"
+	local since
+	since="$(ssh_fw "$STANDBY" 'date +%s' || true)"
+	[[ "$since" =~ ^[0-9]+$ ]] || die "cannot read the standby clock"
 	incus restart "$PRIMARY" --force || die "reboot $PRIMARY failed"
 	sleep "$REBOOT_WAIT"
 	local promoted
@@ -176,27 +325,52 @@ main() {
 	fi
 	pass "the standby $STANDBY was promoted to RG0 primary"
 
-	info "4) (a) promoted node ($STANDBY) Kea must have loaded the memfile with no parse error"
-	# Kea logs a CSV parse error on a header/column mismatch; assert none.
-	if ssh_fw "$STANDBY" "journalctl -u kea-dhcp4-server --since '-2 min' 2>/dev/null | grep -iE 'error|parse|malformed'"; then
-		fail "Kea reported a memfile load error on the promoted node"
+	info "4) (a) promoted node ($STANDBY) Kea loads the memfile after the failover, without errors"
+	local waited=0 loaded=0
+	while [ "$waited" -lt "$REBOOT_WAIT" ]; do
+		if ssh_fw "$STANDBY" "journalctl -u kea-dhcp4-server --since @$since 2>/dev/null | grep -q DHCPSRV_MEMFILE_LEASE_FILE_LOAD"; then
+			loaded=1
+			break
+		fi
+		sleep 5
+		waited=$((waited + 5))
+	done
+	if [ "$loaded" = "1" ]; then
+		pass "Kea on $STANDBY logged a memfile lease-file load after the failover"
+		if ssh_fw "$STANDBY" "journalctl -u kea-dhcp4-server --since @$since 2>/dev/null | grep -iE 'ROW_ERROR|error|parse|malformed'"; then
+			fail "Kea reported a memfile load error on the promoted node"
+		else
+			pass "no Kea memfile load error on the promoted node since the failover"
+		fi
 	else
-		pass "no Kea memfile parse error on promoted node"
+		fail "no Kea memfile lease-file load event on $STANDBY within ${REBOOT_WAIT}s of the failover (kea-dhcp4-server ActiveEnterTimestamp: $(ssh_fw "$STANDBY" 'systemctl show -p ActiveEnterTimestamp --value kea-dhcp4-server' 2>/dev/null || echo unknown)); (a) cannot be judged on a load that did not happen"
 	fi
 
-	info "5) (b) client KEEPS its address + remaining lifetime across failover (renew, no re-DISCOVER)"
-	ssh_fw "$DHCP_CLIENT" "dhclient -1 -v '$DHCP_CLIENT_IFACE'" || fail "renew after failover failed"
-	local addr4b
-	addr4b="$(ssh_fw "$DHCP_CLIENT" "ip -4 -o addr show dev '$DHCP_CLIENT_IFACE' | awk '{print \$4}' | cut -d/ -f1")"
-	if [[ "$addr4b" == "$addr4" ]]; then
-		pass "client retained address $addr4 across failover"
+	info "5) (c) a second client must NOT be handed client A's in-use address by the promoted node"
+	ns_up "$NS_B" "$IF_B" || die "could not create client namespace $NS_B on $DHCP_CLIENT"
+	local addr_b=""
+	if ns_dhclient "$NS_B" "$IF_B"; then
+		addr_b="$(ns_addr4 "$NS_B" "$IF_B")"
+	fi
+	if [[ -z "$addr_b" ]]; then
+		fail "client B acquired no lease from the promoted node, so (c) cannot be judged"
+	elif [[ "$addr_b" == "$addr4" ]]; then
+		fail "the promoted node handed client A's in-use address $addr4 to client B (lease NOT synced)"
 	else
-		fail "client address changed across failover: $addr4 -> $addr4b (lease NOT synced)"
+		pass "client B got $addr_b, not client A's in-use $addr4"
 	fi
 
-	# (c) — the promoted node must not re-hand the in-use address to a second
-	# client — needs a second DHCP client on the segment and is NOT automated
-	# here; the header says so rather than letting a step name imply a check.
+	info "6) (b) client A re-requests its address from the promoted node: REQUEST + ACK, no NAK, no DISCOVER"
+	ssh_fw "$DHCP_CLIENT" "ip netns exec '$NS_A' dhclient -x -sf '$CLIENT_SCRIPT' -pf '/run/dhclient-$NS_A.pid' -lf '/run/dhclient-$NS_A.leases' '$IF_A'" >/dev/null 2>&1 || true
+	local renew addr4b
+	renew="$(ns_dhclient "$NS_A" "$IF_A" || true)"
+	addr4b="$(ns_addr4 "$NS_A" "$IF_A")"
+	if grep -q "DHCPREQUEST for ${addr4}" <<<"$renew" && grep -q "DHCPACK of ${addr4}" <<<"$renew" &&
+		! grep -qE "DHCPNAK|DHCPDISCOVER" <<<"$renew" && [[ "$addr4b" == "$addr4" ]]; then
+		pass "client A kept $addr4 across the failover by REQUEST/ACK, with no NAK and no DISCOVER"
+	else
+		fail "client A did not keep $addr4 by REQUEST/ACK (now '${addr4b:-none}'); exchange: $(tr '\n' ' ' <<<"$renew" | cut -c1-400)"
+	fi
 
 	echo
 	# #9729: the canonical line the ha-smoke ledger adapter parses.
