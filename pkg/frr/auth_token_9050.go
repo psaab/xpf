@@ -43,7 +43,8 @@ import (
 // config applies at all", the first is the one to choose for a value that
 // should never have been persisted.
 //
-// NOT quoting it: whether vtysh accepts a quoted operand at each of these eight
+// NOT quoting it: whether vtysh accepts a quoted operand at each of these ten
+// sites (#9496 added the two IS-IS per-interface sites #9050 had missed)
 // sites is unmeasured, and guessing wrong reproduces the reload failure this
 // avoids.
 
