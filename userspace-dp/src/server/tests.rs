@@ -499,6 +499,37 @@ fn sync_session_delete_with_valid_key_succeeds() {
     assert!(response.ok, "unexpected error: {}", response.error);
 }
 
+/// #9714: the helper must decode Go's peer-delete mark under the key Go sends. A
+/// misspelled rename decodes every marked delete as unmarked, and the helper then
+/// deletes a live local session on the peer's say-so. The key below is a literal
+/// on the wire, so a rename typo cannot round-trip through this struct.
+#[test]
+fn a_sync_session_request_decodes_the_peer_delete_mark_9714() {
+    let mut wire = serde_json::to_value(SessionSyncRequest {
+        operation: "delete".to_string(),
+        ..SessionSyncRequest::default()
+    })
+    .expect("encode a delete");
+    wire["peer_delete"] = serde_json::Value::Bool(true);
+    let marked: SessionSyncRequest =
+        serde_json::from_value(wire.clone()).expect("decode a marked delete");
+    assert!(
+        marked.peer_delete,
+        "the helper did not decode \"peer_delete\": true; Go's marked deletes would apply as \
+         authoritative (#9714)"
+    );
+    wire.as_object_mut()
+        .expect("a request encodes as an object")
+        .remove("peer_delete");
+    let unmarked: SessionSyncRequest =
+        serde_json::from_value(wire).expect("decode an unmarked delete");
+    assert!(
+        !unmarked.peer_delete,
+        "a request without the key (every v15 sender, and every authoritative delete) must decode \
+         as unmarked"
+    );
+}
+
 #[test]
 fn sync_session_upsert_with_valid_entry_succeeds() {
     let mut request = req("sync_session");
@@ -5275,6 +5306,61 @@ mod routing_domain_delete_7160 {
              disambiguate and nothing to refuse; got {:?}",
             response.error
         );
+    }
+
+    /// #9714: the handler routes a MARKED delete to the refusing path at BOTH of its
+    /// delete calls, the exact key and the #8636 single-domain retry, and an unmarked
+    /// delete to the authoritative path. The domain-level cells call the domain
+    /// directly, so a handler that ignored the mark at either call would pass them.
+    #[test]
+    fn the_handler_honours_the_peer_delete_mark_at_both_delete_calls_9714() {
+        for (arm, domain) in [("exact key", 0u32), ("#8636 single-domain retry", DOMAIN)] {
+            for peer_delete in [true, false] {
+                let mut afxdp = afxdp::Coordinator::new();
+                if domain != 0 {
+                    afxdp.seed_routing_domain_for_test(24, domain);
+                }
+                let forward = crate::server::helpers::build_synced_session_entry(
+                    &upsert_request(),
+                    afxdp.zone_name_to_id_ref(),
+                    domain,
+                )
+                .expect("build the local entry");
+                afxdp.seed_live_local_session_for_test(forward, 7, true);
+                assert_eq!(
+                    afxdp.synced_session_entry_count_for_test(),
+                    2,
+                    "setup ({arm}): the live local forward entry and its reverse companion"
+                );
+                let state = Arc::new(Mutex::new(ServerState {
+                    status: ProcessStatus::default(),
+                    snapshot: None,
+                    afxdp,
+                    state_writer: Arc::new(StateWriter::new()),
+                }));
+                let mut request = bare_five_tuple_delete();
+                request
+                    .session_sync
+                    .as_mut()
+                    .expect("a sync_session request")
+                    .peer_delete = peer_delete;
+
+                let response = run_request(state.clone(), request);
+
+                assert!(
+                    response.ok,
+                    "({arm}, peer_delete={peer_delete}) the delete must not fail: {:?}",
+                    response.error
+                );
+                assert_eq!(
+                    synced_key_count(&state),
+                    if peer_delete { 2 } else { 0 },
+                    "({arm}, peer_delete={peer_delete}) a MARKED delete of a live local session \
+                     whose owner RG is active must be refused, and an UNMARKED one (an operator \
+                     clear) must still remove it (#9714)"
+                );
+            }
+        }
     }
 
     fn synced_key_count(state: &Arc<Mutex<ServerState>>) -> usize {

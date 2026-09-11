@@ -1111,6 +1111,38 @@ it refuses on epoch alone — and deliberately does NOT record the per-key
 generation, so the peer's next re-sync of that key is admitted rather than
 refused as stale.
 
+**A peer's delete cannot remove this node's live flow (#9714).** The rollback
+above and `deleteClusterSynced*` are the only callers of
+`DeleteReasonClusterStale`. The rollback removes a session the peer sent;
+`deleteClusterSynced*` removes one the peer said is gone. Both act on the
+PEER's authority, not this node's.
+
+In a dual-primary split both nodes forward the same flows, and each holds its
+copy as a LOCAL session. Until #9714 such a delete reached the helper as an
+ordinary `sync_session` delete. The worker-side guard in
+`handle_delete_synced` kept only the forwarding worker's own entry. Everything
+else still went:
+- the shared rows;
+- the steering row and the DNAT steering hold;
+- every sibling worker's replica (`WorkerLocalImport`, which counts as
+  peer-synced).
+
+**How the delete is marked.** The session store routes a cluster-stale delete
+through the optional `peerSyncedSessionDeleter` capability. The userspace
+`Manager` implements it, and `*LegacyDataPlaneAdapter` forwards it. The
+capability sets `peer_delete` on every helper request (protocol v16).
+
+**What the helper refuses.** It refuses a marked delete of a local-origin
+shared entry whose owner RG is locally active. The refusal comes before any
+shared, steering or DNAT delete and before the worker fan-out. It is counted on
+`peer_delete_refused_local_owned`, the counter the worker-side guard already
+increments.
+
+**What stays authoritative.** Every other delete, such as an operator
+`clear security flow session` or GC expiry, is unmarked and applies as before.
+An older helper does not know the field and would apply a marked delete
+too, which is why the field bumps the protocol.
+
 **Item 1 (accepted residual — #6419 closed).** The guard covers only the
 config-authority → peer direction (the primary that admits the session is also
 the RG0 config-sync authority). A non-authority's sessions carry the

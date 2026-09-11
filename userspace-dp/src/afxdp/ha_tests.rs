@@ -5390,6 +5390,11 @@ struct Fixture9714 {
 /// shared maps with a DNAT steering hold; a session map descriptor present (-1,
 /// so the kernel delete is attempted and recorded, never applied).
 fn fixture_9714(rg_active: bool) -> Fixture9714 {
+    fixture_9714_with_origin(rg_active, SessionOrigin::ForwardFlow)
+}
+
+/// `fixture_9714` with the forward entry's origin chosen by the cell.
+fn fixture_9714_with_origin(rg_active: bool, origin: SessionOrigin) -> Fixture9714 {
     let mut coordinator = Coordinator::new();
     coordinator.set_forwarding_for_test(reserve6600_forwarding());
     let worker_a = Arc::new(Mutex::new(VecDeque::new()));
@@ -5422,7 +5427,7 @@ fn fixture_9714(rg_active: bool) -> Fixture9714 {
         }));
 
     let mut forward = reserve6600_entry(40714, 50714);
-    forward.origin = SessionOrigin::ForwardFlow;
+    forward.origin = origin;
     forward.metadata.owner_rg_id = RG_9714;
     forward.metadata.is_reverse = false;
     let reverse_key = reverse_session_key(&forward.key, forward.decision.nat);
@@ -5578,5 +5583,34 @@ fn a_peer_delete_with_the_owner_rg_inactive_still_deletes_9714() {
     assert!(
         fixture.queued_delete(&fixture.forward.key),
         "with the owner RG inactive the peer delete must fan DeleteSynced out"
+    );
+}
+
+/// Control: the refusal has the worker-side guard's scope. Only a LOCAL-origin
+/// entry is this node's own flow; the peer's delete of a peer-synced entry applies
+/// as it did before #9714, even with the owner RG locally active.
+#[test]
+fn a_peer_delete_of_a_peer_synced_session_still_deletes_with_the_owner_rg_active_9714() {
+    let fixture = fixture_9714_with_origin(true, SessionOrigin::SyncImport);
+    crate::afxdp::bpf_map::clear_session_map_writes();
+
+    fixture
+        .coordinator
+        .session_domain()
+        .delete_peer_synced_session(fixture.forward.key.clone());
+
+    let writes = crate::afxdp::bpf_map::session_map_writes();
+    assert!(
+        !fixture.shared_has(&fixture.forward.key) && !fixture.shared_has(&fixture.reverse_key),
+        "a peer delete of a PEER-SYNCED entry must remove the shared rows even with the owner RG \
+         locally active; only a local-origin entry is this node's to keep (#9714)"
+    );
+    assert!(
+        fixture.steering_deleted(&writes),
+        "a peer delete of a peer-synced entry must remove the kernel steering row. Writes: {writes:?}"
+    );
+    assert!(
+        fixture.queued_delete(&fixture.forward.key),
+        "a peer delete of a peer-synced entry must fan DeleteSynced out"
     );
 }
