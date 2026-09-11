@@ -597,6 +597,22 @@ output pipe included**. The gRPC gate matches the canonical command **path**,
 because the remote `cli` parses the line client-side and only a typed RPC
 crosses the wire — `ping 10.0.0.1` arrives as `Ping{Host:"10.0.0.1"}`.
 
+The canonicalized line holds only words the command tree models. Every value
+slot takes exactly one value, so a word appended after a value
+(`show route table secret-vrf bypass`) is refused as uncanonicalizable, not
+carried into the matched string. Before #9505 it was carried: the handler
+dropped the word and ran the command, and an anchored deny against the
+value-carrying command did not match. Commands whose options may come in any
+order (`show security flow session`, `ping`, `monitor traffic`, …) are declared
+as option lists, so each option is resolved and canonicalized rather than
+refused.
+
+The output pipe is not command-tree grammar, so it is not canonicalized with the
+command (#9628). The words before the first `|` are canonicalized and the pipe is
+matched as typed, so a deny on `display set` still sees it. A pipe verb the CLI
+does not implement is refused. The command WITHOUT its pipe is matched as well,
+so `^show version$` also denies `show version | match .`.
+
 So a deny written against a **path** (`request system reboot`) is enforced
 identically on both. A deny written against **argument text**
 (`show route table secret-vrf`) is enforced on the box and **not** over gRPC.
