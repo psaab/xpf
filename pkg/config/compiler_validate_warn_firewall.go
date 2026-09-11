@@ -45,6 +45,36 @@ func validateFilterLossPriorityWarnings(cfg *Config) []string {
 	return warnings
 }
 
+// validateThreeColorPolicerMarkingWarnings emits a WARN-only commit-time message
+// for each three-color policer whose `then` is a marking action (#9503). The
+// userspace dataplane meters such a policer (green/yellow/red counters) but
+// neither drops the excess nor marks it: only `then discard` enforces the rate.
+// Before #9503 the same config disarmed forwarding on every binding; now it
+// applies, and this is how the operator learns the marking is inert. Mirrors
+// validateFilterLossPriorityWarnings. Never an error, because the #8445 commit
+// gate's own text recommends marking alone as the meter-only spelling.
+func validateThreeColorPolicerMarkingWarnings(cfg *Config) []string {
+	if cfg == nil {
+		return nil
+	}
+	names := make([]string, 0, len(cfg.Firewall.ThreeColorPolicers))
+	for name, pol := range cfg.Firewall.ThreeColorPolicers {
+		if pol != nil && pol.ThenAction != "" && pol.ThenAction != "discard" {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	warnings := make([]string, 0, len(names))
+	for _, name := range names {
+		warnings = append(warnings, fmt.Sprintf(
+			"firewall three-color-policer %q `then %s` meters only in the userspace "+
+				"dataplane: excess traffic is counted green/yellow/red but is neither "+
+				"dropped nor marked (only `then discard` enforces the rate)",
+			name, cfg.Firewall.ThreeColorPolicers[name].ThenAction))
+	}
+	return warnings
+}
+
 // validateFirewallInterfaceSpecificWarnings emits a WARN-only commit-time
 // message for each firewall filter carrying `interface-specific` (fable-167
 // F-3a, #4316). Junos instantiates a distinct counter/policer instance per

@@ -65,14 +65,17 @@ func TestDeriveUserspaceCapabilitiesRejectsUnsupportedThreeColorPolicerActions(t
 			pol:  &config.ThreeColorPolicerConfig{Name: "aware", CIR: 1000000, CBS: 50000, PBS: 50000, ThenAction: "discard"},
 		},
 		{
-			name: "loss-priority",
+			// #9503: `then loss-priority <level>` is no longer here. It applies
+			// meter-only and keeps forwarding armed (three_color_loss_priority_9503_test.go).
+			// An action neither the Go gate nor the helper knows still refuses.
+			name: "unknown-action",
 			pol: &config.ThreeColorPolicerConfig{
-				Name:       "loss",
+				Name:       "unknown",
 				ColorBlind: true,
 				CIR:        1000000,
 				CBS:        50000,
 				PBS:        50000,
-				ThenAction: "loss-priority high",
+				ThenAction: "frobnicate",
 			},
 		},
 	}
@@ -86,7 +89,7 @@ func TestDeriveUserspaceCapabilitiesRejectsUnsupportedThreeColorPolicerActions(t
 			if caps.ForwardingSupported {
 				t.Fatal("ForwardingSupported = true, want fail-closed for unsupported three-color policer mode/action")
 			}
-			if !slices.Contains(caps.UnsupportedReasons, "userspace three-color policers require color-blind mode and then discard") {
+			if !slices.Contains(caps.UnsupportedReasons, "userspace three-color policers require color-blind mode and a supported then action") {
 				t.Fatalf("UnsupportedReasons = %+v, want three-color reason", caps.UnsupportedReasons)
 			}
 		})

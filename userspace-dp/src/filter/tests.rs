@@ -1490,7 +1490,10 @@ fn unsupported_three_color_snapshots_fail_closed_in_rust_compiler() {
             },
         ),
         (
-            "non-discard-action",
+            // #9503: `loss-priority <level>` is now meter-only (see
+            // three_color_loss_priority_meters_without_dropping_9503). An
+            // action the helper does not know still fails closed.
+            "unknown-action",
             ThreeColorPolicerSnapshot {
                 name: "bad-pol".into(),
                 mode: "single-rate".into(),
@@ -1498,7 +1501,7 @@ fn unsupported_three_color_snapshots_fail_closed_in_rust_compiler() {
                 committed_rate_bytes_per_sec: 1_000,
                 committed_burst_bytes: 100,
                 peak_or_excess_burst_bytes: 50,
-                then_action: "loss-priority high".into(),
+                then_action: "frobnicate".into(),
                 ..Default::default()
             },
         ),
@@ -10410,4 +10413,61 @@ fn a_whole_packet_still_matches_the_port_except_term_7174() {
         "port 12345 is not in the except list, so a whole packet must still be discarded — \
          otherwise the fragment cells pass against a matcher that rejects everything"
     );
+}
+
+/// #9503: a color-blind three-color policer with `then loss-priority` meters
+/// and never drops. Before #9503 the compiler failed it closed (every packet on
+/// the term dropped) and the Go capability gate disarmed forwarding
+/// appliance-wide. The same packets as three_color_empty_then_action_uses_default_discard:
+/// the second one is RED, counted as red, and forwarded.
+#[test]
+fn three_color_loss_priority_meters_without_dropping_9503() {
+    let state = make_filter_state_with_three_color(
+        &[FirewallFilterSnapshot {
+            name: "policed".into(),
+            family: "inet".into(),
+            terms: vec![FirewallTermSnapshot {
+                name: "meter".into(),
+                action: "accept".into(),
+                policer: "marking-pol".into(),
+                ..Default::default()
+            }],
+        }],
+        &[ThreeColorPolicerSnapshot {
+            name: "marking-pol".into(),
+            mode: "single-rate".into(),
+            color_blind: true,
+            committed_rate_bytes_per_sec: 1,
+            committed_burst_bytes: 100,
+            peak_or_excess_burst_bytes: 50,
+            then_action: "loss-priority high".into(),
+            ..Default::default()
+        }],
+    );
+
+    let filter = state.filters.get("inet:policed").unwrap();
+    let eval = |len| {
+        evaluate_filter_ref_tx_selection_runtime_counted(
+            filter,
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+            PROTO_UDP,
+            12345,
+            5000,
+            0,
+            TermMatchExtra::default(),
+            len,
+            0,
+        )
+    };
+    let green = eval(100);
+    let red = eval(51);
+
+    assert!(!green.policer_drop, "green is forwarded");
+    assert!(!red.policer_drop, "loss-priority meters only: RED is forwarded, not dropped");
+    let status = state.three_color_policer_statuses();
+    assert_eq!(status.len(), 1, "the policer compiled rather than failing closed");
+    assert_eq!(status[0].green_packets, 1);
+    assert_eq!(status[0].red_packets, 1, "the excess is still metered");
+    assert_eq!(status[0].drop_packets, 0, "and nothing is dropped");
 }

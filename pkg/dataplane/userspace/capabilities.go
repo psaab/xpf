@@ -104,7 +104,7 @@ func deriveUserspaceCapabilities(cfg *config.Config) UserspaceCapabilities {
 		)
 	}
 	if !userspaceSupportsThreeColorPolicers(cfg) {
-		addReason("userspace three-color policers require color-blind mode and then discard")
+		addReason("userspace three-color policers require color-blind mode and a supported then action")
 	}
 	// #8573: the persistent-NAT / chassis-cluster DISARM IS GONE, and the
 	// sentence it reported — "userspace persistent-nat source pool leases are
@@ -238,11 +238,26 @@ func userspaceSupportsThreeColorPolicers(cfg *config.Config) bool {
 		if !pol.ColorBlind {
 			return false
 		}
-		if pol.ThenAction != "" && pol.ThenAction != "discard" {
+		// #9503: `then loss-priority` is a MARKING action. The helper meters
+		// it without dropping (treatments_from_then_action's default), the
+		// same meter-only posture a plain policer's marking action has, and
+		// the commit warns that the marking is inert. Refusing it here set
+		// ForwardingSupported=false, and that disarms EVERY binding: one
+		// policer's action stopped all transit on a green commit. An action
+		// neither side knows still refuses, as a drift guard that matches the
+		// helper's shape check.
+		if !threeColorThenActionSupported(pol.ThenAction) {
 			return false
 		}
 	}
 	return true
+}
+
+// threeColorThenActionSupported mirrors the helper's
+// snapshot_three_color_shape_supported: no action or `discard` (drop the
+// excess), or `loss-priority <level>` (meter only).
+func threeColorThenActionSupported(action string) bool {
+	return action == "" || action == "discard" || strings.HasPrefix(action, "loss-priority ")
 }
 
 func expandUserspacePolicyAddresses(cfg *config.Config, addrs []string) ([]string, bool) {
