@@ -65,17 +65,28 @@ func ipsecSANameIndex(cfg *config.Config) ipsec.SANameIndex {
 // applyIPsecTracked applies cfg's IPsec section and records cfg as the generation HA
 // IPsec attribution reads, at the moment strongSwan LOADED it (#9511).
 //
-// The record is made from inside the apply, through ipsec.Manager.ApplyNotifyLoaded:
-// right after the loaded connection set is promoted, and BEFORE departed connections
-// are torn down. That is the only correct point, for two reasons. First, Apply's
-// error cannot say whether the reload succeeded, because teardown debt (#6542) is
-// returned AFTER a successful reload. Second, that teardown can take tens of seconds.
-// Re-initiation does not hold applySem, so a record made when Apply returned would
-// leave it attributing against the PREVIOUS generation for the whole teardown, while
-// charon already runs this one.
+// The record is made from inside the apply, through ipsec.Manager.ApplyWithHooks.
+// Loaded stores cfg right after the loaded connection set is promoted and BEFORE
+// departed connections are torn down. That is the only correct point: Apply's error
+// cannot say whether the reload succeeded (teardown debt, #6542, is returned after
+// one), and a record made after the teardown would leave re-initiation, which does not
+// hold applySem, attributing against the PREVIOUS generation for the whole teardown.
+//
+// FAILED-RELOAD WINDOW (#9511 stopgap). Written clears the record the moment the
+// on-disk swanctl config changes, before the reload. If the reload then fails, charon
+// keeps running the previous generation, but the NEW file stays on disk, and
+// strongswan.service loads it on charon's own next start or reload (ExecStartPost and
+// ExecReload run `swanctl --load-all`, Restart=on-abnormal). A record still naming the
+// previous generation would then describe a config charon no longer runs, which is
+// worse than master. With the record cleared, attribution falls back to the promoted
+// config, which is master's answer and the generation charon will load. A render or
+// write failure changes nothing on disk, so Written does not run and the previous
+// record stays, still matching both the file and charon. #9641 replaces this with a
+// charon query on every re-initiation pass.
 func (d *Daemon) applyIPsecTracked(cfg *config.Config) error {
-	return d.ipsec.ApplyNotifyLoaded(ipsec.PrepareConfig(cfg), func() {
-		d.ipsecLoadedCfg.Store(cfg)
+	return d.ipsec.ApplyWithHooks(ipsec.PrepareConfig(cfg), ipsec.ApplyHooks{
+		Written: func() { d.ipsecLoadedCfg.Store(nil) },
+		Loaded:  func() { d.ipsecLoadedCfg.Store(cfg) },
 	})
 }
 

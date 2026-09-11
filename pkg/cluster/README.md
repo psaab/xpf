@@ -2991,6 +2991,18 @@ standby can re-initiate the primary's tunnels on takeover:
   generation first. It keeps the pre-#9511 lookup and the RG 0 default rather than
   being treated as an anomaly.
 
+  **Failed-reload window (#9511 stopgap).** The recorded loaded config is CLEARED the
+  moment the on-disk swanctl config changes, before the reload (`ApplyHooks.Written`),
+  and set again only when strongSwan loads it (`ApplyHooks.Loaded`). If the reload fails,
+  charon keeps the previous generation, but the new file stays on disk, and
+  strongswan.service loads it on charon's own next start or reload (`ExecStartPost` and
+  `ExecReload` run `swanctl --load-all`, `Restart=on-abnormal`). A record still naming the
+  previous generation would then describe a config charon no longer runs, which is worse
+  than master. With the record cleared, attribution in that window falls back to the
+  promoted config, which is master's answer and the generation charon will load. A render
+  or write failure leaves the disk unchanged and keeps the record. #9641 replaces this with
+  a charon query on every re-initiation pass.
+
   **A name whose candidates span several groups is initiated only by a node owning
   every one of them, and a declared RG0 for an unanchored candidate.** For example,
   VPN `blue` with selector `red` and VPN `blue-red` both render `blue-red`, and

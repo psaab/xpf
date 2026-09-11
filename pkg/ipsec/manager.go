@@ -226,15 +226,40 @@ func (m *Manager) Apply(ipsecCfg *config.IPsecConfig) error {
 // generation is already what charon runs. loaded runs on the caller's goroutine with
 // no Manager lock held.
 func (m *Manager) ApplyNotifyLoaded(ipsecCfg *config.IPsecConfig, loaded func()) error {
+	return m.ApplyWithHooks(ipsecCfg, ApplyHooks{Loaded: loaded})
+}
+
+// ApplyHooks are the callbacks ApplyWithHooks runs at the two points where the
+// swanctl config on disk and the generation charon runs can diverge.
+type ApplyHooks struct {
+	// Written runs once the on-disk swanctl config has CHANGED (the new file is
+	// written, or the file is removed for an empty config) and BEFORE the reload.
+	// From that moment until a successful reload, charon runs a generation that
+	// is not the file on disk, and its own next start or reload will load the file
+	// (#9511 stopgap). It does not run when render or write fails, because the
+	// previous file is still on disk.
+	Written func()
+	// Loaded runs once strongSwan has LOADED the config: right after the newly
+	// loaded connection set is promoted, before departed connections are torn down.
+	// It does not run on a failed reload. It does run when the apply then returns
+	// teardown debt (#6542).
+	Loaded func()
+}
+
+// ApplyWithHooks is Apply with the ApplyHooks callbacks. A successful apply runs
+// Written, then Loaded. A write followed by a failed reload runs only Written. A
+// render or write failure runs neither. Both run on the caller's goroutine with no
+// Manager lock held.
+func (m *Manager) ApplyWithHooks(ipsecCfg *config.IPsecConfig, hooks ApplyHooks) error {
 	// loadedNames is the set of connections swanctl actually loaded on this
 	// apply. For the render path it is renderConfig's exact emitted set; for
 	// the empty-config clear path nothing is loaded, so it stays nil.
 	var loadedNames map[string]bool
 	var applyErr error
 	if ipsecCfg == nil || len(ipsecCfg.VPNs) == 0 {
-		applyErr = m.clearConfig()
+		applyErr = m.clearConfig(hooks.Written)
 	} else {
-		loadedNames, applyErr = m.applyConfig(ipsecCfg)
+		loadedNames, applyErr = m.applyConfig(ipsecCfg, hooks.Written)
 	}
 
 	// #4898: state promotion and SA teardown are gated on reload SUCCESS. On a
@@ -268,8 +293,8 @@ func (m *Manager) ApplyNotifyLoaded(ipsecCfg *config.IPsecConfig, loaded func())
 	// the commit result shows the degraded IPsec state — the same posture
 	// #4433 established for a failed reload.
 	removed := m.promoteConnNames(loadedNames)
-	if loaded != nil {
-		loaded()
+	if hooks.Loaded != nil {
+		hooks.Loaded()
 	}
 	failed := m.terminateRemovedConns(removed)
 	return m.recordTerminateDebt(failed)
@@ -278,7 +303,7 @@ func (m *Manager) ApplyNotifyLoaded(ipsecCfg *config.IPsecConfig, loaded func())
 // Clear removes the xpf config and reloads strongSwan, terminating the live
 // SAs of every previously-applied connection.
 func (m *Manager) Clear() error {
-	if err := m.clearConfig(); err != nil {
+	if err := m.clearConfig(nil); err != nil {
 		// #4898: the reload failed — the old config is still the effective
 		// loaded config. Preserve prevConnNames and skip termination so a later
 		// Clear retries the teardown rather than reporting a false success.
@@ -295,7 +320,7 @@ func (m *Manager) Clear() error {
 // set Apply diffs against prevConnNames to decide which stale SAs to tear
 // down. On any error (render hard error, write failure, reload failure) it
 // returns a nil set so Apply's error path leaves prevConnNames untouched.
-func (m *Manager) applyConfig(ipsecCfg *config.IPsecConfig) (map[string]bool, error) {
+func (m *Manager) applyConfig(ipsecCfg *config.IPsecConfig, written func()) (map[string]bool, error) {
 	cfg, rendered, err := m.renderConfig(ipsecCfg)
 	if err != nil {
 		return nil, err
@@ -314,6 +339,14 @@ func (m *Manager) applyConfig(ipsecCfg *config.IPsecConfig) (map[string]bool, er
 
 	slog.Info("swanctl config written", "path", m.configPath)
 
+	// #9511 stopgap: the NEW file is on disk from here on. If the reload below
+	// fails, charon keeps the old generation, but its own next start or reload
+	// (strongswan.service ExecStartPost/ExecReload `swanctl --load-all`) loads
+	// this file. Tell the caller before reloading, so it stops trusting its
+	// record of the loaded generation.
+	if written != nil {
+		written()
+	}
 	if err := m.reload(); err != nil {
 		slog.Warn("swanctl reload failed", "err", err)
 		return nil, err
@@ -330,9 +363,14 @@ func (m *Manager) applyConfig(ipsecCfg *config.IPsecConfig) (map[string]bool, er
 // charon kept the old connection loaded — a decommissioned/compromised peer
 // would stay authorized and could re-initiate. This now mirrors applyConfig,
 // which already propagates reload errors (the #4433 contract).
-func (m *Manager) clearConfig() error {
+func (m *Manager) clearConfig(written func()) error {
 	if err := os.Remove(m.configPath); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("remove config: %w", err)
+	}
+	// #9511 stopgap: the on-disk config no longer matches what charon runs; a
+	// charon restart or reload now loads no xpf config at all.
+	if written != nil {
+		written()
 	}
 	return m.reload()
 }
