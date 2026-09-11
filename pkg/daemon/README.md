@@ -397,12 +397,22 @@ startup-phase and shutdown ordering is untouched:
   `runShutdownSequence`, `runHAShutdownUpdate`.
 
   **The fail-closed actions run FIRST (#9035).** `TimeoutStopSec=20`, and
-  systemd SIGKILLs there wherever the teardown has got to. Exactly TWO actions
+  systemd SIGKILLs there wherever the teardown has got to. Exactly THREE actions
   must have completed by then, because only they are fail-closed — everything
   else is best-effort cleanup whose loss costs telemetry, not correctness:
 
-  1. **`rg_active` cleared**, so this node stops forwarding; and
-  2. **the Kea units stopped** (#6787), so it stops answering DHCP.
+  1. **kernel transit closed** (#9686), on the non-hitless (fail-closed) stop
+     only: `markDataplaneNotArmed` installs the #7191 barrier and writes
+     `ip_forward` and `conf.all.forwarding` to 0, before `Teardown` detaches
+     every XDP program. Without it the "fail-closed" stop ended with the kernel
+     routing any transit that still reached the node (surviving interface
+     addresses, static/BGP or link-local next hops) with no policy, session or
+     NAT, for the whole downtime. It keys on `hitless` alone, not on a
+     published runtime, and nothing on the way out re-opens it. A hitless stop
+     keeps the dataplane attached with the shim dropping transit, so it leaves
+     forwarding as it was;
+  2. **`rg_active` cleared**, so this node stops forwarding; and
+  3. **the Kea units stopped** (#6787), so it stops answering DHCP.
 
   Miss either and the peer promotes onto a segment this node is still serving:
   duplicate OFFERs from two lease databases with neither aware of the other.

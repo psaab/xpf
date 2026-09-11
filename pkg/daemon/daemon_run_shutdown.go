@@ -187,6 +187,25 @@ func (d *Daemon) runShutdownSequence(wg *sync.WaitGroup, stop func(), runErr err
 		hitless = true // operator explicitly opted in
 	}
 
+	// #9686: a fail-closed stop must CLOSE kernel transit before it detaches the
+	// dataplane. Teardown below removes every XDP program and pin, and nothing
+	// else on this path lowers ip_forward or installs the #7191 barrier. So
+	// without this the "fail-closed" branch ended with the kernel routing
+	// transit that still reached the node (surviving interface addresses,
+	// static/BGP next hops, link-local next hops) with no policy, session or NAT,
+	// for the whole downtime and into the next start until re-arm. The
+	// not-armed transition is the same one bootstrap and --no-dataplane use: it
+	// installs the barrier and writes both sysctls to 0, and nothing on the way
+	// out re-opens them.
+	//
+	// It keys on hitless alone, not on a published runtime: forwarding can be
+	// open from an earlier arm whether or not a dataplane is still published. A
+	// hitless stop (standalone, or `hitless-restart`) keeps the dataplane
+	// attached and the shim dropping transit, so it leaves forwarding as it is.
+	if !hitless {
+		d.markDataplaneNotArmed("shutdown", "HA fail-closed stop: closing kernel transit before the dataplane detach")
+	}
+
 	// In HA fail-closed mode, clear rg_active and watchdog immediately so
 	// BPF stops forwarding traffic even if subsequent cleanup steps hang.
 	// #2114: one snapshot for the whole HA-clear block (plan §5.3 rule 5).
