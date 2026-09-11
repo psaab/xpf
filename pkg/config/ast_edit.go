@@ -960,6 +960,14 @@ func setInactiveAtPath(current *[]*Node, path []string, grouped []bool, schema *
 		return fmt.Errorf("path not found")
 	}
 
+	// #9793: refuse a toggle addressed to one member of a grouped or packed
+	// node before the walk below prefix-matches the whole node.
+	if schema != nil {
+		if err := refusePackedMemberToggle(*current, path, i, schema, inactive); err != nil {
+			return err
+		}
+	}
+
 	keyword := path[i]
 
 	childSchema := schemaChildFor(schema, keyword) // #9685
