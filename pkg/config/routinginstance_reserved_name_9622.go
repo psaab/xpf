@@ -54,7 +54,7 @@ func IsReservedRoutingInstanceName(name string) bool {
 // the daemon reserves (#9622). It judges the same three-view name union as the
 // #3855 table-id gate (routingInstanceNameUnionAST), so an instance is caught
 // wherever it is declared: any top-level `routing-instances` root, any `groups`
-// block, either AST shape including the brace-elided leaf, or the node0/node1
+// block an apply-groups statement reaches (#9657), either AST shape including the brace-elided leaf, or the node0/node1
 // expansion. Both cluster nodes therefore decide identically.
 //
 // It runs on the STRICT path only (commit / commit-check). The tolerant load and

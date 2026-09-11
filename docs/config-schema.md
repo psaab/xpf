@@ -10922,11 +10922,17 @@ reserved for whole-dataplane selection where a rewrite shim
   node, or a reachable group when no expansion succeeds is still refused. The
   lenient warning no longer names a quarantined instance: the union spans both
   nodes' views, so it cannot know which instance this node drops, and the
-  runtime quarantine warns naming the one it does. The same scan also skips
-  `apply-groups`, `apply-groups-except` and `apply-macro` statements under
-  `routing-instances`; after `#9622` widened it to two-key leaves, they were
-  counted as instance names. The zone (`#3075`) and tunnel (`#1873`) gates'
-  pre-expansion views still count every `groups` block. Regression coverage:
+  runtime quarantine warns naming the one it does. An unquoted `apply-groups`,
+  `apply-groups-except` or `apply-macro` statement under `routing-instances`
+  is not a routing instance. Expansion strips only `apply-groups`, and
+  `compileRoutingInstances` built a routing instance, and a VRF, named
+  `apply-macro` or `apply-groups-except` from the other two. That phantom
+  could also quarantine a real instance whose table id collided with it while
+  the strict gate saw nothing. The compiler and the collision scan now skip
+  them through one predicate (`isApplyStatementNode`); a quoted
+  `"apply-macro"` is still an instance name. The zone (`#3075`) and tunnel
+  (`#1873`) gates' pre-expansion views still count every `groups` block.
+  Regression coverage:
   `pkg/config/routinginstanceid_unapplied_groups_9657_test.go`.
 - **#3444 (destination-NAT rule-set `to` scope reject):** a Junos
   destination-NAT rule-set has only a `from` clause (zone | interface |

@@ -55,6 +55,26 @@ func StableRoutingInstanceTableID(name string) int {
 	return RoutingInstanceTableIDBase + int(folded%uint64(RoutingInstanceTableIDSpan))
 }
 
+// isApplyStatementNode reports whether a child of a routing-instances stanza is
+// an apply statement rather than an instance: an UNQUOTED `apply-groups`,
+// `apply-groups-except` or `apply-macro` (#9657). Group expansion strips only
+// apply-groups; the other two stay in the tree, and compileRoutingInstances used
+// to build a routing instance, and its VRF, named after the keyword. That
+// phantom could also quarantine a real instance whose stable table id collided
+// with it. A quoted name ("apply-macro") is an operator's instance name and is
+// kept. The compiler and the collision scan share this predicate so they count
+// the same instances.
+func isApplyStatementNode(n *Node) bool {
+	if len(n.Keys) == 0 || (len(n.KeysQuoted) > 0 && n.KeysQuoted[0]) {
+		return false
+	}
+	switch n.Keys[0] {
+	case "apply-groups", "apply-groups-except", "apply-macro":
+		return true
+	}
+	return false
+}
+
 // collectRoutingInstanceNamesAST appends the routing-instance names declared
 // under a "routing-instances" node into out. Mirrors compileRoutingInstances
 // (compiler_routing.go): Keys[0] is the instance name in both the hierarchical
@@ -74,11 +94,10 @@ func collectRoutingInstanceNamesAST(riNode *Node, out map[string]struct{}) {
 		if len(child.Keys) == 0 || (child.IsLeaf && len(child.Keys) < 2) {
 			continue
 		}
-		// This scan runs before group expansion removes apply statements. Under
-		// a routing-instances stanza they are two-key leaves, the same shape as
-		// a brace-elided instance, so they are skipped by name (#9657).
-		switch child.Keys[0] {
-		case "apply-groups", "apply-groups-except", "apply-macro":
+		// An apply statement is not an instance. compileRoutingInstances skips
+		// it through the same predicate, so this scan counts exactly what the
+		// compiler builds (#9657).
+		if isApplyStatementNode(child) {
 			continue
 		}
 		if name := child.Keys[0]; name != "" {
@@ -238,7 +257,8 @@ func QuarantinedRoutingInstanceNames(names []string) map[string]struct{} {
 
 // routingInstanceNameUnionAST is the three-view union of routing-instance names
 // the name gates judge (#3855, #9622): View 1 — the PRE-expansion presence union
-// across every top-level "routing-instances" root AND every "groups" block;
+// across every top-level "routing-instances" root AND every "groups" block an
+// apply-groups statement reaches (#9657);
 // Views 2/3 — the names that survive expanding the candidate for node0 and
 // node1. It is a pure function of the candidate config, so a verdict built on
 // it is identical on both chassis-cluster nodes. One definition for every gate

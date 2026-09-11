@@ -151,13 +151,13 @@ func TestTableIDGateCountsReachableGroupsWhenExpansionFails_9657(t *testing.T) {
 // brace-elided instance, and must not be counted as instance names.
 func TestRoutingInstanceNameScanSkipsApplyStatements_9657(t *testing.T) {
 	text := "groups {\n    g1 {\n        system {\n            host-name fw;\n        }\n    }\n}\n" +
-		"routing-instances {\n    apply-groups g1;\n    apply-groups-except g2;\n    ri7 {\n        instance-type virtual-router;\n    }\n}\n"
+		"routing-instances {\n    apply-groups g1;\n    apply-groups-except g2;\n    apply-macro M {\n        k v;\n    }\n    ri7 {\n        instance-type virtual-router;\n    }\n}\n"
 	tree, errs := NewParser(text).Parse()
 	if len(errs) > 0 {
 		t.Fatalf("fixture must parse: %v", errs)
 	}
 	names := routingInstanceNameUnionAST(tree)
-	for _, kw := range []string{"apply-groups", "apply-groups-except"} {
+	for _, kw := range []string{"apply-groups", "apply-groups-except", "apply-macro"} {
 		if _, ok := names[kw]; ok {
 			t.Errorf("#9657: the routing-instance name union counts the statement %q as an instance: %v", kw, names)
 		}
@@ -235,5 +235,56 @@ func TestRoutingInstanceUnionFiltersTheMergedGroupShape_9657(t *testing.T) {
 	}
 	if _, ok := routingInstanceNameUnionAST(build(true))["ri116"]; !ok {
 		t.Errorf("#9657: the merged groups shape drops an instance from an applied group")
+	}
+}
+
+// An apply statement under routing-instances is not a routing instance, for the
+// compiler as well as the collision scan. Group expansion strips only
+// apply-groups; apply-groups-except and apply-macro stay in the tree. Before
+// #9657 the compiler built an instance, and a VRF, named after the keyword, and
+// that phantom quarantined a real instance whose stable table id collided with
+// it while the strict gate saw nothing. apply-macro folds to the same table as
+// ri486364, and apply-groups-except to the same as ri402839.
+func TestApplyStatementsAreNotRoutingInstances_9657(t *testing.T) {
+	if StableRoutingInstanceTableID("apply-macro") != StableRoutingInstanceTableID("ri486364") ||
+		StableRoutingInstanceTableID("apply-groups-except") != StableRoutingInstanceTableID("ri402839") {
+		t.Fatalf("fixture: each keyword and its sibling must fold to one table id")
+	}
+	for _, tc := range []struct{ name, text, want string }{
+		{"apply-macro beside a colliding instance",
+			"routing-instances {\n    apply-macro M {\n        k v;\n    }\n    ri486364 {\n        instance-type virtual-router;\n    }\n}\n", "ri486364"},
+		{"apply-groups-except beside a colliding instance",
+			"groups {\n    g2 {\n        system {\n            host-name x;\n        }\n    }\n}\n" +
+				"routing-instances {\n    apply-groups-except g2;\n    ri402839 {\n        instance-type virtual-router;\n    }\n}\n", "ri402839"},
+	} {
+		if _, err := compile9657(t, tc.text, false); err != nil {
+			t.Errorf("#9657 %s: the apply statement is not an instance, so nothing collides; strict refused: %v", tc.name, err)
+		}
+		cfg, err := compile9657(t, tc.text, true)
+		if err != nil {
+			t.Fatalf("lenient %s: %v", tc.name, err)
+		}
+		if names := riNames9657(cfg); len(names) != 1 || names[0] != tc.want {
+			t.Errorf("#9657 %s: want exactly [%s], got %v; the apply statement became a routing instance", tc.name, tc.want, names)
+		}
+		for _, w := range cfg.Warnings {
+			if strings.Contains(w, "QUARANTINE") {
+				t.Errorf("#9657 %s: a real instance was quarantined against the apply statement: %q", tc.name, w)
+			}
+		}
+	}
+	// A QUOTED name is the operator's instance: it compiles, and it still takes
+	// part in the collision gate.
+	quoted := "routing-instances {\n    \"apply-macro\" {\n        instance-type virtual-router;\n    }\n}\n"
+	cfg, err := compile9657(t, quoted, true)
+	if err != nil {
+		t.Fatalf("lenient quoted: %v", err)
+	}
+	if names := riNames9657(cfg); len(names) != 1 || names[0] != "apply-macro" {
+		t.Errorf("#9657: a quoted \"apply-macro\" is an instance name and must compile, got %v", names)
+	}
+	collide := "routing-instances {\n    \"apply-macro\" {\n        instance-type virtual-router;\n    }\n    ri486364 {\n        instance-type virtual-router;\n    }\n}\n"
+	if _, err := compile9657(t, collide, false); err == nil || !strings.Contains(err.Error(), "table-id collision") {
+		t.Errorf("#9657: a quoted \"apply-macro\" instance still collides with ri486364 on the strict path, got %v", err)
 	}
 }

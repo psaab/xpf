@@ -282,7 +282,8 @@ func compileConfigWithOpts(tree *ConfigTree, opts compileOpts) (*Config, error) 
 
 	// #3855: stable routing-instance table-id collision gate. Like the zone gate
 	// above it runs on the PRE-expansion tree and unions instance names across
-	// all groups so both cluster nodes accept/reject identically. Strict
+	// every group an apply-groups statement reaches (#9657), so both cluster
+	// nodes accept/reject identically. Strict
 	// hard-rejects a colliding pair (two VRFs must never share a kernel table);
 	// lenient warns and compileRoutingInstances quarantines the later instance.
 	riTableIDWarnings, riTableIDErr := validateRoutingInstanceTableIDCollisionAST(
@@ -585,8 +586,9 @@ func compileConfigForNodeWithOpts(tree *ConfigTree, nodeID int, opts compileOpts
 	}
 
 	// #3855: stable routing-instance table-id collision gate — see
-	// compileConfigWithOpts. Pre-expansion union across all groups so the
-	// verdict is identical on both cluster nodes; read-only, safe on the copy.
+	// compileConfigWithOpts. Pre-expansion union across the groups an
+	// apply-groups statement reaches (#9657), so the verdict is identical on both
+	// cluster nodes; read-only, safe on the copy.
 	riTableIDWarnings, riTableIDErr := validateRoutingInstanceTableIDCollisionAST(
 		tree, opts.lenientRoutingInstanceTableIDCollision)
 	if riTableIDErr != nil {
