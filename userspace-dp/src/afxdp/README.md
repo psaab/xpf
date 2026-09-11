@@ -880,9 +880,9 @@ sync.
     Frag-Needed/PTB instead of a silent `GRE_ENCAP_DF_OVERSIZE_DROPS` /
     `encap_mtu_drops` — and because `mtu_signalled` skips the build entirely,
     there is no double-drop/double-count with those encap guards (a non-DF
-    IPv4 inner stays fragmentable → `Forward` → the #2331 drop guard remains
-    the backstop). `mtu == 0` (no MTU resolvable / unknown tunnel kind)
-    fails open to `Forward`.
+    IPv4 inner gets no PTB: it is `ForwardOversizeNoDf`, and the encap guard
+    remains the backstop; see that variant). `mtu == 0` (no MTU resolvable /
+    unknown tunnel kind) fails open to `Forward`.
     **Per-peer WG underlay (#2845):** for WireGuard the underlay MTU is
     NOT one-per-interface — different peers of one wg endpoint can have
     different endpoints / transport routes / underlay MTUs. The dispatcher

@@ -143,10 +143,10 @@ pub(in crate::afxdp) fn segment_forwarded_tcp_frames_from_frame(
         // MTU; an Unknown/missing mode yields 0 → fail closed. Do NOT
         // floor a tunnel budget to 1280: a tunnel with a small outer MTU
         // has a genuinely smaller inner budget, and flooring it would
-        // re-introduce the oversized-then-dropped blackhole this fix
-        // exists to prevent. #5159: the plain-forward path below no longer
-        // floors either — the same oversized blackhole applies to a plain
-        // interface with a valid sub-1280 IPv4 MTU.
+        // re-introduce the oversized submission this fix exists to prevent.
+        // #5159: the plain-forward path below no longer floors either — the
+        // same oversized submission applies to a plain interface with a
+        // valid sub-1280 IPv4 MTU.
         let kind = forwarding
             .tunnel_endpoints
             .get(&decision.resolution.tunnel_endpoint_id)
@@ -257,9 +257,9 @@ pub(in crate::afxdp) fn segment_forwarded_tcp_frames_from_frame(
     // An oversized segment carrying FIN is an ordinary data segment that also
     // closes the sender's half. Declining it sent the frame to
     // `compute_forwarded_egress_ptb`, and on an IPv4 path with DF CLEAR that
-    // returns `Forward` — so the original oversized frame was submitted and
-    // dropped downstream, black-holing the connection close. There is no IPv4
-    // transit fragmentation engine to catch it.
+    // forwards the original oversized frame whole (`ForwardOversizeNoDf` since
+    // #9328), so wherever the path could not carry it the connection close was
+    // lost. There is no IPv4 transit fragmentation engine to catch it.
     //
     // SYN carries no bulk payload and its options are per-connection, so
     // splitting one is never right. RST is terminal and payload-bearing RSTs

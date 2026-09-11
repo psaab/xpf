@@ -331,8 +331,9 @@ proptest! {
     /// #9116 REMOVED FIN FROM THIS PROPERTY DELIBERATELY. This cell pinned the
     /// decision rather than detecting a defect, and the decision was wrong for
     /// FIN: declining sent the frame to `compute_forwarded_egress_ptb`, which
-    /// returns `Forward` on an IPv4 path with DF clear, so the oversized frame
-    /// was submitted and dropped downstream — the connection close black-holed.
+    /// forwards it whole on an IPv4 path with DF clear (`ForwardOversizeNoDf`
+    /// since #9328), so wherever the path could not carry it the connection
+    /// close was lost.
     /// FIN now segments, with the flag on the last segment only; see
     /// `segmentation_splits_fin_and_keeps_it_on_the_last_segment_9116`. SYN and
     /// RST still decline.
@@ -386,8 +387,8 @@ proptest! {
         } else {
             let segs = result.expect(
                 "an oversized FIN-bearing TCP frame must SEGMENT (#9116): declining it \
-                 forwards the oversized frame on an IPv4 DF-clear path and black-holes \
-                 the close",
+                 forwards the oversized frame whole on an IPv4 DF-clear path, and the \
+                 close is lost wherever the path cannot carry it",
             );
             check_segments(&segs, &pkt, mtu, tx_vlan, &want)?;
         }
