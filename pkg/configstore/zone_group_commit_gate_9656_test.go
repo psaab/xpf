@@ -67,6 +67,7 @@ func TestZoneStatementWithBodyStillCommits9656(t *testing.T) {
 		{"braced body naming a body-holding keyword zone", zones(`security-zone [ zga zgb host-inbound-traffic ] { tcp-rst; }`), []string{`"host-inbound-traffic":{"Name":"host-inbound-traffic"`}},
 		{"single zone with a packed statement", screens + zones(`security-zone trust screen edge;`), []string{`"trust":{"Name":"trust"`, `"ScreenProfile":"edge"`}},
 		{"repeated name", zones(`security-zone [ zga zga ];`), []string{`"zga":{"Name":"zga"`}},
+		{"single zone with an inline apply-macro", zones(`security-zone trust apply-macro M;`), []string{`"trust":{"Name":"trust"`}},
 		{"inactive group", zones(`inactive: security-zone [ zga zgb ]; security-zone trust;`), []string{`"trust":{"Name":"trust"`}},
 	} {
 		t.Run(c.name, func(t *testing.T) {

@@ -534,7 +534,9 @@ func TestCompactNormalizeScopePreservesCompiledResult8690(t *testing.T) {
 		"security zones security-zone xpfarg tcp-rst": "the gate refuses the CONSEQUENCE of the drop, measured " +
 			"the same way as the description site: `security-zone trust tcp-rst;` is refused with the pass " +
 			"disabled, because the flag is dropped, and accepted with it enabled. The braced spelling is " +
-			"accepted either way.",
+			"accepted either way. A leaf GROUP whose later member is spelled tcp-rst is different: the " +
+			"fold reads that member as the flag and the zone is silently lost, a pre-existing loss this gate " +
+			"cannot see after the fold (measured at ed313e4c9; #9635).",
 		"system services dhcp-local-server group xpfarg pool xpfarg static-binding xpfarg fixed-address": "the gate refuses the CONSEQUENCE of the " +
 			"drop. Measured with the pass disabled, elided `static-binding b1 " +
 			"fixed-address 10.0.1.50;` loses the address and the compiler rejects with " +
@@ -1075,7 +1077,10 @@ var knownFixtureLimited8690 = map[string]string{
 	//	ELIDED passDisabled=false        <nil>     (the fold repairs it)
 	"security zones security-zone xpfarg interfaces": "HAND-MEASURED with interface ge-0/0/0.0 defined: the " +
 		"elided spelling is refused by the #9656 zone-statement gate with the pass disabled and accepted with it " +
-		"enabled; the braced spelling is accepted both ways. The gate refuses the drop the pass repairs.",
+		"enabled; the braced spelling is accepted both ways. The gate refuses the drop the pass repairs. " +
+		"A leaf GROUP whose later member is spelled interfaces is different: the fold reads it as an " +
+		"empty interfaces statement and the zone is silently lost, a pre-existing loss this gate cannot " +
+		"see after the fold (measured at ed313e4c9; #9635).",
 	"security zones security-zone xpfarg screen": "HAND-MEASURED with screen profile edge defined: the elided " +
 		"spelling is refused by the #9656 zone-statement gate with the pass disabled and accepted with it enabled; " +
 		"the braced spelling is accepted both ways. The gate refuses the drop the pass repairs.",

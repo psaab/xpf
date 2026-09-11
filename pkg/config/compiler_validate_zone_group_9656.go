@@ -22,13 +22,16 @@ import (
 //	security-zone trust apply-groups G;             trust without G (#9788)
 //	security-zone trust scren edge;                 trust; the mistyped statement is dropped
 //
-// Three kinds of statement are left alone:
+// Four kinds of statement are left alone:
 //   - A statement the fold moves into a body, such as
 //     `security-zone trust screen edge;`, already has a child by the time this
 //     runs.
 //   - A braced group is compiled for every member by
 //     bracketedGroupInstances8794 (#8794).
 //   - A repeat of the name, as in `security-zone [ zga zga ];`, loses nothing.
+//   - An `apply-macro` tail. No compiler consumes a macro, and
+//     `security-zone trust apply-macro M;` compiles exactly like its braced
+//     spelling (measured at ed313e4c9, #9656 review round 5).
 //
 // Why a refusal: an earlier cut expanded groups in the normalizer, and three
 // review rounds found the per-member statements it materialised colliding with
@@ -53,7 +56,7 @@ func validateZoneStatementTails9656(nodes []*Node, lenient bool) ([]string, erro
 				if ch == nil || len(ch.Keys) < 3 || ch.Keys[0] != "security-zone" || len(ch.Children) > 0 {
 					continue
 				}
-				if !zoneTailDropsKeys9656(ch) {
+				if ch.Keys[2] == "apply-macro" || !zoneTailDropsKeys9656(ch) {
 					continue
 				}
 				msg := zoneTailMessage9656(ch)

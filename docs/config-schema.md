@@ -573,6 +573,9 @@ paths warn instead, and compile the statement as before (#1960).
     edge;`, already has a child by the time the check runs.
   - A braced group compiles for every member (#8794).
   - A repeated name, as in `security-zone [ zga zga ];`, loses nothing.
+  - An `apply-macro` tail. No compiler consumes a macro, and
+    `security-zone trust apply-macro M;` compiles exactly like its braced
+    spelling.
 - **It reads the group-expanded, inactive-pruned tree.** A body that group
   expansion empties is refused, and an inactive statement is not.
 - **The normalizer pass is what keeps a single-zone statement committing.**
@@ -592,6 +595,19 @@ paths warn instead, and compile the statement as before (#1960).
   as `set security zones security-zone zga zgb`. That builds zone `zga` with an
   unknown child `zgb`, which the open-world zone schema accepts and the compiler
   ignores. The rendering constraint is #9635.
+- **A zone-keyword name later in a leaf group is read as that statement.**
+  The #8662 fold rewrites `security-zone [ zga tcp-rst ];` into
+  `zga { tcp-rst; }` before the check runs, so it commits with no zone named
+  `tcp-rst`. Measured at `ed313e4c9`:
+  - `interfaces`, `host-inbound-traffic` and `address-book` behave the same;
+  - `description` and `screen` are refused, because they need a value.
+
+  Quotes and brackets do not survive rendering (#9635), so the check cannot tell
+  a zone name from the statement. This predates #9656.
+- **Group expansion can discard a leaf zone before the check runs.** A group's
+  `security-zone zga;` is dropped whenever the configuration has any inline
+  leaf `security-zone …;`, because the override matches only the keyword. This
+  predates #9656 and is tracked in #9831.
 - **Why a refusal and not an expansion.** An earlier cut of #9656 expanded each
   group into one statement per zone in the #8662 normalizer. Three review rounds
   found the per-member statements it materialised colliding with the node
