@@ -1185,6 +1185,7 @@ func (s *SessionSync) handleDisconnect(conn net.Conn) {
 		// fact; clearing one without the other would leave a stale boot id
 		// gating the next peer's end markers.
 		s.bulkRecvIncarnation = bootIncarnation{}
+		s.bulkRecvConn = nil // #9716: the connection that started the bulk is part of the same fact.
 		s.bulkRecvV4 = nil
 		s.bulkRecvV6 = nil
 		s.bulkZoneSnapshot = nil
