@@ -294,10 +294,17 @@ func (m *Manager) syncUserspaceClassifierMapsLocked(snapshot *ConfigSnapshot) er
 	if m.syncClassifierMapsHook != nil {
 		return m.syncClassifierMapsHook(snapshot)
 	}
+	// #9646: preflight the local-address set against the shim maps' capacity
+	// BEFORE any classifier map is written, so a refusal leaves every map on
+	// the plan the helper is enforcing. See local_address_capacity_9646.go.
+	desiredV4, desiredV6, enumComplete := m.buildDesiredLocalAddressSets(snapshot)
+	if err := checkLocalAddressCapacity(len(desiredV4), len(desiredV6)); err != nil {
+		return err
+	}
 	if err := m.syncIngressIfaceMapLocked(snapshot); err != nil {
 		return err
 	}
-	if err := m.syncLocalAddressMapsLocked(snapshot); err != nil {
+	if err := m.syncLocalAddressMapsWithSetsLocked(desiredV4, desiredV6, enumComplete); err != nil {
 		return err
 	}
 	return m.syncInterfaceNATAddressMapsLocked(snapshot)
@@ -314,6 +321,15 @@ func (m *Manager) lookupUserspaceCtrlForFailClosed(ctrlMap ctrlMapUpdater, key u
 
 func (m *Manager) syncUserspaceClassifierMapsFailClosedLocked(snapshot *ConfigSnapshot) error {
 	if err := m.syncUserspaceClassifierMapsLocked(snapshot); err != nil {
+		if isLocalAddressCapacityError(err) {
+			// #9646: the preflight refused before any classifier map was
+			// written, so the maps still hold the plan the helper enforces and
+			// ctrl stays as it is. Failing closed here turned one local address
+			// past the map capacity into dropping ALL transit.
+			slog.Error("userspace: classifier maps not refreshed; the local-address set exceeds the shim map capacity",
+				"err", err, "issue", "#9646")
+			return err
+		}
 		return m.failClosedUserspaceCtrlMapLocked(snapshot, err)
 	}
 	return nil
@@ -559,7 +575,17 @@ func (m *Manager) applyHelperStatusLocked(status *ProcessStatus) error {
 	// applyHelperStatusLocked fail-closes before ever writing the ctrl gate, so
 	// the map-free seam above would still leave the ctrl branch untestable.
 	if err := m.syncUserspaceClassifierMapsLocked(m.lastSnapshot); err != nil {
-		return m.failClosedUserspaceCtrlLocked(ctrlMap, ctrl, err)
+		if !isLocalAddressCapacityError(err) {
+			return m.failClosedUserspaceCtrlLocked(ctrlMap, ctrl, err)
+		}
+		// #9646: this poll re-syncs the snapshot the helper already enforces
+		// every tick, so a host whose address count grows past the shim map
+		// capacity (VRRP VIPs, secondary addresses) would otherwise drop all
+		// transit on the next tick. The preflight wrote nothing: keep the maps
+		// and ctrl, and alarm once per transition rather than once a second.
+		m.noteLocalAddressCapacityLocked(err)
+	} else {
+		m.noteLocalAddressCapacityLocked(nil)
 	}
 	// Sync userspace-forwarded packet counters into BPF counter maps so
 	// that ReadGlobalCounter/ReadZoneCounters/etc. return complete values
@@ -899,6 +925,20 @@ func mergeIngressInventory(prior, installed []uint32) []uint32 {
 }
 
 func (m *Manager) syncLocalAddressMapsLocked(snapshot *ConfigSnapshot) error {
+	desiredV4, desiredV6, enumComplete := m.buildDesiredLocalAddressSets(snapshot)
+	if err := checkLocalAddressCapacity(len(desiredV4), len(desiredV6)); err != nil {
+		return err
+	}
+	return m.syncLocalAddressMapsWithSetsLocked(desiredV4, desiredV6, enumComplete)
+}
+
+// syncLocalAddressMapsWithSetsLocked writes an already-built (and, #9646,
+// capacity-checked) local-address set into userspace_local_v4/v6.
+func (m *Manager) syncLocalAddressMapsWithSetsLocked(
+	desiredV4 map[uint32]struct{},
+	desiredV6 map[userspaceLocalV6Key]struct{},
+	enumComplete bool,
+) error {
 	localV4Map := m.bpfShim.Map(mapNameUserspaceLocalV4)
 	if localV4Map == nil {
 		return errors.New("userspace_local_v4 map not loaded")
@@ -908,7 +948,6 @@ func (m *Manager) syncLocalAddressMapsLocked(snapshot *ConfigSnapshot) error {
 		return errors.New("userspace_local_v6 map not loaded")
 	}
 
-	desiredV4, desiredV6, enumComplete := m.buildDesiredLocalAddressSets(snapshot)
 	for key := range desiredV4 {
 		if err := localV4Map.Update(key, uint8(1), ebpf.UpdateAny); err != nil {
 			return fmt.Errorf("update userspace_local_v4 %08x: %w", key, err)

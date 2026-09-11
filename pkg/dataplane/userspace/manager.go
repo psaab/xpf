@@ -411,6 +411,9 @@ type Manager struct {
 	// buildDesiredLocalAddressSets so tests can inject a transient
 	// enumeration failure (#3924). Production leaves it nil.
 	addrListForLocalSyncHook addrListHook
+	// localAddressCapacityAlarm latches the #9646 capacity refusal text while it
+	// persists, so the 1/s status poll alarms once per transition. Guarded by mu.
+	localAddressCapacityAlarm string
 
 	mode               DataplaneMode // current active runtime mode
 	configuredMode     DataplaneMode // user-configured desired mode (from config)
