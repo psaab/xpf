@@ -13,6 +13,8 @@
 #     - Force-stop fw0
 #     - Verify fw1 takes over (VRRP master) within 2s
 #     - Verify new TCP connections work through fw1
+#     - Verify the ESTABLISHED iperf3 streams survive the takeover and keep
+#       forwarding (#9692)
 #     - Restart fw0, verify it rejoins as secondary
 #     - Manual failover back to fw0
 #
@@ -21,6 +23,8 @@
 #     - Stop xpfd on fw0 (should clear rg_active + teardown BPF)
 #     - Verify fw1 takes over within 2s
 #     - Verify new TCP connections work through fw1
+#     - Verify the ESTABLISHED iperf3 streams survive the takeover and keep
+#       forwarding (#9692)
 #     - Restart xpfd, verify recovery
 #
 #   Phase 3: Multi-cycle crash (3 cycles force-stop/restart)
@@ -46,8 +50,13 @@ xpf_enter_destructive_cluster_cell "test-ha-crash $*" "$0" "$@"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=test/incus/cluster-env.sh
 source "${SCRIPT_DIR}/cluster-env.sh"
+# shellcheck source=test/incus/iperf-throughput-lib.sh
+source "${SCRIPT_DIR}/iperf-throughput-lib.sh"
 
 IPERF_TARGET="${IPERF_TARGET:-$IPERF_TARGET4}"
+# #9692: the recovery cell below measures throughput, so measure the UNSHAPED
+# class. Port 5201 is iperf-100m in cos-iperf-config.set (#7673/#9691).
+IPERF_PORT="${IPERF_PORT:-5211}"
 IPERF_STREAMS=4
 CRASH_CYCLES="${CRASH_CYCLES:-3}"          # multi-cycle crash iterations
 TAKEOVER_TIMEOUT=5                          # max seconds for fw1 to take over
@@ -59,11 +68,37 @@ PASS=0
 FAIL=0
 ERRORS=()
 LOG="/tmp/iperf3-ha-crash.log"
+# #9692: how long to let the established streams settle after a takeover, and
+# the rate their most recent [SUM] interval must reach to count as recovered.
+RECOVERY_WAIT="${RECOVERY_WAIT:-10}"
+RECOVERY_MIN_GBPS="${RECOVERY_MIN_GBPS:-0.5}"
 
 info()  { echo "==> $*"; }
 pass()  { echo "  PASS  $*"; PASS=$((PASS + 1)); }
 fail()  { echo "  FAIL  $*"; FAIL=$((FAIL + 1)); ERRORS+=("$*"); }
 die()   { echo "FATAL: $*" >&2; exit 2; }
+
+# established_streams_recovered <phase> — #9692. The iperf3 client started
+# before the failure must still be running and forwarding after the takeover.
+# Without this the phase asserted only the takeover, a NEW connection and a ping,
+# then killed the client, so a survivor that lost or refused the synced sessions,
+# or a stopping node whose teardown broke established flows, still passed the
+# mandated HA crash gate.
+established_streams_recovered() {
+	local phase="$1" last gbps
+	sleep "$RECOVERY_WAIT"
+	if ! incus exec "$CLUSTER_LAN_HOST" -- pgrep -x iperf3 &>/dev/null; then
+		fail "${phase}: the established iperf3 streams DIED across the takeover"
+		return
+	fi
+	last=$(incus exec "$CLUSTER_LAN_HOST" -- grep '\[SUM\]' "$LOG" 2>/dev/null | grep -v 'sender\|receiver' | tail -1 || true)
+	gbps=$(iperf_sum_rate_gbps "$last")
+	if [[ -n "$gbps" ]] && awk "BEGIN{exit !($gbps >= $RECOVERY_MIN_GBPS)}"; then
+		pass "${phase}: established streams kept forwarding after the takeover (last interval ${gbps} Gbps)"
+	else
+		fail "${phase}: established streams did not recover after the takeover (last interval '${gbps:-unparseable}' Gbps, want >= ${RECOVERY_MIN_GBPS}) -- [SUM] line: ${last:-none}"
+	fi
+}
 
 instance_running() {
 	local status
@@ -273,7 +308,7 @@ info "Phase 1: Hard VM stop — simulating kernel panic / power loss"
 # Start iperf3
 info "Phase 1: Starting iperf3 -P${IPERF_STREAMS} → ${IPERF_TARGET}"
 incus exec "$CLUSTER_LAN_HOST" -- bash -c \
-	"iperf3 --forceflush --connect-timeout 5000 -t 120 -c ${IPERF_TARGET} -P ${IPERF_STREAMS} > ${LOG} 2>&1 &"
+	"iperf3 --forceflush --connect-timeout 5000 -t 120 -c ${IPERF_TARGET} -p ${IPERF_PORT} -P ${IPERF_STREAMS} > ${LOG} 2>&1 &"
 sleep 8
 
 if incus exec "$CLUSTER_LAN_HOST" -- pgrep -x iperf3 &>/dev/null; then
@@ -316,7 +351,10 @@ else
 	fail "phase1: ping through fw1 failed"
 fi
 
-# Kill iperf3 from phase 1 (sessions are dead — fw0 hard-crashed)
+established_streams_recovered "phase1"
+
+# Stop phase 1's client now that its survival across the takeover was measured
+# (#9692; the synced sessions are expected to survive a hard stop of fw0).
 incus exec "$CLUSTER_LAN_HOST" -- pkill -9 iperf3 2>/dev/null || true
 sleep 1
 
@@ -391,7 +429,7 @@ fi
 # Start iperf3
 info "Phase 2: Starting iperf3 -P${IPERF_STREAMS} → ${IPERF_TARGET}"
 incus exec "$CLUSTER_LAN_HOST" -- bash -c \
-	"iperf3 --forceflush --connect-timeout 5000 -t 120 -c ${IPERF_TARGET} -P ${IPERF_STREAMS} > ${LOG} 2>&1 &"
+	"iperf3 --forceflush --connect-timeout 5000 -t 120 -c ${IPERF_TARGET} -p ${IPERF_PORT} -P ${IPERF_STREAMS} > ${LOG} 2>&1 &"
 sleep 8
 
 if incus exec "$CLUSTER_LAN_HOST" -- pgrep -x iperf3 &>/dev/null; then
@@ -424,7 +462,9 @@ else
 	fail "phase2: ping through fw1 failed"
 fi
 
-# Kill iperf3 from phase 2
+established_streams_recovered "phase2"
+
+# Stop phase 2's client now that its survival across the takeover was measured (#9692).
 incus exec "$CLUSTER_LAN_HOST" -- pkill -9 iperf3 2>/dev/null || true
 sleep 1
 
