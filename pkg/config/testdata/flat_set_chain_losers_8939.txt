@@ -1,3 +1,3 @@
-# counts: losers=1 walked=109 vacuous=38 unmeasured=77
-# collector reach: 370 containers walked, 136 reached the census (137 dropped: no eligible leaf, 97 dropped: only one)
+# counts: losers=1 walked=109 vacuous=38 unmeasured=78
+# collector reach: 370 containers walked, 137 reached the census (137 dropped: no eligible leaf, 96 dropped: only one)
 services rpm probe arg1 test arg1 target  [address | url]  total  OPERATOR

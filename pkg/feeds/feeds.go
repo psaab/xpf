@@ -133,6 +133,9 @@ type feedState struct {
 	prefixes    []string
 	hash        [32]byte // sha256 over the canonical join; zero when no snapshot
 	hasSnapshot bool     // true once a good fetch has installed a snapshot
+	// holdDropped marks a feed whose snapshot was dropped by its hold-interval,
+	// as opposed to one never fetched (#9689). Cleared by the next install.
+	holdDropped bool
 
 	// publishedHash is the content hash of the snapshot last CONFIRMED applied
 	// to the dataplane — it advances ONLY when the onUpdate publish callback
@@ -617,15 +620,25 @@ func (m *Manager) SnapshotForBindings(daCfg *config.DynamicAddressConfig) map[st
 		// feed ahead of the unready one. That work was always discarded.
 		total := 0
 		allReady := true
+		// #9689: whether every unready constituent was dropped by its
+		// hold-interval, as opposed to never fetched or unknown. Only then may a
+		// `fail-mode drop` binding be published instead of omitted: the operator
+		// chose that a feed down past its hold interval stops constraining the
+		// policy. A never-fetched or unknown feed still omits the binding (#5645).
+		unreadyAllHoldDropped := true
 		for _, feedName := range binding.FeedNames {
 			fs, ok := m.feeds[feedName]
 			if !ok || len(fs.prefixes) == 0 {
 				allReady = false
-				break
+				if !ok || !fs.holdDropped {
+					unreadyAllHoldDropped = false
+					break
+				}
+				continue
 			}
 			total += len(fs.prefixes)
 		}
-		if !allReady {
+		if !allReady && !(binding.FailMode == "drop" && unreadyAllHoldDropped) {
 			continue
 		}
 		seen := make(map[string]struct{}, total)
@@ -672,6 +685,7 @@ func (m *Manager) AllFeeds() map[string]FeedInfo {
 			InvalidLines:  fs.invalidLines,
 			InvalidSample: append([]string(nil), fs.invalidSample...),
 			Degraded:      fs.invalidLines > 0,
+			HoldDropped:   fs.holdDropped,
 		}
 	}
 	return result
@@ -705,6 +719,9 @@ type FeedInfo struct {
 	InvalidLines  int
 	InvalidSample []string
 	Degraded      bool
+	// HoldDropped is true after a hold-interval drop and until the next
+	// successful fetch (#9689).
+	HoldDropped bool
 }
 
 func (m *Manager) refreshLoop(ctx context.Context, fs *feedState, interval time.Duration) {
@@ -1031,6 +1048,7 @@ func (m *Manager) installSnapshot(fs *feedState, res fetchResult) {
 	fs.prefixes = res.prefixes
 	fs.hash = res.hash
 	fs.hasSnapshot = true
+	fs.holdDropped = false
 	fs.lastFetch = now
 	fs.lastSuccess = now
 	fs.lastError = ""
@@ -1128,6 +1146,7 @@ func (m *Manager) recordFailure(fs *feedState, ferr error) {
 			// that re-apply and leave the recovered denylist un-enforced.
 			fs.publishedHash = [32]byte{}
 			fs.hasPublished = false
+			fs.holdDropped = true
 			dropped = true
 		}
 	}
