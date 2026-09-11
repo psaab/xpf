@@ -53,10 +53,12 @@ import (
 //
 // THE PERMITTED SET IS READ FROM THE SCHEMA, not hardcoded (#9017's rule): a
 // keyword declared under the routing-instance wildcard is permitted here
-// automatically, so there is no second place to remember. The schema and the
-// compiler's own `isRoutingInstanceKeyword8787` are held to the SAME SET by
-// TestRoutingInstanceSchemaAndCompilerAgree9323 — before #9323 they had
-// already drifted, the schema declaring 4 of the compiler's 8.
+// automatically, so there is no second place to remember. Since #9620 the same
+// declarations also split a brace-elided instance into its statements
+// (normalizeElidedRoutingInstance9620), so the compiler keeps no keyword list of
+// its own. TestRoutingInstanceSchemaAndCompilerAgree9323 binds that every
+// keyword the compiler reads is declared; before #9323 the schema declared 4 of
+// the compiler's 8.
 
 // routingInstanceChildTokens9323 returns the keywords the
 // `routing-instances <name>` wildcard declares, sorted, for use in the gate and
@@ -193,11 +195,11 @@ func validateRoutingInstanceChildTokensAST(nodes []*Node, lenient bool) ([]strin
 //	VRF-A protocols { ospf { area 0.0.0.0 { interface ge-0/0/1.0; } } }
 //	  -> REJECTED: "ospf" is not a routing-instance keyword
 //
-// Both are valid configuration. This is #9055's lesson, which the COMPILER
-// already learned at the sibling site ("an elided BODY-BEARING keyword puts its
-// NAME on the Keys tail and its BODY in Children, so the property loop sees the
-// body's contents instead of the keyword") — and which this gate had to learn
-// separately because it splits the node itself.
+// Both are valid configuration. Since #9620 the prewalk receives the
+// #8662-normalized tree, where normalizeElidedRoutingInstance9620 has already
+// rewritten a brace-elided instance into the braced shape, so on the compile
+// and commit paths this third shape no longer reaches the gate. The branch below
+// stays for any caller that hands it an un-normalized tree.
 //
 // So the two sources are EXCLUSIVE, not additive: a node whose Keys carry a
 // tail is a packed/elided instance keyword and its Children belong to that

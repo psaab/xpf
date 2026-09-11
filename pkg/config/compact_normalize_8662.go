@@ -77,6 +77,11 @@ func normalizeCompactNodes(nodes []*Node, schema *schemaNode, inScope func(conta
 		if child == nil {
 			continue
 		}
+		// #9620: a brace-elided routing instance packs its statements onto the
+		// instance NAME's node, which no (container, head) scope pair can name.
+		if schema == schemaRoutingInstances && child == schema.wildcard {
+			n += normalizeElidedRoutingInstance9620(node, child)
+		}
 		// The node's own identity is its keyword plus its declared args.
 		identity := 1 + child.args
 		// #8763: a compoundKey container carries its second key as an
