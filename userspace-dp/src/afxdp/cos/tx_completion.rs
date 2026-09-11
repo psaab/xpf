@@ -12,10 +12,11 @@ use std::sync::Arc;
 
 use crate::afxdp::types::{
     COS_TIMER_WHEEL_L0_SLOTS, COS_TIMER_WHEEL_L1_SLOTS, CoSInterfaceRuntime, CoSPendingTxItem,
-    CoSQueueRuntime, PreparedTxRequest, SharedCoSQueueLease, TxRequest,
+    CoSQueueRuntime, ExactDemandQueueMask, PreparedTxRequest, SharedCoSQueueLease, TxRequest,
 };
 use crate::afxdp::worker::BindingWorker;
 
+use super::exact_demand::{exact_demand_rate_bytes_for_mask, serviceable_exact_demand_mask};
 use super::queue_ops::{
     cos_exact_queue_serviceable, cos_item_len, cos_queue_front, cos_queue_is_empty,
     cos_queue_push_front, maybe_demote_drained_best_effort,
@@ -544,54 +545,6 @@ fn serviceable_exact_backlog_bytes(root: &CoSInterfaceRuntime) -> u64 {
 }
 
 #[inline]
-fn exact_backlog_queue_mask(root: &CoSInterfaceRuntime) -> u64 {
-    // #hb166 T-6(b): the published exact-demand MASK (read by peer workers
-    // as `peer_exact_demand_queue_mask` for their BE-surplus reservation)
-    // must also reflect serviceability, not just non-emptiness — otherwise
-    // a peer over-reserves for this node's starved/parked exact class and
-    // starves best-effort while the link idles. Same predicate as
-    // `serviceable_exact_backlog_bytes` / `root_exact_demand_queue_mask`.
-    let root_tokens = root.tokens;
-    root.queues
-        .iter()
-        .enumerate()
-        .filter(|(_, queue)| {
-            queue.config.exact
-                && queue.config.guarantee_enabled
-                && cos_exact_queue_serviceable(root_tokens, queue)
-        })
-        .fold(0u64, |acc, (queue_idx, _)| {
-            if queue_idx < u64::BITS as usize {
-                acc | (1u64 << queue_idx)
-            } else {
-                u64::MAX
-            }
-        })
-}
-
-#[inline]
-fn exact_backlog_guarantee_rate_bytes_for_mask(
-    root: &CoSInterfaceRuntime,
-    exact_demand_mask: u64,
-) -> u64 {
-    if exact_demand_mask == 0 {
-        return 0;
-    }
-    root.queues
-        .iter()
-        .enumerate()
-        .filter(|(queue_idx, queue)| {
-            queue.config.exact
-                && queue.config.guarantee_enabled
-                && (*queue_idx >= u64::BITS as usize
-                    || (exact_demand_mask & (1u64 << *queue_idx)) != 0)
-        })
-        .fold(0u64, |acc, (_, queue)| {
-            acc.saturating_add(queue.transmit_rate_bytes())
-        })
-}
-
-#[inline]
 pub(in crate::afxdp) fn publish_cos_exact_backlog(binding: &BindingWorker, root_ifindex: i32) {
     let Some(shared_exact_backlog) = binding
         .cos
@@ -609,7 +562,7 @@ pub(in crate::afxdp) fn publish_cos_exact_backlog(binding: &BindingWorker, root_
         binding.slot,
         exact_backlog_bytes(root),
         serviceable_exact_backlog_bytes(root),
-        exact_backlog_queue_mask(root),
+        serviceable_exact_demand_mask(root),
     );
 }
 
@@ -631,14 +584,17 @@ fn interface_has_backlogged_exact_queue(
 }
 
 #[inline]
-fn peer_exact_demand_queue_mask(binding: &BindingWorker, root_ifindex: i32) -> u64 {
+fn peer_exact_demand_queue_mask(
+    binding: &BindingWorker,
+    root_ifindex: i32,
+) -> ExactDemandQueueMask {
     binding
         .cos
         .cos_fast_interfaces
         .get(&root_ifindex)
         .and_then(|iface_fast| iface_fast.shared_exact_backlog.as_ref())
         .map(|backlog| backlog.peer_exact_demand_queue_mask(binding.slot))
-        .unwrap_or(0)
+        .unwrap_or(ExactDemandQueueMask::EMPTY)
 }
 
 #[inline]
@@ -885,9 +841,8 @@ pub(in crate::afxdp) fn apply_cos_send_result(
         let Some(root) = binding.cos.cos_interfaces.get_mut(&root_ifindex) else {
             return retry;
         };
-        let exact_demand_mask = exact_backlog_queue_mask(root) | peer_exact_demand_mask;
-        let exact_demand_rate =
-            exact_backlog_guarantee_rate_bytes_for_mask(root, exact_demand_mask);
+        let exact_demand_mask = serviceable_exact_demand_mask(root) | peer_exact_demand_mask;
+        let exact_demand_rate = exact_demand_rate_bytes_for_mask(root, exact_demand_mask);
         let exact_backlogged = sent_bytes > 0
             && root
                 .queues
@@ -1007,9 +962,8 @@ pub(in crate::afxdp) fn apply_cos_prepared_result(
         let Some(root) = binding.cos.cos_interfaces.get_mut(&root_ifindex) else {
             return retry;
         };
-        let exact_demand_mask = exact_backlog_queue_mask(root) | peer_exact_demand_mask;
-        let exact_demand_rate =
-            exact_backlog_guarantee_rate_bytes_for_mask(root, exact_demand_mask);
+        let exact_demand_mask = serviceable_exact_demand_mask(root) | peer_exact_demand_mask;
+        let exact_demand_rate = exact_demand_rate_bytes_for_mask(root, exact_demand_mask);
         let exact_backlogged = sent_bytes > 0
             && root
                 .queues

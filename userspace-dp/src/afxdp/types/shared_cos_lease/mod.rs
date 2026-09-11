@@ -38,7 +38,7 @@ mod vtime;
 // existing `types/mod.rs` re-export (`pub(super) use
 // shared_cos_lease::{...}`) and the sibling submodules' `use super::*;`
 // continue to resolve every symbol exactly as before the split.
-pub(in crate::afxdp) use backlog::SharedCoSExactBacklog;
+pub(in crate::afxdp) use backlog::{ExactDemandQueueMask, SharedCoSExactBacklog};
 pub(in crate::afxdp) use lease::{SharedCoSQueueLease, SharedCoSRootLease};
 pub(in crate::afxdp) use vtime::{NOT_PARTICIPATING, PaddedVtimeSlot, SharedCoSQueueVtimeFloor};
 

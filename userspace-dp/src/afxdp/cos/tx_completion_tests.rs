@@ -398,7 +398,12 @@ fn apply_cos_send_result_debits_shared_residual_surplus_budget() {
         }
     }
     let shared_exact_backlog = Arc::new(SharedCoSExactBacklog::new(1));
-    shared_exact_backlog.publish_with_serviceable(1, 1500, 0, 1 << 0);
+    shared_exact_backlog.publish_with_serviceable(
+        1,
+        1500,
+        0,
+        ExactDemandQueueMask::EMPTY.with_queue(0),
+    );
     let residual_rate = 100_000_000;
     let residual_burst = COS_MIN_BURST_BYTES;
     assert_eq!(
@@ -460,7 +465,12 @@ fn apply_cos_prepared_result_debits_shared_residual_surplus_budget() {
         }
     }
     let shared_exact_backlog = Arc::new(SharedCoSExactBacklog::new(1));
-    shared_exact_backlog.publish_with_serviceable(1, 1500, 0, 1 << 0);
+    shared_exact_backlog.publish_with_serviceable(
+        1,
+        1500,
+        0,
+        ExactDemandQueueMask::EMPTY.with_queue(0),
+    );
     let residual_rate = 100_000_000;
     let residual_burst = COS_MIN_BURST_BYTES;
     assert_eq!(
