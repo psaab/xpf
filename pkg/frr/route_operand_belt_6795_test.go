@@ -1,6 +1,7 @@
 package frr
 
 import (
+	"net/netip"
 	"strings"
 	"testing"
 
@@ -194,22 +195,21 @@ func TestRouteOperandBeltAcceptsWhatCommitsToday6795(t *testing.T) {
 	}
 }
 
-// TestDHCPRouteOperandsAreStructurallySafe6795 records a measurement rather than
-// guarding a fix, and says so.
+// TestDHCPRouteOperandsAreStructurallySafe6795 covers ALL THREE operands of the
+// DHCP-learned `ip route` line (#9501 corrected this record).
 //
-// The DHCP-learned routes look like the highest-risk operands — they come from a
-// DHCP server on the wire — but they are NOT raw strings: `lease.Gateway` is a
-// netip.Addr and `cr.Destination` a netip.Prefix, both String()-ed. Those types
-// cannot stringify to anything containing whitespace, so the DHCP path cannot
-// carry the injection this issue is about. No belt was added there.
-//
-// This cell exists so that stays true: if either field is ever widened to a
-// string, the belt question has to be re-asked, and a compile failure here is
-// the cheapest possible reminder.
+//   - gateway and destination: safe by construction. They come from netip.Addr
+//     and netip.Prefix String(), which cannot contain whitespace. The fixture
+//     below builds the gateway from a real netip.Addr so it exercises that shape.
+//     The field is `string` at the FRR boundary, so no compile error would flag a
+//     widening; this cell only checks the rendered shape.
+//   - interface: NOT safe by construction. It is a plain string from
+//     config.DHCPLeaseIfName, so it IS belted (dhcpRouteInterface, #9501);
+//     TestDHCPRouteInterfaceOperandIsBelted_9501 holds the rows that can fail.
 func TestDHCPRouteOperandsAreStructurallySafe6795(t *testing.T) {
 	var b strings.Builder
 	renderDHCPDefaults(&b, &FullConfig{
-		DHCPRoutes: []DHCPRoute{{Gateway: "10.0.2.1", Interface: "fxp0"}},
+		DHCPRoutes: []DHCPRoute{{Gateway: netip.MustParseAddr("10.0.2.1").String(), Interface: "fxp0"}},
 	})
 	if !strings.Contains(b.String(), "ip route 0.0.0.0/0 10.0.2.1 fxp0 200") {
 		t.Fatalf("the DHCP default route did not render as expected:\n%s", b.String())
