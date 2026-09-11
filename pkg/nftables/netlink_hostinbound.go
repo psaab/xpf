@@ -46,6 +46,12 @@ func buildHostInboundNetlink(p *nlPlan, spec HostInboundSpec) {
 		emitHostInboundWireGuardAcceptNetlink(p, spec.WGListenPorts)
 	}
 
+	// #9637: ingress-zone rules first, as in the oracle.
+	ingressV4, ingressV6 := hostInboundIngressDestinations(spec.Views, spec.UnzonedV4, spec.UnzonedV6)
+	for _, v := range spec.Views {
+		emitHostInboundZoneIngressNetlink(p, v, famV4, ingressV4)
+		emitHostInboundZoneIngressNetlink(p, v, famV6, ingressV6)
+	}
 	for _, v := range spec.Views {
 		emitHostInboundZoneNetlink(p, v, famV4, v.V4Addrs)
 		emitHostInboundZoneNetlink(p, v, famV6, v.V6Addrs)
@@ -70,11 +76,12 @@ func declareHostInboundCounters(p *nlPlan, spec HostInboundSpec) {
 	for _, typ := range HostInboundAcceptCounterTypes {
 		decl(HostInboundAcceptCounterName(typ))
 	}
+	ingressV4, ingressV6 := hostInboundIngressDestinations(spec.Views, spec.UnzonedV4, spec.UnzonedV6)
 	for _, v := range spec.Views {
-		if hostInboundEmitsDrop(v, v.V4Addrs) {
+		if hostInboundEmitsDrop(v, v.V4Addrs) || hostInboundEmitsIngressDrop(v, ingressV4) {
 			decl(HostInboundDenyCounterName(v.Zone, "ip"))
 		}
-		if hostInboundEmitsDrop(v, v.V6Addrs) {
+		if hostInboundEmitsDrop(v, v.V6Addrs) || hostInboundEmitsIngressDrop(v, ingressV6) {
 			decl(HostInboundDenyCounterName(v.Zone, "ip6"))
 		}
 	}
