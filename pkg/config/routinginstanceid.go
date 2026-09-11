@@ -63,8 +63,8 @@ func StableRoutingInstanceTableID(name string) int {
 // carries the body (#8787). The compiler builds an instance from that leaf, so
 // this scan must see it: before #9622 it skipped every leaf, and neither the
 // table-id gate nor the reserved-name gate saw a packed instance (two packed
-// instances folding to one table committed strict-clean, and the runtime
-// quarantined one). A bare `routing-instances { ri1; }` carries no properties,
+// instances folding to one table passed the strict gate, and the runtime then
+// quarantined one with a warning). A bare `routing-instances { ri1; }` carries no properties,
 // compiles to nothing, and is still skipped. routingInstanceNameUnionAST's
 // pre-expansion view also counts instances in groups nothing applies; that
 // over-approximation predates this scan and now covers both spellings alike
