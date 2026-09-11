@@ -128,7 +128,7 @@ const quarantineDenySeq = 10
 // into a permit.
 func renderQuarantineDenyRouteMap(name string) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "route-map %s deny %d\n", name, quarantineDenySeq)
+	fmt.Fprintf(&b, "route-map %s deny %d\n", frrName(name), quarantineDenySeq)
 	b.WriteString("exit\n")
 	return b.String()
 }
@@ -254,9 +254,9 @@ func (m *Manager) generatePolicyOptions(po *config.PolicyOptionsConfig, bgpAccep
 			// load path (the strict #1798 commit control-char gate rejects it,
 			// but the peer-sync / rollback path only warns, #1960).
 			if strings.Contains(prefix, ":") {
-				fmt.Fprintf(&b, "ipv6 prefix-list %s seq %d permit %s\n", name, (i+1)*5, sanitizeFRRValue(prefix))
+				fmt.Fprintf(&b, "ipv6 prefix-list %s seq %d permit %s\n", frrName(name), (i+1)*5, sanitizeFRRValue(prefix))
 			} else {
-				fmt.Fprintf(&b, "ip prefix-list %s seq %d permit %s\n", name, (i+1)*5, sanitizeFRRValue(prefix))
+				fmt.Fprintf(&b, "ip prefix-list %s seq %d permit %s\n", frrName(name), (i+1)*5, sanitizeFRRValue(prefix))
 			}
 		}
 	}
@@ -325,7 +325,7 @@ func (m *Manager) generatePolicyOptions(po *config.PolicyOptionsConfig, bgpAccep
 			// RAW members (a `\n` is not a regex metacharacter, so it does
 			// not by itself flip standard→expanded; the exploit's `^`/`$`
 			// do). The strict #1798 commit control-char gate rejects it outright.
-			fmt.Fprintf(&b, "bgp community-list %s %s permit %s\n", listKind, name, sanitizeFRRValue(member))
+			fmt.Fprintf(&b, "bgp community-list %s %s permit %s\n", listKind, frrName(name), sanitizeFRRValue(member))
 		}
 	}
 	if len(po.Communities) > 0 {
@@ -367,7 +367,7 @@ func (m *Manager) generatePolicyOptions(po *config.PolicyOptionsConfig, bgpAccep
 			// token, so a legitimate space (multi-AS path) survives; only
 			// control chars (incl. the newline injection vector) collapse
 			// to a space. The strict #1798 commit control-char gate rejects it.
-			fmt.Fprintf(&b, "bgp as-path access-list %s permit %s\n", name, sanitizeFRRValue(ap.Regex))
+			fmt.Fprintf(&b, "bgp as-path access-list %s permit %s\n", frrName(name), sanitizeFRRValue(ap.Regex))
 		}
 		b.WriteString("!\n")
 	}
@@ -518,7 +518,7 @@ func (m *Manager) renderPolicyTermSequences(po *config.PolicyOptionsConfig, rout
 		// sequence they can satisfy (#2607; the same AND finding that
 		// drove #2071's single-matcher decision).
 		emitTermBody := func(seqFam string, seqNum int, rfs []indexedRouteFilter, plName string, fromPL fromPrefixListRef, fromCommunity, fromASPath string) {
-			fmt.Fprintf(&b, "route-map %s %s %d\n", routeMapName, action, seqNum)
+			fmt.Fprintf(&b, "route-map %s %s %d\n", frrName(routeMapName), action, seqNum)
 
 			// rfMatchEmitted / rfMatchV6 record whether THIS sequence emitted a
 			// route-filter "match ip|ipv6 address prefix-list" line and its
@@ -576,9 +576,9 @@ func (m *Manager) renderPolicyTermSequences(po *config.PolicyOptionsConfig, rout
 					}
 				}
 				if matchV6 {
-					fmt.Fprintf(&b, " match ipv6 address prefix-list %s\n", plName)
+					fmt.Fprintf(&b, " match ipv6 address prefix-list %s\n", frrName(plName))
 				} else {
-					fmt.Fprintf(&b, " match ip address prefix-list %s\n", plName)
+					fmt.Fprintf(&b, " match ip address prefix-list %s\n", frrName(plName))
 				}
 				rfMatchEmitted = true
 				rfMatchV6 = matchV6
@@ -648,7 +648,7 @@ func (m *Manager) renderPolicyTermSequences(po *config.PolicyOptionsConfig, rout
 					renderFromPrefixListACL(&b, aclName, matchKW, plObj)
 					fmt.Fprintf(&b, " match %s address %s\n", matchKW, aclName)
 				} else {
-					fmt.Fprintf(&b, " match %s address prefix-list %s\n", matchKW, fromPL.name)
+					fmt.Fprintf(&b, " match %s address prefix-list %s\n", matchKW, frrName(fromPL.name))
 				}
 			}
 
@@ -676,11 +676,11 @@ func (m *Manager) renderPolicyTermSequences(po *config.PolicyOptionsConfig, rout
 			// (route_map_add_match replaces same-type), so OR is expressed
 			// by emitting one SEQUENCE per entry (dispatch loop below).
 			if fromCommunity != "" {
-				fmt.Fprintf(&b, " match community %s\n", sanitizeFRRValue(fromCommunity))
+				fmt.Fprintf(&b, " match community %s\n", frrName(fromCommunity))
 			}
 
 			if fromASPath != "" {
-				fmt.Fprintf(&b, " match as-path %s\n", sanitizeFRRValue(fromASPath))
+				fmt.Fprintf(&b, " match as-path %s\n", frrName(fromASPath))
 			}
 
 			// then actions
@@ -790,7 +790,7 @@ func (m *Manager) renderPolicyTermSequences(po *config.PolicyOptionsConfig, rout
 				// per referenced list — every name in order (#2902).
 				for _, name := range term.CommunityDelete {
 					if name != "" {
-						fmt.Fprintf(&b, " set comm-list %s delete\n", sanitizeFRRValue(name))
+						fmt.Fprintf(&b, " set comm-list %s delete\n", frrName(name))
 					}
 				}
 			default: // "" or "set" — whole-attribute replace
@@ -938,7 +938,7 @@ func (m *Manager) renderRouteMapForPolicy(po *config.PolicyOptionsConfig, emitNa
 	// under a per-use-site alias with a different trailing default, never
 	// mutating FRR's name-keyed shared route-map object (#4481). See
 	// policyTrailingAction for the case matrix.
-	fmt.Fprintf(&b, "route-map %s %s %d\n", emitName, trailingAction, seq)
+	fmt.Fprintf(&b, "route-map %s %s %d\n", frrName(emitName), trailingAction, seq)
 	b.WriteString("exit\n")
 	return b.String()
 }
@@ -1007,12 +1007,12 @@ func (m *Manager) renderComposedRouteMap(po *config.PolicyOptionsConfig, compose
 		seq = next
 		switch ps.DefaultAction {
 		case "accept":
-			fmt.Fprintf(&b, "route-map %s permit %d\n", composedName, seq)
+			fmt.Fprintf(&b, "route-map %s permit %d\n", frrName(composedName), seq)
 			b.WriteString("exit\n")
 			seq += 10
 			terminated = true
 		case "reject":
-			fmt.Fprintf(&b, "route-map %s deny %d\n", composedName, seq)
+			fmt.Fprintf(&b, "route-map %s deny %d\n", frrName(composedName), seq)
 			b.WriteString("exit\n")
 			seq += 10
 			terminated = true
@@ -1024,7 +1024,7 @@ func (m *Manager) renderComposedRouteMap(po *config.PolicyOptionsConfig, compose
 	if !terminated {
 		// Fell off the end of every policy in the chain → Junos BGP
 		// default-ACCEPT (#2998): permit the (accumulated-modified) route.
-		fmt.Fprintf(&b, "route-map %s permit %d\n", composedName, seq)
+		fmt.Fprintf(&b, "route-map %s permit %d\n", frrName(composedName), seq)
 		b.WriteString("exit\n")
 	}
 	return b.String()

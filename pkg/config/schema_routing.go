@@ -171,13 +171,13 @@ var schemaRoutingOptions = &schemaNode{desc: "Routing options", children: map[st
 }}
 
 var schemaPolicyOptions = &schemaNode{desc: "Policy options", children: map[string]*schemaNode{
-	"prefix-list": {desc: "Prefix list", args: 1, placeholder: "<name>", children: nil},
-	"community": {desc: "Community", args: 1, placeholder: "<name>", closedWorld: true, children: map[string]*schemaNode{
+	"prefix-list": {desc: "Prefix list", args: 1, placeholder: "<name>", keyValidator: ValidateFRRObjectName, children: nil},
+	"community": {desc: "Community", args: 1, placeholder: "<name>", keyValidator: ValidateFRRObjectName, closedWorld: true, children: map[string]*schemaNode{
 		"members": {desc: "Community members", args: 1, multi: true, placeholder: "<community>", children: nil},
 	}},
-	"as-path": {desc: "AS path", args: 2, multi: true, placeholder: "<name>", children: nil},
-	"policy-statement": {desc: "Policy statement", args: 1, placeholder: "<name>", children: map[string]*schemaNode{
-		"term": {desc: "Term name", args: 1, placeholder: "<term-name>", children: map[string]*schemaNode{
+	"as-path": {desc: "AS path", args: 2, multi: true, placeholder: "<name>", keyValidatorPos: ValidateASPathNameArg, children: nil},
+	"policy-statement": {desc: "Policy statement", args: 1, placeholder: "<name>", keyValidator: ValidateFRRObjectName, children: map[string]*schemaNode{
+		"term": {desc: "Term name", args: 1, placeholder: "<term-name>", keyValidator: ValidateFRRObjectName, children: map[string]*schemaNode{
 			"from": {desc: "Match condition", children: map[string]*schemaNode{
 				// "from protocol" is a multi-value match: Junos accepts
 				// "from protocol [ bgp ospf static ]" and, equivalently, a
@@ -346,7 +346,7 @@ var schemaProtocols = &schemaNode{desc: "Protocols configuration", children: map
 				// #8443: modeled ONLY so it is REFUSED — see
 				// schema_ospf_authentication_8443.go.
 				"authentication-type": unmodeledOSPFAuthTypeLeaf(),
-				"cost":                {desc: "Interface cost", args: 1, placeholder: "<cost>", children: nil},
+				"cost":                {desc: "Interface cost", args: 1, valueType: ValueInteger, placeholder: "<cost>", validator: ValidateInteger(1, 65535), children: nil},
 				"hello-interval":      {desc: "Hello interval (seconds)", args: 1, valueType: ValueInteger, placeholder: "<seconds>", validator: ValidateInteger(1, 65535), children: nil},
 				"dead-interval":       {desc: "Dead interval (seconds)", args: 1, valueType: ValueInteger, placeholder: "<seconds>", validator: ValidateInteger(1, 65535), children: nil},
 				"retransmit-interval": {desc: "Retransmit interval (seconds)", args: 1, valueType: ValueInteger, placeholder: "<seconds>", validator: ValidateInteger(1, 65535), children: nil},
@@ -374,8 +374,8 @@ var schemaProtocols = &schemaNode{desc: "Protocols configuration", children: map
 					"no-summaries": {desc: "No summaries", children: nil},
 				}},
 			}},
-			"virtual-link": {desc: "Virtual link", args: 1, placeholder: "<router-id>", children: map[string]*schemaNode{
-				"transit-area": {desc: "Transit area", args: 1, placeholder: "<area-id>", children: nil},
+			"virtual-link": {desc: "Virtual link", args: 1, placeholder: "<router-id>", keyValidator: ValidateOSPFVirtualLinkNeighbor, children: map[string]*schemaNode{
+				"transit-area": {desc: "Transit area", args: 1, valueType: ValueIPAddress, placeholder: "<area-id>", validator: ValidateOSPFArea, children: nil},
 			}},
 		}},
 	}},
@@ -385,7 +385,7 @@ var schemaProtocols = &schemaNode{desc: "Protocols configuration", children: map
 		"area": {desc: "OSPFv3 area", args: 1, placeholder: "<area-id>", keyValidator: ValidateOSPFArea, children: map[string]*schemaNode{
 			"interface": {desc: "Interface", args: 1, valueHint: ValueHintInterfaceName, placeholder: "<interface-name>", children: map[string]*schemaNode{
 				"passive":             {desc: "Passive interface", children: nil},
-				"cost":                {desc: "Interface cost", args: 1, placeholder: "<cost>", children: nil},
+				"cost":                {desc: "Interface cost", args: 1, valueType: ValueInteger, placeholder: "<cost>", validator: ValidateInteger(1, 65535), children: nil},
 				"hello-interval":      {desc: "Hello interval (seconds)", args: 1, valueType: ValueInteger, placeholder: "<seconds>", validator: ValidateInteger(1, 65535), children: nil},
 				"dead-interval":       {desc: "Dead interval (seconds)", args: 1, valueType: ValueInteger, placeholder: "<seconds>", validator: ValidateInteger(1, 65535), children: nil},
 				"retransmit-interval": {desc: "Retransmit interval (seconds)", args: 1, valueType: ValueInteger, placeholder: "<seconds>", validator: ValidateInteger(1, 65535), children: nil},
@@ -418,11 +418,11 @@ var schemaProtocols = &schemaNode{desc: "Protocols configuration", children: map
 		"group": {desc: "BGP group", args: 1, placeholder: "<group-name>", children: map[string]*schemaNode{
 			"peer-as":            {desc: "Peer AS number", args: 1, valueType: ValueInteger, placeholder: "<as-number>", validator: ValidateInteger(1, 4294967295), children: nil},
 			"local-as":           {desc: "Local AS number for this peering", args: 1, valueType: ValueInteger, placeholder: "<as-number>", validator: ValidateInteger(1, 4294967295), children: nil},
-			"local-address":      {desc: "Local address (BGP update-source)", args: 1, placeholder: "<address>", children: nil},
+			"local-address":      {desc: "Local address (BGP update-source)", args: 1, valueType: ValueIPAddress, placeholder: "<address>", validator: ValidateIPAddress, children: nil},
 			"hold-time":          {desc: "Hold time (seconds)", args: 1, valueType: ValueInteger, placeholder: "<seconds>", validator: ValidateBGPHoldTime, children: nil},
 			"passive":            {desc: "Passive mode (do not initiate connections)", children: nil},
 			"description":        {desc: "Description", args: 1, scalar: true, placeholder: "<text>", children: nil},
-			"multihop":           {desc: "Multihop TTL", args: 1, placeholder: "<ttl>", children: nil},
+			"multihop":           {desc: "Multihop TTL", args: 1, valueType: ValueInteger, placeholder: "<ttl>", validator: ValidateInteger(1, 255), children: nil},
 			"export":             {desc: "Export policy", args: 1, multi: true, placeholder: "<policy-name>", children: nil},
 			"import":             {desc: "Import policy", args: 1, multi: true, placeholder: "<policy-name>", children: nil},
 			"authentication-key": {desc: "Authentication key", args: 1, placeholder: "<key>", children: nil},
@@ -453,10 +453,10 @@ var schemaProtocols = &schemaNode{desc: "Protocols configuration", children: map
 				"description":            {desc: "Description", args: 1, scalar: true, placeholder: "<text>", children: nil},
 				"peer-as":                {desc: "Peer AS number", args: 1, valueType: ValueInteger, placeholder: "<as-number>", validator: ValidateInteger(1, 4294967295), children: nil},
 				"local-as":               {desc: "Local AS number for this peering", args: 1, valueType: ValueInteger, placeholder: "<as-number>", validator: ValidateInteger(1, 4294967295), children: nil},
-				"local-address":          {desc: "Local address (BGP update-source)", args: 1, placeholder: "<address>", children: nil},
+				"local-address":          {desc: "Local address (BGP update-source)", args: 1, valueType: ValueIPAddress, placeholder: "<address>", validator: ValidateIPAddress, children: nil},
 				"hold-time":              {desc: "Hold time (seconds)", args: 1, valueType: ValueInteger, placeholder: "<seconds>", validator: ValidateBGPHoldTime, children: nil},
 				"passive":                {desc: "Passive mode (do not initiate connections)", children: nil},
-				"multihop":               {desc: "Multihop TTL", args: 1, placeholder: "<ttl>", children: nil},
+				"multihop":               {desc: "Multihop TTL", args: 1, valueType: ValueInteger, placeholder: "<ttl>", validator: ValidateInteger(1, 255), children: nil},
 				"export":                 {desc: "Export policy", args: 1, multi: true, placeholder: "<policy-name>", children: nil},
 				"import":                 {desc: "Import policy", args: 1, multi: true, placeholder: "<policy-name>", children: nil},
 				"authentication-key":     {desc: "Authentication key", args: 1, placeholder: "<key>", children: nil},
@@ -546,7 +546,7 @@ var schemaProtocols = &schemaNode{desc: "Protocols configuration", children: map
 			valueExamples: AuthTypeSpellings(), validator: ValidateAuthType, children: nil},
 	}},
 	"isis": {desc: "IS-IS configuration", children: map[string]*schemaNode{
-		"net": {desc: "NET address", args: 1, placeholder: "<net-address>", children: nil},
+		"net": {desc: "NET address", args: 1, valueType: ValueIdentifier, placeholder: "<net-address>", validator: ValidateISISNET, children: nil},
 		// #8446: BOTH spell the same concept and both compile into
 		// ISISConfig.Level. Typed so a non-canonical value (notably
 		// `level-2-only`, the spelling this product's OWN renderer
