@@ -3262,8 +3262,9 @@ func TestGenerateProtocols_BGPExportMixed(t *testing.T) {
 // resolvable redistribute source protocol. resolveRedistribute MUST skip
 // it (emit nothing) rather than fall back to the FRR-invalid
 // `redistribute <policy>` line — that line is rejected by frr-reload.py
-// and, because it lands in the xpf-managed section, degrades the WHOLE
-// reload (every managed route/redistribute is lost, not just this one).
+// and, because it lands in the xpf-managed section, fails the WHOLE
+// reload: no stale config is removed anywhere in the managed section while
+// it is rendered, not just in this stanza.
 //
 // Pre-fix this returned " redistribute export-comm\n". Post-fix it
 // returns "".

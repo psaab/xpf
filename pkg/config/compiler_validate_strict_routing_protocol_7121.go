@@ -44,8 +44,9 @@ func validateRoutingPolicyProtocolsStrict(cfg *Config) error {
 				return fmt.Errorf(
 					"policy-options policy-statement %q term %q: `from protocol %s` is not a "+
 						"routing protocol this dataplane can match; FRR rejects an unknown "+
-						"source-protocol and ONE rejected line degrades the whole managed FRR "+
-						"reload (#1880/#2223), so this would not fail alone. Valid: direct "+
+						"source-protocol, and ONE rejected line fails the whole managed FRR "+
+						"reload: stale routing config stops being removed for every protocol, "+
+						"not just this policy (#1880/#2223). Valid: direct "+
 						"(connected), static, ospf, ospf6, bgp, rip, ripng, isis, kernel",
 					stmtName, term.Name, proto)
 			}

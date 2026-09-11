@@ -41,12 +41,16 @@ func knownRedistProtocol(name string) bool {
 // Invariant: this never emits a syntactically-invalid `redistribute
 // <name>` line. FRR's `redistribute` requires a source protocol token
 // (connected/static/ospf/bgp/rip/isis/kernel); a bare policy-statement or
-// typo name is rejected by frr-reload.py. Because the line lands in the
-// xpf-managed section, ONE rejected line degrades the WHOLE reload
-// (frr-reload exits non-zero on any CMD_WARNING_CONFIG_FAILED, then the
-// additive vtysh -f fallback rejects it too — every managed route and
-// redistribute is lost, not just this stanza, #1880/#2223). So when an
-// export cannot be resolved to a source protocol we SKIP it and warn
+// typo name is rejected by FRR's parser. Because the line lands in the
+// xpf-managed section, ONE rejected line fails the WHOLE reload, not just
+// this stanza. frr-reload.py exits non-zero, and the additive `vtysh -f`
+// fallback in reloadLocked applies every other line but also exits non-zero
+// on that one: FRR stable/10.6 vtysh_config_from_file keeps going past a
+// rejected line and returns its error. So the reload fails, and every retry
+// re-reads the same file and fails the same way. What is lost is REMOVAL, not
+// addition: a later commit that deletes a route, neighbour or policy leaves it
+// live in FRR for as long as the bad line is rendered (#1880/#2223, #9510). So
+// when an export cannot be resolved to a source protocol we SKIP it and warn
 // rather than poison the managed reload.
 //
 // Two cases reach the skip-and-warn path:
@@ -64,6 +68,13 @@ func knownRedistProtocol(name string) bool {
 //     load / peer-sync path, opts.lenientRoutingExportRef in pkg/config).
 //     The strict validator REJECTS this case at commit; only the lenient
 //     load/peer-sync path can reach the renderer with such a name.
+//
+// A source protocol can also be valid in general and still be rejected where
+// the line lands. FRR's redistribute grammar is per address family, so
+// `redistribute ospf6` under `router ospf` is rejected exactly like a typo
+// (#9510). redistSourceFitsNode filters that on BOTH paths, at the use site,
+// rather than rejecting the policy at commit: a policy-statement is reusable,
+// and `from protocol ospf6` is valid under `router ospf6`.
 func (m *Manager) resolveRedistribute(export string, po *config.PolicyOptionsConfig, self string, bgpAcceptDefault map[string]bool) string {
 	// Junos spells directly-connected routes "direct"; FRR's redistribute
 	// keyword is "connected". A bare `export direct` must render
@@ -87,6 +98,13 @@ func (m *Manager) resolveRedistribute(export string, po *config.PolicyOptionsCon
 				"protocol", self)
 			return ""
 		}
+		// #9510: the source must also be in a family the enclosing router's
+		// redistribute grammar lists (redistribute_afi_9510.go).
+		if !redistSourceFitsNode(export, self) {
+			slog.Warn("FRR redistribute export skipped: source protocol is not in this router's address family",
+				"protocol", self, "source", export)
+			return ""
+		}
 		// #8597 (muse-004 K87): sanitized for PARITY, not because this site is
 		// reachable with a dirty operand.
 		//
@@ -104,6 +122,7 @@ func (m *Manager) resolveRedistribute(export string, po *config.PolicyOptionsCon
 	if po != nil && po.PolicyStatements != nil {
 		if ps, ok := po.PolicyStatements[export]; ok {
 			protocols := make(map[string]bool)
+			skipped := false
 			for _, term := range ps.Terms {
 				for _, proto := range term.FromProtocols {
 					if proto == "direct" {
@@ -114,6 +133,17 @@ func (m *Manager) resolveRedistribute(export string, po *config.PolicyOptionsCon
 					// route-map X` under `router ospf` is self-
 					// redistribution and FRR rejects it (#2943).
 					if self != "" && proto == self {
+						skipped = true
+						continue
+					}
+					// #9510: a term whose source is outside the enclosing
+					// router's address family is dropped here, at the use
+					// site. The same policy stays valid under a router
+					// whose grammar lists that source.
+					if !redistSourceFitsNode(proto, self) {
+						slog.Warn("FRR redistribute policy term skipped: source protocol is not in this router's address family",
+							"policy", export, "protocol", self, "source", proto)
+						skipped = true
 						continue
 					}
 					protocols[proto] = true
@@ -165,6 +195,14 @@ func (m *Manager) resolveRedistribute(export string, po *config.PolicyOptionsCon
 						sanitizeFRRValue(proto), sanitizeFRRValue(rmName))
 				}
 				return sb.String()
+			}
+			if skipped {
+				// Every `from protocol` was filtered above, as self or as
+				// another address family. "has no `from protocol`" would send
+				// the operator looking for a term that already exists.
+				slog.Warn("FRR redistribute export skipped: no `from protocol` in the policy-statement applies under this router",
+					"policy", export, "protocol", self)
+				return ""
 			}
 			// Defined policy-statement with no resolvable source protocol:
 			// nothing valid to redistribute. Skip + warn rather than emit
