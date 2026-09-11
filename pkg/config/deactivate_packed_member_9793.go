@@ -31,17 +31,22 @@ import (
 func refusePackedMemberToggle(nodes []*Node, path []string, i int, schema *schemaNode, inactive bool) error {
 	tail := path[i:]
 	keys := elidedPackedRunCarrying(nodes, tail, schema)
-	if keys == nil || len(keys) == len(tail) {
+	if keys == nil {
+		// #9799: a LATER member of a bracketed group never matches the walk
+		// at all; refuse it the same way rather than report no node.
+		if keys = groupCarryingLaterMember9799(nodes, tail); keys == nil {
+			return nil
+		}
+	} else if len(keys) == len(tail) {
 		return nil
-	}
-	if at, ok := addressedSchema9793(tail, schema); ok && len(keys) > len(tail) && resolveSchemaChild(at, keys[len(tail)]) != nil {
+	} else if at, ok := addressedSchema9793(tail, schema); ok && len(keys) > len(tail) && resolveSchemaChild(at, keys[len(tail)]) != nil {
 		return nil
 	}
 	verb := "activate"
 	if inactive {
 		verb = "deactivate"
 	}
-	return fmt.Errorf("%q is one member of a statement that names others on the same line (%q), and %s would apply to all of them. Re-author that line with braces around %q, then %s it (#9793, #8992)",
+	return fmt.Errorf("%q is one member of a statement that names others on the same line (%q), and %s would apply to all of them. Re-author that line with braces around %q, then %s it (#9793, #9799, #8992)",
 		strings.Join(path, " "), strings.Join(keys, " "), verb, path[len(path)-1], verb)
 }
 
