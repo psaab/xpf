@@ -36,6 +36,7 @@ which makes each domain unit-testable with a fake (see `rules_test.go`'s
 |------|--------|------|
 | `routing.go` | `Manager` façade | sole `*netlink.Handle`, domain refs |
 | `vrf.go` | `vrfManager` | VRF lifecycle + `BindInterfaceToVRF`; own `mu` + tracked set |
+| `vrf_miss_terminator_9819.go` + `rule_l3mdev_linux.go` | (part of `vrfManager`) | the #9819 VRF miss terminator (`l3mdev unreachable`, pref 2000), installed before any VRF device exists; the raw FRA_L3MDEV request |
 | `routes.go` | `routeReader` | kernel routing-table reads (`routeLister`) |
 | `routeformat.go` | free fns | Junos `show route` formatters |
 | `tunnel.go` | `tunnelManager` | GRE/IPIP + AnchorOnly TUN reconcile, VRF-claim, address, `Clear`/`GetStatus`; own `mu`. WireGuard and the keepalive runner are split into siblings below (#5661) |
@@ -44,6 +45,7 @@ which makes each domain unit-testable with a fake (see `rules_test.go`'s
 | `tunnel_keepalive_runner.go` | (part of `tunnelManager`) | keepalive **runner** half (#5661): `KeepaliveState`/`keepaliveRunner`, `startKeepalive`/`stopAll`, `keepaliveLoop`/`keepaliveTick`, `GetKeepaliveState` |
 | `xfrm.go` | `xfrmManager` | XFRM/IPsec interface lifecycle; own `mu` + tracked `name→if_id` set. `Apply` reconciles **differentially** against the tracked set (keep unchanged / create new / delete removed / recreate on `if_id` change) — it does NOT clear-all-then-rebuild, so an unrelated config commit leaves active xfrmi interfaces untouched (#2546). Refuses to create either of two distinct devices that derive the same `if_id` — fail-closed collision guard (#2909) |
 | `rules.go` | `nextTableManager` / `ribGroupManager` / `pbrManager` | policy-routing ip-rule reconcilers (`ruleOps`, stateless) |
+| `rib_group_return_9819.go` | (part of `ribGroupManager`) | the #9819 return rules for a rib-group leak source (`iif`/`oif vrf-<instance> lookup main`, pref 1500) and the compile-time priority ordering |
 | `probe_pin.go` | `probePinManager` | RPM probe next-hop pin reconciler (#1827): fwmark rules in band 50-99 + pinned host routes in reserved tables 7000-7049 (`probePinOps`, stateless). `Apply` returns per-test install failures (keyed by TestKey) and rolls back the fwmark rule when the pinned route fails (best-effort — a failed rollback is swept by the next band clear; the pin reports failed either way); callers thread the failed map into `pkg/rpm` so affected tests hold state instead of probing unpinned (#1895) |
 | `bond.go` | `bondManager` | bond (fabric/ae LAG) device lifecycle; own `mu` + tracked `name→bondSig` set. `Apply` reconciles **differentially** against the tracked set (keep unchanged / create new / delete removed / recreate on signature change) — it does NOT clear-all-then-rebuild, so an unrelated config commit no longer flaps the LAG (#5119, mirroring #2546) |
 | `reth.go` | `rethManager` | stale `reth*` bond cleanup. `Clear` scans `LinkList` for `reth*` bond devices and deletes them; a per-bond `LinkDel` failure is aggregated with `errors.Join` and returned (NOT swallowed) so a stale reth bond left in the kernel fails the commit closed (#5704 / codex-review-182 M30, the reth analog of the #4901 xfrm/bond/tunnel `Clear` fix). Idempotent: an already-absent reth device is not returned by `LinkList`, so no `LinkDel` runs and no spurious error is produced; retry is implicit via the next reconcile's re-scan (no ownership map to retain) |
@@ -416,13 +418,41 @@ delegate to the owning domain. Exported types:
     to keep host-originated default-instance traffic on the leak would
     reintroduce the cross-VRF hijack for every VRF-bound daemon.
 
-  The AF\_XDP fast path was never exposed: the userspace FIB follows a
-  `next_table` leak only when the route is found in the **ingress
-  instance's own** table (`userspace-dp/src/afxdp/forwarding/fib.rs`), so
-  it is instance-scoped by construction. The exposure was the Linux path
-  — host-originated traffic, slow-path `XDP_PASS` packets, local
-  delivery, and any interface without native XDP where
-  `redirect_capable` falls back to kernel forwarding.
+  The AF\_XDP fast path is instance-scoped only for **PBR-steered**
+  traffic. The userspace FIB follows a `next_table` route found in
+  whichever table a lookup runs in
+  (`userspace-dp/src/afxdp/forwarding/fib.rs`), and a transit lookup runs
+  in a per-instance table only when a PBR interface filter steers it
+  there. Without PBR the fast path does no per-instance destination-FIB
+  selection (`userspace-dp/src/afxdp/forwarding/README.md`). The exposure
+  #9420 closed was on the Linux path: host-originated traffic, slow-path
+  `XDP_PASS` packets, local delivery, and any interface without native
+  XDP where `redirect_capable` falls back to kernel forwarding.
+- `1000`: the kernel's own `l3mdev` rule (`lookup [l3mdev-table]`), added
+  by the kernel when the first VRF device appears. It is not ours. It is
+  listed because the next two entries are defined relative to it, and
+  because it is a LOOKUP rule: a lookup that misses the VRF's table moves on
+  down this list.
+- `1500`: rib-group **return rules** (#9819). For each routing instance
+  whose interface routes leak into main, in each family whose leak
+  installs: `iif vrf-<instance> lookup main` and `oif vrf-<instance>
+  lookup main`. `ribGroupReturnRulePriority` in `rib_group_return_9819.go`;
+  added by `ribGroupManager.Apply`, removed by its `clear()`. They give a
+  leak source a return path through `main` that the terminator would
+  otherwise cut, and they reach `main` only, never the rib-group band or
+  another instance. Not installed for a forwarding instance or a reserved
+  name, which have no VRF device.
+- `2000`: the **VRF miss terminator** (#9819), `l3mdev unreachable`, once
+  per family. `vrfMissTerminatorPriority` in `vrf_miss_terminator_9819.go`.
+  `vrfManager.Reconcile` (and `Create`) installs it before creating any VRF
+  device, re-asserts it on every reconcile (EEXIST is success), and removes
+  it only once no VRF is desired or still owned. It matches exactly what
+  the `1000` rule matches, so a lookup that missed a VRF table ends here
+  instead of reaching the rib-group band and `main`. netlink v1.3.1's
+  `Rule` has no l3mdev selector, so `rule_l3mdev_linux.go` builds the
+  install request. A failure is returned into the commit (#5700 `vrfErr`)
+  and never skips the VRF reconcile. The order of these three priorities
+  is checked at compile time. See `docs/rib-group-route-leaking.md`.
 - `31000–31999`: PBR (firewall-filter `routing-instance` action).
   `pbrRulePriority` in `rules.go`. **Kernel FBF support matrix (#3730):**
   `BuildPBRRules` mirrors only the term `from` predicates an `ip rule` can

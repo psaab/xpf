@@ -36,6 +36,12 @@ type vrfOps interface {
 type vrfManager struct {
 	ops vrfOps
 
+	// term installs and removes the #9819 VRF miss terminator
+	// (vrf_miss_terminator_9819.go). New wires the production ops. Only the
+	// link-only test constructors leave it nil, and the real-kernel cell drives
+	// a Manager built by New, so the production wiring is exercised.
+	term vrfMissTerminatorOps
+
 	// mu serializes all reads and writes of vrfs, and is held for the
 	// full duration of Reconcile/Create including the netlink
 	// operations. Callers must not assume Reconcile is re-entrant. See
@@ -48,6 +54,12 @@ type vrfManager struct {
 func (v *vrfManager) Create(name string, tableID int) error {
 	v.mu.Lock()
 	defer v.mu.Unlock()
+	// #9819: the miss terminator first, as in Reconcile.
+	if v.term != nil {
+		if err := setVRFMissTerminator(v.term, true); err != nil {
+			return errors.Join(err, v.createLocked(name, tableID))
+		}
+	}
 	return v.createLocked(name, tableID)
 }
 
@@ -108,12 +120,33 @@ func (v *vrfManager) IsManaged(name string) bool {
 // Holds mu for the full body including netlink operations. VRF
 // reconcile is low-frequency; lock contention is not a concern and
 // serialized reconciles avoid TOCTOU between concurrent callers.
+//
+// #9819: when any VRF is desired, Reconcile installs the VRF miss terminator
+// BEFORE it creates a device, so no VRF is ever live with its misses falling
+// through to main. When nothing is desired and nothing is still owned, it
+// removes the terminator afterwards. A terminator failure is returned beside
+// the link reconcile's error and never skips the link reconcile.
 func (v *vrfManager) Reconcile(desired []VRFSpec) error {
 	v.mu.Lock()
 	defer v.mu.Unlock()
+	var termErr error
+	if v.term != nil && len(desired) > 0 {
+		termErr = setVRFMissTerminator(v.term, true)
+	}
 	newVrfs, err := reconcileVRFs(v.ops, v.vrfs, desired)
 	v.vrfs = newVrfs
-	return err
+	// A VRF whose delete failed stays tracked and is still in the kernel, so
+	// its misses still need ending: remove only once nothing is owned.
+	if v.term != nil && len(desired) == 0 && len(newVrfs) == 0 {
+		termErr = setVRFMissTerminator(v.term, false)
+	}
+	switch {
+	case termErr == nil:
+		return err
+	case err == nil:
+		return termErr
+	}
+	return errors.Join(err, termErr)
 }
 
 // BindInterfaceToVRF binds a network interface to a VRF device.
