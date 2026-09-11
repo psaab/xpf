@@ -228,6 +228,9 @@ func TestReservedNameTakesNoPartInTableIDCollision_9622(t *testing.T) {
 // The shared name scan now sees the brace-elided leaf instance, so the #3855
 // table-id collision gate sees a packed instance as well. The colliding pair is
 // found by search, not hardcoded, so the cell does not depend on one hash value.
+// Both instances here are effective. One declared in a group nothing applies
+// is counted too, in either spelling; that over-approximation is #9657 and is
+// deliberately not asserted here.
 func TestPackedLeafInstancesJoinTheTableIDCollisionGate_9622(t *testing.T) {
 	byID := map[int]string{}
 	var a, b string

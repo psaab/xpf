@@ -85,10 +85,9 @@ import (
 // carries the same meaning it does everywhere else in the tree.
 const LearnedRouteImportPreference = 200
 
-// mgmtVRFTableID is the kernel routing table backing the management VRF.
-// Its SSOT is the ReconcileVRFs call in pkg/daemon daemon_apply.go
-// (mgmtTableID); it is duplicated here only to hard-exclude the table from
-// the import.
+// mgmtVRFTableID is the kernel routing table backing the management VRF
+// (config.ManagementVRFTableID, #9622), named here to hard-exclude the table
+// from the import.
 //
 // Management-interface (fxp*/fab*/em*) DHCP leases are NOT owned by FRR —
 // pkg/daemon collectDHCPRoutes skips them and programs them directly via

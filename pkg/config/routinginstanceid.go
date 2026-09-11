@@ -14,7 +14,7 @@ import (
 //
 // The band sits ABOVE every other reserved kernel-table constant this project
 // uses — the kernel-reserved local/main/default tables (253/254/255), the mgmt
-// VRF table (999, pkg/daemon), and the RPM probe-pin band (ProbeTableBase
+// VRF table (999, ManagementVRFTableID), and the RPM probe-pin band (ProbeTableBase
 // 7000..7049) — so a stable routing-instance table can never collide with any
 // of them. It also stays >= 100 (the historical routing-instance table floor
 // several callers and tests still assume) by construction.
@@ -62,9 +62,13 @@ func StableRoutingInstanceTableID(name string) int {
 // `routing-instances { ri1 instance-type forwarding; }`, a LEAF whose Keys tail
 // carries the body (#8787). The compiler builds an instance from that leaf, so
 // this scan must see it: before #9622 it skipped every leaf, and neither the
-// table-id gate nor the reserved-name gate saw a packed instance. A bare
-// `routing-instances { ri1; }` carries no properties, compiles to nothing, and
-// is still skipped.
+// table-id gate nor the reserved-name gate saw a packed instance (two packed
+// instances folding to one table committed strict-clean, and the runtime
+// quarantined one). A bare `routing-instances { ri1; }` carries no properties,
+// compiles to nothing, and is still skipped. routingInstanceNameUnionAST's
+// pre-expansion view also counts instances in groups nothing applies; that
+// over-approximation predates this scan and now covers both spellings alike
+// (#9657).
 func collectRoutingInstanceNamesAST(riNode *Node, out map[string]struct{}) {
 	if riNode == nil {
 		return

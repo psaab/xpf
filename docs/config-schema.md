@@ -10870,20 +10870,25 @@ reserved for whole-dataplane selection where a rewrite shim
   includes the brace-elided leaf spelling `routing-instances { mgmt
   instance-type virtual-router; }` (#8787), which the compiler builds an
   instance from. The shared name scan used to skip every leaf, so neither gate
-  saw a packed instance. The tolerant load and peer-sync paths skip the gate
-  (`lenientReservedRoutingInstanceName`), and `compileRoutingInstances`
-  QUARANTINES the instance with one warning, so the node boots and the daemon
-  never plans it. The daemon also skips a reserved name as a second line of
-  defence; no test covers that part. The quarantine runs before the `#3855`
-  collision pass, and the table-id gate leaves reserved names out of its union
-  to match. A reserved instance therefore never claims a table or displaces an
-  instance that shares its hash (`mgmt` and `z1061437` fold to one id). **This
-  is an xpf reservation, not Junos parity:** Junos reserves `mgmt_junos`,
-  which exists only under `system management-instance`. xpf has no such knob
-  and always uses `mgmt`, so a Junos config with an ordinary instance named
-  `mgmt` must be renamed. Names are case-sensitive and the VRF device is
-  `vrf-` + the name, so `MGMT`, `mgmt1` and `vrf-mgmt` stay ordinary
-  instances. Regression coverage:
+  saw a packed instance. At `bdc238675` two packed instances folding to one
+  table commit strict-clean and the runtime silently quarantines one; the
+  widened scan rejects them. The table-id gate's pre-expansion view also
+  counts instances in `groups` blocks nothing applies, in both spellings, so
+  it can refuse a config whose effective instances do not collide. That
+  over-approximation predates #9622 and is tracked on #9657. The tolerant load
+  and peer-sync paths skip the gate (`lenientReservedRoutingInstanceName`),
+  and `compileRoutingInstances` QUARANTINES the instance with one warning, so
+  the node boots and the daemon never plans it. The daemon also skips a
+  reserved name as a second line of defence; no test covers that part. The
+  quarantine runs before the `#3855` collision pass, and the table-id gate
+  leaves reserved names out of its union to match. A reserved instance
+  therefore never claims a table or displaces an instance that shares its hash
+  (`mgmt` and `z1061437` fold to one id). **This is an xpf reservation, not
+  Junos parity:** Junos reserves `mgmt_junos`, which exists only under `system
+  management-instance`. xpf has no such knob and always uses `mgmt`, so a
+  Junos config with an ordinary instance named `mgmt` must be renamed. Names
+  are case-sensitive and the VRF device is `vrf-` + the name, so `MGMT`,
+  `mgmt1` and `vrf-mgmt` stay ordinary instances. Regression coverage:
   `pkg/config/routinginstance_reserved_name_9622_test.go` (flat-set and
   hierarchical including brace-elided, both compiler cores, the collision
   ordering, packed-leaf collisions) and
