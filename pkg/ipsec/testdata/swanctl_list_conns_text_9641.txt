@@ -1,0 +1,19 @@
+proof-ms: IKEv1/2, no reauthentication, rekeying every 14400s
+  local:  %any[500]
+  remote: 198.51.100.62[500]
+  local pre-shared key authentication:
+  remote pre-shared key authentication:
+  proof-ms-ts1: TUNNEL, rekeying every 3600s
+    local:  10.61.1.0/24
+    remote: 10.62.1.0/24
+  proof-ms-ts2: TUNNEL, rekeying every 3600s
+    local:  10.61.2.0/24
+    remote: 10.62.2.0/24
+proof-plain: IKEv1/2, no reauthentication, rekeying every 14400s
+  local:  %any[500]
+  remote: 198.51.100.61[500]
+  local pre-shared key authentication:
+  remote pre-shared key authentication:
+  proof-plain: TUNNEL, rekeying every 3600s
+    local:  dynamic
+    remote: dynamic

@@ -3,7 +3,10 @@
 #
 # Usage: REPO=<worktree> scripts/mutate.sh <spec.tsv> [out.tsv]
 #
-# Spec is TAB-separated: label <TAB> file <TAB> old <TAB> new
+# Spec is TAB-separated: label <TAB> file <TAB> old <TAB> new [<TAB> target [<TAB> expect]]
+#   target (#8231): the test this cell must kill, attributed by NAME.
+#   expect (#9564): a fixed substring the target's own failure output must
+#                   contain; without it a kill for the wrong reason scores KILLED.
 # `old` and `new` use \t and \n escapes (the fields cannot contain literal tabs
 # or newlines, and Go source is tab-indented, so escaping is mandatory).
 #
@@ -104,7 +107,7 @@ printf 'cell\tfile\tlang\tapplied\tbuilt\tcollected\tfailed\tverdict\n' > "$OUT"
 # specs keep working and keep their count-based verdict — the column is what
 # lets the driver say "the failing test is the one this cell targets" instead of
 # asking the reader to check.
-while IFS=$'\t' read -r label file old new target; do
+while IFS=$'\t' read -r label file old new target expect; do
 	[ -z "${label:-}" ] && continue
 	case "$label" in \#*) continue ;; esac
 
@@ -171,6 +174,13 @@ PY
 		verdict=$(mutation_verdict_for_target "$verdict" "$target" \
 			$(mutation_go_failed_names_json "$GOTESTJSON_LOG"))
 		attributed=yes
+		# #9564: the name proves WHICH test failed; the expected message proves
+		# it failed for the reason the cell exists.
+		if [ -n "${expect:-}" ]; then
+			verdict=$(mutation_verdict_for_message "$verdict" "$target" "$expect" "$GOTESTJSON_LOG")
+		fi
+	elif [ -n "${expect:-}" ]; then
+		echo "[$label] note: the expect column needs a target column and a go -json stream; ignored"
 	fi
 	printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
 		"$label" "$file" "$lang" "$applied" "$built" "$collected" "$failed" "$verdict" >> "$OUT"
@@ -205,6 +215,9 @@ PY
 		fi
 	elif [ "$verdict" = KILLED ]; then
 		echo "         ^ attributed by NAME to $target (#8231)"
+		[ -n "${expect:-}" ] && echo "         ^ and by MESSAGE: its output contains the expected text (#9564)"
+	elif [ "$verdict" = KILLED-WRONG-MSG ]; then
+		echo "         ^ $target failed, but its output lacks the expected message: $expect (#9564)"
 	fi
 
 	cp "$orig" "$REPO/$file"
@@ -214,4 +227,5 @@ echo "=== $OUT ==="
 column -t -s$'\t' "$OUT"
 escaped=$(awk -F'\t' 'NR>1 && $8=="ESCAPED"' "$OUT" | wc -l)
 void=$(awk -F'\t' 'NR>1 && $8 ~ /^VOID|^REFUSED/' "$OUT" | wc -l)
-echo "escaped=$escaped void_or_refused=$void"
+wrongmsg=$(awk -F'\t' 'NR>1 && $8=="KILLED-WRONG-MSG"' "$OUT" | wc -l)
+echo "escaped=$escaped void_or_refused=$void killed_wrong_msg=$wrongmsg"

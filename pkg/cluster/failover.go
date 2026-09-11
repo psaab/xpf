@@ -508,9 +508,12 @@ func (m *Manager) clearRemoteTransferOutLeaseLocked(rgID int) {
 }
 
 // manualFailoverRestoreWeightLocked recomputes an RG's monitor-derived weight
-// after ManualFailover is cleared. It is used by BOTH the dual-resign guard and
-// the transfer-out lease expiry in electRG; it deliberately does NOT run
-// election (recalcWeight would recurse back into electRG). Caller holds m.mu.
+// after ManualFailover is cleared. It is used by the dual-resign guard and the
+// transfer-out lease expiry in electRG, and by handlePeerTimeout's peer-loss
+// clear (#9640). It deliberately does NOT run election: in electRG
+// recalcWeight would recurse back into electRG, and on peer loss its
+// electSingleNode would promote every group before the disable-rg-confirmed
+// fence. Caller holds m.mu.
 func (m *Manager) manualFailoverRestoreWeightLocked(rg *RedundancyGroupState) {
 	totalLost := 0
 	for _, iface := range rg.MonitorFails {

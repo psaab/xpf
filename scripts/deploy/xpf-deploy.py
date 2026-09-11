@@ -57,8 +57,10 @@ import fcntl
 import json
 import os
 import re
+import secrets
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -562,15 +564,41 @@ def print_map(ap):
 
 # ── preflight / existence probes (query-only; never mutate) ────────────
 def _incus_exists(kind, name):
-    """True if an incus object exists. kind in {instance,image,network}.
-    Query-only; tolerant of a missing incus binary (returns False)."""
+    """True if incus AFFIRMATIVELY reports the object. kind in
+    {instance,image,network}. Query-only.
+
+    For non-destructive callers, where "could not tell" reading as "not there"
+    is harmless. A destructive caller must use `_incus_state`, which keeps the
+    two apart (#9325)."""
+    return _incus_state(kind, name) == DOMAIN_PRESENT
+
+
+def _incus_state(kind, name):
+    """PRESENT / ABSENT / UNKNOWN for an incus object (query-only, #9325).
+
+    The same three states as `_virsh_domain_state`, for the same reason:
+    `incus ... info` exits non-zero both for an object that does not exist and
+    for a daemon it could not reach, and an `incus` this process cannot run
+    (off PATH, a dangling symlink mid-upgrade) says nothing about what the
+    daemon holds. Absence is read from incus's own wording, measured for all
+    three kinds:
+
+        instance: Error: Failed to fetch instance "x" in project "default": Instance not found
+        image:    Error: Image "x" not found
+        network:  Error: Network interface "x" not found
+    """
     argv = {"instance": ["incus", "info", name],
             "image": ["incus", "image", "info", name],
             "network": ["incus", "network", "info", name]}[kind]
     try:
-        return subprocess.run(argv, capture_output=True, text=True).returncode == 0
-    except FileNotFoundError:
-        return False
+        r = subprocess.run(argv, capture_output=True, text=True)
+    except OSError:
+        return DOMAIN_UNKNOWN
+    if r.returncode == 0:
+        return DOMAIN_PRESENT
+    if "not found" in ((r.stderr or "") + (r.stdout or "")).lower():
+        return DOMAIN_ABSENT
+    return DOMAIN_UNKNOWN
 
 
 # #8977: three states, not two. `virsh dominfo` exits non-zero for a domain that
@@ -583,29 +611,75 @@ DOMAIN_ABSENT = "absent"
 DOMAIN_UNKNOWN = "unknown"
 
 
+# #9669: libvirt keeps a SEPARATE domain namespace per connection URI, and virsh
+# / virt-install used to run with no --connect, so they spoke to whichever URI
+# the invoking user's default resolved to. The golden and overlay disks are
+# hard-wired to system scope (/var/lib/libvirt/images), so the tool now names
+# the URI: `deploy` defines the domain at LIBVIRT_SYSTEM_URI. Teardown can no
+# longer trust ONE probe: a domain an operator deployed non-root lives in the
+# session URI, and a probe against the system URI reports it ABSENT, which is
+# exactly the answer that lets teardown delete its disks (#9325). So every
+# presence question asks BOTH URIs. A domain present in either is present,
+# and it is torn down through the URI that holds it. Absence needs both.
+LIBVIRT_SYSTEM_URI = "qemu:///system"
+LIBVIRT_SESSION_URI = "qemu:///session"
+LIBVIRT_PROBE_URIS = (LIBVIRT_SYSTEM_URI, LIBVIRT_SESSION_URI)
+
+
+def _virsh_domain_locate(name):
+    """(state, uris) for a libvirt domain across LIBVIRT_PROBE_URIS (#9669).
+
+    PRESENT with every URI that holds the domain; otherwise UNKNOWN if ANY URI
+    could not answer (an unreachable URI might hold it); otherwise ABSENT.
+    """
+    states = {uri: _virsh_domain_state_at(name, uri) for uri in LIBVIRT_PROBE_URIS}
+    present = [uri for uri in LIBVIRT_PROBE_URIS if states[uri] == DOMAIN_PRESENT]
+    if present:
+        return DOMAIN_PRESENT, present
+    if any(st == DOMAIN_UNKNOWN for st in states.values()):
+        return DOMAIN_UNKNOWN, []
+    return DOMAIN_ABSENT, []
+
+
 def _virsh_domain_state(name):
-    """PRESENT / ABSENT / UNKNOWN for a libvirt domain (query-only).
+    """PRESENT / ABSENT / UNKNOWN for a libvirt domain across both URIs (#9669)."""
+    return _virsh_domain_locate(name)[0]
+
+
+def _virsh_teardown_domain(name, uris):
+    """destroy + undefine the domain through each URI that holds it (#9669)."""
+    for uri in uris:
+        subprocess.run(["virsh", "-c", uri, "destroy", name], capture_output=True, text=True)
+        r = subprocess.run(["virsh", "-c", uri, "undefine", "--nvram", name],
+                           capture_output=True, text=True)
+        if r.returncode != 0:   # domains without NVRAM reject --nvram
+            subprocess.run(["virsh", "-c", uri, "undefine", name],
+                           capture_output=True, text=True)
+
+
+def _virsh_domain_state_at(name, uri):
+    """PRESENT / ABSENT / UNKNOWN for a libvirt domain at ONE URI (query-only).
 
     UNKNOWN is the state that did not exist before #8977, and it is the one the
     destructive callers must refuse on.
 
-    A MISSING BINARY is genuine absence: virsh is not installed, so no libvirt
-    domain can exist. That is the tolerance the sibling `_incus_exists`
-    docstring describes and it is correct. What is not correct is extending it
-    to a tool that IS installed and FAILED TO ANSWER, where the domain's
-    existence is simply not known.
+    A MISSING BINARY is NOT absence (#9325). virsh is a client: libvirtd and its
+    domains exist whether or not this process can exec it, and a restricted
+    unit PATH, sudo's secure_path, or a package upgrade that left a dangling
+    symlink all raise FileNotFoundError while a domain runs. #8977 exempted
+    that one case as "virsh is not installed, so no domain can exist"; it is
+    UNKNOWN like every other failure to answer.
 
     `virsh dominfo` distinguishes them in its stderr: a missing domain says so
     explicitly, while a connection/permission failure names the transport. We
     read that rather than the exit code, which cannot separate them.
     """
     try:
-        r = subprocess.run(["virsh", "dominfo", name],
+        r = subprocess.run(["virsh", "-c", uri, "dominfo", name],
                            capture_output=True, text=True)
-    except FileNotFoundError:
-        # virsh absent -> no libvirt domains exist. Genuine absence.
-        return DOMAIN_ABSENT
     except OSError:
+        # FileNotFoundError included (#9325): a virsh this process cannot run
+        # says nothing about whether libvirtd holds the domain.
         return DOMAIN_UNKNOWN
     if r.returncode == 0:
         return DOMAIN_PRESENT
@@ -825,19 +899,26 @@ def _qcow2_backing_file(path):
     is a realistic instance: qemu-img can fail on an image held by a live
     domain.
 
-    The ONE case that legitimately means "no backing" is qemu-img being absent
-    ENTIRELY, and the original reasoning for it still holds and is preserved
-    below: qemu-img is a hard dependency of the overlay-CREATE path
-    (`libvirt_disk` -> `qemu-img create`), so if it is missing from this host
-    then this tool never created an overlay here (#5043). That argument covers
-    a missing binary only; it never covered a probe that ran and failed, which
-    is the hole."""
+    #9325: a qemu-img that cannot be RUN is indeterminate too. #6760 kept it as
+    "no backing" on the #5043 argument that this tool cannot have created an
+    overlay without qemu-img -- an argument about THIS process's history, not
+    about the sibling in front of it. An overlay created before qemu-img left
+    PATH (a restricted unit PATH, sudo's secure_path, an upgrade in flight), or
+    by another tool, still backs onto the golden, and with qemu-img off PATH the
+    old answer let that golden be replaced. Treating it as indeterminate
+    changes exactly one state:
+
+        state                                  before     after
+        fresh host, no golden yet              PROCEED    PROCEED
+        golden present, no sibling .qcow2      PROCEED    PROCEED
+        golden present + a sibling overlay     PROCEED    REFUSED
+    """
     try:
         r = subprocess.run(["qemu-img", "info", "--output=json", path],
                            capture_output=True, text=True)
-    except FileNotFoundError:
-        # qemu-img absent: no overlay can have been created here. Determinate.
-        return None
+    except OSError as exc:
+        # Could not ask, which is not "no backing" (#9325; see the docstring).
+        raise _ProbeIndeterminate(f"qemu-img could not be run to probe {path}: {exc}")
     if r.returncode != 0:
         raise _ProbeIndeterminate(
             f"qemu-img info failed for {path}: rc={r.returncode} "
@@ -1078,23 +1159,57 @@ def _atomic_install_golden(srcq, golden):
     within one filesystem (os.replace across filesystems is not atomic and
     raises). The sudo fallback mirrors the same shape for the root-owned
     /var/lib/libvirt/images case."""
-    tmp = f"{golden}.xpf-tmp.{os.getpid()}"
+    gdir = os.path.dirname(golden)
+    tmp = None
     try:
-        os.makedirs(os.path.dirname(golden), exist_ok=True)
-        shutil.copyfile(srcq, tmp)
+        os.makedirs(gdir, exist_ok=True)
+        # #9325: an unpredictable name created O_CREAT|O_EXCL by mkstemp (as
+        # _download_to does, #5817), written through the descriptor mkstemp
+        # returned, so no path is resolved after creation. The old predictable
+        # `<golden>.xpf-tmp.<pid>` let a pre-planted symlink redirect the copy
+        # and then be renamed over the golden itself.
+        fd, tmp = tempfile.mkstemp(dir=gdir,
+                                   prefix=os.path.basename(golden) + ".xpf-tmp.")
+        with os.fdopen(fd, "wb") as dst, open(srcq, "rb") as src:
+            shutil.copyfileobj(src, dst, 1 << 20)
+            os.fchmod(dst.fileno(), 0o644)
+            written = os.fstat(dst.fileno())
+        # os.replace renames a PATH: refuse unless it still names the regular
+        # file written above.
+        now = os.lstat(tmp)
+        if (not stat.S_ISREG(now.st_mode)
+                or (now.st_dev, now.st_ino) != (written.st_dev, written.st_ino)):
+            os.unlink(tmp)
+            die(f"refusing to install golden {golden}: its temp file {tmp} was "
+                f"replaced while it was being written")
         os.replace(tmp, golden)
         return
-    except OSError:
-        # Clean up our partial temp before falling back, so a failed attempt
-        # never leaves a stray sibling *.qcow2-adjacent file behind.
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
+    except BaseException as exc:
+        # Clean up our partial temp before falling back -- or before an
+        # interruption propagates -- so a failed attempt never leaves a stray
+        # sibling *.qcow2-adjacent file behind.
+        if tmp is not None:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+        if not isinstance(exc, OSError):
+            raise
     # /var/lib/libvirt/images is normally root-owned; -D creates the dir.
-    # install writes the temp, mv -f renames it into place atomically.
-    run_capture(["sudo", "install", "-m", "0644", "-D", srcq, tmp])
-    run_capture(["sudo", "mv", "-f", tmp, golden])
+    # install writes the temp, mv -f renames it into place atomically. GNU
+    # install unlinks a planted destination symlink and creates the file
+    # O_EXCL, so this arm does not write through one (#9325, measured).
+    sudo_tmp = f"{golden}.xpf-tmp.{secrets.token_hex(8)}"
+    for argv in (["sudo", "install", "-m", "0644", "-D", srcq, sudo_tmp],
+                 ["sudo", "mv", "-f", sudo_tmp, golden]):
+        r = subprocess.run(argv, capture_output=True, text=True)
+        if r.returncode != 0:
+            # #9325: remove the root-owned, full-size temp before failing. It does
+            # not end in .qcow2, so nothing else would ever notice or reclaim it.
+            subprocess.run(["sudo", "rm", "-f", sudo_tmp], capture_output=True, text=True)
+            detail = (r.stderr or r.stdout or "").strip() or "(no output on stderr)"
+            die(f"command failed (rc={r.returncode}): "
+                f"{' '.join(shlex.quote(x) for x in argv)}\n    {detail}")
 
 
 def libvirt_disk(ap, runner):
@@ -1154,13 +1269,13 @@ def _virsh_define(runner, name, xml):
     stopped, so the pinned-guest-PCI workflow (edit slots via `virsh edit`
     BEFORE first boot) works (fable-165 H-26)."""
     if runner.dry:
-        runner.run(["virsh", "define", f"{name}.xml"])
+        runner.run(["virsh", "-c", LIBVIRT_SYSTEM_URI, "define", f"{name}.xml"])
         return
     fd, path = tempfile.mkstemp(suffix=".xml", prefix=f"xpf-{name}-")
     try:
         with os.fdopen(fd, "w") as f:
             f.write(xml)
-        runner.run(["virsh", "define", path])
+        runner.run(["virsh", "-c", LIBVIRT_SYSTEM_URI, "define", path])
     finally:
         os.unlink(path)
 
@@ -1188,7 +1303,7 @@ def _cleanup_libvirt(name, overlay):
     """Best-effort teardown of a half-created libvirt VM: destroy+undefine the
     domain (if it got defined) and remove the per-VM overlay. Tolerant of a
     missing domain / file (fable-165 H-27)."""
-    state = _virsh_domain_state(name)
+    state, uris = _virsh_domain_locate(name)
     if state == DOMAIN_UNKNOWN:
         # #8977: this is the cleanup path of a FAILED deploy, so it must not
         # itself destroy anything it cannot account for. If libvirtd is
@@ -1205,12 +1320,18 @@ def _cleanup_libvirt(name, overlay):
     if state == DOMAIN_PRESENT:
         print(f"==> deploy of '{name}' failed; cleaning up the libvirt domain "
               f"so a re-run starts clean")
-        subprocess.run(["virsh", "destroy", name], capture_output=True, text=True)
-        r = subprocess.run(["virsh", "undefine", "--nvram", name],
-                           capture_output=True, text=True)
-        if r.returncode != 0:   # domains without NVRAM reject --nvram
-            subprocess.run(["virsh", "undefine", name],
-                           capture_output=True, text=True)
+        _virsh_teardown_domain(name, uris)
+        after = _virsh_domain_state(name)
+        if after != DOMAIN_ABSENT:
+            # #9325: neither exit status above is evidence the overlay is free.
+            # A running domain survives `undefine` as a transient domain, and a
+            # failed `destroy` is also what a stopped domain returns. Only a
+            # fresh probe that reports the domain gone permits the unlink.
+            print(f"==> WARNING: libvirt domain '{name}' is not confirmed gone "
+                  f"after destroy and undefine (probe: {after})")
+            print(f"==> leaving {overlay} in place rather than risk deleting a "
+                  f"running VM's disk; remove it by hand once the domain is gone")
+            return
     if os.path.isfile(overlay):
         try:
             os.remove(overlay)
@@ -1223,7 +1344,7 @@ def _cleanup_libvirt(name, overlay):
 def _deploy_libvirt_inner(ap, runner, start, iso):
     name = ap["name"]
     disk = libvirt_disk(ap, runner)
-    argv = ["virt-install", "--name", name, "--memory", str(memory_mb(ap["memory"])),
+    argv = ["virt-install", "--connect", LIBVIRT_SYSTEM_URI, "--name", name, "--memory", str(memory_mb(ap["memory"])),
             "--vcpus", str(ap["cpu"]), "--import",
             "--disk", f"path={disk}",
             "--osinfo", "ubuntu26.04", "--noautoconsole"]
@@ -1305,11 +1426,24 @@ def destroy_incus(ap, runner):
     iso = day0_iso_path(name)
     if runner.dry:
         runner.run(["incus", "delete", "--force", name])
-    elif _incus_exists("instance", name):
-        print(f"==> destroying incus instance '{name}'")
-        run_capture(["incus", "delete", "--force", name])
     else:
-        print(f"==> incus instance '{name}' not present (nothing to destroy)")
+        # #9325: three states, as for libvirt. The day-0 drive is removed only
+        # once incus affirmatively reports the instance gone.
+        state = _incus_state("instance", name)
+        if state == DOMAIN_PRESENT:
+            print(f"==> destroying incus instance '{name}'")
+            run_capture(["incus", "delete", "--force", name])
+            state = _incus_state("instance", name)
+        elif state == DOMAIN_ABSENT:
+            print(f"==> incus instance '{name}' not present (nothing to destroy)")
+        if state != DOMAIN_ABSENT:
+            raise SystemExit(
+                f"==> ERROR: cannot confirm incus instance '{name}' is gone "
+                f"(probe: {state}; incus not runnable from this context, the "
+                f"daemon unreachable, or permission denied).\n"
+                f"    REFUSING to remove {iso} -- an instance that still exists may "
+                f"have that drive attached.\n"
+                f"    Fix incus access and retry.")
     if os.path.isfile(iso) and not runner.dry:
         os.remove(iso)
         print(f"==> removed day-0 drive {iso}")
@@ -1320,11 +1454,12 @@ def destroy_libvirt(ap, runner):
     overlay = libvirt_overlay_path(name)
     iso = day0_iso_path(name)
     if runner.dry:
-        runner.run(["virsh", "destroy", name])
-        runner.run(["virsh", "undefine", "--nvram", name])
+        for uri in LIBVIRT_PROBE_URIS:
+            runner.run(["virsh", "-c", uri, "destroy", name])
+            runner.run(["virsh", "-c", uri, "undefine", "--nvram", name])
         runner.run(["rm", "-f", overlay])
         return
-    state = _virsh_domain_state(name)
+    state, uris = _virsh_domain_locate(name)
     if state == DOMAIN_UNKNOWN:
         # #8977: REFUSE. The probe could not reach libvirtd, so the domain may
         # be RUNNING. The destroy is survivable to skip; the unlink below is
@@ -1342,11 +1477,20 @@ def destroy_libvirt(ap, runner):
     if state == DOMAIN_PRESENT:
         print(f"==> destroying libvirt domain '{name}'")
         # destroy (power off) is best-effort — the domain may already be stopped.
-        subprocess.run(["virsh", "destroy", name], capture_output=True, text=True)
-        r = subprocess.run(["virsh", "undefine", "--nvram", name],
-                           capture_output=True, text=True)
-        if r.returncode != 0:   # domains without NVRAM reject --nvram
-            run_capture(["virsh", "undefine", name])
+        print(f"==> via {', '.join(uris)}")
+        _virsh_teardown_domain(name, uris)
+        after = _virsh_domain_state(name)
+        if after != DOMAIN_ABSENT:
+            # #9325: as in _cleanup_libvirt, only an affirmative ABSENT frees the
+            # disks. A running domain survives undefine as a transient domain.
+            raise SystemExit(
+                f"==> ERROR: libvirt domain '{name}' is not confirmed gone after "
+                f"destroy and undefine (probe: {after}).\n"
+                f"    REFUSING to remove {overlay} or {iso} -- a running domain "
+                f"survives undefine as a transient domain and still uses them.\n"
+                f"    Stop it (virsh -c <uri> destroy {name}), confirm `virsh -c "
+                f"{LIBVIRT_SYSTEM_URI} dominfo {name}` and `virsh -c {LIBVIRT_SESSION_URI} "
+                f"dominfo {name}` both report it missing, then re-run destroy.")
     else:
         print(f"==> libvirt domain '{name}' not present (nothing to destroy)")
     for f in (overlay, iso):
@@ -1633,6 +1777,70 @@ def _verified_private_artifacts(sign_mod, out, names, keys, manifest, sig):
         shutil.rmtree(stage, ignore_errors=True)
 
 
+def _validation_verdict(fields):
+    """Read a VERIFIED provenance sidecar's `validated` field (#9325).
+
+    Returns (state, reason): "true"; "false" for anything a bake did not write
+    as true, a garbled value included; or "absent" for a sidecar from a bake
+    that predates #4904 binding the field."""
+    if "validated" not in fields:
+        return "absent", ("the signed provenance sidecar has no `validated` field "
+                          "(a bake that predates #4904), so whether the image passed "
+                          "the in-guest verify-dataplane gate cannot be confirmed")
+    if fields["validated"].strip().lower() == "true":
+        return "true", "validated: true"
+    return "false", (f"its signed provenance sidecar records validated: "
+                     f"{fields['validated']} -- the in-guest verify-dataplane gate "
+                     f"did not pass (a --skip-validate bake)")
+
+
+def _require_validated_fetch(sign, out, names, ver, fetch_one, allow_unvalidated):
+    """#9325: refuse to fetch an image whose SIGNED provenance sidecar says it
+    was not validated, before the image itself is downloaded.
+
+    A `--skip-validate` bake signs `validated: false`, and publish.py refuses
+    to publish such an image -- but that is one chokepoint, and a signed image
+    reaches a host through any mirror or copy. The sidecar is covered by the
+    signed SHA256SUMS, so it is read from VERIFIED bytes.
+
+    - listed, `validated: true`: proceed.
+    - listed, anything else: refuse unless --allow-unvalidated.
+    - listed but not retrievable or not matching: refuse; the override does
+      not cover a sidecar the signature lists and the mirror withholds.
+    - listed but without the field, or not listed at all: a release that
+      predates the sidecar or the field; warn.
+    """
+    manifest = os.path.join(out, names["manifest"])
+    sig = os.path.join(out, names["sig"])
+    sidecar = f"xpf-{ver}.manifest"
+    try:
+        listed = sidecar in sign.verify_manifest_map(manifest, sig)
+    except sign.SignError as e:
+        die(f"VERIFICATION FAILED for {names['manifest']}: {e}")
+    if not listed:
+        print(f"==> WARNING: {names['manifest']} lists no provenance sidecar "
+              f"({sidecar}), so whether {ver} passed the in-guest verify-dataplane "
+              f"gate cannot be confirmed (a release that predates #4904)")
+        return
+    path = fetch_one(sidecar)
+    try:
+        data = sign.verify_listed_artifact_bytes(path, manifest, sig)
+    except sign.SignError as e:
+        die(f"VERIFICATION FAILED for {sidecar}: {e}")
+    state, reason = _validation_verdict(
+        _parse_image_manifest_versions(data.decode("utf-8", "replace")))
+    if state == "true":
+        print(f"==> provenance OK: {sidecar} (validated: true)")
+    elif state == "absent":
+        print(f"==> WARNING: {reason}")
+    elif not allow_unvalidated:
+        die(f"refusing to fetch {ver}: {reason}.\n"
+            f"    An unvalidated image is a dev or emergency build. Pass "
+            f"--allow-unvalidated to fetch it anyway.")
+    else:
+        print(f"==> WARNING: fetching {ver} with --allow-unvalidated: {reason}")
+
+
 def cmd_fetch(args):
     """Download an appliance image from XPF_IMAGE_BASE_URL, VERIFY the exact
     downloaded bytes against the signed per-version manifest (#1924 §5.2),
@@ -1722,6 +1930,9 @@ def cmd_fetch(args):
     want = ["qcow2"] if args.qcow2_only else ["qcow2", "metadata"]
     fetch_one(names["manifest"])
     fetch_one(names["sig"])
+    if not args.dry_run:
+        _require_validated_fetch(sign, out, names, ver, fetch_one,
+                                 getattr(args, "allow_unvalidated", False))
     for w in want:
         fetch_one(names[w])
 
@@ -2974,6 +3185,19 @@ def cmd_image_roll(args):
             f"against the signed {os.path.basename(sums_path)} — the mixed-base "
             f"gate must read signed bytes (#5042): {e}")
 
+    # #9325: the same signed sidecar says whether the image passed the in-guest
+    # verify-dataplane gate. A --skip-validate bake signs `validated: false`, and
+    # this roll is about to replace both nodes' forwarding path with it.
+    v_state, v_reason = _validation_verdict(new_img)
+    if v_state == "absent":
+        print(f"==> WARNING: {v_reason}")
+    elif v_state != "true":
+        if not getattr(args, "allow_unvalidated", False):
+            die(f"image-roll: refusing to roll {os.path.basename(args.manifest)}: "
+                f"{v_reason}. Pass --allow-unvalidated to roll an unvalidated "
+                f"image anyway.")
+        print(f"==> WARNING: image-roll proceeding with --allow-unvalidated: {v_reason}")
+
     holder = _re.sub(r"[^A-Za-z0-9._:-]", "_",
                      f"{os.uname().nodename}:pid{os.getpid()}")
     lease_ttl = args.lease_ttl
@@ -3475,6 +3699,11 @@ def main():
         sub.add_argument("--allow-rollback", action="store_true",
                          help="permit fetching an older version than the "
                               "recorded watermark (deliberate downgrade)")
+        sub.add_argument("--allow-unvalidated", action="store_true",
+                         dest="allow_unvalidated",
+                         help="fetch an image whose signed provenance sidecar "
+                              "records validated: false (a --skip-validate dev "
+                              "or emergency build) instead of refusing (#9325)")
         sub.add_argument("--qcow2-only", action="store_true",
                          help="fetch+verify only the qcow2 (libvirt/KVM path)")
         sub.add_argument("--install-libvirt", action="store_true",
@@ -3549,6 +3778,11 @@ def main():
                               "XPF_ROLL_BACKEND, XPF_ROLL_EXPECT_VERSION, "
                               "XPF_ROLL_EXPECT_NODE_ID and XPF_ROLL_DAEMON_HOLD "
                               "in env")
+        sub.add_argument("--allow-unvalidated", action="store_true",
+                         dest="allow_unvalidated",
+                         help="roll an image whose signed manifest records "
+                              "validated: false (a --skip-validate build) instead "
+                              "of refusing (#9325)")
         sub.add_argument("--require-daemon-hold", action="store_true",
                          help="REFUSE the roll unless the recreate hook is "
                               "observed to have kept xpfd from auto-starting on "

@@ -202,8 +202,24 @@ applies a *retain-last-good* policy rather than installing a partial/empty set:
   fail-open. This is the operator-chosen posture and deliberately diverges
   from Junos hold-interval-then-drop. Only when `hold-interval` is explicitly
   configured > 0 does the snapshot drop to empty after that interval elapses
-  (clearing `StaleSince`/`Hash`), firing an `onUpdate` so enforcement sees
-  the now-empty set — an explicit operator opt-in to fail-open-on-stale.
+  (clearing `StaleSince`/`Hash`) and fire an `onUpdate`.
+
+  **The drop does NOT make enforcement see an empty set (#9527).** The
+  dropped feed has no installed snapshot, so `SnapshotForBindings` omits every
+  binding built on it. Here is what follows for an enforced policy that
+  references such a binding:
+  - The policy lowers to `__unsupported_address__`.
+  - The helper's integrity preflight rejects the WHOLE snapshot.
+  - The dataplane keeps the previous-good state (fresh boot: default-deny).
+  - The same holds for later commits, until the feed recovers or the reference
+    is edited out.
+
+  So the last-good prefixes stay enforced, whichever way the feed is used: a
+  denylist keeps DENYING them, and an allowlist keeps PERMITTING them. Only
+  `show security dynamic-address`, which reads the live set, goes empty. A
+  binding that no enforced policy references carries no enforcement either way.
+  Retaining previous-good is #5645's decision. A per-binding fail mode
+  (retain, versus drop to an enforced empty set) is not implemented.
 - **an out-of-range interval falls back; it never wraps (#8597).**
   `update-interval` and `hold-interval` are bounded to
   `[1, config.MaxDurationSeconds]` by the strict schema, but the compiler

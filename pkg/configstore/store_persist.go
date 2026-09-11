@@ -700,7 +700,12 @@ func (s *Store) persistRetryLoop(backoff, maxBackoff time.Duration) {
 			}
 		}
 
-		if !s.persistDegraded && !s.confirmRemoveDegraded {
+		// #9625: the SAME debt set as the top check. This exit used to omit
+		// confirmArmDegraded, so an arm-write retry that failed a second time,
+		// with no other debt owed, returned here with the debt still standing:
+		// the retry ran exactly once, and health stayed degraded for the rest of
+		// the window with nothing left to heal it.
+		if !s.persistDegraded && !s.confirmRemoveDegraded && !s.confirmArmDegraded {
 			s.persistRetryActive = false
 			s.mu.Unlock()
 			return

@@ -275,25 +275,58 @@ func unenforceableDenyPatterns(rules config.CompiledLoginRegexes) []string {
 	return []string{src}
 }
 
+// unenforceableDenyAlternatives is the #9340 per-alternative answer for THIS
+// surface: the alternatives of the class's deny pattern that can never fire
+// here although the pattern as a whole can. It delegates to pkg/config for the
+// same single-implementation reason as unenforceableDenyPatterns: the commit
+// advisory and this log line must not disagree.
+func unenforceableDenyAlternatives(rules config.CompiledLoginRegexes) []string {
+	for _, f := range config.UnenforceableDenyAlternatives(rules) {
+		if f.Surface == grpcSurfaceName {
+			return f.Alternatives
+		}
+	}
+	return nil
+}
+
 // warnUnenforceableDenyPatternsOnce logs the finding once per class per daemon
 // lifetime.
 //
 // Once, because this is a property of the CONFIG, not of the request: repeating
 // it per RPC would flood the log at request rate, which this project's logging
 // rules forbid outright for anything on a per-request path.
+//
+// The dedup is checked BEFORE the answer is computed (#9340). The answer is a
+// pure function of the class's allow and deny sources, since the registered
+// command set is fixed at init. Computing it first would re-run the
+// per-alternative analysis, a regexp parse plus one evaluation per alternative
+// per command, on every restricted RPC. Keying on both sources keeps the
+// "a commit that changes the pattern warns again" property.
 func (s *Server) warnUnenforceableDenyPatternsOnce(class string, rules config.CompiledLoginRegexes) {
-	pats := unenforceableDenyPatterns(rules)
-	if len(pats) == 0 {
+	denySrc, _ := rules.DenySource()
+	allowSrc, allowSet := rules.AllowSource()
+	key := fmt.Sprintf("%s\x00%t\x00%s\x00%s", class, allowSet, allowSrc, denySrc)
+	if _, loaded := s.unenforceableDenyWarned.LoadOrStore(key, true); loaded {
 		return
 	}
-	if _, loaded := s.unenforceableDenyWarned.LoadOrStore(class+"\x00"+strings.Join(pats, "\x00"), true); loaded {
+	if pats := unenforceableDenyPatterns(rules); len(pats) > 0 {
+		slog.Warn("login class deny-commands pattern cannot be enforced on the gRPC surface "+
+			"and restricts the on-box CLI only (#7172)",
+			"class", class,
+			"pattern", strings.Join(pats, ", "),
+			"reason", "it matches no command this listener can produce: the remote CLI parses "+
+				"the line client-side, so this gate matches the canonical command PATH and "+
+				"never argument values")
 		return
 	}
-	slog.Warn("login class deny-commands pattern cannot be enforced on the gRPC surface "+
-		"and restricts the on-box CLI only (#7172)",
-		"class", class,
-		"pattern", strings.Join(pats, ", "),
-		"reason", "it matches no command this listener can produce: the remote CLI parses "+
-			"the line client-side, so this gate matches the canonical command PATH and "+
-			"never argument values")
+	if alts := unenforceableDenyAlternatives(rules); len(alts) > 0 {
+		slog.Warn("login class deny-commands pattern is only partly enforceable on the gRPC surface: "+
+			"some alternatives restrict the on-box CLI only (#9340)",
+			"class", class,
+			"pattern", denySrc,
+			"alternatives", strings.Join(alts, ", "),
+			"reason", "those alternatives match no command this listener can produce: the remote CLI "+
+				"parses the line client-side, so this gate matches the canonical command PATH and "+
+				"never argument values")
+	}
 }

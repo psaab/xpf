@@ -107,6 +107,13 @@ var peerEffectiveStrictSubjects = []peerEffectiveStrictSubject{
 // installable": a peer view that will not compile is NOT adjudicated here, by
 // design.
 //
+// The commit path no longer depends on this function alone for the peer
+// (#9619): configstore.compileTreeStrict follows it with
+// validatePeerStrictPipeline, which runs the whole strict pipeline on the same
+// peer tree. That refuses a shared commit for any strict gate on the peer's
+// view and for a peer view that does not compile. This registry still runs
+// first so its two subjects keep their specific messages.
+//
 // The peer view is produced with CompileConfigForNodeLenient(peerID) — the EXACT
 // transform the standby applies on Store.SyncApply — so what is validated is
 // precisely what the peer will instantiate (same ${node} apply-group
@@ -149,6 +156,15 @@ func ValidatePeerEffectiveStrict(tree *ConfigTree, localNodeID int) error {
 		}
 	}
 	return nil
+}
+
+// PeerNodeID is peerNodeID for callers outside pkg/config. configstore's
+// compileTreeStrict needs the peer id to run its own strict helpers (schema
+// validation on the expanded tree, the compiled-config cross-checks) against
+// the peer node's view (#9619); a second copy of the 0<->1 mapping there could
+// drift from the one the registry above uses.
+func PeerNodeID(nodeID int) (int, bool) {
+	return peerNodeID(nodeID)
 }
 
 // peerNodeID returns the OTHER node id in a 2-node chassis cluster (0<->1). ok is

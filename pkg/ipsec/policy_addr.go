@@ -19,7 +19,22 @@ func PrepareConfig(cfg *config.Config) *config.IPsecConfig {
 	if cfg == nil {
 		return nil
 	}
+	// A dynamic-hostname gateway resolves its remote family hint via a DNS
+	// lookup bounded by resolveHostFamilyTimeout (#2757). Resolving those
+	// hints CONCURRENTLY (bounded pool) keeps a multi-gateway commit at
+	// ~one timeout of wall-clock rather than N×timeout under DNS failure
+	// (#4547). The hint is per-gateway and order-independent, so the result
+	// per gateway is identical to the former sequential resolution.
+	familyHints := resolveGatewayFamilyHints(cfg.Security.IPsec.Gateways)
+	return prepareConfig(cfg, func(name string, gw *config.IPsecGateway) string {
+		return resolveInterfaceAddress(cfg, gw.ExternalIface, familyHints[name])
+	})
+}
 
+// prepareConfig is PrepareConfig's deep copy. localAddr supplies the local address of
+// every gateway that sets external-interface and no local-address; nothing else is
+// resolved.
+func prepareConfig(cfg *config.Config, localAddr func(name string, gw *config.IPsecGateway) string) *config.IPsecConfig {
 	src := &cfg.Security.IPsec
 	out := &config.IPsecConfig{
 		IKEProposals: make(map[string]*config.IKEProposal, len(src.IKEProposals)),
@@ -38,18 +53,10 @@ func PrepareConfig(cfg *config.Config) *config.IPsecConfig {
 		cp := *pol
 		out.IKEPolicies[name] = &cp
 	}
-	// A dynamic-hostname gateway resolves its remote family hint via a DNS
-	// lookup bounded by resolveHostFamilyTimeout (#2757). Resolving those
-	// hints CONCURRENTLY (bounded pool) keeps a multi-gateway commit at
-	// ~one timeout of wall-clock rather than N×timeout under DNS failure
-	// (#4547). The hint is per-gateway and order-independent, so the result
-	// per gateway is identical to the former sequential resolution.
-	familyHints := resolveGatewayFamilyHints(src.Gateways)
 	for name, gw := range src.Gateways {
 		cp := *gw
 		if cp.LocalAddress == "" && cp.ExternalIface != "" {
-			cp.LocalAddress = resolveInterfaceAddress(
-				cfg, cp.ExternalIface, familyHints[name])
+			cp.LocalAddress = localAddr(name, gw)
 		}
 		out.Gateways[name] = &cp
 	}
@@ -315,6 +322,54 @@ func gatewayRemoteFamilyHint(gw *config.IPsecGateway) int {
 		return resolveHostFamily(gw.DynamicHostname)
 	}
 	return 0
+}
+
+// prepareConfigFromConfig is PrepareConfig resolved from the configuration ALONE (#9641).
+// It replays a stored generation's render without the kernel or DNS, neither of which can
+// be replayed for the past. runtime names every gateway whose production local address
+// could have come from either, and that gateway's LocalAddress is left empty here.
+//
+// It mirrors resolveInterfaceAddress. Production takes the configured unit address for
+// the remote family hint when there is one, and asks the kernel only when there is not.
+// So a configured address found here is exactly production's answer, and a miss is
+// runtime. The hint mirrors gatewayRemoteFamilyHint without its DNS lookup, so a dynamic
+// hostname that is not an IP literal is runtime too.
+func prepareConfigFromConfig(cfg *config.Config) (*config.IPsecConfig, map[string]bool) {
+	runtime := map[string]bool{}
+	if cfg == nil {
+		return nil, runtime
+	}
+	out := prepareConfig(cfg, func(name string, gw *config.IPsecGateway) string {
+		family, ok := configuredGatewayFamilyHint(gw)
+		if !ok {
+			runtime[name] = true
+			return ""
+		}
+		addr := resolveConfiguredInterfaceAddress(cfg, gw.ExternalIface, family)
+		if addr == "" {
+			runtime[name] = true
+		}
+		return addr
+	})
+	return out, runtime
+}
+
+// configuredGatewayFamilyHint is gatewayRemoteFamilyHint without the DNS lookup. ok is
+// false for exactly the case gatewayRemoteFamilyHint resolves through DNS.
+func configuredGatewayFamilyHint(gw *config.IPsecGateway) (family int, ok bool) {
+	if gw == nil {
+		return 0, true
+	}
+	if gw.Address != "" {
+		return addressFamilyHint(gw.Address), true
+	}
+	if gw.DynamicHostname != "" {
+		if f := addressFamilyHint(gw.DynamicHostname); f != 0 {
+			return f, true
+		}
+		return 0, false
+	}
+	return 0, true
 }
 
 func resolveConfiguredInterfaceAddress(cfg *config.Config, ifaceRef string, family int) string {

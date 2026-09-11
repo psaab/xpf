@@ -1704,7 +1704,7 @@ func (d *DHCPDynamicDNSConfig) String() string {
 		"hostname-source=%q conflict-policy=%q backend=%q update-server=%q "+
 		"tsig-key=%q tsig-alg=%q tsig-secret=%q}",
 		d.Enabled, d.Domain, d.TTLSeconds, d.HostnameSource,
-		d.ConflictPolicy, d.Backend, d.UpdateServer,
+		d.ConflictPolicy, d.Backend, RedactURL(d.UpdateServer), // #9497: same redaction as MarshalJSON
 		d.TSIGKeyName, d.TSIGAlgorithm, secret)
 }
 

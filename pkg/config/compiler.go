@@ -281,12 +281,13 @@ func compileConfigWithOpts(tree *ConfigTree, opts compileOpts) (*Config, error) 
 	}
 
 	// #3855: stable routing-instance table-id collision gate. Like the zone gate
-	// above it runs on the PRE-expansion tree and unions instance names across
-	// all groups so both cluster nodes accept/reject identically. Strict
+	// above it runs on the PRE-expansion tree and unions the instance names each
+	// compile path's own group expansion lands (#9657), so both cluster nodes
+	// accept/reject identically. Strict
 	// hard-rejects a colliding pair (two VRFs must never share a kernel table);
 	// lenient warns and compileRoutingInstances quarantines the later instance.
 	riTableIDWarnings, riTableIDErr := validateRoutingInstanceTableIDCollisionAST(
-		tree, opts.lenientRoutingInstanceTableIDCollision)
+		tree, nil, opts.lenientRoutingInstanceTableIDCollision)
 	if riTableIDErr != nil {
 		return nil, riTableIDErr
 	}
@@ -294,7 +295,7 @@ func compileConfigWithOpts(tree *ConfigTree, opts compileOpts) (*Config, error) 
 	// as the table-id gate above. Strict only: the lenient paths skip it and
 	// compileRoutingInstances quarantines the instance with one warning.
 	if !opts.lenientReservedRoutingInstanceName {
-		if err := validateReservedRoutingInstanceNamesAST(tree); err != nil {
+		if err := validateReservedRoutingInstanceNamesAST(tree, nil); err != nil {
 			return nil, err
 		}
 	}
@@ -585,10 +586,11 @@ func compileConfigForNodeWithOpts(tree *ConfigTree, nodeID int, opts compileOpts
 	}
 
 	// #3855: stable routing-instance table-id collision gate — see
-	// compileConfigWithOpts. Pre-expansion union across all groups so the
-	// verdict is identical on both cluster nodes; read-only, safe on the copy.
+	// compileConfigWithOpts. Union of the names each compile path's group
+	// expansion lands (#9657), so the verdict is identical on both cluster nodes;
+	// read-only, safe on the copy.
 	riTableIDWarnings, riTableIDErr := validateRoutingInstanceTableIDCollisionAST(
-		tree, opts.lenientRoutingInstanceTableIDCollision)
+		tree, &nodeID, opts.lenientRoutingInstanceTableIDCollision)
 	if riTableIDErr != nil {
 		return nil, riTableIDErr
 	}
@@ -596,7 +598,7 @@ func compileConfigForNodeWithOpts(tree *ConfigTree, nodeID int, opts compileOpts
 	// as the table-id gate above. Strict only: the lenient paths skip it and
 	// compileRoutingInstances quarantines the instance with one warning.
 	if !opts.lenientReservedRoutingInstanceName {
-		if err := validateReservedRoutingInstanceNamesAST(tree); err != nil {
+		if err := validateReservedRoutingInstanceNamesAST(tree, &nodeID); err != nil {
 			return nil, err
 		}
 	}

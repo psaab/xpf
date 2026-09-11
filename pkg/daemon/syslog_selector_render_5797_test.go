@@ -24,6 +24,7 @@ package daemon
 
 import (
 	"log/slog"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -685,6 +686,24 @@ func TestApplySystemSyslogWarnsWhenClientDialFails_6829(t *testing.T) {
 	})
 }
 
+// loopbackSyslogSink9359 opens a UDP sink on loopback and returns its port, for a
+// cell that needs an INSTALLED client. A UDP client dials at construction
+// (pkg/logging/syslog.go) and a failed dial installs nothing, so a collector off
+// the box made these cells depend on this host's routing. Measured (#9359): in
+// one network namespace, removing the route to 192.0.2.10 turned red exactly the
+// two cells that asserted an installed client, and nothing else in pkg/daemon.
+// The sink is the test's own, so no other host is contacted and nothing else is
+// listening on it.
+func loopbackSyslogSink9359(t *testing.T) int {
+	t.Helper()
+	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("open a loopback syslog sink: %v", err)
+	}
+	t.Cleanup(func() { _ = pc.Close() })
+	return pc.LocalAddr().(*net.UDPAddr).Port
+}
+
 // TestApplySystemSyslogFacilityReachesClient_6829 binds the facility VALUE that
 // reaches the installed client (A5).
 //
@@ -697,19 +716,21 @@ func TestApplySystemSyslogWarnsWhenClientDialFails_6829(t *testing.T) {
 func TestApplySystemSyslogFacilityReachesClient_6829(t *testing.T) {
 	apply := func(t *testing.T, facility string) *logging.SyslogClient {
 		t.Helper()
+		buf := captureRenderedWarnings(t)
 		d := &Daemon{slogHandler: logging.NewSyslogSlogHandler(slog.Default().Handler())}
 		t.Cleanup(func() { d.slogHandler.SetClients(nil) })
 		cfg := &config.Config{}
 		cfg.System.Syslog = &config.SystemSyslogConfig{
 			Hosts: []*config.SyslogHostConfig{{
-				Address:    "192.0.2.10",
+				Address:    "127.0.0.1",
+				Port:       loopbackSyslogSink9359(t),
 				Facilities: []config.SyslogFacility{{Facility: facility, Severity: "info"}},
 			}},
 		}
 		d.applySystemSyslog(cfg)
 		cs := d.slogHandler.Clients()
 		if len(cs) != 1 {
-			t.Fatalf("want exactly one installed client, got %d", len(cs))
+			t.Fatalf("want exactly one installed client, got %d; captured:\n%s", len(cs), buf.String())
 		}
 		return cs[0]
 	}
@@ -744,16 +765,17 @@ func TestApplySystemSyslogFacilityReachesClient_6829(t *testing.T) {
 	// daemon default rather than the zero value, which is kern — the bucket
 	// receivers reserve for the kernel.
 	t.Run("host naming no facility at all keeps the daemon default", func(t *testing.T) {
+		buf := captureRenderedWarnings(t)
 		d := &Daemon{slogHandler: logging.NewSyslogSlogHandler(slog.Default().Handler())}
 		t.Cleanup(func() { d.slogHandler.SetClients(nil) })
 		cfg := &config.Config{}
 		cfg.System.Syslog = &config.SystemSyslogConfig{
-			Hosts: []*config.SyslogHostConfig{{Address: "192.0.2.10"}},
+			Hosts: []*config.SyslogHostConfig{{Address: "127.0.0.1", Port: loopbackSyslogSink9359(t)}},
 		}
 		d.applySystemSyslog(cfg)
 		cs := d.slogHandler.Clients()
 		if len(cs) != 1 {
-			t.Fatalf("want exactly one installed client, got %d", len(cs))
+			t.Fatalf("want exactly one installed client, got %d; captured:\n%s", len(cs), buf.String())
 		}
 		got := cs[0].Facility
 		if got == logging.FacilityKern {
@@ -821,7 +843,7 @@ func TestApplySyslogConfigSecurityStreamWarnsOnUnmappedFacility_6829(t *testing.
 		cfg := &config.Config{}
 		cfg.Security.Log.Streams = map[string]*config.SyslogStream{
 			"audit": {
-				Name: "audit", Host: "192.0.2.10", Port: 514,
+				Name: "audit", Host: "127.0.0.1", Port: loopbackSyslogSink9359(t),
 				Facility: facility, Severity: "info",
 			},
 		}
@@ -852,7 +874,7 @@ func TestApplySyslogConfigSecurityStreamWarnsOnUnmappedFacility_6829(t *testing.
 		if len(cs) != 1 {
 			t.Fatalf("want exactly one installed audit-stream client, got %d — forwarding "+
 				"is deliberately NOT withheld for an unmappable facility, so a regression "+
-				"to zero clients is a behaviour change this subtest must catch", len(cs))
+				"to zero clients is a behaviour change this subtest must catch; captured:\n%s", len(cs), got)
 		}
 		if cs[0].Facility != logging.FacilityLocal0 {
 			t.Errorf("installed audit-stream Facility = %d, want FacilityLocal0 (%d) — the "+
@@ -873,7 +895,7 @@ func TestApplySyslogConfigSecurityStreamWarnsOnUnmappedFacility_6829(t *testing.
 	// `client == nil` continue, so a stream whose host does not resolve was
 	// skipped and the operator was never told the facility was also unmappable.
 	//
-	// Measured: host "192.0.2.10" constructs fine (1 client); an unresolvable
+	// Measured: a loopback sink constructs fine (1 client); an unresolvable
 	// name returns nil,err from the UDP arm (pkg/logging/syslog.go) and installs
 	// ZERO. RED-on-revert: move the classify block back below the continue and
 	// this subtest goes silent while every other cell stays green.
@@ -913,15 +935,15 @@ func TestApplySyslogConfigSecurityStreamWarnsOnUnmappedFacility_6829(t *testing.
 	// default, so asserting they DIFFER is what the single-stream unmapped cell
 	// cannot do.
 	t.Run("unmapped and mapped streams get different facilities", func(t *testing.T) {
-		_ = captureRenderedWarnings(t)
+		buf := captureRenderedWarnings(t)
 		d := &Daemon{slogHandler: logging.NewSyslogSlogHandler(slog.Default().Handler())}
 		t.Cleanup(func() { d.slogHandler.SetClients(nil) })
 
 		cfg := &config.Config{}
 		cfg.Security.Log.Streams = map[string]*config.SyslogStream{
-			"unmappable": {Name: "unmappable", Host: "192.0.2.10", Port: 514,
+			"unmappable": {Name: "unmappable", Host: "127.0.0.1", Port: loopbackSyslogSink9359(t),
 				Facility: "security", Severity: "info"},
-			"mapped": {Name: "mapped", Host: "192.0.2.11", Port: 514,
+			"mapped": {Name: "mapped", Host: "127.0.0.1", Port: loopbackSyslogSink9359(t),
 				Facility: "auth", Severity: "info"},
 		}
 		er := logging.NewEventReader(nil, nil)
@@ -929,7 +951,7 @@ func TestApplySyslogConfigSecurityStreamWarnsOnUnmappedFacility_6829(t *testing.
 
 		cs := er.SyslogClients()
 		if len(cs) != 2 {
-			t.Fatalf("want two installed clients, got %d", len(cs))
+			t.Fatalf("want two installed clients, got %d; captured:\n%s", len(cs), buf.String())
 		}
 		seen := map[int]bool{}
 		for _, c := range cs {
@@ -951,7 +973,7 @@ func TestApplySyslogConfigSecurityStreamWarnsOnUnmappedFacility_6829(t *testing.
 		}
 		cs := er.SyslogClients()
 		if len(cs) != 1 {
-			t.Fatalf("want one installed audit-stream client, got %d", len(cs))
+			t.Fatalf("want one installed audit-stream client, got %d; captured:\n%s", len(cs), got)
 		}
 		if cs[0].Facility != logging.FacilityAuth {
 			t.Errorf("installed audit-stream Facility = %d, want FacilityAuth (%d) — the "+

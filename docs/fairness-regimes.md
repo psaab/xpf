@@ -1963,6 +1963,17 @@ Each carries a RED-on-revert unit test.
   before merge** (confirm BE reclaims idle bandwidth without under-serving
   a briefly-parked exact class). The "budget-0 queues never park / no wake
   source" half of (b) is a separate wake-source design and stays deferred.
+  **#9365:** both demand masks were `u64`s keyed by the index into ALL of the
+  interface's queues, so a serviceable queue at index >= 64 saturated the
+  mask and consumers counted every exact queue at index >= 64 whenever the
+  mask was non-zero — idle exact classes kept their rate reserved and a pure
+  best-effort class (surplus is its only service path) lost all service. The
+  two per-file copies are now one producer/consumer pair
+  (`serviceable_exact_demand_mask` / `exact_demand_rate_bytes_for_mask`,
+  `cos/exact_demand.rs`) over `ExactDemandQueueMask`
+  (`types/shared_cos_lease/backlog.rs`), one bit per u8 queue id, so every
+  committed interface is tracked exactly; the published peer slot carries all
+  four words.
 
 - **T-6(e) — V_min publish on the CoSBatch settle path.** The CoSBatch
   submit path (`submit_local`/`submit_prepared`) was the 5th of 5 V_min

@@ -1757,6 +1757,17 @@ they repeatedly bite:
     target test in an optional 5th TAB column, refines the verdict with
     `mutation_verdict_for_target`.
 
+    **A name is not a reason (#9564).** A guard with a LIVENESS fatal ("the
+    parser found no anchors") and a violation branch scores KILLED by name
+    whichever branch fired, so a mutant that merely broke the fixture reads as
+    covered. An optional 6th TAB column gives a fixed substring the target's
+    own failure output must contain. `mutation_verdict_for_message` matches it
+    against the jq-DECODED `Output` of the target and its subtests only (so a
+    `"` in the message matches, and a sibling test's message cannot satisfy it).
+    A target that failed without it scores `KILLED-WRONG-MSG`: not KILLED,
+    because the reason is unproven, and not ESCAPED, because the target did
+    fail. An empty column leaves every verdict byte-identical.
+
     **Do not close the attribution gap by converting the driver to
     `go test -json` instead. That narrows the gate.** Gating through `make` is
     why a mutation cell carries `go vet`, the targeted `-race` runs with
@@ -1946,6 +1957,17 @@ they repeatedly bite:
     cannot name its subject is not evidence. `XPF_CLUSTER_BUILD_STRICT=1`
     promotes the boundary report to fatal. Covered by
     `make test-cluster-lock-lib` (mocked incus, no cluster).
+  - **`incus exec` reads its stdin (#9683).** Inside a loop fed on stdin
+    (`while read -r x; do ...; done <<<"$list"`, `... | while read`,
+    `done < file`), an `incus exec` without `-n` forwards the loop's input
+    to the remote command. The FIRST call drains the rest of the list, and
+    the body runs once, silently, exit 0. Measured: the post-deploy
+    reassert transferred only RG0, so every deploy that needed RG1/RG2
+    back failed as "node0 is not primary for every redundancy group"; and
+    the build-identity probe above sampled only FW0. Use `incus exec -n` in
+    any such loop. A mock `incus` that ignores stdin cannot see this, so
+    the deploy-lib and build-identity self-test mocks drain stdin unless
+    `-n` is given, like the real client.
   - Queue diagnosis: `cat /tmp/xpf-cluster.owner` +
     `fuser -v /tmp/xpf-cluster.lock`. A dead recorded pid with the
     lock still held means a child inherited the fd (pre-#1875 raw

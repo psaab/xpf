@@ -158,7 +158,7 @@ func TestFormatStatusSummaryShowsTheForwardingDisarmReason(t *testing.T) {
 	// echoes whatever UnsupportedReasons string the manager supplies, so any
 	// reason exercises it — and pinning a particular one is what tied this cell
 	// to a gate that then went away.
-	const specimenReason = "userspace three-color policers require color-blind mode and then discard"
+	const specimenReason = "userspace three-color policers require color-blind mode and a supported then action"
 	status := userspace.ProcessStatus{
 		Capabilities: userspace.UserspaceCapabilities{
 			ForwardingSupported: false,

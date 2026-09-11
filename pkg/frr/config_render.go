@@ -441,14 +441,18 @@ func renderDHCPDefaults(b *strings.Builder, fc *FullConfig) {
 			vrfPart = fmt.Sprintf(" table %d", tableID)
 		}
 		if dr.IsIPv6 {
-			if dr.Interface != "" {
-				fmt.Fprintf(b, "ipv6 route %s %s %s 200%s\n", dest, dr.Gateway, dr.Interface, vrfPart)
+			if ifn, drop := dhcpRouteInterface(dr); drop {
+				// #9501: unusable interface operand on a link-local gateway; the route is dropped.
+			} else if ifn != "" {
+				fmt.Fprintf(b, "ipv6 route %s %s %s 200%s\n", dest, dr.Gateway, ifn, vrfPart)
 			} else {
 				fmt.Fprintf(b, "ipv6 route %s %s 200%s\n", dest, dr.Gateway, vrfPart)
 			}
 		} else {
-			if dr.Interface != "" {
-				fmt.Fprintf(b, "ip route %s %s %s 200%s\n", dest, dr.Gateway, dr.Interface, vrfPart)
+			if ifn, drop := dhcpRouteInterface(dr); drop {
+				// #9501: unusable interface operand on a link-local gateway; the route is dropped.
+			} else if ifn != "" {
+				fmt.Fprintf(b, "ip route %s %s %s 200%s\n", dest, dr.Gateway, ifn, vrfPart)
 			} else {
 				fmt.Fprintf(b, "ip route %s %s 200%s\n", dest, dr.Gateway, vrfPart)
 			}

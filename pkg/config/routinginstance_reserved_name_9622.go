@@ -53,8 +53,8 @@ func IsReservedRoutingInstanceName(name string) bool {
 // validateReservedRoutingInstanceNamesAST refuses a routing instance whose name
 // the daemon reserves (#9622). It judges the same three-view name union as the
 // #3855 table-id gate (routingInstanceNameUnionAST), so an instance is caught
-// wherever it is declared: any top-level `routing-instances` root, any `groups`
-// block, either AST shape including the brace-elided leaf, or the node0/node1
+// wherever it is declared: any top-level `routing-instances` root, any group a compile
+// path's expansion applies (#9657), either AST shape including the brace-elided leaf, or the node0/node1
 // expansion. Both cluster nodes therefore decide identically.
 //
 // It runs on the STRICT path only (commit / commit-check). The tolerant load and
@@ -62,9 +62,9 @@ func IsReservedRoutingInstanceName(name string) bool {
 // compileRoutingInstances quarantines the instance with ONE warning, on the tree
 // the node actually compiles. The node still boots (#1960 no-brick) and the
 // daemon never plans the instance.
-func validateReservedRoutingInstanceNamesAST(tree *ConfigTree) error {
+func validateReservedRoutingInstanceNamesAST(tree *ConfigTree, compiledNode *int) error {
 	var hits []string
-	for name := range routingInstanceNameUnionAST(tree) {
+	for name := range routingInstanceNameUnionAST(tree, compiledNode) {
 		if IsReservedRoutingInstanceName(name) {
 			hits = append(hits, name)
 		}

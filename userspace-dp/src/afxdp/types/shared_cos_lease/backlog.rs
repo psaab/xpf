@@ -8,12 +8,89 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
+pub(in crate::afxdp) const EXACT_DEMAND_MASK_WORDS: usize = 4;
+
+/// #9365: which exact guarantee queues on one CoS interface have demand, one
+/// bit per index into `CoSInterfaceRuntime::queues`.
+///
+/// Queue ids are `u8` and the strict commit gate enforces a forwarding-class
+/// <-> queue bijection, so a committed interface has at most 256 queues and
+/// every one of them has its own bit (the const assertion below ties the width
+/// to the id type). Before #9365 this was a `u64`, which cannot name index 64:
+/// a serviceable queue there saturated the whole mask, and the consumers
+/// counted every exact queue at index >= 64 whenever the mask was non-zero. A
+/// 65-queue interface then reserved the rates of IDLE exact classes, and a pure
+/// best-effort class, whose only service path is the surplus pass, lost all
+/// service.
+///
+/// Past `BITS` — reachable only from a tolerated config that breaks the
+/// bijection — there is one overflow policy, applied by `with_queue` and
+/// `counts` alike: a demanding queue saturates the mask, and an untracked index
+/// counts as demanding whenever the mask is non-empty. That over-reserves,
+/// withholding best-effort surplus, rather than under-reserving and letting
+/// best-effort take rate an exact guarantee is owed.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(in crate::afxdp) struct ExactDemandQueueMask([u64; EXACT_DEMAND_MASK_WORDS]);
+
+const _: () = assert!(ExactDemandQueueMask::BITS > u8::MAX as usize);
+
+impl ExactDemandQueueMask {
+    pub(in crate::afxdp) const BITS: usize = EXACT_DEMAND_MASK_WORDS * u64::BITS as usize;
+    pub(in crate::afxdp) const EMPTY: Self = Self([0; EXACT_DEMAND_MASK_WORDS]);
+    pub(in crate::afxdp) const ALL: Self = Self([u64::MAX; EXACT_DEMAND_MASK_WORDS]);
+
+    #[inline]
+    pub(in crate::afxdp) fn with_queue(self, queue_idx: usize) -> Self {
+        if queue_idx >= Self::BITS {
+            return Self::ALL;
+        }
+        let mut words = self.0;
+        words[queue_idx / u64::BITS as usize] |= 1u64 << (queue_idx % u64::BITS as usize);
+        Self(words)
+    }
+
+    #[inline]
+    pub(in crate::afxdp) fn counts(self, queue_idx: usize) -> bool {
+        if queue_idx >= Self::BITS {
+            return !self.is_empty();
+        }
+        self.0[queue_idx / u64::BITS as usize] & (1u64 << (queue_idx % u64::BITS as usize)) != 0
+    }
+
+    #[inline]
+    pub(in crate::afxdp) fn is_empty(self) -> bool {
+        self.0.iter().all(|word| *word == 0)
+    }
+
+    #[inline]
+    fn from_words(words: [u64; EXACT_DEMAND_MASK_WORDS]) -> Self {
+        Self(words)
+    }
+}
+
+impl std::ops::BitOr for ExactDemandQueueMask {
+    type Output = Self;
+
+    #[inline]
+    fn bitor(self, rhs: Self) -> Self {
+        let mut words = self.0;
+        for (word, other) in words.iter_mut().zip(rhs.0) {
+            *word |= other;
+        }
+        Self(words)
+    }
+}
+
 #[repr(align(64))]
 struct PaddedBacklogSlot {
     queued_bytes: AtomicU64,
     serviceable_bytes: AtomicU64,
-    demand_queue_mask: AtomicU64,
+    /// #9365: one `AtomicU64` per `ExactDemandQueueMask` word. Two byte
+    /// counters plus four words is 48 bytes, inside the 64-byte alignment.
+    demand_queue_mask: [AtomicU64; EXACT_DEMAND_MASK_WORDS],
 }
+
+const _: () = assert!(std::mem::size_of::<PaddedBacklogSlot>() == 64);
 
 #[repr(align(64))]
 struct PaddedResidualBudget {
@@ -55,7 +132,7 @@ impl SharedCoSExactBacklog {
                 .map(|_| PaddedBacklogSlot {
                     queued_bytes: AtomicU64::new(0),
                     serviceable_bytes: AtomicU64::new(0),
-                    demand_queue_mask: AtomicU64::new(0),
+                    demand_queue_mask: std::array::from_fn(|_| AtomicU64::new(0)),
                 })
                 .collect::<Vec<_>>()
                 .into_boxed_slice(),
@@ -77,7 +154,11 @@ impl SharedCoSExactBacklog {
             binding_slot,
             bytes,
             bytes,
-            if bytes > 0 { u64::MAX } else { 0 },
+            if bytes > 0 {
+                ExactDemandQueueMask::ALL
+            } else {
+                ExactDemandQueueMask::EMPTY
+            },
         );
     }
 
@@ -87,14 +168,19 @@ impl SharedCoSExactBacklog {
         binding_slot: u32,
         queued_bytes: u64,
         serviceable_bytes: u64,
-        demand_queue_mask: u64,
+        demand_queue_mask: ExactDemandQueueMask,
     ) {
         if let Some(slot) = self.worker_bytes.get(binding_slot as usize) {
             slot.queued_bytes.store(queued_bytes, Ordering::Relaxed);
             slot.serviceable_bytes
                 .store(serviceable_bytes, Ordering::Release);
-            slot.demand_queue_mask
-                .store(demand_queue_mask, Ordering::Release);
+            // #9365: the words are stored one at a time, so a reader racing
+            // this publish can combine words from two publishes. Each word is
+            // one a worker really published, so the result can only add or
+            // drop a queue for the one scheduling pass before the next publish.
+            for (word, value) in slot.demand_queue_mask.iter().zip(demand_queue_mask.0) {
+                word.store(value, Ordering::Release);
+            }
         }
     }
 
@@ -117,13 +203,18 @@ impl SharedCoSExactBacklog {
     }
 
     #[inline]
-    pub(in crate::afxdp) fn peer_exact_demand_queue_mask(&self, binding_slot: u32) -> u64 {
+    pub(in crate::afxdp) fn peer_exact_demand_queue_mask(
+        &self,
+        binding_slot: u32,
+    ) -> ExactDemandQueueMask {
         self.worker_bytes
             .iter()
             .enumerate()
             .filter(|(idx, _)| *idx != binding_slot as usize)
-            .fold(0u64, |acc, (_, slot)| {
-                acc | slot.demand_queue_mask.load(Ordering::Acquire)
+            .fold(ExactDemandQueueMask::EMPTY, |acc, (_, slot)| {
+                acc | ExactDemandQueueMask::from_words(std::array::from_fn(|word| {
+                    slot.demand_queue_mask[word].load(Ordering::Acquire)
+                }))
             })
     }
 

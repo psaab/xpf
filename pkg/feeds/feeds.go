@@ -1138,12 +1138,24 @@ func (m *Manager) recordFailure(fs *feedState, ferr error) {
 		slog.Warn("dynamic-address: hold interval elapsed, dropping stale feed to empty",
 			"name", fs.name, "err", ferr, "hold", fs.holdInterval)
 		if m.onUpdate != nil {
-			// The drop-to-empty is a fail-CLOSED transition (a denylist stops
-			// enforcing stale prefixes). If the apply of the now-empty set is
-			// rejected the dataplane keeps enforcing the last-good prefixes —
-			// strictly safer than an empty set — so we only log the rejection;
-			// publishedHash was already reset above so a later recovery
-			// re-publishes regardless.
+			// #9527: the drop-to-empty has NO fixed safety direction. It depends
+			// on how the operator uses the feed: an empty denylist stops denying
+			// (fail-OPEN, which is why hold-interval is opt-in), and an empty
+			// allowlist stops permitting.
+			//
+			// And for any enforced policy that references a binding on this feed,
+			// the empty set does not reach the dataplane at all:
+			//   - SnapshotForBindings omits the binding;
+			//   - the policy lowers to __unsupported_address__;
+			//   - the helper's integrity preflight rejects the whole snapshot and
+			//     keeps the previous-good one (fresh boot: default-deny).
+			//
+			// That keeps the last-good prefixes enforced: still DENYING them for
+			// a denylist, still PERMITTING them for an allowlist. So retention is
+			// not "strictly safer" than an empty set. The userspace manager warns
+			// on that reject and records ProcessStatus reject reasons (#3261); an
+			// error returned by onUpdate is only logged here. publishedHash was
+			// already reset above, so a later recovery re-publishes regardless.
 			if err := m.onUpdate(); err != nil {
 				slog.Warn("dynamic-address: drop-to-empty apply rejected — dataplane retains last-good set",
 					"name", fs.name, "err", err)

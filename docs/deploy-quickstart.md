@@ -107,9 +107,18 @@ first boot:
 
 ```bash
 scripts/deploy/xpf-deploy.py --hypervisor libvirt --no-start deploy examples/deploy/standalone-passthrough.yaml
-virsh edit fw1        # pin guest PCI slots, then:
-virsh start fw1
+virsh -c qemu:///system edit fw1        # pin guest PCI slots, then:
+virsh -c qemu:///system start fw1
 ```
+
+**The libvirt connection URI (#9669).** The tool always names the URI. The golden and overlay
+disks live under system-scope `/var/lib/libvirt/images`, so `deploy` runs `virt-install
+--connect qemu:///system` and `virsh -c qemu:///system define`. Use the same URI for your own
+`virsh edit` / `virsh start`. `destroy`, and the cleanup after a failed deploy, probe BOTH
+`qemu:///system` and `qemu:///session`, because libvirt keeps a separate domain namespace per
+URI. A domain in either URI is treated as present and is torn down through the URI that holds
+it. Disks are removed only when both URIs report the domain missing. An unreachable URI is not
+proof of absence.
 
 See `examples/deploy/README.md` for the full incus-vs-libvirt
 comparison and the SR-IOV VF-pool / pinned-guest-PCI details.
@@ -124,6 +133,14 @@ re-deploy starts clean (incus instance / libvirt domain, whichever
 scripts/deploy/xpf-deploy.py destroy examples/deploy/standalone-passthrough.yaml
 scripts/deploy/xpf-deploy.py --hypervisor libvirt destroy examples/deploy/standalone-passthrough.yaml
 ```
+
+`destroy` removes a disk only after the hypervisor **affirmatively** reports the
+VM gone (#8977, #9325). If `virsh`/`incus` cannot be run from the invoking
+context, cannot reach its daemon, or still reports the domain after `destroy` and
+`undefine` (a running libvirt domain survives `undefine` as a transient domain),
+it refuses and names the files it left. Stop the VM, check that
+`virsh dominfo <name>` / `incus info <name>` reports it missing, then run
+`destroy` again.
 
 The `<name>-day0.iso` drive is written **owner-only (0600)** in the build
 directory and lingers there until `destroy` removes it. That ISO embeds

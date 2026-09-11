@@ -284,7 +284,12 @@ func (c CompiledLoginRegexes) Evaluate(command string) LoginRegexDecision {
 // The direction is safe by construction: a side's match length can only grow,
 // and growth on the ALLOW side needs a pattern that matches the bare command —
 // which is an allow the operator wrote.
-func (c CompiledLoginRegexes) EvaluateForms(command, prefix string) LoginRegexDecision {
+//
+// #9628 adds forms rather than a third parameter shape: the local gate also
+// measures the command WITHOUT its output pipe, so an anchored deny such as
+// `^show version$` still covers `show version | match .`. The same max-per-side
+// rule applies to every form, so the widening direction is unchanged.
+func (c CompiledLoginRegexes) EvaluateForms(command, prefix string, more ...string) LoginRegexDecision {
 	// No regexes configured: this class opted out of fine-grained control and
 	// the coarse permission bits are the whole story.
 	if !c.allowSet && !c.denySet {
@@ -297,6 +302,13 @@ func (c CompiledLoginRegexes) EvaluateForms(command, prefix string) LoginRegexDe
 		if prefix != command {
 			if n := longestMatchLen(re, prefix); n > best {
 				best = n
+			}
+		}
+		for _, form := range more {
+			if form != command {
+				if n := longestMatchLen(re, form); n > best {
+					best = n
+				}
 			}
 		}
 		return best

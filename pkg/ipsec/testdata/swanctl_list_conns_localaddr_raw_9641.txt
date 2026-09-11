@@ -1,0 +1,2 @@
+list-conn event {proof-la {local_addrs=[192.0.2.61] remote_addrs=[198.51.100.63] local_port=500 remote_port=500 version=IKEv1/2 reauth_time=0 rekey_time=14400 unique=UNIQUE_NO local-1 {class=pre-shared key groups=[] cert_policy=[] certs=[] cacerts=[]} remote-1 {class=pre-shared key groups=[] cert_policy=[] certs=[] cacerts=[]} children {proof-la-ts1 {mode=TUNNEL rekey_time=3600 rekey_bytes=0 rekey_packets=0 dpd_action=none close_action=none local-ts=[10.63.1.0/24] remote-ts=[10.64.1.0/24]}}}}
+list-conns reply {}

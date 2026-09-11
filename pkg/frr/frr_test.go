@@ -965,8 +965,16 @@ func TestGenerateProtocols_ISISExport(t *testing.T) {
 		},
 	}
 	got := m.generateProtocols(nil, nil, nil, nil, isis, "", 0, nil, nil)
-	if !strings.Contains(got, "redistribute connected\n") {
-		t.Errorf("missing redistribute connected, got:\n%s", got)
+	// #9666: isisd accepts only `redistribute <ipv4|ipv6> <proto> <level>`.
+	// This cell asserted the OSPF-shaped `redistribute connected`, which isisd
+	// rejects and which failed the whole managed reload.
+	for _, want := range []string{" redistribute ipv4 connected level-2\n", " redistribute ipv6 connected level-2\n"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q, got:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, " redistribute connected\n") {
+		t.Errorf("rendered the isisd-invalid `redistribute connected`, got:\n%s", got)
 	}
 }
 
@@ -3262,8 +3270,9 @@ func TestGenerateProtocols_BGPExportMixed(t *testing.T) {
 // resolvable redistribute source protocol. resolveRedistribute MUST skip
 // it (emit nothing) rather than fall back to the FRR-invalid
 // `redistribute <policy>` line — that line is rejected by frr-reload.py
-// and, because it lands in the xpf-managed section, degrades the WHOLE
-// reload (every managed route/redistribute is lost, not just this one).
+// and, because it lands in the xpf-managed section, fails the WHOLE
+// reload: no stale config is removed anywhere in the managed section while
+// it is rendered, not just in this stanza.
 //
 // Pre-fix this returned " redistribute export-comm\n". Post-fix it
 // returns "".

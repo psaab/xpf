@@ -1934,8 +1934,29 @@ the standby applies — and re-runs the registered strict SUBJECTS against that
 peer-effective `*Config`. A peer-only source-NAT error is now rejected at the
 origin commit, naming the peer node and the offending pool, so BOTH
 node-effective source-NAT outputs are proven representable before promotion.
-A peer view that will not compile at all is left to the peer's own load path (no
-false-reject of the origin commit).
+The registry on its own leaves a peer view that will not compile at all
+unadjudicated; since #9619 that case, and every strict gate the registry does
+not name, is refused by the whole-pipeline peer check described next.
+
+**The whole strict pipeline on the peer view (#9619).** The registry covered two
+subjects, so any other strict gate was a peer-only hole: `groups node1 system
+dataplane ring-entries 16385` or `groups node1 chassis cluster
+reth-advertise-interval 40960` committed green on node0 (whose view is valid)
+although node1's own commit rejects the value, and config-sync installed it on
+node1 through the tolerant ingress. `configstore.compileTreeStrict` now follows
+the registry with `validatePeerStrictPipeline`
+(`pkg/configstore/peer_strict_pipeline_9619.go`), which runs the same steps as
+the local commit on the peer's `${node}` expansion: typed-leaf schema
+validation, `CompileConfigForNode`, and the #4525 router-advertisement ratio
+check. The error names the peer node and wraps the gate's own error. The tree
+it checks is the #6861 F2 clone with retired `dataplane-type` leaves rewritten,
+because that is what the standby compiles. The #4185 node-identity cross-check
+is not run for the peer: it compares the leaf with the checking host's node-id
+file, and a config authored for one node with a literal `node 0` leaf is an
+accepted check-config input there. Standalone commits and the tolerant
+`Store.Load` / `Store.SyncApply` ingresses are unchanged, so a config already on
+disk that is invalid for this node still loads with warnings. The registry
+still runs first, so its two subjects keep their specific messages.
 
 **Subjects, not one gate (#4785).** The peer view is a FULL compile, so it is
 built ONCE and every registered subject runs against it; a second standalone
@@ -8872,6 +8893,17 @@ pre-#4070 OVERRIDE. `isLeafListSchema` therefore requires `multi && children==ni
   leaf-list) still unions — the flag lives on the `then community` node, so the
   from/then keyword collision is resolved by schema CONTEXT, not by keyword.
 
+**A self-repeating run is carried, not deduplicated (#9627).** A group member
+equal to the leaf's own keyword and unquoted (`export [ A export ]`) is the
+ambiguous #9027 shape. The union appends it to the merged node's keys whatever
+the inline leaf's shape, and never deduplicates it, so the #9027 gate on the
+group-expanded tree refuses it (strict) or warns (lenient). That matches what
+happens when the same run is authored inline or inherited with no inline leaf.
+The union used to read group members through `firewallMatchValues`, which drops
+that token, so an inline leaf of the same name made the ambiguity vanish before
+the gate could see it. A QUOTED member named like the keyword is an ordinary
+value: it is unioned with its quote kept, where it used to be dropped.
+
 **Implementation.** `mergeNodes(dst, src, ancestorPath)` threads the from-root
 key path (the same `ancestorPath` `expandGroupsRecursive` already builds for
 group-context walking). `isLeafListSchema(ancestorPath, key)` walks `setSchema`
@@ -10864,36 +10896,79 @@ reserved for whole-dataplane selection where a rewrite shim
   reserved name at strict commit and commit-check (`CheckText`), on both
   compiler cores (`CompileConfig*` and `CompileConfigForNode*`). It judges the
   same three-view name union as the `#3855` table-id gate
-  (`routingInstanceNameUnionAST`): every top-level `routing-instances` root
-  and every `groups` block before expansion, plus the node0 and node1
-  expansions. Both cluster nodes therefore decide identically. The union now
+  (`routingInstanceNameUnionAST`): every top-level `routing-instances` root,
+  plus the names the generic compile's and each cluster node's group expansion
+  land (#9657). Both cluster nodes therefore decide identically. The union now
   includes the brace-elided leaf spelling `routing-instances { mgmt
   instance-type virtual-router; }` (#8787), which the compiler builds an
   instance from. The shared name scan used to skip every leaf, so neither gate
   saw a packed instance. At `bdc238675` two packed instances folding to one
   table pass the strict gate and the runtime then quarantines one with a
-  warning; the widened scan rejects them. The table-id gate's pre-expansion
-  view also counts instances in `groups` blocks nothing applies, in both
-  spellings, so it can refuse a config whose effective instances do not
-  collide. That over-approximation predates #9622 and is tracked on #9657. The
-  tolerant load and peer-sync paths skip the gate
-  (`lenientReservedRoutingInstanceName`), and `compileRoutingInstances`
-  QUARANTINES the instance with one warning, so the node boots and the daemon
-  never plans it. The daemon also skips a reserved name as a second line of
-  defence; no test covers that part. The quarantine runs before the `#3855`
-  collision pass, and the table-id gate leaves reserved names out of its union
-  to match. A reserved instance therefore never claims a table or displaces an
-  instance that shares its hash (`mgmt` and `z1061437` fold to one id). **This
-  is an xpf reservation, not Junos parity:** Junos reserves `mgmt_junos`,
-  which exists only under `system management-instance`. xpf has no such knob
-  and always uses `mgmt`, so a Junos config with an ordinary instance named
-  `mgmt` must be renamed. Names are case-sensitive and the VRF device is
-  `vrf-` + the name, so `MGMT`, `mgmt1` and `vrf-mgmt` stay ordinary
-  instances. Regression coverage:
+  warning; the widened scan rejects them. The union used to count instances in
+  `groups` blocks nothing applies as well, in both spellings, refusing configs
+  whose effective instances do not collide; #9657 replaced that pre-expansion
+  view with the compile paths' own expansions. The tolerant load and peer-sync
+  paths skip the gate (`lenientReservedRoutingInstanceName`), and
+  `compileRoutingInstances` QUARANTINES the instance with one warning, so the
+  node boots and the daemon never plans it. The daemon also skips a reserved
+  name as a second line of defence; no test covers that part. The quarantine
+  runs before the `#3855` collision pass, and the table-id gate leaves
+  reserved names out of its union to match. A reserved instance therefore
+  never claims a table or displaces an instance that shares its hash (`mgmt`
+  and `z1061437` fold to one id). **This is an xpf reservation, not Junos
+  parity:** Junos reserves `mgmt_junos`, which exists only under `system
+  management-instance`. xpf has no such knob and always uses `mgmt`, so a
+  Junos config with an ordinary instance named `mgmt` must be renamed. Names
+  are case-sensitive and the VRF device is `vrf-` + the name, so `MGMT`,
+  `mgmt1` and `vrf-mgmt` stay ordinary instances. Regression coverage:
   `pkg/config/routinginstance_reserved_name_9622_test.go` (flat-set and
   hierarchical including brace-elided, both compiler cores, the collision
   ordering, packed-leaf collisions) and
   `pkg/configstore/check_reserved_ri_9622_test.go` (`CheckText`).
+- **#9657 (the routing-instance collision gate counts only instances some
+  compile path lands):** the `#3855` routing-instance table-id gate's
+  pre-expansion view counted instances in every `groups` block, including
+  groups nothing applies. Group expansion drops such a group, so an instance
+  declared only there never compiles on either node. The strict path still
+  refused a config whose effective instances do not collide (`ri7` plus a
+  `ri116` in an unapplied group, both folding to table 957120), and the
+  lenient warning named the active `ri7` as quarantined while the runtime kept
+  it. `routingInstanceNameUnionAST` now unions every top-level
+  `routing-instances` root with the names each compile path's own group
+  expansion lands: the generic compile (no node variables, and on an undefined
+  `"${node}"` group the node0 retry on the same tree, as
+  `compileConfigWithOpts` does) and each cluster node's expansion (node0 and
+  node1, plus the requested node when a node compile passes any other ID,
+  negative ones included, since `compileConfigForNodeWithOpts` accepts any
+  integer). An expansion that fails contributes nothing, because the compile
+  that performs it refuses the config. Every view is computed on both nodes
+  from the same candidate, so both nodes decide identically. Earlier revisions
+  approximated expansion without running it (reachable groups, merge contexts,
+  `apply-groups-except`), and each approximation disagreed with expansion
+  somewhere; the expansion views are exact by construction. The lenient
+  warning no longer names a quarantined instance: the union spans every view,
+  so it cannot know which instance this node drops, and the runtime quarantine
+  warns naming the one it does. An `apply-groups`, `apply-groups-except` or
+  `apply-macro` statement under `routing-instances` is not a routing instance.
+  Expansion strips only `apply-groups`, and `compileRoutingInstances` built a
+  routing instance, and a VRF, named `apply-macro` or `apply-groups-except`
+  from the other two; that phantom could also quarantine a real instance whose
+  table id collided with it while the strict gate saw nothing. The compiler
+  and the collision scan now skip them through one predicate
+  (`isApplyStatementNode`). The predicate goes by name, quoted or not, because
+  group expansion and the `#9323` validator also go by name and a quote does
+  not survive rendering, which an HA peer reparses. An instance therefore
+  cannot take one of these names. A one-key stanza under such a name that
+  carries a routing-instance keyword gets a commit warning on every path
+  (`validateRoutingInstanceChildTokensAST`, the `#9323` validator) instead of
+  vanishing silently. It is not refused: a flat `set` statement whose macro or
+  group is named after a routing-instance keyword (`set routing-instances
+  apply-macro interface k v`) has the same shape, so the shape cannot prove an
+  instance was meant. A two-key statement such as `apply-macro M { interface
+  ...; }` is neither warned nor refused. The zone (`#3075`) and tunnel
+  (`#1873`) gates still count every `groups` block before expansion.
+  Regression coverage:
+  `pkg/config/routinginstanceid_unapplied_groups_9657_test.go`.
 - **#3444 (destination-NAT rule-set `to` scope reject):** a Junos
   destination-NAT rule-set has only a `from` clause (zone | interface |
   routing-instance) — DNAT translates the destination on inbound, so there
@@ -14051,9 +14126,41 @@ Left installed, deliberately:
   `UnknownMembers`), unless it is on the structural line #9595 draws: a
   constraint-shaped value on an otherwise protocol-wide application, or a set
   member statement naming a real application. Those are refused. #6524's stray
-  statement beside a retained port stays armed. A constraint lost beside a
-  retained one stays installed; separating it from a numeric stray needs
-  keyword similarity and is the #9603 decision.
+  statement beside a retained port stays armed.
+
+#9603 refuses one more class, a real Junos application statement xpf does not
+implement, whatever its value and wherever it stands. The class is a closed,
+exact, case-sensitive table (`junosApplicationLeavesNotImplemented9603`):
+
+- `application-protocol`
+- `ether-type`
+- `icmp6-type`
+- `icmp6-code`
+- `rpc-program-number`
+- `uuid`
+
+The table is taken from Juniper's SRX grammar, `junos-es-conf-applications@2024-01-01`
+(github.com/Juniper/yang, 24.4R2).
+
+So `protocol tcp; destination-port 135; uuid ...;` no longer installs as every
+MS-RPC interface on tcp/135. The table reads every token of the unrecognized
+run, direct and term, not only its first keyword, so a table statement written
+after an unrecognized keyword in the same statement is still seen. The two DNS ALG translation switches
+(`do-not-translate-A-query-to-AAAA-query` and its reverse) stay out: they change
+translation, not which packets match. Statements from other Junos families'
+application grammar, such as the MX services `snmp-command`, are not SRX grammar
+and stay on the #9595 line.
+
+A MISSPELLED constraint beside a retained one (`source-poort 1024` beside
+`destination-port 80`, `icmp-cod 0` beside `icmp-type 8`, an `applicaton`
+member) stays installed as the documented residual. Separating it from a
+numeric stray would need keyword similarity. It is a residual rather than a gap
+because no strict commit channel admits it: `CompileConfig`,
+`compileTreeStrict` (behind every commit and commit check) and `CheckText` all
+reject each spelling, naming the token.
+`pkg/configstore/app_misspelling_strict_channels_9603_test.go` pins that. Such
+text reaches the tolerant path only from a looser build's database or HA sync.
+The measurement is in `docs/log/9603.md`.
 
 The strict text for a `source-port` on a non-port protocol now names the ICMP
 Identifier instead of claiming that such a protocol presents ports of 0.
@@ -15007,7 +15114,11 @@ is never echoed into a warning.
 
 - **SNMP** (`snmpInertKnobWarnings`, `compiler_system.go`) — `view` /
   community `view` (MIB view scoping is NOT enforced → full ifTable exposure),
-  `trap-options source-address` (traps use the default egress IP),
+  every `trap-options` statement (#9562): `source-address` (traps use the
+  default egress IP), `routing-instance` (traps leave through the default
+  routing instance), `context-oid` (no context varbind is added),
+  `agent-address` (ignored; the SNMPv1 agent-addr is already the per-target
+  source address) and any other statement (a no-op),
   `health-monitor`, `rmon` (no-ops).
 - **system** (`systemInertKnobWarnings`) — `login message` / `announcement`
   (banners not applied), `login retry-options` (lockout not enforced), `ntp

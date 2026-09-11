@@ -19,7 +19,14 @@ parses a torn file, no fsync on the apply path.
   **Fail-closed:** restart failures (and failures to stop an active
   unit that left the config) are returned, so a commit surfaces
   "DHCP server failed" instead of silently succeeding with no
-  service. The `systemctl is-active` probe (`unitIsActive`) is itself
+  service. A failed restart gets exactly one recovery attempt first
+  (#9601, `restartClearingStartLimit`): `systemctl reset-failed` and a
+  second restart. A node taking several redundancy groups at once
+  restarts Kea once per MASTER apply, which can trip the unit's systemd
+  start limit; systemd then refuses every start, including the #6535
+  converger's retry, until the interval passes or the failed state is
+  reset. A unit that still fails after the reset returns the combined
+  error and stays retryable. The `systemctl is-active` probe (`unitIsActive`) is itself
   tri-state (#4870): a recognized state string is authoritative
   (active / inactive / failed) regardless of exit code, but a query
   that CANNOT determine the state — timeout, exec error, garbled/empty

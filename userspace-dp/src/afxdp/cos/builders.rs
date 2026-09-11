@@ -12,7 +12,7 @@ use crate::afxdp::types::{
     COS_PRIORITY_LEVELS, CoSInterfaceConfig, CoSInterfaceRuntime, CoSOversubscriptionPolicy,
     CoSQueueConfigState, CoSQueueDropCounters, CoSQueueHotState, CoSQueueOwnerProfile,
     CoSQueueRuntime, CoSQueueSojourn, CoSQueueTelemetry, CoSQueueWaterfillCounters,
-    CoSTimerWheelRuntime,
+    CoSTimerWheelRuntime, ExactDemandQueueMask,
     ForwardingState, VMinQueueState,
 };
 #[allow(unused_imports)]
@@ -121,6 +121,22 @@ pub(in crate::afxdp) fn build_cos_interface_runtime(
              exact queues beyond the first 64 (by ascending rate) may be \
              over-served",
             exact_queues_by_rate_ascending.len()
+        );
+    }
+    // #9365: the exact-demand mask (`ExactDemandQueueMask`) has one bit per
+    // index into `queues`, sized for every u8 queue id. More queues than that
+    // can only come from a tolerated config that breaks the strict
+    // forwarding-class <-> queue bijection. Past it the mask saturates: exact
+    // queues beyond the tracked range count as demanding whenever any exact
+    // queue does, and a backlog on one of them reserves every exact queue's
+    // rate. Same cold path and repeat caveat as the warning above.
+    if config.queues.len() > ExactDemandQueueMask::BITS {
+        eprintln!(
+            "xpf-userspace-dp: CoS interface has {} queues (>{}); exact-demand \
+             tracking is capped there, so exact queues past it are reserved \
+             whenever any exact queue is backlogged",
+            config.queues.len(),
+            ExactDemandQueueMask::BITS
         );
     }
     // #916: transparent root. When `shaping_rate_bytes == 0` the root

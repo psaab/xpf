@@ -8834,3 +8834,78 @@ fn undefined_screen_profile_never_carries_an_audit_flag_9425() {
         "POSITIVE CONTROL: the undefined reference itself must still decode"
     );
 }
+
+/// #9512: kernel-learned IPv6 routes whose next hop is the SAME link-local
+/// address on different links. The Go importer publishes each leg as
+/// `gateway@<netdev>`; the helper must bind each leg to its own link, and the
+/// answer must not depend on snapshot interface order. Before #9512 the leg was
+/// scope-less, and the connected-prefix scan bound whichever interface's
+/// `fe80::/64` came first. The last route is the negative control: a
+/// scope-less GLOBAL gateway still infers its link from the connected prefix.
+#[test]
+fn learned_link_local_next_hop_binds_its_own_link_in_any_order_9512() {
+    fn iface(name: &str, linux: &str, ifindex: i32, global: &str, link_local: &str) -> InterfaceSnapshot {
+        InterfaceSnapshot {
+            name: name.into(),
+            linux_name: linux.into(),
+            ifindex,
+            hardware_addr: format!("02:00:00:00:95:{:02x}", ifindex & 0xff),
+            addresses: vec![
+                crate::protocol::snapshot::InterfaceAddressSnapshot {
+                    family: "inet6".into(),
+                    address: global.into(),
+                    ..Default::default()
+                },
+                crate::protocol::snapshot::InterfaceAddressSnapshot {
+                    family: "inet6".into(),
+                    address: link_local.into(),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        }
+    }
+    let route = |dst: &str, hops: &[&str]| crate::RouteSnapshot {
+        table: "inet6.0".into(),
+        family: "inet6".into(),
+        destination: dst.into(),
+        next_hops: hops.iter().map(|h| h.to_string()).collect(),
+        ..Default::default()
+    };
+    let one = iface("ge-0/0/1.0", "ge-0-0-1", 101, "2001:db8:1::1/64", "fe80::1/64");
+    let two = iface("ge-0/0/2.0", "ge-0-0-2", 102, "2001:db8:2::1/64", "fe80::2/64");
+    let routes = vec![
+        route("2001:db8:beef::/48", &["fe80::254@ge-0-0-2"]),
+        route("2001:db8:cafe::/48", &["fe80::254@ge-0-0-1"]),
+        route("2001:db8:ec::/48", &["fe80::254@ge-0-0-1", "fe80::254@ge-0-0-2"]),
+        route("2001:db8:ab::/48", &["2001:db8:2::254"]),
+    ];
+
+    for (label, interfaces) in [
+        ("ge-0-0-1 first", vec![one.clone(), two.clone()]),
+        ("ge-0-0-2 first", vec![two.clone(), one.clone()]),
+    ] {
+        let snapshot = ConfigSnapshot {
+            interfaces,
+            routes: routes.clone(),
+            ..Default::default()
+        };
+        let state = build_forwarding_state(&snapshot);
+        let table = state.routes_v6.get("inet6.0").expect("inet6.0 table");
+        let legs = |dst: &str| -> Vec<i32> {
+            let prefix: Ipv6Addr = dst.split('/').next().unwrap().parse().unwrap();
+            table
+                .iter()
+                .find(|r| r.prefix.contains(prefix))
+                .unwrap_or_else(|| panic!("{label}: no route for {dst}"))
+                .next_hops
+                .iter()
+                .map(|nh| nh.ifindex)
+                .collect()
+        };
+        assert_eq!(legs("2001:db8:beef::"), vec![102], "{label}: fe80::254@ge-0-0-2 must bind ge-0-0-2");
+        assert_eq!(legs("2001:db8:cafe::"), vec![101], "{label}: fe80::254@ge-0-0-1 must bind ge-0-0-1");
+        assert_eq!(legs("2001:db8:ec::"), vec![101, 102], "{label}: each ECMP leg binds its own link");
+        assert_eq!(legs("2001:db8:ab::"), vec![102], "{label}: a scope-less global gateway still infers its connected link");
+    }
+}

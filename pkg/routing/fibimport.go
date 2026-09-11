@@ -2,6 +2,10 @@ package routing
 
 import (
 	"fmt"
+	"log/slog"
+	"net"
+	"strconv"
+	"sync"
 
 	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
@@ -177,6 +181,7 @@ var learnedRouteProtocols = map[int]bool{
 // misdirects a packet.
 func ImportLearnedRoutes(tableIDs []int) ([]LearnedRoute, error) {
 	var out []LearnedRoute
+	names := newLinkNameCache()
 	for _, tableID := range tableIDs {
 		if tableID <= 0 || tableID == mgmtVRFTableID {
 			continue
@@ -190,7 +195,7 @@ func ImportLearnedRoutes(tableIDs []int) ([]LearnedRoute, error) {
 					familyName(family), tableID, err)
 			}
 			for _, r := range routes {
-				lr, ok := importableRoute(r, family, tableID)
+				lr, ok := importableRouteScoped(r, family, tableID, names.lookup)
 				if !ok {
 					continue
 				}
@@ -234,18 +239,29 @@ func ImportLearnedRoutes(tableIDs []int) ([]LearnedRoute, error) {
 //     ECMP set is the same defect class as the #1827 half-override the
 //     overlay path is built to make impossible.
 func importableRoute(r netlink.Route, family, tableID int) (LearnedRoute, bool) {
+	return importableRouteScoped(r, family, tableID, newLinkNameCache().lookup)
+}
+
+// importableRouteScoped is importableRoute with the link-name resolver the
+// #9512 scoping uses. ImportLearnedRoutes passes one cache for the whole dump,
+// so a table of routes sharing a handful of links costs a handful of lookups.
+func importableRouteScoped(r netlink.Route, family, tableID int, linkName func(int) (string, bool)) (LearnedRoute, bool) {
 	if r.Type != unix.RTN_UNICAST {
 		return LearnedRoute{}, false
 	}
 	if !learnedRouteProtocols[int(r.Protocol)] {
 		return LearnedRoute{}, false
 	}
-	nextHops, ok := learnedRouteNextHops(r)
-	if !ok || len(nextHops) == 0 {
-		return LearnedRoute{}, false
-	}
 	dst, ok := learnedRouteDestination(r, family)
 	if !ok {
+		return LearnedRoute{}, false
+	}
+	nextHops, ok, unscoped := learnedRouteNextHops(r, linkName)
+	if unscoped != nil {
+		warnUnscopedLinkLocalOnce(tableID, dst, unscoped, r)
+		return LearnedRoute{}, false
+	}
+	if !ok || len(nextHops) == 0 {
 		return LearnedRoute{}, false
 	}
 	return LearnedRoute{
@@ -279,21 +295,109 @@ func learnedRouteDestination(r netlink.Route, family int) (string, bool) {
 //
 // Returns ok=false when the route is an ECMP set with at least one leg that
 // carries no gateway — see the all-or-nothing rule on importableRoute.
-func learnedRouteNextHops(r netlink.Route) ([]string, bool) {
+//
+// #9512: an IPv6 LINK-LOCAL gateway is meaningless without its link, and the
+// wire form has a place for the link: `gateway@interface`, the form the
+// configured-route path already emits and the helper already parses. Before
+// #9512 the leg's LinkIndex was dropped. The helper then inferred the link by
+// scanning connected prefixes, and every addressed interface contributes an
+// fe80::/64, so the scan bound whichever interface came FIRST in the snapshot,
+// an order-dependent wrong egress for every OSPFv3-learned route (RFC 5340
+// makes the link-local address the next hop there).
+//
+// So each link-local leg is published as `gateway@<netdev>`, using the kernel
+// name the helper resolves through its linux-name map. A link-local leg whose
+// link cannot be named makes the whole route unimportable (unscoped is set):
+// a scope-less link-local next hop has no correct binding to fall back to.
+// This is deliberately NOT extended to GLOBAL (or IPv4) gateways. A scope-less
+// global gateway is legitimate and correctly inferred from the connected
+// prefix today, and refusing or rescoping it would change working routes.
+func learnedRouteNextHops(r netlink.Route, linkName func(int) (string, bool)) (nhs []string, ok bool, unscoped net.IP) {
 	if len(r.MultiPath) > 0 {
-		nhs := make([]string, 0, len(r.MultiPath))
+		nhs = make([]string, 0, len(r.MultiPath))
 		for _, nh := range r.MultiPath {
 			if nh == nil || nh.Gw == nil {
-				return nil, false
+				return nil, false, nil
 			}
-			nhs = append(nhs, nh.Gw.String())
+			leg, scoped := scopeLearnedGateway(nh.Gw, nh.LinkIndex, linkName)
+			if !scoped {
+				return nil, false, nh.Gw
+			}
+			nhs = append(nhs, leg)
 		}
-		return nhs, true
+		return nhs, true, nil
 	}
 	if r.Gw == nil {
-		return nil, true
+		return nil, true, nil
 	}
-	return []string{r.Gw.String()}, true
+	leg, scoped := scopeLearnedGateway(r.Gw, r.LinkIndex, linkName)
+	if !scoped {
+		return nil, false, r.Gw
+	}
+	return []string{leg}, true, nil
+}
+
+// scopeLearnedGateway renders one gateway leg. Only an IPv6 link-local
+// gateway is scoped; scoped=false means it is link-local and its link has no
+// resolvable name.
+func scopeLearnedGateway(gw net.IP, linkIndex int, linkName func(int) (string, bool)) (string, bool) {
+	if gw.To4() != nil || !gw.IsLinkLocalUnicast() {
+		return gw.String(), true
+	}
+	if linkIndex <= 0 || linkName == nil {
+		return "", false
+	}
+	name, ok := linkName(linkIndex)
+	if !ok || name == "" {
+		return "", false
+	}
+	return gw.String() + "@" + name, true
+}
+
+// learnedRouteLinkNameFn resolves a kernel ifindex to its netdev name.
+// Indirected so the importer cells can run without real links.
+var learnedRouteLinkNameFn = func(index int) (string, error) {
+	link, err := netlink.LinkByIndex(index)
+	if err != nil {
+		return "", err
+	}
+	return link.Attrs().Name, nil
+}
+
+// linkNameCache memoises learnedRouteLinkNameFn for one import, failures
+// included, so a dump costs one lookup per distinct link.
+type linkNameCache map[int]string
+
+func newLinkNameCache() linkNameCache { return linkNameCache{} }
+
+func (c linkNameCache) lookup(index int) (string, bool) {
+	if name, seen := c[index]; seen {
+		return name, name != ""
+	}
+	name, err := learnedRouteLinkNameFn(index)
+	if err != nil {
+		name = ""
+	}
+	c[index] = name
+	return name, name != ""
+}
+
+// unscopedLinkLocalWarned dedups the refusal diagnostic. The importer runs on
+// every route-snapshot build, so an unlogged refusal would be silent and a
+// logged-every-time one would repeat at build rate. Keyed on the route and its
+// leg, so a different failure warns again. It grows only with distinct refused
+// routes.
+var unscopedLinkLocalWarned sync.Map
+
+func warnUnscopedLinkLocalOnce(tableID int, dst string, gw net.IP, r netlink.Route) {
+	key := strconv.Itoa(tableID) + "|" + dst + "|" + gw.String()
+	if _, loaded := unscopedLinkLocalWarned.LoadOrStore(key, true); loaded {
+		return
+	}
+	slog.Warn("refusing a kernel-learned route: its IPv6 link-local next hop has no resolvable "+
+		"interface, and a link-local next hop without one cannot be bound correctly (#9512)",
+		"destination", dst, "table", tableID, "gateway", gw.String(),
+		"protocol", rtProtoName(r.Protocol))
 }
 
 // LearnedRouteTableIDs returns the bounded kernel table set the importer

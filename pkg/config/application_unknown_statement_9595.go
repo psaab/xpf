@@ -31,12 +31,15 @@ import (
 // `bogus value` is not constraint-shaped, so it stays armed.
 //
 // The measured limits of the line:
-//   - NOT refused: a constraint lost BESIDE a retained one, for example
-//     `destination-port 80; source-poort 1024`, `icmp-type 8; icmp-cod 0`, or
-//     `uuid ...` on tcp/135. It widens only inside the retained constraint, and
+//   - NOT refused: a MISSPELLED constraint lost BESIDE a retained one, for
+//     example `destination-port 80; source-poort 1024` or `icmp-type 8;
+//     icmp-cod 0`. It widens only inside the retained constraint, and
 //     structurally it is identical to a numeric stray beside a retained
-//     constraint (`inactivity-timout 30`). Separating the two needs keyword
-//     similarity, which is left as a decision.
+//     constraint (`inactivity-timout 30`). The #9603 decision keeps this as
+//     the documented residual: every strict commit channel rejects both
+//     spellings, so only text a looser build committed reaches here. A REAL
+//     Junos statement xpf does not implement (`uuid ...` on tcp/135) is refused
+//     by exact grammar instead (application_unimplemented_leaves_9603.go).
 //   - REFUSED: a numeric or named-port stray on a protocol-wide application
 //     (`bogus 8080`). Structurally it is identical to a lost port, so it fails
 //     closed.

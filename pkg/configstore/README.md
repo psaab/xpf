@@ -181,6 +181,18 @@ inline archive-site passwords).
   what used to be a post-semaphore-release window can no longer make the marker
   key a different, never-applied tree. `ActiveDigest` returns exactly the value
   `ActiveApplied` compares against (`configTextDigest(s.active.Format())`).
+- `ActiveDigestFor(cfg)` / `RetainedGeneration(digest)` — `store_generation.go`, the
+  IPsec generation marker (#9641). `ActiveDigestFor` returns `ActiveDigest()` only when
+  `cfg` IS the compiled active config (pointer identity and digest read under one lock),
+  else `""`. The daemon names charon's marker pool with it, and a concurrent promotion
+  cannot pair `cfg` with another tree's digest. `RetainedGeneration` turns a digest back
+  into a compiled config: the active config itself, else a tolerant recompile
+  (`compileTreeLenient`, from a copy) of the most recent matching rollback-history tree,
+  after Load's retired-dataplane rewrite. A slot read from disk skips Load's
+  preprocessing, and an older xpf may have written syntax this one retired.
+  History is reloaded from the rollback files at boot, so a digest named before an xpfd
+  restart still resolves after it. A miss formats every retained tree, so it is for rare
+  callers (an HA re-initiation pass).
 - **`InvalidateAppliedDigest` — a FAILED apply un-records the marker (#9175).**
   "The marker is keyed on config text, so a stale value can only cause an
   idempotent re-apply, never a false convergence" USED TO STAND HERE, and it was
@@ -607,6 +619,14 @@ holder exits, disconnects, or is reclaimed on its idle lease (#4476), and
 another session enters and stages different edits — and the in-flight commit
 would snapshot and promote the **new** holder's candidate under the **original**
 holder's authorization.
+
+A session whose lease is reclaimed stays out (#9632). The reclaim records the evicted session in
+`reclaimedHolders`, and `ensureHolderLocked` refuses it while the lock has no recorded holder, which
+is the internal / local `EnterConfigure()` state. Without that refusal, #5059's empty-holder pass
+(which deliberately lets other user sessions edit a local-CLI candidate) let the evicted session
+keep writing, and committing, into the candidate that replaced its own. The refusal wraps
+`ErrConfigLockedByOther` and says to re-enter configure. Re-entering, shared or exclusive, clears
+it. The set is capped at 64 entries.
 
 Generation binding does not close it, and the retry loop makes it worse. A
 turnover that completes *before* the daemon's `CompileCandidateGen` — i.e. while
@@ -1562,6 +1582,34 @@ persistence failures on every persist path;
   boot predicate decides bootstrap vs normal as usual.
 
 An ABSENT DB is NOT an error (`Load` returns nil; start-fresh).
+
+### Shared cluster commit: strict on both node views (#9619)
+
+On a chassis cluster one candidate is committed on one node and config-sync
+carries the raw group tree to the other, which ingests it on the tolerant path
+(`SyncApply` -> `compileTreeLenient`, where strict gates only warn). So
+`compileTreeStrict` checks the peer's `${node}` expansion as well as the local
+one. It runs the `pkg/config` peer-effective registry first (#5876 source NAT,
+#4785 IPIP), then `validatePeerStrictPipeline`, which repeats the local strict
+steps for the peer node: `schemaValidateExpandedTreeForNode`,
+`config.CompileConfigForNode` and `crossCheckRAIntervals`. A failure is
+reported as `chassis cluster peer node<N>: ...` wrapping the gate's own error.
+
+- The peer tree is a clone with `rewriteRetiredDataplaneType(SyncCaller)`
+  applied (#6861 F2), because that is what the standby compiles. A peer-only
+  retired `dataplane-type` leaf therefore does not refuse the commit.
+- `crossCheckNodeID` (#4185) is not run for the peer. It compares the leaf with
+  the checking host's node-id file, and a config written for one node with a
+  literal `chassis cluster node 0` is an accepted input on that node. A literal
+  leaf that reaches the other node by config-sync is warned about on that
+  node's tolerant ingress.
+- Standalone (`nodeID < 0`) runs no peer check. `Store.Load` and
+  `Store.SyncApply` never call `compileTreeStrict`, so a persisted config that
+  is invalid for this node still loads with warnings.
+- `CheckText` (`xpfd check-config`) shares the function, so day-0 validation
+  with `-node-id 0|1` refuses a shared config that is invalid on either node.
+  The shipped `docs/ha-cluster*.conf` pass for both node ids
+  (`TestShippedHAConfigsCheckCleanOnBothNodes_9619`).
 
 ## Audit journal (#1896)
 

@@ -7,6 +7,7 @@
 //
 // Submodules by concern (see each file's header):
 //   selector  drain  wakeup  waterfill  sojourn  refund  submit
+//   demand_mask_9365 (the exact-demand mask past queue index 64)
 
 use super::*;
 use crate::afxdp::types::EqualFlowTargetPolicy;
@@ -16,8 +17,8 @@ use crate::afxdp::cos::queue_ops::cos_queue_push_back;
 use crate::afxdp::cos::tx_completion::COS_TIMER_WHEEL_TICK_NS;
 use crate::afxdp::tx::test_support::*;
 use crate::afxdp::types::{
-    CoSQueueWaterfillCounters, SharedCoSExactBacklog, SharedCoSQueueLease, SharedCoSRootLease,
-    V8RateMode, WorkerCoSInterfaceFastPath,
+    CoSQueueWaterfillCounters, ExactDemandQueueMask, SharedCoSExactBacklog, SharedCoSQueueLease,
+    SharedCoSRootLease, V8RateMode, WorkerCoSInterfaceFastPath,
 };
 use crate::afxdp::worker::BindingWorker;
 use crate::afxdp::{PROTO_TCP, UMEM_FRAME_SHIFT};
@@ -57,3 +58,4 @@ mod waterfill;
 mod sojourn;
 mod refund;
 mod submit;
+mod demand_mask_9365;

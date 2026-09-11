@@ -2020,6 +2020,31 @@ helper never sees it, so a helper crash cannot lock management out).
   legitimate configuration, which is precisely why it carried no flag. Tests pin
   both rejections so relaxing either gate cannot silently re-open the path.
 
+  **The tolerant channel DID reach it (#9572).** Those two gates guard the strict
+  commit only. The tolerant compile (`CompileConfigLenient`, used on the
+  persisted-load and HA peer-sync paths) downgrades both rejections to warnings.
+  It then compiles the policy with the dropped dimension left EMPTY, flagged
+  `LenientContentDropped` (#5575). The userspace snapshot builder refuses such a
+  policy.
+
+  The kernel projection used to read the empty dimension as `any`. So an omitted
+  or valueless `application` became an application-any permit, and an omitted or
+  valueless `source-address` became a permit for every source. Either one erased
+  every later deny from the program. The daemon still installs this program from
+  the config the helper refused, and on the host-bound path it is the
+  enforcement. A poisoned permit also blocked the deny that followed it
+  (narrow-application poison) whenever its application was narrow.
+
+  `junosHostProjectTerm` now marks a poisoned PERMIT, and
+  `junosHostProjectProgram` skips it. Its real carve cannot be recovered from
+  dropped content, so later denies render as authored. That can only drop MORE
+  host-bound traffic than configured, never admit traffic a deny names. A
+  poisoned DENY is unchanged: its empty dimension widens a DROP, which is the
+  fail-closed direction.
+
+  Covered by `pkg/config/junos_host_poisoned_permit_9572_test.go` and the
+  rendered-nft cell in `pkg/daemon/host_inbound_junos_host_4146_test.go`.
+
   **Only an OWN netdev counts toward the gap.** A VLAN subunit contributes its
   physical parent as an extra candidate for the bondless-RETH case where frames
   may ride the member. On a plain 802.1Q trunk the parent is never where the

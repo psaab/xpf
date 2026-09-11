@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/psaab/xpf/pkg/cliterm"
 	"github.com/psaab/xpf/pkg/cmdtree"
 	"github.com/psaab/xpf/pkg/config"
 )
@@ -137,12 +138,34 @@ func evaluateCommandRegex(
 	}
 
 	words := strings.Fields(full)
-	canon, res := cmdtree.Canonicalize(cmdtree.OperationalTree, words)
+	// #9628: the output pipe is NOT operational-tree grammar. Canonicalizing it
+	// with the command made `|` an unknown word, so a restricted class was
+	// refused `show route | match X` and every other piped command whose node
+	// could not absorb it. The command words are canonicalized alone, and the
+	// pipe is matched as typed: it is still part of the matched string, so a
+	// deny on `display set` sees it.
+	cmdWords, pipeWords := splitAtPipe(words)
+	canon, res := cmdtree.Canonicalize(cmdtree.OperationalTree, cmdWords)
 	if res != cmdtree.CanonicalOK {
 		return fmt.Errorf(
 			"permission denied: login class %q restricts commands and %q could not be "+
 				"resolved to a canonical command, so the restriction cannot be evaluated",
 			class, firstWord(words))
+	}
+	if len(pipeWords) > 0 && (len(pipeWords) < 2 || !authorizablePipe(pipeWords[1])) {
+		verb := ""
+		if len(pipeWords) > 1 {
+			verb = pipeWords[1]
+		}
+		return fmt.Errorf(
+			"permission denied: login class %q restricts commands and the output pipe %q is not "+
+				"a recognised filter, so the restriction cannot be evaluated",
+			class, verb)
+	}
+	command := strings.Join(canon, " ")
+	matched := command
+	if len(pipeWords) > 0 {
+		matched = command + " " + strings.Join(pipeWords, " ")
 	}
 
 	// #9022: match against the full canonical string AND the argument-free
@@ -151,7 +174,11 @@ func evaluateCommandRegex(
 	// `^show log$` stopped matching the moment any argument was appended and
 	// the denied command ran. See EvaluateForms for why this is a max-per-side
 	// widening rather than "deny if either matches".
-	decision := rules.EvaluateForms(strings.Join(canon, " "), canonicalPrefix(canon))
+	//
+	// #9628: the pipe-less command is measured as well. Without it, fixing the
+	// splice would have let `show version | match .` step around
+	// `^show version$`, which the refusal used to hide.
+	decision := rules.EvaluateForms(matched, canonicalPrefix(canon), command)
 	if decision.Allowed {
 		return nil
 	}
@@ -168,6 +195,27 @@ func evaluateCommandRegex(
 	// string, which Canonicalize does not currently report.
 	return fmt.Errorf("permission denied: login class %q denies %q (%s)",
 		class, canonicalPrefix(canon), decision.Reason)
+}
+
+// splitAtPipe splits a tokenised line at its FIRST `|` token. Everything after
+// it is pipe text, including any later `|` inside a filter argument, because a
+// filter argument may itself contain one (`| match "a | b"`).
+func splitAtPipe(words []string) (cmd, pipe []string) {
+	for i, w := range words {
+		if w == "|" {
+			return words[:i], words[i:]
+		}
+	}
+	return words, nil
+}
+
+// authorizablePipe reports whether the first pipe verb is one the CLI honours:
+// an output filter SplitPipe splits off, or `display`, which the show and
+// config handlers parse from the line themselves (`| display set`). Anything
+// else is refused. The gate does not know what it would do, so it cannot know
+// that a deny fails to match it.
+func authorizablePipe(verb string) bool {
+	return cliterm.IsPipeFilter(verb) || verb == "display"
 }
 
 func firstWord(words []string) string {

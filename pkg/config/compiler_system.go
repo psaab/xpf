@@ -1515,6 +1515,20 @@ func loginClassAdvisoryWarnings(cfg *Config) []string {
 						pluralSurface(len(surfaces))))
 				}
 			}
+			// #9340: the same question per ALTERNATIVE, on the surfaces where
+			// the whole pattern can fire. One enforceable alternative no longer
+			// buys silence for an argument-text alternative beside it.
+			for _, f := range UnenforceableDenyAlternatives(rules) {
+				if src, ok := rules.DenySource(); ok {
+					warnings = append(warnings, fmt.Sprintf(
+						"system login class %q: deny-commands %q is only partly enforceable on %s: "+
+							"its alternatives %q match no command in the REGISTERED command set of %s, "+
+							"so they restrict the on-box CLI only; the other alternatives apply on both. "+
+							"(The registered set is what that surface declares, not a census of everything "+
+							"it can dispatch.)",
+						lc.Name, src, f.Surface, f.Alternatives, f.Surface))
+				}
+			}
 		}
 	}
 	return warnings
@@ -2205,8 +2219,9 @@ func compileSNMP(node *Node, sys *SystemConfig, cfg *Config, lenient bool) error
 // `snmp` knobs xpf recognizes but does not enforce (#4306 S-5). The
 // security-relevant ones are called out explicitly: a MIB `view` (on a
 // community or standalone) is NOT enforced, so a view-scoped community is
-// silently promoted to full ifTable exposure; `trap-options source-address`
-// is NOT bound, so traps leave from the default egress IP. Messages are built
+// silently promoted to full ifTable exposure; no `trap-options` statement is
+// honoured (#9562, see snmpTrapOptionsAdvisory9562), and `source-address` in
+// particular is NOT bound, so traps leave from the default egress IP. Messages are built
 // from the node IDENTITY (keywords) only — never the community NAME (an SNMP
 // community string is a secret). Deterministic, deduplicated output.
 func snmpInertKnobWarnings(node *Node) []string {
@@ -2240,8 +2255,11 @@ func snmpInertKnobWarnings(node *Node) []string {
 		case "view":
 			add("snmp view: MIB view scoping is accepted but NOT enforced by the SNMP agent (the full ifTable MIB is exposed regardless)")
 		case "trap-options":
-			if nodeHasSub(child, "source-address") {
-				add("snmp trap-options source-address: accepted but NOT enforced (traps are sent from the default egress IP)")
+			// #9562: compileSNMP reads NOTHING under trap-options, so every
+			// statement there gets an advisory, not only source-address. A
+			// statement nobody has listed is covered by construction.
+			for _, kw := range snmpTrapOptionsStatements9562(child) {
+				add(snmpTrapOptionsAdvisory9562(kw))
 			}
 		case "health-monitor":
 			add("snmp health-monitor: accepted but NOT implemented (no-op)")
@@ -2385,7 +2403,25 @@ func compileSNMPv3(node *Node, snmp *SNMPConfig) {
 	}
 
 	// Hierarchical form: v3 -> usm -> local-engine -> user <name> { ... }
-	usmNode := node.FindChild("usm")
+	//
+	// #9561: look `usm` up through packedBodyChildren, not FindChild. The
+	// brace-elided spellings put the path on v3's OWN Keys:
+	//
+	//	v3 usm { local-engine { user u1 { ... } } }   Keys=[v3 usm]
+	//	v3 usm local-engine { user u1 { ... } }       Keys=[v3 usm local-engine]
+	//	v3 usm local-engine user u1 { ... }           Keys=[v3 usm local-engine user u1]
+	//
+	// None has a `usm` CHILD, and none reaches the 8-key packed branch above,
+	// so every one compiled to ZERO users with no warning. packedBodyChildren
+	// rebuilds each into the braced chain, with the body attached under the
+	// deepest node (#6818), and returns a braced v3's children unchanged.
+	var usmNode *Node
+	for _, c := range packedBodyChildren(node, schemaForPath("snmp", "v3")) {
+		if c.Name() == "usm" {
+			usmNode = c
+			break
+		}
+	}
 	if usmNode == nil {
 		return
 	}

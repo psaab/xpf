@@ -84,7 +84,7 @@ func TestTakeoverReadyReportsACapabilityDisarmReason(t *testing.T) {
 	// A live reason from deriveUserspaceCapabilities, spelled here rather than
 	// imported: it is a SPECIMEN of the class, and pinning it to a particular
 	// constant is what tied this cell to a gate that then went away.
-	const specimen = "userspace three-color policers require color-blind mode and then discard"
+	const specimen = "userspace three-color policers require color-blind mode and a supported then action"
 	m := &Manager{
 		proc: &exec.Cmd{Process: &os.Process{Pid: 1}},
 		lastStatus: ProcessStatus{

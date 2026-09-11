@@ -360,6 +360,12 @@ maps the Junos `permissions` token set onto xpf's coarse permission model at
 compile (`LoginClass.MappedPermissions`, consulted at runtime by
 `resolveClassPerms`).
 
+The `permissions` tokens are validated at commit (#9490) against the Junos
+login-class permission flag set, plus xpf's `super-user` alias. A misspelled
+flag used to commit and silently fold to view-only, so the class was not the
+one written. A config persisted before the gate still loads, because the
+tolerant path does not run the schema validators.
+
 Because xpf's runtime RBAC is **coarse** (view/clear/control/config/maintenance/
 all) it cannot faithfully represent every fine-grained Junos permission or the
 per-command allow/deny regexes. The **permission mapping** is therefore
@@ -597,11 +603,43 @@ output pipe included**. The gRPC gate matches the canonical command **path**,
 because the remote `cli` parses the line client-side and only a typed RPC
 crosses the wire — `ping 10.0.0.1` arrives as `Ping{Host:"10.0.0.1"}`.
 
+The canonicalized line holds only words the command tree models. Every value
+slot takes exactly one value, so a word appended after a value
+(`show route table secret-vrf bypass`) is refused as uncanonicalizable, not
+carried into the matched string. Before #9505 it was carried: the handler
+dropped the word and ran the command, and an anchored deny against the
+value-carrying command did not match. Commands whose options may come in any
+order (`show security flow session`, `ping`, `monitor traffic`, …) are declared
+as option lists, so each option is resolved and canonicalized rather than
+refused.
+
+The output pipe is not command-tree grammar, so it is not canonicalized with the
+command (#9628). The words before the first `|` are canonicalized and the pipe is
+matched as typed, so a deny on `display set` still sees it. A pipe verb the CLI
+does not implement is refused. The command WITHOUT its pipe is matched as well,
+so `^show version$` also denies `show version | match .`.
+
 So a deny written against a **path** (`request system reboot`) is enforced
 identically on both. A deny written against **argument text**
 (`show route table secret-vrf`) is enforced on the box and **not** over gRPC.
 A pattern that can never fire on the gRPC surface is reported for the class, so
 this is visible rather than inferred.
+
+The same holds for each alternative of a combined pattern (#9340). Take
+`^(show route table secret-vrf|request system reboot)$`. It is enforced on both
+surfaces for `request system reboot` and only on the box for
+`show route table secret-vrf`, and the commit output names that alternative.
+Before #9340 the enforceable half silenced the warning for the whole pattern.
+The alternatives come from the parsed pattern: alternations and optional groups,
+however they are spelled or anchored. So the report does not depend on how the
+rule was written. A pattern with more than 64 alternatives is not split and
+keeps the whole-pattern answer.
+
+"Can fire" means the deny pattern is what refuses a command. A class with an
+`allow-commands` pattern also refuses every command outside its allow list.
+Before #9340, those refusals counted as the deny firing, so allow `^show` with
+deny `^show route table secret-vrf` reported nothing, although that deny decides
+nothing on the gRPC surface.
 
 #### The `*-regexps` family is NOT implemented (#7971)
 

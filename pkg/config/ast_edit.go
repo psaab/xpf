@@ -423,15 +423,9 @@ func (t *ConfigTree) SetPathQuotedGrouped(path []string, quoted, grouped []bool)
 		keyword := path[i]
 		keyStart := i
 
-		// Look up keyword in current schema level.
-		var childSchema *schemaNode
-		if schema != nil {
-			if s, ok := schema.children[keyword]; ok {
-				childSchema = s
-			} else if schema.wildcard != nil {
-				childSchema = schema.wildcard
-			}
-		}
+		// Look up keyword in current schema level (#9685: an apply statement at
+		// a wildcard slot is the statement, not an instance name).
+		childSchema := schemaChildFor(schema, keyword)
 
 		if childSchema == nil {
 			// #6668: an unmodeled position still honours an authored bracket
@@ -593,7 +587,9 @@ func (t *ConfigTree) SetPathQuotedGrouped(path []string, quoted, grouped []bool)
 		if childSchema.multi && (childSchema.children == nil || childSchema.valueList) && i < len(path) {
 			nextToken := path[i]
 			_, nextIsSibling := schema.children[nextToken]
-			if !nextIsSibling && schema.wildcard != nil {
+			// #9685: after an apply statement the remaining tokens are group
+			// names, never an instance under this node's wildcard slot.
+			if !nextIsSibling && schema.wildcard != nil && childSchema != applyStatementSchema {
 				nextIsSibling = true
 			}
 			// When the next token names a known child of THIS node (only
@@ -810,15 +806,8 @@ func deletePath(current *[]*Node, path []string, grouped []bool, schema *schemaN
 
 	keyword := path[i]
 
-	// Look up keyword in current schema level.
-	var childSchema *schemaNode
-	if schema != nil {
-		if s, ok := schema.children[keyword]; ok {
-			childSchema = s
-		} else if schema.wildcard != nil {
-			childSchema = schema.wildcard
-		}
-	}
+	// Look up keyword in current schema level (#9685).
+	childSchema := schemaChildFor(schema, keyword)
 
 	if childSchema == nil {
 		// #6668: an unmodeled position still honours an authored bracket group
@@ -973,14 +962,7 @@ func setInactiveAtPath(current *[]*Node, path []string, grouped []bool, schema *
 
 	keyword := path[i]
 
-	var childSchema *schemaNode
-	if schema != nil {
-		if s, ok := schema.children[keyword]; ok {
-			childSchema = s
-		} else if schema.wildcard != nil {
-			childSchema = schema.wildcard
-		}
-	}
+	childSchema := schemaChildFor(schema, keyword) // #9685
 
 	if childSchema == nil {
 		// #6668: honour an authored bracket group at an unmodeled position —

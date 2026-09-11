@@ -668,12 +668,21 @@ func (m *Manager) handlePeerTimeout() {
 	// node MUST be able to take over. Without this, a previous manual
 	// transfer-out would keep the local node parked in secondary-hold even
 	// though there is no longer a peer to hand ownership to.
+	//
+	// #9640: restore the weight WITHOUT electing, with the helper electRG uses
+	// when it clears a manual failover for the same reason. recalcWeight runs
+	// electSingleNode (peerAlive is already false), which promoted every group
+	// BEFORE the disable-rg-confirmed fence below asked the peer to relinquish
+	// them. The single electSingleNode after the fence elects every group. Under
+	// disable-rg and no fencing that election still precedes any fence, so their
+	// events and end state are unchanged
+	// (TestPeerLossWithManualFailoverKeepsTodaysOutcome9640).
 	for _, rg := range m.groups {
 		if rg.ManualFailover {
 			slog.Info("cluster: clearing manual failover (peer lost)", "rg", rg.GroupID)
 			rg.ManualFailover = false
 			rg.ManualFailoverAt = time.Time{}
-			m.recalcWeight(rg)
+			m.manualFailoverRestoreWeightLocked(rg)
 		}
 	}
 

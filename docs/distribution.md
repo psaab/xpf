@@ -141,6 +141,12 @@ publisher isolates suites in its own database and is unaffected. `selftest.sh`
   image inventory (guest kernel + installed package versions, #6500), so
   the traceability record is authenticated by the same signature as the
   bytes it describes. `publish.py` refuses a release missing any of them.
+  `xpf-deploy.py fetch` reads the sidecar's `validated` field from VERIFIED
+  bytes before it downloads the image, and refuses `validated: false` (a
+  `--skip-validate` bake) unless `--allow-unvalidated` is passed (#9325). A
+  sidecar the signed sums list but the mirror withholds is refused regardless;
+  a release whose signed sums list no sidecar at all predates it and gets a
+  warning. `image-roll` applies the same rule to the manifest it verifies.
   `xpf-deploy.py fetch` records a best-effort monotonic watermark at
   `${XDG_STATE_HOME:-~/.local/state}/xpf/image-watermark.json` (per
   `--channel`, default `stable`) and REFUSES a version older than the recorded
@@ -289,18 +295,28 @@ live VM holds open. The probe now distinguishes **indeterminate** from
 **no-backing**, and an indeterminate sibling BLOCKS the install with its own
 message (investigate the file) separate from a known dependant (destroy the VM).
 
-The one case that legitimately means "no backing" is preserved: `qemu-img`
-missing *entirely* still classifies as determinate-none, because `qemu-img` is a
-hard dependency of the overlay-create path, so its absence means this tool never
-created an overlay on that host. That reasoning covers a missing binary only; it
-never covered a probe that ran and failed, which was the hole.
+*A `qemu-img` that cannot be run is indeterminate too (#9325).* An earlier
+revision kept a missing `qemu-img` as determinate-none, on the argument that the
+tool cannot have created an overlay without it. That argument is about the
+invoking process's history, not about the sibling on disk: an overlay created
+before `qemu-img` left `PATH` (a restricted unit `PATH`, sudo's `secure_path`, an
+upgrade in flight), or by another tool, still backs onto the golden. Measured,
+the change moves exactly one state:
+
+| state | before | after |
+|---|---|---|
+| fresh host, no golden yet | proceed | proceed |
+| golden present, no sibling `.qcow2` | proceed | proceed |
+| golden present + a sibling overlay | proceed | **refused** |
 
 *The replacement is atomic and locked (#6761).* It was an unlocked
 check-then-in-place-copy, which fails two ways. An overlay created between the
 check and the copy backs onto bytes that are about to be swapped and nothing
 looks again (TOCTOU); and an **interrupted** in-place copy leaves a truncated
 golden, corrupting every existing overlay with no concurrency involved at all.
-The new image is now written to a sibling temp file and moved into place with an
+The new image is now written to a sibling temp file -- an unpredictable name
+created `O_EXCL` by `mkstemp` and written through its descriptor, so a planted
+symlink cannot redirect it (#9325) -- and moved into place with an
 atomic rename, so the golden is either wholly the old image or wholly the new
 one — under an exclusive `flock` on `<images-dir>/.xpf-golden.lock` that
 `libvirt_disk` takes as well. Both sides must hold the same lock: locking only

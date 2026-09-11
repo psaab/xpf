@@ -773,7 +773,10 @@ type compileOpts struct {
 	// unrecognized statement is refused only on the #9595 structural line (a
 	// constraint-shaped value on an otherwise protocol-wide application, or a
 	// set member statement naming a real application); #6524's stray beside a
-	// retained constraint stays armed, and the residual is the #9603 decision.
+	// retained constraint stays armed. #9603 also refuses a real Junos
+	// application statement xpf does not implement (uuid, rpc-program-number,
+	// icmp6-type, ...) whatever its shape, and keeps a misspelling beside a
+	// retained constraint as the measured, documented residual.
 	// Commit stays strict so the operator's next edit fails loudly. This is an
 	// AST/typed-config compile decision and deliberately does NOT live in
 	// SchemaValidate (applications stay opaque there). Same doctrine as
@@ -1253,6 +1256,13 @@ type compileOpts struct {
 	// refuses such a policy, so a leniently-loaded bad config is no worse off,
 	// now flagged. Same doctrine as lenientPolicyMatchApplications.
 	lenientPolicyMatchAddressSetMembers bool
+
+	// lenientAddressSetMembersDefined (#9490) downgrades the address-set member
+	// reference gate (validateAddressSetMembersDefinedStrict) to a warning on the
+	// tolerant load / peer-sync paths, so a persisted config an older binary
+	// accepted still boots (#1960). The runtime resolver drops the dangling
+	// member either way.
+	lenientAddressSetMembersDefined bool
 	// lenientRibGroupRefs (#2226) downgrades the rib-group import-rib
 	// cross-reference gate (validateRibGroupImportRibReferencesStrict) from a
 	// hard compile error to a cfg.Warnings entry. An `import-rib` naming a rib
@@ -1309,6 +1319,13 @@ type compileOpts struct {
 	// { … }` spelling as the DHCPv4 relay (dhcpRelayV4Node9411) -- before that it
 	// installed the DHCPv6 groups as DHCPv4 relays, so the stanza was not inert.
 	lenientDHCPRelayDHCPv6 bool
+	// lenientDHCPRelayChildTokens (#9552) downgrades
+	// validateDHCPRelayChildTokensAST from a hard compile error to a cfg.Warnings
+	// entry on the tolerant load / peer-sync paths, so a persisted or peer-synced
+	// config carrying an undeclared dhcp-relay child still BOOTS (#1960). The
+	// child is inert either way: compileDHCPRelay reads only server-group and
+	// group.
+	lenientDHCPRelayChildTokens bool
 	// lenientRoutingRuleWindows (#5854) downgrades the next-table / rib-group
 	// ip-rule window over-subscription gate (validateRoutingRuleWindowsStrict)
 	// from a hard compile error to a cfg.Warnings entry. The runtime applier
@@ -2804,10 +2821,12 @@ func lenientCompileOpts() compileOpts {
 		lenientPolicyMatchApplications:         true,
 		lenientNATMatchApplications:            true,
 		lenientPolicyMatchAddressSetMembers:    true,
+		lenientAddressSetMembersDefined:        true,
 		lenientRibGroupRefs:                    true,
 		lenientNextTableRefs:                   true,
 		lenientForwardingInstanceProtocols:     true,
 		lenientDHCPRelayDHCPv6:                 true,
+		lenientDHCPRelayChildTokens:            true,
 		lenientRoutingRuleWindows:              true,
 		lenientPolicyRouteMapSeq:               true,
 		lenientRouteDispositionConflict:        true,

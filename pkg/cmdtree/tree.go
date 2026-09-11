@@ -129,11 +129,32 @@ type Node struct {
 	// as an unknown filter, so it is correctly CanonicalUnknown and is NOT
 	// marked.
 	//
-	// Like HasDynamic it consumes ARBITRARILY MANY trailing words, because
-	// Canonicalize leaves currentNode in place across the skip. That is what a
-	// config hierarchy path needs, and why a typed-leaf ValueType — admitting
-	// exactly one — cannot express these.
+	// It consumes ARBITRARILY MANY trailing words, because Canonicalize leaves
+	// currentNode in place across the skip. That is what a config hierarchy
+	// path needs, and why a typed-leaf ValueType — admitting exactly one —
+	// cannot express these. A dynamic node used to share this arm and its
+	// unbounded absorption; since #9505 it takes one value, like a typed leaf.
+	// Under an Options node the absorption stops at the next option keyword.
 	AcceptsArgs bool
+
+	// Options marks a node whose dispatcher parses its children as combinable
+	// OPTIONS, in any order (#9505): `show security flow session zone trust
+	// destination-port 22`, `ping <host> routing-instance <ri> count 5`.
+	//
+	// Canonicalize gives every value slot exactly one value. Without this
+	// flag the word after that value must be a child of the node that took it,
+	// or the line is refused: #8289's rule, extended to values. With it, the
+	// walk returns to this node's children once an option is complete, so the
+	// next option resolves (and is canonicalized) instead of being absorbed as
+	// raw text.
+	//
+	// Set it only where the dispatcher really loops over its arguments.
+	// `show route` looks like an option list and is not: handleShowRoute
+	// dispatches on args[0] and drops the rest, so `show route table X
+	// protocol Y` runs `show route table X`. Marking it would let an anchored
+	// deny on that command be stepped around with a sibling keyword, the
+	// bypass this flag must not reopen. Honoured only in Canonicalize.
+	Options bool
 }
 
 // HasDynamic returns true if the node has any dynamic completion function.
@@ -376,7 +397,18 @@ var OperationalTree = map[string]*Node{
 					names = append(names, n)
 				}
 				return names
-			}},
+			},
+				// #9505: `family <f>` and `effective` are read anywhere after the
+				// filter name (firewallFamilyArg / firewallArgsHaveWord), so they
+				// are options of THIS node. They are not options of `show
+				// firewall`: the dispatcher honours them only after `filter
+				// <name>`, and `show firewall family inet filter X` lists every
+				// filter.
+				Options: true,
+				Children: map[string]*Node{
+					"effective": {Desc: "Show the effective (compiled) filter the dataplane receives"},
+					"family":    {Desc: "Address family (inet, inet6)", ValueType: ValueIdentifier},
+				}},
 		}},
 		"flow-monitoring": {Desc: "Show flow monitoring/NetFlow configuration", Children: map[string]*Node{
 			"statistics": {Desc: "Show per-collector NetFlow v9/IPFIX write-health"},
@@ -519,16 +551,18 @@ var OperationalTree = map[string]*Node{
 			}},
 			"dynamic-address": {Desc: "Show dynamic address feeds"},
 			"flow": {Desc: "Show security flow information", Children: map[string]*Node{
-				"session": {Desc: "Show session table", Children: map[string]*Node{
+				// #9505: parseSessionFilterMode loops over every argument, so these are
+				// options in any order, and each valued one takes exactly one value.
+				"session": {Desc: "Show session table", Options: true, Children: map[string]*Node{
 					"summary":            {Desc: "Show session count summary"},
 					"brief":              {Desc: "Show sessions in compact table"},
-					"application":        {Desc: "Filter sessions by application name"},
-					"interface":          {Desc: "Filter sessions by interface"},
-					"source-prefix":      {Desc: "Filter by source IP prefix"},
-					"destination-prefix": {Desc: "Filter by destination IP prefix"},
-					"source-port":        {Desc: "Filter by source port"},
-					"destination-port":   {Desc: "Filter by destination port"},
-					"protocol":           {Desc: "Filter by IP protocol"},
+					"application":        {Desc: "Filter sessions by application name", ValueType: ValueIdentifier},
+					"interface":          {Desc: "Filter sessions by interface", ValueType: ValueIdentifier},
+					"source-prefix":      {Desc: "Filter by source IP prefix", ValueType: ValueCIDR},
+					"destination-prefix": {Desc: "Filter by destination IP prefix", ValueType: ValueCIDR},
+					"source-port":        {Desc: "Filter by source port", ValueType: ValueInteger},
+					"destination-port":   {Desc: "Filter by destination port", ValueType: ValueInteger},
+					"protocol":           {Desc: "Filter by IP protocol", ValueType: ValueIdentifier},
 					"zone": {Desc: "Filter by security zone", DynamicFn: func(cfg *config.Config) []string {
 						if cfg == nil {
 							return nil
@@ -597,7 +631,10 @@ var OperationalTree = map[string]*Node{
 			}},
 			"address-book": {Desc: "Show address book entries"},
 			"applications": {Desc: "Show application definitions"},
-			"log": {Desc: "Show recent security events", Children: map[string]*Node{
+			// #9505: logging.ParseEventFilterArgs loops over every argument and reads a
+			// bare positive integer anywhere as the event count.
+			"log": {Desc: "Show recent security events", Options: true, Children: map[string]*Node{
+				"<count>": {Desc: "Number of events to show"},
 				"zone": {Desc: "Filter by security zone", DynamicFn: func(cfg *config.Config) []string {
 					if cfg == nil {
 						return nil
@@ -608,8 +645,8 @@ var OperationalTree = map[string]*Node{
 					}
 					return names
 				}},
-				"protocol": {Desc: "Filter by IP protocol"},
-				"action":   {Desc: "Filter by action (permit, deny, reject)"},
+				"protocol": {Desc: "Filter by IP protocol", ValueType: ValueIdentifier},
+				"action":   {Desc: "Filter by action (permit, deny, reject)", ValueType: ValueIdentifier},
 			}},
 			"statistics": {Desc: "Show global statistics", Children: map[string]*Node{
 				"detail": {Desc: "Show detailed statistics with screen and session breakdown"},
@@ -792,7 +829,10 @@ var OperationalTree = map[string]*Node{
 		}},
 	}},
 	"monitor": {Desc: "Show real-time debugging information", Children: map[string]*Node{
-		"traffic": {Desc: "Capture traffic on interface", Children: map[string]*Node{
+		// #9505: parseMonitorTrafficArgs loops over every argument. `matching`
+		// takes a multi-word expression that the parser ends at the next option
+		// keyword, which is exactly where the Options walk resumes.
+		"traffic": {Desc: "Capture traffic on interface", Options: true, Children: map[string]*Node{
 			"interface": {Desc: "Interface name to capture on", DynamicFn: func(cfg *config.Config) []string {
 				if cfg == nil || cfg.Interfaces.Interfaces == nil {
 					return nil
@@ -803,8 +843,8 @@ var OperationalTree = map[string]*Node{
 				}
 				return names
 			}},
-			"matching": {Desc: "Filter expression (tcpdump syntax)"},
-			"count":    {Desc: "Number of packets to capture"},
+			"matching": {Desc: "Filter expression (tcpdump syntax)", AcceptsArgs: true},
+			"count":    {Desc: "Number of packets to capture", ValueType: ValueInteger},
 		}},
 		"interface": {Desc: "Show interface traffic statistics", DynamicFn: func(cfg *config.Config) []string {
 			if cfg == nil || cfg.Interfaces.Interfaces == nil {
@@ -820,19 +860,22 @@ var OperationalTree = map[string]*Node{
 		}},
 		"security": {Desc: "Monitor security events", Children: map[string]*Node{
 			"flow": {Desc: "Monitor security flow", Children: map[string]*Node{
-				"file": {Desc: "Configure flow trace file", Children: map[string]*Node{
+				// #9505: handleMonitorSecurityFlowFile loops over size/files/match.
+				"file": {Desc: "Configure flow trace file", Options: true, Children: map[string]*Node{
 					"<filename>": {Desc: "Name of trace file"},
-					"files":      {Desc: "Maximum number of trace files (2..1000)"},
-					"size":       {Desc: "Maximum trace file size (10240..1073741824)"},
-					"match":      {Desc: "Regular expression for lines to log"},
+					"files":      {Desc: "Maximum number of trace files (2..1000)", ValueType: ValueInteger},
+					"size":       {Desc: "Maximum trace file size (10240..1073741824)", ValueType: ValueInteger},
+					"match":      {Desc: "Regular expression for lines to log", ValueType: ValueIdentifier},
 				}},
-				"filter": {Desc: "Configure flow trace filter", Children: map[string]*Node{
+				// #9505: handleMonitorSecurityFlowFilter loops over the options after
+				// the filter name.
+				"filter": {Desc: "Configure flow trace filter", Options: true, Children: map[string]*Node{
 					"<filter-name>":      {Desc: "Name of filter"},
-					"source-prefix":      {Desc: "Source IP prefix to match"},
-					"destination-prefix": {Desc: "Destination IP prefix to match"},
-					"source-port":        {Desc: "Source port to match"},
-					"destination-port":   {Desc: "Destination port to match"},
-					"protocol":           {Desc: "Protocol to match (tcp/udp/icmp/0..255)"},
+					"source-prefix":      {Desc: "Source IP prefix to match", ValueType: ValueCIDR},
+					"destination-prefix": {Desc: "Destination IP prefix to match", ValueType: ValueCIDR},
+					"source-port":        {Desc: "Source port to match", ValueType: ValueInteger},
+					"destination-port":   {Desc: "Destination port to match", ValueType: ValueInteger},
+					"protocol":           {Desc: "Protocol to match (tcp/udp/icmp/0..255)", ValueType: ValueIdentifier},
 					"interface": {Desc: "Interface to match", DynamicFn: func(cfg *config.Config) []string {
 						if cfg == nil || cfg.Interfaces.Interfaces == nil {
 							return nil
@@ -847,12 +890,13 @@ var OperationalTree = map[string]*Node{
 				"start": {Desc: "Start flow tracing"},
 				"stop":  {Desc: "Stop flow tracing"},
 			}},
-			"packet-drop": {Desc: "Monitor security packet drops", Children: map[string]*Node{
-				"source-prefix":      {Desc: "Source IP prefix to match"},
-				"destination-prefix": {Desc: "Destination IP prefix to match"},
-				"source-port":        {Desc: "Source port to match"},
-				"destination-port":   {Desc: "Destination port to match"},
-				"protocol":           {Desc: "Protocol to match (tcp/udp/icmp/0..255)"},
+			// #9505: handleMonitorSecurityPacketDrop loops over every argument.
+			"packet-drop": {Desc: "Monitor security packet drops", Options: true, Children: map[string]*Node{
+				"source-prefix":      {Desc: "Source IP prefix to match", ValueType: ValueCIDR},
+				"destination-prefix": {Desc: "Destination IP prefix to match", ValueType: ValueCIDR},
+				"source-port":        {Desc: "Source port to match", ValueType: ValueInteger},
+				"destination-port":   {Desc: "Destination port to match", ValueType: ValueInteger},
+				"protocol":           {Desc: "Protocol to match (tcp/udp/icmp/0..255)", ValueType: ValueIdentifier},
 				"from-zone": {Desc: "Ingress zone to match", DynamicFn: func(cfg *config.Config) []string {
 					if cfg == nil {
 						return nil
@@ -876,8 +920,8 @@ var OperationalTree = map[string]*Node{
 					}
 					return names
 				}},
-				"count": {Desc: "Number of packet drops to display (1..8192)"},
-				"node":  {Desc: "Cluster node (0, 1, all, local, primary)"},
+				"count": {Desc: "Number of packet drops to display (1..8192)", ValueType: ValueInteger},
+				"node":  {Desc: "Cluster node (0, 1, all, local, primary)", ValueType: ValueIdentifier},
 			}},
 		}},
 	}},
@@ -894,12 +938,14 @@ var OperationalTree = map[string]*Node{
 		}},
 		"security": {Desc: "Clear security statistics and tables", Children: map[string]*Node{
 			"flow": {Desc: "Clear flow information", Children: map[string]*Node{
-				"session": {Desc: "Clear session table entries", Children: map[string]*Node{
-					"source-prefix":      {Desc: "Filter sessions by source IP prefix"},
-					"destination-prefix": {Desc: "Filter sessions by destination IP prefix"},
-					"source-port":        {Desc: "Filter sessions by source port"},
-					"destination-port":   {Desc: "Filter sessions by destination port"},
-					"protocol":           {Desc: "Filter sessions by IP protocol"},
+				// #9505: the same parseSessionFilterMode loop as `show security flow
+				// session`.
+				"session": {Desc: "Clear session table entries", Options: true, Children: map[string]*Node{
+					"source-prefix":      {Desc: "Filter sessions by source IP prefix", ValueType: ValueCIDR},
+					"destination-prefix": {Desc: "Filter sessions by destination IP prefix", ValueType: ValueCIDR},
+					"source-port":        {Desc: "Filter sessions by source port", ValueType: ValueInteger},
+					"destination-port":   {Desc: "Filter sessions by destination port", ValueType: ValueInteger},
+					"protocol":           {Desc: "Filter sessions by IP protocol", ValueType: ValueIdentifier},
 					"zone": {Desc: "Filter sessions by security zone", DynamicFn: func(cfg *config.Config) []string {
 						if cfg == nil {
 							return nil
@@ -920,7 +966,7 @@ var OperationalTree = map[string]*Node{
 						}
 						return names
 					}},
-					"application": {Desc: "Filter sessions by application name"},
+					"application": {Desc: "Filter sessions by application name", ValueType: ValueIdentifier},
 					"nat-only":    {Desc: "Clear only sessions with NAT translation"},
 					"source-nat-pool": {Desc: "Clear sessions translated by a source NAT pool", DynamicFn: func(cfg *config.Config) []string {
 						if cfg == nil || cfg.Security.NAT.SourcePools == nil {
@@ -1136,8 +1182,9 @@ var OperationalTree = map[string]*Node{
 				}},
 			}},
 		}},
-		"routing": {Desc: "Test route lookup", Children: map[string]*Node{
-			"destination": {Desc: "Destination IP or prefix to look up"},
+		// #9505: testRouting loops over destination/instance in any order.
+		"routing": {Desc: "Test route lookup", Options: true, Children: map[string]*Node{
+			"destination": {Desc: "Destination IP or prefix to look up", ValueType: ValueCIDR},
 			"instance": {Desc: "Routing instance for route lookup", DynamicFn: func(cfg *config.Config) []string {
 				return routingInstanceNames(cfg) // #4866: nil-skip tolerated entries
 			}},
@@ -1155,23 +1202,30 @@ var OperationalTree = map[string]*Node{
 			}},
 		}},
 	}},
-	"ping": {Desc: "Ping remote host", Children: map[string]*Node{
+	// #9505: handlePing loops over the options after the target.
+	"ping": {Desc: "Ping remote host", Options: true, Children: map[string]*Node{
 		"<host>": {Desc: "Hostname or IP address of remote host"},
 		// #9064: each takes a real dispatcher-read VALUE (cli_request_ping.go
 		// reads count/source/size), so a bare leaf made the whole command
 		// CanonicalUnknown and a restricted login class was refused a command
 		// the CLI's own `usage:` string documents.
-		"count":  {Desc: "Number of ping requests to send", AcceptsArgs: true},
-		"source": {Desc: "Source address to use", AcceptsArgs: true},
-		"size":   {Desc: "Request data size in bytes", AcceptsArgs: true},
+		//
+		// #9505: exactly ONE value each. AcceptsArgs absorbed every later word,
+		// and the ping loop ignores a word it does not recognise, so
+		// `ping <host> count 5 junk` was authorized as a different string from
+		// the command that ran.
+		"count":  {Desc: "Number of ping requests to send", ValueType: ValueInteger},
+		"source": {Desc: "Source address to use", ValueType: ValueIPAddress},
+		"size":   {Desc: "Request data size in bytes", ValueType: ValueInteger},
 		"routing-instance": {Desc: "Routing instance for route lookup", DynamicFn: func(cfg *config.Config) []string {
 			return routingInstanceNames(cfg) // #4866: nil-skip tolerated entries
 		}},
 	}},
-	"traceroute": {Desc: "Trace route to remote host", Children: map[string]*Node{
+	// #9505: the same option loop as ping.
+	"traceroute": {Desc: "Trace route to remote host", Options: true, Children: map[string]*Node{
 		"<host>": {Desc: "Hostname or IP address of remote host"},
 		// #9064: takes a value, like ping's.
-		"source": {Desc: "Source address to use", AcceptsArgs: true},
+		"source": {Desc: "Source address to use", ValueType: ValueIPAddress},
 		"routing-instance": {Desc: "Routing instance for route lookup", DynamicFn: func(cfg *config.Config) []string {
 			return routingInstanceNames(cfg) // #4866: nil-skip tolerated entries
 		}},
@@ -1718,122 +1772,4 @@ func FilterPrefix(items []string, prefix string) []string {
 		}
 	}
 	return result
-}
-
-// CanonicalizeResult reports why Canonicalize could not resolve a word, so a
-// caller can tell "this is not a command" from "this abbreviation is ambiguous"
-// without re-walking the tree.
-type CanonicalizeResult int
-
-const (
-	// CanonicalOK — every keyword slot resolved.
-	CanonicalOK CanonicalizeResult = iota
-	// CanonicalUnknown — a word matched no keyword and no value slot could
-	// consume it.
-	CanonicalUnknown
-	// CanonicalAmbiguous — a word is a prefix of more than one keyword.
-	CanonicalAmbiguous
-)
-
-// Canonicalize expands an abbreviated operational command line to the one
-// spelling every consumer must agree on (#7172).
-//
-// Junos accepts unique prefixes, so `req sys reb` and `request system reboot`
-// are the same command. An authorization gate that matches a deny regex against
-// what the operator typed can therefore be stepped around by abbreviating, and
-// there is no amount of regex cleverness that fixes it — the regex is written
-// against one spelling and the input has many. Canonicalization is what makes
-// the input single-valued before matching.
-//
-// WHY NOT REUSE CompleteFromTree's canonWords WALK, which computes exactly this
-// and throws it away (see #5196 there): that walk is completion-shaped. It is
-// driven by a trailing `partial`, it returns early in several branches to yield
-// candidates, and it calls ContextDynamicFn providers — which need a
-// *config.Config and exist to enumerate live values, neither of which a
-// canonicalizer should require or trigger. Sharing resolveTreeWord (the actual
-// prefix rule) rather than the walk keeps the one thing that must agree in one
-// place, without dragging completion's needs into an authorization path.
-//
-// VALUE SLOTS KEEP THE RAW WORD, deliberately. A typed-leaf value, a
-// <placeholder> and a dynamic value are operator-supplied data, not keywords —
-// there is no canonical spelling to expand them to, and rewriting them would
-// change the command. This mirrors the same choice in CompleteFromTree's walk.
-//
-// THE BOOL IS NOT ADVISORY. On anything other than CanonicalOK the returned
-// words are the input unchanged, and a caller enforcing a restriction MUST fail
-// closed: it does not know what command it is holding, so it cannot know that a
-// deny regex fails to match it. Treating a failed canonicalization as "no match,
-// allow" is the bypass this function exists to close.
-func Canonicalize(tree map[string]*Node, words []string) ([]string, CanonicalizeResult) {
-	if len(words) == 0 {
-		return words, CanonicalOK
-	}
-	out := append([]string(nil), words...)
-	current := tree
-	var currentNode *Node
-	parentTyped := false
-
-	for wi, w := range words {
-		name, node, matches, ok := resolveTreeWord(current, w)
-		if !ok {
-			// Not a keyword at this level. A value slot may legitimately
-			// consume it — those keep the raw word.
-			if parentTyped {
-				parentTyped = false
-				continue
-			}
-			// #8304: AcceptsArgs is honoured HERE and not in the completion
-			// walkers above, which ask a different question — those decide what
-			// to OFFER, and a node with no completion source has nothing to add.
-			if currentNode != nil && (currentNode.HasDynamic() || currentNode.AcceptsArgs) {
-				continue
-			}
-			if ph := findPlaceholder(current); ph != nil {
-				if ph.Children != nil {
-					currentNode = ph
-					current = ph.Children
-				}
-				continue
-			}
-			// Ambiguity and absence are different operator errors and
-			// different security stories: an ambiguous prefix is a command the
-			// dispatcher will also refuse, while an unknown word may be a
-			// value slot this tree does not model.
-			if len(matches) > 1 {
-				return words, CanonicalAmbiguous
-			}
-			_ = wi
-			return words, CanonicalUnknown
-		}
-		out[wi] = name
-		currentNode = node
-		parentTyped = node.IsTypedLeaf()
-		// #8289: descend UNCONDITIONALLY, including to a leaf's nil child map.
-		// This used to `continue` when `node.Children == nil`, leaving `current`
-		// pointing at the PARENT map, so the next word resolved against the
-		// leaf's own SIBLINGS: `show version configuration` canonicalized OK as
-		// a three-word command.
-		//
-		// That is an RBAC bypass, and not the one it looks like. Both
-		// dispatchers run it as plain `show version` — `case "version"` in
-		// pkg/cli/cli_show.go and pkg/grpcapi/server_show.go both call a
-		// no-argument showVersion and drop the rest — so the trailing word is
-		// NOT executed as `show configuration`. The hazard is the reverse:
-		// `evaluateCommandRegex` decides on `strings.Join(canon, " ")`, so it
-		// judged the three-word string while the box ran the two-word command.
-		// An operator's anchored `deny-commands "^show version$"` therefore did
-		// not match, and appending ANY sibling keyword ran the denied command.
-		// Measured:
-		//
-		//	deny="^show version$"  line="show version"                -> denied
-		//	deny="^show version$"  line="show version configuration"  -> ALLOWED
-		//
-		// Assigning nil sends the next word into the `!ok` arm above, which
-		// still admits the legitimate consumers of a word after a keyword — a
-		// typed leaf's value (`parentTyped`), a dynamic node, a placeholder —
-		// and refuses anything else as CanonicalUnknown. Callers fail closed on
-		// that, per this function's own contract.
-		current = node.Children
-	}
-	return out, CanonicalOK
 }

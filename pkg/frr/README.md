@@ -212,6 +212,45 @@ as the literal operand `all`). Advisory rather than gate, per #1960: the
 tolerant load / HA config-sync paths must still accept a config the strict
 interface set does not explain.
 
+### Six operand classes have a commit validator AND a render belt (#9493)
+
+These operands reached the managed section with neither a commit-time
+validator nor a render belt:
+- BGP `local-address` (`update-source`);
+- the OSPF `virtual-link` neighbor and transit area;
+- IS-IS `net`;
+- OSPF/OSPFv3 `cost`;
+- BGP `multihop`;
+- object NAMES: policy-statement, term, prefix-list, community and as-path.
+
+A malformed value committed GREEN, and FRR rejected the rendered line, which
+fails the whole managed reload.
+
+The commit gate is one schema validator per leaf
+(`pkg/config/schema_validators_frr_operand_9493.go`). SchemaValidate runs on
+commit and commit-check only, so a persisted value still boots (#1960). A
+schema `validator:` runs only on a TYPED leaf, which is why the string leaves
+carry a `valueType`.
+
+The render belts cover the path the gate cannot reach:
+
+- **Omit with a warning:** a malformed `update-source`, `virtual-link` or `net`.
+- **Clamp:** `cost` to 65535 and `multihop` to 255. Omitting them would fall
+  back to FRR's defaults and pull traffic onto the link or drop a multihop
+  session.
+- **Alias:** every route-map / prefix-list / community-list / as-path name goes
+  through `frrName`. A safe name comes back unchanged, so renders stay
+  byte-identical. An unsafe one renders under a deterministic single-token
+  alias: the `sanitizeFRRIdent` fragment plus a hash of the full name, which
+  keeps `a b` and `a_b` apart. Names are aliased rather than omitted because
+  omitting `neighbor X route-map NAME out` REMOVES the outbound filter.
+  Access-list names are already hashed and sanitized by `routeFilterACLName`.
+
+`TestEveryRenderedObjectNameIsOneTokenAndResolves9493` is a behavioural census,
+not a list of sites. It renders a config whose every name carries a space and
+checks every reference against the definitions. A missed definition or
+reference site therefore shows up as a raw name or a dangling reference.
+
 ### BGP neighbor identity is a single FRR token (#6796)
 
 `n.Address` is rendered RAW at 24 sites in `protocols_render.go` — unlike every
@@ -1167,12 +1206,15 @@ step. Both are required — neither sees the other's case:
 - **`resolveRedistribute` never emits an invalid `redistribute <name>`
   line (#2223).** FRR's `redistribute` requires a source-protocol token
   (`connected`/`static`/`ospf`/`bgp`/`rip`/`isis`/`kernel`); a bare
-  policy-statement name or a typo is rejected by `frr-reload.py`, and
+  policy-statement name or a typo is rejected by FRR's parser, and
   because the line lives in the xpf-managed section that ONE rejected line
-  degrades the WHOLE reload (`frr-reload.py` exits non-zero on any
-  `CMD_WARNING_CONFIG_FAILED`, then the additive `vtysh -f` fallback
-  rejects it too) — every managed route/redistribute is lost, not just the
-  bad stanza. The commit-time strict validator accepts any DEFINED
+  fails the WHOLE reload. `frr-reload.py` exits non-zero, and the additive
+  `vtysh -f` fallback applies every other line but also exits non-zero on
+  that one (FRR stable/10.6 `vtysh_config_from_file` continues past a
+  rejected line and returns its error), so every retry fails the same way.
+  Additions still reach FRR; REMOVALS do not. A later commit that deletes a
+  route, neighbour or policy leaves it live in FRR for as long as the bad
+  line is rendered. The commit-time strict validator accepts any DEFINED
   policy-statement for a redistribute-backed export; it does NOT require the
   policy to carry a `from protocol`. So a policy that matches only `from
   community` / `from prefix-list` / `from as-path` passes commit but yields
@@ -1194,12 +1236,30 @@ step. Both are required — neither sees the other's case:
   `self` argument naming the enclosing router protocol (`ospf` / `ospf6` /
   `bgp` / `rip` / `isis`; `""` for callers with no enclosing protocol such as
   unit tests). FRR rejects a protocol redistributing into itself
-  (`redistribute ospf` under `router ospf`), and one rejected line degrades
+  (`redistribute ospf` under `router ospf`), and one rejected line fails
   the whole managed reload (#1880/#2223). Both render paths drop the self
   protocol: a bare self token returns `""` (skip+warn), and a policy-statement
   term whose `from protocol` names the self protocol is filtered out while its
   sibling non-self terms still render. Each `generateProtocols` call site
   passes its own protocol as `self`.
+- **`resolveRedistribute` drops a source outside the enclosing router's
+  address family (#9510).** FRR's `redistribute` grammar is per family.
+  `lib/route_types.pl` builds each daemon's source list with
+  `collect($daemon, ipv4, ipv6)`, so `ospf6`/`ripng` are not in ospfd's or
+  ripd's list and `ospf`/`rip` are not in ospf6d's. Such a line is rejected
+  at parse exactly like a typo. The commit gate cannot catch this, because a
+  `from protocol` token is valid or not per USE SITE, not per policy: the
+  same policy is valid under `router ospf6`. So both render paths filter at
+  the use site through `redistSourceFitsNode` (`redistribute_afi_9510.go`),
+  and a policy whose every `from protocol` was filtered says so in its warning
+  instead of claiming it has none. **BGP is the easy row to get wrong.** bgpd
+  is dual-stack, but a bare-token export is written directly under
+  `router bgp` (BGP_NODE), where `bgp_vty.c` installs only the IPv4 grammar
+  (`FRR_IP_REDIST_STR_BGPD`). `redistribute ospf6` is rejected there too;
+  the IPv6 grammar exists only under `address-family ipv6 unicast`, and this
+  renderer does not write redistribution there (#9667). IS-IS lists both
+  families, so nothing is filtered under `router isis`, but the plain
+  `redistribute <proto>` form is not IS-IS grammar at all (#9666).
 - **A policied family-less IPv6 BGP neighbor activates under ipv6 unicast,
   not ipv4 (#2941).** The "default-activate a family-less policied neighbor
   under ipv4 unicast" fall-through (#2473/#2490) is correct ONLY for an IPv4
@@ -1342,3 +1402,15 @@ step. Both are required — neither sees the other's case:
   case in the outcome switch: the gauge stayed 0, no retry debt was armed,
   and live FRR kept the stale forwarding state until the next commit or a
   daemon restart while the operator's commit reported success.
+
+**IS-IS redistribute uses isisd's grammar (#9666).** isisd installs only
+`redistribute <ipv4|ipv6> <proto> <level-1|level-2> [route-map X]`. The address
+family and the level are mandatory, so the OSPF-shaped `redistribute <proto>` was
+rejected for every `protocols isis export`, and one rejected line fails the whole
+managed reload (the #9510 mechanism). `resolveISISRedistribute` renders the isisd
+form from the same resolved sources (`redistributeEntries`) the other routers use:
+- the families come from `frrRedistSourceAFI` (ospf/rip IPv4 only, ospf6/ripng IPv6
+  only, the rest both);
+- the levels come from the router's is-type, through the same `CanonicalISISLevel`
+  the is-type line uses. level-1 renders level-1, level-1-2 renders one line per
+  level, and anything else renders the narrow level-2 default.

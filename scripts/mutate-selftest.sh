@@ -270,6 +270,37 @@ ck "a kill that does NOT name the target is not a kill" 	"ESCAPED(other tests fa
 # exists to prevent.
 ck "a VOID verdict is not refined by names" "VOID(build break)" 	"$(mutation_verdict_for_target 'VOID(build break)' TestTarget TestOther)"
 
+echo "== MESSAGE ATTRIBUTION (#9564) =="
+# One stream, three tests. TestTarget fails with a LIVENESS message; TestOther
+# fails with the violation text; TestQuoted's subtest fails with a message that
+# carries quotes, which the JSON encodes as \".
+cat > "$W/msg.json" <<'EOF'
+{"Action":"run","Test":"TestTarget"}
+{"Action":"output","Test":"TestTarget","Output":"    guard_test.go:10: LIVENESS: the parser found no anchors\n"}
+{"Action":"fail","Test":"TestTarget"}
+{"Action":"run","Test":"TestOther"}
+{"Action":"output","Test":"TestOther","Output":"    other_test.go:5: violation: field Proto disagrees on the Rust side\n"}
+{"Action":"fail","Test":"TestOther"}
+{"Action":"run","Test":"TestQuoted"}
+{"Action":"output","Test":"TestQuoted/sub","Output":"    q_test.go:7: want \"a b\" got \"c\"\n"}
+{"Action":"fail","Test":"TestQuoted/sub"}
+{"Action":"fail","Test":"TestQuoted"}
+EOF
+ck "1: the target fails WITH the expected message -> KILLED" "KILLED" \
+	"$(mutation_verdict_for_message KILLED TestTarget "LIVENESS: the parser" "$W/msg.json")"
+ck "2: the target fails with a DIFFERENT message -> KILLED-WRONG-MSG (the row that matters)" "KILLED-WRONG-MSG" \
+	"$(mutation_verdict_for_message KILLED TestTarget "violation: field" "$W/msg.json")"
+ck "3: the expected message is only in ANOTHER test's output -> KILLED-WRONG-MSG" "KILLED-WRONG-MSG" \
+	"$(mutation_verdict_for_message KILLED TestTarget "Proto disagrees on the Rust side" "$W/msg.json")"
+ck "4: an empty column leaves the verdict byte-identical" "KILLED" \
+	"$(mutation_verdict_for_message KILLED TestTarget "" "$W/msg.json")"
+ck "4b: a non-KILLED verdict is never refined" "ESCAPED(other tests failed: TestOther)" \
+	"$(mutation_verdict_for_message 'ESCAPED(other tests failed: TestOther)' TestTarget "LIVENESS" "$W/msg.json")"
+ck "4c: a VOID stays VOID" "VOID(build break)" \
+	"$(mutation_verdict_for_message 'VOID(build break)' TestTarget "LIVENESS" "$W/msg.json")"
+ck "5: a message with a quote matches through JSON escaping, in a subtest" "KILLED" \
+	"$(mutation_verdict_for_message KILLED TestQuoted 'want "a b" got' "$W/msg.json")"
+
 echo "== ANCHORING (#8213): every anchor variant fails somewhere =="
 # THE FIXTURE IS THE POINT. Three real failing tests in three different
 # shapes, including the spliced line captured verbatim from the #8000 matrix

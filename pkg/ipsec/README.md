@@ -61,6 +61,38 @@ the apply path pays no fsync (the file is regenerated on every apply).
   - The daemon records the loaded config for HA IPsec attribution from these hooks.
     `SetSwanctlForTesting` (`test_seams.go`) installs the swanctl exec double for other
     packages' tests.
+- `ApplyGeneration(ipsecCfg, generation string, hooks ApplyHooks) error` — `manager.go`,
+  marker in `generation.go` (#9641). `ApplyWithHooks`, and the file it writes ends with an
+  inert **generation marker**: `pools { xpf-gen-<generation> { addrs = 192.0.2.1/32 } }`.
+  No connection references the pool, so no SA can lease from or negotiate against it, and
+  a pool is not a connection. strongSwan 6.0.5 loads and lists it
+  (`testdata/swanctl_list_pools_*_9641.*`). `generation` must be a 64-hex config digest
+  (the daemon passes the configstore digest of the active config it applies). Anything
+  else, and `ApplyWithHooks`/`Apply`, writes `xpf-gen-unknown`. The marker is appended to
+  the render, not rendered inside it, so `renderConfig`'s other consumers are unchanged,
+  and the empty-config clear path removes the file, so charon then lists no marker. An
+  xpf node's `swanctl --list-pools` therefore shows one `xpf-gen-*` pool with no leases;
+  that is expected.
+- `LoadedGeneration() (string, error)` — `generation.go`. `swanctl --list-pools --raw`
+  (stdout-only seam, `swanctlTimeout`): the generation the single loaded marker names.
+  Errors: `ErrNoGenerationMarker` (no xpf-written file loaded, or one from an older xpf),
+  `ErrAmbiguousGenerationMarker`, or the exec error when charon cannot be asked. The marker
+  is IDENTITY, not proof: `--load-all` is not a transaction, so a partial load can leave
+  the pool and the connections at different generations.
+- `ListLoadedConns() (LoadedConns, error)`, `LoadedConns`, `(LoadedConns).SANames()`,
+  `(LoadedConns).Equal(o) bool` — `list_conns.go`, `generation.go`. What
+  `swanctl --list-conns --raw` reports: each loaded connection's children and
+  `local_addrs`/`remote_addrs`. `Equal` compares connection names exactly and each list as
+  a multiset. An unreachable charon is an error, never an empty set.
+- `ExpectedLoadedConns(cfg *config.Config) (LoadedConns, error)` — `generation.go`. What
+  charon lists once it has COMPLETELY loaded cfg as xpf renders it, which is the
+  validation a marker needs. The candidate renders as a whole: a hard render error is
+  returned, and a skipped VPN is excluded. Local addresses are replayed from configuration
+  alone (`prepareConfigFromConfig`, `policy_addr.go`, mirroring `PrepareConfig`'s
+  configured-address-first resolution). When a rendered connection's local address could
+  have come from the kernel (an unconfigured interface address, e.g. DHCP) or from a
+  DNS-derived family hint, the result is `ErrGenerationUnvalidatable`. Checked against
+  real 6.0.5 captures, including a local-address move that keeps every name.
 - `SANameIndex`, `BuildSANameIndex(ipsecCfg) SANameIndex`,
   `(SANameIndex).VPNs(saName) []string`, `(SANameIndex).Collisions() []string` —
   `policy.go`. The inverse of the render (#9511): every SA name
