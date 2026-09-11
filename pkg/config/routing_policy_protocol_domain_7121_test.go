@@ -8,8 +8,9 @@ import (
 // #7121: `policy-options policy-statement <p> term <t> from protocol <tok>` had
 // no value-domain check in ANY spelling. The token is rendered verbatim as
 // ` match source-protocol <tok>`, FRR rejects an unknown one, and ONE rejected
-// line degrades the whole managed reload (#1880/#2223) — so a single typo was a
-// green commit that could take down the managed FRR section.
+// line fails the whole managed reload (#1880/#2223) — so a single typo was a
+// green commit that stopped stale-config removal for the whole managed FRR
+// section.
 func TestRoutingPolicyProtocolDomainIsGated_7121(t *testing.T) {
 	cfgWith := func(proto string) *Config {
 		return &Config{PolicyOptions: PolicyOptionsConfig{

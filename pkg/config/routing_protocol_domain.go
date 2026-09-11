@@ -13,9 +13,11 @@ import "strings"
 // commit-time gate could not consult it and an unknown token committed clean.
 //
 // That matters more than an ordinary typo: FRR rejects an unknown
-// `source-protocol`, and one rejected line degrades the WHOLE managed reload
-// (#1880/#2223). A single `from protocol ospv;` was a green commit that could
-// take down the managed FRR section.
+// `source-protocol`, and one rejected line fails the WHOLE managed reload
+// (#1880/#2223). The `vtysh -f` fallback still applies every other line, but no
+// stale route, neighbour or policy is removed anywhere in the managed section
+// while the line is rendered. A single `from protocol ospv;` was a green commit
+// that froze the managed FRR section.
 //
 // NOT the same domain as the identically-spelled `firewall filter ... from
 // protocol`, which is IP protocols (tcp/udp/gre/icmp) and is gated separately by
