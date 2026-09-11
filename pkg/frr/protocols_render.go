@@ -789,10 +789,18 @@ func (m *Manager) generateProtocols(ospf *config.OSPFConfig, ospfv3 *config.OSPF
 						"interface", iface.Name, "authentication_type", iface.AuthType,
 						"accepted", config.AuthTypeSpellings())
 				}
+				// #9496: the per-interface pair goes through the same #9050 belt as
+				// every other routing-auth site. sanitizeFRRValue maps a TAB into a
+				// splitter and passes a space through, so a whitespace secret arriving
+				// via a tolerant load, peer sync or rollback rendered a splittable line.
 				if config.AuthTypeIsMD5(iface.AuthType) {
-					fmt.Fprintf(&b, " isis password md5 %s\n", sanitizeFRRValue(iface.AuthKey.Reveal()))
+					if tok, ok := authTokenOrOmit("isis-interface-md5", iface.AuthKey.Reveal()); ok {
+						fmt.Fprintf(&b, " isis password md5 %s\n", tok)
+					}
 				} else {
-					fmt.Fprintf(&b, " isis password clear %s\n", sanitizeFRRValue(iface.AuthKey.Reveal()))
+					if tok, ok := authTokenOrOmit("isis-interface-clear", iface.AuthKey.Reveal()); ok {
+						fmt.Fprintf(&b, " isis password clear %s\n", tok)
+					}
 				}
 			}
 			// `isis bfd` / `isis bfd profile <name>` are interface-scoped
