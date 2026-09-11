@@ -10916,11 +10916,13 @@ reserved for whole-dataplane selection where a rewrite shim
   `routing-instances` root with the names each compile path's own group
   expansion lands: the generic compile (no node variables, and on an undefined
   `"${node}"` group the node0 retry on the same tree, as
-  `compileConfigWithOpts` does) and each cluster node's expansion (node0,
-  node1). An expansion that fails contributes nothing, because the compile
-  that performs it refuses the config. Every view is computed on both nodes
-  from the same candidate, so both nodes decide identically. Earlier revisions
-  approximated expansion without running it (reachable groups, merge contexts,
+  `compileConfigWithOpts` does) and each cluster node's expansion (node0 and
+  node1, plus the requested node when a node compile passes any other ID,
+  since `compileConfigForNodeWithOpts` accepts one). An expansion that fails
+  contributes nothing, because the compile that performs it refuses the
+  config. Every view is computed on both nodes from the same candidate, so
+  both nodes decide identically. Earlier revisions approximated expansion
+  without running it (reachable groups, merge contexts,
   `apply-groups-except`), and each approximation disagreed with expansion
   somewhere; the expansion views are exact by construction. The lenient
   warning no longer names a quarantined instance: the union spans every view,

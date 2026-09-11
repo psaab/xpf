@@ -157,7 +157,7 @@ routing-instances {
 		t.Fatalf("expected 2 top-level routing-instances roots, got %d", got)
 	}
 
-	if _, err := validateRoutingInstanceTableIDCollisionAST(tree, false); err == nil {
+	if _, err := validateRoutingInstanceTableIDCollisionAST(tree, -1, false); err == nil {
 		t.Fatalf("expected a routing-instance table-id collision error across split roots "+
 			"(instances %q/%q both fold to table %d), got nil (#5691)",
 			a, b, StableRoutingInstanceTableID(a))

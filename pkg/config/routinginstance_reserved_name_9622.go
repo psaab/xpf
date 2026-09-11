@@ -62,9 +62,9 @@ func IsReservedRoutingInstanceName(name string) bool {
 // compileRoutingInstances quarantines the instance with ONE warning, on the tree
 // the node actually compiles. The node still boots (#1960 no-brick) and the
 // daemon never plans the instance.
-func validateReservedRoutingInstanceNamesAST(tree *ConfigTree) error {
+func validateReservedRoutingInstanceNamesAST(tree *ConfigTree, nodeID int) error {
 	var hits []string
-	for name := range routingInstanceNameUnionAST(tree) {
+	for name := range routingInstanceNameUnionAST(tree, nodeID) {
 		if IsReservedRoutingInstanceName(name) {
 			hits = append(hits, name)
 		}

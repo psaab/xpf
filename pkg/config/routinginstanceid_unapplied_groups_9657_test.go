@@ -146,7 +146,7 @@ func TestRoutingInstanceNameScanSkipsApplyStatements_9657(t *testing.T) {
 	if len(errs) > 0 {
 		t.Fatalf("fixture must parse: %v", errs)
 	}
-	names := routingInstanceNameUnionAST(tree)
+	names := routingInstanceNameUnionAST(tree, -1)
 	for _, kw := range []string{"apply-groups", "apply-groups-except", "apply-macro"} {
 		if _, ok := names[kw]; ok {
 			t.Errorf("#9657: the routing-instance name union counts the statement %q as an instance: %v", kw, names)
@@ -493,5 +493,47 @@ func TestTableIDGateMirrorsTheGenericNodeRetry_9657(t *testing.T) {
 	}
 	if _, err := compile9657(t, text, false); err == nil || !strings.Contains(err.Error(), "table-id collision") {
 		t.Errorf("#9657: the generic retry lands ri116, so the collision must be refused on the strict path, got %v", err)
+	}
+}
+
+// CompileConfigForNode accepts any node ID and expands that node's own groups.
+// node0's and node1's views never see `groups node2`, so the gates must count
+// the requested node's view: a collision and a reserved instance that only node
+// 2's expansion lands must still be refused on node 2's strict compile.
+func TestGatesCountTheRequestedNodesView_9657(t *testing.T) {
+	assertFixtureCollides9657(t)
+	parse := func(text string) *ConfigTree {
+		t.Helper()
+		tree, errs := NewParser(text).Parse()
+		if len(errs) > 0 {
+			t.Fatalf("fixture must parse: %v", errs)
+		}
+		return tree
+	}
+	node2 := func(body string) string {
+		return "groups {\n    node0 {\n        system {\n            host-name a;\n        }\n    }\n" +
+			"    node1 {\n        system {\n            host-name b;\n        }\n    }\n" +
+			"    node2 {\n        " + body + "    }\n}\napply-groups \"${node}\";\n"
+	}
+	collide := node2(braced116_9657) + activeRI7_9657
+	if _, err := CompileConfigForNode(parse(collide), 2); err == nil || !strings.Contains(err.Error(), "table-id collision") {
+		t.Errorf("#9657: node 2's own expansion lands ri116 beside ri7, so its strict compile must refuse the collision, got %v", err)
+	}
+	cfg, err := CompileConfigForNodeLenient(parse(collide), 2)
+	if err != nil {
+		t.Fatalf("lenient node 2 compile: %v", err)
+	}
+	quarantined := false
+	for _, w := range cfg.Warnings {
+		if strings.Contains(w, "QUARANTINED") {
+			quarantined = true
+		}
+	}
+	if !quarantined {
+		t.Errorf("control: node 2's expansion must land both instances and quarantine one; instances=%v", riNames9657(cfg))
+	}
+	reserved := node2("routing-instances {\n            mgmt {\n                instance-type virtual-router;\n            }\n        }\n")
+	if _, err := CompileConfigForNode(parse(reserved), 2); err == nil || !strings.Contains(err.Error(), "reserved for") {
+		t.Errorf("#9657: a reserved mgmt instance in node 2's group must be refused on node 2's strict compile, got %v", err)
 	}
 }
