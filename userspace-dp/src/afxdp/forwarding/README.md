@@ -471,8 +471,21 @@ forward-direction collision.
   for the structurally identical host-inbound case. Alert with
   `max_over_time(xpf_vrf_overlap_pbr_admitted[1h]) > 0`; the reporter shares
   the commit gate's detector, so the metric and the advisory can never describe
-  different detections. If #7160's Option B lands, the metric goes to zero and
-  stays there, which is itself the confirmation.
+  different detections. #7160 shipped, and on such a box the metric still does
+  not go to zero: flows PBR steers in from default-instance ingress stay routing
+  domain 0, which is the residual the gate refuses (#9809).
+
+  #9809 made the gate see that residual in every spelling the PBR builder
+  installs. Prefix-lists expand, and a bare host is a /32 or /128. `any`, a
+  term with no address match, and an empty `except` list are match-all steered
+  space, which pairs only with steered space from another filter. So
+  default-instance steering beside an unrelated member-interface instance still
+  commits (the shape the FBF lab overlay loads on the HA cluster config), and so
+  does a DSCP catch-all after an address term in one multi-WAN filter, where the
+  first matching term decides. A literal
+  0.0.0.0/0 still pairs with everything, as before. A bare routing-instance
+  member counts every configured unit, as the FIB binds it, in the gate and in
+  the interface-routes rib-group leak alike.
 
   The warning states the limitation and points at #2387. Track B is no
   longer a candidate — it is decided and shipped (#7160 phases 1 and 2), and
