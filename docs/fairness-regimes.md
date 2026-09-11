@@ -15,8 +15,12 @@ with the structural ceilings (a 1+3 distribution has a ~58% CoV
 ceiling regardless of scheduler perfection — see "Structural CoV
 ceiling — worked examples" below).
 
-The userspace AF_XDP zero-copy dataplane locks each flow to the
-worker that processes its RSS-hashed RX queue (the upstream Linux
+The userspace AF_XDP zero-copy dataplane serves each packet on the
+worker whose socket owns the RX queue the NIC delivered it to. By
+default that queue is RSS-hashed, so a flow stays on one worker; an
+exact ntuple rule can move an established flow to another queue (see
+"Hardware steering and the floor"). The queue-to-socket binding
+itself cannot move (the upstream Linux
 kernel enforces this in `net/xdp/xsk.c`,
 where `xsk_rcv_check()` validates `xs->dev == xdp->rxq->dev` and
 `xs->queue_id == xdp->rxq->queue_index` before delivery; this
@@ -30,7 +34,8 @@ across workers have failed:
 - **#840** (RSS rebalance): IMPLEMENTED + REVERTED — net-negative
   on fairness (CoV 37.7% with vs 18.5% baseline)
 - **#1203** (n-tuple steering / cross-binding): WITHDRAWN as
-  architectural anti-pattern
+  architectural anti-pattern (for what its measurement does and does
+  not show at HEAD, see "Hardware steering and the floor" below)
 - **#1215** + **#937** (cross-worker shared per-flow signal +
   ingress XDP_REDIRECT): both PLAN-KILLED. The kernel constraint
   that derails #937's clean form is upstream Linux's per-socket
@@ -187,12 +192,17 @@ The shape (high at small `N`, decreasing as `N` grows) is the
 takeaway. A small flow count over 6 queues is *expected* to be
 bimodal.
 
-### Why hardware steering does NOT beat the floor
+### Hardware steering and the floor
 
 The natural question is "the NIC supports flow steering — can we
-just steer flows one-per-queue?" #1649 researched this directly on
-the deployed NIC and the answer is no. Findings (verbatim ethtool
-evidence in issue #1649, research plan at commit `36fcd1b8`):
+just steer flows one-per-queue?" It has two answers, measured
+separately. No *static* rule set beats the RSS floor for uncoordinated
+ephemeral source ports (#1649, below).
+Re-placing *established* flows does beat it at HEAD (#9488, "Re-placement
+measured at HEAD" below). Whether moving an established flow is
+*safe* is an open architectural question, #9778. #1649's findings
+(verbatim ethtool evidence in issue #1649, research plan at commit
+`36fcd1b8`):
 
 - **The #937/#840-named prerequisite EXISTS.** The mlx5 VF accepts
   exact-5-tuple → RX-queue ntuple rules
@@ -217,21 +227,89 @@ evidence in issue #1649, research plan at commit `36fcd1b8`):
 
 - **Even placement of `N ≤ M` flows requires negative
   dependence** — steering each new flow *away from* already-occupied
-  queues. That is occupancy-aware reactive re-steer, which AF_XDP
-  per-queue UMEM ownership forbids: the SYN is RSS-placed before any
-  exact rule can exist (the ephemeral port is unknowable in
-  advance), so any later correction *moves an established flow* —
-  the forbidden re-steer pattern. #1203/#789 already built and
-  measured that reactive closed-loop form on this exact cluster:
-  **49–55% CoV at P=12** (gate ≤20% not met), closed with "per-flow
-  CoV is bounded by within-queue scheduling, not placement."
+  queues. The SYN is RSS-placed before any exact rule can exist (the
+  ephemeral port is unknowable in advance), so any occupancy-aware
+  correction *moves an established flow*. #1765 ended with that move
+  adjudicated architecturally forbidden. The verdict stands until
+  #9778 answers whether the move is actually unsafe under AF_XDP
+  per-queue UMEM ownership, given #1748's barriered
+  ownership-transfer protocol. The measurement below shows the move
+  *works*; it says nothing about whether it is safe.
 
 Two external reviewers (Codex + Antigravity) independently
-reproduced the Monte-Carlo and confirmed the kill. The general
-theorem: no static placement can create the negative dependence
-between flows needed to make `N ≤ M` flows avoid occupied queues;
-only a reactive controller observing live occupancy can, and that
-is a re-steer.
+reproduced the Monte-Carlo, and that half of #1649's kill stands.
+The general theorem: no static placement can create the negative
+dependence between flows needed to make `N ≤ M` flows avoid
+occupied queues; only a reactive controller observing live
+occupancy can, and that means moving established flows.
+
+#### Re-placement measured at HEAD (#9488)
+
+Re-placement was measured by hand, with no controller, at build
+`e1cebdf8b` on `loss:xpf-userspace-fw0` (`ge-0-0-1`, 6 RX queues →
+6 workers). Each run is a 70 s `iperf3 -P 12 -p 5210` push to queue
+10 (`iperf-24g`, `24g exact`, so `shared_exact` with flow-fair MQFQ
+on; equal-flow-enforcement not configured). A run is either
+**unsteered**, or **re-pinned** at t≈14 s with one exact-5-tuple
+`ethtool -N` rule per established client socket, `action <i mod 6>`
+(#1748 R1's recipe). There were three runs per state, in alternating
+order. Every run, with its per-worker flow counts and retransmits,
+is in [`log/9488.md`](log/9488.md). Per-flow CoV is `population_cov`
+(`test/incus/fairness_cov.py`) over per-stream 5 s means; Cstruct is
+`xpf_fairness_cstruct` for queue 10.
+
+| state | per-flow CoV, t45–70 (9 windows) | Cstruct | aggregate |
+|---|---:|---:|---:|
+| unsteered (RSS draw) | 41.5–55.4%, mean 47.2% | 0.447–0.601 | 22.05–22.74 G |
+| re-pinned, `[2,2,2,2,2,2]` | 6.7–13.9%, mean 9.7% | 0.000 | 22.64–22.80 G |
+
+How to read it:
+
+- **Re-placement beats `Cstruct + ε`.** Every post-re-pin window
+  (t45–70) sat at 6.7–13.9%, far below the unsteered runs'
+  `Cstruct + 0.05` over the same windows (0.497–0.651). Aggregate did
+  not change. Placement sets most of the per-flow spread at P=12 on
+  this queue: in every t45–70 window, unsteered CoV sits within
+  −13.9…+10.7 pp of its draw's Cstruct.
+- **The re-pinned residual is larger than Gate 2's `ε = 0.05`.** It
+  is 6.7–13.9 pp over a Cstruct of 0. These are 5 s windows of 1 s
+  iperf3 samples, not the Gate 2 harness method, so this is not a
+  Gate 2 verdict.
+- **Moving all 12 flows at once costs a retransmit burst while the
+  rules go in.** The 13 rules went in over about 3 s. The three runs
+  saw 2681 / 2851 / 4770 retransmits in the 1 s intervals t14–16 and
+  at most 3 over the rest of each run. The lowest 1 s aggregate in
+  those intervals was 19.8 / 21.4 / 22.0 G, and no stream fell below
+  100 Mb/s in any 1 s interval from t13 to t25.
+- **#1203/#789's 49–55% CoV at P=12 is no longer the citation.** It
+  was a closed-loop controller's result (PR head `979482dff`,
+  2026-05-05), not a measured balanced placement. Its final comment
+  attributed the number to the flow-fair MQFQ path being gated off
+  for `shared_exact` and to 1024 flow buckets. The code it ran on
+  already had `queue.flow_fair = queue.exact` (since `2a20cc8a0`,
+  #785 Phase 3) and `COS_FLOW_FAIR_BUCKETS = 4096` (since
+  `891f07525`). The MQFQ gate it cited was only in a stale doc
+  comment in `types/cos.rs`, which #1210 later scrubbed. Why that
+  controller stayed at 49–55% was never established.
+
+**#1748 R1: 16.8% → 3.8%, and how to read it.** R1 used the same
+re-pin recipe, run once on 2026-06-02 at master `ecdc16f2e` with
+`iperf3 -i 5`. Per-flow CoV was **16.8%** on the natural draw
+`[2,2,1,1,4,2]` at 16.24 G. After the re-pin it was **2.3–4.2%**
+(3.8% at t55–60) on `[2,2,2,2,2,2]` at 17.5–17.8 G, with 7601
+retransmits over the run. Read it as:
+
+- **Evidence that the move works on established flows.** The HEAD
+  runs above reproduce that.
+- **Not a measure of the placement effect.** It was one run with no
+  unsteered control, so the drop cannot be separated from run-to-run
+  variance. It also ran on different code at a lower aggregate
+  (16.2 G against about 22.7 G here), and its baseline sat 33 pp
+  below its own draw's Cstruct (16.8% against 0.50), where no HEAD
+  t45–70 window sat more than 13.9 pp below its own. Per-flow rates
+  on that run were not set by per-worker share, and what did set
+  them was not recorded. Its smaller delta therefore cannot size the
+  placement effect at HEAD; the table above does.
 
 ### What this means operationally
 
