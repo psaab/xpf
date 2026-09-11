@@ -565,6 +565,19 @@ type DHCPLeaseInfo struct {
 	DNS       []string `json:"dns,omitempty"`
 	LeaseTime string   `json:"lease_time"`
 	Obtained  string   `json:"obtained"`
+	// DelegatedPrefixes carries IPv6 prefix delegations (IA_PD), attached to the
+	// interface's inet6 lease or, on a PD-only interface, to a standalone inet6
+	// row with no address (#9413, mirroring gRPC's #5382 aggregation).
+	DelegatedPrefixes []DHCPDelegatedPrefixInfo `json:"delegated_prefixes,omitempty"`
+}
+
+// DHCPDelegatedPrefixInfo is one IA_PD delegation as reported over REST (#9413).
+type DHCPDelegatedPrefixInfo struct {
+	Interface         string `json:"interface"`
+	Prefix            string `json:"prefix"`
+	PreferredLifetime string `json:"preferred_lifetime"`
+	ValidLifetime     string `json:"valid_lifetime"`
+	Obtained          string `json:"obtained"`
 }
 
 // RouteInfo holds route information.
