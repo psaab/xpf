@@ -75,10 +75,13 @@ xpf_cluster_build_probe() {
 		source "${dir}/cluster-env.sh" >/dev/null 2>&1 || true
 		printf '%s\n%s\n' "${FW0:-}" "${FW1:-}"
 	)"
+	# -n: without it `incus exec` forwards this loop's stdin to the remote
+	# command, so the first node's call drains the node list and only FW0 is
+	# ever probed. A binary swapped on FW1 then diffs clean (#9683).
 	while read -r ref; do
 		[[ -n "$ref" ]] || continue
 		sha="$(timeout "$XPF_CLUSTER_BUILD_TIMEOUT" \
-			incus exec "$ref" -- sha256sum "$XPF_CLUSTER_BUILD_BIN" 2>/dev/null \
+			incus exec -n "$ref" -- sha256sum "$XPF_CLUSTER_BUILD_BIN" 2>/dev/null \
 			| awk '{print $1}')"
 		printf '%s %s\n' "$ref" "${sha:-unknown}"
 	done <<<"$refs" | sort

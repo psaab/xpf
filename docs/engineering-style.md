@@ -1946,6 +1946,17 @@ they repeatedly bite:
     cannot name its subject is not evidence. `XPF_CLUSTER_BUILD_STRICT=1`
     promotes the boundary report to fatal. Covered by
     `make test-cluster-lock-lib` (mocked incus, no cluster).
+  - **`incus exec` reads its stdin (#9683).** Inside a loop fed on stdin
+    (`while read -r x; do ...; done <<<"$list"`, `... | while read`,
+    `done < file`), an `incus exec` without `-n` forwards the loop's input
+    to the remote command. The FIRST call drains the rest of the list, and
+    the body runs once, silently, exit 0. Measured: the post-deploy
+    reassert transferred only RG0, so every deploy that needed RG1/RG2
+    back failed as "node0 is not primary for every redundancy group"; and
+    the build-identity probe above sampled only FW0. Use `incus exec -n` in
+    any such loop. A mock `incus` that ignores stdin cannot see this, so
+    the deploy-lib and build-identity self-test mocks drain stdin unless
+    `-n` is given, like the real client.
   - Queue diagnosis: `cat /tmp/xpf-cluster.owner` +
     `fuser -v /tmp/xpf-cluster.lock`. A dead recorded pid with the
     lock still held means a child inherited the fd (pre-#1875 raw

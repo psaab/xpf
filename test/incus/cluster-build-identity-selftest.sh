@@ -21,9 +21,25 @@ fail() { echo "FAIL: $*" >&2; exit 1; }
 mkdir -p "$T/bin" "$T/state"
 cat >"$T/bin/incus" <<'MOCK'
 #!/usr/bin/env bash
-# incus exec <ref> -- sha256sum <path>
+# incus exec [-n] <ref> -- sha256sum <path>
+# Like the real client, `incus exec` without -n reads its stdin (#9683): inside
+# a stdin-fed loop it drains the loop's input. Emulated so a probe that forgets
+# -n fails case 2b instead of passing it. The drain reads only input that is
+# already there, so it never blocks.
 [[ "$1" == "exec" ]] || exit 1
-ref="$2"
+shift
+drain=1 ref=""
+for a in "$@"; do
+	case "$a" in
+	--) break ;;
+	-n|--disable-stdin) drain=0 ;;
+	-*) ;;
+	*) [[ -n "$ref" ]] || ref="$a" ;;
+	esac
+done
+if (( drain )) && [[ ! -t 0 ]]; then
+	while read -r -t 0 _ && IFS= read -r _; do :; done
+fi
 f="${XPF_SELFTEST_STATE}/${ref//[^A-Za-z0-9_.-]/_}"
 [[ -f "$f" ]] || exit 1          # node unreachable
 printf '%s  /usr/local/sbin/xpfd\n' "$(cat "$f")"
@@ -64,6 +80,22 @@ rc=0; xpf_cluster_build_diff >/dev/null 2>&1 || rc=$?
 rc=0; xpf_assert_cluster_build_unchanged 2>/dev/null || rc=$?
 [[ "$rc" == 1 ]] || fail "assert must FAIL on a changed build (rc=$rc)"
 ok "changed build: diff reports CHANGED and the measurement assert fails"
+
+# 2b: #9683 -- the SECOND node's binary replaced. Case 2 changes node0, which
+#    a probe that samples only its first node still sees. The probe runs
+#    `incus exec` inside a loop fed the node list on stdin; without -n the
+#    first call drains that list, so only FW0 is ever sampled and a swap on FW1
+#    diffs clean. The mock drains stdin like the real client, so this case
+#    fails on exactly that build.
+set_sha node0 "$A"; set_sha node1 "$A"
+xpf_cluster_build_record "$XPF_CLUSTER_BUILD_BASELINE"
+probed=$(xpf_cluster_build_probe | wc -l)
+[[ "$probed" == 2 ]] \
+	|| fail "the probe must sample EVERY node; it sampled $probed of 2 (#9683)"
+set_sha node1 "$B"
+rc=0; xpf_cluster_build_diff >/dev/null 2>&1 || rc=$?
+[[ "$rc" == 1 ]] || fail "a binary changed on the SECOND node must diff as CHANGED (rc=$rc, #9683)"
+ok "changed build on the second node: every node is sampled and the diff reports CHANGED"
 
 # 3: the report names BOTH shas -- knowing WHICH build was measured is
 #    what made the originating incident traceable
