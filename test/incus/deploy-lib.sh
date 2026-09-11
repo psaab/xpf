@@ -447,6 +447,11 @@ deploy_reassert_primary_node0() {
 		die "post-deploy primary reassert: could not read cluster status from $rinst after ${DEPLOY_REASSERT_READ_TRIES} attempts. NOT continuing: the pre-#6591 code warned and returned success here, leaving the next HA smoke to discover an un-reasserted cluster in its own preflight."
 	fi
 
+	# Every `incus exec` in a loop fed on stdin (`done <<<"$rgs"`) takes -n.
+	# Without it the client forwards the loop's stdin to the remote command, so
+	# the FIRST call drains the rest of $rgs and the body runs for RG0 only:
+	# RG1 and RG2 were never transferred, and a deploy that needed them failed
+	# this reassert as "node0 is not primary for every redundancy group" (#9683).
 	while read -r rg; do
 		[[ -n "$rg" ]] || continue
 		# Clear the PEER's manual pin FIRST. A pinned peer cannot participate
@@ -460,10 +465,10 @@ deploy_reassert_primary_node0() {
 		# every redundancy group" -- indistinguishable from an HA regression in
 		# whatever branch happened to deploy next (#7688).
 		if [[ -n "$pinst" ]]; then
-			incus exec "$pinst" -- cli -c "request chassis cluster failover reset redundancy-group $rg" >/dev/null 2>&1 || true
+			incus exec -n "$pinst" -- cli -c "request chassis cluster failover reset redundancy-group $rg" >/dev/null 2>&1 || true
 		fi
-		incus exec "$rinst" -- cli -c "request chassis cluster failover reset redundancy-group $rg" >/dev/null 2>&1 || true
-		incus exec "$rinst" -- cli -c "request chassis cluster failover redundancy-group $rg node 0" >/dev/null 2>&1 || true
+		incus exec -n "$rinst" -- cli -c "request chassis cluster failover reset redundancy-group $rg" >/dev/null 2>&1 || true
+		incus exec -n "$rinst" -- cli -c "request chassis cluster failover redundancy-group $rg node 0" >/dev/null 2>&1 || true
 	done <<<"$rgs"
 
 	# #7771: WAIT for the transfers to commit before clearing the pins. The
@@ -492,10 +497,11 @@ deploy_reassert_primary_node0() {
 	done
 
 	# Clear the pins. UNCONDITIONAL: see above -- an un-cleared pin blocks the
-	# next election and is what #7688 was filed about.
+	# next election and is what #7688 was filed about. -n for the same reason
+	# as the transfer loop: without it only RG0's pin is cleared (#9683).
 	while read -r rg; do
 		[[ -n "$rg" ]] || continue
-		incus exec "$rinst" -- cli -c "request chassis cluster failover reset redundancy-group $rg" >/dev/null 2>&1 || true
+		incus exec -n "$rinst" -- cli -c "request chassis cluster failover reset redundancy-group $rg" >/dev/null 2>&1 || true
 	done <<<"$rgs"
 
 	# Individual requests are tolerated (|| true) because the VERDICT is the

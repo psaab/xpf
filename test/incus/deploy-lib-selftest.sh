@@ -74,8 +74,21 @@ incus() {
 	local verb="$1"; shift
 	case "$verb" in
 	exec)
+		# Like the real client, `incus exec` without -n reads its stdin (#9683).
+		# Inside a `while read ... done <<<"$list"` loop that drains the rest of
+		# the list, so the loop body runs once. Emulate it, or every cell here is
+		# blind to a lib call that forgets -n. The drain never blocks: it reads
+		# only input that is already there, and it leaves a terminal alone.
+		local drain=1
+		while [[ "$1" == -* && "$1" != "--" ]]; do
+			[[ "$1" == "-n" || "$1" == "--disable-stdin" ]] && drain=0
+			shift
+		done
 		shift          # instance name
 		[[ "$1" == "--" ]] && shift
+		if (( drain )) && [[ ! -t 0 ]]; then
+			while read -r -t 0 _ && IFS= read -r _; do :; done
+		fi
 		_fake_exec "$@"
 		;;
 	file)
@@ -991,8 +1004,10 @@ test_reassert_clears_the_peer_manual_pin() {
 	# cell would stay green with the peer reset deleted, because node0 is reset
 	# twice per RG anyway and the texts are identical.
 	local peer node0
-	peer=$(grep -c '^exec fake:vm1 -- cli -c request chassis cluster failover reset redundancy-group' "$FAKE_CALL_LOG" || true)
-	node0=$(grep -c '^exec fake:vm0 -- cli -c request chassis cluster failover reset redundancy-group' "$FAKE_CALL_LOG" || true)
+	# (-n )? keeps the count keyed on the CALL, not on its flag spelling; the
+	# mock's stdin drain is what makes a missing -n visible here (#9683).
+	peer=$(grep -cE '^exec (-n )?fake:vm1 -- cli -c request chassis cluster failover reset redundancy-group' "$FAKE_CALL_LOG" || true)
+	node0=$(grep -cE '^exec (-n )?fake:vm0 -- cli -c request chassis cluster failover reset redundancy-group' "$FAKE_CALL_LOG" || true)
 	if (( peer == 2 && node0 == 4 )); then
 		ok "reassert: clears the PEER's manual pin once per RG (peer=$peer, node0=$node0)"
 	else
