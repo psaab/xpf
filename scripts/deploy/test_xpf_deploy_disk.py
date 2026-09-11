@@ -356,11 +356,20 @@ class GoldenProbeIndeterminateTests(unittest.TestCase):
                          "the golden was overwritten despite an unprobeable sibling "
                          "— this is the #6760 corruption path")
 
-    def test_qemu_img_absent_still_means_no_backing(self):
-        # The ONE case the original reasoning covered and which must NOT start
-        # blocking: qemu-img missing entirely means this tool never created an
-        # overlay here (#5043). Restoring the real probe with no qemu-img on
-        # PATH must yield a determinate None, not an indeterminate.
+    def test_qemu_img_absent_is_indeterminate_9325(self):
+        # #9325 reversed this cell. It insisted a missing qemu-img stay "no
+        # backing", on the claim that anything else "would block every install
+        # on a host without qemu-img". Measured, that is false: the probe only
+        # runs on a SIBLING overlay, so the change moves exactly one state, and
+        # it is the state this guard exists for.
+        #
+        #   state                                  before     after
+        #   fresh host, no golden yet              PROCEED    PROCEED
+        #   golden present, no sibling .qcow2      PROCEED    PROCEED
+        #   golden present + a sibling overlay     PROCEED    REFUSED
+        #
+        # A qemu-img that cannot be run is "could not ask": an overlay created
+        # before it left PATH, or by another tool, still backs onto the golden.
         xpf_deploy._qcow2_backing_file = self._orig_backing
         orig_run = xpf_deploy.subprocess.run
 
@@ -371,11 +380,8 @@ class GoldenProbeIndeterminateTests(unittest.TestCase):
 
         xpf_deploy.subprocess.run = no_qemu_img
         try:
-            self.assertIsNone(xpf_deploy._qcow2_backing_file("/nonexistent.qcow2"),
-                              "a missing qemu-img must stay DETERMINATE-none; "
-                              "making it indeterminate would block every install "
-                              "on a host without qemu-img, which the #5043 "
-                              "reasoning explicitly covers")
+            with self.assertRaises(xpf_deploy._ProbeIndeterminate):
+                xpf_deploy._qcow2_backing_file("/nonexistent.qcow2")
         finally:
             xpf_deploy.subprocess.run = orig_run
 
@@ -427,18 +433,22 @@ class GoldenAtomicReplaceTests(unittest.TestCase):
         src, golden = self._paths()
         before = open(golden, "rb").read()
 
-        real_copy = xpf_deploy.shutil.copyfile
+        # #9325: the temp is written through the mkstemp descriptor with
+        # copyfileobj now, so that is where the interruption is injected.
+        real_copy = xpf_deploy.shutil.copyfileobj
 
         def boom(a, b, *args, **kw):
             real_copy(a, b, *args, **kw)   # write the temp fully...
             raise KeyboardInterrupt("interrupted after the temp write")
 
-        xpf_deploy.shutil.copyfile = boom
+        xpf_deploy.shutil.copyfileobj = boom
         try:
             with self.assertRaises(KeyboardInterrupt):
                 xpf_deploy._atomic_install_golden(src, golden)
         finally:
-            xpf_deploy.shutil.copyfile = real_copy
+            xpf_deploy.shutil.copyfileobj = real_copy
+        self.assertEqual([n for n in os.listdir(os.path.dirname(golden)) if "xpf-tmp" in n], [],
+                         "an interruption must not leave the temp behind either")
 
         self.assertEqual(open(golden, "rb").read(), before,
                          "an interruption before the rename must leave the golden "

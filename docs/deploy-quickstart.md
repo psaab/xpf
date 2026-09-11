@@ -125,6 +125,14 @@ scripts/deploy/xpf-deploy.py destroy examples/deploy/standalone-passthrough.yaml
 scripts/deploy/xpf-deploy.py --hypervisor libvirt destroy examples/deploy/standalone-passthrough.yaml
 ```
 
+`destroy` removes a disk only after the hypervisor **affirmatively** reports the
+VM gone (#8977, #9325). If `virsh`/`incus` cannot be run from the invoking
+context, cannot reach its daemon, or still reports the domain after `destroy` and
+`undefine` (a running libvirt domain survives `undefine` as a transient domain),
+it refuses and names the files it left. Stop the VM, check that
+`virsh dominfo <name>` / `incus info <name>` reports it missing, then run
+`destroy` again.
+
 The `<name>-day0.iso` drive is written **owner-only (0600)** in the build
 directory and lingers there until `destroy` removes it. That ISO embeds
 `xpf.conf` verbatim — the most secret-bearing artifact on the box
