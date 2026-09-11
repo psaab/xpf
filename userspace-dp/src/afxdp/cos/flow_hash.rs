@@ -6,7 +6,7 @@
 // owning them.
 
 use crate::afxdp::types::{CoSPendingTxItem, CoSQueueRuntime, COS_FLOW_FAIR_BUCKET_MASK};
-use crate::session::SessionKey;
+use crate::session::{SessionKey, TunnelDiscriminator};
 use std::net::IpAddr;
 
 /// XorShift-style mix step used by both the per-queue salt fallback
@@ -18,6 +18,15 @@ fn mix_cos_flow_bucket(seed: &mut u64, value: u64) {
         .wrapping_add(0x9e3779b97f4a7c15)
         .wrapping_add(*seed << 6)
         .wrapping_add(*seed >> 2);
+}
+
+/// #9645: mix a u32 as its low and high 16-bit halves. The mix step carries
+/// only upward and the bucket index keeps the low bits, so a single mix of a
+/// u32 whose two values differ only above bit 15 cannot move the bucket.
+#[inline(always)]
+fn mix_u32_halves_for_cos_bucket(seed: &mut u64, value: u32) {
+    mix_cos_flow_bucket(seed, u64::from(value & 0xffff));
+    mix_cos_flow_bucket(seed, u64::from(value >> 16));
 }
 
 /// Draw a fresh per-queue hash salt from the kernel.
@@ -62,6 +71,40 @@ fn exact_cos_flow_bucket(queue_seed: u64, flow_key: Option<&SessionKey>) -> u16 
     }
     mix_cos_flow_bucket(&mut seed, flow_key.src_port as u64);
     mix_cos_flow_bucket(&mut seed, flow_key.dst_port as u64);
+    // #9645: the routing domain and the tunnel discriminator are part of
+    // `SessionKey` identity, so identical 5-tuples in two routing instances,
+    // or in two GRE tunnels that differ only by key, are different flows.
+    // Hashing only the 5-tuple put them in the SAME bucket for every seed,
+    // so overlapping tenant address space split one fair share by
+    // construction rather than by chance. Each field is mixed only when it is
+    // not the default, so a flow in the default routing instance with no
+    // discriminator keeps exactly the pre-#9645 bucket mapping (the seed-0
+    // pins and the 5201 fairness baseline stay valid).
+    //
+    // Tags are small values and every u32 is mixed as two 16-bit halves:
+    // `mix_cos_flow_bucket` only carries UPWARD and the bucket keeps the low
+    // bits, so a difference that lives only above bit 15 (a tag placed at
+    // bit 32, or two GRE keys that differ only in their upper half) would
+    // otherwise never reach the bucket.
+    if flow_key.routing_domain != 0 {
+        mix_cos_flow_bucket(&mut seed, 1);
+        mix_u32_halves_for_cos_bucket(&mut seed, flow_key.routing_domain);
+    }
+    // Exhaustive with no `_` arm, as in `session/key.rs`: a new discriminator
+    // class has to decide here whether it separates fair shares.
+    match flow_key.discriminator {
+        TunnelDiscriminator::None => {}
+        TunnelDiscriminator::Unkeyed => mix_cos_flow_bucket(&mut seed, 2),
+        TunnelDiscriminator::Keyed(key) => {
+            mix_cos_flow_bucket(&mut seed, 3);
+            mix_u32_halves_for_cos_bucket(&mut seed, key);
+        }
+        TunnelDiscriminator::Pptp(handle) => {
+            mix_cos_flow_bucket(&mut seed, 4);
+            mix_u32_halves_for_cos_bucket(&mut seed, handle);
+        }
+        TunnelDiscriminator::Unparseable => mix_cos_flow_bucket(&mut seed, 5),
+    }
     seed as u16
 }
 
