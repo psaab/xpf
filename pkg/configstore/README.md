@@ -1571,6 +1571,34 @@ persistence failures on every persist path;
 
 An ABSENT DB is NOT an error (`Load` returns nil; start-fresh).
 
+### Shared cluster commit: strict on both node views (#9619)
+
+On a chassis cluster one candidate is committed on one node and config-sync
+carries the raw group tree to the other, which ingests it on the tolerant path
+(`SyncApply` -> `compileTreeLenient`, where strict gates only warn). So
+`compileTreeStrict` checks the peer's `${node}` expansion as well as the local
+one. It runs the `pkg/config` peer-effective registry first (#5876 source NAT,
+#4785 IPIP), then `validatePeerStrictPipeline`, which repeats the local strict
+steps for the peer node: `schemaValidateExpandedTreeForNode`,
+`config.CompileConfigForNode` and `crossCheckRAIntervals`. A failure is
+reported as `chassis cluster peer node<N>: ...` wrapping the gate's own error.
+
+- The peer tree is a clone with `rewriteRetiredDataplaneType(SyncCaller)`
+  applied (#6861 F2), because that is what the standby compiles. A peer-only
+  retired `dataplane-type` leaf therefore does not refuse the commit.
+- `crossCheckNodeID` (#4185) is not run for the peer. It compares the leaf with
+  the checking host's node-id file, and a config written for one node with a
+  literal `chassis cluster node 0` is an accepted input on that node. A literal
+  leaf that reaches the other node by config-sync is warned about on that
+  node's tolerant ingress.
+- Standalone (`nodeID < 0`) runs no peer check. `Store.Load` and
+  `Store.SyncApply` never call `compileTreeStrict`, so a persisted config that
+  is invalid for this node still loads with warnings.
+- `CheckText` (`xpfd check-config`) shares the function, so day-0 validation
+  with `-node-id 0|1` refuses a shared config that is invalid on either node.
+  The shipped `docs/ha-cluster*.conf` pass for both node ids
+  (`TestShippedHAConfigsCheckCleanOnBothNodes_9619`).
+
 ## Audit journal (#1896)
 
 `.config.journal` (next to the config file) is a JSONL audit trail

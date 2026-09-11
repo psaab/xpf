@@ -301,6 +301,10 @@ func TestCommitCheck_AcceptsGroupDefinedForwardingClass(t *testing.T) {
 	cfgPath := filepath.Join(t.TempDir(), "config")
 	writeStoredConfig(t, cfgPath,
 		"set groups node0 class-of-service forwarding-classes queue 5 iperf-video",
+		// #9619: node1's group too. A clustered commit is now strict-checked on
+		// the peer's view as well, and with only node0 defined node1's
+		// `${node}` names an undefined group, which node1 cannot load.
+		"set groups node1 class-of-service forwarding-classes queue 5 iperf-video",
 		`set apply-groups "${node}"`,
 		"set firewall family inet filter f1 term t1 then forwarding-class iperf-video")
 

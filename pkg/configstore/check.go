@@ -15,7 +15,9 @@ import (
 //
 // nodeID selects cluster ${node} expansion (0/1); pass -1 for
 // standalone, which keeps the historical "${node} → node0" validation
-// fallback from schemaValidateExpandedTreeForNode.
+// fallback from schemaValidateExpandedTreeForNode. With 0 or 1 the PEER
+// node's expansion is strict-checked too (#9619), because a shared config
+// reaches the peer by config-sync.
 //
 // This is the validation gate behind `xpfd check-config` (#1879): the
 // first-boot config-drive loader validates an untrusted day-0 config
