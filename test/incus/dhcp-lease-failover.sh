@@ -75,6 +75,10 @@ DHCP_CLIENT_IFACE="${DHCP_CLIENT_IFACE:-eth0}"
 KEA_MEMFILE4="${KEA_MEMFILE4:-/var/lib/kea/kea-leases4.csv}"
 KEA_MEMFILE6="${KEA_MEMFILE6:-/var/lib/kea/kea-leases6.csv}"
 REBOOT_WAIT="${REBOOT_WAIT:-60}"
+# How long to wait for the lease-sync push to pre-seed the standby. The push is
+# change-polled every 2s and fully re-sent every 30s (pkg/daemon
+# daemon_dhcp_lease_sync.go), so 30s covers a missed change poll.
+LEASE_SYNC_WAIT="${LEASE_SYNC_WAIT:-30}"
 DHCP_V6="${DHCP_V6:-0}"
 # #9729 fixture provisioning (see the header).
 DHCP_PROVISION="${DHCP_PROVISION:-1}"
@@ -319,16 +323,27 @@ main() {
 		pass "client A acquired a v6 lease"
 	fi
 
-	info "2) Wait for the lease-sync push + standby pre-seed, then gate byte-exactness"
-	sleep 3
+	info "2) Wait for the lease-sync push to pre-seed the standby, then gate byte-exactness"
+	# #9729 run 4: a fixed 3s sleep read the standby memfile before the
+	# asynchronous push landed, and the post-failover cells then proved the
+	# lease HAD synced. Poll for the leased address instead of guessing.
+	local seeded=0 waited=0
+	while [ "$waited" -lt "$LEASE_SYNC_WAIT" ]; do
+		if ssh_fw "$STANDBY" "grep -q '^${addr4},' '$KEA_MEMFILE4'" 2>/dev/null; then
+			seeded=1
+			break
+		fi
+		sleep 1
+		waited=$((waited + 1))
+	done
 	assert_memfile_header "$STANDBY" "$KEA_MEMFILE4" "$GOLDEN_HEADER4" 4
 	if [ "$DHCP_V6" = "1" ]; then
 		assert_memfile_header "$STANDBY" "$KEA_MEMFILE6" "$GOLDEN_HEADER6" 6
 	fi
-	if ! ssh_fw "$STANDBY" "grep -q '^${addr4},' '$KEA_MEMFILE4'"; then
-		fail "leased address $addr4 not present in standby pre-seed memfile"
+	if [ "$seeded" = "1" ]; then
+		pass "leased address $addr4 present in standby pre-seed memfile after ${waited}s"
 	else
-		pass "leased address $addr4 present in standby pre-seed memfile"
+		fail "leased address $addr4 not present in standby pre-seed memfile after ${LEASE_SYNC_WAIT}s"
 	fi
 
 	info "3) Hard failover — reboot the RG0 primary ($PRIMARY)"
