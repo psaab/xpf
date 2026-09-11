@@ -81,77 +81,60 @@ b="$(iperf_throughput_verdict 5 '[SUM] garbage')"
 [[ "$b" == *"unparseable"* ]] || bad "unparseable verdict must say so, got: $b"
 ok "absent and unparseable verdicts are distinguishable"
 
-# --- WIRING: the lib must actually be reached from test-failover.sh --------
-# Binding the lib alone would leave a green if someone deleted the CALL from
-# the production path — the shape that has repeatedly produced false
-# confidence. A behavioural probe of test-failover.sh needs a cluster, so this
-# is a structural guard on the one caller, and it is deliberately narrow:
-# it asserts the wiring exists, not that the surrounding logic is correct.
-FAILOVER="${SCRIPT_DIR}/test-failover.sh"
-[[ -f "$FAILOVER" ]] || bad "test-failover.sh not found at $FAILOVER"
-
-grep -q 'source "${SCRIPT_DIR}/iperf-throughput-lib.sh"' "$FAILOVER" \
-	|| bad "test-failover.sh does not source iperf-throughput-lib.sh"
-ok "test-failover.sh sources the lib"
-
-grep -q 'iperf_throughput_verdict "$MIN_THROUGHPUT" "$sum_line"' "$FAILOVER" \
-	|| bad "test-failover.sh does not call iperf_throughput_verdict — the cell would go silent again"
-ok "test-failover.sh calls iperf_throughput_verdict"
-
-# The catch-all is what makes the caller total. Without it an unknown status
-# falls through the case and emits nothing — reintroducing #6897 one level up.
-awk '/^throughput_verdict=/,/^esac$/' "$FAILOVER" | grep -qE '^\*\)[[:space:]]+fail ' \
-	|| bad "the throughput verdict case has no catch-all '*) fail' — an unhandled status would emit no cell"
-ok "the verdict case has a catch-all that fails loudly"
-
-# The old Gbits-only parse must be gone; if it comes back it silently
-# reintroduces the literal "0" that matched neither branch.
-if grep -q "grep -oP '\[\\d.\]+\\s+Gbits'" "$FAILOVER"; then
-	bad "the Gbits-only inline parse is back in test-failover.sh"
-fi
-ok "the Gbits-only inline parse is gone"
-
-# ── #7673: the gate must not measure a SHAPED CoS class ────────────────────
+# --- WIRING + the #7673 PORT AGREEMENT, for EVERY HA smoke with a throughput cell ---
+# Binding the lib alone would leave a green if someone deleted the CALL from a
+# production path -- the shape that has repeatedly produced false confidence. A
+# behavioural probe of these harnesses needs a cluster, so these are structural
+# guards on each caller: the wiring exists, not that the surrounding logic is
+# correct.
 #
-# iperf3 defaults to destination port 5201, and cos-iperf-config.set maps 5201
-# to `iperf-100m`, a `transmit-rate 100m exact` class. Measuring that against
-# MIN_THROUGHPUT=1.0 Gbps fails by construction, at ~92-94 Mbits/s, with every
-# failover assertion passing -- which reads exactly like a forwarding
-# regression rather than like a misdirected probe.
+# #9690/#9691: these cells used to read test-failover.sh ONLY, and its four
+# siblings kept both defects it had fixed: a Gbits-only parse with no else
+# (#6897), and the 5201 default port that cos-iperf-config.set shapes to 100m
+# (#7673). The list is every harness that starts an iperf3 client against
+# IPERF_TARGET and judges its throughput.
 #
-# These assert the AGREEMENT between two files rather than pinning either to a
-# literal. Pinning the port alone would encode which side is trusted, and the
-# side that was wrong here is the one nobody suspected.
+# The port cells assert the AGREEMENT between each harness and the CoS set rather
+# than pinning either to a literal. Pinning the port alone would encode which
+# side is trusted, and the side that was wrong in #7673 is the one nobody
+# suspected. Port to class is read in two steps (port to term, term to class)
+# rather than assuming term 11.
 COS_SET="$(dirname "$0")/cos-iperf-config.set"
+SMOKES=(test-failover.sh test-double-failover.sh test-chained-crash.sh test-active-active.sh test-stress-failover.sh)
+for smoke in "${SMOKES[@]}"; do
+	f="${SCRIPT_DIR}/${smoke}"
+	[[ -f "$f" ]] || bad "$smoke not found at $f"
 
-grep -q -- '-p ${IPERF_PORT}' "$FAILOVER" \
-	|| bad "test-failover.sh does not pass -p \${IPERF_PORT} to iperf3 — it will use the 5201 default, which is the 100m-shaped class"
-ok "the iperf3 client is given an explicit port"
+	grep -q 'source "${SCRIPT_DIR}/iperf-throughput-lib.sh"' "$f" \
+		|| bad "$smoke does not source iperf-throughput-lib.sh"
+	grep -q 'iperf_throughput_verdict "$MIN_THROUGHPUT" "$sum_line"' "$f" \
+		|| bad "$smoke does not call iperf_throughput_verdict -- its throughput cell can go silent again (#6897/#9690)"
+	# The catch-all is what makes the caller total. Without it an unknown status
+	# falls through the case and emits nothing -- #6897 one level up.
+	awk '/^throughput_verdict=/,/^esac$/' "$f" | grep -qE '^\*\)[[:space:]]+fail ' \
+		|| bad "$smoke: the throughput verdict case has no catch-all '*) fail' -- an unhandled status would emit no cell"
+	# No inline Gbits-only parse may come back, in either the grep -oP or the
+	# grep -oiE spelling; it silently reintroduces the value that matched no branch.
+	if grep -vE '^[[:space:]]*#' "$f" | grep -qE "grep -o[a-zA-Z]* ['\"][^'\"]*Gbits"; then
+		bad "$smoke: an inline Gbits-only throughput parse is back"
+	fi
+	ok "$smoke: sources the lib, calls the total verdict with a catch-all, no inline Gbits parse"
 
-port=$(sed -n 's/^IPERF_PORT="\${IPERF_PORT:-\([0-9]*\)}"/\1/p' "$FAILOVER")
-[ -n "$port" ] || bad "could not read the IPERF_PORT default out of test-failover.sh — this cell would otherwise pass having checked nothing"
-ok "IPERF_PORT default is readable ($port)"
-
-# Which forwarding-class does that port land in, per the CoS config the smoke
-# applies? Read it in two steps -- port to term, term to class -- rather than
-# assuming it is still term 11.
-term=$(sed -n "s/^set firewall family inet filter bandwidth-output term \([0-9]*\) from destination-port ${port}$/\1/p" "$COS_SET" | head -1)
-[ -n "$term" ] || bad "port $port matches no 'from destination-port' term in cos-iperf-config.set — the smoke would be measuring an unclassified path"
-ok "port $port is classified by filter term $term"
-
-fc=$(sed -n "s/^set firewall family inet filter bandwidth-output term ${term} then forwarding-class \(.*\)$/\1/p" "$COS_SET" | head -1)
-[ -n "$fc" ] || bad "filter term $term has no 'then forwarding-class' line — cannot tell which class port $port lands in"
-ok "port $port maps to forwarding-class $fc"
-
-# The class must be UNSHAPED: its scheduler must carry no transmit-rate.
-sched=$(sed -n "s/^set class-of-service scheduler-maps [^ ]* forwarding-class $fc scheduler \(.*\)$/\1/p" "$COS_SET" | head -1)
-[ -n "$sched" ] || bad "forwarding-class $fc has no scheduler in the scheduler-map — cannot tell whether it is shaped"
-ok "forwarding-class $fc uses scheduler $sched"
-
-if grep -q "^set class-of-service schedulers $sched transmit-rate" "$COS_SET"; then
-	bad "the smoke's iperf port $port lands in $fc/$sched, which HAS a transmit-rate — the throughput gate is measuring a deliberately shaped class (#7673)"
-fi
-ok "scheduler $sched carries no transmit-rate (unshaped)"
+	grep -q -- '-p ${IPERF_PORT}' "$f" \
+		|| bad "$smoke does not pass -p \${IPERF_PORT} to iperf3 -- it measures the 5201 default, the 100m-shaped class (#7673/#9691)"
+	port=$(sed -n 's/^IPERF_PORT="\${IPERF_PORT:-\([0-9]*\)}"/\1/p' "$f")
+	[ -n "$port" ] || bad "could not read the IPERF_PORT default out of $smoke -- this cell would otherwise pass having checked nothing"
+	term=$(sed -n "s/^set firewall family inet filter bandwidth-output term \([0-9]*\) from destination-port ${port}$/\1/p" "$COS_SET" | head -1)
+	[ -n "$term" ] || bad "$smoke: port $port matches no 'from destination-port' term in cos-iperf-config.set -- the smoke would be measuring an unclassified path"
+	fc=$(sed -n "s/^set firewall family inet filter bandwidth-output term ${term} then forwarding-class \(.*\)$/\1/p" "$COS_SET" | head -1)
+	[ -n "$fc" ] || bad "$smoke: filter term $term has no 'then forwarding-class' line -- cannot tell which class port $port lands in"
+	sched=$(sed -n "s/^set class-of-service scheduler-maps [^ ]* forwarding-class $fc scheduler \(.*\)$/\1/p" "$COS_SET" | head -1)
+	[ -n "$sched" ] || bad "$smoke: forwarding-class $fc has no scheduler in the scheduler-map -- cannot tell whether it is shaped"
+	if grep -q "^set class-of-service schedulers $sched transmit-rate" "$COS_SET"; then
+		bad "$smoke: iperf port $port lands in $fc/$sched, which HAS a transmit-rate -- the throughput gate is measuring a deliberately shaped class (#7673/#9691)"
+	fi
+	ok "$smoke: -p \${IPERF_PORT} default $port -> term $term -> $fc/$sched, unshaped"
+done
 
 echo
 echo "iperf-throughput-lib self-test: $PASS passed"

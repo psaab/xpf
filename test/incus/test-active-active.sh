@@ -37,8 +37,17 @@ xpf_enter_destructive_cluster_cell "test-active-active $*" "$0" "$@"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=test/incus/cluster-env.sh
 source "${SCRIPT_DIR}/cluster-env.sh"
+# shellcheck source=test/incus/iperf-throughput-lib.sh
+source "${SCRIPT_DIR}/iperf-throughput-lib.sh"
 
 IPERF_TARGET="${IPERF_TARGET:-$IPERF_TARGET4}"
+# #9691: measure the UNSHAPED class. iperf3 defaults to port 5201, which
+# cos-iperf-config.set classifies as iperf-100m (transmit-rate 100m exact) on
+# the reth0.80 path to IPERF_TARGET4, so this gate's throughput verdict depended
+# on whether CoS was left applied on the shared cluster. #7673 fixed the same
+# in test-failover.sh; iperf-throughput-selftest.sh asserts, for every HA smoke,
+# that this port still maps to an unshaped class.
+IPERF_PORT="${IPERF_PORT:-5211}"
 IPERF_DURATION=90       # seconds — enough to span two failovers + settling
 IPERF_STREAMS=8
 SETTLE_WAIT=3           # seconds to let VRRP + election settle
@@ -127,7 +136,7 @@ sleep 1
 info "Phase 1: Starting iperf3 -P${IPERF_STREAMS} -t${IPERF_DURATION} → ${IPERF_TARGET}"
 
 incus exec "$CLUSTER_LAN_HOST" -- bash -c \
-	"iperf3 --forceflush --connect-timeout 5000 -t ${IPERF_DURATION} -c ${IPERF_TARGET} -P ${IPERF_STREAMS} > /tmp/iperf3-active-active.log 2>&1 &"
+	"iperf3 --forceflush --connect-timeout 5000 -t ${IPERF_DURATION} -c ${IPERF_TARGET} -p ${IPERF_PORT} -P ${IPERF_STREAMS} > /tmp/iperf3-active-active.log 2>&1 &"
 
 sleep 8  # all parallel streams must be fully established before failover
 
@@ -280,20 +289,20 @@ done
 # Check iperf3 completed successfully
 if incus exec "$CLUSTER_LAN_HOST" -- grep -q "iperf Done" /tmp/iperf3-active-active.log 2>/dev/null; then
 	pass "iperf3 completed successfully"
-
-	# Extract final throughput
-	throughput=$(incus exec "$CLUSTER_LAN_HOST" -- grep '\[SUM\].*sender' /tmp/iperf3-active-active.log 2>/dev/null \
-		| grep -oP '[\d.]+\s+Gbits' | grep -oP '[\d.]+' || echo "0")
-
-	if [[ -n "$throughput" ]] && awk "BEGIN{exit !($throughput >= $MIN_THROUGHPUT)}"; then
-		pass "iperf3 throughput: ${throughput} Gbps (>= ${MIN_THROUGHPUT} Gbps)"
-	else
-		fail "iperf3 throughput too low: ${throughput} Gbps (expected >= ${MIN_THROUGHPUT} Gbps)"
-	fi
 else
 	iperf_log=$(incus exec "$CLUSTER_LAN_HOST" -- tail -5 /tmp/iperf3-active-active.log 2>/dev/null || echo "(no log)")
 	fail "iperf3 did not complete: $iperf_log"
 fi
+
+# #9690: one TOTAL throughput cell from iperf-throughput-lib.sh. The inline
+# block parsed "Gbits" only and judged a sub-Gbit run as "0 Gbps" (#6897 fixed the same in test-failover.sh).
+sum_line=$(incus exec "$CLUSTER_LAN_HOST" -- grep '\[SUM\].*sender' /tmp/iperf3-active-active.log 2>/dev/null | tail -1 || true)
+throughput_verdict=$(iperf_throughput_verdict "$MIN_THROUGHPUT" "$sum_line")
+case "$throughput_verdict" in
+PASS\ *) pass "${throughput_verdict#PASS }" ;;
+FAIL\ *) fail "${throughput_verdict#FAIL }" ;;
+*) fail "iperf3 throughput: unexpected verdict '${throughput_verdict}'" ;;
+esac
 
 # ── Cleanup & Results ────────────────────────────────────────────────
 
