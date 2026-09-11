@@ -81,17 +81,32 @@ func oversizeReply9322(c net.Conn) {
 	if _, err := c.Write([]byte(`{"ok":true,"session_deltas":[`)); err != nil {
 		return
 	}
-	// One element, repeated. 4 MiB per write, past the 64 MiB cap.
+	// One element, repeated in 256 KiB writes, until past the EFFECTIVE cap.
+	// The socket cells shrink it (smallResponseCap9697), so this crosses in
+	// milliseconds instead of streaming and decoding 64 MiB.
 	elem := []byte(`{"session_id":1,"owner_rg":1,"src_ip":"2001:db8::1","dst_ip":"2001:db8::2"},`)
-	chunk := make([]byte, 0, 4<<20)
-	for len(chunk) < 4<<20 {
+	chunk := make([]byte, 0, 256<<10)
+	for len(chunk) < 256<<10 {
 		chunk = append(chunk, elem...)
 	}
-	for i := 0; i < (MaxControlResponseBytes/len(chunk))+2; i++ {
+	for i := int64(0); i < controlResponseCapBytes/int64(len(chunk))+2; i++ {
 		if _, err := c.Write(chunk); err != nil {
 			return
 		}
 	}
+}
+
+// smallResponseCap9697 shrinks the response cap for one cell (#9697). Crossing
+// the real 64 MiB cap takes long enough under load to outrun the socket's
+// round-trip deadline (3 s for the session socket and a small control
+// request), and then the cell reports the deadline, not the cap. It is what
+// the cell asserts, not a timing test. The cells that call it are not
+// parallel, so they finish before any t.Parallel test resumes.
+func smallResponseCap9697(t *testing.T) {
+	t.Helper()
+	prev := controlResponseCapBytes
+	controlResponseCapBytes = 1 << 20
+	t.Cleanup(func() { controlResponseCapBytes = prev })
 }
 
 // preReplyClose is the POSITIVE CONTROL: the helper accepts, reads the request,
@@ -127,6 +142,7 @@ func managerOnSocket9322(t *testing.T, sock string) *Manager {
 // RED at master: the oversize arm produces the #1961 "helper rejected it before
 // replying" sentence, identical to the control arm.
 func TestControlSocketNamesTheResponseCap9322(t *testing.T) {
+	smallResponseCap9697(t)
 	oversize := func(t *testing.T) error {
 		dir := shortSockDir9322(t)
 		sock := filepath.Join(dir, "c.sock")
@@ -164,6 +180,7 @@ func TestControlSocketNamesTheResponseCap9322(t *testing.T) {
 // — so this cell asserts the wrapper is still errSessionHelperUnreachable AND
 // that the cap is now named inside it.
 func TestSessionSocketNamesTheResponseCap9322(t *testing.T) {
+	smallResponseCap9697(t)
 	run := func(t *testing.T, reply func(net.Conn)) error {
 		dir := shortSockDir9322(t)
 		// sessionSocketPath() derives the session socket from the control
@@ -192,6 +209,7 @@ func TestSessionSocketNamesTheResponseCap9322(t *testing.T) {
 // It returns the error BARE, so before #9322 a truncation here surfaced as an
 // unadorned "unexpected EOF" with nothing naming the cap at all.
 func TestBootProbeNamesTheResponseCap9322(t *testing.T) {
+	smallResponseCap9697(t)
 	run := func(t *testing.T, reply func(net.Conn)) error {
 		dir := shortSockDir9322(t)
 		sock := filepath.Join(dir, "b.sock")
@@ -227,7 +245,7 @@ func assertCapVsPreReplyClose9322(t *testing.T, oversize, preReplyClose func(*te
 		t.Errorf("the over-cap error does not name the cap.\n got: %v\nwant a message containing %q",
 			capErr, capMarker)
 	}
-	if !strings.Contains(capErr.Error(), fmt.Sprintf("%d", int64(MaxControlResponseBytes))) {
+	if !strings.Contains(capErr.Error(), fmt.Sprintf("%d", controlResponseCapBytes)) {
 		t.Errorf("the over-cap error does not name the byte ceiling: %v", capErr)
 	}
 	if strings.Contains(capErr.Error(), rejectMarker) {
@@ -394,4 +412,19 @@ func min9322(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// TestResponseCapSeamDefaultsToTheConst9697 pins what the #9697 seam must
+// never change: outside a cell that shrinks it, the enforced cap and the named
+// cap are MaxControlResponseBytes.
+func TestResponseCapSeamDefaultsToTheConst9697(t *testing.T) {
+	if controlResponseCapBytes != MaxControlResponseBytes {
+		t.Fatalf("controlResponseCapBytes = %d, want MaxControlResponseBytes (%d)", controlResponseCapBytes, int64(MaxControlResponseBytes))
+	}
+	if got := boundedResponseReader(strings.NewReader("")).remaining; got != MaxControlResponseBytes {
+		t.Fatalf("boundedResponseReader budget = %d, want MaxControlResponseBytes (%d)", got, int64(MaxControlResponseBytes))
+	}
+	if msg := responseCapError("status", io.EOF).Error(); !strings.Contains(msg, fmt.Sprintf("%d", int64(MaxControlResponseBytes))) {
+		t.Fatalf("responseCapError does not name MaxControlResponseBytes: %s", msg)
+	}
 }
