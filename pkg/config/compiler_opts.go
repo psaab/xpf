@@ -753,7 +753,10 @@ type compileOpts struct {
 	// unrecognized statement is refused only on the #9595 structural line (a
 	// constraint-shaped value on an otherwise protocol-wide application, or a
 	// set member statement naming a real application); #6524's stray beside a
-	// retained constraint stays armed, and the residual is the #9603 decision.
+	// retained constraint stays armed. #9603 also refuses a real Junos
+	// application statement xpf does not implement (uuid, rpc-program-number,
+	// icmp6-type, ...) whatever its shape, and keeps a misspelling beside a
+	// retained constraint as the measured, documented residual.
 	// Commit stays strict so the operator's next edit fails loudly. This is an
 	// AST/typed-config compile decision and deliberately does NOT live in
 	// SchemaValidate (applications stay opaque there). Same doctrine as

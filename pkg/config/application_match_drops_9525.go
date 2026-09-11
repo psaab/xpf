@@ -110,6 +110,9 @@ func ApplicationMatchDrops(app *Application) []string {
 	if reason := unknownStatementProtocolWide9595(app); reason != "" {
 		out = append(out, reason)
 	}
+	if reason := unimplementedJunosApplicationLeaf9603(app); reason != "" {
+		out = append(out, reason)
+	}
 	return out
 }
 
