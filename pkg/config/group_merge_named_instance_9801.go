@@ -9,6 +9,13 @@ var zonesSchema9801 = schemaSecurity.children["zones"]
 // includes instance args, such as `security-zone <name>` or
 // `system syslog host <host>`. For anything else it returns nil, which leaves
 // the leaf-list and scalar override paths unchanged.
+//
+// A multi-value leaf (`multi` or `valueList`) is excluded too, such as a static
+// route's `next-hop [ a b ]` or `system ntp server`. Its keys are a list of
+// values, not one instance. Matched by its first member, a group's
+// `next-hop 192.0.2.2;` missed `next-hop [ 192.0.2.1 192.0.2.2 ];`, was adopted,
+// and compiled a duplicate next hop; the reversed list did not (d64625101,
+// Codex review round 1).
 func groupNamedInstanceSchema9831(ancestorPath [][]string, key string) *schemaNode {
 	if key == "" {
 		return nil
@@ -18,7 +25,7 @@ func groupNamedInstanceSchema9831(ancestorPath [][]string, key string) *schemaNo
 		return nil
 	}
 	cs := resolveSchemaChild(parent, key)
-	if cs == nil || cs.args < 1 || (cs.children == nil && cs.wildcard == nil) {
+	if cs == nil || cs.args < 1 || cs.multi || cs.valueList || (cs.children == nil && cs.wildcard == nil) {
 		return nil
 	}
 	return cs

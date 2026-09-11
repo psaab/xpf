@@ -311,3 +311,36 @@ func TestGroupPackedInstanceKeepsOneInstance9831(t *testing.T) {
 		}
 	})
 }
+
+// A multi-value leaf is a list of values, not a named instance. Matched by its
+// first member, a group's `next-hop 192.0.2.2;` missed the inline list
+// `[ 192.0.2.1 192.0.2.2 ]`, was adopted, and compiled a duplicate next hop,
+// while the reversed list did not (d64625101, Codex review round 1). Master
+// compiles both rows without a duplicate.
+func TestGroupMultiValueLeafIsNotANamedInstance9831(t *testing.T) {
+	for _, c := range []struct{ name, inline, want string }{
+		{"group value second in the inline list", `next-hop [ 192.0.2.1 192.0.2.2 ];`, "192.0.2.1 192.0.2.2"},
+		{"group value first in the inline list", `next-hop [ 192.0.2.2 192.0.2.1 ];`, "192.0.2.2 192.0.2.1"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			text := `groups { G { routing-options { static { route 10.0.0.0/8 { next-hop 192.0.2.2; } } } } } apply-groups G; routing-options { static { route 10.0.0.0/8 { ` + c.inline + ` } } }`
+			tree, perrs := NewParser(text).Parse()
+			if len(perrs) > 0 {
+				t.Fatalf("fixture must parse: %v", perrs)
+			}
+			cfg, err := CompileConfig(tree)
+			if err != nil {
+				t.Fatalf("strict compile %q: %v", text, err)
+			}
+			var hops []string
+			for _, r := range cfg.RoutingOptions.StaticRoutes {
+				for _, nh := range r.NextHops {
+					hops = append(hops, nh.Address)
+				}
+			}
+			if got := strings.Join(hops, " "); got != c.want {
+				t.Errorf("compiled next hops [%s], want [%s]: a group value already in the inline list must not be added again (#9831)", got, c.want)
+			}
+		})
+	}
+}

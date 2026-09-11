@@ -1691,6 +1691,11 @@ names.
   same instance: the keyword plus the instance keys (`sameInstancePeer9831`).
   Before #9831 it matched on the keyword alone, so an inline
   `security-zone trust;` overrode, and dropped, a group's `security-zone zga;`.
+- A multi-value leaf (`multi` or `valueList`), such as a static route's
+  `next-hop [ a b ]`, is a list of values rather than an instance. It keeps the
+  leaf-list and override paths. Matched by its first member, a group's
+  `next-hop 192.0.2.2;` would miss `[ 192.0.2.1 192.0.2.2 ]` and compile a
+  duplicate next hop.
 - A group leaf that carries keys past the instance it names is not overridden
   by that instance's inline node, because the override would drop the extra
   keys. Examples are `security-zone [ zga zgb ];` and a mistyped
