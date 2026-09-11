@@ -475,7 +475,7 @@ same remedy — the choice is not a matter of taste:
 
 | issue | site | remedy |
 |---|---|---|
-| #8794 | `security-zone [ a b ]` | REFUSE |
+| #8794, #9656 | `security-zone [ a b ]` | **EXPAND** |
 | #9246 | policy `to-zone [ a b ]` | REFUSE |
 | #8810 | `device-map interface [ a b ]` | REFUSE |
 | #9424 | `family inet address [ a b ]` | **ACCUMULATE** |
@@ -487,6 +487,14 @@ device mapped twice, is undefined — there is no correct expansion to write. A
 logical unit with two addresses is ordinary, and the two-separate-stanzas
 spelling compiles exactly it, which is both the argument for accumulating and
 the positive control that keeps the cell honest.
+
+**`security-zone [ a b ]` expands; it was never refused.** #8794 (PRs #8802 and
+#8806) creates every named zone with the shared body, and
+`formatset_container_bracket_6668_test.go` expects `security-zone [ trust dmz ]
+{ … }` to commit. Several zones with the same statements are ordinary
+configuration, which puts zone groups on the ACCUMULATE side of the rule. The
+table previously listed this row as REFUSE. #9656 moved the expansion into the
+#8662 normalizer; see "Zone groups written without braces (#9656)" below.
 
 **Accumulating needs a discriminator, because the packed shape is AMBIGUOUS
 with the brace-elided sub-statement spelling.** These parse identically:
@@ -534,6 +542,64 @@ ABSORBS the third onto its own `Keys`:
 
 A chain walk that reads only each link's `Keys[0]` recovers `b` and loses `c` —
 the #2419 defect reintroduced by the #2419 fix. Read `Keys[1:]` at every link.
+
+### Zone groups written without braces (#9656)
+
+#8794 fanned a zone group out in the compiler, and only when the node had a
+non-empty braced body (`bracketedGroupInstances8794`: `len(Keys) >= 3 &&
+len(Children) > 0`). Each of these committed at `e09f425dd` with no error or
+warning and created one zone:
+
+| Spelling | Before #9656 |
+|---|---|
+| `security-zone [ zga zgb ] screen edge;` | zone `zga` with no screen; no `zgb` |
+| `security-zone [ zga zgb ];` | no `zgb` |
+| `security-zone [ zga zgb ] { }` | no `zgb` |
+| `security-zone [ zga zgb ] apply-groups G;` and `… { apply-groups G; }` | no `zgb`, and `zga` without the group's statements |
+
+The #8662 normalizer now rewrites every group under `zones` into one zone
+statement per member, before group expansion and validation
+(`expandZoneGroups9656`, `compact_normalize_zone_group_9656.go`). This also
+applies inside `groups` mirrors. The rewritten tree is the one the longhand
+spelling parses to, so every strict gate reads it as longhand:
+
+- `security-zone [ zga zgb ] interfaces ge-0/0/0.0;` is refused, because one
+  interface is in two zones.
+- `security-zone [ zga zgb ] screen edge tcp-rst;` is refused on the trailing
+  token.
+- A screen name that does not exist is refused, as for the longhand.
+
+The rules:
+
+- **Members versus body.** Members are the tokens before the first keyword the
+  `security-zone` schema node declares, or before `apply-groups`,
+  `apply-groups-except` or `apply-macro`. setSchema does not declare those inside
+  a zone (#9685), so without the stop `security-zone trust apply-groups G;` would
+  be three zones. The remaining tokens are a packed body, placed under each
+  member. That body owns the braced body when the statement has one. A
+  statement with a single member is left to the scoped fold.
+- **Brackets are not consulted.** `Format` and `FormatSet` drop the bracket mask
+  on a leaf, so `show configuration` renders `security-zone [ zga zgb ] screen
+  edge;` as `security-zone zga zgb screen edge;`. A cluster peer compiles that
+  text, so both spellings must reach the same zones.
+- **What ignoring brackets costs.** A mistyped keyword reads as a member:
+  `security-zone trust scren edge;` now creates the empty zones `scren` and
+  `edge`. Before #9656 the same line committed as zone `trust` with the
+  statement dropped, so neither version refuses it. Telling the two apart needs
+  a leaf's brackets to survive rendering, which is the #9635 constraint.
+- **Every zone walker agrees.** `compileZones`, the #3075 zone-ID views, the
+  strict zone gates, the empty-identity gate and the plaintext advisories all
+  read the normalized tree, so they see the same zones.
+  `bracketedGroupInstances8794` is unchanged. It still serves the interface
+  callers, and a braced group in an un-normalized tree.
+
+Tests:
+
+- `pkg/config/zone_group_normalize_9656_test.go` compares the tree against the
+  longhand for the hierarchical, `groups`, compact-head and flat-set shapes. It
+  also checks the apply-keyword stop and zone-ID enumeration.
+- `pkg/configstore/zone_group_commit_gate_9656_test.go` checks the strict
+  verdict and the lenient compile against the longhand.
 
 ### Which flat runs an operator can actually COMMIT (8939)
 

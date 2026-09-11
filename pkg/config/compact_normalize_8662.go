@@ -229,6 +229,11 @@ func normalizeCompactNodes(nodes []*Node, schema *schemaNode, inScope func(conta
 				}
 			}
 		}
+		// #9656 (M40): fan a security-zone group out into one zone statement per
+		// member, before the statements under `zones` are folded and validated.
+		if childSub == zonesSchema9656 {
+			n += expandZoneGroups9656(node, childSub.children["security-zone"])
+		}
 		n += splitBracedPackedChildren8886(node, childSub)
 		n += normalizeCompactNodes(node.Children, childSub, inScope)
 	}
