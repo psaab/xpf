@@ -808,6 +808,11 @@ type mockSweepDP struct {
 	// in every other test, so the write path is unchanged for them.
 	onSetV4 func()
 	onSetV6 func()
+	// onDeleteV4/onDeleteV6 run INSIDE the session delete, before the row is
+	// removed, for the same reason: #9715 parks a delete there while another
+	// receive loop applies the same key. nil everywhere else.
+	onDeleteV4 func(dataplane.SessionKey)
+	onDeleteV6 func(dataplane.SessionKeyV6)
 }
 
 // Sessions implements clusterRuntime by wrapping the mock in the same
@@ -897,11 +902,17 @@ func (m *mockSweepDP) SetSessionV6(key dataplane.SessionKeyV6, val dataplane.Ses
 }
 
 func (m *mockSweepDP) DeleteSession(key dataplane.SessionKey) error {
+	if m.onDeleteV4 != nil {
+		m.onDeleteV4(key)
+	}
 	delete(m.v4sessions, key)
 	return nil
 }
 
 func (m *mockSweepDP) DeleteSessionV6(key dataplane.SessionKeyV6) error {
+	if m.onDeleteV6 != nil {
+		m.onDeleteV6(key)
+	}
 	delete(m.v6sessions, key)
 	return nil
 }
