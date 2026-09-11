@@ -82,6 +82,7 @@ func buildSnapshotWithSchedulerStateAndNATCounters(cfg *config.Config, ucfg conf
 		return nil, err
 	}
 	mirrorConfigs, mirrorExclusions := buildMirrorConfigSnapshots(cfg, interfaces)
+	synCookieKey, synCookieKeyRing := buildSYNCookieKeys(cfg, synCookieNow())
 	snap := &ConfigSnapshot{
 		Version:       ProtocolVersion,
 		Generation:    generation,
@@ -123,7 +124,8 @@ func buildSnapshotWithSchedulerStateAndNATCounters(cfg *config.Config, ucfg conf
 		Screens:               buildScreenSnapshots(cfg),
 		ScreenMissingProfiles: buildScreenMissingProfileRefs(cfg),
 		ScreenInertProfiles:   buildScreenInertProfileRefs(cfg),
-		SYNCookieMasterKey:    buildSYNCookieMasterKey(cfg),
+		SYNCookieMasterKey:    synCookieKey,
+		SYNCookieKeyRing:      synCookieKeyRing,
 		Filters:               buildFirewallFilterSnapshots(cfg),
 		Policers:              buildPolicerSnapshots(cfg),
 		ThreeColorPolicers:    buildThreeColorPolicerSnapshots(cfg),
@@ -201,6 +203,15 @@ func snapshotContentHash(snap *ConfigSnapshot) ([32]byte, bool) {
 	// not be an input to itself.
 	tmp.ContentDigest = ""
 	tmp.Config = nil // exclude raw config from content hash to avoid churn from non-forwarding metadata
+	// #9173: on a keyed cluster the SYN-cookie keys derive from the cluster
+	// authentication-key (elsewhere from synCookieProcessSecret), and this digest
+	// reaches state.json and conflict logs. Hashed raw it would be an offline
+	// oracle for a weak PSK: rebuild the rest of the snapshot, then test guesses.
+	// Each key enters only as an HMAC under a per-daemon-start random salt, so the
+	// digest still moves exactly when a key changes and cannot be recomputed
+	// without that salt.
+	tmp.SYNCookieMasterKey = synCookieDigestFingerprint(snap.SYNCookieMasterKey)
+	tmp.SYNCookieKeyRing = synCookieRingDigestFingerprint(snap.SYNCookieKeyRing)
 	// #1197 (Copilot review): hash only PUBLISHABLE neighbors so
 	// the dedup compares against what userspace-dp actually sees.
 	// Filtered-out rows (state="none", malformed MAC) never reach

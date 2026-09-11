@@ -113,16 +113,19 @@ func ValidateConfig(cfg *Config) []string {
 				"see docs/services-application-identification.md.")
 	}
 
-	if userspaceSynCookieProtectionActive(cfg) &&
-		(cfg.System.RootAuthentication == nil ||
-			cfg.System.RootAuthentication.EncryptedPassword == "") {
+	// #9173: the userspace SYN-cookie key derives from the chassis cluster
+	// authentication-key. Without one each node keys its cookies with its own
+	// per-start random secret -- what a standalone node does by design -- so a
+	// cookie minted by one node does not validate on its peer after a failover.
+	// The strict commit gate already refuses an unkeyed cluster; this is the
+	// lenient load path.
+	if userspaceSynCookieProtectionActive(cfg) && cfg.Chassis.Cluster != nil &&
+		cfg.Chassis.Cluster.ControlLinkAuthKey.Reveal() == "" {
 		warnings = append(warnings,
-			"active userspace-dp SYN-cookie screen profiles require "+
-				"system root-authentication encrypted-password material "+
-				"for the userspace cookie key; the userspace dataplane "+
-				"fails closed until it is set. Legacy eBPF SYN-cookie "+
-				"handling uses kernel helpers and is not affected by "+
-				"this warning.")
+			"active userspace-dp SYN-cookie screen profiles on a chassis cluster "+
+				"with no authentication-key use a per-node random cookie key, so a "+
+				"cookie minted by one node does not validate on its peer after a "+
+				"failover; set `chassis cluster authentication-key`")
 	}
 
 	// #1944 §5.8: warn when a configured login user has no usable auth

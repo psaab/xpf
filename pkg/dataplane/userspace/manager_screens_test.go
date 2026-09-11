@@ -9,60 +9,6 @@ import (
 	"github.com/psaab/xpf/pkg/config"
 )
 
-func TestUserspaceSupportsScreenProfilesBasic(t *testing.T) {
-	cfg := &config.Config{}
-	cfg.Security.Screen = map[string]*config.ScreenProfile{
-		"basic": {
-			Name: "basic",
-			TCP:  config.TCPScreen{Land: true, SynFin: true},
-			ICMP: config.ICMPScreen{FloodThreshold: 100},
-		},
-	}
-	if !userspaceSupportsScreenProfiles(cfg) {
-		t.Fatal("basic screen profile should be supported")
-	}
-}
-
-func TestUserspaceSupportsScreenProfilesAllowsSynCookie(t *testing.T) {
-	cfg := &config.Config{}
-	cfg.Security.Flow.SynFloodProtectionMode = "syn-cookie"
-	cfg.Security.Screen = map[string]*config.ScreenProfile{
-		"basic": {
-			Name: "basic",
-			TCP:  config.TCPScreen{Land: true},
-		},
-	}
-	if !userspaceSupportsScreenProfiles(cfg) {
-		t.Fatal("syn-cookie mode should be supported")
-	}
-}
-
-func TestUserspaceSupportsScreenProfilesAllowsPortScan(t *testing.T) {
-	cfg := &config.Config{}
-	cfg.Security.Screen = map[string]*config.ScreenProfile{
-		"scan": {
-			Name: "scan",
-			TCP:  config.TCPScreen{PortScanThreshold: 100},
-		},
-	}
-	if !userspaceSupportsScreenProfiles(cfg) {
-		t.Fatal("port scan threshold should now be supported in userspace dataplane")
-	}
-}
-
-func TestUserspaceSupportsScreenProfilesAllowsSessionLimit(t *testing.T) {
-	cfg := &config.Config{}
-	cfg.Security.Screen = map[string]*config.ScreenProfile{
-		"limit": {
-			Name:         "limit",
-			LimitSession: config.LimitSessionScreen{SourceIPBased: 100},
-		},
-	}
-	if !userspaceSupportsScreenProfiles(cfg) {
-		t.Fatal("session limiting should now be supported in userspace dataplane")
-	}
-}
-
 // TestBuildScreenSnapshotsSynFloodSubThresholds verifies the #3315 SYN-flood
 // sub-thresholds (alarm/source/destination) cross the userspace-dp wire. Before
 // the fix only attack-threshold was published, so the four sub-thresholds
@@ -335,14 +281,17 @@ func TestBuildScreenSnapshotsMarksSynCookieMode(t *testing.T) {
 		t.Fatalf("SYNCookie = false, want true: %+v", snaps[0])
 	}
 	snap := mustBuildSnapshot(t, cfg, config.UserspaceConfig{}, 1, 0)
-	if len(snap.SYNCookieMasterKey) != 32 {
-		t.Fatalf("SYNCookieMasterKey len = %d, want 32", len(snap.SYNCookieMasterKey))
+	if len(snap.SYNCookieMasterKey) != 32 || snap.SYNCookieKeyRing == nil {
+		t.Fatalf("SYNCookieMasterKey len = %d, ring = %v; want a 32-hex key and a ring",
+			len(snap.SYNCookieMasterKey), snap.SYNCookieKeyRing)
 	}
+	// #9173: the key no longer derives from root-authentication, so removing it
+	// leaves a cookie key in place instead of failing closed.
 	cfg.System.RootAuthentication = nil
 	cfg.System.MasterPassword = "juniper-prf1"
 	snap = mustBuildSnapshot(t, cfg, config.UserspaceConfig{}, 1, 0)
-	if snap.SYNCookieMasterKey != "" {
-		t.Fatalf("SYNCookieMasterKey without root secret = %q, want empty", snap.SYNCookieMasterKey)
+	if len(snap.SYNCookieMasterKey) != 32 {
+		t.Fatalf("SYNCookieMasterKey without root secret = %q, want a 32-hex key", snap.SYNCookieMasterKey)
 	}
 }
 

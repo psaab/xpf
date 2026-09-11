@@ -524,14 +524,23 @@ type ConfigSnapshot struct {
 	// field, never redefine one, because the two HA nodes run different
 	// binaries against one wire and `serde(default)` cannot help when the
 	// OLDER binary is the sender.
-	ScreenInertProfiles []ScreenMissingProfileRef   `json:"screen_inert_profile_zones,omitempty"`
-	SYNCookieMasterKey  string                      `json:"syn_cookie_master_key,omitempty"`
-	Filters             []FirewallFilterSnapshot    `json:"filters,omitempty"`
-	Policers            []PolicerSnapshot           `json:"policers,omitempty"`
-	ThreeColorPolicers  []ThreeColorPolicerSnapshot `json:"three_color_policers,omitempty"`
-	ClassOfService      *ClassOfServiceSnapshot     `json:"class_of_service,omitempty"`
-	FlowExport          *FlowExportSnapshot         `json:"flow_export,omitempty"`
-	MirrorConfigs       []MirrorConfigSnapshot      `json:"mirror_configs,omitempty"`
+	ScreenInertProfiles []ScreenMissingProfileRef `json:"screen_inert_profile_zones,omitempty"`
+	SYNCookieMasterKey  string                    `json:"syn_cookie_master_key,omitempty"`
+	// #9173: the SYN-cookie key bases, ADDED beside SYNCookieMasterKey rather
+	// than redefining it. SYNCookieMasterKey keeps its meaning (the key to mint
+	// and validate with, now the key of the period the snapshot was built in), so
+	// an older helper that ignores this field still works. A newer helper derives
+	// every period's key from the ring and picks one by each cookie's own epoch.
+	// Only a newer helper that receives NO ring falls back to SYNCookieMasterKey;
+	// a ring it receives is authoritative, and one with no usable base fails
+	// closed. See buildSYNCookieKeys.
+	SYNCookieKeyRing   *SYNCookieKeyRingSnapshot   `json:"syn_cookie_key_ring,omitempty"`
+	Filters            []FirewallFilterSnapshot    `json:"filters,omitempty"`
+	Policers           []PolicerSnapshot           `json:"policers,omitempty"`
+	ThreeColorPolicers []ThreeColorPolicerSnapshot `json:"three_color_policers,omitempty"`
+	ClassOfService     *ClassOfServiceSnapshot     `json:"class_of_service,omitempty"`
+	FlowExport         *FlowExportSnapshot         `json:"flow_export,omitempty"`
+	MirrorConfigs      []MirrorConfigSnapshot      `json:"mirror_configs,omitempty"`
 	// MirrorExclusions records the port-mirroring entries this snapshot's
 	// build REFUSED to install for a runtime reason (#7357 §2). Carried on
 	// the snapshot so a show surface renders the verdict that was actually
@@ -989,4 +998,21 @@ type UserspaceCapabilities struct {
 	// The Rust helper has no field for this and (lacking deny_unknown_fields)
 	// silently ignores it on decode.
 	PolicyContentRejected []string `json:"policy_content_rejected,omitempty"`
+}
+
+// SYNCookieKeyRingSnapshot is the #9173 SYN-cookie key ring; see
+// ConfigSnapshot.SYNCookieKeyRing and buildSYNCookieKeys.
+type SYNCookieKeyRingSnapshot struct {
+	// PeriodSecs is the rotation period. It must be a whole number of 64-second
+	// cookie epochs, or the helper fails the ring closed.
+	PeriodSecs uint64                     `json:"period_secs"`
+	Bases      []SYNCookieKeyBaseSnapshot `json:"bases"`
+}
+
+// SYNCookieKeyBaseSnapshot is one ring base: 64 hex characters for the 32-byte
+// HMAC key every period's key derives from, and whether those keys are only
+// accepted and never minted with (a #6630 additional-authentication-key base).
+type SYNCookieKeyBaseSnapshot struct {
+	Base       string `json:"base"`
+	AcceptOnly bool   `json:"accept_only,omitempty"`
 }

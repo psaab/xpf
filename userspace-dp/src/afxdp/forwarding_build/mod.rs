@@ -176,6 +176,20 @@ fn parse_syn_cookie_master_key(key: &str) -> Option<[u8; 16]> {
     Some(out)
 }
 
+/// #9173: a SYN-cookie key-ring base, 64 hex characters for 32 bytes.
+fn parse_syn_cookie_key_base(base: &str) -> Option<[u8; 32]> {
+    if base.len() != 64 {
+        return None;
+    }
+    let mut out = [0u8; 32];
+    for (idx, byte) in out.iter_mut().enumerate() {
+        let start = idx * 2;
+        let part = base.get(start..start + 2)?;
+        *byte = u8::from_str_radix(part, 16).ok()?;
+    }
+    Some(out)
+}
+
 /// Test/legacy entry point — infallible; panics on snapshot
 /// integrity error (which test snapshots never hit). Production
 /// code uses `try_build_forwarding_state_*` instead.
@@ -742,6 +756,23 @@ fn build_fallible_forwarding_state(
     state.screen_inert_profiles = build_screen_inert_profiles(snapshot);
     state.syn_cookie_master_key =
         SynCookieMasterKey(parse_syn_cookie_master_key(&snapshot.syn_cookie_master_key));
+    // #9173: a ring ABSENT from the snapshot (an older control plane) leaves the
+    // dataplane on `syn_cookie_master_key`. Presence is the field's, not its
+    // contents': a delivered ring is authoritative even when empty, and one
+    // malformed base makes it present with no base. Either way cookies fail
+    // closed instead of falling back to the key the ring replaced.
+    state.syn_cookie_key_ring = match &snapshot.syn_cookie_key_ring {
+        None => crate::screen::SynCookieKeyRing::default(),
+        Some(ring) => ring
+            .bases
+            .iter()
+            .map(|entry| {
+                parse_syn_cookie_key_base(&entry.base).map(|base| (base, entry.accept_only))
+            })
+            .collect::<Option<Vec<_>>>()
+            .map(|bases| crate::screen::SynCookieKeyRing::new(ring.period_secs, bases))
+            .unwrap_or_else(crate::screen::SynCookieKeyRing::failed_closed),
+    };
     state.tcp_mss_all_tcp = snapshot.flow.tcp_mss_all_tcp;
     state.tcp_mss_ipsec_vpn = snapshot.flow.tcp_mss_ipsec_vpn;
     state.tcp_mss_gre_in = snapshot.flow.tcp_mss_gre_in;

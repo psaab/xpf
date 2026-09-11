@@ -2803,118 +2803,78 @@ func TestZoneSetSyntax(t *testing.T) {
 	}
 }
 
-func TestValidateConfigWarnsSynCookieWithoutRootSecret(t *testing.T) {
+// #9173: the userspace SYN-cookie key derives from the chassis cluster
+// authentication-key, so the one configuration left to warn about is an unkeyed
+// cluster, whose nodes key cookies independently. A missing root password is no
+// longer one.
+const synCookieUnkeyedClusterWarning9173 = "use a per-node random cookie key"
+
+func synCookieWarnings9173(t *testing.T, compile func(*ConfigTree) (*Config, error), lines ...string) string {
+	t.Helper()
 	tree := &ConfigTree{}
-	setCommands := []string{
+	for _, cmd := range lines {
+		path, err := ParseSetCommand(cmd)
+		if err != nil {
+			t.Fatalf("ParseSetCommand(%q): %v", cmd, err)
+		}
+		if err := tree.SetPath(path); err != nil {
+			t.Fatalf("SetPath(%q): %v", cmd, err)
+		}
+	}
+	cfg, err := compile(tree)
+	if err != nil {
+		t.Fatalf("compile failed: %v", err)
+	}
+	return strings.Join(cfg.Warnings, "\n")
+}
+
+func synCookieLines9173(screen string, extra ...string) []string {
+	return append([]string{
 		"set system dataplane-type userspace",
 		"set security flow syn-flood-protection-mode syn-cookie",
 		"set security zones security-zone trust screen flood",
-		"set security screen ids-option flood tcp syn-flood attack-threshold 100",
-	}
-	for _, cmd := range setCommands {
-		path, err := ParseSetCommand(cmd)
-		if err != nil {
-			t.Fatalf("ParseSetCommand(%q): %v", cmd, err)
-		}
-		if err := tree.SetPath(path); err != nil {
-			t.Fatalf("SetPath(%q): %v", cmd, err)
-		}
-	}
-	cfg, err := CompileConfig(tree)
-	if err != nil {
-		t.Fatalf("CompileConfig failed: %v", err)
-	}
+		"set security screen ids-option flood tcp " + screen,
+	}, extra...)
+}
 
-	warnings := strings.Join(cfg.Warnings, "\n")
-	if !strings.Contains(warnings, "active userspace-dp SYN-cookie screen profiles require") {
-		t.Fatalf("expected userspace SYN-cookie secret warning, got: %s", warnings)
-	}
-	if !strings.Contains(warnings, "Legacy eBPF SYN-cookie handling uses kernel helpers") {
-		t.Fatalf("expected legacy eBPF scope note, got: %s", warnings)
+const synFloodScreen9173 = "syn-flood attack-threshold 100"
+
+var unkeyedCluster9173 = []string{
+	"set chassis cluster cluster-id 1",
+	"set chassis cluster node 0",
+}
+
+func TestValidateConfigWarnsSynCookieOnUnkeyedCluster9173(t *testing.T) {
+	// The lenient load path: the strict commit gate refuses an unkeyed cluster.
+	warnings := synCookieWarnings9173(t, CompileConfigLenient,
+		synCookieLines9173(synFloodScreen9173, unkeyedCluster9173...)...)
+	if !strings.Contains(warnings, synCookieUnkeyedClusterWarning9173) {
+		t.Fatalf("expected the unkeyed-cluster SYN-cookie warning, got: %s", warnings)
 	}
 }
 
-func TestValidateConfigDoesNotWarnSynCookieWithRootSecret(t *testing.T) {
-	tree := &ConfigTree{}
-	setCommands := []string{
-		"set system dataplane-type userspace",
-		`set system root-authentication encrypted-password "$6$rounds=5000$salt$hash"`,
-		"set security flow syn-flood-protection-mode syn-cookie",
-		"set security zones security-zone trust screen flood",
-		"set security screen ids-option flood tcp syn-flood attack-threshold 100",
-	}
-	for _, cmd := range setCommands {
-		path, err := ParseSetCommand(cmd)
-		if err != nil {
-			t.Fatalf("ParseSetCommand(%q): %v", cmd, err)
-		}
-		if err := tree.SetPath(path); err != nil {
-			t.Fatalf("SetPath(%q): %v", cmd, err)
-		}
-	}
-	cfg, err := CompileConfig(tree)
-	if err != nil {
-		t.Fatalf("CompileConfig failed: %v", err)
-	}
-
-	warnings := strings.Join(cfg.Warnings, "\n")
-	if strings.Contains(warnings, "active userspace-dp SYN-cookie screen profiles require") {
-		t.Fatalf("unexpected userspace SYN-cookie secret warning: %s", warnings)
+func TestValidateConfigDoesNotWarnSynCookieOnKeyedCluster9173(t *testing.T) {
+	keyed := append(append([]string{}, unkeyedCluster9173...), "set chassis cluster authentication-key secret123")
+	warnings := synCookieWarnings9173(t, CompileConfig, synCookieLines9173(synFloodScreen9173, keyed...)...)
+	if strings.Contains(warnings, synCookieUnkeyedClusterWarning9173) {
+		t.Fatalf("unexpected SYN-cookie warning on a keyed cluster: %s", warnings)
 	}
 }
 
-func TestValidateConfigDoesNotWarnDormantSynCookieWithoutRootSecret(t *testing.T) {
-	tree := &ConfigTree{}
-	setCommands := []string{
-		"set system dataplane-type userspace",
-		"set security flow syn-flood-protection-mode syn-cookie",
-		"set security zones security-zone trust screen flood",
-		"set security screen ids-option flood tcp land",
-	}
-	for _, cmd := range setCommands {
-		path, err := ParseSetCommand(cmd)
-		if err != nil {
-			t.Fatalf("ParseSetCommand(%q): %v", cmd, err)
+func TestValidateConfigDoesNotWarnStandaloneSynCookieWithoutRootSecret9173(t *testing.T) {
+	warnings := synCookieWarnings9173(t, CompileConfig, synCookieLines9173(synFloodScreen9173)...)
+	for _, retired := range []string{synCookieUnkeyedClusterWarning9173, "root-authentication encrypted-password material"} {
+		if strings.Contains(warnings, retired) {
+			t.Fatalf("a standalone SYN-cookie screen needs neither root-authentication nor a cluster key; got %q in: %s",
+				retired, warnings)
 		}
-		if err := tree.SetPath(path); err != nil {
-			t.Fatalf("SetPath(%q): %v", cmd, err)
-		}
-	}
-	cfg, err := CompileConfig(tree)
-	if err != nil {
-		t.Fatalf("CompileConfig failed: %v", err)
-	}
-
-	warnings := strings.Join(cfg.Warnings, "\n")
-	if strings.Contains(warnings, "active userspace-dp SYN-cookie screen profiles require") {
-		t.Fatalf("unexpected dormant userspace SYN-cookie warning: %s", warnings)
 	}
 }
 
-func TestValidateConfigWarnsDefaultUserspaceSynCookieWithoutRootSecret(t *testing.T) {
-	tree := &ConfigTree{}
-	setCommands := []string{
-		"set security flow syn-flood-protection-mode syn-cookie",
-		"set security zones security-zone trust screen flood",
-		"set security screen ids-option flood tcp syn-flood attack-threshold 100",
-	}
-	for _, cmd := range setCommands {
-		path, err := ParseSetCommand(cmd)
-		if err != nil {
-			t.Fatalf("ParseSetCommand(%q): %v", cmd, err)
-		}
-		if err := tree.SetPath(path); err != nil {
-			t.Fatalf("SetPath(%q): %v", cmd, err)
-		}
-	}
-	cfg, err := CompileConfig(tree)
-	if err != nil {
-		t.Fatalf("CompileConfig failed: %v", err)
-	}
-
-	warnings := strings.Join(cfg.Warnings, "\n")
-	if !strings.Contains(warnings, "active userspace-dp SYN-cookie screen profiles require") {
-		t.Fatalf("expected default-userspace SYN-cookie warning, got: %s", warnings)
+func TestValidateConfigDoesNotWarnDormantSynCookieOnUnkeyedCluster9173(t *testing.T) {
+	warnings := synCookieWarnings9173(t, CompileConfigLenient, synCookieLines9173("land", unkeyedCluster9173...)...)
+	if strings.Contains(warnings, synCookieUnkeyedClusterWarning9173) {
+		t.Fatalf("unexpected dormant SYN-cookie warning: %s", warnings)
 	}
 }
 

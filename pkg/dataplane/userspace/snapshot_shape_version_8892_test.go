@@ -204,7 +204,7 @@ func shapeDigest8892(t *testing.T) (string, int) {
 // garbage domain on a delete, which can name ANOTHER TENANT's row. Exact-
 // equality refusal is the only mechanism that stops the pairing.
 const (
-	snapshotShapeGolden8892 = "6ba8027754216f49b2b20319239563c63ff2c7a45a4edfa70b442d37ddc1fdde"
+	snapshotShapeGolden8892 = "9dc3d11cd31664846ce9a022529a064461673e2cfa6d9eb759400ffbc4fc1514"
 	// v13 BUMPED (issue 9412) against the SAME digest. The TCP close class
 	// crosses the HA session-sync path, and the old behaviour is the defect it
 	// fixes, so the v9 rule requires the bump. The session-sync messages are not
@@ -224,6 +224,38 @@ const (
 	// apply reuses its installed generation; an old helper ignores it and keeps
 	// admitting that apply content-blind, which IS the defect, so this is the
 	// v10/v11 arm again.
+	// v15 STANDS (issue 9173), and it moved the digest:
+	// `ConfigSnapshot.SYNCookieKeyRing` (`syn_cookie_key_ring`) is transmitted.
+	// Unlike #9416 the new helper DOES read it, so the question is #9425's -- is
+	// what a MISMATCHED helper enforces acceptable? -- and it was checked rather
+	// than taken from the additive-field rule:
+	//
+	//   - at origin/master `git grep syn_cookie_key_ring -- userspace-dp/src/`
+	//     returns ZERO hits and protocol/snapshot.rs carries no
+	//     `deny_unknown_fields`, so an old helper ignores the key instead of
+	//     failing the parse (`syn_cookie_key_ring_is_secret_and_additive_both_ways_9173`
+	//     pins the unknown-field direction);
+	//   - what that old helper enforces instead is `syn_cookie_master_key`, which a
+	//     new daemon sets to the key of the period the snapshot was built in
+	//     (TestSYNCookieRingCarriesTheBaseAndTheAdditionalBase9173). It mints and
+	//     validates with a key derived from the new base (the cluster
+	//     authentication-key, or a per-daemon-start random secret), not the root
+	//     password, so the #9173 defect is fixed for it too. What it loses is
+	//     rotation: it keeps that
+	//     key until its next full snapshot, while a new helper picks each cookie's
+	//     key by the cookie's own epoch. From the FIRST period boundary after that
+	//     snapshot the two disagree in both directions
+	//     (syn_cookie_mixed_version_pair_disagrees_from_the_first_boundary_9173),
+	//     so a handshake straddling a failover between them is refused. The client
+	//     has already sent its ACK and does not resend the SYN, so that connection
+	//     fails and its application must reconnect: a mismatched deployment failing
+	//     a straddling handshake visibly, not a fail-open and not a black hole;
+	//   - a NEW helper under an OLD daemon receives no ring, falls back to
+	//     `syn_cookie_master_key`, and enforces exactly the pre-#9173 behaviour.
+	//
+	// Both mismatched pairings enforce something acceptable, and the coordinator's
+	// acceptance for #9173 requires an older helper to ignore the added field. A
+	// bump would instead make both pairings refuse every snapshot.
 	snapshotShapeVersion8892 = 15
 )
 

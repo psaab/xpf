@@ -2365,7 +2365,7 @@ state). `buildScreenSnapshots` and its siblings `buildScreenMissingProfileRefs` 
 `ScreenMissingProfiles` / `ScreenInertProfiles`) now collect the
 zone names, `sort.Strings` them, and range in sorted order — matching the
 long-standing pattern in `buildZoneSnapshots` (`zones.go`) and
-`buildSYNCookieMasterKey`. The syn-cookie master-key hash and all
+`synCookieScreenedZones` (the SYN-cookie key's zone list). The SYN-cookie key derivation and all
 zone-host-inbound builders already sorted; the NAT / tunnel / neighbor
 builders range config SLICES (already ordered), so they were never affected.
 
@@ -3716,9 +3716,12 @@ is [`userspace-dataplane-gaps.md`](userspace-dataplane-gaps.md).
   explicit userspace capability gate because persistent leases are not
   synchronized. Helper-restart reset and mixed-backend selector parity are
   documented contracts, not active #1377 blockers.
-- SYN-cookie flood protection closeout: bounded SYN-ACK/RST TX,
-  root-auth-derived snapshot key publication, fail-closed missing-secret
-  behavior, status counters, and gate removal are wired. Any final live
+- SYN-cookie flood protection closeout: bounded SYN-ACK/RST TX, snapshot key
+  publication (#9173: an HMAC base from the cluster authentication-key, or a
+  per-daemon-start random secret on a standalone or unkeyed node, from which
+  the helper derives a key that rotates just under hourly), fail-closed behavior
+  when a published ring has no usable base, status counters, and gate removal
+  are wired. Any final live
   HA/flood artifact belongs with #1477 on the source-removal candidate.
 - RFC 2697/2698 three-color policer closeout: #1375 now preserves
   token/counter state across compatible in-process snapshot refreshes and

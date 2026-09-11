@@ -390,6 +390,41 @@ impl std::ops::Deref for SynCookieMasterKeyHex {
     }
 }
 
+/// #9173: serde calls this only when `syn_cookie_key_ring` is PRESENT, so an
+/// explicit `null` becomes a present, empty ring -- which fails closed -- rather
+/// than the `None` an omitted field gets from `default`.
+fn deserialize_present_key_ring<'de, D>(
+    deserializer: D,
+) -> Result<Option<SynCookieKeyRingSnapshot>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let ring = <Option<SynCookieKeyRingSnapshot> as serde::Deserialize>::deserialize(deserializer)?;
+    Ok(Some(ring.unwrap_or_default()))
+}
+
+/// #9173: the wire form of `ConfigSnapshot::syn_cookie_key_ring`.
+#[derive(Clone, Debug, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub(crate) struct SynCookieKeyRingSnapshot {
+    /// Rotation period in seconds: a whole number of 64-second cookie epochs,
+    /// or the helper fails the ring closed.
+    #[serde(default)]
+    pub(crate) period_secs: u64,
+    #[serde(default)]
+    pub(crate) bases: Vec<SynCookieKeyBaseSnapshot>,
+}
+
+/// One ring base: the 32-byte HMAC key every period's key derives from, as 64
+/// hex characters. `base` is the redacting hex wrapper, so `Debug` never renders
+/// it; `accept_only` marks a base whose keys validate but never mint (#6630).
+#[derive(Clone, Debug, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub(crate) struct SynCookieKeyBaseSnapshot {
+    #[serde(default)]
+    pub(crate) base: SynCookieMasterKeyHex,
+    #[serde(default)]
+    pub(crate) accept_only: bool,
+}
+
 impl AsRef<str> for SynCookieMasterKeyHex {
     fn as_ref(&self) -> &str {
         &self.0
@@ -541,16 +576,36 @@ pub(crate) struct ConfigSnapshot {
     /// `default` path.
     ///
     /// No Rust-side regeneration is needed or wanted: the key is
-    /// DETERMINISTIC — the Go control plane derives it from the root
-    /// secret + cluster-id + screened zones (`buildSYNCookieMasterKey`,
+    /// DETERMINISTIC — the Go control plane derives it from the chassis
+    /// cluster authentication-key + cluster-id + rotation epoch + screened
+    /// zones (`buildSYNCookieKeys`,
     /// pkg/dataplane/userspace/screens.go) and re-delivers it on every
     /// config push. `ServerState.snapshot` starts `None` on boot and is
     /// never restored from `state.json`, so the control plane always
-    /// supplies the key. A fresh random per-boot key would instead break
+    /// supplies the key. A random key drawn by the helper would instead break
     /// HA: both chassis must derive the SAME key for cross-node SYN-cookie
-    /// validation to survive failover.
+    /// validation to survive failover. (A node with no cluster
+    /// authentication-key does key from a per-daemon-start random secret,
+    /// drawn by the control plane, #9173.)
     #[serde(rename = "syn_cookie_master_key", default, skip_serializing)]
     pub syn_cookie_master_key: SynCookieMasterKeyHex,
+    /// #9173: the SYN-cookie key bases, ADDED beside `syn_cookie_master_key`
+    /// rather than redefining it. That field keeps its meaning (the key to mint
+    /// and validate with), so an older helper that ignores this one still works;
+    /// this helper derives every period's key from the ring's bases and picks one
+    /// by each cookie's own epoch. Only an ABSENT ring (an older control plane)
+    /// falls back to `syn_cookie_master_key`; a present ring is authoritative, and
+    /// one with no usable base fails closed. SECRET, and `skip_serializing` for
+    /// the same #3909 reason. Presence is the FIELD's: an omitted ring is `None`
+    /// (an older control plane) and an explicitly empty or `null` one is a
+    /// published ring (`deserialize_present_key_ring`).
+    #[serde(
+        rename = "syn_cookie_key_ring",
+        default,
+        skip_serializing,
+        deserialize_with = "deserialize_present_key_ring"
+    )]
+    pub syn_cookie_key_ring: Option<SynCookieKeyRingSnapshot>,
     #[serde(default)]
     pub filters: Vec<FirewallFilterSnapshot>,
     #[serde(default)]

@@ -353,7 +353,7 @@ The userspace dataplane reports per-binding SYN-cookie counters in
 | JSON key | Meaning |
 |----------|---------|
 | `syn_cookie_challenges` | SYNs that entered the userspace challenge path |
-| `syn_cookie_secret_unavailable` | Challenge attempts that failed closed because no SYN-cookie secret was published |
+| `syn_cookie_secret_unavailable` | Challenge attempts that failed closed because no usable SYN-cookie key was available: none was published, the legacy key was cleared, or a present key ring has no usable primary base (the ring is empty, a base is malformed, or the period is not a whole number of cookie epochs) |
 | `syn_cookie_syn_ack_sent` | SYN-cookie SYN-ACK replies admitted to the bounded local TX queue |
 | `syn_cookie_ack_rst_sent` | RST replies admitted after a returning ACK validates |
 | `syn_cookie_reply_budget_drops` | Cookie replies dropped to preserve forwarding TX headroom |
@@ -366,11 +366,13 @@ The userspace dataplane reports per-binding SYN-cookie counters in
 the daemon's BPF-compatible global counters. Secret-unavailable and
 reply-budget drops remain userspace-local diagnostics because they describe
 helper-local fail-closed and backpressure conditions. The validated-client cache
-is local, but the snapshot-published key is derived from cluster-synced root
-encrypted-password material so peers with the same committed config can
-validate cookies minted by the former active node inside the current,
-previous, or next Unix wall-clock epoch overlap. The next-epoch candidate keeps
-failover stable when peer clocks straddle a 64-second boundary. The epoch input
+is local, but on a keyed cluster the snapshot-published key material derives
+from the chassis cluster authentication-key (a standalone or unkeyed node uses a
+per-daemon-start random secret; see "Key derivation and rotation" below), so
+a peer that agrees on the key ("When two nodes agree", below) can validate
+cookies minted by the former active node inside the current, previous, or next
+Unix wall-clock epoch overlap. The next-epoch candidate keeps failover stable
+when peer clocks straddle a 64-second boundary. The epoch input
 MUST be Unix wall-clock seconds (not `CLOCK_MONOTONIC`), since peers share only
 the NTP-synced wall clock — their monotonic bases are unrelated. To avoid an OS
 clock read on every minted/validated cookie under a flood (#3032), the helper
@@ -423,11 +425,105 @@ defense in depth, and unrelated profile edits (e.g. stateless screens,
 scan/sweep thresholds) do NOT bump the generation, so they cause no
 re-validation churn.
 
-If that secret material is
-absent, userspace
-omits the key and fails closed instead of minting predictable cookies; config
-validation also warns and userspace capability admission refuses active
-SYN-cookie screen profiles until the secret exists.
+### Key derivation and rotation (#9173)
+
+The cookie key is derived in two steps. `buildSYNCookieKeys`
+(`pkg/dataplane/userspace/screens.go`) computes a **base**: `HMAC-SHA256` over a
+domain label, the cluster identity and the screened (zone, profile) pairs, each
+field length-prefixed so no name can frame the bytes of a different set. A period's **key** is
+`HMAC-SHA256(base, "xpf-syncookie\0v3-epoch\0" || rotation epoch)`, truncated to
+16 bytes. The key is no longer a function of the root password verifier. A base,
+and every key derived from it, is still an offline check on guesses at the
+secret that keys it, so it is only as strong as that secret's entropy and stays
+secret (`skip_serializing`, redacted in `Debug`, and only a salted HMAC of it in
+the #9520 content digest):
+
+| Node | Base keyed by | Survives a failover | Changes on a daemon restart |
+|---|---|---|---|
+| chassis cluster with `authentication-key` | that key (the #4107 PSK both nodes already share) | yes, when the nodes agree (below) | no: a restarted node must agree with its peer |
+| standalone | a per-daemon-start random secret, never persisted | n/a | yes |
+| cluster with no `authentication-key` (lenient load path only) | a per-daemon-start random secret | **no**; config validation warns | yes |
+
+**When two nodes agree.** A cookie minted by one node validates on another only
+if the validating node holds the minting node's primary base. That takes:
+
+- the same cluster-id;
+- the same screened (zone, profile) set, which node-specific configuration can
+  break (#9740);
+- the minting node's `authentication-key`, held by the validating node as its
+  own `authentication-key` or, during a #6630 rotation, as its
+  `additional-authentication-key`. That second form is an accept-only base,
+  which a helper that predates the ring ignores.
+
+A node without an `authentication-key` keys from a per-daemon-start random
+secret, so no other node validates its cookies.
+
+**Rotation.** The rotation epoch is `unix_seconds / 3584`: just under an hour,
+and a whole number of 64-second cookie epochs, so a cookie's own epoch names
+exactly one rotation period. The helper rotates on its own. The snapshot's added
+`syn_cookie_key_ring` carries the base, and `SynCookieKeyRing`
+(`userspace-dp/src/screen/syncookie.rs`) derives the keys for the periods
+before, at and after the latched cookie epoch's, once per period per worker. One
+known-answer vector pins the Go and Rust derivations to the same bytes. The
+helper picks a key by the COOKIE's epoch, not by when anything was published:
+
+- nodes that agree derive each period's key from their shared base and the wall
+  clock. They switch at the same boundary to within their clock skew plus up to
+  one second of sampling lag, because each helper refreshes its wall clock at
+  most once per monotonic second. The adjacent periods' keys are derived too, so
+  a cookie from a node slightly ahead still finds its key;
+- a cookie minted in the last epoch of a period still validates in the first
+  epoch of the next;
+- a key two periods old is not derived and is refused;
+- only the cookie's own period's keys are tried: one, or two while a #6630 PSK
+  window adds an accept-only base. The adjacent periods add no attempts per ACK;
+  the PSK overlap deliberately adds a second.
+
+No control-plane republish is involved, so cookie protection does not depend on
+the control plane publishing every period. The skew assumption is the one HA
+already makes: node clocks agree to well within the 64-second cookie epoch. The
+helper's cookie epoch never steps backward: following a backward clock step would
+re-accept cookies from epochs the node has already left, so a recorded ACK could
+validate again. Derived keys cover every epoch, so no clock step leaves the latch
+without a key. The cost falls on the other node: after a backward step of more
+than one cookie epoch, an HA peer on a different clock cannot validate this
+node's cookies until time catches up. #9712 records that trade-off and the
+options.
+
+`syn_cookie_master_key` keeps its meaning: the key to mint and validate with. A
+new control plane sets it to the key of the period the snapshot was built in, so
+an older helper that ignores the ring still works, but it does not rotate: it
+keeps that key until its next full snapshot. From the first period boundary after
+that snapshot, an older and a newer helper disagree in both directions: the older
+one signs later epochs with the old period's key, and the newer one picks the new
+period's key by the cookie's epoch. A later full snapshot hands the older helper
+the then-current period's key and restores the pair until the next boundary. So
+until both nodes run this release, a handshake that straddles a failover between
+them is refused from each boundary until the older helper's next full snapshot. An ABSENT ring (an older control
+plane) leaves `syn_cookie_master_key` in charge. A PRESENT ring is
+authoritative: one with no usable base -- empty, a malformed base, or a period
+that is not a whole number of cookie epochs -- fails every cookie closed
+(`syn-cookie-unavailable`, counted in `syn_cookie_secret_unavailable`) instead
+of falling back to the legacy key. Presence is decided by the field, not its
+contents: an omitted ring is absent, and an explicitly empty or `null` one is
+present and fails closed.
+
+The helper holds the base, so a compromise of the helper's memory yields every
+period's key until the base changes (a PSK or cluster-id change, a screened-zone
+change, or a daemon restart on a node without an authentication-key), not only
+the adjacent periods' keys.
+
+**PSK rotation (#6630).** While `additional-authentication-key` is set, the
+ring also carries an accept-only base derived from it. Its keys validate a
+cookie minted by a peer signing with that key, given the other conditions in
+"When two nodes agree", and never mint.
+
+A cluster that is mid-upgrade from a release that derived the key from the root
+password disagrees on the key until both nodes run this release, so a handshake
+straddling a failover in that window is refused. The client has already sent its
+ACK and considers the connection open, so it does not resend the SYN: the
+connection fails and the application must reconnect. If no key is published at
+all, userspace still fails closed instead of minting predictable cookies.
 
 ### On-disk state hygiene: the master key is never persisted (#3909)
 
@@ -443,17 +539,25 @@ private key (`wg_local_privkey_hex`) and per-peer PSK
 file. A local unprivileged user who could read the key would be able to
 forge valid SYN cookies and defeat source validation.
 
-No Rust-side regeneration is needed: the key is deterministic — the Go
-control plane derives it from the cluster-synced root secret + cluster-id
-+ screened zones (`buildSYNCookieMasterKey`,
-`pkg/dataplane/userspace/screens.go`) and re-delivers it on every config
-push over the control socket (`apply_snapshot`). `ServerState.snapshot`
+Nothing needs to be persisted: the Go control plane derives the key material
+(on a keyed cluster deterministically from the chassis cluster
+authentication-key + cluster-id + screened zones, and on a standalone or
+unkeyed node from a per-daemon-start random secret that is never persisted;
+`buildSYNCookieKeys`, `pkg/dataplane/userspace/screens.go`) and re-delivers it
+on every config push over the control socket (`apply_snapshot`). The helper
+derives each period's key from the delivered base. `ServerState.snapshot`
 starts `None` on boot and is never restored from `state.json`, so the
-control plane always supplies the key after a restart. A fresh random
-per-boot key would instead break HA: both chassis must derive the SAME
-key for cross-node cookie validation to survive failover. The
-skip-serialize omission is pinned by
-`syn_cookie_master_key_is_skipped_in_state_snapshot`
+control plane always supplies the key material after a restart. A random secret
+drawn by the helper would instead break HA: both chassis must derive the SAME
+keys for cross-node cookie validation to survive failover. The key ring
+(`syn_cookie_key_ring`, the bases) is `skip_serializing` for the same reason as
+the key. The #9520 content digest that Go stamps on every snapshot does reach
+`state.json` and conflict logs. It carries the key and each base only as an HMAC
+under a per-daemon-start random salt, so it is not an offline oracle for a weak
+cluster authentication-key.
+The omissions are pinned by
+`syn_cookie_master_key_is_skipped_in_state_snapshot` and
+`syn_cookie_key_ring_is_secret_and_additive_both_ways_9173`
 (`userspace-dp/src/protocol/tests.rs`).
 
 Cookie replies are host-generated flood-control frames, and since #2238 they are
