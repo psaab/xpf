@@ -112,7 +112,29 @@ func validateRoutingInstanceChildTokensAST(nodes []*Node, lenient bool) ([]strin
 			// this loop as an "instance" called apply-macro whose child `M` was
 			// then judged an unknown keyword — a hard reject of a config Junos
 			// permits at any hierarchy point.
-			if routingInstanceApplyMetaKeyword9323(instName) {
+			if isApplyStatementNode(inst) {
+				// #9657: the node is read as the statement, never as an instance,
+				// quoted or not, which is what the compiler and the collision scan
+				// do too. A one-key stanza under the keyword's name may be an
+				// instance the operator wrote there, and a routing-instance keyword
+				// among its children suggests it. It is WARNED, not refused, on every
+				// path: a flat `set` statement whose macro or group is named after a
+				// routing-instance keyword (`set routing-instances apply-macro
+				// interface k v`) has exactly this shape, so the shape cannot prove
+				// that an instance was meant. The two-key form (`apply-macro M { ... }`)
+				// is always the statement and is not warned.
+				if len(inst.Keys) == 1 {
+					for _, ch := range inst.Children {
+						if ch == nil || !permitted[ch.Name()] {
+							continue
+						}
+						warnings = append(warnings, fmt.Sprintf("routing-instances: %q is a statement keyword and "+
+							"cannot name a routing instance; the stanza is read as that statement, so if %q under it "+
+							"was meant as a routing-instance setting, no instance is created — rename the instance (#9657)",
+							instName, ch.Name()))
+						break
+					}
+				}
 				continue
 			}
 			for _, tok := range routingInstanceChildTokensOf9323(inst) {

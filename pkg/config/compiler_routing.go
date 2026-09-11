@@ -569,6 +569,13 @@ func compileRoutingInstances(node *Node, cfg *Config) error {
 		if len(child.Keys) == 0 {
 			continue
 		}
+		// #9657: an apply statement is not an instance. Expansion strips only
+		// apply-groups, so an apply-groups-except or apply-macro reached this
+		// loop and became a routing instance and a VRF named after the keyword.
+		// The #3855 collision scan skips the same statements.
+		if isApplyStatementNode(child) {
+			continue
+		}
 		// #8787: a brace-elided instance is a LEAF, and skipping it dropped
 		// the ENTIRE routing instance rather than one property:
 		//
