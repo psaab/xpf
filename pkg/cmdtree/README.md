@@ -130,7 +130,8 @@ the broken code.
 The walk now descends unconditionally, including to a leaf's nil child map, so
 the next word falls into the not-a-keyword arm. That arm still admits the
 legitimate consumers of a following word — a typed leaf's value, a dynamic
-node, a placeholder, a node that declares `AcceptsArgs` — and refuses anything
+node, a placeholder (one value each since #9505), a node that declares
+`AcceptsArgs` — and refuses anything
 else as `CanonicalUnknown`, which callers must fail closed on.
 
 Over-rejection is the risk to watch when touching this, because a caller MUST
@@ -170,7 +171,10 @@ before, so it cannot re-open #8289. The mutant that deletes the opt-in and
 admits any trailing word (`if currentNode != nil`) reds the #8289 and #7172
 guards as well as #8304's own controls — that is the cell carrying the weight.
 
-Marked today: `show log`, and the 16 `show configuration` stanza children.
+Marked today: `show log`, the 16 `show configuration` stanza children, and
+`monitor traffic matching` (#9505). The `count`/`size`/`source` options of `ping`
+and `traceroute`, marked by #9064, have been typed leaves since #9505, because
+`AcceptsArgs` absorbed every later word.
 
 **Do NOT mark a node whose dispatcher refuses the argument.**
 `clear security flow session all` looks like a fourth instance and is not one:
@@ -182,6 +186,64 @@ clear-all. The command
 is refused by the box, and the tree refusing it is the two agreeing. Marking it
 would assert a command that does not exist — the mirror defect of #8304, and
 the one #8057's canonicalize-to-self check exists to catch.
+
+## A value slot takes ONE value, and option lists are declared (#9505)
+
+**#9505: the dynamic arm absorbed every later word.** A dynamic node shared
+`AcceptsArgs`'s `continue`, which never advances `currentNode`, so
+`show route table secret-vrf bypass` canonicalized OK. `handleShowRoute` dropped
+`bypass` and ran the command, and an anchored deny on the four-word command
+never saw the five:
+
+```
+deny="^show route table secret-vrf$"  line="show route table secret-vrf"         -> denied
+deny="^show route table secret-vrf$"  line="show route table secret-vrf bypass"  -> ALLOWED  (pre-fix)
+```
+
+A childless placeholder had the same shape. It never moves `current`, so it
+re-matched every later word, and `ping 1.1.1.1 junk` authorized as a different
+string from the ping that ran.
+
+Every value slot (typed leaf, dynamic node, placeholder) now takes exactly one
+value. After it, the next word must be a child of the node that took it, or
+the line is refused.
+
+That alone would have refused lawful commands. Several dispatchers parse their
+children as **options in any order**, and until now the only thing letting a
+restricted class run `show security flow session zone trust destination-port 22`
+was the absorption itself. `Node.Options` declares those. Under an Options node
+the walk returns to the option list once an option is complete, so the next
+option resolves and is canonicalized, instead of being absorbed as raw text. The
+value-taking options there are typed leaves, so they take one value too.
+
+Marked, each checked against its dispatcher's loop:
+- `ping` and `traceroute`
+- `show security flow session` and `clear security flow session`
+- `monitor security flow file` and `monitor security flow filter`
+- `monitor security packet-drop`
+- `monitor traffic`: `matching` is `AcceptsArgs` and stops at the next option,
+  as its parser does.
+- `show security log`, with a `<count>` placeholder.
+- `test routing`
+- `show firewall filter`: the mark is on the `filter` node, not on
+  `show firewall`, because the dispatcher honours `family` and `effective` only
+  after `filter <name>`.
+
+**Do NOT mark a first-match dispatcher.** `show route` looks like an option list
+and is not: `handleShowRoute` dispatches on `args[0]` and drops the rest, so
+`show route table X protocol Y` runs `show route table X`. Marking it would
+reopen the bypass through a sibling keyword instead of a junk word. `Options` is
+honoured only in `Canonicalize`, bound by
+`TestOptionsIsHonouredOnlyInCanonicalize9505`.
+
+Verified differentially against master over 107 lines: every `usage:` string,
+plus option-order and junk variants.
+- 14 lawful option-list lines moved from UNKNOWN to OK.
+- 13 extra-word lines moved from OK to UNKNOWN. Each is a word its handler
+  ignores or rejects.
+- One abbreviated line moved from OK to AMBIGUOUS, because `dest` names two
+  options.
+- Nothing else moved.
 
 ## Typed leaves
 

@@ -61,12 +61,23 @@ func SplitPipe(line string) (cmd, pipeType, pipeArg string, ok bool) {
 	if len(parts) > 1 {
 		pipeArg = parts[1]
 	}
-	switch pipeType {
-	case "match", "grep", "except", "find", "count", "last", "no-more":
+	if IsPipeFilter(pipeType) {
 		return cmd, pipeType, pipeArg, true
-	default:
-		return line, "", "", false
 	}
+	return line, "", "", false
+}
+
+// IsPipeFilter reports whether verb is an output filter SplitPipe splits off.
+// It is the ONE list, for the same reason SplitPipe is one function: the
+// authorization gate refuses a pipe it does not recognise (#9628), so a verb
+// the dispatcher honours and the gate does not know would refuse a lawful
+// command, and the reverse would authorize a pipe nobody reviewed.
+func IsPipeFilter(verb string) bool {
+	switch verb {
+	case "match", "grep", "except", "find", "count", "last", "no-more":
+		return true
+	}
+	return false
 }
 
 // MaxTailLines bounds the ring the `| last N` filter retains and grows,
