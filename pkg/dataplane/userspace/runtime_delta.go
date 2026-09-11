@@ -23,8 +23,20 @@ func (s runtimeSessionDeltaSource) DrainSessionDeltas(max uint32) (dpruntime.Ses
 
 func (s runtimeSessionDeltaSource) ExportOwnerRGSessions(rgIDs []int, max uint32) (dpruntime.SessionDeltaSnapshot, error) {
 	deltas, status, err := s.manager.ExportOwnerRGSessions(rgIDs, max)
+	return runtimeOwnerRGExportSnapshot(deltas, status, max, err)
+}
+
+// runtimeOwnerRGExportSnapshot converts one owner-RG export result into the
+// runtime snapshot (#9699). An export error carries NO deltas, whatever the
+// manager returned beside it: the contract is one complete window or an error.
+// The status still rides along for the caller's diagnostics.
+//
+// It is a function of its own so the rule can be exercised. Every Manager exit
+// already returns nil deltas on error, so a cell driven through a real manager
+// passes whether or not this layer applies the rule.
+func runtimeOwnerRGExportSnapshot(deltas []SessionDeltaInfo, status ProcessStatus, max uint32, err error) (dpruntime.SessionDeltaSnapshot, error) {
 	if err != nil {
-		return runtimeSessionDeltaSnapshot(deltas, status, max), err
+		return runtimeSessionDeltaSnapshot(nil, status, max), err
 	}
 	return runtimeSessionDeltaSnapshot(deltas, status, max), nil
 }

@@ -127,7 +127,10 @@ func (m *Manager) ExportOwnerRGSessionsPaged(rgIDs []int) ([]SessionDeltaInfo, P
 		if resp.Status != nil {
 			status = *resp.Status
 			if err := m.applyHelperStatusLocked(&status); err != nil {
-				return all, status, err
+				// #9699: one complete window or an error, never both. The
+				// pages collected so far are a partial window, and #5085's
+				// receiver deletes every session missing from a window.
+				return nil, status, err
 			}
 		}
 		if !resp.SessionExportMore {
@@ -156,7 +159,8 @@ func (m *Manager) exportOwnerRGSessionsUnpagedLocked(rgIDs []int) ([]SessionDelt
 	if resp.Status != nil {
 		status = *resp.Status
 		if err := m.applyHelperStatusLocked(&status); err != nil {
-			return resp.SessionDeltas, status, err
+			// #9699: never deltas together with an error (see the paged loop).
+			return nil, status, err
 		}
 	}
 	return resp.SessionDeltas, status, nil
