@@ -114,12 +114,12 @@ var methodsWithoutCanonicalCommand = map[string]string{
 	"ExitConfigure":   "leaves config mode; changes nothing",
 	"Set":             "configuration mutation — deny-configuration, not deny-commands",
 	"Delete":          "configuration mutation — deny-configuration, not deny-commands",
-	"Load":            "configuration mutation — deny-configuration, and content-matching is a named gap",
+	"Load":            "configuration mutation — deny-configuration per written path; override refused for a restricted class (#9633)",
 	"Commit":          "acts on the candidate as a whole; no path for a command regex to match",
 	"CommitCheck":     "acts on the candidate as a whole",
 	"CommitConfirmed": "acts on the candidate as a whole",
 	"ConfirmCommit":   "acts on the candidate as a whole",
-	"Rollback":        "acts on the candidate as a whole",
+	"Rollback":        "acts on the candidate as a whole; n>0 refused for a class with configuration regexes (#9633)",
 	"Complete":        "tab completion; returns candidates and executes nothing",
 
 	// NO OPERATIONAL COMMAND EXISTS IN cmdtree FOR THESE. The routing-protocol

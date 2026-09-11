@@ -143,6 +143,17 @@ func TestUnenforceableDenyDetectionIsSpellingIndependent7172(t *testing.T) {
 
 // FAIL CLOSED on an RPC with no canonical command — but only for a restricted
 // class (the unrestricted case is covered above).
+//
+// #9633 took the CONFIG-MODE methods out of this rule, and the reason is a
+// changed premise, not a relaxed check. The rule is "not knowing which command
+// we hold, we cannot know a deny regex fails to match it". For config-mode RPCs
+// the right regexes are the `*-configuration` ones, and #9633 gave that gate an
+// answer for every one of them: per written path for Set, Delete, Load set and
+// Load merge; a refusal of load override and rollback n>0 for a restricted
+// class. So the operational regexes no longer decide them, as on the console.
+// Commit was the row here; TestDocumentedDenyCommandsClassCanConfigureOverGRPC9633
+// and TestLoadAndRollbackMeetTheConfigurationRegexes9633 now bind those methods,
+// and the rows below still bind every other method with no canonical command.
 func TestUnmappedRPCDeniesARestrictedClass7172(t *testing.T) {
 	cfg := gateCfg7172(t, "request system reboot", true)
 	for _, tc := range []struct {
@@ -150,7 +161,6 @@ func TestUnmappedRPCDeniesARestrictedClass7172(t *testing.T) {
 		method string
 		req    any
 	}{
-		{"config-mode method governed by deny-configuration", "Commit", nil},
 		{"method named absent: no cmdtree command exists", "GetOSPFStatus", &pb.GetOSPFStatusRequest{}},
 		{"unknown ShowText topic", "ShowText", &pb.ShowTextRequest{Topic: "zzbogus-topic"}},
 		{"ShowText whose request cannot be read", "ShowText", nil},

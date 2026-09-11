@@ -42,7 +42,8 @@ func (s *Server) authorizeRPCConfigMutation(cfg *config.Config, class, fullMetho
 	}
 	line, ok := configMutationLineFor(fullMethod, req)
 	if !ok {
-		return nil
+		// #9633: Load and Rollback write more than one line.
+		return s.authorizeRPCLoadAndRollback(cfg, class, fullMethod, req)
 	}
 	if err := config.AuthorizeConfigMutation(cfg, class, nil, line); err != nil {
 		return fmt.Errorf("%w", err)
