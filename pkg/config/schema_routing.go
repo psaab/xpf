@@ -844,7 +844,7 @@ var schemaForwardingOptions = &schemaNode{desc: "Packet forwarding options", chi
 	}},
 }}
 
-var schemaBridgeDomains = &schemaNode{desc: "Bridge domain configuration", wildcard: &schemaNode{desc: "Bridge domain name", children: map[string]*schemaNode{
+var schemaBridgeDomains = &schemaNode{desc: "Bridge domain configuration", wildcard: &schemaNode{desc: "Bridge domain name", keyValidator: ValidateBridgeDomainName, children: map[string]*schemaNode{
 	"vlan-id-list":      {args: 1, multi: true, desc: "VLAN IDs in this bridge domain", children: nil},
 	"routing-interface": {args: 1, desc: "IRB routing interface (e.g. irb.0)", children: nil},
 	"domain-type":       {args: 1, desc: "Bridge domain type", children: nil},

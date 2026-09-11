@@ -418,6 +418,16 @@ func (m *Manager) Apply(interfaces []InterfaceConfig) error {
 		}
 	}
 	for _, ifc := range interfaces {
+		// #9494: ifc.Name becomes a path component under m.networkDir, and
+		// filepath.Join Cleans, so a name carrying a separator would write
+		// outside the managed directory as root while Apply reported success.
+		// Refuse it as a write failure: the Apply fails and nothing is written
+		// for that interface. This is the belt behind the schema gate, for
+		// names that reach Apply through a tolerant load, peer sync or rollback.
+		if err := confinedInterfaceName(ifc.Name); err != nil {
+			writeErrs = append(writeErrs, err)
+			continue
+		}
 		// .netdev file: for bond/LAG devices and bridge devices
 		if ifc.IsBond {
 			netdevPath := filepath.Join(m.networkDir, filePrefix+ifc.Name+".netdev")
@@ -974,4 +984,14 @@ func writeIfChanged(path, content string) (bool, error) {
 
 	slog.Info("wrote networkd file", "path", path)
 	return true, nil
+}
+
+// confinedInterfaceName reports whether name can stand as a single file-name
+// component under the managed networkd directory (#9494). An empty name, or one
+// containing a path separator or NUL, cannot.
+func confinedInterfaceName(name string) error {
+	if name == "" || strings.ContainsAny(name, "/\x00") {
+		return fmt.Errorf("networkd: refusing interface name %q: it cannot be a file name inside the managed directory (#9494)", name)
+	}
+	return nil
 }
