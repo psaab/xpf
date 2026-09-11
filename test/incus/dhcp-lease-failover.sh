@@ -280,7 +280,7 @@ ns_down() {
 	# #9729: RELEASE the v4 lease first. Every run's client is a fresh random MAC,
 	# and an unreleased lease stays bound for its full lifetime (86400s in the lab),
 	# so reruns filled the pool with dead owners whose addresses got reused.
-	ssh_fw "$DHCP_CLIENT" "if [ -e /run/netns/'$1' ] && [ -f /run/dhclient-$1.leases ]; then timeout 15 nsenter --net=/run/netns/'$1' dhclient -r -sf '$CLIENT_SCRIPT' -pf /run/dhclient-$1.pid -lf /run/dhclient-$1.leases \$(nsenter --net=/run/netns/'$1' ls /sys/class/net | grep -v '^lo\$' | head -1) 2>/dev/null; fi; for f in /run/dhclient-$1.pid /run/dhclient6-$1.pid; do [ -f \$f ] && kill \$(cat \$f) 2>/dev/null; rm -f \$f; done; rm -f /run/dhclient-$1.leases /run/dhclient6-$1.leases; ip netns del '$1' 2>/dev/null; true" >/dev/null 2>&1 || true
+	ssh_fw "$DHCP_CLIENT" "if [ -e /run/netns/'$1' ] && [ -f /run/dhclient-$1.leases ]; then timeout 15 nsenter --net=/run/netns/'$1' dhclient -r -sf '$CLIENT_SCRIPT' -pf /run/dhclient-$1.pid -lf /run/dhclient-$1.leases \$(nsenter --net=/run/netns/'$1' ip -o link show | awk -F': ' '{sub(/@.*/, \"\", \$2)} \$2 != \"lo\" {print \$2; exit}') 2>/dev/null; fi; for f in /run/dhclient-$1.pid /run/dhclient6-$1.pid; do [ -f \$f ] && kill \$(cat \$f) 2>/dev/null; rm -f \$f; done; rm -f /run/dhclient-$1.leases /run/dhclient6-$1.leases; ip netns del '$1' 2>/dev/null; true" >/dev/null 2>&1 || true
 }
 
 # ---------------------------------------------------------------------------
@@ -337,7 +337,14 @@ main() {
 		assert_memfile_header "$STANDBY" "$KEA_MEMFILE6" "$GOLDEN_HEADER6" 6
 	fi
 	local mac_a
-	mac_a="$(ssh_fw "$DHCP_CLIENT" "nsenter --net=/run/netns/'$NS_A' cat /sys/class/net/'$IF_A'/address" 2>/dev/null || true)"
+	# Read the MAC over netlink inside the namespace, the way ns_addr4 reads the
+	# address. /sys/class/net lists the devices of the network namespace that
+	# MOUNTED sysfs, so `nsenter --net ... cat /sys/class/net/<if>/address` cannot
+	# see the namespace's macvlan (#9791 lab run 1: "cannot read client A's MAC").
+	# `ip netns exec` would remount sysfs, but the LAN host is an unprivileged
+	# container that may not ("mount of /sys failed: Operation not permitted",
+	# run 2).
+	mac_a="$(ssh_fw "$DHCP_CLIENT" "nsenter --net=/run/netns/'$NS_A' ip -o link show dev '$IF_A'" 2>/dev/null | grep -o 'link/ether [0-9a-f:]*' | cut -d' ' -f2 | head -1 || true)"
 	[[ -n "$mac_a" ]] || die "cannot read client A's MAC"
 
 	info "3) Hard failover — reboot the RG0 primary ($PRIMARY)"
