@@ -3656,10 +3656,18 @@ outside the monitor loop:
   handler, #2198 F2) so a rebooted peer — whose monotonic-seeded counter
   legitimately restarts lower — has its cold-start bulk re-prime accepted instead
   of refused as stale (the stale-RETAIN inverse of #2170), and so a delete
-  tombstone never permanently blocks a legitimate cold re-prime. The
-  check→Put→record apply sequence is not held under one `recvGenMu` acquisition;
-  it is safe because the per-peer receive path is single-threaded over the single
-  active fabric (#2198 F3).
+  tombstone never permanently blocks a legitimate cold re-prime.
+  **Apply atomicity (#9715).** Every installed fabric connection runs its own
+  `receiveLoop`, so while the sync stream moves between fabrics two loops can
+  apply the same key at once.
+  - Each install (guard → dataplane write → record, or rollback) runs under
+    `applyMu`. So does each delete (guard → dataplane delete), and the
+    `resetRecvGen` map reset.
+  - Before this, the #2198 F3 note assumed a single-threaded apply. An older
+    install parked in its write could regress the stored generation and content,
+    after which an older delete was admitted.
+  - `applyMu` is uncontended while one loop applies.
+  - Lock order: `applyMu` → `recvGenMu`.
 - **Close-class resend memo (#9412)**: `stampInstallGenV4/V6` also keeps a resend
   from REGRESSING a session's TCP close class.
   - **Why.** The sweep and the bulk window send from the BPF mirror, whose

@@ -1147,6 +1147,34 @@ type SessionSync struct {
 	recvGenMu        sync.Mutex
 	recvGenV4        map[dataplane.SessionKey]uint64
 	recvGenV6        map[dataplane.SessionKeyV6]uint64
+	// applyMu serializes the receive-side session APPLY across receive loops
+	// (#9715).
+	//   - Every installClusterSynced* holds it from the guard, through the
+	//     dataplane write, to the generation record or rollback.
+	//   - Every deleteClusterSynced* holds it from the guard through the
+	//     dataplane delete.
+	//   - resetRecvGen holds it around the generation-map reset.
+	//
+	// Why a second lock: each installed fabric connection runs its own
+	// receiveLoop. When the sync stream moves (a fabric flap, or the #9508
+	// preferred-fabric switch), the old loop can still be applying frames it
+	// already read while the new loop applies newer frames for the same key.
+	// recvGenMu covers each guard and each record separately, so without
+	// applyMu:
+	//   - an older install parked in its dataplane write records its
+	//     generation over a newer one;
+	//   - an admitted delete removes a newer install that landed during its
+	//     write.
+	//
+	// Cost: it is uncontended in steady state, because the peer sends over one
+	// stream and one loop applies at a time. It serializes only while two loops
+	// apply at once, and then it also covers the reverse-companion row a forward
+	// install writes.
+	//
+	// LOCK ORDER: applyMu -> recvGenMu. Nothing takes applyMu while holding
+	// recvGenMu, bulkMu or configGenMu. OnForwardSessionInstalled runs under
+	// applyMu and must not block; the daemon's only starts a goroutine.
+	applyMu sync.Mutex
 
 	// #3931 config-sync ordering guard.
 	//

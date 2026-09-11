@@ -425,10 +425,16 @@ func (s *SessionSync) deleteGenGuardV6(key dataplane.SessionKeyV6, deleteGen uin
 // mid-bulk for a key the bulk has not yet re-recorded falls back to gen-0
 // (stored==0 after reset) → unconditional, which is the legacy-safe behavior.
 func (s *SessionSync) resetRecvGen() {
+	// #9715: under applyMu, so an install on the other receive loop that passed
+	// its guard before this reset cannot record its pre-reboot generation after
+	// it. That stale high-water would refuse the rebooted peer's lower re-prime
+	// generations: the stale-RETAIN this reset exists to prevent.
+	s.applyMu.Lock()
 	s.recvGenMu.Lock()
 	s.recvGenV4 = make(map[dataplane.SessionKey]uint64)
 	s.recvGenV6 = make(map[dataplane.SessionKeyV6]uint64)
 	s.recvGenMu.Unlock()
+	s.applyMu.Unlock()
 	// #3931: also reset the last-applied config generation. A reconnecting
 	// peer may have REBOOTED, restarting its monotonic configGenCounter at a
 	// value LOWER than the generation we stored from its previous boot.
@@ -477,23 +483,28 @@ func (s *SessionSync) resetRecvGen() {
 	s.recvSeqMu.Unlock()
 }
 
-// Non-atomicity note (#2198 F3): the apply sequence — guard check
-// (installGenGuard*), PutClusterSynced*, recordInstalledGen* / deleteGenGuard*
-// — does NOT hold recvGenMu across the whole sequence; the mutex is taken
-// independently inside each of installGenGuard*/recordInstalledGen*/
-// deleteGenGuard*. This is safe in production because the receiver apply path
-// for a given peer is single-threaded: messages are decoded and dispatched
-// serially within one receiveLoop goroutine over the single ACTIVE fabric
-// connection (activeConnLocked prefers conn0; conn1 is used only when conn0 is
-// down — never both at once for sends, and the peer sends over one stream). So
-// no two installs/deletes for the SAME key are ever applied concurrently, and
-// the per-key stored generation cannot be interleaved between the guard read
-// and the record write. The standby fabric's receiveLoop exists but the active
-// sender never duplicates a key's traffic across both, so cross-goroutine
-// same-key races do not occur. Holding recvGenMu across the dataplane Put would
-// also serialize unrelated keys and block on dataplane I/O under the lock,
-// which is not worth it for a race that the single-active-fabric invariant
-// already precludes.
+// Apply atomicity (#2198 F3, corrected by #9715).
+//
+// The helpers (installGenGuard*, recordInstalledGen*, deleteGenGuard*) each take
+// recvGenMu separately. The apply as a whole runs as ONE critical section under
+// applyMu: an install from its guard, through the dataplane write, to its record
+// or rollback; a delete from its guard through the dataplane delete.
+//
+// F3 used to argue no such lock was needed, because the receive apply path is
+// single-threaded: the peer sends over one active stream. That holds within one
+// receiveLoop, but every installed fabric connection runs its own loop. When the
+// stream moves (a fabric flap, or the #9508 preferred-fabric switch), the old
+// loop can still be applying frames it already read while the new loop applies
+// newer frames for the same key. The #9715 cells drive both interleavings the
+// old sequence allowed:
+//   - an older install parked in its dataplane write recorded its generation
+//     over a newer install's;
+//   - an admitted delete removed a newer install that landed during its write.
+//
+// applyMu does hold across dataplane I/O, which F3 declined to do with
+// recvGenMu. The cost F3 named, serializing unrelated keys, is paid only while
+// two loops apply at once: in steady state one loop applies and the lock is
+// uncontended.
 // configEpochStale reports whether a synced session admitted under config
 // epoch `epoch` must be REFUSED because this node has since applied a STRICTLY
 // newer config (#5274). The peer stamps the session with the #3931 config-sync
@@ -548,8 +559,9 @@ func (s *SessionSync) configEpochStale(epoch uint64) bool {
 // exactly what that node forwards on after a failover.
 //
 // The fix is act-then-verify rather than a lock. Serializing the check with the
-// Put would hold a mutex across dataplane I/O on the bulk-install hot path,
-// which the #2198 F3 note deliberately refuses. Re-reading the threshold after
+// Put against configApplyLoop would mean holding one lock across dataplane I/O
+// and across a whole config apply. applyMu (#9715) does not do that: it orders
+// the receive loops against each other, not against configApplyLoop. Re-reading the threshold after
 // the Put costs one atomic load per install and detects precisely the case the
 // pre-check could not see; the rollback then applies the SAME verdict the guard
 // would have reached, just later. That introduces no new semantic:
@@ -589,6 +601,9 @@ func (s *SessionSync) installClusterSyncedV4(key dataplane.SessionKey, val datap
 	if s.sessions == nil {
 		return
 	}
+	// #9715: guard, write and record are one apply across receive loops; see applyMu.
+	s.applyMu.Lock()
+	defer s.applyMu.Unlock()
 	record, apply := s.installGenGuardV4(key, val.Generation)
 	if !apply {
 		s.stats.InstallsStaleIgnored.Add(1)
@@ -637,6 +652,9 @@ func (s *SessionSync) installClusterSyncedV6(key dataplane.SessionKeyV6, val dat
 	if s.sessions == nil {
 		return
 	}
+	// #9715: see the v4 twin and applyMu.
+	s.applyMu.Lock()
+	defer s.applyMu.Unlock()
 	record, apply := s.installGenGuardV6(key, val.Generation)
 	if !apply {
 		s.stats.InstallsStaleIgnored.Add(1)
@@ -684,6 +702,10 @@ func (s *SessionSync) deleteClusterSyncedV4(key dataplane.SessionKey, deleteGen 
 	if s.sessions == nil {
 		return
 	}
+	// #9715: the guard and the dataplane delete are one apply across receive
+	// loops, so a newer install cannot land between them; see applyMu.
+	s.applyMu.Lock()
+	defer s.applyMu.Unlock()
 	if !s.deleteGenGuardV4(key, deleteGen) {
 		s.stats.DeletesStaleIgnored.Add(1)
 		slog.Debug("cluster sync: ignored stale-generation v4 delete (replacement session survives)",
@@ -700,6 +722,9 @@ func (s *SessionSync) deleteClusterSyncedV6(key dataplane.SessionKeyV6, deleteGe
 	if s.sessions == nil {
 		return
 	}
+	// #9715: see the v4 twin and applyMu.
+	s.applyMu.Lock()
+	defer s.applyMu.Unlock()
 	if !s.deleteGenGuardV6(key, deleteGen) {
 		s.stats.DeletesStaleIgnored.Add(1)
 		slog.Debug("cluster sync: ignored stale-generation v6 delete (replacement session survives)",
