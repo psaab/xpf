@@ -5173,3 +5173,199 @@ fn ha_same_key_replace_dropping_snat_releases_the_old_row_9514() {
          nothing will ever close under decision A again"
     );
 }
+
+// #9678: a peer-synced upsert for a flow this node forwards as a LOCAL session,
+// while the owner RG is locally forwarding-active, must not touch the allocator
+// or the shared maps. The worker refuses that replace; before the fix the
+// coordinator's pre-publish reservation had already evicted the local flow's
+// live allocation.
+const RG_9678: i32 = 1;
+const LOCAL_PORT_9678: u16 = 50010;
+const PEER_PORT_9678: u16 = 50020;
+const FLOW_SRC_PORT_9678: u16 = 40100;
+
+fn snat_9678(port: u16) -> NatDecision {
+    NatDecision {
+        rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 1))),
+        rewrite_src_port: Some(port),
+        ..NatDecision::default()
+    }
+}
+
+/// True when a DIFFERENT flow can reserve `pool_port`, i.e. nothing live holds
+/// it. A successful probe takes the port, so each probe uses its own flow and is
+/// the last word on that port in its cell.
+fn port_is_free_9678(coordinator: &Coordinator, probe_src_port: u16, pool_port: u16) -> bool {
+    let probe = SessionKey {
+        src_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 61, 201)),
+        src_port: probe_src_port,
+        ..test_key()
+    };
+    crate::nat::reserve_synced_source_nat_allocation_untracked(
+        &coordinator.forwarding.iface_nat_allocators,
+        &coordinator.forwarding.source_nat_rules,
+        &probe,
+        snat_9678(pool_port),
+        false,
+        None,
+        2_000,
+    )
+}
+
+fn peer_entry_9678() -> SyncedSessionEntry {
+    let mut entry = reserve6600_entry(FLOW_SRC_PORT_9678, PEER_PORT_9678);
+    entry.metadata.owner_rg_id = RG_9678;
+    entry
+}
+
+/// A coordinator with one worker, RG_9678 locally active or not, and (when
+/// `local_flow`) flow F forwarded locally on LOCAL_PORT_9678: allocated and
+/// published to the shared maps as a local-origin session.
+fn coordinator_9678(
+    rg_active: bool,
+    local_flow: bool,
+) -> (Coordinator, Arc<Mutex<VecDeque<WorkerCommand>>>, SessionKey) {
+    let mut coordinator = Coordinator::new();
+    coordinator.set_forwarding_for_test(reserve6600_forwarding());
+    let commands = Arc::new(Mutex::new(VecDeque::new()));
+    coordinator.workers.register(
+        0,
+        WorkerRuntimeRecord::for_test(test_worker_handle(commands.clone())),
+        None,
+    );
+    let now_secs = monotonic_nanos() / 1_000_000_000;
+    let rg = if rg_active {
+        active_ha_runtime(now_secs)
+    } else {
+        inactive_ha_runtime(0)
+    };
+    coordinator
+        .ha
+        .rg_runtime
+        .store(Arc::new(BTreeMap::from([(RG_9678, rg)])));
+    let key = peer_entry_9678().key;
+    if local_flow {
+        let mut local = reserve6600_entry(FLOW_SRC_PORT_9678, LOCAL_PORT_9678);
+        local.origin = SessionOrigin::ForwardFlow;
+        local.metadata.owner_rg_id = RG_9678;
+        assert!(
+            crate::nat::reserve_synced_source_nat_allocation_untracked(
+                &coordinator.forwarding.iface_nat_allocators,
+                &coordinator.forwarding.source_nat_rules,
+                &local.key,
+                local.decision.nat,
+                false,
+                None,
+                1_000,
+            ),
+            "setup: the local flow must hold LOCAL_PORT_9678"
+        );
+        crate::afxdp::shared_ops::publish_shared_session(
+            &coordinator.sessions.synced,
+            &coordinator.sessions.nat,
+            &coordinator.sessions.forward_wire,
+            &coordinator.sessions.owner_rg_indexes,
+            &local,
+        );
+    }
+    (coordinator, commands, key)
+}
+
+fn shared_origin_9678(coordinator: &Coordinator, key: &SessionKey) -> Option<(SessionOrigin, NatDecision)> {
+    coordinator
+        .sessions
+        .synced
+        .lock()
+        .expect("synced map")
+        .get(key)
+        .map(|entry| (entry.origin, entry.decision.nat))
+}
+
+fn queued_upsert_9678(commands: &Arc<Mutex<VecDeque<WorkerCommand>>>, key: &SessionKey) -> bool {
+    commands
+        .lock()
+        .expect("commands")
+        .iter()
+        .any(|cmd| matches!(cmd, WorkerCommand::UpsertSynced(entry) if &entry.key == key))
+}
+
+#[test]
+fn peer_upsert_keeps_a_locally_owned_flows_allocation_9678() {
+    let (coordinator, commands, key) = coordinator_9678(true, true);
+    coordinator.upsert_synced_session(peer_entry_9678());
+    assert!(
+        !port_is_free_9678(&coordinator, 40200, LOCAL_PORT_9678),
+        "the peer upsert evicted the live local allocation: the locally forwarded flow's \
+         translated port is free to be handed to another flow"
+    );
+    assert!(
+        port_is_free_9678(&coordinator, 40201, PEER_PORT_9678),
+        "the peer upsert left an Untracked reservation on its own port for a session no \
+         worker will install"
+    );
+    assert_eq!(
+        shared_origin_9678(&coordinator, &key),
+        Some((SessionOrigin::ForwardFlow, snat_9678(LOCAL_PORT_9678))),
+        "the shared maps must keep naming the local session, not the peer's decision"
+    );
+    assert!(
+        !queued_upsert_9678(&commands, &key),
+        "a peer upsert the worker must refuse is not fanned out"
+    );
+}
+
+#[test]
+fn peer_upsert_naming_an_occupied_port_keeps_the_local_allocation_9678() {
+    let (coordinator, _commands, _key) = coordinator_9678(true, true);
+    // Another flow already holds the port the peer names, so the reserve would
+    // refuse; the eviction used to happen before that refusal.
+    let other = SessionKey {
+        src_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 61, 202)),
+        src_port: 40300,
+        ..test_key()
+    };
+    assert!(crate::nat::reserve_synced_source_nat_allocation_untracked(
+        &coordinator.forwarding.iface_nat_allocators,
+        &coordinator.forwarding.source_nat_rules,
+        &other,
+        snat_9678(PEER_PORT_9678),
+        false,
+        None,
+        1_500,
+    ));
+    coordinator.upsert_synced_session(peer_entry_9678());
+    assert!(
+        !port_is_free_9678(&coordinator, 40202, LOCAL_PORT_9678),
+        "a peer upsert whose reservation is refused still freed the local flow's port"
+    );
+}
+
+#[test]
+fn peer_upsert_replaces_and_reserves_when_the_rg_is_not_locally_active_9678() {
+    // Control: the gate is ownership, not "never reserve over a local entry".
+    let (coordinator, commands, key) = coordinator_9678(false, true);
+    coordinator.upsert_synced_session(peer_entry_9678());
+    assert_eq!(
+        shared_origin_9678(&coordinator, &key),
+        Some((SessionOrigin::SyncImport, snat_9678(PEER_PORT_9678))),
+        "with the RG not locally active the peer's session must replace the local one"
+    );
+    assert!(queued_upsert_9678(&commands, &key), "the replace must be fanned out");
+    assert!(
+        !port_is_free_9678(&coordinator, 40203, PEER_PORT_9678),
+        "the replacing import must reserve its translated port"
+    );
+}
+
+#[test]
+fn peer_upsert_still_reserves_on_an_active_node_with_no_local_flow_9678() {
+    // Control: an active RG alone must not skip the #6600 pre-publish reservation.
+    let (coordinator, commands, key) = coordinator_9678(true, false);
+    coordinator.upsert_synced_session(peer_entry_9678());
+    assert!(queued_upsert_9678(&commands, &key), "the import must be fanned out");
+    assert!(
+        !port_is_free_9678(&coordinator, 40204, PEER_PORT_9678),
+        "an import with no local session must still reserve before it publishes (#6600)"
+    );
+}
+
