@@ -285,7 +285,6 @@ interfaces xpfname unit xpfarg family inet6 dhcpv6-client update-router-advertis
 interfaces xpfname unit xpfarg family inet6 mtu	empty
 interfaces xpfname unit xpfarg family inet6 sampling input	empty
 interfaces xpfname unit xpfarg family inet6 sampling output	empty
-interfaces xpfname unit xpfarg inner-vlan-id	empty
 interfaces xpfname unit xpfarg point-to-point	empty
 interfaces xpfname vlan-tagging	partial
 protocols bgp graceful-restart	empty

@@ -218,8 +218,8 @@ construction, not by omission.
 
 `compactNormalizeInScope` takes no parent context, so an admitted
 `(container, head)` pair is live at every site where a container of that keyword
-declares that head. `testdata/multisite_admissions_8921.txt` records where: 202
-pairs over 531 (pair, site) cells. Each pair was adjudicated at one site, and
+declares that head. `testdata/multisite_admissions_8921.txt` records where: 204
+pairs over 538 (pair, site) cells. Each pair was adjudicated at one site, and
 `multisite_adjudication_8921_test.go` now adjudicates **every recorded cell**.
 
 **The per-site question is structural.** The pair decides only *whether* the
@@ -233,9 +233,9 @@ except source position. Both compile entries prune inactive nodes and then
 normalize before group expansion and every validator, and commit-check now does
 the same (see below), so an identical tree compiles and validates identically
 for that value -- including the cells whose value the #2419 census cannot
-observe. Measured at this change: 531 of 531.
+observe. Measured at #9620: 538 of 538.
 `TestMultisiteCellsAgreeWithTheCompiledCensus8921` cross-checks that premise
-against the compiled census (393 cells ruled equivalent, 0 divergent); a
+against the compiled census (398 cells ruled equivalent, 0 divergent); a
 divergent cell there would mean some reader runs before the normalizer.
 
 **"For that value", not "for every value".** Where the container splits a packed
@@ -657,6 +657,39 @@ what else has to move with it:
   legitimately name a different garbage token per spelling. Allowlisting that is
   a CLAIM, so it is paired with a test asserting the commit decision is REJECT
   in BOTH spellings — otherwise the allowlist would hide a fail-open.
+
+### Packed spellings reached by admissions and opt-ins (#9620)
+
+Each spelling below was compared with its braced form in two ways: through
+`configstore.CheckText`, the strict commit gate, and through the lenient compile
+that the boot and HA-sync loaders use. "Before" is `9f520a5b2`.
+
+| Spelling | Before | After |
+|---|---|---|
+| firewall `term t1 then count C1 discard;` (either order) | strict accepted; the term compiled with no action | commits and compiles like braced |
+| policy `term t1 then next-hop self accept;` (likewise `local-preference`, `metric`, `community add`) | strict accepted; compiled differently from braced | strict refuses, naming the stray token; the lenient compile matches braced except for `community add` |
+| inet6 `from next-header tcp source-address 2001:db8::/32;` | strict accepted a match-all term | strict refuses, as it already refused the reversed order |
+| snmp `community public clients 10.0.0.0/8 authorization read-only;` (either order) | strict refused; the lenient compile produced garbage clients | commits and compiles like braced |
+| `unit 0 vlan-id 10 inner-vlan-id 20;` | strict refused (unknown modifier); the lenient load dropped the tag | refused by the QinQ gate, like braced; the lenient load carries the tag |
+
+The admitted pairs are `term then`, `from next-header`, `unit inner-vlan-id` and
+`community authorization`. The containers opted into `packedStatements` are
+interfaces `unit` and snmp `community`.
+
+Three changes were measured and deliberately left out:
+
+- **`term from` is not admitted.** `policy-statement P { term t1 from protocol
+  ospf then accept; }` compiles correctly today. Folding it would put
+  `then accept` under `from`; strict then refuses the config and the lenient
+  load fails to compile it.
+- **The firewall `from` containers do not opt into `packedStatements`.** The
+  opt-in would also split `from { protocol tcp protocol udp; }`, which the #9027
+  self-repeat gate refuses on purpose.
+- **`security-zone` does not opt into `packedStatements`.** The opt-in let the
+  empty zone stanza `interfaces host-inbound-traffic;` past the #6525 and #6735
+  empty-member gates. It also made strict accept the one-line flat spelling of
+  `description … screen …` while dropping one of the two statements.
+  `security-zone z1 description hi screen s1;` therefore stays refused on strict.
 
 ### Brace-elided routing instances
 

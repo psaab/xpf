@@ -491,15 +491,22 @@ func compactNormalizeInScope(containerKeyword, head string) bool {
 	//	unit 0 vlan-id 10;             before  folds=0 vlan=0         after  folds=1 vlan=10
 	//	braced reference               desc="uplink" vlan=10 either way
 	//
-	// DELIBERATELY EXCLUDES `unit <n> inner-vlan-id`, the third unblocked site.
-	// That one INVERTS: braced `inner-vlan-id` is REJECTED by the QinQ /
-	// stacked-VLAN gate, and the elided form commits clean with the value
-	// dropped, so normalizing it RESTORES a rejection and turns a config that
-	// commits today into one that does not. Right outcome, different decision,
-	// and it belongs with #8755's introduces-rejection class rather than in a
-	// slice justified as "unblocked".
+	// `unit <n> inner-vlan-id` was EXCLUDED here because it inverted: braced
+	// `inner-vlan-id` is REJECTED by the QinQ / stacked-VLAN gate, while the
+	// elided form committed clean with the value dropped, so normalizing it
+	// would have turned a committing config into a refused one (#8755's
+	// introduces-rejection class).
+	//
+	// #9620 (M6): that premise no longer holds. Measured through CheckText at
+	// 9f520a5b2, the elided `unit 0 vlan-id 10 inner-vlan-id 20;` is refused
+	// ("unknown modifier inner-vlan-id") and the braced spelling is refused by
+	// the QinQ gate, so admitting it changes which refusal the operator sees,
+	// not whether the config commits. The lenient load path, which dropped the
+	// value, now carries it as the braced spelling does. `unit` also opts into
+	// packedStatements, which is what splits the vlan-id run.
 	switch containerKeyword + " " + head {
 	case "unit description",
+		"unit inner-vlan-id",
 		"unit vlan-id":
 		return true
 	}
@@ -590,6 +597,11 @@ func compactNormalizeInScope(containerKeyword, head string) bool {
 		"rpm probe",
 		"snmp community",
 		"snmp trap-group",
+		// #9620 (M5): with `clients` first, the multi-value leaf absorbed
+		// `authorization read-only` as client prefixes; with `authorization`
+		// first, the run never folded. The snmp `community` container also opts
+		// into packedStatements, which splits the run.
+		"community authorization",
 		"community clients",
 		"trap-group categories",
 		"trap-group targets",
@@ -1002,7 +1014,7 @@ func compactNormalizeInScope(containerKeyword, head string) bool {
 		"port-mirroring instance",
 		"sampling instance":
 		return true
-	// firewall: 34 pairs.
+	// firewall: 36 pairs.
 	case "filter term",
 		"firewall family",
 		"firewall policer",
@@ -1014,6 +1026,14 @@ func compactNormalizeInScope(containerKeyword, head string) bool {
 		"from dscp",
 		"from icmp-code",
 		"from icmp-type",
+		// #9620 (H10): `from next-header tcp source-address …` on one line never
+		// folded, so the term compiled with no match condition, a match-all
+		// accepted on strict. Folded, the run reaches the #8883 multi-leaf gate,
+		// which refuses it on strict as it already refuses the reversed order.
+		// The `from` containers deliberately do NOT opt into packedStatements:
+		// that would also split `from { protocol tcp protocol udp; }`, which the
+		// #9027 self-repeat gate refuses on purpose.
+		"from next-header",
 		"from protocol",
 		"from source-address",
 		"from source-port",
@@ -1039,6 +1059,17 @@ func compactNormalizeInScope(containerKeyword, head string) bool {
 		"single-rate committed-burst-size",
 		"single-rate committed-information-rate",
 		"single-rate excess-burst-size",
+		// #9620 (H9): `term t1 then count C1 discard;` never folded, so the term
+		// compiled with no action on a commit reporting success. The pair is also
+		// effective at policy-options policy-statement terms; the #8921 ratchet
+		// records the sites.
+		//
+		// `term from` is deliberately NOT admitted. Measured at 9f520a5b2,
+		// `policy-statement P { term t1 from protocol ospf then accept; }` compiles
+		// correctly today. Folding it puts `then accept` under `from`, where the
+		// policy compiler reads `then` as a protocol: strict refuses the config
+		// and the lenient load fails to compile it.
+		"term then",
 		"then count",
 		"then dscp",
 		"then forwarding-class",
