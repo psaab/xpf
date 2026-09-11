@@ -350,8 +350,18 @@ const MaxControlResponseBytes = MaxControlRequestBytes
 // answer, which no helper log will ever mention. Whether the cap is the RIGHT
 // SIZE for that answer is a separate question, tracked separately; this type
 // only makes the difference nameable.
+// controlResponseCapBytes is the cap boundedResponseReader enforces and
+// responseCapError names. It always equals MaxControlResponseBytes. It is a
+// package var, not the const, ONLY so the #9322 socket cells can shrink it
+// (#9697). Reaching a 64 MiB cap means receiving and decoding 64 MiB of JSON,
+// and under load that outran the round-trip deadline, so the cells reported
+// the deadline instead of the cap. Nothing in production mutates it, and
+// TestResponseCapSeamDefaultsToTheConst9697 pins the default. This is the same
+// seam shape as sessionSyncRoundtripDeadline.
+var controlResponseCapBytes int64 = MaxControlResponseBytes
+
 func boundedResponseReader(r io.Reader) *limitedResponseReader {
-	return &limitedResponseReader{r: r, remaining: MaxControlResponseBytes}
+	return &limitedResponseReader{r: r, remaining: controlResponseCapBytes}
 }
 
 // limitedResponseReader is io.LimitReader plus a truncated flag.
@@ -403,5 +413,5 @@ func responseCapError(verb string, err error) error {
 			"(MaxControlResponseBytes) and was truncated; the helper ANSWERED and "+
 			"the answer did not fit — this is not a helper rejection and the helper "+
 			"log will not mention it: %w",
-		verb, int64(MaxControlResponseBytes), err)
+		verb, controlResponseCapBytes, err)
 }
