@@ -259,6 +259,36 @@ sees made commit-check decline a fold the compiler performs. The compiled census
 could not see either ordering defect, because it compiles through the compiler's
 own ordering.
 
+**Fixed in #9932: the DHCP-client heads fold.** `family inet dhcp;` with the
+`family` brace elided compiled `DHCP=false`, committed clean and warned about
+nothing — and that is the canonical way to write a DHCP interface, so an
+interface whose only address source was DHCP came up with no address while
+`show configuration` still displayed the statement. `family inet6
+dhcpv6-client …` had the same gap.
+
+`(inet, dhcp)` and `(inet6, dhcpv6-client)` are admitted on this pass's usual
+evidence: each is **empty-equivalent** in the elided spelling (the positive
+measurement that no reader consumes the packed tail) and each **reaches exactly
+one schema path**, the interface unit's family.
+
+The **flat-set path was already correct**, and that bounds the severity:
+`SetPath` builds the head as a CHILD while the hierarchical text parser leaves
+it on the container head's `Keys`, where `afNode.FindChild` never looks. The
+exposure was configuration TEXT only — a saved config, `load merge`, a restored
+backup — which is why the interactive CLI never showed it.
+
+The **sub-option chain is deliberately not admitted**: `family inet dhcp
+lease-time 3600;` still loses the lease-time. It is measured and ready (all four
+`dhcp` children and all six `dhcpv6-client` children reach one path each and are
+empty-equivalent) but it is ten more pairs, each owing rows in the #8763, #8768,
+#8852 and #9446 registers. `TestDhcpSubOptionChainIsStillUnadmitted9932` pins
+the boundary so admitting it is a decision.
+
+Admitting the outer pair changed no #9446 verdict — it moved the REASON one
+level deeper. The pass now clears the outer pair, descends, and is refused by
+the sub-option pair instead, which is why those sites still drop while their
+recorded pair list grew.
+
 **Fixed in #9635: the split reads the authored provenance.**
 `splitPackedStatements8768` used to end a multi-value statement at the first
 token that named a sibling statement, so `security ike policy P1 { proposals
