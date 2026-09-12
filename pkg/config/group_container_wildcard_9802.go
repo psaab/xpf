@@ -88,8 +88,13 @@ func wildcardInstanceNode9802(ancestorPath [][]string, n *Node) bool {
 	if parent == nil {
 		return false
 	}
+	// Container-shaped is the whole test. `scalar` and an args floor were tried
+	// beside it and are redundant: a scalar declares no children or wildcard, and
+	// an args-0 child leaves an EMPTY identity span below, which no wildcard can
+	// sit inside. The matrix showed both as escapes, so they are gone rather than
+	// carried as conditions nothing can break.
 	cs := resolveSchemaChild(parent, n.Keys[0])
-	if cs == nil || cs.args < 1 || cs.scalar || (cs.children == nil && cs.wildcard == nil) {
+	if cs == nil || (cs.children == nil && cs.wildcard == nil) {
 		return false
 	}
 	span := 1 + cs.args

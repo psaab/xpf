@@ -324,3 +324,30 @@ func TestGroupBodyRoutingPrefersAnExactMatch9802(t *testing.T) {
 		t.Errorf("compiled trust->untrust sets %v, want one set [qu,pg]: the group's pair must reach its own stanza, and a second set would evaluate it before the inline policy (#9802)", sets)
 	}
 }
+
+// The wildcard must sit in the INSTANCE-NAME span. A wildcard in a VALUE
+// position belongs to the statement, not to an instance, and the statement is
+// adopted whole. Without the span test the whole `unit 0` disappears, taking
+// the address with it.
+func TestPruneNeedsTheWildcardInTheIdentitySpan9802(t *testing.T) {
+	const text = `groups { G { interfaces { ge-0/0/0 { unit 0 description <*>; unit 0 { family inet { address 10.0.0.1/24; } } } } } } apply-groups G; system { host-name p; }`
+	tree, perrs := NewParser(text).Parse()
+	if len(perrs) > 0 {
+		t.Fatalf("fixture must parse: %v", perrs)
+	}
+	cfg, err := CompileConfigLenient(tree)
+	if err != nil {
+		t.Fatalf("lenient compile: %v", err)
+	}
+	ifc := cfg.Interfaces.Interfaces["ge-0/0/0"]
+	if ifc == nil {
+		t.Fatalf("the adopted interface did not compile")
+	}
+	var addrs int
+	for _, u := range ifc.Units {
+		addrs += len(u.Addresses)
+	}
+	if addrs != 1 {
+		t.Errorf("compiled %d IPv4 addresses on ge-0/0/0, want 1: a wildcard in a VALUE position is not an instance name, so the unit is adopted whole (#9802)", addrs)
+	}
+}
