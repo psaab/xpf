@@ -104,6 +104,36 @@ func TestInheritanceDisplayAgreesWithTheCompiledConfig9743(t *testing.T) {
 	}
 }
 
+// #9743: the display must not MUTATE the tree it was asked to render.
+//
+// Normalizing is a rewrite, and these entry points are read-only operations on
+// an operator's candidate configuration — `show configuration | display
+// inheritance` must leave the candidate exactly as authored. The fix normalizes
+// the CLONE for that reason (`cloneForExpansion` never aliases the caller), and
+// nothing else in this file can tell the two apart: every other cell parses a
+// fresh tree and calls a formatter once, so a version that also rewrote the
+// caller's tree passes all of them.
+func TestInheritanceDisplayDoesNotMutateTheTree9743(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		render func(*ConfigTree) string
+	}{
+		{"FormatInheritance", func(tr *ConfigTree) string { return tr.FormatInheritance() }},
+		{"FormatPathInheritance", func(tr *ConfigTree) string {
+			return tr.FormatPathInheritance([]string{"routing-instances"})
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tree := parse9743(t, elidedGroupBody9743)
+			before := tree.Format()
+			_ = tc.render(tree)
+			if after := tree.Format(); after != before {
+				t.Fatalf("rendering must not rewrite the caller's tree\n--- before ---\n%s\n--- after ---\n%s", before, after)
+			}
+		})
+	}
+}
+
 // CONTROL: a config with no group and no elision must render exactly as before.
 // It passed at master and pins that normalizing the display clone did not
 // disturb the ordinary path.
