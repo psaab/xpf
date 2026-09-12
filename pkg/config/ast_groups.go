@@ -506,17 +506,43 @@ func mergeNodes(dst *[]*Node, src []*Node, ancestorPath [][]string, budget *grou
 			continue
 		}
 
-		// Container node: find matching container in dst.
+		// Container node: find matching containers in dst.
+		//
+		// #9802: a level spread over two blocks is ONE level. Merging into the
+		// first same-keyed container and stopping sent a group body to a
+		// stanza that could not receive it, and left the stanza that could
+		// without the group. The wildcard-keyed children go to every
+		// same-keyed container, because each may hold different instances;
+		// the rest go to the one that can receive them.
 		found := false
-		for _, d := range *dst {
-			if !d.IsLeaf && keysEqual(d.Keys, s.Keys) {
-				// Merge children recursively.
-				if err := mergeNodes(&d.Children, s.Children, appendPath(ancestorPath, d.Keys), budget, group, vars); err != nil {
+		if targets := sameKeyedContainers9802(*dst, s.Keys); len(targets) > 0 {
+			wild, rest := splitWildcardChildren9802(s.Children)
+			// #9802 follow-up: route EACH concrete child to the stanza that can
+			// receive it. Bundling them sent a body carrying `screen` and
+			// `zones` to whichever stanza matched first, and the other stanza
+			// never saw the group: measured, `trust.ScreenProfile` went from
+			// `edge` to empty.
+			for _, c := range rest {
+				d := receivingContainer9802(targets, c)
+				if err := mergeNodes(&d.Children, []*Node{c}, appendPath(ancestorPath, d.Keys), budget, group, vars); err != nil {
 					return err
 				}
-				found = true
-				break
 			}
+			for _, d := range targets {
+				if len(wild) == 0 {
+					break
+				}
+				// #6767: one clone per destination, charged before it is made,
+				// exactly as the wildcard branch charges its fan-out.
+				if err := budget.charge(countNodes(wild)); err != nil {
+					return err
+				}
+				cloned := cloneNodes(wild)
+				if err := mergeNodes(&d.Children, cloned, appendPath(ancestorPath, d.Keys), budget, group, vars); err != nil {
+					return err
+				}
+			}
+			found = true
 		}
 		if !found {
 			// Cross-shape guard (#4325): a single-key group container whose
@@ -526,6 +552,23 @@ func mergeNodes(dst *[]*Node, src []*Node, ancestorPath [][]string, budget *grou
 			// leaf-list — keep the no-duplicate invariant (skip rather than
 			// append a second node for the same key).
 			if len(s.Keys) == 1 && hasMatchingLeaf(*dst, s.Keys) {
+				continue
+			}
+			// #9802: the adopted subtree is never recursed into, so a
+			// wildcard-keyed INSTANCE inside it would land in the tree as a
+			// literal name — the #9423 phantom, reached by the route that
+			// issue's fixtures cannot take. It matched nothing by
+			// construction, so drop it; a member-slot wildcard is left alone
+			// and stays refused. Pruned BEFORE the charge below, so the budget
+			// counts what is actually added.
+			hadChildren := len(s.Children) > 0
+			s.Children = pruneWildcardInstances9802(appendPath(ancestorPath, s.Keys), s.Children)
+			if wildcardInstanceNode9802(ancestorPath, s) {
+				continue
+			}
+			// A container whose whole body was wildcard-keyed adds nothing:
+			// adopting it would leave an empty stanza the operator never wrote.
+			if hadChildren && len(s.Children) == 0 {
 				continue
 			}
 			// #6767: adopting a container WHOLESALE adds its entire subtree to

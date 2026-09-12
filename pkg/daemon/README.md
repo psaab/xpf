@@ -2794,7 +2794,19 @@ never lock an operator out of a remote box it manages.
   - Nothing is bound when the last apply did not manage `vrf-mgmt`.
   - Tests: `fabric_overlay_vrf_9813_test.go`. It includes a kernel cell that runs
     in a private netns (`unshare -rn`) and skips without `CAP_NET_ADMIN`.
-  - Not covered: tenant routing-instance members re-created outside an apply.
+  - Routing-instance interface-LIST members have the same gap, and
+    `riMemberVRFReassertLoop` closes it. Step 0a and the #6805 late pass bind
+    them, both only from an apply, so a member netdev re-created outside one (a
+    driver re-probe, a VF reset) or unbound out of band forwards in the DEFAULT
+    table until the next apply. The loop binds only a member whose master is not
+    its VRF: `BindInterfaceToVRF` logs at Info on every call, so re-running the
+    apply's bind loop each tick would log on every tick of a healthy node. It
+    leaves a tunnel carrying its own `routing-instance` stanza alone, because
+    that is the tunnel manager's claim (`reconcileVRFClaimLocked` case 1, recorded
+    in `appliedRI` only from its own bind), and it resolves names through
+    `riMemberLinuxName` exactly as step 0a does, so the two reason about ONE name
+    set. It takes `applySem` before the config read that drives the binding
+    (#4001). Tests: `ri_member_vrf_reassert_9813_test.go`, including a kernel cell.
 
   **Host-inbound conntrack revocation retry (#6802, the same recovery shape):**
   `flushDeniedHostInboundConntrack` (the #5566 reconcile) deletes established

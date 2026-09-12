@@ -2190,7 +2190,19 @@ mod tests_shim_wg_classify_8274;
 // #1824: proptest property harness (parse no-panic/bounds, NAT
 // round-trip + descriptor-vs-generic differential, TSO reassembly).
 // `not(miri)` because proptest case loops are intractable under the
-// targeted `cargo +nightly miri test --bin` passes (#1755 lesson);
-// the deterministic example tests keep miri coverage of the same fns.
+// targeted `cargo +nightly miri test --bin` passes (#1755 lesson).
+//
+// #9499: this comment used to end "the deterministic example tests keep
+// miri coverage of the same fns". That was true of the tests' SHAPE and
+// false about the world -- no make target ran Miri at all, so the
+// exclusion was gating against a pass that never happened, and a reader
+// took a protection to exist. `make test-miri` now runs a REGISTERED
+// subset (userspace-dp/MIRI.registry) and `afxdp::frame::` is NOT in it:
+// measured at 16df7c8c7 the module ran 1021 s under Miri and then stopped
+// on an `unsupported operation` from a test that reads a file. This file
+// is therefore declared in userspace-dp/MIRI.unregistered with that
+// reason, and scripts/miri-census.sh fails if that declaration is
+// dropped. The deterministic pins remain the RIGHT shape for Miri; they
+// are simply not run under it today.
 #[cfg(all(test, not(miri)))]
 mod prop_tests;

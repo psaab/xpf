@@ -39,6 +39,8 @@ type physDesired struct {
 	// name an MTU the LOWEST unit number wins. That tie-break is arbitrary but
 	// it is DECIDED — the old behaviour was decided by map iteration order,
 	// which is not the same thing as unspecified, it is different per run.
+	// A TAGGED unit contributes only the interface-level value (#9761): its own
+	// unit MTU belongs to its VLAN sub-interface, not to the parent.
 	mtu int
 	// skipAddrs suppresses address reconciliation when any unit on the netdev
 	// is DHCP-managed, or the interface is a RETH member or fabric parent.
@@ -74,6 +76,16 @@ func planPhysDesired(cfg *config.Config) map[string]*physDesired {
 	// unit number that supplied the current mtu, per phys; -1 = interface level.
 	mtuUnit := map[string]int{}
 	seenAddr := map[string]map[string]bool{}
+	planFor := func(physName string) *physDesired {
+		pd := out[physName]
+		if pd == nil {
+			pd = &physDesired{}
+			out[physName] = pd
+			mtuUnit[physName] = -2 // nothing decided yet
+			seenAddr[physName] = map[string]bool{}
+		}
+		return pd
+	}
 
 	for _, zoneName := range zoneNames {
 		zone := cfg.Security.Zones[zoneName]
@@ -82,17 +94,35 @@ func planPhysDesired(cfg *config.Config) map[string]*physDesired {
 		}
 		for _, ifaceRef := range zone.Interfaces {
 			physName, cfgName, unitNum, vlanID := resolveInterfaceRef(ifaceRef, cfg)
-			if physName == "" || vlanID != 0 {
-				// A tagged unit actuates its own sub-interface, not the parent.
+			if physName == "" {
 				continue
 			}
-			pd := out[physName]
-			if pd == nil {
-				pd = &physDesired{}
-				out[physName] = pd
-				mtuUnit[physName] = -2 // nothing decided yet
-				seenAddr[physName] = map[string]bool{}
+			if vlanID != 0 {
+				// A tagged unit actuates its own sub-interface: its addresses,
+				// DHCP and unit MTU belong to that child, not to the parent. The
+				// parent still takes the interface-level mtu (#9761). This branch
+				// used to skip the whole reference, so a vlan-tagging interface
+				// whose zone references were all tagged got no plan, and its
+				// interface-level mtu was never written. Two tagged references
+				// plan nothing, as on master, because another component owns the
+				// MTU of the device they resolve to (resolveInterfaceRef): a fabric
+				// interface resolves to the local fabric member, whose MTU the
+				// fabric setup owns, and a per-unit tunnel resolves to its tunnel
+				// device, whose MTU the tunnel manager owns, even when a WireGuard
+				// unit shares the interface's own device (#6941).
+				if ifCfg := cfg.Interfaces.Interfaces[cfgName]; ifCfg != nil && ifCfg.MTU > 0 && ifCfg.LocalFabricMember == "" {
+					if unit := ifCfg.Units[unitNum]; unit != nil && unit.Tunnel != nil {
+						continue
+					}
+					pd := planFor(physName)
+					if mtuUnit[physName] == -2 {
+						pd.mtu = ifCfg.MTU
+						mtuUnit[physName] = -1
+					}
+				}
+				continue
 			}
+			pd := planFor(physName)
 			ifCfg, ok := cfg.Interfaces.Interfaces[cfgName]
 			if !ok || ifCfg == nil {
 				continue

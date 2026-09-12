@@ -11,7 +11,7 @@ BUILD_TIME ?= $(shell date -u '+%Y-%m-%dT%H:%M:%SZ')
 LDFLAGS := -X main.version=$(VERSION) -X main.commit=$(COMMIT) -X main.buildTime=$(BUILD_TIME)
 
 # eBPF compilation flags
-.PHONY: all generate generate-userspace-xdp build-userspace-xdp build build-ctl build-userspace-dp build-userspace-dp-debug-log proto install clean test test-go test-rust test-race-dp audit-check test-connectivity test-wire-properties test-failover test-double-failover test-active-active test-stress-failover test-ha-crash test-chained-crash test-private-rg test-restart-connectivity test-harness-ledger-lib harness-compare harness-ledger-lint
+.PHONY: all generate generate-userspace-xdp build-userspace-xdp build build-ctl build-userspace-dp build-userspace-dp-debug-log proto install clean test test-go test-rust test-miri miri-census test-miri-census-lib test-race-dp audit-check test-connectivity test-wire-properties test-failover test-double-failover test-active-active test-stress-failover test-ha-crash test-chained-crash test-private-rg test-restart-connectivity test-harness-ledger-lib harness-compare harness-ledger-lint
 
 all: generate build build-ctl
 
@@ -339,6 +339,54 @@ test-rust:
 	$(CARGO) test --manifest-path userspace-dp/Cargo.toml \
 		--bins --tests -- --test-threads=1 frame nat session checksum
 
+# #9499 member 2: UB detection. `make test-rust` above makes an integer WRAP an
+# executed failure; nothing makes undefined behaviour one. The crate carries
+# `unsafe` that only a UB oracle can judge -- FlowFairState::new_boxed writes
+# MaybeUninit fields through raw pointers, and a missed field or a bad drop
+# target is invisible to every other gate in the tree.
+#
+# It is a REGISTERED SUBSET, not the crate: measured at 16df7c8c7,
+# `cargo +nightly miri test --bins -- afxdp::frame::` ran 1021 s and then
+# stopped on an `unsupported operation: open ... when isolation is enabled`
+# from a test that reads a file. Miri over this crate is neither fast nor
+# uniformly clean, so userspace-dp/MIRI.registry names what runs and what floor
+# each module must meet, and `miri-census` below makes every module OUTSIDE the
+# subset say so in writing.
+#
+# The scoring is the point. `cargo miri test -- <filter>` that matches NOTHING
+# prints `0 passed` and exits 0, so scripts/miri-leg.sh judges the LOG: a
+# missing result line, `0 passed`, a count below the registered floor, and an
+# `unsupported operation` are all FAILURES rather than skips. Heavy and
+# single-threaded -- run it as the only heavy job on a shared box. Not folded
+# into `make test`, which must stay runnable without a nightly toolchain.
+test-miri:
+	bash scripts/miri-leg.sh
+
+# The claim census (#9499 member 2). Every file under userspace-dp that
+# mentions Miri -- a `cfg(not(miri))` exclusion or a prose claim that something
+# "keeps miri coverage" -- is either run by a registered module or declared in
+# userspace-dp/MIRI.unregistered with a one-line reason.
+#
+# This is what stops the registry shrinking in silence. Deleting its last line
+# does not make `make test-miri` quieter; it makes this census report every
+# claim that line was covering as undeclared, and exit 1. #9499's finding was
+# four in-tree comments asserting Miri coverage while NO target ran Miri at
+# all, so the equivalence it refuses is "a comment about coverage" = "coverage".
+# Hermetic file scan, well under a second; also runs inside `make selftest`.
+miri-census:
+	sh scripts/miri-census.sh
+
+# Self-test the census and the leg's scorer. Both fail INVISIBLY: a broken
+# claim matcher reports a CLEAN BOARD and a broken scorer reports a clean run,
+# so each defence is asserted by a MUTATION that must flip the verdict, against
+# a sandbox repo built from scratch (never the real worktree -- a self-test
+# that edits the tree it checks cannot tell its own mutant from your work).
+# The leg cells drive the real scripts/miri-leg.sh over a stub cargo replaying
+# fixture logs, so the parser under test is the shipped one. Hermetic: no
+# cargo, no Miri, no cluster.
+test-miri-census-lib:
+	bash ./test/incus/miri-census-selftest.sh
+
 # Standalone convenience view of the refactoring-heatmap drift (#1661
 # item 8). Regenerates scripts/refactoring-audit.sh output to a temp
 # file and diffs it against the committed
@@ -663,6 +711,30 @@ test-target-services-lib:
 # exit status. Hermetic: mocked incus, canned transcripts; no cluster, no VM.
 # Run this after touching apply-cos-config.sh or cos-apply-lib.sh. The Go half
 # of the marker contract lives in cmd/cli/cos_apply_markers_6440_test.go.
+# #9551: refuse a NEGATED GitHub close keyword. GitHub's parser does not read
+# negation, so a sentence saying an issue stays open closes it at merge when a
+# close verb stands in front of the number. scripts/close_keyword_lint_ci.sh
+# holds both pull-request legs (the body and the commit range); the GitHub
+# Actions job that would call it on every PR is NOT in the tree yet, because
+# pushing a workflow file needs a token with `workflow` scope (#9551). These are
+# the local legs.
+#   close-keyword-lint           lint this branch's commit messages
+#                                (origin/master..HEAD); PR=<n> lints that PR's
+#                                body and commit messages instead (needs gh)
+#   install-git-hooks            install the commit-msg hook: honours
+#                                core.hooksPath, refuses to replace a different
+#                                hook, and fails open in a worktree without the lint
+#   test-close-keyword-lint-lib  the lint's cells (make selftest runs them too)
+.PHONY: close-keyword-lint install-git-hooks test-close-keyword-lint-lib
+close-keyword-lint:
+	python3 ./scripts/close_keyword_lint.py $(if $(PR),--pr $(PR),--commits origin/master..HEAD)
+
+install-git-hooks:
+	bash ./scripts/git-hooks/install.sh
+
+test-close-keyword-lint-lib:
+	python3 -m unittest scripts/test_close_keyword_lint.py
+
 test-cos-apply-lib:
 	bash ./test/incus/cos-apply-lib-selftest.sh
 	go test -count=1 -run 6440 ./cmd/cli/

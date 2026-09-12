@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"net"
 	"sync"
 	"sync/atomic"
@@ -1082,6 +1083,10 @@ type SessionSync struct {
 
 	zoneRGMu  sync.RWMutex
 	zoneRGMap map[uint16]int
+	// zoneRGMapGen changes whenever SetZoneRGMap installs a map with different
+	// contents (#9655), so a bulk can tell whether the zone map its snapshot was
+	// taken from still applies. Guarded by zoneRGMu.
+	zoneRGMapGen uint64
 
 	// ingressFoldFn resolves a session's LOCAL ingress identity to the
 	// #7095 cluster-stable fold that rides the sync wire. Injected by the
@@ -1193,7 +1198,7 @@ type SessionSync struct {
 	bulkRecvConn               net.Conn
 	bulkRecvV4                 map[dataplane.SessionKey]struct{}
 	bulkRecvV6                 map[dataplane.SessionKeyV6]struct{}
-	bulkZoneSnapshot           map[uint16]bool
+	bulkZoneSnapshot           *zoneOwnershipSnapshot
 	barrierSeq                 atomic.Uint64
 	barrierAckSeq              atomic.Uint64
 	barrierWaitMu              sync.Mutex
@@ -1693,6 +1698,12 @@ func (s *SessionSync) SetVRFDevice(dev string) {
 // session synchronization.
 func (s *SessionSync) SetZoneRGMap(m map[uint16]int) {
 	s.zoneRGMu.Lock()
+	// #9655: only a map with different contents is a change. The daemon re-sets
+	// the map on every config apply, and a bulk must not lose its reconcile to
+	// a commit that moved no zone.
+	if !maps.Equal(s.zoneRGMap, m) {
+		s.zoneRGMapGen++
+	}
 	s.zoneRGMap = m
 	s.zoneRGMu.Unlock()
 }
@@ -1889,13 +1900,53 @@ func (s *SessionSync) WaitForIdle(timeout time.Duration, stableSamples int, samp
 	}
 }
 
-func (s *SessionSync) snapshotZoneOwnership() map[uint16]bool {
+// zoneOwnershipSnapshot is the zone ownership a bulk's stale-session reconcile
+// judges by, taken when the bulk STARTS (#9655).
+type zoneOwnershipSnapshot struct {
+	// zones is ShouldSyncZone's answer for each zone the zone->RG map names.
+	zones map[uint16]bool
+	// mapGen is the zone->RG map generation the snapshot was taken from.
+	mapGen uint64
+}
+
+// shouldSync reports whether a zone's sessions are KEPT by this reconcile. It
+// answers from the zone->RG map the bulk started with; a zone that map does not
+// name is kept whole (#9655).
+//
+// Keeping is the conservative answer, and it is deliberate. The live sweep
+// answers an unmapped zone with RG 0 ownership, and the first attempt at this
+// issue had the reconcile do the same, so a stale peer-owned session there
+// would finally be deleted on the RG 0 secondary. The measurement stopped it: a
+// zone of node-local, non-RETH interfaces is RG-unmapped too, and no
+// cluster-mode commit rule rejects one, so that answer deletes the node's OWN
+// live flows in such a zone at every bulk and a TCP flow dies on its next
+// non-SYN packet. Deleting only the SYNCED copy needs a per-session origin bit,
+// which the session_value/HA-wire prerequisite carries. Until then an unmapped
+// zone is kept whole and #9655 stays open for that half.
+func (z *zoneOwnershipSnapshot) shouldSync(zoneID uint16) bool {
+	if v, ok := z.zones[zoneID]; ok {
+		return v
+	}
+	return true
+}
+
+func (s *SessionSync) snapshotZoneOwnership() *zoneOwnershipSnapshot {
 	s.zoneRGMu.RLock()
 	m := s.zoneRGMap
+	gen := s.zoneRGMapGen
 	s.zoneRGMu.RUnlock()
-	snap := make(map[uint16]bool, len(m))
+	// No zone the map names means nothing this reconcile can judge by, whether
+	// the daemon has not wired zone ownership yet (nil) or the config maps no
+	// zone to an RG (installed but empty). Take no snapshot; the reconcile skips
+	// and the next bulk tries again. Judging an unnamed zone is exactly what
+	// shouldSync refuses to do, so a snapshot over an empty map could only ever
+	// answer "not ours" for every zone and delete the node's own sessions.
+	if len(m) == 0 {
+		return nil
+	}
+	snap := &zoneOwnershipSnapshot{zones: make(map[uint16]bool, len(m)), mapGen: gen}
 	for zoneID := range m {
-		snap[zoneID] = s.ShouldSyncZone(zoneID)
+		snap.zones[zoneID] = s.ShouldSyncZone(zoneID)
 	}
 	return snap
 }
@@ -1915,7 +1966,11 @@ func (s *SessionSync) reconcileStaleSessions() {
 	s.bulkZoneSnapshot = nil
 	s.bulkMu.Unlock()
 	start := time.Now()
-	slog.Info("cluster sync: reconcile stale sessions starting", "recv_v4", len(recvV4), "recv_v6", len(recvV6), "zones", len(zoneSnap))
+	zones := -1
+	if zoneSnap != nil {
+		zones = len(zoneSnap.zones)
+	}
+	slog.Info("cluster sync: reconcile stale sessions starting", "recv_v4", len(recvV4), "recv_v6", len(recvV6), "zones", zones)
 	// #5085: do NOT skip on an empty received set. A completed bulk window
 	// (BulkStart -> BulkEnd, #5272-gated on bulkInProgress) is authoritative:
 	// an EMPTY authoritative snapshot means the peer legitimately holds no
@@ -1930,16 +1985,30 @@ func (s *SessionSync) reconcileStaleSessions() {
 		slog.Info("cluster sync: reconcile stale sessions skipped (no dataplane)")
 		return
 	}
-	if len(zoneSnap) == 0 {
+	// #9655: a bulk with no zone snapshot has nothing to judge ownership by, and
+	// deleting on a guess is the failure this reconcile can cause. Both shapes
+	// take no snapshot: a zone map that was never installed (ownership is not
+	// wired yet) and one installed naming no zone. See snapshotZoneOwnership.
+	if zoneSnap == nil {
 		slog.Info("cluster sync: reconcile stale sessions skipped (no zone snapshot)")
 		return
 	}
-	shouldSyncAtBulkStart := func(zoneID uint16) bool {
-		if v, ok := zoneSnap[zoneID]; ok {
-			return v
-		}
-		return true
+	// #9655: the snapshot answers for the zone map it was taken from. A map with
+	// different contents installed during the bulk can move a zone to this node,
+	// and judging by the old answers would delete a session this node now owns.
+	// Keep everything; the next bulk reconciles.
+	s.zoneRGMu.RLock()
+	mapGen := s.zoneRGMapGen
+	s.zoneRGMu.RUnlock()
+	if mapGen != zoneSnap.mapGen {
+		slog.Info("cluster sync: reconcile stale sessions skipped (zone map changed during the bulk)",
+			"snapshot_map_gen", zoneSnap.mapGen, "map_gen", mapGen)
+		return
 	}
+	// #9655: judged by the zone answers this bulk started with. A zone the map
+	// does not name is not judged; see zoneOwnershipSnapshot.shouldSync for why
+	// the RG 0 answer the live sweep uses is NOT applied here.
+	shouldSyncAtBulkStart := zoneSnap.shouldSync
 	var deleted int
 	result, err := s.sessions.ReconcileClusterBulk(dataplane.ClusterBulkReconcileInput{
 		ReceivedV4:     recvV4,

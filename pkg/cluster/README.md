@@ -4344,6 +4344,42 @@ outside the monitor loop:
   bulk-prime retry bound (35 s), exported so there is one number. Cells:
   `sync_cold_prime_ack_9626_test.go`.
 
+  **The stale-session reconcile judges only zones the zone->RG map names (#9655).**
+  At BulkEnd, `reconcileStaleSessions` deletes a session absent from the peer's
+  authoritative bulk, but only in a zone this node does not own. It judges
+  ownership by `zoneOwnershipSnapshot`, taken when the bulk started.
+  - `SetZoneRGMap` bumps `zoneRGMapGen` when the map's CONTENTS change. The
+    reconcile skips a bulk whose snapshot came from an older generation, because
+    the old answers could delete a session in a zone that has since moved to this
+    node. An identical map re-set by a config apply is not a change, so a commit
+    during a bulk does not cost it its reconcile.
+  - A snapshot that names no zone judges nothing, and both shapes take none: a
+    map never installed (ownership is not wired yet) and a map installed naming
+    no zone. The bulk deletes nothing and the next one tries again
+    (`TestReconcileSkipsNonEmptyBulkWithoutZoneSnapshot` keeps the first guard).
+  - A zone the map does not name is KEPT WHOLE. That is the conservative answer
+    and it is deliberate.
+
+  **Why an RG-unmapped zone is not answered with RG 0.** The live sweep answers
+  such a zone with RG 0 ownership (`IsPrimaryFn`), and the first attempt at this
+  issue had the reconcile do the same, so a stale peer-owned session in an
+  unmapped zone would finally be deleted on the RG 0 secondary. It was withdrawn
+  on measurement: `buildZoneRGMap` maps a zone only through RETH interfaces, so a
+  zone of node-local (non-RETH) dataplane interfaces is RG-unmapped too, and no
+  cluster-mode commit rule rejects one. On the RG 0 secondary that answer deletes
+  that node's OWN live flows in such a zone at every bulk, and a TCP flow dies on
+  its next non-SYN packet — a worse outcome than the stale rows the issue is
+  about, because sessions carry no origin flag telling a local flow from a stale
+  synced copy.
+
+  **What is still open.** Deleting only the SYNCED copy in an unmapped zone needs
+  a per-session origin bit (synced vs local). That rides the one
+  `session_value`/HA-wire prerequisite covering pair identity (#9604),
+  `route_table_id` (#9752) and the origin bit, so #9655 stays open for that half
+  rather than growing a wire change here.
+
+  Cells: `sync_zone_snapshot_rg0_9655_test.go`.
+
   **Accepted limitation, with its owner (#9626 item 3).** A cold prime carries
   only the redundancy groups this node is PRIMARY for when the bulk is built:
   `storeBulkWalk` filters by `ShouldSyncZone`, and the table-truth snapshot
