@@ -5506,6 +5506,22 @@ impl Fixture9714 {
 /// (`synced_entry_allows_local_replace`) had already declined to clobber the same
 /// entry. A delete guard weaker than the install guard it mirrors is #9714 through a
 /// second door. Both guards now ask the install side's question.
+///
+/// THERE IS DELIBERATELY NO V6 TWIN, and the asymmetry is a decision rather than
+/// an oversight. The v6 peer delete reaches identical code:
+/// `delete_peer_synced_session` is one function over a `SessionKey` that carries
+/// `addr_family` as a FIELD, `delete_synced_session_gen_marked` is its only
+/// implementation, `handlers/sync_session.rs` its only call site, and the delete
+/// handler contains no family branch at all. The predicate under test —
+/// `synced_entry_allows_local_replace(ha_state, owner_rg_id, now_secs)` — takes no
+/// key, no address and no family. A v6 copy of this cell would therefore feed the
+/// same predicate the same arguments, and could not fail unless this cell also
+/// failed: a fixture that is VALID and carries NO SIGNAL, which is worse than no
+/// cell at all because it reads as coverage. The V4/V6 split that IS real lives on
+/// the Go marking path, which has its own twins
+/// (`TestAPeerV6BatchDeleteMarksEveryHelperRequest9714`). If a family branch is
+/// ever added between the wire and this predicate, that argument dies and the twin
+/// becomes required.
 #[test]
 fn a_peer_delete_of_a_live_local_session_with_an_unresolved_owner_rg_is_refused_9714() {
     let fixture = fixture_9714_with_owner_rg(true, SessionOrigin::ForwardFlow, 0);
