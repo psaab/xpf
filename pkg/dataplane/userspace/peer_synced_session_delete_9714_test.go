@@ -236,6 +236,55 @@ func TestAPeerBatchCollectsTheAppliedKeysByName9714(t *testing.T) {
 	}
 }
 
+// #9714 review round 2, finding 8: a refusal in a LATER chunk must be reported by
+// ITS OWN key.
+//
+// Deletes reach the helper in chunks of sessionHelperDeleteChunk (256), and a refusal
+// is recorded as keys[start+i]. The review names the mutant that survives everything
+// else: keys[start+i] -> keys[start], which reports the chunk's FIRST key instead of
+// the refused one. Every other cell refuses request 1 of chunk 1, where start+i and
+// start are the SAME index, so none of them can see it — the fixture, not the
+// assertion, is what was hiding the bug.
+//
+// The consequence is precise and bad in both directions at once: the refused session
+// loses the mirror row it was supposed to keep, and an unrelated session keeps a row
+// it was supposed to lose.
+func TestARefusalInALaterChunkIsReportedByItsOwnKey9714(t *testing.T) {
+	m, rec := newSyncOnlyManager9146(t)
+	const n = sessionHelperDeleteChunk + 5 // spans two chunks
+	ports := make([]uint16, 0, n)
+	for i := 0; i < n; i++ {
+		ports = append(ports, uint16(20000+i))
+	}
+	keys := scopedKeys9364(100007, ports...)
+	// 1-based, and deliberately inside the SECOND chunk so that start != 0.
+	const refusedNth = sessionHelperDeleteChunk + 2
+	rec.refuseNth(refusedNth, peerDeleteRefusedLocalOwned)
+
+	var refused, applied []dataplane.ScopedSessionKey
+	if err := m.deleteHelperSessionsScopedV4Marked(keys, true, &refused, &applied); err != nil {
+		t.Fatalf("marked scoped delete: %v", err)
+	}
+
+	if got := len(rec.all()); got != n {
+		t.Fatalf("FIXTURE: the helper saw %d requests, want %d — the batch must span two chunks and "+
+			"survive a per-key refusal (#5881), or there is no later chunk to measure", got, n)
+	}
+	want := keys[refusedNth-1]
+	if len(refused) != 1 || refused[0] != want {
+		t.Errorf("refused = %v, want exactly [%v]: a refusal recorded against the CHUNK'S FIRST key "+
+			"instead of its own strands the refused session — its mirror row is deleted — and spares an "+
+			"unrelated one (#9714 r2 F8)", refused, want)
+	}
+	if len(applied) != n-1 {
+		t.Errorf("applied = %d keys, want %d: every key the helper answered without refusing", len(applied), n-1)
+	}
+	if slices.Contains(applied, want) {
+		t.Errorf("the refused key %v was ALSO reported as applied, so its mirror row would be deleted "+
+			"despite the helper keeping the session", want)
+	}
+}
+
 // #9714 review round 2, finding 1: after a transport failure aborts the batch, every
 // request the loop NEVER SENT must report errSessionSyncNotAttempted — not nil.
 //

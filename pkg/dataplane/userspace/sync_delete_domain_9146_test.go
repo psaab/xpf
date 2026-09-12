@@ -50,17 +50,30 @@ type syncRec9146 struct {
 	ln   net.Listener
 	mu   sync.Mutex
 	reqs []SessionSyncRequest
-	// refusal, when set, is the in-band error the FIRST request is answered with
-	// (#9714); every other request is answered OK.
-	refusal string
+	// refusal, when set, is the in-band error ONE request is answered with
+	// (#9714); every other request is answered OK. refuseAt names WHICH request,
+	// 1-based.
+	//
+	// Refusing something other than the first matters for the chunk-boundary cells:
+	// a bug that records a refusal against the chunk's FIRST key instead of its own
+	// is invisible whenever the refused key and the first key are the same one, which
+	// they are in every cell that refuses request 1 (#9714 r2 F8).
+	refusal  string
+	refuseAt int
 }
 
 // refuseFirst makes the recorder answer its first request with the in-band error
 // refusal, as the helper answers a delete it refused (#9714).
 func (r *syncRec9146) refuseFirst(refusal string) {
+	r.refuseNth(1, refusal)
+}
+
+// refuseNth makes the recorder answer the n'th request (1-based) with refusal.
+func (r *syncRec9146) refuseNth(n int, refusal string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.refusal = refusal
+	r.refuseAt = n
 }
 
 func (r *syncRec9146) all() []SessionSyncRequest {
@@ -93,7 +106,7 @@ func startSyncRec9146(t *testing.T, sock string) *syncRec9146 {
 				if req.SessionSync != nil {
 					r.mu.Lock()
 					r.reqs = append(r.reqs, *req.SessionSync)
-					if len(r.reqs) == 1 && r.refusal != "" {
+					if len(r.reqs) == r.refuseAt && r.refusal != "" {
 						resp = ControlResponse{OK: false, Error: r.refusal}
 					}
 					r.mu.Unlock()
