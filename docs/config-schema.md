@@ -277,12 +277,28 @@ it on the container head's `Keys`, where `afNode.FindChild` never looks. The
 exposure was configuration TEXT only — a saved config, `load merge`, a restored
 backup — which is why the interactive CLI never showed it.
 
-The **sub-option chain is deliberately not admitted**: `family inet dhcp
-lease-time 3600;` still loses the lease-time. It is measured and ready (all four
-`dhcp` children and all six `dhcpv6-client` children reach one path each and are
-empty-equivalent) but it is ten more pairs, each owing rows in the #8763, #8768,
-#8852 and #9446 registers. `TestDhcpSubOptionChainIsStillUnadmitted9932` pins
-the boundary so admitting it is a decision.
+**#9977 fixed the sub-option chain in the READER, and it is still not
+admitted.** `family inet dhcp lease-time 3600;` used to compile `DHCP=true` and
+lose the lease-time, because #9932's fold puts `dhcp` under the family and the
+`dhcp` node then carries its options as a PACKED TAIL on its own Keys — where
+`FindChild` and the `Children` range in `compiler_interfaces.go` cannot see them.
+Both DHCP-client reads are now wrapped in `packedBody`.
+
+The admission route was viable and pre-measured — all four `dhcp` children and
+all six `dhcpv6-client` children reach exactly one schema path and every one is
+empty-equivalent — but it is ten pairs each owing rows in the #8763, #8768,
+#8852 and #9446 registers, to reach what two `packedBody` calls reach. A reader
+change alters no admission, so those four censuses see nothing new. Same trade as
+#9620 H9.
+
+`TestDhcpSubOptionChainFoldsWithoutBeingAdmitted9977` holds BOTH halves — that no
+sub-option pair is admitted, and that the value survives anyway — because they
+are separate facts and the interesting one is that they are compatible.
+
+Three sites still diverge and keep their register lines:
+`dhcpv6-client prefix-delegating`'s two leaves and
+`update-router-advertisement interface` sit one level deeper than the node this
+read expands.
 
 Admitting the outer pair changed no #9446 verdict — it moved the REASON one
 level deeper. The pass now clears the outer pair, descends, and is refused by

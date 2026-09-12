@@ -263,10 +263,6 @@ interfaces xpfname unit	partial
 interfaces xpfname unit xpfarg family inet address xpfarg preferred	empty
 interfaces xpfname unit xpfarg family inet address xpfarg primary	empty
 interfaces xpfname unit xpfarg family inet address xpfarg vrrp-group	empty
-interfaces xpfname unit xpfarg family inet dhcp force-discover	empty
-interfaces xpfname unit xpfarg family inet dhcp lease-time	empty
-interfaces xpfname unit xpfarg family inet dhcp retransmission-attempt	empty
-interfaces xpfname unit xpfarg family inet dhcp retransmission-interval	empty
 interfaces xpfname unit xpfarg family inet mtu	empty
 interfaces xpfname unit xpfarg family inet sampling input	empty
 interfaces xpfname unit xpfarg family inet sampling output	empty
@@ -276,11 +272,8 @@ interfaces xpfname unit xpfarg family inet6 address xpfarg preferred	empty
 interfaces xpfname unit xpfarg family inet6 address xpfarg primary	empty
 interfaces xpfname unit xpfarg family inet6 address xpfarg vrrp-group	empty
 interfaces xpfname unit xpfarg family inet6 dad-disable	empty
-interfaces xpfname unit xpfarg family inet6 dhcpv6-client client-ia-type	empty
-interfaces xpfname unit xpfarg family inet6 dhcpv6-client client-type	empty
 interfaces xpfname unit xpfarg family inet6 dhcpv6-client prefix-delegating preferred-prefix-length	empty
 interfaces xpfname unit xpfarg family inet6 dhcpv6-client prefix-delegating sub-prefix-length	empty
-interfaces xpfname unit xpfarg family inet6 dhcpv6-client req-option	empty
 interfaces xpfname unit xpfarg family inet6 dhcpv6-client update-router-advertisement interface	empty
 interfaces xpfname unit xpfarg family inet6 mtu	empty
 interfaces xpfname unit xpfarg family inet6 sampling input	empty
