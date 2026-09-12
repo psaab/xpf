@@ -327,16 +327,17 @@ func TestGroupBodyRoutingPrefersAnExactMatch9802(t *testing.T) {
 
 // The wildcard must sit in the INSTANCE-NAME span. A wildcard in a VALUE
 // position belongs to the statement, not to an instance, so the statement is
-// adopted whole. Without the span test the zone statement is pruned and the
-// zone never compiles.
+// adopted whole. Without the span test the syslog host statement is pruned and
+// the destination never compiles.
 //
-// The fixture reaches the statement through NAMED schema children only.
-// `schemaAtAncestorPath` does not resolve through a wildcard hop such as a
-// dynamic interface name, so a fixture under `interfaces` cannot exercise this
-// rule at all: the prune declines there for want of a schema, not for want of
+// The fixture is chosen so the rule is actually reachable. It keeps a PACKED
+// tail (no admitted pair folds `host <addr> <tail>` into a body), and it
+// resolves through NAMED schema children: `schemaAtAncestorPath` does not
+// resolve through a wildcard hop such as a dynamic interface name, so a fixture
+// under `interfaces` would decline for want of a schema rather than for want of
 // the span.
 func TestPruneNeedsTheWildcardInTheIdentitySpan9802(t *testing.T) {
-	const text = `groups { G { security { zones { security-zone trust description <*>; } } } } apply-groups G; system { host-name p; }`
+	const text = `groups { G { system { syslog { host 10.0.0.1 <*>; } } } } apply-groups G; interfaces { ge-0/0/0 { unit 0; } }`
 	tree, perrs := NewParser(text).Parse()
 	if len(perrs) > 0 {
 		t.Fatalf("fixture must parse: %v", perrs)
@@ -345,8 +346,13 @@ func TestPruneNeedsTheWildcardInTheIdentitySpan9802(t *testing.T) {
 	if err != nil {
 		t.Fatalf("lenient compile: %v", err)
 	}
-	z := cfg.Security.Zones["trust"]
-	if z == nil {
-		t.Errorf("zone trust did not compile: a wildcard in a VALUE position is not an instance name, so the statement is adopted whole (#9802)")
+	var addrs []string
+	if cfg.System.Syslog != nil {
+		for _, h := range cfg.System.Syslog.Hosts {
+			addrs = append(addrs, h.Address)
+		}
+	}
+	if len(addrs) != 1 || addrs[0] != "10.0.0.1" {
+		t.Errorf("compiled syslog hosts %v, want [10.0.0.1]: the wildcard sits in a VALUE position, so the statement is not an instance name and is adopted whole (#9802)", addrs)
 	}
 }
