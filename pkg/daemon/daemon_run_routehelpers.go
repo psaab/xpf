@@ -555,3 +555,57 @@ func inferIPv6StaticNextHopInterfaces(cfg *config.Config, overlay []config.Route
 	}
 	return resolved
 }
+
+// riMemberLinuxNames resolves a routing-instance member to EVERY kernel device
+// it claims, which for a BARE member is the base netdev and all of its
+// configured units.
+//
+// #9754: the bind loop called riMemberLinuxName once per member string, and for
+// a bare member that returns the parent netdev alone. The 802.1Q children for
+// the tagged units were created with no master and never enslaved, so
+// kernel-path traffic on them routed in the DEFAULT instance -- failing OPEN to
+// main on a config strict accepts with no warning. FRR/zebra reads interface VRF
+// membership from the same kernel master, so those units' connected prefixes
+// landed in the default VRF and VRF-bound sockets never saw them.
+//
+// A bare reference MEANS every unit everywhere else that reads one: the
+// userspace routing-instance binder consumes InterfaceUnitRefKeys (#9132) and
+// the DHCP route map keys every unit of a whole-device member. This makes the
+// kernel bind read it the same way, through the SAME helper rather than a second
+// fan-down that could drift from it.
+//
+// A UNIT reference still binds exactly that unit -- InterfaceUnitRefKeys does
+// not fan up to the base, deliberately (#9063): the base row carries unit 0's
+// addresses, so binding the base from a unit-1 reference would move unit 0's
+// prefix into unit 1's instance.
+//
+// A tunnel or xfrmi member resolves to ONE device and is returned before the
+// fan-down: TunnelNameMap is keyed on the canonical ref, those devices have no
+// 802.1Q children, and fanning them down would invent names for units that have
+// no netdev of their own.
+func riMemberLinuxNames(cfg *config.Config, tunMap map[string]string, ifaceName string) []string {
+	canon := config.CanonicalInterfaceUnitRef(ifaceName)
+	if name, ok := tunMap[canon]; ok && name != "" {
+		return []string{name}
+	}
+	refs := config.InterfaceUnitRefKeys(cfg, ifaceName)
+	if len(refs) == 0 {
+		return []string{riMemberLinuxName(cfg, tunMap, ifaceName)}
+	}
+	seen := make(map[string]struct{}, len(refs))
+	out := make([]string, 0, len(refs))
+	for _, ref := range refs {
+		name := riMemberLinuxName(cfg, tunMap, ref)
+		if name == "" {
+			continue
+		}
+		if _, dup := seen[name]; dup {
+			// A unit with no vlan-id collapses onto the base device
+			// (logicalUnitDeviceKey), so the base and unit 0 name one netdev.
+			continue
+		}
+		seen[name] = struct{}{}
+		out = append(out, name)
+	}
+	return out
+}
