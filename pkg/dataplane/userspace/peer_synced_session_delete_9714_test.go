@@ -195,6 +195,47 @@ func TestOnlyAnAppliedKeyLosesItsMirrorRow9714(t *testing.T) {
 	}
 }
 
+// #9714 review round 2, finding 1 — the WIRING, not the pure function.
+//
+// TestOnlyAnAppliedKeyLosesItsMirrorRow9714 drives deleteAppliedMirrorRows with a
+// LITERAL slice, so it cannot see whether anything still fills that slice. A
+// mutation run proved the gap rather than guessing at it: deleting the `applied`
+// collection arm from BOTH the V4 and V6 marked-delete twins broke no cell anywhere,
+// while leaving the batch deleting zero mirror rows — a silent regression in the
+// direction of doing nothing, which no existing assertion could see.
+//
+// The gap was introduced by the fix itself. Before the inversion the teardown was
+// driven by `scoped` directly, so there was no collection step that could break.
+// It asserts on the COLLECTION ARM directly rather than on a mirror-row count,
+// deliberately. Seeding real rows needs injectSessionMaps, which builds real eBPF
+// maps and SKIPS without CAP_BPF — and a cell that skips is not coverage, least of
+// all in the environment where this gap was found. The arm is reachable without
+// privileges through the session socket, so the cell measures the mutated code
+// itself instead of a downstream consequence of it.
+func TestAPeerBatchCollectsTheAppliedKeysByName9714(t *testing.T) {
+	m, rec := newSyncOnlyManager9146(t)
+	rec.refuseFirst(peerDeleteRefusedLocalOwned)
+	keys := scopedKeys9364(100007, 1234, 1235, 1236)
+
+	var refused, applied []dataplane.ScopedSessionKey
+	if err := m.deleteHelperSessionsScopedV4Marked(keys, true, &refused, &applied); err != nil {
+		t.Fatalf("marked scoped delete: %v", err)
+	}
+
+	if got := len(rec.all()); got != len(keys) {
+		t.Fatalf("FIXTURE: the helper saw %d requests, want %d — a per-key refusal must not abort the batch "+
+			"(#5881), or there is no applied tail for this cell to measure", got, len(keys))
+	}
+	if !slices.Equal(refused, keys[:1]) {
+		t.Errorf("refused = %v, want exactly the first key: the helper refused it and it must be named", refused)
+	}
+	if !slices.Equal(applied, keys[1:]) {
+		t.Errorf("applied = %v, want every key the helper answered WITHOUT refusing. The applied set is what "+
+			"drives the mirror-row teardown, so a short or empty set silently tears down nothing, and a set "+
+			"that wrongly includes the refused key tears down a live local session (#9714 r2 F1)", applied)
+	}
+}
+
 // #9714 review round 2, finding 1: after a transport failure aborts the batch, every
 // request the loop NEVER SENT must report errSessionSyncNotAttempted — not nil.
 //
