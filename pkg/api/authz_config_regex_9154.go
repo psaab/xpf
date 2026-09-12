@@ -101,12 +101,67 @@ var restConfigMutationRoutes = map[string]restConfigRoute{
 var restConfigRoutesUngated = map[string]string{
 	"POST /api/v1/config/enter":            "opens a candidate session; mutates nothing and carries no path",
 	"POST /api/v1/config/exit":             "closes the session; carries no path",
-	"POST /api/v1/config/load":             "STATED REMAINING GAP, not an exemption: applies arbitrary content whose paths are unknown until parsed. The gRPC surface closed this in #9633 by evaluating the content line-by-line; REST and the CLI evaluator have not. Tracked separately — do not read this row as 'load is safe'.",
 	"POST /api/v1/config/commit":           "acts on the candidate as a whole; every path in it was adjudicated when it was written",
 	"POST /api/v1/config/commit-check":     "compiles the candidate and discards the result; writes nothing",
 	"POST /api/v1/config/commit-confirmed": "as commit; the confirm window carries no path",
 	"POST /api/v1/config/confirm":          "confirms an outstanding commit; carries no path",
-	"POST /api/v1/config/rollback":         "replaces the candidate wholesale from a stored revision; carries no path to match, same class as load",
+}
+
+// restConfigContentRoutes are the config routes adjudicated by their CONTENT
+// rather than by a path field, and are the third category the census accepts
+// (#9892).
+//
+// `load` and `rollback` carry no single path to match — which is exactly why
+// they were previously recorded as ungated, `load` as a STATED REMAINING GAP
+// and `rollback` as "the same class as load". That was an accurate description
+// of a hole, not a reason for one: `load` is the verb that can carry EVERY
+// denied path at once (up to 16 MiB on this surface), so leaving it alone made
+// the per-path gate on `set` and `delete` bypassable by choosing a bigger verb.
+//
+// #9633 closed both on gRPC by adjudicating the content line by line and
+// refusing the whole-candidate replacements. That evaluator now lives in
+// pkg/config and this surface calls the same one — deliberately the SAME code
+// rather than an equivalent copy, because two renderings of "hierarchical
+// content as set lines" drift invisibly.
+var restConfigContentRoutes = map[string]string{
+	"POST /api/v1/config/load":     "load",
+	"POST /api/v1/config/rollback": "rollback",
+}
+
+// authorizeRESTConfigLoad adjudicates the content-gated routes (#9892).
+//
+// It reads the ALREADY-BUFFERED body and puts it back, as the path gate does,
+// so the handler decodes the same bytes it was judged on.
+func (s *Server) authorizeRESTConfigLoad(r *http.Request, cfg *config.Config, p authz.Principal) error {
+	verb, gated := restConfigContentRoutes[r.Method+" "+r.URL.Path]
+	if !gated || p.Class == "" || p.Superuser {
+		return nil
+	}
+	if r.Body == nil || r.Body == http.NoBody {
+		return nil
+	}
+	raw, err := io.ReadAll(r.Body)
+	r.Body = io.NopCloser(bytes.NewReader(raw))
+	if err != nil {
+		return nil
+	}
+	var req struct {
+		Mode    string `json:"mode"`
+		Content string `json:"content"`
+		N       int    `json:"n"`
+	}
+	if err := json.Unmarshal(raw, &req); err != nil {
+		return nil
+	}
+	switch verb {
+	case "load":
+		return config.AuthorizeConfigLoad(cfg, p.Class, req.Mode, req.Content)
+	case "rollback":
+		return config.AuthorizeConfigRollback(cfg, p.Class, req.N)
+	}
+	// FAIL CLOSED, for the same reason the path gate does: a row added here
+	// whose adjudication nobody wrote must not pass through unexamined.
+	return fmt.Errorf("config route %s %s has no content adjudication", r.Method, r.URL.Path)
 }
 
 // authorizeRESTConfigMutation adjudicates a config-mutating REST request
