@@ -340,11 +340,14 @@ func (d *Daemon) bindRoutingInstanceMembers(cfg *config.Config) {
 			continue
 		}
 		for _, ifaceName := range ri.Interfaces {
-			linuxName := riMemberLinuxName(cfg, tunMap, ifaceName)
-			if err := d.routing.BindInterfaceToVRF(linuxName, ri.Name); err != nil {
-				slog.Warn("failed to bind interface to VRF",
-					"interface", ifaceName, "linux", linuxName,
-					"instance", ri.Name, "err", err)
+			// #9754: every device the member claims, which for a BARE member is
+			// the base netdev AND each configured unit's 802.1Q child.
+			for _, linuxName := range riMemberLinuxNames(cfg, tunMap, ifaceName) {
+				if err := d.routing.BindInterfaceToVRF(linuxName, ri.Name); err != nil {
+					slog.Warn("failed to bind interface to VRF",
+						"interface", ifaceName, "linux", linuxName,
+						"instance", ri.Name, "err", err)
+				}
 			}
 		}
 	}
