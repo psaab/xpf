@@ -5546,24 +5546,39 @@ fn a_peer_delete_of_a_live_local_session_with_an_unresolved_owner_rg_is_refused_
         .is_refused_local_owned();
 
     let writes = crate::afxdp::bpf_map::session_map_writes();
+    // Properties COLLECTED, not asserted in sequence — see the acceptance cell for why
+    // an outcome-first order hides every state property behind it from the matrix.
+    let mut violations: Vec<String> = Vec::new();
+    if !refused {
+        violations.push(
+            "a peer delete of a live LOCAL session whose owner RG is UNRESOLVED was applied: \
+             owner 0 is unknown-not-absent, and the install guard already refuses it (#9714 F4)"
+                .to_string(),
+        );
+    }
+    if !(fixture.shared_has(&fixture.forward.key) && fixture.shared_has(&fixture.reverse_key)) {
+        violations.push(
+            "a peer delete removed the shared rows of an unresolved-owner local session".to_string(),
+        );
+    }
+    if fixture.steering_deleted(&writes) {
+        violations.push(format!(
+            "a peer delete deleted the steering row of an unresolved-owner local session, so its \
+             packets stop forwarding while the session still exists. Writes: {writes:?}"
+        ));
+    }
+    if fixture.queued_delete(&fixture.forward.key) {
+        violations.push(
+            "a peer delete fanned DeleteSynced out to the workers for an unresolved-owner local \
+             session, dropping the sibling replicas"
+                .to_string(),
+        );
+    }
     assert!(
-        refused,
-        "a peer delete of a live LOCAL session whose owner RG is UNRESOLVED was applied: owner 0 \
-         is unknown-not-absent, and the install guard already refuses it (#9714 F4)"
-    );
-    assert!(
-        fixture.shared_has(&fixture.forward.key) && fixture.shared_has(&fixture.reverse_key),
-        "a peer delete removed the shared rows of an unresolved-owner local session"
-    );
-    assert!(
-        !fixture.steering_deleted(&writes),
-        "a peer delete deleted the steering row of an unresolved-owner local session, so its \
-         packets stop forwarding while the session still exists"
-    );
-    assert!(
-        !fixture.queued_delete(&fixture.forward.key),
-        "a peer delete fanned DeleteSynced out to the workers for an unresolved-owner local \
-         session, dropping the sibling replicas"
+        violations.is_empty(),
+        "#9714 F4 unresolved owner: {} of 4 properties violated:\n  - {}",
+        violations.len(),
+        violations.join("\n  - ")
     );
 }
 
@@ -5860,34 +5875,62 @@ fn a_peer_delete_of_a_live_local_session_is_refused_9714() {
         .is_refused_local_owned();
 
     let writes = crate::afxdp::bpf_map::session_map_writes();
+    // PREMISES fail fast (a broken fixture makes the cell meaningless); PROPERTIES are
+    // COLLECTED and reported together.
+    //
+    // This cell used to assert the reported outcome FIRST. A panicking assert ends a Rust
+    // test, so any mutant that broke only the REPORTING masked all five state properties
+    // behind it, and the matrix could not say whether the session had survived — the
+    // `Fatalf`-first shape, sitting in the cell that decides whether #9714 is fixed. It
+    // cost a real measurement: the F3d probe (delete the early refusal, leave the
+    // under-lock predicate as the sole defence) reds this cell on "got ok=true" and
+    // never reaches "were the shared rows kept?", which was the entire question.
+    let mut violations: Vec<String> = Vec::new();
+    if !refused {
+        violations.push(
+            "the refusal must be reported, or the handler answers ok and the Go side deletes its \
+             mirror and DNAT rows for a flow the helper kept (#9714)"
+                .to_string(),
+        );
+    }
+    if !(fixture.shared_has(&fixture.forward.key) && fixture.shared_has(&fixture.reverse_key)) {
+        violations.push(
+            "a peer delete removed the shared rows of a live local session; bulk export would then \
+             drop it and a later failover would lose the flow (#9714)"
+                .to_string(),
+        );
+    }
+    if fixture.steering_deleted(&writes) {
+        violations.push(format!(
+            "a peer delete removed the kernel steering row of a live local session; the non-owning \
+             RSS queues then adjudicate its packets as new flows (#9714). Writes: {writes:?}"
+        ));
+    }
+    let holds_after = fixture.dnat_holds();
+    if holds_after != holds_before {
+        violations.push(format!(
+            "a peer delete released the DNAT steering hold of a live local session (#9714): \
+             {holds_before} -> {holds_after}"
+        ));
+    }
+    if fixture.queued_delete(&fixture.forward.key) || fixture.queued_delete(&fixture.reverse_key) {
+        violations.push(
+            "a peer delete sent DeleteSynced to the workers; the sibling WorkerLocalImport replicas \
+             count as peer-synced and would all be dropped (#9714)"
+                .to_string(),
+        );
+    }
+    if PEER_DELETE_REFUSED_LOCAL_OWNED.load(Ordering::Relaxed) <= refused_before {
+        violations.push(
+            "the refusal must be counted on the #9048 counter so a dual-primary split is visible"
+                .to_string(),
+        );
+    }
     assert!(
-        refused,
-        "the refusal must be reported, or the handler answers ok and the Go side deletes its \
-         mirror and DNAT rows for a flow the helper kept (#9714)"
-    );
-    assert!(
-        fixture.shared_has(&fixture.forward.key) && fixture.shared_has(&fixture.reverse_key),
-        "a peer delete removed the shared rows of a live local session; bulk export would then drop it \
-         and a later failover would lose the flow (#9714)"
-    );
-    assert!(
-        !fixture.steering_deleted(&writes),
-        "a peer delete removed the kernel steering row of a live local session; the non-owning RSS \
-         queues then adjudicate its packets as new flows (#9714). Writes: {writes:?}"
-    );
-    assert_eq!(
-        fixture.dnat_holds(),
-        holds_before,
-        "a peer delete released the DNAT steering hold of a live local session (#9714)"
-    );
-    assert!(
-        !fixture.queued_delete(&fixture.forward.key) && !fixture.queued_delete(&fixture.reverse_key),
-        "a peer delete sent DeleteSynced to the workers; the sibling WorkerLocalImport replicas count as \
-         peer-synced and would all be dropped (#9714)"
-    );
-    assert!(
-        PEER_DELETE_REFUSED_LOCAL_OWNED.load(Ordering::Relaxed) > refused_before,
-        "the refusal must be counted on the #9048 counter so a dual-primary split is visible"
+        violations.is_empty(),
+        "#9714 acceptance: {} of 6 properties violated:\n  - {}",
+        violations.len(),
+        violations.join("\n  - ")
     );
 }
 
@@ -6003,28 +6046,48 @@ fn a_peer_delete_of_the_reverse_key_of_a_live_local_session_is_refused_9714() {
         .is_refused_local_owned();
 
     let writes = crate::afxdp::bpf_map::session_map_writes();
+    // Properties COLLECTED, not asserted in sequence — see the acceptance cell for why
+    // an outcome-first order hides every state property behind it from the matrix.
+    let mut violations: Vec<String> = Vec::new();
+    if !refused {
+        violations.push(
+            "a peer delete of the reverse key of a live local session must be refused and say so \
+             (#9714)"
+                .to_string(),
+        );
+    }
+    if !(fixture.shared_has(&fixture.forward.key) && fixture.shared_has(&fixture.reverse_key)) {
+        violations.push(
+            "a peer delete of the REVERSE key removed a live local session's shared rows (#9714)"
+                .to_string(),
+        );
+    }
+    if writes
+        .iter()
+        .any(|w| w.value.is_none() && w.key == fixture.reverse_key)
+    {
+        violations.push(format!(
+            "a peer delete of the reverse key removed its kernel steering row. Writes: {writes:?}"
+        ));
+    }
+    let holds_after = fixture.dnat_holds();
+    if holds_after != holds_before {
+        violations.push(format!(
+            "a refused peer delete of the reverse key released the flow's DNAT steering hold \
+             (#9714): {holds_before} -> {holds_after}"
+        ));
+    }
+    if fixture.queued_delete(&fixture.forward.key) || fixture.queued_delete(&fixture.reverse_key) {
+        violations.push(
+            "a refused peer delete of the reverse key still sent DeleteSynced to the workers \
+             (#9714)"
+                .to_string(),
+        );
+    }
     assert!(
-        refused,
-        "a peer delete of the reverse key of a live local session must be refused and say so \
-         (#9714)"
-    );
-    assert!(
-        fixture.shared_has(&fixture.forward.key) && fixture.shared_has(&fixture.reverse_key),
-        "a peer delete of the REVERSE key removed a live local session's shared rows (#9714)"
-    );
-    assert!(
-        !writes
-            .iter()
-            .any(|w| w.value.is_none() && w.key == fixture.reverse_key),
-        "a peer delete of the reverse key removed its kernel steering row. Writes: {writes:?}"
-    );
-    assert_eq!(
-        fixture.dnat_holds(),
-        holds_before,
-        "a refused peer delete of the reverse key released the flow's DNAT steering hold (#9714)"
-    );
-    assert!(
-        !fixture.queued_delete(&fixture.forward.key) && !fixture.queued_delete(&fixture.reverse_key),
-        "a refused peer delete of the reverse key still sent DeleteSynced to the workers (#9714)"
+        violations.is_empty(),
+        "#9714 F6 reverse key: {} of 5 properties violated:\n  - {}",
+        violations.len(),
+        violations.join("\n  - ")
     );
 }
