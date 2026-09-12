@@ -420,15 +420,15 @@ func junosHostPolicyStricterThanCoarseGate(action PolicyAction, m PolicyMatch) (
 	// source-narrowed one is — the nft chain admits every configured
 	// system-service to EVERY local address in the zone, so each firewall
 	// address the permit does not name falls to the junos-host default deny
-	// under Junos and is admitted here. Before this clause such a permit was
-	// silent on BOTH halves: junosHostProjectTerm already refuses to render it
-	// (a permit is projected only as a `saddr !=` subtraction of later denies,
-	// which cannot express a carve that is also destination-scoped), and this
-	// predicate — asking about the source alone — never said so. The condition
-	// is deliberately the SAME expression junosHostProjectTerm applies, not a
-	// second opinion: a divergence between "the projection refuses to render it"
-	// and "the warning says so" is ALWAYS a bug, so the two must not hold
-	// independent copies of it.
+	// under Junos and is admitted here. Before #6612 such a permit produced no
+	// warning at all, because this predicate asked about the source alone.
+	//
+	// #9504 changed what the warning is FOR, not whether it fires. The
+	// projection now renders a destination-scoped permit (a return carrying its
+	// `daddr` predicate), so it is no longer an unrendered policy. What stays
+	// true is that no path applies an implicit junos-host default-deny, so the
+	// addresses the permit does not name are admitted everywhere, and the
+	// warning says that.
 	if junosHostAddrScoped(m.DestinationAddresses) || m.DestinationAddressExcluded {
 		return true, "destination-restricted permit"
 	}
@@ -487,6 +487,28 @@ func validateJunosHostDirectDeliveryWarnings(cfg *Config) []string {
 				"docs/host-inbound-service-matrix.md)",
 			who, reason)
 	}
+	// #9504: a restricted PERMIT has nothing to enforce on any path. The runtime
+	// applies no implicit junos-host default-deny (policy.rs
+	// evaluate_junos_host_policy_l3_aware, policymatch.matchJunosHost), so what the
+	// permit does not match is admitted by the zone's host-inbound-traffic on the
+	// userspace path exactly as on the kernel path. msg tells the operator the
+	// restriction holds on the userspace path, which is false for a permit.
+	permitMsg := func(who, reason string) string {
+		return fmt.Sprintf(
+			"security policy %s is a %s to-zone junos-host, but no path applies an "+
+				"implicit default-deny to host-bound traffic (the management lifeline): "+
+				"whatever the permit does not match is still admitted by the ingress "+
+				"zone's host-inbound-traffic, on the direct host-bound path and on the "+
+				"userspace path alike. To refuse it, follow the permit with an explicit `then deny` "+
+				"policy (#4146, #9504; see docs/host-inbound-service-matrix.md)",
+			who, reason)
+	}
+	pick := func(a PolicyAction) func(string, string) string {
+		if a == PolicyPermit {
+			return permitMsg
+		}
+		return msg
+	}
 	// Zone-pair policies: `from-zone X to-zone junos-host { policy ... }`.
 	for _, zpp := range cfg.Security.Policies {
 		if zpp == nil || zpp.ToZone != "junos-host" {
@@ -500,7 +522,7 @@ func validateJunosHostDirectDeliveryWarnings(cfg *Config) []string {
 				continue // #4146: enforced on the direct path — no parity gap.
 			}
 			if stricter, reason := junosHostPolicyStricterThanCoarseGate(p.Action, p.Match); stricter {
-				warnings = append(warnings, msg(fmt.Sprintf(
+				warnings = append(warnings, pick(p.Action)(fmt.Sprintf(
 					"%q (from-zone %q)", p.Name, zpp.FromZone), reason))
 			} else if p.Action == PolicyPermit {
 				// #7374: the APPLICATION dimension. Checked separately because
@@ -510,7 +532,7 @@ func validateJunosHostDirectDeliveryWarnings(cfg *Config) []string {
 				// permit is only stricter when the gate admits something the
 				// permit does not cover.
 				if gap, reason := junosHostPermitApplicationGap(cfg, zoneByName(cfg, zpp.FromZone), p.Match); gap {
-					warnings = append(warnings, msg(fmt.Sprintf(
+					warnings = append(warnings, permitMsg(fmt.Sprintf(
 						"%q (from-zone %q)", p.Name, zpp.FromZone), reason))
 				}
 			}
@@ -529,7 +551,7 @@ func validateJunosHostDirectDeliveryWarnings(cfg *Config) []string {
 			continue // #4146: enforced on the direct path — no parity gap.
 		}
 		if stricter, reason := junosHostPolicyStricterThanCoarseGate(p.Action, p.Match); stricter {
-			warnings = append(warnings, msg(fmt.Sprintf("global %q", p.Name), reason))
+			warnings = append(warnings, pick(p.Action)(fmt.Sprintf("global %q", p.Name), reason))
 		} else if p.Action == PolicyPermit {
 			// #7374: a global `to-zone junos-host` permit applies from EVERY
 			// zone, so it has a gap if ANY zone's gate admits something it does
@@ -537,7 +559,7 @@ func validateJunosHostDirectDeliveryWarnings(cfg *Config) []string {
 			// gap is deterministic.
 			for _, zn := range sortedZoneNames(cfg) {
 				if gap, reason := junosHostPermitApplicationGap(cfg, zoneByName(cfg, zn), p.Match); gap {
-					warnings = append(warnings, msg(fmt.Sprintf("global %q", p.Name), reason))
+					warnings = append(warnings, permitMsg(fmt.Sprintf("global %q", p.Name), reason))
 					break
 				}
 			}
