@@ -225,18 +225,47 @@ func compileProtocols(node *Node, proto *ProtocolsConfig) error {
 				}
 			}
 
-			// Parse area-type (stub/nssa)
-			if atNode := areaInst.node.FindChild("area-type"); atNode != nil {
-				for _, atChild := range atNode.Children {
+			// Parse area-type (stub/nssa).
+			//
+			// #9656 M26: this read `areaInst.node.FindChild("area-type")` and
+			// then iterated ONLY that node's Children, which sees exactly one
+			// of the three spellings an operator can write. Measured at
+			// 766da5332, all three commit clean and two of them silently
+			// rendered a stub or NSSA area as a NORMAL area:
+			//
+			//	area 0.0.0.1 area-type stub;          area.Keys=[area 0.0.0.1 area-type stub]
+			//	                                      children=0        -> AreaType=""    WRONG
+			//	area 0.0.0.1 { area-type stub; }      child Keys=[area-type stub]
+			//	                                      nchild=0          -> AreaType=""    WRONG
+			//	area 0.0.0.1 { area-type { stub; } }  child Keys=[area-type]
+			//	                                      nchild=1          -> AreaType="stub"
+			//
+			// The consequence is silent and it is not cosmetic: a stub or NSSA
+			// area rendered as a normal area floods the Type-5/7 LSAs the
+			// operator asked to keep out.
+			//
+			// Both misses are the SAME defect — a packed tail that no reader
+			// unpacks — so both are fixed by asking packedBodyChildren, the
+			// schema-driven SSOT the sibling `interface` loop above already
+			// uses, instead of reading Children directly. It is applied TWICE:
+			// once to lift `area-type …` off the AREA node's own keys, and once
+			// to lift `stub` / `nssa` off the `area-type` node's keys.
+			areaSchema := schemaForPath("protocols", "ospf", "area")
+			atSchema := schemaForPath("protocols", "ospf", "area", "area-type")
+			for _, atNode := range packedBodyChildren(areaInst.node, areaSchema) {
+				if atNode.Name() != "area-type" {
+					continue
+				}
+				for _, atChild := range packedBodyChildren(atNode, atSchema) {
 					switch atChild.Name() {
 					case "stub":
 						area.AreaType = "stub"
-						if atChild.FindChild("no-summaries") != nil {
+						if hasPackedChild9656(atChild, atSchema, "no-summaries") {
 							area.NoSummary = true
 						}
 					case "nssa":
 						area.AreaType = "nssa"
-						if atChild.FindChild("no-summaries") != nil {
+						if hasPackedChild9656(atChild, atSchema, "no-summaries") {
 							area.NoSummary = true
 						}
 					}

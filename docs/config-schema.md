@@ -789,10 +789,12 @@ HA-sync loaders use. "Before" is `9f520a5b2`.
 | inet6 `from next-header tcp source-address 2001:db8::/32;` | strict accepted a match-all term | strict refuses it, as it already refused the reversed order |
 | snmp `community public clients 10.0.0.0/8 authorization read-only;` | strict refused; lenient compiled garbage clients | commits and compiles like braced |
 | `unit 0 vlan-id 10 inner-vlan-id 20;` | strict refused (unknown modifier); lenient dropped the inner tag | refused by the QinQ gate, like braced; lenient carries the tag |
+| `unit 0 inner-vlan-id 20;` (no outer tag) | strict ACCEPTED and silently dropped the inner tag (#9656 M6) | refused by the QinQ gate with the #2354 text, like both braced twins |
 | `unit 0 description u0 vlan-id 10;` | strict refused (trailing token) | commits and compiles like braced |
 
-The admitted pair is `from next-header`. The containers opted into
-`packedStatements` are interfaces `unit` and snmp `community`.
+The admitted pairs are `from next-header` and, since #9656 M6,
+`unit inner-vlan-id`. The containers opted into `packedStatements` are
+interfaces `unit` and snmp `community`.
 
 The following were measured and deliberately left out. Each breaks a spelling
 that compiles correctly today:
@@ -810,8 +812,23 @@ that compiles correctly today:
   clients 10.0.0.0/8 restrict;` is read correctly today, and so is the same line
   with a client list. The args-bounded split left the tail on the authorization
   leaf, which strict refused.
-- **`unit inner-vlan-id`.** `unit 0 inner-vlan-id 20;` alone commits today, while
-  dropping the tag. Admitting the pair makes the QinQ gate refuse it.
+- ~~**`unit inner-vlan-id`**~~ — **ADMITTED in #9656 M6.** The measurement that
+  kept it out was right and the conclusion drawn from it was not. Admitting the
+  pair does make the QinQ gate refuse `unit 0 inner-vlan-id 20;`, and that is
+  the correct verdict, because BOTH braced twins are already refused:
+
+  ```
+  unit 0 { vlan-id 10; inner-vlan-id 20; }   REJECTS (#2354 text)
+  unit 0 { inner-vlan-id 20; }               REJECTS (#2354 text)
+  unit 0 inner-vlan-id 20;                   ACCEPTED, InnerVlanID=0   <- the defect
+  ```
+
+  So the elided spelling was not a supported configuration that folding would
+  break; it was the SAME unsupported configuration, accepted only because
+  nothing unpacked it — committing green while the inner tag was discarded, on
+  a dataplane where a double-tagged frame falls to the kernel path and is never
+  firewalled. The break is deliberate and visible: the operator now gets the
+  #2354 message, which names the supported alternative.
 - **`packedStatements` on the firewall `from` containers.** It would also split
   `from { protocol tcp protocol udp; }`, which the #9027 self-repeat gate refuses
   on purpose.
@@ -819,6 +836,40 @@ that compiles correctly today:
   `interfaces host-inbound-traffic;` past the #6525 and #6735 empty-member gates.
   It also made strict accept the one-line flat spelling of `description …
   screen …` while dropping one of the two statements.
+
+### Packed tails the COMPILER must unpack (#9656 M26)
+
+The fold scope above decides which packed statements the NORMALIZER rewrites.
+It is not the only place a packed tail has to be read: a compiler that walks
+`node.Children` directly sees nothing when the value it wants is on the node's
+own `Keys`, and there is no fold-scope entry that would help, because the tail
+is already inside a container the pass admitted.
+
+`protocols ospf area <id> area-type` was the measured instance. Three spellings,
+at `766da5332`, before the fix:
+
+```
+area 0.0.0.1 area-type stub;          area.Keys=[area 0.0.0.1 area-type stub] children=0  -> AreaType=""
+area 0.0.0.1 { area-type stub; }      child Keys=[area-type stub] nchild=0                -> AreaType=""
+area 0.0.0.1 { area-type { stub; } }  child Keys=[area-type] nchild=1                     -> AreaType="stub"
+```
+
+Only the third worked, and it is the one `show configuration` renders — so a
+save-and-reload round trip reproduced the working spelling and hid the defect
+from anyone who looked for it that way. The consequence is silent: a stub or
+NSSA area rendered as a normal area floods exactly the Type-5/7 LSAs it was
+configured to suppress.
+
+The fix is not a new key scan. `packedBodyChildren(node, schema)` is the
+schema-driven SSOT for this, and it is applied at BOTH levels — once to lift
+`area-type …` off the area node's keys, once to lift `stub` / `nssa` off the
+`area-type` node's keys, which is also what makes `area-type stub no-summaries;`
+read correctly. The sibling `interface` loop in the same function already used
+it; the `area-type` read was the one that had not been converted.
+
+**When adding a compiler read under a container, use `packedBodyChildren` rather
+than `FindChild` + `.Children`.** The braced spelling you tested is usually the
+one that already worked.
 
 ### Brace-elided routing instances
 

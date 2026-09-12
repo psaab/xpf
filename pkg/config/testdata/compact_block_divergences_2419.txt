@@ -285,7 +285,6 @@ interfaces xpfname unit xpfarg family inet6 dhcpv6-client update-router-advertis
 interfaces xpfname unit xpfarg family inet6 mtu	empty
 interfaces xpfname unit xpfarg family inet6 sampling input	empty
 interfaces xpfname unit xpfarg family inet6 sampling output	empty
-interfaces xpfname unit xpfarg inner-vlan-id	empty
 interfaces xpfname unit xpfarg point-to-point	empty
 interfaces xpfname vlan-tagging	partial
 protocols bgp graceful-restart	empty
@@ -300,8 +299,6 @@ protocols isis overload	empty
 protocols isis wide-metrics-only	empty
 protocols lldp disable	empty
 protocols lldp interface xpfarg disable	empty
-protocols ospf area xpfarg area-type nssa no-summaries	empty
-protocols ospf area xpfarg area-type stub no-summaries	empty
 protocols ospf passive	empty
 protocols router-advertisement interface xpfarg managed-configuration	empty
 protocols router-advertisement interface xpfarg other-stateful-configuration	empty
@@ -317,8 +314,6 @@ routing-instances xpfname protocols bgp multipath ibgp	empty
 routing-instances xpfname protocols bgp multipath multiple-as	empty
 routing-instances xpfname protocols isis overload	empty
 routing-instances xpfname protocols isis wide-metrics-only	empty
-routing-instances xpfname protocols ospf area xpfarg area-type nssa no-summaries	empty
-routing-instances xpfname protocols ospf area xpfarg area-type stub no-summaries	empty
 routing-instances xpfname protocols ospf passive	empty
 security policies from-zone xpfarg xpfarg xpfarg policy xpfarg scheduler-name	empty
 security policies from-zone xpfarg xpfarg xpfarg policy xpfarg then permit	empty

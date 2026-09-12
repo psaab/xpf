@@ -491,22 +491,45 @@ func compactNormalizeInScope(containerKeyword, head string) bool {
 	//	unit 0 vlan-id 10;             before  folds=0 vlan=0         after  folds=1 vlan=10
 	//	braced reference               desc="uplink" vlan=10 either way
 	//
-	// DELIBERATELY EXCLUDES `unit <n> inner-vlan-id`, the third unblocked site.
-	// That one INVERTS: braced `inner-vlan-id` is REJECTED by the QinQ /
-	// stacked-VLAN gate, and the elided form commits clean with the value
-	// dropped, so normalizing it RESTORES a rejection and turns a config that
-	// commits today into one that does not. Right outcome, different decision,
-	// and it belongs with #8755's introduces-rejection class rather than in a
-	// slice justified as "unblocked".
+	// `unit <n> inner-vlan-id` was DELIBERATELY EXCLUDED here twice, and #9656
+	// M6 admits it. The exclusion's premise was never wrong; the decision it
+	// drew from that premise was.
 	//
-	// #9620 re-measured this at 9f520a5b2 and the premise still holds:
-	// `unit 0 inner-vlan-id 20;` alone commits and drops the tag, and admitting
-	// the pair makes the QinQ gate refuse it. The `vlan-id`-first run is folded
-	// by `unit vlan-id` and split by the `unit` container's packedStatements
-	// opt-in, and it was already refused.
+	// The premise, re-measured at 766da5332 and unchanged from #8755 and
+	// #9620: this site INVERTS. Every other member of the family loses a value
+	// on a green commit and folding RESTORES the value. This one loses a value
+	// on a green commit and folding restores a REJECTION, because the QinQ /
+	// stacked-VLAN gate (#2354, #5879) refuses an inner tag the AF_XDP
+	// dataplane cannot enforce. So admitting the pair turns a config that
+	// commits today into one that does not.
+	//
+	// Why that is now the right outcome. The braced twin of this spelling is
+	// ALREADY refused, measured both ways at 766da5332:
+	//
+	//	unit 0 { vlan-id 10; inner-vlan-id 20; }   REJECTS (#2354 text)
+	//	unit 0 { inner-vlan-id 20; }               REJECTS (#2354 text)
+	//	unit 0 inner-vlan-id 20;                   ACCEPTS, InnerVlanID=0
+	//
+	// So the elided spelling is not a config the appliance supports and the
+	// braced one does not — it is the SAME unsupported config, accepted only
+	// because nothing unpacked it. What it buys is not compatibility: it is a
+	// commit that succeeds while the inner tag the operator wrote is silently
+	// discarded, on a dataplane where a double-tagged frame falls to the kernel
+	// path and is never firewalled. A refusal that names the spelling is
+	// strictly better than a green commit that drops it, and #9656's acceptance
+	// says so explicitly: each spelling must either compile to its control's
+	// result or be rejected at strict commit with a message naming it.
+	//
+	// The break is deliberate and it is visible: the operator gets the #2354
+	// text, which already names the supported alternative.
+	//
+	// (The `vlan-id`-first run — `unit 0 vlan-id 10 inner-vlan-id 20;` — was
+	// already refused before this change: `unit vlan-id` folds it and the
+	// `unit` container's packedStatements opt-in splits the run.)
 	switch containerKeyword + " " + head {
 	case "unit description",
-		"unit vlan-id":
+		"unit vlan-id",
+		"unit inner-vlan-id":
 		return true
 	}
 
