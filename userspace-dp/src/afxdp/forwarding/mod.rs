@@ -340,3 +340,8 @@ mod tests_noroute_adjudication_7480;
 #[cfg(test)]
 #[path = "tests_noroute_capped_import_9054.rs"]
 mod tests_noroute_capped_import_9054;
+// #9955: the overlapping-leak resolution differential (kernel rule priority vs
+// helper longest-prefix).
+#[cfg(test)]
+#[path = "tests_leak_overlap_9955.rs"]
+mod tests_leak_overlap_9955;
