@@ -224,9 +224,10 @@ func (realExecutor) VtyshLoad(ctx context.Context, conf string) ([]byte, error) 
 // peerFetchErrorStatus (#7294/#8308) exists to avoid on the peer surfaces).
 var ErrVtyshBusy = errors.New("FRR vtysh concurrency limit reached")
 
-// vtysh is the SINGLE funnel every operational FRR shell-out in this package
-// goes through. It applies the process-wide admission bound and then hands the
-// caller's context to the executor.
+// vtysh is the SINGLE funnel every BUFFERED operational FRR shell-out in this
+// package goes through. It applies the process-wide admission bound and then
+// hands the caller's context to the executor. The one STREAMING read is exempt
+// by design -- see #9755 below.
 //
 // #9143: the bound lives here, not at each handler, and that placement is the
 // point. #6809 gated ONE branch of ONE handler (the REST full-RIB stream) and

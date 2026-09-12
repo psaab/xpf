@@ -307,8 +307,9 @@ encoded the mistake.
 
 ## Every operational vtysh shell-out is bounded and cancellable (#9143)
 
-`Manager.vtysh(ctx, command)` is the SINGLE funnel every operational FRR read in
-this package goes through. It does two things the individual `Get*` shells used
+`Manager.vtysh(ctx, command)` is the SINGLE funnel every **buffered** operational
+FRR read in this package goes through — the one streaming read is exempt by
+design, see below (#9755). It does two things the individual `Get*` shells used
 to skip:
 
 1. **Admission.** It takes a slot from `diagcmd.VtyshLimiter`
