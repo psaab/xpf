@@ -2711,6 +2711,36 @@ unit name, so each binder now stores its map key on the canonical unit:
     binding it from a `ge-0/0/0.1` reference would move unit 0's prefix into
     unit 1's instance. The zone binder's own fan-UP stays at its call site,
     where it is correct, rather than being levelled into the shared helper.
+
+    **#9754 added the KERNEL VRF bind to the same rule.** #9132 fixed the
+    userspace route builders; the kernel bind was a fourth consumer of the same
+    reference and still read a bare member as the parent netdev alone.
+    `bindRoutingInstanceMembers` (`pkg/daemon`) called `riMemberLinuxName` once
+    per member string, so the 802.1Q children created for the tagged units were
+    never enslaved: kernel-path traffic on them routed in the DEFAULT instance —
+    failing OPEN to main — on a config strict accepts with no warning, and
+    FRR/zebra read the same kernel master, so those units' connected prefixes
+    landed in the default VRF. `riMemberLinuxNames` now resolves through
+    `InterfaceUnitRefKeys` like the other three, so there is no second fan-down
+    to drift. A tunnel or xfrmi member returns before the fan-down: it resolves
+    to one device and has no 802.1Q children.
+
+    The bind set and the default-instance next-table ingress set
+    (`DefaultInstanceIngressIfaces`) stay DISJOINT, which is what stops a unit
+    from being inside a VRF while still receiving default-instance `iif` rules.
+    They agree by construction rather than by a shared list, so the property is
+    asserted per spelling:
+
+    | member | bind targets | default-instance ingress |
+    |---|---|---|
+    | `ge-0/0/0` (stanza spelling) | base + every unit | none |
+    | `ge-0-0-0` (linux spelling) | base only | the tagged units |
+    | `ge-0/0/0.1` (unit reference) | that unit | the others |
+
+    The middle row is a known pre-existing split — the base lands in the VRF
+    while the tagged units keep default-instance rules — left unrepaired because
+    fixing it means resolving members independently of spelling, which requires
+    moving the next-table set in the same change.
   - **Per-interface host-inbound override** — `buildInterfaceHostInboundMap`
     (`zones_override.go`), plus the operator-facing lookups in
     `ClassifyHostInboundForInterface` / `ResolveHostInboundIngressInterface`
