@@ -2247,9 +2247,14 @@ never lock an operator out of a remote box it manages.
     the kernel (route-based IPsec plaintext, SNAT'd frames, the #7409 slow-path
     reinject) wait for an attach after every start or restart, and stay closed
     on a node with nothing attached. The kernel is also closed from boot until
-    xpfd starts: the appliance image (`scripts/image/bake.py`) and the test VMs
-    (`test/incus/setup.sh`, `cluster-setup.sh`) write forwarding `0` into
-    `sysctl.d`. The package also ships `xpf-transit-closed.service`
+    xpfd starts, and NOT by a persisted sysctl: neither the appliance image
+    (`scripts/image/bake.py`) nor the test VMs (`test/incus/setup.sh`,
+    `cluster-setup.sh`) write the transit knobs into `sysctl.d` at all, because
+    `systemd-sysctl` re-applies such a file whenever it runs and would then
+    fight the gate under a running xpfd — in whichever direction the file was
+    written. Both knobs default to `0`, so closing at boot needs no persisted
+    value, and the postinst scrubs them from an image baked before #9725 (which
+    persisted `1`). What closes them is `xpf-transit-closed.service`
     (`scripts/image/xpf-transit-closed.service`, enabled by `debian/rules` and
     `bake.py`), a boot-only oneshot that writes both knobs to `0` after
     `systemd-sysctl` and before networkd, FRR and xpfd, whatever an older

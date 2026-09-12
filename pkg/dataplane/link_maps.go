@@ -165,8 +165,12 @@ func (m *Manager) xdpLinkFor(ifindex int) (link.Link, bool) {
 
 func (m *Manager) setXDPLink(ifindex int, l link.Link) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	m.xdpLinks[ifindex] = l
+	m.mu.Unlock()
+	// #9725: an OPENING change reports AFTER it happens -- the link must exist
+	// before the gate may open on it. Reported with m.mu released: the observer
+	// does kernel work and re-reads the count.
+	m.notifyAttachedLinksFunc(m.AttachedXDPLinkCount)
 }
 
 func (m *Manager) deleteXDPLink(ifindex int) {

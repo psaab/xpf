@@ -32,6 +32,11 @@ set -e
 
 STAGED=/usr/local/share/xpf/staged
 SBIN=/usr/local/sbin
+# #9725: the directory the transit-knob scrub below cleans. A top-level
+# assignment, like STAGED and SBIN, so test/debian/postinst-test.sh can rewrite
+# it under its temp root -- the scrub edits files, and a unit test must never
+# touch the host's real sysctl configuration.
+SYSCTL_D=/etc/sysctl.d
 # Managed-binary set (#1982). The single source of truth is the Go manifest
 # pkg/upgrade/manifest; this literal is kept self-contained on purpose (no
 # build-time sed into the tracked checkout). The drift canary
@@ -53,7 +58,7 @@ case "$1" in
         # before #9725 persisted forwarding=1 and would OPEN transit the gate had
         # closed. Scrub just those two keys and leave the rest of each file alone.
         # Neither file is a dpkg conffile, so editing them prompts nothing.
-        for _sysctl_f in /etc/sysctl.d/99-xpf.conf /etc/sysctl.d/99-bpf.conf; do
+        for _sysctl_f in "$SYSCTL_D/99-xpf.conf" "$SYSCTL_D/99-bpf.conf"; do
             [ -f "$_sysctl_f" ] || continue
             if grep -qE '^[[:space:]]*net\.(ipv4\.ip_forward|ipv6\.conf\.all\.forwarding)[[:space:]]*=' "$_sysctl_f"; then
                 sed -i -E '/^[[:space:]]*net\.(ipv4\.ip_forward|ipv6\.conf\.all\.forwarding)[[:space:]]*=/d' "$_sysctl_f"

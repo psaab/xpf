@@ -59,7 +59,10 @@ import "log/slog"
 // HOW THE PIECES FIT.
 //   - Bring-up closes transit explicitly (closeTransitUntilAttached). An older
 //     image's sysctl.d and a restart after an armed run both leave the sysctls at
-//     1. The image and the test VMs now write 0 into sysctl.d.
+//     1. Neither the image nor the test VMs persist the transit knobs in sysctl.d:
+//     systemd-sysctl re-applies such a file whenever it runs and would fight the
+//     gate under a running xpfd, in whichever direction it was written. Both
+//     default to 0, and the postinst scrubs an older image's persisted values.
 //   - The package also ships xpf-transit-closed.service, a boot-only oneshot that
 //     writes 0 after systemd-sysctl and before networkd, FRR and xpfd. It closes
 //     the kernel from boot until xpfd starts, whatever an older image's sysctl.d
@@ -129,26 +132,53 @@ func (d *Daemon) attachedXDPLinks() int {
 	return src.AttachedXDPLinkCount()
 }
 
-// unpinnedLinksSource is the optional runtime capability the hitless shutdown
-// reads, as attachedLinksSource is for the gate. A runtime that does not report
-// it answers 0, which keeps the pre-#9725 behaviour: leave forwarding as it is.
-type unpinnedLinksSource interface {
-	UnpinnedAttachedXDPLinks() int
+// attachedLinksNotifier is the optional runtime capability that REPORTS link
+// changes, the other half of attachedLinksSource. The daemon registers on the
+// runtime it publishes and clears the one it unpublishes, so the observer's
+// lifetime is the runtime's: package-level state would let one daemon's detach
+// drive another daemon's gate when two exist in a process.
+type attachedLinksNotifier interface {
+	SetAttachedLinksObserver(func(int))
 }
 
-// unpinnedAttachedXDPLinks reads how many attached shim XDP links carry no bpffs
-// pin, and so will be detached the moment this process closes its handles.
-func (d *Daemon) unpinnedAttachedXDPLinks() int {
-	src, ok := d.dataplane().(unpinnedLinksSource)
-	if !ok {
-		return 0
+// registerAttachedLinksObserver arms the gate on the currently published runtime.
+func (d *Daemon) registerAttachedLinksObserver() {
+	if src, ok := d.dataplane().(attachedLinksNotifier); ok {
+		src.SetAttachedLinksObserver(d.onAttachedLinksChanged)
 	}
-	return src.UnpinnedAttachedXDPLinks()
 }
 
-// transitOpen is the predicate every kernel-transit write follows.
+// clearAttachedLinksObserver disarms the currently published runtime, before it
+// is replaced or dropped.
+func (d *Daemon) clearAttachedLinksObserver() {
+	if src, ok := d.dataplane().(attachedLinksNotifier); ok {
+		src.SetAttachedLinksObserver(nil)
+	}
+}
+
+// onAttachedLinksChanged drives the gate from the count a writer REPORTS. It
+// does not read the count back: the report can arrive while the writer holds a
+// lock the read would need, and after Close no handle can answer at all, so a
+// read-back would say zero even for a hitless upgrade whose pinned programs are
+// still forwarding.
+func (d *Daemon) onAttachedLinksChanged(n int) {
+	d.lockTransitGate("attachedLinksObserver")
+	defer d.transitGateMu.Unlock()
+	d.writeTransitGateForCountLocked("attached-links", n)
+}
+
+// transitOpen is the predicate every kernel-transit write follows, read against
+// the LIVE attached-link count.
 func (d *Daemon) transitOpen() bool {
-	return d.dataplaneArmed.Load() && d.attachedXDPLinks() > 0
+	return d.transitOpenForCount(d.attachedXDPLinks())
+}
+
+// transitOpenForCount is that same predicate against a GIVEN count, which is
+// what an observer report carries. Both forms go through here, so the rule has
+// one statement: re-deriving it at the count-taking call site left transitOpen
+// bypassed on the path the gate actually uses.
+func (d *Daemon) transitOpenForCount(attached int) bool {
+	return d.dataplaneArmed.Load() && attached > 0
 }
 
 // writeTransitGateLocked drives both legs of the gate, the two sysctls and the
@@ -158,7 +188,14 @@ func (d *Daemon) transitOpen() bool {
 // on the barrier alone. So the order only decides how early a change is
 // complete. A change of state is logged once. Caller holds transitGateMu.
 func (d *Daemon) writeTransitGateLocked(stage string) (open, verified bool) {
-	open = d.transitOpen()
+	return d.writeTransitGateForCountLocked(stage, d.attachedXDPLinks())
+}
+
+// writeTransitGateForCountLocked is writeTransitGateLocked against a GIVEN
+// attached-link count, which is what an observer report carries. Caller holds
+// transitGateMu.
+func (d *Daemon) writeTransitGateForCountLocked(stage string, attached int) (open, verified bool) {
+	open = d.transitOpenForCount(attached)
 	var sysctlsOK, barrierOK bool
 	if open {
 		sysctlsOK = writeTransitForwardSysctls(true)

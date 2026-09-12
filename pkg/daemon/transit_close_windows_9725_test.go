@@ -18,7 +18,8 @@ import (
 //
 //   - a hitless stop closes the Go handles and leaves forwarding open, because
 //     "the shim keeps dropping transit" (#9686). That premise is about PINS, and
-//     an unpinned link does not survive Close.
+//     an unpinned link does not survive Close, so Close REPORTS what outlives it
+//     and the gate follows that number.
 //   - the bootstrap rollback tore the dataplane down and closed the gate
 //     AFTERWARDS, so the whole teardown ran with forwarding on and nothing
 //     attached.
@@ -27,16 +28,28 @@ import (
 // barrier calls AT THE MOMENT the lifecycle call runs, so these cells fail if the
 // close moves back after it, which is what a plain end-state assertion would miss.
 
-// pinWitnessDP9725 is the #9686 witness plus the two #9725 link reports.
+// pinWitnessDP9725 is the #9686 witness plus the #9725 link REPORT. It stands in
+// for the real Manager, whose Close reports the links that outlive it (the ones
+// whose pin still names them) before it closes any handle.
 type pinWitnessDP9725 struct {
 	transitWitnessDP
 
-	attached int
-	unpinned int
+	attached  int
+	surviving int
+	observer  func(int)
 }
 
-func (d *pinWitnessDP9725) AttachedXDPLinkCount() int     { return d.attached }
-func (d *pinWitnessDP9725) UnpinnedAttachedXDPLinks() int { return d.unpinned }
+func (d *pinWitnessDP9725) AttachedXDPLinkCount() int { return d.attached }
+
+func (d *pinWitnessDP9725) SetAttachedLinksObserver(fn func(int)) { d.observer = fn }
+
+func (d *pinWitnessDP9725) Close() error {
+	if d.observer != nil {
+		d.observer(d.surviving)
+	}
+	d.snapshot("Close")
+	return nil
+}
 
 // A hitless stop must close kernel transit when its attached links carry no pin,
 // and must still leave a genuine hitless upgrade alone. The two rows differ ONLY
@@ -45,19 +58,19 @@ func (d *pinWitnessDP9725) UnpinnedAttachedXDPLinks() int { return d.unpinned }
 func TestAHitlessStopClosesTransitOnlyWhenItsLinksHaveNoPin9725(t *testing.T) {
 	for _, tc := range []struct {
 		name        string
-		unpinned    int
+		surviving   int
 		wantSysctl  string
 		wantBarrier []string
 	}{
 		{
-			name:        "every attached link is pinned: a true hitless upgrade",
-			unpinned:    0,
+			name:        "a link survives the close: a true hitless upgrade",
+			surviving:   1,
 			wantSysctl:  "1",
-			wantBarrier: nil,
+			wantBarrier: []string{"remove"},
 		},
 		{
-			name:        "an attached link carries no pin: Close detaches it",
-			unpinned:    1,
+			name:        "nothing survives the close: the links were unpinned",
+			surviving:   0,
 			wantSysctl:  "0",
 			wantBarrier: []string{"install"},
 		},
@@ -74,7 +87,7 @@ func TestAHitlessStopClosesTransitOnlyWhenItsLinksHaveNoPin9725(t *testing.T) {
 			dp := &pinWitnessDP9725{
 				transitWitnessDP: transitWitnessDP{v4: v4, v6: v6, nft: fake},
 				attached:         1,
-				unpinned:         tc.unpinned,
+				surviving:        tc.surviving,
 			}
 			d := &Daemon{store: store, applySem: semaphore.NewWeighted(1), daemonCtx: daemonCtx}
 			d.setDataplane(dp)
@@ -100,11 +113,12 @@ func TestAHitlessStopClosesTransitOnlyWhenItsLinksHaveNoPin9725(t *testing.T) {
 			}
 			for i, fam := range []string{"IPv4 ip_forward", "IPv6 conf.all.forwarding"} {
 				if dp.sysctlsAtCall[i] != tc.wantSysctl {
-					t.Errorf("#9725: %s read %q when Close ran, want %q (%d unpinned attached link(s)). "+
-						"An unpinned link is detached by the kernel as soon as this process closes its handle, "+
-						"so leaving transit open routes traffic under no policy for the whole downtime; a pinned "+
-						"link survives, and closing then would break the hitless upgrade this path exists for",
-						fam, dp.sysctlsAtCall[i], tc.wantSysctl, tc.unpinned)
+					t.Errorf("#9725: %s read %q when Close ran, want %q (Close reported %d surviving link(s)). "+
+						"Close reports what OUTLIVES it, and the gate follows that number: nothing surviving must "+
+						"close transit, because the kernel detaches an unpinned link as soon as this process drops "+
+						"its handle; a surviving link must leave forwarding alone, or the hitless upgrade this "+
+						"path exists for is broken",
+						fam, dp.sysctlsAtCall[i], tc.wantSysctl, tc.surviving)
 				}
 			}
 			if got := strings.Join(dp.barrierAtCall, ","); got != strings.Join(tc.wantBarrier, ",") {

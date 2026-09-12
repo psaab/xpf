@@ -2,7 +2,6 @@ package daemon
 
 import (
 	"context"
-	dpuserspace "github.com/psaab/xpf/pkg/dataplane/userspace"
 	"log/slog"
 	"sync"
 	"time"
@@ -404,24 +403,18 @@ func (d *Daemon) runShutdownSequence(wg *sync.WaitGroup, stop func(), runErr err
 			logFinalStats(ready, rt.Telemetry())
 		}
 		if hitless {
-			// #9725: the reason this path leaves forwarding open (#9686, above) is
-			// that "a hitless stop keeps the dataplane attached and the shim
-			// dropping transit". That is a claim about PINS, and it is not always
-			// true. A link with no bpffs pin is detached by the kernel as soon as
-			// this process closes its handle, and the pin is best effort: AttachXDP
-			// logs a failed Pin at Warn and still returns success, and a stop that
-			// lands between removeUserspaceShimXDPLinkPins and the re-attach — or
-			// after an attach that failed — finds live links with no pins. In those
-			// shapes Close() detaches the programs and the node goes on routing
-			// transit under no policy for the whole downtime and into the next
-			// start. Close the gate for exactly those, and leave a genuine hitless
-			// upgrade, where every attached link is pinned, exactly as it was.
-			if n := d.unpinnedAttachedXDPLinks(); n > 0 {
-				d.markDataplaneNotArmed("shutdown",
-					"hitless stop with shim XDP links that carry no pin: they do not survive Close")
-			}
 			// Hitless: close Go handles only — BPF programs keep running.
-			slog.Info("hitless shutdown: preserving BPF state", "unpinned_links", d.unpinnedAttachedXDPLinks())
+			//
+			// #9725: no gate call here. Close REPORTS the links that survive it —
+			// the ones whose pin still names them — and the observer closes the
+			// gate when that is zero. That covers the cases this path's premise
+			// misses: the pin is best effort (AttachXDP logs a failed Pin at Warn
+			// and still returns success), and a stop landing between
+			// removeUserspaceShimXDPLinkPins and the re-attach finds live links
+			// with no pins, which Close then detaches. A genuine hitless upgrade
+			// reports a non-zero surviving count and keeps forwarding, as #9686
+			// intends.
+			slog.Info("hitless shutdown: preserving BPF state")
 			rt.Close()
 		} else {
 			// Fail-closed: tear down all pinned BPF state.
@@ -429,11 +422,6 @@ func (d *Daemon) runShutdownSequence(wg *sync.WaitGroup, stop func(), runErr err
 			rt.Teardown()
 		}
 	}
-
-	// #9725: unwire the last-detach transit close. The hook is package state in
-	// pkg/dataplane/userspace and closes over THIS daemon; leaving it set lets a
-	// later reconcile drive a dead daemon's gate.
-	dpuserspace.SetTransitCloseOnLastDetach(nil)
 
 	// #801 B2: restore any host-scope tunables xpfd claimed to their
 	// pre-xpfd values. No-op if `claim-host-tunables` was never set.

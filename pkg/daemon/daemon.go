@@ -1647,6 +1647,12 @@ func (d *Daemon) dataplane() dataplane.RuntimeDataPlane {
 // (pkg/dataplane/dataplane.go) returns arbitrary constructor results
 // unchecked, so the guard covers every nillable kind.
 func (d *Daemon) setDataplane(dp dataplane.RuntimeDataPlane) {
+	// #9725: the attached-link observer follows the PUBLISHED runtime. Disarm the
+	// outgoing one before it is replaced or dropped, and arm the incoming one
+	// after it is stored, so a runtime this daemon no longer publishes can never
+	// drive this daemon's transit gate — and, with two daemons in a process,
+	// neither drives the other's.
+	d.clearAttachedLinksObserver()
 	if dp == nil {
 		d.dpCell.Store(nil)
 		return
@@ -1661,6 +1667,7 @@ func (d *Daemon) setDataplane(dp dataplane.RuntimeDataPlane) {
 		}
 	}
 	d.dpCell.Store(&dpSlot{v: dp})
+	d.registerAttachedLinksObserver()
 }
 
 func (d *Daemon) applyResult() *dataplane.ApplyResult {

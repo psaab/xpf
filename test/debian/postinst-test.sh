@@ -30,6 +30,7 @@ patched_postinst() {
     sed \
       -e "s#^STAGED=.*#STAGED=$ROOT/usr/local/share/xpf/staged#" \
       -e "s#^SBIN=.*#SBIN=$ROOT/usr/local/sbin#" \
+      -e "s#^SYSCTL_D=.*#SYSCTL_D=$ROOT/etc/sysctl.d#" \
       -e "s#^\([[:space:]]*\)CURRENT_DIR=.*#\1CURRENT_DIR=$ROOT/var/lib/xpf/versions/current#" \
       -e "s#/etc/xpf/node-id#$ROOT/etc/xpf/node-id#g" \
       -e "s#\\[ -d /run/systemd/system \\]#false#g" \
@@ -37,6 +38,10 @@ patched_postinst() {
     chmod +x "$ROOT/postinst"
     [ "$(grep -E '^STAGED=' "$ROOT/postinst" || true)" = "STAGED=$ROOT/usr/local/share/xpf/staged" ] || {
         echo "FAIL: patched postinst missing rewritten STAGED assignment"; exit 1; }
+    # #9725: the scrub EDITS files, so an un-rewritten SYSCTL_D would have this
+    # unit test rewrite the host's own /etc/sysctl.d.
+    [ "$(grep -E '^SYSCTL_D=' "$ROOT/postinst" || true)" = "SYSCTL_D=$ROOT/etc/sysctl.d" ] || {
+        echo "FAIL: patched postinst missing rewritten SYSCTL_D assignment"; exit 1; }
     [ "$(grep -E '^SBIN=' "$ROOT/postinst" || true)" = "SBIN=$ROOT/usr/local/sbin" ] || {
         echo "FAIL: patched postinst missing rewritten SBIN assignment"; exit 1; }
     current_line=$(grep -E '^[[:space:]]*CURRENT_DIR=' "$ROOT/postinst" || true)

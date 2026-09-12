@@ -115,15 +115,15 @@ func (a *LegacyDataPlaneAdapter) AttachedXDPLinkCount() int {
 	return m.AttachedXDPLinkCount()
 }
 
-// UnpinnedAttachedXDPLinks forwards the #9725 unpinned-link count. Not
-// forwarding it here would make the hitless shutdown read 0 forever and leave
-// transit open in exactly the cases the count exists to catch (#9804).
-func (a *LegacyDataPlaneAdapter) UnpinnedAttachedXDPLinks() int {
+// SetAttachedLinksObserver forwards the #9725 attached-link observer. The
+// daemon publishes this adapter, not the manager, so an observer not forwarded
+// here is never registered and every link change goes unreported (#9804).
+func (a *LegacyDataPlaneAdapter) SetAttachedLinksObserver(fn func(int)) {
 	m, err := a.managerOrErr()
 	if err != nil {
-		return 0
+		return
 	}
-	return m.UnpinnedAttachedXDPLinks()
+	m.SetAttachedLinksObserver(fn)
 }
 
 func (a *LegacyDataPlaneAdapter) IsLoaded() bool {

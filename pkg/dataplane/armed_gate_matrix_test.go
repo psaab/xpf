@@ -150,10 +150,19 @@ var managerMethodClasses = map[string]string{
 	// #7191: ArmCoverageSummary reads only the armCoverage cell (its own RWMutex),
 	// touches no map registry, and cannot arm or disarm anything on its own — the
 	// daemon-side gate decides. Same class as the proof it reports.
-	"ArmCoverageSummary":      "catG",
-	"ClearZoneCounterOffsets": "catG",
-	"ReadFloodCounters":       "catG",
-	"SetFloodCounterOffset":   "catG",
+	"ArmCoverageSummary": "catG",
+	// #9725, the same shape twice. AttachedXDPLinkCount ranges the m.mu-protected
+	// xdpLinks SNAPSHOT and asks the kernel whether each link is still attached;
+	// SetAttachedLinksObserver stores one callback in an atomic cell. Neither
+	// touches the map registry, and neither can arm or disarm anything — the
+	// daemon-side transit gate decides on what they report. The first of the two
+	// landed on this branch without being classified, which left the package's
+	// TEST BUILD red at 141 vs 140 exactly as #6743 r4 records for its own pair.
+	"AttachedXDPLinkCount":     "catG",
+	"SetAttachedLinksObserver": "catG",
+	"ClearZoneCounterOffsets":  "catG",
+	"ReadFloodCounters":        "catG",
+	"SetFloodCounterOffset":    "catG",
 	// #3651 flood half: the plural sibling of SetFloodCounterOffset, and the
 	// only production writer of the flood offset map. Same shape as
 	// ReplaceZoneCounterOffsets above — it takes m.mu, rebuilds the
@@ -236,8 +245,8 @@ func TestManager_PreArmMethodMatrix(t *testing.T) {
 		}
 	}
 
-	if len(inventory) != 140 {
-		t.Fatalf("exported *Manager method inventory = %d, want 140 (the 164 census minus the 23 NAT write methods retired in #7268, plus ArmCoverageSummary added in #7191, minus DeleteStaleNAT64 and ZeroStaleNATPoolConfigs retired in #7804 — the writers for snat_rules, static_nat_*, nptv6_rules, nat_pool_*, snat_egress_ips and nat64_* maps, none of which the AF_XDP shim declares); reconcile the count or the plan", len(inventory))
+	if len(inventory) != 142 {
+		t.Fatalf("exported *Manager method inventory = %d, want 142 (the 164 census minus the 23 NAT write methods retired in #7268, plus ArmCoverageSummary added in #7191, minus DeleteStaleNAT64 and ZeroStaleNATPoolConfigs retired in #7804 — the writers for snat_rules, static_nat_*, nptv6_rules, nat_pool_*, snat_egress_ips and nat64_* maps, none of which the AF_XDP shim declares — plus the two #9725 additions: AttachedXDPLinkCount, the live count the transit gate opens on, and SetAttachedLinksObserver, the registration the gate needs on the runtime the daemon publishes. This census was already red at 141 on the first #9725 commit, which added the first of those without reconciling it; the #9725 test helpers are deliberately unexported and live in test files so they do not enter this census); reconcile the count or the plan", len(inventory))
 	}
 	for name := range inventory {
 		if _, ok := managerMethodClasses[name]; !ok {
@@ -1170,8 +1179,7 @@ type registryCallsiteManifestEntry struct {
 var registryCallsiteManifest = []registryCallsiteManifestEntry{
 	{"compiler.go", "Compile", "map", `"redirect_capable"`, "optional"}, // leg: Compile continuation (absent redirect_capable skips AND CONTINUES into attachment work)
 	{"loader.go", "AddTxPort", "map", `"tx_ports"`, "required"},
-	{"loader.go", "AttachTC", "prog", `"tc_main_prog"`, "carveout"},     // carve-out: the pre-registry loaded rejection fires first on both unarmed states; the lookup keeps master's not-found text
-	{"loader.go", "AttachXDP", "prog", "<ident:entryProg>", "carveout"}, // carve-out
+	{"loader.go", "AttachTC", "prog", `"tc_main_prog"`, "carveout"}, // carve-out: the pre-registry loaded rejection fires first on both unarmed states; the lookup keeps master's not-found text
 	{"loader.go", "ClearIfaceZoneMap", "map", `"iface_zone_map"`, "required"},
 	{"loader.go", "ClearVlanIfaceMap", "map", `"vlan_iface_map"`, "required"},
 	{"loader.go", "Map", "map", "<ident:name>", "optional"},        // class 4: nil outcome
@@ -1181,10 +1189,13 @@ var registryCallsiteManifest = []registryCallsiteManifestEntry{
 	{"loader.go", "SetZone", "map", `"iface_zone_map"`, "required"},
 	{"loader.go", "clearNativeXDPFlags", "map", `"iface_zone_map"`, "optional"},
 	{"loader.go", "clearNativeXDPFlagsForIfindexes", "map", `"iface_zone_map"`, "optional"},
-	{"loader.go", "seedInterfaceCounter", "map", `"interface_counters"`, "optional"}, // leg (ii): absent skips the seed (AttachXDP/AddTxPort still succeed); present asserts the seed wrote
-	{"loader.go", "setXDPAttachedFlag", "map", `"iface_zone_map"`, "optional"},       // leg (iii): absent -> master's early-boot no-op NIL, claims untouched
-	{"loader.go", "setXDPAttachedFlag", "map", `"vlan_iface_map"`, "optional"},       // leg: absent vlan_iface_map CONTINUES into the physical-interface processing
-	{"loader.go", "swapXDPEntryProg", "prog", "<ident:name>", "required"},
+	{"loader.go", "setXDPAttachedFlag", "map", `"iface_zone_map"`, "optional"}, // leg (iii): absent -> master's early-boot no-op NIL, claims untouched
+	{"loader.go", "setXDPAttachedFlag", "map", `"vlan_iface_map"`, "optional"}, // leg: absent vlan_iface_map CONTINUES into the physical-interface processing
+	// #9725: moved out of loader.go with the XDP attach/detach lifecycle when the
+	// #7253 modularity audit required that split. Same callsites, new file.
+	{"loader_xdp_links.go", "AttachXDP", "prog", "<ident:entryProg>", "carveout"},              // carve-out
+	{"loader_xdp_links.go", "seedInterfaceCounter", "map", `"interface_counters"`, "optional"}, // leg (ii): absent skips the seed (AttachXDP/AddTxPort still succeed); present asserts the seed wrote
+	{"loader_xdp_links.go", "swapXDPEntryProg", "prog", "<ident:name>", "required"},
 	{"maps_counters.go", "ClearGlobalCounters", "map", `"global_counters"`, "optional"}, // class 3: pinned legacy behavior
 	{"maps_counters.go", "ClearInterfaceCounters", "map", `"interface_counters"`, "required"},
 	{"maps_counters.go", "ClearZoneCounters", "map", `"zone_counters"`, "optional"}, // class 3

@@ -777,12 +777,11 @@ func (m *Manager) AttachedXDPLinkCount() int {
 	return m.bpfShim.AttachedXDPLinkCount()
 }
 
-// UnpinnedAttachedXDPLinks forwards the bpf shim's count of attached links with
-// no bpffs pin, which the daemon's hitless shutdown reads before it decides
-// whether it may leave kernel transit open (#9725).
-func (m *Manager) UnpinnedAttachedXDPLinks() int {
+// SetAttachedLinksObserver forwards the #9725 attached-link observer to the bpf
+// shim, whose link writers report through it.
+func (m *Manager) SetAttachedLinksObserver(fn func(int)) {
 	if m == nil || m.bpfShim == nil {
-		return 0
+		return
 	}
-	return m.bpfShim.UnpinnedAttachedXDPLinks()
+	m.bpfShim.SetAttachedLinksObserver(fn)
 }
