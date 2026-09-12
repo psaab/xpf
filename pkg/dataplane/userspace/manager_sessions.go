@@ -558,9 +558,9 @@ func peerDeleteRefused(err error) bool {
 // keys' mirror rows go one at a time, so a row already gone does not strand the
 // rest. As with the unmarked batch, the helper IPC error itself is best-effort.
 func (m *Manager) BatchDeletePeerSyncedSessionsScoped(scoped []dataplane.ScopedSessionKey) (int, []dataplane.ScopedSessionKey, error) {
-	var refused []dataplane.ScopedSessionKey
-	_ = m.deleteHelperSessionsScopedV4Marked(scoped, true, &refused)
-	deleted, err := deleteUnrefusedMirrorRows(scoped, refused, func(sk dataplane.ScopedSessionKey) error {
+	var refused, applied []dataplane.ScopedSessionKey
+	_ = m.deleteHelperSessionsScopedV4Marked(scoped, true, &refused, &applied)
+	deleted, err := deleteAppliedMirrorRows(applied, func(sk dataplane.ScopedSessionKey) error {
 		return m.bpfShim.DeleteSession(sk.Key)
 	})
 	return deleted, refused, err
@@ -568,29 +568,31 @@ func (m *Manager) BatchDeletePeerSyncedSessionsScoped(scoped []dataplane.ScopedS
 
 // BatchDeletePeerSyncedSessionsScopedV6 is the IPv6 analogue (#9714).
 func (m *Manager) BatchDeletePeerSyncedSessionsScopedV6(scoped []dataplane.ScopedSessionKeyV6) (int, []dataplane.ScopedSessionKeyV6, error) {
-	var refused []dataplane.ScopedSessionKeyV6
-	_ = m.deleteHelperSessionsScopedV6Marked(scoped, true, &refused)
-	deleted, err := deleteUnrefusedMirrorRows(scoped, refused, func(sk dataplane.ScopedSessionKeyV6) error {
+	var refused, applied []dataplane.ScopedSessionKeyV6
+	_ = m.deleteHelperSessionsScopedV6Marked(scoped, true, &refused, &applied)
+	deleted, err := deleteAppliedMirrorRows(applied, func(sk dataplane.ScopedSessionKeyV6) error {
 		return m.bpfShim.DeleteSessionV6(sk.Key)
 	})
 	return deleted, refused, err
 }
 
-// deleteUnrefusedMirrorRows deletes the BPF mirror row of every key the helper did
-// not refuse (#9714). A refused key is a live local session the helper kept, so its
-// row stays. Rows go one at a time, and a row that is already gone is not an error,
-// so one missing row does not strand the rest.
-func deleteUnrefusedMirrorRows[K comparable](keys, refused []K, del func(K) error) (int, error) {
-	kept := make(map[K]struct{}, len(refused))
-	for _, key := range refused {
-		kept[key] = struct{}{}
-	}
+// deleteAppliedMirrorRows deletes the BPF mirror row of every key the helper
+// EXPLICITLY APPLIED (#9714 review round 2, finding 1).
+//
+// It used to be deleteUnrefusedMirrorRows and take the COMPLEMENT — every key not
+// in `refused` — which is a different set and a larger one. "Not refused" also
+// contains a request whose transport failed and a request the batch never sent at
+// all after an unreachable helper (errSessionSyncNotAttempted). Deleting on that
+// complement removed the mirror rows of sessions the helper still holds, and the
+// mirror does not heal: the refresh path writes with BPF_EXIST specifically so it
+// will not recreate a deleted entry. Silence is not assent.
+//
+// Rows go one at a time, and a row that is already gone is not an error, so one
+// missing row does not strand the rest.
+func deleteAppliedMirrorRows[K comparable](applied []K, del func(K) error) (int, error) {
 	deleted := 0
 	var firstErr error
-	for _, key := range keys {
-		if _, ok := kept[key]; ok {
-			continue
-		}
+	for _, key := range applied {
 		switch err := del(key); {
 		case err == nil:
 			deleted++
@@ -734,13 +736,20 @@ func (m *Manager) deleteHelperSessionsV4(keys []dataplane.SessionKey) error {
 
 // deleteHelperSessionsScopedV4 is the #9364 domain-carrying helper delete.
 func (m *Manager) deleteHelperSessionsScopedV4(keys []dataplane.ScopedSessionKey) error {
-	return m.deleteHelperSessionsScopedV4Marked(keys, false, nil)
+	return m.deleteHelperSessionsScopedV4Marked(keys, false, nil, nil)
 }
 
 // deleteHelperSessionsScopedV4Marked is deleteHelperSessionsScopedV4 with the
 // #9714 peer mark set on every request it builds.
+//
 // refused, when non-nil, collects the keys the helper refused as peer deletes.
-func (m *Manager) deleteHelperSessionsScopedV4Marked(keys []dataplane.ScopedSessionKey, peer bool, refused *[]dataplane.ScopedSessionKey) error {
+// applied, when non-nil, collects the keys the helper CONFIRMED it deleted.
+//
+// The two are not complements, and that is the whole point (#9714 review round 2,
+// finding 1). A key can also be transport-failed, or never sent at all once the
+// batch aborts on an unreachable helper. Only `applied` licenses the caller to
+// destroy anything.
+func (m *Manager) deleteHelperSessionsScopedV4Marked(keys []dataplane.ScopedSessionKey, peer bool, refused, applied *[]dataplane.ScopedSessionKey) error {
 	if len(keys) == 0 {
 		return nil
 	}
@@ -773,6 +782,15 @@ func (m *Manager) deleteHelperSessionsScopedV4Marked(keys []dataplane.ScopedSess
 		for i, outcome := range m.syncSessionRequestOutcomesLocked(reqs...) {
 			switch {
 			case outcome == nil:
+				// The helper ANSWERED and applied it. This arm used to be
+				// empty, so the one fact that licenses destroying Go-side
+				// state was computed and then thrown away, leaving every
+				// caller to re-derive it as "not refused" — a strictly
+				// larger set that also contains transport failures and
+				// requests never sent at all.
+				if applied != nil {
+					*applied = append(*applied, keys[start+i])
+				}
 			case peer && refused != nil && peerDeleteRefused(outcome):
 				*refused = append(*refused, keys[start+i])
 			case err == nil:
@@ -807,12 +825,14 @@ func (m *Manager) deleteHelperSessionsV6(keys []dataplane.SessionKeyV6) error {
 // deleteHelperSessionsScopedV6 is the IPv6 analogue of
 // deleteHelperSessionsScopedV4 (#9364).
 func (m *Manager) deleteHelperSessionsScopedV6(keys []dataplane.ScopedSessionKeyV6) error {
-	return m.deleteHelperSessionsScopedV6Marked(keys, false, nil)
+	return m.deleteHelperSessionsScopedV6Marked(keys, false, nil, nil)
 }
 
 // deleteHelperSessionsScopedV6Marked is the IPv6 analogue of
-// deleteHelperSessionsScopedV4Marked (#9714).
-func (m *Manager) deleteHelperSessionsScopedV6Marked(keys []dataplane.ScopedSessionKeyV6, peer bool, refused *[]dataplane.ScopedSessionKeyV6) error {
+// deleteHelperSessionsScopedV4Marked (#9714). Same `refused` / `applied`
+// contract, and the same reason it matters: the two are NOT complements, and only
+// `applied` licenses the caller to destroy anything.
+func (m *Manager) deleteHelperSessionsScopedV6Marked(keys []dataplane.ScopedSessionKeyV6, peer bool, refused, applied *[]dataplane.ScopedSessionKeyV6) error {
 	if len(keys) == 0 {
 		return nil
 	}
@@ -842,6 +862,15 @@ func (m *Manager) deleteHelperSessionsScopedV6Marked(keys []dataplane.ScopedSess
 		for i, outcome := range m.syncSessionRequestOutcomesLocked(reqs...) {
 			switch {
 			case outcome == nil:
+				// The helper ANSWERED and applied it. This arm used to be
+				// empty, so the one fact that licenses destroying Go-side
+				// state was computed and then thrown away, leaving every
+				// caller to re-derive it as "not refused" — a strictly
+				// larger set that also contains transport failures and
+				// requests never sent at all.
+				if applied != nil {
+					*applied = append(*applied, keys[start+i])
+				}
 			case peer && refused != nil && peerDeleteRefused(outcome):
 				*refused = append(*refused, keys[start+i])
 			case err == nil:

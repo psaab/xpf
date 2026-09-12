@@ -1,6 +1,8 @@
 package userspace
 
 import (
+	"errors"
+	"fmt"
 	"slices"
 	"testing"
 
@@ -155,12 +157,25 @@ func TestAnUnmarkedDeleteNeverReadsAPeerRefusal9714(t *testing.T) {
 	}
 }
 
-// #9714 review F1: a key the helper refused keeps its BPF mirror row, and a row that
-// is already gone neither counts as deleted nor stops the rest.
-func TestARefusedKeyKeepsItsMirrorRow9714(t *testing.T) {
+// #9714 review round 2, finding 1: ONLY a key the helper EXPLICITLY applied loses its
+// BPF mirror row, and a row that is already gone neither counts as deleted nor stops
+// the rest.
+//
+// This cell used to drive deleteUnrefusedMirrorRows, which deleted the COMPLEMENT of
+// the refused set. That complement is strictly larger than "applied": it also holds
+// keys whose transport failed and keys the batch never sent at all after an
+// unreachable helper. At THIS layer those three are indistinguishable — each is
+// simply absent from `applied` — so the cell asserts only what it can observe here,
+// and the refused-versus-never-answered distinction is asserted upstream where it is
+// observable, by TestAnAbortedBatchReportsTheUnsentTailAsNotAttempted9714.
+func TestOnlyAnAppliedKeyLosesItsMirrorRow9714(t *testing.T) {
 	keys := scopedKeys9364(100007, 1234, 1235, 1236)
+	// The helper answered for two of the three. keys[0] is NOT applied — refused,
+	// transport-failed, or never sent; this layer cannot tell them apart and does
+	// not need to, because none of them licenses deleting the row.
+	applied := []dataplane.ScopedSessionKey{keys[1], keys[2]}
 	var attempted []dataplane.ScopedSessionKey
-	deleted, err := deleteUnrefusedMirrorRows(keys, keys[:1], func(sk dataplane.ScopedSessionKey) error {
+	deleted, err := deleteAppliedMirrorRows(applied, func(sk dataplane.ScopedSessionKey) error {
 		attempted = append(attempted, sk)
 		if sk == keys[1] {
 			return ebpf.ErrKeyNotExist
@@ -171,12 +186,66 @@ func TestARefusedKeyKeepsItsMirrorRow9714(t *testing.T) {
 		t.Fatalf("a missing mirror row is not an error: %v", err)
 	}
 	if slices.Contains(attempted, keys[0]) {
-		t.Errorf("the refused key's BPF mirror row was deleted; bulk export would then drop a flow the helper " +
-			"kept (#9714)")
+		t.Errorf("a key the helper did not apply had its BPF mirror row deleted; bulk export would then drop " +
+			"a flow the helper kept, and refresh cannot recreate it (BPF_EXIST) (#9714)")
 	}
 	if len(attempted) != 2 || deleted != 1 {
 		t.Errorf("attempted %d rows and counted %d deleted, want 2 and 1: a missing row must neither count nor "+
 			"stop the rest", len(attempted), deleted)
+	}
+}
+
+// #9714 review round 2, finding 1: after a transport failure aborts the batch, every
+// request the loop NEVER SENT must report errSessionSyncNotAttempted — not nil.
+//
+// nil is the helper's "I applied it", and it is the single fact that licenses a caller
+// to delete a BPF mirror row. A chunk is up to sessionHelperDeleteChunk (256)
+// requests, so an unreachable helper on the FIRST request used to manufacture up to
+// 255 phantom successes, and the peer batch then deleted 255 mirror rows for sessions
+// the helper still holds. Refresh cannot put them back: it writes with BPF_EXIST
+// precisely so it will not recreate a deleted entry.
+//
+// Until this cell, sendSessionSyncBatchOutcomes had NO direct coverage at all, which
+// is how a doc comment stating "a request after that one was never sent and reports
+// nil" survived as if it were a contract rather than the defect.
+//
+// The abort itself is #5380 behaviour and is deliberately unchanged, so this cell
+// pins the abort AND the marking together: marking the tail while losing the
+// fast-fail would trade one defect for another, and the `sent` assertion is what
+// keeps this cell from passing vacuously if the abort ever stops happening.
+func TestAnAbortedBatchReportsTheUnsentTailAsNotAttempted9714(t *testing.T) {
+	reqs := make([]SessionSyncRequest, 4)
+	for i := range reqs {
+		reqs[i].Operation = "delete"
+	}
+	sent := 0
+	outcomes := sendSessionSyncBatchOutcomes(reqs, func(ControlRequest) error {
+		sent++
+		if sent == 2 {
+			return fmt.Errorf("write: %w", errSessionHelperUnreachable)
+		}
+		return nil
+	})
+
+	if sent != 2 {
+		t.Fatalf("FIXTURE: the batch sent %d requests, want 2 — it must abort ON the transport failure "+
+			"(#5380), or there is no unsent tail for this cell to measure", sent)
+	}
+	if len(outcomes) != len(reqs) {
+		t.Fatalf("FIXTURE: %d outcomes for %d requests", len(outcomes), len(reqs))
+	}
+	if outcomes[0] != nil {
+		t.Errorf("request 0 was sent and applied, but reports %v", outcomes[0])
+	}
+	if !errors.Is(outcomes[1], errSessionHelperUnreachable) {
+		t.Errorf("request 1 failed at the transport, but reports %v", outcomes[1])
+	}
+	for i := 2; i < len(reqs); i++ {
+		if !errors.Is(outcomes[i], errSessionSyncNotAttempted) {
+			t.Errorf("request %d was NEVER SENT but reports %v; a nil there reads as \"the helper applied it\" "+
+				"and licenses deleting the mirror row of a session the helper still holds (#9714 r2 F1)",
+				i, outcomes[i])
+		}
 	}
 }
 
