@@ -915,6 +915,19 @@ func (s *Server) readAuthz(w http.ResponseWriter, r *http.Request, next http.Han
 		writeError(w, http.StatusForbidden, err.Error())
 		return
 	}
+	// #9952: the class's `deny-commands` / `allow-commands` regexes. This
+	// surface consulted NONE of them — the coarse bit and the
+	// `*-configuration` pair were the whole of REST authorization, while
+	// docs/system-login.md claimed all four were enforced. See
+	// authz_command_regex_9952.go for the route -> canonical command table and
+	// why an unmapped route denies.
+	if err := s.authorizeRESTCommand(r, cfg, p); err != nil {
+		slog.Debug("api: refused read denied by the class's command regexes",
+			"method", r.Method, "path", r.URL.Path,
+			"principal", p.String(), "err", err)
+		writeError(w, http.StatusForbidden, err.Error())
+		return
+	}
 	// #9051: the verdict above is a point-in-time answer, and an SSE handler
 	// runs indefinitely. Keep checking for as long as the handler runs, so a
 	// revoked principal loses the feed rather than keeping it until it
@@ -1070,6 +1083,16 @@ func (s *Server) mutationAuthzGuard(next http.Handler) http.Handler {
 		// #9892: `load` and `rollback` are adjudicated by CONTENT, not by a
 		// path field — see restConfigContentRoutes.
 		if err := s.authorizeRESTConfigLoad(r, cfg, p); err != nil {
+			deny(p, err)
+			return
+		}
+		// #9952: the operational command regexes, on the mutating side. The
+		// config-mode routes are DECLARED as having no operational command —
+		// they are governed by the `*-configuration` pair just above — so this
+		// charges the clear, diagnostic and system-action endpoints, which is
+		// exactly the matrix the issue names (POST /api/v1/system/action
+		// reaches reboot and halt).
+		if err := s.authorizeRESTCommand(r, cfg, p); err != nil {
 			deny(p, err)
 			return
 		}
