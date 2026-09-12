@@ -425,6 +425,11 @@ func packedOptInCases8768() map[string]packedOptInCase8768 {
 			stmts: map[string]string{
 				"description": "description u0",
 				"vlan-id":     "vlan-id 10",
+				// #9656 M6 admitted (unit, inner-vlan-id). The compare runs on
+				// the LENIENT compile, where both spellings carry the tag; the
+				// STRICT refusal that admission introduces is pinned separately
+				// by TestElidedInnerVlanIsRefusedLikeItsBracedTwin9656.
+				"inner-vlan-id": "inner-vlan-id 20",
 				// #9620 H11 admitted (unit, family), so the unit-elided
 				// spelling folds instead of keeping the whole run on the unit
 				// node. The reader below carries the family's own state, or a
@@ -432,9 +437,10 @@ func packedOptInCases8768() map[string]packedOptInCase8768 {
 				"family": "family inet address 10.0.0.1/24",
 			},
 			second: map[string]string{
-				"description": "description u1",
-				"vlan-id":     "vlan-id 11",
-				"family":      "family inet6 address 2001:db8::1/64",
+				"description":   "description u1",
+				"vlan-id":       "vlan-id 11",
+				"inner-vlan-id": "inner-vlan-id 21",
+				"family":        "family inet6 address 2001:db8::1/64",
 			},
 			read: func(c *Config) string {
 				ifc := c.Interfaces.Interfaces["ge-0/0/0"]
@@ -1113,6 +1119,13 @@ func TestPackedOptInHoldsForEveryLeafPair8768(t *testing.T) {
 		// #9620 (M6): the interfaces unit container opted into packedStatements.
 		"interfaces/*/unit description+description": "scalar binding: the compiler keeps the FIRST statement's value, so one instance and two read alike (measured #9620: `description u0; description u1;` reads desc=\"u0\")",
 		"interfaces/*/unit vlan-id+vlan-id":         "scalar binding: the compiler keeps the FIRST statement's value, so one instance and two read alike (measured #9620: `description u0; description u1;` reads desc=\"u0\")",
+		// #9656 M6: same scalar binding as its `vlan-id` sibling above —
+		// measured, `inner-vlan-id 20; inner-vlan-id 21;` reads inner=20. The
+		// SPLIT itself is still exercised: the single-instance packed spelling
+		// is compared against its braced twin in every pair row, and the strict
+		// refusal that this admission introduces is pinned by
+		// TestElidedInnerVlanIsRefusedLikeItsBracedTwin9656.
+		"interfaces/*/unit inner-vlan-id+inner-vlan-id": "scalar binding: the compiler keeps the FIRST statement's value, so one instance and two read alike (measured #9656: `inner-vlan-id 20; inner-vlan-id 21;` reads inner=20)",
 		// issue 8939: the class-of-service BINDING containers. Every binding is
 		// a SCALAR field -- CoSInterfaceUnit.DSCPClassifier is one string, not a
 		// list -- so a repeated statement OVERWRITES rather than accumulating,

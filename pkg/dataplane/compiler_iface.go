@@ -801,21 +801,11 @@ func (st *zoneMapState) mapZoneInterface(dp DataPlane, cfg *config.Config, resul
 			}
 		}
 
-		// Apply unit-level MTU to VLAN sub-interface
-		if ifCfg, ok := cfg.Interfaces.Interfaces[cfgName]; ok && ifCfg != nil {
-			if unit, ok := ifCfg.Units[unitNum]; ok && unit.MTU > 0 {
-				if nl, err := result.cachedLinkByName(subName); err == nil {
-					if nl.Attrs().MTU != unit.MTU {
-						if err := linkSetMTUSeam(nl, unit.MTU); err != nil {
-							slog.Warn("failed to set VLAN sub-interface MTU",
-								"name", subName, "mtu", unit.MTU, "err", err)
-						} else {
-							slog.Info("set VLAN sub-interface MTU", "name", subName, "mtu", unit.MTU)
-						}
-					}
-				}
-			}
-		}
+		// #9757: the unit's MTU, and its RESET when the statement is gone.
+		// Extracted to compiler_iface_unit_mtu_9757.go -- adding it inline
+		// pushed this file past the 2000 LOC modularity floor, and the rule
+		// there is to split rather than to record an exception for a bugfix.
+		applyVLANSubInterfaceMTU9757(cfg, result, cfgName, unitNum, physName, subName)
 
 		slog.Info("VLAN sub-interface configured",
 			"parent", physName, "vlan_id", vlanID,

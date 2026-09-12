@@ -1380,7 +1380,16 @@ snap`, and there are two of them — one per acceptance path).
     were all tagged (the loss cluster's `reth0`) got no plan, and its
     interface-level `mtu` was never written. A VLAN child's unit MTU can still be
     written before its parent's in the same apply, and when it is, a commit that
-    raises both converges on the next commit (#9845). Sorting the zone map would have made
+    raises both converges on the next commit (#9845). **A unit MTU that is
+    DELETED resets the child to its parent's live MTU (#9757)** — the value a
+    freshly created VLAN child inherits. Before that the write happened only
+    when `unit.MTU > 0`, with no other branch, and nothing else writes a VLAN
+    unit's MTU: deleting `family inet mtu` left the device, and the userspace
+    egress MTU read from it, at the old value, so the committed configuration
+    stopped describing the running state (measured on the loss cluster: both
+    nodes' children sat at 1400 after the delete, and the only repair was to
+    commit an explicit mtu and delete it again). The reset writes only on a real
+    difference, because this path runs on every commit. Sorting the zone map would have made
     the outcome stable and still arbitrary, so the second writer is removed
     rather than made to lose consistently. The witness is
     `TestTwoAppliesOfOneConfigConverge_8119_8120`: a single apply is

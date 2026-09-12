@@ -43,6 +43,25 @@ liveness/readiness. Prometheus metrics endpoint. SSE event streams.
   `rollback_history_degraded` field plus the
   `xpf_config_rollback_persist_degraded` 0/1 gauge (also emitted even
   when the dataplane is not loaded) for alerting.
+  `ConfigApplyDebtFn` (#9811, same injection pattern) reports whether the
+  dataplane is known to be enforcing something OTHER than the active
+  configuration, and DOES downgrade `/health` to 503. The distinction from
+  `RollbackHistoryDegradedFn` directly above is the one that decides it,
+  and it is not severity-by-feel: a degraded rollback history is a
+  recovery aid failing on a node that forwards exactly what it reports,
+  and such a node must not be pulled from rotation. Here the reported
+  state and the enforced state DISAGREE — a commit-confirmed auto-rollback
+  promotes the store first, so a failed apply leaves the node enforcing
+  the abandoned config while this payload, `show configuration` and the
+  peer resync all name the promoted one. That is
+  `ConfigPersistDegradedFn`'s class ("a restart would load a stale
+  config"), not `RollbackHistoryDegradedFn`'s. It is transient by
+  construction: the daemon's `configApplyReassertLoop` re-applies the
+  active config every 30s until it converges. Two fields are surfaced,
+  `config_apply_debt_owed` and `config_apply_failure_count`; the raw
+  error is withheld under the #5031 rule, and the COUNT is the field that
+  separates a retry owner that is running and failing from one that is
+  not running at all.
 - `GET /metrics` — Prometheus exposition.
 - `GET /api/v1/...` — REST mirrors of the gRPC API: sessions, routes,
   NAT, DHCP, IPsec, VRRP, OSPF, BGP, etc.

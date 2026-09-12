@@ -5,7 +5,9 @@
  * for UMEM/socket creation. The inline functions cannot be called
  * directly from Rust FFI, so we wrap them here.
  *
- * Linked against -lxdp (which pulls in -lbpf).
+ * Linked against the libxdp and libbpf snapshots build.rs takes (#9726):
+ * -lxpfxdp, then -lxpfbpf for the libbpf symbols libxdp leaves undefined.
+ * Neither is a system archive; see "Linked library provenance" in the README.
  */
 #include <xdp/xsk.h>
 #include <linux/if_xdp.h>
@@ -23,10 +25,11 @@
  * `XskRingProd`/`XskRingCons` and hands zeroed boxes of them to the creation
  * functions below for libxdp to populate in place as native
  * `struct xsk_ring_{prod,cons}`. Nothing else couples the *installed* libxdp
- * layout (this translation unit compiles against /usr/include/xdp/xsk.h) to
- * that independent Rust copy. A libxdp/header package upgrade that reorders
- * or resizes the ring struct would otherwise silently turn a clean rebuild
- * into out-of-bounds writes / misread indices at runtime.
+ * layout (this translation unit compiles against the xdp/xsk.h in libxdp's
+ * pkg-config includedir, #9726) to that independent Rust copy. A
+ * libxdp/header package upgrade that reorders or resizes the ring struct
+ * would otherwise silently turn a clean rebuild into out-of-bounds writes /
+ * misread indices at runtime.
  *
  * These assertions pin the installed `struct xsk_ring_{prod,cons}` to a fixed
  * 64-bit ABI contract; src/xsk_ffi.rs pins its Rust mirror to the SAME
@@ -35,6 +38,22 @@
  * numbers in lockstep with the `const _` assertions in src/xsk_ffi.rs.
  */
 _Static_assert(sizeof(void *) == 8, "xsk ring ABI assumes 64-bit pointers");
+
+/*
+ * #9726: the helper attaches its own XDP program and must keep libxdp from
+ * loading one. bridge_fill_socket_config (below) sets
+ * XSK_LIBXDP_FLAGS__INHIBIT_PROG_LOAD in the config both socket-create
+ * functions pass. Pin the header's value here, and export it, so a Rust test
+ * can compare it with the libxdp_flags each create function passes to libxdp,
+ * which the test-only capture seam (below) records.
+ */
+_Static_assert(XSK_LIBXDP_FLAGS__INHIBIT_PROG_LOAD == 1,
+               "libxdp changed XSK_LIBXDP_FLAGS__INHIBIT_PROG_LOAD; re-validate bridge_fill_socket_config");
+
+int bridge_xsk_libxdp_inhibit_prog_load_flag(void)
+{
+    return XSK_LIBXDP_FLAGS__INHIBIT_PROG_LOAD;
+}
 
 #define XSK_RING_ABI_ASSERT(T)                                                 \
     _Static_assert(sizeof(struct T) == 48, #T " size drift vs Rust mirror");   \
@@ -87,6 +106,87 @@ int bridge_xsk_umem_fd(const struct xsk_umem *umem)
 
 /* ── Socket creation / destruction ────────────────────────────────── */
 
+/*
+ * #9726: the one place a socket config is filled. The helper attaches its own
+ * XDP program, so libxdp must not load one (INHIBIT_PROG_LOAD), and xdp_flags
+ * stays 0. Both create functions below fill their config here.
+ */
+static void bridge_fill_socket_config(
+    struct xsk_socket_config *cfg,
+    __u32 rx_size,
+    __u32 tx_size,
+    __u16 bind_flags)
+{
+    *cfg = (struct xsk_socket_config){
+        .rx_size      = rx_size,
+        .tx_size      = tx_size,
+        .libxdp_flags = XSK_LIBXDP_FLAGS__INHIBIT_PROG_LOAD,
+        .xdp_flags    = 0,
+        .bind_flags   = bind_flags,
+    };
+}
+
+/*
+ * #9726: TEST-ONLY SEAM. The create functions below reach libxdp through these
+ * pointers. Production never calls bridge_xsk_capture_socket_create_for_test,
+ * so the pointers keep their defaults, libxdp's xsk_socket__create and
+ * xsk_socket__create_shared. A Rust test (src/xsk_ffi_tests.rs) swaps in the
+ * capture functions to observe the config each create function passes to
+ * libxdp. The pointers take their types from libxdp's declarations, so a
+ * capture whose signature drifts from libxdp's fails to compile. The swap is not
+ * synchronized: the crate's suite runs single-threaded (#8291).
+ */
+static __typeof__(xsk_socket__create) *bridge_socket_create = xsk_socket__create;
+static __typeof__(xsk_socket__create_shared) *bridge_socket_create_shared =
+    xsk_socket__create_shared;
+static __u32 bridge_captured_libxdp_flags;
+
+/* Each capture records config->libxdp_flags and returns -EINVAL. It reads no
+ * other argument and creates no socket, so a test may pass null pointers. */
+static int bridge_capture_socket_create(
+    struct xsk_socket **xsk,
+    const char *ifname,
+    __u32 queue_id,
+    struct xsk_umem *umem,
+    struct xsk_ring_cons *rx,
+    struct xsk_ring_prod *tx,
+    const struct xsk_socket_config *config)
+{
+    bridge_captured_libxdp_flags = config->libxdp_flags;
+    return -EINVAL;
+}
+
+static int bridge_capture_socket_create_shared(
+    struct xsk_socket **xsk,
+    const char *ifname,
+    __u32 queue_id,
+    struct xsk_umem *umem,
+    struct xsk_ring_cons *rx,
+    struct xsk_ring_prod *tx,
+    struct xsk_ring_prod *fill,
+    struct xsk_ring_cons *comp,
+    const struct xsk_socket_config *config)
+{
+    bridge_captured_libxdp_flags = config->libxdp_flags;
+    return -EINVAL;
+}
+
+/* #9726: test-only. A non-zero enable routes both create functions to the
+ * captures; 0 restores libxdp's functions. Either resets the captured flags to 0. */
+void bridge_xsk_capture_socket_create_for_test(int enable)
+{
+    bridge_captured_libxdp_flags = 0;
+    bridge_socket_create = enable ? bridge_capture_socket_create : xsk_socket__create;
+    bridge_socket_create_shared =
+        enable ? bridge_capture_socket_create_shared : xsk_socket__create_shared;
+}
+
+/* #9726: test-only. The libxdp_flags a capture recorded since the last enable. */
+__u32 bridge_xsk_captured_libxdp_flags(void)
+{
+    return bridge_captured_libxdp_flags;
+}
+
 int bridge_xsk_socket_create_private(
     struct xsk_socket **xsk_out,
     const char *ifname,
@@ -98,23 +198,17 @@ int bridge_xsk_socket_create_private(
     struct xsk_ring_cons *comp,
     __u32 rx_size,
     __u32 tx_size,
-    __u32 libxdp_flags,
-    __u32 xdp_flags,
     __u16 bind_flags)
 {
-    struct xsk_socket_config cfg = {
-        .rx_size      = rx_size,
-        .tx_size      = tx_size,
-        .libxdp_flags = libxdp_flags,
-        .xdp_flags    = xdp_flags,
-        .bind_flags   = bind_flags,
-    };
+    struct xsk_socket_config cfg;
+
+    bridge_fill_socket_config(&cfg, rx_size, tx_size, bind_flags);
     /* Private UMEM mode: one socket owns one UMEM.  Non-shared create uses
      * the UMEM's fill/comp rings directly, so the per-socket fill/comp
      * parameters are ignored by design. */
     (void)fill;
     (void)comp;
-    return xsk_socket__create(xsk_out, ifname, queue_id, umem, rx, tx, &cfg);
+    return bridge_socket_create(xsk_out, ifname, queue_id, umem, rx, tx, &cfg);
 }
 
 int bridge_xsk_socket_create_shared(
@@ -128,19 +222,13 @@ int bridge_xsk_socket_create_shared(
     struct xsk_ring_cons *comp,
     __u32 rx_size,
     __u32 tx_size,
-    __u32 libxdp_flags,
-    __u32 xdp_flags,
     __u16 bind_flags)
 {
-    struct xsk_socket_config cfg = {
-        .rx_size      = rx_size,
-        .tx_size      = tx_size,
-        .libxdp_flags = libxdp_flags,
-        .xdp_flags    = xdp_flags,
-        .bind_flags   = bind_flags,
-    };
-    return xsk_socket__create_shared(xsk_out, ifname, queue_id, umem,
-                                     rx, tx, fill, comp, &cfg);
+    struct xsk_socket_config cfg;
+
+    bridge_fill_socket_config(&cfg, rx_size, tx_size, bind_flags);
+    return bridge_socket_create_shared(xsk_out, ifname, queue_id, umem,
+                                       rx, tx, fill, comp, &cfg);
 }
 
 void bridge_xsk_socket_delete(struct xsk_socket *xsk)
