@@ -5308,6 +5308,72 @@ mod routing_domain_delete_7160 {
         );
     }
 
+    /// #9714 review round 2, finding 4: a MARKED delete with NO shared authority must
+    /// do NOTHING — not even the domain-0 delete the handler used to send regardless.
+    ///
+    /// With routing instances configured and no shared-map match, the old handler
+    /// still fanned `DeleteSynced(domain 0)` out to every worker. A worker whose real
+    /// local session lives in a NONZERO domain misses the scoped lookup and takes the
+    /// unconditional key-only arm, tearing out the steering row of a live flow.
+    ///
+    /// "No shared entry" does NOT mean "no session", which is what makes this
+    /// reachable rather than theoretical: on the install path the BPF publish precedes
+    /// the shared-map publish, so there is a real window in which the kernel row
+    /// exists and the shared entry does not.
+    ///
+    /// The unmarked arm is the CONTROL. Without it, a handler that fanned nothing out
+    /// for any delete would pass the marked assertion while silently breaking every
+    /// operator clear.
+    #[test]
+    fn a_marked_delete_with_no_shared_authority_fans_out_nothing_9714() {
+        for peer_delete in [true, false] {
+            let mut afxdp = afxdp::Coordinator::new();
+            afxdp.seed_routing_domain_for_test(24, DOMAIN);
+            let queued_deletes = afxdp.register_counting_worker_for_test(0);
+            assert_eq!(
+                afxdp.synced_session_entry_count_for_test(),
+                0,
+                "setup (peer_delete={peer_delete}): this cell is about the NO-shared-authority \
+                 case, so the shared map must start empty"
+            );
+            let state = Arc::new(Mutex::new(ServerState {
+                status: ProcessStatus::default(),
+                snapshot: None,
+                afxdp,
+                state_writer: Arc::new(StateWriter::new()),
+            }));
+            let mut request = bare_five_tuple_delete();
+            request
+                .session_sync
+                .as_mut()
+                .expect("a sync_session request")
+                .peer_delete = peer_delete;
+
+            let response = run_request(state.clone(), request);
+
+            assert!(
+                response.ok,
+                "(peer_delete={peer_delete}) a miss is not a refusal; got {:?}",
+                response.error
+            );
+            if peer_delete {
+                assert_eq!(
+                    queued_deletes(),
+                    0,
+                    "a MARKED delete with no shared authority fanned DeleteSynced out anyway. The \
+                     worker no-entry arm then deletes the kernel steering row of a live local flow \
+                     whose shared entry has not been published yet (#9714 r2 F4)"
+                );
+            } else {
+                assert!(
+                    queued_deletes() > 0,
+                    "control: an AUTHORITATIVE delete must keep its plain-miss kernel cleanup, or \
+                     the marked arm's zero proves only that nothing ever fans out"
+                );
+            }
+        }
+    }
+
     /// #9714: the handler routes a MARKED delete to the refusing path at BOTH of its
     /// delete calls, the exact key and the #8636 single-domain retry, and an unmarked
     /// delete to the authoritative path. The domain-level cells call the domain
