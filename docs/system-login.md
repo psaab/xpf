@@ -444,6 +444,20 @@ ways that used to differ, all measured before the fix:
 not parse for its verb falls back to gating the WHOLE remainder. A precision
 gain must never remove coverage.
 
+**An `event-options` payload is adjudicated against the operator who plants it
+(#9939).** `then change-configuration commands "delete security policies …"`
+stores its payload as DATA, and at fire time the daemon applies it with INTERNAL
+(root) authority — there is no principal to charge, which is what made it an
+escalation. The commit that plants it is the only moment a class is in scope, so
+each embedded `set`/`delete` is now evaluated against the planting class's own
+regexes, from the same evaluator every surface uses.
+
+Two things an operator should know: an **unanchored** deny already caught this
+incidentally, because the payload text is part of the planting line — only an
+**anchored** deny reached the gap; and a payload **already persisted** before
+this landed still fires as root, because the policy records no planting class
+(#9984).
+
 **How REST resolves a command.** A REST route is not a CLI command, so the
 canonical command each route performs is DEFINED in a table
 (`restRouteCommand`, `pkg/api/authz_command_regex_9952.go`), mirroring the gRPC
