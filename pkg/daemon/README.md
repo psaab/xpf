@@ -2607,6 +2607,52 @@ never lock an operator out of a remote box it manages.
   refuses the whole snapshot. A kernel term that widens while userspace
   refuses the same filter is a mode-dependent fail-open.
 
+- **A port comparison with no protocol predicate reads a port out of a
+  header that has none (#9953).** `th sport` / `th dport` load two bytes at
+  an offset into whatever the kernel calls the transport header and compare
+  them to a port number. The load is unconditional — nothing in the rule
+  establishes that the packet is TCP or UDP — and the `xpf_lo0` input chain
+  carries no `iif` predicate, so every packet arriving at the kernel input
+  hook is evaluated against every term.
+
+  The host-bound set reaching that hook is **not** "TCP and UDP to the
+  firewall". The AF_XDP shim's local-destination arm hands host-bound
+  traffic to the kernel on every bound interface keyed on the DESTINATION
+  being local and NOT on protocol, so SCTP, GRE and ICMP to a
+  firewall-local address take that arm exactly as TCP and UDP do; and the
+  lifelines (`fxp0`, `em0`, `fab*`) are never AF_XDP-bound at all and are
+  served on the kernel path unconditionally. So an operator's
+  `destination-port 22` term is evaluated against a GRE or ICMP packet,
+  reading two arbitrary header bytes as a port — an `accept` term fails
+  OPEN when they happen to match, a `discard` term drops traffic the
+  operator never named.
+
+  Both renderers now emit `meta l4proto { tcp, udp }` alongside a port
+  match that carries no protocol predicate, from one SSOT
+  (`pkg/nftables/lo0_port_fallback_9953.go`) so they agree by construction.
+  Three scope rules, each of which is a fail-open if inverted:
+
+  - it keys on the EMITTED protocol predicate being empty, not on
+    `len(term.Protocols)`. An unresolvable token is kept verbatim by #6806
+    precisely so the load is rejected; supplying a fallback there would
+    replace a deliberate fail-closed with a rule that loads and matches;
+  - a term carrying an `icmp-type` / `icmp-code` is left alone — the ICMP
+    lowering already supplies the protocol dependency, and adding
+    `{tcp, udp}` on top makes the rule match NOTHING, which for a `discard`
+    term means it stops dropping what it was written to drop;
+  - a term with no port comparison is not touched at all, or a `discard`
+    written to stop GRE would stop only tcp/udp.
+
+  **This is the second instance of the bullet above, and it proves the
+  point.** Both renderers emitted the bare port match identically, so they
+  agreed perfectly while both were wrong, and the T1 parity CI passed
+  throughout — its fixture even contains the exact shape (`range-drop`
+  carries ports with no protocol, `reject-term` carries ports with ICMP
+  types). Parity is worth having: it is what now shows the fix renders
+  bit-identically on both paths, including the ICMP exclusion. But it could
+  not have found the defect, because a defect present in both mirrors is
+  invisible to a comparison between them.
+
 - lo0 input filters (`interfaces lo0 unit 0 family inet[6] filter input
   <name>`) lock down host-bound/control-plane traffic via an nftables table
   `inet xpf_lo0`. `daemon_nft.go:applyLo0Filter` installs the table via the

@@ -158,6 +158,21 @@ func buildLo0TermNetlink(p *nlPlan, t Lo0FilterTerm, f nlFamily) {
 			} else if len(protos) > 0 {
 				a.l4protoSet(protos)
 			}
+		} else if Lo0NeedsPortProtocolFallback(
+			len(t.Protocols) > 0,
+			len(t.ICMPTypes) > 0 || len(t.ICMPCodes) > 0,
+			Lo0TermComparesPort(t.SourcePorts, t.DestinationPorts, t.SourcePortsExcept, t.DestPortsExcept),
+		) {
+			// #9953: this term compares a transport PORT but names no protocol, so
+			// without a guard the two bytes it reads come out of whatever header
+			// follows the IP header — including SCTP, GRE and ICMP, which reach
+			// this chain by the ordinary host-bound path. See
+			// lo0_port_fallback_9953.go for why that set is not hypothetical.
+			//
+			// Emitted BEFORE addPorts below so the protocol comparison short-circuits
+			// ahead of the payload load, which is both correct and the order the nft
+			// text oracle produces.
+			a.l4protoSet(Lo0PortFallbackProtocols())
 		}
 		addPorts(a, t.SourcePorts, "sport", false)
 		addPorts(a, t.DestinationPorts, "dport", false)
