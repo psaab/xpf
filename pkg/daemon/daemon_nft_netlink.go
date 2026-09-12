@@ -104,6 +104,7 @@ func toNftViews(views []dpuserspace.ZoneHostInboundView) []xnft.HostInboundZoneV
 			Protocols:      v.Protocols,
 			V4Addrs:        v.V4Addrs,
 			V6Addrs:        v.V6Addrs,
+			IngressNetdevs: v.IngressNetdevs,
 		})
 	}
 	return out
@@ -140,14 +141,14 @@ func toNftDenyRules(rules []config.JunosHostDenyRule) []xnft.JunosHostDenyRule {
 	out := make([]xnft.JunosHostDenyRule, 0, len(rules))
 	for _, r := range rules {
 		nr := xnft.JunosHostDenyRule{
-			Family:         r.Family,
-			SrcAny:         r.SrcAny,
-			SrcExcluded:    r.SrcExcluded,
-			Src:            r.Src,
-			PermitSubtract: r.PermitSubtract,
-			DstAny:         r.DstAny,
-			DstExcluded:    r.DstExcluded,
-			Dst:            r.Dst,
+			Family:      r.Family,
+			SrcAny:      r.SrcAny,
+			SrcExcluded: r.SrcExcluded,
+			Src:         r.Src,
+			Verdict:     r.Verdict,
+			DstAny:      r.DstAny,
+			DstExcluded: r.DstExcluded,
+			Dst:         r.Dst,
 		}
 		for _, l4 := range r.L4 {
 			nr.L4 = append(nr.L4, xnft.JunosHostDenyL4{

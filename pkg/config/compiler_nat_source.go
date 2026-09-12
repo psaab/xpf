@@ -417,7 +417,9 @@ func compileNAT64(node *Node, sec *SecurityConfig) error {
 	for _, inst := range namedInstances(node.FindChildren("rule-set")) {
 		rs := &NAT64RuleSet{Name: inst.name}
 
-		for _, child := range inst.node.Children {
+		// #9792: a packed one-line run reaches this reader on the lenient path
+		// (Store.Load / Store.SyncApply); expand it as #9235 does. Lenient path only.
+		for _, child := range expandResolvingRuns9792(inst.node.Children, nat64RuleSetSchema9792()) {
 			switch child.Name() {
 			case "prefix":
 				rs.Prefix = nodeVal(child)

@@ -82,8 +82,9 @@ func (m *Manager) BumpFIBGeneration() (uint32, error) {
 	// #1197: use forwarding-effective diff so REACHABLE↔STALE aging churn
 	// doesn't trigger unnecessary publishes; filter publish payload to
 	// publishable-only entries (matches userspace-dp accept rules).
-	newNeighbors := buildNeighborSnapshots(m.lastSnapshot.Config)
-	if !neighborsEqualForwarding(m.lastSnapshot.Neighbors, newNeighbors) {
+	newNeighbors := m.sampleNeighborsLocked()
+	// #9684: an unchanged set is re-sent while an earlier replace's outcome is unknown.
+	if !neighborsEqualForwarding(m.lastSnapshot.Neighbors, newNeighbors) || m.partialSectionUnknownLocked(partialNeighbors) {
 		publishable := filterPublishableNeighbors(newNeighbors)
 		// #6034: stamp a fresh monotonic replace generation (see
 		// RegenerateNeighborSnapshot / Manager.neighborReplaceGen).
@@ -97,6 +98,7 @@ func (m *Manager) BumpFIBGeneration() (uint32, error) {
 			NeighborGeneration: gen,
 		}, &status); err != nil {
 			slog.Warn("userspace: failed to publish neighbor update", "err", err)
+			m.recordPartialUpdateFailureLocked(partialNeighbors, err)
 		} else if status.ManagerNeighborGeneration != 0 && status.ManagerNeighborGeneration < gen {
 			// #6034: the helper fenced this replace as stale. Retain the
 			// cached neighbor view so the next bump re-diffs and retries
@@ -110,6 +112,11 @@ func (m *Manager) BumpFIBGeneration() (uint32, error) {
 			// a transient failure doesn't suppress future retries.
 			m.lastSnapshot.Neighbors = newNeighbors
 			m.rebuildNeighborIndex() // #1197
+			// #9684: an ACK above gen is an unrecognised fence (#9696); only 0 or
+			// exactly gen proves the replace applied.
+			if status.ManagerNeighborGeneration == 0 || status.ManagerNeighborGeneration == gen {
+				m.resolvePartialOutcomesLocked(partialNeighbors)
+			}
 		}
 	}
 

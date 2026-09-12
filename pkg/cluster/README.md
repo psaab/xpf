@@ -589,6 +589,28 @@ Two defenses, both fail-safe rather than manufacturing a false winner:
   conflict). Yielding both nodes to SECONDARY produces a clean, obvious,
   loudly-logged outage instead of subtle duplicate-address corruption.
 
+## Paced session installs (#9767)
+
+`QueueSessionV4`/`V6` never block. A full send queue (4096 entries) drops the
+message, counts a send error and arms the sweep backfill. That suits the
+incremental producers, because the sweep re-sends their sessions.
+
+A producer that must know its whole batch was queued uses
+`QueueSessionV4Paced`/`V6Paced` instead:
+
+- It waits up to `maxWait` for room, re-checking the connection every 10 ms,
+  and reports whether the session was queued.
+- A disconnect ends the wait at once.
+- An expired wait makes one final lossy enqueue, so a drop is counted the same
+  way.
+
+The one caller is the daemon's FullResync export, whose frame is acknowledged
+to the helper only when every install was queued
+(`pkg/daemon/full_resync_transaction_9767.go`). The test seams
+`SetConnectedForTesting`, `FillSendQueueForTesting` and
+`TakeQueuedMessageTypeForTesting` let a test drive the send queue with no peer
+and no writer.
+
 ## Readiness barrier fence (#9508)
 
 `WaitForPeerBarrier` is demotion readiness: the peer processed every delta queued
@@ -2700,13 +2722,13 @@ connection at handshake time, which is #6628's territory, not this one.
 The userspace **SYN-cookie key** widens with them (#9173). It derives from
 `authentication-key`, and while an additional key is set each node's snapshot
 also carries an accept-only cookie-key base derived from that key. So at every
-step of the procedure below, when both nodes run a helper that reads the key
-ring and share the cluster-id and screened (zone, profile) set (#9740), a cookie
-minted by either node validates on its peer after a failover: each node derives
-the peer's signing key from a primary or an accept-only base.
-A helper that predates the ring ignores the accept-only base, so during a
-rolling upgrade a handshake that straddles a failover mid-rotation can be
-refused. The client has already sent its ACK, so it does not resend the SYN:
+step of the procedure below, when both nodes run this release's helper and share
+the cluster-id, a cookie minted by either node in a zone both nodes have
+validates on its peer after a failover (#9740): each node derives the peer's
+signing key from a primary or an accept-only base.
+A helper from before this release uses a different cookie format (#9740) and
+ignores the accept-only base, so during a rolling upgrade a handshake that
+straddles a failover is refused until both nodes run the same helper. The client has already sent its ACK, so it does not resend the SYN:
 that connection fails and the application must reconnect. See docs/syn-cookie-flood-protection.md, "Key
 derivation and rotation".
 
@@ -4321,6 +4343,42 @@ outside the monitor loop:
   treated as lost and the bulk goes again. The bound is the daemon's
   bulk-prime retry bound (35 s), exported so there is one number. Cells:
   `sync_cold_prime_ack_9626_test.go`.
+
+  **The stale-session reconcile judges only zones the zone->RG map names (#9655).**
+  At BulkEnd, `reconcileStaleSessions` deletes a session absent from the peer's
+  authoritative bulk, but only in a zone this node does not own. It judges
+  ownership by `zoneOwnershipSnapshot`, taken when the bulk started.
+  - `SetZoneRGMap` bumps `zoneRGMapGen` when the map's CONTENTS change. The
+    reconcile skips a bulk whose snapshot came from an older generation, because
+    the old answers could delete a session in a zone that has since moved to this
+    node. An identical map re-set by a config apply is not a change, so a commit
+    during a bulk does not cost it its reconcile.
+  - A snapshot that names no zone judges nothing, and both shapes take none: a
+    map never installed (ownership is not wired yet) and a map installed naming
+    no zone. The bulk deletes nothing and the next one tries again
+    (`TestReconcileSkipsNonEmptyBulkWithoutZoneSnapshot` keeps the first guard).
+  - A zone the map does not name is KEPT WHOLE. That is the conservative answer
+    and it is deliberate.
+
+  **Why an RG-unmapped zone is not answered with RG 0.** The live sweep answers
+  such a zone with RG 0 ownership (`IsPrimaryFn`), and the first attempt at this
+  issue had the reconcile do the same, so a stale peer-owned session in an
+  unmapped zone would finally be deleted on the RG 0 secondary. It was withdrawn
+  on measurement: `buildZoneRGMap` maps a zone only through RETH interfaces, so a
+  zone of node-local (non-RETH) dataplane interfaces is RG-unmapped too, and no
+  cluster-mode commit rule rejects one. On the RG 0 secondary that answer deletes
+  that node's OWN live flows in such a zone at every bulk, and a TCP flow dies on
+  its next non-SYN packet — a worse outcome than the stale rows the issue is
+  about, because sessions carry no origin flag telling a local flow from a stale
+  synced copy.
+
+  **What is still open.** Deleting only the SYNCED copy in an unmapped zone needs
+  a per-session origin bit (synced vs local). That rides the one
+  `session_value`/HA-wire prerequisite covering pair identity (#9604),
+  `route_table_id` (#9752) and the origin bit, so #9655 stays open for that half
+  rather than growing a wire change here.
+
+  Cells: `sync_zone_snapshot_rg0_9655_test.go`.
 
   **Accepted limitation, with its owner (#9626 item 3).** A cold prime carries
   only the redundancy groups this node is PRIMARY for when the bulk is built:

@@ -567,7 +567,7 @@ func compileRoutingInstances(node *Node, cfg *Config) error {
 			TableID: StableRoutingInstanceTableID(instanceName),
 		}
 
-		for _, prop := range child.Children {
+		for _, prop := range expandResolvingRuns9792(child.Children, routingInstanceSchema9792()) { // #9792: expand a lenient-path packed run (#9235).
 			switch prop.Name() {
 			case "description":
 				ri.Description = nodeVal(prop)

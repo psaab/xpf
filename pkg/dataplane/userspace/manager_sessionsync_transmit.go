@@ -73,7 +73,43 @@ func (m *Manager) syncSessionRequestLocked(req SessionSyncRequest) error {
 // mirror is best-effort — the periodic sweep retries once the helper is healthy
 // again.
 func sendSessionSyncBatch(reqs []SessionSyncRequest, send func(ControlRequest) error) error {
-	var firstErr error
+	for _, err := range sendSessionSyncBatchOutcomes(reqs, send) {
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// errSessionSyncNotAttempted marks a request the batch NEVER SENT (#9714 review
+// round 2, finding 1).
+//
+// It is not a failure OF the request — it is the ABSENCE of an answer, and on the
+// delete path that distinction decides whether a live session survives. The three
+// states a caller must tell apart are:
+//   - nil            the helper APPLIED it; the caller may drop its BPF mirror row;
+//   - a refusal      the helper KEPT the session; the row must stay;
+//   - not attempted  the caller knows NOTHING; the row must stay.
+//
+// Collapsing the third into the first is not recoverable later: the mirror is not
+// self-healing, because the refresh path writes with BPF_EXIST precisely so it
+// "avoid[s] recreating deleted entries". A row deleted on a guess is gone until
+// the session is rebuilt.
+var errSessionSyncNotAttempted = errors.New("session sync request not attempted")
+
+// sendSessionSyncBatchOutcomes is sendSessionSyncBatch keeping every request's
+// result (#9714): outcomes[i] is reqs[i]'s error, nil if the helper applied it.
+// It stops at the first transport failure exactly as sendSessionSyncBatch does
+// (#5380), and every request after that one reports errSessionSyncNotAttempted.
+//
+// That tail used to report nil, i.e. "applied". A chunk is up to
+// sessionHelperDeleteChunk (256) requests, so an unreachable helper on request 1
+// manufactured up to 255 phantom successes, and BatchDeletePeerSyncedSessions*
+// then deleted 255 BPF mirror rows for sessions the helper still holds — the
+// failure direction this whole path exists to prevent, reached by an instrument
+// that could not distinguish silence from assent.
+func sendSessionSyncBatchOutcomes(reqs []SessionSyncRequest, send func(ControlRequest) error) []error {
+	outcomes := make([]error, len(reqs))
 	for i := range reqs {
 		ctrlReq := ControlRequest{
 			Type:           "sync_session",
@@ -82,18 +118,35 @@ func sendSessionSyncBatch(reqs []SessionSyncRequest, send func(ControlRequest) e
 		}
 		if err := send(ctrlReq); err != nil {
 			slog.Debug("userspace session sync mirror failed", "operation", reqs[i].Operation, "err", err)
-			if firstErr == nil {
-				firstErr = err
-			}
+			outcomes[i] = err
 			// Helper unreachable/hung: abort the batch instead of paying the
 			// per-request deadline once per remaining request (#5380).
 			if errors.Is(err, errSessionHelperUnreachable) {
+				// Mark the unsent tail EXPLICITLY. A zero-valued `error` is
+				// indistinguishable from a success the helper actually gave,
+				// so the absence of an answer has to be written down rather
+				// than left as the zero value.
+				for j := i + 1; j < len(reqs); j++ {
+					outcomes[j] = errSessionSyncNotAttempted
+				}
 				break
 			}
-			continue
 		}
 	}
-	return firstErr
+	return outcomes
+}
+
+// syncSessionRequestOutcomesLocked is syncSessionRequestsLocked keeping every
+// request's result (#9714); see sendSessionSyncBatchOutcomes. The m.mu discipline
+// is the same: one unlock around the socket I/O, reacquired before returning.
+func (m *Manager) syncSessionRequestOutcomesLocked(reqs ...SessionSyncRequest) []error {
+	if len(reqs) == 0 {
+		return nil
+	}
+	m.mu.Unlock()
+	outcomes := sendSessionSyncBatchOutcomes(reqs, m.requestSessionSync)
+	m.mu.Lock()
+	return outcomes
 }
 
 // syncSessionRequestsLocked transmits one or more PRE-BUILT session-sync

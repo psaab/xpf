@@ -157,7 +157,11 @@ impl crate::afxdp::Coordinator {
         // teardown, so extracting the raw `fd` and dropping the guard would
         // reintroduce the use-after-close this publish exists to prevent.
         let maps = self.bpf_maps.load();
-        let session_map_fd = maps.session_map_fd.as_ref().map(|fd| fd.fd).unwrap_or(-1);
+        let session_map = SteeringMap {
+            fd: maps.session_map_fd.as_ref().map(|fd| fd.fd).unwrap_or(-1),
+            owners: &self.steering_owners,
+            holder: crate::afxdp::bpf_map::SteeringHolder::Coordinator,
+        };
 
         // RG activation is still allowed to be a narrow ownership transition,
         // but split-RG continuity depends on rewarming the derived reverse
@@ -169,18 +173,18 @@ impl crate::afxdp::Coordinator {
             &self.sessions.forward_wire,
             &self.sessions.owner_rg_indexes,
             &worker_commands,
-            session_map_fd,
+            session_map,
             &self.forwarding,
             current.as_ref(),
             self.dynamic_neighbors_ref(),
             activated_rgs,
             now_secs,
         );
-        if session_map_fd >= 0 {
+        if session_map.fd >= 0 {
             let republished = republish_bpf_session_entries_for_owner_rgs(
                 &self.sessions.synced,
                 &self.sessions.owner_rg_indexes,
-                session_map_fd,
+                session_map,
                 activated_rgs,
                 self.forwarding.has_routing_domains,
             );

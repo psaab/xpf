@@ -24,11 +24,11 @@ use crate::test_zone_ids::*;
 use std::net::Ipv4Addr;
 
 /// Not negative, so `publish_worker_session_map_entry` does not take its
-/// `session_map_fd < 0` early return; never an open BPF map, so every syscall
+/// `session_map.fd < 0` early return; never an open BPF map, so every syscall
 /// fails harmlessly after the recorder has seen it.
 const NOT_A_MAP_FD: c_int = i32::MAX;
 
-fn host_bound_key() -> SessionKey {
+pub(super) fn host_bound_key() -> SessionKey {
     SessionKey {
         addr_family: libc::AF_INET as u8,
         protocol: PROTO_TCP,
@@ -95,7 +95,7 @@ fn worker_publish_writes_for(
     };
     clear_session_map_writes();
     publish_worker_session_map_entry(
-        NOT_A_MAP_FD,
+        SteeringMap::unshared_for_test(NOT_A_MAP_FD),
         &forwarding,
         &key,
         local_delivery(),
@@ -115,6 +115,45 @@ fn pass_to_kernel_writes(writes: &[SessionMapWriteRecord]) -> usize {
 
 fn deletes(writes: &[SessionMapWriteRecord]) -> usize {
     writes.iter().filter(|w| w.value.is_none()).count()
+}
+
+/// #9560 round 3: the kernel-local publish must not DELETE before it writes.
+///
+/// The path used to release the entry's whole old row set before attempting the new
+/// publish. If either write then failed, the session was left with no rows at all — the
+/// failure-safe migration `publish_entry` exists to provide (release the rows the new
+/// decision does not name, and only after every write succeeded) was bypassed by the one
+/// path that needed it. Ordering is what makes that observable without injecting a write
+/// failure: no delete may precede the first write.
+#[test]
+fn the_kernel_local_publish_writes_before_it_deletes_9560() {
+    // has_routing_domains=FALSE is the KERNEL-LOCAL branch. With routing domains the
+    // #9517 demotion publishes REDIRECT instead, so `true` never reaches the path this
+    // cell is NAMED for — and the cell passed `true`. Measured: the mutant that
+    // restores the pre-delete SURVIVED against `true`, because its
+    // `if uses_kernel_local { .. }` never executed.
+    let writes = worker_publish_writes(false, false);
+    assert_eq!(
+        pass_to_kernel_writes(&writes),
+        1,
+        "FIXTURE: the publish must take the KERNEL-LOCAL branch, or this cell is named \
+         for a path it never executes — which is exactly how it went green over a \
+         restored pre-delete. Writes: {writes:?}"
+    );
+    let first_write = writes.iter().position(|w| w.value.is_some());
+    let first_delete = writes.iter().position(|w| w.value.is_none());
+    assert!(
+        first_write.is_some(),
+        "fixture: the publish must write at least one row, or the ordering below is \
+         vacuous. Writes: {writes:?}"
+    );
+    if let Some(delete_at) = first_delete {
+        assert!(
+            delete_at > first_write.expect("write"),
+            "a row was DELETED before the new row set was written: a failed write then \
+             leaves the session with no rows at all (#9560 round 3). Writes: {writes:?}"
+        );
+    }
 }
 
 #[test]

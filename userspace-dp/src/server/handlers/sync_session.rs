@@ -149,7 +149,26 @@ pub(super) fn handle(
             SyncedKeyIntent::Delete,
         ) {
             Ok(key) => {
-                domain.delete_synced_session(key.clone());
+                // #9714: a delete the Go side marked as made on behalf of the PEER
+                // is refused for a live local session whose owner RG is locally
+                // active; every other delete stays authoritative. `delete` reports a
+                // refusal, answered in-band below so the Go side keeps its own mirror
+                // and DNAT rows for the flow the helper kept.
+                // #9714 r2 F7: the helper reports an OUTCOME, not a bool in which a
+                // stale-generation rejection and a successful apply were the same
+                // value. Only the ownership refusal is answered in-band with the
+                // peer-delete token — a stale-generation refusal means the helper
+                // already holds something newer, so there is nothing for the Go side
+                // to preserve and nothing to tell it about.
+                let delete = |key| {
+                    if sync_req.peer_delete {
+                        domain.delete_peer_synced_session(key).is_refused_local_owned()
+                    } else {
+                        domain.delete_synced_session(key);
+                        false
+                    }
+                };
+                let mut refused = false;
                 // #7160 (#2387): a bare-5-tuple delete (the `clear security
                 // flow session` / batch-revoke path) carries no ingress
                 // identity, so the key above resolved domain 0 and the exact
@@ -192,42 +211,94 @@ pub(super) fn handle(
                 // toward keeping a session too long rather than tearing down
                 // another tenant's, which is the direction that makes it
                 // acceptable rather than merely small.
-                if key.routing_domain == 0 {
-                    let mut matched: Vec<u32> = Vec::new();
+                //
+                // #9714 review round 2, findings 2 and 4: resolve the COMPLETE
+                // candidate set without mutating anything, then perform EXACTLY ONE
+                // delete, or none.
+                //
+                // The previous shape probed first but still deleted the exact
+                // domain-0 entry BEFORE it counted the matches, so "domain 0 plus one
+                // match" deleted both, and "domain 0 plus several" deleted domain 0
+                // and then reported ambiguity — having already mutated the state it
+                // was declining to act on. An exact refusal was masked too, because
+                // the ownership token was only emitted while `response.ok` still held.
+                //
+                // `bare` is "this request NAMES no domain", which is NOT
+                // `key.routing_domain == 0`. Domain 0 is also the DEFAULT routing
+                // instance, and a sender that stated it made a statement:
+                // `routing_domain_from_wire` deliberately separates `Present(0)` from
+                // `Absent`, and `resolved_domain` carries that distinction until
+                // `unwrap_or(0)` flattens it for the key. Reading the flattened 0 as
+                // "unknown" sent an AUTHORITATIVE single-domain delete into the
+                // ambiguity probe, where it could be refused for naming too many
+                // tenants when it had named exactly one.
+                let bare = resolved_domain.is_none();
+                let mut matched: Vec<u32> = Vec::new();
+                if bare {
+                    // Domain 0 is a CANDIDATE like any other, not a special case
+                    // evaluated first and deleted before the rest are counted. That
+                    // ordering was the whole defect.
+                    if domain.synced_session_contains(&key) {
+                        matched.push(0);
+                    }
                     for rd in view.routing_domains() {
+                        if rd == 0 {
+                            continue;
+                        }
                         let mut scoped = key.clone();
                         scoped.routing_domain = rd;
                         if domain.synced_session_contains(&scoped) {
                             matched.push(rd);
                         }
                     }
+                }
+                if !bare {
+                    // The request named its domain. Exactly one authority, no probe.
+                    refused |= delete(key.clone());
+                } else {
                     match matched.as_slice() {
-                        // No routing-instance copy. The exact delete above was
-                        // the whole job; empty in every deployment with no
-                        // routing-instance interface membership.
-                        [] => {}
-                        // Exactly one domain holds it, so the bare tuple names
-                        // it unambiguously. This is STRICTLY better than the
-                        // old fan-out: it deletes the same session and touches
-                        // no other domain.
+                        // No shared authority anywhere for this tuple.
+                        //
+                        // #9714 r2 F4: a MARKED delete stops here. The domain-0
+                        // delete used to go out regardless, and a worker whose real
+                        // local session lives in another domain misses the scoped
+                        // lookup and takes the unconditional key-only arm, tearing
+                        // out the steering row of a live flow. That is reachable
+                        // during install, because the BPF publish precedes the
+                        // shared-map publish — so "no shared entry" does NOT mean
+                        // "no session". An authoritative delete keeps its plain-miss
+                        // kernel cleanup, which is the behaviour operators rely on
+                        // for a stale row.
+                        [] => {
+                            if !sync_req.peer_delete {
+                                refused |= delete(key.clone());
+                            }
+                        }
+                        // Exactly one domain holds it, so the bare tuple names it
+                        // unambiguously.
                         [rd] => {
                             let mut scoped = key.clone();
                             scoped.routing_domain = *rd;
-                            domain.delete_synced_session(scoped);
+                            refused |= delete(scoped);
                         }
-                        // Ambiguous: the tuple names a live session in more
-                        // than one tenant and nothing in this request says
-                        // which. Refuse rather than guess. Go tolerates a
-                        // per-key refusal without aborting the batch (#5881),
-                        // so the rest of a clear still proceeds.
+                        // Ambiguous: the tuple names a live session in more than one
+                        // tenant and nothing in this request says which. Refuse
+                        // rather than guess, having mutated NOTHING. Go tolerates a
+                        // per-key refusal without aborting the batch (#5881), so the
+                        // rest of a clear still proceeds.
                         _ => {
                             response.ok = false;
                             response.error = format!(
-                                "{SYNCED_DELETE_REFUSED_PREFIX}ambiguous-routing-domain                                  (5-tuple matches {} routing instances)",
+                                "{SYNCED_DELETE_REFUSED_PREFIX}ambiguous-routing-domain (5-tuple matches {} routing instances)",
                                 matched.len()
                             );
                         }
                     }
+                }
+                if refused && response.ok {
+                    response.ok = false;
+                    response.error =
+                        format!("{SYNCED_DELETE_REFUSED_PREFIX}peer-delete-local-owned");
                 }
             }
             Err(err) => {

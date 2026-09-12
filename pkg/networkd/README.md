@@ -83,7 +83,11 @@ Standard library only.
   rather than derived by filtering the fixture with the production
   predicate — deriving it would let the same predicate decide both the
   behaviour and the expectation, so deleting an arm would change them
-  together and the test could never red.
+  together and the test could never red. Since #9885 that argv also carries
+  `--` after the verb, so an interface name beginning with `-` reaches
+  networkctl as an operand rather than as an option; the separator is
+  spelled out in the expectation for the same non-circularity reason as the
+  names.
 - **The activation tail is owed whenever ANYONE reloads, not only when
   `Apply` does (#6912).** `pkg/daemon` runs `networkctl reload` from
   several sites of its own and reports the result through

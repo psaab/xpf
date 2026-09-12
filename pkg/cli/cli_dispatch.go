@@ -10,6 +10,7 @@ import (
 	"golang.org/x/sys/unix"
 
 	"github.com/psaab/xpf/pkg/cliterm"
+	"github.com/psaab/xpf/pkg/config"
 )
 
 var errExit = fmt.Errorf("exit")
@@ -407,6 +408,20 @@ func (c *CLI) dispatchConfig(line string) error {
 				return fmt.Errorf("rollback: rollback number must be >= 0, got %d", v)
 			}
 			n = v
+		}
+		// #9892: `rollback n` for n>0 replaces the candidate with an older
+		// configuration whose paths cannot be adjudicated one by one — the
+		// same shape as `load override`, and ungated here for the same reason
+		// (`rollback` is not in configMutationVerbs, so the gate above
+		// declined). `rollback 0` returns to the COMMITTED configuration,
+		// every path of which was adjudicated when it was written, and stays
+		// available.
+		var rbCfg *config.Config
+		if c.store != nil {
+			rbCfg = c.store.ActiveConfig()
+		}
+		if err := config.AuthorizeConfigRollback(rbCfg, c.userClass, n); err != nil {
+			return err
 		}
 		if err := c.store.Rollback(n); err != nil {
 			return err

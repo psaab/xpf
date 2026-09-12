@@ -1111,6 +1111,56 @@ it refuses on epoch alone — and deliberately does NOT record the per-key
 generation, so the peer's next re-sync of that key is admitted rather than
 refused as stale.
 
+**A peer's delete cannot remove this node's live flow (#9714).** Three callers
+use `DeleteReasonClusterStale`, and all three act on the PEER's authority, not
+this node's:
+- the rollback above removes a session the peer sent;
+- `deleteClusterSynced*` removes one the peer said is gone;
+- bulk stale reconciliation (`ReconcileClusterBulk`, which also defaults an
+  empty reason to cluster-stale) removes the ones the peer's bulk sync left out.
+
+In a dual-primary split both nodes forward the same flows, and each holds its
+copy as a LOCAL session. Until #9714 such a delete reached the helper as an
+ordinary `sync_session` delete. The worker-side guard in
+`handle_delete_synced` kept only the forwarding worker's own entry. Everything
+else still went:
+- the shared rows;
+- the steering row and the DNAT steering hold;
+- every sibling worker's replica (`WorkerLocalImport`, which counts as
+  peer-synced).
+
+**How the delete is marked.** The session store routes a cluster-stale delete
+through the optional `peerSyncedSessionDeleter` capability. The userspace
+`Manager` implements it, and `*LegacyDataPlaneAdapter` forwards it. The
+capability sets `peer_delete` on every helper request (protocol v16), and the
+helper answers FIRST:
+- the forward key goes before its reverse companion, and a refused forward's
+  reverse is never sent;
+- the Manager deletes a key's BPF mirror row only once the helper has applied
+  the delete, and a mirror row that is already gone does not stop the helper
+  being asked;
+- the store deletes the reverse-SNAT DNAT row only for an applied forward. The
+  unmarked path deletes that row before the helper is asked.
+
+**What the helper refuses.** It refuses a marked delete of a local-origin
+shared entry, forward or reverse, whose owner RG is locally active. The refusal
+comes before any shared, steering or DNAT delete and before the worker fan-out.
+It is counted on `peer_delete_refused_local_owned`, the counter the worker-side
+guard already increments, and answered in-band as
+`synced-delete-refused:peer-delete-local-owned`.
+
+A delete that names no routing domain is probed across the routing instances
+BEFORE anything is deleted. The exact (domain 0) key is deleted only when
+shared authority holds it, or when no instance does. Deleting it first had
+fanned DeleteSynced out to every worker, and a worker holding no entry at that
+key deletes the bare tuple's steering row: the row a live routing-instance
+session still forwards on.
+
+**What stays authoritative.** Every other delete, such as an operator
+`clear security flow session` or GC expiry, is unmarked and applies as before.
+An older helper does not know the field and would apply a marked delete
+too, which is why the field bumps the protocol.
+
 **Item 1 (accepted residual — #6419 closed).** The guard covers only the
 config-authority → peer direction (the primary that admits the session is also
 the RG0 config-sync authority). A non-authority's sessions carry the
@@ -2626,9 +2676,11 @@ been copied.
 | equal to the daemon's | match | proceed |
 | anything else | mismatch | WITHHOLD the delta batch |
 
-Enforcement sits on `queueUserspaceSessionDeltas`, the single chokepoint all
-three producers funnel through (binary stream, JSON drain, FullResync export),
-so one check covers every leg.
+Enforcement sits on the two queue entry points the three producers use:
+`queueUserspaceSessionDeltas` for the binary stream and the JSON drain, and
+`queueUserspaceSessionDeltasComplete` for the FullResync export. The export's
+form reports a withheld batch as a failure, so its frame is not acknowledged
+(#9767).
 
 **The refusal is loud on purpose.** Withholding quietly would trade a silent
 zero-fill for a silently dead HA sync — the standby would stop receiving
@@ -2696,14 +2748,16 @@ until both legs carry it. Guards:
 
 ### Bulk Owner-RG Export (FullResync republish)
 
-`ExportOwnerRGSessions(rgIDs, 0)` dumps **all** userspace sessions owned by the
-primary's RGs. The `max = 0` argument means unbounded (`usize::MAX` helper-side)
-— it is an unbounded ground-truth snapshot of the entire conntrack table for the
-owned RGs, not a Max-truncated or delta-replay export, so it cannot silently drop
-post-snapshot sessions.
+`ExportOwnerRGSessionsPaged(rgIDs)` dumps **all** userspace sessions owned by
+the primary's RGs, as one complete window or an error. Since #9344 it pages
+against a helper that reports the paging contract, and falls back to the
+unbounded request for one that does not. It is a ground-truth snapshot of the
+owned RGs' session table, not a truncated or delta-replay export.
 
-This is **not** triggered by demotion prep. Its only live caller is
-`handleEventStreamFullResync` → `exportUserspaceOwnerRGSessionsWithConfig`: the
+This is **not** triggered by demotion prep. On this path its caller is
+`handleEventStreamFullResync` → `exportUserspaceOwnerRGSessionsWithConfig`. (The
+#6031 cold-prime snapshot, `userspaceBulkSnapshotWithConfig`, calls the same
+export for its acknowledged bulk window.) The
 event stream signals a FullResync after a #2874 sequence gap, a #2442
 delta-ring overflow (loss-of-sync), a #5483 **undecodable session frame**
 (a COMPLETE-but-semantically-rejected open/close/update — same severity as a
@@ -2712,6 +2766,59 @@ gap, because the standby is missing that frame's session state), or a #6132
 exceeds the sanity bound), and the export republishes the full owned set from
 table truth. It is not the same thing as the
 steady-state delta drain.
+
+**#9767: the frame is acknowledged only when the whole export is queued.**
+`handleEventStreamFullResync` returning true acknowledges the FullResync frame,
+and the helper then trims its replay buffer past the barrier. The export used to
+return success whatever it managed to queue:
+
+- `QueueSessionV4`/`V6` drop a message when the 4096-entry send queue is full.
+  The writer sends one message per write, so an export of more than 4096
+  sessions routinely outran it.
+- The #7194 schema gate could withhold the whole batch.
+
+The sweep does not repair either loss, because it re-sends only sessions whose
+timestamps moved. The export now queues through
+`queueUserspaceSessionDeltasComplete`:
+
+- Each install goes through `QueueSessionV4Paced`/`V6Paced`, which waits up to
+  `fullResyncInstallWait` (2 s) for room instead of dropping, so the writer
+  paces the export in order. After one install times out, the rest are queued
+  without waiting, so a stalled link costs the reader one wait, not one per
+  session.
+- A delete that finds the queue full is journaled as before, and the next
+  connected sweep flushes it (#3926).
+- A withheld batch, a missed install or a disconnect is an error, and the frame
+  is not acknowledged.
+
+A declined FullResync frame is retried on every later frame and on the 100 ms
+ACK tick, and each retry would re-run the synchronous helper export. After a
+failed attempt the handler therefore declines without exporting for
+`fullResyncRetryBackoff` (1 s).
+
+The gap and decode-failure triggers ignore the handler's result, so a trigger
+inside the backoff skips its export. Something else still covers it:
+
+- after a gap, the forced reconnect;
+- the declined FullResync frame, which is still pending and re-exports the full
+  owned set once the backoff passes.
+
+Two decode-failure triggers are at least `decodeFailureResyncInterval` (2 s)
+apart, so neither can fall inside a backoff the other started.
+
+Pacing lengthens the time the export holds the event-stream reader, which #9630
+tracks.
+
+**#9766: the export and its queueing are one transaction.** The fallback loop's
+reconciliation drain queues deltas on its own goroutine. A close it drained
+after the export's snapshot, but before the export's installs were queued,
+reached the peer first. The stale install that followed drew a fresher
+generation and resurrected the session on the standby, because the #2221
+tombstone refuses only an older install. `handleEventStreamFullResync` now holds
+`userspaceDeltaSyncMu` across the export and its queueing, and both
+fallback-loop drains take it through `drainUserspaceSessionDeltasLocked`. The
+event stream's own delta frames cannot interleave, because the export runs on
+the reader goroutine.
 
 The #5483 case closes a silent-divergence hole: the reader used to skip an
 undecodable session frame with `DecodeErrors.Add(1); continue`, leaving the

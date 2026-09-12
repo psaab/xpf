@@ -1244,8 +1244,9 @@ func (s *SessionSync) handleDisconnect(conn net.Conn) {
 		staleWaiters := s.barrierWaiters
 		s.barrierWaiters = nil
 		s.barrierWaitMu.Unlock()
-		for _, ch := range staleWaiters {
-			close(ch)
+		// Not marked fenced: this IS a disconnect, and the barrier should say so.
+		for _, w := range staleWaiters {
+			close(w.ch)
 		}
 		s.failoverWaitMu.Lock()
 		failoverWaiters := s.failoverWaiters
@@ -1302,6 +1303,12 @@ func (s *SessionSync) handleDisconnect(conn net.Conn) {
 		// retained version: it would make every confirmed-fence takeover wait
 		// out its full timeout against a downgraded peer that cannot answer.
 		s.peerCapabilityFlags.Store(0)
+		// #9714 F5: the delete-suppression warning latch is scoped to the
+		// same incarnation. Keeping it latched would silence the alarm
+		// through exactly the reconnect that matters — a downgrade that
+		// starts the suppression, or the upgrade that ends it — and an
+		// operator would see one line, once, for the life of the process.
+		s.deleteSuppressionWarned.Store(false)
 		// #7990: same incarnation scoping. A retained sync-wire version is the
 		// worst of the three to keep: it would let the LANE-1 drain gate certify
 		// compatibility against a version the reconnected (possibly downgraded)

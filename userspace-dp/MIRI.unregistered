@@ -1,0 +1,24 @@
+# userspace-dp/MIRI.unregistered -- files that mention Miri but are NOT covered
+# by any module in userspace-dp/MIRI.registry (#9499 member 2).
+#
+# FORMAT: <path>  <one-line reason>
+#
+# A file lands here when it carries a Miri claim, a `cfg(miri)` gate, or a
+# `cfg(not(miri))` exclusion, and no registered module runs it. The reason is
+# the point: #9499's finding was that four separate comments asserted Miri
+# coverage while NO executed gate ran Miri at all, so a reader took a
+# protection to exist that did not. A declaration converts that from an
+# unexamined sentence into a recorded decision with a cost attached.
+#
+# RULES scripts/miri-census.sh enforces:
+#   * A path here that IS covered by a registered module is a FAIL ("remove
+#     it from this file"). The list may only shrink, so it cannot be used to
+#     re-hide a module later.
+#   * A path here that does not exist in the tree is a FAIL.
+#   * The positive control (afxdp/types/cos.rs) may never appear here.
+#
+userspace-dp/src/afxdp/frame/mod.rs  The `cfg(all(test, not(miri)))` gate on prop_tests, plus the comment explaining it. Registering afxdp::frame:: costs more than the budget: measured at 16df7c8c7, `cargo +nightly miri test --bins -- afxdp::frame::` ran 1021 s and then stopped on `unsupported operation: open ... when isolation is enabled` from a test that reads a file, so the module is neither fast nor uniformly clean under Miri today.
+userspace-dp/src/afxdp/frame/README.md  Documents the same `cfg(all(test, not(miri)))` gate. Its claim that the deterministic pins "keep miri coverage" is now stated conditionally and names #9499, because no leg runs afxdp::frame:: under Miri.
+userspace-dp/src/afxdp/frame/prop_tests/inspect.rs  Says its non-proptest cells "also run under miri". True of the cells' SHAPE, not of any executed gate, for the same budget reason as frame/mod.rs. The sentence now names this file's unregistered state.
+userspace-dp/src/afxdp/frame/tests_ttl_descriptor_dscp.rs  Describes a deterministic cell as the "miri-coverable twin" of a proptest. Coverable, not covered -- afxdp::frame:: is not in the registry.
+userspace-dp/src/xsk_ffi_tests.rs  Says Miri CANNOT drive it: the libxdp bridge is `extern "C"` FFI, which Miri does not support. This file is the one that already got the wording right -- it names the limitation and names the pins that stand in for Miri (the `&mut XskRingCons` field, which is compile-pinned, plus a behavioral test that the consumer pointer advanced). Declared, not fixed.

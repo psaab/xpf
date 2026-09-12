@@ -77,6 +77,25 @@ func ValidateInterfaceName(raw string, _ *Config) error {
 	if raw == "" {
 		return fmt.Errorf("interface name must not be empty")
 	}
+	// A THIRD actively-dangerous class, and the only one about POSITION rather
+	// than about which characters appear (#9885). `-` is legitimate everywhere
+	// else in a name — `ge-0-0-0` is the normal spelling — so the allowlist
+	// loop below cannot see this, and no amount of tightening it would.
+	//
+	// The name reaches an argv slot (`networkctl reconfigure <names...>`,
+	// pkg/networkd), where a leading `-` is read as an OPTION. The sharp case
+	// is not a name that errors: `--help` and `--version` EXIT 0 WITHOUT
+	// ACTING, so one such interface silently leaves every interface in that
+	// batch unconfigured while the caller reads success and clears its retry
+	// debt. `-x` would at least fail loudly.
+	if strings.HasPrefix(raw, "-") {
+		return fmt.Errorf(
+			"interface name %q begins with '-'; the name is passed as an argv element to "+
+				"`networkctl reconfigure`, where a leading dash is read as an OPTION rather "+
+				"than as a link — and an option like `--help` EXITS 0 WITHOUT ACTING, so this "+
+				"one name would leave every interface in the batch unconfigured while the "+
+				"apply reported success. '-' is allowed everywhere else in the name", raw)
+	}
 	for i := 0; i < len(raw); i++ {
 		c := raw[i]
 		if interfaceNameAllowed(c) {
@@ -113,4 +132,16 @@ func ValidateInterfaceName(raw string, _ *Config) error {
 // checked the allowlist against itself would be true by construction.
 func interfaceNameRendersAsOnePattern(name string) bool {
 	return len(strings.Fields(name)) == 1 && strings.Fields(name)[0] == name
+}
+
+// interfaceNameIsNotAnOptionWord reports whether name occupies an argv slot as
+// an OPERAND rather than as an option, per the POSIX utility syntax guideline
+// that an argument beginning with '-' is an option.
+//
+// It exists for the same reason as the helper above: so the property the
+// validator protects can be asserted against the convention DIRECTLY, rather
+// than only through the validator's own prefix test — a cell that checked the
+// prefix test against itself would be true by construction.
+func interfaceNameIsNotAnOptionWord(name string) bool {
+	return name != "" && !strings.HasPrefix(name, "-")
 }

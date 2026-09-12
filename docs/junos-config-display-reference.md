@@ -810,6 +810,26 @@ Possible completions:
 Expands configuration groups (apply-groups) inline, showing inherited data and
 its source group.
 
+**It normalizes the same way a commit does (#9743).** `FormatInheritance` and
+`FormatPathInheritance` run the #8662 compact normalizer on their expansion
+clone before expanding groups, because both compile cores normalize first
+(`compiler.go`, and `schema_walk.go` via `normalizeCompactForValidation`).
+Skipping it made the display disagree with the commit: since #9620 the
+normalizer rewrites a brace-elided routing instance into its braced shape, and
+group expansion binds against that shape, so
+
+```
+groups { G { routing-instances { blue instance-type forwarding description inherited; } } }
+```
+
+committed `blue` with both properties while the display showed neither — the
+same group body written braced showed both. `instance-type forwarding` decides
+whether the daemon creates a VRF at all, so the display was wrong exactly where
+an operator checks what a group contributes.
+
+The clone is normalized, never the caller's tree: these are read-only
+operations on a candidate configuration, and normalizing is a rewrite.
+
 Line counts show the impact of inheritance expansion:
 - Base config: 5,770 lines
 - With inheritance: 10,574 lines (no-comments)

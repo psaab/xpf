@@ -115,16 +115,7 @@ func (d *Daemon) applyFabricIPVLAN(cfg *config.Config) error {
 	}
 	// Register deferred IPVLAN creation callback on the userspace manager.
 	if len(deferredOverlays) > 0 && bindingCtrl != nil {
-		bindingCtrl.SetOnXSKBound(func() {
-			for _, ov := range deferredOverlays {
-				slog.Info("XSK bound — creating deferred fabric IPVLAN",
-					"parent", ov.parent, "name", ov.name)
-				if err := fabricEnsureFn(ov.parent, ov.name, ov.addrs); err != nil {
-					slog.Error("deferred fabric IPVLAN creation failed",
-						"parent", ov.parent, "name", ov.name, "err", err)
-				}
-			}
-		})
+		bindingCtrl.SetOnXSKBound(func() { d.createDeferredFabricOverlays(deferredOverlays) })
 	}
 	// Clean up stale fabric IPVLAN overlays not in current config (#128).
 	for _, name := range []string{"fab0", "fab1"} {
@@ -349,11 +340,14 @@ func (d *Daemon) bindRoutingInstanceMembers(cfg *config.Config) {
 			continue
 		}
 		for _, ifaceName := range ri.Interfaces {
-			linuxName := riMemberLinuxName(cfg, tunMap, ifaceName)
-			if err := d.routing.BindInterfaceToVRF(linuxName, ri.Name); err != nil {
-				slog.Warn("failed to bind interface to VRF",
-					"interface", ifaceName, "linux", linuxName,
-					"instance", ri.Name, "err", err)
+			// #9754: every device the member claims, which for a BARE member is
+			// the base netdev AND each configured unit's 802.1Q child.
+			for _, linuxName := range riMemberLinuxNames(cfg, tunMap, ifaceName) {
+				if err := d.routing.BindInterfaceToVRF(linuxName, ri.Name); err != nil {
+					slog.Warn("failed to bind interface to VRF",
+						"interface", ifaceName, "linux", linuxName,
+						"instance", ri.Name, "err", err)
+				}
 			}
 		}
 	}

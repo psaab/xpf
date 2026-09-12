@@ -546,7 +546,7 @@ pub(super) fn poll_binding_process_descriptor(
                 let mut decision = if let Some(flow) = flow.as_ref() {
                     if let Some(resolved) = resolve_flow_session_decision(
                         sessions,
-                        binding.bpf_maps.session_map_fd,
+                        binding.bpf_maps.session_map.handle(),
                         worker_ctx.shared_sessions,
                         worker_ctx.shared_nat_sessions,
                         worker_ctx.shared_forward_wire_sessions,
@@ -902,7 +902,7 @@ pub(super) fn poll_binding_process_descriptor(
                                     // path, names no entry in the primary index.
                                     delete_terminal_filtered_session(
                                         sessions,
-                                        binding.bpf_maps.session_map_fd,
+                                        binding.bpf_maps.session_map.handle(),
                                         conntrack_v4_fd,
                                         conntrack_v6_fd,
                                         worker_ctx.shared_sessions,
@@ -1011,7 +1011,7 @@ pub(super) fn poll_binding_process_descriptor(
                             // path, names no entry in the primary index.
                             delete_terminal_filtered_session(
                                 sessions,
-                                binding.bpf_maps.session_map_fd,
+                                binding.bpf_maps.session_map.handle(),
                                 conntrack_v4_fd,
                                 conntrack_v6_fd,
                                 worker_ctx.shared_sessions,
@@ -1107,7 +1107,7 @@ pub(super) fn poll_binding_process_descriptor(
                                     if may_revoke {
                                         delete_terminal_filtered_session(
                                             sessions,
-                                            binding.bpf_maps.session_map_fd,
+                                            binding.bpf_maps.session_map.handle(),
                                             conntrack_v4_fd,
                                             conntrack_v6_fd,
                                             worker_ctx.shared_sessions,
@@ -1182,7 +1182,7 @@ pub(super) fn poll_binding_process_descriptor(
                                         if may_revoke {
                                             delete_terminal_filtered_session(
                                                 sessions,
-                                                binding.bpf_maps.session_map_fd,
+                                                binding.bpf_maps.session_map.handle(),
                                                 conntrack_v4_fd,
                                                 conntrack_v6_fd,
                                                 worker_ctx.shared_sessions,
@@ -1249,7 +1249,7 @@ pub(super) fn poll_binding_process_descriptor(
                             if may_revoke {
                                 delete_terminal_filtered_session(
                                     sessions,
-                                    binding.bpf_maps.session_map_fd,
+                                    binding.bpf_maps.session_map.handle(),
                                     conntrack_v4_fd,
                                     conntrack_v6_fd,
                                     worker_ctx.shared_sessions,
@@ -2115,7 +2115,7 @@ pub(super) fn poll_binding_process_descriptor(
                                         flow.forward_key.src_port,
                                         flow.forward_key.dst_ip,
                                         flow.forward_key.dst_port,
-                                        count_bpf_session_entries(binding.bpf_maps.session_map_fd),
+                                        count_bpf_session_entries(binding.bpf_maps.session_map.fd),
                                         sessions.len(),
                                     );
                                     // Dump all local sessions to compare
@@ -2405,7 +2405,7 @@ pub(super) fn poll_binding_process_descriptor(
                             };
                             if install_helper_local_session_on_miss(
                                 sessions,
-                                binding.bpf_maps.session_map_fd,
+                                binding.bpf_maps.session_map.handle(),
                                 worker_ctx.shared_sessions,
                                 worker_ctx.shared_nat_sessions,
                                 worker_ctx.shared_forward_wire_sessions,
@@ -3123,7 +3123,7 @@ pub(super) fn poll_binding_process_descriptor(
                                         // failures are visible in release
                                         // builds (was `let _ =`).
                                         if publish_live_session_entry(
-                                            binding.bpf_maps.session_map_fd,
+                                            binding.bpf_maps.session_map.handle(),
                                             &flow.forward_key,
                                             decision.nat,
                                             false,
@@ -3481,9 +3481,19 @@ pub(super) fn poll_binding_process_descriptor(
                                         // publishes (was `let _ =`; the
                                         // debug-only verify below re-reads
                                         // the map and cannot see the Err).
-                                        if publish_live_session_key(
-                                            binding.bpf_maps.session_map_fd,
+                                        // #9560 round 3: ENTRY-level, even though a
+                                        // reverse entry derives exactly one row.
+                                        // `install_with_protocol_with_origin` above
+                                        // silently removed any same-key predecessor,
+                                        // and a row-level publish claims the new row
+                                        // without releasing the rows that predecessor
+                                        // held — which is how a replaced reverse entry
+                                        // left claims nothing would ever release.
+                                        if publish_live_session_entry(
+                                            binding.bpf_maps.session_map.handle(),
                                             &reverse_key,
+                                            reverse_decision.nat,
+                                            true,
                                         )
                                         .is_err()
                                         {
@@ -3495,7 +3505,7 @@ pub(super) fn poll_binding_process_descriptor(
                                         // Verify session keys and log creations (debug-only: BPF syscalls)
                                         if cfg!(feature = "debug-log") {
                                             if verify_session_key_in_bpf(
-                                                binding.bpf_maps.session_map_fd,
+                                                binding.bpf_maps.session_map.fd,
                                                 &reverse_key,
                                             ) {
                                                 SESSION_PUBLISH_VERIFY_OK
@@ -3512,11 +3522,11 @@ pub(super) fn poll_binding_process_descriptor(
                                                     reverse_key.src_port,
                                                     reverse_key.dst_ip,
                                                     reverse_key.dst_port,
-                                                    binding.bpf_maps.session_map_fd,
+                                                    binding.bpf_maps.session_map.fd,
                                                 );
                                             }
                                             if !verify_session_key_in_bpf(
-                                                binding.bpf_maps.session_map_fd,
+                                                binding.bpf_maps.session_map.fd,
                                                 &flow.forward_key,
                                             ) {
                                                 debug_log!(
@@ -3553,13 +3563,13 @@ pub(super) fn poll_binding_process_descriptor(
                                                     reverse_key.dst_port,
                                                     decision.nat.rewrite_src,
                                                     decision.nat.rewrite_dst,
-                                                    binding.bpf_maps.session_map_fd,
+                                                    binding.bpf_maps.session_map.fd,
                                                     count_bpf_session_entries(
-                                                        binding.bpf_maps.session_map_fd
+                                                        binding.bpf_maps.session_map.fd
                                                     ),
                                                 );
                                                 dump_bpf_session_entries(
-                                                    binding.bpf_maps.session_map_fd,
+                                                    binding.bpf_maps.session_map.fd,
                                                     20,
                                                 );
                                             }
@@ -3747,7 +3757,7 @@ pub(super) fn poll_binding_process_descriptor(
                             ) {
                                 install_helper_local_session_on_miss(
                                     sessions,
-                                    binding.bpf_maps.session_map_fd,
+                                    binding.bpf_maps.session_map.handle(),
                                     worker_ctx.shared_sessions,
                                     worker_ctx.shared_nat_sessions,
                                     worker_ctx.shared_forward_wire_sessions,
@@ -6100,7 +6110,7 @@ pub(super) fn poll_binding_process_descriptor(
                                         // (shim misses the key -> NO_SESSION
                                         // degraded path for the seeded flow).
                                         if publish_session_map_entry_for_session(
-                                            binding.bpf_maps.session_map_fd,
+                                            binding.bpf_maps.session_map.handle(),
                                             &flow.forward_key,
                                             pending_decision,
                                             &entry.metadata,

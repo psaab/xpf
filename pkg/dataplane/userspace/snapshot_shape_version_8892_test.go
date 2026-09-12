@@ -240,23 +240,35 @@ const (
 	//     (TestSYNCookieRingCarriesTheBaseAndTheAdditionalBase9173). It mints and
 	//     validates with a key derived from the new base (the cluster
 	//     authentication-key, or a per-daemon-start random secret), not the root
-	//     password, so the #9173 defect is fixed for it too. What it loses is
-	//     rotation: it keeps that
-	//     key until its next full snapshot, while a new helper picks each cookie's
-	//     key by the cookie's own epoch. From the FIRST period boundary after that
-	//     snapshot the two disagree in both directions
-	//     (syn_cookie_mixed_version_pair_disagrees_from_the_first_boundary_9173),
-	//     so a handshake straddling a failover between them is refused. The client
-	//     has already sent its ACK and does not resend the SYN, so that connection
-	//     fails and its application must reconnect: a mismatched deployment failing
-	//     a straddling handshake visibly, not a fail-open and not a black hole;
-	//   - a NEW helper under an OLD daemon receives no ring, falls back to
-	//     `syn_cookie_master_key`, and enforces exactly the pre-#9173 behaviour.
+	//     password, so the #9173 defect is fixed for it too. It and a new helper
+	//     still disagree on every cookie, in both directions, from the first one.
+	//     Every helper that ignores the ring predates #9740, so its cookie MAC
+	//     absorbs the 16-bit zone id where a new helper's absorbs the zone's name
+	//     tag (syn_cookie_mint_binds_the_zone_tag_twice_and_refuses_a_pre_9740_cookie_9740).
+	//     It also keeps its key until its next full snapshot, while a new helper
+	//     picks each cookie's key by the cookie's own epoch
+	//     (syn_cookie_mixed_version_pair_disagrees_from_the_first_boundary_9173
+	//     models that difference alone). So a handshake straddling a failover
+	//     between them is refused. The client has already sent its ACK and does not
+	//     resend the SYN, so that connection fails and its application must
+	//     reconnect: a mismatched deployment failing a straddling handshake
+	//     visibly, not a fail-open and not a black hole;
+	//   - a NEW helper under an OLD daemon receives no ring and falls back to
+	//     `syn_cookie_master_key`: the pre-#9173 key behaviour, with #9740's zone
+	//     tag, so it refuses an old peer's cookies the same way.
+	//
+	// #9740 moved no snapshot field, so neither the digest nor this version moves
+	// for it.
 	//
 	// Both mismatched pairings enforce something acceptable, and the coordinator's
 	// acceptance for #9173 requires an older helper to ignore the added field. A
 	// bump would instead make both pairings refuse every snapshot.
-	snapshotShapeVersion8892 = 15
+	// v15 -> v16 BUMPED (issue 9714) against the SAME digest, the v13 shape:
+	// `SessionSyncRequest.PeerDelete` crosses the HA session-sync path, and the
+	// old behaviour (delete a live local session on a peer's say-so) is the defect
+	// it closes. The session-sync messages are not snapshot structs, which is why
+	// the digest above did not move.
+	snapshotShapeVersion8892 = 16
 )
 
 func TestSnapshotShapeIsPinnedToProtocolVersion8892(t *testing.T) {

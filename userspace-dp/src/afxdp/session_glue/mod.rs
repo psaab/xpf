@@ -349,7 +349,7 @@ pub(super) fn session_key_has_lo0_filter(forwarding: &ForwardingState, key: &Ses
 
 pub(super) fn republish_local_delivery_sessions_for_lo0_filter(
     sessions: &SessionTable,
-    session_map_fd: c_int,
+    session_map: SteeringMap<'_>,
     forwarding: &ForwardingState,
 ) -> usize {
     let mut republished = 0usize;
@@ -360,16 +360,11 @@ pub(super) fn republish_local_delivery_sessions_for_lo0_filter(
         {
             return;
         }
-        if session_map_fd >= 0 {
+        if session_map.fd >= 0 {
             // #1789: count failed lo0-filter republishes (was `let _ =`).
             // No binding context in this glue path — shared counter.
-            if publish_live_session_entry(
-                session_map_fd,
-                key,
-                decision.nat,
-                metadata.is_reverse,
-            )
-            .is_err()
+            if publish_live_session_entry(session_map, key, decision.nat, metadata.is_reverse)
+                .is_err()
             {
                 SESSION_PUBLISH_ERRORS_SHARED.fetch_add(1, Ordering::Relaxed);
             }
@@ -381,7 +376,7 @@ pub(super) fn republish_local_delivery_sessions_for_lo0_filter(
 
 pub(super) fn purge_sessions_for_input_dscp_filter_revalidation(
     sessions: &mut SessionTable,
-    session_map_fd: c_int,
+    session_map: SteeringMap<'_>,
     conntrack_v4_fd: c_int,
     conntrack_v6_fd: c_int,
     shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
@@ -422,7 +417,7 @@ pub(super) fn purge_sessions_for_input_dscp_filter_revalidation(
         // frees the shared reservation once and the second visit is a no-op.
         delete_terminal_filtered_session(
             sessions,
-            session_map_fd,
+            session_map,
             conntrack_v4_fd,
             conntrack_v6_fd,
             shared_sessions,
@@ -480,7 +475,7 @@ pub(super) fn deleted_first_policy_rule_id(
 #[allow(clippy::too_many_arguments)]
 pub(super) fn purge_sessions_bound_to_deleted_first_policy(
     sessions: &mut SessionTable,
-    session_map_fd: c_int,
+    session_map: SteeringMap<'_>,
     conntrack_v4_fd: c_int,
     conntrack_v6_fd: c_int,
     shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
@@ -511,7 +506,7 @@ pub(super) fn purge_sessions_bound_to_deleted_first_policy(
     for (key, decision, metadata, origin) in bound {
         delete_terminal_filtered_session(
             sessions,
-            session_map_fd,
+            session_map,
             conntrack_v4_fd,
             conntrack_v6_fd,
             shared_sessions,
@@ -533,7 +528,7 @@ pub(super) fn purge_sessions_bound_to_deleted_first_policy(
 }
 
 pub(in crate::afxdp::session_glue) fn publish_worker_session_map_entry(
-    session_map_fd: c_int,
+    session_map: SteeringMap<'_>,
     forwarding: &ForwardingState,
     key: &SessionKey,
     decision: SessionDecision,
@@ -541,7 +536,7 @@ pub(in crate::afxdp::session_glue) fn publish_worker_session_map_entry(
     origin: SessionOrigin,
     allow_replace_local: bool,
 ) {
-    if session_map_fd < 0 {
+    if session_map.fd < 0 {
         return;
     }
     let has_lo0_filter = session_key_has_lo0_filter(forwarding, key);
@@ -558,8 +553,7 @@ pub(in crate::afxdp::session_glue) fn publish_worker_session_map_entry(
         //
         // #1789: count failed publishes (was `let _ =`). No binding
         // context in this glue path — shared counter.
-        if publish_live_session_entry(session_map_fd, key, decision.nat, metadata.is_reverse)
-            .is_err()
+        if publish_live_session_entry(session_map, key, decision.nat, metadata.is_reverse).is_err()
         {
             SESSION_PUBLISH_ERRORS_SHARED.fetch_add(1, Ordering::Relaxed);
         }
@@ -576,13 +570,17 @@ pub(in crate::afxdp::session_glue) fn publish_worker_session_map_entry(
         allow_replace_local,
         forwarding.has_routing_domains,
     ) {
-        publish_live_session_entry(session_map_fd, key, decision.nat, metadata.is_reverse)
+        publish_live_session_entry(session_map, key, decision.nat, metadata.is_reverse)
     } else {
-        if uses_kernel_local {
-            delete_live_session_entry(session_map_fd, key, decision.nat, metadata.is_reverse);
-        }
+        // #9560 round 3: NO pre-delete here. It released the entry's whole old row
+        // set before the new publish was attempted, so a failed PASS_TO_KERNEL or
+        // SNAT-reverse REDIRECT write left the session with NO rows at all — the
+        // failure-safe migration `publish_entry` exists to provide (release the rows
+        // the new decision does not name, only after every write succeeded) was
+        // bypassed by the very path that needed it. The publish below is entry-level
+        // for both arms, so the kernel-local <-> live row-set change migrates there.
         publish_session_map_entry_for_session_with_origin(
-            session_map_fd,
+            session_map,
             key,
             decision,
             metadata,
@@ -598,7 +596,7 @@ pub(in crate::afxdp::session_glue) fn publish_worker_session_map_entry(
 #[allow(clippy::too_many_arguments)]
 pub(super) fn delete_terminal_filtered_session(
     sessions: &mut SessionTable,
-    session_map_fd: c_int,
+    session_map: SteeringMap<'_>,
     conntrack_v4_fd: c_int,
     conntrack_v6_fd: c_int,
     shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
@@ -652,7 +650,7 @@ pub(super) fn delete_terminal_filtered_session(
     delete_terminal_half(
         worker_id,
         sessions,
-        session_map_fd,
+        session_map,
         conntrack_v4_fd,
         conntrack_v6_fd,
         shared_sessions,
@@ -673,7 +671,7 @@ pub(super) fn delete_terminal_filtered_session(
         delete_terminal_half(
             worker_id,
             sessions,
-            session_map_fd,
+            session_map,
             conntrack_v4_fd,
             conntrack_v6_fd,
             shared_sessions,
@@ -704,7 +702,7 @@ pub(super) fn delete_terminal_filtered_session(
 fn delete_terminal_half(
     worker_id: u32,
     sessions: &mut SessionTable,
-    session_map_fd: c_int,
+    session_map: SteeringMap<'_>,
     conntrack_v4_fd: c_int,
     conntrack_v6_fd: c_int,
     shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
@@ -742,7 +740,7 @@ fn delete_terminal_half(
         worker_id,
     );
     delete_session_map_entry_for_removed_session_with_origin(
-        session_map_fd,
+        session_map,
         key,
         decision,
         metadata,
@@ -758,6 +756,11 @@ fn delete_terminal_half(
         shared_owner_rg_indexes,
         key,
     );
+    // #9560 round 3: shared authority for this key is gone, so the coordinator's claim
+    // on its rows goes too. The coordinator claims what it publishes for shared
+    // authority (HA import, bringup replay, activation prewarm); a claim left behind
+    // here is one no worker teardown can ever release.
+    release_coordinator_session_rows(session_map, key);
     replicate_session_delete_repairing(
         peer_worker_commands,
         worker_commands_by_id,
@@ -838,7 +841,7 @@ pub(crate) fn export_forward_sessions_for_owner_rgs(
 pub(super) fn apply_worker_commands(
     commands: &Arc<Mutex<VecDeque<WorkerCommand>>>,
     sessions: &mut SessionTable,
-    session_map_fd: c_int,
+    session_map: SteeringMap<'_>,
     _conntrack_v4_fd: c_int,
     _conntrack_v6_fd: c_int,
     forwarding: &ForwardingState,
@@ -912,7 +915,7 @@ pub(super) fn apply_worker_commands(
             WorkerCommand::DemoteOwnerRGS { owner_rgs } => {
                 commands::handle_demote_owner_rgs(
                     sessions,
-                    session_map_fd,
+                    session_map,
                     forwarding,
                     ha_state,
                     dynamic_neighbors,
@@ -926,7 +929,7 @@ pub(super) fn apply_worker_commands(
             WorkerCommand::RefreshOwnerRGS { owner_rgs } => {
                 commands::handle_refresh_owner_rgs(
                     sessions,
-                    session_map_fd,
+                    session_map,
                     forwarding,
                     ha_state,
                     dynamic_neighbors,
@@ -976,7 +979,7 @@ pub(super) fn apply_worker_commands(
             WorkerCommand::UpsertSynced(entry) => {
                 commands::handle_upsert_synced(
                     sessions,
-                    session_map_fd,
+                    session_map,
                     forwarding,
                     ha_state,
                     dynamic_neighbors,
@@ -1036,7 +1039,7 @@ pub(super) fn apply_worker_commands(
             WorkerCommand::DeleteSynced(key) => {
                 commands::handle_delete_synced(
                     sessions,
-                    session_map_fd,
+                    session_map,
                     forwarding,
                     ha_state,
                     key,
@@ -1475,13 +1478,14 @@ pub(super) fn replicate_session_delete_repairing(
 pub(in crate::afxdp) fn reconcile_peer_synced_against_shared(
     sessions: &mut SessionTable,
     shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    session_map: SteeringMap<'_>,
     evicted_keys: &mut Vec<SessionKey>,
 ) -> usize {
     let mut sweep = DeleteDropSweep::default();
     sweep.arm();
     let mut total = 0;
     while sweep.is_running() {
-        total += sweep.step(sessions, shared_sessions, evicted_keys);
+        total += sweep.step(sessions, shared_sessions, session_map, evicted_keys);
     }
     total
 }
@@ -1519,8 +1523,18 @@ pub(super) fn teardown_tcp_rst_flow(
     let reverse_key = reverse_session_key(forward_key, nat);
     sessions.delete(forward_key);
     sessions.delete(&reverse_key);
-    delete_live_session_entry(current.bpf_maps.session_map_fd, forward_key, nat, false);
-    delete_live_session_entry(current.bpf_maps.session_map_fd, &reverse_key, nat, true);
+    delete_live_session_entry(
+        current.bpf_maps.session_map.handle(),
+        forward_key,
+        nat,
+        false,
+    );
+    delete_live_session_entry(
+        current.bpf_maps.session_map.handle(),
+        &reverse_key,
+        nat,
+        true,
+    );
     delete_bpf_conntrack_entry(
         current.bpf_maps.conntrack_v4_fd,
         current.bpf_maps.conntrack_v6_fd,
@@ -1538,6 +1552,9 @@ pub(super) fn teardown_tcp_rst_flow(
         shared_owner_rg_indexes,
         forward_key,
     );
+    // #9560 round 3: release the coordinator's claim with the shared authority it
+    // stood for.
+    release_coordinator_session_rows(current.bpf_maps.session_map.handle(), forward_key);
     remove_shared_session(
         shared_sessions,
         shared_nat_sessions,
@@ -1545,6 +1562,8 @@ pub(super) fn teardown_tcp_rst_flow(
         shared_owner_rg_indexes,
         &reverse_key,
     );
+    // #9560 round 3: and for the reverse half's own shared entry.
+    release_coordinator_session_rows(current.bpf_maps.session_map.handle(), &reverse_key);
     replicate_session_delete(peer_worker_commands, forward_key);
     replicate_session_delete(peer_worker_commands, &reverse_key);
     cancel_pending_forwards(current, pending_forwards, forward_key, &reverse_key);
@@ -1753,7 +1772,7 @@ fn materialize_shared_session_hit(
 
 pub(super) fn resolve_flow_session_decision(
     sessions: &mut SessionTable,
-    session_map_fd: c_int,
+    session_map: SteeringMap<'_>,
     shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
     shared_nat_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
     shared_forward_wire_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
@@ -1820,7 +1839,7 @@ pub(super) fn resolve_flow_session_decision(
         if keep_transient && let Some((key, decision, metadata, origin)) = poison_key {
             purge_translated_synced_hit(
                 sessions,
-                session_map_fd,
+                session_map,
                 shared,
                 key,
                 decision,
@@ -1877,7 +1896,7 @@ pub(super) fn resolve_flow_session_decision(
         } else {
             maybe_promote_synced_session(
                 sessions,
-                session_map_fd,
+                session_map,
                 shared,
                 peer_worker_commands,
                 forwarding,
@@ -1960,7 +1979,7 @@ pub(super) fn resolve_flow_session_decision(
     )?;
     let (resolved, reverse_installed) = install_reverse_session_from_forward_match(
         sessions,
-        session_map_fd,
+        session_map,
         shared_sessions,
         shared_nat_sessions,
         shared_forward_wire_sessions,
@@ -2009,7 +2028,7 @@ pub(super) fn resolve_flow_session_decision(
     // created (ReverseFlow), not peer-synced, so they won't be promoted.
     let metadata = maybe_promote_synced_session(
         sessions,
-        session_map_fd,
+        session_map,
         shared,
         peer_worker_commands,
         forwarding,
@@ -2098,6 +2117,10 @@ mod newflow_contention_tests;
 #[cfg(test)]
 #[path = "routing_domain_publish_9517_tests.rs"]
 mod routing_domain_publish_9517_tests;
+// #9560: the steering map's shared-row DELETE, driven against the same recorder.
+#[cfg(test)]
+#[path = "steering_row_owners_9560_tests.rs"]
+mod steering_row_owners_9560_tests;
 
 // #6600: the coordinator's pre-publish NAT reservation resolves the synced zone
 // pair through the SAME helper the worker-side upsert uses, so the two cannot

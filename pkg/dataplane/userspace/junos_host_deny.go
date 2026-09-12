@@ -13,8 +13,8 @@ import (
 // reused by the #4168 commit warning so the warning can never be suppressed for
 // a deny that produced no kernel rule. This wrapper only forwards the already-
 // resolved IngressNetdevs (the ZONE scope is always `iifname` — a daddr-derived
-// zone scope under-/over-denies across zones, plan §3.2) and the rendered DROP
-// rules. A rule may additionally carry a `daddr` predicate when the policy
+// zone scope under-/over-denies across zones, plan §3.2) and the rendered
+// first-match rules (#9504). A rule may additionally carry a `daddr` predicate when the policy
 // authored an explicit `match destination-address`; that NARROWS the deny on top
 // of the iifname scope and never replaces it.
 //
@@ -22,7 +22,7 @@ import (
 // is Go-only in the nft `xpf_hostinbound` chain: no Rust, no shim, no verifier
 // interaction.
 
-// JunosHostProgram is one ingress zone's effective junos-host DENY program,
+// JunosHostProgram is one ingress zone's effective junos-host program,
 // enriched with the kernel iifnames the daemon scopes each DROP rule by. Only
 // representable programs that resolve to >=1 non-lifeline netdev AND emit >=1
 // rule are returned.
@@ -33,8 +33,8 @@ type JunosHostProgram struct {
 	// bondless-RETH VLAN whose frames arrive on the physical member — the parent
 	// member netdev). Never a lifeline; never a netdev shared with another zone.
 	IngressIfnames []string
-	// RulesV4 / RulesV6 are the projected DROP rules (config SSOT) in first-match
-	// order.
+	// RulesV4 / RulesV6 are the projected rules (config SSOT), each family in
+	// first-match order.
 	RulesV4 []config.JunosHostDenyRule
 	RulesV6 []config.JunosHostDenyRule
 	// CoarseAdmitsIKE / CoarseIdentResets / HasApplicationAnyDeny drive the
@@ -54,9 +54,9 @@ type JunosHostProgram struct {
 	IdentResetNetdevs []string
 }
 
-// BuildJunosHostPrograms returns the per-ingress-zone junos-host DENY programs
+// BuildJunosHostPrograms returns the per-ingress-zone junos-host programs
 // the daemon renders into the kernel `xpf_hostinbound` chain. It calls the
-// config projection for the representable ordered DROP rules and resolves the
+// config projection for the representable first-match rules and resolves the
 // iifname scope from the live interface snapshots. A representable program that
 // resolves to no non-lifeline netdev (lifeline-only, or a freshly-renamed
 // interface not yet in the snapshot) is dropped — it emits nothing and the

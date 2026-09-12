@@ -259,16 +259,36 @@ sees made commit-check decline a fold the compiler performs. The compiled census
 could not see either ordering defect, because it compiles through the compiler's
 own ordering.
 
-**Not fixed here: #9635.** `splitPackedStatements8768` ends a multi-value
-statement at the first token that names a sibling statement, so `security ike
-policy P1 { proposals [ P "proposal-set" ]; }` -- a reference to a proposal named
-`proposal-set` -- becomes `proposals P;` plus a bogus `proposal-set;`, in the
-braced spelling as well as the elided one. A decline keyed on the quote/bracket
-masks was tried and withdrawn: the #8437 fusion gate still refused the spelling
-at commit, and declining on any quoted token regressed `pre-shared-key
-ascii-text "s" "mode" aggressive;`, which master splits and accepts because a
-quoted statement head is valid. The masks are now carried onto every split
-statement, which a fix for both needs.
+**Fixed in #9635: the split reads the authored provenance.**
+`splitPackedStatements8768` used to end a multi-value statement at the first
+token that named a sibling statement, so `security ike policy P1 { proposals
+[ P "proposal-set" ]; }` -- a reference to a proposal *named* `proposal-set` --
+became `proposals P;` plus a bogus `proposal-set;`, in the braced spelling as
+well as the elided one, and SchemaValidate then refused it.
+
+The rule is about the statement BEFORE the token, not the token alone. An
+authored value -- quoted, or inside the same `[ ... ]` list -- may stay a value
+only where the preceding leaf can accept another one: a `multi` or `valueList`
+leaf. A fixed-arity leaf is saturated past its declared args, so `pre-shared-key
+ascii-text "s" "mode" aggressive;` keeps splitting at the quoted `"mode"`. That
+distinction is why the first attempt was withdrawn: it declined every split
+whose boundary landed on a quoted token, which regressed that spelling.
+
+Both readers ask the same question, through `leafOwnsMoreValues9635` /
+`authoredValueRun9635` (`packed_value_provenance_9635.go`). Teaching only the
+splitter leaves the #8437 fusion gate refusing what the splitter just kept
+whole -- measured, and the reason this is one change rather than two. A node
+with no provenance recovers the previous behaviour exactly.
+
+The gate's provenance check is easy to mistake for dead weight: deleting it
+leaves the whole `pkg/config` suite green, because every fixture there sits
+under a `packedStatements` container where the splitter separates a bare run
+before the gate can see it. 166 containers are NOT `packedStatements` while
+holding a `multi` leaf with a sibling, and under those the gate is the only
+reader -- `applications { application-set S { application A application-set B; } }`
+COMMITS without the clause and silently drops the second statement.
+`TestFusionGateStillRefusesUnderANonPackedContainer9635` is the cell that can
+see it.
 
 **So item 1 is decided: the predicate stays keyword-keyed.** Parent
 qualification would put a parent term on every entry to guard against a
@@ -604,10 +624,15 @@ paths warn instead, and compile the statement as before (#1960).
 
   Quotes and brackets do not survive rendering (#9635), so the check cannot tell
   a zone name from the statement. This predates #9656.
-- **Group expansion can discard a leaf zone before the check runs.** A group's
-  `security-zone zga;` is dropped whenever the configuration has any inline
-  leaf `security-zone …;`, because the override matches only the keyword. This
-  predates #9656 and is tracked in #9831.
+- **Group expansion matches a zone statement by the zone it names.** Before #9831, a
+  group's `security-zone zga;` was dropped, before this check could see it,
+  whenever the configuration had any inline leaf `security-zone …;`: the
+  override matched only the keyword. Group expansion now matches the keyword
+  plus the zone name, so the group's zone survives. A group statement that
+  carries keys past the zone name, such as `security-zone [ zga zgb ];`, is
+  adopted beside the inline zone it names, whether that zone is braced or a
+  leaf, unless #7648 expands it into the braced body. So it reaches this check
+  and is refused.
 - **Why a refusal and not an expansion.** An earlier cut of #9656 expanded each
   group into one statement per zone in the #8662 normalizer. Three review rounds
   found the per-member statements it materialised colliding with the node
@@ -764,10 +789,12 @@ HA-sync loaders use. "Before" is `9f520a5b2`.
 | inet6 `from next-header tcp source-address 2001:db8::/32;` | strict accepted a match-all term | strict refuses it, as it already refused the reversed order |
 | snmp `community public clients 10.0.0.0/8 authorization read-only;` | strict refused; lenient compiled garbage clients | commits and compiles like braced |
 | `unit 0 vlan-id 10 inner-vlan-id 20;` | strict refused (unknown modifier); lenient dropped the inner tag | refused by the QinQ gate, like braced; lenient carries the tag |
+| `unit 0 inner-vlan-id 20;` (no outer tag) | strict ACCEPTED and silently dropped the inner tag (#9656 M6) | refused by the QinQ gate with the #2354 text, like both braced twins |
 | `unit 0 description u0 vlan-id 10;` | strict refused (trailing token) | commits and compiles like braced |
 
-The admitted pair is `from next-header`. The containers opted into
-`packedStatements` are interfaces `unit` and snmp `community`.
+The admitted pairs are `from next-header` and, since #9656 M6,
+`unit inner-vlan-id`. The containers opted into `packedStatements` are
+interfaces `unit` and snmp `community`.
 
 The following were measured and deliberately left out. Each breaks a spelling
 that compiles correctly today:
@@ -785,8 +812,23 @@ that compiles correctly today:
   clients 10.0.0.0/8 restrict;` is read correctly today, and so is the same line
   with a client list. The args-bounded split left the tail on the authorization
   leaf, which strict refused.
-- **`unit inner-vlan-id`.** `unit 0 inner-vlan-id 20;` alone commits today, while
-  dropping the tag. Admitting the pair makes the QinQ gate refuse it.
+- ~~**`unit inner-vlan-id`**~~ — **ADMITTED in #9656 M6.** The measurement that
+  kept it out was right and the conclusion drawn from it was not. Admitting the
+  pair does make the QinQ gate refuse `unit 0 inner-vlan-id 20;`, and that is
+  the correct verdict, because BOTH braced twins are already refused:
+
+  ```
+  unit 0 { vlan-id 10; inner-vlan-id 20; }   REJECTS (#2354 text)
+  unit 0 { inner-vlan-id 20; }               REJECTS (#2354 text)
+  unit 0 inner-vlan-id 20;                   ACCEPTED, InnerVlanID=0   <- the defect
+  ```
+
+  So the elided spelling was not a supported configuration that folding would
+  break; it was the SAME unsupported configuration, accepted only because
+  nothing unpacked it — committing green while the inner tag was discarded, on
+  a dataplane where a double-tagged frame falls to the kernel path and is never
+  firewalled. The break is deliberate and visible: the operator now gets the
+  #2354 message, which names the supported alternative.
 - **`packedStatements` on the firewall `from` containers.** It would also split
   `from { protocol tcp protocol udp; }`, which the #9027 self-repeat gate refuses
   on purpose.
@@ -794,6 +836,40 @@ that compiles correctly today:
   `interfaces host-inbound-traffic;` past the #6525 and #6735 empty-member gates.
   It also made strict accept the one-line flat spelling of `description …
   screen …` while dropping one of the two statements.
+
+### Packed tails the COMPILER must unpack (#9656 M26)
+
+The fold scope above decides which packed statements the NORMALIZER rewrites.
+It is not the only place a packed tail has to be read: a compiler that walks
+`node.Children` directly sees nothing when the value it wants is on the node's
+own `Keys`, and there is no fold-scope entry that would help, because the tail
+is already inside a container the pass admitted.
+
+`protocols ospf area <id> area-type` was the measured instance. Three spellings,
+at `766da5332`, before the fix:
+
+```
+area 0.0.0.1 area-type stub;          area.Keys=[area 0.0.0.1 area-type stub] children=0  -> AreaType=""
+area 0.0.0.1 { area-type stub; }      child Keys=[area-type stub] nchild=0                -> AreaType=""
+area 0.0.0.1 { area-type { stub; } }  child Keys=[area-type] nchild=1                     -> AreaType="stub"
+```
+
+Only the third worked, and it is the one `show configuration` renders — so a
+save-and-reload round trip reproduced the working spelling and hid the defect
+from anyone who looked for it that way. The consequence is silent: a stub or
+NSSA area rendered as a normal area floods exactly the Type-5/7 LSAs it was
+configured to suppress.
+
+The fix is not a new key scan. `packedBodyChildren(node, schema)` is the
+schema-driven SSOT for this, and it is applied at BOTH levels — once to lift
+`area-type …` off the area node's keys, once to lift `stub` / `nssa` off the
+`area-type` node's keys, which is also what makes `area-type stub no-summaries;`
+read correctly. The sibling `interface` loop in the same function already used
+it; the `area-type` read was the one that had not been converted.
+
+**When adding a compiler read under a container, use `packedBodyChildren` rather
+than `FindChild` + `.Children`.** The braced spelling you tested is usually the
+one that already worked.
 
 ### Brace-elided routing instances
 
@@ -2686,6 +2762,36 @@ unit name, so each binder now stores its map key on the canonical unit:
     binding it from a `ge-0/0/0.1` reference would move unit 0's prefix into
     unit 1's instance. The zone binder's own fan-UP stays at its call site,
     where it is correct, rather than being levelled into the shared helper.
+
+    **#9754 added the KERNEL VRF bind to the same rule.** #9132 fixed the
+    userspace route builders; the kernel bind was a fourth consumer of the same
+    reference and still read a bare member as the parent netdev alone.
+    `bindRoutingInstanceMembers` (`pkg/daemon`) called `riMemberLinuxName` once
+    per member string, so the 802.1Q children created for the tagged units were
+    never enslaved: kernel-path traffic on them routed in the DEFAULT instance —
+    failing OPEN to main — on a config strict accepts with no warning, and
+    FRR/zebra read the same kernel master, so those units' connected prefixes
+    landed in the default VRF. `riMemberLinuxNames` now resolves through
+    `InterfaceUnitRefKeys` like the other three, so there is no second fan-down
+    to drift. A tunnel or xfrmi member returns before the fan-down: it resolves
+    to one device and has no 802.1Q children.
+
+    The bind set and the default-instance next-table ingress set
+    (`DefaultInstanceIngressIfaces`) stay DISJOINT, which is what stops a unit
+    from being inside a VRF while still receiving default-instance `iif` rules.
+    They agree by construction rather than by a shared list, so the property is
+    asserted per spelling:
+
+    | member | bind targets | default-instance ingress |
+    |---|---|---|
+    | `ge-0/0/0` (stanza spelling) | base + every unit | none |
+    | `ge-0-0-0` (linux spelling) | base only | the tagged units |
+    | `ge-0/0/0.1` (unit reference) | that unit | the others |
+
+    The middle row is a known pre-existing split — the base lands in the VRF
+    while the tagged units keep default-instance rules — left unrepaired because
+    fixing it means resolving members independently of spelling, which requires
+    moving the next-table set in the same change.
   - **Per-interface host-inbound override** — `buildInterfaceHostInboundMap`
     (`zones_override.go`), plus the operator-facing lookups in
     `ClassifyHostInboundForInterface` / `ResolveHostInboundIngressInterface`

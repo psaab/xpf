@@ -626,6 +626,16 @@ pub(super) fn populate_interfaces(
         //   - registered_local: only an interface that actually registered a
         //     local_v4/local_v6 target is a host-inbound exposure. A fully
         //     NAT-excluded (interface_nat only) or address-less interface is not.
+        //     #9941: that reasoning holds for an ORDINARY interface and fails for
+        //     a TUNNEL. A decapped inner packet re-ingresses on the tunnel's
+        //     LOGICAL ifindex (logical_ingress::build_logical_ingress_packet,
+        //     reached from gre.rs and wg/decap.rs) and is delivered to a local
+        //     address registered by some OTHER interface — so a tunnel is a
+        //     host-inbound exposure WITHOUT ever being addressed itself. An
+        //     unzoned tunnel is absent from ifindex_to_zone_id (the insert is
+        //     gated on row_zone_id != 0), so it resolves to zone 0 and takes the
+        //     `None => true` global admit arm. `iface.tunnel` therefore joins
+        //     registered_local as a reason to arm the sentinel.
         //   - !iface.host_inbound_configured: an explicit per-interface override
         //     already inserted its own (possibly deny-all) `ifindex_host_inbound`
         //     entry above; never clobber the operator's configured admit set.
@@ -641,7 +651,7 @@ pub(super) fn populate_interfaces(
         // path, cf. #3719, that keeps an interface bound while stripping its zone)
         // cannot silently become a host-inbound bypass.
         if iface.zone.is_empty()
-            && registered_local
+            && (registered_local || iface.tunnel)
             && !iface.host_inbound_configured
             && !is_host_inbound_lifeline(&iface.name)
         {

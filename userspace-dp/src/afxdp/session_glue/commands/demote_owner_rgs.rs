@@ -31,7 +31,7 @@ use super::super::*;
 /// observe it).
 pub(in crate::afxdp::session_glue) fn handle_demote_owner_rgs(
     sessions: &mut SessionTable,
-    session_map_fd: c_int,
+    session_map: SteeringMap<'_>,
     forwarding: &ForwardingState,
     ha_state: &BTreeMap<i32, HAGroupRuntime>,
     dynamic_neighbors: &Arc<ShardedNeighborMap>,
@@ -107,7 +107,7 @@ pub(in crate::afxdp::session_glue) fn handle_demote_owner_rgs(
                 metadata.clone()
             };
             publish_worker_session_map_entry(
-                session_map_fd,
+                session_map,
                 forwarding,
                 &demoted_key,
                 publish_decision,

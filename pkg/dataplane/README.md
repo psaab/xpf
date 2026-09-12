@@ -1368,7 +1368,19 @@ snap`, and there are two of them — one per acceptance path).
     `LinkSetMTU` never refreshes, so they took turns and the MTU flapped between
     the two configured values on every commit. A unit MTU still overrides the
     interface-level one; between units the lowest unit number wins — arbitrary,
-    but decided, which map order was not. Sorting the zone map would have made
+    but decided, which map order was not. A TAGGED unit's reference plans only
+    the interface-level MTU on its parent (#9761): its addresses, DHCP and unit
+    MTU belong to its VLAN sub-interface. Two tagged references plan nothing,
+    because another component owns the MTU of the device they resolve to: a
+    fabric interface's resolves to the local fabric member, whose MTU the fabric
+    setup owns, and a per-unit tunnel's to its tunnel device, whose MTU the tunnel
+    manager owns, even when a WireGuard unit shares the interface's own device
+    (#6941). The planner used to skip tagged
+    references outright, so a `vlan-tagging` interface whose zone references
+    were all tagged (the loss cluster's `reth0`) got no plan, and its
+    interface-level `mtu` was never written. A VLAN child's unit MTU can still be
+    written before its parent's in the same apply, and when it is, a commit that
+    raises both converges on the next commit (#9845). Sorting the zone map would have made
     the outcome stable and still arbitrary, so the second writer is removed
     rather than made to lose consistently. The witness is
     `TestTwoAppliesOfOneConfigConverge_8119_8120`: a single apply is

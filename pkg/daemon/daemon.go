@@ -1412,8 +1412,13 @@ type Daemon struct {
 	eventStreamConnected atomic.Bool
 
 	// userspaceDeltaSyncMu serializes helper delta draining between the
-	// event-stream fallback loop and the background polling loop.
+	// event-stream fallback loop and the background polling loop, and holds
+	// that drain off a FullResync's export-and-queue transaction (#9766).
 	userspaceDeltaSyncMu sync.Mutex
+	// fullResyncRetryAt and fullResyncInstallWaitForTest: see
+	// full_resync_transaction_9767.go.
+	fullResyncRetryAt            atomic.Int64
+	fullResyncInstallWaitForTest time.Duration
 	// userspaceDemotionPrepUntil suppresses duplicate demotion prep for the
 	// same RG during a single failover transition. Manual failover can now
 	// stage prep before ownership changes; the later cluster/VRRP edges must

@@ -88,7 +88,69 @@ func packedOptInCases8768() map[string]packedOptInCase8768 {
 		"encryption-algorithm aes-128-cbc; }"
 	const ikeProp = "proposal pr1 { authentication-method pre-shared-keys; dh-group group14; " +
 		"authentication-algorithm sha1; encryption-algorithm aes-128-cbc; }"
+	// #9620 H11: `inet` and `inet6` opted in so a unit's packed family run
+	// splits instead of folding to its first statement. Two leaves are admitted
+	// at each, `address` and `filter`, and both are compared here in the packed
+	// and braced spellings.
+	const fwFilters = "firewall { family inet { filter f1 { term t0 { then accept; } } " +
+		"filter f2 { term t0 { then accept; } } } " +
+		"family inet6 { filter f6 { term t0 { then accept; } } " +
+		"filter f7 { term t0 { then accept; } } } } "
 	return map[string]packedOptInCase8768{
+		"interfaces/*/unit/family/inet": {
+			prefix: fwFilters + "interfaces { ge-0/0/0 { unit 0 { ",
+			open:   "family inet",
+			closer: " } } }",
+			stmts: map[string]string{
+				"address": "address 10.0.0.1/24",
+				"filter":  "filter input f1",
+			},
+			second: map[string]string{
+				"address": "address 10.0.0.2/24",
+				"filter":  "filter output f2",
+			},
+			read: func(c *Config) string {
+				out := ""
+				for _, i := range c.Interfaces.Interfaces {
+					for _, u := range i.Units {
+						out += fmt.Sprintf("addrs=%v fin4=%q fout4=%q fin6=%q fout6=%q",
+							u.Addresses, u.FilterInputV4, u.FilterOutputV4,
+							u.FilterInputV6, u.FilterOutputV6)
+					}
+				}
+				if out == "" {
+					out = "<no unit>"
+				}
+				return out
+			},
+		},
+		"interfaces/*/unit/family/inet6": {
+			prefix: fwFilters + "interfaces { ge-0/0/0 { unit 0 { ",
+			open:   "family inet6",
+			closer: " } } }",
+			stmts: map[string]string{
+				"address": "address 2001:db8::1/64",
+				"filter":  "filter input f6",
+			},
+			second: map[string]string{
+				"address": "address 2001:db8::2/64",
+				"filter":  "filter output f7",
+			},
+			read: func(c *Config) string {
+				out := ""
+				for _, i := range c.Interfaces.Interfaces {
+					for _, u := range i.Units {
+						out += fmt.Sprintf("addrs=%v fin4=%q fout4=%q fin6=%q fout6=%q",
+							u.Addresses, u.FilterInputV4, u.FilterOutputV4,
+							u.FilterInputV6, u.FilterOutputV6)
+					}
+				}
+				if out == "" {
+					out = "<no unit>"
+				}
+				return out
+			},
+		},
 		// #8781-follow-up: the IKE gateway opted in so a packed body carries
 		// `local-identity`/`remote-identity`. The schema declares the container
 		// TWICE — under `security ike` and under `security ipsec` — and this
@@ -363,10 +425,22 @@ func packedOptInCases8768() map[string]packedOptInCase8768 {
 			stmts: map[string]string{
 				"description": "description u0",
 				"vlan-id":     "vlan-id 10",
+				// #9656 M6 admitted (unit, inner-vlan-id). The compare runs on
+				// the LENIENT compile, where both spellings carry the tag; the
+				// STRICT refusal that admission introduces is pinned separately
+				// by TestElidedInnerVlanIsRefusedLikeItsBracedTwin9656.
+				"inner-vlan-id": "inner-vlan-id 20",
+				// #9620 H11 admitted (unit, family), so the unit-elided
+				// spelling folds instead of keeping the whole run on the unit
+				// node. The reader below carries the family's own state, or a
+				// split here would be compared on unit fields alone.
+				"family": "family inet address 10.0.0.1/24",
 			},
 			second: map[string]string{
-				"description": "description u1",
-				"vlan-id":     "vlan-id 11",
+				"description":   "description u1",
+				"vlan-id":       "vlan-id 11",
+				"inner-vlan-id": "inner-vlan-id 21",
+				"family":        "family inet6 address 2001:db8::1/64",
 			},
 			read: func(c *Config) string {
 				ifc := c.Interfaces.Interfaces["ge-0/0/0"]
@@ -375,7 +449,8 @@ func packedOptInCases8768() map[string]packedOptInCase8768 {
 				}
 				out := ""
 				for n, u := range ifc.Units {
-					out += fmt.Sprintf("unit=%d desc=%q vlan=%d inner=%d ", n, u.Description, u.VlanID, u.InnerVlanID)
+					out += fmt.Sprintf("unit=%d desc=%q vlan=%d inner=%d addrs=%v ",
+						n, u.Description, u.VlanID, u.InnerVlanID, u.Addresses)
 				}
 				return out
 			},
@@ -992,8 +1067,6 @@ func TestPackedOptInHoldsForEveryLeafPair8768(t *testing.T) {
 		//
 		// So this head is strictly BETTER than master here and still unequal.
 		// Recorded as diverging, not as fixed.
-		"security/zones/security-zone/address-book address+address-set": true,
-		"security/address-book/global address+address-set":              true,
 	}
 	sawDivergence := map[string]bool{}
 
@@ -1046,6 +1119,13 @@ func TestPackedOptInHoldsForEveryLeafPair8768(t *testing.T) {
 		// #9620 (M6): the interfaces unit container opted into packedStatements.
 		"interfaces/*/unit description+description": "scalar binding: the compiler keeps the FIRST statement's value, so one instance and two read alike (measured #9620: `description u0; description u1;` reads desc=\"u0\")",
 		"interfaces/*/unit vlan-id+vlan-id":         "scalar binding: the compiler keeps the FIRST statement's value, so one instance and two read alike (measured #9620: `description u0; description u1;` reads desc=\"u0\")",
+		// #9656 M6: same scalar binding as its `vlan-id` sibling above —
+		// measured, `inner-vlan-id 20; inner-vlan-id 21;` reads inner=20. The
+		// SPLIT itself is still exercised: the single-instance packed spelling
+		// is compared against its braced twin in every pair row, and the strict
+		// refusal that this admission introduces is pinned by
+		// TestElidedInnerVlanIsRefusedLikeItsBracedTwin9656.
+		"interfaces/*/unit inner-vlan-id+inner-vlan-id": "scalar binding: the compiler keeps the FIRST statement's value, so one instance and two read alike (measured #9656: `inner-vlan-id 20; inner-vlan-id 21;` reads inner=20)",
 		// issue 8939: the class-of-service BINDING containers. Every binding is
 		// a SCALAR field -- CoSInterfaceUnit.DSCPClassifier is one string, not a
 		// list -- so a repeated statement OVERWRITES rather than accumulating,

@@ -169,7 +169,7 @@ var schemaInterfaces = &schemaNode{desc: "Interface configuration", wildcard: &s
 		},
 		"tunnel": {desc: "Tunnel parameters", packedStatements: true, children: tunnelSchemaChildren()},
 		"family": {desc: "Protocol family", compoundKey: true, children: map[string]*schemaNode{
-			"inet": {desc: "IPv4 protocol", children: map[string]*schemaNode{
+			"inet": {desc: "IPv4 protocol", packedStatements: true, children: map[string]*schemaNode{
 				// #4308 (fable-review-167 I-3): typed + compiled so they stop
 				// silently vanishing, but ACCEPTED-ONLY today (commit-time
 				// advisory). unnumbered-address needs a networkd
@@ -239,7 +239,7 @@ var schemaInterfaces = &schemaNode{desc: "Interface configuration", wildcard: &s
 				}},
 				"dynamic-dns": interfaceDynamicDNSSchema(),
 			}},
-			"inet6": {desc: "IPv6 protocol", children: map[string]*schemaNode{
+			"inet6": {desc: "IPv6 protocol", packedStatements: true, children: map[string]*schemaNode{
 				// Compiled at compiler_interfaces.go:578 (the lower of
 				// the per-family values wins); same pass-through
 				// contract as the interface-level mtu.

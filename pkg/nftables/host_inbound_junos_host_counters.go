@@ -37,6 +37,15 @@ func HostInboundJunosHostDenyCounterName(scope, family string) string {
 	return fmt.Sprintf("%s%s_%d_%s", hostInboundJunosHostDenyCounterPrefix, family, len(s), s)
 }
 
+// HostInboundJunosHostChainName names the regular chain holding one ingress
+// zone's first-match junos-host rules (#9504). The index is the program's
+// position in the rendered program list, which keeps the name unique when two
+// zone names sanitize to the same identifier; the sanitized zone keeps
+// `nft list` readable.
+func HostInboundJunosHostChainName(index int, zone string) string {
+	return fmt.Sprintf("junos_host_%d_%s", index, sanitizeNftIdent(zone))
+}
+
 // ParseHostInboundJunosHostDenyCounterName reverses
 // HostInboundJunosHostDenyCounterName, returning ok=false for any name that is
 // not one of our junos-host deny counters so the scraper skips foreign objects.

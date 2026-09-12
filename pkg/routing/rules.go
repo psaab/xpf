@@ -530,6 +530,10 @@ type ribGroupManager struct {
 // rib-groups are handled. Non-main (VRF→VRF) import targets are deferred to
 // Phase 2 and warned at commit (pkg/config); this applier installs nothing
 // for them.
+//
+// #9819: for each source whose leak installs, Apply also adds return rules
+// (`iif`/`oif vrf-<instance> lookup main`), so the VRF miss terminator does
+// not cut the leak's return path. See ribGroupReturnRulePriority.
 func (rg *ribGroupManager) Apply(ribGroups map[string]*config.RibGroup, instances []*config.RoutingInstanceConfig, connectedPrefixes map[string][]string) error {
 	// Clean up old rib-group rules. As with next-table, a failed per-family
 	// list does not abort the apply; the clear error is captured and
@@ -611,6 +615,7 @@ func (rg *ribGroupManager) Apply(ribGroups map[string]*config.RibGroup, instance
 			}
 		}
 
+		installed := map[int]bool{}
 		for _, lr := range toInstall {
 			// Hard-cap at the priority window clear() scans. A rule at or
 			// beyond the upper bound would never be removed on a later apply
@@ -648,11 +653,16 @@ func (rg *ribGroupManager) Apply(ribGroups map[string]*config.RibGroup, instance
 				prio++
 				continue
 			}
+			installed[lr.family] = true
 			slog.Info("rib-group leak rule added",
 				"instance", inst.Name, "prefix", lr.prefix,
 				"table", sourceTable, "family", familyStr, "pref", prio)
 			prio++
 		}
+		// #9819: the source's return path, in each family whose leak
+		// installed. See ribGroupReturnRulePriority for why it is main, and
+		// only main.
+		errs = append(errs, rg.addRibGroupReturnRules(inst, installed)...)
 	}
 	// Desired rules are re-added; surface any clear/add failure so a dropped
 	// leak rule (or the orphaned-rule window) is observable rather than
@@ -716,6 +726,9 @@ func splitConnectedPrefixesByFamily(prefixes []string) (v4, v6 []string) {
 //     behind alongside the new per-prefix rules.
 //   - [200, 300): the original legacy window.
 //
+// It also removes the #9819 return rules at ribGroupReturnRulePriority, which
+// Apply re-adds for every source whose leak installs.
+//
 // Per-family RuleList dump failures are aggregated and returned rather
 // than swallowed; see the rationale on nextTableManager.clear (#2273).
 func (rg *ribGroupManager) clear() error {
@@ -730,7 +743,8 @@ func (rg *ribGroupManager) clear() error {
 			inCurrent := r.Priority >= ribGroupLeakRulePriority && r.Priority < ribGroupLeakRulePriority+maxRibGroupLeakRules
 			inOldBlanket := r.Priority >= ribGroupRulePriority && r.Priority < ribGroupRulePriority+100
 			inLegacy := r.Priority >= 200 && r.Priority < 300
-			if inCurrent || inOldBlanket || inLegacy {
+			inReturn := r.Priority == ribGroupReturnRulePriority // #9819
+			if inCurrent || inOldBlanket || inLegacy || inReturn {
 				if err := rg.ops.RuleDel(&r); err != nil {
 					if isRuleAlreadyGone(err) {
 						// Already absent — the desired end-state, not a

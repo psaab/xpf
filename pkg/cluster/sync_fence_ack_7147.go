@@ -147,6 +147,15 @@ const (
 	// syncMsgFenceAck. Absent => the peer predates #7147 and will never ack,
 	// so a confirmed-fence gate must not wait on it.
 	capFlagFenceAck uint8 = 1 << 0
+
+	// capFlagPeerDeleteOwnership: the sender's helper understands a peer-MARKED
+	// session delete (control protocol v16, #9714) and will REFUSE one that
+	// would tear down a live LOCAL session whose owner redundancy group is
+	// locally forwarding-active. Absent => the peer applies our deletes
+	// unconditionally, so under a dual-primary split a delete this node sends
+	// destroys a flow that peer is still forwarding — #9714's defect reached
+	// from the other side of the wire.
+	capFlagPeerDeleteOwnership uint8 = 1 << 1
 )
 
 // localCapabilityFlags is what this build advertises. It is a compile-time
@@ -154,7 +163,7 @@ const (
 // configuration, so it must not be conditioned on anything a deployment can
 // turn off. In particular it is deliberately independent of
 // localSnapshotProtocol — see sendCapabilities for why that mattered.
-const localCapabilityFlags = capFlagFenceAck
+const localCapabilityFlags = capFlagFenceAck | capFlagPeerDeleteOwnership
 
 // FenceResult is what the local fence handler reports about what it achieved.
 // It is the daemon's answer to "how many RGs did you just drive to
@@ -270,6 +279,41 @@ func (s *SessionSync) PeerFenceAckCapable() bool {
 		return false
 	}
 	return uint8(s.peerCapabilityFlags.Load())&capFlagFenceAck != 0
+}
+
+// PeerDeleteOwnershipCapable reports whether the peer advertised that its helper
+// honours the #9714 peer-delete ownership refusal.
+//
+// UNLIKE PeerFenceAckCapable, a false reading here must NOT be treated as
+// "incapable" on its own, and the asymmetry is the whole point. For fence-ack,
+// false means "do not wait", and not waiting is harmless. Here false would gate a
+// DESTRUCTIVE choice — whether to withhold a session delete — while
+// peerCapabilityFlags reads 0 both for a genuinely old peer AND for the window
+// before this incarnation's advertisement lands. Acting on false alone would
+// silently discard deletes on every reconnect of a perfectly matched pair, turning
+// a mixed-version safeguard into an every-reconnect regression. Callers MUST pair
+// this with peerCapabilitiesLearned.
+func (s *SessionSync) PeerDeleteOwnershipCapable() bool {
+	if s == nil {
+		return false
+	}
+	return uint8(s.peerCapabilityFlags.Load())&capFlagPeerDeleteOwnership != 0
+}
+
+// peerCapabilitiesLearned reports whether a syncMsgPeerCapabilities frame has been
+// decoded for the CURRENT peer incarnation.
+//
+// peerSnapshotProtocol is stored from that same frame and cleared alongside the
+// flags on full disconnect, and no real peer advertises snapshot protocol 0, so a
+// non-zero reading is exactly "this incarnation has told us what it is". That is the
+// signal separating "the peer said it cannot" from "the peer has not said yet" — a
+// distinction peerCapabilityFlags cannot carry alone, because 0 encodes both and
+// only one of them justifies withholding anything.
+func (s *SessionSync) peerCapabilitiesLearned() bool {
+	if s == nil {
+		return false
+	}
+	return s.peerSnapshotProtocol.Load() != 0
 }
 
 // sendFenceAck replies to a sequenced fence with what the local fence achieved.

@@ -66,6 +66,66 @@ func (s *SessionSync) QueueSessionV6(key dataplane.SessionKeyV6, val dataplane.S
 	s.queueMessage(msg, &s.stats.SessionsSent, "session_v6")
 }
 
+// pacedQueuePoll is how often a paced enqueue re-checks the connection while
+// it waits for room in the send queue.
+const pacedQueuePoll = 10 * time.Millisecond
+
+// QueueSessionV4Paced queues a v4 session like QueueSessionV4, except that a
+// full send queue makes it wait up to maxWait for room instead of dropping the
+// message (#9767). It reports whether the session reached the queue. The
+// FullResync export uses it because its frame is acknowledged to the helper
+// only once the whole export is queued: waiting lets the writer pace a burst
+// larger than the queue, in order, where QueueSessionV4 discards its tail.
+func (s *SessionSync) QueueSessionV4Paced(key dataplane.SessionKey, val dataplane.SessionValue, maxWait time.Duration) bool {
+	s.stampInstallGenV4(key, &val)
+	return s.queueMessagePaced(encodeSessionV4(key, val), &s.stats.SessionsSent, "session_v4", maxWait)
+}
+
+// QueueSessionV6Paced is the v6 form of QueueSessionV4Paced.
+func (s *SessionSync) QueueSessionV6Paced(key dataplane.SessionKeyV6, val dataplane.SessionValueV6, maxWait time.Duration) bool {
+	s.stampInstallGenV6(key, &val)
+	return s.queueMessagePaced(encodeSessionV6(key, val), &s.stats.SessionsSent, "session_v6", maxWait)
+}
+
+// queueMessagePaced is queueMessage with a bounded wait for room. A disconnect
+// ends the wait at once, as it refuses queueMessage. When maxWait passes with
+// the queue still full, the last attempt is queueMessage itself, so a dropped
+// message is counted exactly as a lossy producer's drop is.
+func (s *SessionSync) queueMessagePaced(msg []byte, sentCounter *atomic.Uint64, source string, maxWait time.Duration) bool {
+	deadline := time.Now().Add(maxWait)
+	var timer *time.Timer
+	defer func() {
+		if timer != nil {
+			timer.Stop()
+		}
+	}()
+	for s.stats.Connected.Load() {
+		select {
+		case s.sendCh <- msg:
+			sentCounter.Add(1)
+			return true
+		default:
+		}
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return s.queueMessage(msg, sentCounter, source)
+		}
+		poll := min(remaining, pacedQueuePoll)
+		if timer == nil {
+			timer = time.NewTimer(poll)
+		} else {
+			timer.Reset(poll)
+		}
+		select {
+		case s.sendCh <- msg:
+			sentCounter.Add(1)
+			return true
+		case <-timer.C:
+		}
+	}
+	return false
+}
+
 // QueueDeleteV4 queues a v4 session deletion for synchronization. If the peer
 // is disconnected, the delete is journaled for replay on reconnect. The delete
 // draws a fresh generation strictly greater than the install it cancels
@@ -75,6 +135,9 @@ func (s *SessionSync) QueueSessionV6(key dataplane.SessionKeyV6, val dataplane.S
 // its own install out-ranks it, letting the peer's tombstone refuse the late
 // install of the cancelled session.
 func (s *SessionSync) QueueDeleteV4(key dataplane.SessionKey) {
+	if s.suppressDeleteForIncapablePeer("delete_v4") {
+		return
+	}
 	gen := s.takeDeleteGenV4(key)
 	msg := encodeDeleteV4(key, gen)
 	if !s.queueMessage(msg, &s.stats.DeletesSent, "delete_v4") {
@@ -82,9 +145,59 @@ func (s *SessionSync) QueueDeleteV4(key dataplane.SessionKey) {
 	}
 }
 
+// suppressDeleteForIncapablePeer reports whether an outgoing session delete must be
+// WITHHELD because the peer's helper cannot refuse a peer-marked delete (#9714 F5).
+//
+// A peer without capFlagPeerDeleteOwnership applies our delete unconditionally, so
+// in a dual-primary split it tears down the flow it is still forwarding — #9714's
+// defect reached from the other side of the wire. An upgraded node is already safe
+// from the peer's deletes; this closes the remaining direction.
+//
+// It DROPS rather than journals, and that is the opposite of what the obvious
+// reading of "suppress" suggests. journalDelete would hold the message for replay,
+// but an incapable peer does not become capable without reconnecting, so the bounded
+// journal (deleteJournalDefaultCap, 10000) fills on any busy node. The overflow
+// evicts and arms forceResync, which sends a full BulkSync — and the peer's
+// reconcileStaleSessions then deletes every session absent from that set, unmarked,
+// on the very peer being protected. Journalling therefore escalates a per-flow
+// hazard into a whole-set teardown. Dropping fails toward KEEPING sessions, the
+// direction this codebase already chooses for deletes.
+//
+// The cost is real, which is why this is counted and alarmed rather than silent: the
+// peer retains sessions this node has closed until they idle out.
+//
+// UNKNOWN IS NOT INCAPABLE. peerCapabilityFlags reads 0 both for an old peer and for
+// the window before this incarnation's advertisement arrives, so gating on the flag
+// alone would discard deletes on every reconnect of a matched pair. The gate
+// therefore fires only once capabilities have actually been LEARNED, and before that
+// behaves exactly as it did before #9714 — the status quo, not a new exposure.
+//
+// The gate is unavoidably COARSE: it cannot be narrowed to an observed dual-primary,
+// because IsPrimaryForRGFn reports only the LOCAL node, and a split is definitionally
+// the state in which neither node can see the other's truth.
+func (s *SessionSync) suppressDeleteForIncapablePeer(source string) bool {
+	if s == nil || !s.peerCapabilitiesLearned() || s.PeerDeleteOwnershipCapable() {
+		return false
+	}
+	s.stats.DeletesSuppressedPeerIncapable.Add(1)
+	if s.deleteSuppressionWarned.CompareAndSwap(false, true) {
+		slog.Warn("cluster sync: withholding session deletes — the peer does not advertise #9714 peer-delete "+
+			"ownership, so it would apply them unconditionally and could tear down a flow it is still "+
+			"forwarding. That peer will retain sessions this node has closed until they idle out. "+
+			"Completing the upgrade on both nodes restores delete sync.",
+			"source", source,
+			"peer_snapshot_protocol", s.peerSnapshotProtocol.Load(),
+			"peer_capability_flags", uint8(s.peerCapabilityFlags.Load()))
+	}
+	return true
+}
+
 // QueueDeleteV6 queues a v6 session deletion for synchronization. If the peer
 // is disconnected, the delete is journaled for replay on reconnect.
 func (s *SessionSync) QueueDeleteV6(key dataplane.SessionKeyV6) {
+	if s.suppressDeleteForIncapablePeer("delete_v6") {
+		return
+	}
 	gen := s.takeDeleteGenV6(key)
 	msg := encodeDeleteV6(key, gen)
 	if !s.queueMessage(msg, &s.stats.DeletesSent, "delete_v6") {

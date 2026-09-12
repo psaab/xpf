@@ -835,3 +835,7 @@ pub(in crate::afxdp) fn host_inbound_admits_iface(
 #[cfg(test)]
 #[path = "host_inbound_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "unzoned_tunnel_host_inbound_9941_tests.rs"]
+mod unzoned_tunnel_9941_tests;

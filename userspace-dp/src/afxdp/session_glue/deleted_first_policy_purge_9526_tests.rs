@@ -141,7 +141,7 @@ fn purge(sessions: &mut SessionTable, rule_id: &str) -> usize {
     let peer_worker_commands: Vec<Arc<Mutex<VecDeque<WorkerCommand>>>> = Vec::new();
     purge_sessions_bound_to_deleted_first_policy(
         sessions,
-        -1,
+        SteeringMap::unshared_for_test(-1),
         -1,
         -1,
         &shared_sessions,

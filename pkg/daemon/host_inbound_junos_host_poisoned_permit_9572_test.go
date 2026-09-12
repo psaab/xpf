@@ -17,7 +17,7 @@ import (
 // so the deny's DROP line must be in the payload as authored.
 func TestJunosHostPoisonedPermitKeepsRenderedDrop9572(t *testing.T) {
 	cn := xnft.HostInboundJunosHostDenyCounterName("untrust", "ip")
-	drop := `iifname "ge-0-0-1" ip saddr 10.0.0.0/8 counter name "` + cn + `" drop`
+	drop := `meta nfproto ipv4 ip saddr 10.0.0.0/8 counter name "` + cn + `" drop`
 	for _, poisoned := range []bool{false, true} {
 		cfg := junosHostDenyTestConfig()
 		p0 := permitPolicy("p0", "app:any")

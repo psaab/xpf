@@ -94,8 +94,10 @@ func (m *Manager) RegenerateNeighborSnapshot() {
 	// if neighbor entries didn't diff.
 	m.rebuildMonitoredIfindexes()
 
-	newNeighbors := buildNeighborSnapshots(m.lastSnapshot.Config)
-	if neighborsEqualForwarding(m.lastSnapshot.Neighbors, newNeighbors) {
+	newNeighbors := m.sampleNeighborsLocked()
+	// #9684: while an earlier replace's outcome is unknown, an unchanged kernel
+	// set says nothing about what the helper holds, so it is re-sent.
+	if neighborsEqualForwarding(m.lastSnapshot.Neighbors, newNeighbors) && !m.partialSectionUnknownLocked(partialNeighbors) {
 		return
 	}
 	publishable := filterPublishableNeighbors(newNeighbors)
@@ -111,6 +113,7 @@ func (m *Manager) RegenerateNeighborSnapshot() {
 		NeighborGeneration: gen,
 	}, &status); err != nil {
 		slog.Warn("userspace: failed to publish neighbor regeneration", "err", err)
+		m.recordPartialUpdateFailureLocked(partialNeighbors, err)
 		return
 	}
 	// #6034: retain retry debt if the helper did not acknowledge applying
@@ -128,6 +131,12 @@ func (m *Manager) RegenerateNeighborSnapshot() {
 	}
 	m.lastSnapshot.Neighbors = newNeighbors
 	m.rebuildNeighborIndex() // #1197 (after publish success)
+	// #9684: only an ACK of exactly gen, or 0 from a helper without the ACK,
+	// proves this replace applied. An ACK above gen is a fence the check above
+	// does not yet recognise (#9696), so the section stays unknown.
+	if status.ManagerNeighborGeneration == 0 || status.ManagerNeighborGeneration == gen {
+		m.resolvePartialOutcomesLocked(partialNeighbors)
+	}
 	// Copilot review: advance publishedSnapshot + refresh lastSnapshotHash,
 	// so the status loop does not see the bumped generation as unpublished and
 	// force a redundant apply_snapshot, and churn in filtered-out rows cannot
