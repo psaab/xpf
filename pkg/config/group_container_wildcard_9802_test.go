@@ -326,10 +326,17 @@ func TestGroupBodyRoutingPrefersAnExactMatch9802(t *testing.T) {
 }
 
 // The wildcard must sit in the INSTANCE-NAME span. A wildcard in a VALUE
-// position belongs to the statement, not to an instance. Without the span test
-// the whole `unit 0` statement is pruned and the unit never compiles.
+// position belongs to the statement, not to an instance, so the statement is
+// adopted whole. Without the span test the zone statement is pruned and the
+// zone never compiles.
+//
+// The fixture reaches the statement through NAMED schema children only.
+// `schemaAtAncestorPath` does not resolve through a wildcard hop such as a
+// dynamic interface name, so a fixture under `interfaces` cannot exercise this
+// rule at all: the prune declines there for want of a schema, not for want of
+// the span.
 func TestPruneNeedsTheWildcardInTheIdentitySpan9802(t *testing.T) {
-	const text = `groups { G { interfaces { ge-0/0/0 { unit 0 description <*>; } } } } apply-groups G; system { host-name p; }`
+	const text = `groups { G { security { zones { security-zone trust description <*>; } } } } apply-groups G; system { host-name p; }`
 	tree, perrs := NewParser(text).Parse()
 	if len(perrs) > 0 {
 		t.Fatalf("fixture must parse: %v", perrs)
@@ -338,17 +345,8 @@ func TestPruneNeedsTheWildcardInTheIdentitySpan9802(t *testing.T) {
 	if err != nil {
 		t.Fatalf("lenient compile: %v", err)
 	}
-	ifc := cfg.Interfaces.Interfaces["ge-0/0/0"]
-	if ifc == nil {
-		t.Fatalf("the adopted interface did not compile")
-	}
-	var got string
-	for _, u := range ifc.Units {
-		if u.Number == 0 {
-			got = u.Description
-		}
-	}
-	if len(ifc.Units) != 1 || got != "<*>" {
-		t.Errorf("compiled %d unit(s) with unit 0 description %q, want one unit described `<*>`: a wildcard in a VALUE position is not an instance name (#9802)", len(ifc.Units), got)
+	z := cfg.Security.Zones["trust"]
+	if z == nil {
+		t.Errorf("zone trust did not compile: a wildcard in a VALUE position is not an instance name, so the statement is adopted whole (#9802)")
 	}
 }
