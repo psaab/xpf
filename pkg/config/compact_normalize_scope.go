@@ -968,6 +968,15 @@ func compactNormalizeInScope(containerKeyword, head string) bool {
 		"interfaces scheduler-map",
 		"interfaces shaping-rate",
 		"interfaces unit",
+		// #9620 H11: the OUTER half of the unit's family fold. With `inet` and
+		// `inet6` opted into packedStatements, `unit 0 { family inet filter
+		// input f1 address 10.0.0.1/24; }` already compiles like its braced
+		// spelling; the unit-elided spelling
+		// `unit 0 family inet filter input f1 address …;` keeps the whole run
+		// on the unit node, because the pass never reaches a container it has
+		// not created. Asked the pass which keys it consults: the depth-2
+		// spelling consults exactly `(unit, family)` and nothing else.
+		"unit family",
 		"loss-priority code-point",
 		"loss-priority code-points",
 		"oversubscription-policy guarantee-rate",
