@@ -101,15 +101,90 @@ func TestAuthoredValueStaysAValue9635(t *testing.T) {
 	}
 }
 
+// statementsUnder9635 returns the normalized statement list at
+// `security ike policy P1`, as space-joined keys.
+func statementsUnder9635(t *testing.T, text string) []string {
+	t.Helper()
+	tree, perrs := NewParser(text).Parse()
+	if len(perrs) > 0 {
+		t.Fatalf("fixture must parse: %v", perrs)
+	}
+	normalizeCompactStanzas(tree)
+	nodes := tree.Children
+	for _, want := range []string{"security", "ike", "policy"} {
+		var next []*Node
+		found := false
+		for _, n := range nodes {
+			if len(n.Keys) > 0 && n.Keys[0] == want {
+				next, found = n.Children, true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("no %q level in %q", want, text)
+		}
+		nodes = next
+	}
+	out := make([]string, 0, len(nodes))
+	for _, n := range nodes {
+		out = append(out, strings.Join(n.Keys, " "))
+	}
+	return out
+}
+
+// #9635: an authored-value run ENDS where the authoring stops. The bracketed
+// list keeps `proposal-set`, and the bare `mode aggressive` after the closing
+// bracket is still its own statement.
+//
+// Without this row the bound on the run is untested: consuming to the end of
+// the tail produces the same answer on every other fixture here, because in all
+// of them the authored tokens run to the end.
+func TestAuthoredValueRunEndsWithTheAuthoring9635(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		text string
+		want []string
+	}{
+		{
+			name: "bare statement after a bracketed list",
+			text: `security { ike { policy P1 { proposals [ P "proposal-set" ] mode aggressive; } } }`,
+			want: []string{"proposals P proposal-set", "mode aggressive"},
+		},
+		{
+			name: "control, all-bare list then a bare statement",
+			text: `security { ike { policy P1 { proposals [ P Q ] mode aggressive; } } }`,
+			want: []string{"proposals P Q", "mode aggressive"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := statementsUnder9635(t, tc.text)
+			if len(got) != len(tc.want) {
+				t.Fatalf("statements: got %q want %q", got, tc.want)
+			}
+			for i := range got {
+				if got[i] != tc.want[i] {
+					t.Fatalf("statement %d: got %q want %q", i, got, tc.want)
+				}
+			}
+		})
+	}
+}
+
 // #9635: the rule is about the statement BEFORE the token, not the token alone.
 // `pre-shared-key` is fixed-arity (args: 2), so once `ascii-text` and the key
 // are consumed it cannot own another value and the quoted `"mode"` really does
 // begin the next statement. An earlier attempt declined every split whose
 // boundary landed on a quoted token, which regressed exactly this config.
 //
-// The claim is equality with the spelling that writes the semicolon out, which
-// is stronger than "it commits": a fold that dropped `mode aggressive`
-// altogether would also commit.
+// THE STRUCTURAL ASSERTION IS THE ONE THAT BITES, and that is not obvious.
+// Dropping the arity rule fuses this run into a single node -- and the compiled
+// config comes out IDENTICAL anyway, because the compiler here also reads the
+// packed tail. A compiled-output comparison therefore passes either way:
+// measured, by running the whole pkg/config suite with the arity rule removed,
+// which stayed green. The issue states the acceptance as "keeps committing as
+// two statements", so the statement list is asserted directly. Leaning on the
+// downstream tolerance instead would leave the rule unfalsifiable, and a rule
+// no cell can break is not a safety margin.
 func TestFixedArityQuotedTokenIsAStatementHead9635(t *testing.T) {
 	for _, tc := range []struct{ name, packed, separated string }{
 		{
@@ -124,6 +199,17 @@ func TestFixedArityQuotedTokenIsAStatementHead9635(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			got := statementsUnder9635(t, tc.packed)
+			want := statementsUnder9635(t, tc.separated)
+			if len(got) != len(want) {
+				t.Fatalf("packed must normalize to the same statements\npacked:    %q\nseparated: %q", got, want)
+			}
+			for i := range got {
+				if got[i] != want[i] {
+					t.Fatalf("statement %d differs\npacked:    %q\nseparated: %q", i, got, want)
+				}
+			}
+
 			sp, jp := compiledJSON9635(t, tc.packed)
 			ss, js := compiledJSON9635(t, tc.separated)
 			if sp != "OK" || ss != "OK" {
