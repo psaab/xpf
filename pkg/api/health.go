@@ -81,6 +81,36 @@ func (s *Server) healthHandler(w http.ResponseWriter, _ *http.Request) {
 	if s.rollbackHistoryDegradedFn != nil {
 		payload["rollback_history_degraded"] = s.rollbackHistoryDegradedFn()
 	}
+	// #9811: the node is enforcing a configuration it does not report. A
+	// commit-confirmed auto-rollback promotes the store FIRST and then applies;
+	// when that apply fails, every other surface in this payload — and `show
+	// configuration`, and the peer the rolled-back config was re-synced to —
+	// names C1 while the dataplane still enforces C2 under the #5679 contract.
+	//
+	// This returns 503, unlike rollback_history_degraded directly above. The
+	// difference is not severity-by-feel: a degraded rollback history is a
+	// recovery aid failing on a node that forwards exactly what it reports, and
+	// the comment above is right that such a node must not be pulled from
+	// rotation. Here the reported state and the enforced state DISAGREE, which
+	// is ConfigPersistDegradedFn's class, and an orchestrator that keeps
+	// steering traffic at a node whose policy is not the policy it published is
+	// acting on a false premise.
+	//
+	// #5031: lastErr is a raw apply error and can quote config internals, so it
+	// does NOT cross onto this unauthenticated surface. The owed flag and the
+	// attempt COUNT are the stable non-secret signal — and the count is the
+	// useful one, because a climbing count means the retry owner is running and
+	// failing while a flat count with owed set means it is not running at all.
+	if s.configApplyDebtFn != nil {
+		owed, failures, _ := s.configApplyDebtFn()
+		payload["config_apply_debt_owed"] = owed
+		payload["config_apply_failure_count"] = failures
+		if owed {
+			payload["status"] = "degraded"
+			writeJSON(w, http.StatusServiceUnavailable, Response{Success: false, Data: payload, Error: "the dataplane is enforcing a configuration other than the active one; a caller-less apply failed and the retry owner has not converged"})
+			return
+		}
+	}
 	writeOK(w, payload)
 }
 
