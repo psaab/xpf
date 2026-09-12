@@ -1029,113 +1029,27 @@ const WAN_INGRESS_IFINDEX: i32 = 12;
 /// the owner counts, which is the channel that moves (a recorder-only map records a
 /// delete but cannot show a claim that merely persists).
 #[test]
-/// #9560 round 3, R12: the poll path's FORWARD install must release a predecessor's
-/// rows too.
-///
-/// Measured as a gap before this cell existed: the mutant reverting the forward call
-/// site to `publish_live_session_key` SURVIVED a 71-cell run with nothing failing. The
-/// forward and reverse installs are two call sites of the same function with DIFFERENT
-/// arguments (`&flow.forward_key`/`decision.nat`/`false` vs
-/// `&reverse_key`/`reverse_decision.nat`/`true`), not twins — so the reverse cell says
-/// nothing about this one, and neither would a cell written against only one of them.
-///
-/// The assertion is a DECREASE from the seeded count, not an absolute count. What a
-/// forward entry-level publish claims is not known here and is deliberately not
-/// guessed: an earlier attempt at the reverse site asserted a count I had inferred
-/// rather than observed and failed at base. A decrease expresses the release itself,
-/// needs no row arithmetic, and does not rot if that arithmetic changes.
-#[test]
-fn the_poll_paths_forward_install_releases_a_seeded_predecessors_rows_9560() {
-    use crate::afxdp::bpf_map::{
-        RECORDER_ONLY_MAP_FD, SteeringHolder, SteeringMapRef, SteeringRowOwners,
-        publish_live_session_entry,
-    };
-
-    // PASS 1 exists only to learn the FORWARD key this flow installs under.
-    let forward_key = {
-        let owners = std::sync::Arc::new(SteeringRowOwners::default());
-        let (syn, meta_syn, _ack, _meta_ack) = dnat_frames();
-        let snapshot = inbound_dnat_snapshot(wan_to_lan_permit(DNAT_REAL, "permit-internal"));
-        let forwarding = build_forwarding_state(&snapshot);
-        let ha_state = txn_ha_state();
-        let mut sessions = SessionTable::new();
-        let mut binding = BindingWorker::new_for_mirror_test(0, 0, WAN_INGRESS_IFINDEX, 0);
-        binding.interface = Arc::<str>::from("reth0.80");
-        binding.bpf_maps.session_map = SteeringMapRef::new(
-            RECORDER_ONLY_MAP_FD,
-            std::sync::Arc::clone(&owners),
-            SteeringHolder::Worker(0),
-        );
-        let (_batch, dbg) = txn_run_descriptor(
-            &mut binding,
-            &mut sessions,
-            &forwarding,
-            &ha_state,
-            &syn,
-            meta_syn,
-        );
-        assert_eq!(dbg.tx, 1, "FIXTURE: pass 1 must admit the SYN to derive a forward key");
-        let mut found: Option<SessionKey> = None;
-        sessions.iter_with_origin(|key, _decision, metadata, _origin| {
-            if !metadata.is_reverse {
-                found = Some(key.clone());
-            }
-        });
-        found.expect("FIXTURE: pass 1 must install a forward session")
-    };
-
-    // PASS 2: a PREDECESSOR holds a wider row set at that forward key when the poll
-    // path installs over it.
-    let owners = std::sync::Arc::new(SteeringRowOwners::default());
-    let (syn, meta_syn, _ack, _meta_ack) = dnat_frames();
-    let snapshot = inbound_dnat_snapshot(wan_to_lan_permit(DNAT_REAL, "permit-internal"));
-    let forwarding = build_forwarding_state(&snapshot);
-    let ha_state = txn_ha_state();
-    let mut sessions = SessionTable::new();
-    let mut binding = BindingWorker::new_for_mirror_test(0, 0, WAN_INGRESS_IFINDEX, 0);
-    binding.interface = Arc::<str>::from("reth0.80");
-    binding.bpf_maps.session_map = SteeringMapRef::new(
-        RECORDER_ONLY_MAP_FD,
-        std::sync::Arc::clone(&owners),
-        SteeringHolder::Worker(0),
-    );
-
-    let _ = publish_live_session_entry(
-        binding.bpf_maps.session_map.handle(),
-        &forward_key,
-        crate::nat::NatDecision {
-            rewrite_src: Some(std::net::IpAddr::V4(std::net::Ipv4Addr::new(203, 0, 113, 11))),
-            rewrite_src_port: Some(51_009),
-            ..crate::nat::NatDecision::default()
-        },
-        false,
-    );
-    let seeded = owners.held_row_count(&forward_key, 0);
-    assert!(
-        seeded > 1,
-        "FIXTURE: the predecessor must claim MORE than one row, or a DECREASE below is \
-         not observable (held {seeded})"
-    );
-
-    let (_batch, dbg) = txn_run_descriptor(
-        &mut binding,
-        &mut sessions,
-        &forwarding,
-        &ha_state,
-        &syn,
-        meta_syn,
-    );
-    assert_eq!(dbg.tx, 1, "FIXTURE: pass 2 must admit the SYN, or nothing installs over the seed");
-
-    let after = owners.held_row_count(&forward_key, 0);
-    assert!(
-        after < seeded,
-        "the poll path's FORWARD install kept every one of the predecessor's claims \
-         ({seeded} before, {after} after). An entry-level publish releases the rows its \
-         decision does not name; a key-level one claims its own row and leaves the rest \
-         owned by a session that no longer exists (#9560 round 3, R12)"
-    );
-}
+// #9560 round 3, R12 — MEASURED GAP, and the reason is specific.
+//
+// The poll path's FORWARD install (`&flow.forward_key`, `decision.nat`, `false`) has no
+// cell that can detect a revert to a key-level publish. The mutant SURVIVED a 71-cell
+// run with ALL_FAILED empty.
+//
+// A cell asserting ROW COUNT cannot close it, in EITHER form. An absolute count fails
+// because an entry-level publish leaves the owner holding exactly the rows its decision
+// names, and a key-level one also ends up holding rows — the numbers need not differ. A
+// DELTA fails for a sharper reason, measured: seeding a predecessor with 4 rows and
+// letting the install run gives "4 before, 4 after", because the real decision also
+// names 4. A count cannot distinguish "released the old set and claimed a same-size new
+// one" from "kept everything".
+//
+// Closing it needs ROW IDENTITY, not arity: seed a row the real decision provably cannot
+// name and assert THAT row's owner count falls to zero. `held_row_count` only counts, and
+// there is no row-listing API on the registry today, so this is a different cell plus a
+// small accessor — not a stronger assertion here.
+//
+// Recorded rather than closed with something that cannot fail. R12's driver row is
+// declared UNCOVERED so every matrix run re-announces the gap.
 
 /// #9560 round 3, R9: the poll path's reverse install must RELEASE what a same-key
 /// PREDECESSOR held — asserted on the release itself, not on a row count.
