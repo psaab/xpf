@@ -926,12 +926,13 @@ func TestExportUserspaceOwnerRGSessionsWithConfigQueuesForwardWireAlias(t *testi
 			FabricRedirect: true,
 		}},
 	}
-	d := &Daemon{
-		sessionSync: &cluster.SessionSync{
-			IsPrimaryFn:      func() bool { return true },
-			IsPrimaryForRGFn: func(rgID int) bool { return rgID == 1 },
-		},
-	}
+	// #9767: the count is what reached the send queue, so the sync must read
+	// connected. A disconnected one admits nothing, and the export says so.
+	ss := cluster.NewSessionSync("127.0.0.1:0", "127.0.0.1:1", nil)
+	ss.IsPrimaryFn = func() bool { return true }
+	ss.IsPrimaryForRGFn = func(rgID int) bool { return rgID == 1 }
+	ss.SetConnectedForTesting(true)
+	d := &Daemon{sessionSync: ss}
 	cfg := &config.Config{}
 	cfg.Security.Zones = map[string]*config.ZoneConfig{
 		"lan": {Name: "lan"},
@@ -947,6 +948,12 @@ func TestExportUserspaceOwnerRGSessionsWithConfigQueuesForwardWireAlias(t *testi
 	}
 	if exporter.calls != 1 {
 		t.Fatalf("export calls = %d, want 1", exporter.calls)
+	}
+	for i := 0; i < 2; i++ {
+		if typ, ok := ss.TakeQueuedMessageTypeForTesting(0); !ok || typ != "session_v4" {
+			t.Fatalf("send-queue message %d = %q (present=%v), want session_v4 for the session and its forward-wire alias",
+				i, typ, ok)
+		}
 	}
 }
 

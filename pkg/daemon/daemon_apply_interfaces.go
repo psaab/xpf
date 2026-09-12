@@ -115,16 +115,7 @@ func (d *Daemon) applyFabricIPVLAN(cfg *config.Config) error {
 	}
 	// Register deferred IPVLAN creation callback on the userspace manager.
 	if len(deferredOverlays) > 0 && bindingCtrl != nil {
-		bindingCtrl.SetOnXSKBound(func() {
-			for _, ov := range deferredOverlays {
-				slog.Info("XSK bound — creating deferred fabric IPVLAN",
-					"parent", ov.parent, "name", ov.name)
-				if err := fabricEnsureFn(ov.parent, ov.name, ov.addrs); err != nil {
-					slog.Error("deferred fabric IPVLAN creation failed",
-						"parent", ov.parent, "name", ov.name, "err", err)
-				}
-			}
-		})
+		bindingCtrl.SetOnXSKBound(func() { d.createDeferredFabricOverlays(deferredOverlays) })
 	}
 	// Clean up stale fabric IPVLAN overlays not in current config (#128).
 	for _, name := range []string{"fab0", "fab1"} {

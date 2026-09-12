@@ -497,7 +497,11 @@ func (d *Daemon) applyDataplaneAndHACore(ctx context.Context, cfg *config.Config
 		// the recovering node stops receiving peer heartbeats and declares
 		// split-brain after the grace period expires.
 		if d.cluster != nil {
-			d.cluster.RestartHeartbeat()
+			// #9751: a failed restart is reported, not discarded. It leaves the
+			// heartbeat stopped, and the next apply retries it.
+			if err := restartHeartbeatAfterRebind(d.cluster); err != nil {
+				networkdErr = errors.Join(networkdErr, err)
+			}
 		}
 	}
 

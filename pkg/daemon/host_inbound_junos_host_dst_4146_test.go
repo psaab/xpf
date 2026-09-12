@@ -43,9 +43,9 @@ type junosHostVerdictQuery struct {
 // zone's program against a concrete host-bound packet and reports whether the
 // kernel would DROP it. It walks the rules in first-match order applying the
 // SAME predicates the nft codegen renders: family, source (any / positive /
-// excluded) minus the earlier-permit subtraction, destination (any / positive /
-// excluded), and the L4 fragment. This is a verdict evaluation of the emitted
-// ruleset, not a structural assertion about it.
+// excluded), destination (any / positive / excluded), and the L4 fragment. The
+// first matching rule decides, and a return (a permit) admits (#9504). This is a
+// verdict evaluation of the emitted ruleset, not a structural assertion about it.
 //
 // It takes the whole program SLICE deliberately: when the projection emits NO
 // program for the zone — which is exactly what the pre-fix code did for a
@@ -66,16 +66,13 @@ func junosHostKernelDrops(programs []dpuserspace.JunosHostProgram, zone string, 
 			if !junosHostAddrMatches(src, r.SrcAny, r.SrcExcluded, r.Src) {
 				continue
 			}
-			if ipInAny(src, r.PermitSubtract) {
-				continue // carved out by an earlier permit (`saddr != <permit-set>`)
-			}
 			if !junosHostAddrMatches(dst, r.DstAny, r.DstExcluded, r.Dst) {
 				continue
 			}
 			if !junosHostL4Matches(r.L4, q.proto, q.dport) {
 				continue
 			}
-			return true
+			return r.Verdict != config.JunosHostReturn
 		}
 	}
 	return false
@@ -201,7 +198,7 @@ func TestJunosHostDstScopedDenyIsEnforced(t *testing.T) {
 			len(programs), programs)
 	}
 	cn := xnft.HostInboundJunosHostDenyCounterName("untrust", "ip")
-	want := `iifname "ge-0-0-1" tcp dport 22 ip saddr 10.0.0.5/32 ip daddr 10.0.2.10/32 counter name "` + cn + `" drop`
+	want := `meta nfproto ipv4 tcp dport 22 ip saddr 10.0.0.5/32 ip daddr 10.0.2.10/32 counter name "` + cn + `" drop`
 	if !strings.Contains(payload, want) {
 		t.Fatalf("payload missing the destination-scoped drop %q:\n%s", want, payload)
 	}
@@ -239,7 +236,7 @@ func TestJunosHostDstScopedDenyIsEnforcedV6(t *testing.T) {
 		t.Errorf("a v6-only source/destination must emit no IPv4 rule, got %+v", programs[0].RulesV4)
 	}
 	cn := xnft.HostInboundJunosHostDenyCounterName("untrust", "ip6")
-	want := `iifname "ge-0-0-1" tcp dport 22 ip6 saddr 2001:db8:bad::5/128 ip6 daddr 2001:db8:2::10/128 counter name "` + cn + `" drop`
+	want := `meta nfproto ipv6 tcp dport 22 ip6 saddr 2001:db8:bad::5/128 ip6 daddr 2001:db8:2::10/128 counter name "` + cn + `" drop`
 	if !strings.Contains(payload, want) {
 		t.Fatalf("payload missing the v6 destination-scoped drop %q:\n%s", want, payload)
 	}
@@ -287,14 +284,17 @@ func TestJunosHostDstScopedDenyDoesNotDisableSiblingDeny(t *testing.T) {
 	}
 }
 
-// TestJunosHostDstScopedPermitStaysUnrepresentable is the over-reach guard on
-// the permit side. A permit is projected ONLY as a `saddr !=` SUBTRACTION of
-// later denies, which cannot express a carve that is also destination-scoped —
-// so a destination-scoped PERMIT keeps the whole program un-representable and
-// the zone emits nothing. Rendering the following deny while dropping the
+// TestJunosHostDstScopedPermitRendersAReturn9504 is the over-reach guard on the
+// permit side, re-pointed by #9504.
+//
+// The hazard is unchanged: rendering the following deny while dropping the
 // permit's destination dimension would DENY traffic the operator explicitly
-// permitted.
-func TestJunosHostDstScopedPermitStaysUnrepresentable(t *testing.T) {
+// permitted. What changed is the remedy. A permit used to be projectable only as
+// a `saddr !=` subtraction of later denies, which cannot carry a destination, so
+// the projection refused the whole program. It now renders as a RETURN carrying
+// the permit's own daddr, ahead of the deny, in first-match order — so the carve
+// is expressed rather than refused, and the deny stays as wide as authored.
+func TestJunosHostDstScopedPermitRendersAReturn9504(t *testing.T) {
 	cfg := junosHostDstTestConfig()
 	cfg.Security.Policies = []*config.ZonePairPolicies{
 		{FromZone: "untrust", ToZone: "junos-host", Policies: []*config.Policy{
@@ -302,14 +302,41 @@ func TestJunosHostDstScopedPermitStaysUnrepresentable(t *testing.T) {
 			denyPolicy("block-net", "src:bad-net", "app:any"),
 		}},
 	}
-	_, programs := junosHostPayload(t, cfg)
-	if len(programs) != 0 {
-		t.Fatalf("a destination-scoped PERMIT must keep the program un-representable, got %+v", programs)
+	payload, programs := junosHostPayload(t, cfg)
+	if len(programs) != 1 {
+		t.Fatalf("want one program for the ingress zone, got %+v", programs)
 	}
-	// Both policies keep the #4168 warning (nothing rendered).
+	v4 := programs[0].RulesV4
+	if len(v4) != 2 {
+		t.Fatalf("want the permit's return then the deny's drop in v4, got %+v", v4)
+	}
+	if r := v4[0]; r.Verdict != config.JunosHostReturn || r.DstAny || len(r.Dst) != 1 {
+		t.Errorf("first v4 rule = %+v, want a return still scoped to the permit's destination", r)
+	}
+	if r := v4[1]; r.Verdict != config.JunosHostDrop || !r.DstAny {
+		t.Errorf("second v4 rule = %+v, want the deny's drop for every destination", r)
+	}
+	// The rendered subchain must carry the permit's daddr on the return: a return
+	// that lost it would admit the permitted source to every firewall address, and
+	// one that never rendered would deny it at the address the operator permitted.
+	var sawScopedReturn bool
+	for _, l := range junosHostChainLines(payload) {
+		if strings.Contains(l, "return") && strings.Contains(l, "daddr") {
+			sawScopedReturn = true
+		}
+	}
+	if !sawScopedReturn {
+		t.Errorf("no destination-scoped return rendered in the zone's subchain:\n%s", payload)
+	}
+	// The deny is enforced, so its warning is suppressed; the permit is never
+	// suppressed, because the half that would refuse what it does not match is
+	// enforced on no path (#9504).
 	rendered := config.BuildJunosHostDenyProjection(cfg).RenderedPolicyKeys
-	if len(rendered) != 0 {
-		t.Errorf("no policy may be marked rendered when the program emits nothing: %+v", rendered)
+	if !rendered[config.JunosHostZonePairPolicyKey("untrust", "block-net")] {
+		t.Errorf("the deny renders a rule yet is not marked rendered: %+v", rendered)
+	}
+	if rendered[config.JunosHostZonePairPolicyKey("untrust", "allow-good-to-mgmt")] {
+		t.Errorf("a permit must never be marked rendered: %+v", rendered)
 	}
 }
 
@@ -329,7 +356,7 @@ func TestJunosHostDstAnyExcludedEmitsNoDropLine(t *testing.T) {
 	if len(programs) != 0 {
 		t.Fatalf("destination any+excluded is inert and must emit no program, got %+v", programs)
 	}
-	for _, l := range junosHostSection(payload) {
+	for _, l := range junosHostChainLines(payload) {
 		if strings.Contains(l, "drop") && strings.Contains(l, "xpfjh_") {
 			t.Errorf("unexpected junos-host drop line for an inert destination any+excluded term: %q", l)
 		}
@@ -350,7 +377,7 @@ func TestJunosHostDstExcludedDropsEverythingElse(t *testing.T) {
 		t.Fatalf("want 1 program, got %d: %+v", len(programs), programs)
 	}
 	cn := xnft.HostInboundJunosHostDenyCounterName("untrust", "ip")
-	want := `iifname "ge-0-0-1" tcp dport 22 ip saddr 10.0.0.5/32 ip daddr != 192.0.2.10/32 counter name "` + cn + `" drop`
+	want := `meta nfproto ipv4 tcp dport 22 ip saddr 10.0.0.5/32 ip daddr != 192.0.2.10/32 counter name "` + cn + `" drop`
 	if !strings.Contains(payload, want) {
 		t.Fatalf("payload missing the excluded-destination drop %q:\n%s", want, payload)
 	}

@@ -15,8 +15,8 @@ import (
 // security policy, which historically ran only on the userspace AF_XDP
 // LocalDelivery path, never applied to it (the #4146 security gap). This file
 // PROJECTS the effective ordered junos-host policy program per ingress zone into
-// a DROP-only, representability-gated form that the kernel `xpf_hostinbound` nft
-// chain (pkg/daemon/daemon_nft.go) renders. It is deliberately in pkg/config —
+// a first-match, representability-gated rule program that the kernel
+// `xpf_hostinbound` nft chain (pkg/daemon/daemon_nft.go) renders. It is deliberately in pkg/config —
 // the lowest package that owns policies, zones, the address book, applications,
 // schedulers and feed bindings — so the #4168 commit WARNING
 // (compiler_validate_warn.go) can reuse the SAME rendered-policy decision that
@@ -32,11 +32,16 @@ import (
 //   - WHOLE-PROGRAM representability gate: if ANY contributing term (any tier)
 //     is un-representable, the WHOLE program emits nothing and every one of its
 //     junos-host policies keeps the #4168 warning. Never a per-term partial.
-//   - DROP-only via SET-SUBTRACTION: a `deny` becomes a drop; a `permit` NEVER
+//   - FIRST-MATCH, NEVER A FINE ACCEPT (#9504): each ingress zone's program
+//     renders, in authored order, into its own nft subchain. A `deny` drops
+//     (answering TCP with a RST on a `tcp-rst` zone), a `reject` answers (TCP
+//     RST, else ICMP administratively prohibited), and a `permit` RETURNS from
+//     the subchain so the coarse host-inbound gate still decides. A permit never
 //     emits a fine accept (that could re-admit a coarse-rejected service — Rust
-//     poll_descriptor/mod.rs:138) — instead every later deny SUBTRACTS the
-//     earlier permit's source set (`saddr != <permit-set>`), so the coarse
-//     host-inbound gate stays the sole admit authority.
+//     poll_descriptor/mod.rs:138). A packet no rule matches returns too: the
+//     runtime has no implicit junos-host default-deny (policy.rs
+//     evaluate_junos_host_policy_l3_aware, policymatch.matchJunosHost), and
+//     neither does this program.
 //   - Fine-eligible L4 domain: ESP/AH (proto 50/51) are always exempt; IKE
 //     500/4500 is exempt when the ingress zone's coarse host-inbound admits ike;
 //     ident-reset TCP/113 is exempt only when the zone's effective coarse verdict
@@ -65,10 +70,40 @@ type JunosHostDenyL4 struct {
 	ICMPCode *uint8
 }
 
-// JunosHostDenyRule is one projected DROP rule for a single family. The daemon
-// renders it as
+// JunosHostVerdict is what a projected junos-host rule does with a packet it
+// matches (#9504). Every verdict except JunosHostReturn is DENY-class: the
+// packet does not reach the host.
+type JunosHostVerdict uint8
+
+const (
+	// JunosHostDrop is `then deny` on an ingress zone without `tcp-rst`: a
+	// silent drop.
+	JunosHostDrop JunosHostVerdict = iota
+	// JunosHostDropTCPReset is `then deny` on a `tcp-rst` ingress zone. The
+	// runtime answers a TCP packet with a RST and drops everything else
+	// silently (reject_reply.rs enqueue_deny_reply).
+	JunosHostDropTCPReset
+	// JunosHostReject is `then reject`: a TCP RST for TCP and an ICMP/ICMPv6
+	// destination-unreachable, administratively prohibited, for everything
+	// else (reject_reply.rs).
+	JunosHostReject
+	// JunosHostReturn is `then permit`: the packet leaves the zone's subchain
+	// and the coarse host-inbound gate decides. It is never an accept.
+	JunosHostReturn
+)
+
+// SplitsTCP reports whether the verdict answers TCP differently from every other
+// protocol (with a RST), so an `application any` rule renders a TCP rule ahead of
+// the rest.
+func (v JunosHostVerdict) SplitsTCP() bool {
+	return v == JunosHostReject || v == JunosHostDropTCPReset
+}
+
+// JunosHostDenyRule is one projected rule for a single family, in first-match
+// order. Despite the name it carries every verdict a junos-host term can have
+// (Verdict). The daemon renders it inside the ingress zone's subchain as
 //
-//	iifname { <zone netdevs> } [<l4>] <fam> saddr <src> [saddr != <permit-subtract>] [<fam> daddr <dst>] drop
+//	[<l4>] <fam> saddr <src> [<fam> daddr <dst>] <verdict>
 //
 // SrcAny (no source constraint) and SrcExcluded (`saddr != Src`) mirror the
 // policymatch.matchAddr family semantics; a rule is only emitted for a family
@@ -82,9 +117,8 @@ type JunosHostDenyRule struct {
 	SrcAny      bool   // true => match every source (no saddr predicate)
 	SrcExcluded bool   // true => `saddr != Src` (source-address-excluded)
 	Src         []string
-	// PermitSubtract accumulates the source CIDRs of every EARLIER permit term
-	// that carves this deny (rendered as additional `saddr != <set>` predicates).
-	PermitSubtract []string
+	// Verdict is what the rule does with a packet it matches (#9504).
+	Verdict JunosHostVerdict
 	// DstAny / DstExcluded / Dst mirror Src* for `match destination-address`.
 	// DstAny (the overwhelmingly common `destination-address any`) renders NO
 	// daddr predicate, so an unscoped deny is byte-identical to the pre-slice
@@ -97,7 +131,7 @@ type JunosHostDenyRule struct {
 	L4 []JunosHostDenyL4
 }
 
-// JunosHostDenyProgram is the effective ordered junos-host DENY program for one
+// JunosHostDenyProgram is the effective ordered junos-host program for one
 // ingress zone.
 type JunosHostDenyProgram struct {
 	Zone string
@@ -116,7 +150,8 @@ type JunosHostDenyProgram struct {
 	// Representable is false when any contributing term is un-representable; the
 	// program then carries NO rules and the daemon emits nothing for the zone.
 	Representable bool
-	// RulesV4 / RulesV6 are the projected DROP rules in first-match order.
+	// RulesV4 / RulesV6 are the projected rules, each family in first-match
+	// order. A non-empty list never ends in a JunosHostReturn.
 	RulesV4 []JunosHostDenyRule
 	RulesV6 []JunosHostDenyRule
 	// CoarseAdmitsIKE / CoarseIdentResets drive the daemon's fine-eligible-L4
@@ -139,8 +174,8 @@ type JunosHostDenyProgram struct {
 	IKEExemptNetdevs  []string
 	IdentResetNetdevs []string
 	// HasApplicationAnyDeny is true when the program contains a rendered
-	// `application any` drop, so the daemon knows to emit the IKE/ident exemption
-	// shields ahead of it.
+	// `application any` rule with a DENY-class verdict, so the daemon knows to
+	// emit the IKE/ident exemption shields ahead of it.
 	HasApplicationAnyDeny bool
 }
 
@@ -208,11 +243,11 @@ func BuildJunosHostDenyProjection(cfg *Config) JunosHostDenyProjection {
 	coverageByZone := junosHostZoneNetdevCoverageMap(cfg)
 
 	// Per-policy-key bookkeeping to decide rendered-vs-warned (§3.3): a policy is
-	// rendered (warning suppressed) iff it is a DENY that applies to >=1
-	// enforceable ingress zone and EVERY enforceable zone it applies to has a
-	// representable program. A PERMIT is NEVER suppressed — a source-restricted
-	// permit's "deny non-permitted" half is the §6.5 follow-up, not enforced in
-	// this DENY slice — and a REJECT is always un-representable here.
+	// rendered (warning suppressed) iff it is a DENY or REJECT that applies to
+	// >=1 enforceable ingress zone and EVERY enforceable zone it applies to has a
+	// representable program that emitted it. A PERMIT is NEVER suppressed: its
+	// "deny non-permitted" half is enforced on no path, because the runtime has
+	// no implicit junos-host default-deny (#9504).
 	appliesEnforceable := map[string]int{}
 	blockedByUnrep := map[string]bool{}
 	actionByKey := map[string]PolicyAction{}
@@ -257,26 +292,17 @@ func BuildJunosHostDenyProjection(cfg *Config) JunosHostDenyProjection {
 				break
 			}
 		}
-		// Also un-representable if the ingress zone answers a TCP deny with a
-		// RST (tcp-rst): a silent-drop kernel rule would diverge from Junos's RST
-		// verdict class (§6.2). The reject follow-up lifts this.
-		if zone.TCPRst {
-			representable = false
-		}
+		// A `tcp-rst` ingress zone is representable (#9504): its denies render
+		// as JunosHostDropTCPReset, the RST the runtime sends for a TCP deny.
 		var prog JunosHostDenyProgram
 		// emitted is the subset of this zone's term keys that actually produced
 		// >=1 rule; nil whenever no program was projected at all (#6705).
 		var emitted map[string]bool
 		if emitsRules && representable {
-			// A cross-dimension permit/deny overlap (a narrow-application or
-			// source-excluded permit ahead of a deny) cannot be cleanly rendered
-			// as a `saddr !=` subtraction — the whole program is un-representable
-			// (§5.1). junosHostProjectProgram reports this via ok=false.
-			var ok bool
-			prog, emitted, ok = junosHostProjectProgram(zoneName, ifaceRefs, terms)
-			if !ok {
-				representable = false
-			}
+			// #9504: a permit renders as a return in first-match order, so a
+			// narrow-application, source-excluded or destination-scoped permit
+			// ahead of a deny no longer makes the program un-representable.
+			prog, emitted = junosHostProjectProgram(zoneName, ifaceRefs, terms, zone.TCPRst)
 			prog.IngressNetdevs = netdevs
 			// #5565: scope the fine-eligible-L4 (IKE / ident) exemption to the
 			// SPECIFIC netdevs whose effective per-interface host-inbound set
@@ -319,7 +345,7 @@ func BuildJunosHostDenyProjection(cfg *Config) JunosHostDenyProjection {
 			// Emission is the property the suppression actually claims, so gate on
 			// it directly rather than on the representability that implied it.
 			// No action guard here on purpose: the suppression loop below already
-			// restricts RenderedPolicyKeys to PolicyDeny, so blocking a permit's
+			// restricts RenderedPolicyKeys to deny and reject, so blocking a permit's
 			// key is unobservable. A `t.action == PolicyDeny` condition here read
 			// as load-bearing while no test could distinguish it either way —
 			// mutating it away changed nothing — so it is stated once, where it
@@ -340,7 +366,7 @@ func BuildJunosHostDenyProjection(cfg *Config) JunosHostDenyProjection {
 	}
 
 	for key, n := range appliesEnforceable {
-		if n > 0 && !blockedByUnrep[key] && actionByKey[key] == PolicyDeny {
+		if a := actionByKey[key]; n > 0 && !blockedByUnrep[key] && (a == PolicyDeny || a == PolicyReject) {
 			out.RenderedPolicyKeys[key] = true
 		}
 	}
@@ -414,11 +440,10 @@ func containsZone(zs []string, z string) bool {
 }
 
 // junosHostProjectTerm resolves one policy's match into a representable term. A
-// reject action, scheduler-gated policy, feed-tainted / non-static source or
-// destination, an un-reducible application, or an application scoped to an
-// IPsec/ident exempt tuple all mark the term un-representable. A scoped
-// `match destination-address` is representable for a DENY (rendered as a `daddr`
-// predicate) but NOT for a permit — see the destination block below.
+// scheduler-gated policy, a feed-tainted / non-static source or destination, an
+// un-reducible application, or an application scoped to an IPsec/ident exempt
+// tuple marks the term un-representable. Every action is representable (#9504):
+// deny, reject and permit each keep their verdict in first-match order.
 func junosHostProjectTerm(cfg *Config, key string, p *Policy, feedBound map[string]bool) junosHostTerm {
 	t := junosHostTerm{key: key, action: p.Action, representable: true}
 	// A #5575-poisoned PERMIT contributes no subtraction (#9572). The tolerant
@@ -440,9 +465,10 @@ func junosHostProjectTerm(cfg *Config, key string, p *Policy, feedBound map[stri
 		t.lenientDropped = true
 		return t
 	}
-	// Reject is the §6.5 follow-up slice; scheduler-gated policies are
-	// time-windowed and cannot be an always-on static rule (§6.2).
-	if p.Action == PolicyReject || p.SchedulerName != "" {
+	// Scheduler-gated policies are time-windowed and cannot be an always-on
+	// static rule (§6.2). A permit is no exception: rendered as an always-on
+	// return it would carve later denies outside its window.
+	if p.SchedulerName != "" {
 		t.representable = false
 	}
 	// Source resolution (static-only, feed-untainted).
@@ -461,22 +487,15 @@ func junosHostProjectTerm(cfg *Config, key string, p *Policy, feedBound map[stri
 	// Rust/policymatch evaluation of that policy matches nothing — so the live
 	// firewall-local address set is NOT needed to render it correctly.
 	//
-	// A PERMIT (or reject) with a SCOPED destination stays un-representable: a
-	// permit is projected only as a `saddr !=` SUBTRACTION of later denies
-	// (§5.1), which cannot express a carve that is also destination-scoped.
-	// Leaving it un-representable keeps the whole-program gate conservative — the
-	// zone emits nothing and every one of its policies keeps the #4168 warning —
-	// rather than silently widening a later deny past the permit.
+	// The same holds for a PERMIT or a REJECT (#9504): a destination-scoped
+	// permit renders as a return carrying the same `daddr` predicate, so its
+	// carve of a later deny is exactly as wide as authored.
 	dv4, dv6, dAnyV4, dAnyV6, dok := junosHostResolveAddrSet(cfg, p.Match.DestinationAddresses, feedBound)
 	if !dok {
 		t.representable = false
 	}
 	t.dstV4, t.dstV6, t.dstAnyV4, t.dstAnyV6 = dv4, dv6, dAnyV4, dAnyV6
 	t.dstExcluded = p.Match.DestinationAddressExcluded
-	if p.Action != PolicyDeny &&
-		(junosHostAddrScoped(p.Match.DestinationAddresses) || p.Match.DestinationAddressExcluded) {
-		t.representable = false
-	}
 	// Application resolution.
 	l4, appAny, appOK := junosHostResolveApplications(cfg, p.Match.Applications)
 	if !appOK {
@@ -486,117 +505,108 @@ func junosHostProjectTerm(cfg *Config, key string, p *Policy, feedBound map[stri
 	return t
 }
 
-// junosHostProjectProgram builds the DROP-only, set-subtracted rule lists for a
-// representable ingress-zone program. ok=false when the program requires a
-// cross-dimension permit/deny subtraction that cannot be cleanly rendered (a
-// narrow-application or source-excluded permit ahead of a deny) — the whole
-// program is then un-representable and the caller warns (§5.1).
-func junosHostProjectProgram(zone string, ifaceRefs []string, terms []junosHostTerm) (JunosHostDenyProgram, map[string]bool, bool) {
+// junosHostProjectProgram renders a representable ingress-zone program as one
+// first-match rule list per family (#9504). Every term keeps its authored
+// verdict (junosHostTermVerdict), so a permit ahead of a deny carves it the way
+// the runtime does, in any dimension: the permit's rule returns from the
+// subchain before the deny's rule is reached. A packet no rule matches returns
+// as well, which is the runtime's deliver-on-no-match lifeline.
+//
+// Two refinements shorten the lists without changing any verdict:
+//   - once a permit's rule returns EVERY packet of a family (application any,
+//     every source, every destination), no later rule of that family can match
+//     and none is emitted. That is also what keeps #6705's warning on a deny the
+//     permit shadows: the deny emitted nothing, so nothing enforces it.
+//   - trailing returns are dropped: a return with nothing after it is the
+//     subchain's own end.
+func junosHostProjectProgram(zone string, ifaceRefs []string, terms []junosHostTerm, tcpRst bool) (JunosHostDenyProgram, map[string]bool) {
 	prog := JunosHostDenyProgram{
 		Zone:          zone,
 		InterfaceRefs: ifaceRefs,
 		Representable: true,
 	}
-	// emitted records the term keys that contributed AT LEAST ONE rule to this
-	// program. A deny term can be fully representable and still project nothing
-	// — an earlier application-any permit for every source shadows it
-	// (junosHostBuildRule's permitAll arm), its application resolves entirely to
-	// the other family, or its address match is the #5828 degenerate empty set.
-	// The caller needs that distinction because "representable" and "enforced"
-	// are different properties: without it a deny that emitted zero rules still
+	// emitted records the term keys that contributed AT LEAST ONE rule. A deny
+	// term can be fully representable and still project nothing — a permit ahead
+	// of it returns every packet, its application resolves entirely to the other
+	// family, or its address match is the #5828 degenerate empty set. The caller
+	// needs that distinction because "representable" and "enforced" are
+	// different properties: without it a deny that emitted zero rules still
 	// counted as rendered and had its #4168 warning suppressed, so the operator
 	// got neither the enforcement nor the diagnostic (#6705).
 	emitted := map[string]bool{}
-	// Accumulated earlier-permit source sets (per family) that carve later
-	// denies via `saddr !=`. A permit that permits ALL sources shadows every
-	// later deny.
-	var permitV4, permitV6 []string
-	permitAllV4, permitAllV6 := false, false
-	sawDeny := false
+	var doneV4, doneV6 bool
 	for _, t := range terms {
 		if t.action == PolicyPermit && t.lenientDropped {
 			continue // #9572: a #5575-poisoned permit carves nothing.
 		}
-		if t.action == PolicyPermit {
-			// A permit can only be projected as a source SUBTRACTION of later
-			// denies. That is faithful ONLY for an application-any, non-excluded
-			// permit (its carve-out is exactly its source set on every later
-			// deny's domain). A narrow-application or source-excluded permit is a
-			// cross-dimension carve nft cannot express as one `saddr !=` — if any
-			// deny follows it, the program is un-representable. A trailing permit
-			// with no following deny renders nothing (its "deny non-permitted"
-			// half is the §6.5 follow-up; that policy keeps the #4168 warning
-			// because it is a PERMIT, never suppressed).
-			if !t.appAny || t.srcExcluded {
-				if sawDeny {
-					return JunosHostDenyProgram{}, nil, false
-				}
-				// No deny yet: a later deny would make this un-representable.
-				// Record a poison flag by shadowing nothing but forcing the check
-				// on the next deny.
-				permitV4 = append(permitV4, junosHostPoison)
-				permitV6 = append(permitV6, junosHostPoison)
-				continue
+		verdict := junosHostTermVerdict(t.action, tcpRst)
+		add := func(family string, rules *[]JunosHostDenyRule, done *bool) {
+			if *done {
+				return
 			}
-			if t.srcAnyV4 {
-				permitAllV4 = true
-			} else {
-				permitV4 = append(permitV4, t.srcV4...)
+			r, ok := junosHostBuildRule(family, t, verdict)
+			if !ok {
+				return
 			}
-			if t.srcAnyV6 {
-				permitAllV6 = true
-			} else {
-				permitV6 = append(permitV6, t.srcV6...)
-			}
-			continue
-		}
-		// action deny.
-		sawDeny = true
-		if junosHostHasPoison(permitV4) || junosHostHasPoison(permitV6) {
-			return JunosHostDenyProgram{}, nil, false
-		}
-		if r, ok := junosHostBuildRule("ip", t, permitV4, permitAllV4); ok {
-			prog.RulesV4 = append(prog.RulesV4, r)
+			*rules = append(*rules, r)
 			emitted[t.key] = true
-			if t.appAny {
+			if verdict == JunosHostReturn {
+				*done = junosHostRuleMatchesFamily(r)
+			} else if t.appAny {
 				prog.HasApplicationAnyDeny = true
 			}
 		}
-		if r, ok := junosHostBuildRule("ip6", t, permitV6, permitAllV6); ok {
-			prog.RulesV6 = append(prog.RulesV6, r)
-			emitted[t.key] = true
-			if t.appAny {
-				prog.HasApplicationAnyDeny = true
-			}
-		}
+		add("ip", &prog.RulesV4, &doneV4)
+		add("ip6", &prog.RulesV6, &doneV6)
 	}
-	return prog, emitted, true
+	prog.RulesV4 = junosHostTrimTrailingReturns(prog.RulesV4)
+	prog.RulesV6 = junosHostTrimTrailingReturns(prog.RulesV6)
+	return prog, emitted
 }
 
-// junosHostPoison is a sentinel accumulated for a cross-dimension permit so a
-// following deny (which cannot cleanly subtract it) forces the whole program
-// un-representable.
-const junosHostPoison = "\x00poison\x00"
-
-func junosHostHasPoison(in []string) bool {
-	for _, v := range in {
-		if v == junosHostPoison {
-			return true
-		}
+// junosHostTermVerdict maps a term's action to its rule verdict on an ingress
+// zone. A deny on a `tcp-rst` zone answers TCP with a RST, as the runtime's
+// enqueue_deny_reply does; on any other zone it is silent.
+func junosHostTermVerdict(action PolicyAction, tcpRst bool) JunosHostVerdict {
+	switch {
+	case action == PolicyPermit:
+		return JunosHostReturn
+	case action == PolicyReject:
+		return JunosHostReject
+	case tcpRst:
+		return JunosHostDropTCPReset
+	default:
+		return JunosHostDrop
 	}
-	return false
 }
 
-// junosHostBuildRule projects one deny term to a single-family DROP rule,
-// applying the earlier-permit source subtraction. Returns ok=false when the
-// family's match resolves to "match nothing" (a constrained positive source or
-// destination with no prefix of this family, or a degenerate `any`+excluded set)
-// or when an earlier permit-all shadows it.
-func junosHostBuildRule(family string, t junosHostTerm, permit []string, permitAll bool) (JunosHostDenyRule, bool) {
-	if permitAll {
-		// Every source is permitted ahead of this deny -> nothing to drop.
-		return JunosHostDenyRule{}, false
+// junosHostRuleMatchesFamily reports whether a rule matches every packet of its
+// family: no L4 constraint and no source or destination predicate.
+// junosHostProjectAddrMatch never sets SrcAny (or DstAny) together with the
+// excluded flag, so the two wildcard bits are the whole test.
+func junosHostRuleMatchesFamily(r JunosHostDenyRule) bool {
+	return len(r.L4) == 0 && r.SrcAny && r.DstAny
+}
+
+// junosHostTrimTrailingReturns drops the returns at the end of a family's rule
+// list: with nothing after them they only restate the subchain's end.
+func junosHostTrimTrailingReturns(rules []JunosHostDenyRule) []JunosHostDenyRule {
+	n := len(rules)
+	for n > 0 && rules[n-1].Verdict == JunosHostReturn {
+		n--
 	}
+	if n == 0 {
+		return nil
+	}
+	return rules[:n]
+}
+
+// junosHostBuildRule projects one term to a single-family rule carrying the
+// given verdict. Returns ok=false when the family's match resolves to "match
+// nothing": a constrained positive source or destination with no prefix of this
+// family, a degenerate `any`+excluded set, or an application entirely of the
+// other family.
+func junosHostBuildRule(family string, t junosHostTerm, verdict JunosHostVerdict) (JunosHostDenyRule, bool) {
 	var src, dst []string
 	var srcAny, dstAny bool
 	if family == "ip" {
@@ -608,7 +618,7 @@ func junosHostBuildRule(family string, t junosHostTerm, permit []string, permitA
 	}
 	l4 := junosHostFamilyL4(family, t.l4)
 	if !t.appAny && len(l4) == 0 {
-		// The deny's application resolved entirely to the OTHER family (e.g. an
+		// The term's application resolved entirely to the OTHER family (e.g. an
 		// ICMPv6 app on the inet chain) -> matches nothing here.
 		return JunosHostDenyRule{}, false
 	}
@@ -624,7 +634,7 @@ func junosHostBuildRule(family string, t junosHostTerm, permit []string, permitA
 	srcEmptyBoth := !t.srcAnyV4 && !t.srcAnyV6 && len(t.srcV4) == 0 && len(t.srcV6) == 0
 	dstEmptyBoth := !t.dstAnyV4 && !t.dstAnyV6 && len(t.dstV4) == 0 && len(t.dstV6) == 0
 
-	rule := JunosHostDenyRule{Family: family, L4: l4}
+	rule := JunosHostDenyRule{Family: family, L4: l4, Verdict: verdict}
 	matchAny, matchExcluded, set, ok := junosHostProjectAddrMatch(src, srcAny, t.srcExcluded, srcEmptyBoth)
 	if !ok {
 		return JunosHostDenyRule{}, false
@@ -635,9 +645,6 @@ func junosHostBuildRule(family string, t junosHostTerm, permit []string, permitA
 		return JunosHostDenyRule{}, false
 	}
 	rule.DstAny, rule.DstExcluded, rule.Dst = matchAny, matchExcluded, set
-	if permitFam := junosHostDedup(permit); len(permitFam) > 0 {
-		rule.PermitSubtract = permitFam
-	}
 	return rule, true
 }
 
@@ -1048,20 +1055,9 @@ func junosHostZoneNetdevCoverageMap(cfg *Config) map[string]junosHostZoneNetdevC
 	sort.Strings(ifNames)
 	// Pass 1: ref -> netdev for every physical and unit row, so the VRF member
 	// list resolves through the SAME name rule the candidates use.
-	netdevByRef := map[string]string{}
-	for _, ifName := range ifNames {
-		iface := cfg.Interfaces.Interfaces[ifName]
-		if iface == nil {
-			continue
-		}
-		netdevByRef[ifName] = junosHostLinuxNameWith(cfg, ifName, nil, tunNames)
-		for un, unit := range iface.Units {
-			if unit == nil {
-				continue
-			}
-			netdevByRef[fmt.Sprintf("%s.%d", ifName, un)] = junosHostLinuxNameWith(cfg, ifName, unit, tunNames)
-		}
-	}
+	netdevByRef := junosHostNetdevByRef(cfg, func(ifName string, unit *InterfaceUnit) string {
+		return junosHostLinuxNameWith(cfg, ifName, unit, tunNames)
+	})
 	enslaved := junosHostVRFEnslavedNetdevs(cfg, netdevByRef)
 	// Pass 2: the candidate walk. One "row" per physical interface + one per
 	// unit, mirroring the dataplane interface snapshot.
@@ -1233,21 +1229,6 @@ func junosHostZoneByInterface(cfg *Config) map[string]string {
 					}
 				}
 			}
-		}
-	}
-	return out
-}
-
-func junosHostDedup(in []string) []string {
-	if len(in) == 0 {
-		return nil
-	}
-	seen := map[string]bool{}
-	var out []string
-	for _, v := range in {
-		if v != "" && !seen[v] {
-			seen[v] = true
-			out = append(out, v)
 		}
 	}
 	return out

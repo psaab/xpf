@@ -99,7 +99,18 @@ func (m *Manager) ManualFailover(rgID int) (FailoverOutcome, error) {
 	preHook := m.preManualFailoverFn
 	retryTimeout := m.preManualFailoverRetryTimeout
 	retryInterval := m.preManualFailoverRetryInterval
+	staleFn := m.peerConfigStaleFn
 	m.mu.Unlock()
+
+	// #9569: this demotes the local node, so the peer is what gets promoted.
+	// Refuse when it did not apply the newest config this node sent, as the
+	// node-targeted form already refuses through the peer's transfer readiness.
+	if err := peerConfigStaleRefusal(staleFn, fmt.Sprintf("manual failover of redundancy group %d", rgID)); err != nil {
+		m.mu.Lock()
+		delete(m.failoverInProgress, rgID)
+		m.mu.Unlock()
+		return FailoverApplied, err
+	}
 
 	var preHookErr error
 	if preHook != nil {
@@ -184,6 +195,16 @@ func (m *Manager) ManualFailover(rgID int) (FailoverOutcome, error) {
 // to become secondary. Used by ISSU to drain traffic to the peer before upgrade.
 // Returns an error if the peer is not alive (no peer to take over).
 func (m *Manager) ForceSecondary() error {
+	// #9569: forcing every RG secondary promotes the peer for all of them (the
+	// ISSU drain). Refuse when it did not apply the newest config this node
+	// sent. The predicate is read under the lock and evaluated outside it.
+	m.mu.Lock()
+	staleFn := m.peerConfigStaleFn
+	m.mu.Unlock()
+	if err := peerConfigStaleRefusal(staleFn, "to force secondary"); err != nil {
+		return err
+	}
+
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -671,7 +692,18 @@ func (m *Manager) ManualFailoverBatch(rgIDs []int) (BatchFailoverResult, error) 
 	preHook := m.preManualFailoverFn
 	retryTimeout := m.preManualFailoverRetryTimeout
 	retryInterval := m.preManualFailoverRetryInterval
+	staleFn := m.peerConfigStaleFn
 	m.mu.Unlock()
+
+	// #9569: the same gate as ManualFailover, for every RG in the batch.
+	if err := peerConfigStaleRefusal(staleFn, fmt.Sprintf("manual failover of redundancy groups %v", ids)); err != nil {
+		m.mu.Lock()
+		for _, rgID := range ids {
+			delete(m.failoverInProgress, rgID)
+		}
+		m.mu.Unlock()
+		return res, err
+	}
 
 	var preHookErr error
 	if preHook != nil {

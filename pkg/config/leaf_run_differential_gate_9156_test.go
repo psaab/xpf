@@ -189,25 +189,38 @@ func TestLeafRunDifferentialGate9156(t *testing.T) {
 	flatCompared := 0
 	reachable := 0
 	for _, s := range sites {
+		// #9792: a fixture supplies what the generated placeholders cannot
+		// (leaf_run_fixtures_9792_test.go). The zero value changes nothing.
+		fx := leafRunFixtures9156[s.key()]
+		container := s.container
+		if fx.container != nil {
+			container = fx.container
+		}
 		hv, ok := leafValue9156(s.headNode)
+		if fx.headVal != "" {
+			hv, ok = fx.headVal, true
+		}
 		if !ok {
 			skipNoVal = append(skipNoVal, s.key()+" (head)")
 			continue
 		}
 		tv, ok := leafValue9156(s.tailNode)
+		if fx.tailVal != "" {
+			tv, ok = fx.tailVal, true
+		}
 		if !ok {
 			skipNoVal = append(skipNoVal, s.key()+" (tail)")
 			continue
 		}
-		ctx := contextFor(s.container)
+		ctx := contextFor(container) + fx.ctx
 		headStmt := statement9156(s.head, s.headNode, hv)
 		tailStmt := statement9156(s.tail, s.tailNode, tv)
 
 		// ONE LINE: the run. The braced rendering of a flat-set run is the
 		// nested chain SetPath builds, which is what the reader sees.
-		runText := nest(s.container, ctx+headStmt+" "+tailStmt+";")
+		runText := fx.render(container, ctx+headStmt+" "+tailStmt+";")
 		// SEPARATE LINES: the oracle.
-		sepText := nest(s.container, ctx+headStmt+"; "+tailStmt+";")
+		sepText := fx.render(container, ctx+headStmt+"; "+tailStmt+";")
 
 		sep, sepErr := gateCompileBrace(sepText)
 		if sepErr != nil {
@@ -234,8 +247,12 @@ func TestLeafRunDifferentialGate9156(t *testing.T) {
 		// and lose on the other. #9156's own defect is on the FLAT-SET axis, and
 		// the braced-only version of this gate stayed GREEN when that fix was
 		// reverted: it was blind to its own subject.
-		flatSep, flatSepErr := gateCompileFlatSet9156(s.container, ctx, headStmt, tailStmt, false)
-		flatRun, flatRunErr := gateCompileFlatSet9156(s.container, ctx, headStmt, tailStmt, true)
+		flatBase := ""
+		if fx.wrap != nil || fx.preamble != "" || strings.TrimSpace(ctx) != "" {
+			flatBase = fx.render(container, ctx)
+		}
+		flatSep, flatSepErr := gateCompileFlatSet9156(container, flatBase, headStmt, tailStmt, false)
+		flatRun, flatRunErr := gateCompileFlatSet9156(container, flatBase, headStmt, tailStmt, true)
 		flatDriven := flatSepErr == nil && flatRunErr == nil
 		if !flatDriven {
 			skipFlat = append(skipFlat, s.key())
@@ -277,7 +294,7 @@ func TestLeafRunDifferentialGate9156(t *testing.T) {
 		//
 		// Hand-measuring 26 rows one at a time to learn that is the expensive
 		// way to ask a question the walker can answer for every row at once.
-		if strictAdmitsLeafRun9156(s.container, ctx, headStmt, tailStmt) {
+		if strictAdmitsLeafRun9156(runText) {
 			axis += " {strict-admits}"
 			reachable++
 		} else {
@@ -344,6 +361,7 @@ func TestLeafRunDifferentialGate9156(t *testing.T) {
 	report("one-line form did not compile", skipRunNC)
 	report("ORACLE did not compile", skipSepNC)
 	report("flat-set arm not compilable (braced arm still compared)", skipFlat)
+	checkLeafRunFixtureOutcomes9792(t, skipNoVal, skipRunNC, skipSepNC)
 
 	// RATCHET. The register below is a DEBT REGISTER, not an acceptance: the
 	// gate fails on any container that starts differing AND on any recorded one
@@ -568,25 +586,16 @@ func TestTunnelSchemaResolvesBothPositions9156(t *testing.T) {
 // starts agreeing while still listed — so the register cannot outlive the
 // defect it describes.
 var leafRunKnownDiffer9156 = map[string]bool{
-	"bridge-domains xpfname [domain-type -> routing-interface] {braced+flat} {lenient-only}":                                                   true,
-	"class-of-service interfaces xpfarg [output-traffic-control-profile -> priority-low-min-share] {braced+flat} {lenient-only}":               true,
-	"forwarding-options sampling instance xpfarg family inet output flow-server xpfarg [source-address -> port] {braced+flat} {lenient-only}":  true,
-	"forwarding-options sampling instance xpfarg family inet6 output flow-server xpfarg [source-address -> port] {braced+flat} {lenient-only}": true,
-	"interfaces xpfname [bandwidth -> description] {braced+flat} {lenient-only}":                                                               true,
-	"interfaces xpfname aggregated-ether-options [link-speed -> minimum-links] {braced+flat} {lenient-only}":                                   true,
-	"interfaces xpfname gigether-options [802.3ad -> redundant-parent] {braced+flat} {lenient-only}":                                           true,
-	"interfaces xpfname tunnel wireguard [private-key -> listen-port] {braced+flat} {lenient-only}":                                            true,
-	"interfaces xpfname tunnel wireguard peer xpfarg [endpoint -> persistent-keepalive] {braced+flat} {lenient-only}":                          true,
-	"protocols bgp group xpfarg neighbor xpfarg [authentication-key -> description] {braced+flat} {lenient-only}":                              true,
-	"routing-instances xpfname [description -> instance-type] {braced+flat} {lenient-only}":                                                    true,
-	"routing-instances xpfname protocols bgp group xpfarg neighbor xpfarg [authentication-key -> description] {braced+flat} {lenient-only}":    true,
-	"security dynamic-address feed-server xpfarg [hostname -> hold-interval] {braced+flat} {lenient-only}":                                     true,
-	"security flow traceoptions packet-filter xpfarg [destination-prefix -> protocol] {braced+flat} {lenient-only}":                            true,
-	"security nat nat64 rule-set xpfarg [prefix -> source-pool] {braced+flat} {lenient-only}":                                                  true,
-	"security screen ids-option xpfarg limit-session [destination-ip-based -> source-ip-based] {braced+flat} {lenient-only}":                   true,
-	"security screen ids-option xpfarg tcp syn-flood [alarm-threshold -> attack-threshold] {braced+flat} {lenient-only}":                       true,
-	"security zones security-zone xpfarg [description -> screen] {braced+flat} {lenient-only}":                                                 true,
-	"system ntp server xpfarg [routing-instance -> key] {braced} {lenient-only}":                                                               true,
+	// #9792 part 2 REMOVED eight security rows by applying #9235's lenient-path
+	// remedy at their readers (flat_run_residue_9792.go): screen tcp syn-flood,
+	// screen limit-session, security-zone [description -> screen], both policy
+	// [description -> scheduler-name] rows, nat64 rule-set, dynamic-address
+	// feed-server, and flow traceoptions packet-filter.
+	// #9792 part 2 REMOVED the remaining sixteen rows the same way (the five
+	// part 1 fixtured, and eleven more). The routing-instance, system and
+	// interface readers take expandLeafHeadedRuns9792, because a whole-body
+	// expansion there hoisted a nested BGP `description` to the instance and
+	// added two rows.
 	// #9235 REMOVED the two `static-binding` rows that stood here:
 	//
 	//	system services dhcp-local-server   group <g> pool <p> static-binding <m>
@@ -610,10 +619,15 @@ var leafRunKnownDiffer9156 = map[string]bool{
 // that the container #9156 actually FIXED is not in it — a fix that left its
 // own row behind would be indistinguishable from no fix at all.
 func TestLeafRunRegisterIsNotVacuous9156(t *testing.T) {
-	if n := len(leafRunKnownDiffer9156); n == 0 {
-		t.Fatalf("the register is empty; either every container was fixed (remove " +
-			"this cell's premise deliberately) or the gate stopped finding rows")
-	}
+	// #9792 part 2 fixed every registered row, so the register is EMPTY, and
+	// this cell's former first assertion ("the register is non-empty") is
+	// removed deliberately, as its own failure text prescribed. An empty
+	// register does not mean the gate stopped finding rows:
+	// TestLeafRunDifferentialGateDiscriminates9156 drives a known differing
+	// container through the gate and fails if it is not reported. The
+	// properties below still hold for an empty register. For the "consulted"
+	// property, a fabricated registered row is installed for the duration of
+	// the cell, because the real register has none to lend.
 	for k := range leafRunKnownDiffer9156 {
 		if strings.HasPrefix(k, "interfaces xpfname tunnel [") {
 			t.Errorf("%q is registered as a known difference, but it is the container "+
@@ -625,11 +639,9 @@ func TestLeafRunRegisterIsNotVacuous9156(t *testing.T) {
 	// gate accept every difference as recorded left the whole suite green while
 	// this cell still passed on size alone — so the decision is driven here with
 	// a fabricated input instead of being inferred from the gate's colour.
-	var anyRecorded string
-	for k := range leafRunKnownDiffer9156 {
-		anyRecorded = k
-		break
-	}
+	const anyRecorded = "xpf-registered-fixture [xpfhead -> xpftail] {flat}"
+	leafRunKnownDiffer9156[anyRecorded] = true
+	t.Cleanup(func() { delete(leafRunKnownDiffer9156, anyRecorded) })
 	const fabricated = "xpf-not-a-real-container [xpfhead -> xpftail] {flat}"
 	unrec, _ := ratchetLeafRunDiffers9156([]string{fabricated, anyRecorded})
 	if len(unrec) != 1 || unrec[0] != fabricated {

@@ -241,6 +241,19 @@ distinction).
   surfaces (local CLI, remote CLI, gRPC, REST) on top of these primitives —
   the store wrappers `configstore.Store.DeactivateFromInput` /
   `ActivateFromInput` route through the same `applyEditLine` verb switch.
+  A toggle addressed to ONE member of a node that names several
+  (`deactivate ... security-zone zga` against `security-zone [ zga zgb ]`)
+  is refused rather than prefix-matching and toggling the whole node,
+  matching #8992's delete refusal (#9793, `deactivate_packed_member_9793.go`).
+  Two addresses still toggle the node: a path naming every key (the grouped
+  line `display set` emits) and a path ending at a statement whose own
+  content is packed behind it (`security-zone trust screen edge tcp-rst;`).
+  A LATER member of a bracketed group (`zgb` in `security-zone [ zga zgb ]`)
+  resolves to the group for a path-scoped `show`, as the first member always
+  did, and `delete`, `deactivate` and `activate` refuse it with the same
+  re-author guidance instead of reporting no node (#9799). Bracket provenance
+  (`Node.KeyBracketed`) decides membership, so a packed body is never read as
+  a member.
 
 ## Callers
 
@@ -1669,3 +1682,30 @@ application terms are lowered separately
 exactly with trailing `Pad [N]byte` fields. cilium/ebpf serializes map
 values in native endian, not big-endian, so use `binary.NativeEndian`
 when packing IP addresses (already in network byte order on the wire).
+
+**Group expansion of zone statements written as leaves (#9801, #9831):**
+`mergeNodes` (`ast_groups.go`) treats `security-zone trust;` as the zone it
+names. Both rules apply only to `security-zone` statements directly under
+`security zones` (`group_merge_zone_leaf_9801.go`).
+- A group's zone statement is matched against the inline statement naming the
+  same zone (`zoneGroupLeafPeer9831`). Before #9831 it matched on the keyword
+  alone, so an inline `security-zone trust;` overrode, and dropped, a group's
+  `security-zone zga;`.
+- A group zone statement that carries keys past the zone name is not
+  overridden by that zone's inline statement, because the override would drop
+  the extra keys. Examples are `security-zone [ zga zgb ];` and a mistyped
+  `security-zone trust scren edge;`. A braced zone takes a packed statement
+  through #7648; otherwise the statement is adopted, and #9656 judges it as it
+  would the same text written inline.
+- A `<*>` group reaches a zone written as a leaf, which becomes the empty
+  container its braced spelling is (`zoneLeafTakesWildcard9801`). Before #9801
+  the wildcard merge visited only non-leaf destinations, so
+  `security-zone trust;` lost a group's screen that `security-zone trust { }`
+  took.
+- Every other named instance keeps the keyword override. An interface or
+  routing instance written as a leaf compiles no instance at all (#9838). A
+  schema-generic identity rule was tried and withdrawn. It compiled a
+  duplicate next hop for a value list (`next-hop [ a b ]`), misclassified
+  `multi` named containers such as `class-of-service schedulers`, and split
+  keys the compiler canonicalises (`ospf area 0` against `area 0.0.0.0`). That
+  work is #9859.

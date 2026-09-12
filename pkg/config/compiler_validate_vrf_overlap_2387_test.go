@@ -55,7 +55,7 @@ import (
 // The mutation that ISOLATES the promise dimension is a TAIL-ONLY substitution:
 // replace "…may cross-forward. See #2387 for the status of this limitation"
 // with "…may cross-forward until the session identity is VRF-aware", KEEPING
-// the "the session identity carries no routing-instance discriminator, so"
+// the "flows PBR steers in from default-instance ingress share routing domain 0 in the session identity, so"
 // clause. That reds TestVRFOverlapWarningStatesStatusNotPromise twice over — the
 // message no longer ends with vrfOverlapStatusTail, and "until" is on the
 // blocklist — while TestVRFOverlapWarningKeepsDiagnosticSubstance stays GREEN,
@@ -241,7 +241,7 @@ func TestVRFOverlapV6NoCrossFamilyFalsePositive(t *testing.T) {
 // appended promise satisfies `HasSuffix` again. It takes deliberate effort, so
 // treat it as a limit on what the pin PROVES rather than a gap to plug.
 //
-// It deliberately starts AFTER the "…discriminator, so " clause. That makes the
+// It deliberately starts AFTER the "…session identity, so " clause. That makes the
 // two tests SEPARABLE — not orthogonal, and the difference is measured. Deleting
 // the diagnosis reds TestVRFOverlapWarningKeepsDiagnosticSubstance and only that
 // test, so the substance check is not a second spelling of this one. The converse
@@ -490,7 +490,7 @@ func TestVRFOverlapWarningStatesStatusNotPromise(t *testing.T) {
 // TestVRFOverlapWarningKeepsDiagnosticSubstance is the negative control for
 // TestVRFOverlapWarningStatesStatusNotPromise. Dropping the promise must not
 // cost the operator the diagnosis: the warning still has to say WHAT is wrong
-// (no routing-instance discriminator in the session identity) and WHAT follows
+// (steered flows share routing domain 0 in the session identity) and WHAT follows
 // from it (colliding 5-tuples MAY cross-forward).
 //
 // What this control actually defends against is GUTTING the warning down to a
@@ -502,7 +502,7 @@ func TestVRFOverlapWarningStatesStatusNotPromise(t *testing.T) {
 // precise about how much that proves — TestVRFOverlapWarnsOnOverlappingRIs also
 // reds there, because that particular gut drops "NOT session-isolated", which it
 // asserts too. The cell where this control is the ONLY red in the file is
-// stripping the "…carries no routing-instance discriminator, so " clause while
+// stripping the "…share routing domain 0 in the session identity, so " clause while
 // leaving the tail intact: promise GREEN, six pre-existing GREEN, this one RED.
 // That is the measurement that makes it load-bearing rather than duplicative.
 //
@@ -572,7 +572,7 @@ func TestVRFOverlapWarningKeepsDiagnosticSubstance(t *testing.T) {
 		// cause with the "no" that makes it a cause.
 		for _, want := range []string{
 			"NOT session-isolated",
-			"the session identity carries no routing-instance discriminator",
+			"flows PBR steers in from default-instance ingress share routing domain 0 in the session identity",
 			"colliding 5-tuples may cross-forward",
 		} {
 			if !strings.Contains(tc.warn, want) {

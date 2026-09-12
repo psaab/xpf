@@ -783,6 +783,7 @@ func compileClassOfService(node *Node, cos *ClassOfServiceConfig, opts compileOp
 // both expose the same knob children, and the interface node's `unit`
 // children are separate nodes that are not read here.
 func parseCoSInterfaceUnitBody(node *Node, unit *CoSInterfaceUnit) {
+	node = expandResolvingRun9792(node, cosInterfaceSchema9792()) // #9792: expand a lenient-path packed run (#9235).
 	if shapingNode := node.FindChild("shaping-rate"); shapingNode != nil {
 		if v := nodeVal(shapingNode); v != "" {
 			unit.ShapingRateBytes = parseBandwidthLimit(v)

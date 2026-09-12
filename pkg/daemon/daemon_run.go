@@ -657,6 +657,20 @@ func (d *Daemon) Run(ctx context.Context) error {
 		d.fabricIPVLANReassertLoop(ctx)
 	}()
 
+	// #9813: the same recovery shape for routing-instance interface-LIST
+	// members. Step 0a and the #6805 late pass bind them, and both run only
+	// from a config apply, so a member netdev re-created outside an apply (a
+	// driver re-probe, a VF reset) or unbound out of band (`ip link set
+	// nomaster`) forwards in the DEFAULT table until the next apply of any
+	// kind. Started unconditionally beside the loop above; its gate is one
+	// netlink name lookup per configured member plus one per instance VRF, and
+	// nothing at all on a config with no routing instances.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		d.riMemberVRFReassertLoop(ctx)
+	}()
+
 	// #6800: the always-on retry owner for an xpf-managed service
 	// configuration file whose RUNTIME reload failed after the file itself
 	// converged (rsyslog drop-ins, chrony sources/threshold). Started

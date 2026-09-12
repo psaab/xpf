@@ -203,6 +203,22 @@ all files stay in `package ipsec`, so the public API is unchanged.
 
   Covered by `terminate_debt_6542_test.go`.
 
+
+- **The teardown record survives an xpfd restart (#9687).** `prevConnNames`
+  and `pendingTerminate` were memory-only, and the daemon builds a fresh
+  `Manager` on every start. A restart between a failed terminate (#6542), a
+  failed reload that deferred a removal (#4898), or a teardown still running,
+  and its retry, forgot the departed connection; strongSwan's SAs survive the
+  restart, so its child SA kept forwarding. `New()` now persists both to
+  `DefaultConnStatePath` (`/var/lib/xpf/ipsec-conn-state.json`,
+  `conn_state_9687.go`) with a durable write at every promotion and every
+  settle. A removal counts as debt from its promotion until its terminate
+  settles, and a fresh `Manager` folds the file in once, at its first
+  promotion. The daemon applies IPsec on every config apply, even with no
+  VPNs, so the first apply after a restart retries the teardown. A missing,
+  unreadable or oversized file is ignored with a warning (the old behaviour),
+  and a failed write is logged rather than failing the apply.
+  `NewWithConfigDir` Managers do not persist.
 - **The diff keys off the RENDERED set, not the raw VPN name (#5494 —
   FLIPS the prior #3941 name-keyed behavior).** `renderConfig` returns the
   EXACT set of connection names it emitted; `Apply` diffs THAT. A VPN that
@@ -855,3 +871,18 @@ all files stay in `package ipsec`, so the public API is unchanged.
   name still collides. Unlike the #4098 gate this does NOT reject the
   config: two selectors with distinct legal Junos names are valid, so the
   fix makes both render (vSRX parity) rather than failing the commit.
+
+## Section names: the #9495 allowlist and render belt
+
+An IPsec VPN name is written raw as a swanctl section header: the connection, the child of a VPN with no traffic selector, the prefix of every other child, and the `ike-<name>` secret.
+
+Measured on the pinned strongSwan (`docs/log/9495.md`):
+- **Whole file unparsable, so every tunnel is lost:** whitespace, `{`, `}`, `#`, `=`, `,`, `"` or `.` in a VPN name.
+- **Structure injection:** `x { children { p { mode = transport } } } y` loads two connections, and the injected setting is applied.
+- **Silent rename:** `:` loads the tunnel under another name (section inheritance).
+- **Refused:** `%` and non-ASCII.
+
+Three pieces close this:
+- **Commit allowlist.** `ipsecname.SectionSafe` accepts only ASCII letters, digits, `-` and `_`. `validateIPsecSectionNamesStrict` refuses anything else at commit and commit-check, naming the VPN. On the tolerant load / peer-sync path it warns instead (`lenientIPsecSectionName`), so a persisted or synced config still boots.
+- **Render belt.** `ipsecname.SectionBreaking` is the narrower set measured to break the file. `renderConfig` skips such a VPN, and its secret with it, and logs a warning, so one hostile persisted name cannot take down the other tunnels. It is deliberately narrower than the allowlist: a name that loads today (for example `a/b`) is refused at commit but keeps rendering when persisted, so an upgrade does not take down a working tunnel.
+- **Selector names.** `ipsecname.ChildBase` maps `.` to `-`, like every other character outside `[A-Za-z0-9_-]`. A dotted selector (`sel` with `t.s`) rendered child `sel-t.s`, which strongSwan could not parse. Such a child never loaded, so no working config changes, and the #9624 collision derivation shares `ChildBase`.

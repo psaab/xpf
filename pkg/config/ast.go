@@ -654,6 +654,25 @@ func navigatePathWidth(nodes []*Node, path []string) ([]*Node, int) {
 					matched = append(matched, n)
 				}
 			}
+			if len(matched) == 0 {
+				// #9799: a LATER member of a bracketed group resolves to the
+				// group node, as its first member always did. See
+				// bracketedLaterMember9799 for why provenance, not key count.
+				var groups []*Node
+				for _, n := range current {
+					if bracketedLaterMember9799(n, keyword, path[i+1]) {
+						groups = append(groups, n)
+					}
+				}
+				if len(groups) > 0 {
+					i += 2
+					if i >= len(path) {
+						return groups, 2
+					}
+					current = unionChildren(groups)
+					continue
+				}
+			}
 			if len(matched) > 0 {
 				consumed := 2
 				// Continue consuming additional key-value pairs from the path

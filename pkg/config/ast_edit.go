@@ -802,6 +802,15 @@ func deletePath(current *[]*Node, path []string, grouped []bool, schema *schemaN
 				"(#8992, #8932)",
 				ErrPathNotFound, strings.Join(path, " "), strings.Join(keys, " "), path[len(path)-1])
 		}
+		// #9799: a LATER member of a bracketed group (`zgb` in `security-zone
+		// [ zga zgb ]`) never matched the walk below and was reported as no
+		// node. It is the same one-line group, so it gets the same guidance.
+		if keys := groupCarryingLaterMember9799(*current, path[i:]); keys != nil {
+			return fmt.Errorf("%w: %q is one member of a group written on one line (%q), and "+
+				"deleting it would remove the others too. Re-author that line with braces "+
+				"around %q, then delete it (#9799, #8992)",
+				ErrPathNotFound, strings.Join(path, " "), strings.Join(keys, " "), path[len(path)-1])
+		}
 	}
 
 	keyword := path[i]
@@ -958,6 +967,14 @@ func (t *ConfigTree) ActivatePathGrouped(path []string, grouped []bool) error {
 func setInactiveAtPath(current *[]*Node, path []string, grouped []bool, schema *schemaNode, i int, inactive bool) error {
 	if i >= len(path) {
 		return fmt.Errorf("path not found")
+	}
+
+	// #9793: refuse a toggle addressed to one member of a grouped or packed
+	// node before the walk below prefix-matches the whole node.
+	if schema != nil {
+		if err := refusePackedMemberToggle(*current, path, i, schema, inactive); err != nil {
+			return err
+		}
 	}
 
 	keyword := path[i]

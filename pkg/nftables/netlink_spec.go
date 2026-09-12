@@ -16,6 +16,8 @@ package nftables
 // so the only thing that differs between oracle and netlink is the
 // rendering-to-kernel step — which the T1 ruleset-parity test pins.
 
+import "github.com/psaab/xpf/pkg/config"
+
 // PortRange mirrors config.PortRange: an inclusive [Lo,Hi] transport-port range
 // (Lo==Hi is a single port).
 type PortRange struct {
@@ -31,6 +33,7 @@ type HostInboundZoneView struct {
 	Protocols      []string
 	V4Addrs        []string
 	V6Addrs        []string
+	IngressNetdevs []string // #9637: see dpuserspace.ZoneHostInboundView
 }
 
 // JunosHostDenyL4 mirrors config.JunosHostDenyL4.
@@ -44,15 +47,15 @@ type JunosHostDenyL4 struct {
 
 // JunosHostDenyRule mirrors config.JunosHostDenyRule.
 type JunosHostDenyRule struct {
-	Family         string // "ip" or "ip6"
-	SrcAny         bool
-	SrcExcluded    bool
-	Src            []string
-	PermitSubtract []string
-	DstAny         bool
-	DstExcluded    bool
-	Dst            []string
-	L4             []JunosHostDenyL4
+	Family      string // "ip" or "ip6"
+	SrcAny      bool
+	SrcExcluded bool
+	Src         []string
+	Verdict     config.JunosHostVerdict // #9504
+	DstAny      bool
+	DstExcluded bool
+	Dst         []string
+	L4          []JunosHostDenyL4
 }
 
 // JunosHostProgram mirrors dpuserspace.JunosHostProgram.

@@ -83,11 +83,19 @@ func TestColdPrimeOwedWhenRuntimeWiredAfterConnect(t *testing.T) {
 		prim.syncSweep()
 	}
 
-	if prim.needColdPrime.Load() {
-		t.Error("#82: the cold-prime obligation is still armed after the runtime became ready — no path re-drives it while the connection stays up")
-	}
 	if got := prim.stats.BulkSyncs.Load(); got != 1 {
-		t.Fatalf("#82: expected exactly one authoritative bulk after the runtime was wired, got %d", got)
+		t.Fatalf("#82: expected exactly one authoritative bulk after the runtime was wired, got %d (none means no path re-drives the owed prime while the connection stays up)", got)
+	}
+	// #9626: the obligation is discharged by the peer's BulkAck, not by the
+	// write. It is still owed here, and the ack for this bulk clears it.
+	epoch, _, ok := prim.PendingBulkAck()
+	if !ok || !prim.needColdPrime.Load() {
+		t.Fatalf("#82/#9626: after the re-drive, want a pending ack and a still-owed obligation, got pending=%v owed=%v",
+			ok, prim.needColdPrime.Load())
+	}
+	prim.handleMessage(cap, syncMsgBulkAck, epochPayload9626(epoch))
+	if prim.needColdPrime.Load() {
+		t.Error("#82: the cold-prime obligation is still armed after the peer acknowledged the re-driven bulk")
 	}
 
 	standbyDP := &mockSweepDP{

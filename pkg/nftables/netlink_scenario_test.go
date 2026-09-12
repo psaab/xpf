@@ -90,10 +90,15 @@ func hostInboundScenario() HostInboundSpec {
 				IdentResetNetdevs:     []string{"ge-0-0-2"},
 				RulesV4: []JunosHostDenyRule{
 					{
-						// application any, positive saddr set + permit subtraction.
-						Family:         "ip",
-						Src:            []string{"192.0.2.0/24", "198.51.100.7"},
-						PermitSubtract: []string{"192.0.2.10"},
+						// #9504: an earlier permit's carve, rendered as a return.
+						Family:  "ip",
+						Src:     []string{"192.0.2.10"},
+						Verdict: config.JunosHostReturn,
+					},
+					{
+						// application any, positive saddr set.
+						Family: "ip",
+						Src:    []string{"192.0.2.0/24", "198.51.100.7"},
 					},
 					{
 						// narrow-app tcp dport, source-excluded saddr.

@@ -542,6 +542,13 @@ type compileOpts struct {
 	// lenientIPsecManualKey.
 	lenientIPsecSANameDisplay bool
 
+	// lenientIPsecSectionName (#9495) downgrades the IPsec VPN section-name
+	// allowlist reject (validateIPsecSectionNamesStrict) to a warning on the
+	// tolerant load / peer-sync paths, so a persisted or synced config still
+	// boots. A name that would actually break the swanctl file is skipped at
+	// render (pkg/ipsec), so the other tunnels keep loading.
+	lenientIPsecSectionName bool
+
 	// lenientLogProfileStreamRef (#2008 H7) downgrades the
 	// `security log profile <name> stream-name <stream>` cross-reference
 	// from a hard error to a warning on the tolerant load / peer-sync
@@ -1381,6 +1388,12 @@ type compileOpts struct {
 	// the MAC), so a leniently-loaded bad binding is inert. Same doctrine as
 	// lenientPolicyMatchAddress.
 	lenientDHCPStaticBindings bool
+	// lenientDHCPPoolSubnets (#9785) downgrades the duplicate pool-subnet gate
+	// (validateDHCPPoolSubnetsUniqueStrict) to a cfg.Warnings entry on the
+	// tolerant load / peer-sync paths, so a persisted config carrying two pools
+	// with one subnet still boots (#1960). The Kea renderer skips the later
+	// pool, so Kea still loads.
+	lenientDHCPPoolSubnets bool
 	// lenientWireguardPeers (#1434 multi-peer) downgrades the WireGuard
 	// per-peer gate (validateWireguardPeersStrict) from a hard compile
 	// error to a cfg.Warnings entry. The strict commit / commit-check
@@ -2325,6 +2338,10 @@ type compileOpts struct {
 	// already-persisted config carrying one still boots (#1960), with the
 	// widening flagged rather than silent.
 	lenientEmptySecurityIdentity bool
+	// lenientZoneStatementTail9656 (#9656) downgrades to a warning the refusal
+	// of a security-zone statement with no braced body whose keys after the zone
+	// name would be dropped, on the tolerant load and peer-sync paths (#1960).
+	lenientZoneStatementTail9656 bool
 	// lenientPolicyCommunityRef (#2881) downgrades the policy community
 	// cross-reference gate (validatePolicyCommunityReferencesStrict) from a
 	// hard compile error to a cfg.Warnings entry. A policy term's
@@ -2773,6 +2790,7 @@ func lenientCompileOpts() compileOpts {
 		lenientIPsecProposalProtocol:           true,
 		lenientIPsecManualKey:                  true,
 		lenientIPsecSANameDisplay:              true,
+		lenientIPsecSectionName:                true,
 		lenientLogProfileStreamRef:             true,
 		lenientAuthTypeAbsent:                  true,
 		lenientMultiLeafSelfRepeat:             true,
@@ -2831,6 +2849,7 @@ func lenientCompileOpts() compileOpts {
 		lenientPolicyRouteMapSeq:               true,
 		lenientRouteDispositionConflict:        true,
 		lenientDHCPStaticBindings:              true,
+		lenientDHCPPoolSubnets:                 true,
 		lenientWireguardPeers:                  true,
 		lenientTunnelOuterFamily:               true,
 		lenientIpipTunnelMode:                  true,
@@ -2892,6 +2911,7 @@ func lenientCompileOpts() compileOpts {
 		lenientPolicyValuelessMatch:            true,
 		lenientFirewallValuelessFrom:           true,
 		lenientEmptySecurityIdentity:           true,
+		lenientZoneStatementTail9656:           true,
 		lenientPolicyCommunityRef:              true,
 		lenientSNMPv3KeyMaterial:               true,
 		lenientSNMPv3SecurityKeyword:           true,

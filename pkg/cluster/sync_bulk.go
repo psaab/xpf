@@ -187,6 +187,10 @@ func (s *SessionSync) bulkSyncWindow(walk *bulkWalk) error {
 	if conn == nil {
 		return fmt.Errorf("no peer connection")
 	}
+	// #9626: the cold-prime debt this bulk is sent to pay, taken when it STARTS.
+	// An arm that lands after this point is a newer debt, and this bulk's ack
+	// must not discharge it.
+	owed := s.coldPrimeOwedGen()
 
 	// Assign a monotonically increasing epoch to this bulk transfer.
 	epoch := s.bulkSendNext.Add(1)
@@ -224,8 +228,7 @@ func (s *SessionSync) bulkSyncWindow(walk *bulkWalk) error {
 		s.onStreamMoved(false)
 	}
 	if err != nil {
-		s.pendingBulkAckEpoch.Store(0)
-		s.pendingBulkAckSince.Store(0)
+		s.clearPendingBulkAck()
 		s.handleDisconnect(conn)
 		return err
 	}
@@ -255,8 +258,7 @@ func (s *SessionSync) bulkSyncWindow(walk *bulkWalk) error {
 		return true
 	})
 	if err != nil {
-		s.pendingBulkAckEpoch.Store(0)
-		s.pendingBulkAckSince.Store(0)
+		s.clearPendingBulkAck()
 		return fmt.Errorf("bulk sync v4 iterate: %w", err)
 	}
 	slog.Info("cluster sync: bulk sync iterated v4",
@@ -285,8 +287,7 @@ func (s *SessionSync) bulkSyncWindow(walk *bulkWalk) error {
 		return true
 	})
 	if err != nil {
-		s.pendingBulkAckEpoch.Store(0)
-		s.pendingBulkAckSince.Store(0)
+		s.clearPendingBulkAck()
 		return fmt.Errorf("bulk sync v6 iterate: %w", err)
 	}
 	slog.Info("cluster sync: bulk sync iterated v6",
@@ -306,6 +307,9 @@ func (s *SessionSync) bulkSyncWindow(walk *bulkWalk) error {
 	// pending epoch that no future ack ever clears — permanently blocking
 	// manual failover (#3912). Recording first guarantees the ack can only
 	// ever observe the pending epoch already in place.
+	// #9626: the debt stamp BEFORE the epoch, so an ack that observes the epoch
+	// also observes the generation this bulk pays.
+	s.pendingBulkOwed.Store(owed)
 	s.pendingBulkAckEpoch.Store(epoch)
 	s.fence.pendingBulk.Store(walk.fence) // #9508: AFTER the epoch; see barrierFence.pendingBulk
 	s.pendingBulkAckSince.Store(time.Now().UnixNano())
@@ -330,8 +334,7 @@ func (s *SessionSync) bulkSyncWindow(walk *bulkWalk) error {
 	err = writeMsg(conn, syncMsgBulkEnd, endPayload)
 	s.writeMu.Unlock()
 	if err != nil {
-		s.pendingBulkAckEpoch.Store(0)
-		s.pendingBulkAckSince.Store(0)
+		s.clearPendingBulkAck()
 		s.handleDisconnect(conn)
 		return err
 	}
@@ -357,6 +360,69 @@ func (s *SessionSync) PendingBulkAck() (epoch uint64, age time.Duration, ok bool
 		age = 0
 	}
 	return epoch, age, true
+}
+
+// BulkAckPendingRetryAfter is how long an outbound bulk may await its BulkAck
+// before a retry treats it as lost (#9626). The daemon's bulk-prime retry loop
+// (startSessionSyncPrimeRetry) and the sweep's owed cold-prime re-drive both
+// wait this long, so there is one number for "the ack is late".
+const BulkAckPendingRetryAfter = 35 * time.Second
+
+// clearPendingBulkAck forgets the pending outbound bulk: its epoch, its start
+// time, and the cold-prime generation it was sent to pay (#9626). Every path
+// that abandons a pending bulk goes through here, so a stale stamp cannot
+// survive to discharge a later debt.
+func (s *SessionSync) clearPendingBulkAck() {
+	s.pendingBulkAckEpoch.Store(0)
+	s.pendingBulkAckSince.Store(0)
+	s.pendingBulkOwed.Store(0)
+}
+
+// armColdPrimeLocked records a cold-prime obligation under a NEW generation
+// (#9626). Callers hold s.mu.
+func (s *SessionSync) armColdPrimeLocked() {
+	s.coldPrimeGen.Add(1)
+	s.needColdPrime.Store(true)
+}
+
+// coldPrimeOwedGen is the generation of the outstanding cold-prime debt, or 0
+// when none is owed. It is read under s.mu, so it is consistent with the arms.
+func (s *SessionSync) coldPrimeOwedGen() uint64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.needColdPrime.Load() {
+		return 0
+	}
+	return s.coldPrimeGen.Load()
+}
+
+// dischargeColdPrime clears the cold-prime obligation on the peer's
+// acknowledgement of a bulk that was sent to pay generation stamp (#9626). It
+// does nothing when that bulk paid no debt (stamp 0), or when a newer arm has
+// happened since the bulk started: that debt belongs to a later bulk's ack.
+func (s *SessionSync) dischargeColdPrime(stamp uint64) {
+	if stamp == 0 {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.coldPrimeGen.Load() == stamp {
+		s.needColdPrime.Store(false)
+	}
+}
+
+// coldPrimeAckAwaited reports whether the owed cold prime has already been sent
+// and its ack may still be on the way (#9626): the pending bulk was stamped
+// with the CURRENT debt and is younger than BulkAckPendingRetryAfter. The
+// sweep's owed re-drive skips while it holds, instead of re-bulking the peer
+// every tick while a healthy ack is in flight.
+func (s *SessionSync) coldPrimeAckAwaited() bool {
+	stamp := s.pendingBulkOwed.Load()
+	if stamp == 0 || stamp != s.coldPrimeOwedGen() {
+		return false
+	}
+	_, age, ok := s.PendingBulkAck()
+	return ok && age < BulkAckPendingRetryAfter
 }
 
 // TransferReadiness snapshots the sync state that makes manual failover

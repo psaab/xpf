@@ -95,9 +95,11 @@ func junosHostPayload(t *testing.T, cfg *config.Config) (string, []dpuserspace.J
 	return buildHostInboundFilterPayload(views, nil, nil, programs, nil), programs
 }
 
-// junosHostSection returns the payload lines from the junos-host DROP subchain
-// window — everything between the reply-direction established accept and the
-// ND accepts.
+// junosHostSection returns the payload lines from the junos-host window of the
+// INPUT chain — everything between the reply-direction established accept and
+// the ND accepts. Since #9504 that window holds the exemption shields and the
+// iifname-scoped jump; the zone's rules live in its subchain
+// (junosHostChainLines).
 func junosHostSection(payload string) []string {
 	lines := strings.Split(payload, "\n")
 	var out []string
@@ -117,10 +119,32 @@ func junosHostSection(payload string) []string {
 	return out
 }
 
+// junosHostChainLines returns the rule lines inside the rendered junos-host
+// subchains (#9504): everything between a `chain junos_host_...` header and its
+// closing brace. A zone's projected rules moved there when the program became a
+// first-match chain the input chain jumps to.
+func junosHostChainLines(payload string) []string {
+	var out []string
+	in := false
+	for _, l := range strings.Split(payload, "\n") {
+		t := strings.TrimSpace(l)
+		switch {
+		case strings.HasPrefix(t, "chain junos_host_"):
+			in = true
+		case in && t == "}":
+			in = false
+		case in:
+			out = append(out, l)
+		}
+	}
+	return out
+}
+
 // TestJunosHostDenyRendersDropScopedByIifname is the core #4146 enforcement
 // guard: a representable `to-zone junos-host` DENY renders an iifname-scoped
-// silent DROP (no fine accept) in the kernel chain, placed in coarse-then-fine
-// order, and NOT scoped by destination address.
+// jump into the zone's subchain, whose silent DROP (no fine accept) carries the
+// authored source, placed in coarse-then-fine order and NOT scoped by
+// destination address.
 func TestJunosHostDenyRendersDropScopedByIifname(t *testing.T) {
 	cfg := junosHostDenyTestConfig()
 	cfg.Security.Policies = []*config.ZonePairPolicies{
@@ -141,9 +165,15 @@ func TestJunosHostDenyRendersDropScopedByIifname(t *testing.T) {
 	}
 
 	cn := xnft.HostInboundJunosHostDenyCounterName("untrust", "ip")
-	wantDrop := `iifname "ge-0-0-1" ip saddr 10.0.0.5/32 counter name "` + cn + `" drop`
+	// #9504: the ZONE scope is the jump's iifname; the rule itself carries only
+	// the authored match, inside the zone's subchain.
+	wantJump := `iifname "ge-0-0-1" jump ` + xnft.HostInboundJunosHostChainName(0, "untrust")
+	if !strings.Contains(payload, wantJump) {
+		t.Fatalf("payload missing the iifname-scoped jump %q:\n%s", wantJump, payload)
+	}
+	wantDrop := `meta nfproto ipv4 ip saddr 10.0.0.5/32 counter name "` + cn + `" drop`
 	if !strings.Contains(payload, wantDrop) {
-		t.Fatalf("payload missing iifname-scoped junos-host drop %q:\n%s", wantDrop, payload)
+		t.Fatalf("payload missing the junos-host drop %q:\n%s", wantDrop, payload)
 	}
 	// The counter must be DECLARED (unquoted) so nft never references an
 	// undeclared object.
@@ -156,7 +186,7 @@ func TestJunosHostDenyRendersDropScopedByIifname(t *testing.T) {
 	// EXPLICIT `match destination-address` does render a narrowing daddr — see
 	// host_inbound_junos_host_dst_4146_test.go — but it is always ON TOP of the
 	// iifname scope, never a replacement for it.)
-	sec := junosHostSection(payload)
+	sec := append(junosHostSection(payload), junosHostChainLines(payload)...)
 	for _, l := range sec {
 		if strings.Contains(l, "daddr") {
 			t.Errorf("junos-host section must not scope by daddr: %q", l)
@@ -175,17 +205,19 @@ func TestJunosHostDenyRendersDropScopedByIifname(t *testing.T) {
 	assertOrder(t, payload,
 		"meta l4proto { 50, 51 } accept",
 		"ct state established,related ct direction reply accept",
-		wantDrop,
+		wantJump,
 		"icmpv6 type { 1, 2, 3, 4 }",
 		"ct state established,related accept",
 		"tcp dport 22 accept",
 	)
 }
 
-// TestJunosHostDenySetSubtraction proves an earlier permit carves a later deny
-// via `saddr !=` and NEVER emits a fine accept (the coarse gate stays the sole
-// admit authority).
-func TestJunosHostDenySetSubtraction(t *testing.T) {
+// TestJunosHostPermitRendersAReturnAheadOfTheDeny9504 proves an earlier permit
+// carves a later deny by RETURNING from the zone's subchain ahead of it, in
+// first-match order, and NEVER emits a fine accept (the coarse gate stays the
+// sole admit authority). Before #9504 the carve was a `saddr !=` subtraction on
+// the deny, which could not express a permit narrowed on any other dimension.
+func TestJunosHostPermitRendersAReturnAheadOfTheDeny9504(t *testing.T) {
 	cfg := junosHostDenyTestConfig()
 	cfg.Security.Policies = []*config.ZonePairPolicies{
 		{FromZone: "untrust", ToZone: "junos-host", Policies: []*config.Policy{
@@ -198,15 +230,14 @@ func TestJunosHostDenySetSubtraction(t *testing.T) {
 		t.Fatalf("want 1 program, got %d", len(programs))
 	}
 	cn := xnft.HostInboundJunosHostDenyCounterName("untrust", "ip")
-	want := `iifname "ge-0-0-1" ip saddr 10.0.0.0/8 ip saddr != 10.0.0.6/32 counter name "` + cn + `" drop`
-	if !strings.Contains(payload, want) {
-		t.Fatalf("set-subtraction drop missing %q:\n%s", want, payload)
-	}
-	// No fine accept anywhere in the junos-host section (a permit only narrows a
-	// later deny; it must not re-admit anything).
-	for _, l := range junosHostSection(payload) {
+	wantReturn := `meta nfproto ipv4 ip saddr 10.0.0.6/32 return`
+	wantDrop := `meta nfproto ipv4 ip saddr 10.0.0.0/8 counter name "` + cn + `" drop`
+	assertOrder(t, payload, wantReturn, wantDrop)
+	// No fine accept anywhere in the zone's subchain (a permit returns to the
+	// coarse gate; it must never re-admit anything itself).
+	for _, l := range junosHostChainLines(payload) {
 		if strings.Contains(l, "accept") {
-			t.Errorf("permit must not emit a fine accept in the junos-host section: %q", l)
+			t.Errorf("permit must not emit a fine accept in the junos-host subchain: %q", l)
 		}
 	}
 }
@@ -227,8 +258,13 @@ func TestJunosHostDenyIKEExemption(t *testing.T) {
 	}
 	shield := `iifname "ge-0-0-1" udp dport { 500, 4500 } accept`
 	cn := xnft.HostInboundJunosHostDenyCounterName("untrust", "ip")
-	drop := `iifname "ge-0-0-1" ip saddr 10.0.0.5/32 counter name "` + cn + `" drop`
-	assertOrder(t, payload, shield, drop)
+	// The shield must precede the JUMP: once the packet is in the subchain the
+	// drop is unconditional for that source, so a shield after it never runs.
+	assertOrder(t, payload, shield, `iifname "ge-0-0-1" jump `+xnft.HostInboundJunosHostChainName(0, "untrust"))
+	drop := `meta nfproto ipv4 ip saddr 10.0.0.5/32 counter name "` + cn + `" drop`
+	if !strings.Contains(payload, drop) {
+		t.Fatalf("payload missing the junos-host drop %q:\n%s", drop, payload)
+	}
 }
 
 // TestJunosHostDenyAppScopedToExemptTupleWarns: a deny explicitly scoped to an
@@ -283,10 +319,105 @@ func TestJunosHostAnyExcludedEmitsNoDropLine(t *testing.T) {
 	}
 	// No junos-host drop line at all in the section window (xpfjh_ tags every
 	// junos-host named counter).
-	for _, l := range junosHostSection(payload) {
+	for _, l := range junosHostChainLines(payload) {
 		if strings.Contains(l, "drop") && strings.Contains(l, "xpfjh_") {
 			t.Errorf("unexpected junos-host drop line for an inert any+excluded term: %q", l)
 		}
+	}
+}
+
+// TestJunosHostSubchainRulesCarryTheirFamily9504 pins the guard that makes
+// first-match order safe across families.
+//
+// A rule with no address predicate — an `application any` deny, or a permit
+// narrowed only on application — carries no family of its own. Without a
+// `meta nfproto` guard an IPv4 rule would also match an IPv6 packet, and that is
+// not cosmetic here: the v4 list is emitted before the v6 list, so a v6 packet
+// could meet a LATER term's v4 rule before its own term's v6 rule, and be dropped
+// by a deny that its own permit precedes. Under the pre-#9504 DROP-only model
+// every rule was a drop, so family bleed changed no verdict and no cell covered
+// it.
+func TestJunosHostSubchainRulesCarryTheirFamily9504(t *testing.T) {
+	cfg := junosHostDenyTestConfig()
+	cfg.Security.Policies = []*config.ZonePairPolicies{
+		{FromZone: "untrust", ToZone: "junos-host", Policies: []*config.Policy{
+			permitPolicy("allow-good", "src:good-host", "app:any"),
+			denyPolicy("block-all", "src:any", "app:any"),
+		}},
+	}
+	payload, programs := junosHostPayload(t, cfg)
+	if len(programs) != 1 {
+		t.Fatalf("want 1 program, got %+v", programs)
+	}
+	lines := junosHostChainLines(payload)
+	if len(lines) == 0 {
+		t.Fatal("no subchain rules rendered, so this cell checks nothing")
+	}
+	for _, l := range lines {
+		if !strings.Contains(l, "meta nfproto ipv4") && !strings.Contains(l, "meta nfproto ipv6") {
+			t.Errorf("subchain rule carries no family guard, so it can match the other "+
+				"family ahead of that family's own earlier term: %q", l)
+		}
+	}
+}
+
+// TestJunosHostVerdictsRenderAsTheRuntimeAnswers9504 pins the two verdicts #9504
+// added to the kernel path, in the text the daemon installs.
+//
+// Both split TCP from everything else, because the runtime does: a `reject`
+// answers TCP with a RST and every other protocol with an ICMP administratively
+// prohibited, and a deny on a `tcp-rst` zone answers TCP with a RST and drops the
+// rest silently (enqueue_deny_reply, reject_reply.rs). Rendering either as a
+// plain drop would be invisible to a rule-count assertion and wrong on the wire.
+func TestJunosHostVerdictsRenderAsTheRuntimeAnswers9504(t *testing.T) {
+	cn := xnft.HostInboundJunosHostDenyCounterName("untrust", "ip")
+	for _, tc := range []struct {
+		name  string
+		build func() *config.Config
+		want  []string
+	}{
+		{
+			name: "then reject",
+			build: func() *config.Config {
+				cfg := junosHostDenyTestConfig()
+				p := &config.Policy{Name: "rej", Action: config.PolicyReject}
+				applyMatches(&p.Match, "src:bad-host", "app:any")
+				cfg.Security.Policies = []*config.ZonePairPolicies{
+					{FromZone: "untrust", ToZone: "junos-host", Policies: []*config.Policy{p}},
+				}
+				return cfg
+			},
+			want: []string{
+				`meta nfproto ipv4 meta l4proto tcp ip saddr 10.0.0.5/32 counter name "` + cn + `" reject with tcp reset`,
+				`meta nfproto ipv4 ip saddr 10.0.0.5/32 counter name "` + cn + `" reject with icmpx type admin-prohibited`,
+			},
+		},
+		{
+			name: "deny on a tcp-rst ingress zone",
+			build: func() *config.Config {
+				cfg := junosHostDenyTestConfig()
+				cfg.Security.Zones["untrust"].TCPRst = true
+				cfg.Security.Policies = []*config.ZonePairPolicies{
+					{FromZone: "untrust", ToZone: "junos-host",
+						Policies: zonePairDeny("untrust", "blk", "src:bad-host", "app:any")},
+				}
+				return cfg
+			},
+			want: []string{
+				`meta nfproto ipv4 meta l4proto tcp ip saddr 10.0.0.5/32 counter name "` + cn + `" reject with tcp reset`,
+				`meta nfproto ipv4 ip saddr 10.0.0.5/32 counter name "` + cn + `" drop`,
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			payload, programs := junosHostPayload(t, tc.build())
+			if len(programs) != 1 {
+				t.Fatalf("want 1 program, got %+v", programs)
+			}
+			// Ordered: the TCP answer must precede the catch-all, or TCP never
+			// reaches it.
+			assertOrder(t, payload, tc.want...)
+		})
 	}
 }
 
@@ -373,8 +504,8 @@ func TestJunosHostNftMatchesRustOracle(t *testing.T) {
 // fine junos-host policy (Stage 11 returns pre-fine; ident-reset is a coarse
 // terminal). The pure-fine oracle returns DENY for those tuples (it models only
 // the fine layer), so the kernel nft ADMIT/RST is FAITHFUL to the Rust runtime,
-// NOT a divergence — the exemption shields the codegen emits ahead of the
-// application-any drop encode exactly that pre-fine behaviour. Only the
+// NOT a divergence — the exemption shields the codegen emits ahead of the jump
+// into the zone's subchain encode exactly that pre-fine behaviour. Only the
 // fine-eligible tuples (e.g. tcp/22) are actually dropped.
 func TestJunosHostExemptTupleParity(t *testing.T) {
 	mkPayload := func(svc string) (string, dpuserspace.JunosHostProgram) {
@@ -412,7 +543,7 @@ func TestJunosHostExemptTupleParity(t *testing.T) {
 		// admitted before the drop can silence it.
 		assertOrder(t, payload,
 			`iifname "ge-0-0-1" udp dport { 500, 4500 } accept`,
-			`iifname "ge-0-0-1" ip saddr 10.0.0.5/32`,
+			`iifname "ge-0-0-1" jump `+xnft.HostInboundJunosHostChainName(0, "untrust"),
 		)
 		// The naive fine oracle would DENY BAD's 500 — nft's admit is the faithful
 		// runtime behaviour, not a bug.
@@ -428,7 +559,7 @@ func TestJunosHostExemptTupleParity(t *testing.T) {
 		}
 		assertOrder(t, payload,
 			`iifname "ge-0-0-1" tcp dport 113 reject with tcp reset`,
-			`iifname "ge-0-0-1" ip saddr 10.0.0.5/32`,
+			`iifname "ge-0-0-1" jump `+xnft.HostInboundJunosHostChainName(0, "untrust"),
 		)
 		if !oracleDenies("tcp", 113) {
 			t.Fatal("sanity: the pure-fine oracle should DENY BAD's tcp/113 (documents the intended nft divergence)")
@@ -438,7 +569,7 @@ func TestJunosHostExemptTupleParity(t *testing.T) {
 	t.Run("fine-eligible tcp/22 still dropped", func(t *testing.T) {
 		payload, _ := mkPayload("ike")
 		// The drop is application-any (no L4 match), so it catches BAD's tcp/22.
-		if !strings.Contains(payload, `iifname "ge-0-0-1" ip saddr 10.0.0.5/32 counter name "`+cn+`" drop`) {
+		if !strings.Contains(payload, `meta nfproto ipv4 ip saddr 10.0.0.5/32 counter name "`+cn+`" drop`) {
 			t.Fatalf("fine-eligible traffic from BAD must still be dropped:\n%s", payload)
 		}
 	})
@@ -455,26 +586,23 @@ func junosHostDenyTestConfig4146Oracle() *config.Config {
 	return cfg
 }
 
-// junosHostProgramDrops simulates the nft verdict of a program's v4 DROP rules
-// for a source IP: a rule drops when the source matches its positive/excluded
-// set AND is not in any permit-subtraction set. Application-any only (the fixture
-// uses app any), first-drop wins.
+// junosHostProgramDrops simulates the nft verdict of a program's v4 rules for a
+// source IP in first-match order (#9504): the first rule whose source matches
+// decides, a return (a permit) admitting and every other verdict denying.
+// Application-any only (the fixture uses app any).
 func junosHostProgramDrops(p dpuserspace.JunosHostProgram, ip net.IP) bool {
 	for _, r := range p.RulesV4 {
-		if r.SrcExcluded {
-			if !ipInAny(ip, r.Src) && !ipInAny(ip, r.PermitSubtract) {
-				return true
-			}
-			continue
+		var matched bool
+		switch {
+		case r.SrcExcluded:
+			matched = !ipInAny(ip, r.Src)
+		case r.SrcAny:
+			matched = true
+		default:
+			matched = ipInAny(ip, r.Src)
 		}
-		if r.SrcAny {
-			if !ipInAny(ip, r.PermitSubtract) {
-				return true
-			}
-			continue
-		}
-		if ipInAny(ip, r.Src) && !ipInAny(ip, r.PermitSubtract) {
-			return true
+		if matched {
+			return r.Verdict != config.JunosHostReturn
 		}
 	}
 	return false

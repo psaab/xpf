@@ -475,7 +475,8 @@ same remedy — the choice is not a matter of taste:
 
 | issue | site | remedy |
 |---|---|---|
-| #8794 | `security-zone [ a b ]` | REFUSE |
+| #8794 | `security-zone [ a b ] { … }` | **EXPAND** |
+| #9656 | `security-zone [ a b ];` with no braced body | REFUSE |
 | #9246 | policy `to-zone [ a b ]` | REFUSE |
 | #8810 | `device-map interface [ a b ]` | REFUSE |
 | #9424 | `family inet address [ a b ]` | **ACCUMULATE** |
@@ -487,6 +488,15 @@ device mapped twice, is undefined — there is no correct expansion to write. A
 logical unit with two addresses is ordinary, and the two-separate-stanzas
 spelling compiles exactly it, which is both the argument for accumulating and
 the positive control that keeps the cell honest.
+
+**`security-zone [ a b ]` expands; it was never refused.** #8794 (PRs #8802 and
+#8806) creates every named zone with the shared body, and
+`formatset_container_bracket_6668_test.go` expects `security-zone [ trust dmz ]
+{ … }` to commit. Several zones with the same statements are ordinary
+configuration. Expanding therefore invents nothing the platform lacks. That is
+the argument that makes #9424 accumulate values, applied here to instances: each
+member becomes its own zone with the body. The table previously listed this row
+as REFUSE. Without a braced body, a group is refused at strict commit instead; see "Zone statements whose keys would be dropped (#9656)" below.
 
 **Accumulating needs a discriminator, because the packed shape is AMBIGUOUS
 with the brace-elided sub-statement spelling.** These parse identically:
@@ -534,6 +544,96 @@ ABSORBS the third onto its own `Keys`:
 
 A chain walk that reads only each link's `Keys[0]` recovers `b` and loses `c` —
 the #2419 defect reintroduced by the #2419 fix. Read `Keys[1:]` at every link.
+
+### Zone statements whose keys would be dropped (#9656)
+
+Every reader of a zone goes through `bracketedGroupInstances8794`. For a
+`security-zone` statement with no braced body, that reads only `Keys[1]`, so
+whatever follows the name reaches no compiler. That covers both further zone
+names and a statement the #8662 fold did not move into a body. Each of these
+committed at `6cf4305ab` with no error:
+
+| Spelling | Compiled at `6cf4305ab` |
+|---|---|
+| `security-zone [ zga zgb ] screen edge;` | zone `zga` with no screen; no `zgb` (#9656 M40) |
+| `security-zone [ zga zgb ];` or `security-zone [ zga zgb ] { }` | no `zgb` |
+| `security-zone [ zga zgb ] { apply-groups G; }` | no `zgb`: group expansion empties the body |
+| `security-zone [ tcp-rst zgb ];` | only `tcp-rst` |
+| `security-zone trust apply-groups G;` | `trust` without group `G` (#9788) |
+| `security-zone trust scren edge;` | `trust`; the mistyped statement is dropped |
+
+`validateZoneStatementTails9656` (`compiler_validate_zone_group_9656.go`, run
+from `runPreWalkGates`) refuses a childless `security-zone` statement if any key
+after the name is not a repeat of the name. The message names the zone that
+compiles and the text that would be dropped. The tolerant load and peer-sync
+paths warn instead, and compile the statement as before (#1960).
+
+- **What is left alone.**
+  - A statement the fold moves into a body, such as `security-zone trust screen
+    edge;`, already has a child by the time the check runs.
+  - A braced group compiles for every member (#8794).
+  - A repeated name, as in `security-zone [ zga zga ];`, loses nothing.
+  - An `apply-macro` tail. No compiler consumes a macro, and
+    `security-zone trust apply-macro M;` compiles exactly like its braced
+    spelling.
+- **It reads the group-expanded, inactive-pruned tree.** A body that group
+  expansion empties is refused, and an inactive statement is not.
+- **The normalizer pass is what keeps a single-zone statement committing.**
+  With the #8662 pass disabled, `security-zone trust description d;` stays
+  childless and is refused, because its description really is dropped. The
+  pass folds it into a body, and then it commits.
+  `TestCompactNormalizeScopePreservesCompiledResult8690` records this
+  interaction, each site hand-measured with type-valid values:
+  - `description` and `tcp-rst` in its `benign` map;
+  - `interfaces` and `screen` in `knownFixtureLimited8690`, because their
+    census values fail other validators.
+- **Brackets and quotes are not consulted.** The hierarchical text that
+  `show configuration` prints, and that cluster sync compiles, gets the same
+  verdict.
+- **`FormatSet` replay is not covered, and predates this check.**
+  `FormatSet` drops a leaf's brackets, so `security-zone [ zga zgb ];` replays
+  as `set security zones security-zone zga zgb`. That builds zone `zga` with an
+  unknown child `zgb`, which the open-world zone schema accepts and the compiler
+  ignores. The rendering constraint is #9635.
+- **A zone-keyword name later in a leaf group is read as that statement.**
+  The #8662 fold rewrites `security-zone [ zga tcp-rst ];` into
+  `zga { tcp-rst; }` before the check runs, so it commits with no zone named
+  `tcp-rst`. Measured at `ed313e4c9`:
+  - `interfaces`, `host-inbound-traffic` and `address-book` behave the same;
+  - `description` and `screen` are refused, because they need a value.
+
+  Quotes and brackets do not survive rendering (#9635), so the check cannot tell
+  a zone name from the statement. This predates #9656.
+- **Group expansion matches a zone statement by the zone it names.** Before #9831, a
+  group's `security-zone zga;` was dropped, before this check could see it,
+  whenever the configuration had any inline leaf `security-zone …;`: the
+  override matched only the keyword. Group expansion now matches the keyword
+  plus the zone name, so the group's zone survives. A group statement that
+  carries keys past the zone name, such as `security-zone [ zga zgb ];`, is
+  adopted beside the inline zone it names, whether that zone is braced or a
+  leaf, unless #7648 expands it into the braced body. So it reaches this check
+  and is refused.
+- **Why a refusal and not an expansion.** An earlier cut of #9656 expanded each
+  group into one statement per zone in the #8662 normalizer. Three review rounds
+  found the per-member statements it materialised colliding with the node
+  budgets downstream:
+  - clones with no bound;
+  - a budget kept per `zones` node;
+  - a group subtree pushed past the apply-groups work budget, so one cluster
+    node's tolerant load failed;
+  - cloned bodies growing again under normalization;
+  - a second normalization with a fresh budget.
+
+  The braced spelling already compiles for every member, and the #9656
+  acceptance allows a strict refusal that names the spelling.
+- **#9788 is refused, not fixed.** `security-zone trust apply-groups G;` is now
+  refused. Making it compile is #9788.
+- **Unchanged.** A braced group keeps two readings that predate #9656:
+  - a packed head before a braced body reads as zone names;
+  - a member-specific `deactivate` acts on the whole group (#9793).
+
+Tests: `pkg/config/zone_group_body_gate_9656_test.go` and
+`pkg/configstore/zone_group_commit_gate_9656_test.go`.
 
 ### Which flat runs an operator can actually COMMIT (8939)
 

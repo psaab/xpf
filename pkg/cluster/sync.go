@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"net"
 	"sync"
 	"sync/atomic"
@@ -309,6 +310,9 @@ type SyncStats struct {
 	// (#9174 V013). Counted because the refusal decides whether the VRRP sync
 	// hold is released.
 	BulkEndsDeadIncarnationDropped atomic.Uint64
+	// ClockSyncsRefused counts ClockSync frames refused for a peer monotonic
+	// clock no running peer can read (#9653). The previous offset stays in force.
+	ClockSyncsRefused atomic.Uint64
 	// BulkEndsForeignConnDropped counts BulkEnd frames refused because they
 	// arrived on a connection other than the one that carried the accepted
 	// BulkStart (#9716). BulkSync pins one connection per bulk, so such a frame
@@ -497,6 +501,7 @@ type SyncStatsSnapshot struct {
 	BulkPrimesWithoutIncarnation   uint64
 	ConfigsDeadIncarnationDropped  uint64
 	BulkEndsDeadIncarnationDropped uint64 // #9174 V013
+	ClockSyncsRefused              uint64 // #9653
 	BulkEndsForeignConnDropped     uint64 // #9716
 	BulkEndsEpochOnlyMatched       uint64 // #9716
 	// PeerBootIncarnation renders the boot id of the peer incarnation that
@@ -714,6 +719,14 @@ type SessionSync struct {
 	conn0Gen        uint64
 	conn1Gen        uint64
 	writeMu         sync.Mutex
+	// conn0Announced/conn1Announced record whether the install of the
+	// connection in that slot dispatched OnPeerConnected (#9636), so a
+	// BulkStart that later retires the prior incarnation on the same
+	// connection does not dispatch it a second time. Every install of a slot
+	// overwrites it, and it is read only for a connection still installed
+	// there. Guarded by mu.
+	conn0Announced bool
+	conn1Announced bool
 	// authProvider supplies the shared control-link PSK for #4107 F23
 	// session-sync stream auth. Optional: nil (or an empty key) ⇒ legacy
 	// unauthenticated stream.
@@ -960,6 +973,19 @@ type SessionSync struct {
 	peerEpochAtIncarnation uint64
 	lastSweepTime          uint64
 	syncBackfillNeeded     atomic.Bool
+	// rebootAwaiting names the half of the CURRENT incarnation's reboot
+	// evidence that has not arrived yet; it is live only while
+	// rebootAwaitingInc equals peerIncarnation (#9636). Guarded by mu.
+	//
+	// One peer reboot reaches two classifiers, in either order: installConn
+	// sees a raised heartbeat boot epoch, and the BulkStart arm sees a changed
+	// boot id. Whichever retires the incarnation records that the other
+	// signal is still to come, and the other consumes the record instead of
+	// retiring the incarnation again, which would evict the peer's healthy
+	// second fabric. Keyed to the incarnation it was recorded for, so any
+	// later advance voids it. See classifyPrimeLocked.
+	rebootAwaiting    rebootEvidence
+	rebootAwaitingInc uint64
 	// forceResync arms a full authoritative bulk resync after a delete-journal
 	// overflow dropped session-delete records the standby still needs (#5450).
 	// It is DISTINCT from syncBackfillNeeded: that flag re-drives the INSTALL
@@ -1038,6 +1064,10 @@ type SessionSync struct {
 
 	zoneRGMu  sync.RWMutex
 	zoneRGMap map[uint16]int
+	// zoneRGMapGen changes whenever SetZoneRGMap installs a map with different
+	// contents (#9655), so a bulk can tell whether the zone map its snapshot was
+	// taken from still applies. Guarded by zoneRGMu.
+	zoneRGMapGen uint64
 
 	// ingressFoldFn resolves a session's LOCAL ingress identity to the
 	// #7095 cluster-stable fold that rides the sync wire. Injected by the
@@ -1085,6 +1115,16 @@ type SessionSync struct {
 	// holds our full table and incremental sync keeps it fresh across
 	// reconnects, so it is never reset.
 	outboundBulkAcked atomic.Bool
+	// pendingBulkOwed is the cold-prime generation the pending outbound bulk was
+	// sent to pay (#9626): coldPrimeGen as it stood when that bulk STARTED, or 0
+	// when no cold prime was owed then. It is recorded beside
+	// pendingBulkAckEpoch and cleared with it (clearPendingBulkAck), and the
+	// matching BulkAck discharges exactly that generation (dischargeColdPrime).
+	pendingBulkOwed atomic.Uint64
+	// coldPrimeGen numbers the cold-prime arms (#9626). Every arm runs under s.mu
+	// and bumps it (armColdPrimeLocked), so a discharge that compares it under
+	// s.mu cannot clear a debt armed after the bulk it acknowledges started.
+	coldPrimeGen atomic.Uint64
 	// bulkRedriveInFlight guards the survivor-fabric cold-start bulk
 	// re-drive (#4090). A single fabric dropping mid-cold-start-bulk while
 	// the other fabric is up leaves the bulk stranded — pinned to the dead
@@ -1098,7 +1138,8 @@ type SessionSync struct {
 	// needColdPrime latches the outstanding cold-prime obligation across the
 	// per-accept goroutines (#4962). It is armed under s.mu on a full
 	// disconnect -> connect transition (both fabric slots were empty) and
-	// consumed (cleared) only when a cold-prime bulk actually SUCCEEDS. Because
+	// consumed (cleared) only when the PEER acknowledges a cold-prime bulk
+	// (#9626; see the end of this comment). Because
 	// handleNewConnection now runs per-accept (post-#4370), two same-fabric
 	// accepts can race: the first observes the empty registry and installs, the
 	// second observes the first's connection and supersedes it — closing it and
@@ -1108,10 +1149,18 @@ type SessionSync struct {
 	// cold-prime: the peer never received the authoritative session table and
 	// blackholed established flows on the next failover. The latch lets the
 	// surviving connection INHERIT the obligation and re-drive the bulk. Like
-	// forceResync it is a plain atomic.Bool; the narrow window where a newer
-	// full-disconnect epoch's arm is cleared by an older epoch's success
-	// self-heals via forceResync / the #4090 survivor re-drive / the next
-	// reconnect.
+	// forceResync it is a plain atomic.Bool.
+	//
+	// #9626: it is discharged by the PEER, not by a local write. A bulk whose
+	// BulkEnd was written can still die in the kernel before the peer consumes
+	// it, so only the matching BulkAck (sync_conn_read.go) clears the latch, and
+	// only if no newer arm has happened since that bulk started. Every arm bumps
+	// coldPrimeGen under s.mu, the bulk carries the generation it was sent to
+	// pay (pendingBulkOwed), and the ack compares the two under s.mu. The success
+	// paths that used to clear it (handleNewConnection, the survivor re-drive,
+	// the sweep's owed re-drive) no longer do. The sweep instead waits up to
+	// BulkAckPendingRetryAfter for the ack of a bulk sent for the current debt
+	// before re-driving.
 	needColdPrime  atomic.Bool
 	bulkMu         sync.Mutex
 	bulkInProgress bool
@@ -1130,7 +1179,7 @@ type SessionSync struct {
 	bulkRecvConn               net.Conn
 	bulkRecvV4                 map[dataplane.SessionKey]struct{}
 	bulkRecvV6                 map[dataplane.SessionKeyV6]struct{}
-	bulkZoneSnapshot           map[uint16]bool
+	bulkZoneSnapshot           *zoneOwnershipSnapshot
 	barrierSeq                 atomic.Uint64
 	barrierAckSeq              atomic.Uint64
 	barrierWaitMu              sync.Mutex
@@ -1250,7 +1299,10 @@ type SessionSync struct {
 	// (QueueConfig). Distinct from configGenCounter, which is the next value to
 	// draw: a nack naming an older generation is a straggler for a push already
 	// superseded and must not re-arm the marker for the current one.
-	lastSentConfigGen    atomic.Uint64
+	lastSentConfigGen atomic.Uint64
+	// peerConfigNackedGen is the generation of the last config-apply nack that
+	// matched lastSentConfigGen when it arrived (#9569). See PeerConfigStale.
+	peerConfigNackedGen  atomic.Uint64
 	configGenCounter     atomic.Uint64
 	lastAppliedConfigGen atomic.Uint64
 	// applyingConfigGen is the apply-in-progress config fence (#6284, item 2).
@@ -1372,8 +1424,10 @@ type SessionSync struct {
 	// incarnation (the construction seed, constant for the process lifetime;
 	// see initGenState) and the per-type counters give a strictly-monotonic
 	// sequence PER stream. The receiver tracks the last-applied (incarnation,
-	// seq) per stream (ipsecRecvSeq / dhcpV4RecvSeq / dhcpV6RecvSeq, guarded by
-	// recvSeqMu because both receiveLoops touch them) and admits only a
+	// seq) per stream (ipsecRecvSeq / dhcpV4RecvSeq / dhcpV6RecvSeq /
+	// persistentNatLeaseRecvSeq, guarded by recvSeqMu because both receiveLoops
+	// touch them; resetRecvGen resets every one of them through
+	// fullSetGuardsLocked, #9634) and admits only a
 	// strictly-newer pair (fullSetSeqGuard.admit); a stale reorder is dropped
 	// and counted. A legacy peer sends no trailer -> (0,0) -> accept-always
 	// (mixed-version compat). The receiver guards are reset on a peer bulk
@@ -1625,6 +1679,12 @@ func (s *SessionSync) SetVRFDevice(dev string) {
 // session synchronization.
 func (s *SessionSync) SetZoneRGMap(m map[uint16]int) {
 	s.zoneRGMu.Lock()
+	// #9655: only a map with different contents is a change. The daemon re-sets
+	// the map on every config apply, and a bulk must not lose its reconcile to
+	// a commit that moved no zone.
+	if !maps.Equal(s.zoneRGMap, m) {
+		s.zoneRGMapGen++
+	}
 	s.zoneRGMap = m
 	s.zoneRGMu.Unlock()
 }
@@ -1710,7 +1770,7 @@ func (s *SessionSync) Stats() SyncStatsSnapshot {
 		activeFabric = -1
 	}
 	s.mu.Unlock()
-	return SyncStatsSnapshot{SessionsSent: s.stats.SessionsSent.Load(), SweepSessionsSent: s.stats.SweepSessionsSent.Load(), SessionsReceived: s.stats.SessionsReceived.Load(), SessionsInstalled: s.stats.SessionsInstalled.Load(), DeletesSent: s.stats.DeletesSent.Load(), DeletesReceived: s.stats.DeletesReceived.Load(), BulkSyncs: s.stats.BulkSyncs.Load(), ConfigsSent: s.stats.ConfigsSent.Load(), ConfigsReceived: s.stats.ConfigsReceived.Load(), ConfigsStaleIgnored: s.stats.ConfigsStaleIgnored.Load(), BulkPrimesWithoutIncarnation: s.stats.BulkPrimesWithoutIncarnation.Load(), PeerBootIncarnation: s.PeerBootIncarnation().String(), ConfigsDeadIncarnationDropped: s.stats.ConfigsDeadIncarnationDropped.Load(), BulkEndsDeadIncarnationDropped: s.stats.BulkEndsDeadIncarnationDropped.Load(), BulkEndsForeignConnDropped: s.stats.BulkEndsForeignConnDropped.Load(), BulkEndsEpochOnlyMatched: s.stats.BulkEndsEpochOnlyMatched.Load(), ConfigsApplyFailed: s.stats.ConfigsApplyFailed.Load(), ImportsRefusedByHelper: s.stats.ImportsRefusedByHelper.Load(), ConfigsQueueFullDropped: s.stats.ConfigsQueueFullDropped.Load(), ConfigApplyNacksReceived: s.stats.ConfigApplyNacksReceived.Load(), IPsecSASent: s.stats.IPsecSASent.Load(), IPsecSAReceived: s.stats.IPsecSAReceived.Load(), IPsecSAStaleIgnored: s.stats.IPsecSAStaleIgnored.Load(), DHCPLeasesSent: s.stats.DHCPLeasesSent.Load(), DHCPLeasesReceived: s.stats.DHCPLeasesReceived.Load(), DHCPLeasesStaleIgnored: s.stats.DHCPLeasesStaleIgnored.Load(), DHCPLeasesSeeded: s.stats.DHCPLeasesSeeded.Load(), FencesSent: s.stats.FencesSent.Load(), FencesReceived: s.stats.FencesReceived.Load(), FenceAcksSent: s.stats.FenceAcksSent.Load(), FenceAcksReceived: s.stats.FenceAcksReceived.Load(), FenceAcksTimedOut: s.stats.FenceAcksTimedOut.Load(), Errors: s.stats.Errors.Load(), DeletesDropped: s.stats.DeletesDropped.Load(), DeletesStaleIgnored: s.stats.DeletesStaleIgnored.Load(), InstallsStaleIgnored: s.stats.InstallsStaleIgnored.Load(), SessionsStaleConfigIgnored: s.stats.SessionsStaleConfigIgnored.Load(), GenMapOverflow: s.stats.GenMapOverflow.Load(), GenTombstonesEvicted: s.stats.GenTombstonesEvicted.Load(), PreAuthRejected: s.stats.PreAuthRejected.Load(), Connected: s.stats.Connected.Load(), ActiveFabric: activeFabric, BulkSyncStartTime: s.stats.BulkSyncStartTime.Load(), BulkSyncEndTime: s.stats.BulkSyncEndTime.Load(), BulkSyncSessions: s.stats.BulkSyncSessions.Load(), LastConfigSyncTime: s.stats.LastConfigSyncTime.Load(), LastConfigSyncSize: s.stats.LastConfigSyncSize.Load(), LastFenceSeq: s.stats.LastFenceSeq.Load(), LastFenceAckAt: s.stats.LastFenceAckAt.Load()}
+	return SyncStatsSnapshot{SessionsSent: s.stats.SessionsSent.Load(), SweepSessionsSent: s.stats.SweepSessionsSent.Load(), SessionsReceived: s.stats.SessionsReceived.Load(), SessionsInstalled: s.stats.SessionsInstalled.Load(), DeletesSent: s.stats.DeletesSent.Load(), DeletesReceived: s.stats.DeletesReceived.Load(), BulkSyncs: s.stats.BulkSyncs.Load(), ConfigsSent: s.stats.ConfigsSent.Load(), ConfigsReceived: s.stats.ConfigsReceived.Load(), ConfigsStaleIgnored: s.stats.ConfigsStaleIgnored.Load(), BulkPrimesWithoutIncarnation: s.stats.BulkPrimesWithoutIncarnation.Load(), PeerBootIncarnation: s.PeerBootIncarnation().String(), ConfigsDeadIncarnationDropped: s.stats.ConfigsDeadIncarnationDropped.Load(), BulkEndsDeadIncarnationDropped: s.stats.BulkEndsDeadIncarnationDropped.Load(), ClockSyncsRefused: s.stats.ClockSyncsRefused.Load(), BulkEndsForeignConnDropped: s.stats.BulkEndsForeignConnDropped.Load(), BulkEndsEpochOnlyMatched: s.stats.BulkEndsEpochOnlyMatched.Load(), ConfigsApplyFailed: s.stats.ConfigsApplyFailed.Load(), ImportsRefusedByHelper: s.stats.ImportsRefusedByHelper.Load(), ConfigsQueueFullDropped: s.stats.ConfigsQueueFullDropped.Load(), ConfigApplyNacksReceived: s.stats.ConfigApplyNacksReceived.Load(), IPsecSASent: s.stats.IPsecSASent.Load(), IPsecSAReceived: s.stats.IPsecSAReceived.Load(), IPsecSAStaleIgnored: s.stats.IPsecSAStaleIgnored.Load(), DHCPLeasesSent: s.stats.DHCPLeasesSent.Load(), DHCPLeasesReceived: s.stats.DHCPLeasesReceived.Load(), DHCPLeasesStaleIgnored: s.stats.DHCPLeasesStaleIgnored.Load(), DHCPLeasesSeeded: s.stats.DHCPLeasesSeeded.Load(), FencesSent: s.stats.FencesSent.Load(), FencesReceived: s.stats.FencesReceived.Load(), FenceAcksSent: s.stats.FenceAcksSent.Load(), FenceAcksReceived: s.stats.FenceAcksReceived.Load(), FenceAcksTimedOut: s.stats.FenceAcksTimedOut.Load(), Errors: s.stats.Errors.Load(), DeletesDropped: s.stats.DeletesDropped.Load(), DeletesStaleIgnored: s.stats.DeletesStaleIgnored.Load(), InstallsStaleIgnored: s.stats.InstallsStaleIgnored.Load(), SessionsStaleConfigIgnored: s.stats.SessionsStaleConfigIgnored.Load(), GenMapOverflow: s.stats.GenMapOverflow.Load(), GenTombstonesEvicted: s.stats.GenTombstonesEvicted.Load(), PreAuthRejected: s.stats.PreAuthRejected.Load(), Connected: s.stats.Connected.Load(), ActiveFabric: activeFabric, BulkSyncStartTime: s.stats.BulkSyncStartTime.Load(), BulkSyncEndTime: s.stats.BulkSyncEndTime.Load(), BulkSyncSessions: s.stats.BulkSyncSessions.Load(), LastConfigSyncTime: s.stats.LastConfigSyncTime.Load(), LastConfigSyncSize: s.stats.LastConfigSyncSize.Load(), LastFenceSeq: s.stats.LastFenceSeq.Load(), LastFenceAckAt: s.stats.LastFenceAckAt.Load()}
 }
 
 // IsConnected reports whether a peer sync connection is currently established.
@@ -1821,13 +1881,53 @@ func (s *SessionSync) WaitForIdle(timeout time.Duration, stableSamples int, samp
 	}
 }
 
-func (s *SessionSync) snapshotZoneOwnership() map[uint16]bool {
+// zoneOwnershipSnapshot is the zone ownership a bulk's stale-session reconcile
+// judges by, taken when the bulk STARTS (#9655).
+type zoneOwnershipSnapshot struct {
+	// zones is ShouldSyncZone's answer for each zone the zone->RG map names.
+	zones map[uint16]bool
+	// mapGen is the zone->RG map generation the snapshot was taken from.
+	mapGen uint64
+}
+
+// shouldSync reports whether a zone's sessions are KEPT by this reconcile. It
+// answers from the zone->RG map the bulk started with; a zone that map does not
+// name is kept whole (#9655).
+//
+// Keeping is the conservative answer, and it is deliberate. The live sweep
+// answers an unmapped zone with RG 0 ownership, and the first attempt at this
+// issue had the reconcile do the same, so a stale peer-owned session there
+// would finally be deleted on the RG 0 secondary. The measurement stopped it: a
+// zone of node-local, non-RETH interfaces is RG-unmapped too, and no
+// cluster-mode commit rule rejects one, so that answer deletes the node's OWN
+// live flows in such a zone at every bulk and a TCP flow dies on its next
+// non-SYN packet. Deleting only the SYNCED copy needs a per-session origin bit,
+// which the session_value/HA-wire prerequisite carries. Until then an unmapped
+// zone is kept whole and #9655 stays open for that half.
+func (z *zoneOwnershipSnapshot) shouldSync(zoneID uint16) bool {
+	if v, ok := z.zones[zoneID]; ok {
+		return v
+	}
+	return true
+}
+
+func (s *SessionSync) snapshotZoneOwnership() *zoneOwnershipSnapshot {
 	s.zoneRGMu.RLock()
 	m := s.zoneRGMap
+	gen := s.zoneRGMapGen
 	s.zoneRGMu.RUnlock()
-	snap := make(map[uint16]bool, len(m))
+	// No zone the map names means nothing this reconcile can judge by, whether
+	// the daemon has not wired zone ownership yet (nil) or the config maps no
+	// zone to an RG (installed but empty). Take no snapshot; the reconcile skips
+	// and the next bulk tries again. Judging an unnamed zone is exactly what
+	// shouldSync refuses to do, so a snapshot over an empty map could only ever
+	// answer "not ours" for every zone and delete the node's own sessions.
+	if len(m) == 0 {
+		return nil
+	}
+	snap := &zoneOwnershipSnapshot{zones: make(map[uint16]bool, len(m)), mapGen: gen}
 	for zoneID := range m {
-		snap[zoneID] = s.ShouldSyncZone(zoneID)
+		snap.zones[zoneID] = s.ShouldSyncZone(zoneID)
 	}
 	return snap
 }
@@ -1847,7 +1947,11 @@ func (s *SessionSync) reconcileStaleSessions() {
 	s.bulkZoneSnapshot = nil
 	s.bulkMu.Unlock()
 	start := time.Now()
-	slog.Info("cluster sync: reconcile stale sessions starting", "recv_v4", len(recvV4), "recv_v6", len(recvV6), "zones", len(zoneSnap))
+	zones := -1
+	if zoneSnap != nil {
+		zones = len(zoneSnap.zones)
+	}
+	slog.Info("cluster sync: reconcile stale sessions starting", "recv_v4", len(recvV4), "recv_v6", len(recvV6), "zones", zones)
 	// #5085: do NOT skip on an empty received set. A completed bulk window
 	// (BulkStart -> BulkEnd, #5272-gated on bulkInProgress) is authoritative:
 	// an EMPTY authoritative snapshot means the peer legitimately holds no
@@ -1862,16 +1966,30 @@ func (s *SessionSync) reconcileStaleSessions() {
 		slog.Info("cluster sync: reconcile stale sessions skipped (no dataplane)")
 		return
 	}
-	if len(zoneSnap) == 0 {
+	// #9655: a bulk with no zone snapshot has nothing to judge ownership by, and
+	// deleting on a guess is the failure this reconcile can cause. Both shapes
+	// take no snapshot: a zone map that was never installed (ownership is not
+	// wired yet) and one installed naming no zone. See snapshotZoneOwnership.
+	if zoneSnap == nil {
 		slog.Info("cluster sync: reconcile stale sessions skipped (no zone snapshot)")
 		return
 	}
-	shouldSyncAtBulkStart := func(zoneID uint16) bool {
-		if v, ok := zoneSnap[zoneID]; ok {
-			return v
-		}
-		return true
+	// #9655: the snapshot answers for the zone map it was taken from. A map with
+	// different contents installed during the bulk can move a zone to this node,
+	// and judging by the old answers would delete a session this node now owns.
+	// Keep everything; the next bulk reconciles.
+	s.zoneRGMu.RLock()
+	mapGen := s.zoneRGMapGen
+	s.zoneRGMu.RUnlock()
+	if mapGen != zoneSnap.mapGen {
+		slog.Info("cluster sync: reconcile stale sessions skipped (zone map changed during the bulk)",
+			"snapshot_map_gen", zoneSnap.mapGen, "map_gen", mapGen)
+		return
 	}
+	// #9655: judged by the zone answers this bulk started with. A zone the map
+	// does not name is not judged; see zoneOwnershipSnapshot.shouldSync for why
+	// the RG 0 answer the live sweep uses is NOT applied here.
+	shouldSyncAtBulkStart := zoneSnap.shouldSync
 	var deleted int
 	result, err := s.sessions.ReconcileClusterBulk(dataplane.ClusterBulkReconcileInput{
 		ReceivedV4:     recvV4,

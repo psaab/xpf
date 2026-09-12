@@ -132,6 +132,8 @@ scripts/run-selftests.sh
 scripts/mutate-lib.sh
 scripts/mutate.sh
 scripts/mutate-selftest.sh
+scripts/docs/check-upgrade-docs.sh
+scripts/docs/check-upgrade-docs-selftest.sh
 test/incus/fbf-steering-lib.sh
 test/incus/fbf-steering-selftest.sh
 test/incus/test-fbf-steering.sh
@@ -149,6 +151,9 @@ scripts/ignored-cell-census.sh
 test/incus/ignored-cell-census-selftest.sh
 scripts/go-skip-census.sh
 test/incus/go-skip-census-selftest.sh
+scripts/close_keyword_lint_ci.sh
+scripts/git-hooks/commit-msg
+scripts/git-hooks/install.sh
 "
 for s in $SH_SCRIPTS; do
 	[ -f "$s" ] || continue
@@ -266,6 +271,10 @@ run_shell scripts/dist/selftest.sh
 run_bash scripts/mutate-selftest.sh
 run_bash scripts/go-test-json-selftest.sh
 run_bash scripts/no-git-stash-selftest.sh
+# #9783: the upgrade-docs canary (make docs-check). Hermetic fixture trees via
+# DOCS_CHECK_ROOT; the row that matters is the positive control -- the phantom
+# symbol in a LIVE doc must still fail once the history archives are excluded.
+run_bash scripts/docs/check-upgrade-docs-selftest.sh
 # AF_XDP reproducer strict-warning build — fail-on-revert gate for #4906
 # (HC-081 uninitialized-counter false PASS). SKIPs on a host without a C
 # toolchain / libbpf-dev / libxdp-dev / xxd.

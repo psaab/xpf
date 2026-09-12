@@ -544,11 +544,30 @@ func (s *SessionSync) resetRecvGen() {
 	// full-set re-push (nudged on reconnect) as stale and strand the standby on
 	// the pre-reboot set. Resetting to the zero state admits the next push
 	// unconditionally — it is always the peer's CURRENT set.
+	//
+	// #9634: EVERY full-set guard, from one list. The three resets used to be
+	// written out one per line, and the fourth guard (#8121's persistent-NAT
+	// lease set) was declared without one. A rebooted peer's lease sets were then
+	// dropped as stale until its monotonic epoch passed the dead process's.
 	s.recvSeqMu.Lock()
-	s.ipsecRecvSeq.reset()
-	s.dhcpV4RecvSeq.reset()
-	s.dhcpV6RecvSeq.reset()
+	for _, g := range s.fullSetGuardsLocked() {
+		g.reset()
+	}
 	s.recvSeqMu.Unlock()
+}
+
+// fullSetGuardsLocked returns every full-set receive guard on SessionSync
+// (#9634). resetRecvGen resets exactly this list. TestEveryFullSetGuardIsResetOnRePrime_9634
+// enumerates the fullSetSeqGuard fields of SessionSync by reflection and requires
+// every one of them to be reset, so a new full-set family cannot be added
+// without joining this list. The caller holds recvSeqMu.
+func (s *SessionSync) fullSetGuardsLocked() []*fullSetSeqGuard {
+	return []*fullSetSeqGuard{
+		&s.ipsecRecvSeq,
+		&s.dhcpV4RecvSeq,
+		&s.dhcpV6RecvSeq,
+		&s.persistentNatLeaseRecvSeq,
+	}
 }
 
 // Apply atomicity (#2198 F3, corrected by #9715).

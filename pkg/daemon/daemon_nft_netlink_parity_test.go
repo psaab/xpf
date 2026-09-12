@@ -300,7 +300,8 @@ func runNftNetlinkParityInner(t *testing.T) {
 		mutate func(s *xnft.HostInboundSpec)
 	}{
 		{"widened_daddr_/32_to_/24", func(s *xnft.HostInboundSpec) { s.Views[0].V4Addrs = []string{"10.0.1.0/24"} }},
-		{"dropped_saddr_except_subtraction", func(s *xnft.HostInboundSpec) { s.Programs[0].RulesV4[0].PermitSubtract = nil }},
+		{"dropped_permit_return", func(s *xnft.HostInboundSpec) { s.Programs[0].RulesV4 = s.Programs[0].RulesV4[1:] }},
+		{"weakened_reject_to_drop", func(s *xnft.HostInboundSpec) { s.Programs[0].RulesV4[2].Verdict = config.JunosHostDrop }},
 		{"weakened_verdict_zone_opened_all", func(s *xnft.HostInboundSpec) { s.Views[0].SystemServices = []string{"all"} }},
 		{"dropped_unzoned_deny", func(s *xnft.HostInboundSpec) { s.UnzonedV4 = nil; s.UnzonedV6 = nil }},
 		// FIX-2: widen the narrow IKE exemption to also cover ge-0-0-2.80 — an
@@ -588,11 +589,23 @@ func bytesTrimRightZero(b []byte) []byte {
 
 func parityHostInboundInputs() (views []dpuserspace.ZoneHostInboundView, unzonedV4, unzonedV6 []string, programs []dpuserspace.JunosHostProgram, wg []uint16) {
 	views = []dpuserspace.ZoneHostInboundView{
-		{Zone: "trust", SystemServices: []string{"ssh", "https", "ping", "dns"}, V4Addrs: []string{"10.0.1.1", "10.0.1.2"}, V6Addrs: []string{"2001:db8:1::1"}},
-		{Zone: "mgmt", SystemServices: []string{"all"}, V4Addrs: []string{"10.0.9.1"}},
-		{Zone: "core", Protocols: []string{"all"}, V4Addrs: []string{"10.0.5.1"}, V6Addrs: []string{"2001:db8:5::1"}},
-		{Zone: "edge", SystemServices: []string{"ident-reset", "ssh"}, V4Addrs: []string{"10.0.7.1"}},
-		{Zone: "quarantine", V4Addrs: []string{"10.0.8.1"}, V6Addrs: []string{"2001:db8:8::1"}},
+		// #9637: IngressNetdevs on every rendering branch the ingress-zone rules
+		// take, so T1 pins them rule-for-rule: a multi-netdev set (trust), the
+		// named-service union (mgmt), routing protocols (core), the ident-reset
+		// reject (edge), the empty-admit drop (quarantine) and any-service (open).
+		{Zone: "trust", SystemServices: []string{"ssh", "https", "ping", "dns"}, V4Addrs: []string{"10.0.1.1", "10.0.1.2"}, V6Addrs: []string{"2001:db8:1::1"}, IngressNetdevs: []string{"ge-0-0-0", "ge-0-0-0.10"}},
+		{Zone: "mgmt", SystemServices: []string{"all"}, V4Addrs: []string{"10.0.9.1"}, IngressNetdevs: []string{"ge-0-0-9"}},
+		{Zone: "core", Protocols: []string{"all"}, V4Addrs: []string{"10.0.5.1"}, V6Addrs: []string{"2001:db8:5::1"}, IngressNetdevs: []string{"ge-0-0-5"}},
+		{Zone: "edge", SystemServices: []string{"ident-reset", "ssh"}, V4Addrs: []string{"10.0.7.1"}, IngressNetdevs: []string{"ge-0-0-7"}},
+		{Zone: "quarantine", V4Addrs: []string{"10.0.8.1"}, V6Addrs: []string{"2001:db8:8::1"}, IngressNetdevs: []string{"ge-0-0-8"}},
+		{Zone: "open", SystemServices: []string{"any-service"}, V4Addrs: []string{"10.0.6.1"}, IngressNetdevs: []string{"ge-0-0-6"}},
+		// A v6-only view with an ingress scope. Its ip (v4) ingress drop is the
+		// ONLY reason its v4 deny counter is declared, so a counter pre-pass
+		// that ignores ingress drops leaves a rule referencing an undeclared
+		// counter. Every other view already declares its v4 counter for its own
+		// addresses and cannot show that (mutation M7 of #9637 escaped without
+		// this row).
+		{Zone: "v6only", SystemServices: []string{"ping"}, V6Addrs: []string{"2001:db8:66::1"}, IngressNetdevs: []string{"ge-0-0-66"}},
 	}
 	unzonedV4 = []string{"10.0.99.1"}
 	unzonedV6 = []string{"2001:db8:99::1"}
@@ -611,7 +624,14 @@ func parityHostInboundInputs() (views []dpuserspace.ZoneHostInboundView, unzoned
 			IKEExemptNetdevs:  []string{"ge-0-0-2", "ge-0-0-2.50"},
 			IdentResetNetdevs: []string{"ge-0-0-2"},
 			RulesV4: []config.JunosHostDenyRule{
-				{Family: "ip", Src: []string{"192.0.2.0/24", "198.51.100.7"}, PermitSubtract: []string{"192.0.2.10"}, DstAny: true},
+				// #9504: an earlier permit's carve renders as a return ahead of the deny.
+				{Family: "ip", Src: []string{"192.0.2.10"}, DstAny: true, Verdict: config.JunosHostReturn},
+				{Family: "ip", Src: []string{"192.0.2.0/24", "198.51.100.7"}, DstAny: true},
+				// #9504: a reject, as `application any` (split, TCP first) and as a UDP
+				// fragment (ICMP administratively prohibited).
+				{Family: "ip", Src: []string{"198.18.0.0/15"}, DstAny: true, Verdict: config.JunosHostReject},
+				{Family: "ip", SrcAny: true, DstAny: true, Verdict: config.JunosHostReject,
+					L4: []config.JunosHostDenyL4{{Proto: config.HostInboundProtoUDP, Ports: []config.PortRange{{Lo: 69, Hi: 69}}}}},
 				{Family: "ip", SrcExcluded: true, Src: []string{"203.0.113.0/24"}, DstAny: true, L4: []config.JunosHostDenyL4{{Proto: config.HostInboundProtoTCP, Ports: []config.PortRange{{Lo: 22, Hi: 22}}}}},
 				{Family: "ip", SrcAny: true, DstAny: true, L4: []config.JunosHostDenyL4{{Proto: config.HostInboundProtoICMP, ICMPType: ptrU8(8), ICMPCode: ptrU8(0)}}},
 				// #4146 destination slice: a POSITIVE `match destination-address`
@@ -626,6 +646,11 @@ func parityHostInboundInputs() (views []dpuserspace.ZoneHostInboundView, unzoned
 			},
 			RulesV6: []config.JunosHostDenyRule{
 				{Family: "ip6", Src: []string{"2001:db8:a::/48"}, DstAny: true, L4: []config.JunosHostDenyL4{{Proto: 47}}},
+				// #9504: a deny on a tcp-rst zone, as `application any` (split) and as a
+				// TCP fragment (RST).
+				{Family: "ip6", Src: []string{"2001:db8:b::/48"}, DstAny: true, Verdict: config.JunosHostDropTCPReset},
+				{Family: "ip6", SrcAny: true, DstAny: true, Verdict: config.JunosHostDropTCPReset,
+					L4: []config.JunosHostDenyL4{{Proto: config.HostInboundProtoTCP, Ports: []config.PortRange{{Lo: 179, Hi: 179}}}}},
 				{Family: "ip6", SrcAny: true, Dst: []string{"2001:db8:5::1/128"},
 					L4: []config.JunosHostDenyL4{{Proto: config.HostInboundProtoTCP, Ports: []config.PortRange{{Lo: 22, Hi: 22}}}}},
 			},

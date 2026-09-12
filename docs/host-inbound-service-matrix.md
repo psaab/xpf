@@ -801,11 +801,13 @@ fence had partitioned per address value since #6492; the two disagreed, and that
 divergence WAS the defect. Both now derive the lifeline address set from one
 walk (`forEachFirewallLocalAddr`).
 
-**Why it reaches management.** Every host-inbound drop is
-destination-address-only, with no `iifname` qualifier (#3718). A drop scoped to a
-shared management address therefore applies to traffic arriving on the lifeline
-too — the rule cannot tell the two ingress paths apart. That is why the fix is a
-subtraction and not an ingress qualifier.
+**Why it reaches management.** The destination-address rules carry no `iifname`
+qualifier (#3718). A drop scoped to a shared management address therefore applies
+to traffic arriving on the lifeline too — the rule cannot tell the two ingress
+paths apart. That is why the fix is a subtraction and not an ingress qualifier.
+The #9637 ingress-zone rules (see "Ingress-zone judgement (#9637)") do not change
+this. A lifeline netdev is never in a view's ingress scope, so traffic arriving on
+the lifeline still meets only the destination-address rules.
 
 **The topology is one the commit gate accepts.**
 `validateDuplicateHostLocalAddressStrict` permits a management address shared
@@ -1412,8 +1414,8 @@ keys the same address under `overrideByIface[ifN.0]` (the base ∪ unit-0 merged
 override above). A per-interface override on the **unit-0** ref therefore made
 the two signatures diverge, emitting the SINGLE live address into TWO
 host-inbound views with conflicting admit sets. Because the kernel
-`xpf_hostinbound` chain matches destination address only (no ingress-interface
-predicate), whichever view's rule block sorts first decides — a deterministic
+`xpf_hostinbound` destination-address rules carry no ingress-interface
+predicate, whichever view's rule block sorts first decides — a deterministic
 false-deny (the base view's narrower set drops a service the unit-0 override
 opened). The fix skips the base (physical) snapshot's host-inbound address
 contribution when unit 0 is configured: unit 0's snapshot is the authoritative
@@ -1805,12 +1807,105 @@ for the two sibling fixes (`services rpm probe`, `security ssh-known-hosts
 host`) that share this exact root cause at the named-instance level.
 RED-on-revert guards: `pkg/config/zone_dup_block_4818_test.go`.
 
+## Ingress-zone judgement (#9637)
+
+Junos admits host-inbound traffic by the zone of the interface it **arrives on**.
+The destination-address rules judged it by the zone that **owns the address it
+names**, and the two disagree whenever those zones differ:
+
+- **Exposure.** A client on a zone that denies ssh reached ssh on another zone's
+  address.
+- **Over-refusal.** A zone that admits ssh was refused on another zone's address.
+  This was measured on the loss cluster on 2026-09-11: from `lan`, which admits
+  ssh, TCP/22 to the `wan` and `sfmix` addresses timed out while ping answered.
+
+The `xpf_hostinbound` chain now carries two rule sets, in this order, after the
+global accepts:
+
+1. **Ingress-zone rules** (`emitHostInboundZoneIngress`,
+   `pkg/daemon/host_inbound_ingress_9637.go`, mirrored rule-for-rule by
+   `emitHostInboundZoneIngressNetlink`). Each view, in each family, emits
+   `iifname <view netdevs> <fam> daddr <every judged address> <match> accept` for
+   each listed service or protocol, then the same scope with the zone's deny
+   counter and `drop`. "Every judged address" is every view's addresses plus the
+   addressed-but-unzoned set (#4420), which is exactly the set rule set 2 judges.
+   A packet on a view's netdev is decided here, whichever of those addresses it
+   names.
+2. **Destination-address rules**, unchanged. A packet on a netdev no view claims
+   meets only these, exactly as before #9637.
+
+Both rule sets judge the same destination addresses, so no packet reaches the
+chain's accept policy that did not before. A netdev left out of every scope loses
+coverage, but it never admits anything it did not admit before.
+
+**Which netdevs a view claims** is decided by `hostInboundViewIngressNetdevs`
+(`pkg/dataplane/userspace/zones_host_inbound.go`). A view claims the netdevs of
+its own interface **units**, by the snapshot `LinuxName` the dataplane uses. A
+RETH unit therefore resolves to its member netdev on the node (`reth1.0` →
+`ge-0-0-1` on node 0), and a VLAN unit to `<parent>.<vlan>`. It does not claim:
+
+- a physical row's netdev. That is either a trunk parent, whose tagged frames
+  arrive on the subunit netdevs, or the netdev its unit 0 collapses onto, which
+  that unit claims.
+- a netdev claimed by more than one (zone, token-set) view. Whichever view's
+  rules came first would decide it.
+- a lifeline netdev (fxp0 / em0 / fab*), so management and cluster control are
+  never judged by a data zone.
+- a netdev enslaved to an l3mdev VRF (#6619,
+  `config.HostInboundVRFEnslavedNetdevs`), because at LOCAL_IN `iifname` names
+  the VRF master. A routing-instance member zone, such as `sfmix` on the loss
+  cluster, therefore stays judged by destination address.
+
+**What an operator can observe.**
+
+- Cross-zone host-inbound follows the ingress zone **for a packet the kernel
+  receives on its ingress netdev**. A zone that does not admit ssh is refused on
+  every such address, including one owned by a zone that admits ssh (the
+  exposure). Measured on the loss cluster: TCP/22 from the WAN VLAN 80 segment to
+  the LAN VIP went from admitted to dropped, while ping answered.
+- **Residual over-refusal (measured, not closed by #9637).** The XDP shim does not
+  pass every host-bound packet to the kernel on its ingress netdev.
+  - A destination owned by interface-mode source NAT is reported non-local by
+    `is_local_destination`, so its reverse-NAT repair can run (#290). Such a
+    packet goes to the userspace dataplane.
+  - The userspace dataplane applies its own ingress-zone host-inbound check, then
+    reinjects the packet through `xpf-usp0`.
+  - The kernel chain sees `iifname xpf-usp0`, which no view claims, so the
+    destination-address rules judge it by the address's owner.
+  - On the loss cluster the `lan-to-wan` rule is `source-nat interface`, so TCP/22
+    from the LAN host to the `wan` addresses is still refused. A capture on fw0
+    showed those SYNs arriving on `xpf-usp0`, while a SYN to the LAN VIP arrived
+    on `ge-0-0-1`. Closing this needs the reinject path to carry the ingress zone
+    to the kernel chain.
+- The per-zone deny counters (#3361) count the drop under the ingress zone.
+- The fences (#5644 cold-boot, #5789 gap) are unchanged. They drop by destination
+  address, with no per-service accepts, over the same address set.
+- `make test-host-inbound` probes from the LAN host. Its `wan` ssh cells remain
+  DENY, because those addresses are interface-NAT addresses and take the reinject
+  path above. The smoke says so beside the cells, which flip to ADMIT once the
+  residual is closed.
+
+Pinned by:
+
+- `TestHostInboundIngressZoneVerdictsOnRealKernel9637`. Three client namespaces
+  reach a listener through the rendered ruleset. The destination-only ruleset
+  reproduces both directions of the defect, the ingress-scoped one inverts both,
+  and an unclaimed netdev is still judged by destination.
+- `TestHostInboundIngressRulesShape9637` and
+  `TestZoneHostInboundViewIngressNetdevs9637`.
+- The T1 parity fixture (`TestNftNetlinkParity`), which gives `IngressNetdevs` to
+  every rendering branch.
+
 ## Duplicate host-local-address ambiguity (#3718, Option B)
 
-The kernel host-inbound chain matches on **destination address only** — every
-rule is `<fam> daddr <zone-addrs> ...` with **no** ingress-interface / VRF / zone
-predicate, over a **single global** `inet xpf_hostinbound` input chain
-(`emitHostInboundZone`, `pkg/daemon/daemon_nft.go`). So when two security zones
+The kernel host-inbound chain's destination-address rules match on
+**destination address only**. Each is `<fam> daddr <zone-addrs> ...`, with **no**
+ingress-interface / VRF / zone predicate, in a **single global**
+`inet xpf_hostinbound` input chain (`emitHostInboundZone`,
+`pkg/daemon/daemon_nft.go`). Since #9637 the ingress-zone rules come before them
+and decide every packet that arrives on a netdev some view claims. What follows
+describes the destination-address rules, which still decide every other packet.
+So when two security zones
 resolve the **same** firewall-local address — a duplicated interface address, a
 duplicated VRRP VIP, or the same address reused across routing-instances (a zone
 is not VRF-scoped in xpf, so overlapping-VRF reuse surfaces as the cross-zone
@@ -1863,14 +1958,19 @@ Option B rejects the ambiguity fail-closed; it does **not** yet make the kernel
 path ingress-scoped. Two follow-ons are tracked on #3718:
 
 - **Option A — kernel `iifname` ingress-scope**: emit host-inbound rules with an
-  `iifname` (ingress netdev / VRF) predicate so the ingress zone disambiguates
-  the `daddr`, matching the Junos model and ending the split-brain with the
-  already-ingress-scoped userspace path. Deferred: `iifname` must enumerate every
-  ingress netdev for a zone (physical, `.0` units, VLAN subinterfaces, VRF
-  members, `lo` for locally-generated traffic, HA/fabric paths) or a legitimate
-  management packet fails closed and locks out the box — it needs the
-  netdev-enumeration audit + loss-cluster lab validation (VLAN units + a VRRP
-  failover).
+  `iifname` predicate, so the ingress zone disambiguates the `daddr`.
+  **Delivered by #9637 for every netdev a view claims.**
+  - It was deferred because an ingress rule set must enumerate every ingress
+    netdev, or a legitimate management packet fails closed. #9637 avoids that
+    requirement rather than meeting it: the ingress-zone rules come first, and
+    the destination-address rules stay behind them as the judge for any netdev
+    the scope leaves out.
+  - Those netdevs are VRF members, `lo`, lifelines, trunk parents, and netdevs
+    claimed by two views. An incomplete enumeration therefore costs coverage,
+    never admission, and a packet on a left-out netdev keeps its pre-#9637
+    verdict.
+  - VRF-member zones are the remaining gap. They stay destination-judged
+    (#6619).
 - **Option C — per-VRF host-inbound chains**: separate per-routing-instance input
   chains so the same address can be **intentionally** reused across VRFs with
   distinct host-inbound policies (which Option B rejects). A larger architectural
@@ -1925,11 +2025,29 @@ helper never sees it, so a helper crash cannot lock management out).
   **whole ordered program**: if any contributing term is un-representable the
   program emits nothing (no coarsened / partial rule) and its policies keep the
   warning.
-- **DROP-only via set-subtraction.** A `deny` becomes a silent `drop`; a `permit`
-  NEVER emits a fine `accept` (that would let a fine permit re-admit a
-  coarse-rejected service — Rust `poll_descriptor/mod.rs:138`). Instead each later
-  deny SUBTRACTS an earlier permit's source set (`saddr != <permit-set>`), so the
-  coarse host-inbound gate stays the **sole admit authority**.
+- **FIRST-MATCH, never a fine accept (#9504).** Each ingress zone's program
+  renders, in authored order, into its own nft chain that the `xpf_hostinbound`
+  input chain enters with an `iifname`-scoped `jump`. A `deny` drops (answering
+  TCP with a RST on a `tcp-rst` zone), a `reject` answers (TCP RST, else ICMP
+  administratively prohibited), and a `permit` RETURNS from the subchain, so the
+  coarse host-inbound gate still decides. A permit NEVER emits a fine `accept`
+  (that would let it re-admit a coarse-rejected service — Rust
+  `poll_descriptor/mod.rs:138`); `return` leaves the fine program without
+  admitting anything.
+
+  A packet that matches no rule returns as well. **xpf applies no implicit
+  junos-host default-deny on any path** — `evaluate_junos_host_policy_l3_aware`
+  (policy.rs) and `policymatch.matchJunosHost` both deliver on no match, which is
+  the management-lifeline guarantee — so the kernel program must not invent one
+  either. The consequence for an operator is stated under the warning below: a
+  restricted `permit` alone restricts nothing, on any path.
+
+  Before #9504 a permit could be projected only as a `saddr !=` SUBTRACTION of
+  later denies. That cannot express a carve narrowed on any other dimension, so a
+  narrow-application, source-excluded or destination-scoped permit made the WHOLE
+  program un-representable — which silently disabled kernel enforcement of every
+  other junos-host deny on that ingress zone, including the canonical management
+  ACL (`permit <mgmt-net> junos-ssh` followed by `deny any`).
 - **Ingress `iifname` scope, never `daddr` as the ZONE scope.** The DROP is scoped
   by the from-zone's kernel netdev names
   (`pkg/dataplane/userspace/BuildJunosHostPrograms`), excluding lifelines
@@ -2110,13 +2228,15 @@ helper never sees it, so a helper crash cannot lock management out).
   attribute a drop to a policy object; that is the one "counters stay zero" symptom
   the direct path retains. The userspace XSK path keeps its own attribution.
 
-**Representable subset:** action `deny`; `match source-address` /
-`source-address-excluded` **and** `match destination-address` /
+**Representable subset:** action `deny`, `reject` or `permit` (#9504); `match
+source-address` / `source-address-excluded` **and** `match destination-address` /
 `destination-address-excluded` resolving entirely to *static* address-book CIDRs
 (recursively feed-untainted); `match application` reducing to simple
 proto + optional dst/src port + optional ICMP type/code (application-sets
-OR-expanded to multiple rules); **no** `scheduler-name`; ingress zone **not**
-`tcp-rst`.
+OR-expanded to multiple rules); **no** `scheduler-name`. A `tcp-rst` ingress zone
+is representable: its denies render as a TCP `reject with tcp reset` ahead of the
+drop for everything else, which is what `enqueue_deny_reply` (reject_reply.rs)
+does at runtime.
 
 **Address-match semantics (source AND destination).** Both dimensions route
 through ONE projection formula (`junosHostProjectAddrMatch`,
@@ -2162,12 +2282,19 @@ widened past the permit's destination scope.
 
 **Un-representable remainder (keeps the commit warning below):** feed-tainted
 source **or destination**, a **MIXED direct+term** or ALG-bearing application, an
-application scoped to an IPsec/ident exempt tuple, a **destination-scoped or
-destination-excluded `permit`**, a scheduler-gated policy, a `tcp-rst` ingress
-zone (silent drop would diverge from Junos's RST verdict class), `reject`, and
-the "deny non-permitted" half of a source-restricted `permit` (the reject and
-source-restricted-permit slices are tracked follow-ups using the identical
-machinery). No partial/coarsened kernel rule is ever emitted for the remainder.
+application scoped to an IPsec/ident exempt tuple, and a scheduler-gated policy
+(time-windowed: rendered as an always-on rule it would carve or drop outside its
+own window). A zone whose ingress netdevs cannot all be scoped (#6564, #6619) and
+a lifeline-only zone keep the warning for their own reasons, above. No
+partial/coarsened kernel rule is ever emitted for the remainder.
+
+**Not in the remainder, and not enforced anywhere: the "deny non-permitted" half
+of a restricted `permit`.** It is not a kernel-vs-userspace gap — xpf has no
+implicit junos-host default-deny on either path — so the fix for an operator who
+wants it is an explicit `then deny` policy after the permit, which the kernel
+chain now enforces. The commit warning for a restricted permit says exactly that
+(#9504); it previously said the restriction held on the userspace path, which was
+false.
 
 A **pure multi-term** application is NOT in that remainder, contrary to earlier
 revisions of this paragraph. A `term`-bearing application with no direct match
@@ -2319,12 +2446,16 @@ its expectations depend on has changed. A shared cluster's config is not the
 smoke's to own, and an expectation table that has silently gone stale reports a
 clean pass while asserting the wrong thing.
 
-### The matrix, as measured on `loss:xpf-userspace-fw0`
+### The matrix on `loss:xpf-userspace-fw0`
 
-`lan` admits `ssh` + `ping`; `wan` admits `ping` + `gre` and owns the two
-tagged sub-units `reth0.50` / `reth0.80`. Probed from `cluster-userspace-host`:
+`lan` admits `ssh` + `ping`. `wan` admits `ping` + `gre` and owns the two tagged
+sub-units `reth0.50` / `reth0.80`. Every probe comes from `cluster-userspace-host`,
+so every probe **arrives on `lan`** (`reth1`). Since #9637, host-inbound is judged
+by the zone a packet arrives on, whichever address it names, so the smoke scores
+lan's own addresses against `lan`'s posture, and the `wan`
+sub-units against the reinject-path residual:
 
-| target | interface | zone | tcp/22 | tcp/23 | icmp |
+| target | interface | owning zone | tcp/22 | tcp/23 | icmp |
 |---|---|---|---|---|---|
 | `10.0.61.1` | `reth1.0` (untagged) | lan | RST → **admitted** | timeout → denied | reply |
 | `2001:559:8585:ef00::1` | `reth1.0` (untagged) | lan | RST → **admitted** | timeout → denied | reply |
@@ -2333,10 +2464,19 @@ tagged sub-units `reth0.50` / `reth0.80`. Probed from `cluster-userspace-host`:
 | `172.16.80.8` | `reth0.80` (**VLAN 80**) | wan | timeout → **denied** | timeout → denied | reply |
 | `2001:559:8585:80::8` | `reth0.80` (**VLAN 80**) | wan | timeout → **denied** | timeout → denied | reply |
 
-The lan row and the wan rows differ on tcp/22 while agreeing on icmp, and both
-lan rows admit tcp/22 while denying tcp/23 at the *same address*. That pair is
-what makes the VLAN cells load-bearing: no routing or reachability story
-explains a reading where one port at an address answers and another does not.
+The four `wan` rows deny tcp/22 although every probe arrives on `lan`, which
+admits ssh. That is the residual over-refusal #9637 measured and did not close.
+These are interface-NAT addresses, so the userspace dataplane reinjects the SYN
+through `xpf-usp0`, where the kernel chain still judges by the address's owner
+(§ "Ingress-zone judgement (#9637)"). The cells stay
+load-bearing through the tcp/22 and tcp/23 pair at the *same address*: one port
+answers and the other does not, which no routing or reachability story explains.
+A posture check asserts that `lan` owns `reth1.0`, the prober's ingress interface,
+so the ssh cells cannot quietly be scored against the wrong zone.
+
+This prober cannot see the other direction: a client arriving on `wan` that names
+a `lan` address. The #9637 lab gate measured that direction separately, from the
+WAN-side `xpf-mouse-target` (`docs/log/9637.md`).
 
 ### Why the RST matters
 

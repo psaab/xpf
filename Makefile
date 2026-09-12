@@ -316,10 +316,28 @@ test-race-dp:
 #
 # Cheap: cold ~2.5 min (shared with the --release artifacts below only
 # partially, since this is a dev-profile check), warm ~0s.
+#
+# #9499 member 1: a THIRD leg makes integer overflow an executed failure
+# oracle. The --release leg is the only other leg that runs tests, and a
+# release build has overflow-checks OFF, so a wrap was caught only when a
+# test happened to assert the exact wrapped value. This leg runs the frame,
+# NAT, session and checksum tests in the default test profile, where
+# overflow checks and debug assertions are on. It is filtered rather than
+# whole-suite because it is a second full build; widen the filter rather
+# than dropping the leg.
+#
+# It is not decoration: with `parsed.seq.wrapping_add(seg_len)` in
+# afxdp/frame/tcp.rs mutated to `parsed.seq + seg_len`, the --release leg
+# stays green and this leg fails
+# reject_rst_v4_for_syn_at_seq_max_wraps_ack_to_zero_9499 with "attempt to
+# add with overflow" (docs/log/9499.md). Measured on a loaded host: ~3.5 min
+# cold build, ~65 s run (2489 tests).
 test-rust:
 	$(CARGO) check --manifest-path userspace-dp/Cargo.toml --benches
 	$(CARGO) test --manifest-path userspace-dp/Cargo.toml --release \
 		--bins --tests -- --test-threads=1
+	$(CARGO) test --manifest-path userspace-dp/Cargo.toml \
+		--bins --tests -- --test-threads=1 frame nat session checksum
 
 # Standalone convenience view of the refactoring-heatmap drift (#1661
 # item 8). Regenerates scripts/refactoring-audit.sh output to a temp
@@ -645,6 +663,30 @@ test-target-services-lib:
 # exit status. Hermetic: mocked incus, canned transcripts; no cluster, no VM.
 # Run this after touching apply-cos-config.sh or cos-apply-lib.sh. The Go half
 # of the marker contract lives in cmd/cli/cos_apply_markers_6440_test.go.
+# #9551: refuse a NEGATED GitHub close keyword. GitHub's parser does not read
+# negation, so a sentence saying an issue stays open closes it at merge when a
+# close verb stands in front of the number. scripts/close_keyword_lint_ci.sh
+# holds both pull-request legs (the body and the commit range); the GitHub
+# Actions job that would call it on every PR is NOT in the tree yet, because
+# pushing a workflow file needs a token with `workflow` scope (#9551). These are
+# the local legs.
+#   close-keyword-lint           lint this branch's commit messages
+#                                (origin/master..HEAD); PR=<n> lints that PR's
+#                                body and commit messages instead (needs gh)
+#   install-git-hooks            install the commit-msg hook: honours
+#                                core.hooksPath, refuses to replace a different
+#                                hook, and fails open in a worktree without the lint
+#   test-close-keyword-lint-lib  the lint's cells (make selftest runs them too)
+.PHONY: close-keyword-lint install-git-hooks test-close-keyword-lint-lib
+close-keyword-lint:
+	python3 ./scripts/close_keyword_lint.py $(if $(PR),--pr $(PR),--commits origin/master..HEAD)
+
+install-git-hooks:
+	bash ./scripts/git-hooks/install.sh
+
+test-close-keyword-lint-lib:
+	python3 -m unittest scripts/test_close_keyword_lint.py
+
 test-cos-apply-lib:
 	bash ./test/incus/cos-apply-lib-selftest.sh
 	go test -count=1 -run 6440 ./cmd/cli/

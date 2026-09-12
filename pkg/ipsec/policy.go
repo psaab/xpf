@@ -121,6 +121,20 @@ func (m *Manager) renderConfig(ipsecCfg *config.IPsecConfig) (string, map[string
 			continue
 		}
 
+		// #9495: a VPN name written raw as a section header must not break the
+		// swanctl file. Commit refuses such a name (validateIPsecSectionNamesStrict);
+		// this belt covers a persisted or peer-synced one. One such name would
+		// otherwise make strongSwan discard EVERY tunnel in the file, or inject
+		// settings. SKIP it (the secrets loop honours skipped too) and keep the rest.
+		if ipsecname.SectionBreaking(sanitizeSwanctlValue(name)) {
+			skipped[name] = true
+			slog.Warn("skipping IPsec VPN: its name would break the swanctl section it is "+
+				"written into (whitespace, a brace, '#', '=', ',', a quote, '.', '%', ':' "+
+				"or non-ASCII); rename the VPN to letters, digits, '-' and '_' (#9495)",
+				"vpn", name)
+			continue
+		}
+
 		// This VPN passed every skip check, so it is emitted into the
 		// loaded config. Record its sanitized connection name in the
 		// rendered set (#5494) — the same key swanctl reports in

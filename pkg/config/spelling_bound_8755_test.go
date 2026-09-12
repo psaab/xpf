@@ -5,26 +5,33 @@ import (
 	"testing"
 )
 
-// #8755: a scope entry closes ONE of four losing spellings, and the register
-// says so. This is the guard that keeps that note true rather than merely
-// written.
+// #8755: the SPELLING BOUND on the #8690 register, and the filter-input site it
+// was first measured on.
 //
-// Measured at 769f2f622, through the real pass under the production scope:
+// HISTORY: the bound below is not the current one. At 769f2f622, through the
+// real pass under the production scope, the idiomatic `family inet { filter
+// input f4; }` DROPPED the filter and was UNREACHABLE: normalizeCompactNodes
+// recursed into a braced `Keys=[family inet]` with schema.children["family"],
+// advancing the schema one level where the node advanced two, so no pair was
+// asked for that shape even under admit-all. Only the one-liner was reachable,
+// hence "a scope entry closes ONE of four losing spellings".
 //
-//	A  family inet { filter { input f4; } }   keeps  "f4"   fully braced, correct
-//	B  family inet { filter input f4; }       DROPS         idiomatic elision
-//	C  family inet filter input f4;           DROPS         one-liner
-//	D  family { inet { filter input f4; } }   DROPS         unidiomatic
-//	E  family { inet filter input f4; }       DROPS         unidiomatic
+// #8763 made the pass descend a compoundKey node, and ("inet","filter") and
+// ("filter","input") have since been admitted. Measured at ac03dce96 (#9446),
+// every spelling binds "f4":
 //
-// Only C is reachable by admitting a chain. B is unreachable BY CONSTRUCTION:
-// normalizeCompactNodes recurses into a braced `Keys=[family inet]` with
-// schema.children["family"], while those children belong to `family inet` — the
-// schema advances one level where the node advanced two, so nothing beneath is
-// ever consulted (pairsAsked=[] for that shape even under admit-all).
+//	family inet { filter { input f4; } }   fully braced
+//	family inet { filter input f4; }       idiomatic elision
+//	family inet filter input f4;           one-liner
+//	family { inet { filter input f4; } }
+//	family { inet filter input f4; }
 //
-// `unit`-level sites are NOT subject to this: there the second token is an
-// instance ARG consumed by `identity`, not a child keyword.
+// The bound on the sites still `open` is not one sentence any more. It differs
+// per site, so TestSpellingBoundNotesAreMeasured_9446 measures each entry and
+// holds its note to that measurement.
+//
+// `unit`-level sites are NOT subject to any of this: there the second token is
+// an instance ARG consumed by `identity`, not a child keyword.
 
 func filterInOf8755(t *testing.T, text string) (string, bool) {
 	t.Helper()
@@ -50,8 +57,8 @@ func ifaceSpelling8755(inner string) string {
 	return fwFilter8755 + `interfaces { ge-0/0/0 { unit 0 { ` + inner + ` } } }`
 }
 
-// THE CONTROL. The fully braced spelling must keep the filter, or every "DROPS"
-// below is about a fixture that never bound one.
+// THE CONTROL. The fully braced spelling must keep the filter, or every
+// comparison below is about a fixture that never bound one.
 func TestTheBracedSpellingKeepsTheFilter_8755(t *testing.T) {
 	got, ok := filterInOf8755(t, ifaceSpelling8755(`family inet { filter { input f4; } }`))
 	if !ok {
@@ -63,13 +70,12 @@ func TestTheBracedSpellingKeepsTheFilter_8755(t *testing.T) {
 	}
 }
 
-// THE BOUND. C is reachable by a scope entry; B is not. If C is ever fixed
-// while B still drops, the fix is PARTIAL and the register's `open` entries
-// need re-reading — `open` there means available, not fully fixable.
-//
-// This is green today (both drop) and green after a complete fix (both keep).
-// It fires on exactly one state: the partial one.
-func TestAChainAdmissionDoesNotCloseTheIdiomaticElision_8755(t *testing.T) {
+// THE REPAIRED BOUND, pinned. At 769f2f622 this cell was green while the
+// idiomatic elision and the one-liner both DROPPED the filter, and it fired only
+// on the partial state between. The fix has since shipped in full, which turned
+// its silent "both drop" arm into a regression that passed. Every spelling now
+// has to bind what the fully braced control binds (#9446).
+func TestEveryFilterSpellingBindsTheFilter_8755(t *testing.T) {
 	// The control is READ, not merely asserted elsewhere: every comparison below
 	// is against what the fully braced spelling actually binds. A control that
 	// is only checked in its own cell can stop binding without this one
@@ -79,32 +85,23 @@ func TestAChainAdmissionDoesNotCloseTheIdiomaticElision_8755(t *testing.T) {
 		t.Fatalf("the fully braced control binds %q; every comparison below is "+
 			"against it and means nothing if it binds nothing", want)
 	}
-	braced, ok1 := filterInOf8755(t, ifaceSpelling8755(`family inet { filter input f4; }`))
-	oneLiner, ok2 := filterInOf8755(t, ifaceSpelling8755(`family inet filter input f4;`))
-	if !ok1 || !ok2 {
-		t.Fatal("a spelling did not compile; this cell measures nothing")
-	}
-	switch {
-	case braced == want && oneLiner == want:
-		t.Log("both spellings now bind the filter — the traversal gap is closed and " +
-			"this cell, and the register's spelling-bound note, can be retired")
-	case braced == "" && oneLiner == "":
-		// Today. Nothing admitted, so nothing folds.
-	case braced == "" && oneLiner == want:
-		// UNFALSIFIABLE AT THIS HEAD, and labelled: the partial state does not
-		// exist yet, so a mutation deleting this arm kills nothing. That is what
-		// the arm is FOR — it fires on a future state, which is the only kind of
-		// guard that can catch a fix being shipped half-done.
-		t.Errorf("PARTIAL FIX: the one-liner now binds %q and the idiomatic "+
-			"`family inet { filter input f4; }` still drops it. A chain admission cannot reach a braced multi-key "+
-			"container — normalizeCompactNodes advances the schema one level where "+
-			"the node advanced two. The #8690 register lists these sites `open`; "+
-			"that class now understates them and the entries must say which "+
-			"spelling they close (#8755)", braced)
-	default:
-		t.Errorf("unexpected combination: braced=%q oneLiner=%q — the two spellings "+
-			"have diverged in a direction this cell does not model, which is worth "+
-			"a human before it is worth a fix", braced, oneLiner)
+	for _, sp := range []string{
+		`family inet { filter input f4; }`,
+		`family inet filter input f4;`,
+		`family { inet { filter input f4; } }`,
+		`family { inet filter input f4; }`,
+	} {
+		got, ok := filterInOf8755(t, ifaceSpelling8755(sp))
+		if !ok {
+			t.Errorf("%s did not compile; this cell measures nothing for it", sp)
+			continue
+		}
+		if got != want {
+			t.Errorf("%s binds %q, want %q as the fully braced spelling does. It "+
+				"bound at ac03dce96 (#9446): either the pass stopped descending a "+
+				"braced compoundKey node (#8763), or (inet,filter) / (filter,input) "+
+				"left the normalizer scope", sp, got, want)
+		}
 	}
 }
 
@@ -163,8 +160,9 @@ func TestEveryOpenEntryCarriesTheSpellingBound_8755(t *testing.T) {
 	if len(missing) > 0 {
 		t.Errorf("%d `open` entries carry no spelling bound: %v.\n`open` reads as "+
 			"\"available work, fully fixable\", and for the sites under a braced "+
-			"multi-key container it is not — a chain admission closes one of four "+
-			"losing spellings. An entry without that note invites a fix that covers "+
-			"a quarter of the exposure (#8755)", len(missing), missing)
+			"multi-key container it is not: their losing spellings resolve to "+
+			"different pairs, so one admission is not the whole fix. "+
+			"TestSpellingBoundNotesAreMeasured_9446 holds each note to its own "+
+			"measurement (#8755, #9446)", len(missing), missing)
 	}
 }

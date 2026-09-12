@@ -214,5 +214,18 @@ func runUniformGatesIPsecEvent(tree *ConfigTree, cfg *Config, opts compileOpts) 
 		}
 	}
 
+	// #9495: an IPsec VPN name is written raw as a swanctl section header, and a name outside
+	// letters, digits, '-' and '_' can make strongSwan discard every tunnel in the file, inject
+	// settings, or rename the tunnel. Strict on commit / commit-check; lenient on load / peer-sync
+	// (warn, and the pkg/ipsec render belt skips a name that would actually break the file).
+	if err := validateIPsecSectionNamesStrict(cfg); err != nil {
+		if opts.lenientIPsecSectionName {
+			cfg.Warnings = append(cfg.Warnings,
+				fmt.Sprintf("ipsec VPN section name (downgraded to warning on tolerant path): %v", err))
+		} else {
+			return err
+		}
+	}
+
 	return nil
 }

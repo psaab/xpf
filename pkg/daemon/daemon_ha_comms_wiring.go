@@ -454,6 +454,9 @@ func (d *Daemon) wireClusterPeerFailoverHooks(ss *cluster.SessionSync) {
 	// failoverActuateTimeout cannot delay a real commit past this lease.
 	d.cluster.SetRemoteTransferOutLeaseDuration(2*d.localFailoverCommitTimeout + 20*time.Second)
 	d.cluster.SetTransferReadinessFunc(d.userspaceTransferReadiness)
+	// #9569: the untargeted failover and ForceSecondary refuse a peer that did
+	// not apply the newest config this node sent.
+	d.cluster.SetPeerConfigStaleFunc(d.peerConfigStale)
 	d.cluster.SetPeerTimeoutGuard(d.shouldSuppressPeerHeartbeatTimeout)
 	// #7367: surface the dataplane's view of each RG in the status render.
 	d.cluster.SetRGForwardingFunc(d.rgForwardingStatus)

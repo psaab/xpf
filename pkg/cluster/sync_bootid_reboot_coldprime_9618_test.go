@@ -187,14 +187,23 @@ func TestBootIDRebootColdPrimeIsDrivenToTheReplacement_9618(t *testing.T) {
 	}
 
 	ss.lastSweepTime = monotonicSeconds()
-	for i := 0; i < 3 && ss.needColdPrime.Load(); i++ {
+	for i := 0; i < 3; i++ {
 		ss.syncSweep()
-	}
-	if ss.needColdPrime.Load() {
-		t.Errorf("#9618: the sweep never discharged the owed cold prime; the replacement stays empty")
 	}
 	if got := ss.stats.BulkSyncs.Load() - bulksBefore; got != 1 {
 		t.Errorf("#9618: want exactly one authoritative bulk for the reboot, got %d", got)
+	}
+	// #9626: writing the bulk discharges nothing. The replacement's BulkAck does.
+	if !ss.needColdPrime.Load() {
+		t.Errorf("#9626: the owed cold prime was discharged before the replacement acknowledged the bulk")
+	}
+	epoch, _, ok := ss.PendingBulkAck()
+	if !ok {
+		t.Fatalf("#9618: the sweep's bulk left no pending ack to discharge the debt with")
+	}
+	ss.handleMessage(c1, syncMsgBulkAck, epochPayload9626(epoch))
+	if ss.needColdPrime.Load() {
+		t.Errorf("#9618: the replacement's BulkAck did not discharge the owed cold prime; the next reboot signal would find it still armed")
 	}
 	if starts, ends := countBulkMarkers(t, c1.bytes()); starts == 0 || ends == 0 {
 		t.Errorf("#9618: no bulk window reached the REPLACEMENT's connection (starts=%d ends=%d)", starts, ends)

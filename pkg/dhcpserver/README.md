@@ -231,6 +231,29 @@ addressed. Regression guards: `TestKeaSubnetIDStableAcrossRegenerations`
 cross-node), and `TestKeaSubnetIDCollisionProbeIsNodeIndependent` (#5203,
 colliding pair).
 
+## Duplicate pool subnets — #9785
+
+Every pool renders as its own Kea `subnet4`/`subnet6` entry. Kea refuses a
+second entry for a prefix it already holds (`subnet with the prefix of
+'10.0.61.0/24' already exists`) and then loads nothing: `kea-dhcp4-server`
+exits and the node serves no DHCP for any pool. Before #9785 such a config
+committed clean.
+
+- **Commit:** `validateDHCPPoolSubnetsUniqueStrict` (`pkg/config`) refuses two
+  pools of one server whose subnets have the same masked prefix, across groups
+  and within one group, naming both pools. `dhcp-local-server` and
+  `dhcpv6-local-server` are checked separately. Nested prefixes of different
+  lengths are not refused; `warnAmbiguousV4SubnetSelection` still warns about
+  them.
+- **Tolerant load and peer sync:** the gate downgrades to a `cfg.Warnings`
+  entry (`lenientDHCPPoolSubnets`), so a persisted config still boots.
+- **Render belt:** `claimPoolSubnet` (`kea_duplicate_subnet_9785.go`) keeps the
+  first pool in the generators' stable (group, pool) order and skips every
+  later pool with the same masked prefix, with a warning naming both. The skip
+  comes before `resolveSubnetID`, so a skipped pool takes no subnet id. The
+  kept pool is the first by name, not necessarily the older one; commit refuses
+  the pair, so only a config that arrived through the tolerant path reaches it.
+
 ## Expired-lease reclamation — #1387 (stale-lease-cleanup slice / Path S)
 
 The "stale lease cleanup" half of #1387. Kea keeps an expired / released /
@@ -912,6 +935,19 @@ canonical config:
   `ensureDHCPLeaseSyncLoop` (shared with the connect-time launch, so it cannot
   double-launch): a knob-ON commit (re)launches it against the live comms
   context, a knob-OFF commit stops it, without a restart.
+
+
+### One owner per address in the takeover pre-seed (#9791)
+
+`mergeLeasesByIdentity` builds the memfile a promoted node's Kea loads. It first
+unions the local and peer sets by identity (address + client), where the local
+row wins the same binding, and then keeps ONE row per address: the binding with
+the most recent grant (`ValidLife - Remaining`, falling back to the later expiry
+when a row lacks its valid lifetime), a tie keeping the local row. Before this,
+a stale local row for an address the peer had re-granted to a new client was
+written first beside the peer's row, and the current holder was refused its
+renewal after failover (#9729 run 6). A v6 key includes the lease type and
+prefix length.
 
 ## Callers
 

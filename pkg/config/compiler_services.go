@@ -812,7 +812,9 @@ func compileDynamicAddress(node *Node, sec *SecurityConfig) error {
 			fs = &FeedServer{Name: inst.name}
 		}
 
-		for _, prop := range inst.node.Children {
+		// #9792: a packed one-line run reaches this reader on the lenient path
+		// (Store.Load / Store.SyncApply); expand it as #9235 does. Lenient path only.
+		for _, prop := range expandResolvingRuns9792(inst.node.Children, feedServerSchema9792()) {
 			switch prop.Name() {
 			case "url":
 				fs.URL = nodeVal(prop)
@@ -851,12 +853,22 @@ func compileDynamicAddress(node *Node, sec *SecurityConfig) error {
 
 	for _, inst := range namedInstances(node.FindChildren("address-name")) {
 		ab := &AddressBinding{Name: inst.name}
-		if profile := inst.node.FindChild("profile"); profile != nil {
-			for _, c := range profile.Children {
-				if c.Name() == "feed-name" {
+		// #9689: every `profile` statement, not the first. Two sibling statements
+		// (`profile feed-name f; profile fail-mode drop;`) leave two profile nodes,
+		// and FindChild returned only the first, silently dropping the second
+		// leaf on a commit that reports success.
+		for _, profile := range inst.node.FindChildren("profile") {
+			// #9689: split a packed or nested one-line run (see
+			// dynamicAddressProfileSchema9689) before matching leaves by name.
+			for _, c := range hoistAndSplitRun8939(profile.Children, dynamicAddressProfileSchema9689()) {
+				switch c.Name() {
+				case "feed-name":
 					if fn := nodeVal(c); fn != "" {
 						ab.FeedNames = append(ab.FeedNames, fn)
 					}
+				case "fail-mode":
+					// #9689: retain (default) or drop.
+					ab.FailMode = nodeVal(c)
 				}
 			}
 		}
@@ -979,7 +991,7 @@ func compilePreferredRoutes(node *Node, ri, polName string, routes map[string]*P
 			}
 		}
 		// Child-node shape (hierarchical blocks + flat-set replay).
-		for _, p := range rInst.node.Children {
+		for _, p := range expandResolvingRuns9792(rInst.node.Children, preferredRouteSchema9792(ri != "")) { // #9792: expand a lenient-path packed run (#9235).
 			switch p.Name() {
 			case "next-hop":
 				if v := nodeVal(p); v != "" {
@@ -1696,7 +1708,7 @@ func compileSamplingFamily(node *Node) *SamplingFamily {
 				if len(child.Keys) < 2 && len(child.Children) > 0 {
 					fsChildren = child.Children[0].Children
 				}
-				for _, prop := range fsChildren {
+				for _, prop := range expandResolvingRuns9792(fsChildren, samplingFlowServerSchema9792()) { // #9792: expand a lenient-path packed run (#9235).
 					switch prop.Name() {
 					case "port":
 						if v := nodeVal(prop); v != "" {
@@ -2379,6 +2391,7 @@ func compileBridgeDomains(node *Node, bds *[]*BridgeDomainConfig, lenient bool, 
 			continue
 		}
 		bdName := child.Name()
+		bdLeaves := expandResolvingRun9792(child, bridgeDomainSchema9792()) // #9792: expand a lenient-path packed run (#9235).
 		bd := &BridgeDomainConfig{
 			Name: bdName,
 		}
@@ -2435,12 +2448,12 @@ func compileBridgeDomains(node *Node, bds *[]*BridgeDomainConfig, lenient bool, 
 		}
 
 		// Routing interface (e.g. "irb.0")
-		if riNode := child.FindChild("routing-interface"); riNode != nil {
+		if riNode := bdLeaves.FindChild("routing-interface"); riNode != nil {
 			bd.RoutingInterface = nodeVal(riNode)
 		}
 
 		// Domain type
-		if dtNode := child.FindChild("domain-type"); dtNode != nil {
+		if dtNode := bdLeaves.FindChild("domain-type"); dtNode != nil {
 			bd.DomainType = nodeVal(dtNode)
 		}
 

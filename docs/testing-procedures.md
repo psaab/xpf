@@ -23,7 +23,11 @@ fails `make test`. Before #4006 this target ran only the Go suite, so a
 Rust dataplane regression — a forwarding / CoS / NAT / session break in
 the ONLY runtime forwarding path (#1373/#1476) — passed `make test`
 green. The Go leg is ~30s; the Rust leg compiles + runs a few thousand
-tests in `--release` and takes a few minutes.
+tests in `--release` and takes a few minutes. A second Rust test leg
+(#9499) runs the frame, NAT, session and checksum tests in the default test
+profile, where integer overflow panics: a release build wraps silently, so
+without it a wrap failed a test only if the test asserted the exact value.
+Measured on a loaded host: ~3.5 min cold build, ~65 s run.
 
 **Go suite** (`make test-go`) — 880+ tests across 30 packages. Covers:
 - Config parser (hierarchical + flat set syntax)
