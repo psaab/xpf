@@ -309,6 +309,12 @@ func famOnlyCases8763() []famOnlyCase8763 {
 		{"filter output", "", ifUnit("   family inet {\n    filter { output f4probe; }\n   }"), ifUnit("   family inet {\n    filter output f4probe;\n   }"), ifUnit("   family inet {\n    filter { }\n   }"), recover8763},
 		{"inet address", "", ifUnit("   family inet {\n    address 10.9.9.1/24;\n   }"), ifUnit("   family inet address 10.9.9.1/24;"), ifUnit("   family inet {\n   }"), recover8763},
 		{"inet6 address", "", ifUnit("   family inet6 {\n    address 2001:db8::1/64;\n   }"), ifUnit("   family inet6 address 2001:db8::1/64;"), ifUnit("   family inet6 {\n   }"), recover8763},
+		// #9932: the two DHCP-client heads. `dhcp` and `dhcpv6-client` are
+		// CONTAINERS, not value leaves, so the packed spelling under measurement
+		// is the bare head -- which is also the canonical way to write a DHCP
+		// interface, and the shape that committed with the client off.
+		{"inet dhcp", "", ifUnit("   family inet {\n    dhcp;\n   }"), ifUnit("   family inet dhcp;"), ifUnit("   family inet {\n   }"), recover8763},
+		{"inet6 dhcpv6-client", "", ifUnit("   family inet6 {\n    dhcpv6-client { client-type stateful; }\n   }"), ifUnit("   family inet6 dhcpv6-client { client-type stateful; }"), ifUnit("   family inet6 {\n   }"), recover8763},
 		// Refused in both spellings by a live gate, so nothing the fold does can
 		// change the outcome. These two are also REMOVED from the scope list by
 		// this change -- see the note in compact_normalize_scope.go.
