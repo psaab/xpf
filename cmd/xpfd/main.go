@@ -191,6 +191,12 @@ func main() {
 			fmt.Fprintf(os.Stderr, "cleanup BPF: %v\n", err)
 			os.Exit(1)
 		}
+		// #9725: cleanup has just destroyed every pinned XDP link, including the
+		// ones a hitless stop left attached with kernel transit OPEN on the
+		// strength of their surviving. No daemon is running to notice, so close
+		// the gate here: after cleanup nothing adjudicates transit until xpfd
+		// starts and re-evaluates it.
+		daemon.CloseKernelTransitForCleanup()
 		// Remove fabric IPVLAN interfaces created by the daemon.
 		daemon.CleanupFabricIPVLANs()
 		// Also clear FRR managed routes so the kernel routing table is

@@ -274,7 +274,7 @@ test-go: test-race-dp
 # this recipe, so this leg must stay BELOW the pkg/daemon one.
 test-race-dp:
 	$(GO) test -race ./pkg/daemon/ -run 'DataplaneCell|NATPoolAlarm|ForwardingStatus|BootstrapExit|RuntimeDataplaneNeverBareRootManager|EventStreamFallbackLoop|RunUserspaceEventStream|LiveDataPlane_|GRPCShowBuffers_|SystemAction_|GRPCServer_|RESTServer_|ManagementProbe|ConsoleCLIProbeWiring|FullResync|ReconcilePassUsesOneDataplaneSnapshot|ReconcileBlackholeWrappersStillReloadPerCall' -count=2
-	$(GO) test -race ./pkg/dataplane/ -run 'ArmedGate|PreArm|AllConcurrentSaveNoRace|StatusPathReadRacesCompileWrite|DetachXDPIsNotSelfSerializing' -count=2
+	$(GO) test -race ./pkg/dataplane/ -run 'ArmedGate|PreArm|AllConcurrentSaveNoRace|StatusPathReadRacesCompileWrite|DetachXDPIsNotSelfSerializing|ConcurrentDetachesLeaveTheLastReportAccurate' -count=2
 	$(GO) test -race ./pkg/cluster/ -run 'DoesNotRaceUpdateGroups6550|DoesNotHoldMuAcrossManagerCallback6550|DoesNotRaceStopHeartbeat7257|HeartbeatStartSuperseded' -count=2
 
 # Rust userspace-dp correctness suite (#4006). userspace-dp is a

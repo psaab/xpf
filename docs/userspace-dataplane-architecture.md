@@ -3041,7 +3041,10 @@ stopped.
   6 bindings and covered only 7 of those 18.
 
   **The appliance image ships NO reservation.** `scripts/image/bake.py` writes
-  `/etc/sysctl.d/99-xpf.conf` with forwarding and BPF-JIT settings only; nothing
+  `/etc/sysctl.d/99-xpf.conf` with BPF-JIT and host-posture settings only — the
+  kernel transit knobs are deliberately NOT persisted there (#9725), because
+  systemd-sysctl re-applies such a file whenever it runs and would fight the
+  transit gate under a running xpfd; nothing
   in the bake or the deploy installs `99-xpf-hugepages.conf`. That is correct for
   the default `ring-entries` (a binding is ~10 MiB at 1024, so no pool is needed),
   but it means raising `ring-entries` to 16384 on a baked appliance takes the THP

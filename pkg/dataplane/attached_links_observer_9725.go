@@ -57,9 +57,13 @@ func (m *Manager) notifyAttachedLinks(n int) {
 	if m == nil {
 		return
 	}
-	if fn := m.attachedLinksObserver.Load(); fn != nil {
-		(*fn)(n)
+	fn := m.attachedLinksObserver.Load()
+	if fn == nil {
+		return
 	}
+	m.linkReportMu.Lock()
+	defer m.linkReportMu.Unlock()
+	(*fn)(n)
 }
 
 // notifyAttachedLinksFunc reports count() to the observer, and calls count ONLY
@@ -67,13 +71,27 @@ func (m *Manager) notifyAttachedLinks(n int) {
 // not merely an optimisation: a writer must not do a kernel round trip whose
 // result nobody consumes, and a link handle that cannot answer Info must not be
 // interrogated by a writer that was not asked to report.
+// The count and the report are ONE critical section. Two concurrent detaches
+// each compute "the count without me" and then report; unserialised, the higher
+// count can be delivered last and leave the gate open with nothing attached
+// (#9725 round 12). Holding linkReportMu across both makes the last report the
+// one computed last. It also closes the pin window: removeUserspaceShimXDPLinkPins
+// takes the same lock, so a pin cannot be deleted between Close counting the
+// links that survive it and Close reporting that number.
+//
+// The observer writes sysctls and nftables and never re-enters the Manager, so
+// holding this across the callback introduces no cycle.
 func (m *Manager) notifyAttachedLinksFunc(count func() int) {
 	if m == nil {
 		return
 	}
-	if fn := m.attachedLinksObserver.Load(); fn != nil {
-		(*fn)(count())
+	fn := m.attachedLinksObserver.Load()
+	if fn == nil {
+		return
 	}
+	m.linkReportMu.Lock()
+	defer m.linkReportMu.Unlock()
+	(*fn)(count())
 }
 
 // attachedXDPLinkCountExcluding is AttachedXDPLinkCount without the link for

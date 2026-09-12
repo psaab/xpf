@@ -221,6 +221,14 @@ func (m *Manager) DetachXDP(ifindex int) error {
 	// infinite-loop on a stuck-close link, but surface the close
 	// error.
 	m.deleteXDPLink(ifindex)
+	// #9725 round 12: report AGAIN, now that the map no longer holds this link.
+	// The report above is "the count without me", computed before the detach so
+	// the gate closes while the program still adjudicates — but under concurrent
+	// detaches EVERY such report is computed before the others' deletions land,
+	// so none of them carries the final state. This one does: it is the true
+	// count, and whichever detach finishes last reports it. It can only LOWER
+	// the count, so it cannot reopen the gate.
+	m.notifyAttachedLinksFunc(m.AttachedXDPLinkCount)
 	if closeErr != nil {
 		return fmt.Errorf("detach XDP from ifindex %d: %w", ifindex, closeErr)
 	}

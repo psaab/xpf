@@ -211,7 +211,12 @@ func (d *Daemon) writeTransitGateForCountLocked(stage string, attached int) (ope
 		d.transitWasOpen = open
 		if open {
 			slog.Info("transit gate open: the dataplane is armed and a shim XDP program is attached",
-				"stage", stage, "attached_links", d.attachedXDPLinks(),
+				// #9725: the REPORTED count, not a re-read. Re-reading here would
+				// re-enter the Manager from inside the observer, while both
+				// linkReportMu and transitGateMu are held — the very thing the
+				// observer's contract says it does not do — and it would log a
+				// number different from the one the gate just acted on.
+				"stage", stage, "attached_links", attached,
 				"sysctls_verified", sysctlsOK, "barrier_verified", barrierOK)
 		} else {
 			slog.Info("transit gate closed: the dataplane is unarmed or no shim XDP program is attached",

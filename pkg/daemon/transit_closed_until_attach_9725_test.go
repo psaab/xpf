@@ -567,10 +567,11 @@ func TestTheImageAndTestVMsStartWithForwardingClosed9725(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read xpf.postinst: %v", err)
 	}
-	for _, want := range []string{"99-xpf.conf", "ipv6.conf.all.forwarding"} {
+	for _, want := range []string{"SYSCTL_D=/etc/sysctl.d", "99-xpf.conf", "ipv6.conf.all.forwarding"} {
 		if !strings.Contains(string(p), want) {
 			t.Errorf("the postinst does not scrub %q from a legacy image's sysctl.d, so systemd-sysctl "+
-				"re-applies the old value under a running xpfd", want)
+				"re-applies the old value under a running xpfd. SYSCTL_D must name the REAL directory: a "+
+				"scrub pointed elsewhere passes a string check while cleaning nothing", want)
 		}
 	}
 }

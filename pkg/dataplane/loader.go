@@ -52,8 +52,11 @@ type Manager struct {
 	// transit gate registers. Atomic because the writers report from paths that
 	// hold m.mu and from paths that do not.
 	attachedLinksObserver atomic.Pointer[func(int)]
-	programs              map[string]*ebpf.Program
-	maps                  map[string]*ebpf.Map
+	// linkReportMu serialises (count, report) so the gate cannot be driven by a
+	// count that a later writer has already invalidated. See notifyAttachedLinks.
+	linkReportMu sync.Mutex
+	programs     map[string]*ebpf.Program
+	maps         map[string]*ebpf.Map
 	// xdpLinks / tcLinks / vlanSubInterfaces are ALL guarded by m.mu (#6740).
 	// The 1 Hz userspace status path ranges them while CompileUserspaceShim /
 	// AttachXDP / DetachXDP mutate them, and a concurrent Go map read+write is
@@ -325,7 +328,11 @@ func (m *Manager) CompileUserspaceShim(cfg *config.Config) (*CompileResult, erro
 	if err := cleanupUserspaceShimLegacyOnlyMapPins(); err != nil {
 		return nil, m.abortAfterHostMutation(result, err)
 	}
+	// #9725: under linkReportMu, so a pin cannot vanish between Close counting
+	// the links that survive it and Close reporting that count.
+	m.linkReportMu.Lock()
 	removeUserspaceShimXDPLinkPins()
+	m.linkReportMu.Unlock()
 
 	if err := runPostMutationSteps(result,
 		func(r *CompileResult) error {
