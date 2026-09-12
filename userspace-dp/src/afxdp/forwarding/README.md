@@ -412,9 +412,17 @@ forward-direction collision.
   NAT change, a kernel-local <-> live row set), and a teardown releases every
   row still held.
 
-  The coordinator (HA import and delete, bringup replay, RG activation) claims
-  nothing. Its writes leave rows unowned, and its delete skips a row any worker
-  holds; that worker's `DeleteSynced` releases the claim.
+  The coordinator (HA import and delete, bringup replay, RG activation) is an
+  OWNER too (#9560 round 3). Its writes claim the rows they publish, and the
+  claim is released where the shared authority it stood for is removed — every
+  `remove_shared_session` caller. Its delete still skips a row any worker holds;
+  that worker's `DeleteSynced` releases the worker's claim.
+
+  Round 2 gave it no claim, and that left the original defect alive in the
+  handoff window: between the import's synchronous write and the first worker
+  claim the row was unowned, so an aliased session's teardown deleted the row
+  the imported session was still using — permanently, when every queued upsert
+  was dropped.
 
   A claim is recorded only after its write succeeded. Every write and delete
   runs under the row's shard lock, so a sibling's publish cannot land between
@@ -426,10 +434,12 @@ forward-direction collision.
   once the workers are joined.
 
   Residuals:
-  - From a coordinator write until a worker applies the queued upsert, the row
-    is unowned, and an alias's teardown deletes it as before #9560.
-  - A panicked worker is not respawned, and its claims stay until the next
-    `stop_inner`.
+  - A row an EARLIER helper incarnation left in the pinned map is unowned, and
+    an alias's teardown deletes it as before #9560. Nothing in this incarnation
+    publishes an unowned row.
+  - A panicked worker's claims are retired when the supervisor declares it dead
+    (`retire_worker_holders_where` -> `SteeringRowOwners::retire_worker`), which
+    deletes the rows it was the last owner of.
 
   Until #9560 two aliased sessions shared one row and either one's ordinary
   teardown removed it; with an `lo0` input filter the survivor's next packet

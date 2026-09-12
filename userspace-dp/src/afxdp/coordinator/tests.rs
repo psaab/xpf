@@ -8628,6 +8628,62 @@ fn bringup_replay_reads_the_live_map_and_still_filters_purged_tunnels_8157() {
 /// the next bringup's claims from an HA delete that raced the teardown (`sync_session` runs
 /// without the `ServerState` mutex, #7209); a claim carried across would block the row's
 /// legitimate delete for the life of the process.
+/// #9560 round 3: the holder identity a plan hands each worker is that worker's OWN id.
+///
+/// `plan_workers` builds every `BindingPlan`'s handle as
+/// `SteeringMapRef::new(fd, coord.steering_owners, SteeringHolder::Worker(binding.worker_id))`
+/// (reconcile/bringup.rs), so two workers can never share a holder bit and one worker's
+/// teardown can never release another's claim. This pins the property that construction
+/// depends on: distinct ids are distinct, non-overlapping owners of one shared registry,
+/// and a row survives until its LAST holder gives it up.
+#[test]
+fn distinct_workers_are_distinct_holders_of_one_registry_9560() {
+    let coordinator = Coordinator::new();
+    let registry = Arc::clone(&coordinator.steering_owners);
+    let key = f4_key();
+    let row = crate::afxdp::bpf_map::session_map_row(&key);
+
+    for worker_id in [0u32, 1, 2] {
+        registry
+            .publish_row(
+                &row,
+                &key,
+                crate::afxdp::bpf_map::SteeringHolder::Worker(worker_id),
+                || Ok(()),
+            )
+            .expect("a worker claim");
+    }
+    assert_eq!(
+        registry.owner_count(&row),
+        3,
+        "three workers claiming one row must register as THREE owners; a shared or \
+         constant holder id would collapse them and let one teardown delete the row the \
+         other two still forward on (#9560)"
+    );
+
+    let mut deleted = 0usize;
+    for worker_id in [0u32, 1] {
+        registry.release_row(
+            &row,
+            &key,
+            crate::afxdp::bpf_map::SteeringHolder::Worker(worker_id),
+            |_| deleted += 1,
+        );
+    }
+    assert_eq!(
+        deleted, 0,
+        "a row was deleted while worker 2 still held it: releases are per holder, and the \
+         row goes only with the LAST one"
+    );
+    registry.release_row(
+        &row,
+        &key,
+        crate::afxdp::bpf_map::SteeringHolder::Worker(2),
+        |_| deleted += 1,
+    );
+    assert_eq!(deleted, 1, "the last holder's release must take the row");
+}
+
 #[test]
 fn stop_retires_every_steering_claim_and_keeps_the_one_registry_9560() {
     let mut coordinator = Coordinator::new();

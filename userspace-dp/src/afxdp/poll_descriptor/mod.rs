@@ -3481,10 +3481,19 @@ pub(super) fn poll_binding_process_descriptor(
                                         // publishes (was `let _ =`; the
                                         // debug-only verify below re-reads
                                         // the map and cannot see the Err).
-                                        if publish_live_session_key(
+                                        // #9560 round 3: ENTRY-level, even though a
+                                        // reverse entry derives exactly one row.
+                                        // `install_with_protocol_with_origin` above
+                                        // silently removed any same-key predecessor,
+                                        // and a row-level publish claims the new row
+                                        // without releasing the rows that predecessor
+                                        // held — which is how a replaced reverse entry
+                                        // left claims nothing would ever release.
+                                        if publish_live_session_entry(
                                             binding.bpf_maps.session_map.handle(),
                                             &reverse_key,
-                                            &reverse_key,
+                                            reverse_decision.nat,
+                                            true,
                                         )
                                         .is_err()
                                         {

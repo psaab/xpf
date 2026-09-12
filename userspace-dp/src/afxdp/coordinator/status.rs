@@ -1177,6 +1177,29 @@ impl super::Coordinator {
                 now_ns,
             );
             freed += self.forwarding.nat64.retire_worker(id, now_ns);
+            // #9560 round 3: retire that worker's STEERING claims too. NAT and CoS were
+            // already reclaimed here; the steering registry was not, so a dead worker's
+            // bit kept suppressing every later delete of the rows it held — an aliased
+            // session's teardown found an owner that can never come back, and both the
+            // registry holding and the fixed-size BPF row leaked for the life of the
+            // process.
+            let steering_retired = {
+                let maps = self.bpf_maps.load();
+                crate::afxdp::bpf_map::retire_worker_steering_rows(
+                    crate::afxdp::bpf_map::SteeringMap {
+                        fd: maps.session_map_fd.as_ref().map(|fd| fd.fd).unwrap_or(-1),
+                        owners: &self.steering_owners,
+                        holder: crate::afxdp::bpf_map::SteeringHolder::Coordinator,
+                    },
+                    id,
+                )
+            };
+            if steering_retired > 0 {
+                eprintln!(
+                    "xpf-dp: retired {steering_retired} steering claim(s) stranded by dead \
+                     worker {id}"
+                );
+            }
             // #9367: the V_min vacate is gated on the PANIC flag, not on this
             // sweep's own `select`. `retire_all_worker_holders` passes
             // `|_| true` — it retires every registered id, LIVE ones included,

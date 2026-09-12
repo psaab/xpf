@@ -361,11 +361,17 @@ fn an_idle_replica_reap_keeps_the_rows_the_forwarding_worker_holds_9560() {
     );
 }
 
-/// C8b. The coordinator (HA import and delete, bringup replay, RG activation) claims
-/// nothing: its publish leaves the rows unowned, and its delete removes a row only while
-/// no worker holds it. The workers' own DeleteSynced fan-out releases their claims.
+/// C8b, round 3. The coordinator (HA import and delete, bringup replay, RG activation)
+/// CLAIMS what it publishes, and its delete still removes a row only while no worker
+/// holds it. The workers' own DeleteSynced fan-out releases their claims; the
+/// coordinator's claim is released where the shared authority it stood for is removed.
+///
+/// Round 2 asserted the publish claimed NOTHING. That left every coordinator-published
+/// row unowned from the write until a worker's first claim — and permanently when the
+/// queued upsert was dropped — so an unrelated session's teardown deleted the row the
+/// imported session was still using. That is the #9560 defect itself.
 #[test]
-fn the_coordinator_claims_nothing_and_its_delete_skips_a_worker_held_row_9560() {
+fn the_coordinator_claims_its_row_and_its_delete_skips_a_worker_held_row_9560() {
     let owners = SteeringRowOwners::default();
     let nat = NatDecision::default();
     let imported = host_bound_key();
@@ -376,9 +382,9 @@ fn the_coordinator_claims_nothing_and_its_delete_skips_a_worker_held_row_9560() 
     let _ = publish_live_session_entry(as_coordinator(&owners), &imported, nat, false);
     assert_eq!(
         owners.owner_count(&session_map_row(&imported)),
-        0,
-        "a coordinator publish claimed its row; nothing would ever release that claim, and it \
-         would block the row's delete (#9560)"
+        1,
+        "a coordinator publish must CLAIM its row. Unowned, an unrelated session's teardown \
+         deletes it while the imported session still needs it (#9560)"
     );
     let _ = publish_live_session_entry(on_worker(&owners, 0), &held, nat, false);
 
@@ -482,5 +488,94 @@ fn every_steering_write_and_delete_runs_under_the_row_owner_lock_9560() {
         "a steering-map write or delete ran outside its row's owner-shard lock. A \
          teardown that decides under the lock and deletes after releasing it can \
          delete a row a sibling published in between (#9560). Writes: {writes:?}"
+    );
+}
+
+/// C8e (round 3). THE HANDOFF WINDOW, which round 2 left open.
+///
+/// The coordinator publishes an imported session's row. Before any worker claims it —
+/// its queued `UpsertSynced` still in flight, or dropped outright by a full queue — an
+/// ALIASED session in another routing domain is torn down on a worker. The two share one
+/// physical row, so under round 2's unowned coordinator write that teardown deleted the
+/// row the imported session was still using: the #9560 defect, inside the window round 2
+/// created rather than closed.
+#[test]
+fn an_aliased_teardown_keeps_the_row_the_coordinator_holds_9560() {
+    let owners = SteeringRowOwners::default();
+    let nat = NatDecision::default();
+    let imported = in_domain(1);
+    let alias = in_domain(2);
+    assert_eq!(
+        session_map_row(&imported),
+        session_map_row(&alias),
+        "fixture: the two domains must share ONE physical row, or this cell observes \
+         nothing"
+    );
+
+    let _ = publish_live_session_entry(as_coordinator(&owners), &imported, nat, false);
+    let _ = publish_live_session_entry(on_worker(&owners, 0), &alias, nat, false);
+
+    clear_session_map_writes();
+    delete_live_session_entry(on_worker(&owners, 0), &alias, nat, false);
+    let writes = session_map_writes();
+    assert_eq!(
+        deletes_of(&writes, &imported),
+        0,
+        "an aliased session's teardown deleted the row the coordinator holds for the \
+         imported session, in the handoff window before any worker claims it. Writes: \
+         {writes:?}"
+    );
+
+    clear_session_map_writes();
+    delete_live_session_entry(as_coordinator(&owners), &imported, nat, false);
+    let released = session_map_writes();
+    assert!(
+        deletes_of(&released, &imported) >= 1,
+        "once the shared authority is gone the coordinator's own release must take the \
+         row, or a claim nothing releases blocks every later delete. Writes: {released:?}"
+    );
+}
+
+/// C8f (round 3). A same-key replacement releases the rows its PREDECESSOR held.
+///
+/// `install_with_protocol_with_origin` silently removes a same-key prior entry, and the
+/// reverse install published its row through the ROW-level call — which claims the new
+/// row and releases nothing. A SNAT forward replaced at the same key by a reverse entry
+/// therefore left the forward's wire-alias row claimed by a worker that will never name
+/// it again, so nothing could ever delete it.
+#[test]
+fn a_same_key_replacement_releases_the_predecessors_rows_9560() {
+    let owners = SteeringRowOwners::default();
+    let key = host_bound_key();
+    let snat = NatDecision {
+        rewrite_src: Some(std::net::IpAddr::V4(std::net::Ipv4Addr::new(203, 0, 113, 7))),
+        rewrite_src_port: Some(51_000),
+        ..NatDecision::default()
+    };
+
+    let _ = publish_live_session_entry(on_worker(&owners, 0), &key, snat, false);
+    let forward_rows = owners.held_row_count(&key, 0);
+    assert_eq!(
+        forward_rows, 4,
+        "fixture: a SNAT forward publishes its own row plus the forward-wire, \
+         reverse-wire and reverse-canonical aliases (`live_session_rows`). If this \
+         number moves, the release below is measuring a different row set"
+    );
+
+    clear_session_map_writes();
+    let _ = publish_live_session_entry(on_worker(&owners, 0), &key, snat, true);
+    let writes = session_map_writes();
+    assert_eq!(
+        owners.held_row_count(&key, 0),
+        1,
+        "a reverse entry derives ONE row, so the replacement must leave exactly that \
+         claim. It kept claims on rows its new decision does not name, and nothing will \
+         ever name them again (#9560 round 3)"
+    );
+    assert_eq!(
+        writes.iter().filter(|w| w.value.is_none()).count(),
+        forward_rows - 1,
+        "every row the predecessor held and the replacement does not name must be \
+         DELETED, not merely unclaimed. Writes: {writes:?}"
     );
 }

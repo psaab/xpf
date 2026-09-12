@@ -9459,7 +9459,12 @@ fn the_reconcile_sweeps_only_peer_synced_origins_8586() {
     );
 
     let mut evicted = Vec::new();
-    let n = reconcile_peer_synced_against_shared(&mut sessions, &shared_sessions, &mut evicted);
+    let n = reconcile_peer_synced_against_shared(
+            &mut sessions,
+            &shared_sessions,
+            SteeringMap::unshared_for_test(-1),
+            &mut evicted,
+        );
 
     assert_eq!(n, swept.len(), "exactly the peer-synced origins are swept");
     for (origin, key) in &swept {
@@ -9498,7 +9503,12 @@ fn the_reconcile_keeps_a_peer_synced_entry_the_shared_map_still_holds_8586() {
     publish8586(&shared_sessions, &live);
 
     let mut evicted = Vec::new();
-    let n = reconcile_peer_synced_against_shared(&mut sessions, &shared_sessions, &mut evicted);
+    let n = reconcile_peer_synced_against_shared(
+            &mut sessions,
+            &shared_sessions,
+            SteeringMap::unshared_for_test(-1),
+            &mut evicted,
+        );
 
     assert_eq!(n, 1, "only the one shared authority dropped");
     assert!(
@@ -9618,7 +9628,12 @@ fn reconcile_cost_9327() {
         }
         let mut evicted = Vec::new();
         let t = Instant::now();
-        let swept = reconcile_peer_synced_against_shared(&mut sessions, &shared_sessions, &mut evicted);
+        let swept = reconcile_peer_synced_against_shared(
+            &mut sessions,
+            &shared_sessions,
+            SteeringMap::unshared_for_test(-1),
+            &mut evicted,
+        );
         let el = t.elapsed();
         eprintln!("n={n:<6} swept={swept:<6} elapsed={el:?}   (finds-nothing)");
     }
@@ -9631,10 +9646,86 @@ fn reconcile_cost_9327() {
         }
         let mut evicted = Vec::new();
         let t = Instant::now();
-        let swept = reconcile_peer_synced_against_shared(&mut sessions, &shared_sessions, &mut evicted);
+        let swept = reconcile_peer_synced_against_shared(
+            &mut sessions,
+            &shared_sessions,
+            SteeringMap::unshared_for_test(-1),
+            &mut evicted,
+        );
         let el = t.elapsed();
         eprintln!("ALL-STALE n={n:<6} swept={swept:<6} elapsed={el:?}");
     }
+}
+
+/// #9560 round 3: the delete-drop sweep gives up the swept session's STEERING claims.
+///
+/// The sweep deletes the local table entry directly, so after it runs nothing can derive
+/// the rows that session published. Before round 3 the worker's holdings and the
+/// fixed-size BPF rows survived with no entry left to reap them: an aliased session's
+/// teardown then found an owner that would never release, and unique-key churn grew both
+/// the registry and the map until publishes failed.
+#[test]
+fn the_delete_drop_sweep_releases_the_swept_sessions_steering_claims_9560() {
+    use crate::afxdp::bpf_map::{
+        RECORDER_ONLY_MAP_FD, SteeringHolder, SteeringMap, SteeringRowOwners,
+        clear_session_map_writes, publish_live_session_entry, session_map_row,
+        session_map_writes,
+    };
+
+    let owners = SteeringRowOwners::default();
+    let handle = SteeringMap {
+        fd: RECORDER_ONLY_MAP_FD,
+        owners: &owners,
+        holder: SteeringHolder::Worker(0),
+    };
+
+    let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let mut sessions = SessionTable::new();
+    let swept = key9327(1);
+    let survivor = key9327(2);
+    install8586(&mut sessions, &swept, SessionOrigin::SyncImport);
+    install8586(&mut sessions, &survivor, SessionOrigin::SyncImport);
+    // Only the survivor keeps shared authority; the swept key is what the sweep drops.
+    publish8586(&shared_sessions, &survivor);
+
+    let nat = crate::nat::NatDecision::default();
+    let _ = publish_live_session_entry(handle, &swept, nat, false);
+    let _ = publish_live_session_entry(handle, &survivor, nat, false);
+    assert!(
+        owners.held_row_count(&swept, 0) > 0 && owners.held_row_count(&survivor, 0) > 0,
+        "fixture: both sessions must hold steering claims, or the release below observes \
+         nothing"
+    );
+
+    clear_session_map_writes();
+    let mut evicted = Vec::new();
+    let n = reconcile_peer_synced_against_shared(
+        &mut sessions,
+        &shared_sessions,
+        handle,
+        &mut evicted,
+    );
+    assert_eq!(n, 1, "fixture: exactly the one key without shared authority is swept");
+
+    assert_eq!(
+        owners.held_row_count(&swept, 0),
+        0,
+        "the sweep deleted the table entry but kept its steering claims; nothing will \
+         ever name those rows again (#9560 round 3)"
+    );
+    let writes = session_map_writes();
+    let swept_row = session_map_row(&swept);
+    assert!(
+        writes
+            .iter()
+            .any(|w| w.value.is_none() && session_map_row(&w.key) == swept_row),
+        "the swept session's row must be DELETED from the map, not merely unclaimed. \
+         Writes: {writes:?}"
+    );
+    assert!(
+        owners.held_row_count(&survivor, 0) > 0,
+        "the sweep released claims belonging to a session it did not sweep"
+    );
 }
 
 fn key9327(i: usize) -> SessionKey {
@@ -9684,7 +9775,12 @@ fn one_sweep_pass_is_bounded_by_the_budget_9327() {
     let mut sweep = super::DeleteDropSweep::default();
     sweep.arm();
     let mut evicted = Vec::new();
-    let first = sweep.step(&mut sessions, &shared_sessions, &mut evicted);
+    let first = sweep.step(
+            &mut sessions,
+            &shared_sessions,
+            SteeringMap::unshared_for_test(-1),
+            &mut evicted,
+        );
 
     assert!(
         first <= super::DELETE_DROP_SWEEP_BUDGET,
@@ -9725,7 +9821,12 @@ fn the_budgeted_sweep_still_sweeps_everything_9327() {
     let mut total = 0usize;
     let mut passes = 0usize;
     while sweep.is_running() {
-        total += sweep.step(&mut sessions, &shared_sessions, &mut evicted);
+        total += sweep.step(
+            &mut sessions,
+            &shared_sessions,
+            SteeringMap::unshared_for_test(-1),
+            &mut evicted,
+        );
         passes += 1;
         assert!(
             passes < n + 16,
@@ -9777,14 +9878,24 @@ fn the_sweep_reuses_its_buffer_across_passes_9327() {
     sweep.arm();
     let mut evicted = Vec::new();
 
-    let first = sweep.step(&mut sessions, &shared_sessions, &mut evicted);
+    let first = sweep.step(
+            &mut sessions,
+            &shared_sessions,
+            SteeringMap::unshared_for_test(-1),
+            &mut evicted,
+        );
     let cap_after_first = sweep.stale_capacity_for_test();
     assert!(
         first > 0 && cap_after_first > 0,
         "NON-VACUITY: the first pass collected {first} keys and left capacity          {cap_after_first}; the reuse assertion below needs a buffer that          actually grew"
     );
 
-    let second = sweep.step(&mut sessions, &shared_sessions, &mut evicted);
+    let second = sweep.step(
+            &mut sessions,
+            &shared_sessions,
+            SteeringMap::unshared_for_test(-1),
+            &mut evicted,
+        );
     assert_eq!(
         second, 0,
         "fixture: the second window is entirely present in the shared map, so          this pass must collect NOTHING — that is what makes a retained buffer          distinguishable from a fresh one"
@@ -9809,7 +9920,12 @@ fn arming_restarts_an_in_flight_sweep_9327() {
     let mut sweep = super::DeleteDropSweep::default();
     sweep.arm();
     let mut evicted = Vec::new();
-    sweep.step(&mut sessions, &shared_sessions, &mut evicted);
+    sweep.step(
+            &mut sessions,
+            &shared_sessions,
+            SteeringMap::unshared_for_test(-1),
+            &mut evicted,
+        );
     assert!(sweep.cursor_for_test() > 0, "fixture: the first pass must advance the cursor");
     sweep.arm();
     assert_eq!(

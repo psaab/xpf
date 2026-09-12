@@ -1376,8 +1376,12 @@ pub(crate) fn worker_loop(
         // DELETE_DROP_SWEEP_BUDGET slab slots. A no-op with no sweep armed.
         {
             let mut evicted_keys: Vec<crate::session::SessionKey> = Vec::new();
-            let reconciled =
-                delete_drop_sweep.step(&mut sessions, &shared_sessions, &mut evicted_keys);
+            let reconciled = delete_drop_sweep.step(
+                &mut sessions,
+                &shared_sessions,
+                session_map.handle(),
+                &mut evicted_keys,
+            );
             if reconciled > 0 {
                 crate::afxdp::worker::invalidate_flow_cache_slots_for_keys(
                     &mut bindings,

@@ -122,6 +122,10 @@ pub(in crate::afxdp::session_glue) fn handle_delete_synced(
             &lookup.metadata,
         );
     } else {
-        delete_live_session_key(session_map, &key, &key);
+        // #9560 round 3: the local entry is already gone, so there is no decision to
+        // derive this session's rows from — and the bare key is only ONE of them. Its
+        // NAT and forward-wire aliases were claimed by this worker too, and releasing
+        // just the key left them claimed by a holder that will never name them again.
+        release_all_session_rows(session_map, &key);
     }
 }

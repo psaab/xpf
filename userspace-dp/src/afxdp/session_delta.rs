@@ -526,6 +526,12 @@ pub(super) fn flush_session_deltas(
                 &shared_owner_rg_indexes,
                 &delta.key,
             );
+            // #9560 round 3: the coordinator claimed this key's rows when it published
+            // them for shared authority (HA import, bringup replay, activation
+            // prewarm). That authority is gone as of the line above, so the claim goes
+            // with it — otherwise it outlives every worker's teardown and suppresses
+            // the row's delete for good.
+            release_coordinator_session_rows(session_map, &delta.key);
             let reverse_key = reverse_session_key(&delta.key, delta.decision.nat);
             delete_live_session_entry(session_map, &reverse_key, delta.decision.nat, true);
             delete_bpf_conntrack_entry(conntrack_v4_fd, conntrack_v6_fd, &reverse_key);
@@ -536,6 +542,8 @@ pub(super) fn flush_session_deltas(
                 &shared_owner_rg_indexes,
                 &reverse_key,
             );
+            // #9560 round 3: same for the reverse half's own shared entry.
+            release_coordinator_session_rows(session_map, &reverse_key);
             // #8114 item 4: repair the sibling NAT holder bit a refused
             // `DeleteSynced` would otherwise strand. The forward key carries
             // the reservation; the reverse call self-gates on `is_reverse` and

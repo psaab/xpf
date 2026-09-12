@@ -45,7 +45,9 @@ use super::*;
 /// packet MISS, reach the kernel, and skip the filter; demoting to `REDIRECT` does
 /// not help there, because both rows are `REDIRECT` and still collide. Identity in
 /// the key is what the verifier budget forbids, so #9560 records each row's OWNERS
-/// instead (`steering_owners.rs`) and deletes a row only with its last owner. See
+/// instead (`steering_owners.rs`) and deletes a row only with its last owner. Every
+/// writer is an owner: each packet worker, and the coordinator for the rows it
+/// publishes on behalf of shared authority. See
 /// `docs/log/9517.md` for the two remedies that were tried and rejected, and
 /// `afxdp/forwarding/README.md` for the collision-surface list.
 pub(super) fn uses_kernel_local_session_map_entry(
@@ -1323,6 +1325,53 @@ pub(super) fn delete_live_session_entry(
         .map(|(row_key, _)| row_key)
         .collect();
     release_session_rows(map, key, &keys);
+}
+
+/// Give up EVERY row the handle's holder still holds for `owner`, whatever decision
+/// published them (#9560 round 3).
+///
+/// The recovery paths have no decision left to derive rows from. The delete-drop sweep
+/// (`session_glue/delete_drop_sweep.rs`) drops a peer-synced session the shared authority
+/// no longer holds, and `handle_delete_synced`'s no-entry arm runs when the local table
+/// has already lost the entry. Releasing only the bare key there left every other row the
+/// entry had published — the NAT and forward-wire aliases — claimed by a holder that will
+/// never name them again, so the BPF row outlived its session and the registry grew with
+/// unique-key churn until publishes failed.
+/// Retire every steering claim `worker_id` holds, deleting each row it was the last
+/// owner of (#9560 round 3). The coordinator calls this behind the `holders_retired`
+/// CAS when the supervisor declares a worker dead; that worker never runs its own
+/// teardown, so without this its bit suppresses every later delete of the rows it held.
+pub(super) fn retire_worker_steering_rows(map: SteeringMap<'_>, worker_id: u32) -> usize {
+    map.owners
+        .retire_worker(worker_id, |row| delete_steering_row(map, row, None))
+}
+
+/// Give up the COORDINATOR's claims for `owner`, through any handle onto the same
+/// registry (#9560 round 3).
+///
+/// The coordinator claims what it publishes on behalf of shared authority — the HA
+/// import, the bringup replay, the RG-activation prewarm — so the claim has to go when
+/// that authority does. Every authoritative removal (`remove_shared_session` and its
+/// callers) runs on a path holding a WORKER handle, so the holder is substituted here
+/// rather than threading a second map through each call site.
+pub(super) fn release_coordinator_session_rows(map: SteeringMap<'_>, owner: &SessionKey) {
+    release_all_session_rows(
+        SteeringMap {
+            holder: SteeringHolder::Coordinator,
+            ..map
+        },
+        owner,
+    );
+}
+
+pub(super) fn release_all_session_rows(map: SteeringMap<'_>, owner: &SessionKey) {
+    // The owner's OWN row is named, not just whatever the holder is recorded as holding.
+    // A row no one is registered for — one an earlier helper incarnation left in the
+    // pinned map, or one whose claims were retired — is deleted exactly as it was before
+    // #9560. Releasing only the recorded holdings would have dropped that cleanup, which
+    // is the behaviour `a_synced_delete_for_an_absent_session_honours_the_rows_other_owners_9560`
+    // pins with its unowned control.
+    release_session_rows(map, owner, std::slice::from_ref(owner));
 }
 
 fn for_each_session_map_redirect_key<F>(
