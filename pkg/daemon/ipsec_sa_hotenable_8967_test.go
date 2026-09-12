@@ -66,6 +66,24 @@ func applyTailMentions8967(t *testing.T, starter string) bool {
 //	ConfigSync     comms-wiring=0  apply-path=8
 //	SessionSync    comms-wiring=6  apply-path=1
 
+// ipsecSALoopCancelForTest reads the publisher's cancel handle under loopMu.
+//
+// #9844: the cells below used to read d.ipsecSALoopCancelForTest() directly. Every
+// production writer takes loopMu (ensureIPsecSASyncLoop, stopIPsecSASyncLoop,
+// clearIPsecSALoopIfCurrent), and the last of those runs on the PUBLISHER's own
+// goroutine as it exits — so an unlocked read here raced a write that was
+// correctly synchronised on the other side. It reproduced as roughly one
+// DATA RACE per 200 runs of the hot-enable cell and reddened any lane's
+// `go test -race ./pkg/daemon`.
+//
+// The value is only ever compared against nil, so reading it under the lock
+// changes nothing the cells assert; it just stops the read racing the write.
+func (d *Daemon) ipsecSALoopCancelForTest() context.CancelFunc {
+	d.ipsecSASync.loopMu.Lock()
+	defer d.ipsecSASync.loopMu.Unlock()
+	return d.ipsecSASync.loopCancel
+}
+
 // The starter must be idempotent, must not launch without comms, and must
 // stop on disable. These are the three properties `ensureDHCPLeaseSyncLoop`
 // has and that #4647 established as the shape for a hot-toggleable loop.
@@ -76,7 +94,7 @@ func TestIPsecSASyncStarterIsIdempotentAndCommsGated8967(t *testing.T) {
 	// before comms exist -- that is the case this gate is for, and the
 	// comms-start call re-runs the starter once they are up.
 	d.ensureIPsecSASyncLoop(true)
-	if d.ipsecSASync.loopCancel != nil {
+	if d.ipsecSALoopCancelForTest() != nil {
 		t.Fatal("#8967: the starter launched with no comms context. The apply path " +
 			"runs before comms are up, so launching there would run the publisher " +
 			"against a nil session-sync")
@@ -84,7 +102,7 @@ func TestIPsecSASyncStarterIsIdempotentAndCommsGated8967(t *testing.T) {
 
 	// DISABLE with nothing running must be a no-op, not a nil deref.
 	d.ensureIPsecSASyncLoop(false)
-	if d.ipsecSASync.loopCancel != nil {
+	if d.ipsecSALoopCancelForTest() != nil {
 		t.Error("#8967: disable with no running loop left a cancel registered")
 	}
 }
@@ -101,7 +119,7 @@ func TestIPsecSASyncHotEnableStartsAndStops8967(t *testing.T) {
 	d.ipsec = &ipsec.Manager{}
 
 	d.ensureIPsecSASyncLoop(true)
-	first := d.ipsecSASync.loopCancel
+	first := d.ipsecSALoopCancelForTest()
 	if first == nil {
 		t.Fatal("#8967: a knob-ON call with comms up did not start the publisher. " +
 			"That is the defect: the knob was read once at comms start, so " +
@@ -118,7 +136,7 @@ func TestIPsecSASyncHotEnableStartsAndStops8967(t *testing.T) {
 	// overwrote the first one's cancel, leaking it. A mutation removing the
 	// idempotence guard survived the weaker assertion.
 	d.ensureIPsecSASyncLoop(true)
-	if d.ipsecSASync.loopCancel == nil {
+	if d.ipsecSALoopCancelForTest() == nil {
 		t.Fatal("#8967: the second knob-ON call cleared the running loop")
 	}
 	if got := d.ipsecSASync.launches.Load(); got != 1 {
@@ -131,7 +149,7 @@ func TestIPsecSASyncHotEnableStartsAndStops8967(t *testing.T) {
 	// DISABLE must stop it. Without this half, a knob-OFF commit would leave
 	// the publisher advertising after the operator turned it off.
 	d.ensureIPsecSASyncLoop(false)
-	if d.ipsecSASync.loopCancel != nil {
+	if d.ipsecSALoopCancelForTest() != nil {
 		t.Error("#8967: a knob-OFF call did not stop the publisher")
 	}
 }
