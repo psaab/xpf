@@ -18,6 +18,25 @@ func (t *ConfigTree) FormatInheritance() string {
 	// schemaValidateExpandedTreeForNode). #2008 H1. cloneForExpansion does a
 	// single deep copy and never aliases t.
 	clone := t.cloneForExpansion()
+	// #9743: normalize the clone before expanding, because both compile cores
+	// do (compiler.go, and schema_walk.go via normalizeCompactForValidation).
+	// Since #9620 the #8662 normalizer rewrites a brace-elided routing instance
+	// into its braced shape, and group expansion binds against that shape. A
+	// display that expands the RAW tree therefore omits properties the commit
+	// applies:
+	//
+	//	groups { G { routing-instances { blue instance-type forwarding description inherited; } } }
+	//
+	// compiled `blue` with InstanceType=forwarding and Description=inherited,
+	// while `display inheritance` showed neither; the same group body written
+	// braced showed both. `instance-type forwarding` is among the omitted
+	// properties, and it decides whether the daemon creates a VRF at all -- so
+	// the display was wrong exactly where an operator checks what a group
+	// contributes.
+	//
+	// The clone is fresh (cloneForExpansion never aliases t), so normalizing it
+	// in place cannot reach the caller's tree.
+	normalizeCompactStanzas(clone)
 	if err := clone.ExpandGroupsTagged(); err != nil {
 		return t.Format() // fallback to plain format on error
 	}
@@ -30,6 +49,8 @@ func (t *ConfigTree) FormatInheritance() string {
 func (t *ConfigTree) FormatPathInheritance(path []string) string {
 	// Strip inactive before expansion (see FormatInheritance). #2008 H1.
 	clone := t.cloneForExpansion()
+	// #9743, same reason as FormatInheritance above.
+	normalizeCompactStanzas(clone)
 	if err := clone.ExpandGroupsTagged(); err != nil {
 		return t.FormatPath(path)
 	}
