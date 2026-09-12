@@ -222,6 +222,44 @@ func TestFixedArityQuotedTokenIsAStatementHead9635(t *testing.T) {
 	}
 }
 
+// #9635: the #8437 gate must keep refusing a fused statement under a container
+// the SPLITTER never visits, and that is where its provenance check earns its
+// place.
+//
+// This cell exists because of a near-miss. Removing the provenance half of the
+// gate's condition left the whole pkg/config suite green, which reads as "the
+// clause is unfalsifiable, delete it". It is not: every fixture in the package
+// sat under a `packedStatements` container, where the splitter separates a bare
+// run before the gate ever sees it, so the gate's answer could not matter.
+// `applications application-set` is one of 166 containers that are NOT
+// packedStatements while holding a `multi` leaf with a sibling -- there the gate
+// is the only reader of the packed tail, and without the clause the fused
+// `application-set B` COMMITS and is silently dropped.
+//
+// "No test notices" was a fact about the tests, not about the code.
+func TestFusionGateStillRefusesUnderANonPackedContainer9635(t *testing.T) {
+	const fused = `applications { application-set S { application A application-set B; } }`
+	const authored = `applications { application-set S { application [ A "application-set" ]; } }`
+
+	tree, perrs := NewParser(fused).Parse()
+	if len(perrs) > 0 {
+		t.Fatalf("fixture must parse: %v", perrs)
+	}
+	normalizeCompactStanzas(tree)
+	if err := SchemaValidate(tree, nil); err == nil {
+		t.Fatalf("a fused statement under a non-packed container must still be refused (#8437)")
+	}
+
+	authTree, perrs := NewParser(authored).Parse()
+	if len(perrs) > 0 {
+		t.Fatalf("fixture must parse: %v", perrs)
+	}
+	normalizeCompactStanzas(authTree)
+	if err := SchemaValidate(authTree, nil); err != nil {
+		t.Fatalf("the authored-value spelling must commit, got: %v", err)
+	}
+}
+
 // #9635 must not make a genuinely fused statement acceptable. The pair below is
 // the SAME TOKENS in the same order, differing only in whether the operator
 // wrote the quote and the brackets -- which is the entire content of the claim
