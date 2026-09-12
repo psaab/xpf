@@ -1305,6 +1305,9 @@ type Daemon struct {
 	svcReloadDebt serviceReloadDebt
 	// routingDebt is the #9693 routing reconcile debt (routing_reconcile_debt_9693.go).
 	routingDebt routingReconcileDebt
+	// #9811: the caller-less auto-rollback apply's retry owner. Zero value
+	// owes nothing.
+	configDebt configApplyDebt
 
 	// startupActiveAnnounce tracks whether the one-shot active-side
 	// neighbor refresh has been sent for each RG on this daemon run.

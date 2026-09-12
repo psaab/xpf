@@ -698,6 +698,18 @@ func (d *Daemon) Run(ctx context.Context) error {
 		d.routingReconcileReassertLoop(ctx)
 	}()
 
+	// #9811: the always-on retry owner for a config apply that failed on a path
+	// with NO CALLER to report to. Today that is the commit-confirmed
+	// auto-rollback, where the store is promoted BEFORE the apply, so a failure
+	// leaves the node enforcing the abandoned config while every surface
+	// reports the promoted one. Started unconditionally; while nothing is owed
+	// it costs one mutex read per tick.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		d.configApplyReassertLoop(ctx)
+	}()
+
 	// #1387 inc-2: start the always-on DHCP dynamic-DNS reconcile loop. It
 	// is constructed UNCONDITIONALLY (idle when disabled) so an
 	// enabled→disabled commit can still withdraw published records; the loop

@@ -233,6 +233,26 @@ type Config struct {
 	// reported as a non-fatal field plus the gauge for alerting. Optional;
 	// if nil, the field and gauge are omitted.
 	RollbackHistoryDegradedFn func() bool
+	// ConfigApplyDebtFn surfaces the daemon's #9811 config-apply debt: the
+	// dataplane is known to be enforcing something OTHER than the active
+	// configuration, because an apply on a path with no caller to report to
+	// failed and the retry owner has not yet converged. Today that path is the
+	// commit-confirmed auto-rollback, where the store is promoted BEFORE the
+	// apply.
+	//
+	// This DOES make /health return 503, and the distinction from
+	// RollbackHistoryDegradedFn is the one that decides it: a degraded rollback
+	// history is a recovery AID failing on a node that forwards exactly what it
+	// reports, and a perfectly forwarding firewall must not be pulled from
+	// rotation over one. Here the node forwards something it does NOT report —
+	// the store, `show configuration`, the peer resync and the rest of this
+	// payload all name a configuration the dataplane is not enforcing. That is
+	// the same class as ConfigPersistDegradedFn ("a restart would load a stale
+	// config"): a divergence between the reported state and the real one, which
+	// an orchestrator scanning a probe must be able to act on. It is transient
+	// by construction — the retry owner re-applies every 30s until it
+	// converges. Optional; if nil, the check is omitted.
+	ConfigApplyDebtFn func() (owed bool, failures uint64, lastErr string)
 	// NeighborPhaseAgeFn surfaces the age (seconds) since each Go
 	// periodic neighbor-maintenance phase last completed (#1780 Path A).
 	// Keys: resolve/force_probe/clean_failed/warm. A monotonically
@@ -537,6 +557,7 @@ type Server struct {
 	// #7181: applied state of the host-inbound nft surface; nil = unwired.
 	hostInboundAppliedFn                 func() HostInboundAppliedSnapshot
 	configPersistDegradedFn              func() bool
+	configApplyDebtFn                    func() (bool, uint64, string)
 	rollbackHistoryDegradedFn            func() bool
 	neighborPhaseAgeFn                   func() map[string]float64
 	frrReloadDegradedFn                  func() bool
@@ -660,6 +681,7 @@ func NewServer(cfg Config) *Server {
 		hostInboundAppliedFn:                 cfg.HostInboundAppliedFn,
 		configPersistDegradedFn:              cfg.ConfigPersistDegradedFn,
 		rollbackHistoryDegradedFn:            cfg.RollbackHistoryDegradedFn,
+		configApplyDebtFn:                    cfg.ConfigApplyDebtFn,
 		neighborPhaseAgeFn:                   cfg.NeighborPhaseAgeFn,
 		frrReloadDegradedFn:                  cfg.FRRReloadDegradedFn,
 		frrQuarantinedRouteMapsFn:            cfg.FRRQuarantinedRouteMapsFn,

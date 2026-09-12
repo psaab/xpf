@@ -744,6 +744,9 @@ func (d *Daemon) apiServerConfig(eventBuf *logging.EventBuffer) api.Config {
 		// reads 1) while the running active config is not durable on
 		// disk (failed HA sync / auto-rollback persist, retry pending).
 		ConfigPersistDegradedFn: d.store.ConfigPersistDegraded,
+		// #9811: the caller-less-apply debt, so /health reports degraded while
+		// the dataplane enforces something other than the active config.
+		ConfigApplyDebtFn: d.ConfigApplyDebt,
 		// #8321 finding 15: the REST /vrrp handler needs the same
 		// per-RG priority source the gRPC surface uses so it can report
 		// RETH VRRP instances on a chassis cluster.

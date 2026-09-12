@@ -134,8 +134,6 @@ unsafe extern "C" {
         comp: *mut XskRingCons,
         rx_size: u32,
         tx_size: u32,
-        libxdp_flags: u32,
-        xdp_flags: u32,
         bind_flags: u16,
     ) -> c_int;
 
@@ -150,13 +148,15 @@ unsafe extern "C" {
         comp: *mut XskRingCons,
         rx_size: u32,
         tx_size: u32,
-        libxdp_flags: u32,
-        xdp_flags: u32,
         bind_flags: u16,
     ) -> c_int;
 
     fn bridge_xsk_socket_delete(xsk: *mut XskSocketOpaque);
     fn bridge_xsk_socket_fd(xsk: *const XskSocketOpaque) -> c_int;
+    fn bridge_xsk_libxdp_inhibit_prog_load_flag() -> c_int;
+    // #9726: the test-only seam in csrc/xsk_bridge.c; production never calls it.
+    fn bridge_xsk_capture_socket_create_for_test(enable: c_int);
+    fn bridge_xsk_captured_libxdp_flags() -> u32;
 
     fn bridge_xsk_ring_prod_reserve(ring: *mut XskRingProd, nb: u32, idx_out: *mut u32) -> u32;
     fn bridge_xsk_ring_prod_submit(ring: *mut XskRingProd, nb: u32);
@@ -1308,10 +1308,10 @@ fn create_xsk_binding_impl(
     let mut comp_ring: Box<XskRingCons> = Box::new(unsafe { core::mem::zeroed() });
     let mut xsk_ptr: *mut XskSocketOpaque = core::ptr::null_mut();
 
-    // XSK_LIBBPF_FLAGS__INHIBIT_PROG_LOAD = 1 << 0
-    // We manage our own XDP program; don't let libxdp load one.
-    let libxdp_flags: u32 = 1;
-
+    // #9726: the C bridge sets the socket config's libxdp_flags
+    // (INHIBIT_PROG_LOAD: we manage our own XDP program, so libxdp must not load
+    // one) and xdp_flags (0) in bridge_fill_socket_config. A test captures the
+    // libxdp_flags both create functions pass to libxdp.
     let rc = unsafe {
         match mode {
             XskCreateMode::PrivateUmem => bridge_xsk_socket_create_private(
@@ -1325,8 +1325,6 @@ fn create_xsk_binding_impl(
                 &mut *comp_ring,
                 ring_entries,
                 ring_entries,
-                libxdp_flags,
-                0,
                 bind_flags,
             ),
             XskCreateMode::SharedUmem => bridge_xsk_socket_create_shared(
@@ -1340,8 +1338,6 @@ fn create_xsk_binding_impl(
                 &mut *comp_ring,
                 ring_entries,
                 ring_entries,
-                libxdp_flags,
-                0,
                 bind_flags,
             ),
         }

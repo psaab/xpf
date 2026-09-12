@@ -104,6 +104,10 @@ func packedOptInCases8768() map[string]packedOptInCase8768 {
 			stmts: map[string]string{
 				"address": "address 10.0.0.1/24",
 				"filter":  "filter input f1",
+				// #9932: a CONTAINER head, so its fixture statement is the bare
+				// keyword. Its sub-options are a separate chain, measured and
+				// filed rather than admitted here.
+				"dhcp": "dhcp",
 			},
 			second: map[string]string{
 				"address": "address 10.0.0.2/24",
@@ -113,9 +117,9 @@ func packedOptInCases8768() map[string]packedOptInCase8768 {
 				out := ""
 				for _, i := range c.Interfaces.Interfaces {
 					for _, u := range i.Units {
-						out += fmt.Sprintf("addrs=%v fin4=%q fout4=%q fin6=%q fout6=%q",
+						out += fmt.Sprintf("addrs=%v fin4=%q fout4=%q fin6=%q fout6=%q dhcp=%v dhcpv6=%v",
 							u.Addresses, u.FilterInputV4, u.FilterOutputV4,
-							u.FilterInputV6, u.FilterOutputV6)
+							u.FilterInputV6, u.FilterOutputV6, u.DHCP, u.DHCPv6)
 					}
 				}
 				if out == "" {
@@ -131,6 +135,10 @@ func packedOptInCases8768() map[string]packedOptInCase8768 {
 			stmts: map[string]string{
 				"address": "address 2001:db8::1/64",
 				"filter":  "filter input f6",
+				// #9932: a CONTAINER head. `dhcpv6-client` alone compiles
+				// DHCPv6=true, which is the value the elided spelling used to
+				// lose; its own sub-options are a separate chain.
+				"dhcpv6-client": "dhcpv6-client",
 			},
 			second: map[string]string{
 				"address": "address 2001:db8::2/64",
@@ -140,9 +148,9 @@ func packedOptInCases8768() map[string]packedOptInCase8768 {
 				out := ""
 				for _, i := range c.Interfaces.Interfaces {
 					for _, u := range i.Units {
-						out += fmt.Sprintf("addrs=%v fin4=%q fout4=%q fin6=%q fout6=%q",
+						out += fmt.Sprintf("addrs=%v fin4=%q fout4=%q fin6=%q fout6=%q dhcp=%v dhcpv6=%v",
 							u.Addresses, u.FilterInputV4, u.FilterOutputV4,
-							u.FilterInputV6, u.FilterOutputV6)
+							u.FilterInputV6, u.FilterOutputV6, u.DHCP, u.DHCPv6)
 					}
 				}
 				if out == "" {

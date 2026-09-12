@@ -227,6 +227,25 @@ var knownBlindScopePairs8852 = map[string]string{
 	// records that arm 2 is blind to it, which stays true however the fold
 	// behaves. Read it as a boundary, not as a clearance.
 	"unit family": "plain-container",
+	// #9932 admitted ("inet","dhcp") and ("inet6","dhcpv6-client") so the
+	// canonical DHCP-client spellings fold: `family inet dhcp;` compiled
+	// DHCP=false where braced compiled true, on a commit strict accepts with no
+	// warning, and an interface whose only address source is DHCP came up with
+	// no address at all.
+	//
+	// Both heads are the SAME SHAPE as the two entries above -- measured:
+	// `dhcp` is args:0, 4 children, no wildcard; `dhcpv6-client` is args:0,
+	// 6 children, no wildcard -- so the census emits no site for either and
+	// arm 2 adjudicates nothing.
+	//
+	// COVERED THERE IS NOT ADJUDICATED HERE, as for the two above:
+	// TestDhcpClientFoldsLikeBraced9932 compares the compiled config elided
+	// against braced for both families and both elision depths, and #8763's
+	// famOnlyCases records each pair as `recovery` -- the fold delivers exactly
+	// the braced result. This entry records only that arm 2 is blind to them,
+	// which stays true however the fold behaves. A boundary, not a clearance.
+	"inet dhcp":           "plain-container",
+	"inet6 dhcpv6-client": "plain-container",
 	// issue 8858. Unlike the two confirmed-broken entries above, this pair's
 	// fold IS repaired and measured -- but by its own cells, not by arm 2, and
 	// a pair leaves this list only when arm 2 starts generating a site for it.

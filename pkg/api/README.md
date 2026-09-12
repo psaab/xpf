@@ -43,6 +43,42 @@ liveness/readiness. Prometheus metrics endpoint. SSE event streams.
   `rollback_history_degraded` field plus the
   `xpf_config_rollback_persist_degraded` 0/1 gauge (also emitted even
   when the dataplane is not loaded) for alerting.
+  `ConfigApplyDebtFn` (#9811, same injection pattern) reports whether the
+  dataplane is known to be enforcing something OTHER than the active
+  configuration, and DOES downgrade `/health` to 503. The distinction from
+  `RollbackHistoryDegradedFn` directly above is the one that decides it,
+  and it is not severity-by-feel: a degraded rollback history is a
+  recovery aid failing on a node that forwards exactly what it reports,
+  and such a node must not be pulled from rotation. Here the reported
+  state and the enforced state DISAGREE — a commit-confirmed auto-rollback
+  promotes the store first, so a failed apply leaves the node enforcing
+  the abandoned config while this payload, `show configuration` and the
+  peer resync all name the promoted one. That is
+  `ConfigPersistDegradedFn`'s class ("a restart would load a stale
+  config"), not `RollbackHistoryDegradedFn`'s. It is transient by
+  construction: the daemon's `configApplyReassertLoop` re-applies the
+  active config every 30s until it converges. Two fields are surfaced,
+  `config_apply_debt_owed` and `config_apply_failure_count`; the raw
+  error is withheld under the #5031 rule, and the COUNT is the field that
+  separates a retry owner that is running and failing from one that is
+  not running at all.
+
+**Authorization on this surface enforces all four `system login class` regex
+statements as of #9952.** The coarse permission bits come first
+(`pkg/authz`), then the `*-configuration` pair on the config-mutating routes
+(#9154/#9890/#9892), then the `*-commands` pair on every route
+(`authz_command_regex_9952.go`).
+
+The command pair needs a route -> canonical-command TABLE, because a REST route
+is not a CLI command and the mapping has to be defined rather than derived; the
+gRPC table (`pkg/grpcapi/authz_command_table*.go`) is the model, and the
+SystemAction verb table now lives in `pkg/authz` so both surfaces read ONE copy.
+Routes with no operational twin are declared in `restRoutesNoCommand` with a
+reason, and a census test requires every route registered in `server.go` to
+appear in exactly one of the two tables. A route in neither fails the build and
+DENIES at runtime — the census is a build-time guard, so the request path fails
+closed independently of it.
+
 - `GET /metrics` — Prometheus exposition.
 - `GET /api/v1/...` — REST mirrors of the gRPC API: sessions, routes,
   NAT, DHCP, IPsec, VRRP, OSPF, BGP, etc.

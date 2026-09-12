@@ -30,20 +30,28 @@ type ProcessStatus struct {
 	// schema identity (#7194). 0 == not advertised (helper predates the field),
 	// which CompareSessionDeltaSchema treats as unknown-and-deferred rather
 	// than as a mismatch.
-	SessionDeltaSchemaFingerprint uint64                `json:"session_delta_schema_fingerprint,omitempty"`
-	StartedAt                     time.Time             `json:"started_at"`
-	ControlSocket                 string                `json:"control_socket"`
-	StateFile                     string                `json:"state_file"`
-	Workers                       int                   `json:"workers"`
-	RingEntries                   int                   `json:"ring_entries"`
-	HelperMode                    string                `json:"helper_mode"`
-	IOUringPlanned                bool                  `json:"io_uring_planned"`
-	IOUringActive                 bool                  `json:"io_uring_active,omitempty"`
-	IOUringMode                   string                `json:"io_uring_mode,omitempty"`
-	IOUringLastError              string                `json:"io_uring_last_error,omitempty"`
-	Enabled                       bool                  `json:"enabled"`
-	ForwardingArmed               bool                  `json:"forwarding_armed,omitempty"`
-	Capabilities                  UserspaceCapabilities `json:"capabilities"`
+	SessionDeltaSchemaFingerprint uint64 `json:"session_delta_schema_fingerprint,omitempty"`
+	// LinkedLibxdpVersion is the build host's libxdp (pkg-config) the helper
+	// statically linked, and LinkedLibbpfVersion the full version of the vendored
+	// libbpf it linked. BuildHostLibbpfVersion is the build host's libbpf
+	// (pkg-config); it is not linked, and it does not identify what libxdp was
+	// compiled against (#9726). Empty from a helper that predates them.
+	LinkedLibxdpVersion    string                `json:"linked_libxdp_version,omitempty"`
+	LinkedLibbpfVersion    string                `json:"linked_libbpf_version,omitempty"`
+	BuildHostLibbpfVersion string                `json:"build_host_libbpf_version,omitempty"`
+	StartedAt              time.Time             `json:"started_at"`
+	ControlSocket          string                `json:"control_socket"`
+	StateFile              string                `json:"state_file"`
+	Workers                int                   `json:"workers"`
+	RingEntries            int                   `json:"ring_entries"`
+	HelperMode             string                `json:"helper_mode"`
+	IOUringPlanned         bool                  `json:"io_uring_planned"`
+	IOUringActive          bool                  `json:"io_uring_active,omitempty"`
+	IOUringMode            string                `json:"io_uring_mode,omitempty"`
+	IOUringLastError       string                `json:"io_uring_last_error,omitempty"`
+	Enabled                bool                  `json:"enabled"`
+	ForwardingArmed        bool                  `json:"forwarding_armed,omitempty"`
+	Capabilities           UserspaceCapabilities `json:"capabilities"`
 	// LastSnapshotRejectReasons is the manager-owned (#3261) diagnostic
 	// recording why the most recent snapshot build carries unrepresentable
 	// policy content that the helper integrity preflight rejects (previous-good
