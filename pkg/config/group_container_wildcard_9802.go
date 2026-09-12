@@ -33,51 +33,70 @@ package config
 // Dropping that member would turn a loud refusal into a silent one, so the
 // predicate below excludes leaf-list (member) slots and any key position the
 // schema does not model as an instance name.
-func pruneWildcardInstances9802(nodes []*Node) []*Node {
+func pruneWildcardInstances9802(ancestorPath [][]string, nodes []*Node) []*Node {
 	out := nodes[:0:0]
 	for _, n := range nodes {
 		if n == nil {
 			continue
 		}
-		if wildcardInstanceNode9802(n) {
+		if wildcardInstanceNode9802(ancestorPath, n) {
 			continue
 		}
 		if len(n.Children) > 0 {
-			n.Children = pruneWildcardInstances9802(n.Children)
+			n.Children = pruneWildcardInstances9802(appendPath(ancestorPath, n.Keys), n.Children)
 		}
 		out = append(out, n)
 	}
 	return out
 }
 
-// wildcardInstanceNode9802 reports whether n is a wildcard-keyed node that the
-// wildcard branch would have fanned out, had the destination container existed.
-// Those matched nothing by construction and are dropped.
+// wildcardInstanceNode9802 reports whether n is a wildcard-keyed node standing
+// where an INSTANCE NAME goes, so nothing in the destination could ever have
+// named it. Those are dropped from a wholesale-adopted subtree; everything else
+// is adopted unchanged.
 //
-// The discriminator is the node's SHAPE, not the schema. The schema cannot tell
-// the two cases apart: a zone's `interfaces` member slot is declared as a
-// wildcard child WITH children (schema_security.go), exactly like a dynamic
-// instance name, so a schema-shape predicate prunes the member too. Measured at
-// ef390f3ac + that predicate, `interfaces { <ge-*>; }` inside an adopted group
-// zone stopped being refused and committed clean — a loud refusal turned
-// silent.
+// The first cut keyed on the node's SHAPE (`!IsLeaf || len(Keys) >= 2`) and was
+// wrong in the silent direction. Measured at ef390f3ac against 4cc9b66e6:
 //
-//   - A wildcard-keyed CONTAINER is what `mergeNodes` routes to the wildcard
-//     branch (that branch runs only for non-leaf sources), so with no
-//     destination it applied nothing: `security-zone <*> { tcp-rst; }`,
-//     `<*> { description … }`.
-//   - A wildcard-keyed LEAF carrying an instance name (keyword plus the
-//     wildcard, two or more keys) is the bodyless spelling of the same thing:
-//     `security-zone <*>;`.
-//   - A single-key wildcard LEAF is a MEMBER, not an instance key:
-//     `interfaces { <ge-*>; }` inside a zone. It takes the leaf branch, is
-//     adopted as it is today, and stays loudly refused by the compiler's
-//     interface-reference check (#9423).
-func wildcardInstanceNode9802(n *Node) bool {
+//	description "<*>";            kept  -> DROPPED   (an ordinary scalar value)
+//	interfaces <ge-*>;  (compact) refused -> COMMITS  (a zone MEMBER, and the
+//	                                         strict refusal naming the token
+//	                                         disappeared with it)
+//
+// Both are two-key leaves, which is why a shape rule cannot separate them from
+// `security-zone <*>;`. The schema can: an instance name is an ARG of a
+// container-shaped child, while `description` is a scalar and a zone's
+// `interfaces` member slot takes no args at all (its wildcard child IS the
+// member). So the test is:
+//
+//   - a wildcard-keyed CONTAINER, which the wildcard branch would have fanned
+//     out had the destination existed; or
+//   - a wildcard inside the IDENTITY SPAN (keyword plus args) of a child the
+//     schema declares with `args >= 1` and children or a wildcard of its own.
+//
+// A wildcard anywhere else is a value or a member, and is left alone: the
+// compiler's own checks judge it exactly as they judge the braced spelling
+// (#9423).
+func wildcardInstanceNode9802(ancestorPath [][]string, n *Node) bool {
 	if n == nil || len(n.Keys) == 0 || !keysContainWildcard(n.Keys) {
 		return false
 	}
-	return !n.IsLeaf || len(n.Keys) >= 2
+	if !n.IsLeaf {
+		return true
+	}
+	parent := schemaAtAncestorPath(ancestorPath)
+	if parent == nil {
+		return false
+	}
+	cs := resolveSchemaChild(parent, n.Keys[0])
+	if cs == nil || cs.args < 1 || cs.scalar || (cs.children == nil && cs.wildcard == nil) {
+		return false
+	}
+	span := 1 + cs.args
+	if span > len(n.Keys) {
+		span = len(n.Keys)
+	}
+	return keysContainWildcard(n.Keys[1:span])
 }
 
 // sameKeyedContainers9802 returns every destination container a group container
@@ -120,19 +139,23 @@ func splitWildcardChildren9802(children []*Node) (wild, rest []*Node) {
 // only `screen`, and the zones in a second stanza never saw the group. Measured
 // at ef390f3ac: with the stanzas in that order, `trust` compiled without the
 // group's statement.
-func receivingContainer9802(targets []*Node, children []*Node) *Node {
+func receivingContainer9802(targets []*Node, child *Node) *Node {
+	if child == nil || len(child.Keys) == 0 {
+		return targets[0]
+	}
+	// An exact key match first: `from-zone trust to-zone untrust` must not be
+	// captured by a stanza holding `from-zone trust to-zone dmz`.
 	for _, d := range targets {
-		for _, c := range children {
-			if c == nil || len(c.Keys) == 0 {
-				continue
+		for _, dc := range d.Children {
+			if dc != nil && keysEqual(dc.Keys, child.Keys) {
+				return d
 			}
-			for _, dc := range d.Children {
-				if dc == nil || len(dc.Keys) == 0 {
-					continue
-				}
-				if keysEqual(dc.Keys, c.Keys) || dc.Keys[0] == c.Keys[0] {
-					return d
-				}
+		}
+	}
+	for _, d := range targets {
+		for _, dc := range d.Children {
+			if dc != nil && len(dc.Keys) > 0 && dc.Keys[0] == child.Keys[0] {
+				return d
 			}
 		}
 	}
