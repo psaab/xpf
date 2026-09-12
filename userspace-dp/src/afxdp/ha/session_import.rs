@@ -1,5 +1,42 @@
 use crate::afxdp::*;
 
+/// The outcome of a helper-side synced delete (#9714 review round 2, finding 7).
+///
+/// This replaces a `bool` in which a stale-generation REJECTION and a successful
+/// APPLY were the SAME value, `false`; only the peer refusal was distinguishable.
+/// Peer deletes currently carry generation 0, so the collision is latent — but it is
+/// latent in the direction that matters. A rejected delete reported as applied
+/// licenses the caller to destroy the mirror and DNAT rows of a session the helper
+/// still holds, and the mirror cannot be rebuilt afterwards: the refresh path writes
+/// with `BPF_EXIST` precisely so it will not recreate a deleted entry. The moment a
+/// generation-aware helper-originated delete exists, the conflation goes live.
+///
+/// Three states, because "I did it", "I declined" and "I declined for a DIFFERENT
+/// reason" are three different answers to the caller, and only the first of them
+/// permits any further teardown.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SyncedDeleteOutcome {
+    /// The entry named by the key was removed.
+    Applied,
+    /// Refused: a PEER delete named a live LOCAL session whose owner redundancy
+    /// group is locally forwarding-active — a dual-primary split.
+    RefusedLocalOwned,
+    /// Refused: the stored entry's install generation is strictly NEWER than the
+    /// delete's, so this is a stale delete arriving after a same-key replacement
+    /// the helper has already mirrored (#2170).
+    RefusedStaleGeneration,
+}
+
+impl SyncedDeleteOutcome {
+    /// Whether this is the #9714 ownership refusal specifically, which the handler
+    /// answers in-band with its own token so the Go side keeps its mirror and DNAT
+    /// rows. A stale-generation refusal is NOT that: it means the helper already
+    /// holds something newer, so the Go side has nothing to preserve.
+    pub(crate) fn is_refused_local_owned(self) -> bool {
+        matches!(self, Self::RefusedLocalOwned)
+    }
+}
+
 /// The outcome of an HA synced-session import (#6785).
 ///
 /// `upsert_synced_session` used to return `()`. It has three SEMANTIC refusal
@@ -754,9 +791,9 @@ impl crate::afxdp::ha::SessionDomain {
     /// dual-primary split. Otherwise, and for every authoritative delete, it
     /// behaves exactly as `delete_synced_session`.
     ///
-    /// Returns whether it REFUSED. The handler answers a refusal in-band, so the Go
-    /// side keeps its own mirror and DNAT rows for the flow the helper kept.
-    pub fn delete_peer_synced_session(&self, key: SessionKey) -> bool {
+    /// Returns the OUTCOME. The handler answers a refusal in-band, so the Go side
+    /// keeps its own mirror and DNAT rows for the flow the helper kept.
+    pub fn delete_peer_synced_session(&self, key: SessionKey) -> SyncedDeleteOutcome {
         self.delete_synced_session_gen_marked(key, 0, true)
     }
 
@@ -771,7 +808,7 @@ impl crate::afxdp::ha::SessionDomain {
     /// generation-aware deletes. A delete_gen of 0, or a stored generation of
     /// 0, falls back to unconditional delete (rolling-upgrade safe).
     pub fn delete_synced_session_gen(&self, key: SessionKey, delete_gen: u64) {
-        self.delete_synced_session_gen_marked(key, delete_gen, false);
+        let _ = self.delete_synced_session_gen_marked(key, delete_gen, false);
     }
 
     fn delete_synced_session_gen_marked(
@@ -779,7 +816,7 @@ impl crate::afxdp::ha::SessionDomain {
         key: SessionKey,
         delete_gen: u64,
         peer_delete: bool,
-    ) -> bool {
+    ) -> SyncedDeleteOutcome {
         // #7209: ONE load of the published view, bound for the whole call. Two
         // loads inside one import can straddle a publish and resolve the
         // session's zones against one generation and its NAT against another —
@@ -806,7 +843,7 @@ impl crate::afxdp::ha::SessionDomain {
             self.sessions
                 .delete_stale_ignored
                 .fetch_add(1, Ordering::Relaxed);
-            return false;
+            return SyncedDeleteOutcome::RefusedStaleGeneration;
         }
         // #9714: refuse a PEER delete of a live local session whose owner RG is
         // locally active, before any kernel, DNAT or shared delete and before the
@@ -833,7 +870,7 @@ impl crate::afxdp::ha::SessionDomain {
             )
         {
             PEER_DELETE_REFUSED_LOCAL_OWNED.fetch_add(1, Ordering::Relaxed);
-            return true;
+            return SyncedDeleteOutcome::RefusedLocalOwned;
         }
         let reverse_key = removed_entry.as_ref().and_then(|entry| {
             if entry.metadata.is_reverse {
@@ -961,7 +998,7 @@ impl crate::afxdp::ha::SessionDomain {
                 self.release_dropped_delete_for_worker(entry, &key, *worker_id);
             }
         }
-        false
+        SyncedDeleteOutcome::Applied
     }
 
     /// #6979 F4: run the NAT teardown a worker will never run itself, because

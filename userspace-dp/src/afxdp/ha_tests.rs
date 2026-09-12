@@ -5539,7 +5539,8 @@ fn a_peer_delete_of_a_live_local_session_with_an_unresolved_owner_rg_is_refused_
     let refused = fixture
         .coordinator
         .session_domain()
-        .delete_peer_synced_session(fixture.forward.key.clone());
+        .delete_peer_synced_session(fixture.forward.key.clone())
+        .is_refused_local_owned();
 
     let writes = crate::afxdp::bpf_map::session_map_writes();
     assert!(
@@ -5581,7 +5582,8 @@ fn a_peer_delete_with_an_unresolved_owner_rg_and_no_active_group_still_deletes_9
     let refused = fixture
         .coordinator
         .session_domain()
-        .delete_peer_synced_session(fixture.forward.key.clone());
+        .delete_peer_synced_session(fixture.forward.key.clone())
+        .is_refused_local_owned();
 
     assert!(
         !refused,
@@ -5611,7 +5613,8 @@ fn a_peer_delete_of_a_live_local_session_is_refused_9714() {
     let refused = fixture
         .coordinator
         .session_domain()
-        .delete_peer_synced_session(fixture.forward.key.clone());
+        .delete_peer_synced_session(fixture.forward.key.clone())
+        .is_refused_local_owned();
 
     let writes = crate::afxdp::bpf_map::session_map_writes();
     assert!(
@@ -5682,7 +5685,8 @@ fn a_peer_delete_with_the_owner_rg_inactive_still_deletes_9714() {
     let refused = fixture
         .coordinator
         .session_domain()
-        .delete_peer_synced_session(fixture.forward.key.clone());
+        .delete_peer_synced_session(fixture.forward.key.clone())
+        .is_refused_local_owned();
 
     let writes = crate::afxdp::bpf_map::session_map_writes();
     assert!(
@@ -5716,7 +5720,8 @@ fn a_peer_delete_of_a_peer_synced_session_still_deletes_with_the_owner_rg_active
     let refused = fixture
         .coordinator
         .session_domain()
-        .delete_peer_synced_session(fixture.forward.key.clone());
+        .delete_peer_synced_session(fixture.forward.key.clone())
+        .is_refused_local_owned();
 
     let writes = crate::afxdp::bpf_map::session_map_writes();
     assert!(
@@ -5751,7 +5756,8 @@ fn a_peer_delete_of_the_reverse_key_of_a_live_local_session_is_refused_9714() {
     let refused = fixture
         .coordinator
         .session_domain()
-        .delete_peer_synced_session(fixture.reverse_key.clone());
+        .delete_peer_synced_session(fixture.reverse_key.clone())
+        .is_refused_local_owned();
 
     let writes = crate::afxdp::bpf_map::session_map_writes();
     assert!(
