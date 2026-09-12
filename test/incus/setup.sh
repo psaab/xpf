@@ -426,8 +426,9 @@ provision_instance() {
 	# the dataplane is armed with a live attached link.
 	incus exec "$INSTANCE_NAME" -- bash -c 'cat > /etc/sysctl.d/99-bpf.conf <<EOF
 net.core.bpf_jit_enable=1
-net.ipv4.ip_forward=0
-net.ipv6.conf.all.forwarding=0
+# #9725: the transit knobs are NOT persisted here. xpfd's transit gate owns
+# them, and a sysctl.d file is re-applied by any systemd-sysctl run, which
+# would fight the gate under a running xpfd. Both default to 0 anyway.
 net.ipv6.conf.all.accept_ra=0
 net.ipv6.conf.default.accept_ra=0
 EOF'

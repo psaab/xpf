@@ -157,28 +157,32 @@ func (d *Daemon) transitOpen() bool {
 // alone keeps ROUTED transit closed; bridged frames ignore the sysctls and rely
 // on the barrier alone. So the order only decides how early a change is
 // complete. A change of state is logged once. Caller holds transitGateMu.
-func (d *Daemon) writeTransitGateLocked(stage string) bool {
-	open := d.transitOpen()
+func (d *Daemon) writeTransitGateLocked(stage string) (open, verified bool) {
+	open = d.transitOpen()
+	var sysctlsOK, barrierOK bool
 	if open {
-		writeTransitForwardSysctls(true)
-		d.applyTransitBarrier(true)
+		sysctlsOK = writeTransitForwardSysctls(true)
+		barrierOK = d.applyTransitBarrier(true)
 	} else {
-		d.applyTransitBarrier(false)
-		writeTransitForwardSysctls(false)
+		barrierOK = d.applyTransitBarrier(false)
+		sysctlsOK = writeTransitForwardSysctls(false)
 	}
+	verified = sysctlsOK && barrierOK
 	// The transition logs name the gate's state. A leg that fails to actuate is
 	// logged where it fails: writeTransitForwardSysctls and the barrier episodes.
 	if open != d.transitWasOpen {
 		d.transitWasOpen = open
 		if open {
 			slog.Info("transit gate open: the dataplane is armed and a shim XDP program is attached",
-				"stage", stage, "attached_links", d.attachedXDPLinks())
+				"stage", stage, "attached_links", d.attachedXDPLinks(),
+				"sysctls_verified", sysctlsOK, "barrier_verified", barrierOK)
 		} else {
 			slog.Info("transit gate closed: the dataplane is unarmed or no shim XDP program is attached",
-				"stage", stage, "dataplane_armed", d.dataplaneArmed.Load())
+				"stage", stage, "dataplane_armed", d.dataplaneArmed.Load(),
+				"sysctls_verified", sysctlsOK, "barrier_verified", barrierOK)
 		}
 	}
-	return open
+	return open, verified
 }
 
 // reassertTransitGate re-reads the arm and the attached links and drives both
@@ -196,8 +200,9 @@ func (d *Daemon) reassertTransitGate(stage string) {
 func (d *Daemon) closeTransitUntilAttached(stage string) {
 	d.lockTransitGate("closeTransitUntilAttached")
 	defer d.transitGateMu.Unlock()
-	d.applyTransitBarrier(false)
-	writeTransitForwardSysctls(false)
+	barrierOK := d.applyTransitBarrier(false)
+	sysctlsOK := writeTransitForwardSysctls(false)
 	d.transitWasOpen = false
-	slog.Info("transit gate closed at bring-up; it opens when the dataplane is armed and a shim XDP link is attached", "stage", stage)
+	slog.Info("transit gate closed at bring-up; it opens when the dataplane is armed and a shim XDP link is attached",
+		"stage", stage, "sysctls_verified", sysctlsOK, "barrier_verified", barrierOK)
 }

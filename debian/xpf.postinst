@@ -41,6 +41,26 @@ BINS="xpfd cli xpf-userspace-dp xpf-day0-config"
 
 case "$1" in
     configure)
+        # === #9725: the kernel transit knobs must not live in a sysctl.d file ===
+        #
+        # xpfd's transit gate owns net.ipv4.ip_forward and
+        # net.ipv6.conf.all.forwarding at runtime, and xpf-transit-closed.service
+        # holds them closed from boot until xpfd starts. That unit is a boot-only
+        # oneshot for a reason: systemd-sysctl re-applies EVERY sysctl.d file
+        # whenever it runs, so a persisted value is reimposed under a running
+        # xpfd by something as routine as `systemctl restart systemd-sysctl`.
+        # Whichever way it was persisted, it fights the gate -- an image baked
+        # before #9725 persisted forwarding=1 and would OPEN transit the gate had
+        # closed. Scrub just those two keys and leave the rest of each file alone.
+        # Neither file is a dpkg conffile, so editing them prompts nothing.
+        for _sysctl_f in /etc/sysctl.d/99-xpf.conf /etc/sysctl.d/99-bpf.conf; do
+            [ -f "$_sysctl_f" ] || continue
+            if grep -qE '^[[:space:]]*net\.(ipv4\.ip_forward|ipv6\.conf\.all\.forwarding)[[:space:]]*=' "$_sysctl_f"; then
+                sed -i -E '/^[[:space:]]*net\.(ipv4\.ip_forward|ipv6\.conf\.all\.forwarding)[[:space:]]*=/d' "$_sysctl_f"
+                echo "xpf: removed the kernel transit knobs from $_sysctl_f; xpfd's transit gate and xpf-transit-closed.service own them (#9725)"
+            fi
+        done
+
         # $2 is the previously-configured version, empty on first install.
         if [ -z "$2" ]; then
             # === #1964 first-install seed (mechanism A) ===

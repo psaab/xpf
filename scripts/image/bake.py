@@ -90,13 +90,19 @@ RUNTIME_PACKAGES = [
     "cloud-guest-utils", "e2fsprogs",
 ]
 
-# #9725: kernel transit forwarding starts CLOSED. xpfd's transit gate opens it
-# when the dataplane is armed with a live attached link; a 1 here would forward
-# transit, with no program adjudicating it, from boot until then.
+# #9725: the kernel transit knobs (net.ipv4.ip_forward,
+# net.ipv6.conf.all.forwarding) are DELIBERATELY not here. xpfd's transit gate
+# owns them at runtime and xpf-transit-closed.service holds them closed from
+# boot until xpfd starts, which is why that unit is a boot-only oneshot rather
+# than a sysctl.d file: systemd-sysctl re-applies every sysctl.d file whenever
+# it runs, so a `systemctl restart systemd-sysctl` would reimpose this file's
+# value under a RUNNING xpfd and fight the gate — closing transit the gate had
+# opened (breaking route-based IPsec plaintext, SNAT'd frames passed up for
+# kernel routing and the #7409 slow-path reinject) until the next apply. The
+# kernel's own default for both knobs is already 0, so persisting a 0 bought
+# nothing and cost that.
 SYSCTL_CONF = (
     "net.core.bpf_jit_enable=1\n"
-    "net.ipv4.ip_forward=0\n"
-    "net.ipv6.conf.all.forwarding=0\n"
     "net.ipv6.conf.all.accept_ra=0\n"
     "net.ipv6.conf.default.accept_ra=0\n"
 )

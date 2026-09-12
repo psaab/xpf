@@ -141,11 +141,16 @@ var transitForwardWriteHook func(path, value string)
 // has already made the gate decision. The failure direction that matters is
 // "could not close transit", which is why it is a Warn on a line that names
 // the value it failed to set.
-func writeTransitForwardSysctls(on bool) {
+func writeTransitForwardSysctls(on bool) bool {
 	want := "0"
 	if on {
 		want = "1"
 	}
+	// #9725: report whether both knobs HOLD the wanted value. The failures here
+	// are deliberately swallowed (propagating one would brick management on a
+	// boot path), which is why the callers' transition logs used to state the
+	// gate's decision as though it were the kernel's state.
+	verified := true
 	for _, path := range transitForwardSysctlPaths() {
 		current, _ := os.ReadFile(path)
 		if strings.TrimSpace(string(current)) == want {
@@ -157,8 +162,20 @@ func writeTransitForwardSysctls(on bool) {
 		if err := os.WriteFile(path, []byte(want), 0644); err != nil {
 			slog.Warn("failed to set kernel transit-forwarding sysctl",
 				"path", path, "value", want, "err", err)
+			verified = false
+			continue
+		}
+		// A write that returned nil is not proof the knob took the value: a
+		// read-only /proc, a namespace that does not carry the knob, or a
+		// concurrent writer all accept the write and keep the old value.
+		back, err := os.ReadFile(path)
+		if err != nil || strings.TrimSpace(string(back)) != want {
+			slog.Warn("kernel transit-forwarding sysctl did not hold the written value",
+				"path", path, "value", want, "read_back", strings.TrimSpace(string(back)), "err", err)
+			verified = false
 		}
 	}
+	return verified
 }
 
 // DataplaneArmed reports whether the runtime dataplane has been proven to
@@ -191,9 +208,9 @@ func (d *Daemon) markDataplaneArmed(stage string) {
 	d.lockTransitGate("markDataplaneArmed")
 	defer d.transitGateMu.Unlock()
 	d.dataplaneArmed.Store(true)
-	open := d.writeTransitGateLocked(stage)
+	open, verified := d.writeTransitGateLocked(stage)
 	d.applyDataplaneArmTrack(true)
-	slog.Info("dataplane armed", "stage", stage, "kernel_transit_open", open)
+	slog.Info("dataplane armed", "stage", stage, "transit_gate_open", open, "legs_verified", verified)
 }
 
 // applyDataplaneArmTrack mirrors the arm state into redundancy-group weight so
@@ -245,13 +262,14 @@ func (d *Daemon) markDataplaneArmFailed(stage, remediation string, err error) {
 	d.transitWasOpen = false // #9725
 	// #7191: install the nft barrier FIRST on the closing path. Both legs
 	// close, so the order only affects how early closure is complete.
-	d.applyTransitBarrier(false)
-	writeTransitForwardSysctls(false)
+	barrierOK := d.applyTransitBarrier(false)
+	sysctlsOK := writeTransitForwardSysctls(false)
 	d.applyDataplaneArmTrack(false)
-	slog.Error("dataplane arm FAILED; kernel transit forwarding DISABLED (fail-closed, degraded): "+
+	slog.Error("dataplane arm FAILED; kernel transit forwarding close ATTEMPTED (fail-closed, degraded): "+
 		"nothing adjudicates transit on this node, so it forwards none — management (SSH/CLI/gRPC/REST) "+
 		"stays up so the config can be corrected in-band",
-		"stage", stage, "err", err, "remediation", remediation)
+		"stage", stage, "err", err, "remediation", remediation,
+		"sysctls_verified", sysctlsOK, "barrier_verified", barrierOK)
 }
 
 // markDataplaneNotArmed records a DELIBERATE not-armed state and closes
@@ -275,9 +293,9 @@ func (d *Daemon) markDataplaneNotArmed(stage, reason string) {
 	d.lockTransitGate("markDataplaneNotArmed") // #9725
 	defer d.transitGateMu.Unlock()
 	d.dataplaneArmed.Store(false)
-	d.transitWasOpen = false     // #9725
-	d.applyTransitBarrier(false) // #7191
-	writeTransitForwardSysctls(false)
+	d.transitWasOpen = false                  // #9725
+	barrierOK := d.applyTransitBarrier(false) // #7191
+	sysctlsOK := writeTransitForwardSysctls(false)
 	// #7178: DELIBERATE and FAILED are the same fact to a peer — this node
 	// forwards no transit either way, so it must not outbid one that does. The
 	// distinction is why this logs at Info while the failure path logs at Error;
@@ -285,8 +303,9 @@ func (d *Daemon) markDataplaneNotArmed(stage, reason string) {
 	// cluster yet and applyDataplaneArmTrack is a no-op; the case this covers is
 	// config-only mode on a node that already has a cluster configured.
 	d.applyDataplaneArmTrack(false)
-	slog.Info("dataplane not armed; kernel transit forwarding disabled (fail-closed)",
-		"stage", stage, "reason", reason)
+	slog.Info("dataplane not armed; kernel transit forwarding close attempted (fail-closed)",
+		"stage", stage, "reason", reason,
+		"sysctls_verified", sysctlsOK, "barrier_verified", barrierOK)
 }
 
 // applyTransitBarrier drives the #7191 nftables half of the barrier from the
@@ -315,19 +334,24 @@ func (d *Daemon) markDataplaneNotArmed(stage, reason string) {
 //     kernel forwarding: route-based IPsec plaintext off an xfrm interface,
 //     SNAT'd frames passed up for kernel routing, and the #7409 slow-path
 //     reinject.
-func (d *Daemon) applyTransitBarrier(open bool) {
+func (d *Daemon) applyTransitBarrier(open bool) bool {
+	// Production always has an installer (daemon_nft_netlink.go); nil is the
+	// test/no-nft build, where there is no barrier leg to verify.
 	if nftInstaller == nil {
-		return
+		return true
 	}
 	if open {
 		d.transitBarrierInstallFailing = false
+		err := nftInstaller.RemoveTransitBarrier()
 		d.transitBarrierRemoveFailing = logTransitBarrierEpisode("remove",
-			d.transitBarrierRemoveFailing, nftInstaller.RemoveTransitBarrier())
-		return
+			d.transitBarrierRemoveFailing, err)
+		return err == nil
 	}
 	d.transitBarrierRemoveFailing = false
+	err := nftInstaller.InstallTransitBarrier()
 	d.transitBarrierInstallFailing = logTransitBarrierEpisode("install",
-		d.transitBarrierInstallFailing, nftInstaller.InstallTransitBarrier())
+		d.transitBarrierInstallFailing, err)
+	return err == nil
 }
 
 // logTransitBarrierEpisode logs one barrier install or remove result against the

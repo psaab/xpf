@@ -526,21 +526,51 @@ func TestThePublishedRuntimeReportsItsAttachedLinks9725(t *testing.T) {
 // TestTheImageAndTestVMsStartWithForwardingClosed9725 pins the sysctl.d defaults.
 // A 1 there re-opens the kernel path at every boot, before xpfd starts.
 func TestTheImageAndTestVMsStartWithForwardingClosed9725(t *testing.T) {
+	// Not "persists 0" but "persists NEITHER value". systemd-sysctl re-applies
+	// every sysctl.d file whenever it runs, so a persisted knob is reimposed
+	// under a RUNNING xpfd by something as routine as `systemctl restart
+	// systemd-sysctl`, and it fights the gate in whichever direction it was
+	// written: a persisted 1 (images baked before #9725) opens transit the gate
+	// had closed, and a persisted 0 closes transit the gate had opened, breaking
+	// route-based IPsec plaintext, SNAT'd frames passed up for kernel routing and
+	// the #7409 slow-path reinject until the next apply. Both knobs default to 0,
+	// so closing at boot needs no persisted value at all.
 	for _, rel := range []string{"scripts/image/bake.py", "test/incus/setup.sh", "test/incus/cluster-setup.sh"} {
 		b, err := os.ReadFile(filepath.Join("..", "..", rel))
 		if err != nil {
 			t.Fatalf("read %s: %v", rel, err)
 		}
 		body := string(b)
-		for _, want := range []string{"net.ipv4.ip_forward=0", "net.ipv6.conf.all.forwarding=0"} {
-			if !strings.Contains(body, want) {
-				t.Errorf("%s does not set %s", rel, want)
+		for _, bad := range []string{"net.ipv4.ip_forward=", "net.ipv6.conf.all.forwarding="} {
+			if strings.Contains(body, bad) {
+				t.Errorf("%s writes %s into a persistent sysctl file. xpfd's transit gate owns that knob, and "+
+					"systemd-sysctl re-applies sysctl.d files under a running daemon", rel, bad)
 			}
 		}
-		for _, bad := range []string{"net.ipv4.ip_forward=1", "net.ipv6.conf.all.forwarding=1"} {
-			if strings.Contains(body, bad) {
-				t.Errorf("%s still sets %s, which opens kernel transit at boot before xpfd starts", rel, bad)
-			}
+	}
+
+	// What DOES close them at boot: the oneshot, enabled by the image.
+	b, err := os.ReadFile(filepath.Join("..", "..", "scripts/image/bake.py"))
+	if err != nil {
+		t.Fatalf("read bake.py: %v", err)
+	}
+	for _, want := range []string{"xpf-transit-closed.service", "systemctl enable xpf-transit-closed.service"} {
+		if !strings.Contains(string(b), want) {
+			t.Errorf("bake.py no longer ships or enables %q, so nothing closes kernel transit between "+
+				"systemd-sysctl and xpfd", want)
+		}
+	}
+
+	// And an image baked BEFORE #9725 still has the knobs persisted, so the
+	// package must scrub them on upgrade rather than leave them to be re-applied.
+	p, err := os.ReadFile(filepath.Join("..", "..", "debian", "xpf.postinst"))
+	if err != nil {
+		t.Fatalf("read xpf.postinst: %v", err)
+	}
+	for _, want := range []string{"99-xpf.conf", "ipv6.conf.all.forwarding"} {
+		if !strings.Contains(string(p), want) {
+			t.Errorf("the postinst does not scrub %q from a legacy image's sysctl.d, so systemd-sysctl "+
+				"re-applies the old value under a running xpfd", want)
 		}
 	}
 }

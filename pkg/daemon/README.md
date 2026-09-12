@@ -2170,9 +2170,14 @@ never lock an operator out of a remote box it manages.
     until xpfd restarts. Fixing the config and re-committing is not enough;
     `systemctl restart xpfd` is.
   - **How to tell.** The failure logs at **Error**: `dataplane arm FAILED;
-    kernel transit forwarding DISABLED (fail-closed, degraded)` with a
-    `remediation` attribute. Confirm with `sysctl net.ipv4.ip_forward` (0) and
-    `journalctl -u xpfd | grep 'arm FAILED'`.
+    kernel transit forwarding close ATTEMPTED (fail-closed, degraded)` with a
+    `remediation` attribute, plus `sysctls_verified` and `barrier_verified`.
+    The line says ATTEMPTED, not DISABLED, because both legs swallow their
+    failures by design — propagating one would brick management on a boot path
+    — so the message names the decision and the two attributes name what
+    actually actuated (#9725). `sysctls_verified=false` means the knobs did not
+    take the value and this node may still be forwarding. Confirm with `sysctl
+    net.ipv4.ip_forward` (0) and `journalctl -u xpfd | grep 'arm FAILED'`.
   - **What still works.** `ip_forward` governs FORWARDED packets only, so
     management is unaffected by design (#1960 no-brick): SSH, gRPC/REST/CLI,
     the cluster heartbeat, and DHCP are locally terminated, and the `hook
