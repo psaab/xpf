@@ -663,6 +663,30 @@ test-target-services-lib:
 # exit status. Hermetic: mocked incus, canned transcripts; no cluster, no VM.
 # Run this after touching apply-cos-config.sh or cos-apply-lib.sh. The Go half
 # of the marker contract lives in cmd/cli/cos_apply_markers_6440_test.go.
+# #9551: refuse a NEGATED GitHub close keyword. GitHub's parser does not read
+# negation, so a sentence saying an issue stays open closes it at merge when a
+# close verb stands in front of the number. scripts/close_keyword_lint_ci.sh
+# holds both pull-request legs (the body and the commit range); the GitHub
+# Actions job that would call it on every PR is NOT in the tree yet, because
+# pushing a workflow file needs a token with `workflow` scope (#9551). These are
+# the local legs.
+#   close-keyword-lint           lint this branch's commit messages
+#                                (origin/master..HEAD); PR=<n> lints that PR's
+#                                body and commit messages instead (needs gh)
+#   install-git-hooks            install the commit-msg hook: honours
+#                                core.hooksPath, refuses to replace a different
+#                                hook, and fails open in a worktree without the lint
+#   test-close-keyword-lint-lib  the lint's cells (make selftest runs them too)
+.PHONY: close-keyword-lint install-git-hooks test-close-keyword-lint-lib
+close-keyword-lint:
+	python3 ./scripts/close_keyword_lint.py $(if $(PR),--pr $(PR),--commits origin/master..HEAD)
+
+install-git-hooks:
+	bash ./scripts/git-hooks/install.sh
+
+test-close-keyword-lint-lib:
+	python3 -m unittest scripts/test_close_keyword_lint.py
+
 test-cos-apply-lib:
 	bash ./test/incus/cos-apply-lib-selftest.sh
 	go test -count=1 -run 6440 ./cmd/cli/

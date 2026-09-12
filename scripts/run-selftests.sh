@@ -151,6 +151,9 @@ scripts/ignored-cell-census.sh
 test/incus/ignored-cell-census-selftest.sh
 scripts/go-skip-census.sh
 test/incus/go-skip-census-selftest.sh
+scripts/close_keyword_lint_ci.sh
+scripts/git-hooks/commit-msg
+scripts/git-hooks/install.sh
 "
 for s in $SH_SCRIPTS; do
 	[ -f "$s" ] || continue

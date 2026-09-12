@@ -1,0 +1,19 @@
+#!/bin/sh
+# commit-msg hook (#9551): refuse a NEGATED GitHub close keyword in the message.
+# A sentence saying a commit does not fix an issue, written with the close verb
+# in front of the number, closes that issue when the commit reaches the default
+# branch.
+#
+# Installed by `make install-git-hooks`. One hooks directory can serve every
+# worktree of a clone (core.hooksPath), so the installed hook delegates here
+# through the worktree being committed to, and this resolves the linter the
+# same way. It FAILS OPEN when that worktree predates the linter: a guard that
+# blocked every older branch would be removed, not obeyed.
+top=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
+lint="$top/scripts/close_keyword_lint.py"
+[ -f "$lint" ] || exit 0
+if ! command -v python3 >/dev/null 2>&1; then
+	echo "commit-msg: python3 not found; the #9551 close-keyword lint did NOT run" >&2
+	exit 0
+fi
+exec python3 "$lint" --source "commit message" "$1"

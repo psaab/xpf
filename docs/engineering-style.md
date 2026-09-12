@@ -1351,6 +1351,27 @@ Every hit must be an issue you intend to close. Also check every commit
 message body — GitHub scans those on the default branch too, so a clean PR
 body does not save you.
 
+**It is mechanical now (#9551).** `scripts/close_keyword_lint.py` implements
+GitHub's documented grammar plus the two measured shapes above. It refuses a
+close pair that follows a negation, or a scoping heading, within its own clause,
+and names the issue and the spellings that pass. Verdicts are per pair, so a
+`Closes #N` in the same body goes through. It runs in two places today, and a
+third is written but not installed:
+
+- `scripts/close_keyword_lint_ci.sh` holds both pull-request legs (the PR body
+  and every commit message in the range). The GitHub Actions job that would call
+  it on every pull request is **not in the tree**: pushing a workflow file needs
+  an OAuth token with `workflow` scope, which the token in use does not have
+  (#9551). Until it lands, nothing checks a PR BODY unless someone runs
+  `make close-keyword-lint PR=<n>`. `master` is not branch-protected either, so
+  even with the job a red check would not block `gh pr merge`.
+- `make close-keyword-lint` checks this branch's commit messages
+  (`origin/master..HEAD`); with `PR=<n>` it checks that PR's body and commit
+  messages.
+- `make install-git-hooks` installs a `commit-msg` hook that refuses at commit
+  time. It is not installed by default, because one hooks directory can serve
+  every worktree of a clone.
+
 **Why this is worth a section.** The failure is invisible after the fact: the
 wrongly-closed issue reads `COMPLETED`, so every subsequent sweep for open work
 skips it forever, and the only contradicting evidence is a one-second gap
