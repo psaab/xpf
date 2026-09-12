@@ -1175,6 +1175,7 @@
     "next_hop": "",
     "operation": "",
     "owner_rg_id": 0,
+    "peer_delete": false,
     "policy_counter_idx": 0,
     "policy_id": 0,
     "pptp_call_ids": 0,
