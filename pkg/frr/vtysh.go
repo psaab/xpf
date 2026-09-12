@@ -233,8 +233,34 @@ var ErrVtyshBusy = errors.New("FRR vtysh concurrency limit reached")
 // every other FRR read stayed unbounded — REST ospf (both branches) and bgp
 // summary, plus the gRPC OSPF/BGP/RIP/IS-IS/route status RPCs. Gating them one
 // at a time would leave the twentieth FRR read to be added unbounded again. A
-// funnel makes every present AND future FRR read bounded by construction:
-// nothing in this package can reach vtysh except through here.
+// funnel makes every present AND future BUFFERED FRR read bounded by
+// construction.
+//
+// #9755 CORRECTS THE SCOPE OF THAT CLAIM. This used to say "nothing in this
+// package can reach vtysh except through here", and that was false: the ONE
+// streaming read, StreamBGPRoutes, calls the executor's VtyshStream directly, so
+// it takes no VtyshLimiter slot and gets no vtyshTimeout. The #9143 census had no
+// row for it either, so nothing detected the gap between the sentence and the
+// code.
+//
+// The exemption is KEPT rather than closed, deliberately. A full-RIB stream is
+// allowed a 10-minute progress budget (pkg/api's bgpStreamTotalBudget), far
+// longer than the 15 s here; making it hold one of four shared slots would let a
+// single slow reader occupy a quarter of the budget for EVERY FRR status surface
+// on the box for ten minutes. A shared limiter would also imply a cross-surface
+// bound that does not exist -- the gRPC and CLI `show route protocol bgp` paths
+// call the buffered GetBGPRoutes, which cannot be pinned by a slow reader.
+//
+// So the true invariant is: every BUFFERED operational read in this package goes
+// through here; the one STREAMING read is exempt and carries its own admission
+// (pkg/api's ribStreamLimiter, capacity 2) plus its own budget; and the apply
+// path is excluded for the separate reason below. Worst case is therefore four
+// buffered plus two streaming children, not four.
+//
+// That exemption is only safe while the stream path's single caller bounds
+// itself, so the count is pinned by
+// TestStreamPathKeepsExactlyOneBoundedCaller9755 -- a second caller has to choose
+// a contract rather than inherit this one.
 //
 // Admission is FAIL-FAST, mirroring diagcmd.Limiter's contract and #6809's
 // stated reason: a queued request holds the same connection it would have held

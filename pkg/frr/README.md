@@ -345,8 +345,21 @@ call site at once.
 
 The bound is enforced in the funnel rather than at each handler on purpose:
 gating them one at a time would leave the twentieth FRR read to be added
-unbounded again. Nothing in this package can reach `vtysh` except through
-`Manager.vtysh`.
+unbounded again. Every **buffered** operational read in this package reaches
+`vtysh` through `Manager.vtysh`.
+
+**The one streaming read is exempt, and that is deliberate (#9755).**
+`StreamBGPRoutes` calls the executor's `VtyshStream` directly: it takes no
+`VtyshLimiter` slot and no 15s `vtyshTimeout`. A full-RIB stream is allowed a
+10-minute progress budget, so holding one of four shared slots would let a single
+slow reader occupy a quarter of the budget for every FRR status surface for ten
+minutes; and a shared limiter would imply a cross-surface bound that does not
+exist, because the gRPC and CLI `show route protocol bgp` paths call the buffered
+`GetBGPRoutes`. It is bounded instead by `pkg/api`'s `ribStreamLimiter`
+(capacity 2) and that budget. **Worst case across the process is four buffered
+plus two streaming `vtysh` children, not four.** The exemption holds only while
+the stream path's single caller bounds itself, which
+`TestStreamPathKeepsExactlyOneBoundedCaller9755` pins.
 
 **The apply path is deliberately NOT behind it.** `FrrReloadPy` and `VtyshLoad`
 are driven by a config commit rather than by a client, and are already
@@ -364,8 +377,11 @@ renders 500 / `codes.Internal`, because `ErrVtyshBusy` is a new condition only
 the new limiter can produce.
 
 Guards: `vtysh_admission_ctx_9143_test.go` (including a cell that drives all
-nineteen operational reads and asserts each is behind the funnel — coverage that
-is structural rather than a hand-picked list), `pkg/api/routing_frr_admission_9143_test.go`,
+nineteen **buffered** operational reads and asserts each is behind the funnel —
+coverage that is structural rather than a hand-picked list),
+`stream_path_admission_9755_test.go` (the streaming read's exemption, asserted
+beside its buffered twin so a saturated limiter is observable, plus the
+single-bounded-caller census), `pkg/api/routing_frr_admission_9143_test.go`,
 `pkg/grpcapi/routing_frr_admission_9143_test.go`.
 
 ## Entry points
