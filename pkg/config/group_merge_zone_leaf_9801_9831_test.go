@@ -306,3 +306,29 @@ func TestGroupPackedZoneStatementMergesIntoBracedZone9831(t *testing.T) {
 		t.Errorf("expanded zone statements %q (tcp-rst merged: %v), want one `security-zone trust` holding the group's tcp-rst (#7648, #9831)", stmts, rst)
 	}
 }
+
+// The zone rule does not reach keys the compiler canonicalises. A schema-generic
+// identity rule treated a group's `ospf area 0 area-type stub;` and an inline
+// `area 0.0.0.0;` as different instances and compiled two areas for one
+// (9d1424e09, Codex review round 2). Master compiles one area. Only the count is
+// pinned: whether the group's `area-type` should reach the area is #9859.
+func TestGroupCanonicalAliasGetsNoSecondInstance9831(t *testing.T) {
+	const text = `groups { G { protocols { ospf { area 0 area-type stub; } } } } apply-groups G; protocols { ospf { area 0.0.0.0; } }`
+	tree, perrs := NewParser(text).Parse()
+	if len(perrs) > 0 {
+		t.Fatalf("fixture must parse: %v", perrs)
+	}
+	cfg, err := CompileConfig(tree)
+	if err != nil {
+		t.Fatalf("strict compile %q: %v", text, err)
+	}
+	var ids []string
+	if cfg.Protocols.OSPF != nil {
+		for _, a := range cfg.Protocols.OSPF.Areas {
+			ids = append(ids, a.ID)
+		}
+	}
+	if len(ids) != 1 {
+		t.Errorf("compiled OSPF areas %v, want one area: `area 0` and `area 0.0.0.0` name the same area (#9831)", ids)
+	}
+}
