@@ -934,8 +934,16 @@ func (d *Daemon) executeConfirmedRollback(gen uint64) {
 	// without the plan it falls back to the pre-#6948 post-apply scan, which
 	// sweeps the sessions of whichever policy inherited a deleted policy's id.
 	d.armPolicyInvalidationPlan(oldActive, prevCfg)
-	if err := d.applyConfigLocked(context.Background(), prevCfg); err != nil {
-		slog.Error("commit confirmed auto-rollback dataplane apply failed", "err", err)
+	// #9811: latch the outcome. The log alone left the node ENFORCING the
+	// abandoned config C2 while the store, `show configuration`, the peer
+	// resync and /health all reported C1, with nothing to retry it — this is a
+	// timer callback with no caller to report to, unlike the commit path where
+	// the operator sees the error and re-commits. noteConfigApplyResult also
+	// DISCHARGES on success, so an apply that works needs no separate site.
+	applyErr := d.applyConfigLocked(context.Background(), prevCfg)
+	d.noteConfigApplyResult(applyErr)
+	if applyErr != nil {
+		slog.Error("commit confirmed auto-rollback dataplane apply failed", "err", applyErr)
 	}
 	// #5578: this is a background timer callback with no return path, so mirror
 	// the applyConfigLocked handling above — a PARTIAL session invalidation

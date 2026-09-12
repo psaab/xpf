@@ -2760,6 +2760,36 @@ never lock an operator out of a remote box it manages.
   there is no usable overlay: address failures are warn-only inside it and it uses
   the idempotent `AddrReplace`, and an already-correct overlay returns nil — so
   there is no benign already-exists that could newly fail a healthy commit.
+- **A caller-less config apply has a retry owner and a degraded signal
+  (#9811).** A `commit confirmed` timeout promotes the STORE to the
+  rollback target and then applies it, because the store has already moved
+  and the dataplane must be brought into agreement unconditionally. When
+  that apply failed it was only LOGGED. Under the #5679 contract a failed
+  full apply keeps the old compiled policy live, so the node went on
+  ENFORCING the abandoned configuration while the store, `show
+  configuration`, the peer resync and `/health` all reported the promoted
+  one — and unlike the commit path there is no caller to report to, so
+  nothing retried it until some later unrelated apply happened to succeed.
+  `configApplyDebt` latches the failure and `configApplyReassertLoop`
+  (started unconditionally in `Run`, beside the loops below) re-applies
+  until it converges; `ConfigApplyDebt()` feeds `/health`, which returns
+  503 while it is owed.
+
+  The retry re-reads the ACTIVE config rather than replaying the config
+  whose apply failed, and that is load-bearing rather than incidental: a
+  commit landing between the failure and the next tick makes the promoted
+  target stale, so replaying it would UNDO the operator's newer commit and
+  turn a convergence mechanism into a config regression. Re-applying
+  whatever is active converges on the same invariant and is also what
+  discharges the debt after an unrelated successful commit, which would
+  otherwise leave a permanent false degraded on a converged node.
+
+  SCOPE: this covers the auto-rollback path only. Every caller-less apply
+  (boot load, DHCP lease callback, feed refresh, config poll) has the same
+  shape and #9693 already owns the ROUTING tail for all of them — but on
+  those paths the store has NOT advanced, so the reported configuration is
+  still the enforced one and the consequence is different.
+
   Separately, `fabricIPVLANReassertLoop` is the persistent recovery owner the
   overlay never had: `applyFabricIPVLAN` runs only from a config apply on BOTH
   standalone and cluster nodes, so a netlink failure outlasting those five seconds
