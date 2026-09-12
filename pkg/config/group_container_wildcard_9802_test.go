@@ -326,11 +326,10 @@ func TestGroupBodyRoutingPrefersAnExactMatch9802(t *testing.T) {
 }
 
 // The wildcard must sit in the INSTANCE-NAME span. A wildcard in a VALUE
-// position belongs to the statement, not to an instance, and the statement is
-// adopted whole. Without the span test the whole `unit 0` disappears, taking
-// the address with it.
+// position belongs to the statement, not to an instance. Without the span test
+// the whole `unit 0` statement is pruned and the unit never compiles.
 func TestPruneNeedsTheWildcardInTheIdentitySpan9802(t *testing.T) {
-	const text = `groups { G { interfaces { ge-0/0/0 { unit 0 description <*>; unit 0 { family inet { address 10.0.0.1/24; } } } } } } apply-groups G; system { host-name p; }`
+	const text = `groups { G { interfaces { ge-0/0/0 { unit 0 description <*>; } } } } apply-groups G; system { host-name p; }`
 	tree, perrs := NewParser(text).Parse()
 	if len(perrs) > 0 {
 		t.Fatalf("fixture must parse: %v", perrs)
@@ -343,11 +342,13 @@ func TestPruneNeedsTheWildcardInTheIdentitySpan9802(t *testing.T) {
 	if ifc == nil {
 		t.Fatalf("the adopted interface did not compile")
 	}
-	var addrs int
+	var got string
 	for _, u := range ifc.Units {
-		addrs += len(u.Addresses)
+		if u.Number == 0 {
+			got = u.Description
+		}
 	}
-	if addrs != 1 {
-		t.Errorf("compiled %d IPv4 addresses on ge-0/0/0, want 1: a wildcard in a VALUE position is not an instance name, so the unit is adopted whole (#9802)", addrs)
+	if len(ifc.Units) != 1 || got != "<*>" {
+		t.Errorf("compiled %d unit(s) with unit 0 description %q, want one unit described `<*>`: a wildcard in a VALUE position is not an instance name (#9802)", len(ifc.Units), got)
 	}
 }
