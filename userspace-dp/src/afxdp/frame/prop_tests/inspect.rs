@@ -181,7 +181,11 @@ proptest! {
 
 // ---------------------------------------------------------------------------
 // Deterministic pins (current-behavior documentation, NOT generator-
-// hidden). These also run under miri (no proptest loop).
+// hidden). These are SHAPED to run under Miri -- no proptest loop -- but
+// no gate runs them there (#9499): `make test-miri` covers only the
+// modules in userspace-dp/MIRI.registry, and `afxdp::frame::` is declared
+// in userspace-dp/MIRI.unregistered instead. This comment previously read
+// "These also run under miri", which a reader takes as a run that happens.
 // ---------------------------------------------------------------------------
 
 /// Builds a v6 TCP frame with `n` hop-by-hop extension headers (8

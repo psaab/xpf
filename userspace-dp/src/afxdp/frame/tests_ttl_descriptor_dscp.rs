@@ -1211,8 +1211,9 @@ fn apply_dscp_rewrite_to_ipv6_frame_updates_traffic_class() {
 
 /// #1840: adjust_l4_checksum_port family pair — the RFC 768 stored-0
 /// skip fires for IPv4 UDP only; the same stored-0 v6 UDP input gets
-/// adjusted. Deterministic example (miri-coverable twin of the
-/// prop_tests pins).
+/// adjusted. Deterministic example (miri-COVERABLE twin of the
+/// prop_tests pins -- coverable, not covered: `afxdp::frame::` is not in
+/// userspace-dp/MIRI.registry, see #9499).
 #[test]
 fn adjust_l4_checksum_port_v4_skip_v6_no_skip() {
     // 8-byte UDP header at offset 0; checksum bytes at 6..8 = 0.

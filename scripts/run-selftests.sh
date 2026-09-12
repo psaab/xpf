@@ -151,6 +151,9 @@ scripts/ignored-cell-census.sh
 test/incus/ignored-cell-census-selftest.sh
 scripts/go-skip-census.sh
 test/incus/go-skip-census-selftest.sh
+scripts/miri-census.sh
+scripts/miri-leg.sh
+test/incus/miri-census-selftest.sh
 scripts/close_keyword_lint_ci.sh
 scripts/git-hooks/commit-msg
 scripts/git-hooks/install.sh
@@ -383,6 +386,12 @@ run_bash test/incus/ignored-cell-census-selftest.sh
 # cannot be made to fail is indistinguishable from one that examines nothing,
 # which is the defect the whole of #9052 is about.
 run_bash test/incus/go-skip-census-selftest.sh
+# #9499 member 2. Both halves fail INVISIBLY -- a census whose claim matcher
+# breaks reports a CLEAN BOARD, and a Miri leg whose scorer breaks reports a
+# clean run over a filter that matched nothing. So each defence is a mutation
+# cell that must flip the verdict, and the leg's scoring cells drive the real
+# scripts/miri-leg.sh over a stub cargo replaying fixture logs.
+run_bash test/incus/miri-census-selftest.sh
 
 # -- harness reachability census (#8302) --
 #
@@ -417,6 +426,13 @@ run_shell scripts/harness-census.sh
 # interpreter census checks this).
 hdr "ignored-cell census"
 run_shell scripts/ignored-cell-census.sh --check-issues
+
+# #9499 member 2: every file in userspace-dp that mentions Miri is either run
+# by a module in userspace-dp/MIRI.registry or declared in MIRI.unregistered
+# with a reason. The finding was that four in-tree comments asserted Miri
+# coverage while no target ran Miri at all; this is what makes deleting a
+# registry line loud instead of quiet. Hermetic file scan, well under a second.
+run_shell scripts/miri-census.sh
 
 # -- interpreter census (#8153) --
 #
