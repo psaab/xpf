@@ -247,7 +247,7 @@ pub(super) fn emit_periodic_report(
         SESSION_PUBLISH_VERIFY_OK.swap(0, Ordering::Relaxed),
         SESSION_PUBLISH_VERIFY_FAIL.swap(0, Ordering::Relaxed),
         if let Some(b) = bindings.first() {
-            count_bpf_session_entries(b.bpf_maps.session_map_fd)
+            count_bpf_session_entries(b.bpf_maps.session_map.fd)
         } else {
             0
         },
@@ -379,7 +379,7 @@ pub(super) fn check_and_dump_stall(
         if let Some(b) = bindings.first() {
             eprintln!(
                 "DBG STALL_BPF_SESSIONS: entries={}",
-                count_bpf_session_entries(b.bpf_maps.session_map_fd)
+                count_bpf_session_entries(b.bpf_maps.session_map.fd)
             );
         }
     } else if prev_fwd_total > 0 {

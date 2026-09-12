@@ -547,7 +547,7 @@ fn prewarm_recovers_from_poisoned_shared_session_mutex() {
         &coordinator.sessions.forward_wire,
         &coordinator.sessions.owner_rg_indexes,
         std::slice::from_ref(&worker_commands),
-        -1,
+        SteeringMap::unshared_for_test(-1),
         &coordinator.forwarding,
         &ha_state,
         coordinator.dynamic_neighbors_ref(),
@@ -4172,7 +4172,11 @@ fn the_reconcile_replay_rederives_a_dead_reverse_companion_7209() {
     let queues: BTreeMap<u32, Arc<Mutex<VecDeque<WorkerCommand>>>> =
         BTreeMap::from([(0u32, Arc::new(Mutex::new(VecDeque::new())))]);
     let before = coordinator.synced_reverse_rederived_total();
-    let replayed = coordinator.replay_synced_sessions(&replay_entries, &queues, -1);
+    let replayed = coordinator.replay_synced_sessions(
+        &replay_entries,
+        &queues,
+        SteeringMap::unshared_for_test(-1),
+    );
     assert!(replayed > 0, "the replay processed nothing");
 
     // (2) the SHARED MAP — the authority — is what must be repaired.
@@ -4235,7 +4239,11 @@ fn the_reconcile_replay_rederives_a_dead_reverse_companion_7209() {
     // (3) CONTROL: replaying again, with nothing changed, must be inert.
     let steady_entries = coordinator.snapshot_shared_session_entries();
     let steady_before = coordinator.synced_reverse_rederived_total();
-    coordinator.replay_synced_sessions(&steady_entries, &queues, -1);
+    coordinator.replay_synced_sessions(
+        &steady_entries,
+        &queues,
+        SteeringMap::unshared_for_test(-1),
+    );
     assert_eq!(
         coordinator.synced_reverse_rederived_total(),
         steady_before,
@@ -6089,5 +6097,114 @@ fn a_peer_delete_of_the_reverse_key_of_a_live_local_session_is_refused_9714() {
         "#9714 F6 reverse key: {} of 5 properties violated:\n  - {}",
         violations.len(),
         violations.join("\n  - ")
+    );
+}
+/// #9560 round 3: a coordinator delete whose worker fan-out is DROPPED raises that
+/// worker's delete-drop epoch, for EITHER half.
+///
+/// Shared authority is removed before the fan-out, so nothing re-delivers a dropped
+/// `DeleteSynced`: the worker keeps forwarding the revoked entry AND keeps its steering
+/// claims, and those claims suppress every later delete of the rows. Round 2 checked only
+/// the forward half's push result and discarded the reverse half's entirely.
+#[test]
+fn a_dropped_delete_half_raises_the_workers_delete_drop_epoch_9560() {
+    let mut coordinator = Coordinator::new();
+    coordinator.set_forwarding_for_test(reserve6600_forwarding());
+    coordinator
+        .bpf_maps
+        .store(Arc::new(crate::afxdp::coordinator::BpfMaps {
+            session_map_fd: Some(crate::afxdp::bpf_map::OwnedFd {
+                fd: crate::afxdp::bpf_map::RECORDER_ONLY_MAP_FD,
+            }),
+            ..Default::default()
+        }));
+    let commands = Arc::new(Mutex::new(VecDeque::new()));
+    coordinator.workers.register(
+        0,
+        WorkerRuntimeRecord::for_test(test_worker_handle(commands.clone())),
+        None,
+    );
+
+    let entry = reserve6600_entry(40960, 50960);
+    let key = entry.key.clone();
+    let _ = coordinator.upsert_synced_session(entry);
+
+    // EXACTLY ONE slot free, so the FORWARD half is queued and only the REVERSE half is
+    // refused. Filling the queue completely would drop both, and then a check that reads
+    // only the forward half's result would still raise the epoch — the cell would pass
+    // against the very defect it exists to catch.
+    {
+        let mut pending = commands.lock().expect("commands");
+        pending.clear();
+        for _ in 0..(crate::afxdp::worker_queue::MAX_PENDING_WORKER_COMMANDS - 1) {
+            pending.push_back(WorkerCommand::VacateAllSharedExactSlots);
+        }
+    }
+
+    let before = crate::afxdp::session_glue::session_delete_drop_epoch(0);
+    coordinator.delete_synced_session_gen(key, 1);
+    let after = crate::afxdp::session_glue::session_delete_drop_epoch(0);
+
+    {
+        let pending = commands.lock().expect("commands");
+        assert_eq!(
+            pending.len(),
+            crate::afxdp::worker_queue::MAX_PENDING_WORKER_COMMANDS,
+            "fixture: the forward half must have taken the last slot, leaving the reverse \
+             half as the ONLY refused push"
+        );
+    }
+    assert!(
+        after > before,
+        "the REVERSE half's dropped DeleteSynced raised no epoch, so that worker never \
+         reconciles: it keeps the revoked entry and its steering claims, and nothing \
+         re-delivers the command (#9560 round 3). epoch {before} -> {after}"
+    );
+}
+
+/// #9560 round 3: an HA import publishes as the COORDINATOR and CLAIMS the row it
+/// writes.
+///
+/// Round 2 asserted the opposite here, on the reasoning that no worker teardown
+/// releases a coordinator claim. That reasoning was right about the release and wrong
+/// about the fix: leaving the row unowned kept the original #9560 defect alive in the
+/// handoff window, where an aliased session's teardown deletes the row the imported
+/// session is still using — and permanently so when every queued upsert is dropped.
+/// Round 3 makes the coordinator an owner and releases its claim where the shared
+/// authority it stood for is removed (`release_coordinator_session_rows`, called from
+/// every `remove_shared_session` caller).
+#[test]
+fn an_ha_import_claims_its_steering_row_as_the_coordinator_9560() {
+    let mut coordinator = Coordinator::new();
+    coordinator.set_forwarding_for_test(reserve6600_forwarding());
+    coordinator
+        .bpf_maps
+        .store(Arc::new(crate::afxdp::coordinator::BpfMaps {
+            session_map_fd: Some(crate::afxdp::bpf_map::OwnedFd {
+                fd: crate::afxdp::bpf_map::RECORDER_ONLY_MAP_FD,
+            }),
+            ..Default::default()
+        }));
+    let entry = reserve6600_entry(40960, 50960);
+    let key = entry.key.clone();
+    crate::afxdp::bpf_map::clear_session_map_writes();
+
+    let _ = coordinator.upsert_synced_session(entry);
+
+    let writes = crate::afxdp::bpf_map::session_map_writes();
+    assert!(
+        writes.iter().any(|w| w.value.is_some() && w.key == key),
+        "control: the import must publish the entry's steering row, or the claim count below \
+         observes nothing. Writes: {writes:?}"
+    );
+    assert_eq!(
+        coordinator
+            .steering_owners
+            .owner_count(&crate::afxdp::bpf_map::session_map_row(&key)),
+        1,
+        "an HA import must CLAIM the steering row it publishes (#9560 round 3). Unowned, \
+         an aliased session's teardown deletes it while the imported session still needs \
+         it — the defect #9560 exists to close, surviving in the coordinator's handoff \
+         window"
     );
 }

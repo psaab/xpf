@@ -380,7 +380,18 @@ impl crate::afxdp::ha::SessionDomain {
         // shim takes the NO_SESSION degraded path). No binding context here, so
         // bump the shared counter. Distinct from the absent-map arm above: this
         // one HAD a map and the kernel refused the write.
-        if publish_live_session_entry(session_map_fd.fd, key, nat, is_reverse).is_err() {
+        if publish_live_session_entry(
+            SteeringMap {
+                fd: session_map_fd.fd,
+                owners: &self.steering_owners,
+                holder: crate::afxdp::bpf_map::SteeringHolder::Coordinator,
+            },
+            key,
+            nat,
+            is_reverse,
+        )
+        .is_err()
+        {
             SESSION_PUBLISH_ERRORS_SHARED.fetch_add(1, Ordering::Relaxed);
         }
     }
@@ -883,7 +894,11 @@ impl crate::afxdp::ha::SessionDomain {
             let maps = self.bpf_maps.load();
             if let Some(session_map_fd) = maps.session_map_fd.as_ref() {
                 delete_session_map_entry_for_removed_session(
-                    session_map_fd.fd,
+                    SteeringMap {
+                        fd: session_map_fd.fd,
+                        owners: &self.steering_owners,
+                        holder: crate::afxdp::bpf_map::SteeringHolder::Coordinator,
+                    },
                     &entry.key,
                     entry.decision,
                     &entry.metadata,
@@ -1013,12 +1028,18 @@ impl crate::afxdp::ha::SessionDomain {
             let mut pending = worker_queue::lock_recover(&rec.handle.commands);
             let queued =
                 worker_queue::push_bounded(&mut pending, WorkerCommand::DeleteSynced(key.clone()));
-            if let Some(reverse_key) = &reverse_key {
-                worker_queue::push_bounded(
+            // #9560 round 3: the REVERSE half's result was discarded. Both halves carry
+            // the same consequence for the worker that misses one — its local session
+            // entry, its flow-cache slots and its steering claims for that key all stay
+            // — so both are checked, and either drop raises that worker's out-of-band
+            // delete epoch below.
+            let reverse_queued = match &reverse_key {
+                Some(reverse_key) => worker_queue::push_bounded(
                     &mut pending,
                     WorkerCommand::DeleteSynced(reverse_key.clone()),
-                );
-            }
+                ),
+                None => true,
+            };
             // Release the command queue before touching allocator mutexes: the
             // two are unrelated locks and holding both would invent an ordering.
             drop(pending);
@@ -1034,6 +1055,19 @@ impl crate::afxdp::ha::SessionDomain {
                 && !queued
             {
                 self.release_dropped_delete_for_worker(entry, &key, *worker_id);
+            }
+            // #9560 round 3: tell the worker that missed EITHER half to reconcile.
+            // Shared authority is already gone, so nothing re-delivers the command;
+            // without this the worker keeps forwarding a revoked entry and keeps its
+            // steering claims, and the claims are what suppress a later alias delete.
+            // The sweep this arms (`delete_drop_sweep`) is the only thing that can
+            // reach that worker's own table and registry holdings.
+            if !queued || !reverse_queued {
+                if let Some(epoch) = crate::afxdp::session_glue::SESSION_DELETE_DROP_EPOCH
+                    .get(*worker_id as usize)
+                {
+                    epoch.fetch_add(1, Ordering::Relaxed);
+                }
             }
         }
         SyncedDeleteOutcome::Applied

@@ -7975,6 +7975,27 @@ fn retire_dead_worker_holders_reclaims_only_dead_workers_6979() {
         "fixture precondition: the port is occupied before any retirement"
     );
 
+    // #9560 round 3: the same sweep must retire that worker's STEERING claims. A dead
+    // worker never runs its own teardown, so its bit otherwise suppresses every later
+    // delete of the rows it held, and both the registry holding and the fixed-size BPF
+    // row survive for the life of the process.
+    let steering_key = f4_key();
+    let steering_row = crate::afxdp::bpf_map::session_map_row(&steering_key);
+    coordinator
+        .steering_owners
+        .publish_row(
+            &steering_row,
+            &steering_key,
+            crate::afxdp::bpf_map::SteeringHolder::Worker(3),
+            || Ok(()),
+        )
+        .expect("fixture: worker 3 must take a steering claim");
+    assert_eq!(
+        coordinator.steering_owners.owner_count(&steering_row),
+        1,
+        "fixture precondition: the claim is registered before any retirement"
+    );
+
     // NEGATIVE CONTROL: worker 3 is ALIVE. The sweep must leave it alone — a
     // sweep that retired every worker would satisfy the positive case below
     // while freeing tuples out from under workers that are still forwarding,
@@ -7983,6 +8004,11 @@ fn retire_dead_worker_holders_reclaims_only_dead_workers_6979() {
         coordinator.retire_dead_worker_holders(),
         0,
         "a LIVE worker's reservations must not be reclaimed"
+    );
+    assert_eq!(
+        coordinator.steering_owners.owner_count(&steering_row),
+        1,
+        "a LIVE worker's steering claim must not be retired either"
     );
     assert!(
         alloc.debug_is_port_occupied(0, 20000),
@@ -8006,6 +8032,20 @@ fn retire_dead_worker_holders_reclaims_only_dead_workers_6979() {
     assert!(
         !alloc.debug_is_port_occupied(0, 20000),
         "the reclaimed port must be free for a new flow"
+    );
+    // #9560 round 3: the POSITIVE case for the steering registry. The negative
+    // control above (a LIVE worker's claim must survive) was here without it, and a
+    // negative control alone cannot distinguish "correctly selective" from "does
+    // nothing" — measured: deleting the whole retirement block from
+    // `coordinator/status.rs` left this cell GREEN, because nothing asserted the
+    // dead worker's claim was actually released.
+    assert_eq!(
+        coordinator.steering_owners.owner_count(&steering_row),
+        0,
+        "a DEAD worker's steering claim survived the sweep. The bit then suppresses \
+         every later delete of the rows it held: an aliased session's teardown finds \
+         an owner that can never come back, and both the registry holding and the \
+         fixed-size BPF row leak for the life of the process (#9560 round 3)"
     );
     assert!(
         atomics.holders_retired.load(Ordering::Relaxed),
@@ -8680,7 +8720,11 @@ fn bringup_replay_reads_the_live_map_and_still_filters_purged_tunnels_8157() {
         &mut coordinator,
         &workers,
         &[PURGED_TUNNEL],
-        -1,
+        crate::afxdp::bpf_map::SteeringMap {
+            fd: -1,
+            owners: &Default::default(),
+            holder: crate::afxdp::bpf_map::SteeringHolder::Coordinator,
+        },
     );
 
     let queued = queues
@@ -8698,6 +8742,109 @@ fn bringup_replay_reads_the_live_map_and_still_filters_purged_tunnels_8157() {
          entry drags its derived reverse companion with it — a half-dead pair). \
          ZERO means the replay read nothing from the live shared map, which is \
          the window #8157 closes and #7209 makes reachable."
+    );
+}
+
+/// #9560: one steering-row owner registry for the coordinator's whole life. The session
+/// domain (HA import and delete) shares it with the workers, `stop` keeps it, and `stop`
+/// retires every claim once the workers are joined. A registry replaced at stop would hide
+/// the next bringup's claims from an HA delete that raced the teardown (`sync_session` runs
+/// without the `ServerState` mutex, #7209); a claim carried across would block the row's
+/// legitimate delete for the life of the process.
+/// #9560 round 3: the holder identity a plan hands each worker is that worker's OWN id.
+///
+/// `plan_workers` builds every `BindingPlan`'s handle as
+/// `SteeringMapRef::new(fd, coord.steering_owners, SteeringHolder::Worker(binding.worker_id))`
+/// (reconcile/bringup.rs), so two workers can never share a holder bit and one worker's
+/// teardown can never release another's claim. This pins the property that construction
+/// depends on: distinct ids are distinct, non-overlapping owners of one shared registry,
+/// and a row survives until its LAST holder gives it up.
+#[test]
+fn distinct_workers_are_distinct_holders_of_one_registry_9560() {
+    let coordinator = Coordinator::new();
+    let registry = Arc::clone(&coordinator.steering_owners);
+    let key = f4_key();
+    let row = crate::afxdp::bpf_map::session_map_row(&key);
+
+    for worker_id in [0u32, 1, 2] {
+        registry
+            .publish_row(
+                &row,
+                &key,
+                crate::afxdp::bpf_map::SteeringHolder::Worker(worker_id),
+                || Ok(()),
+            )
+            .expect("a worker claim");
+    }
+    assert_eq!(
+        registry.owner_count(&row),
+        3,
+        "three workers claiming one row must register as THREE owners; a shared or \
+         constant holder id would collapse them and let one teardown delete the row the \
+         other two still forward on (#9560)"
+    );
+
+    let mut deleted = 0usize;
+    for worker_id in [0u32, 1] {
+        registry.release_row(
+            &row,
+            &key,
+            crate::afxdp::bpf_map::SteeringHolder::Worker(worker_id),
+            |_| deleted += 1,
+        );
+    }
+    assert_eq!(
+        deleted, 0,
+        "a row was deleted while worker 2 still held it: releases are per holder, and the \
+         row goes only with the LAST one"
+    );
+    registry.release_row(
+        &row,
+        &key,
+        crate::afxdp::bpf_map::SteeringHolder::Worker(2),
+        |_| deleted += 1,
+    );
+    assert_eq!(deleted, 1, "the last holder's release must take the row");
+}
+
+#[test]
+fn stop_retires_every_steering_claim_and_keeps_the_one_registry_9560() {
+    let mut coordinator = Coordinator::new();
+    let registry = Arc::clone(&coordinator.steering_owners);
+    assert!(
+        Arc::ptr_eq(&registry, &coordinator.session_domain().steering_owners),
+        "the session domain must share the coordinator's registry, or an HA delete consults \
+         owners no worker claims in (#9560)"
+    );
+    let key = f4_key();
+    let row = crate::afxdp::bpf_map::session_map_row(&key);
+    registry
+        .publish_row(
+            &row,
+            &key,
+            crate::afxdp::bpf_map::SteeringHolder::Worker(0),
+            || Ok(()),
+        )
+        .expect("a worker claim");
+    assert_eq!(
+        registry.owner_count(&row),
+        1,
+        "control: the claim must be recorded before stop, or the retirement below is \
+         unobserved"
+    );
+
+    coordinator.stop();
+
+    assert!(
+        Arc::ptr_eq(&registry, &coordinator.steering_owners),
+        "stop replaced the steering-row owner registry; an HA delete holding the old one would \
+         not see the next bringup's claims (#9560)"
+    );
+    assert_eq!(
+        registry.owner_count(&row),
+        0,
+        "stop joined every worker, so their steering claims must be retired; a claim carried \
+         across blocks the row's delete for the life of the process (#9560)"
     );
 }
 

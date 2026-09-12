@@ -203,13 +203,21 @@ fn republish_local_delivery_sessions_for_lo0_filter_selects_existing_hits() {
     ));
 
     assert_eq!(
-        republish_local_delivery_sessions_for_lo0_filter(&sessions, -1, &forwarding),
+        republish_local_delivery_sessions_for_lo0_filter(
+            &sessions,
+            SteeringMap::unshared_for_test(-1),
+            &forwarding
+        ),
         1
     );
 
     forwarding.filter_state.lo0_filter_v4_fast = None;
     assert_eq!(
-        republish_local_delivery_sessions_for_lo0_filter(&sessions, -1, &forwarding),
+        republish_local_delivery_sessions_for_lo0_filter(
+            &sessions,
+            SteeringMap::unshared_for_test(-1),
+            &forwarding
+        ),
         0
     );
 }
@@ -257,7 +265,7 @@ fn purge_sessions_for_input_dscp_filter_revalidation_removes_family() {
     assert_eq!(
         purge_sessions_for_input_dscp_filter_revalidation(
             &mut sessions,
-            -1,
+            SteeringMap::unshared_for_test(-1),
             -1,
             -1,
             &shared_sessions,
@@ -393,7 +401,7 @@ fn maybe_promote_synced_session_sets_fabric_ingress_on_fabric_hit() {
 
     let promoted = maybe_promote_synced_session(
         &mut sessions,
-        -1,
+        SteeringMap::unshared_for_test(-1),
         shared,
         &peer_worker_commands,
         &forwarding,
@@ -457,7 +465,7 @@ fn promote_republishes_the_live_close_class_9412() {
         };
         let _ = maybe_promote_synced_session(
             &mut sessions,
-            -1,
+            SteeringMap::unshared_for_test(-1),
             shared,
             &peer_worker_commands,
             &forwarding,
@@ -534,7 +542,7 @@ fn promote_republishes_the_session_id_for_replicas_to_adopt_9582() {
     };
     let _ = maybe_promote_synced_session(
         &mut sessions,
-        -1,
+        SteeringMap::unshared_for_test(-1),
         shared,
         &peer_worker_commands,
         &forwarding,
@@ -610,7 +618,7 @@ fn maybe_promote_synced_session_skips_worker_local_import() {
 
     let promoted = maybe_promote_synced_session(
         &mut sessions,
-        -1,
+        SteeringMap::unshared_for_test(-1),
         shared,
         &peer_worker_commands,
         &forwarding,
@@ -698,7 +706,7 @@ fn resolve_flow_session_decision_promotes_stale_fabric_shared_hit_to_local_owner
     };
     let resolved = resolve_flow_session_decision(
         &mut sessions,
-        -1,
+        SteeringMap::unshared_for_test(-1),
         &shared_sessions,
         &shared_nat_sessions,
         &shared_forward_wire_sessions,
@@ -1534,7 +1542,7 @@ fn resolve_flow_session_decision_uses_canonical_key_for_translated_forward_hit()
     let peer_worker_commands = Vec::new();
     let resolved = resolve_flow_session_decision(
         &mut sessions,
-        -1,
+        SteeringMap::unshared_for_test(-1),
         &shared_sessions,
         &shared_nat_sessions,
         &shared_forward_wire_sessions,
@@ -1628,7 +1636,7 @@ fn resolve_flow_session_decision_promotes_translated_shared_hit_on_active_fabric
     };
     let resolved = resolve_flow_session_decision(
         &mut sessions,
-        -1,
+        SteeringMap::unshared_for_test(-1),
         &shared_sessions,
         &shared_nat_sessions,
         &shared_forward_wire_sessions,
@@ -1722,7 +1730,7 @@ fn resolve_flow_session_decision_promotes_local_synced_translated_hit_on_active_
     };
     let resolved = resolve_flow_session_decision(
         &mut sessions,
-        -1,
+        SteeringMap::unshared_for_test(-1),
         &shared_sessions,
         &shared_nat_sessions,
         &shared_forward_wire_sessions,
@@ -1819,7 +1827,7 @@ fn resolve_flow_session_decision_keeps_translated_shared_hit_transient_on_inacti
     };
     let _resolved = resolve_flow_session_decision(
         &mut sessions,
-        -1,
+        SteeringMap::unshared_for_test(-1),
         &shared_sessions,
         &shared_nat_sessions,
         &shared_forward_wire_sessions,
@@ -1907,7 +1915,7 @@ fn resolve_flow_session_decision_keeps_translated_shared_hit_transient_on_inacti
     };
     let _resolved = resolve_flow_session_decision(
         &mut sessions,
-        -1,
+        SteeringMap::unshared_for_test(-1),
         &shared_sessions,
         &shared_nat_sessions,
         &shared_forward_wire_sessions,
@@ -1985,7 +1993,7 @@ fn resolve_flow_session_decision_keeps_local_synced_translated_hit_transient_on_
     };
     let _resolved = resolve_flow_session_decision(
         &mut sessions,
-        -1,
+        SteeringMap::unshared_for_test(-1),
         &shared_sessions,
         &shared_nat_sessions,
         &shared_forward_wire_sessions,
@@ -2055,7 +2063,7 @@ fn apply_worker_commands_replaces_stale_local_session_for_inactive_owner_rg() {
     apply_worker_commands(
         &commands,
         &mut sessions,
-        -1,
+        SteeringMap::unshared_for_test(-1),
         -1,
         -1,
         &forwarding,
@@ -2124,7 +2132,7 @@ fn apply_worker_commands_preserves_local_session_for_active_owner_rg() {
     apply_worker_commands(
         &commands,
         &mut sessions,
-        -1,
+        SteeringMap::unshared_for_test(-1),
         -1,
         -1,
         &forwarding,
@@ -2173,7 +2181,7 @@ fn drive_delete_synced_9048(
     apply_worker_commands(
         &commands,
         sessions,
-        -1,
+        SteeringMap::unshared_for_test(-1),
         -1,
         -1,
         &forwarding,
@@ -2336,7 +2344,7 @@ fn apply_worker_commands_demotes_local_owner_rg_sessions_to_sync_import() {
     apply_worker_commands(
         &commands,
         &mut sessions,
-        -1,
+        SteeringMap::unshared_for_test(-1),
         -1,
         -1,
         &forwarding,
@@ -2378,7 +2386,7 @@ fn demoted_local_session_promotes_as_synced_on_failback_lookup() {
     apply_worker_commands(
         &commands,
         &mut sessions,
-        -1,
+        SteeringMap::unshared_for_test(-1),
         -1,
         -1,
         &forwarding,
@@ -2402,7 +2410,7 @@ fn demoted_local_session_promotes_as_synced_on_failback_lookup() {
 
     let resolved = resolve_flow_session_decision(
         &mut sessions,
-        -1,
+        SteeringMap::unshared_for_test(-1),
         &shared_sessions,
         &shared_nat_sessions,
         &shared_forward_wire_sessions,
@@ -2668,7 +2676,7 @@ fn export_owner_rg_command_does_not_overflow_ring_unbounded() {
     let results = apply_worker_commands(
         &commands,
         &mut sessions,
-        -1,
+        SteeringMap::unshared_for_test(-1),
         -1,
         -1,
         &forwarding,
@@ -2770,7 +2778,7 @@ fn apply_worker_commands_exports_owner_rg_forward_sessions_without_teardown() {
     let results = apply_worker_commands(
         &commands,
         &mut sessions,
-        -1,
+        SteeringMap::unshared_for_test(-1),
         -1,
         -1,
         &forwarding,
@@ -2844,7 +2852,7 @@ fn apply_worker_commands_does_not_export_missing_neighbor_seed_sessions() {
     let results = apply_worker_commands(
         &commands,
         &mut sessions,
-        -1,
+        SteeringMap::unshared_for_test(-1),
         -1,
         -1,
         &forwarding,
@@ -2895,7 +2903,7 @@ fn apply_worker_commands_demote_owner_rg_returns_cancelled_keys() {
     let results = apply_worker_commands(
         &commands,
         &mut sessions,
-        -1,
+        SteeringMap::unshared_for_test(-1),
         -1,
         -1,
         &forwarding,
@@ -3097,7 +3105,7 @@ fn prewarm_reverse_synced_sessions_after_demotion_recomputes_split_owner_reverse
         &shared_forward_wire_sessions,
         &shared_owner_rg_indexes,
         &worker_commands,
-        -1,
+        SteeringMap::unshared_for_test(-1),
         &forwarding,
         &ha_state,
         &dynamic_neighbors,
@@ -3141,7 +3149,7 @@ fn apply_worker_commands_demotes_local_owner_rg_sessions_and_cancels_keys() {
     let results = apply_worker_commands(
         &commands,
         &mut sessions,
-        -1,
+        SteeringMap::unshared_for_test(-1),
         -1,
         -1,
         &test_forwarding_state_with_fabric(),
@@ -3183,7 +3191,7 @@ fn apply_worker_commands_demote_owner_rg_rewrites_resolution_to_fabric_redirect(
     let results = apply_worker_commands(
         &commands,
         &mut sessions,
-        -1,
+        SteeringMap::unshared_for_test(-1),
         -1,
         -1,
         &test_forwarding_state_with_fabric(),
@@ -3262,7 +3270,7 @@ fn apply_worker_commands_demote_split_reverse_owner_rg_rewrites_to_fabric_redire
     let results = apply_worker_commands(
         &commands,
         &mut sessions,
-        -1,
+        SteeringMap::unshared_for_test(-1),
         -1,
         -1,
         &test_forwarding_state_split_rgs(),
@@ -3343,7 +3351,7 @@ fn apply_worker_commands_refresh_split_reverse_owner_rg_rewrites_to_forward_cand
     let results = apply_worker_commands(
         &commands,
         &mut sessions,
-        -1,
+        SteeringMap::unshared_for_test(-1),
         -1,
         -1,
         &test_forwarding_state_split_rgs(),
@@ -3432,7 +3440,7 @@ fn apply_worker_commands_refresh_split_reverse_owner_rg_updates_stale_indexed_se
     let results = apply_worker_commands(
         &commands,
         &mut sessions,
-        -1,
+        SteeringMap::unshared_for_test(-1),
         -1,
         -1,
         &test_forwarding_state_split_rgs(),
@@ -3521,7 +3529,7 @@ fn apply_worker_commands_refresh_owner_rg_updates_reverse_session_owned_by_other
     let results = apply_worker_commands(
         &commands,
         &mut sessions,
-        -1,
+        SteeringMap::unshared_for_test(-1),
         -1,
         -1,
         &test_forwarding_state_split_rgs(),
@@ -3610,7 +3618,7 @@ fn apply_worker_commands_refresh_owner_rg_rewrites_remote_reverse_session_on_pee
     let results = apply_worker_commands(
         &commands,
         &mut sessions,
-        -1,
+        SteeringMap::unshared_for_test(-1),
         -1,
         -1,
         &test_forwarding_state_split_rgs(),
@@ -3694,7 +3702,7 @@ fn apply_worker_commands_refresh_owner_rg_rewrites_shared_promote_reverse_on_pee
     let results = apply_worker_commands(
         &commands,
         &mut sessions,
-        -1,
+        SteeringMap::unshared_for_test(-1),
         -1,
         -1,
         &test_forwarding_state_split_rgs(),
@@ -3747,7 +3755,7 @@ fn export_owner_rg_sessions_skips_locally_demoted_entries() {
     let results = apply_worker_commands(
         &commands,
         &mut sessions,
-        -1,
+        SteeringMap::unshared_for_test(-1),
         -1,
         -1,
         &test_forwarding_state_with_fabric(),
@@ -4406,7 +4414,7 @@ fn prewarm_reverse_synced_sessions_for_owner_rgs_adds_reverse_companion() {
         &shared_forward_wire_sessions,
         &shared_owner_rg_indexes,
         &worker_commands,
-        -1,
+        SteeringMap::unshared_for_test(-1),
         &forwarding,
         &ha_state,
         &dynamic_neighbors,
@@ -4479,7 +4487,7 @@ fn prewarm_reverse_synced_sessions_for_owner_rgs_restores_shared_promote_forward
         &shared_forward_wire_sessions,
         &shared_owner_rg_indexes,
         &worker_commands,
-        -1,
+        SteeringMap::unshared_for_test(-1),
         &forwarding,
         &ha_state,
         &dynamic_neighbors,
@@ -4562,7 +4570,7 @@ fn prewarm_reverse_synced_sessions_recomputes_when_reverse_owner_rg_activates() 
         &shared_forward_wire_sessions,
         &shared_owner_rg_indexes,
         &worker_commands,
-        -1,
+        SteeringMap::unshared_for_test(-1),
         &forwarding,
         &ha_state,
         &dynamic_neighbors,
@@ -4752,7 +4760,7 @@ fn republish_bpf_session_entries_covers_all_sessions_in_owner_rg_index() {
     let count = republish_bpf_session_entries_for_owner_rgs(
         &shared_sessions,
         &shared_owner_rg_indexes,
-        -1,
+        SteeringMap::unshared_for_test(-1),
         &[1],
         false,
     );
@@ -4762,7 +4770,7 @@ fn republish_bpf_session_entries_covers_all_sessions_in_owner_rg_index() {
     let count = republish_bpf_session_entries_for_owner_rgs(
         &shared_sessions,
         &shared_owner_rg_indexes,
-        -1,
+        SteeringMap::unshared_for_test(-1),
         &[2],
         false,
     );
@@ -4838,7 +4846,7 @@ fn synced_session_hit_recomputes_local_resolution_after_failover() {
 
     let resolved = resolve_flow_session_decision(
         &mut sessions,
-        -1,
+        SteeringMap::unshared_for_test(-1),
         &shared_sessions,
         &shared_nat_sessions,
         &shared_forward_wire_sessions,
@@ -4959,7 +4967,7 @@ fn reverse_materialized_shared_hit_adopts_replica_session_id_6313() {
     for key in [&reverse, &reverse_legacy] {
         resolve_flow_session_decision(
             &mut sessions,
-            -1,
+            SteeringMap::unshared_for_test(-1),
             &shared_sessions,
             &shared_nat_sessions,
             &shared_forward_wire_sessions,
@@ -5142,7 +5150,7 @@ fn apply_worker_commands_dispatch_order_pin_with_demote_dedup() {
     let results = apply_worker_commands(
         &commands,
         &mut sessions,
-        -1,
+        SteeringMap::unshared_for_test(-1),
         -1,
         -1,
         &forwarding,
@@ -5237,8 +5245,8 @@ fn apply_worker_commands_dispatch_order_pin_with_demote_dedup() {
 // dispatch. It asserts:
 //   - correctness: exactly N keys cancelled, all unique (the dedup does
 //     not drop or duplicate any key), and
-//   - the pass completes well under a wall-clock bound. `session_map_fd`
-//     is -1 so `publish_worker_session_map_entry` early-returns and the
+//   - the pass completes well under a wall-clock bound. The steering-map
+//     fd is -1 so `publish_worker_session_map_entry` early-returns and the
 //     per-key baseline is cheap; the O(N^2) scan dominates the revert.
 //
 // Wall-clock bound is deliberately generous (fix: tens of ms; reverting
@@ -5301,7 +5309,7 @@ fn apply_worker_commands_demote_dedup_is_linear_not_quadratic() {
     let results = apply_worker_commands(
         &commands,
         &mut sessions,
-        -1,
+        SteeringMap::unshared_for_test(-1),
         -1,
         -1,
         &forwarding,
@@ -5389,7 +5397,7 @@ fn apply_worker_commands_recovers_poisoned_queue_and_processes_commands() {
     let results = apply_worker_commands(
         &commands,
         &mut sessions,
-        -1,
+        SteeringMap::unshared_for_test(-1),
         -1,
         -1,
         &forwarding,
@@ -5888,7 +5896,7 @@ fn apply_upsert_local_pair(
     apply_worker_commands(
         &commands,
         sessions,
-        -1,
+        SteeringMap::unshared_for_test(-1),
         -1,
         -1,
         &forwarding,
@@ -6144,7 +6152,7 @@ fn flush_session_deltas_without_binding_reaches_global_consumers() {
     flush_session_deltas(
         &ident,
         None,
-        -1,
+        SteeringMap::unshared_for_test(-1),
         -1,
         -1,
         &dnat_fds,
@@ -6291,7 +6299,7 @@ fn flush_session_deltas_rt_flow_app_id_uses_post_nat_dst_port() {
         flush_session_deltas(
             &ident,
             None,
-            -1,
+            SteeringMap::unshared_for_test(-1),
             -1,
             -1,
             &dnat_fds,
@@ -6428,7 +6436,7 @@ fn flush_session_deltas_session_close_reresolves_policy_id_after_reorder() {
     flush_session_deltas(
         &ident,
         None,
-        -1,
+        SteeringMap::unshared_for_test(-1),
         -1,
         -1,
         &dnat_fds,
@@ -6523,7 +6531,7 @@ fn flush_session_deltas_event_stream_drop_latches_out_of_sync() {
     let out_of_sync = flush_session_deltas(
         &ident,
         None,
-        -1,
+        SteeringMap::unshared_for_test(-1),
         -1,
         -1,
         &dnat_fds,
@@ -6637,7 +6645,7 @@ fn flush_session_deltas_full_queue_send_is_bounded_and_latches_out_of_sync() {
     let out_of_sync = flush_session_deltas(
         &ident,
         None,
-        -1,
+        SteeringMap::unshared_for_test(-1),
         -1,
         -1,
         &dnat_fds,
@@ -6767,7 +6775,7 @@ fn resync_export_aggregate_lossless_wait_is_bounded_below_heartbeat() {
         let out_of_sync = flush_session_deltas(
             &ident,
             None,
-            -1,
+            SteeringMap::unshared_for_test(-1),
             -1,
             -1,
             &dnat_fds,
@@ -6890,7 +6898,7 @@ fn close_delta_deletes_dnat_table_entry_for_snat_flow() {
         flush_session_deltas(
             &ident,
             None,
-            -1,
+            SteeringMap::unshared_for_test(-1),
             -1,
             -1,
             &dnat_fds,
@@ -7218,7 +7226,7 @@ fn delete_terminal_filtered_session_releases_companion_and_allocator_5622() {
         };
         delete_terminal_filtered_session(
             &mut sessions,
-            -1,
+            SteeringMap::unshared_for_test(-1),
             -1,
             -1,
             &shared_sessions,
@@ -7364,7 +7372,7 @@ fn purge_translated_synced_hit_releases_source_nat_reservation_5295() {
 
     purge_translated_synced_hit(
         &mut sessions,
-        -1,
+        SteeringMap::unshared_for_test(-1),
         shared,
         &wire_key,
         decision,
@@ -7456,7 +7464,7 @@ fn purge_translated_synced_hit_releases_nat64_reservation_5295() {
 
     purge_translated_synced_hit(
         &mut sessions,
-        -1,
+        SteeringMap::unshared_for_test(-1),
         shared,
         &wire_key,
         decision,
@@ -7577,7 +7585,7 @@ fn purge_translated_synced_hit_reverse_entry_releases_nothing_5295() {
 
     purge_translated_synced_hit(
         &mut sessions,
-        -1,
+        SteeringMap::unshared_for_test(-1),
         shared,
         &rev_key,
         rev_decision,
@@ -7610,8 +7618,8 @@ fn purge_translated_synced_hit_reverse_entry_releases_nothing_5295() {
 // the demote path (`handle_demote_owner_rgs`) and only re-stamps a session whose
 // refreshed disposition is forwarding (`!= HAInactive`).
 //
-// The test drives the real `handle_refresh_owner_rgs` loop with `session_map_fd
-// = -1` (publish is a no-op) and asserts, via `first_held_ns_for`:
+// The test drives the real `handle_refresh_owner_rgs` loop with a steering-map
+// fd of -1 (publish is a no-op) and asserts, via `first_held_ns_for`:
 //   * Case A — a session that re-resolves to HAInactive (owner RG1 still
 //     inactive while an unrelated RG2 activates) keeps its armed HOLD clock.
 //     Reverting the guard resets it to 0 -> this assertion FAILS.
@@ -7679,7 +7687,7 @@ fn refresh_owner_rgs_skips_hainactive_hold_clock_5152() {
     ]);
     super::commands::handle_refresh_owner_rgs(
         &mut sessions_a,
-        -1,
+        SteeringMap::unshared_for_test(-1),
         &forwarding,
         &ha_state_a,
         &neighbors,
@@ -7702,7 +7710,7 @@ fn refresh_owner_rgs_skips_hainactive_hold_clock_5152() {
     let ha_state_b = BTreeMap::from([(1, active_ha_runtime(act_secs))]);
     super::commands::handle_refresh_owner_rgs(
         &mut sessions_b,
-        -1,
+        SteeringMap::unshared_for_test(-1),
         &forwarding,
         &ha_state_b,
         &neighbors,
@@ -7754,7 +7762,7 @@ fn delete_synced_records_key_for_flow_cache_invalidation() {
 
     super::commands::handle_delete_synced(
         &mut sessions,
-        -1,
+        SteeringMap::unshared_for_test(-1),
         &forwarding,
         // #9048: an EMPTY HA view keeps the new ownership guard inert (no RG
         // is forwarding-active), so this cell keeps measuring the delete
@@ -7794,7 +7802,7 @@ fn delete_synced_records_key_even_when_session_already_absent() {
 
     super::commands::handle_delete_synced(
         &mut sessions,
-        -1,
+        SteeringMap::unshared_for_test(-1),
         &forwarding,
         // #9048: an EMPTY HA view keeps the new ownership guard inert (no RG
         // is forwarding-active), so this cell keeps measuring the delete
@@ -7903,7 +7911,7 @@ fn handle_upsert_synced_resolves_active_zone_pair_for_snat_reserve_6211() {
     let dynamic_neighbors = Arc::new(ShardedNeighborMap::default());
     crate::afxdp::session_glue::commands::handle_upsert_synced(
         &mut sessions,
-        -1, // no session map fd: the publish is skipped, the reserve is not
+        SteeringMap::unshared_for_test(-1), // no session map fd: the publish is skipped, the reserve is not
         &forwarding,
         &ha_state,
         &dynamic_neighbors,
@@ -8021,7 +8029,7 @@ fn delete_synced_frees_both_allocators_end_to_end_6211() {
     // Upsert #1 — zones resolve, so the reserve lands in the lan rule.
     crate::afxdp::session_glue::commands::handle_upsert_synced(
         &mut sessions,
-        -1,
+        SteeringMap::unshared_for_test(-1),
         &forwarding,
         &ha_state,
         &dynamic_neighbors,
@@ -8034,7 +8042,7 @@ fn delete_synced_frees_both_allocators_end_to_end_6211() {
     // the zone drop, so the reserve lands in the dmz rule instead.
     crate::afxdp::session_glue::commands::handle_upsert_synced(
         &mut sessions,
-        -1,
+        SteeringMap::unshared_for_test(-1),
         &forwarding_after_zone_drop,
         &ha_state,
         &dynamic_neighbors,
@@ -8056,7 +8064,7 @@ fn delete_synced_frees_both_allocators_end_to_end_6211() {
     let mut deleted_keys: Vec<crate::session::SessionKey> = Vec::new();
     crate::afxdp::session_glue::commands::handle_delete_synced(
         &mut sessions,
-        -1,
+        SteeringMap::unshared_for_test(-1),
         &forwarding_after_zone_drop,
         // #9048: empty HA view — see the note at the sibling call sites.
         &BTreeMap::new(),
@@ -8387,7 +8395,7 @@ fn apply_once(
     apply_worker_commands(
         commands,
         sessions,
-        -1,
+        SteeringMap::unshared_for_test(-1),
         -1,
         -1,
         &ForwardingState::default(),
@@ -8647,7 +8655,7 @@ fn f3_replace_6979(second: NatDecision) -> (u64, Option<Option<u16>>) {
 
     crate::afxdp::session_glue::commands::handle_upsert_synced(
         &mut sessions,
-        -1,
+        SteeringMap::unshared_for_test(-1),
         &forwarding,
         &ha_state,
         &dynamic_neighbors,
@@ -8665,7 +8673,7 @@ fn f3_replace_6979(second: NatDecision) -> (u64, Option<Option<u16>>) {
 
     crate::afxdp::session_glue::commands::handle_upsert_synced(
         &mut sessions,
-        -1,
+        SteeringMap::unshared_for_test(-1),
         &forwarding,
         &ha_state,
         &dynamic_neighbors,
@@ -8777,7 +8785,7 @@ fn worker_commands_install_and_forget_pptp_associations_7699() {
     apply_worker_commands(
         &commands,
         &mut sessions,
-        -1,
+        SteeringMap::unshared_for_test(-1),
         -1,
         -1,
         &forwarding,
@@ -8805,7 +8813,7 @@ fn worker_commands_install_and_forget_pptp_associations_7699() {
     apply_worker_commands(
         &commands,
         &mut sessions,
-        -1,
+        SteeringMap::unshared_for_test(-1),
         -1,
         -1,
         &forwarding,
@@ -8897,7 +8905,7 @@ fn a_control_segment_becomes_a_resolvable_association_7699() {
     apply_worker_commands(
         &queues[1],
         &mut sessions,
-        -1,
+        SteeringMap::unshared_for_test(-1),
         -1,
         -1,
         &forwarding,
@@ -9298,7 +9306,7 @@ fn flush_one_and_report_armed_8593(bulk_resync: bool) -> bool {
     crate::afxdp::session_delta::flush_session_deltas(
         &ident,
         Some(&live),
-        -1,
+        SteeringMap::unshared_for_test(-1),
         -1,
         -1,
         &dnat_fds,
@@ -9451,7 +9459,12 @@ fn the_reconcile_sweeps_only_peer_synced_origins_8586() {
     );
 
     let mut evicted = Vec::new();
-    let n = reconcile_peer_synced_against_shared(&mut sessions, &shared_sessions, &mut evicted);
+    let n = reconcile_peer_synced_against_shared(
+            &mut sessions,
+            &shared_sessions,
+            SteeringMap::unshared_for_test(-1),
+            &mut evicted,
+        );
 
     assert_eq!(n, swept.len(), "exactly the peer-synced origins are swept");
     for (origin, key) in &swept {
@@ -9490,7 +9503,12 @@ fn the_reconcile_keeps_a_peer_synced_entry_the_shared_map_still_holds_8586() {
     publish8586(&shared_sessions, &live);
 
     let mut evicted = Vec::new();
-    let n = reconcile_peer_synced_against_shared(&mut sessions, &shared_sessions, &mut evicted);
+    let n = reconcile_peer_synced_against_shared(
+            &mut sessions,
+            &shared_sessions,
+            SteeringMap::unshared_for_test(-1),
+            &mut evicted,
+        );
 
     assert_eq!(n, 1, "only the one shared authority dropped");
     assert!(
@@ -9610,7 +9628,12 @@ fn reconcile_cost_9327() {
         }
         let mut evicted = Vec::new();
         let t = Instant::now();
-        let swept = reconcile_peer_synced_against_shared(&mut sessions, &shared_sessions, &mut evicted);
+        let swept = reconcile_peer_synced_against_shared(
+            &mut sessions,
+            &shared_sessions,
+            SteeringMap::unshared_for_test(-1),
+            &mut evicted,
+        );
         let el = t.elapsed();
         eprintln!("n={n:<6} swept={swept:<6} elapsed={el:?}   (finds-nothing)");
     }
@@ -9623,10 +9646,86 @@ fn reconcile_cost_9327() {
         }
         let mut evicted = Vec::new();
         let t = Instant::now();
-        let swept = reconcile_peer_synced_against_shared(&mut sessions, &shared_sessions, &mut evicted);
+        let swept = reconcile_peer_synced_against_shared(
+            &mut sessions,
+            &shared_sessions,
+            SteeringMap::unshared_for_test(-1),
+            &mut evicted,
+        );
         let el = t.elapsed();
         eprintln!("ALL-STALE n={n:<6} swept={swept:<6} elapsed={el:?}");
     }
+}
+
+/// #9560 round 3: the delete-drop sweep gives up the swept session's STEERING claims.
+///
+/// The sweep deletes the local table entry directly, so after it runs nothing can derive
+/// the rows that session published. Before round 3 the worker's holdings and the
+/// fixed-size BPF rows survived with no entry left to reap them: an aliased session's
+/// teardown then found an owner that would never release, and unique-key churn grew both
+/// the registry and the map until publishes failed.
+#[test]
+fn the_delete_drop_sweep_releases_the_swept_sessions_steering_claims_9560() {
+    use crate::afxdp::bpf_map::{
+        RECORDER_ONLY_MAP_FD, SteeringHolder, SteeringMap, SteeringRowOwners,
+        clear_session_map_writes, publish_live_session_entry, session_map_row,
+        session_map_writes,
+    };
+
+    let owners = SteeringRowOwners::default();
+    let handle = SteeringMap {
+        fd: RECORDER_ONLY_MAP_FD,
+        owners: &owners,
+        holder: SteeringHolder::Worker(0),
+    };
+
+    let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let mut sessions = SessionTable::new();
+    let swept = key9327(1);
+    let survivor = key9327(2);
+    install8586(&mut sessions, &swept, SessionOrigin::SyncImport);
+    install8586(&mut sessions, &survivor, SessionOrigin::SyncImport);
+    // Only the survivor keeps shared authority; the swept key is what the sweep drops.
+    publish8586(&shared_sessions, &survivor);
+
+    let nat = crate::nat::NatDecision::default();
+    let _ = publish_live_session_entry(handle, &swept, nat, false);
+    let _ = publish_live_session_entry(handle, &survivor, nat, false);
+    assert!(
+        owners.held_row_count(&swept, 0) > 0 && owners.held_row_count(&survivor, 0) > 0,
+        "fixture: both sessions must hold steering claims, or the release below observes \
+         nothing"
+    );
+
+    clear_session_map_writes();
+    let mut evicted = Vec::new();
+    let n = reconcile_peer_synced_against_shared(
+        &mut sessions,
+        &shared_sessions,
+        handle,
+        &mut evicted,
+    );
+    assert_eq!(n, 1, "fixture: exactly the one key without shared authority is swept");
+
+    assert_eq!(
+        owners.held_row_count(&swept, 0),
+        0,
+        "the sweep deleted the table entry but kept its steering claims; nothing will \
+         ever name those rows again (#9560 round 3)"
+    );
+    let writes = session_map_writes();
+    let swept_row = session_map_row(&swept);
+    assert!(
+        writes
+            .iter()
+            .any(|w| w.value.is_none() && session_map_row(&w.key) == swept_row),
+        "the swept session's row must be DELETED from the map, not merely unclaimed. \
+         Writes: {writes:?}"
+    );
+    assert!(
+        owners.held_row_count(&survivor, 0) > 0,
+        "the sweep released claims belonging to a session it did not sweep"
+    );
 }
 
 fn key9327(i: usize) -> SessionKey {
@@ -9676,7 +9775,12 @@ fn one_sweep_pass_is_bounded_by_the_budget_9327() {
     let mut sweep = super::DeleteDropSweep::default();
     sweep.arm();
     let mut evicted = Vec::new();
-    let first = sweep.step(&mut sessions, &shared_sessions, &mut evicted);
+    let first = sweep.step(
+            &mut sessions,
+            &shared_sessions,
+            SteeringMap::unshared_for_test(-1),
+            &mut evicted,
+        );
 
     assert!(
         first <= super::DELETE_DROP_SWEEP_BUDGET,
@@ -9717,7 +9821,12 @@ fn the_budgeted_sweep_still_sweeps_everything_9327() {
     let mut total = 0usize;
     let mut passes = 0usize;
     while sweep.is_running() {
-        total += sweep.step(&mut sessions, &shared_sessions, &mut evicted);
+        total += sweep.step(
+            &mut sessions,
+            &shared_sessions,
+            SteeringMap::unshared_for_test(-1),
+            &mut evicted,
+        );
         passes += 1;
         assert!(
             passes < n + 16,
@@ -9769,14 +9878,24 @@ fn the_sweep_reuses_its_buffer_across_passes_9327() {
     sweep.arm();
     let mut evicted = Vec::new();
 
-    let first = sweep.step(&mut sessions, &shared_sessions, &mut evicted);
+    let first = sweep.step(
+            &mut sessions,
+            &shared_sessions,
+            SteeringMap::unshared_for_test(-1),
+            &mut evicted,
+        );
     let cap_after_first = sweep.stale_capacity_for_test();
     assert!(
         first > 0 && cap_after_first > 0,
         "NON-VACUITY: the first pass collected {first} keys and left capacity          {cap_after_first}; the reuse assertion below needs a buffer that          actually grew"
     );
 
-    let second = sweep.step(&mut sessions, &shared_sessions, &mut evicted);
+    let second = sweep.step(
+            &mut sessions,
+            &shared_sessions,
+            SteeringMap::unshared_for_test(-1),
+            &mut evicted,
+        );
     assert_eq!(
         second, 0,
         "fixture: the second window is entirely present in the shared map, so          this pass must collect NOTHING — that is what makes a retained buffer          distinguishable from a fresh one"
@@ -9801,7 +9920,12 @@ fn arming_restarts_an_in_flight_sweep_9327() {
     let mut sweep = super::DeleteDropSweep::default();
     sweep.arm();
     let mut evicted = Vec::new();
-    sweep.step(&mut sessions, &shared_sessions, &mut evicted);
+    sweep.step(
+            &mut sessions,
+            &shared_sessions,
+            SteeringMap::unshared_for_test(-1),
+            &mut evicted,
+        );
     assert!(sweep.cursor_for_test() > 0, "fixture: the first pass must advance the cursor");
     sweep.arm();
     assert_eq!(
@@ -10054,7 +10178,7 @@ fn drive_trunk_reply_9383(arrival_vlan: u16) -> (bool, usize) {
 
     let resolved = resolve_flow_session_decision(
         &mut sessions,
-        -1,
+        SteeringMap::unshared_for_test(-1),
         &shared_sessions,
         &shared_nat_sessions,
         &shared_forward_wire_sessions,
@@ -10215,7 +10339,7 @@ fn flush_session_deltas_update_syncs_without_an_rt_flow_create_9412() {
         flush_session_deltas(
             &ident,
             None,
-            -1,
+            SteeringMap::unshared_for_test(-1),
             -1,
             -1,
             &dnat_fds,

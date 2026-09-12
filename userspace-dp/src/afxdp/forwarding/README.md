@@ -392,11 +392,60 @@ forward-direction collision.
   longer publishes `PASS_TO_KERNEL` at all, and neither does any session whose
   key carries a tunnel discriminator. The GRE arm needs no routing domains —
   two keyed tunnels between one endpoint pair alias on a single-instance box.
-  The DELETE arm is NOT closed (#9560): two aliased sessions still share one
-  row, so either one's ordinary teardown removes it, and with an `lo0` input
-  filter the survivor's next packet misses, reaches the kernel and skips the
-  filter. Closing it needs identity in the key, and the shim cannot compute
-  the domain inside the #1864 verifier budget.
+  The DELETE arm is handled in the helper by #9560, again without identity in
+  the key (the shim cannot compute the domain inside the #1864 verifier
+  budget). A row-owner registry (`SteeringRowOwners`,
+  `afxdp/bpf_map/steering_owners.rs`) sits beside the map, and a row is deleted
+  only when its LAST owner goes, or when no owner holds it (deleted as before).
+  An owner is an ENTRY key held by a WORKER:
+  - the entry key, never the row key: `reverse_canonical_key` zeroes
+    `routing_domain` (#7160), so two domains derive the identical `SessionKey`
+    for their shared reverse row;
+  - held by a worker, because every session is replicated to every worker
+    (`replicate_session_upsert`) and each replica is reaped on its own schedule
+    (#6211). Owned by the key alone, the first idle replica's reap deleted the
+    row under the worker still forwarding.
+
+  A row stores each entry key once with a worker bitmask (the #6211 F2
+  128-worker cap). The registry also records, per key, the rows each worker
+  holds. So a republish releases the rows the new decision no longer names (a
+  NAT change, a kernel-local <-> live row set), and a teardown releases every
+  row still held.
+
+  The coordinator (HA import and delete, bringup replay, RG activation) is an
+  OWNER too (#9560 round 3). Its writes claim the rows they publish, and the
+  claim is released where the shared authority it stood for is removed — every
+  `remove_shared_session` caller. Its delete still skips a row any worker holds;
+  that worker's `DeleteSynced` releases the worker's claim.
+
+  Round 2 gave it no claim, and that left the original defect alive in the
+  handoff window: between the import's synchronous write and the first worker
+  claim the row was unowned, so an aliased session's teardown deleted the row
+  the imported session was still using — permanently, when every queued upsert
+  was dropped.
+
+  A claim is recorded only after its write succeeded. Every write and delete
+  runs under the row's shard lock, so a sibling's publish cannot land between
+  a teardown's decision and its delete.
+
+  There is ONE registry per `Coordinator`, shared with the session domain:
+  `sync_session` runs without the `ServerState` mutex (#7209), so an HA delete
+  can race a bringup. `stop_inner` retires every claim, without a BPF delete,
+  once the workers are joined.
+
+  Residuals:
+  - A row an EARLIER helper incarnation left in the pinned map is unowned, and
+    an alias's teardown deletes it as before #9560. Nothing in this incarnation
+    publishes an unowned row.
+  - A panicked worker's claims are retired when the supervisor declares it dead
+    (`retire_worker_holders_where` -> `SteeringRowOwners::retire_worker`), which
+    deletes the rows it was the last owner of.
+
+  Until #9560 two aliased sessions shared one row and either one's ordinary
+  teardown removed it; with an `lo0` input filter the survivor's next packet
+  missed, reached the kernel and skipped the filter. Cells:
+  `session_glue/steering_row_owners_9560_tests.rs`, `bpf_map/steering_owners.rs`,
+  `coordinator/tests.rs` and `ha_tests.rs`.
 - **PBR `then routing-instance` is the ONLY per-VRF forwarding path.** An
   interface's native `routing_instance` selects only the connected-route
   table NAME (#2388 above) — it does NOT scope a transit packet's
@@ -450,7 +499,9 @@ forward-direction collision.
   alias too; it is keyed on the LOGICAL (VLAN unit) ingress ifindex since
   `42bc6bc88`, so two units of one parent no longer share a cache entry. What
   remains are the ifindex-less conntrack table and the bare-5-tuple XDP
-  steering map.
+  steering map. The steering map's two aliasing arms are neutralised in the
+  helper rather than in the key: #9517 (no `PASS_TO_KERNEL` overwrite where
+  rows can alias) and #9560 (a shared row is deleted only by its last owner).
 - **Interim mitigation + candidate real fix (UNDECIDED).** The Go compiler
   emits a commit WARNING (`validateVRFOverlap`, `pkg/config`) when two
   distinct routing-instances carry overlapping L3 address space, so the

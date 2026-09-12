@@ -74,7 +74,7 @@ pub(in crate::afxdp) fn should_cache_local_delivery_session_on_miss(
 
 pub(in crate::afxdp) fn install_helper_local_session_on_miss(
     sessions: &mut SessionTable,
-    session_map_fd: c_int,
+    session_map: SteeringMap<'_>,
     shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
     shared_nat_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
     shared_forward_wire_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
@@ -101,7 +101,7 @@ pub(in crate::afxdp) fn install_helper_local_session_on_miss(
             key,
         );
         delete_session_map_entry_for_removed_session(
-            session_map_fd,
+            session_map,
             key,
             previous.decision,
             &previous.metadata,
@@ -138,7 +138,7 @@ pub(in crate::afxdp) fn install_helper_local_session_on_miss(
     // #1789: count a failed helper-local session publish (same
     // shim-missing-key consequence as every other publish site).
     if publish_session_map_entry_for_session(
-        session_map_fd,
+        session_map,
         key,
         decision,
         &local_entry.metadata,

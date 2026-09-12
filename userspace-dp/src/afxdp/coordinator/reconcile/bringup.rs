@@ -144,8 +144,11 @@ pub(super) fn bring_up_workers(
     let workers = plan_workers(coord, snapshot, bindings, &fds, ring_entries);
     // Capture the values the later phases need BEFORE `fds` is moved into
     // `publish_runtime`: the session map's raw descriptor (replay) and the DNAT
-    // table fds (Copy; the worker launch bundle).
+    // table fds (Copy; the worker launch bundle). The replay writes as the
+    // coordinator, which claims no steering row (#9560), through the coordinator's
+    // one registry.
     let session_map_raw_fd = fds.session_map_fd.fd;
+    let session_map_owners = Arc::clone(&coord.steering_owners);
     let dnat_fds = fds.dnat_fds;
     // Phase: PUBLISH. Move the OwnedFds onto `coord.bpf_maps` and publish the
     // mirror-target + CoS owner/active-shard maps the workers read — BEFORE any
@@ -153,8 +156,16 @@ pub(super) fn bring_up_workers(
     publish_runtime(coord, &workers, fds);
     // Phase: REPLAY. Build the per-worker command queues and replay preserved
     // synced sessions into the session map — BEFORE launch.
-    let worker_command_queues =
-        replay_preserved_sessions(coord, &workers, tunnel_purge_ids, session_map_raw_fd);
+    let worker_command_queues = replay_preserved_sessions(
+        coord,
+        &workers,
+        tunnel_purge_ids,
+        SteeringMap {
+            fd: session_map_raw_fd,
+            owners: &session_map_owners,
+            holder: crate::afxdp::bpf_map::SteeringHolder::Coordinator,
+        },
+    );
     // Phase: RESOLVER (best-effort, ATTEMPTED before worker launch so every
     // worker's `WorkerSharedDataplane::from_coord` clones a live handle). A
     // spawn failure leaves it `None` and workers still launch (with
@@ -313,7 +324,11 @@ fn plan_workers(
                 live,
                 xsk_map_fd: map_fd.fd,
                 heartbeat_map_fd: heartbeat_map_fd.fd,
-                session_map_fd: session_map_fd.fd,
+                session_map: crate::afxdp::bpf_map::SteeringMapRef::new(
+                    session_map_fd.fd,
+                    Arc::clone(&coord.steering_owners),
+                    crate::afxdp::bpf_map::SteeringHolder::Worker(binding.worker_id),
+                ),
                 conntrack_v4_fd: conntrack_v4_fd.as_ref().map(|f| f.fd).unwrap_or(-1),
                 conntrack_v6_fd: conntrack_v6_fd.as_ref().map(|f| f.fd).unwrap_or(-1),
                 ring_entries,
@@ -402,15 +417,17 @@ fn publish_runtime(
     // half-populated generation (e.g. a live `session_map_fd` beside a stale
     // `dnat_table_fd`). The previous set's descriptors are closed when the last
     // holder releases its `Arc`.
-    coord.bpf_maps.store(Arc::new(crate::afxdp::coordinator::BpfMaps {
-        map_fd: Some(map_fd),
-        heartbeat_map_fd: Some(heartbeat_map_fd),
-        session_map_fd: Some(session_map_fd),
-        conntrack_v4_fd,
-        conntrack_v6_fd,
-        dnat_table_fd,
-        dnat_table_v6_fd,
-    }));
+    coord
+        .bpf_maps
+        .store(Arc::new(crate::afxdp::coordinator::BpfMaps {
+            map_fd: Some(map_fd),
+            heartbeat_map_fd: Some(heartbeat_map_fd),
+            session_map_fd: Some(session_map_fd),
+            conntrack_v4_fd,
+            conntrack_v6_fd,
+            dnat_table_fd,
+            dnat_table_v6_fd,
+        }));
     let worker_binding_ifindexes = workers
         .iter()
         .map(|(worker_id, binding_plans)| {
@@ -482,7 +499,7 @@ pub(in crate::afxdp) fn replay_preserved_sessions(
     coord: &mut Coordinator,
     workers: &BTreeMap<u32, Vec<BindingPlan>>,
     tunnel_purge_ids: &[u16],
-    session_map_raw_fd: core::ffi::c_int,
+    session_map: SteeringMap<'_>,
 ) -> Arc<BTreeMap<u32, Arc<Mutex<VecDeque<WorkerCommand>>>>> {
     let worker_command_queues: Arc<BTreeMap<u32, Arc<Mutex<VecDeque<WorkerCommand>>>>> = Arc::new(
         workers
@@ -496,7 +513,7 @@ pub(in crate::afxdp) fn replay_preserved_sessions(
     let replayed_synced_sessions = coord.replay_synced_sessions(
         &replay_entries,
         worker_command_queues.as_ref(),
-        session_map_raw_fd,
+        session_map,
     );
     if replayed_synced_sessions > 0 {
         coord.last_reconcile_stage = ReconcileStage::ReplayedSynced {

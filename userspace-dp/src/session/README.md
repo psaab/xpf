@@ -1512,7 +1512,7 @@ Rust helper's publication sites, never about the map's writers.
 
 The transit forward install publishes the mirror row IN ADDITION to the shim's
 steering table, not instead of it. The two are different maps and always were:
-`publish_live_session_entry` writes `session_map_fd`, a 40-byte key with a
+`publish_live_session_entry` writes the steering map (`userspace_sessions`), a 40-byte key with a
 one-byte action value, and the mirror carries the 144-byte conntrack value.
 `publish_shared_session` for the shared/HA maps is unchanged.
 
