@@ -1244,8 +1244,9 @@ func (s *SessionSync) handleDisconnect(conn net.Conn) {
 		staleWaiters := s.barrierWaiters
 		s.barrierWaiters = nil
 		s.barrierWaitMu.Unlock()
-		for _, ch := range staleWaiters {
-			close(ch)
+		// Not marked fenced: this IS a disconnect, and the barrier should say so.
+		for _, w := range staleWaiters {
+			close(w.ch)
 		}
 		s.failoverWaitMu.Lock()
 		failoverWaiters := s.failoverWaiters

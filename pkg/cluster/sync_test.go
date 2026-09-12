@@ -3479,8 +3479,8 @@ func TestWaitForPeerBarriersDrainedTimesOutWhenUnacked(t *testing.T) {
 	ss.barrierSeq.Store(3)
 	ss.barrierAckSeq.Store(1)
 	ss.barrierWaitMu.Lock()
-	ss.barrierWaiters = map[uint64]chan struct{}{
-		3: make(chan struct{}),
+	ss.barrierWaiters = map[uint64]*barrierWaiter{
+		3: {ch: make(chan struct{})},
 	}
 	ss.barrierWaitMu.Unlock()
 
@@ -3513,8 +3513,8 @@ func TestHandleDisconnectClearsBarrierWaitersWithoutResettingBarrierCounters(t *
 	ss.barrierAckSeq.Store(1)
 	waiterCh := make(chan struct{})
 	ss.barrierWaitMu.Lock()
-	ss.barrierWaiters = map[uint64]chan struct{}{
-		2: waiterCh,
+	ss.barrierWaiters = map[uint64]*barrierWaiter{
+		2: {ch: waiterCh},
 	}
 	ss.barrierWaitMu.Unlock()
 
@@ -3566,7 +3566,7 @@ func TestBarrierSeqNoCollisionAcrossReconnect(t *testing.T) {
 
 	cycle1Waiter := make(chan struct{})
 	ss.barrierWaitMu.Lock()
-	ss.barrierWaiters = map[uint64]chan struct{}{1: cycle1Waiter}
+	ss.barrierWaiters = map[uint64]*barrierWaiter{1: {ch: cycle1Waiter}}
 	ss.barrierWaitMu.Unlock()
 	ss.barrierSeq.Store(1)
 
@@ -3599,7 +3599,7 @@ func TestBarrierSeqNoCollisionAcrossReconnect(t *testing.T) {
 	cycle2Waiter := make(chan struct{})
 	seq2 := ss.barrierSeq.Add(1) // seq=2
 	ss.barrierWaitMu.Lock()
-	ss.barrierWaiters = map[uint64]chan struct{}{seq2: cycle2Waiter}
+	ss.barrierWaiters = map[uint64]*barrierWaiter{seq2: {ch: cycle2Waiter}}
 	ss.barrierWaitMu.Unlock()
 
 	// Verify no collision: seq2 must be 2, not 1.

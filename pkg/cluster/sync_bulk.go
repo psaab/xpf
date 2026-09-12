@@ -479,13 +479,33 @@ func (s *SessionSync) sendBarrierAck(conn net.Conn, seq uint64) {
 		"sessions_installed", stats.SessionsInstalled)
 }
 
+// barrierWaiter is one pending WaitForPeerBarrier.
+//
+// #9822: `fenced` records that the waiter was released by the stream-move sweep
+// rather than by an ack, so a woken barrier is TOLD why it woke instead of
+// inferring it from the fence epoch. The inference had a window. Every caller of
+// noteStreamConnLocked bumps the epoch under writeMu, RELEASES writeMu, and only
+// then calls onStreamMoved, so the sweep can land arbitrarily late; a barrier
+// that starts in that gap — admissible because an acked re-prime discharged the
+// fence — captures the ALREADY-BUMPED epoch, sees no change at wake-up, and
+// reported "session sync disconnected during barrier wait" for a connection that
+// never went away. The caller's remedy for a fenced barrier is to re-prime and
+// retry, and its remedy for a disconnect is not, so the misreport is not
+// cosmetic.
+type barrierWaiter struct {
+	ch chan struct{}
+	// fenced is written under barrierWaitMu before ch is closed, and read under
+	// it after the wake, so the reason cannot race the wake-up.
+	fenced bool
+}
+
 func (s *SessionSync) completeBarrierWait(seq uint64) {
 	s.barrierWaitMu.Lock()
 	waiter := s.barrierWaiters[seq]
 	delete(s.barrierWaiters, seq)
 	s.barrierWaitMu.Unlock()
 	if waiter != nil {
-		close(waiter)
+		close(waiter.ch)
 	}
 }
 
@@ -550,10 +570,10 @@ func (s *SessionSync) WaitForPeerBarrier(timeout time.Duration) error {
 		return barrierFencedError(0)
 	}
 	seq := s.barrierSeq.Add(1)
-	waiter := make(chan struct{})
+	waiter := &barrierWaiter{ch: make(chan struct{})}
 	s.barrierWaitMu.Lock()
 	if s.barrierWaiters == nil {
-		s.barrierWaiters = make(map[uint64]chan struct{})
+		s.barrierWaiters = make(map[uint64]*barrierWaiter)
 	}
 	s.barrierWaiters[seq] = waiter
 	s.barrierWaitMu.Unlock()
@@ -580,7 +600,7 @@ func (s *SessionSync) WaitForPeerBarrier(timeout time.Duration) error {
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()
 	select {
-	case <-waiter:
+	case <-waiter.ch:
 		// The waiter channel can be closed by either completeBarrierWait
 		// (barrier acked) or handleDisconnect (connection lost). Check
 		// whether the barrier was actually acknowledged.
@@ -589,7 +609,13 @@ func (s *SessionSync) WaitForPeerBarrier(timeout time.Duration) error {
 		// If the stream moved while this barrier was pending, earlier frames may
 		// be on another connection, unprocessed or lost, so the ACK is not
 		// readiness.
-		if s.fence.epoch.Load() != fence {
+		// #9822: the sweep says so directly. The epoch comparison below still
+		// catches a move this waiter was registered BEFORE, but it cannot see one
+		// whose sweep landed after this barrier captured the bumped epoch.
+		s.barrierWaitMu.Lock()
+		sweptByMove := waiter.fenced
+		s.barrierWaitMu.Unlock()
+		if sweptByMove || s.fence.epoch.Load() != fence {
 			s.scheduleBarrierFenceReprime("barrier refused")
 			return barrierFencedError(seq)
 		}
