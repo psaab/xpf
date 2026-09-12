@@ -1,8 +1,14 @@
 // status_parse.go holds the parsed Get* methods and their public types.
 //
-// All vtysh shell-outs in this file go through m.vtysh(ctx, ...) so
+// Every BUFFERED vtysh shell-out in this file goes through m.vtysh(ctx, ...) so
 // tests can inject a fake executor and exercise the parsers without a
 // real vtysh binary.
+//
+// #9755: StreamBGPRoutes is the ONE exception and this used to say "All". It
+// calls the executor's VtyshStream directly, taking no VtyshLimiter slot and no
+// 15s vtyshTimeout, because a full-RIB stream is allowed a 10-minute progress
+// budget. It is bounded by pkg/api's ribStreamLimiter instead. See
+// Manager.vtysh for the full contract.
 //
 // Symbols (public types + methods):
 //   - RIPRouteEntry, GetRIPRoutes

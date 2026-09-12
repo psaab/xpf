@@ -338,7 +338,19 @@ var SnapshotReadLimiter = NewLimiter(MaxConcurrentSnapshotReads)
 // `show ip ospf neighbor` must not refuse an operator's ping, and vice versa.
 // The value is deliberately small — legitimate use is a handful of concurrent
 // status reads — while the 15s per-child cap plus this aggregate bound together
-// cap the worst-case footprint at MaxConcurrentVtyshShellOuts children.
+// cap the worst-case BUFFERED footprint at MaxConcurrentVtyshShellOuts children.
+//
+// #9755: BUFFERED is the operative word, and it used to be missing. The one
+// STREAMING FRR read (pkg/frr's StreamBGPRoutes, reached only by
+// `GET /api/v1/routing/bgp?type=routes`) does not pass through the funnel and
+// takes no slot here. It is bounded instead by pkg/api's ribStreamLimiter
+// (capacity 2) and a 10-minute progress budget, because a full-RIB stream needs
+// far longer than 15s and must not hold a quarter of this budget while it runs.
+//
+// The whole-process worst case is therefore MaxConcurrentVtyshShellOuts buffered
+// children PLUS maxConcurrentRIBStreams streaming ones — six, not four. Stated
+// here rather than left implicit, because this constant is where a reader comes
+// to find the number.
 const MaxConcurrentVtyshShellOuts = 4
 
 // VtyshLimiter is the process-wide limiter for FRR vtysh shell-outs, shared by
