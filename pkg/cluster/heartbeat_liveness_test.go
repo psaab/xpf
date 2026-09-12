@@ -94,8 +94,10 @@ func TestLastPeerReceiveAgeMonotonic(t *testing.T) {
 // TestRestartHeartbeatSeedsLastSeenAndRearmsGrace exercises the #1792
 // restart protections: the notify hook fires before teardown, the
 // replacement receiver inherits the pre-restart lastSeen (so a peer that
-// dies during the restart window is still detected), and the receiver
-// startup grace (startedAt) re-arms.
+// dies during the restart window is still detected), and startedAt re-arms.
+// Since #9722 the grace measured from that startedAt is the short
+// heartbeatRestartGrace, not the cold-boot one; see
+// heartbeat_restart_grace_9722_test.go.
 func TestRestartHeartbeatSeedsLastSeenAndRearmsGrace(t *testing.T) {
 	m := NewManager(0, 1)
 	if err := m.StartHeartbeat("127.0.0.1", "127.0.0.1", "", "em0"); err != nil {

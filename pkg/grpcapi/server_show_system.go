@@ -118,11 +118,20 @@ func (s *Server) showAlarms(buf *strings.Builder) {
 		return
 	}
 	warnings := config.ValidateConfig(cfg)
-	if len(warnings) == 0 {
+	// #9530: a peer config sync that discarded a local commit is an alarm too.
+	divergence := s.store.ConfigSyncDivergenceAlarm()
+	n := len(warnings)
+	if divergence != "" {
+		n++
+	}
+	if n == 0 {
 		buf.WriteString("No alarms currently active\n")
 		return
 	}
-	fmt.Fprintf(buf, "%d active alarm(s):\n", len(warnings))
+	fmt.Fprintf(buf, "%d active alarm(s):\n", n)
+	if divergence != "" {
+		fmt.Fprintf(buf, "  CRITICAL: %s\n", divergence)
+	}
 	for _, w := range warnings {
 		fmt.Fprintf(buf, "  WARNING: %s\n", w)
 	}

@@ -1048,20 +1048,9 @@ func junosHostZoneNetdevCoverageMap(cfg *Config) map[string]junosHostZoneNetdevC
 	sort.Strings(ifNames)
 	// Pass 1: ref -> netdev for every physical and unit row, so the VRF member
 	// list resolves through the SAME name rule the candidates use.
-	netdevByRef := map[string]string{}
-	for _, ifName := range ifNames {
-		iface := cfg.Interfaces.Interfaces[ifName]
-		if iface == nil {
-			continue
-		}
-		netdevByRef[ifName] = junosHostLinuxNameWith(cfg, ifName, nil, tunNames)
-		for un, unit := range iface.Units {
-			if unit == nil {
-				continue
-			}
-			netdevByRef[fmt.Sprintf("%s.%d", ifName, un)] = junosHostLinuxNameWith(cfg, ifName, unit, tunNames)
-		}
-	}
+	netdevByRef := junosHostNetdevByRef(cfg, func(ifName string, unit *InterfaceUnit) string {
+		return junosHostLinuxNameWith(cfg, ifName, unit, tunNames)
+	})
 	enslaved := junosHostVRFEnslavedNetdevs(cfg, netdevByRef)
 	// Pass 2: the candidate walk. One "row" per physical interface + one per
 	// unit, mirroring the dataplane interface snapshot.

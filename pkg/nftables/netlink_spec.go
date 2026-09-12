@@ -31,6 +31,7 @@ type HostInboundZoneView struct {
 	Protocols      []string
 	V4Addrs        []string
 	V6Addrs        []string
+	IngressNetdevs []string // #9637: see dpuserspace.ZoneHostInboundView
 }
 
 // JunosHostDenyL4 mirrors config.JunosHostDenyL4.

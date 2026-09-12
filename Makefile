@@ -316,10 +316,28 @@ test-race-dp:
 #
 # Cheap: cold ~2.5 min (shared with the --release artifacts below only
 # partially, since this is a dev-profile check), warm ~0s.
+#
+# #9499 member 1: a THIRD leg makes integer overflow an executed failure
+# oracle. The --release leg is the only other leg that runs tests, and a
+# release build has overflow-checks OFF, so a wrap was caught only when a
+# test happened to assert the exact wrapped value. This leg runs the frame,
+# NAT, session and checksum tests in the default test profile, where
+# overflow checks and debug assertions are on. It is filtered rather than
+# whole-suite because it is a second full build; widen the filter rather
+# than dropping the leg.
+#
+# It is not decoration: with `parsed.seq.wrapping_add(seg_len)` in
+# afxdp/frame/tcp.rs mutated to `parsed.seq + seg_len`, the --release leg
+# stays green and this leg fails
+# reject_rst_v4_for_syn_at_seq_max_wraps_ack_to_zero_9499 with "attempt to
+# add with overflow" (docs/log/9499.md). Measured on a loaded host: ~3.5 min
+# cold build, ~65 s run (2489 tests).
 test-rust:
 	$(CARGO) check --manifest-path userspace-dp/Cargo.toml --benches
 	$(CARGO) test --manifest-path userspace-dp/Cargo.toml --release \
 		--bins --tests -- --test-threads=1
+	$(CARGO) test --manifest-path userspace-dp/Cargo.toml \
+		--bins --tests -- --test-threads=1 frame nat session checksum
 
 # Standalone convenience view of the refactoring-heatmap drift (#1661
 # item 8). Regenerates scripts/refactoring-audit.sh output to a temp

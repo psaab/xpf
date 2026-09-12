@@ -170,9 +170,12 @@ func (d *Daemon) reassertFabricIPVLANOnce(ctx context.Context) {
 	// is an EXTRA device, not a missing one, so `len(missing) == 0` is exactly
 	// the state a stale overlay produces -- gating on it alone would make the
 	// reaper unreachable in the only case it exists for.
+	// #9813: the same holds for an overlay that exists outside the management
+	// VRF: it is neither missing nor stale.
 	if cfg := d.store.ActiveConfig(); cfg == nil ||
-		(len(d.missingFabricOverlays(cfg)) == 0 && len(d.staleFabricOverlays(cfg)) == 0) {
-		return // cheap path: nothing configured, and nothing extra
+		(len(d.missingFabricOverlays(cfg)) == 0 && len(d.staleFabricOverlays(cfg)) == 0 &&
+			len(d.fabricOverlaysOutsideMgmtVRF(cfg)) == 0) {
+		return // cheap path: nothing configured, nothing extra, nothing unbound
 	}
 	if err := d.applySem.Acquire(ctx, 1); err != nil {
 		return // ctx cancelled (daemon shutdown) — do not reconcile.
@@ -193,6 +196,11 @@ func (d *Daemon) reassertFabricIPVLANOnce(ctx context.Context) {
 		}
 		slog.Info("fabric IPVLAN re-asserted", "parent", ov.parent, "name", ov.name)
 	}
+
+	// #9813: bind AFTER the ensure, so an overlay this pass just re-created is
+	// bound in the same pass. ensureFabricIPVLAN sets no master, and an overlay
+	// can also lose its master without being re-created.
+	d.rebindFabricOverlaysToMgmtVRF(cfg)
 
 	// Reap AFTER the ensure, in the same pass and under the same semaphore.
 	//

@@ -124,7 +124,7 @@ func (s *SessionSync) handleMessage(conn net.Conn, msgType uint8, payload []byte
 					}
 					s.bulkMu.Unlock()
 				}
-				offset := s.peerClockOffset.Load()
+				offset := s.clockOffsetFor(conn)
 				val.Created = rebaseTimestamp(val.Created, offset)
 				val.LastSeen = rebaseTimestamp(val.LastSeen, offset)
 				s.installClusterSyncedV4(key, val)
@@ -159,7 +159,7 @@ func (s *SessionSync) handleMessage(conn net.Conn, msgType uint8, payload []byte
 					}
 					s.bulkMu.Unlock()
 				}
-				offset := s.peerClockOffset.Load()
+				offset := s.clockOffsetFor(conn)
 				val.Created = rebaseTimestamp(val.Created, offset)
 				val.LastSeen = rebaseTimestamp(val.LastSeen, offset)
 				s.installClusterSyncedV6(key, val)
@@ -337,17 +337,24 @@ func (s *SessionSync) handleMessage(conn net.Conn, msgType uint8, payload []byte
 		// boot — which is the routine second-fabric case #5718's tests exist to
 		// protect. So the remedy needs "we knew a DIFFERENT boot before", which
 		// `switched` alone does not say.
-		var evictedStale bool
-		if switched && priorInc.known() {
-			s.mu.Lock()
-			if idx := s.fabricIdxForConnLocked(conn); idx >= 0 {
-				evictedStale = s.applyPeerIncarnationSwitchLocked(idx)
-			}
-			s.mu.Unlock()
+		// #9636: this switch is one of TWO reboot classifiers, and
+		// classifyPrimeLocked reconciles it with installConn's epoch arm. It
+		// also settles an epoch retirement on a prime whose boot id did not
+		// change, so it runs for every accepted BulkStart, not only a switch.
+		s.mu.Lock()
+		pc := s.classifyPrimeLocked(conn, switched, priorInc.known())
+		s.mu.Unlock()
+		if pc.announce && s.OnPeerConnected != nil {
+			// No install classified this reboot, so the new process's
+			// OnPeerConnected comes from here.
+			slog.Info("cluster sync: scheduling OnPeerConnected callback for a peer reboot classified by its boot id",
+				"remote", connRemoteAddrString(conn))
+			go s.OnPeerConnected()
 		}
 		slog.Info("cluster sync: bulk transfer starting", "epoch", epoch,
 			"peer_boot_incarnation", inc.String(), "incarnation_switched", switched,
-			"evicted_stale_incarnation_conn", evictedStale,
+			"retired_incarnation", pc.retired, "reboot_already_retired", pc.consumed,
+			"evicted_stale_incarnation_conn", pc.evicted,
 			"local", connLocalAddrString(conn), "remote", connRemoteAddrString(conn))
 		// #5084: a peer that primes without an incarnation gets today's
 		// generation-only ordering (fail open). Warn ONCE per connection, not
@@ -523,6 +530,9 @@ func (s *SessionSync) handleMessage(conn net.Conn, msgType uint8, payload []byte
 			return
 		}
 		s.stats.ConfigApplyNacksReceived.Add(1)
+		// #9569: the peer still holds an older config. A handover onto it is refused
+		// until a newer push supersedes this generation.
+		s.peerConfigNackedGen.Store(nackedGen)
 		slog.Warn("cluster sync: peer did not apply the config generation we pushed — re-arming the push marker",
 			"gen", nackedGen)
 		if s.OnPeerConfigApplyFailed != nil {
@@ -859,7 +869,28 @@ func (s *SessionSync) handleMessage(conn net.Conn, msgType uint8, payload []byte
 		}
 		peerMono := binary.LittleEndian.Uint64(payload[:8])
 		localMono := monotonicSeconds()
+		// #9653: the offset rebases Created/LastSeen of every session installed
+		// from this peer, and it used to be stored with no bound. peerMono 2^63-1
+		// rebased every later install to 0, so the standby aged the sessions out;
+		// 0 against a long local uptime put them in the future, so they never
+		// aged. Refuse a reading no running peer can send, and keep the previous
+		// offset.
+		if !plausiblePeerMonoSeconds(peerMono) {
+			n := s.stats.ClockSyncsRefused.Add(1)
+			if n == 1 || n%64 == 0 {
+				slog.Warn("cluster sync: refusing clock sync with an impossible peer monotonic clock; the previous offset stays in force",
+					"peer_mono", peerMono, "local_mono", localMono, "refused_total", n, "remote", connRemoteAddrString(conn))
+			}
+			return
+		}
 		offset := int64(localMono) - int64(peerMono)
+		// A bound cannot tell a plausible false reading from a true one, so the
+		// offset belongs to the connection that carried it: it rebases only the
+		// sessions that connection carries (clockOffsetFor).
+		if ac, ok := conn.(*authConn); ok {
+			ac.clockOffset.Store(offset)
+			ac.clockSynced.Store(true)
+		}
 		s.peerClockOffset.Store(offset)
 		s.clockSynced.Store(true)
 		slog.Info("cluster sync: clock synced with peer", "peer_mono", peerMono, "local_mono", localMono, "offset", offset)

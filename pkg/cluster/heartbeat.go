@@ -78,6 +78,21 @@ const (
 	//     elapses.
 	heartbeatStartupGrace = 30 * time.Second
 
+	// heartbeatRestartGrace bounds the seen-then-lost suppression of a receiver
+	// that REPLACED one which had already seen the peer (RestartHeartbeat,
+	// #9722). Such a restart happens on a node that is already up: every config
+	// apply that rebinds the management VRF rebuilds the heartbeat sockets.
+	// Arming the 30s cold-boot grace there meant a peer that died within 30s
+	// after a commit was declared lost up to 30s late. The restart's own
+	// disruption is the socket rebind, which RestartHeartbeat already retries
+	// for up to 5s, so the grace matches that window. A live peer whose
+	// heartbeats are briefly lost past it is still covered by the sync-recency
+	// guard handlePeerTimeout consults (the daemon's
+	// shouldSuppressPeerHeartbeatTimeout, #1792). The never-seen arm keeps the
+	// cold-boot floor: a replacement for a receiver that never saw the peer is
+	// not armed, so it IS a cold start.
+	heartbeatRestartGrace = 5 * time.Second
+
 	// heartbeatAuthMagic marks the optional #4107 PSK/HMAC auth trailer.
 	// Distinct from heartbeatMagic ("BPFX") so a reader can unambiguously
 	// detect a trailer at the tail of a frame. The trailer is appended AFTER
@@ -1338,6 +1353,21 @@ type heartbeatReceiver struct {
 	received   atomic.Uint64
 	recvErrors atomic.Uint64
 	startedAt  time.Time // when receiver started (for initial peer-lost detection)
+	// seenGrace is the seen-then-lost suppression window measured from
+	// startedAt. Zero means the cold-boot heartbeatStartupGrace. armRestart sets
+	// it to heartbeatRestartGrace for a receiver that replaced one which had seen
+	// the peer (#9722). Written only before start(), so the timeout goroutine
+	// reads it without a lock.
+	seenGrace time.Duration
+	// inheritedHold is the end of a grace the REPLACED receiver was still inside
+	// when it was restarted (#9722). A restart never shortens a grace in
+	// progress. The boot-time config apply restarts the heartbeat about a second
+	// after the cold start. Holding that replacement for only
+	// heartbeatRestartGrace declared a still-booting peer lost: on the loss
+	// cluster, gate f6433a59a, fw1 marked fw0 lost 13s after the boot-time
+	// restart and took every RG. Zero when there is nothing to inherit. Written
+	// only before start().
+	inheritedHold time.Time
 
 	// peerAddr is the configured control-link peer, used to drop datagrams
 	// from any other source before they cost a MAC verification (#6888).
@@ -1536,6 +1566,31 @@ func newHeartbeatReceiver(mgr *Manager, conn *net.UDPConn, threshold int, interv
 		auth: mgr.heartbeatAuthState(),
 	}
 	return r
+}
+
+// armRestart installs the pre-restart peer liveness on a replacement receiver
+// BEFORE start(): the last heartbeat the replaced receiver saw, and the short
+// restart grace (#9722). Only a receiver that replaced one which had seen the
+// peer is armed; lastSeen == 0 leaves the cold-boot semantics in place.
+// inheritedHold is the end of any grace the replaced receiver was still inside,
+// so the restart does not shorten it (see heartbeatReceiver.inheritedHold).
+func (r *heartbeatReceiver) armRestart(lastSeen int64, inheritedHold time.Time) {
+	r.inheritedHold = inheritedHold
+	if lastSeen == 0 {
+		return
+	}
+	r.lastSeen.Store(lastSeen)
+	r.seenGrace = heartbeatRestartGrace
+}
+
+// seenThenLostGrace is how long after startedAt checkTimeout suppresses
+// peer-lost for a peer it has seen: the restart grace when armRestart set one,
+// the cold-boot grace otherwise.
+func (r *heartbeatReceiver) seenThenLostGrace() time.Duration {
+	if r.seenGrace > 0 {
+		return r.seenGrace
+	}
+	return heartbeatStartupGrace
 }
 
 func (r *heartbeatReceiver) start() {
@@ -1803,7 +1858,14 @@ func (r *heartbeatReceiver) checkTimeout() {
 	// declares peer lost — creating split-brain. (r.startedAt is a direct
 	// time.Time, so time.Since uses its embedded monotonic reading — already
 	// step-safe.)
-	if time.Since(r.startedAt) < heartbeatStartupGrace {
+	//
+	// #9722: a receiver that replaced one which had already seen the peer is
+	// not booting, so it holds only for heartbeatRestartGrace
+	// (seenThenLostGrace). Holding 30s there hid a peer that died just after a
+	// commit for up to 30s. It still keeps whatever remained of a grace its
+	// predecessor was inside (inheritedHold). At boot, that is the cold-boot
+	// grace, which the boot-time apply's restart must not cut short.
+	if time.Since(r.startedAt) < r.seenThenLostGrace() || time.Now().Before(r.inheritedHold) {
 		return
 	}
 	// Compare in the CLOCK_MONOTONIC domain. The previous

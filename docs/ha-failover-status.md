@@ -221,6 +221,13 @@ yet. Here is what is true today:
   proceeds; the unplanned/crash path is not gated. Surfaced in
   `show chassis cluster status` transfer-readiness reason as "standby config
   stale: applied gen=N behind peer committed gen=M"
+- The untargeted failover, the batch form and `ForceSecondary` refuse a
+  config-stale standby too (#9569). The #5563 gate above runs on the node that
+  becomes primary, so only the node-targeted form reached it. The untargeted
+  `request chassis cluster failover redundancy-group N` and the ISSU drain
+  (`request system software in-service-upgrade`) demote the local node instead,
+  and they now refuse while the standby's latest config-apply nack matches the
+  newest generation this node sent. The error names the generation.
 - (removed in #8573) HA configs that use per-pool source NAT `persistent-nat`
   used to be refused userspace forwarding entirely, on the #1449 reasoning that
   leases are helper-local and not HA-synchronized. Measured on the loss

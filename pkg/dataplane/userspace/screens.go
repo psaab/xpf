@@ -532,8 +532,8 @@ func synCookieRingDigestFingerprint(ring *SYNCookieKeyRingSnapshot) *SYNCookieKe
 
 // buildSYNCookieKeys derives the snapshot's SYN-cookie key material (#9173).
 //
-// A BASE is HMAC-SHA256 over a domain label, the cluster identity and the
-// screened zones. A keyed cluster keys it with `chassis cluster
+// A BASE is HMAC-SHA256 over a domain label and the cluster identity; the
+// screened zones are not an input (#9740). A keyed cluster keys it with `chassis cluster
 // authentication-key`; anything else uses synCookieProcessSecret. A period's key
 // is HMAC-SHA256 of the base over a second label and the rotation epoch (unix
 // seconds / synCookieKeyPeriodSecs), truncated to 16 bytes: deriveSYNCookieEpochKey
@@ -556,22 +556,21 @@ func synCookieRingDigestFingerprint(ring *SYNCookieKeyRingSnapshot) *SYNCookieKe
 // accept-only base derived from `additional-authentication-key` while a #6630
 // PSK rotation window is open.
 func buildSYNCookieKeys(cfg *config.Config, now time.Time) (string, *SYNCookieKeyRingSnapshot) {
+	// Protection is active only while some zone's screen profile has a SYN-flood
+	// attack threshold. Without one no zone can challenge, so no key is built.
+	// Which zones they are does not enter the key (#9740).
 	if !userspaceSynCookieProtectionActive(cfg) {
 		return "", nil
 	}
-	zones := synCookieScreenedZones(cfg)
-	if len(zones) == 0 {
-		return "", nil
-	}
 	primary, additional, identity := synCookieKeyMaterial(cfg)
-	primaryBase := deriveSYNCookieBase(primary, identity, zones)
+	primaryBase := deriveSYNCookieBase(primary, identity)
 	ring := &SYNCookieKeyRingSnapshot{
 		PeriodSecs: synCookieKeyPeriodSecs,
 		Bases:      []SYNCookieKeyBaseSnapshot{{Base: hex.EncodeToString(primaryBase)}},
 	}
 	if len(additional) > 0 {
 		ring.Bases = append(ring.Bases, SYNCookieKeyBaseSnapshot{
-			Base:       hex.EncodeToString(deriveSYNCookieBase(additional, identity, zones)),
+			Base:       hex.EncodeToString(deriveSYNCookieBase(additional, identity)),
 			AcceptOnly: true,
 		})
 	}
@@ -615,25 +614,22 @@ func synCookieRotationEpoch(now time.Time) uint64 {
 }
 
 // deriveSYNCookieBase is the base every period's key derives from: one per keyed
-// cluster, or one per daemon start. Every variable-length field is
-// length-prefixed, so no identity or zone/profile name -- a quoted identifier may
-// contain a NUL -- can frame the same bytes as a different screened-zone set.
-func deriveSYNCookieBase(secret []byte, identity string, zones [][2]string) []byte {
+// cluster, or one per daemon start. The identity is length-prefixed.
+//
+// The screened zones are not an input (#9740). In the base they made the key a
+// function of the screen configuration: nodes that screened different zones
+// disagreed on every key, and a commit that added or removed a screened zone
+// invalidated every cookie minted before it. The helper binds each cookie to its
+// zone's NAME instead (syn_cookie_zone_tag, userspace-dp/src/screen/syncookie.rs),
+// which also keeps zones whose folded IDs collide apart. The base no longer
+// separates two clusters that share an authentication-key and a cluster-id.
+func deriveSYNCookieBase(secret []byte, identity string) []byte {
 	mac := hmac.New(sha256.New, secret)
 	mac.Write([]byte("xpf-syncookie\x00v3-base\x00"))
 	var n [4]byte
-	field := func(s string) {
-		binary.BigEndian.PutUint32(n[:], uint32(len(s)))
-		mac.Write(n[:])
-		mac.Write([]byte(s))
-	}
-	field(identity)
-	binary.BigEndian.PutUint32(n[:], uint32(len(zones)))
+	binary.BigEndian.PutUint32(n[:], uint32(len(identity)))
 	mac.Write(n[:])
-	for _, zone := range zones {
-		field(zone[0])
-		field(zone[1])
-	}
+	mac.Write([]byte(identity))
 	return mac.Sum(nil)
 }
 
@@ -648,30 +644,6 @@ func deriveSYNCookieEpochKey(base []byte, epoch uint64) string {
 	binary.BigEndian.PutUint64(epochBytes[:], epoch)
 	mac.Write(epochBytes[:])
 	return hex.EncodeToString(mac.Sum(nil)[:16])
-}
-
-// synCookieScreenedZones lists (zone, profile) for every zone whose screen profile
-// has a SYN-flood attack threshold, sorted so the key is deterministic.
-func synCookieScreenedZones(cfg *config.Config) [][2]string {
-	var zones [][2]string
-	for _, zone := range cfg.Security.Zones {
-		if zone == nil || zone.ScreenProfile == "" {
-			continue
-		}
-		profile := cfg.Security.Screen[zone.ScreenProfile]
-		if profile == nil || profile.TCP.SynFlood == nil ||
-			profile.TCP.SynFlood.AttackThreshold <= 0 {
-			continue
-		}
-		zones = append(zones, [2]string{zone.Name, zone.ScreenProfile})
-	}
-	sort.Slice(zones, func(i, j int) bool {
-		if zones[i][0] != zones[j][0] {
-			return zones[i][0] < zones[j][0]
-		}
-		return zones[i][1] < zones[j][1]
-	})
-	return zones
 }
 
 func userspaceSynCookieProtectionActive(cfg *config.Config) bool {

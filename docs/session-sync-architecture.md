@@ -1588,8 +1588,9 @@ tiny queue indices), so the two writers can never alias. That reservation is a
 cross-language invariant, and it is ENFORCED on the Rust side rather than merely
 recorded: `SessionTable::set_worker_id` asserts a worker id never lands on
 `CONTROL_PLANE_SESSION_ID_WORKER_HI`. A hard `assert!`, not `debug_assert!` —
-`make test-rust` and the shipped helper both build `--release`, where a debug
-assertion is stripped and would guard nothing — and worker setup is config time,
+the shipped helper builds `--release`, and so does `make test-rust`'s main leg
+(its #9499 debug-profile leg covers only the frame, NAT, session and checksum
+tests), where a debug assertion is stripped and would guard nothing — and worker setup is config time,
 where `docs/engineering-style.md` prefers crash-start over running with a wrong
 invariant. The counter never
 returns `0` — that is the established "unknown id" sentinel that makes
@@ -2625,9 +2626,11 @@ been copied.
 | equal to the daemon's | match | proceed |
 | anything else | mismatch | WITHHOLD the delta batch |
 
-Enforcement sits on `queueUserspaceSessionDeltas`, the single chokepoint all
-three producers funnel through (binary stream, JSON drain, FullResync export),
-so one check covers every leg.
+Enforcement sits on the two queue entry points the three producers use:
+`queueUserspaceSessionDeltas` for the binary stream and the JSON drain, and
+`queueUserspaceSessionDeltasComplete` for the FullResync export. The export's
+form reports a withheld batch as a failure, so its frame is not acknowledged
+(#9767).
 
 **The refusal is loud on purpose.** Withholding quietly would trade a silent
 zero-fill for a silently dead HA sync — the standby would stop receiving
@@ -2695,14 +2698,16 @@ until both legs carry it. Guards:
 
 ### Bulk Owner-RG Export (FullResync republish)
 
-`ExportOwnerRGSessions(rgIDs, 0)` dumps **all** userspace sessions owned by the
-primary's RGs. The `max = 0` argument means unbounded (`usize::MAX` helper-side)
-— it is an unbounded ground-truth snapshot of the entire conntrack table for the
-owned RGs, not a Max-truncated or delta-replay export, so it cannot silently drop
-post-snapshot sessions.
+`ExportOwnerRGSessionsPaged(rgIDs)` dumps **all** userspace sessions owned by
+the primary's RGs, as one complete window or an error. Since #9344 it pages
+against a helper that reports the paging contract, and falls back to the
+unbounded request for one that does not. It is a ground-truth snapshot of the
+owned RGs' session table, not a truncated or delta-replay export.
 
-This is **not** triggered by demotion prep. Its only live caller is
-`handleEventStreamFullResync` → `exportUserspaceOwnerRGSessionsWithConfig`: the
+This is **not** triggered by demotion prep. On this path its caller is
+`handleEventStreamFullResync` → `exportUserspaceOwnerRGSessionsWithConfig`. (The
+#6031 cold-prime snapshot, `userspaceBulkSnapshotWithConfig`, calls the same
+export for its acknowledged bulk window.) The
 event stream signals a FullResync after a #2874 sequence gap, a #2442
 delta-ring overflow (loss-of-sync), a #5483 **undecodable session frame**
 (a COMPLETE-but-semantically-rejected open/close/update — same severity as a
@@ -2711,6 +2716,59 @@ gap, because the standby is missing that frame's session state), or a #6132
 exceeds the sanity bound), and the export republishes the full owned set from
 table truth. It is not the same thing as the
 steady-state delta drain.
+
+**#9767: the frame is acknowledged only when the whole export is queued.**
+`handleEventStreamFullResync` returning true acknowledges the FullResync frame,
+and the helper then trims its replay buffer past the barrier. The export used to
+return success whatever it managed to queue:
+
+- `QueueSessionV4`/`V6` drop a message when the 4096-entry send queue is full.
+  The writer sends one message per write, so an export of more than 4096
+  sessions routinely outran it.
+- The #7194 schema gate could withhold the whole batch.
+
+The sweep does not repair either loss, because it re-sends only sessions whose
+timestamps moved. The export now queues through
+`queueUserspaceSessionDeltasComplete`:
+
+- Each install goes through `QueueSessionV4Paced`/`V6Paced`, which waits up to
+  `fullResyncInstallWait` (2 s) for room instead of dropping, so the writer
+  paces the export in order. After one install times out, the rest are queued
+  without waiting, so a stalled link costs the reader one wait, not one per
+  session.
+- A delete that finds the queue full is journaled as before, and the next
+  connected sweep flushes it (#3926).
+- A withheld batch, a missed install or a disconnect is an error, and the frame
+  is not acknowledged.
+
+A declined FullResync frame is retried on every later frame and on the 100 ms
+ACK tick, and each retry would re-run the synchronous helper export. After a
+failed attempt the handler therefore declines without exporting for
+`fullResyncRetryBackoff` (1 s).
+
+The gap and decode-failure triggers ignore the handler's result, so a trigger
+inside the backoff skips its export. Something else still covers it:
+
+- after a gap, the forced reconnect;
+- the declined FullResync frame, which is still pending and re-exports the full
+  owned set once the backoff passes.
+
+Two decode-failure triggers are at least `decodeFailureResyncInterval` (2 s)
+apart, so neither can fall inside a backoff the other started.
+
+Pacing lengthens the time the export holds the event-stream reader, which #9630
+tracks.
+
+**#9766: the export and its queueing are one transaction.** The fallback loop's
+reconciliation drain queues deltas on its own goroutine. A close it drained
+after the export's snapshot, but before the export's installs were queued,
+reached the peer first. The stale install that followed drew a fresher
+generation and resurrected the session on the standby, because the #2221
+tombstone refuses only an older install. `handleEventStreamFullResync` now holds
+`userspaceDeltaSyncMu` across the export and its queueing, and both
+fallback-loop drains take it through `drainUserspaceSessionDeltasLocked`. The
+event stream's own delta frames cannot interleave, because the export runs on
+the reader goroutine.
 
 The #5483 case closes a silent-divergence hole: the reader used to skip an
 undecodable session frame with `DecodeErrors.Add(1); continue`, leaving the
