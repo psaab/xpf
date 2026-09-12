@@ -1016,19 +1016,6 @@ const DNAT_REAL: &str = "10.0.61.102/32";
 const DNAT_VIP_CIDR: &str = "172.16.80.8/32";
 const WAN_INGRESS_IFINDEX: i32 = 12;
 
-/// #9560 round 3: the poll path's REVERSE install publishes entry-level, so a same-key
-/// predecessor's rows are released.
-///
-/// `install_with_protocol_with_origin` silently removes a same-key prior entry. The
-/// reverse install used to publish its row through the ROW-level call, which claims the
-/// new row and releases nothing — so a predecessor's extra rows stayed claimed by a
-/// worker that will never name them again, and nothing could delete them.
-///
-/// Driven through the REAL poll body (`txn_run_descriptor`) on a session MISS, because
-/// that is the only path that reaches the reverse install; the registry assertions are on
-/// the owner counts, which is the channel that moves (a recorder-only map records a
-/// delete but cannot show a claim that merely persists).
-#[test]
 // #9560 round 3, R12 — MEASURED GAP, and the reason is specific.
 //
 // The poll path's FORWARD install (`&flow.forward_key`, `decision.nat`, `false`) has no
