@@ -143,6 +143,28 @@ func packedBodyChildren(node *Node, schema *schemaNode) []*Node {
 	for len(tail) > 0 {
 		// Deepest first: a token a nested level declares belongs to that level,
 		// which is what makes the ordinary chain keep its shape.
+		//
+		// TWO JUSTIFIED SURVIVORS, with the fact that would kill them. Neither
+		// the deepest-FIRST order here nor the `levels[:at+1]` truncation below
+		// is falsifiable by the current corpus: mutating either to its wrong
+		// form leaves the whole pkg/config suite green (measured, not assumed).
+		// That is a statement about COVERAGE, not about the clauses -- both
+		// decide which level owns a token, and they can only differ where ONE
+		// packed run has two OPEN levels that declare the SAME child name.
+		//
+		// 72 (ancestor, descendant) pairs in the schema share a child name --
+		// `authentication-key` under both `protocols bgp group` and `... group
+		// neighbor`, `class` under both `system login` and `system login user`,
+		// `address` under both `security address-book global` and its
+		// `address-set`. None is reached by a packed run any fixture writes: the
+		// bgp one was tried and does not discriminate, because packedBody is
+		// called on the NEIGHBOR node so `group` is never an open level.
+		//
+		// THE EXPIRY CONDITION: the first packed run that opens two levels
+		// declaring one name is where these two get their cell. Until then they
+		// are the conservative choice (the deeper level is the more specific
+		// owner, and a truncated stack cannot attach under a statement the run
+		// has already left) and they are NOT claimed as proven.
 		at := -1
 		var childSchema *schemaNode
 		for i := len(levels) - 1; i >= 0; i-- {
