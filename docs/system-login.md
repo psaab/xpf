@@ -405,6 +405,48 @@ All four — `allow-commands`, `deny-commands`, `allow-configuration`,
 operational and configuration paths, the gRPC listener the remote `cli` speaks
 to, and the REST API.
 
+> **This sentence was an overclaim a SECOND time, and #9952 closed the second
+> half.** After #9154 the REST surface enforced the coarse permission bits and
+> the `*-configuration` pair — and *nothing else*. The operational pair had no
+> enforcement point in `pkg/api` at all, so a class that narrowed its command set
+> by regex had that narrowing silently ignored on every REST endpoint, including
+> `POST /api/v1/system/action`, which reaches reboot and halt.
+>
+> The absence was a measurement, not a failed search: `OperationalLoginRegexesFor`
+> is the only resolver for these regexes and it had exactly two non-test
+> enforcement callers, `pkg/grpcapi` and `pkg/cli`. The same grep finding both
+> other surfaces is what made "zero in `pkg/api`" evidence.
+>
+> The lesson is the one the #9154 note already draws one paragraph down, and it
+> repeated: **a sentence that says "every surface" and then enumerates them is
+> two claims, and the enumeration is the one that rots.** It is now bound by a
+> census test rather than by this prose — see below.
+
+**How REST resolves a command.** A REST route is not a CLI command, so the
+canonical command each route performs is DEFINED in a table
+(`restRouteCommand`, `pkg/api/authz_command_regex_9952.go`), mirroring the gRPC
+table that has existed since #7172. Routes with no operational twin — `/health`,
+`/metrics`, the config-mode routes governed by the `*-configuration` pair, and a
+handful of REST-only observability endpoints — are listed in
+`restRoutesNoCommand` **with a reason**, and a census test requires every route
+registered in `server.go` to appear in exactly one of the two. A route in
+neither fails the build; at runtime it **denies** for any class with operational
+regexes, because a census is a build-time guard and the request path must fail
+closed on its own.
+
+Two consequences an operator should know:
+
+- **Config-mode REST routes are charged no operational command.** They are
+  governed by `allow-configuration` / `deny-configuration`, exactly as the
+  on-box CLI's config path is. Charging them here would lock any class with an
+  operational pattern out of configuration over REST — the regression #9633
+  fixed on gRPC.
+- **`POST /api/v1/system/action` is charged the verb's command**, the same
+  string gRPC charges (`request system reboot`, `clear arp`, …). A verb with no
+  entry — including the prefix forms such as `cluster-failover:1:node0`, which
+  the handler parses out of a packed string and which therefore cannot appear in
+  any table — **denies** for a restricted class.
+
 > **This sentence was a LIVE OVERCLAIM until #9154, and the shape of the error
 > is worth keeping.** It said "every dispatch surface" and then enumerated two,
 > and the `*-configuration` pair was in force on exactly ONE of them — the

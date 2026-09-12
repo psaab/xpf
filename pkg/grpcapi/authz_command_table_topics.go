@@ -1,6 +1,9 @@
 package grpcapi
 
-import "github.com/psaab/xpf/pkg/cmdtree"
+import (
+	"github.com/psaab/xpf/pkg/authz"
+	"github.com/psaab/xpf/pkg/cmdtree"
+)
 
 // Canonical command strings for the two REQUEST-DECODED gRPC methods
 // (#7172 cut 5a-2): ShowText's topics and SystemAction's verbs.
@@ -118,50 +121,11 @@ import "github.com/psaab/xpf/pkg/cmdtree"
 // whatever rule 5b uses to price a topic finds a command for the same key.
 var showTextTopicCommand = cmdtree.ShowTextTopicCommands()
 
-// systemActionVerbCommand maps a SystemAction verb to the canonical operational
-// command that sends it.
+// systemActionVerbCommand is the SHARED table, aliased rather than copied.
 //
-// The verb is NOT the command and cannot be derived from it: `clear-firewall-
-// counters` is sent only by `clear firewall all`, `clear-nat-counters` by
-// `clear security nat statistics`, and `clear-policy-counters` by
-// `clear security policies hit-count`. Three different `clear` subtrees, three
-// verb spellings that share a naming convention with none of them.
-//
-// PREFIX-FORM verbs are absent on purpose and cannot be listed: the handler's
-// default branch parses `cluster-failover*` (#5810) and the `userspace-*`
-// dataplane control forms out of a packed string, so they have no case label to
-// enumerate and no fixed spelling to key. systemActionPermission already
-// charges them the destructive floor; 5b must treat a verb with no entry the
-// way it treats an unmapped method rather than assuming this table is total
-// over what the handler accepts.
-//
-// The key set is pinned to the handler's own `switch req.Action` in both
-// directions by TestEverySystemActionVerbHasACanonicalCommand7172.
-var systemActionVerbCommand = map[string]string{
-	// Destructive maintenance — `request system ...`.
-	"reboot":             "request system reboot",
-	"halt":               "request system halt",
-	"power-off":          "request system power-off",
-	"zeroize":            "request system zeroize",
-	"in-service-upgrade": "request system software in-service-upgrade",
-
-	// The `clear ...` family.
-	"clear-config-lock":           "clear system config-lock",
-	"clear-arp":                   "clear arp",
-	"clear-interfaces-statistics": "clear interfaces statistics",
-	"clear-ipv6-neighbors":        "clear ipv6 neighbors",
-	"clear-policy-counters":       "clear security policies hit-count",
-	"clear-firewall-counters":     "clear firewall all",
-	"clear-nat-counters":          "clear security nat statistics",
-	"clear-persistent-nat":        "clear security nat source persistent-nat-table",
-
-	// The non-maintenance `request ...` family.
-	"ospf-clear":         "request protocols ospf clear",
-	"bgp-clear":          "request protocols bgp clear",
-	"ipsec-sa-clear":     "request security ipsec sa clear",
-	"dhcp-renew":         "request dhcp renew",
-	"dynamic-dns-update": "request system dynamic-dns update",
-	"dynamic-dns-check":  "request system dynamic-dns check",
-	"rescue-save":        "request system configuration rescue save",
-	"rescue-delete":      "request system configuration rescue delete",
-}
+// #9952 moved it to pkg/authz because the REST surface dispatches the same
+// verbs and must charge them the same commands. The alias keeps every reader in
+// this package — and, more importantly, the completeness guard that pins this
+// key set against the handler's own `switch req.Action` — working unchanged,
+// while there is exactly ONE table for both surfaces to disagree with.
+var systemActionVerbCommand = authz.SystemActionVerbCommand

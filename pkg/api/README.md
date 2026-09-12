@@ -62,6 +62,23 @@ liveness/readiness. Prometheus metrics endpoint. SSE event streams.
   error is withheld under the #5031 rule, and the COUNT is the field that
   separates a retry owner that is running and failing from one that is
   not running at all.
+
+**Authorization on this surface enforces all four `system login class` regex
+statements as of #9952.** The coarse permission bits come first
+(`pkg/authz`), then the `*-configuration` pair on the config-mutating routes
+(#9154/#9890/#9892), then the `*-commands` pair on every route
+(`authz_command_regex_9952.go`).
+
+The command pair needs a route -> canonical-command TABLE, because a REST route
+is not a CLI command and the mapping has to be defined rather than derived; the
+gRPC table (`pkg/grpcapi/authz_command_table*.go`) is the model, and the
+SystemAction verb table now lives in `pkg/authz` so both surfaces read ONE copy.
+Routes with no operational twin are declared in `restRoutesNoCommand` with a
+reason, and a census test requires every route registered in `server.go` to
+appear in exactly one of the two tables. A route in neither fails the build and
+DENIES at runtime — the census is a build-time guard, so the request path fails
+closed independently of it.
+
 - `GET /metrics` — Prometheus exposition.
 - `GET /api/v1/...` — REST mirrors of the gRPC API: sessions, routes,
   NAT, DHCP, IPsec, VRRP, OSPF, BGP, etc.
