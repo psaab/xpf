@@ -200,6 +200,10 @@ func lexConfigMutationLine9938(line string) (tokens []string, quoted []bool) {
 // sending, so the gRPC and REST surfaces pass nil and gate the line they will
 // actually act on.
 func AuthorizeConfigMutation(cfg *Config, class string, editPath []string, line string) error {
+	return authorizeConfigMutationDepth9939(cfg, class, editPath, line, 0)
+}
+
+func authorizeConfigMutationDepth9939(cfg *Config, class string, editPath []string, line string, depth int) error {
 	if class == "" {
 		return nil
 	}
@@ -234,7 +238,12 @@ func AuthorizeConfigMutation(cfg *Config, class string, editPath []string, line 
 		return fmt.Errorf("permission denied: login class %q denies %s under %q (%s)",
 			class, parts[0], configAuditRoot(path), decision.Reason)
 	}
-	return nil
+	// #9939: a `then change-configuration commands` PAYLOAD is data on the path
+	// above, and the daemon later applies it with INTERNAL (root) authority and
+	// no authorization at all. So the line that PLANTS it is the only place a
+	// class is in scope, and the payload is adjudicated here, against the
+	// planter's own regexes, as if they had typed it.
+	return authorizeEmbeddedChangeConfig9939(cfg, class, parts, quoted, depth)
 }
 
 // configAuditRoot renders only the first element of a configuration path.
