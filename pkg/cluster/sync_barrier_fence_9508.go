@@ -68,9 +68,15 @@ func (s *SessionSync) onStreamMoved(scheduleReprime bool) {
 	s.barrierWaitMu.Lock()
 	waiters := s.barrierWaiters
 	s.barrierWaiters = nil
+	// #9822: mark BEFORE closing, under the same mutex the waiter reads it
+	// under, so a barrier released here is told it was fenced rather than left
+	// to infer it from an epoch it may have captured after the bump.
+	for _, w := range waiters {
+		w.fenced = true
+	}
 	s.barrierWaitMu.Unlock()
-	for _, ch := range waiters {
-		close(ch)
+	for _, w := range waiters {
+		close(w.ch)
 	}
 	slog.Warn("cluster sync: ordered stream moved to another fabric connection; readiness barriers are fenced until a re-prime is acked",
 		"fence_epoch", s.fence.epoch.Load(), "released_barrier_waiters", len(waiters))

@@ -1202,7 +1202,7 @@ type SessionSync struct {
 	barrierSeq                 atomic.Uint64
 	barrierAckSeq              atomic.Uint64
 	barrierWaitMu              sync.Mutex
-	barrierWaiters             map[uint64]chan struct{}
+	barrierWaiters             map[uint64]*barrierWaiter
 	fence                      barrierFence // #9508 (sync_barrier_fence_9508.go)
 	failoverWaitMu             sync.Mutex
 	failoverWaiters            map[int]failoverWaiter
