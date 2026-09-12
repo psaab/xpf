@@ -81,7 +81,7 @@ func findBGPNeighbor9192(neighbors []*BGPNeighbor, group, addr string) *BGPNeigh
 // most-specific-LEVEL-wins flags have to survive from one node to the next or
 // the second node's first `export` wipes the first node's own list.
 func applyBGPNeighborProps9192(neighbor *BGPNeighbor, child *Node, ownExport, ownImport *bool) {
-	for _, prop := range child.Children {
+	for _, prop := range expandResolvingRuns9792(child.Children, bgpNeighborSchema9792()) { // #9792: expand a lenient-path packed run (#9235).
 		switch prop.Name() {
 		case "description":
 			neighbor.Description = nodeVal(prop)
