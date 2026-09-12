@@ -2371,7 +2371,7 @@ fn helper_local_session_on_miss_stays_out_of_shared_alias_maps() {
 
     assert!(install_helper_local_session_on_miss(
         &mut sessions,
-        -1,
+        SteeringMap::unshared_for_test(-1),
         &shared_sessions,
         &shared_nat_sessions,
         &shared_forward_wire_sessions,
@@ -2477,7 +2477,7 @@ fn helper_local_session_on_miss_clears_stale_shared_aliases() {
 
     assert!(install_helper_local_session_on_miss(
         &mut sessions,
-        -1,
+        SteeringMap::unshared_for_test(-1),
         &shared_sessions,
         &shared_nat_sessions,
         &shared_forward_wire_sessions,

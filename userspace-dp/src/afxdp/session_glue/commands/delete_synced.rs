@@ -19,7 +19,7 @@ use super::super::*;
 /// control-plane delete rate, never per-packet.
 pub(in crate::afxdp::session_glue) fn handle_delete_synced(
     sessions: &mut SessionTable,
-    session_map_fd: c_int,
+    session_map: SteeringMap<'_>,
     forwarding: &ForwardingState,
     // #9048: the local HA view, so a peer delete cannot tear down a session
     // this node is actively forwarding for. Same two inputs the sibling
@@ -74,9 +74,18 @@ pub(in crate::afxdp::session_glue) fn handle_delete_synced(
     // the table entry it was seeded from; here the table entry SURVIVES, so
     // the permit is still backed and invalidating it would be wrong in the
     // one direction #6457 does not consider.
+    // #9714 F4: the predicate is the INSTALL side's
+    // `synced_entry_allows_local_replace`, not `owner_rg_is_locally_active`. The
+    // latter hard-requires `owner_rg_id > 0`, so an entry whose owner RG is 0 —
+    // UNKNOWN, not "no RG" — was unprotected on this verb while
+    // `upsert_synced_with_origin` already declined to clobber it whenever ANY
+    // redundancy group is forwarding-active. Owner 0 is reachable for a synced
+    // forward session through the ingress-zone fallback, so this was not a
+    // corner. The coordinator's #9714 guard carried the identical fail-open and
+    // moved in the same change: install and delete now ask one question.
     let refuse = matches!(existing_origin, Some(origin) if !origin.is_peer_synced())
         && delete_alias.as_ref().is_some_and(|lookup| {
-            owner_rg_is_locally_active(ha_state, lookup.metadata.owner_rg_id, now_secs)
+            !synced_entry_allows_local_replace(ha_state, lookup.metadata.owner_rg_id, now_secs)
         });
     if refuse {
         PEER_DELETE_REFUSED_LOCAL_OWNED.fetch_add(1, Ordering::Relaxed);
@@ -116,12 +125,16 @@ pub(in crate::afxdp::session_glue) fn handle_delete_synced(
             worker_id,
         );
         delete_session_map_entry_for_removed_session(
-            session_map_fd,
+            session_map,
             &key,
             lookup.decision,
             &lookup.metadata,
         );
     } else {
-        delete_live_session_key(session_map_fd, &key);
+        // #9560 round 3: the local entry is already gone, so there is no decision to
+        // derive this session's rows from — and the bare key is only ONE of them. Its
+        // NAT and forward-wire aliases were claimed by this worker too, and releasing
+        // just the key left them claimed by a holder that will never name them again.
+        release_all_session_rows(session_map, &key);
     }
 }

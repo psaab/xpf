@@ -1665,7 +1665,11 @@ fn replay_synced_sessions_requeues_preserved_entries_for_new_workers() {
         (1u32, Arc::new(Mutex::new(VecDeque::new()))),
     ]);
 
-    let replayed = coordinator.replay_synced_sessions(&[entry.clone()], &worker_command_queues, -1);
+    let replayed = coordinator.replay_synced_sessions(
+        &[entry.clone()],
+        &worker_command_queues,
+        SteeringMap::unshared_for_test(-1),
+    );
     assert_eq!(replayed, 1);
 
     for commands in worker_command_queues.values() {

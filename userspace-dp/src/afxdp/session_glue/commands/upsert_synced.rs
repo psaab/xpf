@@ -49,7 +49,7 @@ pub(in crate::afxdp) fn synced_source_nat_zone_pair<'a>(
 /// (`enforce_ha_resolution_snapshot`).
 pub(in crate::afxdp::session_glue) fn handle_upsert_synced(
     sessions: &mut SessionTable,
-    session_map_fd: c_int,
+    session_map: SteeringMap<'_>,
     forwarding: &ForwardingState,
     ha_state: &BTreeMap<i32, HAGroupRuntime>,
     dynamic_neighbors: &Arc<ShardedNeighborMap>,
@@ -206,7 +206,7 @@ pub(in crate::afxdp::session_glue) fn handle_upsert_synced(
             );
         }
         publish_worker_session_map_entry(
-            session_map_fd,
+            session_map,
             forwarding,
             &key,
             entry_decision,

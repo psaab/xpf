@@ -547,7 +547,7 @@ fn prewarm_recovers_from_poisoned_shared_session_mutex() {
         &coordinator.sessions.forward_wire,
         &coordinator.sessions.owner_rg_indexes,
         std::slice::from_ref(&worker_commands),
-        -1,
+        SteeringMap::unshared_for_test(-1),
         &coordinator.forwarding,
         &ha_state,
         coordinator.dynamic_neighbors_ref(),
@@ -4172,7 +4172,11 @@ fn the_reconcile_replay_rederives_a_dead_reverse_companion_7209() {
     let queues: BTreeMap<u32, Arc<Mutex<VecDeque<WorkerCommand>>>> =
         BTreeMap::from([(0u32, Arc::new(Mutex::new(VecDeque::new())))]);
     let before = coordinator.synced_reverse_rederived_total();
-    let replayed = coordinator.replay_synced_sessions(&replay_entries, &queues, -1);
+    let replayed = coordinator.replay_synced_sessions(
+        &replay_entries,
+        &queues,
+        SteeringMap::unshared_for_test(-1),
+    );
     assert!(replayed > 0, "the replay processed nothing");
 
     // (2) the SHARED MAP — the authority — is what must be repaired.
@@ -4235,7 +4239,11 @@ fn the_reconcile_replay_rederives_a_dead_reverse_companion_7209() {
     // (3) CONTROL: replaying again, with nothing changed, must be inert.
     let steady_entries = coordinator.snapshot_shared_session_entries();
     let steady_before = coordinator.synced_reverse_rederived_total();
-    coordinator.replay_synced_sessions(&steady_entries, &queues, -1);
+    coordinator.replay_synced_sessions(
+        &steady_entries,
+        &queues,
+        SteeringMap::unshared_for_test(-1),
+    );
     assert_eq!(
         coordinator.synced_reverse_rederived_total(),
         steady_before,
@@ -5369,3 +5377,834 @@ fn peer_upsert_still_reserves_on_an_active_node_with_no_local_flow_9678() {
     );
 }
 
+
+// #9714: under a dual-primary split a PEER delete must not tear down a flow this
+// node forwards as a LOCAL session while that session's owner RG is locally
+// active. The helper refuses before the kernel steering delete, the DNAT delete,
+// the shared-map removal and the DeleteSynced fan-out, so nothing below happens.
+// An authoritative delete of the same entry (an operator clear, GC, the tunnel
+// purge) still deletes, and a peer delete with the RG inactive still deletes.
+const RG_9714: i32 = 1;
+
+struct Fixture9714 {
+    coordinator: Coordinator,
+    worker_a: Arc<Mutex<VecDeque<WorkerCommand>>>,
+    worker_b: Arc<Mutex<VecDeque<WorkerCommand>>>,
+    forward: SyncedSessionEntry,
+    reverse_key: SessionKey,
+}
+
+/// Two workers; a LOCAL-origin forward session and its reverse published to the
+/// shared maps with a DNAT steering hold; a session map descriptor present (-1,
+/// so the kernel delete is attempted and recorded, never applied).
+fn fixture_9714(rg_active: bool) -> Fixture9714 {
+    fixture_9714_with_origin(rg_active, SessionOrigin::ForwardFlow)
+}
+
+/// `fixture_9714` with the forward entry's origin chosen by the cell.
+fn fixture_9714_with_origin(rg_active: bool, origin: SessionOrigin) -> Fixture9714 {
+    fixture_9714_with_owner_rg(rg_active, origin, RG_9714)
+}
+
+/// `fixture_9714_with_origin` with the ENTRY's owner RG chosen by the cell (#9714
+/// F4). The RG map always carries `RG_9714` and `rg_active` says whether it is
+/// forwarding; `owner_rg_id` is what the ENTRY claims. Passing 0 models an entry
+/// whose owner could not be RESOLVED while a redundancy group is still forwarding —
+/// the case `owner_rg_is_locally_active` failed open on, because it hard-requires
+/// `owner_rg_id > 0`.
+fn fixture_9714_with_owner_rg(
+    rg_active: bool,
+    origin: SessionOrigin,
+    owner_rg_id: i32,
+) -> Fixture9714 {
+    let mut coordinator = Coordinator::new();
+    coordinator.set_forwarding_for_test(reserve6600_forwarding());
+    let worker_a = Arc::new(Mutex::new(VecDeque::new()));
+    let worker_b = Arc::new(Mutex::new(VecDeque::new()));
+    coordinator.workers.register(
+        0,
+        WorkerRuntimeRecord::for_test(test_worker_handle(worker_a.clone())),
+        None,
+    );
+    coordinator.workers.register(
+        1,
+        WorkerRuntimeRecord::for_test(test_worker_handle(worker_b.clone())),
+        None,
+    );
+    let now_secs = monotonic_nanos() / 1_000_000_000;
+    let rg = if rg_active {
+        active_ha_runtime(now_secs)
+    } else {
+        inactive_ha_runtime(0)
+    };
+    coordinator
+        .ha
+        .rg_runtime
+        .store(Arc::new(BTreeMap::from([(RG_9714, rg)])));
+    coordinator
+        .bpf_maps
+        .store(Arc::new(crate::afxdp::coordinator::BpfMaps {
+            session_map_fd: Some(crate::afxdp::bpf_map::OwnedFd { fd: -1 }),
+            ..Default::default()
+        }));
+
+    let mut forward = reserve6600_entry(40714, 50714);
+    forward.origin = origin;
+    // What the ENTRY claims. The RG map above always carries RG_9714, so passing 0
+    // here models an entry whose owner could not be RESOLVED while a redundancy
+    // group is still forwarding — the #9714 F4 case.
+    forward.metadata.owner_rg_id = owner_rg_id;
+    forward.metadata.is_reverse = false;
+    let reverse_key = reverse_session_key(&forward.key, forward.decision.nat);
+    let mut reverse = forward.clone();
+    reverse.key = reverse_key.clone();
+    reverse.origin = SessionOrigin::ReverseFlow;
+    reverse.metadata.is_reverse = true;
+    for entry in [&forward, &reverse] {
+        crate::afxdp::shared_ops::publish_shared_session(
+            &coordinator.sessions.synced,
+            &coordinator.sessions.nat,
+            &coordinator.sessions.forward_wire,
+            &coordinator.sessions.owner_rg_indexes,
+            entry,
+        );
+    }
+    crate::afxdp::checksum::add_dnat_steering_holder(&forward.key, forward.decision.nat);
+    Fixture9714 {
+        coordinator,
+        worker_a,
+        worker_b,
+        forward,
+        reverse_key,
+    }
+}
+
+impl Fixture9714 {
+    fn shared_has(&self, key: &SessionKey) -> bool {
+        self.coordinator
+            .sessions
+            .synced
+            .lock()
+            .expect("synced map")
+            .contains_key(key)
+    }
+
+    fn queued_delete(&self, key: &SessionKey) -> bool {
+        [&self.worker_a, &self.worker_b].iter().any(|queue| {
+            queue
+                .lock()
+                .expect("commands")
+                .iter()
+                .any(|cmd| matches!(cmd, WorkerCommand::DeleteSynced(k) if k == key))
+        })
+    }
+
+    fn steering_deleted(&self, writes: &[crate::afxdp::bpf_map::SessionMapWriteRecord]) -> bool {
+        writes
+            .iter()
+            .any(|w| w.value.is_none() && w.key == self.forward.key)
+    }
+
+    fn dnat_holds(&self) -> usize {
+        crate::afxdp::checksum::dnat_steering_holder_count(&self.forward.key, self.forward.decision.nat)
+    }
+}
+
+/// #9714 F4: owner RG 0 means the entry's owner could not be RESOLVED, not that the
+/// entry has no owner. `owner_rg_is_locally_active` hard-required `owner_rg_id > 0`,
+/// so a peer delete of such a LOCAL session was applied even while this node was
+/// forwarding for a redundancy group — while the INSTALL side
+/// (`synced_entry_allows_local_replace`) had already declined to clobber the same
+/// entry. A delete guard weaker than the install guard it mirrors is #9714 through a
+/// second door. Both guards now ask the install side's question.
+///
+/// THERE IS DELIBERATELY NO V6 TWIN, and the asymmetry is a decision rather than
+/// an oversight. The v6 peer delete reaches identical code:
+/// `delete_peer_synced_session` is one function over a `SessionKey` that carries
+/// `addr_family` as a FIELD, `delete_synced_session_gen_marked` is its only
+/// implementation, `handlers/sync_session.rs` its only call site, and the delete
+/// handler contains no family branch at all. The predicate under test —
+/// `synced_entry_allows_local_replace(ha_state, owner_rg_id, now_secs)` — takes no
+/// key, no address and no family. A v6 copy of this cell would therefore feed the
+/// same predicate the same arguments, and could not fail unless this cell also
+/// failed: a fixture that is VALID and carries NO SIGNAL, which is worse than no
+/// cell at all because it reads as coverage. The V4/V6 split that IS real lives on
+/// the Go marking path, which has its own twins
+/// (`TestAPeerV6BatchDeleteMarksEveryHelperRequest9714`). If a family branch is
+/// ever added between the wire and this predicate, that argument dies and the twin
+/// becomes required.
+#[test]
+fn a_peer_delete_of_a_live_local_session_with_an_unresolved_owner_rg_is_refused_9714() {
+    let fixture = fixture_9714_with_owner_rg(true, SessionOrigin::ForwardFlow, 0);
+    assert_eq!(
+        fixture.forward.metadata.owner_rg_id, 0,
+        "FIXTURE: this cell is about an UNRESOLVED owner; a non-zero owner is what the \
+         acceptance cell below already covers, and the two must not collapse"
+    );
+    assert!(
+        fixture.shared_has(&fixture.forward.key) && fixture.shared_has(&fixture.reverse_key),
+        "FIXTURE: the local forward and reverse entries must be in the shared maps"
+    );
+    crate::afxdp::bpf_map::clear_session_map_writes();
+
+    let refused = fixture
+        .coordinator
+        .session_domain()
+        .delete_peer_synced_session(fixture.forward.key.clone())
+        .is_refused_local_owned();
+
+    let writes = crate::afxdp::bpf_map::session_map_writes();
+    // Properties COLLECTED, not asserted in sequence — see the acceptance cell for why
+    // an outcome-first order hides every state property behind it from the matrix.
+    let mut violations: Vec<String> = Vec::new();
+    if !refused {
+        violations.push(
+            "a peer delete of a live LOCAL session whose owner RG is UNRESOLVED was applied: \
+             owner 0 is unknown-not-absent, and the install guard already refuses it (#9714 F4)"
+                .to_string(),
+        );
+    }
+    if !(fixture.shared_has(&fixture.forward.key) && fixture.shared_has(&fixture.reverse_key)) {
+        violations.push(
+            "a peer delete removed the shared rows of an unresolved-owner local session".to_string(),
+        );
+    }
+    if fixture.steering_deleted(&writes) {
+        violations.push(format!(
+            "a peer delete deleted the steering row of an unresolved-owner local session, so its \
+             packets stop forwarding while the session still exists. Writes: {writes:?}"
+        ));
+    }
+    if fixture.queued_delete(&fixture.forward.key) {
+        violations.push(
+            "a peer delete fanned DeleteSynced out to the workers for an unresolved-owner local \
+             session, dropping the sibling replicas"
+                .to_string(),
+        );
+    }
+    assert!(
+        violations.is_empty(),
+        "#9714 F4 unresolved owner: {} of 4 properties violated:\n  - {}",
+        violations.len(),
+        violations.join("\n  - ")
+    );
+}
+
+/// The CONTROL for the cell above, and the reason that cell can discriminate at all:
+/// with NO redundancy group forwarding-active, owner 0 is NOT protected and the same
+/// peer delete still applies. Without this, the refusal cell passes just as well
+/// against a guard that refuses everything — which is the shape a correct-looking
+/// fix and a broken one share.
+#[test]
+fn a_peer_delete_with_an_unresolved_owner_rg_and_no_active_group_still_deletes_9714() {
+    let fixture = fixture_9714_with_owner_rg(false, SessionOrigin::ForwardFlow, 0);
+    assert!(
+        fixture.shared_has(&fixture.forward.key),
+        "FIXTURE: the forward entry must start in the shared maps, or the assertion below is \
+         vacuous"
+    );
+    crate::afxdp::bpf_map::clear_session_map_writes();
+
+    let refused = fixture
+        .coordinator
+        .session_domain()
+        .delete_peer_synced_session(fixture.forward.key.clone())
+        .is_refused_local_owned();
+
+    assert!(
+        !refused,
+        "owner 0 was treated as protected with NO group forwarding-active: the guard must key on \
+         whether this node is actually forwarding, not on the owner being unknown (#9714 F4)"
+    );
+    assert!(
+        !fixture.shared_has(&fixture.forward.key),
+        "the shared forward row survived a peer delete that nothing protected"
+    );
+}
+
+// --- #9714 review round 2, finding 3: validate and remove the SAME entry. ---
+
+/// Files `key` in the reverse-prewarm index the way the live path does, so a cell can
+/// observe whether a removal un-filed it.
+fn file_prewarm_9714(fixture: &Fixture9714, key: &SessionKey) {
+    let mut index = fixture
+        .coordinator
+        .sessions
+        .owner_rg_indexes
+        .reverse_prewarm_sessions
+        .lock()
+        .expect("prewarm index");
+    index.entry(RG_9714).or_default().insert(key.clone());
+}
+
+fn prewarm_filed_9714(fixture: &Fixture9714, key: &SessionKey) -> bool {
+    let index = fixture
+        .coordinator
+        .sessions
+        .owner_rg_indexes
+        .reverse_prewarm_sessions
+        .lock()
+        .expect("prewarm index");
+    index.values().any(|keys| keys.contains(key))
+}
+
+/// THE CELL THAT DISTINGUISHES THIS FIX FROM A STAMP: the predicate is shown the
+/// entry that is ACTUALLY THERE, not the one the caller decided about.
+///
+/// A stamp validates a TOKEN and then trusts it, which leaves the same
+/// check-to-removal window one step further along. Here the predicate runs inside the
+/// lock hold that performs the removal, so it cannot be shown a stale entry.
+#[test]
+fn the_removal_predicate_sees_the_entry_that_replaced_the_original_9714() {
+    let fixture = fixture_9714(false);
+    let original = (fixture.forward.origin, fixture.forward.generation);
+
+    // A DIFFERENT entry now occupies the key — the replacement the old
+    // clone-then-release-then-remove could not notice.
+    let mut replacement = fixture.forward.clone();
+    replacement.origin = SessionOrigin::SyncImport;
+    replacement.generation = 77;
+    publish_shared_session(
+        &fixture.coordinator.sessions.synced,
+        &fixture.coordinator.sessions.nat,
+        &fixture.coordinator.sessions.forward_wire,
+        &fixture.coordinator.sessions.owner_rg_indexes,
+        &replacement,
+    );
+    assert_ne!(
+        original,
+        (replacement.origin, replacement.generation),
+        "FIXTURE: the replacement must DIFFER from the original, or \"saw the current entry\" and \
+         \"saw the stale clone\" are the same observation and this cell proves nothing"
+    );
+
+    let mut seen: Option<(SessionOrigin, u64)> = None;
+    let outcome = remove_shared_session_if(
+        &fixture.coordinator.sessions.synced,
+        &fixture.coordinator.sessions.nat,
+        &fixture.coordinator.sessions.forward_wire,
+        &fixture.coordinator.sessions.owner_rg_indexes,
+        &fixture.forward.key,
+        |current| {
+            seen = Some((current.origin, current.generation));
+            true
+        },
+    );
+
+    assert_eq!(
+        seen,
+        Some((replacement.origin, replacement.generation)),
+        "the predicate was shown the ORIGINAL entry rather than the replacement now occupying the \
+         key — that is exactly the stale-decision window finding 3 exists to close (#9714 r2 F3)"
+    );
+    assert!(
+        matches!(outcome, SharedRemoval::Removed(_)),
+        "an accepting predicate must remove"
+    );
+}
+
+/// A DECLINED removal mutates NOTHING — including the reverse-prewarm filing.
+///
+/// The un-filing is unconditional in the plain path (#7209: a key with no entry must
+/// not stay filed) and used to run BEFORE the decision. Moving it after the decision
+/// is a real semantic change, and this cell is what pins it: a decline leaves a LIVE
+/// session behind, and un-filing a live session's prewarm entry strands it — the
+/// activation prewarm skips a key it cannot find, so the filing must survive.
+///
+/// It asserts the PREMISE (the session is live AND filed before the call), not only
+/// the conclusion. Without that, an empty index would make "unchanged" vacuously true.
+#[test]
+fn a_declined_removal_leaves_the_session_live_and_filed_9714() {
+    let fixture = fixture_9714(false);
+    let key = fixture.forward.key.clone();
+    file_prewarm_9714(&fixture, &key);
+
+    assert!(
+        fixture.shared_has(&key),
+        "FIXTURE: the session must be live before the declined removal"
+    );
+    assert!(
+        prewarm_filed_9714(&fixture, &key),
+        "FIXTURE: the key must be FILED before the declined removal, or the assertion below passes \
+         against an empty index and measures nothing"
+    );
+
+    let outcome = remove_shared_session_if(
+        &fixture.coordinator.sessions.synced,
+        &fixture.coordinator.sessions.nat,
+        &fixture.coordinator.sessions.forward_wire,
+        &fixture.coordinator.sessions.owner_rg_indexes,
+        &key,
+        |_| false,
+    );
+
+    assert!(matches!(outcome, SharedRemoval::Declined), "the predicate declined");
+    assert!(
+        fixture.shared_has(&key),
+        "a DECLINED removal removed the entry anyway"
+    );
+    assert!(
+        prewarm_filed_9714(&fixture, &key),
+        "a DECLINED removal un-filed the reverse-prewarm entry of a session that is still LIVE. \
+         The activation prewarm skips a key it cannot find, so the session would be stranded on \
+         the failover path it exists to serve (#9714 r2 F3)"
+    );
+}
+
+/// The CONTROL: an ACCEPTED removal still removes and still un-files, exactly as the
+/// unconditional path did. Without this, a predicate wired to decline everything
+/// would pass the cell above while silently breaking every delete in the process.
+#[test]
+fn an_accepted_removal_still_removes_and_unfiles_9714() {
+    let fixture = fixture_9714(false);
+    let key = fixture.forward.key.clone();
+    file_prewarm_9714(&fixture, &key);
+    assert!(
+        prewarm_filed_9714(&fixture, &key),
+        "FIXTURE: the key must be filed before the accepted removal"
+    );
+
+    let outcome = remove_shared_session_if(
+        &fixture.coordinator.sessions.synced,
+        &fixture.coordinator.sessions.nat,
+        &fixture.coordinator.sessions.forward_wire,
+        &fixture.coordinator.sessions.owner_rg_indexes,
+        &key,
+        |_| true,
+    );
+
+    assert!(matches!(outcome, SharedRemoval::Removed(_)), "the predicate accepted");
+    assert!(!fixture.shared_has(&key), "an accepted removal left the entry behind");
+    assert!(
+        !prewarm_filed_9714(&fixture, &key),
+        "an accepted removal left the key FILED, which is the #7209 strand: a filing with no \
+         session behind it survives for the life of the process"
+    );
+}
+
+/// #9714 review round 2, finding 7: the stale-generation refusal is a DISTINCT
+/// outcome from an applied delete, and this pair is the only thing that reaches it.
+///
+/// THE AXIS THIS CELL EXISTS FOR. Every other #9714 cell builds on
+/// `reserve6600_entry`, which sets `generation: 0`, and the #2170 guard fires only
+/// when BOTH the stored and the delete generation are non-zero. So the third enum
+/// state that finding 7 introduced had no row at all — a state added by the fix,
+/// with the fixture set pinned to the one value that cannot reach it.
+#[test]
+fn a_stale_generation_delete_is_refused_and_keeps_the_entry_9714() {
+    // RG INACTIVE on purpose: ownership must not be what refuses here, or this cell
+    // would pass for the wrong reason and duplicate the F4 pair.
+    let fixture = fixture_9714(false);
+    let mut newer = fixture.forward.clone();
+    newer.generation = 9;
+    crate::afxdp::shared_ops::publish_shared_session(
+        &fixture.coordinator.sessions.synced,
+        &fixture.coordinator.sessions.nat,
+        &fixture.coordinator.sessions.forward_wire,
+        &fixture.coordinator.sessions.owner_rg_indexes,
+        &newer,
+    );
+    let before = fixture.coordinator.session_delete_stale_ignored_total();
+
+    // A delete carrying an OLDER generation than the stored entry.
+    fixture
+        .coordinator
+        .session_domain()
+        .delete_synced_session_gen(fixture.forward.key.clone(), 3);
+
+    assert_eq!(
+        fixture.coordinator.session_delete_stale_ignored_total(),
+        before + 1,
+        "a delete older than the stored entry must be counted stale-ignored (#2170)"
+    );
+    assert!(
+        fixture.shared_has(&fixture.forward.key),
+        "a STALE delete removed the NEWER same-key entry the helper had already mirrored — the \
+         outcome the #2170 guard exists to prevent, and the one finding 7 made distinguishable \
+         from an applied delete instead of collapsing both onto `false` (#9714 r2 F7)"
+    );
+}
+
+/// The CONTROL for the cell above: a delete whose generation is NEWER than the stored
+/// entry still APPLIES. Without it, a guard that refused every generation-carrying
+/// delete would pass the stale cell and silently stop honouring authoritative ones.
+#[test]
+fn a_newer_generation_delete_still_applies_9714() {
+    let fixture = fixture_9714(false);
+    let mut stored = fixture.forward.clone();
+    stored.generation = 9;
+    crate::afxdp::shared_ops::publish_shared_session(
+        &fixture.coordinator.sessions.synced,
+        &fixture.coordinator.sessions.nat,
+        &fixture.coordinator.sessions.forward_wire,
+        &fixture.coordinator.sessions.owner_rg_indexes,
+        &stored,
+    );
+    assert!(
+        fixture.shared_has(&fixture.forward.key),
+        "FIXTURE: the generation-stamped entry must be stored, or the assertion below is vacuous"
+    );
+    let before = fixture.coordinator.session_delete_stale_ignored_total();
+
+    fixture
+        .coordinator
+        .session_domain()
+        .delete_synced_session_gen(fixture.forward.key.clone(), 11);
+
+    assert_eq!(
+        fixture.coordinator.session_delete_stale_ignored_total(),
+        before,
+        "a NEWER delete was counted as stale; the guard must order, not refuse"
+    );
+    assert!(
+        !fixture.shared_has(&fixture.forward.key),
+        "a delete newer than the stored entry did not apply"
+    );
+}
+
+/// THE ACCEPTANCE CRITERION: a peer delete of a live local session whose owner RG
+/// is locally active changes nothing.
+#[test]
+fn a_peer_delete_of_a_live_local_session_is_refused_9714() {
+    let fixture = fixture_9714(true);
+    assert!(
+        fixture.shared_has(&fixture.forward.key) && fixture.shared_has(&fixture.reverse_key),
+        "fixture: the local forward and reverse entries must be in the shared maps"
+    );
+    let holds_before = fixture.dnat_holds();
+    assert!(holds_before >= 1, "fixture: the forward session must hold its DNAT steering row");
+    let refused_before = PEER_DELETE_REFUSED_LOCAL_OWNED.load(Ordering::Relaxed);
+    crate::afxdp::bpf_map::clear_session_map_writes();
+
+    let refused = fixture
+        .coordinator
+        .session_domain()
+        .delete_peer_synced_session(fixture.forward.key.clone())
+        .is_refused_local_owned();
+
+    let writes = crate::afxdp::bpf_map::session_map_writes();
+    // PREMISES fail fast (a broken fixture makes the cell meaningless); PROPERTIES are
+    // COLLECTED and reported together.
+    //
+    // This cell used to assert the reported outcome FIRST. A panicking assert ends a Rust
+    // test, so any mutant that broke only the REPORTING masked all five state properties
+    // behind it, and the matrix could not say whether the session had survived — the
+    // `Fatalf`-first shape, sitting in the cell that decides whether #9714 is fixed. It
+    // cost a real measurement: the F3d probe (delete the early refusal, leave the
+    // under-lock predicate as the sole defence) reds this cell on "got ok=true" and
+    // never reaches "were the shared rows kept?", which was the entire question.
+    let mut violations: Vec<String> = Vec::new();
+    if !refused {
+        violations.push(
+            "the refusal must be reported, or the handler answers ok and the Go side deletes its \
+             mirror and DNAT rows for a flow the helper kept (#9714)"
+                .to_string(),
+        );
+    }
+    if !(fixture.shared_has(&fixture.forward.key) && fixture.shared_has(&fixture.reverse_key)) {
+        violations.push(
+            "a peer delete removed the shared rows of a live local session; bulk export would then \
+             drop it and a later failover would lose the flow (#9714)"
+                .to_string(),
+        );
+    }
+    if fixture.steering_deleted(&writes) {
+        violations.push(format!(
+            "a peer delete removed the kernel steering row of a live local session; the non-owning \
+             RSS queues then adjudicate its packets as new flows (#9714). Writes: {writes:?}"
+        ));
+    }
+    let holds_after = fixture.dnat_holds();
+    if holds_after != holds_before {
+        violations.push(format!(
+            "a peer delete released the DNAT steering hold of a live local session (#9714): \
+             {holds_before} -> {holds_after}"
+        ));
+    }
+    if fixture.queued_delete(&fixture.forward.key) || fixture.queued_delete(&fixture.reverse_key) {
+        violations.push(
+            "a peer delete sent DeleteSynced to the workers; the sibling WorkerLocalImport replicas \
+             count as peer-synced and would all be dropped (#9714)"
+                .to_string(),
+        );
+    }
+    if PEER_DELETE_REFUSED_LOCAL_OWNED.load(Ordering::Relaxed) <= refused_before {
+        violations.push(
+            "the refusal must be counted on the #9048 counter so a dual-primary split is visible"
+                .to_string(),
+        );
+    }
+    assert!(
+        violations.is_empty(),
+        "#9714 acceptance: {} of 6 properties violated:\n  - {}",
+        violations.len(),
+        violations.join("\n  - ")
+    );
+}
+
+/// An authoritative delete of the same entry (operator clear, GC, tunnel purge)
+/// still deletes: the refusal is for the peer's say-so only.
+#[test]
+fn an_authoritative_delete_of_the_same_live_local_session_still_deletes_9714() {
+    let fixture = fixture_9714(true);
+    crate::afxdp::bpf_map::clear_session_map_writes();
+
+    fixture
+        .coordinator
+        .session_domain()
+        .delete_synced_session(fixture.forward.key.clone());
+
+    let writes = crate::afxdp::bpf_map::session_map_writes();
+    assert!(
+        !fixture.shared_has(&fixture.forward.key),
+        "an authoritative delete (e.g. `clear security flow session`) must still remove the shared row"
+    );
+    assert!(
+        fixture.steering_deleted(&writes),
+        "an authoritative delete must still remove the kernel steering row. Writes: {writes:?}"
+    );
+    assert!(
+        fixture.queued_delete(&fixture.forward.key),
+        "an authoritative delete must still fan DeleteSynced out to the workers"
+    );
+}
+
+/// Control: with the owner RG not locally active the peer delete is the ordinary
+/// peer delete and removes everything, as before #9714.
+#[test]
+fn a_peer_delete_with_the_owner_rg_inactive_still_deletes_9714() {
+    let fixture = fixture_9714(false);
+    crate::afxdp::bpf_map::clear_session_map_writes();
+
+    let refused = fixture
+        .coordinator
+        .session_domain()
+        .delete_peer_synced_session(fixture.forward.key.clone())
+        .is_refused_local_owned();
+
+    let writes = crate::afxdp::bpf_map::session_map_writes();
+    assert!(
+        !refused,
+        "an applied peer delete reported a refusal; the Go side would keep mirror and DNAT rows \
+         for a session the helper removed (#9714)"
+    );
+    assert!(
+        !fixture.shared_has(&fixture.forward.key) && !fixture.shared_has(&fixture.reverse_key),
+        "with the owner RG inactive this node does not own the flow, so the peer delete must remove the \
+         shared rows"
+    );
+    assert!(
+        fixture.steering_deleted(&writes),
+        "with the owner RG inactive the peer delete must remove the kernel steering row. Writes: {writes:?}"
+    );
+    assert!(
+        fixture.queued_delete(&fixture.forward.key),
+        "with the owner RG inactive the peer delete must fan DeleteSynced out"
+    );
+}
+
+/// Control: the refusal has the worker-side guard's scope. Only a LOCAL-origin
+/// entry is this node's own flow; the peer's delete of a peer-synced entry applies
+/// as it did before #9714, even with the owner RG locally active.
+#[test]
+fn a_peer_delete_of_a_peer_synced_session_still_deletes_with_the_owner_rg_active_9714() {
+    let fixture = fixture_9714_with_origin(true, SessionOrigin::SyncImport);
+    crate::afxdp::bpf_map::clear_session_map_writes();
+
+    let refused = fixture
+        .coordinator
+        .session_domain()
+        .delete_peer_synced_session(fixture.forward.key.clone())
+        .is_refused_local_owned();
+
+    let writes = crate::afxdp::bpf_map::session_map_writes();
+    assert!(
+        !refused,
+        "an applied peer delete reported a refusal; the Go side would keep mirror and DNAT rows \
+         for a session the helper removed (#9714)"
+    );
+    assert!(
+        !fixture.shared_has(&fixture.forward.key) && !fixture.shared_has(&fixture.reverse_key),
+        "a peer delete of a PEER-SYNCED entry must remove the shared rows even with the owner RG \
+         locally active; only a local-origin entry is this node's to keep (#9714)"
+    );
+    assert!(
+        fixture.steering_deleted(&writes),
+        "a peer delete of a peer-synced entry must remove the kernel steering row. Writes: {writes:?}"
+    );
+    assert!(
+        fixture.queued_delete(&fixture.forward.key),
+        "a peer delete of a peer-synced entry must fan DeleteSynced out"
+    );
+}
+
+/// #9714 review F6: a marked delete of the REVERSE key of a live local forward is
+/// refused too. The Go side deletes a flow's reverse companion as well, so a refusal
+/// that exempted reverse entries would tear down the flow's reply direction.
+#[test]
+fn a_peer_delete_of_the_reverse_key_of_a_live_local_session_is_refused_9714() {
+    let fixture = fixture_9714(true);
+    let holds_before = fixture.dnat_holds();
+    crate::afxdp::bpf_map::clear_session_map_writes();
+
+    let refused = fixture
+        .coordinator
+        .session_domain()
+        .delete_peer_synced_session(fixture.reverse_key.clone())
+        .is_refused_local_owned();
+
+    let writes = crate::afxdp::bpf_map::session_map_writes();
+    // Properties COLLECTED, not asserted in sequence — see the acceptance cell for why
+    // an outcome-first order hides every state property behind it from the matrix.
+    let mut violations: Vec<String> = Vec::new();
+    if !refused {
+        violations.push(
+            "a peer delete of the reverse key of a live local session must be refused and say so \
+             (#9714)"
+                .to_string(),
+        );
+    }
+    if !(fixture.shared_has(&fixture.forward.key) && fixture.shared_has(&fixture.reverse_key)) {
+        violations.push(
+            "a peer delete of the REVERSE key removed a live local session's shared rows (#9714)"
+                .to_string(),
+        );
+    }
+    if writes
+        .iter()
+        .any(|w| w.value.is_none() && w.key == fixture.reverse_key)
+    {
+        violations.push(format!(
+            "a peer delete of the reverse key removed its kernel steering row. Writes: {writes:?}"
+        ));
+    }
+    let holds_after = fixture.dnat_holds();
+    if holds_after != holds_before {
+        violations.push(format!(
+            "a refused peer delete of the reverse key released the flow's DNAT steering hold \
+             (#9714): {holds_before} -> {holds_after}"
+        ));
+    }
+    if fixture.queued_delete(&fixture.forward.key) || fixture.queued_delete(&fixture.reverse_key) {
+        violations.push(
+            "a refused peer delete of the reverse key still sent DeleteSynced to the workers \
+             (#9714)"
+                .to_string(),
+        );
+    }
+    assert!(
+        violations.is_empty(),
+        "#9714 F6 reverse key: {} of 5 properties violated:\n  - {}",
+        violations.len(),
+        violations.join("\n  - ")
+    );
+}
+/// #9560 round 3: a coordinator delete whose worker fan-out is DROPPED raises that
+/// worker's delete-drop epoch, for EITHER half.
+///
+/// Shared authority is removed before the fan-out, so nothing re-delivers a dropped
+/// `DeleteSynced`: the worker keeps forwarding the revoked entry AND keeps its steering
+/// claims, and those claims suppress every later delete of the rows. Round 2 checked only
+/// the forward half's push result and discarded the reverse half's entirely.
+#[test]
+fn a_dropped_delete_half_raises_the_workers_delete_drop_epoch_9560() {
+    let mut coordinator = Coordinator::new();
+    coordinator.set_forwarding_for_test(reserve6600_forwarding());
+    coordinator
+        .bpf_maps
+        .store(Arc::new(crate::afxdp::coordinator::BpfMaps {
+            session_map_fd: Some(crate::afxdp::bpf_map::OwnedFd {
+                fd: crate::afxdp::bpf_map::RECORDER_ONLY_MAP_FD,
+            }),
+            ..Default::default()
+        }));
+    let commands = Arc::new(Mutex::new(VecDeque::new()));
+    coordinator.workers.register(
+        0,
+        WorkerRuntimeRecord::for_test(test_worker_handle(commands.clone())),
+        None,
+    );
+
+    let entry = reserve6600_entry(40960, 50960);
+    let key = entry.key.clone();
+    let _ = coordinator.upsert_synced_session(entry);
+
+    // EXACTLY ONE slot free, so the FORWARD half is queued and only the REVERSE half is
+    // refused. Filling the queue completely would drop both, and then a check that reads
+    // only the forward half's result would still raise the epoch — the cell would pass
+    // against the very defect it exists to catch.
+    {
+        let mut pending = commands.lock().expect("commands");
+        pending.clear();
+        for _ in 0..(crate::afxdp::worker_queue::MAX_PENDING_WORKER_COMMANDS - 1) {
+            pending.push_back(WorkerCommand::VacateAllSharedExactSlots);
+        }
+    }
+
+    let before = crate::afxdp::session_glue::session_delete_drop_epoch(0);
+    coordinator.delete_synced_session_gen(key, 1);
+    let after = crate::afxdp::session_glue::session_delete_drop_epoch(0);
+
+    {
+        let pending = commands.lock().expect("commands");
+        assert_eq!(
+            pending.len(),
+            crate::afxdp::worker_queue::MAX_PENDING_WORKER_COMMANDS,
+            "fixture: the forward half must have taken the last slot, leaving the reverse \
+             half as the ONLY refused push"
+        );
+    }
+    assert!(
+        after > before,
+        "the REVERSE half's dropped DeleteSynced raised no epoch, so that worker never \
+         reconciles: it keeps the revoked entry and its steering claims, and nothing \
+         re-delivers the command (#9560 round 3). epoch {before} -> {after}"
+    );
+}
+
+/// #9560 round 3: an HA import publishes as the COORDINATOR and CLAIMS the row it
+/// writes.
+///
+/// Round 2 asserted the opposite here, on the reasoning that no worker teardown
+/// releases a coordinator claim. That reasoning was right about the release and wrong
+/// about the fix: leaving the row unowned kept the original #9560 defect alive in the
+/// handoff window, where an aliased session's teardown deletes the row the imported
+/// session is still using — and permanently so when every queued upsert is dropped.
+/// Round 3 makes the coordinator an owner and releases its claim where the shared
+/// authority it stood for is removed (`release_coordinator_session_rows`, called from
+/// every `remove_shared_session` caller).
+#[test]
+fn an_ha_import_claims_its_steering_row_as_the_coordinator_9560() {
+    let mut coordinator = Coordinator::new();
+    coordinator.set_forwarding_for_test(reserve6600_forwarding());
+    coordinator
+        .bpf_maps
+        .store(Arc::new(crate::afxdp::coordinator::BpfMaps {
+            session_map_fd: Some(crate::afxdp::bpf_map::OwnedFd {
+                fd: crate::afxdp::bpf_map::RECORDER_ONLY_MAP_FD,
+            }),
+            ..Default::default()
+        }));
+    let entry = reserve6600_entry(40960, 50960);
+    let key = entry.key.clone();
+    crate::afxdp::bpf_map::clear_session_map_writes();
+
+    let _ = coordinator.upsert_synced_session(entry);
+
+    let writes = crate::afxdp::bpf_map::session_map_writes();
+    assert!(
+        writes.iter().any(|w| w.value.is_some() && w.key == key),
+        "control: the import must publish the entry's steering row, or the claim count below \
+         observes nothing. Writes: {writes:?}"
+    );
+    assert_eq!(
+        coordinator
+            .steering_owners
+            .owner_count(&crate::afxdp::bpf_map::session_map_row(&key)),
+        1,
+        "an HA import must CLAIM the steering row it publishes (#9560 round 3). Unowned, \
+         an aliased session's teardown deletes it while the imported session still needs \
+         it — the defect #9560 exists to close, surviving in the coordinator's handoff \
+         window"
+    );
+}

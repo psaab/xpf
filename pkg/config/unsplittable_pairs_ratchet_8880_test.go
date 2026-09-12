@@ -339,7 +339,15 @@ func TestUnsplittablePairRatchet8880(t *testing.T) {
 		// #9689 SHRINKS it 452 -> 451: `profile` opted into packedStatements, so
 		// `profile feed-name` is splittable (and the new `profile fail-mode` never
 		// enters the population).
-		wantArgs1 = 451
+		// #9620 H11 SHRINKS it 451 -> 449. The splitter now walks a container
+		// HEAD's own elided body instead of refusing the run outright, so a pair
+		// whose head declares the following token is splittable. The two that
+		// left are the address-book `address+address-set` pairs, at the global
+		// book and the zone-local one. The same two were registered in the #8768
+		// opt-in guard as diverging by nested elision, and those registrations
+		// went stale in the same run and are deleted there -- two independent
+		// ratchets naming the same pair movement.
+		wantArgs1 = 449
 	)
 	pairs2, _ := unsplittablePairs8880(2)
 	pairs1, conflict1 := unsplittablePairs8880(1)

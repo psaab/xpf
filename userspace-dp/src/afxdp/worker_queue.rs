@@ -122,7 +122,7 @@ pub(in crate::afxdp) fn push_bounded(
 /// (`server/lifecycle.rs`), and at 25 Gbps with 1500 B frames (~2.08 Mpps) a
 /// 4096-slot RX ring fills in ~1.97 ms. A drain of the full
 /// [`MAX_PENDING_WORKER_COMMANDS`] measured 3.85 ms — already past that, and a
-/// LOWER bound, since the measurement ran with `session_map_fd = -1` so the
+/// LOWER bound, since the measurement ran with a steering-map fd of `-1` so the
 /// `bpf_map_update_elem` calls failed at the fd check without paying the
 /// kernel-side hash insert (a forward `publish_live_session_entry` issues up to
 /// four real map updates). That burst arrives at RG activation, the moment the

@@ -48,7 +48,7 @@ use crate::afxdp::coordinator::{
 
 /// A cloneable, lock-free handle onto the peer-synced session domain.
 ///
-/// Cheap to clone (six `Arc` bumps) and valid for the coordinator's whole life:
+/// Cheap to clone (seven `Arc` bumps) and valid for the coordinator's whole life:
 /// none of the fields it mirrors is ever REASSIGNED on the `Coordinator` — only
 /// mutated through its own interior synchronization — which is what makes a
 /// handle taken at startup observe every later change rather than a snapshot.
@@ -60,6 +60,9 @@ pub(crate) struct SessionDomain {
     pub(in crate::afxdp) workers: WorkerRecordsReader,
     pub(in crate::afxdp) runtime: RuntimeViewReader,
     pub(in crate::afxdp) bpf_maps: Arc<ArcSwap<BpfMaps>>,
+    /// #9560: the coordinator's steering-row owner registry, the instance its workers claim
+    /// rows in, so an HA delete racing a teardown or bringup sees their claims.
+    pub(in crate::afxdp) steering_owners: Arc<crate::afxdp::bpf_map::SteeringRowOwners>,
     pub(in crate::afxdp) rg_runtime: Arc<ArcSwap<BTreeMap<i32, HAGroupRuntime>>>,
     pub(in crate::afxdp) dynamic_neighbors: Arc<ShardedNeighborMap>,
     /// #6819 §7 test seam, SHARED rather than copied. The six tests that set it
@@ -76,13 +79,14 @@ impl SessionDomain {
     ///
     /// Takes borrows of the live fields rather than an `&Coordinator`, so it
     /// can be called from inside `Coordinator::new`'s struct construction —
-    /// and so the compiler enforces that it reads exactly these six things.
+    /// and so the compiler enforces that it reads exactly these seven things.
     pub(in crate::afxdp) fn new(
         sessions: &Arc<SessionManager>,
         workers: &WorkerManager,
         ha: &HaState,
         neighbors: &NeighborManager,
         bpf_maps: &Arc<ArcSwap<BpfMaps>>,
+        steering_owners: &Arc<crate::afxdp::bpf_map::SteeringRowOwners>,
         #[cfg(test)] synced_import_cap_override: &Arc<std::sync::atomic::AtomicUsize>,
     ) -> Self {
         Self {
@@ -90,6 +94,7 @@ impl SessionDomain {
             workers: workers.records_reader(),
             runtime: ha.runtime_reader(),
             bpf_maps: Arc::clone(bpf_maps),
+            steering_owners: Arc::clone(steering_owners),
             rg_runtime: Arc::clone(&ha.rg_runtime),
             dynamic_neighbors: Arc::clone(&neighbors.dynamic),
             #[cfg(test)]

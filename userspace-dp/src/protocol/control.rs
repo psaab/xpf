@@ -122,8 +122,13 @@ use super::snapshot::{ConfigSnapshot, FabricSnapshot, NeighborSnapshot, Userspac
 // installed generation. An old helper ignores it and keeps admitting a reused
 // generation content-blind, which is the defect the field closes. See
 // protocol.go's v15 note.
+// v16 (#9714): `SessionSyncRequest.peer_delete`, which marks a delete sent on
+// behalf of the peer so this process can refuse one that would tear down a live
+// LOCAL session whose owner RG is locally active. An old helper ignores it and
+// keeps deleting, which is the defect the field closes. The #8892 digest did not
+// move. See protocol.go's v16 note.
 // Keep the line below in this exact form: the Go lockstep guard parses it.
-pub(crate) const CONFIG_SNAPSHOT_PROTOCOL_VERSION: i32 = 15;
+pub(crate) const CONFIG_SNAPSHOT_PROTOCOL_VERSION: i32 = 16;
 
 /// #9520: the machine-readable prefix of the refusal `apply` sends when a
 /// snapshot reuses the installed generation with a different content digest.
@@ -881,6 +886,17 @@ pub(crate) struct SessionSyncRequest {
     /// (`pkg/dataplane/userspace/protocol_ha.go`, `SessionSyncRequest`).
     #[serde(rename = "tcp_close_class", default)]
     pub tcp_close_class: u8,
+    /// #9714: this delete was sent on behalf of the PEER (the cluster-stale apply
+    /// and the #6368 install rollback). The helper refuses such a delete for a key
+    /// it holds as a LOCAL session whose owner redundancy group is locally active,
+    /// so under a dual-primary split the peer closing its copy cannot tear down
+    /// this node's live one. `false` (an operator clear, GC expiry, policy
+    /// revocation, or an older daemon) deletes exactly as before.
+    ///
+    /// The rename MUST match the Go struct tag
+    /// (`pkg/dataplane/userspace/protocol_ha.go`, `SessionSyncRequest.PeerDelete`).
+    #[serde(rename = "peer_delete", default)]
+    pub peer_delete: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]

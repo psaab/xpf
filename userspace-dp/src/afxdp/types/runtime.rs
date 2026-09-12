@@ -215,7 +215,9 @@ pub(in crate::afxdp) struct BindingPlan {
     pub(in crate::afxdp) live: Arc<BindingLiveState>,
     pub(in crate::afxdp) xsk_map_fd: c_int,
     pub(in crate::afxdp) heartbeat_map_fd: c_int,
-    pub(in crate::afxdp) session_map_fd: c_int,
+    /// #9560: the steering map's fd, the coordinator's row-owner registry, and this
+    /// plan's worker as the holder that claims rows.
+    pub(in crate::afxdp) session_map: crate::afxdp::bpf_map::SteeringMapRef,
     pub(in crate::afxdp) conntrack_v4_fd: c_int,
     pub(in crate::afxdp) conntrack_v6_fd: c_int,
     pub(in crate::afxdp) ring_entries: u32,

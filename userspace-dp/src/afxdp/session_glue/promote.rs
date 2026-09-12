@@ -70,7 +70,7 @@ pub(in crate::afxdp::session_glue) fn should_keep_synced_hit_transient(
 /// signature changed (16 → 13 params via `SharedSessionRefs`).
 pub(in crate::afxdp::session_glue) fn maybe_promote_synced_session(
     sessions: &mut SessionTable,
-    session_map_fd: c_int,
+    session_map: SteeringMap<'_>,
     shared: SharedSessionRefs<'_>,
     peer_worker_commands: &[Arc<Mutex<VecDeque<WorkerCommand>>>],
     forwarding: &ForwardingState,
@@ -108,7 +108,7 @@ pub(in crate::afxdp::session_glue) fn maybe_promote_synced_session(
         // #1789: count a failed shared-promote publish (shim would miss the
         // key -> NO_SESSION degraded path for the promoted flow).
         if publish_session_map_entry_for_session(
-            session_map_fd,
+            session_map,
             key,
             decision,
             &promoted,
@@ -175,7 +175,7 @@ pub(in crate::afxdp::session_glue) fn maybe_promote_synced_session(
 #[allow(clippy::too_many_arguments)]
 pub(in crate::afxdp::session_glue) fn purge_translated_synced_hit(
     sessions: &mut SessionTable,
-    session_map_fd: c_int,
+    session_map: SteeringMap<'_>,
     shared: SharedSessionRefs<'_>,
     key: &SessionKey,
     decision: SessionDecision,
@@ -198,7 +198,7 @@ pub(in crate::afxdp::session_glue) fn purge_translated_synced_hit(
         shared.owner_rg_indexes,
         key,
     );
-    delete_session_map_entry_for_removed_session(session_map_fd, key, decision, metadata);
+    delete_session_map_entry_for_removed_session(session_map, key, decision, metadata);
     sessions.delete(key);
     // #5295: return the pool reservation to the local allocator, exactly as
     // `handle_delete_synced` does on the delete-sync teardown. `is_reverse` is

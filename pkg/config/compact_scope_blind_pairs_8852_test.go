@@ -213,6 +213,20 @@ var knownBlindScopePairs8852 = map[string]string{
 	// breaking the fold does not remove this pair from the map; only the census
 	// gaining a site for it does. Read this as a boundary, not as a clearance.
 	"firewall family": "plain-container",
+	// #9620 H11 admitted ("unit","family") so the unit-elided spelling
+	// `unit 0 family inet filter input f1 address 10.0.0.1/24;` folds instead
+	// of keeping the whole run on the unit node, where the address and the
+	// filter were both dropped. `family` is args:0 with children and no
+	// wildcard, the same shape as the entry above, so the census emits no site
+	// for it and arm 2 adjudicates nothing.
+	//
+	// COVERED THERE IS NOT ADJUDICATED HERE, exactly as for firewall family:
+	// TestPackedUnitFamilyCompilesLikeBraced9620 compares the compiled config
+	// elided against braced for inet and inet6, both statement orders and both
+	// elision depths, so the pair's BEHAVIOUR is asserted -- while this entry
+	// records that arm 2 is blind to it, which stays true however the fold
+	// behaves. Read it as a boundary, not as a clearance.
+	"unit family": "plain-container",
 	// issue 8858. Unlike the two confirmed-broken entries above, this pair's
 	// fold IS repaired and measured -- but by its own cells, not by arm 2, and
 	// a pair leaves this list only when arm 2 starts generating a site for it.

@@ -426,6 +426,18 @@ type SyncStats struct {
 	// connection; this counter makes it visible.
 	StrictAuthResidualWarnings atomic.Uint64
 	DeletesDropped             atomic.Uint64
+	// DeletesSuppressedPeerIncapable counts outgoing session deletes WITHHELD
+	// because the peer advertised its capabilities and did NOT claim #9714
+	// peer-delete ownership (capFlagPeerDeleteOwnership). Such a peer applies a
+	// delete unconditionally, so in a dual-primary split our delete would tear
+	// down a flow it is still forwarding.
+	//
+	// A nonzero value is OPERATIONALLY MEANINGFUL, not diagnostic noise: the
+	// peer is retaining sessions this node has already closed, and will until
+	// they idle out or the upgrade completes on both nodes. It is counted
+	// rather than left silent precisely because the suppression trades a
+	// visible leak for an invisible teardown.
+	DeletesSuppressedPeerIncapable atomic.Uint64
 	// DeletesStaleIgnored counts deletes refused by the #2170 install-
 	// generation guard: a journaled/deferred delete whose generation was
 	// strictly older than the currently-installed same-key entry. A nonzero
@@ -996,13 +1008,20 @@ type SessionSync struct {
 	// Armed once per overflow episode (CAS) by rejournalTail/journalDelete and
 	// consumed by whichever of the sweep loop (syncSweep) or the next reconnect
 	// (handleNewConnection) runs first.
-	forceResync       atomic.Bool
-	lastNewCounter    uint64
-	lastClosedCounter uint64
-	lastSweepEmpty    bool
-	vrfDevice         string
-	peerClockOffset   atomic.Int64
-	clockSynced       atomic.Bool
+	forceResync atomic.Bool
+	// deleteSuppressionWarned latches the #9714 F5 operator warning so a path
+	// that can run thousands of times a second logs the episode ONCE, in the
+	// shape armDeleteResync already uses. Reset with the peer capability flags
+	// on full disconnect: the warning is about a peer INCARNATION, and a latch
+	// that outlived it would stay silent through the reconnect that actually
+	// matters — a downgrade, or the upgrade that fixes it.
+	deleteSuppressionWarned atomic.Bool
+	lastNewCounter          uint64
+	lastClosedCounter       uint64
+	lastSweepEmpty          bool
+	vrfDevice               string
+	peerClockOffset         atomic.Int64
+	clockSynced             atomic.Bool
 
 	// localSnapshotProtocol is this node's config-snapshot protocol version,
 	// advertised to the peer on every installed connection (#6650). Set by the
@@ -1183,7 +1202,7 @@ type SessionSync struct {
 	barrierSeq                 atomic.Uint64
 	barrierAckSeq              atomic.Uint64
 	barrierWaitMu              sync.Mutex
-	barrierWaiters             map[uint64]chan struct{}
+	barrierWaiters             map[uint64]*barrierWaiter
 	fence                      barrierFence // #9508 (sync_barrier_fence_9508.go)
 	failoverWaitMu             sync.Mutex
 	failoverWaiters            map[int]failoverWaiter

@@ -20,7 +20,7 @@ pub(in crate::afxdp::session_glue) type RefreshOwnerRgsItem =
 /// fabric-redirect.
 pub(in crate::afxdp::session_glue) fn handle_refresh_owner_rgs(
     sessions: &mut SessionTable,
-    session_map_fd: c_int,
+    session_map: SteeringMap<'_>,
     forwarding: &ForwardingState,
     ha_state: &BTreeMap<i32, HAGroupRuntime>,
     dynamic_neighbors: &Arc<ShardedNeighborMap>,
@@ -73,7 +73,7 @@ pub(in crate::afxdp::session_glue) fn handle_refresh_owner_rgs(
             continue;
         }
         publish_worker_session_map_entry(
-            session_map_fd,
+            session_map,
             forwarding,
             &key,
             refreshed_decision,

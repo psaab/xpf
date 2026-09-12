@@ -76,6 +76,7 @@ impl DeleteDropSweep {
         &mut self,
         sessions: &mut SessionTable,
         shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+        session_map: SteeringMap<'_>,
         evicted_keys: &mut Vec<SessionKey>,
     ) -> usize {
         if !self.running {
@@ -99,6 +100,12 @@ impl DeleteDropSweep {
             )
         };
         for key in &self.stale {
+            // #9560 round 3: give up this worker's steering claims BEFORE the table
+            // entry goes. The sweep deletes the entry directly, so nothing downstream
+            // can derive the rows it published; its holdings and the fixed-size BPF
+            // rows would survive with no entry left to reap them, and unique-key churn
+            // would grow both until publishes failed.
+            release_all_session_rows(session_map, key);
             sessions.delete(key);
             evicted_keys.push(key.clone());
         }

@@ -15,7 +15,7 @@ the workers share.
 | File | Purpose |
 |------|---------|
 | `mod.rs` | `Coordinator` struct + worker-spawn + reconcile entry. The per-worker spawn closure (in `reconcile/bringup.rs`) launches `worker_loop` via 5 typed bundles (#6241): `WorkerSharedDataplane::from_coord` / `WorkerCoSState::from_coord` clone the coordinator-published shared state, and the `::new` builders carry the per-worker fresh slots — behavior-preserving, no extra clone/alloc vs. the old positional call. |
-| `bpf_maps.rs` | `BpfMaps` — pinned BPF map FDs (XSK map, heartbeat, session, conntrack v4/v6) opened once and shared with every worker. |
+| `bpf_maps.rs` | `BpfMaps` — pinned BPF map FDs (XSK map, heartbeat, session, conntrack v4/v6) opened once and shared with every worker. The steering map's row-owner registry is NOT here: it lives on `Coordinator` (`steering_owners`, #9560) for the coordinator's whole life. |
 | `cos_leases.rs` | CoS runtime-map plumbing: `refresh_cos_owner_worker_map_*` / `refresh_cos_runtime_maps` (diff-and-store of the `SharedCoSState` Arcs) plus the owner-by-queue / active-shard / root- and queue-lease / exact-backlog / vtime-floor builders with their Arc-reuse match predicates, and the #710 cross-worker status aggregation used by `status.rs`. (#1890 split.) |
 | `cos_state.rs` | `SharedCoSState` — Arcs that workers consult to find owner-by-queue, live owner, root/queue leases, vtime floors. |
 | `ha_state.rs` | `HaState`: HA snapshot, shared fabrics, forwarding state. (RG epoch counters live on `Coordinator` itself in `mod.rs`, not here.) |
