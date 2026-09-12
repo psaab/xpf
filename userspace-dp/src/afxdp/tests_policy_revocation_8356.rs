@@ -1029,6 +1029,114 @@ const WAN_INGRESS_IFINDEX: i32 = 12;
 /// the owner counts, which is the channel that moves (a recorder-only map records a
 /// delete but cannot show a claim that merely persists).
 #[test]
+/// #9560 round 3, R9: the poll path's reverse install must RELEASE what a same-key
+/// PREDECESSOR held — asserted on the release itself, not on a row count.
+///
+/// The count was only ever a PROXY, and a proxy has a failure mode a direct assertion
+/// does not: even where the counts differ they differ INCIDENTALLY, so a later change
+/// to how many rows a DNAT reverse entry names would make the cell vacuous again with
+/// nobody touching it. Measured on the way here: a reverse entry-level publish claims
+/// exactly ONE row, the same as a key-level publish, so no count assertion at this call
+/// site can separate the arms at all — which is why the sibling cell below documents
+/// that it cannot detect this and defers to here.
+///
+/// The predecessor is seeded BEFORE the poll path installs, so the release is performed
+/// by the CALL SITE. The sibling cell's direct calls to `publish_live_session_entry`
+/// exercise the function while bypassing the wiring — testing the transform while the
+/// defect lives in the feed.
+#[test]
+fn the_poll_paths_reverse_install_releases_a_seeded_predecessors_rows_9560() {
+    use crate::afxdp::bpf_map::{
+        RECORDER_ONLY_MAP_FD, SteeringHolder, SteeringMapRef, SteeringRowOwners,
+        publish_live_session_entry,
+    };
+
+    // PASS 1 exists only to learn the reverse key this flow derives.
+    let reverse_key = {
+        let owners = std::sync::Arc::new(SteeringRowOwners::default());
+        let (syn, meta_syn, _ack, _meta_ack) = dnat_frames();
+        let snapshot = inbound_dnat_snapshot(wan_to_lan_permit(DNAT_REAL, "permit-internal"));
+        let forwarding = build_forwarding_state(&snapshot);
+        let ha_state = txn_ha_state();
+        let mut sessions = SessionTable::new();
+        let mut binding = BindingWorker::new_for_mirror_test(0, 0, WAN_INGRESS_IFINDEX, 0);
+        binding.interface = Arc::<str>::from("reth0.80");
+        binding.bpf_maps.session_map = SteeringMapRef::new(
+            RECORDER_ONLY_MAP_FD,
+            std::sync::Arc::clone(&owners),
+            SteeringHolder::Worker(0),
+        );
+        let (_batch, dbg) = txn_run_descriptor(
+            &mut binding,
+            &mut sessions,
+            &forwarding,
+            &ha_state,
+            &syn,
+            meta_syn,
+        );
+        assert_eq!(dbg.tx, 1, "FIXTURE: pass 1 must admit the SYN to derive a reverse key");
+        let mut found: Option<SessionKey> = None;
+        sessions.iter_with_origin(|key, _decision, metadata, _origin| {
+            if metadata.is_reverse {
+                found = Some(key.clone());
+            }
+        });
+        found.expect("FIXTURE: pass 1 must install a reverse companion")
+    };
+
+    // PASS 2: the same flow, but a PREDECESSOR already holds a WIDER row set at that
+    // reverse key when the poll path installs over it.
+    let owners = std::sync::Arc::new(SteeringRowOwners::default());
+    let (syn, meta_syn, _ack, _meta_ack) = dnat_frames();
+    let snapshot = inbound_dnat_snapshot(wan_to_lan_permit(DNAT_REAL, "permit-internal"));
+    let forwarding = build_forwarding_state(&snapshot);
+    let ha_state = txn_ha_state();
+    let mut sessions = SessionTable::new();
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, WAN_INGRESS_IFINDEX, 0);
+    binding.interface = Arc::<str>::from("reth0.80");
+    binding.bpf_maps.session_map = SteeringMapRef::new(
+        RECORDER_ONLY_MAP_FD,
+        std::sync::Arc::clone(&owners),
+        SteeringHolder::Worker(0),
+    );
+
+    let _ = publish_live_session_entry(
+        binding.bpf_maps.session_map.handle(),
+        &reverse_key,
+        crate::nat::NatDecision {
+            rewrite_src: Some(std::net::IpAddr::V4(std::net::Ipv4Addr::new(203, 0, 113, 9))),
+            rewrite_src_port: Some(51_001),
+            ..crate::nat::NatDecision::default()
+        },
+        false,
+    );
+    let seeded = owners.held_row_count(&reverse_key, 0);
+    assert!(
+        seeded > 1,
+        "FIXTURE: the predecessor must claim MORE rows than a reverse entry names, or \
+         the release below has nothing to observe (held {seeded})"
+    );
+
+    let (_batch, dbg) = txn_run_descriptor(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &syn,
+        meta_syn,
+    );
+    assert_eq!(dbg.tx, 1, "FIXTURE: pass 2 must admit the SYN, or nothing installs over the seed");
+
+    assert_eq!(
+        owners.held_row_count(&reverse_key, 0),
+        1,
+        "the poll path's reverse install KEPT the predecessor's extra claims. An \
+         entry-level publish releases the rows its decision does not name; a key-level \
+         one claims its own row and leaves the rest owned by a session that no longer \
+         exists, so nothing will ever release them (#9560 round 3)"
+    );
+}
+
 fn the_poll_paths_reverse_install_releases_a_predecessors_rows_9560() {
     use crate::afxdp::bpf_map::{
         RECORDER_ONLY_MAP_FD, SteeringHolder, SteeringMapRef, SteeringRowOwners,
@@ -1092,12 +1200,12 @@ fn the_poll_paths_reverse_install_releases_a_predecessors_rows_9560() {
     // publish_live_session_entry, which bypass the call site entirely — it tests the
     // transform while the defect lives in the feed.
     //
-    // Closing it needs a different cell, not a stronger assertion here: seed a WIDER
-    // claim at the reverse key BEFORE the poll path installs (the key is derivable as
-    // reverse_session_key(&forward_key, decision.nat)), then assert the install
-    // released the rows its decision does not name. R9's driver row is declared
-    // UNCOVERED so the matrix REPORTS this gap on every run instead of implying
-    // coverage that is not there.
+    // CLOSED by a different cell rather than a stronger assertion here:
+    // `the_poll_paths_reverse_install_releases_a_seeded_predecessors_rows_9560` seeds a
+    // WIDER claim at the reverse key BEFORE the poll path installs, then asserts the
+    // install released the rows its decision does not name. That is the release
+    // semantics themselves rather than a count standing in for them — a count would
+    // have been a proxy that could rot silently if the row arithmetic ever changed.
     assert!(
         owners.held_row_count(&reverse_key, 0) >= 1,
         "the reverse install claimed nothing, so its row is unowned and an aliased \
