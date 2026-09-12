@@ -1078,23 +1078,30 @@ fn the_poll_paths_reverse_install_releases_a_predecessors_rows_9560() {
         }
     });
     let reverse_key = reverse_key.expect("fixture: the reverse companion must be in the table");
-    // #9560 round 3: this must measure the SHAPE of the poll path's publish, not merely
-    // that it claimed something. `>= 1` was satisfied by BOTH the entry-level publish
-    // and a key-level one, so the mutant reverting this call site to
-    // `publish_live_session_key` SURVIVED — the rest of this cell exercises
-    // `publish_live_session_entry` through DIRECT calls, which bypass the wiring
-    // entirely. The cell tested the transform while the defect lived in the feed.
+    // KNOWN GAP, stated rather than papered over (#9560 round 3, R9).
     //
-    // A DNAT session's reverse entry names more than one row (the reverse-wire row and
-    // its canonical twin), so an entry-level publish claims more than one; a key-level
-    // publish claims exactly one.
-    let claimed = owners.held_row_count(&reverse_key, 0);
+    // This assertion CANNOT detect a revert of the poll path's reverse install to a
+    // key-level publish, and neither can any other assertion in this cell. Measured
+    // twice: the mutant survives, and an attempt to strengthen this to `> 1` FAILED AT
+    // BASE — a reverse entry-level publish claims exactly ONE row, which is also what a
+    // key-level publish claims. Row count is the wrong observable here; the two arms
+    // agree on it by construction.
+    //
+    // The only property that separates them is the RELEASE of a predecessor's rows, and
+    // the rest of this cell exercises that through DIRECT calls to
+    // publish_live_session_entry, which bypass the call site entirely — it tests the
+    // transform while the defect lives in the feed.
+    //
+    // Closing it needs a different cell, not a stronger assertion here: seed a WIDER
+    // claim at the reverse key BEFORE the poll path installs (the key is derivable as
+    // reverse_session_key(&forward_key, decision.nat)), then assert the install
+    // released the rows its decision does not name. R9's driver row is declared
+    // UNCOVERED so the matrix REPORTS this gap on every run instead of implying
+    // coverage that is not there.
     assert!(
-        claimed > 1,
-        "the poll path's reverse install claimed {claimed} row(s). One row means it \
-         published at KEY level, which claims the new row without releasing what a \
-         same-key predecessor held — the rows nothing will ever name again (#9560 \
-         round 3)"
+        owners.held_row_count(&reverse_key, 0) >= 1,
+        "the reverse install claimed nothing, so its row is unowned and an aliased \
+         session's teardown deletes it while this session still needs it (#9560)"
     );
 
     // A predecessor at the SAME key with a wider row set: publishing the reverse entry
