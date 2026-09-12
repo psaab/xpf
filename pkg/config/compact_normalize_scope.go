@@ -576,9 +576,37 @@ func compactNormalizeInScope(containerKeyword, head string) bool {
 	//	                         baseline   braced      packed OFF   packed ON
 	//	family inet address      addrs=[]   [10.0.0.1/24]  []         [10.0.0.1/24]
 	//	family inet filter input ""         "f1"           ""         "f1"
+	// #9932 adds the two DHCP-client heads, on the same evidence the four above
+	// carry, measured rather than reasoned:
+	//
+	//	                              braced        elided (before)  empty stanza
+	//	family inet dhcp              DHCP=true     DHCP=false       DHCP=false
+	//	family inet6 dhcpv6-client    DHCPv6=true   DHCPv6=false     DHCPv6=false
+	//
+	// The elided spelling compiled IDENTICALLY to the empty stanza, which is this
+	// pass's admission precondition: a positive measurement that no reader
+	// consumes the packed tail today, so moving it cannot break one.
+	//
+	// PAIR REACH, checked against the schema like the note above: `(inet, dhcp)`
+	// and `(inet6, dhcpv6-client)` each reach EXACTLY ONE path, the interface
+	// unit's family. `dhcp` exists nowhere else under a container named `inet`,
+	// and `dhcpv6-client` nowhere else under `inet6`.
+	//
+	// The consequence of the gap was the worst shape this class has: an interface
+	// whose ONLY address source is DHCP committed clean with the client off, so it
+	// came up with no address at all and `show configuration` still displayed the
+	// statement. It is the canonical way to write a DHCP interface.
+	//
+	// The FLAT-SET path was already correct (`set interfaces ge-0/0/0 unit 0
+	// family inet dhcp` gives DHCP=true), because SetPath builds `dhcp` as a CHILD
+	// while the hierarchical parser leaves it on the container head's Keys. That
+	// bounded the exposure to configuration TEXT -- a saved config, `load merge`,
+	// a restored backup -- and is why the interactive CLI never showed it.
 	switch containerKeyword + " " + head {
 	case "inet address",
 		"inet6 address",
+		"inet dhcp",
+		"inet6 dhcpv6-client",
 		"filter input",
 		"filter output":
 		return true
