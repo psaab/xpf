@@ -7950,6 +7950,20 @@ fn retire_dead_worker_holders_reclaims_only_dead_workers_6979() {
         !alloc.debug_is_port_occupied(0, 20000),
         "the reclaimed port must be free for a new flow"
     );
+    // #9560 round 3: the POSITIVE case for the steering registry. The negative
+    // control above (a LIVE worker's claim must survive) was here without it, and a
+    // negative control alone cannot distinguish "correctly selective" from "does
+    // nothing" — measured: deleting the whole retirement block from
+    // `coordinator/status.rs` left this cell GREEN, because nothing asserted the
+    // dead worker's claim was actually released.
+    assert_eq!(
+        coordinator.steering_owners.owner_count(&steering_row),
+        0,
+        "a DEAD worker's steering claim survived the sweep. The bit then suppresses \
+         every later delete of the rows it held: an aliased session's teardown finds \
+         an owner that can never come back, and both the registry holding and the \
+         fixed-size BPF row leak for the life of the process (#9560 round 3)"
+    );
     assert!(
         atomics.holders_retired.load(Ordering::Relaxed),
         "the one-shot latch must be set after the sweep"

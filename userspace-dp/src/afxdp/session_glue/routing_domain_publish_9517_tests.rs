@@ -127,7 +127,19 @@ fn deletes(writes: &[SessionMapWriteRecord]) -> usize {
 /// failure: no delete may precede the first write.
 #[test]
 fn the_kernel_local_publish_writes_before_it_deletes_9560() {
-    let writes = worker_publish_writes(true, false);
+    // has_routing_domains=FALSE is the KERNEL-LOCAL branch. With routing domains the
+    // #9517 demotion publishes REDIRECT instead, so `true` never reaches the path this
+    // cell is NAMED for — and the cell passed `true`. Measured: the mutant that
+    // restores the pre-delete SURVIVED against `true`, because its
+    // `if uses_kernel_local { .. }` never executed.
+    let writes = worker_publish_writes(false, false);
+    assert_eq!(
+        pass_to_kernel_writes(&writes),
+        1,
+        "FIXTURE: the publish must take the KERNEL-LOCAL branch, or this cell is named \
+         for a path it never executes — which is exactly how it went green over a \
+         restored pre-delete. Writes: {writes:?}"
+    );
     let first_write = writes.iter().position(|w| w.value.is_some());
     let first_delete = writes.iter().position(|w| w.value.is_none());
     assert!(
