@@ -1070,19 +1070,24 @@ func compactNormalizeInScope(containerKeyword, head string) bool {
 		"single-rate committed-burst-size",
 		"single-rate committed-information-rate",
 		"single-rate excess-burst-size",
-		// #9620: `term then` and `term from` are deliberately NOT admitted. Both are
-		// keyword-keyed, so they are also live at policy-options policy-statement
-		// terms, and there each breaks a spelling that compiles correctly at
-		// 9f520a5b2:
-		//   - `term t1 from protocol ospf then accept;`: the fold puts `then accept`
-		//     under `from`, strict refuses the config, and the lenient load fails
-		//     to compile it.
-		//   - `term t1 then accept load-balance per-packet local-preference 200;`:
-		//     the fold leaves the actions after `accept` on the `then` node's keys,
-		//     and the policy compiler keeps only `accept`, on strict and lenient
-		//     alike.
-		// The firewall member (`term t1 then count C1 discard;`, #9620 H9) needs a
-		// remedy scoped to the firewall term, not this pair.
+		// #9620: `term from` is deliberately NOT admitted. It is keyword-keyed, so
+		// it is also live at policy-options policy-statement terms, and there it
+		// breaks a spelling that compiles correctly at 9f520a5b2:
+		// `term t1 from protocol ospf then accept;` folds `then accept` under
+		// `from`, strict refuses the config, and the lenient load fails to
+		// compile it.
+		//
+		// `term then` has the SAME keyword collision -- at policy-options,
+		// `term t1 then accept load-balance per-packet local-preference 200;`
+		// leaves the actions after `accept` on the `then` node's keys and the
+		// policy compiler keeps only `accept` -- and it is admitted anyway,
+		// because headDeclaresPacked9620 scopes it by the head's own schema
+		// instead of by this string. The firewall `then` declares
+		// packedStatements and the policy-options `then` does not, so the pair
+		// is live at the firewall term (#9620 H9) and inert at the policy term.
+		// See packed_term_then_9620.go; the two spellings above are pinned as
+		// cells, in both statement orders.
+		"term then",
 		"then count",
 		"then dscp",
 		"then forwarding-class",

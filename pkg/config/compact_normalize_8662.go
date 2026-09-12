@@ -139,7 +139,8 @@ func normalizeCompactNodes(nodes []*Node, schema *schemaNode, inScope func(conta
 			if childSub != child && identity >= 2 {
 				ckw = node.Keys[identity-1]
 			}
-			if _, isBody := childSub.children[head]; isBody && inScope(ckw, head) {
+			if headSchema, isBody := childSub.children[head]; isBody && inScope(ckw, head) &&
+				headDeclaresPacked9620(ckw, head, headSchema) {
 				// #8880: DECLINE rather than STRAND. The parser splits a run of
 				// statements packed onto an elided container's line into
 				// SIBLINGS, and only the first carries the container keyword:
