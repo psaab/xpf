@@ -28,6 +28,89 @@ impl Coordinator {
         self.forwarding = forwarding;
         self.publish_runtime_view();
     }
+
+    /// #9714 test seam: a LIVE LOCAL session as the forwarding path leaves it, the
+    /// forward entry and its reverse companion in the shared maps, with its owner RG
+    /// locally active or not.
+    ///
+    /// The server-side cells need it because they cannot reach `ha` or `shared_ops`,
+    /// and `upsert_synced_session` imports a PEER-synced entry: the one origin the
+    /// #9714 refusal must leave alone.
+    pub(crate) fn seed_live_local_session_for_test(
+        &mut self,
+        mut forward: SyncedSessionEntry,
+        owner_rg: i32,
+        rg_active: bool,
+    ) {
+        let now_secs = monotonic_nanos() / 1_000_000_000;
+        let runtime = if rg_active {
+            HAGroupRuntime {
+                active: true,
+                watchdog_timestamp: now_secs,
+                lease: HAGroupRuntime::active_lease_until(now_secs, now_secs),
+            }
+        } else {
+            HAGroupRuntime {
+                active: false,
+                watchdog_timestamp: 0,
+                lease: HAForwardingLease::Inactive,
+            }
+        };
+        self.ha
+            .rg_runtime
+            .store(Arc::new(BTreeMap::from([(owner_rg, runtime)])));
+        forward.origin = SessionOrigin::ForwardFlow;
+        forward.metadata.owner_rg_id = owner_rg;
+        forward.metadata.is_reverse = false;
+        let mut reverse = forward.clone();
+        reverse.key = reverse_session_key(&forward.key, forward.decision.nat);
+        reverse.origin = SessionOrigin::ReverseFlow;
+        reverse.metadata.is_reverse = true;
+        for entry in [&forward, &reverse] {
+            crate::afxdp::shared_ops::publish_shared_session(
+                &self.sessions.synced,
+                &self.sessions.nat,
+                &self.sessions.forward_wire,
+                &self.sessions.owner_rg_indexes,
+                entry,
+            );
+        }
+    }
+
+    /// #9714 test seam: register worker `worker_id` with a command queue a server-side
+    /// cell cannot otherwise reach, and return a reader of how many `DeleteSynced`
+    /// commands have been queued to it.
+    pub(crate) fn register_counting_worker_for_test(
+        &mut self,
+        worker_id: u32,
+    ) -> Box<dyn Fn() -> usize> {
+        let commands = Arc::new(Mutex::new(VecDeque::new()));
+        self.workers.register(
+            worker_id,
+            WorkerRuntimeRecord::for_test(WorkerHandle {
+                stop: Arc::new(AtomicBool::new(false)),
+                heartbeat: Arc::new(AtomicU64::new(0)),
+                commands: commands.clone(),
+                session_export_ack: Arc::new(AtomicU64::new(0)),
+                cos_status: Arc::new(ArcSwap::from_pointee(Vec::new())),
+                runtime_atomics: Arc::new(
+                    crate::afxdp::worker_runtime::WorkerRuntimeAtomics::new(),
+                ),
+                cold_path_atomics: Arc::new(
+                    crate::afxdp::cold_path_hist::WorkerColdPathAtomics::new(),
+                ),
+            }),
+            None,
+        );
+        Box::new(move || {
+            commands.lock().map_or(0, |queue| {
+                queue
+                    .iter()
+                    .filter(|command| matches!(command, WorkerCommand::DeleteSynced(_)))
+                    .count()
+            })
+        })
+    }
 }
 
 use crate::INJECT_PACKET_TUPLE_PROTOCOL_VERSION;

@@ -1,5 +1,42 @@
 use crate::afxdp::*;
 
+/// The outcome of a helper-side synced delete (#9714 review round 2, finding 7).
+///
+/// This replaces a `bool` in which a stale-generation REJECTION and a successful
+/// APPLY were the SAME value, `false`; only the peer refusal was distinguishable.
+/// Peer deletes currently carry generation 0, so the collision is latent — but it is
+/// latent in the direction that matters. A rejected delete reported as applied
+/// licenses the caller to destroy the mirror and DNAT rows of a session the helper
+/// still holds, and the mirror cannot be rebuilt afterwards: the refresh path writes
+/// with `BPF_EXIST` precisely so it will not recreate a deleted entry. The moment a
+/// generation-aware helper-originated delete exists, the conflation goes live.
+///
+/// Three states, because "I did it", "I declined" and "I declined for a DIFFERENT
+/// reason" are three different answers to the caller, and only the first of them
+/// permits any further teardown.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SyncedDeleteOutcome {
+    /// The entry named by the key was removed.
+    Applied,
+    /// Refused: a PEER delete named a live LOCAL session whose owner redundancy
+    /// group is locally forwarding-active — a dual-primary split.
+    RefusedLocalOwned,
+    /// Refused: the stored entry's install generation is strictly NEWER than the
+    /// delete's, so this is a stale delete arriving after a same-key replacement
+    /// the helper has already mirrored (#2170).
+    RefusedStaleGeneration,
+}
+
+impl SyncedDeleteOutcome {
+    /// Whether this is the #9714 ownership refusal specifically, which the handler
+    /// answers in-band with its own token so the Go side keeps its mirror and DNAT
+    /// rows. A stale-generation refusal is NOT that: it means the helper already
+    /// holds something newer, so the Go side has nothing to preserve.
+    pub(crate) fn is_refused_local_owned(self) -> bool {
+        matches!(self, Self::RefusedLocalOwned)
+    }
+}
+
 /// The outcome of an HA synced-session import (#6785).
 ///
 /// `upsert_synced_session` used to return `()`. It has three SEMANTIC refusal
@@ -754,6 +791,23 @@ impl crate::afxdp::ha::SessionDomain {
         self.delete_synced_session_gen(key, 0);
     }
 
+    /// #9714: a delete sent on behalf of the PEER (`SessionSyncRequest.peer_delete`:
+    /// the Go cluster-stale apply and the #6368 install rollback). It is refused for
+    /// a key this node holds as a LOCAL session whose owner redundancy group is
+    /// locally forwarding-active: under a dual-primary split both nodes forward the
+    /// flow, and the peer closing its copy must not remove this node's kernel,
+    /// DNAT and shared rows or send `DeleteSynced` to the sibling replicas. This is
+    /// the process-wide mirror of the worker's #9048 refusal
+    /// (`handle_delete_synced`), with the same predicate, so it fires only in a
+    /// dual-primary split. Otherwise, and for every authoritative delete, it
+    /// behaves exactly as `delete_synced_session`.
+    ///
+    /// Returns the OUTCOME. The handler answers a refusal in-band, so the Go side
+    /// keeps its own mirror and DNAT rows for the flow the helper kept.
+    pub fn delete_peer_synced_session(&self, key: SessionKey) -> SyncedDeleteOutcome {
+        self.delete_synced_session_gen_marked(key, 0, true)
+    }
+
     /// #2170 delete-side guard (belt-and-suspenders for any helper-side delete
     /// that carries a peer install generation): refuse to remove a stored
     /// entry whose generation is strictly NEWER than the delete's, so a stale
@@ -765,6 +819,15 @@ impl crate::afxdp::ha::SessionDomain {
     /// generation-aware deletes. A delete_gen of 0, or a stored generation of
     /// 0, falls back to unconditional delete (rolling-upgrade safe).
     pub fn delete_synced_session_gen(&self, key: SessionKey, delete_gen: u64) {
+        let _ = self.delete_synced_session_gen_marked(key, delete_gen, false);
+    }
+
+    fn delete_synced_session_gen_marked(
+        &self,
+        key: SessionKey,
+        delete_gen: u64,
+        peer_delete: bool,
+    ) -> SyncedDeleteOutcome {
         // #7209: ONE load of the published view, bound for the whole call. Two
         // loads inside one import can straddle a publish and resolve the
         // session's zones against one generation and its NAT against another —
@@ -791,7 +854,34 @@ impl crate::afxdp::ha::SessionDomain {
             self.sessions
                 .delete_stale_ignored
                 .fetch_add(1, Ordering::Relaxed);
-            return;
+            return SyncedDeleteOutcome::RefusedStaleGeneration;
+        }
+        // #9714: refuse a PEER delete of a live local session whose owner RG is
+        // locally active, before any kernel, DNAT or shared delete and before the
+        // worker fan-out. Nothing below runs, so no sibling replica is dropped.
+        //
+        // #9714 F4: the predicate is the INSTALL side's
+        // `synced_entry_allows_local_replace`, NOT `owner_rg_is_locally_active`.
+        // The latter hard-requires `owner_rg_id > 0`, so owner 0 — which means
+        // UNKNOWN rather than "no RG" — fell straight through to the delete,
+        // while the install side already refused to clobber such an entry
+        // whenever ANY redundancy group is forwarding-active. A delete guard
+        // weaker than the install guard it mirrors is the #9714 defect through a
+        // second door: the peer tears down what the peer could not have
+        // installed. The same fail-open sat on BOTH delete guards (here and the
+        // worker's #9048 refusal in `handle_delete_synced`); both move together,
+        // so the two verbs keep agreeing by construction rather than by comment.
+        if peer_delete
+            && let Some(entry) = removed_entry.as_ref()
+            && !entry.origin.is_peer_synced()
+            && !synced_entry_allows_local_replace(
+                self.rg_runtime.load().as_ref(),
+                entry.metadata.owner_rg_id,
+                monotonic_nanos() / 1_000_000_000,
+            )
+        {
+            PEER_DELETE_REFUSED_LOCAL_OWNED.fetch_add(1, Ordering::Relaxed);
+            return SyncedDeleteOutcome::RefusedLocalOwned;
         }
         let reverse_key = removed_entry.as_ref().and_then(|entry| {
             if entry.metadata.is_reverse {
@@ -834,12 +924,43 @@ impl crate::afxdp::ha::SessionDomain {
                 delete_dnat_table_entry(&dnat_fds, &entry.key, entry.decision.nat);
             }
         }
-        remove_shared_session(
+        // #9714 review round 2, finding 3: re-ask the decision UNDER THE LOCK, of the
+        // entry actually being removed.
+        //
+        // The early returns above still short-circuit a delete that will be refused,
+        // so no teardown is done for one. What they cannot do is bind their verdict
+        // to THIS removal: the entry was read at the top of this function and the
+        // lock released in the same statement, so a local replacement published in
+        // the window between would be destroyed on a decision taken about a
+        // different entry. Asking again inside the removal's own lock hold closes
+        // that window without an identity token — the entry the predicate sees IS
+        // the one removed.
+        let now_secs = monotonic_nanos() / 1_000_000_000;
+        let rg_runtime = self.rg_runtime.load();
+        let removal = remove_shared_session_if(
             &self.sessions.synced,
             &self.sessions.nat,
             &self.sessions.forward_wire,
             &self.sessions.owner_rg_indexes,
             &key,
+            |current| {
+                // #2170: a stale delete must not remove a NEWER same-key entry.
+                if current.generation != 0
+                    && delete_gen != 0
+                    && delete_gen < current.generation
+                {
+                    return false;
+                }
+                // #9714: nor may a peer delete remove a live LOCAL session whose
+                // owner RG is not free to be replaced.
+                !(peer_delete
+                    && !current.origin.is_peer_synced()
+                    && !synced_entry_allows_local_replace(
+                        rg_runtime.as_ref(),
+                        current.metadata.owner_rg_id,
+                        now_secs,
+                    ))
+            },
         );
         refresh_reverse_prewarm_owner_rg_indexes(
             &self.sessions.owner_rg_indexes.reverse_prewarm_sessions,
@@ -848,7 +969,14 @@ impl crate::afxdp::ha::SessionDomain {
             removed_entry.as_ref(),
             None,
         );
-        if let Some(reverse_key) = &reverse_key {
+        // The reverse companion goes only if the FORWARD actually went. If the
+        // predicate declined — a replacement appeared between the decision and the
+        // removal — the flow is still live, and tearing down its reverse half would
+        // leave a forward session that can no longer match its own replies: worse
+        // than either outcome the decision was choosing between.
+        if let Some(reverse_key) = &reverse_key
+            && !matches!(removal, SharedRemoval::Declined)
+        {
             remove_shared_session(
                 &self.sessions.synced,
                 &self.sessions.nat,
@@ -942,6 +1070,7 @@ impl crate::afxdp::ha::SessionDomain {
                 }
             }
         }
+        SyncedDeleteOutcome::Applied
     }
 
     /// #6979 F4: run the NAT teardown a worker will never run itself, because

@@ -2777,6 +2777,37 @@ never lock an operator out of a remote box it manages.
   proof; gate quiet-when-up / fires-when-down; the re-assert re-creates; and a
   loop-START cell asserting `Run` launches it unconditionally).
 
+  **Fabric overlay management-VRF membership (#9813).** A fabric overlay carries
+  the session-sync address, and session sync binds its sockets to `vrf-mgmt`, so
+  the overlay must be a member of that VRF. Only the apply bound it: step 0b
+  before networkd, and the authoritative step-2.7 re-bind after it. Two paths
+  create an overlay outside an apply, and neither sets a master: the re-assert
+  loop above and the deferred `OnXSKBound` callback. An overlay can also lose its
+  master without being re-created, for example through an out-of-band
+  `ip link set nomaster`. Session sync over that fabric then stayed down until the
+  next apply of any kind.
+  - After its ensure step, the re-assert pass binds every configured overlay that
+    the last apply published in the management-VRF set but whose master is not
+    `vrf-mgmt`. Its cheap gate counts such an overlay too.
+  - `createDeferredFabricOverlays`, the `OnXSKBound` callback, binds each overlay
+    it creates.
+  - Nothing is bound when the last apply did not manage `vrf-mgmt`.
+  - Tests: `fabric_overlay_vrf_9813_test.go`. It includes a kernel cell that runs
+    in a private netns (`unshare -rn`) and skips without `CAP_NET_ADMIN`.
+  - Routing-instance interface-LIST members have the same gap, and
+    `riMemberVRFReassertLoop` closes it. Step 0a and the #6805 late pass bind
+    them, both only from an apply, so a member netdev re-created outside one (a
+    driver re-probe, a VF reset) or unbound out of band forwards in the DEFAULT
+    table until the next apply. The loop binds only a member whose master is not
+    its VRF: `BindInterfaceToVRF` logs at Info on every call, so re-running the
+    apply's bind loop each tick would log on every tick of a healthy node. It
+    leaves a tunnel carrying its own `routing-instance` stanza alone, because
+    that is the tunnel manager's claim (`reconcileVRFClaimLocked` case 1, recorded
+    in `appliedRI` only from its own bind), and it resolves names through
+    `riMemberLinuxName` exactly as step 0a does, so the two reason about ONE name
+    set. It takes `applySem` before the config read that drives the binding
+    (#4001). Tests: `ri_member_vrf_reassert_9813_test.go`, including a kernel cell.
+
   **Host-inbound conntrack revocation retry (#6802, the same recovery shape):**
   `flushDeniedHostInboundConntrack` (the #5566 reconcile) deletes established
   kernel conntrack entries for host services the operator has just removed,

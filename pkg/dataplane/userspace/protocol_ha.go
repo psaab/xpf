@@ -187,6 +187,14 @@ type SessionSyncRequest struct {
 	// closing, which imports exactly as before. userspace-dp's
 	// SessionSyncRequest declares the same key.
 	TCPCloseClass uint8 `json:"tcp_close_class,omitempty"`
+	// PeerDelete (#9714) marks a delete sent on behalf of the PEER (the
+	// cluster-stale apply and the #6368 install rollback). The helper refuses such a
+	// delete for a key it holds as a LOCAL session whose owner redundancy group is
+	// locally active: under a dual-primary split both nodes forward the flow, and
+	// the peer closing its copy must not tear down this node's live one. An
+	// operator clear, GC expiry and policy revocation leave it false and delete as
+	// before. userspace-dp's SessionSyncRequest declares the same key.
+	PeerDelete bool `json:"peer_delete,omitempty"`
 }
 
 // SessionDeltaInfo is the HA session-open/close delta as it reaches this

@@ -164,7 +164,7 @@ func TestJunosHostDstExcludedProjectsNegatedSet(t *testing.T) {
 // therefore keep the WHOLE program un-representable — rendering the following
 // deny while silently dropping the permit's destination dimension would deny
 // traffic the operator explicitly permitted.
-func TestJunosHostDstScopedPermitStaysUnrepresentable(t *testing.T) {
+func TestJunosHostDstScopedPermitRendersAReturn9504(t *testing.T) {
 	proj := jh4146DstProjection(t,
 		"set security policies from-zone untrust to-zone junos-host policy ok match source-address any",
 		"set security policies from-zone untrust to-zone junos-host policy ok match destination-address wan-ip",
@@ -176,11 +176,27 @@ func TestJunosHostDstScopedPermitStaysUnrepresentable(t *testing.T) {
 		"set security policies from-zone untrust to-zone junos-host policy blk then deny",
 	)
 	p := jh4146OneProgram(t, proj)
-	if p.Representable {
-		t.Fatalf("a destination-scoped PERMIT must keep the program un-representable: %+v", p)
+	if !p.Representable {
+		t.Fatalf("#9504: a destination-scoped permit renders as a return carrying its own "+
+			"daddr, so the program is representable: %+v", p)
 	}
-	if len(proj.RenderedPolicyKeys) != 0 {
-		t.Errorf("no policy may be marked rendered when the program emits nothing: %+v", proj.RenderedPolicyKeys)
+	if len(p.RulesV4) != 2 {
+		t.Fatalf("want the permit's return then the deny's drop in v4, got %+v", p.RulesV4)
+	}
+	if r := p.RulesV4[0]; r.Verdict != JunosHostReturn || r.DstAny || len(r.Dst) != 1 {
+		t.Errorf("first v4 rule = %+v, want a return scoped to the permit's destination — "+
+			"a return that dropped its daddr would carve the later deny wider than authored", r)
+	}
+	if r := p.RulesV4[1]; r.Verdict != JunosHostDrop || !r.DstAny {
+		t.Errorf("second v4 rule = %+v, want the deny's drop for every destination", r)
+	}
+	// The deny is enforced; the permit is NEVER suppressed, because the half that
+	// would refuse what it does not match is enforced on no path (#9504).
+	if !proj.RenderedPolicyKeys[JunosHostZonePairPolicyKey("untrust", "blk")] {
+		t.Errorf("the deny renders a rule yet is not marked rendered: %+v", proj.RenderedPolicyKeys)
+	}
+	if proj.RenderedPolicyKeys[JunosHostZonePairPolicyKey("untrust", "ok")] {
+		t.Errorf("a permit must never be marked rendered: %+v", proj.RenderedPolicyKeys)
 	}
 }
 

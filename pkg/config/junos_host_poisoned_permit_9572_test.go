@@ -83,16 +83,17 @@ func junosHost9572Program(proj JunosHostDenyProjection) *JunosHostDenyProgram {
 }
 
 // junosHost9572AssertSSHDrop asserts p1's authored content in ONE family: one
-// rule, every source, nothing subtracted, and exactly TCP destination port 22.
+// drop rule for every source (no return ahead of it), and exactly TCP
+// destination port 22.
 func junosHost9572AssertSSHDrop(t *testing.T, family string, rules []JunosHostDenyRule) {
 	t.Helper()
 	if len(rules) != 1 {
 		t.Fatalf("%s: want exactly the p1 DROP rule, got %d rules: %+v", family, len(rules), rules)
 	}
 	r := rules[0]
-	if !r.SrcAny || len(r.Src) != 0 || len(r.PermitSubtract) != 0 {
-		t.Errorf("%s: p1 source content = SrcAny:%v Src:%v PermitSubtract:%v, want every source with nothing subtracted",
-			family, r.SrcAny, r.Src, r.PermitSubtract)
+	if !r.SrcAny || len(r.Src) != 0 || r.Verdict != JunosHostDrop {
+		t.Errorf("%s: p1 = SrcAny:%v Src:%v Verdict:%v, want a drop for every source",
+			family, r.SrcAny, r.Src, r.Verdict)
 	}
 	if len(r.L4) != 1 || r.L4[0].Proto != HostInboundProtoTCP ||
 		len(r.L4[0].Ports) != 1 || r.L4[0].Ports[0] != (PortRange{Lo: 22, Hi: 22}) {
@@ -153,11 +154,18 @@ func TestJunosHostPoisonedPermitKeepsFollowingDeny9572(t *testing.T) {
 	}
 }
 
-// TestJunosHostAuthoredPermitStillSubtracts9572 holds the other side. A fix
+// TestJunosHostAuthoredPermitStillCarvesTheDeny9572 holds the other side. A fix
 // that stopped projecting every permit, or keyed the skip off an empty
-// dimension instead of the flag, would satisfy the test above and break the
-// #4146 set subtraction.
-func TestJunosHostAuthoredPermitStillSubtracts9572(t *testing.T) {
+// dimension instead of the flag, would satisfy the test above and leave the
+// authored permit's carve unrendered.
+//
+// Renamed by #9504, because the mechanism it names is gone: the carve is no
+// longer a `saddr !=` SUBTRACTION applied to the deny — the permit renders as a
+// return AHEAD of the deny in first-match order. The cell kept its job, and it
+// is what catches a trailing-return trim or a permit-all shadow that stops
+// working (mutation rows V4 and V5, which scored ESCAPED only because I had
+// predicted a different cell by name).
+func TestJunosHostAuthoredPermitStillCarvesTheDeny9572(t *testing.T) {
 	// S2-CTRL: a valid `application any` permit for every source legitimately
 	// shadows p1 (#7477), strict and lenient alike.
 	t.Run("S2-CTRL application any permit-all shadows p1", func(t *testing.T) {
@@ -178,19 +186,19 @@ func TestJunosHostAuthoredPermitStillSubtracts9572(t *testing.T) {
 		}
 	})
 
-	// An authored narrow-source permit still carves p1 with `saddr !=`.
-	t.Run("authored source permit is subtracted from p1", func(t *testing.T) {
+	// An authored narrow-source permit still carves p1: its return precedes p1.
+	t.Run("authored source permit carves p1 ahead of it", func(t *testing.T) {
 		cfg, err := compileJunosHost9572(t, true,
 			junosHost9572Config("source-address NET9", "destination-address any", "application any")...)
 		if err != nil {
 			t.Fatalf("strict compile: %v", err)
 		}
 		prog := junosHost9572Program(BuildJunosHostDenyProjection(cfg))
-		if prog == nil || len(prog.RulesV4) != 1 {
-			t.Fatalf("want one v4 p1 rule, got %+v", prog)
+		if prog == nil || len(prog.RulesV4) != 2 {
+			t.Fatalf("want the p0 return then the p1 drop in v4, got %+v", prog)
 		}
-		if got := prog.RulesV4[0].PermitSubtract; len(got) != 1 || got[0] != "10.0.9.0/24" {
-			t.Errorf("p1 PermitSubtract = %v, want [10.0.9.0/24] from the authored p0 permit", got)
+		if r := prog.RulesV4[0]; r.Verdict != JunosHostReturn || len(r.Src) != 1 || r.Src[0] != "10.0.9.0/24" {
+			t.Errorf("first v4 rule = %+v, want the authored p0 permit's return for [10.0.9.0/24]", r)
 		}
 	})
 

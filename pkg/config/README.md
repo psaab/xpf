@@ -1682,3 +1682,50 @@ application terms are lowered separately
 exactly with trailing `Pad [N]byte` fields. cilium/ebpf serializes map
 values in native endian, not big-endian, so use `binary.NativeEndian`
 when packing IP addresses (already in network byte order on the wire).
+
+**Group expansion into split stanzas and wildcard adoption (#9802):** a group
+container with no same-keyed destination is adopted wholesale, and one with a
+same-keyed destination used to merge into the FIRST one only.
+- A wildcard-keyed node inside a wholesale-adopted subtree matched nothing by
+  construction, and used to land as a literal instance name — the #9423
+  phantom, reached by the route that issue's fixtures cannot take. It is now
+  dropped (`pruneWildcardInstances9802`), and a container whose whole body was
+  wildcard-keyed is not adopted at all.
+  - The scope is the node's SHAPE, not the schema: a zone's `interfaces` member
+    slot is declared as a wildcard child WITH children, exactly like a dynamic
+    instance name. Only a wildcard container, or a wildcard leaf carrying an
+    instance name, is dropped. A single-key wildcard leaf is a MEMBER and stays
+    loudly refused by the compiler's reference check (#9423).
+- A group container's wildcard-keyed children now reach every same-keyed
+  destination container, and the rest go to the one that can receive them
+  (`sameKeyedContainers9802`, `receivingContainer9802`). A level spread over two
+  blocks is one level, which is the rule `siblingsExcludeGroup` already applies
+  to `apply-groups-except` (#9422) and the pre-passes apply across roots
+  (#5741).
+
+**Group expansion of zone statements written as leaves (#9801, #9831):**
+`mergeNodes` (`ast_groups.go`) treats `security-zone trust;` as the zone it
+names. Both rules apply only to `security-zone` statements directly under
+`security zones` (`group_merge_zone_leaf_9801.go`).
+- A group's zone statement is matched against the inline statement naming the
+  same zone (`zoneGroupLeafPeer9831`). Before #9831 it matched on the keyword
+  alone, so an inline `security-zone trust;` overrode, and dropped, a group's
+  `security-zone zga;`.
+- A group zone statement that carries keys past the zone name is not
+  overridden by that zone's inline statement, because the override would drop
+  the extra keys. Examples are `security-zone [ zga zgb ];` and a mistyped
+  `security-zone trust scren edge;`. A braced zone takes a packed statement
+  through #7648; otherwise the statement is adopted, and #9656 judges it as it
+  would the same text written inline.
+- A `<*>` group reaches a zone written as a leaf, which becomes the empty
+  container its braced spelling is (`zoneLeafTakesWildcard9801`). Before #9801
+  the wildcard merge visited only non-leaf destinations, so
+  `security-zone trust;` lost a group's screen that `security-zone trust { }`
+  took.
+- Every other named instance keeps the keyword override. An interface or
+  routing instance written as a leaf compiles no instance at all (#9838). A
+  schema-generic identity rule was tried and withdrawn. It compiled a
+  duplicate next hop for a value list (`next-hop [ a b ]`), misclassified
+  `multi` named containers such as `class-of-service schedulers`, and split
+  keys the compiler canonicalises (`ospf area 0` against `area 0.0.0.0`). That
+  work is #9859.

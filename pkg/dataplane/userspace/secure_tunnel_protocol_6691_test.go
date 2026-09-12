@@ -88,7 +88,12 @@ const preSecureTunnelProtocolVersion = 4
 // Issue 9520 moved it 14 -> 15, for `ConfigSnapshot.content_digest`, which the
 // helper compares when an apply reuses its installed generation. Nothing about
 // secure_tunnel changed, so MinProtocolSecureTunnelRefusal (7) is untouched.
-const secureTunnelSnapshotProtocolVersion = 15
+//
+// Issue 9714 moved it 15 -> 16, for `SessionSyncRequest.PeerDelete`, which lets
+// the helper refuse a peer delete of a live local session under a dual-primary
+// split. Nothing about secure_tunnel changed, so MinProtocolSecureTunnelRefusal
+// (7) is untouched.
+const secureTunnelSnapshotProtocolVersion = 16
 
 // preV5HelperAcceptsSnapshot models the exact-equality version gate a pre-v5
 // helper applies before touching any dataplane state

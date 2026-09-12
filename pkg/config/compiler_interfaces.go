@@ -32,13 +32,14 @@ func compileInterfaces(node *Node, ifaces *InterfacesConfig, opts compileOpts, w
 			continue
 		}
 		ifName := child.Name()
+		ifLeaves := expandResolvingRun9792(child, interfaceSchema9792()) // #9792: expand a lenient-path packed run (#9235).
 		ifc := &InterfaceConfig{
 			Name:  ifName,
 			Units: make(map[int]*InterfaceUnit),
 		}
 
 		// Check for description
-		if descNode := child.FindChild("description"); descNode != nil {
+		if descNode := ifLeaves.FindChild("description"); descNode != nil {
 			ifc.Description = nodeVal(descNode)
 		}
 
@@ -63,7 +64,7 @@ func compileInterfaces(node *Node, ifaces *InterfacesConfig, opts compileOpts, w
 		}
 
 		// Interface bandwidth (bits per second)
-		if bwNode := child.FindChild("bandwidth"); bwNode != nil {
+		if bwNode := ifLeaves.FindChild("bandwidth"); bwNode != nil {
 			if v := nodeVal(bwNode); v != "" {
 				ifc.Bandwidth = parseBandwidthBps(v)
 			}
@@ -104,6 +105,7 @@ func compileInterfaces(node *Node, ifaces *InterfacesConfig, opts compileOpts, w
 
 		// Check for gigether-options redundant-parent and 802.3ad LAG member
 		if goNode := child.FindChild("gigether-options"); goNode != nil {
+			goNode = expandResolvingRun9792(goNode, gigetherOptionsSchema9792()) // #9792: expand a lenient-path packed run (#9235).
 			if rpNode := goNode.FindChild("redundant-parent"); rpNode != nil {
 				ifc.RedundantParent = nodeVal(rpNode)
 			}
@@ -114,6 +116,7 @@ func compileInterfaces(node *Node, ifaces *InterfacesConfig, opts compileOpts, w
 
 		// Check for aggregated-ether-options (LAG/ae interface)
 		if aeoNode := child.FindChild("aggregated-ether-options"); aeoNode != nil {
+			aeoNode = expandResolvingRun9792(aeoNode, aggregatedEtherOptionsSchema9792()) // #9792: expand a lenient-path packed run (#9235).
 			opts := &AggregatedEtherOptions{}
 			if lacpNode := aeoNode.FindChild("lacp"); lacpNode != nil {
 				if lacpNode.FindChild("active") != nil {
@@ -716,7 +719,7 @@ func parseTunnelWireguard(tc *TunnelConfig, wgNode *Node) {
 	// both AST shapes via namedInstances and append one WgPeerConfig
 	// per instance (preserving config order — the snapshot builder
 	// sorts by pubkey for HA determinism).
-	for _, prop := range wgNode.Children {
+	for _, prop := range expandResolvingRuns9792(wgNode.Children, tunnelWireguardSchema9792()) { // #9792: expand a lenient-path packed run (#9235).
 		switch prop.Name() {
 		case "listen-port":
 			if v := nodeVal(prop); v != "" {
@@ -754,7 +757,7 @@ func parseTunnelWireguard(tc *TunnelConfig, wgNode *Node) {
 // commit-time hex validator rejects it.
 func parseTunnelWireguardPeer(pubkey string, peerNode *Node) WgPeerConfig {
 	peer := WgPeerConfig{PublicKeyHex: strings.ToLower(pubkey)}
-	for _, prop := range peerNode.Children {
+	for _, prop := range expandResolvingRuns9792(peerNode.Children, tunnelWireguardPeerSchema9792()) { // #9792: expand a lenient-path packed run (#9235).
 		switch prop.Name() {
 		case "allowed-ips":
 			// Multi-value (#2419): a bracketed list `allowed-ips [ a b ]`

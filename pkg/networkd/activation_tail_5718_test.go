@@ -66,7 +66,15 @@ func activationTailIfaces() []InterfaceConfig {
 // true by construction: the same predicate would decide both the expectation
 // and the behaviour, so deleting an arm would change them together and the test
 // could never red.
-var wantActivationTailArgv = []string{"reconfigure", "trust0", "dmz0"}
+//
+// #9885 inserted `--` after the verb. That is not part of what this expectation
+// is about — the INTERFACE SET is — but it is spelled out here too, for the same
+// reason the names are: an expectation derived from the production argv builder
+// would be true by construction. `--` ends option parsing, so a name beginning
+// with `-` reaches networkctl as an OPERAND rather than as an option; without it
+// a name like `--help` exits 0 without acting and leaves the whole batch
+// unapplied while Apply reads success.
+var wantActivationTailArgv = []string{"reconfigure", "--", "trust0", "dmz0"}
 
 // rpFilterFixture points procSysNetRoot at a temp tree with the slow-path TUN's
 // rp_filter pre-set to networkd's post-reload default, and returns a reader for

@@ -564,7 +564,24 @@ func (m *Manager) Apply(interfaces []InterfaceConfig) error {
 			}
 		}
 		if len(reconf) > 0 {
-			args := append([]string{"reconfigure"}, reconf...)
+			// `--` ENDS OPTION PARSING (#9885). Interface names occupy argv
+			// slots here, and a name beginning with `-` would be read by
+			// networkctl as an OPTION rather than as a link. The damage is not
+			// that it errors — it is that `--help` and `--version` exit 0
+			// WITHOUT acting, so ONE badly named interface leaves EVERY
+			// interface in this batch unconfigured while the branch below
+			// reads success and clears the retry debt. A name like `-x` would
+			// at least fail noisily.
+			//
+			// `ValidateInterfaceName` now refuses a leading `-` at commit, so
+			// this is the belt to that suspenders: it also covers a name that
+			// predates the validator or arrives from a path that does not run
+			// it. Same treatment the repo already gives scp (#4589).
+			//
+			// Verified against networkctl (systemd 261) rather than assumed:
+			// `networkctl list -- lo` and `networkctl list lo` produce
+			// identical output, so the separator is accepted and inert.
+			args := append([]string{"reconfigure", "--"}, reconf...)
 			// Best-effort (reload above already applied the files), but the
 			// failure is no longer silent AND no longer forgotten: record the
 			// debt so the next Apply retries even with unchanged files (#4954).

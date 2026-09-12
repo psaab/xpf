@@ -1,0 +1,35 @@
+# userspace-dp/MIRI.registry -- the modules `make test-miri` actually runs
+# under Miri (#9499 member 2).
+#
+# FORMAT: <module-path>  <min-passed>  <one-line reason>
+#
+#   module-path   the `cargo miri test` filter, e.g. `afxdp::types::cos::`.
+#                 It must resolve to a real file under userspace-dp/src/;
+#                 scripts/miri-census.sh FAILS if it does not, because a
+#                 registry entry pointing at a module that no longer exists is
+#                 the silent-shrink failure wearing a green face.
+#   min-passed    the floor `make test-miri` asserts against the module's
+#                 `test result: ok. N passed` line. A MISSING result line and
+#                 `0 passed` are both FAILURES, never skips -- a leg that ran
+#                 nothing and exited 0 is exactly what this registry exists to
+#                 make impossible.
+#   reason        why this module is worth the Miri budget, in one line.
+#
+# WHY A REGISTRY AND NOT `miri test` OVER THE CRATE
+#
+#   Measured at 16df7c8c7: `cargo +nightly miri test --bins -- afxdp::frame::`
+#   ran 1021 s and then stopped on an `unsupported operation: open ... when
+#   isolation is enabled` from a test that reads a file. Miri over this crate
+#   is neither fast nor uniformly clean, so the honest shape is a named subset
+#   plus a census that makes every module OUTSIDE the subset say so in writing
+#   (userspace-dp/MIRI.unregistered).
+#
+# HOW THIS SHRINKS SAFELY
+#
+#   It cannot shrink silently. Deleting a line here does not make the leg
+#   quieter -- it makes scripts/miri-census.sh report every miri-coverage claim
+#   that line was covering as undeclared, and the census exits 1. Removing a
+#   module for real is therefore a two-part edit that names its own reason in
+#   MIRI.unregistered, which is the visible-cost property #9499 asks for.
+#
+afxdp::types::cos::  12  FlowFairState::new_boxed writes MaybeUninit fields through raw pointers; Miri is the only oracle in the tree that can see a missed field or a bad drop target. Measured clean at 16df7c8c7: 12 passed, 76 s, no unsupported operations.

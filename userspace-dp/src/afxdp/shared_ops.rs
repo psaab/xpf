@@ -1253,6 +1253,19 @@ fn remove_shared_alias_owned_by(
     }
 }
 
+/// The outcome of a conditional shared-session removal (#9714 review round 2,
+/// finding 3).
+pub(super) enum SharedRemoval {
+    /// The predicate accepted, and this is the entry that was removed — the SAME
+    /// one the predicate saw, under the same lock hold.
+    Removed(Box<SyncedSessionEntry>),
+    /// An entry was present and the predicate DECLINED it. Nothing was mutated:
+    /// not the shared maps, not the aliases, and not the reverse-prewarm filing.
+    Declined,
+    /// No entry at the key.
+    Absent,
+}
+
 pub(super) fn remove_shared_session(
     shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
     shared_nat_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
@@ -1260,6 +1273,39 @@ pub(super) fn remove_shared_session(
     shared_owner_rg_indexes: &SharedSessionOwnerRgIndexes,
     key: &SessionKey,
 ) {
+    let _ = remove_shared_session_if(
+        shared_sessions,
+        shared_nat_sessions,
+        shared_forward_wire_sessions,
+        shared_owner_rg_indexes,
+        key,
+        |_| true,
+    );
+}
+
+/// `remove_shared_session` with the removal CONDITIONAL on a predicate evaluated
+/// under the SAME lock hold that performs it (#9714 review round 2, finding 3).
+///
+/// The delete path used to clone the entry, release the lock, decide, and only then
+/// call the unconditional remove — so a local replacement published in that window
+/// was destroyed on a decision taken about a DIFFERENT entry. Deciding inside the
+/// removal's own lock hold closes the window without needing an identity token: the
+/// entry the predicate sees IS the entry removed. A stamp would validate a token and
+/// then trust it, which leaves the same window one step further along.
+///
+/// The review prescribed "an incarnation/generation comparison". That identity does
+/// not exist: `generation` is 0 for local-origin entries and `session_id` is 0 for
+/// local-origin publishes, and local entries are exactly the population this guard
+/// protects. So the goal is reached by the route that exists rather than the one
+/// prescribed.
+pub(super) fn remove_shared_session_if(
+    shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_nat_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_forward_wire_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_owner_rg_indexes: &SharedSessionOwnerRgIndexes,
+    key: &SessionKey,
+    accept: impl FnOnce(&SyncedSessionEntry) -> bool,
+) -> SharedRemoval {
     // #7209: un-file this key from the reverse-prewarm index HERE, so that
     // EVERY removal path is covered rather than only the coordinator's delete
     // verb. `purge_translated_synced_hit` (session_glue/promote.rs) and the
@@ -1279,15 +1325,28 @@ pub(super) fn remove_shared_session(
     // Needs no `forwarding`, which is what allows it to live here at all. While
     // the un-file was derived from the FIB it could only be done where a
     // `ForwardingState` was in scope, and it could not be authoritative anyway.
-    {
-        let mut index = lock_shared_recover(&shared_owner_rg_indexes.reverse_prewarm_sessions);
-        remove_owner_rg_index_key_from_every_bucket_locked(&mut index, key);
-    }
+    // #9714 r2 F3: the un-file MOVED to after the decision — see the block near the
+    // end of this function. It stays unconditional for the ABSENT and REMOVED cases,
+    // which is what #7209 above requires; it is skipped only on a DECLINE, where the
+    // entry remains LIVE and un-filing it would strand a session that still exists
+    // (the activation prewarm skips a key it cannot find).
+    //
+    // Safe to move: the prewarm lock and `shared_sessions` are acquired SEQUENTIALLY
+    // and never nested — the guard was dropped before the sessions lock was taken —
+    // and no production caller holds either across the call. All nine were checked
+    // by name; see docs/log/9714.md.
+    //
     // #2402: recover poison so a delete-sync removal is never silently
     // skipped (leaving a stale entry that would mis-route after failover)
     // because a worker panicked under the shared-session lock.
     let mut sessions = lock_shared_recover(shared_sessions);
-    if let Some(entry) = sessions.remove(key) {
+    if let Some(candidate) = sessions.get(key)
+        && !accept(candidate)
+    {
+        return SharedRemoval::Declined;
+    }
+    let removed_entry = sessions.remove(key);
+    if let Some(entry) = removed_entry.as_ref() {
         remove_owner_rg_index_entry(
             &shared_owner_rg_indexes.sessions,
             entry.metadata.owner_rg_id,
@@ -1339,6 +1398,20 @@ pub(super) fn remove_shared_session(
                 }
             }
         }
+    }
+    // Release the sessions lock before the prewarm un-file: the two are sequential,
+    // never nested, which is what makes the reorder safe (#9714 r2 F3).
+    drop(sessions);
+    // #7209, moved here from before the decision. Unconditional for REMOVED and
+    // ABSENT exactly as it was — "a key with no entry must not be filed either" —
+    // and reached only on those two paths, because a DECLINE returned above.
+    {
+        let mut index = lock_shared_recover(&shared_owner_rg_indexes.reverse_prewarm_sessions);
+        remove_owner_rg_index_key_from_every_bucket_locked(&mut index, key);
+    }
+    match removed_entry {
+        Some(entry) => SharedRemoval::Removed(Box::new(entry)),
+        None => SharedRemoval::Absent,
     }
 }
 

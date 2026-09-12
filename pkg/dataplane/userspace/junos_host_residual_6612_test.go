@@ -129,6 +129,11 @@ func policy(name, src, dst, app, action string) []string {
 
 // TestJunosHostResidualIsUnrenderedAndWarned6612 walks the #6612 remainder.
 //
+// #9504 removed two rows — `then reject` and a deny on a `tcp-rst` ingress zone
+// — because both render now, with the runtime's own verdict. They moved to
+// TestJunosHostRejectAndTCPRstAreEnforced9504, which asserts that verdict rather
+// than only the rendering.
+//
 // FAIL-ON-REVERT: each row's residual attribute is the only difference from its
 // flip, so removing a representability gate in junosHostProjectTerm /
 // junosHostProjectProgram makes that row render rules (half 1 RED) and lose its
@@ -173,22 +178,6 @@ func TestJunosHostResidualIsUnrenderedAndWarned6612(t *testing.T) {
 			cmds: concat(residualBase, feedScaffolding,
 				policy("feed-dst", "any", "feed-bad", "any", "deny")),
 			flip:      concat(residualBase, feedScaffolding, policy("feed-dst", "any", "fw-mgmt", "any", "deny")),
-			flipRules: true,
-		},
-		{
-			name:       "then reject (a silent kernel drop diverges from the RST/ICMP verdict class)",
-			policyName: "rej",
-			cmds:       concat(residualBase, policy("rej", "bad-host", "any", "any", "reject")),
-			flip:       concat(residualBase, policy("rej", "bad-host", "any", "any", "deny")),
-			flipRules:  true,
-		},
-		{
-			name:       "deny in a tcp-rst ingress zone (every deny in the zone answers with a RST)",
-			policyName: "rst-zone",
-			cmds: concat(residualBase,
-				[]string{"set security zones security-zone untrust tcp-rst"},
-				policy("rst-zone", "bad-host", "any", "any", "deny")),
-			flip:      concat(residualBase, policy("rst-zone", "bad-host", "any", "any", "deny")),
 			flipRules: true,
 		},
 		{
@@ -379,49 +368,37 @@ func TestJunosHostMultiTermApplicationIsFullyExpanded6612(t *testing.T) {
 }
 
 // TestJunosHostDestinationScopedPermitDoesNotWidenALaterDeny6612 is the
-// mutation anchor for the RULES half of the destination-scoped-permit contract.
-// The table above asserts the conjunction (no rules AND a warning naming the
-// policy) for this class; this pins the half the table's fixture cannot make
-// gate-sensitive.
+// projection half of the #6612 destination-scoped permit class, re-pointed by
+// #9504.
 //
-// The two halves cannot be made load-bearing by ONE fixture, and the reason is
-// structural rather than a shortcut here:
+// Before #9504 a permit could be projected only as a `saddr !=` subtraction of
+// later denies, which cannot express a carve that is also destination-scoped, so
+// the projection refused to render the WHOLE zone program and this cell asserted
+// emptiness. The permit now renders as a return carrying its own destination
+// predicate, so the property to hold is the one the emptiness stood in for: the
+// deny that follows is exactly as wide as authored, and the permit's carve is
+// exactly as narrow.
 //
-//   - For the RULES half to red when the projection's destination gate is
-//     deleted, the permit needs a CONCRETE source. With `source-address any` the
-//     permit sets permitAllV4 and shadows every later deny outright, so the
-//     program renders nothing with or without the gate.
-//   - For the WARNING half to red when the advisory's destination clause is
-//     deleted, the permit must NOT be source-scoped, or it warns through
-//     junosHostPolicySourceScoped and proves nothing about the destination
-//     dimension.
-//
-// A concrete source and no concrete source are mutually exclusive, so the class
-// is covered by the table row (source `any` — pins the warning clause) plus this
-// test (concrete source ahead of a deny — pins the projection gate). Both
-// fixtures assert what they can; neither pretends to bind the other's gate.
-//
-// The property this one binds: without the projection gate, the deny that
-// follows renders `saddr != <permit source>` and stops denying that source to
-// every firewall address the permit never covered — an under-deny, and the only
-// shape in which the gate changes a packet verdict.
-//
-// FAIL-ON-REVERT: delete the `p.Action != PolicyDeny && (junosHostAddrScoped(...)
-// || DestinationAddressExcluded)` gate in junosHostProjectTerm — RED here.
+// It needs a CONCRETE source for the same reason it always did: with
+// `source-address any` the permit returns every packet and shadows the deny
+// outright, so nothing downstream would be observable either way.
 func TestJunosHostDestinationScopedPermitDoesNotWidenALaterDeny6612(t *testing.T) {
 	followingDeny := policy("blk", "any", "any", "any", "deny")
 	for _, tc := range []struct {
-		name string
-		cmds []string
+		name   string
+		permit string
+		cmds   []string
 	}{
 		{
-			name: "destination-scoped permit ahead of a deny",
+			name:   "destination-scoped permit ahead of a deny",
+			permit: "dst-permit",
 			cmds: concat(residualBase,
 				policy("dst-permit", "mgmt-net", "fw-mgmt", "any", "permit"),
 				followingDeny),
 		},
 		{
-			name: "destination-EXCLUDED permit ahead of a deny",
+			name:   "destination-EXCLUDED permit ahead of a deny",
+			permit: "dstx-permit",
 			cmds: concat(residualBase,
 				policy("dstx-permit", "mgmt-net", "fw-mgmt", "any", "permit"),
 				[]string{"set security policies from-zone untrust to-zone junos-host policy dstx-permit match destination-address-excluded"},
@@ -430,21 +407,85 @@ func TestJunosHostDestinationScopedPermitDoesNotWidenALaterDeny6612(t *testing.T
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := residualCfg(t, tc.cmds)
-			if n := residualRuleCount(cfg); n != 0 {
-				t.Errorf("rendered %d kernel DROP rule(s); a destination-scoped permit ahead of a deny must leave the zone program EMPTY — projecting the permit as a bare `saddr !=` subtraction drops its destination scope and under-denies the permitted source to every other firewall address", n)
+			progs := BuildJunosHostPrograms(cfg)
+			if len(progs) != 1 {
+				t.Fatalf("want one program for the ingress zone, got %+v", progs)
 			}
-			// The deny that follows DOES warn (a deny always does), which is what
-			// keeps the zone's other policies visible. The permit does not — the
-			// open half named above.
-			if got := residualWarnings(cfg, "blk"); len(got) != 1 {
-				t.Errorf("the following deny must keep its #4168 warning (%d), otherwise the whole zone is silent, not just the permit; got %v", len(got), got)
+			v4 := progs[0].RulesV4
+			if len(v4) != 2 {
+				t.Fatalf("want the permit's return then the deny's drop in v4, got %+v", v4)
+			}
+			if r := v4[0]; r.Verdict != config.JunosHostReturn || r.DstAny || len(r.Dst) != 1 {
+				t.Errorf("first v4 rule = %+v, want a return still scoped to the permit's "+
+					"destination; dropping that predicate is what would under-deny the "+
+					"permitted source to every other firewall address", r)
+			}
+			if r := v4[1]; r.Verdict != config.JunosHostDrop || !r.DstAny || !r.SrcAny {
+				t.Errorf("second v4 rule = %+v, want the deny unchanged for every source and "+
+					"destination", r)
+			}
+			// The deny is enforced on the direct path now, so its warning is gone. The
+			// permit keeps one: no path refuses what it does not match.
+			if got := residualWarnings(cfg, "blk"); len(got) != 0 {
+				t.Errorf("the deny renders kernel rules yet still warns (%d): %v", len(got), got)
+			}
+			if got := residualWarnings(cfg, tc.permit); len(got) != 1 {
+				t.Errorf("the permit must keep its warning (%d): %v", len(got), got)
 			}
 		})
 	}
-	// Non-vacuity: the same builder and fixture DO render a rule for that deny
-	// when no un-representable permit precedes it, so the zero above is the gate
-	// and not an inert fixture.
+	// Non-vacuity: the same builder and fixture render for a lone deny too, so the
+	// shapes above are the gate and not an inert fixture.
 	if n := residualRuleCount(residualCfg(t, residualBase, followingDeny)); n == 0 {
 		t.Fatalf("control: a lone representable deny must render a kernel rule on this fixture; got 0")
+	}
+}
+
+// TestJunosHostRejectAndTCPRstAreEnforced9504 holds the two rows #9504 moved out
+// of the residual table: they render now, with the verdict the runtime answers
+// with. Asserting the VERDICT is the point — a silent drop where the runtime
+// sends a RST trades a visible gap for an invisible divergence, and both halves
+// of the residual contract (no rule, a warning) would still look satisfied by a
+// plain drop.
+func TestJunosHostRejectAndTCPRstAreEnforced9504(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		policy  string
+		verdict config.JunosHostVerdict
+		cmds    []string
+	}{
+		{
+			name:    "then reject",
+			policy:  "rej",
+			verdict: config.JunosHostReject,
+			cmds:    concat(residualBase, policy("rej", "bad-host", "any", "any", "reject")),
+		},
+		{
+			name:    "deny on a tcp-rst ingress zone",
+			policy:  "rst-zone",
+			verdict: config.JunosHostDropTCPReset,
+			cmds: concat(residualBase,
+				[]string{"set security zones security-zone untrust tcp-rst"},
+				policy("rst-zone", "bad-host", "any", "any", "deny")),
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := residualCfg(t, tc.cmds)
+			n := 0
+			for _, p := range BuildJunosHostPrograms(cfg) {
+				for _, r := range append(append([]config.JunosHostDenyRule{}, p.RulesV4...), p.RulesV6...) {
+					n++
+					if r.Verdict != tc.verdict {
+						t.Errorf("rule verdict = %v, want %v", r.Verdict, tc.verdict)
+					}
+				}
+			}
+			if n == 0 {
+				t.Fatal("no kernel rule rendered, so this class is still unenforced")
+			}
+			if got := residualWarnings(cfg, tc.policy); len(got) != 0 {
+				t.Errorf("an enforced policy still warns (%d): %v", len(got), got)
+			}
+		})
 	}
 }
