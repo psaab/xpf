@@ -2,7 +2,9 @@ Source: xpf
 Section: net
 Priority: optional
 Maintainer: xpf maintainers <noreply@anthropic.com>
-Build-Depends: debhelper-compat (= 13)
+Build-Depends: debhelper-compat (= 13),
+ libxdp-dev (>= 1.6.3),
+ libxdp-dev (<< 1.7)
 Standards-Version: 4.6.2
 Homepage: https://github.com/psaab/xpf
 Rules-Requires-Root: no
