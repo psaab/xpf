@@ -110,6 +110,16 @@ func TestAZoneMapNamingNoZoneSkipsTheReconcile_9655(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			rx, dp := receiver9655(t, false, tc.zoneRG)
+			// THE PROPERTY: no snapshot is taken at all. Asserting only that
+			// nothing was deleted cannot see this — with an empty snapshot every
+			// zone falls to shouldSync's unnamed-zone default, which KEEPS, so a
+			// bulk that wrongly snapshots deletes nothing either and the cell
+			// passes for the wrong reason.
+			if snap := rx.snapshotZoneOwnership(); snap != nil {
+				t.Errorf("#9655: a zone map naming no zone produced a snapshot (%d zones, mapGen %d); the "+
+					"reconcile must take none and skip, so the next bulk can judge by a real map",
+					len(snap.zones), snap.mapGen)
+			}
 			pumpBulk(t, emptyWindowSender9655(t), rx)
 			for what, key := range map[string]dataplane.SessionKey{
 				"the session in an RG-unmapped zone": staleUnmapped9655,
