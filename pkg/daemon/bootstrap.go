@@ -643,6 +643,24 @@ func (d *Daemon) runBootstrapTeardownSteps() []bootstrapTeardownStep {
 		}
 	}
 
+	// #9725: close the kernel transit path BEFORE the detach, not after it.
+	// Teardown destroys the last XDP link, and nothing re-evaluates the gate
+	// while it runs, so closing afterwards left forwarding open with no shim
+	// attached for the whole teardown — the same window this issue exists to
+	// remove, and the one the fail-closed shutdown already avoids by closing
+	// ahead of its own detach (#9686, daemon_run_shutdown.go).
+	//
+	// #5275: the detach UN-ARMS this node — the shim is no longer attached, so
+	// nothing adjudicates transit. Dropping the armed flag keeps the transit
+	// gate closed at the next apply tail (applyKernelTuning), whatever link
+	// count it reads. Unconditional: a rollback that found no published backend
+	// is equally unarmed, and the write is a no-op when the knobs are already
+	// closed. The bootstrap-exit arm, when a corrected commit re-arms the
+	// retained object, reopens nothing by itself: the gate reopens only when
+	// a re-evaluation finds the dataplane armed with a live attached link.
+	d.markDataplaneNotArmed("bootstrap rollback",
+		"dataplane detaching; first commit confirmed timed out")
+
 	// (4) Detach the dataplane (inverse of Start). Keep the object so a later
 	// confirmed commit re-arms it via runBootstrapExitStartup.
 	if rt := d.dataplane(); rt != nil {
@@ -650,17 +668,6 @@ func (d *Daemon) runBootstrapTeardownSteps() []bootstrapTeardownStep {
 			steps = append(steps, bootstrapTeardownStep{name: "dataplane teardown", err: err})
 		}
 	}
-	// #5275: the detach above UN-ARMS this node — the shim is no longer
-	// attached, so nothing adjudicates transit. Close the kernel transit
-	// path to match, and drop the armed flag so the transit gate stays
-	// closed at the next apply tail (applyKernelTuning), whatever link count
-	// it reads. Unconditional: a rollback that found no published backend is
-	// equally unarmed, and the write is a no-op when the knobs are already
-	// closed. The bootstrap-exit arm, when a corrected commit re-arms the
-	// retained object, reopens nothing by itself: the gate reopens only when
-	// a re-evaluation finds the dataplane armed with a live attached link.
-	d.markDataplaneNotArmed("bootstrap rollback",
-		"dataplane detached; first commit confirmed timed out")
 
 	return steps
 }

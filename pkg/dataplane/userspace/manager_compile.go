@@ -932,13 +932,30 @@ func (m *Manager) syncInterfaceAttachments(result *dataplane.CompileResult, snap
 	for _, ifindex := range buildUserspaceIngressIfindexes(snapshot) {
 		allowed[int(ifindex)] = true
 	}
+	detachedXDP := false
 	for ifindex := range m.bpfShim.XDPLinks() {
 		if allowed[ifindex] {
 			continue
 		}
 		if err := m.bpfShim.DetachXDP(ifindex); err != nil {
 			slog.Warn("userspace: detach XDP from non-data interface failed", "ifindex", ifindex, "err", err)
+			continue
 		}
+		detachedXDP = true
+	}
+	// #9725: this reconcile can remove the LAST shim XDP link. The daemon's
+	// transit gate is otherwise re-read only when ApplyConfig RETURNS — after
+	// the helper-status, HA-state and forwarding steps below, each of which can
+	// block on a control round trip or fail. For that whole interval kernel
+	// transit stayed open with nothing attached to adjudicate it, which is the
+	// window this issue exists to close, not one it may leave behind.
+	//
+	// Closing here is safe to do eagerly: the apply tail re-reads the arm and
+	// the live link count (reassertTransitGate) and reopens the gate if a link
+	// is attached by the time the apply finishes. A pass that detached nothing,
+	// or that left a link attached, changes nothing.
+	if detachedXDP && transitCloseOnLastDetach != nil && m.AttachedXDPLinkCount() == 0 {
+		transitCloseOnLastDetach("apply-detach")
 	}
 	for ifindex := range m.bpfShim.TCLinks() {
 		if allowed[ifindex] {

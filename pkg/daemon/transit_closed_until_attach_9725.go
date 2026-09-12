@@ -129,6 +129,23 @@ func (d *Daemon) attachedXDPLinks() int {
 	return src.AttachedXDPLinkCount()
 }
 
+// unpinnedLinksSource is the optional runtime capability the hitless shutdown
+// reads, as attachedLinksSource is for the gate. A runtime that does not report
+// it answers 0, which keeps the pre-#9725 behaviour: leave forwarding as it is.
+type unpinnedLinksSource interface {
+	UnpinnedAttachedXDPLinks() int
+}
+
+// unpinnedAttachedXDPLinks reads how many attached shim XDP links carry no bpffs
+// pin, and so will be detached the moment this process closes its handles.
+func (d *Daemon) unpinnedAttachedXDPLinks() int {
+	src, ok := d.dataplane().(unpinnedLinksSource)
+	if !ok {
+		return 0
+	}
+	return src.UnpinnedAttachedXDPLinks()
+}
+
 // transitOpen is the predicate every kernel-transit write follows.
 func (d *Daemon) transitOpen() bool {
 	return d.dataplaneArmed.Load() && d.attachedXDPLinks() > 0

@@ -115,6 +115,17 @@ func (a *LegacyDataPlaneAdapter) AttachedXDPLinkCount() int {
 	return m.AttachedXDPLinkCount()
 }
 
+// UnpinnedAttachedXDPLinks forwards the #9725 unpinned-link count. Not
+// forwarding it here would make the hitless shutdown read 0 forever and leave
+// transit open in exactly the cases the count exists to catch (#9804).
+func (a *LegacyDataPlaneAdapter) UnpinnedAttachedXDPLinks() int {
+	m, err := a.managerOrErr()
+	if err != nil {
+		return 0
+	}
+	return m.UnpinnedAttachedXDPLinks()
+}
+
 func (a *LegacyDataPlaneAdapter) IsLoaded() bool {
 	m, err := a.managerOrErr()
 	if err != nil || m.bpfShim == nil {

@@ -591,6 +591,14 @@ func (d *Daemon) setupDataplaneAndInitialConfig() error {
 //     leaving the knobs as found, covers the image's sysctl.d default and a
 //     restart after an armed run, which both leave them at 1.
 func (d *Daemon) applyBootTransitPolicy() {
+	// #9725: wire the attachment reconcile's last-detach close. The reconcile
+	// inside an apply can remove the LAST shim XDP link, and without this the
+	// gate is not re-read until ApplyConfig returns, several fallible control
+	// steps later — kernel transit stays open with nothing attached for that
+	// whole interval. closeTransitUntilAttached is the right callee: it drives
+	// both legs and records nothing about the arm, because the dataplane is
+	// still armed there, only its links are gone.
+	dpuserspace.SetTransitCloseOnLastDetach(d.closeTransitUntilAttached)
 	switch {
 	case d.opts.NoDataplane:
 		d.markDataplaneNotArmed("boot", "--no-dataplane config-only mode")

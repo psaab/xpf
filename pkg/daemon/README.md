@@ -414,8 +414,16 @@ startup-phase and shutdown ordering is untouched:
      addresses, static/BGP or link-local next hops) with no policy, session or
      NAT, for the whole downtime. It keys on `hitless` alone, not on a
      published runtime, and nothing on the way out re-opens it. A hitless stop
-     keeps the dataplane attached with the shim dropping transit, so it leaves
-     forwarding as it was;
+     leaves forwarding as it was only while its links SURVIVE the stop
+     (#9725). "The shim keeps dropping transit" is a claim about bpffs pins,
+     and an attached link with no pin is detached by the kernel the moment the
+     process closes its handle. The pin is best effort — `AttachXDP` logs a
+     failed `Pin` at Warn and still returns success — and a stop that lands
+     between `removeUserspaceShimXDPLinkPins` and the re-attach, or after an
+     attach that failed, finds live links with no pins. So the hitless path
+     counts them (`UnpinnedAttachedXDPLinks`) and closes the gate when an
+     attached link would not survive, leaving a genuine hitless upgrade
+     untouched;
   2. **`rg_active` cleared**, so this node stops forwarding; and
   3. **the Kea units stopped** (#6787), so it stops answering DHCP.
 

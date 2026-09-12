@@ -661,7 +661,7 @@ func (m *Manager) AttachXDP(ifindex int, forceGeneric bool) error {
 	// running in generic forever — losing native-XDP performance even
 	// after the driver/firmware issue that forced the fallback is resolved,
 	// and leaving IFACE_FLAG_NATIVE_XDP stale in the BPF maps.
-	pinFile := filepath.Join(linkPinPath, fmt.Sprintf("xdp_%d", ifindex))
+	pinFile := filepath.Join(linkPinPath, xdpLinkPinName(ifindex))
 	if existing, err := link.LoadPinnedLink(pinFile, nil); err == nil {
 		if xdpAttachModeMatches(ifindex, forceGeneric) {
 			if err := existing.Update(prog); err == nil {
