@@ -499,6 +499,37 @@ fn sync_session_delete_with_valid_key_succeeds() {
     assert!(response.ok, "unexpected error: {}", response.error);
 }
 
+/// #9714: the helper must decode Go's peer-delete mark under the key Go sends. A
+/// misspelled rename decodes every marked delete as unmarked, and the helper then
+/// deletes a live local session on the peer's say-so. The key below is a literal
+/// on the wire, so a rename typo cannot round-trip through this struct.
+#[test]
+fn a_sync_session_request_decodes_the_peer_delete_mark_9714() {
+    let mut wire = serde_json::to_value(SessionSyncRequest {
+        operation: "delete".to_string(),
+        ..SessionSyncRequest::default()
+    })
+    .expect("encode a delete");
+    wire["peer_delete"] = serde_json::Value::Bool(true);
+    let marked: SessionSyncRequest =
+        serde_json::from_value(wire.clone()).expect("decode a marked delete");
+    assert!(
+        marked.peer_delete,
+        "the helper did not decode \"peer_delete\": true; Go's marked deletes would apply as \
+         authoritative (#9714)"
+    );
+    wire.as_object_mut()
+        .expect("a request encodes as an object")
+        .remove("peer_delete");
+    let unmarked: SessionSyncRequest =
+        serde_json::from_value(wire).expect("decode an unmarked delete");
+    assert!(
+        !unmarked.peer_delete,
+        "a request without the key (every v15 sender, and every authoritative delete) must decode \
+         as unmarked"
+    );
+}
+
 #[test]
 fn sync_session_upsert_with_valid_entry_succeeds() {
     let mut request = req("sync_session");
@@ -5275,6 +5306,202 @@ mod routing_domain_delete_7160 {
              disambiguate and nothing to refuse; got {:?}",
             response.error
         );
+    }
+
+    /// #9714 review round 2, finding 2: a sender that STATES the default routing
+    /// instance has named exactly ONE domain, and must not be routed into the
+    /// ambiguity probe.
+    ///
+    /// `routing_domain_from_wire` separates `Present(0)` from `Absent` deliberately,
+    /// and `resolved_domain` carries that distinction right up to the `unwrap_or(0)`
+    /// that flattens it for the key. `bare` used to be `key.routing_domain == 0`,
+    /// which reads the FLATTENED value and so cannot tell the two apart: an
+    /// authoritative single-domain delete was refused for naming too many tenants
+    /// while naming exactly one — a guard refusing the very case it exists to permit.
+    ///
+    /// THE AXIS THIS CELL EXISTS FOR. Every other delete cell sends wire
+    /// `routing_domain: 0`, which decodes to ABSENT — `WIRE_DEFAULT_INSTANCE` is 1,
+    /// not 0. With only that value in the fixture set, `resolved_domain.is_none()`
+    /// and `key.routing_domain == 0` agree on every input, so the fix had no cell
+    /// that could distinguish it from the defect. The axis had one value, so the row
+    /// did not exist.
+    ///
+    /// The wire value comes from `routing_domain_to_wire(0)` rather than a literal,
+    /// so the cell tracks the encoder a real sender uses instead of a copy of it.
+    #[test]
+    fn a_stated_default_instance_delete_is_not_ambiguous_9714() {
+        // The same fixture the ambiguity cell uses: the tuple is live in TWO tenants,
+        // so an ABSENT delete is refused. A STATED default instance must not be.
+        let state = state_holding_the_same_tuple_in(&[100_007, 100_008]);
+        assert_eq!(synced_key_count(&state), 4, "setup: two tenants x (forward + reverse)");
+
+        let mut request = bare_five_tuple_delete();
+        request
+            .session_sync
+            .as_mut()
+            .expect("a sync_session request")
+            .routing_domain = crate::session::routing_domain_to_wire(0);
+
+        let response = run_request(state.clone(), request);
+
+        assert!(
+            response.ok,
+            "a delete that STATED the default routing instance was refused as ambiguous. It named \
+             exactly one domain; the ambiguity probe exists for requests that named NONE (#9714 r2 \
+             F2). Got {:?}",
+            response.error
+        );
+        assert_eq!(
+            synced_key_count(&state),
+            4,
+            "the stated-default delete removed a TENANT's rows: it names domain 0 only, and neither \
+             tenant's session lives there"
+        );
+    }
+
+    /// #9714 review round 2, finding 4: a MARKED delete with NO shared authority must
+    /// do NOTHING — not even the domain-0 delete the handler used to send regardless.
+    ///
+    /// With routing instances configured and no shared-map match, the old handler
+    /// still fanned `DeleteSynced(domain 0)` out to every worker. A worker whose real
+    /// local session lives in a NONZERO domain misses the scoped lookup and takes the
+    /// unconditional key-only arm, tearing out the steering row of a live flow.
+    ///
+    /// "No shared entry" does NOT mean "no session", which is what makes this
+    /// reachable rather than theoretical: on the install path the BPF publish precedes
+    /// the shared-map publish, so there is a real window in which the kernel row
+    /// exists and the shared entry does not.
+    ///
+    /// The unmarked arm is the CONTROL. Without it, a handler that fanned nothing out
+    /// for any delete would pass the marked assertion while silently breaking every
+    /// operator clear.
+    #[test]
+    fn a_marked_delete_with_no_shared_authority_fans_out_nothing_9714() {
+        for peer_delete in [true, false] {
+            let mut afxdp = afxdp::Coordinator::new();
+            afxdp.seed_routing_domain_for_test(24, DOMAIN);
+            let queued_deletes = afxdp.register_counting_worker_for_test(0);
+            assert_eq!(
+                afxdp.synced_session_entry_count_for_test(),
+                0,
+                "setup (peer_delete={peer_delete}): this cell is about the NO-shared-authority \
+                 case, so the shared map must start empty"
+            );
+            let state = Arc::new(Mutex::new(ServerState {
+                status: ProcessStatus::default(),
+                snapshot: None,
+                afxdp,
+                state_writer: Arc::new(StateWriter::new()),
+            }));
+            let mut request = bare_five_tuple_delete();
+            request
+                .session_sync
+                .as_mut()
+                .expect("a sync_session request")
+                .peer_delete = peer_delete;
+
+            let response = run_request(state.clone(), request);
+
+            assert!(
+                response.ok,
+                "(peer_delete={peer_delete}) a miss is not a refusal; got {:?}",
+                response.error
+            );
+            if peer_delete {
+                assert_eq!(
+                    queued_deletes(),
+                    0,
+                    "a MARKED delete with no shared authority fanned DeleteSynced out anyway. The \
+                     worker no-entry arm then deletes the kernel steering row of a live local flow \
+                     whose shared entry has not been published yet (#9714 r2 F4)"
+                );
+            } else {
+                assert!(
+                    queued_deletes() > 0,
+                    "control: an AUTHORITATIVE delete must keep its plain-miss kernel cleanup, or \
+                     the marked arm's zero proves only that nothing ever fans out"
+                );
+            }
+        }
+    }
+
+    /// #9714: the handler routes a MARKED delete to the refusing path at BOTH of its
+    /// delete calls, the exact key and the #8636 single-domain retry, and an unmarked
+    /// delete to the authoritative path. The domain-level cells call the domain
+    /// directly, so a handler that ignored the mark at either call would pass them.
+    #[test]
+    fn the_handler_honours_the_peer_delete_mark_at_both_delete_calls_9714() {
+        for (arm, domain) in [("exact key", 0u32), ("#8636 single-domain retry", DOMAIN)] {
+            for peer_delete in [true, false] {
+                let mut afxdp = afxdp::Coordinator::new();
+                if domain != 0 {
+                    afxdp.seed_routing_domain_for_test(24, domain);
+                }
+                let forward = crate::server::helpers::build_synced_session_entry(
+                    &upsert_request(),
+                    afxdp.zone_name_to_id_ref(),
+                    domain,
+                )
+                .expect("build the local entry");
+                afxdp.seed_live_local_session_for_test(forward, 7, true);
+                let queued_deletes = afxdp.register_counting_worker_for_test(0);
+                assert_eq!(
+                    afxdp.synced_session_entry_count_for_test(),
+                    2,
+                    "setup ({arm}): the live local forward entry and its reverse companion"
+                );
+                let state = Arc::new(Mutex::new(ServerState {
+                    status: ProcessStatus::default(),
+                    snapshot: None,
+                    afxdp,
+                    state_writer: Arc::new(StateWriter::new()),
+                }));
+                let mut request = bare_five_tuple_delete();
+                request
+                    .session_sync
+                    .as_mut()
+                    .expect("a sync_session request")
+                    .peer_delete = peer_delete;
+
+                let response = run_request(state.clone(), request);
+
+                assert_eq!(
+                    synced_key_count(&state),
+                    if peer_delete { 2 } else { 0 },
+                    "({arm}, peer_delete={peer_delete}) a MARKED delete of a live local session \
+                     whose owner RG is active must be refused, and an UNMARKED one (an operator \
+                     clear) must still remove it (#9714)"
+                );
+                if peer_delete {
+                    assert!(
+                        !response.ok
+                            && response.error == "synced-delete-refused:peer-delete-local-owned",
+                        "({arm}) a refused peer delete must be answered in-band with its token, or \
+                         the Go side deletes its own mirror and DNAT rows for a flow the helper \
+                         kept (#9714); got ok={} error={:?}",
+                        response.ok,
+                        response.error
+                    );
+                    assert_eq!(
+                        queued_deletes(),
+                        0,
+                        "({arm}) a refused peer delete still fanned DeleteSynced out to the \
+                         workers, whose no-entry arm deletes the live flow's steering row (#9714)"
+                    );
+                } else {
+                    assert!(
+                        response.ok,
+                        "({arm}) an unmarked delete must succeed: {:?}",
+                        response.error
+                    );
+                    assert!(
+                        queued_deletes() > 0,
+                        "({arm}) control: an applied delete must fan DeleteSynced out, or the \
+                         refused arm's zero proves nothing"
+                    );
+                }
+            }
+        }
     }
 
     fn synced_key_count(state: &Arc<Mutex<ServerState>>) -> usize {

@@ -1111,6 +1111,56 @@ it refuses on epoch alone — and deliberately does NOT record the per-key
 generation, so the peer's next re-sync of that key is admitted rather than
 refused as stale.
 
+**A peer's delete cannot remove this node's live flow (#9714).** Three callers
+use `DeleteReasonClusterStale`, and all three act on the PEER's authority, not
+this node's:
+- the rollback above removes a session the peer sent;
+- `deleteClusterSynced*` removes one the peer said is gone;
+- bulk stale reconciliation (`ReconcileClusterBulk`, which also defaults an
+  empty reason to cluster-stale) removes the ones the peer's bulk sync left out.
+
+In a dual-primary split both nodes forward the same flows, and each holds its
+copy as a LOCAL session. Until #9714 such a delete reached the helper as an
+ordinary `sync_session` delete. The worker-side guard in
+`handle_delete_synced` kept only the forwarding worker's own entry. Everything
+else still went:
+- the shared rows;
+- the steering row and the DNAT steering hold;
+- every sibling worker's replica (`WorkerLocalImport`, which counts as
+  peer-synced).
+
+**How the delete is marked.** The session store routes a cluster-stale delete
+through the optional `peerSyncedSessionDeleter` capability. The userspace
+`Manager` implements it, and `*LegacyDataPlaneAdapter` forwards it. The
+capability sets `peer_delete` on every helper request (protocol v16), and the
+helper answers FIRST:
+- the forward key goes before its reverse companion, and a refused forward's
+  reverse is never sent;
+- the Manager deletes a key's BPF mirror row only once the helper has applied
+  the delete, and a mirror row that is already gone does not stop the helper
+  being asked;
+- the store deletes the reverse-SNAT DNAT row only for an applied forward. The
+  unmarked path deletes that row before the helper is asked.
+
+**What the helper refuses.** It refuses a marked delete of a local-origin
+shared entry, forward or reverse, whose owner RG is locally active. The refusal
+comes before any shared, steering or DNAT delete and before the worker fan-out.
+It is counted on `peer_delete_refused_local_owned`, the counter the worker-side
+guard already increments, and answered in-band as
+`synced-delete-refused:peer-delete-local-owned`.
+
+A delete that names no routing domain is probed across the routing instances
+BEFORE anything is deleted. The exact (domain 0) key is deleted only when
+shared authority holds it, or when no instance does. Deleting it first had
+fanned DeleteSynced out to every worker, and a worker holding no entry at that
+key deletes the bare tuple's steering row: the row a live routing-instance
+session still forwards on.
+
+**What stays authoritative.** Every other delete, such as an operator
+`clear security flow session` or GC expiry, is unmarked and applies as before.
+An older helper does not know the field and would apply a marked delete
+too, which is why the field bumps the protocol.
+
 **Item 1 (accepted residual — #6419 closed).** The guard covers only the
 config-authority → peer direction (the primary that admits the session is also
 the RG0 config-sync authority). A non-authority's sessions carry the

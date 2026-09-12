@@ -74,9 +74,18 @@ pub(in crate::afxdp::session_glue) fn handle_delete_synced(
     // the table entry it was seeded from; here the table entry SURVIVES, so
     // the permit is still backed and invalidating it would be wrong in the
     // one direction #6457 does not consider.
+    // #9714 F4: the predicate is the INSTALL side's
+    // `synced_entry_allows_local_replace`, not `owner_rg_is_locally_active`. The
+    // latter hard-requires `owner_rg_id > 0`, so an entry whose owner RG is 0 —
+    // UNKNOWN, not "no RG" — was unprotected on this verb while
+    // `upsert_synced_with_origin` already declined to clobber it whenever ANY
+    // redundancy group is forwarding-active. Owner 0 is reachable for a synced
+    // forward session through the ingress-zone fallback, so this was not a
+    // corner. The coordinator's #9714 guard carried the identical fail-open and
+    // moved in the same change: install and delete now ask one question.
     let refuse = matches!(existing_origin, Some(origin) if !origin.is_peer_synced())
         && delete_alias.as_ref().is_some_and(|lookup| {
-            owner_rg_is_locally_active(ha_state, lookup.metadata.owner_rg_id, now_secs)
+            !synced_entry_allows_local_replace(ha_state, lookup.metadata.owner_rg_id, now_secs)
         });
     if refuse {
         PEER_DELETE_REFUSED_LOCAL_OWNED.fetch_add(1, Ordering::Relaxed);
