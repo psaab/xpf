@@ -1067,6 +1067,12 @@ func (s *Server) mutationAuthzGuard(next http.Handler) http.Handler {
 			deny(p, err)
 			return
 		}
+		// #9892: `load` and `rollback` are adjudicated by CONTENT, not by a
+		// path field — see restConfigContentRoutes.
+		if err := s.authorizeRESTConfigLoad(r, cfg, p); err != nil {
+			deny(p, err)
+			return
+		}
 		slog.Debug("api: authorized mutating request",
 			"method", r.Method, "path", r.URL.Path,
 			"principal", p.String(), "required", authz.PermissionName(required))
