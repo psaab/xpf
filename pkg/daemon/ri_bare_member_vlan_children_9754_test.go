@@ -224,3 +224,49 @@ func TestBoundDevicesAreNotAlsoDefaultInstanceIngress9754(t *testing.T) {
 		})
 	}
 }
+
+// #9754: the two spellings the SHIPPED configs actually use must resolve
+// exactly as they did before this change. This is the evidence behind the
+// judgement that no cluster smoke is owed: the change touches no cluster, VRRP,
+// session-sync or failover code, AND the cluster config's own member resolves
+// to the same single device it always did.
+//
+//	docs/ha-cluster-userspace.conf   interface gr-0/0/0.0   a tunnel unit ref
+//	test/incus/xpf-test.conf         interface ge-0/0/2     bare, one untagged unit
+//
+// A tunnel member resolves to ONE device in either spelling: TunnelNameMap is
+// keyed on unit refs, and a bare tunnel member's fan-down lands on the same
+// device through that map and is deduped. Only a bare member on a port with
+// TAGGED units resolves differently than before, and no config in the tree has
+// one.
+func TestShippedMemberSpellingsResolveUnchanged9754(t *testing.T) {
+	t.Run("cluster config: tunnel unit ref", func(t *testing.T) {
+		cfg := &config.Config{}
+		cfg.Interfaces.Interfaces = map[string]*config.InterfaceConfig{
+			"gr-0/0/0": {
+				Name:   "gr-0/0/0",
+				Tunnel: &config.TunnelConfig{Source: "10.0.0.1", Destination: "10.0.0.2"},
+				Units:  map[int]*config.InterfaceUnit{0: {Number: 0}},
+			},
+		}
+		for _, member := range []string{"gr-0/0/0.0", "gr-0/0/0"} {
+			got := riMemberLinuxNames(cfg, cfg.TunnelNameMap(), member)
+			if len(got) != 1 || got[0] != "gr-0-0-0" {
+				t.Fatalf("a tunnel member resolves to one device; %s gave %v", member, got)
+			}
+		}
+	})
+
+	t.Run("test VM config: bare member, one untagged unit", func(t *testing.T) {
+		cfg := &config.Config{}
+		cfg.Interfaces.Interfaces = map[string]*config.InterfaceConfig{
+			"ge-0/0/2": {Name: "ge-0/0/2", Units: map[int]*config.InterfaceUnit{
+				0: {Number: 0, Addresses: []string{"10.0.30.10/24"}},
+			}},
+		}
+		got := riMemberLinuxNames(cfg, cfg.TunnelNameMap(), "ge-0/0/2")
+		if len(got) != 1 || got[0] != "ge-0-0-2" {
+			t.Fatalf("an untagged unit 0 collapses onto the base; got %v want [ge-0-0-2]", got)
+		}
+	})
+}
