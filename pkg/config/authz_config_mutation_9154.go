@@ -65,24 +65,131 @@ var configMutationVerbs = map[string]bool{
 //     path the loaded content touches, which is a different mechanism from a
 //     verb gate. Explicitly a REMAINING GAP rather than something this gate
 //     quietly covers.
-func configMutationPath(editPath, parts []string) (string, bool) {
+func configMutationPaths(editPath, parts []string, quoted []bool) ([]string, bool) {
 	if len(parts) == 0 {
-		return "", false
+		return nil, false
 	}
-	if !configMutationVerbs[parts[0]] {
-		return "", false
+	verb := parts[0]
+	if !configMutationVerbs[verb] {
+		return nil, false
 	}
 	if len(parts) < 2 {
 		// The verb's own arity error is a better message than a permission
 		// denial, and an empty path cannot match a meaningful deny anyway.
-		return "", false
+		return nil, false
 	}
 	// THE RESOLVED PATH, not the typed remainder. See the edit-path bypass note
 	// above: matching parts[1:] alone lets `edit system` walk a deny.
-	full := make([]string, 0, len(editPath)+len(parts)-1)
-	full = append(full, editPath...)
-	full = append(full, parts[1:]...)
-	return strings.Join(full, " "), true
+	resolve := func(rel []string) string {
+		full := make([]string, 0, len(editPath)+len(rel))
+		full = append(full, editPath...)
+		full = append(full, rel...)
+		return strings.Join(full, " ")
+	}
+
+	// #9938 F-029: copy and rename act on TWO paths, and the gate used to join
+	// them into one string (`<verb> <src> to <dst>`) that the dispatcher never
+	// acts on. handleCopyRename / handleCopyRename's gRPC twin split at `to`
+	// and call Copy/Rename with two REAL paths, so both endpoints are
+	// adjudicated here, separately.
+	//
+	// It matters under an ANCHORED deny, which is the idiom Junos documents for
+	// complex expressions: `^security policies p1$` does not match the joined
+	// string in either direction, so `rename <denied> to <allowed>` and
+	// `rename <allowed> to <denied>` were both permitted. An UNANCHORED deny
+	// caught them incidentally, which is why this survived — the common case
+	// hid the mechanism.
+	switch verb {
+	case "copy", "rename":
+		toIdx := -1
+		for i, p := range parts {
+			if p == "to" {
+				toIdx = i
+				break
+			}
+		}
+		if toIdx < 2 || toIdx >= len(parts)-1 {
+			// MALFORMED — and the answer is the WHOLE REMAINDER, not "ungated".
+			//
+			// The dispatcher does print its own usage and act on nothing, so
+			// "there is nothing to adjudicate" is a true statement about this
+			// line. It is still the wrong answer, because it makes the gate's
+			// coverage depend on the line PARSING, and the pre-#9938 gate
+			// covered it. A change that adds precision must not remove
+			// coverage: falling back keeps the old behaviour as a floor and
+			// adds the two-endpoint split above it. Caught by
+			// TestEveryFlatVerbIsTakenVerbatimNotReparsed9892, which is exactly
+			// what that cell exists for.
+			break
+		}
+		return []string{resolve(parts[1:toIdx]), resolve(parts[toIdx+1:])}, true
+
+	case "insert":
+		// `insert <element-path> before|after <ref>` moves the element; the ref
+		// is a SIBLING identifier that is not itself mutated, and it lives under
+		// the same parent, so a deny covering the element covers it.
+		kwIdx := -1
+		for i, p := range parts {
+			if p == "before" || p == "after" {
+				kwIdx = i
+				break
+			}
+		}
+		if kwIdx < 2 || kwIdx >= len(parts)-1 {
+			break // malformed: fall back to the whole remainder, see above
+		}
+		return []string{resolve(parts[1:kwIdx])}, true
+
+	case "annotate":
+		// `annotate <path> "comment"`. The comment is dropped from the path, but
+		// ONLY when it was actually written as a quoted string.
+		//
+		// Trimming the last token unconditionally is wrong and fails in the
+		// silent direction: `annotate system root-authentication` has no comment,
+		// so the trim leaves `system` and an anchored deny on
+		// `^system root-authentication` stops matching. That is a coverage LOSS
+		// introduced by a precision gain, which is why quote provenance is
+		// carried out of the lexer rather than inferred from position.
+		if len(parts) < 3 || !quoted[len(parts)-1] {
+			break // no comment token: the whole remainder is the path
+		}
+		return []string{resolve(parts[1 : len(parts)-1])}, true
+	}
+
+	return []string{resolve(parts[1:])}, true
+}
+
+// lexConfigMutationLine9938 tokenizes a config-mode line THE WAY THE STORE DOES,
+// with quotes consumed.
+//
+// #9938 F-020: this was `strings.Fields`, which keeps quote characters. The
+// store lexes them away (`readString` returns the unquoted body, reached through
+// ParseSetVerbGrouped -> SetPathQuoted), so `deactivate security "policies" p1`
+// was GATED as `security "policies" p1` and APPLIED as `security policies p1`.
+// A deny on the real path did not match the string the gate judged.
+//
+// Using the lexer rather than a quote-stripping pass is deliberate: the defect
+// is that the gate had its own idea of tokenization, and a second
+// almost-the-same tokenizer is the same defect with a smaller diff. It also
+// makes `annotate`'s trailing comment one token, which is what lets the path be
+// extracted without a second parse.
+func lexConfigMutationLine9938(line string) (tokens []string, quoted []bool) {
+	lex := NewLexer(line)
+	for {
+		tok := lex.Next()
+		switch tok.Type {
+		case TokenEOF:
+			return tokens, quoted
+		case TokenIdentifier, TokenString:
+			tokens = append(tokens, tok.Value)
+			quoted = append(quoted, tok.Type == TokenString)
+		default:
+			// A brace or semicolon has no place in a flat config-mode line.
+			// Stopping rather than skipping keeps the gate's view of the line a
+			// PREFIX of what the dispatcher sees, never a different line.
+			return tokens, quoted
+		}
+	}
 }
 
 // AuthorizeConfigMutation adjudicates one config-mode line against a class's
@@ -96,8 +203,8 @@ func AuthorizeConfigMutation(cfg *Config, class string, editPath []string, line 
 	if class == "" {
 		return nil
 	}
-	parts := strings.Fields(line)
-	path, gated := configMutationPath(editPath, parts)
+	parts, quoted := lexConfigMutationLine9938(line)
+	paths, gated := configMutationPaths(editPath, parts, quoted)
 	if !gated {
 		return nil
 	}
@@ -110,17 +217,24 @@ func AuthorizeConfigMutation(cfg *Config, class string, editPath []string, line 
 	if !ok {
 		return nil
 	}
-	decision := rules.Evaluate(path)
-	if decision.Allowed {
-		return nil
+	// #9938 F-029: EVERY acted-upon path is adjudicated, and the FIRST denial
+	// refuses the whole command. A copy or rename that is permitted at one
+	// endpoint and denied at the other must not run at all — half of it is
+	// still a mutation of a path the class was denied.
+	for _, path := range paths {
+		decision := rules.Evaluate(path)
+		if decision.Allowed {
+			continue
+		}
+		// AUDIT: the VERB and the resolved path's leading element only. A config
+		// path's trailing tokens are operator data — `set system root-authentication
+		// plain-text-password <secret>` puts the secret in the path itself — so the
+		// full path must never reach a log line. Cut 3's canonicalPrefix cannot be
+		// reused: it walks the operational cmdtree, which config paths do not use.
+		return fmt.Errorf("permission denied: login class %q denies %s under %q (%s)",
+			class, parts[0], configAuditRoot(path), decision.Reason)
 	}
-	// AUDIT: the VERB and the resolved path's leading element only. A config
-	// path's trailing tokens are operator data — `set system root-authentication
-	// plain-text-password <secret>` puts the secret in the path itself — so the
-	// full path must never reach a log line. Cut 3's canonicalPrefix cannot be
-	// reused: it walks the operational cmdtree, which config paths do not use.
-	return fmt.Errorf("permission denied: login class %q denies %s under %q (%s)",
-		class, parts[0], configAuditRoot(path), decision.Reason)
+	return nil
 }
 
 // configAuditRoot renders only the first element of a configuration path.

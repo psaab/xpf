@@ -422,6 +422,28 @@ to, and the REST API.
 > two claims, and the enumeration is the one that rots.** It is now bound by a
 > census test rather than by this prose — see below.
 
+**What the `*-configuration` regexes are matched against (#9938).** The path the
+STORE will act on, lexed the way the store lexes it — not the wire text. Three
+ways that used to differ, all measured before the fix:
+
+- the gRPC `Set` RPC sends a **bare path** with the verb stripped
+  (`cmd/cli/shared.go` joins `fullPath`), and a line whose first token is not a
+  mutation verb was answered "not gated" — so `set` over gRPC was **unenforced**.
+  The verb is now supplied at the resolver, as `Delete` already did;
+- `strings.Fields` kept quote characters while the store's lexer consumes them,
+  so `deactivate security "policies" p1` was judged as `security "policies" p1`
+  and applied as `security policies p1`. The gate now uses the lexer;
+- `copy` and `rename` act on **two** paths and were joined into one string. Each
+  endpoint is adjudicated separately and either one denied refuses the command.
+  This only escaped under an **anchored** deny — the idiom Junos documents for
+  complex expressions — because an unanchored deny caught the joined string
+  incidentally.
+
+`insert` and `annotate` carry a trailing token that is not part of the path
+(`before|after <ref>`, `"comment"`), and it is trimmed — but a payload that does
+not parse for its verb falls back to gating the WHOLE remainder. A precision
+gain must never remove coverage.
+
 **How REST resolves a command.** A REST route is not a CLI command, so the
 canonical command each route performs is DEFINED in a table
 (`restRouteCommand`, `pkg/api/authz_command_regex_9952.go`), mirroring the gRPC

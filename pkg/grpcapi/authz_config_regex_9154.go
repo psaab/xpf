@@ -65,8 +65,29 @@ func configMutationLineFor(fullMethod string, req any) (string, bool) {
 	}
 	switch method {
 	case "Set":
+		// #9938 F-019: the verb is supplied HERE, exactly as `Delete` below
+		// supplies its own, and the asymmetry between them was the defect.
+		//
+		// The production remote CLI sends `SetRequest{Input: strings.Join(
+		// fullPath, " ")}` (cmd/cli/shared.go) — a BARE PATH with the verb
+		// already stripped. Returned verbatim, that reached
+		// AuthorizeConfigMutation as `security policies p1`, whose first token
+		// is not a mutation verb, so the gate answered "not gated" and the
+		// mutation was ALLOWED. Not a surface-wide gap and that is what makes
+		// it a defect rather than a story: REST builds `route.verb+" "+input`,
+		// the Delete RPC prepends its verb, and the CLI's deactivate / activate
+		// / copy / rename arms keep theirs. `Set` over gRPC was the one hole —
+		// and since #9633 exempted config-mode methods from the operational
+		// command gate, it had no second net beneath it.
+		//
+		// A `set` line that ALREADY carries its verb (a `load set` replay, an
+		// operator pasting `set …`) must not become `set set …`, so the prefix
+		// is added only when it is absent.
 		if r, okReq := req.(*pb.SetRequest); okReq {
 			if line := strings.TrimSpace(r.GetInput()); line != "" {
+				if !strings.HasPrefix(line, "set ") {
+					line = "set " + line
+				}
 				return line, true
 			}
 		}
