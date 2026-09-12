@@ -66,6 +66,17 @@ func TestAreaTypeIsReadFromEverySpelling9656(t *testing.T) {
 		// this is what stops the fix from being a rewrite that trades one
 		// readable spelling for another.
 		"braced container stub": {"        area 0.0.0.1 {\n            area-type {\n                stub;\n            }\n        }", "stub", false},
+		// The shape that reaches hasPackedChild9656's PACKED branch, and the
+		// only one that does. It was found by enumerating what
+		// packedBodyChildren can return, not by noticing a gap: when the
+		// area-type node has no tail of its own, packedBodyChildren returns
+		// node.Children UNCHANGED — so a child written as `stub no-summaries;`
+		// arrives as one node with Keys=["stub","no-summaries"] and no
+		// children, and FindChild("no-summaries") on it is nil. Every other
+		// spelling goes through the chain-building path, which nests the tail
+		// into separate nodes and leaves FindChild sufficient. Without this row
+		// the helper's second half is dead code that reads as protection.
+		"braced container with packed leaf":       {"        area 0.0.0.1 {\n            area-type {\n                stub no-summaries;\n            }\n        }", "stub", true},
 		"braced container nssa with no-summaries": {"        area 0.0.0.1 {\n            area-type {\n                nssa {\n                    no-summaries;\n                }\n            }\n        }", "nssa", true},
 	} {
 		t.Run(name, func(t *testing.T) {
