@@ -801,16 +801,43 @@ func (st *zoneMapState) mapZoneInterface(dp DataPlane, cfg *config.Config, resul
 			}
 		}
 
-		// Apply unit-level MTU to VLAN sub-interface
+		// Apply unit-level MTU to VLAN sub-interface, and RESET it when the
+		// statement is gone.
+		//
+		// #9757: this used to write only when `unit.MTU > 0`, with no other
+		// branch, and nothing else writes a VLAN unit's MTU. So deleting
+		// `family inet mtu` left the device — and the userspace egress MTU,
+		// which pkg/dataplane/userspace reads from that same device — at the old
+		// value. The committed configuration then no longer described the
+		// running state: DF-set traffic between the stale value and the link MTU
+		// kept drawing Frag-Needed from the box, and DF-clear traffic kept
+		// recording the #9328 egress_mtu_exceeded_forwarded_no_df exception.
+		// Measured on the loss cluster: both nodes' children sat at 1400 after
+		// the delete, and the only repair was to commit an explicit mtu and
+		// delete it again.
+		//
+		// The reset target is the PARENT link's live MTU, which is what a
+		// freshly created VLAN child inherits, so the device lands where it
+		// would have been had the statement never existed rather than at a
+		// number invented here. `family inet6 mtu` compiles into the same
+		// unit.MTU, so it is covered by the same branch.
 		if ifCfg, ok := cfg.Interfaces.Interfaces[cfgName]; ok && ifCfg != nil {
-			if unit, ok := ifCfg.Units[unitNum]; ok && unit.MTU > 0 {
+			wantMTU := 0
+			if unit, ok := ifCfg.Units[unitNum]; ok && unit != nil && unit.MTU > 0 {
+				wantMTU = unit.MTU
+			} else if parent, err := result.cachedLinkByName(physName); err == nil {
+				wantMTU = parent.Attrs().MTU
+			}
+			if wantMTU > 0 {
 				if nl, err := result.cachedLinkByName(subName); err == nil {
-					if nl.Attrs().MTU != unit.MTU {
-						if err := linkSetMTUSeam(nl, unit.MTU); err != nil {
+					// Only on a real difference: this runs on every commit, so an
+					// unconditional write would churn the link and the log.
+					if nl.Attrs().MTU != wantMTU {
+						if err := linkSetMTUSeam(nl, wantMTU); err != nil {
 							slog.Warn("failed to set VLAN sub-interface MTU",
-								"name", subName, "mtu", unit.MTU, "err", err)
+								"name", subName, "mtu", wantMTU, "err", err)
 						} else {
-							slog.Info("set VLAN sub-interface MTU", "name", subName, "mtu", unit.MTU)
+							slog.Info("set VLAN sub-interface MTU", "name", subName, "mtu", wantMTU)
 						}
 					}
 				}
