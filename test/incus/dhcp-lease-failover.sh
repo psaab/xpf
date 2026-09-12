@@ -275,12 +275,20 @@ ns_addr4() {
 	ssh_fw "$DHCP_CLIENT" "nsenter --net=/run/netns/'$1' ip -4 -o addr show dev '$2' | awk '{print \$4}' | cut -d/ -f1 | head -1" || true
 }
 
+# lease_sync_count <node> <field> prints one column of the "DHCP leases" row of
+# `show chassis cluster statistics`: field 3 is Sent, field 4 is Received
+# (#9791). The counters reset when cluster comms restart, so compare values read
+# in the same window, never across a reboot.
+lease_sync_count() {
+	ssh_fw "$1" '/usr/local/sbin/cli -c "show chassis cluster statistics" 2>/dev/null' | awk -v f="$2" '$1 == "DHCP" && $2 == "leases" { print $f; exit }'
+}
+
 # ns_down <ns> stops the namespace's clients and deletes it (the macvlan goes with it).
 ns_down() {
 	# #9729: RELEASE the v4 lease first. Every run's client is a fresh random MAC,
 	# and an unreleased lease stays bound for its full lifetime (86400s in the lab),
 	# so reruns filled the pool with dead owners whose addresses got reused.
-	ssh_fw "$DHCP_CLIENT" "if [ -e /run/netns/'$1' ] && [ -f /run/dhclient-$1.leases ]; then timeout 15 nsenter --net=/run/netns/'$1' dhclient -r -sf '$CLIENT_SCRIPT' -pf /run/dhclient-$1.pid -lf /run/dhclient-$1.leases \$(nsenter --net=/run/netns/'$1' ls /sys/class/net | grep -v '^lo\$' | head -1) 2>/dev/null; fi; for f in /run/dhclient-$1.pid /run/dhclient6-$1.pid; do [ -f \$f ] && kill \$(cat \$f) 2>/dev/null; rm -f \$f; done; rm -f /run/dhclient-$1.leases /run/dhclient6-$1.leases; ip netns del '$1' 2>/dev/null; true" >/dev/null 2>&1 || true
+	ssh_fw "$DHCP_CLIENT" "if [ -e /run/netns/'$1' ] && [ -f /run/dhclient-$1.leases ]; then timeout 15 nsenter --net=/run/netns/'$1' dhclient -r -sf '$CLIENT_SCRIPT' -pf /run/dhclient-$1.pid -lf /run/dhclient-$1.leases \$(nsenter --net=/run/netns/'$1' ip -o link show | awk -F': ' '{sub(/@.*/, \"\", \$2)} \$2 != \"lo\" {print \$2; exit}') 2>/dev/null; fi; for f in /run/dhclient-$1.pid /run/dhclient6-$1.pid; do [ -f \$f ] && kill \$(cat \$f) 2>/dev/null; rm -f \$f; done; rm -f /run/dhclient-$1.leases /run/dhclient6-$1.leases; ip netns del '$1' 2>/dev/null; true" >/dev/null 2>&1 || true
 }
 
 # ---------------------------------------------------------------------------
@@ -337,8 +345,42 @@ main() {
 		assert_memfile_header "$STANDBY" "$KEA_MEMFILE6" "$GOLDEN_HEADER6" 6
 	fi
 	local mac_a
-	mac_a="$(ssh_fw "$DHCP_CLIENT" "nsenter --net=/run/netns/'$NS_A' cat /sys/class/net/'$IF_A'/address" 2>/dev/null || true)"
+	# Read the MAC over netlink inside the namespace, the way ns_addr4 reads the
+	# address. /sys/class/net lists the devices of the network namespace that
+	# MOUNTED sysfs, so `nsenter --net ... cat /sys/class/net/<if>/address` cannot
+	# see the namespace's macvlan (#9791 lab run 1: "cannot read client A's MAC").
+	# `ip netns exec` would remount sysfs, but the LAN host is an unprivileged
+	# container that may not ("mount of /sys failed: Operation not permitted",
+	# run 2).
+	mac_a="$(ssh_fw "$DHCP_CLIENT" "nsenter --net=/run/netns/'$NS_A' ip -o link show dev '$IF_A'" 2>/dev/null | grep -o 'link/ether [0-9a-f:]*' | cut -d' ' -f2 | head -1 || true)"
 	[[ -n "$mac_a" ]] || die "cannot read client A's MAC"
+
+	# #9791: the reboot below tests the takeover pre-seed only if client A's
+	# grant has reached the standby. The primary pushes its full lease set on a
+	# 2 s change poll, and each set the standby receives bumps a counter visible
+	# on that node. So gate the reboot on the standby RECEIVING a set after the
+	# grant. Without this gate, "the pre-seed dropped A's binding" and "A's
+	# binding never left the primary" fail step 4b identically.
+	local rx_at_grant rx_now="" sent_now waited=0
+	rx_at_grant="$(lease_sync_count "$STANDBY" 4 || true)"
+	[[ "$rx_at_grant" =~ ^[0-9]+$ ]] || die "cannot read the standby's DHCP lease-sync Received counter from 'show chassis cluster statistics'"
+	while (( waited < 30 )); do
+		rx_now="$(lease_sync_count "$STANDBY" 4 || true)"
+		if [[ "$rx_now" =~ ^[0-9]+$ ]] && (( rx_now > rx_at_grant )); then
+			break
+		fi
+		sleep 2
+		waited=$((waited + 2))
+	done
+	sent_now="$(lease_sync_count "$PRIMARY" 3 || true)"
+	if [[ "$rx_now" =~ ^[0-9]+$ ]] && (( rx_now > rx_at_grant )); then
+		# One more change-poll tick: a push already in flight at the grant can
+		# land first, carrying the set read before the grant.
+		sleep 4
+		pass "the standby received a DHCP lease set after client A's grant (standby received ${rx_at_grant} -> $(lease_sync_count "$STANDBY" 4 || true); primary sent ${sent_now})"
+	else
+		fail "the standby received NO DHCP lease set within 30s of client A's grant (standby received stayed ${rx_at_grant}; primary sent ${sent_now}) — lease sync did not deliver, so a step-4b failure below is not evidence about the pre-seed (#9791)"
+	fi
 
 	info "3) Hard failover — reboot the RG0 primary ($PRIMARY)"
 	local since
@@ -367,7 +409,14 @@ main() {
 	done
 	if [ "$loaded" = "1" ]; then
 		pass "Kea on $STANDBY logged a memfile lease-file load after the failover"
-		if ssh_fw "$STANDBY" "journalctl -u kea-dhcp4-server --since @$since 2>/dev/null | grep -iE 'ROW_ERROR|error|parse|malformed'"; then
+		# Match Kea's memfile LOAD failures by message id, not any line carrying
+		# "error". #9791 lab run 4 failed this cell on DHCP4_BUFFER_RECEIVE_FAIL
+		# ("Value of the length of the IP header must not be lower than 5
+		# words"): a packet-receive error on the raw socket, unrelated to loading
+		# the lease file. DHCPSRV_MEMFILE_* is the memfile backend's id family, so
+		# its ERROR/FAIL members, a discarded row, and a server init or config
+		# load failure are what (a) is about.
+		if ssh_fw "$STANDBY" "journalctl -u kea-dhcp4-server --since @$since 2>/dev/null | grep -E 'DHCPSRV_MEMFILE_[A-Z_]*(ERROR|FAIL)|ROW_ERROR|DHCP4_(INIT_FAIL|CONFIG_LOAD_FAIL)'"; then
 			fail "Kea reported a memfile load error on the promoted node"
 		else
 			pass "no Kea memfile load error on the promoted node since the failover"

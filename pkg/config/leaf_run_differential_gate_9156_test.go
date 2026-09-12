@@ -586,35 +586,16 @@ func TestTunnelSchemaResolvesBothPositions9156(t *testing.T) {
 // starts agreeing while still listed — so the register cannot outlive the
 // defect it describes.
 var leafRunKnownDiffer9156 = map[string]bool{
-	// #9792 part 1: these five sat in skip buckets until
-	// leaf_run_fixtures_9792_test.go gave their oracles fixtures the validators
-	// accept. Measured on first comparison, all five are {lenient-only}: the
-	// strict walk refuses the one-line spelling, so a commit cannot reach the
-	// loss. They join #9792's part 2 population with the rows below.
-	"security policies from-zone xpfarg xpfarg xpfarg policy xpfarg [description -> scheduler-name] {braced+flat} {lenient-only}":                                true,
-	"security policies global policy xpfarg [description -> scheduler-name] {braced+flat} {lenient-only}":                                                        true,
-	"services ip-monitoring policy xpfarg then preferred-route route xpfarg [next-hop -> preferred-metric] {braced+flat} {lenient-only}":                         true,
-	"services ip-monitoring policy xpfarg then preferred-route routing-instance xpfarg route xpfarg [next-hop -> preferred-metric] {braced+flat} {lenient-only}": true,
-	"system [dataplane-type -> domain-name] {braced+flat} {lenient-only}":                                                                                        true,
-	"bridge-domains xpfname [domain-type -> routing-interface] {braced+flat} {lenient-only}":                                                                     true,
-	"class-of-service interfaces xpfarg [output-traffic-control-profile -> priority-low-min-share] {braced+flat} {lenient-only}":                                 true,
-	"forwarding-options sampling instance xpfarg family inet output flow-server xpfarg [source-address -> port] {braced+flat} {lenient-only}":                    true,
-	"forwarding-options sampling instance xpfarg family inet6 output flow-server xpfarg [source-address -> port] {braced+flat} {lenient-only}":                   true,
-	"interfaces xpfname [bandwidth -> description] {braced+flat} {lenient-only}":                                                                                 true,
-	"interfaces xpfname aggregated-ether-options [link-speed -> minimum-links] {braced+flat} {lenient-only}":                                                     true,
-	"interfaces xpfname gigether-options [802.3ad -> redundant-parent] {braced+flat} {lenient-only}":                                                             true,
-	"interfaces xpfname tunnel wireguard [private-key -> listen-port] {braced+flat} {lenient-only}":                                                              true,
-	"interfaces xpfname tunnel wireguard peer xpfarg [endpoint -> persistent-keepalive] {braced+flat} {lenient-only}":                                            true,
-	"protocols bgp group xpfarg neighbor xpfarg [authentication-key -> description] {braced+flat} {lenient-only}":                                                true,
-	"routing-instances xpfname [description -> instance-type] {braced+flat} {lenient-only}":                                                                      true,
-	"routing-instances xpfname protocols bgp group xpfarg neighbor xpfarg [authentication-key -> description] {braced+flat} {lenient-only}":                      true,
-	"security dynamic-address feed-server xpfarg [hostname -> hold-interval] {braced+flat} {lenient-only}":                                                       true,
-	"security flow traceoptions packet-filter xpfarg [destination-prefix -> protocol] {braced+flat} {lenient-only}":                                              true,
-	"security nat nat64 rule-set xpfarg [prefix -> source-pool] {braced+flat} {lenient-only}":                                                                    true,
-	"security screen ids-option xpfarg limit-session [destination-ip-based -> source-ip-based] {braced+flat} {lenient-only}":                                     true,
-	"security screen ids-option xpfarg tcp syn-flood [alarm-threshold -> attack-threshold] {braced+flat} {lenient-only}":                                         true,
-	"security zones security-zone xpfarg [description -> screen] {braced+flat} {lenient-only}":                                                                   true,
-	"system ntp server xpfarg [routing-instance -> key] {braced} {lenient-only}":                                                                                 true,
+	// #9792 part 2 REMOVED eight security rows by applying #9235's lenient-path
+	// remedy at their readers (flat_run_residue_9792.go): screen tcp syn-flood,
+	// screen limit-session, security-zone [description -> screen], both policy
+	// [description -> scheduler-name] rows, nat64 rule-set, dynamic-address
+	// feed-server, and flow traceoptions packet-filter.
+	// #9792 part 2 REMOVED the remaining sixteen rows the same way (the five
+	// part 1 fixtured, and eleven more). The routing-instance, system and
+	// interface readers take expandLeafHeadedRuns9792, because a whole-body
+	// expansion there hoisted a nested BGP `description` to the instance and
+	// added two rows.
 	// #9235 REMOVED the two `static-binding` rows that stood here:
 	//
 	//	system services dhcp-local-server   group <g> pool <p> static-binding <m>
@@ -638,10 +619,15 @@ var leafRunKnownDiffer9156 = map[string]bool{
 // that the container #9156 actually FIXED is not in it — a fix that left its
 // own row behind would be indistinguishable from no fix at all.
 func TestLeafRunRegisterIsNotVacuous9156(t *testing.T) {
-	if n := len(leafRunKnownDiffer9156); n == 0 {
-		t.Fatalf("the register is empty; either every container was fixed (remove " +
-			"this cell's premise deliberately) or the gate stopped finding rows")
-	}
+	// #9792 part 2 fixed every registered row, so the register is EMPTY, and
+	// this cell's former first assertion ("the register is non-empty") is
+	// removed deliberately, as its own failure text prescribed. An empty
+	// register does not mean the gate stopped finding rows:
+	// TestLeafRunDifferentialGateDiscriminates9156 drives a known differing
+	// container through the gate and fails if it is not reported. The
+	// properties below still hold for an empty register. For the "consulted"
+	// property, a fabricated registered row is installed for the duration of
+	// the cell, because the real register has none to lend.
 	for k := range leafRunKnownDiffer9156 {
 		if strings.HasPrefix(k, "interfaces xpfname tunnel [") {
 			t.Errorf("%q is registered as a known difference, but it is the container "+
@@ -653,11 +639,9 @@ func TestLeafRunRegisterIsNotVacuous9156(t *testing.T) {
 	// gate accept every difference as recorded left the whole suite green while
 	// this cell still passed on size alone — so the decision is driven here with
 	// a fabricated input instead of being inferred from the gate's colour.
-	var anyRecorded string
-	for k := range leafRunKnownDiffer9156 {
-		anyRecorded = k
-		break
-	}
+	const anyRecorded = "xpf-registered-fixture [xpfhead -> xpftail] {flat}"
+	leafRunKnownDiffer9156[anyRecorded] = true
+	t.Cleanup(func() { delete(leafRunKnownDiffer9156, anyRecorded) })
 	const fabricated = "xpf-not-a-real-container [xpfhead -> xpftail] {flat}"
 	unrec, _ := ratchetLeafRunDiffers9156([]string{fabricated, anyRecorded})
 	if len(unrec) != 1 || unrec[0] != fabricated {

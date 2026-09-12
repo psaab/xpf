@@ -355,10 +355,14 @@ func compilePolicy(polInst struct {
 		pol.Action = PolicyDeny
 	}
 
-	if descNode := polInst.node.FindChild("description"); descNode != nil {
+	// #9792: `description <d> scheduler-name <s>` on one line reaches here as a
+	// chain on the lenient path (Store.Load / Store.SyncApply), and FindChild
+	// on the raw node saw only the description. Expand it as #9235 does.
+	policyLeaves := expandResolvingRun9792(polInst.node, policySchema9792(isGlobal))
+	if descNode := policyLeaves.FindChild("description"); descNode != nil {
 		pol.Description = nodeVal(descNode)
 	}
-	if snNode := polInst.node.FindChild("scheduler-name"); snNode != nil {
+	if snNode := policyLeaves.FindChild("scheduler-name"); snNode != nil {
 		pol.SchedulerName = nodeVal(snNode)
 	}
 

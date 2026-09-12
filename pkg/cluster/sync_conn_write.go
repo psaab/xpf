@@ -66,6 +66,66 @@ func (s *SessionSync) QueueSessionV6(key dataplane.SessionKeyV6, val dataplane.S
 	s.queueMessage(msg, &s.stats.SessionsSent, "session_v6")
 }
 
+// pacedQueuePoll is how often a paced enqueue re-checks the connection while
+// it waits for room in the send queue.
+const pacedQueuePoll = 10 * time.Millisecond
+
+// QueueSessionV4Paced queues a v4 session like QueueSessionV4, except that a
+// full send queue makes it wait up to maxWait for room instead of dropping the
+// message (#9767). It reports whether the session reached the queue. The
+// FullResync export uses it because its frame is acknowledged to the helper
+// only once the whole export is queued: waiting lets the writer pace a burst
+// larger than the queue, in order, where QueueSessionV4 discards its tail.
+func (s *SessionSync) QueueSessionV4Paced(key dataplane.SessionKey, val dataplane.SessionValue, maxWait time.Duration) bool {
+	s.stampInstallGenV4(key, &val)
+	return s.queueMessagePaced(encodeSessionV4(key, val), &s.stats.SessionsSent, "session_v4", maxWait)
+}
+
+// QueueSessionV6Paced is the v6 form of QueueSessionV4Paced.
+func (s *SessionSync) QueueSessionV6Paced(key dataplane.SessionKeyV6, val dataplane.SessionValueV6, maxWait time.Duration) bool {
+	s.stampInstallGenV6(key, &val)
+	return s.queueMessagePaced(encodeSessionV6(key, val), &s.stats.SessionsSent, "session_v6", maxWait)
+}
+
+// queueMessagePaced is queueMessage with a bounded wait for room. A disconnect
+// ends the wait at once, as it refuses queueMessage. When maxWait passes with
+// the queue still full, the last attempt is queueMessage itself, so a dropped
+// message is counted exactly as a lossy producer's drop is.
+func (s *SessionSync) queueMessagePaced(msg []byte, sentCounter *atomic.Uint64, source string, maxWait time.Duration) bool {
+	deadline := time.Now().Add(maxWait)
+	var timer *time.Timer
+	defer func() {
+		if timer != nil {
+			timer.Stop()
+		}
+	}()
+	for s.stats.Connected.Load() {
+		select {
+		case s.sendCh <- msg:
+			sentCounter.Add(1)
+			return true
+		default:
+		}
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return s.queueMessage(msg, sentCounter, source)
+		}
+		poll := min(remaining, pacedQueuePoll)
+		if timer == nil {
+			timer = time.NewTimer(poll)
+		} else {
+			timer.Reset(poll)
+		}
+		select {
+		case s.sendCh <- msg:
+			sentCounter.Add(1)
+			return true
+		case <-timer.C:
+		}
+	}
+	return false
+}
+
 // QueueDeleteV4 queues a v4 session deletion for synchronization. If the peer
 // is disconnected, the delete is journaled for replay on reconnect. The delete
 // draws a fresh generation strictly greater than the install it cancels

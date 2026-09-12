@@ -50,7 +50,7 @@ func compileSystem(node *Node, sys *SystemConfig, cfg *Config, opts compileOpts)
 	// `case "login"` arm.
 	var loginUserByName map[string]*LoginUser
 
-	for _, child := range node.Children {
+	for _, child := range expandResolvingRuns9792(node.Children, systemSchema9792()) { // #9792: expand a lenient-path packed run (#9235).
 		switch child.Name() {
 		case "host-name":
 			if len(child.Keys) >= 2 {
@@ -3874,7 +3874,7 @@ func ntpServerValues(n *Node) ([]string, map[string]NTPServerOption) {
 	// docs/config-schema.md warns about, and it is exactly the one an
 	// early-return on Keys cannot see.
 	var mods []*Node
-	for _, child := range n.Children {
+	for _, child := range expandResolvingRuns9792(n.Children, ntpServerSchema9792()) {
 		if child == nil || len(child.Keys) == 0 {
 			continue
 		}

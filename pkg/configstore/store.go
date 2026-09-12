@@ -140,6 +140,15 @@ type Store struct {
 	// Every successful committed write resets it to true.
 	persistMarkerCommitted bool
 
+	// #9530: peerReachableFn reports whether the cluster peer can currently be
+	// shown a commit (nil for a standalone store). unshared marks an active
+	// config holding a local commit the peer has not been shown to hold, and is
+	// persisted in .configdb/unshared.json. divergence is the last peer sync that
+	// replaced such a config. All guarded by mu; see unshared_9530.go.
+	peerReachableFn func() bool
+	unshared        *unsharedRecord
+	divergence      *SyncDivergence
+
 	// confirmResolvePendingPersist records that a commit-confirmed window was
 	// RESOLVED in memory (timeout auto-rollback, boot recovery, or an HA
 	// config-sync that superseded it) but the resolving active-config write
@@ -855,6 +864,10 @@ func (s *Store) SyncApply(content string, chassisPreserve func(*config.ConfigTre
 		return nil, fmt.Errorf("sync config compile error: %w", err)
 	}
 
+	// #9530: classify BEFORE the active config is replaced, while it can still
+	// be compared with the unshared-commit mark.
+	divergence := s.classifySyncLocked(tree)
+
 	// Push current active to history.
 	s.history.Push(&HistoryEntry{
 		Config:    s.active.Clone(),
@@ -863,6 +876,7 @@ func (s *Store) SyncApply(content string, chassisPreserve func(*config.ConfigTre
 
 	s.active = tree
 	s.compiled = compiled
+	s.recordSyncDivergenceLocked(divergence)
 	s.dirty = false
 
 	// If in config mode, update candidate too.

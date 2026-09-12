@@ -801,6 +801,9 @@ func compileFlow(node *Node, sec *SecurityConfig) error {
 			to.Flags = append(to.Flags, firewallMatchValues(flagNode)...)
 		}
 		for _, pfInst := range namedInstances(toNode.FindChildren("packet-filter")) {
+			// #9792: expand a lenient-path packed run (#9235) so every leaf below is
+			// read from the expanded body, not only the head of the chain.
+			pfNode := expandResolvingRun9792(pfInst.node, packetFilterSchema9792())
 			pf := &TracePacketFilter{Name: pfInst.name}
 			// A prefix node that is PRESENT but empty (`source-prefix ""`) is
 			// malformed: an empty prefix is not "no constraint" but a typo that
@@ -808,19 +811,19 @@ func compileFlow(node *Node, sec *SecurityConfig) error {
 			// (#3422 M01). Record the distinction here (present-but-empty vs the
 			// absent protocol-only case) so the runtime can fail it closed; the
 			// strict commit gate rejects it outright before it ever lands here.
-			if spNode := pfInst.node.FindChild("source-prefix"); spNode != nil {
+			if spNode := pfNode.FindChild("source-prefix"); spNode != nil {
 				pf.SourcePrefix = nodeVal(spNode)
 				if pf.SourcePrefix == "" {
 					pf.InvalidPrefix = true
 				}
 			}
-			if dpNode := pfInst.node.FindChild("destination-prefix"); dpNode != nil {
+			if dpNode := pfNode.FindChild("destination-prefix"); dpNode != nil {
 				pf.DestinationPrefix = nodeVal(dpNode)
 				if pf.DestinationPrefix == "" {
 					pf.InvalidPrefix = true
 				}
 			}
-			if protoNode := pfInst.node.FindChild("protocol"); protoNode != nil {
+			if protoNode := pfNode.FindChild("protocol"); protoNode != nil {
 				pf.Protocol = nodeVal(protoNode)
 			}
 			to.PacketFilters = append(to.PacketFilters, pf)

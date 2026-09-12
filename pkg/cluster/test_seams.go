@@ -11,6 +11,8 @@
 
 package cluster
 
+import "time"
+
 // SetPeerIPsecSAsForTesting installs the peer's advertised IPsec
 // connection-name set without a wire round trip, mirroring
 // SetPeerDHCPLeasesForTesting.
@@ -23,4 +25,68 @@ func (s *SessionSync) SetPeerIPsecSAsForTesting(names []string) {
 	s.peerIPsecSAsMu.Lock()
 	defer s.peerIPsecSAsMu.Unlock()
 	s.peerIPsecSAs = append([]string(nil), names...)
+}
+
+// SetConnectedForTesting sets the connected flag every queue producer checks,
+// without a peer. With no Start there is no writer either, so the send queue
+// holds exactly what the producers under test enqueued (#9767).
+func (s *SessionSync) SetConnectedForTesting(connected bool) {
+	s.stats.Connected.Store(connected)
+}
+
+// FillSendQueueForTesting fills the send queue with placeholder messages and
+// returns how many it added.
+func (s *SessionSync) FillSendQueueForTesting() int {
+	n := 0
+	for {
+		select {
+		case s.sendCh <- nil:
+			n++
+		default:
+			return n
+		}
+	}
+}
+
+// TakeQueuedMessageTypeForTesting removes the oldest queued message, waiting up
+// to wait for one, and names its type: "session_v4", "session_v6",
+// "delete_v4", "delete_v6", "filler" for a FillSendQueueForTesting placeholder,
+// or "other". ok is false when the queue stayed empty.
+func (s *SessionSync) TakeQueuedMessageTypeForTesting(wait time.Duration) (typ string, ok bool) {
+	select {
+	case msg := <-s.sendCh:
+		return queuedMessageTypeForTesting(msg), true
+	default:
+	}
+	if wait <= 0 {
+		return "", false
+	}
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+	select {
+	case msg := <-s.sendCh:
+		return queuedMessageTypeForTesting(msg), true
+	case <-timer.C:
+		return "", false
+	}
+}
+
+func queuedMessageTypeForTesting(msg []byte) string {
+	if msg == nil {
+		return "filler"
+	}
+	if len(msg) < syncHeaderSize {
+		return "other"
+	}
+	switch msg[4] {
+	case syncMsgSessionV4:
+		return "session_v4"
+	case syncMsgSessionV6:
+		return "session_v6"
+	case syncMsgDeleteV4:
+		return "delete_v4"
+	case syncMsgDeleteV6:
+		return "delete_v6"
+	}
+	return "other"
 }

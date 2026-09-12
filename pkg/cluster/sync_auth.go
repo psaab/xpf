@@ -184,6 +184,12 @@ type authConn struct {
 	// connection, like recvSeq/recvSeen below.
 	readKey  []byte
 	writeKey []byte
+	// clockOffset is the peer clock offset the ClockSync on THIS connection
+	// established, and clockSynced says one was accepted (#9653). Sessions the
+	// connection carries rebase with it (clockOffsetFor), so a ClockSync on one
+	// connection cannot rebase the sessions another connection carries.
+	clockOffset atomic.Int64
+	clockSynced atomic.Bool
 
 	// bootIncarnation is the peer boot id the BulkStart on THIS connection
 	// primed under (#5084). Zero until an incarnated prime arrives, and zero

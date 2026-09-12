@@ -434,7 +434,7 @@ func compileScreen(node *Node, sec *SecurityConfig) error {
 					recordChildExtras("tcp fin-no-ack", opt)
 				case "syn-flood":
 					sf := &SynFloodConfig{}
-					for _, sfOpt := range opt.Children {
+					for _, sfOpt := range expandResolvingRuns9792(opt.Children, synFloodSchema9792()) { // #9792: lenient-path packed run
 						val := numVal(sfOpt, 1)
 						switch sfOpt.Name() {
 						case "alarm-threshold":
@@ -556,7 +556,9 @@ func compileScreen(node *Node, sec *SecurityConfig) error {
 		limitNode := body.FindChild("limit-session")
 		if limitNode != nil {
 			limitsessionSchema := famSchema("limit-session")
-			for _, rawOpt := range limitNode.Children {
+			// #9792: a packed one-line run reaches this reader on the lenient path
+			// (Store.Load / Store.SyncApply); expand it as #9235 does. Lenient path only.
+			for _, rawOpt := range expandResolvingRuns9792(limitNode.Children, limitSessionSchema9792()) {
 				opt := screenOpt(limitsessionSchema, rawOpt)
 				val := numVal(opt, 1)
 				switch opt.Name() {

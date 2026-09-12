@@ -193,6 +193,7 @@ func (m *Manager) PublishRouteOverlaySnapshot(cfg *config.Config, overlay []conf
 	next.FIBGeneration = m.readFIBGeneration()
 	next.GeneratedAt = time.Now().UTC()
 	next.Config = cfg
+	resampled := m.resampleUnresolvedSectionsLocked(&next) // #9684
 	// #3772 (M9): a transient ip-rule enumeration failure aborts the
 	// overlay publish (fail-closed). The deferred commit above leaves
 	// m.routeOverlay at the last-applied baseline on a non-nil err, so the
@@ -233,9 +234,10 @@ func (m *Manager) PublishRouteOverlaySnapshot(cfg *config.Config, overlay []conf
 	// Duplicate-publish skip: identical content (e.g. the actuator ran
 	// twice for the same overlay) does not need a control-socket
 	// round-trip. The content hash excludes Generation/FIBGeneration. Not while an
-	// earlier apply's outcome is unknown (#9520): the hash then describes what Go
-	// last sent, not what the helper holds.
-	if h, ok := snapshotContentHash(&next); ok && h == m.lastSnapshotHash && !m.applySnapshotOutcomeUnknown {
+	// earlier apply's outcome is unknown (#9520), nor while a partial update's is
+	// (#9684): the hash then describes what Go last sent, not what the helper holds.
+	if h, ok := snapshotContentHash(&next); ok && h == m.lastSnapshotHash && !m.applySnapshotOutcomeUnknown &&
+		m.partialOutcomeUnknown == 0 {
 		slog.Debug("userspace: route overlay publish skipped (content unchanged)")
 		return false, nil
 	}
@@ -264,6 +266,7 @@ func (m *Manager) PublishRouteOverlaySnapshot(cfg *config.Config, overlay []conf
 	if h, ok := snapshotContentHash(&next); ok {
 		m.lastSnapshotHash = h
 	}
+	m.resolvePartialOutcomesLocked(resampled)
 	if err := m.applyHelperStatusLocked(&status); err != nil {
 		slog.Warn("userspace: failed to sync helper status after route overlay publish", "err", err)
 	}

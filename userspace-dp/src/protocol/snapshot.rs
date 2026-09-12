@@ -577,8 +577,8 @@ pub(crate) struct ConfigSnapshot {
     ///
     /// No Rust-side regeneration is needed or wanted: the key is
     /// DETERMINISTIC — the Go control plane derives it from the chassis
-    /// cluster authentication-key + cluster-id + rotation epoch + screened
-    /// zones (`buildSYNCookieKeys`,
+    /// cluster authentication-key + cluster-id + rotation epoch
+    /// (`buildSYNCookieKeys`,
     /// pkg/dataplane/userspace/screens.go) and re-delivers it on every
     /// config push. `ServerState.snapshot` starts `None` on boot and is
     /// never restored from `state.json`, so the control plane always
