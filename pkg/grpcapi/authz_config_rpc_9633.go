@@ -2,7 +2,6 @@ package grpcapi
 
 import (
 	"fmt"
-	"strings"
 
 	"github.com/psaab/xpf/pkg/config"
 	pb "github.com/psaab/xpf/pkg/grpcapi/xpfv1"
@@ -52,13 +51,6 @@ func isConfigModeMethod9633(fullMethod string) bool {
 	return ok && service == serviceName && configModeMethods9633[method]
 }
 
-// loadFlatVerbs9633 are the first words that make a Load body set-format,
-// matching the mutation verbs config.AuthorizeConfigMutation gates.
-var loadFlatVerbs9633 = map[string]bool{
-	"set": true, "delete": true, "deactivate": true, "activate": true,
-	"copy": true, "rename": true, "insert": true, "annotate": true,
-}
-
 // authorizeRPCLoadAndRollback adjudicates the two config RPCs whose writes are
 // not a single request line.
 func (s *Server) authorizeRPCLoadAndRollback(cfg *config.Config, class, fullMethod string, req any) error {
@@ -82,56 +74,21 @@ func (s *Server) authorizeRPCLoadAndRollback(cfg *config.Config, class, fullMeth
 		if !okReq {
 			return nil
 		}
-		if r.GetMode() == "override" {
-			return fmt.Errorf("permission denied: login class %q restricts configuration paths, and "+
-				"load override replaces the whole candidate, so the paths it deletes cannot be "+
-				"adjudicated one by one; use load merge or load set (#9633)", class)
-		}
-		for _, line := range loadMutationLines9633(r.GetContent()) {
-			if err := config.AuthorizeConfigMutation(cfg, class, nil, line); err != nil {
-				return err
-			}
-		}
+		// #9892: delegate to the shared evaluator. The logic below used to
+		// live here; it now lives in pkg/config beside AuthorizeConfigMutation
+		// so REST and the CLI adjudicate the SAME content the same way. Two
+		// copies of "render hierarchical content as set lines" drift, and the
+		// drift is invisible because each copy looks right on its own.
+		return config.AuthorizeConfigLoad(cfg, class, r.GetMode(), r.GetContent())
 	case "Rollback":
 		r, okReq := req.(*pb.RollbackRequest)
-		if !okReq || r.GetN() == 0 {
+		if !okReq {
 			return nil
 		}
-		return fmt.Errorf("permission denied: login class %q restricts configuration paths, and "+
-			"rollback %d replaces the candidate with an older configuration whose paths cannot "+
-			"be adjudicated one by one; rollback 0 remains available (#9633)", class, r.GetN())
+		// #9892: shared with REST and the CLI.
+		return config.AuthorizeConfigRollback(cfg, class, int(r.GetN()))
 	}
 	return nil
-}
-
-// loadMutationLines9633 returns the set-form mutation lines a Load body writes.
-// Set-format content is taken line by line. Hierarchical content is parsed with
-// the store's parser and rendered as set lines, so its every leaf path is
-// checked. Content that does not parse yields its parsed part; the store's own
-// Load refuses what it cannot parse.
-func loadMutationLines9633(content string) []string {
-	var lines []string
-	flat := false
-	for _, raw := range strings.Split(content, "\n") {
-		line := strings.TrimSpace(raw)
-		if f := strings.Fields(line); len(f) > 0 && loadFlatVerbs9633[f[0]] {
-			flat = true
-			lines = append(lines, line)
-		}
-	}
-	if flat {
-		return lines
-	}
-	tree, _ := config.NewParser(content).Parse()
-	if tree == nil {
-		return nil
-	}
-	for _, line := range strings.Split(tree.FormatSet(), "\n") {
-		if line = strings.TrimSpace(line); line != "" {
-			lines = append(lines, line)
-		}
-	}
-	return lines
 }
 
 // unenforceableAllowOnGRPC9633 reports whether the class's allow-commands

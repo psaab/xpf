@@ -180,6 +180,29 @@ func (c *CLI) handleLoad(args []string) error {
 		return fmt.Errorf("load: empty input")
 	}
 
+	// #9892: adjudicate the CONTENT against the class's deny-configuration
+	// regexes, HERE and not at dispatch.
+	//
+	// cli_dispatch.go DOES run checkConfigRegex on every config-mode line,
+	// including this one — but it delegates to configMutationPath, which
+	// returns ok=false for any verb outside configMutationVerbs, and `load` is
+	// not in that map. So the gate executed and declined to adjudicate, which
+	// is worse than being absent: a reader auditing that path sees a gate on
+	// it. And it could not have done better there, because at dispatch time
+	// the content has not been read yet — `terminal` input arrives only after
+	// the paste completes, several lines below.
+	//
+	// Same evaluator as the REST and gRPC surfaces (pkg/config), not an
+	// equivalent copy: two renderings of hierarchical content as set lines
+	// drift, and each looks right on its own.
+	var loadCfg *config.Config
+	if c.store != nil {
+		loadCfg = c.store.ActiveConfig()
+	}
+	if err := config.AuthorizeConfigLoad(loadCfg, c.userClass, mode, content); err != nil {
+		return err
+	}
+
 	switch mode {
 	case "set":
 		count, err := c.store.LoadSet(content)
