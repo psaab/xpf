@@ -210,7 +210,33 @@ func nftRulesFromTerm(term *config.FirewallFilterTerm, family string, prefixList
 	}
 	parts = append(parts, addrParts...)
 
-	parts = append(parts, nftTermProtocolPredicates(term)...)
+	protoParts := nftTermProtocolPredicates(term)
+	parts = append(parts, protoParts...)
+
+	// #9953: a port comparison with no protocol predicate reads two bytes out of
+	// whatever header follows the IP header. On the lo0 input chain that includes
+	// SCTP, GRE and ICMP reaching a firewall-local address by the ordinary
+	// host-bound path, so `destination-port 22` is evaluated against packets that
+	// have no ports at all — fail-OPEN for an accept term, an unasked-for drop for
+	// a discard term.
+	//
+	// The condition is asked of the SAME predicate the netlink builder uses
+	// (pkg/nftables), so the two render paths agree by construction rather than by
+	// the parity test noticing afterwards. Note it keys on protoParts being EMPTY,
+	// not on len(term.Protocols): an unresolvable protocol token is kept verbatim
+	// by the lowering above precisely so `nft -f -` rejects the ruleset, and such a
+	// term HAS a protocol predicate — supplying a fallback there would replace a
+	// deliberate fail-closed with a silently widened rule.
+	if xnft.Lo0NeedsPortProtocolFallback(
+		len(protoParts) > 0,
+		len(term.ICMPTypes) > 0 || len(term.ICMPCodes) > 0,
+		xnft.Lo0TermComparesPort(term.SourcePorts, term.DestinationPorts,
+			term.SourcePortsExcept, term.DestPortsExcept),
+	) {
+		if expr := xnft.Lo0PortFallbackL4ProtoExpr(); expr != "" {
+			parts = append(parts, expr)
+		}
+	}
 
 	// Source port matching
 	if len(term.SourcePorts) == 1 {
