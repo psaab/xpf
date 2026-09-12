@@ -1683,6 +1683,26 @@ exactly with trailing `Pad [N]byte` fields. cilium/ebpf serializes map
 values in native endian, not big-endian, so use `binary.NativeEndian`
 when packing IP addresses (already in network byte order on the wire).
 
+**Group expansion into split stanzas and wildcard adoption (#9802):** a group
+container with no same-keyed destination is adopted wholesale, and one with a
+same-keyed destination used to merge into the FIRST one only.
+- A wildcard-keyed node inside a wholesale-adopted subtree matched nothing by
+  construction, and used to land as a literal instance name — the #9423
+  phantom, reached by the route that issue's fixtures cannot take. It is now
+  dropped (`pruneWildcardInstances9802`), and a container whose whole body was
+  wildcard-keyed is not adopted at all.
+  - The scope is the node's SHAPE, not the schema: a zone's `interfaces` member
+    slot is declared as a wildcard child WITH children, exactly like a dynamic
+    instance name. Only a wildcard container, or a wildcard leaf carrying an
+    instance name, is dropped. A single-key wildcard leaf is a MEMBER and stays
+    loudly refused by the compiler's reference check (#9423).
+- A group container's wildcard-keyed children now reach every same-keyed
+  destination container, and the rest go to the one that can receive them
+  (`sameKeyedContainers9802`, `receivingContainer9802`). A level spread over two
+  blocks is one level, which is the rule `siblingsExcludeGroup` already applies
+  to `apply-groups-except` (#9422) and the pre-passes apply across roots
+  (#5741).
+
 **Group expansion of zone statements written as leaves (#9801, #9831):**
 `mergeNodes` (`ast_groups.go`) treats `security-zone trust;` as the zone it
 names. Both rules apply only to `security-zone` statements directly under
