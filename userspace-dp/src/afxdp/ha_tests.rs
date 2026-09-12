@@ -5599,6 +5599,246 @@ fn a_peer_delete_with_an_unresolved_owner_rg_and_no_active_group_still_deletes_9
     );
 }
 
+// --- #9714 review round 2, finding 3: validate and remove the SAME entry. ---
+
+/// Files `key` in the reverse-prewarm index the way the live path does, so a cell can
+/// observe whether a removal un-filed it.
+fn file_prewarm_9714(fixture: &Fixture9714, key: &SessionKey) {
+    let mut index = fixture
+        .coordinator
+        .sessions
+        .owner_rg_indexes
+        .reverse_prewarm_sessions
+        .lock()
+        .expect("prewarm index");
+    index.entry(RG_9714).or_default().insert(key.clone());
+}
+
+fn prewarm_filed_9714(fixture: &Fixture9714, key: &SessionKey) -> bool {
+    let index = fixture
+        .coordinator
+        .sessions
+        .owner_rg_indexes
+        .reverse_prewarm_sessions
+        .lock()
+        .expect("prewarm index");
+    index.values().any(|keys| keys.contains(key))
+}
+
+/// THE CELL THAT DISTINGUISHES THIS FIX FROM A STAMP: the predicate is shown the
+/// entry that is ACTUALLY THERE, not the one the caller decided about.
+///
+/// A stamp validates a TOKEN and then trusts it, which leaves the same
+/// check-to-removal window one step further along. Here the predicate runs inside the
+/// lock hold that performs the removal, so it cannot be shown a stale entry.
+#[test]
+fn the_removal_predicate_sees_the_entry_that_replaced_the_original_9714() {
+    let fixture = fixture_9714(false);
+    let original = (fixture.forward.origin, fixture.forward.generation);
+
+    // A DIFFERENT entry now occupies the key — the replacement the old
+    // clone-then-release-then-remove could not notice.
+    let mut replacement = fixture.forward.clone();
+    replacement.origin = SessionOrigin::SyncImport;
+    replacement.generation = 77;
+    publish_shared_session(
+        &fixture.coordinator.sessions.synced,
+        &fixture.coordinator.sessions.nat,
+        &fixture.coordinator.sessions.forward_wire,
+        &fixture.coordinator.sessions.owner_rg_indexes,
+        &replacement,
+    );
+    assert_ne!(
+        original,
+        (replacement.origin, replacement.generation),
+        "FIXTURE: the replacement must DIFFER from the original, or \"saw the current entry\" and \
+         \"saw the stale clone\" are the same observation and this cell proves nothing"
+    );
+
+    let mut seen: Option<(SessionOrigin, u64)> = None;
+    let outcome = remove_shared_session_if(
+        &fixture.coordinator.sessions.synced,
+        &fixture.coordinator.sessions.nat,
+        &fixture.coordinator.sessions.forward_wire,
+        &fixture.coordinator.sessions.owner_rg_indexes,
+        &fixture.forward.key,
+        |current| {
+            seen = Some((current.origin, current.generation));
+            true
+        },
+    );
+
+    assert_eq!(
+        seen,
+        Some((replacement.origin, replacement.generation)),
+        "the predicate was shown the ORIGINAL entry rather than the replacement now occupying the \
+         key — that is exactly the stale-decision window finding 3 exists to close (#9714 r2 F3)"
+    );
+    assert!(
+        matches!(outcome, SharedRemoval::Removed(_)),
+        "an accepting predicate must remove"
+    );
+}
+
+/// A DECLINED removal mutates NOTHING — including the reverse-prewarm filing.
+///
+/// The un-filing is unconditional in the plain path (#7209: a key with no entry must
+/// not stay filed) and used to run BEFORE the decision. Moving it after the decision
+/// is a real semantic change, and this cell is what pins it: a decline leaves a LIVE
+/// session behind, and un-filing a live session's prewarm entry strands it — the
+/// activation prewarm skips a key it cannot find, so the filing must survive.
+///
+/// It asserts the PREMISE (the session is live AND filed before the call), not only
+/// the conclusion. Without that, an empty index would make "unchanged" vacuously true.
+#[test]
+fn a_declined_removal_leaves_the_session_live_and_filed_9714() {
+    let fixture = fixture_9714(false);
+    let key = fixture.forward.key.clone();
+    file_prewarm_9714(&fixture, &key);
+
+    assert!(
+        fixture.shared_has(&key),
+        "FIXTURE: the session must be live before the declined removal"
+    );
+    assert!(
+        prewarm_filed_9714(&fixture, &key),
+        "FIXTURE: the key must be FILED before the declined removal, or the assertion below passes \
+         against an empty index and measures nothing"
+    );
+
+    let outcome = remove_shared_session_if(
+        &fixture.coordinator.sessions.synced,
+        &fixture.coordinator.sessions.nat,
+        &fixture.coordinator.sessions.forward_wire,
+        &fixture.coordinator.sessions.owner_rg_indexes,
+        &key,
+        |_| false,
+    );
+
+    assert!(matches!(outcome, SharedRemoval::Declined), "the predicate declined");
+    assert!(
+        fixture.shared_has(&key),
+        "a DECLINED removal removed the entry anyway"
+    );
+    assert!(
+        prewarm_filed_9714(&fixture, &key),
+        "a DECLINED removal un-filed the reverse-prewarm entry of a session that is still LIVE. \
+         The activation prewarm skips a key it cannot find, so the session would be stranded on \
+         the failover path it exists to serve (#9714 r2 F3)"
+    );
+}
+
+/// The CONTROL: an ACCEPTED removal still removes and still un-files, exactly as the
+/// unconditional path did. Without this, a predicate wired to decline everything
+/// would pass the cell above while silently breaking every delete in the process.
+#[test]
+fn an_accepted_removal_still_removes_and_unfiles_9714() {
+    let fixture = fixture_9714(false);
+    let key = fixture.forward.key.clone();
+    file_prewarm_9714(&fixture, &key);
+    assert!(
+        prewarm_filed_9714(&fixture, &key),
+        "FIXTURE: the key must be filed before the accepted removal"
+    );
+
+    let outcome = remove_shared_session_if(
+        &fixture.coordinator.sessions.synced,
+        &fixture.coordinator.sessions.nat,
+        &fixture.coordinator.sessions.forward_wire,
+        &fixture.coordinator.sessions.owner_rg_indexes,
+        &key,
+        |_| true,
+    );
+
+    assert!(matches!(outcome, SharedRemoval::Removed(_)), "the predicate accepted");
+    assert!(!fixture.shared_has(&key), "an accepted removal left the entry behind");
+    assert!(
+        !prewarm_filed_9714(&fixture, &key),
+        "an accepted removal left the key FILED, which is the #7209 strand: a filing with no \
+         session behind it survives for the life of the process"
+    );
+}
+
+/// #9714 review round 2, finding 7: the stale-generation refusal is a DISTINCT
+/// outcome from an applied delete, and this pair is the only thing that reaches it.
+///
+/// THE AXIS THIS CELL EXISTS FOR. Every other #9714 cell builds on
+/// `reserve6600_entry`, which sets `generation: 0`, and the #2170 guard fires only
+/// when BOTH the stored and the delete generation are non-zero. So the third enum
+/// state that finding 7 introduced had no row at all — a state added by the fix,
+/// with the fixture set pinned to the one value that cannot reach it.
+#[test]
+fn a_stale_generation_delete_is_refused_and_keeps_the_entry_9714() {
+    // RG INACTIVE on purpose: ownership must not be what refuses here, or this cell
+    // would pass for the wrong reason and duplicate the F4 pair.
+    let fixture = fixture_9714(false);
+    let mut newer = fixture.forward.clone();
+    newer.generation = 9;
+    crate::afxdp::shared_ops::publish_shared_session(
+        &fixture.coordinator.sessions.synced,
+        &fixture.coordinator.sessions.nat,
+        &fixture.coordinator.sessions.forward_wire,
+        &fixture.coordinator.sessions.owner_rg_indexes,
+        &newer,
+    );
+    let before = fixture.coordinator.session_delete_stale_ignored_total();
+
+    // A delete carrying an OLDER generation than the stored entry.
+    fixture
+        .coordinator
+        .session_domain()
+        .delete_synced_session_gen(fixture.forward.key.clone(), 3);
+
+    assert_eq!(
+        fixture.coordinator.session_delete_stale_ignored_total(),
+        before + 1,
+        "a delete older than the stored entry must be counted stale-ignored (#2170)"
+    );
+    assert!(
+        fixture.shared_has(&fixture.forward.key),
+        "a STALE delete removed the NEWER same-key entry the helper had already mirrored — the \
+         outcome the #2170 guard exists to prevent, and the one finding 7 made distinguishable \
+         from an applied delete instead of collapsing both onto `false` (#9714 r2 F7)"
+    );
+}
+
+/// The CONTROL for the cell above: a delete whose generation is NEWER than the stored
+/// entry still APPLIES. Without it, a guard that refused every generation-carrying
+/// delete would pass the stale cell and silently stop honouring authoritative ones.
+#[test]
+fn a_newer_generation_delete_still_applies_9714() {
+    let fixture = fixture_9714(false);
+    let mut stored = fixture.forward.clone();
+    stored.generation = 9;
+    crate::afxdp::shared_ops::publish_shared_session(
+        &fixture.coordinator.sessions.synced,
+        &fixture.coordinator.sessions.nat,
+        &fixture.coordinator.sessions.forward_wire,
+        &fixture.coordinator.sessions.owner_rg_indexes,
+        &stored,
+    );
+    assert!(
+        fixture.shared_has(&fixture.forward.key),
+        "FIXTURE: the generation-stamped entry must be stored, or the assertion below is vacuous"
+    );
+    let before = fixture.coordinator.session_delete_stale_ignored_total();
+
+    fixture
+        .coordinator
+        .session_domain()
+        .delete_synced_session_gen(fixture.forward.key.clone(), 11);
+
+    assert_eq!(
+        fixture.coordinator.session_delete_stale_ignored_total(),
+        before,
+        "a NEWER delete was counted as stale; the guard must order, not refuse"
+    );
+    assert!(
+        !fixture.shared_has(&fixture.forward.key),
+        "a delete newer than the stored entry did not apply"
+    );
+}
+
 /// THE ACCEPTANCE CRITERION: a peer delete of a live local session whose owner RG
 /// is locally active changes nothing.
 #[test]

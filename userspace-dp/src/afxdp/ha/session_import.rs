@@ -909,12 +909,43 @@ impl crate::afxdp::ha::SessionDomain {
                 delete_dnat_table_entry(&dnat_fds, &entry.key, entry.decision.nat);
             }
         }
-        remove_shared_session(
+        // #9714 review round 2, finding 3: re-ask the decision UNDER THE LOCK, of the
+        // entry actually being removed.
+        //
+        // The early returns above still short-circuit a delete that will be refused,
+        // so no teardown is done for one. What they cannot do is bind their verdict
+        // to THIS removal: the entry was read at the top of this function and the
+        // lock released in the same statement, so a local replacement published in
+        // the window between would be destroyed on a decision taken about a
+        // different entry. Asking again inside the removal's own lock hold closes
+        // that window without an identity token — the entry the predicate sees IS
+        // the one removed.
+        let now_secs = monotonic_nanos() / 1_000_000_000;
+        let rg_runtime = self.rg_runtime.load();
+        let removal = remove_shared_session_if(
             &self.sessions.synced,
             &self.sessions.nat,
             &self.sessions.forward_wire,
             &self.sessions.owner_rg_indexes,
             &key,
+            |current| {
+                // #2170: a stale delete must not remove a NEWER same-key entry.
+                if current.generation != 0
+                    && delete_gen != 0
+                    && delete_gen < current.generation
+                {
+                    return false;
+                }
+                // #9714: nor may a peer delete remove a live LOCAL session whose
+                // owner RG is not free to be replaced.
+                !(peer_delete
+                    && !current.origin.is_peer_synced()
+                    && !synced_entry_allows_local_replace(
+                        rg_runtime.as_ref(),
+                        current.metadata.owner_rg_id,
+                        now_secs,
+                    ))
+            },
         );
         refresh_reverse_prewarm_owner_rg_indexes(
             &self.sessions.owner_rg_indexes.reverse_prewarm_sessions,
@@ -923,7 +954,14 @@ impl crate::afxdp::ha::SessionDomain {
             removed_entry.as_ref(),
             None,
         );
-        if let Some(reverse_key) = &reverse_key {
+        // The reverse companion goes only if the FORWARD actually went. If the
+        // predicate declined — a replacement appeared between the decision and the
+        // removal — the flow is still live, and tearing down its reverse half would
+        // leave a forward session that can no longer match its own replies: worse
+        // than either outcome the decision was choosing between.
+        if let Some(reverse_key) = &reverse_key
+            && !matches!(removal, SharedRemoval::Declined)
+        {
             remove_shared_session(
                 &self.sessions.synced,
                 &self.sessions.nat,

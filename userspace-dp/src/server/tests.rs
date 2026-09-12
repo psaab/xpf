@@ -5308,6 +5308,57 @@ mod routing_domain_delete_7160 {
         );
     }
 
+    /// #9714 review round 2, finding 2: a sender that STATES the default routing
+    /// instance has named exactly ONE domain, and must not be routed into the
+    /// ambiguity probe.
+    ///
+    /// `routing_domain_from_wire` separates `Present(0)` from `Absent` deliberately,
+    /// and `resolved_domain` carries that distinction right up to the `unwrap_or(0)`
+    /// that flattens it for the key. `bare` used to be `key.routing_domain == 0`,
+    /// which reads the FLATTENED value and so cannot tell the two apart: an
+    /// authoritative single-domain delete was refused for naming too many tenants
+    /// while naming exactly one — a guard refusing the very case it exists to permit.
+    ///
+    /// THE AXIS THIS CELL EXISTS FOR. Every other delete cell sends wire
+    /// `routing_domain: 0`, which decodes to ABSENT — `WIRE_DEFAULT_INSTANCE` is 1,
+    /// not 0. With only that value in the fixture set, `resolved_domain.is_none()`
+    /// and `key.routing_domain == 0` agree on every input, so the fix had no cell
+    /// that could distinguish it from the defect. The axis had one value, so the row
+    /// did not exist.
+    ///
+    /// The wire value comes from `routing_domain_to_wire(0)` rather than a literal,
+    /// so the cell tracks the encoder a real sender uses instead of a copy of it.
+    #[test]
+    fn a_stated_default_instance_delete_is_not_ambiguous_9714() {
+        // The same fixture the ambiguity cell uses: the tuple is live in TWO tenants,
+        // so an ABSENT delete is refused. A STATED default instance must not be.
+        let state = state_holding_the_same_tuple_in(&[100_007, 100_008]);
+        assert_eq!(synced_key_count(&state), 4, "setup: two tenants x (forward + reverse)");
+
+        let mut request = bare_five_tuple_delete();
+        request
+            .session_sync
+            .as_mut()
+            .expect("a sync_session request")
+            .routing_domain = crate::session::routing_domain_to_wire(0);
+
+        let response = run_request(state.clone(), request);
+
+        assert!(
+            response.ok,
+            "a delete that STATED the default routing instance was refused as ambiguous. It named \
+             exactly one domain; the ambiguity probe exists for requests that named NONE (#9714 r2 \
+             F2). Got {:?}",
+            response.error
+        );
+        assert_eq!(
+            synced_key_count(&state),
+            4,
+            "the stated-default delete removed a TENANT's rows: it names domain 0 only, and neither \
+             tenant's session lives there"
+        );
+    }
+
     /// #9714 review round 2, finding 4: a MARKED delete with NO shared authority must
     /// do NOTHING — not even the domain-0 delete the handler used to send regardless.
     ///
