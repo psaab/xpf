@@ -5442,7 +5442,10 @@ fn fixture_9714_with_owner_rg(
 
     let mut forward = reserve6600_entry(40714, 50714);
     forward.origin = origin;
-    forward.metadata.owner_rg_id = RG_9714;
+    // What the ENTRY claims. The RG map above always carries RG_9714, so passing 0
+    // here models an entry whose owner could not be RESOLVED while a redundancy
+    // group is still forwarding — the #9714 F4 case.
+    forward.metadata.owner_rg_id = owner_rg_id;
     forward.metadata.is_reverse = false;
     let reverse_key = reverse_session_key(&forward.key, forward.decision.nat);
     let mut reverse = forward.clone();
