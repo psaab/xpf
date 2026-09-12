@@ -7892,6 +7892,27 @@ fn retire_dead_worker_holders_reclaims_only_dead_workers_6979() {
         "fixture precondition: the port is occupied before any retirement"
     );
 
+    // #9560 round 3: the same sweep must retire that worker's STEERING claims. A dead
+    // worker never runs its own teardown, so its bit otherwise suppresses every later
+    // delete of the rows it held, and both the registry holding and the fixed-size BPF
+    // row survive for the life of the process.
+    let steering_key = f4_key();
+    let steering_row = crate::afxdp::bpf_map::session_map_row(&steering_key);
+    coordinator
+        .steering_owners
+        .publish_row(
+            &steering_row,
+            &steering_key,
+            crate::afxdp::bpf_map::SteeringHolder::Worker(3),
+            || Ok(()),
+        )
+        .expect("fixture: worker 3 must take a steering claim");
+    assert_eq!(
+        coordinator.steering_owners.owner_count(&steering_row),
+        1,
+        "fixture precondition: the claim is registered before any retirement"
+    );
+
     // NEGATIVE CONTROL: worker 3 is ALIVE. The sweep must leave it alone — a
     // sweep that retired every worker would satisfy the positive case below
     // while freeing tuples out from under workers that are still forwarding,
@@ -7900,6 +7921,11 @@ fn retire_dead_worker_holders_reclaims_only_dead_workers_6979() {
         coordinator.retire_dead_worker_holders(),
         0,
         "a LIVE worker's reservations must not be reclaimed"
+    );
+    assert_eq!(
+        coordinator.steering_owners.owner_count(&steering_row),
+        1,
+        "a LIVE worker's steering claim must not be retired either"
     );
     assert!(
         alloc.debug_is_port_occupied(0, 20000),

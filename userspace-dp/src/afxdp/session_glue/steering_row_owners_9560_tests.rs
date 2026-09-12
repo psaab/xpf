@@ -491,6 +491,63 @@ fn every_steering_write_and_delete_runs_under_the_row_owner_lock_9560() {
     );
 }
 
+/// C6b (round 3). The no-entry arm releases the WHOLE entry, not just the bare tuple.
+///
+/// C6 above pins that the arm honours ANOTHER owner's claim on the bare row. It cannot see
+/// the rows this session's own holder still holds — its NAT and wire aliases — because its
+/// fixture publishes a single row. A session torn down through the no-entry arm therefore
+/// left those aliases claimed by a holder that will never name them again, so nothing
+/// could ever delete them: the registry and the fixed-size BPF map both grow with
+/// unique-key churn.
+#[test]
+fn the_no_entry_arm_releases_the_entrys_alias_rows_9560() {
+    let owners = SteeringRowOwners::default();
+    let key = host_bound_key();
+    let snat = NatDecision {
+        rewrite_src: Some(std::net::IpAddr::V4(std::net::Ipv4Addr::new(203, 0, 113, 7))),
+        rewrite_src_port: Some(51_000),
+        ..NatDecision::default()
+    };
+
+    let _ = publish_live_session_entry(steering(&owners), &key, snat, false);
+    let published = owners.held_row_count(&key, 0);
+    assert_eq!(
+        published, 4,
+        "fixture: the SNAT forward must publish its own row plus its three aliases, or the \
+         release below has no alias to observe"
+    );
+
+    // The local entry is GONE, which is the arm under test.
+    let mut sessions = SessionTable::new();
+    let mut deleted_keys = Vec::new();
+    clear_session_map_writes();
+    super::commands::handle_delete_synced(
+        &mut sessions,
+        steering(&owners),
+        &ForwardingState::default(),
+        &std::collections::BTreeMap::new(),
+        key.clone(),
+        2_000_000,
+        0,
+        &mut deleted_keys,
+        0,
+    );
+
+    assert_eq!(
+        owners.held_row_count(&key, 0),
+        0,
+        "the no-entry arm released only the bare tuple; this entry's alias rows stayed \
+         claimed by a holder that will never name them again (#9560 round 3)"
+    );
+    let writes = session_map_writes();
+    assert_eq!(
+        writes.iter().filter(|w| w.value.is_none()).count(),
+        published,
+        "every row the entry published must be DELETED, not merely unclaimed. Writes: \
+         {writes:?}"
+    );
+}
+
 /// C8e (round 3). THE HANDOFF WINDOW, which round 2 left open.
 ///
 /// The coordinator publishes an imported session's row. Before any worker claims it —
@@ -514,25 +571,42 @@ fn an_aliased_teardown_keeps_the_row_the_coordinator_holds_9560() {
 
     let _ = publish_live_session_entry(as_coordinator(&owners), &imported, nat, false);
     let _ = publish_live_session_entry(on_worker(&owners, 0), &alias, nat, false);
+    let row = session_map_row(&imported);
+    let owners_before = owners.owner_count(&row);
+    assert!(
+        owners_before >= 1,
+        "fixture: the aliased worker session must be registered on the shared row, or the \
+         teardown below has nothing to release"
+    );
 
-    clear_session_map_writes();
+    // THE OBSERVATION IS THE REGISTRY, NOT THE WRITE RECORD. The recorder only captures
+    // what a delete actually issues, so a row that is never deleted records NOTHING —
+    // and a cell asserting "no delete was recorded" then passes whether the row survived
+    // or was never observed at all. Measured: with the coordinator claiming nothing, the
+    // teardown below drops the owner count 1 -> 0 while the recorded writes stay empty.
+    // The owner count is the channel that moves.
     delete_live_session_entry(on_worker(&owners, 0), &alias, nat, false);
-    let writes = session_map_writes();
-    assert_eq!(
-        deletes_of(&writes, &imported),
-        0,
-        "an aliased session's teardown deleted the row the coordinator holds for the \
-         imported session, in the handoff window before any worker claims it. Writes: \
-         {writes:?}"
+    let owners_after = owners.owner_count(&row);
+    assert!(
+        owners_after >= 1,
+        "an aliased session's teardown took the row out from under the coordinator, in the \
+         handoff window before any worker claims it — the #9560 defect. The coordinator's \
+         claim must survive that teardown ({owners_before} owners before, {owners_after} \
+         after)"
     );
 
     clear_session_map_writes();
     delete_live_session_entry(as_coordinator(&owners), &imported, nat, false);
+    assert_eq!(
+        owners.owner_count(&row),
+        0,
+        "once the shared authority is gone the coordinator's own release must give up the \
+         row, or a claim nothing releases blocks every later delete"
+    );
     let released = session_map_writes();
     assert!(
         deletes_of(&released, &imported) >= 1,
-        "once the shared authority is gone the coordinator's own release must take the \
-         row, or a claim nothing releases blocks every later delete. Writes: {released:?}"
+        "the last owner's release must also DELETE the BPF row. Writes: {released:?}"
     );
 }
 

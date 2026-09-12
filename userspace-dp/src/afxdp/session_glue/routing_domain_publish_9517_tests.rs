@@ -117,6 +117,33 @@ fn deletes(writes: &[SessionMapWriteRecord]) -> usize {
     writes.iter().filter(|w| w.value.is_none()).count()
 }
 
+/// #9560 round 3: the kernel-local publish must not DELETE before it writes.
+///
+/// The path used to release the entry's whole old row set before attempting the new
+/// publish. If either write then failed, the session was left with no rows at all — the
+/// failure-safe migration `publish_entry` exists to provide (release the rows the new
+/// decision does not name, and only after every write succeeded) was bypassed by the one
+/// path that needed it. Ordering is what makes that observable without injecting a write
+/// failure: no delete may precede the first write.
+#[test]
+fn the_kernel_local_publish_writes_before_it_deletes_9560() {
+    let writes = worker_publish_writes(true, false);
+    let first_write = writes.iter().position(|w| w.value.is_some());
+    let first_delete = writes.iter().position(|w| w.value.is_none());
+    assert!(
+        first_write.is_some(),
+        "fixture: the publish must write at least one row, or the ordering below is \
+         vacuous. Writes: {writes:?}"
+    );
+    if let Some(delete_at) = first_delete {
+        assert!(
+            delete_at > first_write.expect("write"),
+            "a row was DELETED before the new row set was written: a failed write then \
+             leaves the session with no rows at all (#9560 round 3). Writes: {writes:?}"
+        );
+    }
+}
+
 #[test]
 fn the_worker_publish_reads_this_nodes_routing_domain_flag_9517() {
     let single_instance = worker_publish_writes(false, false);
