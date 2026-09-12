@@ -63,7 +63,12 @@ usable. Two consequences the code makes explicit:
   exporter from the cell on every call, so a full resync after a rollback
   + corrected re-arm exports from the CURRENT backend rather than the
   torn-down one (#6743 r2-B8, bound by
-  `full_resync_per_call_6743_test.go`). Behavioural guards live in
+  `full_resync_per_call_6743_test.go`). Its export and queueing are one
+  transaction (#9766, #9767): the frame is acknowledged only when every
+  install reached the send queue, the fallback loop's drain is held off
+  meanwhile, and a failed attempt backs off before it exports again (see
+  `docs/session-sync-architecture.md`, "Bulk Owner-RG Export").
+  Behavioural guards live in
   `daemon_dp_escape_test.go` (gRPC) and `daemon_dp_escape_rest_test.go`
   (REST); `daemon_ha_userspace_stream_live_test.go` drives the event-stream
   loop across a `setDataplane(nil)`, across a stream replacement, and —
@@ -642,6 +647,21 @@ such constraint. Hoisting those checks ABOVE the `SyncApply` promotion would als
 close the divergence, but it changes the tolerant path from "converge with the
 peer, refuse to arm" to "refuse the config" — a deliberate #1960 behaviour choice
 that does not belong in a bug fix.
+
+**A partition commit the peer never held is alarmed, not lost silently (#9530).**
+The store marks a local commit made while the peer is unreachable (see
+`pkg/configstore`, "A commit the cluster peer never held"). The daemon supplies
+its three inputs (`config_divergence_9530.go`):
+- `configPeerReachable` (heartbeat alive and session sync connected), wired with
+  `SetPeerReachableFn` at cluster bring-up;
+- `noteConfigSharedWithPeer` after every config push (the commit push, the
+  reconcile push, and its test seam). It counts only when the peer reads RG0
+  secondary: in the dual-active heal window the peer is still primary and
+  rejects the push;
+- `reportConfigSyncDivergence` after a successful `handleConfigSync`, which
+  raises the divergence once as an `EventConfigSync` cluster event naming the
+  rollback slot. `show system alarms` lists it as CRITICAL, on the local CLI and
+  over gRPC.
 
 **Startup ordering and publication (#6719).** `d.mgmt` is an
 `atomic.Pointer[managementReconciler]`, not a plain field, and the type is doing

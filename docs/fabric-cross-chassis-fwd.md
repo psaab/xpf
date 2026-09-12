@@ -587,9 +587,17 @@ and refreshes `lastSnapshotHash`, and is a no-op when the fabric set is
 unchanged so the periodic refresh does not churn the generation. A
 subsequent partial rebuild's `next := *m.lastSnapshot` now carries the
 resolved fabrics forward instead of reverting them. The writeback is
-gated on the send succeeding (mutate-after-success), so a transient
-control-socket error leaves `m.lastSnapshot.Fabrics` matching what the
-helper actually has.
+gated on the send succeeding (mutate-after-success), so
+`m.lastSnapshot.Fabrics` is the last set Go saw the helper accept. That is
+not always what the helper holds: a deadline or EOF can follow an
+`update_fabrics` the helper applied. #9684 marks the section unknown on
+such a failure, and the next partial-rebuild publish re-samples the fabric
+rows instead of inheriting the old ones. The re-sample keeps each row's plan
+half (the parent interface and netdev, the netdev's ifindex and queue count,
+and the device verdict) and refreshes every other field, so it never moves
+the binding plan. A plan-half change needs a full apply; #9803 is
+`update_fabrics` storing one without it
+(`pkg/dataplane/userspace/partial_update_outcome_9684.go`).
 
 ## Same-parent peer replacement must invalidate the stale peer (#5686 M01)
 

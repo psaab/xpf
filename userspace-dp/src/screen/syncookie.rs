@@ -11,8 +11,8 @@
 //!   NO ephemeral source port — #9419)
 //! - `SynCookieValidatedCache` (4-way set-associative recent-validated
 //!   cookie cache so the ACK+SYN bypass path doesn't re-validate per
-//!   packet). Keyed by `(zone_id, profile_gen, src_ip, dst_ip, dst_port)`
-//!   (#2446 + #9419) and consulted non-destructively: the
+//!   packet). Keyed by `(zone_tag, profile_gen, src_ip, dst_ip, dst_port)`
+//!   (#2446, #9419, #9740) and consulted non-destructively: the
 //!   per-zone SYN-cookie profile generation is stamped on insert and
 //!   compared on lookup, so a client validated under an old profile is a
 //!   miss after the zone's SYN-cookie profile changes (the new profile's
@@ -44,6 +44,7 @@ const SYN_COOKIE_SECRET_LEFT_DOMAIN: u64 = u64::from_be_bytes(*b"xpf-sck0");
 const SYN_COOKIE_SECRET_RIGHT_DOMAIN: u64 = u64::from_be_bytes(*b"xpf-sck1");
 const SYN_COOKIE_CACHE_LEFT_DOMAIN: u64 = u64::from_be_bytes(*b"xpf-scv0");
 const SYN_COOKIE_CACHE_RIGHT_DOMAIN: u64 = u64::from_be_bytes(*b"xpf-scv1");
+const SYN_COOKIE_ZONE_TAG_LABEL: &[u8] = b"xpf-syncookie\x00zone-tag\x00v1\x00";
 const SYN_COOKIE_VALIDATED_CACHE_CAPACITY: usize = 4096;
 const SYN_COOKIE_VALIDATED_CACHE_WAYS: usize = 4;
 const SYN_COOKIE_VALIDATED_CACHE_TTL_SECS: u64 = SynCookieCodec::EPOCH_SECS;
@@ -79,6 +80,39 @@ impl SynCookieTuple {
             dst_port: pkt.dst_port,
         }
     }
+}
+
+/// #9740: the zone identity a cookie and its validated-client entry are bound
+/// to: the first 128 bits of SHA-256 over a domain label, the zone NAME's length
+/// and the name. Every node derives the same tag from the same name.
+///
+/// The binding used to be the 16-bit StableZoneID, whose fold collides
+/// (`z174`/`z214`). Within one config the zone-ID quarantine keeps colliding zones
+/// apart, but nothing does across configs: node-specific zones, or a commit that
+/// swaps one colliding zone for another. What separated them there was the
+/// screened-zone set in the key BASE. #9740 removed that set, because it made
+/// every key differ whenever two nodes' zone sets differed. Binding the name keeps
+/// a cookie minted in one zone from validating, or whitelisting its client, in
+/// another zone, whatever the base, while it still validates on a peer that has
+/// the same zone.
+///
+/// A collision-resistant hash at 128 bits, so no search finds two zone names that
+/// share a tag. It is computed once per profile update
+/// (`ZoneScreenState::from_profile`) and read from the zone's state, so the packet
+/// path hashes nothing.
+pub(crate) type SynCookieZoneTag = [u64; 2];
+
+/// The `SynCookieZoneTag` of `zone`.
+pub(crate) fn syn_cookie_zone_tag(zone: &str) -> SynCookieZoneTag {
+    let mut hasher = Sha256::new();
+    hasher.update(SYN_COOKIE_ZONE_TAG_LABEL);
+    hasher.update((zone.len() as u64).to_be_bytes());
+    hasher.update(zone.as_bytes());
+    let digest = hasher.finalize();
+    [
+        u64::from_be_bytes(digest[0..8].try_into().expect("fixed slice")),
+        u64::from_be_bytes(digest[8..16].try_into().expect("fixed slice")),
+    ]
 }
 
 /// Validated-client whitelist key (#9419).
@@ -191,12 +225,12 @@ impl SynCookieCodec {
     pub(crate) fn mint_isn(
         &self,
         tuple: SynCookieTuple,
-        zone_id: u16,
+        zone_tag: SynCookieZoneTag,
         full_epoch: u64,
         peer_mss: u16,
     ) -> u32 {
         let mss_index = Self::mss_index(peer_mss);
-        let mac = self.cookie_mac(tuple, zone_id, full_epoch, mss_index);
+        let mac = self.cookie_mac(tuple, zone_tag, full_epoch, mss_index);
         ((full_epoch as u32 & SYN_COOKIE_EPOCH_MASK) << SYN_COOKIE_EPOCH_SHIFT)
             | ((mss_index as u32 & SYN_COOKIE_MSS_MASK) << SYN_COOKIE_MSS_SHIFT)
             | mac
@@ -206,12 +240,12 @@ impl SynCookieCodec {
     pub(crate) fn validate_isn(
         &self,
         tuple: SynCookieTuple,
-        zone_id: u16,
+        zone_tag: SynCookieZoneTag,
         current_full_epoch: u64,
         cookie_isn: u32,
     ) -> Option<SynCookieValidation> {
         let full_epoch = Self::cookie_full_epoch(current_full_epoch, cookie_isn)?;
-        self.validate_isn_at_epoch(tuple, zone_id, full_epoch, cookie_isn)
+        self.validate_isn_at_epoch(tuple, zone_tag, full_epoch, cookie_isn)
     }
 
     /// The full epoch a cookie was minted in: the validation candidate (next,
@@ -229,13 +263,13 @@ impl SynCookieCodec {
     pub(crate) fn validate_isn_at_epoch(
         &self,
         tuple: SynCookieTuple,
-        zone_id: u16,
+        zone_tag: SynCookieZoneTag,
         full_epoch: u64,
         cookie_isn: u32,
     ) -> Option<SynCookieValidation> {
         let mss_index = ((cookie_isn >> SYN_COOKIE_MSS_SHIFT) & SYN_COOKIE_MSS_MASK) as u8;
         let wire_mac = cookie_isn & SYN_COOKIE_MAC_MASK;
-        (self.cookie_mac(tuple, zone_id, full_epoch, mss_index) == wire_mac).then(|| {
+        (self.cookie_mac(tuple, zone_tag, full_epoch, mss_index) == wire_mac).then(|| {
             SynCookieValidation {
                 full_epoch,
                 mss_index,
@@ -269,14 +303,15 @@ impl SynCookieCodec {
     fn cookie_mac(
         &self,
         tuple: SynCookieTuple,
-        zone_id: u16,
+        zone_tag: SynCookieZoneTag,
         full_epoch: u64,
         mss_index: u8,
     ) -> u32 {
-        let secret = self.epoch_secret(zone_id, full_epoch);
+        let secret = self.epoch_secret(zone_tag, full_epoch);
         let mut sip = SipHash24::new(secret[0], secret[1]);
         sip.write_u64(SYN_COOKIE_MAC_DOMAIN);
-        sip.write_u16(zone_id);
+        sip.write_u64(zone_tag[0]);
+        sip.write_u64(zone_tag[1]);
         sip.write_u64(full_epoch);
         sip.write_u8(mss_index);
         sip.write_ip(tuple.src_ip);
@@ -286,18 +321,20 @@ impl SynCookieCodec {
         (sip.finish() as u32) & SYN_COOKIE_MAC_MASK
     }
 
-    fn epoch_secret(&self, zone_id: u16, full_epoch: u64) -> [u64; 2] {
+    fn epoch_secret(&self, zone_tag: SynCookieZoneTag, full_epoch: u64) -> [u64; 2] {
         let k0 = u64::from_le_bytes(self.master_key[0..8].try_into().expect("fixed slice"));
         let k1 = u64::from_le_bytes(self.master_key[8..16].try_into().expect("fixed slice"));
 
         let mut left = SipHash24::new(k0, k1);
         left.write_u64(SYN_COOKIE_SECRET_LEFT_DOMAIN);
-        left.write_u16(zone_id);
+        left.write_u64(zone_tag[0]);
+        left.write_u64(zone_tag[1]);
         left.write_u64(full_epoch);
 
         let mut right = SipHash24::new(k0, k1);
         right.write_u64(SYN_COOKIE_SECRET_RIGHT_DOMAIN);
-        right.write_u16(zone_id);
+        right.write_u64(zone_tag[0]);
+        right.write_u64(zone_tag[1]);
         right.write_u64(full_epoch);
 
         [left.finish(), right.finish()]
@@ -516,15 +553,15 @@ impl SynCookieKeyRing {
         &self,
         legacy: SynCookieCodec,
         tuple: SynCookieTuple,
-        zone_id: u16,
+        zone_tag: SynCookieZoneTag,
         full_epoch: u64,
         cookie_isn: u32,
     ) -> bool {
         if self.present {
-            self.validate_isn_at_epoch(tuple, zone_id, full_epoch, cookie_isn)
+            self.validate_isn_at_epoch(tuple, zone_tag, full_epoch, cookie_isn)
         } else {
             legacy
-                .validate_isn_at_epoch(tuple, zone_id, full_epoch, cookie_isn)
+                .validate_isn_at_epoch(tuple, zone_tag, full_epoch, cookie_isn)
                 .is_some()
         }
     }
@@ -546,7 +583,7 @@ impl SynCookieKeyRing {
     pub(super) fn validate_isn_at_epoch(
         &self,
         tuple: SynCookieTuple,
-        zone_id: u16,
+        zone_tag: SynCookieZoneTag,
         full_epoch: u64,
         cookie_isn: u32,
     ) -> bool {
@@ -559,7 +596,7 @@ impl SynCookieKeyRing {
             .any(|entry| {
                 entry
                     .codec
-                    .validate_isn_at_epoch(tuple, zone_id, full_epoch, cookie_isn)
+                    .validate_isn_at_epoch(tuple, zone_tag, full_epoch, cookie_isn)
                     .is_some()
             })
     }
@@ -684,7 +721,13 @@ impl SipHash24 {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 struct SynCookieValidatedKey {
-    zone_id: u16,
+    /// #9740: the zone NAME's tag (`syn_cookie_zone_tag`), not the folded
+    /// StableZoneID, so zones whose IDs collide never share an entry. Profile
+    /// generations are also unique across zones within one `ScreenState`
+    /// (`next_syn_cookie_profile_gen`), so today `profile_gen` alone keeps zones
+    /// apart and no test can observe this field on its own. It stays as defense
+    /// in depth against a per-zone generation scheme.
+    zone_tag: SynCookieZoneTag,
     /// Per-zone SYN-cookie profile generation captured at validation time
     /// (#2446). A cached entry is only consumable while the zone's current
     /// generation still matches: a SYN-cookie-relevant profile change
@@ -750,7 +793,7 @@ impl SynCookieValidatedCache {
 
     pub(super) fn insert(
         &mut self,
-        zone_id: u16,
+        zone_tag: SynCookieZoneTag,
         profile_gen: u64,
         client: SynCookieClientKey,
         now_secs: u64,
@@ -759,7 +802,7 @@ impl SynCookieValidatedCache {
             return;
         }
         let key = SynCookieValidatedKey {
-            zone_id,
+            zone_tag,
             profile_gen,
             client,
         };
@@ -821,7 +864,7 @@ impl SynCookieValidatedCache {
     /// occupy a way.
     pub(super) fn contains_valid(
         &mut self,
-        zone_id: u16,
+        zone_tag: SynCookieZoneTag,
         profile_gen: u64,
         client: SynCookieClientKey,
         now_secs: u64,
@@ -830,7 +873,7 @@ impl SynCookieValidatedCache {
             return false;
         }
         let key = SynCookieValidatedKey {
-            zone_id,
+            zone_tag,
             profile_gen,
             client,
         };
@@ -883,7 +926,8 @@ impl SynCookieValidatedCache {
 
     fn key_hash(&self, key: &SynCookieValidatedKey) -> u64 {
         let mut sip = SipHash24::new(self.hash_keys[0], self.hash_keys[1]);
-        sip.write_u16(key.zone_id);
+        sip.write_u64(key.zone_tag[0]);
+        sip.write_u64(key.zone_tag[1]);
         sip.write_u64(key.profile_gen);
         sip.write_ip(key.client.src_ip);
         sip.write_ip(key.client.dst_ip);
@@ -904,7 +948,7 @@ impl SynCookieValidatedCache {
     #[cfg(test)]
     pub(super) fn debug_set_index(
         &self,
-        zone_id: u16,
+        zone_tag: SynCookieZoneTag,
         profile_gen: u64,
         client: SynCookieClientKey,
     ) -> Option<usize> {
@@ -912,7 +956,7 @@ impl SynCookieValidatedCache {
             return None;
         }
         Some(self.set_index(&SynCookieValidatedKey {
-            zone_id,
+            zone_tag,
             profile_gen,
             client,
         }))

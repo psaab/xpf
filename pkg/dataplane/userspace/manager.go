@@ -254,6 +254,11 @@ type Manager struct {
 	// buildFabricSnapshots when unset (so bare &Manager{} literals still work).
 	fabricSnapshotBuilder func(*config.Config) []FabricSnapshot
 
+	// neighborSnapshotBuilder samples the kernel neighbor table for a config.
+	// Nil means buildNeighborSnapshots; tests inject a sample (#9684), the same
+	// seam fabricSnapshotBuilder gives the fabric rows.
+	neighborSnapshotBuilder func(*config.Config) []NeighborSnapshot
+
 	// ingressFoldResolver maps a peer's #7095 cluster-stable ingress fold to
 	// this node's own {ifindex, vlan}. Injected by the daemon, which owns both
 	// the config (reth -> local member) and the ifindex snapshot. Nil resolves
@@ -280,6 +285,17 @@ type Manager struct {
 	// this Manager never saw it accept, so lastSnapshot and lastSnapshotHash may
 	// not describe it. See recordApplySnapshotOutcomeLocked.
 	applySnapshotOutcomeUnknown bool
+	// partialOutcomeUnknown (#9684) marks the sections the helper may hold from
+	// an update_neighbors / update_fabrics round trip whose response was lost, so
+	// lastSnapshot's copy may not describe them. See partial_update_outcome_9684.go.
+	partialOutcomeUnknown partialSections
+	// partialUpdateEpoch (#9684) advances on every update_neighbors /
+	// update_fabrics request (requestLocked) and on every re-sample of a section
+	// into a publish (resampleSectionsLocked). Compile reads it before building
+	// its snapshot outside m.mu and compares it under the lock, so the kernel is
+	// sampled under m.mu only when something may have sent the helper newer
+	// section content in between.
+	partialUpdateEpoch atomic.Uint64
 	// #1866 D3: canonical summary of the WG endpoint set in the last
 	// successfully published snapshot, for publish-boundary transition
 	// logging (logWgEndpointSetTransitionLocked).

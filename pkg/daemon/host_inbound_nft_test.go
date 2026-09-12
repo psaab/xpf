@@ -261,12 +261,40 @@ func TestHostInboundFilterNoStanzaDefaultDeny(t *testing.T) {
 	if !strings.Contains(payload, wantDrop) {
 		t.Errorf("lan (no stanza, #3405) must emit a default-deny catch-all drop %q:\n%s", wantDrop, payload)
 	}
-	// And it must NOT carry any service/protocol accept (the operator opened
-	// nothing). The only line referencing lan's address is the drop.
-	for _, line := range strings.Split(payload, "\n") {
-		if strings.Contains(line, "10.0.61.1") && strings.Contains(line, "accept") {
-			t.Errorf("lan (no stanza) must not accept any service to its address, got: %q", line)
+	// And lan must NOT accept any service: the operator opened nothing.
+	//
+	// #9637 narrowed what "lan" means here. Before it, every rule was
+	// destination-only, so "no accept names lan's address" was the whole
+	// property. Since #9637 another zone's ingress-zone rules name every judged
+	// address, lan's included, because a packet arriving on THAT zone is judged
+	// by that zone (wan admits ssh, so wan-ingress ssh to 10.0.61.1 is
+	// accepted). The #3405 decision is about traffic arriving on lan's own
+	// interfaces, and it still holds: neither lan's ingress-zone rules nor its
+	// destination-only rules may accept anything.
+	lanIngress := ""
+	for _, v := range views {
+		if v.Zone == "lan" && len(v.IngressNetdevs) > 0 {
+			lanIngress = "iifname " + nftIifnameSet(v.IngressNetdevs) + " "
 		}
+	}
+	if lanIngress == "" {
+		t.Fatal("lan's view must carry its ingress netdevs (#9637); without them this cell cannot see lan's ingress-zone rules")
+	}
+	sawLanIngressDrop := false
+	for _, line := range strings.Split(payload, "\n") {
+		s := strings.TrimSpace(line)
+		if strings.HasPrefix(s, "iifname ") && !strings.HasPrefix(s, lanIngress) {
+			continue // another zone's ingress judges its own arrivals
+		}
+		if strings.HasPrefix(s, lanIngress) && strings.HasSuffix(s, " drop") {
+			sawLanIngressDrop = true
+		}
+		if strings.Contains(s, "10.0.61.1") && strings.Contains(s, "accept") {
+			t.Errorf("lan (no stanza) must not accept any service, got: %q", line)
+		}
+	}
+	if !sawLanIngressDrop {
+		t.Errorf("lan (no stanza) must default-deny what arrives on its own netdevs (#9637 ingress-zone drop):\n%s", payload)
 	}
 }
 

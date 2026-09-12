@@ -76,7 +76,7 @@ func New() (*Manager, error) {
 	// reassignment of m.nlHandle cannot redirect Close at the handle this
 	// Manager actually owns.
 	m.closeHandleFn = h.Close
-	m.vrf = &vrfManager{ops: h}
+	m.vrf = &vrfManager{ops: h, term: dscpRuleOps{h}} // #9819 miss terminator
 	m.routes = &routeReader{ops: h}
 	// tunnel depends on vrf for BindInterfaceToVRF (no lock-ordering
 	// cycle: BindInterfaceToVRF takes no lock); vrf is constructed first.

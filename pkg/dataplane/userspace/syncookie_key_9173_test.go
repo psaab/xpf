@@ -1,7 +1,6 @@
 package userspace
 
 import (
-	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -95,13 +94,8 @@ func TestTwoNodesWithTheSameAuthKeyAndEpochDeriveTheSameKey9173(t *testing.T) {
 	if other, _ := buildSYNCookieKeys(synCookieCfg9173(otherCluster, "", "fw0"), synCookieT0_9173); other == key0 {
 		t.Fatal("a different cluster-id derived the same key")
 	}
-	// The same NUMBER of screened zones, differently named, so the zone names
-	// themselves -- not only their count -- must move the key.
-	otherZones := synCookieCfg9173(keyedCluster9173("psk-A", "psk-old"), "", "fw0")
-	otherZones.Security.Zones = map[string]*config.ZoneConfig{"dmz": {Name: "dmz", ScreenProfile: "flood"}}
-	if other, _ := buildSYNCookieKeys(otherZones, synCookieT0_9173); other == key0 {
-		t.Fatal("a different set of screened zones derived the same key")
-	}
+	// The screened-zone set is deliberately NOT a control here: it does not move
+	// the key (TestNodesWithDifferentScreenedZonesDeriveTheSameKey9740).
 }
 
 // TestSYNCookieRingCarriesTheBaseAndTheAdditionalBase9173: the helper derives
@@ -214,50 +208,17 @@ func TestSYNCookieEpochKeyMatchesTheHelper9173(t *testing.T) {
 	}
 }
 
-// TestSYNCookieKeyIsIndependentOfZoneMapOrder9173: config zones live in a map,
-// whose iteration order Go randomises, and two nodes must derive one key, so the
-// screened zones are sorted before they enter the base.
-func TestSYNCookieKeyIsIndependentOfZoneMapOrder9173(t *testing.T) {
-	cfg := synCookieCfg9173(keyedCluster9173("psk-A", ""), "", "fw")
-	for _, z := range []string{"untrust", "dmz", "guest", "mgmt", "lab"} {
-		cfg.Security.Zones[z] = &config.ZoneConfig{Name: z, ScreenProfile: "flood"}
-	}
-	want, _ := buildSYNCookieKeys(cfg, synCookieT0_9173)
-	for i := 0; i < 50; i++ {
-		if got, _ := buildSYNCookieKeys(cfg, synCookieT0_9173); got != want {
-			t.Fatalf("build %d derived a different key: the screened zones must be sorted, not taken in map order", i)
-		}
-	}
-}
-
 // TestSYNCookieBaseDerivationVector9173 pins deriveSYNCookieBase to a known
 // answer. Two cluster nodes on different builds must derive one base, so a change
 // to its label, field order or framing has to be deliberate.
 func TestSYNCookieBaseDerivationVector9173(t *testing.T) {
-	got := hex.EncodeToString(deriveSYNCookieBase([]byte("xpf-kat-psk"), "cluster-id=3",
-		[][2]string{{"trust", "flood"}, {"untrust", "flood-b"}}))
-	const want = "8590f73a33ec3375540317e52b97be13f1814279108e7365cd198663b4546b67"
+	// #9740: the screened zones left the base, which moved this vector. The value
+	// was computed independently of this package, and that computation reproduced
+	// the previous zone-bearing vector first.
+	got := hex.EncodeToString(deriveSYNCookieBase([]byte("xpf-kat-psk"), "cluster-id=3"))
+	const want = "490ca8d4374e5e570cd9d8298f06a3e323f135fd75b88615adbc03d2d081156e"
 	if got != want {
 		t.Fatalf("deriveSYNCookieBase vector = %s, want %s", got, want)
-	}
-}
-
-// TestSYNCookieBaseFramingIsUnambiguous9173: zone and profile names are quoted
-// identifiers that may contain a NUL, so NUL-terminated framing would let two
-// different screened-zone sets derive one base.
-func TestSYNCookieBaseFramingIsUnambiguous9173(t *testing.T) {
-	secret := []byte("psk")
-	for _, pair := range [][2][][2]string{
-		{{{"a\x00b", "p"}}, {{"a", "b\x00p"}}},
-		{{{"a", "b"}, {"c", "d"}}, {{"a", "b\x00c\x00d"}}},
-	} {
-		if bytes.Equal(deriveSYNCookieBase(secret, "cluster-id=3", pair[0]), deriveSYNCookieBase(secret, "cluster-id=3", pair[1])) {
-			t.Fatalf("screened-zone sets %q and %q derived the same base", pair[0], pair[1])
-		}
-	}
-	if bytes.Equal(deriveSYNCookieBase(secret, "x\x00", [][2]string{{"y", "z"}}),
-		deriveSYNCookieBase(secret, "x", [][2]string{{"\x00y", "z"}})) {
-		t.Fatal("the identity and the first zone name framed the same bytes")
 	}
 }
 

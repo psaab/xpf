@@ -64,6 +64,7 @@ func (m *Manager) retryDeferredWorkerArmLocked() error {
 	next.Generation = nextGeneration
 	next.FIBGeneration = m.readFIBGeneration()
 	next.GeneratedAt = time.Now().UTC()
+	resampled := m.resampleUnresolvedSectionsLocked(&next) // #9684
 
 	publishSnap := next
 	publishSnap.Neighbors = filterPublishableNeighbors(next.Neighbors)
@@ -95,6 +96,7 @@ func (m *Manager) retryDeferredWorkerArmLocked() error {
 		m.lastSnapshotHash = h
 	}
 	m.pendingWorkerArm = false
+	m.resolvePartialOutcomesLocked(resampled)
 	slog.Info("userspace: armed deferred AF_XDP workers after deferred-MAC re-apply retry",
 		"generation", next.Generation)
 	if err := m.applyHelperStatusLocked(&status); err != nil {

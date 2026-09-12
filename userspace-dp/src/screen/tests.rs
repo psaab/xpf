@@ -3,6 +3,7 @@
 // LOC threshold. Loaded as a sibling submodule via
 // `#[path = "screen_tests.rs"]` from screen.rs.
 
+use super::syncookie::syn_cookie_zone_tag;
 use super::*;
 // #7888: the two WARN texts live in the `unresolved` child module after the
 // split; `use super::*` does not reach into a sibling module's namespace.
@@ -2183,7 +2184,7 @@ fn zone_screen_state_construction_has_no_fail_open_gap_4969() {
     configured.syn_flood_alarm_threshold = 2;
     configured.syn_flood_threshold = 10;
 
-    let z = ZoneScreenState::from_profile(configured.clone());
+    let z = ZoneScreenState::from_profile("trust", configured.clone());
     assert!(
         z.icmp_dst_sketch.is_some(),
         "icmp_flood_threshold>0 must construct the icmp_dst_sketch"
@@ -2204,7 +2205,7 @@ fn zone_screen_state_construction_has_no_fail_open_gap_4969() {
     // Symmetric negative: an unconfigured profile constructs NONE of the
     // sketches, so the Option is a faithful `Some ⟺ configured` flag (memory
     // still tracks live config), not a lazy "always Some".
-    let bare = ZoneScreenState::from_profile(ScreenProfile::default());
+    let bare = ZoneScreenState::from_profile("trust", ScreenProfile::default());
     assert!(bare.icmp_dst_sketch.is_none());
     assert!(bare.udp_dst_sketch.is_none());
     assert!(bare.syn_dst_sketch.is_none());
@@ -3164,6 +3165,11 @@ fn syn_cookie_codec() -> SynCookieCodec {
     SynCookieCodec::new(syn_cookie_key())
 }
 
+/// Zone tags for the codec and cache cells that predate #9740, in place of the
+/// zone ids they passed. Any two distinct tags serve.
+const Z7: [u64; 2] = [7, 0];
+const Z8: [u64; 2] = [8, 0];
+
 fn syn_cookie_key() -> [u8; 16] {
     [
         0x10, 0x21, 0x32, 0x43, 0x54, 0x65, 0x76, 0x87, 0x98, 0xa9, 0xba, 0xcb, 0xdc, 0xed, 0xfe,
@@ -3235,9 +3241,9 @@ fn syn_cookie_tuple_from_packet_matches_packet_flow() {
 fn syn_cookie_mint_validate_roundtrip() {
     let codec = syn_cookie_codec();
     let tuple = syn_cookie_tuple();
-    let cookie = codec.mint_isn(tuple, 7, 42, 1460);
+    let cookie = codec.mint_isn(tuple, Z7, 42, 1460);
     let validation = codec
-        .validate_isn(tuple, 7, 42, cookie)
+        .validate_isn(tuple, Z7, 42, cookie)
         .expect("fresh cookie should validate");
 
     assert_eq!(validation.full_epoch, 42);
@@ -3253,25 +3259,25 @@ fn syn_cookie_mint_validate_roundtrip() {
 fn syn_cookie_validate_rejects_modified_tuple() {
     let codec = syn_cookie_codec();
     let tuple = syn_cookie_tuple();
-    let cookie = codec.mint_isn(tuple, 7, 42, 1460);
+    let cookie = codec.mint_isn(tuple, Z7, 42, 1460);
 
     let mut mutated = tuple;
     mutated.src_ip = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 11));
-    assert!(codec.validate_isn(mutated, 7, 42, cookie).is_none());
+    assert!(codec.validate_isn(mutated, Z7, 42, cookie).is_none());
 
     mutated = tuple;
     mutated.dst_ip = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 21));
-    assert!(codec.validate_isn(mutated, 7, 42, cookie).is_none());
+    assert!(codec.validate_isn(mutated, Z7, 42, cookie).is_none());
 
     mutated = tuple;
     mutated.src_port += 1;
-    assert!(codec.validate_isn(mutated, 7, 42, cookie).is_none());
+    assert!(codec.validate_isn(mutated, Z7, 42, cookie).is_none());
 
     mutated = tuple;
     mutated.dst_port += 1;
-    assert!(codec.validate_isn(mutated, 7, 42, cookie).is_none());
+    assert!(codec.validate_isn(mutated, Z7, 42, cookie).is_none());
 
-    assert!(codec.validate_isn(tuple, 8, 42, cookie).is_none());
+    assert!(codec.validate_isn(tuple, Z8, 42, cookie).is_none());
 }
 
 #[test]
@@ -3282,9 +3288,9 @@ fn syn_cookie_validate_rejects_stale_secret() {
         0x00,
     ]);
     let tuple = syn_cookie_tuple();
-    let cookie = codec.mint_isn(tuple, 7, 42, 1460);
+    let cookie = codec.mint_isn(tuple, Z7, 42, 1460);
 
-    assert!(stale_codec.validate_isn(tuple, 7, 42, cookie).is_none());
+    assert!(stale_codec.validate_isn(tuple, Z7, 42, cookie).is_none());
 }
 
 #[test]
@@ -3294,22 +3300,22 @@ fn syn_cookie_mss_index_encoding_parity() {
 
     for (idx, mss) in SYN_COOKIE_MSS_VALUES.iter().copied().enumerate() {
         assert_eq!(SynCookieCodec::mss_index(mss), idx as u8);
-        let cookie = codec.mint_isn(tuple, 7, 42, mss);
+        let cookie = codec.mint_isn(tuple, Z7, 42, mss);
         assert_eq!(
             (cookie >> SYN_COOKIE_MSS_SHIFT) & SYN_COOKIE_MSS_MASK,
             idx as u32
         );
-        assert_eq!(codec.validate_isn(tuple, 7, 42, cookie).unwrap().mss, mss);
+        assert_eq!(codec.validate_isn(tuple, Z7, 42, cookie).unwrap().mss, mss);
     }
 
     assert_eq!(SynCookieCodec::mss_index(535), 0);
     assert_eq!(SynCookieCodec::mss_index(1459), 5);
     assert_eq!(SynCookieCodec::mss_index(9000), 7);
 
-    let cookie = codec.mint_isn(tuple, 7, 42, 1460);
+    let cookie = codec.mint_isn(tuple, Z7, 42, 1460);
     let tampered_mss =
         (cookie & !(SYN_COOKIE_MSS_MASK << SYN_COOKIE_MSS_SHIFT)) | (5 << SYN_COOKIE_MSS_SHIFT);
-    assert!(codec.validate_isn(tuple, 7, 42, tampered_mss).is_none());
+    assert!(codec.validate_isn(tuple, Z7, 42, tampered_mss).is_none());
 }
 
 #[test]
@@ -3350,11 +3356,11 @@ fn syn_cookie_round_trip_with_cached_wall_secs() {
     let mint_unix_secs = 1_800_000_000u64;
     assert_eq!(mint_unix_secs % SynCookieCodec::EPOCH_SECS, 0);
     let mint_epoch = SynCookieCodec::current_full_epoch(mint_unix_secs);
-    let cookie = codec.mint_isn(tuple, 7, mint_epoch, 1460);
+    let cookie = codec.mint_isn(tuple, Z7, mint_epoch, 1460);
 
     // Validate at the same cached second.
     assert!(
-        codec.validate_isn(tuple, 7, mint_epoch, cookie).is_some(),
+        codec.validate_isn(tuple, Z7, mint_epoch, cookie).is_some(),
         "same-second validation must succeed",
     );
     // Validate from a second still inside the same epoch (cached value may be
@@ -3364,7 +3370,7 @@ fn syn_cookie_round_trip_with_cached_wall_secs() {
     assert_eq!(same_epoch_later, mint_epoch);
     assert!(
         codec
-            .validate_isn(tuple, 7, same_epoch_later, cookie)
+            .validate_isn(tuple, Z7, same_epoch_later, cookie)
             .is_some(),
         "validation later in the same epoch must succeed",
     );
@@ -3374,7 +3380,7 @@ fn syn_cookie_round_trip_with_cached_wall_secs() {
         SynCookieCodec::current_full_epoch(mint_unix_secs + SynCookieCodec::EPOCH_SECS);
     assert_eq!(next_epoch, mint_epoch + 1);
     assert!(
-        codec.validate_isn(tuple, 7, next_epoch, cookie).is_some(),
+        codec.validate_isn(tuple, Z7, next_epoch, cookie).is_some(),
         "validation one epoch later must succeed (window tolerance)",
     );
     // Two epochs ahead is outside the window and must fail, exactly as
@@ -3384,7 +3390,7 @@ fn syn_cookie_round_trip_with_cached_wall_secs() {
     assert_eq!(two_epochs_ahead, mint_epoch + 2);
     assert!(
         codec
-            .validate_isn(tuple, 7, two_epochs_ahead, cookie)
+            .validate_isn(tuple, Z7, two_epochs_ahead, cookie)
             .is_none(),
         "validation two epochs later must fail as before",
     );
@@ -3436,7 +3442,7 @@ fn syn_cookie_wall_clock_epoch_survives_peer_uptime_skew() {
     let tuple = syn_cookie_tuple();
     let shared_wall_epoch = SynCookieCodec::full_epoch_from_unix_secs(1_800_000_000);
     let peer_monotonic_epoch = 0;
-    let cookie = codec.mint_isn(tuple, 7, shared_wall_epoch, 1460);
+    let cookie = codec.mint_isn(tuple, Z7, shared_wall_epoch, 1460);
 
     assert_ne!(
         shared_wall_epoch, peer_monotonic_epoch,
@@ -3444,13 +3450,13 @@ fn syn_cookie_wall_clock_epoch_survives_peer_uptime_skew() {
     );
     assert!(
         codec
-            .validate_isn(tuple, 7, shared_wall_epoch, cookie)
+            .validate_isn(tuple, Z7, shared_wall_epoch, cookie)
             .is_some(),
         "HA peers validate with the shared Unix wall-clock epoch"
     );
     assert!(
         codec
-            .validate_isn(tuple, 7, peer_monotonic_epoch, cookie)
+            .validate_isn(tuple, Z7, peer_monotonic_epoch, cookie)
             .is_none(),
         "local monotonic uptime would reject the peer-minted cookie"
     );
@@ -3462,12 +3468,12 @@ fn syn_cookie_epoch_low_bits_wrap_rejects_32_epoch_old_cookie() {
     let tuple = syn_cookie_tuple();
     let old_epoch = 10;
     let current_epoch = old_epoch + 32;
-    let cookie = codec.mint_isn(tuple, 7, old_epoch, 1460);
+    let cookie = codec.mint_isn(tuple, Z7, old_epoch, 1460);
 
     assert_eq!(old_epoch & 0x1f, current_epoch & 0x1f);
     assert!(
         codec
-            .validate_isn(tuple, 7, current_epoch, cookie)
+            .validate_isn(tuple, Z7, current_epoch, cookie)
             .is_none()
     );
 }
@@ -3476,33 +3482,33 @@ fn syn_cookie_epoch_low_bits_wrap_rejects_32_epoch_old_cookie() {
 fn syn_cookie_validation_tries_next_current_and_previous_full_epoch() {
     let codec = syn_cookie_codec();
     let tuple = syn_cookie_tuple();
-    let next_cookie = codec.mint_isn(tuple, 7, 43, 1460);
-    let current_cookie = codec.mint_isn(tuple, 7, 42, 1460);
-    let previous_cookie = codec.mint_isn(tuple, 7, 41, 1460);
-    let older_cookie = codec.mint_isn(tuple, 7, 40, 1460);
+    let next_cookie = codec.mint_isn(tuple, Z7, 43, 1460);
+    let current_cookie = codec.mint_isn(tuple, Z7, 42, 1460);
+    let previous_cookie = codec.mint_isn(tuple, Z7, 41, 1460);
+    let older_cookie = codec.mint_isn(tuple, Z7, 40, 1460);
 
     assert_eq!(
         codec
-            .validate_isn(tuple, 7, 42, next_cookie)
+            .validate_isn(tuple, Z7, 42, next_cookie)
             .expect("next epoch")
             .full_epoch,
         43
     );
     assert_eq!(
         codec
-            .validate_isn(tuple, 7, 42, current_cookie)
+            .validate_isn(tuple, Z7, 42, current_cookie)
             .expect("current epoch")
             .full_epoch,
         42
     );
     assert_eq!(
         codec
-            .validate_isn(tuple, 7, 42, previous_cookie)
+            .validate_isn(tuple, Z7, 42, previous_cookie)
             .expect("previous epoch")
             .full_epoch,
         41
     );
-    assert!(codec.validate_isn(tuple, 7, 42, older_cookie).is_none());
+    assert!(codec.validate_isn(tuple, Z7, 42, older_cookie).is_none());
 }
 
 #[test]
@@ -3529,8 +3535,12 @@ fn syn_cookie_chosen_when_threshold_exceeded() {
         state.check_packet_with_zone_id("trust", 7, &pkt, 128),
         ScreenVerdict::Pass
     );
-    let expected_isn =
-        syn_cookie_codec().mint_isn(SynCookieTuple::from_packet(&pkt), 7, 2, pkt.tcp_mss);
+    let expected_isn = syn_cookie_codec().mint_isn(
+        SynCookieTuple::from_packet(&pkt),
+        syn_cookie_zone_tag("trust"),
+        2,
+        pkt.tcp_mss,
+    );
     assert_eq!(
         state.check_packet_with_zone_id("trust", 7, &pkt, 128),
         ScreenVerdict::SynCookieChallenge(SynCookieChallenge {
@@ -4040,8 +4050,12 @@ fn syn_cookie_ack_validates_on_peer_without_local_active_window() {
         443,
         TCP_SYN,
     );
-    let cookie_isn =
-        syn_cookie_codec().mint_isn(SynCookieTuple::from_packet(&syn), 7, 41, syn.tcp_mss);
+    let cookie_isn = syn_cookie_codec().mint_isn(
+        SynCookieTuple::from_packet(&syn),
+        syn_cookie_zone_tag("trust"),
+        41,
+        syn.tcp_mss,
+    );
 
     let mut ack = syn.clone();
     ack.tcp_flags = TCP_ACK;
@@ -4073,8 +4087,12 @@ fn syn_cookie_ack_validates_on_peer_one_epoch_behind_active() {
         443,
         TCP_SYN,
     );
-    let active_cookie =
-        syn_cookie_codec().mint_isn(SynCookieTuple::from_packet(&syn), 7, 41, syn.tcp_mss);
+    let active_cookie = syn_cookie_codec().mint_isn(
+        SynCookieTuple::from_packet(&syn),
+        syn_cookie_zone_tag("trust"),
+        41,
+        syn.tcp_mss,
+    );
 
     let mut ack = syn.clone();
     ack.tcp_flags = TCP_ACK;
@@ -4186,8 +4204,12 @@ fn syn_cookie_standby_ack_validation_is_rate_limited() {
     // The instantaneous budget is fully spent.
     assert_eq!(peer.syn_cookie_standby_ack_available("trust"), 0);
 
-    let valid_cookie =
-        syn_cookie_codec().mint_isn(SynCookieTuple::from_packet(&syn), 7, 41, syn.tcp_mss);
+    let valid_cookie = syn_cookie_codec().mint_isn(
+        SynCookieTuple::from_packet(&syn),
+        syn_cookie_zone_tag("trust"),
+        41,
+        syn.tcp_mss,
+    );
     let mut valid_ack = syn.clone();
     valid_ack.tcp_flags = TCP_ACK;
     valid_ack.tcp_seq = 3;
@@ -4269,21 +4291,21 @@ fn syn_cookie_validated_cache_is_bounded() {
     let mut client = syn_cookie_client();
     for port in 40000..40032 {
         client.dst_port = port;
-        cache.insert(7, 0, client, 100);
+        cache.insert(Z7, 0, client, 100);
     }
 
     assert_eq!(cache.len(), 4);
     let mut evicted = syn_cookie_client();
     evicted.dst_port = 40000;
-    assert!(!cache.contains_valid(7, 0, evicted, 100));
+    assert!(!cache.contains_valid(Z7, 0, evicted, 100));
     evicted.dst_port = 40027;
-    assert!(!cache.contains_valid(7, 0, evicted, 100));
+    assert!(!cache.contains_valid(Z7, 0, evicted, 100));
 
     let mut retained = syn_cookie_client();
     retained.dst_port = 40028;
-    assert!(cache.contains_valid(7, 0, retained, 100));
+    assert!(cache.contains_valid(Z7, 0, retained, 100));
     retained.dst_port = 40031;
-    assert!(cache.contains_valid(7, 0, retained, 100));
+    assert!(cache.contains_valid(Z7, 0, retained, 100));
 }
 
 #[test]
@@ -4296,7 +4318,7 @@ fn syn_cookie_validated_cache_index_is_keyed() {
     let mut client = syn_cookie_client();
     let differs = (0..1024).any(|offset| {
         client.dst_port = 30000 + offset;
-        left.debug_set_index(7, 0, client) != right.debug_set_index(7, 0, client)
+        left.debug_set_index(Z7, 0, client) != right.debug_set_index(Z7, 0, client)
     });
 
     assert!(
@@ -4555,14 +4577,14 @@ fn syn_cookie_validated_cache_generation_is_keyed() {
     let mut cache = SynCookieValidatedCache::new(64, 64);
     let client = syn_cookie_client();
 
-    cache.insert(7, 1, client, 100);
+    cache.insert(Z7, 1, client, 100);
     assert!(
-        !cache.contains_valid(7, 2, client, 100),
+        !cache.contains_valid(Z7, 2, client, 100),
         "an entry from a stale generation must be a miss under the new gen"
     );
 
     assert!(
-        cache.contains_valid(7, 1, client, 100),
+        cache.contains_valid(Z7, 1, client, 100),
         "an entry looked up under its own generation must still be a hit"
     );
 }
@@ -4591,11 +4613,11 @@ fn syn_cookie_validated_cache_refresh_extends_ttl() {
     let client_refreshed = syn_cookie_client();
     let mut client_old = syn_cookie_client();
     client_old.dst_port += 1;
-    cache.insert(7, 0, client_refreshed, 100);
-    cache.insert(7, 0, client_old, 100);
-    cache.insert(7, 0, client_refreshed, 109);
-    assert!(!cache.contains_valid(7, 0, client_old, 110));
-    assert!(cache.contains_valid(7, 0, client_refreshed, 110));
+    cache.insert(Z7, 0, client_refreshed, 100);
+    cache.insert(Z7, 0, client_old, 100);
+    cache.insert(Z7, 0, client_refreshed, 109);
+    assert!(!cache.contains_valid(Z7, 0, client_old, 110));
+    assert!(cache.contains_valid(Z7, 0, client_refreshed, 110));
 }
 
 #[test]
@@ -4603,14 +4625,14 @@ fn syn_cookie_validated_cache_expires_on_ttl_boundary() {
     let mut cache = SynCookieValidatedCache::new(4, SynCookieCodec::EPOCH_SECS);
     let client = syn_cookie_client();
 
-    cache.insert(7, 0, client, 128);
+    cache.insert(Z7, 0, client, 128);
     assert!(
-        cache.contains_valid(7, 0, client, 191),
+        cache.contains_valid(Z7, 0, client, 191),
         "entry should remain valid until just before the 64s TTL boundary"
     );
 
     assert!(
-        !cache.contains_valid(7, 0, client, 192),
+        !cache.contains_valid(Z7, 0, client, 192),
         "entry expires at insertion time + one cookie epoch"
     );
     // #9419: the TTL is what BOUNDS the whitelist now that a hit no longer
@@ -7252,7 +7274,7 @@ fn ring_ack_9173(key: [u8; 16], full_epoch: u64) -> ScreenPacketInfo {
     let syn = ring_syn_9173();
     let cookie_isn = SynCookieCodec::new(key).mint_isn(
         SynCookieTuple::from_packet(&syn),
-        7,
+        syn_cookie_zone_tag("trust"),
         full_epoch,
         syn.tcp_mss,
     );
@@ -7290,7 +7312,7 @@ fn minted_by_9173(key: [u8; 16], full_epoch: u64, cookie_isn: u32) -> bool {
     SynCookieCodec::new(key)
         .validate_isn_at_epoch(
             SynCookieTuple::from_packet(&ring_syn_9173()),
-            7,
+            syn_cookie_zone_tag("trust"),
             full_epoch,
             cookie_isn,
         )
@@ -7649,6 +7671,227 @@ fn syn_cookie_backward_step_does_not_resurrect_a_past_cookie_9173() {
     }
 }
 
+/// #9740: a state screening `zones`, all with a syn-flood threshold of 1 and SYN
+/// cookies on, keyed from the published #9173 ring and pinned to `epoch`.
+fn zones_state_9740(zones: &[&str], epoch: u64) -> ScreenState {
+    let mut state = ScreenState::new();
+    let mut profiles = FxHashMap::default();
+    for zone in zones {
+        let mut profile = ScreenProfile::default();
+        profile.syn_flood_threshold = 1;
+        profile.syn_cookie = true;
+        profiles.insert((*zone).to_string(), profile);
+    }
+    state.update_profiles(profiles);
+    state.update_syn_cookie_keys(Some(LEGACY_KEY_9173), published_ring_9173());
+    state.set_syn_cookie_full_epoch_for_test(epoch);
+    state
+}
+
+/// Drive `ring_syn_9173()` through `zone`'s flood gate until it mints a cookie.
+fn mint_in_zone_9740(state: &mut ScreenState, zone: &str) -> u32 {
+    let syn = ring_syn_9173();
+    for _ in 0..8 {
+        if let ScreenVerdict::SynCookieChallenge(challenge) =
+            state.check_packet_with_zone_id(zone, 7, &syn, 100)
+        {
+            return challenge.cookie_isn;
+        }
+    }
+    panic!("the SYN-flood gate in zone {zone} never minted a cookie challenge");
+}
+
+#[test]
+fn syn_cookie_zone_tag_matches_its_known_answers_9740() {
+    // Computed independently of this crate, by Python's hashlib (SHA-256 over the
+    // label, the big-endian u64 name length and the name). Every node must derive
+    // the same tag from the same zone name, or a cookie fails on its peer.
+    let vectors: [(&str, [u64; 2]); 4] = [
+        ("trust", [0x1aba_0b6c_d3d9_e26c, 0x4f25_84ec_784a_79df]),
+        ("z174", [0x59b7_3d0d_4599_c856, 0xecb2_8035_0e17_a855]),
+        ("z214", [0x3203_9774_5ec7_fc64, 0x0ce5_66c2_ac63_46ff]),
+        ("", [0xe554_9b85_9775_a4da, 0xe61f_c3af_b059_d1e5]),
+    ];
+    for (zone, want) in vectors {
+        assert_eq!(syn_cookie_zone_tag(zone), want, "zone tag of {zone:?}");
+    }
+}
+
+#[test]
+fn syn_cookie_zones_whose_ids_collide_share_neither_cookies_nor_whitelist_9740() {
+    // z174 and z214 fold to the same StableZoneID (the premise of
+    // pkg/cli/apply_syslog_zonemap_3704_test.go); here both carry zone_id 7.
+    // #9740 dropped the screened-zone set from the key base, so what keeps a
+    // cookie minted in one from validating, or whitelisting its client, in the
+    // other is the cookie's binding to the zone NAME.
+    let epoch = RING_FIRST_EPOCH_9173 + 3;
+    let mut node = zones_state_9740(&["z174", "z214"], epoch);
+    let ack = ack_for_isn_9173(mint_in_zone_9740(&mut node, "z174"));
+
+    assert_ne!(
+        node.validate_syn_cookie_ack_on_session_miss("z214", 7, &ack, 128 * NS, 128),
+        SynCookieAckVerdict::Validated,
+        "a cookie minted in z174 must not validate in z214, whose zone ID collides"
+    );
+    let mut peer_other = zones_state_9740(&["z214"], epoch);
+    assert_ne!(
+        peer_other.validate_syn_cookie_ack_on_session_miss("z214", 7, &ack, 128 * NS, 128),
+        SynCookieAckVerdict::Validated,
+        "a peer screening only z214 must not validate a z174 cookie"
+    );
+    let mut peer_same = zones_state_9740(&["z174"], epoch);
+    assert_eq!(
+        peer_same.validate_syn_cookie_ack_on_session_miss("z174", 7, &ack, 128 * NS, 128),
+        SynCookieAckVerdict::Validated,
+        "control: a peer that has the same zone validates the cookie"
+    );
+
+    assert_eq!(
+        node.validate_syn_cookie_ack_on_session_miss("z174", 7, &ack, 128 * NS, 128),
+        SynCookieAckVerdict::Validated,
+        "premise: the cookie validates in the zone it was minted in"
+    );
+    let mut retry = ring_syn_9173();
+    retry.src_port = retry.src_port.wrapping_add(1);
+    assert_eq!(
+        node.check_packet_with_zone_id("z174", 7, &retry, 128),
+        ScreenVerdict::SynCookieBypass,
+        "control: the whitelisted client bypasses the gate in its own zone"
+    );
+    assert_ne!(
+        node.check_packet_with_zone_id("z214", 7, &retry, 128),
+        ScreenVerdict::SynCookieBypass,
+        "a client whitelisted in z174 must not bypass the SYN-flood gate in z214"
+    );
+}
+
+#[test]
+fn syn_cookie_a_removed_and_recreated_zone_does_not_inherit_its_whitelist_9740() {
+    // The validated cache outlives a removed zone for up to one cookie epoch, and
+    // a re-created zone used to start at generation 1 again, so a client
+    // whitelisted in the old zone bypassed the new zone's gate.
+    let epoch = RING_FIRST_EPOCH_9173 + 3;
+    let mut node = zones_state_9740(&["trust", "dmz"], epoch);
+    let ack = ack_for_isn_9173(mint_in_zone_9740(&mut node, "trust"));
+    assert_eq!(
+        node.validate_syn_cookie_ack_on_session_miss("trust", 7, &ack, 128 * NS, 128),
+        SynCookieAckVerdict::Validated,
+        "premise: the cookie validates in the zone it was minted in"
+    );
+    let mut retry = ring_syn_9173();
+    retry.src_port = retry.src_port.wrapping_add(1);
+    assert_eq!(
+        node.check_packet_with_zone_id("trust", 7, &retry, 128),
+        ScreenVerdict::SynCookieBypass,
+        "control: the whitelisted client bypasses the gate while its zone exists"
+    );
+
+    let profiles = |zones: &[&str]| {
+        zones
+            .iter()
+            .map(|zone| {
+                let mut profile = ScreenProfile::default();
+                profile.syn_flood_threshold = 1;
+                profile.syn_cookie = true;
+                ((*zone).to_string(), profile)
+            })
+            .collect::<FxHashMap<_, _>>()
+    };
+    node.update_profiles(profiles(&["dmz"]));
+    node.update_profiles(profiles(&["trust", "dmz"]));
+    assert_ne!(
+        node.check_packet_with_zone_id("trust", 7, &retry, 128),
+        ScreenVerdict::SynCookieBypass,
+        "a client whitelisted before its zone was removed must not bypass the re-created zone's gate"
+    );
+}
+
+/// #9740: a cookie ISN rebuilt from its documented parts, independently of
+/// `SynCookieCodec`. `identity` absorbs the zone into both the per-epoch secret
+/// and the MAC. With the zone tag it must reproduce `mint_isn`; with the 16-bit
+/// zone id it is a cookie from a helper that predates #9740.
+fn documented_cookie_isn_9740(
+    master_key: [u8; 16],
+    tuple: SynCookieTuple,
+    identity: &dyn Fn(&mut SipHash24),
+    full_epoch: u64,
+    peer_mss: u16,
+) -> u32 {
+    let k0 = u64::from_le_bytes(master_key[0..8].try_into().expect("fixed slice"));
+    let k1 = u64::from_le_bytes(master_key[8..16].try_into().expect("fixed slice"));
+    let secret = |domain: &[u8; 8]| {
+        let mut sip = SipHash24::new(k0, k1);
+        sip.write_u64(u64::from_be_bytes(*domain));
+        identity(&mut sip);
+        sip.write_u64(full_epoch);
+        sip.finish()
+    };
+    let mss_index = SynCookieCodec::mss_index(peer_mss);
+    let mut sip = SipHash24::new(secret(b"xpf-sck0"), secret(b"xpf-sck1"));
+    sip.write_u64(u64::from_be_bytes(*b"xpf-sync"));
+    identity(&mut sip);
+    sip.write_u64(full_epoch);
+    sip.write_u8(mss_index);
+    sip.write_ip(tuple.src_ip);
+    sip.write_ip(tuple.dst_ip);
+    sip.write_u16(tuple.src_port);
+    sip.write_u16(tuple.dst_port);
+    let mac = (sip.finish() as u32) & ((1u32 << SYN_COOKIE_MSS_SHIFT) - 1);
+    ((full_epoch as u32 & SYN_COOKIE_EPOCH_MASK) << SYN_COOKIE_EPOCH_SHIFT)
+        | ((mss_index as u32 & SYN_COOKIE_MSS_MASK) << SYN_COOKIE_MSS_SHIFT)
+        | mac
+}
+
+#[test]
+fn syn_cookie_mint_binds_the_zone_tag_twice_and_refuses_a_pre_9740_cookie_9740() {
+    // The per-epoch secret and the MAC each absorb the zone, so dropping either
+    // binding alone leaves every behavioural cell green. Requiring mint_isn to
+    // equal the ISN rebuilt from its documented parts pins both bindings.
+    let key = *b"xpf-9740-mac-key";
+    let codec = SynCookieCodec::new(key);
+    let tuple = SynCookieTuple {
+        src_ip: IpAddr::V4(Ipv4Addr::new(198, 51, 100, 7)),
+        dst_ip: IpAddr::V4(Ipv4Addr::new(203, 0, 113, 10)),
+        src_port: 40_000,
+        dst_port: 443,
+    };
+    let full_epoch = 0x0000_0001_2345_6789u64;
+    for zone in ["trust", "z174", "z214"] {
+        let tag = syn_cookie_zone_tag(zone);
+        let with_tag = |sip: &mut SipHash24| {
+            sip.write_u64(tag[0]);
+            sip.write_u64(tag[1]);
+        };
+        for peer_mss in [536u16, 1460, 9000] {
+            assert_eq!(
+                codec.mint_isn(tuple, tag, full_epoch, peer_mss),
+                documented_cookie_isn_9740(key, tuple, &with_tag, full_epoch, peer_mss),
+                "mint_isn in {zone} (mss {peer_mss}) must bind the zone tag in the secret and in the MAC"
+            );
+        }
+    }
+
+    // A helper from before #9740 absorbed the 16-bit zone id instead, so the two
+    // refuse each other's cookies from the first one, whatever key they share.
+    let tag = syn_cookie_zone_tag("trust");
+    let validates = |isn: u32| codec.validate_isn(tuple, tag, full_epoch, isn).is_some();
+    let new_isn = codec.mint_isn(tuple, tag, full_epoch, 1460);
+    assert!(
+        validates(new_isn),
+        "control: this helper validates its own cookie"
+    );
+    let with_id = |sip: &mut SipHash24| sip.write_u16(7);
+    let old_isn = documented_cookie_isn_9740(key, tuple, &with_id, full_epoch, 1460);
+    assert!(
+        !validates(old_isn),
+        "a cookie minted by a pre-#9740 helper must not validate on this one"
+    );
+    assert_ne!(
+        new_isn, old_isn,
+        "a pre-#9740 helper computes a different MAC for this helper's cookie, so it refuses it"
+    );
+}
+
 #[test]
 fn syn_cookie_backward_step_past_one_epoch_splits_the_nodes_both_ways_9712() {
     // #9712 keeps the latch. After a backward wall-clock step this node mints and
@@ -7744,6 +7987,11 @@ fn syn_cookie_mixed_version_pair_disagrees_from_the_first_boundary_9173() {
     // full snapshot was built in, here key(R). A newer helper picks a key by the
     // cookie's own epoch, so the two agree inside period R and disagree from the
     // first epoch of R + 1, in both directions.
+    //
+    // No real pair has this shape: every helper that ignores the ring predates
+    // #9740 and absorbs the zone id, so it disagrees from the first cookie (see
+    // syn_cookie_mint_binds_the_zone_tag_twice_and_refuses_a_pre_9740_cookie_9740).
+    // The cell still pins what the legacy key alone gives a ring-ignoring helper.
     let old_key = ring_key_9173(RING_ROTATION_9173);
     let state = |legacy: [u8; 16], ring: SynCookieKeyRing, epoch: u64| {
         let mut profile = ScreenProfile::default();

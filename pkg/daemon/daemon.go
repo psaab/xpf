@@ -736,6 +736,14 @@ type Daemon struct {
 	// live TCP sync transport (mirrors syncPeerForTest for the commit path).
 	configSyncPushForTest func()
 
+	// #9530: configPeerStateForTest, when non-nil, replaces the cluster-derived
+	// (peer reachable, peer reads RG0 secondary) answer config sync uses to mark
+	// and share commits. configDivergenceReported is the divergence already
+	// raised as a cluster event, guarded by configDivergenceMu.
+	configPeerStateForTest   func() (reachable, peerSecondary bool)
+	configDivergenceMu       sync.Mutex
+	configDivergenceReported time.Time
+
 	slogHandler *logging.SyslogSlogHandler
 	// #3932: the flow-traceoptions writer is published through an atomic
 	// pointer read lock-free by a SINGLE stable EventReader callback that
@@ -1404,8 +1412,13 @@ type Daemon struct {
 	eventStreamConnected atomic.Bool
 
 	// userspaceDeltaSyncMu serializes helper delta draining between the
-	// event-stream fallback loop and the background polling loop.
+	// event-stream fallback loop and the background polling loop, and holds
+	// that drain off a FullResync's export-and-queue transaction (#9766).
 	userspaceDeltaSyncMu sync.Mutex
+	// fullResyncRetryAt and fullResyncInstallWaitForTest: see
+	// full_resync_transaction_9767.go.
+	fullResyncRetryAt            atomic.Int64
+	fullResyncInstallWaitForTest time.Duration
 	// userspaceDemotionPrepUntil suppresses duplicate demotion prep for the
 	// same RG during a single failover transition. Manual failover can now
 	// stage prep before ownership changes; the later cluster/VRRP edges must

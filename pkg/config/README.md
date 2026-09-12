@@ -248,6 +248,12 @@ distinction).
   Two addresses still toggle the node: a path naming every key (the grouped
   line `display set` emits) and a path ending at a statement whose own
   content is packed behind it (`security-zone trust screen edge tcp-rst;`).
+  A LATER member of a bracketed group (`zgb` in `security-zone [ zga zgb ]`)
+  resolves to the group for a path-scoped `show`, as the first member always
+  did, and `delete`, `deactivate` and `activate` refuse it with the same
+  re-author guidance instead of reporting no node (#9799). Bracket provenance
+  (`Node.KeyBracketed`) decides membership, so a packed body is never read as
+  a member.
 
 ## Callers
 

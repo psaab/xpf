@@ -33,8 +33,9 @@ func (m *Manager) syncSnapshotLocked() error {
 	// path in manager_compile.go already does unconditionally.
 	// #9520: a generation proves nothing about content while an earlier apply's
 	// outcome is unknown, so the catch-up stands down and the publish below runs.
+	// #9684: nor while a partial update's outcome is.
 	if m.publishedSnapshot != 0 && m.lastStatus.LastSnapshotGeneration >= m.lastSnapshot.Generation &&
-		!m.applySnapshotOutcomeUnknown {
+		!m.applySnapshotOutcomeUnknown && m.partialOutcomeUnknown == 0 {
 		// #1197 v7 (Codex code-review v6): status-loop catch-up
 		// path. Helper has the snapshot; mirror the FULL
 		// successful-apply_snapshot bookkeeping, otherwise
@@ -66,11 +67,19 @@ func (m *Manager) syncSnapshotLocked() error {
 	// update routes and neighbors. Blocking them creates a deadlock: XSK
 	// liveness needs RX traffic, but transit traffic needs FIB data that
 	// hasn't been published yet.
-	if m.publishedSnapshot != 0 && !m.xskLivenessProven && !m.xskLivenessFailed {
-		samePlan := m.publishedPlanKey != "" && m.publishedPlanKey == planKey
-		if !samePlan {
-			return nil
-		}
+	xskStartup := m.publishedSnapshot != 0 && !m.xskLivenessProven && !m.xskLivenessFailed
+	if xskStartup && (m.publishedPlanKey == "" || m.publishedPlanKey != planKey) {
+		return nil
+	}
+	// #9684: re-sample any section a lost partial update left unknown, only once
+	// the gate above lets this publish proceed. A deferred tick then costs no
+	// kernel sample, which matters because the probe extends while a link is idle
+	// and that window has no bound. A re-sample never moves the binding plan
+	// (resampleUnresolvedSectionsLocked keeps the fabric rows' plan half), so the
+	// gate's decision holds for the copy that will be sent.
+	retained := *m.lastSnapshot
+	resampled := m.resampleUnresolvedSectionsLocked(&retained)
+	if xskStartup {
 		slog.Info("userspace: publishing deferred same-plan snapshot during XSK startup",
 			"generation", m.lastSnapshot.Generation,
 			"fib_generation", m.lastSnapshot.FIBGeneration,
@@ -92,17 +101,19 @@ func (m *Manager) syncSnapshotLocked() error {
 	// forwarding-relevant content hasn't changed since the last publish.
 	// This eliminates redundant publishes during route convergence where
 	// BumpFIBGeneration fires repeatedly but routes/neighbors are unchanged.
-	hash, hashOK := snapshotContentHash(m.lastSnapshot)
-	// #9520: not while an earlier apply's outcome is unknown; see the catch-up above.
-	if hashOK && hash == m.lastSnapshotHash && m.publishedSnapshot != 0 && !m.applySnapshotOutcomeUnknown {
+	hash, hashOK := snapshotContentHash(&retained)
+	// #9520 / #9684: not while an earlier apply's or partial update's outcome is
+	// unknown; see the catch-up above.
+	if hashOK && hash == m.lastSnapshotHash && m.publishedSnapshot != 0 && !m.applySnapshotOutcomeUnknown &&
+		m.partialOutcomeUnknown == 0 {
 		// Still update the published generation so subsequent checks pass.
 		m.publishedSnapshot = m.lastSnapshot.Generation
 		return nil
 	}
 	// #1197 v5 (Codex code-review v4 #2): publishable-only filter
 	// for parity with update_neighbors path.
-	publishSnap := *m.lastSnapshot
-	publishSnap.Neighbors = filterPublishableNeighbors(m.lastSnapshot.Neighbors)
+	publishSnap := retained
+	publishSnap.Neighbors = filterPublishableNeighbors(retained.Neighbors)
 	// #5488 (F7): mapsMutatedInPlace is unconditionally true here for the same
 	// reason the publishSnapshotFailClosedLocked call below passes true — the
 	// only producer of an unpublished lastSnapshot is Compile's pendingXSKStartup
@@ -145,6 +156,13 @@ func (m *Manager) syncSnapshotLocked() error {
 	// path too. Compile() defers when XSK is starting up; this
 	// is where the snapshot actually lands in userspace-dp.
 	m.logWgEndpointSetTransitionLocked(&publishSnap, "deferred-sync")
+	if resampled != 0 {
+		// #9684: record the re-sampled sections the helper now holds. hash and
+		// planKey were already taken from this copy.
+		m.lastSnapshot.Neighbors = retained.Neighbors
+		m.lastSnapshot.Fabrics = retained.Fabrics
+		m.resolvePartialOutcomesLocked(resampled)
+	}
 	// #9520: a content-conflict republish moves the snapshot to a fresh generation.
 	m.adoptPublishedGenerationLocked(m.lastSnapshot, publishSnap.Generation)
 	m.rebuildNeighborIndex()

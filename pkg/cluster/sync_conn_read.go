@@ -337,17 +337,24 @@ func (s *SessionSync) handleMessage(conn net.Conn, msgType uint8, payload []byte
 		// boot — which is the routine second-fabric case #5718's tests exist to
 		// protect. So the remedy needs "we knew a DIFFERENT boot before", which
 		// `switched` alone does not say.
-		var evictedStale bool
-		if switched && priorInc.known() {
-			s.mu.Lock()
-			if idx := s.fabricIdxForConnLocked(conn); idx >= 0 {
-				evictedStale = s.applyPeerIncarnationSwitchLocked(idx)
-			}
-			s.mu.Unlock()
+		// #9636: this switch is one of TWO reboot classifiers, and
+		// classifyPrimeLocked reconciles it with installConn's epoch arm. It
+		// also settles an epoch retirement on a prime whose boot id did not
+		// change, so it runs for every accepted BulkStart, not only a switch.
+		s.mu.Lock()
+		pc := s.classifyPrimeLocked(conn, switched, priorInc.known())
+		s.mu.Unlock()
+		if pc.announce && s.OnPeerConnected != nil {
+			// No install classified this reboot, so the new process's
+			// OnPeerConnected comes from here.
+			slog.Info("cluster sync: scheduling OnPeerConnected callback for a peer reboot classified by its boot id",
+				"remote", connRemoteAddrString(conn))
+			go s.OnPeerConnected()
 		}
 		slog.Info("cluster sync: bulk transfer starting", "epoch", epoch,
 			"peer_boot_incarnation", inc.String(), "incarnation_switched", switched,
-			"evicted_stale_incarnation_conn", evictedStale,
+			"retired_incarnation", pc.retired, "reboot_already_retired", pc.consumed,
+			"evicted_stale_incarnation_conn", pc.evicted,
 			"local", connLocalAddrString(conn), "remote", connRemoteAddrString(conn))
 		// #5084: a peer that primes without an incarnation gets today's
 		// generation-only ordering (fail open). Warn ONCE per connection, not
@@ -523,6 +530,9 @@ func (s *SessionSync) handleMessage(conn net.Conn, msgType uint8, payload []byte
 			return
 		}
 		s.stats.ConfigApplyNacksReceived.Add(1)
+		// #9569: the peer still holds an older config. A handover onto it is refused
+		// until a newer push supersedes this generation.
+		s.peerConfigNackedGen.Store(nackedGen)
 		slog.Warn("cluster sync: peer did not apply the config generation we pushed — re-arming the push marker",
 			"gen", nackedGen)
 		if s.OnPeerConfigApplyFailed != nil {

@@ -44,12 +44,16 @@ xpf_enter_destructive_cluster_cell "test-host-inbound $*" "$0" "$@"
 # what the COMPILER produced. None can show what the BOX ADMITTED. #6936 names
 # the two on-wire legs that were never covered:
 #
-#   VLAN            — host-inbound resolved on a TAGGED sub-unit (reth0.50 /
-#                     reth0.80), not just on an untagged interface. The
-#                     interesting direction is the DENY: the wan zone admits
-#                     ping and gre but not ssh, so a tcp/22 probe to a VLAN
-#                     sub-unit address must get nothing back while a ping to
-#                     the SAME address gets a reply.
+#   VLAN            — tagged sub-unit addresses (reth0.50 / reth0.80) are
+#                     host-inbound targets, not just the untagged interface.
+#                     Every probe ARRIVES on lan (the prober is the LAN host),
+#                     and lan admits ssh. The cells are ssh ADMIT at lan's
+#                     addresses, ssh DENY at the wan sub-units, telnet DENY
+#                     everywhere (no zone admits it), and ping ADMIT as the
+#                     same-address control. The wan ssh DENY is the residual
+#                     over-refusal #9637 measured: a LAN SYN to a wan address is
+#                     reinjected through xpf-usp0, where the kernel chain cannot
+#                     see its ingress zone (see score_matrix).
 #   HA failover     — admission is UNCHANGED after the redundancy groups move
 #                     to the peer node. The failure mode is silent: an
 #                     admission that quietly stops working after a failover
@@ -170,6 +174,17 @@ score "posture wan/ping" "$(hi_zone_service_verdict "$ZONE_SETS" wan ping PRESEN
 score "posture wan/ssh" "$(hi_zone_service_verdict "$ZONE_SETS" wan ssh ABSENT)"
 score "posture lan/telnet" "$(hi_zone_service_verdict "$ZONE_SETS" lan telnet ABSENT)"
 score "posture wan/telnet" "$(hi_zone_service_verdict "$ZONE_SETS" wan telnet ABSENT)"
+# #9637: every probe arrives on the LAN host's segment, reth1. The ssh cells
+# below are scored against that zone's posture, so the zone must own reth1.
+PROBER_ZONE=lan
+# The committed config spells the member either `reth1` or `reth1.0`, and an
+# interface-level host-inbound override follows it on the same line (the loss
+# cluster's own config reads `... interfaces reth1 host-inbound-traffic ...`).
+if grep -qE "^set security zones security-zone ${PROBER_ZONE} interfaces reth1(\.0)?( |$)" <<<"$ZONE_SETS"; then
+	pass "posture ${PROBER_ZONE}/reth1: the prober's ingress interface is in ${PROBER_ZONE}, whose posture scores every ssh cell"
+else
+	fail "posture ${PROBER_ZONE}/reth1: ${PROBER_ZONE} no longer owns the prober's ingress interface — the ssh cells would be scored against the wrong zone"
+fi
 for tagged in reth0.50 reth0.80; do
 	if grep -qxF "set security zones security-zone wan interfaces ${tagged}" <<<"$ZONE_SETS"; then
 		pass "posture wan/${tagged}: the wan zone owns the tagged sub-unit (this is the VLAN leg's subject)"
@@ -264,8 +279,18 @@ score_matrix() {
 		# this address.
 		score "[${label}] ${t}-ping (control)" \
 			"$(hi_cell_verdict ADMIT "$control" "$control")"
+		# ssh is admitted at lan's own addresses and NOT at the wan-owned
+		# sub-units, although every probe arrives on ${PROBER_ZONE}, which admits
+		# ssh. That is the residual over-refusal #9637 measured and did not close.
+		# A LAN SYN to a wan address is not passed to the kernel on reth1: the
+		# userspace dataplane reinjects it through xpf-usp0, where the kernel
+		# chain has no ingress zone and still judges it by the address's owner.
+		# (A SYN to lan's own address arrives on ge-0-0-1, and the #9637
+		# ingress-zone rules admit it.) When the reinject path carries the
+		# ingress zone, these cells flip to ADMIT. That flip is the signal the
+		# residual is fixed, so update this line then rather than weakening it.
 		if [[ "${TARGET_ZONE[$t]}" == lan ]]; then ssh_expect=ADMIT; else ssh_expect=DENY; fi
-		score "[${label}] ${t}-ssh (zone ${TARGET_ZONE[$t]} -> ${ssh_expect})" \
+		score "[${label}] ${t}-ssh (arrives on ${PROBER_ZONE}, owned by ${TARGET_ZONE[$t]} -> ${ssh_expect})" \
 			"$(hi_cell_verdict "$ssh_expect" "$(awk -v c="${t}-ssh" '$1 == c { print $2; exit }' <<<"$obs_lines")" "$control")"
 		# telnet is admitted by NO zone here. On the lan address this is
 		# the strongest cell in the file: same address, same prober, one

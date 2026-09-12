@@ -718,6 +718,14 @@ type SessionSync struct {
 	conn0Gen        uint64
 	conn1Gen        uint64
 	writeMu         sync.Mutex
+	// conn0Announced/conn1Announced record whether the install of the
+	// connection in that slot dispatched OnPeerConnected (#9636), so a
+	// BulkStart that later retires the prior incarnation on the same
+	// connection does not dispatch it a second time. Every install of a slot
+	// overwrites it, and it is read only for a connection still installed
+	// there. Guarded by mu.
+	conn0Announced bool
+	conn1Announced bool
 	// authProvider supplies the shared control-link PSK for #4107 F23
 	// session-sync stream auth. Optional: nil (or an empty key) ⇒ legacy
 	// unauthenticated stream.
@@ -964,6 +972,19 @@ type SessionSync struct {
 	peerEpochAtIncarnation uint64
 	lastSweepTime          uint64
 	syncBackfillNeeded     atomic.Bool
+	// rebootAwaiting names the half of the CURRENT incarnation's reboot
+	// evidence that has not arrived yet; it is live only while
+	// rebootAwaitingInc equals peerIncarnation (#9636). Guarded by mu.
+	//
+	// One peer reboot reaches two classifiers, in either order: installConn
+	// sees a raised heartbeat boot epoch, and the BulkStart arm sees a changed
+	// boot id. Whichever retires the incarnation records that the other
+	// signal is still to come, and the other consumes the record instead of
+	// retiring the incarnation again, which would evict the peer's healthy
+	// second fabric. Keyed to the incarnation it was recorded for, so any
+	// later advance voids it. See classifyPrimeLocked.
+	rebootAwaiting    rebootEvidence
+	rebootAwaitingInc uint64
 	// forceResync arms a full authoritative bulk resync after a delete-journal
 	// overflow dropped session-delete records the standby still needs (#5450).
 	// It is DISTINCT from syncBackfillNeeded: that flag re-drives the INSTALL
@@ -1273,7 +1294,10 @@ type SessionSync struct {
 	// (QueueConfig). Distinct from configGenCounter, which is the next value to
 	// draw: a nack naming an older generation is a straggler for a push already
 	// superseded and must not re-arm the marker for the current one.
-	lastSentConfigGen    atomic.Uint64
+	lastSentConfigGen atomic.Uint64
+	// peerConfigNackedGen is the generation of the last config-apply nack that
+	// matched lastSentConfigGen when it arrived (#9569). See PeerConfigStale.
+	peerConfigNackedGen  atomic.Uint64
 	configGenCounter     atomic.Uint64
 	lastAppliedConfigGen atomic.Uint64
 	// applyingConfigGen is the apply-in-progress config fence (#6284, item 2).
