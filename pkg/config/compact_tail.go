@@ -103,11 +103,56 @@ func packedBodyChildren(node *Node, schema *schemaNode) []*Node {
 		return node.Children
 	}
 
-	var head, last *Node
+	// #9620 H9: the open schema levels, not a single `cur`.
+	//
+	// This used to refine `cur` one level deeper per statement and build a
+	// strictly NESTED chain, which is right only while every statement is a
+	// child of the one before it. `term t1 then count C1 discard;` is not that
+	// shape: `count` is a child of `then`, and so is `discard` — a SIBLING.
+	// After consuming `count C1` the old loop had refined `cur` to `count`,
+	// `resolveSchemaChild(count, "discard")` came back nil, and the whole body
+	// was discarded under "do not guess".
+	//
+	// The term then compiled with an EMPTY Action — and that is not a formatting
+	// matter. Measured through the real filter engine: a modifier-only term is a
+	// fall-through (`NextTerm`), nothing later terminates, and
+	// `FilterResult::default()` returns `FilterAction::Accept`. So a term written
+	// `then count C1 discard;` ACCEPTED the packet it was written to discard,
+	// on a commit strict reports clean, with `show` printing `then accept`. A
+	// DENY that PERMITS.
+	//
+	// So the walk keeps the levels it has opened and attaches each statement to
+	// the DEEPEST open level that declares it, popping the levels below. A
+	// single-parent chain (`filter input f1`) is unchanged, because there the
+	// deepest declaring level is always the one just pushed.
+	type openLevel struct {
+		schema *schemaNode
+		node   *Node // nil for the synthetic root the first statement attaches to
+	}
+	levels := []openLevel{{schema: cur}}
+	// The run's ROOT-level statements, in order. A list rather than a single
+	// head: once the walk can pop back to the container, a run produces SIBLINGS
+	// there -- `term t1 from protocol tcp then discard;` is a `from` and a `then`
+	// side by side, not one nested in the other. Chaining them under the first
+	// statement put `then` inside `from`, and the commit gate then refused the
+	// config as "`from then` is not enforced by the dataplane" -- caught by
+	// dumping this function's own output rather than by the verdict, which was
+	// merely "refused" and looked like a deliberate gate.
+	var roots []*Node
+	var last *Node
 	for len(tail) > 0 {
-		childSchema := resolveSchemaChild(cur, tail[0])
+		// Deepest first: a token a nested level declares belongs to that level,
+		// which is what makes the ordinary chain keep its shape.
+		at := -1
+		var childSchema *schemaNode
+		for i := len(levels) - 1; i >= 0; i-- {
+			if cs := resolveSchemaChild(levels[i].schema, tail[0]); cs != nil {
+				at, childSchema = i, cs
+				break
+			}
+		}
 		if childSchema == nil {
-			// Outside the modelled grammar. Do not guess.
+			// Outside the modelled grammar at every open level. Do not guess.
 			return node.Children
 		}
 		n, refined := consumeNodeKeys(tail, childSchema)
@@ -115,18 +160,20 @@ func packedBodyChildren(node *Node, schema *schemaNode) []*Node {
 			return node.Children
 		}
 		next := &Node{Keys: append([]string(nil), tail[:n]...)}
-		if last == nil {
-			head = next
+		if levels[at].node == nil {
+			// The run's first statement, or one that popped all the way back to
+			// the container: a SIBLING at the body's top level.
+			roots = append(roots, next)
 		} else {
-			last.Children = []*Node{next}
+			levels[at].node.Children = append(levels[at].node.Children, next)
 		}
+		levels = append(levels[:at+1], openLevel{schema: refined, node: next})
 		last = next
 		tail = tail[n:]
-		cur = refined
 	}
 
 	if len(node.Children) == 0 {
-		return []*Node{head}
+		return roots
 	}
 	// The parser DOES produce both, contrary to what this comment used to
 	// claim. `authentication md5 7 { key "secret"; }` parses as
@@ -157,11 +204,14 @@ func packedBodyChildren(node *Node, schema *schemaNode) []*Node {
 	// body at its terminal, and compiles identically to the fully nested
 	// spelling. Chain length was never the question; whether the terminal takes
 	// a body is.
+	// #9620 H9: the deepest OPEN level's schema, which is what `cur` used to
+	// hold when the chain could only nest.
+	cur = levels[len(levels)-1].schema
 	if cur == nil || (len(cur.children) == 0 && cur.wildcard == nil) {
 		return node.Children
 	}
-	last.Children = append([]*Node(nil), node.Children...)
-	return []*Node{head}
+	last.Children = append(last.Children, node.Children...)
+	return roots
 }
 
 // nodeChildren is node.Children with a nil-node guard.
