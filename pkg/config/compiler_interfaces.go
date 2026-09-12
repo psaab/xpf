@@ -453,7 +453,23 @@ func compileInterfaces(node *Node, ifaces *InterfacesConfig, opts compileOpts, w
 							}
 							parseVRRPGroups(unit, addrInst.name, addrInst.node)
 						}
-						if dhcpNode := afNode.FindChild("dhcp"); dhcpNode != nil {
+						// #9977: the `dhcp` node may carry its options as a PACKED
+						// TAIL rather than as children. #9932 taught the fold to
+						// put `dhcp` under `family inet` for the elided spelling,
+						// but `family inet dhcp lease-time 3600;` leaves
+						// `lease-time 3600` on the dhcp node's own Keys, where
+						// FindChild and the Children range below cannot see it —
+						// so the client came up with the DEFAULT lease time on a
+						// commit that reported success and rendered the statement.
+						//
+						// A READER fix, not ten scope admissions: the ten
+						// sub-option pairs each reach exactly one schema path and
+						// each is empty-equivalent, so admitting them was viable,
+						// but it is ten pairs owing rows in four registers to reach
+						// what one packedBody call reaches here. Same shape as
+						// #9620 H9.
+						if dhcpNode := packedBody(afNode.FindChild("dhcp"),
+							schemaForPath("interfaces", "x", "unit", "family", "inet", "dhcp")); dhcpNode != nil {
 							unit.DHCP = true
 							if len(dhcpNode.Children) > 0 {
 								opts := &DHCPInetOptions{}
@@ -578,7 +594,11 @@ func compileInterfaces(node *Node, ifaces *InterfacesConfig, opts compileOpts, w
 						if ddns := compileInterfaceDynamicDNS(afNode); ddns != nil {
 							unit.DynamicDNSInet6 = ddns
 						}
-						if dcNode := afNode.FindChild("dhcpv6-client"); dcNode != nil {
+						// #9977, the inet6 twin: `family inet6 dhcpv6-client
+						// client-type stateful;` leaves the options on the
+						// dhcpv6-client node's Keys.
+						if dcNode := packedBody(afNode.FindChild("dhcpv6-client"),
+							schemaForPath("interfaces", "x", "unit", "family", "inet6", "dhcpv6-client")); dcNode != nil {
 							unit.DHCPv6 = true
 							dc := &DHCPv6ClientConfig{}
 							for _, prop := range dcNode.Children {

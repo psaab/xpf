@@ -1,9 +1,6 @@
 package config
 
-import (
-	"strings"
-	"testing"
-)
+import "testing"
 
 // #9932: `family inet dhcp;` with the `family` brace elided compiled DHCP=false,
 // committed clean, and emitted no warning. The interface ended up with no
@@ -123,33 +120,71 @@ func TestDhcpFlatSetPathStaysCorrect9932(t *testing.T) {
 	}
 }
 
-// #9932 leaves the sub-option CHAIN unadmitted, and this pins that boundary so
-// it is a decision rather than an oversight.
+// #9932 left the sub-option CHAIN unadmitted, and #9977 kept it that way while
+// making the value survive anyway. Both halves are asserted, because they are
+// separate facts and the interesting one is that they are compatible.
 //
-// `family inet dhcp lease-time 3600;` — the FULLY elided run — still loses the
-// lease-time, because `(dhcp, lease-time)` is not admitted. The head itself now
-// folds, so the outer pair is no longer the blocker.
-//
-// The chain is measured and ready: all four `dhcp` children and all six
-// `dhcpv6-client` children reach exactly one schema path each and every one is
-// empty-equivalent, so each satisfies this pass's admission precondition.
-// Completing both chains is ten more pairs, each owing rows in the #8763,
-// #8768, #8852 and #9446 registers — a wider change than the flag-level fix,
-// filed rather than folded in.
-//
-// If this cell starts FAILING, the chain was admitted and the register notes on
-// those sites need re-measuring with it.
-func TestDhcpSubOptionChainIsStillUnadmitted9932(t *testing.T) {
-	_, fully := compiledConfigJSON9620(t,
-		"interfaces { ge-0/0/0 { unit 0 { family inet dhcp lease-time 3600; } } }")
-	_, braced := compiledConfigJSON9620(t,
-		"interfaces { ge-0/0/0 { unit 0 { family inet { dhcp { lease-time 3600; } } } } }")
-	if fully == braced {
-		t.Fatalf("the dhcp sub-option chain now folds; admit it deliberately and re-measure the " +
-			"#9446 register notes for every `dhcp`/`dhcpv6-client` sub-option site")
+// This REPLACES TestDhcpSubOptionChainIsStillUnadmitted9932, which asserted that
+// the fully elided run DIFFERS from braced. That assertion was correct when
+// written and #9977 made it false — by fixing the READ rather than the admission.
+// Deleting the cell would have dropped the "still unadmitted" half, which is
+// still true and still worth holding.
+func TestDhcpSubOptionChainFoldsWithoutBeingAdmitted9977(t *testing.T) {
+	// (a) STILL NOT ADMITTED: no sub-option pair entered the scope table. If one
+	// does, its rows in the #8763 / #8768 / #8852 / #9446 registers are owed and
+	// this cell is the place that says so.
+	for _, pair := range [][2]string{
+		{"dhcp", "lease-time"},
+		{"dhcp", "force-discover"},
+		{"dhcp", "retransmission-attempt"},
+		{"dhcp", "retransmission-interval"},
+		{"dhcpv6-client", "client-type"},
+		{"dhcpv6-client", "client-identifier"},
+		{"dhcpv6-client", "req-option"},
+	} {
+		if compactNormalizeInScope(pair[0], pair[1]) {
+			t.Fatalf("(%s, %s) was admitted to compactNormalizeInScope; #9977 fixed this "+
+				"class in the READER instead, so an admission here owes rows in the "+
+				"#8763, #8768, #8852 and #9446 registers", pair[0], pair[1])
+		}
 	}
-	// The HEAD still folds even on that run — only the sub-option is lost.
-	if !strings.Contains(fully, `"DHCP":true`) {
-		t.Fatalf("the dhcp head must fold even when its sub-option does not: %s", fully)
+
+	// (b) AND THE VALUE SURVIVES ANYWAY: packedBody expands the packed tail on
+	// the `dhcp` / `dhcpv6-client` node, which FindChild and the Children range
+	// could not see. Equality with the braced spelling is the claim.
+	for _, tc := range []struct{ name, elided, braced string }{
+		{
+			name:   "inet dhcp lease-time",
+			elided: "interfaces { ge-0/0/0 { unit 0 { family inet dhcp lease-time 3600; } } }",
+			braced: "interfaces { ge-0/0/0 { unit 0 { family inet { dhcp { lease-time 3600; } } } } }",
+		},
+		{
+			name:   "inet dhcp force-discover (a value-less sub-option)",
+			elided: "interfaces { ge-0/0/0 { unit 0 { family inet dhcp force-discover; } } }",
+			braced: "interfaces { ge-0/0/0 { unit 0 { family inet { dhcp { force-discover; } } } } }",
+		},
+		{
+			name:   "inet6 dhcpv6-client client-type",
+			elided: "interfaces { ge-0/0/0 { unit 0 { family inet6 dhcpv6-client client-type stateful; } } }",
+			braced: "interfaces { ge-0/0/0 { unit 0 { family inet6 { dhcpv6-client { client-type stateful; } } } } }",
+		},
+		{
+			// CONTROL: the head alone, which #9932 fixed. A reader change that
+			// broke the bare head would pass every row above.
+			name:   "control, the bare head",
+			elided: "interfaces { ge-0/0/0 { unit 0 { family inet dhcp; } } }",
+			braced: "interfaces { ge-0/0/0 { unit 0 { family inet { dhcp; } } } }",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			se, je := compiledConfigJSON9620(t, tc.elided)
+			sb, jb := compiledConfigJSON9620(t, tc.braced)
+			if se != "OK" || sb != "OK" {
+				t.Fatalf("both spellings must commit: elided=%s braced=%s", se, sb)
+			}
+			if je != jb {
+				t.Fatalf("the elided spelling must compile like the braced one\nelided: %s\nbraced: %s", je, jb)
+			}
+		})
 	}
 }
