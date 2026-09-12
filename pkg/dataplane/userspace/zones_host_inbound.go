@@ -38,6 +38,13 @@ type ZoneHostInboundView struct {
 	Protocols      []string
 	V4Addrs        []string // bare host IPv4 addresses (no prefix)
 	V6Addrs        []string // bare host IPv6 addresses (no prefix)
+	// IngressNetdevs (#9637) are the kernel netdevs whose arriving host-bound
+	// packets this view judges, whichever local address they name. They come
+	// from the view's own interfaces, minus three kinds: a netdev another view
+	// also claims, a lifeline's netdev, and a netdev enslaved to an l3mdev VRF.
+	// See hostInboundViewIngressNetdevs. Empty means the view judges by
+	// destination address only, as before #9637.
+	IngressNetdevs []string
 }
 
 // BuildZoneHostInboundViews returns one ZoneHostInboundView per configured
@@ -93,6 +100,8 @@ func BuildZoneHostInboundViews(cfg *config.Config) []ZoneHostInboundView {
 	// traffic is never denied (#3277).
 	lifelines := hostInboundLifelineSet(cfg)
 	lifelineShared := hostInboundLifelineSharedAddrs(cfg)
+	// #9637: netdevs that can never be an ingress scope.
+	vrfEnslaved := config.HostInboundVRFEnslavedNetdevs(cfg)
 	// #3362: per-interface host-inbound override lookup (ref → override, with
 	// physical→unit expansion). An interface that declares an override is
 	// described ENTIRELY by it — the zone-level set is REPLACED, not unioned
@@ -202,9 +211,29 @@ func BuildZoneHostInboundViews(cfg *config.Config) []ZoneHostInboundView {
 		getGroup(name, svc, proto, "")
 	}
 
+	// #9637: which (zone, token signature) groups claim each netdev, for the
+	// views' ingress scopes. A netdev is recorded here whether or not its
+	// interface carries an address, so an address-less zone still judges what
+	// arrives on it.
+	netdevSigs := map[string]map[string]bool{}
+	lifelineNetdevs := map[string]bool{}
+	claimNetdev := func(netdev, sig string) {
+		if netdev == "" {
+			return
+		}
+		if netdevSigs[netdev] == nil {
+			netdevSigs[netdev] = map[string]bool{}
+		}
+		netdevSigs[netdev][sig] = true
+	}
+
 	// Per-interface static/learned addresses from the resolved snapshots.
 	for _, snap := range ifaceSnaps {
-		if snap.Zone == "" || hostInboundLifelineInterface(snap.Name, lifelines) {
+		if hostInboundLifelineInterface(snap.Name, lifelines) {
+			lifelineNetdevs[snap.LinuxName] = true // #9637: never an ingress scope
+			continue
+		}
+		if snap.Zone == "" {
 			continue
 		}
 		// #5699: a PHYSICAL (no-unit) snapshot whose unit 0 COLLAPSES onto the
@@ -243,6 +272,14 @@ func BuildZoneHostInboundViews(cfg *config.Config) []ZoneHostInboundView {
 			continue
 		}
 		svc, proto := effectiveHostInboundTokens(zone, snap.Name, overrideByIface[snap.Name])
+		// #9637: only a unit row's netdev is an ingress identity. A physical
+		// row's netdev is either the trunk parent of VLAN units, whose frames
+		// arrive on the subunit netdevs, or the netdev its unit 0 collapses onto,
+		// which that unit claims. Claiming a trunk parent would have one zone
+		// judge untagged frames no unit owns.
+		if strings.Contains(snap.Name, ".") {
+			claimNetdev(snap.LinuxName, snap.Zone+"\x00"+config.CanonicalHostInboundTokenSig(svc, proto))
+		}
 		var g *group
 		for _, a := range snap.Addresses {
 			host := hostIPFromCIDR(a.Address)
@@ -374,8 +411,34 @@ func BuildZoneHostInboundViews(cfg *config.Config) []ZoneHostInboundView {
 			Protocols:      g.proto,
 			V4Addrs:        v4,
 			V6Addrs:        v6,
+			IngressNetdevs: hostInboundViewIngressNetdevs(sig, netdevSigs, lifelineNetdevs, vrfEnslaved),
 		})
 	}
+	return out
+}
+
+// hostInboundViewIngressNetdevs returns, sorted, the netdevs a view judges by
+// ingress (#9637): the ones this view's group claims and no other group does.
+// It leaves out:
+//   - a netdev claimed by two groups, in one zone or in two. Whichever group's
+//     rules came first would decide, which is the #3718 ambiguity in another
+//     shape;
+//   - a lifeline's netdev, so management and cluster control are never judged
+//     by a data zone;
+//   - a netdev enslaved to an l3mdev VRF (#6619). At LOCAL_IN, iifname names the
+//     VRF master, so a rule naming the slave would match nothing.
+//
+// A packet that arrives on a left-out netdev is still judged by the
+// destination-address rules, exactly as before #9637.
+func hostInboundViewIngressNetdevs(sig string, netdevSigs map[string]map[string]bool, lifelineNetdevs, vrfEnslaved map[string]bool) []string {
+	var out []string
+	for netdev, sigs := range netdevSigs {
+		if len(sigs) != 1 || !sigs[sig] || lifelineNetdevs[netdev] || vrfEnslaved[netdev] {
+			continue
+		}
+		out = append(out, netdev)
+	}
+	sort.Strings(out)
 	return out
 }
 

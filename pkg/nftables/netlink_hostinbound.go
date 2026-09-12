@@ -11,6 +11,8 @@ package nftables
 
 import (
 	"sort"
+
+	"github.com/google/nftables"
 	"strconv"
 	"strings"
 
@@ -29,12 +31,20 @@ const unzonedHostInboundZoneLabel = "junos-host"
 func buildHostInboundNetlink(p *nlPlan, spec HostInboundSpec) {
 	declareHostInboundCounters(p, spec)
 
+	// #9504: each program's first-match rules live in a regular chain the input
+	// chain jumps to. The chains are declared first, so every jump names a chain
+	// already in the batch; their rules follow the input chain's, as in the
+	// oracle text.
+	chains := make([]*nftables.Chain, len(spec.Programs))
+	for i, prog := range spec.Programs {
+		chains[i] = p.regularChain(HostInboundJunosHostChainName(i, prog.Zone))
+	}
 	if len(spec.Programs) > 0 {
 		// junos-host path — coarse-then-fine order (#4146).
 		p.rule().l4protoSet([]uint8{50, 51}).emit(verdictAccept()...)
 		p.rule().ctEstablishedRelated().ctDirectionReply().emit(verdictAccept()...)
-		for _, prog := range spec.Programs {
-			emitJunosHostDenyProgramNetlink(p, prog)
+		for i, prog := range spec.Programs {
+			emitJunosHostProgramJumpNetlink(p, i, prog)
 		}
 		emitHostInboundICMPAcceptsNetlink(p)
 		emitHostInboundWireGuardAcceptNetlink(p, spec.WGListenPorts)
@@ -46,12 +56,21 @@ func buildHostInboundNetlink(p *nlPlan, spec HostInboundSpec) {
 		emitHostInboundWireGuardAcceptNetlink(p, spec.WGListenPorts)
 	}
 
+	// #9637: ingress-zone rules first, as in the oracle.
+	ingressV4, ingressV6 := hostInboundIngressDestinations(spec.Views, spec.UnzonedV4, spec.UnzonedV6)
+	for _, v := range spec.Views {
+		emitHostInboundZoneIngressNetlink(p, v, famV4, ingressV4)
+		emitHostInboundZoneIngressNetlink(p, v, famV6, ingressV6)
+	}
 	for _, v := range spec.Views {
 		emitHostInboundZoneNetlink(p, v, famV4, v.V4Addrs)
 		emitHostInboundZoneNetlink(p, v, famV6, v.V6Addrs)
 	}
 	emitUnzonedHostInboundDenyNetlink(p, famV4, "ip", spec.UnzonedV4)
 	emitUnzonedHostInboundDenyNetlink(p, famV6, "ip6", spec.UnzonedV6)
+	for i, prog := range spec.Programs {
+		p.inChain(chains[i], func() { emitJunosHostProgramChainNetlink(p, prog) })
+	}
 }
 
 // declareHostInboundCounters mirrors buildHostInboundFilterPayload's counter
@@ -70,11 +89,12 @@ func declareHostInboundCounters(p *nlPlan, spec HostInboundSpec) {
 	for _, typ := range HostInboundAcceptCounterTypes {
 		decl(HostInboundAcceptCounterName(typ))
 	}
+	ingressV4, ingressV6 := hostInboundIngressDestinations(spec.Views, spec.UnzonedV4, spec.UnzonedV6)
 	for _, v := range spec.Views {
-		if hostInboundEmitsDrop(v, v.V4Addrs) {
+		if hostInboundEmitsDrop(v, v.V4Addrs) || hostInboundEmitsIngressDrop(v, ingressV4) {
 			decl(HostInboundDenyCounterName(v.Zone, "ip"))
 		}
-		if hostInboundEmitsDrop(v, v.V6Addrs) {
+		if hostInboundEmitsDrop(v, v.V6Addrs) || hostInboundEmitsIngressDrop(v, ingressV6) {
 			decl(HostInboundDenyCounterName(v.Zone, "ip6"))
 		}
 	}
@@ -148,8 +168,10 @@ func emitUnzonedHostInboundDenyNetlink(p *nlPlan, f nlFamily, family string, add
 	p.rule().daddr(f, addrs, false).counterRef(cn).emit(verdictDrop()...)
 }
 
-// emitJunosHostDenyProgramNetlink mirrors emitJunosHostDenyProgram (#4146).
-func emitJunosHostDenyProgramNetlink(p *nlPlan, prog JunosHostProgram) {
+// emitJunosHostProgramJumpNetlink mirrors emitJunosHostProgramJump (#4146,
+// #9504): the exemption shields, then the iifname-scoped jump to the zone's
+// subchain.
+func emitJunosHostProgramJumpNetlink(p *nlPlan, index int, prog JunosHostProgram) {
 	if prog.HasApplicationAnyDeny {
 		if prog.CoarseAdmitsIKE {
 			p.rule().iifname(prog.IKEExemptNetdevs).
@@ -162,34 +184,60 @@ func emitJunosHostDenyProgramNetlink(p *nlPlan, prog JunosHostProgram) {
 				emit(rejectTCPReset()...)
 		}
 	}
+	p.rule().iifname(prog.IngressIfnames).emit(verdictJump(HostInboundJunosHostChainName(index, prog.Zone))...)
+}
+
+// emitJunosHostProgramChainNetlink mirrors emitJunosHostProgramChain: the zone's
+// rules in first-match order, IPv4 then IPv6.
+func emitJunosHostProgramChainNetlink(p *nlPlan, prog JunosHostProgram) {
 	for _, r := range prog.RulesV4 {
-		emitJunosHostDropRuleNetlink(p, prog, r)
+		emitJunosHostRuleNetlink(p, prog.Zone, r)
 	}
 	for _, r := range prog.RulesV6 {
-		emitJunosHostDropRuleNetlink(p, prog, r)
+		emitJunosHostRuleNetlink(p, prog.Zone, r)
 	}
 }
 
-// emitJunosHostDropRuleNetlink mirrors emitJunosHostDropRule: one nft rule per
-// L4 fragment (or a single rule for `application any`).
-func emitJunosHostDropRuleNetlink(p *nlPlan, prog JunosHostProgram, r JunosHostDenyRule) {
+// emitJunosHostRuleNetlink mirrors emitJunosHostRule: the family guard, the L4
+// fragment, the address predicates, then the counter and verdict. A verdict
+// that answers TCP with a RST splits an `application any` rule, TCP first.
+func emitJunosHostRuleNetlink(p *nlPlan, zone string, r JunosHostDenyRule) {
 	f := famFor(r.Family)
-	cn := HostInboundJunosHostDenyCounterName(prog.Zone, r.Family)
-	finish := func(a *ruleAsm) {
+	cn := HostInboundJunosHostDenyCounterName(zone, r.Family)
+	finish := func(a *ruleAsm, tcp bool) {
 		applyJunosHostSrcPredicate(a, f, r)
 		applyJunosHostDstPredicate(a, f, r)
-		a.counterRef(cn)
-		a.emit(verdictDrop()...)
+		switch {
+		case r.Verdict == config.JunosHostReturn:
+			a.emit(verdictReturn()...)
+		case r.Verdict.SplitsTCP() && tcp:
+			a.counterRef(cn)
+			a.emit(rejectTCPReset()...)
+		case r.Verdict == config.JunosHostReject:
+			a.counterRef(cn)
+			a.emit(rejectICMPXAdminProhibited()...)
+		default:
+			a.counterRef(cn)
+			a.emit(verdictDrop()...)
+		}
 	}
 	if len(r.L4) == 0 {
-		a := p.rule().iifname(prog.IngressIfnames)
-		finish(a)
+		if r.Verdict.SplitsTCP() {
+			a := p.rule()
+			a.needNfproto(f)
+			a.needL4proto(protoTCP)
+			finish(a, true)
+		}
+		a := p.rule()
+		a.needNfproto(f)
+		finish(a, false)
 		return
 	}
 	for _, l4 := range r.L4 {
-		a := p.rule().iifname(prog.IngressIfnames)
+		a := p.rule()
+		a.needNfproto(f)
 		applyJunosHostL4(a, f, l4)
-		finish(a)
+		finish(a, l4.Proto == protoTCP)
 	}
 }
 
@@ -225,7 +273,7 @@ func applyJunosHostL4(a *ruleAsm, f nlFamily, l4 JunosHostDenyL4) {
 }
 
 // applyJunosHostSrcPredicate mirrors junosHostSrcPredicate: the positive /
-// excluded / any source match plus the earlier-permit `saddr !=` subtractions.
+// excluded / any source match.
 func applyJunosHostSrcPredicate(a *ruleAsm, f nlFamily, r JunosHostDenyRule) {
 	switch {
 	case r.SrcExcluded && len(r.Src) > 0:
@@ -236,9 +284,6 @@ func applyJunosHostSrcPredicate(a *ruleAsm, f nlFamily, r JunosHostDenyRule) {
 		if len(r.Src) > 0 {
 			a.saddr(f, r.Src, false)
 		}
-	}
-	if len(r.PermitSubtract) > 0 {
-		a.saddr(f, r.PermitSubtract, true)
 	}
 }
 

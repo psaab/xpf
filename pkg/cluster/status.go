@@ -576,6 +576,11 @@ func (m *Manager) FormatInformation() string {
 		if syncStats.BulkEndsDeadIncarnationDropped > 0 {
 			fmt.Fprintf(&b, "  Bulk ends dead-incarnation-dropped: %d\n", syncStats.BulkEndsDeadIncarnationDropped)
 		}
+		// #9653: same posture. A nonzero value means something on the session-sync
+		// link sent a peer clock no running peer can read, and it was refused.
+		if syncStats.ClockSyncsRefused > 0 {
+			fmt.Fprintf(&b, "  Clock syncs refused: %d\n", syncStats.ClockSyncsRefused)
+		}
 		// #9716: the connection fence, and the fail-open completions it covers.
 		// Same posture: counters an operator can see, not a health annotation.
 		if syncStats.BulkEndsForeignConnDropped > 0 {

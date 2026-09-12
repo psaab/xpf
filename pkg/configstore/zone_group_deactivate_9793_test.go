@@ -38,12 +38,11 @@ func TestDeactivateOneZoneOfAGroupIsRefused9793(t *testing.T) {
 	}
 
 	// The first member is the address that marked the whole statement. A
-	// later member never matched the node at all, so it already failed with
-	// the walk's "no node matching" and changed nothing; that stays an error,
-	// and this cell only requires that it change nothing either.
+	// later member never matched the node and was reported as no node; #9799
+	// refuses it with the same guidance.
 	for _, tc := range []struct{ line, want string }{
 		{"security zones security-zone zga", "#9793"},
-		{"security zones security-zone zgb", ""},
+		{"security zones security-zone zgb", "#9799"},
 	} {
 		err := s.DeactivateFromInput(tc.line)
 		if err == nil || !strings.Contains(err.Error(), tc.want) {

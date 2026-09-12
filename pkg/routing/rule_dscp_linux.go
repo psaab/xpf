@@ -32,8 +32,9 @@ const FRA_DSCP = nl.FRA_DPORT_RANGE + 1
 const maxDSCP = 63
 
 // dscpRuleOps is the production ruleOps. It embeds *netlink.Handle so RuleAdd /
-// RuleDel / RuleList remain the library's implementations, and adds the single
-// operation the library cannot express.
+// RuleDel / RuleList remain the library's implementations, and adds the
+// operations the library cannot express: the DSCP selector below, and the
+// #9819 l3mdev terminator in rule_l3mdev_linux.go.
 type dscpRuleOps struct {
 	*netlink.Handle
 }

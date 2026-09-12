@@ -286,6 +286,8 @@ pub(crate) struct ScreenState {
     /// still fails closed.
     syn_cookie_key_ring: SynCookieKeyRing,
     syn_cookie_validated: SynCookieValidatedCache,
+    /// #9740: the last profile generation issued (`next_syn_cookie_profile_gen`).
+    syn_cookie_profile_gen_clock: u64,
     syn_cookie_last_full_epoch: u64,
     /// #3032: Unix wall-clock seconds cached for SYN-cookie epoch math,
     /// refreshed at most once per monotonic second (see
@@ -402,6 +404,7 @@ impl ScreenState {
             syn_cookie_codec: None,
             syn_cookie_key_ring: SynCookieKeyRing::default(),
             syn_cookie_validated: SynCookieValidatedCache::default(),
+            syn_cookie_profile_gen_clock: 0,
             syn_cookie_last_full_epoch: 0,
             syn_cookie_epoch_wall_secs: 0,
             syn_cookie_epoch_clock_mono_secs: u64::MAX,
@@ -473,20 +476,18 @@ impl ScreenState {
                     // unrelated edits (teardrop, port-scan, …) do NOT churn it.
                     let old_sig = Self::syn_cookie_profile_signature(&old.profile);
                     if old_sig != new_sig {
-                        old.syn_cookie_profile_gen = old.syn_cookie_profile_gen.wrapping_add(1);
+                        old.syn_cookie_profile_gen = self.next_syn_cookie_profile_gen();
                     }
                     old.profile = profile;
                     old.reconcile_substate();
                     old
                 }
                 None => {
-                    // New zone: fresh state from the profile. The pre-#4969
-                    // parallel maps bumped a brand-new zone's generation from 0
-                    // to 1 (`old_sig` None != `Some(new_sig)`); match that so a
-                    // cookie validated before a same-name zone is (re-)created
-                    // is treated as a miss under the new generation.
-                    let mut z = ZoneScreenState::from_profile(profile);
-                    z.syn_cookie_profile_gen = z.syn_cookie_profile_gen.wrapping_add(1);
+                    // New zone: a generation no earlier incarnation of this name
+                    // had, so a client validated before a remove and re-create is
+                    // a miss. A per-zone bump from 0 gave each one 1 (#9740).
+                    let mut z = ZoneScreenState::from_profile(&zone, profile);
+                    z.syn_cookie_profile_gen = self.next_syn_cookie_profile_gen();
                     z
                 }
             };
@@ -584,6 +585,13 @@ impl ScreenState {
     /// validated cache.
     fn syn_cookie_profile_signature(profile: &ScreenProfile) -> (bool, u32) {
         (profile.syn_cookie, profile.syn_flood_threshold)
+    }
+
+    /// #9740: the next SYN-cookie profile generation, from one counter for the
+    /// whole state, so no two incarnations of a zone share one.
+    fn next_syn_cookie_profile_gen(&mut self) -> u64 {
+        self.syn_cookie_profile_gen_clock = self.syn_cookie_profile_gen_clock.wrapping_add(1);
+        self.syn_cookie_profile_gen_clock
     }
 
     /// #2446: current SYN-cookie profile generation for a zone (0 if the zone
@@ -746,9 +754,9 @@ impl ScreenState {
         self.check_packet_with_zone_id(zone, 0, pkt, now_secs)
     }
 
-    /// Run all screen checks with the stable numeric zone id available to
-    /// SYN-cookie MACs. `check_packet` remains for callers/tests that do not
-    /// need cookie mode.
+    /// Run all screen checks. `zone_id` is the stable numeric zone id; SYN-cookie
+    /// MACs bind the zone's name tag instead (#9740). `check_packet` remains for
+    /// callers/tests that do not pass an id.
     pub fn check_packet_with_zone_id(
         &mut self,
         zone: &str,
@@ -779,7 +787,8 @@ impl ScreenState {
     pub fn check_packet_with_zone_id_opts(
         &mut self,
         zone: &str,
-        zone_id: u16,
+        // #9740: unused; SYN cookies bind the zone's name tag, not this ID.
+        _zone_id: u16,
         pkt: &ScreenPacketInfo,
         now_ns: u64,
         now_secs: u64,
@@ -918,9 +927,10 @@ impl ScreenState {
                 // arrives from a NEW ephemeral port — a port-scoped,
                 // single-use entry could never match it.
                 let profile_gen = zstate.syn_cookie_profile_gen;
+                let zone_tag = zstate.syn_cookie_zone_tag;
                 let syn_cookie_validated = syn_cookie
                     && self.syn_cookie_validated.contains_valid(
-                        zone_id,
+                        zone_tag,
                         profile_gen,
                         SynCookieClientKey::from_packet(pkt),
                         now_secs,
@@ -982,7 +992,7 @@ impl ScreenState {
                             };
                             let cookie_isn = codec.mint_isn(
                                 SynCookieTuple::from_packet(pkt),
-                                zone_id,
+                                zone_tag,
                                 full_epoch,
                                 pkt.tcp_mss,
                             );
@@ -1316,16 +1326,17 @@ impl ScreenState {
     pub fn validate_syn_cookie_ack_on_session_miss(
         &mut self,
         zone: &str,
-        zone_id: u16,
+        // #9740: the cookie binds the zone NAME (syn_cookie_zone_tag), not this ID.
+        _zone_id: u16,
         pkt: &ScreenPacketInfo,
         now_ns: u64,
         now_secs: u64,
     ) -> SynCookieAckVerdict {
         // #4969: one shared `zones` lookup for the profile applicability gate
-        // AND the cookie active-until read. The borrow ends at `locally_active`
-        // (a copied bool), before the whole-`self` epoch call below; the standby
-        // budget and profile-gen reads later go through their own helpers (this
-        // is the cold session-miss ACK path, not the per-packet hot path).
+        // AND the cookie active-until read. The borrow ends at `locally_active` and
+        // `zone_tag` (copied values), before the whole-`self` epoch call below; the
+        // standby budget and profile-gen reads later go through their own helpers
+        // (this is the cold session-miss ACK path, not the per-packet hot path).
         let Some(zstate) = self.zones.get(zone) else {
             return SynCookieAckVerdict::NotApplicable;
         };
@@ -1340,6 +1351,7 @@ impl ScreenState {
             return SynCookieAckVerdict::NotApplicable;
         }
         let locally_active = zstate.syn_cookie_active_until_secs > now_secs;
+        let zone_tag = zstate.syn_cookie_zone_tag;
         if is_closing(flags) {
             return if locally_active {
                 SynCookieAckVerdict::Invalid
@@ -1371,15 +1383,13 @@ impl ScreenState {
         let tuple = SynCookieTuple::from_packet(pkt);
         // #9173: the cookie is checked against the key for ITS OWN period
         // (SynCookieKeyRing::validates).
+        let ring = &self.syn_cookie_key_ring;
         let validated = SynCookieCodec::cookie_full_epoch(current_epoch, cookie_isn)
-            .is_some_and(|full_epoch| {
-                self.syn_cookie_key_ring
-                    .validates(legacy_codec, tuple, zone_id, full_epoch, cookie_isn)
-            });
+            .is_some_and(|epoch| ring.validates(legacy_codec, tuple, zone_tag, epoch, cookie_isn));
         if validated {
             let profile_gen = self.syn_cookie_profile_gen(zone);
             self.syn_cookie_validated.insert(
-                zone_id,
+                zone_tag,
                 profile_gen,
                 SynCookieClientKey::from_packet(pkt),
                 now_secs,

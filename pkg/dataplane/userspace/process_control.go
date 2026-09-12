@@ -354,6 +354,11 @@ func (m *Manager) requestSessionSyncLocked(req ControlRequest) error {
 }
 
 func (m *Manager) requestLocked(req ControlRequest, status *ProcessStatus) error {
+	// #9684: count every partial update sent, whatever its outcome, so Compile
+	// can tell whether one ran while it built its snapshot outside m.mu.
+	if req.Type == "update_neighbors" || req.Type == "update_fabrics" {
+		m.partialUpdateEpoch.Add(1)
+	}
 	if m.controlRequestHook != nil {
 		return m.controlRequestHook(req, status)
 	}

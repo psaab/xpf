@@ -63,7 +63,12 @@ usable. Two consequences the code makes explicit:
   exporter from the cell on every call, so a full resync after a rollback
   + corrected re-arm exports from the CURRENT backend rather than the
   torn-down one (#6743 r2-B8, bound by
-  `full_resync_per_call_6743_test.go`). Behavioural guards live in
+  `full_resync_per_call_6743_test.go`). Its export and queueing are one
+  transaction (#9766, #9767): the frame is acknowledged only when every
+  install reached the send queue, the fallback loop's drain is held off
+  meanwhile, and a failed attempt backs off before it exports again (see
+  `docs/session-sync-architecture.md`, "Bulk Owner-RG Export").
+  Behavioural guards live in
   `daemon_dp_escape_test.go` (gRPC) and `daemon_dp_escape_rest_test.go`
   (REST); `daemon_ha_userspace_stream_live_test.go` drives the event-stream
   loop across a `setDataplane(nil)`, across a stream replacement, and —
@@ -642,6 +647,21 @@ such constraint. Hoisting those checks ABOVE the `SyncApply` promotion would als
 close the divergence, but it changes the tolerant path from "converge with the
 peer, refuse to arm" to "refuse the config" — a deliberate #1960 behaviour choice
 that does not belong in a bug fix.
+
+**A partition commit the peer never held is alarmed, not lost silently (#9530).**
+The store marks a local commit made while the peer is unreachable (see
+`pkg/configstore`, "A commit the cluster peer never held"). The daemon supplies
+its three inputs (`config_divergence_9530.go`):
+- `configPeerReachable` (heartbeat alive and session sync connected), wired with
+  `SetPeerReachableFn` at cluster bring-up;
+- `noteConfigSharedWithPeer` after every config push (the commit push, the
+  reconcile push, and its test seam). It counts only when the peer reads RG0
+  secondary: in the dual-active heal window the peer is still primary and
+  rejects the push;
+- `reportConfigSyncDivergence` after a successful `handleConfigSync`, which
+  raises the divergence once as an `EventConfigSync` cluster event naming the
+  rollback slot. `show system alarms` lists it as CRITICAL, on the local CLI and
+  over gRPC.
 
 **Startup ordering and publication (#6719).** `d.mgmt` is an
 `atomic.Pointer[managementReconciler]`, not a plain field, and the type is doing
@@ -2756,6 +2776,37 @@ never lock an operator out of a remote box it manages.
   failure with a healthy-path control; the `applyTailReconciles` commit-join WIRING
   proof; gate quiet-when-up / fires-when-down; the re-assert re-creates; and a
   loop-START cell asserting `Run` launches it unconditionally).
+
+  **Fabric overlay management-VRF membership (#9813).** A fabric overlay carries
+  the session-sync address, and session sync binds its sockets to `vrf-mgmt`, so
+  the overlay must be a member of that VRF. Only the apply bound it: step 0b
+  before networkd, and the authoritative step-2.7 re-bind after it. Two paths
+  create an overlay outside an apply, and neither sets a master: the re-assert
+  loop above and the deferred `OnXSKBound` callback. An overlay can also lose its
+  master without being re-created, for example through an out-of-band
+  `ip link set nomaster`. Session sync over that fabric then stayed down until the
+  next apply of any kind.
+  - After its ensure step, the re-assert pass binds every configured overlay that
+    the last apply published in the management-VRF set but whose master is not
+    `vrf-mgmt`. Its cheap gate counts such an overlay too.
+  - `createDeferredFabricOverlays`, the `OnXSKBound` callback, binds each overlay
+    it creates.
+  - Nothing is bound when the last apply did not manage `vrf-mgmt`.
+  - Tests: `fabric_overlay_vrf_9813_test.go`. It includes a kernel cell that runs
+    in a private netns (`unshare -rn`) and skips without `CAP_NET_ADMIN`.
+  - Routing-instance interface-LIST members have the same gap, and
+    `riMemberVRFReassertLoop` closes it. Step 0a and the #6805 late pass bind
+    them, both only from an apply, so a member netdev re-created outside one (a
+    driver re-probe, a VF reset) or unbound out of band forwards in the DEFAULT
+    table until the next apply. The loop binds only a member whose master is not
+    its VRF: `BindInterfaceToVRF` logs at Info on every call, so re-running the
+    apply's bind loop each tick would log on every tick of a healthy node. It
+    leaves a tunnel carrying its own `routing-instance` stanza alone, because
+    that is the tunnel manager's claim (`reconcileVRFClaimLocked` case 1, recorded
+    in `appliedRI` only from its own bind), and it resolves names through
+    `riMemberLinuxName` exactly as step 0a does, so the two reason about ONE name
+    set. It takes `applySem` before the config read that drives the binding
+    (#4001). Tests: `ri_member_vrf_reassert_9813_test.go`, including a kernel cell.
 
   **Host-inbound conntrack revocation retry (#6802, the same recovery shape):**
   `flushDeniedHostInboundConntrack` (the #5566 reconcile) deletes established

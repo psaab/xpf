@@ -1279,11 +1279,15 @@ func buildHostInboundFilterPayload(views []dpuserspace.ZoneHostInboundView, unzo
 	for _, typ := range xnft.HostInboundAcceptCounterTypes {
 		addCounter(xnft.HostInboundAcceptCounterName(typ))
 	}
+	// #9637: a view's ingress-zone rules reference the same per-zone/family
+	// counter, possibly in a family where the view has no address of its own, so
+	// the declaration covers them too.
+	ingressV4, ingressV6 := hostInboundIngressDestinations(views, unzonedV4, unzonedV6)
 	for _, v := range views {
-		if hostInboundEmitsDrop(v, v.V4Addrs) {
+		if hostInboundEmitsDrop(v, v.V4Addrs) || hostInboundEmitsIngressDrop(v, ingressV4) {
 			addCounter(xnft.HostInboundDenyCounterName(v.Zone, "ip"))
 		}
-		if hostInboundEmitsDrop(v, v.V6Addrs) {
+		if hostInboundEmitsDrop(v, v.V6Addrs) || hostInboundEmitsIngressDrop(v, ingressV6) {
 			addCounter(xnft.HostInboundDenyCounterName(v.Zone, "ip6"))
 		}
 	}
@@ -1346,10 +1350,11 @@ func buildHostInboundFilterPayload(views []dpuserspace.ZoneHostInboundView, unzo
 		// reply direction is admitted ahead of the fine DROP; the denied source's
 		// original-direction established inbound falls through to the DROP below.
 		rules = append(rules, "    ct state established,related ct direction reply accept")
-		// (3) Fine junos-host DROP-only subchain (per ingress zone, iifname-scoped,
-		// set-subtracted). Placed before the ND/PMTUD accepts (§6.4).
-		for _, p := range programs {
-			emitJunosHostDenyProgram(&rules, p)
+		// (3) Fine junos-host programs: per ingress zone, the exemption shields
+		// and an iifname-scoped jump to the zone's first-match subchain (#9504).
+		// Placed before the ND/PMTUD accepts (§6.4).
+		for i, p := range programs {
+			emitJunosHostProgramJump(&rules, i, p)
 		}
 		// (4) ND/PMTUD/ICMP-error accepts for NON-denied sources.
 		emitHostInboundICMPAccepts(&rules)
@@ -1382,6 +1387,18 @@ func buildHostInboundFilterPayload(views []dpuserspace.ZoneHostInboundView, unzo
 		emitHostInboundWireGuardAccept(&rules, wgListenPorts)
 	}
 
+	// #9637: the ingress-zone rules come first. A packet that arrives on a
+	// view's own netdev is judged by that view's zone, whichever judged address
+	// it names, and ends here: a listed service accepts it, or the drop does. A
+	// packet on any other netdev matches none of these rules and meets the
+	// destination-address rules below, which are unchanged. A netdev the scope
+	// leaves out is judged exactly as before, and no packet reaches the accept
+	// policy that did not before, because both rule sets judge the same
+	// destination addresses.
+	for _, v := range views {
+		emitHostInboundZoneIngress(&rules, v, "ip", ingressV4)
+		emitHostInboundZoneIngress(&rules, v, "ip6", ingressV6)
+	}
 	for _, v := range views {
 		emitHostInboundZone(&rules, v, "ip", v.V4Addrs)
 		emitHostInboundZone(&rules, v, "ip6", v.V6Addrs)
@@ -1398,6 +1415,10 @@ func buildHostInboundFilterPayload(views []dpuserspace.ZoneHostInboundView, unzo
 	emitUnzonedHostInboundDeny(&rules, "ip", unzonedV4)
 	emitUnzonedHostInboundDeny(&rules, "ip6", unzonedV6)
 	rules = append(rules, "  }")
+	// #9504: the junos-host subchains the input chain jumps to.
+	for i, p := range programs {
+		emitJunosHostProgramChain(&rules, i, p)
+	}
 	rules = append(rules, "}")
 	return strings.Join(rules, "\n") + "\n"
 }
@@ -1489,19 +1510,14 @@ func renderWireGuardPortSpec(ports []uint16) string {
 	return "{ " + strings.Join(parts, ", ") + " }"
 }
 
-// emitJunosHostDenyProgram appends one ingress zone's fine `to-zone junos-host`
-// DENY program (#4146): the fine-eligible-L4 exemption shields (ahead of an
-// `application any` drop) followed by the iifname-scoped, set-subtracted DROP
-// rules. NO fine `accept` is ever emitted (a permit only narrows later denies
-// via `saddr !=`), so the coarse host-inbound gate below stays the sole admit
-// authority (Rust poll_descriptor/mod.rs:138).
-func emitJunosHostDenyProgram(rules *[]string, p dpuserspace.JunosHostProgram) {
-	iif := nftIifnameSet(p.IngressIfnames)
-	// §6.6 fine-eligible-L4 exemption shields — only meaningful ahead of an
-	// `application any` drop (a representable narrow-app deny can never target an
-	// exempt tuple; such a deny is un-representable and never rendered). ESP/AH is
-	// already globally accepted at the chain top, so only IKE and ident need a
-	// per-zone shield.
+// emitJunosHostProgramJump appends one ingress zone's entry into its fine
+// `to-zone junos-host` program (#4146): the fine-eligible-L4 exemption shields
+// (ahead of an `application any` deny-class rule), then an iifname-scoped jump
+// to the zone's subchain. The subchain holds the first-match rules and a permit
+// RETURNS from it (#9504), so no fine accept is ever emitted and the coarse
+// host-inbound gate below stays the sole admit authority (Rust
+// poll_descriptor/mod.rs:138).
+func emitJunosHostProgramJump(rules *[]string, index int, p dpuserspace.JunosHostProgram) {
 	if p.HasApplicationAnyDeny {
 		if p.CoarseAdmitsIKE {
 			// The coarse gate admits IKE (udp 500/4500) from any source, and the
@@ -1523,39 +1539,76 @@ func emitJunosHostDenyProgram(rules *[]string, p dpuserspace.JunosHostProgram) {
 			*rules = append(*rules, "    iifname "+identIif+" tcp dport 113 reject with tcp reset")
 		}
 	}
-	for _, r := range p.RulesV4 {
-		emitJunosHostDropRule(rules, p.Zone, iif, r)
-	}
-	for _, r := range p.RulesV6 {
-		emitJunosHostDropRule(rules, p.Zone, iif, r)
-	}
+	*rules = append(*rules, "    iifname "+nftIifnameSet(p.IngressIfnames)+" jump "+xnft.HostInboundJunosHostChainName(index, p.Zone))
 }
 
-// emitJunosHostDropRule renders one projected DROP rule (one nft rule per L4
-// fragment; a single rule for `application any`).
-func emitJunosHostDropRule(rules *[]string, zone, iif string, r config.JunosHostDenyRule) {
+// emitJunosHostProgramChain appends a zone's subchain (#9504): every projected
+// rule in first-match order, IPv4 then IPv6. Each rule carries its family, so an
+// IPv6 packet never meets an IPv4 rule of a later term. The chain's end returns,
+// as the runtime delivers a host-bound packet no junos-host policy matches.
+func emitJunosHostProgramChain(rules *[]string, index int, p dpuserspace.JunosHostProgram) {
+	*rules = append(*rules, "  chain "+xnft.HostInboundJunosHostChainName(index, p.Zone)+" {")
+	for _, r := range p.RulesV4 {
+		emitJunosHostRule(rules, p.Zone, r)
+	}
+	for _, r := range p.RulesV6 {
+		emitJunosHostRule(rules, p.Zone, r)
+	}
+	*rules = append(*rules, "  }")
+}
+
+// emitJunosHostRule renders one projected rule: one nft rule per L4 fragment, or
+// one for `application any`. A verdict that answers TCP with a RST (a reject, or
+// a deny on a tcp-rst zone) renders an `application any` rule as two, the TCP
+// rule first. A return carries no counter: the counter counts denies.
+func emitJunosHostRule(rules *[]string, zone string, r config.JunosHostDenyRule) {
+	head := "    meta nfproto " + junosHostNfproto(r.Family)
+	preds := junosHostSrcPredicate(r) + junosHostDstPredicate(r)
 	cn := xnft.HostInboundJunosHostDenyCounterName(zone, r.Family)
-	tail := junosHostSrcPredicate(r) + junosHostDstPredicate(r) +
-		" counter name \"" + cn + "\" drop"
 	if len(r.L4) == 0 {
-		// `application any` — all protocols.
-		*rules = append(*rules, "    iifname "+iif+tail)
+		if r.Verdict.SplitsTCP() {
+			*rules = append(*rules, head+" meta l4proto tcp"+preds+junosHostVerdictText(r.Verdict, cn, true))
+		}
+		*rules = append(*rules, head+preds+junosHostVerdictText(r.Verdict, cn, false))
 		return
 	}
 	for _, f := range r.L4 {
-		l4 := renderJunosHostL4(f, r.Family)
-		line := "    iifname " + iif
-		if l4 != "" {
+		line := head
+		if l4 := renderJunosHostL4(f, r.Family); l4 != "" {
 			line += " " + l4
 		}
-		*rules = append(*rules, line+tail)
+		*rules = append(*rules, line+preds+junosHostVerdictText(r.Verdict, cn, f.Proto == config.HostInboundProtoTCP))
 	}
 }
 
-// junosHostSrcPredicate builds the leading-space source predicate for a DROP
-// rule: the positive/excluded/any source match plus every earlier-permit
-// subtraction (`<fam> saddr != <permit-set>`). Returns "" for an unconstrained
-// source with no permit subtraction (matches every source on this iifname).
+// junosHostVerdictText renders a rule's counter and verdict. tcp says the rule
+// matches only TCP, which selects the RST for a verdict that answers TCP with
+// one.
+func junosHostVerdictText(v config.JunosHostVerdict, counter string, tcp bool) string {
+	c := " counter name \"" + counter + "\""
+	switch {
+	case v == config.JunosHostReturn:
+		return " return"
+	case v.SplitsTCP() && tcp:
+		return c + " reject with tcp reset"
+	case v == config.JunosHostReject:
+		return c + " reject with icmpx type admin-prohibited"
+	default:
+		return c + " drop"
+	}
+}
+
+// junosHostNfproto is the `meta nfproto` value for a rule family.
+func junosHostNfproto(family string) string {
+	if family == "ip6" {
+		return "ipv6"
+	}
+	return "ipv4"
+}
+
+// junosHostSrcPredicate builds the leading-space source predicate for a
+// junos-host rule: the positive/excluded/any source match. Returns "" for an
+// unconstrained source (the rule matches every source of its family).
 func junosHostSrcPredicate(r config.JunosHostDenyRule) string {
 	var b strings.Builder
 	switch {
@@ -1567,9 +1620,6 @@ func junosHostSrcPredicate(r config.JunosHostDenyRule) string {
 		if len(r.Src) > 0 {
 			b.WriteString(" " + r.Family + " saddr " + nftAddrSet(r.Src))
 		}
-	}
-	if len(r.PermitSubtract) > 0 {
-		b.WriteString(" " + r.Family + " saddr != " + nftAddrSet(r.PermitSubtract))
 	}
 	return b.String()
 }

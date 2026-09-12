@@ -18,16 +18,12 @@ func (m *Manager) SyncFabricState() {
 	if m.proc == nil || m.proc.Process == nil || m.lastSnapshot == nil {
 		return
 	}
-	build := m.fabricSnapshotBuilder
-	if build == nil {
-		build = buildFabricSnapshots
-	}
 	// #6691 round 11: the refresh carries MACs, ifindexes and link state — never
 	// a device-level binding verdict. The builder re-samples the kernel, and a
 	// verdict re-decided here would apply to a snapshot whose interface rows are
 	// still the applied ones, on two planes that neither replan on this path.
 	// alignFabricVerdicts (fabric.go) holds the reasoning.
-	fabrics := alignFabricVerdicts(build(m.lastSnapshot.Config), m.lastSnapshot)
+	fabrics := m.sampleFabricsLocked()
 	if len(fabrics) == 0 {
 		return
 	}
@@ -38,6 +34,7 @@ func (m *Manager) SyncFabricState() {
 	}
 	if err := m.requestLocked(req, &status); err != nil {
 		slog.Debug("userspace: failed to sync fabric state", "err", err)
+		m.recordPartialUpdateFailureLocked(partialFabrics, err)
 		return
 	}
 	// #5306: persist the resolved fabrics into the Go-side lastSnapshot. The
@@ -50,11 +47,13 @@ func (m *Manager) SyncFabricState() {
 	// unresolved-MAC set baked in at the last full apply, so the next such
 	// apply_snapshot silently reverts the helper to the unresolved fabric MAC —
 	// exactly during the HA window fabric cross-chassis forwarding exists to
-	// preserve. Write back only after the send succeeds (mutate-after-success):
-	// a transient control-socket error leaves lastSnapshot.Fabrics matching what
-	// the helper actually has. Mirrors RegenerateNeighborSnapshot's post-publish
+	// preserve. Write back only after the send succeeds (mutate-after-success),
+	// so lastSnapshot.Fabrics is the last set Go saw the helper accept. A failed
+	// round trip can still follow an applied update; #9684 marks that, and the
+	// next publish re-samples. Mirrors RegenerateNeighborSnapshot's post-publish
 	// writeback for the neighbor table.
 	m.persistResolvedFabricsLocked(fabrics)
+	m.resolvePartialOutcomesLocked(partialFabrics)
 }
 
 // persistResolvedFabricsLocked writes the fabric snapshots SyncFabricState just

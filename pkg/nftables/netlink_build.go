@@ -107,6 +107,23 @@ func (p *nlPlan) counterObj(name string) {
 // rule starts a new rule assembler bound to this plan's chain.
 func (p *nlPlan) rule() *ruleAsm { return &ruleAsm{p: p} }
 
+// regularChain declares a regular (non-base) chain in the plan's table: no hook,
+// reachable only by a jump (#9504).
+func (p *nlPlan) regularChain(name string) *nftables.Chain {
+	if p.err != nil {
+		return nil
+	}
+	return p.c.AddChain(&nftables.Chain{Name: name, Table: p.table})
+}
+
+// inChain emits the rules fn builds into ch rather than the plan's base chain.
+func (p *nlPlan) inChain(ch *nftables.Chain, fn func()) {
+	base := p.chain
+	p.chain = ch
+	defer func() { p.chain = base }()
+	fn()
+}
+
 // ruleAsm accumulates one rule's []expr.Any, tracking the established nfproto /
 // l4proto dependencies for nft-faithful guard dedup.
 type ruleAsm struct {
@@ -680,6 +697,11 @@ func counterRef(name string) []expr.Any {
 
 func verdictAccept() []expr.Any { return []expr.Any{&expr.Verdict{Kind: expr.VerdictAccept}} }
 func verdictDrop() []expr.Any   { return []expr.Any{&expr.Verdict{Kind: expr.VerdictDrop}} }
+func verdictReturn() []expr.Any { return []expr.Any{&expr.Verdict{Kind: expr.VerdictReturn}} }
+
+func verdictJump(chain string) []expr.Any {
+	return []expr.Any{&expr.Verdict{Kind: expr.VerdictJump, Chain: chain}}
+}
 
 func rejectTCPReset() []expr.Any {
 	return []expr.Any{&expr.Reject{Type: unix.NFT_REJECT_TCP_RST}}

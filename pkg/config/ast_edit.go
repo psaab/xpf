@@ -802,6 +802,15 @@ func deletePath(current *[]*Node, path []string, grouped []bool, schema *schemaN
 				"(#8992, #8932)",
 				ErrPathNotFound, strings.Join(path, " "), strings.Join(keys, " "), path[len(path)-1])
 		}
+		// #9799: a LATER member of a bracketed group (`zgb` in `security-zone
+		// [ zga zgb ]`) never matched the walk below and was reported as no
+		// node. It is the same one-line group, so it gets the same guidance.
+		if keys := groupCarryingLaterMember9799(*current, path[i:]); keys != nil {
+			return fmt.Errorf("%w: %q is one member of a group written on one line (%q), and "+
+				"deleting it would remove the others too. Re-author that line with braces "+
+				"around %q, then delete it (#9799, #8992)",
+				ErrPathNotFound, strings.Join(path, " "), strings.Join(keys, " "), path[len(path)-1])
+		}
 	}
 
 	keyword := path[i]

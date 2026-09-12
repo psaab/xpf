@@ -777,20 +777,34 @@ func (m *Manager) PreSeedMemfileMerged6(ctx context.Context, peer []SyncLease, n
 	return m.writeMemfile6(m.leaseFile(6), mergeLeasesByIdentity(local, peer, 6), now)
 }
 
-// mergeLeasesByIdentity returns the union of the local and peer lease sets for
-// one family, keyed by SyncLease.IdentityKey (address + client identity). The
-// LOCAL lease WINS a conflict: for an RG this node still masters, its live
-// binding is the authoritative in-use lease, so it must never be displaced by a
-// peer copy. Peer-only identities (the RG being taken over) are appended. The
-// result is a fresh slice; inputs are not mutated.
+// mergeLeasesByIdentity returns the lease set the takeover pre-seed writes for
+// one family (#5040), with ONE owner per address (#9791).
+//
+// Two passes:
+//  1. Union by SyncLease.IdentityKey (address + client identity). The LOCAL
+//     row wins an identity conflict: the same binding held on both sides is
+//     this node's live copy, and it must not be displaced by a peer copy.
+//  2. One row per address (leaseAddressKey9791). The same address bound to two
+//     DIFFERENT clients keeps the binding with the most recent grant
+//     (moreRecentGrant9791); a tie keeps the local row. Pass 1 alone kept both
+//     rows, local first. #9729's run 6 left a promoted node's memfile holding
+//     three rows for a reused address, all naming the client that had released
+//     it, and the client holding it now was refused its renewal. A memfile load
+//     does not arbitrate between two clients for one address, so the writer
+//     must.
+//
+// The peer set is as old as its last sync, so the recency comparison can be off
+// by that much. A re-grant to a new client follows the old lease's release or
+// expiry, which puts the two grants much further apart. The result is a fresh
+// slice; inputs are not mutated.
 func mergeLeasesByIdentity(local, peer []SyncLease, family int) []SyncLease {
 	seen := make(map[string]struct{}, len(local)+len(peer))
-	out := make([]SyncLease, 0, len(local)+len(peer))
+	union := make([]SyncLease, 0, len(local)+len(peer))
 	for _, l := range local {
 		if l.Family != family {
 			continue
 		}
-		out = append(out, l)
+		union = append(union, l)
 		seen[l.IdentityKey()] = struct{}{}
 	}
 	for _, l := range peer {
@@ -800,10 +814,52 @@ func mergeLeasesByIdentity(local, peer []SyncLease, family int) []SyncLease {
 		if _, dup := seen[l.IdentityKey()]; dup {
 			continue // local live binding wins
 		}
-		out = append(out, l)
+		union = append(union, l)
 		seen[l.IdentityKey()] = struct{}{}
 	}
+	return oneOwnerPerAddress9791(union)
+}
+
+// oneOwnerPerAddress9791 keeps, for each address, the row with the most recent
+// grant. Rows arrive local-first, so a tie keeps the local row. Order is
+// otherwise preserved: a winning later row takes the earlier row's position.
+func oneOwnerPerAddress9791(rows []SyncLease) []SyncLease {
+	at := make(map[string]int, len(rows))
+	out := make([]SyncLease, 0, len(rows))
+	for _, l := range rows {
+		k := leaseAddressKey9791(l)
+		i, dup := at[k]
+		if !dup {
+			at[k] = len(out)
+			out = append(out, l)
+			continue
+		}
+		if moreRecentGrant9791(l, out[i]) {
+			out[i] = l
+		}
+	}
 	return out
+}
+
+// leaseAddressKey9791 names the address a lease occupies. A v6 lease type and
+// a delegated prefix length are part of it, so an IA_PD /56 and /60 sharing a
+// base address are different occupancies.
+func leaseAddressKey9791(l SyncLease) string {
+	if l.Family == 6 {
+		return fmt.Sprintf("6|%s|%s|%d", l.Address, l.LeaseType, l.PrefixLen)
+	}
+	return "4|" + l.Address
+}
+
+// moreRecentGrant9791 reports whether a was granted more recently than b. The
+// time since grant at read time is ValidLife-Remaining. A row that does not
+// carry its valid lifetime (an older peer) cannot place its grant, so the pair
+// is compared by remaining lifetime instead, and the later expiry wins.
+func moreRecentGrant9791(a, b SyncLease) bool {
+	if a.ValidLife > 0 && b.ValidLife > 0 {
+		return a.ValidLife-a.Remaining < b.ValidLife-b.Remaining
+	}
+	return a.Remaining > b.Remaining
 }
 
 // keaMemfileHeader4 is Kea's canonical DHCPv4 memfile CSV header (Kea 2.x/3.x).

@@ -4,8 +4,6 @@ import (
 	"fmt"
 	"net/netip"
 	"sort"
-	"strconv"
-	"strings"
 )
 
 // vrfOverlapPrefix records one L3 prefix carried by a routing-instance together
@@ -14,6 +12,15 @@ import (
 type vrfOverlapPrefix struct {
 	prefix netip.Prefix // masked network prefix
 	origin string       // e.g. `interface "ge-0/0/1.0"` or `filter "fbf" term "t1"`
+	// steered marks space a PBR `then routing-instance` term put here, as
+	// opposed to a member interface's address.
+	steered bool
+	// steeredAll marks the MATCH-ALL space of a steering term written with
+	// `any`, with no address match, or with an empty `except` list (#9809). It
+	// pairs only with steered space from ANOTHER filter; see validateVRFOverlap.
+	steeredAll bool
+	// filter names the firewall filter a steered prefix came from.
+	filter string
 }
 
 const (
@@ -33,27 +40,27 @@ const (
 	vrfOverlapMaxComparisons = 1 << 20 // ~1M
 )
 
-// validateVRFOverlap emits a commit WARNING (never a hard reject) when two
-// DISTINCT routing-instances carry overlapping L3 address space. This is the
-// #2387 interim mitigation (Track A.1): the userspace-dp session/flow identity
-// is the bare 5-tuple (userspace-dp/src/session/key.rs) with no
-// routing-instance/VRF discriminator, so two flows in different
-// routing-instances that share a 5-tuple collide in the conntrack map. The
-// collision is LIVE under PBR `then routing-instance` (the established-session
-// fast path runs before the PBR table override, so a second flow with the same
-// 5-tuple inherits the first flow's cached egress / NAT / policy decision —
-// wrong-VRF forwarding). See docs/research/2387-vrf-flow-identity/plan.md and
-// userspace-dp/src/afxdp/forwarding/README.md.
+// validateVRFOverlap warns when two DISTINCT routing-instances carry
+// overlapping L3 address space, and refuses that overlap combined with a PBR
+// `then routing-instance` term (#7924).
 //
-// A WARNING, not a reject: overlapping-subnet multi-tenant VRF via PBR is a
-// legitimate, working forwarding design, so hard-rejecting it would break a
-// valid deployment to work around a fast-path bug. The operator is told the
-// topology is not session-isolated; the config still commits. Neither of the
-// two candidate end-states is decided: the hard-reject variant (a "no
-// overlapping subnets at all" product posture) and the VRF-aware session key
-// (a symmetric routing-domain id in SessionKey, Track B) both remain open on
-// #2387, which is held on a maintainer risk-appetite call rather than on
-// further engineering.
+// What the session identity separates today (#9809 rewrote this from the #2387
+// original, which predates #7160 and #9519):
+//   - SessionKey carries a routing domain derived from the LOGICAL INGRESS
+//     interface (userspace-dp/src/afxdp/forwarding/mod.rs), so flows arriving on
+//     member interfaces of different instances do not share an entry.
+//   - Flows PBR steers in from default-instance ingress stay routing domain 0 in
+//     both directions, so two steered flows that share a 5-tuple resolve one
+//     entry. The established-session fast path runs before the PBR table
+//     override, and the second flow inherits the first one's cached egress and
+//     NAT.
+//   - Policy is evaluated again only when the colliding hit arrives from another
+//     zone (#9519); a same-zone collider inherits the policy decision too.
+//
+// That steered residual is what the #7924 refusal covers. Whether a member
+// overlap combined with an unrelated PBR term still needs refusing, now that
+// such flows are domain-separated, is a maintainer question recorded on #9809;
+// this function still refuses it. See userspace-dp/src/afxdp/forwarding/README.md.
 //
 // The warning text below therefore states the CURRENT limitation and points at
 // the tracking issue; it must not promise a fix, nor rule one out. It used to
@@ -75,11 +82,20 @@ const (
 //
 // Detection builds routing-instance -> set-of-prefixes from two sources:
 //  1. native RI membership — each member interface unit's configured addresses
-//     (the connected L3 space that lives in that VRF), joined via
-//     ri.Interfaces -> cfg.Interfaces.Interfaces[base].Units[unit].Addresses;
-//  2. PBR filter terms — a `then routing-instance <name>` term's source/dest
-//     match prefixes (the L3 space steered INTO that VRF, the reachable-via-PBR
-//     trigger).
+//     (the connected L3 space that lives in that VRF). A bare member is every
+//     configured unit (RoutingInstanceMemberUnits, #9809), as the FIB binds it;
+//  2. PBR filter terms — the space a `then routing-instance <name>` term steers
+//     INTO that VRF, as the PBR rule builder realises it (PBRDirectionSteers,
+//     #9809): prefix-lists expand, a bare host is a /32 or /128, and a term the
+//     builder drops contributes nothing. A term that matches every address
+//     (`any`, no address match, an empty `except`) adds MATCH-ALL steered space,
+//     which pairs only with steered space from ANOTHER filter. The residual
+//     above is one 5-tuple steered into two instances. A member prefix against
+//     steered space is the domain-separated pair, and two terms of ONE filter
+//     cannot both steer a packet, because the first match wins: a DSCP-only
+//     catch-all after an address term (TestFirewallFilter's multi-WAN filter)
+//     is not a collision. A literal 0.0.0.0/0 or ::/0 keeps its pre-#9809
+//     behaviour and pairs with everything.
 //
 // then compares the prefix sets of every unordered pair of distinct
 // routing-instances for overlap (net/netip Prefix.Overlaps — contains-or-equal).
@@ -112,7 +128,7 @@ func validateVRFOverlap(cfg *Config, lenientPBR bool) ([]string, []VRFOverlapAdm
 	// encountered wins; native interfaces are processed before PBR terms and both
 	// in deterministic order, so the retained origin is stable.
 	seen := map[string]map[string]bool{}
-	addPrefix := func(riName, cidr, origin string) {
+	addPrefix := func(riName, cidr, origin, filter string, steered, steeredAll bool) {
 		if riName == "" || cidr == "" {
 			return
 		}
@@ -122,6 +138,9 @@ func validateVRFOverlap(cfg *Config, lenientPBR bool) ([]string, []VRFOverlapAdm
 		}
 		p = p.Masked()
 		key := p.String()
+		if steeredAll {
+			key += "|all"
+		}
 		if seen[riName] == nil {
 			seen[riName] = map[string]bool{}
 		}
@@ -129,7 +148,7 @@ func validateVRFOverlap(cfg *Config, lenientPBR bool) ([]string, []VRFOverlapAdm
 			return
 		}
 		seen[riName][key] = true
-		riPrefixes[riName] = append(riPrefixes[riName], vrfOverlapPrefix{prefix: p, origin: origin})
+		riPrefixes[riName] = append(riPrefixes[riName], vrfOverlapPrefix{prefix: p, origin: origin, steered: steered, steeredAll: steeredAll, filter: filter})
 	}
 
 	// Source 1: native routing-instance membership -> member interface unit
@@ -140,26 +159,12 @@ func validateVRFOverlap(cfg *Config, lenientPBR bool) ([]string, []VRFOverlapAdm
 			continue
 		}
 		for _, member := range ri.Interfaces {
-			base, unitTok, hasUnit := strings.Cut(member, ".")
-			unitNum := 0
-			if hasUnit {
-				n, err := strconv.Atoi(unitTok)
-				if err != nil {
-					continue
+			// #9809: a bare member is every configured unit, not unit 0.
+			for _, mu := range RoutingInstanceMemberUnits(cfg, member) {
+				origin := fmt.Sprintf("interface %q", mu.Ref)
+				for _, addr := range mu.Addresses {
+					addPrefix(ri.Name, addr, origin, "", false, false)
 				}
-				unitNum = n
-			}
-			ifc := cfg.Interfaces.Interfaces[base]
-			if ifc == nil {
-				continue
-			}
-			unit := ifc.Units[unitNum]
-			if unit == nil {
-				continue
-			}
-			origin := fmt.Sprintf("interface %q", member)
-			for _, addr := range unit.Addresses {
-				addPrefix(ri.Name, addr, origin)
 			}
 		}
 	}
@@ -168,7 +173,8 @@ func validateVRFOverlap(cfg *Config, lenientPBR bool) ([]string, []VRFOverlapAdm
 	// filter is duplicated into both FiltersInet and FiltersInet6; process both
 	// maps in sorted-name order and let the per-RI prefix de-dup collapse the
 	// repeat.
-	addFilterTerms := func(filterName string, filter *FirewallFilter) {
+	pls := cfg.PolicyOptions.PrefixLists
+	addFilterTerms := func(filterName string, filter *FirewallFilter, matchAll netip.Prefix) {
 		if filter == nil {
 			return
 		}
@@ -183,22 +189,37 @@ func validateVRFOverlap(cfg *Config, lenientPBR bool) ([]string, []VRFOverlapAdm
 			// contributed a prefix" would miss a match-all steering term.
 			sawPBRRoutingInstance = true
 			origin := fmt.Sprintf("filter %q term %q", filterName, term.Name)
-			for _, addr := range term.SourceAddresses {
-				addPrefix(term.RoutingInstance, addr, origin)
+			// #9809: the space the builder steers, not only literals that parse.
+			srcs, srcAll, srcNone := PBRDirectionSteers(term.SourceAddresses, term.SourcePrefixLists, pls)
+			dsts, dstAll, dstNone := PBRDirectionSteers(term.DestAddresses, term.DestPrefixLists, pls)
+			if srcNone || dstNone {
+				continue // the builder installs no rule for this term
 			}
-			for _, addr := range term.DestAddresses {
-				addPrefix(term.RoutingInstance, addr, origin)
+			for _, addr := range srcs {
+				addPrefix(term.RoutingInstance, addr, origin, filterName, true, false)
+			}
+			for _, addr := range dsts {
+				addPrefix(term.RoutingInstance, addr, origin, filterName, true, false)
+			}
+			if srcAll && dstAll {
+				addPrefix(term.RoutingInstance, matchAll.String(), origin, filterName, true, true)
 			}
 		}
 	}
-	for _, filters := range []map[string]*FirewallFilter{cfg.Firewall.FiltersInet, cfg.Firewall.FiltersInet6} {
-		names := make([]string, 0, len(filters))
-		for name := range filters {
+	for _, fam := range []struct {
+		filters  map[string]*FirewallFilter
+		matchAll netip.Prefix
+	}{
+		{cfg.Firewall.FiltersInet, netip.MustParsePrefix("0.0.0.0/0")},
+		{cfg.Firewall.FiltersInet6, netip.MustParsePrefix("::/0")},
+	} {
+		names := make([]string, 0, len(fam.filters))
+		for name := range fam.filters {
 			names = append(names, name)
 		}
 		sort.Strings(names)
 		for _, name := range names {
-			addFilterTerms(name, filters[name])
+			addFilterTerms(name, fam.filters[name], fam.matchAll)
 		}
 	}
 
@@ -240,6 +261,13 @@ Scan:
 					if a.prefix.Addr().Is4() != b.prefix.Addr().Is4() {
 						continue
 					}
+					// #9809: match-all steered space pairs only with steered space
+					// from ANOTHER filter. Against a member prefix it is the
+					// domain-separated pair, and within one filter the first
+					// matching term wins, so its terms never steer one packet twice.
+					if (a.steeredAll || b.steeredAll) && !(a.steered && b.steered && a.filter != b.filter) {
+						continue
+					}
 					if !a.prefix.Overlaps(b.prefix) {
 						continue
 					}
@@ -278,13 +306,15 @@ Scan:
 	if len(warnings) > 0 && sawPBRRoutingInstance && !lenientPBR {
 		return warnings, admissions, fmt.Errorf(
 			"overlapping L3 across routing-instances combined with a PBR `then "+
-				"routing-instance` term is refused: the session identity carries no "+
-				"routing-instance discriminator, and the established-session fast path "+
-				"runs BEFORE the PBR table override, so a second flow sharing a 5-tuple "+
-				"inherits the first flow's cached egress, NAT and POLICY decision across "+
-				"the tenant boundary (#7924; tracked for a real fix by #7160). "+
-				"Overlapping VRF address space WITHOUT PBR steering still commits with a "+
-				"warning. First overlap: %s", warnings[0])
+				"routing-instance` term is refused: flows PBR steers in from "+
+				"default-instance ingress share routing domain 0 in the session "+
+				"identity (#7160 separates flows on member interfaces, not steered "+
+				"ones), and the established-session fast path runs BEFORE the PBR "+
+				"table override, so a second flow sharing a 5-tuple inherits the first "+
+				"flow's cached egress and NAT, and its POLICY decision unless it "+
+				"arrives from another zone (#9519), across the tenant boundary "+
+				"(#7924). Overlapping VRF address space WITHOUT PBR steering still "+
+				"commits with a warning. First overlap: %s", warnings[0])
 	}
 	// #7991: the findings are reported ONLY when PBR steering is present — that
 	// is the combination the strict path refuses, and therefore the only one a
@@ -329,8 +359,9 @@ func (o VRFOverlapAdmission) warning() string {
 		return fmt.Sprintf(
 			"routing-instance %q (%s) and %q (%s) both carry %s: "+
 				"overlapping L3 across routing-instances is forwarded via "+
-				"PBR but is NOT session-isolated (#2387) — the session "+
-				"identity carries no routing-instance discriminator, so "+
+				"PBR but is NOT session-isolated (#2387) — flows PBR steers "+
+				"in from default-instance ingress share routing domain 0 in "+
+				"the session identity, so "+
 				"colliding 5-tuples may cross-forward. See #2387 for the "+
 				"status of this limitation",
 			o.InstanceA, o.OriginA, o.InstanceB, o.OriginB, o.PrefixA)
@@ -338,8 +369,9 @@ func (o VRFOverlapAdmission) warning() string {
 	return fmt.Sprintf(
 		"routing-instance %q (%s, %s) and %q (%s, %s) carry "+
 			"overlapping L3: overlapping L3 across routing-instances is "+
-			"forwarded via PBR but is NOT session-isolated (#2387) — the "+
-			"session identity carries no routing-instance discriminator, "+
+			"forwarded via PBR but is NOT session-isolated (#2387) — flows "+
+			"PBR steers in from default-instance ingress share routing "+
+			"domain 0 in the session identity, "+
 			"so colliding 5-tuples may cross-forward. See #2387 for the "+
 			"status of this limitation",
 		o.InstanceA, o.OriginA, o.PrefixA, o.InstanceB, o.OriginB, o.PrefixB)
@@ -351,13 +383,15 @@ func (o VRFOverlapAdmission) warning() string {
 // Empty for every config the strict path would accept.
 //
 // WHAT A NON-EMPTY RESULT MEANS, because a metric nobody can interpret is not an
-// improvement: on such a box a second flow sharing a 5-tuple hits the FIRST
-// flow's conntrack entry and inherits its cached egress, NAT and POLICY
-// decision. The established-session fast path runs before the PBR table override
-// and has no policy call at all, and the per-packet re-checks that do run use
-// the session's CACHED zone. So tenant-b's packets leave via tenant-a's egress
-// with tenant-a's NAT, never adjudicated by any policy. That is a cross-tenant
-// forwarding path, not a configuration-hygiene advisory.
+// improvement: on such a box a second steered flow sharing a 5-tuple (both in
+// routing domain 0, #9809) hits the FIRST flow's conntrack entry and inherits
+// its cached egress and NAT. The established-session fast path runs before the
+// PBR table override. A hit from the same zone is treated as the owner and
+// inherits the policy decision too; a hit from another zone is re-evaluated
+// against that zone's policy (#9519) and, on permit, still forwards with the
+// first flow's egress and NAT. So tenant-b's packets can leave via tenant-a's
+// egress with tenant-a's NAT. That is a cross-tenant forwarding path, not a
+// configuration-hygiene advisory.
 //
 // Runs the SAME detector the commit gate runs (leniently, so it reports rather
 // than errors), for the reason #3718's reporter states about its own builder:

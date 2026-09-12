@@ -567,7 +567,7 @@ func compileRoutingInstances(node *Node, cfg *Config) error {
 			TableID: StableRoutingInstanceTableID(instanceName),
 		}
 
-		for _, prop := range child.Children {
+		for _, prop := range expandResolvingRuns9792(child.Children, routingInstanceSchema9792()) { // #9792: expand a lenient-path packed run (#9235).
 			switch prop.Name() {
 			case "description":
 				ri.Description = nodeVal(prop)
@@ -1557,26 +1557,12 @@ func RibGroupConnectedPrefixes(cfg *Config) map[string][]string {
 		}
 		var prefixes []string
 		for _, member := range ri.Interfaces {
-			base, unitTok, hasUnit := strings.Cut(member, ".")
-			unitNum := 0
-			if hasUnit {
-				n, err := strconv.Atoi(unitTok)
-				if err != nil {
-					continue
-				}
-				unitNum = n
-			}
-			ifc := cfg.Interfaces.Interfaces[base]
-			if ifc == nil {
-				continue
-			}
-			unit := ifc.Units[unitNum]
-			if unit == nil {
-				continue
-			}
-			for _, addr := range unit.Addresses {
-				if prefix, _, ok := ConnectedNetworkPrefix(addr); ok {
-					prefixes = append(prefixes, prefix)
+			// #9809: every configured unit of a bare member, as the FIB binds it.
+			for _, mu := range RoutingInstanceMemberUnits(cfg, member) {
+				for _, addr := range mu.Addresses {
+					if prefix, _, ok := ConnectedNetworkPrefix(addr); ok {
+						prefixes = append(prefixes, prefix)
+					}
 				}
 			}
 		}
