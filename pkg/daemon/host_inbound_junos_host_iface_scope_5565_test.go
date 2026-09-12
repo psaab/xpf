@@ -104,9 +104,15 @@ func TestJunosHostIKEExemptionScopedToConfiguringInterface(t *testing.T) {
 	}
 	// The zone-wide `application any` DROP still covers BOTH interfaces.
 	cn := xnft.HostInboundJunosHostDenyCounterName("untrust", "ip")
-	wantDrop := `iifname { "ge-0-0-1", "ge-0-0-2" } ip saddr 10.0.0.5/32 counter name "` + cn + `" drop`
+	// #9504: the zone-wide scope is the jump's iifname set; the drop itself lives
+	// in the subchain and carries only the authored source.
+	wantJump := `iifname { "ge-0-0-1", "ge-0-0-2" } jump ` + xnft.HostInboundJunosHostChainName(0, "untrust")
+	if !strings.Contains(payload, wantJump) {
+		t.Fatalf("zone-wide jump missing (the deny must still apply to both interfaces):\nwant %q\n%s", wantJump, payload)
+	}
+	wantDrop := `meta nfproto ipv4 ip saddr 10.0.0.5/32 counter name "` + cn + `" drop`
 	if !strings.Contains(payload, wantDrop) {
-		t.Fatalf("zone-wide DROP missing (deny must still apply to both interfaces):\nwant %q\n%s", wantDrop, payload)
+		t.Fatalf("zone-wide DROP missing from the subchain:\nwant %q\n%s", wantDrop, payload)
 	}
 }
 

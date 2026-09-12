@@ -141,15 +141,14 @@ func TestJunosHostRenderedDenyStaysSuppressed6705(t *testing.T) {
 	if got == nil {
 		t.Fatal("no program projected for zone trust")
 	}
-	if len(got.RulesV4) != 1 {
-		t.Fatalf("expected exactly one v4 DROP rule, got %+v", got.RulesV4)
+	if len(got.RulesV4) != 2 {
+		t.Fatalf("expected the permit's return then the p2 drop in v4, got %+v", got.RulesV4)
 	}
-	r := got.RulesV4[0]
-	if len(r.Src) != 1 || r.Src[0] != "10.0.9.0/24" {
-		t.Errorf("deny source content = %v, want [10.0.9.0/24]", r.Src)
+	if r := got.RulesV4[0]; r.Verdict != JunosHostReturn || len(r.Src) != 1 || r.Src[0] != "10.0.1.50/32" {
+		t.Errorf("first v4 rule = %+v, want the permit's return for [10.0.1.50/32]", r)
 	}
-	if len(r.PermitSubtract) != 1 || r.PermitSubtract[0] != "10.0.1.50/32" {
-		t.Errorf("permit subtraction content = %v, want [10.0.1.50/32]", r.PermitSubtract)
+	if r := got.RulesV4[1]; r.Verdict != JunosHostDrop || len(r.Src) != 1 || r.Src[0] != "10.0.9.0/24" {
+		t.Errorf("deny rule = %+v, want a drop for [10.0.9.0/24]", r)
 	}
 	if !proj.RenderedPolicyKeys[key] {
 		t.Errorf("deny p2 projected a real DROP rule but is NOT marked rendered — the #4168 suppression "+

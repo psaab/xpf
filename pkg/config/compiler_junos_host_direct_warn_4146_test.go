@@ -54,10 +54,11 @@ var junosHostBaseZones = []string{
 
 // TestJunosHostDirectDeliveryWarns is the #4146 fail-on-revert guard for the
 // UN-REPRESENTABLE remainder: a `to-zone junos-host` policy the kernel nft chain
-// cannot faithfully enforce on the direct host-bound path — a `reject`, a
-// source-restricted PERMIT (the "deny non-permitted" half is the §6.5 follow-up),
-// a feed-tainted source, or an ingress zone with `tcp-rst` — STILL emits the
-// commit-time parity warning. Reverting the suppression logic must not silence
+// cannot faithfully enforce on the direct host-bound path — a source-restricted
+// PERMIT (whose implied deny-non-permitted half no path enforces) or a
+// feed-tainted source — STILL emits the commit-time parity warning. #9504 moved
+// `reject` and a `tcp-rst` ingress zone OUT of this remainder; they are pinned as
+// enforced by TestJunosHostRejectAndTCPRstAreEnforced9504 below. Reverting the suppression logic must not silence
 // these (they are a genuine, still-open gap). REPRESENTABLE denies are covered
 // by TestJunosHostDirectDeliveryEnforcedNoWarn instead (they are now enforced).
 func TestJunosHostDirectDeliveryWarns(t *testing.T) {
@@ -67,17 +68,6 @@ func TestJunosHostDirectDeliveryWarns(t *testing.T) {
 		reason     string // substring the warning must carry
 		cmds       []string
 	}{
-		{
-			name:       "zone-pair reject (verdict-class divergence, §6.5 follow-up)",
-			policyName: `"reject-bad"`,
-			reason:     "a reject to-zone junos-host",
-			cmds: append(append([]string{}, junosHostBaseZones...),
-				"set security policies from-zone untrust to-zone junos-host policy reject-bad match source-address bad-host",
-				"set security policies from-zone untrust to-zone junos-host policy reject-bad match destination-address any",
-				"set security policies from-zone untrust to-zone junos-host policy reject-bad match application any",
-				"set security policies from-zone untrust to-zone junos-host policy reject-bad then reject",
-			),
-		},
 		{
 			name:       "zone-pair source-restricted permit (deny-non-permitted half is §6.5)",
 			policyName: `"mgmt-only"`,
@@ -103,18 +93,6 @@ func TestJunosHostDirectDeliveryWarns(t *testing.T) {
 				"set security policies from-zone untrust to-zone junos-host policy block-feed then deny",
 			),
 		},
-		{
-			name:       "deny in a tcp-rst ingress zone (silent-drop diverges, §6.2)",
-			policyName: `"block-rst"`,
-			reason:     "a deny to-zone junos-host",
-			cmds: append(append([]string{}, junosHostBaseZones...),
-				"set security zones security-zone untrust tcp-rst",
-				"set security policies from-zone untrust to-zone junos-host policy block-rst match source-address bad-host",
-				"set security policies from-zone untrust to-zone junos-host policy block-rst match destination-address any",
-				"set security policies from-zone untrust to-zone junos-host policy block-rst match application any",
-				"set security policies from-zone untrust to-zone junos-host policy block-rst then deny",
-			),
-		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -127,6 +105,72 @@ func TestJunosHostDirectDeliveryWarns(t *testing.T) {
 				if !strings.Contains(w, want) {
 					t.Errorf("warning missing substring %q:\n  %s", want, w)
 				}
+			}
+		})
+	}
+}
+
+// TestJunosHostRejectAndTCPRstAreEnforced9504 pins the two classes #9504 moved
+// out of the remainder above. A `then reject`, and a deny on a `tcp-rst` ingress
+// zone, now render with the verdict the runtime answers with rather than a silent
+// drop, so their parity warning is suppressed. The verdict is asserted, not just
+// the rendering: suppressing the warning for a rule that drops where the runtime
+// RSTs would trade a visible gap for an invisible divergence.
+func TestJunosHostRejectAndTCPRstAreEnforced9504(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		policy  string
+		verdict JunosHostVerdict
+		cmds    []string
+	}{
+		{
+			name:    "then reject",
+			policy:  "reject-bad",
+			verdict: JunosHostReject,
+			cmds: append(append([]string{}, junosHostBaseZones...),
+				"set security policies from-zone untrust to-zone junos-host policy reject-bad match source-address bad-host",
+				"set security policies from-zone untrust to-zone junos-host policy reject-bad match destination-address any",
+				"set security policies from-zone untrust to-zone junos-host policy reject-bad match application any",
+				"set security policies from-zone untrust to-zone junos-host policy reject-bad then reject",
+			),
+		},
+		{
+			name:    "deny on a tcp-rst ingress zone",
+			policy:  "block-rst",
+			verdict: JunosHostDropTCPReset,
+			cmds: append(append([]string{}, junosHostBaseZones...),
+				"set security zones security-zone untrust tcp-rst",
+				"set security policies from-zone untrust to-zone junos-host policy block-rst match source-address bad-host",
+				"set security policies from-zone untrust to-zone junos-host policy block-rst match destination-address any",
+				"set security policies from-zone untrust to-zone junos-host policy block-rst match application any",
+				"set security policies from-zone untrust to-zone junos-host policy block-rst then deny",
+			),
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := junosHostWarnings(t, tc.cmds); len(got) != 0 {
+				t.Errorf("an enforced policy still carries the parity warning (%d): %v", len(got), got)
+			}
+			cfg, err := CompileConfig(buildJunosHostWarnTree(t, tc.cmds))
+			if err != nil {
+				t.Fatalf("CompileConfig: %v", err)
+			}
+			proj := BuildJunosHostDenyProjection(cfg)
+			if !proj.RenderedPolicyKeys[JunosHostZonePairPolicyKey("untrust", tc.policy)] {
+				t.Fatalf("%s is not marked rendered, so the suppressed warning above is a SILENT gap: %+v",
+					tc.policy, proj)
+			}
+			n := 0
+			for _, p := range proj.Programs {
+				for _, r := range append(append([]JunosHostDenyRule{}, p.RulesV4...), p.RulesV6...) {
+					n++
+					if r.Verdict != tc.verdict {
+						t.Errorf("rule verdict = %v, want %v — the kernel must answer as the runtime does", r.Verdict, tc.verdict)
+					}
+				}
+			}
+			if n == 0 {
+				t.Fatal("no rule projected, so the verdict assertion above checked nothing")
 			}
 		})
 	}

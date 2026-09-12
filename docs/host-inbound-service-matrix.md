@@ -2025,11 +2025,29 @@ helper never sees it, so a helper crash cannot lock management out).
   **whole ordered program**: if any contributing term is un-representable the
   program emits nothing (no coarsened / partial rule) and its policies keep the
   warning.
-- **DROP-only via set-subtraction.** A `deny` becomes a silent `drop`; a `permit`
-  NEVER emits a fine `accept` (that would let a fine permit re-admit a
-  coarse-rejected service — Rust `poll_descriptor/mod.rs:138`). Instead each later
-  deny SUBTRACTS an earlier permit's source set (`saddr != <permit-set>`), so the
-  coarse host-inbound gate stays the **sole admit authority**.
+- **FIRST-MATCH, never a fine accept (#9504).** Each ingress zone's program
+  renders, in authored order, into its own nft chain that the `xpf_hostinbound`
+  input chain enters with an `iifname`-scoped `jump`. A `deny` drops (answering
+  TCP with a RST on a `tcp-rst` zone), a `reject` answers (TCP RST, else ICMP
+  administratively prohibited), and a `permit` RETURNS from the subchain, so the
+  coarse host-inbound gate still decides. A permit NEVER emits a fine `accept`
+  (that would let it re-admit a coarse-rejected service — Rust
+  `poll_descriptor/mod.rs:138`); `return` leaves the fine program without
+  admitting anything.
+
+  A packet that matches no rule returns as well. **xpf applies no implicit
+  junos-host default-deny on any path** — `evaluate_junos_host_policy_l3_aware`
+  (policy.rs) and `policymatch.matchJunosHost` both deliver on no match, which is
+  the management-lifeline guarantee — so the kernel program must not invent one
+  either. The consequence for an operator is stated under the warning below: a
+  restricted `permit` alone restricts nothing, on any path.
+
+  Before #9504 a permit could be projected only as a `saddr !=` SUBTRACTION of
+  later denies. That cannot express a carve narrowed on any other dimension, so a
+  narrow-application, source-excluded or destination-scoped permit made the WHOLE
+  program un-representable — which silently disabled kernel enforcement of every
+  other junos-host deny on that ingress zone, including the canonical management
+  ACL (`permit <mgmt-net> junos-ssh` followed by `deny any`).
 - **Ingress `iifname` scope, never `daddr` as the ZONE scope.** The DROP is scoped
   by the from-zone's kernel netdev names
   (`pkg/dataplane/userspace/BuildJunosHostPrograms`), excluding lifelines
@@ -2210,13 +2228,15 @@ helper never sees it, so a helper crash cannot lock management out).
   attribute a drop to a policy object; that is the one "counters stay zero" symptom
   the direct path retains. The userspace XSK path keeps its own attribution.
 
-**Representable subset:** action `deny`; `match source-address` /
-`source-address-excluded` **and** `match destination-address` /
+**Representable subset:** action `deny`, `reject` or `permit` (#9504); `match
+source-address` / `source-address-excluded` **and** `match destination-address` /
 `destination-address-excluded` resolving entirely to *static* address-book CIDRs
 (recursively feed-untainted); `match application` reducing to simple
 proto + optional dst/src port + optional ICMP type/code (application-sets
-OR-expanded to multiple rules); **no** `scheduler-name`; ingress zone **not**
-`tcp-rst`.
+OR-expanded to multiple rules); **no** `scheduler-name`. A `tcp-rst` ingress zone
+is representable: its denies render as a TCP `reject with tcp reset` ahead of the
+drop for everything else, which is what `enqueue_deny_reply` (reject_reply.rs)
+does at runtime.
 
 **Address-match semantics (source AND destination).** Both dimensions route
 through ONE projection formula (`junosHostProjectAddrMatch`,
@@ -2262,12 +2282,19 @@ widened past the permit's destination scope.
 
 **Un-representable remainder (keeps the commit warning below):** feed-tainted
 source **or destination**, a **MIXED direct+term** or ALG-bearing application, an
-application scoped to an IPsec/ident exempt tuple, a **destination-scoped or
-destination-excluded `permit`**, a scheduler-gated policy, a `tcp-rst` ingress
-zone (silent drop would diverge from Junos's RST verdict class), `reject`, and
-the "deny non-permitted" half of a source-restricted `permit` (the reject and
-source-restricted-permit slices are tracked follow-ups using the identical
-machinery). No partial/coarsened kernel rule is ever emitted for the remainder.
+application scoped to an IPsec/ident exempt tuple, and a scheduler-gated policy
+(time-windowed: rendered as an always-on rule it would carve or drop outside its
+own window). A zone whose ingress netdevs cannot all be scoped (#6564, #6619) and
+a lifeline-only zone keep the warning for their own reasons, above. No
+partial/coarsened kernel rule is ever emitted for the remainder.
+
+**Not in the remainder, and not enforced anywhere: the "deny non-permitted" half
+of a restricted `permit`.** It is not a kernel-vs-userspace gap — xpf has no
+implicit junos-host default-deny on either path — so the fix for an operator who
+wants it is an explicit `then deny` policy after the permit, which the kernel
+chain now enforces. The commit warning for a restricted permit says exactly that
+(#9504); it previously said the restriction held on the userspace path, which was
+false.
 
 A **pure multi-term** application is NOT in that remainder, contrary to earlier
 revisions of this paragraph. A `term`-bearing application with no direct match
