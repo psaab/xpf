@@ -569,12 +569,29 @@ func walkSchemaNode(node *Node, parent *schemaNode, path []string, vc *walkConte
 	// whose own args legitimately consume a token that happens to share a
 	// sibling's name is untouched.
 	if parent != nil && parent.children != nil && len(node.Keys) > declaredKeyTokens {
-		for _, tok := range node.Keys[declaredKeyTokens:] {
+		// #9635: the same authored-value rule the packed splitter applies. A
+		// `multi` / `valueList` leaf keeps the tokens the operator wrote as
+		// values -- quoted, or inside the same `[ ... ]` list -- even when one
+		// spells a sibling keyword, because `proposals [ P "proposal-set" ]` is
+		// a reference to a proposal merely NAMED like a statement. Without this
+		// the splitter declines the split and THIS gate refuses the config, so
+		// the two passes disagree about one input and the spelling is
+		// unusable either way.
+		//
+		// A fixed-arity leaf is saturated past its args, so a quoted token
+		// there still fuses: `pre-shared-key ascii-text "s" "mode" aggressive`
+		// keeps being two statements.
+		values := authoredValueMask9635(node.KeysQuoted, node.KeysBracketed, len(node.Keys))
+		for i := declaredKeyTokens; i < len(node.Keys); i++ {
+			tok := node.Keys[i]
 			if _, isSibling := parent.children[tok]; !isSibling {
 				continue
 			}
 			if tok == keyword {
 				continue // a repeat of this leaf, not a foreign statement
+			}
+			if values != nil && values[i] && leafOwnsMoreValues9635(childSchema) {
+				continue // authored as a value of a leaf that can own another
 			}
 			// A token that also names a CHILD of this node is ambiguous: it may
 			// be a PACKED spelling (`system login user bob class super-user`)

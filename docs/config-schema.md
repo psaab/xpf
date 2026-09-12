@@ -259,16 +259,36 @@ sees made commit-check decline a fold the compiler performs. The compiled census
 could not see either ordering defect, because it compiles through the compiler's
 own ordering.
 
-**Not fixed here: #9635.** `splitPackedStatements8768` ends a multi-value
-statement at the first token that names a sibling statement, so `security ike
-policy P1 { proposals [ P "proposal-set" ]; }` -- a reference to a proposal named
-`proposal-set` -- becomes `proposals P;` plus a bogus `proposal-set;`, in the
-braced spelling as well as the elided one. A decline keyed on the quote/bracket
-masks was tried and withdrawn: the #8437 fusion gate still refused the spelling
-at commit, and declining on any quoted token regressed `pre-shared-key
-ascii-text "s" "mode" aggressive;`, which master splits and accepts because a
-quoted statement head is valid. The masks are now carried onto every split
-statement, which a fix for both needs.
+**Fixed in #9635: the split reads the authored provenance.**
+`splitPackedStatements8768` used to end a multi-value statement at the first
+token that named a sibling statement, so `security ike policy P1 { proposals
+[ P "proposal-set" ]; }` -- a reference to a proposal *named* `proposal-set` --
+became `proposals P;` plus a bogus `proposal-set;`, in the braced spelling as
+well as the elided one, and SchemaValidate then refused it.
+
+The rule is about the statement BEFORE the token, not the token alone. An
+authored value -- quoted, or inside the same `[ ... ]` list -- may stay a value
+only where the preceding leaf can accept another one: a `multi` or `valueList`
+leaf. A fixed-arity leaf is saturated past its declared args, so `pre-shared-key
+ascii-text "s" "mode" aggressive;` keeps splitting at the quoted `"mode"`. That
+distinction is why the first attempt was withdrawn: it declined every split
+whose boundary landed on a quoted token, which regressed that spelling.
+
+Both readers ask the same question, through `leafOwnsMoreValues9635` /
+`authoredValueRun9635` (`packed_value_provenance_9635.go`). Teaching only the
+splitter leaves the #8437 fusion gate refusing what the splitter just kept
+whole -- measured, and the reason this is one change rather than two. A node
+with no provenance recovers the previous behaviour exactly.
+
+The gate's provenance check is easy to mistake for dead weight: deleting it
+leaves the whole `pkg/config` suite green, because every fixture there sits
+under a `packedStatements` container where the splitter separates a bare run
+before the gate can see it. 166 containers are NOT `packedStatements` while
+holding a `multi` leaf with a sibling, and under those the gate is the only
+reader -- `applications { application-set S { application A application-set B; } }`
+COMMITS without the clause and silently drops the second statement.
+`TestFusionGateStillRefusesUnderANonPackedContainer9635` is the cell that can
+see it.
 
 **So item 1 is decided: the predicate stays keyword-keyed.** Parent
 qualification would put a parent term on every entry to guard against a

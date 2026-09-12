@@ -182,10 +182,17 @@ func normalizeCompactNodes(nodes []*Node, schema *schemaNode, inScope func(conta
 				// one statement, split by the pass whose job is to make them one.
 				quoted := keyMask8921(node.KeysQuoted, len(node.Keys))
 				bracketed := keyMask8921(node.KeysBracketed, len(node.Keys))
+				// #9635: built BEFORE the truncation below, and sliced to the
+				// same span as `tail`. Reading len(node.Keys) after the
+				// truncation would measure the container's identity instead of
+				// the authored run and hand the splitter an empty mask.
+				tailValues := maskSlice8921(
+					authoredValueMask9635(quoted, bracketed, len(node.Keys)),
+					identity, len(node.Keys))
 				node.Keys = append([]string(nil), node.Keys[:identity]...)
 				node.Children = nil
 				node.IsLeaf = false
-				stmts := splitPackedStatements8768(tail, childSub)
+				stmts := splitPackedStatements8768(tail, childSub, tailValues)
 				// #8850: a braced body plus a MULTI-statement run is ambiguous --
 				// nothing in the tree says which statement the body belongs to.
 				// Measured: `address-book address-set s1 { address a1; } address a2
@@ -261,7 +268,7 @@ func normalizeCompactNodes(nodes []*Node, schema *schemaNode, inScope func(conta
 // and hand back the whole tail unsplit. Not guessing is the entire safety
 // argument; a partial split is worse than none because it publishes a shape the
 // operator did not write.
-func splitPackedStatements8768(tail []string, container *schemaNode) [][]string {
+func splitPackedStatements8768(tail []string, container *schemaNode, valueMask []bool) [][]string {
 	if len(tail) == 0 || container == nil || !container.packedStatements {
 		return [][]string{tail}
 	}
@@ -278,6 +285,23 @@ func splitPackedStatements8768(tail []string, container *schemaNode) [][]string 
 		n, refined := consumeNodeKeys(rest, childSchema)
 		if n <= 0 || n > len(rest) {
 			return [][]string{tail}
+		}
+		// #9635: a multi / valueList leaf keeps the tokens the operator AUTHORED
+		// as values -- quoted, or inside the same `[ ... ]` list -- even when one
+		// of them spells a sibling keyword. `proposals [ P "proposal-set" ]`
+		// referenced a proposal merely NAMED like the `proposal-set` statement,
+		// and ending the run there produced a valueless `proposal-set;` that
+		// SchemaValidate refused.
+		//
+		// Bounded to leaves that can own another value, so the fixed-arity case
+		// is untouched: `pre-shared-key ascii-text "s" "mode" aggressive` is
+		// saturated after its two args and the quoted `"mode"` still begins the
+		// next statement, exactly as master splits it.
+		if off := len(tail) - len(rest); valueMask != nil {
+			n += authoredValueRun9635(childSchema, valueMask, off+n)
+			if n > len(rest) {
+				return [][]string{tail}
+			}
 		}
 		// A CONTAINER head followed by more tokens is a NESTED ELISION, and the
 		// run cannot be split through it: nothing says whether what follows is
@@ -458,7 +482,8 @@ func splitBracedPackedChildren8886(node *Node, container *schemaNode) int {
 		// them yet; that, together with the #8437 fusion gate, is issue 9635.)
 		quoted := keyMask8921(ch.KeysQuoted, len(ch.Keys))
 		bracketed := keyMask8921(ch.KeysBracketed, len(ch.Keys))
-		stmts := splitPackedStatements8768(ch.Keys, container)
+		stmts := splitPackedStatements8768(ch.Keys, container,
+			authoredValueMask9635(quoted, bracketed, len(ch.Keys)))
 		if len(stmts) < 2 {
 			out = append(out, ch)
 			continue
