@@ -1159,6 +1159,143 @@ fn the_poll_paths_reverse_install_releases_a_seeded_predecessors_rows_9560() {
     );
 }
 
+/// #9560 R12: the poll path's FORWARD install must release the rows a predecessor holds
+/// that its own decision does not name.
+///
+/// A SEPARATE cell from the reverse one above, not a copy of it. The two are different
+/// call sites of the same function with different arguments — `&flow.forward_key` /
+/// `decision.nat` / `false` against `&reverse_key` / `reverse_decision.nat` / `true` —
+/// so a cell covering one says nothing about the other, and R12 SURVIVED a 71-cell run
+/// confirming the forward site was undefended.
+///
+/// **This asserts row IDENTITY, and that is the entire point.** The first cell written to
+/// close R12 failed at base with "4 before, 4 after". The real forward decision names as
+/// many rows as the seeded predecessor did, so an absolute count is satisfied by both
+/// arms and so is a DELTA — a delta of zero is what "released the old set and claimed a
+/// same-size new one" and "kept everything" both produce. Those two outcomes differ only
+/// in WHICH rows are held, so naming them is the only dimension that can separate them.
+/// A count here is not a weak observable; it is the wrong one.
+///
+/// The premise "rows the real decision cannot name" is MEASURED, not asserted: pass 1
+/// runs the real flow alone and records its exact row set, so pass 2's claim is a fact
+/// about this fixture rather than a belief about how NAT derives rows.
+#[test]
+fn the_poll_paths_forward_install_releases_a_seeded_predecessors_unnamed_rows_9560() {
+    use crate::afxdp::bpf_map::{
+        RECORDER_ONLY_MAP_FD, SteeringHolder, SteeringMapRef, SteeringRowOwners,
+        publish_live_session_entry,
+    };
+
+    fn forward_key_of(sessions: &SessionTable) -> Option<SessionKey> {
+        let mut found: Option<SessionKey> = None;
+        sessions.iter_with_origin(|key, _decision, metadata, _origin| {
+            if !metadata.is_reverse {
+                found = Some(key.clone());
+            }
+        });
+        found
+    }
+
+    // PASS 1 exists only to LEARN what the real forward decision names.
+    let (forward_key, real_rows) = {
+        let owners = std::sync::Arc::new(SteeringRowOwners::default());
+        let (syn, meta_syn, _ack, _meta_ack) = dnat_frames();
+        let snapshot = inbound_dnat_snapshot(wan_to_lan_permit(DNAT_REAL, "permit-internal"));
+        let forwarding = build_forwarding_state(&snapshot);
+        let ha_state = txn_ha_state();
+        let mut sessions = SessionTable::new();
+        let mut binding = BindingWorker::new_for_mirror_test(0, 0, WAN_INGRESS_IFINDEX, 0);
+        binding.interface = Arc::<str>::from("reth0.80");
+        binding.bpf_maps.session_map = SteeringMapRef::new(
+            RECORDER_ONLY_MAP_FD,
+            std::sync::Arc::clone(&owners),
+            SteeringHolder::Worker(0),
+        );
+        let (_batch, dbg) = txn_run_descriptor(
+            &mut binding,
+            &mut sessions,
+            &forwarding,
+            &ha_state,
+            &syn,
+            meta_syn,
+        );
+        assert_eq!(dbg.tx, 1, "FIXTURE: pass 1 must admit the SYN to derive the forward rows");
+        let key = forward_key_of(&sessions).expect("FIXTURE: pass 1 must install a forward entry");
+        let rows = owners.held_rows_for(&key, SteeringHolder::Worker(0));
+        assert!(
+            !rows.is_empty(),
+            "FIXTURE: the real forward install must claim rows, or 'cannot name' is vacuous"
+        );
+        (key, rows)
+    };
+
+    // PASS 2: a predecessor already holds a set at that SAME forward key which includes
+    // rows the decision measured above does not name.
+    let owners = std::sync::Arc::new(SteeringRowOwners::default());
+    let (syn, meta_syn, _ack, _meta_ack) = dnat_frames();
+    let snapshot = inbound_dnat_snapshot(wan_to_lan_permit(DNAT_REAL, "permit-internal"));
+    let forwarding = build_forwarding_state(&snapshot);
+    let ha_state = txn_ha_state();
+    let mut sessions = SessionTable::new();
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, WAN_INGRESS_IFINDEX, 0);
+    binding.interface = Arc::<str>::from("reth0.80");
+    binding.bpf_maps.session_map = SteeringMapRef::new(
+        RECORDER_ONLY_MAP_FD,
+        std::sync::Arc::clone(&owners),
+        SteeringHolder::Worker(0),
+    );
+
+    let _ = publish_live_session_entry(
+        binding.bpf_maps.session_map.handle(),
+        &forward_key,
+        crate::nat::NatDecision {
+            rewrite_src: Some(std::net::IpAddr::V4(std::net::Ipv4Addr::new(203, 0, 113, 9))),
+            rewrite_src_port: Some(51_001),
+            ..crate::nat::NatDecision::default()
+        },
+        false,
+    );
+
+    let seeded = owners.held_rows_for(&forward_key, SteeringHolder::Worker(0));
+    let unnameable: Vec<_> = seeded
+        .iter()
+        .copied()
+        .filter(|row| !real_rows.contains(row))
+        .collect();
+    assert!(
+        !unnameable.is_empty(),
+        "FIXTURE: the seed must claim at least one row the real decision does NOT name, or \
+         the assertion below cannot fail under either arm — this is the pinned-parameter \
+         trap the count-based version of this cell fell into (seeded {} rows, real names {})",
+        seeded.len(),
+        real_rows.len()
+    );
+
+    let (_batch, dbg) = txn_run_descriptor(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &syn,
+        meta_syn,
+    );
+    assert_eq!(dbg.tx, 1, "FIXTURE: pass 2 must admit the SYN, or nothing installs over the seed");
+
+    let still_owned: Vec<_> = unnameable
+        .iter()
+        .filter(|row| owners.owner_count(row) != 0)
+        .collect();
+    assert!(
+        still_owned.is_empty(),
+        "the poll path's FORWARD install KEPT {} of {} rows its own decision does not name. \
+         An entry-level publish releases them; a key-level one claims its own row and leaves \
+         the rest owned by a session that no longer exists, so nothing will ever release \
+         them and a later aliasing session inherits rows it does not own (#9560 R12)",
+        still_owned.len(),
+        unnameable.len()
+    );
+}
+
 fn the_poll_paths_reverse_install_releases_a_predecessors_rows_9560() {
     use crate::afxdp::bpf_map::{
         RECORDER_ONLY_MAP_FD, SteeringHolder, SteeringMapRef, SteeringRowOwners,

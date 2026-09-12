@@ -525,10 +525,30 @@ impl SteeringRowOwners {
         self.held_row_count_for(owner, SteeringHolder::Worker(worker))
     }
 
+    /// The rows `holder` holds for `owner`, BY IDENTITY.
+    ///
+    /// #9560 R12: a COUNT cannot answer an identity question. The first cell written to
+    /// close the forward install's gap failed at base with "4 before, 4 after" — the
+    /// real forward decision names as many rows as a seeded predecessor did, so neither
+    /// an absolute count nor a delta can separate "released the old set and claimed a
+    /// same-size new one" from "kept everything". Naming the rows is the only dimension
+    /// in which those two differ.
+    #[cfg(test)]
+    pub(crate) fn held_rows_for(
+        &self,
+        owner: &SessionKey,
+        holder: SteeringHolder,
+    ) -> SmallVec<[SteeringRow; 4]> {
+        held_rows(&self.holdings_shard(owner), owner, holder.claim())
+    }
+
     /// The rows `holder` holds for `owner`.
+    ///
+    /// Derived from `held_rows_for` so the count and the identity answer cannot drift
+    /// apart: a count that disagreed with the set it counts would make both untrustworthy.
     #[cfg(test)]
     pub(crate) fn held_row_count_for(&self, owner: &SessionKey, holder: SteeringHolder) -> usize {
-        held_rows(&self.holdings_shard(owner), owner, holder.claim()).len()
+        self.held_rows_for(owner, holder).len()
     }
 }
 
