@@ -29,6 +29,36 @@ func DHCPLeaseIfName(ifName string, unit *InterfaceUnit) string {
 	return base
 }
 
+// InterfaceHasVlanSubinterface reports whether ifCfg carries at least one
+// configured 802.1Q VLAN subinterface (a logical unit with VlanID > 0).
+//
+// It is the SCOPE of every RX-VLAN-hardware-offload fail-closed decision. Only
+// a parent that classifies traffic by in-frame VLAN tag is at risk when the tag
+// is HW-stripped: the XDP dataplane derives 802.1Q identity solely from the
+// in-frame tag, so a stripped tag makes a frame parse as vlan_id=0 and fall
+// back to the PHYSICAL parent ifindex — untrusted VLAN traffic classified into
+// the parent's zone. A plain parent has no such mapping to get wrong, so a
+// disable failure there is tolerated rather than failing the operator's commit.
+//
+// Shared, like DHCPLeaseIfName above, so the two enforcement points cannot
+// drift: the compile-time activation gate (#5268,
+// pkg/dataplane.rxVlanOffloadActivationError) and the post-link-cycle
+// re-disable (#9946, pkg/daemon.reDisableRxVlanAfterLinkCycle). They must agree
+// on scope in BOTH directions — a post-cycle fault wider than the compile gate
+// would fail commits on plain parents that never strip a tag, and a narrower
+// one would leave the bypass the compile gate exists to prevent.
+func InterfaceHasVlanSubinterface(ifCfg *InterfaceConfig) bool {
+	if ifCfg == nil {
+		return false
+	}
+	for _, unit := range ifCfg.Units {
+		if unit != nil && unit.VlanID > 0 {
+			return true
+		}
+	}
+	return false
+}
+
 // InterfaceSlot extracts the FPC slot number from an interface name, in BOTH
 // spellings this codebase uses:
 //

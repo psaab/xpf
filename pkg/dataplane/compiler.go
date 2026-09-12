@@ -1569,38 +1569,17 @@ func (r *CompileResult) ensureRxVlanOff(iface string) error {
 	if r.rxVlanOffCache[iface] {
 		return nil
 	}
-	// Check current state via ethtool -k.
-	out, err := runEthtool("-k", iface)
-	if err == nil {
-		featurePresent := false
-		for _, line := range strings.Split(string(out), "\n") {
-			l := strings.TrimSpace(line)
-			if strings.HasPrefix(l, "rx-vlan-offload:") {
-				featurePresent = true
-				// Parse the VALUE after the colon — NOT `Contains(l, "off")`,
-				// which matches the feature NAME "rx-vlan-offLOAD" and so read
-				// EVERY line (on or off) as "off", meaning an ACTIVE offload was
-				// never actually disabled (pre-#5268 latent bug). The value is
-				// "on" or "off"/"off [fixed]".
-				value := strings.TrimSpace(strings.TrimPrefix(l, "rx-vlan-offload:"))
-				if strings.HasPrefix(value, "off") {
-					// Already off (includes "off [fixed]"): no tags stripped.
-					r.rxVlanOffCache[iface] = true
-					return nil
-				}
-				// Reported "on": fall through to disable below.
-				break
-			}
-		}
-		if !featurePresent {
-			// A SUCCESSFUL query that lists no rx-vlan-offload feature at all
-			// means the NIC has no such offload, so it never strips tags —
-			// safe. Do NOT attempt `-K` (which would fail "not supported" on
-			// such a NIC and falsely trip the fail-closed gate for a virtio
-			// VLAN parent).
-			r.rxVlanOffCache[iface] = true
-			return nil
-		}
+	// Check current state via ethtool -k. The classification — including why a
+	// NIC that lists no such feature must NOT be probed with `-K`, and why a
+	// failed query counts as "needs disable" rather than "safe" — lives in
+	// ClassifyRxVlanOffload, shared with the post-link-cycle re-disable in
+	// pkg/daemon so the two cannot drift (#9946).
+	switch ClassifyRxVlanOffload(runEthtool("-k", iface)) {
+	case RxVlanOffloadOff, RxVlanOffloadAbsent:
+		// Already off (includes "off [fixed]"), or the NIC has no such offload
+		// at all: no tags stripped either way.
+		r.rxVlanOffCache[iface] = true
+		return nil
 	}
 	// Either the offload is ON, or the query failed (state unknown): attempt to
 	// disable. Success => off; failure => the caller may fail closed.
@@ -1615,26 +1594,23 @@ func (r *CompileResult) ensureRxVlanOff(iface string) error {
 	return nil
 }
 
-// parentHasVlanSubinterface reports whether the config interface cfgName carries
-// at least one configured 802.1Q VLAN subinterface (a logical unit with
-// VlanID > 0). #5268 gates the fail-closed RX-VLAN-offload activation check on
-// this: only a parent that classifies traffic by in-frame VLAN tag is at risk
-// when the tag is HW-stripped; a plain parent (no 802.1Q units) does not care
-// about the offload state, so a disable failure there is tolerated.
+// parentHasVlanSubinterface resolves cfgName in cfg and asks
+// config.InterfaceHasVlanSubinterface about it. #5268 gates the fail-closed
+// RX-VLAN-offload activation check on this.
+//
+// The predicate itself moved to pkg/config in #9946 because the post-link-cycle
+// re-disable in pkg/daemon must use the SAME scope — it holds an
+// *config.InterfaceConfig directly (the RETH's) and has no cfg/cfgName pair to
+// look up, so the shared half is the one that takes the interface.
 func parentHasVlanSubinterface(cfg *config.Config, cfgName string) bool {
 	if cfg == nil {
 		return false
 	}
 	ifCfg, ok := cfg.Interfaces.Interfaces[cfgName]
-	if !ok || ifCfg == nil {
+	if !ok {
 		return false
 	}
-	for _, unit := range ifCfg.Units {
-		if unit != nil && unit.VlanID > 0 {
-			return true
-		}
-	}
-	return false
+	return config.InterfaceHasVlanSubinterface(ifCfg)
 }
 
 // rxVlanOffloadActivationError decides whether a failure to disable RX-VLAN

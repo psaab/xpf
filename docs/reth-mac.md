@@ -456,17 +456,31 @@ member interval". That was wrong, and round 7 fixes it. The call lands at the en
 of the **MAC set**, before everything expensive in a member's turn, so the real
 interval between two renewals was member N's whole tail plus member N+1's MAC
 set, and the final tail ran to the release with no renewal in it at all. There
-are now three renewal points, all through `Daemon.renewLinkCycleLease`:
+are now four renewal points, all through `Daemon.renewLinkCycleLease`:
 
 | renewal point | what the preceding interval contains |
 |---|---|
 | `programRethMemberMAC` | 3 netlink calls (down / set / up) |
-| `finishRethMemberLinkTail` | **one** `ethtool -K rxvlan off` + one netlink round trip per VLAN child |
+| `reDisableRxVlanAfterLinkCycle` *(only when the offload came back on)* | **one** `ethtool -k` query |
+| `finishRethMemberLinkTail` | **one** `ethtool -K rxvlan off` (only when the offload came back on) + one netlink round trip per VLAN child |
 | `reconcileAfterRethLinkCycle` | netlink, one pass per redundancy group |
 | *(release: `NotifyLinkCycle`)* | its 1s NIC settle + one control round trip |
 
-The last two renewals are *unconditional* on whether the member cycled, and that
-is safe because the renewal cannot create a lease.
+The invariant the table encodes is that **no interval holds more than one
+20s-ceiling external command**. #9946 is why the second row exists: making the
+post-cycle re-disable fail the apply meant first *querying* the offload state
+(`ethtool -k`) rather than running `ethtool -K` blind, and a query plus a disable
+are two such commands. Put in one window they would spend 40s of a 60s TTL and
+leave the per-VLAN-child loop — whose length is operator-unbounded — under 20s.
+The renewal between them keeps the invariant true instead of making the constant
+bigger, which is the same reasoning round 6 applied to the member tail.
+
+`finishRethMemberLinkTail`'s and `reconcileAfterRethLinkCycle`'s renewals are
+*unconditional* on whether the member cycled, and that is safe because the
+renewal cannot create a lease. The `reDisableRxVlanAfterLinkCycle` one is the
+only conditional renewal, and it is safe for the same reason: on a NIC that needs
+no disable it never runs, and on one that does, the lease is either held (so it
+extends) or already released (so `RenewLinkCycle` refuses from the `0` sentinel).
 
 **It buys nothing on the abort path, and this table used to say it did (#6871
 round 15).** The claim was that gating on `needLinkCycleRecovery` "would skip
