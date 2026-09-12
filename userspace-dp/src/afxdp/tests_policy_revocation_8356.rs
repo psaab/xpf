@@ -1016,6 +1016,113 @@ const DNAT_REAL: &str = "10.0.61.102/32";
 const DNAT_VIP_CIDR: &str = "172.16.80.8/32";
 const WAN_INGRESS_IFINDEX: i32 = 12;
 
+/// #9560 round 3: the poll path's REVERSE install publishes entry-level, so a same-key
+/// predecessor's rows are released.
+///
+/// `install_with_protocol_with_origin` silently removes a same-key prior entry. The
+/// reverse install used to publish its row through the ROW-level call, which claims the
+/// new row and releases nothing — so a predecessor's extra rows stayed claimed by a
+/// worker that will never name them again, and nothing could delete them.
+///
+/// Driven through the REAL poll body (`txn_run_descriptor`) on a session MISS, because
+/// that is the only path that reaches the reverse install; the registry assertions are on
+/// the owner counts, which is the channel that moves (a recorder-only map records a
+/// delete but cannot show a claim that merely persists).
+#[test]
+fn the_poll_paths_reverse_install_releases_a_predecessors_rows_9560() {
+    use crate::afxdp::bpf_map::{
+        RECORDER_ONLY_MAP_FD, SteeringHolder, SteeringMapRef, SteeringRowOwners,
+        publish_live_session_entry, session_map_row,
+    };
+
+    let owners = std::sync::Arc::new(SteeringRowOwners::default());
+    let (syn, meta_syn, _ack, _meta_ack) = dnat_frames();
+    let snapshot = inbound_dnat_snapshot(wan_to_lan_permit(DNAT_REAL, "permit-internal"));
+    let forwarding = build_forwarding_state(&snapshot);
+    let ha_state = txn_ha_state();
+    let mut sessions = SessionTable::new();
+
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, WAN_INGRESS_IFINDEX, 0);
+    binding.interface = Arc::<str>::from("reth0.80");
+    binding.bpf_maps.session_map = SteeringMapRef::new(
+        RECORDER_ONLY_MAP_FD,
+        std::sync::Arc::clone(&owners),
+        SteeringHolder::Worker(0),
+    );
+
+    let (_batch, dbg) = txn_run_descriptor(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &syn,
+        meta_syn,
+    );
+    assert_eq!(
+        dbg.tx, 1,
+        "fixture: the SYN must be admitted and forwarded, or no reverse companion is \
+         installed and every assertion below is vacuous"
+    );
+    assert_eq!(
+        session_count(&sessions),
+        2,
+        "fixture: admission must install the forward AND its reverse companion"
+    );
+
+    // The reverse companion's key, as the poll path derived it: the one row a reverse
+    // entry names. Its claim is what the entry-level publish records.
+    let mut reverse_key: Option<SessionKey> = None;
+    sessions.iter_with_origin(|key, _decision, metadata, _origin| {
+        if metadata.is_reverse {
+            reverse_key = Some(key.clone());
+        }
+    });
+    let reverse_key = reverse_key.expect("fixture: the reverse companion must be in the table");
+    assert!(
+        owners.held_row_count(&reverse_key, 0) >= 1,
+        "the reverse install claimed nothing, so its row is unowned and an aliased \
+         session's teardown deletes it while this session still needs it (#9560)"
+    );
+
+    // A predecessor at the SAME key with a wider row set: publishing the reverse entry
+    // over it must RELEASE what the new decision does not name.
+    let extra = SessionKey {
+        src_port: reverse_key.src_port.wrapping_add(7),
+        ..reverse_key.clone()
+    };
+    let _ = publish_live_session_entry(
+        binding.bpf_maps.session_map.handle(),
+        &reverse_key,
+        crate::nat::NatDecision {
+            rewrite_src: Some(std::net::IpAddr::V4(std::net::Ipv4Addr::new(203, 0, 113, 9))),
+            rewrite_src_port: Some(51_001),
+            ..crate::nat::NatDecision::default()
+        },
+        false,
+    );
+    let widened = owners.held_row_count(&reverse_key, 0);
+    assert!(
+        widened > 1,
+        "fixture: the predecessor publish must claim MORE rows than a reverse entry \
+         names, or the release below has nothing to observe (held {widened})"
+    );
+    let _ = extra;
+
+    let _ = publish_live_session_entry(
+        binding.bpf_maps.session_map.handle(),
+        &reverse_key,
+        crate::nat::NatDecision::default(),
+        true,
+    );
+    assert_eq!(
+        owners.held_row_count(&reverse_key, 0),
+        1,
+        "a same-key reverse publish kept claims on rows its decision does not name; \
+         nothing will ever name them again (#9560 round 3). Row: {:?}",
+        session_map_row(&reverse_key)
+    );
+}
+
 fn dnat_frames() -> (Vec<u8>, UserspaceDpMeta, Vec<u8>, UserspaceDpMeta) {
     let syn = build_txn_tcp_syn_frame_v4(DNAT_CLIENT, DNAT_VIP, 54321, 443, TCP_FLAG_SYN);
     let meta_syn = txn_meta_v4(WAN_INGRESS_IFINDEX as u32, TCP_FLAG_SYN, syn.len() as u16);
