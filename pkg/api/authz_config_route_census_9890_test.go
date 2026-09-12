@@ -56,12 +56,23 @@ func TestEveryConfigPostRouteIsGatedOrDeclared9890(t *testing.T) {
 
 	for _, route := range routes {
 		_, gated := restConfigMutationRoutes[route]
+		_, content := restConfigContentRoutes[route]
 		reason, declared := restConfigRoutesUngated[route]
+		// #9892: THREE categories now — gated by path, gated by content, or
+		// declared with a reason. Still EXACTLY ONE: a route in two tables is
+		// a disagreement about whether it is adjudicated, and a reader cannot
+		// tell which is true.
+		n := 0
+		for _, in := range []bool{gated, content, declared} {
+			if in {
+				n++
+			}
+		}
 		switch {
-		case gated && declared:
-			t.Errorf("%s is BOTH gated and declared ungated — the two tables disagree about "+
-				"whether it is adjudicated, and a reader cannot tell which is true", route)
-		case gated:
+		case n > 1:
+			t.Errorf("%s appears in %d of the three tables (path-gated=%v content-gated=%v "+
+				"declared=%v) — they disagree about whether it is adjudicated", route, n, gated, content, declared)
+		case gated, content:
 		case declared:
 			if strings.TrimSpace(reason) == "" {
 				t.Errorf("%s is declared ungated with an EMPTY reason — the reason is the whole "+
@@ -69,10 +80,11 @@ func TestEveryConfigPostRouteIsGatedOrDeclared9890(t *testing.T) {
 			}
 		default:
 			t.Errorf("%s is registered but appears in NEITHER restConfigMutationRoutes nor "+
-				"restConfigRoutesUngated (#9890). If it mutates the candidate by path, gate it; "+
-				"if it cannot carry a denied path, say so in restConfigRoutesUngated. A route in "+
-				"neither is not 'allowed' — it is unexamined, which is how deactivate, activate "+
-				"and annotate went ungated.", route)
+				"restConfigContentRoutes nor restConfigRoutesUngated (#9890, #9892). If it "+
+				"mutates the candidate by path, gate it; if by content, add it to the content "+
+				"table; if it cannot carry a denied path, say so in restConfigRoutesUngated. A "+
+				"route in none is not 'allowed' — it is unexamined, which is how deactivate, "+
+				"activate and annotate went ungated, and how load stayed ungated after that.", route)
 		}
 	}
 }
@@ -97,6 +109,15 @@ func TestConfigRouteCensusSeesAKnownGatedRoute9890(t *testing.T) {
 	}
 	if _, declared := restConfigRoutesUngated["POST /api/v1/config/set"]; declared {
 		t.Fatal("POST /api/v1/config/set is declared UNGATED — the control may never be exempted")
+	}
+	// #9892: the content table has its own control, for the same reason.
+	if _, content := restConfigContentRoutes["POST /api/v1/config/load"]; !content {
+		t.Fatal("POST /api/v1/config/load is not in restConfigContentRoutes — the verb that can " +
+			"carry every denied path at once is ungated again")
+	}
+	if _, declared := restConfigRoutesUngated["POST /api/v1/config/load"]; declared {
+		t.Fatal("POST /api/v1/config/load is declared UNGATED — moving it back to the exemption " +
+			"list is the cheapest way to make a failing census green, and it reopens #9892")
 	}
 }
 
