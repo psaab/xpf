@@ -225,3 +225,134 @@ func TestGroupContainerReachesEverySameKeyedStanza9802(t *testing.T) {
 		}
 	})
 }
+
+// The prune must reach a wildcard in an INSTANCE-NAME position and nothing
+// else. The first cut keyed on node shape (`!IsLeaf || len(Keys) >= 2`) and
+// took two ordinary two-key leaves with it. Measured at ef390f3ac against
+// 4cc9b66e6: the description was kept and then dropped, and the compact member
+// was refused and then committed clean.
+func TestPruneReachesOnlyInstanceNames9802(t *testing.T) {
+	t.Run("a scalar whose value spells a wildcard survives", func(t *testing.T) {
+		const text = `groups { G { interfaces { ge-0/0/0 { description "<*>"; unit 0 { family inet { address 10.0.0.1/24; } } } } } } apply-groups G; system { host-name p; }`
+		tree, perrs := NewParser(text).Parse()
+		if len(perrs) > 0 {
+			t.Fatalf("fixture must parse: %v", perrs)
+		}
+		cfg, err := CompileConfig(tree)
+		if err != nil {
+			t.Fatalf("strict compile: %v", err)
+		}
+		ifc := cfg.Interfaces.Interfaces["ge-0/0/0"]
+		if ifc == nil {
+			t.Fatalf("the adopted interface did not compile")
+		}
+		if ifc.Description != "<*>" {
+			t.Errorf("compiled description %q, want `<*>`: a scalar VALUE is not an instance name (#9802)", ifc.Description)
+		}
+	})
+	t.Run("a COMPACT zone member stays refused", func(t *testing.T) {
+		const text = `groups { G { security { zones { security-zone trust { interfaces <ge-*>; } } } } } apply-groups G; interfaces { ge-0/0/0 { unit 0 { family inet { address 10.0.0.1/24; } } } }`
+		tree, perrs := NewParser(text).Parse()
+		if len(perrs) > 0 {
+			t.Fatalf("fixture must parse: %v", perrs)
+		}
+		_, err := CompileConfig(tree)
+		if err == nil {
+			t.Fatalf("strict accepted a compact wildcard zone member; the block spelling is refused and this one must be too (#9802, #9423)")
+		}
+		if !strings.Contains(err.Error(), "<ge-*>") {
+			t.Errorf("refused, but the message does not name the token: %v (#9802)", err)
+		}
+	})
+}
+
+// Each concrete child of a group container goes to the stanza that can receive
+// IT. Bundling them sent a body carrying `screen` and `zones` to whichever
+// stanza matched first: measured at 4cc9b66e6, `trust` lost the group's screen
+// that master ef390f3ac gave it.
+func TestGroupBodyChildrenRouteIndependently9802(t *testing.T) {
+	const text = `groups { G { security { screen { ids-option edge { icmp { ping-death; } } } zones { security-zone <*> { screen edge; } } } } } apply-groups G; security { screen { ids-option local { icmp { ping-death; } } } } security { zones { security-zone trust { } } }`
+	tree, perrs := NewParser(text).Parse()
+	if len(perrs) > 0 {
+		t.Fatalf("fixture must parse: %v", perrs)
+	}
+	cfg, err := CompileConfig(tree)
+	if err != nil {
+		t.Fatalf("strict compile: %v", err)
+	}
+	z := cfg.Security.Zones["trust"]
+	if z == nil {
+		t.Fatalf("zone trust did not compile")
+	}
+	if z.ScreenProfile != "edge" {
+		t.Errorf("zone trust compiled ScreenProfile=%q, want `edge`: `screen` and `zones` live in different stanzas and each child must reach its own (#9802)", z.ScreenProfile)
+	}
+}
+
+// A multi-key container must reach its OWN stanza, not one that merely shares a
+// first key. Codex round 1 on #9802 traced this, and the consequence is policy
+// ORDER, not tree shape: with the group's pair captured by the `to-zone dmz`
+// stanza, the compiled config carried TWO `trust -> untrust` sets with the
+// group's policy in the FIRST one, so it was evaluated before the inline
+// policy. Measured at 4cc9b66e6: `[trust->untrust:[pg], trust->untrust:[qu]]`,
+// against `[trust->untrust:[qu,pg]]` here.
+func TestGroupBodyRoutingPrefersAnExactMatch9802(t *testing.T) {
+	const text = `groups { G { security { policies { from-zone trust to-zone untrust { policy pg { match { source-address any; destination-address any; application any; } then { deny; } } } } } } } apply-groups G; ` +
+		`security { zones { security-zone trust { } security-zone untrust { } security-zone dmz { } } ` +
+		`policies { from-zone trust to-zone dmz { policy qd { match { source-address any; destination-address any; application any; } then { deny; } } } } ` +
+		`policies { from-zone trust to-zone untrust { policy qu { match { source-address any; destination-address any; application any; } then { deny; } } } } }`
+	tree, perrs := NewParser(text).Parse()
+	if len(perrs) > 0 {
+		t.Fatalf("fixture must parse: %v", perrs)
+	}
+	cfg, err := CompileConfig(tree)
+	if err != nil {
+		t.Fatalf("strict compile: %v", err)
+	}
+	var sets []string
+	for _, zp := range cfg.Security.Policies {
+		if zp.FromZone != "trust" || zp.ToZone != "untrust" {
+			continue
+		}
+		var names []string
+		for _, p := range zp.Policies {
+			names = append(names, p.Name)
+		}
+		sets = append(sets, strings.Join(names, ","))
+	}
+	if len(sets) != 1 || sets[0] != "qu,pg" {
+		t.Errorf("compiled trust->untrust sets %v, want one set [qu,pg]: the group's pair must reach its own stanza, and a second set would evaluate it before the inline policy (#9802)", sets)
+	}
+}
+
+// The wildcard must sit in the INSTANCE-NAME span. A wildcard in a VALUE
+// position belongs to the statement, not to an instance, so the statement is
+// adopted whole. Without the span test the syslog host statement is pruned and
+// the destination never compiles.
+//
+// The fixture is chosen so the rule is actually reachable. It keeps a PACKED
+// tail (no admitted pair folds `host <addr> <tail>` into a body), and it
+// resolves through NAMED schema children: `schemaAtAncestorPath` does not
+// resolve through a wildcard hop such as a dynamic interface name, so a fixture
+// under `interfaces` would decline for want of a schema rather than for want of
+// the span.
+func TestPruneNeedsTheWildcardInTheIdentitySpan9802(t *testing.T) {
+	const text = `groups { G { system { syslog { host 10.0.0.1 <*>; } } } } apply-groups G; interfaces { ge-0/0/0 { unit 0; } }`
+	tree, perrs := NewParser(text).Parse()
+	if len(perrs) > 0 {
+		t.Fatalf("fixture must parse: %v", perrs)
+	}
+	cfg, err := CompileConfigLenient(tree)
+	if err != nil {
+		t.Fatalf("lenient compile: %v", err)
+	}
+	var addrs []string
+	if cfg.System.Syslog != nil {
+		for _, h := range cfg.System.Syslog.Hosts {
+			addrs = append(addrs, h.Address)
+		}
+	}
+	if len(addrs) != 1 || addrs[0] != "10.0.0.1" {
+		t.Errorf("compiled syslog hosts %v, want [10.0.0.1]: the wildcard sits in a VALUE position, so the statement is not an instance name and is adopted whole (#9802)", addrs)
+	}
+}

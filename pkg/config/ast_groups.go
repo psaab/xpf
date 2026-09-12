@@ -517,9 +517,14 @@ func mergeNodes(dst *[]*Node, src []*Node, ancestorPath [][]string, budget *grou
 		found := false
 		if targets := sameKeyedContainers9802(*dst, s.Keys); len(targets) > 0 {
 			wild, rest := splitWildcardChildren9802(s.Children)
-			if len(rest) > 0 {
-				d := receivingContainer9802(targets, rest)
-				if err := mergeNodes(&d.Children, rest, appendPath(ancestorPath, d.Keys), budget, group, vars); err != nil {
+			// #9802 follow-up: route EACH concrete child to the stanza that can
+			// receive it. Bundling them sent a body carrying `screen` and
+			// `zones` to whichever stanza matched first, and the other stanza
+			// never saw the group: measured, `trust.ScreenProfile` went from
+			// `edge` to empty.
+			for _, c := range rest {
+				d := receivingContainer9802(targets, c)
+				if err := mergeNodes(&d.Children, []*Node{c}, appendPath(ancestorPath, d.Keys), budget, group, vars); err != nil {
 					return err
 				}
 			}
@@ -557,8 +562,8 @@ func mergeNodes(dst *[]*Node, src []*Node, ancestorPath [][]string, budget *grou
 			// and stays refused. Pruned BEFORE the charge below, so the budget
 			// counts what is actually added.
 			hadChildren := len(s.Children) > 0
-			s.Children = pruneWildcardInstances9802(s.Children)
-			if wildcardInstanceNode9802(s) {
+			s.Children = pruneWildcardInstances9802(appendPath(ancestorPath, s.Keys), s.Children)
+			if wildcardInstanceNode9802(ancestorPath, s) {
 				continue
 			}
 			// A container whose whole body was wildcard-keyed adds nothing:
