@@ -5395,6 +5395,20 @@ fn fixture_9714(rg_active: bool) -> Fixture9714 {
 
 /// `fixture_9714` with the forward entry's origin chosen by the cell.
 fn fixture_9714_with_origin(rg_active: bool, origin: SessionOrigin) -> Fixture9714 {
+    fixture_9714_with_owner_rg(rg_active, origin, RG_9714)
+}
+
+/// `fixture_9714_with_origin` with the ENTRY's owner RG chosen by the cell (#9714
+/// F4). The RG map always carries `RG_9714` and `rg_active` says whether it is
+/// forwarding; `owner_rg_id` is what the ENTRY claims. Passing 0 models an entry
+/// whose owner could not be RESOLVED while a redundancy group is still forwarding —
+/// the case `owner_rg_is_locally_active` failed open on, because it hard-requires
+/// `owner_rg_id > 0`.
+fn fixture_9714_with_owner_rg(
+    rg_active: bool,
+    origin: SessionOrigin,
+    owner_rg_id: i32,
+) -> Fixture9714 {
     let mut coordinator = Coordinator::new();
     coordinator.set_forwarding_for_test(reserve6600_forwarding());
     let worker_a = Arc::new(Mutex::new(VecDeque::new()));
@@ -5483,6 +5497,85 @@ impl Fixture9714 {
     fn dnat_holds(&self) -> usize {
         crate::afxdp::checksum::dnat_steering_holder_count(&self.forward.key, self.forward.decision.nat)
     }
+}
+
+/// #9714 F4: owner RG 0 means the entry's owner could not be RESOLVED, not that the
+/// entry has no owner. `owner_rg_is_locally_active` hard-required `owner_rg_id > 0`,
+/// so a peer delete of such a LOCAL session was applied even while this node was
+/// forwarding for a redundancy group — while the INSTALL side
+/// (`synced_entry_allows_local_replace`) had already declined to clobber the same
+/// entry. A delete guard weaker than the install guard it mirrors is #9714 through a
+/// second door. Both guards now ask the install side's question.
+#[test]
+fn a_peer_delete_of_a_live_local_session_with_an_unresolved_owner_rg_is_refused_9714() {
+    let fixture = fixture_9714_with_owner_rg(true, SessionOrigin::ForwardFlow, 0);
+    assert_eq!(
+        fixture.forward.metadata.owner_rg_id, 0,
+        "FIXTURE: this cell is about an UNRESOLVED owner; a non-zero owner is what the \
+         acceptance cell below already covers, and the two must not collapse"
+    );
+    assert!(
+        fixture.shared_has(&fixture.forward.key) && fixture.shared_has(&fixture.reverse_key),
+        "FIXTURE: the local forward and reverse entries must be in the shared maps"
+    );
+    crate::afxdp::bpf_map::clear_session_map_writes();
+
+    let refused = fixture
+        .coordinator
+        .session_domain()
+        .delete_peer_synced_session(fixture.forward.key.clone());
+
+    let writes = crate::afxdp::bpf_map::session_map_writes();
+    assert!(
+        refused,
+        "a peer delete of a live LOCAL session whose owner RG is UNRESOLVED was applied: owner 0 \
+         is unknown-not-absent, and the install guard already refuses it (#9714 F4)"
+    );
+    assert!(
+        fixture.shared_has(&fixture.forward.key) && fixture.shared_has(&fixture.reverse_key),
+        "a peer delete removed the shared rows of an unresolved-owner local session"
+    );
+    assert!(
+        !fixture.steering_deleted(&writes),
+        "a peer delete deleted the steering row of an unresolved-owner local session, so its \
+         packets stop forwarding while the session still exists"
+    );
+    assert!(
+        !fixture.queued_delete(&fixture.forward.key),
+        "a peer delete fanned DeleteSynced out to the workers for an unresolved-owner local \
+         session, dropping the sibling replicas"
+    );
+}
+
+/// The CONTROL for the cell above, and the reason that cell can discriminate at all:
+/// with NO redundancy group forwarding-active, owner 0 is NOT protected and the same
+/// peer delete still applies. Without this, the refusal cell passes just as well
+/// against a guard that refuses everything — which is the shape a correct-looking
+/// fix and a broken one share.
+#[test]
+fn a_peer_delete_with_an_unresolved_owner_rg_and_no_active_group_still_deletes_9714() {
+    let fixture = fixture_9714_with_owner_rg(false, SessionOrigin::ForwardFlow, 0);
+    assert!(
+        fixture.shared_has(&fixture.forward.key),
+        "FIXTURE: the forward entry must start in the shared maps, or the assertion below is \
+         vacuous"
+    );
+    crate::afxdp::bpf_map::clear_session_map_writes();
+
+    let refused = fixture
+        .coordinator
+        .session_domain()
+        .delete_peer_synced_session(fixture.forward.key.clone());
+
+    assert!(
+        !refused,
+        "owner 0 was treated as protected with NO group forwarding-active: the guard must key on \
+         whether this node is actually forwarding, not on the owner being unknown (#9714 F4)"
+    );
+    assert!(
+        !fixture.shared_has(&fixture.forward.key),
+        "the shared forward row survived a peer delete that nothing protected"
+    );
 }
 
 /// THE ACCEPTANCE CRITERION: a peer delete of a live local session whose owner RG

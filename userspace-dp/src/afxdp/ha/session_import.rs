@@ -811,10 +811,22 @@ impl crate::afxdp::ha::SessionDomain {
         // #9714: refuse a PEER delete of a live local session whose owner RG is
         // locally active, before any kernel, DNAT or shared delete and before the
         // worker fan-out. Nothing below runs, so no sibling replica is dropped.
+        //
+        // #9714 F4: the predicate is the INSTALL side's
+        // `synced_entry_allows_local_replace`, NOT `owner_rg_is_locally_active`.
+        // The latter hard-requires `owner_rg_id > 0`, so owner 0 — which means
+        // UNKNOWN rather than "no RG" — fell straight through to the delete,
+        // while the install side already refused to clobber such an entry
+        // whenever ANY redundancy group is forwarding-active. A delete guard
+        // weaker than the install guard it mirrors is the #9714 defect through a
+        // second door: the peer tears down what the peer could not have
+        // installed. The same fail-open sat on BOTH delete guards (here and the
+        // worker's #9048 refusal in `handle_delete_synced`); both move together,
+        // so the two verbs keep agreeing by construction rather than by comment.
         if peer_delete
             && let Some(entry) = removed_entry.as_ref()
             && !entry.origin.is_peer_synced()
-            && owner_rg_is_locally_active(
+            && !synced_entry_allows_local_replace(
                 self.rg_runtime.load().as_ref(),
                 entry.metadata.owner_rg_id,
                 monotonic_nanos() / 1_000_000_000,
