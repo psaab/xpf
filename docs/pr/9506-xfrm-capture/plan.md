@@ -1,453 +1,461 @@
-# #9506 — Route-based IPsec decrypted-ingress capture/re-entry bridge (PLAN ONLY, r3)
+# #9506 — Route-based IPsec decrypted-ingress capture/re-entry bridge (PLAN ONLY, r4)
 
 ## 0. Status
 
-**PLAN r3** — no production code. Revision 3 (final planned round) of the
-triple-review planning artifact for `psaab/xpf#9506`, after round-2
-hostile review (Codex: NEEDS-MAJOR; GLM: NEEDS-MINOR — raw verdicts in
-`reviews/codex-r2.txt`, `reviews/glm-5.3-r2.txt`). Neither round-2 review
-is a PLAN-KILL; both converge on the same substance and differ only in
-severity. Successor to closed #8276 (priced only) and umbrella #7167
-(closed NOT_PLANNED, not fixed).
+**PLAN r4** — no production code. Revision 4, one targeted round
+authorized by parent on Codex-r3-terms ("re-plan the disposition/
+lifecycle core — the gaps are architectural, not editorial"), after a
+round-3 split (Codex: NEEDS-MAJOR; GLM: NEEDS-MINOR — raw verdicts in
+`reviews/codex-r3.txt`, `reviews/glm-5.3-r3.txt`). Neither review is a
+PLAN-KILL; both retain NFQUEUE as the research candidate. Successor to
+closed #8276 (priced only) and umbrella #7167 (closed NOT_PLANNED).
 
 - Branch: `research/9506-xfrm-capture`, base `origin/master 7ef226474`.
-- What changed in r3 (codes C2x = Codex r2, Nx = GLM r2): unified
-  three-way verdict disposition replacing the permit-release/TUN
-  contradiction (C2A/N1); shadow redefined as divert-hold with
-  ACCEPT-always, AF_PACKET removed from the plan (C2B/N2); generation
-  bound to queue instances with verdict-issue as the linearization
-  point, T17 replaced (C2C/N6); overlapped (double-buffered) pipeline
-  specified, stop-and-wait prohibited (C2-§5); B1 claims separated
-  into demonstrated/conditional/untested (C2-§4); numerical T22 gates
-  (C2-§5); verdict-loop B-invariance stated (N3); chain-presence
-  overhead row (N4); per-tunnel queues (N5); fragment end-to-end
-  semantics (C2-§6); worker dispatch rule (C2-§7); checksum/offload
-  contract (C2-§7); TUN-exclusion inversion fixed (C2-§7);
-  supervisor-side observability (C2-§7); lifecycle/ordering contract
-  (C2-§3); citation drift fixed (N7/C2-§7).
+- What changed in r4 (Cx = Codex r3, Hx = GLM r3): disposition-specific
+  commit points with attempted/successful/uncertain submission, REINJECT
+  linearized at TUN submission (A); supervisor deadline + explicit
+  teardown, no per-packet-timeout reliance (A); worker×instance TUN
+  model with bounds (B); second-traversal accounting — TTL
+  compensation, mark save/restore, policy-free post-TUN topology,
+  route-stability fence at commit (B); drain-before-activation flip
+  with transitional epoch, receive-time phase sampling, cancel-over-
+  ACCEPT precedence, quarantined shadow sessions (C); full queue
+  lifecycle protocol — quarantine, atomic swap, listener lifetime,
+  epoch-tagged verdict identifiers, in-flight classification,
+  snapshot coordination (D); derived T22 workload + stage-rate
+  analysis (E); batch-verdict factual correction — implementation
+  selects and prices the verdict API, plan asserts nothing (E);
+  out-of-order verdicts with per-flow FIFO + separate fragment slots
+  (blocking); owner-homogeneous sub-batches (blocking); v6
+  overlap-drop + v4 hole-tracking (blocking); repriced reassembly
+  budget + stated tunnel max (major); shadow failure table (H2);
+  counter-pinning + local-address-set lifecycle (H6); metadata/
+  conntrack residuals (H3); class-stickiness + reorder bound (H4);
+  queue-timeout ownership (H5); phase-in-tuple (H1).
 - Gate: hostile review by `zai/glm-5.3` + `openai-codex/gpt-6-astra`,
-  raw outputs in `reviews/`. This is round 3 of max 3.
+  raw outputs in `reviews/`. Round 4 of max 4 (one targeted extension).
 
 ## 1. Framing
 
-Route-based IPsec (`bind-interface stN`, the only IPsec model xpf supports
-since policy-based `then permit tunnel` is hard-rejected per #3114)
-decrypts in the kernel XFRM stack. Plaintext surfaces on the `xfrmi`
-netdev, which is **excluded from AF_XDP ingress adjudication in both
-planes independently** (Go `pkg/dataplane/userspace/ingress_exclusions.go`
-`SecureTunnel` class via `userspaceSkipsIngressInterface` gating
-`buildUserspaceIngressIfindexes`; Rust `planning.rs`
-`include_userspace_binding_interface`). The armed kernel-forward path is
-**deliberately open** (`daemon_transit_gate.go` removes the barrier when
-armed; the barrier exists only while unarmed when `ip_forward` is already
-0 — `transit_barrier.go:36-39`). Admission is warning-only
-(`compiler_ipsec_plaintext_warn.go:120-191`).
+Route-based IPsec (`bind-interface stN`, the only IPsec model xpf supports)
+decrypts in kernel XFRM; plaintext surfaces on the `xfrmi`, excluded from
+AF_XDP adjudication in both planes (`ingress_exclusions.go` SecureTunnel
+class; `planning.rs` `include_userspace_binding_interface`); the armed
+forward path is deliberately open (`daemon_transit_gate.go` removes the
+barrier when armed); admission is warning-only. An authenticated peer's
+inner packets forward with no policy/session/NAT/screen/counter/deny —
+disclosed, unremediated, high-severity, no active owner.
 
-Net effect: an authenticated peer's inner packets reach kernel-routed
-destinations with no zone policy, no session, no NAT, no screen, no
-counter, no deny event. Disclosed (`docs/userspace-dataplane-gaps.md`,
-commit-time advisory), unremediated, high-severity, no active owner.
-
-Round-2 correction, stated plainly: r2 named the denial mechanism but
-left the *permit* half holding two egresses at once (verdict-release
-AND TUN re-inject). A plan whose tests cannot tell which wire a
-permitted packet leaves on is not implementable. This revision replaces
-both with one three-way verdict contract (§4.2).
+Round-3 correction, stated plainly: r3's "verdict-issue linearization"
+was wrong for REINJECT (the TUN write authorizes before any verdict is
+issued), "exactly-one-wire" overclaimed crash semantics, and several
+lifecycle sentences named properties without mechanisms. This revision
+replaces the single linearization point with a per-disposition commit
+table and gives every lifecycle claim a protocol.
 
 ## 2. Honest scope and value, with absolute numbers
 
-If built and gated: every decrypted-ingress inner flow evaluated against
-the tunnel's zone policy before session/flow-cache lookup, disposed by
-exactly one verdict (DROP / ACCEPT / REINJECT), with permit/deny
-evidence, IPv4 + IPv6, host-bound included, multi-tunnel isolated.
-Unmeasured: kernel-half cost, owned-frame adjudication cost,
-TUN-write cost — all committed as gate rows, none spent as budget.
+If built and gated: every decrypted-ingress inner flow disposed by
+exactly one verdict (DROP / ACCEPT / REINJECT) against the tunnel's zone
+policy, with evidence, v4+v6, host-bound included, multi-tunnel
+isolated. Unmeasured: kernel-half cost, adjudication cost, TUN-write
+cost — all gate rows, none spent as budget.
 
-Budget (r2 derivation retained; round-2 precision fixes applied):
+Budget (r2 derivation retained; r4 corrections):
 
-- 2,797 ns is the reciprocal of #5275's whole-box throughput — a scale
-  reference only, never spendable. The bridge allowance is incremental:
-  sustained tunnel throughput ≥ **80% of the pre-bridge same-topology
-  baseline** on the loss cluster, p99 added latency ≤ **250 µs**
-  (covers the 100 µs flush cap + verdict loop + one TUN write on the
-  REINJECT path). Both numbers are gate-ratified: G2 re-measures the
-  baseline on the same boxes and either confirms or kills (C2-§5).
-- Per-thread attribution; binding constraint = worse thread.
-- Verified bench facts: ~111 ns same-thread rows already include the
-  copy; cross-thread consumer reads only `f.len()`; cross-thread row
-  uses `sync_channel` vs production's mutex `VecDeque`; no batched row
-  exists (`X/B` is hypothesis); 4096 × 1504 B = 6.16 MB (5.88 MiB).
-- The verdict-issue loop (`recvmsg` per drained packet + verdict
-  `sendmsg` per packet) is **B-invariant**: there is no mainline
-  batched-verdict NFQUEUE API. B amortizes the capture→worker wake
-  only. The G2 kill criterion therefore tests whether NFQUEUE's
-  per-packet API cost is affordable *at all* — B cannot rescue a
-  B-invariant term (N3). If the syscall pair alone busts the floor, B2
-  is dead per Q1.
-- Sustained-flood floor B ≥ 8 (target 8–32, bound 64); timer-flushed
-  partials measured in the occupancy distribution; B=3 struck as dead.
+- 2,797 ns = whole-box reciprocal, scale reference only. Allowance is
+  incremental: T22 floors (derived in §8, not asserted here).
+- Per-thread attribution; binding = worse thread.
+- Verified bench facts: 111 ns rows include the copy; cross-thread
+  consumer reads only `f.len()`; cross-thread row is `sync_channel`
+  vs production mutex `VecDeque`; no batched row exists.
+- The verdict-issue path is priced as two terms with different
+  B-dependence: the capture→worker wake (per-batch, B-amortized) and
+  the socket half (per-packet objective cost whose batching depends on
+  the verdict API the implementation selects — see below). G2's kill
+  phrasing: if the B-invariant portion alone busts T22, no B saves it.
+- **Factual correction (Cx-E):** r3 claimed "no mainline batched-verdict
+  NFQUEUE API". The reviewer asserts batch/cumulative verdict support
+  exists; this box carries no libnetfilter_queue headers to check
+  against, so this plan asserts NOTHING about API availability. The
+  implementation selects per-packet and/or batch verdict calls and
+  prices the chosen shape in G2. Constraint the plan does impose:
+  cumulative batch semantics cannot express arbitrary mixed
+  dispositions — mixed batches use per-packet verdicts, or
+  disposition-homogeneous grouping where the API allows it. The
+  economics section prices the chosen shape; it never denies a
+  capability again.
+- Floor B ≥ 8 sustained (target 8–32, bound 64); timer-flushed partials
+  in the occupancy distribution; B=3 dead.
 
 ## 3. Shipped work (not re-proposed)
 
-- #8276 / PR #8604: pricing instrument; kernel half explicitly unpriced.
-- #7167 adjudication: case against naive AF_XDP attach, refreshed for
-  #7497, with round-2 honesty classes (C2-§4) — **demonstrated**:
-  (a) Ethernet-only `parse_l2` before the ingress-set gate misparses
-  raw-L3; (b) half-admission impossible (ingress map without READY
-  binding ⇒ `drop_degraded_transit`); **conditional**: (c) one-shot
-  `COPY_ONLY` bind with no fallback black-holes *if* copy-mode attach
-  fails; (d) no-egress ⇒ recycle *for tunnel-originated ingress*
-  (the commentary warns the blanket `missing_egress_binding` account
-  was wrong for LAN-to-tunnel traffic — corrected here); **untested**:
-  (e) whether copy-mode XSK comes up on `ARPHRD_NONE` at all
-  (explicitly unclaimed in-tree; needs a live NIC). Live guards:
-  `secure_tunnel_adds_nothing_to_the_binding_plan`,
-  `binding_candidate_excludes_secure_tunnel`. Pre-#7497 global queue
-  collapse retired with its guard. Inherited: adjudication identity ≠
-  binding admission; the re-entry TUN (§4.5) must never enter the shim
-  ingress map.
-- #8274: owned-frame entry pattern + #6682 unzoned guard.
-- #7949: snapshot visibility (egress half); ingress advisory stays
-  until enforcement is real. #7191/#5275: unarmed-only barrier;
-  load-bearing bypass. #7480: `NoRoute`-arm denial respected; the
-  permit-all-defaults outbound residual stays out (§9). #7497:
-  per-interface `min(rx_queues, 16)`.
+#8276/#8604 instrument (kernel half unpriced). #7167 anti-AF_XDP case in
+demonstrated/conditional/untested classes (r2 §3 retained). #8274
+owned-frame pattern + #6682 guard. #7949 snapshot visibility. #7191 /
+#5275 unarmed-only barrier; load-bearing bypass. #7480 NoRoute-arm
+denial; permit-all outbound residual out (§9). #7497 per-interface
+queues. #9646 local-address capacity gate (reused §6.12).
 
 ## 4. Concrete design
 
 ### 4.1 Order
 
-Authority (§4.2) → handoff pipeline (§4.3) → adjudication entry (§4.4)
-→ re-entry (§4.5) → phasing (§4.6) → prohibitions (§4.7). No section
-assumes what an earlier one has not supplied.
+Authority + commit points (§4.2) → handoff pipeline (§4.3) →
+adjudication entry (§4.4) → re-entry TUN contract (§4.5) → phasing
+(§4.6) → prohibitions (§4.7).
 
-### 4.2 Transport + closure: scoped NFQUEUE divert; ONE three-way verdict contract
+### 4.2 Transport, closure, and the commit table
 
 Divert rules (exact, checkable): `forward`: `iifname == <stN> → queue`;
-`input`: `iifname == <stN>` with host destination → `queue`. Untouched:
-outbound (`oif == stN`, match is on `iif`); SNAT/`accept_local` frames
-(different ingress); #7409 reinject (inject path, never `iif == stN`)
-— asserted here, pinned by [P] tests with the divert live (T12), never
-trusted on assertion alone (C2-§3). The refuted object is the
-*unconditional policy-DROP chain*; the divert carries no verdict, drops
-nothing by rule, and closes the bypass *by hold*, verdicts deferred to
-the adjudicator. Q7 + T12 pin the exact rule set against drift.
+`input`: `iifname == <stN>` + host-destination (match set = the
+`buildDesiredLocalAddressSets` enumeration that already feeds
+`userspace_local_v4/v6`, per generation, #9646 capacity-checked; stale
+entries purged on rotation — H6) → `queue`. Untouched: `oif == stN`
+outbound, SNAT/`accept_local` ingress, #7409 reinject — asserted,
+pinned by [P] T12 with divert live. Refuted object = unconditional
+policy-DROP chain; divert carries no verdict, drops nothing by rule.
+Q7 + T12 pin the rule set against drift.
 
-**Disposition contract (unified, C2A/N1).** Every held packet receives
-exactly one verdict:
+**Commit table (Cx-A — replaces r3's single linearization point).**
 
-- **DROP** — deny. The held original dies in the queue. No second
-  copy exists anywhere. This is the whole deny path.
-- **ACCEPT** — permit with no userspace mutation (no NAT rewrite and
-  kernel FIB route == adjudicated route). The kernel forwards/delivers
-  the held original. No TUN involved.
-- **REINJECT** — permit requiring userspace-applied mutation (NAT
-  address/port rewrite, or VRF/table selection differing from kernel
-  FIB — load-bearing for T3's overlapping prefixes): userspace writes
-  the mutated frame to the instance-bound re-entry TUN (§4.5) and the
-  held original receives DROP. Issue order is write-then-verdict; a
-  crash between the two leaves the original held until queue
-  timeout/release, which the kernel drops (fail-closed). Exactly one
-  wire per packet in every outcome.
+| Disposition | Commits at | Generation fence | Failure between adjudication and commit |
+|---|---|---|---|
+| ACCEPT | successful verdict submission (syscall success AND queue epoch live at return) | epoch re-check immediately before submission | pre-commit demotion/rotation ⇒ DROP-and-count, never submitted |
+| REINJECT | successful TUN `write()` of the full mutated frame | epoch re-check immediately before `write()`; the DROP verdict on the held original afterwards is cleanup, not authorization | pre-write demotion ⇒ DROP-and-count, NO write; crash after write ⇒ permit completes, original dies held (at-most-once) |
+| DROP | successful verdict submission (same boundary as ACCEPT) | epoch re-check before submission | same as ACCEPT |
 
-Coverage of the contract: modified packets ⇒ REINJECT (IP-header
-mutation applied uniformly to all fragments of a datagram; a permit
-needing L4-dependent mutation on a non-first fragment ⇒ DROP-and-count,
-documented limitation); host delivery ⇒ input-hook verdicts are
-DROP/ACCEPT only (a host-bound flow needing mutation ⇒ DROP-and-count,
-documented limitation); fragment completion ⇒ one verdict class per
-datagram applied to every held fragment (§6.8); errors/cancellation ⇒
-verdict-issue failure leaves the packet held ⇒ kernel drops on
-timeout/release (fail-closed). T2/T11/T15 are authored against this
-contract and no other.
+Submission states, distinguished everywhere (Cx-A): **attempted**
+(syscall issued), **successful** (returned success with epoch live),
+**uncertain** (syscall error, or epoch rotated mid-call, or return
+status ambiguous). Uncertain ⇒ counted as uncertain and resolved
+fail-closed: the packet is never assumed disposed; supervisor
+reconciliation (queue-stats audit + teardown default of drop) converges
+it to dropped. "Exactly-one-wire" is struck as a guarantee and
+replaced with **at-most-once emission + fail-closed convergence**:
+zero deliveries (pre-commit crash) and one delivery are the only
+outcomes the design produces; duplicates are structurally excluded
+(the original cannot leave before its verdict; the replacement exists
+only after a committed write); uncertain outcomes converge to dropped.
 
-Generation and linearization (C2C/N6): **generation binds to the queue
-instance, not the packet stamp.** Rotation creates a new queue under
-the new generation and detaches the old (pending ⇒ kernel-dropped,
-fail-closed). Packets are identified with their queue's generation by
-construction — no retrospective stamping of kernel-buffered packets.
-The **linearization point is verdict issue**: demotion before a
-packet's verdict is issued ⇒ DROP-and-count; demotion after an ACCEPT
-was issued ⇒ the packet was authorized under a live generation at
-issue and the kernel owns it (valid — T17's "post-verdict
-pre-transmit cancellation" is struck as unimplementable: no
-enforcement point exists past release, and the plan no longer
-pretends one does). The physical fence is quiesce-before-issue on the
-capture thread for orderly demotion, or demotion-time arm-down
-(downstream drops) for abrupt loss; the gate picks the default.
-"A verdict already sent to the kernel cannot be recalled" is stated
-once, here, and §6.5 no longer claims otherwise.
+**No per-packet-timeout reliance (Cx-A).** NFQUEUE supplies no generic
+per-packet timeout and the plan no longer implies one. The bound is a
+**supervisor verdict deadline: 50 ms from capture** (tunable,
+gate-validated). Expiry ⇒ supervisor teardown sequence: detach rule →
+drain-or-deadline old queue → destroy queue → confirm destruction;
+pending packets die with the queue (kernel default). Teardown is a
+tested mechanism (T10/T14), not a sentence.
 
-Lifecycle/ordering (C2-§3): the divert transfers disposition authority
-and can drop on failure — safety comes from scope + lifecycle, never
-from "carries no verdict". Divert install failure uses a DIFFERENT
-contract than the transit barrier's tolerated failure: the barrier is
-belt-to-braces over an already-closed window, while an authoritative
-divert that fails to install leaves the tunnel DOWN (fail-closed),
-never open-forwarding. Rule ownership and atomic ordering against
-tunnel create/activate/replace/teardown and daemon restart: divert
-lifecycle is tied to snapshot generation — after restart, closed until
-the divert is re-resolved and confirmed. The input twin orders before
-host-inbound policy (it supplies packets TO policy, a stated ordering
-requirement + test).
+**Route-stability fence at commit (Cx-B).** The FIB-vs-adjudicated
+guarantee under PBR/ECMP/concurrent change is bounded honestly: the
+worker re-resolves the route at commit; mismatch with the adjudicated
+route ⇒ DROP-and-count (route-flap fail-closed) + counter. Guarantee =
+"egress realizes the adjudicated route iff the FIB is stable across
+the adjudication→commit window; otherwise drop." No stronger claim.
 
-Fairness (N5): **per-tunnel queues** (isolation over thread economy;
-thread count bounded by a stated tunnel max, over-max ⇒ tunnel stays
-down, counted). One shared queue would make one tunnel's flood
-head-of-line-block the rest — chosen against, with a per-queue-depth
-counter and test.
+**Queue lifecycle protocol (Cx-D).** Queue numbers come from a
+per-daemon allocator as `(number, epoch)` handles with **reuse
+quarantine**: a number is not reused until the old listener has exited
+AND queue destruction is confirmed AND one full supervisor tick has
+passed. Atomic replacement ordering: create new queue → install new
+rule → drain-or-deadline old → delete old rule → destroy old queue.
+Old listener lifetime: until drain-complete or the supervisor
+deadline, then thread teardown + destroy. Verdict identifiers carry
+`(number, epoch)`; a verdict addressing a recycled number with a stale
+epoch is refused (quarantine + epoch check at send — test-pinned).
+Pre-rotation in-flight classification: the diversion boundary defines
+the epoch — a packet reaching the hook after the new rule installs
+belongs to the new queue even if it entered the stack earlier
+(stated, tested). Snapshot coordination: rotation is serialized with
+snapshot publication; a worker whose snapshot version is older than
+the queue epoch at commit ⇒ DROP-and-count (no verdict from stale
+policy, test-pinned).
 
-### 4.3 Handoff pipeline: batched AND overlapped (stop-and-wait prohibited)
+Fairness: per-tunnel queues (head-of-line isolation); bound stated in
+§6 (tunnel max); over-max ⇒ tunnel down + counted.
 
-Batching amortizes the capture→worker wake; it never amortizes the
-B-invariant socket half (§2). The pipeline is double-buffered:
-bounded in-flight depth ≥ 2 batches — the capture thread drains batch
-N+1 while the worker adjudicates batch N — with a bounded
-worker→capture verdict queue. The capture thread NEVER blocks on the
-worker: full verdict/batching queue ⇒ try-or-drop-and-count
-(fail-closed). R1/r2's "drain → wait → issue → drain" read is
-explicitly prohibited as an implementation shape (C2-§5). G1/G2 rows
-cover the real pipeline: batched send, cross-core payload read,
-verdict-queue behavior under overload, mixed permit/deny traffic
-(never clean-permit synthetics alone).
+### 4.3 Handoff pipeline: batched, overlapped, per-flow ordered
+
+Double-buffered in-flight ≥ 2 batches; bounded worker→capture verdict
+queue; capture thread never blocks (try-or-drop-and-count,
+fail-closed); stop-and-wait prohibited. **Out-of-order verdicts
+(blocking Cx finding):** verdicts may issue out of capture order —
+capture-order issuance plus held fragments would head-of-line-block
+unrelated flows. Constraint retained: **per-flow FIFO** (capture thread
+holds per-flow sequence numbers; a flow's verdicts issue in order).
+**Fragment slots are a separate bounded pool** from ordinary batch
+slots: incomplete datagrams consume fragment ownership, never block
+other flows' verdicts; expiry sweeps reclaim. G1/G2 rows: batched
+send, cross-core payload read, verdict-queue overload behavior, mixed
+permit/deny, chosen verdict-API shape.
 
 Heap: pooled slabs, no hot-path allocation; batch rows carry (slot,
-len, tunnel key, flow key, queue-generation); byte/slot bounds sized
-for 64-frame commands. Saturation: bounded, non-blocking producer,
-refuse-at-bound, drop-and-count, control-command progress fenced from
-batch occupancy, mutex acquisition try-or-drop, telemetry rate-bounded.
-
-Same-thread adjudication stays rejected as a *gated model* (starvation
-risk, symmetric fairness row, explicit reopen condition).
+len, tunnel key, flow key, queue-epoch, phase epoch — H1: phase IS a
+tuple field). Saturation: bounded, non-blocking, refuse-at-bound,
+control progress fenced, mutex try-or-drop, telemetry rate-bounded.
+Same-thread adjudication stays rejected as a gated model with reopen
+condition.
 
 ### 4.4 Adjudication entry: owned-frame path on the worker
 
-#8274/#8062 pattern: each frame enters before flow-cache/session and
-before policy, on tunnel logical ifindex + zone + routing
-instance/table + RG identity; outer ESP/IKE session implies nothing
-inner. Framing: `ARPHRD_NONE` raw-L3 with explicit L3-offset
-representation — never the Ethernet-assuming shim parse. Loop-body
-extraction threads `binding` through 17 fields behind a batch-drain
-call with a batches-per-poll-cycle fairness bound. Owned entry builds
-recyclable pool-slot descriptors (never fake addrs) and carries the
-inner L3 byte count (§6.9). Checksums: the worker verifies inner
-IP/L4 checksums on the owned frame (cost inside the G1 adjudication
-row) — failure ⇒ drop-and-count; GRO/GSO super-frames are
-refused-and-counted, never segmented in userspace (scope guard, §6.8).
+#8274/#8062 pattern, before flow-cache/session/policy, on tunnel
+logical ifindex + zone + instance/table + RG; outer session implies
+nothing inner. `ARPHRD_NONE` L3-offset representation; 17-field
+binding threading behind a batches-per-poll-cycle fairness bound;
+pool-slot descriptors; inner-L3 byte counts; worker-verified inner
+checksums (G1-row cost), GRO/GSO refused-and-counted.
 
-Dispatch rule (C2-§7): a batch is processed wholly on one worker;
-worker selection reuses the physical-path dispatch function on the
-flow key (named at implementation, behavior pinned here); inner
-sessions are owned by the adjudicating worker with reverse flow
-dispatched by session lookup exactly as physical paths do; fragments
-share the datagram key so reassembly affinity holds. NAT/session
-ownership follows the session owner. Verdicts issue in capture order.
+**Dispatch (blocking Cx finding): owner-homogeneous sub-batches.**
+A drained batch is partitioned by owner = the physical-path dispatch
+function on the flow key; each sub-batch goes to its owner worker
+under the same B/100 µs bounds (partials allowed). Whole-batch
+single-worker dispatch is prohibited for mixed-flow batches. Reverse
+flow resolves via session lookup as physical paths do.
+**Fragment-to-session transfer:** reassembly owner = hash(datagram
+key); on completion the adjudicating (reassembly-owner) worker creates
+the session and owns it; the completed datagram's per-fragment
+verdicts execute on the capture thread in per-flow order.
 
-### 4.5 Re-entry: TUN exists ONLY for REINJECT
+### 4.5 Re-entry: worker×instance TUNs with a forwarding contract
 
-The per-worker re-entry TUN carries exactly the REINJECT-modified
-forward-path frames, bound to the adjudicated routing instance. It is
-a refused-dataplane netdev by construction: excluded from the shim
-ingress map, the binding plan, and the RSS/AF_XDP allowlist via a
-dedicated exclusion class, and LISTED in the refused-netdev index
-(r2's "excluded from the refused index" was an inversion — corrected,
-C2-§7) so no alias row can smuggle it back. Half-admission is
-impossible by §3(b): the TUN never enters the ingress set, so no
-`BINDING_MISSING` drop can arise from it.
+TUNs exist only for REINJECT-modified forward-path frames. **Model
+(Cx-B): one TUN per (worker, routing-instance)**, lifecycle tied to
+generation, resource bound: workers × instances ≤ 128 (tunnel max 32
+× instances-per-tunnel ≤ 4 illustrative; exact product gate-checked);
+over-max ⇒ tunnel down + counted. Refused-dataplane class, listed in
+the refused-netdev index, never in the shim ingress map.
 
-### 4.6 Phasing: shadow (ACCEPT-always) → enforcing → closed-by-hold
+**Second-traversal accounting (Cx-B), exhaustive:** the held packet
+already traversed pre-hook kernel processing (incl. one TTL
+decrement); re-injection starts a second traversal. The plan specifies
+each item: TTL — userspace compensates +1 pre-write, test pins the
+observed wire TTL; DSCP — preserved in-band; fwmark (H3) — saved at
+capture, restored via `SO_MARK` pre-write (stated; T2 wire-verified);
+conntrack (H3) — sees a fresh flow on the TUN iface: contained by the
+**policy-free post-TUN topology** (no policy chains attached in
+re-entry instances/VRFs; a test asserts the empty chain set per
+re-entry instance every generation — a mark-based accept would be the
+refuted chain returning, so topology, not marks, carries this);
+NAT already applied in-frame; ICMP errors post-reinject reference the
+re-injected frame (stated acceptable); ECMP/route-change races fall
+under the §4.2 commit fence.
 
-1. **Shadow**: divert live, every verdict issued is unconditional
-   ACCEPT (a DROP would be enforcement), kernel forwards originals
-   exactly as today, adjudication runs and counts divergence, NO
-   re-entry machinery runs. Exactly-once holds by construction
-   (verified, N-construction). Shadow is load-bearing for
-   availability: the divert holds packets in every phase, so reader
-   death or queue-full in shadow drops tunnel traffic that used to
-   forward (NFQUEUE with no bound socket drops by default — on the
-   plan's side, but STATED and tested per phase, never inherited by
-   luck, N2a). Phase is part of the stamped context: a batch captured
-   in shadow completes under shadow semantics even if the flip lands
-   mid-batch; shadow-created sessions invalidate at the flip (N2b).
-   Shadow→enforcing transition has its own test.
-2. **Enforcing**: verdicts released per §4.2; parity proved on real
-   traffic (§8); advisory removed in the SAME change (else a second
-   untruth); in-source #8276 references updated to #9506.
-3. **Closed-by-hold**: no separate close step exists — the bypass is
-   gone *because* the divert holds every `iif == stN` packet. There is
-   no second mechanism for the refuted chain to return through.
+### 4.6 Phasing: shadow (ACCEPT-always) → drain-before-activation → enforcing
 
-Bring-up or runtime failure (queue refused, reader/worker/socket
-death, per phase incl. shadow): IPsec dataplane closed +
-operator-visible, never silent Linux forwarding. Observability
-survives the reader: counters and queue stats (drops, depth via
-netlink) live in the daemon supervisor, published on supervisor
-ticks and reader-heartbeat loss — a dead thread is never the
-publisher of its own death (C2-§7).
+1. **Shadow**: divert live, every issued verdict unconditional ACCEPT;
+   adjudication counts divergence; TUN machinery idle. Shadow failure
+   table (H2), per worker-failure cell: checksum-fail / unparseable /
+   GRO-refused / slab-OOM ⇒ **ACCEPT-with-divergence-count**
+   (observation preserved — dropping here would be enforcement);
+   worker-dead / queue-full / socket loss ⇒ kernel default-drop,
+   counted as **shadow-unavailable** (cannot ACCEPT what was never
+   read). T14 authored per cell per phase.
+2. **Flip = drain-before-activation (Cx-C):** the flip waits for
+   in-flight shadow batches to complete under shadow semantics
+   (bounded by the supervisor deadline; remainder cancelled+dropped),
+   then activates under a **transitional epoch flag**
+   (operator-visible). Phase is sampled at receive — kernel-queued
+   packets carry no stamp, and the plan defines receive-time sampling
+   as the semantic (Cx-C). **Precedence: generation-cancel beats
+   shadow-ACCEPT** for post-flip receives (stated). **Shadow sessions
+   are quarantined**: never published to forwarding/NAT state,
+   invalidated at flip (stronger than r3; test-pinned).
+3. **Enforcing**: verdicts per §4.2; parity on real traffic; advisory
+   removed same-change; #8276 references → #9506.
+4. **Closed-by-hold**: no separate close step; the divert holds every
+   `iif == stN` packet.
+
+Per-phase failure: closed + operator-visible, supervisor-published
+(supervisor owns counters/queue-stats/heartbeats; a dead thread never
+publishes its own death).
+
+**Class-stickiness (H4):** within an epoch, a flow keeps its first
+verdict class; a forced class transition (FIB divergence mid-flow) ⇒
+DROP-and-count the transitioning packets (no silent cross-wire
+reorder); T2/T3 carry a reorder-bound sub-case measuring the residual
+(single-flow ACCEPT→REINJECT boundary reorder where stickiness
+cannot apply, e.g. first packet).
 
 ### 4.7 NOT proposed
 
-- No unconditional policy-DROP forward chain live while armed; the
-  only armed footprint is the scoped divert, rule set pinned by Q7+T12.
-- No AF_XDP attach to the xfrmi (§3 classes); no AF_PACKET-tap
-  enforcement — the tap is REMOVED from this plan (shadow subsumes
-  observation; C2B).
-- No userspace ESP decryption; no selector-as-policy.
+No unconditional armed DROP chain (only the pinned divert rule set).
+No AF_XDP on xfrmi (§3 classes). No AF_PACKET anywhere (removed r2→r3,
+stays out). No userspace ESP decryption. No selector-as-policy.
 
 ## 5. API preservation
 
-Config/CLI unchanged; phase + shadow-divergence exposed via existing
-telemetry/show surfaces. Internal extension additive: batch-queue
-type, packet-bearing command variant, owned-frame entry, per-tunnel
-queue-draining capture threads, divert lifecycle tied to generation.
-Queue bounds 4096/16384 joined by byte/slot bounds for 64-frame
-commands. No second reader on the slow-path channel. Telemetry
-additive and rate-bounded (per-queue depth, verdicts by class,
-shadow-divergence, flush-timer histogram, inner attempted/forwarded,
-generation-fenced drops, recirculation refusals).
+Config/CLI unchanged; phase + transitional epoch + divergence via
+existing telemetry/show surfaces. Additive internals: batch/sub-batch
+queues, packet-bearing commands, owned-frame entry, per-tunnel capture
+threads, per-(worker,instance) TUNs, divert + queue lifecycle tied to
+generation. Bounds 4096/16384 + byte/slot bounds. Telemetry additive,
+rate-bounded (per-queue depth, verdicts by class AND submission state
+— attempted/successful/uncertain — shadow-divergence, flush histogram,
+inner attempted/forwarded, fenced drops, route-flap drops, quarantine
+refusals, uncertain-submission reconciliations).
 
 ## 6. Hidden invariants
 
-1. Bounded, fail-closed handoff (try-or-drop enqueue; control
-   progress fenced; rate-bounded telemetry).
-2. Tunnel-identity adjudication (logical ifindex + zone + instance/
-   table + RG; never outer phys zone).
-3. Pipeline order (inner before flow-cache/session/policy; outer
-   session implies nothing).
-4. Exactly-once egress per phase; no recirculation (§4.2/§4.5).
-5. Generation bound to queue instances; verdict-issue linearization;
+1. Bounded fail-closed handoff (try-or-drop; control fenced;
+   rate-bounded telemetry).
+2. Tunnel-identity adjudication (never outer phys zone).
+3. Pipeline order (outer session implies nothing).
+4. At-most-once emission + fail-closed convergence; no recirculation.
+5. Instance-bound generations; per-disposition commit points;
    quiesce-before-issue / arm-down fences; rotation drops pending +
-   fragment state (§4.2).
-6. Bring-up AND runtime failure fail closed per phase,
-   operator-visible, supervisor-published (§4.6).
-7. HA, RG-scoped: per-node per-RG capture; standby reader stopped;
-   abrupt failure orphans die held (fail-closed); new owner
-   re-resolves before starting, adjudicates nothing until then; no
-   cross-tunnel leakage (per-VRF).
-8. MTU/fragments/GRO: super-frames refused-and-counted; jumbo slab
-   sizing; TUN-MTU writes fail-closed + counted. Reassembly contract
-   (C2-§6): located in the worker post-capture pre-policy; hooks see
-   fragments (no kernel defrag assumed before the hook — assumption +
-   test); completion authorizes per-fragment verdicts of one class,
-   never a merged super-datagram ("first-wins + count" = first-seen
-   bytes win, later overlaps dropped-and-counted, explicit v4/v6
-   overlap semantics at implementation); keys include tunnel + VRF +
-   flow-id + generation/epoch; rotation drops pending state;
-   initial caps ≤1024 datagrams/tunnel, ≤64 KB each, 2 s expiry —
-   gate-validated, kill-linked if incompatible with the handoff
-   budget. Non-first fragments never permit alone; ICMP errors are
-   their own flow.
-9. Counters: inner L3 bytes; attempted (fragments as received) vs
-   forwarded (fragments released) distinct; duplicates excluded by
-   exactly-once; outer ESP never attributed inner; permit AND deny
-   parity.
-10. #7480 outbound ordering untouched; permit-all outbound residual
-    out (§9).
-11. `resolve_ifindex` totality; `(0,0)` collapse test-pinned
-    impossible.
-12. Ownership-keyed divert resolution
-    (`SecureTunnelNetdevForRef` ∪ `liveXfrmNetdevs`), never name
-    shape; unowned `st5` never diverted (T18).
-13. Re-entry TUN refused-dataplane class, listed refused, never in
-    the ingress set (§4.5).
-14. Worker fairness: batches-per-poll-cycle cap; gated measurement.
-15. Input-twin orders before host-inbound policy (stated + tested).
-16. Divert install failure ⇒ tunnel DOWN (distinct from the barrier's
-    tolerated-failure contract); lifecycle tied to generation;
-    restart ⇒ closed until re-confirmed.
+   fragment state; full lifecycle protocol (§4.2).
+6. Per-phase closed failure, supervisor-published.
+7. HA RG-scoped: per-node per-RG capture; standby stopped; abrupt
+   orphans die held; new owner re-resolves first; per-VRF isolation.
+8. MTU/fragments/GRO: super-frames refused-counted; jumbo slabs;
+   TUN-MTU fail-closed. Reassembly: worker post-capture pre-policy;
+   hooks see fragments (no pre-hook kernel defrag assumed — assumption
+   + test; if the kernel defrags first on some path, the queue sees
+   datagrams and the contract still holds since verdicts apply to
+   held packets). Completion authorizes per-fragment verdicts of one
+   class; never a merged super-datagram. Overlap (blocking Cx
+   finding): **IPv6 — any overlap ⇒ whole-datagram DROP + count**
+   (exact duplicates deduplicated + counted; atomic fragments cannot
+   overlap by construction); **IPv4 — first-wins with hole-tracking,
+   holes at completion ⇒ DROP** (incomplete ≠ forwardable).
+   Forwarded set == inspected set always — no
+   inspection/forwarding disagreement by construction. Keys include
+   tunnel + VRF + flow-id + generation/epoch. Repriced caps (major Cx
+   finding): **≤128 datagrams/tunnel × ≤64 KB = ≤8 MiB/tunnel**;
+   **tunnel max 32 ⇒ aggregate ≤256 MiB** + slabs/queues stated in
+   G2; 2 s expiry; held fragments excluded from T22 latency; sweep
+   cost O(caps) bounded. Budget incompatibility kills the plan.
+   Non-first fragments never permit alone; ICMP errors own-flow.
+9. Counters: inner L3; attempted (fragments as received) vs forwarded
+   (fragments released); uncertain submissions counted separately;
+   outer ESP never inner; permit+deny parity; limitation counters
+   pinned (H6: non-first-mutation drops; mutated-host-bound drops).
+10. #7480 ordering untouched; permit-all outbound residual out.
+11. `resolve_ifindex` totality; `(0,0)` impossible by test.
+12. Ownership-keyed divert (`SecureTunnelNetdevForRef` ∪
+    `liveXfrmNetdevs`); unowned `st5` never diverted (T18).
+13. TUN refused-dataplane class, listed refused, never ingress ( §4.5).
+14. Worker fairness caps; gated measurement.
+15. Input twin before host policy (ordered + tested); match set
+    lifecycle = snapshot enumeration + #9646 gate + per-generation
+    purge (H6).
+16. Divert install failure ⇒ tunnel DOWN (≠ barrier tolerance);
+    lifecycle tied to generation; restart closed until re-confirmed.
+17. Route-flap fail-closed at commit (§4.2 fence).
+18. Class-stickiness within epoch (§4.6).
 
 ## 7. Risk table
 
-R1 bypass-path miss → ownership-keyed per-rotation re-resolve;
-recreate/move/demotion tests; unresolvable REFUSED. R2 double
-delivery → single verdict contract + per-phase exactly-once tests.
-R3 drift → inner-L3 plumbing, parity both sides, revocation test.
-R4 kernel-half cost → gate first; B-invariant kill phrasing (Q1).
-R5 batch latency → 100 µs cap + occupancy + T22/T19. R6 pool
-contention → sharded pools + rows. R7 flood drops → specified,
-sized, fenced progress. R8 armed-path breakage → scoping + T12[P]
-with divert live; drift kills the change. R9 failure bricks closed →
-visible error + runbook + per-phase T14. R10 HA staleness → per-RG
-per-node capture, instance-bound generations, demotion/abrupt tests.
-R11 MTU/fragment/GRO → §6.8 contract + T20; budget kill-linked.
-R12 advisory mistiming + invisible divergence → same-change rule,
-per-phase tests, divergence counters.
+R1 path miss → ownership re-resolve per rotation; tests; REFUSED.
+R2 duplicates → commit table + per-phase exactly/at-most-once tests;
+uncertain-submission reconciliation test. R3 drift → inner-L3
+plumbing; parity; revocation; quarantine. R4 kernel cost → gate
+first; B-invariant kill phrasing. R5 latency → cap + occupancy +
+T22/T19. R6 contention → sharded pools + rows. R7 flood → specified
+drops; fenced progress. R8 armed breakage → scoping + T12[P]; drift
+kills change. R9 failure bricks closed → visible + runbook + per-phase
+T14 incl. shadow-unavailable. R10 HA → per-RG capture; instance
+epochs; demotion/abrupt tests; quarantine. R11 MTU/frag/GRO → §6.8 +
+T20; kill-linked budget. R12 advisory/divergence → same-change rule;
+per-phase tests. R13 (new) second-traversal divergence (TTL/mark/
+conntrack) → §4.5 contract + wire tests. R14 (new) flip-window
+enforcement gap → drain-before-activation + transitional epoch +
+deadline-cancel tests.
 
 ## 8. Test plan (fail-on-revert; loss cluster; never faked)
 
-Gates: G1 — cluster re-run of `b2_capture_bridge` + committed new
-rows: batched send (8/16/32 + timer-flushed singles distribution),
-cross-core payload read, owned-frame adjudication incl. checksum
-verify (absorbs r1 Q2), TUN-write row (N1), overlapped-pipeline
-behavior (in-flight ≥2, verdict-queue overload, mixed permit/deny),
-fairness row, per-core attribution (binding = worse thread). G2 —
-NFQUEUE divert + verdict-loop on real SAs (v4/v6, NAT-T/native ESP,
-both hooks, B = 8/16/32): per-diverted-packet cost AND chain-presence
-overhead on non-tunnel forwarded traffic (N4); kill phrasing: if the
-B-invariant socket half alone busts the T22 floor, no B saves it —
-B2 dead per Q1.
+Gates: G1 — cluster `b2_capture_bridge` + rows: batched send
+(8/16/32 + flushed-singles distribution), cross-core payload read,
+owned-frame adjudication incl. checksum verify, TUN-write row,
+overlapped-pipeline behavior (in-flight ≥2, verdict-queue overload,
+mixed permit/deny, chosen verdict-API shape incl. batch-grouping
+behavior), fairness row, per-core attribution. G2 — divert +
+verdict loop on real SAs (v4/v6, NAT-T/native ESP, both hooks,
+8/16/32): per-diverted cost AND chain-presence overhead on non-tunnel
+traffic; kill phrasing tests the B-invariant half with no rescue by B.
 
-Enforcement (each names its reverted mechanism; [P] preservation
-tests pass today): T1 deny v4/v6 (revert: divert rule deletion).
-T2 permit incl. REINJECT path with wire-verified mutation (revert:
-verdict-contract change). T3 per-VRF attribution. T4 app/port deny.
-T5 host-bound both verdicts. T6 fragments incl. split batches,
-non-first never permits, ICMP-own-flow. T7 two-tunnel isolation. T8
-saturation closed + recovery. T9 bring-up refusal ⇒ tunnel down.
-T10 recreate/move/demotion orderly+abrupt; unresolvable REFUSED;
-verdict-issue linearization (replaces r2 T17 — post-release
-cancellation struck as unimplementable). T11 no-recirculation +
-per-phase exactly-once. T12[P] armed paths + `oif == stN` outbound
-with divert live; exact-rule-set scope pin. T13 advisory per phase +
-#8276 reference updates. T14 runtime death per phase incl. shadow
-(N2a) — routed AND host-bound never forward unadjudicated. T15
-exactly-once under flood + flush scheduling. T16 revocation incl.
-phase-flip invalidation (N2b) + flip-ordering test for in-flight
-batches. T17 intent-fencing at verdict issue (renumbered; old
-cancellation semantic struck). T18[P] alias preservation + unowned
-`st5` keeps AF_XDP. T19 flush-timer histogram under contention. T20
-GRO/jumbo/over-TUN-MTU refused-counted-never-truncated. T21
-deny-side parity. T22 numerical floors: ≥80% baseline throughput,
-p99 ≤250 µs added (gate-ratified). Per-transport coverage: suite runs
-the NFQUEUE shape; no tap exists to cover (tap removed).
+**T22 derivation (Cx-E).** Workload (fixed for the gate):
+IMIX (7×64 B, 4×570 B, 1×1518 B) + 9 KB jumbo sub-case; 8 tunnels ×
+4 K flows, bidirectional 60/40; disposition mix 70% ACCEPT / 20%
+REINJECT (NAT) / 10% DROP; 5% fragments; 1% host-bound; offered load
+to 100% of pre-bridge baseline then +20% overload; loss allowance 0
+for ACCEPT/REINJECT-delivered (useful delivered = inner payload
+bytes delivered once, in order per flow — processed/dropped excluded);
+latency = capture-to-verdict-release per packet at 70% load, drops
+excluded + counted separately; 5 runs, ±10% variability bound;
+non-tunnel forwarding concurrent ≤5% degradation. Stage-rate analysis:
+capture stage must sustain recvmsg+verdict-sendmsg pair rate ≥ line
+rate (~358 Kpps scale ref); worker adjudication ≥ same; TUN stage ≥
+20% of line rate. **80% throughput floor** = all three stages
+simultaneously sustain 0.8× baseline useful-delivered with the
+above mix (any stage saturating first identifies the binding
+constraint — the floor is a rate claim, not serialized-latency
+addition). **250 µs p99** = 100 µs flush cap + ≤10 µs verdict pair +
+≤10 µs TUN write + 130 µs p99 scheduling/backlog allowance (stated
+decomposition; the 13× multiplier on the pair is the tail allowance,
+gate-confirmed or killed). Baselines re-measured same-box same-day;
+numbers ratified or plan dies.
+
+Enforcement ([P] pass today): T1 deny (revert: rule deletion). T2
+permit incl. REINJECT wire-verified mutation + TTL pin + mark
+restore + reorder-bound sub-case. T3 per-VRF + post-TUN empty-chain
+assertions. T4 app/port deny. T5 host-bound both verdicts + match-set
+lifecycle. T6 fragments incl. split batches, non-first rule, v6
+overlap-drop, dedup, ICMP-own-flow. T7 isolation. T8 saturation +
+recovery. T9 bring-up refusal ⇒ tunnel down. T10 recreate/move/
+demotion orderly+abrupt; unresolvable REFUSED; commit-point
+linearization per disposition (old cancellation semantic struck).
+T11 no-recirculation + per-phase once/at-most-once. T12[P] armed
+paths + `oif == stN` + exact-rule-set scope pin. T13 advisory per
+phase + #8276 updates. T14 per-phase per-cell (incl.
+shadow-unavailable + shadow ACCEPT-with-divergence). T15 once-ness
+under flood + flush scheduling. T16 revocation incl. flip-drain +
+quarantine (shadow sessions never publish). T17 verdict-issue fence
+(renumbered; old semantic struck). T18[P] aliases + unowned `st5`.
+T19 flush histogram under contention. T20 GRO/jumbo/over-TUN-MTU
+refused-counted. T21 deny parity. T22 floors per derivation. New:
+quarantine-violation (stale-epoch verdict refused); rule-swap
+atomicity (no open window under rotation fuzz); route-flap drop;
+uncertain-submission reconciliation converges to dropped.
 
 ## 9. Out of scope
 
 Userspace ESP decryption. Policy-based IPsec. Unconditional armed
-forward chains. AF_XDP on xfrmi. AF_PACKET entirely (removed r3).
-WireGuard kernel-path residual; #8279 TUN admission. Selector- or
-`allowed-ips`-as-policy. Shape-B outbound under permit-all (#7480
-residual; value claims exclude it). Flowtables. Cross-node capture
-sync; standby adjudication. Re-tuning the scale. L4-mutation on
-non-first fragments; mutated host-bound flows (DROP-and-count
-limitations, §4.2).
+chains. AF_XDP on xfrmi. AF_PACKET entirely. WireGuard kernel-path
+residual; #8279. Selector/`allowed-ips`-as-policy. Shape-B outbound
+under permit-all. Flowtables. Cross-node sync; standby adjudication.
+Re-tuning the scale. L4-mutation on non-first fragments
+(DROP-and-count). Mutated host-bound (DROP-and-count). REINJECT
+metadata residuals as topology-contained (conntrack fresh-flow view;
+§4.5). Residual cross-wire reorder at class boundaries (bounded,
+tested).
 
 ## 10. Open questions (each invites PLAN-KILL)
 
-1. Does the NFQUEUE per-packet API cost fit at all? B rescues the
-   wake, never the socket half — third authoritative transport or
-   B2 dead?
-2. Who owns the flush timer under NAPI pressure — enforceable
-   without a per-packet wake, or is the cap fiction?
-3. Generation primitive selection among pinned behaviors (queue
-   instances + verdict-issue linearization fixed; primitive =
-   snapshot generation vs RG-epoch vs tuple — implementation
-   selection, N6; does NOT block approval).
-4. Do the 25 `desc.len` counters enumerate completely — wider
-   refactor ⇒ kill or re-scope?
-5. Does the bounded-reassembly budget fit — which side gives if not,
-   and is drop-non-first acceptable, stated where?
-6. NFQUEUE depth vs burst: what depth avoids fail-always without
-   breaking T22, and is per-tunnel sizing administrable?
-7. What pins the divert rule set against future "one more match" —
-   T12's scope test, and is it sufficient as the ONLY guard?
+1. NFQUEUE per-packet API cost affordable at all? B rescues the wake
+   only — third authoritative transport or B2 dead?
+2. Flush-timer ownership under NAPI pressure — cap enforceable or
+   fiction?
+3. Generation primitive selection among pinned behaviors
+   (non-blocking; N6-class).
+4. Do the 25 `desc.len` counters enumerate — wider refactor ⇒ kill
+   or re-scope?
+5. Bounded-reassembly budget fit — which side gives; is
+   drop-non-first acceptable, stated where?
+6. Queue depth vs burst: fail-always avoidance within T22; plus queue
+   *timeout* ownership (H5: 50 ms initial, gate-validated).
+7. What pins the divert rule set — is T12's scope test sufficient as
+   the ONLY guard?
+8. Stage-rate assumptions (§8): if any stage misses its rate on
+   cluster silicon, which degrades first — deeper batching, fewer
+   tunnels, or dead plan?
 
 ## 11. Acceptance
 
-- Converged plan on the branch with both reviewers at PLAN-READY
-  (or reported split), raw verdicts in `reviews/`.
-- G1+G2 pass on the loss cluster with per-core attribution; T22
-  numbers confirmed or plan killed; no `X/B` table cited as pricing.
-- Implementation PR (separate, not this plan) carries T1–T22 green
-  on real traffic (enforcement/[P] split honored), no faked numbers,
-  same-change advisory removal + #8276 reference updates.
+- Both reviewers at PLAN-READY on this revision (or reported split),
+  raw verdicts in `reviews/`.
+- G1+G2 pass with per-core attribution; T22 derivation confirmed on
+  silicon or plan killed; no capability-denial cited as pricing.
+- Implementation PR (separate) carries the T-suite green on real
+  traffic (enforcement/[P] split honored), no faked numbers,
+  same-change advisory removal + #8276 updates.
