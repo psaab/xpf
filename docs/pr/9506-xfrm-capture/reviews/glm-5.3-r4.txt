@@ -1,0 +1,69 @@
+# Hostile plan review — ROUND 4 (final, targeted) — docs/pr/9506-xfrm-capture/plan.md (r4)
+
+## (1) Round-3 findings H1–H6 — disposition
+
+| # | Disposition | Reason |
+|---|---|---|
+| H1 | **FIXED** | Phase epoch is an explicit §4.3 tuple field; drain-before-activation is the second rotation mode r3 said was missing; receive-time sampling defines the stamp point. §4.6/§4.3 no longer contradict. |
+| H2 | **FIXED** | Per-cell shadow failure table exists and is T14-authored; the never-read vs read distinction is drawn (see new-hole N2 for one naming ambiguity in a cell). |
+| H3 | **FIXED** | fwmark save/SO_MARK restore (T2 wire-verified), DSCP in-band, NAT in-frame, ICMP-error stance, conntrack contained by policy-free post-TUN topology asserted+tested per generation, §9 residual listed. |
+| H4 | **FIXED** | Class-stickiness within epoch + DROP-and-count on forced transition + T2/T3 reorder-bound sub-case for the boundary residual. |
+| H5 | **FIXED** | Timeout replaced by owned supervisor verdict deadline (50 ms, tunable, gate-validated, Q6); the false implication of a kernel per-packet timeout is retracted explicitly. |
+| H6 | **PARTIALLY-FIXED** | Match-set lifecycle fully specified (snapshot enumeration + #9646 gate + per-generation purge, T5); but the two limitation counters are "pinned" in §6.9 with still no named T row — the exact trivia r3 named is half-alive. |
+
+## (2) Attacking r4's new core
+
+### A. Per-disposition commit table — does it hold?
+
+**REINJECT-commits-at-write + DROP-as-cleanup is coherent, and I could not construct a duplicate or a silent vanish.**
+
+- *Duplicate hunt:* the original cannot emit before its verdict; its only post-write verdict is DROP-cleanup; if that verdict is refused (stale epoch on a queue mid-destruction) or lost to a crash, the original dies with the queue — kernel teardown drop. The mutant exists only after a committed write; a TUN `write()` is packet-atomic (no short-write partial emission). Every interleaving I tried — rotation between re-check and write, crash after write before cleanup, cleanup refused under quarantine, worker death mid-write — yields zero or one emission. Duplicates are structurally excluded, not probabilistically avoided.
+- *Cleanup-as-authorization inversion:* I looked for a path where the DROP-cleanup could authorize the original instead — none exists; the write is the only authorization point and T10/T11 pin per-disposition linearization with the old semantic struck.
+- *Is "at-most-once + fail-closed convergence" the honest claim?* Yes — and this is the load-bearing honesty move of r4. "Exactly-one-wire" required proving no zero-delivery outcome, which r3 could not do (pre-commit crash = permitted packet vanishes). r4 concedes zero-delivery outcomes exist and confines itself to: no duplicates ever, all failures converge to drop, uncertain states counted separately (attempted/successful/uncertain telemetry). The ACCEPT race (rotation wins while the verdict syscall is in flight) resolves either way into zero-or-one. The claim now matches exactly what the mechanisms deliver. Striking exactly-once was correct, not a retreat.
+- *Residual soft spot (not blocking):* "uncertain ⇒ converges to dropped" can, in the rare already-applied-verdict case, count as dropped a packet that actually delivered. The separate uncertain-submission counter keeps telemetry honest, so this is accounting asymmetry, not a safety violation.
+
+### B. Drain-before-activation flip
+
+- **Receive-time phase sampling is the honest boundary.** There is no hook-entry stamp the design can rely on; the plan defines the semantic instead of pretending a boundary exists. Post-flip receives during the transitional flag window get enforcing semantics — a defined, operator-visible, R14-tested gap, not an undefined one.
+- **Drain is bounded and fail-closed:** shadow batches complete under shadow semantics *because* phase is stamped in the row (H1's fix is what makes this sentence implementable); the deadline-bounded remainder is cancelled+dropped — an activation blip of at most one deadline's worth, stated, counted. The alternative (ACCEPTing the remainder) would extend the enforcement gap; dropping is the correct polarity.
+- **Quarantined shadow sessions** (never published, invalidated at flip) correctly force re-adjudication under enforcing semantics and prevent shadow observations from leaking into forwarding/NAT state. T16 pins it.
+- **Precedence rule** (generation-cancel beats shadow-ACCEPT post-flip) is the right tie-break: no path where a cancelled generation's packet exits under shadow defaults.
+
+### C. Queue lifecycle protocol
+
+- **Atomic swap ordering is window-free by construction:** new rule installed before old deleted ⇒ first-match sends hooks to the new queue continuously; "no open window" is fuzz-tested. The pre-rotation classification rule (diversion boundary defines the epoch) closes the "entered the stack earlier" ambiguity with a stated, tested convention.
+- **Quarantine + epoch-tagged verdict identifiers** close the recycled-number hazard: a stale-epoch verdict is refused at send, the underlying packet converges via supervisor reconciliation to drop — consistent with the uncertain-submission machinery. Quarantine exit condition (listener exited AND destruction confirmed AND one tick) is checkable.
+- **Snapshot coordination** is coherent *if* queue epochs and snapshot versions derive from the shared generation counter — the plan states rotations are serialized with snapshot publication, which makes "snapshot older than queue epoch ⇒ DROP-and-count" a well-formed comparison. This is the one lifecycle sentence that leans on an implied shared numbering rather than stating it; the test pin keeps it honest. Half-line nit.
+
+### D. worker×instance TUNs + second-traversal accounting
+
+- **TTL+1:** correct arithmetic — the held frame already ate one decrement; compensation restores wire parity; T2 pins the observed wire TTL rather than the write-time value, which is the only pin that means anything. Host-bound REINJECT is excluded (DROP-and-count), so the +1 rule has exactly one scope.
+- **SO_MARK restore:** works only as setsockopt-before-each-write on a single-threaded per-fd writer — the plan states the restore but not the per-write serialization constraint or the extra syscall's place in the TUN stage budget. G1 has a TUN-write row, so it gets priced; the constraint deserves its clause. Nit.
+- **Policy-free post-TUN topology by assertion+test:** the right posture for this codebase — a structural mechanism (empty chain sets in re-entry instances, asserted every generation) rather than mark/conntrack cleverness. "Topology, not marks, carries this" is the correct inversion of the fragile alternative. The one unprobed edge: a re-entry instance whose egress requires transiting the main instance would exit the asserted zone — T3's per-instance assertion implicitly forbids this, but the topology contract (re-entry instance owns its egress, no main-instance transit) is enforced by test rather than stated as an invariant. Line-item.
+- **Bound** (workers × instances ≤ 128, over-max ⇒ tunnel down) is fail-closed and gate-checked. Fine.
+
+### E. T22 workload + stage-rate derivation
+
+- **The workload is now fixed and the floor is now a rate claim** — r3's conflation objection is answered in the plan's own text ("not serialized-latency addition"). The stage inequalities are stated: capture ≥ line, worker ≥ line, TUN ≥ 20% of line.
+- **Does 80% follow?** It is *consistent with* the stage rates but the arithmetic is never shown: at 100% offered with a 10% DROP mix, intended-delivered = 90%; zero unintended loss with the −10% run-variability bound lands at ≥81% — the 80% floor is exactly that number rounded down. The derivation is reverse-engineerable, which means it's real, but the plan makes the reader do it. One line of arithmetic would convert "hypothesis with correct shape" into "derived." The TUN margin is thin (stage bound 20% of line vs 16% needed at 0.8× with the 20% REINJECT mix — 25% headroom) and the setsockopt-per-write cost sits inside an unstated budget; both are gate-tested, so wrong numbers still kill the plan rather than launder it.
+- **250 µs:** the decomposition is now stated with the 13× tail multiplier named as an allowance and gate-confirmed-or-killed. Still not bottom-up — but it is falsifiable, front-loaded, and honest about being a hypothesis. Correct epistemic posture for a plan already burned on budget fraud.
+- **One genuine spec gap:** the zero-loss clause vs the +20% overload row. "Loss allowance 0 for ACCEPT/REINJECT-delivered" cannot survive +20% offered over capacity unless overload shedding is a separately-counted class — and the plan never defines which losses count against the clause. As written, T22's pass/fail at overload is author-ambiguous (auto-fail or vacuous, implementer's choice). One sentence.
+
+### F. Shadow failure table cells
+
+The read-vs-never-read split is the right axis: parse-class failures (checksum, unparseable, GRO, slab-OOM) ⇒ ACCEPT-with-divergence — correct, since ACCEPT requires no adjudication and dropping would be enforcement; infra failures (worker-dead, socket loss) ⇒ kernel default-drop, correctly justified as "cannot ACCEPT what was never read." T14 per cell per phase is authorable. The table's one flaw is that "queue-full" is ambiguous naming: read as the kernel socket queue it's a never-read event (drop, correct); read as the post-read handoff saturation it contradicts its own sibling cell (slab-OOM is post-read saturation and ACCEPTs). The parenthetical suggests the former; the plan should say so. One clause, not a missing cell.
+
+## (3) NEW holes
+
+- **N1 (minor):** Shadow "queue-full" cell naming ambiguity — kernel-socket-full (never read ⇒ drop, correct) vs post-read handoff saturation (must follow the slab-OOM cell ⇒ ACCEPT-unadjudicated, or shadow enforces availability against its own stated rationale). One clause; T14 authoring must resolve it.
+- **N2 (minor):** T22 zero-loss clause vs +20% overload shedding undefined — overload-shed accounting class not defined, so the overload row is not falsifiable as specified. One sentence.
+- **N3 (trivia):** "Kernel-queued packets carry no stamp" is stated absolutely — NFQA_TIMESTAMP exists (often zero at these hooks, granted); the chosen semantic doesn't depend on it, but this is the exact capability-denial phrasing pattern §2 just promised to stop. Rephrase to "no reliable hook-entry stamp the design may depend on."
+- **N4 (trivia):** The 50 ms supervisor deadline is dual-purpose — wedged-pipeline kill-switch and de-facto overload cliff (sustained backlog > 50 ms ⇒ teardown ⇒ tunnel down). Fail-closed and T8-tested, but the dual role is unnamed; the gate should confirm overload doesn't trip it spuriously.
+- **N5 (trivia):** H6's limitation-counter test row still unnamed (carried from r3).
+- **N6 (trivia):** Snapshot-vs-queue-epoch comparison and the re-entry-owns-its-egress topology contract both rely on implications (shared generation numbering; T3 assertion) rather than stated invariants.
+
+## Verdict: **PLAN-READY**
+
+The center of gravity did not move — it hardened. Every mechanism I attacked failed to break: the commit table is duplicate-free under every crash/rotation interleaving I could construct, and its claim is now exactly as strong as its mechanisms (at-most-once + fail-closed convergence is the *honest* claim; exactly-one-wire was not); the lifecycle protocol's swap ordering is window-free and its quarantine closes the recycle hazard; the flip is now a protocol with a defined sampling semantic rather than a property sentence; the TUN contract enumerates its residuals and contains conntrack structurally; T22 converted from arbitrary targets to fixed-workload stage-rate inequalities with kill polarity — the remaining softness (implicit 90→81→80 arithmetic, thin TUN margin) is gate-falsifiable, not gate-launderable.
+
+H1 and H2 — the two findings I held as pre-READY in r3 — landed as mechanisms, not sentences; H3 got more than its line. What remains (N1–N6) is clause-level: nothing re-architects transport, handoff, closure, or lifecycle, nothing blocks test authoring beyond one clause T14 must choose, and nothing is PLAN-KILL-adjacent. By my own r2/r3 standard — a finding is pre-READY only when the plan's tests cannot be authored without it — N1 is the only candidate, and it is a naming disambiguation between two cells the table already contains, resolvable in the implementation PR under §11's gate. N1–N6 should be recorded and folded into the implementation PR and T22/T14 authoring; they do not warrant a round 5 that was never authorized.

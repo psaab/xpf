@@ -1,0 +1,177 @@
+## Verdict: NEEDS-MAJOR
+
+Read both requested files in full:
+- `docs/pr/9506-xfrm-capture/plan.md`
+- `docs/pr/9506-xfrm-capture/reviews/codex-r3.txt`
+
+Static plan review only; no kernel experiments. **r4 corrects terminology and several scheduling contradictions, but its closure and authorization guarantees still exceed its mechanisms.**
+
+## 1. Codex-r3 disposition
+
+“Fixed” means specified coherently, not experimentally validated.
+
+| r3 block | Status | Reason |
+|---|---|---|
+| A — Commit points | **PARTIALLY-FIXED** | REINJECT now names the correct irreversible operation, but a pre-write epoch check is not serialization, and emitted uncertain submissions cannot converge to dropped. |
+| B — TUN risk | **PARTIALLY-FIXED** | Worker×instance ownership improves isolation; mark restoration is not implementable as stated, and route/conntrack guarantees remain unsupported. |
+| C — Shadow flip | **PARTIALLY-FIXED** | Receive-time sampling, cancellation precedence, and session quarantine are explicit; admission cutoff and bounded draining are not. |
+| D — Queue lifecycle | **PARTIALLY-FIXED** | Allocation, quarantine, and listener lifetime are named, but atomic rule replacement, timeout closure, and outstanding-emitter termination remain incomplete. |
+| E — T22/economics | **PARTIALLY-FIXED** | Workload and measurement definitions improve substantially; 80%/250 µs remain selected budgets, and owner-partitioned batching is unpriced. |
+| Blocking — Fragment scheduling | **PARTIALLY-FIXED** | Out-of-order verdicts and separate fragment slots fix global capture-order blocking; shared kernel queue capacity and 50 ms versus 2 s retention remain contradictory. |
+| Blocking — Dispatch/affinity | **PARTIALLY-FIXED** | Ordinary mixed-flow dispatch is repaired; completed fragments create sessions on a potentially different owner from subsequent ordinary packets. |
+| Blocking — Fragment overlap | **PARTIALLY-FIXED** | IPv6 rejection is substantially improved; atomic isolation is underspecified, and IPv4 hole tracking does not establish inspected/forwarded equivalence. |
+| Major — Resources | **PARTIALLY-FIXED** | A numerical tunnel maximum and smaller payload cap exist, but no total memory/CPU admission budget includes all retained objects. |
+
+## 2. Attack on r4’s core
+
+### A. Blocking: naming TUN submission does not implement a commit fence
+
+§4.2 says:
+
+> epoch re-check immediately before `write()`
+
+There remains an interval between checking the epoch and kernel acceptance of the write. Demotion can complete during that interval. A check does not establish which operation wins.
+
+The plan needs an explicit relationship between **revocation, acquisition of emission authority, outstanding submissions, and completion of demotion**. §10.3 still leaves the generation primitive open. That is the central correctness mechanism, not a deferred implementation choice.
+
+The return-time rule makes matters worse:
+
+> uncertain … epoch rotated mid-call … converges it to dropped
+
+A full TUN write may already have submitted the replacement before the epoch changes or the thread examines the return. Destroying the original queue cannot retract that replacement. Likewise, a successfully delivered ACCEPT verdict cannot be undone by tearing down the queue afterward.
+
+**Required distinction:** uncertain emission may remain **possibly emitted**. Only packets still held can converge to dropped. The current guarantee is impossible as written.
+
+At-most-once also needs an explicit terminal rule: no retry of an uncertain replacement and no later ACCEPT of its original, including cancellation/recovery paths. “Replacement exists only after a committed write” is false under the plan’s own post-return epoch classification.
+
+### B. Blocking: 50 ms is a watchdog intention, not an established bound
+
+The proposed sequence starts:
+
+> detach rule → drain-or-deadline old queue → destroy queue
+
+On the plan’s deliberately open armed path, **detaching the divert rule removes the hold for new arrivals**. Queue destruction only drops already-held packets. It does not close traffic arriving afterward.
+
+Additional missing mechanics:
+
+- Does 50 ms start at the kernel hook or userspace receive? Unread queue entries cannot be timed from a userspace capture event.
+- What prevents a stuck worker from writing to TUN after the supervisor declares teardown complete?
+- Is queue destruction independent of the failed listener and its locks?
+- Does “drain-or-deadline” introduce another waiting interval after the first deadline?
+- What bounds supervisor scheduling delay and confirms closure rather than merely requesting it?
+
+There is also a direct contradiction: **incomplete fragments may be held for 2 seconds, but every packet supposedly has a 50 ms verdict deadline**. Either fragments trigger tunnel-wide teardown during normal operation or they need an explicit separate deadline contract.
+
+A watchdog is viable. This particular ordering does not yet provide fail-closed continuity.
+
+### C. Blocking: route re-resolution renames the race
+
+Checking the route at commit does not pin the route used after commit.
+
+For REINJECT, the subsequent kernel traversal can perform a fresh lookup after `write()`. For ACCEPT, the held skb may already carry a route selected before the queue hook; a fresh userspace lookup does not establish which route resumption uses.
+
+Even a stable FIB is insufficient unless both decisions use equivalent routing inputs: ingress interface, mark, source/destination after mutation, instance, policy rules, and ECMP selection inputs. TUN changes some of those inputs.
+
+Furthermore, endpoint comparison cannot detect a change and restoration between checks. Therefore:
+
+> otherwise drop
+
+is not implemented by comparing two route results.
+
+The defensible current claim is **“detect some route mismatches and drop”**, not “egress realizes the adjudicated route.” Anything stronger requires a concrete forwarding-domain contract or a materially narrower, user-approved guarantee.
+
+### D. Major: shadow draining needs a closed admission set
+
+Drain-before-activation is workable **if the set being drained becomes finite**. r4 does not define when new receives stop becoming shadow work while the drain is pending.
+
+If new shadow work continues arriving, sustained traffic can force deadline cancellation. If receives pause, kernel backlog and overflow must be included. A transitional flag does not answer which state each receive enters or who acknowledges the cutoff.
+
+**Does every flip necessarily drop legitimate traffic? No.** A bounded set that finishes before the deadline need not lose anything. But this plan neither establishes that set nor prices deadline-cancel loss. Legitimate incomplete fragments make the 50 ms deadline especially problematic.
+
+Quarantined shadow sessions are a real improvement. However, draining must include outstanding verdict submissions and TUN-capable work, not merely empty userspace batches.
+
+### E. Major: owner-homogeneous batches can destroy the claimed economics
+
+Partitioning a batch of eight over eight owners can produce eight single-packet deliveries. The upstream capture batch remains eight; the cross-worker wakeup batch does not.
+
+§4.4’s “same B/100 µs bounds” does not establish both properties. Either:
+
+- Owner sub-batches flush small, losing amortization; or
+- They accumulate across capture batches, adding residence time and buffering.
+
+With per-tunnel capture and many workers, sparse tunnel×owner combinations matter even at substantial aggregate traffic rates.
+
+G1/G2 need **actual post-partition occupancy and wakeup cost**, including whether aggregation is shared across tunnels. The flush deadline must be measured from original capture, not restarted at each batching stage.
+
+The NFQUEUE API correction is welcome. However, disposition-homogeneous grouping alone does not make cumulative verdicts safe: unresolved lower identifiers also constrain which cumulative ranges can be released.
+
+T22 now defines a workload, but its “derivation” still allocates budgets rather than justifying acceptance. Marginal component p99 values also do not simply add into an end-to-end p99 guarantee. Direct measurement remains necessary.
+
+### F. IPv6: broadly correct direction, incomplete atomic contract
+
+**Exact duplicates are not automatically a protocol violation.** IPv6 permits discarding an exact duplicate while retaining the other fragments. r4 must define exactness beyond matching offset and length; conflicting content is not an exact duplicate.
+
+Atomic fragments require stronger language than:
+
+> cannot overlap by construction
+
+They must be processed independently of non-atomic reassembly state, including a matching source/destination/identification tuple. They must neither poison an existing reassembly nor be rejected because that state exists.
+
+Also specify handling of subsequent fragments after an overlap invalidates a datagram, within bounded state.
+
+**IPv4 remains blocking:** a complete first-wins inspection buffer does not prove that releasing original overlapping fragments gives the receiver the same bytes. If later fragments are discarded, completeness must be assessed against the retained, releasable fragment set—not against bytes copied from discarded fragments.
+
+“Forwarded set == inspected set … by construction” currently asserts the missing proof.
+
+### G. Major: 256 MiB is arithmetic, not resource pricing
+
+The cap covers nominal reconstructed payload:
+
+`128 × 64 KiB × 32 = 256 MiB`
+
+It does not price:
+
+- Kernel-held skbs and queue metadata.
+- Userspace fragment copies and descriptors.
+- Slabs, ordinary batches, verdict queues, and per-flow ordering state.
+- Session quarantine and overlap-invalidated state.
+- Thread stacks, TUN queues, and worker×instance objects.
+- Sweep CPU and recovery behavior under pressure.
+
+A payload cap does not bound fragment-object count. Separate userspace fragment slots also do not create separate capacity inside the NFQUEUE holding the originals.
+
+The illustrative TUN bound multiplies **tunnels × instances**, while the actual model is **workers × distinct instances**. Those are not interchangeable.
+
+No box memory reserve or admissible percentage is given. This is a smaller unpriced liability, not a priced design.
+
+## 3. Additional holes introduced or sharpened by r4
+
+### Blocking — `SO_MARK` is not a TUN-write metadata mechanism
+
+§4.5 proposes restoring fwmark using `SO_MARK` before writing. A `/dev/net/tun` descriptor is not a socket on which that socket option supplies skb marks. The plan names no usable mechanism for this operation.
+
+A mark is also not an on-wire field; “wire-verified mark restore” needs to mean observed routing/policy consequences plus appropriate metadata evidence.
+
+### Blocking — “policy-free VRF” does not establish conntrack/NAT isolation
+
+VRFs alone do not scope away network-namespace netfilter hooks or supply independent conntrack zones. Entering through TUN also does not inherently guarantee a fresh conntrack identity.
+
+An empty-chain assertion “per re-entry instance” requires an actual isolation mechanism and inventory of applicable hooks. Otherwise the claimed containment of second-pass NAT and policy is unsupported.
+
+### Major — fragmented-session ownership still diverges
+
+The reassembly owner hashes a datagram key and creates the session locally. Ordinary packets use physical-path flow dispatch. Those hashes need not select the same worker, and different datagrams of one flow need not share a reassembly owner.
+
+The plan needs ownership transfer or authoritative owner publication before subsequent forward/reverse packets proceed. “Reverse lookup as physical paths do” does not establish that property.
+
+### Blocking — create/install/delete is not an atomic replacement specification
+
+§4.2 calls the ordering atomic but does not specify the transaction, insertion priority, or rollback. Installing a new rule while leaving the old rule live does not by itself guarantee that the new queue captures all post-install arrivals.
+
+Snapshot version and queue epoch are also compared as if they share an ordering. The mapping between those distinct version domains is unspecified.
+
+## Final assessment
+
+**NEEDS-MAJOR, not PLAN-KILL.** NFQUEUE remains a plausible research transport. The proposed implementation contract is not ready.
+
+The decisive blockers are **non-serialized emission authority, impossible uncertain-to-dropped semantics, an open teardown interval, and an unsupported re-entry forwarding contract**. More named tests cannot make those expected behaviors mutually consistent.
