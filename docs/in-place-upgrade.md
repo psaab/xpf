@@ -726,7 +726,9 @@ case (NOT implemented here — see #1922).
 `apt install`s it (stage-only on the clustered nodes), and drives `xpfd
 upgrade --rolling` secondary-first. This is the default since #9486,
 validated live on the loss userspace cluster. `XPF_DEPLOY_FAST=1` keeps the
-raw push+restart path for the dev inner loop.
+raw push+restart path for the dev inner loop. The deb path preserves node
+config: it never pushes `CLUSTER_CONF`, clears the config DB, or pushes
+Phase-0 artifacts (upgrades must never wipe operator config).
 
 ## Host-wide upgrade lock (#1965)
 

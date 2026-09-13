@@ -17,7 +17,7 @@
 #   ./test/incus/cluster-setup.sh init              # Create networks + profile
 #   ./test/incus/cluster-setup.sh create             # Launch both VMs + test container
 #   ./test/incus/cluster-setup.sh destroy            # Tear down VMs + container
-#   ./test/incus/cluster-setup.sh deploy [0|1|all]   # Build and push to VM(s)
+#   ./test/incus/cluster-setup.sh deploy [0|1|all]   # Build .deb (default) or raw binaries (XPF_DEPLOY_FAST=1), install/cut over on VM(s)
 #   ./test/incus/cluster-setup.sh ssh 0|1            # Shell into VM
 #   ./test/incus/cluster-setup.sh status             # Show all VM status
 #   ./test/incus/cluster-setup.sh logs 0|1           # Show xpfd logs
@@ -650,6 +650,12 @@ cmd_deploy() {
 	if [[ -n "${SRIOV_LAN_PARENT:-}" ]]; then
 		suppress_host_parent_ipv6_ra "$SRIOV_LAN_PARENT"
 	fi
+	# XPF_DEPLOY_DEB is read nowhere: the deb path has been the default since
+	# #9486. Warn when it is set so XPF_DEPLOY_DEB=0 (the old raw meaning)
+	# does not silently select the deb default.
+	if [[ -n "${XPF_DEPLOY_DEB:-}" ]]; then
+		warn "XPF_DEPLOY_DEB=${XPF_DEPLOY_DEB} is deprecated and ignored (deb is the default since #9486); use XPF_DEPLOY_FAST=1 for the raw path"
+	fi
 
 	if [[ "${XPF_DEPLOY_FAST:-}" = "1" ]]; then
 		case "$target" in
@@ -689,6 +695,12 @@ deploy_vm_deb() {
 	# dist-deb/; install the runtime xpf_*.deb, NOT the xpf-appliance meta).
 	deb=$(ls -t "$PROJECT_ROOT"/dist-deb/xpf_*.deb 2>/dev/null | head -1 || true)
 	[[ -n "$deb" ]] || die "no xpf_*.deb found in dist-deb/ — run 'make deb' first (the default deploy build)"
+
+	# NOTICE: the deb path preserves node config — it does NOT push
+	# $CLUSTER_CONF, clear the config DB, or push Phase-0 artifacts the way
+	# the raw path does. Upgrades must never wipe operator config; push
+	# config explicitly (and separately) if a change is intended.
+	warn "NOTICE: deb deploy preserves node config (no config push, no config-DB clear, no Phase-0 artifact push) — push config explicitly if a change is intended"
 
 	info "Pushing $(basename "$deb") to $vm..."
 	incus file push "$deb" "${rinst}/tmp/$(basename "$deb")"
@@ -1020,7 +1032,7 @@ usage() {
 	echo "  init                 Create networks and profile"
 	echo "  create               Launch both VMs + test container"
 	echo "  destroy              Tear down VMs + container, optionally networks/profile"
-	echo "  deploy [0|1|all]     Build xpfd and push to VM(s) (default: all)"
+	echo "  deploy [0|1|all]     Build .deb (default; XPF_DEPLOY_FAST=1 = raw push) and cut over on VM(s) (default: all)"
 	echo "  ssh 0|1              Shell into VM"
 	echo "  status               Show all VM/container/network status"
 	echo "  logs 0|1             Show recent xpfd logs for VM"

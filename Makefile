@@ -1141,7 +1141,16 @@ cluster-init:
 cluster-create:
 	$(CLUSTER_SETUP) create
 
-cluster-deploy: build build-ctl
+# Deploy build prerequisites follow the cmd_deploy default (#9486): the .deb
+# unless XPF_DEPLOY_FAST=1 selects the raw dev path — otherwise
+# cluster-deploy would build raw binaries the deb default never uses.
+ifeq ($(XPF_DEPLOY_FAST),1)
+CLUSTER_DEPLOY_PREREQS = build build-ctl
+else
+CLUSTER_DEPLOY_PREREQS = deb
+endif
+
+cluster-deploy: $(CLUSTER_DEPLOY_PREREQS)
 	$(CLUSTER_SETUP) deploy $(NODE)
 
 cluster-destroy:
@@ -1185,7 +1194,7 @@ loss-cluster-init:
 loss-cluster-create:
 	$(LOSS_CLUSTER_SETUP) create
 
-loss-cluster-deploy: build build-ctl
+loss-cluster-deploy: $(CLUSTER_DEPLOY_PREREQS)
 	$(LOSS_CLUSTER_SETUP) deploy $(NODE)
 
 loss-cluster-destroy:

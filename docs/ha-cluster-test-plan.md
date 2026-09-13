@@ -1283,8 +1283,10 @@ text file because `active.json` already exists. To force re-bootstrap:
 ```bash
 incus exec xpf-fw0 -- rm /etc/xpf/.configdb/active.json
 incus exec xpf-fw1 -- rm /etc/xpf/.configdb/active.json
-make cluster-deploy  # re-push config + restart
+XPF_DEPLOY_FAST=1 make cluster-deploy  # raw path: re-push config + restart
 ```
+(Since #9486 the default deb deploy preserves node config and never pushes
+`xpf.conf`; the raw path above is what re-pushes.)
 
 Alternatively, use `load override` via CLI to load the new config interactively.
 
