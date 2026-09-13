@@ -5,6 +5,12 @@
 # staged `xpfd upgrade --rolling`), split so the postinst stage-only
 # assert (criterion 3) can observe the window between install and cut.
 set -euo pipefail
+# deploy-lib.sh expects the cluster-setup.sh logging helpers; define minimal
+# stand-ins when sourced standalone (fixes `info: command not found` in
+# deploy_reassert_primary_node0).
+info() { echo "info: $*"; }
+warn() { echo "warn: $*" >&2; }
+die() { echo "die: $*" >&2; exit 1; }
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 EVID="$ROOT/docs/pr/9486/evidence"
