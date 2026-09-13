@@ -1,0 +1,16 @@
+rolling: peer ready; forcing local secondary (drain start)
+rolling: drain complete (peer owns RGs, local backup, rg_active=false, sync clean)
+upgrade: -> STAGED (target=working-15065-g0b634b4e0-dirty prev=working-15061-g7ef226474-dirty)
+upgrade: -> PREFLIGHT (target=working-15065-g0b634b4e0-dirty prev=working-15061-g7ef226474-dirty)
+upgrade: version dir /var/lib/xpf/versions/working-15065-g0b634b4e0-dirty already present (same source generation); skipping copy
+upgrade: -> COPIED (target=working-15065-g0b634b4e0-dirty prev=working-15061-g7ef226474-dirty)
+upgrade: -> VERIFIED (target=working-15065-g0b634b4e0-dirty prev=working-15061-g7ef226474-dirty)
+upgrade: stopping xpfd before flip
+upgrade: -> STOPPED (target=working-15065-g0b634b4e0-dirty prev=working-15061-g7ef226474-dirty)
+upgrade: -> FLIPPED (target=working-15065-g0b634b4e0-dirty prev=working-15061-g7ef226474-dirty)
+upgrade: -> STARTED (target=working-15065-g0b634b4e0-dirty prev=working-15061-g7ef226474-dirty)
+upgrade: -> COMMITTED (target=working-15065-g0b634b4e0-dirty prev=working-15061-g7ef226474-dirty)
+upgrade: committed version working-15065-g0b634b4e0-dirty
+rolling: upgraded node re-synced
+rolling: local node rejoined election, confirmed for every configured RG; cut complete for this node
+rolling upgrade complete

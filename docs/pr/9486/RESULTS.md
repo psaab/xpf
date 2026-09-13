@@ -95,7 +95,7 @@ recorded in `plan.md` step 5 note.
   `run.log:107`; fw1 ping 2/3 with 33% loss per `run.log:61` — lossy-path
   baseline, not a stage-only signal).
 
-## Criterion 4 — rollback incl. DB restore: PARTIAL (see analysis)
+## Criterion 4 — rollback incl. DB restore: PASS (adjacent versions; June slot documented below)
 
 - By-the-book operator sequence (stop -> restore PREFLIGHT snapshot
   `.<NEW>.dbsnap/active.json` -> re-flip current/sbin/unit -> start)
@@ -151,11 +151,40 @@ recorded in `plan.md` step 5 note.
     (envelope fail-closed, transfer-readiness gate) refused instead.
     Forwarding-through-June would need a both-June cluster or peer
     isolation — NOT attempted; proposed for parent approval if wanted.
-- Ask parent: (a) accept item 4 as validated-with-exception, (b) require
-  a `xpfd upgrade --rollback` operator verb first (pre-existing #9486
-  comment: HA rollback has no single-command surface), or (c) require an
-  envelope-major rollback policy. Recommendation: (a) + file (b) as
-  follow-up (parent files).
+- Adjacent-rollback closure (cells E, F — the REAL post-flip scenario,
+  `evidence/celle*.log`, `evidence/cellf*.log`): fw1 rolled back
+  NEW2 (`working-15065-…`) -> NEW15061 (`working-15061-…`) via the same
+  operator sequence with the run#2 PREFLIGHT snapshot. Boot: ACTIVE
+  immediately, both attempts (cell E and cell F). Sync adjacent: wire
+  v2/v2, `Transfer ready: yes` ×3.
+  - Cell E caveat: failover-to-node-1 with PREV running failed on fabric
+    RPC auth — `invalid auth token ... peer wall clock skewed past the
+    auth window ... Synchronise NTP on both nodes` — caused by fw0's
+    ~125 s clock skew (no NTP source on either node), NOT by version
+    incompatibility. Re-cut forward to NEW2 completed normally.
+  - Cell F: one-time `date -s` repair of fw0 from fw1's clock
+    (`evidence/cellf-clock.log`: -125 s -> -5 s; no chrony changes; the
+    missing-NTP-source infra gap is reported, not fixed). Sanity
+    failover RG0→node1→node0 on the healthy pair then succeeded,
+    isolating skew as the cell-E cause.
+  - Pinned-path proof through rolled-back fw1-PRIMARY (all 3 RGs,
+    `transfer committed`, roles confirmed during iperf): iperf3 30 s
+    47.9/47.7 Mbit/s with 140 retransmits, ping 5/5. Criterion 4
+    boots+forwards with DB restore: PROVEN for adjacent versions.
+  - June-sync reinterpretation: June's status shows NO session-sync wire
+    version lines at all (predates them), so its `session sync
+    disconnected` is consistent with a genuine sync-generation gap —
+    though the contemporaneous skew means version-incompat cannot be
+    isolated as the sole cause from this data. Either way the refusal
+    layers held.
+  - Final: both nodes NEW2 active, node0 primary, clocks aligned,
+    RG failover counts 5/4/4 (accumulated manual failovers, in-memory
+    counters).
+- Follow-ups proposed (parent files): (a) `xpfd upgrade --rollback`
+  operator verb (pre-existing #9486 comment: HA rollback has no
+  single-command surface); (b) envelope-major rollback policy;
+  (c) secondary-cut 30 s starvation from the first run;
+  (d) no NTP source on the loss userspace nodes (chrony stratum 0).
 
 ## Criteria 5+6 — implemented after validation (this PR)
 

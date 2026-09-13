@@ -1,0 +1,142 @@
+=== CELL-E START 2026-09-13T20:28:34Z ===
+NEW2=working-15065-g0b634b4e0-dirty PREV=working-15065-g0b634b4e0-dirty
+die: PREV (working-15065-g0b634b4e0-dirty) is not the expected NEW15061 slot — refusing to roll anywhere else
+=== CELL-E START 2026-09-13T20:28:43Z ===
+NEW2=working-15065-g0b634b4e0-dirty PREV=working-15061-g7ef226474-dirty
+total 224
+drwx------ 2 root root   4096 Sep 13 20:16 .
+drwxr-xr-x 8 root root   4096 Sep 13 20:26 ..
+-rw------- 1 root root 220873 Sep 13 20:16 active.json
+--- slot listing fw1 ---
+total 32
+drwxr-xr-x 8 root root 4096 Sep 13 20:26 .
+drwxr-xr-x 6 root root 4096 Sep 13 20:26 ..
+drwxr-xr-x 2 root root 4096 Jun 16 18:06 .userspace-forwarding-ok-20260402-bfb00432-2555-gf5b5d5e86-dirty.dbsnap
+drwx------ 2 root root 4096 Sep 13 19:51 .working-15061-g7ef226474-dirty.dbsnap
+drwx------ 2 root root 4096 Sep 13 20:16 .working-15065-g0b634b4e0-dirty.dbsnap
+lrwxrwxrwx 1 root root   30 Sep 13 20:26 current -> working-15065-g0b634b4e0-dirty
+drwxr-xr-x 2 root root 4096 Jun 16 18:00 userspace-forwarding-ok-20260402-bfb00432-2555-gf5b5d5e86-dirty
+drwxr-xr-x 2 root root 4096 Sep 13 19:51 working-15061-g7ef226474-dirty
+drwxr-xr-x 2 root root 4096 Sep 13 20:16 working-15065-g0b634b4e0-dirty
+--- recorders ---
+ping-started
+iperf-started
+=== failover all RGs to fw1 (both NEW2 healthy) ===
+Manual failover completed for redundancy group 0 (transfer committed)
+Manual failover completed for redundancy group 1 (transfer committed)
+Manual failover completed for redundancy group 2 (transfer committed)
+Redundancy group: 0 , Failover count: 0
+node1  100      primary        no       no       None
+node0  200      secondary      no       no       None
+Redundancy group: 1 , Failover count: 0
+node1  100      primary        no       no       None
+node0  200      secondary      no       no       None
+Redundancy group: 2 , Failover count: 0
+node1  100      primary        no       no       None
+node0  200      secondary      no       no       None
+--- baseline pinned iperf on NEW2 fw1-primary ---
+[SUM]   0.00-20.00  sec   114 MBytes  47.6 Mbits/sec                  receiver
+
+iperf Done.
+=== ADJACENT ROLLBACK fw1: working-15065-g0b634b4e0-dirty -> working-15061-g7ef226474-dirty (fw1 primary) ===
+-- 1. stop
+-- 2. restore PREFLIGHT snapshot
+total 224
+drwx------ 2 root root   4096 Sep 13 20:16 .
+drwxr-xr-x 4 root root   4096 Sep 13 20:29 ..
+-rw------- 1 root root 220873 Sep 13 20:16 active.json
+-- 3. re-flip current/sbin/unit to PREV
+working-15061-g7ef226474-dirty
+/var/lib/xpf/versions/current/xpfd
+/var/lib/xpf/versions/current/cli
+/var/lib/xpf/versions/current/xpf-userspace-dp
+# Managed by xpf-upgrade (#1917 increment B). Pins ExecStart to the
+# concrete versioned binary so a helper respawn resolves the matching
+# version's xpf-userspace-dp (systemd does not symlink-resolve argv[0]).
+[Service]
+ExecStartPre=
+ExecStartPre=/var/lib/xpf/versions/working-15061-g7ef226474-dirty/xpfd verify-dataplane
+ExecStart=
+ExecStart=/var/lib/xpf/versions/working-15061-g7ef226474-dirty/xpfd
+-- 4. start rolled-back daemon
+active after ~0s
+ROLLBACK-BOOT-OK
+RB-CLI-UNREACHABLE (timing?)
+--- roles after rollback boot (fw0 should have taken over) ---
+Redundancy group: 0 , Failover count: 2
+node0  200      primary        no       no       None
+node1  100      secondary      no       no       None
+Redundancy group: 1 , Failover count: 2
+node0  200      primary        no       no       None
+node1  100      secondary      no       no       None
+Redundancy group: 2 , Failover count: 2
+node0  200      primary        no       no       None
+node1  100      secondary      no       no       None
+=== failover to node 1 with PREV running (expect success) ===
+error: rpc error: code = Unavailable desc = cannot connect to peer on any fabric address: rpc error: code = Unauthenticated desc = fabric RPC authentication failed: invalid auth token (the token authenticates under an accepted key at a window 120s behind ours, so the PSK is correct; the fabric token is time-windowed, so this is a peer wall clock skewed past the auth window — or a stale/replayed token, which this node cannot tell apart. Synchronise NTP on both nodes)
+error: rpc error: code = Unavailable desc = cannot connect to peer on any fabric address: rpc error: code = Unauthenticated desc = fabric RPC authentication failed: invalid auth token (the token authenticates under an accepted key at a window 120s behind ours, so the PSK is correct; the fabric token is time-windowed, so this is a peer wall clock skewed past the auth window — or a stale/replayed token, which this node cannot tell apart. Synchronise NTP on both nodes)
+error: rpc error: code = Unavailable desc = cannot connect to peer on any fabric address: rpc error: code = Unauthenticated desc = fabric RPC authentication failed: invalid auth token (the token authenticates under an accepted key at a window 120s behind ours, so the PSK is correct; the fabric token is time-windowed, so this is a peer wall clock skewed past the auth window — or a stale/replayed token, which this node cannot tell apart. Synchronise NTP on both nodes)
+--- roles from PREV view ---
+Software version: working-15061-g7ef226474-dirty
+Peer software version: working-15065-g0b634b4e0-dirty
+Redundancy group: 0 , Failover count: 0
+node1  100      secondary      no       no       None
+node0  200      primary        no       no       None
+Redundancy group: 1 , Failover count: 0
+node1  100      secondary      no       no       None
+node0  200      primary        no       no       None
+Redundancy group: 2 , Failover count: 0
+node1  100      secondary      no       no       None
+node0  200      primary        no       no       None
+--- sync state (observed) ---
+    CS  Cold Sync monitoring        FL  Fabric Connection monitoring
+    CF  Config Sync monitoring
+Session-sync wire version: 2
+Peer session-sync wire version: 2
+  Transfer ready: yes
+  Transfer ready: yes
+  Transfer ready: yes
+  failover are unaffected. Synchronise NTP on both nodes.
+    CS  Cold Sync monitoring        FL  Fabric Connection monitoring
+    CF  Config Sync monitoring
+Session-sync wire version: 2
+Peer session-sync wire version: 2
+  Transfer ready: yes
+  Transfer ready: yes
+  Transfer ready: yes
+PREV-NOT-PRIMARY — recording as observed (mixed-version refusal validated)
+=== re-cut fw1 forward to NEW2 ===
+upgrade: version dir /var/lib/xpf/versions/working-15065-g0b634b4e0-dirty already present (same source generation); skipping copy
+upgrade: -> COPIED (target=working-15065-g0b634b4e0-dirty prev=working-15061-g7ef226474-dirty)
+upgrade: -> VERIFIED (target=working-15065-g0b634b4e0-dirty prev=working-15061-g7ef226474-dirty)
+upgrade: stopping xpfd before flip
+upgrade: -> STOPPED (target=working-15065-g0b634b4e0-dirty prev=working-15061-g7ef226474-dirty)
+upgrade: -> FLIPPED (target=working-15065-g0b634b4e0-dirty prev=working-15061-g7ef226474-dirty)
+upgrade: -> STARTED (target=working-15065-g0b634b4e0-dirty prev=working-15061-g7ef226474-dirty)
+upgrade: -> COMMITTED (target=working-15065-g0b634b4e0-dirty prev=working-15061-g7ef226474-dirty)
+upgrade: committed version working-15065-g0b634b4e0-dirty
+rolling: upgraded node re-synced
+rolling: local node rejoined election, confirmed for every configured RG; cut complete for this node
+rolling upgrade complete
+working-15065-g0b634b4e0-dirty
+active
+=== failback to node0, final state ===
+info: Re-asserted node0 primary for all redundancy groups (post-deploy, verified; fallback regime).
+Software version: working-15065-g0b634b4e0-dirty
+Peer software version: working-15065-g0b634b4e0-dirty
+Redundancy group: 0 , Failover count: 2
+node0  200      primary        no       no       None
+node1  100      secondary      no       no       None
+Redundancy group: 1 , Failover count: 2
+node0  200      primary        no       no       None
+node1  100      secondary      no       no       None
+Redundancy group: 2 , Failover count: 2
+node0  200      primary        no       no       None
+node1  100      secondary      no       no       None
+fw0 final: current=working-15065-g0b634b4e0-dirty active=active
+fw1 final: current=working-15065-g0b634b4e0-dirty active=active
+--- stopping recorders, pulling logs ---
+  369 /home/ps/git/pi-xpf/.claude/worktrees/9486-upgrade-deb-default/docs/pr/9486/evidence/ping-celle.log
+  450 /home/ps/git/pi-xpf/.claude/worktrees/9486-upgrade-deb-default/docs/pr/9486/evidence/iperf-celle.log
+  819 total
+=== CELL-E COMPLETE ===

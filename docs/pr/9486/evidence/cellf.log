@@ -1,0 +1,106 @@
+=== CELL-F START 2026-09-13T20:32:20Z ===
+NEW2=working-15065-g0b634b4e0-dirty PREV=working-15061-g7ef226474-dirty
+=== 1. clock evidence + fix (fw0 ~125 s slow, no NTP source) ===
+before: host=2026-09-13T20:32:20Z fw0=2026-09-13T20:30:15Z fw1=2026-09-13T20:32:16Z
+setting fw0 clock to fw1 time: 2026-09-13 20:32:16
+Sun Sep 13 20:32:16 UTC 2026
+after: host=2026-09-13T20:32:23Z fw0=2026-09-13T20:32:18Z fw1=2026-09-13T20:32:18Z
+=== 2. sanity: failover RG0 to node1 and back on healthy NEW2 pair ===
+Manual failover completed for redundancy group 0 (transfer committed)
+Redundancy group: 0 , Failover count: 0
+node1  100      primary        no       no       None
+info: Re-asserted node0 primary for all redundancy groups (post-deploy, verified; fallback regime).
+--- recorders ---
+ping-started
+iperf-started
+=== 3. failover all RGs to fw1 (both NEW2) ===
+Manual failover completed for redundancy group 0 (transfer committed)
+Manual failover completed for redundancy group 1 (transfer committed)
+Manual failover completed for redundancy group 2 (transfer committed)
+Redundancy group: 0 , Failover count: 1
+node1  100      primary        no       no       None
+node0  200      secondary      no       no       None
+Redundancy group: 1 , Failover count: 0
+node1  100      primary        no       no       None
+node0  200      secondary      no       no       None
+Redundancy group: 2 , Failover count: 0
+node1  100      primary        no       no       None
+node0  200      secondary      no       no       None
+=== 4. adjacent rollback fw1 (primary) NEW2 -> PREV ===
+/var/lib/xpf/versions/.working-15065-g0b634b4e0-dirty.dbsnap/active.json
+active.json
+working-15061-g7ef226474-dirty
+active after ~0s
+ROLLBACK-BOOT-OK(2)
+Redundancy group: 0 , Failover count: 4
+node0  200      primary        no       no       None
+node1  100      secondary      no       no       None
+Redundancy group: 1 , Failover count: 3
+node0  200      primary        no       no       None
+node1  100      secondary      no       no       None
+Redundancy group: 2 , Failover count: 3
+node0  200      primary        no       no       None
+node1  100      secondary      no       no       None
+=== 5. failover to node 1 with PREV running ===
+Manual failover completed for redundancy group 0 (transfer committed)
+Manual failover completed for redundancy group 1 (transfer committed)
+Manual failover completed for redundancy group 2 (transfer committed)
+Software version: working-15061-g7ef226474-dirty
+Peer software version: working-15065-g0b634b4e0-dirty
+Redundancy group: 0 , Failover count: 0
+node1  100      primary        no       no       None
+node0  200      secondary      no       no       None
+Redundancy group: 1 , Failover count: 0
+node1  100      primary        no       no       None
+node0  200      secondary      no       no       None
+Redundancy group: 2 , Failover count: 0
+node1  100      primary        no       no       None
+node0  200      secondary      no       no       None
+    CS  Cold Sync monitoring        FL  Fabric Connection monitoring
+    CF  Config Sync monitoring
+Session-sync wire version: 2
+Peer session-sync wire version: 2
+  Transfer ready: yes
+  Transfer ready: yes
+  Transfer ready: yes
+PREV-IS-PRIMARY — pinned iperf through rolled-back fw1
+[SUM]   0.00-30.00  sec   171 MBytes  47.9 Mbits/sec  140             sender
+[SUM]   0.00-30.00  sec   170 MBytes  47.7 Mbits/sec                  receiver
+
+iperf Done.
+--- 172.16.80.200 ping statistics ---
+5 packets transmitted, 5 received, 0% packet loss, time 4077ms
+rtt min/avg/max/mdev = 0.227/0.291/0.357/0.053 ms
+node1  100      primary        no       no       None
+node1  100      primary        no       no       None
+node1  100      primary        no       no       None
+=== 6. re-cut fw1 forward to NEW2, failback, final ===
+upgrade: -> STOPPED (target=working-15065-g0b634b4e0-dirty prev=working-15061-g7ef226474-dirty)
+upgrade: -> FLIPPED (target=working-15065-g0b634b4e0-dirty prev=working-15061-g7ef226474-dirty)
+upgrade: -> STARTED (target=working-15065-g0b634b4e0-dirty prev=working-15061-g7ef226474-dirty)
+upgrade: -> COMMITTED (target=working-15065-g0b634b4e0-dirty prev=working-15061-g7ef226474-dirty)
+upgrade: committed version working-15065-g0b634b4e0-dirty
+rolling: upgraded node re-synced
+rolling: local node rejoined election, confirmed for every configured RG; cut complete for this node
+rolling upgrade complete
+working-15065-g0b634b4e0-dirty
+active
+info: Re-asserted node0 primary for all redundancy groups (post-deploy, verified; fallback regime).
+Software version: working-15065-g0b634b4e0-dirty
+Peer software version: working-15065-g0b634b4e0-dirty
+Redundancy group: 0 , Failover count: 5
+node0  200      primary        no       no       None
+node1  100      secondary      no       no       None
+Redundancy group: 1 , Failover count: 4
+node0  200      primary        no       no       None
+node1  100      secondary      no       no       None
+Redundancy group: 2 , Failover count: 4
+node0  200      primary        no       no       None
+node1  100      secondary      no       no       None
+fw0 final: current=working-15065-g0b634b4e0-dirty active=active clock=20:34:14
+fw1 final: current=working-15065-g0b634b4e0-dirty active=active clock=20:34:15
+--- stopping recorders, pulling logs ---
+  476 /home/ps/git/pi-xpf/.claude/worktrees/9486-upgrade-deb-default/docs/pr/9486/evidence/ping-cellf.log
+  563 /home/ps/git/pi-xpf/.claude/worktrees/9486-upgrade-deb-default/docs/pr/9486/evidence/iperf-cellf.log
+ 1039 total
+=== CELL-F COMPLETE ===

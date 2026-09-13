@@ -1,0 +1,4 @@
+Manual failover completed for redundancy group 0 (transfer committed)
+Redundancy group: 0 , Failover count: 0
+node1  100      primary        no       no       None
+info: Re-asserted node0 primary for all redundancy groups (post-deploy, verified; fallback regime).
