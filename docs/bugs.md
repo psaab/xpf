@@ -1001,9 +1001,9 @@ These bugs were discovered testing iperf3 (~4.7 Gbps reverse mode) through the c
 - **Files:** `pkg/daemon/daemon.go`
 
 ### Deploy configstore stale config — VRRP backward compat failure (FIXED)
-- **Symptom:** After deploying new config via `make cluster-deploy` (which pushes `xpf.conf`), the daemon still uses the OLD config from `active.json`. Removing `private-rg-election` from `xpf.conf` had no effect — VRRP instances didn't start
-- **Root cause:** The configstore DB (`/etc/xpf/.configdb/active.json`) persists the compiled config AST from the previous run. On startup, `Store.Load()` reads from `active.json` first (line 87). The text file `xpf.conf` is only used when `active.json` doesn't exist (bootstrap). Deploy pushes new `xpf.conf` but doesn't clear `active.json`
-- **Fix:** Deploy script (`cluster-setup.sh`) now runs `rm -rf /etc/xpf/.configdb` after pushing new config, forcing the daemon to bootstrap from the fresh `xpf.conf`
+- **Symptom:** After deploying new config via `make cluster-deploy` (which, on the raw path, pushes `xpf.conf`), the daemon still uses the OLD config from `active.json`. Removing `private-rg-election` from `xpf.conf` had no effect — VRRP instances didn't start
+- **Root cause:** The configstore DB (`/etc/xpf/.configdb/active.json`) persists the compiled config AST from the previous run. On startup, `Store.Load()` reads from `active.json` first (line 87). The text file `xpf.conf` is only used when `active.json` doesn't exist (bootstrap). The raw deploy pushed new `xpf.conf` but didn't clear `active.json`
+- **Fix:** Deploy script (`cluster-setup.sh`) now runs `rm -rf /etc/xpf/.configdb` after pushing new config, forcing the daemon to bootstrap from the fresh `xpf.conf`. (Raw-path behavior; since #9486 the default deb deploy preserves node config and never pushes `xpf.conf`.)
 - **Files:** `test/incus/cluster-setup.sh`
 - **Test:** `test/incus/test-private-rg.sh full` — enables then disables private-rg-election, verifying VRRP restarts
 

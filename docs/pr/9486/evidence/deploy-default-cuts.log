@@ -1,0 +1,17 @@
+# Run#1 (item 4b, literal `make cluster-deploy`) cut windows from node journals.
+# fw0 clock runs ~125 s behind (see clock-skew.log); fw1 ≈ host time.
+# Secondary-first order confirmed: fw1 cut first, fw0 second.
+# Captured with: journalctl -u xpfd --since "2026-09-13 20:00" | grep Stopping/Stopped/Started
+fw0 (fw0-clock; +125 s = host ~20:16:56-20:17:04):
+Sep 13 20:14:51 xpf-userspace-fw0 systemd[1]: Stopping xpfd.service - xpf Stateful Firewall Daemon...
+Sep 13 20:14:57 xpf-userspace-fw0 systemd[1]: Stopped xpfd.service - xpf Stateful Firewall Daemon.
+Sep 13 20:14:59 xpf-userspace-fw0 systemd[1]: Started xpfd.service - xpf Stateful Firewall Daemon.
+fw1 (fw1-clock ≈ host):
+Sep 13 20:16:29 xpf-userspace-fw1 systemd[1]: Stopping xpfd.service - xpf Stateful Firewall Daemon...
+Sep 13 20:16:30 xpf-userspace-fw1 systemd[1]: Stopped xpfd.service - xpf Stateful Firewall Daemon.
+Sep 13 20:16:32 xpf-userspace-fw1 systemd[1]: Started xpfd.service - xpf Stateful Firewall Daemon.
+# Continuity during run#1 (evidence/iperf-default.log, evidence/ping-default.log):
+# 205 SUM intervals, 0 zero-transfer seconds on ANY stream ([5]/[7]/[9]/[11]
+# all logged zero zero-runs), no resets/errors. Both cuts left no measurable
+# throughput hole this time — in contrast to the first validation run, where
+# the secondary cut starved 3 streams ~30 s (see RESULTS.md criterion 2).

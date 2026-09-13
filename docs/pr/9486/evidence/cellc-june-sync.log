@@ -1,0 +1,9 @@
+    CS  Cold Sync monitoring        FL  Fabric Connection monitoring
+    CF  Config Sync monitoring
+Software version: userspace-forwarding-ok-20260402-bfb00432-3308-g0eb3b133a
+HA protocol version: 1
+Peer software version: working-15065-g0b634b4e0-dirty
+Peer HA protocol version: 1
+  Transfer ready: no (session sync disconnected)
+  Transfer ready: no (session sync disconnected)
+  Transfer ready: no (session sync disconnected)

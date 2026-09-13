@@ -154,9 +154,9 @@ HA mode does not do hitless restart.
 
 ## Known Issues and Workarounds
 
-### Deploy doesn't update active config
-**Issue:** `make cluster-deploy` pushes `xpf.conf` but the daemon loads from the configstore DB (`active.json`). Config changes in `xpf.conf` are ignored on subsequent deploys.
-**Fix:** Deploy script now clears `.configdb/` after pushing config (fixed in `cluster-setup.sh`).
+### Deploy doesn't update active config (raw path)
+**Issue:** `XPF_DEPLOY_FAST=1 make cluster-deploy` (raw path) pushes `xpf.conf` but the daemon loads from the configstore DB (`active.json`). Config changes in `xpf.conf` are ignored on subsequent deploys. (Since #9486 the default deb deploy preserves node config and never pushes `xpf.conf` — this issue cannot occur there.)
+**Fix:** Deploy script now clears `.configdb/` after pushing config (fixed in `cluster-setup.sh`, raw path).
 **Workaround:** Manually run `rm -rf /etc/xpf/.configdb` on VMs before restart.
 
 ### IPv6 SNAT requires explicit ::/0 rule

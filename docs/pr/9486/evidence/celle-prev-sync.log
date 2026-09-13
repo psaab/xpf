@@ -1,0 +1,8 @@
+    CS  Cold Sync monitoring        FL  Fabric Connection monitoring
+    CF  Config Sync monitoring
+Session-sync wire version: 2
+Peer session-sync wire version: 2
+  Transfer ready: yes
+  Transfer ready: yes
+  Transfer ready: yes
+  failover are unaffected. Synchronise NTP on both nodes.

@@ -1,0 +1,55 @@
+=== CELL-D START 2026-09-13T20:25:42Z ===
+OLD1=userspace-forwarding-ok-20260402-bfb00432-2555-gf5b5d5e86-dirty NEW2=working-15065-g0b634b4e0-dirty
+=== June text-boot on fw1 (currently secondary) ===
+/etc/xpf/xpf.conf
+userspace-forwarding-ok-20260402-bfb00432-2555-gf5b5d5e86-dirty
+active after ~0s
+Software version: userspace-forwarding-ok-20260402-bfb00432-3308-g0eb3b133a
+HA protocol version: 1
+Peer software version: working-15065-g0b634b4e0-dirty
+Peer HA protocol version: 1
+=== failover to node 1 AFTER June is running (pin in June's DB) ===
+error: rpc error: code = FailedPrecondition desc = local redundancy group 0 not transfer-ready for explicit failover reasons=[session sync disconnected]
+error: rpc error: code = FailedPrecondition desc = local redundancy group 1 not transfer-ready for explicit failover reasons=[session sync disconnected]
+error: rpc error: code = FailedPrecondition desc = local redundancy group 2 not transfer-ready for explicit failover reasons=[session sync disconnected]
+--- roles from June's view ---
+Redundancy group: 0 , Failover count: 0
+node1  100      secondary      no       no       None
+node0  200      primary        no       no       None
+Redundancy group: 1 , Failover count: 0
+node1  100      secondary      no       no       None
+node0  200      primary        no       no       None
+Redundancy group: 2 , Failover count: 0
+node1  100      secondary      no       no       None
+node0  200      primary        no       no       None
+--- roles from fw0's view ---
+Redundancy group: 0 , Failover count: 1
+node0  200      primary        no       no       None
+Redundancy group: 1 , Failover count: 1
+node0  200      primary        no       no       None
+Redundancy group: 2 , Failover count: 1
+node0  200      primary        no       no       None
+JUNE-NOT-PRIMARY (failover refused or unconfirmed — see roles logs); recording as observed
+Sep 13 20:26:00 xpf-userspace-fw1 xpfd[346319]: time=2026-09-13T20:26:00.419Z level=INFO msg="cluster: skipping config push (not RG0 primary)"
+Sep 13 20:26:01 xpf-userspace-fw1 xpfd[346319]: time=2026-09-13T20:26:01.421Z level=INFO msg="cluster: skipping config push (not RG0 primary)"
+Sep 13 20:26:02 xpf-userspace-fw1 xpfd[346319]: time=2026-09-13T20:26:02.422Z level=INFO msg="cluster: skipping config push (not RG0 primary)"
+Sep 13 20:26:03 xpf-userspace-fw1 xpfd[346319]: time=2026-09-13T20:26:03.423Z level=INFO msg="cluster: skipping config push (not RG0 primary)"
+Sep 13 20:26:04 xpf-userspace-fw1 xpfd[346319]: time=2026-09-13T20:26:04.425Z level=INFO msg="cluster: skipping config push (not RG0 primary)"
+Sep 13 20:26:05 xpf-userspace-fw1 xpfd[346319]: time=2026-09-13T20:26:05.427Z level=INFO msg="cluster: skipping config push (not RG0 primary)"
+Sep 13 20:26:06 xpf-userspace-fw1 xpfd[346319]: time=2026-09-13T20:26:06.429Z level=INFO msg="cluster: skipping config push (not RG0 primary)"
+Sep 13 20:26:07 xpf-userspace-fw1 xpfd[346319]: time=2026-09-13T20:26:07.431Z level=INFO msg="cluster: skipping config push (not RG0 primary)"
+=== recover fw1 to NEW2, restore DB, failback ===
+active.json
+working-15065-g0b634b4e0-dirty
+active after ~0s
+info: Re-asserted node0 primary for all redundancy groups (post-deploy, verified; fallback regime).
+Software version: working-15065-g0b634b4e0-dirty
+Redundancy group: 0 , Failover count: 1
+node0  200      primary        no       no       None
+Redundancy group: 1 , Failover count: 1
+node0  200      primary        no       no       None
+Redundancy group: 2 , Failover count: 1
+node0  200      primary        no       no       None
+fw0 final: current=working-15065-g0b634b4e0-dirty active=active
+fw1 final: current=working-15065-g0b634b4e0-dirty active=active
+=== CELL-D COMPLETE ===

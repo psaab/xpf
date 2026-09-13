@@ -1,0 +1,6 @@
+=== CELL-B START 2026-09-13T20:17:57Z ===
+OLD1=userspace-forwarding-ok-20260402-bfb00432-2555-gf5b5d5e86-dirty NEW2=working-15065-g0b634b4e0-dirty
+--- recorders ---
+ping-started
+iperf-started
+=== (i) XPF_DEPLOY_DEB=0 full entry (expect WARN + guard behaviour) ===

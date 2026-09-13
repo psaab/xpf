@@ -1,0 +1,38 @@
+Monitor Failure codes:
+    CS  Cold Sync monitoring        FL  Fabric Connection monitoring
+    IF  Interface monitoring        IP  IP monitoring
+    CF  Config Sync monitoring
+
+Cluster ID: 22
+Node name: node0
+
+Software version: userspace-forwarding-ok-20260402-bfb00432-16129-ga94eaf6c5
+HA protocol version: 1
+Session-sync wire version: 2
+Peer software version: userspace-forwarding-ok-20260402-bfb00432-16129-ga94eaf6c5
+Peer HA protocol version: 1
+Peer session-sync wire version: 2
+
+Node   Priority Status         Preempt  Manual   Monitor-failures
+
+Redundancy group: 0 , Failover count: 0
+node0  200      primary        no       no       None
+  Takeover ready: yes
+  Transfer ready: yes
+  Forwarding: rg-active=active vrrp-master=none
+node1  100      secondary-hold no       no       None
+
+Redundancy group: 1 , Failover count: 3
+node0  200      secondary      no       no       None
+  Takeover ready: yes
+  Transfer ready: yes
+  Forwarding: rg-active=inactive vrrp-master=none
+node1  100      primary        no       no       None
+
+Redundancy group: 2 , Failover count: 3
+node0  200      primary        no       no       None
+  Takeover ready: yes
+  Transfer ready: yes
+  Forwarding: rg-active=active vrrp-master=none
+node1  100      secondary      no       no       None
+

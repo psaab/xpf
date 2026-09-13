@@ -1,0 +1,83 @@
+=== ITEM-4b REAL DEFAULT ENTRY POINT 2026-09-13T20:13:49Z ===
+env: XPF_DEPLOY_FAST=[unset] XPF_DEPLOY_DEB=[unset]
+--- fw0 pre: dpkg=0.0.17469+g7ef2264747e6 current=working-15061-g7ef226474-dirty active=active
+--- fw1 pre: dpkg=0.0.17469+g7ef2264747e6 current=working-15061-g7ef226474-dirty active=active
+Software version: working-15061-g7ef226474-dirty
+Peer software version: working-15061-g7ef226474-dirty
+Redundancy group: 0 , Failover count: 0
+node0  200      primary        no       no       None
+node1  100      secondary      no       no       None
+Redundancy group: 1 , Failover count: 0
+node0  200      primary        no       no       None
+node1  100      secondary      no       no       None
+Redundancy group: 2 , Failover count: 0
+node0  200      primary        no       no       None
+node1  100      secondary      no       no       None
+--- starting recorders ---
+ping-started
+iperf-started
+--- make cluster-deploy (REAL default recipe) ---
+Need to get 0 B/36.6 MB of archives.
+After this operation, 0 B of additional disk space will be used.
+Get:1 /tmp/xpf_0.0.17473+g0b634b4e0cd0.dirty_amd64.deb xpf amd64 0.0.17473+g0b634b4e0cd0.dirty [36.6 MB]
+debconf: unable to initialize frontend: Dialog
+debconf: (Dialog frontend will not work on a dumb terminal, an emacs shell buffer, or without a controlling terminal.)
+debconf: falling back to frontend: Readline
+debconf: unable to initialize frontend: Readline
+debconf: (This frontend requires a controlling tty.)
+debconf: falling back to frontend: Teletype
+debconf: unable to initialize frontend: Teletype
+debconf: (This frontend requires a controlling tty.)
+debconf: falling back to frontend: Noninteractive
+(Reading database ... (Reading database ... 5%(Reading database ... 10%(Reading database ... 15%(Reading database ... 20%(Reading database ... 25%(Reading database ... 30%(Reading database ... 35%(Reading database ... 40%(Reading database ... 45%(Reading database ... 50%(Reading database ... 55%(Reading database ... 60%(Reading database ... 65%(Reading database ... 70%(Reading database ... 75%(Reading database ... 80%(Reading database ... 85%(Reading database ... 90%(Reading database ... 95%(Reading database ... 100%(Reading database ... 190216 files and directories currently installed.)
+Preparing to unpack .../xpf_0.0.17473+g0b634b4e0cd0.dirty_amd64.deb ...
+Unpacking xpf (0.0.17473+g0b634b4e0cd0.dirty) over (0.0.17469+g7ef2264747e6) ...
+Setting up xpf (0.0.17473+g0b634b4e0cd0.dirty) ...
+stagedgen: published generation 01789330485755981873-31b5e0d9d4dd76ee (current-gen -> 01789330485755981873-31b5e0d9d4dd76ee)
+publish-generation complete (generation 01789330485755981873-31b5e0d9d4dd76ee)
+xpf: clustered node (node-id present) — staged only; cut over with: xpfd upgrade --rolling
+==> Cutting over node0 via 'xpfd upgrade --rolling'...
+rolling: peer ready; forcing local secondary (drain start)
+rolling: drain complete (peer owns RGs, local backup, rg_active=false, sync clean)
+upgrade: -> STAGED (target=working-15065-g0b634b4e0-dirty prev=working-15061-g7ef226474-dirty)
+upgrade: -> PREFLIGHT (target=working-15065-g0b634b4e0-dirty prev=working-15061-g7ef226474-dirty)
+upgrade: -> COPIED (target=working-15065-g0b634b4e0-dirty prev=working-15061-g7ef226474-dirty)
+upgrade: -> VERIFIED (target=working-15065-g0b634b4e0-dirty prev=working-15061-g7ef226474-dirty)
+upgrade: stopping xpfd before flip
+upgrade: -> STOPPED (target=working-15065-g0b634b4e0-dirty prev=working-15061-g7ef226474-dirty)
+upgrade: -> FLIPPED (target=working-15065-g0b634b4e0-dirty prev=working-15061-g7ef226474-dirty)
+upgrade: -> STARTED (target=working-15065-g0b634b4e0-dirty prev=working-15061-g7ef226474-dirty)
+upgrade: gc removing old version userspace-forwarding-ok-20260402-bfb00432-2554-g6c12e5673-dirty
+upgrade: gc removing orphan DB snapshot .userspace-forwarding-ok-20260402-bfb00432-2554-g6c12e5673-dirty.dbsnap
+upgrade: -> COMMITTED (target=working-15065-g0b634b4e0-dirty prev=working-15061-g7ef226474-dirty)
+upgrade: committed version working-15065-g0b634b4e0-dirty
+rolling: upgraded node re-synced
+rolling: local node rejoined election, confirmed for every configured RG; cut complete for this node
+rolling upgrade complete
+==> Cut-over complete for xpf-userspace-fw0.
+==> Re-asserted node0 primary for all redundancy groups (post-deploy, verified; fallback regime).
+==> Rolling deb deploy complete.
+MAKE-RC=0
+--- post state ---
+--- fw0 post: dpkg=0.0.17473+g0b634b4e0cd0.dirty current=working-15065-g0b634b4e0-dirty active=active
+current userspace-forwarding-ok-20260402-bfb00432-2555-gf5b5d5e86-dirty working-15061-g7ef226474-dirty working-15065-g0b634b4e0-dirty 
+01789330485755981873-31b5e0d9d4dd76ee
+--- fw1 post: dpkg=0.0.17473+g0b634b4e0cd0.dirty current=working-15065-g0b634b4e0-dirty active=active
+current userspace-forwarding-ok-20260402-bfb00432-2555-gf5b5d5e86-dirty working-15061-g7ef226474-dirty working-15065-g0b634b4e0-dirty 
+01789330583810980498-00cce57bc7da44a2
+Software version: working-15065-g0b634b4e0-dirty
+Peer software version: working-15065-g0b634b4e0-dirty
+Redundancy group: 0 , Failover count: 0
+node0  200      primary        no       no       None
+node1  100      secondary-hold (local: transfer-commit grace) no       no       None
+Redundancy group: 1 , Failover count: 0
+node0  200      primary        no       no       None
+node1  100      secondary-hold (local: transfer-commit grace) no       no       None
+Redundancy group: 2 , Failover count: 0
+node0  200      primary        no       no       None
+node1  100      secondary-hold (local: transfer-commit grace) no       no       None
+--- stopping recorders, pulling logs ---
+zero-transfer SUM seconds:
+0
+CLEAN-NO-RESETS
+=== ITEM-4b COMPLETE ===

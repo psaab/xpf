@@ -1141,8 +1141,37 @@ cluster-init:
 cluster-create:
 	$(CLUSTER_SETUP) create
 
-cluster-deploy: build build-ctl
+# Deploy build prerequisites follow the cmd_deploy default (#9486): the .deb
+# unless XPF_DEPLOY_FAST=1 selects the raw dev path — otherwise
+# cluster-deploy would build raw binaries the deb default never uses.
+# Command-line/parent-env form must reach the recipe shell identically, so
+# set flags are exported (GLM F4: without this, `make cluster-deploy
+# XPF_DEPLOY_FAST=1` sets the make variable but the recipe never sees it).
+# Conditional: a bare `export` would leak *empty* vars into the recipe env
+# and trip the presence-based XPF_DEPLOY_DEB warn on every deploy.
+ifneq ($(XPF_DEPLOY_FAST),)
+export XPF_DEPLOY_FAST
+endif
+ifneq ($(XPF_DEPLOY_DEB),)
+export XPF_DEPLOY_DEB
+endif
+ifeq ($(XPF_DEPLOY_FAST),1)
+CLUSTER_DEPLOY_PREREQS = build build-ctl
+else
+CLUSTER_DEPLOY_PREREQS = deb
+endif
+
+cluster-deploy: $(CLUSTER_DEPLOY_PREREQS)
+# The prereq already built, so the deb branch skips cmd_deploy's internal
+# rebuild (deb is .PHONY: without the guard it rebuilds the multi-minute
+# .deb a second time). The raw branch keeps the internal build: it also
+# builds the userspace-dp helper, which the prereq deliberately omits
+# (cargo may be absent; the script degrades gracefully, make would not).
+ifeq ($(XPF_DEPLOY_FAST),1)
 	$(CLUSTER_SETUP) deploy $(NODE)
+else
+	XPF_CLUSTER_SKIP_BUILD=1 $(CLUSTER_SETUP) deploy $(NODE)
+endif
 
 cluster-destroy:
 	$(CLUSTER_SETUP) destroy
@@ -1185,8 +1214,14 @@ loss-cluster-init:
 loss-cluster-create:
 	$(LOSS_CLUSTER_SETUP) create
 
-loss-cluster-deploy: build build-ctl
+loss-cluster-deploy: $(CLUSTER_DEPLOY_PREREQS)
+# Same prereq/guard split as cluster-deploy above (deb prereq + skip;
+# raw prereq + internal build for the helper).
+ifeq ($(XPF_DEPLOY_FAST),1)
 	$(LOSS_CLUSTER_SETUP) deploy $(NODE)
+else
+	XPF_CLUSTER_SKIP_BUILD=1 $(LOSS_CLUSTER_SETUP) deploy $(NODE)
+endif
 
 loss-cluster-destroy:
 	$(LOSS_CLUSTER_SETUP) destroy

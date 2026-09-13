@@ -1,0 +1,3 @@
+--- 172.16.80.200 ping statistics ---
+5 packets transmitted, 5 received, 0% packet loss, time 4077ms
+rtt min/avg/max/mdev = 0.227/0.291/0.357/0.053 ms

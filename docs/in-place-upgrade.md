@@ -722,12 +722,13 @@ case (NOT implemented here — see #1922).
 
 ## Dogfood deploy
 
-`XPF_DEPLOY_DEB=1 make cluster-deploy` builds the `.deb` (outside the
-#1875 cluster lock), `apt install`s it (stage-only on the clustered
-nodes), and drives `xpfd upgrade --rolling` secondary-first. The default
-raw push+restart path (and `XPF_DEPLOY_FAST`) is unchanged for the dev
-inner loop. The deb path is opt-in until validated live; it then becomes
-the CI/smoke default.
+`make cluster-deploy` builds the `.deb` (outside the #1875 cluster lock),
+`apt install`s it (stage-only on the clustered nodes), and drives `xpfd
+upgrade --rolling` secondary-first. This is the default since #9486,
+validated live on the loss userspace cluster. `XPF_DEPLOY_FAST=1` keeps the
+raw push+restart path for the dev inner loop. The deb path preserves node
+config: it never pushes `CLUSTER_CONF`, clears the config DB, or pushes
+Phase-0 artifacts (upgrades must never wipe operator config).
 
 ## Host-wide upgrade lock (#1965)
 

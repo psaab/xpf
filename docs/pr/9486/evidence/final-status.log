@@ -1,0 +1,32 @@
+Monitor Failure codes:
+    CS  Cold Sync monitoring        FL  Fabric Connection monitoring
+    IF  Interface monitoring        IP  IP monitoring
+    CF  Config Sync monitoring
+
+Cluster ID: 22
+Node name: node0
+
+Software version: working-15061-g7ef226474-dirty
+HA protocol version: 1
+Session-sync wire version: 2
+
+Node   Priority Status         Preempt  Manual   Monitor-failures
+
+Redundancy group: 0 , Failover count: 0
+node0  200      primary        no       no       None
+  Takeover ready: yes
+  Transfer ready: no (session sync disconnected)
+  Forwarding: rg-active=active vrrp-master=none
+
+Redundancy group: 1 , Failover count: 0
+node0  200      primary        no       no       None
+  Takeover ready: yes
+  Transfer ready: no (session sync disconnected)
+  Forwarding: rg-active=active vrrp-master=none
+
+Redundancy group: 2 , Failover count: 0
+node0  200      primary        no       no       None
+  Takeover ready: yes
+  Transfer ready: no (session sync disconnected)
+  Forwarding: rg-active=active vrrp-master=none
+

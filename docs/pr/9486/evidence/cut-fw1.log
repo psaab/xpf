@@ -1,0 +1,15 @@
+rolling: peer ready; forcing local secondary (drain start)
+rolling: drain complete (peer owns RGs, local backup, rg_active=false, sync clean)
+upgrade: -> STAGED (target=working-15061-g7ef226474-dirty prev=userspace-forwarding-ok-20260402-bfb00432-2555-gf5b5d5e86-dirty)
+upgrade: -> PREFLIGHT (target=working-15061-g7ef226474-dirty prev=userspace-forwarding-ok-20260402-bfb00432-2555-gf5b5d5e86-dirty)
+upgrade: -> COPIED (target=working-15061-g7ef226474-dirty prev=userspace-forwarding-ok-20260402-bfb00432-2555-gf5b5d5e86-dirty)
+upgrade: -> VERIFIED (target=working-15061-g7ef226474-dirty prev=userspace-forwarding-ok-20260402-bfb00432-2555-gf5b5d5e86-dirty)
+upgrade: stopping xpfd before flip
+upgrade: -> STOPPED (target=working-15061-g7ef226474-dirty prev=userspace-forwarding-ok-20260402-bfb00432-2555-gf5b5d5e86-dirty)
+upgrade: -> FLIPPED (target=working-15061-g7ef226474-dirty prev=userspace-forwarding-ok-20260402-bfb00432-2555-gf5b5d5e86-dirty)
+upgrade: -> STARTED (target=working-15061-g7ef226474-dirty prev=userspace-forwarding-ok-20260402-bfb00432-2555-gf5b5d5e86-dirty)
+upgrade: -> COMMITTED (target=working-15061-g7ef226474-dirty prev=userspace-forwarding-ok-20260402-bfb00432-2555-gf5b5d5e86-dirty)
+upgrade: committed version working-15061-g7ef226474-dirty
+rolling: upgraded node re-synced
+rolling: local node rejoined election, confirmed for every configured RG; cut complete for this node
+rolling upgrade complete

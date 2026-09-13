@@ -1,0 +1,11 @@
+Software version: working-15061-g7ef226474-dirty
+Peer software version: working-15061-g7ef226474-dirty
+Redundancy group: 0 , Failover count: 0
+node0  200      primary        no       no       None
+node1  100      secondary      no       no       None
+Redundancy group: 1 , Failover count: 0
+node0  200      primary        no       no       None
+node1  100      secondary      no       no       None
+Redundancy group: 2 , Failover count: 0
+node0  200      primary        no       no       None
+node1  100      secondary      no       no       None

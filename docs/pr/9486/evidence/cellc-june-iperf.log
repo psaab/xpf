@@ -1,0 +1,4 @@
+[SUM]   0.00-30.00  sec   172 MBytes  48.0 Mbits/sec  140             sender
+[SUM]   0.00-30.00  sec   170 MBytes  47.7 Mbits/sec                  receiver
+
+iperf Done.
