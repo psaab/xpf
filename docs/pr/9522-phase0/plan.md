@@ -2,166 +2,169 @@
 
 ## 1. Status
 
-DRAFT v1 (salvage lane) — pending adversarial plan review (ONE round per model). Same branch
-`fix/9522-learned-route-cap`, base `origin/master 7ef226474`. Parent ruling killed Design A
-(`docs/pr/9522/KILLED-DesignA.md`) and Design B Phase 1+3
-(`docs/pr/9522-designB/KILLED-Phase1-3.md`); Phase 0 (LPM) is the piece BOTH reviewers hold
-independently viable (Astra: "proceed with Phase 0 only"; GLM verified the semantic-identity
-set in source). This plan implements the corpus half of Phase 0 ONLY: new test file(s)
-asserting today's lookup behavior through the production entry points. NO production file is
-touched — no trie, no map-type change, no behavior delta. A future LPM cutover must pass every
-cell herein; that cutover is a separate plan.
+DRAFT v2 — pending implementation (plan-review gate: ONE round per model; Astra NEEDS-MAJOR
+vs GLM NEEDS-MINOR → STOPPED per the worse-than-MINOR rule, then parent authorized option (a):
+implement with fixes). Raw round-1 reviews: `docs/pr/9522-phase0/reviews/`. This revision
+addresses EVERY convergent item; no second plan-review round per parent instruction (fixes are
+agreed-mechanical). PR-stage hostile code review still applies.
+
+Round-1 record: Astra NEEDS-MAJOR (3 blocking: `sort_routes`/`populate_routes` privacy;
+reassembly-invariance false with ties; ECMP entry-point hash mismatch) + scope decisions;
+GLM NEEDS-MINOR (F1–F7 convergent + rulings). The reviews CONVERGE on mechanics; delta is
+severity only. V2 dispositions, each mapped:
+
+- Construction: snapshot-build ONLY via `build_forwarding_state` (`forwarding_build/mod.rs`,
+  `pub(super)` = afxdp-wide, already used by `tests.rs`); the false §4 reachability claim is
+  corrected — `sort_routes`/`populate_routes` are `pub(super)` in private `forwarding_build::fib`,
+  unreexported, and are NEVER called directly nor copied. Fixture interfaces + gateway
+  next-hops reuse the #4446 table-scoped inference path (complementary gates cited, not duplicated).
+- Cell 4: distinct-`(prefix, pref)` qualifier + NEW reversed-tie case proving the winner CHANGES
+  (honest direction of the stability property).
+- ECMP: `lookup_forwarding_resolution_inner_ecmp` with EXPLICIT hashes {0,1} + exact members +
+  reordered-slice swap + sweep-containment + per-destination repeatability via the plain wrapper
+  (no exact dst→member maps — GLM F6). Robustness note: with all members sharing liveness state,
+  live/all-dead arms select identically (`h % len` over the same order), so the assertions hold
+  under both liveness outcomes.
+- Dropped/reframed: cell 12 (#6568 — cite `forwarding_build/tests.rs:3315-3362`, one doc line);
+  cell 6 reduced to the novel angle (next-table route LOSING longest-match to a longer direct
+  route); v4-twin-of-2 stated as deliberate re-homing inside the unified contract.
+- Fixture constraints (Astra): positive distinct ifindices, tunnel IDs zero, empty static AND
+  dynamic neighbor maps, no local-address membership in probe ranges; unresolved-interface
+  gateway (ifindex 0) ⇒ `NoRoute` documented, not asserted otherwise; outside-prefix miss in a
+  populated table; IPv6 canonical builder-to-lookup case.
+- Wording: "selected lookup-semantic coverage" (not equivalence proof); "repeat-run check"
+  (not determinism proof); scoped-diff no-production rule (not `git status` prose);
+  home-package Go gate only.
 
 ## 2. Issue framing
 
-#9522's bypass exists because the helper FIB cannot hold a full table; any future fix that
-grows the table (chunked transport) or restructures lookup (LPM trie) must prove it decides
-exactly what today's linear scan decides. That proof needs a pinned corpus FIRST — otherwise
-the cutover's "equivalence" is asserted, not tested. This plan writes that corpus:
-longest-match, preference, insertion stability, discard/next-table, connected composition
-(three prefix-length relations), ECMP slice/order/hash-member behavior, both families,
-table scoping, and the NoRoute boundary — each cell derived from code read at head
-(`forwarding/fib.rs`, `forwarding_build/fib.rs:37-184`, `types/forwarding.rs:894-919`,
-`choose_v4_route` + v6 twin) and each fail-on-revert against the semantic it pins.
+Unchanged from v1: a pinned corpus must precede any LPM cutover or table-growth fix, or
+"equivalence" is asserted. #9522's bypass + killed Designs A/B are the motivation; this file
+remediates nothing by itself (labeled accordingly).
 
 ## 3. Honest scope / value framing
 
-Test-only change: one new test file + two-line module wiring. Zero throughput/cycle/memory
-impact; zero behavior change. Value is entirely future-facing: (a) the LPM cutover's
-acceptance corpus exists before the cutover; (b) a regression net over the most
-security-adjacent decision in the dataplane (which route — and therefore which zone/NAT/screen
-path — a destination takes). *If reviewers conclude even a test-only corpus is unjustified
-churn without a committed LPM consumer, PLAN-KILL is acceptable — say so explicitly.*
+Test-only: one new test file + three-line `mod.rs` wiring (doc comment + `#[cfg(test)]` +
+`#[path]` + `mod`, per the `mod.rs:330-342` precedent — "two-line" corrected). Zero behavior
+change. Value: LPM-gating evidence foundation + regression net over the route-selection
+decision. Novel coverage (nothing like it in tree): cross-prefix longest-beats-preference,
+equal-pref insertion stability (+ honest reversed-tie), v6 preference tie-breaks, unified
+parity contract. *Q6 answered permanent: keep iff these cells stay green and review-clean.*
 
 ## 4. What's already shipped / partially batched
 
-- Lookup: per-table sorted-`Vec` first-match (`fib.rs:428-431` + v6 twin); `sort_routes`
-  longest-first/preference-ASC/stable (`forwarding_build/fib.rs:161-184`); `choose_v4/v6_route`
-  connected-wins-iff-`conn ≥ route` (`fib.rs:863-881`); ECMP `select_route_next_hop` bitmask
-  order-stable over the whole slice (`fib.rs:1055+`, fanout cap 64); table-scoped connected
-  (#2388); `lookup_forwarding_resolution_in_table_with_dynamic(state, neighbors, dst, table)`
-  as the drivable public entry point.
-- Test affordances: `RouteEntryV4/V6::single` cfg(test) ctors (`types/forwarding.rs:954+`);
-  `PrefixV4/V6::from_net`; `sort_routes` reachable via `super::super::forwarding_build::*`
-  (same pattern as `tests.rs`); `ShardedNeighborMap::new()` empty dynamic map;
-  `#[path]` module wiring precedent (`mod.rs:337-342`).
-- Neighbor semantics the corpus must respect: unresolved next-hop ⇒ `MissingNeighbor`
-  (egress still attributed — the winner is readable without seeding neighbors); discard ⇒
-  `DiscardRoute`; no match ⇒ `NoRoute` (egress 0).
+V1 §4 stands, CORRECTED: `sort_routes`/`populate_routes` NOT directly reachable (privacy,
+verified); construction rides `build_forwarding_state(&ConfigSnapshot)` exclusively.
+Complementary (cited, not duplicated): #6568 ingest cells (`forwarding_build/tests.rs:3315,
+3367` + anti-over-reject), gateway inference (`forwarding_build/tests.rs:3525+`), #2390
+preference cell (`tests.rs:4679`), next-table recursion/self-loop/v6-canonical/cycle cells
+(`tests.rs:2717, 3071, 3090, 3123`). Reused: `RouteSnapshot` wire shape
+(`protocol/snapshot.rs:251`: table/family/destination/next_hops`Vec<String>`/discard/
+next_table/preference), `lookup_forwarding_resolution_in_table_with_dynamic`
+(`fib.rs:182-190`, hash None → destination hash), `lookup_forwarding_resolution_inner_ecmp`
+(`fib.rs:205-213`, explicit `Option<u64>` hash used VERBATIM as spread
+(`:528`, `:759`)), `select_route_next_hop` bitmask order-stable + all-dead fallback
+`candidates[hash % len]` (`fib.rs:1055-1135`, cap 64), `choose_v4/v6_route` (`fib.rs:863-899`),
+`ShardedNeighborMap::new()`, `#[path]` wiring.
 
 ## 5. Concrete design
 
-New file `userspace-dp/src/afxdp/forwarding/tests_lpm_parity_9522.rs`, wired in `mod.rs`
-next to the #7480/#9054 cells (two lines: doc comment + `#[cfg(test)] #[path] mod`). Helpers
-are file-local ONLY (no production `cfg(test)` additions — existing `single()` ctors suffice):
+File `userspace-dp/src/afxdp/forwarding/tests_lpm_parity_9522.rs`, wired in `mod.rs`.
+File-local helpers ONLY (snapshot builders — no production additions):
 
 ```rust
-// file-local helpers (test-only):
-fn v4_table(routes: Vec<(/*prefix*/ &str, /*egress*/ i32, /*pref*/ i32)>) -> ForwardingState
-// parses prefixes via Ipv4Net, builds RouteEntryV4::single (discard=false,
-// next_table=""), inserts into routes_v4["inet.0"], runs sort_routes.
-fn v6_table(...)  // mirror for inet6.0
-fn resolve_v4(state, dst: &str) -> ForwardingResolution  // empty neighbor map, table Some("inet.0")
+// Base snapshot: lan (ifindex 11, 10.99.0.1/24) + wan (ifindex 12, 192.0.2.10/24).
+// Connected 10.99.0.0/24 + 192.0.2.0/24; gateways .2/.1 resolve per #4446.
+// Probe ranges avoid locals/connected except composition cells: 10.0.0.0/8,
+// 172.16.0.0/12, 198.51.100.0/24, 203.0.113.0/24 (+ v6: 2001:db8:1::/48 etc.).
+fn base_snapshot() -> ConfigSnapshot
+fn with_routes(base: ConfigSnapshot, routes: Vec<RouteSnapshot>) -> ForwardingState
+// = build_forwarding_state(&snap) — production sort path, never copied.
+fn resolve(state, dst: &str) -> ForwardingResolution  // empty maps, table inet.0
+fn resolve_ecmp(state, dst: &str, hash: u64) -> ForwardingResolution  // inner_ecmp, Some(hash)
 ```
 
-Cells (each asserts `(disposition, egress_ifindex)` — the LPM-visible contract; each names the
-revert that reds it):
+Cells (each `(disposition, egress)` + named revert; `*_9522` names):
 
-1. `longest_match_beats_better_preference_9522` — /8 pref 5 vs /24 pref 200 ⇒ /24's egress.
-2. `same_prefix_lowest_preference_wins_9522` — three same-prefix routes prefs 10/5/7 ⇒ pref-5 egress.
-3. `equal_preference_keeps_insertion_order_9522` — same prefix+pref, egresses A,B ⇒ A (stable sort).
-4. `insertion_order_irrelevant_across_reassembly_9522` — same SET built in two insertion orders
-   ⇒ identical resolutions over a sweep of destinations (the chunk-reassembly property).
-5. `discard_never_falls_back_to_ancestor_9522` — discard /24 under /8 ⇒ `DiscardRoute` (not /8's egress).
-6. `next_table_chain_resolves_9522` + `next_table_unsupported_9522` — named-table recursion and
-   the depth/cycle terminal (mirror existing #6664-adjacent behavior, assert don't re-specify).
-7. `connected_shorter_than_route_loses_9522` / `connected_equal_wins_9522` /
-   `connected_longer_wins_9522` — the three `conn.prefix_len()` relations vs a static route.
-8. `connected_is_table_scoped_9522` — connected entry in tenant-a never matches tenant-b lookup.
-9. `ecmp_same_slice_order_and_hash_member_stable_9522` — multi-next-hop route: same winner for
-   the same flow hash across calls; all members within the slice across hash sweep (no
-   out-of-slice selection); member ORDER preserved as authored.
-10. `noroute_on_empty_table_9522` — empty table ⇒ `NoRoute`, egress 0 (uncacheable lookup boundary).
-11. v6 twins of 1, 2, 7 (three relations), 10 — the v6 lookup path is a separate function.
-12. `unparseable_destination_fails_closed_9522` — build-path level (via `populate_routes`
-    error arm, #6568): garbage destination ⇒ `Err`, never a silent skip (documents the ingest
-    contract the trie must preserve: tries never see bad routes).
+1. `longest_match_beats_better_preference_9522` (NOVEL — no longest test in tree): /8 pref 5
+   vs /24 pref 200 ⇒ /24 egress. Revert comparator to preference-first ⇒ RED.
+2. `same_prefix_lowest_preference_wins_9522` — deliberate RE-HOMING of #2390 (`tests.rs:4679`)
+   into the unified contract (stated, not novel): prefs 10/5/7 ⇒ pref-5 egress.
+3. `equal_preference_keeps_insertion_order_9522` (NOVEL): same prefix+pref, egresses A,B ⇒ A.
+3b. `reversed_tie_changes_winner_9522` (honest direction): B,A ⇒ B. Revert stability ⇒ RED.
+4. `distinct_key_reassembly_order_independent_9522` (SCOPED per F2): distinct-(prefix,pref) set
+   built in two snapshot orders ⇒ identical sweep resolutions. With ties ⇒ NOT asserted (3b).
+5. `discard_never_falls_back_to_ancestor_9522`: discard /24 under /8 ⇒ `(DiscardRoute, 0)`.
+6. `next_table_loses_longest_match_9522` (REDUCED — the one novel angle): next-table /16 vs
+   direct /24 ⇒ direct wins; + terminal-failure cell (unresolvable depth ⇒
+   `NextTableUnsupported`, no ancestor fallback; missing target table ⇒ `NoRoute` — no
+   early-cycle-detection claim).
+7. `connected_{shorter_loses,equal_wins,longer_wins}_9522` — the three relations vs a static
+   route (probe inside connected ranges; expectation per `choose_v4_route`).
+8. `connected_is_table_scoped_9522`: tenant-b lookup never matches tenant-a connected.
+9. ECMP (explicit-hash entry, exact members): two gateways (egresses 11, 12), hash 0 ⇒ member 0,
+   hash 1 ⇒ member 1; `reordered_slice_swaps_winners_9522`; `sweep_containment_9522` (every
+   winner ∈ slice over dst sweep via plain wrapper); `destination_repeatability_9522` (same dst
+   twice ⇒ same winner; NO exact dst→member maps — F6). Liveness-robust by construction
+   (shared liveness state ⇒ identical selection either arm).
+10. `noroute_empty_table_9522` + `noroute_outside_prefix_populated_table_9522`: `(NoRoute, 0)` both.
+11. v6 twins: longest-beats-preference, same-pref-wins, connected 3 relations, NoRoute (the v6
+    preference tie-break has NO tree coverage — NOVEL). Plus builder-to-lookup IPv6
+    canonical-table case (Astra: distinct coverage).
+- Cell 12 DROPPED (dup of 3315-3362); one doc line cites it. Unresolved-interface gateway
+  (ifindex 0) ⇒ `NoRoute` documented in fixture notes (Astra constraint).
 
-Explicitly NOT asserted (would over-pin internals): exact `sort_routes` comparator shape
-(assert outcomes, not ordering internals); session/flow-cache behavior; policy verdicts;
-performance numbers.
+NOT asserted: comparator internals, sessions/flow-cache, policy, perf numbers, cycle
+early-detection, exact dst→member maps.
 
 ## 6. Public API preservation
 
-Nothing preserved-changed: zero production edits. Test file uses only existing public-in-crate
-entry points (`lookup_forwarding_resolution_in_table_with_dynamic`, `sort_routes`,
-`single()` ctors, `populate_routes` error type). Module wiring adds two lines to `mod.rs`
-inside `#[cfg(test)]`.
+Zero production edits (enforced by scoped diff in review). Test-only use of existing
+crate-visible entry points. Three-line `mod.rs` wiring inside `#[cfg(test)]`.
 
 ## 7. Hidden invariants the change must preserve
 
-1. **No production delta**: `git status` after implementation shows exactly two paths
-   (new test file + `mod.rs` wiring). Any production hunk fails review outright.
-2. **Determinism**: no timing, no netlink, no threads, no global state; fixed hashes/addresses;
-   empty neighbor maps (no resolver involvement).
-3. **Full-suite safety**: unique `*_9522` test names; no shared `static`s; file-local helpers
-   (no fixture coupling that a neighbor refactor can break silently).
-4. **Entry-point fidelity**: every cell drives a REAL lookup function (never a reimplementation
-   of matching logic in the test — a corpus that reimplements `find` proves nothing).
-5. **Fail-on-revert honesty**: each cell's doc comment names the precise revert that reds it
-   (e.g. "flip comparator to preference-DESC ⇒ RED"); cells that cannot name one are deleted.
+V1's five stand, amended: (4) entry-point fidelity — real lookup fns only, INCLUDING the
+explicit-hash ECMP entry (documented exception); (5) every cell names its revert; new (6)
+snapshot-build construction exclusively (no direct-state FIB assembly — also answers Q1:
+integration realism for family/canonicalization/inference comes free); (7) fixture hygiene —
+positive distinct ifindices, zero tunnels, empty maps, probes avoid locals (F7 caveat honored).
 
 ## 8. Risk assessment
 
 | Class | Rating | Reason |
 |---|---|---|
-| Behavioral regression | LOW (none possible) | Test-only; production untouched by construction (§7.1 enforced in review). |
-| Lifetime / borrow-checker | LOW | Test-local owned values; no new production types. |
-| Performance regression | LOW | ~15 unit tests, no benches; suite-time noise only. |
-| Architectural mismatch | LOW | Follows the `tests_noroute_*` file-per-concern precedent; but Q6 invites the kill if even this is churn-without-consumer. |
+| Behavioral regression | LOW (none possible) | Test-only, scoped-diff enforced. |
+| Lifetime / borrow-checker | LOW | Owned test values. |
+| Performance regression | LOW | ~18 deterministic unit tests. |
+| Architectural mismatch | LOW | File-per-concern precedent; Q6 keep (novel cells + unified contract). |
 
-The REAL risk is corpus incorrectness (asserting a semantic the code does not implement —
-then a future LPM "passes" against a lie). Mitigation: every expectation derived from code
-read at head (§4 citations) + cross-checked against existing passing tests + hostile review
-of the plan itself.
+Residual risk = corpus incorrectness: mitigated by derivation-from-head + both-reviewer
+verification (GLM's table: every semantic ✅ exact; Astra: cells 1–3/connected/discard/NoRoute
+correct) + implementation run green + fail-on-revert discipline.
 
 ## 9. Test plan
 
-- `cargo test --release tests_lpm_parity_9522` green (the corpus).
-- Named-module 5× flake check (determinism proof).
-- Full `forwarding` test module + full `cargo test --release` (no regressions possible, prove it).
-- `go test ./pkg/dataplane/userspace/` (Go untouched — sanity that the tree is green around the
-  issue's home package; doubles as the lane's go-suite gate).
-- Loss-cluster smoke: NOT REQUIRED (no dataplane behavior change — nothing to smoke; stated,
-  not skipped silently).
+- `cargo test --release tests_lpm_parity_9522` green (the corpus, ~18 cells).
+- Repeat-run check (module 5×; "proof" language dropped).
+- Full `forwarding` module + full `cargo test --release` green.
+- `go test ./pkg/dataplane/userspace/` (home-package gate; full `./...` disproportionate — Q7).
+- Scoped-diff review: exactly two paths (new file + `mod.rs`); any production hunk kills the PR.
+- No cluster smoke (no behavior change — stated).
 
 ## 10. Out of scope (explicitly)
 
-LPM trie implementation or cutover; transfer verb; any production edit; perf measurement;
-#9172; Design A/B revival; ECMP hash-policy semantics beyond member-stability observation.
+LPM implementation/cutover; transfer verb; any production edit; perf measurement; #9172;
+Design A/B revival; ECMP hash-policy semantics beyond member-stability; cycle
+early-detection claims; exact dst→member maps.
 
-## 11. Open questions for adversarial review
+## 11. Open questions for adversarial review — RESOLVED (no second round per parent)
 
-1. **Snapshot-build vs direct-state construction?** The corpus builds `ForwardingState`
-   directly (precise entry control). Should a subset ALSO go through `ConfigSnapshot` →
-   `populate_routes` → `sort_routes` (integration realism: family-match, canonicalization,
-   next-hop resolution)? Or does dual construction double maintenance for zero added signal?
-2. **ECMP member-stability: pin EXACT member per fixed hash, or determinism-only?** Exact-member
-   pins the bitmask-selection implementation (brittle across legitimate refactors?); sweep-only
-   (all winners ∈ slice + repeatable) pins the contract. Which is the right level — kill the
-   exact-member cell if it over-pins?
-3. **MissingNeighbor as the winner-oracle:** most cells assert winner via `egress_ifindex`
-   under `MissingNeighbor` (no neighbor seeding). Does any cell NEED `ForwardCandidate`
-   (seeded neighbor map) to be meaningful — i.e. does disposition interact with selection
-   anywhere (tunnel outer? local-delivery?) that the corpus must cover?
-4. **Next-table cells: assert or drop?** They mirror existing #6664-adjacent coverage. Keep as
-   LPM-relevant (recursion must survive the trie) or drop as duplication?
-5. **Insertion-reassembly cell (4): is it load-bearing?** It exists for chunked transfer
-   (killed). Without a transfer consumer, is it speculative — delete, or keep as
-   order-independence documentation?
-6. **Kill the whole corpus?** No LPM consumer is committed; #9522's fix direction is undecided
-   (documented residual vs Alternative C per parent). Is a 15-cell corpus now churn without a
-   consumer — PLAN-KILL the salvage too?
-7. **Go-suite gate proportionality:** Go is untouched; is `go test` on the home package
-   sufficient, or does the lane require the full `go test ./...`? Name the cheaper sufficient
-   gate if the full suite is disproportionate.
+1. Snapshot vs direct-state → SNAPSHOT exclusively (both reviewers; integration realism free).
+2. Exact-member ECMP → YES at explicit hashes (Astra: legitimate contract) with
+   sweep-containment + repeatability alongside (GLM F6); NO exact dst→member maps.
+3. Oracle sufficiency → sufficient with fixture constraints (both).
+4. Next-table → reduced novel angle (both).
+5. Cell 4 → kept scoped (both).
+6. Kill corpus → NO (both).
+7. Go gate → home-package (both).
