@@ -651,10 +651,12 @@ cmd_deploy() {
 		suppress_host_parent_ipv6_ra "$SRIOV_LAN_PARENT"
 	fi
 	# XPF_DEPLOY_DEB is read nowhere: the deb path has been the default since
-	# #9486. Warn when it is set so XPF_DEPLOY_DEB=0 (the old raw meaning)
-	# does not silently select the deb default.
-	if [[ -n "${XPF_DEPLOY_DEB:-}" ]]; then
-		warn "XPF_DEPLOY_DEB=${XPF_DEPLOY_DEB} is deprecated and ignored (deb is the default since #9486); use XPF_DEPLOY_FAST=1 for the raw path"
+	# #9486. Warn on PRESENCE (${var+x}), not non-emptiness, so even
+	# XPF_DEPLOY_DEB= (empty) cannot silently mean something it does not —
+	# and in particular XPF_DEPLOY_DEB=0 (the old raw meaning) does not
+	# silently select the deb default.
+	if [[ -n "${XPF_DEPLOY_DEB+x}" ]]; then
+		warn "XPF_DEPLOY_DEB=${XPF_DEPLOY_DEB:-} is deprecated and ignored (deb is the default since #9486); use XPF_DEPLOY_FAST=1 for the raw path"
 	fi
 
 	if [[ "${XPF_DEPLOY_FAST:-}" = "1" ]]; then

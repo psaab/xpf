@@ -130,6 +130,9 @@ recorded in `plan.md` step 5 note.
   each a `cli` query racing the just-started daemon's gRPC socket, each
   followed by successful reads in the same step. Timing artifact, not a
   daemon state.
+- Driver provenance: the committed `run-validation.sh` is a repaired
+  reconstruction (logging stubs + oldver fix post-run);
+  `evidence/run.log` is the raw pre-repair log of what actually executed.
 - Item-6 follow-up runs (cells C, D — June-primary attempt, see
   `evidence/cellc*.log`, `evidence/celld*.log`):
   - June slot binary self-reports `...-3308-g0eb3b133a` (built 2026-06-21);
@@ -168,7 +171,8 @@ recorded in `plan.md` step 5 note.
     failover RG0→node1→node0 on the healthy pair then succeeded,
     isolating skew as the cell-E cause.
   - Pinned-path proof through rolled-back fw1-PRIMARY (all 3 RGs,
-    `transfer committed`, roles confirmed during iperf): iperf3 30 s
+    `transfer committed`, roles confirmed immediately before and after
+    iperf — the sampler ran post-iperf, not mid-stream): iperf3 30 s
     47.9/47.7 Mbit/s with 140 retransmits, ping 5/5. Criterion 4
     boots+forwards with DB restore: PROVEN for adjacent versions.
   - June-sync reinterpretation: June's status shows NO session-sync wire
