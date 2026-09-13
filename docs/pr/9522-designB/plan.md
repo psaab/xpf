@@ -1,34 +1,37 @@
-# #9522-DesignB — Chunked learned-route transfer with shadow staging, joint FIB+validation commit, LPM FIB (cap unreachable, #7480 strict throughout)
+# #9522-DesignB — Chunked learned-route transfer with joint commit, retention, LPM FIB (cap unreachable, #7480 strict throughout)
 
 ## 1. Status
 
-DRAFT v2 (Design B) — pending adversarial plan review (round 2 of 3). Same branch, base
-`7ef226474`. Supersedes Design B v1 (`4720981f`).
+DRAFT v3 (Design B) — pending adversarial plan review (round 3 of 3, final). Same branch, base
+`7ef226474`. Supersedes v2 (`3e1da97`).
 
-Round-1 record (raws: `docs/pr/9522-designB/reviews/` — to be saved with v2's dispatch):
-Astra PLAN-KILL (scoped: Phase-1 publication protocol, Phase-2 live mutation, dependent Phase-3
-retirement; Phase 0 direction sound) + GLM NEEDS-MAJOR (5 closable items). The reviews converge;
-v2 accepts ALL of it:
+Round-2 record (raws: `docs/pr/9522-designB/reviews/round2-*.md`): Astra PLAN-KILL (scoped
+Phase 1 + dependent Phase 3; Phase 0 viable, Phase 2 deferral clean) + GLM NEEDS-MINOR (2
+required: R2-1 pre-bump serialization + NAK re-pair; R2-2 version-identity fork). Convergent
+and closable; v3 closes all of it:
 
-- Publication ordering wrong (swap→publish→ACK→bump exposes new FIB under old validation) →
-  pre-authorized commit identity + ONE joint store (§5-1.4 rewritten).
-- Exactly-once asserted, not specified → commit receipt + idempotent committed-state +
-  crash reconciliation via status echo (§5-1.5 rewritten).
-- Config binding + digest identity open → bound transfer identity, pre-publish checks,
-  clear-at-swap (neighbors precedent), transfer-internal hash distinct from `content_digest`
-  (§5-1.3/1.4).
-- Phase 2 exempts itself from atomicity → **Phase 2 KILLED** (both reviewers + v1 Q2);
-  anti-entropy folded into Phase 1 (hash-skip periodic transfer + installed-identity echo).
-- Apply/overlay path wipes the learned table (GLM R1-F1, the biggest hole) → helper-side
-  learned retention with Rust-side gap-key suppression + next-hop re-resolution (§5-1.6
-  rewritten).
-- Sender serialization/livelock → single in-flight, dirty-flag queueing, pre-empt only on
-  epoch change, convergence-under-churn bound (§5-1.7 rewritten).
-- Phase-3 matrix vs version gate → over-refusal stated correctly + same-package coupling
-  (§5-Phase-3 rewritten).
-- LPM sharpening: structure chosen (binary trie), corpus additions, numeric gates (§5-Phase-0).
-- Plus Astra 6/8: numeric resource/scheduling gates, transaction state table + failure
-  injection, rollout contract.
+- Generation exclusivity: ONE sequencer (`fibGenMu`) across mint+send for ALL publishers;
+  strict freshness (carried > current; equal ⇒ receipt-only duplicate); boot nonce epochs;
+  status-pair update in the commit critical section; NAK re-pair rule; Q1 consumer audit
+  answered (snapshot stampers benign, BPF self-healing, RMW race fixed by the sequencer).
+- Retention completeness: coverage-REMOVAL path (Go detects newly-uncovered keys → immediate
+  re-transfer, fail-closed interim, M2 cell) alongside ADDITION suppression at apply; three
+  rebuild paths enumerated (reconcile apply, armed same-plan, disarmed twin); ban scoping
+  recorded (transfer gap-fill Go vs apply exact-key suppression); config identity stored as
+  `route_config_binding`, separate from `content_digest`.
+- Recovery as an in-plan state machine (§5-1.5 table): staging/commit/abort states, duplicate
+  commit (same id, different content) refused, staging expiry, restart identity, supersede
+  races, lost-ACK-then-unavailable-status disambiguation.
+- Version fork resolved per GLM R2-2(a): NO snapshot version bump (stays v16); route-transfer
+  protocol version advertised via omitempty status field (positive detection); per-verb
+  refusal handles old helpers; matrix rewritten truthfully; sticky latch demoted to backstop.
+- Numeric gates completed: behavioral M0 thresholds (NoRoute pps at 1M ≥ 65k-master, build ≤
+  2×, memory ≤ 2×); per-chunk hold p99 ≤ 500 ms; staging ≤ 1× steady FIB; route-vs-config
+  churn progress rules; K=3 scoped to Go-side restarts + config-abort leg in M1.
+Round-1 → v2 record (kept for archaeology): v2 closed publication ordering (pre-authorized
+joint commit), committed identity, config binding, Phase-2 kill, retention, sender
+serialization, matrix reconciliation, LPM sharpening, numeric gates. Round-2 put the same
+shape under the microscope and found the joints: v3 is joints, not reshaping.
 
 ## 2. Issue framing
 
@@ -40,9 +43,11 @@ paired deployments, #7480 strict throughout, no oracle/attestation/doctrine-exce
 Acceptance (measurable): full-table box — learned miss ≡ uncapped miss (deny drops both,
 permit delegates both with verdicts); uncapped-deny control untouched; NO window (transfer,
 config-commit, overlay, restart) drops/delegates anything the pre-window table would not have
-(availability parity pinned, including the new M2 no-wipe-on-config-commit cell); permit
-throughput within the measured LPM envelope; `LearnedRouteCapHits()==0` on v17 pairings
-(necessary, not sufficient — sufficiency is the installed-transfer-identity echo, §5-1.5).
+(availability parity pinned, M2 no-wipe + removal-path cells); coverage REMOVALS converge by
+re-transfer with a fail-closed interim (drops-more, bounded by transfer convergence — stated,
+not smuggled); permit throughput within the measured LPM envelope;
+`LearnedRouteCapHits()==0` on route-transfer pairings (necessary, not sufficient — sufficiency
+is the installed-transfer-identity echo, §5-1.5).
 
 ## 3. Honest scope / value framing
 
@@ -97,104 +102,123 @@ No-go kills Phase 0 and everything behind it.
 
 ### Phase 1 (core fix): `update_routes` transfer with joint commit
 
-Wire v17 (additive): `route_transfer: u64` (new `routeTransferGen`, seeded from status),
-`route_chunks`, `route_chunk_index/total`, `route_replace` (first chunk),
-`route_complete` (commit request carrying `route_learned_hash`: Go-stamped SHA-256 over the
-canonical learned-set encoding — transfer-internal identity, NOT `content_digest`),
-`route_commit_fib: u32` (PRE-AUTHORIZED fib generation — see commit order), bound
-`route_config_gen: u64` + `route_config_hash` (config identity — see binding).
+Wire (NO snapshot version change — stays v16; route-transfer protocol versioned separately,
+GLM R2-2(a)): `route_transfer_nonce: u64` (Manager boot nonce; fence resets on nonce change —
+restart identity) + `route_transfer_seq: u64` (monotone per nonce), `route_chunks`,
+`route_chunk_index/total`, `route_replace`, `route_complete` (carrying `route_learned_hash`:
+Go-stamped SHA-256 over the canonical learned-set encoding — transfer-internal identity, NOT
+`content_digest`), `route_commit_fib: u32` (PRE-AUTHORIZED fib generation minted under the
+sequencer), bound `route_config_gen: u64` + `route_config_hash` (stored as
+`route_config_binding`). Helper advertises `route_transfer_protocol: u32` (omitempty) in
+`ProcessStatus`; Go sends the verb ONLY on positive detection (unknown-type refusal arm is
+the backstop latch, not the mechanism).
 
-Handler + commit sequence (Astra blockers 1–3 closed by construction):
+Handler + commit sequence (round-2 closures built in):
 
-1. **Fence per transfer**: `transfer < last_seen` refuse; `==` idempotent chunk store;
-   `>` abort prior staging (one live transfer, bounded staging: caps on chunks/routes/decoded
-   bytes/aggregate memory, immutable envelope fields, index bounds — refused loudly).
-2. **Config-bound ingest**: staging records `(transfer, config_gen, config_hash)`; EVERY chunk
-   checked against the CURRENT config identity; mismatch ⇒ abort (stale transfer never
-   commits against new config). Gap-fill coverage computed ONCE per Go build from the bound
-   config and carried in-chunk (helper invents no coverage).
+1. **Fence per (nonce, seq)**: unknown nonce ⇒ adopt as new epoch (fence reset — restart
+   identity); same nonce: `seq < last_seen` refuse, `==` idempotent chunk store (conflicting
+   duplicate chunk contents refused loudly), `>` abort prior staging. One live transfer;
+   staging caps (chunks/routes/decoded bytes/aggregate memory, immutable envelope, index
+   bounds, 90 s wall-clock expiry — all refused loudly, never repaired in place).
+2. **Config-bound ingest**: staging records `(nonce, seq, config_gen, config_hash)`; EVERY
+   chunk checked against CURRENT config identity; mismatch ⇒ abort. Gap-fill computed ONCE
+   per Go build from the bound config and carried in-chunk (helper invents no coverage —
+   transfer-time gap-fill stays Go-computed per `routes.go:789-792`; ban scoping recorded:
+   the round-1 helper-coverage ban is about transfer-time kernel-table policy, while
+   apply-time suppression below is exact-key equality over Go-authored content — GLM R2-4).
 3. **Validate through `populate_routes` path per chunk into STAGING** (same fail-closed
-   checks; `iface_ctx`: persist last-apply `iface_ctx` in `ServerState` — chosen, Q1 closed
-   by decision: persisted, refreshed on every apply, transfer aborts if refreshed mid-flight).
-4. **Commit (joint, pre-authorized)**: Go PRE-BUMPS the shim counter BEFORE sending
-   `route_complete` (shim stays the sole authority; skipped values harmless under
-   equality-match — unpublished pairs never stamp entries). The commit verb carries
-   `route_commit_fib` (= pre-bumped value) + `route_learned_hash`. Helper verifies full chunk
-   bitmap + staged-set hash == carried hash + config binding still current, then sets
-   `self.forwarding` (swap) AND `self.validation.fib_generation` (= carried value) and
-   publishes through the ONE existing choke point (`store_runtime_view` — NO new store site,
-   canary count unchanged). Workers observe complete FIB + fresh pair together, atomically.
-   ACK returns the commit receipt `(transfer, fib)`. A later `bump_fib_generation` with the
-   EQUAL value is admitted by the `<`-fence as the confirm path (or Go skips it when the
-   commit ACK landed — specified both, idempotent either way).
-5. **Exactly-once as committed identity** (Astra 2): helper records
-   `last_committed_transfer` + learned-set hash, echoed in `ProcessStatus`
-   (`manager_route_transfer`, `manager_route_hash` — the neighbor-ACK precedent). Lost ACK ⇒
-   Go retries the COMMIT verb only (never the transfer); helper answers committed-state
-   idempotently (already-committed ⇒ receipt, no re-publish). Crash between shim pre-bump and
-   commit ⇒ shim ahead, helper behind: next transfer pre-bumps further, commits forward —
-   reconciliation rule: Go compares status echo vs intended id on every tick; mismatch ⇒
-   re-transfer (never assume). Daemon/helper restart ⇒ RAM-only staging/partition lost ⇒ echo
-   absent/stale ⇒ Go re-arms a full transfer (restart matrix, §9 cell).
-6. **Digest**: CLEAR installed `content_digest` at swap (neighbors precedent, one line, zero
-   CPU at 1M — GLM R1-F2). The transfer-internal hash is a different object and never touches
-   the snapshot digest gate.
-7. **Retention across applies** (GLM R1-F1 — the v1 hole, closed): `ForwardingState` gains a
-   genuine learned partition the apply path does NOT rebuild: `apply_snapshot` rebuilds
-   config tables from the incoming snapshot, then REPLAYS retained learned `RouteSnapshot`s
-   through `populate_routes` with the NEW `iface_ctx` (re-resolution per #4446), filtered by a
-   Rust-side gap-key suppression (`table|family|canonical-destination`, canonicalization
-   parity-pinned against Go's `canonicalRoutePrefix` by shared corpus cells) so config-added
-   coverage re-suppresses immediately at apply time (no permit-side transient). Overlay path:
-   same replay (it rebuilds `next.Routes` config-only). Restart: helper restart empties the
-   partition ⇒ Go re-arm trigger (echo check). Retention + suppression + re-resolution are
-   M2-gated cells (config commit on full-table deny box: learned traffic uninterrupted;
-   new-covering-config cell: suppressed synchronously at apply).
-8. **Single carrier**: v17 Go excludes learned from `snapshot.Routes`; actuator/overlay/dedup
-   all drive the transfer sender (full republish = new transfer; unchanged = hash-skip).
-   Anti-entropy folded in (Phase 2 killed): periodic hash-skip full transfer at stated cadence
-   (every Nth sweep / M minutes — Q3 narrowed: default M=30min, N/A, confirmed by churn data)
-   + installed-identity echo (drift detector, not just skip).
-9. **Socket discipline + serialization** (GLM R1-F3, Astra 7): ONE in-flight transfer
-   (sender mutex/flag under `m.mu`); new demand sets DIRTY (never pre-empts); pre-empt ONLY on
-   epoch/config change (which aborts + restarts); `m.mu` released between chunks; chunks
-   ≤1–2 MiB measured pre-send; transfer converges inside 30 s actuate or the actuator starts a
-   NEW transfer while the old table serves (progress rule: pre-emption requires NEWER
-   epoch — churn marks alone cannot livelock; convergence-under-churn measured in M1 with a
-   stated bound: at most K supersessions per actuation window, K=3 stipulated, then the
-   actuator holds the newest dirty set for one full transfer — anti-livelock by construction).
-   M1 measures lock/socket percentiles + status/HA max wait (Astra 6).
+   checks; `iface_ctx`: persist last-apply `iface_ctx` in `ServerState`, refreshed on every
+   apply, transfer aborts if refreshed mid-flight).
+4. **Commit (joint, sequenced, receipted)**: ALL fib-generation minting Go-side goes through
+   ONE sequencer (`fibGenMu`) held across {mint shim value + send the verb} for bumps AND
+   transfer commits (R2-1: pre-`m.mu` RMW race fixed by construction; serial socket orders
+   verbs as minted). Commit verb carries `route_commit_fib` (= freshly minted, hence >
+   every previously minted value). Helper rule: `route_commit_fib` > current validation fib
+   REQUIRED (strict freshness; equal-value CANNOT precede committed identity); full bitmap +
+   staged hash == carried hash + config binding current. Then ONE critical section, in order:
+   swap forwarding, set `self.validation.fib_generation`, set
+   `guard.status.last_fib_generation` (GLM R2-5 — the pair never disagrees),
+   `store_runtime_view` (existing site only), record `last_committed (nonce, seq, fib,
+   learned_hash)`, CLEAR `content_digest`, `persist_state`. ACK returns the receipt.
+   Duplicate commit (same nonce+seq, equal fib) ⇒ receipt ONLY, no re-publish. Same id with
+   DIFFERENT hash/fib ⇒ refuse loudly (corrupt sender, fail-closed). Crash between pre-bump
+   and commit ⇒ shim ahead: NAK re-pair rule — Go sends `bump_fib_generation` with the
+   CURRENT map value (equality admitted) to re-pair, never waiting for the next window.
+   Gap consumers audited: snapshot stampers benign (monotone-≥ gates), BPF stamps self-heal
+   by re-lookup (one extra lookup, never blackhole).
+5. **Recovery machine** (states/events/guards/mutations/responses — Astra 3, in-plan):
+   STAGING → COMMITTING → COMMITTED, ABORTED as sink (stale fence, config mismatch,
+   validation failure [staging DISCARDED], envelope violation, 90 s expiry). Events: chunk /
+   complete / duplicate-complete / invalid-commit / ACK-lost (commit-only retry ≤3, receipt
+   dedups) / status-unavailable-after-ACK-loss (commit-retry FIRST, THEN re-transfer —
+   ordered disambiguation) / supersede (newer nonce or same-nonce higher seq ⇒ abort +
+   fence-advance) / config-change (abort staging; COMMITTED table keeps serving — abort never
+   unpublishes) / helper-restart-during-retry (echo check → re-transfer). Completion proven
+   ONLY by status echo (`manager_route_transfer` nonce+seq AND `manager_route_hash`) matching
+   intent, OR a commit receipt for the same triple. `route_config_binding = (config_gen,
+   config_hash)` retained separately, set at commit AND every apply, checked at ingest +
+   pre-publish; `content_digest` participates NOWHERE (binding ≠ digest).
+6. **Digest**: CLEAR installed `content_digest` at swap (neighbors precedent, zero CPU at 1M).
+   Transfer-internal hash never touches the snapshot digest gate.
+7. **Retention across applies, both coverage directions** (GLM R1-F1 + Astra 2 closed):
+   genuine learned partition, rebuilt by NO apply path. All THREE rebuild sites replay it:
+   reconcile apply, armed same-plan refresh, disarmed twin (GLM R2-3) — replay = retained
+   `RouteSnapshot`s through `populate_routes` with the NEW `iface_ctx` (re-resolution #4446),
+   filtered by Rust gap-key suppression (exact-key equality over Go-authored content,
+   canonicalization corpus vs Go's `canonicalRoutePrefix`). ADDITIONS covered synchronously at
+   apply (no permit-side transient). REMOVALS: Go detects newly-uncovered keys at build
+   (compares covered set vs previous) ⇒ marks routes-dirty ⇒ immediate re-transfer; interim
+   keeps old suppression (fail-closed: drops-more, bounded by transfer convergence — stated,
+   M2-pinned). Helper restart empties the partition ⇒ echo-based Go re-arm. M2 cells:
+   no-wipe-on-config-commit (all three paths), new-covering suppression synchrony,
+   removal-path convergence bound.
+8. **Single carrier + echo-primary anti-entropy**: route-transfer-capable Go excludes learned
+   from `snapshot.Routes`; actuator/overlay/dedup drive the transfer sender (full republish =
+   new transfer; unchanged = hash-skip). PRIMARY drift detector is the echo-compare on every
+   status tick (GLM R2-8); M=30min hash-skip full transfer is the backstop bound, not the
+   detection bound (Q5 dissolves).
+9. **Socket discipline + serialization, churn-separated** (GLM R1-F3, Astra 5/7): ONE
+   in-flight transfer; ROUTE churn (kernel marks) sets DIRTY (never pre-empts); pre-empt ONLY
+   on epoch/config change; `m.mu` released between chunks; chunks ≤1–2 MiB measured pre-send.
+   K=3 supersession bound scoped to Go-side restarts ONLY; helper-side config aborts are
+   unbounded-by-construction AND correct-by-binding (GLM R2-6) — convergence bound stated
+   honestly: one quiet window (no config change) ≥ one transfer duration, plus the measured
+   argument that route churn does not move config identity. M1 adds the config-abort leg +
+   lock/socket percentiles + status/HA max wait + staging peak (budget ≤ 1× steady FIB) +
+   per-chunk hold p99 ≤ 500 ms ceilings (Astra 5 — no "stated in PR" deferrals).
 
 ### Phase 2: KILLED (both reviewers + v1 Q2)
 
 Deltas deferred to a future issue gated on measured diff-size distribution. Anti-entropy lives
 in Phase 1 (item 8). No delta verb, no live-partition mutation, no batch-atomicity surface.
+### Phase 3 (removal + rollout — version fork resolved per GLM R2-2(a), no snapshot bump)
 
-### Phase 3 (removal + rollout, reconciled with the version gate)
-
-- New+new: transfers carry the table; cap never fires; gate never triggers (stays in code for
-  legacy pairings).
-- Old helper: refuses `update_routes` per-verb (unknown type, loud, sticky first-refusal) ⇒
-  Go keeps the LEGACY cap path (cap + delegation + loud log + metric) — reachable and
-  specified (NOT via the commit version gate, which governs `apply_snapshot`; per-verb refusal
-  is the operative signal here — GLM R1-F5 reconciled: over-refusal at commit level is safe
-  but unreachable in this pairing because Go never sends v17 snapshots to a v16 helper — Go
-  learns the helper version from status BEFORE choosing the path).
-- New helper + old Go: capped snapshots honored by the gate (byte-identical, no blackhole).
-- Rollout: same-package spawn makes pairings atomic per node (citation §4); upgrade order
-  (helper-first safe: honors gate; Go-first safe: verb refused → legacy path loudly);
-  rollback either side ⇒ legacy behavior automatically; first-full-transfer readiness signaled
-  by the installed-identity echo (cap-hits-zero is necessary-only); operator-visible
-  refusal/recovery status required deliverables. v17 (current verified 16).
+- Snapshot protocol stays v16. Route-transfer capability advertised by the helper via omitempty
+  `route_transfer_protocol: u32` in `ProcessStatus` (positive detection — the mixed-version
+  precedent pattern); Go sends `update_routes` ONLY on positive detection. Old helpers are
+  detected by ABSENCE (no refusal storm); the unknown-type refusal arm is the backstop latch,
+  stated as Go-side behavior (GLM R2-7).
+- Pairings (all reachable, none refused at commit level — the gate still guards commits
+  version-exactly as today): new+new ⇒ transfers, cap never fires, gate never triggers (stays
+  in code for legacy pairings); old helper + new Go ⇒ legacy cap path LOUDLY (cap +
+  delegation + log + metric, byte-identical to today); new helper + old Go ⇒ v16 snapshots
+  accepted, gate honored byte-identically (NO blackhole — the row GLM R2-2 proved false under
+  a bump reading is TRUE under no-bump). Rollback either side ⇒ legacy behavior automatically
+  (helper restart loses RAM-only staging/partition ⇒ echo-based re-arm).
+- Same-package spawn bounds long-lived mixed pairings (citation §4); first-full-transfer
+  readiness = installed-identity echo (cap-hits-zero necessary-only); operator-visible
+  refusal/recovery status required deliverables. No compat window (GLM Q7: would reintroduce
+  the hole by design).
 
 ## 6. Public API preservation
 
 Preserved: `noroute_policy_denial[_gated]` (gate legacy-only); all six `lookup_*` signatures;
 `populate_routes` validation (reused); 64 MiB lockstep; `LearnedRouteCapHits()`; #9654;
 #1913/single-recycle; flow-cache pair contract; `update_neighbors`; the ONE `ha.runtime.store(`
-site (reused, canary unchanged). Added: v17 verb + fields + (`manager_route_transfer/hash`)
-echo + Go sender/sequencer + `partialRoutes` section + digest-clear + retention/suppression +
-pre-bump commit order.
+site (reused, canary unchanged). Added: `update_routes` verb (`route_transfer_protocol`
+capability, NO snapshot bump — stays v16) + fields + (`manager_route_transfer/hash`) echo +
+Go sender/sequencer (`fibGenMu`) + `partialRoutes` section + digest-clear +
+retention/suppression + sequenced joint commit.
 
 ## 7. Hidden invariants the change must preserve
 
@@ -219,19 +243,23 @@ epoch-preempt-only, bounded supersession.
 
 ## 9. Test plan
 
-- M0 (LPM): lookup ns + NoRoute pps 65k→1M pre/post; build p95 ≤ 2× vec; memory ≤ 2× vec;
+- M0 (LPM, behavioral thresholds — Astra 5): NoRoute pps at 1M ≥ NoRoute pps at 65k on master
+  (no scale regression vs today's cap-scale behavior); build p95 ≤ 2× vec; memory ≤ 2× vec;
   parity corpus green (tiebreaks, stability incl. cross-chunk reassembly order, discard/
-  next-table no-ancestor-fallback, connected composition, ECMP slice+bitmask, canonicalization,
-  #6568 fail-closed). No-go kills Phase 0+.
-- M1 (transfer): per-chunk service percentiles (size rule from data); convergence vs 30 s;
-  socket-hold vs 1 s poll; status/HA max wait; swap-clone + rotation cost at 1M; staging peak
-  (coordinator + worker views + retained + staging + clone + scratch, budget stated in PR);
-  unchanged-skip under churn; convergence-under-churn with K=3 supersession bound; neighbor-push
-  clone delta.
+  next-table no-ancestor-fallback, connected composition both families + shorter/equal/longer,
+  ECMP slice+bitmask+hash-member stability, canonicalization, #6568 fail-closed). No-go kills
+  Phase 0+.
+- M1 (transfer, ceilings — no deferrals): per-chunk service percentiles with the ≤1–2 MiB rule
+  confirmed by data; per-chunk hold p99 ≤ 500 ms; convergence vs 30 s actuate; status/HA max
+  wait (stated numerically in PR); swap-clone + rotation cost at 1M; staging peak ≤ 1× steady
+  FIB; unchanged-skip under churn; convergence-under-churn (route churn: dirty-queue bound;
+  config-abort leg: one quiet window ≥ one transfer; K=3 Go-side restarts only);
+  neighbor-push clone delta.
 - M2 (acceptance, ≥cap synthetic): determinist equivalence (deny drops both / permit delegates
-  both); uncapped-deny control; no-wipe-on-config-commit; new-covering-config suppression
-  synchrony; restart re-arm (both processes); fail-on-revert (no staging / no fence /
-  partial-commit / legacy gate refire / retention drop).
+  both); uncapped-deny control; no-wipe-on-config-commit across ALL THREE rebuild paths
+  (reconcile apply, armed same-plan, disarmed twin); new-covering-config suppression synchrony;
+  removal-path convergence bound (fail-closed interim); restart re-arm (both processes);
+  fail-on-revert (no staging / no fence / partial-commit / legacy gate refire / retention drop).
 - Recovery state table (Astra 8): every terminal/replay path (lost commit ACK, double ACK,
   shim-ahead crash, supersede races, validation-fail disposition, empty transfer encoding,
   index/envelope bounds, staging lifetime/memory caps) with failure-injection cells.
@@ -244,31 +272,29 @@ epoch-preempt-only, bounded supersession.
 
 Design A (killed); Phase 2 deltas (killed — future issue); fail-closed-above-cap;
 budget/ceiling changes; FRR filtering; #9172 (beyond needed counters); leak/next-table
-features; chunked-delta stacking (refused); compat window for v17 (over-refusal chosen,
-rollout-safe per same-package coupling).
+features; chunked-delta stacking (refused); snapshot-version compat window (not needed — no
+bump; positive status detection + per-verb refusal instead).
 
 ## 11. Open questions for adversarial review
 
-1. **Pre-bump ordering:** Go pre-bumps the shim before the commit verb; helper applies the
-   carried value jointly. Does shim-ahead-of-helper break any consumer of `readFIBGeneration`
-   (BPF programs? session stamps `protocol/binding.rs:1213`?) during the pre-bump→commit gap?
-   Enumerate or kill.
-2. **Retention vs re-transfer:** apply-time replay keeps old learned routes across config
-   commits — but a withdrawn-in-kernel route then lingers until the next transfer. Is the
-   staleness bound (≤ next transfer/anti-entropy cadence) acceptable, or must every config
-   apply force a synchronous learned re-issue (cost: commit latency)? Name the bound.
-3. **Rust gap-key parity:** canonicalization parity with Go's `canonicalRoutePrefix` pinned by
-   shared corpus — is cross-language canonical parity reviewable, or should suppression stay
-   Go-side (apply carries a suppression list)? Which is less mechanism?
-4. **iface_ctx persistence:** persist-last-apply vs re-derive at verb time — stale-interface
-   hazard either way; transfer-abort-on-refresh chosen. Is the abort rate under link churn
-   acceptable, or does it recreate the livelock R1-F3 closed?
-5. **Anti-entropy cadence:** M=30min/hash-skip default — too slow to catch helper-side drift
-   that matters (drift can't happen without a publish path touching tables — enumerate them or
-   lengthen M)?
-6. **#946-Phase-2 pattern, final call:** explicit-state cold-path fenced machinery at
-   neighbor-scale precedent vs million-route transaction unsuitability — kill whole, phased,
-   or proceed?
-7. **v17 rollout:** is same-package coupling + loud refusal + echo-readiness sufficient for a
-   fleet with pinned old helpers, or is a compat window (verb-ignored + cap retained)
-   REQUIRED — knowing it reintroduces the hole temporarily by design?
+1. **Sequencer coverage:** does `fibGenMu` (or m.mu-reordered equivalent) cover ALL shim
+   minters — ipmon `pendingFIBBump`, CompileConfig tail, transfer pre-bump — with mint+send
+   atomicity in each? A missed minter reopens the RMW race. Enumerate all three call sites or
+   kill.
+2. **Retention staleness bound:** "≤ next transfer" recorded (GLM Q2). A synchronous re-issue
+   on every apply would couple commit latency to a 1M rebuild. Is the bound acceptable given
+   the removal path is fail-closed and the addition path synchronous?
+3. **Rust suppression vs Go-carried list:** kept Rust-side (GLM R2-4: Go-side unbuildable
+   post-restart, 1M-string payload). Is cross-language canonical parity reviewable enough, or
+   does the corpus need byte-vector fixtures generated from Go?
+4. **iface_ctx abort rate under link churn:** abort ⇒ re-arm, bounded storms. Keep the M1
+   measurement, or does link-flap realistically livelock transfers (abort on EVERY refresh)?
+   Consider generation-scoped (abort only if interfaces affecting learned next-hops changed).
+5. **Anti-entropy cadence:** echo-compare per tick is the detector (GLM R2-8); M=30min backstop
+   bound. Too slow for code-bug drift that echo itself can't see (echo compares hashes the
+   same code computed)? What independent check closes that loop, if any is needed?
+6. **#946-Phase-2 pattern, final call (GLM Q6: proceed; Astra: re-entry bar):** proceed,
+   phased kill, or whole kill?
+7. **Rollout without snapshot bump:** same-package coupling + positive status detection +
+   per-verb refusal + echo-readiness — sufficient for pinned-old-helper fleets, or must the
+   plan specify a forced-upgrade path? (No compat window either way — GLM Q7.)
