@@ -340,6 +340,11 @@ mod tests_noroute_adjudication_7480;
 #[cfg(test)]
 #[path = "tests_noroute_capped_import_9054.rs"]
 mod tests_noroute_capped_import_9054;
+// #9522 Phase 0: selected lookup-semantic coverage for the route FIB (parity
+// corpus for a future LPM cutover; test-only, no production change).
+#[cfg(test)]
+#[path = "tests_lpm_parity_9522.rs"]
+mod tests_lpm_parity_9522;
 // #9955: the overlapping-leak resolution differential (kernel rule priority vs
 // helper longest-prefix).
 #[cfg(test)]
