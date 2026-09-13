@@ -83,10 +83,12 @@ recorded in `../plan.md` step 5 note.
   `.<NEW>.dbsnap/active.json` -> re-flip current/sbin/unit -> start)
   executed on fw1; snapshot present, restore byte-correct (live DB
   preserved at `.configdb.old`).
-- The rolled-back June binary FAIL-CLOSED on boot, by design:
+- The rolled-back June binary FAIL-CLOSED on boot, by design
+  (`evidence/rollback-journal.log`, fw1 `journalctl -u xpfd` 19:53:36–52):
   `config envelope format v=2 is newer than this build supports (v=1);
-  refusing to load` — crash-loop, systemd `activating`, journal evidence
-  in `run.log`. The design doc's brick ("an N daemon that fatal-rejects
+  refusing to load` — clean NEW shutdown, then the OLD binary crash-looping
+  every ~4 s (restart counter 8 by 19:54:09), systemd `activating`, DB never
+  overwritten. The design doc's brick ("an N daemon that fatal-rejects
   the N+1 envelope DB") was avoided exactly as specified: refuse, no
   overwrite. But boot+forward on the restored DB was impossible with THIS
   slot: the June rollback target predates the envelope v1->v2 bump, and

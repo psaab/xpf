@@ -1,0 +1,35 @@
+# fw1 xpfd journal — by-the-book operator rollback boot window.
+# Captured 2026-09-13 from loss:xpf-userspace-fw1:
+#   journalctl -u xpfd --since "2026-09-13 19:53:36" --until "2026-09-13 19:53:52"
+# Context: NEW daemon stopped 19:53:36 (clean HA shutdown), config DB restored
+# from the PREFLIGHT snapshot .<NEW>.dbsnap, current/sbin/unit re-flipped to
+# userspace-forwarding-ok-20260402-bfb00432-2555-gf5b5d5e86-dirty, start 19:53:39.
+Sep 13 19:53:36 xpf-userspace-fw1 xpfd[343841]: time=2026-09-13T19:53:36.328Z level=INFO msg="signal received, shutting down"
+Sep 13 19:53:36 xpf-userspace-fw1 xpfd[343841]: time=2026-09-13T19:53:36.330Z level=INFO msg="dataplane not armed; kernel transit forwarding disabled (fail-closed)" stage=shutdown reason="HA fail-closed stop: closing kernel transit before the dataplane detach"
+Sep 13 19:53:36 xpf-userspace-fw1 xpfd[343841]: time=2026-09-13T19:53:36.330Z level=INFO msg="HA shutdown: clearing rg_active for all RGs"
+Sep 13 19:53:36 xpf-userspace-fw1 systemd[1]: Stopping xpfd.service - xpf Stateful Firewall Daemon...
+Sep 13 19:53:37 xpf-userspace-fw1 xpfd[343841]: time=2026-09-13T19:53:37.218Z level=INFO msg="shutdown complete"
+Sep 13 19:53:37 xpf-userspace-fw1 systemd[1]: xpfd.service: Deactivated successfully.
+Sep 13 19:53:37 xpf-userspace-fw1 systemd[1]: Stopped xpfd.service - xpf Stateful Firewall Daemon.
+Sep 13 19:53:39 xpf-userspace-fw1 systemd[1]: Starting xpfd.service - xpf Stateful Firewall Daemon...
+Sep 13 19:53:41 xpf-userspace-fw1 xpfd[344253]: PASS embedded userspace shim (verifier accepted; no production state touched)
+Sep 13 19:53:41 xpf-userspace-fw1 systemd[1]: Started xpfd.service - xpf Stateful Firewall Daemon.
+Sep 13 19:53:41 xpf-userspace-fw1 xpfd[344260]: time=2026-09-13T19:53:41.836Z level=INFO msg="cluster node ID loaded from file" node=1 file=/etc/xpf/node-id
+Sep 13 19:53:41 xpf-userspace-fw1 xpfd[344260]: time=2026-09-13T19:53:41.836Z level=INFO msg="starting xpf daemon" config=/etc/xpf/xpf.conf pid=344260
+Sep 13 19:53:41 xpf-userspace-fw1 xpfd[344260]: xpfd: config DB is present but unreadable; refusing to start and overwrite it (fail closed). Inspect/repair /etc/xpf/.configdb/active.json (the on-disk config DB, NOT the text config file) or roll the xpf binary forward to a build that can read it: read config: config DB present but unreadable: read /etc/xpf/.configdb/active.json: config envelope format v=2 is newer than this build supports (v=1); refusing to load
+Sep 13 19:53:41 xpf-userspace-fw1 systemd[1]: xpfd.service: Main process exited, code=exited, status=1/FAILURE
+Sep 13 19:53:41 xpf-userspace-fw1 systemd[1]: xpfd.service: Failed with result 'exit-code'.
+Sep 13 19:53:41 xpf-userspace-fw1 systemd[1]: xpfd.service: Consumed 2.695s CPU time over 2.779s wall clock time, 88.3M memory peak.
+Sep 13 19:53:42 xpf-userspace-fw1 systemd[1]: xpfd.service: Scheduled restart job, restart counter is at 1.
+Sep 13 19:53:42 xpf-userspace-fw1 systemd[1]: Starting xpfd.service - xpf Stateful Firewall Daemon...
+Sep 13 19:53:45 xpf-userspace-fw1 xpfd[344266]: PASS embedded userspace shim (verifier accepted; no production state touched)
+Sep 13 19:53:45 xpf-userspace-fw1 systemd[1]: Started xpfd.service - xpf Stateful Firewall Daemon.
+Sep 13 19:53:45 xpf-userspace-fw1 xpfd[344274]: time=2026-09-13T19:53:45.685Z level=INFO msg="cluster node ID loaded from file" node=1 file=/etc/xpf/node-id
+Sep 13 19:53:45 xpf-userspace-fw1 xpfd[344274]: time=2026-09-13T19:53:45.685Z level=INFO msg="starting xpf daemon" config=/etc/xpf/xpf.conf pid=344274
+Sep 13 19:53:45 xpf-userspace-fw1 xpfd[344274]: xpfd: config DB is present but unreadable; refusing to start and overwrite it (fail closed). Inspect/repair /etc/xpf/.configdb/active.json (the on-disk config DB, NOT the text config file) or roll the xpf binary forward to a build that can read it: read config: config DB present but unreadable: read /etc/xpf/.configdb/active.json: config envelope format v=2 is newer than this build supports (v=1); refusing to load
+Sep 13 19:53:45 xpf-userspace-fw1 systemd[1]: xpfd.service: Main process exited, code=exited, status=1/FAILURE
+Sep 13 19:53:45 xpf-userspace-fw1 systemd[1]: xpfd.service: Failed with result 'exit-code'.
+Sep 13 19:53:45 xpf-userspace-fw1 systemd[1]: xpfd.service: Consumed 2.726s CPU time over 3.849s wall clock time, 58.4M memory peak.
+Sep 13 19:53:46 xpf-userspace-fw1 systemd[1]: xpfd.service: Scheduled restart job, restart counter is at 2.
+# (... crash-loop repeats every ~4 s with the identical refusal; counters
+# observed climbing through restart counter 8 by 19:54:09.)
