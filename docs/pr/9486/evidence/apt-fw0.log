@@ -1,0 +1,38 @@
+Reading package lists...
+Building dependency tree...
+Reading state information...
+Solving dependencies...
+The following packages were automatically installed and are no longer required:
+  g++-14 g++-14-x86-64-linux-gnu golang-1.24 golang-1.24-doc golang-1.24-go
+  golang-1.24-src libcrypt-dev liblua5.3-0 libobjc-14-dev libpkgconf3
+  libsframe1 libstdc++-14-dev libxml2 linux-base-6.19.8+deb14-amd64
+  linux-binary-6.19.8+deb14-amd64 linux-headers-6.12.74+deb13+1-amd64
+  linux-headers-6.12.74+deb13+1-common linux-headers-6.19.8+deb14-amd64
+  linux-headers-6.19.8+deb14-common linux-image-6.12.74+deb13+1-amd64
+  linux-image-6.19.8+deb14-amd64 linux-kbuild-6.12.74+deb13+1
+  linux-kbuild-6.19.8+deb14 linux-modules-6.19.8+deb14-amd64
+Use 'apt autoremove' to remove them.
+The following packages will be upgraded:
+  xpf
+1 upgraded, 0 newly installed, 0 to remove and 273 not upgraded.
+Need to get 0 B/36.6 MB of archives.
+After this operation, 20.4 MB of additional disk space will be used.
+Get:1 /tmp/xpf_0.0.17469+g7ef2264747e6_amd64.deb xpf amd64 0.0.17469+g7ef2264747e6 [36.6 MB]
+debconf: unable to initialize frontend: Dialog
+debconf: (Dialog frontend will not work on a dumb terminal, an emacs shell buffer, or without a controlling terminal.)
+debconf: falling back to frontend: Readline
+debconf: unable to initialize frontend: Readline
+debconf: (This frontend requires a controlling tty.)
+debconf: falling back to frontend: Teletype
+debconf: unable to initialize frontend: Teletype
+debconf: (This frontend requires a controlling tty.)
+debconf: falling back to frontend: Noninteractive
+(Reading database ... (Reading database ... 5%(Reading database ... 10%(Reading database ... 15%(Reading database ... 20%(Reading database ... 25%(Reading database ... 30%(Reading database ... 35%(Reading database ... 40%(Reading database ... 45%(Reading database ... 50%(Reading database ... 55%(Reading database ... 60%(Reading database ... 65%(Reading database ... 70%(Reading database ... 75%(Reading database ... 80%(Reading database ... 85%(Reading database ... 90%(Reading database ... 95%(Reading database ... 100%(Reading database ... 190208 files and directories currently installed.)
+Preparing to unpack .../xpf_0.0.17469+g7ef2264747e6_amd64.deb ...
+Unpacking xpf (0.0.17469+g7ef2264747e6) over (0.0.3885+gf5b5d5e864f4) ...
+Setting up xpf (0.0.17469+g7ef2264747e6) ...
+stagedgen: published generation 01789328980285697031-016f0e51dbbae716 (current-gen -> 01789328980285697031-016f0e51dbbae716)
+publish-generation complete (generation 01789328980285697031-016f0e51dbbae716)
+xpf: clustered node (node-id present) — staged only; cut over with: xpfd upgrade --rolling
+Created symlink '/etc/systemd/system/multi-user.target.wants/xpf-uefi-slots.service' → '/usr/lib/systemd/system/xpf-uefi-slots.service'.
+Created symlink '/etc/systemd/system/multi-user.target.wants/xpf-kernel-promote.service' → '/usr/lib/systemd/system/xpf-kernel-promote.service'.

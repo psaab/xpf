@@ -1,0 +1,9 @@
+--- pre-fw1 2026-09-13T19:51:08Z ---
+dpkg: 0.0.3885+gf5b5d5e864f4
+current: 
+versions: userspace-forwarding-ok-20260402-bfb00432-2555-gf5b5d5e86-dirty 
+srcgen-NEW: [see post-cut]
+xpfd-pid: MainPID=341020
+sbin-xpfd: REAL-104cf2365c0841c0
+dropin: 
+staged-gen: ls: cannot access '/var/lib/xpf/staged-gen/': No such file or directory 
