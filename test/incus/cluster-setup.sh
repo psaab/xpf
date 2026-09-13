@@ -603,13 +603,12 @@ cmd_deploy() {
 		*) die "Usage: $0 deploy [0|1|all]" ;;
 	esac
 
-	# Dogfood deploy mode (#1917 increment B, C1). XPF_DEPLOY_DEB=1 builds
-	# the .deb and drives the verified in-place cut-over (`xpfd upgrade
-	# --rolling`), exercising the real upgrade mechanism every cycle. The
-	# default (and XPF_DEPLOY_FAST=1) keeps the raw incus-file-push +
-	# restart for the tight dev inner loop (no deb rebuild, no verified
-	# cut). The deb path is opt-in until it is validated live on the loss
-	# userspace cluster (it then becomes the CI/smoke default per the plan).
+	# Dogfood deploy mode (#1917 increment B, C1; default since #9486, validated
+	# live on the loss userspace cluster). The default builds the .deb and drives
+	# the verified in-place cut-over (`xpfd upgrade --rolling`), exercising the
+	# real upgrade mechanism every cycle. XPF_DEPLOY_FAST=1 keeps the raw
+	# incus-file-push + restart for the tight dev inner loop (no deb rebuild, no
+	# verified cut). XPF_DEPLOY_DEB=1 is still accepted and means the default.
 	#
 	# #1875 lock discipline is PRESERVED: `make deb` builds OUTSIDE the
 	# lock (it is multi-minute and local); only the install + cut-over
@@ -620,11 +619,8 @@ cmd_deploy() {
 	# starve other agents for no reason. The locked re-invocation
 	# below skips the rebuild via XPF_CLUSTER_SKIP_BUILD.
 	if [[ -z "${XPF_CLUSTER_SKIP_BUILD:-}" ]]; then
-		if [[ "${XPF_DEPLOY_DEB:-}" = "1" ]]; then
-			info "Building xpf .deb (dogfood in-place upgrade)..."
-			make -C "$PROJECT_ROOT" deb
-		else
-			info "Building xpfd and cli..."
+		if [[ "${XPF_DEPLOY_FAST:-}" = "1" ]]; then
+			info "Building xpfd and cli (XPF_DEPLOY_FAST raw path)..."
 			make -C "$PROJECT_ROOT" build build-ctl
 			if [[ -x "$HOME/.cargo/bin/cargo" || -n "$(command -v cargo 2>/dev/null)" ]]; then
 				info "Building xpf-userspace-dp helper..."
@@ -632,9 +628,11 @@ cmd_deploy() {
 			else
 				warn "Rust toolchain not found; skipping xpf-userspace-dp build"
 			fi
+		else
+			info "Building xpf .deb (dogfood in-place upgrade)..."
+			make -C "$PROJECT_ROOT" deb
 		fi
 	fi
-
 	# #1875: everything past this point mutates shared state —
 	# including the host-parent IPv6-RA suppression (sysctl + addr +
 	# route flush on the shared SR-IOV parent, Codex r2 F1) — and runs
@@ -653,17 +651,17 @@ cmd_deploy() {
 		suppress_host_parent_ipv6_ra "$SRIOV_LAN_PARENT"
 	fi
 
-	if [[ "${XPF_DEPLOY_DEB:-}" = "1" ]]; then
-		case "$target" in
-			0)   deploy_vm_deb 0 ;;
-			1)   deploy_vm_deb 1 ;;
-			all) deploy_rolling_deb ;;
-		esac
-	else
+	if [[ "${XPF_DEPLOY_FAST:-}" = "1" ]]; then
 		case "$target" in
 			0)   deploy_vm 0 ;;
 			1)   deploy_vm 1 ;;
 			all) deploy_rolling ;;
+		esac
+	else
+		case "$target" in
+			0)   deploy_vm_deb 0 ;;
+			1)   deploy_vm_deb 1 ;;
+			all) deploy_rolling_deb ;;
 		esac
 	fi
 
@@ -690,7 +688,7 @@ deploy_vm_deb() {
 	# Locate the freshly-built .deb (Makefile deb: target output dir is
 	# dist-deb/; install the runtime xpf_*.deb, NOT the xpf-appliance meta).
 	deb=$(ls -t "$PROJECT_ROOT"/dist-deb/xpf_*.deb 2>/dev/null | head -1 || true)
-	[[ -n "$deb" ]] || die "no xpf_*.deb found in dist-deb/ — run 'make deb' first (XPF_DEPLOY_DEB build)"
+	[[ -n "$deb" ]] || die "no xpf_*.deb found in dist-deb/ — run 'make deb' first (the default deploy build)"
 
 	info "Pushing $(basename "$deb") to $vm..."
 	incus file push "$deb" "${rinst}/tmp/$(basename "$deb")"
