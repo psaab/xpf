@@ -1,355 +1,357 @@
-# #9522 — Remove the learned-route import cap cause via a chunked route verb (keep #7480 strict adjudication)
+# #9522 — Adjudicate-before-delegate on a NoRoute miss via kernel egress-zone lookup (Design A); chunked route transport deferred (Alternative B)
 
 ## 1. Status
 
-DRAFT v1 — pending adversarial plan review
+DRAFT v2 — pending adversarial plan review (round 2). Supersedes v1 (commit `ee9b3d6`).
 
-Worktree: `/home/ps/git/pi-xpf/.claude/worktrees/9522-learned-route-cap`, branch
-`fix/9522-learned-route-cap`, base `origin/master 7ef226474` (verified: `git rev-parse HEAD`
-equals base at plan time). STEP-0 verified present on base (see §2 evidence); this is not
-ALREADY_FIXED.
+Round-1 record (raw outputs preserved under `docs/pr/9522/reviews/`):
+
+- Codex Astra: **PLAN-KILL**, scoped — "kill the proposed live clear-and-refill architecture,
+  not the issue or chunked transport itself." Required reset: stage an immutable replacement
+  off the live view, validate, bind to config context, publish finished FIB + fresh validation
+  pair together; abort leaves the previous complete view intact.
+- GLM: **NEEDS-MAJOR**. Six required revisions (§5a must not proceed as specified; FIB data
+  structure in scope or lower the target; single carrier; protocol version; Go-owned fib bump;
+  re-plan §5b as the primary candidate with input enumeration and measured cost).
+
+Both reviewers converged on two points this revision accepts outright: (1) v1's clear-at-chunk-0
+live mutation is wrong (availability + invalidation), and (2) the kernel-lookup half must be
+re-planned as the primary candidate because it plausibly closes the filed **security** hole
+without moving 10⁶ routes. V2 does exactly that. V1's Q2 is acknowledged self-contradictory
+("mixed table" vs specified clear — Astra F1/GLM F1 correct; the question described a different
+design than §5a specified). V1's control-socket sharing paragraph is corrected below (session
+sync has a dedicated socket and off-lock serve; the shared contention is the status poll under
+the `ServerState` lock, snapshot/FIB bumps and HA updates), and `controlRoundtripDeadline` is
+henceforth treated as a timeout allowance, never as a service-time measurement.
 
 ## 2. Issue framing
 
-Above the #8355 derived import cap (64,956 routes at head), the daemon withholds the ENTIRE
-kernel-learned route import and stamps `LearnedRouteImportCapped`; the helper's
-`noroute_policy_denial_gated` then returns `None` (delegate) for every `NoRoute` frame, which
-the `poll_binding_process_descriptor` NoRoute arm reinjects to `xpf-usp0` for Linux
-forwarding with no zone-policy adjudication, no session, no NAT and no screen. An ordinary
-full Internet table crosses the cap, so this is a reachable, silent, policy-bypass posture
-change with (per #9172 item 3) no operator-visible signal distinguishing it from ordinary
-unroutable traffic.
+Unchanged from v1: above the #8355 derived import cap (64,956 routes), the daemon withholds the
+entire learned import, `LearnedRouteImportCapped` is stamped, `noroute_policy_denial_gated`
+returns `None`, and the NoRoute arm reinjects to `xpf-usp0` for Linux forwarding with no
+zone-policy adjudication. STEP-0 evidence on base `7ef226474` stands (v1 §2; both round-1
+reviewers re-verified the citations independently). Fail-closed-above-cap remains rejected
+(#9054). Acceptance is unchanged: capped miss ≡ uncapped miss; permit traffic passes through an
+explicitly adjudicated path; the uncapped-deny control keeps passing.
 
-STEP-0 evidence on base `7ef226474` (all read, not inferred):
-
-- `pkg/dataplane/userspace/learned_route_cap_8355.go:129-147` — `learnedRouteCapExceeded`
-  declines the whole import above `maxLearnedRoutes()` and logs the `security_note`
-  ("a NoRoute frame reaches the kernel FIB without zone-policy adjudication").
-- `userspace-dp/src/afxdp/forwarding/mod.rs:184-209` — `noroute_policy_denial_gated`
-  returns `None` iff `forwarding.learned_route_import_capped`; otherwise identical to
-  `noroute_policy_denial` (#7480 adjudication against the #3110 unzoned sentinel).
-- `userspace-dp/src/afxdp/poll_descriptor/mod.rs:5093-5267` — the NoRoute arm adjudicates
-  via the gated helper, then falls through to the shared #1913 `slow_path_admit` reinject
-  chokepoint (`maybe_reinject_slow_path_from_frame`, ~line 6443), which admits `NoRoute`.
-- `pkg/daemon/daemon_transit_gate.go:69-80`, `pkg/nftables/transit_barrier.go:23-33` —
-  kernel forwarding stays on and the transit barrier is removed while armed (cited in issue;
-  not re-read here, taken from the issue's verified citation).
-
-The issue explicitly rejects both horns of the current tradeoff: restoring fail-closed-above-cap
-is the #9054 silent total blackhole of the dynamic FIB (rejected by all three reviewers), and
-keeping silent delegation is the unowned posture change. The converged direction is to remove
-the cap's *cause*: a chunked/delta route verb on the `update_neighbors`
-(`userspace-dp/src/server/handlers/neighbors.rs`) pattern — no route equivalent exists in
-`server/handlers/` today — so a full table reaches the helper FIB in budget-fitting pieces and
-#7480 adjudication stays strict. Fallback if the channel work is too large: kernel route lookup
-on a miss returning the real egress zone, adjudicate-before-delegate.
-
-Acceptance (from the issue): a capped route miss and an uncapped route miss produce the SAME
-policy result, permitted traffic still passes through an explicitly adjudicated path, the
-uncapped-deny positive control keeps passing, and a full-table cap crossing must not silently
-change posture.
+Reframing the cap (new in v2, forced by GLM F2): the runtime FIB lookup is a per-table linear
+scan (`forwarding/fib.rs:428-431` — `routes.iter().find(...)` over longest-prefix-first vecs),
+and a `NoRoute` verdict is NOT flow-cacheable (`flow_cache_tests.rs:1570-1592`). Every
+delegated permit packet therefore pays a full scan per packet (delegated flows never sessionize,
+so nothing caches them). The ~65k cap is currently an *accidental bound* on that scan. V2 keeps
+a bound on helper-FIB size deliberately — restated honestly as a lookup-performance bound, not
+as a socket-hold accident — while removing the *unadjudicated* half of the capped state. The
+cap stops being the cause of a bypass and starts being a documented scan ceiling.
 
 ## 3. Honest scope / value framing
 
-This is a correctness/security fix, not a performance change. There is no throughput, cycle or
-memory win to claim; the win is that a full-table box stops transiting deny-policy traffic with
-no decision. At absolute scale the cost is real and the benefit is binary:
+Security fix, no throughput win claimed. The win: a full-table box stops transiting
+deny-policy traffic with no decision, without moving 10⁶ routes into a linearly-scanned FIB
+and without a new multi-message control transaction. The cost: a helper-side synchronous
+kernel route query on the NoRoute slow path (bounded by a zone-answer cache + rate limits),
+plus a bounded FIB-scan measurement gate that decides whether any future table-growth work
+(Alternative B) is even admissible.
 
-- Cost: a new control-socket verb + an incremental FIB mutation path in the helper + Go-side
-  chunking/retry state — the largest control-plane surface added since `update_neighbors`
-  itself, touching the single most security-sensitive disposition arm (`NoRoute` → reinject).
-- Benefit: the `LearnedRouteImportCapped` state becomes unreachable for size reasons
-  (route count no longer bounded by one publish's socket hold), so #7480 adjudication applies
-  uniformly and the #9054 gate can be deleted rather than tuned.
-
-*If reviewers conclude the channel work is too large to justify against the narrower
-kernel-lookup-on-miss fallback — or that the fallback alone closes the adjudication hole with
-less new mechanism — PLAN-KILL (of the chunked-verb half) is an acceptable verdict. Killing
-the whole issue is also acceptable if reviewers conclude neither half is shippable without
-regressing the #9054 availability property.*
+*If reviewers conclude the kernel-lookup fidelity enumeration (§5) has a hole that fails open,
+or that the per-miss cost under scan is unbounded in a way the rate limits cannot contain,
+PLAN-KILL is an acceptable verdict. If reviewers conclude Alternative B's fast-path value
+justifies its mechanism despite §5, promoting B and killing A is likewise acceptable — but
+shipping both halves in one PR is not on the table.*
 
 ## 4. What's already shipped / partially batched
 
-- #7480: `noroute_policy_denial` + NoRoute-arm adjudication (uncapped deny = positive control).
-  Cells: `forwarding/tests_noroute_adjudication_7480.rs`. Must keep passing unchanged.
-- #8355: derived cap (`learnedRoutePublishBudget = 10s`, ~113 B/route, 64 MiB
-  `MaxControlRequestBytes` lockstep Go↔Rust) + `LearnedRouteCapHits()` counter.
-- #9054: `LearnedRouteImportCapped` wire bit (protocol v10, NOT skew-tolerant by design),
-  `noroute_policy_denial_gated` early-`None`, route-only republish recompute
-  (`manager_overlay.go`), refusal of the snapshot on pre-v10 helpers. Cells:
-  `tests_noroute_capped_import_9054.rs`; Go guards:
-  `learned_route_cap_blackhole_9054_test.go`.
-- `update_neighbors` incremental-verb pattern: `neighbors.rs` replace/clear semantics (#5864
-  present-empty clear), replace-generation envelope + stale fence + ACK (#6034), `refresh_status`
-  after every verb, `content_digest.clear()` on out-of-band mutation (#9520), epoch tracking
-  for partial-update outcome (#9684), writeback guards (#6986, #1197/#5306).
-- Route-only overlay path: `Manager.PublishRouteOverlaySnapshot` + `bump_fib_generation`
-  (fib-only advance invalidating flow-cache entries by pair equality, #3767 H4/H5, #5169).
-- #7409 learned import (gap-fill: config route always wins; order-independent emission),
-  #7437 rtnetlink listener driving coalesced republish (debounce 1s / throttle 3s), #9654
-  capped-absence-is-unknown status semantics.
-- #9172 item 3 (observability half) is explicitly OUT of scope here; fixing the bypass must not
-  claim to fix the signal.
+V1 §4 stands in full (#7480 cells, #8355 cap + counter, #9054 gate + composition cells,
+`update_neighbors` envelope idioms #5864/#6034/#9520/#9684, route-only overlay + `bump_fib`,
+#7409 gap-fill, #7437 coalesced republish, #9654 absence-is-unknown). Additions verified during
+round-1 follow-up (all read at head, not inferred):
 
-## 5. Concrete design
+- Publication shape: `Coordinator::publish_runtime_view` clones the full `ForwardingState` and
+  rotates the worker-visible `Arc` (`coordinator/mod.rs:1590-1598`); neighbor pushes already pay
+  this per push (mod.rs:757-768). Any per-chunk live FIB mutation would pay it per chunk —
+  one more reason v1 §5a is dead.
+- Neighbor atomicity: `bulk_replace_neighbors` under a single bulk acquisition — readers see
+  pre- or post-replace, never half (`coordinator/mod.rs:736-748`). The property v1 §5a
+  discarded; Design A needs none of it (no FIB mutation at all).
+- Unknown verb refusal: `handlers/mod.rs:360-363` (`unknown request type` → `ok:false`). Any
+  future verb is loudly refused by old helpers — the safe direction. (Design A adds NO verb.)
+- FIB generation ownership: values come from the BPF shim map (`manager_generation.go:10-23`
+  `readFIBGeneration`); helper self-advance would desync Go stamps and wedge on the `<` fence
+  (`handlers/snapshot.rs:505-534`, #1844). Design A needs NO generation change.
+- Coalescing bounds: debounce 1 s / throttle 3 s / actuate timeout 30 s
+  (`pkg/coalesce/coalesce.go`, `daemon_route_listener.go:actuateLearnedRouteRefresh`). Any
+  multi-second transfer must converge inside the 30 s actuate budget or it retry-loops.
+- Resolver precedent: a single shared `NeighborResolver` thread serves all workers'
+  single-key `RTM_GETNEIGH` misses with a 1 s per-key rate limit inside a 3 s negative TTL
+  (`afxdp/neighbor_resolver.rs`, `neg_neigh.rs`, `mod.rs:1410-1414`). Design A follows this
+  shape where it fits and says explicitly where it does not (§5).
+- Miss-site context (verified in scope, see §5): `meta.routing_table: u32` (XDP-stamped table
+  selector, `afxdp/types/mod.rs:132`), the PBR `route_table_override` and
+  `effective_resolution_target` in the session-miss arm (`poll_descriptor/mod.rs:1771-1798`),
+  `meta.ingress_ifindex`/`ingress_vlan_id`, `meta.dscp`, and the flow's src/dst addrs + ports.
 
-### 5a. Primary: `update_routes` chunked verb (mirrors `update_neighbors`)
+## 5. Concrete design — Design A (primary): real-egress-zone adjudication on the NoRoute slow path
 
-Wire (additive fields on `ControlRequest`, both sides; Go `protocol.go`, Rust
-`protocol/control.rs`):
+No wire change. No new verb. No FIB mutation. No generation change. No protocol bump (see §5e
+for why none is needed). The `LearnedRouteImportCapped` bit keeps its exact current meaning
+("the helper FIB is deliberately incomplete") and its status/telemetry path; it stops being
+the condition for *unadjudicated* delegation because delegation itself becomes adjudicated.
 
-```go
-// Go ControlRequest additions (omitempty everywhere — old helper ignores them).
-RouteChunk         []RouteSnapshot `json:"route_chunk,omitempty"`
-RouteGeneration    uint64          `json:"route_generation,omitempty"`
-RouteReplace       bool            `json:"route_replace,omitempty"` // first chunk clears
-RouteChunkIndex    uint32          `json:"route_chunk_index,omitempty"`
-RouteChunkTotal    uint32          `json:"route_chunk_total,omitempty"`
-RouteChunkComplete bool            `json:"route_chunk_complete,omitempty"` // last chunk: FIB now whole
+### 5a. The query and its exact inputs
+
+On the NoRoute arm — slow path only, after the existing L3-identity derivation and before the
+`noroute_policy_denial_gated` call site — resolve the kernel's egress for THIS packet and
+adjudicate against the real pair:
+
+```
+inputs (all in scope at the arm today):
+  dst            = adj_flow.dst_ip                      (attacker's destination — the lookup key)
+  src            = adj_flow.src_ip                      (source-specific policy rules)
+  table          = route_table_override                 (PBR `then routing-instance`, when set)
+                     else table derived from meta.routing_table + ingress routing domain
+  iif            = logical ingress ifindex              (resolve_ingress_logical_ifindex — MUST be
+                     passed explicitly: post-reinject the kernel sees xpf-usp0, so an iif-
+                     matching rule evaluated at reinject time would decide differently)
+  tos            = meta.dscp-derived TOS                 (ip-rule tos selector)
+  proto/ports    = meta.protocol + flow ports where present (port-bearing rules, where the
+                     kernel consults them; flowless uses the existing closed-ports rule)
 ```
 
-```rust
-// Rust ControlRequest additions (all #[serde(default)] — old control plane never sends them).
-pub route_chunk: Option<Vec<RouteSnapshot>>,
-pub route_generation: u64,       // default 0
-pub route_replace: bool,         // default false
-pub route_chunk_index: u32,      // default 0
-pub route_chunk_total: u32,      // default 0
-pub route_chunk_complete: bool,  // default false
-```
+The lookup is `RTM_GETROUTE` with the above selectors — i.e. the same decision the kernel will
+make milliseconds later at reinject, computed BEFORE the policy verdict instead of after the
+forward. On success it yields the egress ifindex → `egress_zone_id` via the existing
+`ifindex_to_zone_id` map → evaluate with the real `(from_zone, to_zone)` pair using the
+existing flow-backed / flowless port rules verbatim. Permit → delegate (reinject exactly as
+today, with the verdict now explicit); non-Permit → downgrade to `PolicyDenied` through the
+existing #1913 chokepoint (single-recycle and trailing-admit invariants untouched).
 
-Handler `userspace-dp/src/server/handlers/routes.rs`, dispatched as `"update_routes"` from
-`handlers/mod.rs` next to `"update_neighbors"`:
+### 5b. Every indeterminate case falls back to today's #7480 sentinel path — never to delegation
 
-```rust
-pub(super) fn update(
-    guard: &mut ServerState,
-    chunk: Option<&Vec<RouteSnapshot>>,
-    generation: u64,
-    replace: bool,
-    index: u32,
-    total: u32,
-    complete: bool,
-) {
-    // 1. Fence stale/reordered replaces exactly like #6034 (per-verb last-applied
-    //    route generation; applied==false → eprintln + refresh_status + return).
-    // 2. If replace && index==0: clear the LEARNED-route partition of the live FIB
-    //    (config-derived routes untouched — gap-fill invariant: operator routes win).
-    // 3. Validate + insert chunk into the learned partition via the same
-    //    per-route path populate_routes uses (destination parse #6568, dedupe #3770).
-    // 4. If complete: mark learned partition whole, set
-    //    forwarding.learned_route_import_capped=false path (see §5c),
-    //    bump fib_generation ONCE so flow-cache entries stamped under the
-    //    pre-table pair invalidate exactly once per table, clear content_digest
-    //    (#9520: stored snapshot no longer describes enforced routes), persist.
-    // 5. refresh_status(guard) on every arm (success, fence, validation no-op).
-}
-```
+The lookup is allowed to answer "I don't know", and every such answer takes the EXACT current
+uncapped path (`noroute_policy_denial` against the #3110 unzoned sentinel → default action).
+Indeterminate cases (enumerated; each gets a named counter):
 
-Go sender (`pkg/dataplane/userspace/manager_routes_chunk.go`, new file):
+- kernel reports no route (genuinely unroutable — the common uncapped case, behavior identical);
+- multipath answers whose nexthops resolve to DIFFERENT zones (zone-ambiguous; same-zone ECMP
+  adjudicates normally);
+- non-unicast results (multicast/broadcast/local-table oddities);
+- snapshot-attested complex policy routing (§5d) that the helper cannot reproduce;
+- resolver thread down, rate-limit overflow, or lookup timeout (fail-closed to sentinel path).
 
-```go
-// buildLearnedRouteChunks splits the learned import into publishes each fitting
-// BOTH ceilings: serialized body < MaxControlRequestBytes AND
-// controlRoundtripDeadline(body) <= learnedRoutePublishBudget.
-// First chunk sends RouteReplace=true + generation=nextRouteReplaceGen (new
-// monotone counter seeded from status like neighborReplaceGen #6034);
-// chunks carry index/total; last sets RouteChunkComplete=true.
-// Each chunk uses requestLocked (advances partialUpdateEpoch #9684) and
-// requires an ACK of (generation, index) in ProcessStatus before sending
-// the next (stop-and-wait: preserves order without a reorder buffer).
-// On transport failure (not in-band refusal): retain retry debt, do NOT
-// mark complete, do NOT clear the capped flag; next status tick resumes
-// from the first un-ACKed chunk.
-```
+There is no third outcome. "Delegate without a verdict" ceases to exist in the tree: the gated
+early-`None` is deleted and the type-level shape becomes
+`resolve_real_egress(...) -> Option<ifindex>` feeding the unchanged evaluator. The rewritten
+#9054 cell asserts capped-miss ≡ uncapped-miss by construction (same function, same fallback).
 
-Sizing: chunk by serialized estimate (`len(routes) * learnedRouteBytesEach` plus measured
-base snapshot overhead) with a hard re-measure per chunk (`json.Marshal` length check before
-send; shrink-and-retry if over). Target budget keeps each chunk's socket hold to a fraction of
-the 10 s publish budget so the 1/s status poll, HA sync and session installs are never held
-for seconds, let alone ~56 s.
+### 5c. Cost containment: zone-answer cache + rate limits, policy re-evaluated per packet
 
-FIB data structure: the learned partition MUST be separable from config routes at apply time.
-Today `populate_routes` folds everything into one table set; the plan adds a learned-route
-partition (or, minimally, a `learned: bool` tag per FIB entry + a learned-key index) so
-replace-clear and chunk-append never disturb config routes. Exact shape (partition vs tag) is
-the first implementation decision and must be nailed before code (see Q1).
+A synchronous worker-side `GETROUTE` per NoRoute packet is unbounded under scan (distinct dsts
+never hit anything, and NoRoute is uncacheable at the flow layer). Containment, three layers:
 
-### 5b. Fallback (if §5a is judged too large): kernel route lookup on miss, adjudicate-before-delegate
+1. **Zone-answer cache (new, small, bounded):** key `(table-selector, dst, src-class, tos)` →
+   `(egress_ifindex, zone, expires)`. Caches ONLY the zone answer, NEVER the policy verdict:
+   policy is re-evaluated per packet against fresh policy tables (cheap — policy tables are
+   small; correctness does not depend on cache coherence for config changes). TTL short
+   (1–3 s, the `neg_neigh` 3 s precedent); hard entry cap with expired-first/oldest reclaim
+   (the #6905 discipline); cleared on every FIB publish (fib_generation change — free coherence
+   with the existing pair, no new epoch).
+2. **Staleness bound, disclosed:** a cached zone may lag a route change by at most the TTL.
+   This is the same TOCTOU class as kernel forwarding itself (lookup-to-reinject race is
+   µs–ms; a change landing inside it forwards one packet under the just-withdrawn route with
+   a verdict computed against the real zone at decision time — not a bypass). The TTL is the
+   bound; the plan does not claim zero.
+3. **Rate limit with loud fail-closed overflow:** per-worker in-flight cap + global per-second
+   ceiling on kernel queries; overflow takes the sentinel path and bumps a dedicated counter
+   (indistinguishable from "unroutable" in disposition, distinguishable in telemetry — the
+   #9172-adjacent signal without claiming #9172).
 
-If reviewers kill §5a, the smaller half: on the NoRoute arm (slow path ONLY — never the hot
-forward path), perform a synchronous kernel route lookup for the destination (helper-side
-netlink `RTM_GETROUTE`, new `rtnetlink`-family dependency; or a Go-side oracle — rejected,
-the miss is observed in the helper and a per-packet Go round trip reintroduces the socket-hold
-problem), resolve the REAL egress ifindex → real to-zone, evaluate policy against the real
-pair, delegate (reinject) only on Permit and downgrade to `PolicyDenied` otherwise. Genuinely
-unroutable destinations still resolve NoRoute → today's #7480 path (default action decides).
-This keeps the cap and the capped flag but removes the *unadjudicated* half: every delegated
-frame carries a permit verdict against its real egress zone. Honest cost: new netlink
-dependency in the helper, per-miss RTT (slow path only, but measurable under scan), TOCTOU
-between lookup and reinject, table/VRF selection must match the kernel FIB exactly or the
-"real" zone is wrong — each of which is a kill reason on its own (see §8, §11).
+Sync-vs-thread (decision, reviewers invited to overturn): the query runs SYNCHRONOUSLY in the
+worker slow path, not via the #1769 shared-thread shape. Rationale: async would leave THIS
+packet without a verdict — forcing a first-packet sentinel verdict (a miniature of the rejected
+posture hole for every new flow) or a buffer-and-revisit path with its own ordering hazards.
+Slow-path-only keeps it off the hot forward path; the cache keeps the steady-state cost at one
+hash lookup for repeated dsts. Measured RTT gates this choice (§9): if p99 synchronous RTT
+exceeds the slow-path budget, the design falls back to the thread shape with an explicit
+first-packet rule, as a documented revision — not a silent optimization.
 
-The two halves are ordered, not alternative-equal: land §5a if shippable; §5b only if §5a is
-killed AND §5b survives its own review. Shipping both (chunked table + lookup for the residual
-inter-push window) is explicitly deferred — it doubles the new mechanism for a window #7437
-already narrowed to ~1–3 s.
+### 5d. Capability-scoped activation (the anti-F4 device)
 
-### 5c. Cap removal (lands with whichever half ships)
+Go already enumerates the kernel ip-rule set for leak-route synthesis (#3772 M9 surface). At
+snapshot build it additionally attests one additive bool,
+`complex_policy_routing: true`, when ANY rule uses a selector the helper cannot reproduce
+(mark-based rules — meta carries no mark — `l3mdev` nuances beyond the table selector, or any
+future selector outside §5a's list). While set, the arm uses the sentinel path (today's uncapped
+behavior) and counts it. This bounds the fidelity claim positively: Design A activates exactly
+where its inputs are complete, and says which selector killed it everywhere else. The attested
+set is conservative by construction (unknown selector ⇒ attest complex).
 
-- Go: `learnedRouteCapExceeded` stops declining the import; the full learned set flows through
-  chunking (§5a) or the flag becomes advisory-only (§5b — capped + adjudicated, never capped +
-  unadjudicated). `LearnedRouteCapHits` stays as a telemetry counter (reset semantics: counts
-  refused publishes; post-fix it should read 0 — do NOT delete the symbol, #9172-adjacent
-  callers may exist).
-- Rust: `noroute_policy_denial_gated`'s early-`None` is deleted; the NoRoute arm calls
-  `noroute_policy_denial` unconditionally (§5a) or the new real-zone adjudication (§5b).
-  `ForwardingState.learned_route_import_capped` becomes always-false (§5a) or an advisory
-  status bit (§5b); the wire bit stays decoded (skew tolerance for rolling upgrade) but stops
-  gating the disposition. Protocol version stays at 10 (no new refusal semantics).
-- The #9054 tests are updated, not deleted: `a_capped_import_delegates_noroute…` becomes the
-  fail-on-revert cell asserting a full-table import NEVER delegates-despite-deny (i.e. capped
-  miss ≡ uncapped miss), and the uncapped-deny control
-  (`noroute_is_denied_on_a_default_deny_box_7480`) keeps passing untouched.
+### 5e. Version-skew matrix (no bump required — demonstrated, not asserted)
+
+- New helper + old sender, above cap: sender withholds as today; helper's lookup succeeds from
+  the kernel and adjudicates with the real zone. Permit delegates, deny drops. NO blackhole —
+  the blackhole required adjudication against the unzoned sentinel, which is now only the
+  fallback. Strictly better than today in this pairing.
+- New helper + old sender, below cap / uncapped: identical to today plus lookup refinement for
+  genuine misses (lookup fails → sentinel path, byte-identical verdicts).
+- Old helper + new sender: impossible — Design A sends nothing new. There is no new sender.
+  This is the structural reason no `update_routes`-style capability negotiation exists: nothing
+  to negotiate.
+- Hence no `CONFIG_SNAPSHOT_PROTOCOL_VERSION` change: v10's refusal semantics are untouched,
+  and the tree's version doctrine (no semantic redefinition under a shared version) is
+  satisfied because the *meaning* of the capped bit ("FIB deliberately incomplete") does not
+  change — only the disposition of a frame it describes, which is helper-local behavior.
+
+### 5f. Alternative B (deferred, sketched to round-1's reset — NOT this PR)
+
+Chunked learned-route transport survives ONLY in the stage-off-live-view form both reviewers
+mandated: Go chunks the sorted learned set; the helper stages into an/off-live partition;
+completeness + content identity validated; bound to the config/interface context present at
+transfer start (abort/rebase on change); atomic swap + single Go-owned fib bump
+(complete-ACK → Go bumps shim → existing `bump_fib_generation`) + `content_digest` handling at
+swap; supersede/restart/empty/replay/total-mismatch rules; snapshots exclude learned once the
+verb is negotiated (single carrier, v11); `partial_update_outcome_9684` section types extended.
+PREREQUISITE GATE (GLM F2): bounded FIB-scan measurement at 65k/250k/500k/1M miss-path pps —
+without an LPM answer (trie for the route maps, or learned-partition trie with a defined
+cross-partition LPM rule), activation above the current bound is refused and B stays a
+follow-up workstream. B's marginal value over A is fast-path throughput for learned
+destinations — a performance goal outside #9522's acceptance — so B waits regardless of
+mechanism elegance.
 
 ## 6. Public API preservation
 
-Preserved verbatim (no signature changes):
-
-- `noroute_policy_denial(policy, from, to, src, dst, proto, ports, icmp, len)` — semantics
-  unchanged; the positive control.
-- `apply_snapshot`, `bump_fib_generation`, `update_neighbors` verbs — untouched.
-- `MaxControlRequestBytes` ↔ `MAX_CONTROL_REQUEST_BYTES` 64 MiB lockstep + reachable-deadline
-  analysis (#7675) — untouched; chunking works UNDER both ceilings.
-- `LearnedRouteCapHits()` — symbol retained (telemetry); post-fix expectation is 0 hits.
-- `ProcessStatus.learned_route_import_capped` absence-is-unknown (#9654) — retained.
-- New surface is purely additive: `update_routes` verb, `route_*` wire fields, one Go sender
-  file, one Rust handler file, one status ACK field
-  (`manager_route_generation`, mirroring `manager_neighbor_generation`).
+Preserved verbatim: `noroute_policy_denial` (semantics + signature — the fallback and the
+positive control); `apply_snapshot`, `bump_fib_generation`, `update_neighbors`;
+`MaxControlRequestBytes` ↔ `MAX_CONTROL_REQUEST_BYTES` lockstep + #7675 analysis;
+`LearnedRouteCapHits()` (still counts withheld publishes — now WITH an adjudicated delegation,
+so the counter keeps meaning "FIB incomplete", never "bypass active");
+`ProcessStatus.learned_route_import_capped` absence-is-unknown (#9654); the #1913 chokepoint
+and single-recycle discipline. Deleted: only the `learned_route_import_capped` early-`None` in
+`noroute_policy_denial_gated` (the gate collapses into the §5b fallback type). Added: one
+helper-local resolver (query + zone cache + counters), one Go attestation bool
+(`complex_policy_routing`, additive `omitempty`/`#[serde(default)]`), named telemetry counters.
+No verb, no generation, no version change.
 
 ## 7. Hidden invariants the change must preserve
 
-1. **Single-recycle / slow-path ownership.** The NoRoute arm's terminal paths produce a
-   `StageOutcome` consumed by the single push+continue site (#6432, #1327 split-borrow
-   discipline). The adjudication change must not add a recycle, drop, or early `continue`.
-2. **ONE authority for "may this reach the kernel" (#6664/#1913).** The arm evaluates, then
-   downgrades to `PolicyDenied` and lets the trailing `slow_path_admit` chokepoint refuse.
-   No second gate, no bypass around it — for EITHER half.
-3. **Flow-cache pair-equality validity (#3767/#5169).** Cache entries are stamped
-   `(config_generation, fib_generation)`. Chunk application must invalidate exactly once per
-   completed table (fib bump on `complete`), never per chunk mid-table (would thrash the cache
-   N times per publish) and never zero times (would revive stale permits — fail-open).
-4. **Monotonicity + content-identity gates (#3767 H5, #9520).** The route verb needs the #6034
-   stale-replace fence from day one; out-of-band route mutation MUST clear `content_digest`
-   or a same-generation retry of the last full apply passes the identity gate against routes
-   it no longer describes.
-5. **Allocation discipline.** Hot forward path stays zero-alloc; chunk decode/validate/insert
-   is cold control-socket work. No per-packet netlink (§5b: strictly slow-path NoRoute arm;
-   a hot-path lookup is a revert-on-sight defect).
-6. **Gap-fill precedence.** Config routes always win over learned for the same
-   (table, family, canonical-destination). Chunk insert must apply the `covered` rule per
-   route, not per chunk — a chunk boundary must never let a learned route sit beside the
-   operator's route for one prefix.
-7. **Control-socket sharing.** The socket is shared with the 1/s status poll, HA sync, session
-   installs, snapshot sync and forwarding sync. Stop-and-wait chunking must bound each hold to
-   well under the status period and yield between chunks; a chunked publish that holds the
-   socket for 56 s in N slices is the same outage with better framing.
-8. **Deterministic emission.** Learned order is canonicalised (table, family, destination,
-   next-hops) so unchanged tables don't flap the FIB. Chunking must preserve the canonical
-   order end-to-end (split the SORTED set; reassembled order ≡ sorted order) or every publish
-   reinstalls the FIB.
-9. **Serde skew.** All new wire fields `omitempty` (Go) / `#[serde(default)]` (Rust). Old
-   helper ignores them; old control plane never sends them; first-refusal-sticky behaviour
-   follows the #8121 precedent if a verb is refused.
-10. ** HA/session-sync portability.** No new per-session wire state; route chunks carry only FIB
-    content + generation envelope, so rolling upgrade and HA sync need no negotiation beyond
-    the existing protocol-version gate.
-11. **#9521 steered-port / #3292 / #4024 / #3110 interactions.** The NoRoute arm's flowless
-    handling (`ports=None`, `l4_present=false`) and the unzoned-sentinel semantics stay as-is
-    under §5a; under §5b the real-zone evaluation must still use the flowless closed-ports rule
-    when there is no L4.
+1. **Single-recycle / slow-path ownership (#6432, #1327):** the arm still evaluates, then
+   downgrades to `PolicyDenied`, then falls to the single admit site. No new recycle, no new
+   reinject call site — the query result NEVER routes around the chokepoint.
+2. **ONE authority for "may this reach the kernel" (#6664/#1913):** unchanged; §5b only changes
+   what zone pair the evaluation asks about.
+3. **Flow-cache pair-equality (#3767/#5169):** no FIB mutation ⇒ no invalidation question at
+   all. The zone cache is NOT flow state and is cleared on FIB publish; it can neither revive a
+   stale ALLOW (it never produces one — verdicts are per-packet) nor suppress one.
+4. **Monotonicity / content-identity (#3767 H5, #9520, #6034):** untouched — no generation, no
+   digest interaction, no new verb to fence. The attestation bool rides the existing snapshot
+   content it describes.
+5. **Allocation discipline:** hot path unchanged; query + cache consult live strictly in the
+   NoRoute slow arm. Cache entries are fixed-size, pre-capped, pool-free.
+6. **Gap-fill precedence:** untouched — decided Go-side at build time as today; the helper
+   learns nothing new about precedence.
+7. **Control-socket sharing (corrected):** Design A emits ZERO new control traffic — no
+   socket-hold question exists. `sync_session`'s dedicated socket/off-lock serve is now
+   correctly excluded from the sharing claim; remaining shared contention (status poll,
+   bumps, HA updates) is unaffected by this plan.
+8. **Determinism:** kernel answers are inherently unordered across multipath; the determinism
+   rule is "same-zone ECMP ⇒ same verdict; cross-zone ⇒ sentinel fallback", pinned by cells.
+9. **Serde skew:** one additive bool, both directions defaulted. Old helper ignores it (stays
+   on today's behavior — the documented posture, unchanged); old sender omits it (helper treats
+   absent as complex ⇒ sentinel path — fail-closed direction).
+10. **HA/session portability:** no new per-session wire state; zone cache is per-worker RAM,
+    rebuilt lazily, never synced.
+11. **Flowless + #3110 interactions (#3291/#4024/#3110/#9529):** the real-zone evaluation keeps
+    the flow-backed vs flowless port rules verbatim; the sentinel fallback keeps today's
+    unzoned semantics byte-identical. A real zone of 0 (unmapped egress ifindex) is treated as
+    indeterminate ⇒ sentinel path, never as a novel third zone semantic.
 
 ## 8. Risk assessment
 
 | Class | Rating | Reason |
 |---|---|---|
-| Behavioral regression | HIGH | Touches the NoRoute→reinject disposition (the #6664/#7480/#9054 line) and adds a live FIB mutation path. Wrong chunk boundary, fence, or invalidation = blackhole (availability) or bypass (security). The #9054 composition history is exactly this class of mistake. |
-| Lifetime / borrow-checker | LOW-MED | Handler follows the `neighbors.rs` shape (owned decode → resolved vec → single `&mut ServerState` apply). Risk concentrates in the FIB partition design (Q1): a tag-per-entry vs partition split changes borrow shape of the lookup path. Lookup path itself is read-only and unchanged under §5a. |
-| Performance regression | MED | §5a: N control round trips per full-table publish + one FIB reinstall per completed table (not per chunk, by design). Inter-chunk yields keep the socket free but stretch convergence to ~N×RTT. §5b (if taken): per-miss netlink RTT on the slow path — bounded by miss rate, unbounded under scan. Either needs the loss-cluster matrix (§9), not reasoning. |
-| Architectural mismatch (#961 / #946-Phase-2 dead-end) | MED | The risk this plan EXISTS to surface: is a stateful chunked verb with generation envelope, ACK, retry debt and FIB partitioning the right shape for "move a big table across a small socket", or does it replay the #946-Phase-2 mistake of building protocol machinery around a premise (full-table-in-helper-FIB) that the fallback (lookup-on-miss) shows is unnecessary? Q6 invites the kill on exactly these grounds. |
+| Behavioral regression | MED-HIGH | Same security-sensitive arm (#6664/#7480/#9054 line), but the change narrows the question the arm asks (which zone pair?) without touching disposition plumbing, FIB content, or publish ordering. Wrong-zone answers are the failure mode; §5b's closed fallback list + §5d attestation bound it. The #9054 composition history keeps this above MEDIUM regardless. |
+| Lifetime / borrow-checker | LOW | Query context borrows existing arm locals; zone cache is a plain bounded map owned by the worker/binding struct it serves. No `Arc` rotation, no cross-thread FIB sharing beyond what exists. |
+| Performance regression | MED | Steady state adds one bounded-hash consult per NoRoute packet (cache hit) — negligible. Miss cost is one synchronous netlink RTT, rate-limited, slow-path-only. Residual risks: scan-storm pps for permit-delegated flows (pre-existing at cap scale, unchanged by A — quantified in §9 rather than hand-waved), and p99 RTT gating the sync-vs-thread choice. |
+| Architectural mismatch (#961 / #946-Phase-2) | LOW | Design A follows in-tree precedent instead of inventing mechanism: #1769's resolver shape for kernel queries, #1651's negative-cache TTL/cap discipline, the arm's evaluate-then-downgrade convention. No new protocol, no stateful transaction, nothing to fence. |
 
 ## 9. Test plan
 
-- `cargo build` clean at every commit boundary (bisectable history, one logical unit per commit).
-- `cargo test --release`: full suite green (952+ cells); most-affected named tests 5/5 flake check:
-  - `noroute_is_denied_on_a_default_deny_box_7480` (positive control — must stay green untouched),
-  - new `capped_miss_equals_uncapped_miss_9522` (fail-on-revert: full-table import present, deny
-    box, NoRoute miss → `Some(deny)`; delete the chunking/mutation and it reds),
-  - new chunk-handler cells (stale-generation fence, replace-clear preserves config routes,
-    out-of-order chunk refused, partial table does NOT clear the capped bit / bump fib).
-- `go test` affected packages (`pkg/dataplane/userspace/...`): chunk sizing cells (every chunk
-  body `< MaxControlRequestBytes` AND `controlRoundtripDeadline(body) <= learnedRoutePublishBudget`),
-  reassembly-equals-sorted-full-set, stop-and-wait retry-debt resumption, cap-unreachable cell
-  (full 1M-route synthetic table chunks without a single `learnedRouteCapExceeded` refusal).
-- Source guards updated in place (not deleted): the `slow_path_admit_single_site_6664.rs` NoRoute
-  wiring guard and the #9054 composition cells keep covering the arm; the capped-delegates cell is
-  rewritten as the §5c cell above.
-- Loss-cluster smoke (REQUIRED — dataplane disposition changes): deploy, then v4+v6 ×
-  push+reverse on 5201, multi-stream `-P 12 -R` reproducers, plus a full-table synthetic
-  (or capped-fixture) run proving deny-policy traffic to a learned-only destination drops and
-  permit-policy traffic to the same destination forwards — with `xpf_userspace_binding_slow_path_no_route_packets_total`
-  and `LearnedRouteCapHits()` captured. Per-class CoS 5201-5206 matrix per the triple-review
-  standing rules.
-- NEVER fake numbers: every throughput/retrans figure in the PR body comes from a captured run.
+- `cargo build` clean at every commit boundary; logical bisectable commits (resolver → arm
+  wiring → attestation → counters → test-only commits separate).
+- `cargo test --release` full suite green; 5/5 flake on the affected cells:
+  - `noroute_is_denied_on_a_default_deny_box_7480` — untouched positive control;
+  - NEW `capped_miss_equals_uncapped_miss_9522` (fail-on-revert: capped snapshot + deny box +
+    learned-only dst with kernel route in a DENY pair → `Some(deny)`; delete the lookup call
+    and it reds — the exact master behavior);
+  - NEW real-zone cells: permit-pair delegates with verdict recorded; genuinely-unroutable
+    falls to sentinel (default decides); cross-zone multipath fails closed to sentinel;
+    unmapped-egress-ifindex ⇒ sentinel; flowless closed-ports preserved under real zones;
+    complex-attestation set ⇒ sentinel path + counter.
+  - NEW cache cells: zone-answer TTL expiry, cap reclaim discipline, clear-on-FIB-publish,
+    verdict-never-cached (config policy change between two packets with hot cache entry
+    changes the verdict).
+- Measurement gates (numbers in the PR, never asserted):
+  - FIB linear-scan cost at 65k/250k/500k/1M routes (microbench miss-path ns + loss-cluster
+    NoRoute pps) — documents the scan bound §2 claims and gates Alternative B;
+  - synchronous `GETROUTE` RTT p50/p99 on the slow path (gates sync-vs-thread, §5c);
+  - NoRoute-miss pps under full-table synthetic + scan (sizes the rate limits, §5c).
+- `go test` affected packages: attestation cell (mark-rule config ⇒ complex=true; ordinary
+  rules ⇒ false; enumeration failure ⇒ complex=true — fail-closed), plus the untouched cap
+  derivation cells as regression.
+- Source guards updated in place: `slow_path_admit_single_site_6664.rs` NoRoute wiring guard
+  extended to the lookup call (a deleted lookup must red it); #9054 composition cells rewritten
+  as the §5b equivalence cell, not deleted.
+- Loss-cluster smoke (REQUIRED — disposition changes): deploy; v4+v6 × push+reverse on 5201;
+  `-P 12 -R` reproducers; full-table synthetic run — deny-pair learned-only dst DROPS,
+  permit-pair learned-only dst FORWARDS with verdict telemetry;
+  `xpf_userspace_binding_slow_path_no_route_packets_total` + new lookup/ambiguity/fallback
+  counters + `LearnedRouteCapHits()` captured. Per-class CoS 5201-5206 matrix per standing
+  rules. NEVER faked: every figure from a captured run.
 
 ## 10. Out of scope (explicitly)
 
-- #9172 item 3 observability half (`ProcessStatus` capped field, `LearnedRouteCapHits` call
-  sites). This plan deletes the STATE the signal would describe; the signal work stays separate.
-- Raising `learnedRoutePublishBudget` or `MaxControlRequestBytes` (moves the cap, doesn't remove
-  the cause; invalidates the #7675 reachable-bound analysis).
-- Filtering what FRR installs into the kernel (operator remedy, already documented; not a fix).
-- Combining §5a AND §5b in one PR (doubles the mechanism; the residual inter-push window stays
-  on today's #7480 semantics until a follow-up says otherwise).
-- Fail-closed-above-cap restoration (rejected by the issue and all three reviewers; not on the table).
-- General FIB performance work (LPM, sharding, incremental withdraw beyond chunk replace).
+- #9172 item 3 observability (still separate; this plan only adds the minimal counters its own
+  fallback list needs to be distinguishable).
+- Alternative B implementation (follow-up workstream, gated on the §9 scan measurements + LPM).
+- Raising `learnedRoutePublishBudget` / `MaxControlRequestBytes` (untouched).
+- FRR-side table filtering (operator remedy, documented, unchanged).
+- Fail-closed-above-cap (rejected; not on the table).
+- General FIB LPM work (measurement-gated prerequisite of B, not of A).
 
 ## 11. Open questions for adversarial review
 
-1. **Partition vs tag for the learned FIB slice?** Clearing "the learned partition" on
-   `route_replace && index==0` needs learned routes to be separable from config routes at
-   apply time. Is a hard partition (two table sets merged at lookup) or a per-entry tag +
-   learned-key index the right shape — and does either change the lookup hot path's borrow or
-   branch structure? If the answer is "neither composes with `populate_routes` cleanly",
-   is that a PLAN-KILL for §5a?
-2. **Per-chunk vs per-table flow-cache invalidation?** The plan bumps fib once on `complete`.
-   During a multi-chunk publish the helper enforces a MIXED table (old tail + new head) under
-   the old pair — is that window's forwarding correct, or must each chunk bump (N invalidations
-   per publish)? If neither is clean, does chunking break the pair-equality contract?
-3. **Is stop-and-wait chunking actually kinder to the socket than one 56 s hold?** N chunks ×
-   (RTT + apply + status) still occupies the socket N times and stretches convergence to
-   seconds-to-tens-of-seconds, during which the FIB is deliberately incomplete. Does the
-   1/s status poll + session-install starvation analysis genuinely improve, or does chunking
-   convert one long outage into a repeating short one? Numbers invited.
-4. **What does the inter-chunk window adjudicate?** While chunks 1..k of N are applied, most
-   learned destinations still resolve NoRoute. Under §5a semantics (strict #7480, no gate) the
-   box drops-or-delegates per the DEFAULT action for the whole convergence window — is that a
-   functional return of the #9054 blackhole in miniature, and does the plan need a
-   "publishing" state distinct from both capped and whole?
-5. **Should the fallback WIN — is the full table even needed in the helper?** §5b asks whether
-   a per-miss kernel lookup (real egress zone → adjudicate → delegate-on-permit) closes the
-   hole with one code path and no table-movement protocol at all. If the miss rate on a
-   full-table box is low (established flows hit session/flow-cache; only first packets miss),
-   is §5a over-engineering — PLAN-KILL §5a and ship §5b? What miss-rate measurement would
-   decide this?
-6. **Architectural mismatch (#961/#946-Phase-2)?** Is a stateful replace-generation-fenced,
-   ACKed, retry-debt-carrying chunked route verb the kind of protocol machinery this tree has
-   killed before at plan time — and does the existence of `update_neighbors` as "the pattern"
-   actually transfer, given neighbors are ~hundreds of entries with clear-on-empty semantics
-   while routes are ~10⁶ entries where clear-and-refill per publish is itself an outage?
-   KILL is the expected answer if the analogy doesn't hold.
-7. **VRF/table fidelity for §5b?** A kernel `RTM_GETROUTE` answer is only as good as the
-   query's table selector, fwmark, iif and TOS. Can the helper reconstruct the kernel's exact
-   routing decision from the descriptor metadata on the NoRoute arm — and if any of those
-   inputs is unavailable, does the "real zone" become a guess that reintroduces the bypass
-   through mis-zoning? Enumerate the required inputs or kill §5b.
+1. **Is the §5a input list complete against real `ip rule` selectors?** Enumerate any kernel
+   selector beyond (dst, src, table, iif, tos, proto/ports) that can change a `GETROUTE` answer
+   on a supported topology (nftables-derived marks? `l3mdev` master-index subtleties? realm?
+   `ip rule ... uidrange`?). Each missing input is either a §5d attestation addition or a
+   PLAN-KILL of Design A — no middle ground is acceptable for a security adjudication.
+2. **Does synchronous netlink in the worker slow path hold up under adversarial miss rates?**
+   A scan across distinct unroutable dsts pays full linear-scan + failed lookup per packet with
+   nothing cacheable. Is the §5c rate limit + sentinel-fallback sufficient, or does this need a
+   negative-zone cache (with its own staleness analysis) to avoid a slow-path pps collapse that
+   reads as an availability regression? Numbers invited; "slow path is rare" is not evidence.
+3. **Is caching the zone answer but not the verdict the right split?** It re-evaluates policy
+   per packet (correct under config change, costs policy-eval per NoRoute packet). Should
+   instead the VERDICT be cached with the policy generation stamped (invalidated by the #8356
+   re-derivation generation already published per pass)? Which coherence story is actually
+   tighter — argue for flipping it.
+4. **Cross-zone multipath fails closed to the sentinel — but is SILENT fallback correct there?**
+   A same-prefix ECMP across zones with a deny default drops traffic the operator's
+   per-zone permits would have allowed on whichever member the kernel picked. Should the
+   fallback instead be loud (per-prefix counter + log) or even a distinct disposition? And does
+   the kernel's own hash choice vs the helper's ignorance of it constitute a determinism hole
+   worth killing over?
+5. **Is the TOCTOU bound honestly stated?** Lookup-to-reinject is µs–ms, but the ZONE CACHE
+   extends the window to the TTL (seconds). A route withdrawal inside the TTL forwards
+   permitted packets toward a dead/changed egress. The plan claims this matches kernel
+   behavior — does it, or does the kernel's synchronous FIB make this strictly weaker in a way
+   that matters for a deny that arrived 2 s ago? Quantify or kill the TTL length.
+6. **Should Alternative B die entirely rather than wait?** If Design A closes the filed hole
+   and B's only marginal value is fast-path throughput (perf, outside this issue), is keeping B
+   sketched an invitation to rebuild the v1 mechanism later — i.e. should v2 delete §5f and let
+   any future fast-path work justify itself from zero? KILL-B is an acceptable verdict.
+7. **Does §5e's no-bump argument survive a hostile reading of the version doctrine?** The
+   capped bit's *described meaning* stays fixed, but its *operational consequence* (delegate
+   vs adjudicate) changes under every old sender. Is "helper-local behavior needs no version"
+   actually consistent with the v9 lesson (same bytes read differently), or does the
+   new-helper+old-sender pairing deserve a loud status-level signal (not refusal) so an
+   operator watching `LearnedRouteImportCapped=true` understands delegation is now adjudicated?
+   (Note: this overlaps #9172 without claiming it.)
