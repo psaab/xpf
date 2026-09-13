@@ -1,0 +1,135 @@
+## Verdict: NEEDS-MAJOR
+
+Read r2 and the complete round-1 review, plus the four requested source files. This is a static plan review; no live-kernel validation was performed.
+
+**NFQUEUE fixes the passive-tap authority problem in principle. But r2 combines incompatible packet-disposition models, leaves lifecycle fencing unresolved, and defines no numerical performance acceptance gate.**
+
+### 1. Round-1 disposition
+
+| Round-1 block | Status | Reason |
+|---|---|---|
+| **1. Budget** | **PARTIALLY-FIXED** | Unsupported divisions and double-counting are corrected; actual transport costs remain unmeasured and T22’s throughput percentage and latency limit are placeholders. |
+| **2. Refuted approaches / authority** | **PARTIALLY-FIXED** | NFQUEUE and the input twin provide a plausible authoritative boundary; permit release versus TUN reinjection remains contradictory, and the refreshed B1 argument still overclaims. |
+| **3. Hidden invariants** | **PARTIALLY-FIXED** | Many requirements are now explicit, but generation stamping, final-disposition fencing, worker affinity, checksum metadata, and fragment disposition lack implementable semantics. |
+| **4. Tests** | **FIXED** | Runtime failure, exactly-once, revocation, demotion, alias preservation, and timer-latency cases are named; enforcement and preservation tests are separated. This fixes the inventory, not the underlying design. |
+| **5. Open questions** | **PARTIALLY-FIXED** | Outbound scope is clarified and reassembly selected, but generation and re-entry remain security-boundary decisions disguised as feasibility questions. |
+
+### 2. Blocking findings in r2
+
+#### A. Permit release and TUN re-entry are still two competing forwarding owners
+
+**Evidence:** §4.2 says permit releases the held original. §4.5 says that release is the single egress **and** the TUN carries the post-adjudication forward.
+
+Those are not one disposition. A userspace-owned frame forwarded through TUN and an accepted NFQUEUE original are separate deliveries. Conversely, suppressing TUN forwarding leaves unspecified how worker NAT changes, routing decisions, and other packet mutations reach the released original.
+
+The plan needs a single disposition contract covering:
+
+- Ordinary permits and denies.
+- Modified packets.
+- Host delivery.
+- Fragment completion.
+- Errors and cancellation.
+
+Until that exists, T2/T11/T15 cannot have an unambiguous expected implementation.
+
+#### B. Shadow mode contradicts NFQUEUE holding semantics
+
+**Evidence:** §4.6 defines shadow as “divert live” with “enforcement release suppressed,” while §4.5 says the kernel forwards the original.
+
+A queued original does not continue merely because enforcement is disabled. Suppressing its verdict holds it; it does not produce passive shadow forwarding.
+
+Specify whether shadow is the AF_PACKET tap described in §4.2 or a queue-based observation mode with an explicit original-packet disposition. Currently the phase description implies an outage, not shadow operation.
+
+#### C. Generation and demotion assertions contradict each other
+
+**Evidence:**
+
+- §4.2 declares post-rotation verdicts safe because they were computed under the captured generation.
+- §6.5 requires authorization to remain valid through final disposition.
+- §4.4 says a kernel-buffered packet read after rotation retains an old capture stamp.
+
+An old authorization is not automatically valid after revocation or ownership change. Also, a userspace capture stamp cannot retrospectively identify the generation of a packet waiting in a kernel queue without an explicitly generation-bound queue/lifecycle mechanism.
+
+Most importantly, after an accept verdict transfers the original back to kernel forwarding, the capture thread no longer controls its eventual transmission. **T17 promises post-verdict/pre-transmit cancellation without naming an enforcement point capable of doing it.**
+
+This needs a precise linearization boundary, not another atomic-field list.
+
+### 3. Does the scoped divert preserve the armed paths?
+
+**Qualified yes as a match argument; not established as a lifecycle proof.**
+
+`pkg/nftables/transit_barrier.go` installs an unconditional forward-policy DROP. `pkg/daemon/daemon_transit_gate.go::applyTransitBarrier(true)` removes that barrier, preserving the three named kernel-dependent paths.
+
+An ingress-scoped tunnel divert is materially different:
+
+- It intentionally replaces the tunnel-plaintext path.
+- Ordinary LAN-origin outbound-to-tunnel traffic does not match merely because its output is the tunnel.
+- Other-ingress SNAT and slow-path reinjection should remain outside that match.
+
+However:
+
+1. **These two source files name the dependencies; they do not prove the ingress metadata of every reinjection path.** Calling preservation true “by construction” exceeds the inspected evidence.
+2. “Queue carries no verdict and drops nothing” is misleading. It transfers disposition authority and can cause drops on failure. Safety comes from scope and lifecycle, not from pretending it is non-filtering.
+3. The existing barrier’s install failure is deliberately tolerated because another closure mechanism exists. **That error-handling contract cannot be inherited by an authoritative divert.**
+4. Queue failure with an installed rule is not the same as **rule installation failure or rule removal**. §4.6 assumes a holding divert already exists precisely where T9 must cover its absence.
+5. The plan must define rule ownership and atomic ordering against tunnel creation, activation, replacement, teardown, and daemon restart. Neither existing arm helper supplies that ordering.
+6. The input twin needs explicit ordering against existing host-inbound chains. Adding a queue does not establish which policy executes first or whether a worker permit guarantees host delivery.
+
+**Conclusion:** the scoped idea is not the prohibited unconditional barrier returning. But the source does not establish the stronger “truly avoids every other armed path throughout lifecycle” claim.
+
+### 4. B1 refresh: substantially corrected, still overstated
+
+The requested current-tree comparison confirms:
+
+- `planning.rs::replan_bindings_from_candidates` computes **per-interface** `min(rx_queues, 16)`.
+- Total slots are the sum of those per-interface counts.
+- Global queue collapse is no longer a valid current objection.
+- SecureTunnel commentary explicitly preserves the possibility of copy-mode attachment and documents shared-to-private fallback.
+- Half-admission remains prohibited.
+- The stated replacement guard names match the commentary.
+
+But §4.7 calls all four refreshed grounds **“each sufficient alone.”** That is not supported:
+
+- Spending one binding slot is a resource cost, not an independent impossibility proof.
+- An untested copy-mode bind is a feasibility uncertainty, not proof of a black hole.
+- The commentary explicitly warns that the blanket `missing_egress_binding` account was wrong for LAN-to-tunnel traffic: earlier FIB dispositions intervene.
+
+Retain the rejection of **naive** attachment, but separate demonstrated incompatibilities, conditional failure modes, and untested assumptions.
+
+### 5. Does per-packet verdict issuance destroy batching economics?
+
+**It may dominate them; the present evidence cannot decide.**
+
+Batching amortizes inter-thread handoff. It does not automatically amortize per-packet kernel queue processing, verdict handling, copies, or kernel continuation.
+
+Two further problems:
+
+- §4.2 reads as **drain batch → wait for worker → issue verdicts → drain again**. If literal, this serializes capture and worker service. “The worse core, not the sum” only describes a sufficiently overlapped pipeline, not stop-and-wait batches.
+- Capture starvation is used to reject same-thread adjudication, yet the chosen capture thread may itself wait for adjudication before receiving more packets.
+
+G1/G2 need the actual bounded in-flight pipeline, return-verdict queue, overload behavior, and mixed permit/deny traffic—not just a batched send benchmark.
+
+**T22 is presently non-executable:** “≥ stated %” states no percentage, and the p99 bound has no value. Thus “kill if B=32 fails T22” is not a kill criterion.
+
+### 6. Fragment contract: selected, but not consistent end-to-end
+
+§6.8 and Q5 now agree that bounded reassembly is the selected contract; drop-non-first is only a possible future scope change. That fixes the original direct contradiction.
+
+Remaining blockers:
+
+- Where does reassembly occur relative to kernel defragmentation and the chosen hooks?
+- Does completion authorize the original fragment packets, or forward one normalized datagram? The NFQUEUE/TUN contradiction makes this unanswered.
+- “First-wins + count, never merge-and-forward” needs clarification; reassembly necessarily combines fragment data, and overlap handling must have explicit IPv4/IPv6 semantics.
+- Keys omit an explicit generation/RG epoch despite requiring rotation isolation.
+- Fragment counter accounting is circular: §6.9 points to §6.8, which never defines whether attempted/forwarded bytes count fragments or reconstructed datagrams.
+- Resource caps and expiry are promised but not specified.
+
+### 7. Additional holes
+
+- **Worker ownership remains open:** no flow-dispatch rule establishes reverse-flow placement, NAT/session ownership, ordering, or fragment affinity.
+- **Offload metadata remains open:** slab bounds prevent truncation but do not define checksum/GSO handling or whether the owned entry receives valid standalone L3 packets.
+- **Re-entry exclusion is internally confused:** a new exclusion class normally contributes to the refused-netdev index; §6.13 instead requires exclusion *from* that index. Omitting the TUN from snapshots also prevents a row-based classifier from protecting aliases without another ownership source.
+- **Kernel-drop accounting is assumed:** reader death and socket teardown cannot depend on the dead reader publishing drop counters. Name the surviving observability source.
+- **Test references drift:** R11 cites T21 for MTU/GRO, but T21 is deny-byte parity; §6.12 cites T20 for unowned names, but that case is T18.
+
+**Bottom line:** retain NFQUEUE as a research candidate. Before approval, unify packet ownership, define lifecycle and authorization boundaries, reconcile fragments and metadata, and replace placeholder performance gates with numerical acceptance criteria.

@@ -1,0 +1,68 @@
+# Hostile plan review — docs/pr/9506-xfrm-capture/plan.md
+
+## Verdict: **NEEDS-MAJOR**
+
+The plan is unusually honest about what it doesn't know, and it does not smuggle in either refuted approach *as written*. But its preferred kernel transport has an unacknowledged enforcement-authority hole, the bypass-closure step depends on a mechanism the plan both requires and refuses to design (and §4.6 as worded forbids), and the interim ship phase has undefined duplicate-delivery semantics. A plan whose stated deliverable is "a chosen shape, budget math, invariants, tests" cannot be PLAN-READY while the *denial* mechanism — the entire point of the bridge — is a hole. Findings below; none is a PLAN-KILL.
+
+---
+
+## (1) Does B ≥ 4 (target 8–32) follow from the pricing numbers?
+
+**Arithmetic: correct. Budget semantics: wrong or at least underived. Model: unmeasured in the decisive term.**
+
+- **F1 (major) — the 2,797 ns budget is the reciprocal of whole-pipeline pps, spent as if wholly available to the bridge.** I checked the lineage: `adjudication.md:649` defines the budget as the reciprocal of #5275's achieved 357,500 pps. That is the total per-packet time of the *entire armed pipeline* (RX, session, policy, NAT, TX) at max throughput, not the slack available to a new mechanism layered on top. The plan never derives the incremental allowance, never says whether the measurement is per-core or whole-box, and adds capture-thread ns and worker-thread ns as if they were one currency (they're different cores; the binding constraint is the *worse* thread, not the sum). "61% at B=4" is therefore not "headroom" — it's 61% of a budget the rest of the dataplane is presumably still spending. The G2 kill criterion would catch the blowout empirically, but the acceptance framing ("≤ 61% at B=4") is presented as a survivability statement when a realistic prior for the kernel half alone (a TUN `write()` per permitted packet ≈ 1 µs ≈ 36%) plus any adjudication cost puts B=4 over 100%. **B ≥ 4 does not follow from the numbers; it is the adjudication's B ≥ 3 plus one.** The plan should say which core pays which cost and derive the incremental slack, or state explicitly that "budget" means "total allowed per-packet wall time including existing forwarding" with a citation that says so.
+
+- **F2 (minor) — the batched model is not a measurement, and it omits a real term.** No bench row sends a *batch*; `b2_capture_bridge.rs` prices one frame per send with a per-frame ack. `6,324/B + 136` is a model. Worse, the 25.4 ns copy row is same-thread; the consumer's read of B × 1500 B from another core's cache (48 KB at B=32) is in no row and is plausibly 100–300 ns/packet — the same order as the entire modeled floor. And the wake cost the batching amortizes matters most when the consumer sleeps — i.e., *below* flood — while in sustained flood with a slower consumer the wake is near-free and the binding costs are exactly the unmodeled ones (kernel half, cache transfer, adjudication). The table optimizes a synthetic middle regime.
+
+- **F3 (trivia, fix the text):** the B=3 row "survives, no headroom" — 80% of budget consumed by handoff alone, kernel half unpriced, is dead, not surviving. The "+136 floor" double-counts the copy (the 111 ns same-thread row *includes* the 1500 B copy), which is conservative and harmless but should be stated. "4096 × 1504 ≈ 6.16 MiB" is wrong units: 6,164,480 B = 6.16 **MB** = 5.88 MiB (error inherited from the bench comment).
+
+- **F4 (minor) — asymmetric pricing standards.** Same-thread adjudication (~111 ns, the cheapest row) is rejected on an *unmeasured* starvation argument, while the plan's own choice survives on measured rows plus two unpriced terms (kernel half, adjudication). The rejection reason is plausible, but the same courtesy of "this is a model, gate it" is not applied to the starvation claim.
+
+## (2) Smuggling of refuted approaches
+
+- **F5 (major) — no AF_XDP-on-xfrmi smuggle; partial nftables smuggle via an internal contradiction.** §4.6 cleanly excludes AF_XDP, and nothing in §4.2 reintroduces it — clean. But §4.5 mandates "close the xfrmi kernel-forward bypass" and T12 tests the three armed paths with it closed, **without naming any closure mechanism** — and §4.6's blanket "No live-while-armed nftables `hook forward` chain" as worded forbids the obvious scoped one. The transit_barrier refutation targets an *unconditional* policy-DROP chain (`transit_barrier.go`: "several ARMED paths deliberately rely on the kernel forward path being OPEN and UNFILTERED"); a forward rule scoped `iifname == stN` does not touch any of the three armed paths (xfrm egress enters forward with iif=LAN/oif=xfrmi; SNAT accept_local and #7409 reinject don't ingress the xfrmi). So the closure is probably designable as a scoped queue-or-drop chain — but the plan never designs it, and as written its own §4.6 prohibits it. The riskiest single change in the whole program (R8) has zero design in a plan whose job is to converge the design.
+
+- **F6 (major) — the preferred transport's enforcement story is incoherent as written.** §4.2 option 1: "AF_PACKET capture... denies die in userspace with counters." AF_PACKET is a *tap* — it cannot prevent the kernel from forwarding the original frame, which §1 itself establishes is exactly what happens (ip_forward open, no forward chain, no policy). Until the (unnamed, F5) closure exists, a "denied" inner packet is denied nowhere: it is *evidenced* in userspace and *forwarded* by the kernel. The plan's stated fallback trigger for option 2 — "if AF_PACKET re-inject cannot be made authoritative (i.e. a permitted frame's re-entry can be confused with unadjudicated traffic)" — diagnoses the wrong failure: re-entry confusion is the small problem; capture-side non-authority is the fatal one. nfqueue is authoritative by construction and is the only self-consistent primary. Either invert the preference order with the real reason, or design the closure mechanism that makes AF_PACKET deny-enforcing.
+
+## (3) Hidden invariants — what's missing
+
+§6 is genuinely good (generation fencing, per-node HA, fragment/ICMP rules, inner-byte counters are all there). Missing:
+
+- **F7 (major) — interim-mode semantics.** §4.5 ships capture + adjudication + *re-entry* while the kernel forward path is still open. For a permitted flow, the kernel forwards the original frame *and* the re-entered copy is forwarded → **duplicate delivery by design** during the interim, plus mixed-path reordering. Either the interim is shadow mode (adjudicate-and-count, suppress re-entry forwarding) or it duplicates; the plan says neither. This needs an invariant ("no packet egresses twice; interim divergence is observable, not just tolerated") and a test.
+- **F8 — worker fairness/starvation bound.** The batch lands on the worker's existing command queue; under tunnel flood the batch-drain can starve the same worker's AF_XDP RX. No bound on batches-per-poll-cycle, no fairness invariant. (The plan wielded exactly this starvation argument to reject same-thread adjudication in §4.1, then forgot it for its own design.)
+- **F9 — GRO/GSO and slab sizing vs real MTUs.** The xfrmi delivers via gro_cells (`ingress_exclusions.go` documents this path), so captured "frames" can be GRO super-frames **larger than MTU**; nothing in §6.8 covers them, and slab sizing is discussed only against 1500. Tunnel MTU > 1500 (jumbo xfrmi) and the *re-entry TUN's* MTU (write of an inner frame > TUN MTU fails — fail-closed but unspecified) are both unstated.
+- **F10 — capture-target resolution must be ownership-keyed.** §4.2 says the capture "binds to the tunnel's logical ifindex... resolved at bring-up," but not *keyed on what*. `ingress_exclusions.go`'s entire eleven-round history is the lesson that `stN` is a lexical trap: a physical NIC legitimately named `st5` with no VPN must never be captured. The plan must state it reuses the ownership union (`SecureTunnelNetdevForRef` ∪ `liveXfrmNetdevs`), never the name shape.
+- **F11 — kernel-side generation hole for nfqueue.** §6.5 fences *batch rows* in userspace; it cannot fence an nfqueue **verdict already in flight** when the generation rotates — the kernel applies it regardless. Rotation needs a queue drain/detach whose disposition (socket close ⇒ pending packets dropped, i.e., fail-closed) must be stated and tested.
+- **F12 — the re-entry TUN as a new netdev class.** The per-worker re-entry TUN is a new kernel netdev. Nothing says it stays out of the snapshot/binding-plan machinery (`snapshotNetdevVotes`, RSS allowlist, refused-netdevs index). The repo's round 9–11 history says every new contributor to those sets must join the enumeration or corrupt the binding plan. One invariant + one test.
+- **F13 — cross-batch fragment state** lifetime across the 100 µs timer, batch boundaries, and generation rotation is implied by §6.8 but never bounded.
+
+## (4) Test plan — missing fail-on-revert cases
+
+T1–T13 are strong (counter parity, no-recirculation, saturation, armed-path regressions with closure are all unusually good). Missing:
+
+- **F14 — interim duplicate-delivery / shadow-mode test** (the testable form of F7): a permitted flow through the tunnel egresses exactly once, in every phase, and phase is operator-visible. This is the most consequential omission.
+- **F15 — unowned `stN` test** (F10): a physical NIC named `st5` with no VPN is never captured; its traffic still takes the normal AF_XDP path.
+- **F16 — GRO/large-frame test** (F9): >MTU captured frame is refused/counted, never silently truncated or dropped.
+- **F17 — end-to-end throughput floor**: T-suite has zero perf tests; only bench gates G1/G2 exist. A fail-on-revert cluster test (tunnel throughput with bridge live ≥ X% of pre-bridge) is the only thing that catches a silent 10× regression the microbenches miss. Similarly a latency test for the 100 µs flush (R5's mitigation is a *counter*, not a test).
+- **F18 — per-transport coverage**: if AF_PACKET-with-closure and nfqueue are both candidates, T1–T13 must state they run under both.
+- **F19 (minor) — deny-side byte parity** (T2 pins permits only) and **fragments split across two batches**.
+
+## (5) Open questions — honest?
+
+Yes, overall — each invites a kill and the gates front-load the risk. Two defects:
+
+- **F20 — Q4 is honest but misdiagnosed** (see F6): it asks who authorizes *re-entry*, when option 1's fatal problem is that *capture* is non-authoritative. A perfect answer to Q4 as posed leaves F6 unfixed.
+- **F21 — Q2 is measurable now and shouldn't be open.** The committed harness plus an owned-frame run through a real worker's fast path prices adjudication on existing hardware. Leaving it open lets the plan keep a B ≥ 4 floor that adjudication cost may already refute; fold it into G1. Also Q8's answer (outbound stays out) should be reflected in §9, which currently doesn't list it.
+
+None of the open questions kills the plan today: a coherent core survives (nfqueue-or-scoped-closure transport, batched handoff at B = 8–32, shadow-mode interim, close-last), and the kill criteria are honest and would fire on the real risks.
+
+---
+
+## Required before PLAN-READY
+
+1. Design the **closure mechanism** (scoped chain vs nfqueue-authority vs route starvation), reconcile §4.5 with §4.6, and re-order §4.2's transports on the *real* authority ground (F5, F6).
+2. Specify **interim/shadow-mode semantics** with invariant + test (F7, F14).
+3. Derive the **incremental budget** (per-core cost accounting, slack above existing forwarding) or explicitly redefine the budget with a citation; add the batched-send and cross-thread-payload rows to the pricing gate (F1, F2).
+4. Add invariants/tests for: ownership-keyed resolution, worker fairness bound, GRO/MTU/slab sizing, re-entry-TUN exclusion from the binding plan, kernel-side generation for nfqueue (F8–F12, F15, F16).
+
+Everything else — unit nits, table labels, Q2 promotion, §9 completeness — is minor and mechanical. The plan's honesty discipline is excellent; its convergence is not yet earned where it matters most: on actually saying *no* to a packet.

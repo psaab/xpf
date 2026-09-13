@@ -1,0 +1,87 @@
+## Verdict: NEEDS-MAJOR
+
+The objective is valid; the design is not implementation-ready. Two blockers dominate: **the batching model is not supported by the benchmark**, and **the preferred transport does not yet own the original packet’s disposition**. Neither proves B2 impossible, but both invalidate acceptance as written.
+
+### 1. Budget: correct arithmetic, unjustified model
+
+**§4.1’s divisions are numerically correct. Its cost equation is not established.**
+
+In `userspace-dp/benches/b2_capture_bridge.rs`:
+
+- `bench_cross_thread_roundtrip` allocates and copies a frame, sends it through `sync_channel`, and waits for an acknowledgement. Half its elapsed time is only an estimate—not an isolated, fixed “one-way wake” cost.
+- Both same-thread queue benchmarks already copy the payload. Adding another 25.4 ns copy to their measured cost double-counts that operation unless the design explicitly requires another copy.
+- The production proposal uses the worker’s mutex-protected command queue, whereas the cross-thread measurement uses `sync_channel`.
+- **There is no batched benchmark.** Rerunning the existing instrument on cluster silicon cannot establish G1’s B≥4 floor.
+- The consumer reads `f.len()`, not payload bytes. Despite its comment, this does not establish realistic consumer payload-cache traffic.
+
+Consequently, `6324/B + 136` is a hypothesis, not pricing. It assumes the measured elapsed time is amortizable once per batch and ignores contention, worker scheduling, pool returns, and any verdict/re-entry handoff.
+
+Also:
+
+- At low rates, the timer necessarily produces batches smaller than four. **B≥4 cannot be a universal acceptance floor** alongside bounded flush latency.
+- `1 / 357,500 pps ≈ 2,797 ns` is an aggregate packet interval, not automatically a CPU-service budget transferable across thread topologies.
+- G2 says ≤80% *end-to-end*; §11 says ≤61% at B=4; §4.1 already consumes approximately 61% on the modeled handoff alone. These are incompatible or at least ambiguously scoped gates.
+
+**Required revision:** treat 8–32 as an experimental range, not a selected optimum. Define CPU cost, throughput, and latency separately; measure actual batching and occupancy distributions, including timer-flushed single packets.
+
+### 2. Refuted approaches: not explicitly revived, but the missing mechanism matters
+
+**AF_PACKET capture does not suppress the original packet.** Dropping its userspace copy is not enforcement.
+
+That makes §4.5 circular:
+
+> Keep kernel forwarding open, prove deny/permit parity, then close the bypass.
+
+With passive capture, deny parity cannot hold while originals continue forwarding. Permits may additionally be duplicated by reinjection. Shadow policy agreement is not enforcement parity.
+
+The plan must identify the authoritative interception boundary **before** claiming a working capture/re-entry design, including host-bound traffic. A forward-only mechanism would not cover T5.
+
+**No live armed forward chain is explicitly proposed.** However, “close the bypass” and the nfqueue fallback leave the hook unspecified. If implementation fills that blank with the prohibited armed forward chain, the refuted design returns indirectly. `pkg/nftables/transit_barrier.go` establishes why the existing unconditional barrier cannot serve that purpose.
+
+**No naive AF_XDP attachment is explicitly proposed either.** But §4.4’s “fwmark + ingress-set membership” is dangerously underspecified: the SecureTunnel commentary explicitly says ingress-map admission without a READY binding causes degraded-transit drops. Keep logical adjudication identity distinct from physical binding admission.
+
+There is also stale evidence: §3 still claims global queue collapse as a current, sufficient objection. The requested SecureTunnel section says **#7497 removed that global collapse**. It also explicitly declines to assert that copy-mode attachment cannot work. Refresh the argument against the current tree.
+
+### 3. Hidden invariants are incomplete
+
+| Area | Missing requirement |
+|---|---|
+| **HA** | Role is RG-scoped, not simply node-wide “standby.” Define behavior when different RGs have different owners, during abrupt failure, and while the new owner is not capture-ready. |
+| **Demotion** | Stopping the reader does not fence frames already adjudicated, pending TX, or queued for kernel re-entry. Authorization must remain valid through final disposition. |
+| **Generation** | Define an atomic identity/configuration/ownership association, including ifindex reuse and kernel-buffered packets read after rotation. Stamping the current generation at dequeue can mislabel an old packet. |
+| **Cached state** | Generation checks on batch rows alone do not invalidate prior session, flow-cache, fragment, or pending-forward decisions after policy/zone/VRF changes. |
+| **Worker ownership** | Specify flow affinity, reverse-flow placement, NAT/session ownership, and ordering. “Same worker” is an assertion without a dispatch rule. |
+| **Framing/MTU** | xfrmi is `ARPHRD_NONE`; specify the L3-to-owned-frame representation. Effective MTU alone does not bound GRO aggregates, truncation, checksum metadata, or re-entry PMTU behavior. |
+| **Fragments** | §6.8 promises bounded reassembly while Q7 still offers dropping non-first fragments. Those are materially different contracts. Define isolation keys, overlap handling, expiry, and resource limits. |
+| **Counters** | Define the byte boundary—L3 inner bytes versus Ethernet-inclusive descriptor lengths—and attempted versus successful forwarding, duplicate suppression, and fragment accounting. Physical-interface parity alone is ambiguous. |
+| **Overload** | A bounded queue is not sufficient if mutex acquisition blocks, packet batches multiply effective occupancy, or per-drop events overload telemetry. Define byte/slot bounds and control-command progress. |
+
+The slab argument also overreaches: pooling avoids enlarging every command variant, but does not eliminate payload memory. If a command now holds up to 64 frames, unchanged command-count bounds do **not** imply unchanged resource bounds.
+
+### 4. Tests: the decisive missing fail-on-revert case
+
+**Missing: fail-closed after successful activation when the capture/adjudication service disappears while the appliance remains armed.**
+
+T9 tests bring-up failure; T8 tests saturation. Neither proves continued protection after runtime reader failure, worker loss, socket closure, or teardown.
+
+The test must independently establish that neither routed nor host-bound originals continue unadjudicated. This distinguishes authoritative interception from a healthy-looking mirror.
+
+Additional gaps:
+
+- Exactly-once delivery for permits—not merely “forwarded” and “not re-adjudicated.”
+- Revocation of an already-established inner session after policy/zone changes.
+- Post-verdict, pre-transmit demotion fencing.
+- Preservation of SecureTunnel exclusions across parent/unit aliases in both planes.
+- Measured timer latency under contention; a flush counter proves occurrence, not timeliness.
+
+Finally, “each must fail on today’s tree” is false for the whole suite. Armed-path regression tests should already pass today. Separate new enforcement tests from preservation tests and identify the specific reverted mechanism each test detects.
+
+### 5. Open questions: honest admissions, several are design blockers
+
+- **Q1–Q2:** legitimate feasibility gates; failure may kill this budget-constrained B2 approach.
+- **Q4:** already blocks PLAN-READY. Re-entry authorization and suppression of originals are the security boundary, not implementation details.
+- **Q5:** already blocks PLAN-READY. Generation semantics determine whether permits remain authorized.
+- **Q7:** already contradicts the stated invariant and requires an explicit compatibility decision.
+- **Q8:** can remain separate, but value claims and advisory removal must clearly exclude unresolved outbound behavior.
+
+**Bottom line:** retain B2 as a research candidate. Do not approve this implementation plan until it selects an authoritative disposition mechanism, defines lifecycle fencing, and replaces inferred batching prices with measurements of the proposed shape.

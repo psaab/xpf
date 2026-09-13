@@ -1,0 +1,151 @@
+## Verdict: NEEDS-MAJOR
+
+Read both requested files in full. This is a static review; no kernel experiments were performed.
+
+r3 fixes several contradictions, but its **REINJECT authorization boundary, queue lifecycle, and fragment scheduling are still not implementable as specified**. A final planned round is not an approval criterion.
+
+## 1. Round-2 disposition
+
+“FIXED” below means fixed in the plan, not validated experimentally.
+
+| Round-2 block | Status | Reason |
+|---|---|---|
+| A. Disposition | **PARTIALLY-FIXED** | Three mutually exclusive actions replace competing forwarding owners, but REINJECT commits before the declared authorization boundary and lacks complete failure semantics. |
+| B. Shadow | **PARTIALLY-FIXED** | Explicit ACCEPT solves the suppressed-verdict contradiction; phase transitions, stale session creation, and failure overrides remain inconsistent. |
+| C. Generation | **PARTIALLY-FIXED** | Queue-instance binding and dropping impossible post-ACCEPT cancellation are improvements; queue replacement/reuse and REINJECT fencing remain unspecified. |
+| Armed lifecycle 1: preservation evidence | **PARTIALLY-FIXED** | T12 now explicitly tests ingress metadata with diversion active, but preservation remains an assertion pending that evidence. |
+| Armed lifecycle 2: authority/drop characterization | **FIXED** | The plan explicitly acknowledges authority transfer and failure drops; safety now rests on scope and lifecycle. |
+| Armed lifecycle 3: install-error contract | **FIXED** | Divert installation failure explicitly keeps the tunnel down rather than inheriting tolerated barrier failure. |
+| Armed lifecycle 4: absent/removed rule | **PARTIALLY-FIXED** | Install failure is covered, but runtime rule disappearance and the interval before tunnel shutdown lack a closure mechanism. |
+| Armed lifecycle 5: ownership/atomic ordering | **PARTIALLY-FIXED** | “Tied to generation” states intent, not an executable create/replace/restart transaction with rollback ordering. |
+| Armed lifecycle 6: input ordering | **PARTIALLY-FIXED** | Ordering before host policy is required, but hook priorities and whether later kernel policy may reject a userspace permit remain undefined. |
+| B1 refresh | **FIXED** | Demonstrated, conditional, and untested claims are now separated; the blanket attachment impossibility claim is removed. |
+| Verdict economics | **PARTIALLY-FIXED** | Overlap and numerical thresholds are specified, but the NFQUEUE batching claim is inaccurate and thresholds lack workload/SLO justification. |
+| Fragments | **PARTIALLY-FIXED** | Location, original-fragment disposition, epoch keys, counters, caps, and expiry are named; hook feasibility, overlap semantics, and scheduling remain broken or deferred. |
+| Additional: worker ownership | **PARTIALLY-FIXED** | Whole-batch assignment conflicts with per-flow dispatch for mixed-flow batches; fragment/reverse-flow owner selection is not resolved. |
+| Additional: checksum/offload | **PARTIALLY-FIXED** | Verification/refusal is explicit, but checksum metadata and fragmented-L4 verification are not specified. |
+| Additional: TUN exclusion | **PARTIALLY-FIXED** | Refused-index inversion is fixed; authoritative discovery, alias coverage, and routing-domain multiplicity remain unspecified. |
+| Additional: kernel-drop accounting | **PARTIALLY-FIXED** | Supervisor publication survives reader death, but the proposed counters/source and exact accounting across queue destruction are not established. |
+| Additional: test-reference drift | **FIXED** | R11 now references T20 and the unowned-name invariant references T18. |
+
+## 2. Attack on what is new
+
+### A. Write-then-verdict does not guarantee exactly-one-wire
+
+It can support **at-most-one original-or-replacement emission**, subject to explicit failure assumptions. It cannot guarantee exactly one wire delivery under every crash outcome:
+
+- Crash before successful TUN write: zero deliveries.
+- Successful write: kernel acceptance is not proof of eventual wire transmission.
+- Crash after write: avoiding a duplicate requires the original never subsequently receiving ACCEPT, including during recovery.
+- A reader/worker hang with its socket still open is not equivalent to socket destruction.
+
+**NFQUEUE does not supply the generic per-packet timeout asserted by this plan.** A packet may remain queued until verdict or queue teardown. Specify a supervisor deadline and actual teardown mechanism; “timeout/release” is not an implementation.
+
+The more serious defect is authorization:
+
+> REINJECT writes first, but generation linearizes at verdict issue.
+
+Once TUN accepts the replacement, dropping the original cannot retract that replacement. Demotion between write and DROP therefore permits an emission before the plan’s claimed authorization check.
+
+**Required:** separate disposition commit points. ACCEPT commits at its defined verdict submission boundary; REINJECT commits at TUN submission. Both require the appropriate generation fence. A DROP verdict after injection is cleanup, not authorization.
+
+Also, “verdict issue” must distinguish attempted, successful, and uncertain submission.
+
+### B. REINJECT does reintroduce a re-entry design risk
+
+Not automatically the old half-admission bug: if the exclusion machinery actually covers every TUN identity and alias, refusing ingress admission is coherent.
+
+But exclusion does not prove correct forwarding:
+
+- A **per-worker TUN** cannot simultaneously have one fixed binding to several independent routing instances without an additional steering mechanism.
+- T3 therefore needs a worker×instance TUN model or an explicit alternative, including lifecycle and resource bounds.
+- A packet captured at FORWARD has already traversed earlier kernel processing. Reinjection starts another ingress traversal. The plan must account for routing, TTL/hop-limit handling, conntrack/NAT, firewall hooks, marks, and ICMP behavior across both traversals.
+- Comparing the kernel FIB with the adjudicated route does not guarantee that either ACCEPT or REINJECT realizes the adjudicated egress under policy routing, ECMP, or concurrent route changes.
+
+A binding-plan exclusion is necessary. It is not a re-entry forwarding contract.
+
+### C. Shadow ACCEPT-always plus stamped phase is implementable—but not as an unconditional guarantee
+
+An immutable phase token is straightforward for packets already received by userspace. The unresolved questions are **where phase is sampled and what the flip means**.
+
+A packet waiting in the kernel queue has no userspace phase stamp. Sampling on receive is implementable, but differs from sampling at diversion.
+
+Allowing old shadow work to complete after the flip means:
+
+1. Enforcement activation is not immediately a strict enforcement boundary.
+2. Invalidating shadow sessions once at the flip is insufficient: old work can create sessions afterward.
+3. Generation cancellation says DROP; shadow says unconditional ACCEPT. Precedence is unspecified.
+
+Choose drain-before-activation or cancel-before-activation, or explicitly expose a transitional state with epoch-restricted session publication. Shadow sessions should also not silently become active forwarding/NAT state.
+
+T14’s “never forward unadjudicated” cannot be treated as equivalent to enforcement in ACCEPT-always shadow. Define the intended observation and failure guarantees separately.
+
+### D. Queue-instance generation binding is possible; the current text moves part of the stamping problem
+
+A genuinely distinct live queue per epoch identifies packets already enqueued to that queue. That is a meaningful improvement.
+
+But “new queue” needs concrete semantics:
+
+- Queue-number allocation and reuse quarantine.
+- Atomic rule replacement ordering.
+- Old listener lifetime and queue destruction.
+- Outstanding userspace commands and verdict identifiers.
+- Classification of packets that entered the network stack before rotation but reach the hook afterward.
+- Coordination with policy/RG snapshot publication.
+
+A queue identifies the epoch selected at the diversion boundary—not inherently the packet’s earlier ingress epoch.
+
+Old userspace verdict work must never address a replacement queue through a recycled identifier. Queue-instance binding is a valid design technique, not a substitute for this lifecycle protocol.
+
+### E. T22 thresholds are executable numbers, not justified acceptance criteria
+
+There is no derivation for **80%** or **250 µs**. Re-measuring the baseline establishes a denominator; it does not ratify an acceptable regression.
+
+Missing definitions include:
+
+- Packet-size distribution, tunnel count, flows, bidirectional load.
+- ACCEPT/REINJECT mix, NAT, fragments, and host-bound traffic.
+- Offered load and permitted loss.
+- Whether throughput is useful delivered traffic rather than processed/dropped traffic.
+- Latency measurement method, load point, and handling of dropped packets.
+- Repeated-run variability and non-tunnel interference limits.
+
+The 100 µs flush cap does not bound worker backlog, ordered verdict waiting, scheduler delay, or reassembly. The 250 µs claim needs those qualifications.
+
+**New factual error:** mainline NFQUEUE has batch-verdict support. Its cumulative verdict semantics are not arbitrary mixed per-packet disposition, but “no mainline batched-verdict NFQUEUE API” is false. Price the chosen API shape; do not justify it by denying an existing capability.
+
+## 3. Additional new holes
+
+### Blocking: capture-order verdicts conflict with fragment completion
+
+The plan requires all verdicts to issue in capture order, while fragments remain held until completion.
+
+An incomplete early datagram therefore blocks later unrelated completed traffic. With bounded in-flight capacity, later fragments needed for completion may themselves be refused. This creates head-of-line blocking and potentially prevents progress until expiry.
+
+Specify an out-of-order verdict policy and bounded fragment ownership separate from ordinary batch slots. Per-tunnel queues do not solve this within a tunnel.
+
+### Blocking: whole-batch dispatch contradicts flow affinity
+
+An ordinary capture batch contains multiple flows with potentially different worker owners. “Batch wholly on one worker” and “reuse physical-path dispatch on the flow key” cannot both apply without constructing owner-homogeneous batches.
+
+Define partitioning, per-owner flush timing, reverse-flow resolution, and fragment-to-session ownership transfer.
+
+### Blocking: fragment semantics still permit inspection/forwarding disagreement
+
+“First-seen bytes win” plus dropping later overlapping fragments can leave holes in the forwarded fragment set. Forwarding overlaps instead risks downstream reconstruction differing from worker inspection.
+
+IPv6 overlap handling cannot be deferred as an implementation detail while claiming an approved cross-family contract. Specify whole-datagram rejection or another coherent, protocol-correct disposition.
+
+Also validate hook placement against actual kernel defragmentation: an INPUT/FORWARD queue cannot simply assume it sees original fragments when earlier defragmentation is active.
+
+### Major: resource promises remain mutually unpriced
+
+At 1,024 datagrams × 64 KB, reassembly alone permits roughly **64 MiB per tunnel**, before retained original fragments, queue objects, and slabs. Aggregate memory and thread bounds are absent; the “stated tunnel max” is never stated.
+
+The 2-second fragment hold also needs reconciliation with queue depth, overload recovery, and T22 latency accounting.
+
+## Final assessment
+
+**NEEDS-MAJOR.** Retain NFQUEUE as a research candidate, but do not approve implementation against these invariants yet.
+
+Required revisions are architectural: disposition-specific commit points, an executable queue/phase lifecycle, a complete TUN forwarding contract, and compatible fragment/worker scheduling. More named tests cannot repair contradictory expected behavior.

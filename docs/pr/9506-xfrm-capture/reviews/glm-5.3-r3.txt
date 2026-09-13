@@ -1,0 +1,62 @@
+# Hostile plan review — ROUND 3 (final) — docs/pr/9506-xfrm-capture/plan.md (r3)
+
+## (1) Round-2 findings N1–N7 — disposition
+
+| # | Disposition | Reason |
+|---|---|---|
+| N1 | **FIXED** (one sub-item escaped — see H3) | Branch chosen: unified three-way contract; TUN-write row in G1; NAT semantics = REINJECT with uniform IP-header mutation; but the skb-metadata half-question (fwmark survival) still unstated. |
+| N2 | **FIXED** (one cell unspecified — see H2) | Shadow failure per phase stated (incl. the NFQUEUE default-drop fact) + T14 per-phase; flip semantics + session invalidation + T16 flip-ordering test all present — but the phase/failure interaction table has a hole. |
+| N3 | **FIXED** | B-invariance of the recvmsg/sendmsg pair stated in §2; G2 kill phrasing rewritten ("no B saves it"); Q1 aligned. |
+| N4 | **FIXED** | G2 prices chain-presence overhead on non-tunnel forwarded traffic. |
+| N5 | **FIXED** | Per-tunnel queues chosen with stated tradeoff, thread bound, over-max ⇒ tunnel down + counted, per-queue-depth counter and test. |
+| N6 | **FIXED** | Generation bound to queue instances; verdict-issue linearization; physical fences named (quiesce-before-issue / arm-down); Q3 reduced to primitive selection, explicitly non-blocking. |
+| N7 | **FIXED** | Checked §4.1's order map against actual section numbers, §6.12→T18, §4.2's T-references, §4.4→§6.9: no drift found. |
+
+## (2) Attacking what is NEW in r3
+
+### A. The three-way verdict contract under crash — is exactly-one-wire real?
+
+**Yes, and I tried to break it from both orderings.** Write-then-verdict is the correct order, provably: under write-then-DROP, a crash after the TUN write yields mutant-on-wire + original-held→kernel-dropped = the permit outcome completes, no duplicate ever (the original cannot leave until the DROP verdict processes, and that verdict is only sent after the write). Under the inverse order (verdict-then-write), the same crash window yields *neither* wire — a permitted packet silently vanishes. r3 chose the crash-consistent order. Verdict-issue *failure* (syscall error) after a successful write degrades the same way: permit completes, original dies on timeout. ACCEPT and DROP are one-wire by construction (held original is the only copy in existence). The claim survives.
+
+Two edges worth naming, neither fatal:
+- **Same-flow cross-wire reordering.** A single flow is uniformly ACCEPT or uniformly REINJECT *except* at a class-transition boundary (route/FIB divergence begins mid-flow): packets before the boundary exit via NFQUEUE release, after via TUN — two kernel ingress points, reorder possible on one flow. Edge case; unstated (fold into T2/T3). Not architecture.
+- **The "queue timeout/release" the crash story leans on has no stated value** and no owner. Q6 sizes queue *depth*; nothing sizes the *timeout*. One knob, one line.
+
+### B. The two DROP-and-count limitations — acceptable or scope holes?
+
+**Acceptable, and specifically because they fail toward security.** Orphan non-first fragments of a mutation-requiring datagram *cannot be verified* — permitting them would re-open fragment-smuggling evasion through the very adjudication bridge that exists to close it; DROP-and-count is the only defensible answer, §6.8's datagram-key reassembly (first-wins, overlaps dropped, non-first never permits alone) blocks the ride-along attack, and the limitation is counted and listed in §9. Mutated host-bound: DROP/ACCEPT-only at the input hook is real (a TUN write to a local destination re-enters host-inbound policy on a second interface — a different wrong), and dropping is fail-closed, counted, §9-listed. Both are *documented availability regressions vs the disclosed-bypass status quo*, knowingly accepted — that is the honest shape of a residual. One nit: no test row pins the two limitation *counters* themselves (T5/T6 cover behavior, not the counter). Trivial.
+
+### C. Shadow-as-ACCEPT-always — coherent?
+
+**Coherent at the verdict level.** ACCEPT is a no-op relative to status quo (the packet forwards exactly as today), exactly-once holds by construction (one wire: kernel forward of the held original; TUN machinery idle), the availability load-bearing-ness of shadow is now stated and T14-tested, and REINJECT-class flows getting unmutated ACCEPT in shadow is precisely the divergence signal. The plan no longer pretends shadow is observation-only.
+
+**But there is one unspecified cell that makes "every verdict issued is unconditional ACCEPT" not quite true:** §4.4's worker-side failure rules are written phase-independently — checksum failure ⇒ drop-and-count, GRO super-frames refused-and-counted. In shadow, those are *enforcement* (drops of traffic that forwarded yesterday), contradicting the ACCEPT-always sentence. Which failures drop in shadow vs. defer to ACCEPT-unknown? T14-per-phase cannot be authored until this one-cell table exists. (See H2.)
+
+### D. Phase-flip — specified enough to implement?
+
+**Property level yes; mechanism level no — §4.3 and §4.6 contradict at the field level.** §4.6: "Phase is part of the stamped context: a batch captured in shadow completes under shadow semantics even if the flip lands mid-batch." §4.3: batch rows carry exactly (slot, len, tunnel key, flow key, **queue-generation**) — no phase. Reconciling them forces an unstated fork: (i) phase is a separate epoch field added to the tuple (then say so); (ii) phase ⇒ generation, i.e. the flip rotates queue instances — but §4.2's only rotation is drop-pending, which would kill the in-flight batch §4.6 promises to complete, so this requires a *second* rotation mode (drain-then-swap) that the plan never defines; (iii) "stamped context" is a larger structure than the §4.3 tuple — then §4.3's exhaustive-looking list is wrong. Session invalidation at flip is fine (invalidation forces re-adjudication under enforcing semantics — implementable, T16). This is the strongest new finding: one paragraph, but until it lands, T16 and §4.6's mid-batch claim are not implementable verbatim.
+
+### E. Instance-bound generations + verdict-issue linearization — a real boundary? Is the strike honest?
+
+**Real, and the strike is the most honest sentence in the plan.** Binding generation to the queue instance eliminates the impossible task (retrospectively stamping kernel-buffered packets) — packets carry their queue's generation by construction. Linearization at verdict issue is a genuine authorization atomicity point: pre-issue ⇒ DROP-and-count (never authorized); post-ACCEPT-issue ⇒ authorized under a generation live at issue, kernel owns it — a bounded, named TOCTOU window replacing r2's fiction of recalling sent verdicts. Striking old-T17's "post-verdict pre-transmit cancellation" is honest because no such enforcement point exists in the kernel; the plan says so instead of pretending. The fences (quiesce-before-issue for orderly, arm-down for abrupt) are physical. One dependence left implicit, not hidden: the scheme's soundness under a *live-but-partitioned* old owner (not dead, not orderly-demoted) rests entirely on pre-existing RG ownership fencing (§6.7/R10) — the generation scheme correctly does not claim to solve split-brain, but the dependency deserves its half-sentence.
+
+### F. T22 (80%, 250 µs) — bottom-up or arbitrary?
+
+**Top-down targets with a front-loaded kill gate — not bottom-up, and the plan doesn't pretend otherwise ("gate-ratified... confirms or kills").** Attacks, and what survives:
+
+- **80% is not derived.** No per-stage rate inequality is tabulated. Correctly analyzed, the floor is about stage saturation, not serialized latency addition: the capture thread must sustain recvmsg+sendmsg at ≥ line rate (~358 Kpps at the #5275 reciprocal; ~1–2 µs/packet pair ⇒ ~500–1000 Kpps single-thread capacity — plausible but unproven), and the worker stage likewise. My own first-pass arithmetic ("80% allows only 0.7 µs/packet added") was wrong and I note it because a reviewer applying it would wrongly call the floor self-contradictory; it isn't, but the plan *should* state the stage-rate form, since raw "80%" conflates latency and rate and invites exactly that misreading.
+- **250 µs has unargued slack.** Its own named components (100 µs flush cap + verdict pair ~2–4 µs + one TUN write ~1–5 µs) sum to ~110 µs; the 2.3× headroom to 250 is presumably p99-tail/scheduling, but that multiplier is never argued. Acceptable as a ratified gate; arbitrary as a derivation.
+- The saving grace is structural: both numbers kill the plan rather than get renegotiated, and G2 runs before implementation. Wrong numbers are self-defeating, not self-deceiving. That is the correct epistemic posture for a plan already burned once on budget fraud — but call it what it is: hypothesis, not justification.
+
+## (3) NEW holes
+
+- **H1 (moderate — top required fix): phase is not in the §4.3 batch tuple, and no rotation mode reconciles §4.6's mid-batch completion with §4.2's drop-pending rotation.** One paragraph: add a phase epoch to the tuple, or define drain-then-swap rotation for flips. Blocks verbatim implementation of T16/§4.6.
+- **H2 (moderate): the shadow failure table has an unspecified cell.** §4.4's drop-and-count rules are phase-independent; §4.6 says shadow issues unconditional ACCEPT. State which worker-side failures (checksum-fail, unparseable, GRO-refused) drop in shadow vs. degrade to ACCEPT-with-divergence-count, and pin it in T14.
+- **H3 (minor): REINJECT metadata/conntrack residuals.** A TUN write carries no skb metadata (fwmark; DSCP survives in-band), and kernel conntrack sees re-injected frames as fresh flows on a new interface — double-NAT or policy mismatch on the post-TUN path is possible. T2's wire-verified mutation would surface it empirically, but the plan should name it (this is the un-answered half of N1).
+- **H4 (minor): same-flow cross-wire reordering at a verdict-class transition** (ACCEPT→REINJECT mid-flow on FIB divergence). One line + a T2/T3 sub-case.
+- **H5 (minor): NFQUEUE queue *timeout* value unowned** — the crash-exactly-once story and the fail-closed default both lean on it; Q6 sizes depth only.
+- **H6 (trivia):** no counter-pinning row for the two DROP-and-count limitations; the input twin's "host destination" match implies a dynamically-maintained local-address set whose lifecycle is unnamed.
+
+## Verdict: **NEEDS-MINOR**
+
+The center of gravity held under every attack I brought: the three-way contract is crash-consistent in the chosen ordering and exactly-one-wire in all three outcomes; both DROP-and-count limitations are security-correct, counted, §9-listed residuals rather than scope holes; shadow-as-ACCEPT-always is coherent; generations-with-linearization is a real boundary and striking post-release cancellation is honest engineering, not evasion; T22 is arbitrary-but-gated with the right failure polarity. N1–N7 are all genuinely fixed. What remains is two one-paragraph spec cells (H1 phase mechanism, H2 shadow failure table) and four line-items — none re-architects transport, handoff, or closure, and none is PLAN-KILL-adjacent. By the same standard I applied in r2 — a finding is pre-READY when the plan's own tests cannot be authored without it — H1 and H2 are required; H3–H6 are strongly recommended. If H1 and H2 land as sentences and H3 gets its line, this plan needs no round 4: I would hold PLAN-READY on the amended text without re-review.

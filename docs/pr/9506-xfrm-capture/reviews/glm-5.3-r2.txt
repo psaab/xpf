@@ -1,0 +1,81 @@
+# Hostile plan review — ROUND 2 — docs/pr/9506-xfrm-capture/plan.md (r2)
+
+## Verdict: **NEEDS-MINOR**
+
+r2 is a genuine convergence, not a paint job: the denial mechanism is named, authoritative, and reconciled with the refuted design; the budget fraud of r1 is gone; 19 of my 21 findings are fully absorbed. What remains is one real underspecification on the *permit* half (which the plan's own tests cannot be defined until it is resolved), a cluster of small spec/test gaps around phase transitions, and two pricing rows missing from the gate. None requires re-architecture; all are one-paragraph-plus-row fixes. Findings N1–N7 below are the required-before-READY list. This is not softness — I attacked exactly what r2 asks to be attacked, and the reconciliation holds.
+
+---
+
+## (1) Round-1 findings F1–F21 — disposition
+
+| # | Disposition | Reason |
+|---|---|---|
+| F1 | **FIXED** | Budget redefined as incremental with per-thread attribution; 2,797 ns demoted to scale-reference-only, never spendable; binding = worse thread, in G1. |
+| F2 | **FIXED** | Batched-send and cross-core payload-read rows added to G1 as **unmeasured**; `6324/B` struck as pricing; low-rate singles folded into measured occupancy distribution. |
+| F3 | **FIXED** | B=3 struck as dead; copy double-count removed ("conservative error, now removed"); MB/MiB corrected. |
+| F4 | **FIXED** | Same-thread rejection now labeled a model and gated symmetrically — worker-side starvation gets the same G1 fairness row, with explicit reopen condition. |
+| F5 | **FIXED** | Closure mechanism named (scoped NFQUEUE divert); §4.7 rewritten to prohibit the *unconditional policy-DROP chain*, not the divert; checkable scoping statement + T12 scope pin + Q7 drift guard. (Attacked below; survives.) |
+| F6 | **FIXED** | Preference order inverted on the real authority ground — NFQUEUE primary, AF_PACKET demoted to never-graduating shadow tap. |
+| F7 | **PARTIALLY-FIXED** | Shadow defined as adjudicate-and-count with suppression, but the *permit-egress* mechanism it suppresses toward is now ambiguous (N1), and shadow-phase failure semantics are undefined (N2). |
+| F8 | **FIXED** | §6.14 batches-per-poll-cycle bound + G1 fairness row. |
+| F9 | **FIXED** | §6.8 GRO super-frames refused-and-counted, jumbo slab sizing, re-entry TUN MTU fail-closed; T20. |
+| F10 | **FIXED** | §6.12 ownership-union keying, never name shape; T18 — but §6.12 cites "T20" for the unowned-`st5` test, which is T18 (trivia, N7). |
+| F11 | **PARTIALLY-FIXED** | Disposition stated and tested (drain/detach, close ⇒ pending dropped); but the *primitive* is deferred to Q3 and §6.5 claims demotion "fences kernel-in-flight verdicts" — a verdict already sent to the kernel cannot be recalled; the only physical fences are quiesce-before-issue or demotion-time arm-down. One feasibility sentence missing (N6). |
+| F12 | **FIXED** | §4.5/§6.13: re-entry TUN excluded from snapshot, binding plan, RSS/AF_XDP allowlist, refused-netdev index, shim ingress map; invariant + test. |
+| F13 | **FIXED** | Cross-batch fragment state bounded by expiry + hard cap; rotation drops pending fragment state. |
+| F14 | **PARTIALLY-FIXED** | T11/T13/T15 cover exactly-once and phase visibility per phase — but there is no shadow→enforcing *transition* test for in-flight batches and shadow-created sessions (N2). |
+| F15 | **FIXED** | T18. |
+| F16 | **FIXED** | T20. |
+| F17 | **FIXED** | T22 e2e throughput floor + p99 latency; T19 flush-timer latency histogram. |
+| F18 | **FIXED** | Correctly re-scoped given the demotion: enforcement suite under NFQUEUE; tap runs a stated shadow-only subset, never graded as enforcement. |
+| F19 | **FIXED** | T21 deny-side parity; T6 fragments incl. split-across-batches. |
+| F20 | **FIXED** | Q1 rewritten to the authority-correct form (hold + batched adjudication + verdict issue). |
+| F21 | **FIXED** | Adjudication cost absorbed into G1 as a committed row; #7480 residual explicitly out in §9 with value-claim exclusion. |
+
+---
+
+## (2) Attacking what is NEW in r2
+
+### A. The scoped divert vs. the transit_barrier prohibition — does the reconciliation hold?
+
+**It holds, and I tried three ways to break it.**
+
+1. *Semantic smuggle.* The refuted object (`transit_barrier.go:25-33`) is a kernel-side unconditional policy-DROP chain. The divert rule carries no verdict of its own; verdicts come from the adjudicator. The distinction is real, not cosmetic: the refuted design closed the path *by rule*; this design closes it *by hold*, with the verdict deferred to the entity the whole program exists to build. §4.7's restatement ("carries no verdict, drops nothing by rule, matches none of the other two armed paths") is checkable, and Q7 + T12 pin the exact rule set against drift.
+2. *Armed-path collision.* The two surviving armed paths: SNAT `accept_local` frames enter forward on a different ingress (that is the entire reason accept_local exists); #7409 reinject is an inject path, never `iif == stN`. Both are assertions about someone else's code, and the plan correctly pins them with [P] regression tests *with divert live* (T12) rather than trusting the assertion. Outbound `oif == stN` is untouched because the match is on `iif`. The first named armed path — xfrm plaintext forward — is not broken by the divert, it is *consumed*: this is the honest way to say it, and r2 says it.
+3. *Indirect costs.* One real gap: while armed there is today **no forward-hook chain at all**; the divert installs one. A base chain whose single rule matches nothing still costs every non-tunnel forwarded packet a chain traversal. Near-zero, but not zero, and G2 prices only per-*diverted*-packet cost, not the chain-presence overhead on unrelated forwarded traffic (N4).
+
+### B. Per-packet verdict + batched adjudication — coherent, or does the verdict loop eat the amortization?
+
+**Coherent, but the plan's framing lets a reader believe B buys more than it does.** The two halves of the kernel cost have different B-dependence:
+
+- The **wake** (capture→worker handoff) is per-batch — B amortizes it. ✓
+- The **kernel socket half** — one `recvmsg` per packet drained, one verdict `sendmsg` per packet issued — is **B-invariant**. There is no mainline batched-verdict API for NFQUEUE. The plan admits "the verdict-issue loop is per packet on the capture thread" and G2 prices it, but never names it as syscall cost nor states its B-invariance — and the kill criterion "kill if B=32 still exceeds the e2e floor" conflates a B-amortizable term with a B-invariant one. If the syscall pair (~1–2 µs/packet plausibly) alone busts the floor, **no B saves it**, and the honest phrasing is that the gate is really testing whether NFQUEUE's per-packet API cost is affordable at all — which Q1's "third authoritative transport or B2 dead" does anticipate, so this is a precision defect, not a design hole (N3).
+
+The bigger new problem is adjacent: **G1/G2 price no re-entry TUN write row.** See N1 — under one coherent reading of §4.5, *every permitted packet* pays a TUN write (the ~1 µs term F1 warned about in r1), and that row exists in neither gate. The gates can still catch it only if the row exists.
+
+### C. Is shadow-mode exactly-once real?
+
+**Yes — by construction, and I verified the construction.** In shadow the verdict actually issued must be unconditional ACCEPT (a DROP would be enforcement), the kernel forwards the original exactly as today, and no re-entry occurs at all — suppression is trivial because the re-entry machinery is idle. Exactly-once holds. But two things follow that the plan doesn't say:
+
+- **Shadow is already load-bearing for availability.** The divert holds packets in every phase; reader death or queue-full in *shadow* drops tunnel traffic that previously forwarded fine. An operator deploying shadow "just to observe" has put a userspace component in the forwarding path. §4.6's failure semantics read as enforcing-phase semantics; T14 runs "while armed+enforcing." Shadow-phase failure disposition and its test are unstated (N2a). (For the record: NFQUEUE with no bound socket drops by default — fail-closed is real, the default is on the plan's side — but it must be *stated and tested per phase*, not inherited by luck.)
+- **The phase flip is an untested instant.** A batch captured in shadow, verdict issued after the flip to enforcing: enforcement or shadow? Generation stamping is at capture, but is *phase* part of the stamped generation? Not stated. And sessions created by shadow adjudication — do they carry into enforcing or invalidate at flip? T16 invalidates on policy change, not on phase change (N2b).
+
+---
+
+## (3) NEW holes
+
+- **N1 (moderate — top required fix): the permit-egress mechanism is ambiguous, and the plan's own tests are undefined until it is chosen.** §4.5: "after closure the NFQUEUE permit-verdict release is the single egress **and** the re-entry TUN carries only the post-adjudication forward." Two egress mechanisms named, one egress claimed. Reading A: permit = ACCEPT verdict, kernel forwards the held original; then the re-entry TUN is vestigial after closure, and userspace-computed NAT/routing-instance selection (§4.4 adjudicates NAT and the tunnel's routing table; T3's overlapping per-VRF prefixes make table fidelity load-bearing) is *evidenced but never applied to the wire*. Reading B: permit = TUN write of the userspace-held frame + DROP verdict on the original; then "permit-verdict release is the single egress" is false language, and **every permitted packet pays a TUN write that exists in neither G1 nor G2**. T2's "inner-byte parity with the same flow on a physical NIC" is only well-defined under Reading A without NAT. Required: pick the branch in one paragraph; if B (or NAT-required flows under A), add the re-entry-write row to G1/G2; state whether skb metadata (fwmark/dscp) survives, given a TUN write cannot carry it.
+- **N2 (moderate): phase-transition spec/test gaps.** (a) Shadow-phase bring-up/runtime failure disposition undefined and untested (T14 is enforcing-only). (b) Phase-flip ordering for in-flight batches and shadow-created sessions unspecified, untested.
+- **N3 (minor): verdict-loop B-invariance.** State that the recvmsg/sendmsg pair is per-packet and B-invariant; rephrase the G2 kill criterion so it doesn't imply B can rescue a B-invariant term.
+- **N4 (minor): G2 must price the chain-presence overhead on non-tunnel forwarded traffic**, not only per-diverted-packet cost.
+- **N5 (minor): cross-tunnel fairness on a shared queue.** "One queue with tunnel keying" makes one tunnel's flood a head-of-line risk for all tunnels on that capture thread; per-tunnel queues multiply threads. One sentence choosing, one counter/test.
+- **N6 (minor): Q3 feasibility sentence.** A verdict already issued to the kernel cannot be recalled; §6.5's "fences kernel-in-flight verdicts" must name its physical mechanism (quiesce-before-issue window, or demotion-time arm-down which drops downstream). **Q3 itself does not block PLAN-READY**: the required *properties* are fully specified in §6.5 and pinned by T10/T17 regardless of which primitive implements them; Q3 is implementation selection among pinned behaviors, the legitimate kind of open question.
+- **N7 (trivia):** §6.12 cites T20 for the unowned-`st5` test (it is T18); §4.2 cites "T-rank rotation test" (presumably T10); §4.1's renumbering apology ("kept as §4.3 below for stable section references") leaves §4.4 called "§4.4 in r2 numbering" — clean these up; a plan whose §4.7 prohibition is "stated exactly so it stays checkable" should have checkable cross-references.
+
+---
+
+## Why NEEDS-MINOR and not NEEDS-MAJOR / PLAN-KILL
+
+The r1 blocker was that the plan could not say *no* to a packet. r2's NFQUEUE divert says no by construction: deny verdict = the drop, no second copy to suppress, no window of denied-but-forwarded. The reconciliation with §4.7 survives hostile reading; the armed paths are asserted *and* test-pinned; shadow exactly-once is real by construction; the budget is honest down to the unmeasured rows. The permit half is now underspecified where the deny half was underspecified in r1 — but both candidate mechanisms are named, viable, and gated, versus r1's unnamed nothing. N1 is the one finding that must be fixed before the T-suite can even be authored coherently; N2 before shadow can ship; the rest are rows and sentences. No finding here, alone or combined, requires redesign of the chosen transport, handoff, or closure ordering — so NEEDS-MAJOR would be inflating spec-paragraph gaps into architecture gaps, and PLAN-KILL is nowhere in evidence: every residual risk is either spec-completable in a page or empirically killed by G1/G2/T22, which remain front-loaded and honest.
+
+**Required before PLAN-READY:** N1 (branch choice + TUN-write pricing row + NAT-application semantics), N2 (shadow failure disposition + phase-flip test), N3/N4 (pricing-gate precision), N5 (one sentence + counter), N6 (one sentence), N7 (cross-reference cleanup).
