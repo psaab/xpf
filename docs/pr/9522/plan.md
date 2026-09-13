@@ -1,357 +1,306 @@
-# #9522 — Adjudicate-before-delegate on a NoRoute miss via kernel egress-zone lookup (Design A); chunked route transport deferred (Alternative B)
+# #9522 — Adjudicate-before-delegate on a NoRoute miss via reinject-mirror kernel lookup (Design A v3); chunked transport a gated future pointer
 
 ## 1. Status
 
-DRAFT v2 — pending adversarial plan review (round 2). Supersedes v1 (commit `ee9b3d6`).
+DRAFT v3 — pending adversarial plan review (round 3, final). Supersedes v2 (`e2b4724f`).
 
-Round-1 record (raw outputs preserved under `docs/pr/9522/reviews/`):
+Round-2 record (raw outputs preserved under `docs/pr/9522/reviews/`):
 
-- Codex Astra: **PLAN-KILL**, scoped — "kill the proposed live clear-and-refill architecture,
-  not the issue or chunked transport itself." Required reset: stage an immutable replacement
-  off the live view, validate, bind to config context, publish finished FIB + fresh validation
-  pair together; abort leaves the previous complete view intact.
-- GLM: **NEEDS-MAJOR**. Six required revisions (§5a must not proceed as specified; FIB data
-  structure in scope or lower the target; single carrier; protocol version; Go-owned fib bump;
-  re-plan §5b as the primary candidate with input enumeration and measured cost).
+- Codex Astra: **PLAN-KILL**, scoped to Design A as specified — "the replacement architecture
+  still does not establish that the zone authorized is the zone Linux actually forwards into."
+  Four blockers: (1) query uses origin-ingress context while forwarding uses the reinject
+  context; (2) cache key drops security-relevant inputs; (3) TTL ≠ forwarding parity;
+  (4) sentinel fallback is neither universally fail-closed nor availability-preserving; plus
+  attestation incompleteness, the `omitempty`-vs-absence encoding contradiction, sync-lookup
+  budget, and "defer B, do not approve its sketch".
+- GLM: **NEEDS-MAJOR**, with determined fixes for each: rewrite §5a as reinject-mirror
+  (fewer inputs, not more), restore the capped gate as the fallback condition, make §5d
+  enumerable-and-conservative with a named reader, specify multipath/negative-cache/TOCTOU/
+  scan-gate, strip §5f to prerequisites + pointer.
 
-Both reviewers converged on two points this revision accepts outright: (1) v1's clear-at-chunk-0
-live mutation is wrong (availability + invalidation), and (2) the kernel-lookup half must be
-re-planned as the primary candidate because it plausibly closes the filed **security** hole
-without moving 10⁶ routes. V2 does exactly that. V1's Q2 is acknowledged self-contradictory
-("mixed table" vs specified clear — Astra F1/GLM F1 correct; the question described a different
-design than §5a specified). V1's control-socket sharing paragraph is corrected below (session
-sync has a dedicated socket and off-lock serve; the shared contention is the status poll under
-the `ServerState` lock, snapshot/FIB bumps and HA updates), and `controlRoundtripDeadline` is
-henceforth treated as a timeout allowance, never as a service-time measurement.
+V3 accepts every load-bearing point from both reviews. The three MAJORs change the design's
+fidelity target (F-A), its fail direction (F-B) and its attestation surface (F-C); each fix
+makes §5 strictly *simpler* — fewer lookup inputs, one restored fallback condition, one
+hardened reader. V2's `omitempty`-vs-absence contradiction (Astra blocker 6 / GLM F-B) is
+acknowledged as a genuine spec bug and fixed by tri-state encoding with absent ⇒ legacy
+behavior verbatim. V2's "no third outcome" (v2 §5b) is retracted as overreach.
 
 ## 2. Issue framing
 
-Unchanged from v1: above the #8355 derived import cap (64,956 routes), the daemon withholds the
-entire learned import, `LearnedRouteImportCapped` is stamped, `noroute_policy_denial_gated`
-returns `None`, and the NoRoute arm reinjects to `xpf-usp0` for Linux forwarding with no
-zone-policy adjudication. STEP-0 evidence on base `7ef226474` stands (v1 §2; both round-1
-reviewers re-verified the citations independently). Fail-closed-above-cap remains rejected
-(#9054). Acceptance is unchanged: capped miss ≡ uncapped miss; permit traffic passes through an
-explicitly adjudicated path; the uncapped-deny control keeps passing.
+Unchanged: above the #8355 cap the daemon withholds the learned import, the gated early-`None`
+delegates every `NoRoute` frame unadjudicated, and a full Internet table reaches the cap.
+STEP-0 on base `7ef226474` stands (both reviewer generations re-verified it independently).
+Fail-closed-above-cap remains rejected (#9054). The cap stays restated as a documented
+linear-scan bound (`forwarding/fib.rs:428-431`; NoRoute uncacheable).
 
-Reframing the cap (new in v2, forced by GLM F2): the runtime FIB lookup is a per-table linear
-scan (`forwarding/fib.rs:428-431` — `routes.iter().find(...)` over longest-prefix-first vecs),
-and a `NoRoute` verdict is NOT flow-cacheable (`flow_cache_tests.rs:1570-1592`). Every
-delegated permit packet therefore pays a full scan per packet (delegated flows never sessionize,
-so nothing caches them). The ~65k cap is currently an *accidental bound* on that scan. V2 keeps
-a bound on helper-FIB size deliberately — restated honestly as a lookup-performance bound, not
-as a socket-hold accident — while removing the *unadjudicated* half of the capped state. The
-cap stops being the cause of a bypass and starts being a documented scan ceiling.
+Acceptance, restated honestly after F-B (this replaces v2's unconditional form): for the
+**determinate class** — kernel can route AND the rule set is helper-reproducible — a capped
+miss and an uncapped miss produce the SAME adjudicated result, and permit traffic passes
+through an explicitly adjudicated path. For the **indeterminate class** (no kernel route,
+unreproducible rules, resolver failure/overflow) the plan preserves TODAY's posture loudly
+(capped ⇒ counted delegation as on master; uncapped ⇒ sentinel path as on master) — improved
+only by counters and a status signal, not by a verdict change. The uncapped-deny positive
+control keeps passing untouched. What v3 refuses to promise: identical results where the helper
+cannot determine the zone. That refusal is the F-B fix.
 
 ## 3. Honest scope / value framing
 
-Security fix, no throughput win claimed. The win: a full-table box stops transiting
-deny-policy traffic with no decision, without moving 10⁶ routes into a linearly-scanned FIB
-and without a new multi-message control transaction. The cost: a helper-side synchronous
-kernel route query on the NoRoute slow path (bounded by a zone-answer cache + rate limits),
-plus a bounded FIB-scan measurement gate that decides whether any future table-growth work
-(Alternative B) is even admissible.
+Security fix, no throughput win. The win: on a full-table box with ordinary rules, deny-policy
+traffic to learned destinations stops transiting with no decision — without moving 10⁶ routes,
+without a new verb, without FIB mutation. The residual: capped + indeterminate + default-deny
+still delegates (today's posture, now counted and status-signalled). The scan-bound caveat
+(F-G): delegated permit pps is ALREADY scan-bounded on master at cap scale; v3 does not move
+that ceiling and the PR states measured permit throughput rather than asserting it.
 
-*If reviewers conclude the kernel-lookup fidelity enumeration (§5) has a hole that fails open,
-or that the per-miss cost under scan is unbounded in a way the rate limits cannot contain,
-PLAN-KILL is an acceptable verdict. If reviewers conclude Alternative B's fast-path value
-justifies its mechanism despite §5, promoting B and killing A is likewise acceptable — but
-shipping both halves in one PR is not on the table.*
+*If reviewers conclude the reinject-mirror contract (§5a) still has a fidelity hole that fails
+open, or that the indeterminate-class residual is the issue's core rather than its edge,
+PLAN-KILL is an acceptable verdict. KILL-B (deleting §5f entirely) is likewise acceptable.*
 
 ## 4. What's already shipped / partially batched
 
-V1 §4 stands in full (#7480 cells, #8355 cap + counter, #9054 gate + composition cells,
-`update_neighbors` envelope idioms #5864/#6034/#9520/#9684, route-only overlay + `bump_fib`,
-#7409 gap-fill, #7437 coalesced republish, #9654 absence-is-unknown). Additions verified during
-round-1 follow-up (all read at head, not inferred):
+V2 §4 stands in full; the round-2 follow-up verified three more load-bearing facts (read at
+head):
 
-- Publication shape: `Coordinator::publish_runtime_view` clones the full `ForwardingState` and
-  rotates the worker-visible `Arc` (`coordinator/mod.rs:1590-1598`); neighbor pushes already pay
-  this per push (mod.rs:757-768). Any per-chunk live FIB mutation would pay it per chunk —
-  one more reason v1 §5a is dead.
-- Neighbor atomicity: `bulk_replace_neighbors` under a single bulk acquisition — readers see
-  pre- or post-replace, never half (`coordinator/mod.rs:736-748`). The property v1 §5a
-  discarded; Design A needs none of it (no FIB mutation at all).
-- Unknown verb refusal: `handlers/mod.rs:360-363` (`unknown request type` → `ok:false`). Any
-  future verb is loudly refused by old helpers — the safe direction. (Design A adds NO verb.)
-- FIB generation ownership: values come from the BPF shim map (`manager_generation.go:10-23`
-  `readFIBGeneration`); helper self-advance would desync Go stamps and wedge on the `<` fence
-  (`handlers/snapshot.rs:505-534`, #1844). Design A needs NO generation change.
-- Coalescing bounds: debounce 1 s / throttle 3 s / actuate timeout 30 s
-  (`pkg/coalesce/coalesce.go`, `daemon_route_listener.go:actuateLearnedRouteRefresh`). Any
-  multi-second transfer must converge inside the 30 s actuate budget or it retry-loops.
-- Resolver precedent: a single shared `NeighborResolver` thread serves all workers'
-  single-key `RTM_GETNEIGH` misses with a 1 s per-key rate limit inside a 3 s negative TTL
-  (`afxdp/neighbor_resolver.rs`, `neg_neigh.rs`, `mod.rs:1410-1414`). Design A follows this
-  shape where it fits and says explicitly where it does not (§5).
-- Miss-site context (verified in scope, see §5): `meta.routing_table: u32` (XDP-stamped table
-  selector, `afxdp/types/mod.rs:132`), the PBR `route_table_override` and
-  `effective_resolution_target` in the session-miss arm (`poll_descriptor/mod.rs:1771-1798`),
-  `meta.ingress_ifindex`/`ingress_vlan_id`, `meta.dscp`, and the flow's src/dst addrs + ports.
+- **The reinject context is MAIN, provably.** `tests_fragment.rs:826-841` (#7409 second
+  vector): a PBR-steered NoRoute frame is reinjected and "the kernel ... resolves it in the
+  MAIN table and forwards it down the very path the operator steered it away from" — because
+  `BuildPBRRules` deliberately drops unrepresentable terms from the kernel mirror. Any query
+  that reproduces *operator intent* (origin iif, forced PBR table) therefore authorizes a zone
+  the kernel will never forward into. The ONLY coherent fidelity target is the kernel's
+  post-reinject RPDB walk. This single fact kills v2 §5a and dictates v3 §5a.
+- **iif-scoped rules exist in-tree.** Next-table leak rules are scoped to the authoring
+  instance's ingress ifaces (#9420, `pkg/routing/rules.go`); PBR mirrors ride band
+  31000–31999 (`pbrRulePriority`). An origin-iif query matches rules the reinject walk never
+  evaluates — F-A's third data point, confirmed.
+- **The tree's own DSCP-blindness precedent + remedy.** `rule_dscp_kernel_7796_test.go:108-112`:
+  "netlink's own RuleList cannot be used as the reader here: the library has no FRA_DSCP
+  support at all ... it would silently report every rule as having no DSCP" — and the fix
+  uses iproute2 `ip` as an INDEPENDENT reader. V3 names exactly this reader for attestation.
+- **TUN identity + metrics docs.** `DEFAULT_SLOW_PATH_TUN = "xpf-usp0"`
+  (`afxdp/mod.rs:445`); reinject-path metric descriptors live in
+  `pkg/api/metrics_descriptors_binding.go`.
 
-## 5. Concrete design — Design A (primary): real-egress-zone adjudication on the NoRoute slow path
+## 5. Concrete design — Design A v3 (primary and only half in this PR)
 
-No wire change. No new verb. No FIB mutation. No generation change. No protocol bump (see §5e
-for why none is needed). The `LearnedRouteImportCapped` bit keeps its exact current meaning
-("the helper FIB is deliberately incomplete") and its status/telemetry path; it stops being
-the condition for *unadjudicated* delegation because delegation itself becomes adjudicated.
+### 5a. The query: mirror the reinject walk, not the operator's intent (rewrites v2 §5a)
 
-### 5a. The query and its exact inputs
-
-On the NoRoute arm — slow path only, after the existing L3-identity derivation and before the
-`noroute_policy_denial_gated` call site — resolve the kernel's egress for THIS packet and
-adjudicate against the real pair:
+On the NoRoute arm — slow path only, after L3-identity derivation — issue `RTM_GETROUTE` with
+the context the kernel will have MILLISECONDS LATER at reinject:
 
 ```
-inputs (all in scope at the arm today):
-  dst            = adj_flow.dst_ip                      (attacker's destination — the lookup key)
-  src            = adj_flow.src_ip                      (source-specific policy rules)
-  table          = route_table_override                 (PBR `then routing-instance`, when set)
-                     else table derived from meta.routing_table + ingress routing domain
-  iif            = logical ingress ifindex              (resolve_ingress_logical_ifindex — MUST be
-                     passed explicitly: post-reinject the kernel sees xpf-usp0, so an iif-
-                     matching rule evaluated at reinject time would decide differently)
-  tos            = meta.dscp-derived TOS                 (ip-rule tos selector)
-  proto/ports    = meta.protocol + flow ports where present (port-bearing rules, where the
-                     kernel consults them; flowless uses the existing closed-ports rule)
+dst    = adj_flow.dst_ip            (the lookup key)
+src    = adj_flow.src_ip            (source-specific rules; forwarded => same src both sides)
+iif    = xpf-usp0 ifindex           (DEFAULT_SLOW_PATH_TUN; the device the reinject arrives on.
+                                     NOT the origin ingress — v2's inversion, fixed.)
+mark   = 0                          (a TUN write carries no mark on either side)
+uid    = INVALID (overflowuid)      (forwarded packets carry no socket on either side, so
+                                     uidrange rules are inert for this path on BOTH sides —
+                                     no divergence to attest, stated not assumed)
+tos    = packet TOS                 (FRA_DSCP-relevant rules; input, not attested)
+proto/ports = meta.protocol + flow ports where present (flowless: closed-ports rule verbatim)
+table  = NONE FORCED                (ordinary RPDB traversal from the above context — v2's
+                                     mode contradiction fixed by deleting the second mode.
+                                     route_table_override and meta.routing_table are NOT
+                                     lookup inputs; the #7409 vector proves the kernel
+                                     ignores them at reinject.)
 ```
 
-The lookup is `RTM_GETROUTE` with the above selectors — i.e. the same decision the kernel will
-make milliseconds later at reinject, computed BEFORE the policy verdict instead of after the
-forward. On success it yields the egress ifindex → `egress_zone_id` via the existing
-`ifindex_to_zone_id` map → evaluate with the real `(from_zone, to_zone)` pair using the
-existing flow-backed / flowless port rules verbatim. Permit → delegate (reinject exactly as
-today, with the verdict now explicit); non-Permit → downgrade to `PolicyDenied` through the
-existing #1913 chokepoint (single-recycle and trailing-admit invariants untouched).
+The answer is the egress ifindex the kernel WILL select → existing `ifindex_to_zone_id` map →
+evaluate the real pair with the flow-backed/flowless port rules verbatim. Permit → delegate
+(reinject exactly as today, verdict now explicit); non-Permit → `PolicyDenied` via the existing
+chokepoint. Unmapped egress ifindex (0) ⇒ indeterminate ⇒ §5b fallback.
 
-### 5b. Every indeterminate case falls back to today's #7480 sentinel path — never to delegation
+Why this is exact rather than approximate: same rule engine, same packet context, same
+multipath hash inputs (the helper passes the identical tuple, so flowi-hash selection picks
+the SAME member the reinject walk will pick — F-D resolved to adjudicate-selected-member; the
+FIB_MATCH full-member enumeration is deleted as unnecessary). The §9 suite pins it with the
+PBR-disagreement cell: PBR table says zone X, MAIN says zone Y ⇒ adjudicates Y (the #7409
+vector AS the contract), plus a hash-parity cell (same tuple twice ⇒ same member; documents
+the iif-participation check — mirror mode matches regardless since iif is equal both sides).
 
-The lookup is allowed to answer "I don't know", and every such answer takes the EXACT current
-uncapped path (`noroute_policy_denial` against the #3110 unzoned sentinel → default action).
-Indeterminate cases (enumerated; each gets a named counter):
+Remaining divergence sources, stated (not hand-waved): (i) TOCTOU between query and reinject
+(§5c); (ii) selectors outside the list — each is either proven-inert (uidrange, oif-rules
+which never match a forward lookup) or attested (§5d). Any NEW selector family discovered in
+review is attestation-or-KILL per Q1.
 
-- kernel reports no route (genuinely unroutable — the common uncapped case, behavior identical);
-- multipath answers whose nexthops resolve to DIFFERENT zones (zone-ambiguous; same-zone ECMP
-  adjudicates normally);
-- non-unicast results (multicast/broadcast/local-table oddities);
-- snapshot-attested complex policy routing (§5d) that the helper cannot reproduce;
-- resolver thread down, rate-limit overflow, or lookup timeout (fail-closed to sentinel path).
+### 5b. Fallback: the capped gate survives as the fallback condition (F-B fix; retracts "no third outcome")
 
-There is no third outcome. "Delegate without a verdict" ceases to exist in the tree: the gated
-early-`None` is deleted and the type-level shape becomes
-`resolve_real_egress(...) -> Option<ifindex>` feeding the unchanged evaluator. The rewritten
-#9054 cell asserts capped-miss ≡ uncapped-miss by construction (same function, same fallback).
+```
+lookup success      (either capped state)  → real-zone adjudication (§5a)
+indeterminate + capped                     → TODAY's gated delegation (counted, status-visible)
+indeterminate + uncapped                   → TODAY's sentinel path (byte-identical to master)
+```
 
-### 5c. Cost containment: zone-answer cache + rate limits, policy re-evaluated per packet
+Indeterminate = kernel-no-route, attested-complex (§5d), resolver down/overflow/timeout,
+unmapped egress, (deleted: cross-zone-multipath — F-D makes it determinate). "Delegate without
+a verdict" therefore survives ONLY as the bounded capped fallback — strictly no worse than
+master in every pairing, and the old-sender pairing (every deployment at rollout) is
+byte-identical to today with NO blackhole and NO claimed improvement (rewrites v2 §5e row 1
+honestly). The `noroute_policy_denial_gated` early-`None` is KEPT for exactly this fallback
+and loses its "temporary" framing: it is the named, counted, status-signalled capped-fallback
+condition. The rewritten #9054 cell asserts the determinate equivalence AND the fallback
+preservation (capped+complex+deny ⇒ delegates as on master — pins the residual so no future
+change silently "fixes" it into a blackhole).
 
-A synchronous worker-side `GETROUTE` per NoRoute packet is unbounded under scan (distinct dsts
-never hit anything, and NoRoute is uncacheable at the flow layer). Containment, three layers:
+Default-permit/indeterminate is now specified, not elided (Astra blocker 4): indeterminate
+evaluates the default action — permit ⇒ delegates (real-pair denials NOT enforced in this
+class; the counter + status signal say so), deny ⇒ drops. The test matrix gains the
+default-permit/explicit-pair-deny indeterminate cell asserting delegation-with-signal (the
+documented residual, pinned against silent drift in EITHER direction).
 
-1. **Zone-answer cache (new, small, bounded):** key `(table-selector, dst, src-class, tos)` →
-   `(egress_ifindex, zone, expires)`. Caches ONLY the zone answer, NEVER the policy verdict:
-   policy is re-evaluated per packet against fresh policy tables (cheap — policy tables are
-   small; correctness does not depend on cache coherence for config changes). TTL short
-   (1–3 s, the `neg_neigh` 3 s precedent); hard entry cap with expired-first/oldest reclaim
-   (the #6905 discipline); cleared on every FIB publish (fib_generation change — free coherence
-   with the existing pair, no new epoch).
-2. **Staleness bound, disclosed:** a cached zone may lag a route change by at most the TTL.
-   This is the same TOCTOU class as kernel forwarding itself (lookup-to-reinject race is
-   µs–ms; a change landing inside it forwards one packet under the just-withdrawn route with
-   a verdict computed against the real zone at decision time — not a bypass). The TTL is the
-   bound; the plan does not claim zero.
-3. **Rate limit with loud fail-closed overflow:** per-worker in-flight cap + global per-second
-   ceiling on kernel queries; overflow takes the sentinel path and bumps a dedicated counter
-   (indistinguishable from "unroutable" in disposition, distinguishable in telemetry — the
-   #9172-adjacent signal without claiming #9172).
+### 5c. Cost containment: full-key zone cache + negative entries + bounded sync query
 
-Sync-vs-thread (decision, reviewers invited to overturn): the query runs SYNCHRONOUSLY in the
-worker slow path, not via the #1769 shared-thread shape. Rationale: async would leave THIS
-packet without a verdict — forcing a first-packet sentinel verdict (a miniature of the rejected
-posture hole for every new flow) or a buffer-and-revisit path with its own ordering hazards.
-Slow-path-only keeps it off the hot forward path; the cache keeps the steady-state cost at one
-hash lookup for repeated dsts. Measured RTT gates this choice (§9): if p99 synchronous RTT
-exceeds the slow-path budget, the design falls back to the thread shape with an explicit
-first-packet rule, as a documented revision — not a silent optimization.
+- **Cache key = (dst, src, tos, proto, ports) exact.** No `src-class` (term deleted), no
+  dropped inputs: iif/mark are fixed constants (excluded by construction, documented), domain
+  is excluded because the mirror walk is domain-independent (RPDB from TUN — stated with the
+  §9 domain-independence cell). Routing-distinct packets cannot share an entry by construction.
+- **Negative entries** ("kernel has no route either", F-E): same TTL/cap/clear discipline, so
+  the distinct-dst unroutable scan costs one cached lookup per key, mirroring `neg_neigh`.
+- **Sync query, bounded:** per-worker netlink socket, hard recv deadline (numeric budget in
+  §9, not "p99"), per-worker in-flight cap (1: a worker never pipelines queries), global
+  per-second ceiling; overflow ⇒ indeterminate ⇒ §5b fallback + dedicated counter. Slow-path
+  only; the hot forward path is untouched.
+- **Verdicts never cached** (GLM Q3 answered with the stronger argument: the arm ALREADY
+  evaluates policy per packet on master — `poll_descriptor/mod.rs:5236+` — so verdict-freshness
+  costs nothing versus master, while a verdict cache would invent a third generation-coupled
+  cache for zero gain). Zone answers: TTL ≤ 3 s, hard entry cap with expired-first/oldest
+  reclaim (#6905 discipline), cleared on every FIB publish.
+- **TOCTOU, honestly split** (F-F rewrite): withdrawal-inside-TTL ⇒ kernel drops at reinject
+  (availability blip ≤ TTL, NOT a bypass); change-inside-TTL to a deny-pair egress ⇒ bounded
+  transient residual ≤ TTL — same order as the standing inter-push residual the arm already
+  documents (1 s/3 s coalescing), strictly narrower than today's unbounded capped window.
+  Rule-set changes arrive via commit (new snapshot ⇒ new attestation ⇒ FIB publish ⇒ cache
+  clear); out-of-band kernel rule edits are outside the supported topology (stated).
 
-### 5d. Capability-scoped activation (the anti-F4 device)
+### 5d. Attestation: iproute2 readback as the presence reader (F-C fix)
 
-Go already enumerates the kernel ip-rule set for leak-route synthesis (#3772 M9 surface). At
-snapshot build it additionally attests one additive bool,
-`complex_policy_routing: true`, when ANY rule uses a selector the helper cannot reproduce
-(mark-based rules — meta carries no mark — `l3mdev` nuances beyond the table selector, or any
-future selector outside §5a's list). While set, the arm uses the sentinel path (today's uncapped
-behavior) and counts it. This bounds the fidelity claim positively: Design A activates exactly
-where its inputs are complete, and says which selector killed it everywhere else. The attested
-set is conservative by construction (unknown selector ⇒ attest complex).
+Go's attestation is computed from an **iproute2 `ip rule list` readback** (the #7796 remedy:
+independent reader, not `netlink.RuleList`, which is proven blind to `FRA_DSCP`) — or,
+equivalently, a raw `FRA_*` attribute-presence parse. The plan mandates ONE of the two (Go
+names it in the commit) under the conservative rule: any rule carrying a selector outside
+§5a's list (mark/mask, uidrange, v6 flowlabel, tun_id, l3mdev forms beyond TUN-consistent,
+inversion/goto/suppression constructs the reader cannot reduce to canonical xpf-emitted
+shapes) ⇒ `complex=true`. Encoding (contradiction fixed): `ComplexPolicyRouting *bool`
+tri-state — **absent (old sender) ⇒ legacy behavior verbatim** (no lookup attempted; capped
+gate as on master in both states), `Some(true)` ⇒ sentinel/capped-gate fallback,
+`Some(false)` ⇒ lookup eligible. Old helper ignores the field ⇒ today's behavior. No pair
+enters a NEW unsafe state in either mixed direction; no version change (additive field,
+absent = legacy — consistent with the v10 two-question test).
 
-### 5e. Version-skew matrix (no bump required — demonstrated, not asserted)
+### 5e. Skew matrix (rewritten; the no-bump claim now holds)
 
-- New helper + old sender, above cap: sender withholds as today; helper's lookup succeeds from
-  the kernel and adjudicates with the real zone. Permit delegates, deny drops. NO blackhole —
-  the blackhole required adjudication against the unzoned sentinel, which is now only the
-  fallback. Strictly better than today in this pairing.
-- New helper + old sender, below cap / uncapped: identical to today plus lookup refinement for
-  genuine misses (lookup fails → sentinel path, byte-identical verdicts).
-- Old helper + new sender: impossible — Design A sends nothing new. There is no new sender.
-  This is the structural reason no `update_routes`-style capability negotiation exists: nothing
-  to negotiate.
-- Hence no `CONFIG_SNAPSHOT_PROTOCOL_VERSION` change: v10's refusal semantics are untouched,
-  and the tree's version doctrine (no semantic redefinition under a shared version) is
-  satisfied because the *meaning* of the capped bit ("FIB deliberately incomplete") does not
-  change — only the disposition of a frame it describes, which is helper-local behavior.
+- New helper + old sender (all rollout pairs): absent attestation ⇒ legacy behavior,
+  byte-identical to today. No blackhole (F-B's helper-first direction closed by keeping the
+  gate), no claimed improvement.
+- New helper + new sender: determinate class adjudicated; indeterminate class per §5b.
+- Old helper + new sender: old helper ignores attestation ⇒ today's behavior (the documented
+  tradeoff, unchanged — the v9 doctrine's "old behavior unchanged" is now TRUE rather than
+  aspirational, because the defect being fixed is helper-local disposition, not wire content).
+- Required deliverables (not optional): operator-facing status signal distinguishing
+  adjudicated-delegation from legacy capped delegation + `metrics_descriptors_binding.go`
+  doc update for the new counters.
 
-### 5f. Alternative B (deferred, sketched to round-1's reset — NOT this PR)
+### 5f. Alternative B: prerequisites + pointer (sketch deleted per round-2 convergence)
 
-Chunked learned-route transport survives ONLY in the stage-off-live-view form both reviewers
-mandated: Go chunks the sorted learned set; the helper stages into an/off-live partition;
-completeness + content identity validated; bound to the config/interface context present at
-transfer start (abort/rebase on change); atomic swap + single Go-owned fib bump
-(complete-ACK → Go bumps shim → existing `bump_fib_generation`) + `content_digest` handling at
-swap; supersede/restart/empty/replay/total-mismatch rules; snapshots exclude learned once the
-verb is negotiated (single carrier, v11); `partial_update_outcome_9684` section types extended.
-PREREQUISITE GATE (GLM F2): bounded FIB-scan measurement at 65k/250k/500k/1M miss-path pps —
-without an LPM answer (trie for the route maps, or learned-partition trie with a defined
-cross-partition LPM rule), activation above the current bound is refused and B stays a
-follow-up workstream. B's marginal value over A is fast-path throughput for learned
-destinations — a performance goal outside #9522's acceptance — so B waits regardless of
-mechanism elegance.
+B returns ONLY when ALL hold: (1) §9 scan measurements show helper-FIB growth is admissible
+through the target table size (LPM answer or measured headroom — GLM F2's gate, unchanged);
+(2) a from-zero plan for staged-off-live atomic publication with joint FIB+generation
+  visibility (Astra's reset, unmodified); (3) single-carrier + v11-class negotiation designed
+  first. No mechanism is pre-approved here; any future B justifies itself from zero. (KILL-B —
+  deleting even this pointer — remains an acceptable reviewer verdict.)
 
 ## 6. Public API preservation
 
-Preserved verbatim: `noroute_policy_denial` (semantics + signature — the fallback and the
-positive control); `apply_snapshot`, `bump_fib_generation`, `update_neighbors`;
-`MaxControlRequestBytes` ↔ `MAX_CONTROL_REQUEST_BYTES` lockstep + #7675 analysis;
-`LearnedRouteCapHits()` (still counts withheld publishes — now WITH an adjudicated delegation,
-so the counter keeps meaning "FIB incomplete", never "bypass active");
-`ProcessStatus.learned_route_import_capped` absence-is-unknown (#9654); the #1913 chokepoint
-and single-recycle discipline. Deleted: only the `learned_route_import_capped` early-`None` in
-`noroute_policy_denial_gated` (the gate collapses into the §5b fallback type). Added: one
-helper-local resolver (query + zone cache + counters), one Go attestation bool
-(`complex_policy_routing`, additive `omitempty`/`#[serde(default)]`), named telemetry counters.
-No verb, no generation, no version change.
+Preserved verbatim: `noroute_policy_denial` (fallback + control); the capped-gate fallback
+path (byte-identical disposition in its class); `apply_snapshot`, `bump_fib_generation`,
+`update_neighbors`; 64 MiB lockstep + #7675; `LearnedRouteCapHits()`; #9654 absence semantics;
+#1913 chokepoint + single-recycle. Deleted: nothing (v2's gate deletion retracted). Added:
+helper-local resolver (query + full-key/negative cache + counters), ONE Go attestation field
+(tri-state), named counters + status signal + metrics-docs update. No verb, no generation
+change, no version change.
 
 ## 7. Hidden invariants the change must preserve
 
-1. **Single-recycle / slow-path ownership (#6432, #1327):** the arm still evaluates, then
-   downgrades to `PolicyDenied`, then falls to the single admit site. No new recycle, no new
-   reinject call site — the query result NEVER routes around the chokepoint.
-2. **ONE authority for "may this reach the kernel" (#6664/#1913):** unchanged; §5b only changes
-   what zone pair the evaluation asks about.
-3. **Flow-cache pair-equality (#3767/#5169):** no FIB mutation ⇒ no invalidation question at
-   all. The zone cache is NOT flow state and is cleared on FIB publish; it can neither revive a
-   stale ALLOW (it never produces one — verdicts are per-packet) nor suppress one.
-4. **Monotonicity / content-identity (#3767 H5, #9520, #6034):** untouched — no generation, no
-   digest interaction, no new verb to fence. The attestation bool rides the existing snapshot
-   content it describes.
-5. **Allocation discipline:** hot path unchanged; query + cache consult live strictly in the
-   NoRoute slow arm. Cache entries are fixed-size, pre-capped, pool-free.
-6. **Gap-fill precedence:** untouched — decided Go-side at build time as today; the helper
-   learns nothing new about precedence.
-7. **Control-socket sharing (corrected):** Design A emits ZERO new control traffic — no
-   socket-hold question exists. `sync_session`'s dedicated socket/off-lock serve is now
-   correctly excluded from the sharing claim; remaining shared contention (status poll,
-   bumps, HA updates) is unaffected by this plan.
-8. **Determinism:** kernel answers are inherently unordered across multipath; the determinism
-   rule is "same-zone ECMP ⇒ same verdict; cross-zone ⇒ sentinel fallback", pinned by cells.
-9. **Serde skew:** one additive bool, both directions defaulted. Old helper ignores it (stays
-   on today's behavior — the documented posture, unchanged); old sender omits it (helper treats
-   absent as complex ⇒ sentinel path — fail-closed direction).
-10. **HA/session portability:** no new per-session wire state; zone cache is per-worker RAM,
-    rebuilt lazily, never synced.
-11. **Flowless + #3110 interactions (#3291/#4024/#3110/#9529):** the real-zone evaluation keeps
-    the flow-backed vs flowless port rules verbatim; the sentinel fallback keeps today's
-    unzoned semantics byte-identical. A real zone of 0 (unmapped egress ifindex) is treated as
-    indeterminate ⇒ sentinel path, never as a novel third zone semantic.
+V2's eleven stand, amended: (2) the evaluation question changes from "default action on the
+sentinel" to "real pair where determinate" — authority (one chokepoint) unchanged; (4) no
+generation/digest interaction (no FIB mutation; attestation rides the snapshot it describes,
+recomputed per build); (7) ZERO new control traffic (attestation is a bool inside existing
+snapshots); (9) ABSENT ⇒ legacy verbatim (the skew rule §5d states); (11) real-zone 0 ⇒
+indeterminate, flowless closed-ports verbatim in both classes. New (12): **mirror-equality** —
+the query context MUST equal the reinject context field-for-field (TUN iif, mark 0, INVALID
+uid, no forced table); any future input added to one side is added to both with a paired cell,
+or the design is void.
 
 ## 8. Risk assessment
 
 | Class | Rating | Reason |
 |---|---|---|
-| Behavioral regression | MED-HIGH | Same security-sensitive arm (#6664/#7480/#9054 line), but the change narrows the question the arm asks (which zone pair?) without touching disposition plumbing, FIB content, or publish ordering. Wrong-zone answers are the failure mode; §5b's closed fallback list + §5d attestation bound it. The #9054 composition history keeps this above MEDIUM regardless. |
-| Lifetime / borrow-checker | LOW | Query context borrows existing arm locals; zone cache is a plain bounded map owned by the worker/binding struct it serves. No `Arc` rotation, no cross-thread FIB sharing beyond what exists. |
-| Performance regression | MED | Steady state adds one bounded-hash consult per NoRoute packet (cache hit) — negligible. Miss cost is one synchronous netlink RTT, rate-limited, slow-path-only. Residual risks: scan-storm pps for permit-delegated flows (pre-existing at cap scale, unchanged by A — quantified in §9 rather than hand-waved), and p99 RTT gating the sync-vs-thread choice. |
-| Architectural mismatch (#961 / #946-Phase-2) | LOW | Design A follows in-tree precedent instead of inventing mechanism: #1769's resolver shape for kernel queries, #1651's negative-cache TTL/cap discipline, the arm's evaluate-then-downgrade convention. No new protocol, no stateful transaction, nothing to fence. |
+| Behavioral regression | MED-HIGH | Same arm, but the change is now (a) a context-exact mirror rather than a counterfactual, (b) fallback-preserving rather than gate-deleting. Failure mode is wrong-zone or indeterminate-misclassified answers; §5d + full-key cache + §5b bound it. #9054 history keeps this above MEDIUM. |
+| Lifetime / borrow-checker | LOW | Arm-local borrows + worker-owned bounded maps. No Arc rotation, no shared FIB writes. |
+| Performance regression | MED | Per-NoRoute-packet: one full-key hash consult (hit) or one bounded sync GETROUTE (miss, rate-limited). Pre-existing scan cost unchanged. Scan-storm class handled by negative cache + overflow-to-fallback. §9 gates wiring. |
+| Architectural mismatch | LOW | Follows #1769/#1651/#6905 precedent; no protocol, no transaction, nothing fenced. B's machinery explicitly refused. |
 
 ## 9. Test plan
 
-- `cargo build` clean at every commit boundary; logical bisectable commits (resolver → arm
-  wiring → attestation → counters → test-only commits separate).
-- `cargo test --release` full suite green; 5/5 flake on the affected cells:
-  - `noroute_is_denied_on_a_default_deny_box_7480` — untouched positive control;
-  - NEW `capped_miss_equals_uncapped_miss_9522` (fail-on-revert: capped snapshot + deny box +
-    learned-only dst with kernel route in a DENY pair → `Some(deny)`; delete the lookup call
-    and it reds — the exact master behavior);
-  - NEW real-zone cells: permit-pair delegates with verdict recorded; genuinely-unroutable
-    falls to sentinel (default decides); cross-zone multipath fails closed to sentinel;
-    unmapped-egress-ifindex ⇒ sentinel; flowless closed-ports preserved under real zones;
-    complex-attestation set ⇒ sentinel path + counter.
-  - NEW cache cells: zone-answer TTL expiry, cap reclaim discipline, clear-on-FIB-publish,
-    verdict-never-cached (config policy change between two packets with hot cache entry
-    changes the verdict).
-- Measurement gates (numbers in the PR, never asserted):
-  - FIB linear-scan cost at 65k/250k/500k/1M routes (microbench miss-path ns + loss-cluster
-    NoRoute pps) — documents the scan bound §2 claims and gates Alternative B;
-  - synchronous `GETROUTE` RTT p50/p99 on the slow path (gates sync-vs-thread, §5c);
-  - NoRoute-miss pps under full-table synthetic + scan (sizes the rate limits, §5c).
-- `go test` affected packages: attestation cell (mark-rule config ⇒ complex=true; ordinary
-  rules ⇒ false; enumeration failure ⇒ complex=true — fail-closed), plus the untouched cap
-  derivation cells as regression.
-- Source guards updated in place: `slow_path_admit_single_site_6664.rs` NoRoute wiring guard
-  extended to the lookup call (a deleted lookup must red it); #9054 composition cells rewritten
-  as the §5b equivalence cell, not deleted.
-- Loss-cluster smoke (REQUIRED — disposition changes): deploy; v4+v6 × push+reverse on 5201;
-  `-P 12 -R` reproducers; full-table synthetic run — deny-pair learned-only dst DROPS,
-  permit-pair learned-only dst FORWARDS with verdict telemetry;
-  `xpf_userspace_binding_slow_path_no_route_packets_total` + new lookup/ambiguity/fallback
-  counters + `LearnedRouteCapHits()` captured. Per-class CoS 5201-5206 matrix per standing
-  rules. NEVER faked: every figure from a captured run.
+Order is load-bearing (F-G): **measurements before arm wiring** (go/no-go gates), then cells,
+then suites, then smoke.
+
+- M1 (gate): FIB linear-scan cost at 65k/250k/500k/1M (miss-path ns + NoRoute pps) — documents
+  the §2 scan ceiling AND states measured permit-delegated throughput (the "permit crawls"
+  caveat, if present, ships in the PR with numbers).
+- M2 (gate): sync GETROUTE RTT p50/p99 + worst-case under churn; fixes the numeric recv
+  deadline (§5c) or forces the documented thread-shape revision.
+- M3 (sizing): NoRoute-miss pps under full-table synthetic + distinct-dst scan — sizes rate
+  limits and proves the negative cache holds the unroutable-scan class.
+- Cells (each fail-on-revert): `capped_miss_equals_uncapped_miss_9522` (determinate:
+  capped ≡ uncapped; delete lookup ⇒ RED); PBR-disagreement ⇒ MAIN's zone (the #7409 vector
+  as contract); hash-parity (same tuple ⇒ same member); full-key isolation (tos/src/port
+  variants do NOT share entries); negative-entry consult; TTL-expiry + clear-on-publish +
+  cap-reclaim; verdict-never-cached (policy change with hot zone entry flips the verdict);
+  complex-attested ⇒ fallback + counter (mark-rule AND DSCP-rule — the latter pins the F-C
+  reader choice); enumeration-failure ⇒ complex; default-permit indeterminate ⇒
+  delegation-with-signal (residual pinned both directions); uncapped-deny control untouched.
+- Guards: `slow_path_admit_single_site_6664.rs` extended to the lookup call (deleted lookup
+  reds it); #9054 composition cells rewritten as equivalence + fallback-preservation.
+- Suites: `cargo build` clean per commit; full `cargo test --release`; 5/5 flake on affected
+  cells; `go test` affected pkgs (attestation tri-state incl. absent ⇒ legacy).
+- Smoke (REQUIRED): deploy; v4+v6 × push+reverse; `-P 12 -R`; full-table synthetic —
+  deny-pair learned-only dst DROPS (determinate), permit-pair FORWARDS with verdict telemetry,
+  indeterminate-class counters + `LearnedRouteCapHits()` captured; per-class CoS 5201-5206.
+  Every figure captured, none asserted.
 
 ## 10. Out of scope (explicitly)
 
-- #9172 item 3 observability (still separate; this plan only adds the minimal counters its own
-  fallback list needs to be distinguishable).
-- Alternative B implementation (follow-up workstream, gated on the §9 scan measurements + LPM).
-- Raising `learnedRoutePublishBudget` / `MaxControlRequestBytes` (untouched).
-- FRR-side table filtering (operator remedy, documented, unchanged).
-- Fail-closed-above-cap (rejected; not on the table).
-- General FIB LPM work (measurement-gated prerequisite of B, not of A).
+V2's list stands (observability #9172 beyond the §5e signal + counters; B implementation;
+budget/ceiling changes; FRR filtering; fail-closed-above-cap; general LPM).
 
 ## 11. Open questions for adversarial review
 
-1. **Is the §5a input list complete against real `ip rule` selectors?** Enumerate any kernel
-   selector beyond (dst, src, table, iif, tos, proto/ports) that can change a `GETROUTE` answer
-   on a supported topology (nftables-derived marks? `l3mdev` master-index subtleties? realm?
-   `ip rule ... uidrange`?). Each missing input is either a §5d attestation addition or a
-   PLAN-KILL of Design A — no middle ground is acceptable for a security adjudication.
-2. **Does synchronous netlink in the worker slow path hold up under adversarial miss rates?**
-   A scan across distinct unroutable dsts pays full linear-scan + failed lookup per packet with
-   nothing cacheable. Is the §5c rate limit + sentinel-fallback sufficient, or does this need a
-   negative-zone cache (with its own staleness analysis) to avoid a slow-path pps collapse that
-   reads as an availability regression? Numbers invited; "slow path is rare" is not evidence.
-3. **Is caching the zone answer but not the verdict the right split?** It re-evaluates policy
-   per packet (correct under config change, costs policy-eval per NoRoute packet). Should
-   instead the VERDICT be cached with the policy generation stamped (invalidated by the #8356
-   re-derivation generation already published per pass)? Which coherence story is actually
-   tighter — argue for flipping it.
-4. **Cross-zone multipath fails closed to the sentinel — but is SILENT fallback correct there?**
-   A same-prefix ECMP across zones with a deny default drops traffic the operator's
-   per-zone permits would have allowed on whichever member the kernel picked. Should the
-   fallback instead be loud (per-prefix counter + log) or even a distinct disposition? And does
-   the kernel's own hash choice vs the helper's ignorance of it constitute a determinism hole
-   worth killing over?
-5. **Is the TOCTOU bound honestly stated?** Lookup-to-reinject is µs–ms, but the ZONE CACHE
-   extends the window to the TTL (seconds). A route withdrawal inside the TTL forwards
-   permitted packets toward a dead/changed egress. The plan claims this matches kernel
-   behavior — does it, or does the kernel's synchronous FIB make this strictly weaker in a way
-   that matters for a deny that arrived 2 s ago? Quantify or kill the TTL length.
-6. **Should Alternative B die entirely rather than wait?** If Design A closes the filed hole
-   and B's only marginal value is fast-path throughput (perf, outside this issue), is keeping B
-   sketched an invitation to rebuild the v1 mechanism later — i.e. should v2 delete §5f and let
-   any future fast-path work justify itself from zero? KILL-B is an acceptable verdict.
-7. **Does §5e's no-bump argument survive a hostile reading of the version doctrine?** The
-   capped bit's *described meaning* stays fixed, but its *operational consequence* (delegate
-   vs adjudicate) changes under every old sender. Is "helper-local behavior needs no version"
-   actually consistent with the v9 lesson (same bytes read differently), or does the
-   new-helper+old-sender pairing deserve a loud status-level signal (not refusal) so an
-   operator watching `LearnedRouteImportCapped=true` understands delegation is now adjudicated?
-   (Note: this overlaps #9172 without claiming it.)
+1. **Mirror-equality completeness:** is there ANY kernel input at reinject beyond
+   (dst, src, iif=TUN, mark 0, uid INVALID, tos, proto/ports, RPDB rules+tables) — conntrack
+   state for a first packet? rpfilter on the TUN (`rp_filter` deliberately 0 — verified or
+   assumed?)? TCP-MD5/MPTCP options influencing routing? Each candidate is either proven-inert
+   with a cell or kills Design A. No middle ground.
+2. **uidrange-inert: proven or assumed?** The plan claims forwarded packets carry INVALID_UID
+   on both sides. Cite the kernel path (no socket ⇒ `INET_ECN`... precisely: `fib_rule_uid`
+   match against `skb->sk` NULL ⇒ INVALID) or replace the claim with attestation of uidrange
+   rules. An unproven inertness is a fail-open hole on paper.
+3. **Is the capped+indeterminate delegation residual the issue's core?** If the deployments
+   that cross the cap ALSO run complex rules (mark-based PBR is common on full-table edge
+   boxes — the plan's own target population), the determinate class may be small and v3 fixes
+   little while preserving the hole where it matters. Kill on population grounds if the
+   numbers say so — what measurement would decide?
+4. **Negative-cache poisoning:** a negative entry ("no kernel route") consulted during a
+   route-flap window delegates... no — negative entries take the SENTINEL path (uncapped) /
+   gate fallback (capped), never delegation-with-verdict. Confirm the direction is right, or
+   show a flap sequence where a stale negative entry harms availability beyond its TTL.
+5. **Sync-query worker stall under (M2+M3) worst case:** with the numeric deadline D and
+   ceiling R, what is the worst-case added latency for an unrelated flow sharing the worker,
+   and is it within the slow-path budget the tree already accepts for session installs? If the
+   arithmetic fails, thread-shape is forced — say so now, not in smoke.
+6. **Should §5f die entirely (KILL-B)?** V3 keeps prerequisites + pointer. If even the pointer
+   invites v1's resurrection, delete it and let future fast-path work start from zero.
+7. **Status-signal sufficiency:** does distinguishing adjudicated vs legacy delegation in
+   status + metrics-docs satisfy "must not silently change posture" for the indeterminate
+   residual, or does the residual need its own alert-level signal (log on first capped
+   indeterminate delegation per generation)? #9172 adjacent — draw the line explicitly.
