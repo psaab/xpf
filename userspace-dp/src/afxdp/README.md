@@ -1203,8 +1203,10 @@ data-path learn, and the on-demand resolver are the others).
   `ProcessStatus.manager_neighbor_generation` (distinct from
   `neighbor_generation`, the dynamic ARP/NDP resolver epoch); the Go send path
   advances its cached neighbor view only when the ACK is 0 or exactly the sent
-  generation (#9696) — any other nonzero ACK is this fence answering with its
-  newer applied generation — otherwise it RETAINS retry debt and the
+  generation (#9696) — an ACK above it is this fence answering with its newer
+  applied generation, while an ACK below it (other than 0) is unexpected from
+  the current helper and handled defensively the same way — otherwise it
+  RETAINS retry debt and the
   next event-driven / 60s-safety regeneration re-diffs and retries with a
   strictly higher generation. **Backward-compatible:** a `generation == 0`
   (unversioned / pre-#6034) push bypasses the fence and never advances it, and

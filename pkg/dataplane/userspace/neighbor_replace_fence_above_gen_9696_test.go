@@ -324,3 +324,40 @@ func TestRegenBookkeepingUntouchedOnFence9696(t *testing.T) {
 		t.Fatalf("neighborReplaceGen = %d, want the fencing ACK 100", m.neighborReplaceGen)
 	}
 }
+
+// GPT-1 (parent review): a fenced replace must leave the #9684 bookkeeping
+// EXACTLY as it found it — no marking, no resolving — whether the section
+// starts unmarked or a sibling section alone is marked. Both senders, with a
+// fencing ACK above the sent generation.
+func TestNeighborReplaceFencePreservesOriginalMask9696(t *testing.T) {
+	for _, s := range neighborSenders9696() {
+		for _, tc := range []struct {
+			name string
+			mask partialSections
+		}{
+			{"initially-unmarked", 0},
+			{"fabrics-only", partialFabrics},
+		} {
+			t.Run(s.name+"/"+tc.name, func(t *testing.T) {
+				h := &fenceHook9696{mode: "fixed", fixed: 100}
+				m := newFenceManager9696(t, h)
+				m.mu.Lock()
+				m.partialOutcomeUnknown = tc.mask
+				m.mu.Unlock()
+				s.send(m)
+				if got := h.lastNeighborGen(t); got != 5 {
+					t.Fatalf("update_neighbors carried generation %d, want 5", got)
+				}
+				if got := cachedNeighbors9696(m); len(got) != 1 || got[0] != seededNeighbor9696 {
+					t.Fatalf("fenced replace must retain retry debt: cached neighbors = %+v", got)
+				}
+				if got := unknownBits9696(m); got != tc.mask {
+					t.Fatalf("fenced replace must preserve the original mask: unknown = %v, want %v", got, tc.mask)
+				}
+				if got := replaceCounter9696(m); got != 100 {
+					t.Fatalf("neighborReplaceGen = %d, want the fencing ACK 100", got)
+				}
+			})
+		}
+	}
+}
