@@ -205,22 +205,18 @@ func ValidateOSPFArea(raw string, _ *Config) error {
 	}
 	// #9820: validate what is emitted. The renderer interpolates the RAW
 	// key; padding that TrimSpace hides would pass here while the RAW key
-	// renders. Spaces are harmless FRR token separators, but \n\r SPLIT
-	// the rendered line — and padding IS authorable through ordinary
-	// ingress: the lexer preserves quoted-string contents verbatim
-	// (`lexer.go:337-366`, incl. the `\n` escape) and the parser accepts
-	// them as path values (`parser.go:286-289`), so `area " 0.0.0.0 "`
-	// and even `area "\n0.0.0.0"` commit clean today. This is therefore
-	// an INTENTIONAL compatibility tightening (option 1): area IDs must
-	// be bare tokens, where bare = unpadded DECODED value (quotes
-	// themselves are fine: `"0.0.0.0"` is indistinguishable from
-	// `0.0.0.0` to this validator). Migration: remove quotes/padding —
-	// no semantic change for space-padding. Precision: LEADING newline
-	// padding breaks (splits the command, missing-arg parse error) while
-	// TRAILING newline padding can function (the value's own newline ends
-	// an otherwise complete line; FRR discards whitespace-only lines) —
-	// so no universal "padding never functioned" is claimed. Tolerant
-	// path omits-with-warning (loading ≠ availability).
+	// renders. Padding IS authorable through ordinary ingress (the lexer
+	// preserves quoted-string contents verbatim and the parser accepts
+	// them as path values), so `area " 0.0.0.0 "` commits clean today and
+	// functions (spaces are harmless FRR token separators) — refusing it
+	// is therefore an INTENTIONAL compatibility tightening (option 1):
+	// area IDs must be bare tokens, where bare = unpadded DECODED value
+	// (quotes themselves are fine). Migration: remove quotes/padding.
+	// Newlines need no story here: the #1798 prewalk already rejects
+	// control characters in every key on the strict path and scrubs them
+	// to spaces on the lenient path, so no `\n`-padding ever rendered
+	// split lines; this arm additionally refuses it first, with the
+	// area-specific message. Tolerant path omits-with-warning.
 	if trimmed != raw {
 		return fmt.Errorf("invalid area id %q (leading or trailing whitespace is not allowed; use a bare IPv4 dotted-quad or integer)", raw)
 	}

@@ -16,6 +16,15 @@ import (
 	"github.com/psaab/xpf/pkg/config"
 )
 
+// validFRROSPFArea reports whether id is renderable as an FRR area operand
+// (#9820): exactly what the commit gate accepts (ValidateOSPFArea,
+// incl. its mapped + padding arms) AND a single FRR token. The token
+// check is defense-in-depth against validating-normalized/emitting-raw
+// drift (the #9493 virtual-link belt carries the same pair).
+func validFRROSPFArea(id string) bool {
+	return config.ValidateOSPFArea(id, nil) == nil && config.FRRSingleToken(id)
+}
+
 // generateProtocols generates FRR CLI config for OSPF, BGP, RIP, and IS-IS.
 // If vrfName is non-empty, generates VRF-scoped commands.
 // ecmpMaxPaths > 1 enables ECMP with the given maximum equal-cost paths.
@@ -28,15 +37,6 @@ import (
 // shared section is passed (direct callers / unit tests), it falls back to
 // a function-local section emitted at the end, preserving the historical
 // single-instance behavior byte-for-byte.
-// validFRROSPFArea reports whether id is renderable as an FRR area operand
-// (#9820): exactly what the commit gate accepts (ValidateOSPFArea,
-// incl. its mapped + padding arms) AND a single FRR token. The token
-// check is defense-in-depth against validating-normalized/emitting-raw
-// drift (the #9493 virtual-link belt carries the same pair).
-func validFRROSPFArea(id string) bool {
-	return config.ValidateOSPFArea(id, nil) == nil && config.FRRSingleToken(id)
-}
-
 func (m *Manager) generateProtocols(ospf *config.OSPFConfig, ospfv3 *config.OSPFv3Config, bgp *config.BGPConfig, rip *config.RIPConfig, isis *config.ISISConfig, vrfName string, ecmpMaxPaths int, policyOptions *config.PolicyOptionsConfig, bgpAcceptDefault map[string]bool, shared ...*bfdSection) string {
 	var b strings.Builder
 	var bfd *bfdSection
