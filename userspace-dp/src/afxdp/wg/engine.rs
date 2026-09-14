@@ -59,7 +59,7 @@ use super::framing::{encode_data_header, parse_data_header};
 // handshake_session.rs (same `wg` module); the engine struct holds a map of
 // them, so it imports the type here.
 use super::handshake_session::PendingHandshake;
-use super::peer::{Peer, PeerConfig};
+use super::peer::{decode_roam_endpoint, encode_roam_endpoint, Peer, PeerConfig};
 use super::session::{REJECT_AFTER_MESSAGES, ReplayDecision, WgSession};
 use super::tai64n::Tai64nClock;
 use super::{
@@ -722,15 +722,18 @@ impl WgEngine {
     /// transport-data record from `peer_pubkey`. Record it for the control
     /// thread to adopt.
     ///
-    /// COMPARE BEFORE WRITING. The control thread's own learning does an
-    /// unconditional `HashMap::insert` per authenticated datagram, which is
-    /// free at control-loop rates and is not free on the dataplane hot path:
-    /// this runs once per transport-data record, i.e. once per packet of every
-    /// WireGuard flow. The steady state — a peer that is not roaming — must
-    /// therefore cost one relaxed load and one compare, and it does: the
-    /// mutex is taken only when the observed endpoint DIFFERS from the pending
-    /// one, and `roamed_endpoint_pending` short-circuits the common case where
-    /// a roam is already queued.
+    /// COMPARE BEFORE WRITING — and before locking (#9644). The control
+    /// thread's own learning does an unconditional `HashMap::insert` per
+    /// authenticated datagram, which is free at control-loop rates and is
+    /// not free on the dataplane hot path: this runs once per
+    /// transport-data record, i.e. once per packet of every WireGuard
+    /// flow. The steady state — a peer that is not roaming — costs an
+    /// optimistic snapshot read (relaxed loads + compare, no lock, no
+    /// shared write) against the peer's `RoamSnapshot`; the mutex is
+    /// taken only on the slow path. Suppression obeys the explicitly
+    /// weaker stale-observation contract (`docs/pr/9644/plan.md` §5.3,
+    /// exceptions E1–E4, OP-1): a validated snapshot certifies a
+    /// complete historical publication, never current slot contents.
     ///
     /// Returns true when something new was recorded, so a caller can count it.
     pub(crate) fn note_worker_observed_endpoint(
@@ -742,29 +745,67 @@ impl WgEngine {
         let Some(peer) = self.peer_arc(peer_pubkey) else {
             return false;
         };
-        // Fast path: a roam is already pending and it is the same address, so
-        // there is nothing to say. Checked WITHOUT the lock.
-        if peer.roamed_endpoint_pending.load(Ordering::Relaxed)
-            && let Ok(pending) = peer.roamed_endpoint.try_lock()
-            && *pending == Some(endpoint)
-        {
-            return false;
+        // #9644 fast path: optimistic seqlock read of the snapshot
+        // (plan §5.2). A stable, epoch-current, equal snapshot means
+        // there is nothing to say — no lock, no shared-memory write.
+        let snap = &peer.roam_snapshot;
+        let e0 = snap.live_epoch.load(Ordering::Acquire);
+        let s0 = snap.seq.load(Ordering::Acquire);
+        if s0 & 1 == 0 {
+            let words = [
+                snap.w0.load(Ordering::Relaxed),
+                snap.w1.load(Ordering::Relaxed),
+                snap.w2.load(Ordering::Relaxed),
+                snap.w3.load(Ordering::Relaxed),
+                snap.w4.load(Ordering::Relaxed),
+            ];
+            let snap_epoch = snap.snap_epoch.load(Ordering::Relaxed);
+            std::sync::atomic::fence(Ordering::Acquire);
+            let s1 = snap.seq.load(Ordering::Acquire);
+            let e1 = snap.live_epoch.load(Ordering::Acquire);
+            if s0 == s1
+                && snap_epoch == e0
+                && snap_epoch == e1
+                && decode_roam_endpoint(&words) == Some(endpoint)
+            {
+                return false;
+            }
         }
+        // Slow path: the mutex-protected slot is the authority and is
+        // always re-checked under lock, so any fast-path staleness
+        // resolves here.
         let mut slot = peer
             .roamed_endpoint
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         if *slot == Some(endpoint) {
+            // Equal but snapshot-stale (publish/invalidate race): repair
+            // the snapshot so stable traffic regains lock-free
+            // suppression on the very next packet (plan §5.2
+            // repair-on-equal). Same odd-first protocol.
+            let epoch = snap.live_epoch.load(Ordering::Relaxed);
+            snap.begin_publish();
+            // Slot + pending already hold the right values; only the
+            // snapshot needs republishing.
+            snap.commit_publish(encode_roam_endpoint(endpoint), epoch);
             return false;
         }
+        // ODD-FIRST publish (plan §5.2): the odd mark precedes the slot
+        // write, so no reader can observe a slot write unanchored in a
+        // publication. Slot + pending live inside the odd..even bracket.
+        let epoch = snap.live_epoch.load(Ordering::Relaxed);
+        snap.begin_publish();
         *slot = Some(endpoint);
         peer.roamed_endpoint_pending.store(true, Ordering::Relaxed);
+        snap.commit_publish(encode_roam_endpoint(endpoint), epoch);
         true
     }
 
     /// #8274 step 3: take the endpoint a worker last observed for this peer, if
     /// any. Drained by the control thread's per-peer pass, exactly where it
-    /// already drains `take_handshake_request`.
+    /// already drains `take_handshake_request`. On a `Some` take the drain
+    /// generation bumps under the same mutex (#9644 plan §5.2): the
+    /// abstract take linearizes at the bump.
     pub(crate) fn take_worker_observed_endpoint(
         &self,
         peer_pubkey: &[u8; WG_KEY_LEN],
@@ -774,10 +815,27 @@ impl WgEngine {
         if !peer.roamed_endpoint_pending.swap(false, Ordering::Relaxed) {
             return None;
         }
-        peer.roamed_endpoint
+        let mut slot = peer
+            .roamed_endpoint
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .take()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let taken = slot.take();
+        if taken.is_some() {
+            peer.roam_snapshot.bump_live_epoch();
+        }
+        taken
+    }
+
+    /// #9644: bump every peer's drain generation once. Called at
+    /// `wg_control_loop` start beside the learned-endpoint seeding, so a
+    /// new consumer incarnation never trusts a previous incarnation's
+    /// adoptions (plan §5.2 incarnation binding). Cold path; a racing
+    /// in-flight publish stamps either side and any stale side
+    /// self-repairs on the next equal slow hit.
+    pub(crate) fn invalidate_roam_snapshots(&self) {
+        for entry in &self.load_table().peers {
+            entry.peer.roam_snapshot.bump_live_epoch();
+        }
     }
 
     pub(crate) fn take_handshake_request(&self, peer_pubkey: &[u8; WG_KEY_LEN]) -> bool {
