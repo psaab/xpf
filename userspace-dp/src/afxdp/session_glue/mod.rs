@@ -2335,6 +2335,9 @@ mod tests;
 #[cfg(test)]
 #[path = "deleted_first_policy_purge_9526_tests.rs"]
 mod deleted_first_policy_purge_9526_tests;
+#[cfg(test)]
+#[path = "pbr_install_table_9752_tests.rs"]
+mod pbr_install_table_9752_tests;
 // #4800: publish + sibling-replication contention accounting for the
 // new-flow-install ceiling harness. Kept in its own file rather than
 // appended to `tests.rs` (already ~7k lines).
