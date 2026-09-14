@@ -138,7 +138,7 @@ func (m *Manager) generateStaticRouteInTable(sr *config.StaticRoute, vrfName str
 	if !validFRRRoutePrefix(sr.Destination) {
 		return ""
 	}
-	isV6 := strings.Contains(sr.Destination, ":")
+	isV6 := config.FRRAddrFamily(sr.Destination) == "v6"
 	prefix := "ip"
 	if isV6 {
 		prefix = "ipv6"
@@ -234,6 +234,28 @@ func (m *Manager) generateStaticRouteInTable(sr *config.StaticRoute, vrfName str
 			continue
 		}
 		if ifName != "" && !validFRRInterfaceOperand(ifName) {
+			continue
+		}
+		// #9820: family belt. An IPv6 destination with an IPv4 next-hop
+		// renders a line FRR cannot use as a gateway route (FRR's `ipv6
+		// route` grammar takes only an IPv6 gateway or an interface), so
+		// the strict gate refuses it at commit and this belt omits the
+		// next-hop — with a warning — on the tolerant load / peer-sync
+		// path. Per-next-hop granularity, like the shape belt: one bad
+		// ECMP member must not kill the good ones.
+		//
+		// Ordering is load-bearing: the destination shape check above
+		// returned early for bad destinations, and the next-hop shape
+		// check `continue`d for non-IP addresses (`@`-forms, bare
+		// interface names), so both operands parse here and the family
+		// comparison cannot misfire.
+		if nh.Address != "" &&
+			config.FRRAddrFamily(sr.Destination) == "v6" &&
+			config.FRRAddrFamily(nh.Address) == "v4" {
+			slog.Warn("frr: skipping a static-route next-hop: IPv6 destination "+
+				"with IPv4 next-hop is unsupported (FRR's ipv6 route grammar takes "+
+				"only an IPv6 gateway or an interface) (#9820)",
+				"destination", sr.Destination, "next_hop", nh.Address)
 			continue
 		}
 		var nexthop string
