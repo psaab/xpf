@@ -1008,7 +1008,17 @@ pub(super) fn poll_binding_process_descriptor(
                             // `canonical_key` is the key the revalidation
                             // resolved — NOT `resolved.key`, which is the WIRE
                             // tuple and, on the NAT reverse-translated alias
-                            // path, names no entry in the primary index.
+                            // path, names no entry in the primary index. The
+                            // decision/metadata/origin are the JUDGED entry's,
+                            // carried on the revocation — NOT `resolved`'s. On a
+                            // forward hit they are the same entry; on a reverse
+                            // hit (#9604) they are the FORWARD companion's, and
+                            // the pairing is load-bearing: the teardown and the
+                            // eviction set both derive the companion from the
+                            // carried nat, and key and nat must belong to the
+                            // SAME direction entry or the companion is missed
+                            // (a degenerate third key under pure SNAT/DNAT, a
+                            // self-identical elision under combined SNAT+DNAT).
                             delete_terminal_filtered_session(
                                 sessions,
                                 binding.bpf_maps.session_map.handle(),
@@ -1022,16 +1032,16 @@ pub(super) fn poll_binding_process_descriptor(
                                 worker_ctx.worker_commands_by_id,
                                 worker_ctx.forwarding,
                                 &revocation.canonical_key,
-                                resolved.decision,
-                                &resolved.metadata,
-                                resolved.origin,
+                                revocation.decision,
+                                &revocation.metadata,
+                                revocation.origin,
                                 now_ns,
                                 worker_id,
                             );
                             collect_revoked_flow_cache_keys(
                                 &resolved.key,
                                 &revocation.canonical_key,
-                                resolved.decision.nat,
+                                revocation.decision.nat,
                                 &mut binding.scratch.scratch_filter_revoked_keys,
                             );
                             telemetry.dbg.policy_revoked_sessions += 1;

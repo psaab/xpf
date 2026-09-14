@@ -1116,6 +1116,13 @@ pub(crate) struct SessionTable {
     /// via `debug_assert!` at the call sites instead, per the #1855
     /// contract). Plain u64 like `create_drops`.
     install_partial: u64,
+    /// #9604: reverse-triggered re-derivation declines on invariant-violating
+    /// input — a degenerate companion inversion or a forward-companion slot
+    /// holding a reverse entry. Bumped by
+    /// `note_policy_revalidation_loud_decline`, whose call sites pair it with
+    /// `debug_assert!(false, ...)` per the #1855 contract. Worker-owned,
+    /// single-threaded — plain u64, no atomics (mirrors `install_partial`).
+    policy_revalidation_loud_declines: u64,
     delta_drops: u64,
     /// #2442: loss-of-sync latch. Set true the moment `push_delta` drops a
     /// delta because the ring is full (a HA-relevant open/close event that the
@@ -1314,6 +1321,7 @@ impl SessionTable {
             lookup_miss_key_mismatch: AtomicU64::new(0),
             admission_refused: 0,
             install_partial: 0,
+            policy_revalidation_loud_declines: 0,
             delta_drops: 0,
             delta_loss_pending: false,
             delta_drained: 0,

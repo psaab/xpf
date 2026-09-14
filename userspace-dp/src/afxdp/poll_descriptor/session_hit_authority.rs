@@ -236,8 +236,23 @@ pub(super) fn foreign_hit_verdict(
     {
         return ForeignHitVerdict::Drop;
     }
-    match sessions.revalidation_canonical_key(session_key) {
-        Some(canonical_key) => ForeignHitVerdict::Revoke(PolicyRevocation { canonical_key }),
+    let Some(canonical_key) = sessions.revalidation_canonical_key(session_key) else {
+        return ForeignHitVerdict::Drop;
+    };
+    // The revocation carries the judged entry's own triple (see
+    // `PolicyRevocation`): reload it from the canonical key rather than
+    // trusting the hit's `decision`/`metadata`, which on the NAT alias path
+    // name a different tuple. A miss means the entry vanished — nothing left
+    // to tear down.
+    match sessions.entry_with_origin(&canonical_key) {
+        Some((decision, metadata, origin)) => {
+            ForeignHitVerdict::Revoke(PolicyRevocation {
+                canonical_key,
+                decision,
+                metadata,
+                origin,
+            })
+        }
         None => ForeignHitVerdict::Drop,
     }
 }
