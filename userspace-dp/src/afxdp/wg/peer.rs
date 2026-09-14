@@ -17,7 +17,7 @@
 use super::session::{SessionRole, WgSession};
 use super::tai64n::TAI64N_LEN;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering, fence};
 use std::sync::{Arc, Mutex, RwLock};
 
 /// Immutable per-snapshot peer config tuple (#2836).
@@ -123,6 +123,148 @@ impl std::fmt::Debug for PeerConfig {
 ///     session was rotated straight into `current`, so every
 ///     peer-initiated rekey blackholed xpf→peer egress until the peer
 ///     sent data (a replayable egress DoS — the F-019 defect).
+/// #9644: lock-free last-observed-endpoint snapshot for the WireGuard
+/// decap hot path. `note_worker_observed_endpoint` runs once per
+/// authenticated transport-data record; the steady state (endpoint
+/// unchanged) must cost relaxed loads and a compare, never the
+/// peer's roaming `Mutex`. This snapshot is ADVISORY ONLY: the
+/// mutex-protected `Peer::roamed_endpoint` slot stays the authority
+/// (every report path re-checks under lock), and suppression obeys
+/// the explicitly weaker stale-observation contract in
+/// `docs/pr/9644/plan.md` §5.3 (exceptions E1–E4, OP-1) — NOT
+/// ordinary last-write-wins linearizability.
+///
+/// Layout: seq + live/stamped epochs + 5 payload words = 8 × 8 B on
+/// ONE cache line, so steady-state readers touch exactly one line
+/// that no writer stores to between roams.
+#[repr(align(64))]
+pub(crate) struct RoamSnapshot {
+    pub(crate) seq: AtomicU64,
+    pub(crate) live_epoch: AtomicU64,
+    pub(crate) snap_epoch: AtomicU64,
+    pub(crate) w0: AtomicU64,
+    pub(crate) w1: AtomicU64,
+    pub(crate) w2: AtomicU64,
+    pub(crate) w3: AtomicU64,
+    pub(crate) w4: AtomicU64,
+}
+
+const _: () = assert!(core::mem::size_of::<RoamSnapshot>() == 64);
+
+/// #9644: total `SocketAddr` encoding for the snapshot words.
+/// `w0 = (family << 56) | (port << 32) | addr word0`, `w1..w3` the
+/// remaining address words (zero for V4), `w4 = (flowinfo << 32) |
+/// scope_id`. Family byte 0 decodes to `None` (the initial state,
+/// never equal to an endpoint). Exact and injective over the full
+/// `SocketAddr` (v4-mapped forms stay distinct — canonicalization
+/// is the drain's job, as with the slot).
+pub(crate) fn encode_roam_endpoint(endpoint: SocketAddr) -> [u64; 5] {
+    match endpoint {
+        SocketAddr::V4(v4) => {
+            let octets = v4.ip().octets();
+            [
+                (4u64 << 56)
+                    | ((v4.port() as u64) << 32)
+                    | (u32::from_be_bytes(octets) as u64),
+                0,
+                0,
+                0,
+                0,
+            ]
+        }
+        SocketAddr::V6(v6) => {
+            let o = v6.ip().octets();
+            let w = |b: &[u8]| u32::from_be_bytes([b[0], b[1], b[2], b[3]]) as u64;
+            [
+                (6u64 << 56) | ((v6.port() as u64) << 32) | w(&o[0..4]),
+                w(&o[4..8]),
+                w(&o[8..12]),
+                w(&o[12..16]),
+                ((v6.flowinfo() as u64) << 32) | (v6.scope_id() as u64),
+            ]
+        }
+    }
+}
+
+/// Inverse of [`encode_roam_endpoint`]; `None` for the family-0
+/// sentinel or an unknown family discriminant. Round-trips `w4`
+/// through [`std::net::SocketAddrV6`] so flowinfo/scope_id survive.
+pub(crate) fn decode_roam_endpoint(words: &[u64; 5]) -> Option<SocketAddr> {
+    let port = ((words[0] >> 32) & 0xFFFF) as u16;
+    match words[0] >> 56 {
+        4 => {
+            let octets = (words[0] as u32).to_be_bytes();
+            Some(SocketAddr::new(
+                std::net::IpAddr::V4(std::net::Ipv4Addr::from(octets)),
+                port,
+            ))
+        }
+        6 => {
+            let mut o = [0u8; 16];
+            for (i, w) in words[0..4].iter().enumerate() {
+                // `w0` low 32 bits hold address word 0; the family/port
+                // bits above it are masked out by the `as u32` cast.
+                o[i * 4..i * 4 + 4].copy_from_slice(&(*w as u32).to_be_bytes());
+            }
+            Some(SocketAddr::V6(std::net::SocketAddrV6::new(
+                std::net::Ipv6Addr::from(o),
+                port,
+                (words[4] >> 32) as u32,
+                words[4] as u32,
+            )))
+        }
+        _ => None,
+    }
+}
+
+impl RoamSnapshot {
+    pub(crate) fn new() -> Self {
+        Self {
+            seq: AtomicU64::new(0),
+            live_epoch: AtomicU64::new(0),
+            snap_epoch: AtomicU64::new(0),
+            w0: AtomicU64::new(0),
+            w1: AtomicU64::new(0),
+            w2: AtomicU64::new(0),
+            w3: AtomicU64::new(0),
+            w4: AtomicU64::new(0),
+        }
+    }
+
+    /// Drain / consumer-start generation. Bumped under the peer
+    /// mutex on take-of-`Some`, lock-free at consumer start (cold).
+    /// Release/Acquire-paired with the reader's epoch loads.
+    pub(crate) fn bump_live_epoch(&self) {
+        self.live_epoch.fetch_add(1, Ordering::Release);
+    }
+
+    /// ODD-FIRST publish, part 1: mark the sequence odd BEFORE the
+    /// slot write, so no reader can observe a slot write unanchored
+    /// in a publication (plan §5.2). Call only with the peer mutex
+    /// held; the matching [`RoamSnapshot::commit_publish`] must
+    /// follow in the same critical section.
+    pub(crate) fn begin_publish(&self) {
+        let prev = self.seq.fetch_add(1, Ordering::Relaxed);
+        debug_assert!(prev & 1 == 0, "9644: publish without matching close");
+    }
+
+    /// ODD-FIRST publish, part 2: fence, word stores, even close.
+    /// The slot + pending stores belong between the two calls, in
+    /// the same critical section. Only infallible operations may
+    /// appear in the odd region — no panic/unwind may abandon it
+    /// (preemption remains possible).
+    pub(crate) fn commit_publish(&self, words: [u64; 5], epoch: u64) {
+        fence(Ordering::Release);
+        self.w0.store(words[0], Ordering::Relaxed);
+        self.w1.store(words[1], Ordering::Relaxed);
+        self.w2.store(words[2], Ordering::Relaxed);
+        self.w3.store(words[3], Ordering::Relaxed);
+        self.w4.store(words[4], Ordering::Relaxed);
+        self.snap_epoch.store(epoch, Ordering::Relaxed);
+        self.seq.fetch_add(1, Ordering::Release);
+    }
+}
+
 pub(crate) struct Peer {
     pub(crate) pubkey: [u8; 32],
     /// #1888 S5 activity stamps + armed timers, all CLOCK_MONOTONIC ns
@@ -232,6 +374,10 @@ pub(crate) struct Peer {
     /// can skip the mutex entirely once a roam is already pending and the
     /// control thread has not yet drained it.
     pub(crate) roamed_endpoint_pending: AtomicBool,
+    /// #9644: lock-free last-observed-endpoint snapshot (advisory;
+    /// authority stays in `roamed_endpoint`). Own cache line; read
+    /// on every decapped packet, written only on change/drain.
+    pub(crate) roam_snapshot: RoamSnapshot,
     pub(crate) handshake_request_pending: AtomicBool,
     /// #5164: monotonic timestamp of THIS peer's last accepted handshake
     /// request edge (0 = never). Drives the per-peer rate-limit gate only;
@@ -275,6 +421,7 @@ impl Peer {
             greatest_tai64n: Mutex::new([0u8; TAI64N_LEN]),
             roamed_endpoint: std::sync::Mutex::new(None),
             roamed_endpoint_pending: AtomicBool::new(false),
+            roam_snapshot: RoamSnapshot::new(),
             handshake_request_pending: AtomicBool::new(false),
             handshake_request_last_ns: AtomicU64::new(0),
             rekey_request_pending: AtomicBool::new(false),
