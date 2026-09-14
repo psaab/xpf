@@ -134,6 +134,13 @@ const ALLOWED_READER_LOADS: &[(&str, usize, &str)] = &[
          forwarding half (it does not match generation stamps)",
     ),
     (
+        "src/afxdp/session_glue/install_table_purge.rs",
+        1,
+        "fenced purge predicate — forwarding half ONLY (registry + fallback \
+         sets for one stamp check), never paired with validation, so it \
+         cannot tear a pair (#9752)",
+    ),
+    (
         "src/afxdp/types/runtime_view.rs",
         1,
         "load_forwarding_if_changed — the #1188 short-circuit for \

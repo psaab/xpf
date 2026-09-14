@@ -131,6 +131,7 @@ pub(in crate::afxdp) struct BindingLiveState {
     pub(super) neighbor_miss_packets: AtomicU64,
     pub(super) discard_route_packets: AtomicU64,
     pub(super) next_table_packets: AtomicU64,
+    pub(super) table_unavailable_packets: AtomicU64,
     pub(super) exception_packets: AtomicU64,
     pub(super) config_gen_mismatches: AtomicU64,
     pub(super) fib_gen_mismatches: AtomicU64,
@@ -438,6 +439,9 @@ pub(in crate::afxdp) struct BindingLiveState {
     /// from "no such packets ever arrived". The drop is counted here
     /// instead, so the signal moves rather than disappears.
     pub(in crate::afxdp) next_table_unsupported_drops: AtomicU64,
+    /// #9752: `TableUnavailable` frames refused by the slow-path allow-list
+    /// and dropped fail-closed (the #6664 shape: counted where refused).
+    pub(in crate::afxdp) table_unavailable_drops: AtomicU64,
     pub(super) kernel_rx_dropped: AtomicU64,
     pub(super) kernel_rx_invalid_descs: AtomicU64,
     pub(super) tx_packets: AtomicU64,
@@ -937,9 +941,16 @@ const _: [(); 64] = [(); std::mem::align_of::<BindingLiveState>()];
 // layout change from defeating the guard — a `#[cfg(test)]` field would have
 // moved the test build alone, and one pair of literals could not have made
 // both green.
+// #9752 added `table_unavailable_packets` and `table_unavailable_drops` and
+// hit #8670's case twice over: `size_of` stayed 2368 (the 64-byte alignment
+// unit #7156 opened still has room) while both offsets moved 2200 -> 2216
+// and 2328 -> 2344 (two unconditional u64s ahead of both sentinels). Same
+// legitimate case as #6664: both builds shift by the same 16 bytes and one
+// pair of literals makes both green — verified by building BOTH the
+// production (`cargo check`) and test (`--all-targets`) configurations.
 const _: [(); 2368] = [(); std::mem::size_of::<BindingLiveState>()];
-const _: [(); 2200] = [(); std::mem::offset_of!(BindingLiveState, pending_tx_admitted)];
-const _: [(); 2328] = [(); std::mem::offset_of!(BindingLiveState, delta_loss_pending)];
+const _: [(); 2216] = [(); std::mem::offset_of!(BindingLiveState, pending_tx_admitted)];
+const _: [(); 2344] = [(); std::mem::offset_of!(BindingLiveState, delta_loss_pending)];
 
 impl BindingLiveState {
     pub(super) fn new() -> Self {
@@ -968,6 +979,7 @@ impl BindingLiveState {
             neighbor_miss_packets: AtomicU64::new(0),
             discard_route_packets: AtomicU64::new(0),
             next_table_packets: AtomicU64::new(0),
+            table_unavailable_packets: AtomicU64::new(0),
             exception_packets: AtomicU64::new(0),
             config_gen_mismatches: AtomicU64::new(0),
             fib_gen_mismatches: AtomicU64::new(0),
@@ -1042,6 +1054,7 @@ impl BindingLiveState {
             tunnel_encap_unresolved_drops: AtomicU64::new(0),
             fabric_redirect_unsendable_drops: AtomicU64::new(0),
             next_table_unsupported_drops: AtomicU64::new(0),
+            table_unavailable_drops: AtomicU64::new(0),
             kernel_rx_dropped: AtomicU64::new(0),
             kernel_rx_invalid_descs: AtomicU64::new(0),
             tx_packets: AtomicU64::new(0),
@@ -1301,6 +1314,14 @@ impl BindingLiveState {
     /// increments.
     pub(in crate::afxdp) fn record_next_table_unsupported_drop(&self) {
         self.next_table_unsupported_drops
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// #9752: record a `TableUnavailable` frame refused by the slow-path
+    /// allow-list and dropped fail-closed. Called from BOTH refusal sites
+    /// via `slow_path_admit`, like `record_next_table_unsupported_drop`.
+    pub(in crate::afxdp) fn record_table_unavailable_drop(&self) {
+        self.table_unavailable_drops
             .fetch_add(1, Ordering::Relaxed);
     }
 }

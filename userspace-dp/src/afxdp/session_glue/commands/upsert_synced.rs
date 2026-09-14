@@ -88,6 +88,10 @@ pub(in crate::afxdp::session_glue) fn handle_upsert_synced(
         } else {
             re_resolved
         };
+        // #9752: a terminal re-resolve arms the purge walk (D8).
+        if re_resolved.disposition == ForwardingDisposition::TableUnavailable {
+            flag_install_table_purge(worker_id);
+        }
         if re_resolved.disposition != ForwardingDisposition::HAInactive {
             entry.decision.resolution = re_resolved;
             let new_owner = owner_rg_for_resolution(forwarding, re_resolved);

@@ -127,6 +127,11 @@ pub(super) fn stage_flow_cache_hit(
                 cached.stamp.owner_rg_id,
                 packet_fabric_ingress,
                 resolution_target_for_session(flow, cached.decision),
+                install_table_name_for_session(
+                    worker_ctx.forwarding,
+                    cached.decision,
+                    resolution_target_for_session(flow, cached.decision),
+                ),
                 cached.decision.resolution,
             )
         {

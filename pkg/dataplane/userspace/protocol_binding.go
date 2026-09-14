@@ -300,6 +300,11 @@ type BindingStatus struct {
 	// where the signal lives; SlowPathNextTablePackets above stays on the wire
 	// for older readers but no longer advances.
 	NextTableUnsupportedDrops   uint64 `json:"next_table_unsupported_drops,omitempty"`
+	// TableUnavailableDrops counts TableUnavailable frames dropped fail-closed
+	// by the slow-path allow-list (#9752): the session's installing table is
+	// not resolvable in the current config (retired/unknown instance or owner
+	// change), so there is no table the kernel could correctly forward it in.
+	TableUnavailableDrops uint64 `json:"table_unavailable_drops,omitempty"`
 	SlowPathForwardBuildPackets uint64 `json:"slow_path_forward_build_packets,omitempty"`
 	SlowPathDrops               uint64 `json:"slow_path_drops,omitempty"`
 	SlowPathRateLimited         uint64 `json:"slow_path_rate_limited,omitempty"`

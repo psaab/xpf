@@ -67,6 +67,7 @@ impl BindingLiveState {
             neighbor_miss_packets: self.neighbor_miss_packets.load(Ordering::Relaxed),
             discard_route_packets: self.discard_route_packets.load(Ordering::Relaxed),
             next_table_packets: self.next_table_packets.load(Ordering::Relaxed),
+            table_unavailable_packets: self.table_unavailable_packets.load(Ordering::Relaxed),
             exception_packets: self.exception_packets.load(Ordering::Relaxed),
             config_gen_mismatches: self.config_gen_mismatches.load(Ordering::Relaxed),
             fib_gen_mismatches: self.fib_gen_mismatches.load(Ordering::Relaxed),
@@ -173,6 +174,7 @@ impl BindingLiveState {
             slow_path_no_route_packets: self.slow_path_no_route_packets.load(Ordering::Relaxed),
             slow_path_next_table_packets: self.slow_path_next_table_packets.load(Ordering::Relaxed),
             next_table_unsupported_drops: self.next_table_unsupported_drops.load(Ordering::Relaxed),
+            table_unavailable_drops: self.table_unavailable_drops.load(Ordering::Relaxed),
             slow_path_forward_build_packets: self
                 .slow_path_forward_build_packets
                 .load(Ordering::Relaxed),

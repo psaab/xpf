@@ -179,6 +179,26 @@ pub(in crate::afxdp) fn lookup_forwarding_resolution_with_dynamic_for_flow(
     )
 }
 
+/// #9752: like `lookup_forwarding_resolution_with_dynamic_for_flow`, but in
+/// an explicit route table: the session re-resolve path. The per-flow ECMP
+/// hash (`#2734`) is preserved — the installing table must not disturb
+/// flow spread.
+pub(in crate::afxdp) fn lookup_forwarding_resolution_with_dynamic_for_flow_in_table(
+    state: &ForwardingState,
+    dynamic_neighbors: &Arc<ShardedNeighborMap>,
+    dst: IpAddr,
+    flow_key: &crate::session::SessionKey,
+    table: &str,
+) -> ForwardingResolution {
+    lookup_forwarding_resolution_inner_ecmp(
+        state,
+        Some(dynamic_neighbors),
+        dst,
+        Some(table),
+        Some(ecmp_hash_flow(flow_key)),
+    )
+}
+
 pub(in crate::afxdp) fn lookup_forwarding_resolution_in_table_with_dynamic(
     state: &ForwardingState,
     dynamic_neighbors: &Arc<ShardedNeighborMap>,
@@ -838,6 +858,26 @@ pub(in crate::afxdp) fn no_route_resolution(next_hop: Option<IpAddr>) -> Forward
         tx_ifindex: 0,
         tunnel_endpoint_id: 0,
         next_hop,
+        neighbor_mac: None,
+        src_mac: None,
+        tx_vlan_id: 0,
+    }
+}
+
+/// #9752: the terminal resolution for a session whose installing table is
+/// not resolvable in the current config (retired/unknown instance, owner
+/// change, or absent family without a table-independent local outcome).
+/// Zeroed egress (the `DiscardRoute` shape at `:479-484`): no attribution
+/// downstream can resurrect it, and it is slow-path-ineligible,
+/// uncacheable, and never kernel-passed by construction.
+pub(in crate::afxdp) fn table_unavailable_resolution() -> ForwardingResolution {
+    ForwardingResolution {
+        disposition: ForwardingDisposition::TableUnavailable,
+        local_ifindex: 0,
+        egress_ifindex: 0,
+        tx_ifindex: 0,
+        tunnel_endpoint_id: 0,
+        next_hop: None,
         neighbor_mac: None,
         src_mac: None,
         tx_vlan_id: 0,

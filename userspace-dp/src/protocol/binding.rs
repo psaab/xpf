@@ -413,6 +413,8 @@ pub(crate) struct BindingStatus {
     pub discard_route_packets: u64,
     #[serde(rename = "next_table_packets", default)]
     pub next_table_packets: u64,
+    #[serde(rename = "table_unavailable_packets", default)]
+    pub table_unavailable_packets: u64,
     #[serde(rename = "exception_packets", default)]
     pub exception_packets: u64,
     #[serde(rename = "config_gen_mismatches", default)]
@@ -683,6 +685,10 @@ pub(crate) struct BindingStatus {
     /// readers but no longer advances.
     #[serde(rename = "next_table_unsupported_drops", default)]
     pub next_table_unsupported_drops: u64,
+    /// #9752: TableUnavailable frames dropped fail-closed by the slow-path
+    /// allow-list (the #6664 refusal signal shape).
+    #[serde(rename = "table_unavailable_drops", default)]
+    pub table_unavailable_drops: u64,
     #[serde(rename = "slow_path_forward_build_packets", default)]
     pub slow_path_forward_build_packets: u64,
     #[serde(rename = "slow_path_drops", default)]

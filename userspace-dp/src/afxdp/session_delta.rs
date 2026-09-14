@@ -177,6 +177,7 @@ pub(in crate::afxdp) fn session_delta_info(
             ForwardingDisposition::HAInactive => "ha_inactive",
             ForwardingDisposition::DiscardRoute => "discard_route",
             ForwardingDisposition::NextTableUnsupported => "next_table_unsupported",
+            ForwardingDisposition::TableUnavailable => "table_unavailable",
         }
         .to_string(),
         origin: delta.origin.as_str().to_string(),

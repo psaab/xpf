@@ -728,6 +728,18 @@ impl DispositionCounters<'_> {
             }
         }
     }
+    #[inline]
+    fn bump_table_unavailable(&mut self) {
+        match self {
+            Self::Hot(c) => {
+                c.touched = true;
+                c.table_unavailable_packets += 1;
+            }
+            Self::Cold(live) => {
+                live.table_unavailable_packets.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
 }
 
 pub(super) fn record_disposition(
@@ -921,6 +933,19 @@ pub(super) fn record_forwarding_disposition(
                 recent_exceptions,
                 binding,
                 "next_table_unsupported",
+                packet_length,
+                meta,
+                debug,
+                forwarding,
+            );
+        }
+        ForwardingDisposition::TableUnavailable => {
+            update_last_resolution(last_resolution, resolution, debug, forwarding);
+            counters.bump_table_unavailable();
+            record_exception(
+                recent_exceptions,
+                binding,
+                "table_unavailable",
                 packet_length,
                 meta,
                 debug,

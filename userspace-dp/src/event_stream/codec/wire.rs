@@ -140,6 +140,7 @@ pub(super) const DISP_MISSING_NEIGHBOR: u8 = 5;
 pub(super) const DISP_HA_INACTIVE: u8 = 6;
 pub(super) const DISP_DISCARD_ROUTE: u8 = 7;
 pub(super) const DISP_NEXT_TABLE_UNSUPPORTED: u8 = 8;
+pub(super) const DISP_TABLE_UNAVAILABLE: u8 = 9;
 
 // Flag bits for SessionOpen/Close
 pub(crate) const FLAG_FABRIC_REDIRECT: u8 = 1 << 0;
@@ -251,6 +252,7 @@ pub(super) fn encode_disposition(d: ForwardingDisposition) -> u8 {
         ForwardingDisposition::HAInactive => DISP_HA_INACTIVE,
         ForwardingDisposition::DiscardRoute => DISP_DISCARD_ROUTE,
         ForwardingDisposition::NextTableUnsupported => DISP_NEXT_TABLE_UNSUPPORTED,
+        ForwardingDisposition::TableUnavailable => DISP_TABLE_UNAVAILABLE,
     }
 }
 

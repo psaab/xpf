@@ -1284,6 +1284,7 @@ pub(crate) enum ForwardingDisposition {
     MissingNeighbor,
     DiscardRoute,
     NextTableUnsupported,
+    TableUnavailable,
 }
 
 impl ForwardingDisposition {
@@ -1318,6 +1319,10 @@ impl ForwardingDisposition {
     ///     the same reason as PolicyDenied.
     ///   - `NextTableUnsupported`: Inter-VRF route leaking hit an
     ///     unsupported next-table. Permanent miss, not worth caching.
+    ///   - `TableUnavailable`: the session's installing table is not
+    ///     resolvable in the current config (retired/unknown instance or
+    ///     owner change). Terminal drop, never cached (a re-added table
+    ///     heals through the slow path instead).
     pub(in crate::afxdp) fn is_cacheable(self) -> bool {
         matches!(
             self,
@@ -1387,6 +1392,9 @@ impl ForwardingDisposition {
     ///     invariant this predicate enforces -- a third `next_table` producer,
     ///     or one relaxed guard, would silently reopen the bypass. Fail closed
     ///     here so the dataplane's own posture is correct on its own terms.
+    ///   - `TableUnavailable`: the session's installing table cannot be
+    ///     resolved — there is no table the kernel could correctly forward
+    ///     it in, so unlike `NoRoute` there is nothing to delegate.
     ///   - `ForwardCandidate` / `FabricRedirect`: handled by the forward /
     ///     fabric path, never the generic slow path. Some callers bypass
     ///     this predicate on purpose; the authoritative enumeration lives
@@ -1437,6 +1445,7 @@ impl ForwardingResolution {
                 ForwardingDisposition::MissingNeighbor => "missing_neighbor",
                 ForwardingDisposition::DiscardRoute => "discard_route",
                 ForwardingDisposition::NextTableUnsupported => "next_table_unsupported",
+                ForwardingDisposition::TableUnavailable => "table_unavailable",
             }
             .to_string(),
             local_ifindex: self.local_ifindex,

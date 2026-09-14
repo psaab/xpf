@@ -125,6 +125,7 @@ fn cached_flow_decision_invalidates_when_owner_rg_is_demoted() {
         1,
         false,
         IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)),
+        None,
         resolution
     ));
     assert!(!cached_flow_decision_valid(
@@ -135,6 +136,7 @@ fn cached_flow_decision_invalidates_when_owner_rg_is_demoted() {
         1,
         false,
         IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)),
+        None,
         resolution
     ));
 }
@@ -155,6 +157,7 @@ fn cached_flow_decision_invalidates_fabric_redirect_on_fabric_ingress_when_local
         1,
         true,
         IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)),
+        None,
         resolution
     ));
 }
@@ -176,6 +179,7 @@ fn cached_flow_decision_invalidates_fabric_redirect_on_non_fabric_ingress_when_l
         1,
         false,
         IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)),
+        None,
         resolution
     ));
 }
@@ -196,6 +200,7 @@ fn cached_flow_decision_keeps_fabric_redirect_on_fabric_ingress_when_local_owner
         1,
         true,
         IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)),
+        None,
         resolution
     ));
 }
@@ -216,6 +221,7 @@ fn cached_flow_decision_keeps_fabric_redirect_on_non_fabric_ingress_when_local_o
         1,
         false,
         IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)),
+        None,
         resolution
     ));
 }
@@ -238,6 +244,7 @@ fn cached_local_delivery_decision_invalidates_when_owner_rg_is_demoted() {
         1,
         false,
         IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8)),
+        None,
         resolution
     ));
     assert!(!cached_flow_decision_valid(
@@ -248,6 +255,7 @@ fn cached_local_delivery_decision_invalidates_when_owner_rg_is_demoted() {
         1,
         false,
         IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8)),
+        None,
         resolution
     ));
 }
@@ -329,6 +337,7 @@ fn fabric_ingress_prefers_local_active_owner_resolution_over_fabric_redirect() {
         now_secs,
         true,
         IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)),
+        None,
         redirected,
     );
     assert_eq!(
