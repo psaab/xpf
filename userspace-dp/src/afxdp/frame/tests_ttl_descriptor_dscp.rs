@@ -175,24 +175,21 @@ fn rewrite_forwarded_frame_in_place_keeps_tcp_checksum_valid_after_vlan_snat() {
             options: 0,
         },
         meta,
-        &SessionDecision {
-            resolution: ForwardingResolution {
-                disposition: ForwardingDisposition::ForwardCandidate,
-                local_ifindex: 0,
-                egress_ifindex: 12,
-                tx_ifindex: 11,
-                tunnel_endpoint_id: 0,
-                next_hop: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200))),
-                neighbor_mac: Some([0xba, 0x86, 0xe9, 0xf6, 0x4b, 0xd5]),
-                src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]),
-                tx_vlan_id: 80,
-            },
-            nat: NatDecision {
-                rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
-                rewrite_dst: None,
-                ..NatDecision::default()
-            },
-        },
+        &SessionDecision { resolution: ForwardingResolution {
+            disposition: ForwardingDisposition::ForwardCandidate,
+            local_ifindex: 0,
+            egress_ifindex: 12,
+            tx_ifindex: 11,
+            tunnel_endpoint_id: 0,
+            next_hop: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200))),
+            neighbor_mac: Some([0xba, 0x86, 0xe9, 0xf6, 0x4b, 0xd5]),
+            src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]),
+            tx_vlan_id: 80,
+        }, nat: NatDecision {
+            rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
+            rewrite_dst: None,
+            ..NatDecision::default()
+        }, install_table_domain: 0, install_table_check: 0 },
         false,
         None,
     )
@@ -253,24 +250,21 @@ fn rewrite_forwarded_frame_in_place_keeps_tcp_checksum_valid_after_vlan_dnat() {
             options: 0,
         },
         meta,
-        &SessionDecision {
-            resolution: ForwardingResolution {
-                disposition: ForwardingDisposition::ForwardCandidate,
-                local_ifindex: 0,
-                egress_ifindex: 5,
-                tx_ifindex: 5,
-                tunnel_endpoint_id: 0,
-                next_hop: Some(IpAddr::V4(Ipv4Addr::new(10, 0, 61, 102))),
-                neighbor_mac: Some([0x02, 0x66, 0x6a, 0x82, 0xfb, 0x2f]),
-                src_mac: Some([0x02, 0xbf, 0x72, 0x01, 0x01, 0x00]),
-                tx_vlan_id: 0,
-            },
-            nat: NatDecision {
-                rewrite_src: None,
-                rewrite_dst: Some(IpAddr::V4(Ipv4Addr::new(10, 0, 61, 102))),
-                ..NatDecision::default()
-            },
-        },
+        &SessionDecision { resolution: ForwardingResolution {
+            disposition: ForwardingDisposition::ForwardCandidate,
+            local_ifindex: 0,
+            egress_ifindex: 5,
+            tx_ifindex: 5,
+            tunnel_endpoint_id: 0,
+            next_hop: Some(IpAddr::V4(Ipv4Addr::new(10, 0, 61, 102))),
+            neighbor_mac: Some([0x02, 0x66, 0x6a, 0x82, 0xfb, 0x2f]),
+            src_mac: Some([0x02, 0xbf, 0x72, 0x01, 0x01, 0x00]),
+            tx_vlan_id: 0,
+        }, nat: NatDecision {
+            rewrite_src: None,
+            rewrite_dst: Some(IpAddr::V4(Ipv4Addr::new(10, 0, 61, 102))),
+            ..NatDecision::default()
+        }, install_table_domain: 0, install_table_check: 0 },
         false,
         None,
     )
@@ -323,23 +317,20 @@ fn rewrite_forwarded_frame_in_place_applies_nat_for_fabric_redirect_when_enabled
             options: 0,
         },
         meta,
-        &SessionDecision {
-            resolution: ForwardingResolution {
-                disposition: ForwardingDisposition::FabricRedirect,
-                local_ifindex: 0,
-                egress_ifindex: 21,
-                tx_ifindex: 21,
-                tunnel_endpoint_id: 0,
-                next_hop: Some(IpAddr::V4(Ipv4Addr::new(10, 99, 13, 2))),
-                neighbor_mac: Some([0xba, 0x86, 0xe9, 0xf6, 0x4b, 0xd5]),
-                src_mac: Some([0x02, 0xbf, 0x72, 0xff, 0x00, 0x01]),
-                tx_vlan_id: 0,
-            },
-            nat: NatDecision {
-                rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
-                ..NatDecision::default()
-            },
-        },
+        &SessionDecision { resolution: ForwardingResolution {
+            disposition: ForwardingDisposition::FabricRedirect,
+            local_ifindex: 0,
+            egress_ifindex: 21,
+            tx_ifindex: 21,
+            tunnel_endpoint_id: 0,
+            next_hop: Some(IpAddr::V4(Ipv4Addr::new(10, 99, 13, 2))),
+            neighbor_mac: Some([0xba, 0x86, 0xe9, 0xf6, 0x4b, 0xd5]),
+            src_mac: Some([0x02, 0xbf, 0x72, 0xff, 0x00, 0x01]),
+            tx_vlan_id: 0,
+        }, nat: NatDecision {
+            rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
+            ..NatDecision::default()
+        }, install_table_domain: 0, install_table_check: 0 },
         true,
         None,
     )
@@ -400,23 +391,20 @@ fn rewrite_forwarded_frame_in_place_skips_nat_for_fabric_redirect_when_disabled(
             options: 0,
         },
         meta,
-        &SessionDecision {
-            resolution: ForwardingResolution {
-                disposition: ForwardingDisposition::FabricRedirect,
-                local_ifindex: 0,
-                egress_ifindex: 21,
-                tx_ifindex: 21,
-                tunnel_endpoint_id: 0,
-                next_hop: Some(IpAddr::V4(Ipv4Addr::new(10, 99, 13, 2))),
-                neighbor_mac: Some([0xba, 0x86, 0xe9, 0xf6, 0x4b, 0xd5]),
-                src_mac: Some([0x02, 0xbf, 0x72, 0xff, 0x00, 0x01]),
-                tx_vlan_id: 0,
-            },
-            nat: NatDecision {
-                rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(198, 51, 100, 99))),
-                ..NatDecision::default()
-            },
-        },
+        &SessionDecision { resolution: ForwardingResolution {
+            disposition: ForwardingDisposition::FabricRedirect,
+            local_ifindex: 0,
+            egress_ifindex: 21,
+            tx_ifindex: 21,
+            tunnel_endpoint_id: 0,
+            next_hop: Some(IpAddr::V4(Ipv4Addr::new(10, 99, 13, 2))),
+            neighbor_mac: Some([0xba, 0x86, 0xe9, 0xf6, 0x4b, 0xd5]),
+            src_mac: Some([0x02, 0xbf, 0x72, 0xff, 0x00, 0x01]),
+            tx_vlan_id: 0,
+        }, nat: NatDecision {
+            rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(198, 51, 100, 99))),
+            ..NatDecision::default()
+        }, install_table_domain: 0, install_table_check: 0 },
         false, // apply_nat_on_fabric = false
         None,
     )
@@ -529,20 +517,17 @@ fn rewrite_forwarded_frame_in_place_skips_ttl_when_fabric_ingress_flag_set() {
                 options: 0,
             },
             meta,
-            &SessionDecision {
-                resolution: ForwardingResolution {
-                    disposition: ForwardingDisposition::ForwardCandidate,
-                    local_ifindex: 0,
-                    egress_ifindex: 12,
-                    tx_ifindex: 12,
-                    tunnel_endpoint_id: 0,
-                    next_hop: Some(src_ip),
-                    neighbor_mac: Some([0, 1, 2, 3, 4, 5]),
-                    src_mac: Some([0x02, 0xbf, 0x72, 0xff, 0x00, 0x01]),
-                    tx_vlan_id: 0,
-                },
-                nat: NatDecision::default(),
-            },
+            &SessionDecision { resolution: ForwardingResolution {
+                disposition: ForwardingDisposition::ForwardCandidate,
+                local_ifindex: 0,
+                egress_ifindex: 12,
+                tx_ifindex: 12,
+                tunnel_endpoint_id: 0,
+                next_hop: Some(src_ip),
+                neighbor_mac: Some([0, 1, 2, 3, 4, 5]),
+                src_mac: Some([0x02, 0xbf, 0x72, 0xff, 0x00, 0x01]),
+                tx_vlan_id: 0,
+            }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 },
             false,
             None,
         )
@@ -602,20 +587,17 @@ fn apply_descriptor_ipv4_no_nat_ttl_and_checksum() {
         src_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 1, 102)),
         dst_ip: IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200)),
     };
-    let decision = SessionDecision {
-        resolution: ForwardingResolution {
-            disposition: ForwardingDisposition::ForwardCandidate,
-            egress_ifindex: 12,
-            tx_ifindex: 11,
-            neighbor_mac: Some([0x00, 0x11, 0x22, 0x33, 0x44, 0x55]),
-            src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x50, 0x08]),
-            tx_vlan_id: 0,
-            local_ifindex: 0,
-            tunnel_endpoint_id: 0,
-            next_hop: None,
-        },
-        nat: NatDecision::default(),
-    };
+    let decision = SessionDecision { resolution: ForwardingResolution {
+        disposition: ForwardingDisposition::ForwardCandidate,
+        egress_ifindex: 12,
+        tx_ifindex: 11,
+        neighbor_mac: Some([0x00, 0x11, 0x22, 0x33, 0x44, 0x55]),
+        src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x50, 0x08]),
+        tx_vlan_id: 0,
+        local_ifindex: 0,
+        tunnel_endpoint_id: 0,
+        next_hop: None,
+    }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 };
     let rd = test_descriptor(&flow, &decision, 0, 0x0800);
 
     let rx_addr = 256u64;
@@ -695,23 +677,20 @@ fn apply_descriptor_ipv4_snat_with_vlan() {
         src_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 61, 102)),
         dst_ip: IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200)),
     };
-    let decision = SessionDecision {
-        resolution: ForwardingResolution {
-            disposition: ForwardingDisposition::ForwardCandidate,
-            egress_ifindex: 12,
-            tx_ifindex: 11,
-            neighbor_mac: Some([0xba, 0x86, 0xe9, 0xf6, 0x4b, 0xd5]),
-            src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]),
-            tx_vlan_id: 80,
-            local_ifindex: 0,
-            tunnel_endpoint_id: 0,
-            next_hop: None,
-        },
-        nat: NatDecision {
-            rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
-            ..NatDecision::default()
-        },
-    };
+    let decision = SessionDecision { resolution: ForwardingResolution {
+        disposition: ForwardingDisposition::ForwardCandidate,
+        egress_ifindex: 12,
+        tx_ifindex: 11,
+        neighbor_mac: Some([0xba, 0x86, 0xe9, 0xf6, 0x4b, 0xd5]),
+        src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]),
+        tx_vlan_id: 80,
+        local_ifindex: 0,
+        tunnel_endpoint_id: 0,
+        next_hop: None,
+    }, nat: NatDecision {
+        rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
+        ..NatDecision::default()
+    }, install_table_domain: 0, install_table_check: 0 };
     let rd = test_descriptor(&flow, &decision, 80, 0x0800);
 
     let rx_addr = 256u64;
@@ -795,23 +774,20 @@ fn apply_descriptor_fabric_redirect_skips_nat_when_flag_is_false() {
         src_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 61, 102)),
         dst_ip: IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200)),
     };
-    let decision = SessionDecision {
-        resolution: ForwardingResolution {
-            disposition: ForwardingDisposition::FabricRedirect,
-            egress_ifindex: 21,
-            tx_ifindex: 21,
-            neighbor_mac: Some([0xba, 0x86, 0xe9, 0xf6, 0x4b, 0xd5]),
-            src_mac: Some([0x02, 0xbf, 0x72, 0xff, 0x00, 0x01]),
-            tx_vlan_id: 0,
-            local_ifindex: 0,
-            tunnel_endpoint_id: 0,
-            next_hop: None,
-        },
-        nat: NatDecision {
-            rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
-            ..NatDecision::default()
-        },
-    };
+    let decision = SessionDecision { resolution: ForwardingResolution {
+        disposition: ForwardingDisposition::FabricRedirect,
+        egress_ifindex: 21,
+        tx_ifindex: 21,
+        neighbor_mac: Some([0xba, 0x86, 0xe9, 0xf6, 0x4b, 0xd5]),
+        src_mac: Some([0x02, 0xbf, 0x72, 0xff, 0x00, 0x01]),
+        tx_vlan_id: 0,
+        local_ifindex: 0,
+        tunnel_endpoint_id: 0,
+        next_hop: None,
+    }, nat: NatDecision {
+        rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
+        ..NatDecision::default()
+    }, install_table_domain: 0, install_table_check: 0 };
     let mut rd = test_descriptor(&flow, &decision, 0, 0x0800);
     rd.apply_nat_on_fabric = false;
 
@@ -886,23 +862,20 @@ fn apply_descriptor_ipv4_dnat_removes_vlan() {
         src_ip: IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200)),
         dst_ip: IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8)),
     };
-    let decision = SessionDecision {
-        resolution: ForwardingResolution {
-            disposition: ForwardingDisposition::ForwardCandidate,
-            egress_ifindex: 5,
-            tx_ifindex: 5,
-            neighbor_mac: Some([0x02, 0x66, 0x6a, 0x82, 0xfb, 0x2f]),
-            src_mac: Some([0x02, 0xbf, 0x72, 0x01, 0x01, 0x00]),
-            tx_vlan_id: 0,
-            local_ifindex: 0,
-            tunnel_endpoint_id: 0,
-            next_hop: None,
-        },
-        nat: NatDecision {
-            rewrite_dst: Some(IpAddr::V4(Ipv4Addr::new(10, 0, 61, 102))),
-            ..NatDecision::default()
-        },
-    };
+    let decision = SessionDecision { resolution: ForwardingResolution {
+        disposition: ForwardingDisposition::ForwardCandidate,
+        egress_ifindex: 5,
+        tx_ifindex: 5,
+        neighbor_mac: Some([0x02, 0x66, 0x6a, 0x82, 0xfb, 0x2f]),
+        src_mac: Some([0x02, 0xbf, 0x72, 0x01, 0x01, 0x00]),
+        tx_vlan_id: 0,
+        local_ifindex: 0,
+        tunnel_endpoint_id: 0,
+        next_hop: None,
+    }, nat: NatDecision {
+        rewrite_dst: Some(IpAddr::V4(Ipv4Addr::new(10, 0, 61, 102))),
+        ..NatDecision::default()
+    }, install_table_domain: 0, install_table_check: 0 };
     let rd = test_descriptor(&flow, &decision, 0, 0x0800);
 
     let mut area = MmapArea::new(4096).expect("mmap");
@@ -990,20 +963,17 @@ fn apply_descriptor_ipv6_no_nat_hop_limit() {
         src_ip: IpAddr::V6(src),
         dst_ip: IpAddr::V6(dst),
     };
-    let decision = SessionDecision {
-        resolution: ForwardingResolution {
-            disposition: ForwardingDisposition::ForwardCandidate,
-            egress_ifindex: 12,
-            tx_ifindex: 11,
-            neighbor_mac: Some([0x00, 0x11, 0x22, 0x33, 0x44, 0x55]),
-            src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x50, 0x08]),
-            tx_vlan_id: 0,
-            local_ifindex: 0,
-            tunnel_endpoint_id: 0,
-            next_hop: None,
-        },
-        nat: NatDecision::default(),
-    };
+    let decision = SessionDecision { resolution: ForwardingResolution {
+        disposition: ForwardingDisposition::ForwardCandidate,
+        egress_ifindex: 12,
+        tx_ifindex: 11,
+        neighbor_mac: Some([0x00, 0x11, 0x22, 0x33, 0x44, 0x55]),
+        src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x50, 0x08]),
+        tx_vlan_id: 0,
+        local_ifindex: 0,
+        tunnel_endpoint_id: 0,
+        next_hop: None,
+    }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 };
     let rd = test_descriptor(&flow, &decision, 0, 0x86dd);
 
     let mut area = MmapArea::new(4096).expect("mmap");
@@ -1080,20 +1050,17 @@ fn apply_descriptor_returns_none_on_port_mismatch() {
         src_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 1, 102)),
         dst_ip: IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200)),
     };
-    let decision = SessionDecision {
-        resolution: ForwardingResolution {
-            disposition: ForwardingDisposition::ForwardCandidate,
-            egress_ifindex: 12,
-            tx_ifindex: 11,
-            neighbor_mac: Some([0x00, 0x11, 0x22, 0x33, 0x44, 0x55]),
-            src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x50, 0x08]),
-            tx_vlan_id: 0,
-            local_ifindex: 0,
-            tunnel_endpoint_id: 0,
-            next_hop: None,
-        },
-        nat: NatDecision::default(),
-    };
+    let decision = SessionDecision { resolution: ForwardingResolution {
+        disposition: ForwardingDisposition::ForwardCandidate,
+        egress_ifindex: 12,
+        tx_ifindex: 11,
+        neighbor_mac: Some([0x00, 0x11, 0x22, 0x33, 0x44, 0x55]),
+        src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x50, 0x08]),
+        tx_vlan_id: 0,
+        local_ifindex: 0,
+        tunnel_endpoint_id: 0,
+        next_hop: None,
+    }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 };
     let rd = test_descriptor(&flow, &decision, 0, 0x0800);
 
     let mut area = MmapArea::new(4096).expect("mmap");

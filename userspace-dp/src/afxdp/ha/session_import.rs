@@ -1155,6 +1155,8 @@ impl crate::afxdp::ha::SessionDomain {
             decision: SessionDecision {
                 resolution,
                 nat: NatDecision::default(),
+                install_table_domain: 0,
+                install_table_check: 0,
             },
             metadata,
             origin: SessionOrigin::ForwardFlow,

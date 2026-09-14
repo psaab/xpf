@@ -469,9 +469,9 @@ const PENDING_NEIGH_TIMEOUT_NS: u64 = 2_000_000_000; // 2 seconds
 // (the #1782 H5 sibling-drop signal). This cap therefore bounds DISTINCT
 // unresolved next-hops per binding, and pins at most one UMEM frame per
 // hop — a SYN flood to one dead host holds 1 entry, not 4096.
-// PendingNeighPacket is 264 B on x86_64 (XdpDesc + UserspaceDpMeta +
+// PendingNeighPacket is 288 B on x86_64 (XdpDesc + UserspaceDpMeta +
 // SessionDecision + flow key + queued_ns + probe_attempts), so the
-// worst case is ~1.0 MiB per binding — but reaching it now requires
+// worst case is ~1.1 MiB per binding — but reaching it now requires
 // 4096 *distinct* unresolved hops (a scan-shaped workload), not a
 // connect burst. The map is lazily allocated (`FastMap::default()` at
 // worker init — see worker/mod.rs), keeping idle-binding RSS near zero.

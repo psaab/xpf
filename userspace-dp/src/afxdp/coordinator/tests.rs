@@ -8498,24 +8498,21 @@ fn f4_seed_shared_only(
     // fix applied.
     let entry = crate::afxdp::worker::SyncedSessionEntry {
         key: key.clone(),
-        decision: crate::afxdp::SessionDecision {
-            resolution: crate::afxdp::ForwardingResolution {
-                disposition: crate::afxdp::ForwardingDisposition::ForwardCandidate,
-                local_ifindex: 0,
-                egress_ifindex: 12,
-                tx_ifindex: 12,
-                tunnel_endpoint_id: 0,
-                next_hop: None,
-                neighbor_mac: None,
-                src_mac: None,
-                tx_vlan_id: 0,
-            },
-            nat: crate::nat::NatDecision {
-                rewrite_src: Some(translated.ip),
-                rewrite_src_port: Some(translated.port),
-                ..crate::nat::NatDecision::default()
-            },
-        },
+        decision: crate::afxdp::SessionDecision { resolution: crate::afxdp::ForwardingResolution {
+            disposition: crate::afxdp::ForwardingDisposition::ForwardCandidate,
+            local_ifindex: 0,
+            egress_ifindex: 12,
+            tx_ifindex: 12,
+            tunnel_endpoint_id: 0,
+            next_hop: None,
+            neighbor_mac: None,
+            src_mac: None,
+            tx_vlan_id: 0,
+        }, nat: crate::nat::NatDecision {
+            rewrite_src: Some(translated.ip),
+            rewrite_src_port: Some(translated.port),
+            ..crate::nat::NatDecision::default()
+        }, install_table_domain: 0, install_table_check: 0 },
         metadata: crate::session::SessionMetadata {
             ingress_zone: 1,
             egress_zone: 2,

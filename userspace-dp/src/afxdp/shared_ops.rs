@@ -990,15 +990,12 @@ pub(super) fn build_reverse_session_from_forward_match(
         policy_counter_idx: forward_match.metadata.policy_counter_idx,
         policy_counter: forward_match.metadata.policy_counter.clone(),
     };
-    let decision = SessionDecision {
-        resolution: redirect_session_resolution_for_metadata(forwarding, resolution, &metadata),
-        nat: forward_match.decision.nat.reverse(
-            forward_match.key.src_ip,
-            forward_match.key.dst_ip,
-            forward_match.key.src_port,
-            forward_match.key.dst_port,
-        ),
-    };
+    let decision = SessionDecision { resolution: redirect_session_resolution_for_metadata(forwarding, resolution, &metadata), nat: forward_match.decision.nat.reverse(
+        forward_match.key.src_ip,
+        forward_match.key.dst_ip,
+        forward_match.key.src_port,
+        forward_match.key.dst_port,
+    ), install_table_domain: 0, install_table_check: 0 };
     SessionLookup { decision, metadata }
 }
 

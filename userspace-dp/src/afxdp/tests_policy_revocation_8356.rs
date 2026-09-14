@@ -128,20 +128,17 @@ fn flow_key_to(dst: Ipv4Addr) -> crate::session::SessionKey {
 /// models the unresolvable case (a peer-synced import for an inactive RG keeps
 /// `NoRoute`/0).
 fn decision(egress_ifindex: i32) -> SessionDecision {
-    SessionDecision {
-        resolution: ForwardingResolution {
-            disposition: ForwardingDisposition::ForwardCandidate,
-            local_ifindex: 0,
-            egress_ifindex,
-            tx_ifindex: egress_ifindex,
-            tunnel_endpoint_id: 0,
-            next_hop: Some(IpAddr::V4(DST)),
-            neighbor_mac: Some([0x00, 0xaa, 0xbb, 0xcc, 0xdd, 0xee]),
-            src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]),
-            tx_vlan_id: 80,
-        },
-        nat: NatDecision::default(),
-    }
+    SessionDecision { resolution: ForwardingResolution {
+        disposition: ForwardingDisposition::ForwardCandidate,
+        local_ifindex: 0,
+        egress_ifindex,
+        tx_ifindex: egress_ifindex,
+        tunnel_endpoint_id: 0,
+        next_hop: Some(IpAddr::V4(DST)),
+        neighbor_mac: Some([0x00, 0xaa, 0xbb, 0xcc, 0xdd, 0xee]),
+        src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]),
+        tx_vlan_id: 80,
+    }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 }
 }
 
 /// `is_reverse` and the zone pair are the two axes these cells vary. A REVERSE

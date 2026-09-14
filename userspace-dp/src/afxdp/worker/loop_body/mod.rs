@@ -2049,14 +2049,11 @@ mod flow_cache_invalidation_tests {
     }
 
     fn reap_decision(snat_port: Option<u16>) -> SessionDecision {
-        SessionDecision {
-            resolution: reap_resolution(),
-            nat: NatDecision {
-                rewrite_src: snat_port.map(|_| IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
-                rewrite_src_port: snat_port,
-                ..NatDecision::default()
-            },
-        }
+        SessionDecision { resolution: reap_resolution(), nat: NatDecision {
+            rewrite_src: snat_port.map(|_| IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
+            rewrite_src_port: snat_port,
+            ..NatDecision::default()
+        }, install_table_domain: 0, install_table_check: 0 }
     }
 
     fn insert_cache_entry(binding: &mut BindingWorker, key: &SessionKey, snat_port: Option<u16>) {
@@ -2748,20 +2745,17 @@ mod gc_reap_source_nat_release_tests_6901 {
     fn expired_for(src_port: u16, pool_addr: Ipv4Addr, snat_port: u16) -> ExpiredSession {
         ExpiredSession {
             key: key_for(src_port),
-            decision: SessionDecision {
-                resolution: ForwardingResolution {
-                    disposition: ForwardingDisposition::ForwardCandidate,
-                    local_ifindex: 0,
-                    egress_ifindex: 12,
-                    tx_ifindex: 12,
-                    tunnel_endpoint_id: 0,
-                    next_hop: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 50, 1))),
-                    neighbor_mac: Some([0, 1, 2, 3, 4, 5]),
-                    src_mac: Some([6, 7, 8, 9, 10, 11]),
-                    tx_vlan_id: 0,
-                },
-                nat: nat_for(pool_addr, snat_port),
-            },
+            decision: SessionDecision { resolution: ForwardingResolution {
+                disposition: ForwardingDisposition::ForwardCandidate,
+                local_ifindex: 0,
+                egress_ifindex: 12,
+                tx_ifindex: 12,
+                tunnel_endpoint_id: 0,
+                next_hop: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 50, 1))),
+                neighbor_mac: Some([0, 1, 2, 3, 4, 5]),
+                src_mac: Some([6, 7, 8, 9, 10, 11]),
+                tx_vlan_id: 0,
+            }, nat: nat_for(pool_addr, snat_port), install_table_domain: 0, install_table_check: 0 },
             metadata: metadata(),
             origin: SessionOrigin::ForwardFlow,
         }
@@ -2949,20 +2943,17 @@ mod gc_reap_nat64_release_tests_7740 {
     fn expired(key: SessionKey, nat: crate::nat::NatDecision) -> ExpiredSession {
         ExpiredSession {
             key,
-            decision: SessionDecision {
-                resolution: ForwardingResolution {
-                    disposition: ForwardingDisposition::ForwardCandidate,
-                    local_ifindex: 0,
-                    egress_ifindex: 12,
-                    tx_ifindex: 12,
-                    tunnel_endpoint_id: 0,
-                    next_hop: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 50, 1))),
-                    neighbor_mac: Some([0, 1, 2, 3, 4, 5]),
-                    src_mac: Some([6, 7, 8, 9, 10, 11]),
-                    tx_vlan_id: 0,
-                },
-                nat,
-            },
+            decision: SessionDecision { resolution: ForwardingResolution {
+                disposition: ForwardingDisposition::ForwardCandidate,
+                local_ifindex: 0,
+                egress_ifindex: 12,
+                tx_ifindex: 12,
+                tunnel_endpoint_id: 0,
+                next_hop: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 50, 1))),
+                neighbor_mac: Some([0, 1, 2, 3, 4, 5]),
+                src_mac: Some([6, 7, 8, 9, 10, 11]),
+                tx_vlan_id: 0,
+            }, nat, install_table_domain: 0, install_table_check: 0 },
             metadata: metadata(),
             origin: SessionOrigin::ForwardFlow,
         }

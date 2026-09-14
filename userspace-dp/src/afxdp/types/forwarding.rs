@@ -30,6 +30,22 @@ impl std::fmt::Debug for SynCookieMasterKey {
     }
 }
 
+/// #9752: one installing-table registry row: the instance's canonical
+/// per-family route tables, preformed at build so re-resolve borrows them
+/// with zero per-packet allocation.
+///
+/// `None` per family means that family has no dataplane presence (no routes,
+/// connected, or local attribution) — re-resolve treats it as absent-family
+/// (local-or-terminal, never a wrong-table lookup and never a stale cached
+/// serve). `h2` is the owner check for the row's instance name, verified on
+/// every use (see [`install_table_identity`](crate::session::install_table_identity)).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(in crate::afxdp) struct InstallTables {
+    pub(in crate::afxdp) v4: Option<String>,
+    pub(in crate::afxdp) v6: Option<String>,
+    pub(in crate::afxdp) h2: u32,
+}
+
 #[derive(Clone, Debug, Default)]
 pub(in crate::afxdp) struct ForwardingState {
     pub(in crate::afxdp) local_v4: FastSet<Ipv4Addr>,
@@ -92,6 +108,16 @@ pub(in crate::afxdp) struct ForwardingState {
     pub(in crate::afxdp) connected_v6: Vec<ConnectedRouteV6>,
     pub(in crate::afxdp) routes_v4: FastMap<String, Vec<RouteEntryV4>>,
     pub(in crate::afxdp) routes_v6: FastMap<String, Vec<RouteEntryV6>>,
+    /// #9752: installing-table registry: stable domain id → the instance's
+    /// canonical per-family route tables + owner check. Re-resolve looks the
+    /// session's `install_table_domain` up here to recover the table string;
+    /// a nonzero domain with no row (retired/unknown instance) or a check
+    /// mismatch (successive-config aliasing) fails closed instead of
+    /// resolving in the default table. Domain 0 (default) is by rule, never
+    /// a row. Built once per config in `forwarding_build` (scan of route
+    /// keys + connected tables + local attributions); read on re-resolve
+    /// paths only, never per packet.
+    pub(in crate::afxdp) install_tables: FastMap<u32, InstallTables>,
     pub(in crate::afxdp) tunnel_endpoints: FastMap<u16, TunnelEndpoint>,
     pub(in crate::afxdp) tunnel_endpoint_by_ifindex: FastMap<i32, u16>,
     /// #2327: kind-segregated, outer-tuple-keyed index for the GRE
