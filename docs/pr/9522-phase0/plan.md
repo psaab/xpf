@@ -31,7 +31,8 @@ severity only. V2 dispositions, each mapped:
 - Fixture constraints (Astra): positive distinct ifindices, tunnel IDs zero, empty static AND
   dynamic neighbor maps, no local-address membership in probe ranges; unresolved-interface
   gateway (ifindex 0) ⇒ `NoRoute` documented, not asserted otherwise; outside-prefix miss in a
-  populated table; IPv6 canonical builder-to-lookup case.
+  populated table; IPv6 canonical normalization cited from `forwarding/tests.rs:2746` (not
+  duplicated — no new builder-to-lookup canonical cell in this corpus).
 - Wording: "selected lookup-semantic coverage" (not equivalence proof); "repeat-run check"
   (not determinism proof); scoped-diff no-production rule (not `git status` prose);
   home-package Go gate only.
@@ -107,10 +108,11 @@ Cells (each `(disposition, egress)` + named revert; `*_9522` names):
    winner ∈ slice over dst sweep via plain wrapper); `destination_repeatability_9522` (same dst
    twice ⇒ same winner; NO exact dst→member maps — F6). Liveness-robust by construction
    (shared liveness state ⇒ identical selection either arm).
-10. `noroute_empty_table_9522` + `noroute_outside_prefix_populated_table_9522`: `(NoRoute, 0)` both.
+10. `noroute_no_static_routes_9522` + `noroute_outside_prefix_populated_table_9522`: `(NoRoute, 0)` both.
 11. v6 twins: longest-beats-preference, same-pref-wins, connected 3 relations, NoRoute (the v6
-    preference tie-break has NO tree coverage — NOVEL). Plus builder-to-lookup IPv6
-    canonical-table case (Astra: distinct coverage).
+    preference tie-break has NO tree coverage — NOVEL). IPv6 canonical-table normalization is
+    cited from `forwarding/tests.rs:2746`, not duplicated (Astra's distinct-coverage ask is met
+    by citation: that test resolves through the normalized table).
 - Cell 12 DROPPED (dup of 3315-3362); one doc line cites it. Unresolved-interface gateway
   (ifindex 0) ⇒ `NoRoute` documented in fixture notes (Astra constraint).
 

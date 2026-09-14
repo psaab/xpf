@@ -172,6 +172,7 @@ fn same_prefix_lowest_preference_wins_9522() {
         v4_route("172.16.0.0/12", vec!["192.0.2.1"], 7),
     ]);
     let r = resolve_v4(&state, Ipv4Addr::new(172, 16, 5, 5));
+    assert_eq!(r.disposition, ForwardingDisposition::MissingNeighbor);
     assert_eq!(r.egress_ifindex, 11, "lowest preference (5) must win");
 }
 
@@ -184,6 +185,7 @@ fn equal_preference_keeps_insertion_order_9522() {
         v4_route("198.51.100.0/24", vec!["10.99.0.2"], 5),
     ]);
     let r = resolve_v4(&state, Ipv4Addr::new(198, 51, 100, 7));
+    assert_eq!(r.disposition, ForwardingDisposition::MissingNeighbor);
     assert_eq!(
         r.egress_ifindex, 12,
         "stable sort must keep the first-inserted equal route winning"
@@ -201,6 +203,7 @@ fn reversed_tie_changes_winner_9522() {
         v4_route("198.51.100.0/24", vec!["192.0.2.1"], 5),
     ]);
     let r = resolve_v4(&state, Ipv4Addr::new(198, 51, 100, 7));
+    assert_eq!(r.disposition, ForwardingDisposition::MissingNeighbor);
     assert_eq!(
         r.egress_ifindex, 11,
         "reversed insertion order must reverse the tied winner"
@@ -210,18 +213,41 @@ fn reversed_tie_changes_winner_9522() {
 /// Order-independence holds ONLY for distinct (prefix, preference) keys — the
 /// same set built in two snapshot orders resolves identically over a sweep
 /// (this is the property a chunked transfer's sort-then-install relies on).
+/// The 10/8 + 10.1/16 overlap is load-bearing: without prefix-length sorting,
+/// forward insertion order finds the /8 first (egress 12) for 10.1.x.x probes.
 #[test]
 fn distinct_key_reassembly_order_independent_9522() {
     let forward = state_with(vec![
         v4_route("10.0.0.0/8", vec!["192.0.2.1"], 5),
+        v4_route("10.1.0.0/16", vec!["10.99.0.2"], 5),
         v4_route("172.16.0.0/12", vec!["10.99.0.2"], 5),
-        v4_route("198.51.100.0/24", vec!["192.0.2.1"], 5),
     ]);
     let reversed = state_with(vec![
-        v4_route("198.51.100.0/24", vec!["192.0.2.1"], 5),
         v4_route("172.16.0.0/12", vec!["10.99.0.2"], 5),
+        v4_route("10.1.0.0/16", vec!["10.99.0.2"], 5),
         v4_route("10.0.0.0/8", vec!["192.0.2.1"], 5),
     ]);
+    // Expected winners pin the sort itself, not just cross-order equivalence:
+    // the overlapping /16 must beat the /8 in BOTH orders.
+    for (dst, expected_egress) in [
+        (Ipv4Addr::new(10, 1, 2, 3), 11),
+        (Ipv4Addr::new(10, 2, 2, 2), 12),
+        (Ipv4Addr::new(172, 16, 5, 5), 11),
+    ] {
+        for (which, state) in [("forward", &forward), ("reversed", &reversed)] {
+            let r = resolve_v4(state, dst);
+            assert_eq!(
+                r.disposition,
+                ForwardingDisposition::MissingNeighbor,
+                "{which} build must attribute (dst {dst})"
+            );
+            assert_eq!(
+                r.egress_ifindex, expected_egress,
+                "{which} build must route (dst {dst}) via the longest match"
+            );
+        }
+    }
+    // Cross-order equivalence sweep, including a miss in both builds.
     for octet in [1u8, 2, 3] {
         let probes = [
             Ipv4Addr::new(10, octet, 1, 1),
@@ -277,6 +303,7 @@ fn next_table_loses_longest_match_9522() {
     ];
     let state = build_forwarding_state(&snap);
     let r = resolve_v4(&state, Ipv4Addr::new(10, 2, 3, 4));
+    assert_eq!(r.disposition, ForwardingDisposition::MissingNeighbor);
     assert_eq!(
         r.egress_ifindex, 12,
         "the longer direct /24 must win over the next-table /16"
@@ -303,16 +330,32 @@ fn next_table_unresolvable_chain_is_unsupported_9522() {
     );
 }
 
-/// Empty table ⇒ `(NoRoute, 0)`.
+/// A next-table reference to a MISSING target table terminates as `(NoRoute,
+/// 0)` (the recursion arm finds no table) rather than recursing forever.
 #[test]
-fn noroute_empty_table_9522() {
+fn next_table_missing_target_is_noroute_9522() {
+    let mut snap = base_snapshot();
+    snap.routes = vec![crate::RouteSnapshot {
+        next_table: "missing.inet.0".into(),
+        ..v4_route("10.6.0.0/16", vec![], 5)
+    }];
+    let state = build_forwarding_state(&snap);
+    let r = resolve_v4(&state, Ipv4Addr::new(10, 6, 1, 1));
+    assert_eq!(r.disposition, ForwardingDisposition::NoRoute);
+    assert_eq!(r.egress_ifindex, 0);
+}
+
+/// No STATIC routes (connected /24s+/64s from the fixture interfaces are still
+/// present) ⇒ `(NoRoute, 0)` for an unconnected probe.
+#[test]
+fn noroute_no_static_routes_9522() {
     let state = state_with(vec![]);
     let r = resolve_v4(&state, Ipv4Addr::new(203, 0, 113, 9));
     assert_eq!(r.disposition, ForwardingDisposition::NoRoute);
     assert_eq!(r.egress_ifindex, 0);
 }
 
-/// A miss inside a POPULATED table is also `(NoRoute, 0)` — empty-table
+/// A miss inside a POPULATED table is also `(NoRoute, 0)` — no-static-routes
 /// coverage alone does not pin the populated-table miss path.
 #[test]
 fn noroute_outside_prefix_populated_table_9522() {
@@ -331,6 +374,7 @@ fn noroute_outside_prefix_populated_table_9522() {
 fn connected_longer_than_route_wins_9522() {
     let state = state_with(vec![v4_route("192.0.0.0/16", vec!["10.99.0.2"], 5)]);
     let r = resolve_v4(&state, Ipv4Addr::new(192, 0, 2, 50));
+    assert_eq!(r.disposition, ForwardingDisposition::MissingNeighbor);
     assert_eq!(r.egress_ifindex, 12, "longer connected /24 must win");
 }
 
@@ -339,6 +383,7 @@ fn connected_longer_than_route_wins_9522() {
 fn connected_equal_to_route_wins_9522() {
     let state = state_with(vec![v4_route("192.0.2.0/24", vec!["10.99.0.2"], 1)]);
     let r = resolve_v4(&state, Ipv4Addr::new(192, 0, 2, 50));
+    assert_eq!(r.disposition, ForwardingDisposition::MissingNeighbor);
     assert_eq!(
         r.egress_ifindex, 12,
         "equal-length connected must win over the static, preference notwithstanding"
@@ -350,6 +395,7 @@ fn connected_equal_to_route_wins_9522() {
 fn connected_shorter_than_route_loses_9522() {
     let state = state_with(vec![v4_route("10.99.0.128/25", vec!["192.0.2.1"], 5)]);
     let r = resolve_v4(&state, Ipv4Addr::new(10, 99, 0, 130));
+    assert_eq!(r.disposition, ForwardingDisposition::MissingNeighbor);
     assert_eq!(r.egress_ifindex, 12, "longer static /25 must win");
 }
 
@@ -401,6 +447,8 @@ fn connected_is_table_scoped_9522() {
         IpAddr::V4(Ipv4Addr::new(10, 99, 1, 50)),
         Some("blue.inet.0"),
     );
+    assert_eq!(red.disposition, ForwardingDisposition::MissingNeighbor);
+    assert_eq!(blue.disposition, ForwardingDisposition::MissingNeighbor);
     assert_eq!(red.egress_ifindex, 101, "red lookup must use red's interface");
     assert_eq!(blue.egress_ifindex, 202, "blue lookup must use blue's interface");
 }
@@ -422,8 +470,12 @@ fn ecmp_exact_member_at_explicit_hash_9522() {
         5,
     )]);
     let dst = Ipv4Addr::new(203, 0, 113, 7);
-    assert_eq!(resolve_ecmp_v4(&state, dst, 0).egress_ifindex, 11);
-    assert_eq!(resolve_ecmp_v4(&state, dst, 1).egress_ifindex, 12);
+    let r0 = resolve_ecmp_v4(&state, dst, 0);
+    let r1 = resolve_ecmp_v4(&state, dst, 1);
+    assert_eq!(r0.disposition, ForwardingDisposition::MissingNeighbor);
+    assert_eq!(r1.disposition, ForwardingDisposition::MissingNeighbor);
+    assert_eq!(r0.egress_ifindex, 11);
+    assert_eq!(r1.egress_ifindex, 12);
 }
 
 /// Reordered authored slice swaps the winners — selection is authored-order
@@ -436,8 +488,12 @@ fn ecmp_reordered_slice_swaps_winners_9522() {
         5,
     )]);
     let dst = Ipv4Addr::new(203, 0, 113, 7);
-    assert_eq!(resolve_ecmp_v4(&state, dst, 0).egress_ifindex, 12);
-    assert_eq!(resolve_ecmp_v4(&state, dst, 1).egress_ifindex, 11);
+    let r0 = resolve_ecmp_v4(&state, dst, 0);
+    let r1 = resolve_ecmp_v4(&state, dst, 1);
+    assert_eq!(r0.disposition, ForwardingDisposition::MissingNeighbor);
+    assert_eq!(r1.disposition, ForwardingDisposition::MissingNeighbor);
+    assert_eq!(r0.egress_ifindex, 12);
+    assert_eq!(r1.egress_ifindex, 11);
 }
 
 /// Sweep containment + per-destination repeatability via the PLAIN wrapper
@@ -480,6 +536,7 @@ fn v6_longest_match_beats_better_preference_9522() {
     ];
     let state = build_forwarding_state(&snap);
     let r = resolve_v6(&state, "2001:db8:100::5".parse().unwrap());
+    assert_eq!(r.disposition, ForwardingDisposition::MissingNeighbor);
     assert_eq!(r.egress_ifindex, 11, "longest v6 match must win over preference");
 }
 
@@ -492,6 +549,7 @@ fn v6_same_prefix_lowest_preference_wins_9522() {
     ];
     let state = build_forwarding_state(&snap);
     let r = resolve_v6(&state, "2001:db8:200::7".parse().unwrap());
+    assert_eq!(r.disposition, ForwardingDisposition::MissingNeighbor);
     assert_eq!(r.egress_ifindex, 11, "lowest v6 preference must win");
 }
 
@@ -501,6 +559,7 @@ fn v6_connected_longer_than_route_wins_9522() {
     snap.routes = vec![v6_route("2001:db8::/32", vec!["2001:db8:99::2"], 5)];
     let state = build_forwarding_state(&snap);
     let r = resolve_v6(&state, "2001:db8:98::50".parse().unwrap());
+    assert_eq!(r.disposition, ForwardingDisposition::MissingNeighbor);
     assert_eq!(r.egress_ifindex, 12, "longer connected v6 /64 must win");
 }
 
@@ -510,6 +569,7 @@ fn v6_connected_equal_to_route_wins_9522() {
     snap.routes = vec![v6_route("2001:db8:98::/64", vec!["2001:db8:99::2"], 1)];
     let state = build_forwarding_state(&snap);
     let r = resolve_v6(&state, "2001:db8:98::50".parse().unwrap());
+    assert_eq!(r.disposition, ForwardingDisposition::MissingNeighbor);
     assert_eq!(r.egress_ifindex, 12, "equal-length connected v6 must win");
 }
 
@@ -519,11 +579,12 @@ fn v6_connected_shorter_than_route_loses_9522() {
     snap.routes = vec![v6_route("2001:db8:99::/80", vec!["2001:db8:98::2"], 5)];
     let state = build_forwarding_state(&snap);
     let r = resolve_v6(&state, "2001:db8:99::130".parse().unwrap());
+    assert_eq!(r.disposition, ForwardingDisposition::MissingNeighbor);
     assert_eq!(r.egress_ifindex, 12, "longer static v6 /80 must win");
 }
 
 #[test]
-fn v6_noroute_empty_table_9522() {
+fn v6_noroute_no_static_routes_9522() {
     let snap = base_snapshot();
     let state = build_forwarding_state(&snap);
     let r = resolve_v6(&state, "2001:db8:100::9".parse().unwrap());
