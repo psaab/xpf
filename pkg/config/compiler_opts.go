@@ -1375,6 +1375,16 @@ type compileOpts struct {
 	// precedence (discard > next-table > next-hop). Same doctrine as
 	// lenientNextTableRefs.
 	lenientRouteDispositionConflict bool
+	// lenientStaticNextHopFamily (#9820) downgrades the static-route
+	// next-hop family gate (validateStaticNextHopFamilyStrict) from a hard
+	// compile error to a cfg.Warnings entry. An IPv6 static route with an
+	// IPv4 next-hop renders a line FRR cannot use as a gateway route, so
+	// the strict commit / commit-check path hard-rejects it; the tolerant
+	// load / peer-sync paths warn so an already-persisted or peer-synced
+	// config still BOOTS (#1960) — the renderer skips the offending
+	// next-hop with a warning. Same doctrine as
+	// lenientRouteDispositionConflict.
+	lenientStaticNextHopFamily bool
 	// lenientDHCPStaticBindings (#2243 review) downgrades the DHCP-server
 	// static (fixed/reserved) host-binding gate (validateDHCPStaticBindingsStrict)
 	// from a hard compile error to a cfg.Warnings entry. The strict commit /
@@ -2848,6 +2858,7 @@ func lenientCompileOpts() compileOpts {
 		lenientRoutingRuleWindows:              true,
 		lenientPolicyRouteMapSeq:               true,
 		lenientRouteDispositionConflict:        true,
+		lenientStaticNextHopFamily:             true,
 		lenientDHCPStaticBindings:              true,
 		lenientDHCPPoolSubnets:                 true,
 		lenientWireguardPeers:                  true,

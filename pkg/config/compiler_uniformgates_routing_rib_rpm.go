@@ -111,6 +111,29 @@ func runUniformGatesRoutingRibRPM(tree *ConfigTree, cfg *Config, opts compileOpt
 		}
 	}
 
+	// #9820: static-route next-hop family gate. An IPv6 static route with
+	// an IPv4 next-hop commits clean today and renders `ipv6 route <v6dst>
+	// <v4nh> [ifname]` — but FRR's `ipv6 route` grammar takes only an
+	// IPv6 gateway or an interface, so the bare form fills the
+	// interface-name slot (normally inactive absent a same-named
+	// interface) and ordinary gateway-plus-interface emissions fail
+	// parsing. The reverse direction (IPv4-via-IPv6) is a valid `ip
+	// route` form and is kept. Strict on commit / commit-check (hard
+	// reject so the unsupported combination is operator-visible); lenient
+	// on load / peer-sync (warn — #1960; the renderer's
+	// generateStaticRouteInTable SKIPS the offending next-hop so a
+	// leniently-loaded config omits it with a warning rather than
+	// poisoning the reload). Mirrors
+	// validateStaticRouteDispositionConflictStrict.
+	if err := validateStaticNextHopFamilyStrict(cfg); err != nil {
+		if opts.lenientStaticNextHopFamily {
+			cfg.Warnings = append(cfg.Warnings,
+				fmt.Sprintf("static route next-hop family (downgraded to warning on tolerant path): %v", err))
+		} else {
+			return err
+		}
+	}
+
 	// #5701: route-map sequence-number overflow gate. A policy-statement whose
 	// per-term Cartesian expansion (families x from-prefix-list x from-community
 	// x from-as-path) produces more sequences than the FRR route-map
