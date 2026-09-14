@@ -511,6 +511,11 @@ fn ecmp_sweep_contained_and_repeatable_9522() {
         let dst = Ipv4Addr::new(203, 0, 113, last);
         let a = resolve_v4(&state, dst);
         let b = resolve_v4(&state, dst);
+        assert_eq!(
+            a.disposition,
+            ForwardingDisposition::MissingNeighbor,
+            "sweep winners attribute via MissingNeighbor (dst {dst})"
+        );
         assert!(
             a.egress_ifindex == 11 || a.egress_ifindex == 12,
             "every ECMP winner must come from the authored slice (dst {dst})"
