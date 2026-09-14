@@ -23,13 +23,15 @@ import (
 //     request carry generation 0 and fails the carry assertion.
 //
 //   - RETRY DEBT: when the helper's ACK (ProcessStatus.ManagerNeighborGeneration)
-//     is BELOW the sent generation — i.e. the replace was fenced as stale — the
-//     manager must NOT advance its cached neighbor view, so the next
-//     regeneration re-diffs and retries. Reverting the ACK check makes the
-//     manager advance m.lastSnapshot.Neighbors even on a non-ack and fails the
-//     debt assertion. The complementary sub-case proves a matching ACK DOES
-//     advance the cached view (so the guard cannot be satisfied by never
-//     advancing).
+//     is anything but the sent generation — i.e. the replace was not
+//     acknowledged — the manager must NOT advance its cached neighbor view,
+//     so the next regeneration re-diffs and retries. (An ACK above gen is the
+//     #6034 fence signature per #9696; a below-gen ACK is unexpected from the
+//     current helper and handled defensively the same way.) Reverting the ACK
+//     check makes the manager advance m.lastSnapshot.Neighbors even on a
+//     non-ack and fails the debt assertion.
+//     The complementary sub-case proves a matching ACK DOES advance the cached
+//     view (so the guard cannot be satisfied by never advancing).
 //
 // The publish path is driven deterministically without kernel neighbor state:
 // a config with no interfaces makes buildNeighborSnapshots return nil, so a
@@ -95,7 +97,7 @@ func TestNeighborReplaceEnvelopeCarriesGenerationAndRetainsRetryDebt(t *testing.
 		return requests[len(requests)-1].NeighborGeneration
 	}
 
-	// --- Sub-case 1: helper fences the replace (ACK below sent gen) ---------
+	// --- Sub-case 1: replace not acknowledged (ACK below sent gen, defensive) --
 	// Manager must retain retry debt: cached neighbor view stays seeded.
 	debtMgr := newManager(4)
 	debtMgr.RegenerateNeighborSnapshot()
@@ -105,9 +107,8 @@ func TestNeighborReplaceEnvelopeCarriesGenerationAndRetainsRetryDebt(t *testing.
 	}
 	debtMgr.mu.Lock()
 	debtNeighbors := append([]NeighborSnapshot(nil), debtMgr.lastSnapshot.Neighbors...)
-	debtMgr.mu.Unlock()
 	if len(debtNeighbors) != 1 || debtNeighbors[0] != seeded {
-		t.Fatalf("RETRY DEBT revert: after a fenced replace (ACK 4 < sent 5) lastSnapshot.Neighbors = %+v, "+
+		t.Fatalf("RETRY DEBT revert: after a non-acknowledged replace (ACK 4 != sent 5) lastSnapshot.Neighbors = %+v, "+
 			"want the seeded entry retained so the next regeneration retries", debtNeighbors)
 	}
 
@@ -121,9 +122,8 @@ func TestNeighborReplaceEnvelopeCarriesGenerationAndRetainsRetryDebt(t *testing.
 	}
 	okMgr.mu.Lock()
 	okNeighbors := append([]NeighborSnapshot(nil), okMgr.lastSnapshot.Neighbors...)
-	okMgr.mu.Unlock()
 	if len(okNeighbors) != 0 {
-		t.Fatalf("acknowledged replace (ACK 5 >= sent 5) must advance the cached neighbor view to empty, "+
+		t.Fatalf("acknowledged replace (ACK 5 == sent 5) must advance the cached neighbor view to empty, "+
 			"got %+v", okNeighbors)
 	}
 }

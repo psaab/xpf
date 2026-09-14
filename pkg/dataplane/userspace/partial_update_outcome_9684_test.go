@@ -398,9 +398,10 @@ func TestAResampleEqualToLastSnapshotIsStillPublished9684(t *testing.T) {
 }
 
 // TestARefusedPartialUpdateMarksNothingAndHoldsNothing9684: an in-band refusal,
-// and a #6034 fence the ACK check recognises, prove the helper kept what it had.
-// Neither may mark the section, and the next publish goes out in the same call
-// carrying lastSnapshot's copy.
+// and a non-acknowledged replace (#6034 defensive mismatch: an ACK other than
+// the sent generation — the current helper's fence always ACKs above it),
+// prove the helper kept what it had. Neither may mark the section, and the
+// next publish goes out in the same call carrying lastSnapshot's copy.
 func TestARefusedPartialUpdateMarksNothingAndHoldsNothing9684(t *testing.T) {
 	neighbors, fabrics := sections9684()[0], sections9684()[1]
 	cells := []struct {
@@ -414,7 +415,7 @@ func TestARefusedPartialUpdateMarksNothingAndHoldsNothing9684(t *testing.T) {
 		{"fabrics refused in band", fabrics, func(rec *partialRecorder9684, _ *Manager) {
 			rec.verbReply = newHelperRejection("update_fabrics refused")
 		}},
-		{"neighbors fenced (#6034)", neighbors, func(rec *partialRecorder9684, m *Manager) {
+		{"neighbors mismatched ACK (#6034 defensive)", neighbors, func(rec *partialRecorder9684, m *Manager) {
 			m.neighborReplaceGen = 4
 			rec.fenceACK = 4
 		}},
@@ -495,7 +496,7 @@ func TestAnUnchangedNeighborSetIsReSentWhileItsOutcomeIsUnknown9684(t *testing.T
 
 // TestAnACKAboveTheSentGenerationKeepsTheSectionUnknown9684: the helper ACKs its
 // applied generation, so an ACK above the one sent means this replace was fenced
-// (#9696 owns the Go check that does not yet recognise that). A landed-looking
+// (#9696: the Go check retains retry debt on that arm). A landed-looking
 // response of that kind must not unmark a section a lost update left unknown.
 func TestAnACKAboveTheSentGenerationKeepsTheSectionUnknown9684(t *testing.T) {
 	for _, s := range neighborSenders9684() {
