@@ -119,10 +119,16 @@ func validFRRRoutePrefix(s string) bool {
 // validFRRNextHopAddress reports whether a next-hop is renderable as a single
 // FRR gateway operand (#6795). Bare address only: FRR's `ip route <p> <gw>`
 // takes an address, and a prefix there is a grammar error that fails the
-// frr-reload.
+// frr-reload. Zoned literals (`fe80::1%eth0`) parse under netip but are
+// rejected too: the commit gate (net.ParseIP) refuses them and FRR's
+// gateway slot has no zone syntax, so emitting one would fail the reload
+// (#9820 GLM-F2 — belt and gate must agree).
 func validFRRNextHopAddress(s string) bool {
-	_, err := netip.ParseAddr(s)
-	return err == nil
+	a, err := netip.ParseAddr(s)
+	if err != nil {
+		return false
+	}
+	return a.Zone() == ""
 }
 
 // validFRRInterfaceOperand reports whether an interface name is renderable as a
@@ -204,29 +210,6 @@ func validBGPOrigin(s string) bool {
 	switch s {
 	case "igp", "egp", "incomplete":
 		return true
-	}
-	return false
-}
-
-// frrOperandIsV6 reports whether a renderable FRR operand — an address or a
-// prefix — is IPv6.
-//
-// #8597: `strings.Contains(s, ":")` is the spelling used inline elsewhere in
-// the renderer and it is adequate there, where both operands have already been
-// derived from the same value. It is NOT adequate for comparing two
-// INDEPENDENT operands' families, which is what the backup-router
-// mismatch check does: the answer decides whether a route is emitted at all,
-// so it should come from the parser rather than from a substring.
-//
-// Callers must have established renderability first (validFRRNextHopAddress /
-// validFRRRoutePrefix); an unparseable operand reports false here, and would
-// have been skipped before reaching this.
-func frrOperandIsV6(s string) bool {
-	if p, err := netip.ParsePrefix(s); err == nil {
-		return p.Addr().Is6() && !p.Addr().Is4In6()
-	}
-	if a, err := netip.ParseAddr(s); err == nil {
-		return a.Is6() && !a.Is4In6()
 	}
 	return false
 }

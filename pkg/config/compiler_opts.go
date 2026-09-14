@@ -1375,6 +1375,16 @@ type compileOpts struct {
 	// precedence (discard > next-table > next-hop). Same doctrine as
 	// lenientNextTableRefs.
 	lenientRouteDispositionConflict bool
+	// lenientStaticNextHopFamily (#9820) downgrades the static-route
+	// next-hop family gate (validateStaticNextHopFamilyStrict) from a hard
+	// compile error to a cfg.Warnings entry. An IPv6 static route with an
+	// IPv4 next-hop renders a line FRR cannot use as a gateway route, so
+	// the strict commit / commit-check path hard-rejects it; the tolerant
+	// load / peer-sync paths warn so an already-persisted or peer-synced
+	// config still BOOTS (#1960) — the renderer skips the offending
+	// next-hop with a warning. Same doctrine as
+	// lenientRouteDispositionConflict.
+	lenientStaticNextHopFamily bool
 	// lenientDHCPStaticBindings (#2243 review) downgrades the DHCP-server
 	// static (fixed/reserved) host-binding gate (validateDHCPStaticBindingsStrict)
 	// from a hard compile error to a cfg.Warnings entry. The strict commit /
@@ -2164,12 +2174,15 @@ type compileOpts struct {
 	// (a v6 next-hop with no explicit destination defaults to ::/0), but an
 	// EXPLICIT destination whose family MISMATCHES the next-hop — e.g.
 	// `backup-router 2001:db8::1` + `destination 0.0.0.0/0` — still renders an
-	// FRR-invalid static line (`ipv6 route 0.0.0.0/0 2001:db8::1 250`).
-	// frr-reload rejects a mismatched-family static and that failure fails the
-	// ENTIRE static config load, not just the one line — exactly the breakage
-	// #2907 set out to prevent. The strict commit / commit-check path hard-
-	// rejects so the operator-error is visible (naming both addresses and
-	// families); the tolerant load / peer-sync paths downgrade to a warning so
+	// FRR-invalid static line (`ipv6 route 0.0.0.0/0 2001:db8::1 250`):
+	// the v4 prefix fails the `ipv6 route` prefix matcher and fails the
+	// static config load. (The reverse arm — v4 next-hop on a v6
+	// destination — instead fills the interface-name slot; #9820
+	// corrected the old blanket "frr-reload rejects a mismatched-family
+	// static" claim to this per-direction account.) The strict commit /
+	// commit-check path hard-rejects so the operator-error is visible
+	// (naming both addresses and families); the tolerant load / peer-sync
+	// paths downgrade to a warning so
 	// an already-persisted or peer-synced config an older binary accepted still
 	// BOOTS (#1960 fail-closed-on-load class). Same doctrine as
 	// lenientReservedZoneNames.
@@ -2848,6 +2861,7 @@ func lenientCompileOpts() compileOpts {
 		lenientRoutingRuleWindows:              true,
 		lenientPolicyRouteMapSeq:               true,
 		lenientRouteDispositionConflict:        true,
+		lenientStaticNextHopFamily:             true,
 		lenientDHCPStaticBindings:              true,
 		lenientDHCPPoolSubnets:                 true,
 		lenientWireguardPeers:                  true,

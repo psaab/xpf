@@ -207,31 +207,3 @@ func TestBackupRouterFixturesReachTheRenderer_8597(t *testing.T) {
 		}
 	}
 }
-
-// TestFRROperandFamilyUsesTheParserNotASubstring_8597 pins the discriminator
-// the mismatch check depends on.
-//
-// The renderer's existing family selection uses strings.Contains(s, ":"), which
-// is adequate where both operands derive from one value. Comparing two
-// INDEPENDENT operands is a different question, and the answer decides whether
-// a route is emitted at all — so it comes from the parser. The cases below are
-// the ones a substring test gets wrong or right for the wrong reason.
-func TestFRROperandFamilyUsesTheParserNotASubstring_8597(t *testing.T) {
-	for _, c := range []struct {
-		in   string
-		want bool
-		note string
-	}{
-		{"192.168.50.1", false, "plain v4 address"},
-		{"10.0.0.0/8", false, "plain v4 prefix"},
-		{"2001:db8::1", true, "plain v6 address"},
-		{"2001:db8::/32", true, "plain v6 prefix"},
-		{"::ffff:192.168.50.1", false, "v4-mapped: colons present, family is v4"},
-		{"::ffff:10.0.0.0/104", false, "v4-mapped prefix: same"},
-		{"not-an-address", false, "unparseable reports false; callers gate on renderability first"},
-	} {
-		if got := frrOperandIsV6(c.in); got != c.want {
-			t.Errorf("frrOperandIsV6(%q) = %v, want %v — %s", c.in, got, c.want, c.note)
-		}
-	}
-}

@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"net"
+	"net/netip"
 	"strconv"
 	"strings"
 )
@@ -202,11 +203,31 @@ func ValidateOSPFArea(raw string, _ *Config) error {
 	if trimmed == "" {
 		return fmt.Errorf("missing value (expected an OSPF area id: an IPv4 dotted-quad like 0.0.0.0, or an integer 0..4294967295)")
 	}
+	// #9820: validate what is emitted. The renderer interpolates the RAW
+	// key; padding that TrimSpace hides would pass here while the RAW key
+	// renders. Padding IS authorable through ordinary ingress (the lexer
+	// preserves quoted-string contents verbatim and the parser accepts
+	// them as path values), so `area " 0.0.0.0 "` commits clean today and
+	// functions (spaces are harmless FRR token separators) — refusing it
+	// is therefore an INTENTIONAL compatibility tightening (option 1):
+	// area IDs must be bare tokens, where bare = unpadded DECODED value
+	// (quotes themselves are fine). Migration: remove quotes/padding.
+	// Newlines need no story here: the #1798 prewalk already rejects
+	// control characters in every key on the strict path and scrubs them
+	// to spaces on the lenient path, so no `\n`-padding ever rendered
+	// split lines; this arm additionally refuses it first, with the
+	// area-specific message. Tolerant path omits-with-warning.
+	if trimmed != raw {
+		return fmt.Errorf("invalid area id %q (leading or trailing whitespace is not allowed; use a bare IPv4 dotted-quad or integer)", raw)
+	}
 	// Dotted-quad form. net.ParseIP rejects a bare integer, so the integer
 	// spelling falls through to the ParseUint arm below.
 	if ip := net.ParseIP(trimmed); ip != nil {
 		if ip.To4() == nil {
 			return fmt.Errorf("invalid area id %q (an IPv6 address is not a valid OSPF area id; use an IPv4 dotted-quad or a 32-bit integer)", raw)
+		}
+		if addr, err := netip.ParseAddr(trimmed); err == nil && addr.Is4In6() {
+			return fmt.Errorf("invalid area id %q (an IPv4-mapped IPv6 literal is not a valid OSPF area id; FRR takes only an IPv4 dotted-quad or a 32-bit integer)", raw)
 		}
 		return nil
 	}

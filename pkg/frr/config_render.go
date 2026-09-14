@@ -138,7 +138,7 @@ func (m *Manager) generateStaticRouteInTable(sr *config.StaticRoute, vrfName str
 	if !validFRRRoutePrefix(sr.Destination) {
 		return ""
 	}
-	isV6 := strings.Contains(sr.Destination, ":")
+	isV6 := config.FRRAddrFamily(sr.Destination) == "v6"
 	prefix := "ip"
 	if isV6 {
 		prefix = "ipv6"
@@ -234,6 +234,28 @@ func (m *Manager) generateStaticRouteInTable(sr *config.StaticRoute, vrfName str
 			continue
 		}
 		if ifName != "" && !validFRRInterfaceOperand(ifName) {
+			continue
+		}
+		// #9820: family belt. An IPv6 destination with an IPv4 next-hop
+		// renders a line FRR cannot use as a gateway route (FRR's `ipv6
+		// route` grammar takes only an IPv6 gateway or an interface), so
+		// the strict gate refuses it at commit and this belt omits the
+		// next-hop — with a warning — on the tolerant load / peer-sync
+		// path. Per-next-hop granularity, like the shape belt: one bad
+		// ECMP member must not kill the good ones.
+		//
+		// Ordering is load-bearing: the destination shape check above
+		// returned early for bad destinations, and the next-hop shape
+		// check `continue`d for non-IP addresses (`@`-forms, bare
+		// interface names), so both operands parse here and the family
+		// comparison cannot misfire.
+		if nh.Address != "" &&
+			config.FRRAddrFamily(sr.Destination) == "v6" &&
+			config.FRRAddrFamily(nh.Address) == "v4" {
+			slog.Warn("frr: skipping a static-route next-hop: IPv6 destination "+
+				"with IPv4 next-hop is unsupported (FRR's ipv6 route grammar takes "+
+				"only an IPv6 gateway or an interface) (#9820)",
+				"destination", sr.Destination, "next_hop", nh.Address)
 			continue
 		}
 		var nexthop string
@@ -486,19 +508,20 @@ func renderBackupRouter(b *strings.Builder, fc *FullConfig) {
 	// the box goes with it, and the operator's log actively points AWAY from
 	// the cause.
 	//
-	// All THREE of the validator's checks are mirrored, not the two an
-	// operand-shape reading suggests. A v4 next-hop with a v6 destination is
+	// All FOUR of the validator's checks are mirrored (malformed next-hop,
+	// mapped next-hop, malformed destination, family mismatch), not the two
+	// an operand-shape reading suggests. A v4 next-hop with a v6 destination
 	// individually well-formed on both operands and still renders
-	// `ipv6 route <v6dst> <v4nh>`, which frr-reload rejects — the #2891 case
-	// the family-selection comment below already describes.
+	// `ipv6 route <v6dst> <v4nh>`, which fills the interface-name slot
+	// (normally inactive absent a same-named interface — #9820 corrected
+	// the old blanket "frr-reload rejects" mechanism claim).
 	//
 	// Skipping is the fail-closed answer, and it is what the validator already
 	// told the operator would happen. The alternative is losing the entire
 	// managed section, which takes the routes that ARE valid with it.
 	if !validFRRNextHopAddress(fc.BackupRouter) {
-		slog.Warn("frr: skipping backup-router default route: next-hop is not a "+
-			"renderable address; a malformed operand fails the entire managed-section "+
-			"reload (the commit-time gate warned this route would be ignored)",
+		slog.Warn("frr: skipping backup-router route: next-hop is not a "+
+			"valid IP gateway address",
 			"next_hop", fc.BackupRouter, "issue", "#8597")
 		return
 	}
@@ -509,22 +532,34 @@ func renderBackupRouter(b *strings.Builder, fc *FullConfig) {
 			"issue", "#8597")
 		return
 	}
+	// #9820: an IPv4-mapped next-hop is refused at commit (product
+	// restriction) and skipped here on the tolerant path, before the
+	// family comparison it would otherwise pass or fail under a false
+	// reason (it previously rendered `ipv6 route ::/0 ::ffff:… 250`).
+	if config.FRRAddrIsMapped(fc.BackupRouter) {
+		slog.Warn("frr: skipping backup-router route: IPv4-mapped IPv6 "+
+			"next-hops are not supported for backup-router (the commit-time "+
+			"gate warned this route would be ignored)",
+			"next_hop", fc.BackupRouter, "issue", "#9820")
+		return
+	}
 	if fc.BackupRouterDst != "" &&
-		frrOperandIsV6(fc.BackupRouterDst) != frrOperandIsV6(fc.BackupRouter) {
-		slog.Warn("frr: skipping backup-router default route: destination family does "+
-			"not match next-hop family; FRR rejects a mismatched-family static route "+
-			"and fails the entire managed-section reload (#2891)",
+		config.FRRAddrFamily(fc.BackupRouterDst) != config.FRRAddrFamily(fc.BackupRouter) {
+		slog.Warn("frr: skipping backup-router route: destination family does "+
+			"not match next-hop family; backup-router requires a next-hop and "+
+			"destination of the same address family (#9820)",
 			"next_hop", fc.BackupRouter, "destination", fc.BackupRouterDst,
-			"issue", "#8597")
+			"issue", "#9820")
 		return
 	}
 	// Match the route prefix family to the next-hop (backup-router) family,
 	// not the destination family. An IPv6 backup-router with an empty/default
 	// destination must default to ::/0 and emit `ipv6 route ::/0 <v6nh>`;
-	// defaulting to 0.0.0.0/0 here would emit `ip route 0.0.0.0/0 <v6nh>` —
-	// a v4 prefix with a v6 next-hop, which frr-reload rejects and which
-	// fails the entire static config load (#2891).
-	nhV6 := strings.Contains(fc.BackupRouter, ":")
+	// a v6 next-hop wants a v6 default. (The old comment claimed the
+	// `0.0.0.0/0` alternative — `ip route 0.0.0.0/0 <v6nh>` — is
+	// frr-reload-rejected; `ip route` in fact accepts a v6 gateway, so the
+	// default is about intent, not reload survival. #9820.)
+	nhV6 := config.FRRAddrFamily(fc.BackupRouter) == "v6"
 	dst := fc.BackupRouterDst
 	if dst == "" {
 		if nhV6 {
@@ -534,7 +569,7 @@ func renderBackupRouter(b *strings.Builder, fc *FullConfig) {
 		}
 	}
 	prefix := "ip"
-	if nhV6 || strings.Contains(dst, ":") {
+	if nhV6 || config.FRRAddrFamily(dst) == "v6" {
 		prefix = "ipv6"
 	}
 	fmt.Fprintf(b, "%s route %s %s 250\n", prefix, dst, fc.BackupRouter)
