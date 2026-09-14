@@ -613,8 +613,10 @@ func (d *Daemon) deleteInvalidatedSessions(c capturedSessions, reason dataplane.
 // sessions and old HA peers all carry 0). Unlike a deletion, a MODIFIED first
 // policy is not covered by the helper's #9526 purge, which keys on the rule
 // vanishing from the snapshot: its sessions are left to the next-packet
-// re-derivation, which declines reverse packets, so a one-way reverse-sustained
-// flow keeps its old verdict (#9604).
+// re-derivation, which judges reverse hits by their forward companion too
+// (#9604) and revokes both halves on a non-permit verdict. The remaining
+// reverse-only gap is the declined population — lone-reverse entries with no
+// forward companion — which keeps its old verdict by design.
 //
 // oldSched / newSched are the per-scheduler active-state maps under the old and
 // new configs, evaluated at the same commit-time instant (nil when a config has

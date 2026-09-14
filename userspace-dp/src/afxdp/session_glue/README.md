@@ -275,8 +275,9 @@ when the first policy actually vanished. A snapshot whose rules all carry 0
 (ids never assigned) names no first policy and purges nothing. Only the
 deleted half is covered: a MODIFIED first policy keeps its stable id, so
 policy-rematch leaves it to the #8356 re-derivation. That covers every flow
-that sends a forward packet (measured in #9596); the reverse-only residual is
-#9604. The cells are in
+that sends a forward packet (measured in #9596); the reverse-only half is
+closed by #9604, which judges a stale reverse hit by its forward companion
+and revokes both halves on a non-permit verdict. The cells are in
 `deleted_first_policy_purge_9526_tests.rs`. The worker-loop wiring is bound
 behaviourally in `worker/loop_body/first_policy_purge_rotation_9526_tests.rs`:
 the cells run the real `worker_loop` with an empty binding plan (no AF_XDP,

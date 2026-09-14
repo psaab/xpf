@@ -40,8 +40,8 @@ use crate::nat::NatDecision;
 use crate::session::{SessionDecision, SessionKey, SessionMetadata, SessionOrigin};
 use crate::test_zone_ids::*;
 use crate::{
-    FirewallFilterSnapshot, FirewallTermSnapshot, InterfaceSnapshot, PolicyRuleSnapshot,
-    RouteSnapshot, SourceNATRuleSnapshot,
+    FirewallFilterSnapshot, FirewallTermSnapshot, InterfaceSnapshot, NeighborSnapshot,
+    PolicyRuleSnapshot, RouteSnapshot, SourceNATRuleSnapshot,
 };
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use crate::tcp_flags::TCP_ACK;
@@ -4157,4 +4157,344 @@ fn post_revoke_both_tuples_miss_and_drop_9604() {
          surviving cache slot"
     );
     assert_eq!(sessions.policy_revalidation_loud_declines(), 0);
+}
+
+/// #9604 review fold (GPT HIGH): production-admitted fabric-ingress flows.
+///
+/// A flow this node admits off the fabric installs as `ForwardFlow` with
+/// `fabric_ingress: true` and ingress identity (0, 0) — origin alone cannot
+/// select the from-zone source, so the pre-fold code live-resolved the zero
+/// identity, declined in the cold body, and left every fabric-admitted
+/// reverse-only flow on its old verdict. These cells admit through the
+/// production path (stamped `lan` frame on the fabric parent, split-RG
+/// ha_state so the stamp validates and the flow forwards locally) and pin
+/// the installed shape before driving the reverse packet under the
+/// narrowed/unchanged generation.
+const FABRIC_PARENT_9604: i32 = 21;
+const FABRIC_WAN_PEER_9604: Ipv4Addr = Ipv4Addr::new(8, 8, 8, 8);
+
+/// Phase-1 snapshot: fabric links + lan neighbor (the #7770 fixture shape),
+/// allow-all `lan -> wan` (from `nat_snapshot`), NO source NAT — a pure
+/// forward flow keeps the key math direct (pool NAT through the reverse path
+/// has its own cells) — pinned generations.
+fn fabric_admit_snapshot_9604() -> crate::ConfigSnapshot {
+    let mut snap = nat_snapshot_with_fabric();
+    snap.neighbors.push(NeighborSnapshot {
+        interface: "reth1.0".to_string(),
+        ifindex: 24,
+        family: "inet".to_string(),
+        ip: "10.0.61.102".to_string(),
+        mac: "de:ad:be:ef:00:01".to_string(),
+        state: "reachable".to_string(),
+        ..Default::default()
+    });
+    snap.source_nat_rules.clear();
+    snap.generation = 7;
+    snap.fib_generation = 9;
+    snap
+}
+
+/// The #7770 stamp shape, claiming `zone`: peer fabric MAC as dst (V1a),
+/// magic + zone id as src.
+fn stamp_fabric_zone_9604(frame: &mut [u8], zone: u16) {
+    let [hi, lo] = zone.to_be_bytes();
+    frame[0..6].copy_from_slice(&[0x02, 0xbf, 0x72, 0xff, 0x00, 0x01]);
+    frame[6..12].copy_from_slice(&[0x02, 0xbf, 0x72, FABRIC_ZONE_MAC_MAGIC, hi, lo]);
+}
+
+/// Split-RG ha_state for the admit leg: RG1 (wan) forwarding-active so the
+/// flow installs `ForwardCandidate` and forwards locally; RG2 (lan) NOT
+/// active so the `lan` stamp validates (V1b: not ALL bound RGs local) — the
+/// shape the peer punts from.
+fn ha_state_fabric_admit_9604(now_secs: u64) -> BTreeMap<i32, HAGroupRuntime> {
+    BTreeMap::from([
+        (
+            1,
+            HAGroupRuntime {
+                active: true,
+                watchdog_timestamp: now_secs,
+                lease: HAGroupRuntime::active_lease_until(now_secs, now_secs),
+            },
+        ),
+        (2, HAGroupRuntime { active: false, ..Default::default() }),
+    ])
+}
+
+/// The phase-1 admit frame: `lan -> wan` ACK stamped `lan`, arriving on the
+/// fabric parent. ACK (not SYN) so admission seeds the flow-cache slot —
+/// otherwise the post-revoke eviction assertions below cannot distinguish
+/// eviction from an empty cache (the #6457 contract, as in
+/// `post_revoke_both_tuples_miss_and_drop_9604`).
+fn fabric_admit_frame_9604() -> (Vec<u8>, UserspaceDpMeta) {
+    let mut frame =
+        build_txn_tcp_syn_frame_v4(SRC, FABRIC_WAN_PEER_9604, SPORT, DPORT, TCP_ACK);
+    stamp_fabric_zone_9604(&mut frame, TEST_LAN_ZONE_ID);
+    let meta = txn_meta_v4(FABRIC_PARENT_9604 as u32, TCP_ACK, frame.len() as u16);
+    (frame, meta)
+}
+
+struct FabricAdmitOutcome {
+    sessions: SessionTable,
+    binding: BindingWorker,
+    fwd_key: SessionKey,
+    rev_key: SessionKey,
+}
+
+/// Shared phase 1: admit a `lan -> wan` flow off the fabric through the
+/// production path and pin the installed shape — `ForwardFlow` origin with
+/// `fabric_ingress` provenance and zero ingress identity is the exact shape
+/// the from-zone selection keys on.
+fn admit_fabric_flow_9604() -> FabricAdmitOutcome {
+    let forwarding = build_forwarding_state(&fabric_admit_snapshot_9604());
+    let now_secs = monotonic_nanos() / 1_000_000_000;
+    let ha_state = ha_state_fabric_admit_9604(now_secs);
+    let mut binding = binding_for_9604(FABRIC_PARENT_9604, "ge-0-0-0");
+    let (frame, meta) = fabric_admit_frame_9604();
+    let mut sessions = SessionTable::new();
+    let (_batch, dbg) =
+        txn_run_descriptor(&mut binding, &mut sessions, &forwarding, &ha_state, &frame, meta);
+    assert_eq!(
+        (dbg.session_hit, dbg.policy_revoked_sessions, dbg.tx),
+        (0, 0, 1),
+        "phase 1 must MISS, admit off the fabric stamp, and forward"
+    );
+    assert_eq!(
+        session_count(&sessions),
+        2,
+        "phase 1 must install the forward + reverse pair"
+    );
+    assert!(
+        txn_flow_cache_entries(&binding) >= 1,
+        "admission must seed the flow-cache slot — otherwise the post-revoke \
+         miss+drop assertions below cannot distinguish eviction from an empty \
+         cache"
+    );
+    let mut fwd_key = None;
+    let mut rev_key = None;
+    let mut fwd_shape = None;
+    sessions.iter_with_origin(|key, _decision, metadata, origin| {
+        if metadata.is_reverse {
+            rev_key = Some(key.clone());
+        } else {
+            fwd_key = Some(key.clone());
+            fwd_shape = Some((metadata.clone(), origin));
+        }
+    });
+    let fwd_key = fwd_key.expect("admit must install a forward entry");
+    let rev_key = rev_key.expect("admit must install a reverse companion");
+    let (fwd_metadata, fwd_origin) =
+        fwd_shape.expect("admit must install a forward entry");
+    assert_eq!(
+        fwd_origin,
+        SessionOrigin::ForwardFlow,
+        "a fabric-admitted flow installs as ForwardFlow — origin alone must \
+         not select the from-zone source (#9604 review fold)"
+    );
+    assert!(
+        fwd_metadata.fabric_ingress,
+        "the admitted entry must carry fabric-ingress provenance"
+    );
+    assert_eq!(
+        (fwd_metadata.ingress_ifindex, fwd_metadata.ingress_vlan_id),
+        (0, 0),
+        "a fabric-admitted entry stamps NO ingress identity (#7096)"
+    );
+    assert_eq!(
+        (fwd_metadata.ingress_zone, fwd_metadata.egress_zone),
+        (TEST_LAN_ZONE_ID, TEST_WAN_ZONE_ID),
+        "the admitted entry records the peer-adjudicated pair"
+    );
+    FabricAdmitOutcome {
+        sessions,
+        binding,
+        fwd_key,
+        rev_key,
+    }
+}
+
+/// The narrowed phase-2 snapshot over the admit fixture: no `lan -> wan`
+/// rule at all (default deny), generation bumped to mark the post-commit
+/// shape.
+fn fabric_narrowed_snapshot_9604() -> crate::ConfigSnapshot {
+    let mut snap = fabric_admit_snapshot_9604();
+    snap.policies.clear();
+    snap.generation = 8;
+    snap
+}
+
+/// Same, but the `lan -> wan` rule survives as `reject` (#9381 through the
+/// fabric-ingress reverse path).
+fn fabric_reject_snapshot_9604() -> crate::ConfigSnapshot {
+    let mut snap = fabric_narrowed_snapshot_9604();
+    snap.policies.push(PolicyRuleSnapshot {
+        name: "lan-out".into(),
+        from_zone: "lan".into(),
+        to_zone: "wan".into(),
+        source_addresses: vec!["any".into()],
+        destination_addresses: vec!["any".into()],
+        applications: vec!["any".into()],
+        application_terms: Vec::new(),
+        action: "reject".into(),
+        ..Default::default()
+    });
+    snap
+}
+
+/// Post-revoke eviction half, mirrored from
+/// `post_revoke_both_tuples_miss_and_drop_9604`: the eviction set must cover
+/// both keys, the same-tick drain runs explicitly (the txn driver skips it),
+/// and both tuples re-driven at the old generation must miss and drop.
+fn assert_fabric_evicted_9604(
+    outcome: &mut FabricAdmitOutcome,
+    forwarding: &ForwardingState,
+    frame_rev: &[u8],
+    meta_rev: UserspaceDpMeta,
+) {
+    let FabricAdmitOutcome {
+        sessions,
+        binding,
+        fwd_key,
+        rev_key,
+    } = outcome;
+    let evict_keys = binding.scratch.scratch_filter_revoked_keys.clone();
+    assert!(
+        evict_keys.contains(fwd_key),
+        "the eviction set must cover the seeded forward slot's key (got {} keys)",
+        evict_keys.len()
+    );
+    assert!(
+        evict_keys.contains(rev_key),
+        "the eviction set must cover the reverse companion too (got {} keys)",
+        evict_keys.len()
+    );
+    for key in &evict_keys {
+        binding.flow.flow_cache.invalidate_slot(key, binding.ifindex);
+    }
+    assert_eq!(
+        txn_flow_cache_entries(binding),
+        0,
+        "the same-tick drain must empty the cache"
+    );
+    let again_rev = drive_packet_9604(sessions, forwarding, binding, frame_rev, meta_rev);
+    assert_eq!(
+        (again_rev.hit, again_rev.tx),
+        (0, 0),
+        "the revoked reverse tuple must miss and drop, not forward off a \
+         surviving cache slot"
+    );
+    let (frame_fwd, meta_fwd) = fabric_admit_frame_9604();
+    let again_fwd = drive_packet_9604(sessions, forwarding, binding, &frame_fwd, meta_fwd);
+    assert_eq!(
+        (again_fwd.hit, again_fwd.tx),
+        (0, 0),
+        "the revoked forward tuple must miss and drop, not forward off a \
+         surviving cache slot"
+    );
+}
+
+/// THE GPT-HIGH DETECTOR. A fabric-admitted flow whose policy is narrowed to
+/// nothing must be revoked on its first reverse packet, judging the recorded
+/// forward zone — not declined on the zero ingress identity.
+///
+/// Dies if the fabric-ingress override is removed: the judgment declines in
+/// the cold body and both halves survive.
+#[test]
+fn fabric_ingress_forward_flow_reverse_triggered_deny_revokes_both_halves_9604() {
+    let mut outcome = admit_fabric_flow_9604();
+    let forwarding = build_forwarding_state(&fabric_narrowed_snapshot_9604());
+    let (frame_rev, meta_rev) =
+        reverse_tcp_frame_v4_9604(&outcome.rev_key, WAN_IFINDEX);
+    let out = drive_packet_9604(
+        &mut outcome.sessions,
+        &forwarding,
+        &mut outcome.binding,
+        &frame_rev,
+        meta_rev,
+    );
+    assert_eq!(
+        out.hit, 1,
+        "the reply must HIT the reverse companion, or the revoke assertion \
+         is vacuous"
+    );
+    assert_eq!(
+        out.revoked, 1,
+        "no rule permits lan -> wan anymore: a fabric-admitted reverse-fed \
+         flow must be revoked. 0 is the pre-fold shape — the judgment \
+         declined on the zero ingress identity instead of evaluating the \
+         recorded forward zone"
+    );
+    assert_slots_gone_9604(&outcome.sessions, &outcome.fwd_key, &outcome.rev_key);
+    assert_fabric_evicted_9604(&mut outcome, &forwarding, &frame_rev, meta_rev);
+    assert_eq!(outcome.sessions.policy_revalidation_loud_declines(), 0);
+}
+
+/// #9381 through the fabric-ingress reverse path: a narrowed-to-`reject`
+/// verdict revokes exactly like a deny.
+#[test]
+fn fabric_ingress_forward_flow_reverse_triggered_reject_revokes_both_halves_9604() {
+    let mut outcome = admit_fabric_flow_9604();
+    let forwarding = build_forwarding_state(&fabric_reject_snapshot_9604());
+    let (frame_rev, meta_rev) =
+        reverse_tcp_frame_v4_9604(&outcome.rev_key, WAN_IFINDEX);
+    let out = drive_packet_9604(
+        &mut outcome.sessions,
+        &forwarding,
+        &mut outcome.binding,
+        &frame_rev,
+        meta_rev,
+    );
+    assert_eq!(out.hit, 1, "the reply must hit the reverse companion");
+    assert_eq!(
+        out.revoked, 1,
+        "a `reject` verdict must revoke a fabric-admitted reverse-fed session \
+         exactly as a forward-fed one (#9381 via #9604)"
+    );
+    assert_slots_gone_9604(&outcome.sessions, &outcome.fwd_key, &outcome.rev_key);
+    assert_fabric_evicted_9604(&mut outcome, &forwarding, &frame_rev, meta_rev);
+    assert_eq!(outcome.sessions.policy_revalidation_loud_declines(), 0);
+}
+
+/// Preservation control: an unchanged permit keeps a fabric-admitted flow on
+/// its reverse packet — and hit-only stamping writes no forward stamp from
+/// the reverse path.
+#[test]
+fn fabric_ingress_forward_flow_permit_kept_on_reverse_9604() {
+    let mut snap = fabric_admit_snapshot_9604();
+    snap.generation = 8;
+    let forwarding = build_forwarding_state(&snap);
+    let mut outcome = admit_fabric_flow_9604();
+    let (frame_rev, meta_rev) =
+        reverse_tcp_frame_v4_9604(&outcome.rev_key, WAN_IFINDEX);
+    let out = drive_packet_9604(
+        &mut outcome.sessions,
+        &forwarding,
+        &mut outcome.binding,
+        &frame_rev,
+        meta_rev,
+    );
+    assert_eq!(
+        (out.hit, out.revoked, out.tx),
+        (1, 0, 1),
+        "a still-permitted fabric-admitted flow must hit, keep, and forward \
+         on its reverse packet"
+    );
+    assert!(
+        outcome.sessions.entry_with_origin(&outcome.fwd_key).is_some(),
+        "the forward half must survive a permit judgment"
+    );
+    assert!(
+        outcome.sessions.entry_with_origin(&outcome.rev_key).is_some(),
+        "the reverse half must survive a permit judgment"
+    );
+    assert_eq!(
+        outcome.sessions.policy_revalidation_target(&outcome.rev_key),
+        PolicyRevalidationTarget::Fresh,
+        "the reverse permit stamps the hit half"
+    );
+    assert_eq!(
+        outcome.sessions.policy_revalidation_target(&outcome.fwd_key),
+        PolicyRevalidationTarget::Stale(outcome.fwd_key.clone()),
+        "hit-only stamping writes NO forward stamp from the reverse path"
+    );
+    assert_eq!(outcome.sessions.policy_revalidation_loud_declines(), 0);
 }

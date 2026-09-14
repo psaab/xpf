@@ -66,7 +66,7 @@
 //!
 //! # THREE things here deliberately do NOT mirror #7212
 //!
-//! **1. The reverse pair is never adjudicated — but reverse HITS are (#9604).**
+//! **1. The reverse pair is never independently adjudicated for revocation — but reverse HITS are (#9604).**
 //! The filter stamp is per-direction on purpose. The reverse companion's own
 //! pair must not be. The reverse companion is built with SWAPPED zones
 //! (`afxdp/shared_ops.rs`: `ingress_zone: forward.metadata.egress_zone`,
@@ -86,7 +86,11 @@
 //! zones. The reverse entry contributes nothing to the verdict but its
 //! staleness and its nat. A lone reverse (no forward companion) and a
 //! companion slot holding another reverse both decline — deriving authority
-//! from swapped zones is exactly the trap above.
+//! from swapped zones is exactly the trap above. The sibling half of the
+//! constraint: the foreign path (`session_hit_authority.rs`,
+//! `foreign_hit_verdict`) evaluates a foreign reverse packet AS A PACKET for
+//! forward/drop only and can never revoke from it — so no path in the tree
+//! tears down a session on the verdict of a reverse pair judged as itself.
 //!
 //! **2. GENERATION-ONLY stamp.** `FilterRevalidationStamp` is keyed
 //! `(generation, logical ingress ifindex)` because an input filter is a
@@ -414,8 +418,11 @@ pub(super) fn revalidate_zone_policy_on_session_hit(
 /// The reverse entry carries swapped zones and no ingress identity (#4983), so
 /// none of its fields may enter the verdict. Everything evaluated comes from
 /// the forward companion entry: its wire tuple and protocol, its NAT (the
-/// post-translation destination, #9382), its egress, and its provenance-gated
-/// from-zone source. Uses nothing from the triggering packet — not its tuple,
+/// post-translation destination, #9382), its egress, and its from-zone source
+/// — the forward entry's recorded ingress zone whenever the entry was admitted
+/// off the fabric (its stamped identity is (0, 0), #7096) or carries
+/// peer-authored provenance, otherwise the recorded admitting identity
+/// live-resolved. Uses nothing from the triggering packet — not its tuple,
 /// not its protocol, not its arrival interface (authority already established
 /// the packet is the session's owner before this runs).
 ///
@@ -473,14 +480,34 @@ fn reverse_hit_zone_policy(
     // (promotion clones without re-stamping, so `SharedPromote` carries no
     // locally-authored identity). Zone ids are cluster-consistent; ifindexes
     // are not (#6928).
+    //
+    // #9604 (review fold): fabric-ingress provenance overrides origin. Every
+    // admitted flow installs as `ForwardFlow` — including a flow admitted off
+    // the fabric — but a fabric-admitted entry carries the peer's ORIGINAL
+    // zone with ingress identity (0, 0): the peer's interface is not knowable
+    // here (the stamp carries a zone id and nothing else), so production
+    // stamps NONE rather than the local fabric member's ifindex (#7096).
+    // Live-resolving that identity misses the ledger and declines in the cold
+    // body, which left every fabric-admitted reverse-only flow on its old
+    // verdict — the residual intact for exactly the HA-split population most
+    // likely to be reverse-fed. The recorded zone is the V1/V2-validated
+    // stamp the peer adjudicated, cluster-consistent like every other
+    // recorded zone. A locally-admitted entry with a zero identity still
+    // takes the `LiveIfindex` arm and declines there — that legitimate
+    // decline is unchanged.
     let from_source = match fwd_origin {
-        SessionOrigin::ForwardFlow | SessionOrigin::LocalMiss | SessionOrigin::MissingNeighborSeed => {
+        SessionOrigin::ForwardFlow | SessionOrigin::LocalMiss | SessionOrigin::MissingNeighborSeed
+            if !fwd_metadata.fabric_ingress =>
+        {
             FromZoneSource::LiveIfindex {
                 ifindex: fwd_metadata.ingress_ifindex as i32,
                 vlan: fwd_metadata.ingress_vlan_id,
             }
         }
-        SessionOrigin::SyncImport
+        SessionOrigin::ForwardFlow
+        | SessionOrigin::LocalMiss
+        | SessionOrigin::MissingNeighborSeed
+        | SessionOrigin::SyncImport
         | SessionOrigin::SharedMaterialize
         | SessionOrigin::SharedPromote
         | SessionOrigin::WorkerLocalImport
