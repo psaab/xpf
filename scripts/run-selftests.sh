@@ -339,6 +339,12 @@ run_bash test/incus/iperf-throughput-selftest.sh
 run_bash test/incus/screen-probe-selftest.sh
 run_bash test/incus/target-services-selftest.sh
 run_bash test/incus/with-cluster-selftest.sh
+# #9531: the wire deny-gate verdict matrices. Hermetic — each --selftest
+# drives its script's shared verdict core (counts in, WIRE_GATE line out)
+# with no cluster, no lock; the live probe→capture→verdict path is proven
+# separately by the pass-on-good/fail-on-bad ledger pairs.
+run_bash test/incus/wire-policy-deny.sh --selftest
+run_bash test/incus/wire-appmatch-twins.sh --selftest
 # #7159: the mouse-latency elephant generator's remote lifecycle. Hermetic --
 # a fake iperf3 plus an unprivileged PID namespace; no incus, no cluster. The
 # defect it guards produced a CORRUPT MEASUREMENT, not an error: killing the
