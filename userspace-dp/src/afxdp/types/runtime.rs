@@ -537,6 +537,17 @@ pub(in crate::afxdp) enum WorkerCommand {
     UpsertSynced(SyncedSessionEntry),
     UpsertLocal(SyncedSessionEntry),
     DeleteSynced(SessionKey),
+    /// #9752: conditional cross-worker delete (purge): delete the entry at
+    /// `key` ONLY if it still carries `(domain, check)` AND that stamp is
+    /// unresolvable under the recipient's CURRENT registry. Lagging senders,
+    /// re-added tables, and reincarnations all decline (the entry survives);
+    /// declined deletes are never repaired (repair would free a live port).
+    /// Replicated PLAIN (never repairing) — see `replicate_purge_delete`.
+    DeleteSyncedIfTableUnknown {
+        key: SessionKey,
+        domain: u32,
+        check: u32,
+    },
     DemoteOwnerRGS {
         owner_rgs: Vec<i32>,
     },

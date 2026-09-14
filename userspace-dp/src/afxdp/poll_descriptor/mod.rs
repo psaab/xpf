@@ -1946,6 +1946,7 @@ pub(super) fn poll_binding_process_descriptor(
                             now_secs,
                             fabric_ingress,
                             effective_resolution_target,
+                            route_table_override.as_deref(),
                             resolution,
                         );
                         let nptv6_nat = nptv6_inbound.map(|internal_dst| NatDecision {

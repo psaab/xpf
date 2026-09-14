@@ -55,6 +55,7 @@ func (c *xpfCollector) emitBindingSlowPathReinjectCounters(ch chan<- prometheus.
 			{c.bindingSlowPathNoRoutePackets, b.SlowPathNoRoutePackets},
 			{c.bindingSlowPathNextTablePackets, b.SlowPathNextTablePackets},
 			{c.bindingNextTableUnsupportedDrops, b.NextTableUnsupportedDrops},
+			{c.bindingTableUnavailableDrops, b.TableUnavailableDrops},
 			{c.bindingSlowPathLocalDeliveryPackets, b.SlowPathLocalDeliveryPackets},
 			{c.bindingSlowPathMissingNeighborPackets, b.SlowPathMissingNeighborPackets},
 		} {

@@ -420,6 +420,9 @@ pub(crate) fn worker_loop(
     // the epoch it is armed by, and carried across passes so no single pass
     // exceeds the RX-ring fill time.
     let mut delete_drop_sweep = crate::afxdp::session_glue::DeleteDropSweep::default();
+    // #9752: the installing-table purge walk is resumable and budgeted, like
+    // the sweep above. Armed by re-resolve terminal observations.
+    let mut install_table_purge = crate::afxdp::session_glue::InstallTablePurge::default();
     let mut dbg_last_report_ns = monotonic_nanos();
     // #1776: the per-interval cfg(debug-log) dbg_* counters are
     // consolidated into debug_report::DbgCounters (single-line
@@ -1392,6 +1395,44 @@ pub(crate) fn worker_loop(
                     worker_id,
                     delete_drop_epoch,
                     reconciled,
+                );
+            }
+        }
+        // #9752: purge sessions whose installing table is unresolvable. The
+        // flag is set by re-resolve terminal observations (cold); the walk is
+        // paced like the sweep above (never whole-table in one pass) and
+        // restarts on generation change inside `step`.
+        if crate::afxdp::session_glue::take_install_table_purge_flag(worker_id) {
+            install_table_purge.arm(validation.fib_generation);
+        }
+        {
+            let mut evicted_keys: Vec<crate::session::SessionKey> = Vec::new();
+            let purged = install_table_purge.step(
+                &mut sessions,
+                session_map.handle(),
+                conntrack_v4_fd,
+                conntrack_v6_fd,
+                &shared_sessions,
+                &shared_nat_sessions,
+                &shared_forward_wire_sessions,
+                &shared_owner_rg_indexes,
+                &peer_worker_commands,
+                &forwarding,
+                &shared_runtime,
+                validation.fib_generation,
+                loop_now_ns,
+                worker_id,
+                &mut evicted_keys,
+            );
+            if purged > 0 {
+                crate::afxdp::worker::invalidate_flow_cache_slots_for_keys(
+                    &mut bindings,
+                    &evicted_keys,
+                );
+                debug_log!(
+                    "INSTALL_TABLE_PURGE: worker={} purged={}",
+                    worker_id,
+                    purged,
                 );
             }
         }

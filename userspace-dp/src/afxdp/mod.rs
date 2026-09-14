@@ -945,6 +945,7 @@ pub(in crate::afxdp) struct BatchCounters {
     neighbor_miss_packets: u64,
     discard_route_packets: u64,
     next_table_packets: u64,
+    table_unavailable_packets: u64,
     local_delivery_packets: u64,
     exception_packets: u64,
 }
@@ -1410,6 +1411,13 @@ impl BatchCounters {
             live.next_table_packets
                 .fetch_add(self.next_table_packets, Ordering::Relaxed);
             self.next_table_packets = 0;
+        }
+        if self.table_unavailable_packets != 0 {
+            live.table_unavailable_packets.fetch_add(
+                self.table_unavailable_packets,
+                Ordering::Relaxed,
+            );
+            self.table_unavailable_packets = 0;
         }
         if self.local_delivery_packets != 0 {
             live.local_delivery_packets

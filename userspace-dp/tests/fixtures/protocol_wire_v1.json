@@ -209,6 +209,8 @@
     "syn_cookie_reply_budget_drops": 0,
     "syn_cookie_secret_unavailable": 0,
     "syn_cookie_syn_ack_sent": 0,
+    "table_unavailable_drops": 0,
+    "table_unavailable_packets": 0,
     "time_exceeded_output_filter_drops": 0,
     "tunnel_encap_unresolved_drops": 0,
     "tx_bytes": 0,

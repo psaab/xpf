@@ -182,6 +182,13 @@ fn enqueue_tx_owned_below_cap_does_not_touch_overflow_counter() {
 // field could not achieve, and which is the entire discriminator between
 // answering this guard and defeating it. `size_of` did NOT move — still 2368 —
 // the FOURTH time the "tail padding is full" prediction has not held.
+// #9752 re-measured the two OFFSETS again (2200 -> 2216, 2328 -> 2344) when
+// the unconditional `table_unavailable_packets` and `table_unavailable_drops`
+// counters joined the cold run. Same lockstep, verified the way the paragraph
+// above requires: BOTH build configurations report the same two shifts, by the
+// same 16 bytes, so one set of literals makes both green. `size_of` did NOT
+// move — still 2368 — the FIFTH time the "tail padding is full" prediction has
+// not held.
 fn admission_attempt_instrument_leaves_four_pinned_layout_values_unchanged_6304() {
     assert_eq!(
         std::mem::size_of::<BindingLiveState>(),

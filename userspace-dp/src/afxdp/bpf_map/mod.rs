@@ -57,12 +57,17 @@ pub(super) fn uses_kernel_local_session_map_entry(
     origin: SessionOrigin,
     has_routing_domains: bool,
 ) -> bool {
+    // #9752: stamped sessions never publish kernel-pass (even LocalDelivery
+    // ones): the shim row would bypass the worker, so no terminal observation
+    // could ever fire for it — the Codex-r3-F3 pre-removal escape. Table-less
+    // (default) sessions are unaffected.
     !has_routing_domains
         && key.discriminator.is_none()
         && origin.is_peer_synced()
         && !metadata.is_reverse
         && decision.resolution.disposition == ForwardingDisposition::LocalDelivery
         && decision.resolution.tunnel_endpoint_id == 0
+        && decision.install_table_domain == 0
 }
 
 #[repr(C)]
