@@ -3622,10 +3622,10 @@ fn unzoned_ingress_evaluates_default_on_reverse_9604() {
     assert_eq!(sessions.policy_revalidation_loud_declines(), 0);
 }
 
-/// THE ZERO-IDENTITY DECLINE. A trusted-origin forward entry with NO recorded
-/// ingress identity (a fabric-installed forward half stamps none) declines —
-/// there is nothing live to resolve and no recorded zone to fall back to on
-/// the live arm.
+/// THE ZERO-IDENTITY DECLINE. A trusted-origin, non-fabric forward entry with
+/// NO recorded ingress identity declines — there is nothing live to resolve
+/// (ifindex 0) and no recorded zone to fall back to on the live arm.
+/// (Fabric-installed halves take the RecordedZone path instead since #9604.)
 ///
 /// An implementation that feeds 0 through the ledger evaluates zone 0 and
 /// revokes under default-deny — this cell reds exactly that shape.
