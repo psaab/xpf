@@ -732,6 +732,94 @@ else
 	python3 "$SCRIPT_DIR/ledger_compare.py" --lint --ledger "$LEDGER" 2>&1 | sed 's/^/    /'
 fi
 
+
+# ── 11. wire-gate adapter (#9531) ────────────────────────────────────
+#
+# Canonical line: WIRE_GATE <gate> <PASS|FAIL|VOID> reason=<slug> <k=v...>.
+# reason is `--` on PASS/FAIL, a design-§8 closed slug on VOID. The adapter
+# transcribes; it never re-derives a verdict from metrics.
+wire_log() { printf '%b' "$1" >"$LOG"; }
+wire_field_is() {
+	local label="$1" rc="$2" n="$3" want="$4" got
+	got=$(adapt_field wire-gate "$rc" "$n")
+	if [[ "$got" == "$want" ]]; then
+		ok "wire-gate: $label"
+	else
+		bad "wire-gate: $label (field $n: want '$want', got '$got')"
+	fi
+}
+wire_field_has() {
+	local label="$1" rc="$2" n="$3" want="$4" got
+	got=$(adapt_field wire-gate "$rc" "$n")
+	if [[ "$got" == *"$want"* ]]; then
+		ok "wire-gate: $label"
+	else
+		bad "wire-gate: $label (field $n does not contain '$want': '$got')"
+	fi
+}
+DENY_OK='WIRE_GATE wire_policy_deny PASS reason=-- probe_offered=1000 probe_leaked=0 control_offered=1000 control_observed=1000\n'
+wire_log "$DENY_OK"
+wire_field_is "deny PASS transcribes" 0 1 "PASS"
+wire_field_is "deny headline is probe_leaked" 0 3 "probe_leaked"
+wire_field_is "deny direction lower-better" 0 4 "lower-better"
+wire_field_has "deny metrics keep the offered counts" 0 5 "probe_offered=1000"
+wire_log 'WIRE_GATE wire_policy_deny FAIL reason=-- probe_offered=1000 probe_leaked=7 control_offered=1000 control_observed=1000\n'
+wire_field_is "deny FAIL transcribes" 0 1 "FAIL"
+wire_field_has "deny FAIL keeps the leak count" 0 5 "probe_leaked=7"
+wire_log 'WIRE_GATE wire_policy_deny VOID reason=capture-blind probe_offered=1000 probe_leaked=0 control_offered=1000 control_observed=0\n'
+wire_field_is "deny VOID transcribes" 0 1 "VOID"
+wire_field_is "deny VOID keeps the closed slug" 0 2 "capture-blind"
+wire_field_has "deny VOID keeps measured metrics" 0 5 "control_observed=0"
+wire_log 'WIRE_GATE wire_policy_deny VOID reason=env-void\n'
+wire_field_is "early VOID with an empty map is legal" 0 1 "VOID"
+wire_field_is "early VOID keeps env-void" 0 2 "env-void"
+wire_log 'WIRE_GATE cc-rollback-arm-b VOID reason=row-timeout mid_present=0 mid_fwd_ok=0 post_gone=0 post_blocked=0 sess_gone=0\n'
+wire_field_is "arm-b row-timeout VOID transcribes" 0 1 "VOID"
+wire_field_is "arm-b VOID keeps row-timeout" 0 2 "row-timeout"
+wire_log 'some noise, no verdict line\n'
+wire_field_is "absent line is VOID, never a pass" 0 1 "VOID"
+wire_field_has "absent line names the missing line" 0 2 "no \"WIRE_GATE"
+wire_log 'WIRE_GATE wire_policy_deny PASS reason=-- probe_offered=1000 probe_leaked=0 control_offered=1000 control_observed=1000\nWIRE_GATE wire_appmatch_twins PASS reason=-- tcp80_offered=1\n'
+wire_field_is "two gate IDs in one log is VOID" 0 1 "VOID"
+wire_field_has "two gate IDs says why" 0 2 "distinct WIRE_GATE gate IDs"
+wire_log 'WIRE_GATE wire_policy_deny PASS reason=policy_leak probe_offered=1000 probe_leaked=0 control_offered=1000 control_observed=1000\n'
+wire_field_is "PASS carrying a slug is VOID" 0 1 "VOID"
+wire_field_has "PASS-with-slug names the contract" 0 2 "must carry reason=--"
+wire_log "$DENY_OK"
+wire_field_is "PASS with rc!=0 is VOID (disagreement)" 1 1 "VOID"
+wire_field_has "disagreement says so" 1 2 "disagree"
+wire_log 'WIRE_GATE wire_policy_deny FAIL reason=-- probe_offered=1000 probe_leaked=7 control_offered=1000 control_observed=1000\n'
+wire_field_is "FAIL stands whatever rc" 0 1 "FAIL"
+wire_log 'WIRE_GATE wire_policy_deny PASS reason=-- probe_offered=1000 probe_leaked=0\n'
+wire_field_is "PASS missing required keys is VOID" 0 1 "VOID"
+wire_field_has "missing keys are named" 0 2 "control_offered,control_observed"
+wire_log 'WIRE_GATE wire_policy_deny PASS reason=-- probe_offered=1000 probe_leaked=x control_offered=1000 control_observed=1000\n'
+wire_field_is "PASS with a corrupt metric is VOID" 0 1 "VOID"
+wire_log 'WIRE_GATE wire_policy_deny VOID reason=bogus\n'
+wire_field_is "unknown VOID slug is VOID" 0 1 "VOID"
+wire_field_has "unknown slug cites the closed taxonomy" 0 2 "closed taxonomy"
+wire_log 'WIRE_GATE nope_gate PASS reason=-- a=1\n'
+wire_field_is "unknown gate is refused, never defaulted" 0 1 "VOID"
+wire_field_has "unknown gate says so" 0 2 "unknown gate nope_gate"
+wire_log 'WIRE_GATE wire_appmatch_twins PASS reason=-- tcp80_offered=10000 tcp80_observed=10000 tcp8080_offered=1000 tcp8080_observed=0 udp53_offered=10000 udp53_observed=10000 udp5353_offered=1000 udp5353_observed=0 deny_leaked=0 permit_missing=0\n'
+wire_field_is "appmatch PASS transcribes" 0 1 "PASS"
+wire_field_is "appmatch headline is deny_leaked" 0 3 "deny_leaked"
+wire_log 'WIRE_GATE test-host-inbound PASS reason=-- cells_passed=24 cells_failed=0\n'
+wire_field_is "host-inbound PASS transcribes" 0 1 "PASS"
+wire_field_is "host-inbound headline is cells_failed" 0 3 "cells_failed"
+wire_log 'WIRE_GATE cc-rollback-arm-b PASS reason=-- mid_present=1 mid_fwd_ok=1 post_gone=1 post_blocked=1 sess_gone=1\n'
+wire_field_is "arm-b PASS transcribes" 0 1 "PASS"
+wire_field_is "arm-b headline is sess_gone" 0 3 "sess_gone"
+wire_log 'WIRE_GATE cc-rollback-arm-b FAIL reason=-- mid_present=1 mid_fwd_ok=1 post_gone=1 post_blocked=0 sess_gone=0\n'
+wire_field_is "arm-b stale-permit shape transcribes FAIL" 0 1 "FAIL"
+wire_field_is "arm-b FAIL headline is sess_gone" 0 3 "sess_gone"
+wire_log 'WIRE_GATE cc-rollback-arm-b VOID reason=harness-void mid_present=1 mid_fwd_ok=1 post_gone=0 post_blocked=0 sess_gone=0\n'
+wire_field_is "arm-b VOID transcribes" 0 1 "VOID"
+wire_field_is "arm-b VOID keeps the closed slug" 0 2 "harness-void"
+wire_field_has "arm-b VOID keeps measured stage flags" 0 5 "mid_fwd_ok=1"
+wire_log 'WIRE_GATE cc-rollback-arm-a FAIL reason=-- mid_blocked=1 post_present=1 post_fwd_ok=0\n'
+wire_field_is "arm-a FAIL transcribes" 0 1 "FAIL"
+wire_field_is "arm-a headline is post_fwd_ok" 0 3 "post_fwd_ok"
 # ── summary ──────────────────────────────────────────────────────────
 echo
 echo "  harness-result selftest: $PASS passed, $FAIL failed"

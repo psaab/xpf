@@ -67,7 +67,7 @@ HARNESS_RESULT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HARNESS_RESULT_SCHEMA=1
 
 # The adapter table. A source not listed here is REFUSED, never defaulted.
-HARNESS_ADAPTERS="ha-smoke newflow-ceiling mouse-latency selftest iperf-throughput"
+HARNESS_ADAPTERS="ha-smoke newflow-ceiling mouse-latency selftest iperf-throughput wire-gate"
 
 harness_result_root() {
 	if [[ -n "${XPF_REPO_ROOT:-}" ]]; then
@@ -356,6 +356,181 @@ harness_adapt_iperf_throughput() {
 	PASS*) printf 'PASS\t\tthroughput_gbps\thigher-better\tthroughput_gbps=%s\n' "$gbps" ;;
 	*) printf 'FAIL\t\tthroughput_gbps\thigher-better\tthroughput_gbps=%s\n' "$gbps" ;;
 	esac
+}
+
+# ── wire-gate ────────────────────────────────────────────────────────
+#
+# #9531 frame-count wire gates (wire_policy_deny, wire_appmatch_twins,
+# test-host-inbound matrix + failover, cc-rollback arms). Each harness prints
+# exactly one final line per wrapper invocation:
+#
+#   WIRE_GATE <gate-id> <PASS|FAIL|VOID> reason=<slug> <k=v numeric...>
+#
+# `reason` is `--` on PASS/FAIL and a design-doc-§8 closed slug on VOID
+# (env-void, row-timeout, no-prober, harness-void, capture-blind,
+# under-sampled, uncalibrated, dut-void). This adapter TRANSCRIBES verdicts;
+# it never re-derives one from metrics. Metrics serve bands and display only.
+# A pre-measurement early VOID (refused precondition) carries an EMPTY metrics
+# map, which the emitter permits on VOID rows; PASS/FAIL always carry the
+# complete per-gate map.
+harness_adapt_wire_gate() {
+	local rc="$1" log="$2"
+	local line gate verdict rest reason
+	line=$(grep -E '^WIRE_GATE [A-Za-z0-9_.-]+ (PASS|FAIL|VOID) ' "$log" | tail -1)
+	if [[ -z "$line" ]]; then
+		printf 'VOID\tharness-void: no "WIRE_GATE <gate> <PASS|FAIL|VOID> reason=<slug> ..." verdict line in the output (rc=%s)\t\t\t\n' "$rc"
+		return 0
+	fi
+	# Two lines naming DIFFERENT gates in one log: one wrapper invocation
+	# carries one arm, so guessing would mis-attribute. Loud VOID instead.
+	local ngates
+	ngates=$(grep -Eo '^WIRE_GATE [A-Za-z0-9_.-]+' "$log" | sort -u | wc -l)
+	if ((ngates > 1)); then
+		printf 'VOID\tharness-void: %s distinct WIRE_GATE gate IDs in one log — one wrapper invocation carries one arm\t\t\t\n' "$ngates"
+		return 0
+	fi
+	gate=$(awk '{print $2}' <<<"$line")
+	verdict=$(awk '{print $3}' <<<"$line")
+	rest=$(sed -E 's/^WIRE_GATE [A-Za-z0-9_.-]+ (PASS|FAIL|VOID) //' <<<"$line")
+	# The reason token is mandatory and first: without it a VOID has nowhere
+	# legal to put its slug (the emitter refuses VOID without one) and a
+	# PASS/FAIL has no way to prove it carries none.
+	local firsttok=${rest%% *}
+	case "$firsttok" in
+	reason=*)
+		reason=${firsttok#reason=}
+		if [[ "$rest" == *" "* ]]; then
+			rest=${rest#* }
+		else
+			rest=""
+		fi
+		;;
+	*)
+		printf 'VOID\tharness-void: WIRE_GATE line for %s has no leading reason=<slug> token\t\t\t\n' "$gate"
+		return 0
+		;;
+	esac
+	# Verdict-dependent reason handling: ONLY a VOID populates --void-reason.
+	# A PASS/FAIL carrying a real slug has no valid translation (the emitter
+	# refuses PASS/FAIL with a reason), so it is a contract violation, loud.
+	if [[ "$verdict" != "VOID" ]]; then
+		if [[ "$reason" != "--" ]]; then
+			printf 'VOID\tharness-void: WIRE_GATE %s %s carries reason=%s — PASS/FAIL must carry reason=--\t\t\t\n' "$gate" "$verdict" "$reason"
+			return 0
+		fi
+	else
+		case " env-void row-timeout no-prober harness-void capture-blind under-sampled uncalibrated dut-void " in
+		*" $reason "*) ;;
+		*)
+			printf 'VOID\tharness-void: WIRE_GATE %s VOID carries unknown slug reason=%s (design §8 closed taxonomy)\t\t\t\n' "$gate" "$reason"
+			return 0
+			;;
+		esac
+	fi
+	# Split the metrics map, keeping only well-formed numeric pairs. A corrupt
+	# pair is never repaired by invention: on PASS/FAIL it voids the row
+	# below via the required-keys rule; on VOID the true reason wins and the
+	# map ships with just its valid pairs (possibly empty — emitter-legal).
+	local metrics="" tok k v badpair=""
+	for tok in $rest; do
+		case "$tok" in
+		[A-Za-z0-9_.-]*=*)
+			k=${tok%%=*}
+			v=${tok#*=}
+			if [[ "$k" == "reason" ]]; then
+				badpair="$tok"
+				break
+			fi
+			case "$v" in
+			- | *[!0-9.+-]* | "" | *.*.*) badpair="$tok"; break ;;
+			esac
+			# Reject lone signs/dots and trailing/leading dots that the
+			# character class above still admits.
+			case "$v" in
+			+ | - | . | +.* | -.* | *. | *..*) badpair="$tok"; break ;;
+			esac
+			metrics="${metrics:+$metrics }$k=$v"
+			;;
+		*)
+			badpair="$tok"
+			break
+			;;
+		esac
+	done
+	# Required keys + headline per gate. An unknown gate is REFUSED, never
+	# defaulted: inventing a headline would fabricate the row's meaning.
+	local required headline direction
+	case "$gate" in
+	wire_policy_deny)
+		required="probe_offered probe_leaked control_offered control_observed"
+		headline="probe_leaked"
+		direction="lower-better"
+		;;
+	wire_appmatch_twins)
+		required="tcp80_offered tcp80_observed tcp8080_offered tcp8080_observed udp53_offered udp53_observed udp5353_offered udp5353_observed deny_leaked permit_missing"
+		headline="deny_leaked"
+		direction="lower-better"
+		;;
+	test-host-inbound | test-host-inbound-failover)
+		required="cells_passed cells_failed"
+		headline="cells_failed"
+		direction="lower-better"
+		;;
+	cc-rollback-arm-a)
+		required="mid_blocked post_present post_fwd_ok"
+		headline="post_fwd_ok"
+		direction="higher-better"
+		;;
+	cc-rollback-arm-b)
+		required="mid_present mid_fwd_ok post_gone post_blocked sess_gone"
+		headline="sess_gone"
+		direction="higher-better"
+		;;
+	*)
+		printf 'VOID\tharness-void: WIRE_GATE names unknown gate %s — no headline table entry, refusing to guess\t\t\t\n' "$gate"
+		return 0
+		;;
+	esac
+	if [[ -n "$badpair" ]]; then
+		if [[ "$verdict" == "VOID" ]]; then
+			printf 'VOID\t%s\t\t\t\n' "$reason"
+		else
+			printf 'VOID\tharness-void: WIRE_GATE %s %s carries malformed metric %s\t\t\t\n' "$gate" "$verdict" "$badpair"
+		fi
+		return 0
+	fi
+	if [[ "$verdict" != "VOID" || -n "$metrics" ]]; then
+		local missing=""
+		local rk
+		for rk in $required; do
+			case " $metrics " in
+			*" $rk="*) ;;
+			*) missing="${missing:+$missing,}$rk" ;;
+			esac
+		done
+		if [[ -n "$missing" ]]; then
+			if [[ "$verdict" == "VOID" ]]; then
+				printf 'VOID\t%s\t\t\t\n' "$reason"
+			else
+				printf 'VOID\tharness-void: WIRE_GATE %s %s is missing required metrics: %s\t\t\t\n' "$gate" "$verdict" "$missing"
+			fi
+			return 0
+		fi
+	fi
+	# Exit-code disagreement (ha-smoke precedent): a PASS whose process failed
+	# is a summary the exit status contradicts — VOID, not a pass. A FAIL
+	# stands whatever rc; a VOID is already the absence of a measurement.
+	if [[ "$verdict" == "PASS" && "$rc" != "0" ]]; then
+		printf 'VOID\tharness-void: WIRE_GATE %s reports PASS but exited rc=%s — summary and exit status disagree\t\t\t\n' "$gate" "$rc"
+		return 0
+	fi
+	if [[ "$verdict" == "VOID" ]]; then
+		printf 'VOID\t%s\t\t\t%s\n' "$reason" "$metrics"
+	elif [[ "$verdict" == "PASS" ]]; then
+		printf 'PASS\t\t%s\t%s\t%s\n' "$headline" "$direction" "$metrics"
+	else
+		printf 'FAIL\t\t%s\t%s\t%s\n' "$headline" "$direction" "$metrics"
+	fi
 }
 
 # ─────────────────────────────────────────────────────────────────────

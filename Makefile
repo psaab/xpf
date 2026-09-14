@@ -657,7 +657,7 @@ clean:
 # The standalone instance name defaults to xpf-fw; override it for an
 # ad-hoc/renamed VM with `XPF_INSTANCE=<name> make test-deploy` (#2162). The
 # env var flows through to setup.sh (INSTANCE_NAME=${XPF_INSTANCE:-xpf-fw}).
-.PHONY: test-env-init test-vm standalone-test-vm test-ct test-deploy test-deploy-lib test-mutate-lib test-cluster-lock-lib test-target-services-lib test-cluster-env-lib test-iperf-throughput-lib test-cos-apply-lib test-mouse-elephant-lib test-fbf-steering-lib test-host-inbound-lib test-host-inbound test-host-inbound-failover test-persistent-nat-failover test-dhcp-lease-failover test-ssh test-destroy test-status test-start test-stop test-restart test-logs test-journal test-screen-probe-lib mouse-target-up mouse-target-status mouse-target-destroy
+.PHONY: test-env-init test-vm standalone-test-vm test-ct test-deploy test-deploy-lib test-mutate-lib test-cluster-lock-lib test-target-services-lib test-cluster-env-lib test-iperf-throughput-lib test-cos-apply-lib test-mouse-elephant-lib test-fbf-steering-lib test-host-inbound-lib test-host-inbound test-host-inbound-failover test-wire-policy-deny test-wire-policy-deny-lib test-wire-appmatch-twins test-wire-appmatch-twins-lib test-cc-rollback-functional test-persistent-nat-failover test-dhcp-lease-failover test-ssh test-destroy test-status test-start test-stop test-restart test-logs test-journal test-screen-probe-lib mouse-target-up mouse-target-status mouse-target-destroy
 
 test-env-init:
 	./test/incus/setup.sh init
@@ -866,11 +866,54 @@ test-incus-lib:
 # cluster). Reads the already-committed config, derives its probe targets from
 # it, and commits NOTHING. `--with-failover` adds the HA leg, which moves RG1
 # and RG2 to the peer and back under the #1875 lock.
+# Ledger-wrapped (#9531): the script appends one WIRE_GATE line per
+# invocation; the matrix-only and failover runs are SEPARATE gates
+# (test-host-inbound vs test-host-inbound-failover) with separate bands.
 test-host-inbound:
-	./test/incus/test-host-inbound.sh
+	BPFRX_CLUSTER_ENV=$(CLUSTER_ENV) ./test/incus/harness-result.sh run \
+		--gate test-host-inbound --adapter wire-gate --env $(HARNESS_ENV) --cluster \
+		-- ./test/incus/test-host-inbound.sh
 
 test-host-inbound-failover:
-	./test/incus/test-host-inbound.sh --with-failover
+	BPFRX_CLUSTER_ENV=$(CLUSTER_ENV) ./test/incus/harness-result.sh run \
+		--gate test-host-inbound-failover --adapter wire-gate --env $(HARNESS_ENV) --cluster \
+		-- ./test/incus/test-host-inbound.sh --with-failover
+
+# #9531 wire-deny gates (need the loss userspace cluster; each script takes
+# the #1875 lock cell itself). One wrapper invocation per arm — one row per
+# run. The -lib recipes are the hermetic selftests (no cluster, no lock).
+test-wire-policy-deny:
+	BPFRX_CLUSTER_ENV=$(CLUSTER_ENV) ./test/incus/harness-result.sh run \
+		--gate wire_policy_deny --adapter wire-gate --env $(HARNESS_ENV) --cluster \
+		-- ./test/incus/wire-policy-deny.sh
+
+test-wire-policy-deny-lib:
+	./test/incus/wire-policy-deny.sh --selftest
+
+test-wire-appmatch-twins:
+	BPFRX_CLUSTER_ENV=$(CLUSTER_ENV) ./test/incus/harness-result.sh run \
+		--gate wire_appmatch_twins --adapter wire-gate --env $(HARNESS_ENV) --cluster \
+		-- ./test/incus/wire-appmatch-twins.sh
+
+test-wire-appmatch-twins-lib:
+	./test/incus/wire-appmatch-twins.sh --selftest
+
+# #1922 rollback functional gate, both arms (#9531 adds Arm B). Two wrapper
+# invocations in one recipe — Arm B runs even if Arm A fails (rc captured,
+# not short-circuited), because on exactly the broken-revert runs Arm B's
+# envelope matters most. FAIL-dominant composite below.
+test-cc-rollback-functional:
+	arm_a_rc=0; arm_b_rc=0; \
+	BPFRX_CLUSTER_ENV=$(CLUSTER_ENV) ./test/incus/harness-result.sh run \
+		--gate cc-rollback-arm-a --adapter wire-gate --env $(HARNESS_ENV) --cluster \
+		-- ./test/incus/cc-rollback-functional.sh --arm a || arm_a_rc=$$?; \
+	BPFRX_CLUSTER_ENV=$(CLUSTER_ENV) ./test/incus/harness-result.sh run \
+		--gate cc-rollback-arm-b --adapter wire-gate --env $(HARNESS_ENV) --cluster \
+		-- ./test/incus/cc-rollback-functional.sh --arm b || arm_b_rc=$$?; \
+	if [ "$$arm_a_rc" = "1" ] || [ "$$arm_b_rc" = "1" ]; then exit 1; \
+	elif [ "$$arm_a_rc" = "3" ] || [ "$$arm_b_rc" = "3" ]; then exit 3; \
+	elif [ "$$arm_a_rc" != "0" ] || [ "$$arm_b_rc" != "0" ]; then exit 2; \
+	else exit 0; fi
 
 # Self-test the shared cluster-env resolver (#5024): the HA/failover
 # smoke scripts read $FW0/$FW1/$CLUSTER_LAN_HOST, which cluster-env.sh
