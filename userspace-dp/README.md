@@ -441,11 +441,14 @@ logging rules, not these specific hot-path constants.
     physical index here would turn a trunk mis-attribution into a
     revocation). Two guards keep it from being a revoke storm:
 
-    * **Fabric ingress keeps the entry's zone**, and the discriminator is
-      the PACKET's fabric ingress, not the session's
+    * **Fabric ingress keeps the entry's zone**, and on the forward path the
+      discriminator is the PACKET's fabric ingress, not the session's
       `metadata.fabric_ingress` — the latter says the session was
       installed from a punt, which says nothing about where this packet
-      arrived. This is load-bearing on the SHIPPED config, not
+      arrived. (Carve-out: reverse-triggered re-derivation deliberately keys
+      on the forward entry's `fabric_ingress` provenance instead, since the
+      reverse packet's arrival is not the flow's ingress — #9604.)
+      This is load-bearing on the SHIPPED config, not
       hypothetical: `docs/ha-cluster-userspace.conf` puts `fab0` in the
       `control` zone and the ledger propagates that onto `ge-0-0-0`, so a
       live resolution there gives `control -> wan`, which nothing

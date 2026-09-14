@@ -68,6 +68,19 @@ impl SessionTable {
         self.install_partial
     }
 
+    /// #9604: counted invariant-violating decline on the reverse-triggered
+    /// re-derivation path. Call sites pair this with `debug_assert!(false,
+    /// ...)` per the #1855 contract.
+    pub fn note_policy_revalidation_loud_decline(&mut self) {
+        self.policy_revalidation_loud_declines =
+            self.policy_revalidation_loud_declines.saturating_add(1);
+    }
+
+    /// #9604: cumulative reverse-rederivation loud declines.
+    pub fn policy_revalidation_loud_declines(&self) -> u64 {
+        self.policy_revalidation_loud_declines
+    }
+
     /// #1861: cumulative at-cap install refusals from
     /// `install_with_protocol_with_origin` (previously write-only —
     /// at-cap drops were operator-invisible).

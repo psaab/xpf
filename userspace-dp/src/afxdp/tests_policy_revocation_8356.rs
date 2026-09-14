@@ -36,11 +36,12 @@
 use super::test_fixtures::*;
 use super::tests_support::*;
 use super::*;
-use crate::session::{SessionDecision, SessionMetadata, SessionOrigin};
+use crate::nat::NatDecision;
+use crate::session::{SessionDecision, SessionKey, SessionMetadata, SessionOrigin};
 use crate::test_zone_ids::*;
 use crate::{
-    FirewallFilterSnapshot, FirewallTermSnapshot, InterfaceSnapshot, PolicyRuleSnapshot,
-    RouteSnapshot,
+    FirewallFilterSnapshot, FirewallTermSnapshot, InterfaceSnapshot, NeighborSnapshot,
+    PolicyRuleSnapshot, RouteSnapshot, SourceNATRuleSnapshot,
 };
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use crate::tcp_flags::TCP_ACK;
@@ -2426,4 +2427,2074 @@ fn the_ordinary_admission_path_does_record_a_default_hit_9385() {
         "the ordinary admission path must still count the implicit-default \
          verdict. If it does not, the zero-delta cell above is vacuous (#9385)"
     );
+}
+// ---------------------------------------------------------------------------
+// #9604: a stale REVERSE hit is judged by its FORWARD companion.
+// ---------------------------------------------------------------------------
+//
+// The #8356 re-derivation was forward-only, so a flow that sent no forward
+// packet after a commit kept its old verdict until idle expiry. These cells
+// drive genuine reverse-direction packets (server→client tuple, owner arrival
+// on the flow's to-zone side) through the real poll body and assert the
+// forward-companion judgment: revoke-both on deny/reject, keep on permit,
+// never adjudicate the reverse pair as its own pair.
+//
+// EVERY cell asserts `hit == 1` (a misrouted packet that never reaches the
+// session would satisfy every revoke-zero assertion vacuously) and
+// `loud == 0` (no invariant-violating decline fired spuriously — the loud
+// counter exists for populations that should not occur, so any nonzero here
+// is a fixture or implementation bug, not background noise).
+use crate::session::PolicyRevalidationTarget;
+use crate::session::reverse_session_key;
+
+/// Second destination port, for the cells that pin port sourcing: 443 vs 8443
+/// distinguishes "judged the forward wire ports" from "judged the reply tuple
+/// or ignored ports".
+const DPORT2_9604: u16 = 8443;
+const SRC6_9604: Ipv6Addr = Ipv6Addr::new(0x2001, 0xdb8, 0, 0x61, 0, 0, 0, 0x102);
+const DST6_9604: Ipv6Addr = Ipv6Addr::new(0x2001, 0xdb8, 0, 0x80, 0, 0, 0, 0x200);
+
+/// Production-shape reverse metadata: zones SWAPPED relative to the forward
+/// flow, and NO ingress identity of its own — the reply's ingress has not been
+/// observed at install (#4983).
+fn reverse_metadata_for_9604(fwd_ingress_zone: u16, fwd_egress_zone: u16) -> SessionMetadata {
+    SessionMetadata {
+        ingress_zone: fwd_egress_zone,
+        egress_zone: fwd_ingress_zone,
+        ingress_ifindex: 0,
+        ingress_vlan_id: 0,
+        owner_rg_id: 0,
+        fabric_ingress: false,
+        is_reverse: true,
+        nat64_reverse: None,
+        log_session_init: false,
+        log_session_close: false,
+        policy_id: 0,
+        inactivity_timeout_ns: None,
+        policy_counter_idx: 0,
+        policy_counter: None,
+    }
+}
+
+/// Install a production-shape pair: the forward entry as given, plus its
+/// reverse companion keyed by `reverse_session_key` with the reversed nat,
+/// swapped zones and zero ingress identity. Both install UNVALIDATED
+/// (`policy_revalidated_gen: 0`), exactly what an operator's commit leaves
+/// behind. Returns the reverse wire key — the tuple the reply carries.
+fn install_pair_9604(
+    sessions: &mut SessionTable,
+    fwd_key: &SessionKey,
+    fwd_decision: SessionDecision,
+    fwd_metadata: SessionMetadata,
+    fwd_origin: SessionOrigin,
+    rev_origin: SessionOrigin,
+) -> SessionKey {
+    let rev_key = reverse_session_key(fwd_key, fwd_decision.nat);
+    let rev_decision = SessionDecision {
+        resolution: fwd_decision.resolution,
+        nat: fwd_decision.nat.reverse(
+            fwd_key.src_ip,
+            fwd_key.dst_ip,
+            fwd_key.src_port,
+            fwd_key.dst_port,
+        ),
+    };
+    let rev_metadata =
+        reverse_metadata_for_9604(fwd_metadata.ingress_zone, fwd_metadata.egress_zone);
+    assert!(
+        sessions.install_with_protocol_with_origin(
+            fwd_key.clone(),
+            fwd_decision,
+            fwd_metadata,
+            fwd_origin,
+            122_000_000_000,
+            fwd_key.protocol,
+            0,
+        ),
+        "9604 fixture must install the forward entry"
+    );
+    assert!(
+        sessions.install_with_protocol_with_origin(
+            rev_key.clone(),
+            rev_decision,
+            rev_metadata,
+            rev_origin,
+            122_000_000_000,
+            rev_key.protocol,
+            0,
+        ),
+        "9604 fixture must install the reverse companion"
+    );
+    rev_key
+}
+
+/// A forward wire key with explicit ports (the file's `flow_key_to` hard-codes
+/// `SPORT`/`DPORT`).
+fn flow_key_port_9604(dst: Ipv4Addr, sport: u16, dport: u16) -> SessionKey {
+    SessionKey {
+        addr_family: libc::AF_INET as u8,
+        protocol: PROTO_TCP,
+        src_ip: IpAddr::V4(SRC),
+        dst_ip: IpAddr::V4(dst),
+        src_port: sport,
+        dst_port: dport,
+        discriminator: Default::default(),
+        routing_domain: 0,
+    }
+}
+
+/// A reverse-direction TCP frame off an installed reverse key, with arrival
+/// meta for `arrival_ifindex`. The tuple is read off the KEY, never
+/// hand-built, so a key the lookup cannot resolve fails the `hit == 1`
+/// assertion instead of silently testing another path.
+fn reverse_tcp_frame_v4_9604(
+    rev_key: &SessionKey,
+    arrival_ifindex: i32,
+) -> (Vec<u8>, UserspaceDpMeta) {
+    let (src, dst) = match (rev_key.src_ip, rev_key.dst_ip) {
+        (IpAddr::V4(s), IpAddr::V4(d)) => (s, d),
+        _ => panic!("9604 v4 driver handed a non-v4 reverse key"),
+    };
+    let frame =
+        build_txn_tcp_syn_frame_v4(src, dst, rev_key.src_port, rev_key.dst_port, TCP_ACK);
+    let meta = txn_meta_v4(arrival_ifindex as u32, TCP_ACK, frame.len() as u16);
+    (frame, meta)
+}
+
+/// v6 twin of the above.
+fn reverse_tcp_frame_v6_9604(
+    rev_key: &SessionKey,
+    arrival_ifindex: i32,
+) -> (Vec<u8>, UserspaceDpMeta) {
+    let (src, dst) = match (rev_key.src_ip, rev_key.dst_ip) {
+        (IpAddr::V6(s), IpAddr::V6(d)) => (s, d),
+        _ => panic!("9604 v6 driver handed a non-v6 reverse key"),
+    };
+    let frame = build_txn_tcp_frame_v6(src, dst, rev_key.src_port, rev_key.dst_port, TCP_ACK);
+    let mut meta = txn_meta_v6(arrival_ifindex as u32, frame.len());
+    meta.tcp_flags = TCP_ACK;
+    (frame, meta)
+}
+
+struct ReverseOutcome {
+    revoked: u64,
+    hit: u64,
+    tx: u64,
+    foreign_drops: u64,
+}
+
+/// Drive one packet through the real poll body on the CALLER's binding (so
+/// multi-drive cells control flow-cache accumulation explicitly).
+fn drive_packet_9604(
+    sessions: &mut SessionTable,
+    forwarding: &ForwardingState,
+    binding: &mut BindingWorker,
+    frame: &[u8],
+    meta: UserspaceDpMeta,
+) -> ReverseOutcome {
+    let ha_state = txn_ha_state();
+    let (_batch, dbg) = txn_run_descriptor(binding, sessions, forwarding, &ha_state, frame, meta);
+    ReverseOutcome {
+        revoked: dbg.policy_revoked_sessions,
+        hit: dbg.session_hit,
+        tx: dbg.tx,
+        foreign_drops: dbg.foreign_authority_drops,
+    }
+}
+
+/// A fresh mirror binding arriving on `arrival_ifindex` as `iface`.
+fn binding_for_9604(arrival_ifindex: i32, iface: &str) -> BindingWorker {
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, arrival_ifindex, 0);
+    binding.interface = Arc::<str>::from(iface);
+    binding
+}
+
+/// Both primary slots must be gone after a revoke — the teardown half of the
+/// key/nat pairing contract (the eviction half is covered by the
+/// post-revoke miss+drop cell).
+fn assert_slots_gone_9604(sessions: &SessionTable, fwd: &SessionKey, rev: &SessionKey) {
+    assert!(
+        sessions.entry_with_origin(fwd).is_none(),
+        "the forward slot must be gone after revocation"
+    );
+    assert!(
+        sessions.entry_with_origin(rev).is_none(),
+        "the reverse companion slot must be gone after revocation — a \
+         teardown that deletes only the judged half strands the companion"
+    );
+}
+
+/// Two-phase driver for translated flows: phase 1 admits through the
+/// production path (real pair, real NAT reservation), phase 2 drives the
+/// REVERSE packet on a fresh binding under a second snapshot. Returns the
+/// table (for stamp/slot assertions) and both installed keys.
+struct AdmitReverseOutcome {
+    sessions: SessionTable,
+    fwd_key: SessionKey,
+    rev_key: SessionKey,
+    revoked: u64,
+    hit: u64,
+    tx: u64,
+}
+
+fn admit_then_reverse_9604(
+    snapshot_phase1: crate::ConfigSnapshot,
+    snapshot_phase2: crate::ConfigSnapshot,
+    admit_ifindex: i32,
+    admit_iface: &str,
+    frame_admit: &[u8],
+    meta_admit: UserspaceDpMeta,
+    rev_arrival: i32,
+    rev_iface: &str,
+) -> AdmitReverseOutcome {
+    let ha_state = txn_ha_state();
+    let mut sessions = SessionTable::new();
+    let forwarding1 = build_forwarding_state(&snapshot_phase1);
+    let mut binding1 = binding_for_9604(admit_ifindex, admit_iface);
+    let (_b1, dbg1) = txn_run_descriptor(
+        &mut binding1,
+        &mut sessions,
+        &forwarding1,
+        &ha_state,
+        frame_admit,
+        meta_admit,
+    );
+    assert_eq!(
+        dbg1.tx, 1,
+        "9604 phase 1 must ADMIT and forward, or the pair under test was never \
+         installed by the production path"
+    );
+    assert_eq!(
+        session_count(&sessions),
+        2,
+        "9604 phase 1 must install the forward + reverse pair"
+    );
+    let mut fwd_key = None;
+    let mut rev_key = None;
+    sessions.iter_with_origin(|key, _decision, metadata, _origin| {
+        if metadata.is_reverse {
+            rev_key = Some(key.clone());
+        } else {
+            fwd_key = Some(key.clone());
+        }
+    });
+    let fwd_key = fwd_key.expect("9604 phase 1 must install a forward entry");
+    let rev_key = rev_key.expect("9604 phase 1 must install a reverse companion");
+    let forwarding2 = build_forwarding_state(&snapshot_phase2);
+    let mut binding2 = binding_for_9604(rev_arrival, rev_iface);
+    let (frame_rev, meta_rev) = reverse_tcp_frame_v4_9604(&rev_key, rev_arrival);
+    let out = drive_packet_9604(&mut sessions, &forwarding2, &mut binding2, &frame_rev, meta_rev);
+    AdmitReverseOutcome {
+        sessions,
+        fwd_key,
+        rev_key,
+        revoked: out.revoked,
+        hit: out.hit,
+        tx: out.tx,
+    }
+}
+
+/// `policy_deny_snapshot` plus a `wan -> lan` permit and NO `lan -> wan` rule:
+/// the asymmetric fixture that separates forward-pair judgment (deny →
+/// revoke) from reverse-pair judgment (permit → keep).
+fn forwarding_asymmetric_9604() -> ForwardingState {
+    let mut snapshot = policy_deny_snapshot();
+    snapshot.generation = 7;
+    snapshot.fib_generation = 9;
+    snapshot.policies.push(wan_to_lan_permit("any", "rev-permit"));
+    build_forwarding_state(&snapshot)
+}
+
+/// A `lan -> wan` permit constrained to one application port (or source port),
+/// for the cells that pin tuple/port sourcing through the reverse path.
+fn port_scoped_permit_9604(dst_port: &str, src_port: &str) -> PolicyRuleSnapshot {
+    PolicyRuleSnapshot {
+        name: "port-out".into(),
+        from_zone: "lan".into(),
+        to_zone: "wan".into(),
+        source_addresses: vec!["any".into()],
+        destination_addresses: vec!["any".into()],
+        applications: vec!["svc-constrained".into()],
+        application_terms: vec![PolicyApplicationSnapshot {
+            name: "svc-constrained".into(),
+            protocol: "tcp".into(),
+            source_port: src_port.into(),
+            destination_port: dst_port.into(),
+            icmp_type: None,
+            icmp_code: None,
+            inactivity_timeout: None,
+        }],
+        action: "permit".into(),
+        ..Default::default()
+    }
+}
+/// THE FEATURE, reverse-fed. A session established under an older policy must
+/// be revoked on its next REVERSE packet once policy no longer permits the
+/// flow — the #9604 half of #7323's residual.
+///
+/// Dies if the reverse branch is deleted (GATE-1 `None` restored): the reverse
+/// hit never re-derives and both halves survive on companion keep-alive.
+#[test]
+fn reverse_only_stream_across_permit_to_deny_revokes_both_halves_9604() {
+    let forwarding = forwarding_with_lan_rule(None);
+    let mut sessions = SessionTable::new();
+    let fwd_key = flow_key_to(DST);
+    let rev_key = install_pair_9604(
+        &mut sessions,
+        &fwd_key,
+        decision(WAN_IFINDEX),
+        metadata(false),
+        SessionOrigin::ForwardFlow,
+        SessionOrigin::ReverseFlow,
+    );
+    let mut binding = binding_for_9604(WAN_IFINDEX, "reth0.80");
+    let (frame, meta) = reverse_tcp_frame_v4_9604(&rev_key, WAN_IFINDEX);
+    let out = drive_packet_9604(&mut sessions, &forwarding, &mut binding, &frame, meta);
+    assert_eq!(
+        out.hit, 1,
+        "the reply must HIT the reverse companion, or the revoke assertion is \
+         vacuous (#9604)"
+    );
+    assert_eq!(
+        out.revoked, 1,
+        "no rule permits lan -> wan anymore, so a reverse-fed flow must be \
+         revoked exactly like a forward-fed one. 0 is the #9604 residual: the \
+         reverse hit never re-derived and the pair survived on companion \
+         keep-alive"
+    );
+    assert_slots_gone_9604(&sessions, &fwd_key, &rev_key);
+    assert_eq!(
+        sessions.policy_revalidation_loud_declines(),
+        0,
+        "no invariant-violating decline may fire on a production-shape pair"
+    );
+}
+
+/// #9381 through the reverse path: a `reject` verdict is terminal
+/// non-forwarding for reverse-fed flows too, and tears down silently like a
+/// deny (the next packet of the tuple takes admission and emits the reject
+/// reply from `reject_reply.rs`).
+#[test]
+fn reverse_only_stream_across_permit_to_reject_revokes_both_halves_9604() {
+    let forwarding = forwarding_with_lan_rule(Some("reject"));
+    let mut sessions = SessionTable::new();
+    let fwd_key = flow_key_to(DST);
+    let rev_key = install_pair_9604(
+        &mut sessions,
+        &fwd_key,
+        decision(WAN_IFINDEX),
+        metadata(false),
+        SessionOrigin::ForwardFlow,
+        SessionOrigin::ReverseFlow,
+    );
+    let mut binding = binding_for_9604(WAN_IFINDEX, "reth0.80");
+    let (frame, meta) = reverse_tcp_frame_v4_9604(&rev_key, WAN_IFINDEX);
+    let out = drive_packet_9604(&mut sessions, &forwarding, &mut binding, &frame, meta);
+    assert_eq!(out.hit, 1, "the reply must hit the reverse companion");
+    assert_eq!(
+        out.revoked, 1,
+        "a `reject` verdict must revoke a reverse-fed session exactly as a \
+         forward-fed one (#9381 via #9604)"
+    );
+    assert_slots_gone_9604(&sessions, &fwd_key, &rev_key);
+    assert_eq!(sessions.policy_revalidation_loud_declines(), 0);
+}
+
+/// THE HARD-CONSTRAINT PIN. The policy permits `wan -> lan` (the reverse
+/// pair) but denies `lan -> wan` (the forward pair the session was admitted
+/// under). A reverse hit must still revoke: the judgment is FOR the forward
+/// tuple, never for the reverse pair.
+///
+/// An implementation that adjudicates the reverse entry as its own pair
+/// returns PERMIT here and keeps — this cell reds exactly that shape, which
+/// no other cell can see (every other deny cell also denies the reverse pair).
+#[test]
+fn a_reverse_pair_permit_does_not_save_a_denied_forward_flow_9604() {
+    let forwarding = forwarding_asymmetric_9604();
+    let mut sessions = SessionTable::new();
+    let fwd_key = flow_key_to(DST);
+    let rev_key = install_pair_9604(
+        &mut sessions,
+        &fwd_key,
+        decision(WAN_IFINDEX),
+        metadata(false),
+        SessionOrigin::ForwardFlow,
+        SessionOrigin::ReverseFlow,
+    );
+    let mut binding = binding_for_9604(WAN_IFINDEX, "reth0.80");
+    let (frame, meta) = reverse_tcp_frame_v4_9604(&rev_key, WAN_IFINDEX);
+    let out = drive_packet_9604(&mut sessions, &forwarding, &mut binding, &frame, meta);
+    assert_eq!(out.hit, 1, "the reply must hit the reverse companion");
+    assert_eq!(
+        out.revoked, 1,
+        "the FORWARD pair lan -> wan is denied: a `wan -> lan` permit must not \
+         save it. 0 means the reverse entry was adjudicated as its own pair, \
+         which is GATE 1's catastrophe in miniature — on a real box that shape \
+         keeps every reverse-fed denied flow (#9604)"
+    );
+    assert_slots_gone_9604(&sessions, &fwd_key, &rev_key);
+    assert_eq!(sessions.policy_revalidation_loud_declines(), 0);
+}
+
+/// v6 mirror of the deny detector: guards the AF-specific companion-key math
+/// through the reverse path.
+#[test]
+fn reverse_only_v6_stream_across_permit_to_deny_revokes_both_halves_9604() {
+    let forwarding = forwarding_with_lan_rule(None);
+    let mut sessions = SessionTable::new();
+    let fwd_key = SessionKey {
+        addr_family: libc::AF_INET6 as u8,
+        protocol: PROTO_TCP,
+        src_ip: IpAddr::V6(SRC6_9604),
+        dst_ip: IpAddr::V6(DST6_9604),
+        src_port: SPORT,
+        dst_port: DPORT,
+        discriminator: Default::default(),
+        routing_domain: 0,
+    };
+    let rev_key = install_pair_9604(
+        &mut sessions,
+        &fwd_key,
+        decision(WAN_IFINDEX),
+        metadata(false),
+        SessionOrigin::ForwardFlow,
+        SessionOrigin::ReverseFlow,
+    );
+    let mut binding = binding_for_9604(WAN_IFINDEX, "reth0.80");
+    let (frame, meta) = reverse_tcp_frame_v6_9604(&rev_key, WAN_IFINDEX);
+    let out = drive_packet_9604(&mut sessions, &forwarding, &mut binding, &frame, meta);
+    assert_eq!(out.hit, 1, "the v6 reply must hit the reverse companion");
+    assert_eq!(
+        out.revoked, 1,
+        "a reverse-fed v6 flow the live policy denies must be revoked (#9604)"
+    );
+    assert_slots_gone_9604(&sessions, &fwd_key, &rev_key);
+    assert_eq!(sessions.policy_revalidation_loud_declines(), 0);
+}
+/// SNAT through the reverse path, with the production pool reservation. Phase 1
+/// admits a pool-SNAT flow (real translated port, real reservation); phase 2
+/// narrows the policy and drives the REVERSE packet (pool -> client tuple).
+///
+/// This is the cell the key/nat pairing section of the plan calls load-bearing:
+/// the teardown and the eviction set both derive the companion from the carried
+/// nat, and the old caller shape (`resolved.decision`, the REVERSE nat) is a
+/// trap for exactly this. A wrong pairing strands the reverse half and its
+/// flow-cache slot — and leaks the pool port.
+#[test]
+fn snat_pair_reverse_triggered_deny_revokes_both_halves_9604() {
+    use crate::nat::source_nat_pool_statuses;
+
+    let mut snap1 = nat_snapshot();
+    snap1.generation = 7;
+    snap1.fib_generation = 9;
+    snap1.source_nat_rules = vec![SourceNATRuleSnapshot {
+        name: "snat-pool".to_string(),
+        from_zone: "lan".to_string(),
+        to_zone: "wan".to_string(),
+        source_addresses: vec!["0.0.0.0/0".to_string()],
+        pool_name: "pool-a".to_string(),
+        pool_addresses: vec!["172.16.80.100".to_string()],
+        port_low: 20000,
+        port_high: 20999,
+        ..Default::default()
+    }];
+    let mut snap2 = snap1.clone();
+    snap2.policies.clear();
+    snap2.generation = 8;
+
+    let ha_state = txn_ha_state();
+    let mut sessions = SessionTable::new();
+    let forwarding1 = build_forwarding_state(&snap1);
+    let mut binding1 = binding_for_9604(LAN_IFINDEX, "reth1.0");
+    // Via the default route (172.16.80.1 has a neighbor entry): DST sits in the
+    // connected WAN subnet with no neighbor entry, so a SYN to it installs but
+    // never forwards — the wrong server for an admit-then-revoke cell.
+    let syn = build_txn_tcp_syn_frame_v4(
+        SRC,
+        Ipv4Addr::new(8, 8, 8, 8),
+        SPORT,
+        DPORT,
+        TCP_FLAG_SYN,
+    );
+    let meta_syn = txn_meta_v4(LAN_IFINDEX as u32, TCP_FLAG_SYN, syn.len() as u16);
+    let (_b1, dbg1) = txn_run_descriptor(
+        &mut binding1,
+        &mut sessions,
+        &forwarding1,
+        &ha_state,
+        &syn,
+        meta_syn,
+    );
+    assert_eq!(dbg1.tx, 1, "9604 SNAT phase 1 must admit");
+    assert_eq!(session_count(&sessions), 2, "9604 phase 1 must install the pair");
+    assert_eq!(
+        source_nat_pool_statuses(&forwarding1.source_nat_rules)[0].used_ports,
+        1,
+        "9604 phase 1 must hold exactly one pool port — otherwise the release \
+         assertion below is vacuous"
+    );
+    let mut rev_key = None;
+    let mut fwd_key = None;
+    sessions.iter_with_origin(|key, _decision, metadata, _origin| {
+        if metadata.is_reverse {
+            rev_key = Some(key.clone());
+        } else {
+            fwd_key = Some(key.clone());
+        }
+    });
+    let (fwd_key, rev_key) = (
+        fwd_key.expect("9604 SNAT phase 1 must install forward"),
+        rev_key.expect("9604 SNAT phase 1 must install reverse"),
+    );
+
+    let forwarding2 = build_forwarding_state(&snap2);
+    let mut binding2 = binding_for_9604(WAN_IFINDEX, "reth0.80");
+    let (frame_rev, meta_rev) = reverse_tcp_frame_v4_9604(&rev_key, WAN_IFINDEX);
+    let out = drive_packet_9604(&mut sessions, &forwarding2, &mut binding2, &frame_rev, meta_rev);
+    assert_eq!(out.hit, 1, "the SNAT reply must hit the reverse companion");
+    assert_eq!(
+        out.revoked, 1,
+        "the narrowed policy denies lan -> wan: the SNAT pair must be revoked \
+         through the reverse hit. 0 is the #9604 residual for translated flows"
+    );
+    assert_slots_gone_9604(&sessions, &fwd_key, &rev_key);
+    // NO pool-release assertion here, deliberately. Pool allocator state is
+    // per-`ForwardingState` build in this harness (measured: a fresh narrowed
+    // build reads `used_ports == 0` while the admitting build still reads 1),
+    // so a cross-build release is invisible by construction — AND the
+    // pre-existing FORWARD revoke reads back identically under the same setup
+    // (measured: forward hit=1 revoked=1 with the admitting build still
+    // showing 1). The reservation release itself is covered from BOTH
+    // `delete_terminal_filtered_session_releases_companion_and_allocator_5622`
+    // (`hit_reverse` in {false, true}); this cell pins the end-to-end
+    // key/nat pairing (both halves actually torn down) instead.
+    assert_eq!(sessions.policy_revalidation_loud_declines(), 0);
+}
+
+/// DNAT through the reverse path. Phase 1 admits `client -> VIP:443`
+/// (translated to `real:8443`); phase 2 narrows to an unrelated host and
+/// drives the reply (`real:8443 -> client`).
+#[test]
+fn dnat_pair_reverse_triggered_narrowing_revokes_9604() {
+    let (syn, meta_syn, _ack, _meta_ack) = dnat_frames();
+    let out = admit_then_reverse_9604(
+        inbound_dnat_snapshot(wan_to_lan_permit(DNAT_REAL, "permit-internal")),
+        inbound_dnat_snapshot(wan_to_lan_permit("10.0.61.200/32", "permit-someone-else")),
+        WAN_INGRESS_IFINDEX,
+        "reth0.80",
+        &syn,
+        meta_syn,
+        LAN_IFINDEX,
+        "reth1.0",
+    );
+    assert_eq!(out.hit, 1, "the DNAT reply must hit the reverse companion");
+    assert_eq!(
+        out.revoked, 1,
+        "the live policy no longer covers the real server, so the DNAT pair \
+         must be revoked through the reverse hit (#9604 via #9382)"
+    );
+    assert_slots_gone_9604(&out.sessions, &out.fwd_key, &out.rev_key);
+    assert_eq!(out.sessions.policy_revalidation_loud_declines(), 0);
+}
+
+/// DNAT with DISTINCT VIP/backend ports (VIP:443 -> real:8443, the fixture's
+/// own shape). Phase 2 permits only the real address at the WRONG port
+/// (real:443): the judgment must read `rewrite_dst_port`, not the wire port.
+///
+/// An implementation that carries the translated ADDRESS but leaves the wire
+/// PORT matches real:443 and keeps — this cell reds exactly that shape.
+#[test]
+fn dnat_distinct_ports_reverse_triggered_narrowing_revokes_9604() {
+    let (syn, meta_syn, _ack, _meta_ack) = dnat_frames();
+    let mut rule = wan_to_lan_permit(DNAT_REAL, "permit-real-wrong-port");
+    rule.applications = vec!["svc-443".into()];
+    rule.application_terms = vec![PolicyApplicationSnapshot {
+        name: "svc-443".into(),
+        protocol: "tcp".into(),
+        source_port: String::new(),
+        destination_port: "443".into(),
+        icmp_type: None,
+        icmp_code: None,
+        inactivity_timeout: None,
+    }];
+    let out = admit_then_reverse_9604(
+        inbound_dnat_snapshot(wan_to_lan_permit(DNAT_REAL, "permit-internal")),
+        inbound_dnat_snapshot(rule),
+        WAN_INGRESS_IFINDEX,
+        "reth0.80",
+        &syn,
+        meta_syn,
+        LAN_IFINDEX,
+        "reth1.0",
+    );
+    assert_eq!(out.hit, 1, "the DNAT reply must hit the reverse companion");
+    assert_eq!(
+        out.revoked, 1,
+        "the only permit names real:443 but the flow serves real:8443 — the \
+         judgment must read the translated PORT as well as the address. 0 means \
+         the wire port rode along and matched (#9604 via #9382)"
+    );
+    assert_slots_gone_9604(&out.sessions, &out.fwd_key, &out.rev_key);
+    assert_eq!(out.sessions.policy_revalidation_loud_declines(), 0);
+}
+
+/// A 443-only permit must actually constrain the destination port on the
+/// reverse path: a session to 8443 revokes. The positive-only control stays
+/// green when ports are ignored (the rule still matches on L3), so without
+/// this cell "ports are evaluated" is unproven.
+#[test]
+fn port_constraint_enforced_on_reverse_9604() {
+    let mut snapshot = policy_deny_snapshot();
+    snapshot.generation = 7;
+    snapshot.fib_generation = 9;
+    snapshot.policies.clear();
+    snapshot
+        .policies
+        .push(port_scoped_permit_9604("443", ""));
+    let forwarding = build_forwarding_state(&snapshot);
+    let mut sessions = SessionTable::new();
+    let fwd_key = flow_key_port_9604(DST, SPORT, DPORT2_9604);
+    let rev_key = install_pair_9604(
+        &mut sessions,
+        &fwd_key,
+        decision(WAN_IFINDEX),
+        metadata(false),
+        SessionOrigin::ForwardFlow,
+        SessionOrigin::ReverseFlow,
+    );
+    let mut binding = binding_for_9604(WAN_IFINDEX, "reth0.80");
+    let (frame, meta) = reverse_tcp_frame_v4_9604(&rev_key, WAN_IFINDEX);
+    let out = drive_packet_9604(&mut sessions, &forwarding, &mut binding, &frame, meta);
+    assert_eq!(out.hit, 1, "the reply must hit the reverse companion");
+    assert_eq!(
+        out.revoked, 1,
+        "the only permit covers dst-port 443 and this flow serves 8443 — the \
+         reverse judgment must enforce the port constraint. 0 means ports are \
+         not evaluated on this path"
+    );
+    assert_slots_gone_9604(&sessions, &fwd_key, &rev_key);
+    assert_eq!(sessions.policy_revalidation_loud_declines(), 0);
+}
+/// An ICMPv4 echo-REPLY frame (type 0) carrying `ident`, mirroring
+/// `build_icmp_echo_frame_v4` (which emits only requests). The reply parses to
+/// `(ident, 0)` off the wire, i.e. the reverse tuple of an echo session.
+fn build_icmp_echo_reply_frame_v4_9604(src: Ipv4Addr, dst: Ipv4Addr, ident: u16) -> Vec<u8> {
+    let mut frame = Vec::new();
+    write_eth_header(
+        &mut frame,
+        [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff],
+        [0x00, 0x25, 0x90, 0x12, 0x34, 0x56],
+        0,
+        0x0800,
+    );
+    frame.extend_from_slice(&[
+        0x45, 0x00, 0x00, 0x1c, 0x00, 0x01, 0x00, 0x00, 64, PROTO_ICMP, 0x00, 0x00,
+    ]);
+    frame.extend_from_slice(&src.octets());
+    frame.extend_from_slice(&dst.octets());
+    let ip_csum = checksum16(&frame[14..34]);
+    frame[24..26].copy_from_slice(&ip_csum.to_be_bytes());
+    let icmp_start = frame.len();
+    frame.extend_from_slice(&[0, 0, 0x00, 0x00]);
+    frame.extend_from_slice(&ident.to_be_bytes());
+    frame.extend_from_slice(&[0x00, 0x01]);
+    let icmp_csum = checksum16(&frame[icmp_start..]);
+    frame[icmp_start + 2..icmp_start + 4].copy_from_slice(&icmp_csum.to_be_bytes());
+    frame
+}
+
+/// A junos-ping-shaped PERMIT for ICMPv6 (echo request, type 128), the v6 twin
+/// of `junos_ping_permit`. Deliberately on `dmz -> wan`: the gate predicate is
+/// whole-snapshot, so the pair is irrelevant to arming.
+fn junos_ping_v6_permit_9604() -> PolicyRuleSnapshot {
+    PolicyRuleSnapshot {
+        name: "ping6-elsewhere".into(),
+        from_zone: "dmz".into(),
+        to_zone: "wan".into(),
+        source_addresses: vec!["any".into()],
+        destination_addresses: vec!["any".into()],
+        applications: vec!["junos-ping6".into()],
+        application_terms: vec![PolicyApplicationSnapshot {
+            name: "junos-ping6".into(),
+            protocol: "icmpv6".into(),
+            source_port: String::new(),
+            destination_port: String::new(),
+            icmp_type: Some(128),
+            icmp_code: None,
+            inactivity_timeout: None,
+        }],
+        action: "permit".into(),
+        ..Default::default()
+    }
+}
+
+const NAT64_CLIENT_V6_9604: &str = "2001:559:8585:ef00::100";
+const NAT64_SYNTH_V6_9604: &str = "64:ff9b::c000:0207";
+const NAT64_MAPPED_V4_9604: [u8; 4] = [192, 0, 2, 1];
+const NAT64_SERVER_V4_9604: [u8; 4] = [203, 0, 113, 7];
+
+/// A production-shape NAT64 ICMP pair, installed manually: v6 echo forward key,
+/// v4 companion derived by `reverse_session_key` (AF + ICMPv6→ICMP remap),
+/// swapped zones, trusted LAN admitting identity on the forward half.
+fn install_nat64_icmp_pair_9604(sessions: &mut SessionTable) -> (SessionKey, SessionKey) {
+    let fwd_key = SessionKey {
+        addr_family: libc::AF_INET6 as u8,
+        protocol: PROTO_ICMPV6,
+        src_ip: NAT64_CLIENT_V6_9604.parse().expect("v6 client"),
+        dst_ip: NAT64_SYNTH_V6_9604.parse().expect("synthetic dst"),
+        src_port: ICMP_ID,
+        dst_port: 0,
+        discriminator: Default::default(),
+        routing_domain: 0,
+    };
+    let nat = crate::nat::NatDecision {
+        rewrite_src: Some(IpAddr::V4(Ipv4Addr::from(NAT64_MAPPED_V4_9604))),
+        rewrite_dst: Some(IpAddr::V4(Ipv4Addr::from(NAT64_SERVER_V4_9604))),
+        nat64: true,
+        ..crate::nat::NatDecision::default()
+    };
+    let fwd_decision = SessionDecision {
+        resolution: decision(WAN_IFINDEX).resolution,
+        nat,
+    };
+    let rev_key = install_pair_9604(
+        sessions,
+        &fwd_key,
+        fwd_decision,
+        metadata(false),
+        SessionOrigin::ForwardFlow,
+        SessionOrigin::ReverseFlow,
+    );
+    (fwd_key, rev_key)
+}
+
+/// Drive the v4 echo reply for an installed NAT64 ICMP pair.
+fn drive_nat64_icmp_reply_9604(
+    sessions: &mut SessionTable,
+    forwarding: &ForwardingState,
+) -> ReverseOutcome {
+    let frame = build_icmp_echo_reply_frame_v4_9604(
+        Ipv4Addr::from(NAT64_SERVER_V4_9604),
+        Ipv4Addr::from(NAT64_MAPPED_V4_9604),
+        ICMP_ID,
+    );
+    let mut meta = txn_meta_v4(WAN_IFINDEX as u32, 0, frame.len() as u16);
+    meta.protocol = PROTO_ICMP;
+    meta.payload_offset = 42;
+    let mut binding = binding_for_9604(WAN_IFINDEX, "reth0.80");
+    drive_packet_9604(sessions, forwarding, &mut binding, &frame, meta)
+}
+
+/// THE GATE PIN, decline direction. The snapshot arms ONLY the ICMPv6
+/// predicate; the v4 reply must therefore decline (kept, stamps stale) rather
+/// than evaluate the v6 tuple type-blind — which would miss the type-specific
+/// permit and manufacture a false DENY.
+///
+/// A packet-family gate (reading the reply's v4 protocol) finds its own family
+/// unarmed, proceeds to evaluate, misses the v6 permit and REVOKES — this cell
+/// reds exactly that shape.
+#[test]
+fn nat64_v6_armed_decline_keeps_flow_and_stamps_stale_9604() {
+    let mut snapshot = policy_deny_snapshot();
+    snapshot.generation = 7;
+    snapshot.fib_generation = 9;
+    snapshot.policies.push(junos_ping_v6_permit_9604());
+    let forwarding = build_forwarding_state(&snapshot);
+    assert!(
+        forwarding.policy.icmp_verdict_may_depend_on_type(PROTO_ICMPV6),
+        "9604 fixture must arm the v6 predicate, or the decline is vacuous"
+    );
+    assert!(
+        !forwarding.policy.icmp_verdict_may_depend_on_type(PROTO_ICMP),
+        "9604 fixture must leave the v4 predicate unarmed"
+    );
+    let mut sessions = SessionTable::new();
+    let (fwd_key, rev_key) = install_nat64_icmp_pair_9604(&mut sessions);
+    let out = drive_nat64_icmp_reply_9604(&mut sessions, &forwarding);
+    assert_eq!(out.hit, 1, "the v4 reply must hit the reverse companion");
+    assert_eq!(
+        out.revoked, 0,
+        "the v6 verdict may depend on type, which this derivation does not \
+         have — it must decline, exactly as the forward path does (#8618 via \
+         #9604)"
+    );
+    assert_eq!(session_count(&sessions), 2, "the declined pair must survive");
+    assert_eq!(
+        sessions.policy_revalidation_target(&fwd_key),
+        PolicyRevalidationTarget::Stale(fwd_key.clone()),
+        "a decline stamps nothing: the forward half must still be stale"
+    );
+    assert_eq!(
+        sessions.policy_revalidation_target(&rev_key),
+        PolicyRevalidationTarget::Stale(rev_key.clone()),
+        "and the reverse half must still be stale, so the next packet re-derives"
+    );
+    let out2 = drive_nat64_icmp_reply_9604(&mut sessions, &forwarding);
+    assert_eq!((out2.hit, out2.revoked), (1, 0), "the re-derivation must decline again");
+    assert_eq!(session_count(&sessions), 2);
+    assert_eq!(sessions.policy_revalidation_loud_declines(), 0);
+}
+
+/// THE GATE PIN, revoke direction: only the v4 predicate is armed, while the
+/// v6 judgment is a plain non-permit (no lan -> wan rule). The v6 family gate
+/// is unarmed, so the walk must run and revoke.
+///
+/// An extra packet-family gate (declining because v4 IS armed) keeps here —
+/// this cell reds exactly that shape, complementing the decline cell above.
+#[test]
+fn nat64_v4_armed_nonpermit_revokes_on_reverse_9604() {
+    let mut snapshot = policy_deny_snapshot();
+    snapshot.generation = 7;
+    snapshot.fib_generation = 9;
+    snapshot.policies.push(junos_ping_permit());
+    let forwarding = build_forwarding_state(&snapshot);
+    assert!(
+        forwarding.policy.icmp_verdict_may_depend_on_type(PROTO_ICMP),
+        "9604 fixture must arm the v4 predicate"
+    );
+    assert!(
+        !forwarding.policy.icmp_verdict_may_depend_on_type(PROTO_ICMPV6),
+        "9604 fixture must leave the v6 predicate unarmed, or the walk never runs"
+    );
+    let mut sessions = SessionTable::new();
+    let (fwd_key, rev_key) = install_nat64_icmp_pair_9604(&mut sessions);
+    let out = drive_nat64_icmp_reply_9604(&mut sessions, &forwarding);
+    assert_eq!(out.hit, 1, "the v4 reply must hit the reverse companion");
+    assert_eq!(
+        out.revoked, 1,
+        "the JUDGED family is v6 (unarmed) and the v6 pair is denied: the walk \
+         must run and revoke. 0 means a packet-family gate declined on the \
+         armed v4 predicate — the wrong family's answer (#9604)"
+    );
+    assert_slots_gone_9604(&sessions, &fwd_key, &rev_key);
+    assert_eq!(sessions.policy_revalidation_loud_declines(), 0);
+}
+use crate::session::SessionInstall;
+
+/// Install a pair through the synced-import path: both halves `SyncImport`,
+/// recorded zones lan -> wan, no locally-authored ingress identity (the peer's
+/// number never crosses, #6928). This is the #7323 imported population — the
+/// one the feature most needs to reach, since `upsert_synced` stamps
+/// generation 0.
+fn install_synced_pair_9604(sessions: &mut SessionTable) -> (SessionKey, SessionKey) {
+    let fwd_key = flow_key_to(DST);
+    let rev_key = reverse_session_key(&fwd_key, NatDecision::default());
+    let rev_nat = NatDecision::default().reverse(SRC.into(), DST.into(), SPORT, DPORT);
+    assert!(
+        sessions.upsert_synced(
+            fwd_key.clone(),
+            decision(WAN_IFINDEX),
+            metadata(false),
+            122_000_000_000,
+            PROTO_TCP,
+            0,
+            true,
+        ),
+        "9604 fixture must import the forward half"
+    );
+    let mut rev_metadata =
+        reverse_metadata_for_9604(TEST_LAN_ZONE_ID, TEST_WAN_ZONE_ID);
+    rev_metadata.policy_id = 0;
+    assert!(
+        sessions.upsert_synced(
+            rev_key.clone(),
+            SessionDecision {
+                resolution: decision(WAN_IFINDEX).resolution,
+                nat: rev_nat,
+            },
+            rev_metadata,
+            122_000_000_000,
+            PROTO_TCP,
+            0,
+            true,
+        ),
+        "9604 fixture must import the reverse half"
+    );
+    (fwd_key, rev_key)
+}
+
+/// The imported population revokes through the reverse path: a `SyncImport`
+/// pair takes the recorded-zone arm (no live resolution of a peer identity)
+/// and judges the recorded pair.
+#[test]
+fn peer_synced_pair_reverse_triggered_deny_revokes_9604() {
+    let forwarding = forwarding_with_lan_rule(None);
+    let mut sessions = SessionTable::new();
+    let (fwd_key, rev_key) = install_synced_pair_9604(&mut sessions);
+    let mut binding = binding_for_9604(WAN_IFINDEX, "reth0.80");
+    let (frame, meta) = reverse_tcp_frame_v4_9604(&rev_key, WAN_IFINDEX);
+    let out = drive_packet_9604(&mut sessions, &forwarding, &mut binding, &frame, meta);
+    assert_eq!(out.hit, 1, "the reply must hit the synced reverse companion");
+    assert_eq!(
+        out.revoked, 1,
+        "the recorded pair lan -> wan is denied: an imported flow must revoke \
+         through the reverse hit, not keep its peer's verdict (#9604 closes the \
+         #7323 residual for reverse-fed imports)"
+    );
+    assert_slots_gone_9604(&sessions, &fwd_key, &rev_key);
+    assert_eq!(sessions.policy_revalidation_loud_declines(), 0);
+}
+
+/// `SharedPromote` entries retain no locally-authored ingress identity
+/// (promotion clones without re-stamping), so they take the recorded-zone arm
+/// like every other imported provenance. A `SyncImport`-only cell cannot
+/// detect a live-resolution regression for promoted entries.
+#[test]
+fn shared_promote_pair_reverse_triggered_deny_revokes_9604() {
+    let forwarding = forwarding_with_lan_rule(None);
+    let mut sessions = SessionTable::new();
+    let fwd_key = flow_key_to(DST);
+    let rev_key = reverse_session_key(&fwd_key, NatDecision::default());
+    for (key, decision, mut md) in [
+        (fwd_key.clone(), decision(WAN_IFINDEX), metadata(false)),
+        (
+            rev_key.clone(),
+            SessionDecision {
+                resolution: decision(WAN_IFINDEX).resolution,
+                nat: NatDecision::default(),
+            },
+            reverse_metadata_for_9604(TEST_LAN_ZONE_ID, TEST_WAN_ZONE_ID),
+        ),
+    ] {
+        md.owner_rg_id = 1;
+        assert!(
+            sessions.upsert_synced_with_origin(
+                SessionInstall {
+                    key,
+                    decision,
+                    metadata: md,
+                    origin: SessionOrigin::SharedPromote,
+                    now_ns: 122_000_000_000,
+                    protocol: PROTO_TCP,
+                    tcp_flags: 0,
+                    session_id: 0,
+                    tcp_close_class: 0,
+                },
+                true,
+            ),
+            "9604 fixture must promote the pair"
+        );
+    }
+    let mut binding = binding_for_9604(WAN_IFINDEX, "reth0.80");
+    let (frame, meta) = reverse_tcp_frame_v4_9604(&rev_key, WAN_IFINDEX);
+    let out = drive_packet_9604(&mut sessions, &forwarding, &mut binding, &frame, meta);
+    assert_eq!(out.hit, 1, "the reply must hit the promoted reverse companion");
+    assert_eq!(
+        out.revoked, 1,
+        "the recorded pair lan -> wan is denied: a promoted flow must revoke \
+         through the reverse hit (#9604)"
+    );
+    assert_slots_gone_9604(&sessions, &fwd_key, &rev_key);
+    assert_eq!(sessions.policy_revalidation_loud_declines(), 0);
+}
+
+/// The collision shape: a `SharedPromote` forward entry whose node-valid
+/// ifindex resolves LOCALLY to a denying zone, but whose recorded (peer-)
+/// zone permits. Recorded-zone handling keeps it; live-resolving the
+/// recorded identity revokes — this cell reds exactly that regression.
+#[test]
+fn shared_promote_collision_kept_on_reverse_9604() {
+    let forwarding = forwarding_with_lan_rule(Some("permit"));
+    let mut sessions = SessionTable::new();
+    let fwd_key = flow_key_to(DST);
+    let rev_key = reverse_session_key(&fwd_key, NatDecision::default());
+    // Recorded identity: an interface number that is live-resolvable on THIS
+    // node to the `wan` zone (which admits nothing back), while the recorded
+    // zone is the permitting `lan`.
+    let mut fwd_metadata = metadata(false);
+    fwd_metadata.ingress_ifindex = WAN_IFINDEX as u32;
+    fwd_metadata.ingress_zone = TEST_LAN_ZONE_ID;
+    assert!(
+        sessions.upsert_synced_with_origin(
+            SessionInstall {
+                key: fwd_key.clone(),
+                decision: decision(WAN_IFINDEX),
+                metadata: fwd_metadata,
+                origin: SessionOrigin::SharedPromote,
+                now_ns: 122_000_000_000,
+                protocol: PROTO_TCP,
+                tcp_flags: 0,
+                session_id: 0,
+                tcp_close_class: 0,
+            },
+            true,
+        ),
+        "9604 fixture must promote the forward half"
+    );
+    assert!(
+        sessions.upsert_synced_with_origin(
+            SessionInstall {
+                key: rev_key.clone(),
+                decision: SessionDecision {
+                    resolution: decision(WAN_IFINDEX).resolution,
+                    nat: NatDecision::default(),
+                },
+                metadata: reverse_metadata_for_9604(TEST_LAN_ZONE_ID, TEST_WAN_ZONE_ID),
+                origin: SessionOrigin::SharedPromote,
+                now_ns: 122_000_000_000,
+                protocol: PROTO_TCP,
+                tcp_flags: 0,
+                session_id: 0,
+                tcp_close_class: 0,
+            },
+            true,
+        ),
+        "9604 fixture must promote the reverse half"
+    );
+    let mut binding = binding_for_9604(WAN_IFINDEX, "reth0.80");
+    let (frame, meta) = reverse_tcp_frame_v4_9604(&rev_key, WAN_IFINDEX);
+    let out = drive_packet_9604(&mut sessions, &forwarding, &mut binding, &frame, meta);
+    assert_eq!(out.hit, 1, "the reply must hit the promoted reverse companion");
+    assert_eq!(
+        out.revoked, 0,
+        "the RECORDED pair lan -> wan is permitted: a promoted identity must \
+         never be live-resolved locally, where its number names an unrelated \
+         zone. A non-zero count means the provenance table resolves \
+         non-locally-authored identities (#9604)"
+    );
+    assert_eq!(session_count(&sessions), 2, "the promoted pair must survive");
+    assert_eq!(sessions.policy_revalidation_loud_declines(), 0);
+}
+
+/// Recorded zone 0 declines: a synced entry that was never zone-adjudicated
+/// has no verdict to re-derive. Evaluating zone 0 would fall to the default
+/// policy and revoke — this cell reds that shape.
+#[test]
+fn recorded_zone_zero_declines_on_reverse_9604() {
+    let forwarding = forwarding_with_lan_rule(None);
+    let mut sessions = SessionTable::new();
+    let fwd_key = flow_key_to(DST);
+    let rev_key = reverse_session_key(&fwd_key, NatDecision::default());
+    let mut fwd_metadata = metadata(false);
+    fwd_metadata.ingress_zone = 0;
+    assert!(
+        sessions.upsert_synced(
+            fwd_key.clone(),
+            decision(WAN_IFINDEX),
+            fwd_metadata,
+            122_000_000_000,
+            PROTO_TCP,
+            0,
+            true,
+        ),
+        "9604 fixture must import the forward half"
+    );
+    assert!(
+        sessions.upsert_synced(
+            rev_key.clone(),
+            SessionDecision {
+                resolution: decision(WAN_IFINDEX).resolution,
+                nat: NatDecision::default(),
+            },
+            reverse_metadata_for_9604(0, TEST_WAN_ZONE_ID),
+            122_000_000_000,
+            PROTO_TCP,
+            0,
+            true,
+        ),
+        "9604 fixture must import the reverse half"
+    );
+    let mut binding = binding_for_9604(WAN_IFINDEX, "reth0.80");
+    let (frame, meta) = reverse_tcp_frame_v4_9604(&rev_key, WAN_IFINDEX);
+    let out = drive_packet_9604(&mut sessions, &forwarding, &mut binding, &frame, meta);
+    assert_eq!(out.hit, 1, "the reply must hit the reverse companion");
+    assert_eq!(
+        out.revoked, 0,
+        "a recorded zone of 0 is a LOOKUP FAILURE, not an unzoned interface: \
+         it must decline, not evaluate to default-deny and revoke (#9513 via \
+         #9604)"
+    );
+    assert_eq!(session_count(&sessions), 2, "the pair must survive the decline");
+    assert_eq!(sessions.policy_revalidation_loud_declines(), 0);
+}
+/// Snapshots for the zone-move detector: generation G leaves `reth1.0` in
+/// `lan` with a `lan -> wan` permit; generation G+1 (same table) moves only
+/// that interface into `live_zone`. Models the commit transition, not just
+/// live-ledger sourcing: the pair is stamped under G first.
+fn zone_move_snapshots_9604(live_zone: &str) -> (ForwardingState, ForwardingState) {
+    let mut snap_g = policy_deny_snapshot();
+    snap_g.generation = 7;
+    snap_g.fib_generation = 9;
+    snap_g.policies.clear();
+    snap_g.policies.push(PolicyRuleSnapshot {
+        name: "lan-out".into(),
+        from_zone: "lan".into(),
+        to_zone: "wan".into(),
+        source_addresses: vec!["any".into()],
+        destination_addresses: vec!["any".into()],
+        applications: vec!["any".into()],
+        application_terms: Vec::new(),
+        action: "permit".into(),
+        ..Default::default()
+    });
+    let mut snap_moved = snap_g.clone();
+    snap_moved.generation = 8;
+    for iface in snap_moved.interfaces.iter_mut() {
+        if iface.ifindex == LAN_IFINDEX {
+            iface.zone = live_zone.to_string();
+        }
+    }
+    (
+        build_forwarding_state(&snap_g),
+        build_forwarding_state(&snap_moved),
+    )
+}
+
+/// Drive a forward packet (LAN arrival) then a reverse packet (WAN arrival)
+/// across a zone move, asserting the G-transition stamps in between.
+fn drive_move_then_reverse_9604(live_zone: &str) -> (SessionTable, SessionKey, SessionKey, ReverseOutcome) {
+    let (forwarding_g, forwarding_moved) = zone_move_snapshots_9604(live_zone);
+    let mut sessions = SessionTable::new();
+    let fwd_key = flow_key_to(DST);
+    let rev_key = install_pair_9604(
+        &mut sessions,
+        &fwd_key,
+        decision(WAN_IFINDEX),
+        metadata(false),
+        SessionOrigin::ForwardFlow,
+        SessionOrigin::ReverseFlow,
+    );
+    // Under G the forward judgment permits and stamps the forward half — the
+    // transition model: the pair is judged, not merely installed, before the move.
+    let mut binding_fwd = binding_for_9604(LAN_IFINDEX, "reth1.0");
+    let frame_fwd = build_txn_tcp_syn_frame_v4(SRC, DST, SPORT, DPORT, TCP_ACK);
+    let meta_fwd = txn_meta_v4(LAN_IFINDEX as u32, TCP_ACK, frame_fwd.len() as u16);
+    let out_fwd = drive_packet_9604(&mut sessions, &forwarding_g, &mut binding_fwd, &frame_fwd, meta_fwd);
+    assert_eq!(out_fwd.hit, 1, "9604 move fixture: the forward packet must hit");
+    assert_eq!(out_fwd.revoked, 0, "9604 move fixture: G still permits lan -> wan");
+    assert_eq!(
+        sessions.policy_revalidation_target(&fwd_key),
+        PolicyRevalidationTarget::Fresh,
+        "9604 move fixture: the forward half must be stamped under G, or the \
+         cell models an install rather than a commit transition"
+    );
+    assert_eq!(
+        sessions.policy_revalidation_target(&rev_key),
+        PolicyRevalidationTarget::Stale(rev_key.clone()),
+        "9604 move fixture: hit-only stamping leaves the reverse half stale"
+    );
+    let mut binding_rev = binding_for_9604(WAN_IFINDEX, "reth0.80");
+    let (frame_rev, meta_rev) = reverse_tcp_frame_v4_9604(&rev_key, WAN_IFINDEX);
+    let out = drive_packet_9604(&mut sessions, &forwarding_moved, &mut binding_rev, &frame_rev, meta_rev);
+    (sessions, fwd_key, rev_key, out)
+}
+
+/// THE MOVE DETECTOR. The interface moved `lan -> dmz` between generations;
+/// only `lan -> wan` is permitted. A reverse-only flow must revoke: the
+/// from-zone is live-resolved from the forward entry's recorded admitting
+/// identity, not replayed from its recorded zone.
+///
+/// An implementation that judges `RecordedZone` everywhere keeps here — the
+/// recorded `lan` still permits — so this cell reds exactly that shape.
+#[test]
+fn zone_membership_move_reaches_reverse_only_flow_9604() {
+    let (sessions, fwd_key, rev_key, out) = drive_move_then_reverse_9604("dmz");
+    assert_eq!(out.hit, 1, "the reply must hit the reverse companion");
+    assert_eq!(
+        out.revoked, 1,
+        "the admitting interface now lives in `dmz`, which admits nothing to \
+         wan: the reverse-fed flow must revoke on the LIVE pair. 0 means the \
+         from-zone was replayed from the entry's recorded zone (#9384 via #9604)"
+    );
+    assert_slots_gone_9604(&sessions, &fwd_key, &rev_key);
+    assert_eq!(sessions.policy_revalidation_loud_declines(), 0);
+}
+
+/// THE ZERO-EVALUATES TWIN of the move detector. The interface moved out of
+/// EVERY zone: a nonzero identity resolving to zone 0 EVALUATES under the
+/// default policy (default deny → revoke), it does not decline.
+///
+/// Redundancy is deliberate: the `dmz` cell above also revokes, but through a
+/// zoned-but-unpermitted pair — an implementation that conflates "zone 0"
+/// with "no identity" keeps HERE while passing there.
+#[test]
+fn unzoned_ingress_evaluates_default_on_reverse_9604() {
+    let (sessions, fwd_key, rev_key, out) = drive_move_then_reverse_9604("");
+    assert_eq!(out.hit, 1, "the reply must hit the reverse companion");
+    assert_eq!(
+        out.revoked, 1,
+        "the admitting interface resolves but sits in NO zone: a new flow \
+         would fall to default-deny, and the reverse-fed established flow must \
+         be judged the same way. 0 conflates an unzoned interface with a lookup \
+         failure (#9513 via #9604)"
+    );
+    assert_slots_gone_9604(&sessions, &fwd_key, &rev_key);
+    assert_eq!(sessions.policy_revalidation_loud_declines(), 0);
+}
+
+/// THE ZERO-IDENTITY DECLINE. A trusted-origin, non-fabric forward entry with
+/// NO recorded ingress identity declines — there is nothing live to resolve
+/// (ifindex 0) and no recorded zone to fall back to on the live arm.
+/// (Fabric-installed halves take the RecordedZone path instead since #9604.)
+///
+/// An implementation that feeds 0 through the ledger evaluates zone 0 and
+/// revokes under default-deny — this cell reds exactly that shape.
+#[test]
+fn trusted_zero_ifindex_declines_on_reverse_9604() {
+    let forwarding = forwarding_with_lan_rule(None);
+    let mut sessions = SessionTable::new();
+    let fwd_key = flow_key_to(DST);
+    let mut fwd_metadata = metadata(false);
+    fwd_metadata.ingress_ifindex = 0;
+    let rev_key = install_pair_9604(
+        &mut sessions,
+        &fwd_key,
+        decision(WAN_IFINDEX),
+        fwd_metadata,
+        SessionOrigin::ForwardFlow,
+        SessionOrigin::ReverseFlow,
+    );
+    let mut binding = binding_for_9604(WAN_IFINDEX, "reth0.80");
+    let (frame, meta) = reverse_tcp_frame_v4_9604(&rev_key, WAN_IFINDEX);
+    let out = drive_packet_9604(&mut sessions, &forwarding, &mut binding, &frame, meta);
+    assert_eq!(out.hit, 1, "the reply must hit the reverse companion");
+    assert_eq!(
+        out.revoked, 0,
+        "no recorded ingress identity means no live resolution is possible: \
+         the judgment must decline, not evaluate a zero identity to \
+         default-deny (#9513 via #9604)"
+    );
+    assert_eq!(session_count(&sessions), 2, "the pair must survive the decline");
+    assert_eq!(
+        sessions.policy_revalidation_target(&fwd_key),
+        PolicyRevalidationTarget::Stale(fwd_key.clone()),
+        "a decline stamps nothing"
+    );
+    assert_eq!(sessions.policy_revalidation_loud_declines(), 0);
+}
+/// THE CONTROL that gives every deny cell above its aim — and doubles as a
+/// forward-pair-judgment proof. Same packet, same path, policy PERMITTING:
+/// nothing may be revoked. Under this asymmetric fixture (no `wan -> lan`
+/// rule) a broken reverse-pair evaluation denies and revokes, so this also
+/// reds adjudicating the reverse entry as its own pair.
+#[test]
+fn a_still_permitted_reverse_fed_flow_is_kept_9604() {
+    let forwarding = forwarding_with_lan_rule(Some("permit"));
+    let mut sessions = SessionTable::new();
+    let fwd_key = flow_key_to(DST);
+    let rev_key = install_pair_9604(
+        &mut sessions,
+        &fwd_key,
+        decision(WAN_IFINDEX),
+        metadata(false),
+        SessionOrigin::ForwardFlow,
+        SessionOrigin::ReverseFlow,
+    );
+    let mut binding = binding_for_9604(WAN_IFINDEX, "reth0.80");
+    let (frame, meta) = reverse_tcp_frame_v4_9604(&rev_key, WAN_IFINDEX);
+    let out = drive_packet_9604(&mut sessions, &forwarding, &mut binding, &frame, meta);
+    assert_eq!(out.hit, 1, "the reply must hit the reverse companion");
+    assert_eq!(
+        out.revoked, 0,
+        "policy still permits lan -> wan, so nothing may be revoked. A \
+         re-derivation that denied unconditionally — or that adjudicated the \
+         reverse pair (wan -> lan, unpermitted here) — would revoke (#9604)"
+    );
+    assert_eq!(
+        session_count(&sessions),
+        2,
+        "the permitted pair — and its translation — must be untouched"
+    );
+    assert_eq!(sessions.policy_revalidation_loud_declines(), 0);
+}
+
+/// DNAT kept through the reverse path: the rule names the REAL server, the
+/// wire carries the VIP, and only a post-translation judgment matches.
+#[test]
+fn dnat_pair_permit_names_real_server_kept_on_reverse_9604() {
+    let (syn, meta_syn, _ack, _meta_ack) = dnat_frames();
+    let out = admit_then_reverse_9604(
+        inbound_dnat_snapshot(wan_to_lan_permit(DNAT_REAL, "permit-internal")),
+        inbound_dnat_snapshot(wan_to_lan_permit(DNAT_REAL, "permit-internal")),
+        WAN_INGRESS_IFINDEX,
+        "reth0.80",
+        &syn,
+        meta_syn,
+        LAN_IFINDEX,
+        "reth1.0",
+    );
+    assert_eq!(out.hit, 1, "the DNAT reply must hit the reverse companion");
+    assert_eq!(
+        out.revoked, 0,
+        "the policy is unchanged and names the real server: judging the wire \
+         VIP would miss the permit and revoke every published service on every \
+         route event (#9382 via #9604)"
+    );
+    assert_eq!(session_count(&out.sessions), 2, "the pair must survive");
+    assert_eq!(out.sessions.policy_revalidation_loud_declines(), 0);
+}
+
+/// Port order through the reverse path: the 443-only permit matches the
+/// forward wire ports. A reply-tuple judgment (src 443, dst 12345) misses and
+/// revokes — this cell reds exactly that shape.
+#[test]
+fn port_scoped_permit_kept_on_reverse_9604() {
+    let mut snapshot = policy_deny_snapshot();
+    snapshot.generation = 7;
+    snapshot.fib_generation = 9;
+    snapshot.policies.clear();
+    snapshot
+        .policies
+        .push(port_scoped_permit_9604("443", ""));
+    let forwarding = build_forwarding_state(&snapshot);
+    let mut sessions = SessionTable::new();
+    let fwd_key = flow_key_to(DST);
+    let rev_key = install_pair_9604(
+        &mut sessions,
+        &fwd_key,
+        decision(WAN_IFINDEX),
+        metadata(false),
+        SessionOrigin::ForwardFlow,
+        SessionOrigin::ReverseFlow,
+    );
+    let mut binding = binding_for_9604(WAN_IFINDEX, "reth0.80");
+    let (frame, meta) = reverse_tcp_frame_v4_9604(&rev_key, WAN_IFINDEX);
+    let out = drive_packet_9604(&mut sessions, &forwarding, &mut binding, &frame, meta);
+    assert_eq!(out.hit, 1, "the reply must hit the reverse companion");
+    assert_eq!(
+        out.revoked, 0,
+        "the flow serves dst-port 443, which the only permit covers. A \
+         non-zero count means the judgment read the reply tuple's ports \
+         (dst 12345) instead of the forward pair's (#9604)"
+    );
+    assert_eq!(session_count(&sessions), 2, "the pair must survive");
+    assert_eq!(sessions.policy_revalidation_loud_declines(), 0);
+}
+
+/// Source-port sourcing through the reverse path: the term constrains the
+/// CLIENT source port (12345), which no reply-tuple slot carries. An
+/// implementation supplying any other slot's port misses and revokes.
+#[test]
+fn source_port_scoped_permit_kept_on_reverse_9604() {
+    let mut snapshot = policy_deny_snapshot();
+    snapshot.generation = 7;
+    snapshot.fib_generation = 9;
+    snapshot.policies.clear();
+    snapshot
+        .policies
+        .push(port_scoped_permit_9604("", "12345"));
+    let forwarding = build_forwarding_state(&snapshot);
+    let mut sessions = SessionTable::new();
+    let fwd_key = flow_key_to(DST);
+    let rev_key = install_pair_9604(
+        &mut sessions,
+        &fwd_key,
+        decision(WAN_IFINDEX),
+        metadata(false),
+        SessionOrigin::ForwardFlow,
+        SessionOrigin::ReverseFlow,
+    );
+    let mut binding = binding_for_9604(WAN_IFINDEX, "reth0.80");
+    let (frame, meta) = reverse_tcp_frame_v4_9604(&rev_key, WAN_IFINDEX);
+    let out = drive_packet_9604(&mut sessions, &forwarding, &mut binding, &frame, meta);
+    assert_eq!(out.hit, 1, "the reply must hit the reverse companion");
+    assert_eq!(
+        out.revoked, 0,
+        "the flow's source port is 12345, which the only permit constrains on. \
+         A non-zero count means `src_port` was sourced from any slot but the \
+         forward pair's (#9604)"
+    );
+    assert_eq!(session_count(&sessions), 2, "the pair must survive");
+    assert_eq!(sessions.policy_revalidation_loud_declines(), 0);
+}
+
+/// SNAT kept under a source-scoped permit: the rule names the PRE-translation
+/// client subnet. A translated-source judgment (the pool address) misses and
+/// revokes — this cell reds exactly that shape.
+#[test]
+fn snat_src_scoped_permit_kept_on_reverse_9604() {
+    let mut snap = nat_snapshot();
+    snap.generation = 7;
+    snap.fib_generation = 9;
+    snap.source_nat_rules = vec![SourceNATRuleSnapshot {
+        name: "snat-pool".to_string(),
+        from_zone: "lan".to_string(),
+        to_zone: "wan".to_string(),
+        source_addresses: vec!["0.0.0.0/0".to_string()],
+        pool_name: "pool-a".to_string(),
+        pool_addresses: vec!["172.16.80.100".to_string()],
+        port_low: 20000,
+        port_high: 20999,
+        ..Default::default()
+    }];
+    snap.policies.clear();
+    snap.policies.push(PolicyRuleSnapshot {
+        name: "lan-out-scoped".into(),
+        from_zone: "lan".into(),
+        to_zone: "wan".into(),
+        source_addresses: vec!["10.0.61.0/24".into()],
+        destination_addresses: vec!["any".into()],
+        applications: vec!["any".into()],
+        application_terms: Vec::new(),
+        action: "permit".into(),
+        ..Default::default()
+    });
+    // Via the default route — see the deny cell: DST has no neighbor entry.
+    let syn = build_txn_tcp_syn_frame_v4(
+        SRC,
+        Ipv4Addr::new(8, 8, 8, 8),
+        SPORT,
+        DPORT,
+        TCP_FLAG_SYN,
+    );
+    let meta_syn = txn_meta_v4(LAN_IFINDEX as u32, TCP_FLAG_SYN, syn.len() as u16);
+    let out = admit_then_reverse_9604(
+        snap.clone(),
+        snap,
+        LAN_IFINDEX,
+        "reth1.0",
+        &syn,
+        meta_syn,
+        WAN_IFINDEX,
+        "reth0.80",
+    );
+    assert_eq!(out.hit, 1, "the SNAT reply must hit the reverse companion");
+    assert_eq!(
+        out.revoked, 0,
+        "the rule names the PRE-translation client subnet 10.0.61.0/24, which \
+         covers this flow: Junos evaluates before source NAT, and so must this \
+         derivation. A non-zero count means the translated pool address was \
+         judged as the source (#9604)"
+    );
+    assert_eq!(session_count(&out.sessions), 2, "the SNAT pair must survive");
+    assert_eq!(out.sessions.policy_revalidation_loud_declines(), 0);
+}
+
+/// THE GENUINE LONE-REVERSE DECLINE. Unlike the 8356 trap cell (which never
+/// reaches revalidation — it is foreign-dropped), this installs a lone
+/// reverse entry under its REVERSE key and drives an owner-arriving reply, so
+/// the missing-companion decline is what keeps it.
+#[test]
+fn lone_reverse_companion_reaching_revalidation_is_declined_9604() {
+    let forwarding = forwarding_with_lan_rule(None);
+    let mut sessions = SessionTable::new();
+    let fwd_key = flow_key_to(DST);
+    let rev_key = reverse_session_key(&fwd_key, NatDecision::default());
+    assert!(
+        sessions.install_with_protocol_with_origin(
+            rev_key.clone(),
+            SessionDecision {
+                resolution: decision(WAN_IFINDEX).resolution,
+                nat: NatDecision::default(),
+            },
+            reverse_metadata_for_9604(TEST_LAN_ZONE_ID, TEST_WAN_ZONE_ID),
+            SessionOrigin::ReverseFlow,
+            122_000_000_000,
+            PROTO_TCP,
+            0,
+        ),
+        "9604 fixture must install the lone reverse entry"
+    );
+    let mut binding = binding_for_9604(WAN_IFINDEX, "reth0.80");
+    let (frame, meta) = reverse_tcp_frame_v4_9604(&rev_key, WAN_IFINDEX);
+    let out = drive_packet_9604(&mut sessions, &forwarding, &mut binding, &frame, meta);
+    assert_eq!(
+        out.hit, 1,
+        "the reply must HIT the lone reverse entry — arrival wan equals the \
+         recorded wan ingress, so this is an owner packet that REACHES \
+         revalidation (unlike the 8356 trap, which is foreign-dropped)"
+    );
+    assert_eq!(
+        out.revoked, 0,
+        "with no forward companion there is no forward pair to judge: the \
+         derivation must decline, not synthesize authority from swapped zones \
+         (#9604)"
+    );
+    assert_eq!(session_count(&sessions), 1, "the lone companion must survive");
+    assert_eq!(
+        sessions.policy_revalidation_target(&rev_key),
+        PolicyRevalidationTarget::Stale(rev_key.clone()),
+        "a decline stamps nothing"
+    );
+    assert_eq!(sessions.policy_revalidation_loud_declines(), 0);
+}
+
+/// A reverse packet from a NON-owning zone is foreign: dropped, and the
+/// session is neither torn down nor stamped. The reply tuple arrives on LAN
+/// while the reverse entry records a WAN ingress.
+#[test]
+fn foreign_reverse_packet_neither_revokes_nor_stamps_9604() {
+    let forwarding = forwarding_with_lan_rule(None);
+    let mut sessions = SessionTable::new();
+    let fwd_key = flow_key_to(DST);
+    let rev_key = install_pair_9604(
+        &mut sessions,
+        &fwd_key,
+        decision(WAN_IFINDEX),
+        metadata(false),
+        SessionOrigin::ForwardFlow,
+        SessionOrigin::ReverseFlow,
+    );
+    let mut binding = binding_for_9604(LAN_IFINDEX, "reth1.0");
+    let (frame, meta) = reverse_tcp_frame_v4_9604(&rev_key, LAN_IFINDEX);
+    let out = drive_packet_9604(&mut sessions, &forwarding, &mut binding, &frame, meta);
+    assert_eq!(out.hit, 1, "the spoofed reply must still HIT the session entry");
+    assert_eq!(
+        out.foreign_drops, 1,
+        "a reply arriving outside the flow's to-zone is FOREIGN and must drop \
+         without acting on the session (#9519)"
+    );
+    assert_eq!(out.revoked, 0, "a foreign packet must never revoke");
+    assert_eq!(session_count(&sessions), 2, "the pair must survive");
+    assert_eq!(
+        sessions.policy_revalidation_target(&rev_key),
+        PolicyRevalidationTarget::Stale(rev_key.clone()),
+        "a foreign packet must not stamp"
+    );
+    assert_eq!(
+        sessions.policy_revalidation_target(&fwd_key),
+        PolicyRevalidationTarget::Stale(fwd_key.clone()),
+        "and neither half may be re-stamped by it"
+    );
+    assert_eq!(sessions.policy_revalidation_loud_declines(), 0);
+}
+
+/// HIT-ONLY STAMPING, observed. A reverse permit stamps the reverse half only;
+/// the same-generation forward packet then re-derives (rather than coasting
+/// on a cross-direction stamp) and stamps the forward half. Verdict-only
+/// assertions would pass under dual-stamp too; the stamp probes carry the proof.
+#[test]
+fn same_generation_reverse_then_forward_kept_9604() {
+    let forwarding = forwarding_with_lan_rule(Some("permit"));
+    let mut sessions = SessionTable::new();
+    let fwd_key = flow_key_to(DST);
+    let rev_key = install_pair_9604(
+        &mut sessions,
+        &fwd_key,
+        decision(WAN_IFINDEX),
+        metadata(false),
+        SessionOrigin::ForwardFlow,
+        SessionOrigin::ReverseFlow,
+    );
+    let mut binding_rev = binding_for_9604(WAN_IFINDEX, "reth0.80");
+    let (frame_rev, meta_rev) = reverse_tcp_frame_v4_9604(&rev_key, WAN_IFINDEX);
+    let out_rev = drive_packet_9604(&mut sessions, &forwarding, &mut binding_rev, &frame_rev, meta_rev);
+    assert_eq!((out_rev.hit, out_rev.revoked), (1, 0), "the reverse packet must hit and keep");
+    assert_eq!(
+        sessions.policy_revalidation_target(&rev_key),
+        PolicyRevalidationTarget::Fresh,
+        "the reverse permit stamps the hit half"
+    );
+    assert_eq!(
+        sessions.policy_revalidation_target(&fwd_key),
+        PolicyRevalidationTarget::Stale(fwd_key.clone()),
+        "hit-only stamping writes NO forward stamp from the reverse path — a \
+         dual-stamp would read Fresh here (#9604)"
+    );
+    let mut binding_fwd = binding_for_9604(LAN_IFINDEX, "reth1.0");
+    let frame_fwd = build_txn_tcp_syn_frame_v4(SRC, DST, SPORT, DPORT, TCP_ACK);
+    let meta_fwd = txn_meta_v4(LAN_IFINDEX as u32, TCP_ACK, frame_fwd.len() as u16);
+    let out_fwd = drive_packet_9604(&mut sessions, &forwarding, &mut binding_fwd, &frame_fwd, meta_fwd);
+    assert_eq!((out_fwd.hit, out_fwd.revoked), (1, 0), "the forward packet must hit and keep");
+    assert_eq!(
+        sessions.policy_revalidation_target(&fwd_key),
+        PolicyRevalidationTarget::Fresh,
+        "the forward packet re-derived (rather than coasting) and stamped"
+    );
+    assert_eq!(session_count(&sessions), 2);
+    assert_eq!(sessions.policy_revalidation_loud_declines(), 0);
+}
+
+/// Side-effect freedom through the reverse path: a reverse-fed permit matches
+/// `lan-out` and must not bump its hit counter (nor the default's). The
+/// positive control is the shipped #9385 admission cell — a zero delta is
+/// meaningless without proof the instrument can move.
+#[test]
+fn reverse_re_derivation_records_no_hit_9604() {
+    let forwarding = forwarding_with_lan_rule(Some("permit"));
+    let (rule_before, default_before) = policy_hit_counts_9385(&forwarding);
+    assert_ne!(rule_before, u64::MAX, "the `lan-out` rule must exist");
+    let mut sessions = SessionTable::new();
+    let rev_key = install_pair_9604(
+        &mut sessions,
+        &flow_key_to(DST),
+        decision(WAN_IFINDEX),
+        metadata(false),
+        SessionOrigin::ForwardFlow,
+        SessionOrigin::ReverseFlow,
+    );
+    let mut binding = binding_for_9604(WAN_IFINDEX, "reth0.80");
+    let (frame, meta) = reverse_tcp_frame_v4_9604(&rev_key, WAN_IFINDEX);
+    let out = drive_packet_9604(&mut sessions, &forwarding, &mut binding, &frame, meta);
+    assert_eq!((out.hit, out.revoked), (1, 0), "the reverse packet must hit and keep");
+    let (rule_after, default_after) = policy_hit_counts_9385(&forwarding);
+    assert_eq!(
+        rule_after, rule_before,
+        "the reverse-triggered walk matched `lan-out` and must NOT have bumped \
+         it — same phantom-hit contract as the forward path (#9385 via #9604)"
+    );
+    assert_eq!(
+        default_after, default_before,
+        "and the implicit-default counter must not move either"
+    );
+    assert_eq!(sessions.policy_revalidation_loud_declines(), 0);
+}
+
+/// THE #6457 CONTRACT for reverse-triggered revocation. A DNAT admit seeds the
+/// flow-cache slot (asserted); after the narrowed generation revokes the pair
+/// through the reverse hit, NEITHER tuple may forward again — no cached
+/// RewriteDescriptor may outlive the session it was seeded from.
+///
+/// The post-revoke redrives keep the ORIGINAL meta on purpose: the txn
+/// harness pins `ValidationState` at generation 7 (`classify_metadata`
+/// drops anything else before any lookup, and both the cache stamp and the
+/// cache lookup follow `validation`, never the meta), so a slot the revoke
+/// failed to evict still matches and forwards — generation invalidation
+/// cannot save it in here, only EXPLICIT eviction passes. The kill drive
+/// reaches the session path anyway: the reverse tuple keys differently from
+/// the seeded forward slot, so it cache-misses into the session
+/// re-derivation, which judges the gen-8 snapshot.
+#[test]
+fn post_revoke_both_tuples_miss_and_drop_9604() {
+    let mut snap_permit =
+        inbound_dnat_snapshot(wan_to_lan_permit(DNAT_REAL, "permit-internal"));
+    snap_permit.generation = 7;
+    snap_permit.fib_generation = 9;
+    let forwarding_permit = build_forwarding_state(&snap_permit);
+    let mut sessions = SessionTable::new();
+    let mut binding = binding_for_9604(WAN_INGRESS_IFINDEX, "reth0.80");
+    let (_syn, _meta_syn, ack, meta_ack) = dnat_frames();
+    // ACK-first: only an eligible packet seeds the flow-cache slot.
+    // `should_cache` admits a pure-ACK TCP (or UDP) packet to a cacheable
+    // disposition — a SYN admit installs the pair but seeds nothing, which
+    // would leave the eviction assertions below vacuous.
+    let admit = drive_packet_9604(&mut sessions, &forwarding_permit, &mut binding, &ack, meta_ack);
+    assert_eq!((admit.hit, admit.revoked, admit.tx), (0, 0, 1), "phase 1 must MISS, admit and forward");
+    assert_eq!(session_count(&sessions), 2, "phase 1 must install the pair");
+    let mut fwd_key = None;
+    let mut rev_key = None;
+    sessions.iter_with_origin(|key, _decision, metadata, _origin| {
+        if metadata.is_reverse {
+            rev_key = Some(key.clone());
+        } else {
+            fwd_key = Some(key.clone());
+        }
+    });
+    let (fwd_key, rev_key) = (
+        fwd_key.expect("admit must install forward"),
+        rev_key.expect("admit must install reverse"),
+    );
+    assert!(
+        txn_flow_cache_entries(&binding) >= 1,
+        "admission must seed the flow-cache slot — otherwise the miss+drop \
+         assertions below cannot distinguish eviction from an empty cache \
+         (got {})",
+        txn_flow_cache_entries(&binding)
+    );
+    // The kill drive IS the first post-install hit, deliberately. Installs
+    // stamp `policy_revalidated_gen: 0` while the harness pins the table's
+    // live generation at validation 7, so exactly the first hit re-derives
+    // (and re-stamps Fresh) — a keep drive here would consume that one
+    // re-derivation under permit AND seed a reverse-tuple slot the pinned
+    // validation can never invalidate, shielding the kill from the session
+    // path (measured: keep moves entries 1 -> 2, the kill then cache-hits
+    // (0,0,1)). Reachability from the reply tuple is proved inline by the
+    // kill's hit == 1; keep-under-permit is covered by the kept-cells (e.g.
+    // `a_still_permitted_reverse_fed_flow_is_kept_9604`).
+    let (frame_rev, meta_rev) = reverse_tcp_frame_v4_9604(&rev_key, LAN_IFINDEX);
+    // The narrowed post-commit snapshot: the re-derivation judges THIS
+    // policy, not the admitting one. (In-harness staleness comes from the
+    // install stamp vs the pinned live 7, not from the 7 -> 8 bump — the
+    // bump marks the post-commit shape, as in the sibling cells.)
+    let mut snap_narrow =
+        inbound_dnat_snapshot(wan_to_lan_permit("10.0.61.200/32", "permit-someone-else"));
+    snap_narrow.generation = 8;
+    snap_narrow.fib_generation = 9;
+    let forwarding_narrowed8 = build_forwarding_state(&snap_narrow);
+    // Drive the kill with the ORIGINAL meta: the harness pins validation at
+    // generation 7, so a re-stamped meta dies in `classify_metadata`
+    // (`ConfigGenerationMismatch`) before any lookup. No re-stamp is needed
+    // anyway — the reverse tuple cache-misses (its 5-tuple differs from the
+    // seeded forward slot) straight into the session re-derivation.
+    let kill = drive_packet_9604(&mut sessions, &forwarding_narrowed8, &mut binding, &frame_rev, meta_rev);
+    assert_eq!((kill.hit, kill.revoked, kill.tx), (1, 1, 0), "the narrowed drive must hit and revoke");
+    assert_slots_gone_9604(&sessions, &fwd_key, &rev_key);
+    // The txn driver runs one descriptor per pass WITHOUT the worker loop's
+    // end-of-poll drain (`drain_revoked_flow_cache_keys`), so the collected
+    // keys sit in scratch and the seeded slot is still present here. That is
+    // a driver boundary, not a product gap: in production the same tick
+    // walks these keys over every binding of the worker. Assert the eviction
+    // SET first — a key/nat mispairing strands the slot (the #9604 pairing
+    // contract) — then perform that same-tick walk explicitly through the
+    // production per-binding primitive and prove the behavioral contract on
+    // the redrives below.
+    let evict_keys = binding.scratch.scratch_filter_revoked_keys.clone();
+    assert!(
+        evict_keys.contains(&fwd_key),
+        "the eviction set must cover the seeded forward slot's key, or the \
+         same-tick drain leaves the descriptor live (got {} keys)",
+        evict_keys.len()
+    );
+    assert!(
+        evict_keys.contains(&rev_key),
+        "the eviction set must cover the reverse companion too, or its slot \
+         survives on a flow the table just deleted (got {} keys)",
+        evict_keys.len()
+    );
+    for key in &evict_keys {
+        binding.flow.flow_cache.invalidate_slot(key, binding.ifindex);
+    }
+    assert_eq!(
+        txn_flow_cache_entries(&binding),
+        0,
+        "the same-tick drain must empty the cache — otherwise the redrives \
+         below cannot distinguish eviction from a broken walk"
+    );
+    // Both tuples re-driven at the OLD generation: a slot the revoke failed to
+    // evict would still match its gen-7 stamp and forward off a stale
+    // descriptor with no session row (#6457). Generation invalidation cannot
+    // save it — the stamps agree — so only EXPLICIT eviction passes this.
+    let again_rev = drive_packet_9604(&mut sessions, &forwarding_narrowed8, &mut binding, &frame_rev, meta_rev);
+    assert_eq!(
+        (again_rev.hit, again_rev.tx), (0, 0),
+        "the revoked reverse tuple must miss and drop, not forward off a \
+         surviving cache slot"
+    );
+    let again_fwd = drive_packet_9604(&mut sessions, &forwarding_narrowed8, &mut binding, &ack, meta_ack);
+    assert_eq!(
+        (again_fwd.hit, again_fwd.tx), (0, 0),
+        "the revoked forward tuple must miss and drop, not forward off a \
+         surviving cache slot"
+    );
+    assert_eq!(sessions.policy_revalidation_loud_declines(), 0);
+}
+
+/// #9604 review fold (GPT HIGH): production-admitted fabric-ingress flows.
+///
+/// A flow this node admits off the fabric installs as `ForwardFlow` with
+/// `fabric_ingress: true` and ingress identity (0, 0) — origin alone cannot
+/// select the from-zone source, so the pre-fold code live-resolved the zero
+/// identity, declined in the cold body, and left every fabric-admitted
+/// reverse-only flow on its old verdict. These cells admit through the
+/// production path (stamped `lan` frame on the fabric parent, split-RG
+/// ha_state so the stamp validates and the flow forwards locally) and pin
+/// the installed shape before driving the reverse packet under the
+/// narrowed/unchanged generation.
+const FABRIC_PARENT_9604: i32 = 21;
+const FABRIC_WAN_PEER_9604: Ipv4Addr = Ipv4Addr::new(8, 8, 8, 8);
+
+/// Phase-1 snapshot: fabric links + lan neighbor (the #7770 fixture shape),
+/// allow-all `lan -> wan` (from `nat_snapshot`), NO source NAT — a pure
+/// forward flow keeps the key math direct (pool NAT through the reverse path
+/// has its own cells) — pinned generations.
+fn fabric_admit_snapshot_9604() -> crate::ConfigSnapshot {
+    let mut snap = nat_snapshot_with_fabric();
+    snap.neighbors.push(NeighborSnapshot {
+        interface: "reth1.0".to_string(),
+        ifindex: 24,
+        family: "inet".to_string(),
+        ip: "10.0.61.102".to_string(),
+        mac: "de:ad:be:ef:00:01".to_string(),
+        state: "reachable".to_string(),
+        ..Default::default()
+    });
+    snap.source_nat_rules.clear();
+    snap.generation = 7;
+    snap.fib_generation = 9;
+    snap
+}
+
+/// The #7770 stamp shape, claiming `zone`: peer fabric MAC as dst (V1a),
+/// magic + zone id as src.
+fn stamp_fabric_zone_9604(frame: &mut [u8], zone: u16) {
+    let [hi, lo] = zone.to_be_bytes();
+    frame[0..6].copy_from_slice(&[0x02, 0xbf, 0x72, 0xff, 0x00, 0x01]);
+    frame[6..12].copy_from_slice(&[0x02, 0xbf, 0x72, FABRIC_ZONE_MAC_MAGIC, hi, lo]);
+}
+
+/// Split-RG ha_state for the admit leg: RG1 (wan) forwarding-active so the
+/// flow installs `ForwardCandidate` and forwards locally; RG2 (lan) NOT
+/// active so the `lan` stamp validates (V1b: not ALL bound RGs local) — the
+/// shape the peer punts from.
+fn ha_state_fabric_admit_9604(now_secs: u64) -> BTreeMap<i32, HAGroupRuntime> {
+    BTreeMap::from([
+        (
+            1,
+            HAGroupRuntime {
+                active: true,
+                watchdog_timestamp: now_secs,
+                lease: HAGroupRuntime::active_lease_until(now_secs, now_secs),
+            },
+        ),
+        (2, HAGroupRuntime { active: false, ..Default::default() }),
+    ])
+}
+
+/// The phase-1 admit frame: `lan -> wan` ACK stamped `lan`, arriving on the
+/// fabric parent. ACK (not SYN) so admission seeds the flow-cache slot —
+/// otherwise the post-revoke eviction assertions below cannot distinguish
+/// eviction from an empty cache (the #6457 contract, as in
+/// `post_revoke_both_tuples_miss_and_drop_9604`).
+fn fabric_admit_frame_9604() -> (Vec<u8>, UserspaceDpMeta) {
+    let mut frame =
+        build_txn_tcp_syn_frame_v4(SRC, FABRIC_WAN_PEER_9604, SPORT, DPORT, TCP_ACK);
+    stamp_fabric_zone_9604(&mut frame, TEST_LAN_ZONE_ID);
+    let meta = txn_meta_v4(FABRIC_PARENT_9604 as u32, TCP_ACK, frame.len() as u16);
+    (frame, meta)
+}
+
+struct FabricAdmitOutcome {
+    sessions: SessionTable,
+    binding: BindingWorker,
+    fwd_key: SessionKey,
+    rev_key: SessionKey,
+}
+
+/// Shared phase 1: admit a `lan -> wan` flow off the fabric through the
+/// production path and pin the installed shape — `ForwardFlow` origin with
+/// `fabric_ingress` provenance and zero ingress identity is the exact shape
+/// the from-zone selection keys on.
+fn admit_fabric_flow_9604() -> FabricAdmitOutcome {
+    let forwarding = build_forwarding_state(&fabric_admit_snapshot_9604());
+    let now_secs = monotonic_nanos() / 1_000_000_000;
+    let ha_state = ha_state_fabric_admit_9604(now_secs);
+    let mut binding = binding_for_9604(FABRIC_PARENT_9604, "ge-0-0-0");
+    let (frame, meta) = fabric_admit_frame_9604();
+    let mut sessions = SessionTable::new();
+    let (_batch, dbg) =
+        txn_run_descriptor(&mut binding, &mut sessions, &forwarding, &ha_state, &frame, meta);
+    assert_eq!(
+        (dbg.session_hit, dbg.policy_revoked_sessions, dbg.tx),
+        (0, 0, 1),
+        "phase 1 must MISS, admit off the fabric stamp, and forward"
+    );
+    assert_eq!(
+        session_count(&sessions),
+        2,
+        "phase 1 must install the forward + reverse pair"
+    );
+    assert!(
+        txn_flow_cache_entries(&binding) >= 1,
+        "admission must seed the flow-cache slot — otherwise the post-revoke \
+         miss+drop assertions below cannot distinguish eviction from an empty \
+         cache"
+    );
+    let mut fwd_key = None;
+    let mut rev_key = None;
+    let mut fwd_shape = None;
+    sessions.iter_with_origin(|key, _decision, metadata, origin| {
+        if metadata.is_reverse {
+            rev_key = Some(key.clone());
+        } else {
+            fwd_key = Some(key.clone());
+            fwd_shape = Some((metadata.clone(), origin));
+        }
+    });
+    let fwd_key = fwd_key.expect("admit must install a forward entry");
+    let rev_key = rev_key.expect("admit must install a reverse companion");
+    let (fwd_metadata, fwd_origin) =
+        fwd_shape.expect("admit must install a forward entry");
+    assert_eq!(
+        fwd_origin,
+        SessionOrigin::ForwardFlow,
+        "a fabric-admitted flow installs as ForwardFlow — origin alone must \
+         not select the from-zone source (#9604 review fold)"
+    );
+    assert!(
+        fwd_metadata.fabric_ingress,
+        "the admitted entry must carry fabric-ingress provenance"
+    );
+    assert_eq!(
+        (fwd_metadata.ingress_ifindex, fwd_metadata.ingress_vlan_id),
+        (0, 0),
+        "a fabric-admitted entry stamps NO ingress identity (#7096)"
+    );
+    assert_eq!(
+        (fwd_metadata.ingress_zone, fwd_metadata.egress_zone),
+        (TEST_LAN_ZONE_ID, TEST_WAN_ZONE_ID),
+        "the admitted entry records the peer-adjudicated pair"
+    );
+    FabricAdmitOutcome {
+        sessions,
+        binding,
+        fwd_key,
+        rev_key,
+    }
+}
+
+/// The narrowed phase-2 snapshot over the admit fixture: no `lan -> wan`
+/// rule at all (default deny), generation bumped to mark the post-commit
+/// shape.
+fn fabric_narrowed_snapshot_9604() -> crate::ConfigSnapshot {
+    let mut snap = fabric_admit_snapshot_9604();
+    snap.policies.clear();
+    snap.generation = 8;
+    snap
+}
+
+/// Same, but the `lan -> wan` rule survives as `reject` (#9381 through the
+/// fabric-ingress reverse path).
+fn fabric_reject_snapshot_9604() -> crate::ConfigSnapshot {
+    let mut snap = fabric_narrowed_snapshot_9604();
+    snap.policies.push(PolicyRuleSnapshot {
+        name: "lan-out".into(),
+        from_zone: "lan".into(),
+        to_zone: "wan".into(),
+        source_addresses: vec!["any".into()],
+        destination_addresses: vec!["any".into()],
+        applications: vec!["any".into()],
+        application_terms: Vec::new(),
+        action: "reject".into(),
+        ..Default::default()
+    });
+    snap
+}
+
+/// Post-revoke eviction half, mirrored from
+/// `post_revoke_both_tuples_miss_and_drop_9604`: the eviction set must cover
+/// both keys, the same-tick drain runs explicitly (the txn driver skips it),
+/// and both tuples re-driven at the old generation must miss and drop.
+fn assert_fabric_evicted_9604(
+    outcome: &mut FabricAdmitOutcome,
+    forwarding: &ForwardingState,
+    frame_rev: &[u8],
+    meta_rev: UserspaceDpMeta,
+) {
+    let FabricAdmitOutcome {
+        sessions,
+        binding,
+        fwd_key,
+        rev_key,
+    } = outcome;
+    let evict_keys = binding.scratch.scratch_filter_revoked_keys.clone();
+    assert!(
+        evict_keys.contains(fwd_key),
+        "the eviction set must cover the seeded forward slot's key (got {} keys)",
+        evict_keys.len()
+    );
+    assert!(
+        evict_keys.contains(rev_key),
+        "the eviction set must cover the reverse companion too (got {} keys)",
+        evict_keys.len()
+    );
+    for key in &evict_keys {
+        binding.flow.flow_cache.invalidate_slot(key, binding.ifindex);
+    }
+    assert_eq!(
+        txn_flow_cache_entries(binding),
+        0,
+        "the same-tick drain must empty the cache"
+    );
+    let again_rev = drive_packet_9604(sessions, forwarding, binding, frame_rev, meta_rev);
+    assert_eq!(
+        (again_rev.hit, again_rev.tx),
+        (0, 0),
+        "the revoked reverse tuple must miss and drop, not forward off a \
+         surviving cache slot"
+    );
+    let (frame_fwd, meta_fwd) = fabric_admit_frame_9604();
+    let again_fwd = drive_packet_9604(sessions, forwarding, binding, &frame_fwd, meta_fwd);
+    assert_eq!(
+        (again_fwd.hit, again_fwd.tx),
+        (0, 0),
+        "the revoked forward tuple must miss and drop, not forward off a \
+         surviving cache slot"
+    );
+}
+
+/// THE GPT-HIGH DETECTOR. A fabric-admitted flow whose policy is narrowed to
+/// nothing must be revoked on its first reverse packet, judging the recorded
+/// forward zone — not declined on the zero ingress identity.
+///
+/// Dies if the fabric-ingress override is removed: the judgment declines in
+/// the cold body and both halves survive.
+#[test]
+fn fabric_ingress_forward_flow_reverse_triggered_deny_revokes_both_halves_9604() {
+    let mut outcome = admit_fabric_flow_9604();
+    let forwarding = build_forwarding_state(&fabric_narrowed_snapshot_9604());
+    let (frame_rev, meta_rev) =
+        reverse_tcp_frame_v4_9604(&outcome.rev_key, WAN_IFINDEX);
+    let out = drive_packet_9604(
+        &mut outcome.sessions,
+        &forwarding,
+        &mut outcome.binding,
+        &frame_rev,
+        meta_rev,
+    );
+    assert_eq!(
+        out.hit, 1,
+        "the reply must HIT the reverse companion, or the revoke assertion \
+         is vacuous"
+    );
+    assert_eq!(
+        out.revoked, 1,
+        "no rule permits lan -> wan anymore: a fabric-admitted reverse-fed \
+         flow must be revoked. 0 is the pre-fold shape — the judgment \
+         declined on the zero ingress identity instead of evaluating the \
+         recorded forward zone"
+    );
+    assert_slots_gone_9604(&outcome.sessions, &outcome.fwd_key, &outcome.rev_key);
+    assert_fabric_evicted_9604(&mut outcome, &forwarding, &frame_rev, meta_rev);
+    assert_eq!(outcome.sessions.policy_revalidation_loud_declines(), 0);
+}
+
+/// #9381 through the fabric-ingress reverse path: a narrowed-to-`reject`
+/// verdict revokes exactly like a deny.
+#[test]
+fn fabric_ingress_forward_flow_reverse_triggered_reject_revokes_both_halves_9604() {
+    let mut outcome = admit_fabric_flow_9604();
+    let forwarding = build_forwarding_state(&fabric_reject_snapshot_9604());
+    let (frame_rev, meta_rev) =
+        reverse_tcp_frame_v4_9604(&outcome.rev_key, WAN_IFINDEX);
+    let out = drive_packet_9604(
+        &mut outcome.sessions,
+        &forwarding,
+        &mut outcome.binding,
+        &frame_rev,
+        meta_rev,
+    );
+    assert_eq!(out.hit, 1, "the reply must hit the reverse companion");
+    assert_eq!(
+        out.revoked, 1,
+        "a `reject` verdict must revoke a fabric-admitted reverse-fed session \
+         exactly as a forward-fed one (#9381 via #9604)"
+    );
+    assert_slots_gone_9604(&outcome.sessions, &outcome.fwd_key, &outcome.rev_key);
+    assert_fabric_evicted_9604(&mut outcome, &forwarding, &frame_rev, meta_rev);
+    assert_eq!(outcome.sessions.policy_revalidation_loud_declines(), 0);
+}
+
+/// Preservation control: an unchanged permit keeps a fabric-admitted flow on
+/// its reverse packet — and hit-only stamping writes no forward stamp from
+/// the reverse path.
+#[test]
+fn fabric_ingress_forward_flow_permit_kept_on_reverse_9604() {
+    let mut snap = fabric_admit_snapshot_9604();
+    snap.generation = 8;
+    let forwarding = build_forwarding_state(&snap);
+    let mut outcome = admit_fabric_flow_9604();
+    let (frame_rev, meta_rev) =
+        reverse_tcp_frame_v4_9604(&outcome.rev_key, WAN_IFINDEX);
+    let out = drive_packet_9604(
+        &mut outcome.sessions,
+        &forwarding,
+        &mut outcome.binding,
+        &frame_rev,
+        meta_rev,
+    );
+    assert_eq!(
+        (out.hit, out.revoked, out.tx),
+        (1, 0, 1),
+        "a still-permitted fabric-admitted flow must hit, keep, and forward \
+         on its reverse packet"
+    );
+    assert!(
+        outcome.sessions.entry_with_origin(&outcome.fwd_key).is_some(),
+        "the forward half must survive a permit judgment"
+    );
+    assert!(
+        outcome.sessions.entry_with_origin(&outcome.rev_key).is_some(),
+        "the reverse half must survive a permit judgment"
+    );
+    assert_eq!(
+        outcome.sessions.policy_revalidation_target(&outcome.rev_key),
+        PolicyRevalidationTarget::Fresh,
+        "the reverse permit stamps the hit half"
+    );
+    assert_eq!(
+        outcome.sessions.policy_revalidation_target(&outcome.fwd_key),
+        PolicyRevalidationTarget::Stale(outcome.fwd_key.clone()),
+        "hit-only stamping writes NO forward stamp from the reverse path"
+    );
+    assert_eq!(outcome.sessions.policy_revalidation_loud_declines(), 0);
 }

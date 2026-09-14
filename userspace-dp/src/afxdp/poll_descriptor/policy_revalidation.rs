@@ -26,6 +26,16 @@
 //! junos-host` policy, and the established-hit path re-evaluates both on every
 //! host-bound packet.
 //!
+//! # Fabric-redirected sessions (#7770, with #9604)
+//!
+//! A `FabricRedirect` entry is judged on its RECORDED egress zone. Its stored
+//! egress names the fabric transport, not the flow's egress, so a live
+//! to-zone resolution asks `from -> fabric` — a pair admission never
+//! evaluated — and revokes the session on its first post-install hit in
+//! either direction. The punt seed is adjudicated on the pre-redirect egress
+//! zone and records it, so the recorded zone is the pair the permit came
+//! from.
+//!
 //! # ICMP scope (#8618)
 //!
 //! #8356 shipped declining ICMP outright, leaving #7323's residual open for
@@ -56,8 +66,9 @@
 //!
 //! # THREE things here deliberately do NOT mirror #7212
 //!
-//! **1. FORWARD ONLY.** The filter stamp is per-direction on purpose. This one
-//! must not be. The reverse companion is built with SWAPPED zones
+//! **1. The reverse pair is never independently adjudicated for revocation — but reverse HITS are (#9604).**
+//! The filter stamp is per-direction on purpose. The reverse companion's own
+//! pair must not be. The reverse companion is built with SWAPPED zones
 //! (`afxdp/shared_ops.rs`: `ingress_zone: forward.metadata.egress_zone`,
 //! `egress_zone: forward.metadata.ingress_zone`; `poll_descriptor/mod.rs` does
 //! the same with `to_zone_id`/`from_zone_id`). This is a STATEFUL firewall — a
@@ -68,6 +79,18 @@
 //! session in the box on the first packet after ANY commit. It would also pass
 //! a test whose fixture uses a symmetric or allow-all policy, which is why the
 //! cell for it uses an asymmetric one.
+//!
+//! What #9604 adds instead: a stale reverse hit resolves its FORWARD companion
+//! (`reverse_session_key` with the reverse entry's own nat — the same hop the
+//! teardown uses) and re-asks zone policy for the FORWARD tuple, protocol and
+//! zones. The reverse entry contributes nothing to the verdict but its
+//! staleness and its nat. A lone reverse (no forward companion) and a
+//! companion slot holding another reverse both decline — deriving authority
+//! from swapped zones is exactly the trap above. The sibling half of the
+//! constraint: the foreign path (`session_hit_authority.rs`,
+//! `foreign_hit_verdict`) evaluates a foreign reverse packet AS A PACKET for
+//! forward/drop only and can never revoke from it — so no path in the tree
+//! tears down a session on the verdict of a reverse pair judged as itself.
 //!
 //! **2. GENERATION-ONLY stamp.** `FilterRevalidationStamp` is keyed
 //! `(generation, logical ingress ifindex)` because an input filter is a
@@ -163,15 +186,71 @@
 
 use super::*;
 use crate::policy::evaluate_policy_result_without_counting;
-use crate::session::{PolicyRevalidationTarget, SessionKey};
+use crate::session::{
+    PolicyRevalidationTarget, SessionDecision, SessionKey, SessionMetadata, SessionOrigin,
+};
+use std::net::IpAddr;
 
 /// A zone-policy re-derivation that came back NON-PERMIT (`Deny` or `Reject`,
-/// #9381). Carries the CANONICAL key —
-/// the primary-index key, which on the NAT reverse-translated alias path is NOT
-/// the wire tuple that found it — so the teardown acts on the session that was
-/// actually judged.
+/// #9381). Carries the CANONICAL key — the primary-index key, which on the NAT
+/// reverse-translated alias path is NOT the wire tuple that found it — AND the
+/// judged entry's own triple, so the teardown acts on the session that was
+/// actually judged, with the decision, metadata and origin it was judged with.
+/// On the forward path these are the hit entry's; on the reverse path (#9604)
+/// they are the FORWARD companion's. Key and nat must belong to the SAME
+/// direction entry: `delete_terminal_filtered_session` and
+/// `collect_revoked_flow_cache_keys` both derive the companion from the
+/// carried nat, and a mismatched pairing misses it (see §5.3 of the #9604 plan).
 pub(super) struct PolicyRevocation {
     pub(super) canonical_key: SessionKey,
+    pub(super) decision: SessionDecision,
+    pub(super) metadata: SessionMetadata,
+    pub(super) origin: SessionOrigin,
+}
+
+/// #9604: where the cold judgment reads the FROM-zone from. A
+/// locally-authored ingress identity is resolved live through the ledger,
+/// exactly as the forward hit path resolves the packet's arrival; a recorded
+/// zone (peer-authored or fabric identities, #6928) is used as-is.
+#[derive(Clone, Copy)]
+enum FromZoneSource {
+    /// Live-resolve through the ledger from this ingress identity.
+    LiveIfindex { ifindex: i32, vlan: u16 },
+    /// Use the judged entry's recorded ingress zone.
+    RecordedZone(u16),
+}
+
+/// #9604: what the cold judgment evaluates — always a FORWARD pair, no matter
+/// which direction's packet triggered it. Every evaluated field (tuple, ports,
+/// protocol, zones) is sourced from the forward entry; the reverse pair is
+/// never adjudicated as its own pair (GATE 1's reason, structural).
+struct PolicyJudgmentInput {
+    /// Its NAT (post-translation dst, #9382) and egress.
+    decision: SessionDecision,
+    /// Its recorded zones (the `RecordedZone` fallback) and fabric flag.
+    metadata: SessionMetadata,
+    /// The JUDGED protocol — the forward key's, never the triggering packet's
+    /// (under NAT64 the reply's family differs from the judgment's).
+    protocol: u8,
+    /// Forward wire tuple (source stays pre-translation, Junos order).
+    src_ip: IpAddr,
+    dst_ip: IpAddr,
+    /// Forward wire ports.
+    src_port: u16,
+    dst_port: u16,
+    from_source: FromZoneSource,
+}
+
+/// Outcome of the cold judgment. Stamping lives with the caller: PERMIT-only,
+/// never on decline or revoke (fail-closed).
+enum ZonePolicyJudgment {
+    /// Still permitted: the caller re-stamps the hit entry.
+    Permit,
+    /// Declined (unresolvable identity, ICMP-type-armed): keep flowing, stamp
+    /// nothing.
+    Decline,
+    /// `Deny` or `Reject` (#9381): the caller revokes via the carried triple.
+    Revoke,
 }
 
 /// Re-derive zone policy for an established-session HIT, at most once per
@@ -199,13 +278,15 @@ pub(super) fn revalidate_zone_policy_on_session_hit(
     packet_fabric_ingress: bool,
 ) -> Option<PolicyRevocation> {
     let flow = flow?;
-    // GATE 1, and it is free: the reverse companion is never independently
-    // policy-adjudicated. See item 1 in the module header — getting this wrong
-    // denies the reply of every permitted flow. `is_reverse` is already on the
-    // metadata the lookup returned, so this costs no lookup at all and excludes
-    // roughly half the established-hit population before anything is hashed.
+    // GATE 1: the reverse companion is never independently policy-adjudicated.
+    // See item 1 in the module header — adjudicating the swapped pair denies
+    // the reply of every permitted flow. `is_reverse` is already on the
+    // metadata the lookup returned, so dispatching on it costs no lookup at
+    // all. #9604 judges a stale reverse hit by its FORWARD companion instead:
+    // same generation stamp, forward tuple and zones, both halves revoked on a
+    // non-permit verdict — the reverse pair itself is never evaluated.
     if metadata.is_reverse {
-        return None;
+        return reverse_hit_zone_policy(forwarding, sessions, session_key);
     }
     // GATE 1b: DECLINE for ICMP, but ONLY when the type actually matters.
     //
@@ -289,16 +370,179 @@ pub(super) fn revalidate_zone_policy_on_session_hit(
         PolicyRevalidationTarget::NoLocalEntry => return None,
         PolicyRevalidationTarget::Stale(k) => k,
     };
-    zone_policy_deny_on_session_hit(
-        forwarding,
-        sessions,
-        canonical_key,
-        metadata,
+    // The forward pair, judged as itself: the packet's tuple and protocol with
+    // the from-zone resolved live from the packet's arrival interface (#9384),
+    // except that a fabric arrival keeps the entry's recorded zone (the fabric
+    // link's zone is structurally not the flow's).
+    let input = PolicyJudgmentInput {
         decision,
-        flow,
-        meta,
-        packet_fabric_ingress,
-    )
+        metadata: (*metadata).clone(),
+        protocol: meta.protocol,
+        src_ip: flow.src_ip,
+        dst_ip: flow.dst_ip,
+        src_port: flow.forward_key.src_port,
+        dst_port: flow.forward_key.dst_port,
+        from_source: if packet_fabric_ingress {
+            FromZoneSource::RecordedZone(metadata.ingress_zone)
+        } else {
+            FromZoneSource::LiveIfindex {
+                ifindex: meta.ingress_ifindex as i32,
+                vlan: meta.ingress_vlan_id,
+            }
+        },
+    };
+    match zone_policy_deny_on_session_hit(forwarding, &input) {
+        ZonePolicyJudgment::Permit => {
+            sessions.mark_policy_revalidated(&canonical_key);
+            None
+        }
+        ZonePolicyJudgment::Decline => None,
+        ZonePolicyJudgment::Revoke => {
+            // The origin is the one input the hit path does not carry: reload it
+            // from the entry just judged. A miss means the entry vanished between
+            // the probe and the verdict — nothing left to tear down.
+            let (_, _, origin) = sessions.entry_with_origin(&canonical_key)?;
+            Some(PolicyRevocation {
+                canonical_key,
+                decision: input.decision,
+                metadata: input.metadata,
+                origin,
+            })
+        }
+    }
+}
+
+/// #9604: the reverse companion's half of GATE 1 — judge the stale reverse hit
+/// by its FORWARD companion, never by the reverse pair.
+///
+/// The reverse entry carries swapped zones and no ingress identity (#4983), so
+/// none of its fields may enter the verdict. Everything evaluated comes from
+/// the forward companion entry: its wire tuple and protocol, its NAT (the
+/// post-translation destination, #9382), its egress, and its from-zone source
+/// — the forward entry's recorded ingress zone whenever the entry was admitted
+/// off the fabric (its stamped identity is (0, 0), #7096) or carries
+/// peer-authored provenance, otherwise the recorded admitting identity
+/// live-resolved. Uses nothing from the triggering packet — not its tuple,
+/// not its protocol, not its arrival interface (authority already established
+/// the packet is the session's owner before this runs).
+///
+/// Stamping is HIT-ONLY: on PERMIT only the hit (reverse) entry is marked. The
+/// forward half is never written from this path, so no cross-direction
+/// equivalence is claimed; the forward half re-derives (cold-only) on its next
+/// packet of the generation.
+fn reverse_hit_zone_policy(
+    forwarding: &ForwardingState,
+    sessions: &mut SessionTable,
+    session_key: &SessionKey,
+) -> Option<PolicyRevocation> {
+    let rev_canonical = match sessions.policy_revalidation_target(session_key) {
+        PolicyRevalidationTarget::Fresh | PolicyRevalidationTarget::NoLocalEntry => {
+            return None
+        }
+        PolicyRevalidationTarget::Stale(k) => k,
+    };
+    let (rev_decision, _, _) = sessions.entry_with_origin(&rev_canonical)?;
+    let fwd_key = crate::session::reverse_session_key(&rev_canonical, rev_decision.nat);
+    if fwd_key == rev_canonical {
+        // Degenerate: the inversion returned its own input. Decline (safe) and
+        // count it — no claim this population is impossible.
+        sessions.note_policy_revalidation_loud_decline();
+        debug_assert!(false, "9604: reverse_session_key inversion is degenerate");
+        return None;
+    }
+    // Lone reverse (no forward entry — the shape the 8356 trap cell installs):
+    // decline. Tuple synthesis alone would be exact, but the zones would
+    // degrade to recorded-swapped values with no live ledger — a strictly
+    // weaker judgment for a population whose forward half is already gone.
+    let (fwd_decision, fwd_metadata, fwd_origin) = sessions.entry_with_origin(&fwd_key)?;
+    if fwd_metadata.is_reverse {
+        // The companion slot holds another reverse entry: judging it as the
+        // forward pair would adjudicate a reverse as its own pair — GATE 1's
+        // reason, enforced structurally everywhere else. Decline loudly.
+        sessions.note_policy_revalidation_loud_decline();
+        debug_assert!(false, "9604: forward companion slot holds a reverse entry");
+        return None;
+    }
+    if fwd_decision.resolution.disposition == super::ForwardingDisposition::LocalDelivery {
+        return None;
+    }
+    // The JUDGED family's gate, after companion resolution — never the
+    // packet's family (under NAT64 the reply's family differs, and the
+    // predicate is per-protocol).
+    if forwarding
+        .policy
+        .icmp_verdict_may_depend_on_type(fwd_key.protocol)
+    {
+        return None;
+    }
+    // From-zone source by forward-entry provenance — the
+    // `arrived_on_the_admitting_interface` trust set, never `!is_peer_synced()`
+    // (promotion clones without re-stamping, so `SharedPromote` carries no
+    // locally-authored identity). Zone ids are cluster-consistent; ifindexes
+    // are not (#6928).
+    //
+    // #9604 (review fold): fabric-ingress provenance overrides origin. Every
+    // admitted flow installs as `ForwardFlow` — including a flow admitted off
+    // the fabric — but a fabric-admitted entry carries the peer's ORIGINAL
+    // zone with ingress identity (0, 0): the peer's interface is not knowable
+    // here (the stamp carries a zone id and nothing else), so production
+    // stamps NONE rather than the local fabric member's ifindex (#7096).
+    // Live-resolving that identity misses the ledger and declines in the cold
+    // body, which left every fabric-admitted reverse-only flow on its old
+    // verdict — the residual intact for exactly the HA-split population most
+    // likely to be reverse-fed. The recorded zone is the V1/V2-validated
+    // stamp the peer adjudicated, cluster-consistent like every other
+    // recorded zone. A locally-admitted entry with a zero identity still
+    // takes the `LiveIfindex` arm and declines there — that legitimate
+    // decline is unchanged.
+    let from_source = match fwd_origin {
+        SessionOrigin::ForwardFlow | SessionOrigin::LocalMiss | SessionOrigin::MissingNeighborSeed
+            if !fwd_metadata.fabric_ingress =>
+        {
+            FromZoneSource::LiveIfindex {
+                ifindex: fwd_metadata.ingress_ifindex as i32,
+                vlan: fwd_metadata.ingress_vlan_id,
+            }
+        }
+        SessionOrigin::ForwardFlow
+        | SessionOrigin::LocalMiss
+        | SessionOrigin::MissingNeighborSeed
+        | SessionOrigin::SyncImport
+        | SessionOrigin::SharedMaterialize
+        | SessionOrigin::SharedPromote
+        | SessionOrigin::WorkerLocalImport
+        | SessionOrigin::FabricPuntSeed => {
+            FromZoneSource::RecordedZone(fwd_metadata.ingress_zone)
+        }
+        SessionOrigin::ReverseFlow => {
+            sessions.note_policy_revalidation_loud_decline();
+            debug_assert!(false, "9604: forward companion has ReverseFlow origin");
+            return None;
+        }
+    };
+    let input = PolicyJudgmentInput {
+        decision: fwd_decision.clone(),
+        metadata: fwd_metadata.clone(),
+        protocol: fwd_key.protocol,
+        src_ip: fwd_key.src_ip,
+        dst_ip: fwd_key.dst_ip,
+        src_port: fwd_key.src_port,
+        dst_port: fwd_key.dst_port,
+        from_source,
+    };
+    match zone_policy_deny_on_session_hit(forwarding, &input) {
+        ZonePolicyJudgment::Permit => {
+            sessions.mark_policy_revalidated(&rev_canonical);
+            None
+        }
+        ZonePolicyJudgment::Decline => None,
+        ZonePolicyJudgment::Revoke => Some(PolicyRevocation {
+            canonical_key: fwd_key,
+            decision: fwd_decision,
+            metadata: fwd_metadata,
+            origin: fwd_origin,
+        }),
+    }
 }
 
 /// The cold half. `#[cold] #[inline(never)]` because it runs at most once per
@@ -324,60 +568,62 @@ pub(super) fn revalidate_zone_policy_on_session_hit(
 #[inline(never)]
 fn zone_policy_deny_on_session_hit(
     forwarding: &ForwardingState,
-    sessions: &mut SessionTable,
-    canonical_key: SessionKey,
-    metadata: &crate::session::SessionMetadata,
-    decision: crate::session::SessionDecision,
-    flow: &SessionFlow,
-    meta: UserspaceDpMeta,
-    packet_fabric_ingress: bool,
-) -> Option<PolicyRevocation> {
-    let egress_ifindex = decision.resolution.egress_ifindex;
-    // #9384: resolve the FROM-zone LIVE from this packet's arrival interface,
-    // symmetric with the to-zone, which has always been resolved live from
-    // `decision.resolution.egress_ifindex`.
+    input: &PolicyJudgmentInput,
+) -> ZonePolicyJudgment {
+    let egress_ifindex = input.decision.resolution.egress_ifindex;
+    // The FROM-zone comes from the judgment input's explicit source — never from
+    // the triggering packet on the reverse path (#9604), where the reply arrives
+    // on the flow's egress side and its arrival zone is the wrong answer.
     //
-    // It used to be handed `Some(metadata.ingress_zone)` — the ENTRY's zone,
-    // which the override makes win over the live ingress map
-    // (`forwarding/mod.rs`) and which also made the ifindex argument dead. The
-    // asymmetry is exactly the one the module header promised was absent: *"a
-    // commit that moves an interface BETWEEN ZONES is caught"* was true of the
-    // EGRESS side only. An operator moving an interface OUT of a permitted zone
-    // to cut off access got the new verdict for new flows while every live
-    // session kept being judged under the zone it was admitted in, was stamped
-    // fresh, and kept forwarding. Go's commit-time invalidation cannot cover it
-    // either: it compares policy match/action text and referenced-object
-    // fingerprints and never diffs zone MEMBERSHIP.
+    // `LiveIfindex` resolves a locally-authored ingress identity live through
+    // the ledger, symmetric with the to-zone, which has always been resolved
+    // live from the stored egress (#9384: a commit that moves an interface
+    // BETWEEN ZONES is caught on this arm). Go's commit-time invalidation cannot
+    // cover it either: it compares policy match/action text and
+    // referenced-object fingerprints and never diffs zone MEMBERSHIP.
     //
-    // Two things make this safe rather than a revoke storm:
-    //
-    // 1. FABRIC INGRESS keeps the entry's zone. A fabric-punted packet arrives
-    //    on the fabric link from the peer, so its arrival zone is structurally
-    //    not the flow's — resolving live there would evaluate (fabric -> X) and
-    //    revoke every cross-chassis flow, which is a correctness break, not a
-    //    hardening. The discriminator is the PACKET's fabric ingress, not the
-    //    session's `metadata.fabric_ingress`: a session installed from a
-    //    fabric-punted packet whose later packets arrive locally should be
-    //    judged on where THEY arrived.
-    // 2. An arrival that resolves to NO zone falls to the existing `from_id == 0`
-    //    DECLINE below, not to a revocation. See the residual noted there.
+    // `RecordedZone` carries a peer-authored or fabric identity whose interface
+    // number is meaningless locally (#6928) but whose zone id is
+    // cluster-consistent: it is used as-is. Fabric arrivals on the FORWARD path
+    // construct this source from the entry's recorded zone for the same reason
+    // the old override did — the fabric link's zone is structurally not the
+    // flow's.
     //
     // #9383: the live resolution goes through `resolve_ingress_logical_ifindex`.
     // Keying `ifindex_to_zone_id` on the raw physical index would reintroduce the
     // logical-vs-physical defect on a trunk, and this is the site that would make
     // it a revocation rather than a mis-attribution.
-    let arrival_logical = resolve_ingress_logical_ifindex(
-        forwarding,
-        meta.ingress_ifindex as i32,
-        meta.ingress_vlan_id,
-    )
-    .unwrap_or(meta.ingress_ifindex as i32);
-    let (from_id, to_id) = zone_pair_ids_for_flow_with_override(
-        forwarding,
-        arrival_logical,
-        packet_fabric_ingress.then_some(metadata.ingress_zone),
-        egress_ifindex,
-    );
+    // #9604 meets #7770: a `FabricRedirect` entry's stored egress names the
+    // fabric TRANSPORT, not the flow's egress. The punt seed's resolution
+    // points at the fabric parent (measured: egress_ifindex 21, ledger zone
+    // 0), so the live to-zone is the "unknown" sentinel and the pair falls to
+    // the default deny. Admission never evaluated that pair: the seed is
+    // adjudicated on the PRE-redirect egress zone
+    // (`forwarding/fabric.rs::fabric_punt_seed_metadata`) and records it as
+    // `egress_zone`, so the re-derivation judges the recorded zone — the same
+    // pair the permit came from. Judging the transport instead revoked the
+    // seed on the peer's first RETURN (and would on the next forward packet
+    // too): `fabric_punt_seed_admits_the_peers_return_7770` fails with
+    // (from lan, to 0). A recorded 0 evaluates exactly as the live 0 it
+    // replaces (default policy, #3110), so entries that were never adjudicated
+    // keep today's verdict.
+    let to_zone_override = (input.decision.resolution.disposition
+        == super::ForwardingDisposition::FabricRedirect)
+        .then_some(input.metadata.egress_zone);
+    let (from_id, live_to_id) = match input.from_source {
+        FromZoneSource::LiveIfindex { ifindex, vlan } => {
+            let arrival_logical =
+                resolve_ingress_logical_ifindex(forwarding, ifindex, vlan).unwrap_or(ifindex);
+            if arrival_logical == 0 {
+                return ZonePolicyJudgment::Decline;
+            }
+            zone_pair_ids_for_flow_with_override(forwarding, arrival_logical, None, egress_ifindex)
+        }
+        FromZoneSource::RecordedZone(z) => {
+            zone_pair_ids_for_flow_with_override(forwarding, 0, Some(z), egress_ifindex)
+        }
+    };
+    let to_id = to_zone_override.unwrap_or(live_to_id);
     // #9513: DECLINE on a LOOKUP FAILURE — an interface this packet has no
     // identity for — and NOT on a zone of 0.
     //
@@ -423,17 +669,13 @@ fn zone_policy_deny_on_session_hit(
     // postures: `default-policy deny` revokes the session, `permit-all` keeps it,
     // and in each case the established flow is treated exactly as a new one would
     // be.
-    let egress_unresolved = egress_ifindex == 0;
-    // The ingress half is the same split. A FABRIC packet keeps the ENTRY's zone
-    // (#9384), so its lookup failure is an entry that was never zone-adjudicated;
-    // for every other packet it is an arrival with no interface identity at all.
-    let ingress_unresolved = if packet_fabric_ingress {
-        metadata.ingress_zone == 0
-    } else {
-        arrival_logical == 0
-    };
-    if egress_unresolved || ingress_unresolved {
-        return None;
+    // LOOKUP-FAILURE declines (#9513), enforced here for both callers. The
+    // `LiveIfindex` no-identity case already declined inside the match above; a
+    // `RecordedZone` that was never zone-adjudicated (fabric-seeded or synced
+    // entries without one) declines here. A nonzero identity resolving to zone 0
+    // is NOT this arm — it evaluated under the default policy above.
+    if egress_ifindex == 0 || matches!(input.from_source, FromZoneSource::RecordedZone(0)) {
+        return ZonePolicyJudgment::Decline;
     }
     // #9382: judge the POST-TRANSLATION destination, the tuple admission judges
     // (#2345/#2358) — NOT the wire tuple the forward session is keyed on.
@@ -467,22 +709,23 @@ fn zone_policy_deny_on_session_hit(
     //
     // With no destination translation both `unwrap_or` arms collapse to the wire
     // values, so every non-translated session is byte-identical to pre-#9382.
-    // The SOURCE deliberately stays pre-translation (`flow.src_ip`): Junos
+    // The SOURCE deliberately stays pre-translation (`input.src_ip`): Junos
     // evaluates policy after destination NAT and BEFORE source NAT, and admission
-    // passes `flow.src_ip` for the same reason.
-    let policy_dst_ip = decision.nat.rewrite_dst.unwrap_or(flow.dst_ip);
-    let policy_dst_port = decision
+    // passes the pre-translation source for the same reason.
+    let policy_dst_ip = input.decision.nat.rewrite_dst.unwrap_or(input.dst_ip);
+    let policy_dst_port = input
+        .decision
         .nat
         .rewrite_dst_port
-        .unwrap_or(flow.forward_key.dst_port);
+        .unwrap_or(input.dst_port);
     let result = evaluate_policy_result_without_counting(
         &forwarding.policy,
         from_id,
         to_id,
-        flow.src_ip,
+        input.src_ip,
         policy_dst_ip,
-        meta.protocol,
-        flow.forward_key.src_port,
+        input.protocol,
+        input.src_port,
         policy_dst_port,
         // Frame-INDEPENDENT, like #7212's static walk: no ICMP type/code is
         // supplied. #8618: an ICMP flow only reaches here when the snapshot has
@@ -507,11 +750,11 @@ fn zone_policy_deny_on_session_hit(
     // action added later fails CLOSED here instead of inheriting the permit arm.
     if matches!(result.action, crate::policy::PolicyAction::Permit) {
         // Still permitted. Nothing counted, nothing logged, the session and its
-        // NAT translation untouched. Re-stamp so no later packet of this
-        // generation re-derives the same verdict.
-        sessions.mark_policy_revalidated(&canonical_key);
-        return None;
+        // NAT translation untouched. The CALLER re-stamps on this exit — and
+        // only on this exit — so no later packet of this generation re-derives
+        // the same verdict.
+        return ZonePolicyJudgment::Permit;
     }
     // DENY or REJECT: deliberately NOT re-stamped — see the header.
-    Some(PolicyRevocation { canonical_key })
+    ZonePolicyJudgment::Revoke
 }

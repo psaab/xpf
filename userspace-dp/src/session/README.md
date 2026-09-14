@@ -726,16 +726,20 @@ needs nothing new and removes the asymmetry rather than preserving it.
 THREE things deliberately do NOT mirror #7212, and the first is the one that
 would take a box down:
 
-* **FORWARD ONLY** (`!metadata.is_reverse`). #7212's stamp is per-DIRECTION and
-  correctly so — a filter is a per-interface object and each direction is judged
-  against the interface its packet arrived on. Copying that here is
-  catastrophic. The reverse companion is built with SWAPPED zones
-  (`afxdp/shared_ops.rs`, `afxdp/poll_descriptor/mod.rs`), and this is a
-  STATEFUL firewall: a reply is permitted because the session exists, not
-  because a policy admits (to_zone -> from_zone). Re-derived per-direction it
-  evaluates the reversed pair, matches nothing on any ordinary one-way policy
-  set, hits the default deny and revokes — so every established session in the
-  box would die on the first packet after ANY commit.
+* **The reverse pair is never adjudicated — but reverse HITS are (#9604).**
+  #7212's stamp is per-DIRECTION and correctly so — a filter is a per-interface
+  object and each direction is judged against the interface its packet actually
+  arrived on. Copying that here is catastrophic. The reverse companion is built
+  with SWAPPED zones (`afxdp/shared_ops.rs`, `afxdp/poll_descriptor/mod.rs`),
+  and this is a STATEFUL firewall: a reply is permitted because the session
+  exists, not because a policy admits (to_zone -> from_zone). Re-derived
+  per-direction it evaluates the reversed pair, matches nothing on any ordinary
+  one-way policy set, hits the default deny and revokes — so every established
+  session in the box would die on the first packet after ANY commit.
+  Instead (#9604) a stale reverse hit resolves its FORWARD companion and
+  re-asks for the FORWARD pair; the reverse entry itself contributes nothing to
+  the verdict but its staleness and its nat. See item 1 in
+  `afxdp/poll_descriptor/policy_revalidation.rs`.
 * **GENERATION-ONLY stamp**, where `FilterRevalidationStamp` is keyed
   `(generation, logical ingress ifindex)`. This bullet used to say both zones
   "come from the ENTRY ... never from the interface a given packet arrived on".
