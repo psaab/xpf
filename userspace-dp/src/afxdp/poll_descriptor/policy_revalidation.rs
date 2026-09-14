@@ -26,6 +26,16 @@
 //! junos-host` policy, and the established-hit path re-evaluates both on every
 //! host-bound packet.
 //!
+//! # Fabric-redirected sessions (#7770, with #9604)
+//!
+//! A `FabricRedirect` entry is judged on its RECORDED egress zone. Its stored
+//! egress names the fabric transport, not the flow's egress, so a live
+//! to-zone resolution asks `from -> fabric` — a pair admission never
+//! evaluated — and revokes the session on its first post-install hit in
+//! either direction. The punt seed is adjudicated on the pre-redirect egress
+//! zone and records it, so the recorded zone is the pair the permit came
+//! from.
+//!
 //! # ICMP scope (#8618)
 //!
 //! #8356 shipped declining ICMP outright, leaving #7323's residual open for
@@ -556,7 +566,24 @@ fn zone_policy_deny_on_session_hit(
     // Keying `ifindex_to_zone_id` on the raw physical index would reintroduce the
     // logical-vs-physical defect on a trunk, and this is the site that would make
     // it a revocation rather than a mis-attribution.
-    let (from_id, to_id) = match input.from_source {
+    // #9604 meets #7770: a `FabricRedirect` entry's stored egress names the
+    // fabric TRANSPORT, not the flow's egress. The punt seed's resolution
+    // points at the fabric parent (measured: egress_ifindex 21, ledger zone
+    // 0), so the live to-zone is the "unknown" sentinel and the pair falls to
+    // the default deny. Admission never evaluated that pair: the seed is
+    // adjudicated on the PRE-redirect egress zone
+    // (`forwarding/fabric.rs::fabric_punt_seed_metadata`) and records it as
+    // `egress_zone`, so the re-derivation judges the recorded zone — the same
+    // pair the permit came from. Judging the transport instead revoked the
+    // seed on the peer's first RETURN (and would on the next forward packet
+    // too): `fabric_punt_seed_admits_the_peers_return_7770` fails with
+    // (from lan, to 0). A recorded 0 evaluates exactly as the live 0 it
+    // replaces (default policy, #3110), so entries that were never adjudicated
+    // keep today's verdict.
+    let to_zone_override = (input.decision.resolution.disposition
+        == super::ForwardingDisposition::FabricRedirect)
+        .then_some(input.metadata.egress_zone);
+    let (from_id, live_to_id) = match input.from_source {
         FromZoneSource::LiveIfindex { ifindex, vlan } => {
             let arrival_logical =
                 resolve_ingress_logical_ifindex(forwarding, ifindex, vlan).unwrap_or(ifindex);
@@ -569,6 +596,7 @@ fn zone_policy_deny_on_session_hit(
             zone_pair_ids_for_flow_with_override(forwarding, 0, Some(z), egress_ifindex)
         }
     };
+    let to_id = to_zone_override.unwrap_or(live_to_id);
     // #9513: DECLINE on a LOOKUP FAILURE — an interface this packet has no
     // identity for — and NOT on a zone of 0.
     //
