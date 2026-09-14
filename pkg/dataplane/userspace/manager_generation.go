@@ -99,11 +99,16 @@ func (m *Manager) BumpFIBGeneration() (uint32, error) {
 		}, &status); err != nil {
 			slog.Warn("userspace: failed to publish neighbor update", "err", err)
 			m.recordPartialUpdateFailureLocked(partialNeighbors, err)
-		} else if status.ManagerNeighborGeneration != 0 && status.ManagerNeighborGeneration < gen {
-			// #6034: the helper fenced this replace as stale. Retain the
-			// cached neighbor view so the next bump re-diffs and retries
-			// with a strictly higher generation. An ACK of 0 = older helper
-			// without ACK support, treated as applied.
+		} else if status.ManagerNeighborGeneration != 0 && status.ManagerNeighborGeneration != gen {
+			// #6034/#9696: an ACK above `gen` identifies a #6034 fence — the
+			// helper is ahead and kept what it had. Retain the cached neighbor
+			// view so the next bump re-diffs and retries with a strictly higher
+			// generation; an ACK below `gen` is unexpected from the current
+			// helper and is handled defensively the same way. An ACK of 0 =
+			// older helper without ACK support, treated as applied. This arm
+			// skips only the neighbor writeback below and falls through to the
+			// FIB bump, whose invalidation is orthogonal.
+			m.seedNeighborReplaceGenerationLocked(status.ManagerNeighborGeneration)
 			slog.Warn("userspace: neighbor update not acknowledged; retaining retry debt",
 				"sent_generation", gen,
 				"applied_generation", status.ManagerNeighborGeneration)
@@ -112,8 +117,10 @@ func (m *Manager) BumpFIBGeneration() (uint32, error) {
 			// a transient failure doesn't suppress future retries.
 			m.lastSnapshot.Neighbors = newNeighbors
 			m.rebuildNeighborIndex() // #1197
-			// #9684: an ACK above gen is an unrecognised fence (#9696); only 0 or
-			// exactly gen proves the replace applied.
+			// #9684/#9696: the fence arm above handled every nonzero ACK other
+			// than gen, so a nonzero ACK here means exactly gen — which proves
+			// this replace applied (modulo the exact-match residual, fenced
+			// helper-side yet ACKed == gen; structurally closed in-tree).
 			if status.ManagerNeighborGeneration == 0 || status.ManagerNeighborGeneration == gen {
 				m.resolvePartialOutcomesLocked(partialNeighbors)
 			}
