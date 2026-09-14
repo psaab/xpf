@@ -112,3 +112,29 @@ func TestBackupRouterMappedFixturesReachRenderer_9820(t *testing.T) {
 		t.Fatalf("strict must refuse with the mapped reason, got: %v", err)
 	}
 }
+
+// GLM-F2: the belt omits zoned literals (the gate refuses them), for the
+// backup-router and, via the shared shape helper, for statics.
+func TestZonedLiteralsOmitted_9820(t *testing.T) {
+	if validFRRNextHopAddress("fe80::1%eth0") {
+		t.Fatal("validFRRNextHopAddress accepted a zoned literal")
+	}
+	if !validFRRNextHopAddress("fe80::1") {
+		t.Fatal("validFRRNextHopAddress rejected a plain v6 address")
+	}
+	got, _ := renderBackupRouterFromLenientConfig(t,
+		"set system backup-router fe80::1%eth0")
+	if strings.TrimSpace(got) != "" {
+		t.Fatalf("zoned backup-router must render nothing, got:\n%s", got)
+	}
+	m := &Manager{}
+	out := m.generateStaticRoute(
+		&config.StaticRoute{
+			Destination: "2001:db8::/32",
+			Preference:  5,
+			NextHops:    []config.NextHopEntry{{Address: "fe80::1%eth0"}},
+		}, "", nil, nil)
+	if strings.TrimSpace(out) != "" {
+		t.Fatalf("zoned static next-hop must render nothing, got:\n%s", out)
+	}
+}

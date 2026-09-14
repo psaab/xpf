@@ -103,3 +103,21 @@ func TestBackupRouterPlainControls_9820(t *testing.T) {
 		})
 	}
 }
+
+// GLM-F2: a zoned literal is refused as malformed (net.ParseIP rejects
+// zones), so the belt must agree by omitting it — netip alone would
+// accept it and the renderer would emit a line FRR refuses.
+func TestBackupRouterZonedNextHopRefused_9820(t *testing.T) {
+	tree := flatTreeFromSets(t, "set system backup-router fe80::1%eth0")
+	_, err := CompileConfig(tree)
+	if err == nil || !strings.Contains(err.Error(), "not a valid IP address") {
+		t.Fatalf("zoned backup-router must be refused as malformed, got: %v", err)
+	}
+	cfg, err := CompileConfigLenient(tree)
+	if err != nil {
+		t.Fatalf("lenient load must NOT fail, got: %v", err)
+	}
+	if cfg.System.BackupRouter != "fe80::1%eth0" {
+		t.Fatalf("lenient compile must retain the zoned value for the belt: %q", cfg.System.BackupRouter)
+	}
+}

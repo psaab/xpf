@@ -508,8 +508,9 @@ func renderBackupRouter(b *strings.Builder, fc *FullConfig) {
 	// the box goes with it, and the operator's log actively points AWAY from
 	// the cause.
 	//
-	// All THREE of the validator's checks are mirrored, not the two an
-	// operand-shape reading suggests. A v4 next-hop with a v6 destination is
+	// All FOUR of the validator's checks are mirrored (malformed next-hop,
+	// mapped next-hop, malformed destination, family mismatch), not the two
+	// an operand-shape reading suggests. A v4 next-hop with a v6 destination
 	// individually well-formed on both operands and still renders
 	// `ipv6 route <v6dst> <v4nh>`, which fills the interface-name slot
 	// (normally inactive absent a same-named interface — #9820 corrected

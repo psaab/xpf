@@ -108,7 +108,7 @@ the cause. **A validator that promises "ignored" owes a renderer that skips**,
 and `TestMalformedBackupRouterIsNotRendered_8597` pins both sides so a future
 change cannot leave the disagreement pointing the other way.
 
-All **three** of the validator's checks are mirrored, not the two an
+All **four** of the validator's checks are mirrored (malformed next-hop, mapped next-hop, malformed destination, family mismatch), not the two an
 operand-shape reading suggests. A v4 next-hop with a v6 destination has two
 individually well-formed operands and still renders `ipv6 route <v6dst>
 <v4nh>`, which fills the interface-name slot (normally inactive absent a

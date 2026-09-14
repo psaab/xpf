@@ -119,10 +119,16 @@ func validFRRRoutePrefix(s string) bool {
 // validFRRNextHopAddress reports whether a next-hop is renderable as a single
 // FRR gateway operand (#6795). Bare address only: FRR's `ip route <p> <gw>`
 // takes an address, and a prefix there is a grammar error that fails the
-// frr-reload.
+// frr-reload. Zoned literals (`fe80::1%eth0`) parse under netip but are
+// rejected too: the commit gate (net.ParseIP) refuses them and FRR's
+// gateway slot has no zone syntax, so emitting one would fail the reload
+// (#9820 GLM-F2 — belt and gate must agree).
 func validFRRNextHopAddress(s string) bool {
-	_, err := netip.ParseAddr(s)
-	return err == nil
+	a, err := netip.ParseAddr(s)
+	if err != nil {
+		return false
+	}
+	return a.Zone() == ""
 }
 
 // validFRRInterfaceOperand reports whether an interface name is renderable as a
