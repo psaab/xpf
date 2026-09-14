@@ -140,9 +140,10 @@ func ValidateRouteDestination(raw string, _ *Config) error {
 	// nothing. Padding IS authorable through ordinary ingress (the lexer
 	// preserves quoted-string contents verbatim). Newlines need no arm
 	// here: the #1798 prewalk already rejects control characters in any
-	// key; the real class is spaces, which previously functioned as
-	// harmless separators. Scoped to this validator (not the shared
-	// parseCIDRStrict): other CIDR consumers are out of #9820's scope.
+	// key; the real class is spaces, which previously committed clean but
+	// installed nothing (omitted by the existing prefix check). Scoped to
+	// this validator (not the shared parseCIDRStrict): other CIDR consumers
+	// are out of #9820's scope.
 	if raw != strings.TrimSpace(raw) {
 		return fmt.Errorf("not a valid route destination (leading or trailing whitespace is not allowed; use a bare CIDR, e.g. 10.0.0.0/24 or 2001:db8::/32)")
 	}

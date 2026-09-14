@@ -113,7 +113,7 @@ operand-shape reading suggests. A v4 next-hop with a v6 destination has two
 individually well-formed operands and still renders `ipv6 route <v6dst>
 <v4nh>`, which fills the interface-name slot (normally inactive absent a
 same-named interface — #9820 corrected the old blanket "frr-reload
-rejects" mechanism claim to this per-direction account). That third check
+rejects" mechanism claim to this per-direction account). That family check
 compares two INDEPENDENT operands, so both it and the commit gate use the
 shared `config.FRRAddrFamily` (netip) predicate rather than an inline
 `strings.Contains(s, ":")` spelling: `::ffff:192.168.50.1` is v6 by

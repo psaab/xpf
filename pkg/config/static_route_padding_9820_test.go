@@ -8,9 +8,10 @@ import (
 // #9820 GPT-P2: the schema gate refuses space-padded static destinations
 // and next-hops. The compiler stores the RAW token and the renderer drops
 // a padded one silently, while the validators checked the TRIMMED form —
-// so quoted padding committed clean and installed nothing. Flat `set`
-// field-splits padding away, so these cells use hierarchical quoted text
-// (the only ordinary ingress that preserves it).
+// so quoted padding committed clean and installed nothing. Quoted padding
+// survives the lexer in both flat and hierarchical ingress (parser and
+// lexer preserve quoted-string contents verbatim); these cells use
+// hierarchical quoted text.
 
 func schemaErrPadding9820(t *testing.T, src string) error {
 	t.Helper()
