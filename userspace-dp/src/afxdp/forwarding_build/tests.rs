@@ -6053,22 +6053,19 @@ fn stale_session_never_adopts_reowned_tunnel_id() {
                     routing_domain: 0,
         },
     };
-    let stale_decision = crate::session::SessionDecision {
-        resolution: crate::afxdp::ForwardingResolution {
-            disposition: crate::afxdp::ForwardingDisposition::ForwardCandidate,
-            local_ifindex: 0,
-            // The OLD owner's netdev ifindex — different from the
-            // current row's.
-            egress_ifindex: row_ifindex + 1000,
-            tx_ifindex: 3,
-            tunnel_endpoint_id: 824,
-            next_hop: None,
-            neighbor_mac: Some([2, 0, 0, 0, 0, 9]),
-            src_mac: Some([2, 0, 0, 0, 0, 1]),
-            tx_vlan_id: 0,
-        },
-        nat: crate::nat::NatDecision::default(),
-    };
+    let stale_decision = crate::session::SessionDecision { resolution: crate::afxdp::ForwardingResolution {
+        disposition: crate::afxdp::ForwardingDisposition::ForwardCandidate,
+        local_ifindex: 0,
+        // The OLD owner's netdev ifindex — different from the
+        // current row's.
+        egress_ifindex: row_ifindex + 1000,
+        tx_ifindex: 3,
+        tunnel_endpoint_id: 824,
+        next_hop: None,
+        neighbor_mac: Some([2, 0, 0, 0, 0, 9]),
+        src_mac: Some([2, 0, 0, 0, 0, 1]),
+        tx_vlan_id: 0,
+    }, nat: crate::nat::NatDecision::default(), install_table_domain: 0, install_table_check: 0 };
     let resolved = lookup_forwarding_resolution_for_session(
         &state,
         &std::sync::Arc::new(ShardedNeighborMap::new()),

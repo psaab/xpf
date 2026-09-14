@@ -563,6 +563,8 @@ pub(super) fn build_local_origin_tunnel_tx_request(
     let decision = SessionDecision {
         resolution,
         nat: NatDecision::default(),
+        install_table_domain: 0,
+        install_table_check: 0,
     };
     let mut flow = parse_session_flow_from_bytes(&inner_frame, meta)
         .ok_or_else(|| "parse_local_origin_session_flow_failed".to_string())?;

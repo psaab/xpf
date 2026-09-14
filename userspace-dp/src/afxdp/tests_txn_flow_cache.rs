@@ -1090,16 +1090,13 @@ fn txn_failed_reply_repair_forwards_uncached_then_self_heals_below_cap() {
             discriminator: Default::default(),
             routing_domain: 0,
     };
-    let forward_decision = SessionDecision {
-        resolution: lookup_forwarding_resolution(
-            &forwarding,
-            IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)),
-        ),
-        nat: NatDecision {
-            rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
-            ..NatDecision::default()
-        },
-    };
+    let forward_decision = SessionDecision { resolution: lookup_forwarding_resolution(
+        &forwarding,
+        IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)),
+    ), nat: NatDecision {
+        rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
+        ..NatDecision::default()
+    }, install_table_domain: 0, install_table_check: 0 };
     assert!(sessions.install_with_protocol_with_origin(
         forward_key,
         forward_decision,

@@ -215,6 +215,8 @@ pub(super) fn queue_prebuilt_embedded_icmp_error(
     let icmp_decision = SessionDecision {
         resolution: icmp_resolution,
         nat: NatDecision::default(),
+        install_table_domain: 0,
+        install_table_check: 0,
     };
     let target_ifindex = if icmp_decision.resolution.tx_ifindex > 0 {
         icmp_decision.resolution.tx_ifindex

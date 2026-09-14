@@ -10,20 +10,17 @@ use super::*;
 use crate::test_zone_ids::*;
 
 fn local_delivery_decision(tunnel_endpoint_id: u16) -> SessionDecision {
-    SessionDecision {
-        resolution: ForwardingResolution {
-            disposition: ForwardingDisposition::LocalDelivery,
-            local_ifindex: 0,
-            egress_ifindex: 0,
-            tx_ifindex: 0,
-            tunnel_endpoint_id,
-            next_hop: None,
-            neighbor_mac: None,
-            src_mac: None,
-            tx_vlan_id: 0,
-        },
-        nat: NatDecision::default(),
-    }
+    SessionDecision { resolution: ForwardingResolution {
+        disposition: ForwardingDisposition::LocalDelivery,
+        local_ifindex: 0,
+        egress_ifindex: 0,
+        tx_ifindex: 0,
+        tunnel_endpoint_id,
+        next_hop: None,
+        neighbor_mac: None,
+        src_mac: None,
+        tx_vlan_id: 0,
+    }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 }
 }
 
 /// #9517: the predicate now reads the session KEY, because the steering map
@@ -92,6 +89,8 @@ fn kernel_local_session_map_entry_rejects_non_kernel_local_cases() {
                 ..local_delivery_decision(0).resolution
             },
             nat: NatDecision::default(),
+            install_table_domain: 0,
+            install_table_check: 0,
         },
         &metadata,
         SessionOrigin::SyncImport,
@@ -443,23 +442,20 @@ fn session_map_redirect_keys_for_forward_session_include_nat_aliases() {
             discriminator: Default::default(),
             routing_domain: 0,
     };
-    let decision = SessionDecision {
-        resolution: ForwardingResolution {
-            disposition: ForwardingDisposition::ForwardCandidate,
-            local_ifindex: 0,
-            egress_ifindex: 14,
-            tx_ifindex: 14,
-            tunnel_endpoint_id: 0,
-            next_hop: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200))),
-            neighbor_mac: None,
-            src_mac: None,
-            tx_vlan_id: 0,
-        },
-        nat: NatDecision {
-            rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
-            ..NatDecision::default()
-        },
-    };
+    let decision = SessionDecision { resolution: ForwardingResolution {
+        disposition: ForwardingDisposition::ForwardCandidate,
+        local_ifindex: 0,
+        egress_ifindex: 14,
+        tx_ifindex: 14,
+        tunnel_endpoint_id: 0,
+        next_hop: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200))),
+        neighbor_mac: None,
+        src_mac: None,
+        tx_vlan_id: 0,
+    }, nat: NatDecision {
+        rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
+        ..NatDecision::default()
+    }, install_table_domain: 0, install_table_check: 0 };
     let metadata = SessionMetadata {
         ingress_zone: TEST_LAN_ZONE_ID,
         egress_zone: TEST_WAN_ZONE_ID,
@@ -502,23 +498,20 @@ fn session_map_redirect_keys_for_kernel_local_synced_session_delete_superset() {
             discriminator: Default::default(),
             routing_domain: 0,
     };
-    let decision = SessionDecision {
-        resolution: ForwardingResolution {
-            disposition: ForwardingDisposition::LocalDelivery,
-            local_ifindex: 14,
-            egress_ifindex: 14,
-            tx_ifindex: 14,
-            tunnel_endpoint_id: 0,
-            next_hop: None,
-            neighbor_mac: None,
-            src_mac: None,
-            tx_vlan_id: 0,
-        },
-        nat: NatDecision {
-            rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
-            ..NatDecision::default()
-        },
-    };
+    let decision = SessionDecision { resolution: ForwardingResolution {
+        disposition: ForwardingDisposition::LocalDelivery,
+        local_ifindex: 14,
+        egress_ifindex: 14,
+        tx_ifindex: 14,
+        tunnel_endpoint_id: 0,
+        next_hop: None,
+        neighbor_mac: None,
+        src_mac: None,
+        tx_vlan_id: 0,
+    }, nat: NatDecision {
+        rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
+        ..NatDecision::default()
+    }, install_table_domain: 0, install_table_check: 0 };
     let metadata = synced_forward_metadata();
 
     let keys =
@@ -650,20 +643,17 @@ fn refresh_bpf_conntrack_last_seen_is_budgeted_across_slices() {
                     discriminator: Default::default(),
                     routing_domain: 0,
         };
-        let decision = SessionDecision {
-            resolution: ForwardingResolution {
-                disposition: ForwardingDisposition::ForwardCandidate,
-                local_ifindex: 0,
-                egress_ifindex: 12,
-                tx_ifindex: 12,
-                tunnel_endpoint_id: 0,
-                next_hop: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 50, 1))),
-                neighbor_mac: Some([0, 1, 2, 3, 4, 5]),
-                src_mac: None,
-                tx_vlan_id: 0,
-            },
-            nat: NatDecision::default(),
-        };
+        let decision = SessionDecision { resolution: ForwardingResolution {
+            disposition: ForwardingDisposition::ForwardCandidate,
+            local_ifindex: 0,
+            egress_ifindex: 12,
+            tx_ifindex: 12,
+            tunnel_endpoint_id: 0,
+            next_hop: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 50, 1))),
+            neighbor_mac: Some([0, 1, 2, 3, 4, 5]),
+            src_mac: None,
+            tx_vlan_id: 0,
+        }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 };
         let metadata = SessionMetadata {
             ingress_zone: TEST_LAN_ZONE_ID,
             egress_zone: TEST_WAN_ZONE_ID,
@@ -1170,20 +1160,17 @@ fn a_refresh_slice_reports_the_largest_session_volume_it_walked_7919() {
         discriminator: Default::default(),
         routing_domain: 0,
     };
-    let mk_decision = || SessionDecision {
-        resolution: ForwardingResolution {
-            disposition: ForwardingDisposition::ForwardCandidate,
-            local_ifindex: 0,
-            egress_ifindex: 12,
-            tx_ifindex: 12,
-            tunnel_endpoint_id: 0,
-            next_hop: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 50, 1))),
-            neighbor_mac: Some([0, 1, 2, 3, 4, 5]),
-            src_mac: None,
-            tx_vlan_id: 0,
-        },
-        nat: NatDecision::default(),
-    };
+    let mk_decision = || SessionDecision { resolution: ForwardingResolution {
+        disposition: ForwardingDisposition::ForwardCandidate,
+        local_ifindex: 0,
+        egress_ifindex: 12,
+        tx_ifindex: 12,
+        tunnel_endpoint_id: 0,
+        next_hop: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 50, 1))),
+        neighbor_mac: Some([0, 1, 2, 3, 4, 5]),
+        src_mac: None,
+        tx_vlan_id: 0,
+    }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 };
     let mk_metadata = || SessionMetadata {
         ingress_zone: TEST_LAN_ZONE_ID,
         egress_zone: TEST_WAN_ZONE_ID,

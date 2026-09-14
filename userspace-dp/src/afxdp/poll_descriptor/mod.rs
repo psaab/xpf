@@ -1865,7 +1865,7 @@ pub(super) fn poll_binding_process_descriptor(
                         // RST/ICMP reply (byte-identical to a non-PBR
                         // `then reject`); on `RouteOverride::Drop` recycle the
                         // frame and skip the route-lookup/forward entirely.
-                        let route_table_override = match ingress_route_table_override(
+                        let (route_table_override, pbr_install_table) = match ingress_route_table_override(
                             worker_ctx.forwarding,
                             packet_frame,
                             meta,
@@ -1883,17 +1883,28 @@ pub(super) fn poll_binding_process_descriptor(
                                 binding.scratch.scratch_recycle.push(desc.addr);
                                 continue;
                             }
-                            RouteOverride::Table(table) => Some(table),
-                            RouteOverride::None => None,
+                            RouteOverride::Table { table, domain, check } => {
+                                (Some(table), Some((domain, check)))
+                            }
+                            RouteOverride::None => (None, None),
                         };
 
-                        let resolution = if should_block_tunnel_interface_nat_session_miss(
+                        // #9752: report which arm produced the resolution — only
+                        // the table arm consults a route table (the override or
+                        // the default); the blocked-tunnel arm synthesizes
+                        // NoRoute and the precedence arms resolve
+                        // table-free interface identities. The stamp below
+                        // follows the arm, not the disposition.
+                        let (resolution, resolved_in_table) = if should_block_tunnel_interface_nat_session_miss(
                             worker_ctx.forwarding,
                             effective_resolution_target,
                             meta.protocol,
                         ) {
-                            no_route_resolution(Some(effective_resolution_target))
-                        } else {
+                            (
+                                no_route_resolution(Some(effective_resolution_target)),
+                                false,
+                            )
+                        } else if let Some(local) =
                             ingress_interface_local_resolution_on_session_miss(
                                 worker_ctx.forwarding,
                                 meta.ingress_ifindex as i32,
@@ -1901,14 +1912,18 @@ pub(super) fn poll_binding_process_descriptor(
                                 effective_resolution_target,
                                 meta.protocol,
                             )
-                            .or_else(|| {
-                                interface_nat_local_resolution_on_session_miss(
-                                    worker_ctx.forwarding,
-                                    effective_resolution_target,
-                                    meta.protocol,
-                                )
-                            })
-                            .unwrap_or_else(|| {
+                        {
+                            (local, false)
+                        } else if let Some(local) =
+                            interface_nat_local_resolution_on_session_miss(
+                                worker_ctx.forwarding,
+                                effective_resolution_target,
+                                meta.protocol,
+                            )
+                        {
+                            (local, false)
+                        } else {
+                            (
                                 enforce_ha_resolution_snapshot(
                                     worker_ctx.forwarding,
                                     worker_ctx.ha_state,
@@ -1919,8 +1934,9 @@ pub(super) fn poll_binding_process_descriptor(
                                         effective_resolution_target,
                                         route_table_override.as_deref(),
                                     ),
-                                )
-                            })
+                                ),
+                                true,
+                            )
                         };
                         let fabric_ingress = packet_fabric_ingress;
                         let resolution = prefer_local_forward_candidate_for_fabric_ingress(
@@ -1939,9 +1955,19 @@ pub(super) fn poll_binding_process_descriptor(
                             nptv6: true,
                             ..NatDecision::default()
                         });
+                        // #9752: stamp the installing table (arm provenance;
+                        // every re-resolve (C2) runs in the stamped table).
+                        let (install_table_domain, install_table_check) =
+                            crate::afxdp::forwarding::install_table_stamp_for_miss(
+                                pbr_install_table,
+                                resolved_in_table,
+                                resolution,
+                            );
                         let mut decision = SessionDecision {
                             resolution,
                             nat: nptv6_nat.or(pre_routing_dnat).unwrap_or_default(),
+                            install_table_domain,
+                            install_table_check,
                         };
                         // #919/#922: zero-allocation zone-pair resolution
                         // direct from u16 IDs — no String materialisation
@@ -3436,15 +3462,12 @@ pub(super) fn poll_binding_process_descriptor(
                                     // entry creation turns that race into a hard policy miss. The
                                     // hit path re-resolves on demand and can fall back to the
                                     // cached decision when neighbor convergence is still in flight.
-                                    let reverse_decision = SessionDecision {
-                                        resolution: reverse_resolution,
-                                        nat: decision.nat.reverse(
-                                            flow.src_ip,
-                                            flow.dst_ip,
-                                            flow.forward_key.src_port,
-                                            flow.forward_key.dst_port,
-                                        ),
-                                    };
+                                    let reverse_decision = SessionDecision { resolution: reverse_resolution, nat: decision.nat.reverse(
+                                        flow.src_ip,
+                                        flow.dst_ip,
+                                        flow.forward_key.src_port,
+                                        flow.forward_key.dst_port,
+                                    ), install_table_domain: 0, install_table_check: 0 };
                                     // For NAT64: the reverse key is IPv4 (different AF
                                     // from the forward IPv6 key). The reply arrives as
                                     // IPv4: src=dst_v4, dst=snat_v4.
@@ -4085,7 +4108,7 @@ pub(super) fn poll_binding_process_descriptor(
                             // does NOT get inherited is per-packet ENFORCEMENT,
                             // which is why the drop above applies and why the
                             // term's counter/log were recorded by the call.
-                            RouteOverride::Table(_) | RouteOverride::None => {}
+                            RouteOverride::Table { .. } | RouteOverride::None => {}
                         }
                     }
                     // #6835: an association hit inherits the STATEFUL decision,
@@ -4222,7 +4245,7 @@ pub(super) fn poll_binding_process_descriptor(
                             binding.scratch.scratch_recycle.push(desc.addr);
                             continue;
                         }
-                        RouteOverride::Table(table) => Some(table),
+                        RouteOverride::Table { table, .. } => Some(table),
                         RouteOverride::None => None,
                     };
                     // #6472: NAT64 (cross-family) ICMP error translation
@@ -4737,6 +4760,8 @@ pub(super) fn poll_binding_process_descriptor(
                     SessionDecision {
                         resolution: final_resolution,
                         nat: NatDecision::default(),
+                        install_table_domain: 0,
+                        install_table_check: 0,
                     }
                 };
                 // Safety net: convert any remaining HAInactive to fabric

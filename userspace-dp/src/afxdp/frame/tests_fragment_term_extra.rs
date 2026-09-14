@@ -749,20 +749,17 @@ fn build_tunnel_egress_non_first_fragment_skips_forced_l4_recompute() {
         ..UserspaceDpMeta::default()
     }
     .into();
-    let decision = SessionDecision {
-        resolution: ForwardingResolution {
-            disposition: ForwardingDisposition::ForwardCandidate,
-            local_ifindex: 0,
-            egress_ifindex: 12,
-            tx_ifindex: 11,
-            tunnel_endpoint_id: 7, // tunnel egress -> force_tunnel_l4_recompute
-            next_hop: Some(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))),
-            neighbor_mac: Some([0xba, 0x86, 0xe9, 0xf6, 0x4b, 0xd5]),
-            src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]),
-            tx_vlan_id: 0,
-        },
-        nat: NatDecision::default(),
-    };
+    let decision = SessionDecision { resolution: ForwardingResolution {
+        disposition: ForwardingDisposition::ForwardCandidate,
+        local_ifindex: 0,
+        egress_ifindex: 12,
+        tx_ifindex: 11,
+        tunnel_endpoint_id: 7, // tunnel egress -> force_tunnel_l4_recompute
+        next_hop: Some(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))),
+        neighbor_mac: Some([0xba, 0x86, 0xe9, 0xf6, 0x4b, 0xd5]),
+        src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]),
+        tx_vlan_id: 0,
+    }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 };
 
     let mut egress = vec![0u8; ingress.len()];
     let written = build_forwarded_frame_into_from_frame(

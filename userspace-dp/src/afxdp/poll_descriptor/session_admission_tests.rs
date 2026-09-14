@@ -54,20 +54,17 @@ mod new_flow_session_limit_tests {
     }
 
     fn decision() -> crate::session::SessionDecision {
-        crate::session::SessionDecision {
-            resolution: ForwardingResolution {
-                disposition: ForwardingDisposition::ForwardCandidate,
-                local_ifindex: 0,
-                egress_ifindex: 12,
-                tx_ifindex: 12,
-                tunnel_endpoint_id: 0,
-                next_hop: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 50, 1))),
-                neighbor_mac: Some([0, 1, 2, 3, 4, 5]),
-                src_mac: None,
-                tx_vlan_id: 0,
-            },
-            nat: crate::nat::NatDecision::default(),
-        }
+        crate::session::SessionDecision { resolution: ForwardingResolution {
+            disposition: ForwardingDisposition::ForwardCandidate,
+            local_ifindex: 0,
+            egress_ifindex: 12,
+            tx_ifindex: 12,
+            tunnel_endpoint_id: 0,
+            next_hop: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 50, 1))),
+            neighbor_mac: Some([0, 1, 2, 3, 4, 5]),
+            src_mac: None,
+            tx_vlan_id: 0,
+        }, nat: crate::nat::NatDecision::default(), install_table_domain: 0, install_table_check: 0 }
     }
 
     /// Install `n` distinct counted forward flows (distinct src ports) for
@@ -222,20 +219,17 @@ mod strict_syn_check_tests {
     }
 
     fn fwd_decision() -> SessionDecision {
-        SessionDecision {
-            resolution: ForwardingResolution {
-                disposition: ForwardingDisposition::ForwardCandidate,
-                local_ifindex: 0,
-                egress_ifindex: 12,
-                tx_ifindex: 12,
-                tunnel_endpoint_id: 0,
-                next_hop: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 50, 1))),
-                neighbor_mac: Some([0, 1, 2, 3, 4, 5]),
-                src_mac: None,
-                tx_vlan_id: 0,
-            },
-            nat: crate::nat::NatDecision::default(),
-        }
+        SessionDecision { resolution: ForwardingResolution {
+            disposition: ForwardingDisposition::ForwardCandidate,
+            local_ifindex: 0,
+            egress_ifindex: 12,
+            tx_ifindex: 12,
+            tunnel_endpoint_id: 0,
+            next_hop: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 50, 1))),
+            neighbor_mac: Some([0, 1, 2, 3, 4, 5]),
+            src_mac: None,
+            tx_vlan_id: 0,
+        }, nat: crate::nat::NatDecision::default(), install_table_domain: 0, install_table_check: 0 }
     }
 
     /// Model the poll_descriptor session-MISS guard for a ForwardCandidate

@@ -61,7 +61,8 @@ pub(crate) use discriminator::{TunnelDiscriminator, WireDiscriminator};
 // decode — #7188's shape, for #7188's reason.
 mod routing_domain_wire;
 pub(crate) use routing_domain_wire::{
-    QUARANTINED_ROUTING_DOMAIN, WireRoutingDomain, routing_domain_from_wire,
+    QUARANTINED_ROUTING_DOMAIN, WireRoutingDomain, install_table_identity,
+    routing_domain_from_wire,
     routing_domain_to_wire,
     // #9546: named at the crate level so the conntrack mirror states absence
     // with the codec's own constant rather than a bare literal.

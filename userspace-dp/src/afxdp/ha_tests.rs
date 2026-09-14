@@ -132,6 +132,8 @@ fn test_decision() -> SessionDecision {
     SessionDecision {
         resolution: test_resolution(),
         nat: NatDecision::default(),
+        install_table_domain: 0,
+        install_table_check: 0,
     }
 }
 
@@ -2310,14 +2312,11 @@ fn reserve6600_entry(src_port: u16, pool_port: u16) -> SyncedSessionEntry {
             src_port,
             ..test_key()
         },
-        decision: SessionDecision {
-            resolution: test_resolution(),
-            nat: NatDecision {
-                rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 1))),
-                rewrite_src_port: Some(pool_port),
-                ..NatDecision::default()
-            },
-        },
+        decision: SessionDecision { resolution: test_resolution(), nat: NatDecision {
+            rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 1))),
+            rewrite_src_port: Some(pool_port),
+            ..NatDecision::default()
+        }, install_table_domain: 0, install_table_check: 0 },
         metadata: test_metadata(),
         origin: SessionOrigin::SyncImport,
         protocol: PROTO_TCP,
@@ -2525,15 +2524,12 @@ fn upsert_synced_session_rolls_back_source_nat_when_nat64_refuses_6600() {
             src_port,
             ..test_key()
         },
-        decision: SessionDecision {
-            resolution: test_resolution(),
-            nat: NatDecision {
-                rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 1))),
-                rewrite_src_port: Some(nat64_port),
-                nat64: true,
-                ..NatDecision::default()
-            },
-        },
+        decision: SessionDecision { resolution: test_resolution(), nat: NatDecision {
+            rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 1))),
+            rewrite_src_port: Some(nat64_port),
+            nat64: true,
+            ..NatDecision::default()
+        }, install_table_domain: 0, install_table_check: 0 },
         metadata: test_metadata(),
         origin: SessionOrigin::SyncImport,
         protocol: PROTO_TCP,

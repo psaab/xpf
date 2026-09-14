@@ -200,18 +200,15 @@ fn build_forwarded_frame_from_frame_encapsulates_native_gre() {
         flow_src_port: 0x1234,
         ..UserspaceDpMeta::default()
     };
-    let decision = SessionDecision {
-        resolution: lookup_forwarding_resolution_v4(
-            &state,
-            None,
-            Ipv4Addr::new(8, 8, 8, 8),
-            "sfmix.inet.0",
-            0,
-            true,
-            None,
-        ),
-        nat: NatDecision::default(),
-    };
+    let decision = SessionDecision { resolution: lookup_forwarding_resolution_v4(
+        &state,
+        None,
+        Ipv4Addr::new(8, 8, 8, 8),
+        "sfmix.inet.0",
+        0,
+        true,
+        None,
+    ), nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 };
     let built = build_forwarded_frame_from_frame(
         &inner,
         inner_meta,
@@ -385,21 +382,18 @@ fn build_forwarded_frame_from_frame_encapsulates_native_gre_after_ipv4_snat() {
         flow_src_port: 0x1234,
         ..UserspaceDpMeta::default()
     };
-    let decision = SessionDecision {
-        resolution: lookup_forwarding_resolution_v4(
-            &state,
-            None,
-            Ipv4Addr::new(10, 255, 192, 41),
-            "sfmix.inet.0",
-            0,
-            true,
-            None,
-        ),
-        nat: NatDecision {
-            rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(10, 255, 192, 42))),
-            ..NatDecision::default()
-        },
-    };
+    let decision = SessionDecision { resolution: lookup_forwarding_resolution_v4(
+        &state,
+        None,
+        Ipv4Addr::new(10, 255, 192, 41),
+        "sfmix.inet.0",
+        0,
+        true,
+        None,
+    ), nat: NatDecision {
+        rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(10, 255, 192, 42))),
+        ..NatDecision::default()
+    }, install_table_domain: 0, install_table_check: 0 };
     let built = build_forwarded_frame_from_frame(
         &inner,
         inner_meta,
@@ -477,13 +471,10 @@ fn build_forwarded_frame_from_frame_recomputes_tcp_checksum_for_native_gre_snat(
         flow_dst_port: dst_port,
         ..UserspaceDpMeta::default()
     };
-    let decision = SessionDecision {
-        resolution: lookup_forwarding_resolution_v4(&state, None, dst_ip, "sfmix.inet.0", 0, true, None),
-        nat: NatDecision {
-            rewrite_src: Some(IpAddr::V4(snat_ip)),
-            ..NatDecision::default()
-        },
-    };
+    let decision = SessionDecision { resolution: lookup_forwarding_resolution_v4(&state, None, dst_ip, "sfmix.inet.0", 0, true, None), nat: NatDecision {
+        rewrite_src: Some(IpAddr::V4(snat_ip)),
+        ..NatDecision::default()
+    }, install_table_domain: 0, install_table_check: 0 };
     let built = build_forwarded_frame_from_frame(
         &frame,
         meta,
@@ -578,6 +569,8 @@ fn build_forwarded_frame_from_frame_clamps_tcp_mss_for_native_gre() {
     let decision = SessionDecision {
         resolution: lookup_forwarding_resolution_v4(&state, None, dst_ip, "sfmix.inet.0", 0, true, None),
         nat: NatDecision::default(),
+        install_table_domain: 0,
+        install_table_check: 0,
     };
     let built = build_forwarded_frame_from_frame(
         &frame,

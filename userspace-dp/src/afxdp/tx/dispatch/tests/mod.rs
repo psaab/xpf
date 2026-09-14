@@ -40,20 +40,17 @@ fn test_forwarding_with_egress_mtu(mtu: usize) -> ForwardingState {
 }
 
 fn test_forwarding_decision_to_bound_ifindex(tx_ifindex: i32) -> SessionDecision {
-    SessionDecision {
-        resolution: ForwardingResolution {
-            disposition: ForwardingDisposition::ForwardCandidate,
-            local_ifindex: 0,
-            egress_ifindex: 80,
-            tx_ifindex,
-            tunnel_endpoint_id: 0,
-            next_hop: None,
-            neighbor_mac: Some([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]),
-            src_mac: Some([0x02, 0xbf, 0x72, 0x16, 0x00, 0x01]),
-            tx_vlan_id: 0,
-        },
-        nat: NatDecision::default(),
-    }
+    SessionDecision { resolution: ForwardingResolution {
+        disposition: ForwardingDisposition::ForwardCandidate,
+        local_ifindex: 0,
+        egress_ifindex: 80,
+        tx_ifindex,
+        tunnel_endpoint_id: 0,
+        next_hop: None,
+        neighbor_mac: Some([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]),
+        src_mac: Some([0x02, 0xbf, 0x72, 0x16, 0x00, 0x01]),
+        tx_vlan_id: 0,
+    }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 }
 }
 
 fn test_live_forward_request_for_frame(

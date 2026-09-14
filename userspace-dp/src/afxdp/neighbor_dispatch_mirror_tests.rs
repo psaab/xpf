@@ -36,20 +36,17 @@
     }
 
     fn resolved_neighbor_decision(next_hop: IpAddr) -> SessionDecision {
-        SessionDecision {
-            resolution: ForwardingResolution {
-                disposition: ForwardingDisposition::MissingNeighbor,
-                local_ifindex: 0,
-                egress_ifindex: 80,
-                tx_ifindex: 22,
-                tunnel_endpoint_id: 0,
-                next_hop: Some(next_hop),
-                neighbor_mac: None,
-                src_mac: Some([0x02, 0xbf, 0x72, 0x16, 0x00, 0x01]),
-                tx_vlan_id: 0,
-            },
-            nat: NatDecision::default(),
-        }
+        SessionDecision { resolution: ForwardingResolution {
+            disposition: ForwardingDisposition::MissingNeighbor,
+            local_ifindex: 0,
+            egress_ifindex: 80,
+            tx_ifindex: 22,
+            tunnel_endpoint_id: 0,
+            next_hop: Some(next_hop),
+            neighbor_mac: None,
+            src_mac: Some([0x02, 0xbf, 0x72, 0x16, 0x00, 0x01]),
+            tx_vlan_id: 0,
+        }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 }
     }
 
     fn pending_neighbor_meta(frame_len: usize) -> UserspaceDpMeta {

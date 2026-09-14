@@ -97,27 +97,24 @@ fn embedded_icmp_nat_match_uses_shared_nat_session_for_ipv4() {
                     discriminator: Default::default(),
                     routing_domain: 0,
         },
-        decision: SessionDecision {
-            resolution: ForwardingResolution {
-                disposition: ForwardingDisposition::ForwardCandidate,
-                local_ifindex: 0,
-                egress_ifindex: 12,
-                tx_ifindex: 12,
-                tunnel_endpoint_id: 0,
-                next_hop: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 1))),
-                neighbor_mac: Some([0x00, 0x11, 0x22, 0x33, 0x44, 0x55]),
-                src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x50, 0x08]),
-                tx_vlan_id: 80,
-            },
-            nat: NatDecision {
-                rewrite_src: Some(IpAddr::V4(snat_ip)),
-                rewrite_dst: None,
-                rewrite_src_port: Some(snat_port),
-                rewrite_dst_port: None,
-                nat64: false,
-                nptv6: false,
-            },
-        },
+        decision: SessionDecision { resolution: ForwardingResolution {
+            disposition: ForwardingDisposition::ForwardCandidate,
+            local_ifindex: 0,
+            egress_ifindex: 12,
+            tx_ifindex: 12,
+            tunnel_endpoint_id: 0,
+            next_hop: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 1))),
+            neighbor_mac: Some([0x00, 0x11, 0x22, 0x33, 0x44, 0x55]),
+            src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x50, 0x08]),
+            tx_vlan_id: 80,
+        }, nat: NatDecision {
+            rewrite_src: Some(IpAddr::V4(snat_ip)),
+            rewrite_dst: None,
+            rewrite_src_port: Some(snat_port),
+            rewrite_dst_port: None,
+            nat64: false,
+            nptv6: false,
+        }, install_table_domain: 0, install_table_check: 0 },
         metadata: SessionMetadata {
             ingress_zone: TEST_LAN_ZONE_ID,
             egress_zone: TEST_WAN_ZONE_ID,
@@ -268,6 +265,8 @@ fn embedded_icmp_nat_match_translates_redirect_v4() {
                 nat64: false,
                 nptv6: false,
             },
+            install_table_domain: 0,
+            install_table_check: 0,
         },
         SessionMetadata {
             ingress_zone: TEST_LAN_ZONE_ID,
@@ -553,6 +552,8 @@ fn poll_descriptor_embedded_icmp_reversal_reachable_on_flowless_path_5690() {
                 nat64: false,
                 nptv6: false,
             },
+            install_table_domain: 0,
+            install_table_check: 0,
         },
         SessionMetadata {
             ingress_zone: TEST_LAN_ZONE_ID,
@@ -737,6 +738,8 @@ fn n6472_install_sessions_in_domain(sessions: &mut SessionTable, now_ns: u64, do
                 tx_vlan_id: 80,
             },
             nat: fwd_nat,
+            install_table_domain: 0,
+            install_table_check: 0,
         },
         SessionMetadata {
             ingress_zone: TEST_LAN_ZONE_ID,
@@ -789,6 +792,8 @@ fn n6472_install_sessions_in_domain(sessions: &mut SessionTable, now_ns: u64, do
                 N6472_CLIENT_PORT,
                 N6472_SERVER_PORT,
             ),
+            install_table_domain: 0,
+            install_table_check: 0,
         },
         SessionMetadata {
             ingress_zone: TEST_WAN_ZONE_ID,
@@ -1503,6 +1508,8 @@ fn poll_descriptor_same_family_reversal_not_stolen_by_nat64_arm_6472() {
                 nat64: false,
                 nptv6: false,
             },
+            install_table_domain: 0,
+            install_table_check: 0,
         },
         SessionMetadata {
             ingress_zone: TEST_LAN_ZONE_ID,
@@ -1635,6 +1642,8 @@ fn n6474_install_snat_session(
                 nat64: false,
                 nptv6: false,
             },
+            install_table_domain: 0,
+            install_table_check: 0,
         },
         SessionMetadata {
             ingress_zone: TEST_LAN_ZONE_ID,
@@ -2126,6 +2135,8 @@ fn embedded_icmp_outbound_snat_marker_scoping_6474() {
                 nat64: false,
                 nptv6: false,
             },
+            install_table_domain: 0,
+            install_table_check: 0,
         },
         SessionMetadata {
             ingress_zone: TEST_LAN_ZONE_ID,
@@ -2979,20 +2990,17 @@ fn poll_descriptor_session_hit_rechecks_dscp_input_filter() {
             discriminator: Default::default(),
             routing_domain: 0,
     };
-    let decision = SessionDecision {
-        resolution: ForwardingResolution {
-            disposition: ForwardingDisposition::ForwardCandidate,
-            local_ifindex: 0,
-            egress_ifindex: 12,
-            tx_ifindex: 12,
-            tunnel_endpoint_id: 0,
-            next_hop: None,
-            neighbor_mac: Some([0, 0xaa, 0xbb, 0xcc, 0xdd, 0xee]),
-            src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]),
-            tx_vlan_id: 80,
-        },
-        nat: NatDecision::default(),
-    };
+    let decision = SessionDecision { resolution: ForwardingResolution {
+        disposition: ForwardingDisposition::ForwardCandidate,
+        local_ifindex: 0,
+        egress_ifindex: 12,
+        tx_ifindex: 12,
+        tunnel_endpoint_id: 0,
+        next_hop: None,
+        neighbor_mac: Some([0, 0xaa, 0xbb, 0xcc, 0xdd, 0xee]),
+        src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]),
+        tx_vlan_id: 80,
+    }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 };
     let metadata = SessionMetadata {
         ingress_zone: TEST_LAN_ZONE_ID,
         egress_zone: TEST_WAN_ZONE_ID,
@@ -3407,20 +3415,17 @@ fn poll_descriptor_lo0_filter_drops_cached_local_delivery_session_hit() {
             discriminator: Default::default(),
             routing_domain: 0,
     };
-    let local_decision = SessionDecision {
-        resolution: ForwardingResolution {
-            disposition: ForwardingDisposition::LocalDelivery,
-            local_ifindex: 24,
-            egress_ifindex: 24,
-            tx_ifindex: 24,
-            tunnel_endpoint_id: 0,
-            next_hop: None,
-            neighbor_mac: None,
-            src_mac: None,
-            tx_vlan_id: 0,
-        },
-        nat: NatDecision::default(),
-    };
+    let local_decision = SessionDecision { resolution: ForwardingResolution {
+        disposition: ForwardingDisposition::LocalDelivery,
+        local_ifindex: 24,
+        egress_ifindex: 24,
+        tx_ifindex: 24,
+        tunnel_endpoint_id: 0,
+        next_hop: None,
+        neighbor_mac: None,
+        src_mac: None,
+        tx_vlan_id: 0,
+    }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 };
     let local_metadata = SessionMetadata {
         ingress_zone: TEST_LAN_ZONE_ID,
         egress_zone: TEST_LAN_ZONE_ID,
@@ -3732,6 +3737,8 @@ fn input_filter_discard_drops_the_embedded_icmp_reversal_7359() {
                 nat64: false,
                 nptv6: false,
             },
+            install_table_domain: 0,
+            install_table_check: 0,
         },
         SessionMetadata {
             ingress_zone: TEST_LAN_ZONE_ID,
@@ -4036,6 +4043,8 @@ fn input_filter_count_term_advances_for_the_embedded_icmp_reversal_7359() {
                 nat64: false,
                 nptv6: false,
             },
+            install_table_domain: 0,
+            install_table_check: 0,
         },
         SessionMetadata {
             ingress_zone: TEST_LAN_ZONE_ID,
@@ -4394,6 +4403,8 @@ fn gre_decapped_embedded_icmp_reversal_reads_the_inner_frame_8271() {
                 nat64: false,
                 nptv6: false,
             },
+            install_table_domain: 0,
+            install_table_check: 0,
         },
         SessionMetadata {
             ingress_zone: TEST_LAN_ZONE_ID,
@@ -4785,6 +4796,8 @@ fn poll_descriptor_embedded_icmp_reversal_reachable_for_pure_dnat_9030() {
                 nat64: false,
                 nptv6: false,
             },
+            install_table_domain: 0,
+            install_table_check: 0,
         },
         SessionMetadata {
             ingress_zone: TEST_LAN_ZONE_ID,
@@ -4951,31 +4964,28 @@ fn embedded_icmp_resolves_a_translated_gre_tunnel_9031() {
             discriminator: TunnelDiscriminator::Keyed(gre_key as u32),
             routing_domain: 0,
         },
-        decision: SessionDecision {
-            resolution: ForwardingResolution {
-                disposition: ForwardingDisposition::ForwardCandidate,
-                local_ifindex: 0,
-                egress_ifindex: 12,
-                tx_ifindex: 12,
-                tunnel_endpoint_id: 0,
-                next_hop: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 1))),
-                neighbor_mac: Some([0x00, 0x11, 0x22, 0x33, 0x44, 0x55]),
-                src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x50, 0x08]),
-                tx_vlan_id: 80,
-            },
-            nat: NatDecision {
-                // ADDRESS-ONLY source NAT: `match_rules.rs` routes a protocol
-                // with no L4 ports to `reserve_address_only`, which is how GRE
-                // genuinely reaches same-family SNAT and is what makes this
-                // reachable at all.
-                rewrite_src: Some(IpAddr::V4(snat_ip)),
-                rewrite_dst: None,
-                rewrite_src_port: None,
-                rewrite_dst_port: None,
-                nat64: false,
-                nptv6: false,
-            },
-        },
+        decision: SessionDecision { resolution: ForwardingResolution {
+            disposition: ForwardingDisposition::ForwardCandidate,
+            local_ifindex: 0,
+            egress_ifindex: 12,
+            tx_ifindex: 12,
+            tunnel_endpoint_id: 0,
+            next_hop: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 1))),
+            neighbor_mac: Some([0x00, 0x11, 0x22, 0x33, 0x44, 0x55]),
+            src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x50, 0x08]),
+            tx_vlan_id: 80,
+        }, nat: NatDecision {
+            // ADDRESS-ONLY source NAT: `match_rules.rs` routes a protocol
+            // with no L4 ports to `reserve_address_only`, which is how GRE
+            // genuinely reaches same-family SNAT and is what makes this
+            // reachable at all.
+            rewrite_src: Some(IpAddr::V4(snat_ip)),
+            rewrite_dst: None,
+            rewrite_src_port: None,
+            rewrite_dst_port: None,
+            nat64: false,
+            nptv6: false,
+        }, install_table_domain: 0, install_table_check: 0 },
         metadata: SessionMetadata {
             ingress_zone: TEST_LAN_ZONE_ID,
             egress_zone: TEST_WAN_ZONE_ID,
@@ -5096,27 +5106,24 @@ fn embedded_icmp_does_not_resolve_a_different_gre_tunnel_9031() {
             discriminator: TunnelDiscriminator::Keyed(session_key_value as u32),
             routing_domain: 0,
         },
-        decision: SessionDecision {
-            resolution: ForwardingResolution {
-                disposition: ForwardingDisposition::ForwardCandidate,
-                local_ifindex: 0,
-                egress_ifindex: 12,
-                tx_ifindex: 12,
-                tunnel_endpoint_id: 0,
-                next_hop: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 1))),
-                neighbor_mac: Some([0x00, 0x11, 0x22, 0x33, 0x44, 0x55]),
-                src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x50, 0x08]),
-                tx_vlan_id: 80,
-            },
-            nat: NatDecision {
-                rewrite_src: Some(IpAddr::V4(snat_ip)),
-                rewrite_dst: None,
-                rewrite_src_port: None,
-                rewrite_dst_port: None,
-                nat64: false,
-                nptv6: false,
-            },
-        },
+        decision: SessionDecision { resolution: ForwardingResolution {
+            disposition: ForwardingDisposition::ForwardCandidate,
+            local_ifindex: 0,
+            egress_ifindex: 12,
+            tx_ifindex: 12,
+            tunnel_endpoint_id: 0,
+            next_hop: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 1))),
+            neighbor_mac: Some([0x00, 0x11, 0x22, 0x33, 0x44, 0x55]),
+            src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x50, 0x08]),
+            tx_vlan_id: 80,
+        }, nat: NatDecision {
+            rewrite_src: Some(IpAddr::V4(snat_ip)),
+            rewrite_dst: None,
+            rewrite_src_port: None,
+            rewrite_dst_port: None,
+            nat64: false,
+            nptv6: false,
+        }, install_table_domain: 0, install_table_check: 0 },
         metadata: SessionMetadata {
             ingress_zone: TEST_LAN_ZONE_ID,
             egress_zone: TEST_WAN_ZONE_ID,
@@ -5238,6 +5245,8 @@ fn the_as_is_embedded_key_carries_the_discriminator_9031() {
                 nat64: false,
                 nptv6: false,
             },
+            install_table_domain: 0,
+            install_table_check: 0,
         },
         SessionMetadata {
             ingress_zone: TEST_LAN_ZONE_ID,
@@ -5323,6 +5332,8 @@ fn the_as_is_embedded_key_does_not_cross_tunnels_9031() {
                 nat64: false,
                 nptv6: false,
             },
+            install_table_domain: 0,
+            install_table_check: 0,
         },
         SessionMetadata {
             ingress_zone: TEST_LAN_ZONE_ID,
@@ -5437,30 +5448,27 @@ fn publish_pptp_gre_session_9298(
             discriminator: TunnelDiscriminator::Pptp(handle),
             routing_domain: 0,
         },
-        decision: SessionDecision {
-            resolution: ForwardingResolution {
-                disposition: ForwardingDisposition::ForwardCandidate,
-                local_ifindex: 0,
-                egress_ifindex,
-                tx_ifindex: egress_ifindex,
-                tunnel_endpoint_id: 0,
-                next_hop: None,
-                neighbor_mac: Some([0x00, 0x11, 0x22, 0x33, 0x44, 0x55]),
-                src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x50, 0x08]),
-                tx_vlan_id: 80,
-            },
-            nat: NatDecision {
-                // ADDRESS-ONLY source NAT: `match_rules.rs` routes a protocol
-                // with no L4 ports to `reserve_address_only`, which is how GRE
-                // genuinely reaches same-family SNAT.
-                rewrite_src: Some(snat),
-                rewrite_dst: None,
-                rewrite_src_port: None,
-                rewrite_dst_port: None,
-                nat64: false,
-                nptv6: false,
-            },
-        },
+        decision: SessionDecision { resolution: ForwardingResolution {
+            disposition: ForwardingDisposition::ForwardCandidate,
+            local_ifindex: 0,
+            egress_ifindex,
+            tx_ifindex: egress_ifindex,
+            tunnel_endpoint_id: 0,
+            next_hop: None,
+            neighbor_mac: Some([0x00, 0x11, 0x22, 0x33, 0x44, 0x55]),
+            src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x50, 0x08]),
+            tx_vlan_id: 80,
+        }, nat: NatDecision {
+            // ADDRESS-ONLY source NAT: `match_rules.rs` routes a protocol
+            // with no L4 ports to `reserve_address_only`, which is how GRE
+            // genuinely reaches same-family SNAT.
+            rewrite_src: Some(snat),
+            rewrite_dst: None,
+            rewrite_src_port: None,
+            rewrite_dst_port: None,
+            nat64: false,
+            nptv6: false,
+        }, install_table_domain: 0, install_table_check: 0 },
         metadata: SessionMetadata {
             ingress_zone: TEST_LAN_ZONE_ID,
             egress_zone: TEST_WAN_ZONE_ID,
@@ -5795,6 +5803,8 @@ fn embedded_icmp_session_match_resolves_a_pptp_call_9298() {
                 tx_vlan_id: 80,
             },
             nat: NatDecision::default(),
+            install_table_domain: 0,
+            install_table_check: 0,
         },
         SessionMetadata {
             ingress_zone: TEST_LAN_ZONE_ID,
@@ -5991,6 +6001,8 @@ fn g9528_run_same_family(term: Option<FirewallTermSnapshot>) -> (usize, usize, O
                 nat64: false,
                 nptv6: false,
             },
+            install_table_domain: 0,
+            install_table_check: 0,
         },
         SessionMetadata {
             ingress_zone: TEST_LAN_ZONE_ID,

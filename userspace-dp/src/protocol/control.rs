@@ -936,6 +936,22 @@ pub(crate) struct SessionSyncRequest {
     /// (`pkg/dataplane/userspace/protocol_ha.go`, `SessionSyncRequest.PeerDelete`).
     #[serde(rename = "peer_delete", default)]
     pub peer_delete: bool,
+    /// #9752: the session's installing route-table domain id
+    /// (`routingInstanceDomain` semantics: 0 = default table). Carried so a
+    /// peer-synced session re-resolves in the table its PBR steer installed
+    /// instead of `inet.0`. `serde(default)` => 0 on an old peer (default),
+    /// the pre-#9752 behavior (rolling-upgrade safe).
+    ///
+    /// The rename MUST match the Go struct tag
+    /// (`pkg/dataplane/userspace/protocol_ha.go`, `SessionSyncRequest`).
+    #[serde(rename = "install_table_domain", default)]
+    pub install_table_domain: u32,
+    /// #9752: owner check for `install_table_domain` (high 32 of the FNV-64).
+    /// 0 iff the domain is 0. Same upgrade semantics as the domain.
+    ///
+    /// The rename MUST match the Go struct tag (same file).
+    #[serde(rename = "install_table_check", default)]
+    pub install_table_check: u32,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]

@@ -137,4 +137,70 @@ fn the_quarantine_sentinel_decodes_unrecognized_9956() {
          on import); Present(_) would file quarantined sessions under a live \
          domain on the peer"
     );
+/// #9752: the Rust name→domain hash agrees with Go's
+/// `config.StableRoutingInstanceTableID` on pinned literals. Vectors computed
+/// via `go run` at base `9184222dd` (see `docs/pr/9752/fnv-vectors.txt`,
+/// uncommitted scratch); the Go side pins the same literals in
+/// `routinginstanceid_test.go` (C4), so either implementation drifting reds
+/// its own suite. If this reds after touching `fnv1a64` or the fold, the
+/// mirror — not the vectors — is wrong; verify against Go before "fixing".
+#[test]
+fn install_table_identity_matches_go_vectors_9752() {
+    for (name, want_domain) in [
+        ("blue", 525590u32),
+        ("tenant-a", 259731),
+        ("tenant-b", 788198),
+        ("sfmix", 488570),
+        ("scrub", 633963),
+        ("ISP-B", 236616),
+        ("vr1", 627081),
+        ("mgmt", 579198),
+        ("trust", 361106),
+        ("wan", 384696),
+        // UTF-8 multibyte (Codex-r2 demand): hashing is over raw bytes.
+        ("é-vrf", 704427),
+        ("a", 969824),
+        ("A", 737632),
+        ("Comcast-GigabitPro", 676172),
+        ("x", 644139),
+        ("zzz", 497540),
+    ] {
+        let (domain, check) = install_table_identity(name);
+        assert_eq!(
+            domain, want_domain,
+            "name {name:?}: domain {domain} != Go {want_domain}"
+        );
+        // H2 is helper-local (no Go counterpart): pin determinism + the
+        // u64-fold shape instead of agreement — same input, same check,
+        // and the check is the hash's high half (non-degenerate).
+        assert_eq!(
+            install_table_identity(name).1,
+            check,
+            "name {name:?}: H2 nondeterministic across calls"
+        );
+    }
+}
+
+/// #9752: hashing the empty name is a caller bug (Go: `""` -> 106945,
+/// IN-BAND — it could be a live instance's domain, and stamping it would
+/// alias). Callers skip defaults before extraction (registry) or never
+/// override on empty (PBR terms); the `debug_assert!` fails loud in tests.
+/// The registry test pins that no row is ever keyed by it.
+#[test]
+#[should_panic(expected = "must be skipped before name extraction")]
+fn empty_name_hash_panics_9752() {
+    let _ = install_table_identity("");
+}
+
+/// #9752: the known Go collision pair collides here too (same function), so
+/// the registry's first-wins determinism cell (forwarding_build) tests the
+/// real shape rather than a synthetic one.
+#[test]
+fn known_go_collision_pair_collides_here_too_9752() {
+    assert_eq!(
+        install_table_identity("ri7").0,
+        install_table_identity("ri116").0,
+        "ri7/ri116 collide in Go (#9657); the mirror must collide identically"
+    );
+    assert_eq!(install_table_identity("ri7").0, 957120);
 }

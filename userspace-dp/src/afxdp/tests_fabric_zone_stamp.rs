@@ -1552,6 +1552,8 @@ fn a_fabric_punted_packet_keeps_the_entrys_ingress_zone_9384() {
                     tx_vlan_id: 80,
                 },
                 nat: NatDecision::default(),
+                install_table_domain: 0,
+                install_table_check: 0,
             },
             metadata,
             SessionOrigin::SyncImport,

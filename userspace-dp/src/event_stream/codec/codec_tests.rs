@@ -50,27 +50,24 @@ fn test_key_v6() -> SessionKey {
 }
 
 fn test_decision() -> SessionDecision {
-    SessionDecision {
-        resolution: ForwardingResolution {
-            disposition: ForwardingDisposition::ForwardCandidate,
-            local_ifindex: 2,
-            egress_ifindex: 3,
-            tx_ifindex: 3,
-            tunnel_endpoint_id: 0,
-            next_hop: Some(IpAddr::V4(Ipv4Addr::new(10, 0, 2, 1))),
-            neighbor_mac: Some([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]),
-            src_mac: Some([0x11, 0x22, 0x33, 0x44, 0x55, 0x66]),
-            tx_vlan_id: 0,
-        },
-        nat: NatDecision {
-            rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(10, 0, 2, 10))),
-            rewrite_dst: None,
-            rewrite_src_port: Some(40000),
-            rewrite_dst_port: None,
-            nat64: false,
-            nptv6: false,
-        },
-    }
+    SessionDecision { resolution: ForwardingResolution {
+        disposition: ForwardingDisposition::ForwardCandidate,
+        local_ifindex: 2,
+        egress_ifindex: 3,
+        tx_ifindex: 3,
+        tunnel_endpoint_id: 0,
+        next_hop: Some(IpAddr::V4(Ipv4Addr::new(10, 0, 2, 1))),
+        neighbor_mac: Some([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]),
+        src_mac: Some([0x11, 0x22, 0x33, 0x44, 0x55, 0x66]),
+        tx_vlan_id: 0,
+    }, nat: NatDecision {
+        rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(10, 0, 2, 10))),
+        rewrite_dst: None,
+        rewrite_src_port: Some(40000),
+        rewrite_dst_port: None,
+        nat64: false,
+        nptv6: false,
+    }, install_table_domain: 0, install_table_check: 0 }
 }
 
 fn test_metadata() -> SessionMetadata {
