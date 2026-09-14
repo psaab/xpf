@@ -387,6 +387,19 @@ echo "════════════════════════�
 echo "  Passed: $PASS"
 echo "  Failed: $FAIL"
 echo "════════════════════════════════════════"
+# Ledger envelope line (#9531 wire-gate adapter): exactly one WIRE_GATE line
+# per invocation. The gate ID matches the wrapping Makefile recipe — matrix
+# runs and failover runs are separate gates with separate bands.
+if [[ "$WITH_FAILOVER" -eq 1 ]]; then
+	HI_GATE="test-host-inbound-failover"
+else
+	HI_GATE="test-host-inbound"
+fi
+if [[ "$FAIL" -gt 0 ]]; then
+	printf 'WIRE_GATE %s FAIL reason=-- cells_passed=%s cells_failed=%s\n' "$HI_GATE" "$PASS" "$FAIL"
+else
+	printf 'WIRE_GATE %s PASS reason=-- cells_passed=%s cells_failed=%s\n' "$HI_GATE" "$PASS" "$FAIL"
+fi
 if [[ "$FAIL" -gt 0 ]]; then
 	echo
 	echo "Failures:"
