@@ -3619,9 +3619,10 @@ func findNamedNode(nodes []*Node, name string) *Node {
 	return nil
 }
 
-// validateBackupRouterDst (#2911, extended by #4808) rejects a `system
-// backup-router` whose next-hop or EXPLICIT `destination` is malformed, or
-// whose destination is a different address family than the next-hop.
+// validateBackupRouterDst (#2911, extended by #4808, #9820) rejects a
+// `system backup-router` whose next-hop is malformed, IPv4-mapped, or
+// whose EXPLICIT `destination` is malformed or of a different address
+// family than the next-hop.
 //
 // Background: renderBackupRouter (pkg/frr) emits a fallback default route
 //
@@ -3634,28 +3635,29 @@ func findNamedNode(nodes []*Node, name string) *Node {
 // ("10.0.0.0/99") sails through commit uncaught and is rendered directly
 // into frr.conf. An explicit destination of the WRONG family renders a
 // mismatched-family static instead — e.g. `backup-router 2001:db8::1` +
-// `destination 0.0.0.0/0` → `ipv6 route 0.0.0.0/0 2001:db8::1 250` (#2911).
-// FRR rejects a malformed OR mismatched-family static route, and
-// frr-reload fails the ENTIRE static config load on that one bad line, not
-// just the offending route. That is exactly the breakage #2907 set out to
-// prevent for the empty-destination case, so every way to reach a bad
-// rendered line must be caught.
+// `destination 0.0.0.0/0` → `ipv6 route 0.0.0.0/0 2001:db8::1 250`
+// (#2911), where the v4 prefix fails the `ipv6 route` prefix matcher and
+// fails the static config load. (A v6-destination/v4-next-hop line instead
+// fills the interface-name slot — normally inactive, not reload-fatal.
+// #9820 corrected the old blanket "FRR rejects a mismatched-family static
+// route" mechanism claim to this per-direction account.)
 //
 // Checks, in order:
 //  1. next-hop must parse as an IP address at all (#4808).
-//  2. an EXPLICIT destination must parse as a CIDR prefix at all (#4808) —
-//     natCIDRIPPart/natAddrFamily below only look at the address portion of
-//     a CIDR string, so they alone would accept a bad mask like "/99";
-//     net.ParseCIDR validates the whole token.
-//  3. an EXPLICIT destination of a different address family than the
+//  2. next-hop must not be an IPv4-mapped IPv6 literal (#9820: product
+//     restriction — a single fallback default that never resolves is a
+//     silent lockout risk).
+//  3. an EXPLICIT destination must parse as a CIDR prefix at all (#4808) —
+//     net.ParseCIDR validates the whole token (mask included).
+//  4. an EXPLICIT destination of a different address family than the
 //     next-hop is rejected (#2911), once both sides are known to parse.
 //
 // Only an EXPLICIT destination is format/family checked. An empty
 // destination is left to #2907's next-hop-family-aware default (v6
 // next-hop → ::/0, v4 → 0.0.0.0/0) and is never malformed or a mismatch.
 //
-// Family classification reuses natAddrFamily / natCIDRIPPart so the colon
-// test (IPv4-mapped IPv6 literal → v6) matches the rest of the compiler.
+// Family classification uses FRRAddrFamily (netip; IPv4-mapped IPv6
+// literal → v6 literal classification), shared with the render belt.
 //
 // Strict (commit / commit-check): hard-reject on the first failing check,
 // naming the offending value. Lenient (load / peer-sync): warn (accumulating
@@ -3676,13 +3678,27 @@ func validateBackupRouterDst(cfg *Config, lenient bool) ([]string, error) {
 	var warnings []string
 
 	// #4808: next-hop must be a well-formed IP address. Rendered verbatim as
-	// the FRR static route's next-hop; a malformed value fails the entire
-	// static config load (frr-reload), not just this route.
+	// the FRR static route's next-hop; a malformed value cannot serve as a
+	// gateway.
 	if net.ParseIP(nh) == nil {
 		msg := fmt.Sprintf(
-			"system backup-router %s: not a valid IP address; FRR rejects a "+
-				"malformed next-hop, which fails the entire static config "+
-				"load (frr-reload)", nh)
+			"system backup-router %s: not a valid IP address; backup-router "+
+				"requires an IP gateway address", nh)
+		if !lenient {
+			return nil, fmt.Errorf("%s", msg)
+		}
+		warnings = append(warnings, msg+" (ignored: backup-router default route not installed until corrected)")
+	}
+
+	// #9820: an IPv4-mapped IPv6 literal is not supported as a
+	// backup-router next-hop (product restriction: a single inert fallback
+	// default is a silent lockout risk). It previously rendered
+	// `ipv6 route ::/0 ::ffff:… 250` or tripped the family check under a
+	// false reason, depending on the destination.
+	if FRRAddrIsMapped(nh) {
+		msg := fmt.Sprintf(
+			"system backup-router %s: IPv4-mapped IPv6 next-hops are not "+
+				"supported for backup-router; use a plain IPv4 or IPv6 address", nh)
 		if !lenient {
 			return nil, fmt.Errorf("%s", msg)
 		}
@@ -3709,8 +3725,8 @@ func validateBackupRouterDst(cfg *Config, lenient bool) ([]string, error) {
 		warnings = append(warnings, msg+" (ignored: backup-router default route not installed until corrected)")
 	}
 
-	nhFam := natAddrFamily(nh)
-	dstFam := natAddrFamily(natCIDRIPPart(dst))
+	nhFam := FRRAddrFamily(nh)
+	dstFam := FRRAddrFamily(dst)
 	// One side did not parse as an IP at all — already reported above (or
 	// pre-existing address-book-name handling that is not this validator's
 	// concern); skip the family comparison, it would be meaningless.
@@ -3722,9 +3738,8 @@ func validateBackupRouterDst(cfg *Config, lenient bool) ([]string, error) {
 	}
 	msg := fmt.Sprintf(
 		"system backup-router %s destination %s: destination family (%s) "+
-			"does not match next-hop family (%s); FRR rejects a "+
-			"mismatched-family static route, which fails the entire static "+
-			"config load (frr-reload)",
+			"does not match next-hop family (%s); backup-router requires a "+
+			"next-hop and destination of the same address family",
 		nh, dst, dstFam, nhFam)
 	if lenient {
 		return append(warnings, msg+" (ignored: backup-router default route not installed until corrected)"), nil

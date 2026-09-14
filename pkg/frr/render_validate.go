@@ -207,26 +207,3 @@ func validBGPOrigin(s string) bool {
 	}
 	return false
 }
-
-// frrOperandIsV6 reports whether a renderable FRR operand — an address or a
-// prefix — is IPv6.
-//
-// #8597: `strings.Contains(s, ":")` is the spelling used inline elsewhere in
-// the renderer and it is adequate there, where both operands have already been
-// derived from the same value. It is NOT adequate for comparing two
-// INDEPENDENT operands' families, which is what the backup-router
-// mismatch check does: the answer decides whether a route is emitted at all,
-// so it should come from the parser rather than from a substring.
-//
-// Callers must have established renderability first (validFRRNextHopAddress /
-// validFRRRoutePrefix); an unparseable operand reports false here, and would
-// have been skipped before reaching this.
-func frrOperandIsV6(s string) bool {
-	if p, err := netip.ParsePrefix(s); err == nil {
-		return p.Addr().Is6() && !p.Addr().Is4In6()
-	}
-	if a, err := netip.ParseAddr(s); err == nil {
-		return a.Is6() && !a.Is4In6()
-	}
-	return false
-}

@@ -53,12 +53,17 @@ func runTailGates(cfg *Config, opts compileOpts) error {
 	// #2911: backup-router destination/next-hop family-mismatch gate. #2907
 	// (#2891) made the EMPTY destination default next-hop-family-aware, but an
 	// EXPLICIT destination whose family differs from the next-hop still renders
-	// an FRR-invalid static line (e.g. `ipv6 route 0.0.0.0/0 <v6nh>`), which
-	// frr-reload rejects and which fails the ENTIRE static config load. Strict
-	// (commit / commit-check): hard-reject. Lenient (load / peer-sync): warn so
-	// a config committed before this gate existed still boots (renderBackupRouter
-	// still emits the bad line, but the rest of the static config no longer
-	// depends on this validator to load — the operator is told to correct it).
+	// a mismatched-family static line. A v4 prefix under `ipv6 route`
+	// (e.g. `ipv6 route 0.0.0.0/0 <v6nh>`) fails the prefix matcher and
+	// fails the static config load; a v4 next-hop on a v6 destination
+	// instead fills the interface-name slot (normally inactive). #9820
+	// corrected the old blanket "frr-reload rejects a mismatched-family
+	// static" claim to this per-direction account.
+	// Strict (commit / commit-check): hard-reject. Lenient (load / peer-sync):
+	// warn so a config committed before this gate existed still boots
+	// (renderBackupRouter still emits the bad line, but the rest of the
+	// static config no longer depends on this validator to load — the
+	// operator is told to correct it).
 	brWarnings, err := validateBackupRouterDst(cfg, opts.lenientBackupRouterDst)
 	if err != nil {
 		return err
