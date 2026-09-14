@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"net"
+	"net/netip"
 	"strconv"
 	"strings"
 )
@@ -202,11 +203,35 @@ func ValidateOSPFArea(raw string, _ *Config) error {
 	if trimmed == "" {
 		return fmt.Errorf("missing value (expected an OSPF area id: an IPv4 dotted-quad like 0.0.0.0, or an integer 0..4294967295)")
 	}
+	// #9820: validate what is emitted. The renderer interpolates the RAW
+	// key; padding that TrimSpace hides would pass here while the RAW key
+	// renders. Spaces are harmless FRR token separators, but \n\r SPLIT
+	// the rendered line — and padding IS authorable through ordinary
+	// ingress: the lexer preserves quoted-string contents verbatim
+	// (`lexer.go:337-366`, incl. the `\n` escape) and the parser accepts
+	// them as path values (`parser.go:286-289`), so `area " 0.0.0.0 "`
+	// and even `area "\n0.0.0.0"` commit clean today. This is therefore
+	// an INTENTIONAL compatibility tightening (option 1): area IDs must
+	// be bare tokens, where bare = unpadded DECODED value (quotes
+	// themselves are fine: `"0.0.0.0"` is indistinguishable from
+	// `0.0.0.0` to this validator). Migration: remove quotes/padding —
+	// no semantic change for space-padding. Precision: LEADING newline
+	// padding breaks (splits the command, missing-arg parse error) while
+	// TRAILING newline padding can function (the value's own newline ends
+	// an otherwise complete line; FRR discards whitespace-only lines) —
+	// so no universal "padding never functioned" is claimed. Tolerant
+	// path omits-with-warning (loading ≠ availability).
+	if trimmed != raw {
+		return fmt.Errorf("invalid area id %q (leading or trailing whitespace is not allowed; use a bare IPv4 dotted-quad or integer)", raw)
+	}
 	// Dotted-quad form. net.ParseIP rejects a bare integer, so the integer
 	// spelling falls through to the ParseUint arm below.
 	if ip := net.ParseIP(trimmed); ip != nil {
 		if ip.To4() == nil {
 			return fmt.Errorf("invalid area id %q (an IPv6 address is not a valid OSPF area id; use an IPv4 dotted-quad or a 32-bit integer)", raw)
+		}
+		if addr, err := netip.ParseAddr(trimmed); err == nil && addr.Is4In6() {
+			return fmt.Errorf("invalid area id %q (an IPv4-mapped IPv6 literal is not a valid OSPF area id; FRR takes only an IPv4 dotted-quad or a 32-bit integer)", raw)
 		}
 		return nil
 	}

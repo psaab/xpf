@@ -28,6 +28,15 @@ import (
 // shared section is passed (direct callers / unit tests), it falls back to
 // a function-local section emitted at the end, preserving the historical
 // single-instance behavior byte-for-byte.
+// validFRROSPFArea reports whether id is renderable as an FRR area operand
+// (#9820): exactly what the commit gate accepts (ValidateOSPFArea,
+// incl. its mapped + padding arms) AND a single FRR token. The token
+// check is defense-in-depth against validating-normalized/emitting-raw
+// drift (the #9493 virtual-link belt carries the same pair).
+func validFRROSPFArea(id string) bool {
+	return config.ValidateOSPFArea(id, nil) == nil && config.FRRSingleToken(id)
+}
+
 func (m *Manager) generateProtocols(ospf *config.OSPFConfig, ospfv3 *config.OSPFv3Config, bgp *config.BGPConfig, rip *config.RIPConfig, isis *config.ISISConfig, vrfName string, ecmpMaxPaths int, policyOptions *config.PolicyOptionsConfig, bgpAcceptDefault map[string]bool, shared ...*bfdSection) string {
 	var b strings.Builder
 	var bfd *bfdSection
@@ -88,7 +97,10 @@ func (m *Manager) generateProtocols(ospf *config.OSPFConfig, ospfv3 *config.OSPF
 				}
 			}
 			if area.AreaType != "" {
-				if area.NoSummary {
+				if !validFRROSPFArea(area.ID) {
+					slog.Warn("frr: omitting an OSPF area stanza with an invalid area id (#9820)",
+						"area", sanitizeFRRValue(area.ID))
+				} else if area.NoSummary {
 					fmt.Fprintf(&b, " area %s %s no-summary\n", area.ID, area.AreaType)
 				} else {
 					fmt.Fprintf(&b, " area %s %s\n", area.ID, area.AreaType)
@@ -177,7 +189,12 @@ func (m *Manager) generateProtocols(ospf *config.OSPFConfig, ospfv3 *config.OSPF
 						b.WriteString(" ip ospf bfd\n")
 					}
 				}
-				fmt.Fprintf(&b, " ip ospf area %s\n", area.ID)
+				if validFRROSPFArea(area.ID) {
+					fmt.Fprintf(&b, " ip ospf area %s\n", area.ID)
+				} else {
+					slog.Warn("frr: omitting an OSPF interface area activation with an invalid area id (#9820)",
+						"area", sanitizeFRRValue(area.ID), "interface", sanitizeFRRValue(iface.Name))
+				}
 				b.WriteString("exit\n!\n")
 			}
 		}
@@ -190,7 +207,12 @@ func (m *Manager) generateProtocols(ospf *config.OSPFConfig, ospfv3 *config.OSPF
 		}
 		for _, area := range ospfv3.Areas {
 			for _, iface := range area.Interfaces {
-				fmt.Fprintf(&b, " interface %s area %s\n", iface.Name, area.ID)
+				if validFRROSPFArea(area.ID) {
+					fmt.Fprintf(&b, " interface %s area %s\n", iface.Name, area.ID)
+				} else {
+					slog.Warn("frr: omitting an OSPFv3 interface area activation with an invalid area id (#9820)",
+						"area", sanitizeFRRValue(area.ID), "interface", sanitizeFRRValue(iface.Name))
+				}
 			}
 		}
 		// IPv6 OSPF ECMP mirrors the OSPFv4 block: FRR ospf6d requires an
