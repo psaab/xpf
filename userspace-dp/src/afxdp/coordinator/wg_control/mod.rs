@@ -433,6 +433,13 @@ fn run_wg_control_loop_with_kernel_path(
             effective_endpoints.insert(pk, ep);
         }
     }
+    // #9644: the learned-endpoint map above is a fresh local, but the
+    // engine (and its per-peer roam snapshots) survives control-thread
+    // restarts by Arc reuse. Bump every drain generation so this
+    // incarnation never suppresses on a previous incarnation's
+    // adoptions — the first packet of a previously learned endpoint
+    // re-reports instead (plan §5.2 incarnation binding). Cold path.
+    engine.invalidate_roam_snapshots();
     // 64 KiB scratch for both directions (max IP packet; WG records are
     // smaller). Single allocation at thread start — no per-packet alloc.
     let mut sock_buf = vec![0u8; 65_535];
@@ -710,10 +717,7 @@ fn run_wg_control_loop_with_kernel_path(
                 // roam and a socket-observed roam are indistinguishable
                 // afterwards — one representation of "where this peer is",
                 // not two that can disagree.
-                if let Some(observed) = engine.take_worker_observed_endpoint(pk) {
-                    effective_endpoints.insert(*pk, canonicalize_endpoint(observed));
-                    last_authenticated_rx.insert(*pk, monotonic_nanos());
-                }
+                adopt_worker_observation(engine, pk, &mut effective_endpoints, &mut last_authenticated_rx);
                 let effective_endpoint = effective_endpoints.get(pk).copied();
                 let endpoint_known = effective_endpoint.is_some();
                 let actions = engine.timer_pass_for_peer(pk, now, endpoint_known);
@@ -777,6 +781,29 @@ fn run_wg_control_loop_with_kernel_path(
                 }
             }
         }
+    }
+}
+
+/// #8274 step 3, extracted for #9644 testability: adopt the endpoint a
+/// worker last observed for `pk` (if any) into the effective-endpoint
+/// map with the socket path's canonicalisation, and stamp the
+/// authenticated-activity anchor the DNS roam-hold (#7158) consumes.
+/// Returns true when a roam was adopted. The stamp line is
+/// load-bearing: deleting it lets a live roamed endpoint expire out
+/// of the hold, which `worker_rereport_refreshes_activity_9644`
+/// pins (its refresh-deleted variant adopts DNS instead).
+fn adopt_worker_observation(
+    engine: &crate::afxdp::wg::WgEngine,
+    pk: &[u8; 32],
+    effective_endpoints: &mut std::collections::HashMap<[u8; 32], SocketAddr>,
+    last_authenticated_rx: &mut std::collections::HashMap<[u8; 32], u64>,
+) -> bool {
+    if let Some(observed) = engine.take_worker_observed_endpoint(pk) {
+        effective_endpoints.insert(*pk, canonicalize_endpoint(observed));
+        last_authenticated_rx.insert(*pk, monotonic_nanos());
+        true
+    } else {
+        false
     }
 }
 
@@ -934,6 +961,93 @@ mod endpoint_adoption_7158_tests {
             "after a full attempt window of silence the learned address has \
              already failed to produce a handshake; DNS must be allowed to \
              recover the peer"
+        );
+    }
+
+    /// #9644: the worker→drain→refresh→hold causal chain at component
+    /// level. A worker report adopted through the PRODUCTION helper
+    /// refreshes the activity anchor, so DNS keeps holding the live
+    /// roamed endpoint; continued traffic re-reports (post-take epoch
+    /// bump) and re-refreshes, extending the hold indefinitely.
+    ///
+    /// FAIL-ON-REVERT (Codex-r5 finding 3): delete the
+    /// `last_authenticated_rx` stamp inside `adopt_worker_observation`
+    /// — the actual production refresh — and the `heard` assertion
+    /// below fails; without the stamp the peer reads as silent and
+    /// DNS adopts the resolved address instead (pinned by the
+    /// refresh-deleted second half).
+    #[test]
+    fn worker_rereport_refreshes_activity_so_dns_hold_survives_9644() {
+        let allowed: Vec<ipnet::IpNet> = vec!["10.123.0.0/24".parse().unwrap()];
+        let (_init, resp, init_pub, _resp_pub) =
+            crate::afxdp::wg::tests::established_pair(allowed.clone(), allowed);
+        let x = addr("198.51.100.77:33445");
+        let resolver =
+            WgEndpointResolver::with_resolved_for_test(&[(init_pub, addr("203.0.113.9:51820"))]);
+        let mut effective: HashMap<[u8; 32], SocketAddr> = HashMap::new();
+        let mut heard: HashMap<[u8; 32], u64> = HashMap::new();
+        let now = 10 * WG_ENDPOINT_ROAM_HOLD_NS;
+
+        // Worker observes X on an authenticated record; the control
+        // pass adopts it through the production helper (take + stamp).
+        assert!(resp.note_worker_observed_endpoint(&init_pub, x));
+        assert!(
+            adopt_worker_observation(&resp, &init_pub, &mut effective, &mut heard),
+            "a queued worker report must adopt"
+        );
+        assert_eq!(effective.get(&init_pub), Some(&x));
+        assert!(
+            heard.get(&init_pub).is_some(),
+            "adopt must stamp last_authenticated_rx — deleting the \
+             production refresh breaks this cell, and without the stamp \
+             the hold below expires"
+        );
+        // DNS offers Y while the peer is live: the hold preserves X.
+        apply_resolved_endpoints(Some(&resolver), &[init_pub], &mut effective, &heard, now, "wg0");
+        assert_eq!(
+            effective.get(&init_pub),
+            Some(&x),
+            "DNS must not move a peer whose worker reports keep refreshing it"
+        );
+        // Next pass under continued traffic re-reports and re-refreshes.
+        assert!(
+            resp.note_worker_observed_endpoint(&init_pub, x),
+            "post-take the generation bumped: must re-report like today"
+        );
+        assert!(adopt_worker_observation(&resp, &init_pub, &mut effective, &mut heard));
+        apply_resolved_endpoints(
+            Some(&resolver),
+            &[init_pub],
+            &mut effective,
+            &heard,
+            now + WG_ENDPOINT_ROAM_HOLD_NS,
+            "wg0",
+        );
+        assert_eq!(
+            effective.get(&init_pub),
+            Some(&x),
+            "continuous worker traffic must extend the hold indefinitely"
+        );
+        // Refresh-deleted variant: a peer with no stamp reads as silent
+        // and yields to DNS after the hold — the consequence the stamp
+        // prevents.
+        let mut effective_silent: HashMap<[u8; 32], SocketAddr> = HashMap::new();
+        effective_silent.insert(init_pub, x);
+        let heard_silent: HashMap<[u8; 32], u64> = HashMap::new();
+        apply_resolved_endpoints(
+            Some(&resolver),
+            &[init_pub],
+            &mut effective_silent,
+            &heard_silent,
+            now,
+            "wg0",
+        );
+        assert_eq!(
+            effective_silent.get(&init_pub).copied(),
+            Some(addr("203.0.113.9:51820")),
+            "without the worker-driven refresh the hold expires and DNS \
+             wins — this is what deleting the production stamp would do \
+             to live roamed peers"
         );
     }
 
