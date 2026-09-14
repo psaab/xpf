@@ -110,12 +110,14 @@ type ProcessStatus struct {
 	// echoes the NeighborGeneration the manager stamps on each
 	// update_neighbors replace (distinct from NeighborGeneration above, which
 	// is the dynamic ARP/NDP resolver epoch). The send path advances its
-	// cached neighbor view only when this ACK confirms the replace landed
-	// (>= the sent generation); a lower value means the helper fenced the
-	// replace as stale, so the manager retains retry debt and re-diffs on the
-	// next regeneration. omitempty for mixed Rust/Go back-compat: an older
-	// helper omits it (decodes 0), which the send path treats as "no ACK
-	// support, assume applied" to preserve pre-#6034 behavior.
+	// cached neighbor view only when this ACK is 0 or exactly the sent
+	// generation. An ACK above the sent generation is a #6034 fence answered
+	// with the helper's newer applied generation; an ACK below it (other than
+	// 0) is unexpected from the current helper and is handled defensively the
+	// same way (#9696): the manager retains retry debt and re-diffs on the
+	// next regeneration. omitempty for mixed Rust/Go
+	// back-compat: an older helper omits it (decodes 0), which the send path
+	// treats as "no ACK support, assume applied" to preserve pre-#6034 behavior.
 	ManagerNeighborGeneration uint64      `json:"manager_neighbor_generation,omitempty"`
 	RouteEntries              int         `json:"route_entries,omitempty"`
 	WorkerHeartbeats          []time.Time `json:"worker_heartbeats,omitempty"`

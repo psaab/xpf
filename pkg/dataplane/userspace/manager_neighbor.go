@@ -116,14 +116,17 @@ func (m *Manager) RegenerateNeighborSnapshot() {
 		m.recordPartialUpdateFailureLocked(partialNeighbors, err)
 		return
 	}
-	// #6034: retain retry debt if the helper did not acknowledge applying
+	// #6034/#9696: retain retry debt if the helper did not acknowledge applying
 	// this replace generation. A helper that supports the ACK echoes the
-	// applied generation; a value below `gen` means it fenced the replace
-	// as stale, so we leave the cached neighbor view untouched and the next
-	// regeneration re-diffs and retries with a strictly higher generation.
-	// An ACK of 0 means an older helper without ACK support — assume applied
-	// (preserves pre-#6034 behavior).
-	if status.ManagerNeighborGeneration != 0 && status.ManagerNeighborGeneration < gen {
+	// applied generation. An ACK above `gen` identifies a #6034 fence: the
+	// helper is ahead and kept what it had, so we leave the cached neighbor
+	// view untouched and the next regeneration re-diffs and retries with a
+	// strictly higher generation. An ACK below `gen` is unexpected from the
+	// current helper (its fence always ACKs >= gen) and is handled
+	// defensively the same way. An ACK of 0 means an older helper without
+	// ACK support — assume applied (preserves pre-#6034 behavior).
+	if status.ManagerNeighborGeneration != 0 && status.ManagerNeighborGeneration != gen {
+		m.seedNeighborReplaceGenerationLocked(status.ManagerNeighborGeneration)
 		slog.Warn("userspace: neighbor regeneration not acknowledged; retaining retry debt",
 			"sent_generation", gen,
 			"applied_generation", status.ManagerNeighborGeneration)
@@ -131,9 +134,11 @@ func (m *Manager) RegenerateNeighborSnapshot() {
 	}
 	m.lastSnapshot.Neighbors = newNeighbors
 	m.rebuildNeighborIndex() // #1197 (after publish success)
-	// #9684: only an ACK of exactly gen, or 0 from a helper without the ACK,
-	// proves this replace applied. An ACK above gen is a fence the check above
-	// does not yet recognise (#9696), so the section stays unknown.
+	// #9684/#9696: the fence arm above handled every nonzero ACK other than
+	// gen, so a nonzero ACK here means exactly gen — which proves this replace
+	// applied (modulo the exact-match residual: a pre-seed gen == applied is
+	// fenced helper-side yet ACKs == gen; structurally closed in-tree). An ACK
+	// of 0 is a helper without the ACK.
 	if status.ManagerNeighborGeneration == 0 || status.ManagerNeighborGeneration == gen {
 		m.resolvePartialOutcomesLocked(partialNeighbors)
 	}

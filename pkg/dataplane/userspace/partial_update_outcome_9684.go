@@ -27,7 +27,8 @@ import (
 //   - A verb failure whose outcome is unknown marks its section
 //     (recordPartialUpdateFailureLocked). An in-band refusal marks nothing,
 //     because the helper answered and kept what it had. Neither does a #6034
-//     fence the Go ACK check recognises (#9696 tracks one it cannot).
+//     fence (#9696: any nonzero ACK other than the sent generation retains
+//     retry debt without marking).
 //   - Each publish that starts from m.lastSnapshot re-samples every marked
 //     section into the snapshot it sends (resampleUnresolvedSectionsLocked).
 //     The sample is taken after the lost update's, so it can only move the
@@ -36,8 +37,8 @@ import (
 //     accepted (resolvePartialOutcomesLocked). That is one of:
 //       - a verb round trip whose response proves the update applied; for
 //         update_neighbors that means an ACK of exactly the generation sent, or
-//         0 from a helper without the ACK. An ACK above it is a #6034 fence the
-//         Go check does not yet recognise (#9696), and leaves the section marked;
+//         0 from a helper without the ACK. An ACK above it is a #6034 fence
+//         (#9696) that retains retry debt and leaves the section marked;
 //       - a successful apply_snapshot that carried a re-sampled copy.
 //   - Compile builds its snapshot outside m.mu, so a partial update can run
 //     between the build and the publish, and the build's older sample would roll
