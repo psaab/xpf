@@ -24,6 +24,46 @@ var vrrpGroupPropertyKeywords = map[string]bool{
 	"track-priority-cost": true,
 }
 
+// parseInterfaceNumeric9899 parses a canonical unsigned decimal token in
+// [min..max] for #9899 F030/F031 interface tunnel/VLAN leaves (key
+// 0..4294967295, TTL 1..255, VLAN/inner 0..4094). Canonical form is a
+// non-empty bare run of ASCII digits: signs, whitespace, and non-digits
+// reject, matching ParseCanonicalUint but with a uint64 value domain so the
+// u32 key ceiling holds on 32-bit builds too. Range failures report the
+// [min..max] contract and the offending value.
+func parseInterfaceNumeric9899(raw string, min, max uint64) (uint64, error) {
+	if raw == "" {
+		return 0, fmt.Errorf("missing value %q (expected integer)", raw)
+	}
+	for i := range len(raw) {
+		if raw[i] < '0' || raw[i] > '9' {
+			return 0, fmt.Errorf("non-canonical numeric token %q: only unsigned decimal digits are allowed (no leading sign or whitespace)", raw)
+		}
+	}
+	v, err := strconv.ParseUint(raw, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("integer out of range [%d..%d] (got %q)", min, max, raw)
+	}
+	if v < min || v > max {
+		return 0, fmt.Errorf("integer out of range [%d..%d] (got %d)", min, max, v)
+	}
+	return v, nil
+}
+
+// validateInterfaceNumeric9899 returns the schema LeafValidator for one #9899
+// numeric leaf. It shares parseInterfaceNumeric9899 with the compiler so
+// schema and compile can never drift on form or bounds; the missing-value
+// check mirrors ValidateInteger.
+func validateInterfaceNumeric9899(min, max uint64) LeafValidator {
+	return func(raw string, _ *Config) error {
+		if strings.TrimSpace(raw) == "" {
+			return fmt.Errorf("missing value %q (expected integer)", raw)
+		}
+		_, err := parseInterfaceNumeric9899(raw, min, max)
+		return err
+	}
+}
+
 func compileInterfaces(node *Node, ifaces *InterfacesConfig, opts compileOpts, warnings *[]string) error {
 	// #6782: reth interfaces whose redundancy-group token was present but
 	// unusable. Only ever populated on the tolerant path — the strict compile
@@ -193,6 +233,7 @@ func compileInterfaces(node *Node, ifaces *InterfacesConfig, opts compileOpts, w
 
 		// Check for interface-level tunnel configuration
 		tunnelNode := child.FindChild("tunnel")
+		skipIface9899 := false
 		if tunnelNode != nil {
 			// Default mode based on interface name prefix: ip-X/X/X → ipip, gr-X/X/X → gre
 			defaultMode := "gre"
@@ -221,17 +262,35 @@ func compileInterfaces(node *Node, ifaces *InterfacesConfig, opts compileOpts, w
 						tc.Mode = prop.Keys[1]
 					}
 				case "key":
-					if len(prop.Keys) >= 2 {
-						if v, err := strconv.Atoi(prop.Keys[1]); err == nil {
-							tc.Key = uint32(v)
+					raw := nodeVal(prop)
+					v, perr := parseInterfaceNumeric9899(raw, 0, 4294967295)
+					if perr != nil {
+						msg := fmt.Sprintf("interfaces %s: tunnel key %s", ifName, perr.Error())
+						if opts.lenientInterfaceNumericBounds {
+							if warnings != nil {
+								*warnings = append(*warnings, msg+fmt.Sprintf("; quarantining interface %q", ifName))
+							}
+							skipIface9899 = true
+							break
 						}
+						return fmt.Errorf("%s", msg)
 					}
+					tc.Key = uint32(v)
 				case "ttl":
-					if len(prop.Keys) >= 2 {
-						if v, err := strconv.Atoi(prop.Keys[1]); err == nil {
-							tc.TTL = v
+					raw := nodeVal(prop)
+					v, perr := parseInterfaceNumeric9899(raw, 1, 255)
+					if perr != nil {
+						msg := fmt.Sprintf("interfaces %s: tunnel ttl %s", ifName, perr.Error())
+						if opts.lenientInterfaceNumericBounds {
+							if warnings != nil {
+								*warnings = append(*warnings, msg+fmt.Sprintf("; quarantining interface %q", ifName))
+							}
+							skipIface9899 = true
+							break
 						}
+						return fmt.Errorf("%s", msg)
 					}
+					tc.TTL = int(v)
 				case "keepalive":
 					if v := nodeVal(prop); v != "" {
 						if n, err := strconv.Atoi(v); err == nil {
@@ -256,6 +315,12 @@ func compileInterfaces(node *Node, ifaces *InterfacesConfig, opts compileOpts, w
 				case "wireguard":
 					parseTunnelWireguard(tc, prop)
 				}
+				if skipIface9899 {
+					break
+				}
+			}
+			if skipIface9899 {
+				continue
 			}
 			ifc.Tunnel = tc
 		}
@@ -327,6 +392,7 @@ func compileInterfaces(node *Node, ifaces *InterfacesConfig, opts compileOpts, w
 					tc = ifc.Tunnel.cloneForUnit(linuxName)
 				}
 				// #9156: same expansion as the interface-level reader above.
+				skipUnit9899 := false
 				for _, prop := range tunnelRunChildren9156(tunnelNode) {
 					switch prop.Name() {
 					case "source":
@@ -350,17 +416,35 @@ func compileInterfaces(node *Node, ifaces *InterfacesConfig, opts compileOpts, w
 							tc.Mode = v
 						}
 					case "key":
-						if v := nodeVal(prop); v != "" {
-							if n, err := strconv.Atoi(v); err == nil {
-								tc.Key = uint32(n)
+						v := nodeVal(prop)
+						n, perr := parseInterfaceNumeric9899(v, 0, 4294967295)
+						if perr != nil {
+							msg := fmt.Sprintf("interfaces %s unit %d: tunnel key %s", ifName, unitNum, perr.Error())
+							if opts.lenientInterfaceNumericBounds {
+								if warnings != nil {
+									*warnings = append(*warnings, msg+fmt.Sprintf("; skipping unit %d", unitNum))
+								}
+								skipUnit9899 = true
+								break
 							}
+							return fmt.Errorf("%s", msg)
 						}
+						tc.Key = uint32(n)
 					case "ttl":
-						if v := nodeVal(prop); v != "" {
-							if n, err := strconv.Atoi(v); err == nil {
-								tc.TTL = n
+						v := nodeVal(prop)
+						n, perr := parseInterfaceNumeric9899(v, 1, 255)
+						if perr != nil {
+							msg := fmt.Sprintf("interfaces %s unit %d: tunnel ttl %s", ifName, unitNum, perr.Error())
+							if opts.lenientInterfaceNumericBounds {
+								if warnings != nil {
+									*warnings = append(*warnings, msg+fmt.Sprintf("; skipping unit %d", unitNum))
+								}
+								skipUnit9899 = true
+								break
 							}
+							return fmt.Errorf("%s", msg)
 						}
+						tc.TTL = int(n)
 					case "keepalive":
 						if v := nodeVal(prop); v != "" {
 							if n, err := strconv.Atoi(v); err == nil {
@@ -376,26 +460,48 @@ func compileInterfaces(node *Node, ifaces *InterfacesConfig, opts compileOpts, w
 					case "wireguard":
 						parseTunnelWireguard(tc, prop)
 					}
+					if skipUnit9899 {
+						break
+					}
+				}
+				if skipUnit9899 {
+					continue
 				}
 				unit.Tunnel = tc
 			}
 
 			// Parse vlan-id on unit
 			if vlanNode := unitInst.node.FindChild("vlan-id"); vlanNode != nil {
-				if v := nodeVal(vlanNode); v != "" {
-					if n, err := strconv.Atoi(v); err == nil {
-						unit.VlanID = n
+				v := nodeVal(vlanNode)
+				n, perr := parseInterfaceNumeric9899(v, 0, 4094)
+				if perr != nil {
+					msg := fmt.Sprintf("interfaces %s unit %d: vlan-id %s", ifName, unitNum, perr.Error())
+					if opts.lenientInterfaceNumericBounds {
+						if warnings != nil {
+							*warnings = append(*warnings, msg+fmt.Sprintf("; skipping unit %d", unitNum))
+						}
+						continue
 					}
+					return fmt.Errorf("%s", msg)
 				}
+				unit.VlanID = int(n)
 			}
 
 			// Parse inner-vlan-id on unit (QinQ inner tag)
 			if ivNode := unitInst.node.FindChild("inner-vlan-id"); ivNode != nil {
-				if v := nodeVal(ivNode); v != "" {
-					if n, err := strconv.Atoi(v); err == nil {
-						unit.InnerVlanID = n
+				v := nodeVal(ivNode)
+				n, perr := parseInterfaceNumeric9899(v, 0, 4094)
+				if perr != nil {
+					msg := fmt.Sprintf("interfaces %s unit %d: inner-vlan-id %s", ifName, unitNum, perr.Error())
+					if opts.lenientInterfaceNumericBounds {
+						if warnings != nil {
+							*warnings = append(*warnings, msg+fmt.Sprintf("; skipping unit %d", unitNum))
+						}
+						continue
 					}
+					return fmt.Errorf("%s", msg)
 				}
+				unit.InnerVlanID = int(n)
 			}
 
 			// Handle two AST shapes:

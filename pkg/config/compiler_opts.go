@@ -2768,6 +2768,20 @@ type compileOpts struct {
 	// refuses the child MTU and the committed value would otherwise never
 	// be realised — the same silence the issue is about.
 	lenientVlanUnitMTU bool
+
+	// lenientInterfaceNumericBounds (#9899 F030/F031) downgrades the
+	// interface tunnel/VLAN numeric gate — a tunnel key/TTL or vlan-id /
+	// inner-vlan-id token that is non-canonical (sign/whitespace/garbage) or
+	// out of range (key 0..4294967295, TTL 1..255, VLAN 0..4094) — from a
+	// hard compile error to a cfg.Warnings entry plus quarantine. Set ONLY on
+	// the tolerant load / peer-sync paths so an already-persisted or
+	// peer-synced config still boots (#1960 no-brick). A malformed
+	// interface-level tunnel quarantines the whole owning interface; a
+	// malformed unit tunnel/VLAN skips only the owning unit, so valid
+	// siblings still compile and no keyed->unkeyed, inherited-tunnel, or
+	// tagged->untagged fallback survives. Candidate commit / commit-check
+	// stay strict. Same doctrine as lenientInterfaceAddressList.
+	lenientInterfaceNumericBounds bool
 	// lenientBareLeafInstance9838 (#9838) downgrades the bare-leaf
 	// interface / routing-instance gate (validateBareLeafInstance9838)
 	// from a hard compile error to a cfg.Warnings entry on the tolerant
@@ -2988,6 +3002,7 @@ func lenientCompileOpts() compileOpts {
 		lenientFabricMemberDefined:             true,
 		lenientInterfaceAddressList:            true,
 		lenientVlanUnitMTU:                     true,
+		lenientInterfaceNumericBounds:          true,
 		lenientBareLeafInstance9838:            true,
 	}
 }
