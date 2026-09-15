@@ -84,8 +84,11 @@ drop-in for xdpilone), and tracks frame budgets per binding.
   (`USERSPACE_CPUMAP`) instead of `XDP_PASS`, which frees the XSK frame
   immediately while still delivering the packet to the kernel stack.
   Two shim paths still return `XDP_PASS` (#9695):
-  - every non-IP frame, through `pass_non_ip_l2_direct`, deliberately,
-    because a cpumap redirect breaks ARP neighbor resolution;
+  - every non-IP frame except nested-VLAN (a still-VLAN post-unwrap
+    ethertype — QinQ-double or legacy 0x9100 — is an explicit `XDP_DROP`
+    with the `qinq_drop` counter since #9888), through
+    `pass_non_ip_l2_direct`, deliberately, because a cpumap redirect
+    breaks ARP neighbor resolution;
   - `cpumap_or_pass`, whenever the cpumap flag is unset or the redirect
     fails.
 

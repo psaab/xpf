@@ -212,13 +212,78 @@ fn tunnel_discriminators_demote_kernel_local_to_redirect_9517() {
 
 #[test]
 fn degraded_path_reason_names_cover_retained_shim_actions() {
-    assert_eq!(DEGRADED_PATH_REASON_NAMES.len(), 16);
+    assert_eq!(DEGRADED_PATH_REASON_NAMES.len(), 17);
     assert_eq!(DEGRADED_PATH_REASON_NAMES[4], "heartbeat_missing");
     assert_eq!(DEGRADED_PATH_REASON_NAMES[5], "heartbeat_stale");
     assert_eq!(DEGRADED_PATH_REASON_NAMES[11], "interface_nat_no_session");
     assert_eq!(DEGRADED_PATH_REASON_NAMES[13], "strict_drop");
     assert_eq!(DEGRADED_PATH_REASON_NAMES[14], "pass_to_kernel");
     assert_eq!(DEGRADED_PATH_REASON_NAMES[15], "transit_drop");
+    assert_eq!(DEGRADED_PATH_REASON_NAMES[16], "qinq_drop");
+}
+
+#[test]
+fn degraded_path_reason_names_agree_with_the_shim_9888() {
+    // #9888: the Rust reader agrees with the shim index-for-index.
+    //
+    // `DEGRADED_PATH_REASON_NAMES` is the THIRD copy of the
+    // `USERSPACE_FALLBACK_REASON_*` index (shim consts, Go
+    // `degradedPathReasonNames`, this table), and the Go side's #8258
+    // agreement test cannot see this one — so a reason appended in the
+    // shim that never lands here would be counted in the kernel and
+    // invisible to the debug-log reader, the same silent-invisibility
+    // failure #8258 guards on the Go side. This reads the shim's
+    // constants and requires this table to match them index for index,
+    // so adding a reason enrols it here automatically and the build
+    // stays red until this table carries it. (Same hand parse the Go
+    // side uses: a `const NAME: u32 = N;` line either is present with
+    // that value or is not.)
+    let lib = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("userspace-xdp/src/lib.rs");
+    let src = std::fs::read_to_string(&lib).expect("read shim lib.rs");
+    let mut max: Option<usize> = None;
+    let mut seen = 0usize;
+    for line in src.lines() {
+        let trimmed = line.trim();
+        let Some(rest) = trimmed.strip_prefix("const USERSPACE_FALLBACK_REASON_") else {
+            continue;
+        };
+        let Some((name, value)) = rest.split_once(": u32 = ") else {
+            continue;
+        };
+        let value: usize = value
+            .strip_suffix(';')
+            .expect("reason value ends with ';'")
+            .parse()
+            .expect("reason value is numeric");
+        if name == "MAX" {
+            max = Some(value);
+            continue;
+        }
+        seen += 1;
+        let want = name.to_ascii_lowercase();
+        let got = DEGRADED_PATH_REASON_NAMES
+            .get(value)
+            .copied()
+            .unwrap_or("<missing>");
+        assert_eq!(
+            got,
+            want.as_str(),
+            "index {value}: the shim calls this {want:?}, the Rust table renders {got:?}"
+        );
+    }
+    let max = max.expect("USERSPACE_FALLBACK_REASON_MAX not found in the shim source");
+    assert!(
+        seen > 0,
+        "no USERSPACE_FALLBACK_REASON_* constants parsed — the scan is broken, not the table"
+    );
+    assert_eq!(
+        DEGRADED_PATH_REASON_NAMES.len(),
+        max,
+        "Rust table has {} slots but the shim MAX is {max}",
+        DEGRADED_PATH_REASON_NAMES.len()
+    );
 }
 
 // --- #2332: monotonic HA-liveness freshness (Rust sibling of #1792) ---

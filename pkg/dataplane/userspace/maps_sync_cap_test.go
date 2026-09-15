@@ -33,12 +33,13 @@ func TestDegradedPathReasonNamesCoverRetainedShimActions(t *testing.T) {
 		"heartbeat_stale",
 		"adjust_meta",
 		"meta_bounds",
+		"qinq_drop",
 	} {
 		if !found[name] {
 			t.Fatalf("degraded path reason %q missing from %v", name, degradedPathReasonNames)
 		}
 	}
-	if got, want := len(degradedPathReasonNames), 16; got != want {
+	if got, want := len(degradedPathReasonNames), 17; got != want {
 		t.Fatalf("degradedPathReasonNames length = %d, want %d", got, want)
 	}
 	if got := mapNameUserspaceShimDegradedStats; got != "userspace_fallback_stats" {

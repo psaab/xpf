@@ -365,17 +365,25 @@ inspect or rewrite a packet sitting in a UMEM frame.
     userspace — and crucially the upstream XDP shim
     (`userspace-xdp/src/lib.rs::parse_l2`) strips exactly ONE tag (an `if`,
     not a `while`), so after the outer tag the dispatched `eth_proto` is the
-    inner TPID (0x8100), which is neither `ETH_P_IP` nor `ETH_P_IPV6`. It
-    therefore hits the `_` arm at `lib.rs:376` and is handed to the kernel via
-    `pass_non_ip_l2_direct()` (XDP_PASS) — NOT delivered to the XSK and NOT
-    XDP_DROPped. So a double-tagged frame never reaches these userspace
-    parsers: there is no reachable misparse divergence on the transit path
-    (the "returned as-is" inner-TPID-at-l3=18 case below is unreachable in
-    production, kept only as a contract invariant). Adding real double-tag
+    inner TPID (0x8100), which is neither `ETH_P_IP` nor `ETH_P_IPV6`. Since
+    #9888 that shape (with a complete L2 header) no longer takes the non-IP
+    `XDP_PASS` arm: a still-VLAN post-unwrap ethertype (inner
+    0x8100/0x88a8/0x9100, or a legacy 0x9100 outer the shim never unwraps)
+    is an explicit `XDP_DROP` with the `qinq_drop` degraded-path counter
+    (`is_vlan_tpid`, on both the armed and the degraded non-IP arms) — NOT
+    delivered to the XSK and NOT handed to the kernel. (A runt truncating
+    inside the tag takes `parse_l2`'s `None` path instead and carries no L3
+    payload, so no transit rides that shape.) So a double-tagged frame
+    never reaches these userspace parsers: there is no reachable misparse
+    divergence on the transit path (the "returned as-is" inner-TPID-at-l3=18
+    case below is unreachable in production, kept only as a contract
+    invariant). Adding real double-tag
     transit would require changing BOTH the shim and the userspace parsers and
-    is out of scope (tracked: #2354). NOTE: earlier revisions of this file
-    said the shim "drops" QinQ-double frames — that was inaccurate; it
-    XDP_PASSes them to the kernel.
+    is out of scope (tracked: #2354). NOTE: before #9888 the shim handed
+    QinQ-double frames to the kernel via `pass_non_ip_l2_direct()`
+    (`XDP_PASS`) — unadjudicated on bridged ports, which was the #9888 hole.
+    Earlier revisions of this file said the shim "drops" such frames; that
+    was inaccurate then and is accurate now.
   - **IPv6 ext-headers**: walk the chain (shared #2148 engine, `MAX_IPV6_EXT_HEADERS`
     bound) to the terminal L4 offset + protocol; do NOT assume L4 at a fixed
     L3+40. The extension-header SET every walker recognizes is Hop-by-Hop (0),
@@ -399,11 +407,10 @@ inspect or rewrite a packet sitting in a UMEM frame.
   l3=14; `parse_ndp_neighbor_advert` read a fixed L3+40 and missed an NA
   behind a hop-by-hop header) and added drift-guard CANARIES
   (`parser_tests.rs::l2_offset_canary_all_parsers_agree`,
-  `ipv6_walk_canary_learning_agrees_with_forwarding`,
+  `l2_qinq_shape_contract_9888`, `ipv6_walk_canary_learning_agrees_with_forwarding`,
   `nat64_tests.rs::nat64_l2_offset_canary`) that FAIL the instant any parser
   drifts from the contract. These bugs were LATENT not live: the shim
-  XDP_PASSes ARP / diverts NDP control / XDP_PASSes QinQ-double to the kernel,
-  so the buggy
+  XDP_PASSes ARP / diverts NDP control / DROPs QinQ-double, so the buggy
   learning/NAT64 parsers never received the trap frames — the fix closes the
   trap before a future steering change springs it. **PR-2 (deferred
   follow-up)** is the full unification: collapse all five L2 parsers + three

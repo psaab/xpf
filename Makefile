@@ -190,12 +190,14 @@ test-shim-run:
 	# cells never executed. A bare count cannot catch that either: the regex also
 	# matches unrelated tests in this package (TestFilterSnapshotIsFragmentSerialized),
 	# so the total is inflated by cells from other files. So the check is by NAME:
-	# every `func Test...` in the file must appear as a `=== RUN` line.
-	@out=$$(go test ./pkg/dataplane/userspace/ -run 'TestV6|TestFragment|TestNonFirstFragment' -v -count=1 2>&1); \
+	# every `func Test...` in each covered file must appear as a `=== RUN` line.
+	# #9888: the QinQ disposition cells live in their own file and are covered
+	# too — same predicate extension, same by-name census over both files.
+	@out=$$(go test ./pkg/dataplane/userspace/ -run 'TestV6|TestFragment|TestNonFirstFragment|TestUserspaceXDPQinQ' -v -count=1 2>&1); \
 	status=$$?; \
 	echo "$$out"; \
 	missing=''; \
-	for n in $$(grep -oE '^func Test[A-Za-z0-9_]+' pkg/dataplane/userspace/fragment_disposition_7494_test.go | sed 's/^func //'); do \
+	for n in $$(grep -hoE '^func Test[A-Za-z0-9_]+' pkg/dataplane/userspace/fragment_disposition_7494_test.go pkg/dataplane/userspace/qinq_disposition_9888_test.go | sed 's/^func //'); do \
 		echo "$$out" | grep -q "^=== RUN   $$n$$" || missing="$$missing $$n"; \
 	done; \
 	if [ -n "$$missing" ]; then \

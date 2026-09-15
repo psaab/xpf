@@ -1802,6 +1802,19 @@ fn nat64_l2_offset_canary() {
         f
     };
     assert_eq!(frame_l3_offset(&untagged), Some(14));
+
+    // #9888: a QinQ double tag is NOT unwound — single-unwrap offset 18,
+    // matching frame/inspect::frame_l3_offset. Unreachable in production
+    // (the shim drops this shape with qinq_drop); pinned so a future
+    // steering change cannot silently reinterpret the inner tag as IP.
+    let mut qinq = vec![0u8; 12];
+    qinq.extend_from_slice(&0x8100u16.to_be_bytes()); // outer TPID
+    qinq.extend_from_slice(&0x0064u16.to_be_bytes()); // outer TCI VID 100
+    qinq.extend_from_slice(&0x8100u16.to_be_bytes()); // inner TPID
+    qinq.extend_from_slice(&0x00c8u16.to_be_bytes()); // inner TCI VID 200
+    qinq.extend_from_slice(&0x0800u16.to_be_bytes()); // payload ethertype
+    qinq.extend_from_slice(&[0u8; 64]);
+    assert_eq!(frame_l3_offset(&qinq), Some(18));
 }
 
 #[test]
