@@ -54,7 +54,7 @@ func TestADeleteIsWithheldFromAPeerWithoutDeleteOwnership9714(t *testing.T) {
 		t.Fatal("FIXTURE: a 2-byte frame must not read as delete-ownership capable")
 	}
 
-	s.QueueDeleteV4(key9714())
+	s.QueueDeleteV4(key9714(), false)
 
 	if got := journalLen9714(s); got != 0 {
 		t.Errorf("%d deletes reached the peer path; a peer without capFlagPeerDeleteOwnership applies them "+
@@ -76,7 +76,7 @@ func TestACapablePeerStillReceivesDeletes9714(t *testing.T) {
 		t.Fatal("FIXTURE: the advertised bit did not decode")
 	}
 
-	s.QueueDeleteV4(key9714())
+	s.QueueDeleteV4(key9714(), false)
 
 	if got := journalLen9714(s); got != 1 {
 		t.Errorf("journalled %d deletes, want 1: a peer advertising capFlagPeerDeleteOwnership must be sent "+
@@ -106,7 +106,7 @@ func TestADeleteIsNotWithheldBeforeCapabilitiesAreLearned9714(t *testing.T) {
 		t.Fatal("FIXTURE: a fresh SessionSync must not read as capable")
 	}
 
-	s.QueueDeleteV4(key9714())
+	s.QueueDeleteV4(key9714(), false)
 
 	if got := journalLen9714(s); got != 1 {
 		t.Errorf("journalled %d deletes, want 1: before the peer has advertised anything, behaviour must be "+
@@ -125,7 +125,7 @@ func TestAV6DeleteIsWithheldFromAnIncapablePeer9714(t *testing.T) {
 
 	s.QueueDeleteV6(dataplane.SessionKeyV6{
 		SrcIP: [16]byte{0x20, 0x01}, Protocol: 6, SrcPort: 5001, DstPort: 443,
-	})
+	}, false)
 
 	if got := journalLen9714(s); got != 0 {
 		t.Errorf("%d v6 deletes reached an incapable peer: the hazard is the peer's unconditional apply, "+

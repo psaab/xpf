@@ -2647,3 +2647,28 @@ func TestDataplaneEventActionFromPayload(t *testing.T) {
 		t.Fatalf("dataplaneEventAction(truncated) = %d, want %d", got, dataplane.ActionDeny)
 	}
 }
+
+func TestDecodeSessionCloseEventCarriesThePurgeRetirementMarker9752(t *testing.T) {
+	base := buildSessionCloseV4Payload(6, 12345, 443,
+		[4]byte{10, 0, 1, 102}, [4]byte{172, 16, 80, 200}, 1, 0, 3, 4)
+	payload := append(append(append([]byte{}, base...),
+		0, 0, 0, 0, 0, 0, 0, 0, // discriminator
+		0, 0, 0, 0), // routing domain
+		1) // purge-retirement marker
+	d, ok := decodeSessionCloseEvent(payload)
+	if !ok {
+		t.Fatal("decodeSessionCloseEvent returned false")
+	}
+	if !d.PurgeRetirement {
+		t.Fatal("#9752: close frame with marker byte set decoded PurgeRetirement=false; " +
+			"downstream retractions would derive companions the purge preserved")
+	}
+	// Legacy (marker absent) keeps the historical behavior.
+	legacy, ok := decodeSessionCloseEvent(payload[:len(payload)-1])
+	if !ok {
+		t.Fatal("decodeSessionCloseEvent returned false for a legacy close")
+	}
+	if legacy.PurgeRetirement {
+		t.Fatal("legacy close decoded PurgeRetirement=true")
+	}
+}

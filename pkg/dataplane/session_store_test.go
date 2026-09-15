@@ -297,7 +297,7 @@ func TestDeleteWithCompanionsV4RemovesReverseAndDNAT(t *testing.T) {
 	}
 	store := NewDataPlaneSessionStore(dp)
 
-	if err := store.DeleteWithCompanionsV4(forward, DeleteReasonClusterStale); err != nil {
+	if err := store.DeleteWithCompanionsV4(forward, DeleteReasonClusterStale, false); err != nil {
 		t.Fatalf("DeleteWithCompanionsV4: %v", err)
 	}
 	if _, ok := dp.v4[forward]; ok {
@@ -333,7 +333,7 @@ func TestDeleteKnownV4StopsBeforeSessionsWhenDNATDeleteFails(t *testing.T) {
 	}
 	store := NewDataPlaneSessionStore(dp)
 
-	err := store.DeleteKnownV4(forward, val, DeleteReasonGCExpired)
+	err := store.DeleteKnownV4(forward, val, DeleteReasonGCExpired, false)
 	if !errors.Is(err, dnatErr) {
 		t.Fatalf("DeleteKnownV4 error = %v, want DNAT error", err)
 	}
@@ -359,7 +359,7 @@ func TestDeleteKnownV4StopsBeforeForwardWhenReverseDeleteFails(t *testing.T) {
 	}
 	store := NewDataPlaneSessionStore(dp)
 
-	err := store.DeleteKnownV4(forward, val, DeleteReasonGCExpired)
+	err := store.DeleteKnownV4(forward, val, DeleteReasonGCExpired, false)
 	if !errors.Is(err, reverseErr) {
 		t.Fatalf("DeleteKnownV4 error = %v, want reverse error", err)
 	}
@@ -384,7 +384,7 @@ func TestDeleteBatchKnownV4UsesBatchSessionDeletes(t *testing.T) {
 	}
 	store := NewDataPlaneSessionStore(dp)
 
-	deleted, err := store.DeleteBatchKnownV4(entries, DeleteReasonGCExpired)
+	deleted, err := store.DeleteBatchKnownV4(entries, DeleteReasonGCExpired, false)
 	if err != nil {
 		t.Fatalf("DeleteBatchKnownV4: %v", err)
 	}
@@ -419,7 +419,7 @@ func TestDeleteBatchKnownV4ReturnsPartialForwardDeletesOnBatchError(t *testing.T
 	dp.failDelV4[failKey] = batchErr
 	store := NewDataPlaneSessionStore(dp)
 
-	deleted, err := store.DeleteBatchKnownV4(entries, DeleteReasonGCExpired)
+	deleted, err := store.DeleteBatchKnownV4(entries, DeleteReasonGCExpired, false)
 	if !errors.Is(err, batchErr) {
 		t.Fatalf("DeleteBatchKnownV4 error = %v, want batch error", err)
 	}
@@ -457,7 +457,7 @@ func TestDeleteBatchKnownV6ReturnsPartialForwardDeletesOnBatchError(t *testing.T
 	dp.failDelV6[failKey] = batchErr
 	store := NewDataPlaneSessionStore(dp)
 
-	deleted, err := store.DeleteBatchKnownV6(entries, DeleteReasonGCExpired)
+	deleted, err := store.DeleteBatchKnownV6(entries, DeleteReasonGCExpired, false)
 	if !errors.Is(err, batchErr) {
 		t.Fatalf("DeleteBatchKnownV6 error = %v, want batch error", err)
 	}
@@ -555,7 +555,7 @@ func TestDeleteWithCompanionsV4PreservesPersistentNATBinding(t *testing.T) {
 	}
 	store := NewDataPlaneSessionStore(dp)
 
-	if err := store.DeleteWithCompanionsV4(forward, DeleteReasonGCExpired); err != nil {
+	if err := store.DeleteWithCompanionsV4(forward, DeleteReasonGCExpired, false); err != nil {
 		t.Fatalf("DeleteWithCompanionsV4: %v", err)
 	}
 	binding := pnat.Lookup(netip.AddrFrom4(forward.SrcIP), forward.SrcPort, "pool-a")
@@ -600,7 +600,7 @@ func TestDeleteWithCompanionsV6RemovesReverseAndDNAT(t *testing.T) {
 	}
 	store := NewDataPlaneSessionStore(dp)
 
-	if err := store.DeleteWithCompanionsV6(forward, DeleteReasonClusterStale); err != nil {
+	if err := store.DeleteWithCompanionsV6(forward, DeleteReasonClusterStale, false); err != nil {
 		t.Fatalf("DeleteWithCompanionsV6: %v", err)
 	}
 	if _, ok := dp.v6[forward]; ok {

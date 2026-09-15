@@ -95,7 +95,16 @@ pub(super) fn purge_queued_flows_for_closed_deltas(
         if delta.kind != SessionDeltaKind::Close {
             continue;
         }
-        let reverse_key = reverse_session_key(&delta.key, delta.decision.nat);
+        // #9752: a purge-retirement close covers exactly `delta.key` — the
+        // purge preserved or separately retired the companion, so deriving
+        // the reverse here would cancel queued flows for a session the walk
+        // deliberately kept. Pass the key twice (the loop_body/mod.rs:978
+        // idiom): matching is per-key, so the forward cancels exactly once.
+        let reverse_key = if delta.purge_retirement {
+            delta.key.clone()
+        } else {
+            reverse_session_key(&delta.key, delta.decision.nat)
+        };
         for binding in bindings.iter_mut() {
             cancel_queued_flow_on_binding(
                 binding,
@@ -270,6 +279,10 @@ pub(in crate::afxdp) fn session_delta_info(
         // describe one session's table differently.
         install_table_domain: delta.decision.install_table_domain,
         install_table_check: delta.decision.install_table_check,
+        // #9752: the purge-retirement marker, exactly as on the binary close
+        // frame's trailing byte. Only meaningful on Close deltas; opens carry
+        // false (the emit paths never set it there).
+        purge_retirement: delta.purge_retirement,
     }
 }
 
@@ -356,6 +369,27 @@ pub(super) fn flush_session_deltas(
     // worker-loop wait stays ~1 budget regardless of the owned-session count K.
     let mut event_stream_out_of_sync = *worker_lossless_wedged;
     for delta in deltas {
+        // #9752: a purge-retirement close is conditional on the table STILL
+        // being unresolvable when the drain runs. The walk removed the entry
+        // under a rotated view, but the delta sits in the ring until the
+        // flush — and a table re-added in between (plus a reinstall the close
+        // predates) must not be destroyed by a stale close: that would delete
+        // the NEW shared authority, its BPF aliases, and (for the ambiguous
+        // companion the purge preserved) a live session. Re-check the ONE
+        // classifier against drain-current forwarding and drop the whole
+        // delta — mirror, event-stream, RPC, recent, and local consumers —
+        // when the session is valid again. Ordinary closes skip the predicate
+        // entirely (flag check first: one branch, no behavior change).
+        if delta.kind == SessionDeltaKind::Close
+            && delta.purge_retirement
+            && !super::session_glue::install_table_purge_predicate(
+                forwarding,
+                &delta.key,
+                &delta.decision,
+            )
+        {
+            continue;
+        }
         let info = session_delta_info(ident, delta, zone_id_to_name);
         // #2669: per-binding RPC fallback push is the ONLY binding-dependent
         // step. Skipped when no binding exists; every consumer below is

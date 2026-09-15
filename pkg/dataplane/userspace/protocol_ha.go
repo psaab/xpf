@@ -202,7 +202,7 @@ type SessionSyncRequest struct {
 	// imports exactly as before. userspace-dp's SessionSyncRequest
 	// declares the same keys.
 	InstallTableDomain uint32 `json:"install_table_domain,omitempty"`
-	InstallTableCheck uint32 `json:"install_table_check,omitempty"`
+	InstallTableCheck  uint32 `json:"install_table_check,omitempty"`
 }
 
 // SessionDeltaInfo is the HA session-open/close delta as it reaches this
@@ -373,6 +373,14 @@ type SessionDeltaInfo struct {
 	// A close-state "update" delta carries the session's new class. An open
 	// carries its current class, so a bulk resync can restore a dropped update.
 	TCPCloseClass uint8 `json:"tcp_close_class,omitempty"`
+	// PurgeRetirement (#9752): this Close retires exactly its key — the
+	// sender already decided the pair (fenced removal, linked or deliberately
+	// preserved companion, conditional worker delete). Every downstream
+	// retraction (mirror, cluster delete, helper import) must act
+	// forward-only and skip companion deletes. Carried as the trailing byte
+	// on the binary close frame; false (or absent on old helpers) keeps the
+	// historical derive-and-retract behavior.
+	PurgeRetirement bool `json:"purge_retirement,omitempty"`
 	// InstallTableDomain (#9752): the session's installing route-table domain
 	// id (0 = default table), carried as the trailing u32 pair after
 	// TCPCloseClass on the binary frame. Carried so a peer-synced PBR session
@@ -380,7 +388,5 @@ type SessionDeltaInfo struct {
 	// Carried opaquely; Go never decodes it. 0 on an old helper (length-skip)
 	// imports default-table behavior, the pre-#9752 behavior per direction.
 	InstallTableDomain uint32 `json:"install_table_domain,omitempty"`
-	// InstallTableCheck (#9752): owner check for InstallTableDomain (high 32
-	// of the FNV-64). 0 iff the domain is 0. Same upgrade semantics.
-	InstallTableCheck uint32 `json:"install_table_check,omitempty"`
+	InstallTableCheck  uint32 `json:"install_table_check,omitempty"`
 }

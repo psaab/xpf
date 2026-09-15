@@ -328,12 +328,12 @@ impl EventFrame {
             seq,
         }
     }
-
     /// Encode a SessionClose (type 2) frame -- minimal payload.
     /// #919/#922: extended with ingress_zone_id + egress_zone_id after the
     /// flags byte. #3075: widened those two fields from u8 to u16 LE so a stable
     /// name-hash zone id > 255 round-trips. They are TRAILING fields, so the Go
     /// decoder length-gates them (a short frame degrades to "no zone ids").
+    /// #9752: trailing purge-retirement marker byte (length-gated likewise).
     pub(crate) fn encode_session_close(
         seq: u64,
         key: &SessionKey,
@@ -341,6 +341,7 @@ impl EventFrame {
         close_flags: u8,
         ingress_zone_id: u16,
         egress_zone_id: u16,
+        purge_retirement: bool,
     ) -> Self {
         let mut buf = [0u8; 256];
         let mut pos = FRAME_HEADER_SIZE;
@@ -402,6 +403,16 @@ impl EventFrame {
         buf[pos..pos + 4]
             .copy_from_slice(&crate::session::routing_domain_to_wire(key.routing_domain).to_le_bytes());
         pos += 4;
+
+        // #9752: purge-retirement marker (u8: 0/1), trailing and length-gated
+        // after the routing domain. A close that retires exactly its key must
+        // not make the peer retract companions the purge deliberately
+        // preserved; the marker tells every downstream retraction (Go mirror,
+        // cluster delete, helper import) to act forward-only. An old Go
+        // decoder length-skips this byte and retracts with companions, which
+        // is what it did before the marker existed.
+        buf[pos] = u8::from(purge_retirement);
+        pos += 1;
 
         let payload_len = (pos - FRAME_HEADER_SIZE) as u32;
         write_header(&mut buf, payload_len, MSG_SESSION_CLOSE, seq);

@@ -181,6 +181,13 @@ func (s *SessionSync) stampInstallGenV4(key dataplane.SessionKey, val *dataplane
 		s.closeClassSentV4 = make(map[dataplane.SessionKey]sentCloseClass)
 	}
 	stampCloseClassLocked(s.closeClassSentV4, key, val.SessionID, &val.TCPCloseClass)
+	// #9752: keep this frame from regressing the installing-table identity
+	// already sent for the same incarnation (a mirror-sourced resend carries
+	// (0,0): the BPF mirror has no slot for sync-only fields). Same lock.
+	if s.installTableSentV4 == nil {
+		s.installTableSentV4 = make(map[dataplane.SessionKey]sentInstallTable)
+	}
+	stampInstallTableLocked(s.installTableSentV4, key, val.SessionID, &val.InstallTableDomain, &val.InstallTableCheck)
 	s.genSentMu.Unlock()
 }
 
@@ -208,6 +215,11 @@ func (s *SessionSync) stampInstallGenV6(key dataplane.SessionKeyV6, val *datapla
 		s.closeClassSentV6 = make(map[dataplane.SessionKeyV6]sentCloseClass)
 	}
 	stampCloseClassLocked(s.closeClassSentV6, key, val.SessionID, &val.TCPCloseClass)
+	// #9752: v6 twin of the installing-table memo above.
+	if s.installTableSentV6 == nil {
+		s.installTableSentV6 = make(map[dataplane.SessionKeyV6]sentInstallTable)
+	}
+	stampInstallTableLocked(s.installTableSentV6, key, val.SessionID, &val.InstallTableDomain, &val.InstallTableCheck)
 	s.genSentMu.Unlock()
 }
 
@@ -247,6 +259,8 @@ func (s *SessionSync) takeDeleteGenV4(key dataplane.SessionKey) uint64 {
 	// #9412: the incarnation is being deleted; forget its close class. Before the
 	// early return, so a key with no generation stamp is still evicted.
 	delete(s.closeClassSentV4, key)
+	// #9752: same for its installing-table identity.
+	delete(s.installTableSentV4, key)
 	if _, ok := s.genSentV4[key]; !ok {
 		if s.genSentOverflowV4 {
 			// #9719: the stamp map has overflowed in this process, so this key may
@@ -267,6 +281,8 @@ func (s *SessionSync) takeDeleteGenV6(key dataplane.SessionKeyV6) uint64 {
 	// #9412: the incarnation is being deleted; forget its close class. Before the
 	// early return, so a key with no generation stamp is still evicted.
 	delete(s.closeClassSentV6, key)
+	// #9752: same for its installing-table identity.
+	delete(s.installTableSentV6, key)
 	if _, ok := s.genSentV6[key]; !ok {
 		if s.genSentOverflowV6 {
 			return s.nextInstallGen() // #9719: see takeDeleteGenV4.
@@ -661,7 +677,7 @@ func (s *SessionSync) configEpochStale(epoch uint64) bool {
 // re-sync of this key is admitted rather than refused as stale.
 func (s *SessionSync) rollBackStaleConfigInstallV4(key dataplane.SessionKey, epoch uint64) {
 	s.stats.SessionsStaleConfigIgnored.Add(1)
-	if err := s.sessions.DeleteWithCompanionsV4(key, dataplane.DeleteReasonClusterStale); err != nil {
+	if err := s.sessions.DeleteWithCompanionsV4(key, dataplane.DeleteReasonClusterStale, false); err != nil {
 		slog.Warn("cluster sync: could not roll back a v4 install whose config epoch went stale during the dataplane write — a stale permit may survive until the next config apply",
 			"session_config_epoch", epoch, "applied_config_gen", s.lastAppliedConfigGen.Load(), "err", err)
 		return
@@ -675,7 +691,7 @@ func (s *SessionSync) rollBackStaleConfigInstallV4(key dataplane.SessionKey, epo
 // the write instead of being serialized with it.
 func (s *SessionSync) rollBackStaleConfigInstallV6(key dataplane.SessionKeyV6, epoch uint64) {
 	s.stats.SessionsStaleConfigIgnored.Add(1)
-	if err := s.sessions.DeleteWithCompanionsV6(key, dataplane.DeleteReasonClusterStale); err != nil {
+	if err := s.sessions.DeleteWithCompanionsV6(key, dataplane.DeleteReasonClusterStale, false); err != nil {
 		slog.Warn("cluster sync: could not roll back a v6 install whose config epoch went stale during the dataplane write — a stale permit may survive until the next config apply",
 			"session_config_epoch", epoch, "applied_config_gen", s.lastAppliedConfigGen.Load(), "err", err)
 		return
@@ -785,7 +801,7 @@ func (s *SessionSync) installClusterSyncedV6(key dataplane.SessionKeyV6, val dat
 	}
 }
 
-func (s *SessionSync) deleteClusterSyncedV4(key dataplane.SessionKey, deleteGen uint64) {
+func (s *SessionSync) deleteClusterSyncedV4(key dataplane.SessionKey, deleteGen uint64, forwardOnly bool) {
 	if s.sessions == nil {
 		return
 	}
@@ -799,13 +815,13 @@ func (s *SessionSync) deleteClusterSyncedV4(key dataplane.SessionKey, deleteGen 
 			"delete_gen", deleteGen)
 		return
 	}
-	if err := s.sessions.DeleteWithCompanionsV4(key, dataplane.DeleteReasonClusterStale); err != nil {
+	if err := s.sessions.DeleteWithCompanionsV4(key, dataplane.DeleteReasonClusterStale, forwardOnly); err != nil {
 		s.stats.Errors.Add(1)
 		slog.Warn("cluster sync: failed to delete v4 session", "err", err)
 	}
 }
 
-func (s *SessionSync) deleteClusterSyncedV6(key dataplane.SessionKeyV6, deleteGen uint64) {
+func (s *SessionSync) deleteClusterSyncedV6(key dataplane.SessionKeyV6, deleteGen uint64, forwardOnly bool) {
 	if s.sessions == nil {
 		return
 	}
@@ -818,7 +834,7 @@ func (s *SessionSync) deleteClusterSyncedV6(key dataplane.SessionKeyV6, deleteGe
 			"delete_gen", deleteGen)
 		return
 	}
-	if err := s.sessions.DeleteWithCompanionsV6(key, dataplane.DeleteReasonClusterStale); err != nil {
+	if err := s.sessions.DeleteWithCompanionsV6(key, dataplane.DeleteReasonClusterStale, forwardOnly); err != nil {
 		s.stats.Errors.Add(1)
 		slog.Warn("cluster sync: failed to delete v6 session", "err", err)
 	}

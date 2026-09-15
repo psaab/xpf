@@ -1450,6 +1450,15 @@ pub(crate) struct SessionDeltaInfo {
     /// FNV-64). 0 iff the domain is 0. Same upgrade semantics as the domain.
     #[serde(rename = "install_table_check", default)]
     pub install_table_check: u32,
+    /// #9752: this Close retires exactly its key (see
+    /// `SessionDelta::purge_retirement`). The drain-fallback leg must convey
+    /// it exactly like the binary close frame's marker byte, or a fallback
+    /// close would retract companions the purge preserved. Additive.
+    ///
+    /// The rename MUST match the Go struct tag
+    /// (`pkg/dataplane/userspace/protocol_ha.go`, `SessionDeltaInfo`).
+    #[serde(rename = "purge_retirement", default)]
+    pub purge_retirement: bool,
 }
 
 

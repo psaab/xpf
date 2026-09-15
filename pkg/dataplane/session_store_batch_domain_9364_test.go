@@ -68,7 +68,7 @@ func TestDeleteBatchKnownCarriesTheRoutingDomain9364(t *testing.T) {
 		},
 	}}
 
-	if _, err := store.DeleteBatchKnownV4(entries, DeleteReasonGCExpired); err != nil {
+	if _, err := store.DeleteBatchKnownV4(entries, DeleteReasonGCExpired, false); err != nil {
 		t.Fatalf("DeleteBatchKnownV4: %v", err)
 	}
 
@@ -106,7 +106,7 @@ func TestDeleteBatchKnownDefaultInstanceStaysDomainZero9364(t *testing.T) {
 	store := dataPlaneSessionStore{dp: dp}
 
 	entries := []SessionEntryV4{{Key: key9364(1234), Value: SessionValue{}}}
-	if _, err := store.DeleteBatchKnownV4(entries, DeleteReasonGCExpired); err != nil {
+	if _, err := store.DeleteBatchKnownV4(entries, DeleteReasonGCExpired, false); err != nil {
 		t.Fatalf("DeleteBatchKnownV4: %v", err)
 	}
 	if len(dp.scopedV4) != 1 {
@@ -133,7 +133,7 @@ func TestDeleteBatchKnownCarriesTheRoutingDomainV6_9364(t *testing.T) {
 		Value: SessionValueV6{RoutingDomain: tenant, ReverseKey: rev},
 	}}
 
-	if _, err := store.DeleteBatchKnownV6(entries, DeleteReasonGCExpired); err != nil {
+	if _, err := store.DeleteBatchKnownV6(entries, DeleteReasonGCExpired, false); err != nil {
 		t.Fatalf("DeleteBatchKnownV6: %v", err)
 	}
 	if len(dp.scopedV6) != 2 {
@@ -171,7 +171,7 @@ func TestDataplaneWithoutTheCapabilityStillDeletesBare9364(t *testing.T) {
 	store := dataPlaneSessionStore{dp: dp}
 
 	entries := []SessionEntryV4{{Key: key9364(1234), Value: SessionValue{RoutingDomain: 100007}}}
-	deleted, err := store.DeleteBatchKnownV4(entries, DeleteReasonGCExpired)
+	deleted, err := store.DeleteBatchKnownV4(entries, DeleteReasonGCExpired, false)
 	if err != nil {
 		t.Fatalf("DeleteBatchKnownV4: %v", err)
 	}

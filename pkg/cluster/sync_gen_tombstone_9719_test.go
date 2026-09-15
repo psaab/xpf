@@ -50,7 +50,7 @@ func TestTombstoneChurnDoesNotStarveANewLiveKey_9719(t *testing.T) {
 	}
 
 	// A delete older than that install, reordered in, must be refused.
-	ss.deleteClusterSyncedV4(newKey, next+5)
+	ss.deleteClusterSyncedV4(newKey, next+5, false)
 	if _, ok := dp.v4sessions[newKey]; !ok {
 		t.Fatalf("#9719: after %d closed sessions with no bulk, a delete OLDER than the new key's install "+
 			"removed it. The generation map was full of tombstones, so the new key's generation was never "+

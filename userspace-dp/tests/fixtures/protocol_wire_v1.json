@@ -1153,6 +1153,7 @@
     "policy_counter_idx": 0,
     "policy_id": 0,
     "protocol": 0,
+    "purge_retirement": false,
     "queue_id": 0,
     "routing_domain": 0,
     "rt_flow_session_id": 0,

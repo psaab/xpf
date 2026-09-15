@@ -76,3 +76,49 @@ func TestTheInstallTableCrossesTheClusterWire9752(t *testing.T) {
 			"the peer decoded (%v,%v).", dom, chk)
 	}
 }
+
+// TestOldSenderResendKeepsTheRecordedStamp9752 composes the receive path end
+// to end: a stamped install lands, then an old sender's resend (same key,
+// higher generation, stamp absent => (0,0)) arrives as REAL wire bytes. The
+// generation guard must let it through (it outranks) while the keep-rule
+// preserves the recorded stamp.
+func TestOldSenderResendKeepsTheRecordedStamp9752(t *testing.T) {
+	fwd := rtflowKeyV4(41001)
+	ss, dp := oldSenderResendSync9752(t)
+	stamped := dataplane.SessionValue{SessionID: 77, Generation: 10,
+		InstallTableDomain: 525590, InstallTableCheck: 3318534811}
+	ss.installClusterSyncedV4(fwd, stamped)
+	if got, _ := dp.GetSessionV4(fwd); got.InstallTableDomain != 525590 {
+		t.Fatal("FIXTURE: stamped install did not land")
+	}
+	// Old sender's resend, as wire bytes: same incarnation, higher
+	// generation, no install-table tail.
+	resend := dataplane.SessionValue{SessionID: 77, Generation: 11}
+	wire := encodeSessionV4Payload(fwd, resend)
+	payload := wire[syncHeaderSize:]
+	truncated := payload[:len(payload)-8] // strip the (0,0) tail: pre-9752 shape
+	key, val, ok := decodeSessionV4Payload(truncated)
+	if !ok {
+		t.Fatal("FIXTURE: truncated resend did not decode")
+	}
+	ss.installClusterSyncedV4(key, val)
+	got, err := dp.GetSessionV4(fwd)
+	if err != nil {
+		t.Fatalf("resend removed the row: %v", err)
+	}
+	if got.InstallTableDomain != 525590 || got.InstallTableCheck != 3318534811 {
+		t.Fatalf("#9752: an old sender's stamp-less resend overwrote (%d,%d); mixed "+
+			"clusters would silently wrong-table the fixed node",
+			got.InstallTableDomain, got.InstallTableCheck)
+	}
+}
+
+func oldSenderResendSync9752(t *testing.T) (*SessionSync, *mockSweepDP) {
+	t.Helper()
+	dp := &mockSweepDP{
+		v4sessions:     map[dataplane.SessionKey]dataplane.SessionValue{},
+		sessionCounter: 1,
+	}
+	ss := NewSessionSync(":0", "10.0.0.2:4785", dp)
+	return ss, dp
+}

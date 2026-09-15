@@ -705,7 +705,7 @@ fn test_encode_session_open_zone_id_above_255() {
 // (type 2 HA delta) wire too.
 #[test]
 fn test_encode_session_close_zone_id_above_255() {
-    let frame = EventFrame::encode_session_close(7, &test_key_v4(), 1, 0, 300, 1000);
+    let frame = EventFrame::encode_session_close(7, &test_key_v4(), 1, 0, 300, 1000, false);
     let p = &frame.data[FRAME_HEADER_SIZE..];
     // [14:18] OwnerRGID i32, [18] Flags, [19:21]/[21:23] u16 zones (#3075).
     assert_eq!(u16::from_le_bytes([p[19], p[20]]), 300);
@@ -964,6 +964,7 @@ fn test_encode_session_close_v4() {
         FLAG_FABRIC_REDIRECT,
         TEST_TRUST_ZONE_ID,
         TEST_UNTRUST_ZONE_ID,
+        false,
     );
 
     assert_eq!(frame.data[4], MSG_SESSION_CLOSE);
@@ -1026,6 +1027,7 @@ fn test_encode_session_close_high_owner_rg_v4() {
         FLAG_FABRIC_REDIRECT,
         TEST_TRUST_ZONE_ID,
         TEST_UNTRUST_ZONE_ID,
+        false,
     );
     let p = &frame.data[FRAME_HEADER_SIZE..];
     // p[6..10] SrcIP, p[10..14] DstIP, p[14..18] OwnerRGID i32 LE.
@@ -1227,8 +1229,8 @@ fn session_open_frames_carry_the_routing_domain_7239() {
 fn session_close_frames_carry_the_routing_domain_7239() {
     let mut key = keyed_gre_key_7188(200);
     key.routing_domain = 100_007;
-    let frame = EventFrame::encode_session_close(7, &key, 1, 0, 300, 1000);
-    let end = frame.len as usize;
+    let frame = EventFrame::encode_session_close(7, &key, 1, 0, 300, 1000, false);
+    let end = frame.len as usize - 1; // #9752: discount the trailing purge-retirement marker byte; the reads below are end-relative
     assert_eq!(
         u32::from_le_bytes(frame.data[end - 4..end].try_into().unwrap()),
         100_007,
@@ -1242,8 +1244,8 @@ fn session_close_frames_carry_the_routing_domain_7239() {
 /// dropped the discriminator would retract the wrong tunnel.
 #[test]
 fn session_close_frames_carry_the_tunnel_discriminator_7188() {
-    let frame = EventFrame::encode_session_close(7, &keyed_gre_key_7188(200), 1, 0, 300, 1000);
-    let end = frame.len as usize;
+    let frame = EventFrame::encode_session_close(7, &keyed_gre_key_7188(200), 1, 0, 300, 1000, false);
+    let end = frame.len as usize - 1; // #9752: discount the trailing purge-retirement marker byte; the reads below are end-relative
     assert_eq!(
         u64::from_le_bytes(frame.data[end - 12..end - 4].try_into().unwrap()),
         crate::session::TunnelDiscriminator::Keyed(200).to_wire()
@@ -1315,10 +1317,16 @@ fn v6_session_open_frame_still_fits_the_buffer_7188() {
 #[test]
 fn test_encode_session_update_matches_the_shared_golden_9412() {
     let zones = test_zone_map();
+    // #9752: the golden fixture carries a REAL stamp, so the shared bytes pin
+    // the full tail (class + identity) and every downstream consumer test that
+    // reads this file exercises a stamped record, never a (0,0) one.
+    let mut decision = test_decision();
+    decision.install_table_domain = 525_590;
+    decision.install_table_check = 3_318_534_811;
     let frame = EventFrame::encode_session_update(
         42,
         &test_key_v4(),
-        &test_decision(),
+        &decision,
         &test_metadata(),
         &zones,
         false,
@@ -1329,9 +1337,14 @@ fn test_encode_session_update_matches_the_shared_golden_9412() {
     let bytes = &frame.data[..frame.len as usize];
     assert_eq!(bytes[bytes.len() - 9], 2, "#9412: the close class sits 8 bytes from the end (#9752 tail follows)");
     assert_eq!(
-        u64::from_le_bytes(bytes[bytes.len() - 8..].try_into().unwrap()),
-        0,
-        "#9752: the unstamped fixture decision encodes a (0,0) install-table tail"
+        u32::from_le_bytes(bytes[bytes.len() - 8..bytes.len() - 4].try_into().unwrap()),
+        525_590,
+        "#9752: the golden tail carries the domain"
+    );
+    assert_eq!(
+        u32::from_le_bytes(bytes[bytes.len() - 4..].try_into().unwrap()),
+        3_318_534_811,
+        "#9752: the golden tail carries the check"
     );
     let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
     let path = concat!(
@@ -1405,4 +1418,29 @@ fn session_frames_carry_the_install_table_identity_9752() {
         u64::from_le_bytes(frame.data[end - 8..end].try_into().unwrap()),
         0
     );
+}
+
+/// #9752: the close frame carries the purge-retirement marker as its final
+/// byte, so every downstream retraction (Go mirror, cluster delete, helper
+/// import) can act forward-only instead of deriving companions the purge
+/// deliberately preserved.
+#[test]
+fn session_close_frame_carries_the_purge_retirement_marker_9752() {
+    for (retire, want) in [(true, 1u8), (false, 0u8)] {
+        let frame = EventFrame::encode_session_close(
+            7,
+            &test_key_v4(),
+            1,
+            0,
+            300,
+            1000,
+            retire,
+        );
+        let end = frame.len as usize;
+        assert_eq!(
+            frame.data[end - 1],
+            want,
+            "retire={retire}: marker must be the frame's last byte"
+        );
+    }
 }
