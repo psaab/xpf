@@ -73,7 +73,7 @@ use snow::{Builder, HandshakeState};
 use std::mem::MaybeUninit;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::{Arc, RwLock};
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 /// Errors that can fail the egress path.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -420,17 +420,28 @@ impl PeerTable {
 /// The engine.
 pub(crate) struct WgEngine {
     /// Local X25519 private key. Held in the engine because every
-    /// slow-path handshake needs it. Wrapped in `Zeroizing` so the
-    /// 32 bytes of key material are wiped on engine drop — kernel
-    /// WG and wireguard-go both do this. #9918 F-142: snow 0.10.0 has NO
-    /// `zeroize` and NO `Drop` impl (verified against the locked registry
-    /// copy: no `zeroize` dep, no `impl Drop`) — the old comment claiming
-    /// "snow internally zeroizes its own copies" was false and is corrected
-    /// here. Transport keys are wiped by `WgSession::drop` (rekey-to-zero);
-    /// the short-lived handshake `HandshakeState`s (chaining keys,
-    /// ephemerals, seconds-lived pendings) have no wipe API and remain an
-    /// accepted residual: heap-scrape of seconds-lived keys, process-isolated,
-    /// with the long-lived secrets (engine key, PSKs, transport keys) wiped.
+    /// slow-path handshake needs it. Wrapped in `Zeroizing` so THIS copy's
+    /// 32 bytes of key material are wiped on engine drop — kernel WG and
+    /// wireguard-go both do this. #9918 F-142: snow 0.10.0 has NO `zeroize`
+    /// and NO `Drop` impl (verified against the locked registry copy: no
+    /// `zeroize` dep, no `impl Drop` anywhere in `src/`) — the old comment
+    /// claiming "snow internally zeroizes its own copies" was false and is
+    /// corrected here. snow COPIES our long-lived secrets into unwiped heap
+    /// objects on every handshake build: the static private key via
+    /// `Builder::local_private_key` → `(*s_dh).set(k)` (`builder.rs:232`,
+    /// owned by `HandshakeState.s`, `handshakestate.rs:35`) and the PSK via
+    /// `psk(2, …)`/`set_psk` into owned `psks: [Option<[u8; 32]>; 10]`
+    /// (`handshakestate.rs:42,145,457-464`). Those snow-held copies of the
+    /// static key and PSKs persist in freed heap with no wipe API and are an
+    /// ACCEPTED residual (heap-scrape of per-handshake heap, process-isolated;
+    /// only our own carriers — this `Zeroizing` key and the `PeerConfig`
+    /// `Zeroizing` PSKs — are wiped). Transport keys are best-effort wiped by
+    /// `WgSession::drop` (rekey-to-zero through snow's `set`, a plain
+    /// `copy_from_slice` in vendored code we cannot change — the compiler
+    /// could theoretically dead-store-eliminate it, so erasure is not
+    /// guaranteed; see the `Drop` doc). Chaining keys and ephemerals in
+    /// `HandshakeState` (seconds-lived pendings) likewise have no wipe API
+    /// and share the same accepted residual.
     local_private_key: Zeroizing<[u8; 32]>,
     /// Local X25519 static PUBLIC key, derived once at construction from
     /// `local_private_key` via `MontgomeryPoint::mul_base_clamped` (the
@@ -1600,7 +1611,7 @@ impl WgEngine {
         {
             Ok(n) => n,
             Err(_) => {
-                out[..plaintext_len_max].fill(0);
+                out[..plaintext_len_max].zeroize();
                 return Err(self.counters.count_decap_err(DecapError::CryptoFailed));
             }
         };

@@ -251,7 +251,7 @@ struct SecretState {
     generated_at_ns: Option<u64>,
     /// True iff `current` was filled from the OS CSPRNG. FALSE means
     /// `getrandom` failed and we hold NO usable secret — the cookie
-    /// mechanism fails CLOSED (`secrets()` returns `None`, under-load
+    /// mechanism fails CLOSED (`with_secrets()` returns `None`, under-load
     /// initiations are dropped) rather than ever using a predictable
     /// secret an attacker could reproduce (#4094 Copilot BUG-2). Never
     /// false on Linux (getrandom does not fail); defense-in-depth.
@@ -319,7 +319,7 @@ impl CookieChecker {
         let mut current = [0u8; 32];
         // FAIL CLOSED on a getrandom failure — never seed the cookie secret
         // from a predictable source (#4094 Copilot BUG-2). `secure == false`
-        // disables the mechanism (`secrets()` returns None → under-load
+        // disables the mechanism (`with_secrets()` returns None → under-load
         // initiations drop) until secure randomness becomes available.
         let secure = fill_random(&mut current);
         if !secure {

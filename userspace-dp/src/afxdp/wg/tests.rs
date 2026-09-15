@@ -1920,6 +1920,14 @@ mod framed_handshake {
         let mut plain = [0u8; 2048];
         let dec = b.try_decap(&wire[..enc.len], &mut plain).unwrap();
         assert_eq!(&plain[..dec.len], &inner[..]);
+        // And back: B's responder session confirmed on the inbound record
+        // above, so B→A egress now works too (the "both ways" half).
+        let reply = ipv4_packet(Ipv4Addr::new(10, 9, 9, 2), Ipv4Addr::new(10, 9, 9, 1));
+        let mut wire2 = [0u8; 2048];
+        let enc2 = b.try_encap(&a_pub, &reply, &mut wire2).unwrap();
+        let mut plain2 = [0u8; 2048];
+        let dec2 = a.try_decap(&wire2[..enc2.len], &mut plain2).unwrap();
+        assert_eq!(&plain2[..dec2.len], &reply[..]);
     }
     /// #9918 F-146: deterministic byte-exact handshake vectors (regression
     /// guard, NOT an independent interop proof). Drives the PRODUCTION
@@ -1928,7 +1936,8 @@ mod framed_handshake {
     /// a transcript regression (prologue deletion, pattern/PSK-index change,
     /// framing offset) fails here. Self-generated from believed-good code
     /// (S2 live interop passed historically); the independent proof remains
-    /// `test/incus/wg-interop.sh` (GATE, still owed in HARNESSES.unreached).
+    /// `test/incus/wg-interop.sh` (GATE, still owed in HARNESSES.unreached,
+    /// tracked by #10118 — this test MUST NOT be cited as the interop gate).
     /// Mutation check (required): flip `WG_PROTOCOL_ID_BYTES` in the pinned
     /// path and confirm RED.
     #[test]
