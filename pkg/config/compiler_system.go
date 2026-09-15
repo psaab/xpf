@@ -15,6 +15,17 @@ import (
 
 const sharedUMEMPhase0ArtifactMaxBytes = 16 << 20
 
+// syslogHostCoalesce9854 is the per-address merge record for the #9854
+// syslog host coalescing: the destination being built, which scalars have
+// been recorded (so an inherited value never overwrites an inline one),
+// and which exact facility pairs have been seen (flat-set parity dedupe).
+type syslogHostCoalesce9854 struct {
+	host    *SyslogHostConfig
+	srcSet  bool
+	portSet bool
+	seenFac map[SyslogFacility]struct{}
+}
+
 func compileSystem(node *Node, sys *SystemConfig, cfg *Config, opts compileOpts) error {
 	dpType, err := compileSystemDataplaneType(node)
 	if err != nil {
@@ -555,8 +566,78 @@ func compileSystem(node *Node, sys *SystemConfig, cfg *Config, opts compileOpts)
 			// #9414: every modifier the destination arms below recognize and
 			// SKIP is recorded at the skip and reported once the walk is done.
 			skipped := syslogSkippedModifiers9414{}
+			// #9854: FIND-OR-CREATE on the host address, not one struct per
+			// AST node. Two `host <addr>` statements naming one address —
+			// authored inline as hierarchical siblings, produced by group
+			// expansion beside an inline statement, or split across a
+			// flat-set bare leaf plus a body container (SetPath keeps the
+			// `host X` leaf and the `host X ...` container as separate
+			// nodes: the leaf branch at ast_edit.go:508-553 never matches
+			// the container find-or-create at ast_edit.go:720-738) —
+			// compiled as TWO destinations, so a message matching both was
+			// sent to the same address once per statement. Junos merges
+			// repeated blocks; zones (#4818) and BGP neighbors (#9192)
+			// already find-or-create for the same reason. The #8436 census
+			// skips this site (dupConservationSkipped8436), so the
+			// divergence was measured by hand.
+			//
+			// Precedence is apply-groups precedence, not position.
+			// Expansion appends adopted group nodes AFTER inline nodes, so
+			// a plain last-wins would let a group's scalar beat the inline
+			// block's explicit value — the opposite of Junos and of the
+			// repo's typed-merge rule (ast_groups.go:385-386, "inline
+			// OVERRIDES the group value"). The compile expands tagged, so
+			// each instance node carries its provenance: an INLINE scalar
+			// always records (last inline wins, matching flat-set `set`
+			// overwrite); an INHERITED scalar records only when nothing
+			// did yet (first group wins, matching the expansion's
+			// peer-override for scalar leaves). allow-duplicates is OR.
+			// Facilities UNION in first-seen order with exact-pair
+			// duplicates dropped — flat-set skips an exact duplicate leaf,
+			// so `set ... any any` twice is one pair and the hierarchical
+			// spelling must be too. First-seen host order is preserved:
+			// the append runs only when the address is first seen. A
+			// caller that pre-expands untagged and then compiles (no
+			// production path does — the compile expands a tagged clone)
+			// gets last-wins among same-address siblings.
+			//
+			// Provenance is read per INSTANCE (slInst.node), never per
+			// prop: packedBodyChildren synthesizes the prop nodes from the
+			// instance's Keys, and synthesized nodes carry no tags. A mixed
+			// container (a group braced body merged into an inline braced
+			// host by the expansion's container path) needs no per-child
+			// tags either — expansion drops a conflicting group scalar
+			// before it lands, so a group scalar present in the container
+			// has no inline rival by construction.
+			//
+			// One boundary is position-dependent, not precedence-ordered:
+			// group-vs-group across MIXED shapes. A packed earlier-group
+			// node is adopted as a sibling AFTER the inline container,
+			// while a braced later-group body merges INTO that container
+			// ahead of it — so the later group's value sorts first and the
+			// first-inherited-wins rule keeps it (measured: G1 packed 111
+			// + G2 braced 222 + inline merges to 222). Same-shape groups
+			// resolve correctly (packed+packed drops the later at
+			// expansion; braced+braced merges with the first winning).
+			// Recovering application order across the mixed shapes needs
+			// ordinal provenance, which InheritedFrom does not carry;
+			// until then the outcome is defined but positional.
+			// Deliberately unpinned: no test enshrines it.
+			hostByAddr := map[string]*syslogHostCoalesce9854{}
 			for _, slInst := range namedInstances(child.FindChildren("host")) {
-				host := &SyslogHostConfig{Address: slInst.name}
+				rec := hostByAddr[slInst.name]
+				if rec == nil {
+					rec = &syslogHostCoalesce9854{
+						host:    &SyslogHostConfig{Address: slInst.name},
+						seenFac: map[SyslogFacility]struct{}{},
+					}
+					hostByAddr[slInst.name] = rec
+					sys.Syslog.Hosts = append(sys.Syslog.Hosts, rec.host)
+				}
+				host := rec.host
+				// Per-instance provenance (see above): a whole adopted
+				// group node is inherited; an inline node is not.
+				inherited := slInst.node.InheritedFrom != ""
 				// #6684: `host 10.0.0.1 any any;` packs the whole body onto the
 				// host node's Keys, leaving Children empty — the host compiled
 				// with ZERO facilities and shipped nothing, silently.
@@ -584,11 +665,26 @@ func compileSystem(node *Node, sys *SystemConfig, cfg *Config, opts compileOpts)
 					case "allow-duplicates":
 						host.AllowDuplicates = true
 					case "source-address":
-						host.SourceAddress = nodeVal(prop)
+						// Guarded so a valueless repeat cannot wipe the
+						// address a previous instance set (#9854 merge).
+						// Behavior-preserving for a single instance: a
+						// fresh struct already holds "".
+						if v := nodeVal(prop); v != "" {
+							// Inline always records (last inline wins);
+							// inherited records only first (see above).
+							if !inherited || !rec.srcSet {
+								host.SourceAddress = v
+								rec.srcSet = true
+							}
+						}
 					case "port":
 						if v := nodeVal(prop); v != "" {
 							if n, err := strconv.Atoi(v); err == nil {
-								host.Port = n
+								// Same precedence as source-address.
+								if !inherited || !rec.portSet {
+									host.Port = n
+									rec.portSet = true
+								}
 							}
 						}
 					case "match", "match-strings", "structured-data",
@@ -602,14 +698,16 @@ func compileSystem(node *Node, sys *SystemConfig, cfg *Config, opts compileOpts)
 						skipped.note("host", prop.Name())
 					default:
 						if fac, sev, ok := syslogFacilitySeverity(prop); ok {
-							host.Facilities = append(host.Facilities, SyslogFacility{
-								Facility: fac,
-								Severity: sev,
-							})
+							pair := SyslogFacility{Facility: fac, Severity: sev}
+							// Exact-pair dedupe: flat-set skips a
+							// repeated leaf, so hier must too (#9854).
+							if _, dup := rec.seenFac[pair]; !dup {
+								rec.seenFac[pair] = struct{}{}
+								host.Facilities = append(host.Facilities, pair)
+							}
 						}
 					}
 				}
-				sys.Syslog.Hosts = append(sys.Syslog.Hosts, host)
 			}
 			for _, fileInst := range namedInstances(child.FindChildren("file")) {
 				file := &SyslogFileConfig{Name: fileInst.name}
