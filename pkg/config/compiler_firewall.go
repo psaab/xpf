@@ -6,6 +6,60 @@ import (
 	"strings"
 )
 
+// firewallAF is one address-family arm of a `firewall family` node: the AF
+// token plus the node whose direct `filter` children are that family's
+// filters.
+type firewallAF struct {
+	// af is the address-family token ("inet", "inet6", "any"). Empty only for
+	// a malformed persisted node with no keys at all (#4827); the live
+	// parser/SetPath paths structurally guarantee len(Keys) >= 1.
+	af string
+	// node is the AF container: the `family` node itself for the hierarchical
+	// `family inet { ... }` spelling, the `inet`/`inet6`/`any` child for the
+	// nested `family { inet { ... } }` spelling.
+	node *Node
+}
+
+// firewallAFNodes resolves the address-family arms of one `firewall family`
+// node across BOTH AST shapes (#9876 — the single walker for the
+// family-to-AF descent):
+//
+//   - hierarchical `family inet { ... }` → one arm: the family node itself,
+//     carrying the AF token in Keys[1];
+//   - nested `family { inet { ... } inet6 { ... } }` (braced, or a `load merge`
+//     fragment; flat `set` cannot produce it because `family` is compoundKey)
+//     → one arm per AF child node.
+//
+// Every firewall-filter walk — compileFirewall, the #3884 collision gate, the
+// `family any` match gate, and the #8480 valueless-`from` gate — descends
+// through this helper, so a gate and the compiler cannot disagree about which
+// shapes exist (#2419/#6526 doctrine). Before #9876 the descent was copy-pasted
+// at three compile sites while the #8480 gate walked `fam.Children` as the
+// filter level directly, so the nested shape compiled match-ANY terms the gate
+// never saw.
+func firewallAFNodes(familyNode *Node) []firewallAF {
+	if len(familyNode.Keys) >= 2 {
+		// Hierarchical: family inet { ... }
+		return []firewallAF{{af: familyNode.Keys[1], node: familyNode}}
+	}
+	// Nested shape: family { inet { ... } inet6 { ... } }
+	arms := make([]firewallAF, 0, len(familyNode.Children))
+	for _, child := range familyNode.Children {
+		// #4827: Name() safely returns "" for an empty Keys slice —
+		// child.Keys[0] would panic (index out of range) on a malformed
+		// persisted Node (e.g. a corrupted on-disk config-store JSON blob;
+		// pkg/configstore/db.go's plain json.Unmarshal has no Node validator).
+		// A bad persisted state must error on load, never panic (#1960
+		// fail-closed-on-load doctrine).
+		af := child.Name()
+		if len(child.Keys) >= 2 {
+			af = child.Keys[1]
+		}
+		arms = append(arms, firewallAF{af: af, node: child})
+	}
+	return arms
+}
+
 func compileFirewall(node *Node, fw *FirewallConfig) error {
 	if fw.FiltersInet == nil {
 		fw.FiltersInet = make(map[string]*FirewallFilter)
@@ -199,37 +253,9 @@ func compileFirewall(node *Node, fw *FirewallConfig) error {
 	}
 
 	for _, familyNode := range node.FindChildren("family") {
-		var afNodes []*Node
-		var afName string
-
-		if len(familyNode.Keys) >= 2 {
-			// Hierarchical: family inet { ... }
-			afName = familyNode.Keys[1]
-			afNodes = []*Node{familyNode}
-		} else {
-			// Set-command shape: family { inet { ... } inet6 { ... } }
-			for _, child := range familyNode.Children {
-				afNodes = append(afNodes, child)
-			}
-		}
-
-		for _, afNode := range afNodes {
-			af := afName
-			if af == "" {
-				// #4827: Name() safely returns "" for an empty Keys slice —
-				// afNode.Keys[0] would panic (index out of range) on a
-				// malformed persisted Node reaching this compile path (a
-				// corrupted on-disk config-store JSON blob;
-				// pkg/configstore/db.go's plain json.Unmarshal has no Node
-				// validator). The live parser/SetPath paths structurally
-				// guarantee len(Keys) >= 1, so this only ever bites a
-				// corrupted store, but a bad persisted state must error on
-				// load, never panic (#1960 fail-closed-on-load doctrine).
-				af = afNode.Name()
-				if len(afNode.Keys) >= 2 {
-					af = afNode.Keys[1]
-				}
-			}
+		for _, afArm := range firewallAFNodes(familyNode) {
+			afNode := afArm.node
+			af := afArm.af
 
 			// #4287: a Junos `family any` filter is protocol-independent —
 			// it matches BOTH IPv4 and IPv6. Folding it into FiltersInet
@@ -436,34 +462,9 @@ func validateFirewallFilterFamilyCollisionsAST(nodes []*Node, lenient bool) ([]s
 			continue
 		}
 		for _, familyNode := range fwNode.FindChildren("family") {
-			var afNodes []*Node
-			var afName string
-			if len(familyNode.Keys) >= 2 {
-				// Hierarchical: family inet { ... }
-				afName = familyNode.Keys[1]
-				afNodes = []*Node{familyNode}
-			} else {
-				// Set-command shape: family { inet { ... } inet6 { ... } }
-				afNodes = append(afNodes, familyNode.Children...)
-			}
-			for _, afNode := range afNodes {
-				af := afName
-				if af == "" {
-					// #4827: Name() safely returns "" for an empty Keys
-					// slice — afNode.Keys[0] would panic (index out of
-					// range) on a malformed persisted Node (e.g. a
-					// corrupted on-disk config-store JSON blob;
-					// pkg/configstore/db.go's plain json.Unmarshal has no
-					// Node validator). The live parser/SetPath paths
-					// structurally guarantee len(Keys) >= 1, so this only
-					// ever bites a corrupted store, but a bad persisted
-					// state must error on load, never panic (#1960
-					// fail-closed-on-load doctrine).
-					af = afNode.Name()
-					if len(afNode.Keys) >= 2 {
-						af = afNode.Keys[1]
-					}
-				}
+			for _, afArm := range firewallAFNodes(familyNode) {
+				afNode := afArm.node
+				af := afArm.af
 				if af == "inet6" {
 					// Its own dest map (FiltersInet6). It cannot collide with
 					// the FiltersInet pool, but #4287 dual-applies `family any`
@@ -700,34 +701,9 @@ func validateFirewallFilterFamilyAnyMatchesAST(nodes []*Node, lenient bool) ([]s
 			continue
 		}
 		for _, familyNode := range fwNode.FindChildren("family") {
-			var afNodes []*Node
-			var afName string
-			if len(familyNode.Keys) >= 2 {
-				// Hierarchical: family any { ... }
-				afName = familyNode.Keys[1]
-				afNodes = []*Node{familyNode}
-			} else {
-				// Set-command shape: family { any { ... } }
-				afNodes = append(afNodes, familyNode.Children...)
-			}
-			for _, afNode := range afNodes {
-				af := afName
-				if af == "" {
-					// #4827: Name() safely returns "" for an empty Keys
-					// slice — afNode.Keys[0] would panic (index out of
-					// range) on a malformed persisted Node (e.g. a
-					// corrupted on-disk config-store JSON blob;
-					// pkg/configstore/db.go's plain json.Unmarshal has no
-					// Node validator). The live parser/SetPath paths
-					// structurally guarantee len(Keys) >= 1, so this only
-					// ever bites a corrupted store, but a bad persisted
-					// state must error on load, never panic (#1960
-					// fail-closed-on-load doctrine).
-					af = afNode.Name()
-					if len(afNode.Keys) >= 2 {
-						af = afNode.Keys[1]
-					}
-				}
+			for _, afArm := range firewallAFNodes(familyNode) {
+				afNode := afArm.node
+				af := afArm.af
 				if af != "any" {
 					continue
 				}
