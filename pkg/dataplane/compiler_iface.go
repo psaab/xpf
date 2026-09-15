@@ -42,6 +42,24 @@ func SetProtectedInterfaceResolver(fn func() map[string]bool) {
 	protectedInterfaceResolver = fn
 }
 
+// stUnitCarriesVlanID9873 reports whether the named unit of a secure-tunnel-
+// spelled base interface is a CONFIGURED VLAN child (#9873). The lexical
+// fallback in resolveInterfaceRef consults it so a configured vlan-id is
+// honoured; a missing base, a missing unit, a zero vlan-id, and a non-numeric
+// suffix all answer false and keep the verbatim ref exactly as before.
+func stUnitCarriesVlanID9873(cfg *config.Config, base, unitSuffix string) bool {
+	ifCfg, ok := cfg.Interfaces.Interfaces[base]
+	if !ok || ifCfg == nil {
+		return false
+	}
+	unitNum, err := strconv.Atoi(unitSuffix)
+	if err != nil {
+		return false
+	}
+	unit := ifCfg.Units[unitNum]
+	return unit != nil && unit.VlanID != 0
+}
+
 // resolveInterfaceRef parses an interface reference like "enp6s0" or "enp6s0.100"
 // and returns the physical Linux name, config name, unit number, and VLAN ID.
 // For RETH interfaces, configName stays as "reth0" (for config lookups) while
@@ -99,14 +117,23 @@ func resolveInterfaceRef(ref string, cfg *config.Config) (physName string, confi
 	// an in-range st<N> unit that no VPN binds keeps the verbatim ref, which
 	// is what this returned before. (An in-range st<N> PHYSICAL interface is a
 	// separate, deliberate question — #6737 — and is deliberately unchanged
-	// here.)
+	// here. The one exception is an unbound unit whose configured stanza
+	// carries a vlan-id, which falls through so the tag is honoured — #9873.)
 	if len(parts) == 2 {
 		if dev, ok := cfg.SecureTunnelUnitNetdev(ref); ok {
 			physName = config.LinuxIfName(dev)
 			unitNum, _ = strconv.Atoi(parts[1])
 			return
 		}
-		if config.IsSecureTunnelIfName(configName) {
+		// #9873: an unbound unit whose configured stanza carries a vlan-id
+		// is a VLAN child, not a physical netdev — it falls through to the
+		// ordinary resolution below so the vlan-id is honoured and the
+		// parent (not the dotted ref) is what gets planned. Anything else
+		// keeps the verbatim ref: the unconfigured-base case this arm exists
+		// for, and the configured-but-untagged case #6729 and
+		// TestResolveInterfaceRefXFRMUnit pin. The bound arm above is
+		// untouched (#6691 order).
+		if config.IsSecureTunnelIfName(configName) && !stUnitCarriesVlanID9873(cfg, configName, parts[1]) {
 			physName = config.LinuxIfName(ref)
 			unitNum, _ = strconv.Atoi(parts[1])
 			return
