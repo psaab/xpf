@@ -2726,3 +2726,335 @@ fn a_zone_wildcard_prefix_off_does_not_withdraw_a_zone_scoped_translate_9159() {
         locals.len()
     );
 }
+
+// #9879 PIN — most-specific-wins across tiers, dataplane intentionally
+// UNCHANGED (HPC: the tiered hash buys O(1) DNAT lookup; the fix is the
+// commit-time gate in pkg/config, not a dataplane reordering). A BROADER `off`
+// exemption LOSES to a NARROWER later translate rule: the cross-tier `.or_else`
+// chain (destination.rs `lookup_with_counter_scoped`) probes exact
+// (proto,dst,port) -> wildcard-port -> PROTO_ANY -> prefix-LPM, and an `off`
+// short-circuits only the tiers probed AFTER it. Within ONE tier config order
+// still wins (same-tier off beats same-tier translate,
+// `dnat_off_exemption_short_circuits_identical_translate_rule`), and
+// translate-vs-translate specificity is unchanged
+// (`dnat_exact_port_beats_wildcard`). The prefix-tier losing shape is already
+// pinned as a premise by `a_broader_prefix_off_does_not_withdraw_a_narrower_translate_9159`
+// (a /24 off loses to a /26 translate); these two cells pin the port and
+// protocol tiers. Each also asserts the off still exempts the NON-overlapping
+// remainder (a partial shadow, not a total one).
+#[test]
+fn dnat_broad_off_loses_to_narrower_translate_port_tier_9879() {
+    let table = DnatTable::from_snapshots(
+        &[
+            // Broad exemption FIRST: same destination, TCP, wildcard port.
+            DestinationNATRuleSnapshot {
+                name: "exempt-any-port".to_string(),
+                destination_address: "203.0.113.10".to_string(),
+                destination_port: 0,
+                protocol: "tcp".to_string(),
+                off: true,
+                ..DestinationNATRuleSnapshot::default()
+            },
+            // Narrower translate LATER: same destination, TCP, exact port 80.
+            DestinationNATRuleSnapshot {
+                name: "web".to_string(),
+                destination_address: "203.0.113.10".to_string(),
+                destination_port: 80,
+                protocol: "tcp".to_string(),
+                pool_address: "192.168.1.10".to_string(),
+                pool_port: 8080,
+                ..DestinationNATRuleSnapshot::default()
+            },
+        ],
+        &crate::nat::NatCounterStore::default(),
+    );
+    // Port 80 hits the exact-port tier first: the later translate WINS and the
+    // "exempted" flow is translated (the #9879 fail-open the commit gate refuses).
+    assert_eq!(
+        table.lookup(
+            PROTO_TCP,
+            "198.51.100.1".parse().unwrap(),
+            "203.0.113.10".parse().unwrap(),
+            80,
+            "",
+        ),
+        Some(NatDecision {
+            rewrite_dst: Some("192.168.1.10".parse().unwrap()),
+            rewrite_dst_port: Some(8080),
+            ..NatDecision::default()
+        }),
+        "a narrower later translate beats a broader earlier off (most-specific-wins)"
+    );
+    // A non-overlapping port still reaches the wildcard-port off entry: exempt.
+    assert_eq!(
+        table.lookup(
+            PROTO_TCP,
+            "198.51.100.1".parse().unwrap(),
+            "203.0.113.10".parse().unwrap(),
+            443,
+            "",
+        ),
+        None,
+        "the broad off still exempts ports the narrower translate does not cover"
+    );
+}
+
+// #9879 PIN, protocol tier: an any-protocol off loses to a TCP-pinned later
+// translate for TCP flows, while still exempting every other protocol. See the
+// header on `dnat_broad_off_loses_to_narrower_translate_port_tier_9879`.
+#[test]
+fn dnat_broad_off_loses_to_narrower_translate_proto_tier_9879() {
+    let table = DnatTable::from_snapshots(
+        &[
+            // Broad exemption FIRST: destination only (any protocol, any port).
+            DestinationNATRuleSnapshot {
+                name: "exempt-any-proto".to_string(),
+                destination_address: "203.0.113.10".to_string(),
+                destination_port: 0,
+                protocol: String::new(),
+                off: true,
+                ..DestinationNATRuleSnapshot::default()
+            },
+            // Narrower translate LATER: TCP pinned, exact port 80.
+            DestinationNATRuleSnapshot {
+                name: "web".to_string(),
+                destination_address: "203.0.113.10".to_string(),
+                destination_port: 80,
+                protocol: "tcp".to_string(),
+                pool_address: "192.168.1.10".to_string(),
+                pool_port: 8080,
+                ..DestinationNATRuleSnapshot::default()
+            },
+        ],
+        &crate::nat::NatCounterStore::default(),
+    );
+    // TCP/80 probes exact, then wildcard-port, before the PROTO_ANY tier the
+    // off entry lives in: the translate wins.
+    assert_eq!(
+        table.lookup(
+            PROTO_TCP,
+            "198.51.100.1".parse().unwrap(),
+            "203.0.113.10".parse().unwrap(),
+            80,
+            "",
+        ),
+        Some(NatDecision {
+            rewrite_dst: Some("192.168.1.10".parse().unwrap()),
+            rewrite_dst_port: Some(8080),
+            ..NatDecision::default()
+        }),
+        "a protocol-pinned later translate beats an any-protocol earlier off"
+    );
+    // UDP never touches the TCP-keyed translate tiers and reaches the
+    // any-protocol off: exempt.
+    assert_eq!(
+        table.lookup(
+            PROTO_UDP,
+            "198.51.100.1".parse().unwrap(),
+            "203.0.113.10".parse().unwrap(),
+            53,
+            "",
+        ),
+        None,
+        "the any-protocol off still exempts protocols the translate does not pin"
+    );
+}
+
+// #9879 LOSS PROOF (GPT-2): a /24 prefix `off` LOSES to a HOST translate
+// inside it for the host's flows — every host tier precedes every prefix
+// tier. This is the dataplane disposition behind the commit gate's
+// prefix-tier reject: the witness address .50 is TRANSLATED despite the
+// exemption, while the off still exempts the rest of the /24.
+#[test]
+fn dnat_prefix_off_loses_to_host_translate_9879() {
+    let table = DnatTable::from_snapshots(
+        &[
+            DestinationNATRuleSnapshot {
+                name: "exempt-net".to_string(),
+                destination_prefix: "203.0.113.0/24".to_string(),
+                destination_port: 80,
+                protocol: "tcp".to_string(),
+                off: true,
+                ..DestinationNATRuleSnapshot::default()
+            },
+            DestinationNATRuleSnapshot {
+                name: "web".to_string(),
+                destination_address: "203.0.113.50".to_string(),
+                destination_port: 80,
+                protocol: "tcp".to_string(),
+                pool_address: "192.168.1.10".to_string(),
+                pool_port: 8080,
+                ..DestinationNATRuleSnapshot::default()
+            },
+        ],
+        &crate::nat::NatCounterStore::default(),
+    );
+    assert_eq!(
+        table.lookup(
+            PROTO_TCP,
+            "198.51.100.1".parse().unwrap(),
+            "203.0.113.50".parse().unwrap(),
+            80,
+            "",
+        ),
+        Some(NatDecision {
+            rewrite_dst: Some("192.168.1.10".parse().unwrap()),
+            rewrite_dst_port: Some(8080),
+            ..NatDecision::default()
+        }),
+        "host translate beats prefix off for the host's flows"
+    );
+    assert_eq!(
+        table.lookup(
+            PROTO_TCP,
+            "198.51.100.1".parse().unwrap(),
+            "203.0.113.51".parse().unwrap(),
+            80,
+            "",
+        ),
+        None,
+        "the prefix off still exempts addresses outside the translate host"
+    );
+}
+
+// #9879 HOLD PROOF (GPT-2): a multi-address exemption carrying BOTH a /24
+// prefix and its contained .50 host HOLDS for .50 against a same-host later
+// translate — the exemption's exact-host entry wins its tier by order, even
+// though the prefix cell alone looks weaker. The gate must not fire here.
+#[test]
+fn dnat_multi_address_off_holds_for_contained_host_9879() {
+    let table = DnatTable::from_snapshots(
+        &[
+            DestinationNATRuleSnapshot {
+                name: "exempt-net".to_string(),
+                destination_prefix: "203.0.113.0/24".to_string(),
+                destination_port: 80,
+                protocol: "tcp".to_string(),
+                off: true,
+                ..DestinationNATRuleSnapshot::default()
+            },
+            DestinationNATRuleSnapshot {
+                name: "exempt-net".to_string(),
+                destination_address: "203.0.113.50".to_string(),
+                destination_port: 80,
+                protocol: "tcp".to_string(),
+                off: true,
+                ..DestinationNATRuleSnapshot::default()
+            },
+            DestinationNATRuleSnapshot {
+                name: "web".to_string(),
+                destination_address: "203.0.113.50".to_string(),
+                destination_port: 80,
+                protocol: "tcp".to_string(),
+                pool_address: "192.168.1.10".to_string(),
+                pool_port: 8080,
+                ..DestinationNATRuleSnapshot::default()
+            },
+        ],
+        &crate::nat::NatCounterStore::default(),
+    );
+    assert_eq!(
+        table.lookup(
+            PROTO_TCP,
+            "198.51.100.1".parse().unwrap(),
+            "203.0.113.50".parse().unwrap(),
+            80,
+            "",
+        ),
+        None,
+        "the exemption's exact-host entry holds against the same-host translate"
+    );
+}
+
+// #9879 HOLD PROOF (parent-review 1a / SPARK-§6): a /24 exact-port `off`
+// HOLDS against a /26 wildcard-port translate — the exact-port bucket is
+// probed before the wildcard-port bucket, so prefix length never decides
+// across port tiers. The gate must not fire here.
+#[test]
+fn dnat_prefix_exact_off_holds_vs_prefix_wild_translate_9879() {
+    let table = DnatTable::from_snapshots(
+        &[
+            DestinationNATRuleSnapshot {
+                name: "exempt-net".to_string(),
+                destination_prefix: "203.0.113.0/24".to_string(),
+                destination_port: 80,
+                protocol: "tcp".to_string(),
+                off: true,
+                ..DestinationNATRuleSnapshot::default()
+            },
+            DestinationNATRuleSnapshot {
+                name: "narrow".to_string(),
+                destination_prefix: "203.0.113.64/26".to_string(),
+                destination_port: 0,
+                protocol: "tcp".to_string(),
+                pool_address: "192.168.1.10".to_string(),
+                ..DestinationNATRuleSnapshot::default()
+            },
+        ],
+        &crate::nat::NatCounterStore::default(),
+    );
+    assert_eq!(
+        table.lookup(
+            PROTO_TCP,
+            "198.51.100.1".parse().unwrap(),
+            "203.0.113.70".parse().unwrap(),
+            80,
+            "",
+        ),
+        None,
+        "exact-port off bucket precedes wildcard-port translate bucket"
+    );
+}
+
+// #9879 LOSS PROOF (parent-review 1b): an any-protocol HOST translate beats
+// a pinned-protocol PREFIX `off` — every host tier precedes every prefix
+// tier, so the protocol tier never saves the exemption. The gate must fire.
+#[test]
+fn dnat_host_any_translate_beats_prefix_pinned_off_9879() {
+    let table = DnatTable::from_snapshots(
+        &[
+            DestinationNATRuleSnapshot {
+                name: "exempt-net".to_string(),
+                destination_prefix: "203.0.113.0/24".to_string(),
+                destination_port: 0,
+                protocol: "tcp".to_string(),
+                off: true,
+                ..DestinationNATRuleSnapshot::default()
+            },
+            DestinationNATRuleSnapshot {
+                name: "anyhost".to_string(),
+                destination_address: "203.0.113.50".to_string(),
+                destination_port: 0,
+                protocol: String::new(),
+                pool_address: "192.168.1.10".to_string(),
+                ..DestinationNATRuleSnapshot::default()
+            },
+        ],
+        &crate::nat::NatCounterStore::default(),
+    );
+    assert_eq!(
+        table.lookup(
+            PROTO_TCP,
+            "198.51.100.1".parse().unwrap(),
+            "203.0.113.50".parse().unwrap(),
+            80,
+            "",
+        ),
+        Some(NatDecision {
+            rewrite_dst: Some("192.168.1.10".parse().unwrap()),
+            ..NatDecision::default()
+        }),
+        "host translate beats prefix off regardless of protocol tier"
+    );
+    assert_eq!(
+        table.lookup(
+            PROTO_TCP,
+            "198.51.100.1".parse().unwrap(),
+            "203.0.113.51".parse().unwrap(),
+            80,
+            "",
+        ),
+        None,
+        "the prefix off still exempts addresses outside the translate host"
+    );
+}
