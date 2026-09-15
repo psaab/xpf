@@ -4426,7 +4426,7 @@ carried STRUCTURALLY instead:
 |---|---|
 | `Node.KeysQuoted []bool` (`ast.go`) | per-key provenance; `nil` when nothing is quoted, so the persisted JSON is byte-identical for the majority of nodes |
 | `Parser.parseKeys` → `parseStatement` (`parser.go`) | hierarchical spelling; `parseKeys` already returned the token KINDS for the `inactive:` marker (#4348) |
-| `ParseSetVerbQuoted` → `ConfigTree.SetPathQuoted` (`parser.go`, `ast_edit.go`) | flat-set spelling; `Store.SetFromInputAs` / `applyEditLine` call these, so CLI, gRPC and REST all carry it |
+| `ParseSetVerbGrouped` → `ConfigTree.SetPathQuotedGrouped` (`parser.go`, `ast_edit.go`) | flat-set spelling; `Store.SetFromInputAs` / `applyEditLine` call these (unified on the grouped pair on #9881; the quote half rides along unchanged), so CLI, gRPC and REST all carry it |
 | `keyNeedsAuthoredQuote` (`ast.go`) | re-emits the authored quote on a NON-TERMINAL key so a serialize/re-parse cycle (HA config sync, `display set` replay, load merge, archive) does not launder it away |
 
 Read it with `Node.KeyQuoted(i)`; ask `Node.KeysHaveQuoteProvenance()` before
