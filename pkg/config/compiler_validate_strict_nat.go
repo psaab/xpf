@@ -4652,3 +4652,61 @@ func natOverlapMessage(owners []natAllocOwner, instA int, memberA string, instB 
 			"owns the address (#5144)",
 		a.desc, memberA, b.desc, memberB)
 }
+
+// validateDNATOffShadowStrict (#9879) hard-rejects a destination-NAT rule-set
+// in which a broad `then destination-nat off` exemption is configured BEFORE
+// a narrower later translate rule that re-enters its match space.
+//
+// The dataplane resolves DNAT by most-specific match — exact (protocol,
+// destination, port), then wildcard port, then PROTO_ANY, then prefix LPM —
+// not by rule order, and an `off` short-circuits only the tiers probed AFTER
+// it (userspace-dp/src/nat/destination.rs, MOST-SPECIFIC-WINS). So the
+// overlapping subspace is TRANSLATED despite the exemption: a fail-open
+// inversion of the author's Junos first-match intent (typically a management
+// or hairpin exclusion), previously committed with no warning.
+//
+// The detector is DNATOffShadowReason (nat_off_shadow_9879.go), shared with
+// the show annotation so the gate and the surface cannot disagree; its doc
+// states the deliberately narrow scope (same rule-set, literal addresses, no
+// `match application`) and the tier model. Rejecting is safe: every intent
+// expressible as off-first is expressible as translate-first — which agrees
+// under BOTH Junos first-match and xpf most-specific-wins — so the reject only
+// forces the unambiguous ordering.
+//
+// Strict on commit / commit-check (hard reject naming the rule-set, the
+// shadowed `off` rule, and the re-entering translate rule); the caller
+// downgrades to a warning on the tolerant load / peer-sync path (#1960
+// no-brick). Rule-sets are walked in sorted name order, rules in configured
+// order, for a deterministic first-reported offender.
+func validateDNATOffShadowStrict(cfg *Config) error {
+	if cfg == nil || cfg.Security.NAT.Destination == nil {
+		return nil
+	}
+	dnat := cfg.Security.NAT.Destination
+	ruleSets := append([]*NATRuleSet(nil), dnat.RuleSets...)
+	sort.Slice(ruleSets, func(i, j int) bool {
+		if ruleSets[i] == nil || ruleSets[j] == nil {
+			return ruleSets[j] == nil
+		}
+		return ruleSets[i].Name < ruleSets[j].Name
+	})
+	for _, rs := range ruleSets {
+		if rs == nil {
+			continue
+		}
+		for _, rule := range rs.Rules {
+			if rule == nil || rule.Then.Type != NATDestination || !rule.Then.Off {
+				continue
+			}
+			if reason := DNATOffShadowReason(dnat, rs, rule); reason != "" {
+				return fmt.Errorf("security nat destination rule-set %q rule %q "+
+					"(`then destination-nat off`) is partially shadowed: %s; move "+
+					"the narrower translate rule before the `off` rule when the "+
+					"overlap should translate, or narrow the translate rule to "+
+					"exclude the exempted space when it should stay exempt",
+					rs.Name, rule.Name, reason)
+			}
+		}
+	}
+	return nil
+}
