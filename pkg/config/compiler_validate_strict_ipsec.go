@@ -7,28 +7,32 @@ import (
 )
 
 // validateIPsecPolicyProposalReferencesStrict hard-rejects an IPsec
-// (Phase 2) policy whose `proposals` reference does not resolve to a
-// defined IPsec proposal (#2073). resolveESPSettings (pkg/ipsec/ike.go)
-// resolves the policy's proposal ref, or falls back to the policy name
-// when no `proposals` leaf is given. When that reference dangles, the
-// renderer would otherwise fall through to `esp_proposals = default`,
-// silently substituting the operator's entire Phase-2 proposal set —
-// including any configured perfect-forward-secrecy DH group — with the
-// strongSwan default (which carries no required modp term). That is the
-// same silent-crypto-weakening class ValidateDHGroup closes for DH-group
-// leaves; this validator closes it for the policy→proposal cross-
-// reference.
+// (Phase 2) reference chain that cannot resolve to a real proposal.
 //
-// Rejected unconditionally (not only when PFSGroup > 0): a dangling
-// reference substitutes the whole proposal, not just PFS. Mirrors
-// validatePolicySchedulerReferencesStrict, which rejects any undefined
-// scheduler reference.
+// It covers two links (#2073 plus the #9919 F-090 half that had no gate):
+//   - policy→proposal: a policy whose `proposals` reference does not resolve
+//     to a defined IPsec proposal (or, with no `proposals` leaf, no proposal
+//     named after the policy itself);
+//   - vpn→policy: a VPN whose `ipsec-policy` names neither a defined
+//     ipsec-policy nor (legacy form) a defined ESP proposal directly.
+//
+// A dangling chain used to render a substituted suite — first the strongSwan
+// `default` (#2073), then a conservative fixed `aes256-sha256` fallback
+// (#4117) — silently replacing the operator's crypto intent with a suite
+// they never authored. Since #9919 the renderer SKIPS such a VPN (like the
+// IKE dangling chain, #2270) rather than fabricate (the #4298 principle), so
+// this gate is what fails the commit loudly up front.
+//
+// An EMPTY vpn.IPsecPolicy is the intentional no-policy case (strongSwan's
+// default suite is the operator's explicit choice, nothing dangles) and is
+// accepted, mirroring the IKE validator's exemption.
 //
 // On the tolerant load / peer-sync paths the call site downgrades this
 // to a warning (opts.lenientIPsecPolicyProposalRef) so an already-
-// persisted or peer-synced config still boots; the render-path safety
-// net in resolveESPSettings preserves the configured PFS group on that
-// boot rather than dropping it.
+// persisted or peer-synced config still boots; the render-path belt in
+// pkg/ipsec (resolveESPSettings -> errESPChainUnresolved -> renderConfig
+// skips the VPN) keeps the bad tunnel out of the generated config rather
+// than emitting a fabricated suite.
 func validateIPsecPolicyProposalReferencesStrict(cfg *Config) error {
 	if cfg == nil {
 		return nil
@@ -65,18 +69,46 @@ func validateIPsecPolicyProposalReferencesStrict(cfg *Config) error {
 			}
 			if explicitRef {
 				return fmt.Errorf("ipsec policy %q references undefined ipsec proposal %q "+
-					"(the configured proposal set, including any perfect-forward-secrecy "+
-					"group, would be silently dropped to the strongSwan default)",
-					pol.Name, propRef)
+					"(including any perfect-forward-secrecy group; the VPN would be "+
+					"skipped at render rather than negotiate its configured crypto — "+
+					"fix the reference)", pol.Name, propRef)
 			}
 			// No explicit `proposals` leaf was given, so do not blame a
 			// phantom proposal named after the policy — describe the actual
 			// gap instead.
 			return fmt.Errorf("ipsec policy %q has no resolvable ipsec proposal "+
-				"(no `proposals` reference and no proposal named %q); the configured "+
-				"perfect-forward-secrecy group would be silently dropped — define a "+
+				"(no `proposals` reference and no proposal named %q) — define a "+
 				"proposal or reference one", pol.Name, pol.Name)
 		}
+	}
+	// #9919 F-090: the vpn→policy link. A VPN whose `ipsec-policy` names
+	// neither a defined ipsec-policy nor (legacy form) a defined ESP
+	// proposal directly has no crypto to render; the renderer skips it
+	// rather than fabricate a suite. Empty (no policy authored) is the
+	// intentional-default case and is accepted. Appended after the
+	// policy→proposal loop so a doubly-broken config reports the policy
+	// link first, deterministically (sorted VPN names).
+	vpns := cfg.Security.IPsec.VPNs
+	vpnNames := make([]string, 0, len(vpns))
+	for name := range vpns {
+		vpnNames = append(vpnNames, name)
+	}
+	sort.Strings(vpnNames)
+	for _, name := range vpnNames {
+		vpn := vpns[name]
+		if vpn == nil || vpn.IPsecPolicy == "" {
+			continue
+		}
+		if _, ok := policies[vpn.IPsecPolicy]; ok {
+			continue
+		}
+		if _, ok := proposals[vpn.IPsecPolicy]; ok {
+			continue
+		}
+		return fmt.Errorf("ipsec vpn %q references undefined ipsec-policy %q "+
+			"(neither a defined ipsec-policy nor a proposal of that name; the "+
+			"VPN would be skipped at render rather than negotiate a fabricated "+
+			"suite — fix the reference)", name, vpn.IPsecPolicy)
 	}
 	return nil
 }
@@ -478,4 +510,98 @@ func validateIPsecProposalLifetimesStrict(cfg *Config) error {
 	sort.Strings(bad)
 	return fmt.Errorf("%s: lifetime-seconds must be a positive integer (at least 1)",
 		strings.Join(bad, "; "))
+}
+
+// validateIPsecDHGroupsStrict rejects a `dh-group` (IKE Phase-1 proposal,
+// IPsec Phase-2 proposal) or `perfect-forward-secrecy keys` (IPsec policy
+// PFS) value that was PRESENT in the input but is not a usable spellable
+// group: an unparseable token ("nonsense"), a present-but-empty leaf, or a
+// numeric group the renderer cannot spell (99, the real-but-omitted 17/18,
+// 0, negatives).
+//
+// #9919 F-161, the #9008 shape for DH: every leaf carries
+// validator: ValidateDHGroup in setSchema, but SchemaValidate runs ONLY from
+// compileTreeStrict. On the tolerant path (Store.Load, HA SyncApply) the
+// compiler dropped the token without a trace — DHGroup stayed 0 and the
+// modp term silently vanished from the negotiated proposal (IKE fell back
+// to charon's default group, ESP lost PFS) — or stored an unspellable
+// numeric that rendered an empty keyword charon refuses, with diagnostics
+// pointing at charon rather than at the value.
+//
+// The compiler now stores only spellable numerics and records anything else
+// in DHGroupInvalidSpec / PFSGroupInvalidSpec (classifyDHGroup), which this
+// gate reads. The numeric spellability arm below is defense-in-depth: a
+// compiled numeric is always spellable-or-absent, but the check is cheap
+// and keeps the gate total over its input.
+//
+// Wired through opts.lenientIPsecDHGroup, so the tolerant path WARNS where
+// the strict path rejects (#1960: Store.Load must not gain a new rejection).
+// The renderer (pkg/ipsec) separately SKIPS any VPN whose EFFECTIVE group
+// is bad, so a warned config never negotiates weakened crypto.
+func validateIPsecDHGroupsStrict(cfg *Config) error {
+	if cfg == nil {
+		return nil
+	}
+	var bad []string
+	for name, p := range cfg.Security.IPsec.IKEProposals {
+		if p == nil {
+			continue
+		}
+		if p.DHGroupInvalidSpec != "" {
+			bad = append(bad, fmt.Sprintf(
+				"security ike proposal %s dh-group %q is not a usable Diffie-Hellman group",
+				name, p.DHGroupInvalidSpec))
+			continue
+		}
+		if p.DHGroup != 0 {
+			if _, ok := DHGroupKeyword(p.DHGroup); !ok {
+				bad = append(bad, fmt.Sprintf(
+					"security ike proposal %s dh-group %d is not a supported Diffie-Hellman group (accepted: %v)",
+					name, p.DHGroup, SupportedDHGroups()))
+			}
+		}
+	}
+	for name, p := range cfg.Security.IPsec.Proposals {
+		if p == nil {
+			continue
+		}
+		if p.DHGroupInvalidSpec != "" {
+			bad = append(bad, fmt.Sprintf(
+				"security ipsec proposal %s dh-group %q is not a usable Diffie-Hellman group",
+				name, p.DHGroupInvalidSpec))
+			continue
+		}
+		if p.DHGroup != 0 {
+			if _, ok := DHGroupKeyword(p.DHGroup); !ok {
+				bad = append(bad, fmt.Sprintf(
+					"security ipsec proposal %s dh-group %d is not a supported Diffie-Hellman group (accepted: %v)",
+					name, p.DHGroup, SupportedDHGroups()))
+			}
+		}
+	}
+	for name, pol := range cfg.Security.IPsec.Policies {
+		if pol == nil {
+			continue
+		}
+		if pol.PFSGroupInvalidSpec != "" {
+			bad = append(bad, fmt.Sprintf(
+				"security ipsec policy %s perfect-forward-secrecy keys %q is not a usable Diffie-Hellman group",
+				name, pol.PFSGroupInvalidSpec))
+			continue
+		}
+		if pol.PFSGroup != 0 {
+			if _, ok := DHGroupKeyword(pol.PFSGroup); !ok {
+				bad = append(bad, fmt.Sprintf(
+					"security ipsec policy %s perfect-forward-secrecy keys %d is not a supported Diffie-Hellman group (accepted: %v)",
+					name, pol.PFSGroup, SupportedDHGroups()))
+			}
+		}
+	}
+	if len(bad) == 0 {
+		return nil
+	}
+	// Map iteration order is randomised; sort so the message (and any test
+	// asserting on it) is stable when more than one value is bad (#9008).
+	sort.Strings(bad)
+	return fmt.Errorf("%s", strings.Join(bad, "; "))
 }

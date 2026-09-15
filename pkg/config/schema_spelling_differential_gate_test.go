@@ -522,6 +522,16 @@ var gateValuePairs = []struct{ name, v1, v2 string }{
 	// rather than raise a blind-spot ceiling over a leaf that is genuinely
 	// comparable.
 	{"refbw", "100m", "1g"},
+	// #9919 F-161 stores only spellable DH groups and records anything else
+	// (unparseable, unlisted numeric, empty) as InvalidSpec for the validator
+	// to reject/warn. Every pair above is outside the DH domain (the closest
+	// is smallint 101/202, both unlisted), so all three dh-group leaves
+	// (`security ike proposal`, `security ipsec proposal`, and the policy
+	// PFS `keys` leaf) compile every pair to 0 and fall out of `compared`
+	// into `advisory` — the same shape the `pcp`/`ospfnet`/`refbw` pairs
+	// were added for, and the same remedy: give the gate a valid pair
+	// rather than reclassify leaves that are genuinely comparable.
+	{"dhgroup", "14", "19"},
 }
 
 type gateLeaf struct {

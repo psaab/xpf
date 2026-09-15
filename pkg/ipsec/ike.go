@@ -33,6 +33,55 @@ type dpdSettings struct {
 var errIKEChainUnresolved = errors.New(
 	"ike gateway names an ike-policy whose proposal chain does not resolve")
 
+// errESPChainUnresolved signals that a VPN names an ipsec-policy whose
+// reference chain cannot be resolved (the policy is undefined and no legacy
+// proposal of that name exists, or the policy resolves but none of its
+// proposal references do). It is the ESP (Phase 2) mirror of
+// errIKEChainUnresolved (#9919 F-090): returning this instead of a
+// fabricated suite honours the #4298 never-fabricate principle — a dangling
+// reference carries operator crypto intent, and substituting ANY suite
+// (strongSwan's `default` before #2073/#4117, the fixed `aes256-sha256`
+// after) negotiates crypto the operator never authored. renderConfig
+// recognises this sentinel and SKIPS the offending VPN (one bad reference
+// never zeroes a healthy tunnel, and the skipped tunnel's stale SA is torn
+// down via the rendered-set diff); the commit-time validator
+// validateIPsecPolicyProposalReferencesStrict (pkg/config) hard-rejects the
+// dangling reference up front so a new operator edit fails loudly.
+var errESPChainUnresolved = errors.New(
+	"vpn names an ipsec-policy whose proposal chain does not resolve")
+
+// errDHGroupUnresolved signals that a VPN's EFFECTIVE Diffie-Hellman group
+// is unusable (#9919 F-161): an unparseable token, a present-but-empty leaf,
+// or a numeric group the renderer cannot spell (99, the real-but-omitted
+// 17/18, 0 authored explicitly, negatives). An unusable group must never
+// silently drop its modp term (IKE falling back to charon's default group,
+// ESP losing PFS) nor render an empty keyword charon refuses while the
+// diagnostics point at charon. renderConfig recognises this sentinel and
+// SKIPS the offending VPN; the commit-time validator
+// validateIPsecDHGroupsStrict (pkg/config) hard-rejects the value up front
+// so a new operator edit fails loudly.
+var errDHGroupUnresolved = errors.New(
+	"proposal carries a Diffie-Hellman group that cannot be rendered")
+
+// dhGroupBad reports whether a DH value is unusable: a recorded InvalidSpec
+// (the compiler saw a token it could not store — unparseable, unspellable
+// numeric, or present-but-empty), or a non-zero numeric the renderer cannot
+// spell (a directly-constructed struct bypassing the compiler, or a group
+// from a newer peer). Zero with no spec is "not configured" (no PFS / no
+// modp term intended), never bad. The detail names the offending value for
+// the skip warning.
+func dhGroupBad(group int, invalidSpec string) (bad bool, detail string) {
+	if invalidSpec != "" {
+		return true, fmt.Sprintf("dh-group %q", invalidSpec)
+	}
+	if group != 0 {
+		if _, ok := config.DHGroupKeyword(group); !ok {
+			return true, fmt.Sprintf("dh-group %d (supported: %v)", group, config.SupportedDHGroups())
+		}
+	}
+	return false, ""
+}
+
 // resolveIKESettings resolves the IKE (Phase 1) auth method, proposal
 // string, lifetime, and aggressive-mode flag from the gateway's IKE policy
 // chain.
@@ -44,6 +93,13 @@ var errIKEChainUnresolved = errors.New(
 //   - gw names an ike-policy but the chain cannot resolve: return
 //     errIKEChainUnresolved so the caller never silently emits a
 //     proposal-less connection (#2270).
+//
+// A proposal whose DH group is unusable (#9919 F-161) is dropped from the
+// list like a dangling reference (#3904 ANY-semantics: one bad entry never
+// zeroes the good ones); only when NOTHING remains renderable does it
+// return errDHGroupUnresolved so the caller skips the VPN instead of
+// negotiating with a silently-dropped modp term or a charon-refused
+// empty keyword.
 func resolveIKESettings(cfg *config.IPsecConfig, gw *config.IPsecGateway) (authMethod, proposals string, lifetime int, aggressive bool, err error) {
 	authMethod = "psk"
 	if gw == nil || gw.IKEPolicy == "" {
@@ -61,9 +117,17 @@ func resolveIKESettings(cfg *config.IPsecConfig, gw *config.IPsecGateway) (authM
 		var built []string
 		var firstLifetime int
 		authResolved := false
+		var dhSkipped []string
 		for _, ref := range ikePol.Proposals {
 			ikeProp, ok := cfg.IKEProposals[ref]
-			if !ok {
+			if !ok || ikeProp == nil {
+				continue
+			}
+			// #9919 F-161: the DH check precedes auth resolution, so a
+			// proposal coupling a bad DH value with a bad auth token is
+			// SKIPPED (per-entry) rather than aborting the whole render.
+			if bad, detail := dhGroupBad(ikeProp.DHGroup, ikeProp.DHGroupInvalidSpec); bad {
+				dhSkipped = append(dhSkipped, fmt.Sprintf("ike-proposal %q %s", ref, detail))
 				continue
 			}
 			if !authResolved {
@@ -79,10 +143,22 @@ func resolveIKESettings(cfg *config.IPsecConfig, gw *config.IPsecGateway) (authM
 		if len(built) > 0 {
 			return authMethod, strings.Join(built, ","), firstLifetime, aggressive, nil
 		}
+		// Nothing renderable: a bad-DH entry is a more actionable
+		// diagnosis than a dangling chain, so name it when present.
+		if len(dhSkipped) > 0 {
+			return "", "", 0, aggressive, fmt.Errorf("%w: ike-policy %q (%s)",
+				errDHGroupUnresolved, gw.IKEPolicy, strings.Join(dhSkipped, "; "))
+		}
 	}
 
 	if !hasIKEChain(cfg, gw.IKEPolicy) {
-		if prop, ok := cfg.Proposals[gw.IKEPolicy]; ok {
+		if prop, ok := cfg.Proposals[gw.IKEPolicy]; ok && prop != nil {
+			// #9919 F-161: the legacy direct-proposal form carries a DH
+			// group too; a bad one skips like the chain form.
+			if bad, detail := dhGroupBad(prop.DHGroup, prop.DHGroupInvalidSpec); bad {
+				return "", "", 0, aggressive, fmt.Errorf("%w: ike-policy %q names proposal %q with %s",
+					errDHGroupUnresolved, gw.IKEPolicy, gw.IKEPolicy, detail)
+			}
 			return authMethod, buildIKEProposal(prop), prop.LifetimeSeconds, aggressive, nil
 		}
 	}
@@ -129,102 +205,101 @@ func vpnUsesAHProposal(cfg *config.IPsecConfig, vpn *config.IPsecVPN) bool {
 
 // resolveESPSettings resolves the ESP (Phase 2) proposal string and lifetime
 // from the VPN's IPsec policy chain.
-func resolveESPSettings(cfg *config.IPsecConfig, vpn *config.IPsecVPN) (string, int) {
-	// ABSENT vs DANGLING (#4117). A VPN that names NO ipsec-policy at all
-	// legitimately wants strongSwan's compiled-in "default" ESP suite — the
-	// operator made no crypto choice, so the built-in default is their
-	// explicit choice and nothing dangles. This is the ONLY path that emits
-	// esp_proposals = default. A NAMED-but-unresolved (dangling) reference
-	// must NEVER fall through to it (see the fail-closed fallback below).
+//
+// ABSENT vs DANGLING (#4117, #9919 F-090). A VPN that names NO ipsec-policy
+// at all legitimately wants strongSwan's compiled-in "default" ESP suite —
+// the operator made no crypto choice, so the built-in default is their
+// explicit choice and nothing dangles. This is the ONLY path that returns
+// esp_proposals = default with a nil error. A NAMED-but-unresolved
+// (dangling) reference returns errESPChainUnresolved so the caller SKIPS the
+// VPN rather than fabricate a suite the operator never authored (the #4298
+// principle; the IKE mirror is errIKEChainUnresolved, #2270).
+//
+// DH groups (#9919 F-161): only the EFFECTIVE group is judged, because the
+// policy-level PFS group overrides each proposal's own dh-group in
+// buildESPProposal. A policy carrying a configured PFS value is judged on
+// the PFS value alone — a good PFS renders even when every proposal's DH
+// is bad (the overridden terms are inert), while a bad PFS skips even when
+// a proposal's DH is good (falling back would silently discard the
+// operator's PFS choice). With no PFS, proposals filter with #3904
+// ANY-semantics: bad-DH entries drop, and only when nothing remains
+// renderable does it return errDHGroupUnresolved.
+//
+// Precedence is chain-before-DH: a policy whose proposals all dangle
+// reports the dangling chain even when the PFS value is also bad (either
+// way the VPN skips; the chain break is the first fix).
+func resolveESPSettings(cfg *config.IPsecConfig, vpn *config.IPsecVPN) (string, int, error) {
 	if vpn.IPsecPolicy == "" {
-		return "default", 0
+		return "default", 0, nil
 	}
 
-	pfsGroup := 0
-	if ipsecPol, ok := cfg.Policies[vpn.IPsecPolicy]; ok {
-		pfsGroup = ipsecPol.PFSGroup
-		// #3904: `proposals [ p1 p2 ]` offers every listed ESP proposal.
-		// Build each resolvable reference (the policy-level PFS group
-		// applies to all) and comma-join. An empty list falls back to a
-		// proposal named after the policy, as before.
+	if ipsecPol, ok := cfg.Policies[vpn.IPsecPolicy]; ok && ipsecPol != nil {
 		propRefs := ipsecPol.Proposals
 		if len(propRefs) == 0 {
 			propRefs = []string{vpn.IPsecPolicy}
 		}
-		var built []string
-		var firstLifetime int
-		for _, propRef := range propRefs {
-			if prop, ok := cfg.Proposals[propRef]; ok {
-				if len(built) == 0 {
-					firstLifetime = prop.LifetimeSeconds
-				}
-				built = append(built, buildESPProposal(prop, pfsGroup))
+		// Phase 1: chain resolvability. Collect every reference that
+		// names a defined proposal; none at all is a dangling chain.
+		type resolvable struct {
+			ref  string
+			prop *config.IPsecProposal
+		}
+		var good []resolvable
+		for _, ref := range propRefs {
+			if prop, ok := cfg.Proposals[ref]; ok && prop != nil {
+				good = append(good, resolvable{ref, prop})
 			}
 		}
-		if len(built) > 0 {
-			return strings.Join(built, ","), firstLifetime
+		if len(good) == 0 {
+			return "", 0, fmt.Errorf("%w: ipsec-policy %q resolves but none of its proposal references %q resolve",
+				errESPChainUnresolved, vpn.IPsecPolicy, propRefs)
 		}
-		// Dangling proposal reference: the policy resolves but none of its
-		// proposal references do. Fall through to the conservative fixed
-		// fallback below — never bare "default".
-	} else if prop, ok := cfg.Proposals[vpn.IPsecPolicy]; ok {
-		// Legacy form: the ipsec-policy value is itself the NAME of a
-		// defined ESP proposal (no policy object). Render it directly.
-		return buildESPProposal(prop, 0), prop.LifetimeSeconds
+		// Phase 2: the effective DH group. A bad PFS value poisons the
+		// policy regardless of the proposals (no silent fallback to a
+		// proposal DH the operator did not choose for PFS).
+		if bad, detail := dhGroupBad(ipsecPol.PFSGroup, ipsecPol.PFSGroupInvalidSpec); bad {
+			return "", 0, fmt.Errorf("%w: ipsec-policy %q carries unusable PFS %s",
+				errDHGroupUnresolved, vpn.IPsecPolicy, detail)
+		}
+		pfsGroup := ipsecPol.PFSGroup
+		var built []string
+		var firstLifetime int
+		var dhSkipped []string
+		for _, r := range good {
+			if pfsGroup == 0 {
+				if bad, detail := dhGroupBad(r.prop.DHGroup, r.prop.DHGroupInvalidSpec); bad {
+					dhSkipped = append(dhSkipped, fmt.Sprintf("proposal %q %s", r.ref, detail))
+					continue
+				}
+			}
+			if len(built) == 0 {
+				firstLifetime = r.prop.LifetimeSeconds
+			}
+			built = append(built, buildESPProposal(r.prop, pfsGroup))
+		}
+		if len(built) > 0 {
+			return strings.Join(built, ","), firstLifetime, nil
+		}
+		return "", 0, fmt.Errorf("%w: ipsec-policy %q (%s)",
+			errDHGroupUnresolved, vpn.IPsecPolicy, strings.Join(dhSkipped, "; "))
 	}
-	// else: dangling POLICY reference — vpn.IPsecPolicy names neither a
-	// defined ipsec-policy nor a defined ESP proposal. Fail closed below.
 
-	// #4117 / #2073: a NAMED ipsec-policy reference did not resolve — either
-	// the policy is undefined, or the policy resolves but its proposal
-	// reference dangles. The commit-time strict validators
-	// (validateIPsecPolicyProposalReferencesStrict) hard-reject this for new
-	// operator edits, so this branch is only reached on a tolerant-path boot
-	// of an already-persisted or peer-synced config (where the validator
-	// downgraded to a warning so the node still boots).
-	//
-	// Do NOT fall through to bare "default" (strongSwan's compiled-in ESP
-	// suite): a NAMED reference carries operator crypto intent, and
-	// substituting the built-in default silently WEAKENS ESP — the same
-	// silent-downgrade class the IKE (Phase-1) path fails closed on (#2270).
-	// Emit a conservative FIXED suite instead: aes256-sha256, a strong known
-	// cipher+integrity pair, carrying the configured perfect-forward-secrecy
-	// group when one is set. A non-AEAD (CBC) ESP transform requires an
-	// integrity algorithm, so the fallback always pairs a cipher with an
-	// integrity alg (and a modp term when PFS is configured). The string is
-	// built directly with swanctl's canonical keyword spellings (aes256 /
-	// sha256 / modp<bits>): "sha256" is the strongSwan base keyword
-	// normalizeAuthAlg maps hmac-sha-256-128 to (#3851), not the invalid
-	// dash-stripped "sha256128" its proposal parser rejects. formatDHGroup
-	// renders the PFS group with its canonical swanctl keyword — modp<bits>
-	// for the MODP groups and the ECP/curve spellings for the elliptic-curve
-	// groups (19->ecp256, 20->ecp384, ...) — so the #2392 ECP fix applies
-	// here too. Direct spelling is used because the reference dangles (there
-	// is no proposal object to hand to buildESPProposal), not because the
-	// builder is unsafe.
-	//
-	// #4117 chose the conservative fixed fallback over the IKE-style
-	// whole-VPN SKIP for ESP parity with #2073, which already emits this
-	// fallback for the pfsGroup > 0 dangling case (with tests asserting the
-	// suite is EMITTED, not skipped). Skipping only when pfsGroup == 0 would
-	// fracture that: a no-PFS dangling config would lose its tunnel entirely
-	// while an otherwise-identical with-PFS config keeps a working fallback
-	// tunnel — a surprising availability asymmetry driven solely by whether
-	// PFS happened to be configured. The tolerant/peer-sync boot path's
-	// intent is to keep an already-persisted tunnel alive with strong,
-	// known crypto rather than drop it; this fallback honours that intent
-	// uniformly. IKE fails closed instead because it has no equivalent
-	// strong fixed suite to offer.
-	espProposals := "aes256-sha256"
-	if pfsGroup > 0 {
-		espProposals = fmt.Sprintf("aes256-sha256-%s", formatDHGroup(pfsGroup))
+	if prop, ok := cfg.Proposals[vpn.IPsecPolicy]; ok && prop != nil {
+		// Legacy form: the ipsec-policy value is itself the NAME of a
+		// defined ESP proposal (no policy object). Render it directly,
+		// subject to the same DH check.
+		if bad, detail := dhGroupBad(prop.DHGroup, prop.DHGroupInvalidSpec); bad {
+			return "", 0, fmt.Errorf("%w: ipsec-policy %q names a proposal with %s",
+				errDHGroupUnresolved, vpn.IPsecPolicy, detail)
+		}
+		return buildESPProposal(prop, 0), prop.LifetimeSeconds, nil
 	}
-	slog.Warn("ipsec policy reference does not resolve; emitting a "+
-		"conservative fixed ESP suite instead of the strongSwan default "+
-		"(a dangling reference must not silently weaken ESP crypto)",
-		"policy", vpn.IPsecPolicy, "esp_proposals", espProposals,
-		"pfs_group", pfsGroup)
-	return espProposals, 0
+
+	// Dangling POLICY reference — vpn.IPsecPolicy names neither a defined
+	// ipsec-policy nor a defined ESP proposal. Fail closed: skip, never
+	// fabricate.
+	return "", 0, fmt.Errorf("%w: ipsec-policy %q names neither a defined ipsec-policy nor a proposal",
+		errESPChainUnresolved, vpn.IPsecPolicy)
 }
 
 // deriveDPD computes the dead-peer-detection settings for a connection.
