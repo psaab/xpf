@@ -974,6 +974,14 @@ func compileNATSource(node *Node, sec *SecurityConfig) error {
 				// #8430: the rule authored a match container. Recorded before
 				// the leaves are read, so an EMPTY `match { }` is still marked.
 				rule.matchAuthored = true
+				// #9877 compact: a brace-elided unknown leaf never unfolds — the
+				// normalizer only folds heads the schema models — so it sits in
+				// the node's Keys, not its Children, and the switch below never
+				// sees it. Record an unmodeled head (a modeled head with a
+				// packed tail is a declined fold, #8880, not a typo).
+				if len(matchNode.Keys) > 1 && !natMatchLeafKnown("source", matchNode.Keys[1]) {
+					rule.UnknownMatchLeaves = appendNATUnknownMatchLeaf(rule.UnknownMatchLeaves, matchNode.Keys[1])
+				}
 				for _, m := range matchNode.Children {
 					switch m.Name() {
 					case "source-address":
@@ -1051,6 +1059,14 @@ func compileNATSource(node *Node, sec *SecurityConfig) error {
 						if len(rule.Match.Applications) > 0 {
 							rule.Match.Application = rule.Match.Applications[0]
 						}
+					default:
+						// #9877: record the unknown leaf instead of silently
+						// dropping it. The strict commit path rejects it at
+						// SchemaValidate (closedWorld match subtree); the
+						// tolerant path downgrades that to a log line, so the
+						// record is what lets the lenient gate warn and the
+						// snapshot builder fail closed.
+						rule.UnknownMatchLeaves = appendNATUnknownMatchLeaf(rule.UnknownMatchLeaves, m.Name())
 					}
 				}
 			}

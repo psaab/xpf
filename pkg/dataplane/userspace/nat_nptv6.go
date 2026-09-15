@@ -36,6 +36,15 @@ func buildNptv6Snapshots(cfg *config.Config) []Nptv6RuleSnapshot {
 			if rule == nil || !rule.IsNPTv6 {
 				continue
 			}
+			// #9877: dropped match leaves disarm NPTv6 rules too — a typo'd
+			// scope leaf must not evade the #5818 drop below and install a
+			// zone-wide rewrite. StaticNATRuleExcludedReason's unknown-leaf
+			// clause is the only one that can fire for IsNPTv6 rules.
+			if reason := config.StaticNATRuleExcludedReason(rule); reason != "" {
+				slog.Warn("userspace snapshot: dropping NPTv6 rule with dropped match leaves (fail-closed, #9877)",
+					"rule_set", rs.Name, "rule", rule.Name, "reason", reason)
+				continue
+			}
 			if config.NPTv6ScopeUnsupported(rs, rule) {
 				slog.Warn("userspace snapshot: dropping NPTv6 rule carrying an unsupported match scope "+
 					"(from-interface/from-routing-instance/source-address/destination-port); the NPTv6 dataplane "+

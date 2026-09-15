@@ -95,6 +95,31 @@ func runUniformGatesNAT(tree *ConfigTree, cfg *Config, opts compileOpts) error {
 		}
 	}
 
+	// #9877 unknown-match-leaf gate. A `match` leaf the compiler does not read
+	// (a typo beside a valid leaf) was silently dropped and the rule compiled
+	// as the surviving dimensions only, with no operator-facing warning on the
+	// tolerant path. The match switches record such leaves on the typed rule;
+	// this gate rejects (strict, first error) or warns naming them (lenient,
+	// EVERY marked rule — a single warning would leave a second skipped rule
+	// or a widened exemption silent), and the snapshot builders independently
+	// fail CLOSED.
+	//
+	// Runs BEFORE the #8430 gate: a typo-ONLY match is both unknown-leaf and
+	// unconstrained, and the unknown-leaf diagnosis names the cause while the
+	// #8430 text would call it an empty match the operator never authored.
+	// Shares the lenientDestNATAddresses flag (same NAT silent-drop /
+	// wrong-translate doctrine).
+	if err := validateNATUnknownMatchLeavesStrict(cfg); err != nil {
+		if opts.lenientDestNATAddresses {
+			for _, v := range enumerateNATUnknownMatchLeaves(cfg) {
+				cfg.Warnings = append(cfg.Warnings,
+					fmt.Sprintf("nat rule match leaves (downgraded to warning on tolerant path): %v", v))
+			}
+		} else {
+			return err
+		}
+	}
+
 	// #8430 unconstrained-match gate. An empty NAT match set is read by the
 	// dataplane as UNCONSTRAINED (`if !constrained { return true }`), so a rule
 	// that constrains nothing translates EVERY packet reaching it rather than

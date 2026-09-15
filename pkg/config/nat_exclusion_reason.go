@@ -48,16 +48,28 @@ import (
 // Callers (they must not drift — see the file header):
 //
 //  1. buildStaticNATSnapshots (pkg/dataplane/userspace/nat_static.go) drops the
-//     rule, and
-//  2. natshow.RenderStatic / RenderStaticRule annotate it as not installed.
+//     rule,
+//  2. buildNptv6Snapshots (pkg/dataplane/userspace/nat_nptv6.go) drops it, and
+//  3. natshow.RenderStatic / RenderStaticRule annotate it as not installed.
 //
-// NPTv6 rules are NOT this predicate's business: buildStaticNATSnapshots routes
-// them to buildNPTv6Snapshots before reaching here, and their own exclusion
-// predicate is NPTv6ScopeUnsupported. A nil rule reports "" — both callers skip
-// nils first, and "installed" is the direction that cannot make a renderer
-// annotate a rule that is in fact armed.
+// NPTv6 rules reach this predicate ONLY for the #9877 unknown-leaf clause:
+// buildStaticNATSnapshots routes IsNPTv6 rules to buildNPTv6Snapshots, whose
+// scope verdict stays NPTv6ScopeUnsupported, and the plain-only clauses below
+// (#5859/#5101) sit behind the IsNPTv6 early return. A nil rule reports "" —
+// all callers skip nils first, and "installed" is the direction that cannot
+// make a renderer annotate a rule that is in fact armed.
 func StaticNATRuleExcludedReason(rule *StaticNATRule) string {
-	if rule == nil || rule.IsNPTv6 {
+	if rule == nil {
+		return ""
+	}
+	// #9877: dropped match leaves disarm BOTH plain and NPTv6 rules, so this
+	// clause precedes the IsNPTv6 early return. A typo'd scope leaf on an
+	// NPTv6 rule would otherwise evade the #5818 drop and install a zone-wide
+	// rewrite the correctly-spelled config would have had refused.
+	if reason := unknownNATMatchLeavesReason(rule.UnknownMatchLeaves); reason != "" {
+		return reason
+	}
+	if rule.IsNPTv6 {
 		return ""
 	}
 	// #5859: `then static-nat inet` is the Junos NAT64 keyword, but this
@@ -94,9 +106,9 @@ func staticNATPortOutOfRange(p int) bool {
 //  2. natshow.RenderDestRuleDetail annotates it as not installed.
 //
 // A `then destination-nat off` rule is the #3844 no-NAT exemption: it names no
-// pool, installs as an exemption entry, and is never excluded. A nil rule or
-// nil DNAT config reports "" for the same reason StaticNATRuleExcludedReason
-// does.
+// pool and installs as an exemption entry. It is excluded only when #9877
+// leaves it unkeyable (below). A nil rule or nil DNAT config reports "" for
+// the same reason StaticNATRuleExcludedReason does.
 func DestinationNATRuleExcludedReason(dnat *DestinationNATConfig, rule *NATRule) string {
 	if dnat == nil || rule == nil {
 		return ""
@@ -116,7 +128,21 @@ func DestinationNATRuleExcludedReason(dnat *DestinationNATConfig, rule *NATRule)
 	// #3844: the no-NAT exemption resolves without a pool. Decided by `off`,
 	// not by an empty pool name.
 	if rule.Then.Off {
+		// #9877: an exemption whose destination key was dropped is unkeyable —
+		// the builder skips rules with no destination entries whether or not
+		// they are exemptions — so report it rather than render it armed. A
+		// keyable exemption (destination survives) still installs: skipping
+		// one would translate traffic the operator said not to translate.
+		if len(rule.UnknownMatchLeaves) > 0 && !dnatRuleHasDestinationKey(rule) {
+			return "exemption match dropped unknown leaves [" + quoteNATLeafKeywords(rule.UnknownMatchLeaves) + "] leaving no destination key; the exemption cannot be keyed so it is not installed (fail-closed)"
+		}
 		return ""
+	}
+	// #9877: match-content loss is asked before the pool clauses: the match is
+	// the rule's own authoring, the pool its referenced object, and the
+	// builder skips on this verdict before any pool lookup.
+	if reason := unknownNATMatchLeavesReason(rule.UnknownMatchLeaves); reason != "" {
+		return reason
 	}
 	pool, ok := dnat.Pools[rule.Then.PoolName]
 	if !ok || pool == nil || pool.Address == "" {
@@ -186,6 +212,73 @@ func DNATPoolHostIP(addr string) (string, bool) {
 // making an EMPTY name visible as "" rather than vanishing mid-sentence.
 func quoteName(s string) string {
 	return `"` + s + `"`
+}
+
+// quoteNATLeafKeywords renders dropped match-leaf keywords for an
+// operator-facing reason string (#9877).
+func quoteNATLeafKeywords(leaves []string) string {
+	quoted := make([]string, len(leaves))
+	for i, l := range leaves {
+		quoted[i] = `"` + l + `"`
+	}
+	return strings.Join(quoted, ", ")
+}
+
+// unknownNATMatchLeavesReason formats the shared #9877 verdict: the rule's
+// match lost leaves the compiler does not read, so installing it would match
+// a different (wider) set than authored. "" when no leaves were dropped.
+func unknownNATMatchLeavesReason(leaves []string) string {
+	if len(leaves) == 0 {
+		return ""
+	}
+	return "match dropped unknown leaves [" + quoteNATLeafKeywords(leaves) + "]; installing it would match a different set than authored, so the rule is not installed (fail-closed)"
+}
+
+// dnatRuleHasDestinationKey reports whether a destination NAT rule configures
+// any destination criterion (literal or name). It mirrors the builder's
+// destination-presence read (literals plus configured names) closely enough
+// to decide the #9877 unkeyable-exemption verdict: configured-empty implies
+// the builder resolves nothing and skips. A configured-but-UNRESOLVABLE name
+// still resolves per-entry at emit time — that pre-existing unknown-name lie
+// class is gate-warned, not grown here.
+func dnatRuleHasDestinationKey(rule *NATRule) bool {
+	m := rule.Match
+	return len(m.DestinationAddresses) > 0 || m.DestinationAddress != "" ||
+		len(m.DestinationAddressNames) > 0 || m.DestinationAddressName != ""
+}
+
+// SourceNATRuleExcludedReason reports why the userspace snapshot builder DROPS
+// a source NAT rule, or "" when the rule is installed.
+//
+// Callers (they must not drift — see the file header):
+//
+//  1. buildSourceNATSnapshotsWithFeeds
+//     (pkg/dataplane/userspace/nat_source.go) drops the rule, and
+//  2. SourceNATRuleNotInstalledReason (nat_not_installed_7473.go) plus
+//     natshow's source renderer annotate it as not installed.
+//
+// Unlike the pool verdicts below (which travel on the wire as `pool_unusable`
+// for Rust to honor), a match-content verdict is decided by a Go-side skip:
+// Rust cannot re-derive a dropped leaf from a snapshot — the leaf left no
+// trace — so any tombstone would have to originate here anyway, and a skip
+// with a shared-predicate annotation is the identical dataplane outcome with
+// no wire churn. A `then source-nat off` exemption is never excluded (the
+// #3844 structure): skipping one would translate traffic the operator said
+// not to translate.
+//
+// Overlap with #9874 (parent ruling: DISARM-WINS): a rule carrying BOTH
+// markers (a typo-only match is also unconstrained) is NOT skipped — it
+// ships as the #9874 fail-closed drop tombstone. Unknown operator intent
+// fails closed (deny: drop + stop) rather than falling through to
+// subsequent rules, which a skip would allow.
+func SourceNATRuleExcludedReason(rule *NATRule) string {
+	if rule == nil || rule.Then.Off {
+		return ""
+	}
+	if rule.LenientMatchDropped {
+		return ""
+	}
+	return unknownNATMatchLeavesReason(rule.UnknownMatchLeaves)
 }
 
 // SourceNATPoolDisarmedReason reports the WIRE reason the userspace snapshot

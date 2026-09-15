@@ -88,12 +88,16 @@ func validateNATRuleMatchConstrainedStrict(cfg *Config) error {
 			"`match { source-address 0.0.0.0/0; }` (#8430)",
 			kind, ruleSet, rule)
 	}
+	// #9877: rules carrying unknown match leaves are skipped here — the #9877
+	// gate (which runs first) reports them precisely by naming the dropped
+	// leaves, so reporting them here too would give the operator two warnings
+	// for one mistake.
 	for _, rs := range cfg.Security.NAT.Source {
 		if rs == nil {
 			continue
 		}
 		for _, r := range rs.Rules {
-			if r != nil && r.matchAuthored && !natMatchIsConstrained(r.Match) {
+			if r != nil && r.matchAuthored && !natMatchIsConstrained(r.Match) && len(r.UnknownMatchLeaves) == 0 {
 				return emit("source", rs.Name, r.Name)
 			}
 		}
@@ -104,7 +108,7 @@ func validateNATRuleMatchConstrainedStrict(cfg *Config) error {
 				continue
 			}
 			for _, r := range rs.Rules {
-				if r != nil && r.matchAuthored && !natMatchIsConstrained(r.Match) {
+				if r != nil && r.matchAuthored && !natMatchIsConstrained(r.Match) && len(r.UnknownMatchLeaves) == 0 {
 					return emit("destination", rs.Name, r.Name)
 				}
 			}

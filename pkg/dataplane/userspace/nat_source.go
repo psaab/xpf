@@ -54,6 +54,25 @@ func buildSourceNATSnapshotsWithFeeds(cfg *config.Config, natCounterIDs map[stri
 			if rule == nil {
 				continue
 			}
+			// #9877: a rule whose match lost unknown leaves on the tolerant path
+			// must not install as the surviving dimensions only. Skip
+			// (fail-closed); the lenient compile warning names the dropped
+			// leaves. Exemptions bypass (SourceNATRuleExcludedReason): skipping
+			// one would translate traffic the operator exempted. Fall-through
+			// note: skipping removes the rule from first-match evaluation, so a
+			// LATER rule may translate traffic the broken rule would have
+			// shadowed — warned at load, and still strictly safer than a silent
+			// widened translation. Overlap with #9874 (parent ruling:
+			// DISARM-WINS): a rule carrying BOTH markers (a typo-only match is
+			// also unconstrained) is NOT skipped here — the predicate yields
+			// so the arm below ships the fail-closed drop tombstone instead.
+			// Unknown intent denies (drop + stop) rather than falling through.
+			if reason := config.SourceNATRuleExcludedReason(rule); reason != "" {
+				slog.Warn("userspace snapshot: skipping source NAT rule with dropped match leaves (fail-closed, #9877)",
+					"ruleset", rs.Name, "rule", rule.Name, "reason", reason)
+				continue
+			}
+
 			// #9874: the rule authored a `match` that constrains nothing. The
 			// snapshot still ships it — with the LenientMatchDropped marker
 			// the Rust table fails CLOSED (drop + count) — so say so loudly:

@@ -137,7 +137,7 @@ func buildDestinationNATSnapshotsWithFeeds(cfg *config.Config, natCounterIDs map
 				// rules are armed. The per-clause rationale lives with the
 				// predicate.
 				if reason := config.DestinationNATRuleExcludedReason(cfg.Security.NAT.Destination, rule); reason != "" {
-					slog.Warn("userspace snapshot: skipping DNAT rule (fail-closed, #3450)",
+					slog.Warn("userspace snapshot: skipping DNAT rule (fail-closed, #3450/#9877)",
 						"ruleset", rs.Name, "rule", rule.Name,
 						"pool", rule.Then.PoolName, "reason", reason)
 					continue
@@ -178,6 +178,14 @@ func buildDestinationNATSnapshotsWithFeeds(cfg *config.Config, natCounterIDs map
 				destAddrs = appendNATDestinationAddressName(cfg, feedOverlay, destAddrs, name)
 			}
 			if len(destAddrs) == 0 {
+				// #9877: an exemption whose destination key was dropped is
+				// unkeyable — the predicate reports it so the renderer agrees
+				// (see DestinationNATRuleExcludedReason). Pre-existing
+				// otherwise-empty skips stay silent.
+				if reason := config.DestinationNATRuleExcludedReason(cfg.Security.NAT.Destination, rule); reason != "" {
+					slog.Warn("userspace snapshot: skipping DNAT rule with no destination key (fail-closed, #9877)",
+						"ruleset", rs.Name, "rule", rule.Name, "reason", reason)
+				}
 				continue
 			}
 

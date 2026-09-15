@@ -111,6 +111,11 @@ func compileNATDestination(node *Node, sec *SecurityConfig) error {
 			// (ast_edit.go), so this only changes the hierarchical/parser shape.
 			for _, matchNode := range ruleInst.node.FindChildren("match") {
 				rule.matchAuthored = true // #8430, see compiler_nat_source.go
+				// #9877 compact: a brace-elided unknown leaf never unfolds (see
+				// compiler_nat_source.go) — record an unmodeled packed head.
+				if len(matchNode.Keys) > 1 && !natMatchLeafKnown("destination", matchNode.Keys[1]) {
+					rule.UnknownMatchLeaves = appendNATUnknownMatchLeaf(rule.UnknownMatchLeaves, matchNode.Keys[1])
+				}
 				for _, m := range matchNode.Children {
 					switch m.Name() {
 					case "destination-address":
@@ -181,6 +186,11 @@ func compileNATDestination(node *Node, sec *SecurityConfig) error {
 						if len(rule.Match.Applications) > 0 {
 							rule.Match.Application = rule.Match.Applications[0]
 						}
+					default:
+						// #9877: record the unknown leaf instead of silently
+						// dropping it — the destination twin of the source
+						// arm above (see compiler_nat_source.go).
+						rule.UnknownMatchLeaves = appendNATUnknownMatchLeaf(rule.UnknownMatchLeaves, m.Name())
 					}
 				}
 			}

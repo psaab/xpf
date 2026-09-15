@@ -823,6 +823,11 @@ func compileNATStatic(node *Node, sec *SecurityConfig) error {
 			// unaffected: SetPath merges duplicate containers into one node
 			// (ast_edit.go), so this only changes the hierarchical/parser shape.
 			for _, matchNode := range ruleInst.node.FindChildren("match") {
+				// #9877 compact: a brace-elided unknown leaf never unfolds (see
+				// compiler_nat_source.go) — record an unmodeled packed head.
+				if len(matchNode.Keys) > 1 && !natMatchLeafKnown("static", matchNode.Keys[1]) {
+					rule.UnknownMatchLeaves = appendNATUnknownMatchLeaf(rule.UnknownMatchLeaves, matchNode.Keys[1])
+				}
 				for _, m := range matchNode.Children {
 					switch m.Name() {
 					case "destination-address":
@@ -915,6 +920,13 @@ func compileNATStatic(node *Node, sec *SecurityConfig) error {
 						if p, err := strconv.Atoi(nodeVal(m)); err == nil {
 							rule.MatchDestinationPort = p
 						}
+					default:
+						// #9877: record the unknown leaf instead of silently
+						// dropping it — the static twin of the source arm
+						// (see compiler_nat_source.go). Runs for NPTv6 rules
+						// too: this loop precedes then-parsing, and a typo'd
+						// scope leaf must not evade the #5818 drop.
+						rule.UnknownMatchLeaves = appendNATUnknownMatchLeaf(rule.UnknownMatchLeaves, m.Name())
 					}
 				}
 			}

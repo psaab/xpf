@@ -47,6 +47,11 @@ func staticRuleNotInstalledReason(rs *config.StaticNATRuleSet, rule *config.Stat
 		return ""
 	}
 	if rule.IsNPTv6 {
+		// #9877 first: the only StaticNATRuleExcludedReason clause that can
+		// fire for NPTv6 rules, in the builder's precedence.
+		if reason := config.StaticNATRuleExcludedReason(rule); reason != "" {
+			return reason
+		}
 		if config.NPTv6ScopeUnsupported(rs, rule) {
 			return "NPTv6 rule carries a match scope the dataplane cannot honor " +
 				"(from-interface / from-routing-instance / source-address / destination-port); " +
