@@ -52,6 +52,13 @@ almost all the time by construction:
    have no dispersion to speak of and a band drawn through them is a number
    with the shape of evidence.
 
+Drift is IN scope, beside the rolling window rather than inside it (#9922
+F-088). The rolling band judges each step against the last K greens and so
+absorbs a slow decay one step at a time; the pinned baseline (the FIRST K
+greens) judges the newest run against genesis and the result carries the
+cumulative displacement plus a drift flag. Drift is reported, not failed:
+attribution needs a human.
+
 Flake vs. regression without re-running blindly
 -----------------------------------------------
 Every row carries invariant metrics beside its headline. When the headline
@@ -705,6 +712,39 @@ def compare(
         }
     )
 
+    # #9922 F-088: the PINNED baseline. The rolling band above re-trusts every
+    # small step, so a slow geometric decay reads WITHIN-BAND at every step
+    # while the total displacement grows unboundedly. The pin is the FIRST K
+    # greens at this env (prior-only, so it is stable once K+1 greens exist),
+    # judged with the same band arithmetic. `drift` is newest-inside-rolling
+    # but outside-pinned: the step the rolling window just absorbed.
+    #
+    # Informational only: drift attribution needs a human (an intentional
+    # change and a regression have the same shape here). The layer's job is to
+    # surface the displacement, which today is invisible. A zero pinned median
+    # (e.g. cells_failed pinned at 0) carries no ratio: displacement is None
+    # and drift stays False rather than crashing — the rolling band still
+    # judges the step (0 -> 1 on a zero-width band is a REGRESSION there).
+    genesis = greens[:k]
+    pvals = [r["metrics"][headline] for r in genesis]
+    pmed, plo, phi = band(pvals)
+    result.update(
+        {
+            "pinned_values": pvals,
+            "pinned_median": pmed,
+            "pinned_lo": plo,
+            "pinned_hi": phi,
+            "pinned_n": len(genesis),
+            "pinned_ts": [r.get("ts") for r in genesis],
+            "displacement": (value - pmed) / abs(pmed) if pmed != 0 else None,
+            "drift": bool(
+                pmed != 0
+                and result["outcome"] == WITHIN_BAND
+                and not (plo <= value <= phi)
+            ),
+        }
+    )
+
     # Invariants: every other metric the newest row carries that also has a
     # baseline of its own.
     invariants: Dict[str, Dict] = {}
@@ -781,6 +821,16 @@ def render(result: Dict) -> str:
         # green run(s)" line with a placeholder invites reading a number that
         # was never computed; the note below says what happened instead.
         out.append(f"green runs available: {result['baseline_n']} (below the K floor)")
+    if "pinned_median" in result:
+        disp = result.get("displacement")
+        disp_s = f"{disp:+.1%}" if disp is not None else "n/a (pinned median is 0)"
+        flag = "  DRIFT — inside the rolling band, outside the pinned one" if result.get("drift") else ""
+        out.append(
+            f"pinned baseline over the first {result['pinned_n']} green run(s): "
+            f"[{result['pinned_lo']:.6g}, {result['pinned_hi']:.6g}] "
+            f"median {result['pinned_median']:.6g}  "
+            f"cumulative displacement {disp_s}{flag}"
+        )
     if result.get("note"):
         out.append(f"note: {result['note']}")
     inv = result.get("invariants") or {}

@@ -51,6 +51,7 @@ from ledger_compare import (
     lint_shard_names,
     load_ledger_text,
     parse_ledger,
+    render,
     run_ids,
     run_ids_at_rev,
     shard_paths,
@@ -357,6 +358,90 @@ class FlakeVersusRegressionSignal(unittest.TestCase):
         res = compare(self._rows(23.05, 21), GATE, ENV)
         self.assertEqual(res["outcome"], WITHIN_BAND)
         self.assertIsNone(res.get("signal"))
+
+
+class PinnedBaseline(unittest.TestCase):
+    """#9922 F-088: the rolling band absorbs slow decay; the pin must not."""
+
+    def test_slow_decay_sets_drift_with_cumulative_displacement(self):
+        # MUTATION: pin the LAST K greens instead of the FIRST K.
+        #
+        # A 4%-per-run geometric decay reads WITHIN-BAND at every step (the
+        # rolling window re-trusts each step) while the total displacement
+        # grows to -36%. The pinned baseline over genesis must surface it.
+        vals = [100.0 * (0.96**i) for i in range(12)]
+        rows = [
+            row(f"2026-09-01T00:{i:02d}:00Z", value=v)
+            for i, v in enumerate(vals)
+        ]
+        res = compare(rows, GATE, ENV)
+        self.assertEqual(res["outcome"], WITHIN_BAND)
+        self.assertEqual(res["pinned_values"], vals[:3])
+        self.assertTrue(res["drift"])
+        self.assertLess(res["displacement"], -0.30)
+        self.assertIn("DRIFT", render(res))
+        self.assertIn("cumulative displacement", render(res))
+
+    def test_stable_history_has_no_drift(self):
+        rows = greens([100.0, 100.0, 100.0, 100.0]) + [
+            row("2026-09-01T00:05:00Z", value=100.0)
+        ]
+        res = compare(rows, GATE, ENV)
+        self.assertEqual(res["outcome"], WITHIN_BAND)
+        self.assertFalse(res["drift"])
+        self.assertAlmostEqual(res["displacement"], 0.0)
+
+    def test_young_history_carries_no_pinned_section(self):
+        # Below the K floor there is no rolling band, so there is nothing to
+        # anchor beside it either: no pinned keys at all, not placeholders.
+        rows = greens([100.0]) + [row("2026-09-01T00:02:00Z", value=60.0)]
+        res = compare(rows, GATE, ENV)
+        self.assertEqual(res["outcome"], NO_BASELINE)
+        self.assertNotIn("pinned_median", res)
+        self.assertNotIn("displacement", res)
+        self.assertNotIn("drift", res)
+
+    def test_zero_pinned_median_yields_no_ratio_and_no_crash(self):
+        # cells_failed pinned at 0 (the host-inbound shape): a ratio over a
+        # zero median is undefined, so displacement is None and drift stays
+        # False rather than crashing — while the rolling band still judges
+        zeros = [0, 0, 0, 0]
+        rows = [
+            row(
+                f"2026-09-01T00:{i:02d}:00Z",
+                value=float(v),
+                headline="cells_failed",
+                direction="lower-better",
+            )
+            for i, v in enumerate(zeros)
+        ]
+        res = compare(rows, GATE, ENV)
+        self.assertEqual(res["outcome"], WITHIN_BAND)
+        self.assertIsNone(res["displacement"])
+        self.assertFalse(res["drift"])
+        rows1 = rows + [
+            row(
+                "2026-09-01T00:05:00Z",
+                value=1.0,
+                headline="cells_failed",
+                direction="lower-better",
+            )
+        ]
+        res1 = compare(rows1, GATE, ENV)
+        self.assertEqual(res1["outcome"], REGRESSION)
+        self.assertIsNone(res1["displacement"])
+        self.assertFalse(res1["drift"])
+
+    def test_drift_is_informational_not_failed(self):
+        # Drift attribution needs a human; the exit status must not move.
+        vals = [100.0 * (0.96**i) for i in range(12)]
+        rows = [
+            row(f"2026-09-01T00:{i:02d}:00Z", value=v)
+            for i, v in enumerate(vals)
+        ]
+        res = compare(rows, GATE, ENV)
+        self.assertTrue(res["drift"])
+        self.assertEqual(exit_status(res), 0)
 
 
 class ExitStatusMapping(unittest.TestCase):

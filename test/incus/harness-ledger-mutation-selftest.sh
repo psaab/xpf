@@ -131,6 +131,13 @@ MUTATIONS = {
         "    if not (lo <= value <= hi):\n        return WITHIN_BAND",
         "the direction of the band test itself",
     ),
+    "pinned-baseline-uses-last-k": (
+        PY_FILE, "py",
+        "    genesis = greens[:k]",
+        "    genesis = greens[-k:]",
+        "the genesis pin: the pinned baseline becomes the rolling one and a "
+        "slow decay is absorbed by both (#9922 F-088)",
+    ),
     "env-filter-dropped": (
         PY_FILE, "py",
         'prior = [r for r in matching[:-1] if r.get("env") == resolved_env]',
