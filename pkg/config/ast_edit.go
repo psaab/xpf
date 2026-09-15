@@ -506,6 +506,83 @@ func (t *ConfigTree) SetPathQuotedGrouped(path []string, quoted, grouped []bool)
 		}
 
 		if i >= len(path) {
+			// #9838: the path ends AT a named-instance slot — a schema
+			// wildcard with children and no value args, e.g. `set
+			// interfaces ge-0/0/0` or `set routing-instances ri1`. That
+			// line is what FormatSet emits for an EMPTY BRACED container
+			// (#9126), and Junos `set` creates the (empty) container — it
+			// never creates a leaf at a container position. Rebuilding it
+			// as a leaf corrupted the round trip: the replayed tree no
+			// longer matched the authored one, and a no-op merge of
+			// `ge-0/0/0 { }` into a configured instance appended a leaf
+			// twin (terminal replay deduped leaves only), which the #9838
+			// gate then refused — a spelling the operator never wrote.
+			//
+			// Scoped to wildcard instance slots on purpose. A DECLARED
+			// child with children and value args (`flow-server <addr>`,
+			// `next-hop <gw>`, `route <dst>`, `area <id>`) is a value
+			// carrier at terminal and stays a leaf, exactly as today.
+			if schema != nil && schema.wildcard != nil && childSchema == schema.wildcard &&
+				childSchema.args == 0 && len(childSchema.children) > 0 &&
+				!childSchema.multi && !childSchema.valueList {
+				// Delta: terminal replay is IDENTITY-PRESERVING. A
+				// same-key node in EITHER shape is the same statement —
+				// flat `set` cannot spell the difference — so reuse it
+				// and change nothing. Matching containers only twinned
+				// legitimate bodyless leaves: `groups { G; }` plus an
+				// empty merge refused as a duplicate group (#5180), and
+				// an ip-monitoring address leaf plus its twin compiled
+				// two targets whose weights the runtime sums
+				// independently. Matching the leaf too preserves all
+				// three: the configured container, the legitimate leaf,
+				// AND a bare #9838 leaf, whose refusal evidence must
+				// survive the replay.
+				for _, n := range *current {
+					if keysEqual(n.Keys, nodeKeys) {
+						if n.IsLeaf {
+							refreshDupKeysQuoted(n, quotedRange(keyStart, i))
+						}
+						return nil
+					}
+				}
+				// Container creation is scoped to the #9838 subjects:
+				// top-level `interfaces` and `routing-instances`.
+				// Pointer-compared, so the same stanza inside `groups`
+				// qualifies while zone-member and RA `interfaces` do
+				// not. Every other instance slot falls through to the
+				// leaf path below, exactly as before this lane.
+				if schema == schemaInterfaces || schema == schemaRoutingInstances {
+					// P2 cross-root identity: the walk descended into
+					// the FIRST same-named root, but the instance may
+					// live in a LATER root — a raw LoadOverride retains
+					// disjoint top-level stanzas (the parser appends
+					// without merging), so creating here would twin it
+					// across roots (a #5180 duplicate refusal for
+					// interfaces, a doubled instance for
+					// routing-instances). len(path)==2 proves the
+					// parent is top-level; deeper paths carry their own
+					// ancestry and must not consult top-level roots.
+					// A match reuses without touching: no authored-leaf
+					// conversion or deletion, ever.
+					if len(path) == 2 {
+						for _, root := range t.Children {
+							if root == nil || root.Name() != path[0] {
+								continue
+							}
+							for _, n := range root.Children {
+								if keysEqual(n.Keys, nodeKeys) {
+									return nil
+								}
+							}
+						}
+					}
+					container := &Node{Keys: append([]string(nil), nodeKeys...)}
+					container.setKeysQuoted(quotedRange(keyStart, i))
+					container.setKeysBracketed(groupedRange(keyStart, i))
+					*current = append(*current, container)
+					return nil
+				}
+			}
 			// No more tokens after this node: it's a leaf.
 			if childSchema.args > 0 && !childSchema.multi && childSchema.children == nil {
 				// Single-value leaf with no sub-structure (e.g. host-name, description): replace existing.
