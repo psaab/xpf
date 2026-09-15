@@ -1,0 +1,17 @@
+# #9920 F-148: PINNED runtime-helper toolchain — single source of truth.
+#
+# The runtime forwarding path (userspace-dp) built with whatever
+# $(HOME)/.cargo/bin/cargo resolved to, while debian/rules claimed the helper
+# "is built with a pinned cargo". Cargo.lock pins dependencies; only rustc
+# floated. This file pins rustc; the Makefile enforces it explicitly
+# (`$(CARGO) +<pin>`, via build_support/dp-toolchain.sh) because cargo is
+# invoked from the repo root with --manifest-path and so does NOT discover
+# this file by CWD.
+#
+# BUMP PROCEDURE: change `channel`, run `make build-userspace-dp test-rust`
+# (both must PASS on the new toolchain), commit together.
+# Override: none — unlike the BPF shim's RUST_BPF_TOOLCHAIN, a helper bisect
+# that needs another toolchain invokes cargo directly; the Makefile stays
+# pinned.
+[toolchain]
+channel = "1.98.1"

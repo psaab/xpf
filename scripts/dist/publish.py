@@ -609,20 +609,6 @@ def gate_images(dist, require_installer=True):
     return versions, pub
 
 
-def _parse_manifest_fields(text):
-    """Parse a bake `.manifest` sidecar (key: value lines) into a dict, keys
-    verbatim. Mirrors scripts/deploy/xpf-deploy.py:_parse_image_manifest_versions
-    but keeps underscores so `validated` / `base_image_pinned` read directly."""
-    d = {}
-    for line in text.splitlines():
-        line = line.strip()
-        if not line or line.startswith("#") or ":" not in line:
-            continue
-        k, v = line.split(":", 1)
-        d[k.strip()] = v.strip()
-    return d
-
-
 def gate_provenance(dist, versions, pub):
     """#4904 A/B: refuse to publish an image set that did not pass the in-guest
     verify-dataplane validation gate OR whose Ubuntu base was not anchored to a
@@ -673,7 +659,7 @@ def gate_provenance(dist, versions, pub):
         except sign.SignError as e:
             die(f"provenance sidecar xpf-{ver}.manifest failed verify against "
                 f"the signed manifest {os.path.basename(sums)}: {e}")
-        fields = _parse_manifest_fields(data.decode("utf-8", "replace"))
+        fields = sign.parse_sidecar_fields(data.decode("utf-8", "replace"))
         validated = fields.get("validated")
         if validated != "true":
             die(f"image set {ver} provenance says validated={validated!r} (not "

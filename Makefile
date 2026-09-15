@@ -49,9 +49,20 @@ build-ctl:
 # changes. The script fails when it cannot resolve or read a file, and `&&`
 # then fails the recipe line. A raw `cargo build` relies on mtimes alone.
 
+# #9920 F-148: every cargo run in the same three recipes also resolves the
+# helper toolchain pin (userspace-dp/rust-toolchain.toml) via
+# userspace-dp/build_support/dp-toolchain.sh and invokes `$(CARGO) +<pin>`
+# explicitly — cargo is run from the repo root with --manifest-path, so it
+# never discovers the pin file by CWD. The script fails loudly on a garbled
+# pin, a missing toolchain, or a non-rustup cargo, and `&&` then fails the
+# recipe line. There is intentionally no unpinned override (unlike the BPF
+# shim's RUST_BPF_TOOLCHAIN): a bisect needing another toolchain invokes
+# cargo directly; the Makefile stays pinned. test-rust is pinned too — the
+# suite must run under the toolchain the shipped helper builds with.
+
 # Build the userspace dataplane helper
 build-userspace-dp:
-	stamp=$$(sh userspace-dp/build_support/linked-libs-stamp.sh) && XPF_LINKED_LIBS_STAMP=$$stamp $(CARGO) build --manifest-path userspace-dp/Cargo.toml --release
+	pinned=$$(sh userspace-dp/build_support/dp-toolchain.sh userspace-dp/rust-toolchain.toml "$(CARGO)") && stamp=$$(sh userspace-dp/build_support/linked-libs-stamp.sh) && XPF_LINKED_LIBS_STAMP=$$stamp $(CARGO) +$$pinned build --manifest-path userspace-dp/Cargo.toml --release
 	install -m 0755 userspace-dp/target/release/xpf-userspace-dp ./xpf-userspace-dp
 
 # Manual build check for the diagnostic `debug-log` feature (#1678).
@@ -63,7 +74,7 @@ build-userspace-dp:
 # #1678 because nothing compiled it) can be revalidated with one
 # command before a commit. Compile-only; does not install.
 build-userspace-dp-debug-log:
-	stamp=$$(sh userspace-dp/build_support/linked-libs-stamp.sh) && XPF_LINKED_LIBS_STAMP=$$stamp $(CARGO) build --manifest-path userspace-dp/Cargo.toml --release --features debug-log
+	pinned=$$(sh userspace-dp/build_support/dp-toolchain.sh userspace-dp/rust-toolchain.toml "$(CARGO)") && stamp=$$(sh userspace-dp/build_support/linked-libs-stamp.sh) && XPF_LINKED_LIBS_STAMP=$$stamp $(CARGO) +$$pinned build --manifest-path userspace-dp/Cargo.toml --release --features debug-log
 
 # Generate protobuf/gRPC code
 proto:
@@ -344,10 +355,10 @@ test-race-dp:
 # add with overflow" (docs/log/9499.md). Measured on a loaded host: ~3.5 min
 # cold build, ~65 s run (2489 tests).
 test-rust:
-	stamp=$$(sh userspace-dp/build_support/linked-libs-stamp.sh) && XPF_LINKED_LIBS_STAMP=$$stamp $(CARGO) check --manifest-path userspace-dp/Cargo.toml --benches
-	stamp=$$(sh userspace-dp/build_support/linked-libs-stamp.sh) && XPF_LINKED_LIBS_STAMP=$$stamp $(CARGO) test --manifest-path userspace-dp/Cargo.toml --release \
+	pinned=$$(sh userspace-dp/build_support/dp-toolchain.sh userspace-dp/rust-toolchain.toml "$(CARGO)") && stamp=$$(sh userspace-dp/build_support/linked-libs-stamp.sh) && XPF_LINKED_LIBS_STAMP=$$stamp $(CARGO) +$$pinned check --manifest-path userspace-dp/Cargo.toml --benches
+	pinned=$$(sh userspace-dp/build_support/dp-toolchain.sh userspace-dp/rust-toolchain.toml "$(CARGO)") && stamp=$$(sh userspace-dp/build_support/linked-libs-stamp.sh) && XPF_LINKED_LIBS_STAMP=$$stamp $(CARGO) +$$pinned test --manifest-path userspace-dp/Cargo.toml --release \
 		--bins --tests -- --test-threads=1
-	stamp=$$(sh userspace-dp/build_support/linked-libs-stamp.sh) && XPF_LINKED_LIBS_STAMP=$$stamp $(CARGO) test --manifest-path userspace-dp/Cargo.toml \
+	pinned=$$(sh userspace-dp/build_support/dp-toolchain.sh userspace-dp/rust-toolchain.toml "$(CARGO)") && stamp=$$(sh userspace-dp/build_support/linked-libs-stamp.sh) && XPF_LINKED_LIBS_STAMP=$$stamp $(CARGO) +$$pinned test --manifest-path userspace-dp/Cargo.toml \
 		--bins --tests -- --test-threads=1 frame nat session checksum
 
 # #9499 member 2: UB detection. `make test-rust` above makes an integer WRAP an
@@ -619,14 +630,23 @@ image:
 # Sign already-baked dist/ image artifacts (re-emit the per-version manifest
 # signature). The bake also signs inline when XPF_SIGN_SECKEY is set; this is
 # the standalone re-sign / rotation entry point.
+# #9920 F-063: sign-manifest asserts the awk-derived set equals the bake's
+# four-file set (+ validated/base_image_pinned/guest_kernel) before signing,
+# so a tampered manifest is refused, not laundered.
+# #9920 F-064: set -e is the belt (both fallible commands below are
+# ||-guarded, so it only fires on the unexpected); the fail accumulator is
+# the mechanism — every manifest is attempted, each failure names itself,
+# and the trailing test fails the recipe iff any failed. Without it the
+# recipe's status was the LAST iteration's: a failed rotation reported
+# success and left the tree half-signed.
 dist-sign:
 	@test -n "$(XPF_SIGN_SECKEY)" || { echo "set XPF_SIGN_SECKEY=<minisign seckey path>"; exit 1; }
-	@for m in dist/xpf-*.SHA256SUMS; do \
+	@set -e; fail=; for m in dist/xpf-*.SHA256SUMS; do \
 	    [ -f "$$m" ] || { echo "no dist/xpf-*.SHA256SUMS (run 'make image' first)"; exit 1; }; \
 	    python3 scripts/dist/sign.py sign-manifest --manifest "$$m" \
 	        --seckey "$(XPF_SIGN_SECKEY)" \
-	        $$(awk '{print "dist/" $$2}' "$$m"); \
-	done
+	        $$(awk '{print "dist/" $$2}' "$$m") || { echo "dist-sign: $$m: FAILED" >&2; fail=1; }; \
+	done; test -z "$$fail"
 
 # Build the signed apt repo (flat default; XPF_APT_TOOL=reprepro to opt in).
 dist-repo:

@@ -24,9 +24,17 @@ Design contract (docs/research/1924-signed-hosted-dist/plan.md §5.1/§5.2):
   from the manifest, or a hash mismatch, FAILS. Files listed but not
   fetched are simply not checked (so a qcow2-only libvirt fetch verifies).
 """
+# #9920 F-063: the sign-manifest CLI (the `make dist-sign` recovery path) is
+#fail-CLOSED for bake manifests: it refuses an xpf-<ver>.SHA256SUMS whose
+#file set is not exactly the bake's four-file set for <ver>, or whose
+#sidecar does not assert validated/base_image_pinned/guest_kernel — BEFORE
+#writing anything. The library functions below stay permissive (bake.py and
+#the publish-negative fixtures call them directly); publish.py remains the
+#full downstream gate.
 
 import hashlib
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -52,6 +60,156 @@ DEFAULT_IMAGE_PUBKEY = default_image_pubkey()
 
 class SignError(Exception):
     """Signing/verification failure — fatal to the caller's gate."""
+
+
+# The bake's four-file signed set (#9920 F-063 SSOT). bake.py builds its
+# write_manifest file list from bake_set_basenames(), and the sign-manifest
+# CLI requires its inputs to equal this set for xpf-*.SHA256SUMS manifests —
+# one literal, so a bake that gains a fifth artifact cannot silently desync
+# from the re-sign gate (it would false-red until both move together, which
+# is the point: the two must move in one PR).
+BAKE_SET_TEMPLATES = (
+    "xpf-{ver}.qcow2",
+    "xpf-{ver}.incus-metadata.tar.gz",
+    "xpf-{ver}.manifest",
+    "xpf-{ver}.pkgs",
+)
+
+
+def bake_set_basenames(ver):
+    """The four basenames bake.py covers with xpf-<ver>.SHA256SUMS."""
+    return [t.format(ver=ver) for t in BAKE_SET_TEMPLATES]
+
+
+def is_bake_manifest(manifest_path):
+    """True when `manifest_path` names a per-version bake manifest — the only
+    manifest shape publish discovers (publish.list_versions globs
+    xpf-*.SHA256SUMS). The strict gate applies exactly to these."""
+    base = os.path.basename(manifest_path)
+    return base.startswith("xpf-") and base.endswith(".SHA256SUMS")
+
+
+# Version allowlist MIRRORS scripts/image/bake.py:validate_version (#5992),
+# which itself mirrors scripts/deploy/xpf-deploy.py:validate_version and
+# pkg/upgrade.ValidateVersion. Mirrored (not imported: bake imports THIS
+# module, so importing bake would cycle) with charset parity asserted in
+# scripts/dist/test_dist_resign_9920.py. Raises SignError instead of dying —
+# the strict gate needs a catchable refusal, and this module never exits
+# outside _main.
+_SAFE_VERSION = re.compile(r"[A-Za-z0-9][A-Za-z0-9._+~-]*\Z")
+
+
+def validate_version(value, field):
+    """Reject a version that could escape the artifact output directory when
+    substituted into `xpf-<ver>.qcow2` (and siblings). Fail-closed on a path
+    separator, `..`, absolute path, leading `.`/`-`, whitespace, `%`, or any
+    char outside [A-Za-z0-9._+~-]. Accepts git-describe / semver versions."""
+    if not isinstance(value, str) or not value:
+        raise SignError(f"{field} is required and must be a non-empty string")
+    if os.path.isabs(value):
+        raise SignError(f"{field} '{value}' must not be an absolute path")
+    if "/" in value or "\\" in value or os.sep in value \
+            or (os.altsep and os.altsep in value):
+        raise SignError(
+            f"{field} '{value}' must not contain a path separator")
+    if value.startswith("-"):
+        raise SignError(
+            f"{field} '{value}' must not start with '-' "
+            "(would be read as a CLI flag)")
+    if not _SAFE_VERSION.match(value):
+        raise SignError(
+            f"{field} '{value}' is not a safe version — allow only "
+            "[A-Za-z0-9][A-Za-z0-9._+~-]* (no separators, '..', '%', spaces, or "
+            "shell metacharacters), so it cannot escape the artifact output "
+            "directory (#5992)")
+    return value
+
+
+def parse_sidecar_fields(text):
+    """Parse a bake `.manifest` sidecar (key: value lines) into a dict, keys
+    verbatim. Moved from publish._parse_manifest_fields (#9920): the strict
+    sign-manifest gate and gate_provenance must split lines identically, and
+    publish already imports this module, so this is the cycle-free home."""
+    d = {}
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or ":" not in line:
+            continue
+        k, v = line.split(":", 1)
+        d[k.strip()] = v.strip()
+    return d
+
+
+def assert_bake_set(manifest_path, files):
+    """#9920 F-063: refuse to sign an xpf-<ver>.SHA256SUMS manifest whose file
+    set is not exactly the bake's four-file set for <ver>, or whose
+    xpf-<ver>.manifest sidecar does not assert validated/base_image_pinned/
+    guest_kernel (the same three properties gate_provenance enforces).
+
+    Call BEFORE write_manifest: every refusal raises SignError (the CLI maps
+    it to `ERROR:` + exit 1) with the manifest and any pre-existing .minisig
+    left byte-identical. What this is NOT, stated so a reader does not
+    mistake the tripwire for authentication:
+      - it never verifies the OLD signature (a rotation may lack the old key;
+        the actor here is the publisher/operator, not a remote party);
+      - it never compares current bytes to the recorded hashes — a byte
+        tamper that preserves the flags is re-hashed and signed (publish's
+        hash checks then pass; pre-existing, outside F-063's letter);
+      - it does not check the inventory leg (hollow/mismatched pkgs stays
+        publish's job — publish remains the full downstream gate).
+    """
+    base = os.path.basename(manifest_path)
+    if not is_bake_manifest(manifest_path):
+        raise SignError(
+            f"{base}: not an xpf-<ver>.SHA256SUMS bake manifest — refusing to "
+            "apply the bake-set gate to it (#9920)")
+    ver = base[len("xpf-"):-len(".SHA256SUMS")]
+    validate_version(ver, f"version in {base}")
+    expected = bake_set_basenames(ver)
+    got = [os.path.basename(f) for f in files]
+    if sorted(got) != sorted(expected):
+        raise SignError(
+            f"{base}: refusing to sign a file set that is not the bake's "
+            f"four-file set for version {ver!r}: got {sorted(got)}, want "
+            f"{sorted(expected)} (#9920: re-sign must not launder a reduced "
+            "set — re-bake or restore the missing files)")
+    # Same basenames from mixed directories would hash foreign bytes under
+    # bake names, so all four must sit beside the manifest they are signed
+    # under (the bake always writes them that way).
+    want_dir = os.path.dirname(os.path.abspath(manifest_path))
+    for f in files:
+        if os.path.dirname(os.path.abspath(f)) != want_dir:
+            raise SignError(
+                f"{base}: {f!r} is not beside the manifest in {want_dir} — "
+                f"refusing to sign a scattered set as the bake set for "
+                f"{ver!r} (#9920)")
+    sidecar_base = f"xpf-{ver}.manifest"
+    sidecar_path = {os.path.basename(f): f for f in files}[sidecar_base]
+    try:
+        with open(sidecar_path, "rb") as fh:
+            raw = fh.read()
+    except OSError as e:
+        raise SignError(
+            f"{base}: cannot read provenance sidecar {sidecar_base}: {e} "
+            "(#9920)") from e
+    fields = parse_sidecar_fields(raw.decode("utf-8", "replace"))
+    validated = fields.get("validated")
+    if validated != "true":
+        raise SignError(
+            f"{base}: provenance sidecar says validated={validated!r} (not "
+            "'true') — refusing to sign an unvalidated bake set (#9920; "
+            "re-bake WITHOUT --skip-validate)")
+    base_pinned = fields.get("base_image_pinned")
+    if base_pinned != "true":
+        raise SignError(
+            f"{base}: provenance sidecar says base_image_pinned="
+            f"{base_pinned!r} (not 'true') — refusing to sign an unpinned "
+            "bake set (#9920)")
+    if not fields.get("guest_kernel"):
+        raise SignError(
+            f"{base}: provenance sidecar records no guest_kernel — refusing "
+            "to sign a set whose traceability record cannot describe it "
+            "(#9920; re-bake)")
 
 
 def require_minisign():
@@ -336,6 +494,14 @@ def _main(argv):
     a = p.parse_args(argv)
     try:
         if a.cmd == "sign-manifest":
+            # #9920 F-063: fail-CLOSED for bake manifests. An xpf-<ver>.SHA256SUMS
+            # feeds publish discovery, so its set + provenance flags are asserted
+            # BEFORE anything is written; a refusal leaves the manifest and any
+            # pre-existing .minisig byte-identical. Other basenames are fixture
+            # scratch (never published) and stay permissive — deliberate
+            # rename-evasion is out of scope (publish still refuses bad sets).
+            if is_bake_manifest(a.manifest):
+                assert_bake_set(a.manifest, a.files)
             write_manifest(a.manifest, a.files)
             sig = sign_manifest(a.manifest, a.seckey, a.comment)
             print(f"signed: {a.manifest} -> {sig}")
@@ -347,6 +513,11 @@ def _main(argv):
                   f"{os.path.basename(a.manifest)}")
             return 0
     except SignError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        return 1
+    except OSError as e:
+        # #9920 F-064: a missing/unreadable input is an operator error with an
+        # actionable message, not an unhandled traceback.
         print(f"ERROR: {e}", file=sys.stderr)
         return 1
 
