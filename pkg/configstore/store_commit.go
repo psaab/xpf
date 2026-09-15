@@ -36,6 +36,11 @@ var (
 	rbWriteFileAtomic  = fsatomic.WriteFileAtomic
 	rbSyncDir          = fsatomic.SyncDir
 	rbRemove           = os.Remove
+	// rbReadBoundedFile routes ONLY DB.ReadConfirm's bounded read (#9887:
+	// transient-read-error coverage for the armed-timer removal gate). Every
+	// other ReadBoundedFile caller uses the func directly; tests scope the
+	// override to confirm.json by basename, as installConfirmDeleteSeams does.
+	rbReadBoundedFile = ReadBoundedFile
 )
 
 // archiveWriteBarrier is a test-only seam (#5869) invoked AFTER the archive
@@ -207,6 +212,7 @@ func (s *Store) commitWithDescriptionLocked(description string) (*config.Config,
 	// itself fail post-rename — fsatomic cannot guarantee an atomic restore
 	// — whereas C is already the durable content, so converging to it needs
 	// no further write to hold the invariant.
+	resolutionDrained := false
 	if err := s.writeActive(s.candidate); err != nil {
 		if !isPostRenameDurabilityFailure(err) {
 			return nil, fmt.Errorf("commit failed: persist active config: %w", err)
@@ -227,7 +233,7 @@ func (s *Store) commitWithDescriptionLocked(description string) (*config.Config,
 		// (or, for a plain commit, a stale PrevTree=A record lingers and a crash
 		// reverts this just-committed C back to A). No-op unless a removal was
 		// deferred.
-		s.clearConfirmResolutionPendingLocked()
+		resolutionDrained = s.clearConfirmResolutionPendingLocked()
 	} else {
 		s.persistDegraded = false       // disk now holds the current config
 		s.everCommitted = true          // #1922 step-0: a real commit has succeeded
@@ -237,7 +243,7 @@ func (s *Store) commitWithDescriptionLocked(description string) (*config.Config,
 		// the deferred (retained) confirm.json so a reboot does not re-drive a
 		// stale rollback that this commit has replaced. No-op unless a removal
 		// was deferred.
-		s.clearConfirmResolutionPendingLocked()
+		resolutionDrained = s.clearConfirmResolutionPendingLocked()
 	}
 
 	// Push current active to history with description
@@ -273,8 +279,25 @@ func (s *Store) commitWithDescriptionLocked(description string) (*config.Config,
 	// already returned an error to the operator when applicable); a durable
 	// confirm.json-removal failure is retained as retry debt + degraded health
 	// inside clearPendingConfirmLocked and converges autonomously.
-	if cleared, _ := s.clearPendingConfirmLocked(); cleared {
+	cleared, _ := s.clearPendingConfirmLocked()
+	if cleared {
 		slog.Info("plain commit confirmed a pending commit-confirmed window")
+	} else if s.confirmRecoveryReadFailed && !resolutionDrained {
+		// #9887: a plain commit ALSO supersedes the #8566 lost window. No
+		// timer was ever armed in that state, so clearPendingConfirmLocked
+		// above no-ops — but the just-promoted config replaces the
+		// unconfirmed one that stood with no rollback, so the flag's
+		// condition is gone. Best-effort remove the unreadable record: on
+		// success the flag clears (the record is durably gone); on failure
+		// resolveConfirmRemovalLocked retains removal debt + degraded health
+		// and the retry loop converges. Deliberately NOT folded into
+		// clearPendingConfirmLocked itself: that helper's cleared bit is the
+		// "a window was pending" contract ConfirmCommit (error) and
+		// ConfirmPendingOnDemotion (bool) report, and an erroring caller
+		// supersedes nothing. Skipped when the deferred finalize above
+		// already drained the same single file (SPARK-F2: one attempt per
+		// op — its retained debt already owns convergence on failure).
+		s.resolveConfirmRemovalLocked("plain_commit_supersede")
 	}
 
 	// Log to journal with description
@@ -905,16 +928,21 @@ func (s *Store) ensurePersistRetryLoopLocked() {
 // from every path that lands a DURABLE active-config write — the persist-retry
 // heal and every superseding commit/sync — so the retained record is dropped
 // exactly when the replacement it was guarding becomes durable, never before.
-// No-op unless a removal was deferred. Caller holds s.mu (write lock).
-func (s *Store) clearConfirmResolutionPendingLocked() {
+// No-op unless a removal was deferred. It reports whether a deferral was
+// pending (and thus a removal attempted) so a caller that ALSO resolves the
+// same single file later in the same operation can skip its own attempt
+// (#9887/SPARK-F2: one drain per op, not two journals for one record).
+// Caller holds s.mu (write lock).
+func (s *Store) clearConfirmResolutionPendingLocked() bool {
 	if !s.confirmResolvePendingPersist {
-		return
+		return false
 	}
 	s.confirmResolvePendingPersist = false
 	// #5835: the replacement config is durable, so remove the retained record.
 	// A durable-removal failure here retains retry debt (degraded health +
 	// background retry) rather than being swallowed — the loop re-drives it.
 	s.resolveConfirmRemovalLocked("confirm_resolution_finalize")
+	return true
 }
 
 // clearPendingConfirmLocked cancels an armed commit-confirmed rollback

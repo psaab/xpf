@@ -909,6 +909,13 @@ func (s *Store) SyncApply(content string, chassisPreserve func(*config.ConfigTre
 	if syncSupersededConfirm {
 		slog.Info("HA config-sync apply confirmed a pending commit-confirmed window")
 	}
+	// #9887: the sync ALSO supersedes the #8566 lost window. No timer was
+	// ever armed in that state, so the cancel above reports nothing — but the
+	// synced config replaces the unconfirmed one standing with no rollback.
+	// It folds into the SAME #5473 ordering below: the unreadable record is
+	// removed only once the synced replacement is durable, and deferred (not
+	// dropped) while it is not.
+	syncSupersededLostWindow := s.confirmRecoveryReadFailed
 
 	// #1799 Option B (degrade-not-fail): the in-memory apply above
 	// MUST stand even if the disk write fails — failing the
@@ -932,23 +939,29 @@ func (s *Store) SyncApply(content string, chassisPreserve func(*config.ConfigTre
 		// is NOT durable. Keep confirm.json and defer its removal until the
 		// retry lands the synced config durably — a crash before then boots
 		// into a state where the persisted rollback still fires.
-		if syncSupersededConfirm {
+		if syncSupersededConfirm || syncSupersededLostWindow {
 			s.confirmResolvePendingPersist = true
 		}
 	} else {
 		s.persistDegraded = false
 		// The synced config is durable. Drop the confirm.json this sync
 		// superseded now that the replacement is on disk.
-		if syncSupersededConfirm {
+		if syncSupersededConfirm || syncSupersededLostWindow {
 			// #5835: a failed removal retains retry debt + degraded health
 			// rather than being swallowed.
 			s.resolveConfirmRemovalLocked("config_sync_remove")
+			// #9887/SPARK-F2: the direct resolve above already drained the
+			// same single file — on failure its retained debt owns
+			// convergence — so consume any stale defer without a second
+			// attempt (and second confirm_remove_error journal) for it.
+			s.confirmResolvePendingPersist = false
+		} else {
+			// Finalize any removal deferred by an EARLIER failed resolution
+			// write (e.g. a prior rollback whose persist failed): the synced
+			// config is durable, so that stale window is definitively
+			// superseded too. No-op unless such a removal was pending.
+			s.clearConfirmResolutionPendingLocked()
 		}
-		// Also finalize any removal deferred by an EARLIER failed resolution
-		// write (e.g. a prior rollback whose persist failed): the synced config
-		// is durable, so that stale window is definitively superseded too.
-		// No-op unless such a removal was pending.
-		s.clearConfirmResolutionPendingLocked()
 	}
 
 	s.journalLog(&JournalEntry{
