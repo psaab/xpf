@@ -533,7 +533,8 @@ func (s *Store) ConfigPersistDegraded() bool {
 // window (#8566). A strict subset of ConfigPersistDegraded, exposed separately
 // so a caller can distinguish "the window is gone" from a write-side debt that
 // the background retry will heal on its own — this one will not: it clears only
-// when a later arm or removal of a confirm record succeeds.
+// when a later arm or removal of a confirm record succeeds (a superseding
+// plain commit or config-sync performs that removal, #9887).
 func (s *Store) ConfirmRecoveryReadFailed() bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -706,12 +707,33 @@ func (s *Store) persistRetryLoop(backoff, maxBackoff time.Duration) {
 			slog.Info("pending commit-confirmed removal debt cleared: a newer armed window "+
 				"durably replaced the record it was owed for", "issue", "#7675")
 		} else if s.confirmRemoveDegraded {
-			// #5835: re-drive the stale confirm.json removal. DeleteConfirm
-			// reaches the #4864 dir fsync even when the file is already absent,
-			// so an "unlink succeeded, dir-sync owed" state converges here.
-			if err := s.removeConfirmState(); err == nil {
+			// #9887/GPT: NEVER re-drive the delete while a window is ARMED.
+			// A successful re-arm clears the read-failure/arm flags but
+			// leaves removal debt outstanding, and the supersede check above
+			// reports "not superseded" on ANY read error — so a transient
+			// ReadConfirm failure here would delete the NEWER live window's
+			// crash-recovery file while its timer REMAINS ARMED (#4577: a
+			// restart then leaves the unconfirmed config standing with no
+			// rollback). Unreadable is not proof of not-a-fresh-arm; only
+			// the in-memory liveness (armed timer) is authoritative. Keep
+			// the debt and re-check on a later tick: a readable tick clears
+			// it via supersession, and window resolution removes the record
+			// itself. Bounded by window expiry — the firing rollback
+			if s.confirmTimer != nil {
+				slog.Info("skipping commit-confirmed record removal retry while a window is armed; " +
+					"the on-disk record may be the live window's")
+			} else if err := s.removeConfirmState(); err == nil {
 				s.confirmRemoveDegraded = false
 				s.confirmRemoveDebtID = ""
+				// #9887: the record is durably gone, so the #8566 flag's
+				// condition is over too. The flag can only still be set here
+				// for this same single file — every ARM WriteConfirm success
+				// clears it (the #8565 tombstone WriteConfirm does not, but
+				// it is a no-op when the flag is set since the record then
+				// reads nil) — and this loop's debt set does not include it,
+				// so without this a healed removal would exit the loop with
+				// the flag latched and /health stuck at 503.
+				s.confirmRecoveryReadFailed = false
 				s.journalLog(&JournalEntry{
 					Action: "confirm_remove_recovered",
 					Detail: "stale pending commit-confirmed record removed after earlier failure",

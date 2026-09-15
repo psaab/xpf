@@ -267,7 +267,7 @@ func (db *DB) ReadConfirm() (*confirmRecord, error) {
 	// authoritative read is ReadBoundedFile (#6753/#4909) — which also refuses a
 	// non-regular file — and the most privileged reads on the boot path were the
 	// ones still using os.ReadFile.
-	data, err := ReadBoundedFile(db.confirmPath(), MaxConfigSize)
+	data, err := rbReadBoundedFile(db.confirmPath(), MaxConfigSize)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil

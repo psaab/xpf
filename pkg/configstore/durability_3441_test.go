@@ -17,9 +17,9 @@ import (
 // package run serially, so a single deferred restore is sufficient.
 func restoreRollbackSeams(t *testing.T) {
 	t.Helper()
-	dur, atom, sync, rm := rbWriteFileDurable, rbWriteFileAtomic, rbSyncDir, rbRemove
+	dur, atom, sync, rm, rd := rbWriteFileDurable, rbWriteFileAtomic, rbSyncDir, rbRemove, rbReadBoundedFile
 	t.Cleanup(func() {
-		rbWriteFileDurable, rbWriteFileAtomic, rbSyncDir, rbRemove = dur, atom, sync, rm
+		rbWriteFileDurable, rbWriteFileAtomic, rbSyncDir, rbRemove, rbReadBoundedFile = dur, atom, sync, rm, rd
 	})
 }
 

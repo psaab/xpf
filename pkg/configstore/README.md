@@ -1051,7 +1051,10 @@ per-path:
     error class is added, because that is a startup-latency and taxonomy
     change with its own design. The state is not self-healing — the window
     is gone — so it clears on operator action: the next successful arm or
-    removal of a confirm record.
+    removal of a confirm record. #9887 extends the removal leg to plain
+    commits and config-syncs, which supersede the lost window (previously
+    only a new arm or an armed-window resolution cleared it, so /health
+    stayed 503 after the condition had been superseded).
   - **The removal debt is KEYED to the record it is owed for (#7675).**
     The retry above re-drove `removeConfirmState()` UNCONDITIONALLY, so it
     deleted whatever `confirm.json` was on disk. An operator who armed a
