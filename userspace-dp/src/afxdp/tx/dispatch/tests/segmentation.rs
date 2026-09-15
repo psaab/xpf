@@ -600,3 +600,159 @@ fn prepared_tx_segments_a_fin_bearing_oversized_frame_9116() {
         );
     }
 }
+// #9782 F2b + tx-twin pin: an oversized PAT-translated TCP flow must
+// segment into frames that ALL carry the translated tuple with valid
+// checksums, and must NOT trip the debug-log tuple-mismatch diagnostic
+// (which compares against the POST-NAT expectation). RED-on-revert both
+// ways: restoring post-NAT enforce in the tx twin emits preserved ports
+// (port asserts fail); comparing against pre-NAT expectations drops the
+// segments under --features debug-log (count assert fails there).
+#[test]
+fn segmentation_pat_translation_survives_expected_ports_9782() {
+    let egress_mtu = 900usize;
+    let tcp_payload_len = 1060usize;
+    let total_len = (20 + 20 + tcp_payload_len) as u16;
+    let src_port = 47308u16;
+    let dst_port = 5201u16;
+    let pat_port = 30001u16;
+
+    let mut frame = vec![0u8; 14 + total_len as usize];
+    frame[12] = 0x08;
+    frame[13] = 0x00;
+    frame[14] = 0x45;
+    frame[16] = (total_len >> 8) as u8;
+    frame[17] = total_len as u8;
+    frame[18] = 0x00;
+    frame[19] = 0x01;
+    frame[20] = 0x00;
+    frame[21] = 0x00;
+    frame[22] = 64;
+    frame[23] = PROTO_TCP;
+    frame[26..30].copy_from_slice(&[10, 0, 0, 1]);
+    frame[30..34].copy_from_slice(&[10, 0, 0, 2]);
+    frame[34..36].copy_from_slice(&src_port.to_be_bytes());
+    frame[36..38].copy_from_slice(&dst_port.to_be_bytes());
+    frame[46] = 0x50;
+    frame[47] = 0x10;
+    let ip_csum = crate::afxdp::tx::test_support::compute_ipv4_header_checksum(&frame[14..34]);
+    frame[24] = (ip_csum >> 8) as u8;
+    frame[25] = (ip_csum & 0xff) as u8;
+    crate::afxdp::frame::checksum::recompute_l4_checksum_ipv4(
+        &mut frame[14..],
+        20,
+        PROTO_TCP,
+        true,
+    )
+    .expect("seed input checksum");
+
+    let mut bindings = vec![
+        BindingWorker::new_for_mirror_test(0, 0, 11, 0),
+        BindingWorker::new_for_mirror_test(1, 0, 22, 0),
+    ];
+    unsafe {
+        bindings[0]
+            .umem
+            .area()
+            .slice_mut_unchecked(0, frame.len())
+    }
+    .expect("ingress frame")
+    .copy_from_slice(&frame);
+
+    let forwarding = test_forwarding_with_egress_mtu(egress_mtu);
+    let lookup = WorkerBindingLookup::from_bindings(&bindings);
+    let mirror_targets = MirrorTargetMap::default();
+    let mut decision = test_forwarding_decision_to_bound_ifindex(22);
+    decision.nat = NatDecision {
+        rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 7))),
+        rewrite_src_port: Some(pat_port),
+        ..Default::default()
+    };
+    let mut req = test_live_forward_request_for_frame(frame.len(), decision);
+    req.expected_ports = Some((src_port, dst_port));
+    let mut pending = vec![req];
+    let mut post_recycles = Vec::new();
+    let ingress_ident = bindings[0].identity();
+    let ingress_live = &*bindings[0].live as *const BindingLiveState;
+    let local_tunnel_deliveries: Arc<ArcSwap<BTreeMap<i32, LocalTunnelDelivery>>> =
+        Arc::new(ArcSwap::from_pointee(BTreeMap::new()));
+    let recent_exceptions = Arc::new(Mutex::new(ExceptionEventRing::new()));
+    let worker_commands_by_id: BTreeMap<u32, Arc<Mutex<VecDeque<WorkerCommand>>>> = BTreeMap::new();
+    let mut dbg = DebugPollCounters::default();
+
+    let (left, rest) = bindings.split_at_mut(0);
+    let (ingress, right) = rest.split_first_mut().expect("ingress binding");
+    enqueue_pending_forwards(
+        left,
+        0,
+        ingress,
+        right,
+        &lookup,
+        &mirror_targets,
+        &mut pending,
+        &mut post_recycles,
+        1,
+        &forwarding,
+        &ingress_ident,
+        unsafe { &*ingress_live },
+        None,
+        &local_tunnel_deliveries,
+        &recent_exceptions,
+        &mut dbg,
+        &mut BatchCounters::default(),
+        0,
+        &worker_commands_by_id,
+    );
+
+    let area = bindings[1].umem.area();
+    let segs: Vec<Vec<u8>> = bindings[1]
+        .tx_pipeline
+        .pending_tx_prepared
+        .iter()
+        .map(|r| {
+            area.slice(r.offset as usize, r.len as usize)
+                .expect("segment bytes")
+                .to_vec()
+        })
+        .collect();
+    assert!(
+        segs.len() >= 2,
+        "#9782: oversized PAT flow must segment, got {} frames",
+        segs.len()
+    );
+    for (i, seg) in segs.iter().enumerate() {
+        let ports = crate::afxdp::frame::live_frame_ports_bytes(
+            seg,
+            libc::AF_INET as u8,
+            PROTO_TCP,
+        );
+        assert_eq!(
+            ports,
+            Some((pat_port, dst_port)),
+            "#9782: segment {i} must carry the translated tuple"
+        );
+        let l3 = crate::afxdp::frame::frame_l3_offset(seg).expect("l3");
+        let mut probe = seg[l3..].to_vec();
+        let ihl = ((probe[0] & 0x0f) as usize) * 4;
+        let before = u16::from_be_bytes([probe[ihl + 16], probe[ihl + 17]]);
+        probe[ihl + 16] = 0;
+        probe[ihl + 17] = 0;
+        crate::afxdp::frame::checksum::recompute_l4_checksum_ipv4(
+            &mut probe, ihl, PROTO_TCP, true,
+        )
+        .expect("recompute");
+        let after = u16::from_be_bytes([probe[ihl + 16], probe[ihl + 17]]);
+        assert_eq!(before, after, "#9782: segment {i} checksum valid");
+    }
+    if cfg!(feature = "debug-log") {
+        let reasons: Vec<String> = recent_exceptions
+            .lock()
+            .expect("exceptions")
+            .iter()
+            .map(|e| e.reason().to_string())
+            .collect();
+        assert!(
+            !reasons.iter().any(|r| r.starts_with("forward_tuple_mismatch")),
+            "#9782: no false mismatch on translated segments: {reasons:?}"
+        );
+    }
+}

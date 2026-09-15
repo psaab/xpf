@@ -293,8 +293,10 @@ proptest! {
 
     /// P-T4: NAT composition — every segment carries the rewritten
     /// tuple and valid checksums (composes the S2 oracle).
-    /// `expected_ports` is the post-NAT wire tuple, matching how the
-    /// enforce step runs after `apply_nat_*` in the splitter.
+    /// `expected_ports` is the pre-NAT arrival tuple (#9782: enforce
+    /// runs before `apply_nat_*` in the splitter, same as the
+    /// canonical paths — a post-NAT input here would assert the
+    /// clobber being fixed).
     #[test]
     fn segmentation_composes_with_nat(
         ((pkt, mtu), nat) in arb_seg_packet().prop_flat_map(|(pkt, mtu)| {
@@ -312,7 +314,7 @@ proptest! {
             &decision,
             &forwarding,
             false,
-            Some((want.src_port, want.dst_port)),
+            Some((pkt.src_port, pkt.dst_port)),
         );
         // #5148: fragments (incl. the strategy's IPv6 Fragment-header ext
         // chain) are declined by the splitter — NAT composition applies only
@@ -440,7 +442,8 @@ fn pin_segmentation_v6_ext_chain_segments_valid() {
         &decision,
         &forwarding,
         false,
-        Some((want.src_port, want.dst_port)),
+        // #9782: pre-NAT arrival tuple (enforce runs before apply_nat).
+        Some((pkt.src_port, pkt.dst_port)),
     )
     .expect("ext-headered oversized v6 TCP must segment");
     assert!(segs.len() > 1, "splitter engaged");
