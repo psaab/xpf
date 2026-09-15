@@ -82,10 +82,27 @@ func (d *Daemon) applyFencedForBackground() bool { return d.applyFenced.Load() }
 // the instant that apply releases, which is precisely the moment the shutdown
 // drain is waiting for. Re-testing after the acquire closes that window, so a
 // waiter cannot inherit the semaphore the drain just freed.
+//
+// #9884: the same gate also refuses while in bootstrap mode. A compile-failed
+// Load can heal ActiveConfig to a non-nil rollback target while still
+// reporting ErrConfigCompile, so "an active compiled config exists" no longer
+// implies "safe to reconcile": a feed refresh, DHCP lease change, or
+// config-poll apply would otherwise reach the bootstrap-exit block in
+// applyConfigLocked and take over interfaces/dataplane with no commit or sync.
+// The AUTHORIZED bootstrap exits (commit, commitConfirmed, syncAndApply,
+// executeConfirmedRollback) acquire applySem directly and never pass through
+// this gate, so they are unaffected. Both predicates are tested twice: a
+// waiter parked on applySem while the holder rolls the daemon back to
+// bootstrap must not apply behind it.
 func (d *Daemon) beginBackgroundApply(who string) bool {
 	if d.applyFencedForBackground() {
 		slog.Info("shutdown: refusing background config apply; the daemon is stopping",
 			"caller", who, "issue", "#6788")
+		return false
+	}
+	if d.inBootstrap() {
+		slog.Info("bootstrap: refusing background config apply; takeover stays suppressed until an authorized recovery transition (commit, sync, rollback)",
+			"caller", who, "issue", "#9884")
 		return false
 	}
 	_ = d.applySem.Acquire(context.Background(), 1)
@@ -97,6 +114,17 @@ func (d *Daemon) beginBackgroundApply(who string) bool {
 		slog.Info("shutdown: refusing background config apply; the daemon began stopping "+
 			"while this applier waited for the apply lock",
 			"caller", who, "issue", "#6788")
+		return false
+	}
+	if d.inBootstrap() {
+		// Entered bootstrap while we waited: the transition that flipped it
+		// (a rollback to the safe state) already determined this generation
+		// must not take over. Hand the semaphore straight back rather than
+		// applying behind it.
+		d.applySem.Release(1)
+		slog.Info("bootstrap: refusing background config apply; the daemon entered bootstrap "+
+			"while this applier waited for the apply lock",
+			"caller", who, "issue", "#9884")
 		return false
 	}
 	return true
