@@ -2196,6 +2196,45 @@ fn firewall_term_snapshot_unrepresentable_marker_wire_keys_6459_6463() {
     assert!(!legacy.address_unrepresentable);
 }
 
+// #9875: cross-language wire-key contract for the whole-`from`-leaf fail-closed
+// marker. The Go producer (pkg/dataplane/userspace/protocol_policies.go)
+// marshals `from_unrepresentable` with omitempty; the Rust consumer
+// (protocol/security.rs) decodes it with serde(default). A key rename on
+// either side must fail a test here (Rust decode) or in the Go-side contract
+// test (Go encode) instead of silently degrading to the pre-fix widening
+// behavior.
+#[test]
+fn firewall_term_snapshot_from_unrepresentable_wire_key_9875() {
+    // Rust serialize: marker set -> exact wire key present and true.
+    let term = FirewallTermSnapshot {
+        from_unrepresentable: true,
+        ..Default::default()
+    };
+    let value: serde_json::Value =
+        serde_json::to_value(&term).expect("serialize FirewallTermSnapshot");
+    assert_eq!(value["from_unrepresentable"], true);
+
+    // Go-style payload (only the marker key populated) decodes into the
+    // marker field — mirrors the Go encoder on the tolerant/HA-sync path.
+    let decoded: FirewallTermSnapshot = serde_json::from_value(serde_json::json!({
+        "name": "t",
+        "action": "discard",
+        "from_unrepresentable": true
+    }))
+    .expect("decode Go-style marker payload");
+    assert!(decoded.from_unrepresentable);
+
+    // Legacy payload (key absent — an older Go control plane, #1961) decodes
+    // with the marker false, i.e. the pre-fix behavior window is explicit,
+    // not a decode failure.
+    let legacy: FirewallTermSnapshot = serde_json::from_value(serde_json::json!({
+        "name": "t",
+        "action": "discard"
+    }))
+    .expect("legacy payload without the marker decodes");
+    assert!(!legacy.from_unrepresentable);
+}
+
 // #1642: Rust→Go status-field parity. These serde tests pin the exact wire
 // keys for the four field groups the Go side previously dropped on unmarshal
 // (HAGroupStatus lease telemetry, CoSQueueStatus starvation/ring counters,

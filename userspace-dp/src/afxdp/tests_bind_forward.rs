@@ -2360,6 +2360,7 @@ fn measure_c19_flowless_reaches_cached_filter_7174() {
                 dscp_match_unrepresentable: false,
                 ports_unrepresentable: false,
                 address_unrepresentable: false,
+                from_unrepresentable: false,
                 is_fragment: false,
                 icmp_types: vec![],
                 icmp_codes: vec![],

@@ -68,6 +68,7 @@ fn basic_accept_discard() {
                 dscp_match_unrepresentable: false,
                 ports_unrepresentable: false,
                 address_unrepresentable: false,
+                from_unrepresentable: false,
                     is_fragment: false,
                     icmp_types: vec![],
                     icmp_codes: vec![],
@@ -105,6 +106,7 @@ fn basic_accept_discard() {
                 dscp_match_unrepresentable: false,
                 ports_unrepresentable: false,
                 address_unrepresentable: false,
+                from_unrepresentable: false,
                     is_fragment: false,
                     icmp_types: vec![],
                     icmp_codes: vec![],
@@ -327,6 +329,7 @@ fn port_range_matching() {
                 dscp_match_unrepresentable: false,
                 ports_unrepresentable: false,
                 address_unrepresentable: false,
+                from_unrepresentable: false,
                 is_fragment: false,
                 icmp_types: vec![],
                 icmp_codes: vec![],
@@ -410,6 +413,7 @@ fn destination_port_except_negation() {
                 dscp_match_unrepresentable: false,
                 ports_unrepresentable: false,
                 address_unrepresentable: false,
+                from_unrepresentable: false,
                 is_fragment: false,
                 icmp_types: vec![],
                 icmp_codes: vec![],
@@ -508,6 +512,7 @@ fn source_port_except_negation() {
                 dscp_match_unrepresentable: false,
                 ports_unrepresentable: false,
                 address_unrepresentable: false,
+                from_unrepresentable: false,
                 is_fragment: false,
                 icmp_types: vec![],
                 icmp_codes: vec![],
@@ -590,6 +595,7 @@ fn protocol_matching() {
                 dscp_match_unrepresentable: false,
                 ports_unrepresentable: false,
                 address_unrepresentable: false,
+                from_unrepresentable: false,
                 is_fragment: false,
                 icmp_types: vec![],
                 icmp_codes: vec![],
@@ -665,6 +671,7 @@ fn dscp_rewrite_action() {
                 dscp_match_unrepresentable: false,
                 ports_unrepresentable: false,
                 address_unrepresentable: false,
+                from_unrepresentable: false,
                 is_fragment: false,
                 icmp_types: vec![],
                 icmp_codes: vec![],
@@ -726,6 +733,7 @@ fn dscp_rewrite_action_allows_default_zero() {
                 dscp_match_unrepresentable: false,
                 ports_unrepresentable: false,
                 address_unrepresentable: false,
+                from_unrepresentable: false,
                 is_fragment: false,
                 icmp_types: vec![],
                 icmp_codes: vec![],
@@ -1836,6 +1844,7 @@ fn multiple_terms_first_match_wins() {
                 dscp_match_unrepresentable: false,
                 ports_unrepresentable: false,
                 address_unrepresentable: false,
+                from_unrepresentable: false,
                     is_fragment: false,
                     icmp_types: vec![],
                     icmp_codes: vec![],
@@ -1873,6 +1882,7 @@ fn multiple_terms_first_match_wins() {
                 dscp_match_unrepresentable: false,
                 ports_unrepresentable: false,
                 address_unrepresentable: false,
+                from_unrepresentable: false,
                     is_fragment: false,
                     icmp_types: vec![],
                     icmp_codes: vec![],
@@ -1949,6 +1959,7 @@ fn source_dest_address_matching() {
                 dscp_match_unrepresentable: false,
                 ports_unrepresentable: false,
                 address_unrepresentable: false,
+                from_unrepresentable: false,
                 is_fragment: false,
                 icmp_types: vec![],
                 icmp_codes: vec![],
@@ -6944,6 +6955,57 @@ fn address_unrepresentable_marker_fails_closed_not_narrowed() {
         t.source_addresses = vec!["10.0.0.0/8".into()];
     })
     .expect("a term without the marker must compile");
+}
+
+#[test]
+fn from_unrepresentable_marker_fails_closed_not_widened() {
+    // #9875 RED-on-revert: a term carrying the `from_unrepresentable` wire
+    // marker (the term's `from` block carried a match leaf the dataplane does
+    // NOT enforce — term.UnknownFrom, #3307 — or a value-bearing leaf written
+    // with NO operand — term.ValuelessFrom, #8480) must reject the WHOLE
+    // snapshot — NOT compile a matcher over only the surviving match set.
+    // Pre-fix the Go builder emitted the surviving set, byte-identical to a
+    // term authored without the leaf: an accept term over-permitted and a
+    // discard/reject term over-dropped. The term below carries a SURVIVING
+    // constraint (protocol tcp) alongside the marker, so reverting the
+    // parse_term guard returns Ok here (non-tautological).
+    let err = filter_with_marked_term("inet", |t| {
+        t.protocols = vec!["tcp".into()];
+        t.from_unrepresentable = true;
+    })
+    .expect_err("an unrepresentable from marker must fail the build closed");
+    match err {
+        SnapshotIntegrityError::UnrepresentableFilterFrom {
+            family,
+            filter,
+            term,
+        } => {
+            assert_eq!(family, "inet");
+            assert_eq!(filter, "f");
+            assert_eq!(term, "marked");
+        }
+        other => panic!("expected UnrepresentableFilterFrom, got {other:?}"),
+    }
+    // A term WITHOUT the marker compiles fine (the guard is keyed on the
+    // marker, not on every from-scoped term).
+    filter_with_marked_term("inet", |t| {
+        t.protocols = vec!["tcp".into()];
+    })
+    .expect("a term without the marker must compile");
+}
+
+#[test]
+fn from_unrepresentable_error_names_the_family_for_reused_filter_names() {
+    // Filter names can be reused across families; the diagnostic must name the
+    // family carrying the marker.
+    let err = filter_with_marked_term("inet6", |t| t.from_unrepresentable = true)
+        .expect_err("an unrepresentable from marker must fail the build closed");
+    match err {
+        SnapshotIntegrityError::UnrepresentableFilterFrom { family, .. } => {
+            assert_eq!(family, "inet6");
+        }
+        other => panic!("expected UnrepresentableFilterFrom, got {other:?}"),
+    }
 }
 
 #[test]
