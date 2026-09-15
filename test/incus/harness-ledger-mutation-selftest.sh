@@ -138,6 +138,41 @@ MUTATIONS = {
         "the genesis pin: the pinned baseline becomes the rolling one and a "
         "slow decay is absorbed by both (#9922 F-088)",
     ),
+    "fail-newest-exits-undetermined": (
+        PY_FILE, "py",
+        '    if result.get("verdict") == "FAIL":\n        return 1',
+        "    if False:",
+        "the FAIL-first exit: a FAIL newest on a thin baseline reads "
+        "undetermined instead of measured-bad (#9922 F-086)",
+    ),
+    "aggregate-ignores-fail-verdict": (
+        PY_FILE, "py",
+        '        if res.get("outcome") == REGRESSION or res.get("verdict") == "FAIL"',
+        '        if res.get("outcome") == REGRESSION',
+        "the verdict half of the aggregate's red condition: newest-FAIL pairs "
+        "drop out of the red set (#9922 F-086)",
+    ),
+    "aggregate-never-red": (
+        PY_FILE, "py",
+        '        if res.get("outcome") == REGRESSION or res.get("verdict") == "FAIL"',
+        "        if False:",
+        "the aggregate's red condition itself: every pair reads non-red "
+        "(#9922 F-086)",
+    ),
+    "window-fails-dropped": (
+        PY_FILE, "py",
+        '    result["window_fails"] = len(wfails)',
+        '    result["window_fails"] = 0',
+        "the FAILs-inside-the-window count: a gate failing every other run "
+        "reads as a clean WITHIN-BAND (#9922 F-086)",
+    ),
+    "expected-red-stale-check-dropped": (
+        PY_FILE, "py",
+        "    if any(p not in red for p in declared):\n        return 1",
+        "    if False:",
+        "the shrink-only half of expected-red: a tolerated red that went "
+        "green stays declared forever (#9922 F-086)",
+    ),
     "env-filter-dropped": (
         PY_FILE, "py",
         'prior = [r for r in matching[:-1] if r.get("env") == resolved_env]',

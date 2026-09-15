@@ -567,9 +567,25 @@ if command -v python3 >/dev/null 2>&1; then
 		faill "ledger-merge-completeness"
 		echo "$out" | sed 's/^/      /'
 	fi
+	# #9922 F-086: the aggregate. lint above checks the rows that are PRESENT
+	# are well-formed; this judges what they SAY — every (gate, env) pair's
+	# newest row against its band, red on REGRESSION or newest-FAIL, with
+	# FAILs inside the baseline window surfaced. Tolerated-red pairs live in
+	# test/incus/ledger-expected-red.txt (shrink-only: a declaration that is
+	# no longer red fails). The strict form (no declarations) is
+	# `make harness-compare-all`, the loop/human entry point.
+	out=$(python3 test/incus/ledger_compare.py --all --ledger test/results/ledger.d --expected-red test/incus/ledger-expected-red.txt 2>&1)
+	rc=$?
+	if [ "$rc" -eq 0 ]; then
+		passl "ledger-compare-all ($(echo "$out" | tail -1))"
+	else
+		faill "ledger-compare-all"
+		echo "$out" | sed 's/^/      /'
+	fi
 else
 	skipl "ledger-lint (python3 not installed)"
 	skipl "ledger-merge-completeness (python3 not installed)"
+	skipl "ledger-compare-all (python3 not installed)"
 fi
 
 # ── summary ──

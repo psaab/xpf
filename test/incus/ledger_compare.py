@@ -691,6 +691,24 @@ def compare(
     result["baseline_n"] = len(baseline)
     result["baseline_ts"] = [r.get("ts") for r in baseline]
 
+    # #9922 F-086: FAIL rows inside the baseline window. They never ENTER the
+    # band (see above), but a comparator that judges only the newest row lets
+    # a gate failing every other run read as a clean WITHIN-BAND. Surfaced
+    # here so the aggregate and the render show them. The window starts at
+    # the oldest baseline member; below the K floor there is no baseline, so
+    # the window is the whole prior history at this env.
+    window_start = baseline[0].get("ts") if baseline else None
+    wfails = [
+        r
+        for r in prior
+        if r.get("verdict") == "FAIL"
+        and r.get("env") == resolved_env
+        and headline in (r.get("metrics") or {})
+        and (window_start is None or r.get("ts", "") >= window_start)
+    ]
+    result["window_fails"] = len(wfails)
+    result["window_fail_ts"] = [r.get("ts") for r in wfails]
+
     if len(baseline) < k:
         result["outcome"] = NO_BASELINE
         result["note"] = (
@@ -793,6 +811,153 @@ def compare(
     return result
 
 
+def compare_all(
+    rows: Sequence[Dict],
+    k: int = MIN_BASELINE_RUNS,
+) -> Dict:
+    """Compare the newest row of EVERY (gate, env) pair against its band.
+
+    #9922 F-086: ``compare()`` over one gate needs a human ``GATE=`` and no
+    automation ever ran it over real rows, so a gate failing every run stayed
+    green everywhere. This is the aggregate that runs it over all of them.
+
+    A pair is RED when its outcome is REGRESSION or its newest verdict is
+    FAIL. VOID / NO-BASELINE pairs are SURFACED, not failed: the aggregate
+    is a red-watch, not a baseline-completeness gate (thin baselines are the
+    normal state of young gates; completeness of a different kind — zero-row
+    gates — is the coverage census's job, F-087).
+    """
+    pairs = sorted(
+        set(
+            (r.get("gate"), r.get("env"))
+            for r in rows
+            if r.get("gate") is not None
+        )
+    )
+    results = {pair: compare(rows, pair[0], pair[1], k) for pair in pairs}
+    red = {
+        pair: res
+        for pair, res in results.items()
+        if res.get("outcome") == REGRESSION or res.get("verdict") == "FAIL"
+    }
+    undetermined = {
+        pair: res
+        for pair, res in results.items()
+        if pair not in red and res.get("outcome") in (VOID, NO_BASELINE)
+    }
+    green = {
+        pair: res for pair, res in results.items() if pair not in red and pair not in undetermined
+    }
+    return {
+        "pairs": results,
+        "red": red,
+        "undetermined": undetermined,
+        "green": green,
+        "k_required": k,
+    }
+
+
+def parse_expected_red(text: str) -> Tuple[Dict[Tuple[str, str], str], List[str]]:
+    """Parse an expected-red declaration file.
+
+    One pair per line: ``gate env reason...`` — the reason is REQUIRED (it is
+    what makes a tolerated red reviewable; cite the tracking issue). Blank
+    lines and ``#`` comments are skipped. Returns (declared, problems);
+    problems is non-empty when any line is malformed.
+    """
+    declared: Dict[Tuple[str, str], str] = {}
+    problems: List[str] = []
+    for lineno, line in enumerate(text.splitlines(), start=1):
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        parts = stripped.split(None, 2)
+        if len(parts) < 3:
+            problems.append(
+                f"line {lineno}: expected `gate env reason...`, got {stripped!r}"
+            )
+            continue
+        declared[(parts[0], parts[1])] = parts[2]
+    return declared, problems
+
+
+def render_all(agg: Dict, declared: Optional[Dict[Tuple[str, str], str]] = None) -> str:
+    """Render the aggregate: every pair's full verdict, then the summary.
+
+    Each pair prints its complete single-gate render (band, pinned baseline,
+    window FAILs, invariants) — a one-line-per-pair summary would leave the
+    FAILs-inside-the-window and the drift flag automation-invisible again,
+    which is the defect being fixed.
+    """
+    declared = declared or {}
+    out: List[str] = []
+    pairs = agg.get("pairs") or {}
+    if not pairs:
+        return "ledger-compare-all: no (gate, env) pairs in the ledger"
+    for pair in sorted(pairs):
+        res = pairs[pair]
+        mark = (
+            "RED"
+            if pair in (agg.get("red") or {})
+            else ("UNDETERMINED" if pair in (agg.get("undetermined") or {}) else "green")
+        )
+        annotation = ""
+        if pair in declared:
+            annotation = (
+                "  [expected-red: still red]"
+                if pair in (agg.get("red") or {})
+                else "  [expected-red: STALE — no longer red, remove the declaration]"
+            )
+        out.append(f"=== {pair[0]} @ {pair[1]} [{mark}]{annotation}")
+        out.append(render(res))
+        out.append("")
+    red = agg.get("red") or {}
+    undet = agg.get("undetermined") or {}
+    green = agg.get("green") or {}
+    undeclared_red = sorted(p for p in red if p not in declared)
+    stale = sorted(p for p in declared if p not in red)
+    out.append(
+        f"summary: {len(red)} red ({len(undeclared_red)} undeclared), "
+        f"{len(undet)} undetermined, {len(green)} green, "
+        f"{len(stale)} stale declaration(s)"
+    )
+    for pair in undeclared_red:
+        out.append(f"  RED: {pair[0]} @ {pair[1]} — {red[pair].get('outcome')}/{red[pair].get('verdict')}")
+    for pair in stale:
+        out.append(f"  STALE: {pair[0]} @ {pair[1]} — declared red but no longer red ({declared[pair][:80]})")
+    return "\n".join(out)
+
+
+def all_exit_status(agg: Dict, declared: Optional[Dict[Tuple[str, str], str]] = None) -> int:
+    """1 = an undeclared red pair or a stale declaration, else 0.
+
+    Undetermined pairs never fail the aggregate (see compare_all): the
+    aggregate watches for red. A stale declaration fails so the file can only
+    shrink — a tolerated red that went green must be un-declared, loudly.
+    """
+    declared = declared or {}
+    red = agg.get("red") or {}
+    if any(p not in declared for p in red):
+        return 1
+    if any(p not in red for p in declared):
+        return 1
+    return 0
+
+
+def _jsonable_agg(agg: Dict, declared: Dict[Tuple[str, str], str]) -> Dict:
+    """The aggregate with string keys, for --json (JSON has no tuples)."""
+    def keyed(d: Dict) -> Dict:
+        return {f"{pair[0]} @ {pair[1]}": res for pair, res in d.items()}
+    return {
+        "pairs": keyed(agg.get("pairs") or {}),
+        "red": sorted(f"{p[0]} @ {p[1]}" for p in (agg.get("red") or {})),
+        "undetermined": sorted(f"{p[0]} @ {p[1]}" for p in (agg.get("undetermined") or {})),
+        "green": sorted(f"{p[0]} @ {p[1]}" for p in (agg.get("green") or {})),
+        "declared": {f"{p[0]} @ {p[1]}": reason for p, reason in declared.items()},
+        "k_required": agg.get("k_required"),
+    }
+
+
 def render(result: Dict) -> str:
     out = [f"outcome: {result['outcome']}"]
     out.append(f"gate: {result['gate']}   env: {result['env']}")
@@ -831,6 +996,11 @@ def render(result: Dict) -> str:
             f"median {result['pinned_median']:.6g}  "
             f"cumulative displacement {disp_s}{flag}"
         )
+    if result.get("window_fails"):
+        out.append(
+            f"FAIL rows inside the baseline window: {result['window_fails']} "
+            f"({', '.join(result.get('window_fail_ts') or [])})"
+        )
     if result.get("note"):
         out.append(f"note: {result['note']}")
     inv = result.get("invariants") or {}
@@ -852,13 +1022,15 @@ def exit_status(result: Dict) -> int:
     Mirrors mouse_latency_aggregate.py's mapping on purpose. A FAIL row exits 1
     even when its headline sits inside the band: the band says the metric did
     not move, and the row says the gate was violated, and the second one wins.
+    The same win applies below the K floor (#9922 F-086): a FAIL newest with
+    a thin baseline is still a measured FAIL, not an undetermined one.
     """
     outcome = result.get("outcome")
+    if result.get("verdict") == "FAIL":
+        return 1
     if outcome in (VOID, NO_BASELINE, LEDGER_CORRUPT):
         return 2
     if outcome == REGRESSION:
-        return 1
-    if result.get("verdict") == "FAIL":
         return 1
     return 0
 
@@ -874,6 +1046,24 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     p.add_argument("--env", default=None, help="restrict to this env")
     p.add_argument("--k", type=int, default=MIN_BASELINE_RUNS, help="green runs required")
     p.add_argument("--json", action="store_true", help="emit JSON instead of text")
+    p.add_argument(
+        "--all",
+        action="store_true",
+        help=(
+            "compare EVERY (gate, env) pair in the ledger (#9922 F-086); exit 1 "
+            "on any REGRESSION or newest-FAIL. Undetermined pairs are surfaced, "
+            "not failed. Mutually exclusive with --gate/--env."
+        ),
+    )
+    p.add_argument(
+        "--expected-red",
+        default=None,
+        metavar="FILE",
+        help=(
+            "declaration file of tolerated-red pairs for --all, one `gate env "
+            "reason...` per line; undeclared red and stale declarations fail"
+        ),
+    )
     p.add_argument("--lint", action="store_true", help="lint the ledger and exit")
     p.add_argument(
         "--lint-merge",
@@ -991,8 +1181,46 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print(f"ledger-lint: OK — {rows} row(s) in {ledger}")
         return 0
 
+    if args.all:
+        if args.gate or args.env:
+            p.error("--all is mutually exclusive with --gate/--env")
+        declared: Dict[Tuple[str, str], str] = {}
+        if args.expected_red:
+            try:
+                with open(args.expected_red, encoding="utf-8") as fh:
+                    declared_text = fh.read()
+            except OSError as exc:
+                print(
+                    f"LEDGER-CORRUPT: cannot read --expected-red "
+                    f"{args.expected_red}: {exc}",
+                    file=sys.stderr,
+                )
+                return 2
+            declared, decl_problems = parse_expected_red(declared_text)
+            if decl_problems:
+                print(
+                    f"ledger-compare-all: {len(decl_problems)} problem(s) in "
+                    f"{args.expected_red}:",
+                    file=sys.stderr,
+                )
+                for prob in decl_problems:
+                    print(f"  {prob}", file=sys.stderr)
+                return 1
+        try:
+            rows = parse_ledger(text)
+        except LedgerError as exc:
+            result = {"outcome": LEDGER_CORRUPT, "gate": None, "env": None, "note": str(exc)}
+            print(json.dumps(result, indent=2) if args.json else render(result))
+            return 2
+        agg = compare_all(rows, args.k)
+        if args.json:
+            print(json.dumps(_jsonable_agg(agg, declared), indent=2))
+        else:
+            print(render_all(agg, declared))
+        return all_exit_status(agg, declared)
+
     if not args.gate:
-        p.error("--gate is required unless --lint is given")
+        p.error("--gate is required unless --lint or --all is given")
 
     try:
         rows = parse_ledger(text)

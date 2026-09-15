@@ -17,6 +17,8 @@ passing vacuously. On an empty input the cells assert NO-BASELINE explicitly —
 the empty set is never allowed to reach an assertion-free path.
 """
 
+import contextlib
+import io
 import json
 import os
 import pathlib
@@ -40,9 +42,11 @@ from ledger_compare import (
     VOID,
     WITHIN_BAND,
     _sorted_rows,
+    all_exit_status,
     band,
     classify,
     compare,
+    compare_all,
     exit_status,
     lint_ledger,
     lint_merge_completeness,
@@ -50,8 +54,11 @@ from ledger_compare import (
     lint_row,
     lint_shard_names,
     load_ledger_text,
+    main,
+    parse_expected_red,
     parse_ledger,
     render,
+    render_all,
     run_ids,
     run_ids_at_rev,
     shard_paths,
@@ -442,6 +449,130 @@ class PinnedBaseline(unittest.TestCase):
         res = compare(rows, GATE, ENV)
         self.assertTrue(res["drift"])
         self.assertEqual(exit_status(res), 0)
+
+
+class AggregateComparison(unittest.TestCase):
+    """#9922 F-086: the aggregate over every (gate, env)."""
+
+    def test_newest_fail_below_the_k_floor_exits_one(self):
+        # MUTATION: drop the FAIL-first branch from exit_status.
+        #
+        # The outcome stays NO-BASELINE (there is no band to judge by) but
+        # the exit is 1: a measured FAIL beats an undetermined band.
+        rows = greens([100.0]) + [
+            row("2026-09-01T00:02:00Z", verdict="FAIL", value=10.0)
+        ]
+        res = compare(rows, GATE, ENV)
+        self.assertEqual(res["outcome"], NO_BASELINE)
+        self.assertEqual(res["verdict"], "FAIL")
+        self.assertEqual(exit_status(res), 1)
+
+    def test_window_fails_are_surfaced_not_banded(self):
+        # MUTATION: drop the window_fails computation.
+        #
+        # A FAIL inside the window must neither enter the band nor vanish: it
+        # is counted, timestamped, and rendered.
+        rows = (
+            greens([100.0, 100.0, 100.0])
+            + [row("2026-09-01T00:03:00Z", verdict="FAIL", value=10.0)]
+            + [row("2026-09-01T00:04:00Z", value=100.0)]
+        )
+        res = compare(rows, GATE, ENV)
+        self.assertEqual(res["outcome"], WITHIN_BAND)
+        self.assertEqual(res["baseline_values"], [100.0, 100.0, 100.0])
+        self.assertEqual(res["window_fails"], 1)
+        self.assertEqual(res["window_fail_ts"], ["2026-09-01T00:03:00Z"])
+        self.assertIn("FAIL rows inside the baseline window: 1", render(res))
+
+    def _mixed_rows(self):
+        green = [
+            row(f"2026-09-01T0{i}:00:00Z", value=100.0, gate="gate-green")
+            for i in range(5)
+        ]
+        regressed = [
+            row(f"2026-09-01T00:0{i}:00Z", value=100.0, gate="gate-reg")
+            for i in range(3)
+        ] + [row("2026-09-01T00:04:00Z", value=10.0, gate="gate-reg")]
+        # FAIL newest on a thin baseline: NO-BASELINE outcome, FAIL verdict.
+        failed = [row("2026-09-01T00:00:00Z", value=100.0, gate="gate-fail")] + [
+            row("2026-09-01T00:01:00Z", verdict="FAIL", value=10.0, gate="gate-fail")
+        ]
+        return green + regressed + failed
+
+    def test_compare_all_reds_on_regression_and_newest_fail(self):
+        # MUTATION: aggregate-ignores-fail-verdict (red on REGRESSION only).
+        # MUTATION: aggregate-never-red (red on nothing).
+        agg = compare_all(self._mixed_rows())
+        self.assertEqual(
+            sorted(agg["red"]), [("gate-fail", ENV), ("gate-reg", ENV)]
+        )
+        self.assertEqual(sorted(agg["green"]), [("gate-green", ENV)])
+        self.assertEqual(all_exit_status(agg), 1)
+
+    def test_compare_all_tolerates_undetermined(self):
+        # A thin-baseline pair is surfaced, not failed: the aggregate watches
+        # for red, it is not a baseline-completeness gate.
+        rows = greens([100.0]) + [row("2026-09-01T00:02:00Z", value=60.0)]
+        agg = compare_all(rows)
+        self.assertEqual(sorted(agg["undetermined"]), [(GATE, ENV)])
+        self.assertEqual(agg["red"], {})
+        self.assertEqual(all_exit_status(agg), 0)
+        self.assertIn("UNDETERMINED", render_all(agg))
+
+    def test_parse_expected_red(self):
+        declared, problems = parse_expected_red(
+            "# comment\n"
+            "\n"
+            "gate-fail loss-userspace-cluster newest-FAIL, tracked in #10122\n"
+        )
+        self.assertEqual(problems, [])
+        self.assertEqual(
+            declared,
+            {("gate-fail", "loss-userspace-cluster"): "newest-FAIL, tracked in #10122"},
+        )
+        _d2, problems2 = parse_expected_red("gate-only\n")
+        self.assertEqual(len(problems2), 1)
+        self.assertIn("line 1", problems2[0])
+
+    def test_all_exit_status_honors_declarations(self):
+        # MUTATION: expected-red-stale-check-dropped.
+        agg = compare_all(self._mixed_rows())
+        declared = {("gate-fail", ENV): "x", ("gate-reg", ENV): "y"}
+        self.assertEqual(all_exit_status(agg, declared), 0)
+        self.assertIn("expected-red: still red", render_all(agg, declared))
+        # A stale declaration (green now) fails so the file can only shrink.
+        stale = {("gate-green", ENV): "was red once"}
+        self.assertEqual(all_exit_status(agg, stale), 1)
+        self.assertIn("STALE", render_all(agg, stale))
+
+    def test_main_all_over_a_fixture_ledger(self):
+        # End to end through main(): shards on disk, strict and declared runs,
+        # and the corrupt-ledger mapping. Hermetic (tmp dir, no git, no net).
+        work = tempfile.mkdtemp(prefix="xpf-compare-all.")
+        self.addCleanup(shutil.rmtree, work, True)
+        for r in self._mixed_rows():
+            with open(os.path.join(work, f"{r['run_id']}.json"), "w") as fh:
+                json.dump(r, fh)
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = main(["--all", "--ledger", work])
+        self.assertEqual(rc, 1)
+        self.assertIn("gate-reg @ ", buf.getvalue())
+        decl = os.path.join(work, "expected.txt")
+        with open(decl, "w") as fh:
+            fh.write(f"gate-fail {ENV} tracked\n")
+            fh.write(f"gate-reg {ENV} tracked\n")
+        buf2 = io.StringIO()
+        with contextlib.redirect_stdout(buf2):
+            rc2 = main(["--all", "--ledger", work, "--expected-red", decl])
+        self.assertEqual(rc2, 0)
+        with open(os.path.join(work, "broken.json"), "w") as fh:
+            fh.write("{not json\n")
+        buf3 = io.StringIO()
+        with contextlib.redirect_stdout(buf3):
+            rc3 = main(["--all", "--ledger", work])
+        self.assertEqual(rc3, 2)
+        self.assertIn("LEDGER-CORRUPT", buf3.getvalue())
 
 
 class ExitStatusMapping(unittest.TestCase):

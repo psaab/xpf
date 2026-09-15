@@ -1,0 +1,8 @@
+# Expected-red pairs for `ledger_compare.py --all` (#9922 F-086).
+#
+# One pair per line: `gate env reason...` — the reason is REQUIRED. A listed
+# pair may be red (REGRESSION or newest-FAIL) without failing the aggregate;
+# an UNLISTED red pair fails, and so does a listed pair that is no longer red
+# (shrink-only: remove the line when the gate is green again). Same contract
+# shape as test/incus/HARNESSES.unreached.
+test-dhcp-lease-failover loss-userspace-cluster newest-FAIL 2026-09-11, zero PASS ever in the tracked ledger (#10122); remove when green

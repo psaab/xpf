@@ -11,7 +11,7 @@ BUILD_TIME ?= $(shell date -u '+%Y-%m-%dT%H:%M:%SZ')
 LDFLAGS := -X main.version=$(VERSION) -X main.commit=$(COMMIT) -X main.buildTime=$(BUILD_TIME)
 
 # eBPF compilation flags
-.PHONY: all generate generate-userspace-xdp build-userspace-xdp build build-ctl build-userspace-dp build-userspace-dp-debug-log proto install clean test test-go test-rust test-miri miri-census test-miri-census-lib test-race-dp audit-check test-connectivity test-wire-properties test-failover test-double-failover test-active-active test-stress-failover test-ha-crash test-chained-crash test-private-rg test-restart-connectivity test-harness-ledger-lib harness-compare harness-ledger-lint
+.PHONY: all generate generate-userspace-xdp build-userspace-xdp build build-ctl build-userspace-dp build-userspace-dp-debug-log proto install clean test test-go test-rust test-miri miri-census test-miri-census-lib test-race-dp audit-check test-connectivity test-wire-properties test-failover test-double-failover test-active-active test-stress-failover test-ha-crash test-chained-crash test-private-rg test-restart-connectivity test-harness-ledger-lib harness-compare harness-compare-all harness-ledger-lint
 
 all: generate build build-ctl
 
@@ -995,6 +995,15 @@ test-harness-ledger-lib:
 harness-compare:
 	@test -n "$(GATE)" || { echo "usage: make harness-compare GATE=<gate> [ENV=<env>]" >&2; exit 2; }
 	@python3 ./test/incus/ledger_compare.py --gate $(GATE) $(if $(ENV),--env $(ENV),)
+
+# Compare the newest run of EVERY (gate, env) pair in the tracked ledger
+# (#9922 F-086). Exit 1 = a REGRESSION or a newest-FAIL anywhere; undetermined
+# pairs (VOID / thin baselines) are surfaced, not failed. STRICT: no
+# expected-red declarations — the loop/human entry point. `make selftest` runs
+# the same aggregate with test/incus/ledger-expected-red.txt; a red pair that
+# is not declared there fails the suite.
+harness-compare-all:
+	@python3 ./test/incus/ledger_compare.py --all
 
 # Lint every row in the tracked ledger. FAILS on a zero-row ledger and names
 # the first unparseable line, so a committed conflict marker is a red gate
