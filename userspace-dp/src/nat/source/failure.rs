@@ -149,6 +149,18 @@ pub(crate) enum SourceNatFailureReason {
     /// older control plane, or a handcrafted snapshot: the same population
     /// `OverBudget` exists for (#6812).
     PoolPeerAddressOverlap,
+    /// #9874: the rule AUTHORED a `match` that constrains nothing. The #8430
+    /// strict gate rejects such a rule at commit; the tolerant load /
+    /// peer-sync path downgrades to a warning and ships it with the
+    /// `lenient_match_dropped` poison marker. Its empty match set reads as
+    /// UNCONSTRAINED, so without the poison it would install as a catch-all
+    /// translator for every flow in scope. Fails CLOSED: the match loop
+    /// returns `Unavailable` for the first matching flow (drop + count),
+    /// before the `off` short-circuit — so a poisoned exemption drops
+    /// instead of exempting everything, and evaluation never falls through
+    /// to a later rule (which would translate under the wrong rule or
+    /// forward the flow untranslated, the #5688 leak shape).
+    AuthoredMatchEmpty,
 }
 
 impl SourceNatFailureReason {
@@ -172,6 +184,7 @@ impl SourceNatFailureReason {
             Self::Nat64OverlapDraining => "source_nat_nat64_overlap_draining",
             Self::PoolIfaceEgressOverlap => "source_nat_pool_iface_egress_overlap",
             Self::PoolPeerAddressOverlap => "source_nat_pool_peer_address_overlap",
+            Self::AuthoredMatchEmpty => "source_nat_authored_match_empty",
         }
     }
 }

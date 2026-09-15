@@ -207,6 +207,16 @@ pub(crate) struct SourceNatRule {
     /// constraint at all. Same fail-closed semantics as `source_constrained`,
     /// for the destination match set.
     pub(crate) destination_constrained: bool,
+    /// #9874: the fail-closed poison for a rule whose AUTHORED `match`
+    /// constrains nothing (snapshot `lenient_match_dropped`). The match loop
+    /// returns `Unavailable` for such a rule AFTER `matches()` but BEFORE the
+    /// `off` short-circuit, so a poisoned rule — translating or exempting —
+    /// drops in-scope flows (drop + count) instead of installing the catch-all
+    /// its empty match set otherwise reads as. Governs NEW-flow lookup
+    /// admission only: synced/established translation retention bypasses the
+    /// lookup check by design (`synced.rs` matches ignoring scope), so an
+    /// established session keeps its translation across the poisoning apply.
+    pub(crate) lenient_match_dropped: bool,
     /// #3429: source-NAT `match destination-port` constraint as inclusive
     /// (low, high) ranges. Empty = port-unconstrained (match any destination
     /// port, the pre-#3429 behavior). Non-empty = the flow's destination port
@@ -331,9 +341,17 @@ impl SourceNatRule {
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn allocator_key(&self) -> Option<SourceNatPoolAllocatorKey> {
         let total_pool = self.pool_addresses_v4.len() + self.pool_addresses_v6.len();
-        (self.pool_mode && total_pool > 0 && self.pool_failure.is_none()).then(|| {
-            self.allocator_key_for(self.pool_port_low, self.pool_port_high)
-        })
+        // #9874: a poisoned rule builds no allocator (no pending) and can never
+        // mint, so like a failed pool it reports no key. Multi-line closure,
+        // deliberately: the single-line shape is the #9428 parity guard's
+        // must-replace-once anchor (drain_allocator_key below owns it).
+        (self.pool_mode
+            && total_pool > 0
+            && self.pool_failure.is_none()
+            && !self.lenient_match_dropped)
+            .then(|| {
+                self.allocator_key_for(self.pool_port_low, self.pool_port_high)
+            })
     }
 
     /// #7717: the carry-over key that IGNORES `pool_failure`.
@@ -1217,6 +1235,25 @@ fn parse_source_nat_rules_inner(
     let mut previous_pools = FxHashMap::<String, Option<PreviousPool>>::default();
     if let Some(prev_rules) = previous {
         for prev in prev_rules {
+            // #9874: a poisoned rule that is NOT draining holds only the
+            // never-built default allocator (no pending, so neither phase 2
+            // nor the 1c drain carry-over ever assigns it one). Contributing
+            // it would publish a placeholder with max_tracked_flows == 0
+            // under a live pool key: a subsequently healthy rule for that key
+            // would reuse it and fail every mint as AllocatorExhausted — so
+            // correcting the empty match would NOT restore pool SNAT, and on
+            // a shared pool the placeholder could displace a healthy sibling's
+            // real allocator on refresh (or_insert below is first-wins). Skip
+            // it, so recovery builds fresh. It also stays out of
+            // previous_pools: a placeholder carries no live port ownership to
+            // reseed, so its only possible contribution there is marking a
+            // genuinely unambiguous pool name ambiguous. A poisoned DRAINING
+            // rule still contributes: phase 1c may have carried a real
+            // allocator with live flows into it, and dropping that strands
+            // them (#7717).
+            if prev.lenient_match_dropped && !prev.is_draining_pool() {
+                continue;
+            }
             // #7717: keyed on `drain_allocator_key`, which ignores
             // `pool_failure`. A QUARANTINED pool's allocator must survive into
             // the next generation or its live flows lose the state that
@@ -1286,6 +1323,21 @@ fn parse_source_nat_rules_inner(
         // unscoped (empty) set keeps "match any" (anti-over-restrict).
         rule.source_constrained = !snap.source_addresses.is_empty();
         rule.destination_constrained = !snap.destination_addresses.is_empty();
+        // #9874: carry the fail-closed poison for an empty authored match. A
+        // marked rule installs but never translates: the match loop drops
+        // every in-scope flow (drop + count). Loud on purpose — without this
+        // marker the rule would install as an unconstrained catch-all
+        // translator, so its presence means the control plane admitted a
+        // config a commit would reject.
+        rule.lenient_match_dropped = snap.lenient_match_dropped;
+        if rule.lenient_match_dropped {
+            eprintln!(
+                "xpf-dp: source-nat rule {:?} authored a match that constrains nothing; \
+                 matching flows are DROPPED instead of translated (a commit would reject \
+                 this rule, #9874)",
+                snap.name,
+            );
+        }
         // #2398: parse each match prefix as a CIDR, falling back to a bare host
         // IP -> /32 (v4) or /128 (v6). Junos carries source/destination-address
         // verbatim and the Go compiler does NOT normalize it, so a bare host
@@ -1419,14 +1471,20 @@ fn parse_source_nat_rules_inner(
         // enforced). The parse loop only records the deferred inputs for rules
         // that pass the `allocator_key()` gate — a failed or pool-less rule
         // keeps the empty default allocator and never builds a bitmap.
+        // #9874: a poisoned rule builds nothing either — the match loop drops
+        // every flow it matches before reaching any allocator, so a pending
+        // here would spend bitmap memory and #6812 budget on a rule that can
+        // never mint (and could push a healthy pool over budget).
         pendings.push(
-            (rule.pool_mode && total_pool > 0 && rule.pool_failure.is_none()).then_some(
-                PendingPoolAllocator {
+            (rule.pool_mode
+                && total_pool > 0
+                && rule.pool_failure.is_none()
+                && !rule.lenient_match_dropped)
+                .then_some(PendingPoolAllocator {
                     port_low,
                     port_high,
                     total_pool,
-                },
-            ),
+                }),
         );
         out.push(rule);
     }

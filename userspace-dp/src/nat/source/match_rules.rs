@@ -358,6 +358,23 @@ fn match_source_nat_result_for_tuple_inner(
         ) {
             continue;
         }
+        // #9874: a rule whose authored `match` constrains nothing claims the
+        // flow and FAILS CLOSED (drop + count) — never a translation, never
+        // an exemption, never fall-through to a later rule. Placed AFTER
+        // `matches()` so scope and rule precedence still apply, and BEFORE
+        // the `off` short-circuit below: an `off` rule returns a no-op match
+        // before the pool_failure check, so without this a poisoned exemption
+        // would bypass NAT for every flow in scope. The hit counter is
+        // captured exactly as for a pool failure (the `Unavailable` caller
+        // clears it); skipping the rule instead would forward the flow
+        // untranslated or translate it under a later, wrong rule.
+        if rule.lenient_match_dropped {
+            *matched_counter = rule.hit_counter.clone();
+            return SourceNatLookup::Unavailable(SourceNatFailure::for_rule(
+                rule,
+                SourceNatFailureReason::AuthoredMatchEmpty,
+            ));
+        }
         if rule.off {
             // An `off` rule applies no translation — leave matched_counter
             // unset so no hit is counted for a no-op match.

@@ -1257,6 +1257,7 @@
     "from_routing_instance": "",
     "from_zone": "",
     "interface_mode": false,
+    "lenient_match_dropped": false,
     "match_applications": [],
     "match_destination_ports": [],
     "name": "",

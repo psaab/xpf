@@ -167,6 +167,10 @@ mod tests_det_lock_scope_9130;
 #[cfg(test)]
 #[path = "tests_addr_only_sibling_9131.rs"]
 mod tests_addr_only_sibling_9131;
+// #9874: authored-but-empty source-NAT match poison (fail-closed drop).
+#[cfg(test)]
+#[path = "tests_empty_match_poison_9874.rs"]
+mod tests_empty_match_poison_9874;
 
 /// #3096: per-flow interface / routing-instance identity passed into the NAT
 /// match path so an interface- or routing-instance-scoped rule-set matches
