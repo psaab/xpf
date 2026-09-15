@@ -164,7 +164,8 @@ func compileSystem(node *Node, sys *SystemConfig, cfg *Config, opts compileOpts)
 						sys.NTPThresholdAction = thNode.Keys[i+1]
 					}
 				}
-				// Check for hierarchical: action { accept; }
+				// Check for hierarchical: threshold 400 { action accept; } — the
+				// value rides the action CHILD's Keys, not a block under it.
 				if actNode := thNode.FindChild("action"); actNode != nil {
 					sys.NTPThresholdAction = nodeVal(actNode)
 				}
