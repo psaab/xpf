@@ -20,6 +20,16 @@ func saIndexPolicies9511() map[string]*config.IPsecPolicyDef {
 	}
 }
 
+// saIndexProposals9511 defines the proposal saIndexPolicies9511 references,
+// so every fixture chain resolves (#9919 F-090: a dangling chain now skips
+// the VPN instead of rendering a fallback, which would empty the index
+// these cells measure).
+func saIndexProposals9511() map[string]*config.IPsecProposal {
+	return map[string]*config.IPsecProposal{
+		"prop1": {Name: "prop1", EncryptionAlg: "aes-256-cbc", AuthAlg: "hmac-sha-256-128"},
+	}
+}
+
 func ts9511(name, local, remote string) *config.IPsecTrafficSelector {
 	return &config.IPsecTrafficSelector{Name: name, LocalIP: local, RemoteIP: remote}
 }
@@ -43,7 +53,8 @@ func TestSANameIndexCoversEveryRenderedSection9511(t *testing.T) {
 					"x:y": ts9511("x:y", "10.0.4.0/24", "10.9.4.0/24"),
 				}},
 		},
-		Policies: saIndexPolicies9511(),
+		Policies:  saIndexPolicies9511(),
+		Proposals: saIndexProposals9511(),
 	}
 	idx := BuildSANameIndex(cfg)
 
@@ -105,7 +116,8 @@ func TestSANameIndexListsEveryVPNRenderingACollidingName9511(t *testing.T) {
 				}},
 			"blue-red": {Name: "blue-red", Gateway: "172.16.0.4", IPsecPolicy: "ipsec-pol"},
 		},
-		Policies: saIndexPolicies9511(),
+		Policies:  saIndexPolicies9511(),
+		Proposals: saIndexProposals9511(),
 	}
 
 	conns := parseSwanctlDoc(t, m.generateConfig(cfg)).at(t, "connections")
@@ -156,7 +168,8 @@ func TestSANameIndexExcludesVPNsTheRendererSkips9511(t *testing.T) {
 			// reachable through the tolerant load and peer-sync paths.
 			"good-x": {Name: "good-x", Gateway: "dangling", IPsecPolicy: "ipsec-pol"},
 		},
-		Policies: saIndexPolicies9511(),
+		Policies:  saIndexPolicies9511(),
+		Proposals: saIndexProposals9511(),
 	}
 	conns := parseSwanctlDoc(t, m.generateConfig(cfg)).at(t, "connections").childNames()
 	if len(conns) != 1 || conns[0] != "good" {
@@ -196,7 +209,8 @@ func TestActiveSANamesPublishesResolvableChildNames9511(t *testing.T) {
 					"ts2": ts9511("ts2", "10.0.2.0/24", "10.9.2.0/24"),
 				}},
 		},
-		Policies: saIndexPolicies9511(),
+		Policies:  saIndexPolicies9511(),
+		Proposals: saIndexProposals9511(),
 	}
 
 	got := activeSANames(parseSAOutput(output))
@@ -237,7 +251,8 @@ func TestSANameIndexSurvivesAnUnrelatedRenderError9511(t *testing.T) {
 				}},
 			"bad": {Name: "bad", Gateway: "gw-bad", IPsecPolicy: "ipsec-pol"},
 		},
-		Policies: saIndexPolicies9511(),
+		Policies:  saIndexPolicies9511(),
+		Proposals: saIndexProposals9511(),
 	}
 	if _, _, err := (&Manager{}).renderConfig(cfg); err == nil {
 		t.Fatal("FIXTURE: the whole render must fail on the unsupported auth method, " +
@@ -275,7 +290,8 @@ func TestSANameIndexKeysEligibilityByVPNNotSanitizedName9511(t *testing.T) {
 			"x y":  {Name: "x y", Gateway: "172.16.0.1", IPsecPolicy: "ipsec-pol"},
 			tabbed: {Name: tabbed, Gateway: "dangling", IPsecPolicy: "ipsec-pol"},
 		},
-		Policies: saIndexPolicies9511(),
+		Policies:  saIndexPolicies9511(),
+		Proposals: saIndexProposals9511(),
 	}
 	if sanitizeSwanctlValue(tabbed) != "x y" {
 		t.Fatalf("FIXTURE: the tabbed name must sanitise to `x y`, got %q", sanitizeSwanctlValue(tabbed))
@@ -310,7 +326,8 @@ func TestActiveSANamesIKEOnlyRowPublishesTheConnectionName9511(t *testing.T) {
 					"ts2": ts9511("ts2", "10.0.2.0/24", "10.9.2.0/24"),
 				}},
 		},
-		Policies: saIndexPolicies9511(),
+		Policies:  saIndexPolicies9511(),
+		Proposals: saIndexProposals9511(),
 	}
 
 	got := activeSANames(parseSAOutput(output))

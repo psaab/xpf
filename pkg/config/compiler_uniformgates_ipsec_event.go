@@ -10,13 +10,13 @@ import "fmt"
 // strict ordering (invariant #6) and the tolerant warning-accumulation
 // order (invariant #7) are preserved. See runUniformGates.
 func runUniformGatesIPsecEvent(tree *ConfigTree, cfg *Config, opts compileOpts) error {
-	// #2073 IPsec policy proposal cross-reference gate. Strict on commit /
-	// commit-check (hard-reject a dangling ipsec policy -> proposal
-	// reference that would silently drop the configured perfect-forward-
-	// secrecy group to the strongSwan default); lenient on load / peer-sync
-	// (warn so an already-persisted or peer-synced config still boots — the
-	// render-path safety net in pkg/ipsec preserves the PFS group on that
-	// boot). Runs alongside the other tolerant-downgradable cross-ref gates.
+	// #2073 (+ #9919 F-090 vpn→policy link) IPsec (Phase 2) reference-chain
+	// gate. Strict on commit / commit-check (hard-reject a dangling chain
+	// that has no crypto to render); lenient on load / peer-sync (warn so
+	// an already-persisted or peer-synced config still boots — the
+	// render belt in pkg/ipsec skips the unrenderable VPN on that boot
+	// rather than fabricate a suite). Runs alongside the other
+	// tolerant-downgradable cross-ref gates.
 	if err := validateIPsecPolicyProposalReferencesStrict(cfg); err != nil {
 		if opts.lenientIPsecPolicyProposalRef {
 			cfg.Warnings = append(cfg.Warnings,
@@ -134,10 +134,31 @@ func runUniformGatesIPsecEvent(tree *ConfigTree, cfg *Config, opts compileOpts) 
 	// accepted with NO diagnostic at all by Store.Load and HA SyncApply, and a
 	// negative was carried into the swanctl renderer as a stored value. Strict
 	// on commit, warn on the tolerant path (#1960 fail-closed-on-load class).
+	// Placed adjacent to its #9919 F-161 DH sibling below: both are
+	// proposal-value gates over the same three objects.
 	if err := validateIPsecProposalLifetimesStrict(cfg); err != nil {
 		if opts.lenientIPsecProposalLifetime {
 			cfg.Warnings = append(cfg.Warnings,
 				fmt.Sprintf("ipsec proposal lifetime (downgraded to warning on tolerant path): %v", err))
+		} else {
+			return err
+		}
+	}
+
+	// #9919 F-161 IKE/IPsec proposal `dh-group` + policy PFS `keys` value
+	// gate. The schema's ValidateDHGroup on all three leaves is enforced
+	// only by SchemaValidate, which compileTreeStrict runs and
+	// compileTreeLenient downgrades — so an unparseable or unspellable group
+	// was rejected at commit but accepted in SILENCE by Store.Load and HA
+	// SyncApply, silently dropping the modp term (or rendering an empty
+	// keyword charon refuses). Strict on commit, warn on the tolerant path
+	// (#1960 fail-closed-on-load class). The renderer separately skips any
+	// VPN whose effective group is bad, so a warned config never negotiates
+	// weakened crypto. Sibling of the #9008 lifetime gate above.
+	if err := validateIPsecDHGroupsStrict(cfg); err != nil {
+		if opts.lenientIPsecDHGroup {
+			cfg.Warnings = append(cfg.Warnings,
+				fmt.Sprintf("ipsec dh-group (downgraded to warning on tolerant path): %v", err))
 		} else {
 			return err
 		}

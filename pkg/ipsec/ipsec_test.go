@@ -1,6 +1,7 @@
 package ipsec
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -191,14 +192,13 @@ func TestBuildESPProposal_PFSOverride(t *testing.T) {
 	}
 }
 
-// TestResolveESPSettings_DanglingProposalPreservesPFS is the #2073
-// render-path safety net (Layer B): when an IPsec policy resolves and a
-// PFS group is configured but its proposal reference is dangling, the
-// renderer must NOT fall through to bare "default" (which drops PFS).
-// Instead it must carry the configured PFS group on a valid fallback
-// proposal that includes a cipher and integrity alg, using swanctl's
-// canonical keyword spellings.
-func TestResolveESPSettings_DanglingProposalPreservesPFS(t *testing.T) {
+// TestResolveESPSettings_DanglingProposalSkips is the #9919 F-090 contract:
+// when an IPsec policy resolves but NONE of its proposal references do, the
+// resolver returns errESPChainUnresolved (IKE parity, #2270) so the caller
+// SKIPS the VPN — never a fabricated suite. This replaces the #2073
+// fallback assertion (which pinned the emitted aes256-sha256-modp2048
+// suite); the PFS group is preserved only when a proposal resolves.
+func TestResolveESPSettings_DanglingProposalSkips(t *testing.T) {
 	cfg := &config.IPsecConfig{
 		Policies: map[string]*config.IPsecPolicyDef{
 			"ipsec-pol": {
@@ -211,32 +211,21 @@ func TestResolveESPSettings_DanglingProposalPreservesPFS(t *testing.T) {
 	}
 	vpn := &config.IPsecVPN{IPsecPolicy: "ipsec-pol"}
 
-	got, lifetime := resolveESPSettings(cfg, vpn)
-	// Exact token, not a `modp` substring: a Contains("modp2048") check
-	// would also pass for an invalid no-integrity "aes256-modp2048". The
-	// integrity keyword MUST be the canonical "sha256" — strongSwan's
-	// proposal parser does not recognize the "sha256128" spelling and
-	// would discard the whole proposal.
-	if got != "aes256-sha256-modp2048" {
-		t.Fatalf("resolveESPSettings dropped PFS or emitted an invalid fallback: got %q, want aes256-sha256-modp2048", got)
+	got, _, err := resolveESPSettings(cfg, vpn)
+	if !errors.Is(err, errESPChainUnresolved) {
+		t.Fatalf("dangling ESP proposal ref must fail closed with errESPChainUnresolved, got (%q, %v)", got, err)
 	}
-	if got == "default" {
-		t.Fatal("PFS was silently dropped to the strongSwan default")
-	}
-	if lifetime != 0 {
-		t.Errorf("lifetime = %d, want 0 (no resolvable proposal to take a lifetime from)", lifetime)
+	if got == "default" || got == "aes256-sha256" || got == "aes256-sha256-modp2048" {
+		t.Fatalf("dangling ESP proposal ref rendered a substitute suite %q; want skip (empty + sentinel)", got)
 	}
 }
 
-// TestResolveESPSettings_DanglingProposalNoPFSFailsClosed is the #4117
-// regression. A dangling proposal reference with NO configured PFS must NOT
-// silently fall through to "default" (strongSwan's compiled-in ESP suite):
-// the NAMED proposal reference carries the operator's cipher/integrity
-// intent, and substituting the built-in default silently weakens ESP. The
-// renderer emits the conservative fixed fallback aes256-sha256 — parity with
-// the pfsGroup > 0 case (#2073), which already emits aes256-sha256-modp
-// rather than skipping. On revert this returns "default" and goes RED.
-func TestResolveESPSettings_DanglingProposalNoPFSFailsClosed(t *testing.T) {
+// TestResolveESPSettings_DanglingProposalNoPFSkips is the no-PFS half of the
+// #9919 F-090 contract: a dangling proposal reference with NO configured PFS
+// skips exactly like the with-PFS half (no availability asymmetry driven by
+// whether PFS happened to be configured — the #4117 rationale retired by
+// the never-fabricate skip).
+func TestResolveESPSettings_DanglingProposalNoPFSkips(t *testing.T) {
 	cfg := &config.IPsecConfig{
 		Policies: map[string]*config.IPsecPolicyDef{
 			"ipsec-pol": {
@@ -249,47 +238,39 @@ func TestResolveESPSettings_DanglingProposalNoPFSFailsClosed(t *testing.T) {
 	}
 	vpn := &config.IPsecVPN{IPsecPolicy: "ipsec-pol"}
 
-	got, lifetime := resolveESPSettings(cfg, vpn)
-	if got == "default" {
-		t.Fatalf("dangling ESP proposal ref silently downgraded to the "+
-			"strongSwan default suite: got %q", got)
+	got, _, err := resolveESPSettings(cfg, vpn)
+	if !errors.Is(err, errESPChainUnresolved) {
+		t.Fatalf("dangling ESP proposal ref (no PFS) must fail closed with errESPChainUnresolved, got (%q, %v)", got, err)
 	}
-	if got != "aes256-sha256" {
-		t.Fatalf("resolveESPSettings = %q, want conservative fixed fallback "+
-			"aes256-sha256 (dangling ref, no PFS)", got)
-	}
-	if lifetime != 0 {
-		t.Errorf("lifetime = %d, want 0 (no resolvable proposal to take a lifetime from)", lifetime)
+	if got != "" {
+		t.Fatalf("dangling ESP proposal ref (no PFS) rendered %q; want skip (empty + sentinel)", got)
 	}
 }
 
-// TestResolveESPSettings_DanglingPolicyRefFailsClosed covers the sibling
-// dangling case (#4117): the VPN names an ipsec-policy that is not defined at
-// all (neither a policy object nor a legacy proposal of that name). This too
-// must fail closed to the conservative fixed suite rather than silently emit
-// esp_proposals = default. No policy resolves, so no PFS group is available
-// and the fallback carries no modp term.
-func TestResolveESPSettings_DanglingPolicyRefFailsClosed(t *testing.T) {
+// TestResolveESPSettings_DanglingPolicyRefSkips covers the sibling dangling
+// case (#9919 F-090): the VPN names an ipsec-policy that is not defined at
+// all (neither a policy object nor a legacy proposal of that name). It
+// skips with errESPChainUnresolved, like the dangling-proposal half.
+func TestResolveESPSettings_DanglingPolicyRefSkips(t *testing.T) {
 	cfg := &config.IPsecConfig{
 		// Neither Policies nor Proposals defines "ipsec-pol".
 	}
 	vpn := &config.IPsecVPN{IPsecPolicy: "ipsec-pol"}
 
-	got, _ := resolveESPSettings(cfg, vpn)
-	if got == "default" {
-		t.Fatalf("dangling ESP policy ref silently downgraded to the "+
-			"strongSwan default suite: got %q", got)
+	got, _, err := resolveESPSettings(cfg, vpn)
+	if !errors.Is(err, errESPChainUnresolved) {
+		t.Fatalf("dangling ESP policy ref must fail closed with errESPChainUnresolved, got (%q, %v)", got, err)
 	}
-	if got != "aes256-sha256" {
-		t.Fatalf("resolveESPSettings = %q, want conservative fixed fallback "+
-			"aes256-sha256 (dangling policy ref)", got)
+	if got != "" {
+		t.Fatalf("dangling ESP policy ref rendered %q; want skip (empty + sentinel)", got)
 	}
 }
 
-// TestGenerateConfig_DanglingProposalNoPFSFailsClosed is the #4117 full-render
-// regression: a dangling ESP proposal reference with no PFS must render
-// esp_proposals = aes256-sha256, never esp_proposals = default.
-func TestGenerateConfig_DanglingProposalNoPFSFailsClosed(t *testing.T) {
+// TestGenerateConfig_DanglingProposalSkips is the #9919 F-090 full-render
+// regression: a dangling ESP proposal reference SKIPS the VPN (no
+// connection block, no fabricated esp_proposals) while a healthy sibling
+// still renders — one bad reference never zeroes a healthy tunnel.
+func TestGenerateConfig_DanglingProposalSkips(t *testing.T) {
 	m := &Manager{configDir: "/tmp", configPath: "/tmp/xpf.conf"}
 	cfg := &config.IPsecConfig{
 		VPNs: map[string]*config.IPsecVPN{
@@ -299,18 +280,30 @@ func TestGenerateConfig_DanglingProposalNoPFSFailsClosed(t *testing.T) {
 				LocalID:     "10.0.1.0/24",
 				RemoteID:    "10.0.2.0/24",
 			},
+			"healthy": {
+				Gateway:  "172.16.0.2",
+				LocalID:  "10.0.3.0/24",
+				RemoteID: "10.0.4.0/24",
+			},
 		},
 		Policies: map[string]*config.IPsecPolicyDef{
 			"ipsec-pol": {Name: "ipsec-pol", PFSGroup: 0, Proposals: []string{"does-not-exist"}},
 		},
 	}
-	// #6824: equality replaces a trailing "\n" that stood in for "the value
-	// ends here". The "not esp_proposals = default" half is a DOCUMENT-WIDE
-	// claim and is kept as one: equality at this path says nothing about a
-	// `default` appearing under another connection.
-	got := m.generateConfig(cfg)
-	childSA_3904(t, got, "tun1").requireSetting(t, "esp_proposals", "aes256-sha256")
-	parseSwanctlDoc(t, got).hasNoSettingValuePrefixAnywhere(t, "esp_proposals", "default")
+	got, rendered, err := m.renderConfig(cfg)
+	if err != nil {
+		t.Fatalf("renderConfig: %v", err)
+	}
+	if rendered["tun1"] {
+		t.Errorf("dangling-ESP VPN tun1 was rendered; want skip.\n%s", got)
+	}
+	if !rendered["healthy"] {
+		t.Errorf("healthy sibling VPN was dropped alongside the dangling one; want it rendered.\n%s", got)
+	}
+	parseSwanctlDoc(t, got).at(t, "connections").hasNoChild(t, "tun1")
+	if strings.Contains(got, "aes256-sha256") {
+		t.Errorf("render contains a fabricated fallback suite for the dangling reference.\n%s", got)
+	}
 }
 
 // TestResolveESPSettings_NoPolicyStaysDefault is the (D) regression: a VPN
@@ -318,34 +311,49 @@ func TestGenerateConfig_DanglingProposalNoPFSFailsClosed(t *testing.T) {
 func TestResolveESPSettings_NoPolicyStaysDefault(t *testing.T) {
 	cfg := &config.IPsecConfig{}
 	vpn := &config.IPsecVPN{}
-	got, lifetime := resolveESPSettings(cfg, vpn)
+	got, lifetime, err := resolveESPSettings(cfg, vpn)
+	if err != nil {
+		t.Fatalf("no-policy VPN must not error: %v", err)
+	}
 	if got != "default" || lifetime != 0 {
 		t.Errorf("resolveESPSettings = (%q, %d), want (default, 0)", got, lifetime)
 	}
 }
 
-// TestGenerateConfig_DanglingProposalPreservesPFS checks the full render:
-// the emitted swanctl child block must carry the PFS modp group rather
-// than esp_proposals = default, using the canonical sha256 keyword.
-func TestGenerateConfig_DanglingProposalPreservesPFS(t *testing.T) {
+// TestGenerateConfig_DanglingPolicyRefSkips checks the full render for the
+// dangling-POLICY half: the VPN names an undefined ipsec-policy, so no
+// connection block is emitted and no orphan secret is written, while the
+// healthy sibling renders.
+func TestGenerateConfig_DanglingPolicyRefSkips(t *testing.T) {
 	m := &Manager{configDir: "/tmp", configPath: "/tmp/xpf.conf"}
 	cfg := &config.IPsecConfig{
 		VPNs: map[string]*config.IPsecVPN{
 			"tun1": {
 				Gateway:     "172.16.0.1",
-				IPsecPolicy: "ipsec-pol",
+				IPsecPolicy: "does-not-exist",
 				LocalID:     "10.0.1.0/24",
 				RemoteID:    "10.0.2.0/24",
 			},
-		},
-		Policies: map[string]*config.IPsecPolicyDef{
-			"ipsec-pol": {Name: "ipsec-pol", PFSGroup: 14, Proposals: []string{"does-not-exist"}},
+			"healthy": {
+				Gateway:  "172.16.0.2",
+				LocalID:  "10.0.3.0/24",
+				RemoteID: "10.0.4.0/24",
+			},
 		},
 	}
-	got := m.generateConfig(cfg)
-	childSA_3904(t, got, "tun1").requireSetting(t, "esp_proposals", "aes256-sha256-modp2048")
-	// PFS must not have silently dropped to the default set ANYWHERE.
-	parseSwanctlDoc(t, got).hasNoSettingValuePrefixAnywhere(t, "esp_proposals", "default")
+	got, rendered, err := m.renderConfig(cfg)
+	if err != nil {
+		t.Fatalf("renderConfig: %v", err)
+	}
+	if rendered["tun1"] {
+		t.Errorf("dangling-policy VPN tun1 was rendered; want skip.\n%s", got)
+	}
+	if !rendered["healthy"] {
+		t.Errorf("healthy sibling VPN was dropped alongside the dangling one; want it rendered.\n%s", got)
+	}
+	doc := parseSwanctlDoc(t, got)
+	doc.at(t, "connections").hasNoChild(t, "tun1")
+	doc.at(t, "secrets").hasNoChild(t, "ike-tun1")
 }
 
 // readSAFixture loads a captured `swanctl --list-sas` golden fixture. The
@@ -1037,7 +1045,9 @@ func TestGenerateConfig_IKELifetime(t *testing.T) {
 	// IKE lifetime was missing. Pin the connection.
 	conn := parseSwanctlDoc(t, m.generateConfig(cfg)).at(t, "connections", "tun")
 	conn.requireSetting(t, "rekey_time", "28800s")
-	conn.requireSetting(t, "rand_time", "0s")
+	// #9919 F-163: no rand_time beside the IKE rekey_time — strongSwan's
+	// default jitter applies.
+	conn.hasNoSetting(t, "rand_time")
 }
 
 func TestGenerateConfig_ESPLifetime(t *testing.T) {
@@ -1060,8 +1070,10 @@ func TestGenerateConfig_ESPLifetime(t *testing.T) {
 	}
 	// The ESP lifetime is the CHILD's rekey_time -- the mirror of the IKE
 	// case above, and indistinguishable from it under containment.
-	childSA_3904(t, m.generateConfig(cfg), "tun").
-		requireSetting(t, "rekey_time", "3600s")
+	// #9919 F-163: no rand_time beside it either.
+	child := childSA_3904(t, m.generateConfig(cfg), "tun")
+	child.requireSetting(t, "rekey_time", "3600s")
+	child.hasNoSetting(t, "rand_time")
 }
 
 func TestGenerateConfig_DPDModes(t *testing.T) {
