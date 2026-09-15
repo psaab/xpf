@@ -61,9 +61,14 @@ func TestValidateFactoryResetRoot(t *testing.T) {
 // forbidFactoryResetRoot registers dir as a #5684 forbidden root for the test's
 // lifetime so a THROWAWAY directory can stand in for a shared/system root like
 // /etc or /srv, keeping the test hermetic (mirrors the DefaultArchiveDir seam).
-// Production code never mutates FactoryResetForbiddenRoots.
+// Production code never mutates FactoryResetForbiddenRoots. The RESOLVED form
+// is registered (#9897 review): the wipe compares resolved candidates, so an
+// unresolved registration would miss under a symlinked TMPDIR.
 func forbidFactoryResetRoot(t *testing.T, dir string) {
 	t.Helper()
+	if resolved, rerr := filepath.EvalSymlinks(dir); rerr == nil {
+		dir = resolved
+	}
 	old := FactoryResetForbiddenRoots
 	FactoryResetForbiddenRoots = append(append([]string(nil), old...), filepath.Clean(dir))
 	t.Cleanup(func() { FactoryResetForbiddenRoots = old })

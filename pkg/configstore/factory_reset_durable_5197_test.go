@@ -58,10 +58,16 @@ func TestFactoryResetDurableKeyFirstOrdering(t *testing.T) {
 	// the ciphertext RemoveAll), then fsync the parent at the end. The
 	// enumerated top-level removals go through os.Remove directly and are not
 	// recorded here.
+	// #9897: the wipe records RESOLVED paths, so normalize the want side for a
+	// symlinked TMPDIR (macOS /var -> /private/var); identity on Linux.
+	wantDir, werr := filepath.EvalSymlinks(dir)
+	if werr != nil {
+		t.Fatalf("EvalSymlinks(%q): %v", dir, werr)
+	}
 	want := []string{
-		"remove:" + masterKey,
-		"sync:" + dbDir,
-		"sync:" + dir,
+		"remove:" + filepath.Join(wantDir, ".configdb", "master.key"),
+		"sync:" + filepath.Join(wantDir, ".configdb"),
+		"sync:" + wantDir,
 	}
 	if !reflect.DeepEqual(events, want) {
 		t.Errorf("durable-erase seam order mismatch:\n got  %v\n want %v", events, want)
@@ -91,9 +97,16 @@ func TestFactoryResetPropagatesDirSyncError(t *testing.T) {
 		t.Fatalf("seed master.key: %v", err)
 	}
 
+	// #9897: the wipe invokes the seam with the RESOLVED root; compare
+	// against the resolved want or the sentinel never fires under a
+	// symlinked TMPDIR (macOS /var -> /private/var).
+	wantDir, werr := filepath.EvalSymlinks(dir)
+	if werr != nil {
+		t.Fatalf("EvalSymlinks(%q): %v", dir, werr)
+	}
 	sentinel := errors.New("injected final dir fsync failure")
 	rbSyncDir = func(d string) error {
-		if filepath.Clean(d) == filepath.Clean(dir) {
+		if filepath.Clean(d) == wantDir {
 			return sentinel // fail ONLY the final configDir barrier
 		}
 		return fsatomic.SyncDir(d)

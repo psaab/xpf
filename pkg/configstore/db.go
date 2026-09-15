@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"syscall"
 	"time"
 
 	"github.com/psaab/xpf/pkg/config"
@@ -50,15 +51,71 @@ func NewDB(dir string) (*DB, error) {
 	// operator needs. The FILES themselves are 0600 (writeTreeMarked); the
 	// dir mode is defense-in-depth so a non-owner cannot even enumerate
 	// the slot names.
+	//
+	// Normalize the spelling ONCE, before the gate, and use it
+	// consistently below (#9897 review). A trailing separator ("link/",
+	// "link/.") makes Lstat traverse the link to the TARGET dir (so the
+	// gate below sees a directory, not a link) and makes the O_NOFOLLOW
+	// open succeed on the target as well — the gate would be dead for any
+	// caller that forwards an unnormalized spelling (cmd/xpfd upgrade.go
+	// forwards its --configdb-dir flag verbatim). Clean strips those
+	// spellings to the link itself. Empty is left alone so it keeps
+	// failing at MkdirAll exactly as today (Clean("") is ".", which must
+	// never be created/chmod'd as a db dir).
+	clean := dir
+	if clean != "" {
+		clean = filepath.Clean(clean)
+	}
+	dir = clean
+	//
+	// Refuse a symlinked db dir (#9897 F-037): without this gate MkdirAll
+	// succeeds through the link and the Chmod below changes the TARGET's
+	// mode to 0700. Only the FINAL component is gated — a symlinked
+	// PARENT (the legitimate layout, e.g. /etc/xpf -> /mnt/persist) still
+	// works, and an absent dir still falls through to creation. An Lstat
+	// error other than success is likewise ignored here so EACCES keeps
+	// surfacing from MkdirAll, today's error site, not from this gate.
+	if fi, lerr := os.Lstat(dir); lerr == nil && fi.Mode()&os.ModeSymlink != 0 {
+		return nil, refuseSymlinkedDBDir(dir)
+	}
 	if err := fsatomic.MkdirAllDurable(dir, 0700); err != nil {
 		return nil, fmt.Errorf("create db dir: %w", err)
 	}
 	// MkdirAllDurable does not chmod an already-existing directory, so an
 	// upgrade from a pre-#4056 build inherits the old 0755. Enforce 0700
 	// here — the daemon owns the dir, so this is idempotent and cheap.
-	if err := os.Chmod(dir, 0700); err != nil {
-		return nil, fmt.Errorf("restrict db dir perms: %w", err)
+	//
+	// The chmod runs through an O_NOFOLLOW handle (#9897): a link swapped
+	// in between the Lstat gate and this chmod would otherwise have the
+	// TARGET's mode changed as root (e.g. /etc to 0700). fchmod on the
+	// pinned descriptor cannot follow anything; ELOOP (or any open
+	// failure on a path that is a link) is the same refusal as the gate.
+	// O_NONBLOCK joins the open so a FIFO swapped into the same window is
+	// refused by the IsDir check instead of hanging the boot (a plain
+	// O_RDONLY open of a FIFO blocks for a writer; NONBLOCK is a no-op
+	// for directories — the #6753 precedent the journal helper shares).
+	f, oerr := os.OpenFile(dir, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	if oerr != nil {
+		if _, rerr := os.Readlink(dir); rerr == nil {
+			return nil, refuseSymlinkedDBDir(dir)
+		}
+		return nil, fmt.Errorf("restrict db dir perms: %w", oerr)
 	}
+	fi, serr := f.Stat()
+	if serr != nil {
+		f.Close()
+		return nil, fmt.Errorf("restrict db dir perms: %w", serr)
+	}
+	if !fi.IsDir() {
+		f.Close()
+		return nil, fmt.Errorf("config db dir %s is not a directory (mode %s) — "+
+			"refusing to use it as the config DB", dir, fi.Mode())
+	}
+	if cerr := f.Chmod(0700); cerr != nil {
+		f.Close()
+		return nil, fmt.Errorf("restrict db dir perms: %w", cerr)
+	}
+	f.Close()
 	// Sweep temp files leaked by a crash mid-write (#1894). fsatomic
 	// names its temps ".<base>.tmp-<random>", so a daemon killed between
 	// CreateTemp and rename leaves one behind; they are dead weight and
@@ -69,6 +126,36 @@ func NewDB(dir string) (*DB, error) {
 		}
 	}
 	return &DB{dir: dir}, nil
+}
+
+// refuseSymlinkedDBDir reports that dir's final component is a symlink (#9897
+// F-037). The error names the link and its target plus the supported layout:
+// a stale or planted link here fails the boot closed (Store.New has no
+// file-only fallback, #1893), and the operator fixes it by symlinking the
+// PARENT directory instead of .configdb itself.
+//
+// Accepted residual: the temp sweep above still Globs+Removes through the
+// path, so a namespace mutation AFTER this function's checks — the db dir (or
+// an ancestor) renamed/swapped to a link mid-call — could direct the removal
+// of ".*.tmp-*" names at another directory. The window is this call's
+// syscalls including the durable-creation fsyncs, not an instant; what it
+// takes is write permission on the db dir's PARENT (or higher) DURING the
+// call, and the blast radius is temp-shaped names only (never chmod or read).
+// Concurrent namespace mutation during the call is therefore EXCLUDED and
+// documented here rather than timed away: the deterministic plant (the
+// modeled attack) is closed above, and full closure would need
+// descriptor-relative traversal (openat/unlinkat by dirfd; openat2 is the
+// direct form but not mandatory), excluded as disproportionate for a
+// boot-path temp sweep — the same exclusion every path-based guard in the
+// repo (notably #9013's Lstat-then-act) already makes.
+func refuseSymlinkedDBDir(dir string) error {
+	target, rerr := os.Readlink(dir)
+	if rerr != nil {
+		target = "<unreadable link target>"
+	}
+	return fmt.Errorf("config db dir %s is a symlink to %s — refusing to create "+
+		"the config DB through it (a stale link fails the boot closed; symlink the "+
+		"PARENT directory instead of .configdb itself)", dir, target)
 }
 
 // activePath returns the path to the active config file.

@@ -117,7 +117,11 @@ func (s *Server) zeroizeConfigRoot() (configDir, configBase string, err error) {
 	// factory reset into a broad deletion of *.conf / .configdb / tls siblings xpf
 	// does not own. Fail CLOSED here, BEFORE runZeroize enters the terminal reset
 	// generation or performZeroizeWipe touches any leg.
-	if err := configstore.ValidateFactoryResetRoot(dir); err != nil {
+	// #9897 F-040: validate the RESOLVED root, not just the lexical path — a
+	// link into a forbidden directory must be refused at this early gate too.
+	// The ORIGINAL path is still returned (the wipe primitive re-resolves
+	// authoritatively), so ordinary callers observe byte-identical roots.
+	if _, err := configstore.ResolveFactoryResetRoot(dir); err != nil {
 		return "", "", err
 	}
 	return dir, filepath.Base(p), nil

@@ -115,9 +115,16 @@ func zeroizeConfigDir(configDir, configBase string) error {
 	// <root>/.configdb), so it re-validates itself — the same defense-in-depth the
 	// CLI's configstore.FactoryResetConfigDir applies. Fail CLOSED, removing
 	// NOTHING, rather than trust the caller not to hand it an unowned root.
-	if err := configstore.ValidateFactoryResetRoot(configDir); err != nil {
-		return err
+	// #9897 F-040: resolve BEFORE validating and wiping, through the SAME
+	// shared helper as the configstore twin — a lexically clean path that
+	// REACHES a forbidden directory through a symlink is refused, and a
+	// link to a dedicated root is wiped AT THE RESOLVED TARGET. This
+	// re-resolution (not the caller's string) is authoritative for the wipe.
+	resolved, rerr := configstore.ResolveFactoryResetRoot(configDir)
+	if rerr != nil {
+		return rerr
 	}
+	configDir = resolved
 
 	var firstErr error
 	fail := func(err error) {

@@ -41,7 +41,13 @@ func TestZeroizeConfigDirDurableOrdering(t *testing.T) {
 	}
 
 	// .configdb fsynced first (key-first durability barrier), configDir last.
-	want := []string{dbDir, dir}
+	// #9897: the wipe records RESOLVED paths, so normalize the want side for a
+	// symlinked TMPDIR (macOS /var -> /private/var); identity on Linux.
+	wantDir, werr := filepath.EvalSymlinks(dir)
+	if werr != nil {
+		t.Fatalf("EvalSymlinks(%q): %v", dir, werr)
+	}
+	want := []string{filepath.Join(wantDir, ".configdb"), wantDir}
 	if !reflect.DeepEqual(syncedDirs, want) {
 		t.Errorf("durable-erase fsync order mismatch:\n got  %v\n want %v", syncedDirs, want)
 	}
@@ -64,9 +70,16 @@ func TestZeroizeConfigDirPropagatesDirSyncError(t *testing.T) {
 	dir := t.TempDir()
 	mustWriteFile(t, filepath.Join(dir, ".configdb", "master.key"), make([]byte, 32))
 
+	// #9897: the wipe invokes the seam with the RESOLVED root; compare
+	// against the resolved want or the sentinel never fires under a
+	// symlinked TMPDIR (macOS /var -> /private/var).
+	wantDir, werr := filepath.EvalSymlinks(dir)
+	if werr != nil {
+		t.Fatalf("EvalSymlinks(%q): %v", dir, werr)
+	}
 	sentinel := errors.New("injected final dir fsync failure")
 	zeroizeSyncDir = func(d string) error {
-		if filepath.Clean(d) == filepath.Clean(dir) {
+		if filepath.Clean(d) == wantDir {
 			return sentinel // fail ONLY the final configDir barrier
 		}
 		return fsatomic.SyncDir(d)
