@@ -7,6 +7,7 @@
 //! that operate on a frame slice without mutating it.
 
 use crate::afxdp::types::ForwardPacketMeta;
+use crate::nat::NatDecision;
 use super::*;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -1239,6 +1240,41 @@ pub(in crate::afxdp) fn forward_tuple_mismatch_reason(
     Some(format!(
         "forward_tuple_mismatch:src={}:{} expected={}:{} built={}:{}",
         source.0, source.1, expected.0, expected.1, built.0, built.1
+    ))
+}
+
+/// #9782: translate a pre-NAT port expectation into the post-NAT tuple a
+/// correct builder must have emitted, for the debug-only post-build
+/// mismatch check (`forward_tuple_mismatch_reason`).
+///
+/// `expected_ports`/`source_ports` are the arrival-tuple authorities
+/// (session-flow/frame bytes). The translation applies to the EFFECTIVE
+/// expectation (`expected_ports.or(source_ports)`, mirroring the reason
+/// function); callers keep passing the ORIGINAL `source_ports` through so
+/// the diagnostic still shows the arrival tuple. Both `None` stays `None`
+/// (no authority — the reason function skips, as before).
+///
+/// `nat_applied == false` (FabricRedirect with `apply_nat_on_fabric ==
+/// false`, where builders suppress NAT) is the identity: the arrival
+/// tuple stands. Callers derive it from the same gate the builders use.
+///
+/// Layer bound: ports only. Outputs whose parsers yield no TCP/UDP tuple
+/// (`built == None` — NAT64 cross-family frames, tunnel encap) still skip
+/// exactly as before; this never fabricates an authority where none
+/// exists. Only same-family TCP/UDP translated output changes verdict.
+pub(in crate::afxdp) fn post_nat_expected_ports(
+    expected_ports: Option<(u16, u16)>,
+    source_ports: Option<(u16, u16)>,
+    nat: NatDecision,
+    nat_applied: bool,
+) -> Option<(u16, u16)> {
+    let (src, dst) = expected_ports.or(source_ports)?;
+    if !nat_applied {
+        return Some((src, dst));
+    }
+    Some((
+        nat.rewrite_src_port.unwrap_or(src),
+        nat.rewrite_dst_port.unwrap_or(dst),
     ))
 }
 

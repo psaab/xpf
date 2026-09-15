@@ -101,7 +101,7 @@ pub(in crate::afxdp) use inspect::{
     l3_session_flow_from_meta,
     l2_dst_is_group_or_broadcast, meta_icmp_identifier_bearing, neighbor_ip_is_learnable,
     neighbor_mac_is_learnable,
-    parse_session_flow,
+    parse_session_flow, post_nat_expected_ports,
     source_is_invalid_for_icmp_error,
     src_is_directed_broadcast, term_match_extra_from_frame,
     term_match_extra_from_meta,
@@ -937,6 +937,19 @@ fn rewrite_apply_v4(
     let repaired_ports =
         restore_l4_tuple_from_meta(&mut packet[ip_start..], meta, rel_l4, non_first_fragment)
             .unwrap_or(false);
+    // #9782: enforce BEFORE NAT. expected_ports carries the ARRIVAL
+    // (pre-NAT) tuple; enforcing after apply_nat overwrote PAT/DNAT port
+    // translations with the original ports (valid checksum, unmatchable
+    // reverse index). Repair-then-translate; incremental checksum deltas
+    // compose, and this stays after all None-gates (preflight contract).
+    let enforced = enforce_expected_ports(
+        packet,
+        meta.addr_family,
+        meta.protocol,
+        expected_ports,
+        non_first_fragment,
+    )
+    .unwrap_or(false);
     if apply_nat {
         apply_nat_ipv4(
             &mut packet[ip_start..],
@@ -954,14 +967,8 @@ fn rewrite_apply_v4(
         old_dst,
         old_ttl,
     )?;
-    let enforced = enforce_expected_ports(
-        packet,
-        meta.addr_family,
-        meta.protocol,
-        expected_ports,
-        non_first_fragment,
-    )
-    .unwrap_or(false);
+    // #9782: repaired (ICMP-ident-only) vs enforced (TCP/UDP-only) are
+    // protocol-disjoint, so this arm keeps its meaning in any order.
     if repaired_ports && !enforced {
         recompute_l4_checksum_ipv4(&mut packet[ip_start..], ihl, meta.protocol, true)?;
     }
@@ -996,6 +1003,16 @@ fn rewrite_apply_v6(
     let repaired_ports =
         restore_l4_tuple_from_meta(&mut packet[ip_start..], meta, rel_l4, non_first_fragment)
             .unwrap_or(false);
+    // #9782: enforce BEFORE NAT (same repair-then-translate ordering as
+    // the v4 arm: expected_ports is the arrival tuple).
+    let enforced = enforce_expected_ports(
+        packet,
+        meta.addr_family,
+        meta.protocol,
+        expected_ports,
+        non_first_fragment,
+    )
+    .unwrap_or(false);
     if apply_nat {
         apply_nat_ipv6(
             &mut packet[ip_start..],
@@ -1008,14 +1025,8 @@ fn rewrite_apply_v6(
     if !skip_ttl {
         packet[ip_start + 7] -= 1;
     }
-    let enforced = enforce_expected_ports(
-        packet,
-        meta.addr_family,
-        meta.protocol,
-        expected_ports,
-        non_first_fragment,
-    )
-    .unwrap_or(false);
+    // #9782: repaired (ICMP-ident-only) vs enforced (TCP/UDP-only) are
+    // protocol-disjoint, so this arm keeps its meaning in any order.
     if repaired_ports && !enforced {
         recompute_l4_checksum_ipv6(&mut packet[ip_start..], rel_l4, meta.protocol)?;
     }
@@ -2186,6 +2197,9 @@ mod tests_shim_ext_parity;
 #[cfg(test)]
 #[path = "tests_shim_wg_classify_8274.rs"]
 mod tests_shim_wg_classify_8274;
+#[cfg(test)]
+#[path = "tests_9782_copy.rs"]
+mod tests_9782_copy;
 
 // #1824: proptest property harness (parse no-panic/bounds, NAT
 // round-trip + descriptor-vs-generic differential, TSO reassembly).

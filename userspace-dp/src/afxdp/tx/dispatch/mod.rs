@@ -85,13 +85,15 @@ fn copy_frame_is_oversized(cp_len: usize) -> bool {
 
 // #4041: test-only fault injection for the direct-TX tuple-mismatch
 // diagnostic. The mismatch is a builder-bug paranoia check that a CORRECT
-// builder can never trip — `enforce_expected_ports()` in
-// `build_forwarded_frame_into_from_frame` makes the built L4 ports equal the
-// expected tuple, so `forward_tuple_mismatch_reason` always returns `None`
-// on a real frame. To exercise the single-recycle invariant on the diagnostic
-// branch (where the frame's `tx_offset` must be returned to `free_tx_frames`
-// EXACTLY once), this thread-local forces the branch. Like `FORCE_OVERSIZED`
-// above it is `#[cfg(test)]` only and DCEs out of release builds.
+// builder can never trip — the call sites compare the built L4 ports
+// against the POST-NAT expectation (`post_nat_expected_ports`), so a
+// correct translation returns `None` on a real frame. (Pre-#9782 this
+// relied on `enforce_expected_ports()` making built ports equal the
+// pre-NAT tuple — which was the clobber being fixed.) To exercise the
+// single-recycle invariant on the diagnostic branch (where the frame's
+// `tx_offset` must be returned to `free_tx_frames` EXACTLY once), this
+// thread-local forces the branch. Like `FORCE_OVERSIZED` above it is
+// `#[cfg(test)]` only and DCEs out of release builds.
 #[cfg(test)]
 thread_local! {
     static FORCE_TUPLE_MISMATCH: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
@@ -446,12 +448,22 @@ fn enqueue_copy_fallback_frame(
     } {
         Some(frame) => {
             if cfg!(feature = "debug-log") {
+                let source_ports =
+                    live_frame_ports_from_meta_bytes(source_frame, request.meta);
+                // #9782: compare against the POST-NAT tuple — built output
+                // carries translations. nat_applied mirrors the builders'
+                // fabric gate (build/mod.rs).
+                let nat_applied = request.decision.resolution.disposition
+                    != ForwardingDisposition::FabricRedirect
+                    || request.apply_nat_on_fabric;
                 if let Some(reason) = forward_tuple_mismatch_reason(
-                    live_frame_ports_from_meta_bytes(
-                        source_frame,
-                        request.meta,
+                    source_ports,
+                    post_nat_expected_ports(
+                        expected_ports,
+                        source_ports,
+                        request.decision.nat,
+                        nat_applied,
                     ),
-                    expected_ports,
                     live_frame_ports_bytes(
                         &frame,
                         request.meta.addr_family,
@@ -891,9 +903,22 @@ pub(in crate::afxdp) fn enqueue_pending_forwards(
                 ) {
                     for frame in segmented {
                         if cfg!(feature = "debug-log") {
+                            let source_ports = live_frame_ports_from_meta_bytes(
+                                source_frame, request.meta,
+                            );
+                            // #9782: compare against the POST-NAT tuple (see
+                            // the copy-fallback site above for the gate).
+                            let nat_applied = request.decision.resolution.disposition
+                                != ForwardingDisposition::FabricRedirect
+                                || request.apply_nat_on_fabric;
                             if let Some(reason) = forward_tuple_mismatch_reason(
-                                live_frame_ports_from_meta_bytes(source_frame, request.meta),
-                                expected_ports,
+                                source_ports,
+                                post_nat_expected_ports(
+                                    expected_ports,
+                                    source_ports,
+                                    request.decision.nat,
+                                    nat_applied,
+                                ),
                                 live_frame_ports_bytes(
                                     &frame,
                                     request.meta.addr_family,
@@ -1161,9 +1186,10 @@ pub(in crate::afxdp) fn enqueue_pending_forwards(
                             )
                         });
                         if let Some(written) = written {
-                            // Debug-only: validate built frame ports match expected.
-                            // enforce_expected_ports() in build_forwarded_frame_into_from_frame
-                            // already ensures correctness; this catches builder bugs.
+                            // Debug-only: validate built frame ports match the
+                            // POST-NAT expectation (a correct translation must
+                            // match after #9782 moved enforcement pre-NAT);
+                            // this catches builder bugs.
                             if cfg!(feature = "debug-log") {
                                 let built_ports = unsafe {
                                     target_area.slice_mut_unchecked(tx_offset as usize, written)
@@ -1175,9 +1201,22 @@ pub(in crate::afxdp) fn enqueue_pending_forwards(
                                         request.meta.protocol,
                                     )
                                 });
+                                let source_ports = live_frame_ports_from_meta_bytes(
+                                    source_frame, request.meta,
+                                );
+                                // #9782: compare against the POST-NAT tuple (see
+                                // the copy-fallback site above for the gate).
+                                let nat_applied = request.decision.resolution.disposition
+                                    != ForwardingDisposition::FabricRedirect
+                                    || request.apply_nat_on_fabric;
                                 if let Some(reason) = direct_tx_tuple_mismatch_reason(
-                                    live_frame_ports_from_meta_bytes(source_frame, request.meta),
-                                    expected_ports,
+                                    source_ports,
+                                    post_nat_expected_ports(
+                                        expected_ports,
+                                        source_ports,
+                                        request.decision.nat,
+                                        nat_applied,
+                                    ),
                                     built_ports,
                                 ) {
                                     // #4041: DO NOT recycle `tx_offset` here.

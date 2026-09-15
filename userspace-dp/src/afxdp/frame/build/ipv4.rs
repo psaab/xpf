@@ -55,6 +55,19 @@ pub(in crate::afxdp::frame) fn build_forwarded_frame_into_ipv4(
     let repaired_ports =
         restore_l4_tuple_from_meta(&mut out[ip_start..], meta, rel_l4, non_first_fragment)
             .unwrap_or(false);
+    // #9782: enforce BEFORE NAT (repair-then-translate; expected_ports is
+    // the arrival tuple — enforcing after apply_nat clobbered PAT/DNAT
+    // port translations with the original ports).
+    let enforced = enforce_expected_ports_at(
+        out,
+        ip_start,
+        ip_start + rel_l4,
+        meta.addr_family,
+        meta.protocol,
+        enforced_ports,
+        non_first_fragment,
+    )
+    .unwrap_or(false);
     if apply_nat {
         apply_nat_ipv4(
             &mut out[ip_start..],
@@ -67,16 +80,6 @@ pub(in crate::afxdp::frame) fn build_forwarded_frame_into_ipv4(
     if !skip_ttl {
         out[ip_start + 8] -= 1;
     }
-    let enforced = enforce_expected_ports_at(
-        out,
-        ip_start,
-        ip_start + rel_l4,
-        meta.addr_family,
-        meta.protocol,
-        enforced_ports,
-        non_first_fragment,
-    )
-    .unwrap_or(false);
     adjust_ipv4_header_checksum(
         &mut out[ip_start..ip_start + ihl],
         old_src,

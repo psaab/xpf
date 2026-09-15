@@ -44,6 +44,19 @@ pub(in crate::afxdp::frame) fn build_forwarded_frame_into_ipv6(
     let repaired_ports =
         restore_l4_tuple_from_meta(&mut out[ip_start..], meta, rel_l4, non_first_fragment)
             .unwrap_or(false);
+    // #9782: enforce BEFORE NAT (repair-then-translate; expected_ports is
+    // the arrival tuple — enforcing after apply_nat clobbered PAT/DNAT
+    // port translations with the original ports).
+    let enforced = enforce_expected_ports_at(
+        out,
+        ip_start,
+        ip_start + rel_l4,
+        meta.addr_family,
+        meta.protocol,
+        enforced_ports,
+        non_first_fragment,
+    )
+    .unwrap_or(false);
     if apply_nat {
         apply_nat_ipv6(
             &mut out[ip_start..],
@@ -56,16 +69,6 @@ pub(in crate::afxdp::frame) fn build_forwarded_frame_into_ipv6(
     if (meta.meta_flags & 0x80) == 0 {
         out[ip_start + 7] -= 1;
     }
-    let enforced = enforce_expected_ports_at(
-        out,
-        ip_start,
-        ip_start + rel_l4,
-        meta.addr_family,
-        meta.protocol,
-        enforced_ports,
-        non_first_fragment,
-    )
-    .unwrap_or(false);
     if selected_tcp_mss > 0 {
         let _ = clamp_tcp_mss_frame(out, ip_start, selected_tcp_mss);
     }

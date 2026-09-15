@@ -471,6 +471,20 @@ fn emit_ipv4_segment(
         if (meta.meta_flags & 0x80) == 0 && packet[8] <= 1 {
             return None;
         }
+    }
+    // #9782: enforce BEFORE NAT (repair-then-translate; expected_ports is
+    // the arrival tuple — enforcing after apply_nat clobbered port
+    // translations). Split from the block above so the TTL gate still runs
+    // before any mutation (preflight contract).
+    let _ = enforce_expected_ports(
+        frame_out,
+        meta.addr_family,
+        meta.protocol,
+        enforced_ports,
+        false,
+    )?;
+    {
+        let packet = frame_out.get_mut(eth_len..)?;
         if apply_nat {
             // #1852 + #5148: non_first_fragment=false — the segmentation
             // admission gate (forwarded_tcp_may_need_segmentation) and the
@@ -482,13 +496,6 @@ fn emit_ipv4_segment(
             packet[8] -= 1;
         }
     }
-    let _ = enforce_expected_ports(
-        frame_out,
-        meta.addr_family,
-        meta.protocol,
-        enforced_ports,
-        false,
-    )?;
     let packet = frame_out.get_mut(eth_len..)?;
     // IP header checksum: full recompute (only 20 bytes, fast).
     packet.get_mut(10..12)?.copy_from_slice(&[0, 0]);
@@ -551,6 +558,20 @@ fn emit_ipv6_segment(
         if (meta.meta_flags & 0x80) == 0 && packet[7] <= 1 {
             return None;
         }
+    }
+    // #9782: enforce BEFORE NAT (repair-then-translate; expected_ports is
+    // the arrival tuple — enforcing after apply_nat clobbered port
+    // translations). Split from the block above so the hop-limit gate still
+    // runs before any mutation (preflight contract).
+    let _ = enforce_expected_ports(
+        frame_out,
+        meta.addr_family,
+        meta.protocol,
+        enforced_ports,
+        false,
+    )?;
+    {
+        let packet = frame_out.get_mut(eth_len..)?;
         if apply_nat {
             // `ip_header_len` IS the ext-aware rel_l4: it is
             // `frame_l4_offset - l3` and the segment copies
@@ -563,13 +584,6 @@ fn emit_ipv6_segment(
             packet[7] -= 1;
         }
     }
-    let _ = enforce_expected_ports(
-        frame_out,
-        meta.addr_family,
-        meta.protocol,
-        enforced_ports,
-        false,
-    )?;
     let packet = frame_out.get_mut(eth_len..)?;
     recompute_l4_checksum_ipv6(packet, ip_header_len, meta.protocol)?;
     Some(())
