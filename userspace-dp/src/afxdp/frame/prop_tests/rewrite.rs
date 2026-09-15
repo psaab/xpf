@@ -565,13 +565,21 @@ fn declined_rewrite_leaves_umem_byte_identical_4965() {
         const BIG: usize = 8192;
         let pkt = pin_packet(false, PROTO_TCP, 1, Vec::new()); // no VLAN → l3 = 14, TTL=1
         let mut area = MmapArea::new(BIG).expect("mmap");
-        for b in area.slice_mut(0, BIG).unwrap().iter_mut() {
-            *b = SENTINEL;
+        // #9900: the slicer refuses cross-frame spans, so sentinel-fill and
+        // snapshot per frame. The frame under test still sits at 4096 (its
+        // tx-4 view leaves the chunk → the memmove path under test).
+        for base in [0usize, FRAME_BASE] {
+            for b in area.slice_mut(base, FRAME_BASE).unwrap().iter_mut() {
+                *b = SENTINEL;
+            }
         }
         area.slice_mut(FRAME_BASE, pkt.frame.len())
             .unwrap()
             .copy_from_slice(&pkt.frame);
-        let snapshot = area.slice(0, BIG).unwrap().to_vec();
+        let snapshot: Vec<u8> = [0usize, FRAME_BASE]
+            .into_iter()
+            .flat_map(|base| area.slice(base, FRAME_BASE).unwrap().to_vec())
+            .collect();
         let desc = XdpDesc {
             addr: FRAME_BASE as u64,
             len: pkt.frame.len() as u32,
@@ -585,9 +593,12 @@ fn declined_rewrite_leaves_umem_byte_identical_4965() {
                 .is_none(),
             "generic must decline TTL≤1 on the vlan-push memmove path"
         );
+        let after: Vec<u8> = [0usize, FRAME_BASE]
+            .into_iter()
+            .flat_map(|base| area.slice(base, FRAME_BASE).unwrap().to_vec())
+            .collect();
         assert_eq!(
-            area.slice(0, BIG).unwrap(),
-            &snapshot[..],
+            after, snapshot,
             "#4965: memmove-path decline must NOT shift the payload or scribble L2"
         );
     }
