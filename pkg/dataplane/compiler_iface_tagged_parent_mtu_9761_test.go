@@ -261,7 +261,7 @@ func TestATaggedInterfaceNamedLikeAFabricStillPlansItsMTU_9761(t *testing.T) {
 // per-unit tunnel plan no MTU anywhere. Every other tagged reference plans the
 // interface-level mtu on the interface's own netdev and on nothing else.
 func TestEveryTaggedReferenceShapePlansByTheTwoExceptionsOnly_9761(t *testing.T) {
-	names := []string{"ge-0/0/4", "gr-eenwich", "ip-lookalike", "wg-lookalike", "fab0", "fab1", "fab9", "fabric-uplink"}
+	names := []string{"ge-0/0/4", "gr-eenwich", "ip-lookalike", "wg-lookalike", "fab0", "fab1", "fab9", "fabric-uplink", "st10"} // #9873: st10 exercises the lexical st<N> fallback against a configured vlan-id
 	units := []struct {
 		label string
 		unit  func(num, vlan int) *config.InterfaceUnit
@@ -338,8 +338,8 @@ func TestEveryTaggedReferenceShapePlansByTheTwoExceptionsOnly_9761(t *testing.T)
 			}
 		}
 	}
-	if cases != 5120 {
-		t.Errorf("premise: enumerated %d shapes, want 5120", cases)
+	if cases != 5760 {
+		t.Errorf("premise: enumerated %d shapes, want 5760", cases)
 	}
 	if failed > 0 {
 		t.Errorf("%d of %d tagged reference shapes planned wrongly", failed, cases)
