@@ -246,3 +246,27 @@ func TestNPTv6ScopeUnsupportedNilArgsReportExcluded_4960(t *testing.T) {
 			"inspect")
 	}
 }
+
+// TestNPTv6UnknownLeavesExcludedRuleWithBadPrefixStillCompiles_9877 is the
+// #9877 twin of the scope-exclusion guard above: buildNptv6Snapshots DROPS a
+// rule carrying unknown match leaves, so it never reaches the helper and a
+// malformed prefix on it must be warn-and-skip — not a whole-apply hard
+// error. RED-on-revert: drop the StaticNATRuleExcludedReason consult in
+// compileNPTv6 and the pre-pass rejects with "invalid nptv6-prefix" instead
+// of reaching the tripwire.
+func TestNPTv6UnknownLeavesExcludedRuleWithBadPrefixStillCompiles_9877(t *testing.T) {
+	dp := &recordingDP{}
+	cfg := nptv6ProbeConfig("2001:db8:9::/48", "not-a-prefix")
+	cfg.Security.NAT.Static[0].Rules[0].UnknownMatchLeaves = []string{"soruce-address"}
+
+	_, err := CompileConfig(dp, cfg, false)
+	if !errors.Is(err, errStopBeforeHostReconcile) {
+		t.Fatalf("an NPTv6 rule the snapshot builder EXCLUDES (unknown match "+
+			"leaves) was rejected by the compiler. That rule never reaches "+
+			"Nptv6State::try_from_snapshots, so today's apply succeeds "+
+			"with it simply not installed — failing the compile turns a "+
+			"working tolerant-load / peer-sync config into a failed apply "+
+			"(#9877 / #1960). Gate the hard error on "+
+			"config.StaticNATRuleExcludedReason.\n  got: %v", err)
+	}
+}

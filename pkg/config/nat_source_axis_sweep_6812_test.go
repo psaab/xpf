@@ -1008,6 +1008,21 @@ var walkRuleAxisExemptions6812 = mergeAxisExemptions6812(
 		"Rule.LenientMatchDropped",
 	),
 	fixtureConstantAxes6812(
+		"#9877 compile-time diagnostic state: `match` children the compiler did "+
+			"not read (a typo'd leaf beside a valid one), recorded so the lenient "+
+			"gate can warn and the snapshot builder can fail closed. Constant "+
+			"nil/empty here because no fixture rule carries an unknown leaf; in "+
+			"production any typo'd leaf populates it on the tolerant path, so "+
+			"this is a real blind spot and NOT production-constant. Registered "+
+			"rather than varied for the same reason as matchAuthored above: "+
+			"nothing sorts or compares on it — it is read once by "+
+			"validateNATUnknownMatchLeavesStrict and the snapshot exclusion "+
+			"predicates and never reaches the dataplane (`json:\"-\"`). If that "+
+			"ever changes, vary it instead.",
+		"Rule.UnknownMatchLeaves.nil", "Rule.UnknownMatchLeaves.len",
+		"Rule.UnknownMatchLeaves.all", "Rule.UnknownMatchLeaves[0]",
+	),
+	fixtureConstantAxes6812(
 		"#7013 compile-time diagnostic state: what ONE `then` container authored, kept "+
 			"so validateNATTerminalActionCardinalityStrict can see a pool the resolved "+
 			"NATThen scalar already discarded. Constant at exactly one authored pool "+

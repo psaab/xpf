@@ -1,6 +1,7 @@
 package dataplane
 
 import (
+	"errors"
 	"strings"
 	"testing"
 
@@ -159,5 +160,70 @@ func TestNPTv6OverlapPredicateMirrorsTheHelper_7078(t *testing.T) {
 				t.Fatalf("want NO conflict (%s), got %q", tc.why, got)
 			}
 		})
+	}
+}
+
+// TestNPTv6OverlapSkipsUnknownLeavesExcludedRules_9877: a marked NPTv6 rule is
+// dropped by the snapshot builder, so it can neither report nor trigger an
+// overlap — in either seen-set position. RED-on-revert: drop the
+// StaticNATRuleExcludedReason consult in NPTv6OverlapConflict and both rows
+// report the overlap.
+func TestNPTv6OverlapSkipsUnknownLeavesExcludedRules_9877(t *testing.T) {
+	marked := func(name, zone, match, then string) *config.StaticNATRuleSet {
+		return &config.StaticNATRuleSet{
+			Name: name, FromZone: zone,
+			Rules: []*config.StaticNATRule{{
+				Name: name + "-r", IsNPTv6: true, Match: match, Then: then,
+				UnknownMatchLeaves: []string{"soruce-address"},
+			}},
+		}
+	}
+	healthy := func(name, zone, match, then string) *config.StaticNATRuleSet {
+		return &config.StaticNATRuleSet{
+			Name: name, FromZone: zone,
+			Rules: []*config.StaticNATRule{{Name: name + "-r", IsNPTv6: true, Match: match, Then: then}},
+		}
+	}
+	for _, tc := range []struct {
+		name string
+		sets []*config.StaticNATRuleSet
+	}{
+		{"marked rule first, healthy overlap second", []*config.StaticNATRuleSet{
+			marked("a", "untrust", "2001:db8:9::/48", "fd00:9::/48"),
+			healthy("b", "untrust", "2001:db8:9::/48", "fd00:aa::/48"),
+		}},
+		{"healthy rule first, marked overlap second", []*config.StaticNATRuleSet{
+			healthy("a", "untrust", "2001:db8:9::/48", "fd00:9::/48"),
+			marked("b", "untrust", "2001:db8:9::/48", "fd00:aa::/48"),
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &config.Config{}
+			cfg.Security.NAT.Static = tc.sets
+			if got := config.NPTv6OverlapConflict(cfg); got != "" {
+				t.Fatalf("want NO conflict (the marked rule never reaches the helper), got %q", got)
+			}
+		})
+	}
+}
+
+// TestNPTv6OverlapWithExcludedRuleStillCompiles_9877 is the compile-level twin:
+// the pair the issue's repro rejects must reach the tripwire once the
+// overlapping rule is marked excluded.
+func TestNPTv6OverlapWithExcludedRuleStillCompiles_9877(t *testing.T) {
+	dp := &recordingDP{}
+	cfg := nptv6OverlapConfig(
+		"untrust", "2001:db8:9::/48", "fd00:9::/48",
+		"untrust", "2001:db8:9::/48", "fd00:aa::/48",
+	)
+	cfg.Security.NAT.Static[0].Rules[0].UnknownMatchLeaves = []string{"soruce-address"}
+
+	_, err := CompileConfig(dp, cfg, false)
+	if !errors.Is(err, errStopBeforeHostReconcile) {
+		t.Fatalf("an overlap involving an EXCLUDED rule was rejected by the "+
+			"pre-pass. The marked rule never reaches try_from_snapshots, so "+
+			"no overlap the helper could refuse exists — failing the compile "+
+			"turns a working tolerant-load config into a failed apply "+
+			"(#9877 / #1960).\n  got: %v", err)
 	}
 }
