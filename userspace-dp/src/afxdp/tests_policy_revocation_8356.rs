@@ -2488,6 +2488,8 @@ fn install_pair_9604(
 ) -> SessionKey {
     let rev_key = reverse_session_key(fwd_key, fwd_decision.nat);
     let rev_decision = SessionDecision {
+        install_table_domain: 0,
+        install_table_check: 0,
         resolution: fwd_decision.resolution,
         nat: fwd_decision.nat.reverse(
             fwd_key.src_ip,
@@ -3151,6 +3153,8 @@ fn install_nat64_icmp_pair_9604(sessions: &mut SessionTable) -> (SessionKey, Ses
         ..crate::nat::NatDecision::default()
     };
     let fwd_decision = SessionDecision {
+        install_table_domain: 0,
+        install_table_check: 0,
         resolution: decision(WAN_IFINDEX).resolution,
         nat,
     };
@@ -3296,6 +3300,8 @@ fn install_synced_pair_9604(sessions: &mut SessionTable) -> (SessionKey, Session
         sessions.upsert_synced(
             rev_key.clone(),
             SessionDecision {
+                install_table_domain: 0,
+                install_table_check: 0,
                 resolution: decision(WAN_IFINDEX).resolution,
                 nat: rev_nat,
             },
@@ -3347,6 +3353,8 @@ fn shared_promote_pair_reverse_triggered_deny_revokes_9604() {
         (
             rev_key.clone(),
             SessionDecision {
+                install_table_domain: 0,
+                install_table_check: 0,
                 resolution: decision(WAN_IFINDEX).resolution,
                 nat: NatDecision::default(),
             },
@@ -3423,6 +3431,8 @@ fn shared_promote_collision_kept_on_reverse_9604() {
             SessionInstall {
                 key: rev_key.clone(),
                 decision: SessionDecision {
+                    install_table_domain: 0,
+                    install_table_check: 0,
                     resolution: decision(WAN_IFINDEX).resolution,
                     nat: NatDecision::default(),
                 },
@@ -3480,6 +3490,8 @@ fn recorded_zone_zero_declines_on_reverse_9604() {
         sessions.upsert_synced(
             rev_key.clone(),
             SessionDecision {
+                install_table_domain: 0,
+                install_table_check: 0,
                 resolution: decision(WAN_IFINDEX).resolution,
                 nat: NatDecision::default(),
             },
@@ -3871,6 +3883,8 @@ fn lone_reverse_companion_reaching_revalidation_is_declined_9604() {
         sessions.install_with_protocol_with_origin(
             rev_key.clone(),
             SessionDecision {
+                install_table_domain: 0,
+                install_table_check: 0,
                 resolution: decision(WAN_IFINDEX).resolution,
                 nat: NatDecision::default(),
             },
