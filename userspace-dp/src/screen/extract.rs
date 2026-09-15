@@ -193,6 +193,19 @@ pub(crate) fn extract_screen_info(
         if l3_offset + ihl_bytes > frame.len() {
             return Err(ScreenParseError::TruncatedIpv4Header);
         }
+        // FAIL-CLOSED (#9901, F-075): the declared total length cannot cover
+        // the header it counts — an impossible datagram. The shim refuses the
+        // same shape before classification (`ipv4_declared_len_covers_header`,
+        // one gate shared by source, parity-pinned in
+        // `afxdp/tests_ipv4_len_gate_9901.rs`); refusing here as well keeps a
+        // frame that bypasses the shim (slow path, injected, replayed) from
+        // reaching the option scan and the length-arithmetic screens below
+        // with a header no consumer can bound. A bare-header datagram
+        // (total == ihl*4) is possible and still passes — only the impossible
+        // shorter-than-header shape is refused.
+        if (info.ip_total_len as usize) < ihl_bytes {
+            return Err(ScreenParseError::TruncatedIpv4Header);
+        }
         // #2973: scan the IPv4 options region (bytes 20..ihl*4) for an
         // actual source-route option. The `source-route` screen used to
         // drop on ANY IHL>5 (any options present), which also dropped
