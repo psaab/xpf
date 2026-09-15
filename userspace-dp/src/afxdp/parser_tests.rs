@@ -341,6 +341,12 @@ fn parse_eth_offsets_handles_short_frame() {
 // returns None for an NA behind a hop-by-hop header (the forwarding walker
 // finds the ICMPv6). PR-2 (full parser unification) is gated on these staying
 // green.
+//
+// #9888 extends the L2 canary to the double-tag shape
+// (`l2_qinq_shape_contract_9888` below): those frames never reach userspace
+// (the shim drops them with the qinq_drop counter), so the extension pins
+// each parser's contract on the unreachable shape rather than a shared
+// offset.
 // ---------------------------------------------------------------------------
 
 use crate::afxdp::cos::ecn::{EthernetL3, ethernet_l3};
@@ -429,6 +435,101 @@ fn l2_offset_canary_all_parsers_agree() {
             assert_eq!(b_l3, c_l3, "frame_l3_offset vs ethernet_l3 disagree");
         }
     }
+}
+
+/// Build a QinQ frame: dst+src MAC, outer TPID+TCI, inner TPID+TCI, the
+/// payload ethertype, then `body_len` zero body bytes.
+fn build_qinq_frame(
+    outer_tpid: u16,
+    inner_tpid: u16,
+    payload_ethertype: u16,
+    body_len: usize,
+) -> Vec<u8> {
+    let mut f = Vec::new();
+    f.extend_from_slice(&[0x00, 0x11, 0x22, 0x33, 0x44, 0x55]); // dst
+    f.extend_from_slice(&[0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]); // src
+    f.extend_from_slice(&outer_tpid.to_be_bytes());
+    f.extend_from_slice(&0x0064u16.to_be_bytes()); // outer TCI: VID 100
+    f.extend_from_slice(&inner_tpid.to_be_bytes());
+    f.extend_from_slice(&0x00c8u16.to_be_bytes()); // inner TCI: VID 200
+    f.extend_from_slice(&payload_ethertype.to_be_bytes());
+    f.extend_from_slice(&vec![0u8; body_len]);
+    f
+}
+
+#[test]
+fn l2_qinq_shape_contract_9888() {
+    // The L2 canary extended to the double-tag shape: parser-contract
+    // coverage only, not steering enforcement. Complete-L2-header QinQ
+    // frames never reach userspace in production — the shim drops them
+    // with the qinq_drop counter, a disposition the Go BPF cells (which
+    // run the real program) own — so what is pinned here is each
+    // parser's CONTRACT on the unreachable shape, not a shared L3
+    // offset: the offset parsers return the single-unwrap answer
+    // (l3=18, inner TPID as ethertype) while the CoS classifier refuses
+    // to guess (None). A future edit that changes any parser reds here
+    // instead of silently reinterpreting the inner tag as an IP header.
+    // A steering change that delivered this shape to userspace would NOT
+    // red here (this test never executes the shim); that regression
+    // belongs to the Go cells.
+    let outers = [0x8100u16, 0x88a8u16];
+    let inners = [0x8100u16, 0x88a8u16, 0x9100u16];
+    for &outer in &outers {
+        for &inner in &inners {
+            let f = build_qinq_frame(outer, inner, 0x0800, 64);
+
+            // Learning parser: single unwrap, inner TPID returned as-is.
+            let (a_l3, a_ethertype) =
+                parse_eth_offsets(&f).expect("parse_eth_offsets parses a double-tagged frame");
+            assert_eq!(
+                a_l3, 18,
+                "parse_eth_offsets l3 for {outer:#06x}/{inner:#06x}"
+            );
+            assert_eq!(
+                a_ethertype, inner,
+                "parse_eth_offsets must return the inner TPID as-is for {outer:#06x}/{inner:#06x}"
+            );
+
+            // Forwarding parser: same single-unwrap offset.
+            let b_l3 = frame_l3_offset(&f).expect("frame_l3_offset parses a double-tagged frame");
+            assert_eq!(b_l3, 18, "frame_l3_offset l3 for {outer:#06x}/{inner:#06x}");
+
+            // CoS ECN parser: refuses the nested stack rather than stamping
+            // into the inner tag.
+            assert_eq!(
+                ethernet_l3(&f),
+                None,
+                "ethernet_l3 must reject the QinQ stack {outer:#06x}/{inner:#06x}"
+            );
+        }
+    }
+
+    // A legacy 0x9100 outer is not a recognised tag to any userspace
+    // parser: the ethertype at 12..14 is returned as the L3 discriminator
+    // (l3=14), which is non-IP, so no parser treats the tag bytes as IP.
+    // (The shim drops this shape too — it never unwraps 0x9100.)
+    let legacy = build_l2_frame(Some(0x9100), 0x0800, 64);
+    let (l3, ethertype) = parse_eth_offsets(&legacy).expect("parses");
+    assert_eq!((l3, ethertype), (14, 0x9100));
+    assert_eq!(frame_l3_offset(&legacy), Some(14));
+    assert_eq!(ethernet_l3(&legacy), None);
+
+    // The trap this shape sets for neighbor learning: a double tag hiding
+    // an ARP reply at offset 22 must NOT classify as a Reply. The learning
+    // parser sees the inner TPID (not ARP) at the single-unwrap position
+    // and declines before reading any ARP bytes.
+    let mut f = build_qinq_frame(0x8100, 0x8100, 0x0806, 0);
+    // Valid ARP-reply body at 22, where a two-unwrap parser would look.
+    f.extend_from_slice(&[0x00, 0x01, 0x08, 0x00, 0x06, 0x04, 0x00, 0x02]);
+    f.extend_from_slice(&[0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]); // sender mac
+    f.extend_from_slice(&[10, 0, 0, 42]); // sender ip
+    f.extend_from_slice(&[0x00; 6]); // target mac
+    f.extend_from_slice(&[10, 0, 0, 1]); // target ip
+    assert_eq!(
+        classify_arp(&f),
+        ArpClassification::NotArp,
+        "a double-tagged ARP reply must not be learned"
+    );
 }
 
 #[test]
