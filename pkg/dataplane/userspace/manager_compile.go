@@ -1518,6 +1518,11 @@ func (m *Manager) disarmSnapshotProtocolFailureLocked(protocolErr error) error {
 	if err := m.requestLocked(req, &status); err != nil {
 		return fmt.Errorf("userspace: disarm helper after snapshot protocol error: %w", err)
 	}
+	// #9770: the disarm landed; reclaim pre-enable orphans under the session fence.
+	// No-op post-enable by design (failback recovery needs those rows). This emitter
+	// has no already-disarmed short-circuit, so a repeat disarm re-runs the fence
+	// harmlessly (nothing new orphaned while disarmed) at publish frequency.
+	m.drainAndClearSteeringRowsLocked("protocol-failure-disarm")
 	if err := m.applyHelperStatusLocked(&status); err != nil {
 		m.recordHelperStatusLocked(&status)
 		return fmt.Errorf("userspace: sync helper status after snapshot protocol fail-closed disarm: %w", err)

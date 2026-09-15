@@ -220,6 +220,13 @@ func (m *Manager) SetForwardingArmed(armed bool) (ProcessStatus, error) {
 	if err := m.requestLocked(req, &status); err != nil {
 		return ProcessStatus{}, err
 	}
+	if !armed {
+		// #9770: the disarm landed — workers joined, authority cleared — so rows the
+		// spawn clear predates are now orphans. Reclaim them under the session fence
+		// before any re-arm can publish. Never runs on arm or on RPC failure;
+		// no-op post-enable by design (failback recovery needs those rows).
+		m.drainAndClearSteeringRowsLocked("disarm")
+	}
 	if err := m.applyHelperStatusLocked(&status); err != nil {
 		return status, err
 	}

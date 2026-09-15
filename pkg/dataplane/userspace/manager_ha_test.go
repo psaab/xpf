@@ -3,7 +3,6 @@ package userspace
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"net"
 	"os"
 	"os/exec"
@@ -16,6 +15,7 @@ import (
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/rlimit"
 	"github.com/psaab/xpf/pkg/config"
+	"github.com/psaab/xpf/pkg/dataplane"
 )
 
 // boundEventStream returns an EventStream whose listener successfully bound on a
@@ -345,6 +345,12 @@ func TestApplyHelperStatusInitialCtrlCleanupRunsOnlyOnce(t *testing.T) {
 	m.bpfShim.SelectUserspaceXDPShimEntryProgram()
 	injectCtrlAndBindingMaps(t, m)
 	usMap := injectUserspaceSessionMap(t, m)
+	injectSessionMaps(t, m)
+	ctV4 := m.bpfShim.Map("sessions")
+	ctV6 := m.bpfShim.Map("sessions_v6")
+	if ctV4 == nil || ctV6 == nil {
+		t.Fatal("conntrack fixtures missing after injectSessionMaps")
+	}
 	// #9337: applyHelperStatusLocked re-syncs the ingress/local/interface-NAT
 	// classifier maps (#6994), which this fixture does not load — under CAP_BPF
 	// it failed with "userspace_ingress_ifaces map not loaded" before reaching
@@ -354,6 +360,9 @@ func TestApplyHelperStatusInitialCtrlCleanupRunsOnlyOnce(t *testing.T) {
 	m.neighborsPrewarmed = true
 	m.xskLivenessProven = true
 	m.publishedSnapshot = 1
+	// #9770: cutoffSec = 100. Stale Created=200 must go; synced Created=50
+	// (0 < 50 <= 100) must stay; Created=0 must go (not a synced timestamp).
+	m.ctrlDisabledAt = 100_000_000_000
 
 	status := ProcessStatus{
 		Enabled:                true,
@@ -373,31 +382,56 @@ func TestApplyHelperStatusInitialCtrlCleanupRunsOnlyOnce(t *testing.T) {
 		}},
 	}
 
-	key := uint32(1)
-	value := uint64(1)
-	if err := usMap.Update(key, value, ebpf.UpdateAny); err != nil {
-		t.Fatalf("seed userspace_sessions: %v", err)
-	}
+	// #9770: steering rows of BOTH values use the real 40-byte/u8 ABI and must
+	// SURVIVE the first enable — the helper's live sessions own them; stale
+	// steering is reclaimed at spawn, not here. RED on revert: restore the
+	// steering loop and both survival assertions below fail.
+	redirKey := steeringMapKey9770{AddrFamily: 2, Protocol: 6, SrcPort: 3001, DstPort: 80, SrcAddr: [16]byte{10}, DstAddr: [16]byte{20}}
+	ptkKey := steeringMapKey9770{AddrFamily: 2, Protocol: 6, SrcPort: 3002, DstPort: 80, SrcAddr: [16]byte{10}, DstAddr: [16]byte{20}}
+	seedSteeringRow9770(t, usMap, redirKey, steeringRedirect9770)
+	seedSteeringRow9770(t, usMap, ptkKey, steeringPassToKernel9770)
+
+	// Conntrack seeds, both families: stale, synced, and zero-Created.
+	v4Stale := dataplane.SessionKey{SrcIP: [4]byte{10, 0, 0, 1}, DstIP: [4]byte{10, 0, 0, 2}, SrcPort: 4001, DstPort: 80, Protocol: 6}
+	v4Synced := dataplane.SessionKey{SrcIP: [4]byte{10, 0, 0, 3}, DstIP: [4]byte{10, 0, 0, 4}, SrcPort: 4002, DstPort: 80, Protocol: 6}
+	v4Zero := dataplane.SessionKey{SrcIP: [4]byte{10, 0, 0, 5}, DstIP: [4]byte{10, 0, 0, 6}, SrcPort: 4003, DstPort: 80, Protocol: 6}
+	seedConntrack9770(t, ctV4, v4Stale, dataplane.ConntrackSessionValueSize, 200)
+	seedConntrack9770(t, ctV4, v4Synced, dataplane.ConntrackSessionValueSize, 50)
+	seedConntrack9770(t, ctV4, v4Zero, dataplane.ConntrackSessionValueSize, 0)
+	v6Stale := dataplane.SessionKeyV6{SrcIP: [16]byte{0x20, 1}, DstIP: [16]byte{0x20, 2}, SrcPort: 4001, DstPort: 80, Protocol: 6}
+	v6Synced := dataplane.SessionKeyV6{SrcIP: [16]byte{0x20, 3}, DstIP: [16]byte{0x20, 4}, SrcPort: 4002, DstPort: 80, Protocol: 6}
+	seedConntrack9770(t, ctV6, v6Stale, dataplane.ConntrackSessionValueSizeV6, 200)
+	seedConntrack9770(t, ctV6, v6Synced, dataplane.ConntrackSessionValueSizeV6, 50)
+
 	if err := m.applyHelperStatusLocked(&status); err != nil {
 		t.Fatalf("first applyHelperStatusLocked: %v", err)
 	}
 	if !m.initialCtrlCleanupDone {
 		t.Fatal("initialCtrlCleanupDone = false, want true after first ctrl enable")
 	}
-	var got uint64
-	if err := usMap.Lookup(key, &got); !errors.Is(err, ebpf.ErrKeyNotExist) {
-		t.Fatalf("userspace_sessions entry survived first ctrl enable cleanup: err=%v got=%d", err, got)
+	if _, ok := lookupSteering9770(t, usMap, redirKey); !ok {
+		t.Fatal("REDIRECT steering row deleted by first ctrl enable (helper's live row)")
 	}
+	if _, ok := lookupSteering9770(t, usMap, ptkKey); !ok {
+		t.Fatal("PASS_TO_KERNEL steering row deleted by first ctrl enable (helper's live row)")
+	}
+	assertConntrackAbsent9770(t, ctV4, v4Stale, dataplane.ConntrackSessionValueSize, "stale v4 conntrack")
+	assertConntrackPresent9770(t, ctV4, v4Synced, dataplane.ConntrackSessionValueSize, "synced v4 conntrack")
+	assertConntrackAbsent9770(t, ctV4, v4Zero, dataplane.ConntrackSessionValueSize, "zero-Created v4 conntrack")
+	assertConntrackAbsent9770(t, ctV6, v6Stale, dataplane.ConntrackSessionValueSizeV6, "stale v6 conntrack")
+	assertConntrackPresent9770(t, ctV6, v6Synced, dataplane.ConntrackSessionValueSizeV6, "synced v6 conntrack")
 
-	if err := usMap.Update(key, value, ebpf.UpdateAny); err != nil {
-		t.Fatalf("reseed userspace_sessions: %v", err)
-	}
+	// Once-only witness: reinsert a DELETION-eligible conntrack row, force another
+	// disabled→enabled transition, and prove the gate is consumed (the row survives).
+	// A keep-eligible seed here would be vacuously green, so this one is stale.
+	seedConntrack9770(t, ctV4, v4Stale, dataplane.ConntrackSessionValueSize, 200)
 	m.ctrlWasEnabled = false
 	if err := m.applyHelperStatusLocked(&status); err != nil {
 		t.Fatalf("second applyHelperStatusLocked: %v", err)
 	}
-	if err := usMap.Lookup(key, &got); err != nil {
-		t.Fatalf("later ctrl re-enable reran startup cleanup: %v", err)
+	assertConntrackPresent9770(t, ctV4, v4Stale, dataplane.ConntrackSessionValueSize, "reinserted stale v4 conntrack after gate consumed")
+	if _, ok := lookupSteering9770(t, usMap, redirKey); !ok {
+		t.Fatal("REDIRECT steering row deleted by later ctrl re-enable")
 	}
 }
 

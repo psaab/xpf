@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/cilium/ebpf"
 	"github.com/psaab/xpf/pkg/config"
 )
 
@@ -97,6 +98,103 @@ func (m *Manager) stopForNewGenerationLocked(cfg config.UserspaceConfig) error {
 	return nil
 }
 
+// clearStaleSteeringRows deletes every row in the pinned userspace_sessions map.
+//
+// #9770: the first-enable flush used to do this after the helper had already published
+// live sessions, deleting their steering rows. At helper-spawn time no row can be live —
+// the previous generation is reaped (crash: supervisor Wait; stop: done-wait; plus the
+// live-listener refusal above the call site) and the new one does not exist yet (the call
+// precedes cmd.Start) — so every row is previous-incarnation stale. TRUE ORDERING
+// REQUIREMENT: before the first apply_snapshot reaches the helper; before-cmd.Start is the
+// enforced stronger form. The same function serves the post-stop closer
+// (drainAndClearSteeringRowsLocked), whose fence proof lives there.
+//
+// A nil map (test-only: production Load precedes every spawn) logs at debug and returns 0.
+// Best-effort like the loop it replaces: the count is deletion ATTEMPTS, not verified
+// deletions. Returns rows deleted.
+func clearStaleSteeringRows(usMap *ebpf.Map) (deleted int) {
+	if usMap == nil {
+		slog.Debug("userspace: no steering map handle; nothing to clear")
+		return 0
+	}
+	key := make([]byte, usMap.KeySize())
+	nextKey := make([]byte, usMap.KeySize())
+	for {
+		if err := usMap.NextKey(key, nextKey); err != nil {
+			break
+		}
+		copy(key, nextKey)
+		_ = usMap.Delete(key)
+		deleted++
+	}
+	return deleted
+}
+
+// drainAndClearSteeringRowsLocked reclaims steering rows orphaned by a proven full stop,
+// but ONLY before this helper generation ever enabled (see below). Callers: every Go
+// emitter of set_forwarding_state armed=false — SetForwardingArmed, PrepareLinkCycle's
+// stop_workers, disarmBeforeUnsupportedPublishLocked, syncDesiredForwardingStateLocked
+// (disarm arm only), disarmSnapshotProtocolFailureLocked — each immediately after its
+// RPC succeeds (on any stop failure the caller skips this: the stop is uncertain and
+// rows may be live). A future sixth emitter must call this too; see the census note.
+//
+// Why gated on never-enabled (#9770 PR review): post-enable, disarm-orphaned REDIRECT
+// rows are load-bearing for recovery — the re-armed helper has no authority for them,
+// so a lingering row forces the next packet into re-adjudication (policy runs, session
+// reinstalls), while a deleted one misses to the kernel with no filter and no reinstall.
+// Clearing post-enable would trade today's lingering-row recovery for permanent bypass
+// on dead-session host-bound flows — the original defect in a new form. Pre-enable there
+// is no recovery role (nothing ever forwarded in this generation) and the removed
+// enable-time flush used to reclaim exactly these rows, so the closer preserves today's
+// pre-enable behavior while fixing live-row deletion. Post-enable it is a no-op by
+// design (parity: today's consumed gate covers post-enable disarms no better).
+// Fence: m.mu is held (all callers); this takes m.sessionMu, draining every session
+// send (all production sends serialize on it), and then pings the session socket — the
+// helper serves that socket synchronously in accept order over a FIFO backlog, so the
+// ping's ack proves every prior-sent request completed before the clear. Post-clear sends
+// resolve defaulted maps and no-op their publishes (entries they insert are live authority
+// the next bringup replays). Re-arm/rebind take m.mu and cannot publish concurrently.
+// Lock order m.mu -> sessionMu is safe: every sessionMu holder releases it before taking
+// m.mu. The disarm/stop RPC itself runs BEFORE sessionMu is taken, so session sync never
+// stalls across worker joins; this hold is a ping RTT plus a map walk.
+// Failure semantics: a drain (ping) failure or nil map skips the clear with a warning and
+// returns nil — best-effort reclamation that never deletes on uncertainty and never fails
+// the primary operation. Orphans from a failed stop linger until the next successful
+// disarm/stop or spawn, which clears them under a re-established fence.
+//
+// Census note: the five call sites above are, as of this writing, every Go emitter of a
+// full stop (set_forwarding_state armed=false, stop_workers). A new emitter that stops
+// workers and clears authority must call this after its RPC succeeds, or pre-enable
+// orphans from its path linger until the next spawn. There is no textual census test —
+// the set_forwarding_state emitters are already enumerated (with lease gating) in the
+// #6871 comment at syncDesiredForwardingStateLocked; keep the two lists in sync.
+func (m *Manager) drainAndClearSteeringRowsLocked(reason string) {
+	if m.initialCtrlCleanupDone {
+		slog.Debug("userspace: helper generation already enabled; keeping disarm-orphaned rows for failback recovery",
+			"reason", reason)
+		return
+	}
+	usMap := m.bpfShim.Map(mapNameUserspaceSessions)
+	if usMap == nil {
+		slog.Debug("userspace: no steering map handle; nothing to clear", "reason", reason)
+		return
+	}
+	if m.sessionSocketPath() != "" {
+		m.sessionMu.Lock()
+		defer m.sessionMu.Unlock()
+		ping := ControlRequest{Type: "ping", SuppressStatus: true}
+		if err := m.requestSessionSyncLocked(ping); err != nil {
+			slog.Warn("userspace: session drain failed; keeping possibly-orphaned steering rows",
+				"reason", reason, "err", err)
+			return
+		}
+	}
+	if deleted := clearStaleSteeringRows(usMap); deleted > 0 {
+		slog.Info("userspace: reclaimed orphaned steering rows after full stop",
+			"reason", reason, "deleted", deleted)
+	}
+}
+
 func (m *Manager) ensureProcessLocked(cfg config.UserspaceConfig) error {
 	tuneSocketBuffers()
 	if m.proc != nil && m.proc.Process != nil && configEqual(m.cfg, cfg) {
@@ -170,6 +268,13 @@ func (m *Manager) ensureProcessLocked(cfg config.UserspaceConfig) error {
 			_ = xskMap.Delete(i)
 		}
 		slog.Debug("userspace: cleared stale XSKMAP entries")
+	}
+	// #9770: clear the previous incarnation's steering rows here — before the new
+	// helper exists — instead of at the first ctrl enable, where live rows already
+	// exist. See clearStaleSteeringRows for the quiescence proof.
+	if deleted := clearStaleSteeringRows(m.bpfShim.Map(mapNameUserspaceSessions)); deleted > 0 {
+		slog.Info("userspace: flushed stale BPF session entries at helper spawn",
+			"deleted", deleted)
 	}
 	pollMode := effectivePollMode(cfg)
 	cmd := exec.Command(binary,
