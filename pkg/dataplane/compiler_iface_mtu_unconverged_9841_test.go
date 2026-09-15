@@ -683,8 +683,13 @@ func TestChildMTUFailureThenSuccessClears9841(t *testing.T) {
 		})
 	d.run()
 
-	if attempts != 2 {
-		t.Fatalf("child attempts = %d, want 2 (fail once, then succeed)", attempts)
+	// #9845 composition: the success lands on the post-parent retry when a
+	// .80 reference runs first (fail, retry-success, then the second
+	// reference re-attempts on its stale cache), or on the second reference
+	// when .50 runs first (fail, then reference-success with no retry —
+	// the parent already moved). Either way the success clears the record.
+	if attempts < 2 || attempts > 3 {
+		t.Fatalf("child attempts = %d, want 2 or 3 (fail once, then succeed; zone order decides whether the retry or the second reference lands it)", attempts)
 	}
 	if got := d.h.mtu[sub80]; got == 1300 {
 		t.Fatalf("child MTU still at the stale 1300: the second attempt must have landed")
@@ -736,8 +741,13 @@ func TestChildMTUFailedRepeatConvergedClears9841(t *testing.T) {
 		})
 	d.run()
 
-	if attempts != 2 {
-		t.Fatalf("child attempts = %d, want 2 (fail divergent, then fail converged)", attempts)
+	// #9845 composition: when a .80 reference runs first, the #9845 retry
+	// lands the converged second attempt and the other reference fails
+	// converged on its stale cache (3 attempts); when .50 runs first there
+	// is no retry and the two references land both attempts (2). Either
+	// way every failure fresh-verifies converged and no record stands.
+	if attempts < 2 || attempts > 3 {
+		t.Fatalf("child attempts = %d, want 2 or 3 (zone order decides whether the retry lands the converged attempt)", attempts)
 	}
 	if got := d.records(); len(got) != 0 {
 		t.Fatalf("records = %+v, want none: fresh-verified convergence must clear the pending failure", got)
