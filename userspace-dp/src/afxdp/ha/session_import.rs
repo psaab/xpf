@@ -789,10 +789,10 @@ impl crate::afxdp::ha::SessionDomain {
         lock_shared_recover(&self.sessions.synced).contains_key(key)
     }
 
-    pub fn delete_synced_session(&self, key: SessionKey) {
+    pub fn delete_synced_session(&self, key: SessionKey, forward_only: bool) {
         // Helper-local deletes (tunnel-remap purge, GC) are authoritative and
         // carry no peer install generation — apply unconditionally.
-        self.delete_synced_session_gen(key, 0);
+        self.delete_synced_session_gen(key, 0, forward_only);
     }
 
     /// #9714: a delete sent on behalf of the PEER (`SessionSyncRequest.peer_delete`:
@@ -808,8 +808,8 @@ impl crate::afxdp::ha::SessionDomain {
     ///
     /// Returns the OUTCOME. The handler answers a refusal in-band, so the Go side
     /// keeps its own mirror and DNAT rows for the flow the helper kept.
-    pub fn delete_peer_synced_session(&self, key: SessionKey) -> SyncedDeleteOutcome {
-        self.delete_synced_session_gen_marked(key, 0, true)
+    pub fn delete_peer_synced_session(&self, key: SessionKey, forward_only: bool) -> SyncedDeleteOutcome {
+        self.delete_synced_session_gen_marked(key, 0, true, forward_only)
     }
 
     /// #2170 delete-side guard (belt-and-suspenders for any helper-side delete
@@ -822,8 +822,8 @@ impl crate::afxdp::ha::SessionDomain {
     /// non-zero delete_gen today; the seam exists for future helper-originated
     /// generation-aware deletes. A delete_gen of 0, or a stored generation of
     /// 0, falls back to unconditional delete (rolling-upgrade safe).
-    pub fn delete_synced_session_gen(&self, key: SessionKey, delete_gen: u64) {
-        let _ = self.delete_synced_session_gen_marked(key, delete_gen, false);
+    pub fn delete_synced_session_gen(&self, key: SessionKey, delete_gen: u64, forward_only: bool) {
+        let _ = self.delete_synced_session_gen_marked(key, delete_gen, false, forward_only);
     }
 
     fn delete_synced_session_gen_marked(
@@ -831,6 +831,10 @@ impl crate::afxdp::ha::SessionDomain {
         key: SessionKey,
         delete_gen: u64,
         peer_delete: bool,
+        // #9752 round 3: retire exactly the named key — no reverse
+        // derivation (which also skips the reverse shared removal and the
+        // reverse `DeleteSynced` fan-out below: both key off `reverse_key`).
+        forward_only: bool,
     ) -> SyncedDeleteOutcome {
         // #7209: ONE load of the published view, bound for the whole call. Two
         // loads inside one import can straddle a publish and resolve the
@@ -887,13 +891,20 @@ impl crate::afxdp::ha::SessionDomain {
             PEER_DELETE_REFUSED_LOCAL_OWNED.fetch_add(1, Ordering::Relaxed);
             return SyncedDeleteOutcome::RefusedLocalOwned;
         }
-        let reverse_key = removed_entry.as_ref().and_then(|entry| {
-            if entry.metadata.is_reverse {
-                None
-            } else {
-                Some(reverse_session_key(&entry.key, entry.decision.nat))
-            }
-        });
+        // #9752 round 3: a forward-only delete names exactly one key; the
+        // sender already decided every companion. `None` here skips the
+        // reverse shared removal and the reverse fan-out below.
+        let reverse_key = if forward_only {
+            None
+        } else {
+            removed_entry.as_ref().and_then(|entry| {
+                if entry.metadata.is_reverse {
+                    None
+                } else {
+                    Some(reverse_session_key(&entry.key, entry.decision.nat))
+                }
+            })
+        };
         if let Some(entry) = removed_entry.as_ref() {
             let maps = self.bpf_maps.load();
             if let Some(session_map_fd) = maps.session_map_fd.as_ref() {

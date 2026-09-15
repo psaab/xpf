@@ -660,13 +660,13 @@ impl Coordinator {
     }
 
     /// See [`Coordinator::upsert_synced_session`].
-    pub fn delete_synced_session(&self, key: crate::session::SessionKey) {
-        self.session_domain.delete_synced_session(key)
+    pub fn delete_synced_session(&self, key: crate::session::SessionKey, forward_only: bool) {
+        self.session_domain.delete_synced_session(key, forward_only)
     }
 
     /// See [`Coordinator::upsert_synced_session`].
-    pub fn delete_synced_session_gen(&self, key: crate::session::SessionKey, delete_gen: u64) {
-        self.session_domain.delete_synced_session_gen(key, delete_gen)
+    pub fn delete_synced_session_gen(&self, key: crate::session::SessionKey, delete_gen: u64, forward_only: bool) {
+        self.session_domain.delete_synced_session_gen(key, delete_gen, forward_only)
     }
 
     /// See [`Coordinator::upsert_synced_session`].

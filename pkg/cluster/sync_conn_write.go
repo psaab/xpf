@@ -55,6 +55,11 @@ func (s *SessionSync) queueMessage(msg []byte, sentCounter *atomic.Uint64, sourc
 // delete can echo it and the peer can refuse a stale superseded delete.
 func (s *SessionSync) QueueSessionV4(key dataplane.SessionKey, val dataplane.SessionValue) {
 	s.stampInstallGenV4(key, &val)
+	// #9752 round 3: after the stamp — the memo may have restored an
+	// identity the mirror could not carry, and THAT is what the fence judges.
+	if s.suppressStampedInstallForIncapablePeer(val.InstallTableDomain, val.InstallTableCheck, "session_v4") {
+		return
+	}
 	msg := encodeSessionV4(key, val)
 	s.queueMessage(msg, &s.stats.SessionsSent, "session_v4")
 }
@@ -62,6 +67,9 @@ func (s *SessionSync) QueueSessionV4(key dataplane.SessionKey, val dataplane.Ses
 // QueueSessionV6 queues a v6 session for synchronization to the peer.
 func (s *SessionSync) QueueSessionV6(key dataplane.SessionKeyV6, val dataplane.SessionValueV6) {
 	s.stampInstallGenV6(key, &val)
+	if s.suppressStampedInstallForIncapablePeer(val.InstallTableDomain, val.InstallTableCheck, "session_v6") {
+		return
+	}
 	msg := encodeSessionV6(key, val)
 	s.queueMessage(msg, &s.stats.SessionsSent, "session_v6")
 }
@@ -78,12 +86,20 @@ const pacedQueuePoll = 10 * time.Millisecond
 // larger than the queue, in order, where QueueSessionV4 discards its tail.
 func (s *SessionSync) QueueSessionV4Paced(key dataplane.SessionKey, val dataplane.SessionValue, maxWait time.Duration) bool {
 	s.stampInstallGenV4(key, &val)
+	// #9752 round 3: false is honest — the frame did not reach the queue,
+	// and the caller counts it missed (no retry loop to spin).
+	if s.suppressStampedInstallForIncapablePeer(val.InstallTableDomain, val.InstallTableCheck, "session_v4") {
+		return false
+	}
 	return s.queueMessagePaced(encodeSessionV4(key, val), &s.stats.SessionsSent, "session_v4", maxWait)
 }
 
 // QueueSessionV6Paced is the v6 form of QueueSessionV4Paced.
 func (s *SessionSync) QueueSessionV6Paced(key dataplane.SessionKeyV6, val dataplane.SessionValueV6, maxWait time.Duration) bool {
 	s.stampInstallGenV6(key, &val)
+	if s.suppressStampedInstallForIncapablePeer(val.InstallTableDomain, val.InstallTableCheck, "session_v6") {
+		return false
+	}
 	return s.queueMessagePaced(encodeSessionV6(key, val), &s.stats.SessionsSent, "session_v6", maxWait)
 }
 
@@ -174,6 +190,37 @@ func (s *SessionSync) suppressForwardOnlyDeleteForIncapablePeer(source string) b
 			"#9752 forward-only deletes, so it would derive companions and destroy sessions the purge "+
 			"deliberately preserved. That peer will retain sessions this node has retired until they "+
 			"idle out. Completing the upgrade on both nodes restores delete sync.",
+			"source", source,
+			"peer_snapshot_protocol", s.peerSnapshotProtocol.Load(),
+			"peer_capability_flags", uint8(s.peerCapabilityFlags.Load()))
+	}
+	return true
+}
+
+// suppressStampedInstallForIncapablePeer reports whether an outgoing STAMPED
+// session install must be WITHHELD because the peer never advertised
+// capFlagInstallTableIdentity (#9752 round 3).
+//
+// Such a peer installs every session stamp-less: it decodes no tail and
+// re-resolves in the default table. Sending it a stamped install would plant
+// a session that silently wrong-tables after failover — the defect in the
+// other direction. Withholding leaves the session off the peer; a later miss
+// there re-establishes it in the right table. Unstamped installs are never
+// withheld (the peer handles them exactly as before), and an unlearned peer
+// is never gated (same reconnect rule as the delete suppressors).
+func (s *SessionSync) suppressStampedInstallForIncapablePeer(domain, check uint32, source string) bool {
+	if domain == 0 && check == 0 {
+		return false
+	}
+	if s == nil || !s.peerCapabilitiesLearned() || s.InstallTableIdentityCapable() {
+		return false
+	}
+	s.stats.InstallsSuppressedNoPeerInstallTable.Add(1)
+	if s.installTableSuppressionWarned.CompareAndSwap(false, true) {
+		slog.Warn("cluster sync: withholding stamped session installs — the peer does not advertise "+
+			"#9752 install-table identity, so it would install them stamp-less and wrong-table after "+
+			"failover. That peer will miss these sessions until a miss re-establishes them or the "+
+			"upgrade completes on both nodes.",
 			"source", source,
 			"peer_snapshot_protocol", s.peerSnapshotProtocol.Load(),
 			"peer_capability_flags", uint8(s.peerCapabilityFlags.Load()))

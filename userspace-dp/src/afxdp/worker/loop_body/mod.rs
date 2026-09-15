@@ -367,6 +367,7 @@ pub(crate) fn worker_loop(
                         &worker_commands_by_id,
                         &event_stream,
                         forwarding.as_ref(),
+                        &shared_runtime,
                         &mut worker_lossless_wedged,
                     )
                 }
@@ -395,6 +396,7 @@ pub(crate) fn worker_loop(
                         &worker_commands_by_id,
                         &event_stream,
                         forwarding.as_ref(),
+                        &shared_runtime,
                         &mut worker_lossless_wedged,
                     )
                 }
@@ -1290,6 +1292,8 @@ pub(crate) fn worker_loop(
                         &mut bindings,
                         &binding_lookup,
                         &mut shared_recycles,
+                        &shared_runtime,
+                        &shared_sessions,
                         &deltas,
                     );
                     // #2669: flush UNCONDITIONALLY. The binding-independent
@@ -1531,6 +1535,8 @@ pub(crate) fn worker_loop(
                 &mut bindings,
                 &binding_lookup,
                 &mut shared_recycles,
+                &shared_runtime,
+                &shared_sessions,
                 &deltas,
             );
             // #2669: flush unconditionally — see flush_drained_session_deltas!.

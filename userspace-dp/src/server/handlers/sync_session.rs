@@ -175,11 +175,12 @@ pub(super) fn handle(
                 // peer-delete token — a stale-generation refusal means the helper
                 // already holds something newer, so there is nothing for the Go side
                 // to preserve and nothing to tell it about.
+                let forward_only = sync_req.forward_only;
                 let delete = |key| {
                     if sync_req.peer_delete {
-                        domain.delete_peer_synced_session(key).is_refused_local_owned()
+                        domain.delete_peer_synced_session(key, forward_only).is_refused_local_owned()
                     } else {
-                        domain.delete_synced_session(key);
+                        domain.delete_synced_session(key, forward_only);
                         false
                     }
                 };

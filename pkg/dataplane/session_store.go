@@ -175,12 +175,13 @@ type sessionDomainBatchDeleter interface {
 type peerSyncedSessionDeleter interface {
 	// BatchDeletePeerSyncedSessionsScoped asks the helper FIRST. It returns how
 	// many BPF mirror rows it deleted and the keys the helper REFUSED, which keep
-	// their mirror rows.
-	BatchDeletePeerSyncedSessionsScoped([]ScopedSessionKey) (int, []ScopedSessionKey, error)
-	BatchDeletePeerSyncedSessionsScopedV6([]ScopedSessionKeyV6) (int, []ScopedSessionKeyV6, error)
+	// their mirror rows. forwardOnly (#9752 round 3) marks the helper request
+	// so the helper retires exactly the named keys (no reverse fan-out).
+	BatchDeletePeerSyncedSessionsScoped([]ScopedSessionKey, bool) (int, []ScopedSessionKey, error)
+	BatchDeletePeerSyncedSessionsScopedV6([]ScopedSessionKeyV6, bool) (int, []ScopedSessionKeyV6, error)
 	// DeletePeerSyncedSession reports whether the helper refused the delete.
-	DeletePeerSyncedSession(SessionKey) (bool, error)
-	DeletePeerSyncedSessionV6(SessionKeyV6) (bool, error)
+	DeletePeerSyncedSession(SessionKey, bool) (bool, error)
+	DeletePeerSyncedSessionV6(SessionKeyV6, bool) (bool, error)
 }
 
 type clusterSyncedSessionInstaller interface {
@@ -359,22 +360,12 @@ func (s dataPlaneSessionStore) PutClusterSyncedV4(key SessionKey, val SessionVal
 	if err != nil {
 		return err
 	}
-	// #9752: unknown-never-default. A (0,0) install-table identity over an
-	// already-stamped row of the SAME (or unknown) incarnation is an old
-	// sender's resend — absence decodes as zero — never a genuine re-stamp
-	// (stamps are install-stable per incarnation, and new senders memo-restore
-	// nonzero, so they never emit a false (0,0) for a recorded incarnation).
-	// Keep the recorded stamp instead of erasing it; without this a mixed
-	// cluster silently wrong-tables the fixed node's sessions on every
-	// sweep/bulk resend. A nonzero incoming identity, a new incarnation, or
-	// no existing row applies normally. Zero extra I/O: forwardSnap is free.
-	if val.InstallTableDomain == 0 && val.InstallTableCheck == 0 &&
-		forwardSnap.existed &&
-		(forwardSnap.val.InstallTableDomain != 0 || forwardSnap.val.InstallTableCheck != 0) &&
-		(val.SessionID == 0 || forwardSnap.val.SessionID == 0 || val.SessionID == forwardSnap.val.SessionID) {
-		val.InstallTableDomain = forwardSnap.val.InstallTableDomain
-		val.InstallTableCheck = forwardSnap.val.InstallTableCheck
-	}
+	// #9752 round 3: NO keep-rule here. The first shape kept a stamp-less
+	// resend from erasing the installed row's stamp — but the row is read
+	// back from the BPF mirror, which drops sync-only fields, so the rule
+	// was dead in production and green only against full-struct doubles.
+	// The live rule is restoreInstallTableLocked on the cluster receive
+	// path, sourced from Go memory beside the install generations.
 	var reverseSnap sessionSnapshotV4
 	needsReverse := val.IsReverse == 0 && val.ReverseKey.Protocol != 0
 	if needsReverse {
@@ -442,14 +433,7 @@ func (s dataPlaneSessionStore) PutClusterSyncedV6(key SessionKeyV6, val SessionV
 	if err != nil {
 		return err
 	}
-	// #9752: v6 twin of the unknown-never-default keep-rule above.
-	if val.InstallTableDomain == 0 && val.InstallTableCheck == 0 &&
-		forwardSnap.existed &&
-		(forwardSnap.val.InstallTableDomain != 0 || forwardSnap.val.InstallTableCheck != 0) &&
-		(val.SessionID == 0 || forwardSnap.val.SessionID == 0 || val.SessionID == forwardSnap.val.SessionID) {
-		val.InstallTableDomain = forwardSnap.val.InstallTableDomain
-		val.InstallTableCheck = forwardSnap.val.InstallTableCheck
-	}
+	// #9752 round 3: v6 twin — no keep-rule here either (see the v4 twin).
 	var reverseSnap sessionSnapshotV6
 	needsReverse := val.IsReverse == 0 && val.ReverseKey.Protocol != 0
 	if needsReverse {
@@ -753,7 +737,9 @@ func (s dataPlaneSessionStore) deletePeerBatchKnownV4(dp peerSyncedSessionDelete
 	for _, entry := range entries {
 		forwardKeys = append(forwardKeys, scoped(entry))
 	}
-	deleted, refused, err := peerDeleteChunks(forwardKeys, dp.BatchDeletePeerSyncedSessionsScoped)
+	deleted, refused, err := peerDeleteChunks(forwardKeys, func(keys []ScopedSessionKey) (int, []ScopedSessionKey, error) {
+		return dp.BatchDeletePeerSyncedSessionsScoped(keys, forwardOnly)
+	})
 	if err != nil {
 		return deleted, err
 	}
@@ -775,7 +761,9 @@ func (s dataPlaneSessionStore) deletePeerBatchKnownV4(dp peerSyncedSessionDelete
 			})
 		}
 	}
-	if _, _, err := peerDeleteChunks(reverseKeys, dp.BatchDeletePeerSyncedSessionsScoped); err != nil {
+	if _, _, err := peerDeleteChunks(reverseKeys, func(keys []ScopedSessionKey) (int, []ScopedSessionKey, error) {
+		return dp.BatchDeletePeerSyncedSessionsScoped(keys, false)
+	}); err != nil {
 		return deleted, err
 	}
 	for _, entry := range applied {
@@ -799,7 +787,9 @@ func (s dataPlaneSessionStore) deletePeerBatchKnownV6(dp peerSyncedSessionDelete
 	for _, entry := range entries {
 		forwardKeys = append(forwardKeys, scoped(entry))
 	}
-	deleted, refused, err := peerDeleteChunks(forwardKeys, dp.BatchDeletePeerSyncedSessionsScopedV6)
+	deleted, refused, err := peerDeleteChunks(forwardKeys, func(keys []ScopedSessionKeyV6) (int, []ScopedSessionKeyV6, error) {
+		return dp.BatchDeletePeerSyncedSessionsScopedV6(keys, forwardOnly)
+	})
 	if err != nil {
 		return deleted, err
 	}
@@ -819,7 +809,9 @@ func (s dataPlaneSessionStore) deletePeerBatchKnownV6(dp peerSyncedSessionDelete
 			})
 		}
 	}
-	if _, _, err := peerDeleteChunks(reverseKeys, dp.BatchDeletePeerSyncedSessionsScopedV6); err != nil {
+	if _, _, err := peerDeleteChunks(reverseKeys, func(keys []ScopedSessionKeyV6) (int, []ScopedSessionKeyV6, error) {
+		return dp.BatchDeletePeerSyncedSessionsScopedV6(keys, false)
+	}); err != nil {
 		return deleted, err
 	}
 	for _, entry := range applied {
@@ -887,7 +879,7 @@ func (s dataPlaneSessionStore) DeleteWithCompanionsV4(key SessionKey, reason Del
 	val, err := s.dp.GetSessionV4(key)
 	if err != nil {
 		if sessionNotFound(err) {
-			return ignoreSessionNotFound(s.deleteSessionV4For(key, reason == DeleteReasonClusterStale))
+			return ignoreSessionNotFound(s.deleteSessionV4For(key, reason == DeleteReasonClusterStale, forwardOnly))
 		}
 		return err
 	}
@@ -898,18 +890,18 @@ func (s dataPlaneSessionStore) DeleteWithCompanionsV4(key SessionKey, reason Del
 // when peer is set and the dataplane offers the capability.
 // The helper's refusal is not an error here: a key the mirror could not find has
 // no DNAT row or reverse half of its own for the store to keep.
-func (s dataPlaneSessionStore) deleteSessionV4For(key SessionKey, peer bool) error {
+func (s dataPlaneSessionStore) deleteSessionV4For(key SessionKey, peer, forwardOnly bool) error {
 	if peerDeleter, ok := s.dp.(peerSyncedSessionDeleter); peer && ok {
-		_, err := peerDeleter.DeletePeerSyncedSession(key)
+		_, err := peerDeleter.DeletePeerSyncedSession(key, forwardOnly)
 		return err
 	}
 	return s.dp.DeleteSession(key)
 }
 
 // deleteSessionV6For is the IPv6 analogue of deleteSessionV4For (#9714).
-func (s dataPlaneSessionStore) deleteSessionV6For(key SessionKeyV6, peer bool) error {
+func (s dataPlaneSessionStore) deleteSessionV6For(key SessionKeyV6, peer, forwardOnly bool) error {
 	if peerDeleter, ok := s.dp.(peerSyncedSessionDeleter); peer && ok {
-		_, err := peerDeleter.DeletePeerSyncedSessionV6(key)
+		_, err := peerDeleter.DeletePeerSyncedSessionV6(key, forwardOnly)
 		return err
 	}
 	return s.dp.DeleteSessionV6(key)
@@ -922,7 +914,7 @@ func (s dataPlaneSessionStore) DeleteWithCompanionsV6(key SessionKeyV6, reason D
 	val, err := s.dp.GetSessionV6(key)
 	if err != nil {
 		if sessionNotFound(err) {
-			return ignoreSessionNotFound(s.deleteSessionV6For(key, reason == DeleteReasonClusterStale))
+			return ignoreSessionNotFound(s.deleteSessionV6For(key, reason == DeleteReasonClusterStale, forwardOnly))
 		}
 		return err
 	}

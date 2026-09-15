@@ -85,30 +85,98 @@ pub(in crate::afxdp) fn drain_session_deltas_fair(
     (out, cursor, overflow)
 }
 
+/// #9752 round 3: is this purge-retirement close STALE — i.e. must the drain
+/// drop the whole delta (and cancel no flows for it)?
+///
+/// TWO ways a purge close goes stale between the walk and the drain, and the
+/// first shape of this guard caught NEITHER in production: it re-checked the
+/// predicate against the worker-CACHED forwarding snapshot, so a table
+/// re-added after the refresh was invisible.
+///   1. TABLE RE-ADD: the predicate fails under CURRENT forwarding. Re-read
+///      under the drain via `shared_runtime` (the same latest-view load the
+///      purge's in-lock fence uses), never the cached snapshot.
+///   2. REINSTALL: the PRIMARY shared map holds the key. The purge REMOVED
+///      shared authority on accept (and emits no close on decline), so
+///      presence at drain proves a post-purge republish — the close predates
+///      the live entry. The purge close carries session_id 0 (the entry was
+///      already removed when it was emitted), so presence alone is the
+///      incarnation fence; no id comparison is needed or possible.
+///      ONLY the primary map is consulted: the nat/forward-wire maps hold
+///      ALIASES keyed under derived keys, and a non-NAT forward's own key
+///      doubles as its forward-wire alias — which the removal deliberately
+///      leaves (`wire_key != entry.key`), so presence there proves nothing.
+///
+/// Ordinary closes never reach here (callers check `purge_retirement` first).
+pub(super) fn purge_retirement_close_is_stale(
+    shared_runtime: &RuntimeViewReader,
+    shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    delta: &SessionDelta,
+) -> bool {
+    if !super::session_glue::install_table_purge_predicate(
+        shared_runtime.load().forwarding(),
+        &delta.key,
+        &delta.decision,
+    ) {
+        return true;
+    }
+    super::shared_ops::lock_shared_recover(shared_sessions).contains_key(&delta.key)
+}
+
+/// #9752 round 3: the (forward, reverse) keys whose queued flows a close
+/// delta cancels — or `None` when the drain will drop the delta. Pure over
+/// the production key derivation so the gating is pinnable without a
+/// `BindingWorker` (which needs real XSK rings and cannot be built in a
+/// unit test): a stale purge close cancels nothing, a live one cancels
+/// exactly its key (the purge already decided the companion), an ordinary
+/// close cancels the pair.
+pub(super) fn purge_close_cancel_keys(delta: &SessionDelta, stale: bool) -> Option<(SessionKey, SessionKey)> {
+    if delta.kind != SessionDeltaKind::Close {
+        return None;
+    }
+    if delta.purge_retirement {
+        if stale {
+            return None;
+        }
+        // The purge preserved or separately retired the companion, so
+        // deriving the reverse here would cancel queued flows for a session
+        // the walk deliberately kept. Pass the key twice (the
+        // loop_body/mod.rs:978 idiom): matching is per-key, so the forward
+        // cancels exactly once.
+        return Some((delta.key.clone(), delta.key.clone()));
+    }
+    Some((
+        delta.key.clone(),
+        reverse_session_key(&delta.key, delta.decision.nat),
+    ))
+}
+
 pub(super) fn purge_queued_flows_for_closed_deltas(
     bindings: &mut [BindingWorker],
     binding_lookup: &WorkerBindingLookup,
     shared_recycles: &mut Vec<(u32, u64)>,
+    shared_runtime: &RuntimeViewReader,
+    shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
     deltas: &[SessionDelta],
 ) {
     for delta in deltas {
-        if delta.kind != SessionDeltaKind::Close {
+        // Cancelled flows are DROPPED, not requeued
+        // (`cancel_queued_flow_on_binding` recycles only the UMEM frame), so
+        // a close the drain will drop must cancel nothing: the session is
+        // valid again and its queued packets are live traffic.
+        let stale = delta.kind == SessionDeltaKind::Close
+            && delta.purge_retirement
+            && purge_retirement_close_is_stale(
+                shared_runtime,
+                shared_sessions,
+                delta,
+            );
+        let Some((forward_key, reverse_key)) = purge_close_cancel_keys(delta, stale) else {
             continue;
-        }
-        // #9752: a purge-retirement close covers exactly `delta.key` — the
-        // purge preserved or separately retired the companion, so deriving
-        // the reverse here would cancel queued flows for a session the walk
-        // deliberately kept. Pass the key twice (the loop_body/mod.rs:978
-        // idiom): matching is per-key, so the forward cancels exactly once.
-        let reverse_key = if delta.purge_retirement {
-            delta.key.clone()
-        } else {
-            reverse_session_key(&delta.key, delta.decision.nat)
         };
         for binding in bindings.iter_mut() {
             cancel_queued_flow_on_binding(
                 binding,
-                &delta.key,
+                &forward_key,
                 &reverse_key,
                 Some(shared_recycles),
             );
@@ -347,6 +415,11 @@ pub(super) fn flush_session_deltas(
     worker_commands_by_id: &BTreeMap<u32, Arc<Mutex<VecDeque<WorkerCommand>>>>,
     event_stream: &Option<crate::event_stream::EventStreamWorkerHandle>,
     forwarding: &ForwardingState,
+    // #9752 round 3: the CURRENT runtime view. `forwarding` is the
+    // worker-cached snapshot (stale by the time the drain runs); the
+    // purge-close staleness fence MUST re-read under the drain, so it
+    // loads through here instead of trusting the snapshot.
+    shared_runtime: &RuntimeViewReader,
     // #5468: per-drain-cycle aggregate lossless-wedge latch (see doc above).
     worker_lossless_wedged: &mut bool,
 ) -> bool {
@@ -369,23 +442,18 @@ pub(super) fn flush_session_deltas(
     // worker-loop wait stays ~1 budget regardless of the owned-session count K.
     let mut event_stream_out_of_sync = *worker_lossless_wedged;
     for delta in deltas {
-        // #9752: a purge-retirement close is conditional on the table STILL
-        // being unresolvable when the drain runs. The walk removed the entry
-        // under a rotated view, but the delta sits in the ring until the
-        // flush — and a table re-added in between (plus a reinstall the close
-        // predates) must not be destroyed by a stale close: that would delete
-        // the NEW shared authority, its BPF aliases, and (for the ambiguous
-        // companion the purge preserved) a live session. Re-check the ONE
-        // classifier against drain-current forwarding and drop the whole
-        // delta — mirror, event-stream, RPC, recent, and local consumers —
-        // when the session is valid again. Ordinary closes skip the predicate
-        // entirely (flag check first: one branch, no behavior change).
+        // #9752 round 3: a purge-retirement close is conditional on STILL
+        // being due when the drain runs — the table still unresolvable AND
+        // no post-purge republish (see `purge_retirement_close_is_stale`).
+        // Drop the whole delta — mirror, event-stream, RPC, recent, and
+        // local consumers — when it went stale. Ordinary closes skip the
+        // fence entirely (flag check first: one branch, no behavior change).
         if delta.kind == SessionDeltaKind::Close
             && delta.purge_retirement
-            && !super::session_glue::install_table_purge_predicate(
-                forwarding,
-                &delta.key,
-                &delta.decision,
+            && purge_retirement_close_is_stale(
+                shared_runtime,
+                shared_sessions,
+                delta,
             )
         {
             continue;

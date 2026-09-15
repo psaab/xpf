@@ -195,6 +195,12 @@ type SessionSyncRequest struct {
 	// operator clear, GC expiry and policy revocation leave it false and delete as
 	// before. userspace-dp's SessionSyncRequest declares the same key.
 	PeerDelete bool `json:"peer_delete,omitempty"`
+	// ForwardOnly (#9752 round 3) marks a delete that retires exactly the
+	// named key: the helper skips reverse derivation, reverse removal and
+	// the reverse DeleteSynced fan-out. Set for purge-retirement closes,
+	// whose sender already decided every companion. userspace-dp's
+	// SessionSyncRequest declares the same key.
+	ForwardOnly bool `json:"forward_only,omitempty"`
 	// InstallTableDomain/InstallTableCheck (#9752): forwarded from
 	// SessionValue{,V6}.InstallTable* so the standby's helper imports a
 	// PBR-steered session with the table its steer installed, re-resolving
