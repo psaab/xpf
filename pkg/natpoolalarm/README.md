@@ -13,9 +13,11 @@ that behaviour entirely in the Go control plane.
 
 A slow (10s) daemon-resident loop (`Monitor.run`) samples the helper's
 LAST-APPLIED NAT pool snapshot and, for each rule-referenced non-deterministic
-source pool, computes port utilization
-`UsedPorts * 100 / (AddressCount * (PortHigh - PortLow + 1))` and applies
-hysteresis:
+source pool, computes utilization as the max of the ports leg
+`UsedPorts * 100 / (AddressCount * (PortHigh - PortLow + 1))` and the
+tracked-flow leg `LiveFlows * 100 / MaxTrackedFlows` (#9896 — the cap that
+actually refuses new flows; address-only pools evaluate the flow leg alone),
+and applies hysteresis:
 
 - **RAISE** when utilization `>= raise-threshold` (record an active alarm).
 - **CLEAR** when it drops `< clear-threshold` (strict less-than).
@@ -64,14 +66,18 @@ coherent applied config is available.
 - **No per-tick logging** — the syslog emit is gated entirely behind a raise/
   clear transition.
 
-## Dedup / deterministic / persistent
+## Dedup / deterministic / persistent / address-only
 
 - Rules sharing a pool share one `Arc<PortAllocatorShared>` and report identical
   `UsedPorts`; `AppliedNATView` deduplicates by pool name and takes one entry —
   never sums (summing would double/triple-count → false alarms).
 - Deterministic pools are SKIPPED in this release (`UsedPorts` is not the right
   numerator for block-based allocation; block-based utilization is a follow-up).
-- Persistent-NAT pools use raw `UsedPorts`.
+- Persistent-NAT pools use raw `UsedPorts` for the ports leg; the tracked-flow
+  leg (#9896) covers their divergence (many live flows per translated tuple).
+- Address-only (`port no-translation`) pools have no ports leg (`UsedPorts` is
+  permanently 0) but raise/clear on the tracked-flow leg; with no flow-cap
+  data the pool is recorded inapplicable (#7361, narrowed by #9896).
 
 ## Commit-time validation
 
@@ -87,6 +93,9 @@ raise=0/clear=0 is an always-firing alarm). See `docs/config-schema.md` #2079.
   deterministic skip + det-convert clear, no-double-count, nil-config / feature-
   disabled clear-all, unavailable / not-coherent HOLD-all, updatePct-no-syslog,
   syslog severity/shape, start/stop. Mutation-verified non-tautological.
+- `natpoolalarm_tracked_flows_9896_test.go` — at-cap fixture raises, dual-leg
+  crossing emits one line, `MaxTrackedFlows==0` falls back to ports-only,
+  flow-leg clear + hysteresis-band hold.
 - `render_test.go` — shared `show security alarms` render (detail/summary/empty,
   numbering continuation).
 - `../dataplane/userspace/applied_nat_view_test.go` — coherency, the FIB-bump

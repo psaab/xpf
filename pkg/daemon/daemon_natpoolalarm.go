@@ -42,11 +42,13 @@ func (d *Daemon) natPoolAlarmSampler() natpoolalarm.Sampler {
 		pools := make(map[string]natpoolalarm.PoolStatus, len(v.Pools))
 		for name, p := range v.Pools {
 			pools[name] = natpoolalarm.PoolStatus{
-				PoolName:     p.PoolName,
-				AddressCount: p.AddressCount,
-				PortLow:      p.PortLow,
-				PortHigh:     p.PortHigh,
-				UsedPorts:    p.UsedPorts,
+				PoolName:        p.PoolName,
+				AddressCount:    p.AddressCount,
+				PortLow:         p.PortLow,
+				PortHigh:        p.PortHigh,
+				UsedPorts:       p.UsedPorts,
+				LiveFlows:       p.LiveFlows,
+				MaxTrackedFlows: p.MaxTrackedFlows,
 			}
 		}
 		return natpoolalarm.View{
