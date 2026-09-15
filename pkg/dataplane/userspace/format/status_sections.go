@@ -310,6 +310,12 @@ func writeOverviewSection(b *strings.Builder, status userspace.ProcessStatus, ag
 	if len(status.Capabilities.UnsupportedReasons) > 0 {
 		fmt.Fprintf(b, "  Forwarding blocked by:     %s\n", strings.Join(status.Capabilities.UnsupportedReasons, "; "))
 	}
+	// #9642: report snapshot retry debt beside the backend classification.
+	// This surface is shared by local CLI and gRPC; the mode/enabled lines
+	// above keep describing the backend contract untouched.
+	if status.SnapshotRetryDebt {
+		fmt.Fprintf(b, "  Snapshot retry debt:      generation %d unpublished, ctrl held fail-closed\n", status.SnapshotRetryDebtGeneration)
+	}
 	fmt.Fprintf(b, "  Workers:                   %d\n", status.Workers)
 	fmt.Fprintf(b, "  Ring entries:              %d\n", status.RingEntries)
 	fmt.Fprintf(b, "  Last snapshot generation:  %d\n", status.LastSnapshotGeneration)

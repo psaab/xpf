@@ -214,11 +214,14 @@ func (m *Manager) advanceGenerationAfterPartialUpdateLocked() {
 	fullSnapshotWasPublished := m.publishedSnapshot >= m.lastSnapshot.Generation
 	m.incGenerationSaturatingLocked()
 	m.lastSnapshot.Generation = m.generation
-	if !fullSnapshotWasPublished {
-		// A full-snapshot publish is outstanding. Leave publishedSnapshot and
-		// lastSnapshotHash alone so the status tick still sees work to do —
-		// and so the publish it eventually makes carries THIS partial update
-		// too, since it reads the same m.lastSnapshot.
+	if !fullSnapshotWasPublished || m.applySnapshotOutcomeUnknown {
+		// A full-snapshot publish is outstanding, or an earlier full publish
+		// (or partial update) left helper content unknown (#9642 / #9520 /
+		// #9684). Leave publishedSnapshot and lastSnapshotHash alone so the
+		// status tick still sees work to do — and so the publish it eventually
+		// makes carries THIS partial update too, since it reads the same
+		// m.lastSnapshot. Advancing published here would mark unknown content
+		// settled and close the republish gate.
 		return
 	}
 	m.publishedSnapshot = m.lastSnapshot.Generation
