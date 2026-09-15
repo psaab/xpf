@@ -98,7 +98,12 @@ const preSecureTunnelProtocolVersion = 4
 // the bounded steered WireGuard port set replacing the v14 singular. Nothing
 // about secure_tunnel changed, so MinProtocolSecureTunnelRefusal (7) is
 // untouched again.
-const secureTunnelSnapshotProtocolVersion = 17
+//
+// Issue 9637 moves it 17 -> 18, for the dual-outlet behavioral contract (no
+// wire change: a pre-narrowing helper funnels every reinject through
+// `xpf-usp0`, which a v18 kernel exempts). Nothing about secure_tunnel
+// changed, so MinProtocolSecureTunnelRefusal (7) is untouched again.
+const secureTunnelSnapshotProtocolVersion = 18
 
 // preV5HelperAcceptsSnapshot models the exact-equality version gate a pre-v5
 // helper applies before touching any dataplane state

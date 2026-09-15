@@ -245,3 +245,33 @@ hi_matrix_stable_verdict() {
 	diff="$(comm -3 <(sort <<<"$a") <(sort <<<"$b") | tr '\t' ' ' | tr '\n' ';')"
 	printf 'FAIL %s\n' "host-inbound matrix CHANGED between ${la} and ${lb} — differing cells: ${diff}"
 }
+
+# hi_wildcard_socket_pids <port>
+#
+#   Read `ss -tlnp` output on stdin; print the sorted-unique PIDs of sockets
+#   bound to a WILDCARD address with an EXACT port match, one per line.
+#   Empty output means no externally-reachable listener on this port.
+#
+#   Extracted from test-host-inbound.sh's fail-closed listener gate (#9637):
+#   a bare `ss :port` check can be satisfied by a loopback-only listener
+#   (unreachable to external probers) or by `:220` when asking for `:22`,
+#   while the prober reaches a different socket. So only rows whose LOCAL
+#   address is wildcard (0.0.0.0/[::], never 127.0.0.1/[::1]) with an exact
+#   port match count, and every emitted PID must be an owned marker PID
+#   (the caller checks ownership — this helper deliberately does NOT
+#   filter, so a foreign PID is emitted and rejected, never silently
+#   dropped).
+hi_wildcard_socket_pids() {
+	local port="$1"
+	awk -v p="$port" '
+		$4 ~ /^(0\.0\.0\.0|\[::\]):[0-9]+$/ {
+			addrport = $4; sub(/.*:/, "", addrport)
+			if (addrport == p) {
+				line = $0
+				while (match(line, /pid=[0-9]+/)) {
+					print substr(line, RSTART + 4, RLENGTH - 4)
+					line = substr(line, RSTART + RLENGTH)
+				}
+			}
+		}' | sort -u
+}

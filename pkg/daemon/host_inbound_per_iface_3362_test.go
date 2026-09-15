@@ -38,7 +38,7 @@ func Test_3362_NftScopesPerInterfaceOverride(t *testing.T) {
 		},
 	}
 
-	payload := buildHostInboundFilterPayload(buildAndCheckViews(t, cfg), nil, nil, nil, nil)
+	payload := buildHostInboundFilterPayload(buildAndCheckViews(t, cfg), nil, nil, nil, nil, true)
 
 	corpDropV4 := "counter name \"" + xnft.HostInboundDenyCounterName("corp", "ip") + "\" drop"
 	mustContain := []string{
@@ -104,7 +104,7 @@ func Test_3362_NftDeclaresEachCounterOnce(t *testing.T) {
 		t.Fatalf("expected >=2 views for zone corp (override + default), got %d", corpViews)
 	}
 
-	payload := buildHostInboundFilterPayload(views, nil, nil, nil, nil)
+	payload := buildHostInboundFilterPayload(views, nil, nil, nil, nil, true)
 
 	// Each named DROP counter for the zone must be DECLARED exactly once.
 	for _, fam := range []string{"ip", "ip6"} {

@@ -77,6 +77,7 @@ fn maybe_reinject_slow_path_ignores_forward_candidate_disposition() {
         },
         meta,
         decision,
+        false,
         &recent_exceptions,
         &ForwardingState::default(),
     );
@@ -182,6 +183,7 @@ fn maybe_reinject_slow_path_drops_ineligible_dispositions() {
             },
             meta,
             decision,
+            false,
             &recent_exceptions,
             &ForwardingState::default(),
         );
@@ -256,6 +258,7 @@ fn maybe_reinject_slow_path_records_extract_failure_for_invalid_desc() {
         },
         meta,
         decision,
+        false,
         &recent_exceptions,
         &ForwardingState::default(),
     );
@@ -315,6 +318,7 @@ fn maybe_reinject_slow_path_from_frame_records_unavailable() {
         &frame,
         meta,
         decision,
+        false,
         &recent_exceptions,
         "forward_build_slow_path",
         &ForwardingState::default(),
@@ -1162,6 +1166,7 @@ fn next_table_unsupported_is_dropped_and_counted_no_route_still_delegates_6664()
             },
             meta,
             decision,
+            false,
             &recent_exceptions,
             &ForwardingState::default(),
         );
@@ -1204,6 +1209,245 @@ fn next_table_unsupported_is_dropped_and_counted_no_route_still_delegates_6664()
                 "{disposition:?} proceeded into the slow-path body, which records an \
                  exception when no reinjector is configured",
             );
+        }
+    }
+}
+
+// #9637 operator narrowing: the outlet mapping is exhaustive — exactly the
+// gate-passed LocalDelivery takes the trusted TUN; every other disposition
+// (including every other SLOW-PATH-ELIGIBLE one: NoRoute and MissingNeighbor
+// delegate) takes the delegated TUN. A new disposition variant fails this
+// test until its outlet is classified here.
+#[test]
+fn reinject_host_authorized_maps_only_gated_local_delivery_to_trusted() {
+    use super::tx::dispatch::reinject_host_authorized;
+    use ForwardingDisposition::*;
+    assert!(reinject_host_authorized(LocalDelivery));
+    for d in [
+        ForwardCandidate,
+        FabricRedirect,
+        HAInactive,
+        PolicyDenied,
+        NoRoute,
+        MissingNeighbor,
+        DiscardRoute,
+        NextTableUnsupported,
+    ] {
+        assert!(
+            !reinject_host_authorized(d),
+            "{d:?} must take the delegated outlet (destination-judged)"
+        );
+    }
+}
+
+// #9637 operator narrowing: the enqueue lands on the selected outlet's
+// status object. Uses a worker-less reinjector (both channels disconnected)
+// so the drop is recorded deterministically without CAP_NET_ADMIN: a
+// trusted enqueue must bump the trusted status and leave the delegated one
+// at zero, and vice versa. If outlet selection ever crossed, this reds.
+#[test]
+fn reinject_outlet_selection_records_on_matching_status() {
+    use crate::slowpath::{EnqueueOutcome, SlowPathReinjector};
+    // Worker-less reinjector: both channels are buffered-but-undrained, so
+    // early enqueues ACCEPT invisibly. Fill each outlet to QueueFull (bounded
+    // 2× capacity: the forgotten receiver never drains, so full is
+    // guaranteed) — the terminal QueueFull (and any rate-limited extras)
+    // must land on THAT outlet's status only. If outlet selection ever
+    // crossed, the other status would move.
+    let r = SlowPathReinjector::new_without_worker(1500);
+    let mut trusted_full = false;
+    for _ in 0..32770 {
+        if matches!(r.enqueue(vec![0u8; 64]), Ok(EnqueueOutcome::QueueFull)) {
+            trusted_full = true;
+            break;
+        }
+    }
+    assert!(trusted_full, "trusted outlet never reported QueueFull");
+    assert!(r.status().dropped_packets >= 1);
+    assert_eq!(r.delegated_status().dropped_packets, 0);
+    let trusted_drops = r.status().dropped_packets;
+    let mut delegated_full = false;
+    for _ in 0..32770 {
+        if matches!(
+            r.enqueue_delegated(vec![0u8; 64]),
+            Ok(EnqueueOutcome::QueueFull)
+        ) {
+            delegated_full = true;
+            break;
+        }
+    }
+    assert!(delegated_full, "delegated outlet never reported QueueFull");
+    assert!(r.delegated_status().dropped_packets >= 1);
+    assert_eq!(r.status().dropped_packets, trusted_drops);
+}
+
+// #9637 operator narrowing: every production reinject site declares its
+// outlet, and only the filtered chokepoint may derive it from the
+// disposition. The two unfiltered sites (ForwardCandidate fallback,
+// synthetic IPsec passthrough) must pass a literal `false`: their classes
+// never passed a host gate, so inferring from disposition there would be
+// wrong the day a gated class shares the site. The chokepoint must pass
+// `reinject_host_authorized(...)` (not a literal): it serves all
+// dispositions that survive the allow-list. A site that stops declaring
+// (or starts inferring) reds here; the mapping's own exhaustiveness is
+// pinned by reinject_host_authorized_maps_only_gated_local_delivery_to_trusted.
+#[test]
+fn reinject_outlet_declared_per_production_site_9637() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let read = |rel: &str| {
+        std::fs::read_to_string(root.join(rel)).expect("read reinject call site")
+    };
+    let after_call = |src: &str, marker: &str, window: usize| -> String {
+        let i = src
+            .find(marker)
+            .unwrap_or_else(|| panic!("call site marker not found: {marker}"));
+        src[i..std::cmp::min(i + window, src.len())].to_string()
+    };
+    // ForwardCandidate fallback: literal false (forward disposition, never
+    // gate-passed).
+    let fc = after_call(
+        &read("src/afxdp/tx/dispatch/slow_path.rs"),
+        "if fallback_to_slow_path {",
+        1200,
+    );
+    assert!(
+        fc.contains("false,"),
+        "FC fallback must pass literal false as host_authorized"
+    );
+    assert!(
+        !fc.contains("reinject_host_authorized("),
+        "FC fallback must not infer authorization from disposition"
+    );
+    // Synthetic IPsec passthrough: literal false (exempt classes never
+    // gate-passed; IKE-new is destination-judged on identical tokens).
+    let ipsec = after_call(
+        &read("src/afxdp/poll_stages.rs"),
+        "let ipsec_decision = ipsec_passthrough_decision();",
+        1400,
+    );
+    assert!(
+        ipsec.contains("false,"),
+        "IPsec passthrough must pass literal false as host_authorized"
+    );
+    assert!(
+        !ipsec.contains("reinject_host_authorized("),
+        "IPsec passthrough must not infer authorization from disposition"
+    );
+    // Filtered chokepoint: the mapping function (serves every surviving
+    // disposition; only gated LocalDelivery maps trusted).
+    let choke = after_call(
+        &read("src/afxdp/poll_descriptor/mod.rs"),
+        "if slow_path_admit(&binding.live, decision.resolution.disposition) {",
+        1400,
+    );
+    assert!(
+        choke.contains("reinject_host_authorized(decision.resolution.disposition)"),
+        "filtered chokepoint must derive host_authorized from the disposition mapping"
+    );
+}
+
+// #9637 F1 (operator narrowing + GPT-1): per-path outlet cells through the
+// REAL primitive (`maybe_reinject_slow_path_from_frame` with a worker-less
+// reinjector), not the mapping function. Each row drives one reinject class
+// with the flag its production site passes and asserts the drop lands on
+// THAT outlet's status — the kernel-observable fork (trusted counter vs
+// destination-deny counter) starts here. Observability comes from the MTU
+// admission gate (no CAP_NET_ADMIN needed): oversized-for-that-outlet
+// frames refuse with MtuExceeded on exactly one status object.
+//
+// Rows: gated LocalDelivery → trusted (the authorized ACCEPT control);
+// NoRoute (common-skew + capped + D2 tunnel-forced shape — all resolve
+// NoRoute at the outlet) → delegated; transit MissingNeighbor (D4a) →
+// delegated; ForwardCandidate (D4b build-failure class) → delegated;
+// synthetic LocalDelivery with authorized=false (NAT-T shape) → delegated.
+// A row whose outlet ever crosses reds here, not in a mapping unit test.
+#[test]
+fn reinject_primitive_routes_each_path_to_its_outlet_9637() {
+    use crate::slowpath::SlowPathReinjector;
+    use ForwardingDisposition::*;
+    struct Case {
+        name: &'static str,
+        disposition: ForwardingDisposition,
+        authorized: bool,
+        frame_len: usize,
+        force_trusted_live: Option<i32>,
+        expect_trusted: bool,
+    }
+    let cases = [
+        Case { name: "gated-LocalDelivery-trusted-ACCEPT-control", disposition: LocalDelivery, authorized: true, frame_len: 96, force_trusted_live: Some(64), expect_trusted: true },
+        Case { name: "NoRoute-delegated", disposition: NoRoute, authorized: false, frame_len: 2048, force_trusted_live: None, expect_trusted: false },
+        Case { name: "MissingNeighbor-delegated-D4a", disposition: MissingNeighbor, authorized: false, frame_len: 2048, force_trusted_live: None, expect_trusted: false },
+        Case { name: "ForwardCandidate-delegated-D4b", disposition: ForwardCandidate, authorized: false, frame_len: 2048, force_trusted_live: None, expect_trusted: false },
+        Case { name: "synthetic-LocalDelivery-delegated-NAT-T", disposition: LocalDelivery, authorized: false, frame_len: 2048, force_trusted_live: None, expect_trusted: false },
+    ];
+    for c in cases {
+        let r = std::sync::Arc::new(SlowPathReinjector::new_without_worker(1500));
+        if let Some(live) = c.force_trusted_live {
+            r.force_mtu_state_for_test(1500, live, false);
+        }
+        let mut frame = build_icmp_echo_frame_v4(
+            Ipv4Addr::new(10, 0, 61, 102),
+            Ipv4Addr::new(172, 16, 80, 8),
+            64,
+        );
+        frame.resize(c.frame_len, 0);
+        let local_tunnel_reinjectors = Arc::new(ArcSwap::from_pointee(BTreeMap::new()));
+        let binding = BindingIdentity {
+            slot: 7,
+            queue_id: 0,
+            worker_id: 0,
+            interface: Arc::<str>::from("ge-0-0-2"),
+            ifindex: 6,
+        };
+        let live = BindingLiveState::new();
+        let recent_exceptions = Arc::new(Mutex::new(ExceptionEventRing::new()));
+        let meta = UserspaceDpMeta {
+            magic: USERSPACE_META_MAGIC,
+            version: USERSPACE_META_VERSION,
+            length: std::mem::size_of::<UserspaceDpMeta>() as u16,
+            l3_offset: 14,
+            l4_offset: 34,
+            addr_family: libc::AF_INET as u8,
+            protocol: PROTO_ICMP,
+            ..UserspaceDpMeta::default()
+        };
+        let decision = SessionDecision {
+            resolution: ForwardingResolution {
+                disposition: c.disposition,
+                local_ifindex: 0,
+                egress_ifindex: 0,
+                tx_ifindex: 0,
+                tunnel_endpoint_id: 0,
+                next_hop: None,
+                neighbor_mac: None,
+                src_mac: None,
+                tx_vlan_id: 0,
+            },
+            nat: NatDecision::default(),
+        };
+        maybe_reinject_slow_path_from_frame(
+            &binding,
+            &live,
+            Some(&r),
+            &local_tunnel_reinjectors,
+            &frame,
+            meta,
+            decision,
+            c.authorized,
+            &recent_exceptions,
+            "path-cell-9637",
+            &ForwardingState::default(),
+        );
+        let (got_trusted, got_delegated) = (
+            r.status().dropped_packets,
+            r.delegated_status().dropped_packets,
+        );
+        if c.expect_trusted {
+            assert_eq!(got_trusted, 1, "{}: trusted outlet must record the refusal", c.name);
+            assert_eq!(got_delegated, 0, "{}: delegated outlet must stay quiet", c.name);
+        } else {
+            assert_eq!(got_delegated, 1, "{}: delegated outlet must record the refusal", c.name);
+            assert_eq!(got_trusted, 0, "{}: trusted outlet must stay quiet", c.name);
         }
     }
 }

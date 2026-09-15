@@ -280,7 +280,7 @@ const (
 	// the pinned-map pre-flight (fail-closed deploy per §5e), not by this gate;
 	// a new helper under an old daemon reads an empty set and refuses kernel-path
 	// transport for every endpoint — the v10/v11 arm, not a STANDS entry.
-	snapshotShapeVersion8892 = 17
+	snapshotShapeVersion8892 = 18
 )
 
 func TestSnapshotShapeIsPinnedToProtocolVersion8892(t *testing.T) {

@@ -76,6 +76,9 @@ func TestApplyResultFromCompileResultCarriesDisplayMetadata(t *testing.T) {
 	if got := result.PolicyScheduleRuleSlots[0].PolicyName; got != "allow-all" {
 		t.Fatalf("PolicyScheduleRuleSlots[0].PolicyName = %q, want allow-all", got)
 	}
+	if result.SnapshotPublishDeferred {
+		t.Fatal("SnapshotPublishDeferred = true, want false (unset on the source)")
+	}
 
 	// Mutate source — verify ApplyResult has independent copies.
 	compileResult.ManagedInterfaces[0].Addresses[0] = "198.51.100.1/24"
@@ -119,6 +122,24 @@ func TestApplyResultFromCompileResultCarriesDisplayMetadata(t *testing.T) {
 	}
 	if got := result.PolicyScheduleRuleSlots[0].PolicyName; got != "allow-all" {
 		t.Fatalf("Clone shared PolicyScheduleRuleSlots backing array, original PolicyName = %q", got)
+	}
+}
+
+// TestApplyResultFromCompileResultCarriesDeferredPublish is the #9637-D1/F1-B
+// pin: the deferred-publish mark must survive the CompileResult→ApplyResult
+// copy, or the daemon gate reads every success as published. RED-on-revert:
+// drop the SnapshotPublishDeferred line from ApplyResultFromCompileResult
+// and this goes RED.
+func TestApplyResultFromCompileResultCarriesDeferredPublish(t *testing.T) {
+	result := ApplyResultFromCompileResult(&CompileResult{SnapshotPublishDeferred: true})
+	if result == nil {
+		t.Fatal("ApplyResultFromCompileResult returned nil")
+	}
+	if !result.SnapshotPublishDeferred {
+		t.Fatal("SnapshotPublishDeferred = false, want true (set on the source)")
+	}
+	if got := result.Clone(); got == nil || !got.SnapshotPublishDeferred {
+		t.Fatal("Clone must preserve SnapshotPublishDeferred")
 	}
 }
 
