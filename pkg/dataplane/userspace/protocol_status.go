@@ -452,6 +452,24 @@ type ProcessStatus struct {
 	// key field. Kept DISTINCT from the cross-domain counter because the two
 	// are different operator stories; one total would answer neither.
 	NAT64FragProtocolAliasMissesTotal uint64 `json:"nat64_frag_protocol_alias_misses_total,omitempty"`
+
+	// FragMaxLifetimeEvictionsTotal is #9901 (F-010): fragment associations
+	// reclaimed by the ABSOLUTE lifetime bound rather than the idle TTL —
+	// one key consulted continuously for the whole maximum lifetime.
+	// Surfaced as xpf_userspace_frag_max_lifetime_evictions_total.
+	FragMaxLifetimeEvictionsTotal uint64 `json:"frag_max_lifetime_evictions_total,omitempty"`
+	// EgressMTUUnknownForwardTotal is #9901 (F-074): forwarded frames whose
+	// egress-MTU decision ran with no known MTU and fail-opened to Forward.
+	// Surfaced as xpf_userspace_egress_mtu_unknown_forward_total.
+	EgressMTUUnknownForwardTotal uint64 `json:"egress_mtu_unknown_forward_total,omitempty"`
+	// EmbeddedQuoteSubminimalRefusedTotal is #9901 (F-077): embedded ICMP
+	// error quotes refused by the 8-byte quoted-L4 adequacy floor.
+	// Surfaced as xpf_userspace_embedded_quote_subminimal_refused_total.
+	EmbeddedQuoteSubminimalRefusedTotal uint64 `json:"embedded_quote_subminimal_refused_total,omitempty"`
+	// EmbeddedErrorPerSessionSuppressedTotal is #9901 (F-077): matched
+	// embedded ICMP errors suppressed by the per-session 64/64 GCRA.
+	// Surfaced as xpf_userspace_embedded_error_per_session_suppressed_total.
+	EmbeddedErrorPerSessionSuppressedTotal uint64 `json:"embedded_error_per_session_suppressed_total,omitempty"`
 	// InterfaceSNATIdentityExhaustionTotal is #6751 PR 2/3: interface-mode
 	// SNAT admissions that failed CLOSED because no free translated
 	// identity existed for their (egress address, remote endpoint) — every
