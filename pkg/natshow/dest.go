@@ -126,7 +126,15 @@ func RenderDestRuleDetail(ctx context.Context, w io.Writer, cfg *config.Config, 
 			// rule is the only kind that can exist. An enumerator that finds
 			// both kinds and a view that shows one is a coverage gap that
 			// looks identical to healthy from the operator's side.
-			noteLenientTerminalAction(w, cfg, "destination", rs.Name, rule.Name)
+			//
+			// #9874: suppressed for a rule whose authored match constrains
+			// nothing — the NOT INSTALLED line above already carries that
+			// verdict (via the predicate's marker clause) and the operative
+			// cause, so the terminal-action note would only repeat the
+			// admission.
+			if !rule.LenientMatchDropped {
+				noteLenientTerminalAction(w, cfg, "destination", rs.Name, rule.Name)
+			}
 
 			if rule.Then.PoolName != "" && dnat.Pools != nil {
 				if pool, ok := dnat.Pools[rule.Then.PoolName]; ok {

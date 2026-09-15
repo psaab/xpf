@@ -953,6 +953,35 @@ type NATRule struct {
 	// is not part of the dataplane contract, and exported it would join the
 	// typed Config's JSON and travel in config-sync payloads.
 	matchAuthored bool
+	// LenientMatchDropped marks a NAT rule the TOLERANT compile path accepted
+	// only by DOWNGRADING the #8430 hard reject to a warning: the rule
+	// AUTHORED a `match` container that constrains NOTHING
+	// (`matchAuthored && !natMatchIsConstrained`), so the dataplane would read
+	// its empty match set as UNCONSTRAINED and translate every flow reaching
+	// it. The strict commit path hard-rejects such a rule, so this flag is
+	// only ever set for a rule a commit would refuse; a clean
+	// strict-committed rule always leaves it false.
+	//
+	// It is the NAT sibling of Policy.LenientContentDropped (#5575): the
+	// snapshot builders carry it onto the wire
+	// (SourceNATRuleSnapshot.LenientMatchDropped) and the Rust source-NAT
+	// table fails such a rule CLOSED (drop + count, #9874) instead of
+	// installing the catch-all translator; the destination builder skips such
+	// a rule with a warning (it already publishes no entry for an empty
+	// match, so that half is observability only).
+	//
+	// EXPORTED (unlike matchAuthored) because the snapshot builders and the
+	// show renderers live in other packages and must read it — but tagged
+	// `json:"-"` per the #9246 MalformedZonePairs precedent: it is a
+	// COMPILE-TIME DIAGNOSTIC derived at compile time on every node
+	// (Store.Load / Store.SyncApply / RetainedGeneration all recompile from
+	// the tree), not semantic content, so serializing it would perturb every
+	// golden and fingerprint for a field that is false in every valid
+	// config. CONSEQUENCE, stated plainly: ConfigFingerprint intentionally
+	// ignores this bit, so fingerprint equality cannot validate preservation
+	// of this behavior — assert the marker and the emitted snapshot
+	// directly.
+	LenientMatchDropped bool `json:"-"`
 }
 
 // NATMatch defines what traffic a NAT rule matches.

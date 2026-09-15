@@ -101,6 +101,18 @@ func DestinationNATRuleExcludedReason(dnat *DestinationNATConfig, rule *NATRule)
 	if dnat == nil || rule == nil {
 		return ""
 	}
+	// #9874: a rule whose authored `match` constrains nothing publishes no
+	// entry — the builder skips it before the pool checks. FIRST, and in
+	// particular before the #3844 `off` exemption below: an empty-match
+	// exemption has no destination key either, so it installs nothing no
+	// matter what it carries. The builder reaches the same verdict through
+	// its own loop-top check (which also covers the `off` shape this
+	// predicate's builder call site does not reach); this clause is what the
+	// show and structured surfaces read.
+	if rule.LenientMatchDropped {
+		return "the authored match constrains nothing, so the rule publishes " +
+			"no entry (a commit would reject it, #9874)"
+	}
 	// #3844: the no-NAT exemption resolves without a pool. Decided by `off`,
 	// not by an empty pool name.
 	if rule.Then.Off {

@@ -82,6 +82,19 @@ func buildDestinationNATSnapshotsWithFeeds(cfg *config.Config, natCounterIDs map
 			if rule == nil {
 				continue
 			}
+			// #9874: the rule authored a `match` that constrains nothing. It
+			// publishes no entry either way (an empty match leaves destAddrs
+			// empty, which the emit guard below skips), so this skip changes
+			// no disposition — it makes the drop LOUD instead of silent, and
+			// names the rule the operator must fix. FIRST, before the #3844
+			// `off` handling: an empty-match exemption has no destination
+			// key either and installs nothing. The show surfaces reach the
+			// same verdict through DestinationNATRuleExcludedReason.
+			if rule.LenientMatchDropped {
+				slog.Warn("userspace snapshot: skipping DNAT rule with an empty authored match (fail-closed, #9874)",
+					"ruleset", rs.Name, "rule", rule.Name)
+				continue
+			}
 			// #3844: `then destination-nat off` is a no-translate EXEMPTION.
 			// It carries no pool, but the rule MUST still install a snapshot
 			// entry so the Rust DnatTable can recognize the matched traffic as

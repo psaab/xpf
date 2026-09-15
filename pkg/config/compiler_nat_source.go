@@ -1148,6 +1148,16 @@ func compileNATSource(node *Node, sec *SecurityConfig) error {
 					rule.thenAuthored = c
 				}
 			}
+			// #9874: poison a rule whose authored `match` constrains nothing, so
+			// the tolerant load / peer-sync path ships it fail-closed instead of
+			// as an unconstrained catch-all. The SAME predicate the #8430 strict
+			// gate uses (single source of truth), evaluated AFTER every `match`
+			// block is read (#3850) so an empty duplicate block cannot poison a
+			// sibling block's valid criteria. Set on both paths: a strict config
+			// carrying it is rejected by the gate before any snapshot exists.
+			// Scope expansion below shares these rule pointers, so one write
+			// covers every expanded rule-set.
+			rule.LenientMatchDropped = rule.matchAuthored && !natMatchIsConstrained(rule.Match)
 			rules = append(rules, rule)
 		}
 
