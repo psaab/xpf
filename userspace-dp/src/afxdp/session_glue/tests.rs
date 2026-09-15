@@ -81,6 +81,8 @@ fn test_decision() -> SessionDecision {
     SessionDecision {
         resolution: test_resolution(),
         nat: NatDecision::default(),
+        install_table_domain: 0,
+        install_table_check: 0,
     }
 }
 
@@ -292,20 +294,17 @@ fn purge_sessions_for_input_dscp_filter_revalidation_removes_family() {
 }
 
 fn test_local_delivery_decision() -> SessionDecision {
-    SessionDecision {
-        resolution: ForwardingResolution {
-            disposition: ForwardingDisposition::LocalDelivery,
-            local_ifindex: 12,
-            egress_ifindex: 12,
-            tx_ifindex: 12,
-            tunnel_endpoint_id: 0,
-            next_hop: None,
-            neighbor_mac: None,
-            src_mac: None,
-            tx_vlan_id: 0,
-        },
-        nat: NatDecision::default(),
-    }
+    SessionDecision { resolution: ForwardingResolution {
+        disposition: ForwardingDisposition::LocalDelivery,
+        local_ifindex: 12,
+        egress_ifindex: 12,
+        tx_ifindex: 12,
+        tunnel_endpoint_id: 0,
+        next_hop: None,
+        neighbor_mac: None,
+        src_mac: None,
+        tx_vlan_id: 0,
+    }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 }
 }
 
 fn test_forwarding_state_with_fabric() -> ForwardingState {
@@ -668,14 +667,11 @@ fn resolve_flow_session_decision_promotes_stale_fabric_shared_hit_to_local_owner
 
     let shared_entry = SyncedSessionEntry {
         key: key.clone(),
-        decision: SessionDecision {
-            resolution: resolve_fabric_redirect(&forwarding).expect("fabric redirect"),
-            nat: NatDecision {
-                rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
-                rewrite_src_port: Some(key.src_port),
-                ..NatDecision::default()
-            },
-        },
+        decision: SessionDecision { resolution: resolve_fabric_redirect(&forwarding).expect("fabric redirect"), nat: NatDecision {
+            rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
+            rewrite_src_port: Some(key.src_port),
+            ..NatDecision::default()
+        }, install_table_domain: 0, install_table_check: 0 },
         metadata: SessionMetadata {
             ingress_ifindex: 0,
             ingress_vlan_id: 0,
@@ -828,14 +824,11 @@ fn lookup_session_across_scopes_preserves_local_synced_origin() {
 fn lookup_session_across_scopes_returns_shared_forward_wire_entry() {
     let mut sessions = SessionTable::new();
     let key = test_key();
-    let decision = SessionDecision {
-        resolution: test_resolution(),
-        nat: NatDecision {
-            rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
-            rewrite_src_port: Some(key.src_port),
-            ..NatDecision::default()
-        },
-    };
+    let decision = SessionDecision { resolution: test_resolution(), nat: NatDecision {
+        rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
+        rewrite_src_port: Some(key.src_port),
+        ..NatDecision::default()
+    }, install_table_domain: 0, install_table_check: 0 };
     let entry = SyncedSessionEntry {
         key: key.clone(),
         decision,
@@ -876,14 +869,11 @@ fn lookup_session_across_scopes_returns_shared_forward_wire_entry() {
 fn lookup_session_across_scopes_preserves_local_forward_wire_synced_origin() {
     let mut sessions = SessionTable::new();
     let key = test_key();
-    let decision = SessionDecision {
-        resolution: test_resolution(),
-        nat: NatDecision {
-            rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
-            rewrite_src_port: Some(key.src_port),
-            ..NatDecision::default()
-        },
-    };
+    let decision = SessionDecision { resolution: test_resolution(), nat: NatDecision {
+        rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
+        rewrite_src_port: Some(key.src_port),
+        ..NatDecision::default()
+    }, install_table_domain: 0, install_table_check: 0 };
     assert!(sessions.install_with_protocol_with_origin(
         key.clone(),
         decision,
@@ -915,14 +905,11 @@ fn lookup_session_across_scopes_preserves_local_forward_wire_synced_origin() {
 fn lookup_session_across_scopes_prefers_shared_entry_over_fabric_wire_placeholder() {
     let mut sessions = SessionTable::new();
     let key = test_key();
-    let decision = SessionDecision {
-        resolution: test_resolution(),
-        nat: NatDecision {
-            rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
-            rewrite_src_port: Some(key.src_port),
-            ..NatDecision::default()
-        },
-    };
+    let decision = SessionDecision { resolution: test_resolution(), nat: NatDecision {
+        rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
+        rewrite_src_port: Some(key.src_port),
+        ..NatDecision::default()
+    }, install_table_domain: 0, install_table_check: 0 };
     let translated_key = forward_wire_key(&key, decision.nat);
     assert!(sessions.install_with_protocol_with_origin(
         translated_key.clone(),
@@ -986,16 +973,13 @@ fn lookup_forward_nat_across_scopes_returns_shared_nat_entry() {
             discriminator: Default::default(),
             routing_domain: 0,
     };
-    let decision = SessionDecision {
-        resolution: test_resolution(),
-        nat: NatDecision {
-            rewrite_src: Some(IpAddr::V6(
-                "2602:fd41:70:100::102".parse::<Ipv6Addr>().unwrap(),
-            )),
-            nptv6: true,
-            ..NatDecision::default()
-        },
-    };
+    let decision = SessionDecision { resolution: test_resolution(), nat: NatDecision {
+        rewrite_src: Some(IpAddr::V6(
+            "2602:fd41:70:100::102".parse::<Ipv6Addr>().unwrap(),
+        )),
+        nptv6: true,
+        ..NatDecision::default()
+    }, install_table_domain: 0, install_table_check: 0 };
     let entry = SyncedSessionEntry {
         key: key.clone(),
         decision,
@@ -1035,14 +1019,11 @@ fn lookup_forward_nat_across_scopes_returns_shared_nat_entry() {
 fn lookup_forward_nat_across_scopes_prefers_shared_entry_over_fabric_wire_placeholder() {
     let mut sessions = SessionTable::new();
     let key = test_key();
-    let decision = SessionDecision {
-        resolution: test_resolution(),
-        nat: NatDecision {
-            rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
-            rewrite_src_port: Some(key.src_port),
-            ..NatDecision::default()
-        },
-    };
+    let decision = SessionDecision { resolution: test_resolution(), nat: NatDecision {
+        rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
+        rewrite_src_port: Some(key.src_port),
+        ..NatDecision::default()
+    }, install_table_domain: 0, install_table_check: 0 };
     let translated_key = forward_wire_key(&key, decision.nat);
     assert!(sessions.install_with_protocol_with_origin(
         translated_key,
@@ -1097,14 +1078,11 @@ fn lookup_forward_nat_across_scopes_prefers_shared_entry_over_fabric_wire_placeh
 fn lookup_forward_nat_across_scopes_ignores_fabric_wire_placeholder_without_shared_entry() {
     let mut sessions = SessionTable::new();
     let key = test_key();
-    let decision = SessionDecision {
-        resolution: test_resolution(),
-        nat: NatDecision {
-            rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
-            rewrite_src_port: Some(key.src_port),
-            ..NatDecision::default()
-        },
-    };
+    let decision = SessionDecision { resolution: test_resolution(), nat: NatDecision {
+        rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
+        rewrite_src_port: Some(key.src_port),
+        ..NatDecision::default()
+    }, install_table_domain: 0, install_table_check: 0 };
     let translated_key = forward_wire_key(&key, decision.nat);
     assert!(sessions.install_with_protocol_with_origin(
         translated_key,
@@ -1141,14 +1119,11 @@ fn lookup_forward_nat_across_scopes_ignores_fabric_wire_placeholder_without_shar
 fn lookup_forward_nat_across_scopes_returns_shared_canonical_reverse_entry() {
     let sessions = SessionTable::new();
     let key = test_key();
-    let decision = SessionDecision {
-        resolution: test_resolution(),
-        nat: NatDecision {
-            rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
-            rewrite_src_port: Some(key.src_port),
-            ..NatDecision::default()
-        },
-    };
+    let decision = SessionDecision { resolution: test_resolution(), nat: NatDecision {
+        rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
+        rewrite_src_port: Some(key.src_port),
+        ..NatDecision::default()
+    }, install_table_domain: 0, install_table_check: 0 };
     let entry = SyncedSessionEntry {
         key: key.clone(),
         decision,
@@ -1191,14 +1166,11 @@ fn publish_and_remove_shared_session_tracks_forward_wire_alias() {
     let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
     let key = test_key();
-    let decision = SessionDecision {
-        resolution: test_resolution(),
-        nat: NatDecision {
-            rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
-            rewrite_src_port: Some(key.src_port),
-            ..NatDecision::default()
-        },
-    };
+    let decision = SessionDecision { resolution: test_resolution(), nat: NatDecision {
+        rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
+        rewrite_src_port: Some(key.src_port),
+        ..NatDecision::default()
+    }, install_table_domain: 0, install_table_check: 0 };
     let entry = SyncedSessionEntry {
         key: key.clone(),
         decision,
@@ -1244,14 +1216,11 @@ fn publish_and_remove_shared_session_tracks_canonical_reverse_alias() {
     let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
     let key = test_key();
-    let decision = SessionDecision {
-        resolution: test_resolution(),
-        nat: NatDecision {
-            rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
-            rewrite_src_port: Some(key.src_port),
-            ..NatDecision::default()
-        },
-    };
+    let decision = SessionDecision { resolution: test_resolution(), nat: NatDecision {
+        rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
+        rewrite_src_port: Some(key.src_port),
+        ..NatDecision::default()
+    }, install_table_domain: 0, install_table_check: 0 };
     let entry = SyncedSessionEntry {
         key: key.clone(),
         decision,
@@ -1294,14 +1263,11 @@ fn publish_and_remove_shared_session_tracks_owner_rg_indexes() {
     let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
     let key = test_key();
-    let decision = SessionDecision {
-        resolution: test_resolution(),
-        nat: NatDecision {
-            rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
-            rewrite_src_port: Some(key.src_port),
-            ..NatDecision::default()
-        },
-    };
+    let decision = SessionDecision { resolution: test_resolution(), nat: NatDecision {
+        rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
+        rewrite_src_port: Some(key.src_port),
+        ..NatDecision::default()
+    }, install_table_domain: 0, install_table_check: 0 };
     let entry = SyncedSessionEntry {
         key: key.clone(),
         decision,
@@ -1499,14 +1465,11 @@ fn publish_shared_session_heals_missing_owner_rg_index_on_same_owner_update() {
 fn resolve_flow_session_decision_uses_canonical_key_for_translated_forward_hit() {
     let mut sessions = SessionTable::new();
     let key = test_key();
-    let decision = SessionDecision {
-        resolution: test_resolution(),
-        nat: NatDecision {
-            rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
-            rewrite_src_port: Some(key.src_port),
-            ..NatDecision::default()
-        },
-    };
+    let decision = SessionDecision { resolution: test_resolution(), nat: NatDecision {
+        rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
+        rewrite_src_port: Some(key.src_port),
+        ..NatDecision::default()
+    }, install_table_domain: 0, install_table_check: 0 };
     let translated_key = forward_wire_key(&key, decision.nat);
     let entry = SyncedSessionEntry {
         key: key.clone(),
@@ -1578,15 +1541,12 @@ fn resolve_flow_session_decision_uses_canonical_key_for_translated_forward_hit()
 fn resolve_flow_session_decision_promotes_translated_shared_hit_on_active_fabric_ingress() {
     let mut sessions = SessionTable::new();
     let key = test_key();
-    let decision = SessionDecision {
-        resolution: resolve_fabric_redirect(&test_forwarding_state_with_fabric())
-            .expect("fabric redirect"),
-        nat: NatDecision {
-            rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
-            rewrite_src_port: Some(key.src_port),
-            ..NatDecision::default()
-        },
-    };
+    let decision = SessionDecision { resolution: resolve_fabric_redirect(&test_forwarding_state_with_fabric())
+        .expect("fabric redirect"), nat: NatDecision {
+        rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
+        rewrite_src_port: Some(key.src_port),
+        ..NatDecision::default()
+    }, install_table_domain: 0, install_table_check: 0 };
     let translated_key = forward_wire_key(&key, decision.nat);
     let entry = SyncedSessionEntry {
         key: translated_key.clone(),
@@ -1682,15 +1642,12 @@ fn resolve_flow_session_decision_promotes_translated_shared_hit_on_active_fabric
 fn resolve_flow_session_decision_promotes_local_synced_translated_hit_on_active_fabric_ingress() {
     let mut sessions = SessionTable::new();
     let key = test_key();
-    let decision = SessionDecision {
-        resolution: resolve_fabric_redirect(&test_forwarding_state_with_fabric())
-            .expect("fabric redirect"),
-        nat: NatDecision {
-            rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
-            rewrite_src_port: Some(key.src_port),
-            ..NatDecision::default()
-        },
-    };
+    let decision = SessionDecision { resolution: resolve_fabric_redirect(&test_forwarding_state_with_fabric())
+        .expect("fabric redirect"), nat: NatDecision {
+        rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
+        rewrite_src_port: Some(key.src_port),
+        ..NatDecision::default()
+    }, install_table_domain: 0, install_table_check: 0 };
     let translated_key = forward_wire_key(&key, decision.nat);
     assert!(sessions.install_with_protocol_with_origin(
         translated_key.clone(),
@@ -1769,15 +1726,12 @@ fn resolve_flow_session_decision_keeps_translated_shared_hit_transient_on_inacti
 {
     let mut sessions = SessionTable::new();
     let key = test_key();
-    let decision = SessionDecision {
-        resolution: resolve_fabric_redirect(&test_forwarding_state_with_fabric())
-            .expect("fabric redirect"),
-        nat: NatDecision {
-            rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
-            rewrite_src_port: Some(key.src_port),
-            ..NatDecision::default()
-        },
-    };
+    let decision = SessionDecision { resolution: resolve_fabric_redirect(&test_forwarding_state_with_fabric())
+        .expect("fabric redirect"), nat: NatDecision {
+        rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
+        rewrite_src_port: Some(key.src_port),
+        ..NatDecision::default()
+    }, install_table_domain: 0, install_table_check: 0 };
     let translated_key = forward_wire_key(&key, decision.nat);
     let entry = SyncedSessionEntry {
         key: translated_key.clone(),
@@ -1857,15 +1811,12 @@ fn resolve_flow_session_decision_keeps_translated_shared_hit_transient_on_inacti
  {
     let mut sessions = SessionTable::new();
     let key = test_key();
-    let decision = SessionDecision {
-        resolution: resolve_fabric_redirect(&test_forwarding_state_with_fabric())
-            .expect("fabric redirect"),
-        nat: NatDecision {
-            rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
-            rewrite_src_port: Some(key.src_port),
-            ..NatDecision::default()
-        },
-    };
+    let decision = SessionDecision { resolution: resolve_fabric_redirect(&test_forwarding_state_with_fabric())
+        .expect("fabric redirect"), nat: NatDecision {
+        rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
+        rewrite_src_port: Some(key.src_port),
+        ..NatDecision::default()
+    }, install_table_domain: 0, install_table_check: 0 };
     let translated_key = forward_wire_key(&key, decision.nat);
     let entry = SyncedSessionEntry {
         key: translated_key.clone(),
@@ -1945,15 +1896,12 @@ fn resolve_flow_session_decision_keeps_local_synced_translated_hit_transient_on_
  {
     let mut sessions = SessionTable::new();
     let key = test_key();
-    let decision = SessionDecision {
-        resolution: resolve_fabric_redirect(&test_forwarding_state_with_fabric())
-            .expect("fabric redirect"),
-        nat: NatDecision {
-            rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
-            rewrite_src_port: Some(key.src_port),
-            ..NatDecision::default()
-        },
-    };
+    let decision = SessionDecision { resolution: resolve_fabric_redirect(&test_forwarding_state_with_fabric())
+        .expect("fabric redirect"), nat: NatDecision {
+        rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
+        rewrite_src_port: Some(key.src_port),
+        ..NatDecision::default()
+    }, install_table_domain: 0, install_table_check: 0 };
     let translated_key = forward_wire_key(&key, decision.nat);
     assert!(sessions.install_with_protocol_with_origin(
         translated_key.clone(),
@@ -2742,13 +2690,10 @@ fn apply_worker_commands_exports_owner_rg_forward_sessions_without_teardown() {
     let commands = Arc::new(Mutex::new(VecDeque::new()));
     let mut sessions = SessionTable::new();
     let key = test_key();
-    let decision = SessionDecision {
-        resolution: test_decision().resolution,
-        nat: NatDecision {
-            rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
-            ..NatDecision::default()
-        },
-    };
+    let decision = SessionDecision { resolution: test_decision().resolution, nat: NatDecision {
+        rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
+        ..NatDecision::default()
+    }, install_table_domain: 0, install_table_check: 0 };
     let metadata = SessionMetadata {
         ingress_ifindex: 0,
         ingress_vlan_id: 0,
@@ -3243,6 +3188,8 @@ fn apply_worker_commands_demote_split_reverse_owner_rg_rewrites_to_fabric_redire
                 forward_key.src_port,
                 forward_key.dst_port,
             ),
+            install_table_domain: 0,
+            install_table_check: 0,
         },
         SessionMetadata {
             ingress_zone: 2,
@@ -3324,6 +3271,8 @@ fn apply_worker_commands_refresh_split_reverse_owner_rg_rewrites_to_forward_cand
                 forward_key.src_port,
                 forward_key.dst_port,
             ),
+            install_table_domain: 0,
+            install_table_check: 0,
         },
         SessionMetadata {
             ingress_zone: 2,
@@ -3410,6 +3359,8 @@ fn apply_worker_commands_refresh_split_reverse_owner_rg_updates_stale_indexed_se
                 forward_key.src_port,
                 forward_key.dst_port,
             ),
+            install_table_domain: 0,
+            install_table_check: 0,
         },
         SessionMetadata {
             ingress_zone: 2,
@@ -3499,6 +3450,8 @@ fn apply_worker_commands_refresh_owner_rg_updates_reverse_session_owned_by_other
                 forward_key.src_port,
                 forward_key.dst_port,
             ),
+            install_table_domain: 0,
+            install_table_check: 0,
         },
         SessionMetadata {
             ingress_zone: 2,
@@ -3588,6 +3541,8 @@ fn apply_worker_commands_refresh_owner_rg_rewrites_remote_reverse_session_on_pee
                 forward_key.src_port,
                 forward_key.dst_port,
             ),
+            install_table_domain: 0,
+            install_table_check: 0,
         },
         SessionMetadata {
             ingress_zone: 2,
@@ -3672,6 +3627,8 @@ fn apply_worker_commands_refresh_owner_rg_rewrites_shared_promote_reverse_on_pee
                 forward_key.src_port,
                 forward_key.dst_port,
             ),
+            install_table_domain: 0,
+            install_table_check: 0,
         },
         SessionMetadata {
             ingress_zone: 2,
@@ -3922,17 +3879,14 @@ fn synthesized_synced_reverse_entry_inherits_nat64_reverse_4565() {
                     discriminator: Default::default(),
                     routing_domain: 0,
         },
-        decision: SessionDecision {
-            resolution: test_resolution(),
-            nat: NatDecision {
-                rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 5))),
-                rewrite_dst: Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1))),
-                rewrite_src_port: Some(40000),
-                rewrite_dst_port: None,
-                nat64: true,
-                nptv6: false,
-            },
-        },
+        decision: SessionDecision { resolution: test_resolution(), nat: NatDecision {
+            rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 5))),
+            rewrite_dst: Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1))),
+            rewrite_src_port: Some(40000),
+            rewrite_dst_port: None,
+            nat64: true,
+            nptv6: false,
+        }, install_table_domain: 0, install_table_check: 0 },
         metadata,
         origin: SessionOrigin::SyncImport,
         protocol: PROTO_TCP,
@@ -4320,23 +4274,20 @@ fn reverse_session_from_tunnel_forward_bypasses_unseeded_ha_during_startup_grace
                             discriminator: Default::default(),
                             routing_domain: 0,
             },
-            decision: SessionDecision {
-                resolution: ForwardingResolution {
-                    disposition: ForwardingDisposition::ForwardCandidate,
-                    local_ifindex: 0,
-                    egress_ifindex: 12,
-                    tx_ifindex: 12,
-                    tunnel_endpoint_id: 1,
-                    next_hop: Some(IpAddr::V4(Ipv4Addr::new(10, 255, 192, 41))),
-                    neighbor_mac: Some([0xde, 0xad, 0xbe, 0xef, 0x00, 0x02]),
-                    src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]),
-                    tx_vlan_id: 80,
-                },
-                nat: NatDecision {
-                    rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(10, 255, 192, 42))),
-                    ..NatDecision::default()
-                },
-            },
+            decision: SessionDecision { resolution: ForwardingResolution {
+                disposition: ForwardingDisposition::ForwardCandidate,
+                local_ifindex: 0,
+                egress_ifindex: 12,
+                tx_ifindex: 12,
+                tunnel_endpoint_id: 1,
+                next_hop: Some(IpAddr::V4(Ipv4Addr::new(10, 255, 192, 41))),
+                neighbor_mac: Some([0xde, 0xad, 0xbe, 0xef, 0x00, 0x02]),
+                src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]),
+                tx_vlan_id: 80,
+            }, nat: NatDecision {
+                rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(10, 255, 192, 42))),
+                ..NatDecision::default()
+            }, install_table_domain: 0, install_table_check: 0 },
             metadata: SessionMetadata {
                 ingress_zone: 1,
                 egress_zone: 5,
@@ -4651,23 +4602,20 @@ fn reverse_session_from_split_owner_fabric_redirect_uses_fabric_return_when_clie
                             discriminator: Default::default(),
                             routing_domain: 0,
             },
-            decision: SessionDecision {
-                resolution: ForwardingResolution {
-                    disposition: ForwardingDisposition::FabricRedirect,
-                    local_ifindex: 0,
-                    egress_ifindex: 21,
-                    tx_ifindex: 21,
-                    tunnel_endpoint_id: 0,
-                    next_hop: Some(IpAddr::V4(Ipv4Addr::new(10, 99, 13, 2))),
-                    neighbor_mac: Some([0x00, 0xaa, 0xbb, 0xcc, 0xdd, 0xee]),
-                    src_mac: Some([0x02, 0xbf, 0x72, FABRIC_ZONE_MAC_MAGIC, 0x00, 0x01]),
-                    tx_vlan_id: 0,
-                },
-                nat: NatDecision {
-                    rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
-                    ..NatDecision::default()
-                },
-            },
+            decision: SessionDecision { resolution: ForwardingResolution {
+                disposition: ForwardingDisposition::FabricRedirect,
+                local_ifindex: 0,
+                egress_ifindex: 21,
+                tx_ifindex: 21,
+                tunnel_endpoint_id: 0,
+                next_hop: Some(IpAddr::V4(Ipv4Addr::new(10, 99, 13, 2))),
+                neighbor_mac: Some([0x00, 0xaa, 0xbb, 0xcc, 0xdd, 0xee]),
+                src_mac: Some([0x02, 0xbf, 0x72, FABRIC_ZONE_MAC_MAGIC, 0x00, 0x01]),
+                tx_vlan_id: 0,
+            }, nat: NatDecision {
+                rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
+                ..NatDecision::default()
+            }, install_table_domain: 0, install_table_check: 0 },
             metadata: SessionMetadata {
                 ingress_zone: 1,
                 egress_zone: 2,
@@ -4794,20 +4742,17 @@ fn synced_session_hit_recomputes_local_resolution_after_failover() {
             mac: [0x56, 0x4a, 0xe8, 0x1e, 0xa8, 0x32],
         },
     );
-    let stale_fabric_decision = SessionDecision {
-        resolution: ForwardingResolution {
-            disposition: ForwardingDisposition::FabricRedirect,
-            local_ifindex: 0,
-            egress_ifindex: 21,
-            tx_ifindex: 21,
-            tunnel_endpoint_id: 0,
-            next_hop: Some(IpAddr::V4(Ipv4Addr::new(10, 99, 13, 2))),
-            neighbor_mac: Some([0x00, 0xaa, 0xbb, 0xcc, 0xdd, 0xee]),
-            src_mac: Some([0x02, 0xbf, 0x72, 0xff, 0x00, 0x01]),
-            tx_vlan_id: 0,
-        },
-        nat: NatDecision::default(),
-    };
+    let stale_fabric_decision = SessionDecision { resolution: ForwardingResolution {
+        disposition: ForwardingDisposition::FabricRedirect,
+        local_ifindex: 0,
+        egress_ifindex: 21,
+        tx_ifindex: 21,
+        tunnel_endpoint_id: 0,
+        next_hop: Some(IpAddr::V4(Ipv4Addr::new(10, 99, 13, 2))),
+        neighbor_mac: Some([0x00, 0xaa, 0xbb, 0xcc, 0xdd, 0xee]),
+        src_mac: Some([0x02, 0xbf, 0x72, 0xff, 0x00, 0x01]),
+        tx_vlan_id: 0,
+    }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 };
     let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
@@ -5502,14 +5447,11 @@ fn w3_forward_entry(src_host: u8, src_port: u16, snat_ip: Ipv4Addr) -> SyncedSes
                     discriminator: Default::default(),
                     routing_domain: 0,
         },
-        decision: SessionDecision {
-            resolution: test_resolution(),
-            nat: NatDecision {
-                rewrite_src: Some(IpAddr::V4(snat_ip)),
-                rewrite_src_port: None,
-                ..NatDecision::default()
-            },
-        },
+        decision: SessionDecision { resolution: test_resolution(), nat: NatDecision {
+            rewrite_src: Some(IpAddr::V4(snat_ip)),
+            rewrite_src_port: None,
+            ..NatDecision::default()
+        }, install_table_domain: 0, install_table_check: 0 },
         metadata: test_metadata(),
         origin: SessionOrigin::ForwardFlow,
         protocol: PROTO_TCP,
@@ -5686,13 +5628,10 @@ fn shared_nat_displacement_counter_counts_collisions_not_republishes() {
                     discriminator: Default::default(),
                     routing_domain: 0,
         },
-        decision: SessionDecision {
-            resolution: test_resolution(),
-            nat: NatDecision {
-                rewrite_dst: Some(backend),
-                ..NatDecision::default()
-            },
-        },
+        decision: SessionDecision { resolution: test_resolution(), nat: NatDecision {
+            rewrite_dst: Some(backend),
+            ..NatDecision::default()
+        }, install_table_domain: 0, install_table_check: 0 },
         metadata: test_metadata(),
         origin: SessionOrigin::ForwardFlow,
         protocol: PROTO_TCP,
@@ -6135,6 +6074,7 @@ fn flush_session_deltas_without_binding_reaches_global_consumers() {
         session_id: 0,
         bulk_resync: false,
         tcp_close_class: 0,
+        purge_retirement: false,
     };
 
     // Synthesize a binding identity with labels only — exactly what the
@@ -6259,6 +6199,7 @@ fn flush_session_deltas_rt_flow_app_id_uses_post_nat_dst_port() {
         session_id: 0,
         bulk_resync: false,
         tcp_close_class: 0,
+        purge_retirement: false,
     };
 
     // Drive the production drain loop and return the stamped application_id off
@@ -6409,6 +6350,7 @@ fn flush_session_deltas_session_close_reresolves_policy_id_after_reorder() {
         session_id: 0,
         bulk_resync: false,
         tcp_close_class: 0,
+        purge_retirement: false,
     };
 
     let (handle, rx) = crate::event_stream::test_worker_handle(
@@ -6517,6 +6459,7 @@ fn flush_session_deltas_event_stream_drop_latches_out_of_sync() {
         session_id: 0,
         bulk_resync: false,
         tcp_close_class: 0,
+        purge_retirement: false,
     };
 
     let ident = BindingIdentity {
@@ -6621,6 +6564,7 @@ fn flush_session_deltas_full_queue_send_is_bounded_and_latches_out_of_sync() {
         session_id: 0,
         bulk_resync: false,
         tcp_close_class: 0,
+        purge_retirement: false,
     };
 
     // Saturate the channel: fill every slot with a best-effort filler push so the
@@ -6747,6 +6691,7 @@ fn resync_export_aggregate_lossless_wait_is_bounded_below_heartbeat() {
         session_id: 0,
         bulk_resync: false,
         tcp_close_class: 0,
+        purge_retirement: false,
     };
     for _ in 0..capacity {
         handle.push_delta(&open, &forwarding.zone_name_to_id);
@@ -6853,6 +6798,8 @@ fn close_delta_deletes_dnat_table_entry_for_snat_flow() {
         let decision = SessionDecision {
             resolution: test_resolution(),
             nat,
+            install_table_domain: 0,
+            install_table_check: 0,
         };
         SessionDelta {
             kind: SessionDeltaKind::Close,
@@ -6869,6 +6816,7 @@ fn close_delta_deletes_dnat_table_entry_for_snat_flow() {
             session_id: 0,
             bulk_resync: false,
             tcp_close_class: 0,
+            purge_retirement: false,
         }
     };
 
@@ -6978,20 +6926,17 @@ fn synced_local_delivery_forward_metadata(owner_rg_id: i32) -> SessionMetadata {
 // map, so `owner_rg_for_resolution` returns 0 and the refreshed metadata keeps
 // the session's original owner RG (the standby RG under test).
 fn synced_local_delivery_decision_unowned_egress() -> SessionDecision {
-    SessionDecision {
-        resolution: ForwardingResolution {
-            disposition: ForwardingDisposition::LocalDelivery,
-            local_ifindex: 0,
-            egress_ifindex: 0,
-            tx_ifindex: 0,
-            tunnel_endpoint_id: 0,
-            next_hop: None,
-            neighbor_mac: None,
-            src_mac: None,
-            tx_vlan_id: 0,
-        },
-        nat: NatDecision::default(),
-    }
+    SessionDecision { resolution: ForwardingResolution {
+        disposition: ForwardingDisposition::LocalDelivery,
+        local_ifindex: 0,
+        egress_ifindex: 0,
+        tx_ifindex: 0,
+        tunnel_endpoint_id: 0,
+        next_hop: None,
+        neighbor_mac: None,
+        src_mac: None,
+        tx_vlan_id: 0,
+    }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 }
 }
 
 #[test]
@@ -7151,6 +7096,8 @@ fn delete_terminal_filtered_session_releases_companion_and_allocator_5622() {
         let fwd_decision = SessionDecision {
             resolution: test_local_delivery_decision().resolution,
             nat: fwd_nat,
+            install_table_domain: 0,
+            install_table_check: 0,
         };
         let fwd_metadata = test_metadata();
 
@@ -7167,6 +7114,8 @@ fn delete_terminal_filtered_session_releases_companion_and_allocator_5622() {
         let rev_decision = SessionDecision {
             resolution: fwd_decision.resolution,
             nat: rev_nat,
+            install_table_domain: 0,
+            install_table_check: 0,
         };
         let mut rev_metadata = test_metadata();
         rev_metadata.is_reverse = true;
@@ -7326,6 +7275,8 @@ fn purge_translated_synced_hit_releases_source_nat_reservation_5295() {
     let decision = SessionDecision {
         resolution: test_local_delivery_decision().resolution,
         nat,
+        install_table_domain: 0,
+        install_table_check: 0,
     };
     let metadata = test_metadata(); // is_reverse = false
 
@@ -7433,6 +7384,8 @@ fn purge_translated_synced_hit_releases_nat64_reservation_5295() {
     let decision = SessionDecision {
         resolution: test_local_delivery_decision().resolution,
         nat,
+        install_table_domain: 0,
+        install_table_check: 0,
     };
     let metadata = test_metadata();
 
@@ -7556,6 +7509,8 @@ fn purge_translated_synced_hit_reverse_entry_releases_nothing_5295() {
     let rev_decision = SessionDecision {
         resolution: test_local_delivery_decision().resolution,
         nat: rev_nat,
+        install_table_domain: 0,
+        install_table_check: 0,
     };
     let mut rev_metadata = test_metadata();
     rev_metadata.is_reverse = true;
@@ -8109,13 +8064,10 @@ fn nat_reverse_fixture_7169() -> (
             discriminator: Default::default(),
             routing_domain: 0,
     };
-    let decision = SessionDecision {
-        resolution: test_resolution(),
-        nat: NatDecision {
-            rewrite_src: Some(IpAddr::V4("198.51.100.8".parse().unwrap())),
-            ..NatDecision::default()
-        },
-    };
+    let decision = SessionDecision { resolution: test_resolution(), nat: NatDecision {
+        rewrite_src: Some(IpAddr::V4("198.51.100.8".parse().unwrap())),
+        ..NatDecision::default()
+    }, install_table_domain: 0, install_table_check: 0 };
     let entry = SyncedSessionEntry {
         key: key.clone(),
         decision,
@@ -9278,6 +9230,7 @@ fn delta_8593(key: &SessionKey, bulk_resync: bool) -> SessionDelta {
         session_id: 0,
         bulk_resync,
         tcp_close_class: 0,
+        purge_retirement: false,
     }
 }
 
@@ -10119,20 +10072,17 @@ fn drive_trunk_reply_9383(arrival_vlan: u16) -> (bool, usize) {
         rewrite_src_port: Some(40001),
         ..NatDecision::default()
     };
-    let decision = SessionDecision {
-        resolution: ForwardingResolution {
-            disposition: ForwardingDisposition::ForwardCandidate,
-            local_ifindex: 0,
-            egress_ifindex: TRUNK_ZONED_UNIT_IFINDEX,
-            tx_ifindex: TRUNK_PARENT_IFINDEX,
-            tunnel_endpoint_id: 0,
-            next_hop: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 50, 1))),
-            neighbor_mac: Some([0, 1, 2, 3, 4, 5]),
-            src_mac: Some([6, 7, 8, 9, 10, 11]),
-            tx_vlan_id: TRUNK_ZONED_VLAN,
-        },
-        nat,
-    };
+    let decision = SessionDecision { resolution: ForwardingResolution {
+        disposition: ForwardingDisposition::ForwardCandidate,
+        local_ifindex: 0,
+        egress_ifindex: TRUNK_ZONED_UNIT_IFINDEX,
+        tx_ifindex: TRUNK_PARENT_IFINDEX,
+        tunnel_endpoint_id: 0,
+        next_hop: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 50, 1))),
+        neighbor_mac: Some([0, 1, 2, 3, 4, 5]),
+        src_mac: Some([6, 7, 8, 9, 10, 11]),
+        tx_vlan_id: TRUNK_ZONED_VLAN,
+    }, nat, install_table_domain: 0, install_table_check: 0 };
     // The forward flow: lan -> wan. `egress_zone` is what the #7169 arrival-zone
     // check compares against.
     let metadata = SessionMetadata {
@@ -10313,6 +10263,7 @@ fn flush_session_deltas_update_syncs_without_an_rt_flow_create_9412() {
         session_id: 77,
         bulk_resync: false,
         tcp_close_class: 2,
+        purge_retirement: false,
     };
     let flush = |delta: SessionDelta| {
         let (handle, rx) = // CONNECTED, so the lossless peer-sync push can queue; the unconnected handle
@@ -10372,9 +10323,9 @@ fn flush_session_deltas_update_syncs_without_an_rt_flow_create_9412() {
     let sync: Vec<_> = update.iter().filter(|f| f.as_bytes()[4] == 3 /* MSG_SESSION_UPDATE; the #9412 golden lockstep pins this byte in both languages */).collect();
     assert_eq!(sync.len(), 1, "#9412: the Update must be queued to the peer exactly once as MSG_SESSION_UPDATE");
     assert_eq!(
-        *sync[0].as_bytes().last().expect("a non-empty frame"),
+        sync[0].as_bytes()[sync[0].as_bytes().len() - 9],
         2,
-        "#9412: the queued Update must end with its close class"
+        "#9412: the queued Update must carry its close class 8 bytes from the end (#9752 tail follows)"
     );
 }
 
@@ -10475,3 +10426,42 @@ fn removing_a_displaced_session_keeps_the_survivors_shared_aliases_9679() {
     );
 }
 
+
+/// #9752 (R1): synthesized reverse companions stamp (0,0) — the reverse
+/// direction resolves the client in the default table by construction
+/// (`reverse_resolution_for_session`), never in the forward's PBR table.
+#[test]
+fn reverse_companion_stamps_zero_install_table_9752() {
+    use crate::afxdp::shared_ops::build_reverse_session_from_forward_match;
+    use std::collections::BTreeMap;
+    let key = test_key();
+    let forward_decision = test_decision();
+    let forward_metadata = test_metadata();
+    let state = ForwardingState::default();
+    let ha_state = BTreeMap::new();
+    let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
+    let reverse = build_reverse_session_from_forward_match(
+        &state,
+        &ha_state,
+        &dynamic_neighbors,
+        ForwardSessionMatch {
+            key,
+            decision: forward_decision,
+            metadata: forward_metadata,
+        },
+        1_000_000_000,
+        0,
+    );
+    assert!(
+        reverse.metadata.is_reverse,
+        "premise: the synthesized session must be the reverse half"
+    );
+    assert_eq!(
+        (
+            reverse.decision.install_table_domain,
+            reverse.decision.install_table_check
+        ),
+        (0, 0),
+        "reverse companions must not inherit the forward PBR table (R1)"
+    );
+}

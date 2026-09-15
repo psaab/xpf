@@ -65,7 +65,7 @@ func TestStaleDeleteIgnoredForReplacement(t *testing.T) {
 	}
 
 	// T2: the journaled delete for the OLD incarnation (gen=1) replays.
-	ss.deleteClusterSyncedV4(key, 1)
+	ss.deleteClusterSyncedV4(key, 1, false)
 
 	if _, ok := dp.v4sessions[key]; !ok {
 		t.Fatal("stale delete (gen=1) wrongly removed the live replacement S' (gen=2)")
@@ -82,7 +82,7 @@ func TestStaleDeleteIgnoredForReplacementV6(t *testing.T) {
 
 	installWithGenV6(ss, key, 1)
 	installWithGenV6(ss, key, 2)
-	ss.deleteClusterSyncedV6(key, 1)
+	ss.deleteClusterSyncedV6(key, 1, false)
 
 	if _, ok := dp.v6sessions[key]; !ok {
 		t.Fatal("stale v6 delete (gen=1) wrongly removed the live replacement (gen=2)")
@@ -100,7 +100,7 @@ func TestRealDeleteApplied(t *testing.T) {
 	ss := NewSessionSync(":0", "10.0.0.2:4785", dp)
 
 	installWithGenV4(ss, key, 2)
-	ss.deleteClusterSyncedV4(key, 2) // equal generation — must delete
+	ss.deleteClusterSyncedV4(key, 2, false) // equal generation — must delete
 
 	if _, ok := dp.v4sessions[key]; ok {
 		t.Fatal("real delete (equal generation) did not remove the session")
@@ -118,7 +118,7 @@ func TestNewerDeleteApplied(t *testing.T) {
 	ss := NewSessionSync(":0", "10.0.0.2:4785", dp)
 
 	installWithGenV4(ss, key, 2)
-	ss.deleteClusterSyncedV4(key, 5)
+	ss.deleteClusterSyncedV4(key, 5, false)
 
 	if _, ok := dp.v4sessions[key]; ok {
 		t.Fatal("newer-generation delete did not remove the session")
@@ -133,7 +133,7 @@ func TestLegacyPeerNoGenStillDeletes(t *testing.T) {
 		dp := &mockSweepDP{v4sessions: map[dataplane.SessionKey]dataplane.SessionValue{}}
 		ss := NewSessionSync(":0", "10.0.0.2:4785", dp)
 		installWithGenV4(ss, key, 0) // legacy peer install: stored gen stays 0
-		ss.deleteClusterSyncedV4(key, 7)
+		ss.deleteClusterSyncedV4(key, 7, false)
 		if _, ok := dp.v4sessions[key]; ok {
 			t.Fatal("delete against a gen-0 stored entry must be unconditional")
 		}
@@ -143,7 +143,7 @@ func TestLegacyPeerNoGenStillDeletes(t *testing.T) {
 		dp := &mockSweepDP{v4sessions: map[dataplane.SessionKey]dataplane.SessionValue{}}
 		ss := NewSessionSync(":0", "10.0.0.2:4785", dp)
 		installWithGenV4(ss, key, 9)
-		ss.deleteClusterSyncedV4(key, 0) // legacy delete: unconditional
+		ss.deleteClusterSyncedV4(key, 0, false) // legacy delete: unconditional
 		if _, ok := dp.v4sessions[key]; ok {
 			t.Fatal("a gen-0 (legacy) delete must be unconditional even against a genned entry")
 		}
@@ -170,7 +170,7 @@ func TestStaleInstallDoesNotRegressStoredGen(t *testing.T) {
 
 	// The stored generation must still be 2, so a stale delete (gen=1) is
 	// refused and the live session survives.
-	ss.deleteClusterSyncedV4(key, 1)
+	ss.deleteClusterSyncedV4(key, 1, false)
 	if _, ok := dp.v4sessions[key]; !ok {
 		t.Fatal("stale install rolled the stored generation back, letting a stale delete kill the live entry")
 	}
@@ -274,12 +274,12 @@ func TestFailoverDomainGenerationReStamp(t *testing.T) {
 	installWithGenV4(ss, key, 250)
 
 	// A stale delete from the OLD owner's domain (gen=100) must be refused.
-	ss.deleteClusterSyncedV4(key, 100)
+	ss.deleteClusterSyncedV4(key, 100, false)
 	if _, ok := dp.v4sessions[key]; !ok {
 		t.Fatal("a stale cross-domain delete removed the re-stamped live entry")
 	}
 	// The new owner's own delete (gen=250) applies.
-	ss.deleteClusterSyncedV4(key, 250)
+	ss.deleteClusterSyncedV4(key, 250, false)
 	if _, ok := dp.v4sessions[key]; ok {
 		t.Fatal("the new owner's same-domain delete did not apply")
 	}
@@ -361,7 +361,7 @@ func TestSessionWireRoundTripPolicyFields3301V4(t *testing.T) {
 	// IngressIfaceFold (4 bytes) AND the #7188 TunnelDiscriminator (8 bytes) so
 	// the frame ends after Generation (an old peer that stops there). Decode
 	// must still succeed with the new fields at 0 and Generation preserved.
-	legacy := payload[:len(payload)-40]
+	legacy := payload[:len(payload)-48]
 	_, lVal, ok := decodeSessionV4Payload(legacy)
 	if !ok {
 		t.Fatal("legacy (truncated) decode failed")
@@ -408,7 +408,7 @@ func TestSessionWireRoundTripPolicyFields3301V6(t *testing.T) {
 	// RTFlowSessionID (8 bytes), the #7095 IngressIfaceFold (4 bytes) AND the
 	// #7188 TunnelDiscriminator (8 bytes) to simulate a pre-#3301 peer that
 	// omits all of the additive trailing fields.
-	legacy := payload[:len(payload)-44]
+	legacy := payload[:len(payload)-52]
 	_, lVal, ok := decodeSessionV6Payload(legacy)
 	if !ok {
 		t.Fatal("legacy (truncated) decode failed")
@@ -445,7 +445,7 @@ func TestSessionWireRoundTripNat64SnatV4_4565(t *testing.T) {
 	// (8 bytes), the #7095 IngressIfaceFold (4 bytes) and the #7188
 	// TunnelDiscriminator (8 bytes) too — so truncate all of them to reach an
 	// after-#3301 frame -> Nat64SnatV4 all-zero (not NAT64).
-	legacy := payload[:len(payload)-36]
+	legacy := payload[:len(payload)-44]
 	_, lVal, ok := decodeSessionV6Payload(legacy)
 	if !ok {
 		t.Fatal("legacy (truncated) decode failed")
@@ -456,26 +456,33 @@ func TestSessionWireRoundTripNat64SnatV4_4565(t *testing.T) {
 }
 
 // TestDeleteWireRoundTripGeneration verifies the delete message carries the
-// generation as a length-gated trailing uint64 (24/48-byte payload).
+// generation as a length-gated trailing uint64 (25/49-byte payload with the
+// #9752 forward-only marker byte).
 func TestDeleteWireRoundTripGeneration(t *testing.T) {
 	key := gen2170KeyV4()
-	msg := encodeDeleteV4(key, 0x1122334455667788)
+	msg := encodeDeleteV4(key, 0x1122334455667788, false)
 	payload := msg[syncHeaderSize:]
-	if len(payload) != 24 {
-		t.Fatalf("v4 delete payload len = %d, want 24", len(payload))
+	if len(payload) != 25 {
+		t.Fatalf("v4 delete payload len = %d, want 25", len(payload))
 	}
 	if g := binary.LittleEndian.Uint64(payload[16:24]); g != 0x1122334455667788 {
 		t.Fatalf("v4 delete generation mismatch: got %#x", g)
 	}
+	if payload[24] != 0 {
+		t.Fatalf("v4 delete marker byte = %d, want 0 for forwardOnly=false", payload[24])
+	}
 
 	key6 := gen2170KeyV6()
-	msg6 := encodeDeleteV6(key6, 0x8877665544332211)
+	msg6 := encodeDeleteV6(key6, 0x8877665544332211, false)
 	payload6 := msg6[syncHeaderSize:]
-	if len(payload6) != 48 {
-		t.Fatalf("v6 delete payload len = %d, want 48", len(payload6))
+	if len(payload6) != 49 {
+		t.Fatalf("v6 delete payload len = %d, want 49", len(payload6))
 	}
 	if g := binary.LittleEndian.Uint64(payload6[40:48]); g != 0x8877665544332211 {
 		t.Fatalf("v6 delete generation mismatch: got %#x", g)
+	}
+	if payload6[48] != 0 {
+		t.Fatalf("v6 delete marker byte = %d, want 0 for forwardOnly=false", payload6[48])
 	}
 }
 
@@ -492,7 +499,7 @@ func TestCrossVersionShortPayloadDecode(t *testing.T) {
 	// #5274 ConfigEpoch u64 + the #5212 RTFlowSessionID u64 + the #7095
 	// IngressIfaceFold u32 + the #7188 TunnelDiscriminator u64) so the payload
 	// ends at FibGen.
-	short := full[:len(full)-48]
+	short := full[:len(full)-56]
 	_, dVal, ok := decodeSessionV4Payload(short)
 	if !ok {
 		t.Fatal("short (legacy) payload should still decode")
@@ -508,7 +515,7 @@ func TestCrossVersionShortPayloadDecode(t *testing.T) {
 	// An OLD delete decoder (16-byte payload) must tolerate the longer 24-byte
 	// payload; and a NEW delete decoder reading a 16-byte (legacy) payload sees
 	// generation 0.
-	legacyDelete := encodeDeleteV4(key, 0)[syncHeaderSize:][:16]
+	legacyDelete := encodeDeleteV4(key, 0, false)[syncHeaderSize:][:16]
 	dp := &mockSweepDP{v4sessions: map[dataplane.SessionKey]dataplane.SessionValue{key: {State: 1}}}
 	ss := NewSessionSync(":0", "10.0.0.2:4785", dp)
 	ss.handleMessage(nil, syncMsgDeleteV4, legacyDelete)
@@ -531,7 +538,7 @@ func TestJournalFlushReplayRefusesStaleDelete(t *testing.T) {
 
 	// The sender stamped D(K) with gen=1 at T0 (journaled). Model that as the
 	// journaled delete wire message.
-	journaledDelete := encodeDeleteV4(key, 1)[syncHeaderSize:]
+	journaledDelete := encodeDeleteV4(key, 1, false)[syncHeaderSize:]
 
 	// T1: S'(K) is synced at gen=2 over a healthy connection and installed.
 	syncedReplacement := func() []byte {
@@ -627,7 +634,7 @@ func TestGenMapOverflowKeepsLiveKeyV4(t *testing.T) {
 	}
 
 	// A stale delete (gen=1, strictly older) MUST be refused.
-	ss.deleteClusterSyncedV4(key, 1)
+	ss.deleteClusterSyncedV4(key, 1, false)
 	if _, ok := dp.v4sessions[key]; !ok {
 		t.Fatal("stale delete (gen=1) wrongly removed the live session after a gen-map overflow (F1 regression)")
 	}
@@ -849,7 +856,7 @@ func TestSameGenReorderDeleteThenInstallConvergesV4(t *testing.T) {
 
 	// The delta-drain closes the session and enqueues the delete FIRST (it won
 	// the enqueue race against the still-queued install).
-	ss.QueueDeleteV4(key)
+	ss.QueueDeleteV4(key, false)
 	// The install is enqueued AFTER the delete.
 	if !ss.queueMessage(installMsg, &ss.stats.SessionsSent, "test_install_v4") {
 		t.Fatal("install enqueue failed")
@@ -875,7 +882,7 @@ func TestSameGenReorderDeleteThenInstallConvergesV6(t *testing.T) {
 	ss.stampInstallGenV6(key, &val)
 	installMsg := encodeSessionV6(key, val)
 
-	ss.QueueDeleteV6(key)
+	ss.QueueDeleteV6(key, false)
 	if !ss.queueMessage(installMsg, &ss.stats.SessionsSent, "test_install_v6") {
 		t.Fatal("install enqueue failed")
 	}
@@ -906,7 +913,7 @@ func TestSameGenInstallThenDeleteConvergesV4(t *testing.T) {
 	if !ss.queueMessage(installMsg, &ss.stats.SessionsSent, "test_install_v4") {
 		t.Fatal("install enqueue failed")
 	}
-	ss.QueueDeleteV4(key)
+	ss.QueueDeleteV4(key, false)
 
 	if got := applySendChInOrder(t, ss); got != 2 {
 		t.Fatalf("expected to drain 2 messages, drained %d", got)
@@ -929,7 +936,7 @@ func TestReestablishAfterDeleteAppliesV4(t *testing.T) {
 	// Install gen=5, delete at a strictly-greater gen=6 (as the fixed sender
 	// produces). The delete applies and tombstones gen=6.
 	installWithGenV4(ss, key, 5)
-	ss.deleteClusterSyncedV4(key, 6)
+	ss.deleteClusterSyncedV4(key, 6, false)
 	if _, ok := dp.v4sessions[key]; ok {
 		t.Fatal("delete did not remove the session")
 	}
@@ -955,8 +962,8 @@ func TestReorderedInstallRefusedByTombstoneV4(t *testing.T) {
 	dp := &mockSweepDP{v4sessions: map[dataplane.SessionKey]dataplane.SessionValue{}}
 	ss := NewSessionSync(":0", "10.0.0.2:4785", dp)
 
-	ss.deleteClusterSyncedV4(key, 6) // tombstone gen=6 (no prior stored entry)
-	installWithGenV4(ss, key, 5)     // reordered older install — must be refused
+	ss.deleteClusterSyncedV4(key, 6, false) // tombstone gen=6 (no prior stored entry)
+	installWithGenV4(ss, key, 5)            // reordered older install — must be refused
 	if _, ok := dp.v4sessions[key]; ok {
 		t.Fatal("#2221: a reordered older install (gen<tombstone) resurrected the closed session")
 	}

@@ -2,9 +2,13 @@ use super::*;
 
 pub(in crate::afxdp) mod commands;
 mod delete_drop_sweep;
+mod install_table_purge;
 mod promote;
 
 pub(in crate::afxdp) use delete_drop_sweep::{DeleteDropSweep, DELETE_DROP_SWEEP_BUDGET};
+pub(in crate::afxdp) use install_table_purge::{
+    InstallTablePurge, INSTALL_TABLE_PURGE_BUDGET, install_table_purge_predicate,
+};
 use promote::{
     SharedSessionRefs, maybe_promote_synced_session, purge_translated_synced_hit,
     should_keep_synced_hit_transient,
@@ -15,6 +19,106 @@ pub(super) fn resolution_target_for_session(
     decision: SessionDecision,
 ) -> IpAddr {
     decision.nat.rewrite_dst.unwrap_or(flow.dst_ip)
+}
+
+/// #9752: the table-independent local outcomes for a target whose installing
+/// table is unresolvable — the ONE classifier shared by D4 re-resolve and the
+/// D8 purge walk (Codex-r4-F4): interface-NAT (global maps) or the any-table
+/// wildcard (mirroring `fib.rs:274-284` with ifindex 0 — no connected scan is
+/// possible without a table, exactly the NAT-only shape). Deliberately NOT
+/// bumping `LOCAL_DELIVERY_IFINDEX0`, which counts table-OWNED-no-ifindex, a
+/// different cause (asserted in cell 10).
+pub(in crate::afxdp) fn local_resolution_without_install_table(
+    forwarding: &ForwardingState,
+    target: IpAddr,
+) -> Option<ForwardingResolution> {
+    if let Some(local) = super::interface_nat_local_resolution(forwarding, target) {
+        return Some(local);
+    }
+    let wildcard_owned = match target {
+        IpAddr::V4(ip) => {
+            forwarding.local_v4.contains(&ip)
+                && forwarding.local_nat_any_table_v4.contains(&ip)
+        }
+        IpAddr::V6(ip) => {
+            forwarding.local_v6.contains(&ip)
+                && forwarding.local_nat_any_table_v6.contains(&ip)
+        }
+    };
+    wildcard_owned.then(|| ForwardingResolution {
+        disposition: ForwardingDisposition::LocalDelivery,
+        local_ifindex: 0,
+        egress_ifindex: 0,
+        tx_ifindex: 0,
+        tunnel_endpoint_id: 0,
+        next_hop: None,
+        neighbor_mac: None,
+        src_mac: None,
+        tx_vlan_id: 0,
+    })
+}
+
+/// #9752: per-worker purge-request flags, set when a re-resolve observes a
+/// terminal installing-table outcome. Atomic (not plain bool) deliberately:
+/// the observation sites span four functions across two files and share only
+/// `worker_id`, so threading a `&mut bool` would churn every signature for a
+/// cold-path single store; one relaxed store per terminal outcome plus one
+/// load per loop pass. Same shape and ceiling as
+/// `SESSION_DELETE_DROP_EPOCH` below.
+pub(crate) static INSTALL_TABLE_PURGE_NEEDED: [std::sync::atomic::AtomicBool;
+    crate::nat::MAX_NAT_HOLDER_WORKERS as usize] =
+    [const { std::sync::atomic::AtomicBool::new(false) };
+        crate::nat::MAX_NAT_HOLDER_WORKERS as usize];
+
+pub(in crate::afxdp) fn flag_install_table_purge(worker_id: u32) {
+    if let Some(slot) = INSTALL_TABLE_PURGE_NEEDED.get(worker_id as usize) {
+        slot.store(true, Ordering::Relaxed);
+    }
+}
+
+pub(in crate::afxdp) fn take_install_table_purge_flag(worker_id: u32) -> bool {
+    INSTALL_TABLE_PURGE_NEEDED
+        .get(worker_id as usize)
+        .map(|slot| slot.swap(false, Ordering::Relaxed))
+        .unwrap_or(false)
+}
+
+/// #9752: a session's installing table, resolved and validated. The ONE
+/// classifier shared by D4 re-resolve and every `prefer_local` / validation
+/// call site (plus the D8 purge predicate, which mirrors it): `Default`
+/// (unstamped — existing behavior), `Table` (validated, borrow the string),
+/// or `Unresolvable` (unknown domain, owner mismatch, or absent family —
+/// table-independent locals or terminal, never a wrong-table lookup).
+/// Callers map `Default`/`Unresolvable` to a `None` table argument; for
+/// `Unresolvable` that argument is unreached (the input resolution is
+/// always `LocalDelivery` or terminal there, both early-returned — proven
+/// in plan v4.1 §5 D4 and pinned by cell 10).
+pub(super) enum InstallTable<'a> {
+    Default,
+    Table(&'a str),
+    Unresolvable,
+}
+
+pub(super) fn resolve_install_table_for_session(
+    forwarding: &ForwardingState,
+    decision: SessionDecision,
+    target: IpAddr,
+) -> InstallTable<'_> {
+    if decision.install_table_domain == 0 {
+        return InstallTable::Default;
+    }
+    let present = forwarding
+        .install_tables
+        .get(&decision.install_table_domain)
+        .filter(|row| row.h2 == decision.install_table_check)
+        .and_then(|row| match target {
+            IpAddr::V4(_) => row.v4.as_deref(),
+            IpAddr::V6(_) => row.v6.as_deref(),
+        });
+    match present {
+        Some(table) => InstallTable::Table(table),
+        None => InstallTable::Unresolvable,
+    }
 }
 
 pub(super) fn cached_session_resolution(
@@ -79,6 +183,21 @@ pub(super) fn lookup_forwarding_resolution_for_session(
     )
 }
 
+/// #9752: the `prefer_local` / validation table argument for a session: the
+/// validated installing table, or `None` for default (correct) and for
+/// unresolvable (unreached — the input there is always `LocalDelivery` or
+/// terminal, both early-returned; see `resolve_install_table_for_session`).
+pub(super) fn install_table_name_for_session(
+    forwarding: &ForwardingState,
+    decision: SessionDecision,
+    target: IpAddr,
+) -> Option<&str> {
+    match resolve_install_table_for_session(forwarding, decision, target) {
+        InstallTable::Table(table) => Some(table),
+        InstallTable::Default | InstallTable::Unresolvable => None,
+    }
+}
+
 fn lookup_forwarding_resolution_for_session_with_cache(
     forwarding: &ForwardingState,
     dynamic_neighbors: &Arc<ShardedNeighborMap>,
@@ -86,6 +205,32 @@ fn lookup_forwarding_resolution_for_session_with_cache(
     decision: SessionDecision,
     allow_cached_fast_path: bool,
 ) -> ForwardingResolution {
+    // #9752: validate a stamped installing table BEFORE any stored-resolution
+    // shortcut (Codex-r2-F2/F5: cached reuse, the lookup fallback, and the
+    // tunnel/local arms must not serve a session whose table is gone).
+    // Zero-stamped sessions skip validation entirely (existing behavior
+    // below, bit-exact — including the LocalDelivery-before-tunnel order
+    // that LocalDelivery+tunnel-ID outcomes depend on (Codex-r3-F2a)).
+    // Family presence is read off the POST-NAT target (cell 14: a NAT64
+    // v6→v4 rewrite uses the v4 table).
+    let table: Option<&str> = match resolve_install_table_for_session(
+        forwarding,
+        decision,
+        resolution_target_for_session(flow, decision),
+    ) {
+        InstallTable::Default => None,
+        InstallTable::Table(table) => Some(table),
+        // Unknown domain, owner change, or absent family: serve a
+        // table-independent local outcome if one exists, else terminal.
+        // No cached reuse, no FIB lookup, no fallback.
+        InstallTable::Unresolvable => {
+            let target = resolution_target_for_session(flow, decision);
+            if let Some(local) = local_resolution_without_install_table(forwarding, target) {
+                return local;
+            }
+            return super::table_unavailable_resolution();
+        }
+    };
     if decision.resolution.disposition == ForwardingDisposition::LocalDelivery {
         return decision.resolution;
     }
@@ -147,12 +292,23 @@ fn lookup_forwarding_resolution_for_session_with_cache(
     // take different paths, while every packet of one flow stays pinned to
     // one member (the resolution is cached on the session entry, and the
     // hash is deterministic within a boot).
-    let resolved = lookup_forwarding_resolution_with_dynamic_for_flow(
-        forwarding,
-        dynamic_neighbors,
-        target,
-        &flow.forward_key,
-    );
+    let resolved = match table {
+        // #9752: re-resolve in the installing table (per-flow ECMP spread
+        // preserved — the table must not disturb it).
+        Some(table) => super::lookup_forwarding_resolution_with_dynamic_for_flow_in_table(
+            forwarding,
+            dynamic_neighbors,
+            target,
+            &flow.forward_key,
+            table,
+        ),
+        None => lookup_forwarding_resolution_with_dynamic_for_flow(
+            forwarding,
+            dynamic_neighbors,
+            target,
+            &flow.forward_key,
+        ),
+    };
     match resolved.disposition {
         ForwardingDisposition::NoRoute | ForwardingDisposition::MissingNeighbor => {
             cached_session_resolution(forwarding, decision.resolution).unwrap_or(resolved)
@@ -770,7 +926,7 @@ fn delete_terminal_half(
         metadata.is_reverse,
         now_ns,
     );
-    sessions.emit_close_delta_with_origin(key.clone(), decision, metadata.clone(), origin);
+    sessions.emit_close_delta_with_origin(key.clone(), decision, metadata.clone(), origin, false);
 }
 
 /// #2442: the filter half of `export_forward_sessions_for_owner_rgs`. Walks the
@@ -913,7 +1069,8 @@ pub(super) fn apply_worker_commands(
     for cmd in scratch.drain(..) {
         match cmd {
             WorkerCommand::DemoteOwnerRGS { owner_rgs } => {
-                commands::handle_demote_owner_rgs(
+                // #9752: a terminal demote arms the purge walk (D8).
+                if commands::handle_demote_owner_rgs(
                     sessions,
                     session_map,
                     forwarding,
@@ -924,10 +1081,13 @@ pub(super) fn apply_worker_commands(
                     now_secs,
                     &mut cancelled_keys,
                     &mut cancelled_keys_seen,
-                );
+                ) {
+                    flag_install_table_purge(worker_id);
+                }
             }
             WorkerCommand::RefreshOwnerRGS { owner_rgs } => {
-                commands::handle_refresh_owner_rgs(
+                // #9752: a terminal refresh arms the purge walk (D8).
+                if commands::handle_refresh_owner_rgs(
                     sessions,
                     session_map,
                     forwarding,
@@ -936,7 +1096,9 @@ pub(super) fn apply_worker_commands(
                     owner_rgs,
                     now_ns,
                     now_secs,
-                );
+                ) {
+                    flag_install_table_purge(worker_id);
+                }
             }
             WorkerCommand::ExportOwnerRGSessions {
                 sequence,
@@ -1048,6 +1210,38 @@ pub(super) fn apply_worker_commands(
                     &mut deleted_synced_keys,
                     worker_id,
                 );
+            }
+            WorkerCommand::DeleteSyncedIfTableUnknown { key, domain, check } => {
+                // #9752: conditional purge delete — decline (no-op, not even
+                // `deleted_keys`: the entry survives so its flow-cache permit
+                // stays backed, the #9048 reasoning) unless OUR entry still
+                // carries this stamp AND is unresolvable under CURRENT
+                // registry. Lagging senders, re-added tables, and
+                // Companions are not replicated: they converge locally
+                // (age/evict; default-scoped and validation-gated).
+                let purgeable = sessions.entry_with_origin(&key).is_some_and(
+                    |(decision, metadata, _)| {
+                        !metadata.is_reverse
+                            && decision.install_table_domain == domain
+                            && decision.install_table_check == check
+                            && install_table_purge::install_table_purge_predicate(
+                                forwarding, &key, &decision,
+                            )
+                    },
+                );
+                if purgeable {
+                    commands::handle_delete_synced(
+                        sessions,
+                        session_map,
+                        forwarding,
+                        ha_state,
+                        key,
+                        now_ns,
+                        now_secs,
+                        &mut deleted_synced_keys,
+                        worker_id,
+                    );
+                }
             }
             WorkerCommand::EnqueueShapedLocal(req) => {
                 // Trivial variant — kept inline (#1346 plan v2 §4.1).
@@ -1325,6 +1519,33 @@ pub(super) fn replicate_session_delete(
             // #8114 item 4: still unrepaired on this path — see
             // `replicate_session_delete_repairing`. Counted so the drop is not
             // silent even where it cannot be repaired.
+            SESSION_DELETE_REPLICA_DROPPED.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+}
+
+/// #9752: fan out a conditional purge delete, PLAIN (never repairing). A
+/// refused conditional is safe without repair: had the recipient held a
+/// purge-worthy entry it re-derives the purge itself (flag on its own
+/// terminal observations, or idle age-out), and had it held a valid one
+/// the repair would have freed a LIVE port (Codex-r4-F4). Drops still bump
+/// the shared counter so they are never silent.
+pub(super) fn replicate_purge_delete(
+    worker_commands: &[Arc<Mutex<VecDeque<WorkerCommand>>>],
+    key: &SessionKey,
+    domain: u32,
+    check: u32,
+) {
+    for commands in worker_commands {
+        let mut pending = worker_queue::lock_recover(commands);
+        if !worker_queue::push_bounded(
+            &mut pending,
+            WorkerCommand::DeleteSyncedIfTableUnknown {
+                key: key.clone(),
+                domain,
+                check,
+            },
+        ) {
             SESSION_DELETE_REPLICA_DROPPED.fetch_add(1, Ordering::Relaxed);
         }
     }
@@ -1875,6 +2096,7 @@ pub(super) fn resolve_flow_session_decision(
             now_secs,
             fabric_ingress,
             resolution_target,
+            install_table_name_for_session(forwarding, decision, resolution_target),
             looked_up_resolution,
         );
         let enforced_resolution = enforce_session_ha_resolution(
@@ -1891,6 +2113,10 @@ pub(super) fn resolve_flow_session_decision(
             fabric_ingress,
             resolved.metadata.ingress_zone,
         );
+        // #9752: a terminal outcome arms this worker's purge walk (D8).
+        if decision.resolution.disposition == ForwardingDisposition::TableUnavailable {
+            flag_install_table_purge(worker_id);
+        }
         let metadata = if keep_transient {
             resolved.metadata
         } else {
@@ -2008,6 +2234,7 @@ pub(super) fn resolve_flow_session_decision(
         now_secs,
         fabric_ingress,
         resolution_target,
+            install_table_name_for_session(forwarding, decision, resolution_target),
         looked_up_resolution,
     );
     let enforced_resolution = enforce_session_ha_resolution(
@@ -2024,6 +2251,10 @@ pub(super) fn resolve_flow_session_decision(
         fabric_ingress,
         resolved.metadata.ingress_zone,
     );
+    // #9752: terminal observation arms the purge walk (D8; reverse arm).
+    if decision.resolution.disposition == ForwardingDisposition::TableUnavailable {
+        flag_install_table_purge(worker_id);
+    }
     // Reverse sessions created from forward NAT matches are locally
     // created (ReverseFlow), not peer-synced, so they won't be promoted.
     let metadata = maybe_promote_synced_session(
@@ -2106,6 +2337,9 @@ mod tests;
 #[cfg(test)]
 #[path = "deleted_first_policy_purge_9526_tests.rs"]
 mod deleted_first_policy_purge_9526_tests;
+#[cfg(test)]
+#[path = "pbr_install_table_9752_tests.rs"]
+mod pbr_install_table_9752_tests;
 // #4800: publish + sibling-replication contention accounting for the
 // new-flow-install ceiling harness. Kept in its own file rather than
 // appended to `tests.rs` (already ~7k lines).

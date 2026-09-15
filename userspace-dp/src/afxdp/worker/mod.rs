@@ -1402,6 +1402,7 @@ pub(crate) struct BindingLiveSnapshot {
     pub(crate) neighbor_miss_packets: u64,
     pub(crate) discard_route_packets: u64,
     pub(crate) next_table_packets: u64,
+    pub(crate) table_unavailable_packets: u64,
     pub(crate) exception_packets: u64,
     pub(crate) config_gen_mismatches: u64,
     pub(crate) fib_gen_mismatches: u64,
@@ -1560,6 +1561,8 @@ pub(crate) struct BindingLiveSnapshot {
     pub(crate) fabric_redirect_unsendable_drops: u64,
     /// #6664 NextTableUnsupported fail-closed drop counter.
     pub(crate) next_table_unsupported_drops: u64,
+    /// #9752 TableUnavailable fail-closed drop counter.
+    pub(crate) table_unavailable_drops: u64,
     pub(crate) kernel_rx_dropped: u64,
     pub(crate) kernel_rx_invalid_descs: u64,
     pub(crate) tx_packets: u64,

@@ -27,6 +27,7 @@ pub(super) fn reset_binding_counters(bindings: &mut [BindingStatus]) {
         binding.neighbor_miss_packets = 0;
         binding.discard_route_packets = 0;
         binding.next_table_packets = 0;
+        binding.table_unavailable_packets = 0;
         binding.exception_packets = 0;
         binding.config_gen_mismatches = 0;
         binding.fib_gen_mismatches = 0;
@@ -69,6 +70,7 @@ pub(super) fn reset_binding_counters(bindings: &mut [BindingStatus]) {
         binding.slow_path_no_route_packets = 0;
         binding.slow_path_next_table_packets = 0;
         binding.next_table_unsupported_drops = 0;
+        binding.table_unavailable_drops = 0;
         binding.slow_path_forward_build_packets = 0;
         binding.slow_path_drops = 0;
         binding.slow_path_rate_limited = 0;

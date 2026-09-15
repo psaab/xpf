@@ -108,7 +108,7 @@ func TestSerializedApplyKeepsTheNewerInstall_9715(t *testing.T) {
 
 	installMarkedV4_9715(ss, key, 10)
 	installMarkedV4_9715(ss, key, 20)
-	ss.deleteClusterSyncedV4(key, 15)
+	ss.deleteClusterSyncedV4(key, 15, false)
 
 	got, ok := dp.v4sessions[key]
 	if !ok || got.PolicyID != 20 {
@@ -130,7 +130,7 @@ func TestOlderInstallParkedInItsWriteCannotRegressANewerOneV4_9715(t *testing.T)
 	interleave9715(t, p,
 		func() { installMarkedV4_9715(ss, key, 10) },
 		func() { installMarkedV4_9715(ss, key, 20) })
-	ss.deleteClusterSyncedV4(key, 15)
+	ss.deleteClusterSyncedV4(key, 15, false)
 
 	if g := storedGenV4_9715(ss, key); g != 20 {
 		t.Errorf("stored generation = %d, want 20: the older install recorded its generation over the "+
@@ -157,7 +157,7 @@ func TestOlderInstallParkedInItsWriteCannotRegressANewerOneV6_9715(t *testing.T)
 	interleave9715(t, p,
 		func() { installMarkedV6_9715(ss, key, 10) },
 		func() { installMarkedV6_9715(ss, key, 20) })
-	ss.deleteClusterSyncedV6(key, 15)
+	ss.deleteClusterSyncedV6(key, 15, false)
 
 	if g := storedGenV6_9715(ss, key); g != 20 {
 		t.Errorf("v6: stored generation = %d, want 20 (#9715)", g)
@@ -184,7 +184,7 @@ func TestDeleteParkedInItsWriteCannotRemoveANewerInstallV4_9715(t *testing.T) {
 	}
 
 	interleave9715(t, p,
-		func() { ss.deleteClusterSyncedV4(key, 12) },
+		func() { ss.deleteClusterSyncedV4(key, 12, false) },
 		func() { installMarkedV4_9715(ss, key, 30) })
 
 	got, ok := dp.v4sessions[key]
@@ -213,7 +213,7 @@ func TestDeleteParkedInItsWriteCannotRemoveANewerInstallV6_9715(t *testing.T) {
 	}
 
 	interleave9715(t, p,
-		func() { ss.deleteClusterSyncedV6(key, 12) },
+		func() { ss.deleteClusterSyncedV6(key, 12, false) },
 		func() { installMarkedV6_9715(ss, key, 30) })
 
 	got, ok := dp.v6sessions[key]

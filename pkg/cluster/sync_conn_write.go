@@ -134,15 +134,51 @@ func (s *SessionSync) queueMessagePaced(msg []byte, sentCounter *atomic.Uint64, 
 // is strictly older than the live entry) and (b) a delete reordered ahead of
 // its own install out-ranks it, letting the peer's tombstone refuse the late
 // install of the cancelled session.
-func (s *SessionSync) QueueDeleteV4(key dataplane.SessionKey) {
+//
+// forwardOnly (#9752) marks a purge-retirement delete: the peer must retract
+// exactly the named key, skipping companion deletes. It is withheld from a
+// peer that never advertised the capability (same drop-not-journal shape as
+// suppressDeleteForIncapablePeer: journaling would escalate to a bulk resync
+// whose reconcile deletes unmarked on the protected peer).
+func (s *SessionSync) QueueDeleteV4(key dataplane.SessionKey, forwardOnly bool) {
 	if s.suppressDeleteForIncapablePeer("delete_v4") {
 		return
 	}
+	if forwardOnly && s.suppressForwardOnlyDeleteForIncapablePeer("delete_v4") {
+		return
+	}
 	gen := s.takeDeleteGenV4(key)
-	msg := encodeDeleteV4(key, gen)
+	msg := encodeDeleteV4(key, gen, forwardOnly)
 	if !s.queueMessage(msg, &s.stats.DeletesSent, "delete_v4") {
 		s.journalDelete(msg)
 	}
+}
+
+// suppressForwardOnlyDeleteForIncapablePeer reports whether an outgoing
+// FORWARD-ONLY session delete must be WITHHELD because the peer never
+// advertised capFlagPurgeRetirementForwardOnly (#9752).
+//
+// Such a peer derives companions for every delete, so our purge-retirement
+// close would destroy sessions the purge deliberately preserved. Withholding
+// leaves them on the peer until they idle out or the upgrade completes —
+// the same visible-leak-over-invisible-teardown trade the #9714 suppressor
+// makes, with its own counter and one-shot warning. Ordinary (non-forward-
+// only) deletes are never withheld here; see suppressDeleteForIncapablePeer.
+func (s *SessionSync) suppressForwardOnlyDeleteForIncapablePeer(source string) bool {
+	if s == nil || !s.peerCapabilitiesLearned() || s.PurgeRetirementForwardOnlyCapable() {
+		return false
+	}
+	s.stats.DeletesSuppressedPurgeRetirement.Add(1)
+	if s.purgeRetirementSuppressionWarned.CompareAndSwap(false, true) {
+		slog.Warn("cluster sync: withholding forward-only session deletes — the peer does not advertise "+
+			"#9752 forward-only deletes, so it would derive companions and destroy sessions the purge "+
+			"deliberately preserved. That peer will retain sessions this node has retired until they "+
+			"idle out. Completing the upgrade on both nodes restores delete sync.",
+			"source", source,
+			"peer_snapshot_protocol", s.peerSnapshotProtocol.Load(),
+			"peer_capability_flags", uint8(s.peerCapabilityFlags.Load()))
+	}
+	return true
 }
 
 // suppressDeleteForIncapablePeer reports whether an outgoing session delete must be
@@ -194,12 +230,16 @@ func (s *SessionSync) suppressDeleteForIncapablePeer(source string) bool {
 
 // QueueDeleteV6 queues a v6 session deletion for synchronization. If the peer
 // is disconnected, the delete is journaled for replay on reconnect.
-func (s *SessionSync) QueueDeleteV6(key dataplane.SessionKeyV6) {
+// forwardOnly (#9752): v6 twin of the QueueDeleteV4 marker.
+func (s *SessionSync) QueueDeleteV6(key dataplane.SessionKeyV6, forwardOnly bool) {
 	if s.suppressDeleteForIncapablePeer("delete_v6") {
 		return
 	}
+	if forwardOnly && s.suppressForwardOnlyDeleteForIncapablePeer("delete_v6") {
+		return
+	}
 	gen := s.takeDeleteGenV6(key)
-	msg := encodeDeleteV6(key, gen)
+	msg := encodeDeleteV6(key, gen, forwardOnly)
 	if !s.queueMessage(msg, &s.stats.DeletesSent, "delete_v6") {
 		s.journalDelete(msg)
 	}

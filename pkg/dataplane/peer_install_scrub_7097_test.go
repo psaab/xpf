@@ -451,8 +451,17 @@ func TestSessionValueFieldCountIsPinned7097(t *testing.T) {
 		// MAC. It means the same thing on either node. Scrubbing it would
 		// reintroduce #9412, where a session that closed on the primary imports
 		// on the established window.
-		{"SessionValue", reflect.TypeOf(SessionValue{}), 39},
-		{"SessionValueV6", reflect.TypeOf(SessionValueV6{}), 40},
+		//
+		// 41/42 since #9752 added InstallTableDomain+InstallTableCheck,
+		// classified NOT node-local. They are the FNV-1a/64 instance-name
+		// identity (domain id + high-32 owner check) both nodes compute
+		// identically from identical config — the same cluster-stable
+		// property as RoutingDomain above. They name no local resource and
+		// mean the same thing on either node. Scrubbing them would
+		// reintroduce #9752, where a PBR-steered session imports
+		// stamp-less and re-resolves in inet.0 after a failover.
+		{"SessionValue", reflect.TypeOf(SessionValue{}), 41},
+		{"SessionValueV6", reflect.TypeOf(SessionValueV6{}), 42},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := tc.typ.NumField(); got != tc.want {

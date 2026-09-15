@@ -96,6 +96,16 @@ func (c *xpfCollector) initBindingDescriptors() {
 			"next-table chain. An attacker cannot create this condition.",
 		[]string{"binding_slot", "queue_id", "worker_id", "iface"}, nil,
 	)
+	c.bindingTableUnavailableDrops = prometheus.NewDesc(
+		"xpf_userspace_binding_table_unavailable_drops_total",
+		"Transit frames DROPPED fail-closed because the session's installing "+
+			"table is not resolvable in the current config — retired/unknown "+
+			"routing instance, or an owner change (#9752). Unlike no_route "+
+			"there is nothing to delegate: no table the kernel FIB could "+
+			"correctly forward. A non-zero value during steady config means "+
+			"HA/config skew worth investigating.",
+		[]string{"binding_slot", "queue_id", "worker_id", "iface"}, nil,
+	)
 	c.bindingSlowPathLocalDeliveryPackets = prometheus.NewDesc(
 		"xpf_userspace_binding_slow_path_local_delivery_packets_total",
 		"Frames delivered to the local host stack via the slow path (#7409). "+

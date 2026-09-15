@@ -879,6 +879,8 @@ mod mode_aware_segmentation_tests {
         let decision = SessionDecision {
             resolution: tunnel_resolution(),
             nat: NatDecision::default(),
+            install_table_domain: 0,
+            install_table_check: 0,
         };
         let frame = ipv4_tcp_frame(2000);
         let segments = segment_forwarded_tcp_frames_from_frame(
@@ -938,6 +940,8 @@ mod mode_aware_segmentation_tests {
         let decision = SessionDecision {
             resolution: tunnel_resolution(),
             nat: NatDecision::default(),
+            install_table_domain: 0,
+            install_table_check: 0,
         };
         let frame = ipv4_tcp_frame(2000);
         let segments = segment_forwarded_tcp_frames_from_frame(
@@ -995,6 +999,8 @@ mod mode_aware_segmentation_tests {
         let decision = SessionDecision {
             resolution: tunnel_resolution(),
             nat: NatDecision::default(),
+            install_table_domain: 0,
+            install_table_check: 0,
         };
         let frame = ipv4_tcp_frame(2000);
         let segments = segment_forwarded_tcp_frames_from_frame(
@@ -1029,6 +1035,8 @@ mod mode_aware_segmentation_tests {
         let decision = SessionDecision {
             resolution: tunnel_resolution(),
             nat: NatDecision::default(),
+            install_table_domain: 0,
+            install_table_check: 0,
         };
         let frame = ipv4_tcp_frame(2000);
         let out = segment_forwarded_tcp_frames_from_frame(
@@ -1054,6 +1062,8 @@ mod mode_aware_segmentation_tests {
         let decision = SessionDecision {
             resolution: tunnel_resolution(),
             nat: NatDecision::default(),
+            install_table_domain: 0,
+            install_table_check: 0,
         };
         let frame = ipv4_tcp_frame(2000);
         let out = segment_forwarded_tcp_frames_from_frame(
@@ -1137,6 +1147,8 @@ mod mode_aware_segmentation_tests {
                 rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 7))),
                 ..NatDecision::default()
             },
+            install_table_domain: 0,
+            install_table_check: 0,
         };
 
         // 2000 bytes of data over a 1280 MTU (1240-byte segment payload)
@@ -1406,6 +1418,8 @@ mod mode_aware_segmentation_tests {
         let decision = SessionDecision {
             resolution: plain_resolution(),
             nat: NatDecision::default(),
+            install_table_domain: 0,
+            install_table_check: 0,
         };
         let frame = ipv4_tcp_frame_with_slack(declared_data, slack);
         let segments = segment_forwarded_tcp_frames_from_frame(
@@ -1445,6 +1459,8 @@ mod mode_aware_segmentation_tests {
         let decision = SessionDecision {
             resolution: plain_resolution(),
             nat: NatDecision::default(),
+            install_table_domain: 0,
+            install_table_check: 0,
         };
         let frame = ipv6_tcp_frame_with_slack(declared_data, slack);
         let segments = segment_forwarded_tcp_frames_from_frame(
@@ -1485,6 +1501,8 @@ mod mode_aware_segmentation_tests {
         let decision = SessionDecision {
             resolution: plain_resolution(),
             nat: NatDecision::default(),
+            install_table_domain: 0,
+            install_table_check: 0,
         };
         // 1400 backing data bytes, but overwrite total_len to a runt 30.
         let mut frame = ipv4_tcp_frame_with_slack(1400, 0);
@@ -1525,6 +1543,8 @@ mod mode_aware_segmentation_tests {
         let decision = SessionDecision {
             resolution: plain_resolution(),
             nat: NatDecision::default(),
+            install_table_domain: 0,
+            install_table_check: 0,
         };
         let frame = ipv6_tcp_frame_with_ext_and_slack(declared_data, slack);
         let segments = segment_forwarded_tcp_frames_from_frame(
@@ -1591,6 +1611,8 @@ mod mode_aware_segmentation_tests {
         let decision = SessionDecision {
             resolution: plain_resolution(),
             nat: NatDecision::default(),
+            install_table_domain: 0,
+            install_table_check: 0,
         };
         // 1400 backing data bytes, but overwrite payload_len to a runt 10.
         let mut frame = ipv6_tcp_frame_with_slack(1400, 0);

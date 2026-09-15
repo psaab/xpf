@@ -564,12 +564,15 @@ func (q queueDeltaSink) openV6(key dataplane.SessionKeyV6, val dataplane.Session
 // keyed-GRE synced session is retracted by its idle timeout rather than by an
 // explicit delete. Under-matching is the safe direction — it never merges two
 // identities — which is why the install arm fails closed and this one does not.
-func (q queueDeltaSink) deleteV4(key dataplane.SessionKey, _ dataplane.SessionValue) {
-	q.ss.QueueDeleteV4(key)
+func (q queueDeltaSink) deleteV4(key dataplane.SessionKey, val dataplane.SessionValue) {
+	// #9752: forward the purge-retirement marker the converter set from the
+	// helper's close: the peer must retract exactly this key, not companions
+	// the purge preserved.
+	q.ss.QueueDeleteV4(key, val.LogFlags&dataplane.LogFlagPurgeRetirementOnly != 0)
 }
 
-func (q queueDeltaSink) deleteV6(key dataplane.SessionKeyV6, _ dataplane.SessionValueV6) {
-	q.ss.QueueDeleteV6(key)
+func (q queueDeltaSink) deleteV6(key dataplane.SessionKeyV6, val dataplane.SessionValueV6) {
+	q.ss.QueueDeleteV6(key, val.LogFlags&dataplane.LogFlagPurgeRetirementOnly != 0)
 }
 
 // pacedQueueDeltaSink is queueDeltaSink for the FullResync export. Each install
@@ -606,12 +609,12 @@ func (p *pacedQueueDeltaSink) openV6(key dataplane.SessionKeyV6, val dataplane.S
 	}
 }
 
-func (p *pacedQueueDeltaSink) deleteV4(key dataplane.SessionKey, _ dataplane.SessionValue) {
-	p.ss.QueueDeleteV4(key)
+func (p *pacedQueueDeltaSink) deleteV4(key dataplane.SessionKey, val dataplane.SessionValue) {
+	p.ss.QueueDeleteV4(key, val.LogFlags&dataplane.LogFlagPurgeRetirementOnly != 0)
 }
 
-func (p *pacedQueueDeltaSink) deleteV6(key dataplane.SessionKeyV6, _ dataplane.SessionValueV6) {
-	p.ss.QueueDeleteV6(key)
+func (p *pacedQueueDeltaSink) deleteV6(key dataplane.SessionKeyV6, val dataplane.SessionValueV6) {
+	p.ss.QueueDeleteV6(key, val.LogFlags&dataplane.LogFlagPurgeRetirementOnly != 0)
 }
 
 // snapshotDeltaSink accumulates a point-in-time set of LIVE sessions for one

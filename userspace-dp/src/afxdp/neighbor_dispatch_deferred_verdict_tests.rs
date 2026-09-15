@@ -27,20 +27,17 @@ const NEXT_HOP: IpAddr = IpAddr::V4(Ipv4Addr::new(10, 0, 61, 9));
 
 /// The buffered packet's decision: unresolved next hop, egress 80.
 fn deferred_decision() -> SessionDecision {
-    SessionDecision {
-        resolution: ForwardingResolution {
-            disposition: ForwardingDisposition::MissingNeighbor,
-            local_ifindex: 0,
-            egress_ifindex: EGRESS_IFINDEX,
-            tx_ifindex: 22,
-            tunnel_endpoint_id: 0,
-            next_hop: Some(NEXT_HOP),
-            neighbor_mac: None,
-            src_mac: Some([0x02, 0xbf, 0x72, 0x16, 0x00, 0x01]),
-            tx_vlan_id: 0,
-        },
-        nat: NatDecision::default(),
-    }
+    SessionDecision { resolution: ForwardingResolution {
+        disposition: ForwardingDisposition::MissingNeighbor,
+        local_ifindex: 0,
+        egress_ifindex: EGRESS_IFINDEX,
+        tx_ifindex: 22,
+        tunnel_endpoint_id: 0,
+        next_hop: Some(NEXT_HOP),
+        neighbor_mac: None,
+        src_mac: Some([0x02, 0xbf, 0x72, 0x16, 0x00, 0x01]),
+        tx_vlan_id: 0,
+    }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 }
 }
 
 /// A ForwardingState whose EGRESS interface (ifindex 80) carries an output

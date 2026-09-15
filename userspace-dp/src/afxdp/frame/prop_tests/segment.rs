@@ -48,20 +48,17 @@ fn seg_fixture(mtu: usize, tx_vlan: u16) -> ForwardingState {
 }
 
 fn seg_decision(next_hop: IpAddr, tx_vlan: u16, nat: NatDecision) -> SessionDecision {
-    SessionDecision {
-        resolution: ForwardingResolution {
-            disposition: ForwardingDisposition::ForwardCandidate,
-            local_ifindex: 0,
-            egress_ifindex: 12,
-            tx_ifindex: 11,
-            tunnel_endpoint_id: 0,
-            next_hop: Some(next_hop),
-            neighbor_mac: Some([0xba, 0x86, 0xe9, 0xf6, 0x4b, 0xd5]),
-            src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]),
-            tx_vlan_id: tx_vlan,
-        },
-        nat,
-    }
+    SessionDecision { resolution: ForwardingResolution {
+        disposition: ForwardingDisposition::ForwardCandidate,
+        local_ifindex: 0,
+        egress_ifindex: 12,
+        tx_ifindex: 11,
+        tunnel_endpoint_id: 0,
+        next_hop: Some(next_hop),
+        neighbor_mac: Some([0xba, 0x86, 0xe9, 0xf6, 0x4b, 0xd5]),
+        src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]),
+        tx_vlan_id: tx_vlan,
+    }, nat, install_table_domain: 0, install_table_check: 0 }
 }
 
 /// The wire tuple a segment must carry after the NAT decision.

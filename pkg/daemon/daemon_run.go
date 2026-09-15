@@ -262,12 +262,12 @@ func (d *Daemon) Run(ctx context.Context) error {
 			// Always sync deletes. Dropping deletes leaves stale sessions
 			// on the peer indefinitely.
 			if ss := d.getSessionSync(); d.cluster != nil && d.cluster.IsLocalPrimaryAny() && ss != nil {
-				ss.QueueDeleteV4(key)
+				ss.QueueDeleteV4(key, false)
 			}
 		}
 		gc.OnDeleteV6 = func(key dataplane.SessionKeyV6) {
 			if ss := d.getSessionSync(); d.cluster != nil && d.cluster.IsLocalPrimaryAny() && ss != nil {
-				ss.QueueDeleteV6(key)
+				ss.QueueDeleteV6(key, false)
 			}
 		}
 

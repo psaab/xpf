@@ -80,7 +80,7 @@ func TestLegacyPeerPayloadDecodesFoldAsUnknown_7095(t *testing.T) {
 	// The running total: #7188's 8-byte TunnelDiscriminator, then #7239's
 	// 4-byte RoutingDomain, plus the 4-byte fold itself = 16.
 	full := encodeSessionV4Payload(key, sessionValue7095(0xABCD1234))
-	legacy := full[:len(full)-16]
+	legacy := full[:len(full)-24]
 
 	gotKey, got, ok := decodeSessionV4Payload(legacy)
 	if !ok {
@@ -126,7 +126,7 @@ func TestIngressFoldRoundTripsV6_7095(t *testing.T) {
 	}
 	// Cut every field appended behind the fold — see the v4 cell above for the
 	// running total (#7188 discriminator 8 + #7239 routing domain 4 + fold 4).
-	_, shortGot, ok := decodeSessionV6Payload(payload[:len(payload)-16])
+	_, shortGot, ok := decodeSessionV6Payload(payload[:len(payload)-24])
 	if !ok || shortGot.IngressIfaceFold != 0 {
 		t.Fatalf("v6 legacy truncation: ok=%v fold=%#x, want ok=true fold=0",
 			ok, shortGot.IngressIfaceFold)

@@ -521,8 +521,17 @@ pub(in crate::afxdp) fn prefer_local_forward_candidate_for_fabric_ingress(
     now_secs: u64,
     fabric_ingress: bool,
     target_ip: IpAddr,
+    // #9752: the session's installing table (None = default). The fallback
+    // probe resolves in it so a PBR session's local alternative stays in X.
+    install_table: Option<&str>,
     resolution: ForwardingResolution,
 ) -> ForwardingResolution {
+    // #9752: terminal propagates — a zeroed-egress disposition would
+    // otherwise fall through to the default-table substitute below
+    // (the DiscardRoute+fabric rescue shape, verified in review).
+    if resolution.disposition == ForwardingDisposition::TableUnavailable {
+        return resolution;
+    }
     if !fabric_ingress || matches!(resolution.disposition, ForwardingDisposition::LocalDelivery) {
         return resolution;
     }
@@ -541,7 +550,18 @@ pub(in crate::afxdp) fn prefer_local_forward_candidate_for_fabric_ingress(
         forwarding,
         ha_state,
         now_secs,
-        lookup_forwarding_resolution_with_dynamic(forwarding, dynamic_neighbors, target_ip),
+        match install_table {
+            // #9752: probe in the installing table. Deliberately the
+            // non-flow lookup (existing per-destination hash semantics —
+            // the session path's ECMP spread comes from the main lookup).
+            Some(table) => lookup_forwarding_resolution_in_table_with_dynamic(
+                forwarding,
+                dynamic_neighbors,
+                target_ip,
+                Some(table),
+            ),
+            None => lookup_forwarding_resolution_with_dynamic(forwarding, dynamic_neighbors, target_ip),
+        },
     );
     let local_owner_rg = owner_rg_for_resolution(forwarding, local_resolution);
     let local_egress_is_fabric = local_resolution.egress_ifindex > 0

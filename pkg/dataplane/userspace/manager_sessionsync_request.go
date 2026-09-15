@@ -111,6 +111,10 @@ func (m *Manager) buildSessionSyncRequestV4(op string, key dataplane.SessionKey,
 		req.TunnelDiscriminator = val.TunnelDiscriminator
 		// #9412: forward the close class so the standby imports the close state.
 		req.TCPCloseClass = val.TCPCloseClass
+		// #9752: forward the installing-table identity so the standby imports
+		// a PBR-steered session with the table its steer installed.
+		req.InstallTableDomain = val.InstallTableDomain
+		req.InstallTableCheck = val.InstallTableCheck
 		if val.Flags&dataplane.SessFlagSNAT == 0 {
 			req.NATSrcIP = ""
 			req.NATSrcPort = 0
@@ -211,6 +215,10 @@ func (m *Manager) buildSessionSyncRequestV6(op string, key dataplane.SessionKeyV
 		req.TunnelDiscriminator = val.TunnelDiscriminator
 		// #9412: forward the close class so the standby imports the close state.
 		req.TCPCloseClass = val.TCPCloseClass
+		// #9752: forward the installing-table identity so the standby imports
+		// a PBR-steered session with the table its steer installed.
+		req.InstallTableDomain = val.InstallTableDomain
+		req.InstallTableCheck = val.InstallTableCheck
 		if val.Flags&dataplane.SessFlagSNAT == 0 {
 			req.NATSrcIP = ""
 			req.NATSrcPort = 0

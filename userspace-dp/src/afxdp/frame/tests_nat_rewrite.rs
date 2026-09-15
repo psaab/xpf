@@ -458,24 +458,21 @@ fn build_forwarded_frame_keeps_tcp_checksum_valid_after_snat() {
             options: 0,
         },
         meta,
-        &SessionDecision {
-            resolution: ForwardingResolution {
-                disposition: ForwardingDisposition::ForwardCandidate,
-                local_ifindex: 0,
-                egress_ifindex: 12,
-                tx_ifindex: 11,
-                tunnel_endpoint_id: 0,
-                next_hop: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200))),
-                neighbor_mac: Some([0xba, 0x86, 0xe9, 0xf6, 0x4b, 0xd5]),
-                src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]),
-                tx_vlan_id: 80,
-            },
-            nat: NatDecision {
-                rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
-                rewrite_dst: None,
-                ..NatDecision::default()
-            },
-        },
+        &SessionDecision { resolution: ForwardingResolution {
+            disposition: ForwardingDisposition::ForwardCandidate,
+            local_ifindex: 0,
+            egress_ifindex: 12,
+            tx_ifindex: 11,
+            tunnel_endpoint_id: 0,
+            next_hop: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200))),
+            neighbor_mac: Some([0xba, 0x86, 0xe9, 0xf6, 0x4b, 0xd5]),
+            src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]),
+            tx_vlan_id: 80,
+        }, nat: NatDecision {
+            rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
+            rewrite_dst: None,
+            ..NatDecision::default()
+        }, install_table_domain: 0, install_table_check: 0 },
         &state,
         None,
     )
@@ -521,23 +518,20 @@ fn rewrite_forwarded_frame_in_place_keeps_icmpv6_checksum_valid_after_snat() {
         protocol: PROTO_ICMPV6,
         ..UserspaceDpMeta::default()
     };
-    let decision = SessionDecision {
-        resolution: ForwardingResolution {
-            disposition: ForwardingDisposition::ForwardCandidate,
-            local_ifindex: 0,
-            egress_ifindex: 12,
-            tx_ifindex: 11,
-            tunnel_endpoint_id: 0,
-            next_hop: Some(IpAddr::V6(dst_ip)),
-            neighbor_mac: Some([0xba, 0x86, 0xe9, 0xf6, 0x4b, 0xd5]),
-            src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]),
-            tx_vlan_id: 80,
-        },
-        nat: NatDecision {
-            rewrite_src: Some(IpAddr::V6("2001:559:8585:80::8".parse().unwrap())),
-            ..NatDecision::default()
-        },
-    };
+    let decision = SessionDecision { resolution: ForwardingResolution {
+        disposition: ForwardingDisposition::ForwardCandidate,
+        local_ifindex: 0,
+        egress_ifindex: 12,
+        tx_ifindex: 11,
+        tunnel_endpoint_id: 0,
+        next_hop: Some(IpAddr::V6(dst_ip)),
+        neighbor_mac: Some([0xba, 0x86, 0xe9, 0xf6, 0x4b, 0xd5]),
+        src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]),
+        tx_vlan_id: 80,
+    }, nat: NatDecision {
+        rewrite_src: Some(IpAddr::V6("2001:559:8585:80::8".parse().unwrap())),
+        ..NatDecision::default()
+    }, install_table_domain: 0, install_table_check: 0 };
     let rewrite_result = rewrite_forwarded_frame_in_place(
         &area,
         XdpDesc {
@@ -791,23 +785,20 @@ fn rewrite_forwarded_frame_in_place_keeps_icmpv6_echo_identifier_and_sequence() 
         flow_src_port: echo_id,
         ..UserspaceDpMeta::default()
     };
-    let decision = SessionDecision {
-        resolution: ForwardingResolution {
-            disposition: ForwardingDisposition::ForwardCandidate,
-            local_ifindex: 0,
-            egress_ifindex: 12,
-            tx_ifindex: 11,
-            tunnel_endpoint_id: 0,
-            next_hop: Some(IpAddr::V6(dst_ip)),
-            neighbor_mac: Some([0xba, 0x86, 0xe9, 0xf6, 0x4b, 0xd5]),
-            src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x50, 0x08]),
-            tx_vlan_id: 80,
-        },
-        nat: NatDecision {
-            rewrite_src: Some(IpAddr::V6("2001:559:8585:50::8".parse().unwrap())),
-            ..NatDecision::default()
-        },
-    };
+    let decision = SessionDecision { resolution: ForwardingResolution {
+        disposition: ForwardingDisposition::ForwardCandidate,
+        local_ifindex: 0,
+        egress_ifindex: 12,
+        tx_ifindex: 11,
+        tunnel_endpoint_id: 0,
+        next_hop: Some(IpAddr::V6(dst_ip)),
+        neighbor_mac: Some([0xba, 0x86, 0xe9, 0xf6, 0x4b, 0xd5]),
+        src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x50, 0x08]),
+        tx_vlan_id: 80,
+    }, nat: NatDecision {
+        rewrite_src: Some(IpAddr::V6("2001:559:8585:50::8".parse().unwrap())),
+        ..NatDecision::default()
+    }, install_table_domain: 0, install_table_check: 0 };
 
     let rewrite_result = rewrite_forwarded_frame_in_place(
         &area,

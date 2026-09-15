@@ -158,6 +158,9 @@ pub(in crate::afxdp) fn cached_flow_decision_valid(
     cached_owner_rg_id: i32,
     fabric_ingress: bool,
     target_ip: IpAddr,
+    // #9752: the session's installing table (None = default). Both lookups
+    // below resolve in it so validation judges the X-table candidate.
+    install_table: Option<&str>,
     resolution: ForwardingResolution,
 ) -> bool {
     if enforce_ha_resolution_snapshot(forwarding, ha_state, now_secs, resolution) != resolution {
@@ -180,7 +183,19 @@ pub(in crate::afxdp) fn cached_flow_decision_valid(
             forwarding,
             ha_state,
             now_secs,
-            lookup_forwarding_resolution_with_dynamic(forwarding, dynamic_neighbors, target_ip),
+            match install_table {
+                // #9752: same table rule as `prefer_local` (non-flow lookup:
+                // existing per-destination hash semantics preserved).
+                Some(table) => super::lookup_forwarding_resolution_in_table_with_dynamic(
+                    forwarding,
+                    dynamic_neighbors,
+                    target_ip,
+                    Some(table),
+                ),
+                None => lookup_forwarding_resolution_with_dynamic(
+                    forwarding, dynamic_neighbors, target_ip,
+                ),
+            },
         );
         let local_owner_rg = owner_rg_for_resolution(forwarding, local_resolution);
         let local_egress_is_fabric = local_resolution.egress_ifindex > 0
@@ -202,6 +217,7 @@ pub(in crate::afxdp) fn cached_flow_decision_valid(
             now_secs,
             true,
             target_ip,
+            install_table,
             resolution,
         ) != resolution
     {

@@ -516,7 +516,7 @@ pub(super) fn native_gre_pbr_snapshot(include_neighbor: bool) -> ConfigSnapshot 
 /// accept-only routing-instance override, the no-regression forward case).
 /// Used to prove the drop-action gate on `ingress_route_table_override`: a
 /// reject/discard term must return `RouteOverride::Drop`, an accept term must
-/// still return `RouteOverride::Table("sfmix.inet[6].0")`.
+/// still return `RouteOverride::Table` for `"sfmix.inet[6].0"`.
 pub(super) fn native_gre_pbr_action_snapshot(action: &str) -> ConfigSnapshot {
     let mut snapshot = native_gre_pbr_snapshot(true);
     // Stamp the action onto the existing v4 routing-instance term

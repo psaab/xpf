@@ -502,7 +502,7 @@ fn ingress_filter_routing_instance_steers_flow_into_native_gre_table() {
     );
     // #4392: an accept (non-drop) routing-instance term still forwards via the
     // override table — RouteOverride::Table, not Drop.
-    let RouteOverride::Table(override_table) =
+    let RouteOverride::Table { table: override_table, .. } =
         ingress_route_table_override(&state, &[], meta, &flow, None, Some(&event_handle), 99, None)
     else {
         panic!("accept routing-instance term must forward via override table");
@@ -591,7 +591,7 @@ fn pbr_routing_instance_accept_still_forwards_no_regression() {
         None,
     );
     match v4 {
-        RouteOverride::Table(table) => assert_eq!(table, "sfmix.inet.0"),
+        RouteOverride::Table { table, .. } => assert_eq!(table, "sfmix.inet.0"),
         _ => panic!("accept v4 routing-instance term must forward via sfmix.inet.0"),
     }
 
@@ -606,7 +606,7 @@ fn pbr_routing_instance_accept_still_forwards_no_regression() {
         None,
     );
     match v6 {
-        RouteOverride::Table(table) => assert_eq!(table, "sfmix.inet6.0"),
+        RouteOverride::Table { table, .. } => assert_eq!(table, "sfmix.inet6.0"),
         _ => panic!("accept v6 routing-instance term must forward via sfmix.inet6.0"),
     }
 }
@@ -697,7 +697,7 @@ fn pbr_routing_instance_reject_synthesizes_reply_on_session_miss() {
         }),
     );
     assert!(
-        matches!(accept, RouteOverride::Table(_)),
+        matches!(accept, RouteOverride::Table { .. }),
         "accept routing-instance term must forward"
     );
     assert_eq!(
@@ -749,7 +749,7 @@ fn pbr_override_survives_nat64_translation_no_vrf_leak() {
     };
 
     // 1) PBR steer runs on the ORIGINAL IPv6 flow -> the v6 override table.
-    let RouteOverride::Table(override_table) =
+    let RouteOverride::Table { table: override_table, .. } =
         ingress_route_table_override(&state, &[], meta, &flow, None, None, 0, None)
     else {
         panic!("a v6 PBR source term must steer the flow into the override table");
@@ -820,7 +820,7 @@ fn pbr_override_survives_nat64_translation_no_vrf_leak() {
                     routing_domain: 0,
         },
     };
-    let RouteOverride::Table(plain_table) =
+    let RouteOverride::Table { table: plain_table, .. } =
         ingress_route_table_override(&state, &[], meta, &plain_flow, None, None, 0, None)
     else {
         panic!("the v6 PBR term must steer the untranslated v6 flow too");
@@ -877,7 +877,7 @@ fn pbr_egress_output_filter_applied_not_base_egress_no_bypass() {
     };
 
     // PBR steers the flow into vrf1.
-    let RouteOverride::Table(table) =
+    let RouteOverride::Table { table, .. } =
         ingress_route_table_override(&state, &[], meta, &flow, None, None, 0, None)
     else {
         panic!("the PBR term must steer the flow into vrf1");
@@ -966,3 +966,58 @@ fn pbr_egress_output_filter_applied_not_base_egress_no_bypass() {
     );
 }
 
+
+/// #9752 stamp matrix: arm provenance, not disposition. Only the table arm
+/// with a live override stamps nonzero; tunnel-egress and precedence arms
+/// stamp (0,0) (table-free by rule).
+#[test]
+fn install_table_stamp_matrix_9752() {
+    use crate::afxdp::forwarding::install_table_stamp_for_miss;
+    use crate::afxdp::{ForwardingDisposition, ForwardingResolution};
+    use crate::session::install_table_identity;
+    let plain = ForwardingResolution {
+        disposition: ForwardingDisposition::ForwardCandidate,
+        local_ifindex: 0,
+        egress_ifindex: 12,
+        tx_ifindex: 12,
+        tunnel_endpoint_id: 0,
+        next_hop: None,
+        neighbor_mac: None,
+        src_mac: None,
+        tx_vlan_id: 0,
+    };
+    let (blue, blue_h2) = install_table_identity("blue");
+    // Table arm + live override -> the identity.
+    assert_eq!(
+        install_table_stamp_for_miss(Some((blue, blue_h2)), true, plain),
+        (blue, blue_h2)
+    );
+    // Table arm, no override (ordinary non-PBR flow) -> default.
+    assert_eq!(
+        install_table_stamp_for_miss(None, true, plain),
+        (0, 0),
+        "a non-PBR table-arm outcome must stamp default, not garbage"
+    );
+    // Precedence/blocked arms never saw a table, even with an override.
+    assert_eq!(
+        install_table_stamp_for_miss(Some((blue, blue_h2)), false, plain),
+        (0, 0)
+    );
+    // Tunnel-egress outcomes are endpoint-pinned, table-free — including a
+    // LocalDelivery carrying a tunnel id (Codex-r3-F2a: interface-local and
+    // interface-NAT constructors set it for tunnel interfaces).
+    let mut tunneled = plain;
+    tunneled.tunnel_endpoint_id = 7;
+    assert_eq!(
+        install_table_stamp_for_miss(Some((blue, blue_h2)), true, tunneled),
+        (0, 0)
+    );
+    let mut local_tunneled = tunneled;
+    local_tunneled.disposition = ForwardingDisposition::LocalDelivery;
+    assert_eq!(
+        install_table_stamp_for_miss(Some((blue, blue_h2)), true, local_tunneled),
+        (0, 0),
+        "LocalDelivery+tunnel-ID must stamp (0,0): served-local via the \
+         preserved arm order, never validated against a table"
+    );
+}

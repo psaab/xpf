@@ -4781,20 +4781,17 @@ fn nat64_3025_incremental_helper_wrong_delta_breaks() {
 
 /// Minimal `SessionDecision` with a forwardable resolution for cache tests.
 fn frag_test_decision(nat: NatDecision) -> SessionDecision {
-    SessionDecision {
-        resolution: crate::afxdp::ForwardingResolution {
-            disposition: crate::afxdp::ForwardingDisposition::ForwardCandidate,
-            local_ifindex: 0,
-            egress_ifindex: 2,
-            tx_ifindex: 2,
-            tunnel_endpoint_id: 0,
-            next_hop: None,
-            neighbor_mac: Some([2, 0, 0, 0, 0, 2]),
-            src_mac: Some([2, 0, 0, 0, 0, 1]),
-            tx_vlan_id: 0,
-        },
-        nat,
-    }
+    SessionDecision { resolution: crate::afxdp::ForwardingResolution {
+        disposition: crate::afxdp::ForwardingDisposition::ForwardCandidate,
+        local_ifindex: 0,
+        egress_ifindex: 2,
+        tx_ifindex: 2,
+        tunnel_endpoint_id: 0,
+        next_hop: None,
+        neighbor_mac: Some([2, 0, 0, 0, 0, 2]),
+        src_mac: Some([2, 0, 0, 0, 0, 1]),
+        tx_vlan_id: 0,
+    }, nat, install_table_domain: 0, install_table_check: 0 }
 }
 
 #[test]

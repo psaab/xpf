@@ -197,7 +197,12 @@ fn replay_filter_drops_purged_forward_and_derived_reverse_companion() {
     let make =
         |key: &SessionKey, resolution: ForwardingResolution, is_reverse: bool| SyncedSessionEntry {
             key: key.clone(),
-            decision: SessionDecision { resolution, nat },
+            decision: SessionDecision {
+                resolution,
+                nat,
+                install_table_domain: 0,
+                install_table_check: 0,
+            },
             metadata: SessionMetadata {
                 ingress_zone: 1,
                 egress_zone: 2,
@@ -313,7 +318,12 @@ fn replay_filter_preserves_order_and_survivors_across_many_drops() {
     let make = |key: &SessionKey, resolution: ForwardingResolution, is_reverse: bool| {
         SyncedSessionEntry {
             key: key.clone(),
-            decision: SessionDecision { resolution, nat },
+            decision: SessionDecision {
+                resolution,
+                nat,
+                install_table_domain: 0,
+                install_table_check: 0,
+            },
             metadata: SessionMetadata {
                 ingress_zone: 1,
                 egress_zone: 2,

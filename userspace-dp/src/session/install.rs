@@ -308,6 +308,7 @@ impl SessionTable {
                 } else {
                     0
                 },
+                purge_retirement: false,
             });
         }
         true
@@ -607,6 +608,7 @@ impl SessionTable {
         let tcp_close_class = self.close_class_wire_for(&key);
         self.push_delta(SessionDelta {
             tcp_close_class,
+            purge_retirement: false,
             kind: SessionDeltaKind::Open,
             key,
             decision,
@@ -640,6 +642,7 @@ impl SessionTable {
         decision: SessionDecision,
         metadata: SessionMetadata,
         origin: SessionOrigin,
+        purge_retirement: bool,
     ) {
         if metadata.is_reverse {
             return;
@@ -676,6 +679,7 @@ impl SessionTable {
             session_id: 0,
             bulk_resync: false,
             tcp_close_class: 0,
+            purge_retirement,
         });
     }
 

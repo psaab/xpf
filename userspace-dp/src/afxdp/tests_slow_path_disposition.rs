@@ -49,20 +49,17 @@ fn maybe_reinject_slow_path_ignores_forward_candidate_disposition() {
         protocol: PROTO_ICMP,
         ..UserspaceDpMeta::default()
     };
-    let decision = SessionDecision {
-        resolution: ForwardingResolution {
-            disposition: ForwardingDisposition::ForwardCandidate,
-            local_ifindex: 0,
-            egress_ifindex: 6,
-            tx_ifindex: 6,
-            tunnel_endpoint_id: 0,
-            next_hop: Some(IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1))),
-            neighbor_mac: Some([0, 1, 2, 3, 4, 5]),
-            src_mac: Some([6, 7, 8, 9, 10, 11]),
-            tx_vlan_id: 0,
-        },
-        nat: NatDecision::default(),
-    };
+    let decision = SessionDecision { resolution: ForwardingResolution {
+        disposition: ForwardingDisposition::ForwardCandidate,
+        local_ifindex: 0,
+        egress_ifindex: 6,
+        tx_ifindex: 6,
+        tunnel_endpoint_id: 0,
+        next_hop: Some(IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1))),
+        neighbor_mac: Some([0, 1, 2, 3, 4, 5]),
+        src_mac: Some([6, 7, 8, 9, 10, 11]),
+        tx_vlan_id: 0,
+    }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 };
 
     maybe_reinject_slow_path(
         &binding,
@@ -154,20 +151,17 @@ fn maybe_reinject_slow_path_drops_ineligible_dispositions() {
             protocol: PROTO_ICMP,
             ..UserspaceDpMeta::default()
         };
-        let decision = SessionDecision {
-            resolution: ForwardingResolution {
-                disposition,
-                local_ifindex: 0,
-                egress_ifindex: 6,
-                tx_ifindex: 6,
-                tunnel_endpoint_id: 0,
-                next_hop: Some(IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1))),
-                neighbor_mac: Some([0, 1, 2, 3, 4, 5]),
-                src_mac: Some([6, 7, 8, 9, 10, 11]),
-                tx_vlan_id: 0,
-            },
-            nat: NatDecision::default(),
-        };
+        let decision = SessionDecision { resolution: ForwardingResolution {
+            disposition,
+            local_ifindex: 0,
+            egress_ifindex: 6,
+            tx_ifindex: 6,
+            tunnel_endpoint_id: 0,
+            next_hop: Some(IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1))),
+            neighbor_mac: Some([0, 1, 2, 3, 4, 5]),
+            src_mac: Some([6, 7, 8, 9, 10, 11]),
+            tx_vlan_id: 0,
+        }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 };
 
         maybe_reinject_slow_path(
             &binding,
@@ -227,20 +221,17 @@ fn maybe_reinject_slow_path_records_extract_failure_for_invalid_desc() {
         protocol: PROTO_ICMP,
         ..UserspaceDpMeta::default()
     };
-    let decision = SessionDecision {
-        resolution: ForwardingResolution {
-            disposition: ForwardingDisposition::NoRoute,
-            local_ifindex: 0,
-            egress_ifindex: 0,
-            tx_ifindex: 0,
-            tunnel_endpoint_id: 0,
-            next_hop: None,
-            neighbor_mac: None,
-            src_mac: None,
-            tx_vlan_id: 0,
-        },
-        nat: NatDecision::default(),
-    };
+    let decision = SessionDecision { resolution: ForwardingResolution {
+        disposition: ForwardingDisposition::NoRoute,
+        local_ifindex: 0,
+        egress_ifindex: 0,
+        tx_ifindex: 0,
+        tunnel_endpoint_id: 0,
+        next_hop: None,
+        neighbor_mac: None,
+        src_mac: None,
+        tx_vlan_id: 0,
+    }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 };
 
     // Addr beyond the registered UMEM length forces an extract failure.
     maybe_reinject_slow_path(
@@ -292,20 +283,17 @@ fn maybe_reinject_slow_path_from_frame_records_unavailable() {
         protocol: PROTO_ICMP,
         ..UserspaceDpMeta::default()
     };
-    let decision = SessionDecision {
-        resolution: ForwardingResolution {
-            disposition: ForwardingDisposition::NoRoute,
-            local_ifindex: 0,
-            egress_ifindex: 0,
-            tx_ifindex: 0,
-            tunnel_endpoint_id: 0,
-            next_hop: None,
-            neighbor_mac: None,
-            src_mac: None,
-            tx_vlan_id: 0,
-        },
-        nat: NatDecision::default(),
-    };
+    let decision = SessionDecision { resolution: ForwardingResolution {
+        disposition: ForwardingDisposition::NoRoute,
+        local_ifindex: 0,
+        egress_ifindex: 0,
+        tx_ifindex: 0,
+        tunnel_endpoint_id: 0,
+        next_hop: None,
+        neighbor_mac: None,
+        src_mac: None,
+        tx_vlan_id: 0,
+    }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 };
 
     maybe_reinject_slow_path_from_frame(
         &binding,
@@ -352,20 +340,17 @@ fn handle_forward_build_failure_records_build_and_slow_path_failures() {
         protocol: PROTO_ICMP,
         ..UserspaceDpMeta::default()
     };
-    let decision = SessionDecision {
-        resolution: ForwardingResolution {
-            disposition: ForwardingDisposition::NoRoute,
-            local_ifindex: 0,
-            egress_ifindex: 0,
-            tx_ifindex: 0,
-            tunnel_endpoint_id: 0,
-            next_hop: None,
-            neighbor_mac: None,
-            src_mac: None,
-            tx_vlan_id: 0,
-        },
-        nat: NatDecision::default(),
-    };
+    let decision = SessionDecision { resolution: ForwardingResolution {
+        disposition: ForwardingDisposition::NoRoute,
+        local_ifindex: 0,
+        egress_ifindex: 0,
+        tx_ifindex: 0,
+        tunnel_endpoint_id: 0,
+        next_hop: None,
+        neighbor_mac: None,
+        src_mac: None,
+        tx_vlan_id: 0,
+    }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 };
     let mut dbg = DebugPollCounters::default();
     let local_tunnel_reinjectors = Arc::new(ArcSwap::from_pointee(BTreeMap::new()));
 
@@ -424,20 +409,17 @@ fn handle_forward_build_failure_without_fallback_only_records_build_failure() {
         protocol: PROTO_ICMP,
         ..UserspaceDpMeta::default()
     };
-    let decision = SessionDecision {
-        resolution: ForwardingResolution {
-            disposition: ForwardingDisposition::ForwardCandidate,
-            local_ifindex: 0,
-            egress_ifindex: 12,
-            tx_ifindex: 12,
-            tunnel_endpoint_id: 0,
-            next_hop: Some(IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1))),
-            neighbor_mac: Some([0, 1, 2, 3, 4, 5]),
-            src_mac: Some([6, 7, 8, 9, 10, 11]),
-            tx_vlan_id: 0,
-        },
-        nat: NatDecision::default(),
-    };
+    let decision = SessionDecision { resolution: ForwardingResolution {
+        disposition: ForwardingDisposition::ForwardCandidate,
+        local_ifindex: 0,
+        egress_ifindex: 12,
+        tx_ifindex: 12,
+        tunnel_endpoint_id: 0,
+        next_hop: Some(IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1))),
+        neighbor_mac: Some([0, 1, 2, 3, 4, 5]),
+        src_mac: Some([6, 7, 8, 9, 10, 11]),
+        tx_vlan_id: 0,
+    }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 };
     let mut dbg = DebugPollCounters::default();
     let local_tunnel_reinjectors = Arc::new(ArcSwap::from_pointee(BTreeMap::new()));
 
@@ -500,20 +482,17 @@ fn handle_forward_build_failure_drops_fabric_redirect_fail_closed() {
         protocol: PROTO_ICMP,
         ..UserspaceDpMeta::default()
     };
-    let decision = SessionDecision {
-        resolution: ForwardingResolution {
-            disposition: ForwardingDisposition::FabricRedirect,
-            local_ifindex: 0,
-            egress_ifindex: 12,
-            tx_ifindex: 12,
-            tunnel_endpoint_id: 0,
-            next_hop: Some(IpAddr::V4(Ipv4Addr::new(10, 99, 0, 2))),
-            neighbor_mac: Some([0, 1, 2, 3, 4, 5]),
-            src_mac: Some([6, 7, 8, 9, 10, 11]),
-            tx_vlan_id: 0,
-        },
-        nat: NatDecision::default(),
-    };
+    let decision = SessionDecision { resolution: ForwardingResolution {
+        disposition: ForwardingDisposition::FabricRedirect,
+        local_ifindex: 0,
+        egress_ifindex: 12,
+        tx_ifindex: 12,
+        tunnel_endpoint_id: 0,
+        next_hop: Some(IpAddr::V4(Ipv4Addr::new(10, 99, 0, 2))),
+        neighbor_mac: Some([0, 1, 2, 3, 4, 5]),
+        src_mac: Some([6, 7, 8, 9, 10, 11]),
+        tx_vlan_id: 0,
+    }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 };
     let mut dbg = DebugPollCounters::default();
     let local_tunnel_reinjectors = Arc::new(ArcSwap::from_pointee(BTreeMap::new()));
 
@@ -588,20 +567,17 @@ fn handle_forward_build_failure_still_reinjects_forward_candidate() {
         protocol: PROTO_ICMP,
         ..UserspaceDpMeta::default()
     };
-    let decision = SessionDecision {
-        resolution: ForwardingResolution {
-            disposition: ForwardingDisposition::ForwardCandidate,
-            local_ifindex: 0,
-            egress_ifindex: 12,
-            tx_ifindex: 12,
-            tunnel_endpoint_id: 0,
-            next_hop: Some(IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1))),
-            neighbor_mac: Some([0, 1, 2, 3, 4, 5]),
-            src_mac: Some([6, 7, 8, 9, 10, 11]),
-            tx_vlan_id: 0,
-        },
-        nat: NatDecision::default(),
-    };
+    let decision = SessionDecision { resolution: ForwardingResolution {
+        disposition: ForwardingDisposition::ForwardCandidate,
+        local_ifindex: 0,
+        egress_ifindex: 12,
+        tx_ifindex: 12,
+        tunnel_endpoint_id: 0,
+        next_hop: Some(IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1))),
+        neighbor_mac: Some([0, 1, 2, 3, 4, 5]),
+        src_mac: Some([6, 7, 8, 9, 10, 11]),
+        tx_vlan_id: 0,
+    }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 };
     let mut dbg = DebugPollCounters::default();
     let local_tunnel_reinjectors = Arc::new(ArcSwap::from_pointee(BTreeMap::new()));
 
@@ -1134,20 +1110,17 @@ fn next_table_unsupported_is_dropped_and_counted_no_route_still_delegates_6664()
         // egress_ifindex 0 mirrors what the FIB actually builds for both of
         // these dispositions (there is no egress interface), so the harness
         // is not quietly kinder to them than production is.
-        let decision = SessionDecision {
-            resolution: ForwardingResolution {
-                disposition,
-                local_ifindex: 0,
-                egress_ifindex: 0,
-                tx_ifindex: 0,
-                tunnel_endpoint_id: 0,
-                next_hop: Some(IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1))),
-                neighbor_mac: None,
-                src_mac: None,
-                tx_vlan_id: 0,
-            },
-            nat: NatDecision::default(),
-        };
+        let decision = SessionDecision { resolution: ForwardingResolution {
+            disposition,
+            local_ifindex: 0,
+            egress_ifindex: 0,
+            tx_ifindex: 0,
+            tunnel_endpoint_id: 0,
+            next_hop: Some(IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1))),
+            neighbor_mac: None,
+            src_mac: None,
+            tx_vlan_id: 0,
+        }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 };
 
         maybe_reinject_slow_path(
             &binding,

@@ -69,6 +69,8 @@ pub(in crate::session) fn decision() -> SessionDecision {
     SessionDecision {
         resolution: resolution(),
         nat: NatDecision::default(),
+        install_table_domain: 0,
+        install_table_check: 0,
     }
 }
 
@@ -765,6 +767,8 @@ fn nat_flow_reverse_activity_keeps_forward_half_alive() {
     let fwd_decision = SessionDecision {
         resolution: resolution(),
         nat: fwd_nat,
+        install_table_domain: 0,
+        install_table_check: 0,
     };
     assert!(table.install_with_protocol(
         forward.clone(),
@@ -795,6 +799,8 @@ fn nat_flow_reverse_activity_keeps_forward_half_alive() {
     let reverse_decision = SessionDecision {
         resolution: resolution(),
         nat: reverse_nat,
+        install_table_domain: 0,
+        install_table_check: 0,
     };
     assert!(table.install_with_protocol(
         reverse.clone(),
@@ -1336,13 +1342,10 @@ fn wheel_alias_lookup_refreshes_canonical_key() {
     };
     let mut reverse_metadata = metadata();
     reverse_metadata.is_reverse = true;
-    let nat = SessionDecision {
-        resolution: resolution(),
-        nat: NatDecision {
-            rewrite_dst: Some(IpAddr::V4(Ipv4Addr::new(10, 0, 61, 102))),
-            ..NatDecision::default()
-        },
-    };
+    let nat = SessionDecision { resolution: resolution(), nat: NatDecision {
+        rewrite_dst: Some(IpAddr::V4(Ipv4Addr::new(10, 0, 61, 102))),
+        ..NatDecision::default()
+    }, install_table_domain: 0, install_table_check: 0 };
     let install_ns = 1_000_000_000u64;
     assert!(table.install_with_protocol(
         canonical_key.clone(),
@@ -1570,13 +1573,10 @@ fn expire_stale_entries_returns_helper_only_local_sessions() {
     let key = key_v4();
     let then = 1_000_000_000u64;
     let local_metadata = metadata();
-    let local_decision = SessionDecision {
-        resolution: ForwardingResolution {
-            disposition: ForwardingDisposition::LocalDelivery,
-            ..resolution()
-        },
-        nat: NatDecision::default(),
-    };
+    let local_decision = SessionDecision { resolution: ForwardingResolution {
+        disposition: ForwardingDisposition::LocalDelivery,
+        ..resolution()
+    }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 };
     // Install with SyncImport origin to mark as peer-synced
     assert!(table.install_with_protocol_with_origin(
         key.clone(),
@@ -1602,13 +1602,10 @@ fn take_synced_local_only_removes_helper_local_sessions() {
     let key = key_v4();
     let now = 1_000_000_000u64;
     let local_metadata = metadata();
-    let local_decision = SessionDecision {
-        resolution: ForwardingResolution {
-            disposition: ForwardingDisposition::LocalDelivery,
-            ..resolution()
-        },
-        nat: NatDecision::default(),
-    };
+    let local_decision = SessionDecision { resolution: ForwardingResolution {
+        disposition: ForwardingDisposition::LocalDelivery,
+        ..resolution()
+    }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 };
     // Install with SyncImport origin so it's considered peer-synced
     assert!(table.install_with_protocol_with_origin(
         key.clone(),
@@ -2854,6 +2851,8 @@ fn find_forward_nat_match_uses_reverse_index() {
     let decision = SessionDecision {
         resolution: resolution(),
         nat,
+        install_table_domain: 0,
+        install_table_check: 0,
     };
     assert!(table.install_with_protocol(
         forward.clone(),
@@ -2904,6 +2903,8 @@ fn find_forward_nat_match_uses_canonical_reverse_index() {
     let decision = SessionDecision {
         resolution: resolution(),
         nat,
+        install_table_domain: 0,
+        install_table_check: 0,
     };
     assert!(table.install_with_protocol(
         forward.clone(),
@@ -2973,6 +2974,8 @@ fn find_forward_nat_match_uses_canonical_reverse_index_for_icmp() {
     let decision = SessionDecision {
         resolution: resolution(),
         nat,
+        install_table_domain: 0,
+        install_table_check: 0,
     };
     assert!(table.install_with_protocol(
         forward.clone(),
@@ -3024,6 +3027,8 @@ fn find_forward_wire_match_uses_translated_forward_index() {
     let decision = SessionDecision {
         resolution: resolution(),
         nat,
+        install_table_domain: 0,
+        install_table_check: 0,
     };
     assert!(table.install_with_protocol(
         forward.clone(),
@@ -3069,13 +3074,10 @@ fn lookup_uses_translated_reverse_alias() {
     };
     let mut reverse_metadata = metadata();
     reverse_metadata.is_reverse = true;
-    let reverse_decision = SessionDecision {
-        resolution: resolution(),
-        nat: NatDecision {
-            rewrite_dst: Some(IpAddr::V4(Ipv4Addr::new(10, 0, 61, 102))),
-            ..NatDecision::default()
-        },
-    };
+    let reverse_decision = SessionDecision { resolution: resolution(), nat: NatDecision {
+        rewrite_dst: Some(IpAddr::V4(Ipv4Addr::new(10, 0, 61, 102))),
+        ..NatDecision::default()
+    }, install_table_domain: 0, install_table_check: 0 };
     assert!(table.install_with_protocol(
         reverse_wire.clone(),
         reverse_decision,
@@ -3405,6 +3407,8 @@ fn find_forward_nat_match_with_dnat_port_rewrite() {
     let decision = SessionDecision {
         resolution: resolution(),
         nat,
+        install_table_domain: 0,
+        install_table_check: 0,
     };
     assert!(table.install_with_protocol(
         forward.clone(),
@@ -4058,6 +4062,7 @@ fn reference_update_session(
             session_id: 0,
             bulk_resync: false,
             tcp_close_class,
+            purge_retirement: false,
         });
     }
     true
@@ -4137,14 +4142,11 @@ fn assert_tables_equiv(
 }
 
 fn nat_rewrite() -> SessionDecision {
-    SessionDecision {
-        resolution: resolution(),
-        nat: NatDecision {
-            rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 7))),
-            rewrite_src_port: Some(40001),
-            ..NatDecision::default()
-        },
-    }
+    SessionDecision { resolution: resolution(), nat: NatDecision {
+        rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 7))),
+        rewrite_src_port: Some(40001),
+        ..NatDecision::default()
+    }, install_table_domain: 0, install_table_check: 0 }
 }
 
 /// Build two identical tables with `key` installed at the given origin.
@@ -4655,13 +4657,10 @@ fn inplace_fin_rst_closing_matches_reference() {
 /// leave the source port untranslated (rewrite_src_port = None). This is
 /// the default SNAT mode and the #1758 reachable collision vector.
 fn iface_snat_decision(egress: Ipv4Addr) -> SessionDecision {
-    SessionDecision {
-        resolution: resolution(),
-        nat: NatDecision {
-            rewrite_src: Some(IpAddr::V4(egress)),
-            ..NatDecision::default()
-        },
-    }
+    SessionDecision { resolution: resolution(), nat: NatDecision {
+        rewrite_src: Some(IpAddr::V4(egress)),
+        ..NatDecision::default()
+    }, install_table_domain: 0, install_table_check: 0 }
 }
 
 #[test]
@@ -5101,13 +5100,10 @@ fn forward_wire_1n_pool_snat_fast_path_stays_single_value() {
 /// destination to a shared backend and a reverse metadata carrying the given
 /// `zone` (used only to distinguish which reverse session resolved).
 fn shared_backend_reverse(backend: IpAddr, zone: u16) -> (SessionDecision, SessionMetadata) {
-    let decision = SessionDecision {
-        resolution: resolution(),
-        nat: NatDecision {
-            rewrite_dst: Some(backend),
-            ..NatDecision::default()
-        },
-    };
+    let decision = SessionDecision { resolution: resolution(), nat: NatDecision {
+        rewrite_dst: Some(backend),
+        ..NatDecision::default()
+    }, install_table_domain: 0, install_table_check: 0 };
     let mut md = metadata();
     md.is_reverse = true;
     md.ingress_zone = zone;
@@ -7191,6 +7187,7 @@ fn open_delta(key: SessionKey) -> SessionDelta {
         session_id: 0,
         bulk_resync: false,
         tcp_close_class: 0,
+        purge_retirement: false,
     }
 }
 
@@ -7646,6 +7643,8 @@ fn account_packet_reverse_folds_onto_forward_translated_icmp() {
         let fwd_decision = SessionDecision {
             resolution: resolution(),
             nat: fwd_nat,
+            install_table_domain: 0,
+            install_table_check: 0,
         };
         // Reverse companion, keyed on the translated id (the reply carries Y).
         let rev = reverse_session_key(&fwd, fwd_nat);
@@ -7656,6 +7655,8 @@ fn account_packet_reverse_folds_onto_forward_translated_icmp() {
         let rev_decision = SessionDecision {
             resolution: resolution(),
             nat: rev_nat,
+            install_table_domain: 0,
+            install_table_check: 0,
         };
 
         assert!(table.install_with_protocol(fwd.clone(), fwd_decision, metadata(), now, proto, 0));
@@ -8725,5 +8726,29 @@ fn counters_with_replica_flag_separates_not_held_from_held_and_idle_7919() {
     assert_eq!(
         counters.fwd_packets, 321,
         "the accessor must report the LIVE counters, not a snapshot from install"
+    );
+}
+
+/// #9752: the installing-table identity costs exactly 8 bytes on the
+/// decision (two `u32`, no padding surprises) at known offsets, and the
+/// decision stays `Copy` (no heap, no atomics on the per-packet copy).
+/// A layout change fails here first, with the numbers, instead of as a
+/// mysterious `PendingNeighPacket` size-assert message two modules away.
+#[test]
+fn session_decision_table_identity_layout_9752() {
+    fn assert_copy<T: Copy>() {}
+    assert_copy::<crate::session::SessionDecision>();
+    assert_eq!(
+        std::mem::size_of::<crate::session::SessionDecision>(),
+        100,
+        "SessionDecision = 48 (resolution) + 44 (nat) + 8 (table identity)"
+    );
+    assert_eq!(
+        core::mem::offset_of!(crate::session::SessionDecision, install_table_domain),
+        92
+    );
+    assert_eq!(
+        core::mem::offset_of!(crate::session::SessionDecision, install_table_check),
+        96
     );
 }

@@ -106,7 +106,7 @@ func TestTwoKeyedTunnelsSharingAKeyStayDistinctOnTheWire_7188(t *testing.T) {
 func TestLegacyPeerPayloadDecodesDiscriminatorAsNotCarried_7188(t *testing.T) {
 	key := greSessionKey7188()
 	full := encodeSessionV4Payload(key, sessionValue7188(uint64(1)<<32|100))
-	legacy := full[:len(full)-12]
+	legacy := full[:len(full)-20]
 
 	gotKey, got, ok := decodeSessionV4Payload(legacy)
 	if !ok {
@@ -152,7 +152,7 @@ func TestTunnelDiscriminatorRoundTripsV6_7188(t *testing.T) {
 		t.Fatalf("v6 discriminator round-tripped as %#x, want %#x",
 			got.TunnelDiscriminator, uint64(discriminator))
 	}
-	_, shortGot, ok := decodeSessionV6Payload(payload[:len(payload)-12])
+	_, shortGot, ok := decodeSessionV6Payload(payload[:len(payload)-20])
 	if !ok || shortGot.TunnelDiscriminator != 0 {
 		t.Fatalf("v6 legacy truncation: ok=%v discriminator=%#x, want ok=true 0",
 			ok, shortGot.TunnelDiscriminator)

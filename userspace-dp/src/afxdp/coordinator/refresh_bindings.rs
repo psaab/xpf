@@ -117,6 +117,7 @@ fn copy_live_snapshot(binding: &mut BindingStatus, snap: BindingLiveSnapshot) {
     binding.neighbor_miss_packets = snap.neighbor_miss_packets;
     binding.discard_route_packets = snap.discard_route_packets;
     binding.next_table_packets = snap.next_table_packets;
+    binding.table_unavailable_packets = snap.table_unavailable_packets;
     binding.exception_packets = snap.exception_packets;
     binding.config_gen_mismatches = snap.config_gen_mismatches;
     binding.fib_gen_mismatches = snap.fib_gen_mismatches;
@@ -189,6 +190,7 @@ fn copy_live_snapshot(binding: &mut BindingStatus, snap: BindingLiveSnapshot) {
     binding.slow_path_no_route_packets = snap.slow_path_no_route_packets;
     binding.slow_path_next_table_packets = snap.slow_path_next_table_packets;
     binding.next_table_unsupported_drops = snap.next_table_unsupported_drops;
+    binding.table_unavailable_drops = snap.table_unavailable_drops;
     binding.slow_path_forward_build_packets = snap.slow_path_forward_build_packets;
     binding.slow_path_drops = snap.slow_path_drops;
     binding.slow_path_rate_limited = snap.slow_path_rate_limited;
@@ -349,6 +351,7 @@ fn zero_unbound_slot(binding: &mut BindingStatus) {
     binding.neighbor_miss_packets = 0;
     binding.discard_route_packets = 0;
     binding.next_table_packets = 0;
+    binding.table_unavailable_packets = 0;
     binding.exception_packets = 0;
     binding.config_gen_mismatches = 0;
     binding.fib_gen_mismatches = 0;
@@ -416,6 +419,7 @@ fn zero_unbound_slot(binding: &mut BindingStatus) {
     binding.slow_path_no_route_packets = 0;
     binding.slow_path_next_table_packets = 0;
     binding.next_table_unsupported_drops = 0;
+    binding.table_unavailable_drops = 0;
     binding.slow_path_forward_build_packets = 0;
     binding.slow_path_drops = 0;
     binding.slow_path_rate_limited = 0;

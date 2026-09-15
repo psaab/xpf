@@ -202,6 +202,7 @@ impl crate::afxdp::Coordinator {
                 bulk_resync: false,
                 // #9412: carry the synced entry's close class on the bulk export.
                 tcp_close_class: entry.tcp_close_class,
+                purge_retirement: false,
             });
         }
         drop(sessions);

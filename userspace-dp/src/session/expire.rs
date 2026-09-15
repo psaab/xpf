@@ -396,6 +396,7 @@ impl SessionTable {
                                 session_id: removed.session_id,
                                 bulk_resync: false,
                                 tcp_close_class: 0,
+                                purge_retirement: false,
                             });
                         }
                         expired_entries.push(ExpiredSession {

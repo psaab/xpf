@@ -438,6 +438,15 @@ type SyncStats struct {
 	// rather than left silent precisely because the suppression trades a
 	// visible leak for an invisible teardown.
 	DeletesSuppressedPeerIncapable atomic.Uint64
+	// DeletesSuppressedPurgeRetirement counts outgoing forward-only session
+	// deletes WITHHELD because the peer advertised its capabilities and did
+	// NOT claim #9752 forward-only deletes
+	// (capFlagPurgeRetirementForwardOnly). Such a peer derives companions
+	// for every delete, so our purge-retirement close would destroy
+	// sessions the purge deliberately preserved. Same operational meaning
+	// as DeletesSuppressedPeerIncapable: counted, visible leak over
+	// invisible teardown.
+	DeletesSuppressedPurgeRetirement atomic.Uint64
 	// DeletesStaleIgnored counts deletes refused by the #2170 install-
 	// generation guard: a journaled/deferred delete whose generation was
 	// strictly older than the currently-installed same-key entry. A nonzero
@@ -1016,12 +1025,16 @@ type SessionSync struct {
 	// that outlived it would stay silent through the reconnect that actually
 	// matters — a downgrade, or the upgrade that fixes it.
 	deleteSuppressionWarned atomic.Bool
-	lastNewCounter          uint64
-	lastClosedCounter       uint64
-	lastSweepEmpty          bool
-	vrfDevice               string
-	peerClockOffset         atomic.Int64
-	clockSynced             atomic.Bool
+	// purgeRetirementSuppressionWarned latches the #9752 forward-only-delete
+	// suppression warning, same incarnation scoping as deleteSuppressionWarned
+	// (reset alongside it on full disconnect).
+	purgeRetirementSuppressionWarned atomic.Bool
+	lastNewCounter                   uint64
+	lastClosedCounter                uint64
+	lastSweepEmpty                   bool
+	vrfDevice                        string
+	peerClockOffset                  atomic.Int64
+	clockSynced                      atomic.Bool
 
 	// localSnapshotProtocol is this node's config-snapshot protocol version,
 	// advertised to the peer on every installed connection (#6650). Set by the
@@ -1252,9 +1265,15 @@ type SessionSync struct {
 	// see stampCloseClassLocked.
 	closeClassSentV4 map[dataplane.SessionKey]sentCloseClass
 	closeClassSentV6 map[dataplane.SessionKeyV6]sentCloseClass
-	recvGenMu        sync.Mutex
-	recvGenV4        map[dataplane.SessionKey]uint64
-	recvGenV6        map[dataplane.SessionKeyV6]uint64
+	// #9752: per tuple, the installing-table identity this node last SENT for
+	// one session incarnation (matched on SessionID), so a mirror-sourced
+	// resend cannot regress it to (0,0). Guarded by genSentMu, beside the
+	// maps it mirrors; see stampInstallTableLocked.
+	installTableSentV4 map[dataplane.SessionKey]sentInstallTable
+	installTableSentV6 map[dataplane.SessionKeyV6]sentInstallTable
+	recvGenMu          sync.Mutex
+	recvGenV4          map[dataplane.SessionKey]uint64
+	recvGenV6          map[dataplane.SessionKeyV6]uint64
 	// recvTombV4/V6 order the TOMBSTONE entries of recvGenV4/V6, oldest first, so a
 	// map at genGuardMapCap evicts the oldest tombstone to record a new key instead
 	// of skip-recording it (#9719). Guarded by recvGenMu, and reset with the maps.
@@ -1641,6 +1660,8 @@ func (s *SessionSync) initGenState() {
 	s.genSentV6 = make(map[dataplane.SessionKeyV6]uint64)
 	s.closeClassSentV4 = make(map[dataplane.SessionKey]sentCloseClass)
 	s.closeClassSentV6 = make(map[dataplane.SessionKeyV6]sentCloseClass)
+	s.installTableSentV4 = make(map[dataplane.SessionKey]sentInstallTable)
+	s.installTableSentV6 = make(map[dataplane.SessionKeyV6]sentInstallTable)
 	s.recvGenV4 = make(map[dataplane.SessionKey]uint64)
 	s.recvGenV6 = make(map[dataplane.SessionKeyV6]uint64)
 	// #3931: seed the config generation from the same monotonic base so the

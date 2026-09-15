@@ -98,7 +98,11 @@ const preSecureTunnelProtocolVersion = 4
 // the bounded steered WireGuard port set replacing the v14 singular. Nothing
 // about secure_tunnel changed, so MinProtocolSecureTunnelRefusal (7) is
 // untouched again.
-const secureTunnelSnapshotProtocolVersion = 17
+//
+// Issue 9752 moved it 17 -> 18, for the session's installing-table identity
+// crossing the HA session-sync path. Nothing about secure_tunnel changed, so
+// MinProtocolSecureTunnelRefusal (7) is untouched again.
+const secureTunnelSnapshotProtocolVersion = 18
 
 // preV5HelperAcceptsSnapshot models the exact-equality version gate a pre-v5
 // helper applies before touching any dataplane state

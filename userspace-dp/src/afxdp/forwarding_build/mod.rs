@@ -18,6 +18,8 @@
 //!   `populate_neighbors`, `populate_fabrics`,
 //!   `resolve_route_target_v[46]`, `parse_route_next_hop[_v6]`,
 //!   `resolve_ifindex`, `infer_connected_route_target_v[46]`
+//! - [`install_tables`] — `build_install_table_registry` (#9752)
+//!   installing-table domain → canonical tables + owner check, derived last.
 //! - [`cos`] — `build_cos_state` (split into
 //!   `build_cos_classifier_tables` + `build_cos_iface_config` +
 //!   orchestrator).
@@ -30,6 +32,7 @@ use super::*;
 
 mod cos;
 mod fib;
+mod install_tables;
 mod interfaces;
 mod tunnels;
 mod validated;
@@ -1027,6 +1030,11 @@ fn build_fallible_forwarding_state(
     // on the next apply and propagated atomically via the ha.runtime view.
     state.pending_neigh_timeout_ns =
         compute_pending_neigh_timeout_ns(&state.ifindex_to_name, &RealSysctlReader);
+
+    // #9752: derive the installing-table registry from the finished FIB maps.
+    // Last derivation: every table-string writer (routes, connected, the
+    // late-stage NAT append) has run, so the scan sees the final key sets.
+    install_tables::build_install_table_registry(&mut state);
 
     Ok(state)
 }

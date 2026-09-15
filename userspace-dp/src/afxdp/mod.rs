@@ -469,9 +469,9 @@ const PENDING_NEIGH_TIMEOUT_NS: u64 = 2_000_000_000; // 2 seconds
 // (the #1782 H5 sibling-drop signal). This cap therefore bounds DISTINCT
 // unresolved next-hops per binding, and pins at most one UMEM frame per
 // hop — a SYN flood to one dead host holds 1 entry, not 4096.
-// PendingNeighPacket is 264 B on x86_64 (XdpDesc + UserspaceDpMeta +
+// PendingNeighPacket is 288 B on x86_64 (XdpDesc + UserspaceDpMeta +
 // SessionDecision + flow key + queued_ns + probe_attempts), so the
-// worst case is ~1.0 MiB per binding — but reaching it now requires
+// worst case is ~1.1 MiB per binding — but reaching it now requires
 // 4096 *distinct* unresolved hops (a scan-shaped workload), not a
 // connect burst. The map is lazily allocated (`FastMap::default()` at
 // worker init — see worker/mod.rs), keeping idle-binding RSS near zero.
@@ -915,6 +915,7 @@ pub(in crate::afxdp) struct BatchCounters {
     neighbor_miss_packets: u64,
     discard_route_packets: u64,
     next_table_packets: u64,
+    table_unavailable_packets: u64,
     local_delivery_packets: u64,
     exception_packets: u64,
 }
@@ -1370,6 +1371,13 @@ impl BatchCounters {
             live.next_table_packets
                 .fetch_add(self.next_table_packets, Ordering::Relaxed);
             self.next_table_packets = 0;
+        }
+        if self.table_unavailable_packets != 0 {
+            live.table_unavailable_packets.fetch_add(
+                self.table_unavailable_packets,
+                Ordering::Relaxed,
+            );
+            self.table_unavailable_packets = 0;
         }
         if self.local_delivery_packets != 0 {
             live.local_delivery_packets
