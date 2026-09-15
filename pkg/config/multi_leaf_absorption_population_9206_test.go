@@ -71,8 +71,25 @@ func TestMultiLeafAbsorptionPopulation9206(t *testing.T) {
 			// the control then wrongly ACCEPTS and the row is discarded. That
 			// silently removed 15 of 19 sites, the RIP instance among them.
 			childPath := append(append([]string{}, path...), k)
-			if c.args >= 1 || c.wildcard != nil {
+			// #9878: the fixture path must carry an INSTANCE NAME for EVERY
+			// arg slot, and the fixed midKeyword at its own slot. A single
+			// xpfinst for args>=1 collapses `from-zone trust to-zone untrust`
+			// to `from-zone xpfinst`, so the control probe packs a malformed
+			// mid position — which the #9878 midKeyword gate now rejects for
+			// the WRONG reason — and the site is silently dropped, never
+			// counted. (That is how three zone-pair match leaves went
+			// missing.) Only from-zone has args>1 with children, so only its
+			// descent changes shape here.
+			if c.wildcard != nil {
 				childPath = append(childPath, "xpfinst")
+			} else {
+				for i := 0; i < c.args; i++ {
+					if c.midKeyword != "" && i == c.midKeywordAt-1 {
+						childPath = append(childPath, c.midKeyword)
+					} else {
+						childPath = append(childPath, "xpfinst")
+					}
+				}
 			}
 			key := strings.Join(childPath, " ")
 			if seen[key] {
@@ -228,7 +245,62 @@ func TestMultiLeafAbsorptionPopulation9206(t *testing.T) {
 	//   - community members and address-set members are refused at COMPILE
 	//     (ValidCommunityMember, validateAddressSetMembersDefinedStrict). They
 	//     still absorb at the schema walk, so they stay in the count.
-	const wantAbsorbing, wantDistinct = 37, 26
+	// #9878: 37 -> 60 absorbing, 26 -> 39 distinct. Arming `security zones` +
+	// `security policies` brings thirteen more multi leaves inside a closed
+	// world (no `groups` rehosts for the zone-pair three: their 11-token
+	// rehost paths exceed this census's depth cap, so +13 structural for
+	// +13 distinct):
+	//
+	//	security policies global policy <p> match multi=application
+	//	security policies global policy <p> match multi=destination-address
+	//	security policies global policy <p> match multi=from-zone
+	//	security policies global policy <p> match multi=source-address
+	//	security policies global policy <p> match multi=to-zone
+	//	security policies from-zone <f> to-zone <t> policy <p> match multi=application
+	//	security policies from-zone <f> to-zone <t> policy <p> match multi=destination-address
+	//	security policies from-zone <f> to-zone <t> policy <p> match multi=source-address
+	//	security zones security-zone <z> address-book multi=address
+	//	security zones security-zone <z> host-inbound-traffic multi=protocols
+	//	security zones security-zone <z> host-inbound-traffic multi=system-services
+	//	security zones security-zone <z> interfaces <if> host-inbound-traffic multi=protocols
+	//	security zones security-zone <z> interfaces <if> host-inbound-traffic multi=system-services
+	//
+	// (The zone-pair three were missing at first: this census appended a
+	// single xpfinst per args>=1 node, collapsing `from-zone trust to-zone
+	// untrust` to `from-zone xpfinst`, so the control packed a malformed mid
+	// position the #9878 midKeyword gate rejects for the WRONG reason and
+	// the sites dropped silently. The walk now carries every arg slot with
+	// the fixed midKeyword at its own slot.)
+	//
+	// (The zone address-book address-SET rows were already counted — that
+	// node carries its own closedWorld flag.)
+	//
+	// The GREW note below says to check whether the new absorption reaches the
+	// compiler too. MEASURED, garbage value per site, strict CompileConfig:
+	//
+	//	global match source-address xpfbogus9206      STRICT REJECT (undefined address)
+	//	global match destination-address xpfbogus9206 STRICT REJECT (undefined address)
+	//	global match application xpfbogus9206         STRICT REJECT (#3144 undefined app)
+	//	global match from-zone xpfbogus9206           STRICT REJECT (undefined zone; #3402)
+	//	global match to-zone xpfbogus9206             STRICT REJECT (undefined zone; #3402)
+	//	zone-pair match source-address xpfbogus9206   STRICT REJECT (same undefined-address
+	//	  validator; dst/app share the global-measured validators)
+	//	zone address-book address xpfbogus9206        DEFINITION, not reference: `address
+	//	  <name> <prefix>` DEFINES the entry, so a garbage name with a valid
+	//	  prefix commits the same way any new address does — there is nothing
+	//	  to reject, and the earlier 9/1 framing was over 10 sites, not 13.
+	//	  The correct reach probe is trailing-after-prefix (TrailingTokens
+	//	  #3332): `address a1 10.0.0.0/8 xpfbogus9206` is STRICT REJECTED.
+	//	  0 reach.
+	//	zone + per-interface host-inbound-traffic     STRICT REJECT
+	//	  (validateHostInboundTokensStrict; per-interface measured with a defined
+	//	  interface, same token grammar per schema_security.go)
+	//
+	// So all thirteen are refused-or-definitional before enforcement: 0
+	// reach. Arming stays a strict improvement: keyword typos in these
+	// containers are now rejected, which the multi-leaf value route was
+	// never going to catch.
+	const wantAbsorbing, wantDistinct = 60, 39
 	if absorbing != wantAbsorbing || distinct != wantDistinct {
 		t.Errorf("#9206: %d sites absorb at the schema walk (%d excluding `groups` "+
 			"rehosts), want %d (%d).\n  %s\n\n"+
