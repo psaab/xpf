@@ -687,6 +687,20 @@ func runPreWalkGates(tree *ConfigTree, opts compileOpts) ([]string, error) {
 	// bypass both gates entirely on the committing node and reach the peer
 	// through the tolerant sync path (#6706 review blocker).
 
+	// #9838: an interface or a routing instance written as a bare leaf
+	// (`interfaces { ge-0/0/0; }`, `routing-instances { ri1; }`) compiles
+	// to no instance while its empty braced spelling compiles one — and
+	// nothing reports it. Strict (commit / commit-check): the first bare
+	// leaf hard-rejects naming the statement. Lenient (load / peer-sync):
+	// warn so an already-persisted or peer-synced config still boots.
+	// Zones are untouched: a zone written as a leaf already compiles via
+	// namedInstances, the same as its braced spelling.
+	bareLeafWarnings, err := validateBareLeafInstance9838(
+		tree.Children, opts.lenientBareLeafInstance9838)
+	if err != nil {
+		return nil, err
+	}
+
 	var warnings []string
 	warnings = append(warnings, ctrlCharWarnings...)
 	warnings = append(warnings, trackWarnings...)
@@ -722,5 +736,6 @@ func runPreWalkGates(tree *ConfigTree, opts compileOpts) ([]string, error) {
 	warnings = append(warnings, monitorWeightWarnings...)
 	warnings = append(warnings, rgArityWarnings...)
 	warnings = append(warnings, garpCountWarnings...)
+	warnings = append(warnings, bareLeafWarnings...)
 	return warnings, nil
 }
