@@ -334,15 +334,24 @@ type trapJob struct {
 const trapQueueDepth = 256
 
 // maxPerTargetTrapQueue caps how many jobs one receiver may hold in the
-// shared trap queue (#9917 F-140). Past the cap that receiver's new traps
-// are shed (counted in trapsDropped) so a dead receiver cannot fill all 256
-// slots and evict healthy-target traps behind it; up to seven capped sick
-// receivers still leave room, versus one today. The cap counts queued
-// PACKETS, not events -- a `version all` group consumes two slots per event
-// per target. This is DROP isolation only: the worker still drains one
-// shared FIFO, so a healthy trap admitted behind a full sick share waits
-// out up to 32 x ~6s worst-case serial sends (~192s) before delivery.
+// shared trap queue once the queue is under pressure (#9917 F-140). Past the
+// cap that receiver's new traps are shed (counted in trapsDropped) so a dead
+// receiver cannot fill the queue and evict healthy-target traps behind it. A
+// lone sick receiver holds at most ~half the queue (admitted pre-pressure),
+// versus all of it before; healthy targets always have room. The cap counts
+// queued PACKETS, not events -- a `version all` group consumes two slots per
+// event per target. This is DROP isolation only: the worker still drains one
+// shared FIFO, so a healthy trap admitted behind a sick backlog waits out the
+// serial sends ahead of it before delivery.
 const maxPerTargetTrapQueue = 32
+
+// trapCapPressureThreshold is the shared-queue occupancy at which the
+// per-target cap starts binding (#9917 F-140). Below half-full the queue
+// absorbs bursts freely -- including healthy fan-out while the worker is
+// transiently stalled -- so the cap cannot drop traffic the un-capped queue
+// would have held. Above half-full each receiver is capped, which is exactly
+// when one receiver's backlog threatens the others' room.
+const trapCapPressureThreshold = trapQueueDepth / 2
 
 // NewAgent creates a new SNMP agent with the given configuration. The
 // SNMPv3 engineBoots counter is loaded from defaultEngineBootsPath,

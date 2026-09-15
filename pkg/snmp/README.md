@@ -802,10 +802,13 @@ packet handlers, and MIB view that call into them.
   lazily (works for both `NewAgent` and bare-struct test agents). When the
   queue is full the trap is DROPPED and `trapsDropped` is incremented rather
   than blocking the caller — dropping is the correct backpressure when
-  targets are not draining. Admission additionally caps each receiver at
-  `maxPerTargetTrapQueue = 32` slots, so one dead receiver cannot fill the
-  shared queue and evict healthy-target traps behind it; that is drop
-  isolation only, the worker still drains one FIFO (#9917 F-140). The
+  targets are not draining. Once the queue is half-full, admission caps each
+  receiver at `maxPerTargetTrapQueue = 32` slots (host/host:port spellings and
+  numeric-IP variants key together), so one dead receiver cannot fill the
+  shared queue and evict healthy-target traps behind it; below half-full
+  bursts absorb freely, so the cap cannot drop traffic the un-capped queue
+  would have held. That is drop isolation only, the worker still drains one
+  FIFO (#9917 F-140). The
   delivery is replaceable through the per-Agent
   `trapSender` field (the seam tests use to inject a slow/mock sender on
   their own Agent; #5023 moved it off a shared package var so the injection

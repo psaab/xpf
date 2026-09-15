@@ -427,9 +427,11 @@ func sortedTrapGroups(cfg *config.SNMPConfig) []*config.SNMPTrapGroup {
 
 // normalizeTrapTarget maps a trap job's target spelling to its per-target
 // accounting key (#9917 F-140): host-only and host:port spellings of one
-// receiver share one cap, since sendTrap dials both at :162. DNS aliases (two
-// names for one box) still count separately -- resolving them at enqueue would
-// put a DNS lookup back on the link-monitor path.
+// receiver share one cap, since sendTrap dials both at :162, and numeric IPs
+// canonicalize (2001:0db8::9 and 2001:db8::9 key together) so spelling games
+// cannot multiply one receiver's share. Hostnames keep their given spelling:
+// DNS aliases still count separately -- resolving them at enqueue would put a
+// DNS lookup back on the link-monitor path -- and so do case variants.
 func normalizeTrapTarget(target string) string {
 	host, port, err := net.SplitHostPort(target)
 	if err != nil {
@@ -437,6 +439,9 @@ func normalizeTrapTarget(target string) string {
 	}
 	if port == "" {
 		port = "162"
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		host = ip.String()
 	}
 	return net.JoinHostPort(host, port)
 }
@@ -508,14 +513,19 @@ func (a *Agent) enqueueTrap(job trapJob) {
 	// buffered channel + default), and the worker never takes a.mu, so holding
 	// the lock across the send cannot deadlock on a slow/absent reader: a full
 	// queue drops immediately.
-	// #9917 F-140: per-target admission cap. One receiver may hold at most
-	// maxPerTargetTrapQueue slots; past that its new traps are shed here so a
-	// dead receiver cannot fill the shared queue and evict healthy-target
-	// traps. This is one decision with three mutually exclusive outcomes --
-	// cap-drop, queue-full-drop, admit -- so every enqueue counts exactly one
-	// outcome and the C180-026 accepted == delivered + dropped exactness holds.
+	// #9917 F-140: per-target admission cap, binding only under shared-queue
+	// pressure. One receiver past maxPerTargetTrapQueue sheds its new traps
+	// here -- but only once the queue holds trapCapPressureThreshold jobs, so
+	// healthy fan-out while the worker is transiently stalled still absorbs
+	// below half-full exactly as the un-capped queue would. This is one
+	// decision with three mutually exclusive outcomes -- cap-drop,
+	// queue-full-drop, admit -- so every enqueue counts exactly one outcome
+	// and the C180-026 accepted == delivered + dropped exactness holds.
+	// len(chan) under mu is approximate under a draining worker, which is fine
+	// for a pressure heuristic: both sides of the threshold shed-or-admit
+	// exactly once either way.
 	targetKey := normalizeTrapTarget(job.target)
-	if a.trapPerTarget[targetKey] >= maxPerTargetTrapQueue {
+	if len(a.trapQueue) >= trapCapPressureThreshold && a.trapPerTarget[targetKey] >= maxPerTargetTrapQueue {
 		a.mu.Unlock()
 		dropped := a.trapsDropped.Add(1)
 		slog.Warn("SNMP trap dropped: per-target queue cap reached",
