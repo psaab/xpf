@@ -461,6 +461,19 @@ pub(crate) struct ProcessStatus {
     pub session_delete_replica_dropped: u64,
     #[serde(rename = "session_delete_replica_drop_repaired", default)]
     pub session_delete_replica_drop_repaired: u64,
+    /// #9900 F-092: TX completions reaped beyond `outstanding_tx` (including
+    /// completions drained at gauge 0, which are definitionally stale).
+    /// Additive / defaulted for backward compatibility.
+    #[serde(rename = "tx_completion_skew", default)]
+    pub tx_completion_skew: u64,
+    /// #9900 F-092: reaped completion offsets dropped instead of recycled
+    /// (not an aligned in-region frame base). Additive / defaulted.
+    #[serde(rename = "tx_completion_invalid", default)]
+    pub tx_completion_invalid: u64,
+    /// #9900 F-091/F-092: fill-ring offsets dropped instead of submitted.
+    /// Additive / defaulted.
+    #[serde(rename = "fill_invalid", default)]
+    pub fill_invalid: u64,
     /// #9048: peer `DeleteSynced` commands REFUSED because the key named a
     /// LIVE LOCAL session this node is actively forwarding for — the
     /// delete-side mirror of the install-side clobber guard in

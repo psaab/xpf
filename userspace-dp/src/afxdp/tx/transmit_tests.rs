@@ -325,3 +325,41 @@ fn tx_retry_outcome_codes_4971() {
          allocate (revert to `Retry(String)` makes this > 0)"
     );
 }
+
+#[test]
+fn cancelled_prepared_foreign_fill_without_sink_parks_masked_base_9900() {
+    // #9900 F-092: a cross-slot Fill recycle with no shared sink parks in
+    // the local free pool masked to its frame BASE — the stored recycle
+    // offset is an RX addr (base + headroom), and planting it verbatim
+    // would submit unaligned TX descs that the completion path must drop.
+    let mut free_tx_frames = VecDeque::new();
+    let mut pending_fill_frames = VecDeque::new();
+
+    recycle_cancelled_prepared_offset_with_shared(
+        &mut free_tx_frames,
+        &mut pending_fill_frames,
+        None,
+        7,
+        PreparedTxRecycle::FillOnSlotWithOffset {
+            slot: 8,
+            offset: 4096 + 256,
+        },
+        4096 + 252,
+    );
+    assert!(pending_fill_frames.is_empty());
+    assert_eq!(free_tx_frames, VecDeque::from([4096]));
+
+    // An already-aligned offset is unchanged (the mask is idempotent).
+    recycle_cancelled_prepared_offset_with_shared(
+        &mut free_tx_frames,
+        &mut pending_fill_frames,
+        None,
+        7,
+        PreparedTxRecycle::FillOnSlotWithOffset {
+            slot: 8,
+            offset: 8192,
+        },
+        8192,
+    );
+    assert_eq!(free_tx_frames, VecDeque::from([4096, 8192]));
+}

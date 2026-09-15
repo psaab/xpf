@@ -134,7 +134,15 @@ pub(in crate::afxdp) fn recycle_cancelled_prepared_offset_with_shared(
                     return;
                 }
             }
-            free_tx_frames.push_back(recycle_offset);
+            // #9900 F-092: no shared sink for a cross-slot Fill recycle — the
+            // frame parks in the LOCAL free pool (an RX→TX migration, as
+            // before), but masked to its frame BASE. The stored recycle offset
+            // is an RX addr (`base + UMEM_HEADROOM`); planting it verbatim
+            // would submit unaligned TX descs that the completion path must
+            // then drop as invalid, leaking the frame. Masking keeps the pool
+            // aligned-only, which is what the reap check requires.
+            free_tx_frames
+                .push_back(recycle_offset & !((crate::afxdp::UMEM_FRAME_SIZE as u64) - 1));
         }
     }
 }

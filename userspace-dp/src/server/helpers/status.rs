@@ -184,6 +184,12 @@ pub(crate) fn refresh_status(state: &mut ServerState) {
         state.afxdp.peer_delete_refused_local_owned_total();
     state.status.shared_session_poison_recoveries =
         state.afxdp.shared_session_poison_recoveries_total();
+    // #9900 F-091/F-092: TX completion skew (over-delivery), invalid
+    // completions dropped, and invalid fill offsets dropped. All three are
+    // kernel-fault signals: zero in a healthy dataplane.
+    state.status.tx_completion_skew = state.afxdp.tx_completion_skew_total();
+    state.status.tx_completion_invalid = state.afxdp.tx_completion_invalid_total();
+    state.status.fill_invalid = state.afxdp.fill_invalid_total();
     // #7398: the three counters below were computed, unit-tested and never
     // assigned into ProcessStatus, so they reached no operator through status,
     // gRPC or Prometheus. They are the queue the UNSURFACED allowlist below

@@ -407,6 +407,46 @@ fn process_status_worker_command_queue_drops_roundtrip_6929() {
     assert_eq!(legacy.worker_command_queue_drops, 0);
 }
 
+#[test]
+fn process_status_tx_completion_counters_roundtrip_9900() {
+    let status = ProcessStatus {
+        tx_completion_skew: 3,
+        tx_completion_invalid: 5,
+        fill_invalid: 7,
+        ..Default::default()
+    };
+    let value: serde_json::Value =
+        serde_json::to_value(&status).expect("serialize ProcessStatus to Value");
+    assert_eq!(value["tx_completion_skew"], 3);
+    assert_eq!(value["tx_completion_invalid"], 5);
+    assert_eq!(value["fill_invalid"], 7);
+
+    let back: ProcessStatus = serde_json::from_value(value).expect("deserialize ProcessStatus");
+    assert_eq!(back.tx_completion_skew, 3);
+    assert_eq!(back.tx_completion_invalid, 5);
+    assert_eq!(back.fill_invalid, 7);
+
+    // Pre-#9900 payload (keys absent) must decode with zero defaults.
+    let mut legacy_value =
+        serde_json::to_value(ProcessStatus::default()).expect("serialize default ProcessStatus");
+    {
+        let obj = legacy_value
+            .as_object_mut()
+            .expect("ProcessStatus serializes to an object");
+        obj.remove("tx_completion_skew")
+            .expect("new key present before strip");
+        obj.remove("tx_completion_invalid")
+            .expect("new key present before strip");
+        obj.remove("fill_invalid")
+            .expect("new key present before strip");
+    }
+    let legacy: ProcessStatus =
+        serde_json::from_value(legacy_value).expect("pre-#9900 payload decodes");
+    assert_eq!(legacy.tx_completion_skew, 0);
+    assert_eq!(legacy.tx_completion_invalid, 0);
+    assert_eq!(legacy.fill_invalid, 0);
+}
+
 // #2402/#6641: round-trip + backward-compat pin for the shared-session
 // poison-recovery counter. The wire key feeds
 // pkg/dataplane/userspace/protocol_status.go and the Prometheus counter
