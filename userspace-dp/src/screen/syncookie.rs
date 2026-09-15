@@ -52,6 +52,24 @@ const SYN_COOKIE_VALIDATED_CACHE_TTL_SECS: u64 = SynCookieCodec::EPOCH_SECS;
 pub(super) const SYN_COOKIE_STANDBY_ACK_VALIDATION_RATE_LIMIT_PER_SEC: u32 = 4096;
 #[cfg(test)]
 pub(super) const SYN_COOKIE_STANDBY_ACK_VALIDATION_RATE_LIMIT_PER_SEC: u32 = 8;
+/// #9902 F-023: flood-ACTIVE SYN-cookie ACK validation budget, per worker per
+/// zone (a separate `TokenBucket` from the standby one: standby sizes
+/// rare-miss opportunism on an idle zone, while active is the flood regime
+/// where legitimate session-miss ACKs — returning handshakes — concentrate, so
+/// sharing standby's 4096/s fail-closed would drop legitimate handshakes under
+/// moderate floods).
+///
+/// PROVISIONAL POLICY, explicitly unmeasured: validation costs on the order of
+/// tens of nanoseconds (epoch math plus one or two SipHash MACs), so 65536/s
+/// caps the flood's validation work at single-digit milliseconds of CPU per
+/// worker core per second while leaving headroom for legitimate handshake
+/// bursts. A follow-up with production measurements may tune it. This shared
+/// budget CAN reject legitimate handshakes once spent — that is the fail-closed
+/// tradeoff, and why the value sits far above standby's.
+#[cfg(not(test))]
+pub(super) const SYN_COOKIE_ACTIVE_ACK_VALIDATION_RATE_LIMIT_PER_SEC: u32 = 65536;
+#[cfg(test)]
+pub(super) const SYN_COOKIE_ACTIVE_ACK_VALIDATION_RATE_LIMIT_PER_SEC: u32 = 64;
 const _: [(); SYN_COOKIE_ISN_BITS as usize] = [(); SYN_COOKIE_LAYOUT_BITS as usize];
 
 /// Three-bit MSS table encoded in userspace SYN cookies.

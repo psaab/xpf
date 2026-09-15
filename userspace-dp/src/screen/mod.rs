@@ -265,6 +265,7 @@ use rate::TokenBucket;
 use scan::{IpSweepTracker, PortScanTracker};
 #[cfg(test)]
 use syn_rate::SynRateSketch;
+use syncookie::SYN_COOKIE_ACTIVE_ACK_VALIDATION_RATE_LIMIT_PER_SEC;
 use syncookie::SYN_COOKIE_STANDBY_ACK_VALIDATION_RATE_LIMIT_PER_SEC;
 #[cfg(not(test))]
 use syncookie::SynCookieValidatedCache;
@@ -690,6 +691,21 @@ impl ScreenState {
             .map(|z| {
                 z.syn_cookie_standby_ack_counter
                     .admit_is_over(now_ns, SYN_COOKIE_STANDBY_ACK_VALIDATION_RATE_LIMIT_PER_SEC)
+            })
+            .unwrap_or(true)
+    }
+
+    /// #9902 F-023: flood-ACTIVE SYN-cookie ACK validation budget check — the
+    /// per-zone `TokenBucket` lives on `ZoneScreenState`, separate from the
+    /// standby one. An absent zone (no profile) returns `true` (limited),
+    /// matching the standby helper: without a profile there is no active
+    /// window to validate into.
+    fn active_syn_cookie_ack_validation_limited(&mut self, zone: &str, now_ns: u64) -> bool {
+        self.zones
+            .get_mut(zone)
+            .map(|z| {
+                z.syn_cookie_active_ack_counter
+                    .admit_is_over(now_ns, SYN_COOKIE_ACTIVE_ACK_VALIDATION_RATE_LIMIT_PER_SEC)
             })
             .unwrap_or(true)
     }
@@ -1375,6 +1391,26 @@ impl ScreenState {
             if self.standby_syn_cookie_ack_validation_limited(zone, now_ns) {
                 return SynCookieAckVerdict::NotApplicable;
             }
+        } else {
+            // #9902 F-023: the flood-active arm used to validate EVERY session-
+            // miss ACK unthrottled — a spoofed-ACK flood bought unbounded SipHash
+            // work per ACK. Throttle it fail-closed like every other active arm
+            // (closing flags, no codec, bad MAC all refuse as Invalid):
+            // out-of-window ACKs refuse BEFORE spending budget (this moves the
+            // `cookie_full_epoch is None` check below ahead of budget charging —
+            // verdict-preserving, since a failed MAC validation is Invalid here
+            // too), and over-budget ACKs refuse as Invalid without MAC work.
+            // The 24-bit MAC is KEPT (widening it is a wire-incompatible ISN
+            // layout change shared with HA peers); the throttle is the bounded
+            // hardening. Limitation, stated: `syn_cookie_ack_invalid` cannot
+            // distinguish throttled ACKs from bad-MAC ones — one counter, three
+            // Invalid origins.
+            if !SynCookieCodec::wire_epoch_matches_validation_window(current_epoch, cookie_isn) {
+                return SynCookieAckVerdict::Invalid;
+            }
+            if self.active_syn_cookie_ack_validation_limited(zone, now_ns) {
+                return SynCookieAckVerdict::Invalid;
+            }
         }
         // The cookie MAC binds the full 4-tuple (that is what makes the
         // cookie unforgeable for this connection); the whitelist it seeds is
@@ -1435,6 +1471,28 @@ impl ScreenState {
         self.zones
             .get(zone)
             .map(|z| z.syn_cookie_standby_ack_counter.is_cold())
+            .unwrap_or(true)
+    }
+
+    /// #9902 F-023: whole tokens still available in a zone's flood-ACTIVE
+    /// SYN-cookie ACK validation budget. Mirrors the standby seam: `0` means
+    /// the budget is fully spent for this instant.
+    #[cfg(test)]
+    fn syn_cookie_active_ack_available(&self, zone: &str) -> u64 {
+        self.zones
+            .get(zone)
+            .map(|z| z.syn_cookie_active_ack_counter.available_tokens())
+            .unwrap_or(0)
+    }
+
+    /// #9902 F-023: true if a zone's flood-ACTIVE SYN-cookie ACK budget bucket
+    /// has never been charged — i.e. the validate path rejected the ACK BEFORE
+    /// reaching the active limiter, so no SipHash budget was spent. Test seam.
+    #[cfg(test)]
+    fn syn_cookie_active_ack_untouched(&self, zone: &str) -> bool {
+        self.zones
+            .get(zone)
+            .map(|z| z.syn_cookie_active_ack_counter.is_cold())
             .unwrap_or(true)
     }
 
