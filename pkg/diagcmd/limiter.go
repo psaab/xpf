@@ -358,6 +358,31 @@ const MaxConcurrentVtyshShellOuts = 4
 // Mirrors DefaultLimiter and SessionWalkLimiter.
 var VtyshLimiter = NewLimiter(MaxConcurrentVtyshShellOuts)
 
+// MaxConcurrentMonitorInterfaceStreams bounds how many gRPC MonitorInterface
+// streams may run at once (#9891).
+//
+// Each stream holds a goroutine plus a 1s ticker for its lifetime and renders
+// a frame every tick; the per-tick dataplane cost is already coalesced O(1)
+// by the Server-wide status cache (#5707), so the unbounded dimension is
+// subscriber COUNT, not per-tick work. Before this bound MonitorInterface was
+// the one monitor stream with no admission gate: MonitorPacketDrop refuses
+// past its EventBuffer cap and Ping/Traceroute refuse past
+// MaxConcurrentDiagnostics, while MonitorInterface admitted without limit and
+// a slow consumer parked its goroutine in a blocking Send with no deadline.
+//
+// Sized to match the sibling streaming budget (logging defaultMaxSubscribers
+// 64, the cap MonitorPacketDrop enforces via TrySubscribe) rather than the
+// fork/walk budgets of 4: these streams hold no child and walk no table, and
+// legitimate use is single-digit long-lived streams, so 64 is a runaway
+// ceiling, not a throttle. A dedicated budget so saturating it refuses only
+// monitor streams and never a diagnostic, walk, or FRR read.
+const MaxConcurrentMonitorInterfaceStreams = 64
+
+// MonitorInterfaceLimiter is the process-wide limiter for gRPC
+// MonitorInterface streams. Consumed only by that RPC today; process-wide so
+// the bound holds regardless of how many Server instances serve it.
+var MonitorInterfaceLimiter = NewLimiter(MaxConcurrentMonitorInterfaceStreams)
+
 // NamedLimiter pairs a process-wide limiter with the label it is exported under
 // (xpf_admission_refusals_total{limiter="..."}).
 type NamedLimiter struct {
@@ -387,5 +412,6 @@ func AllLimiters() []NamedLimiter {
 		{"diagnostic", DefaultLimiter},
 		{"snapshot_read", SnapshotReadLimiter},
 		{"vtysh", VtyshLimiter},
+		{"monitor_interface", MonitorInterfaceLimiter},
 	}
 }
