@@ -119,9 +119,13 @@ func stripInactiveNodes(nodes []*Node) []*Node {
 			IsLeaf:        n.IsLeaf,
 			Annotation:    n.Annotation,
 			InheritedFrom: n.InheritedFrom,
-			Inactive:      false,
-			Line:          n.Line,
-			Column:        n.Column,
+			// #9862: the strip runs before expansion today, so this is latent — but
+			// dropping it here would repeat the #6673 provenance-drop class the
+			// moment any flow expands first and strips second.
+			fromGroups: append([]string(nil), n.fromGroups...),
+			Inactive:   false,
+			Line:       n.Line,
+			Column:     n.Column,
 		}
 		result = append(result, clone)
 	}

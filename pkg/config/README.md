@@ -1706,8 +1706,8 @@ same-keyed destination used to merge into the FIRST one only.
 - A group container's wildcard-keyed children now reach every same-keyed
   destination container, and the rest go to the one that can receive them
   (`sameKeyedContainers9802`, `receivingContainer9802`). A level spread over two
-  blocks is one level, which is the rule `siblingsExcludeGroup` already applies
-  to `apply-groups-except` (#9422) and the pre-passes apply across roots
+  blocks is one level, which is the rule the #9422 sibling-except union already
+  applies to `apply-groups-except` and the pre-passes apply across roots
   (#5741).
 
 **Group expansion of zone statements written as leaves (#9801, #9831):**

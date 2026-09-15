@@ -121,7 +121,11 @@ func (t *ConfigTree) expandGroups(tagInherited bool, vars map[string]string) err
 	// The nil ancestorPath means we're at the top level. The memo map is
 	// created once here and threaded through the whole recursion so a group
 	// reachable via many paths (a converging DAG) is expanded ONCE (#4474).
-	if err := expandGroupsRecursive(&t.Children, groups, nil, nil, make(map[string][]*Node), tagInherited, vars, 0, &groupExpandBudget{}); err != nil {
+	// haveExcept gates ALL #9862 machinery (provenance tagging, exclusion
+	// accumulation, nested filtering): without a single `apply-groups-except`
+	// in the tree, expansion is bit-identical to #9422.
+	haveExcept := treeHasApplyGroupsExcept9862(t.Children)
+	if err := expandGroupsRecursive(&t.Children, groups, nil, nil, make(map[string][]*Node), tagInherited, vars, 0, &groupExpandBudget{}, haveExcept); err != nil {
 		return err
 	}
 
@@ -229,7 +233,9 @@ func walkGroupToContext(groupChildren []*Node, ancestorPath [][]string) []*Node 
 // context) so a converging DAG expands each group once (#4474 fan-out fix).
 // If tagInherited is true, merged nodes get InheritedFrom set to the group name.
 // vars provides ${var} replacements for group names (may be nil).
-func expandGroupsRecursive(nodes *[]*Node, groups map[string]*Node, ancestorPath [][]string, seen map[string]bool, memo map[string][]*Node, tagInherited bool, vars map[string]string, depth int, budget *groupExpandBudget) error {
+// haveExcept gates the #9862 provenance tagging: with no `apply-groups-except`
+// in the tree, clones stay untagged and every filter below keeps all.
+func expandGroupsRecursive(nodes *[]*Node, groups map[string]*Node, ancestorPath [][]string, seen map[string]bool, memo map[string][]*Node, tagInherited bool, vars map[string]string, depth int, budget *groupExpandBudget, haveExcept bool) error {
 	// #5194 A3-b2-F1: bound the nested-group recursion depth before it can
 	// exhaust the goroutine stack on a deep acyclic chain g1->g2->...->gN.
 	if depth > maxGroupExpandDepth {
@@ -282,7 +288,7 @@ func expandGroupsRecursive(nodes *[]*Node, groups map[string]*Node, ancestorPath
 				if err := budget.charge(countNodes(cached)); err != nil {
 					return err
 				}
-				if err := mergeNodes(nodes, cloneNodes(cached), ancestorPath, budget, name, vars); err != nil {
+				if err := mergeNodes(nodes, cloneNodes(cached), ancestorPath, budget, name, vars, nil, haveExcept); err != nil {
 					return err
 				}
 			}
@@ -312,6 +318,14 @@ func expandGroupsRecursive(nodes *[]*Node, groups map[string]*Node, ancestorPath
 			if tagInherited {
 				tagNodesInherited(cloned, name)
 			}
+			// #9862: leaf provenance for `apply-groups-except` through nested
+			// groups. Tags the outer group's own body BEFORE the nested
+			// expansion below merges nested content in, so nested nodes keep
+			// the nested name. Gated: untagged clones filter identically to
+			// #9422 when the tree carries no exclusion.
+			if haveExcept {
+				addNodeContrib9862(cloned, []string{name})
+			}
 			// Transitive apply-groups (#4474): a group body may itself say
 			// `apply-groups G2` (a nested-group template, a standard Junos
 			// idiom). Expand the group's OWN references to a fixed point BEFORE
@@ -323,7 +337,7 @@ func expandGroupsRecursive(nodes *[]*Node, groups map[string]*Node, ancestorPath
 			// inherited FROM the nested group are tagged with THAT group's name:
 			// tagNodesInherited above ran before this call, so it tags only the
 			// outer group's own body and does not clobber the nested tags.
-			if err := expandGroupsRecursive(&cloned, groups, ancestorPath, seen, memo, tagInherited, vars, depth+1, budget); err != nil {
+			if err := expandGroupsRecursive(&cloned, groups, ancestorPath, seen, memo, tagInherited, vars, depth+1, budget, haveExcept); err != nil {
 				return err
 			}
 			expanded = cloned
@@ -334,7 +348,7 @@ func expandGroupsRecursive(nodes *[]*Node, groups map[string]*Node, ancestorPath
 		// merge a SEPARATE clone into the parent so the cache is never mutated.
 		memo[memoKey] = cloneNodes(expanded)
 		if expanded != nil {
-			if err := mergeNodes(nodes, expanded, ancestorPath, budget, name, vars); err != nil {
+			if err := mergeNodes(nodes, expanded, ancestorPath, budget, name, vars, nil, haveExcept); err != nil {
 				return err
 			}
 		}
@@ -360,7 +374,7 @@ func expandGroupsRecursive(nodes *[]*Node, groups map[string]*Node, ancestorPath
 			// Descending the config TREE (not the nested-group chain), so depth
 			// is unchanged — tree depth is already bounded by the parser
 			// brace-depth cap (#4148). The shared work budget still applies.
-			if err := expandGroupsRecursive(&n.Children, groups, childPath, seen, memo, tagInherited, vars, depth, budget); err != nil {
+			if err := expandGroupsRecursive(&n.Children, groups, childPath, seen, memo, tagInherited, vars, depth, budget, haveExcept); err != nil {
 				return err
 			}
 		}
@@ -391,7 +405,15 @@ func expandGroupsRecursive(nodes *[]*Node, groups map[string]*Node, ancestorPath
 // block+block UNIONED — so an inline `match application junos-http` that
 // inherited a group's `match application junos-https` silently DROPPED
 // junos-https (fable-164 L-8), narrowing a `then deny` to junos-http only.
-func mergeNodes(dst *[]*Node, src []*Node, ancestorPath [][]string, budget *groupExpandBudget, group string, vars map[string]string) error {
+// excluded accumulates the vars-resolved `apply-groups-except` names from this
+// level and every ancestor level of THIS merge's descent (#9862): the
+// exclusion reads "here and below", so an ancestor's exclusion filters the
+// kept containers' children. Each call descends on its own copy
+// (cloneExceptSet9862); sibling destinations never share the map. A fresh
+// application from expandGroupsRecursive starts from nil — accumulation never
+// crosses application boundaries, so an explicitly re-applied group below an
+// exclusion still applies, exactly as #9422.
+func mergeNodes(dst *[]*Node, src []*Node, ancestorPath [][]string, budget *groupExpandBudget, group string, vars map[string]string, excluded map[string]bool, haveExcept bool) error {
 	// #9422: `apply-groups-except <group>` at THIS hierarchy level stops the
 	// named group's inheritance here and below. Checking at every merge level
 	// (rather than pre-pruning the group body once) is what makes it correct
@@ -399,15 +421,34 @@ func mergeNodes(dst *[]*Node, src []*Node, ancestorPath [][]string, budget *grou
 	// matching destination container — those containers may disagree about
 	// whether they exclude the group, and the wildcard branch below recurses
 	// into each with its OWN children as dst.
-	if nodesExcludeGroup(*dst, group, vars) {
+	//
+	// #9862: the outer (merged) group keeps its veto EXACTLY. A veto at any
+	// level prunes the descent, so membership in the accumulated set is
+	// equivalent to the old per-level check — and nested contributors filter
+	// per node below only when the outer application proceeds.
+	level := excluded
+	if haveExcept {
+		level = collectExceptNames9862(*dst, vars, cloneExceptSet9862(excluded))
+	}
+	if level[group] {
 		return nil
 	}
 	for _, s := range src {
 		// #6767: one unit per source node MERGED, so a deep group subtree is
 		// bounded by its own size rather than by the single reference that
-		// pulled it in.
+		// pulled it in. Charged BEFORE the #9862 filter below: skipped nodes
+		// cost their visit; only vetoed (unvisited) subtrees stay uncharged,
+		// exactly as the #9422 vetoes. No charge line in this function moved.
 		if err := budget.charge(1); err != nil {
 			return err
+		}
+		// #9862: leaf filter for nested contributors. The outer group passed
+		// its veto above, so this drops only nodes a nested exclusion names.
+		// Leaves are atomic; containers route or adopt as shells when a
+		// descendant survives. With no exclusions on the path this is one
+		// length check per node.
+		if contribExcluded9862(s, group, level) && (s.IsLeaf || !subtreeSurvives9862(s, group, level)) {
+			continue
 		}
 		if s.IsLeaf {
 			key := ""
@@ -429,11 +470,21 @@ func mergeNodes(dst *[]*Node, src []*Node, ancestorPath [][]string, budget *grou
 				// child, so an inline value still wins.
 				if !peer.IsLeaf {
 					if body := groupPackedLeafBody(ancestorPath, s); body != nil {
+						// #9862: the synthesized body carries s's provenance, so a
+						// nested group's packed leaf filters as nested below. The
+						// fallback covers only the impossible untagged case.
+						if haveExcept {
+							contrib := s.fromGroups
+							if len(contrib) == 0 {
+								contrib = []string{group}
+							}
+							addNodeContrib9862(body, contrib)
+						}
 						if err := budget.charge(countNodes(body)); err != nil {
 							return err
 						}
 						if err := mergeNodes(&peer.Children, body,
-							appendPath(ancestorPath, peer.Keys), budget, group, vars); err != nil {
+							appendPath(ancestorPath, peer.Keys), budget, group, vars, level, haveExcept); err != nil {
 							return err
 						}
 						continue
@@ -461,7 +512,17 @@ func mergeNodes(dst *[]*Node, src []*Node, ancestorPath [][]string, budget *grou
 				if keysMatchWildcard(d.Keys, s.Keys) && (!d.IsLeaf || zoneLeafTakesWildcard9801(ancestorPath, d)) {
 					// #9801: a zone written as a leaf becomes the empty container its
 					// braced spelling is, and takes the group the same way.
-					d.IsLeaf = false
+					// #9862: when filtering is active the flip waits for an
+					// adoption (growth-detect): an all-filtered merge must not
+					// reshape the leaf it adds nothing to. mergeNodes only
+					// appends, so growth is exactly adoption. Unconditional
+					// when filtering is off, exactly as before.
+					leafKids := -1
+					if haveExcept {
+						leafKids = len(d.Children)
+					} else {
+						d.IsLeaf = false
+					}
 					// #6767: THIS is the fan-out. One wildcard source is cloned
 					// into every matching destination container, so the cost is
 					// the product, not the reference count. Charge the clone's
@@ -470,8 +531,11 @@ func mergeNodes(dst *[]*Node, src []*Node, ancestorPath [][]string, budget *grou
 						return err
 					}
 					cloned := cloneNodes(s.Children)
-					if err := mergeNodes(&d.Children, cloned, appendPath(ancestorPath, d.Keys), budget, group, vars); err != nil {
+					if err := mergeNodes(&d.Children, cloned, appendPath(ancestorPath, d.Keys), budget, group, vars, level, haveExcept); err != nil {
 						return err
+					}
+					if haveExcept && len(d.Children) > leafKids {
+						d.IsLeaf = false
 					}
 				}
 			}
@@ -502,7 +566,22 @@ func mergeNodes(dst *[]*Node, src []*Node, ancestorPath [][]string, budget *grou
 		// descend into, because a level spread over two blocks
 		// (`system {...} system { apply-groups-except G; ... }`) is one
 		// hierarchy level to the operator and to the compiler.
-		if siblingsExcludeGroup(*dst, s.Keys, group, vars) {
+		//
+		// #9862: the sibling scan becomes a union scope for the descent below.
+		// Veto-if-outer is exactly the old check (the entry veto already passed,
+		// so the outer name can only come from the union); nested contributors
+		// then filter against the level's whole union, since same-keyed twins
+		// are ONE level. Only plain containers consult siblings — leaves,
+		// wildcards, and leaf-list blocks keep their entry-level check alone,
+		// exactly as before.
+		scope := level
+		if haveExcept {
+			scope = collectSiblingExceptNames9862(*dst, s.Keys, vars, cloneExceptSet9862(level))
+		}
+		if scope[group] {
+			continue
+		}
+		if contribExcluded9862(s, group, scope) && !subtreeSurvives9862(s, group, scope) {
 			continue
 		}
 
@@ -524,7 +603,7 @@ func mergeNodes(dst *[]*Node, src []*Node, ancestorPath [][]string, budget *grou
 			// `edge` to empty.
 			for _, c := range rest {
 				d := receivingContainer9802(targets, c)
-				if err := mergeNodes(&d.Children, []*Node{c}, appendPath(ancestorPath, d.Keys), budget, group, vars); err != nil {
+				if err := mergeNodes(&d.Children, []*Node{c}, appendPath(ancestorPath, d.Keys), budget, group, vars, scope, haveExcept); err != nil {
 					return err
 				}
 			}
@@ -538,7 +617,7 @@ func mergeNodes(dst *[]*Node, src []*Node, ancestorPath [][]string, budget *grou
 					return err
 				}
 				cloned := cloneNodes(wild)
-				if err := mergeNodes(&d.Children, cloned, appendPath(ancestorPath, d.Keys), budget, group, vars); err != nil {
+				if err := mergeNodes(&d.Children, cloned, appendPath(ancestorPath, d.Keys), budget, group, vars, scope, haveExcept); err != nil {
 					return err
 				}
 			}
@@ -563,12 +642,22 @@ func mergeNodes(dst *[]*Node, src []*Node, ancestorPath [][]string, budget *grou
 			// counts what is actually added.
 			hadChildren := len(s.Children) > 0
 			s.Children = pruneWildcardInstances9802(appendPath(ancestorPath, s.Keys), s.Children)
+			// #9862: the adopted subtree is never recursed into either, so
+			// excluded nested contributors inside it would ride along. Pruned
+			// recursively AFTER the wildcard prune (the two commute) and
+			// BEFORE the charge below, so the budget counts what lands.
+			// No-op when the scope is empty.
+			wildLeft := len(s.Children)
+			s.Children = pruneExcluded9862(s.Children, group, scope)
 			if wildcardInstanceNode9802(ancestorPath, s) {
 				continue
 			}
 			// A container whose whole body was wildcard-keyed adds nothing:
 			// adopting it would leave an empty stanza the operator never wrote.
-			if hadChildren && len(s.Children) == 0 {
+			// A body emptied by the exclusion filter is different: the shell
+			// is independently authored (clean own provenance), so it is
+			// preserved — only an excluded shell with nothing surviving drops.
+			if hadChildren && len(s.Children) == 0 && (wildLeft == 0 || contribExcluded9862(s, group, scope)) {
 				continue
 			}
 			// #6767: adopting a container WHOLESALE adds its entire subtree to
@@ -701,6 +790,19 @@ func leafListPeer(dst []*Node, key string) *Node {
 // ambiguous run was silently resolved -- and hidden from the gate -- whenever an
 // inline leaf of the same name existed. A QUOTED repeat is an ordinary member.
 func mergeLeafListInto(dst, src *Node) {
+	// #9862: a tagged dst is a group body being merged into (inner merge) or
+	// a previously merged node (outer merge), so this union can mix members
+	// across groups and the node's provenance is uncertain afterwards.
+	// Cleared: filters then fall back to the merge's outer group, which keeps
+	// the node unless the outer application is itself vetoed. Keeping either
+	// side's tag would over-exclude the other side's members; member-level
+	// provenance is a follow-up. The clearing is load-bearing only for inner
+	// merges (whose product becomes outer src); on outer dst it is harmless
+	// because dst-side tags are never consulted. Deliberately unconditional
+	// (no haveExcept here): untagged trees clear nothing.
+	if dst.fromGroups != nil {
+		dst.fromGroups = nil
+	}
 	self := dst.Keys[0]
 	seen := make(map[string]bool)
 	for _, m := range leafListMembers9627(dst) {
@@ -715,6 +817,10 @@ func mergeLeafListInto(dst, src *Node) {
 			continue
 		}
 		if seen[m.value] {
+			// #9862: the duplicate is owned by BOTH sides. Record src's
+			// ownership on the surviving member so excluding one owner
+			// keeps the member for the other (never over-excludes).
+			mergeLeafListDupOwnership9862(dst, src, m.value)
 			continue
 		}
 		seen[m.value] = true

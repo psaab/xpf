@@ -41,57 +41,251 @@ package config
 // break a shared cluster config that excludes a `${node}` group defined only in
 // the peer's view.
 
-// siblingsExcludeGroup reports whether ANY destination container sharing these
-// keys carries the exclusion.
+// treeHasApplyGroupsExcept9862 reports whether the tree carries any
+// `apply-groups-except` statement anywhere, including inside group definitions
+// (an exclusion authored in a group's own body filters that group's nested
+// merges). It gates ALL #9862 machinery: when false, expansion tags nothing,
+// accumulates nothing, and filters nothing — bit-identical to #9422.
 //
-// It is used at the CONTAINER descent only. The wildcard branch does not need
-// it: that branch already recurses into each matching destination separately,
-// so the per-destination decision is taken by nodesExcludeGroup on entry to the
-// recursive call — and a same-keyed duplicate under a wildcard-matched
-// container is folded away by mergeDuplicateBlocks9023 before expansion runs.
-// A copy of this check was written there first and MUTATION-TESTED AS DEAD
-// (severing it killed nothing), which is what identified it as redundant rather
-// than as an untested branch.
-//
-// It exists because one logical hierarchy level can be spread across several
-// AST nodes — `system { host-name p; } … system { apply-groups-except G; }` is
-// two top-level `system` nodes, and the compiler reads both — while mergeNodes
-// merges a group's contribution into the FIRST matching container only. Asking
-// only that container reads the exclusion out of a config that plainly carries
-// it, which was measured: the same fixture honoured the statement with one
-// `system` block and ignored it with two. The scan is over `keysEqual`
-// siblings, the same identity mergeNodes itself uses to decide what "the same
-// container" means, so the two cannot drift.
-func siblingsExcludeGroup(dst []*Node, keys []string, group string, vars map[string]string) bool {
-	for _, d := range dst {
-		if d == nil || d.IsLeaf || !keysEqual(d.Keys, keys) {
+// The scan matches the keyword in ANY key position, not just the node's own:
+// a packed group leaf (`routing-instances ri9 apply-groups-except H;`) carries
+// the exclusion on its Keys tail with Name()=="routing-instances", and #7648
+// synthesis materializes the real exclusion node into the destination DURING
+// the merge — after this scan ran. Missing it would leave the gate off while
+// a live exclusion sits in the tree, regressing the #9422 vetoes (which
+// consulted the tree unconditionally) for subsequently applied groups. A
+// keyword-valued leaf (`description apply-groups-except;`) trips the gate
+// spuriously, but that only enables tagging walks: collection still reads
+// statement nodes, so no exclusion is invented. Vars need no handling: the
+// splitter takes no vars, so a `${var}` tail can never synthesize an
+// exclusion the literal scan misses.
+func treeHasApplyGroupsExcept9862(nodes []*Node) bool {
+	for _, n := range nodes {
+		if n == nil {
 			continue
 		}
-		if nodesExcludeGroup(d.Children, group, vars) {
+		for _, k := range n.Keys {
+			if k == "apply-groups-except" {
+				return true
+			}
+		}
+		if treeHasApplyGroupsExcept9862(n.Children) {
 			return true
 		}
 	}
 	return false
 }
 
-// nodesExcludeGroup reports whether this hierarchy level carries an
-// `apply-groups-except` naming group. Bracket lists
+// cloneExceptSet9862 copies an accumulated exclusion set for descent. mergeNodes
+// recursion must never share the map with its caller: each level adds its own
+// names, and a shared map would leak one destination's exclusions into its
+// siblings. Sets hold a handful of names, so the copy is negligible.
+func cloneExceptSet9862(set map[string]bool) map[string]bool {
+	if len(set) == 0 {
+		return nil
+	}
+	out := make(map[string]bool, len(set))
+	for name := range set {
+		out[name] = true
+	}
+	return out
+}
+
+// collectExceptNames9862 union-adds the vars-resolved group names this
+// hierarchy level excludes into into, allocating it on first use. Bracket lists
 // (`apply-groups-except [ g1 g2 ]`) collapse onto one node's Keys, so every key
 // past the keyword is a group name; `${var}` names resolve the same way
 // `apply-groups` names do.
-func nodesExcludeGroup(nodes []*Node, group string, vars map[string]string) bool {
-	if group == "" {
-		return false
-	}
+func collectExceptNames9862(nodes []*Node, vars map[string]string, into map[string]bool) map[string]bool {
 	for _, n := range nodes {
 		if n == nil || n.Name() != "apply-groups-except" {
 			continue
 		}
 		for _, key := range n.Keys[1:] {
-			if resolveVars(key, vars) == group {
-				return true
+			if into == nil {
+				into = make(map[string]bool)
 			}
+			into[resolveVars(key, vars)] = true
+		}
+	}
+	return into
+}
+
+// collectSiblingExceptNames9862 union-adds the exclusions carried by EVERY
+// same-keyed destination container into into. It is used at the CONTAINER
+// descent only. The wildcard branch does not need it: that branch already
+// recurses into each matching destination separately, so the per-destination
+// decision is taken by the entry accumulation of the recursive call — and a
+// same-keyed duplicate under a wildcard-matched container is folded away by
+// mergeDuplicateBlocks9023 before expansion runs. A copy of this check was
+// written there first and MUTATION-TESTED AS DEAD (severing it killed nothing),
+// which is what identified it as redundant rather than as an untested branch.
+//
+// The union exists because one logical hierarchy level can be spread across
+// several AST nodes — `system { host-name p; } … system { apply-groups-except
+// G; }` is two top-level `system` nodes, and the compiler reads both — while
+// mergeNodes merges a group's contribution into selected containers only.
+// Asking only the receiving container reads the exclusion out of a config that
+// plainly carries it, which was measured: the same fixture honoured the
+// statement with one `system` block and ignored it with two. The scan is over
+// `keysEqual` siblings, the same identity mergeNodes itself uses to decide
+// what "the same container" means, so the two cannot drift. #9862 keeps the
+// union for nested contributors too: same-keyed twins are ONE level, so an
+// `apply-groups-except H` in either twin excludes H from the level.
+func collectSiblingExceptNames9862(dst []*Node, keys []string, vars map[string]string, into map[string]bool) map[string]bool {
+	for _, d := range dst {
+		if d == nil || d.IsLeaf || !keysEqual(d.Keys, keys) {
+			continue
+		}
+		into = collectExceptNames9862(d.Children, vars, into)
+	}
+	return into
+}
+
+// unionNodeContrib9862 union-adds each name in contrib to n's own provenance
+// only (non-recursive). Shared by the subtree walk below and the leaf-list
+// duplicate-ownership merge, which must not credit the duplicate's owners to
+// unrelated grandchildren.
+func unionNodeContrib9862(n *Node, contrib []string) {
+	for _, c := range contrib {
+		found := false
+		for _, have := range n.fromGroups {
+			if have == c {
+				found = true
+				break
+			}
+		}
+		if !found {
+			n.fromGroups = append(n.fromGroups, c)
+		}
+	}
+}
+
+// addNodeContrib9862 union-adds each name in contrib to every node's subtree
+// provenance. It tags a group's context-walked clone (with the resolved group
+// name, before nested references expand) and inherits a packed-leaf source's
+// contrib onto its synthesized body. Tags are chain-independent and flow
+// through the #4474 memo verbatim via cloneNodes. Fresh synthesized nodes
+// take the contrib as their whole set, while an (impossible-for-leaves,
+// defensive) aliased child keeps its own tags too.
+func addNodeContrib9862(nodes []*Node, contrib []string) {
+	if len(contrib) == 0 {
+		return
+	}
+	for _, n := range nodes {
+		if n == nil {
+			continue
+		}
+		unionNodeContrib9862(n, contrib)
+		addNodeContrib9862(n.Children, contrib)
+	}
+}
+
+// mergeLeafListDupOwnership9862 records src's ownership on dst's block-form
+// children carrying value — the member the union just skipped as a duplicate.
+// Without this, the first contributor's tag wins and excluding it drops a
+// member a surviving group also owns (over-exclusion). Collapsed (Keys)
+// members have no node to tag; the cleared parent covers them by falling back
+// to keep. Ownership merges ONLY when both sides are known-tagged; a nil side
+// means uncertain provenance (union-cleared or fresh-appended), which
+// propagates nil so the fallback keeps the member rather than asserting a
+// sole ownership the union cannot prove.
+func mergeLeafListDupOwnership9862(dst, src *Node, value string) {
+	if dst.IsLeaf || value == "" {
+		return
+	}
+	for _, vn := range dst.Children {
+		if vn == nil {
+			continue
+		}
+		match := false
+		for _, k := range vn.Keys {
+			if k == value {
+				match = true
+				break
+			}
+		}
+		if !match {
+			continue
+		}
+		if len(vn.fromGroups) == 0 || len(src.fromGroups) == 0 {
+			vn.fromGroups = nil
+			continue
+		}
+		unionNodeContrib9862(vn, src.fromGroups)
+	}
+}
+
+// contribExcluded9862 reports whether every contributor of the node is
+// excluded: a node survives iff ANY contributor survives (never
+// over-excludes). Single-contributor nodes — the overwhelmingly common case —
+// behave exactly as an intersection check; the distinction matters only for
+// multi-owner leaf-list members, whose duplicate-merged ownership must keep
+// the member while any owner survives. Untagged (nil) nodes are cross-group
+// leaf-list unions whose per-member provenance mergeLeafListInto cleared as
+// uncertain, or fresh union-appended member leaves; they fall back to the
+// merge's outer group, which keeps them unless the outer application is
+// itself vetoed. (Every src clone is tagged when filtering is active, so the
+// fallback covers uncertain-overwritten nodes, not missing tags.)
+func contribExcluded9862(n *Node, group string, excluded map[string]bool) bool {
+	if len(excluded) == 0 {
+		return false
+	}
+	if len(n.fromGroups) == 0 {
+		return group != "" && excluded[group]
+	}
+	for _, c := range n.fromGroups {
+		if !excluded[c] {
+			return false
+		}
+	}
+	return true
+}
+
+// subtreeSurvives9862 reports whether filtering keeps anything of n: the node
+// itself when its own provenance is clean, else any surviving descendant (the
+// node then routes or adopts as a shell for its surviving children). Leaf-list
+// blocks need no special case: pure blocks carry one contributor so survival is
+// atomic by construction, and cross-group unions are tag-cleared so the
+// fallback keeps them (documented under-exclusion, never over-exclusion).
+func subtreeSurvives9862(n *Node, group string, excluded map[string]bool) bool {
+	if n == nil {
+		return false
+	}
+	if !contribExcluded9862(n, group, excluded) {
+		return true
+	}
+	for _, c := range n.Children {
+		if subtreeSurvives9862(c, group, excluded) {
+			return true
 		}
 	}
 	return false
+}
+
+// pruneExcluded9862 drops excluded-contrib nodes from a wholesale-adopted
+// subtree, recursing so a kept container's excluded children do not ride along.
+// A container is dropped only when it is itself excluded AND nothing of it
+// survives: an independently authored container (clean own provenance) is
+// preserved even when its only children were excluded inheritances — an empty
+// zone is a real object, and the exclusion names H's statements, not G's.
+// Runs after pruneWildcardInstances9802; the two commute (both drop, and the
+// adopter's emptiness check below covers either).
+func pruneExcluded9862(nodes []*Node, group string, excluded map[string]bool) []*Node {
+	if len(excluded) == 0 {
+		return nodes
+	}
+	out := nodes[:0]
+	for _, n := range nodes {
+		if n == nil {
+			continue
+		}
+		kept := pruneExcluded9862(n.Children, group, excluded)
+		if len(kept) == 0 && contribExcluded9862(n, group, excluded) {
+			continue
+		}
+		n.Children = kept
+		out = append(out, n)
+	}
+	return out
 }

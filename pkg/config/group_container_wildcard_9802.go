@@ -106,8 +106,8 @@ func wildcardInstanceNode9802(ancestorPath [][]string, n *Node) bool {
 
 // sameKeyedContainers9802 returns every destination container a group container
 // with these keys could merge into. A level spread over two blocks is one
-// hierarchy level to the operator and to the compiler, which is the rule
-// `siblingsExcludeGroup` already applies to `apply-groups-except` (#9422).
+// hierarchy level to the operator and to the compiler, which is the rule the
+// #9422 sibling-except union applies to `apply-groups-except`.
 func sameKeyedContainers9802(dst []*Node, keys []string) []*Node {
 	var out []*Node
 	for _, d := range dst {
