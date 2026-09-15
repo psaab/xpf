@@ -214,4 +214,23 @@ func (c *xpfCollector) initUserspaceDropsDescriptors() {
 			"\"no ext-header drops\" signal.",
 		nil, nil,
 	)
+	c.userspaceEmbeddedQuoteSubminimalRefused = prometheus.NewDesc(
+		"xpf_userspace_embedded_quote_subminimal_refused_total",
+		"#9901 (F-077): embedded ICMP error quotes refused by the 8-byte "+
+			"quoted-L4 adequacy floor — atomic-outer errors whose quoted "+
+			"TCP/UDP/ICMP(v6) header carries fewer than 8 bytes. Before the "+
+			"floor, 4 port bytes parsed and the error matched a live "+
+			"session, so a minimal forged quote could steer an ICMP error "+
+			"onto any session whose 4-tuple the quoter guessed.",
+		nil, nil,
+	)
+	c.userspaceEmbeddedErrorPerSessionSuppressed = prometheus.NewDesc(
+		"xpf_userspace_embedded_error_per_session_suppressed_total",
+		"#9901 (F-077): embedded ICMP errors suppressed by the "+
+			"per-session GCRA — errors that MATCHED a session but were "+
+			"over that session's 64/64 budget. Without the budget, one "+
+			"quoter can steer an UNBOUNDED error stream onto a live "+
+			"session (forged PTB/TE as a PMTUD / throughput weapon).",
+		nil, nil,
+	)
 }

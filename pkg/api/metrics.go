@@ -528,12 +528,19 @@ type xpfCollector struct {
 	// #6751 PR 2/3: the interface-mode SNAT identity registry's three
 	// outcomes — PAT'd collisions, identity exhaustion, registry-cap
 	// exhaustion.
-	userspaceInterfaceSNATPATCollisions      *prometheus.Desc
-	userspaceNAT64FragCrossDomainMisses      *prometheus.Desc
-	userspaceNAT64FragProtocolAliasMisses    *prometheus.Desc
-	userspaceInterfaceSNATIdentityExhaustion *prometheus.Desc
-	userspaceInterfaceSNATSyncConflictDrops  *prometheus.Desc
-	userspaceInterfaceSNATRegistryCap        *prometheus.Desc
+	userspaceInterfaceSNATPATCollisions   *prometheus.Desc
+	userspaceNAT64FragCrossDomainMisses   *prometheus.Desc
+	userspaceNAT64FragProtocolAliasMisses *prometheus.Desc
+	// #9901: packet-identity counters — absolute-lifetime frag evictions
+	// (F-010), unknown-MTU fail-open forwards (F-074), subminimal-quote
+	// refusals + per-session error-budget suppressions (F-077).
+	userspaceFragMaxLifetimeEvictions          *prometheus.Desc
+	userspaceEgressMTUUnknownForward           *prometheus.Desc
+	userspaceEmbeddedQuoteSubminimalRefused    *prometheus.Desc
+	userspaceEmbeddedErrorPerSessionSuppressed *prometheus.Desc
+	userspaceInterfaceSNATIdentityExhaustion   *prometheus.Desc
+	userspaceInterfaceSNATSyncConflictDrops    *prometheus.Desc
+	userspaceInterfaceSNATRegistryCap          *prometheus.Desc
 	// #1807: worker-command-queue poison recoveries — nonzero means a
 	// helper worker panic poisoned a command queue and it was recovered
 	// (committed-prefix + clear_poison policy) instead of going deaf.
@@ -1042,6 +1049,10 @@ func (c *xpfCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.userspaceInterfaceSNATPATCollisions
 	ch <- c.userspaceNAT64FragCrossDomainMisses
 	ch <- c.userspaceNAT64FragProtocolAliasMisses
+	ch <- c.userspaceFragMaxLifetimeEvictions
+	ch <- c.userspaceEgressMTUUnknownForward
+	ch <- c.userspaceEmbeddedQuoteSubminimalRefused
+	ch <- c.userspaceEmbeddedErrorPerSessionSuppressed
 	ch <- c.userspaceInterfaceSNATIdentityExhaustion
 	ch <- c.userspaceInterfaceSNATSyncConflictDrops
 	ch <- c.userspaceInterfaceSNATRegistryCap
