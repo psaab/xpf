@@ -77,11 +77,14 @@ func (h *SyslogSlogHandler) loadOrAllocShared() *syslogClientSet {
 
 // SetClients replaces the set of syslog clients. Old clients are closed.
 // Shared across the lineage (#9916 F-056): derived handlers observe the swap.
+// The slice is COPIED: the caller retains no alias into the handler, so a
+// caller-side mutation of the passed backing array can never race the
+// lineage-wide readers (Handle snapshots the header and iterates it lock-free).
 func (h *SyslogSlogHandler) SetClients(clients []*SyslogClient) {
 	s := h.loadOrAllocShared()
 	s.mu.Lock()
 	old := s.clients
-	s.clients = clients
+	s.clients = append([]*SyslogClient(nil), clients...)
 	s.mu.Unlock()
 
 	for _, c := range old {

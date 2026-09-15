@@ -2,7 +2,9 @@ package eventengine
 
 import (
 	"fmt"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/psaab/xpf/pkg/config"
 )
@@ -48,6 +50,10 @@ func TestEngineCloseAccountsQueued9916(t *testing.T) {
 // counted, not silently dropped. Parks the worker in backoff under a held lock,
 // Closes mid-backoff, and asserts DroppedShutdown==1 from the abort path alone
 // (the queue is empty — the action was dequeued — so the Close drain contributes 0).
+//
+// The park is a deterministic barrier, not a cumulative-counter poll: the injected
+// retry timer signals the instant the worker enters backoff and never fires, so
+// the only exit is the stopCh abort (no 10s-deadline expiry under load to flake on).
 func TestEngineCloseAbortsRetryCounted9916(t *testing.T) {
 	s := newStore(t)
 	pol := &config.EventPolicy{
@@ -56,15 +62,27 @@ func TestEngineCloseAbortsRetryCounted9916(t *testing.T) {
 		ThenCommands: []string{"set system host-name should-not-apply-9916"},
 	}
 	e := New(s, nil)
-	fastRetry(e)
 	// NOTE: no defer Close — Close is the act under test.
 	e.Apply([]*config.EventPolicy{pol})
+
+	entered := make(chan struct{})
+	var once sync.Once
+	e.newTimerFn = func(time.Duration) (<-chan time.Time, func() bool) {
+		once.Do(func() { close(entered) })
+		return make(chan time.Time), func() bool { return true }
+	}
 
 	if err := s.EnterConfigureSession("operator"); err != nil {
 		t.Fatalf("hold lock: %v", err)
 	}
 	e.HandleEvent(eventFor("ping_test_failed"))
-	waitFor(t, "worker retrying under held lock", func() bool { return e.Stats().Retried >= 1 })
+	// The worker applied once (lock held → ErrConfigLocked) and is now parked in
+	// backoff; the timer never fires, so Close's stopCh is the only way out.
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("worker never parked in retry backoff; fixture did not engage")
+	}
 
 	e.Close()
 	// Release the lock after Close so the store is left clean (worker already gone).

@@ -34,22 +34,23 @@ func TestNilWithinClauseFailsClosed9916(t *testing.T) {
 
 			defer func() {
 				if r := recover(); r != nil {
-					t.Fatalf("HandleEvent panicked on nil within clause: %v (#9916 F-135)", r)
+					t.Fatalf("evaluation panicked on nil within clause: %v (#9916 F-135)", r)
 				}
 			}()
-			// Drive enough events to cross any threshold if the gate were open.
-			for i := 0; i < 5; i++ {
-				e.HandleEvent(rpm.Event{Name: "ping_probe_failed", TestOwner: "o", TestName: "t"})
+			// Assert EVERY synchronous evaluation fails closed — including the
+			// threshold-crossing event (index 1 for TriggerOn:2 with the valid
+			// sibling). Checking only the last would hide an early erroneous fire:
+			// it would arm onLatched and suppress the rest, certifying a fail-open.
+			ev := rpm.Event{Name: "ping_probe_failed", TestOwner: "o", TestName: "t"}
+			for i := range 5 {
+				if got := e.evaluateEvent(ev); len(got) != 0 {
+					t.Fatalf("evaluation %d fired %d policies with a nil clause; must fail CLOSED every time (#9916 F-135)", i, len(got))
+				}
 			}
-			// Fail closed: nothing queued (worker never runs a commit; queue stays empty).
-			// Drain-check via Stats (no worker started? HandleEvent starts it; Close drains post-fix).
-			// The panic is the RED; the no-fire is the fail-closed pin. Since HandleEvent
-			// enqueues on fire and the worker would consume async, assert via evaluateEvent
-			// directly (synchronous, no worker): must not trigger.
-			got := e.evaluateEvent(rpm.Event{Name: "ping_probe_failed", TestOwner: "o", TestName: "t"})
-			if len(got) != 0 {
-				t.Fatalf("nil within clause fired %d policies; must fail CLOSED (#9916 F-135)", len(got))
-			}
+			// Probe-path smoke: HandleEvent (async worker) must not panic either.
+			// No queue assertion here — the synchronous loop above is the fail-closed
+			// pin; this covers the probe-goroutine entry the issue names.
+			e.HandleEvent(ev)
 		})
 	}
 }

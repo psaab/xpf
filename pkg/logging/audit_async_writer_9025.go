@@ -77,8 +77,9 @@ type asyncAuditWriter struct {
 	// stopped-check-plus-send and stop's stopped-store-plus-done-close run under
 	// it, so a send that passes the check happens-before the worker's final
 	// drain observes the close. The hot receive path (worker) never takes it;
-	// every critical section is a non-blocking channel op with no I/O, so an
-	// EventStream-reader enqueue blocks for microseconds at most.
+	// every critical section is a non-blocking channel op with no I/O (except
+	// the test-only beforeSendFn pause below), so an EventStream-reader enqueue
+	// blocks for microseconds at most.
 	mu        sync.Mutex
 	startOnce sync.Once
 	stopOnce  sync.Once
@@ -108,6 +109,15 @@ type asyncAuditWriter struct {
 	// deterministically land a send in the drain-to-exit window. Nil in
 	// production; a single nil-check on the retire path only.
 	afterDrainFn func()
+	// beforeSendFn is the second half of the F-132 test pair (parent-review
+	// follow-up): when non-nil, enqueue invokes it after the stopped check
+	// passes and before the send, WHILE HOLDING mu. A test pauses here, runs
+	// stop() (which blocks on mu until the pause releases), then resumes — so
+	// the send provably lands before the worker's drain and is handled exactly
+	// once. On unfixed code (no mu) the same pause lets stop complete first and
+	// the resumed send orphans. Nil in production (one nil-check on the enqueue
+	// path); must not call back into enqueue/stop.
+	beforeSendFn func()
 }
 
 func newAsyncAuditWriter(write func(auditItem)) *asyncAuditWriter {
@@ -175,6 +185,9 @@ func (a *asyncAuditWriter) enqueue(it auditItem) bool {
 		a.mu.Unlock()
 		return false
 	}
+	if a.beforeSendFn != nil {
+		a.beforeSendFn()
+	}
 	select {
 	case a.items <- it:
 		a.mu.Unlock()
@@ -215,9 +228,14 @@ func (a *asyncAuditWriter) stop() {
 	if a.started.Load() {
 		<-a.drained
 		// Re-drain (#9916 F-132): collect anything that landed after the
-		// worker's final empty-observation (a mu-bypassing direct send such as
-		// syncForTest's barrier — mu already closes the window for enqueue
-		// itself, so this is the barrier's catcher plus defense-in-depth).
+		// worker's final empty-observation but before THIS mu acquisition — in
+		// practice the mu-bypassing syncForTest barrier (mu already closes the
+		// window for enqueue itself). NARROWLY SCOPED: a direct send landing
+		// after this re-drain releases mu still orphans. That is acceptable
+		// only because production has no mu-bypassers (every live send routes
+		// through enqueue); the sole bypasser is syncForTest's test-only direct
+		// send, whose post-stop case is benign (its waiter already returned via
+		// the drained arm; at most one leaked barrier in a retired channel).
 		// Collected under mu (non-blocking receives only), handled OUTSIDE it:
 		// handle does disk I/O, and holding mu across a stalled write would
 		// stall EventStream-reader enqueues on the disk.
