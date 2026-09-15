@@ -204,7 +204,7 @@ fn zero_rate_disables_limiter() {
 }
 
 use crate::afxdp::types::FastMap;
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::sync::Arc;
 
 /// Build a `ForwardingState` carrying a fresh per-zone Reject limiter for
@@ -645,6 +645,41 @@ fn colliding_source(anchor: &IpAddr) -> IpAddr {
         }
     }
     panic!("could not find a colliding source in 10000 probes");
+}
+
+/// #9901 (F-074) seed-math pin: 192.0.2.1 and 192.0.2.65 differ ONLY above
+/// the low 6 address bits, and 2001:db8::1 vs 2001:db8:1::1 differ only in
+/// the high half. The pre-fix multiply-only mix mapped the slot from mod-64
+/// of a product — which sees only the low 6 factors — so the v4 pair shared
+/// a slot under EVERY seed and one source could drain the other's bucket
+/// (the `distinct_slot_sources` probe above silently avoided the shape
+/// instead of testing it). After diffusion the slot is a function of the
+/// whole address: each pair must separate under most seeds. Deterministic
+/// (fixed mix, swept seeds) with a huge margin: diffusion separates
+/// ~252/256; the old math separated 0/256 (v4) — verified by revert.
+#[test]
+fn low_bit_neighbors_separate_under_most_seeds_9901() {
+    for (a, b) in [
+        (
+            IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
+            IpAddr::V4(Ipv4Addr::new(192, 0, 2, 65)),
+        ),
+        (
+            IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1)),
+            IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 1, 0, 0, 0, 0, 1)),
+        ),
+    ] {
+        let mut separated = 0u32;
+        for seed in 0..256u64 {
+            if slot_and_tag(seed, &a).0 != slot_and_tag(seed, &b).0 {
+                separated += 1;
+            }
+        }
+        assert!(
+            separated > 200,
+            "diffused slots must separate {a} vs {b} under most seeds (got {separated}/256)"
+        );
+    }
 }
 
 /// #9901 (F-074) HEADLINE fail-on-revert: one source flooding a zone must NOT

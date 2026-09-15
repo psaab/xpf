@@ -693,6 +693,27 @@ pub(in crate::afxdp) fn ipv6_is_any_fragment(packet: &[u8]) -> bool {
     walk_ipv6_ext_chain(packet, 0).fragment.is_some()
 }
 
+/// #9901 (F-077): is this L3-relative IPv6 packet NON-ATOMICALLY fragmented —
+/// i.e. could a LATER fragment explain a short quote? A Fragment header with
+/// offset == 0 AND M == 0 (an ATOMIC fragment, RFC 8200 §4.5) carries the
+/// whole datagram: no later fragment exists, so it must NOT disable the
+/// quoted-L4 adequacy floor the way a genuine first fragment (M == 1) or a
+/// non-first fragment (offset != 0) does. A declaration with UNREADABLE
+/// bytes (truncated header) conservatively counts as fragmenting — the bits
+/// cannot be inspected, so the old declares-match behavior is kept there.
+#[inline]
+pub(in crate::afxdp) fn ipv6_is_nonatomically_fragmented(packet: &[u8]) -> bool {
+    match walk_ipv6_ext_chain(packet, 0).fragment {
+        None => false,
+        Some(f) => match f.bytes {
+            // Fragment-header bytes 2-3: 13-bit offset (high bits) + 2
+            // reserved bits + M. Non-atomic iff offset != 0 or M != 0.
+            Some(b) => (u16::from_be_bytes([b[2], b[3]]) & 0xFFF9) != 0,
+            None => true,
+        },
+    }
+}
+
 /// #2362: family-dispatched ANY-fragment predicate over the L3-relative packet
 /// slice. Used by the firewall-filter `is-fragment` match condition.
 #[inline]

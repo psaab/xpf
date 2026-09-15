@@ -1377,7 +1377,7 @@ fn icmpv6_te_nptv6_reverse_lookup_restores_internal_client() {
         &shared_nat_sessions,
         &shared_forward_wire_sessions,
         1_000_000,
-    )
+    ).into_option()
     .expect("should match embedded ICMPv6 error");
 
     assert_eq!(icmp_match.original_src, IpAddr::V6(internal_client));
@@ -1411,7 +1411,7 @@ fn icmpv6_te_nptv6_reverse_lookup_restores_internal_client() {
 /// which resolves via that alias regardless of the local zone lookup). Here
 /// the ONLY path to the session is the zone-gated `nptv6.translate_inbound`
 /// feeding `embedded_key`, so a wrong zone means NO session is found at all
-/// (`try_embedded_icmp_nat_match_from_frame` returns `None`) instead of
+/// (`try_embedded_icmp_nat_match_from_frame` returns `NoMatch`) instead of
 /// merely returning the wrong `original_src`.
 ///
 /// Reverting the `resolve_ingress_logical_ifindex` call in
@@ -1570,7 +1570,7 @@ fn icmpv6_te_nptv6_reverse_lookup_uses_logical_vlan_unit_zone_not_physical_paren
         &shared_nat_sessions,
         &shared_forward_wire_sessions,
         1_000_000,
-    )
+    ).into_option()
     .expect(
         "must resolve the embedded ICMPv6 error via the LOGICAL vlan unit's \
          zone (zone-b), not the physical parent's inherited zone-a",
@@ -1734,7 +1734,7 @@ fn icmpv6_te_prefers_reverse_session_resolution_for_client_return_path() {
         &shared_nat_sessions,
         &shared_forward_wire_sessions,
         1_000_000,
-    )
+    ).into_option()
     .expect("should match embedded ICMPv6 error");
 
     assert_eq!(icmp_match.original_src, IpAddr::V6(internal_client));

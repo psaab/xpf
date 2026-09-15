@@ -47,7 +47,7 @@ pub(super) fn try_translate_nat64_icmp_error(
     now_ns: u64,
     now_secs: u64,
 ) -> EmbeddedIcmpReversal {
-    let Some(nat64_match) = try_nat64_icmp_error_match_from_frame(
+    let nat64_match = match try_nat64_icmp_error_match_from_frame(
         packet_frame,
         meta,
         sessions,
@@ -57,8 +57,13 @@ pub(super) fn try_translate_nat64_icmp_error(
         worker_ctx.shared_nat_sessions,
         worker_ctx.shared_forward_wire_sessions,
         now_ns,
-    ) else {
-        return EmbeddedIcmpReversal::NotHandled;
+    ) {
+        EmbeddedMatchOutcome::Match(m) => m,
+        // #9901 (F-077): twin of the same-family arm — a matched-but-
+        // over-budget NAT64 error drops; it must neither translate NOR
+        // fall through to flowless forwarding.
+        EmbeddedMatchOutcome::BudgetDenied => return EmbeddedIcmpReversal::Dropped,
+        EmbeddedMatchOutcome::NoMatch => return EmbeddedIcmpReversal::NotHandled,
     };
     match nat64_match {
         Nat64IcmpErrorMatch::V4ToV6 {

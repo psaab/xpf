@@ -24,7 +24,9 @@ pub(in crate::afxdp) static EMBEDDED_QUOTE_SUBMINIMAL_REFUSED_TOTAL: AtomicU64 =
 /// ICMP(v6) arms of both embedded parsers. `pre_fix_need` is the arm's
 /// historical minimum (4 for TCP/UDP ports, 6 for the ICMP echo id); when
 /// `outer_atomic` the 8-byte floor applies instead, required within BOTH the
-/// quoted datagram's declared end AND the captured bytes. A non-atomic
+/// quoted datagram's declared end AND the captured bytes. `frame_len` is the
+/// OUTER-bounded capture length (callers re-slice to `outer_end` first), so
+/// slack beyond the outer datagram satisfies neither leg. A non-atomic
 /// (fragmented) outer keeps pre-fix adequacy byte-for-byte: its first
 /// fragment legitimately carries a short quote. Floor refusals bump
 /// `EMBEDDED_QUOTE_SUBMINIMAL_REFUSED_TOTAL`; pre-fix refusals stay silent.
@@ -136,11 +138,21 @@ pub(in crate::afxdp::icmp_embed) struct EmbeddedV6Header {
 /// TCP/UDP/ICMP arms (`quote_l4_adequate`); a fragmented outer keeps
 /// pre-fix adequacy — its first fragment legitimately carries a short
 /// quote. GRE and all other protocols are unchanged either way.
+///
+/// `outer_end` is the containing outer IP datagram's end offset (absolute),
+/// from `super::outer_datagram_end`. EVERY read below is bounded by it:
+/// slack beyond the outer datagram must satisfy nothing — neither the
+/// floor legs, nor the port reads, nor the GRE/Key extraction. Without
+/// this, bytes past the outer length would pass the floor's captured leg
+/// while the builders (which strip to the outer length) ship a shorter
+/// quote — a 4-byte quote smuggled past the 8-byte floor.
 pub(in crate::afxdp::icmp_embed) fn parse_embedded_v4(
     frame: &[u8],
     embedded_ip_start: usize,
     outer_atomic: bool,
+    outer_end: usize,
 ) -> Option<EmbeddedV4Header> {
+    let frame = frame.get(..outer_end.min(frame.len())).unwrap_or(&[]);
     if frame.len() < embedded_ip_start + 28 {
         return None;
     }
@@ -309,14 +321,18 @@ pub(in crate::afxdp::icmp_embed) fn parse_embedded_v6_l4(packet: &[u8]) -> Optio
 ///
 /// #9901 (F-077): `outer_atomic` gates the 8-byte quoted-L4 floor exactly
 /// as in `parse_embedded_v4` (TCP/UDP/ICMPv6 arms only; GRE and the rest
-/// unchanged). Note the v6 declared end below is already clamped to the
+/// unchanged). `outer_end` bounds every read by the containing outer
+/// datagram exactly as there — see that doc for the slack-smuggling shape
+/// this closes. Note the v6 declared end below is already clamped to the
 /// captured bytes, so the floor's captured leg is subsumed here — the
 /// shared `quote_l4_adequate` still checks both, honestly.
 pub(in crate::afxdp::icmp_embed) fn parse_embedded_v6(
     frame: &[u8],
     embedded_ip_start: usize,
     outer_atomic: bool,
+    outer_end: usize,
 ) -> Option<EmbeddedV6Header> {
+    let frame = frame.get(..outer_end.min(frame.len())).unwrap_or(&[]);
     if frame.len() < embedded_ip_start + 48 {
         return None;
     }
@@ -538,7 +554,7 @@ mod embedded_v6_parse_tests {
         let (rel, proto) = parse_embedded_v6_l4(&p).expect("walk succeeds");
         assert_eq!((rel, proto), (48, PROTO_TCP));
 
-        let hdr = parse_embedded_v6(&p, 0, false).expect("parse succeeds");
+        let hdr = parse_embedded_v6(&p, 0, false, p.len()).expect("parse succeeds");
         assert_eq!(hdr.proto, PROTO_TCP);
         assert_eq!(hdr.l4_off, 48);
         assert_eq!((hdr.src_port, hdr.dst_port), (0x1111, 0x2222));
@@ -558,7 +574,7 @@ mod embedded_v6_parse_tests {
             let (rel, proto) = parse_embedded_v6_l4(&p)
                 .unwrap_or_else(|| panic!("walk past EH type {exotic} must succeed"));
             assert_eq!((rel, proto), (48, PROTO_TCP));
-            let hdr = parse_embedded_v6(&p, 0, false).expect("parse succeeds");
+            let hdr = parse_embedded_v6(&p, 0, false, p.len()).expect("parse succeeds");
             assert_eq!(hdr.proto, PROTO_TCP);
             assert_eq!((hdr.src_port, hdr.dst_port), (0x1111, 0x2222));
         }
@@ -574,7 +590,7 @@ mod embedded_v6_parse_tests {
             let (rel, proto) =
                 parse_embedded_v6_l4(&p).expect("first/atomic fragment walks to L4");
             assert_eq!((rel, proto), (48, PROTO_TCP));
-            let hdr = parse_embedded_v6(&p, 0, false).expect("parse succeeds");
+            let hdr = parse_embedded_v6(&p, 0, false, p.len()).expect("parse succeeds");
             assert_eq!((hdr.src_port, hdr.dst_port), (0x1111, 0x2222));
         }
     }
@@ -600,7 +616,7 @@ mod embedded_v6_parse_tests {
             "a second Fragment header with non-zero offset must refuse the chain"
         );
         assert!(
-            parse_embedded_v6(&p, 0, false).is_none(),
+            parse_embedded_v6(&p, 0, false, p.len()).is_none(),
             "parse_embedded_v6 must refuse the double-fragment chain"
         );
         // Control: the same two-header chain with offset 0 in BOTH
@@ -629,7 +645,7 @@ mod embedded_v6_parse_tests {
                 "non-first fragment (offset {off_be:#06x}) must not expose payload as ports"
             );
             assert!(
-                parse_embedded_v6(&p, 0, false).is_none(),
+                parse_embedded_v6(&p, 0, false, p.len()).is_none(),
                 "parse_embedded_v6 must refuse a quoted non-first fragment"
             );
         }
@@ -640,7 +656,7 @@ mod embedded_v6_parse_tests {
         // Ext-free quoted packet: identical result to the old fixed-40
         // read (regression guard for the common case).
         let p = embedded_v6(&[], PROTO_TCP);
-        let hdr = parse_embedded_v6(&p, 0, false).expect("parse succeeds");
+        let hdr = parse_embedded_v6(&p, 0, false, p.len()).expect("parse succeeds");
         assert_eq!(hdr.proto, PROTO_TCP);
         assert_eq!(hdr.l4_off, 40);
         assert_eq!((hdr.src_port, hdr.dst_port), (0x1111, 0x2222));
@@ -662,7 +678,7 @@ mod embedded_v6_parse_tests {
         let p = embedded_v6(&ehs, PROTO_TCP);
         let (rel, proto) = parse_embedded_v6_l4(&p).expect("7 ext headers within bound resolve");
         assert_eq!((rel, proto), (40 + 7 * 8, PROTO_TCP));
-        let hdr = parse_embedded_v6(&p, 0, false).expect("parse succeeds");
+        let hdr = parse_embedded_v6(&p, 0, false, p.len()).expect("parse succeeds");
         assert_eq!(hdr.proto, PROTO_TCP);
         assert_eq!(hdr.l4_off, 40 + 7 * 8);
         assert_eq!((hdr.src_port, hdr.dst_port), (0x1111, 0x2222));
@@ -689,7 +705,7 @@ mod embedded_v6_parse_tests {
             "a chain longer than MAX_IPV6_EXT_HEADERS must fail closed"
         );
         assert!(
-            parse_embedded_v6(&p, 0, false).is_none(),
+            parse_embedded_v6(&p, 0, false, p.len()).is_none(),
             "parse_embedded_v6 must refuse an over-bound quoted chain"
         );
     }
@@ -731,7 +747,7 @@ mod embedded_v6_parse_tests {
         // Forged ports in the outer slack beyond the declared datagram.
         inner.extend_from_slice(&[0x30, 0x39, 0x14, 0x51, 0, 0, 0, 0]);
         assert!(
-            parse_embedded_v6(&inner, 0, false).is_none(),
+            parse_embedded_v6(&inner, 0, false, inner.len()).is_none(),
             "ports in slack beyond the quoted IPv6 payload_len (0) must not be read"
         );
     }
@@ -750,7 +766,7 @@ mod embedded_v6_parse_tests {
         inner[24..40].copy_from_slice(&[0x30; 16]);
         inner.extend_from_slice(&[0x11, 0x11, 0x22, 0x22, 0, 0, 0, 1]); // 8 quoted L4 bytes
         let hdr =
-            parse_embedded_v6(&inner, 0, false).expect("truncated RFC-minimum v6 quote must still parse");
+            parse_embedded_v6(&inner, 0, false, inner.len()).expect("truncated RFC-minimum v6 quote must still parse");
         assert_eq!((hdr.src_port, hdr.dst_port), (0x1111, 0x2222));
     }
 }
@@ -781,7 +797,7 @@ mod embedded_v4_fragment_tests {
         // header in the quoted bytes — parse succeeds.
         for frag_off in [0x0000u16, 0x2000] {
             let p = embedded_v4(frag_off, PROTO_TCP);
-            let hdr = parse_embedded_v4(&p, 0, false).expect("first/atomic fragment parses");
+            let hdr = parse_embedded_v4(&p, 0, false, p.len()).expect("first/atomic fragment parses");
             assert_eq!(hdr.proto, PROTO_TCP);
             assert_eq!((hdr.src_port, hdr.dst_port), (0x1111, 0x2222));
         }
@@ -794,7 +810,7 @@ mod embedded_v4_fragment_tests {
         for frag_off in [0x0001u16, 0x2001, 0x1FFF] {
             let p = embedded_v4(frag_off, PROTO_TCP);
             assert!(
-                parse_embedded_v4(&p, 0, false).is_none(),
+                parse_embedded_v4(&p, 0, false, p.len()).is_none(),
                 "quoted non-first fragment (frag_off {frag_off:#06x}) must not parse"
             );
         }
@@ -819,7 +835,7 @@ mod embedded_v4_fragment_tests {
         // (12345 / 5201) that would look like an existing session tuple.
         inner.extend_from_slice(&[0x30, 0x39, 0x14, 0x51, 0, 0, 0, 0]);
         assert!(
-            parse_embedded_v4(&inner, 0, false).is_none(),
+            parse_embedded_v4(&inner, 0, false, inner.len()).is_none(),
             "ports lie in slack beyond the quoted IP's declared total-length (20) — \
              the parser must not manufacture an embedded-session tuple from them"
         );
@@ -839,7 +855,7 @@ mod embedded_v4_fragment_tests {
         inner[16..20].copy_from_slice(&[10, 0, 0, 2]);
         inner.extend_from_slice(&[0x11, 0x11, 0x22, 0x22, 0, 0, 0, 1]); // the 8 quoted bytes
         let hdr =
-            parse_embedded_v4(&inner, 0, false).expect("truncated RFC-minimum quote must still parse");
+            parse_embedded_v4(&inner, 0, false, inner.len()).expect("truncated RFC-minimum quote must still parse");
         assert_eq!(
             (hdr.src_port, hdr.dst_port),
             (0x1111, 0x2222),
@@ -944,7 +960,7 @@ mod embedded_gre_discriminator_9031_tests {
     #[test]
     fn a_quoted_unkeyed_gre_yields_unkeyed_not_none_9031() {
         let p = quoted_v4_gre(0, &[]);
-        let hdr = parse_embedded_v4(&p, 0, false).expect("parse");
+        let hdr = parse_embedded_v4(&p, 0, false, p.len()).expect("parse");
         assert_eq!(hdr.proto, PROTO_GRE);
         assert_eq!(
             hdr.discriminator,
@@ -959,7 +975,7 @@ mod embedded_gre_discriminator_9031_tests {
     fn a_quoted_keyed_gre_yields_that_key_9031() {
         for key in [1u32, 0xDEAD_BEEF, u32::MAX] {
             let p = quoted_v4_gre(KEY_FLAG, &key.to_be_bytes());
-            let hdr = parse_embedded_v4(&p, 0, false).expect("parse");
+            let hdr = parse_embedded_v4(&p, 0, false, p.len()).expect("parse");
             assert_eq!(
                 hdr.discriminator,
                 TunnelDiscriminator::Keyed(key),
@@ -973,10 +989,10 @@ mod embedded_gre_discriminator_9031_tests {
     /// join a keyed-zero session.
     #[test]
     fn a_quoted_keyed_zero_gre_is_not_unkeyed_9031() {
-        let keyed_zero = parse_embedded_v4(&quoted_v4_gre(KEY_FLAG, &0u32.to_be_bytes()), 0, false)
+        let keyed_zero = parse_embedded_v4(&quoted_v4_gre(KEY_FLAG, &0u32.to_be_bytes()), 0, false, quoted_v4_gre(KEY_FLAG, &0u32.to_be_bytes()).len())
             .expect("parse")
             .discriminator;
-        let unkeyed = parse_embedded_v4(&quoted_v4_gre(0, &[]), 0, false)
+        let unkeyed = parse_embedded_v4(&quoted_v4_gre(0, &[]), 0, false, quoted_v4_gre(0, &[]).len())
             .expect("parse")
             .discriminator;
         assert_eq!(keyed_zero, TunnelDiscriminator::Keyed(0));
@@ -991,9 +1007,9 @@ mod embedded_gre_discriminator_9031_tests {
     /// produce different lookup keys, which is the whole point of the field.
     #[test]
     fn quotes_differing_only_in_key_do_not_collide_9031() {
-        let a = parse_embedded_v4(&quoted_v4_gre(KEY_FLAG, &7u32.to_be_bytes()), 0, false)
+        let a = parse_embedded_v4(&quoted_v4_gre(KEY_FLAG, &7u32.to_be_bytes()), 0, false, quoted_v4_gre(KEY_FLAG, &7u32.to_be_bytes()).len())
             .expect("parse");
-        let b = parse_embedded_v4(&quoted_v4_gre(KEY_FLAG, &8u32.to_be_bytes()), 0, false)
+        let b = parse_embedded_v4(&quoted_v4_gre(KEY_FLAG, &8u32.to_be_bytes()), 0, false, quoted_v4_gre(KEY_FLAG, &8u32.to_be_bytes()).len())
             .expect("parse");
         let ka = embedded_reply_key(
             libc::AF_INET as u8, a.proto,
@@ -1031,7 +1047,7 @@ mod embedded_gre_discriminator_9031_tests {
     /// correct in all of them.
     #[test]
     fn the_reply_key_carries_the_callers_routing_domain_9162() {
-        let hdr = parse_embedded_v4(&quoted_v4_gre(KEY_FLAG, &42u32.to_be_bytes()), 0, false)
+        let hdr = parse_embedded_v4(&quoted_v4_gre(KEY_FLAG, &42u32.to_be_bytes()), 0, false, quoted_v4_gre(KEY_FLAG, &42u32.to_be_bytes()).len())
             .expect("parse");
         for domain in [0u32, 7, 460_657] {
             let reply = embedded_reply_key(
@@ -1057,7 +1073,7 @@ mod embedded_gre_discriminator_9031_tests {
     fn a_checksummed_quote_reads_the_key_past_the_checksum_9031() {
         let mut tail = vec![0xAA, 0xBB, 0x00, 0x00]; // checksum + reserved1
         tail.extend_from_slice(&0x1234_5678u32.to_be_bytes());
-        let hdr = parse_embedded_v4(&quoted_v4_gre(CKSUM_FLAG | KEY_FLAG, &tail), 0, false).expect("parse");
+        let hdr = parse_embedded_v4(&quoted_v4_gre(CKSUM_FLAG | KEY_FLAG, &tail), 0, false, quoted_v4_gre(CKSUM_FLAG | KEY_FLAG, &tail).len()).expect("parse");
         assert_eq!(
             hdr.discriminator,
             TunnelDiscriminator::Keyed(0x1234_5678),
@@ -1082,7 +1098,7 @@ mod embedded_gre_discriminator_9031_tests {
             ("truncated key", quoted_v4_gre_with_slack(KEY_FLAG, &[], &[])),
         ];
         for (name, p) in cases {
-            let hdr = parse_embedded_v4(&p, 0, false).expect("parse");
+            let hdr = parse_embedded_v4(&p, 0, false, p.len()).expect("parse");
             assert_eq!(
                 hdr.discriminator,
                 TunnelDiscriminator::Unparseable,
@@ -1111,7 +1127,7 @@ mod embedded_gre_discriminator_9031_tests {
              cell is not about slack at all"
         );
 
-        let hdr = parse_embedded_v4(&p, 0, false).expect("parse");
+        let hdr = parse_embedded_v4(&p, 0, false, p.len()).expect("parse");
         assert_eq!(
             hdr.discriminator,
             TunnelDiscriminator::Unparseable,
@@ -1135,7 +1151,7 @@ mod embedded_gre_discriminator_9031_tests {
             p.extend_from_slice(&[0x11, 0x11, 0x22, 0x22, 0, 0, 0, 1]);
             let total = p.len() as u16;
             p[2..4].copy_from_slice(&total.to_be_bytes());
-            let hdr = parse_embedded_v4(&p, 0, false).expect("parse");
+            let hdr = parse_embedded_v4(&p, 0, false, p.len()).expect("parse");
             assert_eq!(
                 hdr.discriminator,
                 TunnelDiscriminator::None,
@@ -1150,7 +1166,7 @@ mod embedded_gre_discriminator_9031_tests {
     /// still missing.
     #[test]
     fn the_ipv6_quote_parser_reads_the_discriminator_too_9031() {
-        let keyed = parse_embedded_v6(&quoted_v6_gre(KEY_FLAG, &99u32.to_be_bytes()), 0, false)
+        let keyed = parse_embedded_v6(&quoted_v6_gre(KEY_FLAG, &99u32.to_be_bytes()), 0, false, quoted_v6_gre(KEY_FLAG, &99u32.to_be_bytes()).len())
             .expect("parse v6");
         assert_eq!(keyed.proto, PROTO_GRE);
         assert_eq!(
@@ -1160,7 +1176,7 @@ mod embedded_gre_discriminator_9031_tests {
              IPv6 PTB is the MTU-reduction signal for a v6 GRE tunnel, which is \
              the case this defect suppresses most visibly"
         );
-        let unkeyed = parse_embedded_v6(&quoted_v6_gre(0, &[]), 0, false).expect("parse v6");
+        let unkeyed = parse_embedded_v6(&quoted_v6_gre(0, &[]), 0, false, quoted_v6_gre(0, &[]).len()).expect("parse v6");
         assert_eq!(unkeyed.discriminator, TunnelDiscriminator::Unkeyed);
     }
 
@@ -1168,7 +1184,7 @@ mod embedded_gre_discriminator_9031_tests {
     /// a property of the tunnel, not of the direction. Ports swap; this does not.
     #[test]
     fn the_reply_key_carries_the_same_discriminator_9031() {
-        let hdr = parse_embedded_v4(&quoted_v4_gre(KEY_FLAG, &42u32.to_be_bytes()), 0, false)
+        let hdr = parse_embedded_v4(&quoted_v4_gre(KEY_FLAG, &42u32.to_be_bytes()), 0, false, quoted_v4_gre(KEY_FLAG, &42u32.to_be_bytes()).len())
             .expect("parse");
         let reply = embedded_reply_key(
             libc::AF_INET as u8, hdr.proto,
@@ -1309,7 +1325,7 @@ mod pptp_quote_call_id_9298_tests {
 
     #[test]
     fn a_quoted_pptp_header_yields_the_call_id_and_stays_unparseable_9298() {
-        let hdr = parse_embedded_v4(&quoted_v4_pptp(0x0202), 0, false).expect("parse");
+        let hdr = parse_embedded_v4(&quoted_v4_pptp(0x0202), 0, false, quoted_v4_pptp(0x0202).len()).expect("parse");
         assert_eq!(hdr.proto, PROTO_GRE);
         assert_eq!(
             hdr.pptp_call_id,
@@ -1347,7 +1363,7 @@ mod pptp_quote_call_id_9298_tests {
             0x2000,
             &0xDEAD_BEEFu32.to_be_bytes(),
         );
-        let hdr = parse_embedded_v4(&p, 0, false).expect("parse");
+        let hdr = parse_embedded_v4(&p, 0, false, p.len()).expect("parse");
         assert_eq!(
             hdr.pptp_call_id, None,
             "#9298: an RFC 2890 Key is NOT a PPTP Call ID. Treating one as the \
@@ -1373,7 +1389,7 @@ mod pptp_quote_call_id_9298_tests {
             "fixture: the slack must lie OUTSIDE the declared quote, or this \
              cell is not about slack at all"
         );
-        let hdr = parse_embedded_v4(&p, 0, false).expect("parse");
+        let hdr = parse_embedded_v4(&p, 0, false, p.len()).expect("parse");
         assert_eq!(
             hdr.pptp_call_id, None,
             "#9298: bytes beyond the quoted datagram's declared total-length \
@@ -1397,7 +1413,7 @@ mod pptp_quote_call_id_9298_tests {
             p.extend_from_slice(&[0x30, 0x01, 0x88, 0x0b, 0x05, 0xdc, 0x02, 0x02]);
             let total = p.len() as u16;
             p[2..4].copy_from_slice(&total.to_be_bytes());
-            let hdr = parse_embedded_v4(&p, 0, false).expect("parse");
+            let hdr = parse_embedded_v4(&p, 0, false, p.len()).expect("parse");
             assert_eq!(
                 hdr.pptp_call_id, None,
                 "#9298: protocol {proto} must carry no Call ID — the bytes at \
@@ -1414,7 +1430,7 @@ mod pptp_quote_call_id_9298_tests {
         let mut tail = PAYLOAD_LEN.to_vec();
         tail.extend_from_slice(&0x0202u16.to_be_bytes());
         let p = super::embedded_gre_discriminator_9031_tests::quoted_v6_gre(PPTP_FLAGS_V1, &tail);
-        let hdr = parse_embedded_v6(&p, 0, false).expect("parse v6");
+        let hdr = parse_embedded_v6(&p, 0, false, p.len()).expect("parse v6");
         assert_eq!(hdr.proto, PROTO_GRE);
         assert_eq!(hdr.pptp_call_id, Some(0x0202));
         assert_eq!(hdr.discriminator, TunnelDiscriminator::Unparseable);
@@ -1545,11 +1561,11 @@ mod quoted_l4_floor_9901_tests {
     #[test]
     fn full_quotes_parse_under_both_outer_states_9901() {
         // The RFC-792 minimum (8 L4 bytes) is adequate under any outer.
-        assert!(parse_embedded_v4(&full_v4_quote(PROTO_TCP), 0, true).is_some());
-        assert!(parse_embedded_v4(&full_v4_quote(PROTO_TCP), 0, false).is_some());
-        assert!(parse_embedded_v4(&full_v4_quote(PROTO_UDP), 0, true).is_some());
-        assert!(parse_embedded_v6(&full_v6_quote(PROTO_TCP), 0, true).is_some());
-        assert!(parse_embedded_v6(&full_v6_quote(PROTO_TCP), 0, false).is_some());
+        assert!(parse_embedded_v4(&full_v4_quote(PROTO_TCP), 0, true, full_v4_quote(PROTO_TCP).len()).is_some());
+        assert!(parse_embedded_v4(&full_v4_quote(PROTO_TCP), 0, false, full_v4_quote(PROTO_TCP).len()).is_some());
+        assert!(parse_embedded_v4(&full_v4_quote(PROTO_UDP), 0, true, full_v4_quote(PROTO_UDP).len()).is_some());
+        assert!(parse_embedded_v6(&full_v6_quote(PROTO_TCP), 0, true, full_v6_quote(PROTO_TCP).len()).is_some());
+        assert!(parse_embedded_v6(&full_v6_quote(PROTO_TCP), 0, false, full_v6_quote(PROTO_TCP).len()).is_some());
     }
 
     #[test]
@@ -1560,20 +1576,20 @@ mod quoted_l4_floor_9901_tests {
         p[2..4].copy_from_slice(&24u16.to_be_bytes());
         assert_eq!(
             refused_delta(|| {
-                assert!(parse_embedded_v4(&p, 0, true).is_none());
+                assert!(parse_embedded_v4(&p, 0, true, p.len()).is_none());
             }),
             1,
             "an atomic-outer short quote must refuse AND count"
         );
         assert!(
-            parse_embedded_v4(&p, 0, false).is_some(),
+            parse_embedded_v4(&p, 0, false, p.len()).is_some(),
             "a fragmented outer keeps pre-fix adequacy for the same bytes"
         );
         // v6 twin: declared payload 4, captured long.
         let mut q = full_v6_quote(PROTO_UDP);
         q[4..6].copy_from_slice(&4u16.to_be_bytes());
-        assert!(parse_embedded_v6(&q, 0, true).is_none());
-        assert!(parse_embedded_v6(&q, 0, false).is_some());
+        assert!(parse_embedded_v6(&q, 0, true, q.len()).is_none());
+        assert!(parse_embedded_v6(&q, 0, false, q.len()).is_some());
     }
 
     #[test]
@@ -1590,9 +1606,9 @@ mod quoted_l4_floor_9901_tests {
         p[16..20].copy_from_slice(&[10, 0, 0, 2]);
         p.extend_from_slice(&[0x11, 0x11, 0x22, 0x22]);
         assert_eq!(p.len(), 28);
-        assert!(parse_embedded_v4(&p, 0, true).is_none());
+        assert!(parse_embedded_v4(&p, 0, true, p.len()).is_none());
         assert!(
-            parse_embedded_v4(&p, 0, false).is_some(),
+            parse_embedded_v4(&p, 0, false, p.len()).is_some(),
             "a fragmented outer keeps pre-fix adequacy for the same bytes"
         );
     }
@@ -1603,15 +1619,15 @@ mod quoted_l4_floor_9901_tests {
         // Declared 26 (6 L4 bytes): pre-fix adequate, floor-refused.
         let mut p = full_v4_quote(PROTO_ICMP);
         p[2..4].copy_from_slice(&26u16.to_be_bytes());
-        assert!(parse_embedded_v4(&p, 0, true).is_none());
-        assert!(parse_embedded_v4(&p, 0, false).is_some());
+        assert!(parse_embedded_v4(&p, 0, true, p.len()).is_none());
+        assert!(parse_embedded_v4(&p, 0, false, p.len()).is_some());
         // Full 8-byte ICMP quote still parses under an atomic outer.
-        assert!(parse_embedded_v4(&full_v4_quote(PROTO_ICMP), 0, true).is_some());
+        assert!(parse_embedded_v4(&full_v4_quote(PROTO_ICMP), 0, true, full_v4_quote(PROTO_ICMP).len()).is_some());
         // ICMPv6 twin.
         let mut q = full_v6_quote(PROTO_ICMPV6);
         q[4..6].copy_from_slice(&6u16.to_be_bytes());
-        assert!(parse_embedded_v6(&q, 0, true).is_none());
-        assert!(parse_embedded_v6(&q, 0, false).is_some());
+        assert!(parse_embedded_v6(&q, 0, true, q.len()).is_none());
+        assert!(parse_embedded_v6(&q, 0, false, q.len()).is_some());
     }
 
     #[test]
@@ -1621,13 +1637,110 @@ mod quoted_l4_floor_9901_tests {
         // before — its discriminator path is unchanged.
         let p = super::embedded_gre_discriminator_9031_tests::quoted_v4_gre(0, &[]);
         assert!(
-            parse_embedded_v4(&p, 0, true).is_some(),
+            parse_embedded_v4(&p, 0, true, p.len()).is_some(),
             "GRE quotes are exempt from the floor"
         );
         let q = super::embedded_gre_discriminator_9031_tests::quoted_v6_gre(0, &[]);
         assert!(
-            parse_embedded_v6(&q, 0, true).is_some(),
+            parse_embedded_v6(&q, 0, true, q.len()).is_some(),
             "GRE quotes are exempt from the floor (v6)"
+        );
+    }
+
+    #[test]
+    fn outer_slack_does_not_satisfy_the_floor_9901() {
+        // The quote declares the full 8 L4 bytes but the OUTER datagram ends
+        // after 4 of them; the remaining 4 sit in the frame as slack beyond
+        // the outer length. Pre-fix the floor's captured leg read the whole
+        // backing frame and passed — while the builders strip to the outer
+        // length and ship a 4-byte quote. Post-fix the parse is bounded by
+        // `outer_end`, so the atomic outer refuses.
+        let p = full_v4_quote(PROTO_TCP);
+        assert!(parse_embedded_v4(&p, 0, true, 24).is_none());
+        assert!(parse_embedded_v4(&p, 0, true, p.len()).is_some());
+        // v6 twin: 40-byte header + 8 L4 bytes, outer ends after 4.
+        let q = full_v6_quote(PROTO_UDP);
+        assert!(parse_embedded_v6(&q, 0, true, 44).is_none());
+        assert!(parse_embedded_v6(&q, 0, true, q.len()).is_some());
+    }
+
+    /// L3-relative outer builder for the atomicity cells: a 40-byte v6 base
+    /// header, plus an 8-byte Fragment header carrying `frag_off_flags`
+    /// (offset high bits + M) when given.
+    fn v6_outer_for_atomicity(frag_off_flags: Option<u16>) -> Vec<u8> {
+        let mut p = vec![0u8; 40];
+        p[0] = 0x60;
+        p[6] = 6;
+        if let Some(f) = frag_off_flags {
+            p[6] = 44;
+            p.extend_from_slice(&[58, 0]);
+            p.extend_from_slice(&f.to_be_bytes());
+            p.extend_from_slice(&[0, 0, 0, 1]);
+        }
+        p
+    }
+
+    fn meta_for_atomicity(addr_family: u8) -> UserspaceDpMeta {
+        UserspaceDpMeta {
+            l3_offset: 0,
+            addr_family,
+            ..UserspaceDpMeta::default()
+        }
+    }
+
+    #[test]
+    fn atomic_fragment_outer_keeps_the_floor_9901() {
+        // An offset-0/M-0 ATOMIC fragment carries the whole datagram: no
+        // later fragment can explain a short quote, so the outer reads
+        // ATOMIC and the 8-byte floor stays on. Pre-fix any declared
+        // Fragment header disabled the floor.
+        let atomic = v6_outer_for_atomicity(Some(0));
+        assert!(
+            super::super::outer_error_atomic(&atomic, &meta_for_atomicity(libc::AF_INET6 as u8)),
+            "an offset-0/M-0 fragment header is atomic — the floor must apply"
+        );
+        // No Fragment header at all: atomic, as before.
+        let plain = v6_outer_for_atomicity(None);
+        assert!(super::super::outer_error_atomic(
+            &plain,
+            &meta_for_atomicity(libc::AF_INET6 as u8)
+        ));
+        // A genuine first fragment (M == 1) still disables the floor.
+        let first = v6_outer_for_atomicity(Some(1));
+        assert!(
+            !super::super::outer_error_atomic(&first, &meta_for_atomicity(libc::AF_INET6 as u8)),
+            "an M-set first fragment must keep pre-fix adequacy"
+        );
+        // A non-first fragment (offset != 0) still disables the floor.
+        let non_first = v6_outer_for_atomicity(Some(0x0100));
+        assert!(
+            !super::super::outer_error_atomic(
+                &non_first,
+                &meta_for_atomicity(libc::AF_INET6 as u8)
+            ),
+            "a non-first fragment must keep pre-fix adequacy"
+        );
+        // Declared-but-truncated Fragment header: bits unreadable, so the
+        // old declares-fragmented behavior is kept (floor off).
+        let mut truncated = vec![0u8; 40];
+        truncated[0] = 0x60;
+        truncated[6] = 44;
+        truncated.extend_from_slice(&[58, 0, 0, 0]);
+        assert!(
+            !super::super::outer_error_atomic(
+                &truncated,
+                &meta_for_atomicity(libc::AF_INET6 as u8)
+            ),
+            "a truncated Fragment header keeps declares-fragmented"
+        );
+        // v4 pin (unchanged behavior): the frag word is bit-inspected.
+        let mut v4 = vec![0u8; 20];
+        v4[0] = 0x45;
+        assert!(super::super::outer_error_atomic(&v4, &meta_for_atomicity(libc::AF_INET as u8)));
+        v4[6..8].copy_from_slice(&0x2000u16.to_be_bytes());
+        assert!(
+            !super::super::outer_error_atomic(&v4, &meta_for_atomicity(libc::AF_INET as u8)),
+            "an MF-set v4 outer must keep pre-fix adequacy"
         );
     }
 }

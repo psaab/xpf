@@ -977,9 +977,11 @@ const ICMP_ERROR_BURST: u64 = 64;
 const ICMP_ERROR_INTERVAL_NS: u64 = 1_000_000_000 / 64;
 const ICMP_ERROR_HORIZON_NS: u64 = ICMP_ERROR_INTERVAL_NS * (ICMP_ERROR_BURST - 1);
 /// #9901 (F-077): cap on the error-budget side table (shared/peer matches
-/// with no local entry). Stalest-TAT eviction past this; 1024 bounds the
-/// worst-case scan and memory while dwarfing any legitimate concurrent
-/// peer-error population.
+/// with no local entry). At cap the insert path prunes fully-recovered
+/// budgets, then conservatively REFUSES unknown keys (suppressed + counted)
+/// rather than evicting — evict-and-admit would let a 1025-key round-robin
+/// exceed 64/s per session indefinitely. 1024 bounds the worst-case scan
+/// and memory while dwarfing any legitimate concurrent peer-error population.
 const ICMP_ERROR_SIDE_TABLE_CAP: usize = 1024;
 
 /// #9901 (F-077): embedded ICMP errors suppressed by the per-session GCRA —
@@ -1305,9 +1307,10 @@ pub(crate) struct SessionTable {
     /// entry — shared/peer sessions resolved through the HA import maps.
     /// Those have no `SessionEntry` to carry a TAT, so the budget lives here,
     /// keyed by the SAME matched key the gate resolves. Bounded (cap 1024,
-    /// stalest-TAT eviction) and seeded (`SeededKeyMap` — attacker-keyed),
-    /// so it is neither growable nor hash-floodable. Local matches use the
-    /// entry TAT and never touch this map. Node-local (never synced).
+    /// prune-then-deny at cap — see `note_icmp_error_delivered`) and seeded
+    /// (`SeededKeyMap` — attacker-keyed), so it is neither growable nor
+    /// hash-floodable. Local matches use the entry TAT and never touch this
+    /// map. Node-local (never synced).
     icmp_error_side_tats: SeededKeyMap<u64>,
 }
 
@@ -1433,15 +1436,19 @@ impl SessionTable {
             return icmp_error_tat_take(tat, now_ns);
         }
         if self.icmp_error_side_tats.len() >= ICMP_ERROR_SIDE_TABLE_CAP {
-            // Stalest-TAT eviction: the least-recently-admitted budget goes.
+            // At cap: first prune fully-recovered budgets (a TAT at or behind
+            // `now` carries no outstanding debt — dropping it loses nothing).
             // O(cap) scan, cold path (shared/peer matches only), cap 1024.
-            if let Some(stalest) = self
-                .icmp_error_side_tats
-                .iter()
-                .min_by_key(|(_, tat)| **tat)
-                .map(|(k, _)| k.clone())
-            {
-                self.icmp_error_side_tats.remove(&stalest);
+            self.icmp_error_side_tats.retain(|_, tat| *tat > now_ns);
+            if self.icmp_error_side_tats.len() >= ICMP_ERROR_SIDE_TABLE_CAP {
+                // Still full: conservative refusal. Every resident budget holds
+                // live debt, so the population exceeds the legitimate bound — the
+                // error is suppressed (and counted), never admitted on a fresh
+                // budget. Evict-and-admit here would let a 1025-key round-robin
+                // exceed 64/s per session indefinitely (each evicted key
+                // re-enters with full credit).
+                EMBEDDED_ERROR_PER_SESSION_SUPPRESSED_TOTAL.fetch_add(1, AtomicOrdering::Relaxed);
+                return false;
             }
         }
         let mut tat = 0u64;

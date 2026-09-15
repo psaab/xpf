@@ -138,27 +138,63 @@ fn shared_key_budgets_via_side_table_9901() {
     assert_eq!(table.icmp_error_side_tats.len(), 1);
 }
 
-/// Past the 1024 cap the side table evicts the STALEST (min-TAT) budget —
-/// bounded memory, and the evicted key simply starts over.
+/// At the 1024 cap with every resident budget holding live debt, an unknown
+/// key is REFUSED (suppressed + counted), never admitted on a fresh budget.
+/// Evict-and-admit here would let a 1025-key round-robin exceed 64/s per
+/// session indefinitely — each evicted key re-entering with full credit.
 #[test]
-fn side_table_evicts_stalest_at_cap_9901() {
+fn side_table_denies_unknown_keys_at_cap_9901() {
     let mut table = SessionTable::new();
     let t0 = 6_000_000_000u64;
-    let mut first = key_v4();
-    first.src_port = 1000;
-    assert!(table.note_icmp_error_delivered(&first, t0));
-    for i in 1..=1024u32 {
+    for i in 0..1024u32 {
         let mut k = key_v4();
         k.src_port = 1000 + i as u16;
-        assert!(table.note_icmp_error_delivered(&k, t0 + i as u64));
+        assert!(table.note_icmp_error_delivered(&k, t0));
     }
+    assert_eq!(table.icmp_error_side_tats.len(), 1024);
+    let mut extra = key_v4();
+    extra.src_port = 3000;
+    let suppressed = suppressed_delta(|| {
+        assert!(
+            !table.note_icmp_error_delivered(&extra, t0),
+            "an unknown key at a debt-full cap must be refused, not admitted fresh"
+        );
+    });
+    assert_eq!(suppressed, 1, "the cap refusal must be counted");
     assert_eq!(
         table.icmp_error_side_tats.len(),
         1024,
         "the side table never exceeds its cap"
     );
     assert!(
-        !table.icmp_error_side_tats.contains_key(&first),
-        "the stalest (min-TAT) budget is evicted first"
+        !table.icmp_error_side_tats.contains_key(&extra),
+        "a refused key leaves no budget behind"
+    );
+}
+
+/// The cap is not a permanent clamp: fully-recovered budgets (TAT at or
+/// behind `now`) are pruned on the at-cap insert path, so a new key is
+/// admitted once the residents' debt has drained.
+#[test]
+fn side_table_prunes_recovered_budgets_at_cap_9901() {
+    let mut table = SessionTable::new();
+    let t0 = 7_000_000_000u64;
+    for i in 0..1024u32 {
+        let mut k = key_v4();
+        k.src_port = 1000 + i as u16;
+        assert!(table.note_icmp_error_delivered(&k, t0));
+    }
+    // One take each: every TAT is t0 + one 64/s interval. Past that instant
+    // every budget is fully recovered and prunable.
+    let t1 = t0 + 1_000_000_000;
+    let mut fresh = key_v4();
+    fresh.src_port = 3000;
+    assert!(
+        table.note_icmp_error_delivered(&fresh, t1),
+        "a new key must be admitted once resident budgets have recovered"
+    );
+    assert!(
+        table.icmp_error_side_tats.len() <= 1024,
+        "prune-then-insert never exceeds the cap"
     );
 }

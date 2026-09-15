@@ -245,7 +245,7 @@ const TAG_EMPTY: u64 = 0;
 /// Structure: one zone `aggregate` bucket (the #3618/#5856 budget, still
 /// parameterized by the gate's rate/burst) fronted by a per-source tier: 64
 /// fixed `src_slots` (each 100/s + burst 100) selected by
-/// `(seed ^ addr_mix) % 64`, plus one `overflow` bucket (same 100/100 budget)
+/// `diffuse64(seed ^ addr_fold) % 64`, plus one `overflow` bucket (same
 /// for a `None` source. Gate order is source-FIRST then aggregate: a
 /// source-deny consumes NOTHING shared (the #5567 build-before-consume
 /// principle applied to the tier order), so one flooder cannot starve another
@@ -279,26 +279,38 @@ pub(in crate::afxdp) struct ZoneLimiter {
     overflow: TokenBucket,
 }
 
-/// Mix a source address into 64 bits. Sequential addresses differ in low
-/// bits; the multiplicative spread keeps neighboring sources in different
-/// slots. Unpredictability comes from the per-boot seed XORed at the call
-/// site, not from this mix.
-fn addr_mix(addr: &IpAddr) -> u64 {
-    let x = match addr {
+/// Fold a source address to 64 bits. No diffusion here — `diffuse64` runs
+/// over `seed ^ fold` at the call site, so every output bit depends on every
+/// address bit AND every seed bit.
+fn addr_fold(addr: &IpAddr) -> u64 {
+    match addr {
         IpAddr::V4(v4) => u32::from(*v4) as u64,
         IpAddr::V6(v6) => {
             let x = u128::from(*v6);
             (x as u64) ^ ((x >> 64) as u64)
         }
-    };
-    x.wrapping_mul(0x9E37_79B9_7F4A_7C15)
+    }
+}
+
+/// splitmix64 finalizer: full-bit diffusion over the seeded fold. REQUIRED
+/// for the slot mapping, not a nicety — the pre-fix multiply-only mix
+/// preserved low-bit locality: mod-64 of a product sees only the low 6
+/// factors, so 192.0.2.1 and 192.0.2.65 (same low 6 address bits) shared a
+/// slot under EVERY seed and one source could drain another's bucket. After
+/// diffusion the low slot bits are a function of the whole address (and the
+/// whole seed); unpredictability still comes from the per-boot seed.
+fn diffuse64(mut z: u64) -> u64 {
+    z = z.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
 }
 
 /// The source slot and claimant tag for `addr` under `seed`. The tag folds
 /// the bits above the slot index and is forced non-zero so it never reads
 /// `TAG_EMPTY`.
 fn slot_and_tag(seed: u64, addr: &IpAddr) -> (usize, u64) {
-    let h = seed ^ addr_mix(addr);
+    let h = diffuse64(seed ^ addr_fold(addr));
     let slot = (h % SRC_SLOT_COUNT as u64) as usize;
     let tag = (h >> 6) | 1;
     (slot, tag)

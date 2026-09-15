@@ -181,10 +181,22 @@ fn extractor_references_the_shared_ext_header_set_9901() {
     // predicate still delegates to the same const. Re-spelling the set in
     // either file reds here while the sweep stays green, which is exactly
     // the convention-drift F-072 is about.
+    // Strip comment-only lines before pinning: a `contains` pin over raw
+    // source would still pass with the arm commented out (the text survives
+    // in the comment). Code lines only — the pins anchor on real code.
+    fn code_only(src: &str) -> String {
+        src.lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-    let extract = std::fs::read_to_string(root.join("screen/extract.rs")).expect("read extract.rs");
-    let inspect =
-        std::fs::read_to_string(root.join("afxdp/frame/inspect.rs")).expect("read inspect.rs");
+    let extract = code_only(
+        &std::fs::read_to_string(root.join("screen/extract.rs")).expect("read extract.rs"),
+    );
+    let inspect = code_only(
+        &std::fs::read_to_string(root.join("afxdp/frame/inspect.rs")).expect("read inspect.rs"),
+    );
     assert!(
         extract.len() > 1000 && inspect.len() > 1000,
         "non-vacuity: both sources must be real files",

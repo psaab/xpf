@@ -212,7 +212,8 @@ use self::icmp::{
 #[cfg(test)]
 use self::icmp_embed::{EmbeddedIcmpMatch, try_embedded_icmp_session_match_from_frame};
 use self::icmp_embed::{
-    Nat64IcmpErrorMatch, build_nat_reversed_icmp_error_v4, build_nat_reversed_icmp_error_v6,
+    EmbeddedMatchOutcome, Nat64IcmpErrorMatch, build_nat_reversed_icmp_error_v4,
+    build_nat_reversed_icmp_error_v6,
     build_snat_outbound_icmp_error_v4, build_snat_outbound_icmp_error_v6,
     finalize_embedded_icmp_resolution, finalize_embedded_icmp_resolution_parts,
     // #8271: the `_from_frame` form is now the ONLY form. Its `(area, desc)`

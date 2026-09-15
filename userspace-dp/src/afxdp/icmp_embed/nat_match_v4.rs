@@ -12,11 +12,18 @@ pub(in crate::afxdp::icmp_embed) fn match_outer_v4(
     meta: UserspaceDpMeta,
     ctx: &mut NatMatchCtx<'_>,
     now_ns: u64,
-) -> Option<EmbeddedIcmpMatch> {
+) -> EmbeddedMatchOutcome<EmbeddedIcmpMatch> {
     let l4 = meta.l4_offset as usize;
     let embedded_ip_start = l4 + 8;
 
-    let hdr = parse_embedded_v4(frame, embedded_ip_start, outer_error_atomic(frame, &meta))?;
+    let Some(hdr) = parse_embedded_v4(
+        frame,
+        embedded_ip_start,
+        outer_error_atomic(frame, &meta),
+        super::outer_datagram_end(frame, &meta),
+    ) else {
+        return EmbeddedMatchOutcome::NoMatch;
+    };
     let emb_src = IpAddr::V4(hdr.src);
     let emb_dst = IpAddr::V4(hdr.dst);
     // #7160 (#2387): the embedded tuple names the ORIGINAL flow, so its key
@@ -114,12 +121,13 @@ pub(in crate::afxdp::icmp_embed) fn match_outer_v4(
         // #9901 (F-077): per-session error budget, keyed on the FORWARD
         // session's own key (the ORIGINAL pre-NAT tuple — the stable
         // identity across every error about this flow). Over budget the
-        // error is suppressed (dropped): a quoter must not steer an
-        // unbounded error stream onto a live session.
+        // error is BudgetDenied (descriptor-drop arm) — NOT a miss: falling
+        // through to flowless forwarding would keep delivering it under an
+        // ICMP-permitting policy.
         if !ctx.sessions.note_icmp_error_delivered(&fwd.key, now_ns) {
-            return None;
+            return EmbeddedMatchOutcome::BudgetDenied;
         }
-        return Some(EmbeddedIcmpMatch {
+        return EmbeddedMatchOutcome::Match(EmbeddedIcmpMatch {
             nat,
             original_src,
             original_src_port,
@@ -157,7 +165,7 @@ pub(in crate::afxdp::icmp_embed) fn match_outer_v4(
     //     unassociable quote.
     //   * reply-key hit otherwise (a DNAT/composed flow): the pre-#6474
     //     behavior is preserved bit-for-bit.
-    lookup_session_across_scopes(
+    let found = lookup_session_across_scopes(
         ctx.sessions,
         ctx.shared_sessions,
         ctx.shared_forward_wire_sessions,
@@ -176,45 +184,47 @@ pub(in crate::afxdp::icmp_embed) fn match_outer_v4(
             0,
         )
         .map(|resolved| (resolved, true))
-    })
-    .and_then(|(resolved, via_reply_key)| {
-        // #9901 (F-077): per-session error budget. The gating key is the
-        // MATCHED key — the canonical key when the resolver carries one
-        // (forward-wire / shared hits), else the winning query key
-        // (`via_reply_key` selects it). `SessionLookup` is never widened.
-        let query_key = if via_reply_key {
-            &reverse_key
-        } else {
-            &embedded_key
-        };
-        if !ctx
-            .sessions
-            .note_icmp_error_delivered(resolved.key.as_ref(query_key), now_ns)
-        {
-            return None;
-        }
-        let sl = resolved.lookup;
-        let resolution = if sl.metadata.is_reverse {
-            sl.decision.resolution
-        } else {
-            embedded_icmp_return_resolution(ctx, &embedded_key, sl.decision, emb_src, now_ns)
-        };
-        let outbound_snat = via_reply_key
-            && !sl.metadata.is_reverse
-            && sl.decision.nat.rewrite_src.is_some()
-            && sl.decision.nat.rewrite_dst.is_none();
-        Some(EmbeddedIcmpMatch {
-            nat: sl.decision.nat,
-            original_src: emb_src,
-            original_src_port: hdr.src_port,
-            // Plain (non-forward-NAT) match: no pre-DNAT public dst to
-            // recover, so the embedded dst stays as-is (#3112 no-op).
-            original_dst: emb_dst,
-            original_dst_port: hdr.dst_port,
-            embedded_proto: hdr.proto,
-            resolution,
-            metadata: sl.metadata,
-            outbound_snat,
-        })
+    });
+    let Some((resolved, via_reply_key)) = found else {
+        return EmbeddedMatchOutcome::NoMatch;
+    };
+    // #9901 (F-077): per-session error budget. The gating key is the
+    // MATCHED key — the canonical key when the resolver carries one
+    // (forward-wire / shared hits), else the winning query key
+    // (`via_reply_key` selects it). `SessionLookup` is never widened.
+    // Denial is BudgetDenied (drop arm), never a miss — see above.
+    let query_key = if via_reply_key {
+        &reverse_key
+    } else {
+        &embedded_key
+    };
+    if !ctx
+        .sessions
+        .note_icmp_error_delivered(resolved.key.as_ref(query_key), now_ns)
+    {
+        return EmbeddedMatchOutcome::BudgetDenied;
+    }
+    let sl = resolved.lookup;
+    let resolution = if sl.metadata.is_reverse {
+        sl.decision.resolution
+    } else {
+        embedded_icmp_return_resolution(ctx, &embedded_key, sl.decision, emb_src, now_ns)
+    };
+    let outbound_snat = via_reply_key
+        && !sl.metadata.is_reverse
+        && sl.decision.nat.rewrite_src.is_some()
+        && sl.decision.nat.rewrite_dst.is_none();
+    EmbeddedMatchOutcome::Match(EmbeddedIcmpMatch {
+        nat: sl.decision.nat,
+        original_src: emb_src,
+        original_src_port: hdr.src_port,
+        // Plain (non-forward-NAT) match: no pre-DNAT public dst to
+        // recover, so the embedded dst stays as-is (#3112 no-op).
+        original_dst: emb_dst,
+        original_dst_port: hdr.dst_port,
+        embedded_proto: hdr.proto,
+        resolution,
+        metadata: sl.metadata,
+        outbound_snat,
     })
 }

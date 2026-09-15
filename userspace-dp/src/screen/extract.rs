@@ -197,7 +197,7 @@ pub(crate) fn extract_screen_info(
         // the header it counts — an impossible datagram. The shim refuses the
         // same shape before classification (`ipv4_declared_len_covers_header`,
         // one gate shared by source, parity-pinned in
-        // `afxdp/tests_ipv4_len_gate_9901.rs`); refusing here as well keeps a
+        // `screen/tests_9901_len_gate.rs`); refusing here as well keeps a
         // frame that bypasses the shim (slow path, injected, replayed) from
         // reaching the option scan and the length-arithmetic screens below
         // with a header no consumer can bound. A bare-header datagram
@@ -378,7 +378,10 @@ pub(crate) fn extract_screen_info(
             // local set (routing + generic + AH + Fragment, terminally
             // excluding 59/ESP like the predicate) to it, so editing either
             // side without the other reds every extractor test in debug builds.
-            // Zero release cost.
+            // Debug-only by design (compiled out in release — zero release
+            // cost): release correctness rests on the generic arm's direct
+            // guard below, which needs no assert; this pins the REMAINING
+            // literal arms (ROUTING/AH/Fragment) against drift where tests run.
             debug_assert_eq!(
                 matches!(
                     nexthdr,
