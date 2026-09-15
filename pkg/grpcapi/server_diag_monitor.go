@@ -7,6 +7,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/psaab/xpf/pkg/appid"
@@ -59,42 +60,130 @@ func (s *Server) monitorInterfaceDataplane() monitoriface.RuntimeDataPlane {
 // fail-fast; over-cap streams return codes.ResourceExhausted without creating
 // a ticker, a rendering goroutine, or a peer dial. A package var so a test can
 // swap in a fresh small-capacity limiter.
+//
+// The 64 slots bound ACTIVE handlers PLUS retained timeout workers: a Send
+// that times out TRANSFERS its slot to the Send worker, which holds it until
+// the transport unblocks (client drains or disconnects). Without the transfer
+// a slow-consumer churn would free slots every 30s while the queued frame +
+// stream state + worker stayed retained outside the budget — 64 would bound
+// running handlers but not the retained footprint. With it, retained workers
+// compete for the same 64, so churn cannot accumulate beyond the cap.
 var monitorInterfaceLimiter = diagcmd.MonitorInterfaceLimiter
 
-// monitorInterfaceSendTimeout bounds a SINGLE downstream frame write. A client
-// that cannot accept one frame within this window is not reading. Per-write,
-// not elapsed: an idle-healthy stream (valid in summary mode between ticks)
-// is untouched and only a peer that has stopped draining is cut — the same
-// axis sseWriteDeadline uses for SSE (#7632). Matches the 30s slow-reader
-// budget so one tuning covers both streaming surfaces. A package var so a test
-// can compress it without a real slow reader.
+// monitorInterfaceSendTimeout bounds a SINGLE downstream frame write,
+// HANDLER-SIDE: the handler goroutine returns within this window of a stuck
+// Send. It does NOT bound client observation (grpc-go queues trailers behind
+// pending DATA under a flow-control block, so the DeadlineExceeded the handler
+// returns is delivered only when the window opens or the connection closes)
+// and it does NOT reclaim transport state (the queued frame + stream state +
+// Send worker stay retained until the client drains or disconnects — see the
+// transfer note on monitorInterfaceLimiter). Per-write, not elapsed: an
+// idle-healthy stream between ticks is untouched and only a peer that has
+// stopped draining is cut, the same axis sseWriteDeadline uses for SSE
+// (#7632). Matches the 30s slow-reader budget. A package var so a test can
+// compress it without a real slow reader.
 var monitorInterfaceSendTimeout = 30 * time.Second
 
+// monitorInterfacePeerIdleTimeout bounds how long the proxy forwarding loop
+// waits for the next peer frame. The peer ticks every 1s by construction, so
+// 10 missed ticks means it is stalled (wedged handler, wedged transport —
+// PSK proves identity, not liveness). Without this a stalled peer parks the
+// proxy in Recv indefinitely, holding its slot + connection + goroutine until
+// the LOCAL client goes away; 64 such wedges exhaust the budget. With it a
+// wedged proxy severs with Unavailable and frees its slot, forcing a stalling
+// peer to re-wedge continuously (new RPCs, new dials) instead of holding once.
+// A package var so a test can compress it without a real stalled peer.
+var monitorInterfacePeerIdleTimeout = 10 * time.Second
+
 // sendMonitorInterfaceFrame sends one frame with a slow-consumer bound. gRPC
-// has no socket write deadline, so Send runs in a short-lived goroutine and
-// the handler selects over its completion, the client context, and the
-// per-write timeout. On timeout the stream is severed with DeadlineExceeded;
-// the handler return then tears the RPC down, which unblocks the helper Send
-// so it cannot outlive the stream. The timer is stopped on the fast path so a
-// healthy Send leaves no 30s timer behind.
-func sendMonitorInterfaceFrame(stream grpc.ServerStreamingServer[pb.MonitorInterfaceResponse], resp *pb.MonitorInterfaceResponse) error {
+// has no socket write deadline, so Send runs in a worker goroutine and the
+// handler selects over its completion, the client context, and the per-write
+// timeout. The timer is stopped on the fast path so a healthy Send leaves no
+// 30s timer behind.
+//
+// On timeout the handler severs with DeadlineExceeded BUT the worker OUTLIVES
+// the return: it stays blocked in Send until the transport unblocks (client
+// drains or disconnects — the handler return does not itself unblock a
+// flow-control-parked Send, and trailers queue behind the pending DATA). The
+// timed-out slot is TRANSFERRED to the worker, which releases it when Send
+// finally completes; the caller must NOT release on the transferred path
+// (it disarms its defer via the returned flag). Release is idempotent, so the
+// narrow race where Send completes exactly as the timer fires — worker may or
+// may not observe the timeout flag — resolves to at most a safe double
+// release, never a leak. Worker exit is proven by test: cancel unblocks Send
+// and InFlight drains to 0.
+func sendMonitorInterfaceFrame(stream grpc.ServerStreamingServer[pb.MonitorInterfaceResponse], resp *pb.MonitorInterfaceResponse, release func()) (error, bool) {
 	ctx := stream.Context()
 	select {
 	case <-ctx.Done():
-		return ctx.Err()
+		return ctx.Err(), false
 	default:
 	}
+	var timedOut atomic.Bool
 	done := make(chan error, 1)
-	go func() { done <- stream.Send(resp) }()
+	go func() {
+		err := stream.Send(resp)
+		done <- err
+		if timedOut.Load() {
+			release()
+		}
+	}()
 	timer := time.NewTimer(monitorInterfaceSendTimeout)
 	defer timer.Stop()
 	select {
 	case err := <-done:
-		return err
+		return err, false
 	case <-ctx.Done():
-		return ctx.Err()
+		return ctx.Err(), false
 	case <-timer.C:
-		return status.Error(codes.DeadlineExceeded, "monitor interface client is not reading; stream severed")
+		timedOut.Store(true)
+		select {
+		case err := <-done:
+			return err, false
+		default:
+		}
+		return status.Error(codes.DeadlineExceeded, "monitor interface client is not reading; handler severed"), true
+	}
+}
+
+// monitorInterfacePeerStream is the Recv half of the peer MonitorInterface
+// client stream. The generated client satisfies it; tests supply a fake that
+// stalls to prove the idle bound without a live peer.
+type monitorInterfacePeerStream interface {
+	Recv() (*pb.MonitorInterfaceResponse, error)
+}
+
+// recvMonitorInterfaceFrame receives one peer frame with a stall bound. Recv
+// runs in a worker goroutine and the proxy selects over its completion, the
+// RPC context, and the peer-idle timeout. On timeout the proxy severs with
+// Unavailable. Unlike the Send path there is no slot transfer: the proxy's
+// deferred conn.Close() tears the peer transport down on return, which
+// unblocks a pending Recv promptly, so the worker exits on connection close
+// rather than lingering on client behavior.
+func recvMonitorInterfaceFrame(peerStream monitorInterfacePeerStream, ctx context.Context) (*pb.MonitorInterfaceResponse, error) {
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	default:
+	}
+	type result struct {
+		resp *pb.MonitorInterfaceResponse
+		err  error
+	}
+	done := make(chan result, 1)
+	go func() {
+		resp, err := peerStream.Recv()
+		done <- result{resp: resp, err: err}
+	}()
+	timer := time.NewTimer(monitorInterfacePeerIdleTimeout)
+	defer timer.Stop()
+	select {
+	case r := <-done:
+		return r.resp, r.err
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-timer.C:
+		return nil, status.Error(codes.Unavailable, "monitor interface peer stalled; proxy severed")
 	}
 }
 
@@ -551,14 +640,27 @@ func (s *Server) MonitorInterface(req *pb.MonitorInterfaceRequest, stream grpc.S
 	// state, and any peer dial, so a refused subscriber costs no goroutine,
 	// no ticker, and no connection. Held across the proxy forwarding loop as
 	// well — it still pins a local goroutine plus a peer connection — while
-	// the peer charges its own slot for the rendering half.
+	// the peer charges its own slot for the rendering half. A Send that times
+	// out TRANSFERS the slot to its worker (transferred=true disarms this
+	// defer); the worker releases when the transport unblocks, so retained
+	// timeout workers compete for the same 64 and churn cannot accumulate
+	// outside the budget.
 	release, err := monitorInterfaceLimiter.Acquire()
 	if err != nil {
 		return status.Error(codes.ResourceExhausted, "too many concurrent monitor interface subscribers")
 	}
-	defer release()
+	transferred := false
+	defer func() {
+		if !transferred {
+			release()
+		}
+	}()
 	if proxyToPeer {
-		return s.proxyMonitorInterface(req, stream)
+		proxyErr, xfer := s.proxyMonitorInterface(req, stream, release)
+		if xfer {
+			transferred = true
+		}
+		return proxyErr
 	}
 
 	summaryInterfaces := func() ([]string, map[string]string) {
@@ -621,8 +723,11 @@ func (s *Server) MonitorInterface(req *pb.MonitorInterfaceRequest, stream grpc.S
 			prevAll = newPrev
 		}
 
-		if err := sendMonitorInterfaceFrame(stream, &pb.MonitorInterfaceResponse{Frame: buf.String()}); err != nil {
-			return err
+		if sendErr, xfer := sendMonitorInterfaceFrame(stream, &pb.MonitorInterfaceResponse{Frame: buf.String()}, release); sendErr != nil {
+			if xfer {
+				transferred = true
+			}
+			return sendErr
 		}
 
 		select {
@@ -635,11 +740,15 @@ func (s *Server) MonitorInterface(req *pb.MonitorInterfaceRequest, stream grpc.S
 
 // proxyMonitorInterface forwards a MonitorInterface stream to the cluster peer.
 // The caller (MonitorInterface) already holds this node's subscriber slot; the
-// peer charges its own for the rendering half.
-func (s *Server) proxyMonitorInterface(req *pb.MonitorInterfaceRequest, stream grpc.ServerStreamingServer[pb.MonitorInterfaceResponse]) error {
+// peer charges its own for the rendering half. release is that slot: a Send
+// that times out transfers it to its worker (returned xfer=true, caller must
+// not release). A Recv stall severs with Unavailable and does NOT transfer —
+// the deferred conn.Close() unblocks the Recv worker promptly, so the slot is
+// freed on return and the worker exits on connection close.
+func (s *Server) proxyMonitorInterface(req *pb.MonitorInterfaceRequest, stream grpc.ServerStreamingServer[pb.MonitorInterfaceResponse], release func()) (error, bool) {
 	conn, err := s.dialPeer()
 	if err != nil {
-		return err
+		return err, false
 	}
 	defer conn.Close()
 
@@ -651,19 +760,19 @@ func (s *Server) proxyMonitorInterface(req *pb.MonitorInterfaceRequest, stream g
 	client := pb.NewBpfrxServiceClient(conn)
 	peerStream, err := client.MonitorInterface(ctx, req)
 	if err != nil {
-		return status.Errorf(codes.Unavailable, "peer monitor failed: %v", err)
+		return status.Errorf(codes.Unavailable, "peer monitor failed: %v", err), false
 	}
 
 	for {
-		resp, err := peerStream.Recv()
+		resp, err := recvMonitorInterfaceFrame(peerStream, ctx)
 		if err != nil {
 			if ctx.Err() != nil {
-				return ctx.Err()
+				return ctx.Err(), false
 			}
-			return err
+			return err, false
 		}
-		if err := sendMonitorInterfaceFrame(stream, resp); err != nil {
-			return err
+		if sendErr, xfer := sendMonitorInterfaceFrame(stream, resp, release); sendErr != nil {
+			return sendErr, xfer
 		}
 	}
 }

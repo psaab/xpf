@@ -929,6 +929,22 @@ contract.
   256 is far above real operator load (low tens, single-digit long-lived
   streams), so it is a runaway ceiling rather than a throttle.
 
+  `MonitorInterface` draws its own 64-stream budget
+  (`diagcmd.MonitorInterfaceLimiter`, `monitorInterfaceLimiter` alias, #9891)
+  — sized to the sibling `EventBuffer` streaming cap, fail-fast with
+  `ResourceExhausted` after validation but before the ticker and any peer
+  dial, so a refused subscriber costs no goroutine, ticker, or connection
+  and validation failures (`NotFound`) cost no slot. Each downstream frame
+  carries a 30s handler-side send bound: a client that cannot accept one
+  frame in 30s is severed with `DeadlineExceeded` (handler returns; trailers
+  still queue behind pending DATA until the window opens or the connection
+  closes). The timed-out slot TRANSFERS to the Send worker, which holds it
+  until the transport unblocks — so the 64 bounds active handlers PLUS
+  retained timeout workers and slow-consumer churn cannot accumulate outside
+  the budget. The proxy leg carries a 10s peer-idle bound (the peer ticks 1s
+  by construction): a stalled peer severs with `Unavailable` and frees its
+  slot instead of parking the proxy in `Recv` until the local client leaves.
+
   Not an injection surface, stated because it reads like one: nine of
   the ten sites pass only compile-time string literals to
   `exec.CommandContext` (no shell). The tenth, `tail -n N <logPath>`, is
