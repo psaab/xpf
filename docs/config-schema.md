@@ -14996,10 +14996,11 @@ of installing silently and then vanishing from the dataplane.
   child. This matters: the compiler accepts an EXPLICIT egress interface on a
   plain next-hop (for IPv6 link-local gateways) in BOTH the hierarchical
   `next-hop fe80::50 { interface reth0.50; }` and the flat/inline
-  `next-hop fe80::50 interface reth0.50` shapes (compiler_routing.go). A
-  typed value-leaf would route the `interface` child through the presence-only
-  modifier path and reject the value token after `interface` as `unknown
-  modifier` — the #2448 over-rejection regression caught in review. Accepted
+  `next-hop fe80::50 interface reth0.50` shapes (compiler_routing.go). Before
+  #9880 a typed value-leaf routed the `interface` child through the then
+  presence-only modifier path and rejected the value token after `interface`
+  as `unknown modifier` — the #2448 over-rejection regression caught in
+  review (#9880 since taught that path valued modifiers). Accepted
   gateway values: a bare IPv4/IPv6 address (the FRR renderer emits it
   verbatim, the Rust FIB parses it), a bare interface name (`ge-0-0-0.0`,
   `reth0.50`, `eth1` — a valid Junos interface next-hop that FRR renders as an
