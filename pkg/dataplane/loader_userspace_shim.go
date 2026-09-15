@@ -109,7 +109,7 @@ const (
 // maps only. The legacy PROG_ARRAY pins (xdp_progs, tc_progs) and
 // the legacy per-CPU policer_states pin are dropped — they no
 // longer exist as kernel objects because no legacy program loads
-// them. cleanupUserspaceShimLegacyOnlyMapPins() in loader.go
+// them. cleanupUserspaceShimLegacyOnlyMapPins() in shim_pins.go
 // removes the stale pins from disk on first boot after upgrade.
 var pinnedMaps = map[string]bool{
 	"sessions":          true,

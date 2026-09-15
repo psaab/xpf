@@ -14,11 +14,11 @@
 #   ./test/incus/wg-interop.sh preflight        # P0 checks + fast-path baseline
 #   ./test/incus/wg-interop.sh provision        # create/reuse the peer VM
 #   ./test/incus/wg-interop.sh configure        # keys + peer wg + xpf commit (P1)
-#   ./test/incus/wg-interop.sh test [phase]     # p2|p4a|p3|p4b|p5|p6|p7 (default: all)
+#   ./test/incus/wg-interop.sh test [phase]     # p2|p4a|p3|p4b|p5|p6|p7|p8 (default: all)
 #   ./test/incus/wg-interop.sh teardown [--keep]# remove config (+ peer unless --keep)
 #   ./test/incus/wg-interop.sh all [--keep]     # everything in plan order
 #
-# Phase order (plan §5.2): P0 P1 P2 P4a P3 P4b P5 P6 P7 teardown.
+# Phase order (plan §5.2 + #9587 P8): P0 P1 P2 P4a P3 P4b P5 P6 P7 P8 teardown.
 #
 # Shared-cluster discipline: EVERY incus command runs under
 # flock /tmp/xpf-cluster.lock + sg incus-admin. Long-running traffic is
@@ -58,7 +58,7 @@ PEER="${R}:${WG_PEER}"
 LANHOST="${R}:${WG_LAN_HOST}"
 
 EVID="${WG_EVIDENCE_DIR:-/tmp/wg-interop-$(date +%Y%m%d-%H%M%S)}"
-mkdir -p "${EVID}"
+mkdir -p "${EVID}" 2>/dev/null || { echo "[wg-interop] FATAL: cannot create evidence dir ${EVID}" >&2; exit 1; }
 SUMMARY="${EVID}/summary.txt"
 
 KEEP_PEER=0
@@ -69,10 +69,49 @@ KEEP_PEER=0
 # commit-apply path. Taints are surfaced at the end and `all` exits 2.
 TAINTS=0
 
-log()  { echo "[wg-interop $(date +%H:%M:%S)] $*" | tee -a "${SUMMARY}"; }
+# Diagnostics are non-fatal by design (GPT round-6): a failed evidence
+# write (missing/unwritable dir, full disk) must never flip control flow
+# or mask an exit status. Lost evidence is visible as missing files.
+log()  { echo "[wg-interop $(date +%H:%M:%S)] $*" | tee -a "${SUMMARY}" || true; }
 pass() { log "PASS: $*"; }
 fail() { log "FAIL: $*"; exit 1; }
 warn() { log "WARN: $*"; }
+
+# Evidence-safe transcript path (GPT round-6): echoes a writable path under
+# EVID, or /dev/null when evidence is unavailable (missing/unwritable dir,
+# non-writable file, failed creation). Always returns 0, so callers under
+# `set -e` never die on evidence.
+evidence_path() {
+    local p="${EVID:-/nonexistent}/$1"
+    if touch "$p" 2>/dev/null && [ -w "$p" ]; then
+        printf '%s' "$p"
+    else
+        printf '/dev/null'
+    fi
+    return 0
+}
+
+# Teardown-on-failure that cannot mask the phase status (GPT round-6):
+# transcript failures fall back to /dev/null with a retry there, and this
+# helper always returns 0, so the trap's `exit ${CLEANED_RC}` carries the
+# original rc. Teardown is idempotent, so a retry after a genuine failure
+# only re-attempts cleanup.
+run_teardown_on_fail() {
+    local tf ts=0
+    tf=$(evidence_path "teardown-on-fail.txt")
+    # Probe the redirect before teardown starts: an outer-redirect failure
+    # would otherwise suppress the cleanup entirely.
+    if ! : >>"$tf" 2>/dev/null; then
+        tf=/dev/null
+    fi
+    ( teardown >>"$tf" 2>&1 ) 2>/dev/null || ts=$?
+    if [ "$ts" -ne 0 ]; then
+        ts=0
+        ( teardown >>/dev/null 2>&1 ) 2>/dev/null || ts=$?
+    fi
+    [ "$ts" -eq 0 ] || warn "failure-teardown itself failed (rc=$ts)" || true
+    return 0
+}
 
 # ---------------------------------------------------------------------------
 # Cluster command plumbing. flock serializes against other agents; sg
@@ -253,8 +292,12 @@ quit
 EOF
     )
     [ -n "${rgs}" ] || rgs="0 1"
+    # Evidence must never preempt the failback itself: the transcript falls
+    # back to /dev/null when EVID is unavailable (GPT round-6).
+    local fbf
+    fbf=$(evidence_path "$1-failback.txt")
     for rg in ${rgs}; do
-        inc exec "${FW0}" -- /usr/local/sbin/cli <<EOF >> "${EVID}/$1-failback.txt" 2>&1
+        inc exec "${FW0}" -- /usr/local/sbin/cli <<EOF >> "$fbf" 2>&1
 request chassis cluster failover redundancy-group ${rg} node 0
 quit
 EOF
@@ -336,6 +379,15 @@ EOF
         warn "stale wg0 stanza in active config — removing"
         wg_stanza_delete
     fi
+    # #9587 P8: same staleness guards for the second tunnel.
+    if inc exec "${FW0}" -- /usr/local/sbin/cli <<'EOF' 2>/dev/null | grep -q "tunnel"
+show configuration groups node0 interfaces wg1
+quit
+EOF
+    then
+        warn "stale wg1 stanza in active config — removing"
+        wg_stanza_delete
+    fi
     # Stale wg0 NETDEV on fw0 is the documented S2a removal leak (the
     # TUN outlives the stanza, pkg/routing/tunnel.go AGY M1 note +
     # #1866) — self-clean it. On fw1 a wg0 netdev means the node0
@@ -347,11 +399,21 @@ EOF
     if ish "${FW1}" 'ip link show wg0 >/dev/null 2>&1'; then
         fail "wg0 netdev on fw1 — node0 scoping was violated; investigate before running"
     fi
+    if ish "${FW0}" 'ip link show wg1 >/dev/null 2>&1'; then
+        warn "stale wg1 netdev on fw0 (S2a removal leak) — deleting"
+        ish "${FW0}" 'ip link del wg1 2>/dev/null; true'
+    fi
+    if ish "${FW1}" 'ip link show wg1 >/dev/null 2>&1'; then
+        fail "wg1 netdev on fw1 — node0 scoping was violated; investigate before running"
+    fi
     # A pinned listen port with no stanza is the leaked control thread
     # (#1866); P1's restart fallback handles fw0. On fw1 it is a
     # scoping violation: hard fail.
     if ish "${FW1}" "ss -uln | grep -q ':${WG_LISTEN_PORT} '"; then
         fail "udp :${WG_LISTEN_PORT} bound on fw1 — scoping violation"
+    fi
+    if ish "${FW1}" "ss -uln | grep -q ':${WG_LISTEN_PORT2} '"; then
+        fail "udp :${WG_LISTEN_PORT2} bound on fw1 — scoping violation"
     fi
     # Free mlx1 VF headroom (informational — incus auto-assigns).
     inc query "/1.0/resources" 2>/dev/null \
@@ -449,6 +511,25 @@ peer_wg_setup() { # peer_wg_setup [endpoint_spec] [allowed_ips] [mtu]
         ip link set ${WG_KERNEL_IFACE} mtu ${mtu} up"
 }
 
+# #9587 P8 — second kernel wg device on the peer for the wg1 tunnel.
+# Disjoint listen port + disjoint inner subnets. Both peer devices share
+# the peer keypair and both xpf tunnels share the xpf identity (no bind
+# collision: all four sockets sit on distinct ports); the peer tells the
+# tunnels apart by device with per-device allowed-ips, keeping the two
+# TAI64N domains separate.
+peer_wg_setup2() { # peer_wg_setup2 [endpoint_spec] — empty (default) = responder, learns from xpf msg1
+    local ep="${1:-}" epflag=""
+    [ -n "$ep" ] && epflag="endpoint $ep persistent-keepalive ${WG_PEER_KEEPALIVE}"
+    ish "${PEER}" "set -eu
+        ip link del ${WG_KERNEL_IFACE2} 2>/dev/null || true
+        ip link add ${WG_KERNEL_IFACE2} type wireguard
+        wg set ${WG_KERNEL_IFACE2} private-key /tmp/wgkeys/peer.priv listen-port ${WG_LISTEN_PORT2} \
+            peer \$(cat /tmp/wgkeys/xpf.pub) allowed-ips ${WG_INNER4_CIDR2},${WG_INNER6_CIDR2} ${epflag}
+        ip addr add ${WG_INNER4_PEER2}/24 dev ${WG_KERNEL_IFACE2}
+        ip -6 addr add ${WG_INNER6_PEER2}/64 dev ${WG_KERNEL_IFACE2}
+        ip link set ${WG_KERNEL_IFACE2} mtu 1420 up"
+}
+
 # Delete the wg0 stanza in its OWN commit. A delete+set in one commit
 # nets out to "identity unchanged" when the values match a previous
 # run, and the S2a reload contract then reuses the live engine Arc —
@@ -460,6 +541,7 @@ wg_stanza_delete() {
 configure
 delete groups node0 security zones security-zone wg
 delete groups node0 interfaces wg0
+delete groups node0 interfaces wg1
 commit
 exit
 quit
@@ -542,6 +624,40 @@ EOF
     cos_require_markers "xpf commit ($1)" "${EVID}/xpf-commit-$1.txt" \
         "$COS_MARKER_COMMIT" \
         || fail "xpf commit failed: $(cat "${EVID}/xpf-commit-$1.txt")"
+}
+
+# #9587 P8 — second tunnel commit. ADDITIVE: unlike xpf_wg_commit this never
+# touches wg0 (P2's single-tunnel control must keep passing with wg1
+# present). Same xpf identity, distinct listen port (no kernel bind
+# collision); wg1.0 joins the existing node0-scoped `wg` zone so its inner
+# addresses get the same host-inbound ping posture as wg0.0.
+xpf_wg_commit2() { # xpf_wg_commit2 <with_endpoint> — predelete of wg1 only, always inline
+    local ep_line="" del_line="delete groups node0 interfaces wg1"
+    [ "$1" = 1 ] && ep_line="set groups node0 interfaces wg1 tunnel wireguard peer ${PEER_PUB_HEX} endpoint ${WG_PEER_LAN4%%/*}:${WG_LISTEN_PORT2}"
+    [[ "${PEER_PUB_HEX}" =~ ^[0-9a-fA-F]{64}$ ]] \
+        || fail "xpf commit2: PEER_PUB_HEX is not a 64-hex key: '${PEER_PUB_HEX}'"
+    [[ "${XPF_PRIV_HEX}" =~ ^[0-9a-fA-F]{64}$ ]] \
+        || fail "xpf commit2: XPF_PRIV_HEX is not a 64-hex key: '${XPF_PRIV_HEX}'"
+    fw0_cli > "${EVID}/xpf-commit2-$1.txt" 2>&1 <<EOF
+configure
+${del_line}
+set groups node0 interfaces wg1 unit 0 family inet address ${WG_INNER4_XPF2}/24
+set groups node0 interfaces wg1 unit 0 family inet6 address ${WG_INNER6_XPF2}/64
+set groups node0 interfaces wg1 tunnel mode wireguard
+set groups node0 interfaces wg1 tunnel wireguard listen-port ${WG_LISTEN_PORT2}
+set groups node0 interfaces wg1 tunnel wireguard private-key ${XPF_PRIV_HEX}
+set groups node0 interfaces wg1 tunnel wireguard peer ${PEER_PUB_HEX} allowed-ips ${WG_INNER4_CIDR2}
+set groups node0 interfaces wg1 tunnel wireguard peer ${PEER_PUB_HEX} allowed-ips ${WG_INNER6_CIDR2}
+set groups node0 security zones security-zone wg interfaces wg1.0
+${ep_line}
+commit
+exit
+quit
+EOF
+    # #7792: line-anchored marker (see wg_stanza_delete).
+    cos_require_markers "xpf commit2 ($1)" "${EVID}/xpf-commit2-$1.txt" \
+        "$COS_MARKER_COMMIT" \
+        || fail "xpf commit2 failed: $(cat "${EVID}/xpf-commit2-$1.txt")"
 }
 
 wait_handshake() { # wait_handshake <deadline_s> <label>
@@ -898,19 +1014,210 @@ test_p7() {
 }
 
 # ---------------------------------------------------------------------------
+# P8 (#9587) — two steered listen ports end to end. wg0 (P2's
+# single-tunnel control) must keep passing WITH wg1 present; wg1 must
+# pass on its own port in both families and both directions (permit);
+# removing wg1's v6 cryptokey route must drop v6 while v4 passes, and
+# restoring it must heal (deny + restore). Evidence is ping + peer
+# transfer counters per tunnel per family, PLUS engine-activity witnesses
+# (per-tunnel encap/decap growth shows live crypto both ways on the
+# configured ports; no unsteered-port drops were counted). These witness
+# steering config + liveness — never which path served the records
+# (encap/decap counters are engine-wide, shared with the control thread)
+# and never the absence of kernel-path delivery (the #9594 residual
+# delivers without dropping). The deny exercises per-family
+# cryptokey-routing at the encap AllowedIPs gate (either datapath may
+# enforce it). Implementing genuinely worker-exclusive proof is DEFERRED
+# to #10038, as is zone/session-level per-port policy proof.
+# The steered-set drop counters ride in the local fail-on-revert cells,
+# not here.
+
+wait_handshake2() { # wait_handshake2 <deadline_s> <label>
+    local t hs
+    for t in $(seq 1 "$1"); do
+        if ish "${FW0}" "ping -c 1 -W 1 ${WG_INNER4_PEER2} >/dev/null 2>&1"; then
+            log "$2: wg1 inner ping through the tunnel OK (t=${t}, transport proven)"
+            return 0
+        fi
+        hs=$(ish "${PEER}" "wg show ${WG_KERNEL_IFACE2} latest-handshakes | awk '{print \$2}'" || echo 0)
+        if [ "${hs:-0}" -gt 0 ] 2>/dev/null; then
+            log "$2: wg1 peer handshake epoch ${hs} (t=${t}) — confirming with inner ping"
+            if ish "${FW0}" "ping -c 3 -W 2 ${WG_INNER4_PEER2} >/dev/null 2>&1"; then
+                log "$2: wg1 transport confirmed"
+                return 0
+            fi
+        fi
+    done
+    {
+        echo "=== $2 post-mortem $(date -u +%H:%M:%S) ==="
+        ish "${PEER}" "wg show ${WG_KERNEL_IFACE2}" 2>&1 || true
+        ish "${PEER}" "wg show ${WG_KERNEL_IFACE2} transfer" 2>&1 || true
+        ish "${FW0}" "ip -br addr show wg1; ss -uln | grep ':${WG_LISTEN_PORT2} ' 2>&1" 2>&1 || true
+    } > "${EVID}/$2-postmortem.txt" 2>&1
+    warn "$2: post-mortem captured to ${EVID}/$2-postmortem.txt"
+    return 1
+}
+
+# Engine-activity witnesses: ping success alone is a weak steering signal.
+# These counters are NOT worker-exclusive — encap/decap are engine-wide
+# (the control thread bumps the same engine on socket records: dispatch.rs
+# try_decap/try_encap) — so growth proves the tunnel carried live crypto
+# both ways on the configured ports (steering-config + liveness witnesses),
+# never which path served the records. Unsteered drops must not grow across
+# our traffic: no unsteered-port drops were counted. Queried straight from
+# the helper status socket on fw0; an absent tunnel row fails loudly rather
+# than passing silently.
+wg_tunnel_counters() { # wg_tunnel_counters <tunnel> — prints "encap decap unsteered"
+    ish "${FW0}" "python3 -c \"
+import socket, json
+s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+s.settimeout(10)
+s.connect('/run/xpf/userspace-dp.sock')
+s.sendall(b'{\\\"type\\\": \\\"status\\\"}\n')
+buf = b''
+while True:
+    c = s.recv(65536)
+    if not c: break
+    buf += c
+st = json.loads(buf).get('status', {})
+for t in st.get('wg_tunnels', []):
+    if t.get('tunnel') == '$1':
+        print(t.get('encap_packets', 0), t.get('decap_packets', 0), t.get('rx_unsteered_transport_drops', 0))
+\""
+}
+
+test_p8_twoport() {
+    log "P8: second tunnel wg1 (:${WG_LISTEN_PORT2}) + single-tunnel control recheck"
+    ensure_wg_mastership "p8" || fail "P8: WG mastership not established"
+    peer_wg_setup2 ""   # peer responder for wg1; xpf initiates (mirrors P1 roles)
+    xpf_wg_commit2 1
+    local t ok=0
+    for t in $(seq 1 30); do
+        if ish "${FW0}" 'ip -br addr show wg1 >/dev/null 2>&1' \
+            && ish "${FW0}" "ss -uln | grep -q ':${WG_LISTEN_PORT2} '"; then
+            ok=1; log "P8: wg1 TUN + :${WG_LISTEN_PORT2} bound (t=${t}s)"; break
+        fi
+        sleep 1
+    done
+    [ "$ok" = 1 ] || fail "P8: wg1 TUN/:${WG_LISTEN_PORT2} not up on fw0"
+    # Node0 scoping for the second tunnel (mirrors the P1 asserts).
+    if ish "${FW1}" 'ip link show wg1 >/dev/null 2>&1'; then
+        fail "P8: wg1 EXISTS on fw1 — node0 scoping failed (BLOCKING finding)"
+    fi
+    if ish "${FW1}" "ss -uln | grep -q ':${WG_LISTEN_PORT2} '"; then
+        fail "P8: fw1 bound :${WG_LISTEN_PORT2} — node0 scoping failed"
+    fi
+    wait_handshake2 "${WG_HANDSHAKE_TIMEOUT_S}" "P8" \
+        || fail "P8: no wg1 handshake/transport (xpf initiator vs kernel responder)"
+    sleep "${WG_SETTLE_S}"
+    # Engine-activity baselines (see wg_tunnel_counters): captured after the
+    # handshake so keepalive noise settles, before any P8 traffic.
+    read -r wg0_e0 wg0_d0 wg0_u0 <<<"$(wg_tunnel_counters wg0)"
+    read -r wg1_e0 wg1_d0 wg1_u0 <<<"$(wg_tunnel_counters wg1)"
+    [ -n "${wg0_e0}" ] || fail "P8: no engine counters for wg0 (helper status missing tunnel)"
+    [ -n "${wg1_e0}" ] || fail "P8: no engine counters for wg1 (helper status missing tunnel)"
+    log "P8 engine baselines: wg0 encap=${wg0_e0} decap=${wg0_d0} unsteered=${wg0_u0}; wg1 encap=${wg1_e0} decap=${wg1_d0} unsteered=${wg1_u0}"
+    # PERMIT, per tunnel per family per direction. wg0 first: the P2
+    # control must stay green with wg1 present (adding a steered port
+    # must not break the first tunnel).
+    ish "${FW0}" "ping -c 10 -i 0.5 -W 2 ${WG_INNER4_PEER}" > "${EVID}/p8-wg0-fw0-v4.txt" \
+        || fail "P8: wg0 xpf->peer v4 regressed with wg1 present"
+    ish "${FW0}" "ping -c 10 -i 0.5 -W 2 ${WG_INNER6_PEER}" > "${EVID}/p8-wg0-fw0-v6.txt" \
+        || fail "P8: wg0 xpf->peer v6 regressed with wg1 present"
+    ish "${PEER}" "ping -c 10 -i 0.5 -W 2 ${WG_INNER4_XPF}" > "${EVID}/p8-wg0-peer-v4.txt" \
+        || fail "P8: wg0 peer->xpf v4 regressed with wg1 present"
+    ish "${PEER}" "ping -c 10 -i 0.5 -W 2 ${WG_INNER6_XPF}" > "${EVID}/p8-wg0-peer-v6.txt" \
+        || fail "P8: wg0 peer->xpf v6 regressed with wg1 present"
+    ish "${FW0}" "ping -c 10 -i 0.5 -W 2 ${WG_INNER4_PEER2}" > "${EVID}/p8-wg1-fw0-v4.txt" \
+        || fail "P8: wg1 xpf->peer inner v4 ping failed"
+    ish "${FW0}" "ping -c 10 -i 0.5 -W 2 ${WG_INNER6_PEER2}" > "${EVID}/p8-wg1-fw0-v6.txt" \
+        || fail "P8: wg1 xpf->peer inner v6 ping failed"
+    ish "${PEER}" "ping -c 10 -i 0.5 -W 2 ${WG_INNER4_XPF2}" > "${EVID}/p8-wg1-peer-v4.txt" \
+        || fail "P8: wg1 peer->xpf inner v4 ping failed"
+    ish "${PEER}" "ping -c 10 -i 0.5 -W 2 ${WG_INNER6_XPF2}" > "${EVID}/p8-wg1-peer-v6.txt" \
+        || fail "P8: wg1 peer->xpf inner v6 ping failed"
+    ish "${PEER}" "wg show ${WG_KERNEL_IFACE2} transfer" > "${EVID}/p8-wg1-transfer.txt"
+    awk '{ if ($2+0 == 0 || $3+0 == 0) exit 1 }' "${EVID}/p8-wg1-transfer.txt" \
+        || fail "P8: wg1 peer transfer counters not bidirectional: $(cat "${EVID}/p8-wg1-transfer.txt")"
+    # Engine-activity verdict: both tunnels' engine encap AND decap must
+    # have grown across the permit traffic above (live crypto both ways on
+    # the configured ports), and no unsteered-port drops were counted. This
+    # witnesses steering config + liveness — never which path served the
+    # records (the counters are engine-wide, shared with the control
+    # thread) and never the absence of kernel-path delivery (the #9594
+    # residual delivers without dropping); zone/session-level proof stays
+    # outstanding for a live #10038 world.
+    read -r wg0_e1 wg0_d1 wg0_u1 <<<"$(wg_tunnel_counters wg0)"
+    [ -n "${wg0_e1}" ] || fail "P8: lost wg0 engine counters after permit traffic"
+    read -r wg1_e1 wg1_d1 wg1_u1 <<<"$(wg_tunnel_counters wg1)"
+    [ -n "${wg1_e1}" ] || fail "P8: lost wg1 engine counters after permit traffic"
+    log "P8 engine counters after permit: wg0 encap=${wg0_e1} decap=${wg0_d1} unsteered=${wg0_u1}; wg1 encap=${wg1_e1} decap=${wg1_d1} unsteered=${wg1_u1}"
+    [ "${wg0_e1}" -gt "${wg0_e0}" ] && [ "${wg0_d1}" -gt "${wg0_d0}" ] \
+        || fail "P8: wg0 engine encap/decap did not grow (tunnel carried nothing?)"
+    [ "${wg1_e1}" -gt "${wg1_e0}" ] && [ "${wg1_d1}" -gt "${wg1_d0}" ] \
+        || fail "P8: wg1 engine encap/decap did not grow (tunnel carried nothing?)"
+    [ "${wg0_u1}" = "${wg0_u0}" ] && [ "${wg1_u1}" = "${wg1_u0}" ] \
+        || fail "P8: unsteered drops grew during permit traffic"
+    # DENY: drop wg1's v6 cryptokey route on xpf; v6 must stop while v4
+    # keeps passing (same tunnel, same window — proves per-family deny,
+    # not tunnel-down). Then restore and re-prove v6.
+    fw0_cli > "${EVID}/p8-deny-commit.txt" 2>&1 <<EOF
+configure
+delete groups node0 interfaces wg1 tunnel wireguard peer ${PEER_PUB_HEX} allowed-ips ${WG_INNER6_CIDR2}
+commit
+exit
+quit
+EOF
+    cos_require_markers "P8 deny commit" "${EVID}/p8-deny-commit.txt" \
+        "$COS_MARKER_COMMIT" \
+        || fail "P8: deny commit failed"
+    sleep 3
+    if ish "${FW0}" "ping -c 5 -W 2 ${WG_INNER6_PEER2} >/dev/null 2>&1"; then
+        fail "P8: wg1 v6 ping PASSED with its cryptokey route removed — deny broken"
+    fi
+    log "P8: wg1 v6 correctly denied with route removed"
+    ish "${FW0}" "ping -c 5 -i 0.5 -W 2 ${WG_INNER4_PEER2}" > "${EVID}/p8-wg1-deny-v4-control.txt" \
+        || fail "P8: wg1 v4 died during the v6 deny window — tunnel down, not per-family deny"
+    fw0_cli > "${EVID}/p8-restore-commit.txt" 2>&1 <<EOF
+configure
+set groups node0 interfaces wg1 tunnel wireguard peer ${PEER_PUB_HEX} allowed-ips ${WG_INNER6_CIDR2}
+commit
+exit
+quit
+EOF
+    cos_require_markers "P8 restore commit" "${EVID}/p8-restore-commit.txt" \
+        "$COS_MARKER_COMMIT" \
+        || fail "P8: restore commit failed"
+    sleep 3
+    ish "${FW0}" "ping -c 10 -i 0.5 -W 2 ${WG_INNER6_PEER2}" > "${EVID}/p8-wg1-restored-v6.txt" \
+        || fail "P8: wg1 v6 did not heal after route restore"
+    pass "P8 two-port (wg0 control green + wg1 v4+v6 both ways, deny+restore)"
+}
+
+# ---------------------------------------------------------------------------
 # Teardown. Removes the xpf stanza, the leaked TUN (S2a known
 # limitation: removed-from-config WG TUNs persist), and the peer VM.
 teardown() {
+    # GPT round-5: cleanup runs independently of evidence availability. If
+    # EVID is gone or unwritable, shadow SUMMARY (dynamically scoped: covers
+    # log/warn/pass here and in every function teardown calls) so no
+    # diagnostic write can abort the cleanup.
+    if [ ! -d "${EVID:-/nonexistent}" ] || [ ! -w "${EVID:-/nonexistent}" ]; then
+        local SUMMARY=/dev/null
+    fi
     log "teardown"
     # Config commits only apply on the RG0 primary; a teardown that
     # silently fails leaves a poisoned cluster for the next run
     # (AGY PR-review F2 — observed live as a "node is not primary"
     # refusal reported as PASS).
     ensure_wg_mastership "teardown" || fail "teardown: WG VIP/mastership not restorable — cannot commit the stanza removal"
-    fw0_cli > "${EVID}/teardown-commit.txt" 2>&1 <<EOF
+    local tcommit
+    tcommit=$(evidence_path "teardown-commit.txt")
+    fw0_cli > "$tcommit" 2>&1 <<EOF
 configure
 delete groups node0 security zones security-zone wg
 delete groups node0 interfaces wg0
+delete groups node0 interfaces wg1
 commit
 exit
 quit
@@ -920,16 +1227,29 @@ EOF
     # requires ALL of its markers, so this disjunction uses the single-marker
     # predicate twice rather than forcing an AND that would fail on a re-run.
     # Both are line-anchored, which the previous `grep -qE` was not.
-    cos_transcript_has_marker "${EVID}/teardown-commit.txt" "$COS_MARKER_COMMIT" \
-        || cos_transcript_has_marker "${EVID}/teardown-commit.txt" "path not found" \
-        || fail "teardown commit failed: $(tail -3 "${EVID}/teardown-commit.txt")"
-    ish "${FW0}" 'ip link del wg0 2>/dev/null; true'
+    # Evidence-independent cleanup: without a transcript the commit still ran
+    # above, but verification is impossible — say so loudly instead of
+    # asserting success.
+    if [ "$tcommit" = /dev/null ]; then
+        warn "teardown: no evidence transcript, stanza removal UNVERIFIED" || true
+    else
+        cos_transcript_has_marker "$tcommit" "$COS_MARKER_COMMIT" \
+            || cos_transcript_has_marker "$tcommit" "path not found" \
+            || fail "teardown commit failed: $(tail -3 "$tcommit" 2>/dev/null || echo '(transcript unreadable)')"
+    fi
+    ish "${FW0}" 'ip link del wg0 2>/dev/null; ip link del wg1 2>/dev/null; true'
     for n in "${FW0}" "${FW1}"; do
         if ish "$n" 'ip link show wg0 >/dev/null 2>&1'; then
             fail "teardown: wg0 still present on $n"
         fi
+        if ish "$n" 'ip link show wg1 >/dev/null 2>&1'; then
+            fail "teardown: wg1 still present on $n"
+        fi
         if ish "$n" "ss -uln | grep -q ':${WG_LISTEN_PORT} '"; then
             fail "teardown: :${WG_LISTEN_PORT} still bound on $n"
+        fi
+        if ish "$n" "ss -uln | grep -q ':${WG_LISTEN_PORT2} '"; then
+            fail "teardown: :${WG_LISTEN_PORT2} still bound on $n"
         fi
     done
     if [ "${KEEP_PEER}" = 1 ]; then
@@ -952,20 +1272,34 @@ case "${CMD}" in
     provision) provision ;;
     configure) configure_p1 ;;
     test)
+        # Validate BEFORE arming cleanup: a typo'd phase must usage-exit
+        # without tearing down a live setup.
+        [[ "${1:-all}" =~ ^(p2|p4a|p3|p4b|p5|p6|p7|p8|all)$ ]] || usage
+        # Failure cleanup: a mid-phase failure must not leave stanzas/peer
+        # behind. `fail()` exits directly, which never fires an ERR trap —
+        # and this path previously had no trap at all. The EXIT trap runs
+        # run_teardown_on_fail on any nonzero exit; the helper always
+        # returns 0, so the original status is preserved. --keep still
+        # keeps the peer for triage.
+        trap 'rc=$?; if [ -z "${CLEANED:-}" ]; then CLEANED=1; CLEANED_RC=$rc; if [ $rc -ne 0 ]; then warn "FAILURE rc=${rc} — running teardown (peer kept for triage if --keep)" || true; run_teardown_on_fail; fi; fi; exit ${CLEANED_RC:-0}' EXIT
         gen_keys   # idempotent — reloads persisted keys for standalone phases
         case "${1:-all}" in
             p2)  test_p2 ;; p4a) test_p4a ;; p3) test_p3 ;; p4b) test_p4b ;;
-            p5)  test_p5 ;; p6)  test_p6 ;;  p7) test_p7 ;;
-            all) test_p2; test_p4a; test_p3; test_p4b; test_p5; test_p6; test_p7 ;;
+            p5)  test_p5 ;; p6)  test_p6 ;;  p7) test_p7 ;; p8) test_p8_twoport ;;
+            all) test_p2; test_p4a; test_p3; test_p4b; test_p5; test_p6; test_p7; test_p8_twoport ;;
             *) usage ;;
         esac ;;
     teardown) teardown ;;
     all)
-        trap 'warn "FAILURE — running teardown (peer kept for triage if --keep)"; teardown || true' ERR
+        # Same failure-cleanup discipline as `test)` above, replacing the old
+        # ERR trap (which `fail()`'s direct exits never fired). See
+        # run_teardown_on_fail: cleanup cannot mask the phase status.
+        trap 'rc=$?; if [ -z "${CLEANED:-}" ]; then CLEANED=1; CLEANED_RC=$rc; if [ $rc -ne 0 ]; then warn "FAILURE rc=${rc} — running teardown (peer kept for triage if --keep)" || true; run_teardown_on_fail; fi; fi; exit ${CLEANED_RC:-0}' EXIT
         preflight; provision; configure_p1
-        test_p2; test_p4a; test_p3; test_p4b; test_p5; test_p6; test_p7
-        trap - ERR
+        test_p2; test_p4a; test_p3; test_p4b; test_p5; test_p6; test_p7; test_p8_twoport
+        trap - EXIT
         teardown
+        CLEANED=1
         if [ "${TAINTS}" -gt 0 ]; then
             warn "${TAINTS} recovery restart(s) used — evidence TAINTED; rerun clean for merge evidence"
             exit 2

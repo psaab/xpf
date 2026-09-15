@@ -27,13 +27,15 @@ type userspaceCtrlValue struct {
 	Workers         uint32
 	QueueCount      uint32
 	Flags           uint32
-	// WgListenPort (#1432 S2a) occupies the former Pad slot before the
-	// u64 ConfigGeneration (the ABI alignment pad the Rust shim's
-	// UserspaceCtrl also exposes as wg_listen_port). Low 16 bits carry
-	// the WG listen port; 0 means no WG tunnel is configured (the shim's
-	// per-CPU "wg_rx" gate). The shim steers local-destination UDP on
-	// this port to the kernel.
-	WgListenPort       uint32
+	// WgPortCount + WgPorts (#9587) occupy the former WgListenPort scalar
+	// slot plus 16 bytes: the ABI the Rust shim's UserspaceCtrl exposes as
+	// wg_port_count (count of valid entries below; 0 = no WG tunnel, the
+	// shim's WG_RX gate stays off) and wg_ports (the steered set in
+	// ascending order, zero-filled past count). Field order mirrors the
+	// repr(C) layout exactly (count@20, ports@24..40, config_generation@40,
+	// total 56); TestUserspaceCtrlLayoutMatchesShim9587 pins it.
+	WgPortCount        uint32
+	WgPorts            [config.MaxSteeredWireGuardPorts]uint16
 	ConfigGeneration   uint64
 	FIBGeneration      uint32
 	HeartbeatTimeoutMS uint32
@@ -45,9 +47,9 @@ const userspaceCtrlFlagTrace = 2
 const userspaceCtrlFlagNativeGRE = 4
 const userspaceCtrlFlagStrict = 8
 
-// userspaceCtrlFlagWgRx (#1432 S2a) is set iff at least one WireGuard
-// tunnel is configured. The shim gates its per-packet WG steering branch
-// on this single bit so non-WG traffic never even loads wg_listen_port.
+// userspaceCtrlFlagWgRx (#1432 S2a, #9587) is set iff the steered WireGuard
+// port set is non-empty. The shim gates its per-packet WG steering branch
+// on this single bit so non-WG traffic never even loads the ports array.
 const userspaceCtrlFlagWgRx = 16
 const bindingQueuesPerIface = 16 // must match BINDING_QUEUES_PER_IFACE in BPF
 
@@ -145,8 +147,8 @@ func (m *Manager) programBootstrapMapsLocked(snapshot *ConfigSnapshot, cfg confi
 	if snapshotHasNativeGRE(snapshot) {
 		ctrlFlags |= userspaceCtrlFlagNativeGRE
 	}
-	wgPort := snapshotWgListenPort(snapshot)
-	if wgPort != 0 {
+	wgPortCount, wgPorts := encodeSteeredPortSet(snapshotWgListenPorts(snapshot))
+	if wgPortCount != 0 {
 		ctrlFlags |= userspaceCtrlFlagWgRx
 	}
 	// Clamp the worker count before it feeds the ctrl fields and the
@@ -181,7 +183,8 @@ func (m *Manager) programBootstrapMapsLocked(snapshot *ConfigSnapshot, cfg confi
 		Workers:            plan.Workers,
 		QueueCount:         plan.Workers,
 		Flags:              ctrlFlags,
-		WgListenPort:       wgPort,
+		WgPortCount:        wgPortCount,
+		WgPorts:            wgPorts,
 		ConfigGeneration:   0,
 		FIBGeneration:      0,
 		HeartbeatTimeoutMS: 30000,
@@ -403,8 +406,8 @@ func (m *Manager) blindFailClosedUserspaceCtrlLocked(
 		disabled.QueueCount = uint32(workers)
 		disabled.ConfigGeneration = snapshot.Generation
 		disabled.FIBGeneration = snapshot.FIBGeneration
-		disabled.WgListenPort = snapshotWgListenPort(snapshot)
-		if disabled.WgListenPort != 0 {
+		disabled.WgPortCount, disabled.WgPorts = encodeSteeredPortSet(snapshotWgListenPorts(snapshot))
+		if disabled.WgPortCount != 0 {
 			disabled.Flags |= userspaceCtrlFlagWgRx
 		}
 		if snapshotHasNativeGRE(snapshot) {
@@ -460,7 +463,32 @@ func (m *Manager) blindFailClosedUserspaceCtrlLocked(
 // on the fail-closed path — so it is deliberately NOT bundled into this round.
 // What this buys is the difference between "unbound" and "bound one level in".
 func (m *Manager) ctrlMustStayDisabledLocked(statusEnabled bool) bool {
-	return statusEnabled && (m.rgTransitionInFlight.Load() || m.linkCycleInFlight())
+	return statusEnabled && (m.rgTransitionInFlight.Load() || m.linkCycleInFlight() ||
+		m.snapshotRetryDebtLocked())
+}
+
+// snapshotRetryDebtLocked reports whether an unknown-outcome full-snapshot
+// publish is still unpublished (#9642). The conjunction is the whole point:
+// direct-producer failures (overlay/scheduler/worker-arm transport errors leave
+// generations equal) keep today's behavior and retries exactly, while an
+// adopted attempt is always strictly unpublished (§5.1 re-stamp) so the wrapper
+// path is fully covered. Nil-guarded: no tick may dereference nil here.
+func (m *Manager) snapshotRetryDebtLocked() bool {
+	return m.applySnapshotOutcomeUnknown && m.lastSnapshot != nil &&
+		m.publishedSnapshot < m.lastSnapshot.Generation
+}
+
+// retryDebtWarnInterval (#9642) bounds the repeat Warn while retry debt
+// persists: the transition Warns once, then at most once a minute. A const,
+// not a var — the cadence is operator-visible contract, not test tuning; the
+// predicate below takes now so cells bind the boundary without touching time.
+const retryDebtWarnInterval = time.Minute
+
+// retryDebtWarnDueLocked reports whether an indebted-sync failure should Warn
+// (transition or rate-limited repeat) rather than Debug. Pure predicate on
+// manager state plus now, so the boundary is unit-testable. Caller holds m.mu.
+func (m *Manager) retryDebtWarnDueLocked(now time.Time) bool {
+	return m.snapshotRetryDebtLocked() && now.Sub(m.lastRetryDebtWarn) >= retryDebtWarnInterval
 }
 
 // applyHelperStatusLocked reconciles one helper status report into the shim's
@@ -518,7 +546,7 @@ func (m *Manager) applyHelperStatusLocked(status *ProcessStatus) error {
 	var newBindingIndices []uint32
 	newBindingIndexSet := make(map[uint32]struct{})
 
-	ctrlFlags, wgPort := m.helperCtrlFlagsLocked()
+	ctrlFlags, wgPortCount, wgPorts := m.helperCtrlFlagsLocked()
 
 	zero := uint32(0)
 	ctrl := userspaceCtrlValue{
@@ -527,7 +555,8 @@ func (m *Manager) applyHelperStatusLocked(status *ProcessStatus) error {
 		Workers:            uint32(maxInt(status.Workers, 1)),
 		QueueCount:         uint32(queueCountFromBindings(status.Bindings)),
 		Flags:              ctrlFlags,
-		WgListenPort:       wgPort,
+		WgPortCount:        wgPortCount,
+		WgPorts:            wgPorts,
 		ConfigGeneration:   status.LastSnapshotGeneration,
 		FIBGeneration:      status.LastFIBGeneration,
 		HeartbeatTimeoutMS: 30000,
@@ -574,18 +603,25 @@ func (m *Manager) applyHelperStatusLocked(status *ProcessStatus) error {
 	// "userspace_ingress_ifaces map not loaded" on any unprivileged machine and
 	// applyHelperStatusLocked fail-closes before ever writing the ctrl gate, so
 	// the map-free seam above would still leave the ctrl branch untestable.
-	if err := m.syncUserspaceClassifierMapsLocked(m.lastSnapshot); err != nil {
-		if !isLocalAddressCapacityError(err) {
-			return m.failClosedUserspaceCtrlLocked(ctrlMap, ctrl, err)
+	// #9642: while retry debt is outstanding the maps are already at the
+	// attempted plan and the helper may be enforcing it — do not re-sync them
+	// to anything until the debt republishes. Ctrl is already 0 (fail-closed
+	// at record time, held by the latch above), so interim classifier staleness
+	// is unobservable.
+	if !m.snapshotRetryDebtLocked() {
+		if err := m.syncUserspaceClassifierMapsLocked(m.lastSnapshot); err != nil {
+			if !isLocalAddressCapacityError(err) {
+				return m.failClosedUserspaceCtrlLocked(ctrlMap, ctrl, err)
+			}
+			// #9646: this poll re-syncs the snapshot the helper already enforces
+			// every tick, so a host whose address count grows past the shim map
+			// capacity (VRRP VIPs, secondary addresses) would otherwise drop all
+			// transit on the next tick. The preflight wrote nothing: keep the maps
+			// and ctrl, and alarm once per transition rather than once a second.
+			m.noteLocalAddressCapacityLocked(err)
+		} else {
+			m.noteLocalAddressCapacityLocked(nil)
 		}
-		// #9646: this poll re-syncs the snapshot the helper already enforces
-		// every tick, so a host whose address count grows past the shim map
-		// capacity (VRRP VIPs, secondary addresses) would otherwise drop all
-		// transit on the next tick. The preflight wrote nothing: keep the maps
-		// and ctrl, and alarm once per transition rather than once a second.
-		m.noteLocalAddressCapacityLocked(err)
-	} else {
-		m.noteLocalAddressCapacityLocked(nil)
 	}
 	// Sync userspace-forwarded packet counters into BPF counter maps so
 	// that ReadGlobalCounter/ReadZoneCounters/etc. return complete values
@@ -1695,25 +1731,42 @@ func snapshotHasNativeGRE(snapshot *ConfigSnapshot) bool {
 	return false
 }
 
-// snapshotWgListenPort returns the WireGuard listen port for the shim ctrl
-// block (#1432 S2a): the ONE port the shim steers onto the AF_XDP WireGuard
-// path. 0 means no WireGuard tunnel (the shim's WG_RX gate stays off). The shim
-// packs it into the low 16 bits of UserspaceCtrl.wg_listen_port.
+// snapshotWgListenPorts returns the steered WireGuard listen-port SET for the
+// shim ctrl block (#9587): the SELECTED set stamped on the snapshot by the
+// builder, in ascending order. Empty means no WireGuard tunnel (the shim's
+// WG_RX gate stays off).
 //
-// #9521: it reads ConfigSnapshot.WgSteeredListenPort and nothing else. It used
-// to return the first WireGuard row of snapshot.TunnelEndpoints, and those rows
-// are the configured endpoints INTERSECTED with the live interface rows — so a
-// missing netdev for the warned tunnel promoted the next tunnel's port, the one
-// the commit warning had just called unsteered. The field is derived once, from
-// the configuration (config.SteeredWireGuardListenPort), and the helper decides
-// from the SAME field which control threads may deliver kernel-path transport
-// plaintext; the shim, the helper and the warning therefore cannot name
-// different ports. Do not re-derive it here from the endpoint rows.
-func snapshotWgListenPort(snapshot *ConfigSnapshot) uint32 {
+// #9521: it reads ConfigSnapshot.WgSteeredListenPorts and nothing else. It
+// used to return the first WireGuard row of snapshot.TunnelEndpoints, and
+// those rows are the configured endpoints INTERSECTED with the live
+// interface rows — so a missing netdev for the warned tunnel promoted the
+// next tunnel's port, the one the commit warning had just called unsteered.
+// The set is derived once, from the configuration
+// (config.SteeredWireGuardListenPorts + SplitSteeredPorts), and the helper
+// decides from the SAME field which control threads may deliver kernel-path
+// transport plaintext; the shim, the helper and the warning therefore cannot
+// name different ports. Do not re-derive it here from the endpoint rows.
+func snapshotWgListenPorts(snapshot *ConfigSnapshot) []uint16 {
 	if snapshot == nil {
-		return 0
+		return nil
 	}
-	return uint32(snapshot.WgSteeredListenPort)
+	return snapshot.WgSteeredListenPorts
+}
+
+// encodeSteeredPortSet encodes the selected set into the ctrl block's
+// count+array. It asserts the programmer contract (len <=
+// config.MaxSteeredWireGuardPorts) by clamping defensively: the only
+// producer is SplitSteeredPorts, so a longer input is a programming bug,
+// and the shim clamps once more on its side. The tail stays zero-filled and
+// zero never matches (the shim's explicit port != 0).
+func encodeSteeredPortSet(selected []uint16) (uint32, [config.MaxSteeredWireGuardPorts]uint16) {
+	var ports [config.MaxSteeredWireGuardPorts]uint16
+	n := len(selected)
+	if n > config.MaxSteeredWireGuardPorts {
+		n = config.MaxSteeredWireGuardPorts
+	}
+	copy(ports[:], selected[:n])
+	return uint32(n), ports
 }
 
 func buildNATTranslatedLocalAddressExclusions(snapshot *ConfigSnapshot) (map[uint32]bool, map[[16]byte]bool) {

@@ -924,38 +924,42 @@ The dataplane is multi-engine: one `Arc<WgEngine>` and one control thread per
 configured WG tunnel-endpoint id (`wg_engines`, `spawn_wg_control_threads`),
 per-tunnel telemetry rows, and engine-by-id encap. **Increment 1** added the
 local-key telemetry and the two CLI commands above. **Increment 2 — steering a
-SET of listen ports in the AF_XDP shim — is DEFERRED and tracked as #9587**: a
-verifier-gated `userspace-xdp` change with a documented v6-line-rate
-sensitivity that must pass the loss cluster, perf and `make test-failover`.
-Design of record: `docs/research/1434-multi-tunnel-wireguard/plan.md`.
+bounded SET of listen ports in the AF_XDP shim — LANDED as #9587**: the shim
+steers up to 8 distinct listen ports (`MaxSteeredWireGuardPorts`), selected in
+emitter order; overflow keeps the #9521 refused posture below. Design of
+record: `docs/research/1434-multi-tunnel-wireguard/plan.md`; implementation
+plan: `docs/pr/9587/plan.md`.
 
-#### What happens to a second listen port (#9521)
+#### What happens past the steered set (#9521, #9587)
 
-The shim steers WireGuard for ONE listen port. `UserspaceCtrl.wg_listen_port`
-is a scalar, and the worker-claim predicate (`wg_worker_claims_record`) requires
-the datagram's destination port to equal it. A transport-data record for that
-port is decapsulated by the worker and its inner packet is adjudicated under
-the tunnel's ingress zone (#8274). A record for any OTHER configured listen
-port is not claimed and reaches the kernel, where that tunnel's own control
-thread receives it: the host-inbound filter admits every configured listen
-port, and the helper runs a control thread per endpoint.
+The shim steers WireGuard for a bounded SET of listen ports (at most 8).
+`UserspaceCtrl.wg_ports[0..wg_port_count]` holds them, and the worker-claim
+predicate (`wg_worker_claims_record`) requires set membership. A
+transport-data record for a steered port is decapsulated by the worker and its
+inner packet is adjudicated under the tunnel's ingress zone (#8274). A record
+for any OTHER configured listen port is not claimed and reaches the kernel,
+where that tunnel's own control thread receives it: the host-inbound filter
+admits every configured listen port, and the helper runs a control thread per
+endpoint.
 
-| | steered port | every other configured port |
+| | steered ports (at most 8) | ports past the set |
 |---|---|---|
 | handshake and cookie records | kernel -> control thread | kernel -> control thread |
 | transport data | worker decap -> zone, session, policy, NAT | kernel -> control thread -> **dropped and counted** |
 | outbound traffic | worker encap after policy | worker encap after policy |
 
-**Which port is steered.** `config.SteeredWireGuardListenPort`: the first
-WireGuard endpoint, in `config.EmitTunnelEndpointNames` order (interfaces
-sorted by name, units ascending), that carries a listen port. It is derived
-from the configuration and stamped on the helper snapshot as
-`wg_steered_listen_port`. The shim ctrl block (`snapshotWgListenPort`) and the
-helper both read that one field, and the commit warning names the same value.
-Before #9521 the shim scalar was the first endpoint that *survived* the
-intersection with the live interface rows, so a missing netdev for the warned
-tunnel silently promoted the next tunnel's port — the one the warning had just
-called unsteered.
+**Which ports are steered.** `config.SteeredWireGuardListenPorts`: the distinct
+WireGuard listen ports in `config.EmitTunnelEndpointNames` order (interfaces
+sorted by name, units ascending). `config.SplitSteeredPorts` selects the first
+8 in that order (sorted ascending for encoding) and reports the remainder as
+overflow. The selected set is derived from the configuration and stamped on
+the helper snapshot as `wg_steered_listen_ports`. The shim ctrl block
+(`snapshotWgListenPorts` + `encodeSteeredPortSet`), the helper and the commit
+warning all read that one derivation, so the three cannot name different
+ports. Before #9521 the shim scalar was the first endpoint that *survived*
+the intersection with the live interface rows, so a missing netdev for the
+warned tunnel silently promoted the next tunnel's port — the one the warning
+had just called unsteered.
 
 **The drop.** Until #9521 an unsteered port's control thread decrypted the
 record and wrote the plaintext inner packet to its wgN TUN, and the kernel
@@ -988,7 +992,7 @@ The ingress comes from `IP_PKTINFO`; coverage and locality are read from the
 shim's own pinned maps. Ingress the shim does not adjudicate (#8274's residual)
 is delivered exactly as before.
 
-So a second tunnel on a distinct port completes handshakes and sends, and gets
+So a ninth tunnel on a distinct port completes handshakes and sends, and gets
 no inbound traffic through the kernel path. It is refused, not dead: this
 section once called it dead (false — it was live, which was the bypass, #9016),
 and then "served by the kernel path" (true until #9521, and the bypass itself).
@@ -1004,54 +1008,59 @@ filter or rejecting the configuration at commit:
   record converges on the control thread's socket.
 - **A commit reject would brick.** A box already running a multi-port config
   could not commit an unrelated change (#1960).
-- **Steering the set is Increment 2** (#9587), above.
-
-It is surfaced at commit. `validateWireguardSingleSteeredPort`
+It is surfaced at commit. `validateWireguardSteeredPortSet`
 (`pkg/config/compiler_validate_wireguard_multiport.go`, run from
 `runTailGates`) emits a **warning** whenever the configuration resolves to more
-than one distinct WireGuard listen port, naming the steered port and every
-refused one. For `wg0` on 51820 and `wg1` on 51900:
+distinct WireGuard listen ports than the steered set holds, naming the steered
+set and every refused one. For `wg0`..`wg7` on 51820..51827 and `wg8` on
+51828:
 
 ```
-wireguard: 2 distinct listen-ports are configured, but the dataplane steers
-inbound WireGuard transport for only ONE of them. listen-port 51820 (wg0) IS
-steered onto the AF_XDP WireGuard path, where its decapsulated traffic is
-adjudicated under the tunnel's ingress zone (screen, session, policy, NAT).
-listen-port 51900 (wg1) is NOT steered, and inbound transport for that
-tunnel is REFUSED rather than forwarded unadjudicated: a transport record
-that reaches that tunnel through the kernel is DROPPED (counted as an
+wireguard: 9 distinct listen-ports are configured, but the dataplane steers
+inbound WireGuard transport for only 8 of them (at most 8). listen-ports
+51820 (wg0), 51821 (wg1), 51822 (wg2), 51823 (wg3), 51824 (wg4), 51825 (wg5),
+51826 (wg6), 51827 (wg7) ARE steered onto the AF_XDP WireGuard path, where
+decapsulated traffic is adjudicated under the tunnel's ingress zone (screen,
+session, policy, NAT). listen-ports 51828 (wg8) are NOT steered, and inbound
+transport for those tunnels is REFUSED rather than forwarded unadjudicated: a
+transport record that reaches one through the kernel is DROPPED (counted as an
 unsteered-port receive drop) instead of being written to its wgN TUN, where
 the kernel would forward it with no zone policy, no session and no counters.
-Handshakes still complete and outbound traffic still flows, so that tunnel
-can come up and still pass no inbound traffic. Only one WireGuard
-listen-port can be steered until multi-port steering lands (#1434 Increment
-2, tracked as #9587).
+Handshakes still complete and outbound traffic still flows, so those tunnels
+can come up and still pass no inbound traffic. (#9587.)
 ```
 
-Two WG tunnels that SHARE one listen port lose nothing to the steering scalar
-and draw no warning.
+Two WG tunnels that SHARE one listen port contribute one set entry and draw no
+warning.
 
-Fail-on-revert guards: `TestWireGuardDistinctListenPortsWarnsAtCommit_1434`,
+Fail-on-revert guards: `TestWireGuardTwoListenPortsDrawNoAdvisory9587`,
 `TestWireGuardSingleListenPortDoesNotWarn_1434`,
 `TestWireGuardSameListenPortDoesNotWarn_1434`,
-`TestWireGuardThreeListenPortsWarnsOnce_1434`,
+`TestWireGuardNineListenPortsWarnsOnce9587`,
 `TestMultiportAdvisoryDoesNotClaimTheTunnelIsDead9016`,
-`TestSteeredWireGuardListenPortIsTheEmitterFirst9521` and
-`TestMultiportWarningNamesTheSteeredPortDerivation9521` (`pkg/config`);
-`TestWireGuardSteeringAdvisoryNamesTheProgrammedPort_1434`,
-`TestSnapshotProgramsTheWarnedWireGuardPort9521`,
-`TestOnlyFirstWireGuardListenPortIsSteered9016`,
-`TestSnapshotWgSteeredListenPortWireKey9521` and
+`TestSteeredWireGuardListenPortsIsEmitterOrdered9521`,
+`TestSteeredWireGuardListenPortsSkipsZeroAndDedups9587`,
+`TestSplitSteeredPortsVectors9587` and
+`TestMultiportWarningNamesTheSteeredSetDerivation9587` (`pkg/config`);
+`TestWireGuardSteeringAdvisoryNamesTheProgrammedSet9587`,
+`TestSnapshotProgramsTheWarnedWireGuardSet9587`,
+`TestSnapshotSteeredSetIgnoresEndpointRows9587`,
+`TestSnapshotWgSteeredListenPortsWireKey9587`,
+`TestEncodeSteeredPortSetClamps9587`,
+`TestUserspaceCtrlLayoutMatchesShim9587` and
 `TestFormatWireguardUnsteeredPortDrops9521` (`pkg/dataplane/userspace`), which
-require the programmed port to equal the warned one with every tunnel netdev
-present, with the warned one absent, and with none; and in `userspace-dp`,
+require the programmed set to equal the warned one with every tunnel netdev
+present, with a selected tunnel's netdev absent, and with none; and in
+`userspace-dp`,
+`wg_both_steered_endpoints_deliver_end_to_end_9587` and
 `wg_unsteered_endpoint_refuses_kernel_transport_end_to_end_9521` (real spawned
 control threads, IPv4 and IPv6),
 `unsteered_port_kernel_transport_is_dropped_not_written_9521`,
-`kernel_transport_decision_fails_closed_9521`,
+`kernel_transport_decision_fails_closed_9587`,
 `wg_resteering_restarts_control_threads_with_the_new_decision_9521`,
-`worker_decap_is_not_gated_by_the_steered_port_9521` and
-`wg_steered_listen_port_wire_key_9521`. #9594 adds
+`worker_decap_is_not_gated_by_the_steered_port_9521`,
+`steered_set_membership_9587` and
+`wg_steered_listen_ports_wire_key_9587`. #9594 adds
 `steered_port_kernel_transport_gets_the_degraded_posture_on_covered_ingress_9594`,
 `unsteered_port_is_refused_before_the_degraded_posture_is_consulted_9594` and
 `wg_steered_endpoint_refuses_degraded_transit_end_to_end_9594` (real spawned
@@ -1059,8 +1068,8 @@ control thread, production posture view).
 
 ## Host-inbound admission of the WG listen port (#5582)
 
-The shim steers local-destination UDP on the configured WG listen port to
-the kernel (`wg_steer_to_kernel`, `userspace-xdp/src/lib.rs`) so the
+The shim steers local-destination UDP on the steered WG listen ports to
+the kernel (`wg_steer_to_kernel`, `userspace-xdp/src/lib.rs`) so each
 userspace WireGuard control socket receives the outer transport. But the
 kernel input path is also guarded by the host-inbound nftables chain
 (`inet xpf_hostinbound`, `pkg/daemon/daemon_nft.go`): on a **restricted**
@@ -1082,10 +1091,10 @@ any WG tunnel is configured, `buildHostInboundFilterPayload` emits a
 single coarse `udp dport <configured-wg-port(s)> accept` on the input
 hook (`emitHostInboundWireGuardAccept`). Rationale:
 
-- **Automatic, not a manual token.** The shim *already* steers the port
-  unconditionally; requiring the operator to separately open it would let
-  the shim steer a packet the kernel then drops. A configured WireGuard
-  listener therefore *implies* host admission of exactly its listen port.
+- **Automatic, not a manual token.** The shim *already* steers the configured
+  ports unconditionally; requiring the operator to separately open them would
+  let the shim steer a packet the kernel then drops. Configured WireGuard
+  listeners therefore *imply* host admission of exactly the configured set.
 - **Dynamic port, so no static SSOT token.** WireGuard's port is
   operator-configured, so it does not fit the static token→port SSOT
   (`config.HostInboundServiceMatch`, e.g. `ssh`→22) that the nft mirror
@@ -1098,8 +1107,8 @@ hook (`emitHostInboundWireGuardAccept`). Rationale:
   packets, so a bare `udp dport <port>` admits the WG port to **every
   firewall-local address** — exactly the shim's `is_local_destination`
   scope — while transit/forward UDP (which traverses the `forward` hook,
-  never this chain) is untouched, so transit/DNAT UDP on the WG port is
-  never shunted around policy. Only the WG port is opened; every other
+  never this chain) is untouched, so transit/DNAT UDP on the WG ports is
+  never shunted around policy. Only the WG port set is opened; every other
   host-bound service stays under the per-zone default-deny.
 - **Composes with the #5565 per-interface host-inbound scoping.** With a
   `to-zone junos-host` DENY program present, the WG accept is placed
@@ -1108,13 +1117,14 @@ hook (`emitHostInboundWireGuardAccept`). Rationale:
   the ND/PMTUD accepts.
 
 **Runtime-vs-config nuance:** the admission uses the CONFIGURED listen
-ports (the compile-time SSOT). The shim steers only one of them (see
-"Multi-tunnel status" above) and the filter admits ALL of them. For the others
-that admit is not a no-op, and it is not where they are refused: it is what
-lets an unsteered tunnel's handshakes reach its control thread, and the helper —
-not this filter — drops that tunnel's kernel-path transport (#9521), because an
-input-hook admit list cannot refuse `ct established` traffic, a zone that
-admits all services, or anything when no table is installed.
+ports (the compile-time SSOT). The shim steers a bounded set of them
+(see "Multi-tunnel status" above) and the filter admits ALL of them. For the
+ports outside the steered set, that admit is not a no-op, and it is not where
+they are refused: it is what lets an unsteered tunnel's handshakes reach its
+control thread, and the helper — not this filter — drops that tunnel's
+kernel-path transport (#9521), because an input-hook admit list cannot
+refuse `ct established` traffic, a zone that admits all services, or
+anything when no table is installed.
 
 Fail-on-revert guards: `TestHostInboundFilterAdmitsWireGuardListenPort`
 and `TestHostInboundFilterWireGuardPayloadParses` (`pkg/daemon`),

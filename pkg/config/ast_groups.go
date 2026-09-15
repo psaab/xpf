@@ -83,6 +83,14 @@ func (t *ConfigTree) ExpandGroupsWithVars(vars map[string]string) error {
 	return t.expandGroups(false, vars)
 }
 
+// ExpandGroupsWithVarsTagged is ExpandGroupsWithVars with the
+// ExpandGroupsTagged provenance marking: each inherited node carries
+// InheritedFrom. The node-aware compile entry needs both the ${node}
+// resolution and the #9854 coalescing provenance.
+func (t *ConfigTree) ExpandGroupsWithVarsTagged(vars map[string]string) error {
+	return t.expandGroups(true, vars)
+}
+
 // resolveVars replaces ${key} placeholders in s with values from vars.
 func resolveVars(s string, vars map[string]string) string {
 	if vars == nil {

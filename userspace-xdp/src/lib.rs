@@ -76,7 +76,8 @@ use ipv6_ext_walk::{
     read_bytes,
 };
 use wg_classify::{
-    wg_record_is_transport_data, wg_steer_to_kernel_on_port_match, wg_worker_claims_record,
+    WG_STEERED_PORT_SET_MAX, wg_port_is_steered, wg_record_is_transport_data,
+    wg_steer_to_kernel_on_port_match, wg_worker_claims_record,
 };
 // MAX_INTERFACES is threaded in from bpf/headers/xpf_common.h via the
 // pkg/dataplane/build-userspace-xdp.sh wrapper, which does
@@ -110,17 +111,23 @@ struct UserspaceCtrl {
     workers: u32,
     queue_count: u32,
     flags: u32,
-    // #1432 S2a: WG listen port in the low 16 bits (0 = no WG tunnel,
-    // the per-CPU "wg_rx" gate). Occupies the 4-byte slot the C/Rust
-    // ABI previously inserted as implicit padding before the u64
-    // config_generation; the Go mirror calls it Pad. The shim WG
-    // early-return reads this; non-WG traffic pays only a single
-    // `wg_listen_port == 0` test.
-    wg_listen_port: u32,
+    // #9587: steered WireGuard listen-port SET. `wg_port_count` valid
+    // entries in `wg_ports` below (0 = no WG tunnel, the WG_RX gate stays
+    // off); the tail is zero-filled by the Go programmer and zero never
+    // matches. Occupies the former `wg_listen_port` scalar slot plus 16
+    // bytes; the Go mirror declares the fields in the same order
+    // (TestUserspaceCtrlLayoutMatchesShim9587 pins both sides).
+    wg_port_count: u32,
+    wg_ports: [u16; WG_STEERED_PORT_SET_MAX],
     config_generation: u64,
     fib_generation: u32,
     heartbeat_timeout_ms: u32,
 }
+
+// #9587: the ctrl value grows 40 -> 56 with the set. The Go
+// `userspaceCtrlValue` mirror, the pinned-map ValueSize (40 -> 56) and the
+// loader fixtures move together; this assertion fails the BUILD on drift.
+const _: [(); 56] = [(); mem::size_of::<UserspaceCtrl>()];
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -661,17 +668,18 @@ fn try_xdp_userspace(ctx: &XdpContext) -> Result<u32, i64> {
     // gates ESP on is_interface_nat_destination and GRE on native-GRE plus
     // an inner PASS_TO_KERNEL, and drops other transit), so the healthy
     // path was the weaker of the two.
-    // #1432 S2a: WireGuard. WG-to-firewall is local-destination UDP on
-    // the configured listen port; steer it to the kernel (the userspace
-    // control-thread UdpSocket reads it) via cpumap_or_pass — the same
-    // path ESP/IPsec rides above. `is_local_destination` is MANDATORY:
-    // a port-only match would shunt TRANSIT/DNAT UDP that happens to use
-    // the WG port to the kernel, bypassing the userspace policy engine.
+    // #1432 S2a (#9587: set-valued): WireGuard. WG-to-firewall is
+    // local-destination UDP on a steered listen port; steer it to the kernel
+    // (the userspace control-thread UdpSocket reads it) via cpumap_or_pass —
+    // the same path ESP/IPsec rides above. `is_local_destination` is
+    // MANDATORY: a port-only match would shunt TRANSIT/DNAT UDP that happens
+    // to use a steered port to the kernel, bypassing the userspace policy
+    // engine.
     //
     // The whole block is gated on the WG_RX flag bit (read from the same
     // `ctrl.flags` word the GRE check just above already loaded), so when
-    // no WG tunnel is configured NOTHING here runs — not the
-    // `wg_listen_port` load, not the protocol/port/local-destination
+    // no WG tunnel is configured NOTHING here runs — not the `wg_ports`
+    // load, not the protocol/port/local-destination
     // tests. This keeps the non-WG datapath byte-for-byte on its prior
     // instruction path (the bare per-packet `wg_listen_port` load+compare
     // measurably regressed v6 best-effort retransmits at line rate).
@@ -748,9 +756,12 @@ fn try_xdp_userspace(ctx: &XdpContext) -> Result<u32, i64> {
                 let wg_worker_claim = (ctrl.flags & USERSPACE_CTRL_FLAG_WG_RX) != 0
                     && wg_worker_claims_record(
                         true,
-                        (ctrl.wg_listen_port & 0xffff) as u16 != 0
-                            && parsed.protocol == PROTO_UDP
-                            && parsed.flow_dst_port == (ctrl.wg_listen_port & 0xffff) as u16,
+                        parsed.protocol == PROTO_UDP
+                            && wg_port_is_steered(
+                                parsed.flow_dst_port,
+                                &ctrl.wg_ports,
+                                ctrl.wg_port_count,
+                            ),
                         true,
                         parsed.udp_wg_transport_data,
                     );
@@ -1670,11 +1681,13 @@ fn parse_ipv6(
 /// would shunt transit/DNAT UDP on the WG port to the kernel, bypassing
 /// the userspace policy engine.
 fn wg_steer_to_kernel(ctrl: &UserspaceCtrl, pkt: &ParsedPacket) -> bool {
-    let wg_port = (ctrl.wg_listen_port & 0xffff) as u16;
-    // The cheap tests stay first: the call site's comment is about instruction
-    // path cost, and nothing below runs for a packet that is not UDP to the
-    // configured listen port.
-    if wg_port == 0 || pkt.protocol != PROTO_UDP || pkt.flow_dst_port != wg_port {
+    // Order is load-bearing (#1432, #9587): the UDP test first, then the
+    // bounded set scan (register compares), and `is_local_destination` LAST
+    // (up to two BPF map lookups). Nothing below runs for a packet that is
+    // not UDP to a steered port.
+    if pkt.protocol != PROTO_UDP
+        || !wg_port_is_steered(pkt.flow_dst_port, &ctrl.wg_ports, ctrl.wg_port_count)
+    {
         return false;
     }
     // #8274 step 2: types 1/2/3 (handshake, cookie) keep going to the kernel —

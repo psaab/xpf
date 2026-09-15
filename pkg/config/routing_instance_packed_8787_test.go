@@ -1,6 +1,9 @@
 package config
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // TestPackedRoutingInstanceSurvives8787 asserts the ABSOLUTE outcome of each
 // spelling: the instance exists and carries the type the operator wrote.
@@ -97,16 +100,23 @@ func TestPackedRoutingInstanceSurvives8787(t *testing.T) {
 			}
 		}
 	})
-	// A bare elided instance carries no properties and must not become a
-	// phantom: it has no type, so it would compile as a VRF.
+	// A bare name carries no properties and must not become a phantom: it
+	// has no type, so it would compile as a VRF. Since #9838 strict refuses
+	// the spelling outright; leniently it still compiles to nothing, now
+	// with a warning naming it.
 	t.Run("bare name is not an instance", func(t *testing.T) {
 		tr, perrs := NewParser(`routing-instances { ri1; }`).Parse()
 		if len(perrs) > 0 {
 			t.Fatalf("parse: %v", perrs)
 		}
-		cfg, err := compileConfigWithOpts(tr, compileOpts{})
+		if _, err := compileConfigWithOpts(tr, compileOpts{}); err == nil ||
+			!strings.Contains(err.Error(), "#9838") {
+			t.Fatalf("strict: want the #9838 refusal, got %v", err)
+		}
+		tr2, _ := NewParser(`routing-instances { ri1; }`).Parse()
+		cfg, err := CompileConfigLenient(tr2)
 		if err != nil {
-			t.Fatalf("compile: %v", err)
+			t.Fatalf("lenient: %v", err)
 		}
 		if len(cfg.RoutingInstances) != 0 {
 			t.Errorf("a bare `ri1;` compiled to %d instance(s); it declares nothing and "+

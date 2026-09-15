@@ -2506,11 +2506,16 @@ update.
   fail-open.
 - **Any other error** (dial, write, decode, EOF, deadline): helper state
   unknown, so `ctrl` is disabled (`failClosedUserspaceCtrlMapLocked` →
-  `Enabled=0`) and transit drops to the kernel-only fail-closed posture until a
-  subsequent good commit re-publishes and re-enables it
-  (`applyHelperStatusLocked`). A rollback here would leave the maps a generation
-  *behind* an already-applied snapshot — the same fail-open with the sign
-  flipped.
+  `Enabled=0`) and transit drops to the kernel-only fail-closed posture. The
+  attempted snapshot is retained as retry debt (#9642: adopted as
+  `m.lastSnapshot` with `publishedSnapshot` held back — except on refusal and
+  on deterministic-local failures such as digest/size/socket-config errors,
+  where the helper provably received nothing and revert-to-old converges), and
+  the status tick republishes it without waiting for an operator commit, while
+  `snapshotRetryDebtLocked` holds `ctrl` disabled and skips the tick's
+  classifier re-sync until a full apply succeeds. A rollback here would leave
+  the maps a generation *behind* an already-applied snapshot — the same
+  fail-open with the sign flipped.
 - If the **rollback itself fails**, the maps are an unknown mix of two plans,
   which is worse than either, so the ctrl-disable is the fallback and both
   errors are returned joined.

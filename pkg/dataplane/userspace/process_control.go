@@ -129,7 +129,7 @@ func controlRoundtripDeadline(bodyLen int) time.Duration {
 
 func (m *Manager) requestDetailedLocked(req ControlRequest) (ControlResponse, error) {
 	if m.cfg.ControlSocket == "" {
-		return ControlResponse{}, errors.New("userspace dataplane control socket not configured")
+		return ControlResponse{}, &knownUnsentError{msg: errControlSocketNotConfigured.Error(), cause: errControlSocketNotConfigured}
 	}
 	// Pre-flight size check (#2744). Serialize the request once and reject
 	// it here if it would exceed the receiver's cap, so the operator sees
@@ -139,16 +139,21 @@ func (m *Manager) requestDetailedLocked(req ControlRequest) (ControlResponse, er
 	// prefixes push the body past MaxControlRequestBytes.
 	body, err := json.Marshal(&req)
 	if err != nil {
-		return ControlResponse{}, err
+		// The digest stamp hashes a projection of an apply_snapshot while the
+		// wire body carries the full struct (Config included), so stamp
+		// success does not prove this marshal succeeds. Either way the helper
+		// provably received nothing: classify beside the verbatim message
+		// (convention per helperRejectedError below), cause stays inspectable.
+		return ControlResponse{}, &knownUnsentError{msg: err.Error(), cause: errors.Join(errControlRequestEncode, err)}
 	}
 	if len(body) > MaxControlRequestBytes {
-		return ControlResponse{}, fmt.Errorf(
+		return ControlResponse{}, &knownUnsentError{msg: fmt.Sprintf(
 			"userspace control request %q is %d bytes, exceeding the dataplane "+
 				"control-socket limit of %d bytes; this is most often a "+
 				"dynamic-address feed with too many prefixes — reduce the feed "+
 				"size or split the address book (the dataplane would reject this "+
 				"request before applying it)",
-			req.Type, len(body), MaxControlRequestBytes)
+			req.Type, len(body), MaxControlRequestBytes), cause: errControlRequestTooLarge}
 	}
 	// #9003: SO_PEERCRED before a single byte is written. `apply_snapshot`
 	// carries the WireGuard local private key and every per-peer preshared key
@@ -240,6 +245,50 @@ func (m *Manager) requestDetailedLocked(req ControlRequest) (ControlResponse, er
 // into a fail-open one, which is why #7468's atomic retain is gated on this
 // sentinel and not on `err != nil`.
 var errHelperRejected = errors.New("userspace helper rejected the request")
+
+// Deterministic-local control failures: the request provably never reached the
+// helper (pre-transmission), so retry is futile and the failure must never adopt
+// retry-debt authority (#9642, isKnownUnsentFailure). Dial/write/deadline/EOF
+// failures are NOT in this class — the helper may hold content the manager never
+// saw accepted, so those adopt.
+var (
+	errControlSocketNotConfigured = errors.New("userspace dataplane control socket not configured")
+	errControlRequestEncode       = errors.New("userspace control request encoding failed")
+	errControlRequestTooLarge     = errors.New("userspace control request exceeds size limit")
+)
+
+// knownUnsentError marks a deterministic-local failure beside its verbatim
+// message (convention per helperRejectedError above: operator-facing text is
+// unchanged); classification rides Is(), the cause stays inspectable.
+type knownUnsentError struct {
+	msg   string
+	cause error
+}
+
+func (e *knownUnsentError) Error() string { return e.msg }
+
+func (e *knownUnsentError) Unwrap() []error { return []error{e.cause} }
+
+// isKnownUnsentFailure reports whether err proves the request never reached the
+// helper: digest-stamp failure (returned before the outcome recorder installs),
+// request-body marshal/size rejection, or an unconfigured socket. Response
+// decoding errors are deliberately NOT in this class — a decodable-or-not
+// response presupposes bytes on the wire.
+func isKnownUnsentFailure(err error) bool {
+	if err == nil {
+		return false
+	}
+	// Bare sentinels match directly; wrapped path errors match through the
+	// knownUnsentError cause chain. Both forms exclude adoption.
+	if errors.Is(err, errSnapshotDigest) ||
+		errors.Is(err, errControlSocketNotConfigured) ||
+		errors.Is(err, errControlRequestEncode) ||
+		errors.Is(err, errControlRequestTooLarge) {
+		return true
+	}
+	var unsent *knownUnsentError
+	return errors.As(err, &unsent)
+}
 
 // helperRejectedError carries the helper's own message VERBATIM while matching
 // errHelperRejected under errors.Is.

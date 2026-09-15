@@ -40,7 +40,7 @@ WG outer transport: UDP 51820 over the VLAN-3667 LAN. Inner subnets:
 ./test/incus/wg-interop.sh preflight      # P0 + fast-path baseline
 ./test/incus/wg-interop.sh provision      # peer VM (idempotent)
 ./test/incus/wg-interop.sh configure      # keys + P1 initiator handshake
-./test/incus/wg-interop.sh test p2        # p2 p4a p3 p4b p5 p6 p7 | all
+./test/incus/wg-interop.sh test p2        # p2 p4a p3 p4b p5 p6 p7 p8 | all
 ./test/incus/wg-interop.sh teardown
 ```
 
@@ -58,9 +58,35 @@ deadlocks; use `with-cluster.sh`:
     env WG_PEER_TYPE=container ./test/incus/wg-interop.sh all
 ```
 
-Phase order is `P0 P1 P2 P4a P3 P4b P5 P6 P7` (P4a needs the
+Phase order is `P0 P1 P2 P4a P3 P4b P5 P6 P7 P8` (P4a needs the
 xpf-initiated session from P1; P4b needs the kernel-initiated session
-from P3 — see plan §5.2).
+from P3 — see plan §5.2; P8 needs P1's wg0 up as its single-tunnel
+control — see ## P8 below).
+
+## P8 — two steered listen ports (#9587)
+
+`./test/incus/wg-interop.sh test p8` (also runs at the end of `all`).
+Commits an ADDITIVE node0-scoped `interfaces wg1` stanza (distinct listen
+port `:51821`, disjoint inners `10.78.1.0/24` + `fd00:78:1::/64`, same xpf
+identity — no bind collision on distinct ports) with `wg1.0` joining the
+existing `wg` zone; the peer gets a second kernel device `wgref2` with
+per-device allowed-ips (TAI64N domains stay separate). Verifies: wg0
+control still passes with wg1 present; wg1 v4+v6 both directions; per-tunnel
+engine encap/decap growth with flat unsteered drops (steering-config +
+liveness witnesses — never which path served the records).
+
+- Programmed set: `bpftool map dump pinned
+  /sys/fs/bpf/xpf/userspace_ctrl` — bytes 20..23 are the count (expect 2),
+  bytes 24..39 the ports array in little-endian u16s (`6c ca` = 51820,
+  `6d ca` = 51821), zero-filled past count. Count 0 with tunnels
+  configured = the snapshot never programmed the set (check the commit
+  applied).
+- Per-tunnel engine counters (liveness, NOT worker-path proof — the control
+  thread bumps the same engine): query the helper status socket on fw0 and
+  read `wg_tunnels[]` (`tunnel`, `encap_packets`, `decap_packets`,
+  `rx_unsteered_transport_drops`).
+- Zone/session-level per-port policy proof stays outstanding for a live
+  #10038 world; P8 asserts cryptokey-routing deny only.
 
 ## The restart runbook (TAI64N)
 

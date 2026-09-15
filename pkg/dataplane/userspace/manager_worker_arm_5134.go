@@ -47,9 +47,11 @@ func (m *Manager) retryDeferredWorkerArmLocked() error {
 		m.pendingWorkerArm = false
 		return nil
 	}
-	if !m.lastSnapshot.DeferWorkers {
-		// A later full apply already published a DeferWorkers=false snapshot
-		// (workers armed). The debt is settled.
+	if !m.lastSnapshot.DeferWorkers && m.publishedSnapshot >= m.lastSnapshot.Generation {
+		// A later full apply published a DeferWorkers=false snapshot (workers
+		// armed). The debt is settled. The publication qualifier is
+		// load-bearing (#9642): an adopted-but-unlanded DeferWorkers=false
+		// snapshot must not drop a live worker-arm debt.
 		m.pendingWorkerArm = false
 		return nil
 	}

@@ -2755,6 +2755,18 @@ type compileOpts struct {
 	// refuses the child MTU and the committed value would otherwise never
 	// be realised — the same silence the issue is about.
 	lenientVlanUnitMTU bool
+	// lenientBareLeafInstance9838 (#9838) downgrades the bare-leaf
+	// interface / routing-instance gate (validateBareLeafInstance9838)
+	// from a hard compile error to a cfg.Warnings entry on the tolerant
+	// load / peer-sync paths. `interfaces { ge-0/0/0; }` and
+	// `routing-instances { ri1; }` compile to no instance while their
+	// empty braced spellings compile one. Commit / commit-check stay
+	// strict so the silent divergence is refused; an already-persisted
+	// or peer-synced config an older binary accepted must still BOOT
+	// (warn) per the #1960 fail-closed-on-load doctrine — leniently
+	// loaded the instance is exactly as absent as it already was, now
+	// flagged. Same doctrine as lenientInterfaceAddressList.
+	lenientBareLeafInstance9838 bool
 
 	// nodeAware / stampNodeID (#4329) carry the runtime cluster node
 	// identity (from /etc/xpf/node-id, or `-node-id` on `xpfd
@@ -2962,5 +2974,6 @@ func lenientCompileOpts() compileOpts {
 		lenientFabricMemberDefined:             true,
 		lenientInterfaceAddressList:            true,
 		lenientVlanUnitMTU:                     true,
+		lenientBareLeafInstance9838:            true,
 	}
 }

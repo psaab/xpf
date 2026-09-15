@@ -1097,8 +1097,8 @@ fn observe_one_record_9521(
 }
 
 /// #9521: the control thread is where an unsteered port's plaintext left the
-/// dataplane. The shim claims transport data for one listen port only, so a
-/// record for any other port reaches this socket on every path, and the loop
+/// dataplane. The shim claims transport data for the steered listen-port set
+/// (#9587), so a record for any port outside the set reaches this socket on every path, and the loop
 /// used to decrypt it straight onto the wgN TUN for the kernel to forward with
 /// no zone policy. Now it authenticates the record and drops the plaintext.
 ///
@@ -1142,18 +1142,29 @@ fn unsteered_port_kernel_transport_is_dropped_not_written_9521() {
     }
 }
 
-/// #9521: a snapshot that names no steered port delivers for NO endpoint.
+/// #9587: an empty steered set delivers for NO endpoint; membership is per
+/// port, not positional. Successor to the #9521 scalar cell of the same name.
 #[test]
-fn kernel_transport_decision_fails_closed_9521() {
+fn kernel_transport_decision_fails_closed_9587() {
     use crate::afxdp::types::WgKernelTransport;
-    assert_eq!(WgKernelTransport::for_listen_port(51820, 51820), WgKernelTransport::Deliver);
-    assert_eq!(WgKernelTransport::for_listen_port(51821, 51820), WgKernelTransport::DropUnsteered);
+    let set = |ports: &[u16]| WgKernelTransport::for_listen_port(51820, ports);
+    assert_eq!(set(&[51820]), WgKernelTransport::Deliver);
+    assert_eq!(set(&[51819, 51820]), WgKernelTransport::Deliver);
     assert_eq!(
-        WgKernelTransport::for_listen_port(51820, 0),
+        WgKernelTransport::for_listen_port(51821, &[51820]),
+        WgKernelTransport::DropUnsteered
+    );
+    assert_eq!(
+        WgKernelTransport::for_listen_port(51820, &[]),
         WgKernelTransport::DropUnsteered,
         "no steered port named must fail closed, not deliver for every port"
     );
-    assert_eq!(WgKernelTransport::for_listen_port(0, 0), WgKernelTransport::DropUnsteered);
+    assert_eq!(WgKernelTransport::for_listen_port(0, &[]), WgKernelTransport::DropUnsteered);
+    assert_eq!(
+        WgKernelTransport::for_listen_port(0, &[51820]),
+        WgKernelTransport::DropUnsteered,
+        "port zero never matches, even against a non-empty set"
+    );
 }
 
 // =======================================================================

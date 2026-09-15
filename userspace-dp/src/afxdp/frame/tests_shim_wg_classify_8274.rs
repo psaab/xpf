@@ -30,8 +30,9 @@
 mod shim_wg;
 
 use shim_wg::{
-    WG_TYPE_COOKIE, WG_TYPE_DATA, WG_TYPE_INITIATION, WG_TYPE_RESPONSE,
-    wg_record_is_transport_data, wg_steer_to_kernel_on_port_match,
+    WG_STEERED_PORT_SET_MAX, WG_TYPE_COOKIE, WG_TYPE_DATA, WG_TYPE_INITIATION,
+    WG_TYPE_RESPONSE, wg_port_is_steered, wg_record_is_transport_data,
+    wg_steer_to_kernel_on_port_match,
 };
 
 /// The acceptance criterion #8274 names first: a type-4 record and a type-1
@@ -142,4 +143,47 @@ fn local_destination_is_required_for_either_message_type_8274() {
              UDP on the WireGuard port past the userspace policy engine (#8274)"
         );
     }
+}
+
+/// #9587: the steered-port SET, EXECUTED (same harness rule as above — the
+/// function below is the real shim code, included by path).
+///
+/// Fail-on-revert: restore the scalar compare (`dst == single_port`) and the
+/// second-port assertions go red while the first stays green — exactly the
+/// #9587 gap (a second tunnel's transport never claimed).
+#[test]
+fn steered_set_membership_9587() {
+    let mut ports = [0u16; WG_STEERED_PORT_SET_MAX];
+    ports[0] = 51820;
+    ports[1] = 51900;
+    ports[7] = 51008;
+    // Member at first, middle and last valid positions.
+    for port in [51820, 51900, 51008] {
+        assert!(
+            wg_port_is_steered(port, &ports, 8),
+            "steered port {port} must match"
+        );
+    }
+    // Non-member, including a port sitting in the array PAST the count.
+    assert!(
+        !wg_port_is_steered(51821, &ports, 8),
+        "unconfigured port must not match"
+    );
+    let mut tail = [0u16; WG_STEERED_PORT_SET_MAX];
+    tail[3] = 51999;
+    assert!(
+        !wg_port_is_steered(51999, &tail, 2),
+        "an entry past the valid count must not match"
+    );
+    // Zero never matches — not against an empty set, not against a zero-filled
+    // tail, not even when the count is corrupt.
+    assert!(!wg_port_is_steered(0, &ports, 8));
+    assert!(!wg_port_is_steered(0, &[0u16; WG_STEERED_PORT_SET_MAX], 0));
+    assert!(!wg_port_is_steered(0, &ports, u32::MAX));
+    // Empty set matches nothing (fail-closed); a corrupt over-count can only
+    // widen to the fixed array, never out of bounds, and still matches only
+    // configured entries.
+    assert!(!wg_port_is_steered(51820, &ports, 0));
+    assert!(wg_port_is_steered(51820, &ports, u32::MAX));
+    assert!(!wg_port_is_steered(51821, &ports, u32::MAX));
 }

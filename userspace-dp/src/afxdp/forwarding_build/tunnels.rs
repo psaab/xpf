@@ -39,9 +39,17 @@ pub(super) fn populate_tunnel_endpoints(
             }
         }
     }
-    // #9521: carried for the WireGuard control-thread spawn, which decides from
-    // it which threads may deliver kernel-path transport plaintext.
-    state.wg_steered_listen_port = snapshot.wg_steered_listen_port;
+    // #9587: carried for the WireGuard control-thread spawn, which decides from
+    // it which threads may deliver kernel-path transport plaintext. The
+    // snapshot carries the selected set; the count is clamped defensively
+    let mut ports = [0u16; crate::afxdp::types::WG_STEERED_PORT_SET_MAX];
+    let n = snapshot
+        .wg_steered_listen_ports
+        .len()
+        .min(crate::afxdp::types::WG_STEERED_PORT_SET_MAX);
+    ports[..n].copy_from_slice(&snapshot.wg_steered_listen_ports[..n]);
+    state.wg_steered_listen_ports = ports;
+    state.wg_steered_listen_port_count = n as u8;
     for endpoint in &snapshot.tunnel_endpoints {
         if endpoint.id == 0 || endpoint.ifindex <= 0 {
             continue;

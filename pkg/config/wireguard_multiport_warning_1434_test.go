@@ -26,31 +26,19 @@ func wgSteeringWarnings(cfg *Config) []string {
 	return out
 }
 
-// TestWireGuardDistinctListenPortsWarnsAtCommit_1434 is the #1434 silence gate.
+// TestWireGuardTwoListenPortsDrawNoAdvisory9587 is the post-#9587 silence
+// gate: the steered set holds up to MaxSteeredWireGuardPorts ports, so a
+// two-tunnel config on distinct ports is fully served and must draw no
+// steering advisory.
 //
-// The defect: the AF_XDP shim's WG-RX steering is a SINGLE scalar
-// (UserspaceCtrl.wg_listen_port, compared in wg_steer_to_kernel), fed by
-// snapshotWgListenPort, which returns the FIRST configured WireGuard endpoint's
-// port. A config with two WireGuard tunnels on DISTINCT listen ports commits
-// clean, but only the first port is ever programmed. This comment used to add
-// that the second tunnel "never receives inbound transport and is permanently,
-// silently down". #9016 showed that was false — the port was live and its
-// plaintext was forwarded by the kernel — and #9521 made the helper drop that
-// transport instead; compiler_validate_wireguard_multiport.go has the mechanism.
-//
-// This asserts the commit now SAYS so, and says it precisely enough to act on:
-// exactly one advisory, naming BOTH ports, BOTH tunnels, which one survives,
-// which one does not, and the tracking issue.
-//
-// Fail-on-revert: delete the validateWireguardSingleSteeredPort append in
-// runTailGates (or make the gate return nil) and this goes RED — the config
-// commits clean again with zero operator signal, which is the defect.
-func TestWireGuardDistinctListenPortsWarnsAtCommit_1434(t *testing.T) {
+// Fail-on-revert: reintroduce a single-port scalar (or shrink the bound
+// below 2) and this goes RED — the config would commit clean while a tunnel
+// silently lost inbound transport, which is the defect.
+func TestWireGuardTwoListenPortsDrawNoAdvisory9587(t *testing.T) {
 	lines := []string{
 		// wg1 on the HIGHER port, authored FIRST. The dataplane snapshot
-		// emitter walks interfaces in sorted NAME order, so wg0 wins the one
-		// steering slot regardless of authoring order — the advisory must
-		// report the emitter's winner, not the author's first line.
+		// emitter walks interfaces in sorted NAME order, so wg0 leads the
+		// steered set regardless of authoring order.
 		"set interfaces wg1 tunnel mode wireguard",
 		"set interfaces wg1 tunnel wireguard listen-port 51900",
 		"set interfaces wg1 tunnel wireguard private-key " + wgKeyA,
@@ -64,37 +52,15 @@ func TestWireGuardDistinctListenPortsWarnsAtCommit_1434(t *testing.T) {
 	tree := buildTree4953(t, lines)
 	cfg, err := CompileConfig(tree)
 	if err != nil {
-		// Explicitly NOT a reject: the config is legal and its first tunnel
-		// works. A hard error here would change commit acceptance for a
-		// config that commits clean at every released version.
-		t.Fatalf("two distinct WG listen-ports must still COMMIT (warning, not reject); got error: %v", err)
+		t.Fatalf("two distinct WG listen-ports must still COMMIT; got error: %v", err)
 	}
-
-	got := wgSteeringWarnings(cfg)
-	if len(got) != 1 {
-		t.Fatalf("want exactly 1 WireGuard steering advisory, got %d: %v (all warnings: %v)",
-			len(got), got, cfg.Warnings)
+	if got := wgSteeringWarnings(cfg); len(got) != 0 {
+		t.Fatalf("two steered WG listen-ports must draw no steering advisory, got: %v", got)
 	}
-	w := got[0]
-
-	// Both ports and both tunnel refs must appear — an advisory that names
-	// only the unsteered port leaves the operator guessing which tunnel is the
-	// adjudicated one.
-	for _, want := range []string{"51820", "51900", "wg0", "wg1", "#1434"} {
-		if !strings.Contains(w, want) {
-			t.Errorf("advisory does not mention %q: %s", want, w)
-		}
-	}
-
-	// Direction is the whole point: naming the ports without saying WHICH one
-	// survives is no better than silence. Bind the assignment explicitly, so a
-	// gate that picks the wrong winner (authoring order, or the max port)
-	// cannot pass by merely mentioning both numbers.
-	if !strings.Contains(w, "listen-port 51820 (wg0) IS steered") {
-		t.Errorf("advisory does not name 51820/wg0 as the port that IS programmed: %s", w)
-	}
-	if !strings.Contains(w, "listen-port 51900 (wg1) is NOT steered") {
-		t.Errorf("advisory does not name 51900/wg1 as the port that is NOT programmed: %s", w)
+	// The derivation still covers both ports — silence means "all steered",
+	// not "gate removed".
+	if got := SteeredWireGuardListenPorts(cfg); len(got) != 2 {
+		t.Fatalf("SteeredWireGuardListenPorts = %v, want both ports", got)
 	}
 }
 
@@ -122,11 +88,11 @@ func TestWireGuardSingleListenPortDoesNotWarn_1434(t *testing.T) {
 }
 
 // TestWireGuardSameListenPortDoesNotWarn_1434 binds the DISTINCT qualifier. Two
-// WireGuard tunnels that share one listen port lose nothing to the single
-// steering scalar — that one port is programmed and covers both — so this gate
-// must stay quiet. A naive "more than one WireGuard tunnel" test would fire
-// here and mislabel a different problem (two tunnels on one port collide on the
-// kernel UDP bind; bind_wg_socket sets no SO_REUSEPORT) as a steering loss.
+// WireGuard tunnels that share one listen port contribute one set entry —
+// that port is programmed and covers both — so this gate must stay quiet. A
+// naive "more than one WireGuard tunnel" test would fire here and mislabel a
+// different problem (two tunnels on one port collide on the kernel UDP bind;
+// bind_wg_socket sets no SO_REUSEPORT) as a steering loss.
 func TestWireGuardSameListenPortDoesNotWarn_1434(t *testing.T) {
 	lines := []string{
 		"set interfaces wg0 tunnel mode wireguard",
@@ -149,47 +115,33 @@ func TestWireGuardSameListenPortDoesNotWarn_1434(t *testing.T) {
 	}
 }
 
-// TestWireGuardThreeListenPortsWarnsOnce_1434 covers the >2 case: one advisory
-// listing EVERY stranded port, not one advisory per stranded tunnel (which
-// would bury the signal) and not just the first stranded one (which would
-// under-report the damage).
-func TestWireGuardThreeListenPortsWarnsOnce_1434(t *testing.T) {
-	lines := []string{
-		"set interfaces wg0 tunnel mode wireguard",
-		"set interfaces wg0 tunnel wireguard listen-port 51820",
-		"set interfaces wg0 tunnel wireguard private-key " + wgKeyB,
-		"set interfaces wg0 tunnel wireguard peer " + wgKeyA + " allowed-ips 10.1.0.0/24",
-		"set interfaces wg1 tunnel mode wireguard",
-		"set interfaces wg1 tunnel wireguard listen-port 51900",
-		"set interfaces wg1 tunnel wireguard private-key " + wgKeyA,
-		"set interfaces wg1 tunnel wireguard peer " + wgKeyB + " allowed-ips 10.2.0.0/24",
-		"set interfaces wg2 tunnel mode wireguard",
-		"set interfaces wg2 tunnel wireguard listen-port 51999",
-		"set interfaces wg2 tunnel wireguard private-key " + wgKeyC1434,
-		"set interfaces wg2 tunnel wireguard peer " + wgKeyA + " allowed-ips 10.3.0.0/24",
-		"set system dataplane-type userspace",
-	}
-	tree := buildTree4953(t, lines)
-	cfg, err := CompileConfig(tree)
-	if err != nil {
-		t.Fatalf("CompileConfig: %v", err)
-	}
+// TestWireGuardNineListenPortsWarnsOnce9587 covers the overflow case: one
+// advisory listing the refused port, not one advisory per refused tunnel
+// (which would bury the signal) and not just a count (which would
+// under-report what to fix).
+//
+// Fail-on-revert: delete the validateWireguardSteeredPortSet append in
+// runTailGates (or make the gate return nil) and this goes RED — the config
+// commits clean again with zero operator signal about the refused port,
+// which is the defect.
+func TestWireGuardNineListenPortsWarnsOnce9587(t *testing.T) {
+	cfg := wgNinePortConfig9587(t, "wg0", 51820)
 	got := wgSteeringWarnings(cfg)
 	if len(got) != 1 {
-		t.Fatalf("want exactly 1 WireGuard steering advisory for 3 ports, got %d: %v", len(got), got)
+		t.Fatalf("want exactly 1 WireGuard steering advisory for 9 ports, got %d: %v", len(got), got)
 	}
 	w := got[0]
-	if !strings.Contains(w, "3 distinct listen-ports") {
+	if !strings.Contains(w, "9 distinct listen-ports") {
 		t.Errorf("advisory does not report the full port count: %s", w)
 	}
-	for _, want := range []string{"51900 (wg1)", "51999 (wg2)"} {
+	// Overflow is wg8's port (ninth in emitter order).
+	if !strings.Contains(w, "51009 (wg8)") {
+		t.Errorf("advisory omits refused port 51009 (wg8): %s", w)
+	}
+	// The selected set is named, including the emitter-first port.
+	for _, want := range []string{"51820 (wg0)", "51002 (wg1)", "#9587"} {
 		if !strings.Contains(w, want) {
-			t.Errorf("advisory omits stranded port %q: %s", want, w)
+			t.Errorf("advisory omits %q: %s", want, w)
 		}
 	}
-	if !strings.Contains(w, "listen-port 51820 (wg0) IS steered") {
-		t.Errorf("advisory does not name 51820/wg0 as the surviving port: %s", w)
-	}
 }
-
-const wgKeyC1434 = "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3"

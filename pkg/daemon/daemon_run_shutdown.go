@@ -403,8 +403,15 @@ func (d *Daemon) runShutdownSequence(wg *sync.WaitGroup, stop func(), runErr err
 		}
 		if hitless {
 			// Hitless: close Go handles only — BPF programs keep running.
-			slog.Info("hitless shutdown: preserving BPF state")
-			rt.Close()
+			// #9847: Close re-pins missing XDP pins before releasing the
+			// handles, and reports a degraded shutdown when a registered
+			// link still has no pin — those interfaces detached with their
+			// handles. Claim preservation only on success; loud, not silent.
+			if err := rt.Close(); err != nil {
+				slog.Error("hitless shutdown degraded: BPF state not preserved", "err", err)
+			} else {
+				slog.Info("hitless shutdown: preserving BPF state")
+			}
 		} else {
 			// Fail-closed: tear down all pinned BPF state.
 			slog.Info("HA shutdown: tearing down BPF state")

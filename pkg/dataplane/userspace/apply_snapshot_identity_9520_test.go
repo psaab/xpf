@@ -672,11 +672,12 @@ func TestOnlyASuccessfulApplyClearsAnUnknownOutcome9520(t *testing.T) {
 // failure (the #9337 cells).
 func TestAFailedRetryAfterAConflictStillFailsClosed9520(t *testing.T) {
 	cases := []struct {
-		name  string
-		retry error
+		name           string
+		retry          error
+		wantGeneration uint64
 	}{
-		{"conflict_then_integrity_refusal", newHelperRejection("snapshot integrity error: unknown zone")},
-		{"conflict_then_transport_error", errLostResponse9520},
+		{"conflict_then_integrity_refusal", newHelperRejection("snapshot integrity error: unknown zone"), 8},
+		{"conflict_then_transport_error", errLostResponse9520, 9},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -695,9 +696,18 @@ func TestAFailedRetryAfterAConflictStillFailsClosed9520(t *testing.T) {
 			if f.ctrl.stored.Enabled != 0 {
 				t.Fatalf("userspace_ctrl.Enabled = %d after a failed republish, want 0 (fail closed)", f.ctrl.stored.Enabled)
 			}
-			if f.m.publishedSnapshot != 1 || f.m.generation != 8 {
-				t.Fatalf("publishedSnapshot=%d generation=%d, want 1 unchanged and 8 consumed",
-					f.m.publishedSnapshot, f.m.generation)
+			// #9642: the transport-error arm additionally retains the Gen-9 attempt
+			// as retry debt, so m.generation moves 8 -> 9 — the generation the
+			// helper may hold is consumed, exactly like a second conflict consumes
+			// its generation in requestApplySnapshotLocked (a later Compile must
+			// never reuse a generation the helper may already enforce with
+			// different content). The refusal arm adopts nothing, so it still
+			// consumes only the conflicted 8. publishedSnapshot stays 1 either
+			// way: nothing was acknowledged, so the tick gate still owes a
+			// republish (or nothing, for the refusal).
+			if f.m.publishedSnapshot != 1 || f.m.generation != tc.wantGeneration {
+				t.Fatalf("publishedSnapshot=%d generation=%d, want 1 unchanged and %d",
+					f.m.publishedSnapshot, f.m.generation, tc.wantGeneration)
 			}
 		})
 	}

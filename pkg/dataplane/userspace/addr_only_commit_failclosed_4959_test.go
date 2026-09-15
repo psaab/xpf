@@ -96,6 +96,20 @@ func newFailClosedManager4959(t *testing.T) (*Manager, *ebpf.Map, ConfigSnapshot
 	m := New()
 	m.proc = &exec.Cmd{Process: &os.Process{Pid: os.Getpid()}}
 	m.cfg.ControlSocket = controlSock
+	// #9587-verification: the publish error branch starts the reconcile
+	// statusLoop (ensureStatusLoopLocked) on this manager. Without a stop the
+	// loop leaks past the test: it polls the removed socket 1/s, and with the
+	// self-pid proc handle the #9651 wedge kill would eventually signal the
+	// test runner itself. Cancel the loop and drop the proc handle so a leaked
+	// tick exits instead of counting toward a wedge.
+	t.Cleanup(func() {
+		if m.syncCancel != nil {
+			m.syncCancel()
+		}
+		m.mu.Lock()
+		m.proc = nil
+		m.mu.Unlock()
+	})
 	// #9337: the classifier maps are NOT loaded in this harness, so the #7468
 	// rollback attempted on an in-band refusal failed with
 	// "userspace_ingress_ifaces map not loaded" and fell through to the

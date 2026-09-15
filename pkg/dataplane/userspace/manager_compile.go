@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"time"
 
 	"github.com/psaab/xpf/pkg/config"
@@ -347,6 +348,31 @@ func (m *Manager) applyCompiledSnapshot(
 	// it sampled its sections. Re-sample what that update may have moved, before
 	// anything below reads the snapshot.
 	resampled := m.resampleForCompileLocked(snap)
+	// #9824: snap was built outside m.mu, so at apply time its generation can
+	// sit at-or-below what the helper may already hold (H): a partial can have
+	// advanced the counters past it (the tick gate then never opens), a lost
+	// tick publish can have installed past published, or a republish can have
+	// landed unallocated m.generation+1 Go never booked. H <= m.generation+1:
+	// every apply_snapshot offers a reserve-allocated generation or unallocated
+	// m.generation+1. Offer strictly above H: m.generation += 2, then stamp.
+	// The second increment is FOR the unallocated send the counter can't see —
+	// minimal sufficient distance, not churn; +1 lands equality exactly when
+	// such a send is outstanding. This closes below-water ALLOCATION (first
+	// attempts admit; identical re-offers converge idempotently). Post-store
+	// drift recovery is the follow-up's tick-side repair, not this boundary's
+	// claim. Inline: bumpGeneration() takes m.mu, which the caller holds.
+	// Exhaustion: within two of the ceiling the += 2 would wrap and offer
+	// below H, and the reserve already saturated (it never wraps, so a
+	// saturated snap is never fresh). Refuse the commit fail-closed instead:
+	// previous-good stays retained AND published; a daemon restart (new
+	// incarnation, H=0 on a fresh helper) recovers. Unreachable in practice
+	// (2^64 allocations per incarnation); the guard exists so strictly-above
+	// holds unconditionally, not probabilistically.
+	if m.generation >= math.MaxUint64-1 {
+		return result, fmt.Errorf("userspace: snapshot generation allocator exhausted (m.generation=%d); refusing to wrap (restart recovers)", m.generation)
+	}
+	m.generation += 2
+	snap.Generation = m.generation
 	// #3261: record whether this snapshot carries unrepresentable policy
 	// content BEFORE the publish, so the diagnostic is captured even when the
 	// helper rejects the snapshot (the publish path returns early on the
@@ -483,6 +509,12 @@ func (m *Manager) applyCompiledSnapshot(
 		return result, err
 	}
 	if err := m.ensureRequiredSnapshotProtocolLocked(snap); err != nil {
+		// The startup restart branch above may have torn the status loop down
+		// (stopForNewGenerationLocked → stopLocked) and this return never
+		// reaches the normal ensureStatusLoopLocked() call — with pre-existing
+		// retry debt the manager would sit loop-dead (helper alive) until the
+		// next operator apply. Idempotent when the loop already runs.
+		m.ensureStatusLoopLocked()
 		return result, m.disarmSnapshotProtocolFailClosedLocked(snap, err, samePlanRefresh)
 	}
 	if m.deferWorkers {
@@ -619,13 +651,17 @@ func (m *Manager) applyCompiledSnapshot(
 //     rollback itself fails the ctrl-disable is the fallback.
 //   - ANY OTHER ERROR: helper state unknown, so the pre-#7468 behaviour stands
 //     — disable ctrl (failClosedUserspaceCtrlMapLocked) and drop transit to the
-//     kernel-only fail-closed posture until a subsequent good commit
-//     re-publishes and re-enables it.
+//     kernel-only fail-closed posture. The attempted snapshot is retained as
+//     retry debt (#9642: adopted as m.lastSnapshot below with publishedSnapshot
+//     held back) and the status tick republishes it — no operator commit needed
+//     — while snapshotRetryDebtLocked holds ctrl disabled until a full apply
+//     succeeds.
 //
 // When mapsMutatedInPlace is false the caller took the full bootstrap path,
 // which already programmed ctrl.Enabled=0 before this publish, so a publish
 // error is already fail-closed and the error is returned unchanged.
 func (m *Manager) publishSnapshotFailClosedLocked(publishSnap *ConfigSnapshot, status *ProcessStatus, mapsMutatedInPlace bool) error {
+	wasDebt := m.snapshotRetryDebtLocked()
 	if err := m.requestApplySnapshotLocked(publishSnap, status); err != nil {
 		publishErr := fmt.Errorf("publish userspace snapshot: %w", err)
 		// #7468: a rejected publish must never return with the manager lacking
@@ -640,6 +676,48 @@ func (m *Manager) publishSnapshotFailClosedLocked(publishSnap *ConfigSnapshot, s
 		// `!bindings.is_empty() && ...` (userspace-dp status.rs), which
 		// resolveCtrlEnableLocked requires before it will arm.
 		m.ensureStatusLoopLocked()
+		if m.applySnapshotOutcomeUnknown && !errors.Is(err, errHelperRejected) &&
+			!isKnownUnsentFailure(err) {
+			// #9642: this attempt may have landed (unknown outcome) and the
+			// classifier maps are already at the attempted plan — mutated in
+			// place on the same-plan arm, freshly programmed on the bootstrap
+			// arm — so the retained authority follows the maps. Refusals never
+			// adopt (the helper provably kept its prior state; #7468/#9337 own
+			// them, including over pre-existing debt). Deterministic-local
+			// failures never adopt (helper provably received nothing;
+			// revert-to-old converges). publishedSnapshot/hash/planKey stay
+			// behind, so the tick's level-triggered gate republishes this.
+			adopted := *publishSnap
+			if adopted.Generation <= m.publishedSnapshot {
+				// A partial writeback overtook Compile's reserved generation
+				// after the build (reserved pre-mu). Re-stamp ahead: content
+				// is current (resampled under mu); only the number moves; the
+				// digest re-stamps per send; the generation is fresh (#5134).
+				m.generation++
+				adopted.Generation = m.generation
+			}
+			m.adoptPublishedGenerationLocked(&adopted, adopted.Generation)
+			m.lastSnapshot = &adopted
+			m.cfg = adopted.Userspace
+			if !m.clusterHA {
+				// The Compile-tail standalone clear never ran; record the
+				// obligation so the tick retries the idempotent clear (#5487
+				// consumer) instead of stranding helper HA groups.
+				m.pendingHAStateClear = true
+			}
+			if !wasDebt {
+				// Transition: Warn once and baseline the repeat limiter. The
+				// debt clock itself was stamped by the outcome recorder on the
+				// mark-setting transition just above (covers every producer,
+				// including conversions that never adopt).
+				m.lastRetryDebtWarn = time.Now()
+				slog.Warn("userspace: apply_snapshot outcome unknown; retained as retry debt",
+					"generation", adopted.Generation, "err", err)
+			} else {
+				slog.Debug("userspace: retry debt republish failed; debt persists",
+					"generation", adopted.Generation, "err", err)
+			}
+		}
 		if mapsMutatedInPlace {
 			return m.retainPreviousClassifierPlanLocked(publishSnap, publishErr)
 		}

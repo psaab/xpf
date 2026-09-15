@@ -53,10 +53,12 @@ func wgMultiportTree9016(t *testing.T, ports ...string) *Config {
 // Nothing bound this text before #9016, which is how a false security-relevant
 // claim survived in a warning that reads as authoritative.
 func TestMultiportAdvisoryDoesNotClaimTheTunnelIsDead9016(t *testing.T) {
-	cfg := wgMultiportTree9016(t, "51820", "51821")
-	adv := validateWireguardSingleSteeredPort(cfg)
+	// Nine distinct ports: eight fit the steered set, the ninth (wg8's
+	// 51828) is refused and its posture is what this text pins.
+	cfg := wgMultiportTree9016(t, "51820", "51821", "51822", "51823", "51824", "51825", "51826", "51827", "51828")
+	adv := validateWireguardSteeredPortSet(cfg)
 	if len(adv) != 1 {
-		t.Fatalf("two distinct listen-ports must produce exactly one advisory, got %d: %v",
+		t.Fatalf("nine distinct listen-ports must produce exactly one advisory, got %d: %v",
 			len(adv), adv)
 	}
 	text := adv[0]
@@ -81,7 +83,7 @@ func TestMultiportAdvisoryDoesNotClaimTheTunnelIsDead9016(t *testing.T) {
 
 	// What it must say instead: the port is unsteered, its kernel-path transport
 	// is DROPPED, and it is NOT inert — it still handshakes.
-	for _, required := range []string{"51821", "steered", "DROPPED", "Handshakes still complete"} {
+	for _, required := range []string{"51828", "steered", "DROPPED", "Handshakes still complete"} {
 		if !strings.Contains(text, required) {
 			t.Fatalf("advisory omits %q:\n\n%s", required, text)
 		}
@@ -118,12 +120,12 @@ func TestMultiportAdvisoryDoesNotClaimTheTunnelIsDead9016(t *testing.T) {
 
 	// CONTROL: one tunnel, no advisory. A check that fired always would satisfy
 	// every assertion above.
-	if adv := validateWireguardSingleSteeredPort(wgMultiportTree9016(t, "51820")); len(adv) != 0 {
+	if adv := validateWireguardSteeredPortSet(wgMultiportTree9016(t, "51820")); len(adv) != 0 {
 		t.Fatalf("a single listen-port must produce NO multi-port advisory, got: %v", adv)
 	}
 
 	// CONTROL: two tunnels sharing ONE port are not a multi-port config either.
-	if adv := validateWireguardSingleSteeredPort(wgMultiportTree9016(t, "51820", "51820")); len(adv) != 0 {
+	if adv := validateWireguardSteeredPortSet(wgMultiportTree9016(t, "51820", "51820")); len(adv) != 0 {
 		t.Fatalf("two tunnels on the SAME port are all steered; no advisory is due, got: %v", adv)
 	}
 }

@@ -18,7 +18,6 @@ import (
 )
 
 const (
-	linkPinPath            = "/sys/fs/bpf/xpf/links"
 	defaultXDPEntryProg    = "xdp_main_prog"
 	userspaceShimEntryProg = "xdp_userspace_prog"
 )
@@ -321,7 +320,7 @@ func (m *Manager) CompileUserspaceShim(cfg *config.Config) (*CompileResult, erro
 	if err := cleanupUserspaceShimLegacyOnlyMapPins(); err != nil {
 		return nil, m.abortAfterHostMutation(result, err)
 	}
-	removeUserspaceShimXDPLinkPins()
+	m.removeUserspaceShimXDPLinkPins()
 
 	if err := runPostMutationSteps(result,
 		func(r *CompileResult) error {
@@ -397,119 +396,6 @@ func (m *Manager) attachUserspaceShimXDP(result *CompileResult) error {
 		}
 	}
 	return nil
-}
-
-// removeUserspaceShimXDPLinkPins deletes every `xdp_*` link pin so the attach is
-// a FRESH attach rather than a pinned-link reuse — reuse (`existing.Update`)
-// swaps the program without reinitializing the mlx5 XSK RQs, leaving the fill
-// ring unconsumed, which breaks zero-copy.
-//
-// Relocated here from userspace.Manager.Compile by #7079: it must precede
-// AttachXDP and must NOT precede CompileConfig. Best-effort — a pin already gone
-// is the desired end state, as at the original site.
-func removeUserspaceShimXDPLinkPins() {
-	entries, _ := os.ReadDir(linkPinPath)
-	for _, e := range entries {
-		if strings.HasPrefix(e.Name(), "xdp_") {
-			_ = os.Remove(filepath.Join(linkPinPath, e.Name()))
-		}
-	}
-}
-
-type pinnedTCLink interface {
-	Unpin() error
-	Close() error
-}
-
-var userspaceShimLegacyOnlyMapPins = []string{
-	"xdp_progs",
-	"tc_progs",
-	"policer_states",
-}
-
-func cleanupUserspaceShimLegacyOnlyMapPins() error {
-	return cleanupUserspaceShimLegacyOnlyMapPinsIn(bpfPinPath, userspaceShimLegacyOnlyMapPins)
-}
-
-func cleanupUserspaceShimLegacyOnlyMapPinsIn(pinDir string, names []string) error {
-	var cleanupErrs []error
-	for _, name := range names {
-		pinFile := filepath.Join(pinDir, name)
-		if err := os.Remove(pinFile); err != nil {
-			if os.IsNotExist(err) {
-				continue
-			}
-			cleanupErrs = append(cleanupErrs,
-				fmt.Errorf("remove legacy-only userspace shim map pin %s: %w", pinFile, err))
-			continue
-		}
-		slog.Info("removed legacy-only BPF map pin before userspace shim attach", "pin", pinFile)
-	}
-	return errors.Join(cleanupErrs...)
-}
-
-func cleanupUserspaceShimLegacyTCLinks() error {
-	return cleanupUserspaceShimLegacyTCLinksIn(linkPinPath, func(path string) (pinnedTCLink, error) {
-		return link.LoadPinnedLink(path, nil)
-	})
-}
-
-func cleanupUserspaceShimLegacyTCLinksIn(
-	linkDir string,
-	load func(string) (pinnedTCLink, error),
-) error {
-	entries, err := os.ReadDir(linkDir)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
-		return fmt.Errorf("read userspace shim link pins: %w", err)
-	}
-	var cleanupErrs []error
-	for _, entry := range entries {
-		if !isLegacyTCPinName(entry.Name()) {
-			continue
-		}
-		pinFile := filepath.Join(linkDir, entry.Name())
-		pinned, err := load(pinFile)
-		if err != nil {
-			if rmErr := os.Remove(pinFile); rmErr != nil && !os.IsNotExist(rmErr) {
-				cleanupErrs = append(cleanupErrs,
-					fmt.Errorf("remove unreadable legacy TC pin %s: load: %v; remove: %w", pinFile, err, rmErr))
-				continue
-			}
-			slog.Warn("removed unreadable legacy TC link pin", "pin", pinFile, "err", err)
-			continue
-		}
-		pinErrs := 0
-		if err := pinned.Unpin(); err != nil {
-			cleanupErrs = append(cleanupErrs, fmt.Errorf("unpin %s: %w", pinFile, err))
-			pinErrs++
-		}
-		if err := pinned.Close(); err != nil {
-			cleanupErrs = append(cleanupErrs, fmt.Errorf("close %s: %w", pinFile, err))
-			pinErrs++
-		}
-		if pinErrs == 0 {
-			slog.Info("detached stale legacy TC link before userspace shim attach", "pin", pinFile)
-		}
-	}
-	return errors.Join(cleanupErrs...)
-}
-
-func isLegacyTCPinName(name string) bool {
-	if !strings.HasPrefix(name, "tc_") {
-		return false
-	}
-	if len(name) == len("tc_") {
-		return false
-	}
-	for _, r := range name[len("tc_"):] {
-		if r < '0' || r > '9' {
-			return false
-		}
-	}
-	return true
 }
 
 type userspaceShimCompileDataplane struct {
@@ -631,7 +517,12 @@ func (m *Manager) AttachXDP(ifindex int, forceGeneric bool) error {
 		return fmt.Errorf("%s not found", entryProg)
 	}
 
-	if _, exists := m.xdpLinkFor(ifindex); exists {
+	if l, exists := m.xdpLinkFor(ifindex); exists {
+		// #9847: the short-circuit never reaches the fresh-attach Pin below,
+		// so re-pin a registered link whose pin is missing — otherwise this
+		// process's first Close detaches it. Best-effort (warns inside);
+		// same error either way.
+		_ = ensureXDPLinkPinned(ifindex, l)
 		return fmt.Errorf("XDP already attached to ifindex %d", ifindex)
 	}
 
@@ -1396,6 +1287,15 @@ func (m *Manager) Close() error {
 	// lock released — l.Close() is a syscall and must not run under the lock
 	// the 1 Hz status path needs. Close deliberately does NOT clear the
 	// membership maps (see Teardown), so a snapshot is the whole interaction.
+	// #9847: a bpf_link survives its last handle close ONLY while a pin holds
+	// it (cilium link.Link: "The link will be broken unless it has been
+	// successfully pinned"). Re-pin any registered link whose pin is missing
+	// BEFORE releasing the handles — after the last handle closes there is
+	// nothing left to pin. Each repair is best-effort (warns inside, same
+	// snapshot idiom: the Pin syscalls run with the lock released).
+	for ifindex, l := range m.XDPLinks() {
+		_ = ensureXDPLinkPinned(ifindex, l)
+	}
 	for ifindex, l := range m.XDPLinks() {
 		if err := l.Close(); err != nil {
 			slog.Error("failed to close XDP link handle", "ifindex", ifindex, "err", err)
@@ -1405,6 +1305,14 @@ func (m *Manager) Close() error {
 		if err := l.Close(); err != nil {
 			slog.Error("failed to close TC link handle", "ifindex", ifindex, "err", err)
 		}
+	}
+	// Whatever is still unpinned after the repair detached with its handle:
+	// report a degraded (non-hitless) shutdown so the shutdown path logs it
+	// instead of claiming preserved BPF state. The handles still close above
+	// either way; no abort here could keep an unpinned link attached past
+	// process exit.
+	if missing := unpinnedXDPLinks(linkPinPath, m.XDPLinks()); len(missing) > 0 {
+		return fmt.Errorf("XDP links without pins detached on close (ifindexes %v): shutdown was not hitless", missing)
 	}
 	return nil
 }

@@ -253,16 +253,15 @@ func runTailGates(cfg *Config, opts compileOpts) error {
 	}
 	cfg.Warnings = append(cfg.Warnings, wgPeerWarnings...)
 
-	// #1434 Increment 2 (deferred): the AF_XDP shim's WG-RX steering gate is a
-	// SINGLE scalar (UserspaceCtrl.wg_listen_port), fed by the FIRST configured
-	// WireGuard endpoint's port (snapshotWgListenPort). A config declaring two
-	// WireGuard tunnels on DISTINCT listen ports therefore commits clean while
-	// the second tunnel receives no inbound transport at all — permanently and
-	// silently down. Warn (never reject): the config is legal, the first tunnel
-	// works exactly as authored, and generalizing the shim to a port SET is a
-	// verifier-gated lab change. This removes the silence; it does not remove
-	// the limitation.
-	cfg.Warnings = append(cfg.Warnings, validateWireguardSingleSteeredPort(cfg)...)
+	// #9587 (#1434 Increment 2, landed): the AF_XDP shim's WG-RX steering is a
+	// bounded SET of at most MaxSteeredWireGuardPorts listen ports
+	// (UserspaceCtrl.wg_ports, programmed from the selected set). A config
+	// declaring MORE distinct listen ports stays legal and its selected
+	// tunnels work exactly as authored, but the overflow tunnels' inbound
+	// transport is refused (helper drops it) rather than forwarded
+	// unadjudicated. Warn (never reject): this removes the silence about the
+	// refused ports; it does not remove the bound.
+	cfg.Warnings = append(cfg.Warnings, validateWireguardSteeredPortSet(cfg)...)
 
 	// #5162: non-WireGuard tunnel outer-family cross-field gate. A GRE/IPIP
 	// tunnel whose OUTER source and destination are different address

@@ -127,8 +127,17 @@ use super::snapshot::{ConfigSnapshot, FabricSnapshot, NeighborSnapshot, Userspac
 // LOCAL session whose owner RG is locally active. An old helper ignores it and
 // keeps deleting, which is the defect the field closes. The #8892 digest did not
 // move. See protocol.go's v16 note.
+// v17 (#9587): `ConfigSnapshot.wg_steered_listen_ports`, the bounded SET of
+// WireGuard listen ports the shim steers, replacing the v14 singular key. An
+// old helper ignores the new key and falls back to the absent singular, which
+// decodes to 0 and delivers kernel-path transport for NO endpoint — a total
+// loss of kernel-path inbound delivery (worker-path decap is endpoint-keyed
+// and unaffected). The bump does not cover ctrl-layout skew either: a size
+// mismatch is refused by the pinned-map pre-flight (fail-closed deploy per
+// §5e), independently of this JSON gate. See protocol.go's v17 note. The
+// #8892 digest moves with it (the plural is a real, transmitted field).
 // Keep the line below in this exact form: the Go lockstep guard parses it.
-pub(crate) const CONFIG_SNAPSHOT_PROTOCOL_VERSION: i32 = 16;
+pub(crate) const CONFIG_SNAPSHOT_PROTOCOL_VERSION: i32 = 17;
 
 /// #9520: the machine-readable prefix of the refusal `apply` sends when a
 /// snapshot reuses the installed generation with a different content digest.

@@ -241,11 +241,17 @@ type ProcessStatus struct {
 	SourceNATPools             []SourceNATPoolStatus     `json:"source_nat_pools,omitempty"`
 	LastResolution             *PacketResolution         `json:"last_resolution,omitempty"`
 	SlowPath                   SlowPathStatus            `json:"slow_path,omitempty"`
-	LastCacheFlushAt           uint64                    `json:"last_cache_flush_at,omitempty"`    // monotonic secs (#312)
-	DataplaneMode              string                    `json:"dataplane_mode,omitempty"`         // Current active mode: "ebpf_only", "userspace_compat", "userspace_strict"
-	ConfiguredMode             string                    `json:"configured_mode,omitempty"`        // Desired mode from config
-	EntryPrograms              map[int]string            `json:"entry_programs,omitempty"`         // ifindex -> attached XDP program name
-	DegradedPathCounters       map[string]uint64         `json:"degraded_path_counters,omitempty"` // reason_name -> count
+	LastCacheFlushAt           uint64                    `json:"last_cache_flush_at,omitempty"` // monotonic secs (#312)
+	DataplaneMode              string                    `json:"dataplane_mode,omitempty"`      // Current active mode: "ebpf_only", "userspace_compat", "userspace_strict"
+	ConfiguredMode             string                    `json:"configured_mode,omitempty"`     // Desired mode from config
+	// SnapshotRetryDebt (#9642) reports unknown-outcome publish debt beside
+	// (never instead of) the backend classification: true while an attempted
+	// snapshot is unpublished with ctrl held at 0. Skew-safe additive
+	// omitempty: old readers ignore it; the helper never sends it.
+	SnapshotRetryDebt           bool              `json:"snapshot_retry_debt,omitempty"`
+	SnapshotRetryDebtGeneration uint64            `json:"snapshot_retry_debt_generation,omitempty"`
+	EntryPrograms               map[int]string    `json:"entry_programs,omitempty"`         // ifindex -> attached XDP program name
+	DegradedPathCounters        map[string]uint64 `json:"degraded_path_counters,omitempty"` // reason_name -> count
 	// #1636 option C: proactive-neighbor-warm telemetry. WarmDrops counts
 	// warm requests dropped because the bounded warmer queue was full
 	// (transient); WarmDisconnected counts requests dropped because the

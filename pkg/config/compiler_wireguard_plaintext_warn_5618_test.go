@@ -90,8 +90,10 @@ func TestWGPlaintextWarningScopesTheZoneToTheDataplanePath(t *testing.T) {
 		// forwarding path, which #9594 made false.
 		"While the dataplane is degraded",
 		"transit is dropped and counted as a degraded-transit receive drop (#9594)",
-		// ... and does not tell a multi-port operator that a refused tunnel leaks.
-		"A record for any other listen port is dropped on that path (#9521)",
+		// ... and the refused-port case stays addressed, keyed by its stable
+		// issue tag rather than its sentence (the sentence moved to
+		// selected-set wording under #9587).
+		"#9521",
 	} {
 		if !strings.Contains(adv, want) {
 			t.Errorf("advisory missing %q; got: %s", want, adv)

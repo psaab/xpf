@@ -25,10 +25,10 @@ import (
 //	                ingress.
 //	kernel path     A record that reaches the firewall through the Linux kernel
 //	                instead lands on the helper's WireGuard control thread
-//	                socket. For every listen port other than the steered one the
-//	                thread drops it (#9521). For the STEERED port it depends on
-//	                where the record entered, which the thread learns from
-//	                IP_PKTINFO (#9594):
+//	                socket. For every listen port outside the selected steered
+//	                set the thread drops it (#9521). For a port INSIDE the
+//	                selected set it depends on where the record entered, which
+//	                the thread learns from IP_PKTINFO (#9594):
 //	                  - an ingress the shim does not adjudicate (#8274's stated
 //	                    residual): the plaintext is written to the wgN TUN
 //	                    (`write_packet_nonblocking` in
@@ -51,15 +51,17 @@ import (
 // became false when #8274 landed (#9251). It now states both halves.
 //
 // Why it still fires for EVERY WireGuard tunnel rather than only the steered
-// one. The kernel-path write belongs to the tunnel on the steered listen port,
-// and the steered port has exactly one derivation, SteeredWireGuardListenPort,
+// ones. The kernel-path write belongs to the tunnels on the steered listen
+// ports, and the steered set has exactly one derivation,
+// SteeredWireGuardListenPorts plus SplitSteeredPorts,
 // which reads the TYPED Config. This advisory runs in the AST pre-walk, before
-// that Config exists, and a second, AST-level derivation of the steered port is
-// the divergence #9521 removed. With one listen port — the case the shim steers
-// completely until #9587 — every tunnel is on it. With several, the multi-port
-// warning (validateWireguardSingleSteeredPort) names the steered tunnel and the
-// refused ones from the derivation the dataplane uses, and the mechanism
-// sentence below scopes the residual to the steered port.
+// that Config exists, and a second, AST-level derivation of the steered set is
+// the divergence #9521 removed. With no more listen ports than the bound —
+// the case the shim steers completely — every tunnel is on a steered port.
+// With more, the multi-port warning (validateWireguardSteeredPortSet) names
+// the steered set and the refused ones from the derivation the dataplane
+// uses, and the mechanism sentence below scopes the residual to a steered
+// port.
 //
 // xpf keeps ip_forward at 1 while the dataplane is armed and installs only
 // nftables `hook input` chains, so nothing between the TUN write and the
@@ -250,7 +252,7 @@ const (
 //
 // The lead and the zoned suffix state the SPLIT: evaluated on the dataplane
 // path, not on the kernel path. The mechanism names the kernel path's one
-// forwarding case — the steered port on ingress the dataplane does not attach
+// forwarding case — a steered port on ingress the dataplane does not attach
 // to (#8274's residual) — says that a degraded dataplane's arrivals on ingress
 // it does attach to have their transit dropped (#9594), and says every other
 // port is dropped there (#9521), so an operator is told neither that a refused
@@ -264,16 +266,18 @@ func wireGuardPlaintextAdvisoryWording() plaintextAdvisoryWording {
 		unzonedHeading: wgPlaintextUnzonedHeading,
 		mechanism: "The AF_XDP dataplane decapsulates WireGuard transport records in its " +
 			"worker and evaluates the inner packet under the tunnel's security zone (#8274). " +
-			"A record for the steered listen port that reaches the firewall through the Linux " +
-			"kernel instead, on an ingress interface the dataplane does not attach to, is " +
-			"decrypted by the helper's WireGuard control thread and written straight to the " +
-			"wgN TUN, where the kernel routes and forwards it: no zone policy, no session, no " +
-			"NAT and no screen are applied to it. While the dataplane is degraded (helper " +
+			"A record for a steered listen port — inside the selected set — that reaches " +
+			"the firewall through the Linux kernel instead, on an ingress interface the " +
+			"dataplane does not attach to, is decrypted by the helper's WireGuard " +
+			"control thread and written straight to the wgN TUN, where the kernel " +
+			"routes and forwards it: no zone policy, no session, no NAT and no " +
+			"screen are applied to it. While the dataplane is degraded (helper " +
 			"start, a redundancy-group transition, a reth link cycle, a stale helper " +
 			"heartbeat), a record arriving on an ingress it does attach to is not forwarded " +
 			"that way: traffic addressed to the firewall is delivered, and transit is dropped " +
-			"and counted as a degraded-transit receive drop (#9594). A record for any other " +
-			"listen port is dropped on that path (#9521). A peer's `allowed-ips` is a " +
+			"and counted as a degraded-transit receive drop (#9594). A record for any " +
+			"port outside the selected steered set is dropped on that path (#9521). " +
+			"A peer's `allowed-ips` is a " +
 			"cryptographic check on the inner SOURCE " +
 			"address, not a security policy — it has no destination, zone-pair or " +
 			"application scope.",

@@ -93,7 +93,12 @@ const preSecureTunnelProtocolVersion = 4
 // the helper refuse a peer delete of a live local session under a dual-primary
 // split. Nothing about secure_tunnel changed, so MinProtocolSecureTunnelRefusal
 // (7) is untouched.
-const secureTunnelSnapshotProtocolVersion = 16
+//
+// Issue 9587 moved it 16 -> 17, for `ConfigSnapshot.wg_steered_listen_ports`,
+// the bounded steered WireGuard port set replacing the v14 singular. Nothing
+// about secure_tunnel changed, so MinProtocolSecureTunnelRefusal (7) is
+// untouched again.
+const secureTunnelSnapshotProtocolVersion = 17
 
 // preV5HelperAcceptsSnapshot models the exact-equality version gate a pre-v5
 // helper applies before touching any dataplane state
