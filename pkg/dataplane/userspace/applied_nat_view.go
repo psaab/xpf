@@ -35,6 +35,12 @@ type AppliedNATPoolStatus struct {
 	PortLow      uint16
 	PortHigh     uint16
 	UsedPorts    uint64
+	// LiveFlows / MaxTrackedFlows are the pool's live tracked-flow count and
+	// tracked-flow cap (#9896) — the constraint that actually refuses new
+	// flows. Zero MaxTrackedFlows (older helper) makes the flow leg
+	// inapplicable downstream.
+	LiveFlows       uint64
+	MaxTrackedFlows uint64
 }
 
 // AppliedNATView is a single generation-coherent snapshot for the NAT
@@ -137,11 +143,13 @@ func (m *Manager) AppliedNATView() AppliedNATView {
 			continue
 		}
 		pools[p.PoolName] = AppliedNATPoolStatus{
-			PoolName:     p.PoolName,
-			AddressCount: p.AddressCount,
-			PortLow:      p.PortLow,
-			PortHigh:     p.PortHigh,
-			UsedPorts:    p.UsedPorts,
+			PoolName:        p.PoolName,
+			AddressCount:    p.AddressCount,
+			PortLow:         p.PortLow,
+			PortHigh:        p.PortHigh,
+			UsedPorts:       p.UsedPorts,
+			LiveFlows:       p.LiveFlows,
+			MaxTrackedFlows: p.MaxTrackedFlows,
 		}
 	}
 
