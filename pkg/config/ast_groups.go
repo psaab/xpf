@@ -526,7 +526,7 @@ func mergeNodes(dst *[]*Node, src []*Node, ancestorPath [][]string, budget *grou
 						return err
 					}
 					if err := mergeNodes(&peer.Children, body,
-						appendPath(ancestorPath, peer.Keys), budget, group, vars); err != nil {
+						appendPath(ancestorPath, peer.Keys), budget, group, vars, level, haveExcept); err != nil {
 						return err
 					}
 				} else if cpeer, cbody, ok := sameInstanceContainerPeer9855(ancestorPath, *dst, s); ok {
@@ -538,7 +538,7 @@ func mergeNodes(dst *[]*Node, src []*Node, ancestorPath [][]string, budget *grou
 						return err
 					}
 					if err := mergeNodes(&cpeer.Children, cbody,
-						appendPath(ancestorPath, cpeer.Keys), budget, group, vars); err != nil {
+						appendPath(ancestorPath, cpeer.Keys), budget, group, vars, level, haveExcept); err != nil {
 						return err
 					}
 				}
@@ -556,7 +556,7 @@ func mergeNodes(dst *[]*Node, src []*Node, ancestorPath [][]string, budget *grou
 					return err
 				}
 				if err := mergeNodes(&cpeer.Children, cbody,
-					appendPath(ancestorPath, cpeer.Keys), budget, group, vars); err != nil {
+					appendPath(ancestorPath, cpeer.Keys), budget, group, vars, level, haveExcept); err != nil {
 					return err
 				}
 				continue
