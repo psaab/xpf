@@ -236,6 +236,10 @@ expect_field "iperf with no verdict line -> VOID" iperf-throughput 1 1 VOID
 printf '{"verdict":"VALID","reasons":[],"new_flows_per_sec":48000.0,"accept_ratio":0.98,"culprits":[],"elapsed_s":30.0,"active_workers":6}\n' >"$LOG"
 expect_field "newflow VALID -> PASS" newflow-ceiling 0 1 PASS
 expect_field "newflow VALID headline is the rate" newflow-ceiling 0 3 new_flows_per_sec
+# #9922 F-160: VALID from a failed process is a summary the exit status
+# contradicts — VOID (ha-smoke policy), never a PASS for a failed teardown.
+expect_field "newflow VALID with rc=1 -> VOID, NOT PASS" newflow-ceiling 1 1 VOID
+expect_field "newflow VALID rc=1 VOID reason names rc" newflow-ceiling 1 2 "analyzer reported VALID but the harness exited rc=1 — the document and the exit status disagree"
 printf '{"verdict":"INVALID","reasons":["zero pool allocations in the window"],"new_flows_per_sec":0.0}\n' >"$LOG"
 expect_field "newflow INVALID (exit 1) -> VOID, NOT FAIL" newflow-ceiling 1 1 VOID
 printf '{"verdict":"INCONCLUSIVE","reasons":["too few RX queues"],"new_flows_per_sec":9000.0}\n' >"$LOG"

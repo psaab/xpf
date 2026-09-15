@@ -260,6 +260,13 @@ m["saturated_sites"] = len(doc.get("culprits") or [])
 if "new_flows_per_sec" not in m:
     emit("VOID", "analyzer reported VALID but no numeric new_flows_per_sec — "
                  "the headline metric is missing from the document")
+# #9922 F-160: a VALID document from a FAILED process is a summary the exit
+# status contradicts — VOID, not a pass. The ha-smoke adapter already encodes
+# this policy (0 failed + rc != 0 → VOID); a harness that analyzes fine and
+# then fails teardown must not bank a PASS for a run the gate itself failed.
+if rc != "0":
+    emit("VOID", f"analyzer reported VALID but the harness exited rc={rc} — "
+                 "the document and the exit status disagree")
 emit("PASS", "", "new_flows_per_sec", "higher-better",
      " ".join(f"{k}={v}" for k, v in m.items()))
 PY
