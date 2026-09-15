@@ -687,18 +687,42 @@ func (m *Manager) publishSnapshotFailClosedLocked(publishSnap *ConfigSnapshot, s
 			// failures never adopt (helper provably received nothing;
 			// revert-to-old converges). publishedSnapshot/hash/planKey stay
 			// behind, so the tick's level-triggered gate republishes this.
-			adopted := *publishSnap
-			if adopted.Generation <= m.publishedSnapshot {
-				// A partial writeback overtook Compile's reserved generation
-				// after the build (reserved pre-mu). Re-stamp ahead: content
-				// is current (resampled under mu); only the number moves; the
-				// digest re-stamps per send; the generation is fresh (#5134).
-				m.generation++
-				adopted.Generation = m.generation
+			//
+			// #10064: retain only what is NEW. A same-generation attempt —
+			// the tick republishing the retained generation without a #9520
+			// conflict retry (which mutates the generation in place) — is
+			// already retained with its gate already open, and its only
+			// delta from the authority is the speculative #9684 resample
+			// every other resampling publisher (overlay, scheduler,
+			// worker-arm) drops on failure. Retaining the copy would import
+			// that speculation into the authority and rewrite m.cfg from it
+			// (spurious #8899 restarts wherever the copy's Userspace
+			// diverges, and a stale-identity writeback over a newer spawn
+			// wherever spawn-NEW-then-publish-failure diverged them the
+			// other way); the mark + recorder-stamped debt clock + open
+			// gate + rate-limited statusLoop logging already cover the
+			// retry. The HA obligation and the debt logs below still ride
+			// the episode: the attempt is unpublished with unknown outcome
+			// either way. Nil retained (first-apply convoy) always
+			// retains. Compile attempts always advance (rebase +2), so
+			// they always retain; conflict retries advance past retained,
+			// so the possibly-landed retry generation is still consumed.
+			debtGen := publishSnap.Generation
+			if m.lastSnapshot == nil || publishSnap.Generation != m.lastSnapshot.Generation {
+				adopted := *publishSnap
+				if adopted.Generation <= m.publishedSnapshot {
+					// A partial writeback overtook Compile's reserved generation
+					// after the build (reserved pre-mu). Re-stamp ahead: content
+					// is current (resampled under mu); only the number moves; the
+					// digest re-stamps per send; the generation is fresh (#5134).
+					m.generation++
+					adopted.Generation = m.generation
+				}
+				m.adoptPublishedGenerationLocked(&adopted, adopted.Generation)
+				m.lastSnapshot = &adopted
+				m.cfg = adopted.Userspace
+				debtGen = adopted.Generation
 			}
-			m.adoptPublishedGenerationLocked(&adopted, adopted.Generation)
-			m.lastSnapshot = &adopted
-			m.cfg = adopted.Userspace
 			if !m.clusterHA {
 				// The Compile-tail standalone clear never ran; record the
 				// obligation so the tick retries the idempotent clear (#5487
@@ -712,10 +736,10 @@ func (m *Manager) publishSnapshotFailClosedLocked(publishSnap *ConfigSnapshot, s
 				// including conversions that never adopt).
 				m.lastRetryDebtWarn = time.Now()
 				slog.Warn("userspace: apply_snapshot outcome unknown; retained as retry debt",
-					"generation", adopted.Generation, "err", err)
+					"generation", debtGen, "err", err)
 			} else {
 				slog.Debug("userspace: retry debt republish failed; debt persists",
-					"generation", adopted.Generation, "err", err)
+					"generation", debtGen, "err", err)
 			}
 		}
 		if mapsMutatedInPlace {
