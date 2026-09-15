@@ -256,6 +256,19 @@ pub(super) fn build_live_forward_request_from_frame(
         // for those the primary `flow` is already `Some`, so this arm is only
         // reached for the non-query / truncated case).
         None
+    } else if matches!(meta.protocol, PROTO_TCP | PROTO_UDP)
+        && !meta_l4_ports_in_declared_end(frame, meta)
+    {
+        // #9894 (GPT-3): mirror the conntrack-side fast-path gate. The shim
+        // reads L4 against the frame end INCLUDING slack, so for a short
+        // declared length the stamped tuple is phantom — and the primary
+        // `flow` is already `None` for it (fast-path gate). Synthesizing
+        // here would feed the rejected ports into TX selection, CoS
+        // output-filter evaluation and the stored `flow_key`. A `None`
+        // flow_key takes the same default, no-output-filter path as the
+        // fragment/ICMP arms above. Legitimate flowless TCP/UDP (real L4
+        // header, in-declared) keeps its meta/frame-derived ports.
+        None
     } else {
         fallback_flow = parse_session_flow_from_meta(meta);
         fallback_flow.as_ref()

@@ -154,6 +154,11 @@ pub(super) fn record_pending_neigh_admission_drop(
 ///        `parse_session_flow_from_bytes` and the immediate
 ///        `build_live_forward_request_from_frame` meta-fallback apply, keeping
 ///        all three pending/immediate/conntrack paths consistent;
+///      - a TCP/UDP packet whose stamped ports lie outside the IP-declared
+///        datagram (#9894 — short total_len/payload_len + slack) → `None`.
+///        The shim reads L4 against the frame end including slack, so the
+///        tuple is phantom and the primary `flow` is already `None` for it
+///        (conntrack-side fast-path gate). Same gate as the immediate path;
 ///      - otherwise the metadata tuple (legitimate flowless TCP/UDP or an
 ///        identifier-bearing ICMP query) → its `forward_key`.
 pub(super) fn pending_neigh_flow_key(
@@ -166,6 +171,10 @@ pub(super) fn pending_neigh_flow_key(
             None
         } else if matches!(meta.protocol, PROTO_ICMP | PROTO_ICMPV6)
             && !meta_icmp_identifier_bearing(raw_frame, meta)
+        {
+            None
+        } else if matches!(meta.protocol, PROTO_TCP | PROTO_UDP)
+            && !meta_l4_ports_in_declared_end(raw_frame, meta)
         {
             None
         } else {
@@ -1256,12 +1265,60 @@ mod pending_neigh_flow_key_tests {
 
     #[test]
     fn flowless_tcp_keeps_meta_pending_flow_key() {
-        // The ICMP gate is protocol-scoped: a flowless TCP packet still buffers
-        // its real meta-derived ports (no behavior change for TCP/UDP). The
-        // frame bytes are irrelevant here — the TCP meta path reads only meta.
+        // The ICMP gate is protocol-scoped: a flowless TCP packet with
+        // in-declared ports still buffers its real meta-derived ports. (#9894
+        // reads the frame for the declared-end check now, but this fixture's
+        // [l4,l4+4) lies inside its total_len=28, so the fallback is kept.)
         let frame = eth_ipv4_icmp_frame(8);
         let key = pending_neigh_flow_key(None, &frame, hostile_meta(PROTO_TCP))
             .expect("flowless TCP keeps its meta pending flow key");
         assert_eq!(key.src_port, 0xBEEF);
+    }
+
+    /// Short-total_len TCP frame: total_len=20 (no declared L4) with 4
+    /// trailing slack bytes spelling (1111, 443) — what the shim copies
+    /// into metadata from beyond the declared datagram.
+    fn eth_ipv4_slack_tcp_frame() -> Vec<u8> {
+        let mut f = vec![
+            0x02, 0xbf, 0x72, 0x00, 0x80, 0x08, 0xba, 0x86, 0xe9, 0xf6, 0x4b, 0xd5, 0x08, 0x00,
+        ];
+        let mut ip = vec![0u8; 20];
+        ip[0] = 0x45;
+        ip[2..4].copy_from_slice(&20u16.to_be_bytes());
+        ip[8] = 64; // ttl
+        ip[9] = PROTO_TCP;
+        ip[12..16].copy_from_slice(&[10, 0, 61, 100]); // src
+        ip[16..20].copy_from_slice(&[172, 16, 80, 200]); // dst
+        f.extend_from_slice(&ip);
+        f.extend_from_slice(&[0x04, 0x57, 0x01, 0xbb]); // slack (1111, 443)
+        f
+    }
+
+    #[test]
+    fn slack_tcp_buffers_no_synthesized_flow_key_9894() {
+        // #9894 (GPT-3, deferred path): a short-total_len TCP packet whose
+        // next-hop is UNRESOLVED must NOT buffer the shim's slack-spelled
+        // tuple as PendingNeighPacket.flow_key. The primary flow is None
+        // for it (conntrack-side fast-path gate); the metadata fallback
+        // must therefore also yield None so retry_pending_neigh feeds None
+        // into CoS/TX — the same gate the immediate path applies. Reverting
+        // it buffers Some((1111, 443)) -> RED.
+        let frame = eth_ipv4_slack_tcp_frame();
+        let meta = UserspaceDpMeta {
+            addr_family: libc::AF_INET as u8,
+            protocol: PROTO_TCP,
+            l3_offset: 14,
+            l4_offset: 34,
+            flow_src_port: 1111,
+            flow_dst_port: 443,
+            flow_src_addr: [10, 0, 61, 100, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            flow_dst_addr: [172, 16, 80, 200, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            ..UserspaceDpMeta::default()
+        };
+        assert_eq!(
+            pending_neigh_flow_key(None, &frame, meta),
+            None,
+            "slack TCP must buffer no metadata-derived pending flow key"
+        );
     }
 }

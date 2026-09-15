@@ -454,9 +454,12 @@ pub(crate) struct TermMatchExtra<'a> {
     /// but "there is no flow to take ports from".
     ///
     /// Polarity is deliberate. `false` is the default, so every existing caller
-    /// keeps today's behaviour and only the site that genuinely lacks ports
-    /// opts in. The one such site is the FLOWLESS arm of
-    /// `resolve_cached_cos_tx_selection_impl`, which passed literal `0, 0`.
+    /// keeps today's behaviour and only a site that genuinely lacks ports
+    /// opts in. Such sites are the FLOWLESS arm of
+    /// `resolve_cached_cos_tx_selection_impl`, which passed literal `0, 0`
+    /// (#7992), and the flowless input-filter/PBR evaluations, which run on
+    /// an L3-only enforcement context whose ports are 0-substituted by
+    /// construction (#9894).
     ///
     /// This cannot be expressed with `l4_present`, which is why that was tried
     /// and reverted: the flow-cache path passes REAL `SessionKey` ports with
