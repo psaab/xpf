@@ -41,6 +41,12 @@ type AppliedNATPoolStatus struct {
 	// AllocatorID is the selected row's reporting allocator instance id
 	// (#9902 F-026).
 	AllocatorID uint64
+	// LiveFlows / MaxTrackedFlows are the pool's live tracked-flow count and
+	// tracked-flow cap (#9896) — the constraint that actually refuses new
+	// flows. Zero MaxTrackedFlows (older helper) makes the flow leg
+	// inapplicable downstream.
+	LiveFlows       uint64
+	MaxTrackedFlows uint64
 }
 
 // AppliedNATView is a single generation-coherent snapshot for the NAT
@@ -168,6 +174,8 @@ func (m *Manager) AppliedNATView() AppliedNATView {
 			UsedPorts:       p.UsedPorts,
 			ExhaustionTotal: p.ExhaustionTotal,
 			AllocatorID:     p.AllocatorID,
+			LiveFlows:       p.LiveFlows,
+			MaxTrackedFlows: p.MaxTrackedFlows,
 		}
 	}
 

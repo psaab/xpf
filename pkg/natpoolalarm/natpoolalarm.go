@@ -66,6 +66,13 @@ type PoolStatus struct {
 	// allocator was rebuilt, rebaseline silently. 0 from a helper older
 	// than the field.
 	AllocatorID uint64
+	// LiveFlows is the helper's live tracked-flow count for the pool
+	// (live_by_flow.len()). Meaningful only when MaxTrackedFlows > 0.
+	LiveFlows uint64
+	// MaxTrackedFlows is the pool's tracked-flow cap — the constraint that
+	// actually refuses new flows (#9896). Zero from a helper predating the
+	// counters, which makes the flow leg inapplicable (ports-only alarm).
+	MaxTrackedFlows uint64
 }
 
 // View is one generation-coherent sample for the monitor. Config and Pools
@@ -339,58 +346,83 @@ func (m *Monitor) evaluate() {
 				"aggregate utilization cannot predict per-block exhaustion")
 			continue
 		}
-		// #7361: an ADDRESS-ONLY pool (`port no-translation`) has no
-		// port-utilization to measure, and its alarm can never fire.
+		// #7361 + #9896: an ADDRESS-ONLY pool (`port no-translation`) has no
+		// PORT-utilization to measure — but it DOES have tracked-flow
+		// utilization, evaluated independently of port translation below.
 		//
 		// The allocator's `used_ports` is a popcount over the occupancy
 		// bitmaps; `reserve_address_only` never touches occupancy — it records
 		// ownership in `live.address_only_owners`. So UsedPorts is permanently
-		// 0, pct is permanently 0, and the raise-threshold cannot be crossed.
+		// 0 and the ports leg can never cross the raise threshold. #7361's
+		// address-count redefinition stays rejected for the reason it gives:
+		// addresses are handed out round-robin and freely REUSED across flows
+		// with different destination tuples, so a one-address pool would
+		// report 100% after its first flow and stay there while serving
+		// thousands more — an alarm that fires on the first packet and never
+		// clears.
 		//
-		// THE HARM IS NOT THE MISSING PERCENTAGE, it is that 0% is
-		// indistinguishable from a healthy pool: `show` renders the alarm
-		// config, and the operator reads a working alarm. Marking it
-		// INAPPLICABLE says the thing that is actually true.
-		//
-		// WHY NOT REDEFINE THE DENOMINATOR. #7361 proposes capacity =
-		// AddressCount, used = distinct addresses allocated. That models an
-		// exhaustion mode this pool class does not have: addresses are handed
-		// out round-robin and freely REUSED across flows with different
-		// destination tuples, so an address-only pool exhausts on
-		// reverse-identity collision, not on running out of addresses. A
-		// one-address pool would report 100% after its first flow and stay
-		// there while serving thousands more — an alarm that fires on the first
-		// packet and never clears, which is worse than the current silence
-		// because it trains operators to ignore the alarm that DOES work on
-		// port-bearing pools.
-		//
-		// If a genuine early warning is wanted for this class, the signal is
-		// the denial rate (the AllocatorExhausted / collision path), not a
-		// utilization ratio. That is a different mechanism with its own
-		// threshold semantics and is deliberately not folded in here.
-		if p.PortNoTranslation {
-			eligible[poolName] = true
-			m.markInapplicable(poolName, "address-only pool (port no-translation) "+
-				"has no port utilization to measure")
-			continue
-		}
-		m.clearInapplicable(poolName)
+		// The tracked-flow leg has no such pathology: address-only tokens LIVE
+		// in `live_by_flow` and admission refuses at the same cap
+		// (reserve_address_only_maybe_persistent at allocator.rs:3608,
+		// roundrobin at :4076, persistent at :4223 — `live_by_flow.len() >=
+		// max_tracked_flows → AllocatorExhausted`). Live proof:
+		// tests_addr_only_sibling_9131.rs:418-419 reports used_ports == 0
+		// with live_flows == 2 — refusing while the ports leg reads healthy.
+		// And live/max is monotonic in the resource that actually refuses.
+		// Hence address-only pools raise/clear on the flow leg alone; only a
+		// pool with NEITHER leg measurable (address-only + MaxTrackedFlows ==
+		// 0, a helper predating the counters) is structurally inapplicable.
 		eligible[poolName] = true
+		if !p.PortNoTranslation {
+			// Port-bearing pools are structurally measurable; a transiently
+			// bad/absent sample HOLDs below without touching this record.
+			m.clearInapplicable(poolName)
+		}
 
 		s, present := view.Pools[poolName]
 		if !present {
 			continue // eligible but absent this tick → HOLD
 		}
-		if s.AddressCount == 0 || uint64(s.PortHigh) < uint64(s.PortLow) {
-			continue // bad sample → HOLD
+
+		var pct uint64
+		if p.PortNoTranslation {
+			if s.MaxTrackedFlows == 0 {
+				m.markInapplicable(poolName, "address-only pool (port no-translation) "+
+					"has no port utilization to measure and reports no tracked-flow cap")
+				continue
+			}
+			m.clearInapplicable(poolName)
+			pct = s.LiveFlows * 100 / s.MaxTrackedFlows
+		} else {
+			if s.AddressCount == 0 || uint64(s.PortHigh) < uint64(s.PortLow) {
+				continue // bad sample → HOLD
+			}
+			// Cast operands to uint64 BEFORE the arithmetic so the uint16 port
+			// range cannot underflow before promotion.
+			capacity := uint64(s.AddressCount) * (uint64(s.PortHigh) - uint64(s.PortLow) + 1)
+			if capacity == 0 {
+				continue // uncomputable → HOLD (NOT a clear)
+			}
+			pct = s.UsedPorts * 100 / capacity
+			// #9896: the tracked-flow cap is the constraint that actually
+			// refuses new flows (allocator.rs:2036: live_by_flow.len() >=
+			// max_tracked_flows → AllocatorExhausted), and for large pools it
+			// sits BELOW the nominal capacity (per-pool min(nominal, 262144)
+			// at allocator.rs:1387). A pool at the cap with a low ports ratio
+			// is refusing while the ports leg reports healthy — so
+			// utilization is the max of both legs. The single raise/clear
+			// state machine below is unchanged: one transition still emits
+			// one line even when both legs cross (no double-syslog).
+			//
+			// MaxTrackedFlows == 0 (a helper predating the counters — serde
+			// `default`) makes the flow leg inapplicable: LiveFlows is
+			// ignored and the ports ratio alone decides.
+			if s.MaxTrackedFlows > 0 {
+				if flowPct := s.LiveFlows * 100 / s.MaxTrackedFlows; flowPct > pct {
+					pct = flowPct
+				}
+			}
 		}
-		// Cast operands to uint64 BEFORE the arithmetic so the uint16 port
-		// range cannot underflow before promotion.
-		capacity := uint64(s.AddressCount) * (uint64(s.PortHigh) - uint64(s.PortLow) + 1)
-		if capacity == 0 {
-			continue // uncomputable → HOLD (NOT a clear)
-		}
-		pct := s.UsedPorts * 100 / capacity
 
 		raised := m.isRaised(poolName)
 		switch {
@@ -738,15 +770,18 @@ func (m *Monitor) markInapplicable(poolName, reason string) {
 		m.inapplicable = map[string]string{}
 	}
 	m.inapplicable[poolName] = reason
-	// A pool that was raised under a previous config (port-bearing) and is now
-	// address-only must not stay latched: the alarm it was raised on no longer
-	// exists. Drop the state without a clear syslog — the CLEAR would claim
-	// utilization fell below the threshold, which is not what happened.
+	// A pool that was raised and is now unmeasurable must not stay latched:
+	// either the legs it was raised on no longer exist (port-bearing pool
+	// flipped to address-only with no flow-cap data), or the measurement is
+	// gone (flow leg flapped to MaxTrackedFlows == 0). Drop the state without
+	// a clear syslog — the CLEAR would claim utilization fell below the
+	// threshold, which is not what happened.
 	delete(m.active, poolName)
 }
 
 // clearInapplicable drops any inapplicability record for a pool that is now
-// measurable again (#7361), e.g. `port no-translation` removed on a commit.
+// measurable again (#7361), e.g. `port no-translation` removed on a commit —
+// or, since #9896, an address-only pool whose helper reports the flow cap.
 func (m *Monitor) clearInapplicable(poolName string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()

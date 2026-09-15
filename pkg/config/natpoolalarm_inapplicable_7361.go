@@ -6,20 +6,23 @@ import (
 )
 
 // natPoolAlarmInapplicableWarnings reports every source-NAT pool whose
-// configured `pool-utilization-alarm` can NEVER fire because the pool is
-// address-only (#7361) or deterministic (#9902 F-026).
+// configured `pool-utilization-alarm` can NEVER fire (deterministic pools,
+// #9902 F-026) or measures only a PARTIAL signal (address-only pools, #7361
+// as narrowed by #9896).
 //
 // THE DEFECT. `used_ports` is a popcount over the allocator's occupancy
 // bitmaps. `reserve_address_only` never touches occupancy — it records
 // ownership in `live.address_only_owners`. So for a `port no-translation` pool
-// UsedPorts is permanently 0, the utilization percentage is permanently 0, and
-// the raise-threshold cannot be crossed.
+// the PORTS leg of the utilization percentage is permanently 0.
 //
-// THE HARM IS NOT THE MISSING PERCENTAGE. It is that the configuration reads as
-// working: `show` renders the alarm, and 0% utilization is indistinguishable
-// from a healthy pool. An operator who set a raise-threshold has no way to learn
-// it cannot arrive — the alarm's silence looks exactly like the silence of a
-// pool with plenty of headroom.
+// #9896 NARROWING. Address-only tokens LIVE in `live_by_flow` and admission
+// refuses at the same tracked-flow cap as port-bearing pools, so the
+// TRACKED-FLOW leg fires for this class on a helper reporting
+// max_tracked_flows (nothing at all on an older helper). What stays true:
+// the ports leg is dead, and an address-only pool ALSO exhausts on
+// reverse-identity collision, which no utilization percentage expresses —
+// so the alarm is a partial early warning here, not the full signal
+// port-bearing pools get.
 //
 // WHY AN ADVISORY AND NOT A REDEFINED DENOMINATOR. #7361 proposes capacity =
 // AddressCount, used = distinct addresses currently allocated. That models an
@@ -32,10 +35,10 @@ import (
 // because it trains operators to ignore the alarm that DOES work on
 // port-bearing pools.
 //
-// If a genuine early warning is wanted for this class, the signal is the denial
-// rate (the AllocatorExhausted / collision path), not a utilization ratio. That
-// is a different mechanism with its own threshold semantics and deserves its
-// own specification.
+// If a genuine early warning is wanted for the COLLISION mode, the signal is
+// the denial rate (the AllocatorExhausted / collision path), not a utilization
+// ratio. That is a different mechanism with its own threshold semantics and
+// deserves its own specification.
 //
 // WARN, NEVER REJECT. The combination is not invalid — `port no-translation`
 // and a global `pool-utilization-alarm` are each legitimate, and the alarm
@@ -93,11 +96,12 @@ func natPoolAlarmInapplicableWarnings(cfg *Config) []string {
 		}
 		out = append(out, fmt.Sprintf(
 			"security nat source pool %q has `port no-translation`, so the configured "+
-				"`pool-utilization-alarm raise-threshold %d` can NEVER fire for it: an "+
-				"address-only pool allocates no ports, so its measured utilization is "+
-				"permanently 0%%. The alarm still applies to port-bearing pools. This "+
-				"pool exhausts on reverse-identity collision rather than on port "+
-				"capacity, which a utilization percentage cannot express",
+				"`pool-utilization-alarm raise-threshold %d` evaluates only the "+
+				"tracked-flow leg for it — nothing at all on a helper predating the "+
+				"flow-cap counters: the pool allocates no ports, so port utilization "+
+				"is permanently 0%%, and reverse-identity collision — the other way "+
+				"this pool class exhausts — has no utilization percentage. The alarm "+
+				"still applies fully to port-bearing pools",
 			name, cfg.Security.NAT.PoolUtilizationAlarm.RaiseThreshold))
 	}
 	return out

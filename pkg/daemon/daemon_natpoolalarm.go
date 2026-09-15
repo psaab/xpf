@@ -57,6 +57,8 @@ func projectNATPoolView(v dpuserspace.AppliedNATView) natpoolalarm.View {
 			UsedPorts:       p.UsedPorts,
 			ExhaustionTotal: p.ExhaustionTotal,
 			AllocatorID:     p.AllocatorID,
+			LiveFlows:       p.LiveFlows,
+			MaxTrackedFlows: p.MaxTrackedFlows,
 		}
 	}
 	return natpoolalarm.View{
