@@ -488,9 +488,13 @@ type physMTUAttempt9841 struct {
 // the want all record; converged-already, write-success, and
 // failed-syscall-with-converged-end-state record nothing. slog lines keep
 // their historical text.
-func attemptPhysMTU9841(result *CompileResult, a physMTUAttempt9841) {
+//
+// It reports whether the seam write SUCCEEDED (#9845: the child's
+// post-parent retry fires only then — a skipped or failed parent write
+// cannot have changed the child's admission).
+func attemptPhysMTU9841(result *CompileResult, a physMTUAttempt9841) bool {
 	if a.want <= 0 {
-		return
+		return false
 	}
 	if a.lookupErr != nil {
 		slog.Warn("failed to resolve interface for MTU; leaving MTU unconverged",
@@ -502,7 +506,7 @@ func attemptPhysMTU9841(result *CompileResult, a physMTUAttempt9841) {
 			Detail:        fmt.Sprintf("link lookup failed after one retry: %v", a.lookupErr),
 			ExpectIfindex: a.ifindex,
 		})
-		return
+		return false
 	}
 	if a.link == nil || a.link.Attrs() == nil {
 		// Defensive: a nil link with a nil lookup error. Production
@@ -517,22 +521,26 @@ func attemptPhysMTU9841(result *CompileResult, a physMTUAttempt9841) {
 			Detail:        "link lookup resolved to a nil link",
 			ExpectIfindex: a.ifindex,
 		})
-		return
+		return false
 	}
 	if a.link.Attrs().MTU == a.want {
-		return
+		return false
 	}
 	if err := linkSetMTUSeam(a.link, a.want); err != nil {
 		slog.Warn("failed to set MTU",
 			"name", a.physName, "mtu", a.want, "err", err)
 		recordPhysMTUWriteFailure9841(result, a, err)
-		return
+		return false
 	}
 	slog.Info("set interface MTU", "name", a.physName, "mtu", a.want)
+	// #9845: a successful MTU write moves the host, so it joins the #4960
+	// record (#9841 left all MTU marks to this issue).
+	result.markHostMutated("set interface MTU")
 	// No clearMTUUnconverged: the per-phys block runs once per netdev per
 	// apply (st.attached), so no pending record for this key can exist.
 	// If a future retry adds a second attempt, it must clear on success —
 	// see the MTUUnconverged contract.
+	return true
 }
 
 // recordPhysMTUWriteFailure9841 records a refused physical MTU write after
@@ -658,7 +666,11 @@ func gradeChildMTUFailure9841(childWant, parentLive, parentWant int, parentLiveO
 // Grading reads the parent's live MTU fresh — lazily, on this rare path
 // only, so the success path for an explicit unit MTU keeps making zero
 // parent reads exactly as before.
-func recordChildMTUWriteFailure9841(result *CompileResult, subName, configRef, physName string, want int, mtuCtx vlanMTUContext9841, writeErr error) {
+//
+// It reports whether the end state is ALREADY converged (a concurrent
+// writer won: journal-only, any pending record cleared). The caller uses
+// that to skip #9845's retry — there is nothing to converge.
+func recordChildMTUWriteFailure9841(result *CompileResult, subName, configRef, physName string, want int, mtuCtx vlanMTUContext9841, writeErr error) bool {
 	live := mtuUnknown9841
 	if fresh, err := result.retryLinkByName9841(subName, mtuCtx.subIfindex, mtuCtx.parentIfindex, true); err == nil {
 		live = fresh.Attrs().MTU
@@ -670,7 +682,7 @@ func recordChildMTUWriteFailure9841(result *CompileResult, subName, configRef, p
 			// stale. (The cached-equality skip in the caller deliberately
 			// does NOT clear: an unverified cache hit is not fresh proof.)
 			result.clearMTUUnconverged(subName, configRef)
-			return
+			return true
 		}
 	}
 	parentLive, parentLiveOK := mtuUnknown9841, false
@@ -685,6 +697,7 @@ func recordChildMTUWriteFailure9841(result *CompileResult, subName, configRef, p
 		Detail:        childMTUFailureDetail9841(grade, want, parentLive, mtuCtx.parentWant, writeErr),
 		ExpectIfindex: mtuCtx.subIfindex, ExpectParentIfindex: mtuCtx.parentIfindex,
 	})
+	return false
 }
 
 // childMTUFailureDetail9841 composes the human specifics for a graded child

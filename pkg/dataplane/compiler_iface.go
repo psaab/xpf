@@ -748,6 +748,8 @@ func (st *zoneMapState) mapZoneInterface(dp DataPlane, cfg *config.Config, resul
 		return nil
 	}
 
+	// #9845: a refused child MTU write, retried once after the parent write below.
+	var mtuRetry9845 *vlanMTUPending9845
 	if vlanID > 0 {
 		// VLAN sub-interface: create it, populate vlan_iface_map
 		subIfindex, vlanCreated, err := ensureVLANSubInterfaceFn(physName, vlanID)
@@ -844,7 +846,7 @@ func (st *zoneMapState) mapZoneInterface(dp DataPlane, cfg *config.Config, resul
 		if pd := st.physDesired[physName]; pd != nil {
 			parentWant = pd.mtu
 		}
-		applyVLANSubInterfaceMTU9757(cfg, result, ifaceRef, cfgName, unitNum, physName, subName, vlanMTUContext9841{
+		mtuRetry9845 = applyVLANSubInterfaceMTU9757(cfg, result, ifaceRef, cfgName, unitNum, physName, subName, vlanMTUContext9841{
 			parentWant: parentWant, parentIfindex: physIface.Index, subIfindex: subIfindex,
 		})
 
@@ -970,16 +972,24 @@ func (st *zoneMapState) mapZoneInterface(dp DataPlane, cfg *config.Config, resul
 		// pre-write value and the two writes alternated on consecutive applies,
 		// flapping the interface MTU between the two configured values forever.
 		// One comparison against a cache that is still fresh cannot do that.
+		// #9845: the child retry below runs only when this write moved the host.
+		parentMTUWrote := false
 		if pd := st.physDesired[physName]; pd != nil && pd.mtu > 0 {
 			// #9841: the write attempt, recording an MTUUnconverged when a
 			// fresh observation cannot confirm convergence. The lookup
 			// outcome above (post-retry) rides along; lookup failure records
 			// instead of skipping silently.
-			attemptPhysMTU9841(result, physMTUAttempt9841{
+			parentMTUWrote = attemptPhysMTU9841(result, physMTUAttempt9841{
 				physName: physName, configRef: cfgName,
 				ifindex: physIface.Index, want: pd.mtu,
 				link: nl, lookupErr: mtuLookupErr,
 			})
+		}
+		// #9845: the child write above runs BEFORE this parent write, and the
+		// kernel can refuse a child MTU above the parent's current MTU — so
+		// retry that same refused write once, here, on its validated link.
+		if mtuRetry9845 != nil && parentMTUWrote {
+			retryVLANSubInterfaceMTU9845(result, mtuRetry9845)
 		}
 
 		// Apply interface speed/duplex via ethtool if configured

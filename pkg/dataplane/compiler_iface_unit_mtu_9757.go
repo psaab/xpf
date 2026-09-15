@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"log/slog"
 
+	"github.com/vishvananda/netlink"
+
 	"github.com/psaab/xpf/pkg/config"
 )
 
@@ -50,8 +52,17 @@ import (
 // once uncached with identity validation (mtuCtx carries ensure's proved
 // ifindexes); the parent's same-pass plan grades ordering transients. A
 // write success clears any pending record for the child — this runs once per
-// zone reference, so a later reference (or #9845's future post-parent retry
-// landing inside this attempt) converging must not leave a stale warning.
+// zone reference, so a later reference (or #9845's post-parent retry, which
+// clears on its own success) converging must not leave a stale warning.
+//
+// #9845: it returns a retry token when — and ONLY when — the kernel refused the
+// write and fresh verification shows the end state still divergent: the caller
+// retries that same write once, on this same link object, right after the
+// parent's per-phys MTU write in the same mapZoneInterface call, and then only
+// when that parent write actually moved the host (the one event in this call
+// that can change the child's admission). A lookup failure is not a refusal —
+// there is no validated link to retry on — and a success, a no-op, or a failed
+// syscall whose end state already converged needs no retry, so all return nil.
 func applyVLANSubInterfaceMTU9757(
 	cfg *config.Config,
 	result *CompileResult,
@@ -61,10 +72,10 @@ func applyVLANSubInterfaceMTU9757(
 	physName string,
 	subName string,
 	mtuCtx vlanMTUContext9841,
-) {
+) *vlanMTUPending9845 {
 	ifCfg, ok := cfg.Interfaces.Interfaces[cfgName]
 	if !ok || ifCfg == nil {
-		return
+		return nil
 	}
 	// The record's ConfigRef is the AUTHORED zone reference verbatim, never
 	// rebuilt from the parsed unit number: "reth0.080" and "reth0.80" are
@@ -96,7 +107,7 @@ func applyVLANSubInterfaceMTU9757(
 					Detail:        fmt.Sprintf("no MTU statement; parent %s unreadable after one retry (first: %v; retry: %v)", physName, perr, rerr),
 					ExpectIfindex: mtuCtx.subIfindex, ExpectParentIfindex: mtuCtx.parentIfindex,
 				})
-				return
+				return nil
 			}
 			slog.Info("parent link resolved on retry", "name", physName)
 		}
@@ -108,7 +119,7 @@ func applyVLANSubInterfaceMTU9757(
 		// is no sane target to write; leave the device alone rather than
 		// invent a value. This is the pre-#9757 behaviour, which is the
 		// safe direction when the reset target cannot be determined.
-		return
+		return nil
 	}
 
 	child, cerr := result.cachedLinkByName(subName)
@@ -125,7 +136,7 @@ func applyVLANSubInterfaceMTU9757(
 				Detail:        fmt.Sprintf("link lookup failed after one retry (first: %v; retry: %v)", cerr, rerr),
 				ExpectIfindex: mtuCtx.subIfindex, ExpectParentIfindex: mtuCtx.parentIfindex,
 			})
-			return
+			return nil
 		}
 		slog.Info("VLAN sub-interface link resolved on retry", "name", subName)
 	}
@@ -142,20 +153,63 @@ func applyVLANSubInterfaceMTU9757(
 			Detail:        "link lookup resolved to a nil link",
 			ExpectIfindex: mtuCtx.subIfindex, ExpectParentIfindex: mtuCtx.parentIfindex,
 		})
-		return
+		return nil
 	}
 	if child.Attrs().MTU == wantMTU {
 		// Converged (or a cached-equality skip): no write, and deliberately
 		// no clear — under #8119 a cached match can predate a write this
 		// same apply already failed. See clearMTUUnconverged.
-		return
+		return nil
 	}
 	if err := linkSetMTUSeam(child, wantMTU); err != nil {
 		slog.Warn("failed to set VLAN sub-interface MTU",
 			"name", subName, "mtu", wantMTU, "err", err)
-		recordChildMTUWriteFailure9841(result, subName, configRef, physName, wantMTU, mtuCtx, err)
-		return
+		if recordChildMTUWriteFailure9841(result, subName, configRef, physName, wantMTU, mtuCtx, err) {
+			// Fresh verification shows the end state already converged
+			// (a concurrent writer won): journal-only, nothing to retry.
+			return nil
+		}
+		return &vlanMTUPending9845{link: child, wantMTU: wantMTU, subName: subName, configRef: configRef}
 	}
 	result.clearMTUUnconverged(subName, configRef)
 	slog.Info("set VLAN sub-interface MTU", "name", subName, "mtu", wantMTU)
+	// #9845: a successful MTU write moves the host, so it joins the #4960
+	// record — previously no MTU write recorded anything.
+	result.markHostMutated("set VLAN sub-interface MTU")
+	return nil
+}
+
+// vlanMTUPending9845 is a #9845 retry token: a VLAN child MTU write the kernel
+// refused, with the EXACT link object it was attempted on. The retry reuses
+// that object rather than resolving the name again, so a foreign device
+// renamed onto the VLAN's name in the meantime can never be modified. configRef
+// rides along so a successful retry clears the #9841 record the refusal took.
+type vlanMTUPending9845 struct {
+	link      netlink.Link
+	wantMTU   int
+	subName   string
+	configRef string
+}
+
+// retryVLANSubInterfaceMTU9845 re-attempts a refused child MTU write once, on
+// the validated link the first attempt used. The kernel decides admission —
+// nothing here models the parent cap, the macsec VLAN_HLEN bite, or the
+// asynchronous parent-to-child propagation — so a still-refused write simply
+// warns again and the apply proceeds exactly as master would have (the #9841
+// record from the first refusal stands: same key, still divergent).
+func retryVLANSubInterfaceMTU9845(result *CompileResult, pending *vlanMTUPending9845) {
+	if pending == nil || pending.link == nil || pending.wantMTU <= 0 {
+		return
+	}
+	if err := linkSetMTUSeam(pending.link, pending.wantMTU); err != nil {
+		slog.Warn("failed to set VLAN sub-interface MTU after parent MTU change",
+			"name", pending.subName, "mtu", pending.wantMTU, "err", err)
+		return
+	}
+	slog.Info("set VLAN sub-interface MTU after parent MTU change",
+		"name", pending.subName, "mtu", pending.wantMTU)
+	// Every write-success path MUST clear (#9841 contract): the refusal above
+	// recorded, and this success supersedes it.
+	result.clearMTUUnconverged(pending.subName, pending.configRef)
+	result.markHostMutated("set VLAN sub-interface MTU")
 }
