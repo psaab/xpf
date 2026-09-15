@@ -139,7 +139,7 @@ impl crate::afxdp::Coordinator {
         // an over-release hands a live worker's port to a new flow.
         let now_ns = crate::afxdp::wg::counters::monotonic_now_ns();
         for (key, nat) in &reservations {
-            if crate::nat::release_source_nat_allocation(
+            if crate::nat::release_synced_source_nat_allocation_untracked(
                 &release_against.iface_nat_allocators,
                 &release_against.source_nat_rules,
                 key,

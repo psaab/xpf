@@ -12657,3 +12657,81 @@ fn an_idle_address_only_lease_is_still_replaced_by_a_pinned_pat_lease_9536() {
         "#9536: with the idle lease gone, the PAT flow must be PINNED (name its lease)"
     );
 }
+
+/// #9902 F-097: the named production entry frees a coordinator import-time
+/// (Untracked) reservation — the #6600 rollback / #8138 purge case, where no
+/// worker ever adopted the reservation so there is no worker_id to thread.
+///
+/// FAIL-ON-REVERT: route the entry through `NatHolder::Worker(0)` and the
+/// untracked record (holders == 0) is no longer freed — this goes RED while
+/// the adoption cell below stays green, proving the two cover different arms.
+#[test]
+fn untracked_coordinator_release_frees_unadopted_reservation_9902() {
+    let rules = holder_pool_rules_6211_f2();
+    let decision =
+        local_pool_allocation_6522(&rules, "10.0.61.50", 40000, NatHolder::Untracked);
+    let key = session_key_from_src("10.0.61.50", 40000, "8.8.8.8", 443);
+    assert!(
+        release_synced_source_nat_allocation_untracked(
+            &InterfaceNatAllocators::default(),
+            &rules,
+            &key,
+            decision,
+            false,
+            2_000,
+        ),
+        "an Untracked reservation must be freed by the coordinator release"
+    );
+    assert_eq!(
+        rules[0].pool_allocator.debug_occupied_count(),
+        0,
+        "freed reservation left its port occupied"
+    );
+}
+
+/// #9902 F-097: the same entry preserves a record a worker HAS adopted.
+/// `Untracked.bit()` is 0, so `drop_holder_locked` keeps any record with
+/// holders set — the purge path collects reservations without establishing
+/// non-adoption, and relies on this under-release direction.
+///
+/// FAIL-ON-REVERT: free unconditionally (ignore the holder mask) and the port
+/// is handed out from under the adopted record — RED here, green above.
+#[test]
+fn untracked_coordinator_release_preserves_worker_held_record_9902() {
+    let rules = holder_pool_rules_6211_f2();
+    let decision =
+        local_pool_allocation_6522(&rules, "10.0.61.50", 40000, NatHolder::Worker(0));
+    let port = decision.rewrite_src_port.expect("translated port");
+    let key = session_key_from_src("10.0.61.50", 40000, "8.8.8.8", 443);
+    assert!(
+        !release_synced_source_nat_allocation_untracked(
+            &InterfaceNatAllocators::default(),
+            &rules,
+            &key,
+            decision,
+            false,
+            2_000,
+        ),
+        "a worker-held record must survive an untracked coordinator release"
+    );
+    assert!(
+        rules[0].pool_allocator.debug_is_port_occupied(0, port),
+        "adopted record's port {port} was freed from under its holder"
+    );
+    // The record is still releasable by its holder afterward — the untracked
+    // call neither freed it nor corrupted the mask.
+    release_source_nat_allocation_for_worker(
+        &InterfaceNatAllocators::default(),
+        &rules,
+        &key,
+        decision,
+        false,
+        2_000,
+        0,
+    );
+    assert_eq!(
+        rules[0].pool_allocator.debug_occupied_count(),
+        0,
+        "holder release after a surviving untracked call leaked the port"
+    );
+}

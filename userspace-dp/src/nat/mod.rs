@@ -216,7 +216,7 @@ pub(crate) use source::{
     match_source_nat,
     match_source_nat_result, match_source_nat_result_for_tuple, parse_source_nat_rules,
     parse_source_nat_rules_with_previous, release_nat64_pool_port,
-    release_source_nat_allocation, release_source_nat_allocation_for_worker,
+    release_source_nat_allocation_for_worker, release_synced_source_nat_allocation_untracked,
     reserve_nat64_pool_port, reserve_synced_source_nat_allocation_for_worker,
     // #6600: the coordinator's pre-publish reservation and its rollback. NOT
     // test-only, unlike the untracked entry points below — these are the
@@ -227,7 +227,10 @@ pub(crate) use source::{
 };
 // #6211 F2: test-only untracked entry points (see their doc comments).
 #[cfg(test)]
-pub(crate) use source::{reserve_synced_source_nat_allocation, rollback_source_nat_allocation};
+pub(crate) use source::{
+    release_source_nat_allocation, reserve_synced_source_nat_allocation,
+    rollback_source_nat_allocation,
+};
 pub(crate) use source::retire_worker_from_pool_rules;
 // #7560 residual: nat64.rs is the third reseed call site and needs the same note.
 pub(crate) use source::report_dropped_leases;
