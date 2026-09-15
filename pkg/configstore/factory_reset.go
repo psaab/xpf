@@ -281,7 +281,9 @@ var FactoryResetForbiddenRoots = []string{
 // rather than deleting the wrong tree. The default appliance root /etc/xpf and
 // any dedicated subdirectory pass. This is a purely lexical guard (it does not
 // resolve symlinks); a defense against config-path misconfiguration, not against
-// an operator who symlinks the config root at a shared directory.
+// an operator who symlinks the config root at a shared directory. Anything that
+// ERASES must therefore resolve first (ResolveFactoryResetRoot), never call
+// this on an unresolved path alone.
 func ValidateFactoryResetRoot(configDir string) error {
 	clean := filepath.Clean(configDir)
 	if !filepath.IsAbs(clean) {
@@ -293,6 +295,128 @@ func ValidateFactoryResetRoot(configDir string) error {
 		}
 	}
 	return nil
+}
+
+// ResolveFactoryResetRoot resolves configDir to the directory a factory-reset
+// wipe must actually validate and erase (#9897 F-040). ValidateFactoryResetRoot
+// is lexical, while the wipe's ReadDir/RemoveAll follow links — so a root that
+// REACHES a forbidden directory through a symlink passes the guard and the wipe
+// deletes xpf-named files under a tree xpf does not own, reporting success.
+// Resolving before BOTH validation and wipe closes the bypass; both wipe
+// copies (FactoryResetConfigDir here and grpcapi.zeroizeConfigDir, the one
+// production runs) and both early-gate resolvers share this one function so
+// the pair cannot drift (#9013's lesson).
+//
+// BOTH the lexical path and the resolved target are validated, and either
+// refusal wins: validating the resolved target alone would launder a
+// lexically-forbidden root that is itself a link (e.g. /tmp -> /private/tmp)
+// into a passing one, and validating the lexical path alone is the original
+// defect. A link to a DEDICATED root still wipes (the resolved tree, which is
+// where the daemon's live secrets are) — resolve, don't refuse — while a link
+// to a forbidden root fails closed naming the link and the target.
+//
+// The denylist is ALSO matched by canonical identity: a forbidden root may be
+// reachable by another pathname (merged-/usr /lib -> /usr/lib, a symlinked
+// /tmp -> /private/tmp, or any test seam alias), and an alias of a forbidden
+// directory is the same directory, not a dedicated root. Each EXISTING
+// denylist entry is therefore canonicalized and the resolved candidate is
+// compared against those identities too. This COMPLETES the denylist (same
+// directories, all spellings) rather than extending it to new ones; absent
+// entries are skipped, and the lexical rejections above are retained
+// unchanged.
+//
+// An ABSENT root (Lstat ENOENT, including a dangling INTERMEDIATE link, which
+// the kernel reports as ENOENT) validates lexically and returns the cleaned
+// original: absence is the goal, and nothing is reachable to erase, so the
+// wipe stays a clean no-op exactly as today. A DANGLING FINAL link (Lstat
+// succeeds, EvalSymlinks fails) is a link, not an absence — reporting success
+// would wipe nothing while telling the operator the box is clean, the #9013
+// shape — so it is refused with the link named. Any other Lstat or resolution
+// error fails closed.
+//
+// Accepted residual, stated accurately: the validated root is a PATHNAME, not
+// a pinned handle — every wipe syscall below re-resolves it. A concurrent
+// namespace mutation DURING the wipe (the root or an ancestor renamed/swapped
+// to a link while the blocking dir fsyncs and recursive RemoveAll traversals
+// run) could redirect the erasure at another tree or report clean while the
+// validated tree's secrets survive. This is NOT a microsecond window: it spans
+// the whole wipe. What it takes is write permission on the root's PARENT (or
+// higher) during the wipe — parent-dir write, not root — plus, for
+// destructive effect, exact-xpf-name collisions in the swapped-in tree (#5768
+// scoping; #9013 final-component refusals still apply per artifact).
+// Concurrent namespace mutation during a wipe is therefore EXCLUDED and
+// documented here rather than timed away: the deterministic plant (a link
+// already in place when zeroize runs — the modeled attack) IS closed above,
+// and full closure would need descriptor-relative traversal (open the root
+// once O_DIRECTORY|O_NOFOLLOW, then openat/unlinkat/fstat by dirfd; openat2
+// with RESOLVE_NO_SYMLINKS is the direct form but not mandatory), which would
+// rewrite both wipe copies' every destructive call site and seam. That
+// exclusion matches every path-based guard in the repo (notably #9013's
+// Lstat-then-act and the #5684 lexical gate itself).
+func ResolveFactoryResetRoot(configDir string) (string, error) {
+	clean := filepath.Clean(configDir)
+	if err := ValidateFactoryResetRoot(clean); err != nil {
+		return "", err
+	}
+	if _, lerr := os.Lstat(clean); lerr != nil {
+		if os.IsNotExist(lerr) {
+			return clean, nil
+		}
+		return "", fmt.Errorf("zeroize: cannot examine config root %q: %w "+
+			"(refusing to factory-reset a root whose state cannot be determined)", clean, lerr)
+	}
+	resolved, rerr := filepath.EvalSymlinks(clean)
+	if rerr != nil {
+		if target, lerr := os.Readlink(clean); lerr == nil {
+			return "", fmt.Errorf("zeroize: config root %q is a symlink to %q, which "+
+				"cannot be resolved (%v) — refusing to factory-reset through it", clean, target, rerr)
+		}
+		return "", fmt.Errorf("zeroize: cannot resolve config root %q: %w "+
+			"(refusing to factory-reset through an unresolvable root)", clean, rerr)
+	}
+	if resolved != clean {
+		if verr := ValidateFactoryResetRoot(resolved); verr != nil {
+			return "", fmt.Errorf("zeroize: config root %q resolves through a symlink "+
+				"to %q: %w", clean, resolved, verr)
+		}
+	}
+	// Canonical-identity denylist completion (see the doc above): refuse when
+	// the resolved target IS a forbidden directory under another pathname.
+	// This runs whether or not a link was involved — a direct alias spelling
+	// (e.g. /private/tmp where /tmp is a link) has resolved == clean and
+	// would otherwise pass both lexical checks.
+	if alias := canonicalForbiddenAlias(resolved); alias != "" {
+		if resolved != clean {
+			return "", fmt.Errorf("zeroize: config root %q resolves through a symlink "+
+				"to %q, which is the same directory as forbidden root %q: refusing to "+
+				"factory-reset", clean, resolved, alias)
+		}
+		return "", fmt.Errorf("zeroize: config root %q is the same directory as "+
+			"forbidden root %q (reached by another pathname): refusing to "+
+			"factory-reset", resolved, alias)
+	}
+	return resolved, nil
+}
+
+// canonicalForbiddenAlias reports the denylist entry of which resolved is an
+// alias — i.e. EvalSymlinks(entry) == resolved for an EXISTING entry — or ""
+// when resolved is no forbidden directory under another pathname. Only
+// existing entries can match: the resolved candidate always exists (its own
+// EvalSymlinks succeeded), so an absent entry has no identity to compare.
+func canonicalForbiddenAlias(resolved string) string {
+	for _, forbidden := range FactoryResetForbiddenRoots {
+		if forbidden == resolved {
+			continue // lexical check already refused this spelling
+		}
+		canon, cerr := filepath.EvalSymlinks(forbidden)
+		if cerr != nil {
+			continue
+		}
+		if canon == resolved {
+			return forbidden
+		}
+	}
+	return ""
 }
 
 // FactoryResetConfigDir securely erases the on-disk configuration STATE under
@@ -366,9 +490,16 @@ func FactoryResetConfigDir(configDir, configBase string) error {
 	// scopes the top-level file sweep below to EXACT xpf-owned names (no `*.conf` /
 	// `rollback*` glob), but this guard stays as defense-in-depth: fail CLOSED —
 	// surface the error and remove NOTHING — rather than enter the wipe at all.
-	if err := ValidateFactoryResetRoot(configDir); err != nil {
-		return err
+	// #9897 F-040: resolve BEFORE validating and wiping — a lexically clean
+	// path that REACHES a forbidden directory through a symlink must be
+	// refused, and a link to a dedicated root is wiped AT THE RESOLVED
+	// TARGET (where the daemon's live secrets are), so every path below
+	// uses the resolved root. Shared with the grpcapi twin.
+	resolved, rerr := ResolveFactoryResetRoot(configDir)
+	if rerr != nil {
+		return rerr
 	}
+	configDir = resolved
 
 	var firstErr error
 	fail := func(err error) {

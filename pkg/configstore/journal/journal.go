@@ -501,6 +501,25 @@ func (j *Journal) releaseInflight(ino uint64) {
 // fsync rotates. The cost of deferring is a current segment that overshoots
 // maxSegmentBytes by one record.
 func (j *Journal) maybeRotateLocked() (bool, error) {
+	// Lstat, not Stat (#9897 F-108): a symlink planted at the current path
+	// must be refused BEFORE the size check and the rename below. Stat
+	// would size the TARGET (driving rotation off someone else's file) and
+	// the Rename would then move the LINK itself into .1, laundering the
+	// plant into a segment every later read follows. Only an (ok, isLink)
+	// Lstat acts here; anything else falls through to the Stat, today's
+	// error site. Accepted residual: a link swapped in between this gate
+	// and the rename could still be laundered — but the readers now refuse
+	// links (openSegmentNoFollow), so a laundered link is inert: Tail
+	// errors loudly naming it instead of rendering spoofed history.
+	if fi, lerr := os.Lstat(j.path); lerr == nil && fi.Mode()&os.ModeSymlink != 0 {
+		target, rerr := os.Readlink(j.path)
+		if rerr != nil {
+			target = "<unreadable link target>"
+		}
+		return false, fmt.Errorf("journal path %s is a symlink to %s — refusing to "+
+			"rotate through it (a stale link fails closed; remove it and the next "+
+			"append recreates a regular current segment)", j.path, target)
+	}
 	fi, err := os.Stat(j.path)
 	if err != nil || fi.Size() < j.maxSegmentBytes {
 		return false, nil // missing/unreadable current segment: nothing to rotate
@@ -598,12 +617,17 @@ func (j *Journal) Tail(limit int) ([]*Entry, error) {
 func (j *Journal) readAllLocked() ([]*Entry, error) {
 	var out []*Entry
 	for seg := j.maxSegments; seg >= 0; seg-- {
-		data, err := os.ReadFile(j.segmentPath(seg))
-		if err != nil {
-			if os.IsNotExist(err) {
+		f, oerr := openSegmentNoFollow(j.segmentPath(seg))
+		if oerr != nil {
+			if os.IsNotExist(oerr) {
 				continue // gaps tolerated (crash mid-rotation)
 			}
-			return nil, fmt.Errorf("read journal segment: %w", err)
+			return nil, oerr
+		}
+		data, rerr := io.ReadAll(f)
+		f.Close()
+		if rerr != nil {
+			return nil, fmt.Errorf("read journal segment: %w", rerr)
 		}
 		for _, line := range bytes.Split(data, []byte{'\n'}) {
 			if e := parseLine(line); e != nil {
@@ -617,12 +641,12 @@ func (j *Journal) readAllLocked() ([]*Entry, error) {
 // tailSegment returns up to limit entries from the END of one segment
 // file, newest first. A missing segment yields (nil, nil).
 func tailSegment(path string, limit int) ([]*Entry, error) {
-	f, err := os.Open(path)
+	f, err := openSegmentNoFollow(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil
 		}
-		return nil, fmt.Errorf("open journal segment: %w", err)
+		return nil, err
 	}
 	defer f.Close()
 	fi, err := f.Stat()
@@ -630,6 +654,75 @@ func tailSegment(path string, limit int) ([]*Entry, error) {
 		return nil, fmt.Errorf("stat journal segment: %w", err)
 	}
 	return tailScan(f, fi.Size(), limit)
+}
+
+// openSegmentNoFollow opens a journal segment for reading without following a
+// symlinked final component (#9897 F-038) — the read-side twin of the
+// O_NOFOLLOW + IsRegular discipline appendLocked already enforces. Without it
+// a planted link makes `show system commit`/history render attacker-chosen
+// JSONL as genuine history, while the append path correctly refuses the same
+// link.
+//
+// Three checks, each load-bearing:
+//
+//   - Lstat pre-check: refuses deterministically, INCLUDING dangling links
+//     (whose open fails ENOENT and would otherwise be skipped as a gap), and
+//     names the link and its target. Message only, not enforcement.
+//   - O_NOFOLLOW open: the kernel refuses a link swapped in after the Lstat,
+//     so there is no TOCTOU window the way an Lstat-then-open would have (the
+//     appendLocked doctrine). ELOOP — or any open failure on a path that is a
+//     link — maps to the same refusal so the link+target invariant holds.
+//   - O_NONBLOCK + fstat IsRegular: opening a FIFO O_RDONLY BLOCKS until a
+//     writer appears, so a plain open hangs before Stat can refuse it (the
+//     #6753 "or blocks" half). NONBLOCK is a no-op for regular files; the
+//     fstat then refuses every non-regular descriptor (FIFO, device, socket,
+//     directory) before a single byte is read.
+//
+// Absence passes through unwrapped so both callers keep mapping NotExist to a
+// tolerated gap; every other failure returns final. Only the final component
+// is constrained — a symlinked PARENT directory still works, matching the
+// append path.
+func openSegmentNoFollow(path string) (*os.File, error) {
+	if fi, lerr := os.Lstat(path); lerr == nil && fi.Mode()&os.ModeSymlink != 0 {
+		return nil, refuseSymlinkedSegment(path)
+	}
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		if _, rerr := os.Readlink(path); rerr == nil {
+			return nil, refuseSymlinkedSegment(path)
+		}
+		if os.IsNotExist(err) {
+			return nil, err
+		}
+		return nil, fmt.Errorf("open journal segment: %w", err)
+	}
+	fi, serr := f.Stat()
+	if serr != nil {
+		f.Close()
+		return nil, fmt.Errorf("stat journal segment: %w", serr)
+	}
+	if !fi.Mode().IsRegular() {
+		mode := fi.Mode()
+		f.Close()
+		return nil, fmt.Errorf("journal segment %s is not a regular file (mode %s) — "+
+			"refusing to read audit history from it", path, mode)
+	}
+	return f, nil
+}
+
+// refuseSymlinkedSegment reports that a journal segment path is a symlink. The
+// refusal is LOUD (a Tail error, which every ListCommitHistory caller
+// propagates) rather than a skip: silently omitting a linked segment would
+// present partial history as complete, which for an audit trail is its own
+// integrity hazard — and a planter with parent-dir write can already delete
+// the journal outright, so erroring grants no new denial.
+func refuseSymlinkedSegment(path string) error {
+	target, rerr := os.Readlink(path)
+	if rerr != nil {
+		target = "<unreadable link target>"
+	}
+	return fmt.Errorf("journal segment %s is a symlink to %s — refusing to read "+
+		"audit history through it", path, target)
 }
 
 // tailScan reads up to limit newline-terminated JSON entries from the
