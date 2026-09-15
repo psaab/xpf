@@ -27,8 +27,7 @@
 //! steered listen port and the worker decapsulates them in the pipeline, so on
 //! a shim-covered ingress this socket sees that port's handshake and cookie
 //! records only. It still sees every record for any OTHER configured listen
-//! port, because the shim steers exactly one (#9521, `WgKernelTransport`).
-//!
+//! port, because the shim steers a bounded set (#9587, `WgKernelTransport`).
 //! ## Directions
 //!
 //!   - **Inbound** (kernel socket → engine → TUN): dispatch on the WG
@@ -36,10 +35,11 @@
 //!     the response; type 2 → `consume_response`; type 3 (cookie) →
 //!     drop+count (S7); type 4 (transport) → `try_decap` (the engine
 //!     AllowedIPs-gates the inner src) → write the plaintext inner IP to
-//!     the `wgN` TUN, where the kernel routes it — ONLY on the steered
-//!     port's thread. Any other port's thread drops the authenticated
-//!     record and counts `rx_unsteered_transport_drops` (#9521), because
-//!     the kernel would forward that plaintext with no zone policy.
+//!     the `wgN` TUN, where the kernel routes it — ONLY on a steered
+//!     port's thread (#9587: every selected port). Any other port's thread
+//!     drops the authenticated record and counts
+//!     `rx_unsteered_transport_drops` (#9521), because the kernel would
+//!     forward that plaintext with no zone policy.
 //!   - **Egress** (TUN → engine → kernel socket): inner IP packets the
 //!     kernel routes onto `wgN` are read, `try_encap`'d, and sent to the
 //!     peer endpoint. The transit AF_XDP egress is the other encap site

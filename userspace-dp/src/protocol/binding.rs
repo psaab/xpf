@@ -318,9 +318,6 @@ pub(crate) fn u32_is_zero(value: &u32) -> bool {
     *value == 0
 }
 
-pub(crate) fn u16_is_zero(value: &u16) -> bool {
-    *value == 0
-}
 
 pub(crate) fn bool_is_false(value: &bool) -> bool {
     !*value

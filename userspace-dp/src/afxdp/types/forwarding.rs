@@ -118,9 +118,12 @@ pub(in crate::afxdp) struct ForwardingState {
     /// True iff any WG engine is configured. Cheap single-bool gate so
     /// non-WG paths never probe `wg_engines` per packet (#1432 §4.5).
     pub(in crate::afxdp) has_wg_tunnels: bool,
-    /// #9521: the one WireGuard listen port the shim steers. Read at control-thread
-    /// spawn, never per packet — see `WgKernelTransport` (types/runtime.rs).
-    pub(in crate::afxdp) wg_steered_listen_port: u16,
+    /// #9587: the bounded SET of WireGuard listen ports the shim steers (at
+    /// most `WG_STEERED_PORT_SET_MAX`). Read at control-thread spawn, never
+    /// per packet — see `WgKernelTransport` (types/runtime.rs). Fixed array
+    /// (spawn-path only, no allocator pressure); only [0..count] are valid.
+    pub(in crate::afxdp) wg_steered_listen_ports: [u16; WG_STEERED_PORT_SET_MAX],
+    pub(in crate::afxdp) wg_steered_listen_port_count: u8,
     pub(in crate::afxdp) neighbors: FastMap<(i32, IpAddr), NeighborEntry>,
     pub(in crate::afxdp) ifindex_to_name: FastMap<i32, String>,
     pub(in crate::afxdp) ifindex_to_config_name: FastMap<i32, String>,

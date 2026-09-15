@@ -570,8 +570,8 @@ func (d *Daemon) applyHostInboundFilter(cfg *config.Config) error {
 		return nil
 	}
 	// #5582: the configured WireGuard listen port(s). The XDP shim steers
-	// local-destination UDP on the WG listen port to the kernel WG socket, so the
-	// host-inbound filter must admit that port or a fresh passive handshake to a
+	// local-destination UDP on the WG listen ports to the kernel WG sockets, so
+	// the host-inbound filter must admit those ports or a fresh passive handshake to a
 	// restricted zoned address is dropped by the per-zone catch-all. Empty (nil)
 	// when no WG tunnel is configured — buildHostInboundFilterPayload then emits
 	// no WG accept, so the restricted-default posture is unchanged.
@@ -907,7 +907,7 @@ func buildFenceTablePayload(tableName string, priority int, views []dpuserspace.
 // fence (buildHostInboundFencePayload) and the additive gap fence
 // (buildHostInboundGapFencePayload, #5789) so their admit posture can never drift
 // apart: both must let established/related, host-terminated IPsec (ESP/AH), IPv6
-// ND, v4/v6 PMTUD+error, and the configured WireGuard listen port through while
+// ND, v4/v6 PMTUD+error, and the configured WireGuard listen ports through while
 // dropping host-bound services to the fenced addresses.
 func hostInboundFenceMandatoryAdmits(wgListenPorts []uint16) []string {
 	admits := []string{
@@ -920,9 +920,10 @@ func hostInboundFenceMandatoryAdmits(wgListenPorts []uint16) []string {
 		"    icmpv6 type { 133, 134, 135, 136, 137 } accept",
 		"    icmp type { destination-unreachable, time-exceeded, parameter-problem } accept",
 	}
-	// The XDP shim steers local-destination UDP on the WG listen port to the
-	// kernel WG socket; admit it so a responder-only tunnel is not black-holed by
-	// the fence (mirrors emitHostInboundWireGuardAccept). No-op when WG is unset.
+	// The XDP shim steers local-destination UDP on the steered WG listen ports
+	// to the kernel WG sockets; admit them so a responder-only tunnel is not
+	// black-holed by the fence (mirrors emitHostInboundWireGuardAccept). No-op
+	// when WG is unset.
 	if len(wgListenPorts) > 0 {
 		admits = append(admits, "    udp dport "+renderWireGuardPortSpec(wgListenPorts)+" accept")
 	}
@@ -1449,7 +1450,7 @@ func emitHostInboundICMPAccepts(rules *[]string) {
 // host-inbound input hook.
 //
 // The XDP shim deliberately steers local-destination UDP on the configured WG
-// listen port to the kernel (userspace-xdp wg_steer_to_kernel) so the userspace
+// listen ports to the kernel (userspace-xdp wg_steer_to_kernel) so the userspace
 // WireGuard control socket receives the outer transport. Without this accept a
 // FRESH passive (responder-only) handshake — conntrack NEW, so the leading
 // `ct state established,related accept` does not cover it — misses the per-zone
@@ -1467,14 +1468,18 @@ func emitHostInboundICMPAccepts(rules *[]string) {
 // restricted-default posture is preserved.
 //
 // The port set is the compile-time SSOT config.WireGuardListenPorts() (all
-// configured WG tunnels). The shim's single-port WG-RX steering (S2a) only
-// steers the FIRST configured listen port today.
+// configured WG tunnels). The shim's WG-RX steering is set-valued (#9587):
+// it steers up to MaxSteeredWireGuardPorts listen ports (first-MAX in
+// emitter order), not just the first.
 //
 // #9016: this comment previously called the second port's rule "a no-op at the
 // kernel (nothing steers that port up)". It is NOT a no-op. The rule is what
-// ADMITS that port's traffic to the host, where the second tunnel's own bound
-// socket (the helper spawns a control thread per wireguard endpoint) receives
-// it. Unsteered means "not on the AF_XDP fast path", not "inert".
+// ADMITS that port's traffic to the host: handshake and cookie records for
+// every configured port, and transport records for ports outside the steered
+// set, reach the tunnels' bound sockets here (the helper spawns a control
+// thread per wireguard endpoint). Ports inside the steered set additionally
+// ride the AF_XDP fast path; ports outside it do not — "unsteered" means
+// "not on the fast path", not "inert".
 //
 // #9521: what that socket does with it changed. Handshake and cookie records
 // are processed as before, so admitting every configured port is still

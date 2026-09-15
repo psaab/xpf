@@ -166,28 +166,38 @@ pub(crate) struct WgControlEntry {
     pub(in crate::afxdp) last_spawn_attempt_ns: u64,
     /// #9521: whether this thread may write kernel-path transport plaintext to
     /// its wgN TUN, decided at spawn from the endpoint's listen port and the
-    /// snapshot's steered port. The apply-time stale prune restarts the thread
-    /// when a later snapshot changes the answer, so re-steering (adding or
-    /// removing the tunnel that sorts first) takes effect without a restart.
+    /// snapshot's steered listen-port set (#9587). The apply-time stale prune
+    /// restarts the thread when a later snapshot changes the answer, so any
+    /// set-membership change (tunnel added/removed, port moved in or out of
+    /// the steered set) takes effect without a restart.
     pub(in crate::afxdp) spawned_kernel_transport: WgKernelTransport,
 }
 
-/// #9521: may a WireGuard control thread write the plaintext of a TRANSPORT
+/// #9587: the bound on the steered WireGuard listen-port set, shared by the
+/// snapshot decode, the forwarding-state fixed array and the shim ctrl block
+/// (`userspace-xdp` carries the same bound; the Go side pins
+/// `config.MaxSteeredWireGuardPorts` equal). Glob-re-exported through
+/// `types` (`pub(in crate::afxdp) use runtime::*`), so the forwarding build
+/// and the supervision reference it as
+/// `crate::afxdp::types::WG_STEERED_PORT_SET_MAX`.
+pub(crate) const WG_STEERED_PORT_SET_MAX: usize = 8;
+
+/// #9587: may a WireGuard control thread write the plaintext of a TRANSPORT
 /// record it received on its kernel socket to its wgN TUN?
 ///
-/// The AF_XDP shim claims transport data for exactly one listen port
-/// (`UserspaceCtrl.wg_listen_port`, programmed from
-/// `ConfigSnapshot.wg_steered_listen_port`) and hands it to the worker, which
-/// adjudicates the inner packet in the pipeline (#8274). For that port a record
-/// reaches this socket only on a path the shim does not cover, and #8274
-/// deliberately kept delivering it there (docs/log/8274.md, "The residual,
-/// stated rather than closed"). A record for ANY OTHER port is never claimed:
-/// it reaches the kernel on every path, and writing its plaintext to the TUN
-/// gave an authenticated peer the kernel's forwarding path with no zone policy,
-/// no session and no counters. That write is refused.
+/// The AF_XDP shim claims transport data for the steered listen-port SET
+/// (`UserspaceCtrl.wg_ports`, programmed from
+/// `ConfigSnapshot.wg_steered_listen_ports`) and hands it to the worker, which
+/// adjudicates the inner packet in the pipeline (#8274). For a steered port a
+/// record reaches this socket only on a path the shim does not cover, and
+/// #8274 deliberately kept delivering it there (docs/log/8274.md, "The
+/// residual, stated rather than closed"). A record for ANY OTHER port is never
+/// claimed: it reaches the kernel on every path, and writing its plaintext to
+/// the TUN gave an authenticated peer the kernel's forwarding path with no
+/// zone policy, no session and no counters. That write is refused.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum WgKernelTransport {
-    /// The steered port: deliver to the TUN, as before #9521.
+    /// A steered port: deliver to the TUN, as before #9521.
     Deliver,
     /// Any other port: authenticate the record (so key confirmation, the replay
     /// window and endpoint roaming behave as for a keepalive), then drop it and
@@ -196,12 +206,13 @@ pub(crate) enum WgKernelTransport {
 }
 
 impl WgKernelTransport {
-    /// Fail closed: a snapshot that names no steered port (0) delivers for NO
-    /// endpoint. The Go control plane stamps the port whenever a WireGuard
-    /// tunnel is configured, and the protocol version refuses a daemon that
-    /// would not.
-    pub(crate) fn for_listen_port(listen_port: u16, steered_listen_port: u16) -> Self {
-        if steered_listen_port != 0 && listen_port == steered_listen_port {
+    /// Fail closed: an empty steered set delivers for NO endpoint. The Go
+    /// control plane stamps the selected set whenever a WireGuard tunnel is
+    /// configured, and the protocol version refuses a daemon that would not.
+    /// A zero listen port never matches, even against a set that (by
+    /// construction) contains no zero.
+    pub(crate) fn for_listen_port(listen_port: u16, steered_ports: &[u16]) -> Self {
+        if listen_port != 0 && steered_ports.contains(&listen_port) {
             Self::Deliver
         } else {
             Self::DropUnsteered

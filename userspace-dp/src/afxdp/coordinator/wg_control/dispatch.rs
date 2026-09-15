@@ -170,10 +170,10 @@ pub(super) fn dispatch_inbound(
             match engine.try_decap(datagram, decap_buf) {
                 Ok(outcome) => {
                     // #9521: an UNSTEERED listen port's transport record. The
-                    // shim claims transport data for exactly one port — the
-                    // steered one — so a record for any other port reaches this
-                    // socket on every path, and writing its plaintext to the TUN
-                    // hands it to the kernel's forwarding path with no zone
+                    // shim claims transport data for the steered listen-port
+                    // SET (#9587), so a record for any port outside the set
+                    // reaches this socket on every path, and writing its
+                    // plaintext to the TUN hands it to the kernel's forwarding path with no zone
                     // policy, no session and no counters. `try_decap` has
                     // already authenticated it, so key confirmation, the replay
                     // window and endpoint roaming behave as for a keepalive; the
