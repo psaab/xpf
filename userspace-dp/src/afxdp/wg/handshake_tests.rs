@@ -122,8 +122,9 @@ fn msg2_layout_byte_offsets() {
 /// msg[0..116] — so an offset or endianness bug in the assembly fails
 /// here even when the per-field KATs pass. (The Noise body is a fixed
 /// pattern rather than a real snow output: this module's job is the
-/// framing assembly + mac1; the snow body byte-exactness is covered by
-/// the engine self-handshake test and the S2 live kernel-WG interop.)
+/// framing assembly + mac1; real snow transcript byte-exactness is covered
+/// by `deterministic_handshake_vectors_9918` (production builders with
+/// fixed ephemerals) and the S2 live kernel-WG interop.)
 #[test]
 fn msg1_full_kat_fixed_body() {
     let resp_pub = [0x42u8; 32];
@@ -309,6 +310,33 @@ fn build_rejects_small_output() {
         build_initiation(&mut small, 0, &noise, &pub_k).unwrap_err(),
         FramingError::OutputTooSmall
     );
+}
+/// #9918 F-144: the precomputed MAC1 key path is byte-identical to the
+/// per-message derivation. All existing KATs exercise `compute_mac1` /
+/// `parse_*` (which now delegate to the `_with_key` cores); this pins the
+/// equivalence directly so a divergence fails loudly.
+#[test]
+fn mac1_precomputed_key_matches_kat_9918() {
+    let pk = [0x42u8; 32];
+    let key = mac1_key_for(&pk);
+    assert_eq!(
+        hex(&key),
+        "172c34d6807bd7acef1a2471f20e928626c23ce0b9f90b326cf5f82d12480a4e"
+    );
+    let mac_a = compute_mac1(&pk, b"abc");
+    let mac_b = compute_mac1_with_key(&key, b"abc");
+    assert_eq!(mac_a, mac_b);
+    assert_eq!(hex(&mac_b), "78df3b0a90577688ce9d272d04a8fb90");
+    // Parses agree too.
+    let noise = [0xABu8; MSG_INIT_NOISE_LEN];
+    let mut buf = [0u8; WG_MSG_INIT_LEN];
+    build_initiation(&mut buf, 1, &noise, &pk).unwrap();
+    assert!(parse_initiation(&buf, &pk).is_ok());
+    assert!(parse_initiation_with_key(&buf, &key).is_ok());
+    let mut bad = buf;
+    bad[116] ^= 0x01;
+    assert!(parse_initiation(&bad, &pk).is_err());
+    assert!(parse_initiation_with_key(&bad, &key).is_err());
 }
 
 fn hex(b: &[u8]) -> String {

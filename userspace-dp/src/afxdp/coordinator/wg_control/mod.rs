@@ -804,6 +804,14 @@ const WG_ENDPOINT_ROAM_HOLD_NS: u64 = crate::afxdp::wg::session::REKEY_ATTEMPT_T
 
 /// Adopt resolver answers into `effective_endpoints`, subject to the roam-hold
 /// rule above. Never blocks: `latest` is a map read, never a lookup.
+///
+/// #9918 F-162 trust boundary: a hostname endpoint trusts DNS for egress
+/// steering after 90 s of peer silence (see the roam-hold const above). An
+/// attacker controlling DNS for the name + a silent peer can redirect egress
+/// (blackhole) and observe timing/cadence, but cannot decrypt or handshake.
+/// Mitigated by the roam-hold, first-authenticated-datagram re-win, and
+/// opt-in hostnames. Moves surface via `endpoint_changed` /
+/// `endpoint_last_error` in status plus the `peer endpoint resolved` log below.
 fn apply_resolved_endpoints(
     resolver: Option<&crate::afxdp::wg::endpoint_resolver::WgEndpointResolver>,
     peer_pubkeys: &[[u8; 32]],

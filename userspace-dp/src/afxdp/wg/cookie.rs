@@ -478,10 +478,15 @@ impl CookieChecker {
         }
     }
 
-    /// Rotate the secret if `current` is older than one rotation window,
-    /// then return `Some((current, previous_if_still_valid))`. Lazy
-    /// first-use init stamps `generated_at_ns` without rotating. A gap of
-    /// two or more full windows starts fresh with no previous (bounds any
+    /// Rotate the secret if due, then run `f` with the live secrets held
+    /// under the lock. #9918 F-145: the responder cookie secrets never leave
+    /// this lock as bare `[u8; 32]` copies — callers receive only derived
+    /// values (cookies, MAC comparisons) computed inside the closure. The
+    /// `Zeroizing` refs cannot outlive the guard (`R: owned` by construction
+    /// — the closure returns cookies/bools, never secret refs).
+    ///
+    /// Lazy first-use init stamps `generated_at_ns` without rotating. A gap
+    /// of two or more full windows starts fresh with no previous (bounds any
     /// secret's validity to `< 2 * COOKIE_ROTATION_TIME_NS`).
     ///
     /// Returns `None` when NO secure secret is available (#4094 BUG-2 fail-
@@ -491,7 +496,20 @@ impl CookieChecker {
     /// the caller (verify/build) fails closed. Every rotation likewise
     /// keeps the existing secure secret rather than rotating to a
     /// predictable one if getrandom fails mid-flight.
-    fn secrets(&self, now_ns: u64) -> Option<([u8; 32], Option<[u8; 32]>)> {
+    ///
+    /// Lock scope: held across rotation + the closure's hashes (2-4
+    /// keyed-BLAKE2s for verify, 1 for build's cookie). The hashes and
+    /// `draw_random` take no locks, and classify/build run on the single
+    /// control thread (locks effectively uncontended — see module doc), so
+    /// this cannot deadlock. The XChaCha seal in `build_cookie_reply` runs
+    /// OUTSIDE this lock (it needs only the derived cookie).
+    /// Poison recovery mirrors the pre-9918 `secrets()`: `into_inner`, so a
+    /// prior panic cannot permanently disable MAC2 (#6422).
+    fn with_secrets<R>(
+        &self,
+        now_ns: u64,
+        f: impl FnOnce(&Zeroizing<[u8; 32]>, Option<&Zeroizing<[u8; 32]>>) -> R,
+    ) -> Option<R> {
         let mut s = self.secret.lock().unwrap_or_else(|e| e.into_inner());
         if !s.secure {
             // Lazy re-acquire — getrandom may have been transiently
@@ -536,12 +554,12 @@ impl CookieChecker {
                 }
             }
         }
-        let prev = if s.has_previous {
-            Some(*s.previous)
+        let prev: Option<&Zeroizing<[u8; 32]>> = if s.has_previous {
+            Some(&s.previous)
         } else {
             None
         };
-        Some((*s.current, prev))
+        Some(f(&s.current, prev))
     }
 
     /// Verify the MAC2 carried in an inbound type-1 initiation `msg`
@@ -558,22 +576,24 @@ impl CookieChecker {
         let src = &src[..n];
         // Fail closed if no secure secret (#4094 BUG-2): without it we
         // cannot recompute the cookie, so we cannot honestly validate MAC2.
-        let Some((cur, prev)) = self.secrets(now_ns) else {
-            return false;
-        };
-        let cookie_cur = keyed_blake2s_128(&cur, src);
-        let expect_cur = keyed_blake2s_128(&cookie_cur, &msg[..M1_MAC2]);
-        if macs_equal(&expect_cur, got) {
-            return true;
-        }
-        if let Some(prev) = prev {
-            let cookie_prev = keyed_blake2s_128(&prev, src);
-            let expect_prev = keyed_blake2s_128(&cookie_prev, &msg[..M1_MAC2]);
-            if macs_equal(&expect_prev, got) {
+        // #9918 F-145: the secrets never leave the lock — the cookie/MAC
+        // recomputation runs inside `with_secrets`.
+        self.with_secrets(now_ns, |cur, prev| {
+            let cookie_cur = keyed_blake2s_128(&cur[..], src);
+            let expect_cur = keyed_blake2s_128(&cookie_cur, &msg[..M1_MAC2]);
+            if macs_equal(&expect_cur, got) {
                 return true;
             }
-        }
-        false
+            if let Some(prev) = prev {
+                let cookie_prev = keyed_blake2s_128(&prev[..], src);
+                let expect_prev = keyed_blake2s_128(&cookie_prev, &msg[..M1_MAC2]);
+                if macs_equal(&expect_prev, got) {
+                    return true;
+                }
+            }
+            false
+        })
+        .unwrap_or(false)
     }
 
     /// Build a WG type-3 CookieReply for the initiation `init_msg` that
@@ -598,9 +618,12 @@ impl CookieChecker {
         let (src, n) = endpoint_cookie_bytes(from);
         // Fail closed on a broken CSPRNG (#4094 BUG-2): no secure secret ->
         // no cookie (a predictable cookie would let a spoofed source forge a
-        // valid MAC2 and defeat the whole mitigation).
-        let (cur, _) = self.secrets(now_ns).ok_or(CookieError::RandUnavailable)?;
-        let cookie = keyed_blake2s_128(&cur, &src[..n]);
+        // valid MAC2 and defeat the whole mitigation). #9918 F-145: derive
+        // the cookie inside the lock; the XChaCha seal below runs outside
+        // (it needs only the derived cookie, never the secret).
+        let cookie = self
+            .with_secrets(now_ns, |cur, _prev| keyed_blake2s_128(&cur[..], &src[..n]))
+            .ok_or(CookieError::RandUnavailable)?;
 
         // A predictable XChaCha nonce is also unacceptable — fail closed
         // rather than send a weak-nonce reply.
@@ -680,10 +703,8 @@ impl CookieChecker {
     #[cfg(test)]
     pub(crate) fn cookie_for_test(&self, from: SocketAddr, now_ns: u64) -> [u8; WG_COOKIE_LEN] {
         let (src, n) = endpoint_cookie_bytes(from);
-        let (cur, _) = self
-            .secrets(now_ns)
-            .expect("test CookieChecker always has a secure secret");
-        keyed_blake2s_128(&cur, &src[..n])
+        self.with_secrets(now_ns, |cur, _prev| keyed_blake2s_128(&cur[..], &src[..n]))
+            .expect("test CookieChecker always has a secure secret")
     }
 
     /// Test hook: simulate a persistent `getrandom` failure (BUG-2 fail-

@@ -1839,6 +1839,52 @@ fn classify_initiation_bad_mac1_under_load_no_reflection() {
         "no cookie reply is emitted for a bad-MAC1 initiation"
     );
 }
+/// #9918 F-144: under load, MAC1 is checked BEFORE MAC2.
+/// A bad-MAC1 initiation carrying a VALID MAC2 for that bad MAC1 (crafted
+/// with the responder's own secret via test hooks) must NOT bump
+/// `hs_rx_under_load_mac2_ok`: MAC1 fails first so MAC2 is never verified.
+/// On base (MAC2-first) this bumps mac2_ok. Proves the 2-3x flood-path cut:
+/// junk costs ~1 keyed hash (precomputed MAC1 key), not 4-6.
+#[test]
+fn classify_skips_mac2_for_bad_mac1_9918() {
+    use crate::afxdp::wg::cookie::{
+        INITIATIONS_UNDER_LOAD_THRESHOLD, stamp_initiation_mac2,
+    };
+    use std::net::SocketAddr;
+    let (engine, _our_pub, good) = under_load_fixture();
+    let now = 22_000_000_000u64;
+    engine.set_mock_now_ns(now);
+    let from: SocketAddr = "203.0.113.9:51820".parse().unwrap();
+    let mut out = [0u8; 256];
+    // Trip under-load with good initiations (same pinned now_ns: no
+    // rotation skew between cookie mint and classify).
+    for _ in 0..(INITIATIONS_UNDER_LOAD_THRESHOLD + 4) {
+        engine.classify_initiation(&good, from, &mut out, now);
+    }
+    // Craft bad-MAC1 then stamp a VALID MAC2 over it using the
+    // responder's own current cookie for `from`.
+    let mut bad = good;
+    bad[116] ^= 0xFF;
+    let cookie = engine.cookie.cookie_for_test(from, now);
+    stamp_initiation_mac2(&mut bad, &cookie);
+    let before = engine
+        .counters()
+        .hs_rx_under_load_mac2_ok
+        .load(Ordering::Relaxed);
+    assert_eq!(
+        engine.classify_initiation(&bad, from, &mut out, now),
+        InitiationAction::Process,
+        "bad-MAC1 still falls through to the cheap consume drop"
+    );
+    assert_eq!(
+        engine
+            .counters()
+            .hs_rx_under_load_mac2_ok
+            .load(Ordering::Relaxed),
+        before,
+        "MAC1-first: a bad-MAC1 packet must never verify MAC2"
+    );
+}
 
 /// #4094 Copilot BUG-2 (engine level): if the OS CSPRNG is unavailable the
 /// under-load gate must FAIL CLOSED — drop the initiation with NO cookie

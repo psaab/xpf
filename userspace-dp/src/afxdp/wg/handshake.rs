@@ -112,6 +112,29 @@ pub(crate) enum FramingError {
     Mac1Mismatch,
 }
 
+/// Derive the MAC1 keyed-hash key for `recipient_static_pub`:
+/// `BLAKE2s-256(LABEL_MAC1 || recipient_pub)`. #9918 F-144: the engine
+/// precomputes this once at construction (its local pub never changes)
+/// so the inbound parse avoids one BLAKE2s-256 per message on the
+/// under-load flood path.
+pub(crate) fn mac1_key_for(recipient_static_pub: &[u8; WG_KEY_LEN]) -> [u8; 32] {
+    let mut hasher = Blake2s256::new();
+    Digest::update(&mut hasher, WG_LABEL_MAC1);
+    Digest::update(&mut hasher, recipient_static_pub);
+    hasher.finalize().into()
+}
+
+/// Compute MAC1 with a precomputed key (see [`mac1_key_for`]).
+/// `mac1 = keyed-BLAKE2s-128(key, data)`. NOT HMAC.
+pub(crate) fn compute_mac1_with_key(key: &[u8; 32], data: &[u8]) -> [u8; WG_MAC_LEN] {
+    let mut mac = <Blake2sMac<U16> as KeyInit>::new_from_slice(key)
+        .expect("MAC1 key is a valid 32-byte BLAKE2s key");
+    Update::update(&mut mac, data);
+    let mut out = [0u8; WG_MAC_LEN];
+    FixedOutput::finalize_into(mac, (&mut out).into());
+    out
+}
+
 /// Compute the keyed-BLAKE2s-128 MAC1 over `data` using the recipient's
 /// static public key.
 ///
@@ -120,19 +143,7 @@ pub(crate) enum FramingError {
 ///
 /// Slow path only (handshake build/parse), never per-packet.
 pub(crate) fn compute_mac1(recipient_static_pub: &[u8; WG_KEY_LEN], data: &[u8]) -> [u8; WG_MAC_LEN] {
-    // key = BLAKE2s-256("mac1----" || recipient_pub)
-    let mut hasher = Blake2s256::new();
-    Digest::update(&mut hasher, WG_LABEL_MAC1);
-    Digest::update(&mut hasher, recipient_static_pub);
-    let key = hasher.finalize();
-
-    // mac1 = keyed-BLAKE2s with 16-byte output. NOT HMAC.
-    let mut mac = <Blake2sMac<U16> as KeyInit>::new_from_slice(&key)
-        .expect("BLAKE2s-256 digest is a valid 32-byte BLAKE2s key");
-    Update::update(&mut mac, data);
-    let mut out = [0u8; WG_MAC_LEN];
-    FixedOutput::finalize_into(mac, (&mut out).into());
-    out
+    compute_mac1_with_key(&mac1_key_for(recipient_static_pub), data)
 }
 
 /// Constant-time-ish comparison of two 16-byte MACs. MAC1 is computed over
@@ -197,16 +208,13 @@ pub(crate) struct ParsedInitiation<'a> {
     pub noise_body: &'a [u8],
 }
 
-/// Parse + authenticate a WG type-1 initiation.
-///
-/// `our_static_pub` is xpf's own static public key — the recipient key for
-/// an inbound initiation; mac1 is verified against
-/// `BLAKE2s-256(LABEL_MAC1 || our_static_pub)`. mac2 is NOT verified in S1
-/// (skip-verify; a peer holding our cookie legitimately sets it). The
-/// returned `noise_body` (108 bytes) is fed to snow `read_message`.
-pub(crate) fn parse_initiation<'a>(
+/// Parse + authenticate a WG type-1 initiation with a precomputed MAC1 key.
+/// Single core: [`parse_initiation`] derives the key inline and delegates
+/// here, so the strict parse (length + canonical u32 type-word + MAC1)
+/// cannot drift between the two entry points. #9918 F-144.
+pub(crate) fn parse_initiation_with_key<'a>(
     msg: &'a [u8],
-    our_static_pub: &[u8; WG_KEY_LEN],
+    mac1_key: &[u8; 32],
 ) -> Result<ParsedInitiation<'a>, FramingError> {
     // WG handshake messages are fixed-length; require EXACTLY 148 bytes
     // (kernel WG / wireguard-go reject any other length).
@@ -225,7 +233,7 @@ pub(crate) fn parse_initiation<'a>(
     }
     // Verify mac1 over msg[0..116] BEFORE handing the body to snow — kernel
     // WG drops on a bad mac1 before any crypto, and so do we.
-    let expect = compute_mac1(our_static_pub, &msg[..M1_MAC1]);
+    let expect = compute_mac1_with_key(mac1_key, &msg[..M1_MAC1]);
     let got = {
         let mut m = [0u8; WG_MAC_LEN];
         m.copy_from_slice(&msg[M1_MAC1..M1_MAC2]);
@@ -240,6 +248,20 @@ pub(crate) fn parse_initiation<'a>(
         sender_index,
         noise_body: &msg[M1_NOISE..M1_MAC1],
     })
+}
+
+/// Parse + authenticate a WG type-1 initiation.
+///
+/// `our_static_pub` is xpf's own static public key — the recipient key for
+/// an inbound initiation; mac1 is verified against
+/// `BLAKE2s-256(LABEL_MAC1 || our_static_pub)`. mac2 is NOT verified in S1
+/// (skip-verify; a peer holding our cookie legitimately sets it). The
+/// returned `noise_body` (108 bytes) is fed to snow `read_message`.
+pub(crate) fn parse_initiation<'a>(
+    msg: &'a [u8],
+    our_static_pub: &[u8; WG_KEY_LEN],
+) -> Result<ParsedInitiation<'a>, FramingError> {
+    parse_initiation_with_key(msg, &mac1_key_for(our_static_pub))
 }
 
 /// True iff `msg`'s leading 4 bytes are exactly the little-endian u32
@@ -308,12 +330,11 @@ pub(crate) struct ParsedResponse<'a> {
     pub noise_body: &'a [u8],
 }
 
-/// Parse + authenticate a WG type-2 response. `our_static_pub` is xpf's own
-/// static public key (the recipient of a response is the initiator = us).
-/// mac1 verified; mac2 skipped (S1).
-pub(crate) fn parse_response<'a>(
+/// Parse + authenticate a WG type-2 response with a precomputed MAC1 key.
+/// Single core; [`parse_response`] delegates here. #9918 F-144.
+pub(crate) fn parse_response_with_key<'a>(
     msg: &'a [u8],
-    our_static_pub: &[u8; WG_KEY_LEN],
+    mac1_key: &[u8; 32],
 ) -> Result<ParsedResponse<'a>, FramingError> {
     if msg.len() != WG_MSG_RESPONSE_LEN {
         return Err(FramingError::WrongLength);
@@ -323,7 +344,7 @@ pub(crate) fn parse_response<'a>(
     if !is_canonical_type(msg, WG_TYPE_RESPONSE) {
         return Err(FramingError::BadType);
     }
-    let expect = compute_mac1(our_static_pub, &msg[..M2_MAC1]);
+    let expect = compute_mac1_with_key(mac1_key, &msg[..M2_MAC1]);
     let got = {
         let mut m = [0u8; WG_MAC_LEN];
         m.copy_from_slice(&msg[M2_MAC1..M2_MAC2]);
@@ -339,6 +360,16 @@ pub(crate) fn parse_response<'a>(
         receiver_index,
         noise_body: &msg[M2_NOISE..M2_MAC1],
     })
+}
+
+/// Parse + authenticate a WG type-2 response. `our_static_pub` is xpf's own
+/// static public key (the recipient of a response is the initiator = us).
+/// mac1 verified; mac2 skipped (S1).
+pub(crate) fn parse_response<'a>(
+    msg: &'a [u8],
+    our_static_pub: &[u8; WG_KEY_LEN],
+) -> Result<ParsedResponse<'a>, FramingError> {
+    parse_response_with_key(msg, &mac1_key_for(our_static_pub))
 }
 
 #[cfg(test)]

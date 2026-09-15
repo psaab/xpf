@@ -206,6 +206,15 @@ impl WgEngine {
         // entry and the marker; we must NOT touch `by_index`, or we would
         // blackhole an already-established session for this peer that a
         // prior completed handshake legitimately installed there.
+        // #9918 F-141: this sound flood bound over-fires on crossed VALID
+        // initiations (both sides hold an Initiator pending, each aborts its
+        // own on the peer's valid init, both reach pending 0 with no current
+        // and both Responses drop as NoPendingHandshake). Accepted: keeping
+        // the Initiator would install counterpartless sessions with no idle
+        // recovery, and a tie-breaker would not bind a kernel/go peer.
+        // Recovery is on-demand via a fresh trigger (NoSession edge ~1 s,
+        // REKEY_TIMEOUT <= 5 s); see
+        // `crossed_valid_initiations_stall_then_recover_9918`.
         if let Some(old_idx) = by_peer.remove(&peer_pubkey) {
             pending.remove(&old_idx);
         }
@@ -467,7 +476,7 @@ impl WgEngine {
         &self,
         msg: &[u8],
     ) -> Result<([u8; WG_KEY_LEN], u32), HandshakeError> {
-        let parsed = handshake::parse_response(msg, &self.local_public_key)?;
+        let parsed = handshake::parse_response_with_key(msg, &self.mac1_key)?;
         let local_index = parsed.receiver_index;
 
         // Hold reconcile_lock across the whole completion so the reservation
@@ -569,7 +578,7 @@ impl WgEngine {
             return Err(HandshakeError::OutputTooSmall);
         }
         // Verify framing (mac1 over OUR public key) and recover the body.
-        let parsed = handshake::parse_initiation(msg, &self.local_public_key)?;
+        let parsed = handshake::parse_initiation_with_key(msg, &self.mac1_key)?;
         let peer_sender_index = parsed.sender_index;
 
         // Run the responder Noise read to recover the peer static key.

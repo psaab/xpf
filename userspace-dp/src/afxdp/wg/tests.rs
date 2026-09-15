@@ -765,6 +765,39 @@ fn decap_zeros_plaintext_on_malformed_inner() {
         &plain[..padded_inner_len],
     );
 }
+/// #9918 F-143: a CryptoFailed decap must zero the staging region.
+/// snow's default-resolver decrypt copies ciphertext into `out` then
+/// decrypts in place; on tag failure `out[..message_len]` holds
+/// attacker-influenced unauthenticated bytes. Every sibling post-AEAD
+/// arm wipes; this arm must too. RED on base (staging retains bytes).
+#[test]
+fn decap_zeros_staging_on_crypto_failed_9918() {
+    let (init_engine, resp_engine, _init_pub, resp_pub) = established_pair(
+        vec!["10.0.1.0/24".parse().unwrap()],
+        vec!["10.0.0.0/24".parse().unwrap()],
+    );
+    let inner = ipv4_packet(Ipv4Addr::new(10, 0, 0, 5), Ipv4Addr::new(10, 0, 1, 5));
+    let mut wire = [0u8; 2048];
+    let enc = init_engine.try_encap(&resp_pub, &inner, &mut wire).unwrap();
+    // Tamper one ciphertext byte (past the 16-byte data header) so the
+    // AEAD tag fails but the header still demuxes to the live session.
+    let mut tampered = wire[..enc.len].to_vec();
+    let ct_off = super::WG_DATA_HEADER_LEN + 4;
+    tampered[ct_off] ^= 0xFF;
+    let mut plain = [0u8; 2048];
+    plain.fill(0xa5);
+    let err = resp_engine
+        .try_decap(&tampered, &mut plain)
+        .unwrap_err();
+    assert_eq!(err, DecapError::CryptoFailed);
+    let padded_inner_len = (inner.len() + 15) & !15;
+    assert!(
+        plain[..padded_inner_len].iter().all(|&b| b == 0),
+        "CryptoFailed must zero out[..plaintext_len] ({} bytes); got {:?}",
+        padded_inner_len,
+        &plain[..padded_inner_len],
+    );
+}
 
 /// r5 regression: the encap path stages plaintext through a
 /// stack `MaybeUninit<[u8; PADDED_PLAINTEXT_MAX]>` and writes it
@@ -1822,6 +1855,198 @@ mod framed_handshake {
 
         // Indices are distinct (each side chose its own).
         assert_ne!(init_idx, resp_idx);
+    }
+    /// #9918 F-141: crossed valid initiations stall, then recover on a fresh
+    /// trigger. The at-most-one-pending-per-peer DoS bound (sound against
+    /// floods) over-fires here: each side aborts its own Initiator pending
+    /// when the peer's valid initiation arrives, installs an unconfirmed
+    /// Responder in `next`, and sends a Response to an index the peer no
+    /// longer holds. Both sides reach `pending_count() == 0` with no
+    /// `current`, so egress fails and both Responses drop as
+    /// `NoPendingHandshake`. This is ACCEPTED (not fixed): keeping the
+    /// Initiator would install confirmed-but-counterpartless sessions with
+    /// no idle recovery (worse — see peer.rs `install_new_session`), and a
+    /// local pubkey tie-breaker would not bind a kernel/go peer. Recovery
+    /// is on-demand (not wall-clock): an idle pair with no keepalive stays
+    /// stalled until egress demand raises the NoSession edge (~1 s) or the
+    /// attempt machine retransmits (<= 5 s REKEY_TIMEOUT); there is no jitter
+    /// in the pacing, but crossed retries self-desynchronize in practice.
+    /// Fresh-crossed (no prior session, this test) blocks egress; a
+    /// rekey-crossed pair keeps serving on the old `current` until the fresh
+    /// handshake completes.
+    #[test]
+    fn crossed_valid_initiations_stall_then_recover_9918() {
+        use crate::afxdp::wg::engine::EncapError;
+        let (a, b, a_pub, b_pub) = engine_pair();
+        let mut msg_a = [0u8; WG_MSG_INIT_LEN];
+        let mut msg_b = [0u8; WG_MSG_INIT_LEN];
+        a.create_initiation(&b_pub, &mut msg_a).unwrap();
+        b.create_initiation(&a_pub, &mut msg_b).unwrap();
+        assert_eq!(a.pending_count(), 1);
+        assert_eq!(b.pending_count(), 1);
+        let mut resp_a = [0u8; WG_MSG_RESPONSE_LEN];
+        let mut resp_b = [0u8; WG_MSG_RESPONSE_LEN];
+        a.consume_initiation_create_response(&msg_b, &mut resp_a).unwrap();
+        b.consume_initiation_create_response(&msg_a, &mut resp_b).unwrap();
+        // Both stalled: no pending, no confirmed session, egress fails.
+        assert_eq!(a.pending_count(), 0, "crossed aborts both initiators");
+        assert_eq!(b.pending_count(), 0, "crossed aborts both initiators");
+        assert!(!a.peer_has_confirmed_session(&b_pub));
+        assert!(!b.peer_has_confirmed_session(&a_pub));
+        let inner = ipv4_packet(Ipv4Addr::new(10, 9, 9, 1), Ipv4Addr::new(10, 9, 9, 2));
+        let mut wire = [0u8; 2048];
+        assert_eq!(a.try_encap(&b_pub, &inner, &mut wire).unwrap_err(), EncapError::NoSession);
+        assert_eq!(b.try_encap(&a_pub, &inner, &mut wire).unwrap_err(), EncapError::NoSession);
+        // Fresh-crossed hits the no-current arm (no `current` at all), not
+        // the unconfirmed gate (which needs a `current` to gate on).
+        assert!(a.counters().encap_drops_no_session.load(std::sync::atomic::Ordering::Relaxed) >= 1);
+        // Both Responses drop: the peer's Initiator pending is gone.
+        assert_eq!(
+            a.consume_response(&resp_b).unwrap_err(),
+            HandshakeError::NoPendingHandshake
+        );
+        assert_eq!(
+            b.consume_response(&resp_a).unwrap_err(),
+            HandshakeError::NoPendingHandshake
+        );
+        // A fresh trigger recovers without a restart: A re-initiates, B
+        // responds, A completes, and traffic flows both ways.
+        let mut msg_fresh = [0u8; WG_MSG_INIT_LEN];
+        a.create_initiation(&b_pub, &mut msg_fresh).unwrap();
+        let mut resp_fresh = [0u8; WG_MSG_RESPONSE_LEN];
+        b.consume_initiation_create_response(&msg_fresh, &mut resp_fresh).unwrap();
+        a.consume_response(&resp_fresh).unwrap();
+        let enc = a.try_encap(&b_pub, &inner, &mut wire).unwrap();
+        let mut plain = [0u8; 2048];
+        let dec = b.try_decap(&wire[..enc.len], &mut plain).unwrap();
+        assert_eq!(&plain[..dec.len], &inner[..]);
+    }
+    /// #9918 F-146: deterministic byte-exact handshake vectors (regression
+    /// guard, NOT an independent interop proof). Drives the PRODUCTION
+    /// builders (pattern/prologue/key-role/PSK wiring) with fixed
+    /// ephemerals via the test seams, plus fixed TAI64N/indices/framing, so
+    /// a transcript regression (prologue deletion, pattern/PSK-index change,
+    /// framing offset) fails here. Self-generated from believed-good code
+    /// (S2 live interop passed historically); the independent proof remains
+    /// `test/incus/wg-interop.sh` (GATE, still owed in HARNESSES.unreached).
+    /// Mutation check (required): flip `WG_PROTOCOL_ID_BYTES` in the pinned
+    /// path and confirm RED.
+    #[test]
+    fn deterministic_handshake_vectors_9918() {
+        use crate::afxdp::wg::handshake::{
+            MSG_INIT_NOISE_LEN, MSG_RESPONSE_NOISE_LEN, build_initiation, build_response,
+            parse_initiation, parse_response,
+        };
+        // Fixed inputs (any 32 bytes are valid X25519/fixed-ephemeral keys;
+        // the transcript is deterministic given these + fixed TAI64N).
+        let init_priv = [0x11u8; 32];
+        let resp_priv = [0x22u8; 32];
+        let e_init = [0x33u8; 32];
+        let e_resp = [0x44u8; 32];
+        let tai64n = [0x55u8; 12];
+        const INIT_IDX: u32 = 0x11223344;
+        const RESP_IDX: u32 = 0xAABBCCDD;
+        let any_v4: Vec<ipnet::IpNet> = vec!["0.0.0.0/0".parse().unwrap()];
+        // Engines with fixed identities (peers configured for PSK lookup).
+        // Pubkeys derived deterministically via dalek (same as production).
+        let init_engine = WgEngine::new(WgEngineConfig {
+            local_private_key: init_priv.into(),
+            listen_port: 51820,
+            peers: vec![WgPeerConfig {
+                pubkey: [0u8; 32], // placeholder, fixed below
+                endpoint: None,
+                persistent_keepalive: 0,
+                allowed_ips: any_v4.clone(),
+                preshared_key: [0u8; 32].into(),
+            }],
+        });
+        let resp_engine = WgEngine::new(WgEngineConfig {
+            local_private_key: resp_priv.into(),
+            listen_port: 51820,
+            peers: vec![WgPeerConfig {
+                pubkey: [0u8; 32],
+                endpoint: None,
+                persistent_keepalive: 0,
+                allowed_ips: any_v4,
+                preshared_key: [0u8; 32].into(),
+            }],
+        });
+        let init_pub = init_engine.local_public_key();
+        let resp_pub = resp_engine.local_public_key();
+        // Reconcile with the true peer pubs (engines built with placeholder).
+        init_engine.reconcile_peers(&[WgPeerConfig {
+            pubkey: resp_pub,
+            endpoint: None,
+            persistent_keepalive: 0,
+            allowed_ips: vec!["0.0.0.0/0".parse().unwrap()],
+            preshared_key: [0u8; 32].into(),
+        }]);
+        resp_engine.reconcile_peers(&[WgPeerConfig {
+            pubkey: init_pub,
+            endpoint: None,
+            persistent_keepalive: 0,
+            allowed_ips: vec!["0.0.0.0/0".parse().unwrap()],
+            preshared_key: [0u8; 32].into(),
+        }]);
+        // Initiator: production builder + fixed ephemeral, fixed TAI64N.
+        let mut init_hs = init_engine
+            .build_initiator_handshake_with_fixed_for_test(&resp_pub, &e_init)
+            .unwrap();
+        let mut noise1 = [0u8; MSG_INIT_NOISE_LEN];
+        let n1 = init_hs.write_message(&tai64n, &mut noise1).unwrap();
+        assert_eq!(n1, MSG_INIT_NOISE_LEN);
+        let mut msg1 = [0u8; WG_MSG_INIT_LEN];
+        build_initiation(&mut msg1, INIT_IDX, &noise1, &resp_pub).unwrap();
+        // Responder: production builder + fixed ephemeral, parse via production.
+        let mut resp_hs = resp_engine
+            .build_responder_handshake_with_fixed_for_test(&e_resp)
+            .unwrap();
+        let parsed1 = parse_initiation(&msg1, &resp_pub).unwrap();
+        assert_eq!(parsed1.sender_index, INIT_IDX);
+        let mut ts_sink = [0u8; 12];
+        resp_hs.read_message(parsed1.noise_body, &mut ts_sink).unwrap();
+        assert_eq!(ts_sink, tai64n);
+        // Production responder sets the identified peer's PSK before msg2
+        // (here zero, same as the builder preset — done for fidelity).
+        resp_hs.set_psk(2, &[0u8; 32]).unwrap();
+        let mut noise2 = [0u8; MSG_RESPONSE_NOISE_LEN];
+        let n2 = resp_hs.write_message(&[], &mut noise2).unwrap();
+        assert_eq!(n2, MSG_RESPONSE_NOISE_LEN);
+        let mut msg2 = [0u8; WG_MSG_RESPONSE_LEN];
+        build_response(&mut msg2, RESP_IDX, INIT_IDX, &noise2, &init_pub).unwrap();
+        // Initiator completes via production parse.
+        let parsed2 = parse_response(&msg2, &init_pub).unwrap();
+        assert_eq!(parsed2.sender_index, RESP_IDX);
+        assert_eq!(parsed2.receiver_index, INIT_IDX);
+        let mut sink2 = [0u8; MSG_RESPONSE_NOISE_LEN];
+        init_hs.read_message(parsed2.noise_body, &mut sink2).unwrap();
+        // Transports match (round-trip one record via snow directly).
+        let init_tp = init_hs.into_stateless_transport_mode().unwrap();
+        let resp_tp = resp_hs.into_stateless_transport_mode().unwrap();
+        let mut buf = [0u8; 64];
+        let mut out = [0u8; 64];
+        let wn = init_tp.write_message(0, b"hello9918", &mut buf).unwrap();
+        let rn = resp_tp.read_message(0, &buf[..wn], &mut out).unwrap();
+        assert_eq!(&out[..rn], b"hello9918");
+        // Pinned byte-exact vectors (recorded from believed-good code).
+        // To re-record (only after verifying interop): run with
+        // `UPDATE_9918_VECTORS=1` and paste the printed hexes below.
+        let msg1_hex: String = msg1.iter().map(|x| format!("{x:02x}")).collect();
+        let msg2_hex: String = msg2.iter().map(|x| format!("{x:02x}")).collect();
+        if std::env::var("UPDATE_9918_VECTORS").is_ok() {
+            eprintln!("9918_MSG1={msg1_hex}");
+            eprintln!("9918_MSG2={msg2_hex}");
+        }
+        assert_eq!(
+            msg1_hex,
+            "01000000443322117b0d47d93427f8311160781c7c733fd89f88970aef490d8aa0ee19a4cb8a1b1481e498317da959fba46669572516a5e6c021bfa620bb6c56ca0082e1feae14988c2c64d024c617734a263f76a008df04c5ac1ef8bee1fa97b4973c0006d2643da81dfb92439f49c5fcdad2ea4212963473e7f974661eece643e4c30f00000000000000000000000000000000",
+            "msg1 vector drift — a transcript regression (prologue/pattern/PSK/framing)"
+        );
+        assert_eq!(
+            msg2_hex,
+            "02000000ddccbbaa44332211ff2ee45601ec1b67310c7790404585ae697331eee1c1f8cf2419731c1fff3e6b3f6529af09c0e8f2fbac6ef2f1ab3a4be902f188265bba9395c5f6b05d64fec700000000000000000000000000000000",
+            "msg2 vector drift — a transcript regression"
+        );
     }
 
     /// #3882 RED-on-revert: a PEER-INITIATED rekey (xpf is the RESPONDER)
