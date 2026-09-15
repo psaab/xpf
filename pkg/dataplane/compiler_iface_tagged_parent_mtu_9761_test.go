@@ -153,6 +153,122 @@ func TestATaggedFabricReferencePlansNoMTU_9761(t *testing.T) {
 	}
 }
 
+// #9872: a fabric interface with CONFIGURED members but no local member is the
+// bond ApplyBonds creates, and the bond setup owns fab0's MTU -- so the #9761
+// tagged-parent exception must key on configured membership, not on the
+// local-node derivation. The reference still resolves to fab0 itself (the
+// bond): VLAN children and BPF attach to the bond, never to a slave.
+//
+// Both cells compile a real fab0 (vlan-tagging + member-interfaces + unit
+// vlan-id) through the strict compiler, so the FabricMembers population
+// (compiler_interfaces.go) and the empty local derivation (compiler_derivations.go)
+// are premises the compiler itself supplies, not hand-built structs.
+func compileSetTree9872(t *testing.T, cmds ...string) *config.ConfigTree {
+	t.Helper()
+	tree := &config.ConfigTree{}
+	for _, cmd := range cmds {
+		path, err := config.ParseSetCommand(cmd)
+		if err != nil {
+			t.Fatalf("ParseSetCommand(%q): %v", cmd, err)
+		}
+		if err := tree.SetPath(path); err != nil {
+			t.Fatalf("SetPath(%q): %v", cmd, err)
+		}
+	}
+	return tree
+}
+
+func assertBondFabricPlansNoMTU9872(t *testing.T, cfg *config.Config, wantMembers []string) {
+	t.Helper()
+	fab0 := cfg.Interfaces.Interfaces["fab0"]
+	if fab0 == nil {
+		t.Fatalf("premise: no fab0 after compile; keys: %v", cfg.Interfaces.Interfaces)
+	}
+	if len(fab0.FabricMembers) != len(wantMembers) {
+		t.Fatalf("premise: fab0 FabricMembers = %q, want %q", fab0.FabricMembers, wantMembers)
+	}
+	for i, m := range wantMembers {
+		if fab0.FabricMembers[i] != m {
+			t.Fatalf("premise: fab0 FabricMembers = %q, want %q", fab0.FabricMembers, wantMembers)
+		}
+	}
+	if fab0.LocalFabricMember != "" {
+		t.Fatalf("premise: fab0 LocalFabricMember = %q, want none (remote-only shape)", fab0.LocalFabricMember)
+	}
+	if phys, _, _, vlan := resolveInterfaceRef("fab0.10", cfg); phys != "fab0" || vlan != 10 {
+		t.Fatalf("fab0.10 resolves to phys %q vlan %d, want the fab0 bond at vlan 10", phys, vlan)
+	}
+	for name, pd := range planPhysDesired(cfg) {
+		if pd.mtu != 0 {
+			t.Errorf("a tagged bond-fabric reference planned mtu %d on %s, want none: the bond setup owns fab0's MTU",
+				pd.mtu, name)
+		}
+	}
+}
+
+// Members with no chassis-cluster stanza: nothing derives local.
+func TestATaggedBondFabricReferencePlansNoMTU_9872(t *testing.T) {
+	tree := compileSetTree9872(t,
+		"set interfaces fab0 mtu 1400",
+		"set interfaces fab0 vlan-tagging",
+		"set interfaces fab0 fabric-options member-interfaces ge-0/0/0",
+		"set interfaces fab0 fabric-options member-interfaces ge-0/0/1",
+		"set interfaces fab0 unit 10 vlan-id 10",
+		"set security zones security-zone fabric interfaces fab0.10",
+	)
+	cfg, err := config.CompileConfig(tree)
+	if err != nil {
+		t.Fatalf("CompileConfig: %v", err)
+	}
+	assertBondFabricPlansNoMTU9872(t, cfg, []string{"ge-0/0/0", "ge-0/0/1"})
+}
+
+// Node-1 box with members whose slots map to node 0 only: remote-only.
+func TestATaggedRemoteOnlyFabricReferencePlansNoMTU_9872(t *testing.T) {
+	tree := compileSetTree9872(t,
+		"set chassis cluster node 1",
+		"set chassis cluster authentication-key test-cluster-psk-9872",
+		"set interfaces fab0 mtu 1400",
+		"set interfaces fab0 vlan-tagging",
+		"set interfaces fab0 fabric-options member-interfaces ge-1/0/0",
+		"set interfaces fab0 fabric-options member-interfaces ge-2/0/0",
+		"set interfaces fab0 unit 10 vlan-id 10",
+		"set security zones security-zone fabric interfaces fab0.10",
+	)
+	cfg, err := config.CompileConfigForNode(tree, 1)
+	if err != nil {
+		t.Fatalf("CompileConfigForNode: %v", err)
+	}
+	if cfg.Chassis.Cluster == nil || cfg.Chassis.Cluster.NodeID != 1 {
+		t.Fatalf("premise: compiled for node %v, want node 1", cfg.Chassis.Cluster)
+	}
+	assertBondFabricPlansNoMTU9872(t, cfg, []string{"ge-1/0/0", "ge-2/0/0"})
+}
+
+// The caveat lock: SlotToNodeID maps every non-7 slot to node 0, so the same
+// members on a node-0 box DO derive local. If that mapping ever changes, this
+// fails loudly instead of letting the remote-only cell above pass vacuously.
+func TestFabricMembersDeriveLocalOnNode0_9872(t *testing.T) {
+	tree := compileSetTree9872(t,
+		"set chassis cluster node 0",
+		"set chassis cluster authentication-key test-cluster-psk-9872",
+		"set interfaces fab0 mtu 1400",
+		"set interfaces fab0 vlan-tagging",
+		"set interfaces fab0 fabric-options member-interfaces ge-1/0/0",
+		"set interfaces fab0 fabric-options member-interfaces ge-2/0/0",
+		"set interfaces fab0 unit 10 vlan-id 10",
+		"set security zones security-zone fabric interfaces fab0.10",
+	)
+	cfg, err := config.CompileConfigForNode(tree, 0)
+	if err != nil {
+		t.Fatalf("CompileConfigForNode: %v", err)
+	}
+	fab0 := cfg.Interfaces.Interfaces["fab0"]
+	if fab0 == nil || fab0.LocalFabricMember != "ge-1/0/0" {
+		t.Fatalf("premise: node-0 fab0 LocalFabricMember = %q, want ge-1/0/0 (first slot-1 member derives local)", fab0.LocalFabricMember)
+	}
+}
+
 // A tagged per-unit tunnel resolves to its tunnel device, not to the interface's
 // own netdev, and keeps its VLAN id. Unit 5 carries VLAN 105, so a planner that
 // looks the unit up by VLAN id instead of unit number fails here. The tunnel manager owns that device's MTU,
@@ -247,14 +363,22 @@ func TestATaggedInterfaceNamedLikeAFabricStillPlansItsMTU_9761(t *testing.T) {
 // Here every shape is zoned ALONE, so no sibling reference can supply the plan a
 // broken planner skipped. The shapes vary every axis of a tagged reference:
 //   - the interface name, including tunnel and fabric lookalikes;
-//   - fabric membership, on and off for the same name;
+//   - fabric membership, three ways for the same name: none; configured members
+//     with a derived local member, as a compiled vSRX fabric does; and configured
+//     members with NO local member, the #9872 bond shape the planner exception
+//     keys on (a table with only the first two would pass a planner that still
+//     tested the local derivation alone);
+//   - vlan-tagging and flexible-vlan-tagging (#9872): the latter leaves
+//     VlanTagging false, so a planner that additionally required it fails here;
 //   - the unit's addressing: static, its own MTU, DHCPv4 or DHCPv6;
 //   - no tunnel, or a per-unit tunnel in each mode, on a device whose name looks
 //     like no tunnel;
 //   - a unit number equal to its VLAN id, one unlike it, and unit 0;
 //   - the reference's spelling of the unit: canonical, with a leading zero,
-//     with a plus sign, and for unit 0 no suffix at all, since
-//     resolveInterfaceRef parses the suffix numerically;
+//     with a plus sign, and for unit 0 no suffix at all, a trailing dot, and
+//     .-0, since resolveInterfaceRef parses the suffix numerically — except
+//     the trailing dot on a secure-tunnel base, which keeps the verbatim
+//     lexical ref by deliberate #9873 doctrine (see the skip below);
 //   - the interface-level mtu itself: a standard 1400 and a jumbo 9000.
 //
 // The expectation reads only the two real exceptions. A fabric reference and a
@@ -282,67 +406,143 @@ func TestEveryTaggedReferenceShapePlansByTheTwoExceptionsOnly_9761(t *testing.T)
 		for _, uv := range [][2]int{{20, 20}, {6, 106}, {0, 30}} {
 			suffixes := []string{fmt.Sprintf(".%d", uv[0]), fmt.Sprintf(".0%d", uv[0]), fmt.Sprintf(".+%d", uv[0])}
 			if uv[0] == 0 {
-				suffixes = append(suffixes, "")
+				suffixes = append(suffixes, "", ".", ".-0")
 			}
 			for _, suffix := range suffixes {
 				numberings = append(numberings, numbering{unit: uv[0], vlan: uv[1], mtu: mtu, suffix: suffix})
 			}
 		}
 	}
-	cases, failed := 0, 0
+	cases, failed, skipped := 0, 0, 0
+	fabrics := []struct {
+		label   string
+		members bool // configured FabricMembers present
+		local   bool // derived LocalFabricMember present
+	}{
+		{"plain", false, false},
+		{"fabric-local", true, true},
+		{"fabric-bond", true, false},
+	}
 	for _, name := range names {
-		for _, fabric := range []bool{false, true} {
+		for _, fabric := range fabrics {
 			for _, u := range units {
 				for _, mode := range []string{"", "gre", "ipip", "wireguard"} {
-					for _, nv := range numberings {
-						cases++
-						label := fmt.Sprintf("%s%s (unit %d, vlan %d, mtu %d, fabric=%v, %s, tunnel %q)", name, nv.suffix, nv.unit, nv.vlan, nv.mtu, fabric, u.label, mode)
-						unit := u.unit(nv.unit, nv.vlan)
-						if mode != "" {
-							unit.Tunnel = &config.TunnelConfig{Name: fmt.Sprintf("tun%d-9761", nv.unit), Mode: mode}
-						}
-						ifCfg := &config.InterfaceConfig{
-							Name: name, MTU: nv.mtu, VlanTagging: true,
-							Units: map[int]*config.InterfaceUnit{nv.unit: unit},
-						}
-						if fabric {
-							ifCfg.LocalFabricMember = "ge-0/0/9"
-						}
-						cfg := &config.Config{}
-						cfg.Security.Zones = map[string]*config.ZoneConfig{
-							"z": {Name: "z", Interfaces: []string{name + nv.suffix}},
-						}
-						cfg.Interfaces.Interfaces = map[string]*config.InterfaceConfig{name: ifCfg}
+					for _, flex := range []bool{false, true} {
+						for _, nv := range numberings {
+							// #9872 x #9873: the trailing-dot spelling of unit 0
+							// is not a tagged shape on a secure-tunnel base.
+							// stUnitCarriesVlanID9873 parses the suffix
+							// strictly, so "st10." keeps the verbatim lexical
+							// ref (vlan 0, untagged plan) by deliberate #9873
+							// doctrine — this table enumerates tagged shapes
+							// only. Pinned by
+							// TestStTrailingDotSuffixKeepsVerbatimRef_9872.
+							if nv.suffix == "." && config.IsSecureTunnelIfName(name) {
+								skipped++
+								continue
+							}
+							cases++
+							tagging := "vlan-tagging"
+							if flex {
+								tagging = "flexible-vlan-tagging"
+							}
+							label := fmt.Sprintf("%s%s (unit %d, vlan %d, mtu %d, %s, %s, %s, tunnel %q)", name, nv.suffix, nv.unit, nv.vlan, nv.mtu, fabric.label, tagging, u.label, mode)
+							unit := u.unit(nv.unit, nv.vlan)
+							if mode != "" {
+								unit.Tunnel = &config.TunnelConfig{Name: fmt.Sprintf("tun%d-9761", nv.unit), Mode: mode}
+							}
+							ifCfg := &config.InterfaceConfig{
+								Name: name, MTU: nv.mtu, VlanTagging: !flex, FlexibleVlanTagging: flex,
+								Units: map[int]*config.InterfaceUnit{nv.unit: unit},
+							}
+							if fabric.members {
+								ifCfg.FabricMembers = []string{"ge-0/0/9"}
+							}
+							if fabric.local {
+								ifCfg.LocalFabricMember = "ge-0/0/9"
+							}
+							cfg := &config.Config{}
+							cfg.Security.Zones = map[string]*config.ZoneConfig{
+								"z": {Name: "z", Interfaces: []string{name + nv.suffix}},
+							}
+							cfg.Interfaces.Interfaces = map[string]*config.InterfaceConfig{name: ifCfg}
 
-						plan := planPhysDesired(cfg)
-						own := config.LinuxIfName(name)
-						exception := fabric || mode != ""
-						ok := true
-						for dev, pd := range plan {
-							if pd.mtu != 0 && (exception || dev != own) {
-								t.Errorf("%s: planned mtu %d on %s", label, pd.mtu, dev)
-								ok = false
+							plan := planPhysDesired(cfg)
+							own := config.LinuxIfName(name)
+							exception := fabric.members || mode != ""
+							ok := true
+							for dev, pd := range plan {
+								if pd.mtu != 0 && (exception || dev != own) {
+									t.Errorf("%s: planned mtu %d on %s", label, pd.mtu, dev)
+									ok = false
+								}
 							}
-						}
-						if !exception {
-							if pd := plan[own]; pd == nil || pd.mtu != nv.mtu {
-								t.Errorf("%s: plan[%s] = %+v, want the interface-level mtu %d", label, own, pd, nv.mtu)
-								ok = false
+							if !exception {
+								if pd := plan[own]; pd == nil || pd.mtu != nv.mtu {
+									t.Errorf("%s: plan[%s] = %+v, want the interface-level mtu %d", label, own, pd, nv.mtu)
+									ok = false
+								}
 							}
-						}
-						if !ok {
-							failed++
+							if !ok {
+								failed++
+							}
 						}
 					}
 				}
 			}
 		}
 	}
-	if cases != 5760 {
-		t.Errorf("premise: enumerated %d shapes, want 5760", cases)
+	if cases != 20544 {
+		t.Errorf("premise: enumerated %d shapes, want 20544", cases)
+	}
+	// 1 st name x 3 fabric states x 4 units x 4 modes x 2 mtu x 2 tagging.
+	if skipped != 192 {
+		t.Errorf("premise: skipped %d trailing-dot st shapes, want 192", skipped)
 	}
 	if failed > 0 {
 		t.Errorf("%d of %d tagged reference shapes planned wrongly", failed, cases)
+	}
+}
+
+// TestStTrailingDotSuffixKeepsVerbatimRef_9872 pins why the table above skips
+// the trailing-dot spelling on secure-tunnel bases: stUnitCarriesVlanID9873
+// parses the suffix strictly, so "st10." — empty suffix, Atoi error — keeps
+// the verbatim lexical ref (phys "st10.", vlan 0) exactly as before #9873,
+// and the planner takes the untagged path for it. This is the deliberate
+// #9873 doctrine for non-numeric suffixes (unconfigured base, missing unit,
+// untagged unit, and non-numeric suffix all keep verbatim); only a strictly
+// numeric suffix whose configured unit carries a vlan-id falls through.
+func TestStTrailingDotSuffixKeepsVerbatimRef_9872(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Security.Zones = map[string]*config.ZoneConfig{
+		"z": {Name: "z", Interfaces: []string{"st10."}},
+	}
+	cfg.Interfaces.Interfaces = map[string]*config.InterfaceConfig{
+		"st10": {
+			Name: "st10", MTU: 1400, VlanTagging: true,
+			Units: map[int]*config.InterfaceUnit{
+				0: {Number: 0, VlanID: 30, Addresses: []string{"192.0.2.1/24"}},
+			},
+		},
+	}
+	if dev, ok := cfg.SecureTunnelUnitNetdev("st10."); ok {
+		t.Fatalf("premise: st10. is owned by a VPN (device %q); this case is about the unbound lexical arm", dev)
+	}
+	phys, cfgName, unitNum, vlanID := resolveInterfaceRef("st10.", cfg)
+	if phys != "st10." || cfgName != "st10" || unitNum != 0 || vlanID != 0 {
+		t.Fatalf("st10. resolves to (%q, %q, unit %d, vlan %d), want the verbatim ref at vlan 0",
+			phys, cfgName, unitNum, vlanID)
+	}
+	plan := planPhysDesired(cfg)
+	pd := plan["st10."]
+	if pd == nil || pd.mtu != 1400 {
+		t.Fatalf("plan[st10.] = %+v, want the untagged plan with the interface-level mtu 1400", pd)
+	}
+	if len(pd.addrs) != 1 || pd.addrs[0] != "192.0.2.1/24" {
+		t.Errorf("plan[st10.].addrs = %v, want unit 0's address: the verbatim ref plans untagged", pd.addrs)
+	}
+	if pd := plan["st10"]; pd != nil {
+		t.Errorf("plan[st10] = %+v, want no entry: the trailing-dot ref never reaches the tagged branch", *pd)
 	}
 }
 
