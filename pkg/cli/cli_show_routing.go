@@ -869,6 +869,9 @@ func (c *CLI) showEventOptions() error {
 			fmt.Printf("  Events: %s\n", strings.Join(ep.Events, ", "))
 		}
 		for _, w := range ep.WithinClauses {
+			if w == nil {
+				continue // #9916 F-135: never panic display on a corrupt clause
+			}
 			fmt.Printf("  Within: %d seconds", w.Seconds)
 			if w.TriggerOn > 0 {
 				fmt.Printf(", trigger on %d", w.TriggerOn)
