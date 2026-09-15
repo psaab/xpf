@@ -232,7 +232,7 @@ flag (read, but value-less)	firewall family inet6 filter <*> term <*> then rejec
 COMPARED	firewall policer <*> if-exceeding bandwidth-limit
 COMPARED	firewall policer <*> if-exceeding burst-size-limit
 flag (read, but value-less)	firewall policer <*> logical-interface-policer
-flag (read, but value-less)	firewall policer <*> then discard
+COMPARED	firewall policer <*> then forwarding-class
 COMPARED	firewall policer <*> then loss-priority
 err (parent stanza does not compile)	firewall three-color-policer <*> single-rate color-aware
 err (parent stanza does not compile)	firewall three-color-policer <*> single-rate color-blind
@@ -240,6 +240,7 @@ err (parent stanza does not compile)	firewall three-color-policer <*> single-rat
 err (parent stanza does not compile)	firewall three-color-policer <*> single-rate committed-information-rate
 err (parent stanza does not compile)	firewall three-color-policer <*> single-rate excess-burst-size
 err (parent stanza does not compile)	firewall three-color-policer <*> then discard
+err (parent stanza does not compile)	firewall three-color-policer <*> then forwarding-class
 err (parent stanza does not compile)	firewall three-color-policer <*> then loss-priority
 err (parent stanza does not compile)	firewall three-color-policer <*> two-rate color-aware
 err (parent stanza does not compile)	firewall three-color-policer <*> two-rate color-blind

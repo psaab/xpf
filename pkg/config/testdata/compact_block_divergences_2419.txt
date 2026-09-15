@@ -238,10 +238,8 @@ firewall family any filter xpfarg interface-specific	empty
 firewall family inet filter xpfarg interface-specific	empty
 firewall family inet6 filter xpfarg interface-specific	empty
 firewall policer xpfarg logical-interface-policer	empty
-firewall policer xpfarg then discard	empty
 firewall three-color-policer xpfarg single-rate color-aware	empty
 firewall three-color-policer xpfarg single-rate color-blind	empty
-firewall three-color-policer xpfarg then discard	empty
 firewall three-color-policer xpfarg two-rate color-aware	empty
 firewall three-color-policer xpfarg two-rate color-blind	empty
 forwarding-options allow-dataplane-sleep	empty

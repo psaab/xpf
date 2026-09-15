@@ -349,6 +349,11 @@ func TestFlatRunResidueSchemasResolve9235(t *testing.T) {
 		want []string
 	}{
 		{"policer if-exceeding", policerIfExceedingSchema9235(), []string{"bandwidth-limit", "burst-size-limit"}},
+		// M3 (#9882): the policer `then` resolvers drive hoistAndSplitRun8939
+		// at both then-readers — without these rows a nil resolver would
+		// silently disable the one-line-run expansion.
+		{"policer then", policerThenSchema9882(), []string{"discard", "forwarding-class", "loss-priority"}},
+		{"three-color-policer then", threeColorPolicerThenSchema9882(), []string{"discard", "forwarding-class", "loss-priority"}},
 		{"ra prefix", raPrefixSchema9235(), []string{"autonomous", "no-autonomous", "no-onlink", "on-link"}},
 		{"static qualified-next-hop", staticQualifiedNextHopSchema9235(), []string{"interface", "metric", "preference"}},
 		{"scheduler", schedulerSchema9235(), []string{"start-date", "start-time", "stop-date"}},

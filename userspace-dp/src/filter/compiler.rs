@@ -546,11 +546,14 @@ fn build_three_color_policer_state(
 /// matching capability refusal disarmed forwarding on every binding. An
 /// action neither side knows still fails closed, as a drift guard; the Go
 /// mirror is `threeColorThenActionSupported`.
+/// #9882: `forwarding-class <class>` is admitted identically — the second
+/// marking spelling, same no-drop default from `treatments_from_then_action`.
 fn snapshot_three_color_shape_supported(snap: &ThreeColorPolicerSnapshot) -> bool {
     snap.color_blind
         && (snap.then_action.is_empty()
             || snap.then_action == "discard"
-            || snap.then_action.starts_with("loss-priority "))
+            || snap.then_action.starts_with("loss-priority ")
+            || snap.then_action.starts_with("forwarding-class "))
 }
 
 fn treatments_from_then_action(action: &str) -> ThreeColorTreatments {

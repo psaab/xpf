@@ -106,6 +106,20 @@ func policerIfExceedingSchema9235() *schemaNode {
 	return resolveSchemaPath9235("firewall", "policer", "if-exceeding")
 }
 
+// #9882: the policer `then` containers, for the hoistAndSplitRun8939 reader
+// below them. A one-line run (`then forwarding-class af11 loss-priority
+// high;`, or the flat-set single command) nests or packs the later statements
+// where a children-only walk keeps just the head; expanding the run at the
+// reader makes every spelling read what the operator wrote. Covered by
+// TestFlatRunResidueSchemasResolve9235 like every resolver here.
+func policerThenSchema9882() *schemaNode {
+	return resolveSchemaPath9235("firewall", "policer", "then")
+}
+
+func threeColorPolicerThenSchema9882() *schemaNode {
+	return resolveSchemaPath9235("firewall", "three-color-policer", "then")
+}
+
 func raPrefixSchema9235() *schemaNode {
 	return resolveSchemaPath9235("protocols", "router-advertisement", "interface", "prefix")
 }

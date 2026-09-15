@@ -244,6 +244,24 @@ func runUniformGatesFilter(tree *ConfigTree, cfg *Config, opts compileOpts) erro
 		}
 	}
 
+	// #9882 policer `then` unknown-action gate. A policer whose `then` carries
+	// a token that is none of the recognized actions kept the "discard"
+	// default while the token vanished silently — a typo that committed clean
+	// on every path including strict and over-dropped with zero diagnostic.
+	// Reads the DEFERRED channel (UnknownActions) populated by compileFirewall,
+	// the policer path's analog of the #2399 filter-term gate (which likewise
+	// runs before its terminal-conflict sibling). Runs BEFORE the #8445
+	// terminal-vs-marking gate below: an unknown token means the intent cannot
+	// be fully characterized, so it is reported first.
+	if err := validateFirewallPolicerUnknownActionsStrict(cfg); err != nil {
+		if opts.lenientPolicerUnknownActions {
+			cfg.Warnings = append(cfg.Warnings,
+				fmt.Sprintf("firewall policer unknown then-action (downgraded to warning on tolerant path): %v", err))
+		} else {
+			return err
+		}
+	}
+
 	// #8445 policer `then` terminal-vs-marking gate. A policer whose `then`
 	// carries both `discard` and a marking action keeps only the last, and with
 	// `discard` written first the compiled policer meters and drops NOTHING —
