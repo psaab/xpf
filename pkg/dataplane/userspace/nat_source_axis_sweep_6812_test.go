@@ -871,6 +871,13 @@ var builderTierAxisExemptions6812 = mergeAxisExemptions6812(
 		"Snapshot.PoolUnusable", "Snapshot.PoolUnusableReason",
 	),
 	fixtureConstantAxes6812(
+		"no rule here authors an empty `match`, so the #9874 fail-closed poison "+
+			"never fires. A poisoned rule is precisely the state that drops "+
+			"instead of translating, and a tiebreak keyed on the marker would "+
+			"reorder such a config.",
+		"Snapshot.LenientMatchDropped",
+	),
+	fixtureConstantAxes6812(
 		"no pool here is deterministic-CGNAT, so the whole #4559 block is zero.",
 		"Snapshot.DeterministicMode", "Snapshot.DeterministicBlockSize",
 		"Snapshot.DeterministicBlocksPerIP", "Snapshot.DeterministicHostBase",
@@ -909,6 +916,13 @@ var builderRuleSetAxisExemptions6812 = mergeAxisExemptions6812(
 		"Snapshot.DeterministicMode", "Snapshot.DeterministicBlockSize",
 		"Snapshot.DeterministicBlocksPerIP", "Snapshot.DeterministicHostBase",
 		"Snapshot.DeterministicHostCount",
+	),
+	fixtureConstantAxes6812(
+		"no rule here authors an empty `match`, so the #9874 fail-closed poison "+
+			"is false in every slot of every block. A within-set sort keyed on "+
+			"the marker would reorder a config carrying a poisoned rule and "+
+			"stay green here.",
+		"Snapshot.LenientMatchDropped",
 	),
 	productionConstantAxes6812(
 		"scope is a property of the RULE-SET: buildSourceNATSnapshotsWithFeeds stamps "+

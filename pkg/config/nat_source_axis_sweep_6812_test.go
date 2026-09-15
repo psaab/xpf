@@ -989,9 +989,23 @@ var walkRuleAxisExemptions6812 = mergeAxisExemptions6812(
 			"false for every scope-only rule, so this is a real blind spot and NOT "+
 			"production-constant. Registered rather than varied for the same reason as "+
 			"thenAuthored below: nothing sorts or compares on it — it is read once by "+
-			"validateNATRuleMatchConstrainedStrict and never reaches the dataplane. If "+
+			"validateNATRuleMatchConstrainedStrict and never reaches the dataplane "+
+			"ITSELF. What reaches the wire is the EXPORTED marker #9874 derives "+
+			"from it (LenientMatchDropped, own column below), not this bit. If "+
 			"that ever changes, vary it instead.",
 		"Rule.matchAuthored",
+	),
+	fixtureConstantAxes6812(
+		"#9874 fail-closed poison, derived from matchAuthored above: whether "+
+			"the rule authored a `match` that constrains nothing. Constant "+
+			"false here because every fixture rule carries a populated match; "+
+			"in production it is true for every tolerant-loaded empty-match "+
+			"rule, so this is a real blind spot and NOT production-constant. "+
+			"Registered rather than varied because nothing sorts or compares "+
+			"on it: the snapshot builders copy it onto the wire and the Rust "+
+			"table drops such a rule closed. If a comparator ever keys on "+
+			"it, vary it instead.",
+		"Rule.LenientMatchDropped",
 	),
 	fixtureConstantAxes6812(
 		"#7013 compile-time diagnostic state: what ONE `then` container authored, kept "+

@@ -204,7 +204,7 @@ func shapeDigest8892(t *testing.T) (string, int) {
 // garbage domain on a delete, which can name ANOTHER TENANT's row. Exact-
 // equality refusal is the only mechanism that stops the pairing.
 const (
-	snapshotShapeGolden8892 = "d4b2056304c402fd1b42b6b910f0a8466d7da81c44c97cf8890098b8d530008c"
+	snapshotShapeGolden8892 = "2c6aa7dececb27593e55dce5959cb7ee5268efb1e60b33b42ae57986e35685d2"
 	// v13 BUMPED (issue 9412) against the SAME digest. The TCP close class
 	// crosses the HA session-sync path, and the old behaviour is the defect it
 	// fixes, so the v9 rule requires the bump. The session-sync messages are not
@@ -280,7 +280,16 @@ const (
 	// the pinned-map pre-flight (fail-closed deploy per §5e), not by this gate;
 	// a new helper under an old daemon reads an empty set and refuses kernel-path
 	// transport for every endpoint — the v10/v11 arm, not a STANDS entry.
-	snapshotShapeVersion8892 = 18
+	// v18 -> v19 BUMPED (issue 9874), and this one moved the digest twice over:
+	// `SourceNATRuleSnapshot.LenientMatchDropped` is a real, transmitted field,
+	// and the typed-config `NATRule.LenientMatchDropped` diagnostic that feeds
+	// it is walked via the embedded Config (it is `json:"-"`, so it moves the
+	// digest by tag only — the #9246 arm, folded into this bump rather than a
+	// separate STANDS entry). The helper fails a marked rule CLOSED (drop +
+	// count) instead of installing the catch-all translator an empty match set
+	// otherwise reads as. An old helper ignores the marker and keeps installing
+	// the catch-all, which IS the defect — the v10/v11 arm, not a STANDS entry.
+	snapshotShapeVersion8892 = 19
 )
 
 func TestSnapshotShapeIsPinnedToProtocolVersion8892(t *testing.T) {
