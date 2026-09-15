@@ -403,9 +403,11 @@ func TestTableIDGateCountsALiteralNodeVariableGroup_9657(t *testing.T) {
 }
 
 // #9422: an apply-groups-except at the routing-instances stanza stops a
-// top-level application of that group there, and group expansion honours it.
-// The pre-expansion view must not count the excluded group's instances. Where
-// expansion does NOT honour the exclusion, the collision is still refused.
+// top-level application of that group there, and group expansion honours it —
+// on the direct path and, since #9862, on the nested-through-another-group
+// path too. The pre-expansion view must not count the excluded group's
+// instances. Where no exclusion names the group, the collision is still
+// refused.
 func TestTableIDGateHonoursAnExcludedGroup_9657(t *testing.T) {
 	assertFixtureCollides9657(t)
 	ri7Excluding := func(group string) string {
@@ -422,11 +424,24 @@ func TestTableIDGateHonoursAnExcludedGroup_9657(t *testing.T) {
 	if names := riNames9657(cfg); len(names) != 1 || names[0] != "ri7" {
 		t.Errorf("fixture: the runtime must honour the exclusion and keep only ri7, got %v", names)
 	}
+	// #9862: g1 reached through another group's body is now honoured too —
+	// the exclusion drops g1's instances on both the direct and the nested
+	// path, so ri116 never lands and there is no collision. This row used to
+	// assert the opposite (nested exclusions ignored); that was the bug.
+	nested := "groups {\n    g0 {\n        apply-groups g1;\n    }\n    g1 {\n        " + braced116_9657 + "    }\n}\n" +
+		"apply-groups [ g0 g1 ];\n" + ri7Excluding("g1")
+	if _, err := compile9657(t, nested, false); err != nil {
+		t.Errorf("#9657/#9862: g1 is excluded at routing-instances on both paths, so its ri116 never lands; the strict path refused: %v", err)
+	}
+	ncfg, err := compile9657(t, nested, true)
+	if err != nil {
+		t.Fatalf("lenient nested: %v", err)
+	}
+	if names := riNames9657(ncfg); len(names) != 1 || names[0] != "ri7" {
+		t.Errorf("#9657/#9862: the runtime must honour the nested exclusion and keep only ri7, got %v", names)
+	}
 	for _, tc := range []struct{ name, text string }{
 		{"the exclusion names another group", group9657("g1", false) + "apply-groups g1;\n" + ri7Excluding("g2")},
-		{"g1 is also reached through another group's body",
-			"groups {\n    g0 {\n        apply-groups g1;\n    }\n    g1 {\n        " + braced116_9657 + "    }\n}\n" +
-				"apply-groups [ g0 g1 ];\n" + ri7Excluding("g1")},
 	} {
 		if _, err := compile9657(t, tc.text, false); err == nil || !strings.Contains(err.Error(), "table-id collision") {
 			t.Errorf("#9657 %s: ri116 still lands, so the collision must be refused, got %v", tc.name, err)
@@ -467,7 +482,7 @@ func TestTableIDGateHonoursAnExcludedGroup_9657(t *testing.T) {
 
 // The union reads each compile path's own expansion, so an exclusion counts only
 // where expansion honours it. On a routing-instances root with extra keys the
-// exclusion is not honoured (siblingsExcludeGroup needs the same keys). Here the
+// exclusion is not honoured (the sibling-except union needs the same keys). Here the
 // node0 and node1 expansions fail on the undefined resolved groups, the generic
 // compile expands the literal "${node}" group, and G's ri116 lands beside ri7,
 // so the collision must be refused.

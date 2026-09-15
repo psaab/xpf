@@ -30,6 +30,23 @@ type Node struct {
 	// Set during ExpandGroups when tagInherited is true.
 	InheritedFrom string
 
+	// fromGroups names the groups whose body literally contains this node —
+	// leaf provenance for `apply-groups-except` through nested groups (#9862).
+	// A group's context-walked clone is tagged with that group's (resolved)
+	// name before its nested references expand, so nodes adopted from a nested
+	// group keep the nested name while the outer group's own nodes keep the
+	// outer one. mergeNodes then honours `apply-groups-except H` against H's
+	// nodes wherever H is applied, directly or through another group.
+	//
+	// Unexported with no struct tags: compile-internal only, never persisted
+	// (unlike InheritedFrom, which is the display path's single-winner
+	// attribution and keeps its nested-wins rule). Tags are chain-independent,
+	// so they flow through the #4474 memo verbatim via cloneNodes. A nil slice means
+	// untagged — authored-inline, or a cross-group leaf-list union whose
+	// per-member provenance is uncertain (mergeLeafListInto clears it) — and
+	// filters fall back to the merge's outer group for those nodes.
+	fromGroups []string
+
 	// Inactive marks a node deactivated via the Junos `inactive:` statement
 	// marker (#2008 H1). The node is retained verbatim in the tree — it
 	// displays in `show configuration` (with the `inactive:` prefix
@@ -611,9 +628,14 @@ func cloneNodes(nodes []*Node) []*Node {
 			IsLeaf:        n.IsLeaf,
 			Annotation:    n.Annotation,
 			InheritedFrom: n.InheritedFrom,
-			Inactive:      n.Inactive,
-			Line:          n.Line,
-			Column:        n.Column,
+			// #9862: leaf provenance flows through every clone, including the
+			// #4474 memo store/handout. Deep-copied: clones must never share the
+			// backing array (tag union-adds append). Nil-preserving, so untagged
+			// nodes allocate nothing.
+			fromGroups: append([]string(nil), n.fromGroups...),
+			Inactive:   n.Inactive,
+			Line:       n.Line,
+			Column:     n.Column,
 		}
 	}
 	return result
