@@ -237,6 +237,19 @@ pub(crate) struct InterfaceSnapshot {
     pub host_inbound_system_services: Vec<String>,
     #[serde(rename = "host_inbound_protocols", default)]
     pub host_inbound_protocols: Vec<String>,
+    /// #9821: the STRUCTURAL row identity — `Some(true)` for a logical-unit
+    /// row, `Some(false)` for an interface (base) row. Name shape cannot
+    /// answer this: a declared interface may itself contain a dot
+    /// (`ge-0/0/5.0`), so "contains a dot" reads a dotted base row as a
+    /// unit row. The Go builder states which loop emitted the row; this
+    /// plane reads it instead of re-deriving it.
+    ///
+    /// `None` (absent key: old Go, tests, fixtures) falls back to the legacy
+    /// name parse — old-Go behavior exactly. No `skip_serializing_if`: the
+    /// field serializes as explicit `null` for `None`, pinning it on the
+    /// `protocol_wire_v1` contract, while Go always emits the bool.
+    #[serde(rename = "is_unit", default)]
+    pub is_unit: Option<bool>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]

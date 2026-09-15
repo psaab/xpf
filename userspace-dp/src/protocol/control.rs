@@ -158,8 +158,16 @@ use super::snapshot::{ConfigSnapshot, FabricSnapshot, NeighborSnapshot, Userspac
 // exactly as before — the pre-fix window, closed on upgrade. Exact equality
 // refuses both pairings. See protocol.go's v20 note. The #8892 digest moves
 // with it (a real, transmitted field).
+// v21 (#9821): `InterfaceSnapshot.is_unit`, the STRUCTURAL row identity. An
+// old helper parses every row by name shape, so a v20 helper reads a dotted
+// base row as a unit row — admitting its zone claim and netdev where only
+// unit rows belong — and that misread IS the defect the field closes. The
+// reverse pairing degrades by construction (`None` parses the name, old-Go
+// behavior exactly) but exact equality refuses it anyway, so no mixed window
+// silently loses the fix. See protocol.go's v21 note. The #8892 digest moves
+// with it (a real, transmitted field).
 // Keep the line below in this exact form: the Go lockstep guard parses it.
-pub(crate) const CONFIG_SNAPSHOT_PROTOCOL_VERSION: i32 = 20;
+pub(crate) const CONFIG_SNAPSHOT_PROTOCOL_VERSION: i32 = 21;
 
 /// #9520: the machine-readable prefix of the refusal `apply` sends when a
 /// snapshot reuses the installed generation with a different content digest.

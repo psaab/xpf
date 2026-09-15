@@ -96,13 +96,17 @@ enum UnitZoneClaim {
 /// True for a snapshot row that names a LOGICAL UNIT (`st0.0`, `reth1.0`,
 /// `ge-0/0/9.100`) rather than an interface (`st0`, `reth1`, `ge-0/0/9`).
 ///
-/// Mirrors the Go builder's `egressRowIdentity.isUnit`, which is set exactly on
-/// the rows emitted from the per-unit loop and named `fmt.Sprintf("%s.%d", ...)`.
-/// A Junos interface name never contains `.` — the separator is `/` — so the
-/// numeric suffix test is a spelling of the same fact rather than a heuristic,
-/// and requiring the suffix to be digits keeps a hypothetical dotted interface
-/// name from being read as a unit.
-fn is_logical_unit_row(name: &str) -> bool {
+/// #9821: the answer is STRUCTURAL, not a spelling. The Go builder states
+/// which loop emitted the row in `is_unit`, and `Some` is authoritative —
+/// a declared interface may itself contain a dot (`ge-0/0/5.0`), so the old
+/// "A Junos interface name never contains `.`" premise was false and its
+/// numeric-suffix test read a dotted base row as a unit row. `None` (old
+/// Go, tests, fixtures) falls back to that same suffix test, which is
+/// old-Go behavior exactly.
+fn is_logical_unit_row(name: &str, is_unit: Option<bool>) -> bool {
+    if let Some(structural) = is_unit {
+        return structural;
+    }
     match name.rsplit_once('.') {
         Some((base, unit)) => {
             !base.is_empty() && !unit.is_empty() && unit.bytes().all(|b| b.is_ascii_digit())
@@ -119,7 +123,7 @@ fn is_logical_unit_row(name: &str) -> bool {
 fn unit_zone_claims(snapshot: &ConfigSnapshot) -> BTreeMap<i32, UnitZoneClaim> {
     let mut out: BTreeMap<i32, UnitZoneClaim> = BTreeMap::new();
     for iface in &snapshot.interfaces {
-        if iface.ifindex <= 0 || !is_logical_unit_row(&iface.name) {
+        if iface.ifindex <= 0 || !is_logical_unit_row(&iface.name, iface.is_unit) {
             continue;
         }
         match out.entry(iface.ifindex) {
@@ -189,7 +193,6 @@ pub(super) fn populate_interfaces(
     // stamps them identically). Flushed into
     // `state.ifindex_unambiguous_zone_id` after the walk, alongside
     // `zones_carried` — ifindex → the zone names its rows literally carry, which
-    // is what corroborates the claim.
     let mut egress_zone_claim: BTreeMap<i32, EgressZoneClaim> = BTreeMap::new();
     let mut zones_carried: BTreeMap<i32, std::collections::BTreeSet<String>> = BTreeMap::new();
 
@@ -231,23 +234,37 @@ pub(super) fn populate_interfaces(
         state
             .ifindex_to_config_name
             .insert(iface.ifindex, iface.name.clone());
-        // #3096: record the interface's routing instance for NAT rule-set
-        // `from`/`to routing-instance` scope matching ("" = default VRF).
-        state
-            .ifindex_to_routing_instance
-            .insert(iface.ifindex, iface.routing_instance.clone());
-        // #7160 (#2387): record the numeric routing DOMAIN alongside the name.
-        // Go decides the number (`routingInstanceDomain`); 0 is the default
-        // instance and is what an old Go binary's snapshot yields for every
-        // interface. Only a non-zero domain is stored, so the map holds exactly
-        // the routing-instance MEMBER interfaces and an absent ifindex reads as
-        // domain 0 — the same "absent = default" convention the name map above
-        // uses, and what keeps `has_routing_domains` a truthful gate.
+        // #9821 (#12): (routing_instance, routing_domain) recorded for an
+        // ifindex always come from ONE row. A nonzero-domain (member) row
+        // claims the ifindex for both maps; a zero-domain row writes its
+        // name only while NO member row has claimed it (domain-map probe,
+        // not name-map: a zero-domain row may still carry a NAME — (name,0)
+        // is the #4446/old-Go compat shape, and its name must keep reaching
+        // NAT scope exactly as today).
+        // Delta vs the old code exists ONLY for member-row-before-zero-row
+        // on one ifindex (the bug order: zero no longer clobbers the member
+        // name). (name,0) rows, ("",0) rows, member-last, and
+        // member-vs-member last-wins are byte-identical.
+        // #3096: the instance name feeds NAT rule-set `from`/`to
+        // routing-instance` scope matching ("" = default VRF). #7160
+        // (#2387): Go decides the domain number (`routingInstanceDomain`);
+        // 0 is the default instance. Only a non-zero domain is stored, so
+        // the map holds exactly the MEMBER ifindexes and an absent ifindex
+        // reads as domain 0 — and `has_routing_domains` is sticky (set on
+        // claim, never cleared: membership, once observed, is not lost to
+        // row order).
         if iface.routing_domain != 0 {
+            state
+                .ifindex_to_routing_instance
+                .insert(iface.ifindex, iface.routing_instance.clone());
             state
                 .ifindex_to_routing_domain
                 .insert(iface.ifindex, iface.routing_domain);
             state.has_routing_domains = true;
+        } else if !state.ifindex_to_routing_domain.contains_key(&iface.ifindex) {
+            state
+                .ifindex_to_routing_instance
+                .insert(iface.ifindex, iface.routing_instance.clone());
         }
         name_to_ifindex.insert(iface.name.clone(), iface.ifindex);
         if !iface.linux_name.is_empty() {
@@ -1199,6 +1216,271 @@ mod routing_domain_7160_tests {
             DOMAIN_B,
             "without a zone encoding the same interface is an ordinary ingress \
              and keeps its own domain"
+        );
+    }
+    // Red matrix for the four same-ifindex cells below (measured on the
+    // pre-guard implementation via scratch worktree): exactly ONE reds —
+    // this one. The other three pin preserved behavior (member-vs-member
+    // last-wins, order-insensitivity, zeros naming) and stay green on both
+    // implementations by construction.
+
+    /// A member claim survives a trailing zero-domain row (#9821 #12).
+    ///
+    /// The member-claimed guard (not recency) decides the pair: a
+    /// nonzero-domain (member) row claims the ifindex for BOTH maps, and a
+    /// later zero-domain row writes nothing while the claim stands. Here the
+    /// base row carries tenant-a and the trailing unit row carries the
+    /// default instance: the merged pair stays the member's (instance +
+    /// domain), and the gate stays true — membership, once observed, is not
+    /// lost to row order. (This replaces an earlier revision that pinned
+    /// last-row-wins clearing; the settled design is the guard — pair
+    /// atomicity was never the invariant, membership survival is.)
+    ///
+    /// `ifindex_to_config_name` intentionally still takes the last row: it
+    /// is last-wins by design for NAT scope (untouched — byte-identical).
+    ///
+    /// FAIL-ON-REVERT: let a zero row overwrite and the domain is lost while
+    /// the name flips to the trailing row.
+    #[test]
+    fn same_ifindex_member_claim_survives_trailing_default_row() {
+        let snapshot = ConfigSnapshot {
+            interfaces: vec![
+                iface("ge-0-0-5", 10, "trust", "tenant-a", DOMAIN_A),
+                iface("ge-0-0-5.0", 10, "trust", "", 0),
+            ],
+            zones: vec![zone("trust", 1)],
+            ..Default::default()
+        };
+        let state = build(&snapshot);
+        assert_eq!(
+            state.ifindex_to_routing_instance.get(&10).cloned(),
+            Some("tenant-a".to_string()),
+            "the member's instance survives the trailing zero row"
+        );
+        assert_eq!(
+            state.ifindex_to_routing_domain.get(&10).copied(),
+            Some(DOMAIN_A),
+            "the member's domain survives the trailing zero row"
+        );
+        assert!(
+            state.has_routing_domains,
+            "the gate is sticky: a claim, once observed, is never lost to row order"
+        );
+        assert_eq!(ingress_routing_domain(&state, 10, 0, None), DOMAIN_A);
+        assert_eq!(
+            state.ifindex_to_config_name.get(&10).cloned(),
+            Some("ge-0-0-5.0".to_string()),
+            "config_name stays last-wins by design (NAT scope; untouched)"
+        );
+    }
+
+    /// Member-vs-member last-wins is preserved, and agreeing rows are
+    /// unaffected (#9821 #12).
+    ///
+    /// Two CLAIMED rows contend: the last member wins both maps (the guard
+    /// protects a claim against ZERO rows only, never against another
+    /// claim). The Go builder emits a base row ahead of its unit rows, so in
+    /// the ordinary order this is unit-row-wins — the unit row is the
+    /// traffic identity (#7509). The agreeing ifindex pins that the guard is
+    /// a no-op where there was no disagreement (the entire strict corpus).
+    ///
+    /// FAIL-ON-REVERT: first-member-wins (or any order-insensitivity across
+    /// claims) resolves the disagreeing ifindex to DOMAIN_A.
+    #[test]
+    fn same_ifindex_disagreeing_domains_resolve_to_the_last_rows_pair() {
+        let snapshot = ConfigSnapshot {
+            interfaces: vec![
+                iface("ge-0-0-5", 10, "trust", "tenant-a", DOMAIN_A),
+                iface("ge-0-0-5.0", 10, "trust", "tenant-b", DOMAIN_B),
+                iface("ge-0-0-6", 11, "trust", "tenant-a", DOMAIN_A),
+                iface("ge-0-0-6.0", 11, "trust", "tenant-a", DOMAIN_A),
+            ],
+            zones: vec![zone("trust", 1)],
+            ..Default::default()
+        };
+        let state = build(&snapshot);
+        assert_eq!(ingress_routing_domain(&state, 10, 0, None), DOMAIN_B);
+        assert_eq!(
+            state.ifindex_to_routing_instance.get(&10).cloned(),
+            Some("tenant-b".to_string()),
+            "instance and domain must come from ONE row"
+        );
+        assert_eq!(ingress_routing_domain(&state, 11, 0, None), DOMAIN_A);
+        assert!(state.has_routing_domains);
+    }
+
+    /// A member claim overwrites a zero row's name regardless of order
+    /// (#9821 #12): zero-first is not special — the claim wins both maps
+    /// whenever it appears.
+    ///
+    /// FAIL-ON-REVERT: first-row-wins keeps the zero row's empty instance.
+    #[test]
+    fn same_ifindex_member_overwrites_zero_row_in_any_order() {
+        let snapshot = ConfigSnapshot {
+            interfaces: vec![
+                iface("ge-0-0-5.0", 10, "trust", "", 0),
+                iface("ge-0-0-5", 10, "trust", "tenant-a", DOMAIN_A),
+            ],
+            zones: vec![zone("trust", 1)],
+            ..Default::default()
+        };
+        let state = build(&snapshot);
+        assert_eq!(
+            state.ifindex_to_routing_instance.get(&10).cloned(),
+            Some("tenant-a".to_string())
+        );
+        assert_eq!(
+            state.ifindex_to_routing_domain.get(&10).copied(),
+            Some(DOMAIN_A)
+        );
+        assert!(state.has_routing_domains);
+    }
+
+    /// Zero-only rows keep last-zero-wins naming with no domain (#9821 #12):
+    /// the (name,0) compat shape (#4446/old-Go) still reaches NAT scope by
+    /// name while the domain map holds exactly member ifindexes and the
+    /// gate stays false.
+    ///
+    /// FAIL-ON-REVERT: storing explicit zeros (or dropping the name) breaks
+    /// absent==default or the compat naming, respectively.
+    #[test]
+    fn same_ifindex_zero_rows_keep_name_without_domain() {
+        let snapshot = ConfigSnapshot {
+            interfaces: vec![
+                iface("ge-0-0-5", 10, "trust", "first", 0),
+                iface("ge-0-0-5.0", 10, "trust", "second", 0),
+            ],
+            zones: vec![zone("trust", 1)],
+            ..Default::default()
+        };
+        let state = build(&snapshot);
+        assert_eq!(
+            state.ifindex_to_routing_instance.get(&10).cloned(),
+            Some("second".to_string()),
+            "last zero row's name wins (byte-identical to the old unconditional insert)"
+        );
+        assert_eq!(
+            state.ifindex_to_routing_domain.get(&10).copied(),
+            None,
+            "no explicit zeros: the map holds exactly member ifindexes"
+        );
+        assert!(
+            !state.has_routing_domains,
+            "no claim observed, gate stays false"
+        );
+        assert_eq!(ingress_routing_domain(&state, 10, 0, None), 0);
+    }
+}
+
+// #9821 (#22) — structural row identity.
+//
+// `is_unit: Some` is authoritative: a dotted base row (`ge-0/0/5.0`,
+// `Some(false)`) is excluded from the unit claims even though its name has
+// a numeric suffix, and unit rows (`Some(true)`) drive them. `None` (old
+// Go, tests, fixtures) falls back to the legacy name parse — old-Go
+// behavior exactly, including the dotted misread it preserves (pinned as a
+// COMPAT characterization, not as approval).
+#[cfg(test)]
+mod row_identity_9821_tests {
+    use super::*;
+    use crate::protocol::{ConfigSnapshot, InterfaceSnapshot, ZoneSnapshot};
+
+    const DOMAIN_A: u32 = 100_001;
+
+    fn build(snapshot: &ConfigSnapshot) -> ForwardingState {
+        let mut state = ForwardingState::default();
+        crate::afxdp::forwarding_build::zones::populate_zones(snapshot, &mut state);
+        populate_interfaces(
+            snapshot,
+            &mut state,
+            &FastSet::default(),
+            &FastSet::default(),
+        )
+        .expect("populate_interfaces");
+        state
+    }
+
+    fn iface(
+        name: &str,
+        ifindex: i32,
+        zone: &str,
+        domain: u32,
+        is_unit: Option<bool>,
+    ) -> InterfaceSnapshot {
+        InterfaceSnapshot {
+            name: name.into(),
+            linux_name: name.into(),
+            ifindex,
+            zone: zone.into(),
+            routing_instance: "tenant-a".into(),
+            routing_domain: domain,
+            is_unit,
+            ..Default::default()
+        }
+    }
+
+    fn zone(name: &str, id: u16) -> ZoneSnapshot {
+        ZoneSnapshot {
+            name: name.into(),
+            id,
+            ..Default::default()
+        }
+    }
+
+    /// `Some(false)` + numeric suffix is excluded from the unit claims: the
+    /// dotted base row's inherited zone is REFUSED and the unit row's zone
+    /// is admitted (#7509 on a dotted shape), and the zone→domain join
+    /// follows the admitted zone.
+    ///
+    /// FAIL-ON-REVERT: parse names instead of reading the bit and the base
+    /// row joins the claims, the ifindex disagrees, and nothing is admitted.
+    #[test]
+    fn some_false_base_excluded_and_unit_admitted_on_dotted_shape() {
+        let snapshot = ConfigSnapshot {
+            interfaces: vec![
+                iface("ge-0/0/5.0", 10, "untrust", DOMAIN_A, Some(false)),
+                iface("ge-0/0/5.0.0", 10, "trust", DOMAIN_A, Some(true)),
+            ],
+            zones: vec![zone("trust", 1), zone("untrust", 2)],
+            ..Default::default()
+        };
+        let state = build(&snapshot);
+        assert_eq!(
+            state.ifindex_to_zone_id.get(&10).copied(),
+            Some(1),
+            "the unit row's zone must be admitted; the base row's inherited \
+             zone must be refused, not disagreed into silence"
+        );
+        assert_eq!(
+            state.zone_routing_domain.get(&1).copied(),
+            Some(DOMAIN_A),
+            "the zone→domain join follows the admitted zone"
+        );
+    }
+
+    /// `None` falls back to the legacy name parse EXACTLY — including
+    /// reading a dotted base row as a unit row. This pins old-Go behavior
+    /// for old snapshots; it is a COMPAT characterization, not approval of
+    /// the misread (which the bumped contract no longer ships).
+    ///
+    /// NOT fail-on-revert for the structural branch: it takes the fallback
+    /// path by construction and stays green whatever `Some` does.
+    #[test]
+    fn none_falls_back_to_legacy_parse_including_dotted_misread() {
+        let snapshot = ConfigSnapshot {
+            interfaces: vec![
+                iface("ge-0/0/5.0", 10, "untrust", DOMAIN_A, None),
+                iface("ge-0/0/5.0.0", 10, "trust", DOMAIN_A, None),
+            ],
+            zones: vec![zone("trust", 1), zone("untrust", 2)],
+            ..Default::default()
+        };
+        let state = build(&snapshot);
+        assert_eq!(
+            state.ifindex_to_zone_id.get(&10).copied(),
+            None,
+            "legacy parse reads the dotted base as a unit, the ifindex \
+             disagrees, and nothing is admitted — old behavior, preserved"
         );
     }
 }
