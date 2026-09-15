@@ -1311,6 +1311,8 @@ func (s *SessionSync) handleDisconnect(conn net.Conn) {
 		s.deleteSuppressionWarned.Store(false)
 		// #9752: same incarnation scoping for the forward-only-delete latch.
 		s.purgeRetirementSuppressionWarned.Store(false)
+		// #9752 round 3: same incarnation scoping for the stamped-install latch.
+		s.installTableSuppressionWarned.Store(false)
 		// #7990: same incarnation scoping. A retained sync-wire version is the
 		// worst of the three to keep: it would let the LANE-1 drain gate certify
 		// compatibility against a version the reconnected (possibly downgraded)

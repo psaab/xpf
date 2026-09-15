@@ -67,6 +67,16 @@ pub(in crate::afxdp::session_glue) fn handle_upsert_synced(
     let is_active = !allow_replace_local;
 
     if !entry.metadata.is_reverse {
+        // #9752 round 3: resolve with the EFFECTIVE stamp. A (0,0) re-import
+        // over a stamped stored entry is an old sender's resend, and the
+        // install below preserves the stamp — resolving with the incoming
+        // (0,0) would install a default-table resolution under it.
+        if let Some((domain, check)) =
+            sessions.preserved_install_table_for(&key, &entry.decision, entry.session_id)
+        {
+            entry.decision.install_table_domain = domain;
+            entry.decision.install_table_check = check;
+        }
         let flow = SessionFlow {
             src_ip: key.src_ip,
             dst_ip: key.dst_ip,

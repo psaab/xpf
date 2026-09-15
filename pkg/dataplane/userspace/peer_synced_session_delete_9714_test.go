@@ -17,7 +17,7 @@ import (
 func TestAPeerBatchDeleteMarksEveryHelperRequest9714(t *testing.T) {
 	m, rec := newSyncOnlyManager9146(t)
 	const tenant = uint32(100007)
-	_, _, _ = m.BatchDeletePeerSyncedSessionsScoped(scopedKeys9364(tenant, 1234, 1235))
+	_, _, _ = m.BatchDeletePeerSyncedSessionsScoped(scopedKeys9364(tenant, 1234, 1235), false)
 
 	got := rec.all()
 	if len(got) != 2 {
@@ -57,7 +57,7 @@ func TestAMarkedSingleDeleteMarksBothHalves9714(t *testing.T) {
 	val := dataplane.SessionValue{RoutingDomain: 100007, ReverseKey: rev}
 
 	m.mu.Lock()
-	m.syncDeleteV4LockedMarked(k, val, true, true)
+	m.syncDeleteV4LockedMarked(k, val, true, true, false)
 	m.mu.Unlock()
 	marked := rec.all()
 	if len(marked) != 2 {
@@ -88,7 +88,7 @@ func TestAPeerV6BatchDeleteMarksEveryHelperRequest9714(t *testing.T) {
 	scoped := []dataplane.ScopedSessionKeyV6{
 		{Key: dataplane.SessionKeyV6{SrcPort: hostToNetwork16(1234), DstPort: hostToNetwork16(443), Protocol: 6}, RoutingDomain: 100007},
 	}
-	_, _, _ = m.BatchDeletePeerSyncedSessionsScopedV6(scoped)
+	_, _, _ = m.BatchDeletePeerSyncedSessionsScopedV6(scoped, false)
 
 	got := rec.all()
 	if len(got) != 1 {
@@ -106,7 +106,7 @@ func TestARefusedPeerBatchDeleteIsReportedByKey9714(t *testing.T) {
 	rec.refuseFirst(peerDeleteRefusedLocalOwned)
 	keys := scopedKeys9364(100007, 1234, 1235)
 
-	_, refused, _ := m.BatchDeletePeerSyncedSessionsScoped(keys)
+	_, refused, _ := m.BatchDeletePeerSyncedSessionsScoped(keys, false)
 
 	if got := len(rec.all()); got != 2 {
 		t.Fatalf("FIXTURE: recorded %d helper requests, want 2", got)
@@ -126,7 +126,7 @@ func TestARefusedPeerSingleDeleteKeepsTheReverse9714(t *testing.T) {
 	rev := dataplane.SessionKey{SrcIP: k.DstIP, DstIP: k.SrcIP, SrcPort: k.DstPort, DstPort: k.SrcPort, Protocol: k.Protocol}
 
 	m.mu.Lock()
-	refused := m.syncDeleteV4LockedMarked(k, dataplane.SessionValue{RoutingDomain: 100007, ReverseKey: rev}, true, true)
+	refused := m.syncDeleteV4LockedMarked(k, dataplane.SessionValue{RoutingDomain: 100007, ReverseKey: rev}, true, true, false)
 	m.mu.Unlock()
 
 	if !refused {
@@ -146,7 +146,7 @@ func TestAnUnmarkedDeleteNeverReadsAPeerRefusal9714(t *testing.T) {
 	rev := dataplane.SessionKey{SrcIP: k.DstIP, DstIP: k.SrcIP, SrcPort: k.DstPort, DstPort: k.SrcPort, Protocol: k.Protocol}
 
 	m.mu.Lock()
-	refused := m.syncDeleteV4LockedMarked(k, dataplane.SessionValue{RoutingDomain: 100007, ReverseKey: rev}, true, false)
+	refused := m.syncDeleteV4LockedMarked(k, dataplane.SessionValue{RoutingDomain: 100007, ReverseKey: rev}, true, false, false)
 	m.mu.Unlock()
 
 	if refused {
@@ -218,7 +218,7 @@ func TestAPeerBatchCollectsTheAppliedKeysByName9714(t *testing.T) {
 	keys := scopedKeys9364(100007, 1234, 1235, 1236)
 
 	var refused, applied []dataplane.ScopedSessionKey
-	if err := m.deleteHelperSessionsScopedV4Marked(keys, true, &refused, &applied); err != nil {
+	if err := m.deleteHelperSessionsScopedV4Marked(keys, true, false, &refused, &applied); err != nil {
 		t.Fatalf("marked scoped delete: %v", err)
 	}
 
@@ -262,7 +262,7 @@ func TestARefusalInALaterChunkIsReportedByItsOwnKey9714(t *testing.T) {
 	rec.refuseNth(refusedNth, peerDeleteRefusedLocalOwned)
 
 	var refused, applied []dataplane.ScopedSessionKey
-	if err := m.deleteHelperSessionsScopedV4Marked(keys, true, &refused, &applied); err != nil {
+	if err := m.deleteHelperSessionsScopedV4Marked(keys, true, false, &refused, &applied); err != nil {
 		t.Fatalf("marked scoped delete: %v", err)
 	}
 
@@ -345,7 +345,7 @@ func TestAnAmbiguousRefusalIsNotAPeerRefusal9714(t *testing.T) {
 	m, rec := newSyncOnlyManager9146(t)
 	rec.refuseFirst("synced-delete-refused:ambiguous-routing-domain (5-tuple matches 2 routing instances)")
 
-	_, refused, _ := m.BatchDeletePeerSyncedSessionsScoped(scopedKeys9364(100007, 1234))
+	_, refused, _ := m.BatchDeletePeerSyncedSessionsScoped(scopedKeys9364(100007, 1234), false)
 
 	if len(refused) != 0 {
 		t.Errorf("an ambiguous-routing-domain refusal was read as a peer refusal: %v", refused)
@@ -357,7 +357,7 @@ func TestAnAmbiguousRefusalIsNotAPeerRefusal9714(t *testing.T) {
 func TestAPeerSingleDeleteAsksTheHelperWithoutAMirrorRow9714(t *testing.T) {
 	m, rec := newSyncOnlyManager9146(t)
 
-	_, _ = m.DeletePeerSyncedSession(key9146())
+	_, _ = m.DeletePeerSyncedSession(key9146(), false)
 
 	got := rec.all()
 	if len(got) != 1 || !got[0].PeerDelete {

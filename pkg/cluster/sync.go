@@ -447,6 +447,16 @@ type SyncStats struct {
 	// as DeletesSuppressedPeerIncapable: counted, visible leak over
 	// invisible teardown.
 	DeletesSuppressedPurgeRetirement atomic.Uint64
+	// InstallsSuppressedNoPeerInstallTable counts outgoing STAMPED session
+	// installs WITHHELD because the peer advertised its capabilities and
+	// did NOT claim #9752 install-table identity
+	// (capFlagInstallTableIdentity). Such a peer installs every session
+	// stamp-less, so our stamped install would silently wrong-table after
+	// failover. Withholding leaves the session off the peer — a later miss
+	// there re-establishes it in the right table — instead of installing a
+	// lie. Unstamped installs are never withheld. Same operational meaning
+	// as the delete suppressors: counted, visible gap over silent corruption.
+	InstallsSuppressedNoPeerInstallTable atomic.Uint64
 	// DeletesStaleIgnored counts deletes refused by the #2170 install-
 	// generation guard: a journaled/deferred delete whose generation was
 	// strictly older than the currently-installed same-key entry. A nonzero
@@ -1029,12 +1039,16 @@ type SessionSync struct {
 	// suppression warning, same incarnation scoping as deleteSuppressionWarned
 	// (reset alongside it on full disconnect).
 	purgeRetirementSuppressionWarned atomic.Bool
-	lastNewCounter                   uint64
-	lastClosedCounter                uint64
-	lastSweepEmpty                   bool
-	vrfDevice                        string
-	peerClockOffset                  atomic.Int64
-	clockSynced                      atomic.Bool
+	// installTableSuppressionWarned latches the #9752 round 3 stamped-install
+	// suppression warning, same incarnation scoping (reset alongside on
+	// full disconnect).
+	installTableSuppressionWarned atomic.Bool
+	lastNewCounter                uint64
+	lastClosedCounter             uint64
+	lastSweepEmpty                bool
+	vrfDevice                     string
+	peerClockOffset               atomic.Int64
+	clockSynced                   atomic.Bool
 
 	// localSnapshotProtocol is this node's config-snapshot protocol version,
 	// advertised to the peer on every installed connection (#6650). Set by the
@@ -1272,6 +1286,15 @@ type SessionSync struct {
 	installTableSentV4 map[dataplane.SessionKey]sentInstallTable
 	installTableSentV6 map[dataplane.SessionKeyV6]sentInstallTable
 	recvGenMu          sync.Mutex
+	// #9752 round 3: per tuple, the installing-table identity this node last
+	// RECEIVED for one session incarnation (matched on SessionID), so a
+	// stamp-less resend from an old sender cannot erase it. The BPF mirror
+	// cannot be the source — it drops sync-only fields on read — so the
+	// record lives here, beside the install generations, and is consulted on
+	// the receive apply before the dataplane write. Guarded by recvGenMu;
+	// see restoreInstallTableLocked.
+	installTableRecvV4 map[dataplane.SessionKey]recvInstallTable
+	installTableRecvV6 map[dataplane.SessionKeyV6]recvInstallTable
 	recvGenV4          map[dataplane.SessionKey]uint64
 	recvGenV6          map[dataplane.SessionKeyV6]uint64
 	// recvTombV4/V6 order the TOMBSTONE entries of recvGenV4/V6, oldest first, so a
@@ -1664,6 +1687,8 @@ func (s *SessionSync) initGenState() {
 	s.installTableSentV6 = make(map[dataplane.SessionKeyV6]sentInstallTable)
 	s.recvGenV4 = make(map[dataplane.SessionKey]uint64)
 	s.recvGenV6 = make(map[dataplane.SessionKeyV6]uint64)
+	s.installTableRecvV4 = make(map[dataplane.SessionKey]recvInstallTable)
+	s.installTableRecvV6 = make(map[dataplane.SessionKeyV6]recvInstallTable)
 	// #3931: seed the config generation from the same monotonic base so the
 	// sender's config-gen never regresses below a value the peer may hold
 	// across this node's restarts within a boot, and create the ordered

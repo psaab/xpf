@@ -1165,6 +1165,7 @@
     "egress_zone": "",
     "egress_zone_id": 0,
     "fabric_ingress": false,
+    "forward_only": false,
     "generation": 0,
     "inactivity_timeout": 0,
     "ingress_ifindex": 0,

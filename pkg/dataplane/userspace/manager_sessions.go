@@ -368,14 +368,14 @@ func (m *Manager) DeleteSession(key dataplane.SessionKey) error {
 // and a skipping cell scores a mutation as survived, which is the reading that
 // argues for deleting a guard doing its job.
 func (m *Manager) syncDeleteV4Locked(key dataplane.SessionKey, val dataplane.SessionValue, haveVal bool) {
-	m.syncDeleteV4LockedMarked(key, val, haveVal, false)
+	m.syncDeleteV4LockedMarked(key, val, haveVal, false, false)
 }
 
 // syncDeleteV4LockedMarked is syncDeleteV4Locked with the #9714 peer mark set on
 // both helper requests (the key and its reverse companion). It reports whether the
 // helper REFUSED the marked delete of the key; a refused key keeps its reverse
 // companion, so that request is not sent.
-func (m *Manager) syncDeleteV4LockedMarked(key dataplane.SessionKey, val dataplane.SessionValue, haveVal, peer bool) bool {
+func (m *Manager) syncDeleteV4LockedMarked(key dataplane.SessionKey, val dataplane.SessionValue, haveVal, peer, forwardOnly bool) bool {
 	if m.proc == nil {
 		return false
 	}
@@ -385,12 +385,14 @@ func (m *Manager) syncDeleteV4LockedMarked(key dataplane.SessionKey, val datapla
 	}
 	req := m.buildSessionSyncRequestV4("delete", key, scope)
 	req.PeerDelete = peer
+	req.ForwardOnly = forwardOnly
 	if err := m.syncSessionRequestLocked(req); peer && peerDeleteRefused(err) {
 		return true
 	}
 	// The reverse companion is the same flow in the same tenant, so it carries
-	// the same domain.
-	if haveVal && val.ReverseKey.Protocol != 0 {
+	// the same domain. A forward-only delete (#9752 round 3) retires exactly
+	// the named key — the sender already decided the companion.
+	if !forwardOnly && haveVal && val.ReverseKey.Protocol != 0 {
 		reverse := m.buildSessionSyncRequestV4("delete", val.ReverseKey, scope)
 		reverse.PeerDelete = peer
 		_ = m.syncSessionRequestLocked(reverse)
@@ -416,11 +418,11 @@ func (m *Manager) DeleteSessionV6(key dataplane.SessionKeyV6) error {
 
 // syncDeleteV6Locked is the IPv6 analogue of syncDeleteV4Locked (#9146).
 func (m *Manager) syncDeleteV6Locked(key dataplane.SessionKeyV6, val dataplane.SessionValueV6, haveVal bool) {
-	m.syncDeleteV6LockedMarked(key, val, haveVal, false)
+	m.syncDeleteV6LockedMarked(key, val, haveVal, false, false)
 }
 
 // syncDeleteV6LockedMarked is the IPv6 analogue of syncDeleteV4LockedMarked (#9714).
-func (m *Manager) syncDeleteV6LockedMarked(key dataplane.SessionKeyV6, val dataplane.SessionValueV6, haveVal, peer bool) bool {
+func (m *Manager) syncDeleteV6LockedMarked(key dataplane.SessionKeyV6, val dataplane.SessionValueV6, haveVal, peer, forwardOnly bool) bool {
 	if m.proc == nil {
 		return false
 	}
@@ -430,10 +432,12 @@ func (m *Manager) syncDeleteV6LockedMarked(key dataplane.SessionKeyV6, val datap
 	}
 	req := m.buildSessionSyncRequestV6("delete", key, scope)
 	req.PeerDelete = peer
+	req.ForwardOnly = forwardOnly
 	if err := m.syncSessionRequestLocked(req); peer && peerDeleteRefused(err) {
 		return true
 	}
-	if haveVal && val.ReverseKey.Protocol != 0 {
+	// #9752 round 3: v6 twin of the forward-only gate above.
+	if !forwardOnly && haveVal && val.ReverseKey.Protocol != 0 {
 		reverse := m.buildSessionSyncRequestV6("delete", val.ReverseKey, scope)
 		reverse.PeerDelete = peer
 		_ = m.syncSessionRequestLocked(reverse)
@@ -448,10 +452,10 @@ func (m *Manager) syncDeleteV6LockedMarked(key dataplane.SessionKeyV6, val datap
 // lookup found nothing), and the helper is asked all the same: before this, the
 // failed mirror delete returned before the helper was contacted, so a helper-only
 // stale session was never retracted.
-func (m *Manager) DeletePeerSyncedSession(key dataplane.SessionKey) (bool, error) {
+func (m *Manager) DeletePeerSyncedSession(key dataplane.SessionKey, forwardOnly bool) (bool, error) {
 	val, valErr := m.bpfShim.GetSessionV4(key)
 	m.mu.Lock()
-	refused := m.syncDeleteV4LockedMarked(key, val, valErr == nil, true)
+	refused := m.syncDeleteV4LockedMarked(key, val, valErr == nil, true, forwardOnly)
 	m.mu.Unlock()
 	if refused {
 		return true, nil
@@ -463,10 +467,10 @@ func (m *Manager) DeletePeerSyncedSession(key dataplane.SessionKey) (bool, error
 }
 
 // DeletePeerSyncedSessionV6 is the IPv6 analogue of DeletePeerSyncedSession (#9714).
-func (m *Manager) DeletePeerSyncedSessionV6(key dataplane.SessionKeyV6) (bool, error) {
+func (m *Manager) DeletePeerSyncedSessionV6(key dataplane.SessionKeyV6, forwardOnly bool) (bool, error) {
 	val, valErr := m.bpfShim.GetSessionV6(key)
 	m.mu.Lock()
-	refused := m.syncDeleteV6LockedMarked(key, val, valErr == nil, true)
+	refused := m.syncDeleteV6LockedMarked(key, val, valErr == nil, true, forwardOnly)
 	m.mu.Unlock()
 	if refused {
 		return true, nil
@@ -557,9 +561,9 @@ func peerDeleteRefused(err error) bool {
 // locally active) is returned in refused and keeps its BPF mirror row. The other
 // keys' mirror rows go one at a time, so a row already gone does not strand the
 // rest. As with the unmarked batch, the helper IPC error itself is best-effort.
-func (m *Manager) BatchDeletePeerSyncedSessionsScoped(scoped []dataplane.ScopedSessionKey) (int, []dataplane.ScopedSessionKey, error) {
+func (m *Manager) BatchDeletePeerSyncedSessionsScoped(scoped []dataplane.ScopedSessionKey, forwardOnly bool) (int, []dataplane.ScopedSessionKey, error) {
 	var refused, applied []dataplane.ScopedSessionKey
-	_ = m.deleteHelperSessionsScopedV4Marked(scoped, true, &refused, &applied)
+	_ = m.deleteHelperSessionsScopedV4Marked(scoped, true, forwardOnly, &refused, &applied)
 	deleted, err := deleteAppliedMirrorRows(applied, func(sk dataplane.ScopedSessionKey) error {
 		return m.bpfShim.DeleteSession(sk.Key)
 	})
@@ -567,9 +571,9 @@ func (m *Manager) BatchDeletePeerSyncedSessionsScoped(scoped []dataplane.ScopedS
 }
 
 // BatchDeletePeerSyncedSessionsScopedV6 is the IPv6 analogue (#9714).
-func (m *Manager) BatchDeletePeerSyncedSessionsScopedV6(scoped []dataplane.ScopedSessionKeyV6) (int, []dataplane.ScopedSessionKeyV6, error) {
+func (m *Manager) BatchDeletePeerSyncedSessionsScopedV6(scoped []dataplane.ScopedSessionKeyV6, forwardOnly bool) (int, []dataplane.ScopedSessionKeyV6, error) {
 	var refused, applied []dataplane.ScopedSessionKeyV6
-	_ = m.deleteHelperSessionsScopedV6Marked(scoped, true, &refused, &applied)
+	_ = m.deleteHelperSessionsScopedV6Marked(scoped, true, forwardOnly, &refused, &applied)
 	deleted, err := deleteAppliedMirrorRows(applied, func(sk dataplane.ScopedSessionKeyV6) error {
 		return m.bpfShim.DeleteSessionV6(sk.Key)
 	})
@@ -736,7 +740,7 @@ func (m *Manager) deleteHelperSessionsV4(keys []dataplane.SessionKey) error {
 
 // deleteHelperSessionsScopedV4 is the #9364 domain-carrying helper delete.
 func (m *Manager) deleteHelperSessionsScopedV4(keys []dataplane.ScopedSessionKey) error {
-	return m.deleteHelperSessionsScopedV4Marked(keys, false, nil, nil)
+	return m.deleteHelperSessionsScopedV4Marked(keys, false, false, nil, nil)
 }
 
 // deleteHelperSessionsScopedV4Marked is deleteHelperSessionsScopedV4 with the
@@ -749,7 +753,7 @@ func (m *Manager) deleteHelperSessionsScopedV4(keys []dataplane.ScopedSessionKey
 // finding 1). A key can also be transport-failed, or never sent at all once the
 // batch aborts on an unreachable helper. Only `applied` licenses the caller to
 // destroy anything.
-func (m *Manager) deleteHelperSessionsScopedV4Marked(keys []dataplane.ScopedSessionKey, peer bool, refused, applied *[]dataplane.ScopedSessionKey) error {
+func (m *Manager) deleteHelperSessionsScopedV4Marked(keys []dataplane.ScopedSessionKey, peer, forwardOnly bool, refused, applied *[]dataplane.ScopedSessionKey) error {
 	if len(keys) == 0 {
 		return nil
 	}
@@ -773,6 +777,7 @@ func (m *Manager) deleteHelperSessionsScopedV4Marked(keys []dataplane.ScopedSess
 			req := m.buildSessionSyncRequestV4(
 				"delete", keys[i].Key, deleteScopeVal(keys[i].RoutingDomain))
 			req.PeerDelete = peer
+			req.ForwardOnly = forwardOnly
 			reqs = append(reqs, req)
 		}
 		// #9714: every request's outcome, not only the first error, so a key the
@@ -825,14 +830,14 @@ func (m *Manager) deleteHelperSessionsV6(keys []dataplane.SessionKeyV6) error {
 // deleteHelperSessionsScopedV6 is the IPv6 analogue of
 // deleteHelperSessionsScopedV4 (#9364).
 func (m *Manager) deleteHelperSessionsScopedV6(keys []dataplane.ScopedSessionKeyV6) error {
-	return m.deleteHelperSessionsScopedV6Marked(keys, false, nil, nil)
+	return m.deleteHelperSessionsScopedV6Marked(keys, false, false, nil, nil)
 }
 
 // deleteHelperSessionsScopedV6Marked is the IPv6 analogue of
 // deleteHelperSessionsScopedV4Marked (#9714). Same `refused` / `applied`
 // contract, and the same reason it matters: the two are NOT complements, and only
 // `applied` licenses the caller to destroy anything.
-func (m *Manager) deleteHelperSessionsScopedV6Marked(keys []dataplane.ScopedSessionKeyV6, peer bool, refused, applied *[]dataplane.ScopedSessionKeyV6) error {
+func (m *Manager) deleteHelperSessionsScopedV6Marked(keys []dataplane.ScopedSessionKeyV6, peer, forwardOnly bool, refused, applied *[]dataplane.ScopedSessionKeyV6) error {
 	if len(keys) == 0 {
 		return nil
 	}
@@ -853,6 +858,7 @@ func (m *Manager) deleteHelperSessionsScopedV6Marked(keys []dataplane.ScopedSess
 			req := m.buildSessionSyncRequestV6(
 				"delete", keys[i].Key, deleteScopeValV6(keys[i].RoutingDomain))
 			req.PeerDelete = peer
+			req.ForwardOnly = forwardOnly
 			reqs = append(reqs, req)
 		}
 		// #9714: every request's outcome, not only the first error, so a key the

@@ -63,3 +63,75 @@ func stampInstallTableLocked[K comparable](m map[K]sentInstallTable, key K, sess
 	}
 	m[key] = sentInstallTable{sessionID: sessionID, domain: *domain, check: *check}
 }
+
+// recvInstallTable is one session incarnation's last-RECEIVED installing-table
+// identity (#9752 round 3).
+type recvInstallTable struct {
+	sessionID uint64
+	domain    uint32
+	check     uint32
+}
+
+// restoreInstallTableLocked (#9752 round 3) keeps a stamp-less resend from an
+// OLD sender from erasing the installing-table identity this node already
+// holds for the SAME session incarnation.
+//
+// WHY NOT THE MIRROR. The first shape of this rule read the existing row back
+// from the dataplane and kept its stamp. That passes against full-struct test
+// doubles — and is dead in production, where GetSessionV4 rebuilds from the
+// BPF map and the BPF conversion drops every sync-only field. The record must
+// live in Go memory, beside the install generations, never in the lossy
+// mirror. Nothing here reads the dataplane.
+//
+// DISCIPLINE (mirror of stampInstallTableLocked, receive direction):
+//   - A (0,0) frame over a recorded nonzero stamp for the SAME SessionID is
+//     an old sender's resend — absence decodes as zero — never a genuine
+//     re-stamp (stamps are install-stable per incarnation). Restore.
+//   - A nonzero frame records (overwrites): the sender stated an identity.
+//   - A different SessionID replaces the record (new incarnation); a
+//     stamp-less new incarnation applies as (0,0), never inheriting.
+//   - SessionID 0 means "no identity": nothing recorded or applied.
+//
+// The caller holds recvGenMu (taken under applyMu on the install path, under
+// genSentMu on the send-side delete path — both leaf-ward, no cycle).
+// Generic over the two wire-key types.
+func restoreInstallTableLocked[K comparable](m map[K]recvInstallTable, key K, sessionID uint64, domain, check *uint32) {
+	if sessionID == 0 {
+		return
+	}
+	rec, ok := m[key]
+	if ok && rec.sessionID != sessionID {
+		// A different incarnation of this tuple: the old record is dead.
+		delete(m, key)
+		ok = false
+	}
+	if ok && *domain == 0 && *check == 0 && (rec.domain != 0 || rec.check != 0) {
+		*domain, *check = rec.domain, rec.check
+	}
+	if *domain == 0 && *check == 0 {
+		return
+	}
+	if !ok && len(m) >= genGuardMapCap {
+		// Skip-record-on-full, like the send memo: degrades to the pre-#9752
+		// window, never to a wrong table.
+		return
+	}
+	m[key] = recvInstallTable{sessionID: sessionID, domain: *domain, check: *check}
+}
+
+// lookupRecvInstallTableLocked (#9752 round 3 item 5) returns the received
+// installing-table identity for this tuple's incarnation, if any. The send
+// path consults it when a frame is still (0,0) after the send memo: a node
+// that RECEIVED the incarnation (standby after failover) resends the true
+// stamp instead of the mirror's (0,0). Read-only — the receive record stays
+// the single source of received truth. The caller holds recvGenMu.
+func lookupRecvInstallTableLocked[K comparable](m map[K]recvInstallTable, key K, sessionID uint64) (uint32, uint32, bool) {
+	if sessionID == 0 {
+		return 0, 0, false
+	}
+	rec, ok := m[key]
+	if !ok || rec.sessionID != sessionID {
+		return 0, 0, false
+	}
+	return rec.domain, rec.check, rec.domain != 0 || rec.check != 0
+}

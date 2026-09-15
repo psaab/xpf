@@ -6089,6 +6089,8 @@ fn flush_session_deltas_without_binding_reaches_global_consumers() {
     };
     let dnat_fds = crate::afxdp::checksum::DnatTableFds::default();
     let mut worker_lossless_wedged = false;
+    let __r3_channel = crate::afxdp::types::RuntimeViewChannel::default();
+    let __r3_reader = __r3_channel.reader();
     flush_session_deltas(
         &ident,
         None,
@@ -6106,6 +6108,7 @@ fn flush_session_deltas_without_binding_reaches_global_consumers() {
         crate::afxdp::empty_worker_commands_by_id(),
         &None,
         &forwarding,
+        &__r3_reader,
         &mut worker_lossless_wedged,
     );
 
@@ -6237,6 +6240,8 @@ fn flush_session_deltas_rt_flow_app_id_uses_post_nat_dst_port() {
         };
         let dnat_fds = crate::afxdp::checksum::DnatTableFds::default();
         let mut worker_lossless_wedged = false;
+        let __r3_channel = crate::afxdp::types::RuntimeViewChannel::default();
+        let __r3_reader = __r3_channel.reader();
         flush_session_deltas(
             &ident,
             None,
@@ -6254,6 +6259,7 @@ fn flush_session_deltas_rt_flow_app_id_uses_post_nat_dst_port() {
             crate::afxdp::empty_worker_commands_by_id(),
             &Some(handle),
             &forwarding,
+            &__r3_reader,
             &mut worker_lossless_wedged,
         );
         let frames: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
@@ -6375,6 +6381,8 @@ fn flush_session_deltas_session_close_reresolves_policy_id_after_reorder() {
     };
     let dnat_fds = crate::afxdp::checksum::DnatTableFds::default();
     let mut worker_lossless_wedged = false;
+    let __r3_channel = crate::afxdp::types::RuntimeViewChannel::default();
+    let __r3_reader = __r3_channel.reader();
     flush_session_deltas(
         &ident,
         None,
@@ -6392,6 +6400,7 @@ fn flush_session_deltas_session_close_reresolves_policy_id_after_reorder() {
         crate::afxdp::empty_worker_commands_by_id(),
         &Some(handle),
         &forwarding,
+        &__r3_reader,
         &mut worker_lossless_wedged,
     );
     let frames: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
@@ -6471,6 +6480,8 @@ fn flush_session_deltas_event_stream_drop_latches_out_of_sync() {
     };
     let dnat_fds = crate::afxdp::checksum::DnatTableFds::default();
     let mut worker_lossless_wedged = false;
+    let __r3_channel = crate::afxdp::types::RuntimeViewChannel::default();
+    let __r3_reader = __r3_channel.reader();
     let out_of_sync = flush_session_deltas(
         &ident,
         None,
@@ -6488,6 +6499,7 @@ fn flush_session_deltas_event_stream_drop_latches_out_of_sync() {
         crate::afxdp::empty_worker_commands_by_id(),
         &event_stream,
         &forwarding,
+        &__r3_reader,
         &mut worker_lossless_wedged,
     );
 
@@ -6586,6 +6598,8 @@ fn flush_session_deltas_full_queue_send_is_bounded_and_latches_out_of_sync() {
 
     let start = std::time::Instant::now();
     let mut worker_lossless_wedged = false;
+    let __r3_channel = crate::afxdp::types::RuntimeViewChannel::default();
+    let __r3_reader = __r3_channel.reader();
     let out_of_sync = flush_session_deltas(
         &ident,
         None,
@@ -6603,6 +6617,7 @@ fn flush_session_deltas_full_queue_send_is_bounded_and_latches_out_of_sync() {
         crate::afxdp::empty_worker_commands_by_id(),
         &event_stream,
         &forwarding,
+        &__r3_reader,
         &mut worker_lossless_wedged,
     );
     let elapsed = start.elapsed();
@@ -6717,6 +6732,8 @@ fn resync_export_aggregate_lossless_wait_is_bounded_below_heartbeat() {
     let start = std::time::Instant::now();
     let mut all_latched = true;
     for _ in 0..BATCHES {
+        let __r3_channel = crate::afxdp::types::RuntimeViewChannel::default();
+        let __r3_reader = __r3_channel.reader();
         let out_of_sync = flush_session_deltas(
             &ident,
             None,
@@ -6734,6 +6751,7 @@ fn resync_export_aggregate_lossless_wait_is_bounded_below_heartbeat() {
             crate::afxdp::empty_worker_commands_by_id(),
             &event_stream,
             &forwarding,
+            &__r3_reader,
             &mut worker_lossless_wedged,
         );
         all_latched &= out_of_sync;
@@ -6843,6 +6861,8 @@ fn close_delta_deletes_dnat_table_entry_for_snat_flow() {
         let recent_session_deltas = Arc::new(Mutex::new(VecDeque::new()));
         let forwarding = ForwardingState::default();
         let mut worker_lossless_wedged = false;
+        let __r3_channel = crate::afxdp::types::RuntimeViewChannel::default();
+        let __r3_reader = __r3_channel.reader();
         flush_session_deltas(
             &ident,
             None,
@@ -6860,6 +6880,7 @@ fn close_delta_deletes_dnat_table_entry_for_snat_flow() {
             crate::afxdp::empty_worker_commands_by_id(),
             &None,
             &forwarding,
+            &__r3_reader,
             &mut worker_lossless_wedged,
         );
     };
@@ -9256,6 +9277,8 @@ fn flush_one_and_report_armed_8593(bulk_resync: bool) -> bool {
     let mut worker_lossless_wedged = false;
     let dropped_before = live.session_delta_dropped.load(Ordering::Relaxed);
 
+    let __r3_channel = crate::afxdp::types::RuntimeViewChannel::default();
+    let __r3_reader = __r3_channel.reader();
     crate::afxdp::session_delta::flush_session_deltas(
         &ident,
         Some(&live),
@@ -9273,6 +9296,7 @@ fn flush_one_and_report_armed_8593(bulk_resync: bool) -> bool {
         crate::afxdp::empty_worker_commands_by_id(),
         &None,
         &forwarding,
+        &__r3_reader,
         &mut worker_lossless_wedged,
     );
 
@@ -10287,6 +10311,8 @@ fn flush_session_deltas_update_syncs_without_an_rt_flow_create_9412() {
         };
         let dnat_fds = crate::afxdp::checksum::DnatTableFds::default();
         let mut worker_lossless_wedged = false;
+        let __r3_channel = crate::afxdp::types::RuntimeViewChannel::default();
+        let __r3_reader = __r3_channel.reader();
         flush_session_deltas(
             &ident,
             None,
@@ -10304,6 +10330,7 @@ fn flush_session_deltas_update_syncs_without_an_rt_flow_create_9412() {
             crate::afxdp::empty_worker_commands_by_id(),
             &Some(handle),
             &forwarding,
+            &__r3_reader,
             &mut worker_lossless_wedged,
         );
         std::iter::from_fn(|| rx.try_recv().ok()).collect::<Vec<_>>()

@@ -27,6 +27,9 @@ type peerRecorderDP struct {
 	peerSingleV4 []SessionKey
 	singleV4     []SessionKey
 	dnatV4       []DNATKey
+	// #9752 round 3: the forward-only mark each helper batch/single carried.
+	peerBatchMarks  []bool
+	peerSingleMarks []bool
 	// refuseV4 names the keys the "helper" refuses as peer deletes; events records
 	// the order of peer deletes and DNAT deletes; iterV4 is what a bulk sweep sees.
 	refuseV4 map[ScopedSessionKey]bool
@@ -34,8 +37,9 @@ type peerRecorderDP struct {
 	iterV4   []SessionEntryV4
 }
 
-func (d *peerRecorderDP) BatchDeletePeerSyncedSessionsScoped(s []ScopedSessionKey) (int, []ScopedSessionKey, error) {
+func (d *peerRecorderDP) BatchDeletePeerSyncedSessionsScoped(s []ScopedSessionKey, forwardOnly bool) (int, []ScopedSessionKey, error) {
 	d.peerBatchV4 = append(d.peerBatchV4, s...)
+	d.peerBatchMarks = append(d.peerBatchMarks, forwardOnly)
 	var refused []ScopedSessionKey
 	for _, k := range s {
 		d.events = append(d.events, "peer-delete")
@@ -46,17 +50,20 @@ func (d *peerRecorderDP) BatchDeletePeerSyncedSessionsScoped(s []ScopedSessionKe
 	return len(s) - len(refused), refused, nil
 }
 
-func (d *peerRecorderDP) BatchDeletePeerSyncedSessionsScopedV6(s []ScopedSessionKeyV6) (int, []ScopedSessionKeyV6, error) {
+func (d *peerRecorderDP) BatchDeletePeerSyncedSessionsScopedV6(s []ScopedSessionKeyV6, forwardOnly bool) (int, []ScopedSessionKeyV6, error) {
 	d.peerBatchV6 = append(d.peerBatchV6, s...)
 	return len(s), nil, nil
 }
 
-func (d *peerRecorderDP) DeletePeerSyncedSession(k SessionKey) (bool, error) {
+func (d *peerRecorderDP) DeletePeerSyncedSession(k SessionKey, forwardOnly bool) (bool, error) {
 	d.peerSingleV4 = append(d.peerSingleV4, k)
+	d.peerSingleMarks = append(d.peerSingleMarks, forwardOnly)
 	return false, nil
 }
 
-func (d *peerRecorderDP) DeletePeerSyncedSessionV6(SessionKeyV6) (bool, error) { return false, nil }
+func (d *peerRecorderDP) DeletePeerSyncedSessionV6(SessionKeyV6, bool) (bool, error) {
+	return false, nil
+}
 
 func (d *peerRecorderDP) BatchDeleteSessionsScoped(s []ScopedSessionKey) (int, error) {
 	d.scopedV4 = append(d.scopedV4, s...)

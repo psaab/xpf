@@ -913,6 +913,16 @@ pub(crate) struct SessionSyncRequest {
     /// (`pkg/dataplane/userspace/protocol_ha.go`, `SessionSyncRequest.PeerDelete`).
     #[serde(rename = "peer_delete", default)]
     pub peer_delete: bool,
+    /// #9752 round 3: this delete retires exactly the named key — no reverse
+    /// derivation, no reverse removal, no reverse `DeleteSynced` fan-out. Set
+    /// for purge-retirement closes, whose sender already decided every
+    /// companion (deriving here would destroy a session the purge
+    /// deliberately preserved). `false` deletes exactly as before.
+    ///
+    /// The rename MUST match the Go struct tag
+    /// (`pkg/dataplane/userspace/protocol_ha.go`, `SessionSyncRequest.ForwardOnly`).
+    #[serde(rename = "forward_only", default)]
+    pub forward_only: bool,
     /// #9752: the session's installing route-table domain id
     /// (`routingInstanceDomain` semantics: 0 = default table). Carried so a
     /// peer-synced session re-resolves in the table its PBR steer installed

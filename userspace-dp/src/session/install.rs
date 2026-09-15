@@ -345,6 +345,42 @@ impl SessionTable {
         )
     }
 
+    /// #9752 round 3: the installing-table identity a (0,0) re-import must
+    /// keep, if any. A (0,0) stamp over a stamped stored entry of the SAME
+    /// (or unknown) incarnation is an old sender's resend — absence decodes
+    /// as zero — never a genuine re-stamp (nothing transitions
+    /// stamped→default). A new incarnation (both ids nonzero and different),
+    /// an explicit nonzero stamp, or no stamped stored entry yields `None`
+    /// (apply as stated). Unlike the Go BPF mirror this table is lossless,
+    /// so the stored entry is a sound source.
+    ///
+    /// Single-sourced for BOTH consumers: `upsert_synced_with_origin` (the
+    /// install) and `handle_upsert_synced` (which must re-resolve with the
+    /// EFFECTIVE stamp — resolving with the incoming (0,0) would install a
+    /// default-table resolution under a preserved stamp, wrong-tabling the
+    /// first post-failover packets until some later re-resolve heals it).
+    pub(crate) fn preserved_install_table_for(
+        &self,
+        key: &SessionKey,
+        incoming: &SessionDecision,
+        wire_session_id: u64,
+    ) -> Option<(u32, u32)> {
+        if incoming.install_table_domain != 0 || incoming.install_table_check != 0 {
+            return None;
+        }
+        let prev = self.entry_by_key(key)?;
+        if prev.decision.install_table_domain == 0 && prev.decision.install_table_check == 0 {
+            return None;
+        }
+        let same = wire_session_id == 0 || prev.session_id == 0 || wire_session_id == prev.session_id;
+        same.then(|| {
+            (
+                prev.decision.install_table_domain,
+                prev.decision.install_table_check,
+            )
+        })
+    }
+
     #[inline]
     pub fn upsert_synced_with_origin(
         &mut self,
@@ -381,6 +417,14 @@ impl SessionTable {
         // primary-key, no_index_points_at) that catch invariant
         // violations in tests. The first two restore the prior
         // key_to_handle mapping internally before returning None.
+        // #9752 round 3: unknown-never-default on re-import, computed BEFORE
+        // the removal (the entry must still be in the table to consult).
+        let preserved = self.preserved_install_table_for(&key, &decision, wire_session_id);
+        let mut decision = decision;
+        if let Some((domain, check)) = preserved {
+            decision.install_table_domain = domain;
+            decision.install_table_check = check;
+        }
         let _previous = self.remove_entry(&key);
         let epoch = self.next_epoch();
         // #5212 (completes the #4915 follow-up): ADOPT the originating node's
