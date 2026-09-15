@@ -2824,16 +2824,16 @@ fn shim_coordinate_ladder(ceiling: u32) -> Vec<u32> {
 fn shim_binding_slot_never_leaves_its_interfaces_row() {
     use shim_binding_index::{BINDING_QUEUES_PER_IFACE as STRIDE, RawRxQueue, binding_slot};
 
-    // The ifindex axis has a real ceiling; the queue axis does not.
-    // `binding_slot` multiplies the ifindex by the stride, so
-    // `ifindex * STRIDE + (STRIDE - 1)` must stay inside `u32` — and
-    // `(2^28 - 1) * 16 + 15` is exactly `u32::MAX`, so this is the largest
-    // ifindex the host can evaluate at all. Above it host and target genuinely
-    // disagree (a debug host build panics on the overflow, the release target
-    // wraps), which is why the axis stops here and why `binding_index.rs` names
-    // that range — and only that range — as uncovered. The queue coordinate is
-    // rejected before the multiply, so its axis runs to `u32::MAX`.
-    const IFINDEX_CEILING: u32 = (1 << 28) - 1;
+    // NEITHER axis has a ceiling (#9900 F-150). The interface-half axis used
+    // to stop at 2^28 - 1 because the plain `u32` multiply overflowed above
+    // it and host and target genuinely disagreed (a debug host build panics
+    // on the overflow, the release target wraps). The checked multiply
+    // resolves what overflows to NO slot, identically on both targets, so the
+    // axis runs to `u32::MAX` like the queue axis and asserts the `None`
+    // above 2^28 - 1 exactly as it asserts exact slots below it. The queue
+    // coordinate is rejected before the multiply, so its axis always ran to
+    // `u32::MAX`.
+    const IFINDEX_CEILING: u32 = u32::MAX;
     let ifindexes = shim_coordinate_ladder(IFINDEX_CEILING);
     let queues = shim_coordinate_ladder(u32::MAX);
 
@@ -2878,7 +2878,7 @@ fn shim_binding_slot_never_leaves_its_interfaces_row() {
 
     for &ifindex in &ifindexes {
         // u64 throughout: the top of the ifindex axis puts `row_start + STRIDE`
-        // one past `u32::MAX`, and the expected value must be computed in a
+        // far past `u32::MAX`, and the expected value must be computed in a
         // width that cannot itself wrap.
         let row_start = u64::from(ifindex) * u64::from(STRIDE);
         for &q in &queues {
@@ -2891,6 +2891,18 @@ fn shim_binding_slot_never_leaves_its_interfaces_row() {
                      clamping it back into range is the mis-steer in another form, and indexing \
                      with it addresses ifindex {}'s row",
                     u64::from(ifindex) + u64::from(q) / u64::from(STRIDE),
+                );
+                continue;
+            }
+            // #9900 F-150: above 2^28 - 1 the composed index overflows `u32`
+            // and must resolve to NO binding — a wrap would land on another
+            // interface's row, which is the defect this ladder exists to catch.
+            let exact = row_start + u64::from(q);
+            if exact > u64::from(u32::MAX) {
+                assert_eq!(
+                    got, None,
+                    "#9900: ifindex {ifindex} x queue {q} composes {exact}, past `u32::MAX`, \
+                     and must fail closed as a clean miss, not wrap onto another row",
                 );
                 continue;
             }
@@ -3723,9 +3735,10 @@ fn shim_index_path_has_one_construction_and_one_lookup() {
         "if", "rx_queue", ".", "0", ">", "=", "BINDING_QUEUES_PER_IFACE", "{",
         "return", "None", ";",
         "}",
-        "Some", "(",
-        "ingress_ifindex", "*", "BINDING_QUEUES_PER_IFACE", "+", "rx_queue", ".", "0",
-        ")",
+        // #9900 F-150: the tail is a checked multiply, not a wrapping one —
+        // an interface id at or above 2^28 resolves to no slot.
+        "ingress_ifindex", ".", "checked_mul", "(", "BINDING_QUEUES_PER_IFACE", ")",
+        "?", ".", "checked_add", "(", "rx_queue", ".", "0", ")",
         "}",
     ];
     let slot_body = seq(BINDING_SLOT_BODY);
@@ -5749,6 +5762,86 @@ fn plan_exceeding_binding_slot_capacity_is_refused_7497() {
         (exact + 1) * stride,
         MAX_BINDING_SLOTS,
         over.len()
+    );
+}
+
+/// One interface's candidates with a caller-chosen ifindex, for the
+/// #9900 F-150 ceiling cells below.
+fn ifindex_ceiling_candidates_9900(
+    ifindex: i32,
+) -> (Vec<(String, usize)>, BTreeMap<String, i32>) {
+    let mut ifindex_by_name = BTreeMap::new();
+    ifindex_by_name.insert("ge-0-0-0".to_string(), ifindex);
+    (vec![("ge-0-0-0".to_string(), 2)], ifindex_by_name)
+}
+
+/// A plan naming an ifindex at or above the addressable ceiling is REFUSED
+/// whole, not minted into binding-missing queues.
+///
+/// The fixture straddles the boundary: 65535 plans (registered, armed), 65536
+/// refuses. A fixture that only tested a wildly oversized ifindex would stay
+/// green against an off-by-one in the comparison.
+#[test]
+fn plan_with_wild_ifindex_is_refused_9900() {
+    use crate::server::helpers::{MAX_BINDING_IFINDEX, replan_bindings_from_candidates};
+
+    // Boundary, admitted side: the largest plannable ifindex still plans.
+    let (candidates, ifindex_by_name) =
+        ifindex_ceiling_candidates_9900(MAX_BINDING_IFINDEX - 1);
+    let admitted = replan_bindings_from_candidates(4, &[], candidates, ifindex_by_name, true);
+    assert_eq!(admitted.len(), 2, "one interface x two queues must plan");
+    assert!(
+        admitted.iter().all(|b| b.registered && b.armed),
+        "an admitted boundary plan must be fully usable, not degraded"
+    );
+
+    // Boundary, refused side: the ceiling itself refuses whole.
+    let (candidates, ifindex_by_name) = ifindex_ceiling_candidates_9900(MAX_BINDING_IFINDEX);
+    let refused = replan_bindings_from_candidates(4, &[], candidates, ifindex_by_name, true);
+    assert!(
+        refused.is_empty(),
+        "ifindex {MAX_BINDING_IFINDEX} is past the addressable rows and must be refused whole"
+    );
+
+    // One wild interface poisons the WHOLE plan, not just its own rows — a
+    // partial plan is an availability failure indistinguishable from healthy.
+    let candidates = vec![
+        ("ge-0-0-0".to_string(), 2),
+        ("ge-0-0-1".to_string(), 2),
+    ];
+    let mut ifindex_by_name = BTreeMap::new();
+    ifindex_by_name.insert("ge-0-0-0".to_string(), 7);
+    ifindex_by_name.insert("ge-0-0-1".to_string(), 100_000);
+    let refused = replan_bindings_from_candidates(4, &[], candidates, ifindex_by_name, true);
+    assert!(
+        refused.is_empty(),
+        "one wild ifindex must refuse the whole plan, including the ordinary interface"
+    );
+}
+
+/// Control: ordinary ifindexes (and the missing/non-positive shapes the
+/// per-binding degrade owns) plan exactly as before — the refusal only fires
+/// on a resolved wild value.
+#[test]
+fn plan_with_ordinary_ifindexes_unchanged_9900() {
+    use crate::server::helpers::replan_bindings_from_candidates;
+
+    let candidates = vec![
+        ("ge-0-0-0".to_string(), 2),
+        ("ge-0-0-1".to_string(), 4),
+        ("ge-0-0-9".to_string(), 1),
+    ];
+    let mut ifindex_by_name = BTreeMap::new();
+    ifindex_by_name.insert("ge-0-0-0".to_string(), 7);
+    ifindex_by_name.insert("ge-0-0-1".to_string(), 0);
+    // ge-0-0-9 has no entry at all: unknown ifindex.
+    let plan = replan_bindings_from_candidates(4, &[], candidates, ifindex_by_name, true);
+    assert_eq!(plan.len(), 7, "2 + 4 + 1 rows must all mint");
+    let usable: Vec<_> = plan.iter().filter(|b| b.registered).collect();
+    assert_eq!(usable.len(), 2, "only the resolved interface registers");
+    assert!(
+        usable.iter().all(|b| b.interface == "ge-0-0-0"),
+        "the unresolved rows degrade per-binding instead of refusing"
     );
 }
 

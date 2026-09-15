@@ -811,6 +811,21 @@ pub(crate) const MAX_BINDING_SLOTS: u32 = 4096;
 /// than the stride stays usable on its first `BINDING_QUEUES_PER_IFACE` queues.
 pub(crate) const BINDING_QUEUES_PER_IFACE: usize = 16;
 
+/// Exclusive ceiling on a plannable interface index (#9900 F-150). Mirrors
+/// `MAX_INTERFACES` in `bpf/headers/xpf_common.h`, which is the authority,
+/// and `MaxInterfaces` in `pkg/dataplane/constants.go` (pinned to the C
+/// header by `constants_test.go`).
+///
+/// The shim resolves the binding row as `ifindex * stride + queue` in `u32`
+/// (`binding_slot`, `userspace-xdp/src/binding_index.rs`), so an ifindex at
+/// or above 2^28 would wrap onto another row; the checked multiply there
+/// fails it closed as a binding miss instead. This ceiling subsumes that
+/// bound with room to spare (65536 * 16 + 15 slots stay far inside `u32`),
+/// and the planner REFUSES any plan naming an ifindex at or above it — a
+/// wild ifindex must be loud at plan time, not a row of silent
+/// binding-missing queues on an interface that still reads up.
+pub(crate) const MAX_BINDING_IFINDEX: i32 = 65536;
+
 pub(crate) fn replan_bindings_from_candidates(
     workers: usize,
     existing: &[BindingStatus],
@@ -984,6 +999,31 @@ pub(crate) fn replan_bindings_from_candidates(
         );
         return Vec::new();
     }
+
+    // #9900 F-150: an ifindex at or above MAX_BINDING_IFINDEX refuses the
+    // WHOLE plan, matching the slot-cap refusal above — a refusal is loud
+    // and diagnosable; a partial plan is not. The shim composes the binding
+    // row as `ifindex * stride + queue` in `u32`, so a wild ifindex either
+    // wraps onto another interface's row (pre-#9900) or fails closed as a
+    // binding miss on queues the interface still reads up (post-#9900) —
+    // either way the plan must not mint it. Checked BEFORE slot minting, and
+    // on the CANDIDATES (pre-cap: the queue cap cannot shrink an ifindex).
+    // Missing names and non-positive ifindexes keep the existing per-binding
+    // degrade in the minting loop below — only a resolved wild value refuses.
+    if let Some((wild_iface, wild_ifindex)) = candidates
+        .iter()
+        .filter_map(|(name, _)| ifindex_by_name.get(name).map(|i| (name.as_str(), *i)))
+        .find(|(_, ifindex)| *ifindex >= MAX_BINDING_IFINDEX)
+    {
+        eprintln!(
+            "replan_bindings: REFUSING plan — interface {wild_iface} has ifindex \
+             {wild_ifindex}, at or above the addressable ceiling \
+             (MAX_BINDING_IFINDEX = {MAX_BINDING_IFINDEX}); its queues would fail \
+             closed as binding misses while the interface still reads up"
+        );
+        return Vec::new();
+    }
+
     // #7497 blocker 3: an operator upgrading onto per-interface queue counts can
     // go from ONE worker thread to as many as the widest interface has queues,
     // with no config change. `plan_workers` keys its map by `worker_id` and

@@ -50,15 +50,19 @@
 //!
 //!     A ladder has no such tell: the OR of the tested values is all-ones
 //!     across the representable range, so a mask that clears ANY bit changes at
-//!     least one tested result. NOT covered, and this time measured rather than
-//!     asserted: ifindexes at or above 2^28, where the multiply overflows `u32`
-//!     and host and target genuinely disagree — a debug host build PANICS while
-//!     the release target WRAPS. `(2^28 - 1) * BINDING_QUEUES_PER_IFACE + 15` is
-//!     exactly `u32::MAX`, so the executed axis stops at that ceiling for a
-//!     stated reason rather than by accident. A kernel ifindex is an `int` and
-//!     the shim gates on its ingress-interface map before reaching here; that
-//!     range is also pre-existing on master, same multiply, same absent bound.
-//!     The queue axis has no such ceiling and runs to `u32::MAX`.
+//!     least one tested result. The range that used to stop the
+//!     interface-half axis — at or above 2^28, where the plain `u32` multiply
+//!     overflowed and host and target genuinely disagreed (a debug host build
+//!     PANICS while the release target WRAPS) — is closed by the checked
+//!     multiply below: what overflowed now resolves to no slot, on both
+//!     targets identically, so both executed axes run to `u32::MAX` and the
+//!     ladder asserts the `None` above 2^28 - 1 exactly as it asserts exact
+//!     slots below it. `(2^28 - 1) * BINDING_QUEUES_PER_IFACE + 15` is exactly
+//!     `u32::MAX`, so that value is the largest addressable slot rather than
+//!     a ceiling with a stated reason. A kernel interface index is an `int`
+//!     and the shim gates on its ingress-interface map before reaching here;
+//!     a wild value that clears that gate now fails closed as a clean miss
+//!     instead of wrapping onto another row (#9900 F-150).
 //!   - **Pinned as text — the BODIES, not only the signatures.** Widening an
 //!     executed axis relocates a boundary; it does not remove one. So all three
 //!     function bodies in this module — the constructor, the telemetry readback
@@ -239,10 +243,17 @@ impl RawRxQueue {
 /// the driver discards — while the shim's last recorded trace stage stays
 /// REDIRECT, making it a drop MIS-TRACED as having reached redirect. Neither
 /// outcome is a cross-interface delivery.
+///
+/// An interface id at or above 2^28 would overflow the `u32` product; the
+/// checked multiply resolves that to `None` instead of wrapping onto another
+/// row (#9900 F-150). The caller treats it as a clean binding miss, same as
+/// an out-of-stride queue.
 #[inline(always)]
 pub fn binding_slot(ingress_ifindex: u32, rx_queue: RawRxQueue) -> Option<u32> {
     if rx_queue.0 >= BINDING_QUEUES_PER_IFACE {
         return None;
     }
-    Some(ingress_ifindex * BINDING_QUEUES_PER_IFACE + rx_queue.0)
+    ingress_ifindex
+        .checked_mul(BINDING_QUEUES_PER_IFACE)?
+        .checked_add(rx_queue.0)
 }
