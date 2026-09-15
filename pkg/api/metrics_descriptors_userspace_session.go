@@ -101,6 +101,25 @@ func (c *xpfCollector) initUserspaceSessionDescriptors() {
 			"not a domain-crossing attempt.",
 		nil, nil,
 	)
+	c.userspaceFragMaxLifetimeEvictions = prometheus.NewDesc(
+		"xpf_userspace_frag_max_lifetime_evictions_total",
+		"#9901 (F-010): fragment associations reclaimed by the ABSOLUTE "+
+			"lifetime bound (10s from install) rather than the 2s idle TTL. "+
+			"An idle-TTL expiry is routine churn; an absolute expiry means "+
+			"one key was consulted continuously for the whole maximum "+
+			"lifetime — the sustained same-key fragment stream the bound "+
+			"exists to stop.",
+		nil, nil,
+	)
+	c.userspaceEgressMTUUnknownForward = prometheus.NewDesc(
+		"xpf_userspace_egress_mtu_unknown_forward_total",
+		"#9901 (F-074): forwarded frames whose egress-MTU decision ran with "+
+			"NO known MTU (mtu == 0) and took the documented fail-open "+
+			"Forward arm. The decision is deliberate, but silence about it "+
+			"hid unknown-MTU configurations (missing egress row / unknown "+
+			"tunnel kind) behind healthy-looking forwards.",
+		nil, nil,
+	)
 	c.userspaceInterfaceSNATPATCollisions = prometheus.NewDesc(
 		"xpf_userspace_interface_snat_pat_collisions_total",
 		"#6751: interface-mode source-NAT admissions whose PRESERVED "+

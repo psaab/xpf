@@ -155,6 +155,22 @@ pub(crate) fn refresh_status(state: &mut ServerState) {
         state.afxdp.nat64_frag_cross_domain_misses_total();
     state.status.nat64_frag_protocol_alias_misses_total =
         state.afxdp.nat64_frag_protocol_alias_misses_total();
+    // #9901 (F-010): absolute-lifetime reclamations — the sustained same-key
+    // stream signal, distinct from routine idle-TTL churn.
+    state.status.frag_max_lifetime_evictions_total =
+        state.afxdp.frag_max_lifetime_evictions_total();
+    // #9901 (F-074): unknown-MTU fail-open forwards — the configuration /
+    // tunnel-kind signal, distinct from in-MTU fast-path forwards.
+    state.status.egress_mtu_unknown_forward_total =
+        state.afxdp.egress_mtu_unknown_forward_total();
+    // #9901 (F-077): subminimal-quote refusals — the forged-short-quote
+    // signal, distinct from matched-error delivery.
+    state.status.embedded_quote_subminimal_refused_total =
+        state.afxdp.embedded_quote_subminimal_refused_total();
+    // #9901 (F-077): per-session GCRA suppressions — the error-flood
+    // signal, distinct from budget-admitted matches.
+    state.status.embedded_error_per_session_suppressed_total =
+        state.afxdp.embedded_error_per_session_suppressed_total();
     state.status.interface_snat_identity_exhaustion_total =
         state.afxdp.interface_snat_identity_exhaustion_total();
     state

@@ -309,9 +309,15 @@ pub(crate) fn walk_ipv6_ext_chain(buf: &[u8], l3: usize) -> ExtChainWalk {
 /// does with a one-header chain of that type, and `tests_shim_ext_parity.rs`
 /// asserts it also agrees with the SHIM's `eh_class`. Adding a type to either
 /// walker without adding it here reds both.
+///
+/// #9901 (F-072): the GENERIC length-prefixed subset as a shared const, so the
+/// screen extractor (`screen/extract.rs`) guards on this single source instead
+/// of a second hand-mirrored arm list. The predicate below delegates to it —
+/// the set is stated once, here.
+pub(crate) const IPV6_GENERIC_EXT_HEADERS: [u8; 8] = [0, 43, 60, 135, 139, 140, 253, 254];
 #[inline]
 pub(crate) fn ipv6_ext_header_is_traversable(protocol: u8) -> bool {
-    matches!(protocol, 0 | 43 | 44 | 51 | 60 | 135 | 139 | 140 | 253 | 254)
+    IPV6_GENERIC_EXT_HEADERS.contains(&protocol) || matches!(protocol, 44 | 51)
 }
 
 pub(in crate::afxdp) fn frame_l3_offset(frame: &[u8]) -> Option<usize> {

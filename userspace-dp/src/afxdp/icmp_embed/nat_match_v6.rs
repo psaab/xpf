@@ -1,5 +1,6 @@
 use super::*;
 use super::parse::{embedded_reply_key, parse_embedded_v6};
+use super::outer_error_atomic;
 use super::return_resolution::embedded_icmp_return_resolution;
 
 /// IPv6-outer branch of `try_embedded_icmp_nat_match_from_frame`.
@@ -17,7 +18,7 @@ pub(in crate::afxdp::icmp_embed) fn match_outer_v6(
     let l4 = meta.l4_offset as usize;
     let embedded_ip_start = l4 + 8;
 
-    let hdr = parse_embedded_v6(frame, embedded_ip_start)?;
+    let hdr = parse_embedded_v6(frame, embedded_ip_start, outer_error_atomic(frame, &meta))?;
 
     // NPTv6 inbound translation: applied at the call site, not in the
     // parser. Preserves the wire-vs-translated asymmetry that the
@@ -156,6 +157,12 @@ pub(in crate::afxdp::icmp_embed) fn match_outer_v6(
             original_src,
             now_ns,
         );
+        // #9901 (F-077): per-session error budget, keyed on the FORWARD
+        // session's own key (the ORIGINAL pre-NAT tuple — the twin of the
+        // v4 gate). Over budget the error is suppressed (dropped).
+        if !ctx.sessions.note_icmp_error_delivered(&fwd.key, now_ns) {
+            return None;
+        }
         return Some(EmbeddedIcmpMatch {
             nat,
             original_src,
@@ -169,9 +176,11 @@ pub(in crate::afxdp::icmp_embed) fn match_outer_v6(
         });
     }
 
-    // Session-fallback path. Inside .or_else we build a SECOND reverse
-    // key — this time using the TRANSLATED emb_src_lookup, mirroring
-    // icmp_embed.rs:412-419 (shared_reverse_key).
+    // Session-fallback path. The SECOND reverse key uses the TRANSLATED
+    // emb_src_lookup, mirroring icmp_embed.rs:412-419 (shared_reverse_key).
+    // It is built EAGERLY (pure construction — no behaviour change) so the
+    // #9901 (F-077) gate below can name the winning query key; it used to
+    // live inside the `.or_else` closure, out of the gate's scope.
     //
     // #6474: the two lookups are mapped SEPARATELY (the v4 twin of
     // `nat_match_v4`): a reply-key hit with `is_reverse == false` on a pure
@@ -181,6 +190,21 @@ pub(in crate::afxdp::icmp_embed) fn match_outer_v6(
     // external identity (RFC 5508 §4) instead of leaking the internal
     // source with an unassociable quote. Every other combination keeps the
     // pre-#6474 behavior bit-for-bit.
+    let shared_reverse_key = embedded_reply_key(
+        libc::AF_INET6 as u8,
+        hdr.proto,
+        emb_src_lookup,
+        hdr.dst,
+        hdr.src_port,
+        hdr.dst_port,
+        quoted_discriminator,
+        // #9162: this one feeds an EXACT `lookup_session_across_scopes`
+        // only, which is domain-preserving on all four of its probes — so
+        // a hardcoded 0 could not reach a session installed in a routing
+        // instance, and the #6474 outbound-SNAT (SNAT66/NPTv6) reply-key
+        // arm was dead for every VRF flow.
+        embedded_routing_domain,
+    );
     lookup_session_across_scopes(
         ctx.sessions,
         ctx.shared_sessions,
@@ -191,21 +215,6 @@ pub(in crate::afxdp::icmp_embed) fn match_outer_v6(
     )
     .map(|resolved| (resolved, false))
     .or_else(|| {
-        let shared_reverse_key = embedded_reply_key(
-            libc::AF_INET6 as u8,
-            hdr.proto,
-            emb_src_lookup,
-            hdr.dst,
-            hdr.src_port,
-            hdr.dst_port,
-            quoted_discriminator,
-            // #9162: this one feeds an EXACT `lookup_session_across_scopes`
-            // only, which is domain-preserving on all four of its probes — so
-            // a hardcoded 0 could not reach a session installed in a routing
-            // instance, and the #6474 outbound-SNAT (SNAT66/NPTv6) reply-key
-            // arm was dead for every VRF flow.
-            embedded_routing_domain,
-        );
         lookup_session_across_scopes(
             ctx.sessions,
             ctx.shared_sessions,
@@ -216,7 +225,22 @@ pub(in crate::afxdp::icmp_embed) fn match_outer_v6(
         )
         .map(|resolved| (resolved, true))
     })
-    .map(|(resolved, via_reply_key)| {
+    .and_then(|(resolved, via_reply_key)| {
+        // #9901 (F-077): per-session error budget — the twin of the v4
+        // gate. The gating key is the matched key (canonical when the
+        // resolver carries one, else the winning query key:
+        // `shared_reverse_key` on the reply arm, `embedded_key` as-is).
+        let query_key = if via_reply_key {
+            &shared_reverse_key
+        } else {
+            &embedded_key
+        };
+        if !ctx
+            .sessions
+            .note_icmp_error_delivered(resolved.key.as_ref(query_key), now_ns)
+        {
+            return None;
+        }
         let sl = resolved.lookup;
         let resolution = if sl.metadata.is_reverse {
             sl.decision.resolution
@@ -233,7 +257,7 @@ pub(in crate::afxdp::icmp_embed) fn match_outer_v6(
             && !sl.metadata.is_reverse
             && sl.decision.nat.rewrite_src.is_some()
             && sl.decision.nat.rewrite_dst.is_none();
-        EmbeddedIcmpMatch {
+        Some(EmbeddedIcmpMatch {
             nat: sl.decision.nat,
             original_src: emb_src_lookup,
             original_src_port: hdr.src_port,
@@ -245,6 +269,6 @@ pub(in crate::afxdp::icmp_embed) fn match_outer_v6(
             resolution,
             metadata: sl.metadata,
             outbound_snat,
-        }
+        })
     })
 }

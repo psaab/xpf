@@ -11,7 +11,8 @@ use super::*;
 // `fn` silently steals the `#[test]` attribute). Imported here instead so the
 // move stays motion-only and no guard changes.
 use crate::fragment_assoc::{
-    FragAuthority, FRAG_CAP_PER_SHARD, NAT64_FRAG_CROSS_DOMAIN_MISSES,
+    FragAuthority, FRAG_CAP_PER_SHARD, FRAG_MAX_LIFETIME_EVICTIONS,
+    FRAG_MAX_LIFETIME_NS, NAT64_FRAG_CROSS_DOMAIN_MISSES,
     NAT64_FRAG_PROTOCOL_ALIAS_MISSES, FRAG_SHARDS, FRAG_TTL_NS, FragAssoc,
     FragKey, frag_shard_index, first_fragment_key,
     nonfirst_fragment_key,
@@ -5056,6 +5057,144 @@ fn nat64_frag_assoc_ttl_evicts() {
         "expired association must miss",
     );
     assert_eq!(cache.len(), 0, "expired entry pruned");
+}
+#[test]
+fn frag_assoc_absolute_lifetime_bounds_continuous_stream_9901() {
+    // #9901 (F-010) REPRO: `lookup` re-stamps the idle deadline on every hit,
+    // so a stream of non-first fragments spaced under the 2s TTL held the
+    // first fragment's permit open indefinitely. The absolute lifetime caps
+    // that hold at FRAG_MAX_LIFETIME_NS measured from install, however fresh
+    // the idle clock is. RED pre-fix: the t0+MAX+1 lookup still hits.
+    use std::sync::atomic::Ordering;
+    let cache = FragAssoc::new();
+    let key = FragKey {
+        addr_family: libc::AF_INET6 as u8,
+        src: IpAddr::V6("2001:db8::1".parse().unwrap()),
+        dst: IpAddr::V6("64:ff9b::0808:0808".parse().unwrap()),
+        ident: 7,
+        protocol: PROTO_UDP,
+        authority: frag_test_authority(),
+    };
+    let decision = frag_test_decision(Nat64State::forward_decision(
+        Ipv4Addr::new(198, 51, 100, 1),
+        Ipv4Addr::new(8, 8, 8, 8),
+        5000,
+    ));
+    let t0 = 1_000u64;
+    cache.install(key, decision, None, t0, 1, 0);
+    // A hit every second: each is inside the refreshed 2s idle window, so
+    // every one of these must hit both pre- and post-fix.
+    for s in 1..FRAG_MAX_LIFETIME_NS / 1_000_000_000 {
+        assert!(
+            cache.lookup(&key, t0 + s * 1_000_000_000, 1, |_| true).is_some(),
+            "idle-fresh consult at +{s}s must hit",
+        );
+    }
+    let evicted_before = FRAG_MAX_LIFETIME_EVICTIONS.load(Ordering::Relaxed);
+    // Past the absolute lifetime with a freshly re-stamped idle deadline:
+    // the association is over and the consult misses.
+    assert!(
+        cache.lookup(&key, t0 + FRAG_MAX_LIFETIME_NS + 1, 1, |_| true).is_none(),
+        "#9901: a continuously refreshed association must still expire at its \
+         absolute lifetime; the idle re-stamp must not extend it",
+    );
+    assert_eq!(cache.len(), 0, "absolute-expired entry pruned");
+    assert_eq!(
+        FRAG_MAX_LIFETIME_EVICTIONS.load(Ordering::Relaxed) - evicted_before,
+        1,
+        "the absolute bound firing must be observable",
+    );
+}
+
+#[test]
+fn frag_assoc_reinstall_restarts_absolute_lifetime_9901() {
+    // #9901 (F-010): only a FRESH first fragment re-admitted through current
+    // enforcement restarts the absolute clock. A re-install at +9s carries
+    // the association to +19s, not +10s — and the re-installed association
+    // still expires absolutely (consults alone never extend it).
+    let cache = FragAssoc::new();
+    let key = FragKey {
+        addr_family: libc::AF_INET6 as u8,
+        src: IpAddr::V6("2001:db8::1".parse().unwrap()),
+        dst: IpAddr::V6("64:ff9b::0808:0808".parse().unwrap()),
+        ident: 9,
+        protocol: PROTO_UDP,
+        authority: frag_test_authority(),
+    };
+    let decision = frag_test_decision(Nat64State::forward_decision(
+        Ipv4Addr::new(198, 51, 100, 1),
+        Ipv4Addr::new(8, 8, 8, 8),
+        5000,
+    ));
+    let t0 = 1_000_000u64;
+    cache.install(key, decision, None, t0, 1, 0);
+    // Keep the association idle-fresh with a hit every second to +9s.
+    for s in 1..=9u64 {
+        assert!(
+            cache.lookup(&key, t0 + s * 1_000_000_000, 1, |_| true).is_some(),
+            "precondition: idle-fresh consult at +{s}s hits",
+        );
+    }
+    cache.install(key, decision, None, t0 + 9_000_000_000, 1, 0);
+    // Stay idle-fresh past the ORIGINAL absolute deadline (+10s): only the
+    // restarted clock keeps these hitting.
+    for s in 10..=18u64 {
+        assert!(
+            cache.lookup(&key, t0 + s * 1_000_000_000, 1, |_| true).is_some(),
+            "a re-admitted first fragment restarts the absolute clock (+{s}s)",
+        );
+    }
+    // At exactly +19s the re-installed association is 10s old and idle-fresh:
+    // the absolute bound — not the idle TTL — denies it.
+    assert!(
+        cache.lookup(&key, t0 + 19_000_000_000, 1, |_| true).is_none(),
+        "the re-installed association still expires absolutely",
+    );
+}
+
+#[test]
+fn frag_assoc_absolute_reclaim_frees_shard_slots_9901() {
+    // #9901 (F-010): install-time reclaim must treat an absolute-expired but
+    // idle-fresh entry as dead space, not a live victim. Otherwise a sustained
+    // same-key stream squats toward the shard cap and forces the eviction of a
+    // genuinely live association. RED pre-fix: reclaim sees every entry
+    // idle-fresh and reports a live eviction.
+    let src: IpAddr = "2001:db8::1".parse().unwrap();
+    let dst: IpAddr = "64:ff9b::0808:0808".parse().unwrap();
+    let family = libc::AF_INET6 as u8;
+    let idents = frag_idents_in_one_shard(src, dst, family, FRAG_CAP_PER_SHARD + 1);
+    let mk = |ident: u32| FragKey {
+        addr_family: family,
+        src,
+        dst,
+        ident,
+        protocol: PROTO_UDP,
+        authority: frag_test_authority(),
+    };
+    let decision = frag_test_decision(Nat64State::forward_decision(
+        Ipv4Addr::new(198, 51, 100, 1),
+        Ipv4Addr::new(8, 8, 8, 8),
+        5000,
+    ));
+    let cache = FragAssoc::new();
+    let t0 = 1_000u64;
+    for &ident in &idents[..FRAG_CAP_PER_SHARD] {
+        cache.install(mk(ident), decision, None, t0, 1, 0);
+    }
+    // Touch every entry every second to +9s: idle-fresh (deadline +11s) but
+    // absolutely old.
+    for s in 1..=9u64 {
+        for &ident in &idents[..FRAG_CAP_PER_SHARD] {
+            assert!(cache.lookup(&mk(ident), t0 + s * 1_000_000_000, 1, |_| true).is_some());
+        }
+    }
+    let evicted_live =
+        cache.install(mk(idents[FRAG_CAP_PER_SHARD]), decision, None, t0 + 10_500_000_000, 1, 0);
+    assert!(
+        !evicted_live,
+        "#9901: install reclaim must prune absolute-expired entries before \
+         evicting; every shard entry was past its absolute lifetime",
+    );
 }
 
 /// Collect `count` distinct idents that all hash to the SAME shard for a fixed

@@ -415,6 +415,45 @@ impl super::Coordinator {
         crate::fragment_assoc::NAT64_FRAG_PROTOCOL_ALIAS_MISSES.load(Ordering::Relaxed)
     }
 
+    /// #9901 (F-010): fragment associations reclaimed by the ABSOLUTE lifetime
+    /// bound (10s from install) rather than the 2s idle TTL. An idle-TTL expiry
+    /// is routine churn; an absolute expiry means one key was consulted
+    /// continuously for the whole maximum lifetime — the sustained same-key
+    /// fragment stream the bound exists to stop. Surfaced as
+    /// `xpf_userspace_frag_max_lifetime_evictions_total`.
+    pub fn frag_max_lifetime_evictions_total(&self) -> u64 {
+        crate::fragment_assoc::FRAG_MAX_LIFETIME_EVICTIONS.load(Ordering::Relaxed)
+    }
+    /// #9901 (F-074): forwarded frames whose egress-MTU decision ran with NO
+    /// known MTU (`mtu == 0`) and took the documented fail-open `Forward` arm.
+    /// The decision is deliberate, but silence about it hid unknown-MTU
+    /// configurations (missing egress row / unknown tunnel kind) behind
+    /// healthy-looking forwards. Surfaced as
+    /// `xpf_userspace_egress_mtu_unknown_forward_total`.
+    pub fn egress_mtu_unknown_forward_total(&self) -> u64 {
+        crate::afxdp::icmp_ptb::EGRESS_MTU_UNKNOWN_FORWARD_TOTAL.load(Ordering::Relaxed)
+    }
+
+    /// #9901 (F-077): embedded quotes refused by the 8-byte quoted-L4
+    /// adequacy floor — atomic-outer errors whose quoted TCP/UDP/ICMP(v6)
+    /// header carries fewer than 8 bytes. Pre-fix the 4 port bytes parsed
+    /// and the error matched a live session, so a minimal forged quote
+    /// could steer an ICMP error onto any guessed session. Surfaced as
+    /// `xpf_userspace_embedded_quote_subminimal_refused_total`.
+    pub fn embedded_quote_subminimal_refused_total(&self) -> u64 {
+        crate::afxdp::icmp_embed::EMBEDDED_QUOTE_SUBMINIMAL_REFUSED_TOTAL.load(Ordering::Relaxed)
+    }
+
+    /// #9901 (F-077): embedded ICMP errors suppressed by the per-session
+    /// GCRA — errors that MATCHED a session but were over that session's
+    /// 64/64 budget. Without it, one quoter can steer an UNBOUNDED error
+    /// stream onto a live session (forged PTB/TE as a PMTUD / throughput
+    /// weapon). Surfaced as
+    /// `xpf_userspace_embedded_error_per_session_suppressed_total`.
+    pub fn embedded_error_per_session_suppressed_total(&self) -> u64 {
+        crate::session::EMBEDDED_ERROR_PER_SESSION_SUPPRESSED_TOTAL.load(Ordering::Relaxed)
+    }
+
     /// #6751 PR 2/3: interface-mode SNAT admissions that failed CLOSED with no
     /// free translated identity for their `(egress, remote)` pair, plus
     /// peer-synced imports refused for the same reason. Surfaced as
