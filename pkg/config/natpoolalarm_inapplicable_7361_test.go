@@ -6,12 +6,15 @@ import (
 )
 
 // #7361: a `pool-utilization-alarm` configured on an ADDRESS-ONLY pool
-// (`port no-translation`) can never fire, and nothing said so.
+// (`port no-translation`) measures only a partial signal, and nothing said
+// so. Narrowed by #9896: the tracked-flow leg DOES fire for this class, so
+// the advisory no longer claims the alarm can never fire — it claims the
+// ports leg is dead and collision exhaustion is silent.
 //
 // `used_ports` is a popcount over the allocator's occupancy bitmaps;
 // `reserve_address_only` never touches occupancy — it records ownership in
-// `live.address_only_owners`. So UsedPorts is permanently 0, the utilization
-// percentage is permanently 0, and the raise-threshold cannot be crossed.
+// `live.address_only_owners`. So the ports leg of the utilization percentage
+// is permanently 0.
 //
 // THE HARM IS NOT THE MISSING PERCENTAGE. The configuration reads as working:
 // `show` renders the alarm, and 0% is indistinguishable from a healthy pool.
@@ -61,7 +64,7 @@ func TestAddressOnlyPoolAlarmWarns7361(t *testing.T) {
 	if len(w) != 1 {
 		t.Fatalf("expected exactly one advisory, got %d: %v", len(w), w)
 	}
-	for _, want := range []string{`"p1"`, "port no-translation", "NEVER fire", "90"} {
+	for _, want := range []string{`"p1"`, "port no-translation", "tracked-flow", "90"} {
 		if !strings.Contains(w[0], want) {
 			t.Errorf("the advisory does not mention %q: %s", want, w[0])
 		}
@@ -130,7 +133,7 @@ func TestAdvisoryReachesValidateConfig7361(t *testing.T) {
 	}
 	var found bool
 	for _, w := range ValidateConfig(cfg) {
-		if strings.Contains(w, "NEVER fire") && strings.Contains(w, `"p4"`) {
+		if strings.Contains(w, "tracked-flow") && strings.Contains(w, `"p4"`) {
 			found = true
 		}
 	}
