@@ -136,8 +136,15 @@ use super::snapshot::{ConfigSnapshot, FabricSnapshot, NeighborSnapshot, Userspac
 // mismatch is refused by the pinned-map pre-flight (fail-closed deploy per
 // §5e), independently of this JSON gate. See protocol.go's v17 note. The
 // #8892 digest moves with it (the plural is a real, transmitted field).
+// v18 (#9752): `SessionDecision`'s installing-table identity now crosses the HA
+// session-sync path (open-frame trailing pair, both `SessionDeltaInfo` legs,
+// `SessionSyncRequest.install_table_*`). Additive, but under the v9 rule that is
+// not enough, because the old behaviour IS the defect: a v17 helper would import
+// every PBR-steered session stamp-less and re-resolve it in `inet.0`. Exact
+// equality refuses that pairing. The #8892 digest did not move (session-sync
+// messages are not snapshot structs). See protocol.go's v18 note.
 // Keep the line below in this exact form: the Go lockstep guard parses it.
-pub(crate) const CONFIG_SNAPSHOT_PROTOCOL_VERSION: i32 = 17;
+pub(crate) const CONFIG_SNAPSHOT_PROTOCOL_VERSION: i32 = 18;
 
 /// #9520: the machine-readable prefix of the refusal `apply` sends when a
 /// snapshot reuses the installed generation with a different content digest.

@@ -224,7 +224,16 @@ const (
 	// new helper under an old daemon reads an empty set and refuses
 	// kernel-path transport for every WireGuard endpoint, the steered ones
 	// included. Exact equality refuses both.
-	ProtocolVersion = 17
+	//
+	// v18 (issue 9752): the session's installing-table identity
+	// (`SessionDecision` domain+check) now crosses the HA session-sync path:
+	// the open-frame trailing pair, both `SessionDeltaInfo` legs, the
+	// cluster wire tails, and `SessionSyncRequest.install_table_*`.
+	// BUMPED on the merits, like v13/v16: an old helper ignores the fields
+	// and imports every PBR-steered session stamp-less, re-resolving it in
+	// `inet.0` — and that IS the defect the fields close. The session-sync
+	// messages are not snapshot structs, so the #8892 digest did not move.
+	ProtocolVersion = 18
 
 	// MinProtocolMultiZoneScopedPolicy is the FIRST snapshot protocol version
 	// that can represent a multi-zone scoped global policy — the plural

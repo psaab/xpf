@@ -71,6 +71,7 @@ fn delta_with_session_id(session_id: u64) -> SessionDelta {
         session_id,
         bulk_resync: false,
         tcp_close_class: 0,
+        purge_retirement: false,
     }
 }
 
@@ -245,9 +246,10 @@ fn binary_attribution(delta: &SessionDelta) -> BinaryAttribution {
         0, // #9412: tcp_close_class
     );
     let payload = &frame.as_bytes()[FRAME_HEADER_SIZE..];
-    // #9412: discount the trailing close-class byte. The fields below are read
-    // end-relative, and the open frame now ends one byte after the routing domain.
-    let n = payload.len() - 1;
+    // #9412 + #9752: discount the trailing close-class byte and install-table
+    // pair. The fields below are read end-relative, and the open frame now
+    // ends nine bytes after the routing domain.
+    let n = payload.len() - 9;
     let u32_at = |off: usize| -> u32 {
         u32::from_le_bytes(payload[off..off + 4].try_into().expect("4 bytes"))
     };
@@ -622,9 +624,10 @@ fn session_delta_json_and_binary_agree_on_the_routing_domain_7239() {
         0, // #9412: tcp_close_class
     );
     let payload = &frame.as_bytes()[FRAME_HEADER_SIZE..];
-    // #9412: discount the trailing close-class byte. The fields below are read
-    // end-relative, and the open frame now ends one byte after the routing domain.
-    let n = payload.len() - 1;
+    // #9412 + #9752: discount the trailing close-class byte and install-table
+    // pair. The fields below are read end-relative, and the open frame now
+    // ends nine bytes after the routing domain.
+    let n = payload.len() - 9;
     let binary = u32::from_le_bytes(payload[n - 4..n].try_into().expect("4 bytes"));
 
     let info = session_delta_info(&test_binding_identity(), &delta, &zone_names());
@@ -675,4 +678,119 @@ fn session_delta_info_carries_the_close_class_and_names_an_update_9412() {
     assert_eq!(info.event, "update", "a close-state Update must be named \"update\" on the JSON leg (#9412)");
     // Positive control: this really is the delta -> JSON conversion.
     assert_eq!(info.src_port, 12345, "conversion produced the delta's tuple");
+}
+
+/// #9752: the two delta legs must agree on the installing-table identity, for
+/// the reason #6949 exists on this same struct — a field carried by the binary
+/// leg and not the JSON one is not an error anywhere, it is a (0,0) at the
+/// consumer, and (0,0) here means "default table", a legal value rather than
+/// an obvious absence. A session recovered through the drain fallback or a
+/// FullResync export would then re-resolve in `inet.0` while the binary leg
+/// pins it to its installing table.
+///
+/// FAIL-ON-REVERT: stop populating `install_table_*` in
+/// `afxdp::session_delta_info` and this reds.
+#[test]
+fn session_delta_json_and_binary_agree_on_the_install_table_9752() {
+    let mut delta = delta_with_attribution();
+    // NONZERO stamp, so a leg that dropped the field entirely cannot compare
+    // equal (both legs would emit (0,0)).
+    delta.decision.install_table_domain = 525_590;
+    delta.decision.install_table_check = 3_318_534_811;
+    let frame = EventFrame::encode_session_open(
+        1,
+        &delta.key,
+        &delta.decision,
+        &delta.metadata,
+        &FxHashMap::default(),
+        delta.fabric_redirect_sync,
+        delta.session_id,
+        0, // #9412: tcp_close_class
+    );
+    let payload = &frame.as_bytes()[FRAME_HEADER_SIZE..];
+    let n = payload.len();
+    let binary_domain =
+        u32::from_le_bytes(payload[n - 8..n - 4].try_into().expect("4 bytes"));
+    let binary_check =
+        u32::from_le_bytes(payload[n - 4..n].try_into().expect("4 bytes"));
+
+    let info = session_delta_info(&test_binding_identity(), &delta, &zone_names());
+    let json = serde_json::to_value(info).expect("delta serializes");
+    let json_domain = json
+        .get("install_table_domain")
+        .unwrap_or_else(|| {
+            panic!(
+                "the JSON session-delta leg carries no `install_table_domain` key at all: {json}"
+            )
+        })
+        .as_u64()
+        .expect("install_table_domain is a number") as u32;
+    let json_check = json
+        .get("install_table_check")
+        .unwrap_or_else(|| {
+            panic!(
+                "the JSON session-delta leg carries no `install_table_check` key at all: {json}"
+            )
+        })
+        .as_u64()
+        .expect("install_table_check is a number") as u32;
+
+    assert_eq!(
+        (json_domain, json_check),
+        (binary_domain, binary_check),
+        "the two session-delta legs disagree on the installing table"
+    );
+    assert_eq!((binary_domain, binary_check), (525_590, 3_318_534_811));
+}
+
+/// #9752: end-to-end import — the stamp the JSON producer emits is the stamp
+/// the importer installs. The request envelope is fixture (tuple/zones, the
+/// established shape); the STAMP ITSELF flows from `session_delta_info`
+/// output through the real `SessionSyncRequest` wire form, so no
+/// hand-stamped import can mask a producer/consumer skew.
+#[test]
+fn synced_import_installs_the_producer_emitted_install_table_9752() {
+    use crate::protocol::SessionSyncRequest;
+    use crate::server::helpers::build_synced_session_entry;
+
+    let mut delta = delta_with_attribution();
+    delta.decision.install_table_domain = 525_590;
+    delta.decision.install_table_check = 3_318_534_811;
+    let info = session_delta_info(&test_binding_identity(), &delta, &zone_names());
+    let produced = serde_json::to_value(info).expect("delta serializes");
+    let domain = produced
+        .get("install_table_domain")
+        .expect("producer emits the domain")
+        .as_u64()
+        .expect("domain is a number");
+    let check = produced
+        .get("install_table_check")
+        .expect("producer emits the check")
+        .as_u64()
+        .expect("check is a number");
+    let req_json = serde_json::json!({
+        "operation": "upsert",
+        "addr_family": 4,
+        "protocol": 6,
+        "src_ip": "10.0.61.102",
+        "dst_ip": "172.16.80.200",
+        "src_port": 40000,
+        "dst_port": 5201,
+        "ingress_zone": "lan",
+        "egress_zone": "wan",
+        "owner_rg_id": 1,
+        "egress_ifindex": 5,
+        "tx_ifindex": 5,
+        "install_table_domain": domain,
+        "install_table_check": check,
+    });
+    let req: SessionSyncRequest =
+        serde_json::from_value(req_json).expect("request parses");
+    let zones = FxHashMap::from_iter([
+        ("lan".to_string(), crate::test_zone_ids::TEST_LAN_ZONE_ID),
+        ("wan".to_string(), crate::test_zone_ids::TEST_WAN_ZONE_ID),
+    ]);
+    let entry = build_synced_session_entry(&req, &zones, 0).expect("import");
+    assert_eq!(entry.decision.install_table_domain, 525_590);
+    assert_eq!(entry.decision.install_table_check, 3_318_534_811);
 }

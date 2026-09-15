@@ -302,6 +302,22 @@ impl EventFrame {
         buf[pos] = tcp_close_class;
         pos += 1;
 
+        // #9752: [+37:+45] the session's installing route-table identity
+        // (domain u32 LE + check u32 LE), trailing and length-gated after the
+        // #9412 close class, like every field since #3301. Carried so a
+        // peer-synced PBR session re-resolves in the table its steer
+        // installed instead of `inet.0`. `(0,0)` = default table, which is
+        // also what a Go decoder that predates these 8 bytes reads — and
+        // what an old helper's re-resolve does without them (rolling-upgrade
+        // safe per direction). Written on BOTH message types this layout
+        // serves: an Update must not downgrade a stamped session to
+        // default, and an Open carries the current stamp so a resync
+        // re-export restores it.
+        buf[pos..pos + 4].copy_from_slice(&decision.install_table_domain.to_le_bytes());
+        pos += 4;
+        buf[pos..pos + 4].copy_from_slice(&decision.install_table_check.to_le_bytes());
+        pos += 4;
+
         // Write header
         let payload_len = (pos - FRAME_HEADER_SIZE) as u32;
         write_header(&mut buf, payload_len, msg_type, seq);

@@ -457,20 +457,98 @@ fn owner_rg_refresh_reresolves_in_installing_table() {
     assert_eq!(decision.resolution.egress_ifindex, BLUE_IFINDEX);
 }
 
-/// C4: the MissingNeighbor-reseed helper honors the installing table.
+/// C4: a real MissingNeighbor seed install reseeds in its installing table.
+/// The seed decision comes from the REAL miss-path table lookup (neighbor
+/// absent => MissingNeighbor), stamped by the REAL stamp fn, installed under
+/// the REAL seed origin; the reseed is a dynamic-neighbor learn followed by
+/// the REAL hit path. Nothing hand-stamped except fixture + metadata.
 #[test]
-fn session_reresolve_helper_honors_installing_table() {
-    let forwarding = pbr_state();
+fn missing_neighbor_seed_install_and_reseed_stay_in_table() {
+    use super::super::forwarding::lookup_forwarding_resolution_in_table_with_dynamic;
+    use super::super::types::NeighborEntry;
+    // Neighbor-absent blue: route + connected present, no neighbor anywhere.
+    let mut snapshot = pbr_snapshot();
+    snapshot.neighbors.retain(|n| n.ip != "172.16.50.254");
+    let forwarding = super::super::forwarding_build::build_forwarding_state(&snapshot);
     let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
-    let resolved = lookup_forwarding_resolution_for_session(
+    let dst = IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8));
+    // Real miss-path lookup in X with no neighbor => MissingNeighbor seed.
+    let miss = lookup_forwarding_resolution_in_table_with_dynamic(
         &forwarding,
         &dynamic_neighbors,
-        &pbr_flow(),
-        stamped_decision(unusable_resolution()),
+        dst,
+        Some("blue.inet.0"),
     );
-    assert_eq!(resolved.disposition, ForwardingDisposition::ForwardCandidate);
-    assert_eq!(resolved.egress_ifindex, BLUE_IFINDEX);
-    // And the name resolver exposes the stamped table to validation callers.
+    assert_eq!(miss.disposition, ForwardingDisposition::MissingNeighbor);
+    // Real stamp fn: a neighbor-miss resolved in X still stamps X.
+    let (domain, check) = super::super::forwarding::install_table_stamp_for_miss(
+        Some(blue_stamp()),
+        true,
+        miss,
+    );
+    assert_eq!((domain, check), blue_stamp());
+    let mut sessions = SessionTable::new();
+    let key = pbr_key();
+    assert!(sessions.install_with_protocol_with_origin(
+        key.clone(),
+        SessionDecision {
+            resolution: miss,
+            nat: NatDecision::default(),
+            install_table_domain: domain,
+            install_table_check: check,
+        },
+        pbr_metadata(),
+        SessionOrigin::MissingNeighborSeed,
+        NOW_NS,
+        PROTO_TCP,
+        0x18,
+    ));
+    // Reseed trigger: the gateway neighbor is learned dynamically.
+    dynamic_neighbors.insert(
+        (
+            BLUE_IFINDEX,
+            IpAddr::V4(Ipv4Addr::new(172, 16, 50, 254)),
+        ),
+        NeighborEntry {
+            mac: [0, 0xaa, 0xbb, 0xcc, 0xdd, 0x01],
+        },
+    );
+    // Real hit path over the seed.
+    let shared = shared_maps();
+    let resolved = resolve_flow_session_decision(
+        &mut sessions,
+        SteeringMap::unshared_for_test(-1),
+        &shared.sessions,
+        &shared.nat_sessions,
+        &shared.forward_wire_sessions,
+        &shared.owner_rg_indexes,
+        &shared.peer_worker_commands,
+        &forwarding,
+        &active_ha(),
+        &dynamic_neighbors,
+        &pbr_flow(),
+        NOW_NS,
+        NOW_SECS,
+        PROTO_TCP,
+        0x18,
+        LAN_IFINDEX,
+        0,
+        false,
+        0,
+        0,
+    )
+    .expect("seeded session must hit");
+    assert_eq!(
+        resolved.decision.resolution.disposition,
+        ForwardingDisposition::ForwardCandidate
+    );
+    assert_eq!(resolved.decision.resolution.egress_ifindex, BLUE_IFINDEX);
+}
+
+/// C4b: the name resolver exposes the stamped table to validation callers.
+#[test]
+fn install_table_name_resolver_exposes_stamped_table() {
+    let forwarding = pbr_state();
     assert_eq!(
         install_table_name_for_session(
             &forwarding,
@@ -1101,5 +1179,421 @@ fn tunnel_resolution_bypasses_install_table() {
     assert_ne!(
         stamped.egress_ifindex, BLUE_IFINDEX,
         "tunnel arm must never serve a blue FIB result"
+    );
+}
+
+/// GPT-3: re-requests during an active walk must not restart the cursor —
+/// 300 stale entries (>1 budget of 256) with a re-arm before EVERY pass
+/// still complete. Pre-fix the second pass re-examined vacant slots 0-256
+/// forever and slots 256-300 starved.
+#[test]
+fn purge_rearm_mid_walk_does_not_starve_beyond_budget() {
+    use super::install_table_purge::INSTALL_TABLE_PURGE_BUDGET;
+    let channel = RuntimeViewChannel::default();
+    let forwarding = Arc::new(pbr_state());
+    publish_pbr_view(&channel, 7, forwarding.clone());
+    let reader = channel.reader();
+    let mut sessions = SessionTable::new();
+    let dst = Ipv4Addr::new(8, 8, 8, 8);
+    let total = INSTALL_TABLE_PURGE_BUDGET + 44;
+    for i in 0..total {
+        let key = pbr_key_for(30000 + i as u16, dst);
+        assert!(
+            sessions.install_with_protocol_with_origin(
+                key,
+                stamped_decision(unusable_resolution()),
+                pbr_metadata(),
+                SessionOrigin::SyncImport,
+                NOW_NS,
+                PROTO_TCP,
+                0x18,
+            ),
+            "install {i}"
+        );
+    }
+    let mut rotated_snapshot = pbr_snapshot();
+    rotated_snapshot.routes.retain(|r| r.table == "inet.0");
+    for iface in &mut rotated_snapshot.interfaces {
+        if iface.ifindex == BLUE_IFINDEX {
+            iface.routing_instance.clear();
+        }
+    }
+    let rotated = Arc::new(super::super::forwarding_build::build_forwarding_state(
+        &rotated_snapshot,
+    ));
+    publish_pbr_view(&channel, 8, rotated.clone());
+    let shared = shared_maps();
+    let mut purge = super::install_table_purge::InstallTablePurge::default();
+    let mut evicted = Vec::new();
+    let mut purged_total = 0usize;
+    let mut passes = 0u32;
+    purge.arm(8);
+    while purge.is_running() && passes < 10 {
+        purge.arm(8); // re-request every pass: retained, never restarting
+        purged_total += purge.step(
+            &mut sessions,
+            SteeringMap::unshared_for_test(-1),
+            -1,
+            -1,
+            &shared.sessions,
+            &shared.nat_sessions,
+            &shared.forward_wire_sessions,
+            &shared.owner_rg_indexes,
+            &shared.peer_worker_commands,
+            &rotated,
+            &reader,
+            8,
+            NOW_NS,
+            0,
+            &mut evicted,
+        );
+        passes += 1;
+    }
+    assert!(
+        !purge.is_running(),
+        "walk must complete despite per-pass re-arms ({passes} passes)"
+    );
+    assert_eq!(purged_total, total);
+    assert_eq!(evicted.len(), total);
+    for i in 0..total {
+        assert!(sessions
+            .entry_with_origin(&pbr_key_for(30000 + i as u16, dst))
+            .is_none());
+    }
+}
+
+fn rotated_blue_gone_state() -> ForwardingState {
+    let mut rotated_snapshot = pbr_snapshot();
+    rotated_snapshot.routes.retain(|r| r.table == "inet.0");
+    // Presence includes connected routes: re-home the blue interface into the
+    // default table too, so `blue` vanishes from the registry entirely (the
+    // realistic "instance deleted" rotation).
+    for iface in &mut rotated_snapshot.interfaces {
+        if iface.ifindex == BLUE_IFINDEX {
+            iface.routing_instance.clear();
+        }
+    }
+    super::super::forwarding_build::build_forwarding_state(&rotated_snapshot)
+}
+
+fn synced_entry_for(
+    key: &SessionKey,
+    decision: SessionDecision,
+    metadata: SessionMetadata,
+) -> SyncedSessionEntry {
+    SyncedSessionEntry {
+        key: key.clone(),
+        decision,
+        metadata,
+        origin: SessionOrigin::SyncImport,
+        protocol: PROTO_TCP,
+        tcp_flags: 0x10,
+        generation: 0,
+        session_id: 0,
+        tcp_close_class: 0,
+    }
+}
+
+fn flush_deltas_for_test(
+    deltas: &[SessionDelta],
+    shared: &SharedMaps,
+    peer_queue: &Arc<Mutex<VecDeque<WorkerCommand>>>,
+    forwarding: &ForwardingState,
+) {
+    use crate::afxdp::checksum::DnatTableFds;
+    let ident = BindingIdentity {
+        slot: 0,
+        queue_id: 0,
+        worker_id: 0,
+        interface: Arc::<str>::from(""),
+        ifindex: -1,
+    };
+    let dnat_fds = DnatTableFds::default();
+    let recent_session_deltas = Arc::new(Mutex::new(VecDeque::new()));
+    let peer_worker_commands = vec![peer_queue.clone()];
+    let mut worker_lossless_wedged = false;
+    flush_session_deltas(
+        &ident,
+        None,
+        SteeringMap::unshared_for_test(-1),
+        -1,
+        -1,
+        &dnat_fds,
+        deltas,
+        &shared.sessions,
+        &shared.nat_sessions,
+        &shared.forward_wire_sessions,
+        &shared.owner_rg_indexes,
+        &recent_session_deltas,
+        &peer_worker_commands,
+        crate::afxdp::empty_worker_commands_by_id(),
+        &None,
+        forwarding,
+        &mut worker_lossless_wedged,
+    );
+}
+
+/// GPT-2a: a table re-added between scan and teardown skips everything —
+/// no local churn, no delta, and the (empty) flush preserves shared state.
+#[test]
+fn purge_table_readd_skips_all_through_flush() {
+    let channel = RuntimeViewChannel::default();
+    let forwarding = Arc::new(pbr_state());
+    publish_pbr_view(&channel, 7, forwarding.clone());
+    let reader = channel.reader();
+    let mut sessions = SessionTable::new();
+    let key = pbr_key();
+    let decision = stamped_decision(unusable_resolution());
+    assert!(sessions.install_with_protocol_with_origin(
+        key.clone(),
+        decision,
+        pbr_metadata(),
+        SessionOrigin::SyncImport,
+        NOW_NS,
+        PROTO_TCP,
+        0x18,
+    ));
+    let shared = shared_maps();
+    publish_shared_session(
+        &shared.sessions,
+        &shared.nat_sessions,
+        &shared.forward_wire_sessions,
+        &shared.owner_rg_indexes,
+        &synced_entry_for(&key, decision, pbr_metadata()),
+    );
+    // Latest re-adds blue while the step still scans the rotated view.
+    publish_pbr_view(&channel, 8, forwarding.clone());
+    let rotated = rotated_blue_gone_state();
+    let peer_queue: Arc<Mutex<VecDeque<WorkerCommand>>> =
+        Arc::new(Mutex::new(VecDeque::new()));
+    let peer_cmds = vec![peer_queue.clone()];
+    let mut purge = super::install_table_purge::InstallTablePurge::default();
+    purge.arm(8);
+    let mut evicted = Vec::new();
+    let purged = purge.step(
+        &mut sessions,
+        SteeringMap::unshared_for_test(-1),
+        -1,
+        -1,
+        &shared.sessions,
+        &shared.nat_sessions,
+        &shared.forward_wire_sessions,
+        &shared.owner_rg_indexes,
+        &peer_cmds,
+        &rotated,
+        &reader,
+        8,
+        NOW_NS,
+        0,
+        &mut evicted,
+    );
+    assert_eq!(purged, 0, "re-added table must skip all teardown");
+    assert!(sessions.entry_with_origin(&key).is_some());
+    assert!(evicted.is_empty());
+    let deltas = sessions.drain_deltas(64);
+    assert!(deltas.is_empty(), "no close may be emitted on re-add skip");
+    flush_deltas_for_test(&deltas, &shared, &peer_queue, &rotated);
+    assert!(shared.sessions.lock().expect("lock").contains_key(&key));
+    assert!(peer_queue.lock().expect("lock").is_empty());
+}
+
+/// GPT-2b: a fenced decline (shared stamp changed under the walk) emits no
+/// close — the flush that follows must preserve the shared entry and queue
+/// nothing, even though local teardown ran.
+#[test]
+fn purge_fence_decline_emits_no_close_through_flush() {
+    let channel = RuntimeViewChannel::default();
+    let forwarding = Arc::new(pbr_state());
+    publish_pbr_view(&channel, 7, forwarding.clone());
+    let reader = channel.reader();
+    let mut sessions = SessionTable::new();
+    let key = pbr_key();
+    let decision = stamped_decision(unusable_resolution());
+    assert!(sessions.install_with_protocol_with_origin(
+        key.clone(),
+        decision,
+        pbr_metadata(),
+        SessionOrigin::SyncImport,
+        NOW_NS,
+        PROTO_TCP,
+        0x18,
+    ));
+    // Shared entry carries a DIFFERENT nonzero stamp: predicate-true under
+    // the rotated view (unknown domain) but stamp-mismatched, so the fence
+    // declines on identity alone.
+    let mut diverged = decision;
+    diverged.install_table_domain = 12345;
+    diverged.install_table_check = 999;
+    let shared = shared_maps();
+    publish_shared_session(
+        &shared.sessions,
+        &shared.nat_sessions,
+        &shared.forward_wire_sessions,
+        &shared.owner_rg_indexes,
+        &synced_entry_for(&key, diverged, pbr_metadata()),
+    );
+    let rotated = Arc::new(rotated_blue_gone_state());
+    publish_pbr_view(&channel, 8, rotated.clone());
+    let peer_queue: Arc<Mutex<VecDeque<WorkerCommand>>> =
+        Arc::new(Mutex::new(VecDeque::new()));
+    let peer_cmds = vec![peer_queue.clone()];
+    let mut purge = super::install_table_purge::InstallTablePurge::default();
+    purge.arm(8);
+    let mut evicted = Vec::new();
+    let purged = purge.step(
+        &mut sessions,
+        SteeringMap::unshared_for_test(-1),
+        -1,
+        -1,
+        &shared.sessions,
+        &shared.nat_sessions,
+        &shared.forward_wire_sessions,
+        &shared.owner_rg_indexes,
+        &peer_cmds,
+        &rotated,
+        &reader,
+        8,
+        NOW_NS,
+        0,
+        &mut evicted,
+    );
+    assert_eq!(purged, 1, "local teardown still runs on decline");
+    assert!(sessions.entry_with_origin(&key).is_none());
+    assert_eq!(evicted, vec![key.clone()]);
+    let deltas = sessions.drain_deltas(64);
+    assert!(deltas.is_empty(), "decline must emit no close");
+    flush_deltas_for_test(&deltas, &shared, &peer_queue, &rotated);
+    assert!(
+        shared.sessions.lock().expect("lock").contains_key(&key),
+        "fenced shared entry must survive the flush"
+    );
+    assert!(
+        peer_queue.lock().expect("lock").is_empty(),
+        "decline must replicate nothing"
+    );
+}
+
+/// GPT-2c: a rejected (ambiguous) companion survives the forward close's
+/// flush — no reverse derivation, no ordinary replicate. The forward close
+/// carries the purge-retirement flag; the peer queue holds exactly the one
+/// conditional delete the walk sent, nothing the drain added.
+#[test]
+fn purge_rejected_companion_survives_close_flush() {
+    let channel = RuntimeViewChannel::default();
+    let forwarding = Arc::new(pbr_state());
+    publish_pbr_view(&channel, 7, forwarding.clone());
+    let reader = channel.reader();
+    let mut sessions = SessionTable::new();
+    let key = pbr_key();
+    let decision = stamped_decision(unusable_resolution());
+    assert!(sessions.install_with_protocol_with_origin(
+        key.clone(),
+        decision,
+        pbr_metadata(),
+        SessionOrigin::SyncImport,
+        NOW_NS,
+        PROTO_TCP,
+        0x18,
+    ));
+    // Simultaneous-open forward squatting the derived reverse slot: the
+    // backlink check rejects it (not reverse), so the purge preserves it.
+    let rk = reverse_session_key(&key, NatDecision::default());
+    assert_ne!(rk, key);
+    assert!(sessions.install_with_protocol_with_origin(
+        rk.clone(),
+        unstamped_decision(unusable_resolution()),
+        pbr_metadata(),
+        SessionOrigin::ForwardFlow,
+        NOW_NS,
+        PROTO_TCP,
+        0x18,
+    ));
+    let shared = shared_maps();
+    publish_shared_session(
+        &shared.sessions,
+        &shared.nat_sessions,
+        &shared.forward_wire_sessions,
+        &shared.owner_rg_indexes,
+        &synced_entry_for(&key, decision, pbr_metadata()),
+    );
+    publish_shared_session(
+        &shared.sessions,
+        &shared.nat_sessions,
+        &shared.forward_wire_sessions,
+        &shared.owner_rg_indexes,
+        &synced_entry_for(&rk, unstamped_decision(unusable_resolution()), pbr_metadata()),
+    );
+    let rotated = Arc::new(rotated_blue_gone_state());
+    publish_pbr_view(&channel, 8, rotated.clone());
+    let peer_queue: Arc<Mutex<VecDeque<WorkerCommand>>> =
+        Arc::new(Mutex::new(VecDeque::new()));
+    let peer_cmds = vec![peer_queue.clone()];
+    // Clear install-time deltas (F2's Open) so the ring holds exactly what
+    // the walk emits.
+    sessions.drain_deltas(64);
+    let mut purge = super::install_table_purge::InstallTablePurge::default();
+    purge.arm(8);
+    let mut evicted = Vec::new();
+    let purged = purge.step(
+        &mut sessions,
+        SteeringMap::unshared_for_test(-1),
+        -1,
+        -1,
+        &shared.sessions,
+        &shared.nat_sessions,
+        &shared.forward_wire_sessions,
+        &shared.owner_rg_indexes,
+        &peer_cmds,
+        &rotated,
+        &reader,
+        8,
+        NOW_NS,
+        0,
+        &mut evicted,
+    );
+    assert_eq!(purged, 1);
+    assert!(sessions.entry_with_origin(&key).is_none());
+    assert!(
+        sessions.entry_with_origin(&rk).is_some(),
+        "rejected companion stays local"
+    );
+    let deltas = sessions.drain_deltas(64);
+    assert_eq!(deltas.len(), 1, "exactly the forward close");
+    assert_eq!(deltas[0].kind, SessionDeltaKind::Close);
+    assert_eq!(deltas[0].key, key);
+    assert!(
+        deltas[0].purge_retirement,
+        "purge close must carry the retirement flag"
+    );
+    {
+        let q = peer_queue.lock().expect("lock");
+        assert_eq!(q.len(), 1, "walk sends exactly the conditional delete");
+        assert!(
+            matches!(
+                &q[0],
+                WorkerCommand::DeleteSyncedIfTableUnknown { key: k, .. } if *k == key
+            ),
+            "unexpected peer command: {:?}",
+            q[0]
+        );
+    }
+    flush_deltas_for_test(&deltas, &shared, &peer_queue, &rotated);
+    assert!(
+        !shared.sessions.lock().expect("lock").contains_key(&key),
+        "removed forward stays removed"
+    );
+    assert!(
+        shared.sessions.lock().expect("lock").contains_key(&rk),
+        "rejected companion must survive the close flush (no reverse derivation)"
+    );
+    assert!(
+        sessions.entry_with_origin(&rk).is_some(),
+        "rejected companion stays local through flush"
+    );
+    let q = peer_queue.lock().expect("lock");
+    assert_eq!(
+        q.len(),
+        1,
+        "drain must add no ordinary replicate for a purge close, got {q:?}"
     );
 }

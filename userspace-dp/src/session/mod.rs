@@ -2270,6 +2270,7 @@ impl SessionTable {
             session_id: forward.session_id,
             bulk_resync: false,
             tcp_close_class: class_after,
+            purge_retirement: false,
         };
         self.push_delta(delta);
     }
@@ -2626,6 +2627,7 @@ impl SessionTable {
             let tcp_close_class = self.close_class_wire_for(key);
             self.push_delta(SessionDelta {
                 tcp_close_class,
+                purge_retirement: false,
                 kind: SessionDeltaKind::Open,
                 key: key.clone(),
                 decision,

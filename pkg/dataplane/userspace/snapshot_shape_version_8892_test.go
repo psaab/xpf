@@ -277,10 +277,15 @@ const (
 	// transport for NO endpoint — a total loss of kernel-path inbound delivery,
 	// which IS the defect (worker-path decap is endpoint-keyed and unaffected,
 	// so "total outage" overstates). Ctrl-layout skew is refused separately by
-	// the pinned-map pre-flight (fail-closed deploy per §5e), not by this gate;
+	// pinned-map pre-flight (fail-closed deploy per §5e), not by this gate;
 	// a new helper under an old daemon reads an empty set and refuses kernel-path
 	// transport for every endpoint — the v10/v11 arm, not a STANDS entry.
-	snapshotShapeVersion8892 = 17
+	// v17 -> v18 BUMPED (issue 9752) against the SAME digest: the
+	// installing-table identity crosses the HA session-sync path, and the old
+	// behaviour (re-resolve every PBR-steered session in inet.0) is the defect
+	// it closes. The session-sync messages are not snapshot structs, which is
+	// why the digest above did not move.
+	snapshotShapeVersion8892 = 18
 )
 
 func TestSnapshotShapeIsPinnedToProtocolVersion8892(t *testing.T) {
