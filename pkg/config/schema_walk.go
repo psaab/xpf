@@ -819,12 +819,18 @@ func validateKeySlot(schema *schemaNode, argIdx int, tok string, vc *walkContext
 }
 
 // validateModifierChild validates one AST child of a typed leaf (e.g.
-// `exact` under `transmit-rate 1g`). A modifier is presence-only: it must
-// be a known child keyword of the leaf, carry NO extra tokens in its Keys
-// (`exact bogus` → leftover `bogus` is unknown), and have NO unexpected
-// descendants of its own (`exact { bogus; }`). Modifiers themselves carry
-// no typed value, so we only assert the keyword is recognized and nothing
-// trails it.
+// `exact` under `transmit-rate 1g`). The modifier must be a known child
+// keyword of the leaf and have NO unexpected descendants of its own
+// (`exact { bogus; }`). A presence-only modifier (args == 0) carries NO
+// extra tokens in its Keys (`exact bogus` → leftover `bogus` is unknown);
+// a VALUED modifier (#9880) carries exactly its declared args as value
+// tokens (`key 5`), each validated against the modifier's own
+// validator/treeValidator — the same checkValue the leaf's own value
+// goes through. Untyped modifiers (no validator) accept any token in
+// the value slot; the arity check still rejects a missing or trailing
+// one. Before #9880 every trailing token was refused as `unknown
+// modifier`, so valid Junos (`server <addr> key <n>`, `threshold <n>
+// action <a>`) could not commit while the lenient path compiled it.
 func validateModifierChild(node *Node, leafSchema *schemaNode, leafPath []string, vc *walkContext) error {
 	if node == nil || len(node.Keys) == 0 {
 		return nil
@@ -837,12 +843,35 @@ func validateModifierChild(node *Node, leafSchema *schemaNode, leafPath []string
 	if !ok {
 		return typedLeafErrorf(leafPath, "unknown modifier %q", mod)
 	}
-	// No tokens may trail the modifier keyword in its Keys.
-	if len(node.Keys) > 1 {
-		return typedLeafErrorf(leafPath, "unknown modifier %q", node.Keys[1])
+	nargs := 0
+	if modSchema != nil {
+		nargs = modSchema.args
 	}
-	// No descendants may hang off a presence-only modifier.
+	trailing := node.Keys[1:]
+	// Fewer tokens than the modifier declares is a missing value (`key`
+	// with no id compiles to unset and is silently dropped); more is
+	// unknown trailing garbage, reported as the first excess token — the
+	// same `unknown modifier` family as before, still naming the leaf.
+	if len(trailing) < nargs {
+		return typedLeafErrorf(leafPath, "modifier %q requires a value", mod)
+	}
+	if len(trailing) > nargs {
+		return typedLeafErrorf(leafPath, "unknown modifier %q", trailing[nargs])
+	}
 	modPath := append(append([]string(nil), leafPath...), mod)
+	if modSchema != nil && nargs > 0 {
+		check := modSchema.checkValue(vc)
+		for _, tok := range trailing {
+			if err := check(tok); err != nil {
+				return typedLeafInvalidErrorf(modPath, tok, err)
+			}
+		}
+	}
+	// No descendants may hang off a modifier that declares no children of
+	// its own. In particular a value-as-block spelling (`key { 5; }`) stays
+	// rejected: a Junos valued leaf takes its value on the statement, not
+	// as a block member — the block-value exception (#6774) is an explicit
+	// per-leaf opt-in, and no modifier takes it.
 	for _, c := range node.Children {
 		if len(c.Keys) == 0 {
 			continue
@@ -964,16 +993,23 @@ func singleBlockValue(node *Node) (string, bool) {
 //
 // Contract (mirrors the schema-feature→AST-match table in the #1319 plan):
 //   - standard typed leaf: the FIRST token is the value → run validator on
-//     it; any subsequent token must match a child keyword (e.g. `exact`).
+//     it; any subsequent token must match a child keyword (e.g. `exact`),
+//     and a VALUED modifier (#9880) consumes its declared args as further
+//     value tokens, each run through the modifier's own validator.
 //   - multi && children==nil value-tail/range leaves are NOT handled
 //     here — walkSchemaNode dispatches them to validateMultiValueLeaf,
 //     which also accepts the hierarchical block-list spelling.
-//   - modifier-only sibling: a flat-set leaf carrying ONLY a known modifier
-//     (e.g. `transmit-rate exact`) is accepted IFF a sibling node supplies
-//     a valid value (`transmit-rate 1g`); otherwise it fails. This
-//     preserves the pre-#1319 schedulerHasTypedTransmitRate behaviour.
+//   - modifier-headed line: the FIRST token is itself a known modifier
+//     keyword, so the statement carries NO value on this node (modifiers
+//     match before values, as in the compilers). A lone presence-only
+//     modifier (e.g. `transmit-rate exact`) is the sibling-rule case below;
+//     anything else modifier-headed fails — a lone valued modifier as a
+//     missing modifier value, a multi-token run as a missing leaf value.
+//   - modifier-only sibling: a flat-set leaf carrying ONLY a known
+//     presence-only modifier is accepted IFF a sibling node supplies a
+//     valid value (`transmit-rate 1g`); otherwise it fails. This preserves
+//     the pre-#1319 schedulerHasTypedTransmitRate behaviour.
 //   - missing value: a typed leaf with no value token fails.
-//   - unknown modifier: a non-value token matching no child keyword fails.
 func validateTypedLeaf(node *Node, leafSchema *schemaNode, parentPath []string, siblings []*Node, vc *walkContext) error {
 	leafName := node.Keys[0]
 	path := append(append([]string(nil), parentPath...), leafName)
@@ -1002,15 +1038,31 @@ func validateTypedLeaf(node *Node, leafSchema *schemaNode, parentPath []string, 
 
 	first := values[0]
 
-	// Modifier-only line: the sole token is a known child keyword (e.g.
-	// `transmit-rate exact`). Accept only if a sibling supplies a valid
-	// value; else fail. This is the cross-sibling rule from the plan.
-	if len(values) == 1 && leafSchema.children != nil {
-		if _, isMod := leafSchema.children[first]; isMod {
-			if siblingSuppliesTypedValue(siblings, leafName, leafSchema, vc) {
-				return nil
+	// Modifier-headed line: the FIRST token is itself a known child keyword,
+	// so per the compiler's grammar — modifiers match before values (cf.
+	// ntpServerValues, which consults the modifiers table before reading a
+	// server, and the skip-modifiers rule in siblingSuppliesTypedValue) —
+	// this statement carries NO value on this node. Reading the head as the
+	// value instead admits statements that compile to nothing: `server
+	// prefer key 5` passes `prefer` as a hostname here while the compiler
+	// reads every token as a modifier with no address and yields no server.
+	// A lone presence-only modifier keeps the historical sibling rule (a
+	// flat-set `transmit-rate exact` beside `transmit-rate 1g`); a lone
+	// valued modifier is a missing modifier value on its face; a
+	// multi-token run is a missing leaf value. This preserves the pre-#1319
+	// schedulerHasTypedTransmitRate behaviour.
+	if leafSchema.children != nil {
+		if modSchema, isMod := leafSchema.children[first]; isMod {
+			if len(values) == 1 && (modSchema == nil || modSchema.args == 0) {
+				if siblingSuppliesTypedValue(siblings, leafName, leafSchema, vc) {
+					return nil
+				}
+				return typedLeafErrorf(path, "modifier %q requires a value (e.g. a sibling %s <value>)", first, leafName)
 			}
-			return typedLeafErrorf(path, "modifier %q requires a value (e.g. a sibling %s <value>)", first, leafName)
+			if len(values) == 1 {
+				return typedLeafErrorf(path, "modifier %q requires a value", first)
+			}
+			return typedLeafErrorf(path, "missing value")
 		}
 	}
 
@@ -1019,13 +1071,37 @@ func validateTypedLeaf(node *Node, leafSchema *schemaNode, parentPath []string, 
 		return typedLeafInvalidErrorf(path, first, err)
 	}
 	// Remaining tokens must be known child-keyword modifiers (e.g. `exact`).
-	for _, tok := range values[1:] {
+	// A valued modifier (#9880) consumes its declared args as value tokens
+	// (`server 1.1.1.1 key 5 version 4`), each validated against the
+	// modifier's own validator — the packed-Keys twin of the
+	// validateModifierChild rule, so both spellings accept and reject
+	// identically.
+	for i := 1; i < len(values); {
+		tok := values[i]
 		if leafSchema.children == nil {
 			return typedLeafErrorf(path, "unknown modifier %q", tok)
 		}
-		if _, ok := leafSchema.children[tok]; !ok {
+		modSchema, ok := leafSchema.children[tok]
+		if !ok {
 			return typedLeafErrorf(path, "unknown modifier %q", tok)
 		}
+		nargs := 0
+		if modSchema != nil {
+			nargs = modSchema.args
+		}
+		if len(values)-i-1 < nargs {
+			return typedLeafErrorf(path, "modifier %q requires a value", tok)
+		}
+		if modSchema != nil && nargs > 0 {
+			mcheck := modSchema.checkValue(vc)
+			modPath := append(append([]string(nil), path...), tok)
+			for _, vtok := range values[i+1 : i+1+nargs] {
+				if err := mcheck(vtok); err != nil {
+					return typedLeafInvalidErrorf(modPath, vtok, err)
+				}
+			}
+		}
+		i += 1 + nargs
 	}
 	return nil
 }

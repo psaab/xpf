@@ -191,9 +191,15 @@ var schemaSystem = &schemaNode{desc: "System configuration", children: map[strin
 		// modifier attaches as a child and everything else is absorbed as a value.
 		"server": {desc: "NTP server", args: 1, multi: true, valueList: true, valueType: ValueHostname, valueDesc: "NTP server IP address or hostname", valueExamples: []string{"192.0.2.1", "pool.ntp.org"}, validator: ValidateNTPServer, placeholder: "<address>",
 			children: map[string]*schemaNode{
-				"prefer":           {desc: "Prefer this server", children: nil},
-				"key":              {desc: "Authentication key id for this server", args: 1, placeholder: "<key-id>", valueType: ValueInteger, children: nil},
-				"version":          {desc: "NTP version for this server", args: 1, placeholder: "<version>", valueType: ValueInteger, children: nil},
+				"prefer": {desc: "Prefer this server", children: nil},
+				// #9880: the modifier value is an integer id the compiler
+				// Atoi-parses and drops to the 0 = unset/default sentinel on
+				// garbage — the #6940 shape (consumers gate on > 0, cf.
+				// renderChronySources) — so the strict gate enforces the
+				// positive floor and fails loud instead of committing a
+				// silently-dropped value.
+				"key":              {desc: "Authentication key id for this server", args: 1, placeholder: "<key-id>", valueType: ValueInteger, validator: ValidateIntegerMin(1), children: nil},
+				"version":          {desc: "NTP version for this server", args: 1, placeholder: "<version>", valueType: ValueInteger, validator: ValidateIntegerMin(1), children: nil},
 				"routing-instance": {desc: "Routing instance to reach this server in", args: 1, placeholder: "<instance>", children: nil},
 			}},
 		"threshold": {desc: "Threshold", args: 1, placeholder: "<seconds>",
@@ -204,7 +210,11 @@ var schemaSystem = &schemaNode{desc: "System configuration", children: map[strin
 			// with no diagnostic.
 			validator: ValidateIntegerMin(1),
 			children: map[string]*schemaNode{
-				"action": {desc: "Action on threshold", args: 1, placeholder: "<action>", children: nil},
+				// #9880: accept|reject is the repo's own contract
+				// (types_system.go; renderChronyThreshold ignores anything
+				// else), so the strict gate enforces the enum instead of
+				// committing a silently-unrendered value.
+				"action": {desc: "Action on threshold", args: 1, placeholder: "<action>", valueType: ValueEnumOf, validator: ValidateEnum([]string{"accept", "reject"}), children: nil},
 			}},
 	}},
 	"syslog": {desc: "Syslog configuration", children: map[string]*schemaNode{
