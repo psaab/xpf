@@ -1716,20 +1716,23 @@ func KeysOf(m map[string]*Node) []string {
 	return keys
 }
 
-// cosClassifierNames returns the configured CoS classifier names (DSCP and
-// IEEE-802.1p) for tab-completion of `show class-of-service classifier`.
+// cosClassifierNames returns the configured CoS classifier names (DSCP,
+// IEEE-802.1p, and inet-precedence) for tab-completion of `show class-of-service classifier`.
+// The inet-precedence names come from the names slice, not Defs, so entryless
+// classifiers complete like #6848 (#9899 F103).
 func cosClassifierNames(cfg *config.Config) []string {
 	if cfg == nil || cfg.ClassOfService == nil {
 		return nil
 	}
 	names := make([]string, 0,
-		len(cfg.ClassOfService.DSCPClassifiers)+len(cfg.ClassOfService.IEEE8021Classifiers))
+		len(cfg.ClassOfService.DSCPClassifiers)+len(cfg.ClassOfService.IEEE8021Classifiers)+len(cfg.ClassOfService.INetPrecedenceClassifiers))
 	for name := range cfg.ClassOfService.DSCPClassifiers {
 		names = append(names, name)
 	}
 	for name := range cfg.ClassOfService.IEEE8021Classifiers {
 		names = append(names, name)
 	}
+	names = append(names, cfg.ClassOfService.INetPrecedenceClassifiers...)
 	return names
 }
 

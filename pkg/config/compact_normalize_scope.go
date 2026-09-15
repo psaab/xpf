@@ -908,11 +908,10 @@ func compactNormalizeInScope(containerKeyword, head string) bool {
 		// All eight admitted together, because a partially-admitted family is
 		// the #8922 shape: partial application reads as success.
 		//
-		// SAFE ACROSS THE KEYWORD, MEASURED not assumed (#8921): the schema
-		// holds 14 containers named `then`, and the predicate is keyed on
-		// (containerKeyword, head) with no parent context -- so an admission
-		// here is live at every `then` that declares the same head. Walked the
-		// schema: EXACTLY ONE `then` declares any of these eight, the
+		// SAFE ACROSS THE KEYWORD, MEASURED not assumed (#8921): the
+		// predicate is keyed on (containerKeyword, head) with no parent
+		// context, so an admission is live at every `then` declaring it.
+		// Exactly one `then` declares any of these eight in the schema: the
 		// policy-statement term's own. No sibling container is reached.
 		"then as-path-prepend",
 		"then community",
@@ -1076,9 +1075,11 @@ func compactNormalizeInScope(containerKeyword, head string) bool {
 		"port-mirroring instance",
 		"sampling instance":
 		return true
-	// firewall: 35 pairs.
+	// Firewall scope includes implicit inet's root pair (#9899). Declaring
+	// that schema without admitting the fold would silently drop packed roots.
 	case "filter term",
 		"firewall family",
+		"firewall filter",
 		"firewall policer",
 		"firewall three-color-policer",
 		"flexible-match-range range",

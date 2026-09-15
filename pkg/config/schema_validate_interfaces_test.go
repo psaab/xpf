@@ -49,19 +49,19 @@ var interfacesLeafMatrix = []interfacesLeafCase{
 		reject:   []string{"0", "-1", "asd", ""},
 	},
 	{
-		// 802.1Q 12-bit VID: 0 = untagged sentinel, 4095 reserved.
+		// 802.1Q 12-bit VID: 0 = untagged sentinel (#9899 accepts), 4095 reserved.
 		name:     "vlan-id",
 		leaf:     "vlan-id",
 		template: "set interfaces ge-0-0-2 unit 50 vlan-id %s",
-		accept:   []string{"1", "50", "80", "4094"},
-		reject:   []string{"0", "4095", "-1", "asd", ""},
+		accept:   []string{"0", "1", "50", "80", "4094"},
+		reject:   []string{"4095", "-1", "asd", ""},
 	},
 	{
 		name:     "inner-vlan-id",
 		leaf:     "inner-vlan-id",
-		template: "set interfaces ge-0-0-2 unit 50 inner-vlan-id %s",
-		accept:   []string{"1", "100", "4094"},
-		reject:   []string{"0", "4095", "-1", "asd", ""},
+		template: "set interfaces ge-0/0/2 unit 50 inner-vlan-id %s",
+		accept:   []string{"0", "1", "100", "4094"},
+		reject:   []string{"4095", "-1", "asd", ""},
 	},
 	{
 		// Typed KEY slot: the runtime net.ParseCIDRs configured
@@ -145,12 +145,12 @@ var interfacesLeafMatrix = []interfacesLeafCase{
 		reject:   []string{"192.0.2.1/32", "asd", ""},
 	},
 	{
-		// netlink Ttl is one byte; 0 = inherit.
+		// netlink Ttl is one byte; omitted = default 64, explicit 0 rejects (#9899).
 		name:     "tunnel-ttl",
 		leaf:     "ttl",
 		template: "set interfaces gr-0-0-0 tunnel ttl %s",
-		accept:   []string{"0", "64", "255"},
-		reject:   []string{"256", "-1", "asd", ""},
+		accept:   []string{"1", "64", "255"},
+		reject:   []string{"0", "256", "-1", "asd", ""},
 	},
 	{
 		// GRE key is a 32-bit wire field; uint32(Atoi) wraps silently

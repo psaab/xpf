@@ -169,6 +169,10 @@ var slotEscCoS = []string{
 var slotEscFilter4 = []string{"set firewall family inet filter F term t1 then accept"}
 var slotEscFilter6 = []string{"set firewall family inet6 filter F6 term t1 then accept"}
 
+// #9899: the implicit-inet twin of slotEscFilter4 — the direct-root spelling
+// of the same filter the icmp-code rows below hang their prerequisites on.
+var slotEscFilterImplicit = []string{"set firewall filter F term t1 then accept"}
+
 var slotEscRibGroup = []string{
 	"set routing-instances blue instance-type virtual-router",
 	"set routing-instances blue interface ge-0/0/1.0",
@@ -417,6 +421,14 @@ func slotEscapeRows() []slotEscapeRow {
 				"set firewall family inet filter F term t1 from protocol icmp",
 				"set firewall family inet filter F term t1 from icmp-type 3"),
 			"set firewall family inet filter F term t1 from icmp-code", "1", "999"},
+		// #9899: the implicit-inet twin of the row above. Same leaf, same
+		// prerequisite shape (protocol + icmp-type must be present for the
+		// control to commit clean), spelled at the direct root.
+		{"filter implicit-inet from icmp-code", "firewall filter <*> term <*> from icmp-code",
+			append(append([]string{}, slotEscFilterImplicit...),
+				"set firewall filter F term t1 from protocol icmp",
+				"set firewall filter F term t1 from icmp-type 3"),
+			"set firewall filter F term t1 from icmp-code", "1", "999"},
 		{"filter inet6 from icmp-code", "firewall family inet6 filter <*> term <*> from icmp-code",
 			append(append([]string{}, slotEscFilter6...),
 				"set firewall family inet6 filter F6 term t1 from next-header icmp6",

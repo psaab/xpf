@@ -347,7 +347,13 @@ func TestUnsplittablePairRatchet8880(t *testing.T) {
 		// opt-in guard as diverging by nested elision, and those registrations
 		// went stale in the same run and are deleted there -- two independent
 		// ratchets naming the same pair movement.
-		wantArgs1 = 449
+		// #9899 admits (firewall, filter), adding one args>=1 member.
+		// Measured, not inferred: both implicit and explicit-inet packed
+		// `filter F filter G` runs retain only F, while their braced twins
+		// retain F/G. Separate packed roots also retain both. This is the
+		// existing #8880 multi-run limitation at a new alias, not a reason
+		// to opt the whole firewall subtree into an unreviewed splitter.
+		wantArgs1 = 450
 	)
 	pairs2, _ := unsplittablePairs8880(2)
 	pairs1, conflict1 := unsplittablePairs8880(1)

@@ -102,6 +102,18 @@ func packedBodyChildren(node *Node, schema *schemaNode) []*Node {
 	if len(tail) == 0 {
 		return node.Children
 	}
+	// The tail's quote/bracket provenance travels with the tokens: a synthesized
+	// node that drops it reads every key as bare, so a quoted self-named value
+	// (`protocol "protocol"`) vanishes in firewallMatchValues exactly as if the
+	// operator had written the bare keyword (#9899 P2). Slice alongside `tail`
+	// below; absent or short provenance stays absent (unknown, not bare).
+	var tailQuoted, tailBracketed []bool
+	if len(node.KeysQuoted) == len(node.Keys) {
+		tailQuoted = node.KeysQuoted[consumed:]
+	}
+	if len(node.KeysBracketed) == len(node.Keys) {
+		tailBracketed = node.KeysBracketed[consumed:]
+	}
 
 	// #9620 H9: the open schema levels, not a single `cur`.
 	//
@@ -182,6 +194,12 @@ func packedBodyChildren(node *Node, schema *schemaNode) []*Node {
 			return node.Children
 		}
 		next := &Node{Keys: append([]string(nil), tail[:n]...)}
+		if len(tailQuoted) == len(tail) {
+			next.setKeysQuoted(append([]bool(nil), tailQuoted[:n]...))
+		}
+		if len(tailBracketed) == len(tail) {
+			next.setKeysBracketed(append([]bool(nil), tailBracketed[:n]...))
+		}
 		if levels[at].node == nil {
 			// The run's first statement, or one that popped all the way back to
 			// the container: a SIBLING at the body's top level.
@@ -192,6 +210,12 @@ func packedBodyChildren(node *Node, schema *schemaNode) []*Node {
 		levels = append(levels[:at+1], openLevel{schema: refined, node: next})
 		last = next
 		tail = tail[n:]
+		if len(tailQuoted) > 0 {
+			tailQuoted = tailQuoted[n:]
+		}
+		if len(tailBracketed) > 0 {
+			tailBracketed = tailBracketed[n:]
+		}
 	}
 
 	if len(node.Children) == 0 {

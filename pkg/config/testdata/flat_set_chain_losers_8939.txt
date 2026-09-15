@@ -1,3 +1,5 @@
-# counts: losers=1 walked=111 vacuous=38 unmeasured=76
-# collector reach: 370 containers walked, 137 reached the census (137 dropped: no eligible leaf, 96 dropped: only one)
+# counts: losers=3 walked=112 vacuous=38 unmeasured=81
+# collector reach: 377 containers walked, 141 reached the census (139 dropped: no eligible leaf, 97 dropped: only one)
+firewall filter arg1 term arg1 then reject  [administratively-prohibited | bad-host-tos | bad-network-tos]  total  OPERATOR
+firewall filter arg1 term arg1 then reject  [administratively-prohibited | bad-host-tos]  total  OPERATOR
 services rpm probe arg1 test arg1 target  [address | url]  total  OPERATOR

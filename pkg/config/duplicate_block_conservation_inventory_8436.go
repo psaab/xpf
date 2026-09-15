@@ -56,6 +56,9 @@ var dupConservationInventory8436 = []string{
 	"firewall family any filter xpfname term",
 	"firewall family inet filter xpfname term",
 	"firewall family inet6 filter xpfname term",
+	// #9899: implicit inet term diverges like its three family siblings --
+	// same two-block vs merged reduction, same verdict as the inet row.
+	"firewall filter xpfname term",
 	"security screen ids-option",
 	"system services dhcpv6-local-server group",
 	// ---- SILENT: no commit gate at all. ----
@@ -191,6 +194,13 @@ var dupConservationSkipped8436 = []string{
 	"firewall family any filter",
 	"firewall family inet6 filter",
 	"firewall family inet filter",
+	// #9899: implicit inet filter joins its three family siblings, for the
+	// same structural reason -- the census cannot synthesize a two-block
+	// duplicate fixture for a filter container. Duplicate filter names are
+	// still refused at strict commit (#8426, exercised for the implicit
+	// spelling in TestImplicitInetFilterGates9899), so the skip is not a
+	// silent loss.
+	"firewall filter",
 	"firewall three-color-policer",
 	"forwarding-options port-mirroring instance",
 	"policy-options community",

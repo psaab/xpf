@@ -571,8 +571,14 @@ func (p *Parser) parseStatement() *Node {
 		return n
 
 	default:
-		// No semicolon or brace -- treat as implicit leaf
-		// (some Junos statements can omit trailing semicolon at EOF)
+		// No semicolon or brace -- treat as implicit leaf, except at EOF
+		// (#9899 F099). A top-level leaf missing its ';' at EOF is unfinished,
+		// not tolerated: record the error and still carry the node for
+		// recovery, like the missing-brace path above. Omission immediately
+		// before '}' stays tolerated (scope only EOF).
+		if tok.Type == TokenEOF {
+			p.addErrorf(tok.Line, tok.Column, "expected ';', got %s", tok)
+		}
 		n := &Node{
 			Keys:     keys,
 			IsLeaf:   true,

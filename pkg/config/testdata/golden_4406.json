@@ -565,6 +565,7 @@
               }
             },
             "Tunnel": null,
+            "AuthoredUnits": true,
             "NativeVlanID": 0,
             "GratuitousARPReply": false,
             "NoGratuitousARPRequest": false
@@ -622,6 +623,7 @@
               }
             },
             "Tunnel": null,
+            "AuthoredUnits": true,
             "NativeVlanID": 0,
             "GratuitousARPReply": false,
             "NoGratuitousARPRequest": false
@@ -648,6 +650,7 @@
             "AggregatedEtherOpts": null,
             "Units": {},
             "Tunnel": null,
+            "AuthoredUnits": false,
             "NativeVlanID": 0,
             "GratuitousARPReply": false,
             "NoGratuitousARPRequest": false
@@ -701,6 +704,7 @@
               }
             },
             "Tunnel": null,
+            "AuthoredUnits": true,
             "NativeVlanID": 0,
             "GratuitousARPReply": false,
             "NoGratuitousARPRequest": false
@@ -725,6 +729,7 @@
             "AggregatedEtherOpts": null,
             "Units": {},
             "Tunnel": null,
+            "AuthoredUnits": false,
             "NativeVlanID": 0,
             "GratuitousARPReply": false,
             "NoGratuitousARPRequest": false
@@ -749,6 +754,7 @@
             "AggregatedEtherOpts": null,
             "Units": {},
             "Tunnel": null,
+            "AuthoredUnits": false,
             "NativeVlanID": 0,
             "GratuitousARPReply": false,
             "NoGratuitousARPRequest": false
@@ -823,6 +829,7 @@
               "WgLocalPrivkeyHex": "",
               "WgPeers": null
             },
+            "AuthoredUnits": true,
             "NativeVlanID": 0,
             "GratuitousARPReply": false,
             "NoGratuitousARPRequest": false
@@ -910,6 +917,7 @@
               }
             },
             "Tunnel": null,
+            "AuthoredUnits": true,
             "NativeVlanID": 0,
             "GratuitousARPReply": false,
             "NoGratuitousARPRequest": false
@@ -966,6 +974,7 @@
               }
             },
             "Tunnel": null,
+            "AuthoredUnits": true,
             "NativeVlanID": 0,
             "GratuitousARPReply": false,
             "NoGratuitousARPRequest": false
@@ -1995,6 +2004,7 @@
               }
             },
             "Tunnel": null,
+            "AuthoredUnits": true,
             "NativeVlanID": 0,
             "GratuitousARPReply": false,
             "NoGratuitousARPRequest": false
@@ -2052,6 +2062,7 @@
               }
             },
             "Tunnel": null,
+            "AuthoredUnits": true,
             "NativeVlanID": 0,
             "GratuitousARPReply": false,
             "NoGratuitousARPRequest": false
@@ -2078,6 +2089,7 @@
             "AggregatedEtherOpts": null,
             "Units": {},
             "Tunnel": null,
+            "AuthoredUnits": false,
             "NativeVlanID": 0,
             "GratuitousARPReply": false,
             "NoGratuitousARPRequest": false
@@ -2131,6 +2143,7 @@
               }
             },
             "Tunnel": null,
+            "AuthoredUnits": true,
             "NativeVlanID": 0,
             "GratuitousARPReply": false,
             "NoGratuitousARPRequest": false
@@ -2155,6 +2168,7 @@
             "AggregatedEtherOpts": null,
             "Units": {},
             "Tunnel": null,
+            "AuthoredUnits": false,
             "NativeVlanID": 0,
             "GratuitousARPReply": false,
             "NoGratuitousARPRequest": false
@@ -2179,6 +2193,7 @@
             "AggregatedEtherOpts": null,
             "Units": {},
             "Tunnel": null,
+            "AuthoredUnits": false,
             "NativeVlanID": 0,
             "GratuitousARPReply": false,
             "NoGratuitousARPRequest": false
@@ -2253,6 +2268,7 @@
               "WgLocalPrivkeyHex": "",
               "WgPeers": null
             },
+            "AuthoredUnits": true,
             "NativeVlanID": 0,
             "GratuitousARPReply": false,
             "NoGratuitousARPRequest": false
@@ -2340,6 +2356,7 @@
               }
             },
             "Tunnel": null,
+            "AuthoredUnits": true,
             "NativeVlanID": 0,
             "GratuitousARPReply": false,
             "NoGratuitousARPRequest": false
@@ -2396,6 +2413,7 @@
               }
             },
             "Tunnel": null,
+            "AuthoredUnits": true,
             "NativeVlanID": 0,
             "GratuitousARPReply": false,
             "NoGratuitousARPRequest": false
@@ -3424,6 +3442,7 @@
               }
             },
             "Tunnel": null,
+            "AuthoredUnits": true,
             "NativeVlanID": 0,
             "GratuitousARPReply": false,
             "NoGratuitousARPRequest": false
@@ -3450,6 +3469,7 @@
             "AggregatedEtherOpts": null,
             "Units": {},
             "Tunnel": null,
+            "AuthoredUnits": false,
             "NativeVlanID": 0,
             "GratuitousARPReply": false,
             "NoGratuitousARPRequest": false
@@ -3507,6 +3527,7 @@
               }
             },
             "Tunnel": null,
+            "AuthoredUnits": true,
             "NativeVlanID": 0,
             "GratuitousARPReply": false,
             "NoGratuitousARPRequest": false
@@ -3560,6 +3581,7 @@
               }
             },
             "Tunnel": null,
+            "AuthoredUnits": true,
             "NativeVlanID": 0,
             "GratuitousARPReply": false,
             "NoGratuitousARPRequest": false
@@ -3584,6 +3606,7 @@
             "AggregatedEtherOpts": null,
             "Units": {},
             "Tunnel": null,
+            "AuthoredUnits": false,
             "NativeVlanID": 0,
             "GratuitousARPReply": false,
             "NoGratuitousARPRequest": false
@@ -3608,6 +3631,7 @@
             "AggregatedEtherOpts": null,
             "Units": {},
             "Tunnel": null,
+            "AuthoredUnits": false,
             "NativeVlanID": 0,
             "GratuitousARPReply": false,
             "NoGratuitousARPRequest": false
@@ -3682,6 +3706,7 @@
               "WgLocalPrivkeyHex": "",
               "WgPeers": null
             },
+            "AuthoredUnits": true,
             "NativeVlanID": 0,
             "GratuitousARPReply": false,
             "NoGratuitousARPRequest": false
@@ -3769,6 +3794,7 @@
               }
             },
             "Tunnel": null,
+            "AuthoredUnits": true,
             "NativeVlanID": 0,
             "GratuitousARPReply": false,
             "NoGratuitousARPRequest": false
@@ -3825,6 +3851,7 @@
               }
             },
             "Tunnel": null,
+            "AuthoredUnits": true,
             "NativeVlanID": 0,
             "GratuitousARPReply": false,
             "NoGratuitousARPRequest": false
@@ -4853,6 +4880,7 @@
               }
             },
             "Tunnel": null,
+            "AuthoredUnits": true,
             "NativeVlanID": 0,
             "GratuitousARPReply": false,
             "NoGratuitousARPRequest": false
@@ -4910,6 +4938,7 @@
               }
             },
             "Tunnel": null,
+            "AuthoredUnits": true,
             "NativeVlanID": 0,
             "GratuitousARPReply": false,
             "NoGratuitousARPRequest": false
@@ -4936,6 +4965,7 @@
             "AggregatedEtherOpts": null,
             "Units": {},
             "Tunnel": null,
+            "AuthoredUnits": false,
             "NativeVlanID": 0,
             "GratuitousARPReply": false,
             "NoGratuitousARPRequest": false
@@ -4989,6 +5019,7 @@
               }
             },
             "Tunnel": null,
+            "AuthoredUnits": true,
             "NativeVlanID": 0,
             "GratuitousARPReply": false,
             "NoGratuitousARPRequest": false
@@ -5013,6 +5044,7 @@
             "AggregatedEtherOpts": null,
             "Units": {},
             "Tunnel": null,
+            "AuthoredUnits": false,
             "NativeVlanID": 0,
             "GratuitousARPReply": false,
             "NoGratuitousARPRequest": false
@@ -5037,6 +5069,7 @@
             "AggregatedEtherOpts": null,
             "Units": {},
             "Tunnel": null,
+            "AuthoredUnits": false,
             "NativeVlanID": 0,
             "GratuitousARPReply": false,
             "NoGratuitousARPRequest": false
@@ -5111,6 +5144,7 @@
               "WgLocalPrivkeyHex": "",
               "WgPeers": null
             },
+            "AuthoredUnits": true,
             "NativeVlanID": 0,
             "GratuitousARPReply": false,
             "NoGratuitousARPRequest": false
@@ -5198,6 +5232,7 @@
               }
             },
             "Tunnel": null,
+            "AuthoredUnits": true,
             "NativeVlanID": 0,
             "GratuitousARPReply": false,
             "NoGratuitousARPRequest": false
@@ -5254,6 +5289,7 @@
               }
             },
             "Tunnel": null,
+            "AuthoredUnits": true,
             "NativeVlanID": 0,
             "GratuitousARPReply": false,
             "NoGratuitousARPRequest": false
@@ -6284,6 +6320,7 @@
               }
             },
             "Tunnel": null,
+            "AuthoredUnits": true,
             "NativeVlanID": 0,
             "GratuitousARPReply": false,
             "NoGratuitousARPRequest": false
@@ -6341,6 +6378,7 @@
               }
             },
             "Tunnel": null,
+            "AuthoredUnits": true,
             "NativeVlanID": 0,
             "GratuitousARPReply": false,
             "NoGratuitousARPRequest": false
@@ -6367,6 +6405,7 @@
             "AggregatedEtherOpts": null,
             "Units": {},
             "Tunnel": null,
+            "AuthoredUnits": false,
             "NativeVlanID": 0,
             "GratuitousARPReply": false,
             "NoGratuitousARPRequest": false
@@ -6420,6 +6459,7 @@
               }
             },
             "Tunnel": null,
+            "AuthoredUnits": true,
             "NativeVlanID": 0,
             "GratuitousARPReply": false,
             "NoGratuitousARPRequest": false
@@ -6444,6 +6484,7 @@
             "AggregatedEtherOpts": null,
             "Units": {},
             "Tunnel": null,
+            "AuthoredUnits": false,
             "NativeVlanID": 0,
             "GratuitousARPReply": false,
             "NoGratuitousARPRequest": false
@@ -6468,6 +6509,7 @@
             "AggregatedEtherOpts": null,
             "Units": {},
             "Tunnel": null,
+            "AuthoredUnits": false,
             "NativeVlanID": 0,
             "GratuitousARPReply": false,
             "NoGratuitousARPRequest": false
@@ -6542,6 +6584,7 @@
               "WgLocalPrivkeyHex": "",
               "WgPeers": null
             },
+            "AuthoredUnits": true,
             "NativeVlanID": 0,
             "GratuitousARPReply": false,
             "NoGratuitousARPRequest": false
@@ -6629,6 +6672,7 @@
               }
             },
             "Tunnel": null,
+            "AuthoredUnits": true,
             "NativeVlanID": 0,
             "GratuitousARPReply": false,
             "NoGratuitousARPRequest": false
@@ -6685,6 +6729,7 @@
               }
             },
             "Tunnel": null,
+            "AuthoredUnits": true,
             "NativeVlanID": 0,
             "GratuitousARPReply": false,
             "NoGratuitousARPRequest": false
@@ -7714,6 +7759,7 @@
               }
             },
             "Tunnel": null,
+            "AuthoredUnits": true,
             "NativeVlanID": 0,
             "GratuitousARPReply": false,
             "NoGratuitousARPRequest": false
@@ -7740,6 +7786,7 @@
             "AggregatedEtherOpts": null,
             "Units": {},
             "Tunnel": null,
+            "AuthoredUnits": false,
             "NativeVlanID": 0,
             "GratuitousARPReply": false,
             "NoGratuitousARPRequest": false
@@ -7797,6 +7844,7 @@
               }
             },
             "Tunnel": null,
+            "AuthoredUnits": true,
             "NativeVlanID": 0,
             "GratuitousARPReply": false,
             "NoGratuitousARPRequest": false
@@ -7850,6 +7898,7 @@
               }
             },
             "Tunnel": null,
+            "AuthoredUnits": true,
             "NativeVlanID": 0,
             "GratuitousARPReply": false,
             "NoGratuitousARPRequest": false
@@ -7874,6 +7923,7 @@
             "AggregatedEtherOpts": null,
             "Units": {},
             "Tunnel": null,
+            "AuthoredUnits": false,
             "NativeVlanID": 0,
             "GratuitousARPReply": false,
             "NoGratuitousARPRequest": false
@@ -7898,6 +7948,7 @@
             "AggregatedEtherOpts": null,
             "Units": {},
             "Tunnel": null,
+            "AuthoredUnits": false,
             "NativeVlanID": 0,
             "GratuitousARPReply": false,
             "NoGratuitousARPRequest": false
@@ -7972,6 +8023,7 @@
               "WgLocalPrivkeyHex": "",
               "WgPeers": null
             },
+            "AuthoredUnits": true,
             "NativeVlanID": 0,
             "GratuitousARPReply": false,
             "NoGratuitousARPRequest": false
@@ -8059,6 +8111,7 @@
               }
             },
             "Tunnel": null,
+            "AuthoredUnits": true,
             "NativeVlanID": 0,
             "GratuitousARPReply": false,
             "NoGratuitousARPRequest": false
@@ -8115,6 +8168,7 @@
               }
             },
             "Tunnel": null,
+            "AuthoredUnits": true,
             "NativeVlanID": 0,
             "GratuitousARPReply": false,
             "NoGratuitousARPRequest": false
@@ -8984,6 +9038,7 @@
               }
             },
             "Tunnel": null,
+            "AuthoredUnits": true,
             "NativeVlanID": 0,
             "GratuitousARPReply": false,
             "NoGratuitousARPRequest": false
@@ -9041,6 +9096,7 @@
               }
             },
             "Tunnel": null,
+            "AuthoredUnits": true,
             "NativeVlanID": 0,
             "GratuitousARPReply": false,
             "NoGratuitousARPRequest": false
@@ -9067,6 +9123,7 @@
             "AggregatedEtherOpts": null,
             "Units": {},
             "Tunnel": null,
+            "AuthoredUnits": false,
             "NativeVlanID": 0,
             "GratuitousARPReply": false,
             "NoGratuitousARPRequest": false
@@ -9120,6 +9177,7 @@
               }
             },
             "Tunnel": null,
+            "AuthoredUnits": true,
             "NativeVlanID": 0,
             "GratuitousARPReply": false,
             "NoGratuitousARPRequest": false
@@ -9144,6 +9202,7 @@
             "AggregatedEtherOpts": null,
             "Units": {},
             "Tunnel": null,
+            "AuthoredUnits": false,
             "NativeVlanID": 0,
             "GratuitousARPReply": false,
             "NoGratuitousARPRequest": false
@@ -9168,6 +9227,7 @@
             "AggregatedEtherOpts": null,
             "Units": {},
             "Tunnel": null,
+            "AuthoredUnits": false,
             "NativeVlanID": 0,
             "GratuitousARPReply": false,
             "NoGratuitousARPRequest": false
@@ -9255,6 +9315,7 @@
               }
             },
             "Tunnel": null,
+            "AuthoredUnits": true,
             "NativeVlanID": 0,
             "GratuitousARPReply": false,
             "NoGratuitousARPRequest": false
@@ -9311,6 +9372,7 @@
               }
             },
             "Tunnel": null,
+            "AuthoredUnits": true,
             "NativeVlanID": 0,
             "GratuitousARPReply": false,
             "NoGratuitousARPRequest": false
@@ -10050,6 +10112,7 @@
               }
             },
             "Tunnel": null,
+            "AuthoredUnits": true,
             "NativeVlanID": 0,
             "GratuitousARPReply": false,
             "NoGratuitousARPRequest": false
@@ -10107,6 +10170,7 @@
               }
             },
             "Tunnel": null,
+            "AuthoredUnits": true,
             "NativeVlanID": 0,
             "GratuitousARPReply": false,
             "NoGratuitousARPRequest": false
@@ -10133,6 +10197,7 @@
             "AggregatedEtherOpts": null,
             "Units": {},
             "Tunnel": null,
+            "AuthoredUnits": false,
             "NativeVlanID": 0,
             "GratuitousARPReply": false,
             "NoGratuitousARPRequest": false
@@ -10186,6 +10251,7 @@
               }
             },
             "Tunnel": null,
+            "AuthoredUnits": true,
             "NativeVlanID": 0,
             "GratuitousARPReply": false,
             "NoGratuitousARPRequest": false
@@ -10210,6 +10276,7 @@
             "AggregatedEtherOpts": null,
             "Units": {},
             "Tunnel": null,
+            "AuthoredUnits": false,
             "NativeVlanID": 0,
             "GratuitousARPReply": false,
             "NoGratuitousARPRequest": false
@@ -10234,6 +10301,7 @@
             "AggregatedEtherOpts": null,
             "Units": {},
             "Tunnel": null,
+            "AuthoredUnits": false,
             "NativeVlanID": 0,
             "GratuitousARPReply": false,
             "NoGratuitousARPRequest": false
@@ -10321,6 +10389,7 @@
               }
             },
             "Tunnel": null,
+            "AuthoredUnits": true,
             "NativeVlanID": 0,
             "GratuitousARPReply": false,
             "NoGratuitousARPRequest": false
@@ -10377,6 +10446,7 @@
               }
             },
             "Tunnel": null,
+            "AuthoredUnits": true,
             "NativeVlanID": 0,
             "GratuitousARPReply": false,
             "NoGratuitousARPRequest": false
@@ -11115,6 +11185,7 @@
               }
             },
             "Tunnel": null,
+            "AuthoredUnits": true,
             "NativeVlanID": 0,
             "GratuitousARPReply": false,
             "NoGratuitousARPRequest": false
@@ -11141,6 +11212,7 @@
             "AggregatedEtherOpts": null,
             "Units": {},
             "Tunnel": null,
+            "AuthoredUnits": false,
             "NativeVlanID": 0,
             "GratuitousARPReply": false,
             "NoGratuitousARPRequest": false
@@ -11198,6 +11270,7 @@
               }
             },
             "Tunnel": null,
+            "AuthoredUnits": true,
             "NativeVlanID": 0,
             "GratuitousARPReply": false,
             "NoGratuitousARPRequest": false
@@ -11251,6 +11324,7 @@
               }
             },
             "Tunnel": null,
+            "AuthoredUnits": true,
             "NativeVlanID": 0,
             "GratuitousARPReply": false,
             "NoGratuitousARPRequest": false
@@ -11275,6 +11349,7 @@
             "AggregatedEtherOpts": null,
             "Units": {},
             "Tunnel": null,
+            "AuthoredUnits": false,
             "NativeVlanID": 0,
             "GratuitousARPReply": false,
             "NoGratuitousARPRequest": false
@@ -11299,6 +11374,7 @@
             "AggregatedEtherOpts": null,
             "Units": {},
             "Tunnel": null,
+            "AuthoredUnits": false,
             "NativeVlanID": 0,
             "GratuitousARPReply": false,
             "NoGratuitousARPRequest": false
@@ -11386,6 +11462,7 @@
               }
             },
             "Tunnel": null,
+            "AuthoredUnits": true,
             "NativeVlanID": 0,
             "GratuitousARPReply": false,
             "NoGratuitousARPRequest": false
@@ -11442,6 +11519,7 @@
               }
             },
             "Tunnel": null,
+            "AuthoredUnits": true,
             "NativeVlanID": 0,
             "GratuitousARPReply": false,
             "NoGratuitousARPRequest": false
@@ -12180,6 +12258,7 @@
               }
             },
             "Tunnel": null,
+            "AuthoredUnits": true,
             "NativeVlanID": 0,
             "GratuitousARPReply": false,
             "NoGratuitousARPRequest": false
@@ -12237,6 +12316,7 @@
               }
             },
             "Tunnel": null,
+            "AuthoredUnits": true,
             "NativeVlanID": 0,
             "GratuitousARPReply": false,
             "NoGratuitousARPRequest": false
@@ -12263,6 +12343,7 @@
             "AggregatedEtherOpts": null,
             "Units": {},
             "Tunnel": null,
+            "AuthoredUnits": false,
             "NativeVlanID": 0,
             "GratuitousARPReply": false,
             "NoGratuitousARPRequest": false
@@ -12316,6 +12397,7 @@
               }
             },
             "Tunnel": null,
+            "AuthoredUnits": true,
             "NativeVlanID": 0,
             "GratuitousARPReply": false,
             "NoGratuitousARPRequest": false
@@ -12340,6 +12422,7 @@
             "AggregatedEtherOpts": null,
             "Units": {},
             "Tunnel": null,
+            "AuthoredUnits": false,
             "NativeVlanID": 0,
             "GratuitousARPReply": false,
             "NoGratuitousARPRequest": false
@@ -12364,6 +12447,7 @@
             "AggregatedEtherOpts": null,
             "Units": {},
             "Tunnel": null,
+            "AuthoredUnits": false,
             "NativeVlanID": 0,
             "GratuitousARPReply": false,
             "NoGratuitousARPRequest": false
@@ -12451,6 +12535,7 @@
               }
             },
             "Tunnel": null,
+            "AuthoredUnits": true,
             "NativeVlanID": 0,
             "GratuitousARPReply": false,
             "NoGratuitousARPRequest": false
@@ -12507,6 +12592,7 @@
               }
             },
             "Tunnel": null,
+            "AuthoredUnits": true,
             "NativeVlanID": 0,
             "GratuitousARPReply": false,
             "NoGratuitousARPRequest": false
@@ -13247,6 +13333,7 @@
               }
             },
             "Tunnel": null,
+            "AuthoredUnits": true,
             "NativeVlanID": 0,
             "GratuitousARPReply": false,
             "NoGratuitousARPRequest": false
@@ -13304,6 +13391,7 @@
               }
             },
             "Tunnel": null,
+            "AuthoredUnits": true,
             "NativeVlanID": 0,
             "GratuitousARPReply": false,
             "NoGratuitousARPRequest": false
@@ -13330,6 +13418,7 @@
             "AggregatedEtherOpts": null,
             "Units": {},
             "Tunnel": null,
+            "AuthoredUnits": false,
             "NativeVlanID": 0,
             "GratuitousARPReply": false,
             "NoGratuitousARPRequest": false
@@ -13383,6 +13472,7 @@
               }
             },
             "Tunnel": null,
+            "AuthoredUnits": true,
             "NativeVlanID": 0,
             "GratuitousARPReply": false,
             "NoGratuitousARPRequest": false
@@ -13407,6 +13497,7 @@
             "AggregatedEtherOpts": null,
             "Units": {},
             "Tunnel": null,
+            "AuthoredUnits": false,
             "NativeVlanID": 0,
             "GratuitousARPReply": false,
             "NoGratuitousARPRequest": false
@@ -13431,6 +13522,7 @@
             "AggregatedEtherOpts": null,
             "Units": {},
             "Tunnel": null,
+            "AuthoredUnits": false,
             "NativeVlanID": 0,
             "GratuitousARPReply": false,
             "NoGratuitousARPRequest": false
@@ -13518,6 +13610,7 @@
               }
             },
             "Tunnel": null,
+            "AuthoredUnits": true,
             "NativeVlanID": 0,
             "GratuitousARPReply": false,
             "NoGratuitousARPRequest": false
@@ -13574,6 +13667,7 @@
               }
             },
             "Tunnel": null,
+            "AuthoredUnits": true,
             "NativeVlanID": 0,
             "GratuitousARPReply": false,
             "NoGratuitousARPRequest": false
@@ -14313,6 +14407,7 @@
               }
             },
             "Tunnel": null,
+            "AuthoredUnits": true,
             "NativeVlanID": 0,
             "GratuitousARPReply": false,
             "NoGratuitousARPRequest": false
@@ -14339,6 +14434,7 @@
             "AggregatedEtherOpts": null,
             "Units": {},
             "Tunnel": null,
+            "AuthoredUnits": false,
             "NativeVlanID": 0,
             "GratuitousARPReply": false,
             "NoGratuitousARPRequest": false
@@ -14396,6 +14492,7 @@
               }
             },
             "Tunnel": null,
+            "AuthoredUnits": true,
             "NativeVlanID": 0,
             "GratuitousARPReply": false,
             "NoGratuitousARPRequest": false
@@ -14449,6 +14546,7 @@
               }
             },
             "Tunnel": null,
+            "AuthoredUnits": true,
             "NativeVlanID": 0,
             "GratuitousARPReply": false,
             "NoGratuitousARPRequest": false
@@ -14473,6 +14571,7 @@
             "AggregatedEtherOpts": null,
             "Units": {},
             "Tunnel": null,
+            "AuthoredUnits": false,
             "NativeVlanID": 0,
             "GratuitousARPReply": false,
             "NoGratuitousARPRequest": false
@@ -14497,6 +14596,7 @@
             "AggregatedEtherOpts": null,
             "Units": {},
             "Tunnel": null,
+            "AuthoredUnits": false,
             "NativeVlanID": 0,
             "GratuitousARPReply": false,
             "NoGratuitousARPRequest": false
@@ -14584,6 +14684,7 @@
               }
             },
             "Tunnel": null,
+            "AuthoredUnits": true,
             "NativeVlanID": 0,
             "GratuitousARPReply": false,
             "NoGratuitousARPRequest": false
@@ -14640,6 +14741,7 @@
               }
             },
             "Tunnel": null,
+            "AuthoredUnits": true,
             "NativeVlanID": 0,
             "GratuitousARPReply": false,
             "NoGratuitousARPRequest": false
@@ -15082,6 +15184,7 @@
             "AggregatedEtherOpts": null,
             "Units": {},
             "Tunnel": null,
+            "AuthoredUnits": false,
             "NativeVlanID": 0,
             "GratuitousARPReply": false,
             "NoGratuitousARPRequest": false
@@ -15106,6 +15209,7 @@
             "AggregatedEtherOpts": null,
             "Units": {},
             "Tunnel": null,
+            "AuthoredUnits": false,
             "NativeVlanID": 0,
             "GratuitousARPReply": false,
             "NoGratuitousARPRequest": false
@@ -15365,6 +15469,7 @@
             "AggregatedEtherOpts": null,
             "Units": {},
             "Tunnel": null,
+            "AuthoredUnits": false,
             "NativeVlanID": 0,
             "GratuitousARPReply": false,
             "NoGratuitousARPRequest": false
@@ -15389,6 +15494,7 @@
             "AggregatedEtherOpts": null,
             "Units": {},
             "Tunnel": null,
+            "AuthoredUnits": false,
             "NativeVlanID": 0,
             "GratuitousARPReply": false,
             "NoGratuitousARPRequest": false
@@ -15648,6 +15754,7 @@
             "AggregatedEtherOpts": null,
             "Units": {},
             "Tunnel": null,
+            "AuthoredUnits": false,
             "NativeVlanID": 0,
             "GratuitousARPReply": false,
             "NoGratuitousARPRequest": false
@@ -15672,6 +15779,7 @@
             "AggregatedEtherOpts": null,
             "Units": {},
             "Tunnel": null,
+            "AuthoredUnits": false,
             "NativeVlanID": 0,
             "GratuitousARPReply": false,
             "NoGratuitousARPRequest": false
@@ -16043,6 +16151,7 @@
               }
             },
             "Tunnel": null,
+            "AuthoredUnits": true,
             "NativeVlanID": 0,
             "GratuitousARPReply": false,
             "NoGratuitousARPRequest": false
@@ -16380,6 +16489,7 @@
               }
             },
             "Tunnel": null,
+            "AuthoredUnits": true,
             "NativeVlanID": 0,
             "GratuitousARPReply": false,
             "NoGratuitousARPRequest": false
@@ -16717,6 +16827,7 @@
               }
             },
             "Tunnel": null,
+            "AuthoredUnits": true,
             "NativeVlanID": 0,
             "GratuitousARPReply": false,
             "NoGratuitousARPRequest": false

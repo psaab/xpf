@@ -40,12 +40,16 @@ func init() {
 	// about inet had changed; only its visibility to the instrument had.
 	//
 	// A copy costs drift instead, and drift is the failure a test can see:
-	// TestFirewallFamiliesAcceptTheSameGrammar9017 compares all three families'
-	// grammars, so a match one family accepts and another does not reds.
+	// TestFirewallFamiliesAcceptTheSameGrammar9017 compares the explicit
+	// families and implicit inet, so grammar drift fails visibly.
 	fam.children["any"] = &schemaNode{
 		desc:     "IPv4 and IPv6 firewall filters (compiles to both families)",
 		children: deepCopySchemaChildren9017(inet.children, 0),
 	}
+
+	// Junos permits [edit firewall filter] as implicit family inet (#9899).
+	// Give this spelling its own schema identities for the same census reason.
+	schemaFirewall.children["filter"] = deepCopySchemaChildren9017(inet.children, 0)["filter"]
 
 	// The undeclared-token half of #9017 is NOT done here. `closedWorld: true`
 	// on the compound key was tried and reverted: the flag INHERITS, so it

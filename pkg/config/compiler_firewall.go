@@ -280,6 +280,7 @@ func compileFirewall(node *Node, fw *FirewallConfig) error {
 					termBody := packedBody(termInst.node,
 						schemaForPath("firewall", "family", af, "filter", "term"))
 
+					var rangeNames map[string]bool
 					for _, fromNode := range termBody.FindChildren("from") {
 						// A `from` written as a one-line STATEMENT inside the term
 						// block — `term t1 { from protocol tcp; }` — packs the
@@ -288,9 +289,24 @@ func compileFirewall(node *Node, fw *FirewallConfig) error {
 						// reads children, so the condition was dropped and the term
 						// matched EVERYTHING. Found by comparing the two spellings
 						// for #6685, where this is the NESTED side.
-						compileFilterFrom(packedBody(fromNode,
+						rangeNames = compileFilterFrom(packedBody(fromNode,
 							schemaForPath("firewall", "family", af, "filter", "term", "from")),
-							term, af)
+							term, af, rangeNames)
+					}
+					// Finalize only after all same-name range fragments have
+					// merged, including fragments in later `from` blocks (#9899).
+					if fm := term.FlexMatch; fm != nil {
+						if fm.BitLength == 0 {
+							fm.BitLength = 32
+						}
+						if fm.Mask == 0 {
+							// #3203: default mask covers the low BitLength bits.
+							if fm.BitLength >= 32 {
+								fm.Mask = 0xFFFFFFFF
+							} else {
+								fm.Mask = uint32(1)<<fm.BitLength - 1
+							}
+						}
 					}
 					// #9875: record the value-bearing `from` leaves this term
 					// WROTE but left EMPTY (`from protocol;`, #8480) — the
@@ -939,9 +955,9 @@ func validateFirewallFilterFamilyAnyMatchesAST(nodes []*Node, lenient bool) ([]s
 func firewallMatchValues(child *Node) []string {
 	var vals []string
 	self := child.Keys[0]
-	for _, k := range child.Keys[1:] {
-		if k == self {
-			// EXPERIMENT (#8883): skip a repeat of the leaf's own keyword.
+	for i, k := range child.Keys[1:] {
+		if k == self && !child.KeyQuoted(i+1) {
+			// Only bare self-repeats are keywords; quoted tokens are values.
 			continue
 		}
 		if k != "" {
@@ -1010,7 +1026,7 @@ func firewallPrefixListRefs(child *Node) []PrefixListRef {
 // compileFilterFrom compiles a firewall-filter term's `from` match block. The
 // family ("inet" / "inet6") selects the ICMPv4 vs ICMPv6 icmp-type name table
 // when resolving symbolic icmp-type values (#3205).
-func compileFilterFrom(node *Node, term *FirewallFilterTerm, family string) {
+func compileFilterFrom(node *Node, term *FirewallFilterTerm, family string, rangeNames map[string]bool) map[string]bool {
 	for _, child := range node.Children {
 		switch child.Name() {
 		case "dscp", "traffic-class":
@@ -1121,24 +1137,25 @@ func compileFilterFrom(node *Node, term *FirewallFilterTerm, family string) {
 			term.IsFragment = true
 		case "flexible-match-range":
 			for _, rangeInst := range namedInstances(child.FindChildren("range")) {
-				// #5823: aggregate EVERY named range across every repeated
-				// flexible-match-range block (this switch arm fires once per
-				// block; namedInstances yields every range within a block).
-				// len(FlexMatchRangeNames) > 1 is the cardinality violation the
-				// strict gate rejects and the lenient path fails closed on. The
-				// pre-#5823 code `break`ed after the first range, silently
-				// dropping the rest (an accept term over-permitted, a
-				// discard/reject over-dropped). Compile the FIRST range into
-				// FlexMatch exactly as before (a single-range term is
-				// byte-identical); later ranges are only COUNTED — the wire is
-				// poisoned to match nothing when the count exceeds one, so
-				// compiling their fields would be dead work.
-				term.FlexMatchRangeNames = append(term.FlexMatchRangeNames, rangeInst.name)
-				if term.FlexMatch != nil {
-					continue
+				// Count distinct range names for #5823. Repeated blocks for
+				// the same name are fragments of one object, just as in flat
+				// set syntax; merge their fields in authored order (#9899).
+				if rangeNames == nil {
+					rangeNames = make(map[string]bool)
 				}
-				fm := &FlexMatchConfig{MatchStart: "layer-3"}
-				for _, rc := range rangeInst.node.Children {
+				if !rangeNames[rangeInst.name] {
+					rangeNames[rangeInst.name] = true
+					term.FlexMatchRangeNames = append(term.FlexMatchRangeNames, rangeInst.name)
+				}
+				if term.FlexMatch != nil && rangeInst.name != term.FlexMatchRangeNames[0] {
+					continue // distinct later ranges remain fail-closed
+				}
+				fm := term.FlexMatch
+				if fm == nil {
+					fm = &FlexMatchConfig{MatchStart: "layer-3"}
+				}
+				rangeSchema := resolveSchemaPath9235("firewall", "family", "inet", "filter", "term", "from", "flexible-match-range", "range")
+				for _, rc := range expandResolvingRuns9792(packedBody(rangeInst.node, rangeSchema).Children, rangeSchema) {
 					switch rc.Name() {
 					case "match-start":
 						if v := nodeVal(rc); v != "" {
@@ -1216,29 +1233,9 @@ func compileFilterFrom(node *Node, term *FirewallFilterTerm, family string) {
 						}
 					}
 				}
-				if fm.BitLength == 0 {
-					fm.BitLength = 32 // default to 32-bit match
-				}
-				if fm.Mask == 0 {
-					// #3203: default mask = the low BitLength bits set, for ANY
-					// 1..32-bit length (not just 8/16). The Rust matcher
-					// (userspace-dp/src/filter/engine/matching.rs) reads
-					// ceil(bits/8) bytes big-endian into a u32 (right-aligned in
-					// the low bits) and compares (read & mask) == value, so a
-					// 24-bit field needs 0x00FFFFFF. The old code defaulted every
-					// non-8/16 length to 0xFFFFFFFF, which that read could never
-					// satisfy for a value with a non-zero high byte.
-					if fm.BitLength >= 32 {
-						fm.Mask = 0xFFFFFFFF
-					} else {
-						fm.Mask = uint32(1)<<fm.BitLength - 1
-					}
-				}
 				term.FlexMatch = fm
-				// #5823: do NOT break — the loop continues so every remaining
-				// range is COUNTED in FlexMatchRangeNames (the guard above skips
-				// re-compiling them). The strict gate then rejects a term with
-				// more than one range, and the lenient path fails it closed.
+				// Continue counting distinct names: multiple ranges retain
+				// the existing strict refusal and tolerant fail-closed marker.
 			}
 		default:
 			// #3307: a `from` match leaf the dataplane does NOT enforce. The
@@ -1253,6 +1250,7 @@ func compileFilterFrom(node *Node, term *FirewallFilterTerm, family string) {
 			term.UnknownFrom = append(term.UnknownFrom, child.Name())
 		}
 	}
+	return rangeNames
 }
 
 // rejectMessageTypes is the set of message-types Junos accepts after

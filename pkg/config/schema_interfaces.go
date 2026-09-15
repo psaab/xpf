@@ -123,20 +123,18 @@ var schemaInterfaces = &schemaNode{desc: "Interface configuration", wildcard: &s
 		"point-to-point": {desc: "Point-to-point interface", children: nil},
 		// 802.1Q VID is a 12-bit wire field: 0 is the compiler's
 		// "untagged" zero-value sentinel and 4095 is reserved, so
-		// 1..4094 is exactly the usable range — the runtime creates
+		// 0..4094 is the accepted range (#9899) — the runtime creates
 		// the sub-interface via netlink.Vlan{VlanId} (pkg/dataplane/
 		// compiler_iface.go:96) and the kernel 8021q layer rejects
-		// anything outside it. Compiled with the Atoi error
-		// swallowed (compiler_interfaces.go:293/:302) — garbage
-		// silently meant "no VLAN" before this gate.
+		// anything outside it. Canonical unsigned digits only.
 		"vlan-id": {
 			desc:          "VLAN ID",
 			args:          1,
 			placeholder:   "<number>",
 			valueType:     ValueInteger,
-			valueDesc:     "802.1Q VLAN ID (1..4094)",
+			valueDesc:     "802.1Q VLAN ID (0..4094; 0 = untagged, canonical digits)",
 			valueExamples: []string{"50", "80"},
-			validator:     ValidateInteger(1, 4094),
+			validator:     validateInterfaceNumeric9899(0, 4094),
 			children:      nil,
 		},
 		// inner-vlan-id stays typed (range-validated) so a malformed value
@@ -162,9 +160,9 @@ var schemaInterfaces = &schemaNode{desc: "Interface configuration", wildcard: &s
 			args:          1,
 			placeholder:   "<number>",
 			valueType:     ValueInteger,
-			valueDesc:     "Inner (QinQ) 802.1Q VLAN ID (1..4094) — stacked-VLAN transit not enforced (#2354)",
+			valueDesc:     "Inner (QinQ) 802.1Q VLAN ID (0..4094) — stacked-VLAN transit not enforced (#2354, canonical digits)",
 			valueExamples: []string{"100"},
-			validator:     ValidateInteger(1, 4094),
+			validator:     validateInterfaceNumeric9899(0, 4094),
 			children:      nil,
 		},
 		"tunnel": {desc: "Tunnel parameters", packedStatements: true, children: tunnelSchemaChildren()},
@@ -455,11 +453,11 @@ func vrrpGroupSchemaNode(v6 bool) *schemaNode {
 //     and an unparseable address silently skips tunnel creation.
 //   - ttl: stored verbatim by the compiler, then truncated to the
 //     netlink uint8 Ttl field (tunnel.go:218/:226/:235) — 256 would
-//     silently wrap to 0. 0 = unset; the runtime substitutes its
+//     silently wrap to 0. Omitted = unset; the runtime substitutes its
 //     default of 64 (tunnel.go:202-205), not the kernel inherit
-//     behaviour (AGY r1 Low on PR #1886).
-//   - key: compiled via uint32(Atoi) (compiler_interfaces.go:168/:262),
-//     so negatives and values past 2^32-1 silently wrap; the GRE key
+//     behaviour (AGY r1 Low on PR #1886). Explicit 0 rejects (#9899):
+//     1..255 plus canonical unsigned digits.
+//   - key: 0..4294967295 canonical unsigned digits (#9899); the GRE key
 //     wire field (IKey/OKey, tunnel.go:238-239) is exactly 32 bits.
 //   - keepalive: typed 0..32767 seconds (0 = disabled). An unbounded
 //     value overflowed time.Duration(sec)*time.Second (int64 ns) at the
@@ -529,9 +527,9 @@ func tunnelSchemaChildren() map[string]*schemaNode {
 			args:          1,
 			placeholder:   "<key>",
 			valueType:     ValueInteger,
-			valueDesc:     "GRE key (0..4294967295; 32-bit wire field)",
+			valueDesc:     "GRE key (0..4294967295; 32-bit wire field, canonical digits)",
 			valueExamples: []string{"100"},
-			validator:     ValidateInteger(0, 4294967295),
+			validator:     validateInterfaceNumeric9899(0, 4294967295),
 			children:      nil,
 		},
 		"ttl": {
@@ -539,9 +537,9 @@ func tunnelSchemaChildren() map[string]*schemaNode {
 			args:          1,
 			placeholder:   "<number>",
 			valueType:     ValueInteger,
-			valueDesc:     "Tunnel TTL (0..255; 0 = use the default 64, one wire byte)",
+			valueDesc:     "Tunnel TTL (1..255; omitted = use the default 64, one wire byte, canonical digits)",
 			valueExamples: []string{"64"},
-			validator:     ValidateInteger(0, 255),
+			validator:     validateInterfaceNumeric9899(1, 255),
 			children:      nil,
 		},
 		"keepalive": {

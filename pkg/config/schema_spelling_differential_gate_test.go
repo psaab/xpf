@@ -367,6 +367,25 @@ var notAValueList = map[string]string{
 	"firewall family inet6 filter <*> term <*> then policer":          "args:1 — one policer name; extra tokens are DISCARDED, verified below",
 	"firewall family inet6 filter <*> term <*> then routing-instance": "args:1 — one instance name; extra tokens are DISCARDED, verified below",
 	"firewall family inet6 filter <*> term <*> then traffic-class":    "args:1 — one code point; extra tokens are DISCARDED, verified below",
+	// #9899: implicit inet is a fourth `then`, a deep copy of inet's subtree
+	// with its own schema identities. Same eleven leaves, same arities, same
+	// discard-the-extras behaviour, so they carry the same reasons. Listed
+	// explicitly like #9017: this map is read by siteKey, and a root that
+	// silently inherited entries would be a root nobody could see had been
+	// checked. Only the ELEVEN the gate flags for a filter `then` are here;
+	// `reject` has children and is never enumerated, so mirroring it would
+	// register a site the gate never asks about.
+	"firewall filter <*> term <*> then accept":           "args:0 terminal action; extra tokens are DISCARDED, verified below",
+	"firewall filter <*> term <*> then count":            "args:1 — one counter name; extra tokens are DISCARDED, verified below",
+	"firewall filter <*> term <*> then discard":          "args:0 terminal action; extra tokens are DISCARDED, verified below",
+	"firewall filter <*> term <*> then dscp":             "args:1 — one code point; extra tokens are DISCARDED, verified below",
+	"firewall filter <*> term <*> then forwarding-class": "args:1 — one class name; extra tokens are DISCARDED, verified below",
+	"firewall filter <*> term <*> then log":              "args:0 flag; extra tokens are DISCARDED, verified below",
+	"firewall filter <*> term <*> then loss-priority":    "args:1 — one priority; extra tokens are DISCARDED, verified below",
+	"firewall filter <*> term <*> then policer":          "args:1 — one policer name; extra tokens are DISCARDED, verified below",
+	"firewall filter <*> term <*> then routing-instance": "args:1 — one instance name; extra tokens are DISCARDED, verified below",
+	"firewall filter <*> term <*> then syslog":           "args:0 flag; extra tokens are DISCARDED, verified below",
+	"firewall filter <*> term <*> then traffic-class":    "args:1 — one code point; extra tokens are DISCARDED, verified below",
 
 	"applications application-set":  "named container: `application-set <name> { ... }`, not a value list",
 	"policy-options prefix-list":    "named container: `prefix-list <name> { <prefix>; }`",

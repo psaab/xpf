@@ -1766,7 +1766,8 @@ func filterProtocolResolvable(token string) bool {
 		return true
 	default:
 		// Numeric protocol number, including the deliberate "0" (HOPOPT).
-		if n, err := strconv.Atoi(strings.TrimSpace(token)); err == nil && n >= 0 && n < 256 {
+		// Canonical raw ASCII decimal only (#9899 F102): no sign, no whitespace.
+		if n, err := ParseCanonicalUint(token); err == nil && n >= 0 && n < 256 {
 			return true
 		}
 		return false
@@ -1809,7 +1810,7 @@ func protocolIsPortBearing(token string) bool {
 		// Numeric protocol number form: only 6 (TCP) and 17 (UDP). Note 132
 		// (SCTP) is intentionally absent — this dataplane does not extract SCTP
 		// ports (ip_proto.rs has_l4_ports).
-		if n, err := strconv.Atoi(strings.TrimSpace(token)); err == nil {
+		if n, err := ParseCanonicalUint(token); err == nil {
 			return n == 6 || n == 17
 		}
 		return false
@@ -1830,7 +1831,7 @@ func protocolIsTCP(token string) bool {
 	case "tcp", "junos-tcp-any":
 		return true
 	default:
-		if n, err := strconv.Atoi(strings.TrimSpace(token)); err == nil {
+		if n, err := ParseCanonicalUint(token); err == nil {
 			return n == 6
 		}
 		return false
@@ -1849,7 +1850,7 @@ func protocolIsICMPFamily(token string) bool {
 		"icmpv6", "icmp6", "junos-icmp6-all", "junos-pingv6":
 		return true
 	default:
-		if n, err := strconv.Atoi(strings.TrimSpace(token)); err == nil {
+		if n, err := ParseCanonicalUint(token); err == nil {
 			return n == 1 || n == 58
 		}
 		return false
