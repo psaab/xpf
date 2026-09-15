@@ -151,6 +151,14 @@ pub(crate) struct ProcessStatus {
     /// known MTU and fail-opened to `Forward`. Additive + `default`ed (#1961).
     #[serde(rename = "egress_mtu_unknown_forward_total", default)]
     pub egress_mtu_unknown_forward_total: u64,
+    /// #9901 (F-077): embedded quotes refused by the 8-byte quoted-L4 floor.
+    /// Additive + `default`ed (#1961).
+    #[serde(rename = "embedded_quote_subminimal_refused_total", default)]
+    pub embedded_quote_subminimal_refused_total: u64,
+    /// #9901 (F-077): matched errors suppressed by the per-session 64/64
+    /// GCRA. Additive + `default`ed (#1961).
+    #[serde(rename = "embedded_error_per_session_suppressed_total", default)]
+    pub embedded_error_per_session_suppressed_total: u64,
     /// #6751 PR 2/3: interface-mode SNAT admissions that failed CLOSED with no
     /// free translated identity — a completed full-cycle PAT probe, a port-less
     /// protocol whose single identity is owned, or a peer-synced import whose

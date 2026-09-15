@@ -163,6 +163,14 @@ pub(crate) fn refresh_status(state: &mut ServerState) {
     // tunnel-kind signal, distinct from in-MTU fast-path forwards.
     state.status.egress_mtu_unknown_forward_total =
         state.afxdp.egress_mtu_unknown_forward_total();
+    // #9901 (F-077): subminimal-quote refusals — the forged-short-quote
+    // signal, distinct from matched-error delivery.
+    state.status.embedded_quote_subminimal_refused_total =
+        state.afxdp.embedded_quote_subminimal_refused_total();
+    // #9901 (F-077): per-session GCRA suppressions — the error-flood
+    // signal, distinct from budget-admitted matches.
+    state.status.embedded_error_per_session_suppressed_total =
+        state.afxdp.embedded_error_per_session_suppressed_total();
     state.status.interface_snat_identity_exhaustion_total =
         state.afxdp.interface_snat_identity_exhaustion_total();
     state

@@ -403,6 +403,8 @@ pub(crate) fn run() -> Result<(), String> {
             nat64_frag_protocol_alias_misses_total: 0,
             frag_max_lifetime_evictions_total: 0,
             egress_mtu_unknown_forward_total: 0,
+            embedded_quote_subminimal_refused_total: 0,
+            embedded_error_per_session_suppressed_total: 0,
             interface_snat_identity_exhaustion_total: 0,
             interface_snat_sync_identity_conflict_drops_total: 0,
             interface_snat_registry_cap_exhaustion_total: 0,

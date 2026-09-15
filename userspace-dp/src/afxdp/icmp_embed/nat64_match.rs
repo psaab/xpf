@@ -46,6 +46,7 @@
 //! #3290 no-fake-session invariant is preserved.
 
 use super::parse::{embedded_reply_key, parse_embedded_v4, parse_embedded_v6};
+use super::outer_error_atomic;
 use super::*;
 use crate::session::TunnelDiscriminator;
 
@@ -134,7 +135,7 @@ fn match_v4_error(
     // address (the offending packet's source, RFC 792).
     let outer_dst_v4 = Ipv4Addr::from(<[u8; 4]>::try_from(frame.get(l3 + 16..l3 + 20)?).ok()?);
 
-    let hdr = parse_embedded_v4(frame, l4 + 8)?;
+    let hdr = parse_embedded_v4(frame, l4 + 8, outer_error_atomic(frame, &meta))?;
     // Fail-closed consistency gate: the quote's source must BE the outer
     // destination. A mismatch means the error is not about this session's
     // wire packet (misrouted/forged) — decline to the same-family arm.
@@ -201,8 +202,13 @@ fn match_v4_error(
     }
     // The reverse decision (produced by `NatDecision::reverse`) carries the
     // ORIGINAL client source port / echo id in `rewrite_dst_port`; absent a
-    // port translation the quote already carries the original value.
     let orig_client_port = sl.decision.nat.rewrite_dst_port.unwrap_or(hdr.src_port);
+    // #9901 (F-077): per-session error budget, keyed on the installed v4
+    // reverse companion's primary key (the stable identity for this NAT64
+    // flow's errors). Shared/peer resolutions budget via the side table.
+    if !ctx.sessions.note_icmp_error_delivered(&reply_key, now_ns) {
+        return None;
+    }
     Some(Nat64IcmpErrorMatch::V4ToV6 {
         orig_src_v6: info.orig_src_v6,
         orig_dst_v6: info.orig_dst_v6,
@@ -229,7 +235,7 @@ fn match_v6_error(
     // flowless arm routes normally — do not intercept it.
     ctx.forwarding.nat64.match_ipv6_dest(outer_dst_v6)?;
 
-    let hdr = parse_embedded_v6(frame, l4 + 8)?;
+    let hdr = parse_embedded_v6(frame, l4 + 8, outer_error_atomic(frame, &meta))?;
     // Fail-closed consistency gate: the quote must be the session's
     // RETURN-direction wire packet — its source is the same synthetic
     // Pref64 address the error is addressed to (the offending packet's
@@ -293,8 +299,13 @@ fn match_v6_error(
     };
     // The forward decision carries the TRANSLATED source port / echo id in
     // `rewrite_src_port`; absent a port translation the quote already
-    // carries the value the server replied to.
     let translated_port = sl.decision.nat.rewrite_src_port.unwrap_or(hdr.dst_port);
+    // #9901 (F-077): per-session error budget, keyed on the installed
+    // forward session's primary key. Shared/peer resolutions budget via
+    // the side table.
+    if !ctx.sessions.note_icmp_error_delivered(&forward_key, now_ns) {
+        return None;
+    }
     Some(Nat64IcmpErrorMatch::V6ToV4 {
         pool_v4,
         server_v4,

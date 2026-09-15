@@ -26,6 +26,10 @@ mod nat_match_v6;
 mod parse;
 mod return_resolution;
 mod session_match;
+// #9901 (F-077): the quoted-L4 floor counter lives in the private `parse`
+// submodule; the status vertical (`afxdp/coordinator/status.rs`) reads it
+// through this re-export at the same visibility.
+pub(in crate::afxdp) use parse::EMBEDDED_QUOTE_SUBMINIMAL_REFUSED_TOTAL;
 
 /// Information returned from an embedded ICMP error session match
 /// that includes NAT reversal data needed to rewrite the ICMP error
@@ -79,6 +83,29 @@ pub(in crate::afxdp::icmp_embed) struct NatMatchCtx<'a> {
     pub shared_sessions: &'a Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
     pub shared_nat_sessions: &'a Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
     pub shared_forward_wire_sessions: &'a Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+}
+
+/// #9901 (F-077): whether the OUTER (error-carrying) packet is atomic
+/// (unfragmented) — the gate for the quoted-L4 adequacy floor. Read from the
+/// presented frame at the meta L3 offset: v4 checks the frag word
+/// (offset==0 && MF==0), v6 checks Fragment-header absence. Every
+/// `parse_embedded_v4/v6` call site computes this and threads it in.
+///
+/// "Outer" is the error-carrying packet AS PRESENTED. Past GRE decap (#8271)
+/// that is the INNER frame — which is the correct signal: the floor asks
+/// whether the packet carrying the quote could legitimately carry a SHORT
+/// quote (a first fragment), and that is a property of the presented packet,
+/// not of the wire outer. An unreadable outer (short slice, incoherent meta)
+/// or unknown family reads ATOMIC, so the floor applies — the quote of a
+/// packet we cannot even frame is not adequate.
+pub(in crate::afxdp::icmp_embed) fn outer_error_atomic(frame: &[u8], meta: &UserspaceDpMeta) -> bool {
+    let outer = frame.get(meta.l3_offset as usize..).unwrap_or(&[]);
+    let fragmented = match meta.addr_family as i32 {
+        libc::AF_INET => crate::afxdp::frame::ipv4_is_any_fragment(outer),
+        libc::AF_INET6 => crate::afxdp::frame::ipv6_is_any_fragment(outer),
+        _ => return true,
+    };
+    !fragmented
 }
 
 // ---------------------------------------------------------------

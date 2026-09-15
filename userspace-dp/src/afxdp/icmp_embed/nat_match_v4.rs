@@ -1,5 +1,6 @@
 use super::*;
 use super::parse::{embedded_reply_key, parse_embedded_v4};
+use super::outer_error_atomic;
 use super::return_resolution::embedded_icmp_return_resolution;
 
 /// IPv4-outer branch of `try_embedded_icmp_nat_match_from_frame`.
@@ -15,7 +16,7 @@ pub(in crate::afxdp::icmp_embed) fn match_outer_v4(
     let l4 = meta.l4_offset as usize;
     let embedded_ip_start = l4 + 8;
 
-    let hdr = parse_embedded_v4(frame, embedded_ip_start)?;
+    let hdr = parse_embedded_v4(frame, embedded_ip_start, outer_error_atomic(frame, &meta))?;
     let emb_src = IpAddr::V4(hdr.src);
     let emb_dst = IpAddr::V4(hdr.dst);
     // #7160 (#2387): the embedded tuple names the ORIGINAL flow, so its key
@@ -110,6 +111,14 @@ pub(in crate::afxdp::icmp_embed) fn match_outer_v4(
             original_src,
             now_ns,
         );
+        // #9901 (F-077): per-session error budget, keyed on the FORWARD
+        // session's own key (the ORIGINAL pre-NAT tuple — the stable
+        // identity across every error about this flow). Over budget the
+        // error is suppressed (dropped): a quoter must not steer an
+        // unbounded error stream onto a live session.
+        if !ctx.sessions.note_icmp_error_delivered(&fwd.key, now_ns) {
+            return None;
+        }
         return Some(EmbeddedIcmpMatch {
             nat,
             original_src,
@@ -168,7 +177,22 @@ pub(in crate::afxdp::icmp_embed) fn match_outer_v4(
         )
         .map(|resolved| (resolved, true))
     })
-    .map(|(resolved, via_reply_key)| {
+    .and_then(|(resolved, via_reply_key)| {
+        // #9901 (F-077): per-session error budget. The gating key is the
+        // MATCHED key — the canonical key when the resolver carries one
+        // (forward-wire / shared hits), else the winning query key
+        // (`via_reply_key` selects it). `SessionLookup` is never widened.
+        let query_key = if via_reply_key {
+            &reverse_key
+        } else {
+            &embedded_key
+        };
+        if !ctx
+            .sessions
+            .note_icmp_error_delivered(resolved.key.as_ref(query_key), now_ns)
+        {
+            return None;
+        }
         let sl = resolved.lookup;
         let resolution = if sl.metadata.is_reverse {
             sl.decision.resolution
@@ -179,7 +203,7 @@ pub(in crate::afxdp::icmp_embed) fn match_outer_v4(
             && !sl.metadata.is_reverse
             && sl.decision.nat.rewrite_src.is_some()
             && sl.decision.nat.rewrite_dst.is_none();
-        EmbeddedIcmpMatch {
+        Some(EmbeddedIcmpMatch {
             nat: sl.decision.nat,
             original_src: emb_src,
             original_src_port: hdr.src_port,
@@ -191,6 +215,6 @@ pub(in crate::afxdp::icmp_embed) fn match_outer_v4(
             resolution,
             metadata: sl.metadata,
             outbound_snat,
-        }
+        })
     })
 }
