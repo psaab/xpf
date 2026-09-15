@@ -47,9 +47,10 @@ import (
 //
 // WHY HERE rather than in the dataplane. ARP never reaches the AF_XDP
 // dataplane: the shim returns `pass_non_ip_l2_direct()` (a plain XDP_PASS) for
-// every non-IP ethertype ABOVE the ingress-interface guard, and two comments
-// exist to defend that placement. Answering there would mean stopping that
-// pass on every interface to fix a per-pool problem. The daemon, by contrast,
+// every non-IP ethertype except nested-VLAN TPIDs (#9888 drops those) ABOVE
+// the ingress-interface guard, and two comments exist to defend that
+// placement. Answering there would mean stopping that pass on every interface
+// to fix a per-pool problem. The daemon, by contrast,
 // already opens AF_PACKET/SOCK_RAW/ETH_P_ARP and builds ARP frames for exactly
 // these addresses (SendGratuitousARPBurstGated, used by
 // announceProxyARPPoolAddresses) — this adds the receive half to machinery that
