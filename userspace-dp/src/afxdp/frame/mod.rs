@@ -83,7 +83,9 @@ pub(crate) use inspect::MAX_IPV6_EXT_HEADERS;
 // `crate::afxdp` re-export + `use super::*` chain. The `ExtChainWalk` /
 // `ExtChainFragment` container types stay inspect-local — callers read
 // their fields, never name them.
-pub(crate) use inspect::{ExtChainOutcome, ipv6_ext_header_is_traversable, walk_ipv6_ext_chain};
+pub(crate) use inspect::{
+    ExtChainOutcome, IPV6_GENERIC_EXT_HEADERS, ipv6_ext_header_is_traversable, walk_ipv6_ext_chain,
+};
 pub(super) use inspect::{
     frame_is_non_first_fragment, frame_l3_offset, frame_l4_offset, live_frame_ports,
     live_frame_ports_bytes, live_frame_ports_from_meta_bytes, metadata_tuple_complete,
