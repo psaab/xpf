@@ -29,8 +29,8 @@
 // bucket per configured zone, held in `ForwardingState::{reject_buckets,
 // time_exceeded_buckets, packet_too_big_buckets}` and resolved at each
 // generator call site from the ingress ifindex, with a process-global
-// per-reason fallback bucket (`{REJECT,TIME_EXCEEDED,PACKET_TOO_BIG}_
-// FALLBACK_BUCKET`) for an unzoned/unknown zone. This removes the cross-zone
+// per-reason fallback limiter (`{REJECT,TIME_EXCEEDED,PACKET_TOO_BIG}_
+// FALLBACK_LIMITER`) for an unzoned/unknown zone. This removes the cross-zone
 // starvation the single global buckets had: a flood ingressing one zone can
 // no longer drain the bucket and suppress a legitimate generated error in
 // another zone.
@@ -61,8 +61,23 @@
 // `*_rate_limited` counter (a global `AtomicU64`, surfaced via the coordinator
 // status the same way as `GRE_ENCAP_DF_OVERSIZE_DROPS`) is bumped so the
 // suppression is observable.
+//
+// #9901 (F-074): each per-zone bucket above is now a per-source-fair
+// HIERARCHICAL limiter (`ZoneLimiter`): a per-source tier (64 fixed slots,
+// 100/s + burst 100 each) in front of the zone aggregate (1000/1000). Before,
+// one source flooding a zone drained that zone's whole budget and starved
+// every OTHER source in the same zone — the same starvation shape #3618/#5856
+// removed between zones, one level down. The source tier is keyed by the
+// trigger's source address (META addrs, never frame bytes); a source-denied
+// reply consumes NOTHING shared (source-FIRST gate order, the #5567
+// build-before-consume principle applied to the tier order), so a flooder
+// spends only its own slot. Slot collisions share the slot's sustained rate
+// (tag is hint-only, no bucket reset on takeover); cardinality stays
+// config-bounded (~1.5KB per zone limiter, no attacker-growable map).
 
+use std::net::IpAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::LazyLock;
 
 use super::neighbor::monotonic_nanos;
 use crate::afxdp::types::ForwardingState;
@@ -116,16 +131,15 @@ const NANOS_PER_SEC: u64 = 1_000_000_000;
 /// `interval`. Because `tat` is the entire state, there is no second field to
 /// tear against — the single CAS atomically refills AND consumes. This is the
 /// same single-TAT pattern used by `event_stream/producer.rs`.
-///
-/// #3618/#5856: exposed as `pub(in crate::afxdp)` so `ForwardingState` can hold
-/// per-zone maps of these for EVERY reason (`reject_buckets`,
-/// `time_exceeded_buckets`, `packet_too_big_buckets`). The fields stay private
-/// to this module; the only cross-module entry points are `TokenBucket::new()`
-/// (to build a fresh per-zone bucket at config apply) and the
-/// `allow_generated_*` gates below (which do the `try_take` + counter bump).
-/// Held behind an `Arc` in `ForwardingState` so the shared atomics survive
-/// `ForwardingState::clone()` (fabric refresh re-stores a clone at runtime
-/// cadence — see `forwarding.rs`).
+/// #3618/#5856: exposed as `pub(in crate::afxdp)` so `ZoneLimiter` (held in
+/// `ForwardingState` per-zone maps: `reject_buckets`,
+/// `time_exceeded_buckets`, `packet_too_big_buckets`) can compose its tiers
+/// from these. The fields stay private to this module; the only cross-module
+/// entry points are `TokenBucket::new()` (to build a fresh tier) and the
+/// `allow_generated_*` gates below (which do the tiered `try_take` + counter
+/// bump). Held behind an `Arc` in `ForwardingState` so the shared atomics
+/// survive `ForwardingState::clone()` (fabric refresh re-stores a clone at
+/// runtime cadence — see `forwarding.rs`).
 #[derive(Debug)]
 pub(in crate::afxdp) struct TokenBucket {
     /// Theoretical arrival time (monotonic nanos). The whole limiter state.
@@ -205,20 +219,228 @@ impl TokenBucket {
         }
     }
 }
+/// #9901 (F-074): number of fixed per-source slots in a `ZoneLimiter`. A
+/// power of two so the slot is one modulo over the seeded mix; 64 bounds the
+/// limiter to ~1.5KB (64 tags + 66 buckets) while keeping incidental
+/// collisions rare for the handful of concurrent error sources a zone sees.
+const SRC_SLOT_COUNT: usize = 64;
 
-/// #3618/#5856: shared per-reason fallback bucket used when a generated error's
-/// ingress (from) zone has NO per-zone bucket — an unzoned (id 0) or
-/// otherwise-unknown zone id. Each is a REAL bucket (never a fail-open skip),
-/// so an unzoned/unknown error is still rate-limited; such errors all share the
-/// reason's one fallback budget (the rare/degenerate case, not a per-zone
-/// diagnostic). The per-zone buckets now live in `ForwardingState`
+/// #9901 (F-074): the per-source sustained rate (tokens/sec) and burst depth
+/// EVERY per-source slot and the `None`-source overflow bucket enforce. Fixed
+/// constants, not gate parameters: a legitimate source emits generated errors
+/// at a trickle (traceroute / PMTUD are a handful per flow), so 100/s + burst
+/// 100 is far above any benign source rate while bounding one flooder to a
+/// tenth of the zone aggregate.
+const SRC_RATE_PER_SEC: u64 = 100;
+const SRC_BURST: u64 = 100;
+
+/// #9901 (F-074): the NEVER-claimed `src_tags` sentinel. Tags are claimed
+/// with `| 1`, so no live tag is ever 0; a zero-initialized slot reads EMPTY
+/// until the first source claims it. Hint-only either way — see `ZoneLimiter`.
+const TAG_EMPTY: u64 = 0;
+
+/// #9901 (F-074): a per-source-fair hierarchical generated-error limiter —
+/// the per-zone budget that used to be a single `TokenBucket`.
+///
+/// Structure: one zone `aggregate` bucket (the #3618/#5856 budget, still
+/// parameterized by the gate's rate/burst) fronted by a per-source tier: 64
+/// fixed `src_slots` (each 100/s + burst 100) selected by
+/// `diffuse64(seed ^ addr_fold) % 64`, plus one `overflow` bucket (same
+/// for a `None` source. Gate order is source-FIRST then aggregate: a
+/// source-deny consumes NOTHING shared (the #5567 build-before-consume
+/// principle applied to the tier order), so one flooder cannot starve another
+/// source in the same zone — only the zone aggregate can still deny, exactly
+/// as before.
+///
+/// `src_tags` records the current claimant of each slot (best-effort CAS,
+/// result ignored). The tag is HINT-ONLY: on takeover the slot's bucket is
+/// NOT reset — colliders share the slot's sustained rate. There is no
+/// attacker-growable map (fixed 64 slots) and no lock (one atomic word per
+/// tier consult). The per-boot seed (`hot_path_hash_seed`) keeps the
+/// source→slot mapping unpredictable off-box, so an attacker cannot
+/// precompute a colliding source set.
+///
+/// Memory: ~1.5KB per limiter (64 × u64 tags + 66 buckets × 2 × u64), held
+/// behind `Arc` in `ForwardingState` exactly as the old per-zone buckets
+/// were. Wire-maximum cardinality (65533 zones × 3 reasons) is ~300MB in the
+/// absurd all-zones-configured case; realistic zone counts cost KBs. Accepted
+/// and documented — the alternative (lazy per-zone build) would admit a
+/// fail-open window or a config-path lock.
+#[derive(Debug)]
+pub(in crate::afxdp) struct ZoneLimiter {
+    /// The zone aggregate budget — the former per-zone `TokenBucket`.
+    aggregate: TokenBucket,
+    /// Current-claimant hint per source slot (`TAG_EMPTY` = never claimed).
+    src_tags: [AtomicU64; SRC_SLOT_COUNT],
+    /// Fixed per-source buckets, 100/s + burst 100 each.
+    src_slots: [TokenBucket; SRC_SLOT_COUNT],
+    /// The `None`-source budget (100/s + burst 100), shared by all sourceless
+    /// errors. A real bucket, never a fail-open skip.
+    overflow: TokenBucket,
+}
+
+/// Fold a source address to 64 bits. No diffusion here — `diffuse64` runs
+/// over `seed ^ fold` at the call site, so every output bit depends on every
+/// address bit AND every seed bit.
+fn addr_fold(addr: &IpAddr) -> u64 {
+    match addr {
+        IpAddr::V4(v4) => u32::from(*v4) as u64,
+        IpAddr::V6(v6) => {
+            let x = u128::from(*v6);
+            (x as u64) ^ ((x >> 64) as u64)
+        }
+    }
+}
+
+/// splitmix64 finalizer: full-bit diffusion over the seeded fold. REQUIRED
+/// for the slot mapping, not a nicety — the pre-fix multiply-only mix
+/// preserved low-bit locality: mod-64 of a product sees only the low 6
+/// factors, so 192.0.2.1 and 192.0.2.65 (same low 6 address bits) shared a
+/// slot under EVERY seed and one source could drain another's bucket. After
+/// diffusion the low slot bits are a function of the whole address (and the
+/// whole seed); unpredictability still comes from the per-boot seed.
+fn diffuse64(mut z: u64) -> u64 {
+    z = z.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
+}
+
+/// The source slot and claimant tag for `addr` under `seed`. The tag folds
+/// the bits above the slot index and is forced non-zero so it never reads
+/// `TAG_EMPTY`.
+fn slot_and_tag(seed: u64, addr: &IpAddr) -> (usize, u64) {
+    let h = diffuse64(seed ^ addr_fold(addr));
+    let slot = (h % SRC_SLOT_COUNT as u64) as usize;
+    let tag = (h >> 6) | 1;
+    (slot, tag)
+}
+
+impl ZoneLimiter {
+    /// A fresh limiter: every tier full (TAT 0), every slot unclaimed.
+    pub(in crate::afxdp) fn new() -> Self {
+        ZoneLimiter {
+            aggregate: TokenBucket::new(),
+            src_tags: std::array::from_fn(|_| AtomicU64::new(TAG_EMPTY)),
+            src_slots: std::array::from_fn(|_| TokenBucket::new()),
+            overflow: TokenBucket::new(),
+        }
+    }
+
+    /// Source-FIRST, aggregate-second admission. Returns true when the reply
+    /// MAY be sent (both tiers had a token). A source-deny bumps the
+    /// reason's aggregate `*_RATE_LIMITED_TOTAL` (the observable metric)
+    /// WITHOUT touching the aggregate bucket; an aggregate-deny is accounted
+    /// by the shared `take_and_account` site. `rate_per_sec == 0` disables
+    /// the limiter (both tiers), preserving the `TokenBucket` opt-out.
+    fn allow(
+        &self,
+        reason: GeneratedErrorReason,
+        src: Option<IpAddr>,
+        now_ns: u64,
+        rate_per_sec: u64,
+        burst: u64,
+    ) -> bool {
+        if rate_per_sec == 0 {
+            return true;
+        }
+        let src_bucket = match src {
+            Some(addr) => {
+                let (slot, tag) =
+                    slot_and_tag(crate::hot_hash_seed::hot_path_hash_seed(), &addr);
+                let observed = self.src_tags[slot].load(Ordering::Relaxed);
+                if observed != tag {
+                    // Best-effort claim; the result is ignored — on a race
+                    // the loser still shares the slot (hint-only, never a
+                    // gate), and no bucket is reset on takeover.
+                    let _ = self.src_tags[slot].compare_exchange_weak(
+                        observed,
+                        tag,
+                        Ordering::Relaxed,
+                        Ordering::Relaxed,
+                    );
+                }
+                &self.src_slots[slot]
+            }
+            None => &self.overflow,
+        };
+        if !src_bucket.try_take(now_ns, SRC_RATE_PER_SEC, SRC_BURST) {
+            src_bucket.rate_limited.fetch_add(1, Ordering::Relaxed);
+            rate_limited_total(reason).fetch_add(1, Ordering::Relaxed);
+            return false;
+        }
+        take_and_account(&self.aggregate, reason, now_ns, rate_per_sec, burst)
+    }
+
+    /// #9901 (F-074) test observable: the aggregate tier's TAT. "Did this
+    /// path spend a token on the SHARED budget?" is exactly "did this value
+    /// move?" — the same question `TokenBucket::arrival_ns` answers for one
+    /// bucket. Mirrors the M04 arrival pattern the TE tests pin.
+    #[cfg(test)]
+    pub(in crate::afxdp) fn aggregate_arrival_ns(&self) -> u64 {
+        self.aggregate.arrival_ns()
+    }
+
+    /// Reset EVERY tier (aggregate, overflow, all source slots + tags) to
+    /// full at epoch `now_ns`, mirroring the single-bucket reset. GCRA: a
+    /// full bucket at `now_ns` is `tat == now_ns`.
+    #[cfg(test)]
+    fn reset_for_test(&self, now_ns: u64) {
+        for bucket in [&self.aggregate, &self.overflow]
+            .into_iter()
+            .chain(self.src_slots.iter())
+        {
+            bucket
+                .theoretical_arrival_ns
+                .store(now_ns, Ordering::Relaxed);
+            bucket.rate_limited.store(0, Ordering::Relaxed);
+        }
+        for tag in self.src_tags.iter() {
+            tag.store(TAG_EMPTY, Ordering::Relaxed);
+        }
+    }
+
+    /// Drain ONLY the aggregate tier at (`now_ns`, rate, burst) — the
+    /// hierarchy-aware form of the far-future-drain pattern. Drains through
+    /// the gate would stop at the source tier's smaller budget and leave the
+    /// aggregate half-full; this empties exactly the tier the old
+    /// single-bucket drains emptied. No accounting (the caller's `before`
+    /// read follows the drain, as before).
+    #[cfg(test)]
+    pub(in crate::afxdp) fn drain_aggregate_for_test(
+        &self,
+        now_ns: u64,
+        rate_per_sec: u64,
+        burst: u64,
+    ) {
+        while self.aggregate.try_take(now_ns, rate_per_sec, burst) {}
+    }
+
+    /// The source slot `addr` maps to under the live seed. Test-only: lets
+    /// cells pick same-slot (collision) vs distinct-slot sources without
+    /// hardcoding a seed-dependent layout.
+    #[cfg(test)]
+    pub(in crate::afxdp) fn slot_for_test(addr: &IpAddr) -> usize {
+        slot_and_tag(crate::hot_hash_seed::hot_path_hash_seed(), addr).0
+    }
+}
+
+/// #3618/#5856: shared per-reason fallback limiter used when a generated
+/// error's ingress (from) zone has NO per-zone limiter — an unzoned (id 0) or
+/// otherwise-unknown zone id. Each is a REAL limiter (never a fail-open
+/// skip), so an unzoned/unknown error is still rate-limited; such errors all
+/// share the reason's one fallback budget (the rare/degenerate case, not a
+/// per-zone diagnostic). The per-zone limiters now live in `ForwardingState`
 /// (`reject_buckets` #3618; `time_exceeded_buckets` / `packet_too_big_buckets`
 /// #5856), built from the configured zone set, so a flood on one zone can no
-/// longer drain a single global bucket and starve error-generation in another
-/// zone.
-static REJECT_FALLBACK_BUCKET: TokenBucket = TokenBucket::new();
-static TIME_EXCEEDED_FALLBACK_BUCKET: TokenBucket = TokenBucket::new();
-static PACKET_TOO_BIG_FALLBACK_BUCKET: TokenBucket = TokenBucket::new();
+/// longer drain a single global limiter and starve error-generation in another
+/// zone. #9901 (F-074): full `ZoneLimiter`s (not bare buckets), so the
+/// fallback path keeps per-source fairness; `LazyLock` because a 64-slot
+/// limiter is not `const`-constructible (precedent:
+/// `nat::source::match_rules`).
+static REJECT_FALLBACK_LIMITER: LazyLock<ZoneLimiter> = LazyLock::new(ZoneLimiter::new);
+static TIME_EXCEEDED_FALLBACK_LIMITER: LazyLock<ZoneLimiter> = LazyLock::new(ZoneLimiter::new);
+static PACKET_TOO_BIG_FALLBACK_LIMITER: LazyLock<ZoneLimiter> = LazyLock::new(ZoneLimiter::new);
 
 /// #3618/#5856: process-global aggregate count, PER reason, of generated error
 /// replies dropped because the (per-zone OR fallback) bucket was empty. A
@@ -232,16 +454,16 @@ static REJECT_RATE_LIMITED_TOTAL: AtomicU64 = AtomicU64::new(0);
 static TIME_EXCEEDED_RATE_LIMITED_TOTAL: AtomicU64 = AtomicU64::new(0);
 static PACKET_TOO_BIG_RATE_LIMITED_TOTAL: AtomicU64 = AtomicU64::new(0);
 
-/// The reason's shared fallback bucket: the bucket the non-zone-keyed
-/// `allow_generated_error_at` back-compat/test entry point and the test
-/// reset/drain helpers operate on. The zone-keyed gates
-/// (`allow_generated_error_zoned*`) resolve a per-zone bucket first and fall
+/// The reason's shared fallback limiter: the limiter the non-zone-keyed
+/// `allow_generated_error_at` test entry point (aggregate tier only) and the
+/// test reset helper operate on. The zone-keyed gates
+/// (`allow_generated_error_zoned*`) resolve a per-zone limiter first and fall
 /// back to this same static, so both stay consistent.
-fn bucket_for(reason: GeneratedErrorReason) -> &'static TokenBucket {
+fn limiter_for(reason: GeneratedErrorReason) -> &'static ZoneLimiter {
     match reason {
-        GeneratedErrorReason::TimeExceeded => &TIME_EXCEEDED_FALLBACK_BUCKET,
-        GeneratedErrorReason::PacketTooBig => &PACKET_TOO_BIG_FALLBACK_BUCKET,
-        GeneratedErrorReason::Reject => &REJECT_FALLBACK_BUCKET,
+        GeneratedErrorReason::TimeExceeded => &TIME_EXCEEDED_FALLBACK_LIMITER,
+        GeneratedErrorReason::PacketTooBig => &PACKET_TOO_BIG_FALLBACK_LIMITER,
+        GeneratedErrorReason::Reject => &REJECT_FALLBACK_LIMITER,
     }
 }
 
@@ -257,17 +479,20 @@ fn rate_limited_total(reason: GeneratedErrorReason) -> &'static AtomicU64 {
     }
 }
 
-/// Non-zone-keyed testable core: try one token against `reason`'s FALLBACK
-/// bucket with an injected clock + rate / burst, so the unit tests can drive a
-/// deterministic burst-then-refill sequence without sleeping. On a deny it
-/// bumps BOTH the fallback bucket's own `rate_limited` field and the reason's
-/// aggregate `*_RATE_LIMITED_TOTAL`, so `rate_limited_count(reason)` (which
-/// reads the aggregate) stays authoritative regardless of entry point.
+/// Non-zone-keyed testable core: try one token against `reason`'s fallback
+/// limiter AGGREGATE tier with an injected clock + rate / burst, so the unit
+/// tests can drive a deterministic burst-then-refill sequence without
+/// sleeping. Bypasses the per-source/overflow tiers: this is the GCRA-math
+/// and far-future-drain entry point, and routing it through the smaller
+/// source budget would cap every drain at 100 tokens. On a deny it bumps BOTH
+/// the aggregate bucket's own `rate_limited` field and the reason's aggregate
+/// `*_RATE_LIMITED_TOTAL`, so `rate_limited_count(reason)` (which reads the
+/// aggregate) stays authoritative regardless of entry point.
 ///
 /// Test-only: production TE/PTB/Reject gates all go through the zone-keyed
-/// [`allow_generated_error_zoned_at`] (which itself falls back to this reason's
-/// FALLBACK bucket for an unzoned/unknown zone), so the pure-fallback path is
-/// exercised directly only by the unit tests.
+/// [`allow_generated_error_zoned_at`] (which itself falls back to this
+/// reason's fallback limiter for an unzoned/unknown zone), so the pure
+/// aggregate path is exercised directly only by the unit tests.
 #[cfg(test)]
 pub(in crate::afxdp) fn allow_generated_error_at(
     reason: GeneratedErrorReason,
@@ -275,30 +500,40 @@ pub(in crate::afxdp) fn allow_generated_error_at(
     rate_per_sec: u64,
     burst: u64,
 ) -> bool {
-    take_and_account(bucket_for(reason), reason, now_ns, rate_per_sec, burst)
+    take_and_account(
+        &limiter_for(reason).aggregate,
+        reason,
+        now_ns,
+        rate_per_sec,
+        burst,
+    )
 }
 
 /// #3618/#5856: zone-scoped generated-error gate. Returns true when a
 /// locally-generated error reply for `reason` whose ingress (from) zone is
-/// `from_zone_id` MAY be sent (its per-zone bucket had a token), false when it
-/// MUST be dropped because that zone's bucket is empty. The per-zone bucket
-/// comes from `ForwardingState` (`reject_buckets` / `time_exceeded_buckets` /
+/// `from_zone_id` MAY be sent (its per-zone limiter admitted it), false when
+/// it MUST be dropped. #9901 (F-074): `src` is the trigger's source address
+/// (META addrs, never frame bytes); `Some` keys the limiter's per-source
+/// tier, `None` the shared overflow tier. The per-zone limiter comes from
+/// `ForwardingState` (`reject_buckets` / `time_exceeded_buckets` /
 /// `packet_too_big_buckets`, built from the configured zone set at config
 /// apply); an unzoned (id 0) or otherwise-unknown zone id falls back to the
-/// reason's shared process-global `*_FALLBACK_BUCKET` — a real bucket, so the
-/// gate is NEVER fail-open and never panics on a missing key. On a deny the
-/// reason's single aggregate `*_RATE_LIMITED_TOTAL` is bumped (metric
-/// unchanged) alongside the bucket's own `rate_limited` field (optional
-/// per-zone attribution).
+/// reason's shared process-global `*_FALLBACK_LIMITER` — a real limiter, so
+/// the gate is NEVER fail-open and never panics on a missing key. On a deny
+/// the reason's single aggregate `*_RATE_LIMITED_TOTAL` is bumped (metric
+/// unchanged) alongside the denying tier's own `rate_limited` field (optional
+/// attribution).
 pub(in crate::afxdp) fn allow_generated_error_zoned(
     forwarding: &ForwardingState,
     reason: GeneratedErrorReason,
     from_zone_id: u16,
+    src: Option<IpAddr>,
 ) -> bool {
     allow_generated_error_zoned_at(
         forwarding,
         reason,
         from_zone_id,
+        src,
         monotonic_nanos(),
         DEFAULT_RATE_PER_SEC,
         DEFAULT_BURST,
@@ -306,33 +541,37 @@ pub(in crate::afxdp) fn allow_generated_error_zoned(
 }
 
 /// Testable core of [`allow_generated_error_zoned`] with an injected clock +
-/// rate / burst, so the unit tests can drive a deterministic per-zone
-/// burst-then-drain sequence without sleeping.
+/// rate / burst (which parameterize the zone AGGREGATE tier; the per-source
+/// tier is fixed 100/s + burst 100), so the unit tests can drive a
+/// deterministic per-zone burst-then-drain sequence without sleeping.
 pub(in crate::afxdp) fn allow_generated_error_zoned_at(
     forwarding: &ForwardingState,
     reason: GeneratedErrorReason,
     from_zone_id: u16,
+    src: Option<IpAddr>,
     now_ns: u64,
     rate_per_sec: u64,
     burst: u64,
 ) -> bool {
-    let bucket = forwarding
+    let limiter = forwarding
         .generated_error_bucket(reason, from_zone_id)
-        .unwrap_or_else(|| bucket_for(reason));
-    take_and_account(bucket, reason, now_ns, rate_per_sec, burst)
+        .unwrap_or_else(|| limiter_for(reason));
+    limiter.allow(reason, src, now_ns, rate_per_sec, burst)
 }
 
 /// #3618: reject-reason convenience wrapper over the generic zone-keyed gate.
 /// Kept as a named entry point for `poll_descriptor::reject_reply` and the
 /// existing reject unit tests; behaviour is identical to
-/// `allow_generated_error_zoned(_, Reject, _)`.
+/// `allow_generated_error_zoned(_, Reject, _, _)`.
 pub(in crate::afxdp) fn allow_generated_reject(
     forwarding: &ForwardingState,
     from_zone_id: u16,
+    src: Option<IpAddr>,
 ) -> bool {
     allow_generated_reject_at(
         forwarding,
         from_zone_id,
+        src,
         monotonic_nanos(),
         DEFAULT_RATE_PER_SEC,
         DEFAULT_BURST,
@@ -344,6 +583,7 @@ pub(in crate::afxdp) fn allow_generated_reject(
 pub(in crate::afxdp) fn allow_generated_reject_at(
     forwarding: &ForwardingState,
     from_zone_id: u16,
+    src: Option<IpAddr>,
     now_ns: u64,
     rate_per_sec: u64,
     burst: u64,
@@ -352,6 +592,7 @@ pub(in crate::afxdp) fn allow_generated_reject_at(
         forwarding,
         GeneratedErrorReason::Reject,
         from_zone_id,
+        src,
         now_ns,
         rate_per_sec,
         burst,
@@ -411,19 +652,19 @@ pub(in crate::afxdp) fn global_bucket_test_lock() -> std::sync::MutexGuard<'stat
 
 #[cfg(test)]
 pub(in crate::afxdp) fn reset_bucket_for_test(reason: GeneratedErrorReason, now_ns: u64) {
-    let bucket = bucket_for(reason);
+    let limiter = limiter_for(reason);
     // GCRA: a full bucket at epoch `now_ns` is `tat == now_ns` (the next
     // `burst` admissions all satisfy `tat - horizon <= now`). Tests that pin a
     // FAR-FUTURE epoch then drain rely on this: after draining at `now_ns`,
     // `tat` runs `burst * interval` ahead, and a later call at a SMALLER clock
     // value stays denied (the GCRA window never travels backwards).
-    bucket
-        .theoretical_arrival_ns
-        .store(now_ns, Ordering::Relaxed);
-    bucket.rate_limited.store(0, Ordering::Relaxed);
+    // #9901 (F-074): reset EVERY tier (aggregate, overflow, all source slots
+    // + tags), mirroring the single-bucket reset — a leftover source-slot TAT
+    // would otherwise deny a sibling's first post-reset admission.
+    limiter.reset_for_test(now_ns);
     // #3618/#5856: also clear the reason's dedicated aggregate so a test that
     // asserts an exact `rate_limited_count(reason)` starts from a clean slate
-    // (the aggregate is a separate atomic from the fallback bucket's field).
+    // (the aggregate is a separate atomic from the fallback limiter's fields).
     rate_limited_total(reason).store(0, Ordering::Relaxed);
 }
 

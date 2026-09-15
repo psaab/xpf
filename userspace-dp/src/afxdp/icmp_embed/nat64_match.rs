@@ -46,6 +46,7 @@
 //! #3290 no-fake-session invariant is preserved.
 
 use super::parse::{embedded_reply_key, parse_embedded_v4, parse_embedded_v6};
+use super::outer_error_atomic;
 use super::*;
 use crate::session::TunnelDiscriminator;
 
@@ -91,32 +92,36 @@ pub(in crate::afxdp) enum Nat64IcmpErrorMatch {
 }
 
 /// Match a flowless ICMP error against the NAT64 session tables. Returns
-/// `None` (caller falls through to the same-family #5690 reversal and then
+/// `NoMatch` (caller falls through to the same-family #5690 reversal and then
 /// normal flowless enforcement, unchanged) when no NAT64 prefix is
 /// configured, the packet is not an ICMP error carrying a parseable quote,
 /// the outer-destination/quote-source consistency gate fails, or the quote
-/// matches no live NAT64 session half.
+/// matches no live NAT64 session half. Returns `BudgetDenied` (caller MUST
+/// drop the descriptor) when a half matched but the F-077 per-session budget
+/// refused it — never a fallthrough.
 pub(in crate::afxdp::icmp_embed) fn try_nat64_icmp_error_match(
     frame: &[u8],
     meta: UserspaceDpMeta,
     ctx: &mut NatMatchCtx<'_>,
     now_ns: u64,
-) -> Option<Nat64IcmpErrorMatch> {
+) -> EmbeddedMatchOutcome<Nat64IcmpErrorMatch> {
     // Zero-cost gate for non-NAT64 deployments: one Vec::is_empty() branch
     // before any parse (this match runs on the flowless arm, which also
     // serves ordinary non-first fragments).
     if ctx.forwarding.nat64.prefixes.is_empty() {
-        return None;
+        return EmbeddedMatchOutcome::NoMatch;
     }
     let l4 = meta.l4_offset as usize;
-    let icmp_type = *frame.get(l4)?;
+    let Some(icmp_type) = frame.get(l4).copied() else {
+        return EmbeddedMatchOutcome::NoMatch;
+    };
     if !is_icmp_error(meta.protocol, icmp_type) {
-        return None;
+        return EmbeddedMatchOutcome::NoMatch;
     }
     match meta.protocol {
         PROTO_ICMP => match_v4_error(frame, meta, ctx, now_ns),
         PROTO_ICMPV6 => match_v6_error(frame, meta, ctx, now_ns),
-        _ => None,
+        _ => EmbeddedMatchOutcome::NoMatch,
     }
 }
 
@@ -126,20 +131,33 @@ fn match_v4_error(
     meta: UserspaceDpMeta,
     ctx: &mut NatMatchCtx<'_>,
     now_ns: u64,
-) -> Option<Nat64IcmpErrorMatch> {
+) -> EmbeddedMatchOutcome<Nat64IcmpErrorMatch> {
     let l3 = meta.l3_offset as usize;
     let l4 = meta.l4_offset as usize;
     // Outer destination: the address the error is addressed TO — for a
     // genuine error about the session's forward packet, the session's pool
     // address (the offending packet's source, RFC 792).
-    let outer_dst_v4 = Ipv4Addr::from(<[u8; 4]>::try_from(frame.get(l3 + 16..l3 + 20)?).ok()?);
+    let Some(outer_dst_v4) = frame
+        .get(l3 + 16..l3 + 20)
+        .and_then(|b| <[u8; 4]>::try_from(b).ok())
+        .map(Ipv4Addr::from)
+    else {
+        return EmbeddedMatchOutcome::NoMatch;
+    };
 
-    let hdr = parse_embedded_v4(frame, l4 + 8)?;
+    let Some(hdr) = parse_embedded_v4(
+        frame,
+        l4 + 8,
+        outer_error_atomic(frame, &meta),
+        super::outer_datagram_end(frame, &meta),
+    ) else {
+        return EmbeddedMatchOutcome::NoMatch;
+    };
     // Fail-closed consistency gate: the quote's source must BE the outer
     // destination. A mismatch means the error is not about this session's
     // wire packet (misrouted/forged) — decline to the same-family arm.
     if hdr.src != outer_dst_v4 {
-        return None;
+        return EmbeddedMatchOutcome::NoMatch;
     }
     // #9162: the routing domain of the interface the error arrived on, the way
     // the same-family arms (`nat_match_v4.rs` / `nat_match_v6.rs`) resolve it.
@@ -184,26 +202,36 @@ fn match_v4_error(
         TunnelDiscriminator::None,
         embedded_routing_domain,
     );
-    let resolved = lookup_session_across_scopes(
+    let Some(resolved) = lookup_session_across_scopes(
         ctx.sessions,
         ctx.shared_sessions,
         ctx.shared_forward_wire_sessions,
         &reply_key,
         now_ns,
         0,
-    )?;
+    ) else {
+        return EmbeddedMatchOutcome::NoMatch;
+    };
     let sl = resolved.lookup;
     // Must be the v4 REVERSE companion of a NAT64 flow — a same-family
     // session half (or the forward half) is the #5690 arm's business.
-    let info = sl.metadata.nat64_reverse?;
+    let Some(info) = sl.metadata.nat64_reverse else {
+        return EmbeddedMatchOutcome::NoMatch;
+    };
     if !sl.metadata.is_reverse || !sl.decision.nat.nat64 {
-        return None;
+        return EmbeddedMatchOutcome::NoMatch;
     }
     // The reverse decision (produced by `NatDecision::reverse`) carries the
     // ORIGINAL client source port / echo id in `rewrite_dst_port`; absent a
-    // port translation the quote already carries the original value.
     let orig_client_port = sl.decision.nat.rewrite_dst_port.unwrap_or(hdr.src_port);
-    Some(Nat64IcmpErrorMatch::V4ToV6 {
+    // #9901 (F-077): per-session error budget, keyed on the installed v4
+    // reverse companion's primary key (the stable identity for this NAT64
+    // flow's errors). Shared/peer resolutions budget via the side table.
+    // Denial is BudgetDenied (drop arm), never a fallthrough.
+    if !ctx.sessions.note_icmp_error_delivered(&reply_key, now_ns) {
+        return EmbeddedMatchOutcome::BudgetDenied;
+    }
+    EmbeddedMatchOutcome::Match(Nat64IcmpErrorMatch::V4ToV6 {
         orig_src_v6: info.orig_src_v6,
         orig_dst_v6: info.orig_dst_v6,
         orig_client_port,
@@ -218,25 +246,44 @@ fn match_v6_error(
     meta: UserspaceDpMeta,
     ctx: &mut NatMatchCtx<'_>,
     now_ns: u64,
-) -> Option<Nat64IcmpErrorMatch> {
+) -> EmbeddedMatchOutcome<Nat64IcmpErrorMatch> {
     let l3 = meta.l3_offset as usize;
     let l4 = meta.l4_offset as usize;
-    let outer_dst_v6 =
-        Ipv6Addr::from(<[u8; 16]>::try_from(frame.get(l3 + 24..l3 + 40)?).ok()?);
+    let Some(outer_dst_v6) = frame
+        .get(l3 + 24..l3 + 40)
+        .and_then(|b| <[u8; 16]>::try_from(b).ok())
+        .map(Ipv6Addr::from)
+    else {
+        return EmbeddedMatchOutcome::NoMatch;
+    };
     // Only an error addressed to a SYNTHETIC Pref64 destination can be a
     // NAT64 session error; an error addressed to a real v6 host (e.g. the
     // client, about the forward packet) is ordinary v6 traffic that the
     // flowless arm routes normally — do not intercept it.
-    ctx.forwarding.nat64.match_ipv6_dest(outer_dst_v6)?;
+    if ctx
+        .forwarding
+        .nat64
+        .match_ipv6_dest(outer_dst_v6)
+        .is_none()
+    {
+        return EmbeddedMatchOutcome::NoMatch;
+    }
 
-    let hdr = parse_embedded_v6(frame, l4 + 8)?;
+    let Some(hdr) = parse_embedded_v6(
+        frame,
+        l4 + 8,
+        outer_error_atomic(frame, &meta),
+        super::outer_datagram_end(frame, &meta),
+    ) else {
+        return EmbeddedMatchOutcome::NoMatch;
+    };
     // Fail-closed consistency gate: the quote must be the session's
     // RETURN-direction wire packet — its source is the same synthetic
     // Pref64 address the error is addressed to (the offending packet's
     // source, RFC 792). A quote of the FORWARD packet (client → Pref64)
     // belongs to an error addressed to the client and fails this gate.
     if hdr.src_wire != outer_dst_v6 {
-        return None;
+        return EmbeddedMatchOutcome::NoMatch;
     }
     // #9162: see the twin derivation in `match_v4_error`. This arm resolves the
     // installed FORWARD session, whose key has been domain-stamped since #7160
@@ -267,35 +314,42 @@ fn match_v6_error(
         TunnelDiscriminator::None,
         embedded_routing_domain,
     );
-    let resolved = lookup_session_across_scopes(
+    let Some(resolved) = lookup_session_across_scopes(
         ctx.sessions,
         ctx.shared_sessions,
         ctx.shared_forward_wire_sessions,
         &forward_key,
         now_ns,
         0,
-    )?;
+    ) else {
+        return EmbeddedMatchOutcome::NoMatch;
+    };
     let sl = resolved.lookup;
     // Must be the FORWARD half of a NAT64 flow carrying the v4 translation.
     if sl.metadata.is_reverse
         || !sl.decision.nat.nat64
         || sl.metadata.nat64_reverse.is_none()
     {
-        return None;
+        return EmbeddedMatchOutcome::NoMatch;
     }
     let pool_v4 = match sl.decision.nat.rewrite_src {
         Some(IpAddr::V4(v4)) => v4,
-        _ => return None,
+        _ => return EmbeddedMatchOutcome::NoMatch,
     };
     let server_v4 = match sl.decision.nat.rewrite_dst {
         Some(IpAddr::V4(v4)) => v4,
-        _ => return None,
+        _ => return EmbeddedMatchOutcome::NoMatch,
     };
     // The forward decision carries the TRANSLATED source port / echo id in
     // `rewrite_src_port`; absent a port translation the quote already
-    // carries the value the server replied to.
     let translated_port = sl.decision.nat.rewrite_src_port.unwrap_or(hdr.dst_port);
-    Some(Nat64IcmpErrorMatch::V6ToV4 {
+    // #9901 (F-077): per-session error budget, keyed on the installed
+    // forward session's primary key. Shared/peer resolutions budget via
+    // the side table. Denial is BudgetDenied (drop arm), never a fallthrough.
+    if !ctx.sessions.note_icmp_error_delivered(&forward_key, now_ns) {
+        return EmbeddedMatchOutcome::BudgetDenied;
+    }
+    EmbeddedMatchOutcome::Match(Nat64IcmpErrorMatch::V6ToV4 {
         pool_v4,
         server_v4,
         translated_port,

@@ -891,6 +891,16 @@ struct SessionEntry {
     /// (`upsert_synced`) is assigned a FRESH node-local id — cross-node id
     /// identity is a documented follow-up (see docs).
     session_id: u64,
+    /// #9901 (F-077): GCRA theoretical-arrival-time gating embedded ICMP
+    /// error delivery FOR this session (burst 64 / rate 64/s — see
+    /// `ICMP_ERROR_BURST`). Without it, one quoter can steer an UNBOUNDED
+    /// error stream onto a live session (forged PTB/TE as a PMTUD /
+    /// throughput weapon). Init 0 = full by construction (a fresh session
+    /// delivers its first 64 errors immediately). A plain `u64`, not an
+    /// atomic: the table is worker-owned and single-threaded. Node-local
+    /// derived state, like `established`: `SessionEntry` carries no serde,
+    /// so this is on no HA wire and a peer re-derives its own budget.
+    last_icmp_error_tat: u64,
 }
 
 /// #2501: per-session traffic accounting, split by direction. A `Copy`
@@ -955,6 +965,44 @@ pub(crate) const SESSION_ID_NODE_BIT_SHIFT: u32 = 15;
 /// the pre-#6311 mask produced, so `set_session_id_namespace` refuses it rather
 /// than masking it away.
 pub(crate) const SESSION_ID_MAX_WORKER: u64 = (1u64 << SESSION_ID_NODE_BIT_SHIFT) - 1;
+
+/// #9901 (F-077): per-session embedded-ICMP-error budget — burst 64 at rate
+/// 64/s. Sized for mtr (30 same-session probes/second all pass) and
+/// traceroute multi-quoter same-id sessions: a 1s min-interval would break
+/// both, while 64/64 bounds a forgery flood to ~64 deliveries per session
+/// per burst. Enforced by `SessionTable::note_icmp_error_delivered` in ONE
+/// u64 TAT per session (init 0 = full by construction).
+const ICMP_ERROR_BURST: u64 = 64;
+/// 1e9 / 64 — exact (15_625_000ns).
+const ICMP_ERROR_INTERVAL_NS: u64 = 1_000_000_000 / 64;
+const ICMP_ERROR_HORIZON_NS: u64 = ICMP_ERROR_INTERVAL_NS * (ICMP_ERROR_BURST - 1);
+/// #9901 (F-077): cap on the error-budget side table (shared/peer matches
+/// with no local entry). At cap the insert path prunes fully-recovered
+/// budgets, then conservatively REFUSES unknown keys (suppressed + counted)
+/// rather than evicting — evict-and-admit would let a 1025-key round-robin
+/// exceed 64/s per session indefinitely. 1024 bounds the worst-case scan
+/// and memory while dwarfing any legitimate concurrent peer-error population.
+const ICMP_ERROR_SIDE_TABLE_CAP: usize = 1024;
+
+/// #9901 (F-077): embedded ICMP errors suppressed by the per-session GCRA —
+/// errors that MATCHED a session but were over that session's 64/64 budget.
+/// Bumped in `icmp_error_tat_take`, the single consume site. Read as a delta
+/// in tests; surfaced as
+/// `xpf_userspace_embedded_error_per_session_suppressed_total`.
+pub(crate) static EMBEDDED_ERROR_PER_SESSION_SUPPRESSED_TOTAL: AtomicU64 = AtomicU64::new(0);
+
+/// Single-TAT GCRA consume on a worker-owned `u64` (no atomics: every call
+/// site runs under `&mut` on the owning worker). Init 0 = full: `0 -
+/// horizon` saturates to 0, which is `<=` any `now`. On deny bumps the
+/// suppression counter; the caller drops the error.
+fn icmp_error_tat_take(tat: &mut u64, now_ns: u64) -> bool {
+    if tat.saturating_sub(ICMP_ERROR_HORIZON_NS) > now_ns {
+        EMBEDDED_ERROR_PER_SESSION_SUPPRESSED_TOTAL.fetch_add(1, AtomicOrdering::Relaxed);
+        return false;
+    }
+    *tat = (*tat).max(now_ns).saturating_add(ICMP_ERROR_INTERVAL_NS);
+    true
+}
 
 pub(crate) struct SessionTable {
     /// #7699: the PPTP call associations THIS worker can resolve.
@@ -1255,6 +1303,15 @@ pub(crate) struct SessionTable {
     /// default and any single-table context) — harmless there because a lone
     /// table's monotonic counter is already unique.
     session_id_worker_hi: u64,
+    /// #9901 (F-077): per-session ICMP-error TATs for matches with NO local
+    /// entry — shared/peer sessions resolved through the HA import maps.
+    /// Those have no `SessionEntry` to carry a TAT, so the budget lives here,
+    /// keyed by the SAME matched key the gate resolves. Bounded (cap 1024,
+    /// prune-then-deny at cap — see `note_icmp_error_delivered`) and seeded
+    /// (`SeededKeyMap` — attacker-keyed), so it is neither growable nor
+    /// hash-floodable. Local matches use the entry TAT and never touch this
+    /// map. Node-local (never synced).
+    icmp_error_side_tats: SeededKeyMap<u64>,
 }
 
 impl SessionTable {
@@ -1333,7 +1390,10 @@ impl SessionTable {
             // #2364: per-IP session-limit counters are keyed by the
             // attacker-chosen source/destination IP — seed them too.
             session_limit_src_counts: HashMap::with_hasher(state.clone()),
-            session_limit_dst_counts: HashMap::with_hasher(state),
+            session_limit_dst_counts: HashMap::with_hasher(state.clone()),
+            // #9901 (F-077): the error-budget side table is keyed by the
+            // attacker-influenced matched key — seed it too.
+            icmp_error_side_tats: HashMap::with_hasher(state),
             // #4915: monotonic session-id counter starts at 1 (0 = "unknown"
             // sentinel on the wire); the node/worker namespace defaults to 0
             // until `set_session_id_namespace` is called at worker setup.
@@ -1345,6 +1405,56 @@ impl SessionTable {
     fn next_epoch(&mut self) -> u64 {
         self.epoch_counter += 1;
         self.epoch_counter
+    }
+
+    /// #9901 (F-077): per-session embedded-ICMP-error gate. Returns true when
+    /// an error for `key` MAY be delivered (its session budget had a token)
+    /// and consumes one token; false when the session is over budget and the
+    /// error MUST be suppressed (the suppression counter is bumped inside).
+    ///
+    /// Budget: burst 64 / rate 64/s in ONE u64 TAT — sized for mtr (30/s
+    /// same-session probes all pass) and traceroute multi-quoter same-id
+    /// sessions, NOT a 1s min-interval (which would break both), while
+    /// bounding a forgery flood to ~64 deliveries per session. A local entry
+    /// carries its TAT on `SessionEntry::last_icmp_error_tat`; a match with
+    /// NO local entry (shared/peer) is budgeted in the bounded side table.
+    /// The caller passes the key it already holds (`fwd.key`, a local, or
+    /// `ResolvedSessionLookup.key.as_ref(query)`) — `SessionLookup` is never
+    /// widened. Node-local scope: budgets are not HA-synced.
+    pub(crate) fn note_icmp_error_delivered(&mut self, key: &SessionKey, now_ns: u64) -> bool {
+        if let Some(handle) = self.key_to_handle.get(key).copied() {
+            if let Some(record) = self.entries.get_mut(handle as usize) {
+                // Reused-slab guard (the #7919 shape): a handle resolving to
+                // a DIFFERENT key must not spend that session's budget — fall
+                // through to the side table instead.
+                if record.key == *key {
+                    return icmp_error_tat_take(&mut record.entry.last_icmp_error_tat, now_ns);
+                }
+            }
+        }
+        if let Some(tat) = self.icmp_error_side_tats.get_mut(key) {
+            return icmp_error_tat_take(tat, now_ns);
+        }
+        if self.icmp_error_side_tats.len() >= ICMP_ERROR_SIDE_TABLE_CAP {
+            // At cap: first prune fully-recovered budgets (a TAT at or behind
+            // `now` carries no outstanding debt — dropping it loses nothing).
+            // O(cap) scan, cold path (shared/peer matches only), cap 1024.
+            self.icmp_error_side_tats.retain(|_, tat| *tat > now_ns);
+            if self.icmp_error_side_tats.len() >= ICMP_ERROR_SIDE_TABLE_CAP {
+                // Still full: conservative refusal. Every resident budget holds
+                // live debt, so the population exceeds the legitimate bound — the
+                // error is suppressed (and counted), never admitted on a fresh
+                // budget. Evict-and-admit here would let a 1025-key round-robin
+                // exceed 64/s per session indefinitely (each evicted key
+                // re-enters with full credit).
+                EMBEDDED_ERROR_PER_SESSION_SUPPRESSED_TOTAL.fetch_add(1, AtomicOrdering::Relaxed);
+                return false;
+            }
+        }
+        let mut tat = 0u64;
+        let admitted = icmp_error_tat_take(&mut tat, now_ns);
+        self.icmp_error_side_tats.insert(key.clone(), tat);
+        admitted
     }
 
     /// #4915 + #6311: namespace this table's session ids so the STABLE session
@@ -3375,3 +3485,8 @@ mod filter_revalidation_7212_tests;
 #[cfg(test)]
 #[path = "policy_revalidation_8356_tests.rs"]
 mod policy_revalidation_8356_tests;
+// #9901 (F-077): per-session embedded-ICMP-error budget (burst 64 / rate
+// 64/s) math, refill, independence, and the shared/peer side table.
+#[cfg(test)]
+#[path = "icmp_error_budget_9901_tests.rs"]
+mod icmp_error_budget_9901_tests;

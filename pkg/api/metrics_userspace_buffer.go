@@ -204,6 +204,28 @@ func (c *xpfCollector) emitUserspaceDynamicBufferMetrics(ch chan<- prometheus.Me
 		prometheus.CounterValue,
 		float64(status.NAT64FragProtocolAliasMissesTotal),
 	)
+	// #9901: packet-identity counters, emitted unconditionally like the
+	// #7056 siblings above — a published 0 is the informative reading.
+	ch <- prometheus.MustNewConstMetric(
+		c.userspaceFragMaxLifetimeEvictions,
+		prometheus.CounterValue,
+		float64(status.FragMaxLifetimeEvictionsTotal),
+	)
+	ch <- prometheus.MustNewConstMetric(
+		c.userspaceEgressMTUUnknownForward,
+		prometheus.CounterValue,
+		float64(status.EgressMTUUnknownForwardTotal),
+	)
+	ch <- prometheus.MustNewConstMetric(
+		c.userspaceEmbeddedQuoteSubminimalRefused,
+		prometheus.CounterValue,
+		float64(status.EmbeddedQuoteSubminimalRefusedTotal),
+	)
+	ch <- prometheus.MustNewConstMetric(
+		c.userspaceEmbeddedErrorPerSessionSuppressed,
+		prometheus.CounterValue,
+		float64(status.EmbeddedErrorPerSessionSuppressedTotal),
+	)
 	ch <- prometheus.MustNewConstMetric(
 		c.userspaceInterfaceSNATIdentityExhaustion,
 		prometheus.CounterValue,

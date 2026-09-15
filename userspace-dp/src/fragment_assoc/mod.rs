@@ -154,6 +154,13 @@ pub(crate) static NAT64_FRAG_CROSS_DOMAIN_MISSES: AtomicU64 = AtomicU64::new(0);
 /// See `NAT64_FRAG_CROSS_DOMAIN_MISSES`.
 pub(crate) static NAT64_FRAG_PROTOCOL_ALIAS_MISSES: AtomicU64 = AtomicU64::new(0);
 
+/// #9901 (F-010): associations reclaimed by the ABSOLUTE lifetime bound rather
+/// than the idle TTL. An idle-TTL expiry is routine churn; an absolute expiry
+/// means one key was consulted continuously for the whole maximum lifetime —
+/// the sustained same-key fragment stream this bound exists to stop. Read as a
+/// delta in tests; surfaced as `xpf_userspace_frag_max_lifetime_evictions_total`.
+pub(crate) static FRAG_MAX_LIFETIME_EVICTIONS: AtomicU64 = AtomicU64::new(0);
+
 pub(crate) const FRAG_SHARDS: usize = 16;
 /// Fixed per-shard entry cap (LRU eviction on overflow). Total ceiling is
 /// `FRAG_SHARDS * FRAG_CAP_PER_SHARD` = 1024 entries; each entry is
@@ -166,6 +173,14 @@ pub(crate) const FRAG_CAP_PER_SHARD: usize = 64;
 /// non-first fragments, which arrive on the fast path within
 /// microseconds-milliseconds. Refreshed on every hit.
 pub(crate) const FRAG_TTL_NS: u64 = 2_000_000_000;
+/// #9901 (F-010): ABSOLUTE association lifetime, alongside the idle `FRAG_TTL_NS`
+/// above. The idle TTL is re-stamped on every hit, so a stream of non-first
+/// fragments spaced under 2s held the first fragment's permit open
+/// indefinitely. No legitimate fragment train needs more than milliseconds of
+/// spread; 10s is vast headroom and still bounds the spoof-hold window. Unlike
+/// `deadline_ns` this is NEVER refreshed by a consult — only a fresh first
+/// fragment re-admitted through enforcement (a re-install) re-stamps it.
+pub(crate) const FRAG_MAX_LIFETIME_NS: u64 = 10_000_000_000;
 
 /// #5798: the INGRESS SECURITY AUTHORITY a fragment association was minted
 /// under — the part of the key that makes "same key" mean "same enforcement
@@ -268,17 +283,20 @@ pub(crate) struct FragAuthority {
     /// earlier revision of this paragraph got it wrong. `FRAG_TTL_NS` is
     /// 2s, but `FragAssoc::lookup` RE-STAMPS `deadline_ns` on every hit
     /// (pre-existing, #2562/#5624 — not introduced here), so it is an IDLE
-    /// timeout, not an absolute lifetime. A stream of non-first fragments
-    /// carrying the same (src, dst, ident, protocol, authority) spaced under
-    /// 2s renews the association indefinitely, and the Fragment Identification
-    /// is attacker-chosen. So the window is "as long as fragments of that
-    /// datagram keep arriving", NOT ~2s. For a legitimate sender, which uses a
-    /// fresh Identification per datagram, it really is ~2s — which is where
-    /// that number came from.
+    /// timeout — and #9901 (F-010) caps the hold it renews with an ABSOLUTE
+    /// lifetime (`FRAG_MAX_LIFETIME_NS`, 10s from install, never refreshed by
+    /// a consult). A stream of non-first fragments carrying the same (src,
+    /// dst, ident, protocol, authority) spaced under 2s used to renew the
+    /// association indefinitely, and the Fragment Identification is
+    /// attacker-chosen; now the window is "as long as fragments of that
+    /// datagram keep arriving, up to 10s from the first". For a legitimate
+    /// sender, which uses a fresh Identification per datagram and completes a
+    /// train in milliseconds, the bound never fires.
     ///
     /// Nothing else bounds it: the config fence (`build_generation`) does not
     /// move on an RG transition, eviction lives in `install` so a pure-consult
-    /// stream never triggers it, `retain` only prunes already-expired entries,
+    /// stream never triggers it (but BOTH prune sites now apply the absolute
+    /// bound, so the stream's own entry still expires under it),
     /// and the input filter this PR runs on a hit is the INTERFACE filter — it
     /// does not re-apply zone policy. (It DOES re-apply the owner-RG gate:
     /// #6835 added `enforce_ha_resolution_snapshot` to the hit arm,
@@ -286,7 +304,8 @@ pub(crate) struct FragAuthority {
     /// otherwise and contradicted the module header above, which had it right.)
     /// This is the same
     /// already-admitted-flow property the flow-backed session table has across
-    /// an RG transition; do not describe it as bounded by a shorter lifetime.
+    /// an RG transition; do not describe it as bounded by a shorter lifetime
+    /// than the 10s absolute cap.
     pub(crate) ingress_zone: u16,
     /// Routing instance / VRF the ingress resolves in — **inert in production**
     /// (#7051): every assignment of `meta.routing_table` is a literal 0, so on a
@@ -336,6 +355,12 @@ struct FragEntry {
     decision: SessionDecision,
     reverse: Option<Nat64ReverseInfo>,
     deadline_ns: u64,
+    /// #9901 (F-010): install instant (`now_ns` at `install`), NEVER refreshed
+    /// by a consult. The absolute lifetime is measured from here: an entry
+    /// older than `FRAG_MAX_LIFETIME_NS` is reclaimed even when idle-fresh. A
+    /// same-key re-install (a fresh first fragment re-admitted through current
+    /// enforcement) re-stamps it — the new admission owns the association now.
+    created_ns: u64,
     /// #5624: the config-snapshot generation the FIRST fragment was admitted +
     /// resolved under (stamped at `install`). A `lookup` under a DIFFERENT
     /// current generation treats the entry as a miss and evicts it, so a config
@@ -430,6 +455,27 @@ pub(crate) fn frag_shard_index(key: &FragKey) -> usize {
     (h as usize) & (FRAG_SHARDS - 1)
 }
 
+/// #9901 (F-010): absolute-lifetime-aware liveness — the ONE predicate both
+/// prune sites (`install` reclaim and the `lookup` pre-pass) share, so a
+/// sustained same-key stream cannot squat toward the shard cap on either path.
+/// An entry is live only while idle-fresh (`deadline_ns`, re-stamped per hit)
+/// AND absolutely young (`created_ns`, never re-stamped by a consult).
+/// A prune of an otherwise-viable (idle-fresh) entry bumps
+/// `FRAG_MAX_LIFETIME_EVICTIONS` — that is the bound firing, not routine idle
+/// churn. An entry that is ALSO idle-stale died of idleness (it would have
+/// been pruned within 2s of going quiet) and is not counted as an absolute
+/// eviction. `saturating_sub` keeps a backward clock (or test time-travel)
+/// fail-open toward live rather than underflowing.
+#[inline]
+fn frag_entry_live(e: &FragEntry, now_ns: u64) -> bool {
+    let idle_live = e.deadline_ns > now_ns;
+    let absolutely_live = now_ns.saturating_sub(e.created_ns) < FRAG_MAX_LIFETIME_NS;
+    if idle_live && !absolutely_live {
+        FRAG_MAX_LIFETIME_EVICTIONS.fetch_add(1, Ordering::Relaxed);
+    }
+    idle_live && absolutely_live
+}
+
 impl FragAssoc {
     pub(crate) fn new() -> Self {
         let mut shards = Vec::with_capacity(FRAG_SHARDS);
@@ -492,6 +538,10 @@ impl FragAssoc {
             // the original one — otherwise a refresh under a now-active RG
             // would leave the entry stamped with the old value.
             e.owner_rg = owner_rg;
+            // #9901 (F-010): a re-install is a FRESH admission — the new first
+            // fragment re-ran enforcement under current config/state — so the
+            // absolute clock restarts here. Only a consult never re-stamps it.
+            e.created_ns = now_ns;
             shard.push(e);
             return false;
         }
@@ -506,7 +556,7 @@ impl FragAssoc {
             // `lookup` uses; only if the shard is STILL at cap (every entry
             // live) do we fall back to evicting the oldest live entry — the
             // unavoidable hard capacity bound.
-            shard.retain(|e| e.deadline_ns > now_ns);
+            shard.retain(|e| frag_entry_live(e, now_ns));
             if shard.len() >= FRAG_CAP_PER_SHARD {
                 shard.remove(0);
                 evicted_live = true;
@@ -517,6 +567,7 @@ impl FragAssoc {
             decision,
             reverse,
             deadline_ns,
+            created_ns: now_ns,
             generation,
             owner_rg,
         });
@@ -555,7 +606,7 @@ impl FragAssoc {
         let mut shard = self.shards[idx]
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        shard.retain(|e| e.deadline_ns > now_ns);
+        shard.retain(|e| frag_entry_live(e, now_ns));
         let Some(pos) = shard.iter().position(|e| e.key == *key) else {
             // #7056 (#5798 required-fix #5): classify the miss before returning
             // it. A full-key miss has several causes with very different

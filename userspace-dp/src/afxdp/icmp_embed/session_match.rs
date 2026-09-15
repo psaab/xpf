@@ -1,5 +1,6 @@
 use super::*;
 use super::parse::{embedded_reply_key, parse_embedded_v4, parse_embedded_v6};
+use super::outer_error_atomic;
 
 /// Core embedded ICMP session match logic operating on a frame slice.
 /// Returns the session lookup if found. Unlike the NAT variant, this
@@ -22,6 +23,16 @@ use super::parse::{embedded_reply_key, parse_embedded_v4, parse_embedded_v6};
 /// have inherited that silently. Making the domain an argument means the
 /// wiring has to answer the question at its call site, the way the three
 /// production arms do.
+///
+/// #9901 (F-077): this path performs NO per-session budget gate — there is
+/// deliberately no `note_icmp_error_delivered` call below. That is safe ONLY
+/// while this function has no production caller. Whoever wires it into
+/// production MUST add the budget gate on the matched key (mirroring the
+/// three production arms, including the `BudgetDenied`-vs-`NoMatch`
+/// distinction and its descriptor-drop mapping) — an ungated production
+/// error path lets one quoter steer an unbounded error stream onto a live
+/// session. The `outer_atomic` / `outer_end` threading below is already
+/// production-shaped; the budget is the missing piece.
 pub(in crate::afxdp::icmp_embed) fn try_embedded_icmp_session_match_from_frame(
     frame: &[u8],
     meta: UserspaceDpMeta,
@@ -40,7 +51,12 @@ pub(in crate::afxdp::icmp_embed) fn try_embedded_icmp_session_match_from_frame(
 
     match meta.protocol {
         PROTO_ICMP => {
-            let hdr = parse_embedded_v4(frame, embedded_ip_start)?;
+            let hdr = parse_embedded_v4(
+                frame,
+                embedded_ip_start,
+                outer_error_atomic(frame, &meta),
+                super::outer_datagram_end(frame, &meta),
+            )?;
             let emb_src = IpAddr::V4(hdr.src);
             let emb_dst = IpAddr::V4(hdr.dst);
             // #9298: kept in step with the two PRODUCTION arms
@@ -83,7 +99,12 @@ pub(in crate::afxdp::icmp_embed) fn try_embedded_icmp_session_match_from_frame(
             lookup_embedded_session(sessions, &embedded_key, &reverse_key, now_ns)
         }
         PROTO_ICMPV6 => {
-            let hdr = parse_embedded_v6(frame, embedded_ip_start)?;
+            let hdr = parse_embedded_v6(
+                frame,
+                embedded_ip_start,
+                outer_error_atomic(frame, &meta),
+                super::outer_datagram_end(frame, &meta),
+            )?;
             let emb_src = IpAddr::V6(hdr.src_wire);
             // #9298: see the v4 arm.
             let quoted_discriminator = super::resolve_quoted_pptp_discriminator(

@@ -114,14 +114,18 @@ fn run_ptb_dispatch_with_forwarding_and_vlan(
     BatchCounters,
     Vec<String>,
 ) {
-    run_ptb_dispatch_full(forwarding, ingress_vlan_id, true)
+    run_ptb_dispatch_full(forwarding, ingress_vlan_id, true, 0)
 }
 
 /// #9328: the harness with the ingress frame's DF bit parameterised.
+/// #9901 (F-074): `tunnel_endpoint_id` overrides the request decision's
+/// tunnel id (0 = plain forward) so a cell can drive the native-tunnel
+/// inner-MTU path through the full dispatch.
 fn run_ptb_dispatch_full(
     forwarding: ForwardingState,
     ingress_vlan_id: u16,
     df: bool,
+    tunnel_endpoint_id: u16,
 ) -> (
     Vec<BindingWorker>,
     DebugPollCounters,
@@ -152,6 +156,7 @@ fn run_ptb_dispatch_full(
     req.meta.l4_offset = 34;
     req.meta.pkt_len = frame.len() as u16;
     req.meta.ingress_vlan_id = ingress_vlan_id;
+    req.decision.resolution.tunnel_endpoint_id = tunnel_endpoint_id;
     let mut pending = vec![req];
     let mut post_recycles = Vec::new();
     let ingress_ident = bindings[0].identity();
@@ -667,7 +672,7 @@ fn ptb_buildable_respects_and_consumes_token_5567() {
 #[test]
 fn oversized_no_df_is_forwarded_and_counted_9328() {
     let (bindings, _dbg, _counters, reasons) =
-        run_ptb_dispatch_full(forwarding_for_ptb(1400), 0, false);
+        run_ptb_dispatch_full(forwarding_for_ptb(1400), 0, false, 0);
 
     assert!(
         reasons
@@ -706,11 +711,79 @@ fn oversized_no_df_is_forwarded_and_counted_9328() {
 #[test]
 fn in_mtu_no_df_records_no_exception_9328() {
     let (_bindings, _dbg, _counters, reasons) =
-        run_ptb_dispatch_full(forwarding_for_ptb(9000), 0, false);
+        run_ptb_dispatch_full(forwarding_for_ptb(9000), 0, false, 0);
     assert!(
         !reasons
             .iter()
             .any(|r| r == "egress_mtu_exceeded_forwarded_no_df"),
         "an in-MTU DF-clear frame must record no oversize exception: {reasons:?}"
+    );
+}
+
+/// #9901 (F-074): the PTB forwarding state plus a tunnel endpoint whose mode
+/// is NEITHER gre/ip6gre NOR wireguard — the unknown-kind shape whose
+/// post-transform inner MTU resolves 0 (mirrors the `icmp_ptb_tests` l2tp
+/// fixture, rebuilt here because that module's helpers are private).
+fn forwarding_for_ptb_with_unknown_tunnel(mtu: usize) -> ForwardingState {
+    let mut forwarding = forwarding_for_ptb(mtu);
+    forwarding.tunnel_endpoints.insert(
+        7,
+        TunnelEndpoint {
+            id: 7,
+            logical_ifindex: 24,
+            interface_label: "tun0".into(),
+            interface: "tun0.0".into(),
+            redundancy_group: 0,
+            mode: "l2tp".into(),
+            outer_family: libc::AF_INET,
+            source: std::net::IpAddr::V4(std::net::Ipv4Addr::new(172, 16, 80, 8)),
+            destination: std::net::IpAddr::V4(std::net::Ipv4Addr::new(203, 0, 113, 1)),
+            key: 0,
+            ttl: 64,
+            transport_table: String::new(),
+            wg_listen_port: 51820,
+            wg_local_privkey: zeroize::Zeroizing::new([0u8; 32]),
+            wg_peers: Vec::new(),
+        },
+    );
+    forwarding
+}
+
+/// #9901 (F-074) fail-on-revert: an oversized frame on an UNKNOWN tunnel kind
+/// (inner MTU unresolvable, 0) takes the documented fail-open `Forward` arm —
+/// NO PTB, NO `egress_mtu_exceeded` — AND bumps
+/// `egress_mtu_unknown_forward_total` exactly once. Before F-074 the
+/// fail-open was silent: nothing distinguished "fits" from "unknown". (The
+/// frame then falls through to the #2327 fail-closed encap build, which
+/// drops it — that drop is #2327's domain, pinned there; this cell pins the
+/// MTU decision's forward + count.) Severing the bump reds the delta
+/// assertion.
+#[test]
+fn unknown_tunnel_kind_mtu_forwards_and_counts_9901() {
+    let before = crate::afxdp::icmp_ptb::EGRESS_MTU_UNKNOWN_FORWARD_TOTAL.load(Ordering::Relaxed);
+    let (bindings, _dbg, _counters, reasons) = run_ptb_dispatch_full(
+        forwarding_for_ptb_with_unknown_tunnel(1400),
+        0,
+        true,
+        7,
+    );
+    assert_eq!(
+        crate::afxdp::icmp_ptb::EGRESS_MTU_UNKNOWN_FORWARD_TOTAL.load(Ordering::Relaxed) - before,
+        1,
+        "one unknown-MTU forward must bump the counter exactly once"
+    );
+    assert_eq!(
+        bindings[0].tx_pipeline.pending_tx_local.len(),
+        0,
+        "no PTB may be generated when no MTU is known (fail-open Forward)"
+    );
+    assert!(
+        !reasons.iter().any(|r| r == "egress_mtu_exceeded"),
+        "no egress-MTU exception on the fail-open path: {reasons:?}"
+    );
+    assert_eq!(
+        ingress_recycled_count(&bindings[0]),
+        1,
+        "the ingress descriptor is recycled exactly once"
     );
 }

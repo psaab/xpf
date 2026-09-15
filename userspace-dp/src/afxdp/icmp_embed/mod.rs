@@ -26,6 +26,10 @@ mod nat_match_v6;
 mod parse;
 mod return_resolution;
 mod session_match;
+// #9901 (F-077): the quoted-L4 floor counter lives in the private `parse`
+// submodule; the status vertical (`afxdp/coordinator/status.rs`) reads it
+// through this re-export at the same visibility.
+pub(in crate::afxdp) use parse::EMBEDDED_QUOTE_SUBMINIMAL_REFUSED_TOTAL;
 
 /// Information returned from an embedded ICMP error session match
 /// that includes NAT reversal data needed to rewrite the ICMP error
@@ -79,6 +83,113 @@ pub(in crate::afxdp::icmp_embed) struct NatMatchCtx<'a> {
     pub shared_sessions: &'a Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
     pub shared_nat_sessions: &'a Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
     pub shared_forward_wire_sessions: &'a Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+}
+
+/// Outcome of an embedded-ICMP match attempt. THREE states, not two: a
+/// session that MATCHED but is over its F-077 per-session error budget MUST
+/// be distinguishable from a miss. Collapsing the denial to `None` would
+/// fall through to ordinary flowless forwarding, which under an
+/// ICMP-permitting policy keeps delivering the "suppressed" error (an
+/// outbound-SNAT error past exhaustion would forward UNTRANSLATED rather
+/// than drop). Callers map `BudgetDenied` to the descriptor-drop arm.
+#[derive(Debug)]
+pub(super) enum EmbeddedMatchOutcome<T> {
+    /// A session matched and the error may be delivered.
+    Match(T),
+    /// A session matched but the per-session budget refused the error —
+    /// the caller MUST drop the descriptor (fail-closed silent drop).
+    BudgetDenied,
+    /// No session matched — the caller falls through unchanged.
+    NoMatch,
+}
+
+impl<T> EmbeddedMatchOutcome<T> {
+    /// Collapse to `Option` (denial reads as no-match). Test-only: for
+    /// cells with provably fresh budgets that assert match-vs-miss.
+    /// Production callers must match all three arms.
+    #[cfg(test)]
+    pub(super) fn into_option(self) -> Option<T> {
+        match self {
+            EmbeddedMatchOutcome::Match(m) => Some(m),
+            EmbeddedMatchOutcome::BudgetDenied | EmbeddedMatchOutcome::NoMatch => None,
+        }
+    }
+}
+
+/// #9901 (F-077): whether the OUTER (error-carrying) packet is atomic
+/// (unfragmented) — the gate for the quoted-L4 adequacy floor. Read from the
+/// presented frame at the meta L3 offset: v4 checks the frag word
+/// (offset==0 && MF==0); v6 requires a NON-ATOMIC Fragment header
+/// (`ipv6_is_nonatomically_fragmented`) — an offset-0/M-0 ATOMIC fragment
+/// carries the whole datagram, so no later fragment can explain a short
+/// quote and the floor stays on. Every `parse_embedded_v4/v6` call site
+/// computes this and threads it in.
+///
+/// "Outer" is the error-carrying packet AS PRESENTED. Past GRE decap (#8271)
+/// that is the INNER frame — which is the correct signal: the floor asks
+/// whether the packet carrying the quote could legitimately carry a SHORT
+/// quote (a first fragment), and that is a property of the presented packet,
+/// not of the wire outer. An unreadable outer (short slice, incoherent meta)
+/// or unknown family reads ATOMIC, so the floor applies — the quote of a
+/// packet we cannot even frame is not adequate. (A declared-but-truncated v6
+/// Fragment header is the one exception: its bits are unreadable, so the old
+/// declares-fragmented behavior is kept — see the predicate's doc.)
+///
+/// Raw-stamp residual (#9900 follow-up): `meta.l3_offset` is read UNVERIFIED
+/// here, not via `verified_l3_or_stamp`. A wrong stamp mis-slices the outer
+/// bytes: short-slice → atomic → floor applies (fail-closed for quote
+/// adequacy); a stamp landing on bytes with a set frag word → fragmented →
+/// floor off (the residual — a short quote admitted it should have refused).
+/// `get()` keeps this panic-free; full stamp verification is the #9900
+/// follow-up. `outer_datagram_end` shares this residual (same stamp).
+pub(in crate::afxdp::icmp_embed) fn outer_error_atomic(frame: &[u8], meta: &UserspaceDpMeta) -> bool {
+    let outer = frame.get(meta.l3_offset as usize..).unwrap_or(&[]);
+    let fragmented = match meta.addr_family as i32 {
+        libc::AF_INET => crate::afxdp::frame::ipv4_is_any_fragment(outer),
+        libc::AF_INET6 => crate::afxdp::frame::ipv6_is_nonatomically_fragmented(outer),
+        _ => return true,
+    };
+    !fragmented
+}
+
+/// #9901 (F-077): the containing outer IP datagram's end offset (absolute in
+/// `frame`), bounding every quote read. v4: L3 + total-length; v6: L3 + 40 +
+/// payload-length. An incoherent or unreadable outer header (v4 total < 20,
+/// v6 header truncated, v6 jumbo payload 0, unknown family) falls back to
+/// `frame.len()` — pre-fix behavior, bounding only when boundable. WITHOUT
+/// this, slack/padding beyond the outer datagram would satisfy the floor's
+/// captured leg while the builders (which strip to the outer length,
+/// `builders.rs`) ship a shorter quote — a 4-byte quote smuggled past the
+/// 8-byte floor. Raw-stamp residual: like `outer_error_atomic` this reads at
+/// the raw `meta.l3_offset` — see the disclosure there (#9900 follow-up).
+pub(in crate::afxdp::icmp_embed) fn outer_datagram_end(frame: &[u8], meta: &UserspaceDpMeta) -> usize {
+    let l3 = meta.l3_offset as usize;
+    match meta.addr_family as i32 {
+        libc::AF_INET => {
+            let total = frame
+                .get(l3 + 2..l3 + 4)
+                .map(|b| u16::from_be_bytes([b[0], b[1]]) as usize)
+                .unwrap_or(0);
+            if total >= 20 {
+                l3.saturating_add(total)
+            } else {
+                frame.len()
+            }
+        }
+        libc::AF_INET6 => {
+            if frame.len() < l3 + 40 {
+                return frame.len();
+            }
+            let payload = u16::from_be_bytes([frame[l3 + 4], frame[l3 + 5]]) as usize;
+            if payload == 0 {
+                // Jumbo (or empty): length lives in a HbH option / nowhere —
+                // unboundable without a header walk, so pre-fix behavior.
+                return frame.len();
+            }
+            l3.saturating_add(40).saturating_add(payload)
+        }
+        _ => frame.len(),
+    }
 }
 
 // ---------------------------------------------------------------
@@ -145,7 +256,9 @@ pub(super) fn try_embedded_icmp_session_match_from_frame(
 // and pass the bytes.
 
 /// Core implementation of embedded ICMP NAT match operating on a
-/// frame slice. Dispatches to the v4 / v6 outer family branch.
+/// frame slice. Dispatches to the v4 / v6 outer family branch. Returns
+/// `BudgetDenied` when a session matched but the F-077 budget refused it —
+/// the poll caller MUST drop the descriptor, never fall through.
 #[inline]
 pub(super) fn try_embedded_icmp_nat_match_from_frame(
     frame: &[u8],
@@ -157,11 +270,13 @@ pub(super) fn try_embedded_icmp_nat_match_from_frame(
     shared_nat_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
     shared_forward_wire_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
     now_ns: u64,
-) -> Option<EmbeddedIcmpMatch> {
+) -> EmbeddedMatchOutcome<EmbeddedIcmpMatch> {
     let l4 = meta.l4_offset as usize;
-    let icmp_type = *frame.get(l4)?;
+    let Some(icmp_type) = frame.get(l4).copied() else {
+        return EmbeddedMatchOutcome::NoMatch;
+    };
     if !is_icmp_error(meta.protocol, icmp_type) {
-        return None;
+        return EmbeddedMatchOutcome::NoMatch;
     }
     let mut ctx = NatMatchCtx {
         sessions,
@@ -174,7 +289,7 @@ pub(super) fn try_embedded_icmp_nat_match_from_frame(
     match meta.protocol {
         PROTO_ICMP => nat_match_v4::match_outer_v4(frame, meta, &mut ctx, now_ns),
         PROTO_ICMPV6 => nat_match_v6::match_outer_v6(frame, meta, &mut ctx, now_ns),
-        _ => None,
+        _ => EmbeddedMatchOutcome::NoMatch,
     }
 }
 
@@ -183,9 +298,11 @@ pub(super) use nat64_match::Nat64IcmpErrorMatch;
 /// #6472: NAT64 flowless ICMP-error session match, operating on a frame
 /// slice. Builds the `NatMatchCtx` borrow bundle exactly like
 /// [`try_embedded_icmp_nat_match_from_frame`] and dispatches to the
-/// cross-family matcher; the poll-side caller translates + forwards per
-/// the returned direction. `None` = not a NAT64 session error (the
-/// same-family reversal and normal flowless enforcement run unchanged).
+/// cross-family matcher; the poll-side caller translates + forwards per the
+/// returned direction. `NoMatch` = not a NAT64 session error (the
+/// same-family reversal and normal flowless enforcement run unchanged);
+/// `BudgetDenied` = a half matched but the F-077 budget refused it (the
+/// poll caller MUST drop the descriptor, never translate NOR fall through).
 #[allow(clippy::too_many_arguments)]
 pub(super) fn try_nat64_icmp_error_match_from_frame(
     frame: &[u8],
@@ -197,7 +314,7 @@ pub(super) fn try_nat64_icmp_error_match_from_frame(
     shared_nat_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
     shared_forward_wire_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
     now_ns: u64,
-) -> Option<Nat64IcmpErrorMatch> {
+) -> EmbeddedMatchOutcome<Nat64IcmpErrorMatch> {
     let mut ctx = NatMatchCtx {
         sessions,
         forwarding,

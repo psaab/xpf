@@ -31,9 +31,22 @@
 // RFC suppression gate (`icmp::reject_icmp_reply_suppressed`,
 // `is_non_first_fragment`) are reused verbatim.
 
+use std::sync::atomic::AtomicU64;
+
 use super::*;
 
 use super::icmp::reject_icmp_reply_suppressed;
+
+/// #9901 (F-074): forwarded frames whose egress-MTU decision ran with NO
+/// known MTU (`mtu == 0` — missing egress row / unknown tunnel kind) and so
+/// took the documented fail-open `Forward` arm. The decision is deliberate
+/// (never invent an MTU smaller than the link), but before this counter the
+/// fail-open was silent: nothing distinguished "fits" from "unknown". Bumped
+/// in `tx::dispatch::compute_forwarded_egress_ptb` when `mtu == 0` with a
+/// readable L3 (the unparseable-frame arm is excluded — it never consults an
+/// MTU). Read as a delta in tests; surfaced as
+/// `xpf_userspace_egress_mtu_unknown_forward_total`.
+pub(in crate::afxdp) static EGRESS_MTU_UNKNOWN_FORWARD_TOTAL: AtomicU64 = AtomicU64::new(0);
 
 /// Outcome of the per-forward egress-MTU decision. The fast path (the
 /// forwarded L3 size fits the egress MTU) is `Forward` and adds a single

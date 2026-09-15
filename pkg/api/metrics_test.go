@@ -980,6 +980,31 @@ func TestEmitUserspaceDynamicBufferMetrics(t *testing.T) {
 			nil,
 			nil,
 		),
+		// #9901: packet-identity quartet — same literal-enumeration rule.
+		userspaceFragMaxLifetimeEvictions: prometheus.NewDesc(
+			"xpf_userspace_frag_max_lifetime_evictions_total",
+			"frag absolute-lifetime evictions",
+			nil,
+			nil,
+		),
+		userspaceEgressMTUUnknownForward: prometheus.NewDesc(
+			"xpf_userspace_egress_mtu_unknown_forward_total",
+			"egress mtu unknown forwards",
+			nil,
+			nil,
+		),
+		userspaceEmbeddedQuoteSubminimalRefused: prometheus.NewDesc(
+			"xpf_userspace_embedded_quote_subminimal_refused_total",
+			"embedded subminimal quote refusals",
+			nil,
+			nil,
+		),
+		userspaceEmbeddedErrorPerSessionSuppressed: prometheus.NewDesc(
+			"xpf_userspace_embedded_error_per_session_suppressed_total",
+			"embedded per-session error suppressions",
+			nil,
+			nil,
+		),
 		userspaceInterfaceSNATIdentityExhaustion: prometheus.NewDesc(
 			"xpf_userspace_interface_snat_identity_exhaustion_total",
 			"interface snat identity exhaustion",
@@ -1394,8 +1419,14 @@ func TestEmitUserspaceDynamicBufferMetrics(t *testing.T) {
 		InterfaceSNATPATCollisionsTotal: 17,
 		// #7056: DISTINCT fixture values, so an emit wired to the wrong field
 		// swaps two numbers that differ rather than two that happen to match.
-		NAT64FragCrossDomainMissesTotal:             23,
-		NAT64FragProtocolAliasMissesTotal:           29,
+		NAT64FragCrossDomainMissesTotal:   23,
+		NAT64FragProtocolAliasMissesTotal: 29,
+		// #9901: DISTINCT fixture values, so an emit wired to the wrong
+		// field swaps two numbers that differ.
+		FragMaxLifetimeEvictionsTotal:               37,
+		EgressMTUUnknownForwardTotal:                43,
+		EmbeddedQuoteSubminimalRefusedTotal:         47,
+		EmbeddedErrorPerSessionSuppressedTotal:      59,
 		InterfaceSNATIdentityExhaustionTotal:        19,
 		InterfaceSNATSyncIdentityConflictDropsTotal: 29,
 		InterfaceSNATRegistryCapExhaustionTotal:     23,
@@ -1504,12 +1535,15 @@ func TestEmitUserspaceDynamicBufferMetrics(t *testing.T) {
 	// +4 for the #8447 source-NAT rule-match quartet.
 	// +2 for the #9169 event-stream producer_seq_lock pair (#4800 SITE 4).
 	// +7 for the #9900 frame-ownership violation counters.
+	// +4 for the #9901 packet-identity quartet (frag absolute-lifetime
+	// evictions + unknown-MTU forwards + subminimal-quote refusals +
+	// per-session error suppressions) = 71.
 	// RE-ANCHORED, not relaxed: this count is a deliberate gate — it catches a
 	// series that is emitted but never asserted, which is how a collector grows
-	// an unverified metric. The seven new series ARE asserted below, so the
+	// an unverified metric. The eleven new series ARE asserted below, so the
 	// original claim still holds and the number moves with the population.
-	if len(got) != 67 {
-		t.Fatalf("emitUserspaceDynamicBufferMetrics: want 67 metrics, got %d", len(got))
+	if len(got) != 71 {
+		t.Fatalf("emitUserspaceDynamicBufferMetrics: want 71 metrics, got %d", len(got))
 	}
 
 	// #8447: DISTINCT values, so a collector that emitted one of the quartet
@@ -1535,6 +1569,12 @@ func TestEmitUserspaceDynamicBufferMetrics(t *testing.T) {
 	// census bump alone would pass against emits wired to the wrong field.
 	assertCounterClose(t, got, c.userspaceNAT64FragCrossDomainMisses, nil, 23)
 	assertCounterClose(t, got, c.userspaceNAT64FragProtocolAliasMisses, nil, 29)
+	// #9901: assert the VALUES, not merely the census — a census bump
+	// alone would pass against emits wired to the wrong field.
+	assertCounterClose(t, got, c.userspaceFragMaxLifetimeEvictions, nil, 37)
+	assertCounterClose(t, got, c.userspaceEgressMTUUnknownForward, nil, 43)
+	assertCounterClose(t, got, c.userspaceEmbeddedQuoteSubminimalRefused, nil, 47)
+	assertCounterClose(t, got, c.userspaceEmbeddedErrorPerSessionSuppressed, nil, 59)
 	assertCounterClose(t, got, c.userspaceInterfaceSNATIdentityExhaustion, nil, 19)
 	assertCounterClose(t, got, c.userspaceInterfaceSNATSyncConflictDrops, nil, 29)
 	assertCounterClose(t, got, c.userspaceInterfaceSNATRegistryCap, nil, 23)

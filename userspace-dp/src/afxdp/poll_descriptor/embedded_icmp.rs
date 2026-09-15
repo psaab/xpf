@@ -70,7 +70,7 @@ pub(super) fn try_reverse_embedded_icmp_error(
     #[cfg(feature = "debug-log")]
     let icmpv6_trace = meta.protocol == PROTO_ICMPV6
         && ICMPV6_EMBED_LOGGED.fetch_add(1, Ordering::Relaxed) < 32;
-    let Some(icmp_match) = try_embedded_icmp_nat_match_from_frame(
+    let icmp_match = match try_embedded_icmp_nat_match_from_frame(
         packet_frame,
         meta,
         sessions,
@@ -80,16 +80,24 @@ pub(super) fn try_reverse_embedded_icmp_error(
         worker_ctx.shared_nat_sessions,
         worker_ctx.shared_forward_wire_sessions,
         now_ns,
-    ) else {
-        #[cfg(feature = "debug-log")]
-        if icmpv6_trace {
-            debug_log!(
-                "ICMPV6_EMBED: no_match ingress_if={} proto={}",
-                meta.ingress_ifindex,
-                meta.protocol,
-            );
+    ) {
+        EmbeddedMatchOutcome::Match(m) => m,
+        // #9901 (F-077): a session MATCHED but its per-session error budget
+        // is exhausted. Drop the descriptor — falling through to flowless
+        // forwarding would keep delivering the "suppressed" error under an
+        // ICMP-permitting policy (an outbound-SNAT error would even forward
+        EmbeddedMatchOutcome::BudgetDenied => return EmbeddedIcmpReversal::Dropped,
+        EmbeddedMatchOutcome::NoMatch => {
+            #[cfg(feature = "debug-log")]
+            if icmpv6_trace {
+                debug_log!(
+                    "ICMPV6_EMBED: no_match ingress_if={} proto={}",
+                    meta.ingress_ifindex,
+                    meta.protocol,
+                );
+            }
+            return EmbeddedIcmpReversal::NotHandled;
         }
-        return EmbeddedIcmpReversal::NotHandled;
     };
     #[cfg(feature = "debug-log")]
     if icmpv6_trace {

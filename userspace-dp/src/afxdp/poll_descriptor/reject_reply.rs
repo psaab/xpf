@@ -398,7 +398,7 @@ fn enqueue_reject_reply(
     // shared bucket and starved legitimate reject-generation in a DIFFERENT
     // zone; per-zone buckets remove that cross-zone starvation. An unzoned /
     // unknown ingress interface (id 0) falls back to the shared
-    // REJECT_FALLBACK_BUCKET (never fail-open). Both policy and filter reject
+    // REJECT_FALLBACK_LIMITER (never fail-open). Both policy and filter reject
     // still share the SAME per-zone bucket for a given ingress zone (a single
     // emit path, per the RejectReplySource doc comment). #3656: the token is
     // consumed ONLY for a buildable reply (feasibility is proven above the
@@ -418,7 +418,9 @@ fn enqueue_reject_reply(
         .get(&logical_ingress_ifindex)
         .copied()
         .unwrap_or(0);
-    if !allow_generated_reject(forwarding, from_zone_id) {
+    // #9901 (F-074): key the limiter's per-source tier on the trigger's
+    // source (`flow` is the pre-NAT session flow, so this is the true origin).
+    if !allow_generated_reject(forwarding, from_zone_id, Some(flow.src_ip)) {
         counters.touched = true;
         // #3661: attribute the rate-limit drop to the reply's SOURCE so a
         // firewall-filter `then reject` starvation is not conflated with a

@@ -4,6 +4,7 @@
 
 use std::net::IpAddr;
 
+use crate::afxdp::frame::{IPV6_GENERIC_EXT_HEADERS, ipv6_ext_header_is_traversable};
 use super::packet::{PROTO_TCP, ScreenPacketInfo, ScreenParseError};
 
 /// Extract screen-relevant fields from raw packet bytes and metadata.
@@ -192,6 +193,19 @@ pub(crate) fn extract_screen_info(
         if l3_offset + ihl_bytes > frame.len() {
             return Err(ScreenParseError::TruncatedIpv4Header);
         }
+        // FAIL-CLOSED (#9901, F-075): the declared total length cannot cover
+        // the header it counts — an impossible datagram. The shim refuses the
+        // same shape before classification (`ipv4_declared_len_covers_header`,
+        // one gate shared by source, parity-pinned in
+        // `screen/tests_9901_len_gate.rs`); refusing here as well keeps a
+        // frame that bypasses the shim (slow path, injected, replayed) from
+        // reaching the option scan and the length-arithmetic screens below
+        // with a header no consumer can bound. A bare-header datagram
+        // (total == ihl*4) is possible and still passes — only the impossible
+        // shorter-than-header shape is refused.
+        if (info.ip_total_len as usize) < ihl_bytes {
+            return Err(ScreenParseError::TruncatedIpv4Header);
+        }
         // #2973: scan the IPv4 options region (bytes 20..ihl*4) for an
         // actual source-route option. The `source-route` screen used to
         // drop on ANY IHL>5 (any options present), which also dropped
@@ -288,6 +302,10 @@ pub(crate) fn extract_screen_info(
         // The shim's parity condition is stated once, authoritatively, at
         // `userspace-xdp/src/ipv6_ext_walk.rs` (`MAX_EXT_HDRS ==
         // MAX_IPV6_EXT_HEADERS - 1`); #4555 moved it from 6 to 7 to reach it.
+        // #9901 (F-072): the DEPTH still differs by mechanism, but the
+        // TRAVERSED SET no longer does — the generic arm below guards on the
+        // shared `IPV6_GENERIC_EXT_HEADERS` const, the same source the
+        // forwarding verdict delegates to.
         //
         // The comment this replaces read "We bound the walk to
         // MAX_EXT_HDRS=8 like the BPF parser", and both halves were false: no
@@ -354,6 +372,34 @@ pub(crate) fn extract_screen_info(
             if offset > frame.len() {
                 return Err(ScreenParseError::TruncatedIpv6ExtChain);
             }
+            // #9901 (F-072): the local arm decision must agree with the SHARED
+            // traversed-set verdict on every iteration. The generic arm below
+            // guards on the shared const directly; this assert pins the FULL
+            // local set (routing + generic + AH + Fragment, terminally
+            // excluding 59/ESP like the predicate) to it, so editing either
+            // side without the other reds every extractor test in debug builds.
+            // Debug-only by design (compiled out in release — zero release
+            // cost): release correctness rests on the generic arm's direct
+            // guard below, which needs no assert; this pins the REMAINING
+            // literal arms (ROUTING/AH/Fragment) against drift where tests run.
+            debug_assert_eq!(
+                matches!(
+                    nexthdr,
+                    NEXTHDR_ROUTING
+                        | NEXTHDR_HOP
+                        | NEXTHDR_DEST
+                        | NEXTHDR_MOBILITY
+                        | NEXTHDR_HIP
+                        | NEXTHDR_SHIM6
+                        | NEXTHDR_EXP1
+                        | NEXTHDR_EXP2
+                        | NEXTHDR_AUTH
+                        | NEXTHDR_FRAGMENT
+                ),
+                ipv6_ext_header_is_traversable(nexthdr),
+                "#9901: screen extractor arm set drifted from the shared IPv6 \
+                 ext-header verdict",
+            );
             match nexthdr {
                 NEXTHDR_ROUTING => {
                     // #2973: an IPv6 Routing Header. Byte at offset+2 is
@@ -374,8 +420,16 @@ pub(crate) fn extract_screen_info(
                     nexthdr = frame[offset];
                     offset += (frame[offset + 1] as usize + 1) * 8;
                 }
-                NEXTHDR_HOP | NEXTHDR_DEST | NEXTHDR_MOBILITY | NEXTHDR_HIP | NEXTHDR_SHIM6
-                | NEXTHDR_EXP1 | NEXTHDR_EXP2 => {
+                // #9901 (F-072): the generic length-prefixed set is the SHARED
+                // `IPV6_GENERIC_EXT_HEADERS` const — the same source the
+                // forwarding walker's `ipv6_ext_header_is_traversable` verdict
+                // delegates to — not a second hand-mirrored arm list. ROUTING
+                // (43) is a member of that set but keeps its own arm above
+                // (it additionally checks the routing type for the
+                // `source-route` screen); arm order keeps it there. AH (51)
+                // and Fragment (44) keep their literal arms (distinct advance
+                // math, single values, covered by the debug_assert above).
+                n if IPV6_GENERIC_EXT_HEADERS.contains(&n) => {
                     if offset + 2 > frame.len() {
                         return Err(ScreenParseError::TruncatedIpv6ExtChain);
                     }

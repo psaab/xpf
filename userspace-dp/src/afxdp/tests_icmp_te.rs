@@ -279,11 +279,11 @@ fn build_local_time_exceeded_request_classifies_generated_icmp_on_egress() {
     // fallback and both assertions below pass vacuously. The control cell caught
     // exactly that on its first run.
     forwarding.ifindex_to_zone_id.insert(5, TEST_LAN_ZONE_ID);
-    let te_bucket = std::sync::Arc::new(crate::afxdp::icmp_ratelimit::TokenBucket::new());
+    let te_bucket = std::sync::Arc::new(crate::afxdp::icmp_ratelimit::ZoneLimiter::new());
     forwarding
         .time_exceeded_buckets
         .insert(TEST_LAN_ZONE_ID, te_bucket.clone());
-    let arrival_before = te_bucket.arrival_ns();
+    let arrival_before = te_bucket.aggregate_arrival_ns();
 
     let mut counters = BatchCounters::default();
     let request = build_local_time_exceeded_request(
@@ -309,7 +309,7 @@ fn build_local_time_exceeded_request_classifies_generated_icmp_on_egress() {
     // does it invisibly, because the drop is attributed to the filter counter
     // while the missing errors are attributed to the limiter.
     assert_eq!(
-        te_bucket.arrival_ns(),
+        te_bucket.aggregate_arrival_ns(),
         arrival_before,
         "a filter-DROPPED ICMP Time Exceeded must not spend a rate-limit token \
          (#7174 M04); the bucket state moved, so it did"
@@ -395,11 +395,11 @@ fn build_local_time_exceeded_request_ignores_trigger_matching_output_filter() {
     // fallback and both assertions below pass vacuously. The control cell caught
     // exactly that on its first run.
     forwarding.ifindex_to_zone_id.insert(5, TEST_LAN_ZONE_ID);
-    let te_bucket = std::sync::Arc::new(crate::afxdp::icmp_ratelimit::TokenBucket::new());
+    let te_bucket = std::sync::Arc::new(crate::afxdp::icmp_ratelimit::ZoneLimiter::new());
     forwarding
         .time_exceeded_buckets
         .insert(TEST_LAN_ZONE_ID, te_bucket.clone());
-    let arrival_before = te_bucket.arrival_ns();
+    let arrival_before = te_bucket.aggregate_arrival_ns();
 
     let mut counters = BatchCounters::default();
     let request = build_local_time_exceeded_request(
@@ -416,7 +416,7 @@ fn build_local_time_exceeded_request_ignores_trigger_matching_output_filter() {
     );
 
     assert_ne!(
-        te_bucket.arrival_ns(),
+        te_bucket.aggregate_arrival_ns(),
         arrival_before,
         "a reply that IS sent must spend a rate-limit token — otherwise the \
          drop-path cell's 'no token spent' assertion proves nothing (#7174 M04)"
