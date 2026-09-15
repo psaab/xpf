@@ -283,6 +283,17 @@ func (e *Engine) withinMatches(pol *config.EventPolicy, rt *policyRuntime, event
 	if len(pol.WithinClauses) == 0 {
 		return true // no temporal filter
 	}
+	// #9916 F-135: a nil entry in a non-empty clause list is malformed config
+	// (missing is len==0 above, which means "no filter"), so fail CLOSED like
+	// the #3751 belt below — never treat it as absent (that would silently drop
+	// a threshold gate and broaden an autonomous remediation fail-open). No
+	// reachable producer today (the compiler always appends non-nil); this is
+	// defense-in-depth for a future producer or corrupt ingress.
+	for _, wc := range pol.WithinClauses {
+		if wc == nil {
+			return false
+		}
+	}
 
 	timestamps := rt.windows[eventName]
 
@@ -398,6 +409,13 @@ func (e *Engine) pruneWindow(pol *config.EventPolicy, eventName string, now time
 
 	maxWindow := time.Duration(0)
 	for _, wc := range pol.WithinClauses {
+		// #9916 F-135: a nil clause contributes nothing to retention (mirrors
+		// the out-of-range continue below) — the window falls through to the
+		// 60s default rather than panicking. withinMatches already fails the
+		// policy closed; prune must still handle its siblings' history.
+		if wc == nil {
+			continue
+		}
 		// An out-of-range clause contributes NOTHING to the retention window,
 		// so maxWindow falls through to the 60s default below rather than to a
 		// wrapped one (#8597). Retaining 60s of history for a clause the

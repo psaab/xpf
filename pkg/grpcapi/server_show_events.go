@@ -129,6 +129,9 @@ func (s *Server) showEventOptions(cfg *config.Config, buf *strings.Builder) {
 				fmt.Fprintf(buf, "  Events: %s\n", strings.Join(ep.Events, ", "))
 			}
 			for _, w := range ep.WithinClauses {
+				if w == nil {
+					continue // #9916 F-135: never panic display on a corrupt clause
+				}
 				fmt.Fprintf(buf, "  Within: %d seconds", w.Seconds)
 				if w.TriggerOn > 0 {
 					fmt.Fprintf(buf, ", trigger on %d", w.TriggerOn)

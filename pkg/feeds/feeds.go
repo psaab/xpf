@@ -1035,6 +1035,29 @@ func hashPrefixes(canon []string) [32]byte {
 // per fetch), never a tight loop.
 func (m *Manager) installSnapshot(fs *feedState, res fetchResult) {
 	m.mu.Lock()
+	// Staleness suppress (#9916 F-133): Apply swaps the producer set without
+	// joining the replaced loops, so an in-flight old fetch can complete
+	// post-swap. Its content would install into an orphaned feedState (harmless)
+	// but its onUpdate would fire a spurious dataplane apply against the NEW
+	// state. A feedState still current is exactly the map's entry for its name
+	// (same pointer — Apply allocates a fresh feedState per entry, so a
+	// persisted name's old and new pointers always differ, and a removed feed
+	// has no entry). Stale completions are dropped silently at Debug: they are
+	// expected on every reconfigure, not an error.
+	//
+	// Residual window, stated: the guard runs under m.mu but onUpdate fires
+	// outside it (it must — onUpdate re-enters the daemon apply, which reads
+	// this same map). An old fetch that passes the guard just before Apply
+	// swaps still fires once post-swap. That apply is content-safe (the new map
+	// carries the old snapshot forward, and the dataplane apply is idempotent),
+	// merely redundant — and it cannot deadlock, because Apply does not join
+	// (joining under the daemon applySem would wedge against this same onUpdate).
+	if cur, ok := m.feeds[fs.name]; !ok || cur != fs {
+		m.mu.Unlock()
+		slog.Debug("dynamic-address: stale feed completion suppressed (post-swap)",
+			"name", fs.name)
+		return
+	}
 	// changed = the installed enforced content differs from the prior install.
 	// Drives the display/degraded logging (a content change), independent of
 	// whether that content has been PUBLISHED.
@@ -1094,8 +1117,13 @@ func (m *Manager) installSnapshot(fs *feedState, res fetchResult) {
 		return
 	}
 	m.mu.Lock()
-	fs.publishedHash = res.hash
-	fs.hasPublished = true
+	// Recheck currency before advancing: fs may have gone stale during the long
+	// onUpdate apply above. Advancing an orphan's publishedHash is harmless (the
+	// orphan is discarded) but pointless; the live entry tracks its own state.
+	if cur, ok := m.feeds[fs.name]; ok && cur == fs {
+		fs.publishedHash = res.hash
+		fs.hasPublished = true
+	}
 	m.mu.Unlock()
 }
 
@@ -1116,6 +1144,15 @@ func (m *Manager) installSnapshot(fs *feedState, res fetchResult) {
 // on every failing tick, so a persistently-down feed does not flood the log.
 func (m *Manager) recordFailure(fs *feedState, ferr error) {
 	m.mu.Lock()
+	// Same staleness suppress as installSnapshot (#9916 F-133): an orphaned
+	// fetch's failure (including a hold-interval drop-to-empty, which fires
+	// onUpdate) must not publish against the post-swap state.
+	if cur, ok := m.feeds[fs.name]; !ok || cur != fs {
+		m.mu.Unlock()
+		slog.Debug("dynamic-address: stale feed failure suppressed (post-swap)",
+			"name", fs.name)
+		return
+	}
 	now := m.now()
 	fs.lastError = redactFeedURLInError9164(ferr.Error(), fs.url)
 

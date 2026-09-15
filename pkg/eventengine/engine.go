@@ -111,6 +111,11 @@ type Stats struct {
 	Superseded        uint64 // same-policy queued actions REPLACED by a newer trigger (benign dedup; nothing lost — the newer equivalent action runs) (#5853)
 	DroppedLockHeld   uint64 // actions dropped after the lock-retry deadline elapsed
 	DroppedStale      uint64 // actions dropped at commit: policy removed/redefined or cooldown active (#3750)
+	// DroppedShutdown counts queued or in-flight-retry actions abandoned by Close
+	// (#9916 F-131). Deliberately NOT surfaced to Prometheus: it increments at
+	// process exit and would never be scraped. Explicit accounting (test-observable
+	// via Stats) plus the shutdown INFO log are the operator signal.
+	DroppedShutdown   uint64 // actions abandoned on shutdown (queued at Close + in-flight retries)
 	AttributesInvalid uint64 // runtime fail-closed: malformed/unknown attributes-match line
 	QueueDepth        int64  // currently queued actions
 }
@@ -125,6 +130,7 @@ type engineCounters struct {
 	superseded        atomic.Uint64
 	droppedLockHeld   atomic.Uint64
 	droppedStale      atomic.Uint64
+	droppedShutdown   atomic.Uint64
 	attributesInvalid atomic.Uint64
 	queueDepth        atomic.Int64
 }
@@ -585,8 +591,17 @@ func (e *Engine) startWorker() {
 	go e.actionWorker()
 }
 
-// Close stops the action worker and drains in-flight retries. Safe to call
-// even if the worker was never started. Called from the daemon shutdown path.
+// Close stops the action worker and explicitly abandons any queued or in-flight
+// actions (#9916 F-131). Safe to call even if the worker was never started, and
+// safe to call twice (the second drain finds an empty queue). Called from the
+// daemon shutdown path.
+//
+// Shutdown does NOT run the queued remediations: up to 64 serial commits (each
+// with a 60s lock-retry deadline plus FRR reload and Rust sync) would risk the
+// systemd TimeoutStopSec, and the lifetime context is already cancelled so the
+// commits would abort anyway. Instead every abandoned action is counted in
+// DroppedShutdown, the queue gauge is reset to zero, and a single INFO log names
+// the count — the drain the old docstring claimed, made honest.
 func (e *Engine) Close() {
 	e.stopOnce.Do(func() {
 		close(e.stopCh)
@@ -597,6 +612,31 @@ func (e *Engine) Close() {
 		}
 	})
 	e.workerWG.Wait()
+	// Single drainer: the worker already exited (it returns on stopCh without
+	// draining), so Close owns the remaining buffered actions. Held under
+	// enqueueMu so no placer can land post-drain: any enqueue that passed the
+	// stopCh fast-exit check completes before this critical section, and any
+	// after blocks then sees the closed stopCh and refuses. enqueueMu is a
+	// producer-only leaf (never with e.mu), the drain is non-blocking, and the
+	// worker is gone — no deadlock, no shutdown delay.
+	e.enqueueMu.Lock()
+	var abandoned uint64
+drain:
+	for {
+		select {
+		case <-e.actions:
+			e.counters.queueDepth.Add(-1)
+			abandoned++
+		default:
+			break drain
+		}
+	}
+	e.enqueueMu.Unlock()
+	if abandoned > 0 {
+		e.counters.droppedShutdown.Add(abandoned)
+		slog.Info("event-options: remediations abandoned on shutdown",
+			"count", abandoned)
+	}
 }
 
 // PolicyCount returns the number of event-options policies the engine
@@ -621,6 +661,7 @@ func (e *Engine) Stats() Stats {
 		Superseded:        e.counters.superseded.Load(),
 		DroppedLockHeld:   e.counters.droppedLockHeld.Load(),
 		DroppedStale:      e.counters.droppedStale.Load(),
+		DroppedShutdown:   e.counters.droppedShutdown.Load(),
 		AttributesInvalid: e.counters.attributesInvalid.Load(),
 		QueueDepth:        e.counters.queueDepth.Load(),
 	}
@@ -711,6 +752,11 @@ func (e *Engine) runAction(a plannedAction) {
 			select {
 			case <-e.stopCh:
 				stopTimer()
+				// #9916 F-131: an in-flight lock retry abandoned on shutdown is
+				// an explicit drop, not a silent return.
+				e.counters.droppedShutdown.Add(1)
+				slog.Info("event-options: remediation abandoned on shutdown (in-flight retry)",
+					"policy", a.policyName)
 				return
 			case <-timerC:
 			}
