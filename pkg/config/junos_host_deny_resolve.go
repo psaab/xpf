@@ -2,7 +2,6 @@ package config
 
 import (
 	"net/netip"
-	"strconv"
 	"strings"
 )
 
@@ -279,7 +278,7 @@ func junosHostReduceApp(cfg *Config, name string) ([]JunosHostDenyL4, bool) {
 		frag.Proto = HostInboundProtoICMPv6
 		frag.ICMPType, frag.ICMPCode = app.ICMPType, app.ICMPCode
 	default:
-		n, err := strconv.Atoi(proto)
+		n, err := ParseCanonicalUint(app.Protocol)
 		if err != nil || n < 0 || n > 255 {
 			return nil, false
 		}

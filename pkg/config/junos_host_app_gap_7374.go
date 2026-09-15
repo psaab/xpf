@@ -88,8 +88,8 @@ func appProtoNumber(p string) (uint8, bool) {
 	case "":
 		return 0, false
 	}
-	n, err := strconv.ParseUint(strings.TrimSpace(p), 10, 8)
-	if err != nil {
+	n, err := ParseCanonicalUint(p)
+	if err != nil || n > 255 {
 		return 0, false
 	}
 	return uint8(n), true

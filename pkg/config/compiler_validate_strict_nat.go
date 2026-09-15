@@ -294,7 +294,7 @@ func dnatProtocolResolvable(token string) bool {
 		"ah", "esp", "sctp", "vrrp":
 		return true
 	default:
-		if n, err := strconv.Atoi(strings.TrimSpace(token)); err == nil && n >= 0 && n < 256 {
+		if n, err := ParseCanonicalUint(token); err == nil && n >= 0 && n < 256 {
 			return true
 		}
 		return false

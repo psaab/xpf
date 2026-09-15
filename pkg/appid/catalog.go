@@ -344,7 +344,9 @@ func ProtocolNumber(name string) (uint8, bool) {
 		return 112, true
 	default:
 		// Numeric protocol number, including the deliberate "0" (HOPOPT).
-		if n, err := strconv.Atoi(strings.TrimSpace(name)); err == nil && n >= 0 && n < 256 {
+		// Canonical raw ASCII decimal only (#9899 F102): no sign, no
+		// surrounding whitespace — same token, same meaning across readers.
+		if n, err := config.ParseCanonicalUint(name); err == nil && n >= 0 && n < 256 {
 			return uint8(n), true
 		}
 		return 0, false

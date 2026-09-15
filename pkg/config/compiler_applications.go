@@ -1203,7 +1203,7 @@ func validateProtocol(proto string) error {
 	if strings.HasPrefix(strings.ToLower(proto), "junos-") {
 		return nil
 	}
-	n, err := strconv.Atoi(proto)
+	n, err := ParseCanonicalUint(proto)
 	if err != nil {
 		return fmt.Errorf("invalid protocol %q", proto)
 	}

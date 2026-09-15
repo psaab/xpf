@@ -389,9 +389,8 @@ func (t *ConfigTree) SetPath(path []string) error {
 // rather than authored; the created nodes then carry no provenance, which is
 // exactly the pre-#6673 state and never a false "this was bare" claim.
 //
-// quoted must be nil or the same length as path; a mismatched length is
-// treated as nil rather than silently misattributing quotes to the wrong
-// tokens.
+// quoted must be nil or the same length as path; a non-nil mismatched length
+// is an error (#9899 F101), never silently misattributed to the wrong tokens.
 func (t *ConfigTree) SetPathQuoted(path []string, quoted []bool) error {
 	return t.SetPathQuotedGrouped(path, quoted, nil)
 }
@@ -419,18 +418,19 @@ func (t *ConfigTree) SetPathQuoted(path []string, quoted []bool) error {
 // (`[ x ]` where the schema takes two tokens) therefore behaves exactly as the
 // bare tokens would, rather than truncating the node's identity.
 //
-// grouped may be nil (or a length that disagrees with path), which is the
-// pre-#6668 behaviour: every group is one node's arity and nothing is widened.
-// It is never a false "this was bare" claim — a nil mask asserts nothing.
+// grouped must be nil or the same length as path; a non-nil mismatched length
+// is an error (#9899 F101), checked before any mutation. Nil is the pre-#6668
+// behaviour: every group is one node's arity and nothing is widened. It is
+// never a false "this was bare" claim — a nil mask asserts nothing.
 func (t *ConfigTree) SetPathQuotedGrouped(path []string, quoted, grouped []bool) error {
 	if len(path) == 0 {
 		return fmt.Errorf("empty path")
 	}
-	if len(quoted) != len(path) {
-		quoted = nil
+	if quoted != nil && len(quoted) != len(path) {
+		return fmt.Errorf("quoted mask length %d != path length %d", len(quoted), len(path))
 	}
-	if len(grouped) != len(path) {
-		grouped = nil
+	if grouped != nil && len(grouped) != len(path) {
+		return fmt.Errorf("grouped mask length %d != path length %d", len(grouped), len(path))
 	}
 	// quotedRange returns the provenance for path[from:to] — every node built
 	// below takes its keys from exactly one CONTIGUOUS range of path (the
@@ -871,12 +871,14 @@ func (t *ConfigTree) DeletePath(path []string) error {
 // so a `delete` line replayed from `show | display set` navigates to the same
 // node the matching `set` line built. Without it the walk re-splits a bracketed
 // CONTAINER key group at the schema arity and reports the node missing.
+// grouped must be nil or the same length as path; a non-nil mismatch is an
+// error before any mutation (#9899 F101).
 func (t *ConfigTree) DeletePathGrouped(path []string, grouped []bool) error {
 	if len(path) == 0 {
 		return fmt.Errorf("empty path")
 	}
-	if len(grouped) != len(path) {
-		grouped = nil
+	if grouped != nil && len(grouped) != len(path) {
+		return fmt.Errorf("grouped mask length %d != path length %d", len(grouped), len(path))
 	}
 
 	return deletePath(&t.Children, path, grouped, setSchema, 0)
@@ -1047,13 +1049,14 @@ func (t *ConfigTree) DeactivatePath(path []string) error {
 // `deactivate` line over the SAME tokens, so the two must tokenize into the
 // same nodes; without the grouping the deactivate line re-split a bracketed
 // container key group at the schema arity and reported the node missing, which
-// on the load paths aborts the whole replay.
+// on the load paths aborts the whole replay. grouped must be nil or the same
+// length as path; a non-nil mismatch is an error before any mutation (#9899 F101).
 func (t *ConfigTree) DeactivatePathGrouped(path []string, grouped []bool) error {
 	if len(path) == 0 {
 		return fmt.Errorf("empty path")
 	}
-	if len(grouped) != len(path) {
-		grouped = nil
+	if grouped != nil && len(grouped) != len(path) {
+		return fmt.Errorf("grouped mask length %d != path length %d", len(grouped), len(path))
 	}
 	return setInactiveAtPath(&t.Children, path, grouped, setSchema, 0, true)
 }
@@ -1066,13 +1069,14 @@ func (t *ConfigTree) ActivatePath(path []string) error {
 }
 
 // ActivatePathGrouped is ActivatePath carrying per-token BRACKET GROUPING
-// (#6668). See DeactivatePathGrouped.
+// (#6668). See DeactivatePathGrouped. grouped must be nil or the same length
+// as path; a non-nil mismatch is an error before any mutation (#9899 F101).
 func (t *ConfigTree) ActivatePathGrouped(path []string, grouped []bool) error {
 	if len(path) == 0 {
 		return fmt.Errorf("empty path")
 	}
-	if len(grouped) != len(path) {
-		grouped = nil
+	if grouped != nil && len(grouped) != len(path) {
+		return fmt.Errorf("grouped mask length %d != path length %d", len(grouped), len(path))
 	}
 	return setInactiveAtPath(&t.Children, path, grouped, setSchema, 0, false)
 }
