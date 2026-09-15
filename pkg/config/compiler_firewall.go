@@ -6,6 +6,28 @@ import (
 	"strings"
 )
 
+// policerThenExtras9882 returns the tokens a policer `then` action carries
+// beyond its declared arity — mirroring thenActionExtras8971 for filter
+// terms. Runs on the hoisted siblings, so a token naming a DECLARED action
+// was already split into its own statement; what remains past the arity is
+// either an unknown token or a value in a slot the action does not declare,
+// and both must be loud rather than swallowed. An unknown HEAD is left
+// alone: the loop's own default arm reports it, and reporting it twice
+// would name the same token in two messages (the #8971 rule).
+func policerThenExtras9882(child *Node, container *schemaNode) []string {
+	if child == nil || container == nil || len(child.Keys) == 0 {
+		return nil
+	}
+	action := resolveSchemaChild(container, child.Keys[0])
+	if action == nil {
+		return nil
+	}
+	if len(child.Keys) <= 1+action.args {
+		return nil
+	}
+	return child.Keys[1+action.args:]
+}
+
 func compileFirewall(node *Node, fw *FirewallConfig) error {
 	if fw.FiltersInet == nil {
 		fw.FiltersInet = make(map[string]*FirewallFilter)
@@ -48,15 +70,69 @@ func compileFirewall(node *Node, fw *FirewallConfig) error {
 
 		thenNode := polInst.node.FindChild("then")
 		if thenNode != nil {
-			for _, child := range thenNode.Children {
+			// #9882: leaf form. `then foo;` (packed single) never folds — the
+			// fold only fires when the head names a DECLARED child
+			// (normalizeCompactNodes) — so the node stays Keys=["then","foo"]
+			// with no children and a children-only walk sees nothing: the
+			// typo would bypass UnknownActions exactly as before the fix.
+			// Walk the Keys tail like compileFilterThen's leaf path does
+			// (#2399), with the same arg consumption and the same default
+			// arm. A leaf carries no children so the loop below is a no-op
+			// for this shape; a hypothetical merged leaf-with-children is
+			// read by BOTH, which is correct — both halves are authored
+			// intent (the #3842 accumulate-everything philosophy).
+			if thenNode.IsLeaf && len(thenNode.Keys) >= 2 {
+				keys := thenNode.Keys[1:]
+				for i := 0; i < len(keys); i++ {
+					k := keys[i]
+					arg := func() string {
+						if i+1 < len(keys) {
+							i++
+							return keys[i]
+						}
+						return ""
+					}
+					switch k {
+					case "discard":
+						pol.ThenActions = append(pol.ThenActions, "discard")
+						pol.ThenAction = "discard"
+					case "loss-priority":
+						pol.ThenActions = append(pol.ThenActions, "loss-priority")
+						if v := arg(); v != "" {
+							pol.ThenAction = "loss-priority " + v
+						}
+					case "forwarding-class":
+						pol.ThenActions = append(pol.ThenActions, "forwarding-class")
+						if v := arg(); v != "" {
+							pol.ThenAction = "forwarding-class " + v
+						}
+					default:
+						pol.UnknownActions = append(pol.UnknownActions, k)
+					}
+				}
+			}
+			// #9882: expand a one-line run before walking. `then
+			// forwarding-class af11 loss-priority high;` (and the flat-set
+			// single command) nests or packs the later statements where a
+			// children-only walk keeps just the head — a silent loss on the
+			// lenient path and, for the flat-set shape, on strict too. The
+			// hoist is a no-op for the canonical separate-statement shapes.
+			thenSchema := policerThenSchema9882()
+			for _, child := range hoistAndSplitRun8939(thenNode.Children, thenSchema) {
 				// #8445: record what was AUTHORED before applying last-wins.
-				// `forwarding-class` is recorded even though no arm below acts
-				// on it: it is an action the operator wrote, and the gate's
-				// question is which actions were written, not which one
-				// survived.
+				// The gate's question is which actions were written, not which
+				// one survived.
 				switch child.Name() {
 				case "discard", "loss-priority", "forwarding-class":
 					pol.ThenActions = append(pol.ThenActions, child.Name())
+				default:
+					// #9882: record the unknown `then` token for the strict commit
+					// gate instead of dropping it — the policer path never got the
+					// UnknownActions channel filter terms got in #2399, so a typo
+					// kept the "discard" default with zero diagnostic. Kept OUT of
+					// ThenActions, which feeds the #8445 terminal-vs-marking gate
+					// and classifies known actions only.
+					pol.UnknownActions = append(pol.UnknownActions, child.Name())
 				}
 				switch child.Name() {
 				case "discard":
@@ -65,6 +141,26 @@ func compileFirewall(node *Node, fw *FirewallConfig) error {
 					if v := nodeVal(child); v != "" {
 						pol.ThenAction = "loss-priority " + v
 					}
+				case "forwarding-class":
+					// #9882: Junos mark-and-forward. The dataplane does not act on
+					// the marking, so this compiles to meter-only (DiscardExcess
+					// stays false) — exactly what the #8445 message promises for
+					// the lone-forwarding-class spelling. Before this arm the
+					// statement was recorded but never acted on, so ThenAction
+					// kept the "discard" default and the policer dropped traffic
+					// the operator asked to be marked and forwarded.
+					if v := nodeVal(child); v != "" {
+						pol.ThenAction = "forwarding-class " + v
+					}
+				}
+				// #9882: tokens fused past the action's declared arity are
+				// unknown, not values — `then { discard foo; }` must not
+				// swallow `foo` any more than `then { foo; }` does. Runs on
+				// the hoisted siblings, so a DECLARED trailing action was
+				// already split into its own statement and only the
+				// genuinely extra tokens land here (the #8971 shape).
+				if extras := policerThenExtras9882(child, thenSchema); len(extras) > 0 {
+					pol.UnknownActions = append(pol.UnknownActions, extras...)
 				}
 			}
 		}
@@ -158,12 +254,50 @@ func compileFirewall(node *Node, fw *FirewallConfig) error {
 		}
 
 		if thenNode := tcpInst.node.FindChild("then"); thenNode != nil {
-			for _, child := range thenNode.Children {
-				// #8445: see the policer arm above — identical last-wins switch,
-				// identical loss of the authored set.
+			// #9882: leaf form — see the policer loop above. `then foo;` never
+			// folds, so without this walk the typo bypasses UnknownActions.
+			if thenNode.IsLeaf && len(thenNode.Keys) >= 2 {
+				keys := thenNode.Keys[1:]
+				for i := 0; i < len(keys); i++ {
+					k := keys[i]
+					arg := func() string {
+						if i+1 < len(keys) {
+							i++
+							return keys[i]
+						}
+						return ""
+					}
+					switch k {
+					case "discard":
+						tcp.ThenActions = append(tcp.ThenActions, "discard")
+						tcp.ThenAction = "discard"
+					case "loss-priority":
+						tcp.ThenActions = append(tcp.ThenActions, "loss-priority")
+						if v := arg(); v != "" {
+							tcp.ThenAction = "loss-priority " + v
+						}
+					case "forwarding-class":
+						tcp.ThenActions = append(tcp.ThenActions, "forwarding-class")
+						if v := arg(); v != "" {
+							tcp.ThenAction = "forwarding-class " + v
+						}
+					default:
+						tcp.UnknownActions = append(tcp.UnknownActions, k)
+					}
+				}
+			}
+			// #9882: expand a one-line run — see the policer loop above.
+			thenSchema := threeColorPolicerThenSchema9882()
+			for _, child := range hoistAndSplitRun8939(thenNode.Children, thenSchema) {
+				// #8445: see the policer loop above — identical last-wins switch,
+				// identical authored set. #9882: identical UnknownActions channel
+				// and identical forwarding-class arm.
 				switch child.Name() {
 				case "discard", "loss-priority", "forwarding-class":
 					tcp.ThenActions = append(tcp.ThenActions, child.Name())
+				default:
+					// #9882: see the policer loop above.
+					tcp.UnknownActions = append(tcp.UnknownActions, child.Name())
 				}
 				switch child.Name() {
 				case "discard":
@@ -172,6 +306,18 @@ func compileFirewall(node *Node, fw *FirewallConfig) error {
 					if v := nodeVal(child); v != "" {
 						tcp.ThenAction = "loss-priority " + v
 					}
+				case "forwarding-class":
+					// #9882: see the policer loop above — Junos mark-and-forward,
+					// meter-only on this dataplane. The Go capability gate and
+					// the Rust shape check both admit the marking (the #9503
+					// pattern), and the #9503 advisory already warns it is inert.
+					if v := nodeVal(child); v != "" {
+						tcp.ThenAction = "forwarding-class " + v
+					}
+				}
+				// #9882: fused tokens past the arity — see the policer loop.
+				if extras := policerThenExtras9882(child, thenSchema); len(extras) > 0 {
+					tcp.UnknownActions = append(tcp.UnknownActions, extras...)
 				}
 			}
 		}

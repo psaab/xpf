@@ -246,8 +246,15 @@ func famOnlyCases8763() []famOnlyCase8763 {
 		// The firewall filter ACTION surface.
 		{"then policer", "firewall {\n policer polprobe77 {\n  if-exceeding { bandwidth-limit 10m; burst-size-limit 1500; }\n  then { discard; }\n }\n}\n",
 			fwTerm(tcpOnly + "\n    then { policer polprobe77; }"), fwTerm(tcpOnly + "\n    then policer polprobe77;"), fwTerm(tcpOnly + "\n    then { }"), inert8763},
-		{"then forwarding-class", "class-of-service {\n forwarding-classes {\n  class fcprobe77 queue-num 3;\n }\n}\n",
-			fwTerm(tcp + "\n    then { forwarding-class fcprobe77; }"), fwTerm(tcp + "\n    then forwarding-class fcprobe77;"), fwTerm(tcp), inert8763},
+		// #9882 MOVED "then forwarding-class" OUT of this population: declaring
+		// it under the policer and three-color-policer `then` containers made
+		// the pair dual-path (reachable with no `family` ancestor), so it is
+		// measured in TestDualPathAdmittedPairsAreTheMeasuredSix8763 instead.
+		// The experiment that case ran — packed vs braced vs baseline at the
+		// `family inet` filter-term shape — is exactly the family-shape
+		// measurement the dual-path table records (folds=1, SAME/SAME,
+		// braced delivers, reads-but-inert); nothing about the under-family
+		// sites changed, only which population counts the pair.
 		{"then routing-instance", "routing-instances {\n riprobe77 {\n  instance-type virtual-router;\n }\n}\n",
 			fwTerm(tcpOnly + "\n    then { routing-instance riprobe77; }"), fwTerm(tcpOnly + "\n    then routing-instance riprobe77;"), fwTerm(tcpOnly + "\n    then { }"), inert8763},
 		{"then dscp", "", fwTerm(tcp + "\n    then { dscp 41; }"), fwTerm(tcp + "\n    then dscp 41;"), fwTerm(tcp), inert8763},

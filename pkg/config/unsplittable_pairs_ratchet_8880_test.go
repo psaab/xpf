@@ -347,7 +347,25 @@ func TestUnsplittablePairRatchet8880(t *testing.T) {
 		// opt-in guard as diverging by nested elision, and those registrations
 		// went stale in the same run and are deleted there -- two independent
 		// ratchets naming the same pair movement.
-		wantArgs1 = 449
+		// #9882 raises it 449 -> 450. Declaring `forwarding-class` (args:1)
+		// under the policer and three-color-policer `then` containers admits
+		// the pair ("then", "forwarding-class") — one key for both paths, the
+		// census dedups by (container, leaf) — beside the pre-existing
+		// ("then", "loss-priority") sibling. The count grows while the harm
+		// does not: the #9882 compiler leaf-walk reads the unfolded tail, so
+		// every packed run at policer `then` now matches its braced twin
+		// (measured: `then discard forwarding-class af11;` rejects via #8445,
+		// `then foo;` via #9882, singles compile identically — pinned by
+		// TestPolicerThenPackedParity_9882, which also closes the sibling
+		// pair's `then discard loss-priority high;` silent fold as a side
+		// effect). packedStatements was measured and rejected as the remedy:
+		// the splitter STOPS at undeclared tokens (splitPackedStatements8768
+		// returns the tail whole), so `then discard foo;` would still swallow
+		// the trailing unknown, while the leaf walk flags it. This census is
+		// structural — the container still cannot split — so the pair stays
+		// counted; its residue is closed in the reader, the flattenThenChain8939
+		// / expandRunChildren9235 shape rather than the splitter shape.
+		wantArgs1 = 450
 	)
 	pairs2, _ := unsplittablePairs8880(2)
 	pairs1, conflict1 := unsplittablePairs8880(1)

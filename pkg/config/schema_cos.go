@@ -478,8 +478,9 @@ var schemaFirewall = &schemaNode{desc: "Firewall filters and policers", children
 		}},
 		"logical-interface-policer": {desc: "Logical interface policer (shared across protocol families)", children: nil},
 		"then": {desc: "Action for traffic exceeding the limits", children: map[string]*schemaNode{
-			"discard":       {desc: "Discard excess traffic (default)", children: nil},
-			"loss-priority": {desc: "Set loss priority for excess traffic (high|medium-high|medium-low|low)", args: 1, placeholder: "<priority>", children: nil},
+			"discard":          {desc: "Discard excess traffic (default)", children: nil},
+			"loss-priority":    {desc: "Set loss priority for excess traffic (high|medium-high|medium-low|low)", args: 1, placeholder: "<priority>", children: nil},
+			"forwarding-class": {desc: "Set forwarding class for excess traffic (marks and forwards; meter-only on this dataplane — #9882)", args: 1, placeholder: "<class>", children: nil},
 		}},
 	}},
 	"three-color-policer": {desc: "Three-color policer", args: 1, multi: true, placeholder: "<name>", children: map[string]*schemaNode{
@@ -499,8 +500,9 @@ var schemaFirewall = &schemaNode{desc: "Firewall filters and policers", children
 			"peak-burst-size":            {desc: "Peak burst size in bytes (k|m|g suffix)", args: 1, placeholder: "<bytes>", children: nil},
 		}},
 		"then": {desc: "Action for out-of-profile traffic", children: map[string]*schemaNode{
-			"discard":       {desc: "Discard out-of-profile traffic (default)", children: nil},
-			"loss-priority": {desc: "Set loss priority for out-of-profile traffic", args: 1, placeholder: "<priority>", children: nil},
+			"discard":          {desc: "Discard out-of-profile traffic (default)", children: nil},
+			"loss-priority":    {desc: "Set loss priority for out-of-profile traffic", args: 1, placeholder: "<priority>", children: nil},
+			"forwarding-class": {desc: "Set forwarding class for out-of-profile traffic (marks and forwards; meter-only on this dataplane — #9882)", args: 1, placeholder: "<class>", children: nil},
 		}},
 	}},
 	// #9017: an undeclared address-family token here used to collapse the

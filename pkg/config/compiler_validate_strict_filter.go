@@ -1874,6 +1874,79 @@ func FilterProtocolResolvable(token string) bool {
 	return filterProtocolResolvable(token)
 }
 
+// validateFirewallPolicerUnknownActionsStrict hard-rejects a policer or
+// three-color-policer whose `then` block carries a token that is none of the
+// recognized policer actions (`discard` / `loss-priority` / `forwarding-class`)
+// — #9882.
+//
+// # Why reject rather than keep the default
+//
+// PolicerConfig.ThenAction defaults to "discard", so an unrecognized token was
+// silently dropped while the policer kept the most destructive action: a typo
+// like `then discrad` committed clean on every path including strict and
+// dropped excess traffic with zero diagnostic — an availability over-drop
+// versus intent. Junos rejects an unknown policer action at commit, so the
+// fail-closed-correct behavior is to refuse the commit and name the offending
+// token. This is the policer path's #2399 (filter terms got their
+// UnknownActions channel there; this path never did).
+//
+// # What this gate reads
+//
+// The DEFERRED channel (`UnknownActions`), populated by compileFirewall's
+// `then` loops — not the AST. Reading the recorded set keeps gate and compiler
+// agreeing by construction on which tokens are unknown, on both AST shapes
+// (hierarchical and flat-set), exactly like validateFilterActionsStrict.
+//
+// Strict on commit / commit-check; lenient on load / peer-sync (warn — #1960
+// no-brick: an already-persisted or peer-synced config still boots, and the
+// "discard" default drives the dataplane exactly as it did before, so a
+// leniently-loaded config is no worse off than before the gate).
+// Deterministic: policers then three-color-policers, each sorted by name.
+// Runs BEFORE the #8445 terminal-vs-marking gate (same order as the filter
+// side, where #2399 unknown-actions runs before #4375 terminal-conflict): an
+// unknown token means the intent cannot be fully characterized, so it is
+// reported first.
+func validateFirewallPolicerUnknownActionsStrict(cfg *Config) error {
+	if cfg == nil {
+		return nil
+	}
+	check := func(kind string, unknownByName map[string][]string) error {
+		names := make([]string, 0, len(unknownByName))
+		for name := range unknownByName {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			if len(unknownByName[name]) == 0 {
+				continue
+			}
+			return fmt.Errorf(
+				"firewall %s %q: unknown `then` action %q "+
+					"(supported: `then discard`, `then loss-priority <level>`, "+
+					"`then forwarding-class <class>`)",
+				kind, name, unknownByName[name][0])
+		}
+		return nil
+	}
+
+	policers := make(map[string][]string, len(cfg.Firewall.Policers))
+	for name, pol := range cfg.Firewall.Policers {
+		if pol != nil {
+			policers[name] = pol.UnknownActions
+		}
+	}
+	if err := check("policer", policers); err != nil {
+		return err
+	}
+	tcps := make(map[string][]string, len(cfg.Firewall.ThreeColorPolicers))
+	for name, tcp := range cfg.Firewall.ThreeColorPolicers {
+		if tcp != nil {
+			tcps[name] = tcp.UnknownActions
+		}
+	}
+	return check("three-color-policer", tcps)
+}
+
 // validateFirewallPolicerThenConflictStrict hard-rejects a policer or
 // three-color-policer whose `then` block carries BOTH the terminal action
 // `discard` and a marking action (`loss-priority` / `forwarding-class`) —

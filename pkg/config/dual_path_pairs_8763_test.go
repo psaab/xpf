@@ -59,22 +59,35 @@ func TestDualPathAdmittedPairsAreTheMeasuredSix8763(t *testing.T) {
 	//	pair                     folds  elided(off) vs braced  elided(ON) vs braced
 	//	from protocol              1     SAME                   SAME    reads-but-inert
 	//	then count                 1     SAME                   SAME    reads-but-inert
+	//	then forwarding-class      1     SAME                   SAME    reads-but-inert
 	//	then log                   1     SAME                   SAME    reads-but-inert
 	//	then loss-priority         1     SAME                   SAME    reads-but-inert
 	//	version-ipfix template     1     DIFF                   SAME    clean recovery
 	//	version9 template          1     DIFF                   SAME    clean recovery
 	//
-	// The first four are already read out of the packed tail by the firewall
+	// The first five are already read out of the packed tail by the firewall
 	// filter compiler (packedBodyChildren), so the fold fires and changes
 	// nothing. The last two are a genuine #8755-class silent drop under
 	// `family inet` that the fold repairs exactly.
 	//
-	// All six are BENIGN at the family shape, so the blocker dissolves and no
+	// #9882 added the `then forwarding-class` row: declaring the head under
+	// the policer and three-color-policer `then` containers moved the pair
+	// from family-only to dual-path. Its measurement was retaken from scratch
+	// (elided `then forwarding-class fcprobe77;` vs braced vs a baseline with
+	// the statement removed, at `family inet filter f1 term t1`, pass off and
+	// on): folds=1, SAME/SAME, braced delivers — the reads-but-inert twin of
+	// the `then loss-priority` row, whose under-family sites are the same
+	// filter-term shape. The famOnly case that used to carry this experiment
+	// is deleted (the pair left that population); this row is where it lives
+	// now.
+	//
+	// All seven are BENIGN at the family shape, so the blocker dissolves and no
 	// path context is needed. If this list changes, that conclusion does not
 	// carry to the new member and the measurement has to be retaken.
 	want := []string{
 		"from protocol",
 		"then count",
+		"then forwarding-class",
 		"then log",
 		"then loss-priority",
 		"version-ipfix template",

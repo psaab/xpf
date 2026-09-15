@@ -923,6 +923,10 @@ var knownUnexaminable8690 = []string{
 	"firewall three-color-policer xpfarg single-rate committed-burst-size",
 	"firewall three-color-policer xpfarg single-rate committed-information-rate",
 	"firewall three-color-policer xpfarg single-rate excess-burst-size",
+	// #9882: same shape as the loss-priority sibling below — the synthesized
+	// fixture carries no rate block, so the reference spelling cannot compile
+	// in isolation. Unmeasurable by this method until #8436, not unfixtured.
+	"firewall three-color-policer xpfarg then forwarding-class",
 	"firewall three-color-policer xpfarg then loss-priority",
 	"firewall three-color-policer xpfarg two-rate committed-burst-size",
 	"firewall three-color-policer xpfarg two-rate committed-information-rate",

@@ -250,9 +250,11 @@ func userspaceSupportsThreeColorPolicers(cfg *config.Config) bool {
 
 // threeColorThenActionSupported mirrors the helper's
 // snapshot_three_color_shape_supported: no action or `discard` (drop the
-// excess), or `loss-priority <level>` (meter only).
+// excess), or a marking action — `loss-priority <level>` (#9503) or
+// `forwarding-class <class>` (#9882) — metered but not acted upon.
 func threeColorThenActionSupported(action string) bool {
-	return action == "" || action == "discard" || strings.HasPrefix(action, "loss-priority ")
+	return action == "" || action == "discard" || strings.HasPrefix(action, "loss-priority ") ||
+		strings.HasPrefix(action, "forwarding-class ")
 }
 
 func expandUserspacePolicyAddresses(cfg *config.Config, addrs []string) ([]string, bool) {
