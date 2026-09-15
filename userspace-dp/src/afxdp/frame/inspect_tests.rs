@@ -1127,3 +1127,260 @@ fn an_unparseable_family_still_refuses_on_the_enforcement_path_7890() {
          #7890 widens the UNSPECIFIED leg only"
     );
 }
+
+// ---- #9894: the TCP/UDP metadata fast path must honor the IP-declared end ----
+//
+// The shim bounds its L4 read by the frame end INCLUDING slack (`parse_l4` in
+// `userspace-xdp/src/lib.rs` reads against `data_end` and never consults IPv4
+// `total_len`), so a short `total_len`/`payload_len` with trailing slack bytes
+// arrives with a metadata tuple spelled from out-of-datagram bytes. The
+// SessionFlow fast path (`parse_session_flow_from_bytes`) returned that tuple
+// verbatim on `metadata_tuple_complete` — a predicate with NO length
+// dimension — seeding sessions, NAT bindings, policy decisions and flow logs
+// on a 5-tuple that never existed on the wire. The fix gates both
+// metadata-return sites on `[l4, l4+4)` lying within `declared_l3_end`, the
+// same #2361 bound `parse_flow_ports` already enforces.
+
+/// Slack bytes spelling the probe tuple (1111, 443): 1111 = 0x0457,
+/// 443 = 0x01BB.
+const SLACK_PORTS_1111_443: [u8; 4] = [0x04, 0x57, 0x01, 0xBB];
+
+#[test]
+fn meta_fast_path_v4_slack_ports_outside_total_len_yield_no_flow_9894() {
+    // total_len = 20 (IHL only): the 4 bytes at l3+20 are slack spelling
+    // (1111, 443), exactly what the shim stamps into metadata. The declared-
+    // end parse yields None, so the production path must too.
+    let frame = v4_frame(PROTO_TCP, 20, &SLACK_PORTS_1111_443);
+    // The bytes ARE present in the slice — proving a slice-only bound would
+    // have returned them.
+    assert_eq!(&frame[14 + 20..14 + 24], &SLACK_PORTS_1111_443);
+    let meta = UserspaceDpMeta {
+        addr_family: libc::AF_INET as u8,
+        protocol: PROTO_TCP,
+        l3_offset: 14,
+        l4_offset: 14 + 20,
+        flow_src_port: 1111,
+        flow_dst_port: 443,
+        flow_src_addr: [192, 0, 2, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        flow_dst_addr: [192, 0, 2, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        ..UserspaceDpMeta::default()
+    };
+    assert_eq!(
+        parse_session_flow_from_bytes(&frame, meta),
+        None,
+        "the (1111, 443) tuple lives in slack past total_len=20 — the fast path must not admit it"
+    );
+}
+
+#[test]
+fn meta_fast_path_v6_slack_ports_outside_payload_len_yield_no_flow_9894() {
+    // IPv6 sibling: payload_len = 0, so the 4 bytes at l3+40 are slack.
+    let frame = v6_frame(PROTO_UDP, 0, &SLACK_PORTS_1111_443);
+    assert_eq!(&frame[14 + 40..14 + 44], &SLACK_PORTS_1111_443);
+    let meta = UserspaceDpMeta {
+        addr_family: libc::AF_INET6 as u8,
+        protocol: PROTO_UDP,
+        l3_offset: 14,
+        l4_offset: 14 + 40,
+        flow_src_port: 1111,
+        flow_dst_port: 443,
+        flow_src_addr: [0x20; 16],
+        flow_dst_addr: [0x30; 16],
+        ..UserspaceDpMeta::default()
+    };
+    assert_eq!(
+        parse_session_flow_from_bytes(&frame, meta),
+        None,
+        "the (1111, 443) tuple lives in slack past payload_len=0 — the fast path must not admit it"
+    );
+}
+
+#[test]
+fn meta_fast_path_v4_declared_ports_still_returned_9894() {
+    // Anti-over-gate: total_len = 24 covers the 4 port bytes, so the same
+    // complete-metadata shape still takes the fast path.
+    let frame = v4_frame(PROTO_TCP, 24, &SLACK_PORTS_1111_443);
+    let meta = UserspaceDpMeta {
+        addr_family: libc::AF_INET as u8,
+        protocol: PROTO_TCP,
+        l3_offset: 14,
+        l4_offset: 14 + 20,
+        flow_src_port: 1111,
+        flow_dst_port: 443,
+        flow_src_addr: [192, 0, 2, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        flow_dst_addr: [192, 0, 2, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        ..UserspaceDpMeta::default()
+    };
+    let flow = parse_session_flow_from_bytes(&frame, meta)
+        .expect("in-declared ports must still resolve via the fast path");
+    assert_eq!(flow.forward_key.src_port, 1111);
+    assert_eq!(flow.forward_key.dst_port, 443);
+}
+
+// ---- #9894 review fold: helper truth-table, fast-vs-fallback, fall-through ----
+
+#[test]
+fn meta_l4_ports_gate_accepts_in_declared_rejects_slack_9894() {
+    // Direct fault detection for the helper (SPARK-4): behavioral pins
+    // alone cannot distinguish "gate correct" from "gate over/under-
+    // rejects but a later arm masks it".
+    let mk_meta = |family: u8, l4: u16| UserspaceDpMeta {
+        addr_family: family,
+        protocol: PROTO_TCP,
+        l3_offset: 14,
+        l4_offset: l4,
+        ..UserspaceDpMeta::default()
+    };
+    // In-declared, exactly at the boundary (l4+4 == declared_end).
+    let frame = v4_frame(PROTO_TCP, 24, &SLACK_PORTS_1111_443);
+    assert!(meta_l4_ports_in_declared_end(
+        &frame,
+        mk_meta(libc::AF_INET as u8, 34)
+    ));
+    // Slack: total_len=20 ends at l4 itself.
+    let frame = v4_frame(PROTO_TCP, 20, &SLACK_PORTS_1111_443);
+    assert!(!meta_l4_ports_in_declared_end(
+        &frame,
+        mk_meta(libc::AF_INET as u8, 34)
+    ));
+    // Straddle: total_len=22 covers 2 of the 4 port bytes.
+    let frame = v4_frame(PROTO_TCP, 22, &SLACK_PORTS_1111_443);
+    assert!(!meta_l4_ports_in_declared_end(
+        &frame,
+        mk_meta(libc::AF_INET as u8, 34)
+    ));
+    // IPv6 pair: payload_len=4 covers the ports, 0 does not.
+    let frame = v6_frame(PROTO_TCP, 4, &SLACK_PORTS_1111_443);
+    assert!(meta_l4_ports_in_declared_end(
+        &frame,
+        mk_meta(libc::AF_INET6 as u8, 54)
+    ));
+    let frame = v6_frame(PROTO_TCP, 0, &SLACK_PORTS_1111_443);
+    assert!(!meta_l4_ports_in_declared_end(
+        &frame,
+        mk_meta(libc::AF_INET6 as u8, 54)
+    ));
+}
+
+#[test]
+fn meta_l4_ports_gate_fails_closed_on_malformed_9894() {
+    let frame = v4_frame(PROTO_TCP, 24, &SLACK_PORTS_1111_443);
+    // Unknown family: no declared end derivable.
+    let meta = UserspaceDpMeta {
+        addr_family: libc::AF_UNIX as u8,
+        protocol: PROTO_TCP,
+        l3_offset: 14,
+        l4_offset: 34,
+        ..UserspaceDpMeta::default()
+    };
+    assert!(!meta_l4_ports_in_declared_end(&frame, meta));
+    // Truncated L3 header (slice shorter than l3+20).
+    let meta = UserspaceDpMeta {
+        addr_family: libc::AF_INET as u8,
+        protocol: PROTO_TCP,
+        l3_offset: 14,
+        l4_offset: 34,
+        ..UserspaceDpMeta::default()
+    };
+    assert!(!meta_l4_ports_in_declared_end(&frame[..20], meta));
+    // l4_offset past the frame entirely.
+    let meta = UserspaceDpMeta {
+        addr_family: libc::AF_INET as u8,
+        protocol: PROTO_TCP,
+        l3_offset: 14,
+        l4_offset: 100,
+        ..UserspaceDpMeta::default()
+    };
+    assert!(!meta_l4_ports_in_declared_end(&frame, meta));
+}
+
+#[test]
+fn meta_fast_path_returns_stamped_tuple_not_frame_ports_9894() {
+    // SPARK-5: the control cell below cannot distinguish fast-return from
+    // frame fallback (both yield the same ports). Here the frame carries
+    // real in-declared ports (0xAAAA, 0xBBBB) while metadata stamps a
+    // DIFFERENT complete tuple (1111, 443), also in-declared. The fast path
+    // trusts bounded meta, so the STAMPED tuple wins — proving the return
+    // came from the fast path. Doubles as a TCP over-reject pin: a gate
+    // that wrongly fails falls through to the frame and returns 0xAAAA.
+    let frame = v4_frame(PROTO_TCP, 24, &[0xAA, 0xAA, 0xBB, 0xBB]);
+    let meta = UserspaceDpMeta {
+        addr_family: libc::AF_INET as u8,
+        protocol: PROTO_TCP,
+        l3_offset: 14,
+        l4_offset: 14 + 20,
+        flow_src_port: 1111,
+        flow_dst_port: 443,
+        flow_src_addr: [192, 0, 2, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        flow_dst_addr: [192, 0, 2, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        ..UserspaceDpMeta::default()
+    };
+    let flow = parse_session_flow_from_bytes(&frame, meta)
+        .expect("in-declared stamped tuple must resolve via the fast path");
+    assert_eq!(
+        (flow.forward_key.src_port, flow.forward_key.dst_port),
+        (1111, 443),
+        "the STAMPED tuple wins on the fast path, not the frame ports"
+    );
+}
+
+#[test]
+fn meta_fast_path_gate_failure_falls_through_to_frame_9894() {
+    // SPARK-5: a complete meta tuple (nonzero ports, set addrs) with a BOGUS
+    // l4_offset past the declared end fails the fast-path gate — yet the
+    // frame itself is well-formed with real ports (0xCAFE, 0xF00D) at the
+    // frame-derived L4. The failure must fall through to the authoritative
+    // frame parse, not to None, so legitimate traffic on weird meta
+    // survives. (Pre-#9894 the fast path returned the stamped tuple here.)
+    let frame = v4_frame(PROTO_TCP, 24, &[0xCA, 0xFE, 0xF0, 0x0D]);
+    let meta = UserspaceDpMeta {
+        addr_family: libc::AF_INET as u8,
+        protocol: PROTO_TCP,
+        l3_offset: 14,
+        l4_offset: 100,
+        flow_src_port: 1111,
+        flow_dst_port: 443,
+        flow_src_addr: [192, 0, 2, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        flow_dst_addr: [192, 0, 2, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        ..UserspaceDpMeta::default()
+    };
+    let flow = parse_session_flow_from_bytes(&frame, meta)
+        .expect("gate failure must fall through to the frame parse, not None");
+    assert_eq!(
+        (flow.forward_key.src_port, flow.forward_key.dst_port),
+        (0xCAFE, 0xF00D),
+        "fall-through yields the authoritative frame ports"
+    );
+}
+
+#[test]
+fn term_extra_builder_leaves_ports_unknown_to_flowless_sites_9894() {
+    // GPT-2 contract: the cold builder ALWAYS leaves `ports_unknown` false,
+    // even for L4-absent shapes. The builder never sees the flow, so it
+    // cannot know whether the evaluated ports are real — deriving the bit
+    // here over-gates session-miss/flow-cache flows evaluated against an
+    // unreadable frame (a DMA-mutated slice must not veto the cached tuple)
+    // and under-gates L3 contexts evaluated against present-but-unevaluated
+    // L4 bytes. The flowless input-filter/PBR sites set the bit themselves,
+    // where the evaluated (synthetic) tuple is known. Reverting to a derived
+    // bit reds here AND on the TX forward-request cells (flow + empty frame).
+    let mk_meta = |protocol: u8| UserspaceDpMeta {
+        addr_family: libc::AF_INET as u8,
+        protocol,
+        l3_offset: 14,
+        l4_offset: 34,
+        ..UserspaceDpMeta::default()
+    };
+    // Slack TCP: L4 absent from the declared datagram, bit still false.
+    let frame = v4_frame(PROTO_TCP, 20, &SLACK_PORTS_1111_443);
+    let extra = term_match_extra_from_frame(&frame, mk_meta(PROTO_TCP));
+    assert!(!extra.ports_unknown);
+    assert!(!extra.l4_present);
+    // Truncated slice: L3 itself unreadable, bit still false.
+    let extra = term_match_extra_from_frame(&frame[..10], mk_meta(PROTO_TCP));
+    assert!(!extra.ports_unknown);
+    // Well-formed control: unchanged.
+    let frame = v4_frame(PROTO_TCP, 24, &[0xAB, 0xCD, 0x12, 0x34]);
+    let extra = term_match_extra_from_frame(&frame, mk_meta(PROTO_TCP));
+    assert!(!extra.ports_unknown);
+}
