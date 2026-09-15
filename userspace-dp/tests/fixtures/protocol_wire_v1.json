@@ -915,6 +915,7 @@
     "flow_worker_map": [],
     "flow_worker_map_truncated": false,
     "forwarding_armed": false,
+    "frag_max_lifetime_evictions_total": 0,
     "gre_decap_checksum_invalid_drops_total": 0,
     "gre_decap_ecn_illegal_drops_total": 0,
     "gre_decap_unsupported_version_refusals_total": 0,

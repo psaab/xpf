@@ -415,6 +415,16 @@ impl super::Coordinator {
         crate::fragment_assoc::NAT64_FRAG_PROTOCOL_ALIAS_MISSES.load(Ordering::Relaxed)
     }
 
+    /// #9901 (F-010): fragment associations reclaimed by the ABSOLUTE lifetime
+    /// bound (10s from install) rather than the 2s idle TTL. An idle-TTL expiry
+    /// is routine churn; an absolute expiry means one key was consulted
+    /// continuously for the whole maximum lifetime — the sustained same-key
+    /// fragment stream the bound exists to stop. Surfaced as
+    /// `xpf_userspace_frag_max_lifetime_evictions_total`.
+    pub fn frag_max_lifetime_evictions_total(&self) -> u64 {
+        crate::fragment_assoc::FRAG_MAX_LIFETIME_EVICTIONS.load(Ordering::Relaxed)
+    }
+
     /// #6751 PR 2/3: interface-mode SNAT admissions that failed CLOSED with no
     /// free translated identity for their `(egress, remote)` pair, plus
     /// peer-synced imports refused for the same reason. Surfaced as

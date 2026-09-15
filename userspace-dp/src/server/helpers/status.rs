@@ -155,6 +155,10 @@ pub(crate) fn refresh_status(state: &mut ServerState) {
         state.afxdp.nat64_frag_cross_domain_misses_total();
     state.status.nat64_frag_protocol_alias_misses_total =
         state.afxdp.nat64_frag_protocol_alias_misses_total();
+    // #9901 (F-010): absolute-lifetime reclamations — the sustained same-key
+    // stream signal, distinct from routine idle-TTL churn.
+    state.status.frag_max_lifetime_evictions_total =
+        state.afxdp.frag_max_lifetime_evictions_total();
     state.status.interface_snat_identity_exhaustion_total =
         state.afxdp.interface_snat_identity_exhaustion_total();
     state
