@@ -67,3 +67,92 @@ func TestReplaceControlBytesHonoursTheCallersSubstitute(t *testing.T) {
 		t.Errorf("got %q, want %q", got, "a?b")
 	}
 }
+
+// TestRendersAsOnePatternRefusesExactlyASCIIWhitespace is exhaustive over the
+// byte range, for the same reason the ReplaceControlBytes contract test is: the
+// guarded failure is a future edit NARROWING the refused class ("surely \v is
+// harmless") or WIDENING it to strings.Fields ("surely unicode spaces split
+// too"). Both edits look like cleanups; a sampled test is what they slip past.
+//
+// Control bytes other than whitespace PASS here BY DESIGN: this predicate
+// answers slot-count only ("ge\x010" IS one slot). Render refusal of controls
+// is SafeInterfaceName's job, pinned exhaustively below — no render caller
+// may use this predicate alone.
+func TestRendersAsOnePatternRefusesExactlyASCIIWhitespace(t *testing.T) {
+	for b := range 0x100 {
+		in := "a" + string(rune(b)) + "z"
+		got := RendersAsOnePattern(in)
+		ws := b == ' ' || b == '\t' || b == '\n' || b == '\v' || b == '\f' || b == '\r'
+		if got == ws {
+			t.Fatalf("byte %#02x: RendersAsOnePattern(%q) = %v, want %v (ascii-whitespace=%v)", b, in, got, !ws, ws)
+		}
+	}
+}
+
+// TestRendersAsOnePatternShape pins the non-obvious structural cases: empty is
+// zero slots, not one; padding refuses even though the core is clean.
+func TestRendersAsOnePatternShape(t *testing.T) {
+	for _, bad := range []string{"", " ", " ge0", "ge0 ", "ge 0", "ge-0-0-0 eth0", "ge\t0", "ge\n0", "ge\r0", "ge\v0", "ge\f0"} {
+		if RendersAsOnePattern(bad) {
+			t.Errorf("RendersAsOnePattern(%q) = true, want false", bad)
+		}
+	}
+	for _, ok := range []string{"ge-0/0/0", "ge-0-0-0", "reth0.50", "fab0", "em0", "br-bd0", "lo0", "a_b", "x.y", "z-", "g\u00e90"} {
+		if !RendersAsOnePattern(ok) {
+			t.Errorf("RendersAsOnePattern(%q) = false, want true", ok)
+		}
+	}
+}
+
+// TestRendersAsOnePatternPassesUnicodeSpaces pins the deliberate divergence
+// from strings.Fields (#9886): NBSP, NEL and friends are kernel-legal and
+// systemd-atomic, so a pre-gate config carrying one keeps booting. A future
+// edit "simplifying" the predicate to Fields reds here.
+func TestRendersAsOnePatternPassesUnicodeSpaces(t *testing.T) {
+	for _, name := range []string{"ge\u00a00", "ge\u00850", "ge\u20280", "ge\u20030"} {
+		if !RendersAsOnePattern(name) {
+			t.Errorf("RendersAsOnePattern(%q) = false, want true — unicode spaces are atomic to systemd", name)
+		}
+	}
+	if RendersAsOnePattern("") {
+		t.Error("empty name must not render as one pattern")
+	}
+}
+
+// TestRendersAsOnePatternPassesGlobsDeferredTo10089 pins the known-deferred
+// pass-through: glob metacharacters are exactly one pattern, so they PASS this
+// predicate. Render-side glob refusal is #10089; when it lands this test flips
+// to refusal. Leading-dash names likewise pass here — one pattern, and the argv
+// sink is #9885's belt, not this predicate's.
+func TestRendersAsOnePatternPassesGlobsDeferredTo10089(t *testing.T) {
+	for _, name := range []string{"ge*", "ge?", "ge[0-9]", "*", "--help", "-x"} {
+		if !RendersAsOnePattern(name) {
+			t.Errorf("RendersAsOnePattern(%q) = false, want true (glob/argv classes are not this predicate's — see #10089/#9885)", name)
+		}
+	}
+}
+
+// TestSafeInterfaceNameRefusesWhitespaceAndControls is the RENDER contract,
+// exhaustive over the byte range: any ASCII whitespace or any C0/DEL byte
+// refuses, everything else passes (including the unicode spaces NBSP/NEL,
+// which the kernel allows and systemd treats atomically, and glob
+// metacharacters, whose render refusal is #10089's, not this predicate's).
+func TestSafeInterfaceNameRefusesWhitespaceAndControls(t *testing.T) {
+	for b := range 0x100 {
+		in := "a" + string(rune(b)) + "z"
+		got := SafeInterfaceName(in)
+		ws := b == ' ' || b == '\t' || b == '\n' || b == '\v' || b == '\f' || b == '\r'
+		ctl := b < 0x20 || b == 0x7f
+		if got == (ws || ctl) {
+			t.Fatalf("byte %#02x: SafeInterfaceName(%q) = %v, want %v (whitespace=%v control=%v)", b, in, got, !(ws || ctl), ws, ctl)
+		}
+	}
+	if SafeInterfaceName("") {
+		t.Fatal("SafeInterfaceName(\"\") = true, want false — empty is zero slots")
+	}
+	for _, ok := range []string{"ge-0/0/0", "ge-0-0-0", "fab0", "br-bd0", "g\u00e90", "ge\u00a00", "ge*", "--help"} {
+		if !SafeInterfaceName(ok) {
+			t.Errorf("SafeInterfaceName(%q) = false, want true", ok)
+		}
+	}
+}
