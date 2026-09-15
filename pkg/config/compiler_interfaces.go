@@ -5,6 +5,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/psaab/xpf/pkg/rendersafe"
 )
 
 // vrrpGroupPropertyKeywords are the property keywords recognized inside
@@ -1304,6 +1306,305 @@ func vrrpAuthLeaf(vg *Node) string {
 		}
 	}
 	return ""
+}
+
+// validateRenderUnsafeInterfaceNamesAST is the #9886 lenient-path gate on
+// every interface-name position that reaches a systemd unit or a kernel
+// rename: top-level `interfaces` and `bridge-domains` identity keys,
+// `chassis device-map interface` logical names, and `fabric-options
+// member-interfaces` references. It runs post-sanitize (#1798) and
+// post-range-expansion (#4027) on the group-expanded tree, so the names it
+// sees are exactly what section compilation would turn into device names —
+// including apply-groups-inherited and range-expanded members.
+//
+// WHY DROP ON LENIENT, NOT HARD-ERROR. The strict commit path already rejects
+// whitespace/control names at most of these positions (ValidateInterfaceName /
+// ValidateBridgeDomainName / ValidateDeviceMapLogicalName via the schema
+// walk), so this gate's strict arm is a backstop that fires only on a direct
+// CompileConfig — except member-interfaces references, which the schema does
+// not validate, where it IS the commit error. On the tolerant load / peer-sync
+// path the name is USELESS but the rest of the config is not: a render-unsafe
+// name can never have produced a correct unit (its intended device's kernel
+// name contains no whitespace, so a multi-pattern [Match] Name= never matched
+// it — it only ever claimed others). Hard-erroring the whole compile for one
+// never-usable name would safe-state Load and alarm-loop SyncApply against a
+// pre-gate primary (the loop store.go exists to forbid); dropping the name
+// with a loud warning instead matches the #5834 VRRP-auth shape for a
+// fail-closed security property on lenient, and the render belts (networkd
+// Apply, linksetup .link guard) stay behind it for every route that does not
+// compile (direct Apply callers).
+//
+// WHY THE RENDER CONTRACT, NOT FULL VALIDATION. The check is
+// rendersafe.SafeInterfaceName — one match-list pattern plus control-free —
+// not the full allowlist: lenient must not refuse to boot pre-gate values
+// that still work (#6564/#1960), so UTF-8 single-pattern names pass and the
+// glob and leading-dash classes stay in #10089's and #9885's lanes. Post-scrub
+// keys are control-free, so this equals the one-pattern check on every
+// reachable input; the uniform notion keeps compile and render from drifting
+// about what "unsafe" means.
+//
+// WHY REFS ARE STRIPPED, NOT JUST DROPPED AT THE SOURCE. Pruning a poisoned
+// member does not remove other members' references to it, and the dataplane
+// emits fabric bond-member rows WITHOUT a kernel-existence check
+// (buildFabricBondModels) — so a surviving `member-interfaces "ge 0"` would
+// resurrect the dropped identity as a refused-but-partially-applied row. The
+// gate strips render-unsafe references from surviving members (mirroring
+// plainListValues' read pattern across all five member-interfaces spellings),
+// which also covers references to never-defined poisoned names. Zone-member
+// references are NOT stripped (they emit no rows — the #4515 existence gate
+// downgrades them to a warning on lenient). Unexpanded interface-range stubs
+// (the #8438 declined-expansion shape) never materialize members, so their
+// `member` statements have no render path and are not inspected.
+func validateRenderUnsafeInterfaceNamesAST(nodes []*Node, lenient bool) ([]string, error) {
+	var warnings []string
+	for _, n := range nodes {
+		switch n.Name() {
+		case "interfaces", "bridge-domains":
+			w, err := pruneUnsafeIdentityMembers9886(n, lenient)
+			warnings = append(warnings, w...)
+			if err != nil {
+				return nil, err
+			}
+		case "chassis":
+			w, err := pruneUnsafeDeviceMapEntries9886(n, lenient)
+			warnings = append(warnings, w...)
+			if err != nil {
+				return nil, err
+			}
+		}
+	}
+	// Fabric references are stripped AFTER member pruning, over the survivors:
+	// a reference to a dropped member and a reference to a never-defined
+	// poisoned name are the same sink, and stripping by predicate (not by
+	// dropped-set) covers both without threading state between passes.
+	for _, n := range nodes {
+		if n.Name() != "interfaces" {
+			continue
+		}
+		for _, c := range n.Children {
+			w, err := stripUnsafeFabricMemberRefs9886(c, lenient)
+			warnings = append(warnings, w...)
+			if err != nil {
+				return nil, err
+			}
+		}
+	}
+	return warnings, nil
+}
+
+// pruneUnsafeIdentityMembers9886 drops top-level `interfaces` / `bridge-domains`
+// members whose identity key is not render-safe. Strict: hard error. Lenient:
+// prune the member node + loud warning (#5834 shape).
+func pruneUnsafeIdentityMembers9886(n *Node, lenient bool) ([]string, error) {
+	kind := "interface"
+	if n.Name() == "bridge-domains" {
+		kind = "bridge-domain"
+	}
+	var warnings []string
+	pruned := false
+	kept := make([]*Node, 0, len(n.Children))
+	for _, c := range n.Children {
+		if len(c.Keys) == 0 || rendersafe.SafeInterfaceName(c.Keys[0]) {
+			kept = append(kept, c)
+			continue
+		}
+		name := c.Keys[0]
+		sink := "[Match] Name="
+		if kind == "bridge-domain" {
+			sink = "[Match] Name= (via the br-" + name + " bridge device)"
+		}
+		if !lenient {
+			return nil, fmt.Errorf("%s %q: %s name is not render-safe for %s — "+
+				"systemd reads it as a whitespace-separated list of globs, so this name "+
+				"would claim interfaces other than its own device. Rename the %s (#9886)",
+				n.Name(), name, kind, sink, kind)
+		}
+		warnings = append(warnings, fmt.Sprintf("%s %q: %s name is not render-safe for %s — "+
+			"systemd would read it as a whitespace-separated list claiming "+
+			"other interfaces, so the member is DROPPED (not configured). The name may "+
+			"have been rewritten by the lenient control-character sanitize (#1798); "+
+			"rename the %s and commit to restore it (#9886)", n.Name(), name, kind, sink, kind))
+		pruned = true
+		continue // drop this member from the AST (fail-closed, #5834 shape)
+	}
+	if pruned {
+		n.Children = kept
+	}
+	return warnings, nil
+}
+
+// pruneUnsafeDeviceMapEntries9886 drops `chassis device-map interface` entries
+// whose logical name is not render-safe. The logical name becomes a .link
+// [Link] Name=, a file name, and a kernel rename target, so a poisoned entry
+// reaches the linksetup writer on the tolerant path (where the schema
+// validator only warns). Instance shapes mirror bracketedGroupInstances8794 +
+// namedInstances exactly: Keys[1:] fan-out with children, Keys[1] alone, or
+// named children — so the gate prunes exactly what the compiler would read.
+func pruneUnsafeDeviceMapEntries9886(chassis *Node, lenient bool) ([]string, error) {
+	dmNode := chassis.FindChild("device-map")
+	if dmNode == nil {
+		return nil, nil
+	}
+	var warnings []string
+	pruned := false
+	kept := make([]*Node, 0, len(dmNode.Children))
+	for _, c := range dmNode.Children {
+		if c.Name() != "interface" {
+			kept = append(kept, c)
+			continue
+		}
+		switch {
+		case len(c.Keys) >= 3 && len(c.Children) > 0:
+			// Bracket fan-out: every Keys[1:] token is an instance.
+			var names []string
+			dropped := false
+			for _, nm := range c.Keys[1:] {
+				if rendersafe.SafeInterfaceName(nm) {
+					names = append(names, nm)
+					continue
+				}
+				if !lenient {
+					return nil, fmt.Errorf("chassis device-map interface %q: logical name "+
+						"is not render-safe for [Link] Name= — rename the entry (#9886)", nm)
+				}
+				warnings = append(warnings, deviceMapDropWarning9886(nm))
+				dropped = true
+			}
+			if len(names) == 0 {
+				pruned = true
+				continue // all instances dropped: remove the node
+			}
+			if dropped {
+				c.Keys = append([]string{c.Keys[0]}, names...)
+				pruned = true
+			}
+			kept = append(kept, c)
+		case len(c.Keys) >= 2:
+			// Single instance: Keys[1] is the name (Keys[2:], if any, is
+			// unread by the compiler and left alone, exactly like it).
+			if rendersafe.SafeInterfaceName(c.Keys[1]) {
+				kept = append(kept, c)
+				continue
+			}
+			if !lenient {
+				return nil, fmt.Errorf("chassis device-map interface %q: logical name "+
+					"is not render-safe for [Link] Name= — rename the entry (#9886)", c.Keys[1])
+			}
+			warnings = append(warnings, deviceMapDropWarning9886(c.Keys[1]))
+			pruned = true
+			continue // drop this entry from the AST
+		default:
+			// Flat-set children shape: each child's Keys[0] is an instance.
+			cpruned := false
+			ckept := make([]*Node, 0, len(c.Children))
+			for _, sub := range c.Children {
+				if len(sub.Keys) == 0 || rendersafe.SafeInterfaceName(sub.Keys[0]) {
+					ckept = append(ckept, sub)
+					continue
+				}
+				if !lenient {
+					return nil, fmt.Errorf("chassis device-map interface %q: logical name "+
+						"is not render-safe for [Link] Name= — rename the entry (#9886)", sub.Keys[0])
+				}
+				warnings = append(warnings, deviceMapDropWarning9886(sub.Keys[0]))
+				cpruned = true
+			}
+			if cpruned {
+				c.Children = ckept
+				pruned = true
+			}
+			kept = append(kept, c)
+		}
+	}
+	if pruned {
+		dmNode.Children = kept
+	}
+	return warnings, nil
+}
+
+// deviceMapDropWarning9886 is the loud lenient warning for a pruned device-map
+// entry. The sink differs from the interfaces members (rename target + .link
+// file, not a match list), so it gets its own message.
+func deviceMapDropWarning9886(name string) string {
+	return fmt.Sprintf("chassis device-map interface %q: logical name is not render-safe "+
+		"for [Link] Name= — it would fail the kernel rename or poison the .link file, "+
+		"so the entry is DROPPED (the NIC keeps its kernel name). The name may have "+
+		"been rewritten by the lenient control-character sanitize (#1798); rename the "+
+		"entry and commit to restore it (#9886)", name)
+}
+
+// stripUnsafeFabricMemberRefs9886 removes render-unsafe values from one
+// surviving interfaces member's `fabric-options member-interfaces` statements.
+// Values are read exactly where plainListValues reads them (node Keys[1:] plus
+// every descendant's Keys, recursively), so the strip covers all five spellings
+// the fabricMemberValues comment documents — including the grandchild quirk —
+// and nothing the compiler would not read. Strict: hard error (this IS the
+// commit error — the schema does not validate these values). Lenient: strip +
+// loud warning.
+func stripUnsafeFabricMemberRefs9886(member *Node, lenient bool) ([]string, error) {
+	if len(member.Keys) == 0 {
+		return nil, nil
+	}
+	foNode := member.FindChild("fabric-options")
+	if foNode == nil {
+		return nil, nil
+	}
+	var warnings []string
+	for _, miNode := range foNode.FindChildren("member-interfaces") {
+		stripped := filterUnsafeFabricMemberKeys9886(miNode, true)
+		if len(stripped) == 0 {
+			continue
+		}
+		quoted := make([]string, 0, len(stripped))
+		for _, s := range stripped {
+			quoted = append(quoted, fmt.Sprintf("%q", s))
+		}
+		if !lenient {
+			return nil, fmt.Errorf("interfaces %q fabric-options member-interfaces: member "+
+				"reference %s is not render-safe for [Match] Name= — the bond-member row it "+
+				"would emit claims other interfaces. Rename the member (#9886)",
+				member.Keys[0], strings.Join(quoted, ", "))
+		}
+		warnings = append(warnings, fmt.Sprintf("interfaces %q fabric-options member-interfaces: "+
+			"member reference %s is not render-safe for [Match] Name= — the bond-member row "+
+			"it would emit claims other interfaces, so the reference is STRIPPED (not "+
+			"enslaved). Rename the member and commit to restore it (#9886)",
+			member.Keys[0], strings.Join(quoted, ", ")))
+	}
+	return warnings, nil
+}
+
+// filterUnsafeFabricMemberKeys9886 removes render-unsafe tokens from n's Keys
+// (skipping Keys[0] at the top node, which is the "member-interfaces" keyword
+// itself) and recurses into every descendant exactly like plainListValues'
+// walk. It returns the stripped values; Keys slices are rewritten only when
+// something was stripped.
+func filterUnsafeFabricMemberKeys9886(n *Node, top bool) []string {
+	var stripped []string
+	start := 0
+	if top {
+		start = 1
+	}
+	if len(n.Keys) > start {
+		kept := make([]string, 0, len(n.Keys))
+		kept = append(kept, n.Keys[:start]...)
+		changed := false
+		for _, k := range n.Keys[start:] {
+			if k != "" && !rendersafe.SafeInterfaceName(k) {
+				stripped = append(stripped, k)
+				changed = true
+				continue
+			}
+			kept = append(kept, k)
+		}
+		if changed {
+			n.Keys = kept
+		}
+	}
+	for _, c := range n.Children {
+		stripped = append(stripped, filterUnsafeFabricMemberKeys9886(c, false)...)
+	}
+	return stripped
 }
 
 // parseTrackCost parses a priority-cost value, returning 0 (tracking

@@ -342,10 +342,64 @@ func (m *Manager) Apply(interfaces []InterfaceConfig) error {
 	// even if old external files exist — xpf takes ownership.
 	external := m.findExternallyManaged()
 
+	// Declared here, ahead of its main use below, because the #9886 belt in
+	// the filter loop already appends refusals. A refused name fails the
+	// Apply exactly like a #2987 write failure.
+	var writeErrs []error
+
 	var filtered []InterfaceConfig
 	for _, ifc := range interfaces {
 		if ifc.Unmanaged && external[ifc.Name] {
 			slog.Debug("skipping externally managed interface", "name", ifc.Name)
+			continue
+		}
+		// #9886: refuse a name that is not render-safe — not exactly one
+		// [Match] pattern, or carrying control bytes. The generators below
+		// interpolate ifc.Name raw into Name=, and systemd reads [Match]
+		// Name= as a WHITESPACE-SEPARATED LIST OF GLOBS — so a name with a
+		// space never configures its own device and claims other ones
+		// instead. Control bytes are refused alongside
+		// (rendersafe.SafeInterfaceName): what systemd makes of a raw control
+		// byte in a unit file is version-dependent and unanalyzed. No
+		// substitution is safe here (see ValidateInterfaceName's "strictly
+		// worse than rendering raw" rule), so the renderer refuses, writing
+		// no file for the interface.
+		//
+		// Placed BEFORE the expected set is built, not beside the #9494
+		// check in the write loop, deliberately: a name refused here must
+		// behave exactly like a DELETED interface, so a poisoned unit a
+		// previous apply rendered is SWEPT by the stale-file pass below
+		// rather than pinned in `expected` and kept on disk forever. A
+		// slash-name (#9494) cannot be a filename, so that check has no
+		// stale-poison case and stays where it is. Skip-first ordering is
+		// load-bearing too: an externally-managed interface is never
+		// rendered by xpf, so it must never trip this belt either.
+		//
+		// Two non-obvious interactions, pinned by tests: a refused name that
+		// is ALSO in the protected set keeps its files (the lifeline
+		// exemption re-adds them to `expected` below — lifeline wins over
+		// the sweep) while the refusal still fails the commit; and a name
+		// failing BOTH this predicate and confinedInterfaceName (slash plus
+		// space) is refused exactly ONCE, here, never reaching #9494.
+		//
+		// Both rendered slots are checked: Name= carries ifc.Name everywhere,
+		// and the .link carries ifc.OriginalName in [Match] OriginalName= —
+		// itself a whitespace-separated match list. First hazard wins, so a
+		// row is refused at most once. An empty OriginalName is unset, not a
+		// name, and skips the check. Glob metacharacters pass (they ARE one
+		// pattern) — render-side glob refusal is #10089.
+		//
+		// Accepted exotic: a kernel device hand-named with control bytes
+		// (legal to dev_valid_name, never minted by udev/systemd) arrives as
+		// an unmanaged row and trips this belt, failing the Apply loudly
+		// until renamed. Loud beats writing unanalyzed bytes into a
+		// root-owned unit file.
+		if !rendersafe.SafeInterfaceName(ifc.Name) {
+			writeErrs = append(writeErrs, fmt.Errorf("networkd: refusing interface name %q: it is not exactly one [Match] Name= pattern or it carries control bytes — systemd would read it as a whitespace-separated list claiming other interfaces, and raw control bytes in a unit file are version-dependent and unanalyzed (#9886)", ifc.Name))
+			continue
+		}
+		if ifc.OriginalName != "" && !rendersafe.SafeInterfaceName(ifc.OriginalName) {
+			writeErrs = append(writeErrs, fmt.Errorf("networkd: refusing OriginalName %q for interface %q: it is not exactly one [Match] OriginalName= pattern or it carries control bytes — systemd would read it as a whitespace-separated list claiming other interfaces (#9886)", ifc.OriginalName, ifc.Name))
 			continue
 		}
 		filtered = append(filtered, ifc)
@@ -413,7 +467,6 @@ func (m *Manager) Apply(interfaces []InterfaceConfig) error {
 	// aggregated (#2987): we still attempt every generated file so a single
 	// blocked path does not silently skip the rest, then fail the Apply at
 	// the end so the commit cannot succeed against stale kernel state.
-	var writeErrs []error
 	write := func(path, content string) {
 		ch, err := writeIfChanged(path, content)
 		if err != nil {

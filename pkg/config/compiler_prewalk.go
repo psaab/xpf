@@ -180,6 +180,20 @@ func runPreWalkGates(tree *ConfigTree, opts compileOpts) ([]string, error) {
 		return nil, ifaceRangeErr
 	}
 
+	// #9886 render-unsafe interface-name gate. Runs AFTER the #1798 sanitize
+	// above (so it sees the post-scrub keys section compilation would turn
+	// into device names) and AFTER range expansion (so range members are
+	// ordinary children, not unexpanded `member` statements). Strict (direct
+	// CompileConfig; the commit path's schema walk rejects first, except for
+	// member-interfaces references, which the schema does not validate):
+	// hard-error. Lenient (load / peer-sync): DROP the poisoned name + warn
+	// loudly (#5834 shape — see the gate's rationale for why not hard-error).
+	identityPatternWarnings, err := validateRenderUnsafeInterfaceNamesAST(
+		tree.Children, opts.lenientRenderUnsafeInterfaceNames)
+	if err != nil {
+		return nil, err
+	}
+
 	// #2008 H9/H10 interface silent-drop gate. Runs on the group-expanded,
 	// inactive-pruned tree (apply-groups-inherited stanzas covered;
 	// `inactive:` stanzas already stripped upstream) and BEFORE section
@@ -712,6 +726,7 @@ func runPreWalkGates(tree *ConfigTree, opts compileOpts) ([]string, error) {
 	warnings = append(warnings, flowTraceFilterWarnings...)
 	warnings = append(warnings, flowTraceSizeWarnings...)
 	warnings = append(warnings, ifaceRangeWarnings...)
+	warnings = append(warnings, identityPatternWarnings...)
 	warnings = append(warnings, unsupportedIfaceWarnings...)
 	warnings = append(warnings, appCollisionWarnings...)
 	warnings = append(warnings, fwFilterFamilyWarnings...)
