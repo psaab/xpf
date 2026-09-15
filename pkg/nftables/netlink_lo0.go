@@ -53,6 +53,29 @@ func buildLo0FilterNetlink(p *nlPlan, spec Lo0FilterSpec) {
 // buildLo0TermNetlink lowers one filter term to 0, 1, or 2 kernel rules,
 // mirroring nftRulesFromTerm.
 func buildLo0TermNetlink(p *nlPlan, t Lo0FilterTerm, f nlFamily) {
+	// #9875: a whole `from` leaf the dataplane does not enforce
+	// (term.UnknownFrom, #3307) or a value-bearing leaf written with NO
+	// operand (term.ValuelessFrom, #8480), carried here as FromUnrepresentable
+	// by toNftLo0Term. This preflight runs FIRST, ahead of the address
+	// elimination below: a marked term refuses the whole plan even when it
+	// is also match-nothing for this family. Letting a marked match-nothing
+	// term skip would install the remaining plan while the Rust filter
+	// compiler rejects the same snapshot — the two dataplanes enforcing
+	// different policy on the same config. The surviving predicates would
+	// render the term WITHOUT its authored constraint — byte-identical to a
+	// term authored without the leaf — so an accept term over-permits and a
+	// discard/reject term over-drops on the kernel-PRIMARY lo0 chain. Fail
+	// the whole plan CLOSED (refuse-all, NOT term-skip: skipping would let
+	// the traffic fall through to later terms and the implicit accept, and
+	// a per-term drop cannot be scoped to a constraint of unknown direction
+	// — a bare drop would deny ALL host-inbound traffic). The install aborts
+	// and the prior ruleset stands — the #6806 ICMP posture, matching the
+	// userspace snapshot refusal (SnapshotIntegrityError::UnrepresentableFilterFrom).
+	if t.FromUnrepresentable {
+		p.fail(fmt.Errorf("lo0 filter term %q: unrepresentable from leaf", t.Name))
+		return
+	}
+
 	// Resolve the address predicates first: a positive scope that resolves to no
 	// prefix of this family is a Junos match-nothing term (skip entirely).
 	// #6512: a malformed token in either direction fails the plan CLOSED. Never

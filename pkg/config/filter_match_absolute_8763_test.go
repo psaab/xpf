@@ -96,6 +96,7 @@ func noOtherMatchFields(tr *FirewallFilterTerm, allowed ...string) error {
 	// Nothing may be silently bucketed as unrecognised either.
 	for name, got := range map[string][]string{
 		"UnknownFrom":      tr.UnknownFrom,
+		"ValuelessFrom":    tr.ValuelessFrom, // #9875: same unplaced-value census
 		"UnknownAddresses": tr.UnknownAddresses,
 		"UnknownPorts":     tr.UnknownPorts,
 		"UnknownICMPTypes": tr.UnknownICMPTypes,
@@ -355,6 +356,8 @@ func TestNoOtherMatchFieldsCatchesTheOverMatch8763(t *testing.T) {
 		{"an action field leaked in", &FirewallFilterTerm{Policer: "p"}, []string{"SourceAddresses"}, "Policer"},
 		{"accepted at commit then bucketed as unrecognised",
 			&FirewallFilterTerm{SourceAddresses: []string{"a"}, UnknownFrom: []string{"ttl"}}, []string{"SourceAddresses"}, "UnknownFrom"},
+		{"accepted at commit then bucketed as valueless (#9875)",
+			&FirewallFilterTerm{SourceAddresses: []string{"a"}, ValuelessFrom: []string{"protocol"}}, []string{"SourceAddresses"}, "ValuelessFrom"},
 		{"an empty slice is not populated", &FirewallFilterTerm{SourceAddresses: []string{"a"}, Protocols: []string{}}, []string{"SourceAddresses"}, ""},
 	} {
 		err := noOtherMatchFields(tc.term, tc.allowed...)

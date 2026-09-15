@@ -192,6 +192,22 @@ func buildFilterTermSnapshots(filterName string, filter *config.FirewallFilter, 
 		if len(term.UnknownAddresses) > 0 {
 			snap.AddressUnrepresentable = true
 		}
+		// #9875: a WHOLE `from` leaf the dataplane does not enforce
+		// (term.UnknownFrom, recorded by compileFilterFrom's default arm,
+		// #3307) or a value-bearing leaf written with NO operand
+		// (term.ValuelessFrom, #8480). The strict commit gates
+		// (validateFilterFromMatchStrict,
+		// validateFirewallFilterValuelessFromStrict) reject both; on the
+		// lenient / peer-sync path they reach here. The pre-#9875 builder
+		// emitted only the surviving match set — byte-identical to a term
+		// authored without the leaf — so an accept term over-permitted
+		// and a discard/reject term over-dropped with no signal past the
+		// boot warning. Mark the term so the Rust filter compiler fails
+		// the snapshot CLOSED rather than enforcing the widened match —
+		// mirroring the ICMP/DSCP/ports/address #3406 family.
+		if len(term.UnknownFrom) > 0 || len(term.ValuelessFrom) > 0 {
+			snap.FromUnrepresentable = true
+		}
 		// #3406: a single direction carrying BOTH a positive port list and a
 		// `*-port-except` list has no single-inversion representation, so the Rust
 		// filter compiler resolves it POSITIVE-WINS (the except list is ignored —

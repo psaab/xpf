@@ -364,6 +364,28 @@ pub(crate) struct FirewallTermSnapshot {
     // plane that omits the field (#1961).
     #[serde(rename = "address_unrepresentable", default)]
     pub address_unrepresentable: bool,
+    // from_unrepresentable (#9875) is set by the Go control plane when the
+    // term's `from` block carried a match leaf the dataplane does NOT enforce
+    // (recorded on term.UnknownFrom, #3307 — ttl / source-mac-address /
+    // ip-options / fragment-offset / hop-limit / ...) or a value-bearing leaf
+    // written with NO operand (recorded on term.ValuelessFrom, #8480 — `from
+    // protocol;`). Both compile to a term missing a constraint the operator
+    // authored: the strict commit gates (validateFilterFromMatchStrict,
+    // validateFirewallFilterValuelessFromStrict) reject them, so a committed
+    // config never sets this. Without the flag the snapshot carried only the
+    // surviving match set — byte-identical to a term authored without the
+    // leaf — so an accept term over-permitted and a discard/reject term
+    // over-dropped with no signal past the boot warning. With this flag the
+    // filter compiler raises
+    // SnapshotIntegrityError::UnrepresentableFilterFrom and rejects the whole
+    // snapshot (the reconcile preflight keeps the previous good filter
+    // state). Whole-snapshot rejection — not term poisoning — because poisoning
+    // a discard/reject term to match-nothing would let its traffic fall through
+    // to the implicit accept (fail-OPEN); only refusing the snapshot is
+    // action-agnostic. serde(default) keeps wire parity with an older control
+    // plane that omits the field (#1961).
+    #[serde(rename = "from_unrepresentable", default)]
+    pub from_unrepresentable: bool,
     // flex_match is the Junos `from flexible-match-range` byte-offset match
     // (#3077). It was parsed + compiled for the retired legacy dataplane but
     // dropped on the userspace wire, so the byte-offset constraint vanished and

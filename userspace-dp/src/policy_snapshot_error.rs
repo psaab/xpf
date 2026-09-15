@@ -324,6 +324,29 @@ pub(crate) enum SnapshotIntegrityError {
         filter: String,
         term: String,
     },
+    /// #9875: a firewall-filter term carried the `from_unrepresentable` wire
+    /// marker — the term's `from` block carried a match leaf the dataplane
+    /// does NOT enforce (recorded on term.UnknownFrom, #3307) or a
+    /// value-bearing leaf written with NO operand (recorded on
+    /// term.ValuelessFrom, #8480). The pre-fix Go builder emitted only the
+    /// surviving match set — byte-identical to a term authored without the
+    /// leaf — so an accept term over-permitted and a discard/reject term
+    /// over-dropped with no signal past the boot warning. The Go commit gates
+    /// (`validateFilterFromMatchStrict`, #3307;
+    /// `validateFirewallFilterValuelessFromStrict`, #8480) are the primary
+    /// defense — a committed config never sets the marker — so this is the
+    /// helper-boundary backstop for a lenient / peer-synced / hand-built /
+    /// version-drifted snapshot, consistent with the #2505/#3367/#3406
+    /// fail-closed family. Rejecting the whole snapshot (the reconcile
+    /// preflight keeps the previous good filter state) is action-agnostic:
+    /// poisoning a discard/reject term to match-nothing would let its traffic
+    /// fall through to the implicit accept (fail-OPEN). `family` (inet /
+    /// inet6) is carried because filter names can be reused across families.
+    UnrepresentableFilterFrom {
+        family: String,
+        filter: String,
+        term: String,
+    },
     /// #3406: a firewall-filter term's `flex_match` carried a byte `length` outside
     /// the representable 1..=4 range (the `value` / `mask` wire fields are u32). The
     /// pre-fix Go builder CAPPED an oversized width to 4 and still emitted the term,
@@ -901,6 +924,15 @@ impl std::fmt::Display for SnapshotIntegrityError {
             } => write!(
                 f,
                 "firewall family {:?} filter {:?} term {:?} has an unparseable address literal — refusing to fail open by dropping it per-token (which would narrow a discard/reject term to only the surviving prefixes and let the rest fall through to the implicit accept)",
+                family, filter, term
+            ),
+            Self::UnrepresentableFilterFrom {
+                family,
+                filter,
+                term,
+            } => write!(
+                f,
+                "firewall family {:?} filter {:?} term {:?} has a from match leaf the dataplane does not enforce — refusing to fail wide by dropping it (which would let an accept term over-permit and a discard/reject term over-drop)",
                 family, filter, term
             ),
             Self::UnrepresentableFilterFlexMatch {

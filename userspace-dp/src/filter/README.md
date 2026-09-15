@@ -1070,6 +1070,37 @@ Tests: `ports_unrepresentable_marker_*`, `address_unrepresentable_marker_*`,
 `TestFirewallTermSnapshotUnrepresentableMarkerWireKeys_6459_6463`,
 `TestFilterMalformedAddressRecorded_6463` (Go) (fail-on-revert).
 
+Whole-`from`-leaf widening backstop (#9875): the same fail-closed family, a
+coarser failure GRANULARITY. The #3406/#6459/#6463 markers cover unresolvable
+tokens WITHIN a leaf the dataplane otherwise enforces. A whole `from` leaf
+the dataplane does not enforce at all (recorded on `term.UnknownFrom`, #3307
+— ttl / source-mac-address / ip-options / fragment-offset / hop-limit / ...)
+or a value-bearing leaf written with NO operand (recorded on
+`term.ValuelessFrom`, #8480 — `from protocol;`) compiles to a term missing
+an entire authored constraint: the snapshot carried only the surviving match
+set — byte-identical to a term authored without the leaf — so an accept term
+over-permitted and a discard/reject term over-dropped with no signal past
+the boot warning. One wire bool closes it, same shape as the family (Go
+builder sets, `parse_term` rejects the whole snapshot; strict commit gates
+`validateFilterFromMatchStrict` / `validateFirewallFilterValuelessFromStrict`
+are the primary defense):
+
+- **`from_unrepresentable` (#9875):** set when compileFirewall records any
+  unenforced `from` leaf on `term.UnknownFrom` or any valueless leaf on
+  `term.ValuelessFrom`; `parse_term` raises
+  `SnapshotIntegrityError::UnrepresentableFilterFrom`.
+
+Whole-snapshot rejection — not term poisoning — because poisoning a
+discard/reject term to match-nothing would let its traffic fall through to
+the implicit accept (fail-OPEN); only refusing the snapshot is
+action-agnostic.
+
+Tests: `from_unrepresentable_marker_*`,
+`firewall_term_snapshot_from_unrepresentable_wire_key_9875` (Rust) and
+`TestFilterSnapshotFromUnrepresentable*`,
+`TestFirewallTermSnapshotFromUnrepresentableWireKey_9875` (Go)
+(fail-on-revert).
+
 ### Negated port match — `source-port-except` / `destination-port-except` (#2622)
 
 Junos `from source-port-except` / `from destination-port-except` matches every

@@ -107,7 +107,14 @@ const preSecureTunnelProtocolVersion = 4
 // Issue 9874 moves it 18 -> 19, for `SourceNATRuleSnapshot.lenient_match_dropped`,
 // the fail-closed poison for an authored-empty NAT match. Nothing about
 // secure_tunnel changed, so MinProtocolSecureTunnelRefusal (7) is untouched again.
-const secureTunnelSnapshotProtocolVersion = 19
+//
+// Issue 9875 moves it 19 -> 20, for
+// `FirewallTermSnapshot.FromUnrepresentable`, set when the term's `from`
+// carried a match leaf the dataplane does not enforce (term.UnknownFrom,
+// #3307) or a value-bearing leaf written with no operand
+// (term.ValuelessFrom, #8480). Nothing about secure_tunnel changed, so
+// MinProtocolSecureTunnelRefusal (7) is untouched again.
+const secureTunnelSnapshotProtocolVersion = 20
 
 // preV5HelperAcceptsSnapshot models the exact-equality version gate a pre-v5
 // helper applies before touching any dataplane state

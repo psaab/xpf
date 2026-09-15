@@ -145,6 +145,23 @@ type Lo0FilterTerm struct {
 	// tcp-flags direction: rendering the term without its narrowing is the
 	// fail-open this issue is about.
 	FlexMatchUnrepresentable bool
+	// FromUnrepresentable marks a term whose `from` block carried a match leaf
+	// the dataplane does NOT enforce (config.FirewallFilterTerm.UnknownFrom,
+	// #3307 — ttl / source-mac-address / ip-options / fragment-offset /
+	// hop-limit / ...) or a value-bearing leaf written with NO operand
+	// (config.FirewallFilterTerm.ValuelessFrom, #8480 — `from protocol;`).
+	// Both compile to a term missing an entire authored constraint; without
+	// the marker the mirror renders only the surviving predicates —
+	// byte-identical to a term authored without the leaf — so an accept term
+	// over-permits and a discard/reject term over-drops on the chain that is
+	// the PRIMARY enforcement for host traffic. The name matches the
+	// userspace wire field
+	// (dpuserspace.FirewallTermSnapshot.FromUnrepresentable) so the two
+	// mirrors of the same config term are greppable as one contract. Strict
+	// commit rejects both spellings; the tolerant load / peer-sync paths only
+	// warn (#1960), so the mirror must still decide. It fails the netlink
+	// plan CLOSED — see buildLo0TermNetlink (#9875).
+	FromUnrepresentable bool
 
 	Log   bool
 	Count string

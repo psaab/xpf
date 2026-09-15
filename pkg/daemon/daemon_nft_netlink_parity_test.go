@@ -312,6 +312,70 @@ func runNftNetlinkParityInner(t *testing.T) {
 		}
 	})
 
+	t.Run("lo0_unrepresentable_from_fails_closed", func(t *testing.T) {
+		// #9875: a whole `from` leaf the dataplane does not enforce
+		// (term.UnknownFrom, #3307) or a value-bearing leaf written with NO
+		// operand (term.ValuelessFrom, #8480). BOTH sides must FAIL CLOSED:
+		// the oracle emits the nft-invalid
+		// __xpf_refuse_unrepresentable_from__ bareword and `nft -f -`
+		// REJECTS the whole ruleset (prior ruleset retained); the netlink
+		// build must likewise error (InstallLo0 != nil) and leave NO
+		// partial table — never drop the constraint and widen the accept
+		// to match-all. Each channel gets its own config so the subtest
+		// proves both refuse, not just the first invalid rule.
+		for _, tc := range []struct {
+			name string
+			term *config.FirewallFilterTerm
+		}{
+			{
+				name: "unknown_from",
+				term: &config.FirewallFilterTerm{
+					Name: "ttl-term", Protocols: []string{"tcp"},
+					UnknownFrom: []string{"ttl"}, Action: "accept",
+				},
+			},
+			{
+				name: "valueless_from",
+				term: &config.FirewallFilterTerm{
+					Name: "empty-proto", ValuelessFrom: []string{"protocol"}, Action: "accept",
+				},
+			},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				badCfg := &config.Config{}
+				badCfg.Firewall.FiltersInet = map[string]*config.FirewallFilter{
+					"badf": {Terms: []*config.FirewallFilterTerm{tc.term}},
+				}
+				nftDeleteTableBestEffort(xnft.Lo0TableName)
+
+				// Oracle side: nft must REJECT the refusal bareword.
+				oracle := buildLo0FilterPayload(badCfg, "badf", "")
+				cmd := exec.Command(findNft(), "-f", "-")
+				cmd.Stdin = strings.NewReader(oracle)
+				if out, err := cmd.CombinedOutput(); err == nil {
+					nftDeleteTableBestEffort(xnft.Lo0TableName)
+					t.Fatalf("oracle FAIL-CLOSED expected: nft ACCEPTED a from-unrepresentable "+
+						"term (fail-open):\n%s", oracle)
+				} else {
+					t.Logf("oracle correctly rejected the from-unrepresentable term: %s",
+						strings.TrimSpace(string(out)))
+				}
+
+				// Netlink side: InstallLo0 must ERROR and install nothing.
+				spec := toNftLo0Spec(badCfg, "badf", "")
+				if _, err := inst.InstallLo0(spec); err == nil {
+					nftDeleteTableBestEffort(xnft.Lo0TableName)
+					t.Fatal("netlink FAIL-CLOSED expected: InstallLo0 returned nil on a " +
+						"from-unrepresentable term (fail-open: the accept widened to match-all)")
+				}
+				if out, err := exec.Command(findNft(), "list", "table", "inet", xnft.Lo0TableName).CombinedOutput(); err == nil {
+					nftDeleteTableBestEffort(xnft.Lo0TableName)
+					t.Fatalf("netlink left a PARTIAL ruleset after a fail-closed build (should have installed nothing):\n%s", out)
+				}
+			})
+		}
+	})
+
 	// Mutation-sensitivity against the REAL oracle: each fail-open class must make
 	// the netlink dump DIVERGE from the oracle dump — proving the gate catches a
 	// fail-open rather than passing vacuously (§12.1).

@@ -8175,6 +8175,38 @@ non-canonical tokens (e.g. `+80`). Fail-on-revert:
 `ports_unrepresentable_marker_*` / `address_unrepresentable_marker_*` /
 `filter_parse_port_spec_rejects_signed_6477` (Rust).
 
+The fail-closed marker family has a coarser-granularity sibling (#9875): a
+whole `from` leaf the dataplane does not enforce at all (recorded on
+`term.UnknownFrom`, #3307 — `ttl`, `source-mac-address`, `ip-options`,
+`fragment-offset`, `hop-limit`, ...) or a value-bearing leaf written with NO
+operand (recorded on `term.ValuelessFrom` via
+`firewallTermValuelessFromLeaves`, #8480 — `from protocol;`) compiled to a
+term missing an entire authored constraint. The snapshot carried only the
+surviving match set — byte-identical to a term authored without the leaf —
+so an `accept` term over-permitted and a `discard`/`reject` term over-dropped
+with no signal past the boot warning. The snapshot builder now sets the
+`from_unrepresentable` wire marker from either recording, and the Rust
+`parse_term` rejects the WHOLE snapshot
+(`SnapshotIntegrityError::UnrepresentableFilterFrom`); the kernel lo0 mirror
+fails its install the same way (netlink `FromUnrepresentable` plan refusal,
+oracle `__xpf_refuse_unrepresentable_from__`), and the PBR classifier drops
+the term's steering. Whole-snapshot refusal — not term poisoning — because
+poisoning a `discard`/`reject` term to match-nothing would let its traffic
+fall through to the implicit accept (fail-OPEN). The strict gates
+(`validateFilterFromMatchStrict`, `validateFirewallFilterValuelessFromStrict`)
+remain the primary defense; the marker guards the lenient / peer-synced /
+hand-built / version-drifted snapshot. Bumped `ProtocolVersion` 19 -> 20
+with it: an old helper ignores the new key and enforces the widened term,
+which IS the defect the marker closes. Fail-on-revert:
+`TestFilterSnapshotFromUnrepresentable*` /
+`TestFirewallTermSnapshotFromUnrepresentableWireKey_9875` (Go,
+`pkg/dataplane/userspace/filters_snapshot_integrity_9875_test.go`),
+`TestFilterValuelessFrom*` / `TestFilterSelfNamedPrefixListCommits9875` /
+`TestFilterFromMarkerGateEquivalence9875` /
+`TestFilterUnknownFromLenientRecord9875` (Go,
+`pkg/config/firewall_from_unrepresentable_9875_test.go`), and
+`from_unrepresentable_marker_*` (Rust).
+
 ### `firewall ... from` cross-field satisfiability — port/tcp-flags/icmp must match the protocol (#3723)
 
 A firewall-filter `from` block can combine a `protocol` (or the inet6

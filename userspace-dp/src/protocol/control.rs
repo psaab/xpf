@@ -136,14 +136,30 @@ use super::snapshot::{ConfigSnapshot, FabricSnapshot, NeighborSnapshot, Userspac
 // mismatch is refused by the pinned-map pre-flight (fail-closed deploy per
 // §5e), independently of this JSON gate. See protocol.go's v17 note. The
 // #8892 digest moves with it (the plural is a real, transmitted field).
+// v18 (#9637): NO wire change — the dual-outlet behavioral contract. A
+// pre-narrowing helper satisfies the handshake but funnels every reinject
+// through `xpf-usp0`, which a v18 kernel exempts from destination judgment.
+// BUMPED on the merits under the v9 rule even with the digest unmoved. See
+// protocol.go's v18 note.
 // v19 (#9874): `SourceNATRuleSnapshot.lenient_match_dropped`, the fail-closed
 // poison for a rule whose authored match constrains nothing. An old helper
 // ignores it and keeps installing the catch-all translator, which is the
 // defect the field closes. See protocol.go's v19 note. The #8892 digest moves
 // with it (a real, transmitted field, plus the `json:"-"` typed diagnostic
 // that feeds it).
+// v20 (#9875): `FirewallTermSnapshot.from_unrepresentable`, set when the
+// term's `from` carried a match leaf this process does not enforce
+// (term.UnknownFrom, #3307) or a value-bearing leaf written with no operand
+// (term.ValuelessFrom, #8480). An old helper ignores the new key and
+// enforces the SURVIVING match set — byte-identical to a term authored
+// without the leaf — so an accept term over-permits and a discard/reject
+// term over-drops, which IS the defect the marker closes. A new helper under
+// an old daemon reads the key absent (false) and enforces the widened term
+// exactly as before — the pre-fix window, closed on upgrade. Exact equality
+// refuses both pairings. See protocol.go's v20 note. The #8892 digest moves
+// with it (a real, transmitted field).
 // Keep the line below in this exact form: the Go lockstep guard parses it.
-pub(crate) const CONFIG_SNAPSHOT_PROTOCOL_VERSION: i32 = 19;
+pub(crate) const CONFIG_SNAPSHOT_PROTOCOL_VERSION: i32 = 20;
 
 /// #9520: the machine-readable prefix of the refusal `apply` sends when a
 /// snapshot reuses the installed generation with a different content digest.

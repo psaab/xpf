@@ -1550,6 +1550,9 @@ func TestBuildPBRRules(t *testing.T) {
 			{"unknown-from", &config.FirewallFilterTerm{
 				Name: "t", DestAddresses: []string{"10.0.0.0/8"},
 				UnknownFrom: []string{"ttl"}, RoutingInstance: "ATT"}},
+			{"valueless-from (#9875)", &config.FirewallFilterTerm{
+				Name: "t", DestAddresses: []string{"10.0.0.0/8"},
+				ValuelessFrom: []string{"protocol"}, RoutingInstance: "ATT"}},
 		}
 		for _, tc := range cases {
 			t.Run(tc.name, func(t *testing.T) {

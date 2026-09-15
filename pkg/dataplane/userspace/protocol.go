@@ -256,7 +256,23 @@ const (
 	// `NATRule.LenientMatchDropped` diagnostic that feeds it is `json:"-"`
 	// and rides along invisibly — the #9246 STANDS arm, folded into this
 	// bump rather than a separate entry.)
-	ProtocolVersion = 19
+	//
+	// v20 (issue 9875): `FirewallTermSnapshot.FromUnrepresentable`, set when
+	// the term's `from` carried a match leaf the dataplane does not enforce
+	// (term.UnknownFrom, #3307) or a value-bearing leaf written with no
+	// operand (term.ValuelessFrom, #8480). BUMPED on the merits under the
+	// v9 rule: an old helper ignores the new key and enforces the SURVIVING
+	// match set — byte-identical to a term authored without the leaf — so
+	// an accept term over-permits and a discard/reject term over-drops,
+	// which IS the defect the marker closes (the #3406/#6459/#6463 family
+	// rode without bumps only because all of them predate the #8892 cell;
+	// the v4 rule above — "a compatibility extension that changes
+	// deny/reject COVERAGE must not be silently ignorable" — governs now).
+	// A new helper under an old daemon reads the key absent (false) and
+	// enforces the widened term exactly as before — the pre-fix window,
+	// closed on upgrade. Exact equality refuses both pairings; the #8892
+	// digest moves with it (a real, transmitted field).
+	ProtocolVersion = 20
 
 	// MinProtocolMultiZoneScopedPolicy is the FIRST snapshot protocol version
 	// that can represent a multi-zone scoped global policy — the plural

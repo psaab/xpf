@@ -355,6 +355,10 @@ func firewallTermIsTerminatingAction(t *FirewallFilterTerm) bool {
 // therefore NOT a catch-all. Adding a new match field to FirewallFilterTerm
 // requires adding it here.
 func firewallTermFromUnconstrained(t *FirewallFilterTerm) bool {
+	// #9875: ValuelessFrom joins UnknownFrom below — a term that WROTE a
+	// value-bearing leaf but left it empty compiles to the same empty match
+	// set as an omitted leaf, yet it is a broken authored constraint, not
+	// an intentional catch-all.
 	return len(t.SourceAddresses) == 0 &&
 		len(t.DestAddresses) == 0 &&
 		len(t.SourcePrefixLists) == 0 &&
@@ -375,5 +379,6 @@ func firewallTermFromUnconstrained(t *FirewallFilterTerm) bool {
 		!t.IsFragment &&
 		t.FlexMatch == nil &&
 		len(t.UnknownFlexMatch) == 0 &&
-		len(t.UnknownFrom) == 0
+		len(t.UnknownFrom) == 0 &&
+		len(t.ValuelessFrom) == 0
 }

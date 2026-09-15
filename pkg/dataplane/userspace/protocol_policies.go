@@ -195,6 +195,32 @@ type FirewallTermSnapshot struct {
 	// whole snapshot instead. omitempty + the Rust serde default keep wire
 	// parity with an older control plane that omits the field (#1961).
 	AddressUnrepresentable bool `json:"address_unrepresentable,omitempty"`
+	// FromUnrepresentable (#9875) is set true when the term's `from` block
+	// carried a match leaf the dataplane does NOT enforce (recorded on
+	// term.UnknownFrom, #3307 — ttl / source-mac-address / ip-options /
+	// fragment-offset / hop-limit / ...) or a value-bearing leaf written
+	// with NO operand (recorded on term.ValuelessFrom, #8480 — `from
+	// protocol;`). Both compile to a term missing a constraint the
+	// operator authored: the strict commit gates
+	// (validateFilterFromMatchStrict, validateFirewallFilterValuelessFromStrict)
+	// reject them, so a committed config never sets this; it is the
+	// helper-boundary fail-closed marker for the tolerant load / peer-sync
+	// path. Without it the snapshot carried only the surviving match set —
+	// byte-identical to a term authored without the leaf — so an accept
+	// term over-permitted and a discard/reject term over-dropped with no
+	// signal past the boot warning. With this flag the Rust filter
+	// compiler raises SnapshotIntegrityError::UnrepresentableFilterFrom
+	// and rejects the whole snapshot instead (the reconcile preflight
+	// keeps the previous good filter state). Whole-snapshot rejection —
+	// not term poisoning — because poisoning a discard/reject term to
+	// match-nothing would let its traffic fall through to the implicit
+	// accept (fail-OPEN); only refusing the snapshot is action-agnostic.
+	// omitempty + the Rust serde default keep wire parity with an older
+	// control plane that omits the field (#1961); the version BUMP (v20,
+	// not a STANDS entry) is what refuses a mixed pair, because an old
+	// helper that ignores this field enforces the widened term — the
+	// defect itself (#8892 v10/v11 arm, #5488 v4 rule).
+	FromUnrepresentable bool `json:"from_unrepresentable,omitempty"`
 	// FlexMatch is the Junos `from flexible-match-range` byte-offset match
 	// (#3077). Before this wiring it was parsed + compiled for the retired
 	// legacy dataplane but DROPPED on the userspace wire, so the byte-offset

@@ -1547,6 +1547,16 @@ func pbrTermL4(term *config.FirewallFilterTerm) (protos []int, sports, dports []
 	for _, f := range term.UnknownFrom {
 		unrep = append(unrep, "unsupported from-match "+f)
 	}
+	// #9875: a value-bearing leaf written with NO operand (`from protocol;`,
+	// #8480) compiles to the byte-identical empty match set the omitted form
+	// produces, which the filter matchers read as match-ANY — the term
+	// widens. Steering the surviving predicates would steer a different
+	// packet set than the (fail-closed) filter enforces, so the term's
+	// steering is dropped and the build degrades, like every other
+	// unrepresentable predicate above.
+	for _, f := range term.ValuelessFrom {
+		unrep = append(unrep, "valueless from-match "+f)
+	}
 
 	// Representable: `from protocol` → one FRA_IP_PROTO value per protocol.
 	for _, p := range term.Protocols {
