@@ -190,10 +190,11 @@ class InventoryWiringTests(unittest.TestCase):
 
     def test_the_pkgs_sidecar_joins_the_SIGNED_checksum_set(self):
         # Outside the signed set it is unauthenticated metadata — exactly the
-        # gap #5042 closed for the .manifest sidecar.
-        self.assertIn(
-            "sign.write_manifest(sums, [qcow_out, meta_out, manifest, pkgs_out])",
-            self.SRC)
+        # gap #5042 closed for the .manifest sidecar. #9920: the set is the
+        # SSOT shared with the strict sign-manifest gate (its four members are
+        # pinned in scripts/dist/test_dist_resign_9920.py).
+        self.assertIn("sign.write_manifest(", self.SRC)
+        self.assertIn("sign.bake_set_basenames(ver)", self.SRC)
 
     def test_a_bad_inventory_aborts_the_bake(self):
         self.assertIn("image_inventory.InventoryError", self.SRC)

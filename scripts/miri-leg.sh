@@ -41,6 +41,9 @@ cd "$REPO_ROOT" || exit 1
 REGISTRY=userspace-dp/MIRI.registry
 MANIFEST=userspace-dp/Cargo.toml
 TOOLCHAIN=${MIRI_TOOLCHAIN:-+nightly}
+# #9920 F-148: the explicit +toolchain above overrides the userspace-dp pin
+# (rust-toolchain.toml) — this leg intentionally runs Miri's nightly, not the
+# Makefile's pinned helper toolchain.
 LOGDIR=${MIRI_LOG_DIR:-$(mktemp -d "${TMPDIR:-/tmp}/miri-leg.XXXXXXXX")}
 mkdir -p "$LOGDIR"
 

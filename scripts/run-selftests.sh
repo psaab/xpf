@@ -128,6 +128,7 @@ scripts/image/test-grow-root.sh
 scripts/dist/selftest.sh
 scripts/dist/install.sh
 scripts/dist/build-apt-repo.sh
+userspace-dp/build_support/dp-toolchain.sh
 scripts/run-selftests.sh
 scripts/mutate-lib.sh
 scripts/mutate.sh
