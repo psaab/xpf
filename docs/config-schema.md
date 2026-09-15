@@ -183,16 +183,14 @@ the other two and changes nothing in the shipped product.
 
 **Which of the three needs the same-keyword collision check, and which cannot.**
 `compactNormalizeInScope` is keyed on a **(container, head) PAIR**, so an
-admission reaches *every* container with that keyword — there are **fourteen**
-containers named `then` (firewall inet/inet6 filter terms, firewall policer,
-three-color-policer, policy-options term, security policies from-zone and
-global, pre-id-default-policy, plus their `groups` mirrors). Admitting
-`(then, metric)` for one admits it for all fourteen.
+admission reaches *every* container with that keyword: firewall filter terms
+(implicit inet and explicit inet/inet6/any), firewall policers,
+three-color-policers, policy-options terms, security policies, and their
+`groups` mirrors. Admitting `(then, metric)` reaches every such declaration.
 
 `packedStatements` is a field on a **schemaNode**. It reaches that node and
-nothing else, so the collision hazard **cannot** apply to it: opting in the two
-filter-term `then` nodes leaves the other twelve untouched, by construction
-rather than by care.
+nothing else, so the collision hazard **cannot** apply to it: opting in the
+filter-term `then` nodes leaves other `then` nodes untouched by construction.
 
 So the rule is: **a pair-keyed admission owes the collision check; a
 node-declared opt-in does not.** Deriving that per remedy is how the check gets
@@ -1216,10 +1214,27 @@ Putting `gre` first makes the dropped value and the fallback identical, so a rea
 divergence reads as EQUIVALENT and the #2419 inventory entry looks stale. A
 fixture must never use the value the bug falls back to.
 
+### Canonical interface numeric values (#9899)
+
+Tunnel `key` and `ttl`, at interface and unit level, and unit `vlan-id` /
+`inner-vlan-id` use the same unsigned-decimal parser in schema validation and
+compilation. Signs, whitespace, empty operands, malformed digits and overflow
+are rejected. The bounds are key **0..4294967295**, TTL **1..255**, and VLAN IDs
+**0..4094**. Omitted TTL retains its default-64 sentinel; explicitly authored
+TTL 0 is not an omission. VLAN 0 remains the untagged sentinel.
+
+Strict compilation rejects an invalid value. Tolerant load / peer-sync warns
+with its path and token and quarantines the owning interface for an invalid
+interface tunnel value, or skips the owning unit for an invalid unit value.
+It must not turn a malformed key into an unkeyed or inherited tunnel, or a
+malformed VLAN into an untagged unit. Valid siblings remain available. The
+existing strict QinQ presence gate still rejects `inner-vlan-id`, including 0;
+range-valid inner values remain warning-only on the tolerant path.
+
 ### `interfaces <if> tunnel keepalive-retry` — a bound for REACHABILITY, not overflow (#9157)
 
 `key`, `ttl` and `keepalive` under `tunnel` each carry `valueType: ValueInteger`
-plus an explicit `ValidateInteger` range. `keepalive-retry` carried neither, and
+plus explicit numeric range checks. `keepalive-retry` carried neither, and
 it was the only one of the four that did not — an omission among typed siblings,
 which is the shape a per-leaf test cannot see.
 
@@ -1585,9 +1600,20 @@ Both are closed. Measured on the flat-set path:
 | spelling | commit gate | FiltersInet | FiltersInet6 |
 |---|---|---|---|
 | `family inet` | ACCEPT | 1 | 0 |
+| implicit inet (`firewall filter F`) | ACCEPT (#9899) | 1 | 0 |
 | `family inet6` | ACCEPT | 0 | 1 |
 | `family any` | ACCEPT | 1 | 1 |
 | `family inett` | **REJECT** at strict compile, naming the token; WARN on the tolerant path | 0 | 0 |
+
+**Implicit inet is valid Junos, not a malformed family token (#9899).**
+[Juniper's configuration guidelines](https://www.juniper.net/documentation/us/en/software/junos/routing-policy/topics/concept/firewall-filter-stateless-guidelines-for-configuring.html)
+explicitly state that `family inet` is optional and that `[edit firewall]`
+and `[edit firewall family inet]` are equivalent. xpf now declares the root
+`filter` grammar and normalizes this spelling on cloned compile/validation
+views before expansion and all gates, including filters inherited from groups.
+The candidate/display tree stays as authored. Mixed implicit/explicit inet
+definitions retain the existing same-name duplicate refusal (#8426), and
+collisions with `family any` retain #3884; this alias does not merge away gates.
 
 **Two designs were tried and backed out; both are worth knowing about.**
 
@@ -1608,8 +1634,8 @@ is reached first and the other silently stops being covered — observed directl
 as #8768 reporting that `firewall/family/inet/filter/term/then` "no longer opts
 in" while nothing about inet had changed. `any` now gets a DEEP COPY. That trades
 invisibility for drift, and drift is the failure a test can see:
-`TestFirewallFamiliesAcceptTheSameGrammar9017` compares all three families' `from`
-grammars.
+`TestFirewallFamiliesAcceptTheSameGrammar9017` compares the three explicit
+families and the deep-copied implicit-inet `from` grammar.
 
 Declaring `any` was also **necessary and not sufficient**: the compact spelling
 `family any filter F { … }` stayed packed until `any filter` joined the

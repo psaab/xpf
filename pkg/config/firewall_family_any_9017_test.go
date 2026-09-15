@@ -200,10 +200,9 @@ func TestFamilyAnyAgreesAcrossEVERYSpelling9017(t *testing.T) {
 	}
 }
 
-// TestFirewallFamiliesAcceptTheSameGrammar9017 guards the sharing decision.
-// `any` SHARES inet's children map, so those two cannot drift. `inet6` is a
-// separate literal and CAN, and a family that accepts a match `any` does not
-// would reintroduce this defect one keyword at a time.
+// TestFirewallFamiliesAcceptTheSameGrammar9017 guards the copied filter
+// grammars, including the implicit-inet spelling. A family that accepts a
+// match another spelling does not would reintroduce the defect.
 func TestFirewallFamiliesAcceptTheSameGrammar9017(t *testing.T) {
 	fam := schemaFirewall.children["family"]
 	// The undeclared-token gate is a compiler prewalk check, NOT
@@ -226,6 +225,11 @@ func TestFirewallFamiliesAcceptTheSameGrammar9017(t *testing.T) {
 		return n.children["filter"].children["term"].children["from"].children
 	}
 	inet, inet6, any := get("inet"), get("inet6"), get("any")
+	root := schemaFirewall.children["filter"]
+	if root == nil {
+		t.Fatal("implicit-inet filter grammar is not declared")
+	}
+	implicit := root.children["term"].children["from"].children
 	if len(inet) == 0 {
 		t.Fatal("positive control failed: the inet `from` grammar is empty, so the " +
 			"comparisons below are between empty sets")
@@ -236,6 +240,7 @@ func TestFirewallFamiliesAcceptTheSameGrammar9017(t *testing.T) {
 	}{
 		{"inet vs any", inet, any},
 		{"inet vs inet6", inet, inet6},
+		{"inet vs implicit inet", inet, implicit},
 	} {
 		var only []string
 		for k := range pair.a {

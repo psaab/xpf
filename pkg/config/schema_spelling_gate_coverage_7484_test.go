@@ -359,7 +359,8 @@ func gateLeafChangesWarnings(g gateLeaf, pre string, epath []string) bool {
 // returning to a population that never included them, rather than shrinking past
 // one that did. Identical in shape to the #8939 registration recorded in
 // notAValueList, which cost 14 sites (1098/706 -> 1076/692) for the same reason.
-const gateCoverageFloor = 741
+// #9899: the implicit-inet schema adds 21 measured comparison sites.
+const gateCoverageFloor = 762
 
 var gateBlindCeiling = map[gateBlindClass]int{
 	// #7492 moved leaves out of `unreachable` in two rounds. The parent
@@ -625,7 +626,10 @@ var gateBlindCeiling = map[gateBlindClass]int{
 	// {default-originate, passive, remove-private, route-reflector-client}.
 	// Every one is a value-less flag under the newly shared subtree, which is
 	// what this class is for; none of them is a leaf whose value could be lost.
-	gateBlindFlag: 224, // 209 -> 201, issue 8939; coverage cost tracked at issue 8971
+	// #9899: measured +16 from the implicit-inet copy: interface-specific,
+	// is-fragment, and the 14 reject-message flags (ignored per #2399).
+	// Their explicit-family twins are the same value-less class.
+	gateBlindFlag: 240,
 	gateBlindErr:  43,
 	// TIGHTENED 1 -> 0. The single member of this class was
 	// `policy-options policy-statement <*> then`, and it is gone because the

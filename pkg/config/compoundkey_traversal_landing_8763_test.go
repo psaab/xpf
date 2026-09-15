@@ -8,8 +8,8 @@ import (
 
 // #8763: what the compoundKey traversal fix actually activates.
 //
-// 30 admitted (container, head) pairs are reachable ONLY below a `family`.
-// Before the fix they folded nothing; after it they fold for the first time.
+// Admitted (container, head) pairs reachable ONLY below a `family` folded
+// nothing before the fix; after it they fold for the first time.
 // "The suite stays green" is not a measurement of them -- a pair whose value is
 // silently dropped produces a clean commit either way, which is the whole
 // defect class this normalizer exists for.
@@ -71,7 +71,7 @@ func foldCount8763(t *testing.T, text string) int {
 	return normalizeCompactStanzas(tree)
 }
 
-func TestTheThirtyFamilyOnlyPairsDeliverOrAreInert8763(t *testing.T) {
+func TestFamilyOnlyPairsDeliverOrAreInert8763(t *testing.T) {
 	for _, c := range famOnlyCases8763() {
 		c := c
 		t.Run(c.pair, func(t *testing.T) {
@@ -136,12 +136,12 @@ func TestTheThirtyFamilyOnlyPairsDeliverOrAreInert8763(t *testing.T) {
 	}
 }
 
-// TestTheThirtyAreTheWholeFamilyOnlyPopulation8763 ties the table to the
+// TestFamilyOnlyPopulationIsExhaustivelyMeasured8763 ties the table to the
 // enumeration, so a pair admitted later cannot slip past the measurement by
 // simply not being listed. The failure this prevents is the one that made the
 // dual-path list wrong: a hand-kept population is wrong in the direction nobody
 // checks, which is the members that are absent.
-func TestTheThirtyAreTheWholeFamilyOnlyPopulation8763(t *testing.T) {
+func TestFamilyOnlyPopulationIsExhaustivelyMeasured8763(t *testing.T) {
 	underFam, noFam, _ := walkPairsByFamilyReach8763(setSchema)
 	var live []string
 	for pair := range underFam {
@@ -190,9 +190,6 @@ func TestTheThirtyAreTheWholeFamilyOnlyPopulation8763(t *testing.T) {
 }
 
 func famOnlyCases8763() []famOnlyCase8763 {
-	fwTerm := func(body string) string {
-		return "firewall {\n family inet {\n  filter f1 {\n   term t1 {\n" + body + "\n   }\n  }\n }\n}\n"
-	}
 	fwFilters := "firewall {\n family inet {\n  filter f4probe {\n   term t1 { from { protocol tcp; } then { accept; } }\n  }\n }\n family inet6 {\n  filter f6probe {\n   term t1 { from { next-header tcp; } then { accept; } }\n  }\n }\n}\n"
 	ifUnit := func(inner string) string {
 		return fwFilters + "interfaces {\n ge-0-0-0 {\n  unit 0 {\n" + inner + "\n  }\n }\n}\n"
@@ -212,50 +209,18 @@ func famOnlyCases8763() []famOnlyCase8763 {
 	vrrp := func(inner string) string {
 		return ifUnit("   family inet {\n    address 10.9.9.1/24 {\n     vrrp-group 1 " + inner + "\n    }\n   }")
 	}
-	// A from/then case: `extra` is the rest of the term, held identical across
-	// all three legs so the only variable is the statement under measurement.
-	fw := func(pair, extra, braced, packed, want string) famOnlyCase8763 {
-		return famOnlyCase8763{pair, "", fwTerm(extra + braced), fwTerm(extra + packed), fwTerm(extra), want}
-	}
-	acc := "    then { accept; }"
-	tcp := "    from { protocol tcp; }\n    then { accept; }"
-	icmp := "    from { protocol icmp; icmp-type 3; }\n    then { accept; }"
-	tcpOnly := "    from { protocol tcp; }"
 
 	return []famOnlyCase8763{
-		// The firewall filter MATCH surface. Every one of these is already read
-		// out of the packed tail today, so the traversal activates nothing here
-		// -- which is the opposite of what "30 pairs go live" suggests, and the
-		// reason it had to be measured rather than reasoned about.
-		fw("from source-address", acc, "\n    from { source-address 198.51.100.77/32; }", "\n    from source-address 198.51.100.77/32;", inert8763),
-		fw("from destination-address", acc, "\n    from { destination-address 203.0.113.77/32; }", "\n    from destination-address 203.0.113.77/32;", inert8763),
-		fw("from source-port", tcp, "\n    from { source-port 51479; }", "\n    from source-port 51479;", inert8763),
-		fw("from destination-port", tcp, "\n    from { destination-port 51477; }", "\n    from destination-port 51477;", inert8763),
-		fw("from source-port-except", tcp, "\n    from { source-port-except 51480; }", "\n    from source-port-except 51480;", inert8763),
-		fw("from destination-port-except", tcp, "\n    from { destination-port-except 51478; }", "\n    from destination-port-except 51478;", inert8763),
-		fw("from dscp", acc, "\n    from { dscp 37; }", "\n    from dscp 37;", inert8763),
-		fw("from icmp-type", icmp, "\n    from { icmp-type 13; }", "\n    from icmp-type 13;", inert8763),
-		fw("from next-header", acc, "\n    from { next-header tcp; }", "\n    from next-header tcp;", inert8763),
-		fw("from icmp-code", icmp, "\n    from { icmp-code 7; }", "\n    from icmp-code 7;", inert8763),
-		fw("from tcp-flags", tcp, "\n    from { tcp-flags syn; }", "\n    from tcp-flags syn;", inert8763),
-		fw("from traffic-class", acc, "\n    from { traffic-class 5; }", "\n    from traffic-class 5;", inert8763),
-		// ...except this one, which IS dropped today. Same container, same
-		// `from`, opposite answer -- a container-level verdict would have been
-		// wrong for it.
-		fw("flexible-match-range range", tcp, "\n    from { flexible-match-range { range 100-200; } }", "\n    from { flexible-match-range range 100-200; }", recover8763),
-		// The firewall filter ACTION surface.
-		{"then policer", "firewall {\n policer polprobe77 {\n  if-exceeding { bandwidth-limit 10m; burst-size-limit 1500; }\n  then { discard; }\n }\n}\n",
-			fwTerm(tcpOnly + "\n    then { policer polprobe77; }"), fwTerm(tcpOnly + "\n    then policer polprobe77;"), fwTerm(tcpOnly + "\n    then { }"), inert8763},
-		{"then forwarding-class", "class-of-service {\n forwarding-classes {\n  class fcprobe77 queue-num 3;\n }\n}\n",
-			fwTerm(tcp + "\n    then { forwarding-class fcprobe77; }"), fwTerm(tcp + "\n    then forwarding-class fcprobe77;"), fwTerm(tcp), inert8763},
-		{"then routing-instance", "routing-instances {\n riprobe77 {\n  instance-type virtual-router;\n }\n}\n",
-			fwTerm(tcpOnly + "\n    then { routing-instance riprobe77; }"), fwTerm(tcpOnly + "\n    then routing-instance riprobe77;"), fwTerm(tcpOnly + "\n    then { }"), inert8763},
-		{"then dscp", "", fwTerm(tcp + "\n    then { dscp 41; }"), fwTerm(tcp + "\n    then dscp 41;"), fwTerm(tcp), inert8763},
-		{"then traffic-class", "", fwTerm(tcp + "\n    then { traffic-class 6; }"), fwTerm(tcp + "\n    then traffic-class 6;"), fwTerm(tcp), inert8763},
-		// The filter's own body.
-		{"filter term", "", "firewall {\n family inet {\n  filter fprobe77 {\n   term tprobe77 { }\n  }\n }\n}\n",
-			"firewall {\n family inet {\n  filter fprobe77 term tprobe77;\n }\n}\n",
-			"firewall {\n family inet {\n  filter fprobe77 { }\n }\n}\n", recover8763},
+		// #9899: the firewall filter match surface (twelve `from` leaves),
+		// `flexible-match-range range`, the ACTION surface (five `then`
+		// leaves) and the filter's own `filter term` pair were measured
+		// here as family-only rows. The implicit-inet root (`firewall
+		// filter`, no `family` ancestor) hosts the same subtree, so all
+		// nineteen are DUAL-path now and enumerated in
+		// TestDualPathAdmittedPairsArePinned8763 instead. Carrying them
+		// here would pin a population this table no longer owns -- the
+		// reverse check below fails a measured pair that left the live
+		// family-only set, which is how the move surfaced.
 		// Sampling / flow export: six real silent drops.
 		{"flow-server port", "", fs("      port 51481;"), fsPacked("port 51481"), fs(""), recover8763},
 		{"flow-server source-address", "", fs("      source-address 198.51.100.78;"), fsPacked("source-address 198.51.100.78"), fs(""), recover8763},

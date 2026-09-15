@@ -163,6 +163,13 @@ var instanceNameBlindBaseline9091 = []string{
 	"/firewall/family/inet6/filter",
 	"/firewall/family/inet6/filter/term",
 	"/firewall/family/inet6/filter/term/from/flexible-match-range/range",
+	// #9899: implicit inet is a deep copy of inet's filter subtree with its own
+	// schema identities, so the same three instance-name containers exist at
+	// the direct root. Blind like their family siblings: arming the root
+	// would inherit closedWorld across the whole filter grammar.
+	"/firewall/filter",
+	"/firewall/filter/term",
+	"/firewall/filter/term/from/flexible-match-range/range",
 	"/firewall/policer",
 	"/firewall/three-color-policer",
 	"/forwarding-options/dhcp-relay/group",

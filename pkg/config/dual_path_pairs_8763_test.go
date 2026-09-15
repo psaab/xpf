@@ -30,7 +30,7 @@ import (
 // inventory is a census of DIVERGENT SITES; a pair rule applies to the whole
 // grammar, so "no other inventory line carries this head" answers a different
 // question. This walks setSchema.
-func TestDualPathAdmittedPairsAreTheMeasuredSix8763(t *testing.T) {
+func TestDualPathAdmittedPairsArePinned8763(t *testing.T) {
 	underFam, noFam, paths := walkPairsByFamilyReach8763(setSchema)
 
 	var dualAdmitted, dualUnadmitted, famOnlyAdmitted []string
@@ -69,14 +69,44 @@ func TestDualPathAdmittedPairsAreTheMeasuredSix8763(t *testing.T) {
 	// nothing. The last two are a genuine #8755-class silent drop under
 	// `family inet` that the fold repairs exactly.
 	//
-	// All six are BENIGN at the family shape, so the blocker dissolves and no
-	// path context is needed. If this list changes, that conclusion does not
-	// carry to the new member and the measurement has to be retaken.
+	// #9899 adds nineteen: every other admitted pair in the firewall filter
+	// subtree (`filter term`, `flexible-match-range range`, the twelve
+	// remaining `from` match leaves, the five remaining `then` actions).
+	// They were FAMILY-ONLY before -- the walk below names them as the
+	// boundary this measurement did not cover -- and are DUAL now because
+	// the same subtree exists at `firewall filter` with no `family`
+	// ancestor. Derived from the admitted scope, not measured anew here:
+	// the family-shape fold behaviour is unchanged, and the new no-family
+	// site compiles into the same inet pool.
+	//
+	// Every pair in this list is BENIGN at the family shape, so the blocker
+	// dissolves and no path context is needed. If this list changes, that
+	// conclusion does not carry to the new member and the measurement has
+	// to be retaken.
 	want := []string{
+		"filter term",
+		"flexible-match-range range",
+		"from destination-address",
+		"from destination-port",
+		"from destination-port-except",
+		"from dscp",
+		"from icmp-code",
+		"from icmp-type",
+		"from next-header",
 		"from protocol",
+		"from source-address",
+		"from source-port",
+		"from source-port-except",
+		"from tcp-flags",
+		"from traffic-class",
 		"then count",
+		"then dscp",
+		"then forwarding-class",
 		"then log",
 		"then loss-priority",
+		"then policer",
+		"then routing-instance",
+		"then traffic-class",
 		"version-ipfix template",
 		"version9 template",
 	}
@@ -102,9 +132,10 @@ func TestDualPathAdmittedPairsAreTheMeasuredSix8763(t *testing.T) {
 	// THE BOUNDARY OF WHAT WAS MEASURED, stated so it is not read as covered.
 	// These pairs are admitted and sit ONLY below a `family`, so they fold
 	// nothing today and go live the moment the traversal lands. They are NOT
-	// covered by the six-pair measurement above; lane-8015's spot-check named
-	// several of them (firewall filter match/action leaves, VRRP
-	// authentication) and they remain separate work.
+	// covered by the measurement above; lane-8015's spot-check named
+	// several of them (VRRP authentication and the interface-unit family
+	// bindings -- the firewall filter match/action leaves left this set
+	// for the dual list in #9899) and they remain separate work.
 	t.Logf("#8763 admitted and FAMILY-ONLY -- goes live with the traversal, NOT measured here: %d pairs",
 		len(famOnlyAdmitted))
 	if len(famOnlyAdmitted) == 0 {

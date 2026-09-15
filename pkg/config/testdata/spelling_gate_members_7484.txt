@@ -229,6 +229,43 @@ flag (read, but value-less)	firewall family inet6 filter <*> term <*> then rejec
 flag (read, but value-less)	firewall family inet6 filter <*> term <*> then reject source-host-isolated
 flag (read, but value-less)	firewall family inet6 filter <*> term <*> then reject source-route-failed
 flag (read, but value-less)	firewall family inet6 filter <*> term <*> then reject tcp-reset
+flag (read, but value-less)	firewall filter <*> interface-specific
+COMPARED	firewall filter <*> term <*> from destination-address
+COMPARED	firewall filter <*> term <*> from destination-port
+COMPARED	firewall filter <*> term <*> from destination-port-except
+COMPARED	firewall filter <*> term <*> from destination-prefix-list
+COMPARED	firewall filter <*> term <*> from dscp
+COMPARED	firewall filter <*> term <*> from flexible-match-range range <*> bit-length
+COMPARED	firewall filter <*> term <*> from flexible-match-range range <*> byte-offset
+COMPARED	firewall filter <*> term <*> from flexible-match-range range <*> match-mask
+COMPARED	firewall filter <*> term <*> from flexible-match-range range <*> match-start
+COMPARED	firewall filter <*> term <*> from flexible-match-range range <*> match-value
+COMPARED	firewall filter <*> term <*> from flexible-match-range range <*> range
+COMPARED	firewall filter <*> term <*> from icmp-code
+COMPARED	firewall filter <*> term <*> from icmp-type
+flag (read, but value-less)	firewall filter <*> term <*> from is-fragment
+COMPARED	firewall filter <*> term <*> from next-header
+COMPARED	firewall filter <*> term <*> from protocol
+COMPARED	firewall filter <*> term <*> from source-address
+COMPARED	firewall filter <*> term <*> from source-port
+COMPARED	firewall filter <*> term <*> from source-port-except
+COMPARED	firewall filter <*> term <*> from source-prefix-list
+COMPARED	firewall filter <*> term <*> from tcp-flags
+COMPARED	firewall filter <*> term <*> from traffic-class
+flag (read, but value-less)	firewall filter <*> term <*> then reject administratively-prohibited
+flag (read, but value-less)	firewall filter <*> term <*> then reject bad-host-tos
+flag (read, but value-less)	firewall filter <*> term <*> then reject bad-network-tos
+flag (read, but value-less)	firewall filter <*> term <*> then reject host-prohibited
+flag (read, but value-less)	firewall filter <*> term <*> then reject host-unreachable
+flag (read, but value-less)	firewall filter <*> term <*> then reject network-prohibited
+flag (read, but value-less)	firewall filter <*> term <*> then reject network-unreachable
+flag (read, but value-less)	firewall filter <*> term <*> then reject port-unreachable
+flag (read, but value-less)	firewall filter <*> term <*> then reject precedence-cutoff
+flag (read, but value-less)	firewall filter <*> term <*> then reject precedence-violation
+flag (read, but value-less)	firewall filter <*> term <*> then reject protocol-unreachable
+flag (read, but value-less)	firewall filter <*> term <*> then reject source-host-isolated
+flag (read, but value-less)	firewall filter <*> term <*> then reject source-route-failed
+flag (read, but value-less)	firewall filter <*> term <*> then reject tcp-reset
 COMPARED	firewall policer <*> if-exceeding bandwidth-limit
 COMPARED	firewall policer <*> if-exceeding burst-size-limit
 flag (read, but value-less)	firewall policer <*> logical-interface-policer

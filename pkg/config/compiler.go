@@ -210,6 +210,7 @@ func compileConfigWithOpts(tree *ConfigTree, opts compileOpts) (*Config, error) 
 	if !opts.skipCompactNormalize {
 		normalizeCompactStanzas(tree)
 	}
+	normalizeImplicitInetFilters9899(tree)
 	// #8752: fold a repeated named-instance statement into the first
 	// occurrence, on the TOLERANT path only. The strict path keeps rejecting
 	// (#3473) so the operator is still told to rename; the tolerant path cannot
@@ -528,6 +529,7 @@ func compileConfigForNodeWithOpts(tree *ConfigTree, nodeID int, opts compileOpts
 	if !opts.skipCompactNormalize {
 		normalizeCompactStanzas(tree)
 	}
+	normalizeImplicitInetFilters9899(tree)
 	// #8752: fold a repeated named-instance statement into the first
 	// occurrence, on the TOLERANT path only. The strict path keeps rejecting
 	// (#3473) so the operator is still told to rename; the tolerant path cannot

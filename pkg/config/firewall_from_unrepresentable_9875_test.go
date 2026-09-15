@@ -411,21 +411,17 @@ func TestFilterFromPackedSeenWithoutNormalizer9875(t *testing.T) {
 	}
 }
 
-// TestFilterNoFamilyPackedValuelessRejected9875 pins the helper's nil-schema
-// fallback (Spark-F2). The no-family shape (`firewall filter F`, no `family`
-// stanza) resolves no address family, so schemaForPath yields nil — without
-// the inet fallback packedBody would return raw Children and the packed
-// valueless leaf below would commit. (Nothing compiles from this shape —
-// the compiler ignores it — so there is no marker half to assert; the gate
-// polices it in the safe reject-only direction, like the unknown-family
-// gate rejects configs that compile to nothing.)
+// TestFilterNoFamilyPackedValuelessRejected9875 originally exercised the
+// helper's nil-schema fallback for a family-less filter. Since #9899 this
+// valid Junos spelling is normalized to inet before gates and compilation;
+// it must still reject a packed valueless match, not become a match-all term.
 func TestFilterNoFamilyPackedValuelessRejected9875(t *testing.T) {
 	mk := func(t *testing.T) *ConfigTree {
 		t.Helper()
 		return fwRawTree9875(t, `firewall { filter F { term T { from protocol; then { discard; } } } }`)
 	}
 	if _, err := CompileConfig(mk(t)); err == nil {
-		t.Fatal("strict must reject no-family from-packed valueless `protocol` (nil-schema fallback)")
+		t.Fatal("strict must reject implicit-inet from-packed valueless `protocol`")
 	} else if !strings.Contains(err.Error(), "#8480") {
 		t.Fatalf("strict error must stay the #8480 gate, got: %v", err)
 	}

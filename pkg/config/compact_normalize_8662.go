@@ -403,8 +403,8 @@ func packedStatementEnd9620(rest []string, headLen int, container, headSchema *s
 	return pos, true
 }
 
-// normalizeCompactForValidation returns a tree with every admitted compact
-// stanza folded, for the typed-leaf walk to validate (issue 8867).
+// normalizeCompactForValidation returns a tree with implicit-inet firewall
+// filters canonicalized and admitted compact stanzas folded for validation.
 //
 // It never mutates the argument: SchemaValidate runs on the operator's
 // candidate tree, which the caller persists, so folding in place would rewrite
@@ -415,7 +415,9 @@ func normalizeCompactForValidation(tree *ConfigTree) *ConfigTree {
 		return nil
 	}
 	clone := tree.Clone()
-	if normalizeCompactStanzas(clone) == 0 {
+	changed := normalizeCompactStanzas(clone)
+	changed += normalizeImplicitInetFilters9899(clone)
+	if changed == 0 {
 		return tree
 	}
 	return clone
@@ -504,25 +506,6 @@ func splitBracedPackedChildren8886(node *Node, container *schemaNode) int {
 	return changed
 }
 
-// NormalizeCompactForScan returns a tree with every admitted compact stanza
-// folded, for a reader that walks the RAW AST rather than the compiled config
-// (issue 8898).
-//
-// The normalizer runs inside the compiler, so anything reading the compiled
-// Config sees folded stanzas for free. A reader that scans the tree directly
-// does not -- it sees whatever the operator typed, and an admitted pair is
-// invisible to it. `configstore.effectiveMasterPasswordPRF` is one such reader:
-// it resolves the at-rest KDF selector by walking `system` blocks, so
-// admitting `system master-password` to the scope fixed the COMPILED config and
-// changed nothing for the consumer that actually decides the encryption.
-//
-// This is the same shape as #8867, where SchemaValidate walked the
-// un-normalized tree and validated nothing in the packed spelling. Same cause,
-// different consumer: the fold is a property of the compile path, and every
-// reader outside it has to opt in.
-//
-// It never mutates the argument -- callers hold trees that get persisted -- and
-// returns the original when nothing folds.
 // keyMask8921 returns m when it is a per-key mask over n keys, and nil
 // otherwise. A mask of any other length is not provenance (see ast.go), so it
 // must not be sliced as if it were.
@@ -542,6 +525,16 @@ func maskSlice8921(m []bool, from, to int) []bool {
 	return m[from:to]
 }
 
+// NormalizeCompactForScan folds admitted compact stanzas and canonicalizes
+// implicit-inet filters for callers that scan the AST rather than Config.
+// Compiler normalization alone is insufficient for raw-tree readers such as
+// configstore.effectiveMasterPasswordPRF (#8898), just as it was insufficient
+// for SchemaValidate (#8867). System/retired-dataplane scans retain their
+// existing behavior; #9899's alias rewrite is confined to firewall roots.
+//
+// It never mutates the argument and returns the original if neither transform
+// changes anything. Display callers use normalizeCompactStanzas directly so
+// their output retains the author's family spelling.
 func NormalizeCompactForScan(tree *ConfigTree) *ConfigTree {
 	return normalizeCompactForValidation(tree)
 }

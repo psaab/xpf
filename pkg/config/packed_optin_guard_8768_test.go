@@ -507,8 +507,9 @@ func packedOptInCases8768() map[string]packedOptInCase8768 {
 			},
 			read: tunnelRead8904(true),
 		},
-		// issue 8939: both filter-term `then` containers. The schema declares
-		// `then` under family inet AND inet6, and this guard requires a case for
+		// issue 8939: each filter-term `then` container. The schema declares
+		// `then` under family inet AND inet6 (plus `any` per #9017 and the
+		// implicit inet root per #9899), and this guard requires a case for
 		// each, so the opt-in cannot ship exercised on only one.
 		//
 		// `accept`, `discard`, `syslog` and `reject` are NOT admitted, so
@@ -594,6 +595,35 @@ func packedOptInCases8768() map[string]packedOptInCase8768 {
 				"traffic-class":    "traffic-class af22",
 			},
 			read: firewallThenRead8939(true),
+		},
+		// #9899: implicit inet is a fourth `then`, a deep copy of inet's with
+		// its own schema identity. Same admitted leaves and same reader: the
+		// implicit spelling compiles into FiltersInet, so the packed-vs-braced
+		// comparison observes the inet pool exactly like the inet row.
+		"firewall/filter/term/then": {
+			prefix: "firewall { filter f1 { term t1 { ",
+			open:   "then",
+			closer: " } } }",
+			stmts: map[string]string{
+				"count":            "count c1",
+				"dscp":             "dscp af11",
+				"forwarding-class": "forwarding-class ef",
+				"log":              "log",
+				"loss-priority":    "loss-priority low",
+				"policer":          "policer pol1",
+				"routing-instance": "routing-instance ri1",
+				"traffic-class":    "traffic-class af12",
+			},
+			second: map[string]string{
+				"count":            "count c2",
+				"dscp":             "dscp af21",
+				"forwarding-class": "forwarding-class af1",
+				"loss-priority":    "loss-priority high",
+				"policer":          "policer pol2",
+				"routing-instance": "routing-instance ri2",
+				"traffic-class":    "traffic-class af22",
+			},
+			read: firewallThenRead8939(false),
 		},
 		// issue 8932: the security-log stream, and the FIRST container to need
 		// `always`. A stream with no `host` does not compile, so without it
