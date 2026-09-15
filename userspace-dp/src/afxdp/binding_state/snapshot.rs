@@ -193,6 +193,9 @@ impl BindingLiveState {
             tx_shared_recycle_unknown_slot_drops: self
                 .tx_shared_recycle_unknown_slot_drops
                 .load(Ordering::Relaxed),
+            tx_shared_recycle_unknown_slot_rescued: self
+                .tx_shared_recycle_unknown_slot_rescued
+                .load(Ordering::Relaxed),
             redirect_inbox_overflow_drops: self
                 .redirect_inbox_overflow_drops
                 .load(Ordering::Relaxed),

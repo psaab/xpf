@@ -196,16 +196,19 @@ fn admission_attempt_instrument_leaves_four_pinned_layout_values_unchanged_6304(
         64,
         "#6304: ...nor its ALIGNMENT"
     );
+    // F-149 (#9904): `tx_shared_recycle_unknown_slot_rescued` moves both
+    // offsets +8 in BOTH builds (unconditional field), matching the updated
+    // compile-time literals in `binding_state/mod.rs`.
     assert_eq!(
         std::mem::offset_of!(BindingLiveState, pending_tx_admitted),
-        2200,
+        2208,
         "#6304/#6114: ...nor the OFFSET of the admission counter whose \
          cacheline this is all about. A `cfg(test)` field ahead of it moves \
          this to 2160 while leaving the size assert above satisfied"
     );
     assert_eq!(
         std::mem::offset_of!(BindingLiveState, delta_loss_pending),
-        2328,
+        2336,
         "#6304: ...nor the offset of the last-declared field, which is the \
          sentinel for a `cfg(test)` member appended at the END of the struct — \
          that shape moves this to 2288 and trips nothing else"

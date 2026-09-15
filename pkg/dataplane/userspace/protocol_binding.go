@@ -313,13 +313,16 @@ type BindingStatus struct {
 	// fabric XSK binding, or the forward-frame build/enqueue failed)
 	// instead of being reinjected to the local kernel FIB (#1946).
 	// Wire-additive: older helpers omit it.
-	FabricRedirectUnsendableDrops     uint64 `json:"fabric_redirect_unsendable_drops,omitempty"`
-	KernelRXDropped                   uint64 `json:"kernel_rx_dropped,omitempty"`
-	KernelRXInvalidDescs              uint64 `json:"kernel_rx_invalid_descs,omitempty"`
-	TXPackets                         uint64 `json:"tx_packets,omitempty"`
-	TXBytes                           uint64 `json:"tx_bytes,omitempty"`
-	TXErrors                          uint64 `json:"tx_errors,omitempty"`
-	TXSharedRecycleUnknownSlotDrops   uint64 `json:"tx_shared_recycle_unknown_slot_drops,omitempty"`
+	FabricRedirectUnsendableDrops   uint64 `json:"fabric_redirect_unsendable_drops,omitempty"`
+	KernelRXDropped                 uint64 `json:"kernel_rx_dropped,omitempty"`
+	KernelRXInvalidDescs            uint64 `json:"kernel_rx_invalid_descs,omitempty"`
+	TXPackets                       uint64 `json:"tx_packets,omitempty"`
+	TXBytes                         uint64 `json:"tx_bytes,omitempty"`
+	TXErrors                        uint64 `json:"tx_errors,omitempty"`
+	TXSharedRecycleUnknownSlotDrops uint64 `json:"tx_shared_recycle_unknown_slot_drops,omitempty"`
+	// F-149 (#9904): unknown-slot recycles preserved via the same-region
+	// backstop. Subset of TXErrors; wire-additive, older helpers omit it.
+	TXSharedRecycleUnknownSlotRescued uint64 `json:"tx_shared_recycle_unknown_slot_rescued,omitempty"`
 	RedirectInboxOverflowDrops        uint64 `json:"redirect_inbox_overflow_drops,omitempty"`
 	PendingTXLocalOverflowDrops       uint64 `json:"pending_tx_local_overflow_drops,omitempty"`
 	TxSubmitErrorDrops                uint64 `json:"tx_submit_error_drops,omitempty"`
@@ -451,21 +454,22 @@ type BindingCountersSnapshot struct {
 	// snapshot so the daemon's fast poller can compute Buffer%
 	// without joining the full BindingStatus. See BindingStatus
 	// for full semantics.
-	UmemTotalFrames                 uint32 `json:"umem_total_frames,omitempty"`
-	TxRingCapacity                  uint32 `json:"tx_ring_capacity,omitempty"`
-	UmemInflightFrames              uint32 `json:"umem_inflight_frames,omitempty"`
-	TXErrors                        uint64 `json:"tx_errors,omitempty"`
-	TXSharedRecycleUnknownSlotDrops uint64 `json:"tx_shared_recycle_unknown_slot_drops,omitempty"`
-	TxSubmitErrorDrops              uint64 `json:"tx_submit_error_drops,omitempty"`
-	PendingTxLocalOverflowDrops     uint64 `json:"pending_tx_local_overflow_drops,omitempty"`
-	MirroredPackets                 uint64 `json:"mirrored_packets,omitempty"`
-	MirroredBytes                   uint64 `json:"mirrored_bytes,omitempty"`
-	MirrorDropsNoFrame              uint64 `json:"mirror_drops_no_frame,omitempty"`
-	MirrorDropsTXFrameReserve       uint64 `json:"mirror_drops_tx_frame_reserve,omitempty"`
-	MirrorDropsNoBinding            uint64 `json:"mirror_drops_no_binding,omitempty"`
-	MirrorDropsQueueFull            uint64 `json:"mirror_drops_queue_full,omitempty"`
-	MirrorDropsQueueFullSameWorker  uint64 `json:"mirror_drops_queue_full_same_worker,omitempty"`
-	MirrorDropsQueueFullCrossWorker uint64 `json:"mirror_drops_queue_full_cross_worker,omitempty"`
+	UmemTotalFrames                   uint32 `json:"umem_total_frames,omitempty"`
+	TxRingCapacity                    uint32 `json:"tx_ring_capacity,omitempty"`
+	UmemInflightFrames                uint32 `json:"umem_inflight_frames,omitempty"`
+	TXErrors                          uint64 `json:"tx_errors,omitempty"`
+	TXSharedRecycleUnknownSlotDrops   uint64 `json:"tx_shared_recycle_unknown_slot_drops,omitempty"`
+	TXSharedRecycleUnknownSlotRescued uint64 `json:"tx_shared_recycle_unknown_slot_rescued,omitempty"`
+	TxSubmitErrorDrops                uint64 `json:"tx_submit_error_drops,omitempty"`
+	PendingTxLocalOverflowDrops       uint64 `json:"pending_tx_local_overflow_drops,omitempty"`
+	MirroredPackets                   uint64 `json:"mirrored_packets,omitempty"`
+	MirroredBytes                     uint64 `json:"mirrored_bytes,omitempty"`
+	MirrorDropsNoFrame                uint64 `json:"mirror_drops_no_frame,omitempty"`
+	MirrorDropsTXFrameReserve         uint64 `json:"mirror_drops_tx_frame_reserve,omitempty"`
+	MirrorDropsNoBinding              uint64 `json:"mirror_drops_no_binding,omitempty"`
+	MirrorDropsQueueFull              uint64 `json:"mirror_drops_queue_full,omitempty"`
+	MirrorDropsQueueFullSameWorker    uint64 `json:"mirror_drops_queue_full_same_worker,omitempty"`
+	MirrorDropsQueueFullCrossWorker   uint64 `json:"mirror_drops_queue_full_cross_worker,omitempty"`
 	// #812: per-queue TX submit→completion latency histogram, pulled
 	// through from BindingStatus so step1-capture consumers can
 	// compute per-queue latency distributions without a second

@@ -55,15 +55,16 @@ var syn_cookie_counter_wire_keys = []string{
 
 func TestBindingStatusTXSharedRecycleUnknownSlotDropsRoundTrip(t *testing.T) {
 	in := BindingStatus{
-		WorkerID:                        3,
-		Slot:                            7,
-		Ifindex:                         11,
-		QueueID:                         2,
-		TXErrors:                        9,
-		TXSharedRecycleUnknownSlotDrops: 4,
-		RedirectInboxOverflowDrops:      5,
-		PendingTXLocalOverflowDrops:     6,
-		TxSubmitErrorDrops:              7,
+		WorkerID:                          3,
+		Slot:                              7,
+		Ifindex:                           11,
+		QueueID:                           2,
+		TXErrors:                          9,
+		TXSharedRecycleUnknownSlotDrops:   4,
+		TXSharedRecycleUnknownSlotRescued: 8,
+		RedirectInboxOverflowDrops:        5,
+		PendingTXLocalOverflowDrops:       6,
+		TxSubmitErrorDrops:                7,
 	}
 	raw, err := json.Marshal(&in)
 	if err != nil {
@@ -75,6 +76,7 @@ func TestBindingStatusTXSharedRecycleUnknownSlotDropsRoundTrip(t *testing.T) {
 	}
 	for _, key := range []string{
 		"tx_shared_recycle_unknown_slot_drops",
+		"tx_shared_recycle_unknown_slot_rescued",
 		"redirect_inbox_overflow_drops",
 		"pending_tx_local_overflow_drops",
 		"tx_submit_error_drops",
@@ -91,6 +93,10 @@ func TestBindingStatusTXSharedRecycleUnknownSlotDropsRoundTrip(t *testing.T) {
 	if back.TXSharedRecycleUnknownSlotDrops != in.TXSharedRecycleUnknownSlotDrops {
 		t.Fatalf("TXSharedRecycleUnknownSlotDrops: got %d, want %d",
 			back.TXSharedRecycleUnknownSlotDrops, in.TXSharedRecycleUnknownSlotDrops)
+	}
+	if back.TXSharedRecycleUnknownSlotRescued != in.TXSharedRecycleUnknownSlotRescued {
+		t.Fatalf("TXSharedRecycleUnknownSlotRescued: got %d, want %d",
+			back.TXSharedRecycleUnknownSlotRescued, in.TXSharedRecycleUnknownSlotRescued)
 	}
 	if back.RedirectInboxOverflowDrops != in.RedirectInboxOverflowDrops {
 		t.Fatalf("RedirectInboxOverflowDrops: got %d, want %d",
@@ -329,11 +335,12 @@ func TestCoSSchedulerSnapshotLegacyBufferSizePercentDefault(t *testing.T) {
 
 func TestBindingCountersSnapshotTXSharedRecycleUnknownSlotDropsRoundTrip(t *testing.T) {
 	in := BindingCountersSnapshot{
-		WorkerID:                        3,
-		Ifindex:                         11,
-		QueueID:                         2,
-		TXErrors:                        9,
-		TXSharedRecycleUnknownSlotDrops: 4,
+		WorkerID:                          3,
+		Ifindex:                           11,
+		QueueID:                           2,
+		TXErrors:                          9,
+		TXSharedRecycleUnknownSlotDrops:   4,
+		TXSharedRecycleUnknownSlotRescued: 8,
 	}
 	raw, err := json.Marshal(&in)
 	if err != nil {
@@ -344,6 +351,9 @@ func TestBindingCountersSnapshotTXSharedRecycleUnknownSlotDropsRoundTrip(t *test
 		t.Fatalf("unmarshal obj: %v", err)
 	}
 	if _, ok := obj["tx_shared_recycle_unknown_slot_drops"]; !ok {
+		t.Fatalf("wire key missing from BindingCountersSnapshot JSON: %s", string(raw))
+	}
+	if _, ok := obj["tx_shared_recycle_unknown_slot_rescued"]; !ok {
 		t.Fatalf("wire key missing from BindingCountersSnapshot JSON: %s", string(raw))
 	}
 

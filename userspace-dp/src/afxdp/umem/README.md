@@ -98,3 +98,37 @@ drop-in for xdpilone), and tracks frame budgets per binding.
   zero-copy first and fall back to copy mode if the driver doesn't
   support it; copy mode is unaffected because `XDP_PASS` there
   operates on kernel DMA buffers, not UMEM frames.
+
+## Fill-alignment contract (F-069, #9904)
+
+The RX-recycle path pushes the RX descriptor's `addr` VERBATIM into the
+FILL ring: every `scratch_recycle.push(desc.addr)` site (~30, in
+`poll_descriptor/` and `neighbor_dispatch.rs`), plus shared-UMEM
+`(slot, offset)` recycles, flow through `pending_fill_frames` into
+`tx/rings.rs::drain_pending_fill` → `xsk_ffi::WriteFill::insert` with no
+masking anywhere on the path. That `addr` is headroom-shifted: with
+`UMEM_HEADROOM == 256` the kernel delivers
+`desc.addr == frame_base + 256`, while the FILL ring was primed with
+`frame_base` (`prime_fill_ring_offsets` feeds `Umem::frame().offset`,
+already base-aligned).
+
+This is correct ONLY because of an AF_XDP CORE contract, not a driver
+quirk: in aligned-chunk mode the kernel masks FILL-ring addresses to the
+chunk base on consume (`xp_check_aligned`; docs.kernel.org AF_XDP,
+"aligned chunk mode"). The preconditions are pinned by construction:
+`WorkerUmem::new` / `new_for_test` hardcode `flags: 0` (aligned mode,
+never `XDP_UMEM_UNALIGNED_CHUNK_FLAG`) and
+`frame_size == UMEM_FRAME_SIZE == 4096`. In unaligned mode the kernel
+does NOT mask, so flipping `flags` without adding an explicit mask at
+the fill-submit boundary would silently corrupt the fill ring — do not
+do that on the strength of this section alone.
+
+Deliberately doc-only (#9904 adjudication): production keeps relying on
+the kernel mask rather than adding a per-frame AND at drain, because the
+mask would be pure redundancy in aligned mode on a warmed path. The
+reference harness (`test/xsk-repro/libbpf_xsk_{,shared_}test.c`,
+`test/xsk-repro/main.rs`) masks explicitly
+(`addr & ~(FRAME_SIZE - 1)`) before refill — defense-in-depth, and the
+reason F-069 has twice been misread as a latent bug. Both shapes are
+correct in aligned mode; they are now recorded as such instead of
+diverging silently.

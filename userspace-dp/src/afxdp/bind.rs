@@ -83,6 +83,55 @@ pub(super) fn ifinfo_from_binding(
     Ok(info)
 }
 
+// F-151 (#9904): post-bind identity re-verification.
+//
+// Bind resolves the planned ifindex to a name (`if_indextoname` in
+// `IfInfo::from_ifindex`) and then creates the socket BY NAME
+// (`xsk_socket__create*` takes `ifname`). A rename landing in that window
+// binds another interface's queue, and the rename actor is the product
+// itself (xpf renames interfaces at startup via `pkg/daemon/linksetup.go`
+// positional renames + `.link` files) — a product-internal ordering
+// question, not a hypothetical operator race.
+//
+// The guard re-resolves the BOUND name back to an ifindex after socket
+// creation and fails on any planned-vs-observed mismatch. It is deliberately
+// best-effort, with two documented residuals: (1) a rename landing between
+// socket creation and this check false-positives on a HEALTHY socket (the
+// kernel holds an ifindex reference; post-bind renames do not move it), so
+// callers MUST fresh-resolve + retry on mismatch rather than failing the
+// whole bind immediately — transients self-heal, persistent mismatches fail
+// closed after the retry budget; (2) delete+recreate reusing both the name
+// AND the ifindex is invisible to a name→ifindex check (no getsockname-style
+// ground truth exists for AF_XDP). What this catches is the ordering window
+// itself: binding under a name that already means a different ifindex.
+pub(super) fn verify_bind_identity_with_resolver(
+    planned_ifindex: u32,
+    bound_ifname: &std::ffi::CStr,
+    resolve: impl Fn(&std::ffi::CStr) -> Option<u32>,
+) -> Result<(), String> {
+    match resolve(bound_ifname) {
+        Some(observed) if observed == planned_ifindex => Ok(()),
+        Some(observed) => Err(format!(
+            "planned ifindex {planned_ifindex} but bound name {:?} now resolves to ifindex {observed}",
+            bound_ifname.to_string_lossy()
+        )),
+        None => Err(format!(
+            "planned ifindex {planned_ifindex} but bound name {:?} no longer resolves",
+            bound_ifname.to_string_lossy()
+        )),
+    }
+}
+
+pub(super) fn verify_bind_identity(
+    planned_ifindex: u32,
+    bound_ifname: &std::ffi::CStr,
+) -> Result<(), String> {
+    verify_bind_identity_with_resolver(planned_ifindex, bound_ifname, |name| {
+        let idx = unsafe { libc::if_nametoindex(name.as_ptr()) };
+        (idx != 0).then_some(idx)
+    })
+}
+
 pub(super) fn preferred_bind_strategy(binding: &BindingStatus) -> AfXdpBindStrategy {
     bind_strategy_for_driver(interface_driver_name(&binding.interface).as_deref())
 }
@@ -98,7 +147,7 @@ pub(super) fn preferred_bind_strategy(binding: &BindingStatus) -> AfXdpBindStrat
 /// pointer passed through `worker_umem`.
 pub(super) unsafe fn open_binding_worker_rings(
     worker_umem: &mut WorkerUmem,
-    info: &IfInfo,
+    info: &mut IfInfo,
     ring_entries: u32,
     bind_strategy: AfXdpBindStrategy,
     socket_role: XskSocketRole,
@@ -121,7 +170,8 @@ pub(super) unsafe fn open_binding_worker_rings(
     ),
     Box<dyn std::error::Error + Send + Sync>,
 > {
-    let bind_flag_candidates = bind_flag_candidates_for_socket_role(info, driver_name, socket_role);
+    let bind_flag_candidates =
+        bind_flag_candidates_for_socket_role(&*info, driver_name, socket_role);
     let mut strategies = vec![bind_strategy];
     if let Some(fallback_strategy) = alternate_bind_strategy(driver_name, bind_strategy) {
         strategies.push(fallback_strategy);
@@ -131,7 +181,7 @@ pub(super) unsafe fn open_binding_worker_rings(
         for (flags_idx, flags) in bind_flag_candidates.iter().copied().enumerate() {
             match try_open_bind(
                 worker_umem,
-                info,
+                &mut *info,
                 ring_entries,
                 flags,
                 socket_role,
@@ -493,7 +543,7 @@ pub(super) fn shared_umem_group_key_for_device(
 /// atomically — matching the proven libbpf xsk code path.
 fn try_open_bind(
     worker_umem: &mut WorkerUmem,
-    info: &IfInfo,
+    info: &mut IfInfo,
     ring_entries: u32,
     bind_flags: u16,
     socket_role: XskSocketRole,
@@ -503,12 +553,13 @@ fn try_open_bind(
     (User, RingRx, RingTx, XskBindMode, u16, DeviceQueue, Vec<u64>),
     Box<dyn std::error::Error + Send + Sync>,
 > {
+    let mut last_verify_err: Option<String> = None;
     for attempt in 0..BIND_RETRY_ATTEMPTS {
         let create_result = match socket_role.create_mode() {
             xsk_ffi::XskCreateMode::PrivateUmem => unsafe {
                 xsk_ffi::create_xsk_binding_private(
                     worker_umem.umem_mut(),
-                    info,
+                    &*info,
                     ring_entries,
                     bind_flags,
                 )
@@ -516,7 +567,7 @@ fn try_open_bind(
             xsk_ffi::XskCreateMode::SharedUmem => unsafe {
                 xsk_ffi::create_xsk_binding_shared(
                     worker_umem.as_raw_umem_ptr(),
-                    info,
+                    &*info,
                     ring_entries,
                     bind_flags,
                 )
@@ -524,6 +575,38 @@ fn try_open_bind(
         };
         match create_result {
             Ok((user, rx, tx, mut device)) => {
+                // F-151 (#9904): re-resolve the bound name BEFORE priming or
+                // publishing anything. On mismatch the just-created socket is
+                // dropped here (`DeviceQueue::drop` deletes it; nothing is
+                // XSKMAP-registered yet — registration happens later in the
+                // caller) and the loop retries with a freshly resolved
+                // `IfInfo`, so a transient rename-storm mismatch self-heals
+                // instead of failing the bind. `from_ifindex` resets the
+                // queue, so it is restored after every fresh resolve.
+                // Persistent mismatches fail closed when the retry budget
+                // below is exhausted.
+                let bound_ifname = info.ifname_cstring();
+                if let Err(mismatch) = verify_bind_identity(info.ifindex(), &bound_ifname) {
+                    eprintln!(
+                        "xpf-userspace-dp: bind identity mismatch after socket create \
+                         (attempt {attempt}): {mismatch} — re-resolving and retrying",
+                    );
+                    last_verify_err = Some(mismatch);
+                    drop(user);
+                    drop(rx);
+                    drop(tx);
+                    drop(device);
+                    let queue_id = info.queue_id();
+                    let planned = info.ifindex();
+                    if let Err(e) = info.from_ifindex(planned) {
+                        return Err(format!(
+                            "bind identity re-resolve of ifindex {planned} failed: {e}"
+                        )
+                        .into());
+                    }
+                    info.set_queue(queue_id);
+                    continue;
+                }
                 let user_fd = user.as_raw_fd();
 
                 // Prime the fill ring AFTER bind — libxdp already binds
@@ -586,11 +669,18 @@ fn try_open_bind(
             }
         }
     }
-    Err(format!(
-        "libxdp bind: exhausted {} retries with flags=0x{:04x}",
-        BIND_RETRY_ATTEMPTS, bind_flags,
-    )
-    .into())
+    Err(match last_verify_err {
+        Some(e) => format!(
+            "libxdp bind: exhausted {} retries with flags=0x{:04x}: last bind-identity error: {e}",
+            BIND_RETRY_ATTEMPTS, bind_flags,
+        )
+        .into(),
+        None => format!(
+            "libxdp bind: exhausted {} retries with flags=0x{:04x}",
+            BIND_RETRY_ATTEMPTS, bind_flags,
+        )
+        .into(),
+    })
 }
 
 fn query_bound_xsk_mode(fd: c_int) -> Option<XskBindMode> {
@@ -1057,6 +1147,38 @@ mod bind_flags_9043_tests {
             Some(&XSK_BIND_FLAGS_COPY),
             "AUTO and COPY_ONLY must differ, or the generic-XDP branch is not \
              choosing anything"
+        );
+    }
+}
+
+#[cfg(test)]
+mod bind_identity_9904_tests {
+    use super::*;
+    use std::ffi::CString;
+
+    // F-151 (#9904): the post-bind identity check with an injected resolver
+    // (no real interfaces needed). Match → Ok; mismatch → Err carrying
+    // planned-vs-observed; unresolvable → Err (fail closed: an interface
+    // that vanished mid-bind cannot be proven to be the planned one).
+    // The wiring (called in `try_open_bind` before the fill prime, with
+    // fresh-resolve retry) is review-pinned: driving it needs a real AF_XDP
+    // bind, and the source tripwire
+    // `tests/bind_identity_verification_9904.rs` pins the call site.
+    #[test]
+    fn verify_bind_identity_matches_and_mismatches_9904() {
+        let name = CString::new("eth0").expect("fixture name");
+        assert!(verify_bind_identity_with_resolver(11, &name, |_| Some(11)).is_ok());
+        let err = verify_bind_identity_with_resolver(11, &name, |_| Some(12))
+            .expect_err("ifindex 12 for planned 11 must fail");
+        assert!(
+            err.contains("11") && err.contains("12"),
+            "mismatch must log planned-vs-observed, got: {err}"
+        );
+        let gone = verify_bind_identity_with_resolver(11, &name, |_| None)
+            .expect_err("unresolvable bound name must fail closed");
+        assert!(
+            gone.contains("11"),
+            "unresolvable error must name the planned ifindex, got: {gone}"
         );
     }
 }

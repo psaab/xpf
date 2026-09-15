@@ -464,10 +464,13 @@ Operational success is not "AF_XDP bind says zerocopy". It is the full chain:
 - `In-place TX packets` increases during LAN<->WAN forwarding
 - `In-place VLAN push desc` / `pop desc` increase for VLAN transitions
 - `In-place L2 memmove fb` stays flat
-- unknown shared-recycle slots fail closed, log the dropped `(slot, offset)`,
-  and increment both `TX errors` and
-  `tx_shared_recycle_unknown_slot_drops` instead of pushing the offset into
-  any fallback binding
+- unknown shared-recycle slots are routing anomalies: they always increment
+  `TX errors`, then split by fate (F-149, #9904) — rescued via the
+  same-region backstop with `tx_shared_recycle_unknown_slot_rescued` in
+  single-region workers, or dropped fail-closed with
+  `tx_shared_recycle_unknown_slot_drops` in mixed-region workers — with a
+  bounded one-line log per drain. Never a cross-region (foreign) offset
+  into any fallback binding
 - perf no longer shows `build_forwarded_frame_into_from_frame` as the
   dominant `__memmove_evex_unaligned_erms` caller
 

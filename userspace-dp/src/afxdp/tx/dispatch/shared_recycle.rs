@@ -21,8 +21,12 @@ pub(in crate::afxdp) fn apply_shared_recycles(
     if shared_recycles.is_empty() {
         return;
     }
+    // F-149 (#9904): computed ONCE per drain, not per unknown slot.
+    let backstop = split_is_single_region(left, current, right);
     let mut dropped = 0u64;
+    let mut rescued = 0u64;
     let mut first_drop = None;
+    let mut first_rescue = None;
     for (slot, offset) in shared_recycles.drain(..) {
         if route_shared_recycle_by_slot(
             left,
@@ -35,11 +39,65 @@ pub(in crate::afxdp) fn apply_shared_recycles(
         ) {
             continue;
         }
-        first_drop.get_or_insert((slot, offset));
-        dropped = dropped.saturating_add(1);
+        if backstop {
+            current.tx_pipeline.pending_fill_frames.push_back(offset);
+            first_rescue.get_or_insert((slot, offset));
+            rescued = rescued.saturating_add(1);
+        } else {
+            first_drop.get_or_insert((slot, offset));
+            dropped = dropped.saturating_add(1);
+        }
     }
     log_shared_recycle_unknown_slot_drops(dropped, first_drop);
+    log_shared_recycle_unknown_slot_rescues(rescued, first_rescue);
     record_shared_recycle_unknown_slot_drops(Some(&current.live), dropped);
+    record_shared_recycle_unknown_slot_rescues(Some(&current.live), rescued);
+}
+
+// F-149 (#9904): same-region backstop premise, stated because the rescue
+// below is sound ONLY while all three hold:
+//
+// (a) Recycle provenance is worker-local. The `shared_recycles`
+// accumulator is a worker-local `Vec` (built per poll loop, never sent
+// across threads), and every record in it originates from this worker's
+// own `PreparedTxRequest`s. Cross-worker redirect carries owned `TxRequest`
+// bytes (`MpscInbox<TxRequest>`), never `PreparedTxRequest`, so no foreign
+// slot/offset pair migrates in.
+//
+// (b) Shared groups are intra-worker. `WorkerUmem` is `Rc`-shared
+// (`shares_allocation_with` is `Rc::ptr_eq`), so two bindings share an
+// allocation only within one worker.
+//
+// (c) Bindings are immutable after setup. `WorkerBindingLookup` is built
+// once in `worker/loop_body/setup.rs` and the bindings slice is never
+// pushed/removed/reordered in the poll loop, so an unknown slot is a
+// routing anomaly (stale/buggy stamp), never a departed binding whose
+// region vanished.
+//
+// Given (a)+(b)+(c), in a single-region worker EVERY offset in the
+// accumulator belongs to the one live region, so routing an unknown-slot
+// offset to any survivor's fill queue is NOT the foreign-offset push
+// `tx/README.md` forbids — it is a same-region backstop. In a mixed-region
+// worker the offset's home region is unknowable from `(slot, offset)`
+// alone (private UMEMs share the same numeric ranges), so the fail-closed
+// drop path is kept. A future cross-worker recycle producer MUST extend
+// the record with region identity before touching this.
+pub(in crate::afxdp) fn split_is_single_region(
+    left: &[BindingWorker],
+    current: &BindingWorker,
+    right: &[BindingWorker],
+) -> bool {
+    left.iter()
+        .chain(right.iter())
+        .all(|binding| binding.umem.shares_allocation_with(&current.umem))
+}
+
+fn single_region_backstop_index(bindings: &[BindingWorker]) -> Option<usize> {
+    let first = bindings.first()?;
+    bindings
+        .iter()
+        .all(|binding| binding.umem.shares_allocation_with(&first.umem))
+        .then_some(0)
 }
 
 fn route_shared_recycle_by_slot(
@@ -122,7 +180,7 @@ where
     (0..binding_count).find(|&idx| slot_at(idx) == Some(slot))
 }
 
-pub(super) fn record_shared_recycle_unknown_slot_drops(
+pub(in crate::afxdp) fn record_shared_recycle_unknown_slot_drops(
     error_live: Option<&BindingLiveState>,
     dropped: u64,
 ) {
@@ -136,7 +194,28 @@ pub(super) fn record_shared_recycle_unknown_slot_drops(
     }
 }
 
-fn log_shared_recycle_unknown_slot_drops(dropped: u64, first_drop: Option<(u32, u64)>) {
+// F-149 (#9904): rescued unknowns join the `tx_errors` aggregate like drops
+// do — an unknown slot is a routing anomaly regardless of fate — with the
+// rescued subset distinguishing "recovered via the same-region backstop"
+// from "lost". `tx_errors == drops + rescued` for unknown slots.
+pub(in crate::afxdp) fn record_shared_recycle_unknown_slot_rescues(
+    error_live: Option<&BindingLiveState>,
+    rescued: u64,
+) {
+    if rescued == 0 {
+        return;
+    }
+    if let Some(live) = error_live {
+        live.tx_errors.fetch_add(rescued, Ordering::Relaxed);
+        live.tx_shared_recycle_unknown_slot_rescued
+            .fetch_add(rescued, Ordering::Relaxed);
+    }
+}
+
+pub(in crate::afxdp) fn log_shared_recycle_unknown_slot_drops(
+    dropped: u64,
+    first_drop: Option<(u32, u64)>,
+) {
     if dropped == 0 {
         return;
     }
@@ -154,6 +233,28 @@ fn log_shared_recycle_unknown_slot_drops(dropped: u64, first_drop: Option<(u32, 
     }
 }
 
+pub(in crate::afxdp) fn log_shared_recycle_unknown_slot_rescues(
+    rescued: u64,
+    first_rescue: Option<(u32, u64)>,
+) {
+    if rescued == 0 {
+        return;
+    }
+    if let Some((slot, offset)) = first_rescue {
+        eprintln!(
+            "xpf-userspace-dp: rescued {} shared UMEM recycles for unknown slots \
+             via the same-region backstop (first slot {} offset {})",
+            rescued, slot, offset
+        );
+    } else {
+        eprintln!(
+            "xpf-userspace-dp: rescued {} shared UMEM recycles for unknown slots \
+             via the same-region backstop",
+            rescued
+        );
+    }
+}
+
 pub(in crate::afxdp) fn apply_shared_recycles_to_bindings(
     bindings: &mut [BindingWorker],
     binding_lookup: &WorkerBindingLookup,
@@ -162,8 +263,12 @@ pub(in crate::afxdp) fn apply_shared_recycles_to_bindings(
     if shared_recycles.is_empty() {
         return 0;
     }
+    // F-149 (#9904): computed ONCE per drain, not per unknown slot.
+    let backstop = single_region_backstop_index(bindings);
     let mut dropped = 0u64;
+    let mut rescued = 0u64;
     let mut first_drop = None;
+    let mut first_rescue = None;
     for (slot, offset) in shared_recycles.drain(..) {
         let target_index =
             shared_recycle_target_index(bindings.len(), binding_lookup, slot, |idx| {
@@ -175,13 +280,26 @@ pub(in crate::afxdp) fn apply_shared_recycles_to_bindings(
             binding.tx_pipeline.pending_fill_frames.push_back(offset);
             continue;
         }
-        first_drop.get_or_insert((slot, offset));
-        dropped = dropped.saturating_add(1);
+        if let Some(host) = backstop
+            && let Some(binding) = bindings.get_mut(host)
+        {
+            binding.tx_pipeline.pending_fill_frames.push_back(offset);
+            first_rescue.get_or_insert((slot, offset));
+            rescued = rescued.saturating_add(1);
+        } else {
+            first_drop.get_or_insert((slot, offset));
+            dropped = dropped.saturating_add(1);
+        }
     }
     log_shared_recycle_unknown_slot_drops(dropped, first_drop);
+    log_shared_recycle_unknown_slot_rescues(rescued, first_rescue);
     record_shared_recycle_unknown_slot_drops(
         bindings.first().map(|binding| binding.live.as_ref()),
         dropped,
+    );
+    record_shared_recycle_unknown_slot_rescues(
+        bindings.first().map(|binding| binding.live.as_ref()),
+        rescued,
     );
     dropped
 }

@@ -76,11 +76,18 @@ normally. Pinned by
   `(slot, offset)` records back through the shared slot-resolution helper.
   The split-slice path used while holding the ingress binding and the
   all-bindings cleanup path must share this resolver so stale lookup entries
-  are handled identically. Unknown recycle slots must fail closed and
-  increment both aggregate `tx_errors` and the subset
-  `tx_shared_recycle_unknown_slot_drops` on the worker status surface with
-  bounded one-line logging per drain; never push a foreign offset into an
-  arbitrary binding's fill ring.
+  are handled identically. Unknown recycle slots are routing anomalies and
+  always increment the aggregate `tx_errors`; their fate then splits
+  (F-149, #9904): in a single-region worker — every surviving binding
+  shares one UMEM allocation, so the offset cannot be foreign — the frame
+  is preserved via the same-region backstop (the current binding's, or
+  first binding's, fill queue) with the subset counter
+  `tx_shared_recycle_unknown_slot_rescued` and a bounded one-line log per
+  drain. In a mixed-region worker the offset's home region is unknowable
+  from `(slot, offset)` alone, so the frame is dropped fail-closed with
+  the subset counter `tx_shared_recycle_unknown_slot_drops` and the same
+  bounded logging. Either way, never push a cross-region (foreign) offset
+  into an arbitrary binding's fill ring.
 - The cross-binding direct-TX build's `debug-log` tuple-mismatch diagnostic
   (`dispatch/mod.rs`) drops the built frame by setting `build_failed`; the
   frame's `tx_offset` is recycled to `free_tx_frames` through the SINGLE
