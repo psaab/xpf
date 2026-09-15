@@ -1562,3 +1562,6 @@ impl ScreenState {
 #[cfg(test)]
 #[path = "tests.rs"]
 mod tests;
+#[cfg(test)]
+#[path = "tests_9901_walker_parity.rs"]
+mod tests_9901_walker_parity;
