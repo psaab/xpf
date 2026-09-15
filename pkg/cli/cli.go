@@ -61,7 +61,10 @@ type CLI struct {
 	rpmResultsFn    func() []*rpm.ProbeResult
 	ipmonStatusFn   func() []ipmon.PolicyStatus
 	natPoolAlarmsFn func() []natpoolalarm.ActiveAlarm
-	feedsFn         func() map[string]feeds.FeedInfo
+	// natPoolExhaustionAlarmsFn returns the active NAT pool-exhaustion
+	// alarms (#9902 F-026). Nil when no monitor is wired.
+	natPoolExhaustionAlarmsFn func() []natpoolalarm.ActiveExhaustionAlarm
+	feedsFn                   func() map[string]feeds.FeedInfo
 	// feedOverlayFn returns the live dynamic-address feed-prefix overlay
 	// (#3105): an address-name -> union-of-live-feed-CIDR-strings map, the same
 	// source the REST/gRPC simulators consume (daemon SnapshotForBindings). The
@@ -259,6 +262,12 @@ func (c *CLI) SetIPMonStatusFn(fn func() []ipmon.PolicyStatus) {
 // pool-utilization alarms surfaced by `show security alarms` (#2079).
 func (c *CLI) SetNATPoolAlarmsFn(fn func() []natpoolalarm.ActiveAlarm) {
 	c.natPoolAlarmsFn = fn
+}
+
+// SetNATPoolExhaustionAlarmsFn sets a callback for retrieving the active NAT
+// pool-exhaustion alarms surfaced by `show security alarms` (#9902 F-026).
+func (c *CLI) SetNATPoolExhaustionAlarmsFn(fn func() []natpoolalarm.ActiveExhaustionAlarm) {
+	c.natPoolExhaustionAlarmsFn = fn
 }
 
 // SetFeedsFn sets a callback for retrieving live dynamic address feed status.

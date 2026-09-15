@@ -35,6 +35,12 @@ type AppliedNATPoolStatus struct {
 	PortLow      uint16
 	PortHigh     uint16
 	UsedPorts    uint64
+	// ExhaustionTotal is the selected row's cumulative allocator-reported
+	// exhaustion events (#9902 F-026).
+	ExhaustionTotal uint64
+	// AllocatorID is the selected row's reporting allocator instance id
+	// (#9902 F-026).
+	AllocatorID uint64
 }
 
 // AppliedNATView is a single generation-coherent snapshot for the NAT
@@ -59,6 +65,12 @@ type AppliedNATView struct {
 	// Available is false when the dataplane helper is not running or no
 	// apply has happened yet; the monitor HOLDs (makes no decision) then.
 	Available bool
+	// StatusSequence is m.lastStatusSeq at sample time (#9902 F-026): the
+	// exhaustion monitor's freshness token.
+	StatusSequence uint64
+	// ProcGen is m.procGen at sample time (#9902 F-026): the
+	// exhaustion monitor's helper-incarnation token.
+	ProcGen uint64
 }
 
 // markAppliedSnapshotLocked captures the just-applied snapshot's config and
@@ -125,23 +137,37 @@ func (m *Manager) AppliedNATView() AppliedNATView {
 	// guard makes the HOLD explicit for the in-window state.
 	coherent := !m.deferWorkers &&
 		m.lastStatus.LastSnapshotGeneration == m.appliedSnapshot.Generation
-
 	pools := make(map[string]AppliedNATPoolStatus, len(m.lastStatus.SourceNATPools))
+	// selectedMax tracks each selected row's MaxTrackedFlows for the
+	// constructed-first rule below.
+	selectedMax := make(map[string]uint64, len(m.lastStatus.SourceNATPools))
 	for _, p := range m.lastStatus.SourceNATPools {
 		if p.PoolName == "" {
 			continue
 		}
-		// Dedup by pool name: rules sharing a pool report identical
-		// UsedPorts (shared Arc), so keep one entry; never sum.
+		// Dedup by pool name, preferring CONSTRUCTED allocators (#9902
+		// F-026): a poisoned rule (#9874) keeps its pool_mode but builds no
+		// allocator, and its status row reports a default allocator's
+		// zeros — first-wins would take the poisoned row whenever it sorts
+		// first. Constructed ⟺ MaxTrackedFlows>0 is airtight (the gate
+		// requires total_pool>0 + no failure + !poisoned, and a constructed
+		// capacity≥1 always yields max≥1; the default is 0), so a
+		// constructed row displaces a default one; ties keep the first.
+		// NEVER sum. This fixes selection for UsedPorts too (same rows).
 		if _, seen := pools[p.PoolName]; seen {
-			continue
+			if selectedMax[p.PoolName] > 0 || p.MaxTrackedFlows == 0 {
+				continue
+			}
 		}
+		selectedMax[p.PoolName] = p.MaxTrackedFlows
 		pools[p.PoolName] = AppliedNATPoolStatus{
-			PoolName:     p.PoolName,
-			AddressCount: p.AddressCount,
-			PortLow:      p.PortLow,
-			PortHigh:     p.PortHigh,
-			UsedPorts:    p.UsedPorts,
+			PoolName:        p.PoolName,
+			AddressCount:    p.AddressCount,
+			PortLow:         p.PortLow,
+			PortHigh:        p.PortHigh,
+			UsedPorts:       p.UsedPorts,
+			ExhaustionTotal: p.ExhaustionTotal,
+			AllocatorID:     p.AllocatorID,
 		}
 	}
 
@@ -151,5 +177,7 @@ func (m *Manager) AppliedNATView() AppliedNATView {
 		AppliedGeneration: m.appliedSnapshot.Generation,
 		HelperCoherent:    coherent,
 		Available:         true,
+		StatusSequence:    m.lastStatusSeq,
+		ProcGen:           m.procGen,
 	}
 }

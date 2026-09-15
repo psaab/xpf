@@ -57,6 +57,15 @@ type PoolStatus struct {
 	PortLow      uint16
 	PortHigh     uint16
 	UsedPorts    uint64
+	// ExhaustionTotal is the allocator's cumulative allocator-reported
+	// exhaustion events for this pool (#9902 F-026). The monitor watches its
+	// rate of change, keyed by (ProcGen, AllocatorID) continuity.
+	ExhaustionTotal uint64
+	// AllocatorID is the reporting allocator's instance id (#9902 F-026):
+	// same id ⇒ same counter instance, deltas comparable; changed id ⇒ the
+	// allocator was rebuilt, rebaseline silently. 0 from a helper older
+	// than the field.
+	AllocatorID uint64
 }
 
 // View is one generation-coherent sample for the monitor. Config and Pools
@@ -75,6 +84,16 @@ type View struct {
 	// has landed. When false the monitor HOLDs ALL alarms (no clear): no data
 	// is not a decision to clear.
 	Available bool
+	// StatusSequence is the manager's status-publication sequence at sample
+	// time (#9902 F-026). A repeated sequence means no new sample, so the
+	// exhaustion pass skips the tick entirely (a re-read cache must not
+	// advance clear hysteresis). 0 on synthetic/legacy views ⇒ never
+	// skipped.
+	StatusSequence uint64
+	// ProcGen is the manager's helper-process generation at sample time
+	// (#9902 F-026). It joins the exhaustion baseline key so allocator-id
+	// reuse across a helper restart cannot alias two incarnations.
+	ProcGen uint64
 }
 
 // Sampler returns the current generation-coherent NAT view. It must read only
@@ -95,11 +114,36 @@ type ActiveAlarm struct {
 	FirstSeen      time.Time
 }
 
+// ActiveExhaustionAlarm is a thread-safe snapshot of one active NAT pool
+// exhaustion alarm for the `show security alarms` render sites (#9902 F-026).
+// Events is the most recent tick's observed exhaustion-event delta.
+type ActiveExhaustionAlarm struct {
+	PoolName  string
+	Events    uint64
+	FirstSeen time.Time
+}
+
 // alarmState is the per-pool internal record while raised.
 type alarmState struct {
 	pct       uint64
 	raiseThr  int
 	firstSeen time.Time
+}
+
+// exhBaseline is the per-pool exhaustion continuity record (#9902 F-026):
+// the (procGen, allocatorID) identity the count was baselined against, the
+// last observed count, and the fresh-clean-tick streak toward a clear.
+type exhBaseline struct {
+	procGen     uint64
+	allocatorID uint64
+	count       uint64
+	streak      int
+}
+
+// exhAlarmState is the per-pool internal exhaustion record while raised.
+type exhAlarmState struct {
+	lastEvents uint64
+	firstSeen  time.Time
 }
 
 // Monitor evaluates NAT pool utilization on a slow tick and maintains the
@@ -119,7 +163,16 @@ type Monitor struct {
 	// utilization is indistinguishable from a healthy pool, so an operator who
 	// configured a raise-threshold needs to learn it cannot arrive.
 	inapplicable map[string]string
-	started      bool // run() launched (guards Stop against an unstarted monitor)
+	// #9902 F-026: exhaustion-alarm state. lastSeq is the newest status
+	// sequence the exhaustion pass has evaluated (a repeated sequence means
+	// no new sample — skip the pass); exhBaseline holds the per-pool
+	// continuity records; activeExhaustion the raised exhaustion alarms.
+	// Separate from `active` because the eligibility sets differ (exhaustion
+	// watches every referenced pool class; utilization only PAT).
+	lastSeq          uint64
+	exhBaseline      map[string]*exhBaseline
+	activeExhaustion map[string]*exhAlarmState
+	started          bool // run() launched (guards Stop against an unstarted monitor)
 
 	stopOnce sync.Once // guards close(stop) against concurrent Stop callers
 	stop     chan struct{}
@@ -131,13 +184,15 @@ type Monitor struct {
 // emit is tolerated (alarms still surface in `show security alarms`).
 func New(sample Sampler, emit Emitter) *Monitor {
 	return &Monitor{
-		sample: sample,
-		emit:   emit,
-		tick:   DefaultTickInterval,
-		nowFn:  time.Now,
-		active: make(map[string]*alarmState),
-		stop:   make(chan struct{}),
-		done:   make(chan struct{}),
+		sample:           sample,
+		emit:             emit,
+		tick:             DefaultTickInterval,
+		nowFn:            time.Now,
+		active:           make(map[string]*alarmState),
+		exhBaseline:      make(map[string]*exhBaseline),
+		activeExhaustion: make(map[string]*exhAlarmState),
+		stop:             make(chan struct{}),
+		done:             make(chan struct{}),
 	}
 }
 
@@ -269,7 +324,18 @@ func (m *Monitor) evaluate() {
 			continue // rule references a missing pool → not eligible
 		}
 		if p.Deterministic != nil {
-			continue // deterministic pools are skipped in r1
+			// #9902 F-026: deterministic pools stay ineligible for
+			// utilization (a per-subscriber block pool has no meaningful
+			// aggregate percentage), but say so explicitly instead of
+			// silently skipping: clear-then-mark. The clear preserves the
+			// det-convert 1-clear contract (no-op unless raised; the prune
+			// below then finds nothing to clear); the mark records WHY the
+			// configured threshold can never fire. Exhaustion events ARE
+			// watched for this class (see the exhaustion pass below).
+			m.clear(poolName, "pool no longer eligible")
+			m.markInapplicable(poolName, "deterministic pool (per-subscriber blocks): "+
+				"aggregate utilization cannot predict per-block exhaustion")
+			continue
 		}
 		// #7361: an ADDRESS-ONLY pool (`port no-translation`) has no
 		// port-utilization to measure, and its alarm can never fire.
@@ -347,6 +413,41 @@ func (m *Monitor) evaluate() {
 			m.clear(poolName, "pool no longer eligible")
 		}
 	}
+
+	// #9902 F-026: exhaustion-event pass. Eligibility here is
+	// rule-referenced + pool-exists, CLASS-AGNOSTIC: a deterministic pool's
+	// block-full and an address-only pool's reverse-identity collision ARE
+	// allocator-reported exhaustion events, even though neither class has a
+	// meaningful utilization percentage. The prune sets MUST stay dual: the
+	// utilization prune above would instantly clear a deterministic /
+	// address-only exhaustion alarm (those pools are never util-eligible).
+	exhEligible := map[string]bool{}
+	for poolName := range referenced {
+		p, ok := cfg.Security.NAT.SourcePools[poolName]
+		if !ok || p == nil {
+			continue // rule references a missing pool → not watched
+		}
+		exhEligible[poolName] = true
+	}
+
+	// Freshness: a repeated status sequence means the sampler re-read the
+	// same cached sample — no new observation, so the exhaustion pass skips
+	// the tick ENTIRELY (evaluation AND prune). Re-evaluating a re-read
+	// would credit clear-hysteresis streaks without new data. Sequence 0
+	// (synthetic/legacy views) never skips.
+	if view.StatusSequence == 0 || view.StatusSequence != m.lastExhaustionSeq() {
+		if view.StatusSequence != 0 {
+			m.setLastExhaustionSeq(view.StatusSequence)
+		}
+		for poolName := range exhEligible {
+			s, present := view.Pools[poolName]
+			if !present {
+				continue // eligible but absent this tick → HOLD
+			}
+			m.evalExhaustion(poolName, view.ProcGen, s.AllocatorID, s.ExhaustionTotal)
+		}
+		m.pruneExhaustion(exhEligible)
+	}
 }
 
 // isRaised reports whether the pool currently has an active alarm.
@@ -407,11 +508,21 @@ func (m *Monitor) clear(poolName, reason string) {
 }
 
 // clearAll clears every active alarm (each via clear, so each emits a clear
-// line). Used on the feature-disabled / nil-config early returns.
+// line). Used on the feature-disabled / nil-config early returns. #9902
+// F-026: also clears every active EXHAUSTION alarm and retires all
+// exhaustion baselines — a disabled/absent stanza watches nothing, and the
+// next enabled tick must re-baseline silently rather than diff against a
+// stale count.
 func (m *Monitor) clearAll(reason string) {
 	for _, poolName := range m.activeKeys() {
 		m.clear(poolName, reason)
 	}
+	for _, poolName := range m.activeExhaustionKeys() {
+		m.clearExhaustion(poolName, reason)
+	}
+	m.mu.Lock()
+	m.exhBaseline = map[string]*exhBaseline{}
+	m.mu.Unlock()
 }
 
 // updatePct refreshes the displayed pct for an already-raised pool that stays
@@ -424,6 +535,134 @@ func (m *Monitor) updatePct(poolName string, pct uint64) {
 	}
 }
 
+// lastExhaustionSeq returns the newest status sequence the exhaustion pass
+// has evaluated (#9902 F-026).
+func (m *Monitor) lastExhaustionSeq() uint64 {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.lastSeq
+}
+
+// setLastExhaustionSeq records the newest evaluated status sequence.
+func (m *Monitor) setLastExhaustionSeq(seq uint64) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.lastSeq = seq
+}
+
+// evalExhaustion runs one pool's exhaustion state machine for a fresh tick
+// (#9902 F-026). The baseline key is (procGen, allocatorID): a change in
+// EITHER means the counter instance was replaced (helper restart or
+// allocator rebuild) and the observation is incomparable with the baseline,
+// so the tick rebases SILENTLY — no evaluation, no clear, streak reset. On
+// an UNCHANGED key the counters are the same instance's monotonic atomics,
+// so the delta is genuine: >0 raises (or silently refreshes the displayed
+// events), ==0 advances the 3-clean-tick clear hysteresis. cur<prev on an
+// unchanged key is unreachable in production (same-instance counters only
+// grow) but specified anyway: defensive rebase.
+//
+// State mutates under the mutex; the at-most-one transition syslog emits
+// AFTER unlock (never hold the mutex across the blocking write).
+func (m *Monitor) evalExhaustion(poolName string, procGen, allocatorID, cur uint64) {
+	m.mu.Lock()
+	sev, msg := 0, ""
+	emit := false
+	b, seen := m.exhBaseline[poolName]
+	switch {
+	case !seen:
+		// First sighting: silent baseline, no evaluation this tick.
+		m.exhBaseline[poolName] = &exhBaseline{procGen: procGen, allocatorID: allocatorID, count: cur}
+	case procGen != b.procGen || allocatorID != b.allocatorID:
+		// Identity change: silent rebase. The new count is stored, the
+		// streak resets, and an active alarm is NEITHER cleared (no false
+		// credit) NOR refreshed.
+		b.procGen, b.allocatorID, b.count, b.streak = procGen, allocatorID, cur, 0
+	case cur < b.count:
+		// Same-key decrease: defensive rebase (unreachable in production).
+		b.count, b.streak = cur, 0
+	default:
+		delta := cur - b.count
+		b.count = cur
+		if delta > 0 {
+			b.streak = 0
+			if st, raised := m.activeExhaustion[poolName]; raised {
+				st.lastEvents = delta
+			} else {
+				m.activeExhaustion[poolName] = &exhAlarmState{lastEvents: delta, firstSeen: m.nowFn()}
+				sev, msg, emit = severityRaise, sprintfExhaustionRaised(poolName, delta), true
+			}
+		} else if _, raised := m.activeExhaustion[poolName]; raised {
+			b.streak++
+			if b.streak >= 3 {
+				delete(m.activeExhaustion, poolName)
+				b.streak = 0
+				sev, msg, emit = severityClear, sprintfExhaustionCleared(poolName, "no recently observed exhaustion"), true
+			}
+		}
+	}
+	m.mu.Unlock()
+	if emit {
+		m.emitLine(sev, msg)
+	}
+}
+
+// pruneExhaustion retires exhaustion state for pools no longer watched
+// (rule-unreferenced or config-removed): baseline-only records are dropped
+// silently, raised alarms clear WITH syslog. Class changes never reach here
+// (every class stays eligible), so exhaustion state survives them.
+func (m *Monitor) pruneExhaustion(exhEligible map[string]bool) {
+	m.mu.Lock()
+	var stale []string
+	for poolName := range m.activeExhaustion {
+		if !exhEligible[poolName] {
+			stale = append(stale, poolName)
+		}
+	}
+	for poolName := range m.exhBaseline {
+		if !exhEligible[poolName] {
+			delete(m.exhBaseline, poolName)
+		}
+	}
+	m.mu.Unlock()
+	for _, poolName := range stale {
+		m.clearExhaustion(poolName, "pool no longer referenced")
+	}
+}
+
+// activeExhaustionKeys snapshots the raised exhaustion-alarm pool names.
+func (m *Monitor) activeExhaustionKeys() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	keys := make([]string, 0, len(m.activeExhaustion))
+	for poolName := range m.activeExhaustion {
+		keys = append(keys, poolName)
+	}
+	return keys
+}
+
+// clearExhaustion removes an active exhaustion alarm and emits one clear
+// syslog line. No-op (no emission) without an active alarm.
+func (m *Monitor) clearExhaustion(poolName, reason string) {
+	m.mu.Lock()
+	if _, ok := m.activeExhaustion[poolName]; !ok {
+		m.mu.Unlock()
+		return
+	}
+	delete(m.activeExhaustion, poolName)
+	m.mu.Unlock()
+
+	m.emitLine(severityClear, sprintfExhaustionCleared(poolName, reason))
+}
+
+func sprintfExhaustionRaised(poolName string, events uint64) string {
+	return fmt.Sprintf("RT_NAT - NAT_POOL_EXHAUSTION_ALARM_RAISED pool-name=%q events=%d",
+		poolName, events)
+}
+
+func sprintfExhaustionCleared(poolName, reason string) string {
+	return fmt.Sprintf("RT_NAT - NAT_POOL_EXHAUSTION_ALARM_CLEARED pool-name=%q reason=%q",
+		poolName, reason)
+}
 func (m *Monitor) emitLine(severity int, msg string) {
 	if m.emit != nil {
 		m.emit(severity, msg)
@@ -444,6 +683,27 @@ func (m *Monitor) ActiveAlarms() []ActiveAlarm {
 			CurrentPct:     st.pct,
 			RaiseThreshold: st.raiseThr,
 			FirstSeen:      st.firstSeen,
+		})
+	}
+	m.mu.Unlock()
+	sort.Slice(out, func(i, j int) bool { return out[i].PoolName < out[j].PoolName })
+	return out
+}
+
+// ActiveExhaustionAlarms returns a sorted, thread-safe snapshot of the active
+// NAT pool exhaustion alarms for the `show security alarms` render sites
+// (#9902 F-026).
+func (m *Monitor) ActiveExhaustionAlarms() []ActiveExhaustionAlarm {
+	if m == nil {
+		return nil
+	}
+	m.mu.Lock()
+	out := make([]ActiveExhaustionAlarm, 0, len(m.activeExhaustion))
+	for name, st := range m.activeExhaustion {
+		out = append(out, ActiveExhaustionAlarm{
+			PoolName:  name,
+			Events:    st.lastEvents,
+			FirstSeen: st.firstSeen,
 		})
 	}
 	m.mu.Unlock()

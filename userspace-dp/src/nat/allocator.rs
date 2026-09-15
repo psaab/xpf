@@ -1314,8 +1314,30 @@ const PRESSURE_GC_BUDGET: usize = 64;
 /// release/idle budgets (64) yield the mutex several times.
 const GC_CHUNK: usize = 8;
 
+/// #9902 F-026: process-global allocator-instance counter. Each
+/// `PortAllocatorShared` takes the next id at construction; the id travels
+/// with the status row so the control plane can tell a rebuilt allocator
+/// (fresh zeroed counters) from the one it baselined. 0 is never assigned —
+/// it means "no id reported" (a helper older than this field).
+///
+/// Monotonic `fetch_add`, never reused: an id identifies one counter instance
+/// for the helper's lifetime. Tests assert only distinctness/equality of ids
+/// from constructions they perform themselves, never absolute values, so
+/// parallel `cargo test` threads cannot flake on the shared sequence (#6819).
+static NEXT_ALLOCATOR_ID: AtomicU64 = AtomicU64::new(1);
+
+fn next_allocator_id() -> u64 {
+    NEXT_ALLOCATOR_ID.fetch_add(1, Ordering::Relaxed)
+}
+
 #[derive(Debug)]
 struct PortAllocatorShared {
+    /// #9902 F-026: this shared state's instance id (see `NEXT_ALLOCATOR_ID`).
+    /// Immutable after construction; `Clone` shares the `Arc`, so a reused
+    /// allocator keeps its id WITH its counters (comparable), while every
+    /// fresh build — reconcile, runtime refresh, disarmed refresh, reseed-new —
+    /// mints a new one (rebaseline). Echoed per pool row in the status.
+    allocator_id: u64,
     /// One atomic counter per pool address, used for the stateless round-robin
     /// `try_next_port` (address-only / `port no-translation` paths). Separate
     /// from `occupancy` (which tracks flow-keyed pool-mode PAT allocation).
@@ -1387,6 +1409,7 @@ impl Default for PortAllocator {
     fn default() -> Self {
         Self {
             shared: Arc::new(PortAllocatorShared {
+                allocator_id: next_allocator_id(),
                 counters: Vec::new(),
                 addr_counter_v4: AtomicU32::new(0),
                 addr_counter_v6: AtomicU32::new(0),
@@ -1477,6 +1500,7 @@ impl PortAllocator {
             .min(MAX_SOURCE_NAT_POOL_TRACKED_FLOWS);
         Self {
             shared: Arc::new(PortAllocatorShared {
+                allocator_id: next_allocator_id(),
                 counters,
                 addr_counter_v4: AtomicU32::new(0),
                 addr_counter_v6: AtomicU32::new(0),
@@ -4649,6 +4673,7 @@ impl PortAllocator {
             .map(|occ| occ.occupied_count() as u64)
             .sum();
         PortAllocatorSnapshot {
+            allocator_id: self.shared.allocator_id,
             live_flows,
             used_ports,
             persistent_leases,
@@ -4902,6 +4927,11 @@ impl PortAllocator {
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct PortAllocatorSnapshot {
+    /// #9902 F-026: the snapshotted allocator's instance id: two snapshots
+    /// with the same id came from the same counter instance (cumulative
+    /// counters comparable); different ids mean a rebuild happened between
+    /// them (rebaseline, never delta).
+    pub(crate) allocator_id: u64,
     pub(crate) live_flows: u64,
     pub(crate) used_ports: u64,
     pub(crate) persistent_leases: u64,

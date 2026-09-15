@@ -12735,3 +12735,201 @@ fn untracked_coordinator_release_preserves_worker_held_record_9902() {
         "holder release after a surviving untracked call leaked the port"
     );
 }
+
+// #9902 F-026: allocator instance-identity continuity. The control plane keys
+// its exhaustion baseline on (ProcGen, AllocatorID), so the dataplane must
+// prove rebuild ⟺ id-change on REAL lifecycle transitions: fresh builds mint
+// distinct ids, exact-key reuse keeps the id WITH its (nonzero) counters, and
+// a reseed-new key mints a new id with zeroed counters. Together with the Go
+// matrix (id/procGen-change ⇒ silent rebase) this composes the continuity
+// proof — no unaudited rebuild path can break it, because the id lives on the
+// counter instance itself.
+fn tiny_pool_snapshot_9902() -> SourceNATRuleSnapshot {
+    SourceNATRuleSnapshot {
+        name: "tiny-snat-9902".to_string(),
+        from_zone: "lan".to_string(),
+        to_zone: "wan".to_string(),
+        source_addresses: vec!["0.0.0.0/0".to_string()],
+        pool_name: "tiny-pool-9902".to_string(),
+        pool_addresses: vec!["203.0.113.10".to_string()],
+        port_low: 40000,
+        port_high: 40000,
+        ..SourceNATRuleSnapshot::default()
+    }
+}
+
+// Drive the 1-port pool to one allocation + one exhaustion (mirrors
+// pool_snat_allocator_exhausted_counter_increments).
+fn exhaust_tiny_pool_9902(rules: &[SourceNatRule]) {
+    let first = tuple_snat_lookup(rules, 10000, "8.8.8.8", 53, 1);
+    assert!(
+        matches!(first, SourceNatLookup::Matched(_)),
+        "fixture: the first flow must allocate the single pool port"
+    );
+    let second = tuple_snat_lookup(rules, 10001, "1.1.1.1", 53, 2);
+    assert!(
+        matches!(second, SourceNatLookup::Unavailable(_)),
+        "fixture: the second flow must exhaust the single-port pool"
+    );
+}
+
+#[test]
+fn allocator_id_distinct_across_fresh_builds_9902() {
+    let a = parse_source_nat_rules(&[tiny_pool_snapshot_9902()]);
+    let b = parse_source_nat_rules(&[tiny_pool_snapshot_9902()]);
+    let ida = source_nat_pool_statuses(&a)[0].allocator_id;
+    let idb = source_nat_pool_statuses(&b)[0].allocator_id;
+    assert_ne!(ida, 0, "a minted id must never be the legacy/unknown 0");
+    assert_ne!(idb, 0, "a minted id must never be the legacy/unknown 0");
+    assert_ne!(
+        ida, idb,
+        "two fresh builds are two counter instances and must mint distinct ids"
+    );
+}
+
+#[test]
+fn allocator_id_distinct_after_drop_9902() {
+    let ida = source_nat_pool_statuses(&parse_source_nat_rules(&[tiny_pool_snapshot_9902()]))[0]
+        .allocator_id;
+    // The predecessor is dropped here; the sequence never reuses an id.
+    let idb = source_nat_pool_statuses(&parse_source_nat_rules(&[tiny_pool_snapshot_9902()]))[0]
+        .allocator_id;
+    assert_ne!(ida, 0);
+    assert_ne!(
+        ida, idb,
+        "a fresh build after dropping the predecessor must mint a new id"
+    );
+}
+
+#[test]
+fn allocator_id_default_mints_distinct_nonzero_9902() {
+    let default_id = PortAllocator::default().snapshot().allocator_id;
+    let new_id = PortAllocator::new(1, 1024, 1027).snapshot().allocator_id;
+    assert_ne!(default_id, 0, "Default must mint a real id, not unknown 0");
+    assert_ne!(new_id, 0, "new must mint a real id, not unknown 0");
+    assert_ne!(
+        default_id, new_id,
+        "both constructors mint from the same sequence; no two instances share an id"
+    );
+}
+
+#[test]
+fn allocator_id_preserved_with_nonzero_exhaustion_on_exact_reuse_9902() {
+    let snap = tiny_pool_snapshot_9902();
+    let rules = parse_source_nat_rules(&[snap.clone()]);
+    exhaust_tiny_pool_9902(&rules);
+    let before = source_nat_pool_statuses(&rules);
+    assert_eq!(
+        before[0].exhaustion_total, 1,
+        "fixture: the tiny pool must hold one exhaustion event before the refresh"
+    );
+    let id_before = before[0].allocator_id;
+    assert_ne!(
+        id_before, 0,
+        "fixture: the id must be minted (a zero id would make the reuse assert vacuous)"
+    );
+
+    let refreshed = parse_source_nat_rules_with_previous(
+        &[snap],
+        Some(&rules),
+        &crate::nat::NatCounterStore::default(),
+        0,
+    );
+    let after = source_nat_pool_statuses(&refreshed);
+    assert_eq!(
+        after[0].allocator_id, id_before,
+        "exact-key reuse clones the Arc: the id survives WITH its counters"
+    );
+    assert_eq!(
+        after[0].exhaustion_total, 1,
+        "reuse must preserve NONZERO exhaustion — the delta the monitor evaluates"
+    );
+    assert_eq!(after[0].allocations_total, 1);
+}
+
+#[test]
+fn allocator_id_new_and_counters_zeroed_on_reseed_new_key_9902() {
+    let snap = tiny_pool_snapshot_9902();
+    let rules = parse_source_nat_rules(&[snap.clone()]);
+    exhaust_tiny_pool_9902(&rules);
+    let id_before = source_nat_pool_statuses(&rules)[0].allocator_id;
+
+    // New key (name + addresses + range): a fully-disjoint address swap, so
+    // the reseed carries nothing and the new allocator starts zeroed.
+    let mut changed = snap.clone();
+    changed.pool_addresses = vec!["203.0.113.11".to_string()];
+    let rebuilt = parse_source_nat_rules_with_previous(
+        &[changed],
+        Some(&rules),
+        &crate::nat::NatCounterStore::default(),
+        0,
+    );
+    let after = source_nat_pool_statuses(&rebuilt);
+    assert_ne!(
+        after[0].allocator_id, id_before,
+        "a reseed-new key builds a fresh allocator with a new id"
+    );
+    assert_eq!(after[0].exhaustion_total, 0);
+    assert_eq!(after[0].allocations_total, 0);
+    assert_eq!(after[0].used_ports, 0);
+}
+
+#[test]
+fn allocator_id_preserved_by_ha_import_9902() {
+    let pool_ip: Ipv4Addr = "203.0.113.1".parse().unwrap();
+    let rules = parse_source_nat_rules(&[SourceNATRuleSnapshot {
+        name: "pool-snat-9902".to_string(),
+        from_zone: "lan".to_string(),
+        to_zone: "wan".to_string(),
+        source_addresses: vec!["0.0.0.0/0".to_string()],
+        pool_name: "import-pool-9902".to_string(),
+        pool_addresses: vec!["203.0.113.1/32".to_string()],
+        port_low: 10000,
+        port_high: 10001,
+        ..SourceNATRuleSnapshot::default()
+    }]);
+    let before = source_nat_pool_statuses(&rules);
+    assert!(
+        before[0].max_tracked_flows > 0,
+        "fixture: the pool must be constructed (the selector's signal)"
+    );
+    assert_eq!(before[0].allocations_total, 0);
+    let id_before = before[0].allocator_id;
+    assert_ne!(
+        id_before, 0,
+        "fixture: the id must be minted (a zero id would make the preservation assert vacuous)"
+    );
+
+    // A peer-synced session the active node translated to (203.0.113.1, 10000).
+    let synced_key = session_key_from_src("10.0.61.50", 40000, "8.8.8.8", 443);
+    let synced_nat = NatDecision {
+        rewrite_src: Some(IpAddr::V4(pool_ip)),
+        rewrite_src_port: Some(10000),
+        ..NatDecision::default()
+    };
+    reserve_synced_source_nat_allocation(
+        &InterfaceNatAllocators::default(),
+        &rules,
+        &synced_key,
+        synced_nat,
+        false,
+        None,
+        0,
+    );
+
+    let after = source_nat_pool_statuses(&rules);
+    assert_eq!(
+        after[0].allocator_id, id_before,
+        "an HA import reserves into the SAME allocator: the id must not move"
+    );
+    assert!(
+        after[0].max_tracked_flows > 0,
+        "the import-only allocator stays constructed (MaxTrackedFlows>0) so the \
+         Go selector prefers it over a poisoned default"
+    );
+    assert_eq!(
+        after[0].allocations_total, 0,
+        "an import reserves bitmap + live records WITHOUT allocating"
+    );
+    assert_eq!(after[0].used_ports, 1);
+}

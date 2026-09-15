@@ -140,10 +140,14 @@ func TestAdvisoryReachesValidateConfig7361(t *testing.T) {
 	}
 }
 
-// DETERMINISTIC pools are skipped by the monitor entirely, so they are not this
-// issue's subject and must not be flagged — otherwise the advisory claims a
-// cause that is not the operative one.
-func TestDeterministicPoolNotFlagged7361(t *testing.T) {
+// DETERMINISTIC pools cannot fire the utilization alarm either (#9902 F-026):
+// aggregate utilization cannot predict per-block exhaustion. They get their
+// OWN sentence — never the address-only one, even when the pool is ALSO
+// address-only (the block structure, not the port mode, is the operative
+// cause). This replaces the #7361-era "not flagged" contract: silence about
+// a threshold that cannot fire is the harm #7361 exists to end, and it
+// applies to this class identically.
+func TestDeterministicPoolFlagged9902(t *testing.T) {
 	w := warnFor7361(t,
 		"set security nat source pool det address 203.0.113.40",
 		"set security nat source pool det port no-translation",
@@ -162,12 +166,43 @@ func TestDeterministicPoolNotFlagged7361(t *testing.T) {
 		"set security nat source rule-set rs rule r1 then source-nat pool det",
 		"set security nat source pool-utilization-alarm raise-threshold 90",
 	)
+	var flagged []string
 	for _, x := range w {
 		if strings.Contains(x, `"det"`) {
-			t.Errorf("a deterministic pool was flagged for an address-only reason; "+
-				"the monitor skips deterministic pools for a different reason "+
-				"entirely: %s", x)
+			flagged = append(flagged, x)
 		}
+	}
+	if len(flagged) != 1 {
+		t.Fatalf("expected exactly one advisory for the deterministic pool, got %d: %v", len(flagged), w)
+	}
+	if !strings.Contains(flagged[0], "cannot predict per-block exhaustion") {
+		t.Errorf("deterministic pool must get the deterministic sentence, got: %s", flagged[0])
+	}
+	if strings.Contains(flagged[0], "no-translation") {
+		t.Errorf("deterministic+address-only pool must not get the address-only sentence, got: %s", flagged[0])
+	}
+}
+
+// A deterministic PORT-BEARING pool is the class the old filter could never
+// reach (the `!PortNoTranslation` gate dropped it before the deterministic
+// skip): it must warn with the deterministic sentence.
+func TestDeterministicPortBearingPoolWarns9902(t *testing.T) {
+	w := warnFor7361(t,
+		"set security nat source pool detpb address 203.0.113.41",
+		"set security nat source pool detpb port range 1024 65535",
+		"set security nat source pool detpb port deterministic block-size 64",
+		"set security nat source pool detpb port deterministic host address 10.0.0.0/28",
+		"set security nat source rule-set rs from zone trust",
+		"set security nat source rule-set rs to zone untrust",
+		"set security nat source rule-set rs rule r1 match source-address 10.0.0.0/8",
+		"set security nat source rule-set rs rule r1 then source-nat pool detpb",
+		"set security nat source pool-utilization-alarm raise-threshold 90",
+	)
+	if len(w) != 1 {
+		t.Fatalf("expected exactly one advisory, got %d: %v", len(w), w)
+	}
+	if !strings.Contains(w[0], `"detpb"`) || !strings.Contains(w[0], "cannot predict per-block exhaustion") {
+		t.Errorf("deterministic port-bearing pool must get the deterministic sentence, got: %s", w[0])
 	}
 }
 

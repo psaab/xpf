@@ -394,6 +394,10 @@ func (s *Server) showSecurityAlarms(cfg *config.Config, topic string, buf *strin
 	if s.natPoolAlarmsFn != nil {
 		alarmCount = natpoolalarm.RenderAlarms(buf, s.natPoolAlarmsFn(), alarmCount, detail)
 	}
+	// #9902 F-026: NAT source pool-exhaustion alarms from the daemon monitor.
+	if s.natPoolExhaustionAlarmsFn != nil {
+		alarmCount = natpoolalarm.RenderExhaustionAlarms(buf, s.natPoolExhaustionAlarmsFn(), alarmCount, detail)
+	}
 
 	if alarmCount == 0 {
 		buf.WriteString("No security alarms currently active\n")

@@ -7,7 +7,7 @@ import (
 
 // natPoolAlarmInapplicableWarnings reports every source-NAT pool whose
 // configured `pool-utilization-alarm` can NEVER fire because the pool is
-// address-only (#7361).
+// address-only (#7361) or deterministic (#9902 F-026).
 //
 // THE DEFECT. `used_ports` is a popcount over the allocator's occupancy
 // bitmaps. `reserve_address_only` never touches occupancy — it records
@@ -68,11 +68,28 @@ func natPoolAlarmInapplicableWarnings(cfg *Config) []string {
 	var out []string
 	for _, name := range sortedReferencedPools(referenced) {
 		p, ok := cfg.Security.NAT.SourcePools[name]
-		if !ok || p == nil || !p.PortNoTranslation {
+		if !ok || p == nil {
 			continue
 		}
+		// #9902 F-026: deterministic FIRST. The old shape (address-only
+		// filter, then a deterministic skip) made the deterministic arm
+		// unreachable behind the `!PortNoTranslation` gate for
+		// deterministic+port-bearing pools — the class this sentence is
+		// about. A deterministic+address-only pool reports the
+		// deterministic sentence only (the block structure, not the port
+		// mode, is the operative cause).
 		if p.Deterministic != nil {
-			continue // deterministic pools are not monitored at all
+			out = append(out, fmt.Sprintf(
+				"security nat source pool %q is deterministic (per-subscriber "+
+					"blocks), so the configured `pool-utilization-alarm "+
+					"raise-threshold %d` can NEVER fire for it: aggregate "+
+					"utilization cannot predict per-block exhaustion. The alarm "+
+					"still applies to port-bearing pools",
+				name, cfg.Security.NAT.PoolUtilizationAlarm.RaiseThreshold))
+			continue
+		}
+		if !p.PortNoTranslation {
+			continue
 		}
 		out = append(out, fmt.Sprintf(
 			"security nat source pool %q has `port no-translation`, so the configured "+
