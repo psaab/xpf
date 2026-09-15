@@ -2,6 +2,8 @@ package dataplane
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -988,7 +990,17 @@ func TestManagerTeardownClearsLinkMembership(t *testing.T) {
 	}
 
 	// Close-only polarity: the hitless path keeps the pinned kernel links
-	// live, so the membership must survive Close.
+	// live, so the membership must survive Close. #9847: Close reports a
+	// degraded shutdown when a registered link has no pin, so the fixture
+	// provides one — an unpinned registered link is the degraded shape,
+	// covered by TestCloseReportsDegradedOnUnpinnedXDPLink_9847.
+	pinDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(pinDir, "xdp_11"), []byte{}, 0600); err != nil {
+		t.Fatalf("seed pin: %v", err)
+	}
+	oldPinPath := linkPinPath
+	linkPinPath = pinDir
+	defer func() { linkPinPath = oldPinPath }()
 	m2 := New()
 	m2.xdpLinks[11] = &armedGateFakeLink{}
 	if err := m2.Close(); err != nil {
