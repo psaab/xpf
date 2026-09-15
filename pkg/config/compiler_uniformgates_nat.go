@@ -330,6 +330,30 @@ func runUniformGatesNAT(tree *ConfigTree, cfg *Config, opts compileOpts) error {
 			return err
 		}
 	}
+	// #9879 destination-NAT `off`-shadow gate. A broad `then destination-nat
+	// off` exemption configured BEFORE a narrower later translate rule loses
+	// for the overlapping subspace: the dataplane resolves DNAT by
+	// most-specific match, not rule order, so the "exempted" traffic is
+	// translated anyway (fail-open). Reject the losing shape so the author
+	// reorders (translate-first agrees under both Junos first-match and xpf
+	// specificity) instead of shipping an inverted exemption. Strict on commit
+	// / commit-check (hard-reject); lenient on load / peer-sync (downgrade to
+	// a warning so a config persisted before this gate existed still boots —
+	// #1960 no-brick; both rules install and the overlap translates, which the
+	// show annotation reports). Shares the lenientDestNATAddresses flag (same
+	// NAT silent-drop / wrong-translate doctrine). Runs last in the NAT
+	// segment so every structural NAT error still wins the first-error slot —
+	// but BEFORE later uniform domains (DHCPApp, Filter, ...) and tailgates,
+	// so a config tripping both #9879 and a later gate reports #9879 first,
+	// by design (pinned by TestDNATOffShadowWinsOverLaterDomain_9879).
+	if err := validateDNATOffShadowStrict(cfg); err != nil {
+		if opts.lenientDestNATAddresses {
+			cfg.Warnings = append(cfg.Warnings,
+				fmt.Sprintf("destination-nat off shadowed (downgraded to warning on tolerant path): %v", err))
+		} else {
+			return err
+		}
+	}
 
 	return nil
 }

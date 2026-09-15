@@ -96,6 +96,24 @@ func noteNotInstalled(w io.Writer, reason string) {
 	fmt.Fprintf(w, "    Status:                  NOT INSTALLED — %s\n", reason)
 }
 
+// noteDNATOffShadowed emits the #9879 partial-shadow warning for a
+// destination-NAT `off` rule a narrower later translate rule re-enters. reason
+// is the operator-facing text from the shared pkg/config predicate
+// (config.DNATOffShadowReason) the COMMIT GATE also consults, so the
+// annotation cannot claim something the gate disagrees with. This is
+// deliberately NOT a noteNotInstalled: the `off` entry IS installed and still
+// exempts the non-overlapping remainder — only the re-entered subspace
+// translates. Saying NOT INSTALLED would promise fall-through that does not
+// happen (the same reason noteLenientMatchDropped is not one). Nothing is
+// printed when reason is empty, so a healthy rule's output is byte-identical
+// to the pre-#9879 form.
+func noteDNATOffShadowed(w io.Writer, reason string) {
+	if reason == "" {
+		return
+	}
+	fmt.Fprintf(w, "    Warning:                 PARTIALLY SHADOWED — %s\n", reason)
+}
+
 // noteLenientTerminalAction annotates a rule that the TOLERANT config path
 // admitted despite the strict terminal-action cardinality gate rejecting it
 // (#7640).
