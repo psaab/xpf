@@ -142,6 +142,11 @@ pub(crate) struct ProcessStatus {
     /// Additive + `default`ed (#1961).
     #[serde(rename = "nat64_frag_protocol_alias_misses_total", default)]
     pub nat64_frag_protocol_alias_misses_total: u64,
+    /// #9901 (F-010): fragment associations reclaimed by the absolute lifetime
+    /// bound rather than the idle TTL — one key consulted continuously for the
+    /// whole maximum lifetime. Additive + `default`ed (#1961).
+    #[serde(rename = "frag_max_lifetime_evictions_total", default)]
+    pub frag_max_lifetime_evictions_total: u64,
     /// #6751 PR 2/3: interface-mode SNAT admissions that failed CLOSED with no
     /// free translated identity — a completed full-cycle PAT probe, a port-less
     /// protocol whose single identity is owned, or a peer-synced import whose
