@@ -295,6 +295,10 @@ type Agent struct {
 	lifeCancel context.CancelFunc
 	trapStop   chan struct{}
 	trapWG     sync.WaitGroup
+	// serveBudget is the Serve loop's per-source request budget (#9917 F-139),
+	// set by the constructors. A nil budget (bare-struct test agents) allows
+	// everything -- only constructor-built agents enforce.
+	serveBudget *snmpServeBudget
 }
 
 // trapJob is one queued trap-delivery unit: a destination target (host or
@@ -374,6 +378,7 @@ func NewAgentWithPaths(cfg *config.SNMPConfig, bootsPath, engineIDPath string) *
 		engineBootsPath: bootsPath,
 		engineIDPath:    engineIDPath,
 		trapSender:      sendTrap,
+		serveBudget:     newSNMPServeBudget(),
 	}
 	a.initEngine()
 	a.initV3Users()
@@ -891,6 +896,20 @@ func (a *Agent) Serve() {
 		var srcIP net.IP
 		if remoteAddr != nil {
 			srcIP = remoteAddr.IP
+		}
+		// #9917 F-139: per-source request budget. The loop stays strictly
+		// serial -- which is what keeps the lastPacket auth pattern safe --
+		// so fairness comes from shedding an over-budget source BEFORE any
+		// MIB work (no per-PDU LinkList snapshot for shed requests) rather
+		// than from concurrency. Shed is silent (no response), as with
+		// unknown-community and source-denied drops: a tooBig reply would
+		// cost a BER decode plus, for v3, near-full USM framing, defeating
+		// the shed, and an over-budget source is abusive or pathological by
+		// construction at this rate. No queue is introduced, so there is
+		// nothing to shed via tooBig instead.
+		if !a.serveBudget.allow(srcIP) {
+			slog.Debug("SNMP: request shed: source over budget", "src", srcIP)
+			continue
 		}
 		resp := a.handlePacketFrom(buf[:n], srcIP)
 		if resp != nil {

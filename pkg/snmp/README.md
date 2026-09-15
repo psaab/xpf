@@ -764,6 +764,22 @@ packet handlers, and MIB view that call into them.
   forms with one shared snapshot. `ifSnapshot` is not safe for concurrent use;
   each request builds its own. Fail-on-revert guard:
   `TestV2cGetBulk_SingleLinkListPerPDU`.
+- **The Serve loop budgets requests per source IP (#9917 F-139).** The loop
+  stays strictly serial — which is what keeps the `lastPacket` v3-auth pattern
+  safe — so one fast manager or valid-credential flood would otherwise stall
+  all polling. Each source gets 100 requests/second sustained with a 200 burst
+  (`snmpServeBudget`, checked before any MIB work, so shed requests cost no
+  LinkList snapshot); the excess sheds silently, as with unknown-community
+  drops. Shed is silent rather than `tooBig` because a `tooBig` reply costs a
+  decode plus near-full USM framing for v3, defeating the shed. Typical polls
+  cost microseconds, so legitimate polling and walk bursts pass untouched.
+  Residual, documented not fixed: worst-case PDU shapes (a max-size GETNEXT
+  measured ~33 ms) can still saturate the loop below the rate — bounding that
+  needs per-PDU cost charging or a varbind cap, a follow-up. Likewise a
+  distributed flood saturates the socket buffer ahead of any userspace budget;
+  the per-source budget bounds the single-source actor. At most 1024 sources
+  are tracked (60 s idle expiry, expiry sweep at most 1/s) so spoofed-source
+  floods cannot grow memory or buy a scan per packet.
 - **Trap delivery is asynchronous and bounded (#2991).** Link-state traps
   are emitted from the daemon's netlink link-monitor goroutine.
   `sendLinkTraps` builds the v2c packet on the caller's goroutine (cheap,
