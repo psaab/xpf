@@ -42,6 +42,25 @@ func firewallFamilyTokens9017() []string {
 	return out
 }
 
+// #9883: the NOTHING claim above is enforced by compileFirewall, not just
+// observed on the flat-set path. Before the quarantine, the braced spelling
+// (`firewall { family inett { filter BAD { ... } } }`) folded the filter into
+// FiltersInet on the tolerant path while this gate's message told the operator
+// it enforces no rule at all — an inverted diagnostic. compileFirewall now
+// SKIPS undeclared families (quarantine: out of BOTH pools) and the #3884
+// collision gate ignores them too, so the message is true on every route and
+// the two gates cannot contradict each other on `inett/X` + `inet/X`.
+// firewallFamilyPermitted9017 builds the schema-read permitted set both the
+// gate below and those two quarantines consult — declaring a fourth family
+// permits it in all three places automatically.
+func firewallFamilyPermitted9017() map[string]bool {
+	permitted := map[string]bool{}
+	for _, f := range firewallFamilyTokens9017() {
+		permitted[f] = true
+	}
+	return permitted
+}
+
 // validateFirewallFilterFamilyTokensAST rejects a `firewall family <token>`
 // whose token is not a declared address family.
 //
@@ -51,13 +70,11 @@ func firewallFamilyTokens9017() []string {
 // family-collision gate beside it uses.
 //
 // It runs on the AST rather than on the typed config for the reason the defect
-// exists at all: an unknown family compiles to NOTHING, so by the time
-// fw.FiltersInet exists there is no trace of it left to validate.
+// exists at all: an unknown family compiles to NOTHING (#9883 quarantine in
+// compileFirewall), so by the time fw.FiltersInet exists there is no trace of
+// it left to validate.
 func validateFirewallFilterFamilyTokensAST(nodes []*Node, lenient bool) ([]string, error) {
-	permitted := map[string]bool{}
-	for _, f := range firewallFamilyTokens9017() {
-		permitted[f] = true
-	}
+	permitted := firewallFamilyPermitted9017()
 	if len(permitted) == 0 {
 		// The schema could not be read. Refusing every family here would turn a
 		// lookup failure into a total outage, so decline to judge.

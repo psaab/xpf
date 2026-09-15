@@ -197,6 +197,12 @@ func compileFirewall(node *Node, fw *FirewallConfig) error {
 			tcp.ColorBlind = true
 		}
 	}
+	// #9883: the schema-declared `firewall family` set — the SAME
+	// firewallFamilyPermitted9017 source the #9017 token gate reads, built once
+	// here so the af loop below consults it without re-allocating. Declaring a
+	// fourth family permits it in the gate, here, and in the #3884 collision
+	// gate automatically; a hardcoded list would be a second place to remember.
+	firewallPermitted := firewallFamilyPermitted9017()
 
 	for _, familyNode := range node.FindChildren("family") {
 		var afNodes []*Node
@@ -230,7 +236,23 @@ func compileFirewall(node *Node, fw *FirewallConfig) error {
 					af = afNode.Keys[1]
 				}
 			}
-
+			// #9883 QUARANTINE: an address-family token the schema does not
+			// declare (a typo like `inett`, or a not-yet-modelled family)
+			// compiles to NOTHING — out of BOTH pools. The old default-fold
+			// (every non-inet6/non-any token landing in FiltersInet) installed
+			// the braced spelling into the IPv4 pool on the tolerant path
+			// while the #9017 warning told the operator it enforces no rule
+			// at all — an inverted diagnostic. Skipping makes the message
+			// true on every route (the flat-set path never nested the token,
+			// so it always compiled to nothing there). An interface hook
+			// naming the quarantined filter dangles: strict already rejects
+			// the token, and on the tolerant path the #3296 reference gate
+			// warns while the snapshot-integrity backstop refuses to publish
+			// the broken snapshot (fail-closed, prior state kept) — the hook
+			// never degrades to Accept.
+			if !firewallPermitted[af] {
+				continue
+			}
 			// #4287: a Junos `family any` filter is protocol-independent —
 			// it matches BOTH IPv4 and IPv6. Folding it into FiltersInet
 			// only (the pre-#4287 behavior for every non-inet6 family) lost
@@ -362,12 +384,14 @@ func compileFirewall(node *Node, fw *FirewallConfig) error {
 //
 // compileFirewall selects the destination map with `dest := fw.FiltersInet`
 // (compiler_firewall.go) and only switches to fw.FiltersInet6 when the family
-// is literally "inet6" — so EVERY other family (inet, any, mpls, ccc, vpls,
-// bridge, and any not-yet-modelled token, since SchemaValidate does not reject
-// an unknown family keyword) folds into the single fw.FiltersInet pool, then
-// writes `dest[filter.Name] = filter` unconditionally. A same-name filter
-// authored under a second such family therefore silently OVERWRITES the first
-// (last-write-wins). If `family inet filter blockX { ... then discard; }` is
+// is literally "inet6" — so every DECLARED non-inet6 family (inet, any) folds
+// into the single fw.FiltersInet pool, then writes `dest[filter.Name] =
+// filter` unconditionally. An UNDECLARED token (a typo like `inett`, or a
+// not-yet-modelled family) is QUARANTINED by compileFirewall (#9883): it
+// compiles to NOTHING, out of both pools, so it neither folds nor collides
+// and this gate ignores it. A same-name filter authored under a second
+// DECLARED family therefore silently OVERWRITES the first (last-write-wins).
+// If `family inet filter blockX { ... then discard; }` is
 // followed by `family any filter blockX { ... then accept; }`, the effective
 // IPv4 filter becomes accept-all — a deny silently downgraded to an accept
 // (a security fail-open).
@@ -376,10 +400,10 @@ func compileFirewall(node *Node, fw *FirewallConfig) error {
 // (V6) buckets only — an interface unit's FilterInputV4 resolves against
 // fw.FiltersInet, FilterInputV6 against fw.FiltersInet6 (compiler_validate_warn.go,
 // routing/rules.go, dataplane/userspace/filters.go). There is no family
-// dimension in the reference, so once two non-inet6 families share a name the
-// map cannot disambiguate them — the reuse is genuinely ambiguous. Junos
-// namespaces firewall filters per family; xpf folds them, so it rejects the
-// reuse fail-closed instead of resolving it by arbitrary map-write order.
+// dimension in the reference, so once two DECLARED non-inet6 families share a
+// name the map cannot disambiguate them — the reuse is genuinely ambiguous.
+// Junos namespaces firewall filters per family; xpf folds them, so it rejects
+// the reuse fail-closed instead of resolving it by arbitrary map-write order.
 //
 // inet6 has its own destination map (fw.FiltersInet6) and is the ONLY family
 // that folds there, so a name shared between family inet and family inet6 lands
@@ -410,6 +434,12 @@ func validateFirewallFilterFamilyCollisionsAST(nodes []*Node, lenient bool) ([]s
 	// so an `any` name that ALSO names a distinct inet6 filter now collides in
 	// FiltersInet6 — tracked here and flagged below.
 	inet6Names := map[string]bool{}
+	// #9883: undeclared families are quarantined out of both pools by
+	// compileFirewall, so they can neither overwrite nor duplicate — this gate
+	// ignores them (the #9017 token gate names the typo instead). Without the
+	// skip, `inett/X` + `inet/X` would warn here about a silent overwrite that
+	// no longer happens, contradicting the token warning on the same config.
+	firewallPermitted := firewallFamilyPermitted9017()
 
 	// #8426: definitions per (family, name). `filterFamilies` above is a set of
 	// DISTINCT families and therefore CANNOT see a second definition inside one
@@ -502,6 +532,9 @@ func validateFirewallFilterFamilyCollisionsAST(nodes []*Node, lenient bool) ([]s
 						}
 					}
 					continue
+				}
+				if !firewallPermitted[af] {
+					continue // #9883 quarantine: compiles to NOTHING, cannot collide
 				}
 				for _, filterInst := range namedInstances(afNode.FindChildren("filter")) {
 					if filterInst.name == "" {
