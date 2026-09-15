@@ -258,6 +258,14 @@ type Agent struct {
 	trapQueue      chan trapJob
 	trapWorkerOnce sync.Once
 	trapsDropped   atomic.Uint64
+	// trapPerTarget counts admitted-but-not-yet-dequeued trap jobs per
+	// normalized receiver (#9917 F-140). Guarded by mu; lazily created in
+	// enqueueTrap next to the queue itself so bare-struct test agents work.
+	// Every increment (admit) pairs with exactly one decTrapPerTarget
+	// (worker dequeue, whether sent, abandoned, or drained), so the map
+	// tracks live backlog only. Keys are config-authored targets, hence
+	// bounded — no network-driven growth.
+	trapPerTarget map[string]int
 
 	// trapSender delivers a single pre-built trap to a target. It is a
 	// per-Agent field (not a package global) so tests can inject a
@@ -307,6 +315,17 @@ type trapJob struct {
 // targets are clearly not draining and dropping is preferable to unbounded
 // memory growth or blocking the link monitor.
 const trapQueueDepth = 256
+
+// maxPerTargetTrapQueue caps how many jobs one receiver may hold in the
+// shared trap queue (#9917 F-140). Past the cap that receiver's new traps
+// are shed (counted in trapsDropped) so a dead receiver cannot fill all 256
+// slots and evict healthy-target traps behind it; up to seven capped sick
+// receivers still leave room, versus one today. The cap counts queued
+// PACKETS, not events -- a `version all` group consumes two slots per event
+// per target. This is DROP isolation only: the worker still drains one
+// shared FIFO, so a healthy trap admitted behind a full sick share waits
+// out up to 32 x ~6s worst-case serial sends (~192s) before delivery.
+const maxPerTargetTrapQueue = 32
 
 // NewAgent creates a new SNMP agent with the given configuration. The
 // SNMPv3 engineBoots counter is loaded from defaultEngineBootsPath,

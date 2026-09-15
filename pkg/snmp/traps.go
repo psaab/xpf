@@ -394,6 +394,37 @@ func sortedTrapGroups(cfg *config.SNMPConfig) []*config.SNMPTrapGroup {
 	return groups
 }
 
+// normalizeTrapTarget maps a trap job's target spelling to its per-target
+// accounting key (#9917 F-140): host-only and host:port spellings of one
+// receiver share one cap, since sendTrap dials both at :162. DNS aliases (two
+// names for one box) still count separately -- resolving them at enqueue would
+// put a DNS lookup back on the link-monitor path.
+func normalizeTrapTarget(target string) string {
+	host, port, err := net.SplitHostPort(target)
+	if err != nil {
+		host, port = target, "162"
+	}
+	if port == "" {
+		port = "162"
+	}
+	return net.JoinHostPort(host, port)
+}
+
+// decTrapPerTarget releases one queued slot for a normalized target key. The
+// worker calls it exactly once per dequeue -- sent, abandoned, or drained --
+// pairing every enqueue-time increment, and the key is deleted at zero so the
+// map tracks live backlog only. Safe on a nil map (a read plus a delete, both
+// no-ops), so bare-struct agents that never admitted need no init.
+func (a *Agent) decTrapPerTarget(key string) {
+	a.mu.Lock()
+	if n := a.trapPerTarget[key]; n <= 1 {
+		delete(a.trapPerTarget, key)
+	} else {
+		a.trapPerTarget[key] = n - 1
+	}
+	a.mu.Unlock()
+}
+
 // enqueueTrap hands a pre-built trap to the async worker (#2991). It starts the
 // worker on first use (so both NewAgent and bare-struct test agents get it) and
 // never blocks the caller: when the bounded queue is full the trap is dropped
@@ -423,6 +454,9 @@ func (a *Agent) enqueueTrap(job trapJob) {
 		a.trapWG.Add(1)
 		go a.trapWorker(a.trapQueue, a.trapStop)
 	})
+	if a.trapPerTarget == nil {
+		a.trapPerTarget = make(map[string]int)
+	}
 	// C180-026: publish under the SAME a.mu that Stop takes to set stopped /
 	// close trapStop, so an enqueue and a Stop are strictly serialized. This
 	// makes shutdown accounting EXACT (accepted == delivered + trapsDropped
@@ -443,11 +477,32 @@ func (a *Agent) enqueueTrap(job trapJob) {
 	// buffered channel + default), and the worker never takes a.mu, so holding
 	// the lock across the send cannot deadlock on a slow/absent reader: a full
 	// queue drops immediately.
+	// #9917 F-140: per-target admission cap. One receiver may hold at most
+	// maxPerTargetTrapQueue slots; past that its new traps are shed here so a
+	// dead receiver cannot fill the shared queue and evict healthy-target
+	// traps. This is one decision with three mutually exclusive outcomes --
+	// cap-drop, queue-full-drop, admit -- so every enqueue counts exactly one
+	// outcome and the C180-026 accepted == delivered + dropped exactness holds.
+	targetKey := normalizeTrapTarget(job.target)
+	if a.trapPerTarget[targetKey] >= maxPerTargetTrapQueue {
+		a.mu.Unlock()
+		dropped := a.trapsDropped.Add(1)
+		slog.Warn("SNMP trap dropped: per-target queue cap reached",
+			"target", job.target, "group", job.group,
+			"event", job.event, "iface", job.iface, "dropped_total", dropped)
+		return
+	}
 	sent := false
 	select {
 	case a.trapQueue <- job:
 		sent = true
 	default:
+	}
+	if sent {
+		// Increment ONLY on a successful send: incrementing before the send
+		// would leak a slot on every queue-full drop (no dequeue ever pairs
+		// it) and drift the target toward a permanent cap-out.
+		a.trapPerTarget[targetKey]++
 	}
 	a.mu.Unlock()
 	if sent {
@@ -500,6 +555,11 @@ func (a *Agent) trapWorker(queue chan trapJob, stop chan struct{}) {
 			if !ok {
 				return
 			}
+			// #9917 F-140: release this job's per-target slot. The receive above
+			// ran with no lock held; only this map update takes a.mu, and it
+			// performs no chan operation, so it cannot deadlock against
+			// enqueueTrap's send-under-mu.
+			a.decTrapPerTarget(normalizeTrapTarget(job.target))
 			// Re-check stop before delivering: the outer select picks
 			// randomly when both cases are ready, so a job dequeued
 			// concurrently with Stop must not be sent after Stop.
@@ -550,6 +610,7 @@ func (a *Agent) countAbandonedTraps(queue chan trapJob) {
 			if !ok {
 				return
 			}
+			a.decTrapPerTarget(normalizeTrapTarget(job.target))
 			dropped := a.trapsDropped.Add(1)
 			slog.Warn("SNMP trap abandoned on stop, dropping trap",
 				"target", job.target, "group", job.group,
