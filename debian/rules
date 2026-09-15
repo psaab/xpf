@@ -3,10 +3,11 @@
 #
 # We deliberately do NOT use dh-golang or dh's auto Go/Cargo build:
 # xpfd embeds the kernel-verified AF_XDP shim (#1864) and the helper
-# is built with a pinned cargo via the project Makefile. Re-deriving
-# the build inside dh would bypass that discipline. So the build step
-# delegates to the project Makefile and the install step copies the
-# freshly built binaries into the dpkg-static staging path.
+# is built with the pinned toolchain (userspace-dp/rust-toolchain.toml,
+# #9920 F-148) via the project Makefile. Re-deriving the build inside
+# dh would bypass that discipline. So the build step delegates to the
+# project Makefile and the install step copies the freshly built
+# binaries into the dpkg-static staging path.
 #
 # Layout (plan #1917 §6.1 / §6.3c):
 #   /usr/local/share/xpf/staged/{xpfd,xpf-userspace-dp,cli,xpf-day0-config}
@@ -34,10 +35,11 @@ STAGED = /usr/local/share/xpf/staged
 	dh $@
 
 # Build the binary set via the project Makefile so the embedded shim
-# and pinned cargo build are used unchanged. CARGO_TARGET_DIR is left
-# at the project default on purpose: the Makefile's build-userspace-dp
-# installs from userspace-dp/target/release/, and overriding the target
-# dir to a scratch path would install a stale binary.
+# and the pinned-toolchain helper build are used unchanged.
+# CARGO_TARGET_DIR is left at the project default on purpose: the
+# Makefile's build-userspace-dp installs from
+# userspace-dp/target/release/, and overriding the target dir to a
+# scratch path would install a stale binary.
 #
 # Stage the systemd units into debian/ under the package-canonical
 # names so dh_installsystemd finds them. The unit sources remain in

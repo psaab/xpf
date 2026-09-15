@@ -1010,7 +1010,10 @@ def main():
         info(f"inventory: {pkgs_out}")
 
         sums = os.path.join(a.out, f"xpf-{ver}.SHA256SUMS")
-        sign.write_manifest(sums, [qcow_out, meta_out, manifest, pkgs_out])
+        # #9920 F-063: the signed set is sign.bake_set_basenames() (SSOT shared
+        # with the strict sign-manifest gate) — same four files, same order.
+        sign.write_manifest(
+            sums, [os.path.join(a.out, n) for n in sign.bake_set_basenames(ver)])
         info("checksums:")
         print(open(sums).read(), end="")
 
