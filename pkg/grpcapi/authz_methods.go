@@ -83,6 +83,12 @@ var methodPermissions = map[string]config.LoginClassPermission{
 	// Config RENDER paths. `show configuration`, `show | compare`, `show system
 	// rollback` and `show system commit` are all `show` in the CLI's table, and
 	// the raw-AST render redacts secrets unconditionally (#4051/#4099).
+	//
+	// The PermView below is the FLOOR, not the whole price, for the two RPCs
+	// that can render uncommitted configuration: the candidate-read gate
+	// (authz_config_target_9324.go, charged in authorizeRPC beside the coarse
+	// check) additionally requires PermConfig for ShowConfig with a CANDIDATE
+	// target (#9324) and for ShowCompare on both arms (#9889).
 	"ShowConfig":   config.PermView,
 	"ShowCompare":  config.PermView,
 	"ShowRollback": config.PermView,
