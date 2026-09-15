@@ -572,7 +572,9 @@ demotion before the reconciler re-pushes, is a false negative.
   with an error `Store.Load` tags `ErrConfigDBUnreadable`. The valid empty
   config `{}` is preserved as valid, and well-formed populated objects plus the
   encrypted-envelope path (whose inner body always marshals from a struct to an
-  object) decode byte-for-byte as before.
+  object) decode byte-for-byte as before. #9898 F-001 extends the gate with a
+  top-level key-set check (only `Children`, case-folded): unknown keys used to
+  decode silently to an empty policy in the same fail-open direction.
 - **GCM AAD binding (A4-05) — deliberately NOT changed.** `Seal`/`Open` pass
   a nil additional-authenticated-data argument. Binding the envelope header
   (PRF/salt) as AAD is textbook defense-in-depth, but the scheme already
@@ -1696,12 +1698,14 @@ owned by the `journal/` subpackage.
   slot is retained, `sha256sum <config>.N` correlates the rollback
   file to its journal entry. Best-effort correlation only — slots
   shift every commit and only ~50 are kept.
-- **Bounded reads** — `ListCommitHistory(limit)` is O(limit), not
-  O(lifetime): `journal.Tail` reverse-scans segments newest-first in
-  64 KiB chunks and stops at `limit` entries. Semantics preserved from
-  v1: last `limit` entries of ANY action, then filtered to commit
-  actions. `limit <= 0` still reads everything. Line assembly is
-  capped at 16 MiB (corrupt newline-free content is skipped, not
+- **Bounded reads** — `ListCommitHistory(limit)` bounds MEMORY, not work
+  (#1896, #9898): `journal.Tail` reverse-scans segments newest-first in
+  64 KiB chunks and stops at `limit` entries, but sparse segments scan
+  whole (up to O(segment) I/O under the journal lock). Semantics
+  preserved from v1: last `limit` entries of ANY action, then filtered to
+  commit actions. `limit <= 0` reads everything subject to the 16 MiB
+  per-segment cap (over-cap refuses loudly, never partial). Line assembly
+  is capped at 16 MiB (corrupt newline-free content is skipped, not
   buffered whole).
 - **Detail cap (#4891)** — an operator-supplied commit description is
   bounded at `maxCommitDescriptionBytes` (4 KiB). `CommitWithDescription`

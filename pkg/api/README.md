@@ -43,6 +43,11 @@ liveness/readiness. Prometheus metrics endpoint. SSE event streams.
   `rollback_history_degraded` field plus the
   `xpf_config_rollback_persist_degraded` 0/1 gauge (also emitted even
   when the dataplane is not loaded) for alerting.
+  `JournalPermsDegradedFn` (#9898 F-113, same injection pattern) reports
+  whether journal permission repair is degraded (a segment could not be
+  tightened to owner-only 0600); likewise non-fatal
+  (`journal_perms_degraded` field plus the
+  `xpf_config_journal_perms_degraded` gauge), since appends continue.
   `ConfigApplyDebtFn` (#9811, same injection pattern) reports whether the
   dataplane is known to be enforcing something OTHER than the active
   configuration, and DOES downgrade `/health` to 503. The distinction from
