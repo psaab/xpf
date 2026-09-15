@@ -321,65 +321,58 @@ all files stay in `package ipsec`, so the public API is unchanged.
   `xfrmiIfID()`. The same name → same numeric ID across reboots — don't
   rename a bind interface without expecting a reset of the SAs that ride
   it.
-- **IPsec policy → proposal cross-reference (#2073).** An IPsec (Phase 2)
-  policy's `proposals` reference (or, when omitted, a proposal named after
-  the policy) is validated at commit / commit-check by
-  `pkg/config` `validateIPsecPolicyProposalReferencesStrict`. A dangling
-  reference is **hard-rejected** at commit: previously it fell through to
-  `esp_proposals = default` in `resolveESPSettings`, silently substituting
-  the operator's entire Phase-2 proposal set — including any configured
-  `perfect-forward-secrecy` DH group — with the strongSwan default (which
-  carries no required modp term), so PFS was silently disabled. On the
-  tolerant load / peer-sync paths the commit check is downgraded to a
-  warning (an already-persisted or peer-synced config still boots), and
-  `resolveESPSettings` has a render-side safety net that emits a
-  conservative **fixed** ESP suite instead of falling through to
-  `default`, and logs a warning. Note: strongSwan ≥ 6.0.2 changed its
-  `default` ESP set to make PFS *optional* rather than absent, so the
-  silent weakening is a downgrade-to-negotiable-PFS there rather than
-  no-PFS — the fix is the same.
-  - **Absent vs dangling (#4117).** The safety net distinguishes two
-    cases. A VPN that names **no** `ipsec-policy` at all
-    (`vpn.IPsecPolicy == ""`) legitimately gets `esp_proposals = default`
-    — the operator made no crypto choice, so strongSwan's built-in suite
-    is their explicit choice. This is the ONLY path that emits `default`.
-    A **named-but-unresolved (dangling)** reference — the policy is
-    undefined, or the policy resolves but its proposal ref dangles — never
-    falls through to `default`. It renders a conservative fixed suite:
-    `aes256-sha256-modp<bits>` when a PFS group is configured (the #2073
-    case), or `aes256-sha256` (no modp term) when no PFS is configured.
-    Before #4117 the no-PFS dangling case still fell through to `default`,
-    silently substituting the operator's whole cipher/integrity choice
-    with strongSwan's built-in suite (the reasoning was "no PFS = nothing
-    to preserve", which overlooked that the cipher/integrity intent is
-    also lost). #4117 chose the conservative **fixed suite** over the
-    IKE-style whole-VPN **skip** (#2270) for parity with the #2073 PFS
-    case, which already emits the fallback rather than skipping: skipping
-    only the no-PFS case would drop a no-PFS tunnel entirely while an
-    otherwise-identical with-PFS tunnel keeps a working fallback — a
-    surprising availability asymmetry driven solely by whether PFS
-    happened to be configured. IKE (Phase 1) fails closed by skipping
-    instead because it has no equivalent strong fixed suite to offer.
+- **IPsec (Phase 2) reference chain (#2073, #4117, #9919 F-090).** The
+  vpn→policy→proposal chain (`vpn.IPsecPolicy` naming a policy or, legacy
+  form, a proposal directly; the policy's `proposals` reference or, when
+  omitted, a proposal named after the policy) is validated at commit /
+  commit-check by `pkg/config`
+  `validateIPsecPolicyProposalReferencesStrict`. A dangling chain is
+  **hard-rejected** at commit. On the tolerant load / peer-sync paths the
+  commit check is downgraded to a warning (an already-persisted or
+  peer-synced config still boots), and `resolveESPSettings` returns the
+  `errESPChainUnresolved` sentinel so `renderConfig` SKIPS the VPN — never
+  a substituted suite. A VPN that names **no** `ipsec-policy` at all
+  (`vpn.IPsecPolicy == ""`) legitimately gets `esp_proposals = default`
+  — the operator made no crypto choice, so strongSwan's built-in suite is
+  their explicit choice. This is the ONLY path that emits `default`.
+  History: the dangling chain first fell through to `default` (silently
+  dropping PFS, #2073), then rendered a conservative fixed
+  `aes256-sha256[-modp]` suite (#4117, which chose the fallback over the
+  IKE-style skip to avoid a PFS/no-PFS availability asymmetry). #9919
+  retires the fallback for the IKE-parity skip: a fabricated suite
+  contradicts the #4298 never-fabricate principle and is invisible on the
+  status surface (only a journal line), while a skip tears the stale SA
+  down loudly via the rendered-set diff (#5494).
+- **Unusable DH groups (#9919 F-161).** An unparseable `dh-group` / `keys`
+  token, or a numeric group the renderer cannot spell, is hard-rejected at
+  commit (`validateIPsecDHGroupsStrict`) and warns on the tolerant path.
+  The renderer judges only the EFFECTIVE group (policy PFS overrides each
+  proposal's dh-group) and drops bad-DH entries from multi-proposal lists
+  (#3904 ANY-semantics); a VPN with nothing renderable left is SKIPPED
+  (`errDHGroupUnresolved`) rather than negotiate with a silently-dropped
+  modp term or a charon-refused empty keyword.
+- **Rekey jitter (#9919 F-163).** `rekey_time` is emitted WITHOUT
+  `rand_time`, so strongSwan's default jitter (rand_time = over_time = 10%
+  of rekey_time) applies and co-timed tunnels do not rekey together.
 - **DH-group keyword rendering (#2392).** Every IKE/ESP proposal builder
-  (`buildIKEProposalFromIKE`, `buildIKEProposal`, `buildESPProposal`, and
-  the #2073 PFS fallback above) renders the Diffie-Hellman group suffix
-  through the single `formatDHGroup` helper. It emits the canonical
-  swanctl proposal keyword: `modp<bits>` for the MODP groups (1/2/5/14/
-  15/16 and the MODP-with-subgroup variants 22/23/24), and the
+  (`buildIKEProposalFromIKE`, `buildIKEProposal`, `buildESPProposal`)
+  renders the Diffie-Hellman group suffix through the single `formatDHGroup`
+  helper (now `config.DHGroupKeyword`, #8597 — the same map the commit gate
+  accepts against, so gate and renderer cannot disagree). It emits the
+  canonical swanctl proposal keyword: `modp<bits>` for the MODP groups
+  (1/2/5/14/15/16 and the MODP-with-subgroup variants 22/23/24), and the
   elliptic-curve spellings for the EC groups — group **19 → `ecp256`**,
   **20 → `ecp384`**, **21 → `ecp521`**, 25 → `ecp192`, 26 → `ecp224`, the
   brainpool groups 27→`ecp224bp`/28→`ecp256bp`/29→`ecp384bp`/30→`ecp512bp`,
   and the Montgomery curves 31 → `curve25519`, 32 → `curve448`. Before the
-  helper, all four sites formatted the suffix as `modp<dhGroupBits>`, so an
-  EC group emitted the strongSwan-invalid tokens `modp256`/`modp384` and
-  swanctl rejected the whole proposal (the tunnel failed to load).
-  `pkg/config` `ValidateDHGroup` accepts any positive-integer DH group, so
-  the helper's table covers every group an operator can commit; an unlisted
-  group falls back to `modp<dhGroupBits>` (which equals the group number
-  for unknown groups). Spellings come straight from strongSwan's
-  `proposal_keywords_static.txt` / `diffie_hellman_group_names`. Live
-  swanctl load-verification of an EC tunnel is lab-bound; the
-  `pkg/ipsec` swanctl-render tests are the gate.
+  helper, every site formatted the suffix as `modp<dhGroupBits>`, so an EC
+  group emitted the strongSwan-invalid tokens `modp256`/`modp384` and
+  swanctl rejected the whole proposal (the tunnel failed to load). An
+  unlisted group renders the empty string (no fall-through since #8597),
+  which the #9919 resolvers refuse before it reaches a proposal. Spellings
+  come straight from strongSwan's `proposal_keywords_static.txt` /
+  `diffie_hellman_group_names`. Live swanctl load-verification of an EC
+  tunnel is lab-bound; the `pkg/ipsec` swanctl-render tests are the gate.
 - **Gateway reference resolution / `remote_addrs` (#2074).** A VPN's
   `ike gateway <name>` either names a defined `security ike gateway`
   object (whose `address` or `dynamic hostname` becomes `remote_addrs`)

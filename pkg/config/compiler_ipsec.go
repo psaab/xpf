@@ -28,6 +28,31 @@ func parseDHGroup(v string) (int, bool) {
 	return 0, false
 }
 
+// classifyDHGroup maps a raw `dh-group` / `keys` token to its compiled form
+// (#9919 F-161). It returns the numeric group to STORE plus the InvalidSpec
+// to record; exactly one of them is non-zero/non-empty:
+//   - spellable group ("14", "group19") -> (n, "")
+//   - unparseable ("nonsense"), unspellable numeric ("99", "17", "0", "-5"),
+//     or present-but-empty ("") -> (0, raw) with "(empty)" for "".
+//
+// Storing only spellable numerics (and recording everything else) mirrors the
+// #9008 lifetime floor (store only n>=1): a stored DHGroup is always valid
+// or absent, so downstream cannot silently drop a term it cannot see. The
+// "(empty)" marker exists because the case arm firing with an empty value
+// means the leaf was AUTHORED empty (a typo like bare `keys;`, reachable per
+// #8845) — distinct from the leaf being absent, where this is never called.
+func classifyDHGroup(v string) (int, string) {
+	if n, ok := parseDHGroup(v); ok {
+		if _, spellable := DHGroupKeyword(n); spellable {
+			return n, ""
+		}
+	}
+	if v == "" {
+		return 0, "(empty)"
+	}
+	return 0, v
+}
+
 func compileIKE(node *Node, sec *SecurityConfig) error {
 	if sec.IPsec.IKEProposals == nil {
 		sec.IPsec.IKEProposals = make(map[string]*IKEProposal)
@@ -57,10 +82,12 @@ func compileIKE(node *Node, sec *SecurityConfig) error {
 			case "authentication-algorithm":
 				prop.AuthAlg = v
 			case "dh-group":
-				// Handle "group2" or "2" format
-				if n, ok := parseDHGroup(v); ok {
-					prop.DHGroup = n
-				}
+				// #9919 F-161: store only a spellable group; record anything
+				// else (unparseable, unlisted numeric, empty) for the
+				// validator to reject/warn and the renderer to skip. A bare
+				// Atoi-store silently dropped the modp term (#2639 shape).
+				n, bad := classifyDHGroup(v)
+				prop.DHGroup, prop.DHGroupInvalidSpec = n, bad
 			case "lifetime-seconds":
 				// #9008: RECORD a value that is not a usable positive
 				// integer instead of dropping it on the floor. Atoi
@@ -339,12 +366,10 @@ func compileIPsec(node *Node, sec *SecurityConfig) error {
 			case "authentication-algorithm":
 				prop.AuthAlg = v
 			case "dh-group":
-				// Handle "group14" or "14" format (#2639): the bare
-				// strconv.Atoi here dropped the Junos "group14" spelling,
-				// silently disabling PFS on the ESP/Phase-2 proposal.
-				if n, ok := parseDHGroup(v); ok {
-					prop.DHGroup = n
-				}
+				// #9919 F-161: mirror of the Phase-1 site above — store only
+				// a spellable group, record the raw token otherwise.
+				n, bad := classifyDHGroup(v)
+				prop.DHGroup, prop.DHGroupInvalidSpec = n, bad
 			case "lifetime-seconds":
 				// #9008: RECORD a value that is not a usable positive
 				// integer instead of dropping it on the floor. Atoi
@@ -406,9 +431,11 @@ func compileIPsec(node *Node, sec *SecurityConfig) error {
 			case "perfect-forward-secrecy":
 				for _, c := range p.Children {
 					if c.Name() == "keys" {
-						if n, ok := parseDHGroup(nodeVal(c)); ok {
-							pol.PFSGroup = n
-						}
+						// #9919 F-161: mirror of the proposal sites — a bad
+						// PFS value records InvalidSpec instead of silently
+						// disabling PFS (the #8844/#8845 silent-disable).
+						n, bad := classifyDHGroup(nodeVal(c))
+						pol.PFSGroup, pol.PFSGroupInvalidSpec = n, bad
 					}
 				}
 			}

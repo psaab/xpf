@@ -1,6 +1,9 @@
 package config
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // #8844: `perfect-forward-secrecy keys <group>;` -- the brace-elided spelling --
 // silently DISABLED PFS. The compiled state was byte-identical to never having
@@ -110,16 +113,37 @@ func TestPFSPackedKeys8844(t *testing.T) {
 		}
 	})
 
-	// SEPARATE ROUTE, pinned as known and NOT fixed here: an unparseable group
-	// also yields 0. parseDHGroup returns (0,false) and the caller leaves
-	// PFSGroup alone. Validating `keys` would newly REJECT a value the tolerant
-	// Load path accepts today, so it is deliberately out of scope -- but it is
-	// recorded so nobody reads this fix as closing the whole silent-disable
-	// surface.
-	t.Run("bad-value-still-silently-disables", func(t *testing.T) {
+	// SEPARATE ROUTE, closed by #9919 F-161 (it was pinned here as known and
+	// out of scope): an unparseable group still leaves PFSGroup at 0 — a bad
+	// value is never STORED — but the raw token is now RECORDED
+	// (PFSGroupInvalidSpec) and the tolerant path WARNS, and the renderer
+	// SKIPS the VPN, instead of silently disabling PFS.
+	t.Run("bad-value-recorded-and-warned", func(t *testing.T) {
 		if got := pfs(t, mk("perfect-forward-secrecy keys nonsense;"), false); got != 0 {
-			t.Errorf("expected an unparseable group to leave PFSGroup=0 (unchanged "+
-				"by this fix), got %d", got)
+			t.Errorf("expected an unparseable group to leave PFSGroup=0 (a bad "+
+				"value is never stored), got %d", got)
+		}
+		tree, errs := NewParser(mk("perfect-forward-secrecy keys nonsense;")).Parse()
+		if len(errs) > 0 {
+			t.Fatalf("parse: %v", errs)
+		}
+		cfg, err := CompileConfigLenient(tree)
+		if err != nil {
+			t.Fatalf("lenient compile bricked (want warn): %v", err)
+		}
+		pol := cfg.Security.IPsec.Policies["p1"]
+		if pol == nil || pol.PFSGroupInvalidSpec != "nonsense" {
+			t.Fatalf("unparseable PFS value not recorded: %+v", pol)
+		}
+		found := false
+		for _, w := range cfg.Warnings {
+			if strings.Contains(w, "ipsec dh-group") {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("tolerant load of unparseable PFS keys warned nothing; warnings=%v", cfg.Warnings)
 		}
 	})
 }

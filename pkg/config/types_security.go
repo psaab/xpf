@@ -1789,12 +1789,27 @@ type IPsecConfig struct {
 
 // IKEProposal defines Phase 1 (IKE) negotiation parameters.
 type IKEProposal struct {
-	Name            string
-	AuthMethod      string // "pre-shared-keys"
-	EncryptionAlg   string // "aes-256-cbc"
-	AuthAlg         string // "sha-256"
-	DHGroup         int    // DH group number
-	LifetimeSeconds int
+	Name          string
+	AuthMethod    string // "pre-shared-keys"
+	EncryptionAlg string // "aes-256-cbc"
+	AuthAlg       string // "sha-256"
+	DHGroup       int    // DH group number (0 = not configured; bad values are never stored, see DHGroupInvalidSpec)
+	// DHGroupInvalidSpec (#9919 F-161) records the RAW `dh-group` token when
+	// it was present but not a usable spellable group: an unparseable value
+	// ("nonsense"), a present-but-empty leaf ("(empty)"), or a numeric group
+	// the renderer cannot spell (99, 17/18, 0, negatives). The parse drops
+	// such a value to DHGroup 0 (indistinguishable from "not configured"),
+	// which silently drops the modp term from the negotiated proposal. The
+	// strict commit gate rejects these in SchemaValidate before the compiler
+	// runs; the tolerant path (compileTreeLenient, used by Store.Load and HA
+	// SyncApply) does not. This field is the compile-time artifact
+	// validateIPsecDHGroupsStrict reads so the tolerant path can WARN
+	// instead of accepting in silence, and the renderer reads so it can SKIP
+	// the VPN instead of negotiating weakened crypto. Mirror of
+	// LifetimeSecondsInvalidSpec (#9008). Not serialised: it is a diagnostic
+	// about the input text, not configuration state.
+	DHGroupInvalidSpec string `json:"-"`
+	LifetimeSeconds    int
 	// LifetimeSecondsInvalidSpec (#9008) records the RAW `lifetime-seconds`
 	// token when it was present but not a usable positive integer. The
 	// parse above drops such a value on the floor: a non-integer leaves
@@ -1832,12 +1847,16 @@ type IKEPolicy struct {
 
 // IPsecProposal defines Phase 2 (ESP) encryption and authentication parameters.
 type IPsecProposal struct {
-	Name            string
-	Protocol        string // "esp"
-	EncryptionAlg   string // "aes-256-cbc", "aes-128-gcm"
-	AuthAlg         string // "hmac-sha-256" (ignored for GCM)
-	DHGroup         int    // DH group number
-	LifetimeSeconds int
+	Name          string
+	Protocol      string // "esp"
+	EncryptionAlg string // "aes-256-cbc", "aes-128-gcm"
+	AuthAlg       string // "hmac-sha-256" (ignored for GCM)
+	DHGroup       int    // DH group number (0 = not configured; bad values are never stored, see DHGroupInvalidSpec)
+	// DHGroupInvalidSpec (#9919 F-161) records the RAW `dh-group` token when
+	// it was present but not a usable spellable group — mirror of the IKE
+	// proposal field above, read by the same validator and renderer.
+	DHGroupInvalidSpec string `json:"-"`
+	LifetimeSeconds    int
 	// LifetimeSecondsInvalidSpec (#9008) records the RAW `lifetime-seconds`
 	// token when it was present but not a usable positive integer. The
 	// parse above drops such a value on the floor: a non-integer leaves
@@ -1864,7 +1883,11 @@ type IPsecProposal struct {
 // IPsecPolicyDef defines Phase 2 policy (PFS + proposal reference).
 type IPsecPolicyDef struct {
 	Name     string
-	PFSGroup int // PFS DH group number (0 = disabled)
+	PFSGroup int // PFS DH group number (0 = disabled; bad values are never stored, see PFSGroupInvalidSpec)
+	// PFSGroupInvalidSpec (#9919 F-161) records the RAW `perfect-forward-
+	// secrecy keys` token when it was present but not a usable spellable
+	// group — mirror of DHGroupInvalidSpec for the policy-level PFS stanza.
+	PFSGroupInvalidSpec string `json:"-"`
 	// ProposalSet is a Junos predefined IPsec proposal-set keyword
 	// (standard, basic, compatible, suiteb-gcm-128, suiteb-gcm-256).
 	// When set and no explicit Proposals are given, the compiler expands
