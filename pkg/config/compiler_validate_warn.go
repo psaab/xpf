@@ -1833,6 +1833,8 @@ func ValidateConfig(cfg *Config) []string {
 	// docs/research/5837-xdp-dnat-before-local/plan.md §0a on branch
 	// research/5837-xdp-dnat-before-local.
 	warnings = append(warnings, validateNATInterfaceAddressCollisionWarnings(cfg)...)
+	// #9917 F-136: single-DES privacy is deprecated; steer to AES-128.
+	warnings = append(warnings, snmpPrivacyDESWarnings9917(cfg)...)
 
 	return warnings
 }

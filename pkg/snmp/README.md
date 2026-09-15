@@ -216,6 +216,9 @@ sender learned about us via discovery, not our local clock at receive time.
   from our header. This path is unchanged by the #2640 fix.
 - DES (`decryptDES`/`encryptDES`, RFC 3414 §8) derives its IV from `privParams`
   XOR the pre-IV salt alone, so boots/time do not enter the DES IV.
+- DES privacy (`privacy-des`, 56-bit effective) is **deprecated** and stays only
+  for Junos compatibility — prefer `privacy-aes128`. Configuring DES draws a
+  commit-time warning naming the user (#9917 F-136); the cipher keeps working.
 
 **Privacy salt is a monotonic counter, unique per engine boot (RFC 3826 §3.3,
 RFC 3414 §8.1.1.1, #5032).** The privacy salt (`msgPrivacyParameters`) MUST be
