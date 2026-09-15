@@ -129,10 +129,44 @@ impl std::fmt::Debug for PeerConfig {
 /// unchanged) must cost relaxed loads and a compare, never the
 /// peer's roaming `Mutex`. This snapshot is ADVISORY ONLY: the
 /// mutex-protected `Peer::roamed_endpoint` slot stays the authority
-/// (every report path re-checks under lock), and suppression obeys
-/// the explicitly weaker stale-observation contract in
-/// `docs/pr/9644/plan.md` §5.3 (exceptions E1–E4, OP-1) — NOT
-/// ordinary last-write-wins linearizability.
+/// (every report path re-checks under lock).
+///
+/// Suppression contract — complete statement, normative here (this
+/// comment, not an external plan, is what the code implements). A
+/// validated read (stable even `seq` across the reader
+/// Acquire-fence protocol) certifies the words of exactly one
+/// COMPLETE historical publication made while the publisher held
+/// the peer mutex with the slot holding the decoded endpoint. It
+/// certifies NOTHING about current slot contents, pending state, or
+/// epoch freshness, so suppression is permitted on stale snapshots
+/// in exactly these cases. E1 missed-odd validation: the reader
+/// validates the previous generation while a same-epoch publish is
+/// in progress or complete-but-core-invisible. E2 stale-generation
+/// read: the reader validates an older same-epoch publication while
+/// newer same-epoch publications exist, at any depth. E3 stale-epoch
+/// read: both epoch loads pre-date one or more take/start bumps;
+/// adoption of the suppressed value is not required. E4
+/// take-before-bump interval: epochs match while the physical slot
+/// is already `None`; the abstract take linearizes at the bump.
+/// Consequences, all accepted: ancestor suppression (a suppressed
+/// value may be neither queued-latest nor just-adopted); NO formal
+/// bound on recovery packet count; this mailbox is NOT
+/// last-write-wins linearizable. Liveness assumption OP-1: live
+/// cores observe epoch/seq RMWs promptly via cache coherence
+/// (assumed, not proven); every invalid snapshot state terminates
+/// in a repairing equal slow hit, so suppression always resumes.
+///
+/// Counter lifetimes — non-wrapping by margin (no wrap handling;
+/// `fetch_add` wraps by definition, so the proof is that reaching
+/// the wrap is infeasible). `live_epoch`/`snap_epoch` advance at
+/// most once per control pass per peer plus once per consumer
+/// start: at one bump per second, 2^64 needs over 10^11 years
+/// (over 10^5 years even at an absurd sustained 10^6 bumps/s).
+/// `seq` advances twice per publish; publishes serialize on the
+/// peer mutex and number at most in the packets-per-second of one
+/// peer: even at an unachievable sustained 10^9 publishes/s, the
+/// 2^64 parity cycle lasts ~585 years. A confused (wrapped)
+/// sequence is therefore unreachable on any real timeline.
 ///
 /// Layout: seq + live/stamped epochs + 5 payload words = 8 × 8 B on
 /// ONE cache line, so steady-state readers touch exactly one line
@@ -240,7 +274,7 @@ impl RoamSnapshot {
 
     /// ODD-FIRST publish, part 1: mark the sequence odd BEFORE the
     /// slot write, so no reader can observe a slot write unanchored
-    /// in a publication (plan §5.2). Call only with the peer mutex
+    /// in a publication. Call only with the peer mutex
     /// held; the matching [`RoamSnapshot::commit_publish`] must
     /// follow in the same critical section.
     pub(crate) fn begin_publish(&self) {
