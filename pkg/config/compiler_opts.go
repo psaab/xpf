@@ -2745,6 +2745,16 @@ type compileOpts struct {
 	// through unremarked — the same silence the issue is about.
 	lenientInterfaceAddressList bool
 
+	// lenientVlanUnitMTU (#9837) downgrades the tagged-unit-MTU gate — a
+	// tagged unit whose family MTU exceeds the interface-level `mtu` — from
+	// a hard compile error to a cfg.Warnings entry. Set ONLY on the tolerant
+	// load / peer-sync paths so an already-persisted or peer-synced config
+	// still boots (#1960 no-brick); the runtime `failed to set VLAN
+	// sub-interface MTU` warning already covers the leniently-loaded case.
+	// Candidate commit / commit-check stay strict, because the kernel
+	// refuses the child MTU and the committed value would otherwise never
+	// be realised — the same silence the issue is about.
+	lenientVlanUnitMTU bool
 	// lenientBareLeafInstance9838 (#9838) downgrades the bare-leaf
 	// interface / routing-instance gate (validateBareLeafInstance9838)
 	// from a hard compile error to a cfg.Warnings entry on the tolerant
@@ -2963,6 +2973,7 @@ func lenientCompileOpts() compileOpts {
 		lenientInterfaceRangeBudget:            true,
 		lenientFabricMemberDefined:             true,
 		lenientInterfaceAddressList:            true,
+		lenientVlanUnitMTU:                     true,
 		lenientBareLeafInstance9838:            true,
 	}
 }
