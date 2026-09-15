@@ -766,16 +766,23 @@ packet handlers, and MIB view that call into them.
   `TestV2cGetBulk_SingleLinkListPerPDU`.
 - **Trap delivery is asynchronous and bounded (#2991).** Link-state traps
   are emitted from the daemon's netlink link-monitor goroutine.
-  `sendLinkTraps` builds the packet on the caller's goroutine (cheap) and
-  enqueues one job per target onto a bounded channel
-  (`trapQueueDepth = 256`) drained by a single worker goroutine; the
+  `sendLinkTraps` builds the v2c packet on the caller's goroutine (cheap,
+  allocation only) and enqueues one job per emitted packet onto a bounded
+  channel (`trapQueueDepth = 256`) drained by a single worker goroutine; the
   blocking `net.DialTimeout` (and DNS resolution for an FQDN target) runs
-  on the worker, NOT on the link monitor. A dead or slow target therefore
-  cannot stall link-state processing. The queue is started lazily (works
-  for both `NewAgent` and bare-struct test agents). When the queue is full
-  the trap is DROPPED and `trapsDropped` is incremented rather than
-  blocking the caller — dropping is the correct backpressure when targets
-  are not draining. The delivery is replaceable through the per-Agent
+  on the worker, NOT on the link monitor. The v1 packet is likewise built on
+  the worker from a deferred job, because its agent-addr costs a second
+  dial per target — building it on the caller serialized K transitions x T
+  targets of blocking dials ahead of the queue (#9917 F-134). A dead or slow
+  target therefore cannot stall link-state processing. The queue is started
+  lazily (works for both `NewAgent` and bare-struct test agents). When the
+  queue is full the trap is DROPPED and `trapsDropped` is incremented rather
+  than blocking the caller — dropping is the correct backpressure when
+  targets are not draining. Admission additionally caps each receiver at
+  `maxPerTargetTrapQueue = 32` slots, so one dead receiver cannot fill the
+  shared queue and evict healthy-target traps behind it; that is drop
+  isolation only, the worker still drains one FIFO (#9917 F-140). The
+  delivery is replaceable through the per-Agent
   `trapSender` field (the seam tests use to inject a slow/mock sender on
   their own Agent; #5023 moved it off a shared package var so the injection
   no longer races the running trap worker's read under `-race`). Before #2991
@@ -799,8 +806,9 @@ packet handlers, and MIB view that call into them.
   (`buildLinkTrapV1` — message version field 0, PDU tag 0xa4, the trap type
   carried in the enterprise/generic-trap/specific-trap/time-stamp fields per
   RFC 1157, with ifIndex/ifDescr/ifOperStatus varbinds; enterprise =
-  `snmpTraps` 1.3.6.1.6.3.1.1.5 and agent-addr 0.0.0.0 per the RFC 2576 §3.1
-  SNMPv2→SNMPv1 mapping), `v2` (or an unspecified/empty version — the default)
+  `snmpTraps` 1.3.6.1.6.3.1.1.5 and agent-addr set to the source address
+  toward the target per RFC 3584 §3.2 (#9123)), `v2` (or an
+  unspecified/empty version — the default)
   emits the SNMPv2c trap (`buildLinkTrap`, version 1, PDU tag 0xa7), and `all`
   emits BOTH. Before #3948 the version was parsed but had no typed field, so a
   `version v1` group silently emitted v2c traps that a v1-only receiver drops.

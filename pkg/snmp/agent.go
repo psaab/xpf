@@ -297,10 +297,16 @@ type Agent struct {
 	trapWG     sync.WaitGroup
 }
 
-// trapJob is one queued trap-delivery unit: a pre-built SNMP packet and its
-// destination target (host or host:port). The packet is built on the caller's
-// goroutine (cheap, allocation only) and the blocking dial/write happens on the
-// worker.
+// trapJob is one queued trap-delivery unit: a destination target (host or
+// host:port) plus either a pre-built SNMP packet or, for the v1 leg, the
+// parameters the worker builds it from. Prebuilt packets are assembled on the
+// caller's goroutine (cheap, allocation only) and the blocking dial/write
+// happens on the worker. A v1 packet is NOT prebuilt: its agent-addr costs a
+// DNS lookup plus an up-to-2s dial, which must not run on the link monitor, so
+// sendLinkTraps enqueues a deferred job (pkt nil, deferredV1 set) and the
+// worker builds it just before sending (#9917 F-134). Precedence: a deferred
+// job's build wins over any carried pkt (senders never set both; explicit
+// beats ambiguous).
 type trapJob struct {
 	target  string
 	pkt     []byte
@@ -308,6 +314,13 @@ type trapJob struct {
 	event   string
 	iface   string
 	ifindex int
+	// Deferred v1 build parameters (used only when deferredV1 is set). uptime
+	// is captured at event time so the v1 time-stamp keeps event-time
+	// semantics instead of skewing to delivery time under backlog.
+	deferredV1 bool
+	community  string
+	linkUp     bool
+	uptime     int
 }
 
 // trapQueueDepth bounds the number of pending trap deliveries. A handful of

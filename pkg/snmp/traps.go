@@ -169,7 +169,14 @@ func (a *Agent) buildLinkTrap(community string, linkUp bool, ifindex int, ifname
 // agent_addr_9123.go.
 func (a *Agent) buildLinkTrapV1(community, target string, linkUp bool, ifindex int, ifname string) []byte {
 	// sysUpTime in hundredths of a second.
-	uptime := int(time.Since(a.startTime).Milliseconds() / 10)
+	return a.buildLinkTrapV1WithUptime(community, target, linkUp, ifindex, ifname, int(time.Since(a.startTime).Milliseconds()/10))
+}
+
+// buildLinkTrapV1WithUptime is buildLinkTrapV1 with the time-stamp supplied by
+// the caller. The trap worker uses it for deferred v1 jobs (#9917 F-134) with
+// the uptime captured at event time, so a trap delivered after backlog carries
+// the event's time-stamp rather than the delivery time's.
+func (a *Agent) buildLinkTrapV1WithUptime(community, target string, linkUp bool, ifindex int, ifname string, uptime int) []byte {
 
 	genericTrap := genericTrapLinkDown
 	operStatus := 2 // down
@@ -317,13 +324,20 @@ func (a *Agent) sendLinkTraps(linkUp bool, ifindex int, ifname string) {
 		direction = "up"
 	}
 
-	// Enqueue one job per target. The trap PDU is built per group because the
-	// SNMP version is a per-trap-group setting (#3948): a `version v1` group
-	// gets an SNMPv1 Trap-PDU, `v2`/unspecified a v2c trap, and `all` both.
-	// The blocking dial/write happens on the trap worker so a dead or slow
-	// target never stalls the link monitor (#2991). Iterate trap groups in
-	// deterministic (sorted) order so log output and dispatch ordering are
-	// stable across runs.
+	// Enqueue one job per emitted packet. The trap PDU shape is a per-trap-group
+	// setting (#3948): a `version v1` group gets an SNMPv1 Trap-PDU,
+	// `v2`/unspecified a v2c trap, and `all` both. The v2c packet is built here
+	// (pure BER, no I/O) while the v1 packet is built on the trap worker: its
+	// agent-addr costs a DNS lookup plus an up-to-2s dial per target, which
+	// must not serialize on the link monitor behind K transitions x T targets
+	// (#9917 F-134). The blocking dial/write happens on the trap worker so a
+	// dead or slow target never stalls the link monitor (#2991). Iterate trap
+	// groups in deterministic (sorted) order so log output and dispatch
+	// ordering are stable across runs.
+	//
+	// uptime is captured once per event for the deferred v1 jobs, so their
+	// time-stamps agree with each other and with event time.
+	uptime := int(time.Since(a.startTime).Milliseconds() / 10)
 	for _, tg := range sortedTrapGroups(cfg) {
 		// #5522: enforce the trap-group category filter. A link trap is in the
 		// "link" category; a group scoped to exclude link (e.g. `categories
@@ -335,19 +349,36 @@ func (a *Agent) sendLinkTraps(linkUp bool, ifindex int, ifname string) {
 			continue
 		}
 		for _, target := range tg.Targets {
-			// #9123: built inside the target loop, because the v1 agent-addr is
-			// derived from the source address toward THIS target. The v2c packet
-			// carries no agent-addr and is unaffected by the move.
-			pkts := a.buildLinkTrapsForVersion(community, tg.Version, target, linkUp, ifindex, ifname)
-			for _, pkt := range pkts {
+			// #9123: the v1 agent-addr is derived from the source address
+			// toward THIS target, so the v1 build stays per target -- it just
+			// runs on the worker now instead of the caller. The v2c packet
+			// carries no agent-addr and is built here, unaffected.
+			switch tg.Version {
+			case "v1":
 				a.enqueueTrap(trapJob{
-					target:  target,
-					pkt:     pkt,
-					group:   tg.Name,
-					event:   "link" + direction,
-					iface:   ifname,
-					ifindex: ifindex,
+					target: target, group: tg.Name, event: "link" + direction,
+					iface: ifname, ifindex: ifindex,
+					deferredV1: true, community: community, linkUp: linkUp, uptime: uptime,
 				})
+			case "all":
+				a.enqueueTrap(trapJob{
+					target: target, group: tg.Name, event: "link" + direction,
+					iface: ifname, ifindex: ifindex,
+					deferredV1: true, community: community, linkUp: linkUp, uptime: uptime,
+				})
+				for _, pkt := range a.buildLinkTrapsForVersion(community, "v2", target, linkUp, ifindex, ifname) {
+					a.enqueueTrap(trapJob{
+						target: target, pkt: pkt, group: tg.Name,
+						event: "link" + direction, iface: ifname, ifindex: ifindex,
+					})
+				}
+			default: // "v2", "" (unspecified), or anything else -> v2c
+				for _, pkt := range a.buildLinkTrapsForVersion(community, tg.Version, target, linkUp, ifindex, ifname) {
+					a.enqueueTrap(trapJob{
+						target: target, pkt: pkt, group: tg.Name,
+						event: "link" + direction, iface: ifname, ifindex: ifindex,
+					})
+				}
 			}
 		}
 	}
@@ -576,7 +607,29 @@ func (a *Agent) trapWorker(queue chan trapJob, stop chan struct{}) {
 				return
 			default:
 			}
-			if err := send(job.target, job.pkt); err != nil {
+			pkt := job.pkt
+			if job.deferredV1 {
+				// #9917 F-134: build the v1 Trap-PDU here, on the worker. The
+				// agent-addr dial runs off the link monitor; the deferred build
+				// wins over any carried pkt by the trapJob contract.
+				pkt = a.buildLinkTrapV1WithUptime(job.community, job.target, job.linkUp, job.ifindex, job.iface, job.uptime)
+				// #4916: the build above can block up to agentAddrDialTimeout,
+				// so re-check stop before delivering -- a Stop that landed
+				// mid-build must still abandon this trap rather than deliver
+				// it to a removed/rotated receiver. Worst-case Stop latency
+				// grows by one agent-addr dial for a deferred job in flight.
+				select {
+				case <-stop:
+					dropped := a.trapsDropped.Add(1)
+					slog.Warn("SNMP trap abandoned on stop, dropping trap",
+						"target", job.target, "group", job.group,
+						"event", job.event, "iface", job.iface, "dropped_total", dropped)
+					a.countAbandonedTraps(queue)
+					return
+				default:
+				}
+			}
+			if err := send(job.target, pkt); err != nil {
 				slog.Warn("SNMP trap send failed",
 					"target", job.target, "group", job.group,
 					"event", job.event, "iface", job.iface, "err", err)
