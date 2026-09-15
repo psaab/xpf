@@ -188,10 +188,11 @@ func TestBracketedMembersListStillCompilesToTwoMembers_8453(t *testing.T) {
 }
 
 // The OTHER production entry point. Operator `set` goes through
-// SetPathQuoted; `load merge` / replay goes through SetPathQuotedGrouped
-// (configstore/store_command.go). A fix verified on only one of them is
-// verified on a population that does not contain the other — which is how a
-// live defect gets recorded as absent.
+// SetPathQuotedGrouped, as does `load merge` / replay
+// (configstore/store_command.go) — the two were unified on #9881, after this
+// file was written against the split pair. A fix verified on only one of
+// them is verified on a population that does not contain the other — which
+// is how a live defect gets recorded as absent.
 func TestMidTokenBracketsSurviveTheLoadMergePath_8453(t *testing.T) {
 	for _, tc := range []struct{ in, wantRegex string }{
 		{`policy-options as-path ap1 .*65000[0-9]*`, `.*65000[0-9]*`},

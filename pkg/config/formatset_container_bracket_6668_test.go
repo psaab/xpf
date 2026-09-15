@@ -457,9 +457,15 @@ func TestLexerPeekRestoresBracketState_6668(t *testing.T) {
 // stray ']' drives the depth negative and every LATER '[' in the file opens at
 // depth 0 or below, so real groups stop being recorded — a malformed line
 // silently disarming the grouping for the rest of the input.
+//
+// Since #9881 the token FOLLOWING the stray reports bracketed: the stray
+// vanishes with no trace (no depth change for any later token to observe),
+// so the follower carries the delimiter loss instead. The floor itself is
+// unchanged — depth stays floored, the later `[ c ]` group still records,
+// and its balanced close still marks nothing.
 func TestStrayCloseBracketDoesNotUnderflow_6668(t *testing.T) {
 	l := NewLexer("a ] b [ c ] d")
-	want := map[string]bool{"a": false, "b": false, "c": true, "d": false}
+	want := map[string]bool{"a": false, "b": true, "c": true, "d": false}
 	for {
 		tok := l.Next()
 		if tok.Type == TokenEOF {

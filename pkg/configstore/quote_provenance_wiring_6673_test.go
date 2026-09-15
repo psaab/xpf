@@ -13,9 +13,10 @@ import (
 // operator `set` — CLI, gRPC (server_config.go), REST (api/config.go) — arrives
 // as a STRING at Store.SetFromInputAs, and it is that method's choice of parser
 // and setter that decides whether the quoting survives into the candidate tree.
-// Reverting either half (ParseSetCommandQuoted -> ParseSetCommand, or
-// SetAsQuoted -> SetAs) still compiles and still passes every pkg/config test;
-// this is the test that goes red.
+// Reverting either half (ParseSetCommandGrouped -> ParseSetCommand, or
+// SetAsQuotedGrouped -> SetAs) still compiles and still passes every pkg/config
+// test; this is the test that goes red. (#9881 unified the operator-set and
+// replay pairs on the grouped variants; the quote half is unchanged.)
 //
 // LoadSet is covered too, because `show | display set` output is replayed
 // through applyEditLine on rollback, rescue and peer sync.
