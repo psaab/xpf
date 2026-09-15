@@ -587,13 +587,16 @@ pub(crate) struct SessionDelta {
     /// delete (recipient re-checks). An ordinary Close here would bypass all
     /// three: the drain derives the reverse key unconditionally and fans out
     /// repairing (unconditional) deletes for both halves. The HA/event-stream
-    /// legs still fire — the standby must drop its forward copy (per-key,
-    /// no derivation downstream) and flowexport needs the close record.
+    /// legs still fire — but they carry the marker (binary close tail,
+    /// JSON key, cluster-delete tail), because downstream retraction DOES
+    /// derive: the Go mirror deletes stored companions and the peer helper
+    /// applies each delete it is sent. Every downstream consumer honors the
+    /// marker by acting forward-only; flowexport needs the close record
+    /// either way.
     ///
     /// Carried on the DELTA like `bulk_resync`, for the same reason: the
     /// producer (`InstallTablePurge` teardown, the only setter) decides, and
-    /// no drain call site can get it wrong because none chooses. Never
-    /// serialized: no wire leg reads it.
+    /// no drain call site can get it wrong because none chooses.
     pub(crate) purge_retirement: bool,
 }
 

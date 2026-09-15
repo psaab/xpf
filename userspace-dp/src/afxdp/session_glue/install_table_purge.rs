@@ -132,9 +132,9 @@ impl InstallTablePurge {
 /// #9752: the purge predicate — EXACTLY the sessions D4 would terminalize:
 /// nonzero stamp, unresolvable under `forwarding` (unknown domain, owner
 /// mismatch, or absent family), with no table-independent local outcome.
-/// Shared by the walk, the fenced shared removal, and the recipient arm —
-/// one classifier (Codex-r4-F4), three call sites.
-pub(super) fn install_table_purge_predicate(
+/// Shared by the walk, the fenced shared removal, the recipient arm, and the
+/// drain's stale-close guard — one classifier (Codex-r4-F4), four call sites.
+pub(in crate::afxdp) fn install_table_purge_predicate(
     forwarding: &ForwardingState,
     key: &SessionKey,
     decision: &SessionDecision,
@@ -304,53 +304,6 @@ fn purge_one_install_table_key(
         }
     }
     true
-}
-
-/// #9752: companion-local teardown shared by the walk (which additionally
-/// handles shared state) and the conditional-delete recipient (which must
-/// not touch shared state the sender owns, and must not emit deltas the
-/// sender already emitted — mirroring `handle_delete_synced`).
-#[allow(clippy::too_many_arguments)]
-pub(super) fn delete_purge_companion_local(
-    sessions: &mut SessionTable,
-    session_map: SteeringMap<'_>,
-    conntrack_v4_fd: c_int,
-    conntrack_v6_fd: c_int,
-    forwarding: &ForwardingState,
-    companion_key: &SessionKey,
-    companion_decision: &SessionDecision,
-    companion_metadata: &SessionMetadata,
-    companion_origin: SessionOrigin,
-    now_ns: u64,
-    worker_id: u32,
-) {
-    release_source_nat_allocation_for_worker(
-        &forwarding.iface_nat_allocators,
-        &forwarding.source_nat_rules,
-        companion_key,
-        companion_decision.nat,
-        companion_metadata.is_reverse,
-        now_ns,
-        worker_id,
-    );
-    crate::nat64::release_nat64_allocation_for_worker(
-        &forwarding.nat64,
-        companion_key,
-        companion_decision.nat,
-        companion_metadata.is_reverse,
-        now_ns,
-        worker_id,
-    );
-    delete_session_map_entry_for_removed_session_with_origin(
-        session_map,
-        companion_key,
-        *companion_decision,
-        companion_metadata,
-        companion_origin,
-        conntrack_v4_fd,
-        conntrack_v6_fd,
-    );
-    sessions.delete(companion_key);
 }
 
 /// #9752: forward-half purge teardown. Mirrors `delete_terminal_half` (NAT

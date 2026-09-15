@@ -79,17 +79,17 @@ func (m *mockGCDP) DeleteV6(key dataplane.SessionKeyV6) error {
 	return m.DeleteSessionV6(key)
 }
 
-func (m *mockGCDP) DeleteKnownV4(key dataplane.SessionKey, val dataplane.SessionValue, reason dataplane.DeleteReason) error {
-	_, err := m.DeleteBatchKnownV4([]dataplane.SessionEntryV4{{Key: key, Value: val}}, reason)
+func (m *mockGCDP) DeleteKnownV4(key dataplane.SessionKey, val dataplane.SessionValue, reason dataplane.DeleteReason, _ bool) error {
+	_, err := m.DeleteBatchKnownV4([]dataplane.SessionEntryV4{{Key: key, Value: val}}, reason, false)
 	return err
 }
 
-func (m *mockGCDP) DeleteKnownV6(key dataplane.SessionKeyV6, val dataplane.SessionValueV6, reason dataplane.DeleteReason) error {
-	_, err := m.DeleteBatchKnownV6([]dataplane.SessionEntryV6{{Key: key, Value: val}}, reason)
+func (m *mockGCDP) DeleteKnownV6(key dataplane.SessionKeyV6, val dataplane.SessionValueV6, reason dataplane.DeleteReason, _ bool) error {
+	_, err := m.DeleteBatchKnownV6([]dataplane.SessionEntryV6{{Key: key, Value: val}}, reason, false)
 	return err
 }
 
-func (m *mockGCDP) DeleteBatchKnownV4(entries []dataplane.SessionEntryV4, _ dataplane.DeleteReason) (int, error) {
+func (m *mockGCDP) DeleteBatchKnownV4(entries []dataplane.SessionEntryV4, _ dataplane.DeleteReason, _ bool) (int, error) {
 	for _, entry := range entries {
 		if entry.Value.ReverseKey.Protocol != 0 {
 			m.DeleteSession(entry.Value.ReverseKey)
@@ -99,7 +99,7 @@ func (m *mockGCDP) DeleteBatchKnownV4(entries []dataplane.SessionEntryV4, _ data
 	return len(entries), nil
 }
 
-func (m *mockGCDP) DeleteBatchKnownV6(entries []dataplane.SessionEntryV6, _ dataplane.DeleteReason) (int, error) {
+func (m *mockGCDP) DeleteBatchKnownV6(entries []dataplane.SessionEntryV6, _ dataplane.DeleteReason, _ bool) (int, error) {
 	for _, entry := range entries {
 		if entry.Value.ReverseKey.Protocol != 0 {
 			m.DeleteSessionV6(entry.Value.ReverseKey)
@@ -109,20 +109,20 @@ func (m *mockGCDP) DeleteBatchKnownV6(entries []dataplane.SessionEntryV6, _ data
 	return len(entries), nil
 }
 
-func (m *mockGCDP) DeleteWithCompanionsV4(key dataplane.SessionKey, reason dataplane.DeleteReason) error {
+func (m *mockGCDP) DeleteWithCompanionsV4(key dataplane.SessionKey, reason dataplane.DeleteReason, _ bool) error {
 	val, err := m.GetSessionV4(key)
 	if err != nil {
 		return err
 	}
-	return m.DeleteKnownV4(key, val, reason)
+	return m.DeleteKnownV4(key, val, reason, false)
 }
 
-func (m *mockGCDP) DeleteWithCompanionsV6(key dataplane.SessionKeyV6, reason dataplane.DeleteReason) error {
+func (m *mockGCDP) DeleteWithCompanionsV6(key dataplane.SessionKeyV6, reason dataplane.DeleteReason, _ bool) error {
 	val, err := m.GetSessionV6(key)
 	if err != nil {
 		return err
 	}
-	return m.DeleteKnownV6(key, val, reason)
+	return m.DeleteKnownV6(key, val, reason, false)
 }
 
 func (m *mockGCDP) ReconcileClusterBulk(dataplane.ClusterBulkReconcileInput) (dataplane.ClusterBulkReconcileResult, error) {
@@ -345,17 +345,17 @@ func (s *runtimeDomainSessionStore) DeleteV4(key dataplane.SessionKey) error {
 
 func (s *runtimeDomainSessionStore) DeleteV6(dataplane.SessionKeyV6) error { return nil }
 
-func (s *runtimeDomainSessionStore) DeleteKnownV4(key dataplane.SessionKey, _ dataplane.SessionValue, _ dataplane.DeleteReason) error {
+func (s *runtimeDomainSessionStore) DeleteKnownV4(key dataplane.SessionKey, _ dataplane.SessionValue, _ dataplane.DeleteReason, _ bool) error {
 	s.deleted = append(s.deleted, key)
 	delete(s.v4, key)
 	return nil
 }
 
-func (s *runtimeDomainSessionStore) DeleteKnownV6(dataplane.SessionKeyV6, dataplane.SessionValueV6, dataplane.DeleteReason) error {
+func (s *runtimeDomainSessionStore) DeleteKnownV6(dataplane.SessionKeyV6, dataplane.SessionValueV6, dataplane.DeleteReason, bool) error {
 	return nil
 }
 
-func (s *runtimeDomainSessionStore) DeleteBatchKnownV4(entries []dataplane.SessionEntryV4, _ dataplane.DeleteReason) (int, error) {
+func (s *runtimeDomainSessionStore) DeleteBatchKnownV4(entries []dataplane.SessionEntryV4, _ dataplane.DeleteReason, _ bool) (int, error) {
 	for _, entry := range entries {
 		s.deleted = append(s.deleted, entry.Key)
 		delete(s.v4, entry.Key)
@@ -363,15 +363,15 @@ func (s *runtimeDomainSessionStore) DeleteBatchKnownV4(entries []dataplane.Sessi
 	return len(entries), nil
 }
 
-func (s *runtimeDomainSessionStore) DeleteBatchKnownV6([]dataplane.SessionEntryV6, dataplane.DeleteReason) (int, error) {
+func (s *runtimeDomainSessionStore) DeleteBatchKnownV6([]dataplane.SessionEntryV6, dataplane.DeleteReason, bool) (int, error) {
 	return 0, nil
 }
 
-func (s *runtimeDomainSessionStore) DeleteWithCompanionsV4(key dataplane.SessionKey, _ dataplane.DeleteReason) error {
-	return s.DeleteKnownV4(key, dataplane.SessionValue{}, dataplane.DeleteReasonGCExpired)
+func (s *runtimeDomainSessionStore) DeleteWithCompanionsV4(key dataplane.SessionKey, _ dataplane.DeleteReason, _ bool) error {
+	return s.DeleteKnownV4(key, dataplane.SessionValue{}, dataplane.DeleteReasonGCExpired, false)
 }
 
-func (s *runtimeDomainSessionStore) DeleteWithCompanionsV6(dataplane.SessionKeyV6, dataplane.DeleteReason) error {
+func (s *runtimeDomainSessionStore) DeleteWithCompanionsV6(dataplane.SessionKeyV6, dataplane.DeleteReason, bool) error {
 	return nil
 }
 
@@ -420,22 +420,22 @@ func (s *partialDeleteSessionStore) PutClusterSyncedV6(dataplane.SessionKeyV6, d
 
 func (s *partialDeleteSessionStore) DeleteV4(dataplane.SessionKey) error   { return nil }
 func (s *partialDeleteSessionStore) DeleteV6(dataplane.SessionKeyV6) error { return nil }
-func (s *partialDeleteSessionStore) DeleteKnownV4(dataplane.SessionKey, dataplane.SessionValue, dataplane.DeleteReason) error {
+func (s *partialDeleteSessionStore) DeleteKnownV4(dataplane.SessionKey, dataplane.SessionValue, dataplane.DeleteReason, bool) error {
 	return nil
 }
-func (s *partialDeleteSessionStore) DeleteKnownV6(dataplane.SessionKeyV6, dataplane.SessionValueV6, dataplane.DeleteReason) error {
+func (s *partialDeleteSessionStore) DeleteKnownV6(dataplane.SessionKeyV6, dataplane.SessionValueV6, dataplane.DeleteReason, bool) error {
 	return nil
 }
-func (s *partialDeleteSessionStore) DeleteBatchKnownV4([]dataplane.SessionEntryV4, dataplane.DeleteReason) (int, error) {
+func (s *partialDeleteSessionStore) DeleteBatchKnownV4([]dataplane.SessionEntryV4, dataplane.DeleteReason, bool) (int, error) {
 	return s.deleted, s.deleteError
 }
-func (s *partialDeleteSessionStore) DeleteBatchKnownV6([]dataplane.SessionEntryV6, dataplane.DeleteReason) (int, error) {
+func (s *partialDeleteSessionStore) DeleteBatchKnownV6([]dataplane.SessionEntryV6, dataplane.DeleteReason, bool) (int, error) {
 	return 0, nil
 }
-func (s *partialDeleteSessionStore) DeleteWithCompanionsV4(dataplane.SessionKey, dataplane.DeleteReason) error {
+func (s *partialDeleteSessionStore) DeleteWithCompanionsV4(dataplane.SessionKey, dataplane.DeleteReason, bool) error {
 	return nil
 }
-func (s *partialDeleteSessionStore) DeleteWithCompanionsV6(dataplane.SessionKeyV6, dataplane.DeleteReason) error {
+func (s *partialDeleteSessionStore) DeleteWithCompanionsV6(dataplane.SessionKeyV6, dataplane.DeleteReason, bool) error {
 	return nil
 }
 func (s *partialDeleteSessionStore) ReconcileClusterBulk(dataplane.ClusterBulkReconcileInput) (dataplane.ClusterBulkReconcileResult, error) {

@@ -6,7 +6,9 @@ mod install_table_purge;
 mod promote;
 
 pub(in crate::afxdp) use delete_drop_sweep::{DeleteDropSweep, DELETE_DROP_SWEEP_BUDGET};
-pub(in crate::afxdp) use install_table_purge::{InstallTablePurge, INSTALL_TABLE_PURGE_BUDGET};
+pub(in crate::afxdp) use install_table_purge::{
+    InstallTablePurge, INSTALL_TABLE_PURGE_BUDGET, install_table_purge_predicate,
+};
 use promote::{
     SharedSessionRefs, maybe_promote_synced_session, purge_translated_synced_hit,
     should_keep_synced_hit_transient,

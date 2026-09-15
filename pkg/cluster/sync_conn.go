@@ -1309,6 +1309,8 @@ func (s *SessionSync) handleDisconnect(conn net.Conn) {
 		// starts the suppression, or the upgrade that ends it — and an
 		// operator would see one line, once, for the life of the process.
 		s.deleteSuppressionWarned.Store(false)
+		// #9752: same incarnation scoping for the forward-only-delete latch.
+		s.purgeRetirementSuppressionWarned.Store(false)
 		// #7990: same incarnation scoping. A retained sync-wire version is the
 		// worst of the three to keep: it would let the LANE-1 drain gate certify
 		// compatibility against a version the reconnected (possibly downgraded)

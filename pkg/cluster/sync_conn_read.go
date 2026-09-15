@@ -180,7 +180,10 @@ func (s *SessionSync) handleMessage(conn net.Conn, msgType uint8, payload []byte
 			if len(payload) >= 24 {
 				gen = binary.LittleEndian.Uint64(payload[16:24])
 			}
-			s.deleteClusterSyncedV4(key, gen)
+			// #9752: length-gated trailing forward-only marker. Absent (old
+			// peer) keeps the historical derive-and-retract behavior.
+			forwardOnly := len(payload) >= 25 && payload[24] != 0
+			s.deleteClusterSyncedV4(key, gen, forwardOnly)
 		}
 	case syncMsgDeleteV6:
 		s.stats.DeletesReceived.Add(1)
@@ -196,7 +199,9 @@ func (s *SessionSync) handleMessage(conn net.Conn, msgType uint8, payload []byte
 			if len(payload) >= 48 {
 				gen = binary.LittleEndian.Uint64(payload[40:48])
 			}
-			s.deleteClusterSyncedV6(key, gen)
+			// #9752: length-gated trailing forward-only marker (v6 twin).
+			forwardOnly := len(payload) >= 49 && payload[48] != 0
+			s.deleteClusterSyncedV6(key, gen, forwardOnly)
 		}
 	case syncMsgBulkStart:
 		var epoch uint64

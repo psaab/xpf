@@ -45,10 +45,11 @@ func TestSessionUpdateGoldenFrameDecodes9412(t *testing.T) {
 	if d.SrcPort != 12345 || d.DstPort != 80 || d.RTFlowSessionID != 0x5EED {
 		t.Fatalf("golden fields misread: src=%d dst=%d id=%#x", d.SrcPort, d.DstPort, d.RTFlowSessionID)
 	}
-	// #9752: the golden's unstamped fixture decision ends in a (0,0)
-	// install-table tail, which must decode (not break the length gates).
-	if d.InstallTableDomain != 0 || d.InstallTableCheck != 0 {
-		t.Fatalf("golden UPDATE decoded install_table=(%d,%d), want (0,0)", d.InstallTableDomain, d.InstallTableCheck)
+	// #9752: the golden's fixture decision is stamped, so the tail decodes
+	// to the real pair — every consumer test downstream of these bytes
+	// exercises a stamped record.
+	if d.InstallTableDomain != 525590 || d.InstallTableCheck != 3318534811 {
+		t.Fatalf("golden UPDATE decoded install_table=(%d,%d), want (525590,3318534811)", d.InstallTableDomain, d.InstallTableCheck)
 	}
 }
 

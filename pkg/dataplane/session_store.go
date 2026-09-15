@@ -61,12 +61,15 @@ type SessionStore interface {
 	PutClusterSyncedV6(SessionKeyV6, SessionValueV6) error
 	DeleteV4(SessionKey) error
 	DeleteV6(SessionKeyV6) error
-	DeleteKnownV4(SessionKey, SessionValue, DeleteReason) error
-	DeleteKnownV6(SessionKeyV6, SessionValueV6, DeleteReason) error
-	DeleteBatchKnownV4([]SessionEntryV4, DeleteReason) (int, error)
-	DeleteBatchKnownV6([]SessionEntryV6, DeleteReason) (int, error)
-	DeleteWithCompanionsV4(SessionKey, DeleteReason) error
-	DeleteWithCompanionsV6(SessionKeyV6, DeleteReason) error
+	DeleteKnownV4(SessionKey, SessionValue, DeleteReason, bool) error
+	DeleteKnownV6(SessionKeyV6, SessionValueV6, DeleteReason, bool) error
+	DeleteBatchKnownV4([]SessionEntryV4, DeleteReason, bool) (int, error)
+	DeleteBatchKnownV6([]SessionEntryV6, DeleteReason, bool) (int, error)
+	// forwardOnly (#9752): retract exactly the named keys, skipping
+	// companion deletes (a purge-retirement close whose pair the sender
+	// already decided). False keeps the historical derive-and-retract.
+	DeleteWithCompanionsV4(SessionKey, DeleteReason, bool) error
+	DeleteWithCompanionsV6(SessionKeyV6, DeleteReason, bool) error
 	ReconcileClusterBulk(ClusterBulkReconcileInput) (ClusterBulkReconcileResult, error)
 	SessionDeltas() dpruntime.SessionDeltaSource
 	Count() (v4, v6 int)
@@ -356,6 +359,22 @@ func (s dataPlaneSessionStore) PutClusterSyncedV4(key SessionKey, val SessionVal
 	if err != nil {
 		return err
 	}
+	// #9752: unknown-never-default. A (0,0) install-table identity over an
+	// already-stamped row of the SAME (or unknown) incarnation is an old
+	// sender's resend — absence decodes as zero — never a genuine re-stamp
+	// (stamps are install-stable per incarnation, and new senders memo-restore
+	// nonzero, so they never emit a false (0,0) for a recorded incarnation).
+	// Keep the recorded stamp instead of erasing it; without this a mixed
+	// cluster silently wrong-tables the fixed node's sessions on every
+	// sweep/bulk resend. A nonzero incoming identity, a new incarnation, or
+	// no existing row applies normally. Zero extra I/O: forwardSnap is free.
+	if val.InstallTableDomain == 0 && val.InstallTableCheck == 0 &&
+		forwardSnap.existed &&
+		(forwardSnap.val.InstallTableDomain != 0 || forwardSnap.val.InstallTableCheck != 0) &&
+		(val.SessionID == 0 || forwardSnap.val.SessionID == 0 || val.SessionID == forwardSnap.val.SessionID) {
+		val.InstallTableDomain = forwardSnap.val.InstallTableDomain
+		val.InstallTableCheck = forwardSnap.val.InstallTableCheck
+	}
 	var reverseSnap sessionSnapshotV4
 	needsReverse := val.IsReverse == 0 && val.ReverseKey.Protocol != 0
 	if needsReverse {
@@ -422,6 +441,14 @@ func (s dataPlaneSessionStore) PutClusterSyncedV6(key SessionKeyV6, val SessionV
 	forwardSnap, err := s.snapshotV6(key)
 	if err != nil {
 		return err
+	}
+	// #9752: v6 twin of the unknown-never-default keep-rule above.
+	if val.InstallTableDomain == 0 && val.InstallTableCheck == 0 &&
+		forwardSnap.existed &&
+		(forwardSnap.val.InstallTableDomain != 0 || forwardSnap.val.InstallTableCheck != 0) &&
+		(val.SessionID == 0 || forwardSnap.val.SessionID == 0 || val.SessionID == forwardSnap.val.SessionID) {
+		val.InstallTableDomain = forwardSnap.val.InstallTableDomain
+		val.InstallTableCheck = forwardSnap.val.InstallTableCheck
 	}
 	var reverseSnap sessionSnapshotV6
 	needsReverse := val.IsReverse == 0 && val.ReverseKey.Protocol != 0
@@ -492,17 +519,17 @@ func (s dataPlaneSessionStore) DeleteV6(key SessionKeyV6) error {
 	return s.dp.DeleteSessionV6(key)
 }
 
-func (s dataPlaneSessionStore) DeleteKnownV4(key SessionKey, val SessionValue, reason DeleteReason) error {
-	_, err := s.DeleteBatchKnownV4([]SessionEntryV4{{Key: key, Value: val}}, reason)
+func (s dataPlaneSessionStore) DeleteKnownV4(key SessionKey, val SessionValue, reason DeleteReason, forwardOnly bool) error {
+	_, err := s.DeleteBatchKnownV4([]SessionEntryV4{{Key: key, Value: val}}, reason, forwardOnly)
 	return err
 }
 
-func (s dataPlaneSessionStore) DeleteKnownV6(key SessionKeyV6, val SessionValueV6, reason DeleteReason) error {
-	_, err := s.DeleteBatchKnownV6([]SessionEntryV6{{Key: key, Value: val}}, reason)
+func (s dataPlaneSessionStore) DeleteKnownV6(key SessionKeyV6, val SessionValueV6, reason DeleteReason, forwardOnly bool) error {
+	_, err := s.DeleteBatchKnownV6([]SessionEntryV6{{Key: key, Value: val}}, reason, forwardOnly)
 	return err
 }
 
-func (s dataPlaneSessionStore) DeleteBatchKnownV4(entries []SessionEntryV4, reason DeleteReason) (int, error) {
+func (s dataPlaneSessionStore) DeleteBatchKnownV4(entries []SessionEntryV4, reason DeleteReason, forwardOnly bool) (int, error) {
 	if s.dp == nil {
 		return 0, errors.New("nil dataplane")
 	}
@@ -512,7 +539,7 @@ func (s dataPlaneSessionStore) DeleteBatchKnownV4(entries []SessionEntryV4, reas
 	// #9714: a delete made on behalf of the PEER asks the helper first; see
 	// deletePeerBatchKnownV4.
 	if peerDeleter, ok := s.dp.(peerSyncedSessionDeleter); ok && reason == DeleteReasonClusterStale {
-		return s.deletePeerBatchKnownV4(peerDeleter, entries)
+		return s.deletePeerBatchKnownV4(peerDeleter, entries, forwardOnly)
 	}
 
 	reverseKeys := make([]ScopedSessionKey, 0, len(entries))
@@ -524,7 +551,11 @@ func (s dataPlaneSessionStore) DeleteBatchKnownV4(entries []SessionEntryV4, reas
 				return 0, err
 			}
 		}
-		if val.ReverseKey.Protocol != 0 {
+		// #9752: a forward-only delete retires exactly the named keys; the
+		// sender already decided every companion (linked-removed or
+		// deliberately preserved), so deriving here would destroy sessions
+		// the purge kept. DNAT + persistent-NAT handling above still run.
+		if !forwardOnly && val.ReverseKey.Protocol != 0 {
 			// #9364: the reverse companion is the SAME flow in the SAME tenant,
 			// so it carries the same domain — the identical derivation #9146's
 			// syncDeleteV4Locked uses for the singular path.
@@ -553,7 +584,7 @@ func (s dataPlaneSessionStore) DeleteBatchKnownV4(entries []SessionEntryV4, reas
 	return deleted, nil
 }
 
-func (s dataPlaneSessionStore) DeleteBatchKnownV6(entries []SessionEntryV6, reason DeleteReason) (int, error) {
+func (s dataPlaneSessionStore) DeleteBatchKnownV6(entries []SessionEntryV6, reason DeleteReason, forwardOnly bool) (int, error) {
 	if s.dp == nil {
 		return 0, errors.New("nil dataplane")
 	}
@@ -563,7 +594,7 @@ func (s dataPlaneSessionStore) DeleteBatchKnownV6(entries []SessionEntryV6, reas
 	// #9714: a delete made on behalf of the PEER asks the helper first; see
 	// deletePeerBatchKnownV6.
 	if peerDeleter, ok := s.dp.(peerSyncedSessionDeleter); ok && reason == DeleteReasonClusterStale {
-		return s.deletePeerBatchKnownV6(peerDeleter, entries)
+		return s.deletePeerBatchKnownV6(peerDeleter, entries, forwardOnly)
 	}
 
 	reverseKeys := make([]ScopedSessionKeyV6, 0, len(entries))
@@ -575,7 +606,8 @@ func (s dataPlaneSessionStore) DeleteBatchKnownV6(entries []SessionEntryV6, reas
 				return 0, err
 			}
 		}
-		if val.ReverseKey.Protocol != 0 {
+		// #9752: v6 twin of the forward-only gate above.
+		if !forwardOnly && val.ReverseKey.Protocol != 0 {
 			// #9364: same tenant as its forward half — see the V4 twin.
 			reverseKeys = append(reverseKeys, ScopedSessionKeyV6{
 				Key:           val.ReverseKey,
@@ -713,7 +745,7 @@ func (s dataPlaneSessionStore) batchDeleteChunkV6(chunk []ScopedSessionKeyV6) (i
 // Forward keys go first, so a refused forward never loses its reverse half. The
 // helper removes an applied forward's derived reverse itself; the reverse delete
 // that follows retires that half's mirror row.
-func (s dataPlaneSessionStore) deletePeerBatchKnownV4(dp peerSyncedSessionDeleter, entries []SessionEntryV4) (int, error) {
+func (s dataPlaneSessionStore) deletePeerBatchKnownV4(dp peerSyncedSessionDeleter, entries []SessionEntryV4, forwardOnly bool) (int, error) {
 	scoped := func(entry SessionEntryV4) ScopedSessionKey {
 		return ScopedSessionKey{Key: entry.Key, RoutingDomain: entry.Value.RoutingDomain}
 	}
@@ -732,7 +764,10 @@ func (s dataPlaneSessionStore) deletePeerBatchKnownV4(dp peerSyncedSessionDelete
 			continue
 		}
 		applied = append(applied, entry)
-		if entry.Value.ReverseKey.Protocol != 0 {
+		// #9752: a forward-only delete retires exactly the named keys; the
+		// sender already decided every companion. DNAT + persistent-NAT
+		// handling below still run.
+		if !forwardOnly && entry.Value.ReverseKey.Protocol != 0 {
 			// #9364: the reverse companion is the SAME flow in the SAME tenant.
 			reverseKeys = append(reverseKeys, ScopedSessionKey{
 				Key:           entry.Value.ReverseKey,
@@ -756,7 +791,7 @@ func (s dataPlaneSessionStore) deletePeerBatchKnownV4(dp peerSyncedSessionDelete
 }
 
 // deletePeerBatchKnownV6 is the IPv6 analogue of deletePeerBatchKnownV4 (#9714).
-func (s dataPlaneSessionStore) deletePeerBatchKnownV6(dp peerSyncedSessionDeleter, entries []SessionEntryV6) (int, error) {
+func (s dataPlaneSessionStore) deletePeerBatchKnownV6(dp peerSyncedSessionDeleter, entries []SessionEntryV6, forwardOnly bool) (int, error) {
 	scoped := func(entry SessionEntryV6) ScopedSessionKeyV6 {
 		return ScopedSessionKeyV6{Key: entry.Key, RoutingDomain: entry.Value.RoutingDomain}
 	}
@@ -775,7 +810,8 @@ func (s dataPlaneSessionStore) deletePeerBatchKnownV6(dp peerSyncedSessionDelete
 			continue
 		}
 		applied = append(applied, entry)
-		if entry.Value.ReverseKey.Protocol != 0 {
+		// #9752: v6 twin of the forward-only gate above.
+		if !forwardOnly && entry.Value.ReverseKey.Protocol != 0 {
 			// #9364: the reverse companion is the SAME flow in the SAME tenant.
 			reverseKeys = append(reverseKeys, ScopedSessionKeyV6{
 				Key:           entry.Value.ReverseKey,
@@ -844,7 +880,7 @@ func bareSessionKeysV6(scoped []ScopedSessionKeyV6) []SessionKeyV6 {
 	return keys
 }
 
-func (s dataPlaneSessionStore) DeleteWithCompanionsV4(key SessionKey, reason DeleteReason) error {
+func (s dataPlaneSessionStore) DeleteWithCompanionsV4(key SessionKey, reason DeleteReason, forwardOnly bool) error {
 	if s.dp == nil {
 		return errors.New("nil dataplane")
 	}
@@ -855,7 +891,7 @@ func (s dataPlaneSessionStore) DeleteWithCompanionsV4(key SessionKey, reason Del
 		}
 		return err
 	}
-	return s.DeleteKnownV4(key, val, reason)
+	return s.DeleteKnownV4(key, val, reason, forwardOnly)
 }
 
 // deleteSessionV4For issues a single-key delete, marked as a #9714 peer delete
@@ -879,7 +915,7 @@ func (s dataPlaneSessionStore) deleteSessionV6For(key SessionKeyV6, peer bool) e
 	return s.dp.DeleteSessionV6(key)
 }
 
-func (s dataPlaneSessionStore) DeleteWithCompanionsV6(key SessionKeyV6, reason DeleteReason) error {
+func (s dataPlaneSessionStore) DeleteWithCompanionsV6(key SessionKeyV6, reason DeleteReason, forwardOnly bool) error {
 	if s.dp == nil {
 		return errors.New("nil dataplane")
 	}
@@ -890,7 +926,7 @@ func (s dataPlaneSessionStore) DeleteWithCompanionsV6(key SessionKeyV6, reason D
 		}
 		return err
 	}
-	return s.DeleteKnownV6(key, val, reason)
+	return s.DeleteKnownV6(key, val, reason, forwardOnly)
 }
 
 func (s dataPlaneSessionStore) preservePersistentNATV4(key SessionKey, val SessionValue) {
@@ -993,7 +1029,7 @@ func (s dataPlaneSessionStore) ReconcileClusterBulk(input ClusterBulkReconcileIn
 	}
 	result.StaleV4 = len(staleV4)
 
-	deletedV4, err := s.DeleteBatchKnownV4(staleV4, reason)
+	deletedV4, err := s.DeleteBatchKnownV4(staleV4, reason, false)
 	result.DeletedV4 = deletedV4
 	if err != nil {
 		errs = append(errs, err)
@@ -1016,7 +1052,7 @@ func (s dataPlaneSessionStore) ReconcileClusterBulk(input ClusterBulkReconcileIn
 	}
 	result.StaleV6 = len(staleV6)
 
-	deletedV6, err := s.DeleteBatchKnownV6(staleV6, reason)
+	deletedV6, err := s.DeleteBatchKnownV6(staleV6, reason, false)
 	result.DeletedV6 = deletedV6
 	if err != nil {
 		errs = append(errs, err)

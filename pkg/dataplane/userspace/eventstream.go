@@ -1689,6 +1689,14 @@ func decodeSessionCloseEvent(payload []byte) (SessionDeltaInfo, bool) {
 		d.RoutingDomain = binary.LittleEndian.Uint32(payload[off : off+4])
 		off += 4
 	}
+	// #9752: trailing purge-retirement marker (u8), length-gated. A close that
+	// retires exactly its key must not make downstream retractions derive
+	// companions the purge preserved. Absent (old helper) keeps the historical
+	// derive-and-retract behavior.
+	if len(payload) >= off+1 {
+		d.PurgeRetirement = payload[off] != 0
+		off++
+	}
 
 	return d, true
 }

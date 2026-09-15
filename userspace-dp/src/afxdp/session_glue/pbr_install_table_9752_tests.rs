@@ -379,24 +379,90 @@ fn unstamped_hit_resolves_in_default_table() {
     );
 }
 
-/// C2: synced import re-resolves in the installing table (wire stamp honored).
+/// C2: the installing table flows producer → import → re-resolution. The
+/// STAMP ITSELF comes from `session_delta_info` JSON output and travels the
+/// real `SessionSyncRequest` wire form, so no hand-stamped import can mask a
+/// producer/consumer skew; the imported entry then re-resolves to the blue
+/// egress in the installing table.
 #[test]
 fn synced_import_reresolves_in_installing_table() {
+    use crate::protocol::SessionSyncRequest;
+    use crate::server::helpers::build_synced_session_entry;
+    use rustc_hash::FxHashMap;
+
     let forwarding = pbr_state();
     let mut sessions = SessionTable::new();
-    let key = pbr_key();
-    let entry = SyncedSessionEntry {
-        key: key.clone(),
+    // Producer side: a delta for the PBR flow carrying the blue stamp.
+    let delta = SessionDelta {
+        kind: SessionDeltaKind::Open,
+        key: pbr_key(),
         decision: stamped_decision(unusable_resolution()),
         metadata: pbr_metadata(),
-        origin: SessionOrigin::SyncImport,
-        protocol: PROTO_TCP,
-        tcp_flags: 0x18,
-        // #2170 test fixture: no peer install generation.
-        generation: 0,
+        origin: SessionOrigin::ForwardFlow,
+        fabric_redirect_sync: false,
+        created_ns: 0,
+        last_seen_ns: 0,
+        counters: crate::session::SessionCounters::default(),
+        observed_tos: 0,
+        observed_tcp_flags: 0,
         session_id: 0,
+        bulk_resync: false,
         tcp_close_class: 0,
+        purge_retirement: false,
     };
+    let mut names: FastMap<u16, String> = FastMap::default();
+    names.insert(1, "lan".to_string());
+    names.insert(2, "wan".to_string());
+    let identity = super::super::types::BindingIdentity {
+        slot: 0,
+        queue_id: 0,
+        worker_id: 7,
+        interface: Arc::from("ge-0-0-1"),
+        ifindex: 12,
+    };
+    let produced = serde_json::to_value(super::super::session_delta::session_delta_info(
+        &identity, &delta, &names,
+    ))
+    .expect("delta serializes");
+    let domain = produced
+        .get("install_table_domain")
+        .expect("producer emits the domain")
+        .as_u64()
+        .expect("domain is a number");
+    let check = produced
+        .get("install_table_check")
+        .expect("producer emits the check")
+        .as_u64()
+        .expect("check is a number");
+    let req_json = serde_json::json!({
+        "operation": "upsert",
+        "addr_family": 2,
+        "protocol": 6,
+        "src_ip": "10.0.61.102",
+        "dst_ip": "8.8.8.8",
+        "src_port": 55068,
+        "dst_port": 443,
+        "ingress_zone": "lan",
+        "egress_zone": "wan",
+        "owner_rg_id": 1,
+        "egress_ifindex": 5,
+        "tx_ifindex": 5,
+        "install_table_domain": domain,
+        "install_table_check": check,
+    });
+    let req: SessionSyncRequest =
+        serde_json::from_value(req_json).expect("request parses");
+    let zones = FxHashMap::from_iter([
+        ("lan".to_string(), crate::test_zone_ids::TEST_LAN_ZONE_ID),
+        ("wan".to_string(), crate::test_zone_ids::TEST_WAN_ZONE_ID),
+    ]);
+    let entry = build_synced_session_entry(&req, &zones, 0).expect("import");
+    // Producer → import leg pinned: the installer receives the emitted stamp
+    // on the PBR tuple.
+    assert_eq!(entry.key, pbr_key());
+    let (want_domain, want_check) = blue_stamp();
+    assert_eq!(entry.decision.install_table_domain, want_domain);
+    assert_eq!(entry.decision.install_table_check, want_check);
     super::commands::handle_upsert_synced(
         &mut sessions,
         SteeringMap::unshared_for_test(-1),
@@ -409,16 +475,15 @@ fn synced_import_reresolves_in_installing_table() {
         0,
     );
     let (decision, _, _) = sessions
-        .entry_with_origin(&key)
+        .entry_with_origin(&pbr_key())
         .expect("imported session must exist");
     assert_eq!(
         decision.resolution.disposition,
         ForwardingDisposition::ForwardCandidate
     );
     assert_eq!(decision.resolution.egress_ifindex, BLUE_IFINDEX);
-    let (domain, check) = blue_stamp();
-    assert_eq!(decision.install_table_domain, domain);
-    assert_eq!(decision.install_table_check, check);
+    assert_eq!(decision.install_table_domain, want_domain);
+    assert_eq!(decision.install_table_check, want_check);
 }
 
 /// C3: owner-RG refresh re-resolves in the installing table.
@@ -1299,6 +1364,7 @@ fn flush_deltas_for_test(
     shared: &SharedMaps,
     peer_queue: &Arc<Mutex<VecDeque<WorkerCommand>>>,
     forwarding: &ForwardingState,
+    event_stream: &Option<crate::event_stream::EventStreamWorkerHandle>,
 ) {
     use crate::afxdp::checksum::DnatTableFds;
     let ident = BindingIdentity {
@@ -1327,7 +1393,7 @@ fn flush_deltas_for_test(
         &recent_session_deltas,
         &peer_worker_commands,
         crate::afxdp::empty_worker_commands_by_id(),
-        &None,
+        event_stream,
         forwarding,
         &mut worker_lossless_wedged,
     );
@@ -1392,7 +1458,7 @@ fn purge_table_readd_skips_all_through_flush() {
     assert!(evicted.is_empty());
     let deltas = sessions.drain_deltas(64);
     assert!(deltas.is_empty(), "no close may be emitted on re-add skip");
-    flush_deltas_for_test(&deltas, &shared, &peer_queue, &rotated);
+    flush_deltas_for_test(&deltas, &shared, &peer_queue, &rotated, &None);
     assert!(shared.sessions.lock().expect("lock").contains_key(&key));
     assert!(peer_queue.lock().expect("lock").is_empty());
 }
@@ -1462,7 +1528,7 @@ fn purge_fence_decline_emits_no_close_through_flush() {
     assert_eq!(evicted, vec![key.clone()]);
     let deltas = sessions.drain_deltas(64);
     assert!(deltas.is_empty(), "decline must emit no close");
-    flush_deltas_for_test(&deltas, &shared, &peer_queue, &rotated);
+    flush_deltas_for_test(&deltas, &shared, &peer_queue, &rotated, &None);
     assert!(
         shared.sessions.lock().expect("lock").contains_key(&key),
         "fenced shared entry must survive the flush"
@@ -1577,7 +1643,7 @@ fn purge_rejected_companion_survives_close_flush() {
             q[0]
         );
     }
-    flush_deltas_for_test(&deltas, &shared, &peer_queue, &rotated);
+    flush_deltas_for_test(&deltas, &shared, &peer_queue, &rotated, &None);
     assert!(
         !shared.sessions.lock().expect("lock").contains_key(&key),
         "removed forward stays removed"
@@ -1595,5 +1661,112 @@ fn purge_rejected_companion_survives_close_flush() {
         q.len(),
         1,
         "drain must add no ordinary replicate for a purge close, got {q:?}"
+    );
+}
+
+/// GPT-3: a table re-added AFTER the walk removed the entry but BEFORE the
+/// drain must not lose the NEW authority. Step retires F1 (close emitted);
+/// blue comes back; traffic reinstalls F1 (local + shared); the drain then
+/// sees a purge close that is stale under CURRENT truth and must drop the
+/// whole delta — shared survives, no HA close is queued, no replicate added.
+#[test]
+fn purge_close_after_table_readd_preserves_new_authority_through_flush() {
+    let channel = RuntimeViewChannel::default();
+    let forwarding = Arc::new(pbr_state());
+    publish_pbr_view(&channel, 7, forwarding.clone());
+    let reader = channel.reader();
+    let mut sessions = SessionTable::new();
+    let key = pbr_key();
+    let decision = stamped_decision(unusable_resolution());
+    let install = |sessions: &mut SessionTable| {
+        assert!(sessions.install_with_protocol_with_origin(
+            key.clone(),
+            decision,
+            pbr_metadata(),
+            SessionOrigin::SyncImport,
+            NOW_NS,
+            PROTO_TCP,
+            0x18,
+        ));
+    };
+    install(&mut sessions);
+    sessions.drain_deltas(64);
+    let shared = shared_maps();
+    let publish = |shared: &SharedMaps| {
+        publish_shared_session(
+            &shared.sessions,
+            &shared.nat_sessions,
+            &shared.forward_wire_sessions,
+            &shared.owner_rg_indexes,
+            &synced_entry_for(&key, decision, pbr_metadata()),
+        );
+    };
+    publish(&shared);
+    let rotated = Arc::new(rotated_blue_gone_state());
+    publish_pbr_view(&channel, 8, rotated.clone());
+    let peer_queue: Arc<Mutex<VecDeque<WorkerCommand>>> =
+        Arc::new(Mutex::new(VecDeque::new()));
+    let peer_cmds = vec![peer_queue.clone()];
+    let mut purge = super::install_table_purge::InstallTablePurge::default();
+    purge.arm(8);
+    let mut evicted = Vec::new();
+    assert_eq!(
+        purge.step(
+            &mut sessions,
+            SteeringMap::unshared_for_test(-1),
+            -1,
+            -1,
+            &shared.sessions,
+            &shared.nat_sessions,
+            &shared.forward_wire_sessions,
+            &shared.owner_rg_indexes,
+            &peer_cmds,
+            &rotated,
+            &reader,
+            8,
+            NOW_NS,
+            0,
+            &mut evicted,
+        ),
+        1
+    );
+    let deltas = sessions.drain_deltas(64);
+    assert_eq!(deltas.len(), 1);
+    assert!(deltas[0].purge_retirement);
+    // Blue comes back; traffic reinstalls before the drain runs.
+    publish_pbr_view(&channel, 9, forwarding.clone());
+    install(&mut sessions);
+    sessions.drain_deltas(64); // drop the reinstall Open; flush only the stale Close
+    publish(&shared);
+    assert!(shared.sessions.lock().expect("lock").contains_key(&key));
+    let (handle, rx) = crate::event_stream::test_worker_handle_connected(
+        8,
+        crate::event_stream::DataplaneEventRateLimitConfig {
+            events_per_second: 0,
+            burst: 0,
+        },
+    );
+    let handle = Some(handle);
+    // Drain-current truth is BLUE (loop-current post-rotation), not rotated.
+    flush_deltas_for_test(&deltas, &shared, &peer_queue, &forwarding, &handle);
+    assert!(
+        shared.sessions.lock().expect("lock").contains_key(&key),
+        "reinstalled shared authority must survive a stale purge close"
+    );
+    assert!(
+        sessions.entry_with_origin(&key).is_some(),
+        "reinstalled local entry must survive"
+    );
+    assert!(
+        std::iter::from_fn(|| rx.try_recv().ok()).count() == 0,
+        "stale purge close must queue no HA/event frame"
+    );
+    let q = peer_queue.lock().expect("lock");
+    assert!(
+        q.iter().all(|c| matches!(
+            c,
+            WorkerCommand::DeleteSyncedIfTableUnknown { .. }
+        )),
+        "drain must add no ordinary replicate for a stale purge close, got {q:?}"
     );
 }

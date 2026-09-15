@@ -743,54 +743,28 @@ fn session_delta_json_and_binary_agree_on_the_install_table_9752() {
     assert_eq!((binary_domain, binary_check), (525_590, 3_318_534_811));
 }
 
-/// #9752: end-to-end import — the stamp the JSON producer emits is the stamp
-/// the importer installs. The request envelope is fixture (tuple/zones, the
-/// established shape); the STAMP ITSELF flows from `session_delta_info`
-/// output through the real `SessionSyncRequest` wire form, so no
-/// hand-stamped import can mask a producer/consumer skew.
+/// #9752: the JSON leg carries the purge-retirement marker exactly as the
+/// binary close frame's trailing byte, so drain-fallback closes honor the
+/// same forward-only retraction. Ordinary closes carry false.
 #[test]
-fn synced_import_installs_the_producer_emitted_install_table_9752() {
-    use crate::protocol::SessionSyncRequest;
-    use crate::server::helpers::build_synced_session_entry;
-
-    let mut delta = delta_with_attribution();
-    delta.decision.install_table_domain = 525_590;
-    delta.decision.install_table_check = 3_318_534_811;
+fn session_delta_json_carries_the_purge_retirement_marker_9752() {
+    let mut delta = delta_with_session_id(1);
+    delta.kind = SessionDeltaKind::Close;
+    delta.purge_retirement = true;
     let info = session_delta_info(&test_binding_identity(), &delta, &zone_names());
-    let produced = serde_json::to_value(info).expect("delta serializes");
-    let domain = produced
-        .get("install_table_domain")
-        .expect("producer emits the domain")
-        .as_u64()
-        .expect("domain is a number");
-    let check = produced
-        .get("install_table_check")
-        .expect("producer emits the check")
-        .as_u64()
-        .expect("check is a number");
-    let req_json = serde_json::json!({
-        "operation": "upsert",
-        "addr_family": 4,
-        "protocol": 6,
-        "src_ip": "10.0.61.102",
-        "dst_ip": "172.16.80.200",
-        "src_port": 40000,
-        "dst_port": 5201,
-        "ingress_zone": "lan",
-        "egress_zone": "wan",
-        "owner_rg_id": 1,
-        "egress_ifindex": 5,
-        "tx_ifindex": 5,
-        "install_table_domain": domain,
-        "install_table_check": check,
-    });
-    let req: SessionSyncRequest =
-        serde_json::from_value(req_json).expect("request parses");
-    let zones = FxHashMap::from_iter([
-        ("lan".to_string(), crate::test_zone_ids::TEST_LAN_ZONE_ID),
-        ("wan".to_string(), crate::test_zone_ids::TEST_WAN_ZONE_ID),
-    ]);
-    let entry = build_synced_session_entry(&req, &zones, 0).expect("import");
-    assert_eq!(entry.decision.install_table_domain, 525_590);
-    assert_eq!(entry.decision.install_table_check, 3_318_534_811);
+    let json = serde_json::to_value(info).expect("delta serializes");
+    assert_eq!(
+        json.get("purge_retirement").and_then(|v| v.as_bool()),
+        Some(true),
+        "a purge-retirement close must set the JSON marker"
+    );
+    let mut ordinary = delta_with_session_id(2);
+    ordinary.kind = SessionDeltaKind::Close;
+    let info = session_delta_info(&test_binding_identity(), &ordinary, &zone_names());
+    let json = serde_json::to_value(info).expect("delta serializes");
+    assert_eq!(
+        json.get("purge_retirement").and_then(|v| v.as_bool()),
+        Some(false),
+        "an ordinary close must not set the marker"
+    );
 }

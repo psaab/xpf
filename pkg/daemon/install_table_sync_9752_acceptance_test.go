@@ -121,3 +121,36 @@ func TestAnOpenDeltaIsSyncedWithItsInstallTable9752(t *testing.T) {
 		t.Fatalf("an open must never be synced as a delete (deletes=%d)", sink.deletes)
 	}
 }
+
+// purgeRetirementSink9752 records the values the walk hands to the delete
+// arms, so the marker bit's travel from delta to sink is observable without
+// a cluster connection.
+type purgeRetirementSink9752 struct {
+	deletesV4 []dataplane.SessionValue
+}
+
+func (s *purgeRetirementSink9752) openV4(_ dataplane.SessionKey, _ dataplane.SessionValue) {
+}
+func (s *purgeRetirementSink9752) openV6(_ dataplane.SessionKeyV6, _ dataplane.SessionValueV6) {
+}
+func (s *purgeRetirementSink9752) deleteV4(_ dataplane.SessionKey, v dataplane.SessionValue) {
+	s.deletesV4 = append(s.deletesV4, v)
+}
+func (s *purgeRetirementSink9752) deleteV6(_ dataplane.SessionKeyV6, _ dataplane.SessionValueV6) {
+}
+
+func TestCloseWalkCarriesThePurgeRetirementBit9752(t *testing.T) {
+	d, ss := primaryForRG1Daemon9752()
+	sink := &purgeRetirementSink9752{}
+	delta := installTableDelta9752(t, "close")
+	delta.PurgeRetirement = true
+	n := d.walkUserspaceSessionDeltas(ss, map[string]uint16{"lan": 1, "wan": 2},
+		[]dpuserspace.SessionDeltaInfo{delta}, sink)
+	if n != 1 || len(sink.deletesV4) != 1 {
+		t.Fatalf("#9752: the close reached %d deletes (n=%d); the marker bit has nowhere to ride", len(sink.deletesV4), n)
+	}
+	if sink.deletesV4[0].LogFlags&dataplane.LogFlagPurgeRetirementOnly == 0 {
+		t.Fatal("#9752: the delete sink received a value without the purge-retirement bit; " +
+			"the cluster delete would go out unmarked and the peer would derive companions")
+	}
+}
