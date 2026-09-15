@@ -1378,9 +1378,13 @@ snap`, and there are two of them — one per acceptance path).
     (#6941). The planner used to skip tagged
     references outright, so a `vlan-tagging` interface whose zone references
     were all tagged (the loss cluster's `reth0`) got no plan, and its
-    interface-level `mtu` was never written. A VLAN child's unit MTU can still be
-    written before its parent's in the same apply, and when it is, a commit that
-    raises both converges on the next commit (#9845). **A unit MTU that is
+    interface-level `mtu` was never written. A VLAN child's unit MTU is still
+    written before its parent's in the same apply, but when the kernel refuses
+    it the write is retried once on the same validated link right after the
+    parent's MTU write when that write moved the host, so a commit raising
+    both converges in that same commit (#9845) — and successful MTU writes
+    join the #4960 host-mutation record.
+    **A unit MTU that is
     DELETED resets the child to its parent's live MTU (#9757)** — the value a
     freshly created VLAN child inherits. Before that the write happened only
     when `unit.MTU > 0`, with no other branch, and nothing else writes a VLAN
