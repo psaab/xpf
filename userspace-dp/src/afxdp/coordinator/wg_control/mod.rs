@@ -391,6 +391,42 @@ pub(super) fn inner_v6_9521() -> Vec<u8> {
     p
 }
 
+/// Seed one consumer incarnation's WireGuard state (#1434 multi-peer,
+/// #7158 activity map) and invalidate roam snapshots (#9644).
+///
+/// The learned-endpoint map is a fresh local seeded from configured
+/// endpoints only; the engine (and its per-peer roam snapshots)
+/// survives control-thread restarts by Arc reuse, so the drain
+/// generation bumps here — otherwise a new incarnation would suppress
+/// on a previous incarnation's adoptions and never re-learn a live
+/// endpoint. Returns `(peer_pubkeys, effective_endpoints,
+/// last_authenticated_rx)`. The bump line is load-bearing: deleting
+/// it breaks `consumer_start_invalidates_snapshots_9644`, which
+/// asserts the generation advances across this call.
+fn init_consumer_state(
+    engine: &crate::afxdp::wg::WgEngine,
+) -> (
+    Vec<[u8; 32]>,
+    std::collections::HashMap<[u8; 32], SocketAddr>,
+    std::collections::HashMap<[u8; 32], u64>,
+) {
+    let peer_pubkeys: Vec<[u8; 32]> = engine.peer_pubkeys();
+    let mut effective_endpoints: std::collections::HashMap<[u8; 32], SocketAddr> =
+        std::collections::HashMap::new();
+    // #7158: last authenticated inbound datagram per peer, for the DNS/roam
+    // precedence rule. Empty means "never heard from", which is exactly the
+    // state in which a resolved address should be adopted immediately.
+    let last_authenticated_rx: std::collections::HashMap<[u8; 32], u64> =
+        std::collections::HashMap::new();
+    for (pk, ep) in engine.peer_endpoints() {
+        if let Some(ep) = ep {
+            effective_endpoints.insert(pk, ep);
+        }
+    }
+    engine.invalidate_roam_snapshots();
+    (peer_pubkeys, effective_endpoints, last_authenticated_rx)
+}
+
 /// The per-tunnel control loop proper, on pre-opened fds so the loop
 /// logic is unit-testable without a real TUN device (the production
 /// caller binds the socket and attaches the persistent wgN TUN above).
@@ -422,17 +458,8 @@ fn run_wg_control_loop_with_kernel_path(
     // attempt window. Egress TUN packets are LPM-routed to the peer that
     // owns the inner destination's AllowedIPs (cryptokey routing); each
     // peer drives its own keepalive/rekey timers.
-    let peer_pubkeys: Vec<[u8; 32]> = engine.peer_pubkeys();
-    let mut effective_endpoints: HashMap<[u8; 32], SocketAddr> = HashMap::new();
-    // #7158: last authenticated inbound datagram per peer, for the DNS/roam
-    // precedence rule. Empty means "never heard from", which is exactly the
-    // state in which a resolved address should be adopted immediately.
-    let mut last_authenticated_rx: HashMap<[u8; 32], u64> = HashMap::new();
-    for (pk, ep) in engine.peer_endpoints() {
-        if let Some(ep) = ep {
-            effective_endpoints.insert(pk, ep);
-        }
-    }
+    let (peer_pubkeys, mut effective_endpoints, mut last_authenticated_rx) =
+        init_consumer_state(engine);
     // 64 KiB scratch for both directions (max IP packet; WG records are
     // smaller). Single allocation at thread start — no per-packet alloc.
     let mut sock_buf = vec![0u8; 65_535];
@@ -710,10 +737,7 @@ fn run_wg_control_loop_with_kernel_path(
                 // roam and a socket-observed roam are indistinguishable
                 // afterwards — one representation of "where this peer is",
                 // not two that can disagree.
-                if let Some(observed) = engine.take_worker_observed_endpoint(pk) {
-                    effective_endpoints.insert(*pk, canonicalize_endpoint(observed));
-                    last_authenticated_rx.insert(*pk, monotonic_nanos());
-                }
+                adopt_worker_observation(engine, pk, &mut effective_endpoints, &mut last_authenticated_rx, now);
                 let effective_endpoint = effective_endpoints.get(pk).copied();
                 let endpoint_known = effective_endpoint.is_some();
                 let actions = engine.timer_pass_for_peer(pk, now, endpoint_known);
@@ -777,6 +801,32 @@ fn run_wg_control_loop_with_kernel_path(
                 }
             }
         }
+    }
+}
+
+/// #8274 step 3, extracted for #9644 testability: adopt the endpoint a
+/// worker last observed for `pk` (if any) into the effective-endpoint
+/// map with the socket path's canonicalisation, and stamp the
+/// authenticated-activity anchor the DNS roam-hold (#7158) consumes
+/// at the caller-supplied `now_ns` (the loop's own clock, so tests
+/// inject a controlled time instead of racing `CLOCK_MONOTONIC`).
+/// Returns true when a roam was adopted. The stamp line is
+/// load-bearing: deleting it lets a live roamed endpoint expire out
+/// of the hold, which `worker_rereport_refreshes_activity_9644`
+/// pins (its refresh-deleted variant adopts DNS instead).
+fn adopt_worker_observation(
+    engine: &crate::afxdp::wg::WgEngine,
+    pk: &[u8; 32],
+    effective_endpoints: &mut std::collections::HashMap<[u8; 32], SocketAddr>,
+    last_authenticated_rx: &mut std::collections::HashMap<[u8; 32], u64>,
+    now_ns: u64,
+) -> bool {
+    if let Some(observed) = engine.take_worker_observed_endpoint(pk) {
+        effective_endpoints.insert(*pk, canonicalize_endpoint(observed));
+        last_authenticated_rx.insert(*pk, now_ns);
+        true
+    } else {
+        false
     }
 }
 
@@ -934,6 +984,158 @@ mod endpoint_adoption_7158_tests {
             "after a full attempt window of silence the learned address has \
              already failed to produce a handshake; DNS must be allowed to \
              recover the peer"
+        );
+    }
+
+    /// #9644: the worker→drain→refresh→hold causal chain at component
+    /// level, on ONE controlled clock. A worker report adopted through
+    /// the PRODUCTION helper refreshes the activity anchor to the
+    /// injected `now`, so DNS keeps holding the live roamed endpoint;
+    /// continued traffic re-reports (post-take epoch bump) and
+    /// re-refreshes, extending the hold indefinitely. Mixing the real
+    /// `CLOCK_MONOTONIC` stamp with fixed evaluation times would make
+    /// this cell host-uptime-dependent (false pass on long-uptime
+    /// hosts via saturating arithmetic, false fail on fresh boots),
+    /// so the helper takes the loop's own clock and every assertion
+    /// below shares one `now`.
+    ///
+    /// FAIL-ON-REVERT: delete the `last_authenticated_rx` stamp inside
+    /// `adopt_worker_observation` — the actual production refresh —
+    /// and the exact-stamp assertion below fails. The negative control
+    /// retains an EXPIRED prior stamp (not an empty map): an empty map
+    /// proves presence matters, while the expired stamp proves refresh
+    /// matters — without a fresh adopt the hold genuinely expires.
+    #[test]
+    fn worker_rereport_refreshes_activity_so_dns_hold_survives_9644() {
+        let allowed: Vec<ipnet::IpNet> = vec!["10.123.0.0/24".parse().unwrap()];
+        let (_init, resp, init_pub, _resp_pub) =
+            crate::afxdp::wg::tests::established_pair(allowed.clone(), allowed);
+        let x = addr("198.51.100.77:33445");
+        let y = addr("203.0.113.9:51820");
+        let resolver = WgEndpointResolver::with_resolved_for_test(&[(init_pub, y)]);
+        let mut effective: HashMap<[u8; 32], SocketAddr> = HashMap::new();
+        let mut heard: HashMap<[u8; 32], u64> = HashMap::new();
+        // One controlled clock for the whole cell: immune to host uptime.
+        let now = 10 * WG_ENDPOINT_ROAM_HOLD_NS;
+
+        // Worker observes X on an authenticated record; the control
+        // pass adopts it through the production helper (take + stamp).
+        assert!(resp.note_worker_observed_endpoint(&init_pub, x));
+        assert!(
+            adopt_worker_observation(&resp, &init_pub, &mut effective, &mut heard, now),
+            "a queued worker report must adopt"
+        );
+        assert_eq!(effective.get(&init_pub), Some(&x));
+        assert_eq!(
+            heard.get(&init_pub),
+            Some(&now),
+            "adopt must stamp EXACTLY the injected now — a real-clock \
+             stamp or a deleted refresh breaks this cell"
+        );
+        // DNS offers Y while the peer is live: the hold preserves X.
+        apply_resolved_endpoints(Some(&resolver), &[init_pub], &mut effective, &heard, now, "wg0");
+        assert_eq!(
+            effective.get(&init_pub),
+            Some(&x),
+            "DNS must not move a peer whose worker reports keep refreshing it"
+        );
+        // Next pass under continued traffic re-reports (post-take
+        // generation bump) and re-refreshes at a later clock.
+        let now2 = now + WG_ENDPOINT_ROAM_HOLD_NS - 1;
+        assert!(
+            resp.note_worker_observed_endpoint(&init_pub, x),
+            "post-take the generation bumped past the stamped snapshot: must re-report through the slow path"
+        );
+        assert!(adopt_worker_observation(&resp, &init_pub, &mut effective, &mut heard, now2));
+        assert_eq!(heard.get(&init_pub), Some(&now2));
+        apply_resolved_endpoints(Some(&resolver), &[init_pub], &mut effective, &heard, now2, "wg0");
+        assert_eq!(
+            effective.get(&init_pub),
+            Some(&x),
+            "continuous worker traffic must extend the hold indefinitely"
+        );
+        // Negative control: an EXPIRED prior stamp with no fresh adopt.
+        // The hold has genuinely lapsed (now2 - (now2 - HOLD) == HOLD,
+        // not < HOLD), so DNS must win — proving refresh, not mere
+        // presence, is what the stamp buys.
+        let mut effective_old: HashMap<[u8; 32], SocketAddr> = HashMap::new();
+        effective_old.insert(init_pub, x);
+        let mut heard_old: HashMap<[u8; 32], u64> = HashMap::new();
+        heard_old.insert(init_pub, now2 - WG_ENDPOINT_ROAM_HOLD_NS);
+        assert!(
+            !adopt_worker_observation(&resp, &init_pub, &mut effective_old, &mut heard_old, now2),
+            "nothing queued: no adopt, no refresh"
+        );
+        apply_resolved_endpoints(
+            Some(&resolver),
+            &[init_pub],
+            &mut effective_old,
+            &heard_old,
+            now2,
+            "wg0",
+        );
+        assert_eq!(
+            effective_old.get(&init_pub),
+            Some(&y),
+            "with only an expired prior stamp the hold lapses and DNS \
+             wins — this is what deleting the production refresh would \
+             do to live roamed peers"
+        );
+    }
+
+    /// #9644: consumer-start coverage — `init_consumer_state` seeds the
+    /// maps AND invalidates the drain generations in one call. The
+    /// generation assertion is the load-bearing one: with the
+    /// invalidate line deleted from the helper the epoch does not
+    /// move and this fails, while the maps seed identically. The
+    /// loop cannot drop the call without dropping its seeded maps
+    /// (it consumes all three return values), so helper coverage is
+    /// call-site coverage.
+    #[test]
+    fn consumer_start_invalidates_snapshots_9644() {
+        let allowed: Vec<ipnet::IpNet> = vec!["10.123.0.0/24".parse().unwrap()];
+        let (_init, resp, init_pub, _resp_pub) =
+            crate::afxdp::wg::tests::established_pair(allowed.clone(), allowed);
+        let x = addr("198.51.100.77:33445");
+        // Reach a fresh snapshot with a queued report: note, drain,
+        // re-report. The take already bumped once; the snapshot is
+        // current again.
+        assert!(resp.note_worker_observed_endpoint(&init_pub, x));
+        assert_eq!(resp.take_worker_observed_endpoint(&init_pub), Some(x));
+        assert!(resp.note_worker_observed_endpoint(&init_pub, x));
+        let (_, live_before, snap_before) = resp
+            .roam_snapshot_epochs_for_test(&init_pub)
+            .expect("peer known");
+        assert_eq!(
+            snap_before, live_before,
+            "fixture precondition: snapshot is fresh before consumer start"
+        );
+        // The actual consumer-start call.
+        let (pubkeys, effective, heard) = init_consumer_state(&resp);
+        let (_, live_after, _) = resp
+            .roam_snapshot_epochs_for_test(&init_pub)
+            .expect("peer known");
+        assert_eq!(
+            live_after,
+            live_before + 1,
+            "consumer start must invalidate (deleting the call keeps the epoch)"
+        );
+        assert!(pubkeys.contains(&init_pub), "peer set seeded");
+        assert!(
+            effective.get(&init_pub).is_none(),
+            "no configured endpoints in this fixture: learned map starts empty"
+        );
+        assert!(heard.is_empty(), "activity map starts unheard");
+        // The queued report survives for the fresh consumer: no
+        // duplicate, then adoption.
+        assert!(
+            !resp.note_worker_observed_endpoint(&init_pub, x),
+            "the queued report stays queued across consumer start"
+        );
+        assert_eq!(
+            resp.take_worker_observed_endpoint(&init_pub),
+            Some(x),
+            "the fresh consumer adopts the queued roam"
         );
     }
 
