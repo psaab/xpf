@@ -53,7 +53,15 @@ type InterfaceConfig struct {
 	// is only for interfaces authored WITHOUT units; without this bit an
 	// interface whose final unit was quarantined would activate a fallback
 	// endpoint the operator never configured.
-	AuthoredUnits bool
+	//
+	// `json:"-"` IS LOAD-BEARING, per the HasPreference precedent
+	// (types_routing.go): ConfigSnapshot embeds the whole typed Config, so an
+	// exported field is on the Go→Rust wire and moves the #9821 golden. This
+	// bit is compiler-internal — the emitter's fallback decision is already
+	// encoded in the emitted endpoint rows, and no Rust consumer reads the
+	// bit itself. Nothing is lost by not persisting it: the config DB stores
+	// the TREE, and compileInterfaces recomputes the bit on every load.
+	AuthoredUnits bool `json:"-"`
 	// #4308 (fable-review-167 I-3): parity knobs that are typed + compiled
 	// so they stop silently vanishing, but are ACCEPTED-ONLY today (a
 	// commit-time advisory warns they are not enforced). native-vlan-id
