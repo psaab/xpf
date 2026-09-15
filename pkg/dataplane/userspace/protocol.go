@@ -241,7 +241,22 @@ const (
 	// is an abort sentinel, so the tail is skipped, the commit fails, and
 	// the helper is disarmed (fail-closed, deliberate) while the retained
 	// kernel table stands. Exact equality refuses both pairings.
-ProtocolVersion = 18
+	//
+	// v19 (issue 9874): `SourceNATRuleSnapshot.LenientMatchDropped`, the
+	// fail-closed poison for a rule whose AUTHORED `match` constrains
+	// nothing. The #8430 strict gate rejects such a rule at commit, but the
+	// tolerant load / peer-sync path downgrades to a warning and used to
+	// ship it with an empty match set — which the helper reads as
+	// UNCONSTRAINED (`source_constrained = false` → match-any), installing
+	// a catch-all translator for every flow in scope. BUMPED, by the test
+	// the v10/v11 notes apply: an old helper ignores the marker and keeps
+	// installing the catch-all, and that IS the defect the field closes.
+	// Exact equality refuses the mismatched pairing instead of degrading
+	// silently, in both directions. (The typed-config
+	// `NATRule.LenientMatchDropped` diagnostic that feeds it is `json:"-"`
+	// and rides along invisibly — the #9246 STANDS arm, folded into this
+	// bump rather than a separate entry.)
+	ProtocolVersion = 19
 
 	// MinProtocolMultiZoneScopedPolicy is the FIRST snapshot protocol version
 	// that can represent a multi-zone scoped global policy — the plural

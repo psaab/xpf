@@ -253,6 +253,12 @@ func compileNATDestination(node *Node, sec *SecurityConfig) error {
 					rule.thenAuthored = c
 				}
 			}
+			// #9874: poison a rule whose authored `match` constrains nothing, as
+			// in compileNATSource. The destination builder already publishes no
+			// entry for such a rule, so this half only makes the skip loud (and
+			// keeps the show surfaces honest via
+			// DestinationNATRuleExcludedReason).
+			rule.LenientMatchDropped = rule.matchAuthored && !natMatchIsConstrained(rule.Match)
 			rules = append(rules, rule)
 		}
 

@@ -103,7 +103,11 @@ const preSecureTunnelProtocolVersion = 4
 // wire change: a pre-narrowing helper funnels every reinject through
 // `xpf-usp0`, which a v18 kernel exempts). Nothing about secure_tunnel
 // changed, so MinProtocolSecureTunnelRefusal (7) is untouched again.
-const secureTunnelSnapshotProtocolVersion = 18
+//
+// Issue 9874 moves it 18 -> 19, for `SourceNATRuleSnapshot.lenient_match_dropped`,
+// the fail-closed poison for an authored-empty NAT match. Nothing about
+// secure_tunnel changed, so MinProtocolSecureTunnelRefusal (7) is untouched again.
+const secureTunnelSnapshotProtocolVersion = 19
 
 // preV5HelperAcceptsSnapshot models the exact-equality version gate a pre-v5
 // helper applies before touching any dataplane state

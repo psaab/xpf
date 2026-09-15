@@ -108,18 +108,26 @@ func RenderSourceRuleDetail(ctx context.Context, w io.Writer, cfg *config.Config
 				fmt.Fprintf(w, "      IP protocol:           %s\n", strings.Join(protos, " "))
 			}
 			fmt.Fprintf(w, "    Action:                  %s\n", action)
-			// #6534: a pool-mode rule whose pool the builder marks unusable
-			// ships PoolUnusable=true and the Rust source-NAT path declines to
-			// translate — but every field above rendered from config as if the
-			// rule were armed. Interface-mode NAT has no pool, so gate on a
-			// non-empty pool name exactly as the builder does.
-			if rule.Then.PoolName != "" {
-				noteNotInstalled(w, config.SourceNATDisarmReasonText(
-					config.SourceNATPoolDisarmedReason(
-						cfg.Security.NAT.SourcePools[rule.Then.PoolName],
-						rule.Then.PoolName, overBudgetPools)))
+			// #9874: a rule whose authored match constrains nothing claims
+			// in-scope flows and the dataplane drops them. That is the operative
+			// cause, so it is printed INSTEAD OF the notes below — see
+			// noteLenientMatchDropped for why those would mislead beside it.
+			if rule.LenientMatchDropped {
+				noteLenientMatchDropped(w)
+			} else {
+				// #6534: a pool-mode rule whose pool the builder marks unusable
+				// ships PoolUnusable=true and the Rust source-NAT path declines to
+				// translate — but every field above rendered from config as if the
+				// rule were armed. Interface-mode NAT has no pool, so gate on a
+				// non-empty pool name exactly as the builder does.
+				if rule.Then.PoolName != "" {
+					noteNotInstalled(w, config.SourceNATDisarmReasonText(
+						config.SourceNATPoolDisarmedReason(
+							cfg.Security.NAT.SourcePools[rule.Then.PoolName],
+							rule.Then.PoolName, overBudgetPools)))
+				}
+				noteLenientTerminalAction(w, cfg, "source", rs.Name, rule.Name)
 			}
-			noteLenientTerminalAction(w, cfg, "source", rs.Name, rule.Name)
 
 			if rule.Then.PoolName != "" && cfg.Security.NAT.SourcePools != nil {
 				if pool, ok := cfg.Security.NAT.SourcePools[rule.Then.PoolName]; ok {

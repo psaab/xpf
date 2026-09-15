@@ -3767,7 +3767,7 @@ type sourceNATAggregatePoolCharge struct {
 //
 // SCOPE — the charged set is exactly the set `parse_source_nat_rules`
 // (userspace-dp/src/nat/source.rs) expands into a PortAllocator, which means
-// TWO exclusions, each one a pool that reaches the dataplane and builds
+// THREE exclusions, each one a pool that reaches the dataplane and builds
 // nothing:
 //
 //   - UNREFERENCED. No pool-mode rule names it, so it never reaches the
@@ -3778,8 +3778,16 @@ type sourceNATAggregatePoolCharge struct {
 //     rejected port range — so the snapshot ships it poisoned and the Rust
 //     parse loop, which gates its PendingPoolAllocator on
 //     `pool_failure.is_none()`, never charges it.
+//   - POISONED-ONLY (#9874). Every referencing rule carries
+//     LenientMatchDropped — an authored-but-empty `match` the tolerant path
+//     admitted with a warning — so the snapshot ships each rule with the
+//     marker and the Rust parse loop, which gates its PendingPoolAllocator
+//     on `!lenient_match_dropped`, never charges the pool. A pool ALSO
+//     referenced by a healthy rule IS charged, at its first healthy
+//     reference. No-op on the strict path: the #8430 gate runs earlier in
+//     runUniformGates and rejects such a config first.
 //
-// Charging either would make this walk refuse a HEALTHY pool that
+// Charging any of the three would make this walk refuse a HEALTHY pool that
 // resolve_pool_allocators admits — over-rejection, landing on the tolerant
 // recovery path (#1960 no-brick) where a peer-sync or lenient load is how an
 // operator gets back to a working state.
@@ -3837,6 +3845,19 @@ func sourceNATAggregateReferencedCharges(cfg *Config) []sourceNATAggregatePoolCh
 			}
 			name := rule.Then.PoolName
 			if seen[name] {
+				continue
+			}
+			// #9874: a pool referenced ONLY by poisoned rules builds no
+			// allocator in Rust — the parse loop gates PendingPoolAllocator
+			// on !lenient_match_dropped — so charging it here would refuse
+			// a healthy pool the dataplane admits (the #6812 F1
+			// over-reject in a new spelling). Only a HEALTHY reference
+			// charges, and the pool is charged at its first healthy
+			// reference: the poisoned rule ships but carries no pending,
+			// so the dataplane charges the shared key where the first
+			// pending rule for it is emitted. Do NOT mark seen — a later
+			// healthy reference for this pool still charges.
+			if rule.LenientMatchDropped {
 				continue
 			}
 			seen[name] = true

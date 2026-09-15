@@ -54,6 +54,15 @@ func buildSourceNATSnapshotsWithFeeds(cfg *config.Config, natCounterIDs map[stri
 			if rule == nil {
 				continue
 			}
+			// #9874: the rule authored a `match` that constrains nothing. The
+			// snapshot still ships it — with the LenientMatchDropped marker
+			// the Rust table fails CLOSED (drop + count) — so say so loudly:
+			// without the marker this rule would install as an unconstrained
+			// catch-all translator.
+			if rule.LenientMatchDropped {
+				slog.Warn("userspace snapshot: source NAT rule authored an empty match; shipping fail-closed",
+					"ruleset", rs.Name, "rule", rule.Name)
+			}
 			sourceAddrs := append([]string(nil), rule.Match.SourceAddresses...)
 			if len(sourceAddrs) == 0 && rule.Match.SourceAddress != "" {
 				sourceAddrs = append(sourceAddrs, rule.Match.SourceAddress)
@@ -235,6 +244,8 @@ func buildSourceNATSnapshotsWithFeeds(cfg *config.Config, natCounterIDs map[stri
 				DeterministicHostBase:            detHostBase,
 				DeterministicHostCount:           detHostCount,
 				CounterID:                        natCounterID(natCounterIDs, dataplane.NATCounterTypeSource, rs.Name, rule.Name),
+				// #9874: the fail-closed poison for an empty authored match.
+				LenientMatchDropped: rule.LenientMatchDropped,
 			})
 		}
 	}

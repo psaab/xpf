@@ -151,6 +151,32 @@ func noteLenientTerminalAction(w io.Writer, cfg *config.Config, kind, ruleSet, r
 	}
 }
 
+// noteLenientMatchDropped annotates a source-NAT rule the TOLERANT config path
+// admitted despite its authored `match` constraining nothing (#9874).
+//
+// It reads rule.LenientMatchDropped directly — the same marker the snapshot
+// builder ships and the Rust table fails closed on — so the annotation and the
+// dataplane disposition cannot disagree. The rule IS installed (it occupies a
+// table slot), which is why this is NOT a noteNotInstalled: it claims in-scope
+// flows and the dataplane DROPS them (drop + count) instead of translating,
+// and rule evaluation STOPS there rather than falling through. Saying "not
+// installed" would tell the operator traffic falls through to later rules,
+// which is exactly wrong. The #7640 ADMITTED shape fits instead: the rule
+// survives only on the tolerant load / peer-sync / rollback paths, and a
+// commit would reject it.
+//
+// Operative-cause precedence: when this marker is set it is printed INSTEAD
+// OF the pool-disarm and tolerant-terminal-action notes, not beside them.
+// The poison check runs before action handling in the Rust match loop, so a
+// marked rule drops no matter what its pool or action arity is — and the
+// terminal-action note's "falls through to any later broader rule" would be
+// false beside it. Callers gate those notes on !LenientMatchDropped.
+func noteLenientMatchDropped(w io.Writer) {
+	fmt.Fprintf(w, "    Status:                  ADMITTED BY TOLERANT LOAD — "+
+		"a commit would REJECT this rule: the match block constrains nothing, "+
+		"so matching traffic is dropped and rule evaluation stops here (#9874)\n")
+}
+
 // noteNotInstalledStatic is noteNotInstalled at the static-NAT renderers' wider
 // label column ("Match destination-address:" / "Then static-nat prefix:"), so
 // the annotation lines up with the fields it is qualifying instead of hanging

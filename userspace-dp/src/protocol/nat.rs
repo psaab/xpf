@@ -152,6 +152,24 @@ pub(crate) struct SourceNATRuleSnapshot {
     /// outside the deterministic range and the allocation fails closed.
     #[serde(rename = "deterministic_host_count", default)]
     pub deterministic_host_count: u32,
+    /// #9874: the fail-closed poison for a rule whose AUTHORED `match`
+    /// constrains nothing. The #8430 strict gate rejects such a rule at commit;
+    /// the tolerant load / peer-sync path downgrades to a warning and ships it
+    /// with this marker. An empty match set reads as UNCONSTRAINED
+    /// (`source_constrained = false` → match-any), so without the marker the
+    /// rule would install as a catch-all translator. The source-NAT table fails
+    /// a marked rule CLOSED (an in-scope flow gets `Unavailable`, drop +
+    /// count, never a translation — including for `off` rules). A scope-only
+    /// rule (no `match` at all) leaves this false and still installs
+    /// unconstrained, which is the legitimate catch-all.
+    ///
+    /// Additive wire field (#1961): an older control plane omits it and
+    /// `#[serde(default)]` leaves it false — but that pairing keeps the
+    /// pre-#9874 catch-all, which is the defect rather than an acceptable
+    /// degradation, so this field rides the v19 protocol bump and the
+    /// exact-equality gate refuses the mismatched pairing instead.
+    #[serde(rename = "lenient_match_dropped", default)]
+    pub lenient_match_dropped: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]

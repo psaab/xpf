@@ -136,8 +136,14 @@ use super::snapshot::{ConfigSnapshot, FabricSnapshot, NeighborSnapshot, Userspac
 // mismatch is refused by the pinned-map pre-flight (fail-closed deploy per
 // §5e), independently of this JSON gate. See protocol.go's v17 note. The
 // #8892 digest moves with it (the plural is a real, transmitted field).
+// v19 (#9874): `SourceNATRuleSnapshot.lenient_match_dropped`, the fail-closed
+// poison for a rule whose authored match constrains nothing. An old helper
+// ignores it and keeps installing the catch-all translator, which is the
+// defect the field closes. See protocol.go's v19 note. The #8892 digest moves
+// with it (a real, transmitted field, plus the `json:"-"` typed diagnostic
+// that feeds it).
 // Keep the line below in this exact form: the Go lockstep guard parses it.
-pub(crate) const CONFIG_SNAPSHOT_PROTOCOL_VERSION: i32 = 18;
+pub(crate) const CONFIG_SNAPSHOT_PROTOCOL_VERSION: i32 = 19;
 
 /// #9520: the machine-readable prefix of the refusal `apply` sends when a
 /// snapshot reuses the installed generation with a different content digest.
