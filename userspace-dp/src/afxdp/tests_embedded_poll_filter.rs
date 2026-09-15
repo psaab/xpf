@@ -6128,3 +6128,393 @@ fn flowless_fragment_evaluates_pbr_exactly_once_9528() {
         "the flowless path must evaluate the PBR term exactly once"
     );
 }
+
+/// #9901 (F-077) floor fixture: an outer ICMPv4 Time Exceeded carrying a TCP
+/// quote of the installed SNAT session, plus the installed session itself.
+/// Returns the frame (full RFC-792 quote — callers shorten it), the outer
+/// meta, and the match context. Mirrors
+/// `embedded_icmp_nat_match_translates_redirect_v4`.
+fn n9901_floor_fixture() -> (
+    Vec<u8>,
+    UserspaceDpMeta,
+    SessionTable,
+    ForwardingState,
+    Arc<ShardedNeighborMap>,
+    Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+) {
+    let router_ip = Ipv4Addr::new(10, 0, 0, 1);
+    let snat_ip = Ipv4Addr::new(172, 16, 80, 8);
+    let client_ip = Ipv4Addr::new(10, 0, 61, 102);
+    let server_ip = Ipv4Addr::new(1, 1, 1, 1);
+    let snat_port: u16 = 40000;
+    let client_port: u16 = 12345;
+    let frame = build_icmp_te_frame_v4(router_ip, snat_ip, server_ip, snat_port, 80, PROTO_TCP);
+    let meta = UserspaceDpMeta {
+        magic: USERSPACE_META_MAGIC,
+        version: USERSPACE_META_VERSION,
+        length: std::mem::size_of::<UserspaceDpMeta>() as u16,
+        l3_offset: 14,
+        l4_offset: 34,
+        addr_family: libc::AF_INET as u8,
+        protocol: PROTO_ICMP,
+        ..UserspaceDpMeta::default()
+    };
+    let mut sessions = SessionTable::new();
+    let forwarding = build_forwarding_state(&nat_snapshot());
+    let neighbors = Arc::new(ShardedNeighborMap::new());
+    learn_dynamic_neighbor(
+        &forwarding,
+        &neighbors,
+        24,
+        0,
+        IpAddr::V4(client_ip),
+        [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff],
+    );
+    let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
+    assert!(sessions.install_with_protocol(
+        SessionKey {
+            addr_family: libc::AF_INET as u8,
+            protocol: PROTO_TCP,
+            src_ip: IpAddr::V4(client_ip),
+            dst_ip: IpAddr::V4(server_ip),
+            src_port: client_port,
+            dst_port: 80,
+            discriminator: Default::default(),
+            routing_domain: 0,
+        },
+        SessionDecision {
+            resolution: ForwardingResolution {
+                disposition: ForwardingDisposition::ForwardCandidate,
+                local_ifindex: 0,
+                egress_ifindex: 24,
+                tx_ifindex: 24,
+                tunnel_endpoint_id: 0,
+                next_hop: Some(IpAddr::V4(client_ip)),
+                neighbor_mac: Some([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]),
+                src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x50, 0x08]),
+                tx_vlan_id: 0,
+            },
+            nat: NatDecision {
+                rewrite_src: Some(IpAddr::V4(snat_ip)),
+                rewrite_dst: None,
+                rewrite_src_port: Some(snat_port),
+                rewrite_dst_port: None,
+                nat64: false,
+                nptv6: false,
+            },
+        },
+        SessionMetadata {
+            ingress_zone: TEST_LAN_ZONE_ID,
+            egress_zone: TEST_WAN_ZONE_ID,
+            ingress_ifindex: 0,
+            ingress_vlan_id: 0,
+            owner_rg_id: 0,
+            fabric_ingress: false,
+            is_reverse: false,
+            nat64_reverse: None,
+            log_session_init: false,
+            log_session_close: false,
+            policy_id: 0,
+            inactivity_timeout_ns: None,
+            policy_counter_idx: 0,
+            policy_counter: None,
+        },
+        1_000_000,
+        PROTO_TCP,
+        0,
+    ));
+    (
+        frame,
+        meta,
+        sessions,
+        forwarding,
+        neighbors,
+        shared_sessions,
+        shared_nat_sessions,
+        shared_forward_wire_sessions,
+    )
+}
+
+/// #9901 (F-077) CONTROL: the unmodified floor fixture (full TCP quote)
+/// matches. Without this, the refusal cell below could pass vacuously on a
+/// fixture that never matched.
+#[test]
+fn full_tcp_quote_in_atomic_outer_matches_9901() {
+    let (frame, meta, mut sessions, forwarding, neighbors, shared, shared_nat, shared_wire) =
+        n9901_floor_fixture();
+    let matched = try_embedded_icmp_nat_match_from_frame(
+        &frame,
+        meta,
+        &mut sessions,
+        &forwarding,
+        &neighbors,
+        &shared,
+        &shared_nat,
+        &shared_wire,
+        1_000_000,
+    );
+    assert!(
+        matched.is_some(),
+        "a full TCP quote must match its session (fixture validity)"
+    );
+}
+
+/// #9901 (F-077) HEADLINE: a 4-byte TCP quote (IP header + 4 L4 bytes
+/// declared) inside an ATOMIC outer is REFUSED — 8 quoted L4 bytes are
+/// required. Pre-fix the 4 port bytes parsed and the error matched a live
+/// session, so a minimal forged quote could steer an ICMP error onto any
+/// session whose 4-tuple the quoter guessed. RED pre-fix (matched), green
+/// post-fix (refused).
+#[test]
+fn short_tcp_quote_in_atomic_outer_refused_9901() {
+    let (mut frame, meta, mut sessions, forwarding, neighbors, shared, shared_nat, shared_wire) =
+        n9901_floor_fixture();
+    // Embedded IP starts at l4+8 = 42; shorten its DECLARED length to 24
+    // (20-byte header + 4 L4 bytes). The captured bytes stay long — this is
+    // the declared-short shape, which pre-fix parsed (4 ports in-declared).
+    frame[44..46].copy_from_slice(&24u16.to_be_bytes());
+    rewrite_outer_icmpv4_type(&mut frame, 34, 11);
+    let matched = try_embedded_icmp_nat_match_from_frame(
+        &frame,
+        meta,
+        &mut sessions,
+        &forwarding,
+        &neighbors,
+        &shared,
+        &shared_nat,
+        &shared_wire,
+        1_000_000,
+    );
+    assert!(
+        matched.is_none(),
+        "a 4-byte TCP quote in an atomic outer must be refused (8-byte floor)"
+    );
+}
+
+/// #9901 (F-077): the floor applies ONLY to atomic outers. The same 4-byte
+/// TCP quote arriving with the outer MF set (a fragmented outer, whose first
+/// fragment legitimately carries a short quote) keeps pre-fix adequacy and
+/// still matches. Green before and after — it pins the gating, not the floor.
+#[test]
+fn short_tcp_quote_in_fragmented_outer_kept_9901() {
+    let (mut frame, meta, mut sessions, forwarding, neighbors, shared, shared_nat, shared_wire) =
+        n9901_floor_fixture();
+    frame[44..46].copy_from_slice(&24u16.to_be_bytes());
+    let outer_frag = u16::from_be_bytes([frame[20], frame[21]]) | 0x2000;
+    frame[20..22].copy_from_slice(&outer_frag.to_be_bytes());
+    rewrite_outer_icmpv4_type(&mut frame, 34, 11);
+    let matched = try_embedded_icmp_nat_match_from_frame(
+        &frame,
+        meta,
+        &mut sessions,
+        &forwarding,
+        &neighbors,
+        &shared,
+        &shared_nat,
+        &shared_wire,
+        1_000_000,
+    );
+    assert!(
+        matched.is_some(),
+        "a short quote in a FRAGMENTED outer keeps pre-fix adequacy"
+    );
+}
+
+/// #9901 (F-077) second-session installer for the GCRA match cells: the same
+/// SNAT shape as `n9901_floor_fixture` with a distinct client port AND
+/// external port, so the session has its own reverse index bucket and its
+/// own error budget. The caller builds the quoting frame with the same
+/// `snat_port`.
+fn n9901_install_snat_session(sessions: &mut SessionTable, client_port: u16, snat_port: u16) {
+    let snat_ip = Ipv4Addr::new(172, 16, 80, 8);
+    let client_ip = Ipv4Addr::new(10, 0, 61, 102);
+    let server_ip = Ipv4Addr::new(1, 1, 1, 1);
+    assert!(sessions.install_with_protocol(
+        SessionKey {
+            addr_family: libc::AF_INET as u8,
+            protocol: PROTO_TCP,
+            src_ip: IpAddr::V4(client_ip),
+            dst_ip: IpAddr::V4(server_ip),
+            src_port: client_port,
+            dst_port: 80,
+            discriminator: Default::default(),
+            routing_domain: 0,
+        },
+        SessionDecision {
+            resolution: ForwardingResolution {
+                disposition: ForwardingDisposition::ForwardCandidate,
+                local_ifindex: 0,
+                egress_ifindex: 24,
+                tx_ifindex: 24,
+                tunnel_endpoint_id: 0,
+                next_hop: Some(IpAddr::V4(client_ip)),
+                neighbor_mac: Some([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]),
+                src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x50, 0x08]),
+                tx_vlan_id: 0,
+            },
+            nat: NatDecision {
+                rewrite_src: Some(IpAddr::V4(snat_ip)),
+                rewrite_dst: None,
+                rewrite_src_port: Some(snat_port),
+                rewrite_dst_port: None,
+                nat64: false,
+                nptv6: false,
+            },
+        },
+        SessionMetadata {
+            ingress_zone: TEST_LAN_ZONE_ID,
+            egress_zone: TEST_WAN_ZONE_ID,
+            ingress_ifindex: 0,
+            ingress_vlan_id: 0,
+            owner_rg_id: 0,
+            fabric_ingress: false,
+            is_reverse: false,
+            nat64_reverse: None,
+            log_session_init: false,
+            log_session_close: false,
+            policy_id: 0,
+            inactivity_timeout_ns: None,
+            policy_counter_idx: 0,
+            policy_counter: None,
+        },
+        1_000_000,
+        PROTO_TCP,
+        0,
+    ));
+}
+
+/// #9901 (F-077) PTB-pair: two DIFFERENT error types (Time Exceeded + v4
+/// fragmentation-needed, the PTB shape) quoting the SAME session at the
+/// SAME instant are BOTH delivered. This is the match-level proof the
+/// budget is 64/64 and NOT a 1s min-interval (which would deliver exactly
+/// one of the pair). The v6 PTB (type 2) shares the NAT-match gate via
+/// `is_icmp_error`, so the v4 pair pins the shape for both.
+#[test]
+fn ptb_pair_same_session_both_delivered_9901() {
+    let (frame_te, meta, mut sessions, forwarding, neighbors, shared, shared_nat, shared_wire) =
+        n9901_floor_fixture();
+    // Fragmentation-needed twin: same quote, outer type 3 / code 4 (the
+    // match reads the quote at l4+8, never the type-specific word, so no
+    // MTU field is needed — only the error gate reads the type).
+    let mut frame_ptb = frame_te.clone();
+    frame_ptb[35] = 4;
+    rewrite_outer_icmpv4_type(&mut frame_ptb, 34, 3);
+    for (what, frame) in [("TE", &frame_te), ("frag-needed", &frame_ptb)] {
+        let matched = try_embedded_icmp_nat_match_from_frame(
+            frame,
+            meta,
+            &mut sessions,
+            &forwarding,
+            &neighbors,
+            &shared,
+            &shared_nat,
+            &shared_wire,
+            1_000_000,
+        );
+        assert!(
+            matched.is_some(),
+            "{what}: the second same-session error at the same instant must still match"
+        );
+    }
+}
+
+/// #9901 (F-077) same-router independence at the match level: draining
+/// session A's budget (64 matches at a frozen instant) then overflowing it
+/// (65th suppressed) leaves session B — same quoter, different session —
+/// fully matchable. A global error budget would fail the B leg.
+#[test]
+fn same_router_sessions_match_independently_9901() {
+    let (frame_a, meta, mut sessions, forwarding, neighbors, shared, shared_nat, shared_wire) =
+        n9901_floor_fixture();
+    n9901_install_snat_session(&mut sessions, 12346, 40001);
+    let frame_b = build_icmp_te_frame_v4(
+        Ipv4Addr::new(10, 0, 0, 1),
+        Ipv4Addr::new(172, 16, 80, 8),
+        Ipv4Addr::new(1, 1, 1, 1),
+        40001,
+        80,
+        PROTO_TCP,
+    );
+    for i in 0..64 {
+        let matched = try_embedded_icmp_nat_match_from_frame(
+            &frame_a,
+            meta,
+            &mut sessions,
+            &forwarding,
+            &neighbors,
+            &shared,
+            &shared_nat,
+            &shared_wire,
+            1_000_000,
+        );
+        assert!(matched.is_some(), "session A error {i} of 64 must match");
+    }
+    let overflow = try_embedded_icmp_nat_match_from_frame(
+        &frame_a,
+        meta,
+        &mut sessions,
+        &forwarding,
+        &neighbors,
+        &shared,
+        &shared_nat,
+        &shared_wire,
+        1_000_000,
+    );
+    assert!(
+        overflow.is_none(),
+        "session A's 65th error at the frozen instant must be suppressed"
+    );
+    let matched_b = try_embedded_icmp_nat_match_from_frame(
+        &frame_b,
+        meta,
+        &mut sessions,
+        &forwarding,
+        &neighbors,
+        &shared,
+        &shared_nat,
+        &shared_wire,
+        1_000_000,
+    );
+    assert!(
+        matched_b.is_some(),
+        "session B must still match after session A's budget is exhausted"
+    );
+}
+
+/// #9901 (F-077) match-level flood: 100 same-session errors at a frozen
+/// instant deliver exactly the 64-token burst; the 36 excess are suppressed
+/// AND counted. Severing the gate (always-true take) reds both assertions.
+#[test]
+fn match_flood_capped_at_burst_and_counted_9901() {
+    let (frame, meta, mut sessions, forwarding, neighbors, shared, shared_nat, shared_wire) =
+        n9901_floor_fixture();
+    let before = crate::session::EMBEDDED_ERROR_PER_SESSION_SUPPRESSED_TOTAL
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let mut delivered = 0u32;
+    for _ in 0..100 {
+        if try_embedded_icmp_nat_match_from_frame(
+            &frame,
+            meta,
+            &mut sessions,
+            &forwarding,
+            &neighbors,
+            &shared,
+            &shared_nat,
+            &shared_wire,
+            1_000_000,
+        )
+        .is_some()
+        {
+            delivered += 1;
+        }
+    }
+    let suppressed = crate::session::EMBEDDED_ERROR_PER_SESSION_SUPPRESSED_TOTAL
+        .load(std::sync::atomic::Ordering::Relaxed)
+        - before;
+    assert_eq!(delivered, 64, "a frozen-instant match flood delivers the burst");
+    assert_eq!(suppressed, 36, "the excess matches must be suppressed AND counted");
+}

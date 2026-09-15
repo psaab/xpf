@@ -1,5 +1,6 @@
 use super::*;
 use super::parse::{embedded_reply_key, parse_embedded_v4, parse_embedded_v6};
+use super::outer_error_atomic;
 
 /// Core embedded ICMP session match logic operating on a frame slice.
 /// Returns the session lookup if found. Unlike the NAT variant, this
@@ -40,7 +41,7 @@ pub(in crate::afxdp::icmp_embed) fn try_embedded_icmp_session_match_from_frame(
 
     match meta.protocol {
         PROTO_ICMP => {
-            let hdr = parse_embedded_v4(frame, embedded_ip_start)?;
+            let hdr = parse_embedded_v4(frame, embedded_ip_start, outer_error_atomic(frame, &meta))?;
             let emb_src = IpAddr::V4(hdr.src);
             let emb_dst = IpAddr::V4(hdr.dst);
             // #9298: kept in step with the two PRODUCTION arms
@@ -83,7 +84,7 @@ pub(in crate::afxdp::icmp_embed) fn try_embedded_icmp_session_match_from_frame(
             lookup_embedded_session(sessions, &embedded_key, &reverse_key, now_ns)
         }
         PROTO_ICMPV6 => {
-            let hdr = parse_embedded_v6(frame, embedded_ip_start)?;
+            let hdr = parse_embedded_v6(frame, embedded_ip_start, outer_error_atomic(frame, &meta))?;
             let emb_src = IpAddr::V6(hdr.src_wire);
             // #9298: see the v4 arm.
             let quoted_discriminator = super::resolve_quoted_pptp_discriminator(

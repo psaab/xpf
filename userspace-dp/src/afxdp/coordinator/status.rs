@@ -434,6 +434,26 @@ impl super::Coordinator {
         crate::afxdp::icmp_ptb::EGRESS_MTU_UNKNOWN_FORWARD_TOTAL.load(Ordering::Relaxed)
     }
 
+    /// #9901 (F-077): embedded quotes refused by the 8-byte quoted-L4
+    /// adequacy floor — atomic-outer errors whose quoted TCP/UDP/ICMP(v6)
+    /// header carries fewer than 8 bytes. Pre-fix the 4 port bytes parsed
+    /// and the error matched a live session, so a minimal forged quote
+    /// could steer an ICMP error onto any guessed session. Surfaced as
+    /// `xpf_userspace_embedded_quote_subminimal_refused_total`.
+    pub fn embedded_quote_subminimal_refused_total(&self) -> u64 {
+        crate::afxdp::icmp_embed::EMBEDDED_QUOTE_SUBMINIMAL_REFUSED_TOTAL.load(Ordering::Relaxed)
+    }
+
+    /// #9901 (F-077): embedded ICMP errors suppressed by the per-session
+    /// GCRA — errors that MATCHED a session but were over that session's
+    /// 64/64 budget. Without it, one quoter can steer an UNBOUNDED error
+    /// stream onto a live session (forged PTB/TE as a PMTUD / throughput
+    /// weapon). Surfaced as
+    /// `xpf_userspace_embedded_error_per_session_suppressed_total`.
+    pub fn embedded_error_per_session_suppressed_total(&self) -> u64 {
+        crate::session::EMBEDDED_ERROR_PER_SESSION_SUPPRESSED_TOTAL.load(Ordering::Relaxed)
+    }
+
     /// #6751 PR 2/3: interface-mode SNAT admissions that failed CLOSED with no
     /// free translated identity for their `(egress, remote)` pair, plus
     /// peer-synced imports refused for the same reason. Surfaced as
