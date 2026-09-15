@@ -9299,7 +9299,7 @@ fn wg9521_snapshot(
             ..Default::default()
         }];
     }
-    snap.wg_steered_listen_port = steered;
+    snap.wg_steered_listen_ports = vec![steered];
     snap
 }
 
@@ -9442,6 +9442,274 @@ fn wg_unsteered_endpoint_refuses_kernel_transport_end_to_end_9521() {
         row(2).rx_unsteered_transport_drops
     );
     assert_eq!(row(1).rx_unsteered_transport_drops, 0, "the steered endpoint reports unsteered drops");
+    coordinator.stop();
+}
+
+/// #9587: every steered port delivers. The successor direction to the #9521
+/// overflow cell above: with the snapshot's steered SET covering both
+/// endpoints' ports, each spawned thread must Deliver in both families and
+/// `rx_unsteered_transport_drops` must stay 0 everywhere.
+///
+/// Level, stated precisely (GPT PR-review): this cell drives snapshot →
+/// forwarding set → spawn decision → control-thread dispatch → TUN stand-in
+/// over real kernel sockets. It does NOT load the XDP shim and does NOT
+/// traverse worker policy — shim classify is covered host-side by
+/// `steered_set_membership_9587`. Real two-port permit/deny through XDP +
+/// worker (with single-port control) is cluster P8; implementing genuinely
+/// worker-exclusive instrumentation is DEFERRED to #10038 as implementation
+/// work, not merely running P8 after it. Fail-on-revert: revert the
+/// Rust-side set derivation (`for_listen_port` back to a singular
+/// compare, or the snapshot set back to scalar) and the second endpoint
+/// decides DropUnsteered, so its delivery assertion goes red. Reverting
+/// the SHIM object alone does NOT red this cell — it never loads BPF.
+#[test]
+fn wg_both_steered_endpoints_deliver_end_to_end_9587() {
+    use crate::afxdp::coordinator::wg_control::{
+        inner_v4_9521, inner_v6_9521, register_tun_standin_9521, tun_standin_recv_9521,
+    };
+    use crate::afxdp::types::WgKernelTransport;
+    use std::sync::atomic::Ordering;
+
+    let (peer_priv, peer_pub) = crate::afxdp::wg::tests::keypair();
+    let peer_hex: String = peer_pub.iter().map(|b| format!("{b:02x}")).collect();
+    let (port_a, port_b) = (crate::test_ports::reserve_ephemeral_udp_port(), crate::test_ports::reserve_ephemeral_udp_port());
+    let mut snap = wg9521_snapshot(
+        ["wgt9587a", "wgt9587b"],
+        [4551, 4552],
+        [port_a, port_b],
+        port_a,
+        &peer_hex,
+    );
+    snap.wg_steered_listen_ports = vec![port_a, port_b];
+    let tun_a = register_tun_standin_9521("wgt9587a");
+    let tun_b = register_tun_standin_9521("wgt9587b");
+
+    let mut coordinator = Coordinator::new();
+    coordinator
+        .refresh_runtime_snapshot(&snap)
+        .expect("refresh_runtime_snapshot must succeed");
+    assert_eq!(wg9521_decision(&coordinator, 1), Some(WgKernelTransport::Deliver));
+    assert_eq!(wg9521_decision(&coordinator, 2), Some(WgKernelTransport::Deliver));
+
+    let allowed: Vec<ipnet::IpNet> =
+        vec!["10.95.21.0/24".parse().unwrap(), "fd95:21::/64".parse().unwrap()];
+    for (id, port, tun) in [(1u16, port_a, &tun_a), (2u16, port_b, &tun_b)] {
+        let engine = coordinator
+            .forwarding
+            .wg_engines
+            .get(&id)
+            .cloned()
+            .expect("the snapshot built a WireGuard engine for this endpoint");
+        let init = crate::afxdp::wg::tests::established_initiator_for(
+            &engine,
+            peer_priv,
+            peer_pub,
+            allowed.clone(),
+        );
+        let resp_pub = engine.local_public_key();
+        for outer_v6 in [false, true] {
+            let family = if outer_v6 { "IPv6" } else { "IPv4" };
+            let inner = if outer_v6 { inner_v6_9521() } else { inner_v4_9521() };
+            thread::sleep(Duration::from_millis(200));
+            while tun_standin_recv_9521(tun).is_some() {}
+            let drops_before = engine.counters().rx_unsteered_transport_drops.load(Ordering::Relaxed);
+            let dst: std::net::SocketAddr = if outer_v6 {
+                format!("[::1]:{port}")
+            } else {
+                format!("127.0.0.1:{port}")
+            }
+            .parse()
+            .unwrap();
+            let sender =
+                std::net::UdpSocket::bind(if outer_v6 { "[::1]:0" } else { "127.0.0.1:0" }).unwrap();
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            let mut delivered = None;
+            while std::time::Instant::now() < deadline {
+                let mut wire = vec![0u8; 2048];
+                let enc = init.try_encap(&resp_pub, &inner, &mut wire).expect("initiator encap");
+                let _ = sender.send_to(&wire[..enc.len], dst);
+                thread::sleep(Duration::from_millis(40));
+                if let Some(bytes) = tun_standin_recv_9521(tun) {
+                    delivered = Some(bytes);
+                    break;
+                }
+                if engine.counters().rx_unsteered_transport_drops.load(Ordering::Relaxed) > drops_before {
+                    break;
+                }
+            }
+            assert_eq!(
+                delivered.as_deref(),
+                Some(&inner[..]),
+                "{family}: endpoint {id}'s spawned thread must deliver kernel-path transport plaintext"
+            );
+            assert_eq!(
+                engine.counters().rx_unsteered_transport_drops.load(Ordering::Relaxed),
+                drops_before,
+                "{family}: endpoint {id} counted an unsteered drop while steered"
+            );
+        }
+    }
+    thread::sleep(Duration::from_millis(300));
+    let rows = coordinator.wg_tunnel_statuses();
+    for r in &rows {
+        assert_eq!(
+            r.rx_unsteered_transport_drops, 0,
+            "no endpoint may report unsteered drops when all ports are steered"
+        );
+    }
+    coordinator.stop();
+}
+
+/// #9587 single-port control for the cell above: same two endpoints, but the
+/// snapshot steers ONLY the first port. The first thread must Deliver in both
+/// families (positive control that the fixture delivers at all); the second
+/// must decide DropUnsteered, write nothing to its TUN, and count one
+/// unsteered drop per family. Without this control the two-port cell cannot
+/// discriminate — both would pass if the second endpoint delivered
+/// unconditionally.
+#[test]
+fn wg_single_steered_port_second_endpoint_drops_end_to_end_9587() {
+    use crate::afxdp::coordinator::wg_control::{
+        inner_v4_9521, inner_v6_9521, register_tun_standin_9521, tun_standin_recv_9521,
+    };
+    use crate::afxdp::types::WgKernelTransport;
+    use std::sync::atomic::Ordering;
+
+    let (peer_priv, peer_pub) = crate::afxdp::wg::tests::keypair();
+    let peer_hex: String = peer_pub.iter().map(|b| format!("{b:02x}")).collect();
+    let (port_a, port_b) = (crate::test_ports::reserve_ephemeral_udp_port(), crate::test_ports::reserve_ephemeral_udp_port());
+    let mut snap = wg9521_snapshot(
+        ["wgt9587c", "wgt9587d"],
+        [4553, 4554],
+        [port_a, port_b],
+        port_a,
+        &peer_hex,
+    );
+    snap.wg_steered_listen_ports = vec![port_a];
+    let tun_a = register_tun_standin_9521("wgt9587c");
+    let tun_b = register_tun_standin_9521("wgt9587d");
+
+    let mut coordinator = Coordinator::new();
+    coordinator
+        .refresh_runtime_snapshot(&snap)
+        .expect("refresh_runtime_snapshot must succeed");
+    assert_eq!(wg9521_decision(&coordinator, 1), Some(WgKernelTransport::Deliver));
+    assert_eq!(wg9521_decision(&coordinator, 2), Some(WgKernelTransport::DropUnsteered));
+
+    let allowed: Vec<ipnet::IpNet> =
+        vec!["10.95.21.0/24".parse().unwrap(), "fd95:21::/64".parse().unwrap()];
+    // Positive control: the steered endpoint delivers both families.
+    {
+        let engine = coordinator
+            .forwarding
+            .wg_engines
+            .get(&1)
+            .cloned()
+            .expect("the snapshot built a WireGuard engine for endpoint 1");
+        let init = crate::afxdp::wg::tests::established_initiator_for(
+            &engine,
+            peer_priv,
+            peer_pub,
+            allowed.clone(),
+        );
+        let resp_pub = engine.local_public_key();
+        for (outer_v6, inner) in [(false, inner_v4_9521()), (true, inner_v6_9521())] {
+            let family = if outer_v6 { "IPv6" } else { "IPv4" };
+            thread::sleep(Duration::from_millis(200));
+            while tun_standin_recv_9521(&tun_a).is_some() {}
+            let dst: std::net::SocketAddr = if outer_v6 {
+                format!("[::1]:{port_a}")
+            } else {
+                format!("127.0.0.1:{port_a}")
+            }
+            .parse()
+            .unwrap();
+            let sender =
+                std::net::UdpSocket::bind(if outer_v6 { "[::1]:0" } else { "127.0.0.1:0" }).unwrap();
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            let mut delivered = None;
+            while std::time::Instant::now() < deadline {
+                let mut wire = vec![0u8; 2048];
+                let enc = init.try_encap(&resp_pub, &inner, &mut wire).expect("initiator encap");
+                let _ = sender.send_to(&wire[..enc.len], dst);
+                thread::sleep(Duration::from_millis(40));
+                if let Some(bytes) = tun_standin_recv_9521(&tun_a) {
+                    delivered = Some(bytes);
+                    break;
+                }
+            }
+            assert_eq!(
+                delivered.as_deref(),
+                Some(&inner[..]),
+                "{family}: steered endpoint 1 must deliver kernel-path transport plaintext"
+            );
+        }
+    }
+    // Gate: the unsteered endpoint writes nothing and counts the drops.
+    {
+        let engine = coordinator
+            .forwarding
+            .wg_engines
+            .get(&2)
+            .cloned()
+            .expect("the snapshot built a WireGuard engine for endpoint 2");
+        let init = crate::afxdp::wg::tests::established_initiator_for(
+            &engine,
+            peer_priv,
+            peer_pub,
+            allowed.clone(),
+        );
+        let resp_pub = engine.local_public_key();
+        for (outer_v6, inner) in [(false, inner_v4_9521()), (true, inner_v6_9521())] {
+            let family = if outer_v6 { "IPv6" } else { "IPv4" };
+            thread::sleep(Duration::from_millis(200));
+            while tun_standin_recv_9521(&tun_b).is_some() {}
+            let drops_before = engine.counters().rx_unsteered_transport_drops.load(Ordering::Relaxed);
+            let dst: std::net::SocketAddr = if outer_v6 {
+                format!("[::1]:{port_b}")
+            } else {
+                format!("127.0.0.1:{port_b}")
+            }
+            .parse()
+            .unwrap();
+            let sender =
+                std::net::UdpSocket::bind(if outer_v6 { "[::1]:0" } else { "127.0.0.1:0" }).unwrap();
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            loop {
+                let mut wire = vec![0u8; 2048];
+                let enc = init.try_encap(&resp_pub, &inner, &mut wire).expect("initiator encap");
+                let _ = sender.send_to(&wire[..enc.len], dst);
+                thread::sleep(Duration::from_millis(40));
+                if engine.counters().rx_unsteered_transport_drops.load(Ordering::Relaxed) > drops_before {
+                    break;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "{family}: unsteered endpoint 2 never counted the drop"
+                );
+            }
+            assert!(
+                tun_standin_recv_9521(&tun_b).is_none(),
+                "{family}: unsteered endpoint 2 wrote plaintext to its TUN"
+            );
+        }
+    }
+    thread::sleep(Duration::from_millis(300));
+    let rows = coordinator.wg_tunnel_statuses();
+    let row = |id: u16| {
+        rows.iter()
+            .find(|r| r.tunnel_endpoint_id as u64 == u64::from(id))
+            .expect("a status row per WireGuard endpoint")
+    };
+    assert_eq!(
+        row(1).rx_unsteered_transport_drops, 0,
+        "steered endpoint 1 must report no unsteered drops"
+    );
+    assert!(
+        row(2).rx_unsteered_transport_drops >= 2,
+        "unsteered endpoint 2 must report one drop per family, got {}",
+        row(2).rx_unsteered_transport_drops
+    );
     coordinator.stop();
 }
 

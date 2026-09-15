@@ -3069,26 +3069,28 @@ fn process_status_session_delete_replica_counters_roundtrip_8586() {
     assert_eq!(legacy.session_delete_replica_drop_repaired, 0);
 }
 
-/// #9521: the Go daemon sends `ConfigSnapshot.WgSteeredListenPort` as
-/// `wg_steered_listen_port` (pinned Go-side by
-/// TestSnapshotWgSteeredListenPortWireKey9521). A misspelling on either side
-/// decodes as 0, and 0 makes every WireGuard control thread refuse kernel-path
-/// transport, so the key is pinned from both sides.
+/// #9587: the Go daemon sends `ConfigSnapshot.WgSteeredListenPorts` as
+/// `wg_steered_listen_ports` (pinned Go-side by
+/// TestSnapshotWgSteeredListenPortsWireKey9587). A misspelling on either side
+/// decodes as empty, and empty makes every WireGuard control thread refuse
+/// kernel-path transport, so the key is pinned from both sides. Successor to
+/// the #9521 singular cell of the same shape.
 #[test]
-fn wg_steered_listen_port_wire_key_9521() {
+fn wg_steered_listen_ports_wire_key_9587() {
     let mut value =
         serde_json::to_value(ConfigSnapshot::default()).expect("serialize a default snapshot");
-    value["wg_steered_listen_port"] = serde_json::json!(51820);
+    value["wg_steered_listen_ports"] = serde_json::json!([51820, 51900]);
     let snap: ConfigSnapshot = serde_json::from_value(value.clone()).expect("decode with the key");
-    assert_eq!(snap.wg_steered_listen_port, 51820);
+    assert_eq!(snap.wg_steered_listen_ports, vec![51820, 51900]);
     value
         .as_object_mut()
         .expect("snapshot serializes as an object")
-        .remove("wg_steered_listen_port");
+        .remove("wg_steered_listen_ports");
     let absent: ConfigSnapshot = serde_json::from_value(value).expect("decode without the key");
     assert_eq!(
-        absent.wg_steered_listen_port, 0,
-        "a daemon that omits the key must decode to 0, which fails closed"
+        absent.wg_steered_listen_ports,
+        Vec::<u16>::new(),
+        "a daemon that omits the key must decode to empty, which fails closed"
     );
 }
 
