@@ -147,7 +147,7 @@ pub(super) fn preferred_bind_strategy(binding: &BindingStatus) -> AfXdpBindStrat
 /// pointer passed through `worker_umem`.
 pub(super) unsafe fn open_binding_worker_rings(
     worker_umem: &mut WorkerUmem,
-    info: &mut IfInfo,
+    info: &IfInfo,
     ring_entries: u32,
     bind_strategy: AfXdpBindStrategy,
     socket_role: XskSocketRole,
@@ -170,8 +170,7 @@ pub(super) unsafe fn open_binding_worker_rings(
     ),
     Box<dyn std::error::Error + Send + Sync>,
 > {
-    let bind_flag_candidates =
-        bind_flag_candidates_for_socket_role(&*info, driver_name, socket_role);
+    let bind_flag_candidates = bind_flag_candidates_for_socket_role(info, driver_name, socket_role);
     let mut strategies = vec![bind_strategy];
     if let Some(fallback_strategy) = alternate_bind_strategy(driver_name, bind_strategy) {
         strategies.push(fallback_strategy);
@@ -181,7 +180,7 @@ pub(super) unsafe fn open_binding_worker_rings(
         for (flags_idx, flags) in bind_flag_candidates.iter().copied().enumerate() {
             match try_open_bind(
                 worker_umem,
-                &mut *info,
+                info,
                 ring_entries,
                 flags,
                 socket_role,
@@ -541,9 +540,39 @@ pub(super) fn shared_umem_group_key_for_device(
 /// umem.fq_cq → umem.rx_tx → user.map_rx/map_tx → umem.bind) with a
 /// single libxdp call that does UMEM registration, ring setup, and bind
 /// atomically — matching the proven libbpf xsk code path.
+// F-151 (#9904): mismatch teardown. Takes ownership of the just-created
+// handles and returns the terminal bind error. Drops run device-first —
+// socket delete while the rx/tx ring boxes are still alive — matching
+// `WorkerXskRings` declaration order (`worker/xsk_rings.rs`: device, rx,
+// tx), whose normal teardown likewise deletes the socket before freeing
+// the rings libxdp was handed. Only `DeviceQueue` has a `Drop`
+// (`xsk_socket__delete`); `User`/`RingRx`/`RingTx` hold a raw fd (closed
+// by the delete, never by us) plus Box rings. Nothing is XSKMAP-registered
+// yet — registration happens later in the caller — so the delete is the
+// complete undo. Hermetically tested below (`new_for_test` fixtures make
+// the delete a null-handle no-op while exercising the real drop path).
+fn fail_identity_mismatched_bind(
+    user: User,
+    rx: RingRx,
+    tx: RingTx,
+    device: DeviceQueue,
+    attempt: usize,
+    mismatch: String,
+) -> Box<dyn std::error::Error + Send + Sync> {
+    eprintln!(
+        "xpf-userspace-dp: bind identity mismatch after socket create \
+         (attempt {attempt}): {mismatch} — failing bind closed",
+    );
+    drop(device);
+    drop(tx);
+    drop(rx);
+    drop(user);
+    format!("bind identity mismatch: {mismatch}").into()
+}
+
 fn try_open_bind(
     worker_umem: &mut WorkerUmem,
-    info: &mut IfInfo,
+    info: &IfInfo,
     ring_entries: u32,
     bind_flags: u16,
     socket_role: XskSocketRole,
@@ -553,13 +582,12 @@ fn try_open_bind(
     (User, RingRx, RingTx, XskBindMode, u16, DeviceQueue, Vec<u64>),
     Box<dyn std::error::Error + Send + Sync>,
 > {
-    let mut last_verify_err: Option<String> = None;
     for attempt in 0..BIND_RETRY_ATTEMPTS {
         let create_result = match socket_role.create_mode() {
             xsk_ffi::XskCreateMode::PrivateUmem => unsafe {
                 xsk_ffi::create_xsk_binding_private(
                     worker_umem.umem_mut(),
-                    &*info,
+                    info,
                     ring_entries,
                     bind_flags,
                 )
@@ -567,7 +595,7 @@ fn try_open_bind(
             xsk_ffi::XskCreateMode::SharedUmem => unsafe {
                 xsk_ffi::create_xsk_binding_shared(
                     worker_umem.as_raw_umem_ptr(),
-                    &*info,
+                    info,
                     ring_entries,
                     bind_flags,
                 )
@@ -576,36 +604,22 @@ fn try_open_bind(
         match create_result {
             Ok((user, rx, tx, mut device)) => {
                 // F-151 (#9904): re-resolve the bound name BEFORE priming or
-                // publishing anything. On mismatch the just-created socket is
-                // dropped here (`DeviceQueue::drop` deletes it; nothing is
-                // XSKMAP-registered yet — registration happens later in the
-                // caller) and the loop retries with a freshly resolved
-                // `IfInfo`, so a transient rename-storm mismatch self-heals
-                // instead of failing the bind. `from_ifindex` resets the
-                // queue, so it is restored after every fresh resolve.
-                // Persistent mismatches fail closed when the retry budget
-                // below is exhausted.
+                // publishing anything, and fail the bind closed on any
+                // mismatch. Deliberately NO in-bind retry: re-creating a
+                // socket on a UMEM whose owner socket was just deleted would
+                // reuse owner resources across the delete/re-create boundary,
+                // whose post-delete state this tree cannot prove from its
+                // linked libxdp. Recovery is the outer reconcile loop, which
+                // rebuilds workers wholesale (fresh UMEM + fresh `IfInfo`
+                // from `BindingStatus` on every `bring_up_workers`) — the
+                // retry boundary that reconstructs owner resources. A
+                // transient rename-storm mismatch therefore delays bringup
+                // until the next driven reconcile instead of bricking it.
                 let bound_ifname = info.ifname_cstring();
                 if let Err(mismatch) = verify_bind_identity(info.ifindex(), &bound_ifname) {
-                    eprintln!(
-                        "xpf-userspace-dp: bind identity mismatch after socket create \
-                         (attempt {attempt}): {mismatch} — re-resolving and retrying",
-                    );
-                    last_verify_err = Some(mismatch);
-                    drop(user);
-                    drop(rx);
-                    drop(tx);
-                    drop(device);
-                    let queue_id = info.queue_id();
-                    let planned = info.ifindex();
-                    if let Err(e) = info.from_ifindex(planned) {
-                        return Err(format!(
-                            "bind identity re-resolve of ifindex {planned} failed: {e}"
-                        )
-                        .into());
-                    }
-                    info.set_queue(queue_id);
-                    continue;
+                    return Err(fail_identity_mismatched_bind(
+                        user, rx, tx, device, attempt, mismatch,
+                    ));
                 }
                 let user_fd = user.as_raw_fd();
 
@@ -669,18 +683,11 @@ fn try_open_bind(
             }
         }
     }
-    Err(match last_verify_err {
-        Some(e) => format!(
-            "libxdp bind: exhausted {} retries with flags=0x{:04x}: last bind-identity error: {e}",
-            BIND_RETRY_ATTEMPTS, bind_flags,
-        )
-        .into(),
-        None => format!(
-            "libxdp bind: exhausted {} retries with flags=0x{:04x}",
-            BIND_RETRY_ATTEMPTS, bind_flags,
-        )
-        .into(),
-    })
+    Err(format!(
+        "libxdp bind: exhausted {} retries with flags=0x{:04x}",
+        BIND_RETRY_ATTEMPTS, bind_flags,
+    )
+    .into())
 }
 
 fn query_bound_xsk_mode(fd: c_int) -> Option<XskBindMode> {
@@ -1179,6 +1186,37 @@ mod bind_identity_9904_tests {
         assert!(
             gone.contains("11"),
             "unresolvable error must name the planned ifindex, got: {gone}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod bind_mismatch_teardown_9904_tests {
+    use super::*;
+
+    // F-151 (#9904): behavioral result-handling pin for the mismatch arm.
+    // The `new_for_test` device carries a null xsk handle, so the socket
+    // delete inside is a no-op while the real ordered-drop path (device,
+    // tx, rx, user) and the terminal error still execute. What this cannot
+    // cover — driving `try_open_bind` itself to the mismatch — needs a real
+    // AF_XDP bind; that invocation ordering (after create, before prime) is
+    // pinned by the `tests/bind_identity_verification_9904.rs` tripwire.
+    #[test]
+    fn mismatched_bind_teardown_fails_closed_with_planned_vs_observed_9904() {
+        let err = fail_identity_mismatched_bind(
+            User::new_for_test(-1),
+            RingRx::new_for_test(-1, 8),
+            RingTx::new_for_test(-1, 8),
+            DeviceQueue::new_for_test(-1, 8),
+            3,
+            "planned ifindex 11 but bound name \"eth0\" now resolves to ifindex 12".to_string(),
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains("bind identity mismatch")
+                && msg.contains("11")
+                && msg.contains("12"),
+            "mismatch teardown must fail closed with planned-vs-observed, got: {msg}"
         );
     }
 }

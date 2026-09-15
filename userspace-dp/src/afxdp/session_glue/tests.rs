@@ -10475,3 +10475,34 @@ fn removing_a_displaced_session_keeps_the_survivors_shared_aliases_9679() {
     );
 }
 
+
+// F-149 (#9904): the session-cancel path routes unknown slots through the
+// same single-region backstop as the dispatch paths (it previously dropped
+// with a per-drop log line; now bounded + rescuing).
+#[test]
+fn cancelled_shared_recycle_unknown_slot_rescues_in_single_region_9904() {
+    let mut bindings = vec![
+        BindingWorker::new_for_mirror_test(0, 0, 11, 0),
+        BindingWorker::new_for_mirror_test(1, 0, 22, 0),
+        BindingWorker::new_for_mirror_test(2, 0, 33, 0),
+    ];
+    bindings[1].umem = bindings[0].umem.clone();
+    bindings[2].umem = bindings[0].umem.clone();
+    let (left, rest) = bindings.split_at_mut(1);
+    let (mid, right) = rest.split_at_mut(1);
+    let current = &mut mid[0];
+    let mut shared_recycles = vec![(99u32, 0x5000u64)];
+    route_cancelled_shared_recycles(left, current, right, &mut shared_recycles);
+    assert!(shared_recycles.is_empty(), "recycles must be drained");
+    assert!(
+        current.tx_pipeline.pending_fill_frames.contains(&0x5000u64),
+        "session-cancel unknown-slot offset must be rescued in a single-region worker"
+    );
+    assert_eq!(
+        current
+            .live
+            .tx_shared_recycle_unknown_slot_rescued
+            .load(std::sync::atomic::Ordering::Relaxed),
+        1
+    );
+}

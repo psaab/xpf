@@ -106,11 +106,13 @@ FILL ring: every `scratch_recycle.push(desc.addr)` site (~30, in
 `poll_descriptor/` and `neighbor_dispatch.rs`), plus shared-UMEM
 `(slot, offset)` recycles, flow through `pending_fill_frames` into
 `tx/rings.rs::drain_pending_fill` → `xsk_ffi::WriteFill::insert` with no
-masking anywhere on the path. That `addr` is headroom-shifted: with
-`UMEM_HEADROOM == 256` the kernel delivers
-`desc.addr == frame_base + 256`, while the FILL ring was primed with
+masking anywhere on the path. That `addr` is headroom-shifted: the kernel
+delivers the supplied frame base plus headroom — 256 from `UMEM_HEADROOM`
+in this tree's configuration, plus any kernel-added headroom — always
+intra-chunk since headroom ≪ 4096, while the FILL ring was primed with
 `frame_base` (`prime_fill_ring_offsets` feeds `Umem::frame().offset`,
-already base-aligned).
+already base-aligned). In aligned-chunk mode the kernel masks any
+intra-chunk FILL address back to the chunk base on consume.
 
 This is correct ONLY because of an AF_XDP CORE contract, not a driver
 quirk: in aligned-chunk mode the kernel masks FILL-ring addresses to the

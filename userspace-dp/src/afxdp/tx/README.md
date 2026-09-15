@@ -88,6 +88,10 @@ normally. Pinned by
   the subset counter `tx_shared_recycle_unknown_slot_drops` and the same
   bounded logging. Either way, never push a cross-region (foreign) offset
   into an arbitrary binding's fill ring.
+  Growth is bounded by construction: each rescue preserves a real pool
+  frame, and `pending_fill_frames` drains every tick — steady-state
+  accumulation without a producer bug is impossible (see the premise note
+  on `split_is_single_region` in `dispatch/shared_recycle.rs`).
 - The cross-binding direct-TX build's `debug-log` tuple-mismatch diagnostic
   (`dispatch/mod.rs`) drops the built frame by setting `build_failed`; the
   frame's `tx_offset` is recycled to `free_tx_frames` through the SINGLE

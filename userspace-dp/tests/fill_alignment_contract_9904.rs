@@ -1,10 +1,13 @@
-//! F-069 (#9904): fill-alignment contract must be cited beside the code.
+//! F-069 (#9904) TRIPWIRE: fill-alignment contract cited beside the code.
 //!
-//! STEP-0 repro: the AF_XDP core aligned-chunk masking contract
-//! (`xp_check_aligned` — the kernel masks FILL-ring addresses to the chunk
-//! base in aligned mode) is load-bearing for the RX-recycle path (which
-//! pushes headroom-shifted `desc.addr` verbatim) but is nowhere written
-//! down. This cell REDs until `afxdp/umem/README.md` cites it.
+//! Explicitly a doc tripwire, and the fix IS the doc: the AF_XDP core
+//! aligned-chunk masking contract (`xp_check_aligned` — the kernel masks
+//! FILL-ring addresses to the chunk base in aligned mode) is load-bearing
+//! for the RX-recycle path (which pushes headroom-shifted `desc.addr`
+//! verbatim) but was nowhere written down. This cell REDs until
+//! `afxdp/umem/README.md` cites it. The `flags == 0` precondition the
+//! citation rests on is pinned in code by
+//! `umem::create_flags_9904_tests`.
 
 use std::path::Path;
 

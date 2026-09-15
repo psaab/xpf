@@ -1621,6 +1621,8 @@ fn route_cancelled_shared_recycles(
         {
             binding.tx_pipeline.pending_fill_frames.push_back(offset);
         } else if backstop {
+            // Same-region per the premise on `split_is_single_region`:
+            // kernel-masked, bounds-checked, growth-bounded. See note.
             current.tx_pipeline.pending_fill_frames.push_back(offset);
             first_rescue.get_or_insert((slot, offset));
             rescued = rescued.saturating_add(1);

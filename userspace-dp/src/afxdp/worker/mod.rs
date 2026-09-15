@@ -459,7 +459,7 @@ impl BindingWorker {
             };
             initial_fill_frames.push(offset);
         }
-        let mut info = ifinfo_from_binding(binding)?;
+        let info = ifinfo_from_binding(binding)?;
         // Safety: `BindingWorker` declares `xsk` before `umem`, so Rust drops
         // the socket/ring handles before the UMEM. That satisfies the UMEM
         // lifetime/drop-order contract enforced by `open_binding_worker_rings`.
@@ -475,7 +475,7 @@ impl BindingWorker {
         ) = unsafe {
             open_binding_worker_rings(
                 &mut worker_umem,
-                &mut info,
+                &info,
                 ring_entries,
                 bind_strategy,
                 socket_role,

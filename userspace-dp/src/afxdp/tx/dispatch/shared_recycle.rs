@@ -21,7 +21,11 @@ pub(in crate::afxdp) fn apply_shared_recycles(
     if shared_recycles.is_empty() {
         return;
     }
-    // F-149 (#9904): computed ONCE per drain, not per unknown slot.
+    // F-149 (#9904): computed ONCE per drain, not per unknown slot: O(N)
+    // `Rc::ptr_eq` compares where N = worker bindings (typically < 32) —
+    // single-digit ns against the drain's per-frame ring ops. Deliberately
+    // not lazy-gated behind the first unknown: the gate would cost the same
+    // order as the scan it skips.
     let backstop = split_is_single_region(left, current, right);
     let mut dropped = 0u64;
     let mut rescued = 0u64;
@@ -40,6 +44,8 @@ pub(in crate::afxdp) fn apply_shared_recycles(
             continue;
         }
         if backstop {
+            // Same-region per the premise above: kernel-masked to the chunk
+            // base on consume, bounds-checked, growth-bounded. See note.
             current.tx_pipeline.pending_fill_frames.push_back(offset);
             first_rescue.get_or_insert((slot, offset));
             rescued = rescued.saturating_add(1);
@@ -82,6 +88,16 @@ pub(in crate::afxdp) fn apply_shared_recycles(
 // alone (private UMEMs share the same numeric ranges), so the fail-closed
 // drop path is kept. A future cross-worker recycle producer MUST extend
 // the record with region identity before touching this.
+//
+// Offset shape at the rescue pushes: the offset may be headroom-shifted
+// (RX `desc.addr`) or TX-shifted (VLAN descriptor views) within its chunk;
+// the kernel's aligned-mode mask maps any intra-chunk address back to the
+// chunk base (F-069), and out-of-range values cannot corrupt — the kernel
+// bounds-checks FILL entries and accounts violations as invalid descs
+// (`rx_invalid_descs`), never DMA out of bounds. Growth is bounded by
+// construction: each rescue preserves a REAL pool frame, and
+// `pending_fill_frames` drains every tick, so steady-state accumulation
+// without a producer bug is impossible.
 pub(in crate::afxdp) fn split_is_single_region(
     left: &[BindingWorker],
     current: &BindingWorker,
@@ -263,7 +279,11 @@ pub(in crate::afxdp) fn apply_shared_recycles_to_bindings(
     if shared_recycles.is_empty() {
         return 0;
     }
-    // F-149 (#9904): computed ONCE per drain, not per unknown slot.
+    // F-149 (#9904): computed ONCE per drain, not per unknown slot: O(N)
+    // `Rc::ptr_eq` compares where N = worker bindings (typically < 32) —
+    // single-digit ns against the drain's per-frame ring ops. Deliberately
+    // not lazy-gated behind the first unknown: the gate would cost the same
+    // order as the scan it skips.
     let backstop = single_region_backstop_index(bindings);
     let mut dropped = 0u64;
     let mut rescued = 0u64;
@@ -283,6 +303,8 @@ pub(in crate::afxdp) fn apply_shared_recycles_to_bindings(
         if let Some(host) = backstop
             && let Some(binding) = bindings.get_mut(host)
         {
+            // Same-region per the premise above: kernel-masked to the chunk
+            // base on consume, bounds-checked, growth-bounded. See note.
             binding.tx_pipeline.pending_fill_frames.push_back(offset);
             first_rescue.get_or_insert((slot, offset));
             rescued = rescued.saturating_add(1);

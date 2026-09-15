@@ -237,3 +237,65 @@ fn shared_recycle_split_unknown_slot_rescues_in_single_region_9904() {
         0
     );
 }
+
+// F-149 (#9904): split path with MIXED allocations still fails closed —
+// the backstop must not fire when the offset's home region is unknowable.
+#[test]
+fn shared_recycle_split_unknown_slot_still_drops_in_mixed_region_9904() {
+    let mut bindings = vec![
+        BindingWorker::new_for_mirror_test(0, 0, 11, 0),
+        BindingWorker::new_for_mirror_test(1, 0, 22, 0),
+        BindingWorker::new_for_mirror_test(2, 0, 33, 0),
+    ];
+    assert!(
+        !bindings[1].umem.shares_allocation_with(&bindings[0].umem),
+        "fixture must have separate UMEM allocations"
+    );
+    let lookup = WorkerBindingLookup::from_bindings(&bindings);
+    let (left, rest) = bindings.split_at_mut(1);
+    let (mid, right) = rest.split_at_mut(1);
+    let current = &mut mid[0];
+    let mut shared_recycles = vec![(99u32, 0x3000u64)];
+    apply_shared_recycles(left, 1, current, right, &lookup, &mut shared_recycles);
+    assert!(shared_recycles.is_empty(), "recycles must be drained");
+    assert!(
+        !current.tx_pipeline.pending_fill_frames.contains(&0x3000u64),
+        "mixed-region split-path unknown must not be rescued"
+    );
+    assert_eq!(current.live.tx_errors.load(Ordering::Relaxed), 1);
+    assert_eq!(
+        current.live.tx_shared_recycle_unknown_slot_drops.load(Ordering::Relaxed),
+        1
+    );
+    assert_eq!(
+        current.live.tx_shared_recycle_unknown_slot_rescued.load(Ordering::Relaxed),
+        0
+    );
+}
+
+// F-149 (#9904): the single-binding worker is trivially single-region, so
+// an unknown slot there rescues to the sole survivor. Sound (not the
+// forbidden arbitrary push): with one live region every worker-local
+// offset belongs to it — there is no second region to be foreign to.
+#[test]
+fn shared_recycle_unknown_slot_rescues_in_single_binding_worker_9904() {
+    let mut bindings = vec![BindingWorker::new_for_mirror_test(0, 0, 11, 0)];
+    let lookup = WorkerBindingLookup::from_bindings(&bindings);
+    let mut shared_recycles = vec![(99u32, 0x4000u64)];
+    let dropped =
+        apply_shared_recycles_to_bindings(&mut bindings, &lookup, &mut shared_recycles);
+    assert_eq!(dropped, 0);
+    assert!(
+        bindings[0].tx_pipeline.pending_fill_frames.contains(&0x4000u64),
+        "single-binding unknown-slot offset must be rescued, not lost"
+    );
+    assert_eq!(bindings[0].live.tx_errors.load(Ordering::Relaxed), 1);
+    assert_eq!(
+        bindings[0].live.tx_shared_recycle_unknown_slot_drops.load(Ordering::Relaxed),
+        0
+    );
+    assert_eq!(
+        bindings[0].live.tx_shared_recycle_unknown_slot_rescued.load(Ordering::Relaxed),
+        1
+    );
+}
