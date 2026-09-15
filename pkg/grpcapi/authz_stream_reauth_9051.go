@@ -59,9 +59,11 @@ func (s reauthServerStream) Context() context.Context { return s.ctx }
 //
 // The returned error is the AUTHZ error, not context.Canceled: a client whose
 // class was revoked must be told that, and a bare cancellation is
-// indistinguishable from an ordinary shutdown. The handler's own error wins
-// when it returns first, because a handler that already failed has a more
-// specific reason than "and also you were revoked".
+// indistinguishable from an ordinary shutdown. When revocation and a handler
+// error are co-present, the revocation wins: the watcher records it before
+// cancelling, so a handler returning *because of* the revocation reports it
+// deterministically (#9903 F-128). A handler-only failure still returns the
+// handler's own (more specific) error.
 func (s *Server) authorizeStreamContinuously(
 	srv any,
 	ss grpc.ServerStream,
@@ -71,16 +73,22 @@ func (s *Server) authorizeStreamContinuously(
 	ctx, cancel := context.WithCancel(ss.Context())
 	defer cancel()
 
-	// Buffered so the watcher never blocks on send if the handler returned
-	// first and nobody is reading -- a leaked goroutine parked on an unread
-	// channel is exactly the kind of slow resource loss a per-stream watcher
-	// must not introduce.
 	revoked := make(chan error, 1)
 	done := make(chan struct{})
 	defer close(done)
 
+	// Buffered so the watcher never blocks on send if the handler returned
+	// first and nobody is reading -- a leaked goroutine parked on an unread
+	// channel is exactly the kind of slow resource loss a per-stream watcher
+	// must not introduce.
+	// #9903 GPT-1: capture the tick interval BEFORE spawning the watcher.
+	// The test helper shortens the package var and restores it on cleanup;
+	// a watcher that read the var at its own (unscheduled) start would race
+	// the restore across sequential runs. All var reads are now sequenced
+	// in the interceptor body.
+	interval := streamReauthInterval9051
 	go func() {
-		t := time.NewTicker(streamReauthInterval9051)
+		t := time.NewTicker(interval)
 		defer t.Stop()
 		for {
 			select {
@@ -102,15 +110,31 @@ func (s *Server) authorizeStreamContinuously(
 	}()
 
 	herr := handler(srv, reauthServerStream{ServerStream: ss, ctx: ctx})
-	if herr != nil {
-		return herr
-	}
-	// The handler returned cleanly. If that was because we cancelled it, report
-	// the revocation rather than success.
+	// #9903 F-128: consult the revocation BEFORE the handler error. The
+	// watcher sends to revoked (buffered) BEFORE cancelling, so when the
+	// handler returns *because of* the revocation, revoked is already
+	// populated and the client deterministically learns PermissionDenied.
+	// Pre-fix the handler's own ctx error won, and identical revocations
+	// surfaced as PermissionDenied or Canceled/Unavailable by timing, so
+	// the client retried instead of surfacing the authorization event. A
+	// handler-only failure (revoked empty) still returns herr, and a clean
+	// return with no revocation still returns nil — only the co-present
+	// case changes precedence, and revocation is terminal anyway.
+	// "Deterministically" is scoped to the because-of shape: the watcher
+	// populates revoked before cancelling, so a handler returning BECAUSE
+	// of this cancellation always finds it. A concurrent INDEPENDENT
+	// failure (revoked still empty at return) takes the select-default arm
+	// and returns the retryable herr — and revocation DETECTION itself has
+	// a tick of latency by design, which no ordering removes. (This orders
+	// the SIGNAL only; the wrapper overrides Context, not the transport's
+	// blocked Send/Recv.)
 	select {
 	case err := <-revoked:
 		return err
 	default:
-		return nil
 	}
+	if herr != nil {
+		return herr
+	}
+	return nil
 }

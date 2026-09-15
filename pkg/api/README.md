@@ -448,12 +448,15 @@ configuration, `authCheck` already exempts them, and the in-tree incus harnesses
 read `/metrics`. A sweep of every in-tree consumer found those two and nothing
 else touching REST at all, so gating `/api/v1` breaks no shipped tooling.
 
-`readAuthz` serves an UNGUARDED safe route rather than refusing it — the
-opposite of the mutation gate's fail-closed default — precisely so those two
-keep working. The cost is that a NEW read route added without a table entry
-would serve unauthenticated, so `TestEveryReadRouteHasAPermission_6660`
-enumerates the routes `server.go` actually registers and fails on any `/api/v1`
-GET the table does not cover, moving that risk from runtime to the suite.
+`readAuthz` serves an UNGUARDED non-API safe route rather than refusing
+it — the opposite of the mutation gate's fail-closed default — precisely so
+those two keep working. Inside the `/api/v1` namespace the default is CLOSED:
+a path with no table entry is refused, because a NEW read route added without
+a table entry would otherwise serve with no authorization decision.
+`TestEveryReadRouteHasAPermission_6660` enumerates the routes `server.go`
+actually registers and fails on any `/api/v1` GET the table does not cover,
+moving the registered-shape risk from runtime to the suite; the runtime deny
+covers the shapes no census sees.
 
 It adjudicates ONCE, where the mutation gate adjudicates twice. That is a
 difference rather than an omission: the mutation gate drains the body between
