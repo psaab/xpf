@@ -85,6 +85,11 @@ func RenderSourceRuleDetail(ctx context.Context, w io.Writer, cfg *config.Config
 	for _, rs := range cfg.Security.NAT.Source {
 		for _, rule := range rs.Rules {
 			ruleIdx++
+			// #9877: the rule-level exclusion verdict, hoisted for the two
+			// readers below: the NOT INSTALLED annotation and the
+			// translation-hits gate. A skipped rule ships no snapshot row and
+			// owns no counter, so the hits line must not print for one (#8185).
+			excludedReason := config.SourceNATRuleExcludedReason(rule)
 			// #7640: render the action the rule ACTUALLY carries. This
 			// defaulted to "interface" whenever neither a pool nor `off` was
 			// set — so an ACTIONLESS rule (one the strict gate rejects, and
@@ -108,11 +113,17 @@ func RenderSourceRuleDetail(ctx context.Context, w io.Writer, cfg *config.Config
 				fmt.Fprintf(w, "      IP protocol:           %s\n", strings.Join(protos, " "))
 			}
 			fmt.Fprintf(w, "    Action:                  %s\n", action)
-			// #9874: a rule whose authored match constrains nothing claims
-			// in-scope flows and the dataplane drops them. That is the operative
-			// cause, so it is printed INSTEAD OF the notes below — see
-			// noteLenientMatchDropped for why those would mislead beside it.
-			if rule.LenientMatchDropped {
+			// #9877: a rule-level exclusion (dropped match leaves) annotates for
+			// EVERY mode — pool, interface, actionless — so it is asked BEFORE
+			// the pool-mode gate, in the builder's precedence. The reason is
+			// Go-side prose (a skipped rule ships nothing to expand).
+			if excludedReason != "" {
+				noteNotInstalled(w, excludedReason)
+			} else if rule.LenientMatchDropped {
+				// #9874: a rule whose authored match constrains nothing claims
+				// in-scope flows and the dataplane drops them. That is the operative
+				// cause, so it is printed INSTEAD OF the notes below — see
+				// noteLenientMatchDropped for why those would mislead beside it.
 				noteLenientMatchDropped(w)
 			} else {
 				// #6534: a pool-mode rule whose pool the builder marks unusable
@@ -169,7 +180,10 @@ func RenderSourceRuleDetail(ctx context.Context, w io.Writer, cfg *config.Config
 			// (other implementations of the interface do error), it simply
 			// cannot fire for the production Manager, which is why the zero got
 			// through. The REST sibling already refuses instead (#5046).
-			if armed {
+			// #9877: a rule the builder skipped owns no counter — printing
+			// `Translation hits: 0` for one would read as armed-but-idle (the
+			// #7473 lie). The NOT INSTALLED line above is its whole story.
+			if armed && excludedReason == "" {
 				ruleKey := dataplane.NATCounterKey(dataplane.NATCounterTypeSource, rs.Name, rule.Name)
 				if cid, ok := cr.NATCounterIDs[ruleKey]; ok {
 					cnt, err := dp.ReadNATRuleCounter(uint32(cid))
@@ -178,7 +192,7 @@ func RenderSourceRuleDetail(ctx context.Context, w io.Writer, cfg *config.Config
 							cnt.Packets, cnt.Bytes)
 					}
 				}
-			} else if dp != nil {
+			} else if dp != nil && excludedReason == "" {
 				fmt.Fprintf(w, "    Translation hits:        %s\n", natCounterUnarmed)
 			}
 			fmt.Fprint(w, "\n")

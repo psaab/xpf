@@ -982,6 +982,25 @@ type NATRule struct {
 	// of this behavior — assert the marker and the emitted snapshot
 	// directly.
 	LenientMatchDropped bool `json:"-"`
+	// UnknownMatchLeaves records `match` children the compiler does not read
+	// (#9877) — e.g. a typo'd `soruce-address` beside a valid
+	// `source-address`. Each NAT match switch has arms for exactly the
+	// documented leaves; without a record, the unknown leaf was silently
+	// dropped and the rule compiled constrained on the surviving dimensions,
+	// with no operator-facing warning on the tolerant path. Recorded in
+	// config order, first-seen deduped, so the warning is deterministic.
+	// Read by validateNATUnknownMatchLeavesStrict (reject at strict commit,
+	// warn on the tolerant path) and by the snapshot exclusion predicates
+	// (fail-closed skip). Non-empty is the verdict.
+	//
+	// EXPORTED because the userspace snapshot builders and the show surfaces
+	// (other packages) read the verdict — an unexported field cannot cross
+	// that boundary the way matchAuthored does within this package.
+	// `json:"-"` because it is compile-time diagnostic state recomputed from
+	// the AST on every compile (both HA peers derive it identically from the
+	// synced tree text); it must not join golden JSON, ConfigFingerprint, or
+	// config-sync payloads (the MappedPortRaw/ThenTargetCount precedent).
+	UnknownMatchLeaves []string `json:"-"`
 }
 
 // NATMatch defines what traffic a NAT rule matches.
@@ -1340,6 +1359,17 @@ type StaticNATRule struct {
 	// derived state recomputed on every compile (last `then` block wins, #3850),
 	// never serialized to the dataplane / peer-sync wire.
 	ThenTargetCount int `json:"-"`
+	// UnknownMatchLeaves records `match` children the compiler does not read
+	// (#9877) — the static twin of NATRule.UnknownMatchLeaves. The static
+	// match switch has arms for exactly destination-address, source-address
+	// and destination-port; anything else (a typo'd leaf beside a valid one)
+	// was silently dropped on the tolerant path. NPTv6 rules record here
+	// too: the match loop runs before then-parsing sets IsNPTv6, and a
+	// typo'd `soruce-address` would otherwise evade the #5818 scope drop and
+	// install a zone-wide NPTv6 rewrite. Same contract as the NATRule field:
+	// config order, first-seen deduped, exported for the cross-package
+	// builders/renderers, `json:"-"` as compile-time diagnostic state.
+	UnknownMatchLeaves []string `json:"-"`
 }
 
 // LimitSessionScreen configures per-IP session limiting.

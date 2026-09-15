@@ -25,7 +25,19 @@ package config
 // not a reason. That mirrors the builder, which gates on a non-empty pool name
 // for exactly the same reason.
 func SourceNATRuleNotInstalledReason(cfg *Config, rule *NATRule) string {
-	if cfg == nil || rule == nil || rule.Then.PoolName == "" {
+	if cfg == nil || rule == nil {
+		return ""
+	}
+	// #9877: a match-content verdict disarms any non-exemption rule — pool,
+	// interface or actionless — so it is asked BEFORE the pool-mode gate
+	// below. It returns operator PROSE (a skipped rule ships nothing, so no
+	// wire token exists); SourceNATDisarmReasonText echoes unknown tokens
+	// verbatim, so the text renderers print it as-is and the structured
+	// surfaces carry it in not_installed_reason unchanged.
+	if reason := SourceNATRuleExcludedReason(rule); reason != "" {
+		return reason
+	}
+	if rule.Then.PoolName == "" {
 		return ""
 	}
 	// #8329: NO early return for a missing pool. This used to be

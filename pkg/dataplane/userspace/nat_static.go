@@ -45,7 +45,7 @@ func buildStaticNATSnapshots(cfg *config.Config, natCounterIDs map[string]uint32
 			// predicate. Strict commit rejects both outright; this is the
 			// lenient load / peer-sync backstop.
 			if reason := config.StaticNATRuleExcludedReason(rule); reason != "" {
-				slog.Warn("userspace snapshot: dropping static NAT rule (fail-closed, #5859/#5101)",
+				slog.Warn("userspace snapshot: dropping static NAT rule (fail-closed, #5859/#5101/#9877)",
 					"ruleset", rs.Name, "rule", rule.Name, "reason", reason,
 					"then", rule.Then,
 					"match_destination_port", rule.MatchDestinationPort,

@@ -844,7 +844,9 @@ func compileNPTv6(dp DataPlane, cfg *config.Config) error {
 			// reaches the helper: today's apply SUCCEEDS with the rule simply not
 			// installed. It keeps the warn-and-skip disposition, because erroring
 			// on it would fail an apply that works today.
-			installed := !config.NPTv6ScopeUnsupported(rs, rule)
+			// #9877: a rule the builder drops for unknown match leaves never
+			// reaches the helper either — same warn-and-skip disposition.
+			installed := !config.NPTv6ScopeUnsupported(rs, rule) && config.StaticNATRuleExcludedReason(rule) == ""
 			// #7077 (#6894 r10): the SAME argument applies a second time, and
 			// missing it turned this fix into a regression. "The helper rejects
 			// this" was inferred from Go's own parse failing, but the two

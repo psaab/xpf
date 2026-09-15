@@ -78,6 +78,12 @@ func RenderDestRuleDetail(ctx context.Context, w io.Writer, cfg *config.Config, 
 	for _, rs := range dnat.RuleSets {
 		for _, rule := range rs.Rules {
 			ruleIdx++
+			// #9877: the rule-level exclusion verdict, hoisted for the two
+			// readers below: the NOT INSTALLED annotation and the
+			// translation-hits gate (the source renderer's #8185 shape). A
+			// skipped rule ships no snapshot row and owns no counter, so the
+			// hits line must not print for one.
+			excludedReason := config.DestinationNATRuleExcludedReason(dnat, rule)
 			// #7640: as in the source renderer, do not claim an action the
 			// rule does not carry. This defaulted to "off", so an ACTIONLESS
 			// destination rule displayed as an explicit exemption the operator
@@ -116,7 +122,7 @@ func RenderDestRuleDetail(ctx context.Context, w io.Writer, cfg *config.Config, 
 			// #6534: buildDestinationNATSnapshotsWithFeeds publishes NO entry
 			// for these rules, so the pool address/port printed below is config
 			// the dataplane never installed.
-			noteNotInstalled(w, config.DestinationNATRuleExcludedReason(dnat, rule))
+			noteNotInstalled(w, excludedReason)
 			// #6823: #7640 wired this annotation on the SOURCE renderer only,
 			// while its record and gauge both walk source AND destination
 			// (TestOffendersCoverBothKinds7640). So the operator-facing half
@@ -154,7 +160,10 @@ func RenderDestRuleDetail(ctx context.Context, w io.Writer, cfg *config.Config, 
 			// (other implementations of the interface do error), it simply
 			// cannot fire for the production Manager, which is why the zero got
 			// through. The REST sibling already refuses instead (#5046).
-			if armed {
+			// #9877: a rule the builder skipped owns no counter — printing
+			// `Translation hits: 0` for one would read as armed-but-idle (the
+			// #7473 lie). The NOT INSTALLED line above is its whole story.
+			if armed && excludedReason == "" {
 				ruleKey := dataplane.NATCounterKey(dataplane.NATCounterTypeDest, rs.Name, rule.Name)
 				if cid, ok := cr.NATCounterIDs[ruleKey]; ok {
 					cnt, err := dp.ReadNATRuleCounter(uint32(cid))
@@ -163,7 +172,7 @@ func RenderDestRuleDetail(ctx context.Context, w io.Writer, cfg *config.Config, 
 							cnt.Packets, cnt.Bytes)
 					}
 				}
-			} else if dp != nil {
+			} else if dp != nil && excludedReason == "" {
 				fmt.Fprintf(w, "    Translation hits:        %s\n", natCounterUnarmed)
 			}
 			fmt.Fprint(w, "\n")

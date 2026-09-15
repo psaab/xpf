@@ -64,8 +64,11 @@ func NPTv6OverlapConflict(cfg *Config) string {
 			if rule.Then == "" || rule.Match == "" {
 				continue // not an NPTv6 rule
 			}
-			if NPTv6ScopeUnsupported(rs, rule) {
-				continue // dropped by the snapshot builder; never reaches the helper
+			// Dropped by the snapshot builder — unsupported scope (#5818) or
+			// unknown match leaves (#9877) — never reaches the helper, so it
+			// can neither report nor trigger an overlap.
+			if NPTv6ScopeUnsupported(rs, rule) || StaticNATRuleExcludedReason(rule) != "" {
+				continue
 			}
 			extWords, extN, extOK := nptv6PrefixWords(rule.Match)
 			intWords, intN, intOK := nptv6PrefixWords(rule.Then)

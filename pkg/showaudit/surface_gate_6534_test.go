@@ -148,14 +148,14 @@ var families = []family{
 	{
 		Name:              "source NAT rule",
 		Collections:       []string{"NAT.Source"},
-		BuilderPredicates: []string{"SourceNATPoolUnusableReason"},
+		BuilderPredicates: []string{"SourceNATPoolUnusableReason", "SourceNATRuleExcludedReason"},
 		// #7473: `SourceNATRuleNotInstalledReason` is the exported COMPOSITION
 		// — which pool map to consult and what to answer when the pool is
 		// absent — that pkg/cli, pkg/api and pkg/grpcapi now share instead of
 		// each re-deriving. It carries the verdict, so a renderer reaching it
 		// is annotated; without it here, moving that composition out of
 		// pkg/cli would report three correct renderers as lying.
-		SurfacePredicates: []string{"SourceNATPoolUnusableReason", "SourceNATPoolDisarmedReason", "SourceNATDisarmReasonText", "SourceNATRuleNotInstalledReason"},
+		SurfacePredicates: []string{"SourceNATPoolUnusableReason", "SourceNATPoolDisarmedReason", "SourceNATDisarmReasonText", "SourceNATRuleNotInstalledReason", "SourceNATRuleExcludedReason"},
 		// #7473 closed the CLI text renderers (showNATSourceRuleAll,
 		// showNATSourceRuleSet, showNATSourceSummary). What remains is the
 		// STRUCTURED half: a JSON or protobuf rule object cannot be fixed by

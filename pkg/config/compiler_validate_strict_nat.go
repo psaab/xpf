@@ -3843,6 +3843,16 @@ func sourceNATAggregateReferencedCharges(cfg *Config) []sourceNATAggregatePoolCh
 			if rule == nil || rule.Then.PoolName == "" {
 				continue
 			}
+			// #9877: a rule the snapshot builder DROPS (unknown match leaves)
+			// charges nothing — its pool reaches Rust only via a row this
+			// builder emits. Placed BEFORE the seen-marking below: marking a
+			// dropped rule's pool seen would let a later healthy reference
+			// skip charging it (under-charge; Go admits what Rust refuses).
+			// Consults the builder's own predicate (#6812 F1
+			// consult-don't-rederive).
+			if SourceNATRuleExcludedReason(rule) != "" {
+				continue
+			}
 			name := rule.Then.PoolName
 			if seen[name] {
 				continue

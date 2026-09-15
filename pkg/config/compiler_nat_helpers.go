@@ -585,3 +585,44 @@ func NATMatchPrefixParses(raw string) bool { return natMatchPrefixParses(raw) }
 // is each consumer re-deriving the tolerance and the set of accepted spellings
 // drifting, which is exactly what #7481 found across three implementations.
 func NormalizeNATPrefixLen(raw string) string { return normalizeNATPrefixLen(raw) }
+
+// appendNATUnknownMatchLeaf records a `match` child keyword the NAT match
+// switches do not read (#9877). First-seen order with dedupe: the switches
+// iterate EVERY `match` block (#3850), so a repeated unknown leaf would
+// otherwise record (and warn) twice. The lists are tiny; a linear scan is
+// cheaper than a set.
+func appendNATUnknownMatchLeaf(leaves []string, keyword string) []string {
+	for _, l := range leaves {
+		if l == keyword {
+			return leaves
+		}
+	}
+	return append(leaves, keyword)
+}
+
+// natMatchLeafKnown reports whether head is a modeled `match` leaf for a NAT
+// direction ("source", "destination" or "static") — navigating the SAME
+// schema map the compact normalizer consults before unfolding a packed tail
+// (compact_normalize_8662.go:142), so the two can never disagree on which
+// heads unfold. A packed head outside this map never unfolds and would
+// otherwise escape every match switch; a modeled head with a packed tail is
+// a deliberately declined fold (#8880), not an unknown leaf.
+//
+// Direct children-map access, no wildcard fallback: every keyword on this
+// path is a literal schema child, and a wildcard descent could only
+// misattribute. A failed lookup reports false (record): the suite's compact
+// fixtures would catch a broken path immediately.
+func natMatchLeafKnown(direction, head string) bool {
+	node := setSchema
+	for _, kw := range []string{"security", "nat", direction, "rule-set", "rule", "match"} {
+		if node == nil {
+			return false
+		}
+		node = node.children[kw]
+	}
+	if node == nil {
+		return false
+	}
+	_, ok := node.children[head]
+	return ok
+}
