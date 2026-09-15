@@ -292,6 +292,32 @@ func compileFirewall(node *Node, fw *FirewallConfig) error {
 							schemaForPath("firewall", "family", af, "filter", "term", "from")),
 							term, af)
 					}
+					// #9875: record the value-bearing `from` leaves this term
+					// WROTE but left EMPTY (`from protocol;`, #8480) — the
+					// F-005 half of the tolerant-path widening. Post-compile a
+					// valueless leaf and an omitted one are byte-identical
+					// empty slices, so the marker must be captured from the AST
+					// here, before the node is out of scope. This calls the SAME
+					// firewallTermValuelessFromLeaves helper on the SAME raw
+					// term node (termInst.node, NOT the packed termBody) the
+					// #8480 pre-walk gate walks, with the SAME from-schema
+					// compileFilterFrom is lowered with two statements above —
+					// packing copies and never mutates, so gate and marker see
+					// identical input (including packed tails, which the helper
+					// expands via packedBody rather than relying on the
+					// compact normalizer's scope admitting the pair) and the
+					// recorded set can never drift from the strict-reject set.
+					// In particular a term-level packed valueless leaf (`term T
+					// from protocol;`, #10072) — like a term-level packed
+					// unknown leaf (#10071) — escapes BOTH the gate and this
+					// recording identically (strict-path packing defects with
+					// their own filings — NOT a marker/gate divergence). The
+					// snapshot builder, the lo0 mirror and the PBR classifier
+					// fail the term closed on this field; the strict path
+					// rejects it in pre-walk before compilation, so a committed
+					// config never carries it.
+					term.ValuelessFrom = firewallTermValuelessFromLeaves(termInst.node,
+						schemaForPath("firewall", "family", af, "filter", "term", "from"))
 
 					// #3850: apply EVERY `then {}` block. compileFilterThen
 					// accumulates modifiers (count/log/forwarding-class/...); a

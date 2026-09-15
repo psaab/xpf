@@ -223,7 +223,16 @@ func toNftLo0Term(term *config.FirewallFilterTerm, pl map[string]*config.PrefixL
 		// FlexMatchUnrepresentable line below (#6804).
 		ICMPTypeUnrepresentable: len(term.UnknownICMPTypes) > 0,
 		ICMPCodeUnrepresentable: len(term.UnknownICMPCodes) > 0,
-		TCPFlags:                term.TCPFlags,
+		// #9875: a whole `from` leaf the dataplane does not enforce
+		// (term.UnknownFrom, #3307) or a value-bearing leaf written with NO
+		// operand (term.ValuelessFrom, #8480) vanishes at this boundary
+		// unless its marker is carried too — every field above is a
+		// surviving predicate. Without this line the mirror rendered the
+		// term WITHOUT its authored constraint while the userspace mirror
+		// set the identically-named wire field and failed the snapshot
+		// closed. Mirrors the ICMPTypeUnrepresentable lines above (#6806).
+		FromUnrepresentable: len(term.UnknownFrom) > 0 || len(term.ValuelessFrom) > 0,
+		TCPFlags:            term.TCPFlags,
 		// #6804: carry the flexible-match-range so the kernel mirror renders the
 		// term's narrowing. Before this the spec had no field for it, so the
 		// predicate was dropped at this boundary and the term rendered WIDER

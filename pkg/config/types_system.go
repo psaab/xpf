@@ -1545,7 +1545,24 @@ type FirewallFilterTerm struct {
 	// is exactly the compileFilterFrom switch cases (every one maps to a wire
 	// field the snapshot builder emits and the Rust matcher evaluates).
 	UnknownFrom []string
-
+	// ValuelessFrom records value-bearing `from` match leaves the term WROTE
+	// but left EMPTY (`from protocol;` with no operand, #8480). Such a leaf
+	// compiles to the byte-identical empty match set the omitted form
+	// produces, which the matchers read as match-ANY — the term widens in
+	// whichever direction the action points. validateFirewallFilterValuelessFromStrict
+	// hard-rejects the commit (pre-walk, on the AST, because post-compile the
+	// valueless and omitted forms are indistinguishable); the tolerant load /
+	// peer-sync path downgrades to a warning (#1960 no-brick). Populated by
+	// compileFirewall via firewallTermValuelessFromLeaves — the SAME helper on
+	// the SAME raw term node the strict gate walks, so the recorded set can
+	// never drift from the strict-reject set (mirrors UnknownFrom /
+	// UnknownAddresses). Read by the userspace snapshot builder (which sets
+	// the FromUnrepresentable wire marker so the Rust filter compiler fails
+	// the snapshot CLOSED, #9875), the kernel lo0 mirror (which fails the
+	// netlink plan CLOSED), and the PBR classifier (which drops the term's
+	// steering). is-fragment and flexible-match-range are NOT value-bearing
+	// (flag / children-carried operands) and are never recorded here.
+	ValuelessFrom []string
 	// CrossFamilyMatchSpellings records `from` match leaves written with the
 	// OTHER address family's spelling of a field that both families carry:
 	//

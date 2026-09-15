@@ -33,11 +33,13 @@ import (
 //	   no prefix of this family with a positive scope. The term cannot match
 //	   anything, so a rule would be dead. `nftTermAddrPredicates` returns
 //	   emitNoRule.
-//	B. EMIT THE TOKEN VERBATIM — an unresolvable protocol / ICMP type / ICMP
-//	   code. Invalid nft is the POINT: `nft -f -` loads atomically, so the whole
-//	   ruleset is REJECTED and the prior generation stays installed (#6806,
-//	   matching #6405 ports/DSCP and #6512 addresses).
-//	   `nftTermProtocolPredicates`, `nftTermICMPPredicates`.
+//	B. EMIT INVALID NFT — an unresolvable protocol / ICMP type / ICMP code
+//	   (#6806), or a whole `from` leaf the dataplane does not enforce
+//	   (#9875). Invalid nft is the POINT: `nft -f -` loads atomically, so the
+//	   whole ruleset is REJECTED and the prior generation stays installed
+//	   (#6806, matching #6405 ports/DSCP and #6512 addresses).
+//	   `nftTermProtocolPredicates`, `nftTermICMPPredicates`,
+//	   the `__xpf_refuse_unrepresentable_from__` rule in `nftRulesFromTerm`.
 //	C. FAIL THE TERM CLOSED WITH A SCOPED DROP — an unrepresentable tcp-flags
 //	   expression (#5512). Rendering the term without its flag narrowing would
 //	   widen it, so the term becomes a drop scoped to TCP. Still inline, in the
@@ -201,8 +203,52 @@ func nftTermICMPPredicates(term *config.FirewallFilterTerm, family string) (part
 	return parts
 }
 
+// unrepresentableFromLeaves names the whole-`from` leaves the dataplane does
+// not enforce (#9875): the unknown leaves on term.UnknownFrom (#3307) plus
+// the value-bearing-but-empty leaves on term.ValuelessFrom (#8480). Names
+// feed the refusal diagnostic (slog) ONLY — never the nft payload, whose
+// refusal statement is constant (see below).
+func unrepresentableFromLeaves(term *config.FirewallFilterTerm) []string {
+	if len(term.UnknownFrom) == 0 && len(term.ValuelessFrom) == 0 {
+		return nil
+	}
+	leaves := make([]string, 0, len(term.UnknownFrom)+len(term.ValuelessFrom))
+	leaves = append(leaves, term.UnknownFrom...)
+	leaves = append(leaves, term.ValuelessFrom...)
+	return leaves
+}
+
+// nftRefuseUnrepresentableFrom is the #9875 refusal rule, CONSTANT by
+// design: no term-controlled text is interpolated into it. UnknownFrom
+// holds raw node names and the lexer permits embedded quotes, so a
+// refusal that quoted the leaf names would make rejection isolation
+// depend on diagnostic contents — a crafted name could break out of the
+// comment. The nft-invalid bareword rejects the atomic load and the prior
+// generation is retained however hostile the input; the offending leaves
+// are reported via slog at the emit site instead.
+const nftRefuseUnrepresentableFrom = `comment "unrepresentable from" __xpf_refuse_unrepresentable_from__`
+
 func nftRulesFromTerm(term *config.FirewallFilterTerm, family string, prefixLists map[string]*config.PrefixList) []string {
 	var parts []string
+
+	// #9875, DISPOSITION B: a whole `from` leaf the dataplane does not
+	// enforce (term.UnknownFrom, #3307) or a value-bearing leaf written
+	// with NO operand (term.ValuelessFrom, #8480). This preflight runs
+	// FIRST, ahead of the address elimination below: a marked term refuses
+	// the whole load even when it is also match-nothing. Letting a marked
+	// match-nothing term skip would install the remaining ruleset while
+	// the Rust filter compiler rejects the same snapshot. Refuse the load
+	// with the CONSTANT rule above so `nft -f -` REJECTS the whole ruleset
+	// and the prior generation is retained — the #6806 posture, matching
+	// the netlink builder's FromUnrepresentable fail-closed. Deliberately
+	// NOT the #5512 per-term drop: a dropped constraint of unknown
+	// direction cannot be scoped, and a bare drop would deny ALL
+	// host-inbound traffic.
+	if leaves := unrepresentableFromLeaves(term); len(leaves) > 0 {
+		slog.Warn("lo0 kernel nftables mirror: refusing load over unrepresentable from leaves",
+			"term", term.Name, "leaves", strings.Join(leaves, ", "))
+		return []string{nftRefuseUnrepresentableFrom}
+	}
 
 	addrParts, emitNoRule := nftTermAddrPredicates(term, family, prefixLists)
 	if emitNoRule {
