@@ -9,9 +9,11 @@ use crate::afxdp::PROTO_TCP;
 #[test]
 fn remember_prepared_recycle_tracks_only_shared_fill_recycles() {
     let mut in_flight_prepared_recycles = FastMap::default();
+    let mut in_flight_untracked_tx = FastSet::default();
 
     remember_prepared_recycle(
         &mut in_flight_prepared_recycles,
+        &mut in_flight_untracked_tx,
         &PreparedTxRequest {
             offset: 41,
             len: 64,
@@ -29,6 +31,7 @@ fn remember_prepared_recycle_tracks_only_shared_fill_recycles() {
     );
     remember_prepared_recycle(
         &mut in_flight_prepared_recycles,
+        &mut in_flight_untracked_tx,
         &PreparedTxRequest {
             offset: 42,
             len: 64,
@@ -46,6 +49,7 @@ fn remember_prepared_recycle_tracks_only_shared_fill_recycles() {
     );
     remember_prepared_recycle(
         &mut in_flight_prepared_recycles,
+        &mut in_flight_untracked_tx,
         &PreparedTxRequest {
             offset: 43,
             len: 64,
@@ -64,7 +68,6 @@ fn remember_prepared_recycle_tracks_only_shared_fill_recycles() {
             enqueue_ns: 0,
         },
     );
-
     assert_eq!(in_flight_prepared_recycles.len(), 2);
     assert_eq!(
         in_flight_prepared_recycles.get(&42),
@@ -78,6 +81,12 @@ fn remember_prepared_recycle_tracks_only_shared_fill_recycles() {
         })
     );
     assert!(!in_flight_prepared_recycles.contains_key(&41));
+    // #9900 F-092 (GPT-2): the FreeTxFrame submit lands in the untracked
+    // ownership set instead — same split, both sides exact.
+    assert_eq!(in_flight_untracked_tx.len(), 1);
+    assert!(in_flight_untracked_tx.contains(&41));
+    assert!(!in_flight_untracked_tx.contains(&42));
+    assert!(!in_flight_untracked_tx.contains(&43));
 }
 
 #[test]

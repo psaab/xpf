@@ -26,7 +26,7 @@ use crate::afxdp::types::{
 };
 use crate::afxdp::umem::MmapArea;
 use crate::afxdp::worker::BindingWorker;
-use crate::afxdp::{FastMap, TX_BATCH_SIZE, tx_frame_capacity};
+use crate::afxdp::{FastMap, FastSet, TX_BATCH_SIZE, tx_frame_capacity};
 use crate::xsk_ffi::xdp::XdpDesc;
 
 use super::{
@@ -1731,6 +1731,7 @@ pub(in crate::afxdp) fn settle_exact_local_fifo_submission(
     queue: Option<&mut CoSQueueRuntime>,
     free_tx_frames: &mut VecDeque<u64>,
     scratch_local_tx: &mut Vec<ExactLocalScratchTxRequest>,
+    in_flight_untracked_tx: &mut FastSet<u64>,
     inserted: usize,
 ) -> (u64, u64) {
     let Some(queue) = queue else {
@@ -1758,6 +1759,12 @@ pub(in crate::afxdp) fn settle_exact_local_fifo_submission(
             None => break,
         }
     }
+    // #9900 F-092 (GPT-2): the kernel accepted the `..sent` prefix — record
+    // ownership for exactly those descs (the drain built them in ring order,
+    // so the prefix is what `inserted` accepted).
+    for req in scratch_local_tx.iter().take(sent) {
+        in_flight_untracked_tx.insert(req.offset);
+    }
     for req in scratch_local_tx.drain(sent..).rev() {
         free_tx_frames.push_front(req.offset);
     }
@@ -1769,6 +1776,7 @@ pub(in crate::afxdp) fn settle_exact_local_scratch_submission_flow_fair(
     queue: Option<&mut CoSQueueRuntime>,
     free_tx_frames: &mut VecDeque<u64>,
     scratch_local_tx: &mut Vec<(u64, TxRequest)>,
+    in_flight_untracked_tx: &mut FastSet<u64>,
     inserted: usize,
     now_ns: u64,
 ) -> (u64, u64) {
@@ -1797,8 +1805,9 @@ pub(in crate::afxdp) fn settle_exact_local_scratch_submission_flow_fair(
             free_tx_frames.push_front(offset);
             cos_queue_push_front(queue, CoSPendingTxItem::Local(req));
         } else {
+            // #9900 F-092 (GPT-2): kernel-accepted — record ownership.
+            in_flight_untracked_tx.insert(offset);
             // Committed: account the TX bytes against the bucket
-            // BEFORE moving the request out (req still owned).
             // now_ns is sampled once per batch by the caller; this
             // scope reuses that single value for every packet.
             let bytes = req.bytes.len() as u64;
@@ -1833,6 +1842,7 @@ pub(in crate::afxdp) fn settle_exact_prepared_fifo_submission(
     queue: Option<&mut CoSQueueRuntime>,
     scratch_prepared_tx: &mut Vec<ExactPreparedScratchTxRequest>,
     in_flight_prepared_recycles: &mut FastMap<u64, PreparedTxRecycle>,
+    in_flight_untracked_tx: &mut FastSet<u64>,
     inserted: usize,
 ) -> (u64, u64) {
     let Some(queue) = queue else {
@@ -1845,7 +1855,11 @@ pub(in crate::afxdp) fn settle_exact_prepared_fifo_submission(
     for _ in 0..sent {
         match queue.hot.items.pop_front() {
             Some(CoSPendingTxItem::Prepared(req)) => {
-                remember_prepared_recycle(in_flight_prepared_recycles, &req);
+                remember_prepared_recycle(
+                    in_flight_prepared_recycles,
+                    in_flight_untracked_tx,
+                    &req,
+                );
                 sent_packets += 1;
                 sent_bytes += req.len as u64;
             }
@@ -1864,6 +1878,7 @@ fn settle_exact_prepared_scratch_submission_flow_fair(
     queue: Option<&mut CoSQueueRuntime>,
     scratch_prepared_tx: &mut Vec<PreparedTxRequest>,
     in_flight_prepared_recycles: &mut FastMap<u64, PreparedTxRecycle>,
+    in_flight_untracked_tx: &mut FastSet<u64>,
     inserted: usize,
     now_ns: u64,
 ) -> (u64, u64) {
@@ -1892,7 +1907,7 @@ fn settle_exact_prepared_scratch_submission_flow_fair(
             // #1829 Phase 1 (Codex review on PR #1846): committed-
             // prefix-only sojourn sample — see the Local settle above.
             queue.telemetry.sojourn.record(req.enqueue_ns, now_ns);
-            remember_prepared_recycle(in_flight_prepared_recycles, &req);
+            remember_prepared_recycle(in_flight_prepared_recycles, in_flight_untracked_tx, &req);
             sent_packets += 1;
             sent_bytes += bytes;
         }

@@ -15,7 +15,7 @@
 // filter and the candidate loop rather than restated in each. Cold path
 // only (control responses), no per-packet work.
 
-use super::{lock_server_recover, refresh_status, should_run_afxdp};
+use super::{lock_server_state_recover, refresh_status, should_run_afxdp};
 use crate::protocol::{BindingStatus, ConfigSnapshot, InterfaceSnapshot, QueueStatus};
 use crate::server::ServerState;
 use chrono::Utc;
@@ -92,7 +92,13 @@ pub(crate) fn wait_for_binding_settle(state: &Arc<Mutex<ServerState>>, timeout: 
     let deadline = Instant::now() + timeout;
     loop {
         {
-            let mut guard = lock_server_recover(&state);
+            let mut guard = lock_server_state_recover(&state);
+            // GPT-4: never settle-wait (and never reconcile-refresh) on
+            // quarantined state — the bindings vector itself may be torn.
+            // The handler's re-lock refuses next.
+            if guard.quarantined_after_panic {
+                return;
+            }
             refresh_status(&mut guard);
             if bindings_settled(&guard.status.bindings) || Instant::now() >= deadline {
                 return;
@@ -658,7 +664,7 @@ pub(crate) fn replan_queues(
     workers: usize,
     existing: &[BindingStatus],
     forwarding_armed: bool,
-) -> Vec<BindingStatus> {
+) -> Result<Vec<BindingStatus>, String> {
     let mut candidates: Vec<(String, usize)> = Vec::new();
     let mut ifindex_by_name: BTreeMap<String, i32> = BTreeMap::new();
     let mut seen_linux: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -826,13 +832,19 @@ pub(crate) const BINDING_QUEUES_PER_IFACE: usize = 16;
 /// binding-missing queues on an interface that still reads up.
 pub(crate) const MAX_BINDING_IFINDEX: i32 = 65536;
 
+/// Mint a binding plan from candidates, or refuse it with a reason.
+///
+/// `Ok(vec![])` is a LEGITIMATELY empty plan (no candidates). Every refusal
+/// (NAT-holder width, slot capacity, wild ifindex) is `Err(reason)` — never
+/// an empty `Ok` — so the caller cannot mistake a refused plan for an empty
+/// one and install zero bindings over a working config (GPT-6).
 pub(crate) fn replan_bindings_from_candidates(
     workers: usize,
     existing: &[BindingStatus],
     candidates: Vec<(String, usize)>,
     ifindex_by_name: BTreeMap<String, i32>,
     forwarding_armed: bool,
-) -> Vec<BindingStatus> {
+) -> Result<Vec<BindingStatus>, String> {
     // #7497 blocker 6: prior state is carried forward keyed by the binding's
     // STABLE IDENTITY — `(interface, queue_id)` — and not by slot.
     //
@@ -858,7 +870,7 @@ pub(crate) fn replan_bindings_from_candidates(
         );
     }
     if candidates.is_empty() {
-        return Vec::new();
+        return Ok(Vec::new());
     }
     // #7497: per-interface queue counts. Each interface contributes
     // `min(rx_queues, BINDING_QUEUES_PER_IFACE)` rows instead of every
@@ -938,8 +950,8 @@ pub(crate) fn replan_bindings_from_candidates(
     // check refuses exactly the configurations that would mis-key a holder.
     let max_worker_id = queue_count.min(workers.max(1)).saturating_sub(1);
     if queue_count > 0 && max_worker_id >= crate::nat::MAX_NAT_HOLDER_WORKERS as usize {
-        eprintln!(
-            "replan_bindings: REFUSING plan — {} queues x {} workers mints worker_id {} \
+        let reason = format!(
+            "{} queues x {} workers mints worker_id {} \
              but the NAT holder mask tracks only {} workers (MAX_NAT_HOLDER_WORKERS); \
              an untracked worker would free a pool port another worker still holds",
             queue_count,
@@ -947,7 +959,8 @@ pub(crate) fn replan_bindings_from_candidates(
             max_worker_id,
             crate::nat::MAX_NAT_HOLDER_WORKERS
         );
-        return Vec::new();
+        eprintln!("replan_bindings: REFUSING plan — {reason}");
+        return Err(reason);
     }
 
     // #7497: `slot` is minted DENSELY below — a plain counter over the bindings
@@ -989,15 +1002,16 @@ pub(crate) fn replan_bindings_from_candidates(
     // would refuse plans that fit.
     let planned_bindings: u64 = per_interface.iter().map(|(_, q)| *q as u64).sum();
     if planned_bindings > MAX_BINDING_SLOTS as u64 {
-        eprintln!(
-            "replan_bindings: REFUSING plan — {} interfaces contributing {} bindings \
+        let reason = format!(
+            "{} interfaces contributing {} bindings \
              in total (widest interface has {} queues), but \
              userspace_heartbeat/userspace_xsk_map address only {} slots \
              (MAX_BINDING_SLOTS); the excess bindings could not be registered and \
              their RX queues would drop all transit traffic",
             interfaces_len, planned_bindings, queue_count, MAX_BINDING_SLOTS
         );
-        return Vec::new();
+        eprintln!("replan_bindings: REFUSING plan — {reason}");
+        return Err(reason);
     }
 
     // #9900 F-150: an ifindex at or above MAX_BINDING_IFINDEX refuses the
@@ -1015,13 +1029,14 @@ pub(crate) fn replan_bindings_from_candidates(
         .filter_map(|(name, _)| ifindex_by_name.get(name).map(|i| (name.as_str(), *i)))
         .find(|(_, ifindex)| *ifindex >= MAX_BINDING_IFINDEX)
     {
-        eprintln!(
-            "replan_bindings: REFUSING plan — interface {wild_iface} has ifindex \
+        let reason = format!(
+            "interface {wild_iface} has ifindex \
              {wild_ifindex}, at or above the addressable ceiling \
              (MAX_BINDING_IFINDEX = {MAX_BINDING_IFINDEX}); its queues would fail \
              closed as binding misses while the interface still reads up"
         );
-        return Vec::new();
+        eprintln!("replan_bindings: REFUSING plan — {reason}");
+        return Err(reason);
     }
 
     // #7497 blocker 3: an operator upgrading onto per-interface queue counts can
@@ -1127,7 +1142,7 @@ pub(crate) fn replan_bindings_from_candidates(
             slot += 1;
         }
     }
-    out
+    Ok(out)
 }
 
 pub(crate) fn summarize_queues(bindings: &[BindingStatus]) -> Vec<QueueStatus> {

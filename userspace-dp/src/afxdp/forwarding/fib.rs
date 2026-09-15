@@ -91,8 +91,7 @@ pub(in crate::afxdp) fn parse_packet_destination(
     // a read-only dst parse, so double-garbage (bad stamp AND unparseable
     // ethertype) keeps the old stamp-indexed behavior (usually `None` via the
     // length guards below) instead of growing a new NoRoute cliff.
-    let l3 = crate::afxdp::frame::nibble_checked_l3(frame, meta.l3_offset, meta.addr_family)
-        .unwrap_or(meta.l3_offset as usize);
+    let l3 = crate::afxdp::frame::verified_l3_or_stamp(frame, meta.l3_offset, meta.addr_family);
     match meta.addr_family as i32 {
         libc::AF_INET => {
             let end = l3.checked_add(20)?;

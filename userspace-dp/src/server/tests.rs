@@ -44,6 +44,7 @@ fn new_state(status: ProcessStatus) -> Arc<Mutex<ServerState>> {
         snapshot: None,
         afxdp: afxdp::Coordinator::new(),
         state_writer: Arc::new(StateWriter::new()),
+        quarantined_after_panic: false,
     }))
 }
 
@@ -718,6 +719,110 @@ fn bump_fib_generation_updates_status_and_stored_snapshot() {
     );
 }
 
+/// #9900 F-150 (GPT-6): a snapshot whose plan the planner refuses (wild
+/// ifindex here) fails the apply WITHOUT installing — no snapshot swap, no
+/// bindings minted, no persist. Pre-fix the refusal returned an empty plan
+/// that installed zero bindings over the working config with ok=true.
+#[test]
+fn apply_snapshot_with_wild_ifindex_is_refused_without_install_9900() {
+    use crate::{ConfigSnapshot, InterfaceSnapshot, CONFIG_SNAPSHOT_PROTOCOL_VERSION};
+    let state = new_state(ProcessStatus::default());
+    let mut request = req("apply_snapshot");
+    request.snapshot = Some(ConfigSnapshot {
+        version: CONFIG_SNAPSHOT_PROTOCOL_VERSION,
+        generation: 1,
+        fib_generation: 1,
+        generated_at: chrono::Utc::now(),
+        interfaces: vec![InterfaceSnapshot {
+            name: "ge-0/0/0".to_string(),
+            linux_name: "ge-0-0-0".to_string(),
+            ifindex: 70_000,
+            zone: "trust".to_string(),
+            rx_queues: 2,
+            ..InterfaceSnapshot::default()
+        }],
+        ..ConfigSnapshot::default()
+    });
+    let response = run_request(state.clone(), request);
+    assert!(!response.ok, "wild-ifindex plan must be refused");
+    assert!(
+        response.error.contains("refused"),
+        "error must say refused, got: {}",
+        response.error
+    );
+    let guard = state.lock().expect("state");
+    assert!(
+        guard.snapshot.is_none(),
+        "refused snapshot must not become the stored baseline"
+    );
+    assert!(
+        guard.status.bindings.is_empty(),
+        "refused plan must mint no bindings"
+    );
+}
+
+/// #9900 F-094 (GPT-4/SPARK-M3): quarantined state refuses requests. The
+/// handler returns `Err` (no dispatch, no status attach from torn state) and
+/// ensures shutdown is underway. QUARANTINED is set by the poison/panic arms;
+/// here it is set directly to prove the REFUSAL half in isolation.
+#[test]
+fn quarantined_state_refuses_requests_9900() {
+    let state = new_state(ProcessStatus::default());
+    state.lock().expect("state").quarantined_after_panic = true;
+    let running = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let (mut client, server) =
+        std::os::unix::net::UnixStream::pair().expect("control socket pair");
+    let session_domain = state.lock().expect("state").afxdp.session_domain().clone();
+    let state_file = format!(
+        "{}/xpf-quarantine-test-{}.json",
+        std::env::temp_dir().display(),
+        std::process::id()
+    );
+    let handle = {
+        let state = state.clone();
+        let running = running.clone();
+        let state_file = state_file.clone();
+        std::thread::spawn(move || {
+            handle_stream(server, &state_file, state, running, session_domain)
+        })
+    };
+    let request = req("ping");
+    serde_json::to_writer(&mut client, &request).expect("write request");
+    std::io::Write::write_all(&mut client, b"\n").expect("newline");
+    let err = handle.join().expect("handler thread").expect_err("must refuse");
+    assert!(
+        err.contains("quarantined"),
+        "refusal must say quarantined, got: {err}"
+    );
+    assert!(
+        !running.load(std::sync::atomic::Ordering::SeqCst),
+        "refusal must ensure shutdown is underway"
+    );
+    let _ = std::fs::remove_file(&state_file);
+}
+
+/// #9900 F-094 (GPT-4): quarantined state is never persisted. The write is
+/// skipped (Ok) so shutdown paths don't fail on it — but the file keeps
+/// exactly its prior bytes rather than baking torn state in.
+#[test]
+fn quarantined_state_skips_state_file_write_9900() {
+    let state = new_state(ProcessStatus::default());
+    let state_file = format!(
+        "{}/xpf-quarantine-persist-test-{}.json",
+        std::env::temp_dir().display(),
+        std::process::id()
+    );
+    std::fs::write(&state_file, b"prior-bytes").expect("seed file");
+    state.lock().expect("state").quarantined_after_panic = true;
+    write_state(&state_file, &state).expect("skip must still be Ok");
+    assert_eq!(
+        std::fs::read(&state_file).expect("read back"),
+        b"prior-bytes",
+        "quarantined write_state must leave the file untouched"
+    );
+    let _ = std::fs::remove_file(&state_file);
+}
+
 /// #3767 H4: bump_fib_generation must version-gate exactly like
 /// apply_snapshot. A mixed-version / corrupt client (version != protocol)
 /// must be REJECTED before mutating any validation state — status,
@@ -1220,6 +1325,7 @@ fn apply_snapshot_same_plan_needs_reconcile_build_failure_rejects_and_keeps_prio
         snapshot: Some(prior),
         afxdp: afxdp::Coordinator::new(),
         state_writer: Arc::new(StateWriter::new()),
+        quarantined_after_panic: false,
     }));
 
     // New same-plan apply: defer_workers=false, unparseable address -> the
@@ -1329,6 +1435,7 @@ fn post_teardown_spawn_failure_fails_closed_no_persist_4952() {
         snapshot: Some(prior),
         afxdp: afxdp::Coordinator::new(),
         state_writer: Arc::new(StateWriter::new()),
+        quarantined_after_panic: false,
     }));
 
     // Force the single planned worker's spawn to fail on the post-teardown
@@ -1515,6 +1622,7 @@ fn full_apply_post_teardown_spawn_failure_fails_closed_no_persist_6140() {
         snapshot: Some(prior),
         afxdp: afxdp::Coordinator::new(),
         state_writer: Arc::new(StateWriter::new()),
+        quarantined_after_panic: false,
     }));
 
     // Force the single planned worker's spawn to fail on the post-teardown
@@ -1675,6 +1783,7 @@ fn full_apply_post_spawn_inthread_bind_failure_fails_closed_no_persist_5143() {
         snapshot: Some(prior),
         afxdp: afxdp::Coordinator::new(),
         state_writer: Arc::new(StateWriter::new()),
+        quarantined_after_panic: false,
     }));
 
     // Force the single planned worker to SPAWN but report an INCOMPLETE bound
@@ -2703,6 +2812,7 @@ fn armed_state_with_failing_reconcile(bindings: Vec<BindingStatus>) -> Arc<Mutex
         snapshot: Some(failing_reconcile_snapshot()),
         afxdp: afxdp::Coordinator::new(),
         state_writer: Arc::new(StateWriter::new()),
+        quarantined_after_panic: false,
     }))
 }
 
@@ -2839,6 +2949,7 @@ fn never_settling_state() -> Arc<Mutex<ServerState>> {
         snapshot: None,
         afxdp: afxdp::Coordinator::new(),
         state_writer: Arc::new(StateWriter::new()),
+        quarantined_after_panic: false,
     }))
 }
 
@@ -4148,6 +4259,7 @@ fn drain_session_deltas_survive_write_state_failure_5294() {
         snapshot: None,
         afxdp: coord,
         state_writer: Arc::new(StateWriter::new()),
+        quarantined_after_panic: false,
     }));
 
     // A state_file inside a directory that does not exist makes write_state's
@@ -4788,6 +4900,7 @@ fn failed_forwarding_reconcile_restores_the_prior_arm_state_6750() {
         snapshot: Some(failing_reconcile_snapshot()),
         afxdp: afxdp::Coordinator::new(),
         state_writer: Arc::new(StateWriter::new()),
+        quarantined_after_panic: false,
     }));
 
     let mut request = req("set_forwarding_state");
@@ -5186,6 +5299,7 @@ mod routing_domain_delete_7160 {
             snapshot: None,
             afxdp,
             state_writer: Arc::new(StateWriter::new()),
+            quarantined_after_panic: false,
         }))
     }
 
@@ -5221,6 +5335,7 @@ mod routing_domain_delete_7160 {
             snapshot: None,
             afxdp,
             state_writer: Arc::new(StateWriter::new()),
+            quarantined_after_panic: false,
         }))
     }
 
@@ -5392,6 +5507,7 @@ mod routing_domain_delete_7160 {
                 snapshot: None,
                 afxdp,
                 state_writer: Arc::new(StateWriter::new()),
+                quarantined_after_panic: false,
             }));
             let mut request = bare_five_tuple_delete();
             request
@@ -5455,6 +5571,7 @@ mod routing_domain_delete_7160 {
                     snapshot: None,
                     afxdp,
                     state_writer: Arc::new(StateWriter::new()),
+                    quarantined_after_panic: false,
                 }));
                 let mut request = bare_five_tuple_delete();
                 request
@@ -5536,6 +5653,7 @@ mod routing_domain_delete_7160 {
             snapshot: None,
             afxdp,
             state_writer: Arc::new(StateWriter::new()),
+            quarantined_after_panic: false,
         }));
 
         let mut request = req("sync_session");
@@ -5588,6 +5706,7 @@ mod routing_domain_delete_7160 {
             snapshot: None,
             afxdp: afxdp::Coordinator::new(),
             state_writer: Arc::new(StateWriter::new()),
+            quarantined_after_panic: false,
         }));
         let mut request = req("sync_session");
         request.session_sync = Some(upsert_request());
@@ -5659,6 +5778,7 @@ mod routing_domain_delete_7160 {
             snapshot: None,
             afxdp,
             state_writer: Arc::new(StateWriter::new()),
+            quarantined_after_panic: false,
         }));
 
         let mut request = req("sync_session");

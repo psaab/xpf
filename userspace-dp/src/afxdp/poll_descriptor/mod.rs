@@ -2587,7 +2587,13 @@ pub(super) fn poll_binding_process_descriptor(
                                 // payload). Computed from the ingress
                                 // frame at the L3 offset.
                                 let snat_non_first_fragment = {
-                                    let l3 = meta.l3_offset as usize;
+                                    // SPARK-m6: verify L3 — a wrong stamp flips
+                                    // this gate (pool-port leak + payload harm).
+                                    let l3 = verified_l3_or_stamp(
+                                        packet_frame,
+                                        meta.l3_offset,
+                                        meta.addr_family,
+                                    );
                                     l3 <= packet_frame.len()
                                         && is_non_first_fragment(
                                             &packet_frame[l3..],
@@ -3049,8 +3055,14 @@ pub(super) fn poll_binding_process_descriptor(
                                         // rewrite; the cross-family NAT64 path
                                         // installs its own association (with
                                         // reverse info) earlier on the cold path.
-                                        if let Some(l3_packet) =
-                                            packet_frame.get(meta.l3_offset as usize..)
+                                        if let Some(l3_packet) = packet_frame.get(
+                                            verified_l3_or_stamp(
+                                                packet_frame,
+                                                meta.l3_offset,
+                                                meta.addr_family,
+                                            )
+                                            ..,
+                                        )
                                         {
                                             // #5146: publish the NAT64 (cross-
                                             // family) first-fragment association
@@ -3786,7 +3798,7 @@ pub(super) fn poll_binding_process_descriptor(
                         decision
                     }
                 } else if let Some(hit) = packet_frame
-                    .get(meta.l3_offset as usize..)
+                    .get(verified_l3_or_stamp(packet_frame, meta.l3_offset, meta.addr_family)..)
                     .and_then(|l3| {
                         // #2562: NAT64 forward non-first fragment fast path. A
                         // cached association (installed by the FIRST fragment on
@@ -5979,7 +5991,12 @@ pub(super) fn poll_binding_process_descriptor(
                                         // #1852: gate pool-mode SNAT allocation
                                         // for a non-first fragment (no L4 ports).
                                         let snat_non_first_fragment = {
-                                            let l3 = meta.l3_offset as usize;
+                                            // SPARK-m6: verify L3 (see above).
+                                            let l3 = verified_l3_or_stamp(
+                                                packet_frame,
+                                                meta.l3_offset,
+                                                meta.addr_family,
+                                            );
                                             l3 <= packet_frame.len()
                                                 && is_non_first_fragment(
                                                     &packet_frame[l3..],

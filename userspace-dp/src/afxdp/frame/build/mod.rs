@@ -38,7 +38,15 @@ pub(in crate::afxdp) fn build_forwarded_frame_into_from_frame(
     // Trust the stamped L3 offset only when the nibble at it matches the
     // family (#9900 F-095); a wrong-but-plausible stamp falls back to the
     // wire parse instead of shifting the payload copy and every L3 rewrite.
-    let l3 = nibble_checked_l3(frame, meta.l3_offset, meta.addr_family)?;
+    // GPT-5: the L4 stamp dies with a distrusted L3 (neutralize to `l3`,
+    // forcing wire derivation in `v6_rel_l4_offset`).
+    let checked = nibble_checked_l3(frame, meta.l3_offset, meta.addr_family)?;
+    let l3 = checked.l3;
+    let mut meta = meta;
+    meta.l3_offset = l3 as u16;
+    if !checked.stamp_trusted {
+        meta.l4_offset = l3 as u16;
+    }
     if l3 >= frame.len() {
         return None;
     }

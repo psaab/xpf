@@ -543,8 +543,17 @@ type xpfCollector struct {
 	// worker that stopped draining rather than at a fast producer.
 	userspaceWorkerCommandQueueDrops       *prometheus.Desc
 	userspaceSharedSessionPoisonRecoveries *prometheus.Desc
-	userspaceSyncedImportZoneUnresolved    *prometheus.Desc
-	userspaceSyncedImportUnpublished       *prometheus.Desc
+	// #9900: frame-ownership violation counters — kernel-fault and
+	// request-path fault signals, zero on a healthy dataplane.
+	userspaceTxCompletionSkew            *prometheus.Desc
+	userspaceTxCompletionInvalid         *prometheus.Desc
+	userspaceTxCompletionDuplicate       *prometheus.Desc
+	userspaceFillInvalid                 *prometheus.Desc
+	userspaceWorkerCommandQueueShed      *prometheus.Desc
+	userspaceServerStatePoisonRecoveries *prometheus.Desc
+	userspaceServerHandlerPanics         *prometheus.Desc
+	userspaceSyncedImportZoneUnresolved  *prometheus.Desc
+	userspaceSyncedImportUnpublished     *prometheus.Desc
 	// #7398: three Coordinator counters that were computed and never shown.
 	userspaceSessionInstallStaleIgnored       *prometheus.Desc
 	userspaceSessionDeleteStaleIgnored        *prometheus.Desc
@@ -1039,6 +1048,13 @@ func (c *xpfCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.userspaceWorkerCommandQueuePoisonRecoveries
 	ch <- c.userspaceWorkerCommandQueueDrops
 	ch <- c.userspaceSharedSessionPoisonRecoveries
+	ch <- c.userspaceTxCompletionSkew
+	ch <- c.userspaceTxCompletionInvalid
+	ch <- c.userspaceTxCompletionDuplicate
+	ch <- c.userspaceFillInvalid
+	ch <- c.userspaceWorkerCommandQueueShed
+	ch <- c.userspaceServerStatePoisonRecoveries
+	ch <- c.userspaceServerHandlerPanics
 	ch <- c.userspaceSyncedImportZoneUnresolved
 	ch <- c.userspaceSyncedImportUnpublished
 	ch <- c.userspaceSessionInstallStaleIgnored

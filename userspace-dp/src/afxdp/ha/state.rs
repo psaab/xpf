@@ -129,6 +129,24 @@ impl crate::afxdp::Coordinator {
         Ok(())
     }
 
+    /// #9900 F-093 (GPT-7): the command queues of LIVE workers only, for fan-outs
+    /// that push to every queue they are given (RG-activation Refresh + reverse
+    /// prewarm). Dead workers are shed + counted (2 per worker: one per fan-out,
+    /// operation-level) and their queues excluded, so neither fan-out feeds a
+    /// queue no thread will ever drain.
+    pub(super) fn collect_live_worker_commands(
+        records: &std::collections::BTreeMap<
+            u32,
+            std::sync::Arc<crate::afxdp::coordinator::WorkerRuntimeRecord>,
+        >,
+    ) -> Vec<std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<WorkerCommand>>>> {
+        records
+            .values()
+            .filter(|rec| !rec.shed_if_dead(2))
+            .map(|rec| rec.handle.commands.clone())
+            .collect()
+    }
+
     fn handle_activated_rgs(&self, activated_rgs: &[i32], now_secs: u64) {
         if activated_rgs.is_empty() {
             return;
@@ -139,19 +157,12 @@ impl crate::afxdp::Coordinator {
         // increment would still invalidate correctly but is avoided for
         // clarity and to keep each transition a single epoch step.
 
-        // #9900 F-093: shed dead workers at collect time (the prewarm below
-        // takes the plain queue slice and keeps its exact behavior).
-        let (shed_flags, worker_commands): (Vec<bool>, Vec<_>) = self
-            .workers
-            .records()
-            .values()
-            .map(|rec| (rec.shed_if_dead(1), rec.handle.commands.clone()))
-            .unzip();
-        for (shed, commands) in shed_flags.iter().zip(&worker_commands) {
-            // #9900 F-093: shed dead workers (counted at collect above).
-            if *shed {
-                continue;
-            }
+        // #9900 F-093 (GPT-7): shed dead workers up front and hand the
+        // prewarm ONLY live queues — it pushes to every queue it is given
+        // with no shed check of its own, so a full list would feed dead
+        // queues (bounded, then overflow-misattributed as DROPS).
+        let live_commands = Self::collect_live_worker_commands(&self.workers.records());
+        for commands in &live_commands {
             // #1790/#1807: uniform poison recovery (worker_queue.rs).
             let mut pending = worker_queue::lock_recover(commands);
             worker_queue::push_bounded(
@@ -182,7 +193,7 @@ impl crate::afxdp::Coordinator {
             &self.sessions.nat,
             &self.sessions.forward_wire,
             &self.sessions.owner_rg_indexes,
-            &worker_commands,
+            &live_commands,
             session_map,
             &self.forwarding,
             current.as_ref(),

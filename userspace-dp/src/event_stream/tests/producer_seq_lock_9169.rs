@@ -205,6 +205,7 @@ fn refresh_status_publishes_the_producer_seq_lock_pair_9169() {
         snapshot: None,
         afxdp: coordinator,
         state_writer: Arc::new(crate::state_writer::StateWriter::new()),
+        quarantined_after_panic: false,
     };
     assert_eq!(
         state.status.event_stream_producer_seq_lock_acquisitions_total, 0,

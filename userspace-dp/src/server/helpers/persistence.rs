@@ -10,7 +10,7 @@
 // reach the guard. Cold path (periodic + fallback delta poll), not the
 // worker loop. Bodies byte-for-byte identical to the pre-split source.
 
-use super::{lock_server_recover, refresh_status};
+use super::{lock_server_state_recover, refresh_status};
 use crate::protocol::{ConfigSnapshot, ProcessStatus};
 use crate::server::ServerState;
 use serde::Serialize;
@@ -73,7 +73,14 @@ pub(crate) fn write_state(state_file: &str, state: &Arc<Mutex<ServerState>>) -> 
     // delta poll serialized+fsynced the whole state while holding the lock,
     // delaying every other control op that needs it.
     let (payload, writer) = {
-        let mut guard = lock_server_recover(&state);
+        let mut guard = lock_server_state_recover(&state);
+        // GPT-4: never persist quarantined state — the snapshot it names may
+        // be half-applied. Skip the write (Ok: callers must not fail their
+        // shutdown path on a skip) rather than baking torn state in.
+        if guard.quarantined_after_panic {
+            eprintln!("xpf-userspace-dp: skipping state-file write: state quarantined after a handler panic");
+            return Ok(());
+        }
         let payload = build_state_payload(&mut guard);
         let writer = guard.state_writer.clone();
         (payload, writer)

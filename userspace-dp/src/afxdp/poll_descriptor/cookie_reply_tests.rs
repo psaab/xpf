@@ -29,6 +29,7 @@ fn tx_pipeline(
         outstanding_tx: 0,
         pending_fill_frames: VecDeque::new(),
         in_flight_prepared_recycles: FastMap::default(),
+        in_flight_untracked_tx: FastSet::default(),
         tx_submit_ns: Vec::new().into_boxed_slice(),
     };
     for _ in 0..pending_local {

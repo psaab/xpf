@@ -181,6 +181,7 @@ pub(super) fn service_exact_local_queue_direct(
             .and_then(|root| root.queues.get_mut(queue_idx)),
         &mut binding.tx_pipeline.free_tx_frames,
         &mut binding.scratch.scratch_exact_local_tx,
+        &mut binding.tx_pipeline.in_flight_untracked_tx,
         inserted as usize,
     );
     // #940: post-settle V_min publish. FIFO queues currently have
@@ -357,6 +358,7 @@ fn service_exact_local_queue_direct_flow_fair(
             .and_then(|root| root.queues.get_mut(queue_idx)),
         &mut binding.tx_pipeline.free_tx_frames,
         &mut binding.scratch.scratch_local_tx,
+        &mut binding.tx_pipeline.in_flight_untracked_tx,
         inserted as usize,
         now_ns,
     );
@@ -537,6 +539,7 @@ pub(super) fn service_exact_prepared_queue_direct(
             .and_then(|root| root.queues.get_mut(queue_idx)),
         &mut binding.scratch.scratch_exact_prepared_tx,
         &mut binding.tx_pipeline.in_flight_prepared_recycles,
+        &mut binding.tx_pipeline.in_flight_untracked_tx,
         inserted as usize,
     );
     // #940: post-settle V_min publish. FIFO queues have
@@ -709,6 +712,7 @@ fn service_exact_prepared_queue_direct_flow_fair(
             .and_then(|root| root.queues.get_mut(queue_idx)),
         &mut binding.scratch.scratch_prepared_tx,
         &mut binding.tx_pipeline.in_flight_prepared_recycles,
+        &mut binding.tx_pipeline.in_flight_untracked_tx,
         inserted as usize,
         now_ns,
     );

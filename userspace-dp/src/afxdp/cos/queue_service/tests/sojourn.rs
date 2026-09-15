@@ -124,10 +124,12 @@ fn sojourn_local_settle_samples_committed_prefix_exactly_once() {
         CoSQueueSojourn::default(),
         "scratch build must NOT sample sojourn",
     );
+    let mut in_flight_untracked_tx = crate::afxdp::FastSet::default();
     let (sent_packets, _) = settle_exact_local_scratch_submission_flow_fair(
         Some(&mut root.queues[0]),
         &mut free_tx_frames,
         &mut scratch_local_tx,
+        &mut in_flight_untracked_tx,
         1,
         now_ns,
     );
@@ -154,10 +156,12 @@ fn sojourn_local_settle_samples_committed_prefix_exactly_once() {
     );
     assert!(matches!(build, ExactCoSScratchBuild::Ready));
     assert_eq!(scratch_local_tx.len(), 1);
+    let mut in_flight_untracked_tx = crate::afxdp::FastSet::default();
     let (sent_packets, _) = settle_exact_local_scratch_submission_flow_fair(
         Some(&mut root.queues[0]),
         &mut free_tx_frames,
         &mut scratch_local_tx,
+        &mut in_flight_untracked_tx,
         1,
         now_ns,
     );
@@ -212,10 +216,12 @@ fn sojourn_prepared_settle_samples_committed_prefix_exactly_once() {
         CoSQueueSojourn::default(),
         "prepared scratch build must NOT sample sojourn",
     );
+    let mut in_flight_untracked_tx = crate::afxdp::FastSet::default();
     let (sent_packets, _) = settle_exact_prepared_scratch_submission_flow_fair(
         Some(&mut root.queues[0]),
         &mut scratch_prepared_tx,
         &mut in_flight_prepared_recycles,
+        &mut in_flight_untracked_tx,
         1,
         now_ns,
     );
@@ -239,10 +245,12 @@ fn sojourn_prepared_settle_samples_committed_prefix_exactly_once() {
     );
     assert!(matches!(build, ExactCoSScratchBuild::Ready));
     assert_eq!(scratch_prepared_tx.len(), 1);
+    let mut in_flight_untracked_tx = crate::afxdp::FastSet::default();
     let (sent_packets, _) = settle_exact_prepared_scratch_submission_flow_fair(
         Some(&mut root.queues[0]),
         &mut scratch_prepared_tx,
         &mut in_flight_prepared_recycles,
+        &mut in_flight_untracked_tx,
         1,
         now_ns,
     );
@@ -419,10 +427,12 @@ fn sojourn_zero_stamp_items_record_nothing_end_to_end() {
         None,
     );
     assert!(matches!(build, ExactCoSScratchBuild::Ready));
+    let mut in_flight_untracked_tx = crate::afxdp::FastSet::default();
     let (sent_packets, _) = settle_exact_local_scratch_submission_flow_fair(
         Some(&mut root.queues[0]),
         &mut free_tx_frames,
         &mut scratch_local_tx,
+        &mut in_flight_untracked_tx,
         1,
         now_ns,
     );

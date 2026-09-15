@@ -62,4 +62,12 @@ pub(crate) struct ServerState {
     pub(crate) snapshot: Option<ConfigSnapshot>,
     pub(crate) afxdp: afxdp::Coordinator,
     pub(crate) state_writer: Arc<StateWriter>,
+    /// #9900 F-094 (GPT-4): set when a request handler panicked (or a
+    /// poisoned lock was recovered, which proves one did). A panic can
+    /// unwind through multi-step mutations — moved-out binding vecs,
+    /// half-applied snapshots, torn coordinator internals — that NO
+    /// poison-clear can repair, so cleared poison resumes NOTHING: every
+    /// request path refuses while this is set, the daemon shuts down, and
+    /// the supervisor restarts it into clean state. Never cleared in-process.
+    pub(crate) quarantined_after_panic: bool,
 }

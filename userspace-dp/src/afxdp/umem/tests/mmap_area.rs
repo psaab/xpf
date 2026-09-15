@@ -31,18 +31,21 @@ fn mmap_area_rejects_span_across_frame_boundary_9900() {
 #[test]
 fn mmap_area_admits_single_frame_boundary_shapes_9900() {
     // Every legitimate production shape is boundary-exact and must keep
-    // working: a full frame at an aligned base, an RX descriptor at
-    // base + 256 (headroom) with len <= 3840, the 96-byte meta read ending
-    // exactly at desc.addr, and in-place +-4 views.
+    // working: a full frame at an aligned base, a native RX descriptor at
+    // base + 512 (UMEM_HEADROOM + XDP_PACKET_HEADROOM) with len <= 3584,
+    // the 96-byte meta read ending exactly at desc.addr, and in-place
+    // views around the headroom point.
     let area = MmapArea::new(8192).expect("mmap");
     assert!(area.slice(0, 4096).is_some());
     assert!(area.slice(4096, 4096).is_some());
+    assert!(area.slice(512, 1500).is_some());
+    assert!(area.slice(4096 + 512, 3584).is_some());
     assert!(area.slice(256, 1500).is_some());
     assert!(area.slice(4096 + 256, 3840).is_some());
-    assert!(area.slice(160, 96).is_some());
-    assert!(area.slice(4096 + 160, 96).is_some());
-    assert!(area.slice(252, 1500).is_some());
-    assert!(area.slice(260, 1500).is_some());
+    assert!(area.slice(416, 96).is_some());
+    assert!(area.slice(4096 + 416, 96).is_some());
+    assert!(area.slice(508, 1500).is_some());
+    assert!(area.slice(516, 1500).is_some());
     assert!(area.slice(0, 0).is_some());
     assert!(area.slice(8192, 0).is_some());
 }

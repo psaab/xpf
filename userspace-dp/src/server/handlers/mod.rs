@@ -37,7 +37,9 @@ mod sync_session;
 
 use crate::afxdp::SessionDomain;
 use super::super::*;
-use super::helpers::{lock_server_recover, refresh_status, wait_for_binding_settle, write_state};
+use super::helpers::{
+    lock_server_state_recover, refresh_status, wait_for_binding_settle, write_state,
+};
 use std::io::{BufRead, BufReader, BufWriter, Read, Write};
 use std::os::unix::net::UnixStream;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -175,7 +177,16 @@ pub(crate) fn handle_stream(
     }
 
     if !served_off_lock {
-        let mut guard = lock_server_recover(&state);
+        let mut guard = lock_server_state_recover(&state);
+        // GPT-4: quarantined state serves nothing — a prior handler panic may
+        // have torn it mid-mutation. Refuse and ensure shutdown is underway
+        // (the panic arm already cleared `running`; this covers poison
+        // observed without a witnessed panic). `sync_session` above stays
+        // servable: it provably never touches `ServerState`.
+        if guard.quarantined_after_panic {
+            running.store(false, Ordering::SeqCst);
+            return Err("server state quarantined after a handler panic; restart required".to_string());
+        }
         match request.request_type.as_str() {
             "ping" | "status" => {}
             "apply_snapshot" => snapshot::apply(
@@ -384,9 +395,16 @@ pub(crate) fn handle_stream(
     if let Some(timeout) = settle_wait {
         wait_for_binding_settle(&state, timeout);
         if !suppress_status {
-            let mut guard = lock_server_recover(&state);
-            refresh_status(&mut guard);
-            response.status = Some(guard.status.clone());
+            let mut guard = lock_server_state_recover(&state);
+            // GPT-4: quarantined state yields no status — skip the attach
+            // (the verb above completed under its own lock hold; only this
+            // fresh read is suspect). Ensure shutdown is underway.
+            if guard.quarantined_after_panic {
+                running.store(false, Ordering::SeqCst);
+            } else {
+                refresh_status(&mut guard);
+                response.status = Some(guard.status.clone());
+            }
         }
     }
 
@@ -401,9 +419,14 @@ pub(crate) fn handle_stream(
     if let Some(wait) = export_wait {
         export::owner_rg_collect(wait, &mut response, &mut persist_state);
         if !suppress_status {
-            let mut guard = lock_server_recover(&state);
-            refresh_status(&mut guard);
-            response.status = Some(guard.status.clone());
+            let mut guard = lock_server_state_recover(&state);
+            // GPT-4: quarantined state yields no status (see above).
+            if guard.quarantined_after_panic {
+                running.store(false, Ordering::SeqCst);
+            } else {
+                refresh_status(&mut guard);
+                response.status = Some(guard.status.clone());
+            }
         }
     }
 
@@ -414,9 +437,14 @@ pub(crate) fn handle_stream(
     if let Some(export) = all_export {
         export::all_push(export, &mut response);
         if !suppress_status {
-            let mut guard = lock_server_recover(&state);
-            refresh_status(&mut guard);
-            response.status = Some(guard.status.clone());
+            let mut guard = lock_server_state_recover(&state);
+            // GPT-4: quarantined state yields no status (see above).
+            if guard.quarantined_after_panic {
+                running.store(false, Ordering::SeqCst);
+            } else {
+                refresh_status(&mut guard);
+                response.status = Some(guard.status.clone());
+            }
         }
     }
 

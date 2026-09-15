@@ -6926,6 +6926,15 @@ fn parse_packet_destination_falls_back_on_wrong_stamp_9900() {
         expected
     );
 
+    // Revert-sensitive: a garbage (non-14/18) stamp on a good frame ALSO
+    // derives the dst from the wire. Pre-fix the blind stamp indexed out
+    // of bounds and returned None.
+    meta.l3_offset = 200;
+    assert_eq!(
+        parse_packet_destination(&area, desc, meta).expect("dst"),
+        expected
+    );
+
     // Double-garbage keeps the old behavior: a truncated frame has no wire
     // parse, so the stamp fallback fails closed through the length guards.
     let mut tiny = MmapArea::new(4096).expect("mmap");

@@ -1110,6 +1110,50 @@ func TestEmitUserspaceDynamicBufferMetrics(t *testing.T) {
 			nil,
 			nil,
 		),
+		// #9900: same segfault-if-omitted rule — the emit helper
+		// dereferences all seven.
+		userspaceTxCompletionSkew: prometheus.NewDesc(
+			"xpf_userspace_tx_completion_skew_total",
+			"tx completion skew",
+			nil,
+			nil,
+		),
+		userspaceTxCompletionInvalid: prometheus.NewDesc(
+			"xpf_userspace_tx_completion_invalid_total",
+			"tx completion invalid",
+			nil,
+			nil,
+		),
+		userspaceTxCompletionDuplicate: prometheus.NewDesc(
+			"xpf_userspace_tx_completion_duplicate_total",
+			"tx completion duplicate",
+			nil,
+			nil,
+		),
+		userspaceFillInvalid: prometheus.NewDesc(
+			"xpf_userspace_fill_invalid_total",
+			"fill invalid",
+			nil,
+			nil,
+		),
+		userspaceWorkerCommandQueueShed: prometheus.NewDesc(
+			"xpf_userspace_worker_command_queue_shed_total",
+			"worker command-queue shed",
+			nil,
+			nil,
+		),
+		userspaceServerStatePoisonRecoveries: prometheus.NewDesc(
+			"xpf_userspace_server_state_poison_recoveries_total",
+			"server state poison recoveries",
+			nil,
+			nil,
+		),
+		userspaceServerHandlerPanics: prometheus.NewDesc(
+			"xpf_userspace_server_handler_panics_total",
+			"server handler panics",
+			nil,
+			nil,
+		),
 		// #7398: the emit helper dereferences these three, so a literal that
 		// omits them segfaults rather than failing an assertion — the reason
 		// the issue calls out that a green BUILD proves nothing about a
@@ -1304,6 +1348,15 @@ func TestEmitUserspaceDynamicBufferMetrics(t *testing.T) {
 		// #2402/#6641: shared-session poison-recovery counter emitted
 		// unconditionally.
 		SharedSessionPoisonRecoveries: 5,
+		// #9900: distinct values so a mis-wired descriptor fails here
+		// instead of matching by coincidence.
+		TxCompletionSkew:            51,
+		TxCompletionInvalid:         52,
+		TxCompletionDuplicate:       53,
+		FillInvalid:                 54,
+		WorkerCommandQueueShed:      55,
+		ServerStatePoisonRecoveries: 56,
+		ServerHandlerPanics:         57,
 		// #7398: distinct values so an assertion cannot pass by reading the
 		// neighbouring field — a mis-wired descriptor emits a series either way.
 		SessionInstallStaleIgnored: 21,
@@ -1450,12 +1503,13 @@ func TestEmitUserspaceDynamicBufferMetrics(t *testing.T) {
 	// to Go as installed.
 	// +4 for the #8447 source-NAT rule-match quartet.
 	// +2 for the #9169 event-stream producer_seq_lock pair (#4800 SITE 4).
+	// +7 for the #9900 frame-ownership violation counters.
 	// RE-ANCHORED, not relaxed: this count is a deliberate gate — it catches a
 	// series that is emitted but never asserted, which is how a collector grows
-	// an unverified metric. The two new series ARE asserted below, so the
+	// an unverified metric. The seven new series ARE asserted below, so the
 	// original claim still holds and the number moves with the population.
-	if len(got) != 60 {
-		t.Fatalf("emitUserspaceDynamicBufferMetrics: want 60 metrics, got %d", len(got))
+	if len(got) != 67 {
+		t.Fatalf("emitUserspaceDynamicBufferMetrics: want 67 metrics, got %d", len(got))
 	}
 
 	// #8447: DISTINCT values, so a collector that emitted one of the quartet
@@ -1529,6 +1583,15 @@ func TestEmitUserspaceDynamicBufferMetrics(t *testing.T) {
 	// unconditionally, so a 0 is a real "no worker panic touched HA session
 	// state" signal rather than an absent series.
 	assertCounterClose(t, got, c.userspaceSharedSessionPoisonRecoveries, nil, 5)
+	// #9900: assert VALUES — a descriptor wired to the wrong status field
+	// emits a series too.
+	assertCounterClose(t, got, c.userspaceTxCompletionSkew, nil, 51)
+	assertCounterClose(t, got, c.userspaceTxCompletionInvalid, nil, 52)
+	assertCounterClose(t, got, c.userspaceTxCompletionDuplicate, nil, 53)
+	assertCounterClose(t, got, c.userspaceFillInvalid, nil, 54)
+	assertCounterClose(t, got, c.userspaceWorkerCommandQueueShed, nil, 55)
+	assertCounterClose(t, got, c.userspaceServerStatePoisonRecoveries, nil, 56)
+	assertCounterClose(t, got, c.userspaceServerHandlerPanics, nil, 57)
 	// #7398: assert the VALUE, not merely that a series exists — a descriptor
 	// wired to the wrong status field emits a series too.
 	assertCounterClose(t, got, c.userspaceSessionInstallStaleIgnored, nil, 21)

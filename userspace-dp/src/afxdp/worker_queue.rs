@@ -103,6 +103,14 @@ pub(in crate::afxdp) static WORKER_COMMAND_QUEUE_DROPS: AtomicU64 = AtomicU64::n
 /// load from a live one).
 pub(in crate::afxdp) static WORKER_COMMAND_QUEUE_SHED_TOTAL: AtomicU64 = AtomicU64::new(0);
 
+/// Test-only serializer for exact-delta assertions on
+/// `WORKER_COMMAND_QUEUE_SHED_TOTAL`. The counter is process-global and
+/// several tests bump it (fan-out sheds, export shed, prewarm filter), so
+/// unsynchronized exact deltas flake under parallel execution. Every test
+/// that bumps OR asserts this counter holds this lock for its duration.
+#[cfg(test)]
+pub(crate) static SHED_TEST_LOCK: Mutex<()> = Mutex::new(());
+
 /// Push a command onto a worker queue, refusing at the capacity bound (#6929).
 ///
 /// Returns whether the command was accepted. Callers that need to know a

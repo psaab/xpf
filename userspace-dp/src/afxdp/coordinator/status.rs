@@ -518,8 +518,15 @@ impl super::Coordinator {
         crate::afxdp::tx::rings::TX_COMPLETION_INVALID_TOTAL.load(Ordering::Relaxed)
     }
 
+    /// #9900 F-092 (GPT-2): aligned in-region completions dropped for lack
+    /// of submit ownership — duplicate/stale deliveries. Nonzero means the
+    /// kernel returned a completion twice (or for an untracked offset).
+    pub fn tx_completion_duplicate_total(&self) -> u64 {
+        crate::afxdp::tx::rings::TX_COMPLETION_DUPLICATE_TOTAL.load(Ordering::Relaxed)
+    }
+
     /// #9900 F-091/F-092: fill-ring offsets dropped instead of submitted
-    /// (outside the UMEM region or past the headroom point within the frame).
+    /// (frame base outside the owned region).
     pub fn fill_invalid_total(&self) -> u64 {
         crate::afxdp::tx::rings::FILL_INVALID_TOTAL.load(Ordering::Relaxed)
     }

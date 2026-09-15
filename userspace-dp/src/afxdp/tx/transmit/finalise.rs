@@ -47,7 +47,11 @@ pub(super) fn finalise_prepared(
     while let Some(req) = binding.scratch.scratch_prepared_tx.pop() {
         let idx = binding.scratch.scratch_prepared_tx.len();
         if idx < inserted as usize {
-            remember_prepared_recycle(&mut binding.tx_pipeline.in_flight_prepared_recycles, &req);
+            remember_prepared_recycle(
+                &mut binding.tx_pipeline.in_flight_prepared_recycles,
+                &mut binding.tx_pipeline.in_flight_untracked_tx,
+                &req,
+            );
             sent_packets += 1;
             sent_bytes += req.len as u64;
         } else {

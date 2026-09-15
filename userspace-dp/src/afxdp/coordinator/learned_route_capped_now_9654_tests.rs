@@ -196,6 +196,7 @@ fn refresh_status_projects_capped_now_and_omits_it_when_unknown_9654() {
         snapshot: None,
         afxdp: Coordinator::new(),
         state_writer: std::sync::Arc::new(crate::state_writer::StateWriter::new()),
+        quarantined_after_panic: false,
     };
     publish_capped_9654(&mut state.afxdp, true);
     crate::server::helpers::status::refresh_status(&mut state);

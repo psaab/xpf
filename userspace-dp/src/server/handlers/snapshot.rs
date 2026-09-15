@@ -398,14 +398,36 @@ pub(super) fn apply(
                 .prune_local_tunnel_sources_for_snapshot(&snapshot);
         }
         let prev_snapshot = std::mem::replace(&mut guard.snapshot, Some(snapshot));
-        let replanned = replan_queues(
+        // GPT-6: a REFUSED plan must never install. `replan_queues` returns
+        // `Err` (not an empty `Ok`) for NAT-holder/slot-cap/wild-ifindex
+        // refusals; installing an empty plan here would tear down the working
+        // config's workers below and persist the breakage as the baseline.
+        // Nothing has been torn down yet (bindings uninstalled, reconcile not
+        // run), so restore the prior snapshot + status fields and fail closed
+        // — mirroring the defer-integrity leg above.
+        let replanned = match replan_queues(
             guard.snapshot.as_ref(),
             guard.status.workers,
             &existing_bindings,
             // #6749: new slots inherit the box's current arm state rather than
             // coming up unarmed and disabling every other binding with them.
             guard.status.forwarding_armed,
-        );
+        ) {
+            Ok(bindings) => bindings,
+            Err(reason) => {
+                guard.snapshot = prev_snapshot;
+                guard.status.last_snapshot_generation = prev_last_snapshot_generation;
+                guard.status.last_fib_generation = prev_last_fib_generation;
+                guard.status.last_snapshot_at = prev_last_snapshot_at;
+                guard.status.capabilities = prev_capabilities;
+                response.ok = false;
+                response.error = format!("binding plan refused: {reason}");
+                eprintln!(
+                    "CTRL_REQ: apply_snapshot rejected (plan refused): {reason} — keeping previous state"
+                );
+                return;
+            }
+        };
         guard.status.bindings = replanned;
         if defer_workers {
             eprintln!(

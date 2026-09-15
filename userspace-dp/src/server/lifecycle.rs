@@ -412,8 +412,11 @@ pub(crate) fn run() -> Result<(), String> {
             shared_session_poison_recoveries: 0,
             tx_completion_skew: 0,
             tx_completion_invalid: 0,
+            tx_completion_duplicate: 0,
             fill_invalid: 0,
             worker_command_queue_shed: 0,
+            server_state_poison_recoveries: 0,
+            server_handler_panics: 0,
             session_install_stale_ignored: 0,
             session_delete_stale_ignored: 0,
             session_delete_dropped_released: 0,
@@ -519,6 +522,7 @@ pub(crate) fn run() -> Result<(), String> {
             c
         },
         state_writer: state_writer.clone(),
+        quarantined_after_panic: false,
     }));
     eprintln!("xpf-userspace-dp: poll_mode={:?}", args.poll_mode);
 
@@ -530,7 +534,7 @@ pub(crate) fn run() -> Result<(), String> {
     // socket off the mutex: deriving it from `state` would need the very lock
     // this exists to avoid.
     let session_domain = {
-        // #9900 F-094: `.expect`, not `lock_server_recover` — startup is still
+        // #9900 F-094: `.expect`, not `lock_server_state_recover` — startup is still
         // single-threaded (the session thread spawns below), so no prior
         // handler could have poisoned this lock; poison here would mean a
         // startup bug, and failing fast beats recovering toward a half-built
@@ -606,9 +610,10 @@ pub(crate) fn run() -> Result<(), String> {
                             // multi-session debugging chase into one log line
                             // (#1961). Served under per-connection
                             // `catch_unwind` (#9900 F-094): a handler panic
-                            // drops this connection and is counted, instead of
-                            // killing the session thread's accept loop.
-                            serve_one_catch_unwind("session", || {
+                            // quarantines the state and stops the daemon for a
+                            // supervisor restart (GPT-4), instead of killing
+                            // the session thread's accept loop.
+                            serve_one_catch_unwind("session", &state, &running, || {
                                 handle_stream(
                                     stream,
                                     &state_file,
@@ -659,10 +664,11 @@ pub(crate) fn run() -> Result<(), String> {
                 // carries apply_snapshot, where a wire-type mismatch silently
                 // left the helper disabled and forwarding nothing (#1961).
                 // Per-connection `catch_unwind` (#9900 F-094): a handler panic
-                // drops this connection and is counted, instead of killing the
-                // control thread's accept loop (which would wedge the daemon:
-                // `running` stays true and nothing serves requests).
-                serve_one_catch_unwind("control", || {
+                // quarantines the state and stops the daemon for a supervisor
+                // restart (GPT-4), instead of killing the control thread's
+                // accept loop (which would wedge the daemon: `running` stays
+                // true and nothing serves requests).
+                serve_one_catch_unwind("control", &state, &running, || {
                     handle_stream(
                         stream,
                         &args.state_file,
@@ -704,6 +710,17 @@ pub(crate) fn run() -> Result<(), String> {
     }
     if let Err(e) = remove_stale_socket(&session_socket) {
         eprintln!("xpf-userspace-dp: session socket cleanup {session_socket}: {e}");
+    }
+    // GPT-4: a quarantined shutdown exits NONZERO so the supervisor restarts
+    // into clean state (`superviseHelper` treats any unexpected exit as a
+    // crash). A poisoned-at-shutdown lock reads as quarantined too — suspect
+    // either way, and there is nothing left to serve.
+    let quarantined = state
+        .lock()
+        .map(|guard| guard.quarantined_after_panic)
+        .unwrap_or(true);
+    if quarantined {
+        return Err("shut down quarantined after a handler panic; restart required".to_string());
     }
     Ok(())
 }

@@ -123,6 +123,7 @@ fn cos_exact_drain_throughput_micro_bench() {
     let packet_bytes = vec![0xABu8; PACKET_LEN];
     let mut scratch = Vec::with_capacity(ITEMS_PER_BATCH);
     let mut free_frames: VecDeque<u64> = (0..ITEMS_PER_BATCH as u64).map(|i| i * 4096).collect();
+    let mut in_flight_untracked_tx = crate::afxdp::FastSet::default();
 
     // Prime: one full batch of items. Each iteration below drains
     // them all and then re-primes both the items and the free frames
@@ -170,6 +171,7 @@ fn cos_exact_drain_throughput_micro_bench() {
             Some(&mut root.queues[0]),
             &mut free_frames,
             &mut scratch,
+            &mut in_flight_untracked_tx,
             inserted,
         );
     }
@@ -206,6 +208,7 @@ fn cos_exact_drain_throughput_micro_bench() {
             Some(&mut root.queues[0]),
             &mut free_frames,
             &mut scratch,
+            &mut in_flight_untracked_tx,
             inserted,
         );
         measured += iter_start.elapsed();
@@ -321,6 +324,7 @@ fn bench_pop_commit_settle_publish() {
     let packet_bytes = vec![0xABu8; PACKET_LEN];
     let mut scratch: Vec<(u64, TxRequest)> = Vec::with_capacity(ITEMS_PER_BATCH);
     let mut free_frames: VecDeque<u64> = (0..ITEMS_PER_BATCH as u64).map(|i| i * 4096).collect();
+    let mut in_flight_untracked_tx = crate::afxdp::FastSet::default();
 
     let prime_queue = |queue: &mut CoSQueueRuntime, packet: &[u8]| {
         queue.hot.items.clear();
@@ -372,6 +376,7 @@ fn bench_pop_commit_settle_publish() {
             Some(&mut root.queues[0]),
             &mut free_frames,
             &mut scratch,
+            &mut in_flight_untracked_tx,
             inserted,
             0, // now_ns: tests don't depend on EWMA accounting
         );
@@ -401,6 +406,7 @@ fn bench_pop_commit_settle_publish() {
             Some(&mut root.queues[0]),
             &mut free_frames,
             &mut scratch,
+            &mut in_flight_untracked_tx,
             inserted,
             0, // now_ns: tests don't depend on EWMA accounting
         );

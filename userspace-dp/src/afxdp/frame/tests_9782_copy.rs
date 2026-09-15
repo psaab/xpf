@@ -180,3 +180,57 @@ fn copy_v4_build_ignores_wrong_l3_stamp_9900() {
         assert!(tcp_checksum_ok_ipv4(&out[14..]), "stamp {stamp}: csum valid");
     }
 }
+
+/// #9900 F-095 (GPT-5): a corrected L3 never pairs with a stale L4. The
+/// tagged v6 frame is stamped l3=14 (wrong; true 18) with an OVERSTATED
+/// l4=62 (true 58) — the raw difference against the corrected L3 (44)
+/// would pass the `>= 40` plausibility gate and drive the SNAT port write
+/// 4 bytes into the TCP header. Neutralizing the L4 stamp forces the wire
+/// walk (40) and the translation lands. Pre-fix the src port at 54 kept
+/// 59508 instead of 40001 (and the enforce arm scribbled the seq bytes).
+#[test]
+fn copy_v6_build_coheres_l4_with_fallback_l3_9900() {
+    let mut frame = build_txn_tcp_syn_frame_v6(
+        "2001:559:8585:ef00::102".parse().unwrap(),
+        "2001:559:8585:80::200".parse().unwrap(),
+        59508,
+        5201,
+    );
+    frame.splice(12..12, [0x81, 0x00, 0x00, 0x0a]);
+    crate::afxdp::frame::checksum::recompute_l4_checksum_ipv6(
+        &mut frame[18..],
+        40,
+        PROTO_TCP,
+    )
+    .expect("seed");
+    let meta: ForwardPacketMeta = UserspaceDpMeta {
+        magic: USERSPACE_META_MAGIC,
+        version: USERSPACE_META_VERSION,
+        length: std::mem::size_of::<UserspaceDpMeta>() as u16,
+        l3_offset: 14,
+        l4_offset: 62,
+        addr_family: libc::AF_INET6 as u8,
+        protocol: PROTO_TCP,
+        ..UserspaceDpMeta::default()
+    }
+    .into();
+    let decision = copy_decision(crate::nat::NatDecision {
+        rewrite_src: Some(IpAddr::V6("2001:559:8585:80::8".parse().unwrap())),
+        rewrite_src_port: Some(40001),
+        ..Default::default()
+    });
+    let mut out = vec![0u8; frame.len() + 4];
+    let written = build_forwarded_frame_into_from_frame(
+        &mut out,
+        &frame,
+        meta,
+        &decision,
+        &ForwardingState::default(),
+        false,
+        Some((59508, 5201)),
+    )
+    .expect("copy build must succeed");
+    let out = &out[..written];
+    assert_eq!(u16::from_be_bytes([out[54], out[55]]), 40001);
+    assert!(tcp_checksum_ok_ipv6(&out[14..]), "copy output csum valid");
+}

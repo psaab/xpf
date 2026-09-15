@@ -470,6 +470,10 @@ pub(crate) struct ProcessStatus {
     /// (not an aligned in-region frame base). Additive / defaulted.
     #[serde(rename = "tx_completion_invalid", default)]
     pub tx_completion_invalid: u64,
+    /// #9900 F-092 (GPT-2): aligned in-region completions dropped for lack
+    /// of submit ownership (duplicate/stale). Additive / defaulted.
+    #[serde(rename = "tx_completion_duplicate", default)]
+    pub tx_completion_duplicate: u64,
     /// #9900 F-091/F-092: fill-ring offsets dropped instead of submitted.
     /// Additive / defaulted.
     #[serde(rename = "fill_invalid", default)]
@@ -477,6 +481,14 @@ pub(crate) struct ProcessStatus {
     /// #9900 F-093: worker commands shed to dead workers. Additive / defaulted.
     #[serde(rename = "worker_command_queue_shed", default)]
     pub worker_command_queue_shed: u64,
+    /// #9900 F-094 (m2): `ServerState` mutex poison recoveries (each one
+    /// quarantined the daemon). Additive / defaulted.
+    #[serde(rename = "server_state_poison_recoveries", default)]
+    pub server_state_poison_recoveries: u64,
+    /// #9900 F-094 (m2): request-handler panics contained per-connection
+    /// (each one quarantined + restarted). Additive / defaulted.
+    #[serde(rename = "server_handler_panics", default)]
+    pub server_handler_panics: u64,
     /// #9048: peer `DeleteSynced` commands REFUSED because the key named a
     /// LIVE LOCAL session this node is actively forwarding for — the
     /// delete-side mirror of the install-side clobber guard in

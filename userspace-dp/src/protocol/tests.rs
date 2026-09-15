@@ -412,22 +412,31 @@ fn process_status_tx_completion_counters_roundtrip_9900() {
     let status = ProcessStatus {
         tx_completion_skew: 3,
         tx_completion_invalid: 5,
+        tx_completion_duplicate: 13,
         fill_invalid: 7,
         worker_command_queue_shed: 11,
+        server_state_poison_recoveries: 17,
+        server_handler_panics: 19,
         ..Default::default()
     };
     let value: serde_json::Value =
         serde_json::to_value(&status).expect("serialize ProcessStatus to Value");
     assert_eq!(value["tx_completion_skew"], 3);
     assert_eq!(value["tx_completion_invalid"], 5);
+    assert_eq!(value["tx_completion_duplicate"], 13);
     assert_eq!(value["fill_invalid"], 7);
     assert_eq!(value["worker_command_queue_shed"], 11);
+    assert_eq!(value["server_state_poison_recoveries"], 17);
+    assert_eq!(value["server_handler_panics"], 19);
 
     let back: ProcessStatus = serde_json::from_value(value).expect("deserialize ProcessStatus");
     assert_eq!(back.tx_completion_skew, 3);
     assert_eq!(back.tx_completion_invalid, 5);
+    assert_eq!(back.tx_completion_duplicate, 13);
     assert_eq!(back.fill_invalid, 7);
     assert_eq!(back.worker_command_queue_shed, 11);
+    assert_eq!(back.server_state_poison_recoveries, 17);
+    assert_eq!(back.server_handler_panics, 19);
 
     // Pre-#9900 payload (keys absent) must decode with zero defaults.
     let mut legacy_value =
@@ -440,17 +449,26 @@ fn process_status_tx_completion_counters_roundtrip_9900() {
             .expect("new key present before strip");
         obj.remove("tx_completion_invalid")
             .expect("new key present before strip");
+        obj.remove("tx_completion_duplicate")
+            .expect("new key present before strip");
         obj.remove("fill_invalid")
             .expect("new key present before strip");
         obj.remove("worker_command_queue_shed")
+            .expect("new key present before strip");
+        obj.remove("server_state_poison_recoveries")
+            .expect("new key present before strip");
+        obj.remove("server_handler_panics")
             .expect("new key present before strip");
     }
     let legacy: ProcessStatus =
         serde_json::from_value(legacy_value).expect("pre-#9900 payload decodes");
     assert_eq!(legacy.tx_completion_skew, 0);
     assert_eq!(legacy.tx_completion_invalid, 0);
+    assert_eq!(legacy.tx_completion_duplicate, 0);
     assert_eq!(legacy.fill_invalid, 0);
     assert_eq!(legacy.worker_command_queue_shed, 0);
+    assert_eq!(legacy.server_state_poison_recoveries, 0);
+    assert_eq!(legacy.server_handler_panics, 0);
 }
 
 // #2402/#6641: round-trip + backward-compat pin for the shared-session

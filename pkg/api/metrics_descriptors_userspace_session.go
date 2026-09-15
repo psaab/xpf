@@ -456,4 +456,52 @@ func (c *xpfCollector) initUserspaceSessionDescriptors() {
 			"durable record of it (#6641).",
 		nil, nil,
 	)
+	// #9900: frame-ownership violation counters. Kernel-fault signals
+	// (TX completion skew/invalid/duplicate, fill invalid) plus the
+	// dead-worker shed and request-path fault counters. All zero on a
+	// healthy dataplane; all emitted unconditionally so 0 is a real
+	// signal, not an absent series.
+	c.userspaceTxCompletionSkew = prometheus.NewDesc(
+		"xpf_userspace_tx_completion_skew_total",
+		"TX completions reaped beyond outstanding_tx, including completions "+
+			"drained at gauge 0 (#9900 F-092).",
+		nil, nil,
+	)
+	c.userspaceTxCompletionInvalid = prometheus.NewDesc(
+		"xpf_userspace_tx_completion_invalid_total",
+		"Reaped completion offsets dropped instead of recycled: not an "+
+			"aligned in-region frame base (#9900 F-092).",
+		nil, nil,
+	)
+	c.userspaceTxCompletionDuplicate = prometheus.NewDesc(
+		"xpf_userspace_tx_completion_duplicate_total",
+		"Aligned in-region completions dropped for lack of submit "+
+			"ownership: duplicate or stale deliveries (#9900 F-092).",
+		nil, nil,
+	)
+	c.userspaceFillInvalid = prometheus.NewDesc(
+		"xpf_userspace_fill_invalid_total",
+		"Fill-ring offsets dropped instead of submitted: frame base "+
+			"outside the owned region (#9900 F-091/F-092).",
+		nil, nil,
+	)
+	c.userspaceWorkerCommandQueueShed = prometheus.NewDesc(
+		"xpf_userspace_worker_command_queue_shed_total",
+		"Worker commands shed because the target worker is dead "+
+			"(recorded panic, thread exited) — distinct from live-queue "+
+			"drops (#9900 F-093).",
+		nil, nil,
+	)
+	c.userspaceServerStatePoisonRecoveries = prometheus.NewDesc(
+		"xpf_userspace_server_state_poison_recoveries_total",
+		"ServerState mutex poison recoveries; each one quarantined the "+
+			"daemon for a supervisor restart (#9900 F-094).",
+		nil, nil,
+	)
+	c.userspaceServerHandlerPanics = prometheus.NewDesc(
+		"xpf_userspace_server_handler_panics_total",
+		"Request-handler panics contained per-connection; each one "+
+			"quarantined the daemon for a supervisor restart (#9900 F-094).",
+		nil, nil,
+	)
 }
