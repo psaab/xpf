@@ -480,6 +480,14 @@ startup-phase and shutdown ordering is untouched:
   already covered by #2926 cancellation, and their servers are stopped during
   teardown.
 
+  **Bootstrap refusal (#9884).** The same helper also refuses while in
+  bootstrap mode. A compile-failed `Load` can heal `ActiveConfig` to a
+  non-nil rollback target while still reporting `ErrConfigCompile`, so a
+  feed refresh, DHCP lease change, or config-poll apply would otherwise
+  reach the bootstrap-exit block and take over with no commit or sync. The
+  authorized exits (commit, sync, rollback) bypass the helper and are
+  unaffected.
+
   The DHCP quiesce is separate and **both are required**. `dhcp.Manager.Quiesce`
   stops the 2s lease-change debounce timer and latches so a lease event racing
   shutdown re-arms nothing; it is emphatically NOT `StopAll`, because cancelling

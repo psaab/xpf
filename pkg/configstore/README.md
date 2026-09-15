@@ -1603,10 +1603,13 @@ persistence failures on every persist path;
   path (e.g. a committed config whose referenced apply-group was later
   deleted in a partially-edited DB). `Load` has already set
   `everCommitted=true` from the on-disk `committed=` marker but leaves
-  `compiled` nil, so `ActiveConfig()` returns nil. Without a guard that
-  tuple (`ActiveConfig()==nil` + `EverCommitted()==true`) drives the daemon
-  boot predicate to NORMAL and positional claim-all interface naming. The
-  daemon detects `ErrConfigCompile`, skips the text-config bootstrap import,
+  `compiled` nil — unless #9884 expired confirm recovery heals it to a
+  compilable rollback target — so `ActiveConfig()` usually returns nil here.
+  Without a guard the (`ActiveConfig()==nil` + `EverCommitted()==true`) tuple
+  drives the daemon boot predicate to NORMAL and positional claim-all
+  interface naming. The guard is the `ErrConfigCompile` CLASSIFICATION of the
+  returned error, not the nilness of the pointer: the daemon detects it via
+  `errors.Is`, skips the text-config bootstrap import,
   and enters the #1922 bootstrap/lifeline safe state (mgmt preserved, no
   claim-all, control plane up) instead of exiting (a hard exit would also
   strand mgmt). See `pkg/daemon` `classifyLoadError` / `computeBootClass`.
@@ -1618,6 +1621,10 @@ persistence failures on every persist path;
     and `Rollback(n)` reaches the on-disk history. `active` is always non-nil
     (the constructor seeds an empty tree), so `(active non-nil, compiled nil)`
     here is the same shape a fresh boot already has — no new invariant.
+  - **Pending confirm windows resolve on this path too (#9884).** An expired
+    record rolls back to prev (persisted, record cleared) and a live one
+    re-arms its timer, instead of stranding the record with no timer. The
+    `ErrConfigCompile` return is unchanged, so the boot class stays fail-closed.
 - **any other error** — logged as a warning; the daemon proceeds and the
   boot predicate decides bootstrap vs normal as usual.
 
