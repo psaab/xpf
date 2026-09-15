@@ -123,6 +123,12 @@ fn reject_peer_owned_identity(
     )))
 }
 
+/// TEST-ONLY address-only wrapper: allocates as `NatHolder::Untracked`
+/// (single-holder contract). Production flow matching threads an explicit
+/// worker holder through `match_source_nat_result_for_tuple` — a production
+/// caller of this wrapper would silently mint untracked allocations, so the
+/// compiler refuses it (#9902 review).
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn match_source_nat(
     // #6751: threaded for signature symmetry with the tuple entry point. This
@@ -156,6 +162,7 @@ pub(crate) fn match_source_nat(
     }
 }
 
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn match_source_nat_result(
     // #6751: see `match_source_nat` — probe-pure, threaded for symmetry.
@@ -190,9 +197,9 @@ pub(crate) fn match_source_nat_result(
         // #4088: the address-only wrapper never carries an ICMP query id
         // (the tuple is unknown), so there is no identifier to preserve.
         false,
-        // #6522: this wrapper has no worker context (its only callers are the
-        // `#[cfg_attr(not(test), allow(dead_code))]` helpers in
-        // `afxdp/forwarding/nat.rs`), so it keeps the untracked contract.
+        // #6522: this TEST-ONLY wrapper has no worker context, so it keeps
+        // the untracked contract (the `#[cfg(test)]` gate above is what
+        // keeps a production caller from silently inheriting it).
         NatHolder::Untracked,
         &mut counter,
     )

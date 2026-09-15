@@ -116,7 +116,9 @@ type ActiveAlarm struct {
 
 // ActiveExhaustionAlarm is a thread-safe snapshot of one active NAT pool
 // exhaustion alarm for the `show security alarms` render sites (#9902 F-026).
-// Events is the most recent tick's observed exhaustion-event delta.
+// Events is the last NONZERO observed exhaustion-event delta: refreshed only
+// on positive deltas, preserved across clean ticks and identity rebases, so
+// the display never shows a raised alarm with a zero count.
 type ActiveExhaustionAlarm struct {
 	PoolName  string
 	Events    uint64
@@ -561,6 +563,17 @@ func (m *Monitor) setLastExhaustionSeq(seq uint64) {
 // unchanged key is unreachable in production (same-instance counters only
 // grow) but specified anyway: defensive rebase.
 //
+// AllocatorID 0 (a helper older than the field) ALWAYS rebases, even
+// against a 0 baseline: a legacy same-process rebuild is invisible (0→0),
+// and a fast re-exhaustion past the old count before the next coherent
+// tick would otherwise evaluate as a phantom delta and FALSE-raise. The
+// tradeoff is explicit: legacy helpers never raise exhaustion (fail-silent
+// for the skewed-upgrade window) rather than risk false alarms.
+//
+// Lost deltas on rebase are inherent to the 1 Hz poll: events between the
+// last tick and a rebuild are unobservable — a rebase neither counts nor
+// clears them.
+//
 // State mutates under the mutex; the at-most-one transition syslog emits
 // AFTER unlock (never hold the mutex across the blocking write).
 func (m *Monitor) evalExhaustion(poolName string, procGen, allocatorID, cur uint64) {
@@ -572,10 +585,10 @@ func (m *Monitor) evalExhaustion(poolName string, procGen, allocatorID, cur uint
 	case !seen:
 		// First sighting: silent baseline, no evaluation this tick.
 		m.exhBaseline[poolName] = &exhBaseline{procGen: procGen, allocatorID: allocatorID, count: cur}
-	case procGen != b.procGen || allocatorID != b.allocatorID:
-		// Identity change: silent rebase. The new count is stored, the
-		// streak resets, and an active alarm is NEITHER cleared (no false
-		// credit) NOR refreshed.
+	case allocatorID == 0 || procGen != b.procGen || allocatorID != b.allocatorID:
+		// Identity change (or legacy-0): silent rebase. The new count is
+		// stored, the streak resets, and an active alarm is NEITHER
+		// cleared (no false credit) NOR refreshed.
 		b.procGen, b.allocatorID, b.count, b.streak = procGen, allocatorID, cur, 0
 	case cur < b.count:
 		// Same-key decrease: defensive rebase (unreachable in production).

@@ -42,7 +42,10 @@ pub(in crate::afxdp) fn nat_scope_ctx_for_flow(
     }
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
+// #9902 review: TEST-ONLY — it funnels into the #[cfg(test)]-gated
+// `match_source_nat` (Untracked allocator). Was `allow(dead_code)`; the gate
+// is what keeps a production caller from silently inheriting it.
+#[cfg(test)]
 pub(in crate::afxdp) fn match_source_nat_for_flow(
     forwarding: &ForwardingState,
     ingress_ifindex: i32,

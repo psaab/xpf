@@ -649,7 +649,7 @@ func TestRenderExhaustionAlarmsDetail9902(t *testing.T) {
 	if !strings.Contains(out, "Class: NAT") || !strings.Contains(out, "Severity: Minor") {
 		t.Fatalf("class/severity wrong:\n%s", out)
 	}
-	if !strings.Contains(out, "NAT source pool p1 allocator-reported exhaustion events: 3 (most recent sample)") {
+	if !strings.Contains(out, "NAT source pool p1 allocator-reported exhaustion events: 3 (last nonzero observed delta)") {
 		t.Fatalf("p1 description wrong:\n%s", out)
 	}
 	if !strings.Contains(out, "First seen: 2026-06-20 01:02:03") {
@@ -677,5 +677,74 @@ func TestRenderExhaustionAlarmsEmpty9902(t *testing.T) {
 	got := RenderExhaustionAlarms(&b, nil, 3, true)
 	if got != 3 || b.String() != "" {
 		t.Fatalf("empty alarms must not change count or write: count=%d out=%q", got, b.String())
+	}
+}
+
+// Monitor-to-render: the displayed Events is the last NONZERO observed
+// delta — a clean tick and an identity rebase must both leave the raised
+// alarm rendering the old delta (never zero, never "most recent sample").
+// Feeding records directly cannot see this; only the monitor's own snapshot
+// exercises the preserve-across-clean-and-rebase path.
+func TestExhaustionRenderShowsLastNonzeroDelta9902(t *testing.T) {
+	m, _, vb := newMon()
+	cfg := cfgWith(80, 70, false)
+	setExhView9902(vb, cfg, 1, 1, exhPool9902("p1", 5, 1))
+	m.evaluate()
+	setExhView9902(vb, cfg, 2, 1, exhPool9902("p1", 8, 1))
+	m.evaluate() // raise, events=3
+	setExhView9902(vb, cfg, 3, 1, exhPool9902("p1", 8, 1))
+	m.evaluate() // clean tick: alarm stays, Events preserved
+	setExhView9902(vb, cfg, 4, 1, exhPool9902("p1", 8, 2))
+	m.evaluate() // id rebase: alarm stays, Events preserved
+
+	var b strings.Builder
+	if got := RenderExhaustionAlarms(&b, m.ActiveExhaustionAlarms(), 0, true); got != 1 {
+		t.Fatalf("expected 1 rendered alarm, got %d", got)
+	}
+	if out := b.String(); !strings.Contains(out, "allocator-reported exhaustion events: 3 (last nonzero observed delta)") {
+		t.Fatalf("render must show the last nonzero delta after clean+rebase:\n%s", out)
+	}
+}
+
+// Legacy helpers (allocator_id 0) ALWAYS rebase: a same-process rebuild is
+// invisible (0→0), so any delta on id 0 is unprovable — evaluating it would
+// false-raise on a fast re-exhaustion past the old count. Fail-silent, never
+// raise.
+func TestExhaustionLegacyZeroNeverRaises9902(t *testing.T) {
+	m, rec, vb := newMon()
+	cfg := cfgWith(80, 70, false)
+	setExhView9902(vb, cfg, 1, 1, exhPool9902("p1", 5, 0))
+	m.evaluate() // baseline at 0
+	setExhView9902(vb, cfg, 2, 1, exhPool9902("p1", 50, 0))
+	m.evaluate() // +45 on id 0: rebase, NOT a raise
+	setExhView9902(vb, cfg, 3, 1, exhPool9902("p1", 99, 0))
+	m.evaluate() // +49 more: still silent
+	if got := activeExhaustion9902(t, m); len(got) != 0 {
+		t.Fatalf("id-0 deltas must never raise, got %+v", got)
+	}
+	if len(rec.snapshot()) != 0 {
+		t.Fatalf("id-0 ticks must emit nothing, got %v", rec.snapshot())
+	}
+}
+
+// A 0→nonzero transition (helper upgraded mid-watch) rebases silently like
+// any identity change, then evaluates normally.
+func TestExhaustionZeroToNonzeroRebasesThenEvaluates9902(t *testing.T) {
+	m, rec, vb := newMon()
+	cfg := cfgWith(80, 70, false)
+	setExhView9902(vb, cfg, 1, 1, exhPool9902("p1", 50, 0))
+	m.evaluate()
+	setExhView9902(vb, cfg, 2, 1, exhPool9902("p1", 60, 7))
+	m.evaluate() // new id: silent rebase even though the count jumped
+	if got := activeExhaustion9902(t, m); len(got) != 0 {
+		t.Fatalf("upgrade transition must rebase silently, got %+v", got)
+	}
+	setExhView9902(vb, cfg, 3, 1, exhPool9902("p1", 63, 7))
+	m.evaluate() // genuine delta on the new id: raise events=3
+	if got := activeExhaustion9902(t, m); len(got) != 1 || got[0].Events != 3 {
+		t.Fatalf("post-upgrade delta must raise events=3, got %+v", got)
+	}
+	if got := countMatch(rec.snapshot(), exhaustedRaisedTag); got != 1 {
+		t.Fatalf("expected 1 raise, got %d", got)
 	}
 }

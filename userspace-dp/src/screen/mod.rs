@@ -1404,7 +1404,14 @@ impl ScreenState {
             // layout change shared with HA peers); the throttle is the bounded
             // hardening. Limitation, stated: `syn_cookie_ack_invalid` cannot
             // distinguish throttled ACKs from bad-MAC ones — one counter, three
-            // Invalid origins.
+            // Invalid origins. MEASUREMENT GAP, stated honestly: there is no
+            // throttle-engagement signal, so the provisional 65536/s rate
+            // cannot be validated or tuned from production telemetry today —
+            // a sustained throttle episode reads exactly like a bad-MAC flood.
+            // Tuning it needs either measured validation-cost data or a
+            // dedicated `syn_cookie_ack_throttled` counter (named follow-up,
+            // deliberately not folded in: the counter would ride the full
+            // worker→binding→status→wire chain).
             if !SynCookieCodec::wire_epoch_matches_validation_window(current_epoch, cookie_isn) {
                 return SynCookieAckVerdict::Invalid;
             }

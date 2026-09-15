@@ -48,8 +48,14 @@ func RenderExhaustionAlarms(w io.Writer, alarms []ActiveExhaustionAlarm, startCo
 	for _, a := range alarms {
 		count++
 		if detail {
+			// "Last nonzero observed delta", not "most recent sample": the
+			// monitor refreshes Events only on positive deltas, so clean
+			// ticks and identity rebases deliberately leave the last
+			// nonzero delta displayed (the alarm means "exhaustion was
+			// recently observed", and the number says how much was last
+			// seen — never zero while raised).
 			fmt.Fprintf(w,
-				"Alarm %d:\n  Class: NAT\n  Severity: Minor\n  Description: NAT source pool %s allocator-reported exhaustion events: %d (most recent sample)\n",
+				"Alarm %d:\n  Class: NAT\n  Severity: Minor\n  Description: NAT source pool %s allocator-reported exhaustion events: %d (last nonzero observed delta)\n",
 				count, a.PoolName, a.Events)
 			if !a.FirstSeen.IsZero() {
 				fmt.Fprintf(w, "  First seen: %s\n", a.FirstSeen.Format("2006-01-02 15:04:05"))

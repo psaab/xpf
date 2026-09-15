@@ -104,6 +104,13 @@ entirely. Watches every rule-referenced pool class (PAT, deterministic,
 address-only); still gated on the same stanza (feature-disabled / nil-config
 clears and retires baselines).
 
+Two stated residuals. (1) Legacy `allocator_id` 0 ALWAYS rebases — a legacy
+same-process rebuild is invisible (0→0), and evaluating the delta would
+false-raise on a fast re-exhaustion past the old count — so legacy helpers
+fail silent (never raise) for the skewed-upgrade window. (2) Rebase loses the
+inter-tick delta: events between the last tick and a rebuild are unobservable
+at the 1 Hz poll cadence, and a rebase neither counts nor clears them.
+
 ## Commit-time validation
 
 `compileNAT` (`pkg/config/compiler_nat.go`) hard-rejects thresholds outside

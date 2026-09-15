@@ -4,10 +4,15 @@ use super::{
 };
 use crate::nat::{
     DnatTable, NatDecision, SourceNatFailure, SourceNatLookup, SourceNatRule, StaticNatTable,
-    match_source_nat, parse_source_nat_rules_with_previous,
+    parse_source_nat_rules_with_previous,
     release_source_nat_allocation_for_worker, reserve_synced_source_nat_allocation_for_worker,
     rollback_source_nat_allocation_for_worker,
 };
+// #9902 review: `match_source_nat` is #[cfg(test)]-gated (Untracked
+// allocator) — this import exists only for the test-only
+// `match_source_nat_for_flow` helper below it in `forwarding/nat.rs`.
+#[cfg(test)]
+use crate::nat::match_source_nat;
 use crate::nat64::{Nat64ReverseInfo, Nat64State};
 use crate::nptv6::Nptv6State;
 use crate::policy::{

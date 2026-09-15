@@ -40,21 +40,29 @@ package userspace
 // Deduplicated, never summed: rules sharing a pool share one
 // `Arc<PortAllocatorShared>` in the helper and therefore report IDENTICAL
 // `UsedPorts`, so summing across rules multiplies the occupancy by the number
-// of referencing rules. This is the same contract `AppliedNATView.Pools`
-// documents; both exist because the alarm monitor needs the cached applied
-// view while the reporting surfaces need the live status.
+// of referencing rules. Among same-name rows the CONSTRUCTED allocator wins
+// (`MaxTrackedFlows>0`, tie → first) — a poisoned rule (#9874) keeps its
+// pool_mode but builds no allocator, and its default-zeros row must not
+// shadow the live one. This is the same contract `AppliedNATView.Pools`
+// documents (#9902 F-026 keeps the two in lockstep); both exist because the
+// alarm monitor needs the cached applied view while the reporting surfaces
+// need the live status.
 func SourceNATPoolOccupancy(status ProcessStatus) map[string]SourceNATPoolStatus {
 	if len(status.SourceNATPools) == 0 {
 		return nil
 	}
 	pools := make(map[string]SourceNATPoolStatus, len(status.SourceNATPools))
+	selectedMax := make(map[string]uint64, len(status.SourceNATPools))
 	for _, p := range status.SourceNATPools {
 		if p.PoolName == "" {
 			continue
 		}
 		if _, seen := pools[p.PoolName]; seen {
-			continue
+			if selectedMax[p.PoolName] > 0 || p.MaxTrackedFlows == 0 {
+				continue
+			}
 		}
+		selectedMax[p.PoolName] = p.MaxTrackedFlows
 		pools[p.PoolName] = p
 	}
 	return pools

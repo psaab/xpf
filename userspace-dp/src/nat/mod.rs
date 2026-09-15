@@ -213,8 +213,7 @@ pub(crate) use source::{
     wire_nat64_overlap_peers,
     SourceNatFailure, SourceNatFailureReason, SourceNatFlowKey, SourceNatLookup, SourceNatRule,
     SyncedNatZones, allocate_nat64_pool_port, allocate_nat64_pool_port_deterministic_v6,
-    match_source_nat,
-    match_source_nat_result, match_source_nat_result_for_tuple, parse_source_nat_rules,
+    match_source_nat_result_for_tuple, parse_source_nat_rules,
     parse_source_nat_rules_with_previous, release_nat64_pool_port,
     release_source_nat_allocation_for_worker, release_synced_source_nat_allocation_untracked,
     reserve_nat64_pool_port, reserve_synced_source_nat_allocation_for_worker,
@@ -226,10 +225,13 @@ pub(crate) use source::{
     rollback_source_nat_allocation_for_worker,
 };
 // #6211 F2: test-only untracked entry points (see their doc comments).
+// #9902 review: the address-only `match_source_nat*` wrappers allocate
+// Untracked, so they ride the same gate — a production caller would silently
+// mint single-holder allocations.
 #[cfg(test)]
 pub(crate) use source::{
-    release_source_nat_allocation, reserve_synced_source_nat_allocation,
-    rollback_source_nat_allocation,
+    match_source_nat, match_source_nat_result, release_source_nat_allocation,
+    reserve_synced_source_nat_allocation, rollback_source_nat_allocation,
 };
 pub(crate) use source::retire_worker_from_pool_rules;
 // #7560 residual: nat64.rs is the third reseed call site and needs the same note.
