@@ -39,6 +39,9 @@ func TestRenderTrafficSelectorSanitizesInjection(t *testing.T) {
 		Policies: map[string]*config.IPsecPolicyDef{
 			"ipsec-pol": {Name: "ipsec-pol", Proposals: []string{"prop1"}},
 		},
+		Proposals: map[string]*config.IPsecProposal{
+			"prop1": {Name: "prop1", EncryptionAlg: "aes-256-cbc", AuthAlg: "hmac-sha-256-128"},
+		},
 	}
 
 	got := m.generateConfig(cfg)
@@ -93,6 +96,9 @@ func TestRenderTrafficSelectorNormalUnchanged(t *testing.T) {
 		},
 		Policies: map[string]*config.IPsecPolicyDef{
 			"ipsec-pol": {Name: "ipsec-pol", Proposals: []string{"prop1"}},
+		},
+		Proposals: map[string]*config.IPsecProposal{
+			"prop1": {Name: "prop1", EncryptionAlg: "aes-256-cbc", AuthAlg: "hmac-sha-256-128"},
 		},
 	}
 	// #6824: the old needles carried a trailing "\n" purely to approximate

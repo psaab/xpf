@@ -252,16 +252,16 @@ type compileOpts struct {
 	// committed, so firing on every boot and peer sync trains the operator to
 	// skip it.
 	suppressContestedTrunkZoneAdvisory bool
-	// lenientIPsecPolicyProposalRef (#2073) downgrades the IPsec policy
-	// proposal cross-reference check from a hard error to a warning on the
-	// tolerant load / peer-sync paths. A dangling `proposals` reference (or
-	// a PFS policy with no resolvable proposal) silently drops the
-	// configured perfect-forward-secrecy group to the strongSwan default at
-	// render time; commit/commit-check hard-reject it so a new operator edit
-	// fails loudly, but an already-persisted or peer-synced config carrying
-	// this latent misconfiguration must still boot (the render-path safety
-	// net in pkg/ipsec resolveESPSettings preserves the PFS group on that
-	// boot). Same doctrine as lenientPolicyMatchAddress.
+	// lenientIPsecPolicyProposalRef (#2073, #9919 F-090) downgrades the IPsec
+	// (Phase 2) reference-chain check from a hard error to a warning on the
+	// tolerant load / peer-sync paths. A dangling `proposals` reference, a
+	// PFS policy with no resolvable proposal, or a VPN whose `ipsec-policy`
+	// names neither a policy nor a proposal has no crypto to render; commit /
+	// commit-check hard-reject it so a new operator edit fails loudly, but an
+	// already-persisted or peer-synced config carrying this latent
+	// misconfiguration must still boot (the render belt in pkg/ipsec skips
+	// the unrenderable VPN on that boot rather than fabricate a suite).
+	// Same doctrine as lenientPolicyMatchAddress.
 	lenientIPsecPolicyProposalRef bool
 
 	// lenientSchedulerMapRef downgrades the class-of-service
@@ -397,6 +397,21 @@ type compileOpts struct {
 	// tolerant path warns rather than gaining a new rejection. Same #1960
 	// fail-closed-on-load doctrine as lenientIPsecEndpoints.
 	lenientIPsecProposalLifetime bool
+
+	// lenientIPsecDHGroup (#9919 F-161) downgrades the IKE/IPsec proposal
+	// `dh-group` and policy `perfect-forward-secrecy keys` value gate
+	// (validateIPsecDHGroupsStrict) from a hard compile error to a
+	// cfg.Warnings entry on the tolerant load / peer-sync paths. The schema
+	// already carries ValidateDHGroup on all three leaves, but SchemaValidate
+	// runs only from compileTreeStrict, so an unparseable or unspellable
+	// group was rejected at commit and accepted in SILENCE by Store.Load
+	// and HA SyncApply (silently dropping the modp term, or rendering an
+	// empty keyword charon refuses). Commit hard-rejects (unchanged — that
+	// path already did, via the schema); an already-persisted or peer-synced
+	// config an older binary accepted must still BOOT, so the tolerant path
+	// warns rather than gaining a new rejection. Same #1960
+	// fail-closed-on-load doctrine as lenientIPsecProposalLifetime.
+	lenientIPsecDHGroup bool
 
 	// lenientIPsecTrafficSelectors (#4098) downgrades the IPsec
 	// `traffic-selector local-ip / remote-ip` value gate
@@ -2855,6 +2870,7 @@ func lenientCompileOpts() compileOpts {
 		lenientIPsecEndpoints:                  true,
 		lenientIPsecSANameCollision:            true,
 		lenientIPsecProposalLifetime:           true,
+		lenientIPsecDHGroup:                    true,
 		lenientIPsecTrafficSelectors:           true,
 		lenientReservedProposalSetNames:        true,
 		lenientChassisClusterIdentities:        true,

@@ -225,7 +225,9 @@ func TestFormatDHGroup_ECPandMODP(t *testing.T) {
 //  1. buildIKEProposalFromIKE  (IKE proposal object path)
 //  2. buildIKEProposal         (legacy IPsec-proposal-as-IKE path)
 //  3. buildESPProposal         (ESP / Phase-2 path)
-//  4. resolveESPSettings PFS fallback (undefined-proposal #2073 fallback)
+//  4. resolveESPSettings PFS override (resolved chain, #9919: the dangling
+//     fallback this site pinned is now a skip; the ECP spelling coverage
+//     moves to the resolved chain where PFS still applies)
 func TestProposalBuilders_ECPGroupAcrossAllSites(t *testing.T) {
 	type groupCase struct {
 		group  int
@@ -272,18 +274,21 @@ func TestProposalBuilders_ECPGroupAcrossAllSites(t *testing.T) {
 			t.Errorf("buildESPProposal(pfs %d) = %q, want %q", gc.group, got, want)
 		}
 
-		// Site 4: resolveESPSettings PFS fallback. The IPsec policy resolves
-		// but names a proposal that does not exist, so the #2073 fallback
-		// carries the configured PFS group onto a conservative proposal.
+		// Site 4: resolveESPSettings with a RESOLVED chain and a PFS group.
+		// The policy resolves and its proposal resolves, so the PFS group
+		// overrides onto the rendered proposal with its canonical spelling.
 		cfg := &config.IPsecConfig{
 			Policies: map[string]*config.IPsecPolicyDef{
-				"pol1": {Name: "pol1", PFSGroup: gc.group, Proposals: []string{"missing-prop"}},
+				"pol1": {Name: "pol1", PFSGroup: gc.group, Proposals: []string{"esp1"}},
+			},
+			Proposals: map[string]*config.IPsecProposal{
+				"esp1": {Name: "esp1", EncryptionAlg: "aes-256-cbc", AuthAlg: "hmac-sha-256"},
 			},
 		}
 		vpn := &config.IPsecVPN{IPsecPolicy: "pol1"}
-		if got, _ := resolveESPSettings(cfg, vpn); got != "aes256-sha256-"+gc.suffix {
-			t.Errorf("resolveESPSettings PFS fallback (group %d) = %q, want %q",
-				gc.group, got, "aes256-sha256-"+gc.suffix)
+		if got, _, err := resolveESPSettings(cfg, vpn); err != nil || got != "aes256-sha256-"+gc.suffix {
+			t.Errorf("resolveESPSettings PFS override (group %d) = (%q, %v), want %q",
+				gc.group, got, err, "aes256-sha256-"+gc.suffix)
 		}
 	}
 }

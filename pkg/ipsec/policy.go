@@ -29,14 +29,16 @@ func (m *Manager) generateConfig(ipsecCfg *config.IPsecConfig) string {
 // swanctl connection names it actually emitted (the sanitized VPN names
 // written into the connections{} block). A VPN present in ipsecCfg.VPNs but
 // OMITTED from the render — a skip class: an unrenderable gateway reference
-// (#2074), an unresolved ike-policy chain (#2270), or a `protocol ah`
-// proposal with no ESP render path (#4298) — is NOT in the returned set even
-// though renderConfig still returns success. Apply diffs THIS rendered set
-// (not the raw VPN map keys) so a previously-loaded connection that dropped
-// out of the render is treated as a removal and its stale child SA is torn
-// down (#5494). Returning the rendered set is the single source of truth for
-// "what is actually loaded", so the skip logic here can never drift from the
-// teardown diff in promoteConnNames.
+// (#2074), an unresolved ike-policy chain (#2270), an unusable IKE DH group
+// (#9919 F-161), a `protocol ah` proposal with no ESP render path (#4298),
+// a section-breaking VPN name (#9495), an unresolved ipsec-policy chain
+// (#9919 F-090), or an unusable ESP/PFS DH group (#9919 F-161) — is NOT in
+// the returned set even though renderConfig still returns success. Apply
+// diffs THIS rendered set (not the raw VPN map keys) so a previously-loaded
+// connection that dropped out of the render is treated as a removal and its
+// stale child SA is torn down (#5494). Returning the rendered set is the
+// single source of truth for "what is actually loaded", so the skip logic
+// here can never drift from the teardown diff in promoteConnNames.
 func (m *Manager) renderConfig(ipsecCfg *config.IPsecConfig) (string, map[string]bool, error) {
 	var b strings.Builder
 
@@ -99,6 +101,18 @@ func (m *Manager) renderConfig(ipsecCfg *config.IPsecConfig) (string, map[string
 					"vpn", name, "ike_policy", gw.IKEPolicy)
 				continue
 			}
+			// #9919 F-161: an unusable IKE DH group skips this VPN like a
+			// dangling chain — it must never abort the whole render (one
+			// bad value would zero every healthy tunnel). The error names
+			// the offending values.
+			if errors.Is(err, errDHGroupUnresolved) {
+				skipped[name] = true
+				slog.Warn("skipping IPsec VPN: unusable Diffie-Hellman group "+
+					"(emitting the proposal would silently drop the modp term "+
+					"or render a keyword charon refuses) — fix the dh-group value",
+					"vpn", name, "detail", err.Error())
+				continue
+			}
 			return "", nil, fmt.Errorf("vpn %s: %w", name, err)
 		}
 
@@ -135,6 +149,40 @@ func (m *Manager) renderConfig(ipsecCfg *config.IPsecConfig) (string, map[string
 			continue
 		}
 
+		// Resolve the ESP settings BEFORE writing the connection block so a
+		// VPN whose ipsec-policy chain does not resolve, or whose effective
+		// DH group is unusable, SKIPS like the IKE chain above (#9919 F-090
+		// / F-161) instead of emitting a fabricated suite or a weakened /
+		// charon-refused proposal. The hard diagnostics are the commit-time
+		// validators (validateIPsecPolicyProposalReferencesStrict,
+		// validateIPsecDHGroupsStrict); this render belt is the
+		// by-construction backstop for any path that reaches render without
+		// passing local commit. Every error this resolver returns today is
+		// skip-class; the abort arm stays as documented-defensive symmetry
+		// with the IKE branch above (a future hard-error class must fail
+		// the render loudly, never render past it).
+		espProposals, espLifetime, err := resolveESPSettings(ipsecCfg, vpn)
+		if err != nil {
+			if errors.Is(err, errESPChainUnresolved) {
+				skipped[name] = true
+				slog.Warn("skipping IPsec VPN: ipsec-policy chain does not "+
+					"resolve — fix the ipsec-policy / ipsec-proposal reference "+
+					"(rendering a substitute suite would negotiate crypto the "+
+					"operator never authored)",
+					"vpn", name, "detail", err.Error())
+				continue
+			}
+			if errors.Is(err, errDHGroupUnresolved) {
+				skipped[name] = true
+				slog.Warn("skipping IPsec VPN: unusable Diffie-Hellman group "+
+					"(emitting the proposal would silently drop PFS or render "+
+					"a keyword charon refuses) — fix the dh-group / keys value",
+					"vpn", name, "detail", err.Error())
+				continue
+			}
+			return "", nil, fmt.Errorf("vpn %s: %w", name, err)
+		}
+
 		// This VPN passed every skip check, so it is emitted into the
 		// loaded config. Record its sanitized connection name in the
 		// rendered set (#5494) — the same key swanctl reports in
@@ -142,7 +190,6 @@ func (m *Manager) renderConfig(ipsecCfg *config.IPsecConfig) (string, map[string
 		rendered[sanitizeSwanctlValue(name)] = true
 
 		fmt.Fprintf(&b, "  %s {\n", sanitizeSwanctlValue(name))
-		espProposals, espLifetime := resolveESPSettings(ipsecCfg, vpn)
 		dpd := deriveDPD(gw, vpn)
 
 		// IKE version
@@ -245,9 +292,14 @@ func (m *Manager) renderConfig(ipsecCfg *config.IPsecConfig) (string, map[string
 			// legitimate proposal or comma-list renders byte-identical (#6469).
 			fmt.Fprintf(&b, "    proposals = %s\n", sanitizeSwanctlValue(ikeProposals))
 		}
+		// #9919 F-163: emit rekey_time WITHOUT rand_time. strongSwan's
+		// default rand_time (= over_time = 10% of rekey_time) jitters the
+		// rekey so co-timed tunnels (fleet boot, mass commit, HA failover)
+		// do not rekey together; emitting `rand_time = 0s` removed that
+		// jitter with no recorded rationale. Junos has no rand_time knob,
+		// so omission (strongSwan's default) is the faithful render.
 		if ikeLifetime > 0 {
 			fmt.Fprintf(&b, "    rekey_time = %ds\n", ikeLifetime)
-			b.WriteString("    rand_time = 0s\n")
 		}
 
 		// #7165: `start_action` is a CHILD setting in swanctl.conf, not a
@@ -305,9 +357,10 @@ func (m *Manager) renderConfig(ipsecCfg *config.IPsecConfig) (string, map[string
 			// unquoted list slot; a legitimate proposal / comma-list renders
 			// byte-identical (#6469).
 			fmt.Fprintf(&b, "        esp_proposals = %s\n", sanitizeSwanctlValue(espProposals))
+			// #9919 F-163: no rand_time beside the child rekey_time either
+			// (same de-jitter as the IKE connection above).
 			if espLifetime > 0 {
 				fmt.Fprintf(&b, "        rekey_time = %ds\n", espLifetime)
-				b.WriteString("        rand_time = 0s\n")
 			}
 			// Junos df-bit → strongSwan copy_df (outer IP-header DF handling;
 			// the DF bit lives in the outer encapsulating IP header, not ESP).
@@ -605,9 +658,11 @@ type SANameIndex map[string][]string
 // Eligibility is the RENDERER's, decided ONE VPN AT A TIME. Each VPN is rendered
 // on its own, sharing every other section of ipsecCfg:
 //
-//   - the renderer SKIPS it (an unrenderable gateway, an unresolved ike-policy
-//     chain, an AH proposal): it loads nothing and contributes no name, so it
-//     cannot make a loaded VPN's name look ambiguous;
+//   - the renderer SKIPS it (an unrenderable gateway, an unresolved
+//     ike-policy chain, an unusable DH group, an AH proposal, a
+//     section-breaking name, an unresolved ipsec-policy chain): it loads
+//     nothing and contributes no name, so it cannot make a loaded VPN's
+//     name look ambiguous;
 //   - it renders: its connection name and every child the renderer emits for it
 //     (effectiveTrafficSelectors + sanitizeSwanctlValue, the render's own
 //     expansion) are indexed;
