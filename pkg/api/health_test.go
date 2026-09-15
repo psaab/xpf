@@ -307,6 +307,36 @@ func TestHealthHandler_ReportsRollbackHistoryDegraded(t *testing.T) {
 	}
 }
 
+// TestHealthHandler_ReportsJournalPermsDegraded pins #9898 F-113: while the
+// configstore reports a degraded journal permission repair, /health surfaces
+// the journal_perms_degraded field as true — but stays 200/ok, because
+// appends continue and the journal is intact (a confidentiality exposure on
+// history, not a forwarding or durability outage).
+func TestHealthHandler_ReportsJournalPermsDegraded(t *testing.T) {
+	s := &Server{
+		journalPermsDegradedFn: func() bool { return true },
+	}
+
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/health", nil)
+	s.healthHandler(rr, req)
+
+	if rr.Code != 200 {
+		t.Errorf("status = %d, want 200 (journal-perms degradation is non-fatal)", rr.Code)
+	}
+	var resp Response
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	data, ok := resp.Data.(map[string]any)
+	if !ok {
+		t.Fatalf("data = %T, want map", resp.Data)
+	}
+	if degraded, _ := data["journal_perms_degraded"].(bool); !degraded {
+		t.Error("journal_perms_degraded should be true and reported in /health")
+	}
+}
+
 // TestHealthHandler_ReportsBootstrapImportFailed pins #4184 (H-11): a failed
 // day-0 / bootstrap config import is surfaced on /health via
 // bootstrap_import_status + bootstrap_import_failed + the error detail — so

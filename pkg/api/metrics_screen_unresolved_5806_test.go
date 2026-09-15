@@ -89,6 +89,20 @@ security {
 	// Strand the reference: the definition stops being a screen profile, the
 	// zone keeps pointing at it.
 	mutated := strings.Replace(string(raw), "ids-option", "ids-optionz", 1)
+	// #9898 F-035: the mutation above is deliberate test surgery on a
+	// digest-stamped envelope; strip the tamper-evidence field so the
+	// reload exercises the legacy-accept path (a missing field means
+	// "pre-fix bytes", which these hand-mutated bytes now are). Without
+	// the strip the reload correctly fails closed on the digest mismatch —
+	// which would test the gate, not the tolerant dangling-ref load this
+	// fixture exists for. The gate itself is pinned in pkg/configstore.
+	if i := strings.Index(mutated, " body-sha256="); i >= 0 {
+		nl := strings.IndexByte(mutated[i:], '\n')
+		if nl < 0 {
+			t.Fatalf("fixture broken: stamped header has no newline")
+		}
+		mutated = mutated[:i] + mutated[i+nl:]
+	}
 	if err := os.WriteFile(dbPath, []byte(mutated), 0o644); err != nil {
 		t.Fatalf("write mutated db: %v", err)
 	}
