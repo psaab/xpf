@@ -283,12 +283,12 @@ proptest! {
     /// produce FULLY byte-identical output frames (mask EMPTY since the
     /// #1838/#1839/#1840 trio — plan §9.3 / Q7), for the success
     /// domain: TCP/UDP, TTL ≥ 2 (v6 ext chains included), v6 UDP
-    /// checksum nonzero, `expected_ports = None` (the two paths check
-    /// expected ports at different pipeline points — descriptor
-    /// pre-NAT as a DMA-race guard, generic post-NAT via
-    /// `enforce_expected_ports` — so port-mismatch inputs are not
-    /// differential-comparable). Both outputs must also be VALID by
-    /// the oracle.
+    /// checksum nonzero, `expected_ports = None` (both paths check the
+    /// arrival tuple pre-NAT since #9782 — descriptor declines on
+    /// mismatch, generic repairs — so port-mismatch inputs remain
+    /// differential-comparable only in outcome class, and `None` keeps
+    /// the byte-equality domain mismatch-free). Both outputs must also
+    /// be VALID by the oracle.
     #[test]
     fn descriptor_generic_differential(
         (pkt, nat) in arb_packet_with_nat(),

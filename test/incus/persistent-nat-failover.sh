@@ -161,13 +161,67 @@ resolve_pool() {
 }
 fw_sh()  { incus exec "$1" -- bash -lc "$2"; }
 
-# The persistent-NAT binding for our client, as the node reports it.
-# Columns: Source IP | SrcPort | NAT IP | NATPort | Pool | Timeout
-# (pkg/natshow/persistent.go RenderPersistent).
-binding_natport() {
-	local node="$1" src_ip="$2"
+# #9782: lease-aware readers. Persistent leases key per source TUPLE (proto,
+# srcip, srcport; any-remote-host drops only the remote scope), so every read
+# names an explicit (ip, sport) — first-match-by-IP is order luck across
+# nodes/ticks. Table columns: Source IP | SrcPort | NAT IP | NATPort | Pool |
+# Timeout (pkg/natshow/persistent.go RenderPersistent). The CLI table
+# additionally lags minting by up to a 30s tick
+# (daemon_persistent_nat_show_8607), so table reads poll (bounded); a
+# genuine absence still fails loudly.
+binding_natport_for_sport() {
+	local node="$1" src_ip="$2" sport="$3"
 	fw_cli "$node" "show security nat source persistent-nat-table" \
-		| awk -v ip="$src_ip" '$1 == ip { print $4; exit }'
+		| awk -v ip="$src_ip" -v sp="$sport" '$1 == ip && $2 == sp { print $4; exit }'
+}
+
+await_binding_for_sport() {
+	local node="$1" src_ip="$2" sport="$3" deadline_s="$4" waited=0 port=""
+	while [ "$waited" -lt "$deadline_s" ]; do
+		port="$(binding_natport_for_sport "$node" "$src_ip" "$sport" || true)"
+		[ -n "$port" ] && { printf '%s' "$port"; return 0; }
+		sleep 3
+		waited=$((waited + 3))
+	done
+	return 1
+}
+
+# Connect from a PINNED source port (python; bash /dev/tcp cannot bind).
+# Prints CONNECT-OK/FAILED; always exits 0 (callers assert explicitly).
+client_connect_pinned() {
+	local src_ip="$1" sport="$2" dport="$3" timeout_s="$4"
+	incus exec "$LAN_CLIENT" -- python3 -u -c "
+import socket
+s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+s.settimeout($timeout_s)
+try:
+    s.bind(('$src_ip', $sport))
+    s.connect(('$TARGET', $dport))
+    print('CONNECT-OK', flush=True)
+except Exception as e:
+    print(f'CONNECT-FAILED {e}', flush=True)
+" 2>/dev/null || echo "CONNECT-FAILED exec-error"
+}
+
+# LOCAL sessions matching the full TCP tuple, as "<session-id> <out-src-port>"
+# rows. The stable dataplane session id (#5213) is the freshness instrument:
+# the caller snapshots pre-connect ids and requires a post-connect id outside
+# the set — same source tuple (the lease key), provably new session. Matching
+# on the full tuple (proto + both endpoints, not just ip/sport) and stopping
+# at the `node<N>:` peer block (peer rows are the other node's sessions, never
+# this node's verdict). Empty when nothing matches.
+session_rows_for_tuple() {
+	local node="$1" src_ip="$2" sport="$3" dst_ip="$4" dport="$5"
+	fw_cli "$node" "show security flow session" 2>/dev/null \
+		| awk -v want=" $src_ip/$sport --> $dst_ip/$dport;tcp" '
+			/^node[0-9]+:/ { exit }
+			/^Session ID: / { sid=$3; sub(/,$/, "", sid); matched=0 }
+			/  In: / { matched = (index($0, want) > 0) }
+			matched && /  Out: / {
+				for (i = 1; i <= NF; i++)
+					if ($i == "-->") { split($(i+1), a, "/"); gsub(/[^0-9]/, "", a[2]); print sid, a[2]; matched=0; break }
+			}'
 }
 
 binding_count() {
@@ -321,26 +375,26 @@ main() {
 
 	apply_pnat_config
 
-	# Open a connection so the active mints a lease, and learn our source IP as
-	# the firewall sees it.
-	info "Opening connections from the client so the active mints a lease"
-	# Several attempts to different remote PORTS: the lease is keyed on the
-	# source tuple (permit any-remote-host), so any of them mints it — and a
-	# single connect to a port with no listener can be refused before the
-	# firewall installs a session.
-	local p
-	for p in 5201 5202 443; do
-		incus exec "$LAN_CLIENT" -- bash -lc \
-			"timeout 3 bash -c 'exec 3<>/dev/tcp/${TARGET}/${p}' 2>/dev/null || true"
-	done
-	sleep 3
-
-	local src_ip natport_before
+	# Open connections from PINNED source ports so the active mints leases
+	# this script can name exactly. Leases key per source TUPLE (sport
+	# included; any-remote-host drops only the remote scope), so ephemeral
+	# sports make every read below order luck. Three sports give the
+	# standby assertion siblings to distinguish a real sync gap from noise.
+	# NOTE: requires python3 on the LAN host (bash cannot bind a sport).
+	incus exec "$LAN_CLIENT" -- bash -lc "command -v python3" >/dev/null 2>&1 \
+		|| die "LAN host lacks python3 (needed for pinned source ports)"
+	local src_ip
 	src_ip="$(incus exec "$LAN_CLIENT" -- bash -lc "ip -4 -o addr show scope global | awk 'NR==1{split(\$4,a,\"/\"); print a[1]}'")"
 	[ -n "$src_ip" ] || die "could not determine the client's source IP"
 	info "client source IP: $src_ip"
+	local sport
+	for sport in 50001 50002 50003; do
+		info "setup connect $src_ip:$sport -> $TARGET:5201: $(client_connect_pinned "$src_ip" "$sport" 5201 5)"
+	done
 
-	natport_before="$(binding_natport "$PRIMARY" "$src_ip" || true)"
+	# The canary lease: sport 50001 must appear (bounded poll for the tick).
+	local natport_before
+	natport_before="$(await_binding_for_sport "$PRIMARY" "$src_ip" 50001 45 || true)"
 	if [ -z "$natport_before" ]; then
 		# Anti-vacuity guard. Dump what the node actually saw, so a failure here
 		# names the cause instead of costing another cluster window to find.
@@ -364,13 +418,28 @@ did not exercise persistent NAT, so every assertion below would be vacuous"
 
 	# (a) THE DIRECT ASSERTION. Before #7360 this is empty however many sessions
 	#     the standby imported.
-	sleep 3
+	# Poll for the canary sport's row (sync + 30s tick lag on the peer).
 	local standby_port standby_count
+	standby_port="$(await_binding_for_sport "$STANDBY" "$src_ip" 50001 60 || true)"
 	standby_count="$(binding_count "$STANDBY" || echo 0)"
-	standby_port="$(binding_natport "$STANDBY" "$src_ip" || true)"
 	if [ "$standby_port" = "$natport_before" ]; then
 		pass "standby $STANDBY reconstructed the binding ($src_ip -> $standby_port)"
 	else
+		# Anti-vacuity guard. A bare count cannot distinguish a stale row
+		# from partial sync from slow sync — and the restore drops the pool
+		# afterwards, so capture both tables + both control-plane views now.
+		echo "---- diagnostics: standby lease sync gap ----" >&2
+		echo "-- persistent-nat-table on PRIMARY ($PRIMARY) --" >&2
+		fw_cli "$PRIMARY" "show security nat source persistent-nat-table" >&2 || true
+		echo "-- persistent-nat-table on STANDBY ($STANDBY) --" >&2
+		fw_cli "$STANDBY" "show security nat source persistent-nat-table" >&2 || true
+		echo "-- canary-tuple live sessions on PRIMARY ($PRIMARY) --" >&2
+		fw_cli "$PRIMARY" "show security flow session" 2>&1 | grep -F "$src_ip/50001" | head -10 >&2 || true
+		echo "-- canary-tuple live sessions on STANDBY ($STANDBY) --" >&2
+		fw_cli "$STANDBY" "show security flow session" 2>&1 | grep -F "$src_ip/50001" | head -10 >&2 || true
+		echo "-- RG0 primary as seen from PRIMARY ($PRIMARY): $(rg0_primary_node "$PRIMARY" || true) --" >&2
+		echo "-- RG0 primary as seen from STANDBY ($STANDBY): $(rg0_primary_node "$STANDBY" || true) --" >&2
+		echo "---- end diagnostics ----" >&2
 		fail "standby $STANDBY has no matching persistent-NAT binding for $src_ip \
 (count=$standby_count, port='${standby_port:-none}', expected $natport_before). \
 This is #7360: the synced reserve published the session without joining a lease."
@@ -393,20 +462,72 @@ This is #7360: the synced reserve published the session without joining a lease.
 		return
 	fi
 
-	info "Opening a NEW connection from the same client on the promoted node"
-	incus exec "$LAN_CLIENT" -- bash -lc \
-		"timeout 5 bash -c 'exec 3<>/dev/tcp/${TARGET}/5201' 2>/dev/null || true"
-	sleep 2
-
-	local natport_after
-	natport_after="$(binding_natport "$STANDBY" "$src_ip" || true)"
-	if [ "$natport_after" = "$natport_before" ]; then
-		pass "the client kept its translated port across the failover ($natport_after)"
+	# Snapshot the canary tuple's LOCAL session ids on the promoted node
+	# BEFORE the new connect. Any post-connect id outside this set is a
+	# demonstrably FRESH session; without the snapshot the verdict below
+	# could credit the synced pre-failover row for the identical 5-tuple.
+	# (The setup connects are closed, so this is usually empty — the
+	# snapshot is what makes "fresh" provable rather than assumed.)
+	local pre_ids
+	pre_ids="$(session_rows_for_tuple "$STANDBY" "$src_ip" 50001 "$TARGET" 5201 | awk '{print $1}' || true)"
+	info "Opening a NEW connection from the SAME source tuple (pinned 50001) on the promoted node"
+	incus exec "$LAN_CLIENT" -- python3 -u -c "
+import socket, time
+s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+s.settimeout(5)
+try:
+    s.bind(('$src_ip', 50001))
+    s.connect(('$TARGET', 5201))
+    print('CONNECT-OK', flush=True)
+    time.sleep(8)
+except Exception as e:
+    print(f'CONNECT-FAILED {e}', flush=True)
+" >"$PNAT_TMP/postfail.out" 2>&1 &
+	HOLD_PID=$!
+	# Bounded wait for the probe's own verdict — asserted BEFORE the lease
+	# verdict, which is only meaningful if this connection established. A
+	# failed connect matching the synced pre-failover row must FAIL here,
+	# never pass on a stale session.
+	POST_RES=""
+	local waited=0
+	while [ "$waited" -lt 12 ]; do
+		POST_RES="$(cat "$PNAT_TMP/postfail.out" 2>/dev/null || true)"
+		case "$POST_RES" in
+			CONNECT-OK*|CONNECT-FAILED*) break ;;
+		esac
+		sleep 1
+		waited=$((waited + 1))
+	done
+	info "post-failover connect result: ${POST_RES:-still-running}"
+	case "$POST_RES" in
+		CONNECT-OK*) ;;
+		*)
+			fail "post-failover connect did not establish (probe said: ${POST_RES:-no result after 12s}) — refusing the lease verdict on a connection that never existed"
+			wait "$HOLD_PID" 2>/dev/null || true
+			summary
+			return
+			;;
+	esac
+	# The lease verdict comes from the LIVE session's translation (dataplane
+	# truth, no display lag): same key must reuse the same translated port —
+	# read from a FRESH session (post-connect id outside the pre-connect
+	# set), never an arbitrary matching row.
+	local post_rows fresh_row fresh_sid natport_after
+	post_rows="$(session_rows_for_tuple "$STANDBY" "$src_ip" 50001 "$TARGET" 5201 || true)"
+	fresh_row="$(printf '%s\n' "$post_rows" | awk -v pre=" $pre_ids " 'NF >= 2 && index(pre, " " $1 " ") == 0 { print; exit }')"
+	fresh_sid="$(printf '%s\n' "$fresh_row" | awk '{print $1}')"
+	natport_after="$(printf '%s\n' "$fresh_row" | awk '{print $2}')"
+	wait "$HOLD_PID" 2>/dev/null || true
+	if [ -z "$fresh_row" ]; then
+		fail "no FRESH session for $src_ip:50001 -> $TARGET:5201 on $STANDBY (pre-connect ids: '${pre_ids:-none}', post-connect rows: '${post_rows:-none}') — the connect succeeded but no new session proves it; refusing to credit a stale row"
+	elif [ "$natport_after" = "$natport_before" ]; then
+		pass "the client kept its translated port across the failover ($natport_after; fresh session $fresh_sid)"
 	else
 		fail "translated port MOVED across the failover: $natport_before -> \
-'${natport_after:-none}'. A NEW connection is the right probe here; an existing \
-one keeps its port on unfixed code because #4388 reserves the imported \
-session's own translation."
+'${natport_after:-none}' (fresh session ${fresh_sid:-none}). A NEW connection \
+is the right probe here; an existing one keeps its port on unfixed code \
+because #4388 reserves the imported session's own translation."
 	fi
 
 	summary

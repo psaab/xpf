@@ -547,6 +547,9 @@ mod tests_gre_session_sync_7188;
 #[path = "tests_bind_forward.rs"]
 mod tests_bind_forward;
 #[cfg(test)]
+#[path = "tests_9782.rs"]
+mod tests_9782;
+#[cfg(test)]
 #[path = "tests_icmp_te.rs"]
 mod tests_icmp_te;
 #[cfg(test)]

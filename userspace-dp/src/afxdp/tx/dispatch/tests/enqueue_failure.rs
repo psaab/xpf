@@ -485,8 +485,9 @@ fn enqueue_failure_conserves_free_frames_across_many_forwards() {
 // so it was handed out for two later TX descriptors that then aliased one
 // in-flight frame (on-wire corruption / double-free on the debug-log build).
 //
-// A correct builder never trips the mismatch (`enforce_expected_ports` makes the
-// built L4 ports equal the expected tuple), so the branch is reached via the
+// A correct builder never trips the mismatch (call sites compare against
+// the POST-NAT expectation via `post_nat_expected_ports` since #9782 moved
+// enforcement pre-NAT), so the branch is reached via the
 // `#[cfg(test)] FORCE_TUPLE_MISMATCH` hook. The branch itself only exists under
 // the `debug-log` feature (`if cfg!(feature = "debug-log")`), so the
 // single-recycle assertions are gated on that feature; the non-debug-log build
@@ -614,5 +615,107 @@ fn direct_tx_tuple_mismatch_recycles_frame_exactly_once() {
             "the direct-TX forward consumes exactly one free frame"
         );
         assert_eq!(dbg.enqueue_ok, 1, "the direct-TX forward is enqueued");
+    }
+}
+// #9782 F2a: a correctly PAT-translated direct-TX forward must NOT trip the
+// debug-log tuple-mismatch diagnostic (which compares against the POST-NAT
+// expectation) and must NOT be dropped. RED-on-revert: comparing against
+// the pre-NAT tuple fires the mismatch on every PAT build and recycles the
+// frame under --features debug-log.
+#[test]
+fn direct_tx_pat_translation_is_not_a_tuple_mismatch_9782() {
+    let _guard = ForceFaultGuard;
+    let mut bindings = vec![
+        BindingWorker::new_for_mirror_test(0, 0, 11, 0),
+        BindingWorker::new_for_mirror_test(1, 0, 22, 0),
+    ];
+    // Hand-rolled TCP frame (arrival tuple 45678 -> 5201).
+    let mut frame = vec![0u8; 14 + 20 + 20];
+    frame[12] = 0x08;
+    frame[13] = 0x00;
+    frame[14] = 0x45;
+    frame[16] = 0x00;
+    frame[17] = 40;
+    frame[22] = 64;
+    frame[23] = PROTO_TCP;
+    frame[26..30].copy_from_slice(&[10, 0, 61, 102]);
+    frame[30..34].copy_from_slice(&[172, 16, 80, 200]);
+    frame[34..36].copy_from_slice(&45678u16.to_be_bytes());
+    frame[36..38].copy_from_slice(&5201u16.to_be_bytes());
+    frame[46] = 0x50;
+    frame[47] = 0x10;
+    unsafe {
+        bindings[0]
+            .umem
+            .area()
+            .slice_mut_unchecked(0, frame.len())
+    }
+    .expect("ingress frame")
+    .copy_from_slice(&frame);
+
+    let egress_free_before = bindings[1].tx_pipeline.free_tx_frames.len();
+    let forwarding = test_forwarding_with_egress_mtu(1500);
+    let lookup = WorkerBindingLookup::from_bindings(&bindings);
+    let mirror_targets = MirrorTargetMap::default();
+    let mut decision = test_forwarding_decision_to_bound_ifindex(22);
+    decision.nat = NatDecision {
+        rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 7))),
+        rewrite_src_port: Some(30001),
+        ..Default::default()
+    };
+    let mut req = test_live_forward_request_for_frame(frame.len(), decision);
+    req.expected_ports = Some((45678, 5201));
+    let mut pending = vec![req];
+    let mut post_recycles = Vec::new();
+    let ingress_ident = bindings[0].identity();
+    let ingress_live = &*bindings[0].live as *const BindingLiveState;
+    let local_tunnel_deliveries: Arc<ArcSwap<BTreeMap<i32, LocalTunnelDelivery>>> =
+        Arc::new(ArcSwap::from_pointee(BTreeMap::new()));
+    let recent_exceptions = Arc::new(Mutex::new(ExceptionEventRing::new()));
+    let worker_commands_by_id: BTreeMap<u32, Arc<Mutex<VecDeque<WorkerCommand>>>> = BTreeMap::new();
+    let mut dbg = DebugPollCounters::default();
+
+    let (left, rest) = bindings.split_at_mut(0);
+    let (ingress, right) = rest.split_first_mut().expect("ingress binding");
+    enqueue_pending_forwards(
+        left,
+        0,
+        ingress,
+        right,
+        &lookup,
+        &mirror_targets,
+        &mut pending,
+        &mut post_recycles,
+        1,
+        &forwarding,
+        &ingress_ident,
+        unsafe { &*ingress_live },
+        None,
+        &local_tunnel_deliveries,
+        &recent_exceptions,
+        &mut dbg,
+        &mut BatchCounters::default(),
+        0,
+        &worker_commands_by_id,
+    );
+
+    let free = &bindings[1].tx_pipeline.free_tx_frames;
+    assert_eq!(
+        free.len(),
+        egress_free_before - 1,
+        "#9782: a correctly translated PAT forward consumes its TX frame"
+    );
+    assert_eq!(dbg.enqueue_ok, 1, "the PAT forward is enqueued");
+    if cfg!(feature = "debug-log") {
+        let reasons: Vec<String> = recent_exceptions
+            .lock()
+            .expect("exceptions")
+            .iter()
+            .map(|e| e.reason().to_string())
+            .collect();
+        assert!(
+            !reasons.iter().any(|r| r.starts_with("forward_tuple_mismatch")),
+            "#9782: no false mismatch on a correct PAT build: {reasons:?}"
+        );
     }
 }
