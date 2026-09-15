@@ -100,8 +100,9 @@ func encodeSessionV4Payload(key dataplane.SessionKey, val dataplane.SessionValue
 	// #7188 TunnelDiscriminator. All length-gated: an old decoder stops after
 	// the field it knows and ignores the rest.
 	// #7239 RoutingDomain (4) and #9412 TCPCloseClass (1) ride behind the
-	// fields above. Over-allocating is harmless: the result is buf[:off].
-	buf := make([]byte, keySize+valSize+8+8+8+8+4+8+4+1)
+	// fields above, then #9752 InstallTableDomain+Check (4+4). Over-allocating
+	// is harmless: the result is buf[:off].
+	buf := make([]byte, keySize+valSize+8+8+8+8+4+8+4+1+8)
 	off := 0
 	copy(buf[off:], key.SrcIP[:])
 	off += 4
@@ -246,6 +247,15 @@ func encodeSessionV4Payload(key dataplane.SessionKey, val dataplane.SessionValue
 	// trailing field since #2170 it does NOT bump SessionSyncWireVersion.
 	buf[off] = val.TCPCloseClass
 	off++
+	// #9752: the installing-table identity (domain u32 LE + check u32 LE),
+	// length-gated after the close class. (0,0) = default table. A decoder
+	// that predates these 8 bytes stops after TCPCloseClass and imports the
+	// session exactly as before. Like every trailing field since #2170 it
+	// does NOT bump SessionSyncWireVersion.
+	binary.LittleEndian.PutUint32(buf[off:], val.InstallTableDomain)
+	off += 4
+	binary.LittleEndian.PutUint32(buf[off:], val.InstallTableCheck)
+	off += 4
 	return buf[:off]
 }
 func encodeSessionV6(key dataplane.SessionKeyV6, val dataplane.SessionValueV6) []byte {
@@ -398,6 +408,15 @@ func encodeSessionV6Payload(key dataplane.SessionKeyV6, val dataplane.SessionVal
 	// trailing field since #2170 it does NOT bump SessionSyncWireVersion.
 	buf[off] = val.TCPCloseClass
 	off++
+	// #9752: the installing-table identity (domain u32 LE + check u32 LE),
+	// length-gated after the close class. (0,0) = default table. A decoder
+	// that predates these 8 bytes stops after TCPCloseClass and imports the
+	// session exactly as before. Like every trailing field since #2170 it
+	// does NOT bump SessionSyncWireVersion.
+	binary.LittleEndian.PutUint32(buf[off:], val.InstallTableDomain)
+	off += 4
+	binary.LittleEndian.PutUint32(buf[off:], val.InstallTableCheck)
+	off += 4
 	return buf[:off]
 }
 
@@ -631,6 +650,13 @@ func decodeSessionV4Payload(payload []byte) (dataplane.SessionKey, dataplane.Ses
 		val.TCPCloseClass = payload[off]
 		off++
 	}
+	// #9752: length-gated trailing installing-table identity. Absent => (0,0)
+	// (default table), which is what a peer predating these bytes sends.
+	if off+8 <= len(payload) {
+		val.InstallTableDomain = binary.LittleEndian.Uint32(payload[off:])
+		val.InstallTableCheck = binary.LittleEndian.Uint32(payload[off+4:])
+		off += 8
+	}
 	return key, val, true
 }
 
@@ -803,6 +829,13 @@ func decodeSessionV6Payload(payload []byte) (dataplane.SessionKeyV6, dataplane.S
 	if off+1 <= len(payload) {
 		val.TCPCloseClass = payload[off]
 		off++
+	}
+	// #9752: length-gated trailing installing-table identity. Absent => (0,0)
+	// (default table), which is what a peer predating these bytes sends.
+	if off+8 <= len(payload) {
+		val.InstallTableDomain = binary.LittleEndian.Uint32(payload[off:])
+		val.InstallTableCheck = binary.LittleEndian.Uint32(payload[off+4:])
+		off += 8
 	}
 	return key, val, true
 }

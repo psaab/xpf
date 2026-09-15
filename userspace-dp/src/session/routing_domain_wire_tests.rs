@@ -141,9 +141,11 @@ fn the_quarantine_sentinel_decodes_unrecognized_9956() {
 /// `config.StableRoutingInstanceTableID` on pinned literals. Vectors computed
 /// via `go run` at base `9184222dd` (see `docs/pr/9752/fnv-vectors.txt`,
 /// uncommitted scratch); the Go side pins the same literals in
-/// `routinginstanceid_test.go` (C4), so either implementation drifting reds
-/// its own suite. If this reds after touching `fnv1a64` or the fold, the
-/// mirror — not the vectors — is wrong; verify against Go before "fixing".
+/// `TestStableRoutingInstanceTableIDLiterals9752`
+/// (`pkg/config/routinginstanceid_test.go`), so either implementation
+/// drifting reds its own suite. If this reds after touching `fnv1a64` or the
+/// fold, the mirror — not the vectors — is wrong; verify against Go before
+/// "fixing".
 #[test]
 fn install_table_identity_matches_go_vectors_9752() {
     for (name, want_domain) in [

@@ -292,7 +292,16 @@ const (
 	// 20 — a v20 helper built from #9875 alone would accept this daemon's
 	// snapshots and misread every dotted base row. 21 was never shipped by
 	// either side.
-	ProtocolVersion = 21
+	//
+	// v22 (issue 9752): the session's installing-table identity
+	// (`SessionDecision` domain+check) now crosses the HA session-sync path:
+	// the open-frame trailing pair, both `SessionDeltaInfo` legs, the
+	// cluster wire tails, and `SessionSyncRequest.install_table_*`.
+	// BUMPED on the merits, like v13/v16: an old helper ignores the fields
+	// and imports every PBR-steered session stamp-less, re-resolving it in
+	// `inet.0` — and that IS the defect the fields close. The session-sync
+	// messages are not snapshot structs, so the #8892 digest did not move.
+	ProtocolVersion = 22
 
 	// MinProtocolMultiZoneScopedPolicy is the FIRST snapshot protocol version
 	// that can represent a multi-zone scoped global policy — the plural

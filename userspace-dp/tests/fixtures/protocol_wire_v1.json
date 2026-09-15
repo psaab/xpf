@@ -1135,6 +1135,8 @@
     "ifindex": 0,
     "ingress_zone": "",
     "ingress_zone_id": 0,
+    "install_table_check": 0,
+    "install_table_domain": 0,
     "interface": "",
     "log_session_close": false,
     "log_session_init": false,

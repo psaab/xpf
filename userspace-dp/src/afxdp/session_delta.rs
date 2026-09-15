@@ -264,6 +264,12 @@ pub(in crate::afxdp) fn session_delta_info(
         tunnel_discriminator: delta.key.discriminator.to_wire(),
         // #9412: the close class, on the JSON leg exactly as on the binary frame.
         tcp_close_class: delta.tcp_close_class,
+        // #9752: the installing-table identity, on the JSON leg exactly as on
+        // the binary frame's trailing pair. Read from `delta.decision`, the
+        // SAME decision the binary open frame encodes, so the two legs cannot
+        // describe one session's table differently.
+        install_table_domain: delta.decision.install_table_domain,
+        install_table_check: delta.decision.install_table_check,
     }
 }
 
@@ -533,43 +539,54 @@ pub(super) fn flush_session_deltas(
             // with it — otherwise it outlives every worker's teardown and suppresses
             // the row's delete for good.
             release_coordinator_session_rows(session_map, &delta.key);
-            let reverse_key = reverse_session_key(&delta.key, delta.decision.nat);
-            delete_live_session_entry(session_map, &reverse_key, delta.decision.nat, true);
-            delete_bpf_conntrack_entry(conntrack_v4_fd, conntrack_v6_fd, &reverse_key);
-            remove_shared_session(
-                shared_sessions,
-                shared_nat_sessions,
-                shared_forward_wire_sessions,
-                &shared_owner_rg_indexes,
-                &reverse_key,
-            );
-            // #9560 round 3: same for the reverse half's own shared entry.
-            release_coordinator_session_rows(session_map, &reverse_key);
-            // #8114 item 4: repair the sibling NAT holder bit a refused
-            // `DeleteSynced` would otherwise strand. The forward key carries
-            // the reservation; the reverse call self-gates on `is_reverse` and
-            // is a no-op for it, exactly as `handle_delete_synced` is.
-            replicate_session_delete_repairing(
-                peer_worker_commands,
-                worker_commands_by_id,
-                forwarding,
-                &delta.key,
-                delta.decision.nat,
-                delta.metadata.is_reverse,
-                crate::afxdp::wg::counters::monotonic_now_ns(),
-            );
-            // #1069: reuse the reverse_key already computed above instead of
-            // recomputing it. reverse_session_key is pure on its inputs and
-            // delta + nat are not modified between the two replicate calls.
-            replicate_session_delete_repairing(
-                peer_worker_commands,
-                worker_commands_by_id,
-                forwarding,
-                &reverse_key,
-                delta.decision.nat,
-                true,
-                crate::afxdp::wg::counters::monotonic_now_ns(),
-            );
+            // #9752: a purge-retirement close covers exactly `delta.key`. The
+            // purge already decided the pair (fenced forward removal, linked or
+            // deliberately preserved companion, CONDITIONAL sibling delete),
+            // so deriving the reverse half here would destroy an ambiguous
+            // companion the purge preserved, and repairing replicates would
+            // fan out UNCONDITIONAL deletes + free possibly-live NAT ports.
+            // Everything above (idempotent forward-half cleanup) and every
+            // outward leg (event-stream HA close, RT_FLOW, RPC, recent-deltas)
+            // still runs — only the local pair fanout is skipped.
+            if !delta.purge_retirement {
+                let reverse_key = reverse_session_key(&delta.key, delta.decision.nat);
+                delete_live_session_entry(session_map, &reverse_key, delta.decision.nat, true);
+                delete_bpf_conntrack_entry(conntrack_v4_fd, conntrack_v6_fd, &reverse_key);
+                remove_shared_session(
+                    shared_sessions,
+                    shared_nat_sessions,
+                    shared_forward_wire_sessions,
+                    &shared_owner_rg_indexes,
+                    &reverse_key,
+                );
+                // #9560 round 3: same for the reverse half's own shared entry.
+                release_coordinator_session_rows(session_map, &reverse_key);
+                // #8114 item 4: repair the sibling NAT holder bit a refused
+                // `DeleteSynced` would otherwise strand. The forward key carries
+                // the reservation; the reverse call self-gates on `is_reverse` and
+                // is a no-op for it, exactly as `handle_delete_synced` is.
+                replicate_session_delete_repairing(
+                    peer_worker_commands,
+                    worker_commands_by_id,
+                    forwarding,
+                    &delta.key,
+                    delta.decision.nat,
+                    delta.metadata.is_reverse,
+                    crate::afxdp::wg::counters::monotonic_now_ns(),
+                );
+                // #1069: reuse the reverse_key already computed above instead of
+                // recomputing it. reverse_session_key is pure on its inputs and
+                // delta + nat are not modified between the two replicate calls.
+                replicate_session_delete_repairing(
+                    peer_worker_commands,
+                    worker_commands_by_id,
+                    forwarding,
+                    &reverse_key,
+                    delta.decision.nat,
+                    true,
+                    crate::afxdp::wg::counters::monotonic_now_ns(),
+                );
+            }
             if cfg!(feature = "debug-log") {
                 debug_log!(
                     "SESS_DELETE_DONE: bpf_entries_after={}",

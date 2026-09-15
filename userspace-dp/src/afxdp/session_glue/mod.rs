@@ -924,7 +924,7 @@ fn delete_terminal_half(
         metadata.is_reverse,
         now_ns,
     );
-    sessions.emit_close_delta_with_origin(key.clone(), decision, metadata.clone(), origin);
+    sessions.emit_close_delta_with_origin(key.clone(), decision, metadata.clone(), origin, false);
 }
 
 /// #2442: the filter half of `export_forward_sessions_for_owner_rgs`. Walks the

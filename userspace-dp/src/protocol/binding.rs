@@ -1437,6 +1437,19 @@ pub(crate) struct SessionDeltaInfo {
     /// (`pkg/dataplane/userspace/protocol_ha.go`, `SessionDeltaInfo`).
     #[serde(rename = "tcp_close_class", default)]
     pub tcp_close_class: u8,
+    /// #9752: the session's installing route-table domain id (0 = default
+    /// table), at parity with the binary open frame's trailing u32 pair.
+    /// Additive: an old daemon ignores the keys and imports default-table
+    /// behavior; an old helper omits them and `default` decodes (0,0).
+    ///
+    /// The renames MUST match the Go struct tags
+    /// (`pkg/dataplane/userspace/protocol_ha.go`, `SessionDeltaInfo`).
+    #[serde(rename = "install_table_domain", default)]
+    pub install_table_domain: u32,
+    /// #9752: owner check for `install_table_domain` (high 32 of the
+    /// FNV-64). 0 iff the domain is 0. Same upgrade semantics as the domain.
+    #[serde(rename = "install_table_check", default)]
+    pub install_table_check: u32,
 }
 
 

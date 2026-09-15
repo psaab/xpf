@@ -135,10 +135,14 @@ const ALLOWED_READER_LOADS: &[(&str, usize, &str)] = &[
     ),
     (
         "src/afxdp/session_glue/install_table_purge.rs",
-        1,
+        2,
         "fenced purge predicate — forwarding half ONLY (registry + fallback \
          sets for one stamp check), never paired with validation, so it \
-         cannot tear a pair (#9752)",
+         cannot tear a pair (#9752). Two loads: the pre-teardown re-add \
+         check plus the in-lock fence; both same-half, and any \
+         disagreement resolves through the existing decline path \
+         (pre-check-false skips, fence-decline gates the close) rather \
+         than by pairing halves.",
     ),
     (
         "src/afxdp/types/runtime_view.rs",

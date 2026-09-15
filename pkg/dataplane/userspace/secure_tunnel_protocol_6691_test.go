@@ -120,7 +120,11 @@ const preSecureTunnelProtocolVersion = 4
 // merged wire past both). Nothing about secure_tunnel changed, so
 // MinProtocolSecureTunnelRefusal (7) is untouched again (historical floors
 // are never renumbered; only this current-version assertion moves).
-const secureTunnelSnapshotProtocolVersion = 21
+//
+// Issue 9752 moved it 21 -> 22, for the session's installing-table identity
+// crossing the HA session-sync path. Nothing about secure_tunnel changed, so
+// MinProtocolSecureTunnelRefusal (7) is untouched again.
+const secureTunnelSnapshotProtocolVersion = 22
 
 // preV5HelperAcceptsSnapshot models the exact-equality version gate a pre-v5
 // helper applies before touching any dataplane state

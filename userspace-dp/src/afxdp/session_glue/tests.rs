@@ -6074,6 +6074,7 @@ fn flush_session_deltas_without_binding_reaches_global_consumers() {
         session_id: 0,
         bulk_resync: false,
         tcp_close_class: 0,
+        purge_retirement: false,
     };
 
     // Synthesize a binding identity with labels only — exactly what the
@@ -6198,6 +6199,7 @@ fn flush_session_deltas_rt_flow_app_id_uses_post_nat_dst_port() {
         session_id: 0,
         bulk_resync: false,
         tcp_close_class: 0,
+        purge_retirement: false,
     };
 
     // Drive the production drain loop and return the stamped application_id off
@@ -6348,6 +6350,7 @@ fn flush_session_deltas_session_close_reresolves_policy_id_after_reorder() {
         session_id: 0,
         bulk_resync: false,
         tcp_close_class: 0,
+        purge_retirement: false,
     };
 
     let (handle, rx) = crate::event_stream::test_worker_handle(
@@ -6456,6 +6459,7 @@ fn flush_session_deltas_event_stream_drop_latches_out_of_sync() {
         session_id: 0,
         bulk_resync: false,
         tcp_close_class: 0,
+        purge_retirement: false,
     };
 
     let ident = BindingIdentity {
@@ -6560,6 +6564,7 @@ fn flush_session_deltas_full_queue_send_is_bounded_and_latches_out_of_sync() {
         session_id: 0,
         bulk_resync: false,
         tcp_close_class: 0,
+        purge_retirement: false,
     };
 
     // Saturate the channel: fill every slot with a best-effort filler push so the
@@ -6686,6 +6691,7 @@ fn resync_export_aggregate_lossless_wait_is_bounded_below_heartbeat() {
         session_id: 0,
         bulk_resync: false,
         tcp_close_class: 0,
+        purge_retirement: false,
     };
     for _ in 0..capacity {
         handle.push_delta(&open, &forwarding.zone_name_to_id);
@@ -6810,6 +6816,7 @@ fn close_delta_deletes_dnat_table_entry_for_snat_flow() {
             session_id: 0,
             bulk_resync: false,
             tcp_close_class: 0,
+            purge_retirement: false,
         }
     };
 
@@ -9223,6 +9230,7 @@ fn delta_8593(key: &SessionKey, bulk_resync: bool) -> SessionDelta {
         session_id: 0,
         bulk_resync,
         tcp_close_class: 0,
+        purge_retirement: false,
     }
 }
 
@@ -10255,6 +10263,7 @@ fn flush_session_deltas_update_syncs_without_an_rt_flow_create_9412() {
         session_id: 77,
         bulk_resync: false,
         tcp_close_class: 2,
+        purge_retirement: false,
     };
     let flush = |delta: SessionDelta| {
         let (handle, rx) = // CONNECTED, so the lossless peer-sync push can queue; the unconnected handle
@@ -10314,9 +10323,9 @@ fn flush_session_deltas_update_syncs_without_an_rt_flow_create_9412() {
     let sync: Vec<_> = update.iter().filter(|f| f.as_bytes()[4] == 3 /* MSG_SESSION_UPDATE; the #9412 golden lockstep pins this byte in both languages */).collect();
     assert_eq!(sync.len(), 1, "#9412: the Update must be queued to the peer exactly once as MSG_SESSION_UPDATE");
     assert_eq!(
-        *sync[0].as_bytes().last().expect("a non-empty frame"),
+        sync[0].as_bytes()[sync[0].as_bytes().len() - 9],
         2,
-        "#9412: the queued Update must end with its close class"
+        "#9412: the queued Update must carry its close class 8 bytes from the end (#9752 tail follows)"
     );
 }
 

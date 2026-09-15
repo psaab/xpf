@@ -577,6 +577,24 @@ pub(crate) struct SessionDelta {
     /// loss-of-sync resync, which is an Open re-export, also restore a dropped
     /// Update. Close deltas carry `0`.
     pub(crate) tcp_close_class: u8,
+    /// #9752: this Close retires exactly `key` — the drain must neither
+    /// derive the reverse half nor replicate sibling deletes for it.
+    ///
+    /// The purge already decided the pair: the forward was fenced-removed
+    /// (shared authority checked under the removal lock against the LATEST
+    /// registry), the companion was either linked-removed or deliberately
+    /// preserved (ambiguous backlink), and siblings got the CONDITIONAL
+    /// delete (recipient re-checks). An ordinary Close here would bypass all
+    /// three: the drain derives the reverse key unconditionally and fans out
+    /// repairing (unconditional) deletes for both halves. The HA/event-stream
+    /// legs still fire — the standby must drop its forward copy (per-key,
+    /// no derivation downstream) and flowexport needs the close record.
+    ///
+    /// Carried on the DELTA like `bulk_resync`, for the same reason: the
+    /// producer (`InstallTablePurge` teardown, the only setter) decides, and
+    /// no drain call site can get it wrong because none chooses. Never
+    /// serialized: no wire leg reads it.
+    pub(crate) purge_retirement: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

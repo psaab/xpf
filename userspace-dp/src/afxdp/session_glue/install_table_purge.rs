@@ -31,7 +31,17 @@ impl InstallTablePurge {
     /// Arm the walk, recording the registry generation it must be revisited
     /// against: a rotation mid-walk restarts rather than completing dirty
     /// (Codex-r4 — consume-at-start, retain-during, revisit-before-clean).
+    ///
+    /// A request arriving DURING an active walk is retained, not re-armed:
+    /// resetting the cursor on every terminal observation would starve all
+    /// entries beyond the first budget while observations keep arriving.
+    /// The in-flight walk already covers the request (same predicate, same
+    /// table set), and its `step` restarts itself on generation change —
+    /// overwriting `start_fib_generation` here would defeat that revisit.
     pub(in crate::afxdp) fn arm(&mut self, fib_generation: u32) {
+        if self.running {
+            return;
+        }
         self.cursor = 0;
         self.running = true;
         self.start_fib_generation = fib_generation;
@@ -185,7 +195,11 @@ pub(super) fn purge_companion_is_linked(
 }
 
 /// #9752: tear down one purge-accepted forward key plus its validated
-/// companion. Returns whether the forward was purged.
+/// companion. Returns whether the forward was acted on (local teardown ran).
+/// A fenced-decline still returns true: the local entry is gone (it
+/// re-misses and heals) and flow-cache eviction must run — but no close is
+/// emitted and nothing is replicated, so shared authority and siblings keep
+/// exactly what the fence preserved.
 #[allow(clippy::too_many_arguments)]
 fn purge_one_install_table_key(
     sessions: &mut SessionTable,
@@ -210,7 +224,18 @@ fn purge_one_install_table_key(
     if metadata.is_reverse || !install_table_purge_predicate(forwarding, key, &decision) {
         return false;
     }
-    teardown_purge_forward(
+    // Re-check against the LATEST registry before touching anything: a table
+    // re-added between the scan and now makes this entry valid again, and
+    // tearing down (NAT/BPF churn + re-miss, possibly with a fresh SNAT port)
+    // for a valid session is pure damage. A flip-flop (re-added then removed
+    // again before the next walk) lingers until age-out or the next terminal
+    // touch re-arms — D4 gates every serve, so lingering is memory-lifetime,
+    // never wrong forwarding. The in-lock fence below stays authoritative for
+    // stamp races the pre-check cannot see.
+    if !install_table_purge_predicate(shared_runtime.load().forwarding(), key, &decision) {
+        return false;
+    }
+    let forward_removed = teardown_purge_forward(
         sessions,
         session_map,
         conntrack_v4_fd,
@@ -228,13 +253,19 @@ fn purge_one_install_table_key(
         now_ns,
         worker_id,
     );
+    evicted_keys.push(key.clone());
+    if !forward_removed {
+        // Fence declined (shared entry changed under us): local teardown ran
+        // and flow-cache eviction above covers it, but the pair belongs to
+        // live shared authority — no replicate, no companion teardown.
+        return true;
+    }
     replicate_purge_delete(
         peer_worker_commands,
         key,
         decision.install_table_domain,
         decision.install_table_check,
     );
-    evicted_keys.push(key.clone());
     // Linked companion (derivation + backlink + expected decision, never
     // replicated — companions converge locally via age/evict/self-purge).
     let companion_key = reverse_session_key(key, decision.nat);
@@ -328,6 +359,13 @@ pub(super) fn delete_purge_companion_local(
 /// the removal lock, so a table re-added between the walk's scan and this
 /// removal declines instead of destroying valid state (Codex-r4-F4). The
 /// ArcSwap load is lock-free — no lock cycle with the sessions mutex.
+///
+/// Returns whether shared authority was actually removed. On decline the
+/// local entry is still gone (it re-misses and heals) but NO close delta is
+/// emitted: an ordinary Close would sail through the drain, which removes
+/// forward+reverse unconditionally and replicates repairing deletes —
+/// destroying exactly the shared state the fence preserved and telling every
+/// sibling to do the same.
 #[allow(clippy::too_many_arguments)]
 fn teardown_purge_forward(
     sessions: &mut SessionTable,
@@ -346,7 +384,7 @@ fn teardown_purge_forward(
     origin: SessionOrigin,
     now_ns: u64,
     worker_id: u32,
-) {
+) -> bool {
     release_source_nat_allocation_for_worker(
         &forwarding.iface_nat_allocators,
         &forwarding.source_nat_rules,
@@ -391,11 +429,16 @@ fn teardown_purge_forward(
         },
     );
     // Coordinator rows release only when shared authority actually went away
-    // (a decline keeps the entry live — releasing would strand it).
+    // (a decline keeps the entry live — releasing would strand it). The close
+    // delta is gated the same way: on decline there is nothing to announce,
+    // and an ordinary Close would destroy the preserved entry downstream.
     if !matches!(removed, SharedRemoval::Declined) {
         release_coordinator_session_rows(session_map, key);
+        sessions.emit_close_delta_with_origin(key.clone(), *decision, metadata.clone(), origin, true);
+        true
+    } else {
+        false
     }
-    sessions.emit_close_delta_with_origin(key.clone(), *decision, metadata.clone(), origin);
 }
 
 /// #9752: companion-half purge teardown. The shared entry must backlink to
@@ -464,13 +507,17 @@ fn teardown_purge_companion(
             )
         },
     );
+    // Same fence gate as the forward half (today vacuous — the emit fn skips
+    // reverse halves — but load-bearing if that ever changes: a declined
+    // shared companion must never gain an ordinary Close downstream).
     if !matches!(removed, SharedRemoval::Declined) {
         release_coordinator_session_rows(session_map, companion_key);
+        sessions.emit_close_delta_with_origin(
+            companion_key.clone(),
+            *companion_decision,
+            companion_metadata.clone(),
+            companion_origin,
+            true,
+        );
     }
-    sessions.emit_close_delta_with_origin(
-        companion_key.clone(),
-        *companion_decision,
-        companion_metadata.clone(),
-        companion_origin,
-    );
 }

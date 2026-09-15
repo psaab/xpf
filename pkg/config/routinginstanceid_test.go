@@ -204,3 +204,38 @@ func TestRoutingInstanceTableIDCollisionGate(t *testing.T) {
 		t.Errorf("expected a QUARANTINE warning naming %q; warnings=%v", quarantined, cfg.Warnings)
 	}
 }
+
+// TestStableRoutingInstanceTableIDLiterals9752 pins name->id vectors the Rust
+// mirror must agree with (`install_table_identity_matches_go_vectors_9752` in
+// userspace-dp/src/session/routing_domain_wire_tests.rs pins the same list).
+// Either implementation drifting reds its own suite; agreement is by shared
+// literals, not by running each other's code. If this reds after touching
+// StableRoutingInstanceTableID, verify against the Rust mirror before "fixing".
+func TestStableRoutingInstanceTableIDLiterals9752(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		want int
+	}{
+		{"blue", 525590},
+		{"tenant-a", 259731},
+		{"tenant-b", 788198},
+		{"sfmix", 488570},
+		{"scrub", 633963},
+		{"ISP-B", 236616},
+		{"vr1", 627081},
+		{"mgmt", 579198},
+		{"trust", 361106},
+		{"wan", 384696},
+		// UTF-8 multibyte: hashing is over raw bytes.
+		{"é-vrf", 704427},
+		{"a", 969824},
+		{"A", 737632},
+		{"Comcast-GigabitPro", 676172},
+		{"x", 644139},
+		{"zzz", 497540},
+	} {
+		if got := StableRoutingInstanceTableID(tc.name); got != tc.want {
+			t.Errorf("StableRoutingInstanceTableID(%q) = %d, want %d (Rust mirror pins the same)", tc.name, got, tc.want)
+		}
+	}
+}

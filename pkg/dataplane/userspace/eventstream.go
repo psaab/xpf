@@ -1592,6 +1592,14 @@ func decodeSessionEvent(payload []byte) (SessionDeltaInfo, bool) {
 		d.TCPCloseClass = payload[off]
 		off++
 	}
+	// #9752: trailing installing-table identity (domain u32 LE + check u32
+	// LE), length-gated after the close class. An old helper omits it =>
+	// (0,0), the default table, and the session syncs exactly as before.
+	if off+8 <= len(payload) {
+		d.InstallTableDomain = binary.LittleEndian.Uint32(payload[off : off+4])
+		d.InstallTableCheck = binary.LittleEndian.Uint32(payload[off+4 : off+8])
+		off += 8
+	}
 
 	return d, true
 }
