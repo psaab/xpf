@@ -339,6 +339,15 @@ func (m *Manager) takeoverReadyLocked() (bool, []string) {
 		}
 		reasons = append(reasons, reason)
 	}
+	// #9642: an indebted node must not advertise takeover readiness. Its
+	// classifier maps are at an unpublished plan with ctrl held at 0; handing
+	// it an RG would cut transit over until the debt converges. Name the
+	// unpublished generation so the operator sees what is owed.
+	if m.snapshotRetryDebtLocked() {
+		reasons = append(reasons, fmt.Sprintf(
+			"userspace snapshot retry debt outstanding (generation %d unpublished)",
+			m.lastSnapshot.Generation))
+	}
 	// Gate on the LOCAL event-stream listener being bound — the primary push
 	// channel from the local helper into the daemon's peer-sync pipeline. A bind
 	// failure (path-too-long, EADDRINUSE, permission) must not be accepted as a

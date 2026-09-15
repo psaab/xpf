@@ -108,23 +108,6 @@ func (m *Manager) disableCtrlBeforeTeardownLocked() error {
 	return nil
 }
 
-// reEnableUserspaceCtrlLocked sets ctrl.enabled=1 in the BPF map.
-// Used to rollback a ctrl disable when the subsequent operation fails.
-func (m *Manager) reEnableUserspaceCtrlLocked() {
-	ctrlMap := m.bpfShim.Map(mapNameUserspaceCtrl)
-	if ctrlMap == nil {
-		return
-	}
-	zero := uint32(0)
-	var ctrl userspaceCtrlValue
-	if err := ctrlMap.Lookup(zero, &ctrl); err != nil {
-		return
-	}
-	ctrl.Enabled = 1
-	_ = ctrlMap.Update(zero, ctrl, ebpf.UpdateAny)
-	slog.Info("userspace: re-enabled ctrl (rollback)")
-}
-
 // DisableAndStopHelper disables ctrl. This prevents the XDP shim from
 // redirecting new packets to XSK. Must be called BEFORE any operation that
 // invalidates UMEM (e.g. link DOWN on mlx5 zero-copy). Worker threads keep

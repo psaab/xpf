@@ -413,6 +413,16 @@ func (m *Manager) flushStaleBPFStateOnCtrlEnableLocked() {
 // reports strict degraded drops separately.
 func (m *Manager) applyRuntimeModeLocked(ctrl *userspaceCtrlValue) {
 	// Compute active runtime mode from ctrl state and liveness.
+	//
+	// #9642 deliberation (parent review round 2): retry debt does NOT remap
+	// this classification. Reporting ebpf_only while indebted flips the
+	// daemon's userspaceActive predicate, which installs kernel blackhole
+	// routes for inactive RGs that survive recovery (their removal is gated
+	// on the same predicate) and shadow less-specific routes. Debt health is
+	// exposed beside the classification instead (ProcessStatus
+	// SnapshotRetryDebt* stamped in recordHelperStatusLocked) plus the
+	// takeover-readiness reason — no kernel-routing side effects, no
+	// recovery reconciliation owed.
 	switch {
 	case ctrl.Enabled == 0 || m.xskLivenessFailed:
 		// Degraded userspace mode keeps the shim attached. Compat still only

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	"strings"
+	"time"
 )
 
 // #9520: apply_snapshot content identity.
@@ -46,6 +47,12 @@ func isSnapshotContentConflict(err error) bool {
 	return errors.As(err, &rejected) && strings.HasPrefix(rejected.msg, snapshotContentConflictPrefix)
 }
 
+// errSnapshotDigest marks a snapshot whose content digest cannot be computed.
+// The request body marshals the same content, so a snapshot that fails here
+// provably never reached the helper: retry is futile and the failure must
+// never adopt retry-debt authority (#9642, isKnownUnsentFailure).
+var errSnapshotDigest = errors.New("userspace: cannot compute the apply_snapshot content digest")
+
 // stampSnapshotContentDigest sets snap.ContentDigest from snapshotContentHash. It
 // refuses rather than sending an empty digest: the request body is the JSON
 // encoding of the same struct, so a hash that cannot marshal means the request
@@ -53,7 +60,7 @@ func isSnapshotContentConflict(err error) bool {
 func stampSnapshotContentDigest(snap *ConfigSnapshot) error {
 	sum, ok := snapshotContentHash(snap)
 	if !ok {
-		return errors.New("userspace: cannot compute the apply_snapshot content digest")
+		return errSnapshotDigest
 	}
 	snap.ContentDigest = hex.EncodeToString(sum[:])
 	return nil
@@ -113,7 +120,12 @@ func (m *Manager) requestApplySnapshotLocked(snap *ConfigSnapshot, status *Proce
 // sets it (anything but an in-band refusal: a deadline after the helper applied
 // the request is the #4036 case), and only a successful apply clears it. An
 // in-band refusal changes nothing, because the helper kept whatever it held,
-// which is exactly as known or unknown as before.
+// which is exactly as known or unknown as before. A deterministic-local
+// failure (isKnownUnsentFailure: digest, marshal, size, unconfigured socket)
+// likewise changes nothing — the helper provably received nothing, so there is
+// no new uncertainty. That distinction is load-bearing for retry debt (#9642):
+// a deferred-but-unpublished snapshot plus a deterministic failure must keep
+// today's revert-to-old behavior, not open a latch no transport failure backs.
 //
 // While it is set, the publish shortcuts that infer the helper's content from
 // Go's own bookkeeping stand down: PublishRouteOverlaySnapshot's content-hash
@@ -125,7 +137,23 @@ func (m *Manager) recordApplySnapshotOutcomeLocked(err error) {
 	switch {
 	case err == nil:
 		m.applySnapshotOutcomeUnknown = false
-	case !errors.Is(err, errHelperRejected):
+		m.retryDebtSince = time.Time{}
+		m.lastRetryDebtWarn = time.Time{}
+	case errors.Is(err, errHelperRejected):
+		// Helper provably kept its prior state: no new uncertainty.
+	case isKnownUnsentFailure(err):
+		// Helper provably received nothing: no new uncertainty. Pre-existing
+		// debt (and its timestamps) survive untouched — a deterministic retry
+		// failure neither settles nor refreshes unknown state.
+	default:
+		// Unknown outcome (parent review round 2: stamp the debt clock on
+		// EVERY mark-setting transition, not just the adopt arm — a
+		// direct-producer failure later converted by a partial success
+		// opens the latch with no adoption in between, and its recovery
+		// log must report a real age, not the zero time).
+		if !m.applySnapshotOutcomeUnknown {
+			m.retryDebtSince = time.Now()
+		}
 		m.applySnapshotOutcomeUnknown = true
 	}
 }

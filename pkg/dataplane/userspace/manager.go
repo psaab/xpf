@@ -184,7 +184,14 @@ type Manager struct {
 	// senders hold it across the send).
 	neighborReplaceGen uint64
 	syncCancel         context.CancelFunc
-	lastStatus         ProcessStatus
+	// syncDone (#9642, parent review) is closed when the statusLoop worker
+	// started by ensureStatusLoopLocked exits, so a joiner can acknowledge a
+	// genuine worker exit instead of inferring it from a canceled context.
+	// Guarded by m.mu like syncCancel; production stop paths deliberately do
+	// NOT wait on it (joining under m.mu would deadlock against the tick body
+	// that needs the same lock) — only test harnesses join.
+	syncDone   chan struct{}
+	lastStatus ProcessStatus
 	// helperStatusObserved records that a helper status has been decoded at
 	// least once in this Manager's life — i.e. that lastStatus describes a
 	// helper we actually heard from rather than a zero value (#6691 round 10).
@@ -285,6 +292,18 @@ type Manager struct {
 	// this Manager never saw it accept, so lastSnapshot and lastSnapshotHash may
 	// not describe it. See recordApplySnapshotOutcomeLocked.
 	applySnapshotOutcomeUnknown bool
+	// retryDebtSince (#9642) marks when the current unknown-outcome debt began:
+	// stamped by the outcome recorder on every mark-setting transition, so it
+	// covers all producers (including direct-producer failures later converted
+	// by a partial success, which never adopt). Zero when no debt is
+	// outstanding. Feeds the indebted-for age in the rate-limited debt Warn.
+	// Set and cleared with the mark under m.mu; read-only elsewhere under the
+	// same lock.
+	retryDebtSince time.Time
+	// lastRetryDebtWarn (#9642) is the last time an indebted-sync failure
+	// Warned (transition or rate-limited repeat). Guards the once-a-minute
+	// repeat in the tick caller. See retryDebtWarnDueLocked.
+	lastRetryDebtWarn time.Time
 	// partialOutcomeUnknown (#9684) marks the sections the helper may hold from
 	// an update_neighbors / update_fabrics round trip whose response was lost, so
 	// lastSnapshot's copy may not describe them. See partial_update_outcome_9684.go.
@@ -422,6 +441,16 @@ type Manager struct {
 	// controlRequestHook replaces requestLocked in unit tests that exercise
 	// manager state transitions without opening a Unix control socket.
 	controlRequestHook func(ControlRequest, *ProcessStatus) error
+
+	// restartBringupHook, when non-nil, replaces ensureProcessLocked in the
+	// binding-plan restart branch of syncSnapshotLocked, so a test can simulate
+	// a successful respawn without spawning a helper process. Teardown
+	// (stopLocked), the loop ensure, and subsequent status ticks stay real;
+	// only the spawn itself is substituted. Production leaves it nil. The hook
+	// must leave m.proc usable for ticks (non-nil with a non-nil Process);
+	// never point it at the test runner's own process — teardown signals
+	// through process lifecycle on some paths (#9642).
+	restartBringupHook func(config.UserspaceConfig) error
 
 	// addrListForLocalSyncHook, when non-nil, replaces netlink.AddrList in
 	// buildDesiredLocalAddressSets so tests can inject a transient

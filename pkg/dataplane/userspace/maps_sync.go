@@ -460,7 +460,32 @@ func (m *Manager) blindFailClosedUserspaceCtrlLocked(
 // on the fail-closed path — so it is deliberately NOT bundled into this round.
 // What this buys is the difference between "unbound" and "bound one level in".
 func (m *Manager) ctrlMustStayDisabledLocked(statusEnabled bool) bool {
-	return statusEnabled && (m.rgTransitionInFlight.Load() || m.linkCycleInFlight())
+	return statusEnabled && (m.rgTransitionInFlight.Load() || m.linkCycleInFlight() ||
+		m.snapshotRetryDebtLocked())
+}
+
+// snapshotRetryDebtLocked reports whether an unknown-outcome full-snapshot
+// publish is still unpublished (#9642). The conjunction is the whole point:
+// direct-producer failures (overlay/scheduler/worker-arm transport errors leave
+// generations equal) keep today's behavior and retries exactly, while an
+// adopted attempt is always strictly unpublished (§5.1 re-stamp) so the wrapper
+// path is fully covered. Nil-guarded: no tick may dereference nil here.
+func (m *Manager) snapshotRetryDebtLocked() bool {
+	return m.applySnapshotOutcomeUnknown && m.lastSnapshot != nil &&
+		m.publishedSnapshot < m.lastSnapshot.Generation
+}
+
+// retryDebtWarnInterval (#9642) bounds the repeat Warn while retry debt
+// persists: the transition Warns once, then at most once a minute. A const,
+// not a var — the cadence is operator-visible contract, not test tuning; the
+// predicate below takes now so cells bind the boundary without touching time.
+const retryDebtWarnInterval = time.Minute
+
+// retryDebtWarnDueLocked reports whether an indebted-sync failure should Warn
+// (transition or rate-limited repeat) rather than Debug. Pure predicate on
+// manager state plus now, so the boundary is unit-testable. Caller holds m.mu.
+func (m *Manager) retryDebtWarnDueLocked(now time.Time) bool {
+	return m.snapshotRetryDebtLocked() && now.Sub(m.lastRetryDebtWarn) >= retryDebtWarnInterval
 }
 
 // applyHelperStatusLocked reconciles one helper status report into the shim's
@@ -574,18 +599,25 @@ func (m *Manager) applyHelperStatusLocked(status *ProcessStatus) error {
 	// "userspace_ingress_ifaces map not loaded" on any unprivileged machine and
 	// applyHelperStatusLocked fail-closes before ever writing the ctrl gate, so
 	// the map-free seam above would still leave the ctrl branch untestable.
-	if err := m.syncUserspaceClassifierMapsLocked(m.lastSnapshot); err != nil {
-		if !isLocalAddressCapacityError(err) {
-			return m.failClosedUserspaceCtrlLocked(ctrlMap, ctrl, err)
+	// #9642: while retry debt is outstanding the maps are already at the
+	// attempted plan and the helper may be enforcing it — do not re-sync them
+	// to anything until the debt republishes. Ctrl is already 0 (fail-closed
+	// at record time, held by the latch above), so interim classifier staleness
+	// is unobservable.
+	if !m.snapshotRetryDebtLocked() {
+		if err := m.syncUserspaceClassifierMapsLocked(m.lastSnapshot); err != nil {
+			if !isLocalAddressCapacityError(err) {
+				return m.failClosedUserspaceCtrlLocked(ctrlMap, ctrl, err)
+			}
+			// #9646: this poll re-syncs the snapshot the helper already enforces
+			// every tick, so a host whose address count grows past the shim map
+			// capacity (VRRP VIPs, secondary addresses) would otherwise drop all
+			// transit on the next tick. The preflight wrote nothing: keep the maps
+			// and ctrl, and alarm once per transition rather than once a second.
+			m.noteLocalAddressCapacityLocked(err)
+		} else {
+			m.noteLocalAddressCapacityLocked(nil)
 		}
-		// #9646: this poll re-syncs the snapshot the helper already enforces
-		// every tick, so a host whose address count grows past the shim map
-		// capacity (VRRP VIPs, secondary addresses) would otherwise drop all
-		// transit on the next tick. The preflight wrote nothing: keep the maps
-		// and ctrl, and alarm once per transition rather than once a second.
-		m.noteLocalAddressCapacityLocked(err)
-	} else {
-		m.noteLocalAddressCapacityLocked(nil)
 	}
 	// Sync userspace-forwarded packet counters into BPF counter maps so
 	// that ReadGlobalCounter/ReadZoneCounters/etc. return complete values

@@ -68,7 +68,13 @@ func (m *Manager) syncSnapshotLocked() error {
 	// liveness needs RX traffic, but transit traffic needs FIB data that
 	// hasn't been published yet.
 	xskStartup := m.publishedSnapshot != 0 && !m.xskLivenessProven && !m.xskLivenessFailed
-	if xskStartup && (m.publishedPlanKey == "" || m.publishedPlanKey != planKey) {
+	// #9642: indebted publishes are exempt from the new-plan deferral. The
+	// deferral avoids helper churn while HA startup converges, but retry debt
+	// holds ctrl at 0 via the latch — and ctrl-0 blocks the RX progress
+	// liveness needs — so deferring a changed-plan debt waits for liveness the
+	// debt itself prevents. Non-debt publishes are unaffected (predicate false
+	// ⇒ condition bit-identical).
+	if xskStartup && !m.snapshotRetryDebtLocked() && (m.publishedPlanKey == "" || m.publishedPlanKey != planKey) {
 		return nil
 	}
 	// #9684: re-sample any section a lost partial update left unknown, only once
@@ -93,9 +99,27 @@ func (m *Manager) syncSnapshotLocked() error {
 		)
 		cfg := m.cfg
 		m.stopLocked()
-		if err := m.ensureProcessLocked(cfg); err != nil {
+		bringup := m.ensureProcessLocked
+		if m.restartBringupHook != nil {
+			bringup = m.restartBringupHook
+		}
+		if err := bringup(cfg); err != nil {
+			// No consumer to ensure: m.proc is nil so a tick would exit
+			// immediately, and that exit never clears syncCancel — ensuring
+			// here would wedge the slot stale against every future ensure.
+			// Bring-up retries on the next operator apply (which ensures).
+			// This boundary is terminal for the tick: log it at Warn every
+			// time (not rate-limited, not Debug) with the debt state, so a
+			// wedged helper + dead loop is never a silent outage.
+			slog.Warn("userspace: helper restart for binding plan change failed; no status-loop consumer until bring-up is retried",
+				"retry_debt", m.snapshotRetryDebtLocked(), "err", err)
 			return fmt.Errorf("restart userspace helper for binding plan change: %w", err)
 		}
+		// #9642: stopLocked tore the status loop down and the respawn does not
+		// restart it — without this, a changed-plan debt never retries again
+		// (respawn+failed republish) or never re-proves liveness (respawn+
+		// success, ctrl pinned at 0). Idempotent.
+		m.ensureStatusLoopLocked()
 	}
 	// Content-hash dedup: skip the control socket publish if the snapshot's
 	// forwarding-relevant content hasn't changed since the last publish.
@@ -137,10 +161,15 @@ func (m *Manager) syncSnapshotLocked() error {
 	// m.publishedSnapshot — and that branch ALWAYS mutated the ingress/local/
 	// interface-NAT classifier BPF maps IN PLACE first
 	// (syncUserspaceClassifierMapsFailClosedLocked(snap)) with ctrl still
-	// enabled. It is the sole producer of an unpublished lastSnapshot: every
-	// other publish site (Compile normal path, route-overlay, policy-scheduler,
-	// deferred-worker-arm) advances m.publishedSnapshot only AFTER a successful
-	// publish, so none can strand a same-plan refresh here. An address-only
+	// enabled. Besides the deferral above, the retry-debt adopt arm in
+	// publishSnapshotFailClosedLocked (#9642) is the only other producer of an
+	// unpublished lastSnapshot — and on both arms the maps are likewise already
+	// at the attempted plan (mutated in place on the same-plan arm, freshly
+	// programmed on the bootstrap arm), so the conclusion below stands for
+	// debt retries too: every other publish site (Compile normal path,
+	// route-overlay, policy-scheduler, deferred-worker-arm) advances
+	// m.publishedSnapshot only AFTER a successful publish, so none can strand
+	// a same-plan refresh here. An address-only
 	// commit landing during the XSK-startup liveness-probe window (ctrl flipped
 	// to Enabled=1 to probe) is exactly that case. Therefore mapsMutatedInPlace
 	// is unconditionally true here: if the helper REJECTS this publish it keeps
@@ -185,8 +214,17 @@ func (m *Manager) ensureStatusLoopLocked() {
 		return
 	}
 	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
 	m.syncCancel = cancel
-	go m.statusLoop(ctx)
+	m.syncDone = done
+	// Close-on-exit (not a signature change on statusLoop): a joiner holding
+	// neither the context nor the mutex can still observe the true worker
+	// exit. The closure escapes, so the #7930 lock analyzer exempts its body
+	// (goroutine context, like the pre-existing bare go statement).
+	go func() {
+		defer close(done)
+		m.statusLoop(ctx)
+	}()
 }
 
 // statusLoopInterval is the reconcile-tick period. It is a package var, not a
@@ -259,13 +297,29 @@ func (m *Manager) statusLoop(ctx context.Context) {
 					// repairs.
 					repaired := m.verifyBindingsMapLocked()
 					m.maybeAutoRebindBusyBindingsLocked(time.Now(), repaired)
-				}
-				if m.lastSnapshot != nil && m.publishedSnapshot < m.lastSnapshot.Generation {
-					if err := m.syncSnapshotLocked(); err != nil {
-						slog.Warn("userspace dataplane snapshot sync failed", "err", err)
+					if m.lastSnapshot != nil && m.publishedSnapshot < m.lastSnapshot.Generation {
+						if err := m.syncSnapshotLocked(); err != nil {
+							// #9642: an indebted failure retries next tick. Warn
+							// on the transition and at most once a minute while
+							// the debt persists (recurring, rate-limited — a
+							// silently wedged debt is an outage with no signal);
+							// Debug in between. Non-debt failures Warn always.
+							now := time.Now()
+							if m.retryDebtWarnDueLocked(now) {
+								m.lastRetryDebtWarn = now
+								slog.Warn("userspace dataplane snapshot sync failed; retry debt outstanding",
+									"generation", m.lastSnapshot.Generation,
+									"published", m.publishedSnapshot,
+									"indebted_for", now.Sub(m.retryDebtSince).Round(time.Second).String(),
+									"err", err)
+							} else if m.snapshotRetryDebtLocked() {
+								slog.Debug("userspace dataplane snapshot sync failed; retry debt outstanding", "err", err)
+							} else {
+								slog.Warn("userspace dataplane snapshot sync failed", "err", err)
+							}
+						}
 					}
 				}
-				// #5134: settle a deferred-MAC worker-arm debt. A live RETH
 				// virtual-MAC change with no link cycle publishes a workerless
 				// DeferWorkers=true snapshot; the daemon's mandatory re-apply
 				// arms the workers. If that re-apply failed, the daemon recorded

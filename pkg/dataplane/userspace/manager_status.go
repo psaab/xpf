@@ -9,8 +9,16 @@ import (
 func (m *Manager) recordHelperStatusLocked(status *ProcessStatus) {
 	status.DataplaneMode = m.mode.String()
 	status.ConfiguredMode = m.configuredMode.String()
-	status.EntryPrograms = m.entryProgramsLocked()
-	status.DegradedPathCounters = m.readDegradedPathStatsLocked()
+	// #9642: stamp retry-debt health beside the mode classification (never
+	// remapping it — parent review round 2: a mode flip would install kernel
+	// blackhole routes that survive recovery). Assigned unconditionally so a
+	// reused status struct cannot carry a stale true.
+	status.SnapshotRetryDebt = false
+	status.SnapshotRetryDebtGeneration = 0
+	if m.snapshotRetryDebtLocked() {
+		status.SnapshotRetryDebt = true
+		status.SnapshotRetryDebtGeneration = m.lastSnapshot.Generation
+	}
 	// #3261: stamp the manager-owned snapshot-reject diagnostic onto the status
 	// the helper round-trip cannot carry (the helper has no PolicyContentRejected
 	// field and strips it on decode). This keeps the rejected-snapshot state
