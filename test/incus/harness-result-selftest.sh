@@ -524,6 +524,46 @@ rc=$?
 [[ "$(last_row_field verdict)" == "VOID" ]] && ok "run wrapper: silent gate wrote a VOID row" ||
 	bad "run wrapper: silent gate wrote $(last_row_field verdict)"
 
+# #9922 F-087: a PASS whose row cannot be written is "passed but unrecorded"
+# (exit 2 + NO ROW WRITTEN), never a silent 0. The ledger path is a regular
+# FILE here, so the emitter's mkdir fails deterministically and hermetically.
+# selftest adapter throughout: its verdict contract is untouched by the F-155
+# smoke split, so these cells are stable across it.
+touch "$WORK/not-a-ledger-dir"
+mkfake <<'FAKE'
+#!/usr/bin/env bash
+echo "  passed=3  skipped=0  failed=0"
+FAKE
+out=$(harness_result_run --ledger "$WORK/not-a-ledger-dir" --hermetic --env testenv --gate fake-emitfail --adapter selftest -- "$WORK/fake-gate.sh" 2>&1)
+rc=$?
+[[ "$rc" == "2" ]] && ok "run wrapper: PASS + emit failure exits 2 (unrecorded), not 0" ||
+	bad "run wrapper: PASS + emit failure exited $rc, expected 2"
+[[ "$out" == *"NO ROW WRITTEN"* ]] && ok "run wrapper: emit failure prints NO ROW WRITTEN" ||
+	bad "run wrapper: emit failure printed no marker"
+# A measured FAIL is never demoted by a write failure: rc preserved.
+mkfake <<'FAKE'
+#!/usr/bin/env bash
+echo "  passed=3  skipped=0  failed=1"
+exit 1
+FAKE
+out=$(harness_result_run --ledger "$WORK/not-a-ledger-dir" --hermetic --env testenv --gate fake-emitfail-red --adapter selftest -- "$WORK/fake-gate.sh" 2>&1)
+rc=$?
+[[ "$rc" == "1" ]] && ok "run wrapper: FAIL + emit failure keeps rc 1" ||
+	bad "run wrapper: FAIL + emit failure exited $rc, expected 1"
+[[ "$out" == *"NO ROW WRITTEN"* ]] && ok "run wrapper: FAIL + emit failure still prints the marker" ||
+	bad "run wrapper: FAIL + emit failure printed no marker"
+# rc preservation past 1 (the composite recipes distinguish 1/3/else): a PASS
+# verdict with a foreign rc keeps that rc, mirroring the adapter-refusal path.
+mkfake <<'FAKE'
+#!/usr/bin/env bash
+echo "  passed=3  skipped=0  failed=0"
+exit 3
+FAKE
+out=$(harness_result_run --ledger "$WORK/not-a-ledger-dir" --hermetic --env testenv --gate fake-emitfail-rc3 --adapter selftest -- "$WORK/fake-gate.sh" 2>&1)
+rc=$?
+[[ "$rc" == "3" ]] && ok "run wrapper: PASS verdict + rc 3 + emit failure keeps rc 3" ||
+	bad "run wrapper: rc-3 emit failure exited $rc, expected 3"
+
 # ── Cluster mode. `incus` is mocked as a shell function, so this stays
 # hermetic: deploy_running_xpfd_sha256 calls `incus` and a function shadows the
 # binary at call time (the same mechanism deploy-lib-selftest.sh uses). Without

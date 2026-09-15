@@ -105,6 +105,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 
 import statistics
 import sys
@@ -958,6 +959,142 @@ def _jsonable_agg(agg: Dict, declared: Dict[Tuple[str, str], str]) -> Dict:
     }
 
 
+#: A ledger-wrapped Makefile recipe names its gate `--gate <name>`. Values
+#: containing `$` are make expansions (the `harness-compare` recipe's `$(GATE)`)
+#: rather than gates and are excluded by coverage().
+WRAPPED_GATE_RE = re.compile(r"--gate (\S+)")
+
+#: The positive control: this gate is wrapped AND has measured rows, so a
+#: coverage matcher that never reports REACHED trips here by name instead of
+#: reporting a clean board over an inverted world.
+COVERAGE_POSITIVE_CONTROL = "test-failover"
+
+
+def parse_coverage_declared(text: str) -> Tuple[Dict[str, str], List[str]]:
+    """Parse a coverage-declaration file: `gate reason...` per line.
+
+    Same shape as parse_expected_red but per GATE (coverage is per gate over
+    any env; the envs a gate was measured in are reported, not gated).
+    """
+    declared: Dict[str, str] = {}
+    problems: List[str] = []
+    for lineno, line in enumerate(text.splitlines(), start=1):
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        parts = stripped.split(None, 1)
+        if len(parts) < 2:
+            problems.append(
+                f"line {lineno}: expected `gate reason...`, got {stripped!r}"
+            )
+            continue
+        declared[parts[0]] = parts[1]
+    return declared, problems
+
+
+def coverage(
+    makefile_text: str,
+    rows: Sequence[Dict],
+    declared_text: str,
+) -> Dict:
+    """Census: every ledger-wrapped gate measured, or declared unreached.
+
+    #9922 F-087: emitter refusal (rc 2, NO row) is the design's falsifiability
+    backstop, and its reader was never built — 12 of 18 wrapped gates have
+    ZERO rows while every aggregate stays green. This is that reader: the
+    wrapped set comes from the Makefile's `--gate` recipes, reached means
+    >= 1 PASS or FAIL row, and anything else must be declared with a reason.
+
+    VOID rows do NOT count as coverage: a gate whose rows are all VOID never
+    measured anything, and counting them would let it read green in both this
+    census and the red-watch aggregate (which surfaces undetermined pairs
+    without failing). Such gates report as void-only, distinctly from zero-row.
+    """
+    wrapped = sorted(
+        {
+            m.group(1)
+            for m in WRAPPED_GATE_RE.finditer(makefile_text)
+            if "$" not in m.group(1)
+        }
+    )
+    declared, problems = parse_coverage_declared(declared_text)
+    problems = list(problems)
+    by_gate: Dict[str, List[Dict]] = {}
+    for r in rows:
+        by_gate.setdefault(r.get("gate", ""), []).append(r)
+    per_gate = {}
+    for gate in wrapped:
+        grows = by_gate.get(gate, [])
+        measured = [r for r in grows if r.get("verdict") in ("PASS", "FAIL")]
+        per_gate[gate] = {
+            "rows": len(grows),
+            "measured_rows": len(measured),
+            "envs": sorted({str(r.get("env")) for r in grows}),
+            "newest_ts": max((r.get("ts", "") for r in grows), default=None),
+        }
+    reached = sorted(g for g in wrapped if per_gate[g]["measured_rows"] > 0)
+    void_only = sorted(
+        g for g in wrapped if per_gate[g]["rows"] > 0 and per_gate[g]["measured_rows"] == 0
+    )
+    zero_row = sorted(g for g in wrapped if per_gate[g]["rows"] == 0)
+    unreached = sorted(set(wrapped) - set(reached))
+    missing = sorted(g for g in unreached if g not in declared)
+    stale = sorted(g for g in declared if g not in unreached)
+    if not wrapped:
+        problems.append("no --gate recipes found in the Makefile text — the parse is wrong")
+    control_ok = COVERAGE_POSITIVE_CONTROL in reached
+    if COVERAGE_POSITIVE_CONTROL in wrapped and not control_ok:
+        problems.append(
+            f"positive control: {COVERAGE_POSITIVE_CONTROL} is wrapped but unreached"
+        )
+    if COVERAGE_POSITIVE_CONTROL not in wrapped:
+        problems.append(
+            f"positive control: {COVERAGE_POSITIVE_CONTROL} is not wrapped anymore"
+        )
+    return {
+        "wrapped": wrapped,
+        "reached": reached,
+        "void_only": void_only,
+        "zero_row": zero_row,
+        "declared": declared,
+        "missing": missing,
+        "stale": stale,
+        "problems": problems,
+        "per_gate": per_gate,
+        "ok": not missing and not stale and not problems,
+    }
+
+
+def render_coverage(cov: Dict) -> str:
+    """Render the coverage census: every wrapped gate, then the verdict."""
+    out = [f"ledger-coverage: {len(cov.get('reached', []))} of {len(cov.get('wrapped', []))} wrapped gates measured"]
+    for gate in cov.get("wrapped", []):
+        pg = (cov.get("per_gate") or {}).get(gate, {})
+        if gate in (cov.get("reached") or []):
+            state = f"REACHED ({pg.get('measured_rows')} measured / {pg.get('rows')} rows)"
+        elif gate in (cov.get("void_only") or []):
+            state = f"VOID-ONLY ({pg.get('rows')} rows, none measured)"
+        else:
+            state = "ZERO ROWS"
+        extra = ""
+        if gate in (cov.get("declared") or {}):
+            extra = (
+                "  [declared: still unreached]"
+                if gate not in (cov.get("reached") or [])
+                else "  [declared: STALE — measured now, remove the declaration]"
+            )
+        envs = ",".join(pg.get("envs") or []) or "-"
+        out.append(f"  {gate:<32} {state:<34} envs={envs}{extra}")
+    for gate in cov.get("missing", []):
+        out.append(f"  MISSING: {gate} — unreached and undeclared (add rows or declare it)")
+    for gate in cov.get("stale", []):
+        out.append(f"  STALE: {gate} — declared but measured now (remove the declaration)")
+    for prob in cov.get("problems", []):
+        out.append(f"  PROBLEM: {prob}")
+    out.append("coverage: OK" if cov.get("ok") else "coverage: FAIL")
+    return "\n".join(out)
+
+
 def render(result: Dict) -> str:
     out = [f"outcome: {result['outcome']}"]
     out.append(f"gate: {result['gate']}   env: {result['env']}")
@@ -1063,6 +1200,25 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "declaration file of tolerated-red pairs for --all, one `gate env "
             "reason...` per line; undeclared red and stale declarations fail"
         ),
+    )
+    p.add_argument(
+        "--coverage",
+        action="store_true",
+        help=(
+            "census every Makefile --gate recipe against the ledger (#9922 "
+            "F-087); exit 1 unless each wrapped gate is measured or declared"
+        ),
+    )
+    p.add_argument(
+        "--makefile",
+        default="Makefile",
+        help="Makefile to read --gate recipes from (default: Makefile)",
+    )
+    p.add_argument(
+        "--coverage-declared",
+        default="test/incus/LEDGER_COVERAGE.unreached",
+        metavar="FILE",
+        help="declaration file of unreached gates, one `gate reason...` per line",
     )
     p.add_argument("--lint", action="store_true", help="lint the ledger and exit")
     p.add_argument(
@@ -1219,8 +1375,40 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             print(render_all(agg, declared))
         return all_exit_status(agg, declared)
 
+    if args.coverage:
+        if args.gate or args.env or args.all:
+            p.error("--coverage is mutually exclusive with --gate/--env/--all")
+        try:
+            with open(args.makefile, encoding="utf-8") as fh:
+                makefile_text = fh.read()
+        except OSError as exc:
+            print(f"LEDGER-CORRUPT: cannot read {args.makefile}: {exc}", file=sys.stderr)
+            return 2
+        try:
+            with open(args.coverage_declared, encoding="utf-8") as fh:
+                declared_text = fh.read()
+        except OSError as exc:
+            print(
+                f"LEDGER-CORRUPT: cannot read --coverage-declared "
+                f"{args.coverage_declared}: {exc}",
+                file=sys.stderr,
+            )
+            return 2
+        try:
+            rows = parse_ledger(text)
+        except LedgerError as exc:
+            result = {"outcome": LEDGER_CORRUPT, "gate": None, "env": None, "note": str(exc)}
+            print(json.dumps(result, indent=2) if args.json else render(result))
+            return 2
+        cov = coverage(makefile_text, rows, declared_text)
+        if args.json:
+            print(json.dumps(cov, indent=2))
+        else:
+            print(render_coverage(cov))
+        return 0 if cov.get("ok") else 1
+
     if not args.gate:
-        p.error("--gate is required unless --lint or --all is given")
+        p.error("--gate is required unless --lint, --all or --coverage is given")
 
     try:
         rows = parse_ledger(text)

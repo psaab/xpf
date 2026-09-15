@@ -895,10 +895,13 @@ PY
 # The one CHANGE in behaviour is deliberate and in the safe direction: a gate
 # that exits 0 without reaching its summary now exits 2 instead of 0.
 #
-# A failure to WRITE the row does not change the gate's own verdict -- reddening
-# a 30-minute cluster smoke because a disk was full would be a worse error than
-# the missing row. It prints a loud NO ROW WRITTEN marker instead; the absence
-# is what the ledger-coverage census reads.
+# A failure to WRITE the row demotes a PASS to 2 ("passed but unrecorded") and
+# prints a loud NO ROW WRITTEN marker; a measured FAIL keeps its rc (#9922
+# F-087). The old contract held that reddening a 30-minute smoke for a write
+# failure was worse than the missing row; the cohort reverses it, because every
+# refusal mode that degrades to 'gate exits normally, nothing recorded, all
+# aggregates green' is exactly the failure the assurance layer exists to catch.
+# The ledger-coverage census reads the absence either way.
 harness_result_run() {
 	local gate="" adapter="" env="" mode="cluster" node="" build_exe="" artifacts="" ledger=""
 	local peer_node_arg=""
@@ -1090,6 +1093,14 @@ harness_result_run() {
 
 	local ledger_arg=()
 	[[ -n "$ledger" ]] && ledger_arg=(--ledger "$ledger")
+	# #9922 F-087: a PASS whose row cannot be written is "passed but
+	# unrecorded", not a pass. Exit 0 claims "passed AND recorded"; 2 claims
+	# "could not record", which is the true one — every refusal mode that
+	# degrades to 'gate exits normally, nothing recorded, all aggregates
+	# green' is the defect. A measured FAIL is never demoted (rc preserved,
+	# mirroring the adapter-refusal path); only the PASS branch moves, and
+	# only from 0 to 2.
+	local emit_failed=0
 	if ! harness_result_emit \
 		--gate "$gate" --env "$env" --verdict "$verdict" \
 		--void-reason "$void_reason" --headline-metric "$headline" \
@@ -1101,6 +1112,7 @@ harness_result_run() {
 		--running-exe-sha256-peer "${peer_running_exe_sha:-}" \
 		--exe-scope "$exe_scope" "${ledger_arg[@]}"; then
 		_hr_warn "NO ROW WRITTEN for gate '$gate' (verdict was $verdict)"
+		emit_failed=1
 	else
 		printf 'harness-result: recorded %s %s verdict=%s\n' "$gate" "$env" "$verdict" >&2
 	fi
@@ -1110,7 +1122,7 @@ harness_result_run() {
 	case "$gate_verdict" in
 	VOID) return 2 ;;
 	FAIL) return $((rc == 0 ? 1 : rc)) ;;
-	*) return "$rc" ;;
+	*) ((emit_failed)) && return $((rc == 0 ? 2 : rc)); return "$rc" ;;
 	esac
 }
 
