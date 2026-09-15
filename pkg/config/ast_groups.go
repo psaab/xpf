@@ -28,6 +28,16 @@ const (
 // expansion recursion (depth is passed by value per nested-group level).
 type groupExpandBudget struct {
 	work int // group expansions performed so far
+	// promoted9855 records the dst nodes promoteLeafPeerForPackedGroup9855
+	// promoted during this expansion (#9855). A promotion turns a leaf peer
+	// into a two-key container, which leafListPeer can no longer select —
+	// so a successive same-keyword group leaf must resolve against the
+	// promoted node (raw match) or be suppressed (master suppressed it via
+	// the pre-promotion leaf), never adopted beside it as a twin. The
+	// budget struct is already the per-expansion shared state, so the set
+	// rides here rather than as a tenth mergeNodes parameter; checks are
+	// siblings-only, so entries from other levels never interfere.
+	promoted9855 map[*Node]bool
 }
 
 // charge accounts n units of expansion work and reports when the budget is
@@ -454,7 +464,53 @@ func mergeNodes(dst *[]*Node, src []*Node, ancestorPath [][]string, budget *grou
 				// range-bearing leaves all take the override path.
 				if leafListUnionEligible(ancestorPath, key, peer, s) {
 					mergeLeafListInto(peer, s)
+				} else if body, ok := promoteLeafPeerForPackedGroup9855(ancestorPath, peer, s); ok {
+					// #9855: a PACKED group leaf naming the same instance as an
+					// inline LEAF peer. Promoting the peer to its braced shape
+					// and merging the expanded tail makes the two spellings of
+					// one group produce one outcome; the override decision
+					// happens one level down, so an inline value still wins.
+					budget.notePromoted9855(peer)
+					if err := budget.charge(countNodes(body)); err != nil {
+						return err
+					}
+					if err := mergeNodes(&peer.Children, body,
+						appendPath(ancestorPath, peer.Keys), budget, group, vars); err != nil {
+						return err
+					}
+				} else if cpeer, cbody, ok := sameInstanceContainerPeer9855(ancestorPath, *dst, s); ok {
+					// #9855: the leaf peer names another instance, but a
+					// same-instance container (promoted earlier in this merge
+					// or authored braced) is also present — merge there instead
+					// of dropping the tail.
+					if err := budget.charge(countNodes(cbody)); err != nil {
+						return err
+					}
+					if err := mergeNodes(&cpeer.Children, cbody,
+						appendPath(ancestorPath, cpeer.Keys), budget, group, vars); err != nil {
+						return err
+					}
 				}
+				continue
+			}
+			// #9855: no leaf peer, but a packed group leaf still merges into a
+			// same-instance container — a peer this merge already promoted, or
+			// an inline braced stanza. Without this a second packed leaf for
+			// the instance adopts beside the first and twins the node. Zones,
+			// value lists, and different instances keep the adopt below,
+			// except that a successive leaf after a promotion is suppressed
+			// as the base suppressed it (suppressSuccessiveLeaf9855).
+			if cpeer, cbody, ok := sameInstanceContainerPeer9855(ancestorPath, *dst, s); ok {
+				if err := budget.charge(countNodes(cbody)); err != nil {
+					return err
+				}
+				if err := mergeNodes(&cpeer.Children, cbody,
+					appendPath(ancestorPath, cpeer.Keys), budget, group, vars); err != nil {
+					return err
+				}
+				continue
+			}
+			if suppressSuccessiveLeaf9855(budget, ancestorPath, *dst, s) {
 				continue
 			}
 			// No inline value for this key: adopt the group leaf.
