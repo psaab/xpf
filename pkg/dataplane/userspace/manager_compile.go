@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"time"
 
 	"github.com/psaab/xpf/pkg/config"
@@ -347,6 +348,31 @@ func (m *Manager) applyCompiledSnapshot(
 	// it sampled its sections. Re-sample what that update may have moved, before
 	// anything below reads the snapshot.
 	resampled := m.resampleForCompileLocked(snap)
+	// #9824: snap was built outside m.mu, so at apply time its generation can
+	// sit at-or-below what the helper may already hold (H): a partial can have
+	// advanced the counters past it (the tick gate then never opens), a lost
+	// tick publish can have installed past published, or a republish can have
+	// landed unallocated m.generation+1 Go never booked. H <= m.generation+1:
+	// every apply_snapshot offers a reserve-allocated generation or unallocated
+	// m.generation+1. Offer strictly above H: m.generation += 2, then stamp.
+	// The second increment is FOR the unallocated send the counter can't see —
+	// minimal sufficient distance, not churn; +1 lands equality exactly when
+	// such a send is outstanding. This closes below-water ALLOCATION (first
+	// attempts admit; identical re-offers converge idempotently). Post-store
+	// drift recovery is the follow-up's tick-side repair, not this boundary's
+	// claim. Inline: bumpGeneration() takes m.mu, which the caller holds.
+	// Exhaustion: within two of the ceiling the += 2 would wrap and offer
+	// below H, and the reserve already saturated (it never wraps, so a
+	// saturated snap is never fresh). Refuse the commit fail-closed instead:
+	// previous-good stays retained AND published; a daemon restart (new
+	// incarnation, H=0 on a fresh helper) recovers. Unreachable in practice
+	// (2^64 allocations per incarnation); the guard exists so strictly-above
+	// holds unconditionally, not probabilistically.
+	if m.generation >= math.MaxUint64-1 {
+		return result, fmt.Errorf("userspace: snapshot generation allocator exhausted (m.generation=%d); refusing to wrap (restart recovers)", m.generation)
+	}
+	m.generation += 2
+	snap.Generation = m.generation
 	// #3261: record whether this snapshot carries unrepresentable policy
 	// content BEFORE the publish, so the diagnostic is captured even when the
 	// helper rejects the snapshot (the publish path returns early on the
