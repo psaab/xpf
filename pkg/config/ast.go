@@ -108,6 +108,15 @@ type Node struct {
 	// is why every bracketed VALUE list round-trips clean without this and why
 	// none of them changes rendering.
 	//
+	// Since #9881 the bit ALSO marks delimiter LOSS: a key that follows a
+	// gap in which brackets were stripped tokenlessly (an empty `[]` pair,
+	// including the POSIX `[]...]` char-class head, or a stray `]`), or
+	// that ends a span with such a gap trailing it. Those delimiters leave
+	// no inside token, so the adjacent token carries the loss. A lone mark
+	// is structurally inert (single-key groups never widen or render);
+	// the as-path gate reads any mark in the regex span as mangling
+	// evidence — the span-level delimiter-loss signal.
+	//
 	// INVARIANT: nil, or len(KeysBracketed) == len(Keys). Use
 	// Node.KeyBracketed(i), never index it directly — a Node built by hand
 	// (compiler synthesis, a config DB written before #6668) legitimately

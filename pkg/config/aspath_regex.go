@@ -47,7 +47,11 @@ import (
 // against a single-space-separated AS_PATH string — treats identically).
 // FRR takes the as-path regex as a REST-OF-LINE token (see the
 // `bgp as-path access-list` render in pkg/frr/policy_render.go), so an
-// embedded space survives the render intact.
+// embedded space survives the render intact. The one exception is a token the
+// lexer stripped brackets from: `[0-9]+` arrives as `0-9`, `+` and joins to
+// the valid-but-different `0-9 +`. That span is not faithful to anything, so
+// the compiler flags it (asPathKeysHaveUnquotedBracket) and the strict gate
+// rejects it with a quote-the-regex diagnostic instead of guessing (#9881).
 //
 // Empty tokens are skipped so a stray separator cannot introduce a double
 // space. A tail of only empty tokens returns "" — the caller decides what
@@ -99,4 +103,39 @@ func ValidASPathRegex(regex string) error {
 		return fmt.Errorf("not a valid POSIX extended regular expression: %w", err)
 	}
 	return nil
+}
+
+// asPathKeysHaveUnquotedBracket reports the span-level delimiter-loss
+// evidence for an as-path regex span: whether any key of n at position from
+// or later was authored inside a `[ ... ]` list WITHOUT quotes, or carries
+// a tokenless-loss mark — brackets the lexer stripped with no token between
+// them (an empty `[]` pair such as the POSIX `[]...]` char-class head, a
+// stray `]`, or a trailing gap pair), attributed to the adjacent token
+// (#9881, parent-review MEDIUM).
+//
+// At a single-value regex position brackets are pattern syntax, never
+// grouping: a marked tail token means the lexer stripped a delimiter the
+// operator wrote, so the joined Regex differs from the authored text and no
+// reconstruction can recover it (`[0-9]+` and `[0-9] +` lex identically —
+// and `[]0-9]+` leaves no inside token at all). A quoted token inside
+// brackets (`[ "[0-9]+" ]`) is faithful text — the quotes defeat the
+// bracket bit — so it does not report. A node with no provenance answers
+// false: unknown, not bare.
+//
+// Callers pass the position where the REGEX starts (2 for an instance node,
+// whose Keys[0:2] are the keyword and the name; 0 for a brace-body entry,
+// whose keys are all value tokens) and MUST call it on the same span whose
+// join became the Regex — the compiler prefers a non-empty instance tail and
+// otherwise keeps the last non-empty body entry, and flagging a shadowed span
+// would refuse a config whose effective regex is clean.
+func asPathKeysHaveUnquotedBracket(n *Node, from int) bool {
+	if n == nil {
+		return false
+	}
+	for i := from; i < len(n.Keys); i++ {
+		if n.KeyBracketed(i) && !n.KeyQuoted(i) {
+			return true
+		}
+	}
+	return false
 }

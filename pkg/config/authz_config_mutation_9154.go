@@ -164,7 +164,7 @@ func configMutationPaths(editPath, parts []string, quoted []bool) ([]string, boo
 //
 // #9938 F-020: this was `strings.Fields`, which keeps quote characters. The
 // store lexes them away (`readString` returns the unquoted body, reached through
-// ParseSetVerbGrouped -> SetPathQuoted), so `deactivate security "policies" p1`
+// ParseSetVerbGrouped -> SetPathQuotedGrouped), so `deactivate security "policies" p1`
 // was GATED as `security "policies" p1` and APPLIED as `security policies p1`.
 // A deny on the real path did not match the string the gate judged.
 //

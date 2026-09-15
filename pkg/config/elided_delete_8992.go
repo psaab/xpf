@@ -154,6 +154,32 @@ func elidedPathIsMultiLeafValues(path []string, root *schemaNode) bool {
 	return false
 }
 
+// nodeIsSingleAuthoredBracketGroup reports whether n's keys are one bracket
+// list the operator authored — every key past the keyword sits inside `[ ...
+// ]` (#9881). Such a node is ONE statement by construction, however many
+// keys it carries: deleting it wholesale by its full path removes exactly
+// what was named, never a packed neighbour.
+//
+// The keyword slot (Keys[0]) is exempt: brackets wrap the values after it
+// (`security-zone [ trust dmz ]`), and a keyword-position group (`[ a b ]`
+// at an unmodeled slot) carries the bit on every key including Keys[0], so
+// exempting the slot accepts both shapes. At least one bit must be SET —
+// without that a bare single key would qualify vacuously. A nil mask
+// (provenance-less tree) never qualifies, preserving today's refusal there.
+func nodeIsSingleAuthoredBracketGroup(n *Node) bool {
+	if n == nil || len(n.Keys) == 0 {
+		return false
+	}
+	anyBracketed := n.KeyBracketed(0)
+	for j := 1; j < len(n.Keys); j++ {
+		if !n.KeyBracketed(j) {
+			return false
+		}
+		anyBracketed = true
+	}
+	return anyBracketed
+}
+
 // elidedPackedRunCarrying reports the full Keys of a node that BEGINS with
 // path but carries a packed run of more than one statement, or nil.
 //
@@ -185,6 +211,16 @@ func elidedPackedRunCarrying(nodes []*Node, path []string, root *schemaNode) []s
 			// statement. Claiming them here would refuse every legal
 			// member-delete (#3846 `protocol tcp`, #3872 `next-hop <ip>`).
 			if elidedPathIsMultiLeafValues(path, root) {
+				continue
+			}
+			// #9881: a path naming the ENTIRE node whose keys are one
+			// authored bracket group is not a packed run — it is the one
+			// statement the brackets delimit — so let it fall through to
+			// the grouped descent, which removes exactly the named node.
+			// Scoped to the whole node on purpose: a MEMBER path (shorter
+			// than the keys) keeps the refusal, which is the #9799 doctrine
+			// (deleting one member must not take the group with it).
+			if len(path) == len(n.Keys) && nodeIsSingleAuthoredBracketGroup(n) {
 				continue
 			}
 			return n.Keys

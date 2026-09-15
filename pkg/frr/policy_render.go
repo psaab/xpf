@@ -361,6 +361,25 @@ func (m *Manager) generatePolicyOptions(po *config.PolicyOptionsConfig, bgpAccep
 					"as_path", name, "reason", err)
 				continue
 			}
+			// #9881 belt, the same shape for a different failure: an as-path
+			// whose Regex was joined from unquoted-bracketed tokens is VALID
+			// POSIX (`[0-9]+` becomes `0-9 +`) but matches a different set than
+			// the operator wrote. The strict commit gate rejects it; on the
+			// tolerant load / peer-sync paths that gate only warns (#1960), so
+			// the definition can still reach this renderer, where it must not
+			// be emitted. Omission ALONE is not fail-closed — a stripped
+			// single-token regex can match real AS paths, so a referencing
+			// REJECT term that kept its `match as-path` line would silently
+			// never fire (dangling match = NO MATCH) and its routes would fall
+			// through to a later accept or the BGP permit default. The term
+			// rule in renderPolicyTermSequences completes this belt: reject
+			// terms over absent lists render deny-all, other terms skip the
+			// dangling branch — so no `match as-path` line ever dangles.
+			if ap.RegexUnquotedBracket {
+				slog.Warn("frr: omitting as-path access-list joined from unquoted brackets",
+					"as_path", name, "regex", ap.Regex)
+				continue
+			}
 			// #4097: sanitize the regex so an embedded newline cannot
 			// inject an extra frr.conf line — parity with the auth /
 			// description fields. FRR takes the regex as a rest-of-line
@@ -454,6 +473,30 @@ func (m *Manager) generatePolicyOptions(po *config.PolicyOptionsConfig, bgpAccep
 // term name reused across chained policies cannot fuse two prefix-lists (#5277).
 // renderRouteMapForPolicy passes routeMapName == plPrefix == emitName, keeping
 // the single-policy render byte-identical to master.
+// asPathListMissingAtRender reports whether `match as-path <name>` would
+// dangle: no such definition, or one the access-list loop omits (not valid
+// POSIX, #6686; or joined from unquoted-bracketed tokens, #9881). The
+// predicate is the union of the belt's omission set and undefined names, so
+// the two cannot drift: every name this reports true for has no
+// `bgp as-path access-list` line in the render.
+//
+// FRR resolves a dangling match to NO MATCH, so a term that keeps the
+// reference silently never fires. For a REJECT term that is fail-open: the
+// route falls through to a later accept or the BGP permit default and is
+// ACCEPTED by the policy it existed to reject. The term loop below renders
+// such terms fail-closed instead (deny-all for reject, skip the dangling
+// OR-branch otherwise).
+func asPathListMissingAtRender(po *config.PolicyOptionsConfig, name string) bool {
+	ap := po.ASPaths[name]
+	if ap == nil {
+		return true
+	}
+	if ap.RegexUnquotedBracket {
+		return true
+	}
+	return config.ValidASPathRegex(ap.Regex) != nil
+}
+
 func (m *Manager) renderPolicyTermSequences(po *config.PolicyOptionsConfig, routeMapName, plPrefix string, ps *config.PolicyStatement, startSeq int) (string, int) {
 	var b strings.Builder
 	seq := startSeq
@@ -490,6 +533,58 @@ func (m *Manager) renderPolicyTermSequences(po *config.PolicyOptionsConfig, rout
 		// hits the policy's default-action sequence (emitted after this
 		// loop), preserving the overall default behavior.
 		nonTerminating := term.Action != "accept" && term.Action != "reject"
+
+		// #9881 fail-closed term rule (parent-review HIGH): the access-list
+		// loop omits flagged/invalid lists, but a `match as-path` reference
+		// to an omitted list resolves to NO MATCH — so a REJECT term keeping
+		// the reference silently never fires and its routes fall through to
+		// a later accept or the BGP permit default. A stripped single-token
+		// regex CAN match real AS paths (e.g. `[65000]` → `65000`), so the
+		// omitted list is not "already matching nothing": omission alone
+		// DISABLES the reject. Never emit a dangling reference:
+		//   - reject term + any dangling ref → ONE bare deny-all sequence.
+		//     The match set is unknowable, so the only sound fail-closed
+		//     render is the superset (deny everything reaching the term).
+		//     Availability cost is bounded to lenient-path garbage that
+		//     strict would have refused outright.
+		//   - accept / non-terminating term → skip the dangling OR-branch
+		//     in the dispatch below (fine branches still emit; a
+		//     fully-dangling term emits nothing and falls through, which is
+		//     the fail-closed direction for accept).
+		// Non-terminating MODIFYING terms (community set, prepend, ...) with
+		// a dangling ref skip the modification — the pre-existing dangling
+		// outcome, made explicit. Match-all application would be unsound
+		// (restrictive and permissive actions need opposite defaults), so a
+		// lenient-path restrictive modification can still be skipped past;
+		// documented residual, same class as the #6686 belt.
+		danglingAsp := make(map[string]bool, len(term.FromASPath))
+		for _, asp := range term.FromASPath {
+			if asp == "" {
+				continue
+			}
+			if _, seen := danglingAsp[asp]; !seen {
+				danglingAsp[asp] = asPathListMissingAtRender(po, asp)
+			}
+		}
+		anyDanglingAsp := false
+		for _, d := range danglingAsp {
+			if d {
+				anyDanglingAsp = true
+				break
+			}
+		}
+		if anyDanglingAsp {
+			if term.Action == "reject" {
+				slog.Warn("frr: reject term matches on as-path list absent from frr.conf; rendering deny-all",
+					"route_map", routeMapName, "term", term.Name)
+				fmt.Fprintf(&b, "route-map %s deny %d\n", frrName(routeMapName), seq)
+				b.WriteString("exit\n")
+				seq += 10
+				continue
+			}
+			slog.Warn("frr: term matches on as-path list absent from frr.conf; skipping dangling match",
+				"route_map", routeMapName, "term", term.Name)
+		}
 
 		// emitTermBody renders one route-map SEQUENCE for this term: the
 		// header, this term's family-specific route-filter match line, the
@@ -885,6 +980,13 @@ func (m *Manager) renderPolicyTermSequences(po *config.PolicyOptionsConfig, rout
 				for _, plRef := range fromPrefixListRefs(po, plName) {
 					for _, comm := range orElseEmpty(term.FromCommunity) {
 						for _, asp := range orElseEmpty(term.FromASPath) {
+							// #9881: never emit a dangling `match as-path`
+							// (see the term rule above). "" is the no-match
+							// sentinel, never dangling. Reject terms never
+							// reach here with a dangling ref (deny-all above).
+							if danglingAsp[asp] {
+								continue
+							}
 							emitTermBody(seqFam, seq, rfs, famPL, plRef, comm, asp)
 							seq += 10
 						}
@@ -892,7 +994,6 @@ func (m *Manager) renderPolicyTermSequences(po *config.PolicyOptionsConfig, rout
 				}
 			}
 		}
-
 		if mixedFamily {
 			// Mixed-family route-filters: split into a v4 group and a v6
 			// group (#2607), each carrying its own family's route-filter
