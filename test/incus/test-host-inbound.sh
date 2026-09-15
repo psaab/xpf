@@ -48,12 +48,13 @@ xpf_enter_destructive_cluster_cell "test-host-inbound $*" "$0" "$@"
 #                     host-inbound targets, not just the untagged interface.
 #                     Every probe ARRIVES on lan (the prober is the LAN host),
 #                     and lan admits ssh. The cells are ssh ADMIT at lan's
-#                     addresses, ssh DENY at the wan sub-units, telnet DENY
-#                     everywhere (no zone admits it), and ping ADMIT as the
-#                     same-address control. The wan ssh DENY is the residual
-#                     over-refusal #9637 measured: a LAN SYN to a wan address is
-#                     reinjected through xpf-usp0, where the kernel chain cannot
-#                     see its ingress zone (see score_matrix).
+#                     addresses and, since the #9637 residual fix, ssh ADMIT
+#                     at the wan sub-units too: a LAN SYN to a wan address is
+#                     reinjected through xpf-usp0 after userspace adjudication,
+#                     and the reinject exemption admits it to view addresses
+#                     (see score_matrix). Telnet stays DENY everywhere (no zone
+#                     admits it), and ping stays ADMIT as the same-address
+#                     control.
 #   HA failover     — admission is UNCHANGED after the redundancy groups move
 #                     to the peer node. The failure mode is silent: an
 #                     admission that quietly stops working after a failover
@@ -137,6 +138,62 @@ score() {
 	esac
 }
 
+# The #9637 residual fix admits LAN→wan-addr TCP/22 in the kernel, but the
+# pre-existing xpf_dp_rst OUTPUT chain drops TCP RSTs sourced from those
+# interface-NAT (userspace-fronted) addresses — so without a listener the
+# wire still shows TIMEOUT and the ADMIT cells below are unobservable. This
+# accept-and-close python listener on TCP/22 AND TCP/23 on BOTH firewalls
+# turns an admitted SYN into a completed handshake (OPEN). Port 23 is the
+# over-admission tripwire: NO zone admits telnet, so a widened chain would
+# complete a telnet handshake and flip those DENY cells RED — without it the
+# telnet cells pass vacuously (xpf_dp_rst silences the RST either way).
+# Started after the posture gate, killed by the EXIT trap (composed with the
+# failover trap below); the marker makes stale-listener cleanup precise
+# (never a broad pkill).
+HI_SSH_LISTENER_MARK="xpf-hi-smoke-ssh-listener-9637"
+start_ssh_probe_listener() {
+	local inst py22 py23
+	py22='import socket; MARK="xpf-hi-smoke-ssh-listener-9637"; s=socket.socket(socket.AF_INET6); s.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1); s.bind(("::", 22)); s.listen(16); [s.accept()[0].close() for _ in iter(int, 1)]'
+	py23='import socket; MARK="xpf-hi-smoke-ssh-listener-9637"; s=socket.socket(socket.AF_INET6); s.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1); s.bind(("::", 23)); s.listen(16); [s.accept()[0].close() for _ in iter(int, 1)]'
+	for inst in "$FW0" "$FW1"; do
+		incus exec "$inst" -- pkill -f "$HI_SSH_LISTENER_MARK" >/dev/null 2>&1 || true
+		incus exec "$inst" -- bash -c "nohup python3 -c '$py22' >/tmp/xpf-hi-ssh-listener-22.log 2>&1 &" >/dev/null 2>&1 || die "cannot start ssh probe listener on $inst"
+		incus exec "$inst" -- bash -c "nohup python3 -c '$py23' >/tmp/xpf-hi-ssh-listener-23.log 2>&1 &" >/dev/null 2>&1 || die "cannot start telnet probe listener on $inst"
+	done
+	# Fail-closed: every ssh/telnet cell below needs OUR listener on the
+	# exact socket the prober reaches. A bare `ss :port` check can be
+	# satisfied by a sibling lane's, stale, or loopback-only listener while
+	# OUR process is dead — scoring cells against someone else's socket.
+	# So for each node and each port: list owned PIDs (pgrep on the marker),
+	# list the socket's PIDs (`ss -tlnp` names users per socket), and require
+	# every socket PID to be an owned PID (and at least one to exist).
+	# Loopback-only listeners do not satisfy external probers and fail here.
+	for inst in "$FW0" "$FW1"; do
+		sleep 1
+		owned="$(incus exec "$inst" -- pgrep -f "$HI_SSH_LISTENER_MARK" 2>/dev/null || true)"
+		[[ -n "$owned" ]] || die "ssh probe listener process missing on $inst — refusing to score cells against an unverified port"
+		for port in 22 23; do
+		# One awk over `ss -tlnp` (hi_wildcard_socket_pids): consider only
+		# rows whose LOCAL address is wildcard (0.0.0.0/[::], i.e.
+		# externally reachable — never 127.0.0.1/[::1]) with an EXACT port
+		# match (":22" must not catch ":220"), and emit the socket PIDs.
+		# Every emitted PID must be an owned marker PID; empty output
+		# fails closed.
+		sockpids="$(incus exec "$inst" -- ss -tlnp 2>/dev/null | hi_wildcard_socket_pids "$port")"
+			for spid in $sockpids; do
+				grep -qxF "$spid" <<<"$owned" || die "$inst:$port held by pid $spid, not our marker process (owned: $(tr '\n' ' ' <<<"$owned")) — refusing to score cells against a foreign socket"
+			done
+		done
+	done
+	info "ssh probe listener on TCP/22+23 ($FW0, $FW1, ownership-verified)"
+}
+cleanup_ssh_probe_listener() {
+	local inst
+	for inst in "$FW0" "$FW1"; do
+		incus exec "$inst" -- pkill -f "$HI_SSH_LISTENER_MARK" >/dev/null 2>&1 || true
+	done
+}
+
 # ── Phase 0: preconditions ───────────────────────────────────────────
 
 [[ -f "$PROBE_SRC" ]] || die "prober missing: $PROBE_SRC"
@@ -193,6 +250,8 @@ for tagged in reth0.50 reth0.80; do
 	fi
 done
 [[ "$FAIL" -eq 0 ]] || die "zone posture precondition failed — update the expectation table rather than weakening a cell"
+trap cleanup_ssh_probe_listener EXIT
+start_ssh_probe_listener
 
 # ── Phase 1: derive probe targets from the box's own config ──────────
 
@@ -279,17 +338,16 @@ score_matrix() {
 		# this address.
 		score "[${label}] ${t}-ping (control)" \
 			"$(hi_cell_verdict ADMIT "$control" "$control")"
-		# ssh is admitted at lan's own addresses and NOT at the wan-owned
-		# sub-units, although every probe arrives on ${PROBER_ZONE}, which admits
-		# ssh. That is the residual over-refusal #9637 measured and did not close.
-		# A LAN SYN to a wan address is not passed to the kernel on reth1: the
-		# userspace dataplane reinjects it through xpf-usp0, where the kernel
-		# chain has no ingress zone and still judges it by the address's owner.
-		# (A SYN to lan's own address arrives on ge-0-0-1, and the #9637
-		# ingress-zone rules admit it.) When the reinject path carries the
-		# ingress zone, these cells flip to ADMIT. That flip is the signal the
-		# residual is fixed, so update this line then rather than weakening it.
-		if [[ "${TARGET_ZONE[$t]}" == lan ]]; then ssh_expect=ADMIT; else ssh_expect=DENY; fi
+	# ssh is admitted at lan's own addresses AND at the wan-owned sub-units:
+	# every probe arrives on ${PROBER_ZONE}, which admits ssh, and the #9637
+	# residual fix exempts the userspace-adjudicated reinject through xpf-usp0
+	# to view addresses. The run holds a TCP/22 accept-and-close listener on
+	# both firewalls (start_ssh_probe_listener): without it the pre-existing
+	# xpf_dp_rst OUTPUT chain drops the no-listener RST from these
+	# interface-NAT addresses and the wire still shows TIMEOUT. Every
+	# TARGET_ORDER address is zoned; unzoned-dst reinjects still meet the
+	# #4420 catch-all DROP (unit-pinned), so no unzoned cell moves.
+	ssh_expect=ADMIT
 		score "[${label}] ${t}-ssh (arrives on ${PROBER_ZONE}, owned by ${TARGET_ZONE[$t]} -> ${ssh_expect})" \
 			"$(hi_cell_verdict "$ssh_expect" "$(awk -v c="${t}-ssh" '$1 == c { print $2; exit }' <<<"$obs_lines")" "$control")"
 		# telnet is admitted by NO zone here. On the lan address this is
@@ -337,7 +395,7 @@ if [[ "$WITH_FAILOVER" -eq 1 ]]; then
 			incus exec "$FW1" -- "$CLI" -c "request chassis cluster failover reset redundancy-group $rg" >/dev/null 2>&1 || true
 		done
 	}
-	trap restore_primacy EXIT
+	trap 'restore_primacy; cleanup_ssh_probe_listener' EXIT
 
 	info "Phase 2: manual failover of RG1 (WAN/reth0) and RG2 (LAN/reth1) to node1"
 	FAILED_OVER=1
@@ -366,7 +424,7 @@ if [[ "$WITH_FAILOVER" -eq 1 ]]; then
 	info "Phase 4: failing back to node0 and re-checking"
 	restore_primacy
 	FAILED_OVER=0
-	trap - EXIT
+	trap cleanup_ssh_probe_listener EXIT
 	for rg in 1 2; do
 		if [[ "$(rg_primary "$rg")" == "node0" ]]; then
 			pass "RG${rg} primary is node0 after failback"

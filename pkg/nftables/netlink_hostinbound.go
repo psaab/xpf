@@ -56,6 +56,14 @@ func buildHostInboundNetlink(p *nlPlan, spec HostInboundSpec) {
 		emitHostInboundWireGuardAcceptNetlink(p, spec.WGListenPorts)
 	}
 
+	// #9637 residual: the userspace-adjudicated reinject exemption, immediately
+	// before the ingress-zone rules in both chain shapes. Omitted unless the
+	// dataplane runs this generation's snapshot (the D1 fail-closed gate).
+	if spec.DataplaneFresh {
+		reinjectV4, reinjectV6 := hostInboundReinjectDestinations(spec.Views)
+		emitHostInboundReinjectAcceptNetlink(p, famV4, reinjectV4)
+		emitHostInboundReinjectAcceptNetlink(p, famV6, reinjectV6)
+	}
 	// #9637: ingress-zone rules first, as in the oracle.
 	ingressV4, ingressV6 := hostInboundIngressDestinations(spec.Views, spec.UnzonedV4, spec.UnzonedV6)
 	for _, v := range spec.Views {
@@ -75,7 +83,8 @@ func buildHostInboundNetlink(p *nlPlan, spec HostInboundSpec) {
 
 // declareHostInboundCounters mirrors buildHostInboundFilterPayload's counter
 // pre-pass: the 3 global ICMP-accept counters, then per-zone/family deny
-// counters, the unzoned deny counters, and the junos-host deny counters, each
+// counters, the #9637 reinject-accept counter (fresh + addressed views only),
+// the unzoned deny counters, and the junos-host deny counters, each
 // declared exactly once and in the same order.
 func declareHostInboundCounters(p *nlPlan, spec HostInboundSpec) {
 	seen := map[string]bool{}
@@ -96,6 +105,15 @@ func declareHostInboundCounters(p *nlPlan, spec HostInboundSpec) {
 		}
 		if hostInboundEmitsDrop(v, v.V6Addrs) || hostInboundEmitsIngressDrop(v, ingressV6) {
 			decl(HostInboundDenyCounterName(v.Zone, "ip6"))
+		}
+	}
+	// #9637 residual: the reinject-accept counter, declared exactly when the
+	// accept rules render (fresh + addressed views), mirroring the oracle —
+	// AFTER the per-zone deny counters and BEFORE the unzoned ones (T1
+	// parity diffs declaration order, so the positions must agree).
+	if spec.DataplaneFresh {
+		if rv4, rv6 := hostInboundReinjectDestinations(spec.Views); len(rv4) > 0 || len(rv6) > 0 {
+			decl(HostInboundAcceptCounterName(HostInboundAcceptReinject))
 		}
 	}
 	if len(spec.UnzonedV4) > 0 {

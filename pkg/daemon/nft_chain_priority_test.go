@@ -54,7 +54,7 @@ func TestNftLocalDeliveryChainsDistinctPriority(t *testing.T) {
 	// views. Use a representative enforced config so the rendered table is the
 	// real commit-time shape.
 	views := buildAndCheckViews(t, hostInboundTestConfig())
-	hiPayload := buildHostInboundFilterPayload(views, nil, nil, nil, nil)
+	hiPayload := buildHostInboundFilterPayload(views, nil, nil, nil, nil, true)
 	hiPri := nftHookInputPriority(t, "host-inbound", hiPayload)
 
 	if lo0Pri == hiPri {
@@ -118,7 +118,7 @@ func TestNftHostInboundGapFenceChainPriority(t *testing.T) {
 	}
 
 	views := buildAndCheckViews(t, hostInboundTestConfig())
-	hiPayload := buildHostInboundFilterPayload(views, nil, nil, nil, nil)
+	hiPayload := buildHostInboundFilterPayload(views, nil, nil, nil, nil, true)
 	hiPri := nftHookInputPriority(t, "host-inbound", hiPayload)
 	if gapPri <= hiPri {
 		t.Fatalf("xpf_hostinbound_gap priority %d must be STRICTLY GREATER THAN "+

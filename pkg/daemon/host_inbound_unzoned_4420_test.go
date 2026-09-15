@@ -42,7 +42,7 @@ func TestHostInboundUnzonedInterfaceDenied(t *testing.T) {
 	cfg := hostInboundUnzonedTestConfig()
 	views := dpuserspace.BuildZoneHostInboundViews(cfg)
 	v4, v6 := dpuserspace.BuildUnzonedHostInboundAddrs(cfg)
-	payload := buildHostInboundFilterPayload(views, v4, v6, nil, nil)
+	payload := buildHostInboundFilterPayload(views, v4, v6, nil, nil, true)
 
 	sentinel := dpuserspace.UnzonedHostInboundZoneLabel
 	wantV4 := hiDrop("ip", "192.0.2.1", sentinel)

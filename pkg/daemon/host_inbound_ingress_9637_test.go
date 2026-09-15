@@ -38,7 +38,7 @@ func ingressViews9637(withIngress bool) []dpuserspace.ZoneHostInboundView {
 func TestHostInboundIngressRulesShape9637(t *testing.T) {
 	views := ingressViews9637(true)
 	views[1].V6Addrs = []string{"2001:db8:80::8"} // lan has no v6 address of its own
-	payload := buildHostInboundFilterPayload(views, []string{"10.0.99.1"}, nil, nil, nil)
+	payload := buildHostInboundFilterPayload(views, []string{"10.0.99.1"}, nil, nil, nil, true)
 
 	allV4 := nftAddrSet([]string{"10.0.61.1", "172.16.80.8", "10.0.99.1"})
 	allV6 := nftAddrSet([]string{"2001:db8:80::8"})
@@ -215,7 +215,7 @@ func hostInboundIngressNetnsChild9637(t *testing.T) {
 	load := func(views []dpuserspace.ZoneHostInboundView) {
 		t.Helper()
 		cmd := exec.Command(findNft(), "-f", "-")
-		cmd.Stdin = strings.NewReader(buildHostInboundFilterPayload(views, nil, nil, nil, nil))
+		cmd.Stdin = strings.NewReader(buildHostInboundFilterPayload(views, nil, nil, nil, nil, true))
 		if out, err := cmd.CombinedOutput(); err != nil {
 			t.Fatalf("nft -f: %v: %s", err, out)
 		}

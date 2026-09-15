@@ -78,14 +78,35 @@ func runNftNetlinkParityInner(t *testing.T) {
 	views, unzonedV4, unzonedV6, programs, wg := parityHostInboundInputs()
 
 	t.Run("host_inbound", func(t *testing.T) {
-		oracle := buildHostInboundFilterPayload(views, unzonedV4, unzonedV6, programs, wg)
-		spec := toNftHostInboundSpec(views, unzonedV4, unzonedV6, programs, wg)
+		oracle := buildHostInboundFilterPayload(views, unzonedV4, unzonedV6, programs, wg, true)
+		spec := toNftHostInboundSpec(views, unzonedV4, unzonedV6, programs, wg, true)
 		// parityCheck compares the nft-text dump AND the PER-RULE iifname scope
 		// (read byte-for-byte via netlink, since google/nftables v0.3.0 renders
 		// anonymous string-set elements empty in `nft list`, so the TEXT cannot
 		// carry the iifname scope). The per-rule comparison — not a global union —
 		// is what catches a scope move/widen between the narrow IKE/ident exemption
 		// and the broad zone deny (#6405 FIX-2).
+		parityCheck(t, xnft.HostInboundTableName, oracle, func() error { return inst.InstallHostInbound(spec) })
+	})
+	t.Run("host_inbound_stale_gate_closed", func(t *testing.T) {
+		// #9637-D1: the CLOSED gate must be bit-identical on both surfaces
+		// too — a stale render is byte-identical to the pre-#9637 ruleset
+		// (no accept, no counter) on the oracle AND the netlink build.
+		oracle := buildHostInboundFilterPayload(views, unzonedV4, unzonedV6, programs, wg, false)
+		spec := toNftHostInboundSpec(views, unzonedV4, unzonedV6, programs, wg, false)
+		parityCheck(t, xnft.HostInboundTableName, oracle, func() error { return inst.InstallHostInbound(spec) })
+	})
+	t.Run("host_inbound_no_programs", func(t *testing.T) {
+		// Both chain shapes (Codex impl r1 §2 limitation): the no-junos-host
+		// shape must also agree on both surfaces, fresh ...
+		oracle := buildHostInboundFilterPayload(views, unzonedV4, unzonedV6, nil, wg, true)
+		spec := toNftHostInboundSpec(views, unzonedV4, unzonedV6, nil, wg, true)
+		parityCheck(t, xnft.HostInboundTableName, oracle, func() error { return inst.InstallHostInbound(spec) })
+	})
+	t.Run("host_inbound_no_programs_stale_gate_closed", func(t *testing.T) {
+		// ... and stale (closed gate, byte-identical to pre-#9637).
+		oracle := buildHostInboundFilterPayload(views, unzonedV4, unzonedV6, nil, wg, false)
+		spec := toNftHostInboundSpec(views, unzonedV4, unzonedV6, nil, wg, false)
 		parityCheck(t, xnft.HostInboundTableName, oracle, func() error { return inst.InstallHostInbound(spec) })
 	})
 
@@ -294,7 +315,7 @@ func runNftNetlinkParityInner(t *testing.T) {
 	// Mutation-sensitivity against the REAL oracle: each fail-open class must make
 	// the netlink dump DIVERGE from the oracle dump — proving the gate catches a
 	// fail-open rather than passing vacuously (§12.1).
-	oracle := buildHostInboundFilterPayload(views, unzonedV4, unzonedV6, programs, wg)
+	oracle := buildHostInboundFilterPayload(views, unzonedV4, unzonedV6, programs, wg, true)
 	mutations := []struct {
 		name   string
 		mutate func(s *xnft.HostInboundSpec)
@@ -304,6 +325,10 @@ func runNftNetlinkParityInner(t *testing.T) {
 		{"weakened_reject_to_drop", func(s *xnft.HostInboundSpec) { s.Programs[0].RulesV4[2].Verdict = config.JunosHostDrop }},
 		{"weakened_verdict_zone_opened_all", func(s *xnft.HostInboundSpec) { s.Views[0].SystemServices = []string{"all"} }},
 		{"dropped_unzoned_deny", func(s *xnft.HostInboundSpec) { s.UnzonedV4 = nil; s.UnzonedV6 = nil }},
+		// #9637-D1: clearing the fresh flag on the netlink side must DIVERGE
+		// from the fresh oracle (the accept + counter vanish) — proving the T1
+		// gate is sensitive to the fail-closed flag, not blind to it.
+		{"reinject_gate_flag_cleared", func(s *xnft.HostInboundSpec) { s.DataplaneFresh = false }},
 		// FIX-2: widen the narrow IKE exemption to also cover ge-0-0-2.80 — an
 		// interface ALREADY in the broad zone-deny IngressIfnames, so the global
 		// iifname UNION is unchanged and the TEXT diff is blind (anonymous ifname
@@ -322,7 +347,7 @@ func runNftNetlinkParityInner(t *testing.T) {
 			iifOracle := iifnameScopeByRule(t, xnft.HostInboundTableName)
 			nftDeleteTableBestEffort(xnft.HostInboundTableName)
 
-			mutated := toNftHostInboundSpec(views, unzonedV4, unzonedV6, programs, wg)
+			mutated := toNftHostInboundSpec(views, unzonedV4, unzonedV6, programs, wg, true)
 			mc.mutate(&mutated)
 			if err := inst.InstallHostInbound(mutated); err != nil {
 				t.Fatalf("mutated install failed: %v", err)

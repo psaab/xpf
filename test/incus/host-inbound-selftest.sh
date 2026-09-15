@@ -74,6 +74,44 @@ checkp PING_UNREACH_IS_ERR   UNREACHED 'From 10.0.61.9 icmp_seq=1 Destination Ho
 checkp PING_EMPTY_IS_BLIND   BLIND    ''
 checkp PING_INCUS_ERR_BLIND  BLIND    'Error: Instance is not running'
 
+# --- socket ownership: `ss -tlnp` -> wildcard-bound PIDs ----------------------
+# Hermetic rows for hi_wildcard_socket_pids (#9637 fail-closed listener
+# gate). Only wildcard-bound sockets with an EXACT port match are emitted;
+# the helper deliberately does NOT filter by ownership — a foreign PID is
+# emitted and the caller rejects it, never silently dropped.
+checkpids() {
+	local name="$1" want="$2" port="$3" ss="$4" got
+	got="$(hi_wildcard_socket_pids "$port" <<<"$ss")"
+	if [[ "$got" == "$want" ]]; then
+		pass=$((pass + 1)); printf 'ok   %-34s -> %s\n' "$name" "${got:-<empty>}"
+	else
+		fail=$((fail + 1)); printf 'FAIL %-34s -> want %q got %q\n' "$name" "$want" "$got"
+	fi
+}
+
+SS_OUT='State Recv-Q Send-Q Local Address:Port Peer Address:Port Process
+LISTEN 0 16 0.0.0.0:22 0.0.0.0:* users:(("python3",pid=1234,fd=3))
+LISTEN 0 16 [::]:22 [::]:* users:(("python3",pid=1234,fd=4))
+LISTEN 0 16 0.0.0.0:220 0.0.0.0:* users:(("other",pid=9999,fd=5))
+LISTEN 0 16 127.0.0.1:22 0.0.0.0:* users:(("xpfd",pid=111,fd=9))
+LISTEN 0 16 [::1]:23 [::]:* users:(("xpfd",pid=111,fd=10))
+LISTEN 0 16 [::]:23 [::]:* users:(("python3",pid=1234,fd=5),("python3",pid=5678,fd=5))'
+
+# Wildcard v4+v6 rows match; same PID on both dedups to one line.
+checkpids SS_WILDCARD_V4_V6_MATCH "1234" 22 "$SS_OUT"
+# ":22" must not catch ":220" — and 220 itself still matches exactly.
+checkpids SS_PORT_NEAR_MISS_EMPTY "" 22 "$(grep ':220' <<<"$SS_OUT")"
+checkpids SS_EXACT_HIGH_PORT_MATCH "9999" 220 "$SS_OUT"
+# Loopback-only listeners are unreachable to external probers: no PIDs.
+checkpids SS_LOOPBACK_V4_EXCLUDED "" 22 "$(grep '127.0.0.1:22' <<<"$SS_OUT")"
+checkpids SS_LOOPBACK_V6_EXCLUDED "" 23 "$(grep '\[::1\]:23' <<<"$SS_OUT")"
+# Multi-PID socket: every user emitted, sorted.
+checkpids SS_MULTI_PID_ROW $'1234\n5678' 23 "$SS_OUT"
+# Foreign PID is emitted, not filtered: the caller's ownership check is
+# what rejects it (grep -qxF against the marker PIDs).
+checkpids SS_FOREIGN_PID_EMITTED "9999" 220 "$SS_OUT"
+checkpids SS_EMPTY_SS_EMPTY "" 22 ""
+
 # --- THE CORE TABLE: every (expectation x observation x control) combination -
 checkv() {
 	local name="$1" want="$2" expect="$3" obs="$4" control="$5" got verdict

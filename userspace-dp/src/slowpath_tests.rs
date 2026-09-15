@@ -1225,3 +1225,34 @@ fn nb_wedged_device_still_terminates_with_bounded_waits_7174() {
          head-of-line stall. got {waits}"
     );
 }
+
+// #9637 F3 (GPT-1 form): staggered-start handshake matrix over the
+// single-atom outlet outcomes. The load-bearing row is the second block's
+// first: a live first outlet plus an initializing second must WAIT — never
+// fail construction. The old two-load handshake failed exactly this shape
+// (the live worker's io_uring-fallback note skewed the read); with one
+// atomic per outlet that skew is unrepresentable — there is no input row
+// for "live with a diagnostic", by construction. Genuine failure fast-fails
+// without waiting for the sibling; both-pending timeout stays optimistic
+// (pre-existing behaviour, not this lane's to change).
+#[test]
+fn handshake_step_staggered_start_waits_genuine_failure_fails() {
+    use HandshakePoll::{Fail, Ready, Wait};
+    use OutletInit::{Failed, Live, Starting};
+    // Both live: ready.
+    assert_eq!(handshake_step(Live, Live, false), Ready);
+    // STAGGERED (F3): live + initializing waits, either side; both
+    // initializing waits.
+    assert_eq!(handshake_step(Live, Starting, false), Wait);
+    assert_eq!(handshake_step(Starting, Live, false), Wait);
+    assert_eq!(handshake_step(Starting, Starting, false), Wait);
+    // GENUINE FAILURE: fast-fails, either outlet, without waiting for the
+    // sibling — even against a live sibling.
+    assert_eq!(handshake_step(Failed, Starting, false), Fail);
+    assert_eq!(handshake_step(Failed, Live, false), Fail);
+    assert_eq!(handshake_step(Starting, Failed, false), Fail);
+    assert_eq!(handshake_step(Live, Failed, false), Fail);
+    // TIMEOUT with anything pending: optimistic ready (pre-existing).
+    assert_eq!(handshake_step(Starting, Starting, true), Ready);
+    assert_eq!(handshake_step(Live, Starting, true), Ready);
+}

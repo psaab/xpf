@@ -443,6 +443,16 @@ const MAX_PENDING_SESSION_DELTAS: usize = 4096;
 const BIND_RETRY_ATTEMPTS: usize = 20;
 const BIND_RETRY_DELAY: Duration = Duration::from_millis(250);
 const DEFAULT_SLOW_PATH_TUN: &str = "xpf-usp0";
+/// #9637-D4 (operator narrowing): the slow-path TUN for reinjects that did
+/// NOT pass a userspace host-inbound gate (NoRoute/capped delegates,
+/// transit-adjudicated MissingNeighbor, ForwardCandidate build-failure
+/// fallback, unconditionally-exempt IPsec classes). The kernel holds NO
+/// accept for this device, so these frames are judged by the destination
+/// rules exactly as pre-#9637. `xpf-usp0` stays the adjudicated-only TUN
+/// (its accept admits solely gate-passed traffic). Must stay equal to the
+/// Go `HostInboundDelegatedIfname` (pinned by test, same as
+/// DEFAULT_SLOW_PATH_TUN ↔ HostInboundReinjectIfname).
+pub(crate) const DELEGATED_SLOW_PATH_TUN: &str = "xpf-usp1";
 const LOCAL_TUNNEL_DELIVERY_QUEUE_DEPTH: usize = 4096;
 const HA_WATCHDOG_STALE_AFTER_SECS: u64 = 10;
 const FABRIC_ZONE_MAC_MAGIC: u8 = 0xfe;

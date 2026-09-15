@@ -584,7 +584,18 @@ func (d *Daemon) applyHostInboundFilter(cfg *config.Config) error {
 	// inputs buildHostInboundFilterPayload feeds the oracle; the netlink build is
 	// parity-proven equivalent (T1 CI). A failed install still fails the commit
 	// closed below (invariant H7) and, at cold boot, drives the fail-closed fence.
-	spec := toNftHostInboundSpec(views, unzonedV4, unzonedV6, programs, wgListenPorts)
+	// #9637-D1: the reinject accept renders only when the dataplane runs this
+	// generation's snapshot (hostInboundDataplaneFresh, set where this
+	// generation's snapshot is published, read here ahead of the tail). An
+	// ordinary ApplyConfig failure still runs this tail (#5679) with the flag
+	// clear, so it installs the destination rules WITHOUT the accept: an
+	// address the dataplane never authorized meets the owner-zone deny
+	// instead of the exemption, and a previously installed accept is removed
+	// by that successful install. A failure of THIS install instead retains
+	// the previous table (pre-existing #5789 staleness, commit fails closed
+	// via H7); the flag is untouched and the next call-site outcome re-drives
+	// it — see hostInboundDataplaneFresh for the full transition table.
+	spec := toNftHostInboundSpec(views, unzonedV4, unzonedV6, programs, wgListenPorts, d.hostInboundDataplaneFresh.Load())
 	if err := nftInstaller.InstallHostInbound(spec); err != nil {
 		err = tagNftInstallErr(err)
 		slog.Warn("failed to apply host-inbound filter", "err", err)
@@ -1211,10 +1222,13 @@ func hostInboundHasEnforceableView(views []dpuserspace.ZoneHostInboundView) bool
 // Layout of `chain input` (type filter hook input priority 10; policy accept —
 // distinct from the xpf_lo0 chain's priority 0 so this host-inbound backstop
 // evaluates AFTER the lo0 input filter, #3364):
+//
 //  1. ct state established,related accept   — return/ongoing host traffic.
+//
 //  2. meta l4proto { 50, 51 } accept — raw ESP/AH exemption for host-terminated
 //     IPsec (mirrors the userspace stage_ipsec_passthrough_check); the kernel
 //     XFRM stack decrypts before any host-inbound deny can apply.
+//
 //  3. icmpv6 ND + error/PMTUD accept, icmp error/PMTUD accept — IPv6 Neighbor
 //     Discovery and v4/v6 PMTUD/error control messages (dest-unreachable,
 //     packet-too-big, time-exceeded, parameter-problem) are mandatory link
@@ -1230,6 +1244,7 @@ func hostInboundHasEnforceableView(views []dpuserspace.ZoneHostInboundView) bool
 //     per-zone catch-all. A single global input-hook rule (input = host-destined
 //     only), so it mirrors the shim's local-destination scope without touching
 //     transit UDP; only the WG port is opened, so the restricted default holds.
+//
 //  4. Per host-inbound-configured zone, per family with addresses:
 //     - if `any-service`: <fam> daddr <addrs> accept (and no deny — the
 //     operator opened the zone to all services). NOT `all`: #3226 narrowed
@@ -1242,7 +1257,16 @@ func hostInboundHasEnforceableView(views []dpuserspace.ZoneHostInboundView) bool
 //     the table body and scraped per zone/family into the
 //     xpf_host_inbound_kernel_denies_total metric (#3361) — distinct from the
 //     userspace-dp xpf_host_inbound_denies_total path (#3326).
-func buildHostInboundFilterPayload(views []dpuserspace.ZoneHostInboundView, unzonedV4, unzonedV6 []string, programs []dpuserspace.JunosHostProgram, wgListenPorts []uint16) string {
+//
+//     dataplaneFresh is the #9637-D1 pre-landing fail-closed gate: true iff the
+//     userspace dataplane runs this generation's snapshot (set at the single
+//     ApplyConfig call site, consulted here). When false the render omits the
+//     reinject accept below — byte-identical to the pre-#9637 ruleset — so a
+//     #5679 deferred-error generation (nft at N+1, dataplane at N) cannot admit a
+//     fresh address the dataplane never authorized, and a post-install failure
+//     removes an installed accept on the next render. The F3 window is closed by
+//     construction, not by probe.
+func buildHostInboundFilterPayload(views []dpuserspace.ZoneHostInboundView, unzonedV4, unzonedV6 []string, programs []dpuserspace.JunosHostProgram, wgListenPorts []uint16, dataplaneFresh bool) string {
 	// Pre-pass: collect the named DROP counters the chain will reference, so they
 	// can be declared at the top of the table body BEFORE the chain. A counter is
 	// emitted exactly when emitHostInboundZone emits a catch-all drop
@@ -1291,6 +1315,14 @@ func buildHostInboundFilterPayload(views []dpuserspace.ZoneHostInboundView, unzo
 		if hostInboundEmitsDrop(v, v.V6Addrs) || hostInboundEmitsIngressDrop(v, ingressV6) {
 			addCounter(xnft.HostInboundDenyCounterName(v.Zone, "ip6"))
 		}
+	}
+	// #9637 residual: the reinject-accept counter is declared exactly when the
+	// accept rules below render (fresh + addressed views) — the deny-counter
+	// declaration discipline, not the unconditional ICMP-accept one. A stale
+	// render declares nothing reinject-related.
+	reinjectV4, reinjectV6 := hostInboundReinjectDestinations(views)
+	if dataplaneFresh && (len(reinjectV4) > 0 || len(reinjectV6) > 0) {
+		addCounter(xnft.HostInboundAcceptCounterName(xnft.HostInboundAcceptReinject))
 	}
 	// #4420 HI-2: the addressed-but-unzoned catch-all DROP references its own
 	// named counter under the reserved junos-host sentinel label (declared here
@@ -1386,6 +1418,14 @@ func buildHostInboundFilterPayload(views []dpuserspace.ZoneHostInboundView, unzo
 		// hook, so the shim-steered outer transport reaches the userspace WG
 		// socket regardless of which zone's address it is destined to.
 		emitHostInboundWireGuardAccept(&rules, wgListenPorts)
+	}
+	// #9637 residual: the userspace-adjudicated reinject exemption. After the
+	// global accepts and the junos-host program jumps (both chain shapes) and
+	// before the ingress-zone rules. Omitted unless the dataplane runs this
+	// generation's snapshot (dataplaneFresh — the D1 fail-closed gate).
+	if dataplaneFresh {
+		emitHostInboundReinjectAccept(&rules, "ip", reinjectV4)
+		emitHostInboundReinjectAccept(&rules, "ip6", reinjectV6)
 	}
 
 	// #9637: the ingress-zone rules come first. A packet that arrives on a

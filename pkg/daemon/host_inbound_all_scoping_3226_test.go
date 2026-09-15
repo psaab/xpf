@@ -46,7 +46,7 @@ func allScopingPayload(t *testing.T, cfg *config.Config) string {
 	if len(views) == 0 {
 		t.Fatalf("expected at least one host-inbound view — the zone must contribute addresses for this test to mean anything")
 	}
-	return buildHostInboundFilterPayload(views, nil, nil, nil, nil)
+	return buildHostInboundFilterPayload(views, nil, nil, nil, nil, true)
 }
 
 // TestHostInboundNftSystemServicesAllIsScopedNotBlanket is the #3226

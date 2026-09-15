@@ -72,7 +72,7 @@ func ParseHostInboundAcceptCounterName(name string) (typ string, ok bool) {
 		return "", false
 	}
 	switch rest {
-	case HostInboundAcceptICMP6ND, HostInboundAcceptICMP6Error, HostInboundAcceptICMP4Error:
+	case HostInboundAcceptICMP6ND, HostInboundAcceptICMP6Error, HostInboundAcceptICMP4Error, HostInboundAcceptReinject:
 		return rest, true
 	}
 	return "", false

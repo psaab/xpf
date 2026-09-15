@@ -1863,27 +1863,39 @@ RETH unit therefore resolves to its member netdev on the node (`reth1.0` →
   every such address, including one owned by a zone that admits ssh (the
   exposure). Measured on the loss cluster: TCP/22 from the WAN VLAN 80 segment to
   the LAN VIP went from admitted to dropped, while ping answered.
-- **Residual over-refusal (measured, not closed by #9637).** The XDP shim does not
+- **Residual over-refusal (measured, closed).** The XDP shim does not
   pass every host-bound packet to the kernel on its ingress netdev.
   - A destination owned by interface-mode source NAT is reported non-local by
     `is_local_destination`, so its reverse-NAT repair can run (#290). Such a
     packet goes to the userspace dataplane.
   - The userspace dataplane applies its own ingress-zone host-inbound check, then
     reinjects the packet through `xpf-usp0`.
-  - The kernel chain sees `iifname xpf-usp0`, which no view claims, so the
-    destination-address rules judge it by the address's owner.
-  - On the loss cluster the `lan-to-wan` rule is `source-nat interface`, so TCP/22
-    from the LAN host to the `wan` addresses is still refused. A capture on fw0
-    showed those SYNs arriving on `xpf-usp0`, while a SYN to the LAN VIP arrived
-    on `ge-0-0-1`. Closing this needs the reinject path to carry the ingress zone
-    to the kernel chain.
+  - The kernel chain trusts that adjudication for view (zoned) addresses:
+    `iifname xpf-usp0 ip/ip6 daddr <view addresses> accept` (named counter
+    `xpfhia_reinject`), placed after the global accepts and the junos-host
+    program jumps and before the ingress-zone rules. Direction (b): the
+    reinject path does NOT carry the ingress zone — the userspace verdict is
+    the authorization. The accept renders only when the dataplane runs this
+    generation's snapshot (D1 fail-closed gate); a stale render is
+    byte-identical to the pre-fix ruleset. Views-scoped, so unzoned-dst
+    reinjects still meet the #4420 catch-all DROP exactly as before.
+  - On the loss cluster the `lan-to-wan` rule is `source-nat interface`, and
+    TCP/22 from the LAN host to the `wan` addresses is now admitted: those
+    SYNs arrive adjudicated on `xpf-usp0` (a SYN to the LAN VIP still arrives
+    on `ge-0-0-1` and takes the ingress-zone rules). Operator narrowing: the
+    accept admits ONLY gate-passed LocalDelivery reinjects — every delegation
+    path (default-permit or capped NoRoute, transit-adjudicated
+    MissingNeighbor, ForwardCandidate build-failure fallback, unconditionally
+    exempt IPsec incl. NAT-T) rides `xpf-usp1`, for which the kernel holds no
+    accept, and meets the destination rules exactly as before. No deployment
+    loses a currently-effective destination denial. See PR #10059.
 - The per-zone deny counters (#3361) count the drop under the ingress zone.
 - The fences (#5644 cold-boot, #5789 gap) are unchanged. They drop by destination
-  address, with no per-service accepts, over the same address set.
-- `make test-host-inbound` probes from the LAN host. Its `wan` ssh cells remain
-  DENY, because those addresses are interface-NAT addresses and take the reinject
-  path above. The smoke says so beside the cells, which flip to ADMIT once the
-  residual is closed.
+  address, with no per-service accepts and no `xpf-usp0` exemption, over the
+  same address set.
+- `make test-host-inbound` probes from the LAN host. Its `wan` ssh cells are
+  now ADMIT via the reinject exemption above; telnet stays DENY (no zone
+  admits it) and ping stays ADMIT as the control.
 
 Pinned by:
 
@@ -2459,32 +2471,38 @@ sub-units against the reinject-path residual:
 |---|---|---|---|---|---|
 | `10.0.61.1` | `reth1.0` (untagged) | lan | RST → **admitted** | timeout → denied | reply |
 | `2001:559:8585:ef00::1` | `reth1.0` (untagged) | lan | RST → **admitted** | timeout → denied | reply |
-| `172.16.50.8` | `reth0.50` (**VLAN 50**) | wan | timeout → **denied** | timeout → denied | reply |
-| `2001:559:8585:50::8` | `reth0.50` (**VLAN 50**) | wan | timeout → **denied** | timeout → denied | reply |
-| `172.16.80.8` | `reth0.80` (**VLAN 80**) | wan | timeout → **denied** | timeout → denied | reply |
-| `2001:559:8585:80::8` | `reth0.80` (**VLAN 80**) | wan | timeout → **denied** | timeout → denied | reply |
+| `172.16.50.8` | `reth0.50` (**VLAN 50**) | wan | RST → **admitted** | timeout → denied | reply |
+| `2001:559:8585:50::8` | `reth0.50` (**VLAN 50**) | wan | RST → **admitted** | timeout → denied | reply |
+| `172.16.80.8` | `reth0.80` (**VLAN 80**) | wan | RST → **admitted** | timeout → denied | reply |
+| `2001:559:8585:80::8` | `reth0.80` (**VLAN 80**) | wan | RST → **admitted** | timeout → denied | reply |
 
-The four `wan` rows deny tcp/22 although every probe arrives on `lan`, which
-admits ssh. That is the residual over-refusal #9637 measured and did not close.
-These are interface-NAT addresses, so the userspace dataplane reinjects the SYN
-through `xpf-usp0`, where the kernel chain still judges by the address's owner
-(§ "Ingress-zone judgement (#9637)"). The cells stay
-load-bearing through the tcp/22 and tcp/23 pair at the *same address*: one port
-answers and the other does not, which no routing or reachability story explains.
-A posture check asserts that `lan` owns `reth1.0`, the prober's ingress interface,
-so the ssh cells cannot quietly be scored against the wrong zone.
+The four `wan` rows admit tcp/22: every probe arrives on `lan`, which admits
+ssh, and the #9637 residual fix exempts the userspace-adjudicated reinject
+through `xpf-usp0` to view addresses. These are interface-NAT addresses, so
+the userspace dataplane reinjects the SYN through `xpf-usp0`, where the
+kernel chain now trusts that adjudication instead of judging by the
+address's owner (§ "Ingress-zone judgement (#9637)"). The cells stay
+load-bearing through the tcp/22 and tcp/23 pair at the *same address*: port
+22 completes (the run holds an accept-and-close listener on both firewalls)
+while port 23 — which no zone admits — stays silent. Port 23 is the
+over-admission tripwire: the run also listens on :23, so a widened chain
+would complete a telnet handshake and flip those cells RED; silence there
+is a real deny, not an unobservable one. A posture check asserts that
+`lan` owns `reth1.0`, the prober's ingress interface, so the ssh cells
+cannot quietly be scored against the wrong zone.
 
 This prober cannot see the other direction: a client arriving on `wan` that names
 a `lan` address. The #9637 lab gate measured that direction separately, from the
 WAN-side `xpf-mouse-target` (`docs/log/9637.md`).
 
-### Why the RST matters
-
 `xpfd` binds its own listeners (gRPC 50051, HTTP 8080) on `127.0.0.1` only, so
 a probe of a non-listening port on a firewall-local address comes back as an
 **RST** if host-inbound admitted it and as **nothing at all** if host-inbound
-dropped it. Collapsing those two — which is what a bare `nc -z` exit status
-does — would make every negative cell in the smoke unfalsifiable. The prober
+dropped it — except on interface-NAT addresses, where the pre-existing
+`xpf_dp_rst` OUTPUT chain drops no-listener RSTs (the smoke's :22/:23
+listeners exist precisely to make ADMIT observable there anyway).
+Collapsing those two — which is what a bare `nc -z` exit status does — would
+make every negative cell in the smoke unfalsifiable. The prober
 (`host_inbound_probe.py`) therefore reports `OPEN` / `REFUSED` / `TIMEOUT` /
 `ERROR` as a raw observation, and `host-inbound-lib.sh` maps them onto
 `ADMITTED` / `SILENT` / `UNREACHED` / `BLIND`.

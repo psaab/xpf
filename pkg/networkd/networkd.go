@@ -645,7 +645,18 @@ var procSysNetRoot = "/proc/sys/net/ipv4"
 // reinjection will be dropped until it is lowered (#2378). This runs only on
 // the reload/clear path, never per-packet.
 func restoreSlowPathRPFilter() {
-	const tunName = "xpf-usp0"
+	// #9637 operator narrowing: the delegated outlet needs the same
+	// rp_filter=0 treatment — its reinjects are judged by destination and
+	// a strict filter would silently drop them on ingress. The name MUST
+	// stay equal to nftables.HostInboundDelegatedIfname (kept as a literal
+	// here: importing that package would cycle networkd→nftables→dataplane
+	// →networkd).
+	for _, tunName := range []string{"xpf-usp0", "xpf-usp1"} {
+		restoreSlowPathRPFilterOn(tunName)
+	}
+}
+
+func restoreSlowPathRPFilterOn(tunName string) {
 	path := fmt.Sprintf("%s/conf/%s/rp_filter", procSysNetRoot, tunName)
 	// BestEffortKernelKnob (#1894): procfs has no rename, so the
 	// fsatomic writers are impossible here by construction — the direct

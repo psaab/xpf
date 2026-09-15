@@ -179,6 +179,17 @@ func (d *Daemon) closeoutHostAuthOnCancel(err error, cfg *config.Config) error {
 		return nil
 	}
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		// #9637-D1 (F1-A): the closeout below renders applyHostInboundFilter
+		// from the INCOMING config at C1/C2 WITHOUT any ApplyConfig of that
+		// config having succeeded — the dataplane still runs the previous
+		// snapshot. Clear the reinject-accept gate first so the closeout
+		// installs the destination rules WITHOUT the accept (a fresh view
+		// address the dataplane never authorized meets the owner-zone deny).
+		// At C3 the dataplane MAY already enforce the new snapshot, so this
+		// over-refuses until the next successful apply — the fail-closed
+		// direction, and the daemon is stopping. Non-cancellation errors
+		// return below untouched (ordinary #5679 clears at its own site).
+		d.hostInboundDataplaneFresh.Store(false)
 		if closeoutErr := d.applyHostAuthorizationCloseout(cfg); closeoutErr != nil {
 			return errors.Join(err, closeoutErr)
 		}

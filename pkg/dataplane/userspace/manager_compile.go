@@ -480,6 +480,14 @@ func (m *Manager) applyCompiledSnapshot(
 			}
 		}
 		m.lastSnapshot = snap
+		// #9637-D1/F1-B: this success did NOT publish (pendingXSKStartup) — mark
+		// it so freshness gates (daemon hostInboundDataplaneFresh, fed via
+		// ApplyResultFromCompileResult below and through ApplyResult) treat this
+		// generation as not-running until the status loop lands the publish. The
+		// normal tail below publishes synchronously and leaves this bit false.
+		if result != nil {
+			result.SnapshotPublishDeferred = true
+		}
 		// #5485: the retained authority is now the NEW snapshot, and the
 		// classifier maps above already dropped the obsolete ifindexes from
 		// userspace_ingress_ifaces, so the kernel attachment set may follow.

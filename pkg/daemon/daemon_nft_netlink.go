@@ -110,12 +110,13 @@ func toNftViews(views []dpuserspace.ZoneHostInboundView) []xnft.HostInboundZoneV
 	return out
 }
 
-func toNftHostInboundSpec(views []dpuserspace.ZoneHostInboundView, unzonedV4, unzonedV6 []string, programs []dpuserspace.JunosHostProgram, wg []uint16) xnft.HostInboundSpec {
+func toNftHostInboundSpec(views []dpuserspace.ZoneHostInboundView, unzonedV4, unzonedV6 []string, programs []dpuserspace.JunosHostProgram, wg []uint16, dataplaneFresh bool) xnft.HostInboundSpec {
 	spec := xnft.HostInboundSpec{
-		Views:         toNftViews(views),
-		UnzonedV4:     unzonedV4,
-		UnzonedV6:     unzonedV6,
-		WGListenPorts: wg,
+		Views:          toNftViews(views),
+		UnzonedV4:      unzonedV4,
+		UnzonedV6:      unzonedV6,
+		WGListenPorts:  wg,
+		DataplaneFresh: dataplaneFresh,
 	}
 	for _, p := range programs {
 		spec.Programs = append(spec.Programs, toNftProgram(p))

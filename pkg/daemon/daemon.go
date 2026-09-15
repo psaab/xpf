@@ -928,6 +928,37 @@ type Daemon struct {
 	// not a current readiness reader. nft success and the following Store are
 	// ordered operations in separate state domains, not one atomic publication.
 	hostInboundEnforced atomic.Bool
+	// hostInboundDataplaneFresh is the #9637-D1 pre-landing fail-closed gate:
+	// true iff the dataplane runs this generation's snapshot. applyHostInboundFilter
+	// consults it to decide whether the reinject accept may be installed; a #5679
+	// deferred-error generation (or any ApplyConfig failure, abort-class included)
+	// clears it so the render omits the accept — byte-identical to the pre-#9637
+	// ruleset — and the next successful install after any failure removes an
+	// installed accept the same way (the tail re-renders accept-less while the
+	// flag is clear). Zero value false is fail-closed: no accept renders before
+	// first successful PUBLISHED ApplyConfig. Writers: set ONLY where this
+	// generation's snapshot is published AND acknowledged — the ApplyConfig
+	// call site in applyDataplaneAndHACore and the #5134 same-config
+	// worker-arm re-apply (same cfg, so views/addresses cannot diverge
+	// there) set it iff ApplyConfig succeeded WITHOUT deferring its publish
+	// (ApplyResult.SnapshotPublishDeferred, set ONLY on the XSK-startup
+	// deferred branch — the one success-without-publish site; the normal
+	// tail publishes synchronously). Cleared on any ApplyConfig failure AND
+	// on deferred-publish success (fail-closed: the helper still serves the
+	// previous snapshot until the status loop lands it) AND on
+	// cancellation-closeout entry (closeoutHostAuthOnCancel — the C1/C2
+	// closeout renders the INCOMING config with the previous snapshot still
+	// installed, F1-A). An InstallHostInbound failure deliberately leaves it
+	// untouched: the retained table's staleness is the pre-existing #5789
+	// class (commit fails closed via H7, next call-site outcome re-drives
+	// the flag), and a compensating render here would fight the
+	// gap-fence/coveredAddrs machinery that assumes the retained generation.
+	// AVAILABILITY NOTE (not authorization): a deferred success renders
+	// accept-less until the NEXT apply republishes (feed onUpdate
+	// re-applies bound this in practice); a rejected deferred publish
+	// disables ctrl via publishSnapshotFailClosedLocked, so no reinject can
+	// reach the accept at all (residual in-flight drain only).
+	hostInboundDataplaneFresh atomic.Bool
 
 	// #7181 applied-state latch. hostInboundEnforced above is STICKY-TRUE and so
 	// cannot distinguish "established and current" from "established but a later

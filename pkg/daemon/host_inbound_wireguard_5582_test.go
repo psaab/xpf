@@ -48,7 +48,7 @@ func TestHostInboundFilterAdmitsWireGuardListenPort(t *testing.T) {
 		t.Fatalf("WireGuardListenPorts() = %v, want [51820]", wgPorts)
 	}
 	views := buildAndCheckViews(t, cfg)
-	payload := buildHostInboundFilterPayload(views, nil, nil, nil, wgPorts)
+	payload := buildHostInboundFilterPayload(views, nil, nil, nil, wgPorts, true)
 
 	wgAccept := "udp dport 51820 accept"
 	if !strings.Contains(payload, wgAccept) {
@@ -107,7 +107,7 @@ func TestHostInboundFilterWireGuardPayloadParses(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := hostInboundWireGuardTestConfig()
 			views := buildAndCheckViews(t, cfg)
-			payload := buildHostInboundFilterPayload(views, nil, nil, nil, tc.ports)
+			payload := buildHostInboundFilterPayload(views, nil, nil, nil, tc.ports, true)
 			if !strings.Contains(payload, tc.want) {
 				t.Fatalf("payload missing %q:\n%s", tc.want, payload)
 			}
@@ -134,7 +134,7 @@ func TestHostInboundFilterNoWireGuardNoAccept(t *testing.T) {
 		t.Fatalf("fixture unexpectedly has WG ports: %v", ports)
 	}
 	views := buildAndCheckViews(t, cfg)
-	payload := buildHostInboundFilterPayload(views, nil, nil, nil, cfg.WireGuardListenPorts())
+	payload := buildHostInboundFilterPayload(views, nil, nil, nil, cfg.WireGuardListenPorts(), true)
 	if strings.Contains(payload, "udp dport") && strings.Contains(payload, "51820") {
 		t.Errorf("no WG accept must be emitted when WireGuard is unconfigured:\n%s", payload)
 	}
