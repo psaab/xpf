@@ -418,10 +418,17 @@ func compileConfigWithOpts(tree *ConfigTree, opts compileOpts) (*Config, error) 
 	usedNodeFallback := false
 
 	// Expand groups before compilation — resolve all apply-groups references.
-	if err := tree.ExpandGroups(); err != nil {
+	// TAGGED (#9854): inherited nodes carry InheritedFrom so the syslog host
+	// coalescing can preserve apply-groups precedence (an inline explicit
+	// scalar beats an inherited one even though expansion appends adopted
+	// nodes after inline ones). The tags ride the cloneForExpansion copy made
+	// above, never the caller's tree, and no reader except that coalescing
+	// (plus `| display inheritance`, which re-derives them on its own clone)
+	// branches on them — plain Format/validators never see them.
+	if err := tree.ExpandGroupsTagged(); err != nil {
 		if strings.Contains(err.Error(), `undefined group "${node}"`) {
 			vars := map[string]string{"node": "node0"}
-			if err2 := tree.ExpandGroupsWithVars(vars); err2 != nil {
+			if err2 := tree.ExpandGroupsWithVarsTagged(vars); err2 != nil {
 				return nil, fmt.Errorf("apply-groups: %w", err2)
 			}
 			usedNodeFallback = true
@@ -709,7 +716,8 @@ func compileConfigForNodeWithOpts(tree *ConfigTree, nodeID int, opts compileOpts
 	}
 
 	vars := map[string]string{"node": fmt.Sprintf("node%d", nodeID)}
-	if err := tree.ExpandGroupsWithVars(vars); err != nil {
+	// TAGGED, as in compileConfigWithOpts (#9854 coalescing provenance).
+	if err := tree.ExpandGroupsWithVarsTagged(vars); err != nil {
 		return nil, fmt.Errorf("apply-groups: %w", err)
 	}
 
