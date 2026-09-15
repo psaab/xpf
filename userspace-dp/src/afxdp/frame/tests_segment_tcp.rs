@@ -614,6 +614,51 @@ fn authoritative_forward_ports_falls_back_to_live_frame_ports_when_metadata_miss
 
 
 #[test]
+fn authoritative_forward_ports_rejects_slack_tuple_when_frame_portless_9894() {
+    // #9894 (GPT-3): flow None (conntrack refused the slack tuple) and the
+    // declared-bounded frame read finds no ports (total_len=20) — the
+    // metadata last resort must NOT resurrect the stamped phantom pair, or
+    // it flows into `expected_ports` and `enforce_expected_ports` writes it
+    // into the frame. Reverting the gate returns Some((1111, 443)) -> RED.
+    let src_ip = Ipv4Addr::new(10, 0, 61, 102);
+    let dst_ip = Ipv4Addr::new(172, 16, 80, 200);
+    let mut frame = Vec::new();
+    write_eth_header(
+        &mut frame,
+        [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff],
+        [0x00, 0x25, 0x90, 0x12, 0x34, 0x56],
+        0,
+        0x0800,
+    );
+    frame.extend_from_slice(&[
+        0x45, 0x00, 0x00, 0x14, 0x00, 0x01, 0x00, 0x00, 64, PROTO_TCP, 0x00, 0x00,
+    ]);
+    frame.extend_from_slice(&src_ip.octets());
+    frame.extend_from_slice(&dst_ip.octets());
+    frame.extend_from_slice(&[0x04, 0x57, 0x01, 0xbb]); // slack (1111, 443)
+    let mut flow_src_addr = [0u8; 16];
+    flow_src_addr[..4].copy_from_slice(&src_ip.octets());
+    let mut flow_dst_addr = [0u8; 16];
+    flow_dst_addr[..4].copy_from_slice(&dst_ip.octets());
+    let meta = UserspaceDpMeta {
+        magic: USERSPACE_META_MAGIC,
+        version: USERSPACE_META_VERSION,
+        length: std::mem::size_of::<UserspaceDpMeta>() as u16,
+        l3_offset: 14,
+        l4_offset: 34,
+        addr_family: libc::AF_INET as u8,
+        protocol: PROTO_TCP,
+        flow_src_addr,
+        flow_dst_addr,
+        flow_src_port: 1111,
+        flow_dst_port: 443,
+        ..UserspaceDpMeta::default()
+    };
+    assert_eq!(authoritative_forward_ports(&frame, meta, None), None);
+}
+
+
+#[test]
 fn parse_session_flow_prefers_metadata_tuple_when_frame_ports_mismatch() {
     let src_ip = "2001:559:8585:ef00::102".parse::<Ipv6Addr>().unwrap();
     let dst_ip = "2001:559:8585:80::200".parse::<Ipv6Addr>().unwrap();

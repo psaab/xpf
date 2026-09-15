@@ -147,19 +147,95 @@ fn control_icmp_v4_installs_no_synthesized_tx_flow_key() {
     );
 }
 
+#[test]
+fn slack_tcp_v4_installs_no_synthesized_tx_flow_key_9894() {
+    // #9894 (GPT-3, immediate path): short total_len=20 + 4 slack bytes
+    // spelling (33333, 443), with a complete shim-style stamped tuple at a
+    // realistic l4_offset=34. Conntrack yields None (fast-path gate); the TX
+    // meta-fallback must mirror that verdict — not resurrect the phantom
+    // tuple into flow_key / expected_ports / CoS output-filter evaluation.
+    // The wan_drop_443 egress filter DISCARDS TCP dst 443, so any
+    // phantom-port evaluation drops the request (req None). Reverting the
+    // forward_request arm synthesizes Some((33333, 443)) -> the filter drops
+    // -> expect RED; reverting only the authoritative_forward_ports gate
+    // leaves expected_ports Some -> assert RED.
+    let mut frame = eth_ipv4_frag_frame(0x0000, &[0x82, 0x35, 0x01, 0xbb]);
+    frame[16] = 0x00;
+    frame[17] = 20; // total_len=20: the 4 port bytes are slack, not datagram
+    assert_eq!(&frame[34..38], &[0x82, 0x35, 0x01, 0xbb]);
+    let forwarding = wan_drop_443_forwarding();
+    let ingress_ident = frag_test_ingress_ident();
+    let decision = frag_test_decision();
+    let mut meta = frag_test_meta(14);
+    meta.l4_offset = 34; // realistic shim stamp: L4 points at the slack bytes
+    meta.pkt_len = frame.len() as u16;
+    // Conntrack side first: the production parse must refuse (chain link —
+    // the TX arm mirrors this verdict rather than re-deciding it).
+    assert_eq!(
+        parse_session_flow_from_bytes(&frame, meta),
+        None,
+        "precondition: the slack tuple must be flowless on the parse side"
+    );
+    let (event_handle, _event_rx) = crate::event_stream::test_worker_handle(
+        8,
+        crate::event_stream::DataplaneEventRateLimitConfig {
+            events_per_second: 0,
+            burst: 0,
+        },
+    );
+
+    let req = build_live_forward_request_from_frame(
+        &WorkerBindingLookup::default(),
+        2,
+        &ingress_ident,
+        XdpDesc {
+            addr: 0,
+            len: frame.len() as u32,
+            options: 0,
+        },
+        &frame,
+        meta,
+        &decision,
+        &forwarding,
+        None, // primary flow is None (conntrack-side #9894 gate, pinned above)
+        None,
+        false,
+        123,
+        Some(&event_handle),
+        None,
+        None,
+        None,
+        // #5606: non-NAT64 test flow — no reverse info.
+        None,
+    )
+    .expect("slack TCP must still forward (phantom 443 must not match the output filter)");
+
+    assert_eq!(
+        req.flow_key, None,
+        "#9894: a slack-ports packet must not synthesize a metadata-derived TX flow key"
+    );
+    assert_eq!(
+        req.expected_ports, None,
+        "#9894: a slack-ports packet must not carry phantom expected ports"
+    );
+}
+
 
 #[test]
 fn flowless_non_fragmented_tcp_still_hits_port_matching_output_filter() {
     // Same meta (dst port 443) but a FIRST/atomic fragment (offset 0) — a
     // real L4 header, so the gate must NOT fire and the meta fallback's
     // ports must drive the discard. Proves we did not over-gate every None
-    // flow to the default queue.
+    // flow to the default queue. (#9894: l4_offset is set to the realistic
+    // 34 — total 28 covers [34,38), so the declared-end gate genuinely
+    // passes here rather than passing vacuously on l4=0.)
     let payload = [0x82, 0x35, 0x01, 0xbb, 0, 0, 0, 0];
     let frame = eth_ipv4_frag_frame(0x0000, &payload); // atomic (offset 0)
     let forwarding = wan_drop_443_forwarding();
     let ingress_ident = frag_test_ingress_ident();
     let decision = frag_test_decision();
-    let meta = frag_test_meta(14);
+    let mut meta = frag_test_meta(14);
+    meta.l4_offset = 34;
     let (event_handle, _event_rx) = crate::event_stream::test_worker_handle(
         8,
         crate::event_stream::DataplaneEventRateLimitConfig {
@@ -906,6 +982,169 @@ fn flowless_non_first_fragment_steered_by_pbr_routing_instance_3291() {
          not dropped — it reaches the slow path exactly once (no reinjector \
          installed in this harness, so the attempt lands in slow_path_drops)"
     );
+}
+
+// ---- #9894 (GPT-2): flowless L3 contexts must not spuriously match
+// port-constrained input-filter/PBR terms on their 0-substituted ports ----
+
+/// Slack-TCP transit frame: atomic (offset 0, NOT a non-first fragment),
+/// total_len=20 with 4 trailing slack bytes spelling (1111, 443).
+/// Addrs match the frag-transit fixtures (10.0.61.100 -> 172.16.80.200) so
+/// the base table forwards it.
+fn slack_tcp_transit_frame_9894() -> Vec<u8> {
+    let mut frame = eth_ipv4_frag_frame(0x0000, &[0x04, 0x57, 0x01, 0xbb]);
+    frame[16] = 0x00;
+    frame[17] = 20; // total_len=20: the L4 bytes are slack, not datagram
+    frame
+}
+
+/// Matching shim-style meta: complete stamped tuple (1111, 443) at a
+/// realistic l4_offset=34 (pointing at the slack bytes), lan ingress.
+fn slack_tcp_transit_meta_9894() -> UserspaceDpMeta {
+    let mut meta = frag_v4_transit_meta();
+    meta.l4_offset = 34;
+    meta.flow_src_port = 1111;
+    meta.flow_dst_port = 443;
+    meta.pkt_len = 24; // L3 backing length, mirroring the fixture convention
+    meta
+}
+
+/// Well-formed TCP transit frame with the given ports (20-byte header, SYN,
+/// total covers L4) for the real-flow controls.
+fn wellformed_tcp_transit_frame_9894(src_port: u16, dst_port: u16) -> Vec<u8> {
+    let mut tcp = [0u8; 20];
+    tcp[0..2].copy_from_slice(&src_port.to_be_bytes());
+    tcp[2..4].copy_from_slice(&dst_port.to_be_bytes());
+    tcp[12] = 0x50; // dataofs 5
+    tcp[13] = 0x02; // SYN
+    eth_ipv4_frag_frame(0x0000, &tcp)
+}
+
+fn wellformed_tcp_transit_meta_9894(src_port: u16, dst_port: u16) -> UserspaceDpMeta {
+    let mut meta = frag_v4_transit_meta();
+    meta.l4_offset = 34;
+    meta.flow_src_port = src_port;
+    meta.flow_dst_port = dst_port;
+    meta.pkt_len = 40;
+    meta
+}
+
+fn permit_all_with_input_filter_9894(filter_name: &str, terms: Vec<FirewallTermSnapshot>) -> ForwardingState {
+    let mut snapshot = policy_deny_snapshot();
+    snapshot.default_policy = "permit".to_string();
+    snapshot.policies.clear();
+    snapshot.interfaces[0].filter_input_v4 = filter_name.to_string();
+    snapshot.filters = vec![FirewallFilterSnapshot {
+        name: filter_name.to_string(),
+        family: "inet".to_string(),
+        terms,
+    }];
+    snapshot.neighbors = vec![frag_transit_wan_neighbor()];
+    build_forwarding_state(&snapshot)
+}
+
+fn run_one_packet_9894(
+    forwarding: &ForwardingState,
+    frame: &[u8],
+    meta: UserspaceDpMeta,
+) -> (u64, u64) {
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, 24, 0);
+    binding.interface = Arc::<str>::from("reth1.0");
+    let mut sessions = SessionTable::new();
+    let ha_state = BTreeMap::new();
+    let (_batch, dbg) = txn_run_descriptor(
+        &mut binding,
+        &mut sessions,
+        forwarding,
+        &ha_state,
+        frame,
+        meta,
+    );
+    (dbg.forward, dbg.no_route)
+}
+
+#[test]
+fn flowless_slack_tcp_not_steered_by_port_except_pbr_9894() {
+    // GPT-2 loop pin: input filter `from { tcp; destination-port-except 22; }
+    // then routing-instance scrub`. The flowless slack-TCP packet evaluates
+    // PBR on an L3-only context (ports 0/0): without suppression the except
+    // term invert-matches the synthetic zero (0 != 22) and steers to the
+    // empty scrub table (NoRoute). Post-fix it base-forwards. Reverting the
+    // pbr.rs marking flips forward 1 -> 0 / no_route 0 -> 1 -> RED.
+    let forwarding = permit_all_with_input_filter_9894(
+        "except-to-scrub",
+        vec![FirewallTermSnapshot {
+            name: "except".to_string(),
+            protocols: vec!["tcp".to_string()],
+            destination_ports_except: vec!["22".to_string()],
+            routing_instance: "scrub".to_string(),
+            action: "accept".to_string(),
+            ..Default::default()
+        }],
+    );
+    // The flowless shape: base-forwarded, NOT steered.
+    let (forward, no_route) = run_one_packet_9894(
+        &forwarding,
+        &slack_tcp_transit_frame_9894(),
+        slack_tcp_transit_meta_9894(),
+    );
+    assert_eq!(
+        forward, 1,
+        "flowless slack TCP must base-forward, not steer"
+    );
+    assert_eq!(no_route, 0);
+    // Control 1: a real flow with dst 80 DOES steer (80 != 22 matches) —
+    // proves the term steers and suppression is flowless-only.
+    let (forward, no_route) = run_one_packet_9894(
+        &forwarding,
+        &wellformed_tcp_transit_frame_9894(40000, 80),
+        wellformed_tcp_transit_meta_9894(40000, 80),
+    );
+    assert_eq!(forward, 0, "real dst-80 flow must steer to scrub");
+    assert_eq!(no_route, 1);
+    // Control 2: except semantics intact — dst 22 is excluded, forwards.
+    let (forward, no_route) = run_one_packet_9894(
+        &forwarding,
+        &wellformed_tcp_transit_frame_9894(40000, 22),
+        wellformed_tcp_transit_meta_9894(40000, 22),
+    );
+    assert_eq!(forward, 1, "dst-22 flow is excluded from the steer");
+    assert_eq!(no_route, 0);
+}
+
+#[test]
+fn flowless_slack_tcp_not_dropped_by_port_except_input_filter_9894() {
+    // GPT-2 loop pin, input-filter half: `from { tcp;
+    // destination-port-except 22; } then discard`. The flowless slack-TCP
+    // packet must FORWARD (suppressed); without suppression the except term
+    // invert-matches (0,0) and discards. Reverting the poll_descriptor
+    // marking flips forward 1 -> 0 -> RED.
+    let forwarding = permit_all_with_input_filter_9894(
+        "drop-except",
+        vec![FirewallTermSnapshot {
+            name: "except".to_string(),
+            protocols: vec!["tcp".to_string()],
+            destination_ports_except: vec!["22".to_string()],
+            action: "discard".to_string(),
+            ..Default::default()
+        }],
+    );
+    let (forward, _) = run_one_packet_9894(
+        &forwarding,
+        &slack_tcp_transit_frame_9894(),
+        slack_tcp_transit_meta_9894(),
+    );
+    assert_eq!(
+        forward, 1,
+        "flowless slack TCP must not match the except term"
+    );
+    // Control: a real dst-80 flow DOES match and is discarded.
+    let (forward, _) = run_one_packet_9894(
+        &forwarding,
+        &wellformed_tcp_transit_frame_9894(40000, 80),
+        wellformed_tcp_transit_meta_9894(40000, 80),
+    );
+    assert_eq!(forward, 0, "real dst-80 flow must hit the discard term");
 }
 
 // ---- #4024: flowless / non-first-fragment MISSING-NEIGHBOR ENFORCEMENT ----

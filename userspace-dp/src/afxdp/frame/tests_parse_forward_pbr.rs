@@ -226,6 +226,42 @@ fn parse_session_flow_prefers_tuple_stamped_in_metadata() {
 
 
 #[test]
+fn icmp_session_identifier_matches_restored_wire_identifier_9894() {
+    // GPT-1: session/wire consistency for ICMP disagreement. Parse keys the
+    // session on the STAMPED identifier (0x4321, #3290 arbitration retained);
+    // the forward path restores `meta.flow_src_port` into the emitted
+    // identifier (`restore_l4_tuple_from_meta`, called by both the in-place
+    // and copy builders). Both must agree — keying on the frame ident while
+    // emitting the stamped one splits the session from the wire and from the
+    // shim's USERSPACE_SESSIONS probe (keyed on the stamped tuple).
+    let frame = build_icmp_echo_frame_v4(
+        Ipv4Addr::new(172, 16, 80, 200),
+        Ipv4Addr::new(172, 16, 80, 8),
+        64,
+    );
+    assert_eq!(
+        u16::from_be_bytes([frame[38], frame[39]]),
+        0x1234,
+        "fixture precondition: on-wire identifier is 0x1234"
+    );
+    let mut meta = valid_meta();
+    meta.l3_offset = 14;
+    meta.l4_offset = 34;
+    meta.flow_src_port = 0x4321;
+    let flow = parse_session_flow_from_bytes(&frame, meta).expect("flow");
+    assert_eq!(flow.forward_key.src_port, 0x4321);
+    // Restore into a scratch copy of the L3+ bytes and read back the ident.
+    let mut packet = frame[14..].to_vec();
+    let restored = restore_l4_tuple_from_meta(&mut packet, meta, 20, false);
+    assert_eq!(restored, Some(true), "the ident restore must fire");
+    let emitted = u16::from_be_bytes([packet[24], packet[25]]);
+    assert_eq!(
+        emitted, flow.forward_key.src_port,
+        "emitted identifier must equal the session identifier"
+    );
+}
+
+#[test]
 fn parse_session_flow_prefers_frame_tuple_when_metadata_disagrees() {
     let frame = vlan_icmp_reply_frame();
     let mut area = MmapArea::new(4096).expect("mmap");

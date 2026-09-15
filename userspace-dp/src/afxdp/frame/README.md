@@ -220,7 +220,17 @@ inspect or rewrite a packet sitting in a UMEM frame.
   L4 identically. The meta fast path is gated too: the XDP shim stamps
   `meta.l4_offset` but does NOT enforce the IP-declared bound, so the meta
   readers re-derive `declared_end` from the L3 header in the frame before
-  reading ports (mirroring #2357's meta-fast-path chokepoint concern).
+  reading ports (mirroring #2357's meta-fast-path chokepoint concern). The
+  SessionFlow fast path in `parse_session_flow_from_bytes` is gated the same
+  way (#9894): both metadata-return sites (the TCP/UDP fast path and the
+  agreement arm) require `[l4, l4+4)` inside `declared_end` via
+  `meta_l4_ports_in_declared_end`. The agreement arm keeps its IPs-only
+  #3290 arbitration (the session key must equal the shim's probe key and
+  the restored identifier), so the arm's gate is defense-in-depth; the
+  length fix for TCP/UDP lives in the fast-path gate. The same bound also guards
+  the TX/deferred metadata fallbacks, and the flowless input-filter/PBR
+  evaluations mark `ports_unknown` explicitly, so rejected ports drive no
+  policy, CoS, or PBR verdict.
 - **The forwarded L4 payload is trimmed to the IP-DECLARED length (#5149)**:
   `trim_l3_payload` (`frame/mod.rs`, called by the `build/mod.rs` orchestrator
   and the in-place `rewrite_plan_eth_from_parts`) determines both the copied

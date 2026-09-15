@@ -3866,9 +3866,17 @@ pub(super) fn poll_binding_process_descriptor(
                     // runs earlier in this loop for every packet, hit or miss.
                     let hit_l3_ctx = crate::afxdp::frame::l3_enforcement_flow_from_meta(meta);
                     if let Some(l3_flow) = hit_l3_ctx.as_ref() {
+                        // #9894 (GPT-2): this evaluation runs on an L3-only
+                        // enforcement context whose ports are 0-substituted by
+                        // construction (#3291) — mark them unknown so
+                        // port-constrained terms fail closed instead of
+                        // matching the synthetic value.
+                        let mut extra =
+                            crate::afxdp::frame::term_match_extra_from_frame(packet_frame, meta);
+                        extra.ports_unknown = true;
                         let input_eval = evaluate_non_pbr_input_filter(
                             worker_ctx.forwarding,
-                            crate::afxdp::frame::term_match_extra_from_frame(packet_frame, meta),
+                            extra,
                             Some(l3_flow),
                             meta,
                             ingress_zone_override,
@@ -4002,9 +4010,17 @@ pub(super) fn poll_binding_process_descriptor(
                     //     tcp-flags / icmp-type / flex predicates fail closed. No
                     //     filter configured => Accept (no behavior change).
                     if let Some(l3_flow) = l3_ctx.as_ref() {
+                        // #9894 (GPT-2): this evaluation runs on an L3-only
+                        // enforcement context whose ports are 0-substituted by
+                        // construction (#3291) — mark them unknown so
+                        // port-constrained terms fail closed instead of
+                        // matching the synthetic value.
+                        let mut extra =
+                            crate::afxdp::frame::term_match_extra_from_frame(packet_frame, meta);
+                        extra.ports_unknown = true;
                         let input_eval = evaluate_non_pbr_input_filter(
                             worker_ctx.forwarding,
-                            crate::afxdp::frame::term_match_extra_from_frame(packet_frame, meta),
+                            extra,
                             Some(l3_flow),
                             meta,
                             ingress_zone_override,

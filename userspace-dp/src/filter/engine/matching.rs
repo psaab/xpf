@@ -328,13 +328,16 @@ fn nets_match_v6(constrained: bool, except: bool, nets: &[PrefixV6], ip: Ipv6Add
 /// false`, while a cached flow carries `false, false`. That pair is the only
 /// thing that separates "ports are synthetic" from "ports came from the key".
 ///
-/// SCOPE, stated because it is narrower than "gate ports on l4_present": this
-/// fixes the fragment case. Other cold-path `!l4_present` shapes — a truncated
-/// ICMP or TCP header (`inspect.rs`: `l4_present` also drops for
-/// `l4_truncated_icmp` / `l4_truncated_tcp`) — are NOT covered, because they
-/// carry `is_fragment: false` and are indistinguishable here from a cached flow.
-/// Whether their ports are equally synthetic is a separate question that needs
-/// its own measurement; it is not silently included.
+/// SCOPE: the `is_fragment && !l4_present` half fixes the fragment case. The
+/// other L4-absent shapes evaluated on this path — flowless packets whose
+/// ports are 0-substituted by construction (an L3-only enforcement context)
+/// — carry `is_fragment: false` and are indistinguishable from a cached flow
+/// BY THESE TWO FLAGS, so this half does not cover them. They ARE covered by
+/// the `ports_unknown` half instead (#9894): the flowless input-filter/PBR
+/// sites set it explicitly, which only they can do soundly — the cold
+/// builder never sees the flow, so it cannot know whether the evaluated
+/// ports are real (a cached tuple survives a DMA-mutated slice). That is the
+/// measurement this paragraph used to defer.
 fn port_terms_match(
     term: &FilterTerm,
     extra: TermMatchExtra<'_>,

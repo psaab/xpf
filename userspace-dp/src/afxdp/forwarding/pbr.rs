@@ -75,7 +75,18 @@ pub(in crate::afxdp) fn ingress_route_table_override(
     // `from { tcp-flags ...; } then routing-instance ...` term matches exactly
     // the authored packets. Built AFTER the precheck so a non-route-lookup-
     // affecting filter pays no extra-build.
-    let extra = crate::afxdp::frame::term_match_extra_from_frame(frame, meta);
+    let mut extra = crate::afxdp::frame::term_match_extra_from_frame(frame, meta);
+    // #9894 (GPT-2): a (0,0)-ported flow is an L3-only enforcement context
+    // (ports 0-substituted by construction, #3291) — its "ports" are not on
+    // the wire, so port-constrained terms must fail closed instead of
+    // matching the synthetic value (a `destination-port 0` positive term or
+    // a negated/except term would otherwise spuriously steer). A real
+    // TCP/UDP flow never has both ports zero; the builder cannot know (it
+    // never sees the flow), so the bit is set HERE, where the evaluated
+    // tuple is known.
+    if flow.forward_key.src_port == 0 && flow.forward_key.dst_port == 0 {
+        extra.ports_unknown = true;
+    }
     let routing_result = match crate::filter::evaluate_filter_ref_routing_instance_event_counted(
         filter,
         flow.src_ip,

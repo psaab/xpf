@@ -741,6 +741,17 @@ pub(in crate::afxdp) fn term_match_extra_from_frame(
     } else {
         (meta.tcp_flags, 0, 0)
     };
+    // #9894 (GPT-2): `ports_unknown` stays `false` HERE, by design. This
+    // builder sees (frame, meta) but never the flow, so it cannot know
+    // whether the evaluated ports are real: a session-miss/flow-cache flow
+    // carries real key ports even when this frame's L4 is unreadable (a
+    // DMA-mutated slice on a cache hit must NOT veto the cached tuple it
+    // was parsed from). The sites that KNOW their ports are synthetic —
+    // the flowless input-filter/PBR evaluations running on an L3-only
+    // enforcement context (ports 0-substituted by construction, #3291) —
+    // set the bit themselves (`poll_descriptor/mod.rs`, `forwarding/pbr.rs`).
+    // Deriving it here would over-gate real flows and under-gate L3 contexts
+    // evaluated against frames with present-but-unevaluated L4 bytes.
     crate::filter::TermMatchExtra {
         tcp_flags,
         is_fragment,
@@ -776,7 +787,8 @@ pub(in crate::afxdp) fn term_match_extra_from_frame(
         } else {
             declared_end.and_then(|end| frame.get(l4..end))
         },
-        // #7992: these callers DO have real ports.
+        // #7992: these callers DO have real ports (flowless sites that do not
+        // set the bit themselves — see above).
         ports_unknown: false,
     }
 }
@@ -1084,6 +1096,35 @@ pub(in crate::afxdp) fn meta_icmp_identifier_bearing(frame: &[u8], meta: Userspa
     }
 }
 
+/// #9894: report whether the 4 TCP/UDP port bytes the shim stamped into
+/// metadata lie inside the IP-declared datagram — the #2361 fail-closed
+/// invariant, applied to the metadata fast path.
+///
+/// The shim bounds its L4 read by the frame end INCLUDING trailing slack
+/// (`parse_l4` in `userspace-xdp/src/lib.rs` reads against `data_end` and
+/// never consults IPv4 `total_len`), so a short declared length with trailing
+/// slack arrives with a metadata tuple spelled from out-of-datagram bytes.
+/// `metadata_tuple_complete` carries no length dimension, so both
+/// metadata-return sites in `parse_session_flow_from_bytes` (the TCP/UDP fast
+/// path and the agreement arm) must consult this gate: `[l4, l4+4)` MUST lie
+/// within `declared_l3_end`, the same bound `parse_flow_ports` enforces for
+/// the frame-led read. Returns `false` (fail closed -> fall through to the
+/// frame parse, which re-derives and re-bounds everything from bytes) on any
+/// malformed/truncated input. One comparison, no re-parse, so the hot-path
+/// cost argument for the fast path is preserved.
+#[inline]
+pub(in crate::afxdp) fn meta_l4_ports_in_declared_end(frame: &[u8], meta: UserspaceDpMeta) -> bool {
+    let l3 = meta.l3_offset as usize;
+    let l4 = meta.l4_offset as usize;
+    let Some(declared_end) = declared_l3_end(frame, l3, meta.addr_family) else {
+        return false;
+    };
+    match l4.checked_add(4) {
+        Some(end) if end <= declared_end => true,
+        _ => false,
+    }
+}
+
 pub(in crate::afxdp) fn parse_flow_ports(
     frame: &[u8],
     l4: usize,
@@ -1160,7 +1201,17 @@ pub(in crate::afxdp) fn authoritative_forward_ports(
     }) {
         return Some(flow_ports);
     }
-    let meta_ports = if meta.flow_src_port != 0 && meta.flow_dst_port != 0 {
+    // #9894 (GPT-3): the metadata last resort is trusted ONLY when the 4
+    // port bytes lie inside the IP-declared datagram. Without this, a short
+    // total_len + slack-ports frame (flowless after the fast-path gate, and
+    // frame-portless after the #2361 bound) would still emit the phantom
+    // stamped tuple as `expected_ports` — and `enforce_expected_ports`
+    // would write it into the frame. `None` means "no authoritative ports":
+    // enforcement is skipped and TX hashing falls back port-less.
+    let meta_ports = if meta.flow_src_port != 0
+        && meta.flow_dst_port != 0
+        && meta_l4_ports_in_declared_end(frame, meta)
+    {
         Some((meta.flow_src_port, meta.flow_dst_port))
     } else {
         None
@@ -1360,9 +1411,14 @@ pub(in crate::afxdp) fn parse_session_flow_from_bytes(
     // Fast path: for TCP/UDP with complete metadata tuple, use meta directly
     // without parsing the frame. This avoids extra L3/L4 parsing for the
     // common established-flow case.
+    // #9894: a complete tuple is NOT sufficient — the shim reads L4 against
+    // the frame end INCLUDING slack, so the 4 port bytes must ALSO lie inside
+    // the IP-declared datagram (#2361). On failure fall through to the frame
+    // parse (authoritative, declared-bounded), not to None.
     if matches!(meta.protocol, PROTO_TCP | PROTO_UDP)
         && let Some(meta_flow) = meta_flow.as_ref()
         && metadata_tuple_complete(meta, meta_flow)
+        && meta_l4_ports_in_declared_end(frame, meta)
     {
         return Some(meta_flow.clone());
     }
@@ -1373,8 +1429,21 @@ pub(in crate::afxdp) fn parse_session_flow_from_bytes(
         parse_session_flow_from_frame(frame, meta)
     };
 
+    // #9894: same declared-end gate as the fast path (defense-in-depth here:
+    // TCP/UDP with a complete tuple already returned above, so this arm is
+    // reachable only for ICMP, whose meta tuple passed the #3290 gate above).
+    // Agreement stays IPs-ONLY (#3290 arbitration retained): the session key
+    // must equal the key the shim probes (`live_userspace_session_action`
+    // keys USERSPACE_SESSIONS on the STAMPED tuple) and the identifier the
+    // forward path restores (`restore_l4_tuple_from_meta` writes
+    // `meta.flow_src_port`). Preferring the frame identifier on disagreement
+    // would key the session on an ident the shim never probes while emitting
+    // another — a session/wire split. TCP/UDP never reach this arm with a
+    // complete tuple (the fast path returns first), so the length fix for
+    // them lives entirely in the fast-path gate above.
     if let Some(meta_flow) = meta_flow
         && metadata_tuple_complete(meta, &meta_flow)
+        && meta_l4_ports_in_declared_end(frame, meta)
     {
         if let Some(ref frame_flow) = frame_flow {
             if frame_flow.src_ip == meta_flow.src_ip && frame_flow.dst_ip == meta_flow.dst_ip {
