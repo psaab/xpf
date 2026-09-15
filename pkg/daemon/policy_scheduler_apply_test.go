@@ -70,6 +70,16 @@ type runtimeOnlyApplyTestDP struct {
 	applyCalls  int
 	applyErr    error
 	applyResult *dataplane.ApplyResult
+	// #9841: last-apply publication tracking. Production backends publish
+	// every successful apply under an advancing generation; the fake used
+	// to return a fixed empty result from LastApplyResult, which cannot
+	// model the generation guard the commit-warning wrapper probes.
+	gen       uint64
+	lastApply *dataplane.ApplyResult
+	// holdLastApply models a successful apply that publishes nothing (a
+	// skipped/NoDataplane-shaped outcome): ApplyConfig succeeds while the
+	// probe keeps serving the previous publication.
+	holdLastApply bool
 }
 
 func (d *runtimeOnlyApplyTestDP) Start(context.Context) error { return nil }
@@ -86,13 +96,24 @@ func (d *runtimeOnlyApplyTestDP) ApplyConfig(ctx context.Context, _ *config.Conf
 	if d.applyErr != nil {
 		return nil, d.applyErr
 	}
+	var out *dataplane.ApplyResult
 	if d.applyResult != nil {
-		return d.applyResult.Clone(), nil
+		out = d.applyResult.Clone()
+	} else {
+		out = &dataplane.ApplyResult{ZoneIDs: map[string]uint16{}}
 	}
-	return &dataplane.ApplyResult{ZoneIDs: map[string]uint16{}}, nil
+	if !d.holdLastApply {
+		d.gen++
+		out.Generation = d.gen
+		d.lastApply = out.Clone()
+	}
+	return out.Clone(), nil
 }
 
 func (d *runtimeOnlyApplyTestDP) LastApplyResult() *dataplane.ApplyResult {
+	if d.lastApply != nil {
+		return d.lastApply.Clone()
+	}
 	return &dataplane.ApplyResult{ZoneIDs: map[string]uint16{}}
 }
 
