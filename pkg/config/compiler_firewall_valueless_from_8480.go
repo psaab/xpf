@@ -136,57 +136,61 @@ func firewallTermValuelessFromLeaves(termNode *Node) []string {
 // tell them apart. That is the same reason #6526 and #7525 run pre-walk.
 func validateFirewallFilterValuelessFromStrict(children []*Node, lenient bool) ([]string, error) {
 	var warnings []string
+	// checkFilters gates every term under the given filter nodes, attributing
+	// rejects to family ("" for the family-less spelling). Filter and term
+	// names resolve through namedInstances, the same dual-shape reader
+	// compileFirewall uses, so `filter { F { ... } }` and `term { T { ... } }`
+	// block names are gated too.
+	checkFilters := func(family string, filterNodes []*Node) error {
+		for _, filterInst := range namedInstances(filterNodes) {
+			for _, termInst := range namedInstances(filterInst.node.FindChildren("term")) {
+				bad := firewallTermValuelessFromLeaves(termInst.node)
+				if len(bad) == 0 {
+					continue
+				}
+				where := fmt.Sprintf("firewall filter %q term %q", filterInst.name, termInst.name)
+				if family != "" {
+					where = fmt.Sprintf("firewall family %s filter %q term %q",
+						family, filterInst.name, termInst.name)
+				}
+				msg := fmt.Sprintf("%s: `from %s` carries no value, and an "+
+					"empty match set is read as match-ANY — the term matches "+
+					"EVERY packet on that criterion rather than none, so a "+
+					"`then discard` widens and a `then accept` opens. Give "+
+					"the leaf a value; for an intentional wildcard, omit the "+
+					"leaf entirely (#8480)",
+					where, strings.Join(bad, ", "))
+				if !lenient {
+					return fmt.Errorf("%s", msg)
+				}
+				warnings = append(warnings, msg)
+			}
+		}
+		return nil
+	}
 	for _, fw := range children {
 		if fw.Name() != "firewall" {
 			continue
 		}
+		// `firewall filter F` (no family) and `firewall family ...` are both
+		// real spellings; the filter level is found by NAME rather than by
+		// depth, in document order (which offending term strict reports first
+		// when several offend is therefore unchanged from #8480).
 		for _, fam := range fw.Children {
-			famName := fam.Name()
-			// `firewall filter F` (no family) and `firewall family inet
-			// filter F` are both real spellings; the first has `filter` where
-			// the second has a family, so the filter level is found by NAME
-			// rather than by depth.
-			filters := fam.Children
-			if famName == "filter" {
-				filters = []*Node{fam}
-				famName = ""
-			}
-			for _, filt := range filters {
-				if filt.Name() != "filter" {
-					continue
+			switch fam.Name() {
+			case "family":
+				// BOTH shapes compileFirewall compiles, via the shared
+				// firewallAFNodes walker (#9876): hierarchical
+				// `family inet { filter ... }` and nested
+				// `family { inet { filter ... } }`.
+				for _, afArm := range firewallAFNodes(fam) {
+					if err := checkFilters(afArm.af, afArm.node.FindChildren("filter")); err != nil {
+						return nil, err
+					}
 				}
-				filtName := ""
-				if len(filt.Keys) > 1 {
-					filtName = filt.Keys[1]
-				}
-				for _, term := range filt.Children {
-					if term.Name() != "term" {
-						continue
-					}
-					termName := ""
-					if len(term.Keys) > 1 {
-						termName = term.Keys[1]
-					}
-					bad := firewallTermValuelessFromLeaves(term)
-					if len(bad) == 0 {
-						continue
-					}
-					where := fmt.Sprintf("firewall filter %q term %q", filtName, termName)
-					if famName != "" {
-						where = fmt.Sprintf("firewall family %s filter %q term %q",
-							famName, filtName, termName)
-					}
-					msg := fmt.Sprintf("%s: `from %s` carries no value, and an "+
-						"empty match set is read as match-ANY — the term matches "+
-						"EVERY packet on that criterion rather than none, so a "+
-						"`then discard` widens and a `then accept` opens. Give "+
-						"the leaf a value; for an intentional wildcard, omit the "+
-						"leaf entirely (#8480)",
-						where, strings.Join(bad, ", "))
-					if !lenient {
-						return nil, fmt.Errorf("%s", msg)
-					}
-					warnings = append(warnings, msg)
+			case "filter":
+				if err := checkFilters("", []*Node{fam}); err != nil {
+					return nil, err
 				}
 			}
 		}
