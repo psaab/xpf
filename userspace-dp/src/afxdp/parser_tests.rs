@@ -792,3 +792,200 @@ fn parse_ndp_na_2368_rejects_payload_len_overrunning_frame() {
         "NA whose declared payload_len overruns the frame must be rejected"
     );
 }
+
+// ---------------------------------------------------------------------------
+// #9893 — RFC 6980 fragment refusal + IPv6-source validation for NA learns.
+//
+// Fail-on-revert: each refusal cell MUST fail (the poisoned learn succeeds)
+// if its gate is removed, and the still-learns cells MUST fail if the gates
+// over-reject. Counter cells hold `ndp_na_refusal_counter_test_lock` across
+// the before/after window so a parallel sibling cannot move the process-wide
+// count inside it.
+// ---------------------------------------------------------------------------
+
+use std::sync::atomic::Ordering;
+
+/// Build an untagged NA behind a single IPv6 Fragment header (44).
+/// `frag_off_field` is the raw bytes-2..4 value (offset<<3 | res | M).
+fn build_eth_ndp_na_behind_fragment(frag_off_field: u16) -> Vec<u8> {
+    let mut f = Vec::new();
+    f.extend_from_slice(&[0x00, 0x11, 0x22, 0x33, 0x44, 0x55]);
+    f.extend_from_slice(&[0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]);
+    f.extend_from_slice(&[0x86, 0xdd]);
+    let l3_start = 14usize;
+    // payload = frag hdr (8) + NA (24) + TLLA (8) = 40.
+    let payload_len = 40u16;
+    f.extend_from_slice(&[0x60, 0x00, 0x00, 0x00]);
+    f.extend_from_slice(&payload_len.to_be_bytes());
+    f.push(44); // next = Fragment
+    f.push(255); // hop limit
+    f.extend_from_slice(&[
+        0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0xab, 0xcd, 0xef, 0x01, 0x00, 0x00, 0x00, 0x01,
+    ]);
+    f.extend_from_slice(&[0xff; 16]);
+    // Fragment header: next=58, reserved=0, off/res/M, ident.
+    f.push(NEXT_HEADER_ICMPV6);
+    f.push(0);
+    f.extend_from_slice(&frag_off_field.to_be_bytes());
+    f.extend_from_slice(&[0x12, 0x34, 0x56, 0x78]);
+    let l4_start = l3_start + 40 + 8;
+    f.push(ICMPV6_TYPE_NA);
+    f.push(0);
+    f.extend_from_slice(&[0x00, 0x00]);
+    f.extend_from_slice(&[0; 4]);
+    f.extend_from_slice(&[
+        0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0xab, 0xcd, 0xef, 0x01, 0x00, 0x00, 0x00, 0x42,
+    ]);
+    f.push(NDP_OPT_TARGET_LL);
+    f.push(1);
+    f.extend_from_slice(&[0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]);
+    let packet_end = l3_start + 40 + payload_len as usize;
+    stamp_icmpv6_checksum(&mut f, l3_start, l4_start, packet_end);
+    f
+}
+
+#[test]
+fn parse_ndp_na_9893_non_first_fragment_refused_and_counted() {
+    // offset=1 (field 0x0008), M=0 — a non-first fragment per RFC 8200 §4.5,
+    // the exact shape the shim diverts to AF_XDP as a flowless session miss.
+    let _g = ndp_na_refusal_counter_test_lock();
+    let f = build_eth_ndp_na_behind_fragment(0x0008);
+    let frag_before = NDP_NA_FRAG_REFUSED.load(Ordering::Relaxed);
+    let src_before = NDP_NA_BAD_SOURCE_REFUSED.load(Ordering::Relaxed);
+    assert!(
+        parse_ndp_neighbor_advert(&f).is_none(),
+        "NA behind a non-first fragment must be refused (RFC 6980 §5 MUST)"
+    );
+    assert_eq!(
+        NDP_NA_FRAG_REFUSED.load(Ordering::Relaxed),
+        frag_before + 1,
+        "the fragment refusal must be counted exactly once"
+    );
+    assert_eq!(
+        NDP_NA_BAD_SOURCE_REFUSED.load(Ordering::Relaxed),
+        src_before,
+        "a fragment refusal must not pollute the bad-source series"
+    );
+}
+
+#[test]
+fn parse_ndp_na_9893_first_and_atomic_fragments_refused() {
+    // RFC 6980 refuses ANY Fragment header — first (offset 0, M=1) and atomic
+    // (offset 0, M=0) alike, not just non-first. Both carry a fully valid
+    // NA otherwise (hop-limit 255, code 0, good checksum).
+    let _g = ndp_na_refusal_counter_test_lock();
+    for (name, field) in [("first", 0x0001u16), ("atomic", 0x0000u16)] {
+        let f = build_eth_ndp_na_behind_fragment(field);
+        assert!(
+            parse_ndp_neighbor_advert(&f).is_none(),
+            "NA behind a {name} fragment must be refused (RFC 6980 covers all)"
+        );
+    }
+}
+
+#[test]
+fn parse_ndp_na_9893_bad_source_refused_and_counted() {
+    let _g = ndp_na_refusal_counter_test_lock();
+    for (name, src) in [
+        ("unspecified", [0u8; 16]),
+        ("loopback", [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]),
+        (
+            "multicast",
+            [0xff, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
+        ),
+    ] {
+        let mut f = build_eth_ndp_na_full(false, true, 255, 0, false);
+        f[14 + 8..14 + 24].copy_from_slice(&src);
+        let packet_end = 14 + 40 + 32;
+        stamp_icmpv6_checksum(&mut f, 14, 14 + 40, packet_end);
+        let src_before = NDP_NA_BAD_SOURCE_REFUSED.load(Ordering::Relaxed);
+        let frag_before = NDP_NA_FRAG_REFUSED.load(Ordering::Relaxed);
+        assert!(
+            parse_ndp_neighbor_advert(&f).is_none(),
+            "NA with {name} IPv6 source must be refused (on-link unicast required)"
+        );
+        assert_eq!(
+            NDP_NA_BAD_SOURCE_REFUSED.load(Ordering::Relaxed),
+            src_before + 1,
+            "the {name}-source refusal must be counted exactly once"
+        );
+        assert_eq!(
+            NDP_NA_FRAG_REFUSED.load(Ordering::Relaxed),
+            frag_before,
+            "a source refusal must not pollute the fragment series"
+        );
+    }
+}
+
+#[test]
+fn parse_ndp_na_9893_valid_unfragmented_na_still_learns() {
+    // Anti-over-reject: a well-formed unfragmented NA from a valid source
+    // must still parse — the two new gates must not break legit resolution.
+    // (The #2368 goldens pin the same frame; this cell owns the #9893 pair.)
+    let _g = ndp_na_refusal_counter_test_lock();
+    let f = build_eth_ndp_na_full(false, true, 255, 0, false);
+    let frag_before = NDP_NA_FRAG_REFUSED.load(Ordering::Relaxed);
+    let src_before = NDP_NA_BAD_SOURCE_REFUSED.load(Ordering::Relaxed);
+    let r = parse_ndp_neighbor_advert(&f).expect("valid NA must still parse");
+    assert_eq!(r.target_mac, Some([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]));
+    assert_eq!(
+        NDP_NA_FRAG_REFUSED.load(Ordering::Relaxed),
+        frag_before,
+        "a valid learn must not bump the fragment series"
+    );
+    assert_eq!(
+        NDP_NA_BAD_SOURCE_REFUSED.load(Ordering::Relaxed),
+        src_before,
+        "a valid learn must not bump the bad-source series"
+    );
+}
+
+#[test]
+fn parse_ndp_na_9893_hbh_without_fragment_still_learns() {
+    // The fragment gate must not over-reject NON-fragment extension headers:
+    // an NA behind hop-by-hop (the #2150 shape) still learns and does not
+    // count as a fragment refusal.
+    let _g = ndp_na_refusal_counter_test_lock();
+    let f = build_ndp_na_with_ext_chain(&[0]);
+    let frag_before = NDP_NA_FRAG_REFUSED.load(Ordering::Relaxed);
+    let r = parse_ndp_neighbor_advert(&f).expect("NA behind HBH must still parse after #9893");
+    assert_eq!(r.target_mac, Some([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]));
+    assert_eq!(
+        NDP_NA_FRAG_REFUSED.load(Ordering::Relaxed),
+        frag_before,
+        "an HBH (non-fragment) chain must not bump the fragment series"
+    );
+}
+
+#[test]
+fn parse_ndp_na_9893_non_na_fragment_does_not_pollute_counter() {
+    // The per-packet probe sees ALL fragmented transit. A fragmented UDP
+    // frame (terminal proto 17, not NA) must return None WITHOUT bumping
+    // the NDP fragment series — the gate fires only for NA-shaped frames.
+    let _g = ndp_na_refusal_counter_test_lock();
+    let mut f = Vec::new();
+    f.extend_from_slice(&[0x00, 0x11, 0x22, 0x33, 0x44, 0x55]);
+    f.extend_from_slice(&[0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]);
+    f.extend_from_slice(&[0x86, 0xdd]);
+    f.extend_from_slice(&[0x60, 0x00, 0x00, 0x00]);
+    f.extend_from_slice(&16u16.to_be_bytes()); // frag(8) + udp(8)
+    f.push(44); // next = Fragment
+    f.push(64); // hop limit (transit, not NDP)
+    f.extend_from_slice(&[0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
+    f.extend_from_slice(&[0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2]);
+    f.push(17); // frag next = UDP
+    f.push(0);
+    f.extend_from_slice(&0x0008u16.to_be_bytes()); // non-first
+    f.extend_from_slice(&[0x12, 0x34, 0x56, 0x78]);
+    f.extend_from_slice(&[0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88]);
+    let frag_before = NDP_NA_FRAG_REFUSED.load(Ordering::Relaxed);
+    assert!(
+        parse_ndp_neighbor_advert(&f).is_none(),
+        "a fragmented UDP frame is not an NA"
+    );
+    assert_eq!(
+        NDP_NA_FRAG_REFUSED.load(Ordering::Relaxed),
+        frag_before,
+        "non-NA fragmented transit must not pollute the NDP series"
+    );
+}

@@ -944,3 +944,265 @@ fn empty_bulk_calls_do_not_bump_the_generation_9071() {
          optimisation #7156 added removed"
     );
 }
+
+// ---------------------------------------------------------------------------
+// #9893 — atomic Override=0 CAS for NDP-NA learns.
+//
+// The sequential cells below drive `insert_ndp_na_if_override_allows`
+// directly and pin the map contract (refusal vs insert, side-effect
+// discipline); the barrier-synchronized concurrency cells after them pin
+// atomicity itself (a sequential test cannot observe the TOCTOU window).
+// The stage cell in poll_stages_tests pins sequential end-to-end
+// preservation through the CAS path (pre-seed, classify, assert kept).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn ndp_cas_override0_refuses_live_differing_mac_9893() {
+    let map = ShardedNeighborMap::new();
+    let k = key_v4(7, 42);
+    map.insert(k, entry(0xAB));
+    let gen_before = map.insert_generation();
+    let drops_before = map.learn_cap_drops();
+    let epoch_before = map.mac_change_epoch_for(&k);
+    assert_eq!(
+        map.insert_ndp_na_if_override_allows(k, entry(0xCD), false),
+        None,
+        "Override=0 must refuse a live differing LLA"
+    );
+    assert_eq!(
+        map.get(&k),
+        Some(entry(0xAB)),
+        "the refusal must leave the live entry untouched"
+    );
+    assert_eq!(
+        map.insert_generation(),
+        gen_before,
+        "a CAS refusal must not bump the insert generation"
+    );
+    assert_eq!(
+        map.learn_cap_drops(),
+        drops_before,
+        "a CAS refusal must not count as a cap drop"
+    );
+    assert_eq!(
+        map.mac_change_epoch_for(&k),
+        epoch_before,
+        "a CAS refusal must not bump the shard MAC-change epoch (no cached \
+         flow holds a stale MAC for an entry that did not change)"
+    );
+}
+
+#[test]
+fn ndp_cas_override1_overwrites_live_differing_mac_9893() {
+    let map = ShardedNeighborMap::new();
+    let k = key_v4(7, 42);
+    map.insert(k, entry(0xAB));
+    assert_eq!(
+        map.insert_ndp_na_if_override_allows(k, entry(0xCD), true),
+        Some(true),
+        "Override=1 (legit §7.2.6 LLA change) must overwrite"
+    );
+    assert_eq!(map.get(&k), Some(entry(0xCD)));
+}
+
+#[test]
+fn ndp_cas_override0_first_insert_and_same_mac_refresh_9893() {
+    let map = ShardedNeighborMap::new();
+    let k = key_v4(7, 42);
+    // First-time Override=0 learn creates.
+    assert_eq!(
+        map.insert_ndp_na_if_override_allows(k, entry(0xAB), false),
+        Some(true),
+        "first-time Override=0 learn must create the entry"
+    );
+    assert_eq!(map.get(&k), Some(entry(0xAB)));
+    // Same-MAC Override=0 refresh is a no-change Some(false), not a refusal.
+    assert_eq!(
+        map.insert_ndp_na_if_override_allows(k, entry(0xAB), false),
+        Some(false),
+        "same-MAC Override=0 refresh must succeed as no-change"
+    );
+}
+
+#[test]
+fn ndp_cas_override1_same_mac_is_no_change_9893() {
+    let map = ShardedNeighborMap::new();
+    let k = key_v4(7, 42);
+    map.insert(k, entry(0xAB));
+    assert_eq!(
+        map.insert_ndp_na_if_override_allows(k, entry(0xAB), true),
+        Some(false),
+        "same-MAC Override=1 must be no-change, matching insert_if_changed"
+    );
+}
+
+#[test]
+fn insert_if_changed_still_overwrites_unconditionally_9893() {
+    // The ARP/RX leg delegates with override=true: a differing MAC always
+    // overwrites, preserving pre-#9893 byte-identical behavior for non-NDP arms.
+    let map = ShardedNeighborMap::new();
+    let k = key_v4(7, 42);
+    map.insert(k, entry(0xAB));
+    assert!(
+        map.insert_if_changed(k, entry(0xCD)),
+        "insert_if_changed must still overwrite a differing MAC"
+    );
+    assert_eq!(map.get(&k), Some(entry(0xCD)));
+}
+
+// ---------------------------------------------------------------------------
+// #9893 concurrency: the TOCTOU window the CAS closes, pinned three ways.
+//
+// A sequential test can never observe the window — `get` then
+// `insert_if_changed` back-to-back behaves exactly like the CAS when no
+// peer mutates between them. These cells force (hazard pin) or hammer
+// (invariant pins) the interleave a sequential test cannot produce.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn ndp_separated_check_then_write_loses_update_9893() {
+    use std::sync::Barrier;
+    // HAZARD PIN (not the contract): replicates the pre-#9893 call-site
+    // pattern — `get` (check) then `insert_if_changed` (write) across two
+    // locks, using the same public primitives — with barriers forcing a
+    // peer insert into the window. The racer checked empty, the peer
+    // landed, the racer's deferred write clobbered it. This asserts the
+    // buggy outcome to document what the window costs; production must
+    // never do this — the CAS invariant cells below assert the peer always
+    // wins under the same shape.
+    let map = ShardedNeighborMap::new();
+    let k = key_v4(7, 99);
+    let cas_mac = entry(0xCA);
+    let peer_mac = entry(0xBE);
+    // Barriers live outside the scope so they outlive the spawned threads.
+    let checked = Barrier::new(2);
+    let peer_in = Barrier::new(2);
+    std::thread::scope(|s| {
+        s.spawn(|| {
+            // Old-pattern check leg (Override=0): proceed unless a live
+            // differing MAC already exists. Observes empty here.
+            let blocked = map.get(&k).is_some_and(|e| e.mac != cas_mac.mac);
+            checked.wait(); // open the window: peer inserts now
+            peer_in.wait(); // peer done; racer writes (too late)
+            if !blocked {
+                map.insert_if_changed(k, cas_mac);
+            }
+        });
+        checked.wait();
+        map.insert(k, peer_mac); // legitimate peer learn lands in the window
+        peer_in.wait();
+    });
+    assert_eq!(
+        map.get(&k),
+        Some(cas_mac),
+        "hazard pin: separated check-then-write clobbers the peer insert \
+         that landed in the window (the pre-#9893 lost update)"
+    );
+}
+
+#[test]
+fn ndp_cas_concurrent_peer_insert_never_lost_9893() {
+    use std::sync::Barrier;
+    // CAS INVARIANT under concurrency: an Override=0 CAS racing an
+    // unconditional peer insert on an empty key can never clobber the peer.
+    // Either order is correct — CAS-first means the peer overwrites it,
+    // peer-first means the CAS observes the peer under its write lock and
+    // refuses — so the final entry is ALWAYS the peer MAC. This holds
+    // deterministically for the single-lock CAS every iteration; a separated
+    // check-then-write fails it whenever the peer lands in the window (the
+    // hazard cell above forces that interleave deterministically; this
+    // hammer makes it overwhelmingly likely within the iteration budget).
+    const ITERS: i32 = 300;
+    let map = ShardedNeighborMap::new();
+    let cas_mac = entry(0xCA);
+    let peer_mac = entry(0xBE);
+    let start = Barrier::new(2);
+    let settled = Barrier::new(2);
+    std::thread::scope(|s| {
+        s.spawn(|| {
+            for i in 0..ITERS {
+                let k = key_v4(2000 + i, 42);
+                start.wait();
+                let _ = map.insert_ndp_na_if_override_allows(k, cas_mac, false);
+                settled.wait();
+            }
+        });
+        for i in 0..ITERS {
+            let k = key_v4(2000 + i, 42);
+            start.wait();
+            map.insert(k, peer_mac);
+            settled.wait();
+        }
+    });
+    for i in 0..ITERS {
+        let k = key_v4(2000 + i, 42);
+        assert_eq!(
+            map.get(&k),
+            Some(peer_mac),
+            "iter {i}: a concurrent Override=0 CAS must never clobber the \
+             peer insert (atomic CAS always loses correctly to unconditional)"
+        );
+    }
+}
+
+#[test]
+fn ndp_cas_empty_race_exactly_one_winner_9893() {
+    use std::sync::{Barrier, Mutex};
+    // CAS INVARIANT for the creation race: N Override=0 racers with distinct
+    // MACs on an empty key — exactly one observes empty and inserts
+    // (`Some(true)`); every other observes the winner under its write lock
+    // and refuses (`None`, never `Some(false)` — no racer ever sees its own
+    // MAC present). Deterministic for the single-lock CAS; a separated
+    // check-then-write lets every racer that checked before the first write
+    // insert, yielding multiple winners.
+    const THREADS: usize = 8;
+    const ITERS: i32 = 50;
+    let map = ShardedNeighborMap::new();
+    let results = Mutex::new(vec![vec![None; THREADS]; ITERS as usize]);
+    let start = Barrier::new(THREADS);
+    let settled = Barrier::new(THREADS);
+    std::thread::scope(|s| {
+        for tid in 0..THREADS {
+            let map = &map;
+            let results = &results;
+            let start = &start;
+            let settled = &settled;
+            s.spawn(move || {
+                let my_mac = entry(0xA0 + tid as u8);
+                for i in 0..ITERS {
+                    let k = key_v4(3000 + i, 77);
+                    start.wait();
+                    let r = map.insert_ndp_na_if_override_allows(k, my_mac, false);
+                    results.lock().unwrap()[i as usize][tid] = r;
+                    settled.wait();
+                }
+            });
+        }
+    });
+    let results = results.lock().unwrap();
+    for i in 0..ITERS {
+        let k = key_v4(3000 + i, 77);
+        let winners: Vec<usize> = (0..THREADS)
+            .filter(|tid| results[i as usize][*tid] == Some(true))
+            .collect();
+        assert_eq!(
+            winners.len(),
+            1,
+            "iter {i}: exactly one racer must win the empty-key race, got {}",
+            winners.len()
+        );
+        for tid in 0..THREADS {
+            if tid != winners[0] {
+                assert_eq!(
+                    results[i as usize][tid], None,
+                    "iter {i} tid {tid}: losers must refuse (None), never no-change"
+                );
+            }
+        }
+        assert_eq!(
+            map.get(&k),
+            Some(entry(0xA0 + winners[0] as u8)),
+            "iter {i}: the final entry must be the single winner's MAC"
+        );
+    }
+}

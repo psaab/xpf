@@ -4613,3 +4613,134 @@ fn flowless_legal_last_fragment_tiny_payload_is_forwarded_9426() {
          (#9426)"
     );
 }
+
+// ---------------------------------------------------------------------------
+// #9893 — stage-level pins: a fragmented or bad-source NA must transit the
+// firewall (Continue) but learn NOTHING. The parser cells prove the None +
+// counter; these prove the None propagates to no neighbor write end-to-end.
+// ---------------------------------------------------------------------------
+
+/// Build an untagged NA behind a single IPv6 Fragment header for the stage
+/// path. Target/macs mirror `ndp_na_frame` (fe80::abcd:ef01:0:42, learnable
+/// non-own) so the ONLY reason to refuse is the fragment.
+fn ndp_na_fragmented_frame_9893() -> (Vec<u8>, IpAddr, [u8; 6]) {
+    const NEXT_HEADER_ICMPV6: u8 = 58;
+    const ICMPV6_TYPE_NA: u8 = 136;
+    const NDP_OPT_TARGET_LL: u8 = 2;
+    let target_bytes = [
+        0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0xab, 0xcd, 0xef, 0x01, 0x00, 0x00, 0x00, 0x42,
+    ];
+    let target_mac = [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff];
+    let mut f = Vec::new();
+    f.extend_from_slice(&[0x00, 0x11, 0x22, 0x33, 0x44, 0x55]);
+    f.extend_from_slice(&target_mac);
+    f.extend_from_slice(&[0x86, 0xdd]);
+    let l3_start = 14usize;
+    let payload_len = 40u16; // frag(8) + NA(24) + TLLA(8)
+    f.extend_from_slice(&[0x60, 0x00, 0x00, 0x00]);
+    f.extend_from_slice(&payload_len.to_be_bytes());
+    f.push(44);
+    f.push(255);
+    f.extend_from_slice(&[
+        0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0xab, 0xcd, 0xef, 0x01, 0x00, 0x00, 0x00, 0x01,
+    ]);
+    f.extend_from_slice(&[0xff; 16]);
+    f.push(NEXT_HEADER_ICMPV6);
+    f.push(0);
+    f.extend_from_slice(&0x0008u16.to_be_bytes()); // non-first
+    f.extend_from_slice(&[0x12, 0x34, 0x56, 0x78]);
+    let l4_start = l3_start + 40 + 8;
+    f.push(ICMPV6_TYPE_NA);
+    f.push(0);
+    f.extend_from_slice(&[0x00, 0x00]);
+    f.extend_from_slice(&[0; 4]);
+    f.extend_from_slice(&target_bytes);
+    f.push(NDP_OPT_TARGET_LL);
+    f.push(1);
+    f.extend_from_slice(&target_mac);
+    let packet_end = l3_start + 40 + payload_len as usize;
+    super::super::test_fixtures::stamp_icmpv6_checksum(&mut f, l3_start, l4_start, packet_end);
+    (f, IpAddr::V6(Ipv6Addr::from(target_bytes)), target_mac)
+}
+
+#[test]
+fn ndp_na_fragmented_frame_transits_but_learns_nothing_9893() {
+    // Produces a `NDP_NA_FRAG_REFUSED` bump via classify — hold the parser
+    // counter lock so a parallel parser sampling test cannot observe this
+    // bump inside its before/after window (same isolation scheme).
+    let _counter_guard = parser::ndp_na_refusal_counter_test_lock();
+    let forwarding: &'static ForwardingState = Box::leak(Box::new(build_forwarding_state(
+        &super::super::test_fixtures::nat_snapshot(),
+    )));
+    let (ctx, neighbors) = neighbor_learn_ctx(forwarding);
+    let meta = link_layer_meta(24, 0);
+    let (frame, target, _) = ndp_na_fragmented_frame_9893();
+    assert!(!forwarding.owns_configured_ip(target));
+    assert!(neighbors.get(&(24, target)).is_none());
+    let outcome = classify(&frame, meta, ctx);
+    assert!(
+        matches!(outcome, StageOutcome::Continue(())),
+        "a fragmented NA must still transit (refusal is learn-only)"
+    );
+    assert!(
+        neighbors.get(&(24, target)).is_none(),
+        "a fragmented NA must NOT install a neighbor entry (RFC 6980)"
+    );
+}
+
+#[test]
+fn ndp_na_bad_source_transits_but_learns_nothing_9893() {
+    // Produces a `NDP_NA_BAD_SOURCE_REFUSED` bump via classify — same lock
+    // discipline as the fragmented sibling above.
+    let _counter_guard = parser::ndp_na_refusal_counter_test_lock();
+    let forwarding: &'static ForwardingState = Box::leak(Box::new(build_forwarding_state(
+        &super::super::test_fixtures::nat_snapshot(),
+    )));
+    let (ctx, neighbors) = neighbor_learn_ctx(forwarding);
+    let meta = link_layer_meta(24, 0);
+    // Unspecified source; loopback/multicast are pinned at the parser.
+    let (mut frame, target, _) = ndp_na_frame();
+    frame[14 + 8..14 + 24].copy_from_slice(&[0u8; 16]);
+    super::super::test_fixtures::stamp_icmpv6_checksum(&mut frame, 14, 54, 86);
+    assert!(!forwarding.owns_configured_ip(target));
+    let outcome = classify(&frame, meta, ctx);
+    assert!(
+        matches!(outcome, StageOutcome::Continue(())),
+        "a bad-source NA must still transit (refusal is learn-only)"
+    );
+    assert!(
+        neighbors.get(&(24, target)).is_none(),
+        "an NA with unspecified source must NOT install a neighbor entry"
+    );
+}
+
+#[test]
+fn ndp_na_override0_cas_preserves_live_entry_end_to_end_9893() {
+    // #9893 SEQUENTIAL end-to-end preservation pin through the CAS path:
+    // pre-seed a live differing LLA, drive an Override=0 NA, assert preserved
+    // AND still transiting. (The #4475 cell owns the pre-CAS behavior; this
+    // owns the post-CAS call site. Atomicity itself — no interleave between
+    // check and write — is pinned by the barrier concurrency cells in
+    // sharded_neighbor_tests, which a sequential test cannot observe.)
+    let forwarding: &'static ForwardingState = Box::leak(Box::new(build_forwarding_state(
+        &super::super::test_fixtures::nat_snapshot(),
+    )));
+    let (ctx, neighbors) = neighbor_learn_ctx(forwarding);
+    let meta = link_layer_meta(24, 0);
+    let (frame, target, na_mac) = ndp_na_frame();
+    assert!(
+        !parser::parse_ndp_neighbor_advert(&frame)
+            .expect("NA parses")
+            .override_flag
+    );
+    let live_mac = [0x02, 0x00, 0x00, 0x00, 0x0b, 0x0b];
+    assert_ne!(live_mac, na_mac);
+    neighbors.insert((24, target), NeighborEntry { mac: live_mac });
+    let outcome = classify(&frame, meta, ctx);
+    assert!(matches!(outcome, StageOutcome::Continue(())));
+    assert_eq!(
+        neighbors.get(&(24, target)).map(|e| e.mac),
+        Some(live_mac),
+        "the atomic CAS must preserve a live differing LLA on Override=0"
+    );
+}
