@@ -224,7 +224,24 @@ const (
 	// new helper under an old daemon reads an empty set and refuses
 	// kernel-path transport for every WireGuard endpoint, the steered ones
 	// included. Exact equality refuses both.
-	ProtocolVersion = 17
+	//
+	// v18 (issue 9637): NO wire change — the dual-outlet behavioral contract.
+	// A pre-narrowing helper satisfies the handshake but funnels every
+	// reinject (adjudicated AND delegated) through `xpf-usp0`, which a v18
+	// kernel exempts from destination judgment; the daemon installs that
+	// exemption on publication freshness, which cannot see outlet semantics.
+	// BUMPED on the merits under the v9 rule even with the digest unmoved:
+	// an old helper under a new daemon would admit unadjudicated traffic,
+	// and that IS the defect the fence closes.
+	// Refusal fails closed in both directions. A helper wire refusal is
+	// ordinary-class (mixed_version_matrix_6691_test.go): the #5679 deferred
+	// path fails the commit while the helper stays armed on its
+	// previous-good snapshot, and the tail still runs with the D1 gate
+	// clear so it renders accept-less. A daemon-side version-gate refusal
+	// is an abort sentinel, so the tail is skipped, the commit fails, and
+	// the helper is disarmed (fail-closed, deliberate) while the retained
+	// kernel table stands. Exact equality refuses both pairings.
+ProtocolVersion = 18
 
 	// MinProtocolMultiZoneScopedPolicy is the FIRST snapshot protocol version
 	// that can represent a multi-zone scoped global policy — the plural

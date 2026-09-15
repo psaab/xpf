@@ -174,6 +174,12 @@ func (d *Daemon) applyDataplaneAndHACore(ctx context.Context, cfg *config.Config
 		var err error
 		if applyResult, err = rt.ApplyConfig(context.Background(), cfg); err != nil {
 			d.recordCompileFailure(err)
+			// #9637-D1: the dataplane still runs the previous snapshot while
+			// the tail below renders from the NEW config — clear the
+			// reinject-accept gate so the render omits the accept (abort-class
+			// included: the tail never runs there, but the staleness persists
+			// until a later apply succeeds).
+			d.hostInboundDataplaneFresh.Store(false)
 			if compileErrorMustAbortApply(err) {
 				return commitOverlay, networkdErr, nil, err
 			}
@@ -193,6 +199,15 @@ func (d *Daemon) applyDataplaneAndHACore(ctx context.Context, cfg *config.Config
 			applyErr = err
 		} else {
 			d.recordCompileSuccess()
+			// #9637-D1/F1-B: the reinject accept may be installed ONLY if the
+			// helper actually runs this generation's snapshot. A success that
+			// DEFERRED its publish (XSK-startup: helper still serves the
+			// previous snapshot until the status loop lands it) leaves the
+			// gate clear — the tail renders accept-less, exactly like a
+			// #5679 failure, until a later apply publishes (nil result from
+			// a backend without the bit keeps the previous behavior).
+			fresh := applyResult == nil || !applyResult.SnapshotPublishDeferred
+			d.hostInboundDataplaneFresh.Store(fresh)
 		}
 	}
 	policySchedulerActiveState = d.reconcilePolicySchedulerLockedAt(cfg, policySchedulerApplyTime)
@@ -1185,11 +1200,20 @@ func (d *Daemon) reapplyAfterDeferredMAC(cfg *config.Config) {
 	if rt == nil {
 		return
 	}
-	if _, err := rt.ApplyConfig(context.Background(), cfg); err != nil {
+	res, err := rt.ApplyConfig(context.Background(), cfg)
+	if err != nil {
 		slog.Warn("failed to re-apply after deferred MAC; recording worker-arm debt for retry",
 			"err", err)
 		d.recordDataplaneWorkerArmDebt()
+		return
 	}
+	// #9637-D1: the re-apply ran this commit's snapshot (same cfg, so
+	// views/addresses are identical to the first apply's) — the reinject
+	// accept may be installed. Without this a first-apply failure (flag
+	// clear) followed by re-apply success would leave nft rendering
+	// accept-less against an N+1 dataplane. F1-B: a deferred re-apply
+	// publish leaves the gate clear, like the primary site.
+	d.hostInboundDataplaneFresh.Store(res == nil || !res.SnapshotPublishDeferred)
 }
 
 // recordDataplaneWorkerArmDebt records the #5134 deferred-MAC worker-arm debt on

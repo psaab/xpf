@@ -183,6 +183,10 @@ type HostInboundSpec struct {
 	UnzonedV6     []string
 	Programs      []JunosHostProgram
 	WGListenPorts []uint16
+	// DataplaneFresh is the #9637-D1 pre-landing fail-closed gate: true iff
+	// the userspace dataplane runs this generation's snapshot. When false the
+	// reinject accept is omitted (byte-identical to the pre-#9637 ruleset).
+	DataplaneFresh bool
 }
 
 // FenceSpec is the cold-boot fail-closed fence render request (#5644): the

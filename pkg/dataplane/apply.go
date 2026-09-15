@@ -141,6 +141,13 @@ type ApplyResult struct {
 
 	Capabilities Capabilities
 	Generation   uint64
+
+	// SnapshotPublishDeferred mirrors CompileResult.SnapshotPublishDeferred:
+	// true when the successful apply did NOT publish its snapshot (XSK-startup
+	// deferral; the status loop lands it later). Freshness gates must treat
+	// deferred success as not-running-this-snapshot. Plain-bool copy in
+	// Clone is exact (no maps to deepen).
+	SnapshotPublishDeferred bool
 }
 
 type FilterCounterSpan struct {
@@ -242,6 +249,7 @@ func ApplyResultFromCompileResult(result *CompileResult) *ApplyResult {
 		AppNames:                maps.Clone(result.AppNames),
 		PolicyScheduleRuleSlots: slices.Clone(result.PolicyScheduleRuleSlots),
 		UnconvergedMTUs:         result.sortedMTUUnconverged(),
+		SnapshotPublishDeferred: result.SnapshotPublishDeferred,
 	}
 	for key, id := range result.NATCounterIDs {
 		out.NATCounterIDs[key] = uint32(id)

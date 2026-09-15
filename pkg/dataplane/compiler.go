@@ -78,6 +78,14 @@ type CompileResult struct {
 	// even on a collision (#5099). 0 = no counter.
 	NATCounterIDs map[string]uint32
 
+	// SnapshotPublishDeferred reports that this successful compile did NOT
+	// publish its snapshot to the helper: the pendingXSKStartup branch
+	// advanced the retained authority and returns nil while the status loop
+	// lands the publish later. Consumers gating on "the dataplane runs this
+	// snapshot" (e.g. the #9637 reinject-accept freshness gate) must treat
+	// deferred success as NOT running it. Set ONLY on that branch; the
+	// normal tail publishes synchronously before returning success.
+	SnapshotPublishDeferred bool
 	// pendingXDP/TC collect interface indexes for deferred program attachment.
 	// Attachment happens AFTER all compilation phases so that link.Update()
 	// atomically switches to programs with fully-populated maps.

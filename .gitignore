@@ -58,3 +58,11 @@ test/xsk-repro/libbpf-xsk-shared-test
 # The two pre-existing "artifacts" mentions in this file are COMMENTS, not
 # patterns, which is why a grep for the word looked like coverage.
 /artifacts/
+
+# Review-process working files (plan drafts, raw reviewer outputs,
+# follow-up bodies). These live under docs/pr/<n>/ during a review drive
+# and must NEVER ship: they are superseded by the reviewed artifacts and
+# by docs/log/<n>.md, and `git add -A` sweeps any untracked-but-not-ignored
+# path into a commit. Shippable per-PR docs (none currently) would be
+# allow-listed explicitly rather than read off this directory.
+docs/pr/
