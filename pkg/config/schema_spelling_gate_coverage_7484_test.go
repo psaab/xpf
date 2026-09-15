@@ -360,7 +360,28 @@ func gateLeafChangesWarnings(g gateLeaf, pre string, epath []string) bool {
 // one that did. Identical in shape to the #8939 registration recorded in
 // notAValueList, which cost 14 sites (1098/706 -> 1076/692) for the same reason.
 // #9899: the implicit-inet schema adds 21 measured comparison sites.
-const gateCoverageFloor = 762
+// #9882 raises it 741 -> 742. Declaring `firewall policer <*> then
+// forwarding-class` (args:1) made the new leaf COMPARABLE, and it lands in
+// the compared bucket — like its `... then loss-priority` sibling, which
+// sits in this bucket too. This IS new compiler behaviour (the #9416 shape,
+// not the #9323 visibility-only one): before #9882 the spelling was
+// undeclared AND unacted-on, compiling to the "discard" default, and the
+// new compiler arm writes "forwarding-class <class>" into ThenAction so the
+// value reaches the output the differential compares. The three-color twin
+// lands in `err`, not here — see the gateBlindErr paragraph.
+// #9882 then raises it 742 -> 743: the packed-shape reader (leaf-form walk
+// + run hoist) made `firewall policer <*> then discard` record ThenActions
+// on the packed spelling too, so the value-less flag left `flag` for
+// COMPARED — the same observability ladder #8445 recorded (unreachable ->
+// flag when ThenActions was introduced). Its three-color twin stays in
+// `err` (the harness parent never compiles).
+// #9882 finally lowers it 743 -> 742: that same `then discard` flag is not
+// a value list (args:0 — a second token is malformed input), so it is
+// registered in notAValueList with its verified landing and leaves the
+// enumeration, the #8939 filter-then shape (whose 14-site coverage cost is
+// tracked at #8971; this is one more site of that class, same tracker).
+// Net 741 -> 742 for the change: the new forwarding-class leaf compares.
+const gateCoverageFloor = 763
 
 var gateBlindCeiling = map[gateBlindClass]int{
 	// #7492 moved leaves out of `unreachable` in two rounds. The parent
@@ -629,8 +650,23 @@ var gateBlindCeiling = map[gateBlindClass]int{
 	// #9899: measured +16 from the implicit-inet copy: interface-specific,
 	// is-fragment, and the 14 reject-message flags (ignored per #2399).
 	// Their explicit-family twins are the same value-less class.
-	gateBlindFlag: 240,
-	gateBlindErr:  43,
+	// #9882 tightens it 224 -> 223: `firewall policer <*> then discard` left
+	// this class for COMPARED once the packed-shape reader recorded it (see
+	// the gateCoverageFloor paragraph). Tightening, not slack: the leaf is
+	// named in the members registry diff, not just counted.
+	gateBlindFlag: 239, // 209 -> 201, issue 8939; coverage cost tracked at issue 8971
+	// #9882 raises it 43 -> 44. The three-color twin,
+	// `firewall three-color-policer <*> then forwarding-class`, lands here
+	// because the differential's three-color parent stanza does not compile
+	// — with AND without the leaf (classifyGateBlindLeaf tries both), so the
+	// verdict is about the harness fixture, not the leaf. BOTH its siblings
+	// (`... then discard`, `... then loss-priority`) already sit in this
+	// class, so the new leaf inherits the family's harness blindness rather
+	// than introducing a new one. Making the parent compile in the harness
+	// would move the whole then-family out together and is a harness change
+	// beyond this leaf's verdict, deliberately not folded in here. No leaf
+	// changed class (the members registry names only arrivals).
+	gateBlindErr: 44,
 	// TIGHTENED 1 -> 0. The single member of this class was
 	// `policy-options policy-statement <*> then`, and it is gone because the
 	// schema now declares that node's children instead of calling it a bare

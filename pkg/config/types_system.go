@@ -1335,7 +1335,7 @@ type PolicerConfig struct {
 	Name                    string
 	BandwidthLimit          uint64 // bytes per second (converted from Junos bits/sec)
 	BurstSizeLimit          uint64 // burst bucket size in bytes
-	ThenAction              string // "discard" or "loss-priority high/medium-high/medium-low/low"
+	ThenAction              string // "discard", "loss-priority <level>", or "forwarding-class <class>"
 	LogicalInterfacePolicer bool   // shared across protocol families on the interface
 	// ThenActions records EVERY action keyword authored in the policer's
 	// `then` block, in source order (#8445).
@@ -1347,6 +1347,16 @@ type PolicerConfig struct {
 	// a cell asserting "ThenAction is what was authored" passes today.
 	// validateFirewallPolicerThenConflictStrict reads this instead.
 	ThenActions []string
+	// UnknownActions records `then` tokens that are none of the recognized
+	// policer actions (discard / loss-priority / forwarding-class) (#9882).
+	// An unknown or misspelled action would otherwise be silently dropped
+	// during compile while ThenAction keeps its "discard" default — a typo
+	// that over-drops with zero diagnostic. This is the deferred-reject
+	// channel mirroring FirewallFilterTerm.UnknownActions (#2399):
+	// validateFirewallPolicerUnknownActionsStrict hard-rejects any policer
+	// carrying an entry here at commit; the tolerant load / peer-sync path
+	// downgrades to a warning (#1960 no-brick). Populated by compileFirewall.
+	UnknownActions []string
 }
 
 // ThreeColorPolicerConfig defines a three-color policer (RFC 2697/2698).
@@ -1364,10 +1374,15 @@ type ThreeColorPolicerConfig struct {
 	CBS                  uint64 // committed burst size (bytes)
 	PIR                  uint64 // peak information rate (bytes/sec, two-rate only)
 	PBS                  uint64 // peak/excess burst size (bytes)
-	ThenAction           string // action on exceed/violate: "discard" or "loss-priority"
+	ThenAction           string // action on exceed/violate: "discard", "loss-priority <level>", or "forwarding-class <class>"
 	// ThenActions: the authored set, for the same reason as PolicerConfig's
 	// (#8445). The three-color `then` loop is the identical last-wins switch.
 	ThenActions []string
+	// UnknownActions: the unrecognized-`then`-token channel, for the same
+	// reason as PolicerConfig's (#9882). The three-color `then` loop drops
+	// unknown tokens identically silently, and ThenAction keeps its "discard"
+	// default identically. Same gate rejects both.
+	UnknownActions []string
 }
 
 // FirewallFilter defines a named firewall filter with ordered terms.

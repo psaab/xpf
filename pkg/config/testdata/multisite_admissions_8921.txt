@@ -190,7 +190,7 @@ template flow-inactive-timeout	services/flow-monitoring/version-ipfix/template,s
 template-refresh-rate seconds	services/flow-monitoring/version-ipfix/template/template-refresh-rate,services/flow-monitoring/version9/template/template-refresh-rate
 then count	firewall/family/any/filter/term/then,firewall/family/inet/filter/term/then,firewall/family/inet6/filter/term/then,firewall/filter/term/then,security/policies/from-zone/policy/then,security/policies/global/policy/then
 then dscp	firewall/family/any/filter/term/then,firewall/family/inet/filter/term/then,firewall/family/inet6/filter/term/then,firewall/filter/term/then
-then forwarding-class	firewall/family/any/filter/term/then,firewall/family/inet/filter/term/then,firewall/family/inet6/filter/term/then,firewall/filter/term/then
+then forwarding-class	firewall/family/any/filter/term/then,firewall/family/inet/filter/term/then,firewall/family/inet6/filter/term/then,firewall/filter/term/then,firewall/policer/then,firewall/three-color-policer/then
 then log	firewall/family/any/filter/term/then,firewall/family/inet/filter/term/then,firewall/family/inet6/filter/term/then,firewall/filter/term/then,security/policies/from-zone/policy/then,security/policies/global/policy/then,security/pre-id-default-policy/then
 then loss-priority	firewall/family/any/filter/term/then,firewall/family/inet/filter/term/then,firewall/family/inet6/filter/term/then,firewall/filter/term/then,firewall/policer/then,firewall/three-color-policer/then
 then policer	firewall/family/any/filter/term/then,firewall/family/inet/filter/term/then,firewall/family/inet6/filter/term/then,firewall/filter/term/then

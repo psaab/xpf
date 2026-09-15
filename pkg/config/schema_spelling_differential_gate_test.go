@@ -486,6 +486,37 @@ var notAValueList = map[string]string{
 	// construction, in every spelling, and it is not a defect.
 	"class-of-service rewrite-rules dscp <*> forwarding-class <*> loss-priority <*> code-points":       "alias of the scalar `code-point`: a rewrite entry writes ONE code point, first value wins",
 	"class-of-service rewrite-rules ieee-802.1 <*> forwarding-class <*> loss-priority <*> code-points": "alias of the scalar `code-point`: a rewrite entry writes ONE code point, first value wins",
+
+	// #9882: the policer `then discard` flag. args:0 — no value to list; a
+	// second token is malformed input, not a second value. Became comparable
+	// when the #9882 reader started recording packed/extra tokens (the #8939
+	// filter-then shape: the gate asks a question that was never askable
+	// before, and the answer is that the leaf is not a list).
+	//
+	// VERIFIED WHERE THE EXTRA TOKENS LAND (word pair zzqaaa1/zzqbbb2), on
+	// the strict path AND the lenient path the gate compares:
+	//
+	//	then { discard [ zzqaaa1 ]; }            Unknown=[zzqaaa1]         (extras past arity)
+	//	then { discard [ zzqaaa1 zzqbbb2 ]; }    Unknown=[zzqaaa1 zzqbbb2]  (extras past arity)
+	//	then { discard { zzqaaa1; }; }           Unknown=[zzqaaa1]         (hoisted to sibling)
+	//	then { discard { zzqaaa1; zzqbbb2; }; }  Unknown=[zzqaaa1 zzqbbb2]  (hoisted to siblings)
+	//	set … then discard [ zzqaaa1 ]           Unknown=[zzqaaa1]         (hoisted to sibling)
+	//	set … then discard [ zzqaaa1 zzqbbb2 ]   Unknown=[zzqaaa1]         (zzqbbb2 rides UNDER the
+	//	                                          unknown head, kept whole)
+	//
+	// Strict REJECTS every one of these naming zzqaaa1; lenient warns naming
+	// zzqaaa1. The lone divergence the gate reports (D-set-bracket drops
+	// while the rest keep) is the last row: SetPath nests the bracket run as
+	// a chain under the unknown head, and the hoist keeps an unresolvable
+	// head whole WITH its subtree (hoistAndSplitRun8939's bound) while the
+	// extras reader skips unknown heads (thenActionExtras8971's bound, which
+	// policerThenExtras9882 mirrors exactly). So zzqbbb2 lands nowhere while
+	// zzqaaa1 is flagged — but the operator-visible verdict is IDENTICAL for
+	// the one- and two-token forms (same reject, same warning, both naming
+	// zzqaaa1), and loosening either bound would diverge from the filter-term
+	// treatment both bounds were built for. The leaf is not a list; the
+	// divergence is which unheard token a loud rejection names second.
+	"firewall policer <*> then discard": "args:0 flag; extra tokens land in UnknownActions (strict rejects / lenient warns naming the first) — D-shape second token rides under the unknown head, verified above (#9882)",
 }
 
 // Value pairs must span the DOMAINS setSchema's typed leaves accept, not merely
