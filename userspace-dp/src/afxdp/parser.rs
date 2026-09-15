@@ -15,6 +15,7 @@
 //! `afxdp.rs`.
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::ethernet::{
     ETH_HDR_LEN, ETHERTYPE_ARP, ETHERTYPE_IPV6, ETHERTYPE_VLAN, ETHERTYPE_VLAN_8021AD, VLAN_TAG_LEN,
@@ -45,6 +46,29 @@ const NDP_OPT_TARGET_LL: u8 = 2;
 /// spoofed-but-routed NA cannot satisfy this without a router
 /// decrementing the field.
 const NDP_REQUIRED_HOP_LIMIT: u8 = 255;
+/// #9893: NA learns refused because the IPv6 chain carried a Fragment header
+/// (RFC 6980 §5 MUST-discards). Bumped only for NA-shaped frames (proto 58 +
+/// type 136 confirmed) so ordinary fragmented transit does not pollute the
+/// series — this probe runs per-packet. Test-visible; Prometheus export is
+/// #10097 (deferred to keep #9893 SMALL per the
+/// `SHARED_SESSION_POISON_RECOVERIES` precedent).
+pub(crate) static NDP_NA_FRAG_REFUSED: AtomicU64 = AtomicU64::new(0);
+/// #9893: NA learns refused because the IPv6 source was not a valid on-link
+/// unicast (unspecified/loopback/multicast). Same NA-shape gating and
+/// test-visible status as `NDP_NA_FRAG_REFUSED`; Prometheus export likewise
+/// #10097.
+pub(crate) static NDP_NA_BAD_SOURCE_REFUSED: AtomicU64 = AtomicU64::new(0);
+/// #9893: serializes tests sampling the two refusal counters above.
+/// The counters are process-wide statics and every `#9893` sampling test
+/// holds this across its before/after window so a parallel sibling cannot
+/// move the count inside it (mirrors
+/// `gre::gre_checksum_counter_test_lock`).
+#[cfg(test)]
+pub(super) fn ndp_na_refusal_counter_test_lock() -> std::sync::MutexGuard<'static, ()> {
+    use std::sync::Mutex;
+    static LOCK: Mutex<()> = Mutex::new(());
+    LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
 
 /// Resolve the L3-header offset and the EtherType. Handles untagged
 /// and single-tagged frames carrying either an 802.1Q (0x8100) or an
@@ -211,9 +235,11 @@ pub(super) struct NdpNeighborAdvert {
 /// arrived behind an IPv6 extension header (hop-by-hop, dest-options,
 /// routing, fragment) was missed — the exact asymmetry the
 /// forwarding/screen walkers (#2148/#2189) were written to avoid. It now
-/// reuses the shared #2148 walker `packet_rel_l4_offset_and_protocol`
-/// over the L3-relative slice to locate the real L4 offset and confirm
-/// the terminal protocol is ICMPv6 (58). The walker keeps its existing
+/// reuses the shared #2148 walker over the L3-relative slice to locate the
+/// real L4 offset and confirm the terminal protocol is ICMPv6 (58) —
+/// `walk_ipv6_ext_chain` directly since #9893 (same one-walk cost as the
+/// `packet_rel_l4_offset_and_protocol` wrapper, plus the recorded Fragment
+/// sighting the RFC 6980 gate needs). The walker keeps its existing
 /// 6-iteration bound, so behavior is byte-identical for the no-ext-header
 /// case (offset == l3 + 40, protocol == 58). The parser-agreement canary
 /// in parser_tests.rs pins this against the forwarding walker.
@@ -230,14 +256,36 @@ pub(super) fn parse_ndp_neighbor_advert(raw_frame: &[u8]) -> Option<NdpNeighborA
     // the real L4 offset + terminal protocol. The walker operates on the
     // L3-relative slice; translate its relative offset back to a
     // frame-absolute offset.
+    //
+    // #9893: walk `walk_ipv6_ext_chain` directly (same one-walk cost as the
+    // `packet_rel_l4_offset_and_protocol` wrapper) so the recorded Fragment
+    // sighting survives for the RFC 6980 gate below. The `L4`-only match
+    // preserves the wrapper's #2292 fail-closed verdict folding.
     let l3_slice = raw_frame.get(l3_start..)?;
-    let (rel_l4, protocol) =
-        super::frame::packet_rel_l4_offset_and_protocol(l3_slice, libc::AF_INET6 as u8)?;
+    let walk = super::frame::walk_ipv6_ext_chain(l3_slice, 0);
+    let (rel_l4, protocol) = match walk.outcome {
+        super::frame::ExtChainOutcome::L4(offset, proto) => (offset, proto),
+        // Truncated/OverLimit/NoNextHeader: fail closed WITHOUT counting —
+        // the shape is unconfirmable as NA (accepted residual: uncounted
+        // but refused, never learned).
+        _ => return None,
+    };
     let l4_start = l3_start.checked_add(rel_l4)?;
     if protocol != NEXT_HEADER_ICMPV6
         || raw_frame.len() < l4_start + ICMPV6_NA_HDR_LEN
         || raw_frame[l4_start] != ICMPV6_TYPE_NA
     {
+        return None;
+    }
+    // #9893 (RFC 6980 §5): Neighbor Discovery messages MUST NOT be
+    // fragmented — discard any NA whose chain sighted a Fragment header.
+    // Gated on the NA-shape confirmation above so this per-packet probe
+    // counts only genuine NA learn attempts, never ordinary fragmented
+    // transit. Counted (`NDP_NA_FRAG_REFUSED`) for the fail-closed audit.
+    // First-defect attribution: this gate precedes the source gate, so a
+    // doubly-defective NA (fragmented AND bad source) counts once, here.
+    if walk.fragment.is_some() {
+        NDP_NA_FRAG_REFUSED.fetch_add(1, Ordering::Relaxed);
         return None;
     }
 
@@ -282,6 +330,22 @@ pub(super) fn parse_ndp_neighbor_advert(raw_frame: &[u8]) -> Option<NdpNeighborA
         return None;
     }
     let target_ip = IpAddr::V6(Ipv6Addr::from(target_bytes));
+    // #9893: the IPv6 SOURCE must be a valid on-link unicast. An NA from
+    // unspecified/loopback/multicast source is never a legitimate neighbor
+    // advertisement — without this an L2-adjacent sender teaches us a TLLA
+    // under a spoofed source identity the checksum alone cannot bind (the
+    // pseudo-header only proves the sender knew the bytes, not that they
+    // name a real on-link peer). Reuses the exact `neighbor_ip_is_learnable`
+    // predicate the learn site applies to targets so the two cannot drift.
+    // `l3_start + 8..24` is in bounds — the `l3_start + 40` length gate at
+    // function top already guaranteed the full base header. Counted.
+    // Accepted residual: on-link here means hop-limit 255 (checked above)
+    // plus this unicast predicate — no FIB connected-prefix check.
+    let src_bytes: [u8; 16] = <[u8; 16]>::try_from(&raw_frame[l3_start + 8..l3_start + 24]).ok()?;
+    if !super::frame::neighbor_ip_is_learnable(IpAddr::V6(Ipv6Addr::from(src_bytes))) {
+        NDP_NA_BAD_SOURCE_REFUSED.fetch_add(1, Ordering::Relaxed);
+        return None;
+    }
 
     // RFC 4861 §4.4: the NA flags byte sits immediately after the 4-byte
     // ICMPv6 header (type/code/checksum), i.e. at `l4_start + 4`. Bit 0x20

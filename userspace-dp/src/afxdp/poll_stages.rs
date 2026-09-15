@@ -126,7 +126,7 @@ pub(super) fn stage_link_layer_classify(
     // #6261: the NDP parser probe (`parse_ndp_neighbor_advert`) and its
     // Target Link-Layer Address destructure stay inline; only the accepted
     // learn-and-program tail (unicast/own-IP gates, #2370 resolve, #4475
-    // Override=0 read-before-write, change-detecting learn, #5288-limited
+    // Override=0 CAS (#9893 atomic), change-detecting learn, #5288-limited
     // program) is outlined to a #[cold] #[inline(never)] handler. NDP
     // "continue" semantics are unchanged — an NA frame still transits the
     // firewall (we fall through to `Continue` below regardless of whether
@@ -252,18 +252,18 @@ fn outline_arp_reply_learn_and_program(
 ///   link-layer-address change sets Override=1 (§7.2.6), so an Override=0
 ///   NA is only allowed to create a first-time entry or refresh the same
 ///   LLA; a live differing LLA is left untouched (this handler returns
-///   without learning — the NA frame still transits). This reads the
-///   per-worker `dynamic_neighbors` snapshot and the `insert_if_changed`
-///   below re-locks the shard, so it is a best-effort gate; the worker is
-///   the sole data-path writer for this key, and the kernel STALE install
-///   (see `DATA_PATH_NEIGH_STATE`) is the second line of defense.
+///   without learning — the NA frame still transits). #9893: the check
+///   and the write share one shard lock inside
+///   `insert_ndp_na_if_override_allows` (atomic CAS), closing the
+///   pre-#9893 best-effort TOCTOU where a concurrent differing-MAC insert
+///   between the `get` and the `insert_if_changed` was overwritten.
 /// - #3048 / #5288: same change-detecting learn and bounded kernel
 ///   program as the ARP handler — an NA flood for a non-owned unicast
 ///   target must not storm netlink on the worker.
 ///
 /// The generation (`mac_change_epoch`) / limiter ordering is preserved
-/// exactly, and the Override read happens BEFORE the `insert_if_changed`
-/// write, as before.
+/// exactly; the Override check now happens ATOMICALLY WITH the write inside
+/// the CAS (pre-#9893 it read before the write across two locks).
 #[cold]
 #[inline(never)]
 fn outline_ndp_na_learn_and_program(
@@ -286,17 +286,18 @@ fn outline_ndp_na_learn_and_program(
             meta.ingress_vlan_id,
         )
         .unwrap_or(meta.ingress_ifindex as i32);
-        if !na.override_flag
-            && worker_ctx
-                .dynamic_neighbors
-                .get(&(ifindex, na.target_ip))
-                .is_some_and(|existing| existing.mac != mac)
-        {
+        // #9893: atomic Override=0 CAS — the differing-MAC check and the
+        // insert share one shard lock inside the map. `None` means the
+        // Override=0 gate refused a live differing LLA (return without
+        // learning; the NA frame still transits). `Some(changed)` feeds the
+        // #5288 limiter exactly as the old `insert_if_changed` bool did.
+        let Some(changed) = worker_ctx.dynamic_neighbors.insert_ndp_na_if_override_allows(
+            (ifindex, na.target_ip),
+            NeighborEntry { mac },
+            na.override_flag,
+        ) else {
             return;
-        }
-        let changed = worker_ctx
-            .dynamic_neighbors
-            .insert_if_changed((ifindex, na.target_ip), NeighborEntry { mac });
+        };
         if neigh_limiter.should_program((ifindex, na.target_ip), mac, changed, now_ns) {
             add_kernel_neighbor(ifindex, na.target_ip, mac);
         }
