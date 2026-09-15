@@ -116,7 +116,7 @@ Last updated: 2026-02-13
 |---------|-------------|-----------|-------------|
 | **Twice NAT** | Simultaneous source and destination NAT in a single rule | Medium | No — xpf has separate SNAT/DNAT but not combined twice-NAT rules |
 | **DNS ALG with NAT** | DNS payload rewriting when NAT changes embedded IP addresses | Medium | No — ALG parsed but DNS payload rewrite not implemented |
-| **NAT Rule Ordering** | Explicit rule ordering with priority numbers | Simple | No — xpf uses implicit ordering |
+| **NAT Rule Ordering** | Explicit rule ordering with priority numbers | Simple | No — xpf resolves DNAT by most-specific match (exact host/port, then wildcard port, then any-protocol, then longest prefix), not rule order; a broad `off` exemption shadowed by a narrower later translate is rejected at commit with a show-surface warning for leniently-loaded configs (#9879) |
 | **NAT Proxy ARP** | Automatic proxy ARP for NAT pool addresses | Simple | No |
 | **Overflow Pool** | Fallback pool when primary NAT pool is exhausted | Simple | No |
 | **PAT Pool with Address Shifting** | Deterministic NAT (predictable port mapping) | Medium | IPv4 (mode 1) AND IPv6/NAPT64 (mode 2) ENFORCED on userspace (#4559) — subscriber → fixed external IPv4 + port block, reversible for CGN compliance logging (`allocate_deterministic_v4`/`_v6`, `userspace-dp/src/nat/allocator.rs`; mode 2 via the NAT64 forward path on a `/32`-or-`/64` IPv6 host referenced by a `nat64` rule-set). Advisory now scoped to residual unenforceable pools; block-based pool-utilization (#2079) a follow-up. Forward/reverse operator lookup exposed via `show security nat source deterministic-nat` + the `GetNATDeterministic` gRPC RPC + `GET /api/v1/security/nat/deterministic` (#5794) |
