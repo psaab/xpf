@@ -805,7 +805,18 @@ func (st *zoneMapState) mapZoneInterface(dp DataPlane, cfg *config.Config, resul
 		// Extracted to compiler_iface_unit_mtu_9757.go -- adding it inline
 		// pushed this file past the 2000 LOC modularity floor, and the rule
 		// there is to split rather than to record an exception for a bugfix.
-		applyVLANSubInterfaceMTU9757(cfg, result, cfgName, unitNum, physName, subName)
+		// #9841: the parent's same-pass plan plus the two proved ifindexes
+		// ride along for failure grading and retry identity, and the AUTHORED
+		// zone reference rides along as the record's ConfigRef (never rebuilt
+		// from unitNum — aliased spellings like "reth0.080" must match their
+		// own show row).
+		parentWant := 0
+		if pd := st.physDesired[physName]; pd != nil {
+			parentWant = pd.mtu
+		}
+		applyVLANSubInterfaceMTU9757(cfg, result, ifaceRef, cfgName, unitNum, physName, subName, vlanMTUContext9841{
+			parentWant: parentWant, parentIfindex: physIface.Index, subIfindex: subIfindex,
+		})
 
 		slog.Info("VLAN sub-interface configured",
 			"parent", physName, "vlan_id", vlanID,
@@ -903,6 +914,21 @@ func (st *zoneMapState) mapZoneInterface(dp DataPlane, cfg *config.Config, resul
 
 		// Single cached netlink lookup for MTU, speed/duplex, and UP/DOWN.
 		nl, nlErr := result.cachedLinkByIndex(physIface.Index)
+		// #9841: one uncached retry, shared by every consumer below. A
+		// transient RTM failure must not skip the setup the configured
+		// state asks for; a persistent failure keeps nlErr set and every
+		// guard below holds exactly as before. mtuLookupErr carries BOTH
+		// errors to the MTU record, while nlErr itself keeps its original
+		// value so the arm-proof record text downstream is unchanged.
+		mtuLookupErr := nlErr
+		if nlErr != nil {
+			if retry, rerr := result.retryLinkByIndex9841(physIface.Index, physName); rerr == nil {
+				slog.Info("interface link resolved on retry", "name", physName)
+				nl, nlErr, mtuLookupErr = retry, nil, nil
+			} else {
+				mtuLookupErr = fmt.Errorf("link lookup failed after one retry (first: %v; retry: %v)", nlErr, rerr)
+			}
+		}
 
 		// #8119/#8120: the ONE MTU write for this netdev, of the value
 		// planPhysDesired already resolved from the interface-level leaf and
@@ -914,15 +940,16 @@ func (st *zoneMapState) mapZoneInterface(dp DataPlane, cfg *config.Config, resul
 		// pre-write value and the two writes alternated on consecutive applies,
 		// flapping the interface MTU between the two configured values forever.
 		// One comparison against a cache that is still fresh cannot do that.
-		if pd := st.physDesired[physName]; pd != nil && pd.mtu > 0 && nlErr == nil {
-			if nl.Attrs().MTU != pd.mtu {
-				if err := linkSetMTUSeam(nl, pd.mtu); err != nil {
-					slog.Warn("failed to set MTU",
-						"name", physName, "mtu", pd.mtu, "err", err)
-				} else {
-					slog.Info("set interface MTU", "name", physName, "mtu", pd.mtu)
-				}
-			}
+		if pd := st.physDesired[physName]; pd != nil && pd.mtu > 0 {
+			// #9841: the write attempt, recording an MTUUnconverged when a
+			// fresh observation cannot confirm convergence. The lookup
+			// outcome above (post-retry) rides along; lookup failure records
+			// instead of skipping silently.
+			attemptPhysMTU9841(result, physMTUAttempt9841{
+				physName: physName, configRef: cfgName,
+				ifindex: physIface.Index, want: pd.mtu,
+				link: nl, lookupErr: mtuLookupErr,
+			})
 		}
 
 		// Apply interface speed/duplex via ethtool if configured

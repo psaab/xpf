@@ -77,7 +77,9 @@ var (
 	// linkByIndexSeam resolves an ifindex to its link so the procfs name for
 	// the proxy responder sysctl can be derived. Wrapped as a package var so
 	// the #6536 test can inject a transient resolution failure without
-	// deleting a real netdev mid-test.
+	// deleting a real netdev mid-test. It is also the fetch seam behind
+	// CompileResult.cachedLinkByIndex (#9841): first attempt and uncached
+	// retry share it so tests script both through one surface.
 	linkByIndexSeam = netlink.LinkByIndex
 )
 

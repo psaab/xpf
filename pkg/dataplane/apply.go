@@ -71,6 +71,18 @@ func LastApplyResultOf(provider any) *ApplyResult {
 	return reader.LastApplyResult()
 }
 
+// LastApplyGenerationOf snapshots the last-apply generation, ok=false when
+// no result is published. The commit-warning wrapper compares entry and
+// exit snapshots to detect a fresh dataplane publication (a skipped or
+// dataplane-less apply must not project a stale apply's records).
+func LastApplyGenerationOf(provider any) (uint64, bool) {
+	r := LastApplyResultOf(provider)
+	if r == nil {
+		return 0, false
+	}
+	return r.Generation, true
+}
+
 func SessionStoreOf(provider any) SessionStore {
 	switch p := Unwrap(provider).(type) {
 	case nil:
@@ -120,6 +132,12 @@ type ApplyResult struct {
 	// scheduler updates. Callers must not recompute these slots from config
 	// policy positions because app-term expansion can make them diverge.
 	PolicyScheduleRuleSlots []PolicyScheduleRuleSlot
+
+	// UnconvergedMTUs carries the configured MTUs the apply left unrealized
+	// (#9841), sorted by (Name, ConfigRef). The daemon renders them into
+	// commit warnings and show-interfaces annotates them; both read through
+	// LastApplyResult, never LastCompileResult.
+	UnconvergedMTUs []MTUUnconverged
 
 	Capabilities Capabilities
 	Generation   uint64
@@ -223,6 +241,7 @@ func ApplyResultFromCompileResult(result *CompileResult) *ApplyResult {
 		PolicyNames:             maps.Clone(result.PolicyNames),
 		AppNames:                maps.Clone(result.AppNames),
 		PolicyScheduleRuleSlots: slices.Clone(result.PolicyScheduleRuleSlots),
+		UnconvergedMTUs:         result.sortedMTUUnconverged(),
 	}
 	for key, id := range result.NATCounterIDs {
 		out.NATCounterIDs[key] = uint32(id)
@@ -245,6 +264,9 @@ func (r *ApplyResult) Clone() *ApplyResult {
 	out.PolicyNames = maps.Clone(r.PolicyNames)
 	out.AppNames = maps.Clone(r.AppNames)
 	out.PolicyScheduleRuleSlots = slices.Clone(r.PolicyScheduleRuleSlots)
+	// Deep copy: a shared backing array would let one holder's append
+	// mutate another's view of the published metadata.
+	out.UnconvergedMTUs = slices.Clone(r.UnconvergedMTUs)
 	return &out
 }
 

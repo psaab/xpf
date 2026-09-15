@@ -99,6 +99,14 @@ type CompileResult struct {
 	// miss is already an unarmedSurfaces entry; this is its consequence.
 	unappliedFilterBindings []UnappliedFilterBinding
 
+	// mtuUnconverged records configured MTUs this apply left unrealized
+	// (#9841) — the per-phys write and the VLAN-child write/read that used
+	// to fail journal-only. A host-convergence record, never an arm-coverage
+	// input: the proof ignores it (see MTUUnconverged). Appended lazily; nil
+	// is a valid empty state. Carried to ApplyResult by
+	// ApplyResultFromCompileResult for the commit warning and show field.
+	mtuUnconverged []MTUUnconverged
+
 	// ManagedInterfaces describes all interfaces managed by the firewall,
 	// used by the networkd manager to generate .link and .network files.
 	ManagedInterfaces []networkd.InterfaceConfig
@@ -144,13 +152,34 @@ func (r *CompileResult) cachedInterfaceByName(name string) (*net.Interface, erro
 	return iface, nil
 }
 
+// linkByNameSeam is the RTM_GETLINK-by-name surface behind cachedLinkByName
+// and fetchLinkByName. A package var so the #9841 uncached-retry tests can
+// script first-fail-then-succeed through the same seam the first attempt
+// uses. Production leaves it pointing at the real function.
+//
+// It is deliberately NOT vlanLinkByNameSeam (compiler_iface.go): that one
+// is ensureVLANSubInterface's scoped seam with adoption fixtures stubbing
+// it, and coupling the general cache fetch to those fixtures would make
+// MTU-retry behavior change under VLAN tests.
+var linkByNameSeam = netlink.LinkByName
+
 // cachedLinkByName returns a cached netlink.Link, performing the
 // RTM_GETLINK syscall only on the first lookup for each name.
 func (r *CompileResult) cachedLinkByName(name string) (netlink.Link, error) {
 	if link, ok := r.linkCache[name]; ok {
 		return link, nil
 	}
-	link, err := netlink.LinkByName(name)
+	return r.fetchLinkByName(name)
+}
+
+// fetchLinkByName resolves name unconditionally and memoizes the hit into
+// both link caches. It is the single fetch+memoize path shared by the
+// first attempt (cachedLinkByName) and the #9841 uncached retry, so the
+// retry cannot maintain the maps differently from the path it stands in
+// for. Failures memoize nothing — a retry after a failure can never
+// overwrite a good entry, because a cached hit never fails.
+func (r *CompileResult) fetchLinkByName(name string) (netlink.Link, error) {
+	link, err := linkByNameSeam(name)
 	if err != nil {
 		return nil, err
 	}
@@ -165,7 +194,15 @@ func (r *CompileResult) cachedLinkByIndex(idx int) (netlink.Link, error) {
 	if link, ok := r.linkIdxMap[idx]; ok {
 		return link, nil
 	}
-	link, err := netlink.LinkByIndex(idx)
+	return r.fetchLinkByIndex(idx)
+}
+
+// fetchLinkByIndex resolves idx unconditionally and memoizes the hit into
+// both link caches: the by-index half of fetchLinkByName's contract. The
+// fetch runs through linkByIndexSeam (proxyarp.go) so first attempt and
+// #9841 retry share one scriptable seam.
+func (r *CompileResult) fetchLinkByIndex(idx int) (netlink.Link, error) {
+	link, err := linkByIndexSeam(idx)
 	if err != nil {
 		return nil, err
 	}
