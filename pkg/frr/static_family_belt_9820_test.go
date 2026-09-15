@@ -24,7 +24,7 @@ func TestStaticFamilyBeltOmitsBadMemberKeepsGood_9820(t *testing.T) {
 	out := m.generateStaticRouteInTable(staticRoute9820("2001:db8::/32",
 		config.NextHopEntry{Address: "192.0.2.1"},
 		config.NextHopEntry{Address: "2001:db8::1"},
-	), "", 0, nil, nil)
+	), "", 0, nil, nil, nil)
 	if strings.Contains(out, "192.0.2.1") {
 		t.Fatalf("bad v4 next-hop reached frr.conf:\n%s", out)
 	}
@@ -37,7 +37,7 @@ func TestStaticFamilyBeltAllBadRendersNothing_9820(t *testing.T) {
 	m := &Manager{}
 	out := m.generateStaticRouteInTable(staticRoute9820("2001:db8::/32",
 		config.NextHopEntry{Address: "192.0.2.1", Interface: "ge-0/0/1.0"},
-	), "", 0, nil, nil)
+	), "", 0, nil, nil, nil)
 	if strings.TrimSpace(out) != "" {
 		t.Fatalf("all-omitted route must render nothing, got:\n%s", out)
 	}
@@ -67,7 +67,7 @@ func TestStaticFamilyBeltKeptFormsByteIdentical_9820(t *testing.T) {
 			"ipv6 route 2001:db8::/32 2001:db8::1 ge-0/0/1 5\n"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := m.generateStaticRouteInTable(tc.sr, "", 0, nil, nil); got != tc.want {
+			if got := m.generateStaticRouteInTable(tc.sr, "", 0, nil, nil, nil); got != tc.want {
 				t.Fatalf("render = %q, want %q", got, tc.want)
 			}
 		})
@@ -81,7 +81,7 @@ func TestStaticFamilyBeltAtFormsShapeDropped_9820(t *testing.T) {
 	m := &Manager{}
 	out := m.generateStaticRouteInTable(staticRoute9820("2001:db8::/32",
 		config.NextHopEntry{Address: "192.0.2.1@eth0"},
-	), "", 0, nil, nil)
+	), "", 0, nil, nil, nil)
 	if strings.TrimSpace(out) != "" {
 		t.Fatalf("raw @-form must stay shape-dropped, got:\n%s", out)
 	}
@@ -108,10 +108,10 @@ func renderStaticFromLenientConfig(t *testing.T, setCmds ...string) (rendered st
 	m := &Manager{}
 	var b strings.Builder
 	for _, sr := range cfg.RoutingOptions.StaticRoutes {
-		b.WriteString(m.generateStaticRoute(sr, "", nil, nil))
+		b.WriteString(m.generateStaticRoute(sr, "", nil, nil, nil))
 	}
 	for _, sr := range cfg.RoutingOptions.Inet6StaticRoutes {
-		b.WriteString(m.generateStaticRoute(sr, "", nil, nil))
+		b.WriteString(m.generateStaticRoute(sr, "", nil, nil, nil))
 	}
 	return b.String(), cfg.Warnings
 }

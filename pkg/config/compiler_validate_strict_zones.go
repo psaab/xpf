@@ -205,20 +205,20 @@ func validateZoneCountStrict(cfg *Config) error {
 // buildInterfaceZoneMap which falls through to the unit-expansion branch when
 // the unit token is empty.
 func zoneIfaceLogicalKeys(cfg *Config, iface string) []string {
-	base, unit, ok := strings.Cut(iface, ".")
-	if ok && unit != "" {
-		// #5878 phase 2: fold the .<unit> suffix onto its canonical identity so
-		// ge-0/0/0.01 and ge-0/0/0.1 claim the SAME logical key — the membership
-		// conflict gate must treat two spellings of one unit as one unit, and
-		// stay aligned with buildInterfaceZoneMap, which now canonicalizes the
-		// key it binds. Without this, a .01 member would bind canonical unit 1 in
-		// buildInterfaceZoneMap (first-writer-wins) while this detector still saw
-		// .01 and .1 as distinct keys — reopening the silent multi-zone fail-open
-		// #3072 closed. A malformed suffix (rejected at commit by the #5933
-		// reference gate) keeps its raw spelling via CanonicalInterfaceUnitRef.
-		return []string{CanonicalInterfaceUnitRef(iface)}
+	// #9821: bare-vs-unit decided by the split (declared-first), so the
+	// conflict detector claims the same keys the runtime binders bind: a
+	// declared bare `p.0` fans down, a declared unit `p.0.1` claims its
+	// canonical Literal. The trailing-dot-as-bare policy below is KEPT
+	// (unit token empty → bare branch) — it differs deliberately from the
+	// runtime maps' trailing-as-literal; see the plan's invariant list.
+	s := cfg.SplitInterfaceUnitRef(iface)
+	if s.HasUnit && s.UnitTok != "" {
+		// #5878 phase 2: fold the .<unit> suffix onto its canonical identity
+		// (see the v3 comment trail) — Literal carries it.
+		return []string{s.Literal}
 	}
 	// Bare interface: claim the physical interface and all its configured units.
+	base := s.Base
 	if base == "" {
 		base = iface
 	}

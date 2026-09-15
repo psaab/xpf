@@ -107,11 +107,17 @@ func (d *Daemon) assembleFRRConfig(cfg *config.Config, overlay []config.RouteOve
 	// Collect interface bandwidths and point-to-point flags for FRR.
 	ifaceBandwidths := make(map[string]uint64)
 	ifaceP2P := make(map[string]bool)
+	// #9821: every declaration in BOTH spellings → its kernel device, so the
+	// static-route render names devices for authored operands (nil-safe at
+	// the render; unit refs are NOT keys — only declared names).
+	declaredNetdevs := make(map[string]string)
 	for name, ifc := range cfg.Interfaces.Interfaces {
 		if ifc == nil {
 			continue
 		}
 		linuxName := config.LinuxIfName(name)
+		declaredNetdevs[name] = linuxName
+		declaredNetdevs[linuxName] = linuxName
 		if ifc.Bandwidth > 0 {
 			ifaceBandwidths[linuxName] = ifc.Bandwidth
 		}
@@ -139,6 +145,7 @@ func (d *Daemon) assembleFRRConfig(cfg *config.Config, overlay []config.RouteOve
 		InterfaceBandwidths:   ifaceBandwidths,
 		InterfacePointToPoint: ifaceP2P,
 		RethMap:               cfg.RethToPhysical(),
+		DeclaredNetdevs:       declaredNetdevs,
 		IPv6NextHopInterfaces: inferIPv6StaticNextHopInterfaces(cfg, overlay),
 		ClusterMode:           d.cluster != nil,
 		PreferredRoutes:       overlay,

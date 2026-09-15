@@ -55,10 +55,19 @@ func contestedTrunkZones(cfg *Config) map[string][]string {
 	// "agree" with whichever unit happened to be first.
 	byBase := map[string]map[string]struct{}{}
 	for iface, zone := range zoneByIface {
-		base, _, ok := strings.Cut(iface, ".")
-		if !ok || base == "" || zone == "" {
+		if zone == "" {
 			continue
 		}
+		// #9821 D17: group by the SPLIT base, and skip exact-declared bare
+		// keys — the function's own base-key exclusion invariant above,
+		// violated once fan-down adds a declared dotted bare (`p.0`) that
+		// first-dot-cut would file as a "unit" of `p`. Without this, two
+		// trunks sharing a first segment false-contest.
+		s := cfg.SplitInterfaceUnitRef(iface)
+		if !s.HasUnit || s.Base == "" {
+			continue
+		}
+		base := s.Base
 		if byBase[base] == nil {
 			byBase[base] = map[string]struct{}{}
 		}

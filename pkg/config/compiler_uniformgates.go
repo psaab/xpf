@@ -74,5 +74,14 @@ func runUniformGates(tree *ConfigTree, cfg *Config, opts compileOpts) error {
 	if err := runUniformGatesInterfaceAddr(tree, cfg, opts); err != nil {
 		return err
 	}
+	// #9821: appended at the END of the phase deliberately, after the #9424
+	// gate above — same doctrine as its comment: a NEW gate inserted between
+	// existing ones would steal the first-error slot from a config that trips
+	// two. Dead-last means the member-collision error only surfaces when no
+	// earlier gate (in particular the #5832 canonical-name and #7795
+	// kernel-device collision gates, which also see these shapes) failed.
+	if err := runUniformGatesRIMemberCollision(tree, cfg, opts); err != nil {
+		return err
+	}
 	return nil
 }

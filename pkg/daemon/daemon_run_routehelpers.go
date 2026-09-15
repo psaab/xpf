@@ -36,7 +36,7 @@ import (
 // #8670-adjacent (#8597 K84/K85): the netdev for an 802.1Q sub-interface is
 // named for the unit's VLAN ID, not its unit number. `set interfaces ge-0-0-1
 // unit 10 vlan-id 100` is created by networkd as `ge-0-0-1.100`. #8321 finding
-// 07 fixed the PRODUCER of `connectedByLogical` to key on the VLAN ID and left
+// 07 fixed the PRODUCER of connected prefixes to key on the VLAN ID and left
 // every CONSUMER deriving its lookup key with config.LinuxIfName(), which
 // yields the unit number — so the producer wrote `ge-0-0-1.100` and the
 // consumers looked up `ge-0-0-1.10` and missed. The consumers were not wrong
@@ -66,6 +66,107 @@ func logicalUnitDeviceKey(base string, unitNum int, unit *config.InterfaceUnit) 
 	return base
 }
 
+// memberDeclaredBase is an RI member resolved to its DECLARED base (+ optional
+// unit) — the ownership identity structural pool claims and DHCP lease keys
+// are built on (#9821 D16).
+type memberDeclaredBase struct {
+	// base is the declared config-spelling base ("" when unresolvable).
+	base string
+	// unit is the canonical unit number when hasUnit (and -1 when the
+	// suffix is present but malformed, matching no configured unit).
+	unit int
+	// hasUnit is false for whole-device readings (bare members, including
+	// alias-bares that matched a whole declaration).
+	hasUnit bool
+	// ok reports the base resolved to a declared stanza.
+	ok bool
+}
+
+// resolveMemberDeclaredBase resolves an RI member through the 4-level alias
+// order (#9821 D16 — the #6 order, now shared with the D2-structural pool
+// claims): exact split-`Base` → linux-match split-`Base` → linux-match RAW →
+// linux-match `Literal`. Raw before canon mirrors the helper's steps
+// 1-before-2; linux-name matching lives ONLY in this daemon layer (#8829
+// precedent: kernel names are linux-spelled — the config-level Split stays
+// alias-free).
+//
+// Levels 3-4 match the WHOLE member against a declaration, so they return a
+// whole-device reading (the verbatim/canon alias-bare cases, e.g. dash member
+// `ge-0-0-1.01` for slash-declared `ge-0/0/1.01`). Levels 1-2 keep the
+// member's own unit reading. Strict declared names are linux-injective
+// (#5832/#7795 reject slash/dash pairs), so linux-match cannot merge
+// independently-declared owners there; pairs that only exist leniently
+// resolve deterministically first-sorted (pinned).
+func resolveMemberDeclaredBase(cfg *config.Config, member string) memberDeclaredBase {
+	none := memberDeclaredBase{unit: -1}
+	if cfg == nil || cfg.Interfaces.Interfaces == nil {
+		return none
+	}
+	declared := cfg.Interfaces.Interfaces
+	s := cfg.SplitInterfaceUnitRef(member)
+	// Level 1: the split base IS declared (exact bare, canon alias, or
+	// longest-prefix unit base).
+	if declared[s.Base] != nil {
+		return splitUnitReading(s)
+	}
+	// Levels 2-4 scan linux-spellings first-sorted for determinism.
+	names := make([]string, 0, len(declared))
+	for name := range declared {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	// Level 2: the split base linux-matches a declaration (dash member
+	// `ge-0-0-1.0` for slash-declared `ge-0/0/1` — Codex's R4-5 shape).
+	wantBase := config.LinuxIfName(s.Base)
+	for _, name := range names {
+		if declared[name] == nil || config.LinuxIfName(name) != wantBase {
+			continue
+		}
+		out := splitUnitReading(s)
+		out.base = name
+		return out
+	}
+	// Level 3: the RAW member linux-matches a whole declaration (verbatim
+	// alias-bare — the member names a declared interface in the other
+	// spelling, suffix included).
+	wantRaw := config.LinuxIfName(member)
+	for _, name := range names {
+		if declared[name] == nil || config.LinuxIfName(name) != wantRaw {
+			continue
+		}
+		return memberDeclaredBase{base: name, ok: true}
+	}
+	// Level 4: the canonical Literal linux-matches a whole declaration
+	// (canon alias-bare — padded member for an unpadded declaration).
+	wantLit := config.LinuxIfName(s.Literal)
+	for _, name := range names {
+		if declared[name] == nil || config.LinuxIfName(name) != wantLit {
+			continue
+		}
+		return memberDeclaredBase{base: name, ok: true}
+	}
+	return none
+}
+
+// splitUnitReading builds the (base, unit, hasUnit) reading from a split
+// whose Base is known declared: bare → whole; unit suffix → canonical unit
+// number, or -1 when malformed (matching no configured unit, exactly like
+// the legacy lookup miss it replaces).
+func splitUnitReading(s config.InterfaceRefSplit) memberDeclaredBase {
+	out := memberDeclaredBase{base: s.Base, ok: true}
+	if !s.HasUnit {
+		return out
+	}
+	out.hasUnit = true
+	n, _, err := config.CanonicalLogicalUnit(s.UnitTok)
+	if err != nil {
+		out.unit = -1
+		return out
+	}
+	out.unit = n
+	return out
+}
+
 // logicalUnitDeviceKeyForRef resolves a cross-subsystem interface REFERENCE
 // ("ge-0/0/1.10", "reth0.50") to the key logicalUnitDeviceKey would have built
 // for that unit, so a consumer holding a config reference and the producer
@@ -75,19 +176,24 @@ func logicalUnitDeviceKey(base string, unitNum int, unit *config.InterfaceUnit) 
 // spelling rather than inventing one: those refs resolved to `base.<unit>`
 // before and still do, so this cannot turn a working lookup into a miss.
 func logicalUnitDeviceKeyForRef(cfg *config.Config, ref string) string {
-	canon := config.CanonicalInterfaceUnitRef(ref)
-	baseRef, unitTok, hasUnit := strings.Cut(canon, ".")
-	base := config.LinuxIfName(baseRef)
-	if !hasUnit {
+	// #9821: a REF THAT NAMES A DECLARED INTERFACE IS THAT INTERFACE, even
+	// when it contains a dot — the #8994 precedence, extended from the
+	// kernel-name resolver to this producer-key derivation. Split RAW (not
+	// the legacy canon): a declared dotted name takes the bare arm and
+	// yields its OWN device instead of being first-dot-cut onto an
+	// undeclared base's unit.
+	s := cfg.SplitInterfaceUnitRef(ref)
+	base := config.LinuxIfName(s.Base)
+	if !s.HasUnit {
 		return base
 	}
-	unitNum, _, err := config.CanonicalLogicalUnit(unitTok)
+	unitNum, _, err := config.CanonicalLogicalUnit(s.UnitTok)
 	if err != nil {
-		return config.LinuxIfName(canon)
+		return config.LinuxIfName(s.Literal)
 	}
 	var unit *config.InterfaceUnit
 	if cfg != nil && cfg.Interfaces.Interfaces != nil {
-		if ifc, ok := cfg.Interfaces.Interfaces[baseRef]; ok && ifc != nil {
+		if ifc, ok := cfg.Interfaces.Interfaces[s.Base]; ok && ifc != nil {
 			unit = ifc.Units[unitNum]
 		}
 	}
@@ -108,8 +214,19 @@ func riMemberLinuxName(cfg *config.Config, tunMap map[string]string, ifaceName s
 	// (validateInterfaceUnitAliasCollisionsAST) gates `interfaces ... unit`
 	// DEFINITIONS, NOT routing-instance/zone membership REFERENCES, so it does not
 	// prevent this reference divergence — the canonicalization does.
-	ifaceName = config.CanonicalInterfaceUnitRef(ifaceName)
-	if name, ok := tunMap[ifaceName]; ok && name != "" {
+	//
+	// #9821: the canonical identity is the split's Literal (byte-equal to the
+	// legacy canon on every legacy path), and a DECLARED-BARE member keeps the
+	// AUTHORED contract: it skips tunMap, whose keys are unit-shaped and can
+	// only hit a bare member by collision with another interface's tunnel key
+	// (the #8994 doctrine — a declared name outranks a parse, #23-gated in
+	// strict). Probing the tunnel map with a declared interface's own name
+	// would bind some other unit's device.
+	s := cfg.SplitInterfaceUnitRef(ifaceName)
+	if !s.HasUnit && cfg != nil && cfg.Interfaces.Interfaces[s.Base] != nil {
+		return logicalUnitDeviceKeyForRef(cfg, s.Literal)
+	}
+	if name, ok := tunMap[s.Literal]; ok && name != "" {
 		return name
 	}
 	// #8597 K85: derive the device the same way the connected-prefix producer
@@ -119,7 +236,7 @@ func riMemberLinuxName(cfg *config.Config, tunMap map[string]string, ifaceName s
 	// failed while the commit reported success and the member silently stayed
 	// in the main table. The unit-0 collapse the strip performed is now the
 	// `unitNum != 0` arm of logicalUnitDeviceKey.
-	return logicalUnitDeviceKeyForRef(cfg, ifaceName)
+	return logicalUnitDeviceKeyForRef(cfg, s.Literal)
 }
 
 func collectAppliedTunnels(cfg *config.Config) []*config.TunnelConfig {
@@ -228,10 +345,17 @@ func inferIPv6StaticNextHopInterfaces(cfg *config.Config, overlay []config.Route
 		ifName    string
 		bits      int
 		linkLocal bool // synthetic fe80::/64 candidate (#2452)
+		// #9821 D2: structural ownership — the declared config-spelling
+		// interface and unit number that produced this prefix. Claims
+		// match on (owner, unitNum), never on device-spelling inference,
+		// so a unit device that looks like another interface's base
+		// (`p.0.2` vs `p.0`) cannot be misattributed by suffix shape.
+		owner   string
+		unitNum int
 	}
 
 	var connected []connectedPrefix
-	connectedByLogical := make(map[string][]connectedPrefix)
+	connectedByOwner := make(map[string][]connectedPrefix)
 	ifNames := make([]string, 0, len(cfg.Interfaces.Interfaces))
 	for ifName := range cfg.Interfaces.Interfaces {
 		ifNames = append(ifNames, ifName)
@@ -283,9 +407,11 @@ func inferIPv6StaticNextHopInterfaces(cfg *config.Config, overlay []config.Route
 					ifName:    logical,
 					bits:      bits,
 					linkLocal: linkLocal,
+					owner:     ifName,
+					unitNum:   unitNum,
 				}
 				connected = append(connected, prefix)
-				connectedByLogical[logical] = append(connectedByLogical[logical], prefix)
+				connectedByOwner[ifName] = append(connectedByOwner[ifName], prefix)
 			}
 			for _, addr := range unit.Addresses {
 				ip, ipNet, err := net.ParseCIDR(addr)
@@ -377,40 +503,32 @@ func inferIPv6StaticNextHopInterfaces(cfg *config.Config, overlay []config.Route
 	}
 
 	collectPrefixesForInterface := func(ifName string) []connectedPrefix {
-		// #8597 K84: keyed by the producer's rule, not by LinuxIfName —
-		// otherwise a tagged unit whose vlan-id differs from its unit number
-		// never matches and the VRF-scoped prefix is dropped.
-		normalized := logicalUnitDeviceKeyForRef(cfg, ifName)
-		var prefixes []connectedPrefix
-		if entries, ok := connectedByLogical[normalized]; ok {
-			prefixes = append(prefixes, entries...)
+		// #9821 D2: claims match on structural ownership (owner, unitNum),
+		// never on device-spelling inference. The member resolves to a
+		// declared base (+ optional unit) through the shared 4-level alias
+		// order; a whole-device reading admits every unit of the owner, a
+		// unit reading admits exactly that configured unit number.
+		//
+		// #9063 (whole vs unit-0) is preserved structurally: the whole/unit
+		// distinction comes from the member's own reading (!HasUnit), not
+		// from a device key both readings share — `ge-0/0/0` admits all of
+		// owner `ge-0/0/0`, while `ge-0/0/0.0` admits only unitNum 0.
+		//
+		// Two deliberate consequences of matching configured unit NUMBERS
+		// rather than device spellings: (a) a member that textually nests a
+		// separately-declared interface (`unknown` vs declared `unknown.5`)
+		// claims nothing — there is no ownership; (b) vlan-id addressing
+		// (`B.100` for unit 10 with vlan-id 100) misses — units are
+		// addressed by unit number, aligning pools with the member-units
+		// consumers (which already key on the configured unit).
+		claim := resolveMemberDeclaredBase(cfg, ifName)
+		if !claim.ok {
+			return nil
 		}
-		// #9063: expand to every sub-unit ONLY for a WHOLE-DEVICE reference.
-		//
-		// The test used to be on the NORMALIZED key, and `logicalUnitDeviceKey`
-		// collapses a unit with no vlan-id and unit number 0 to the bare base --
-		// correctly, because `ge-0-0-0` IS the kernel device name for that unit.
-		// So `ge-0/0/0.0` and the whole-port `ge-0/0/0` produced the same key,
-		// and a routine
-		//
-		//	routing-instances blue { interface ge-0/0/0.0; }
-		//
-		// pulled every `ge-0-0-0.<vlan>` prefix into the VRF pool as well.
-		//
-		// The raw REFERENCE keeps the distinction the key cannot: a reference
-		// with a unit suffix names one unit, and one without names the port.
-		// Both readings are legitimate and the config text is what separates
-		// them.
-		if !strings.Contains(ifName, ".") {
-			prefixNames := make([]string, 0, len(connectedByLogical))
-			for logical := range connectedByLogical {
-				if strings.HasPrefix(logical, normalized+".") {
-					prefixNames = append(prefixNames, logical)
-				}
-			}
-			sort.Strings(prefixNames)
-			for _, logical := range prefixNames {
-				prefixes = append(prefixes, connectedByLogical[logical]...)
+		var prefixes []connectedPrefix
+		for _, prefix := range connectedByOwner[claim.base] {
+			if !claim.hasUnit || prefix.unitNum == claim.unit {
+				prefixes = append(prefixes, prefix)
 			}
 		}
 		return prefixes
@@ -445,10 +563,17 @@ func inferIPv6StaticNextHopInterfaces(cfg *config.Config, overlay []config.Route
 		}
 	}
 
-	// #9063: the value records whether the claim named the WHOLE DEVICE
-	// (`ge-0/0/0`) rather than one unit (`ge-0/0/0.0`). Both normalize to the
-	// same key, and only the first may exclude a port's other sub-units.
-	claimedByVRF := make(map[string]bool)
+	// #9821 D2: the default-pool exclusion uses the SAME structural predicate
+	// as collection (replacing the claimedByVRF string map + exact/base
+	// probes + first-cut normalization). A claim excludes a default prefix
+	// iff owner and (whole or unit) match — so a whole-device claim excludes
+	// every sub-unit of that port (#9063: only a whole reading may), while a
+	// unit claim excludes exactly its unit, and a claim never excludes a
+	// separately-declared interface that merely nests textually.
+	//
+	// Forwarding-instance members do not exclude (their vrfName IS the
+	// default pool) — preserved from the legacy `vrfName != ""` gate.
+	var vrfClaims []memberDeclaredBase
 	for _, ri := range cfg.RoutingInstances {
 		vrfName := "vrf-" + ri.Name
 		if ri.InstanceType == "forwarding" {
@@ -461,45 +586,23 @@ func inferIPv6StaticNextHopInterfaces(cfg *config.Config, overlay []config.Route
 			}
 			connectedByVRF[vrfName] = append(connectedByVRF[vrfName], prefixes...)
 			if vrfName != "" {
-				// #8597: the third site of the same family, named in neither
-				// K84 nor K85. claimedByVRF is compared against producer-keyed
-				// names below, so it must use the producer's rule too.
-				normalized := logicalUnitDeviceKeyForRef(cfg, ifName)
-				// #9063: record WHICH READING this claim is. The normalized key
-				// cannot say -- `ge-0/0/0` and `ge-0/0/0.0` both key to
-				// `ge-0-0-0` -- and the two mean different things to the
-				// base-match exclusion below. The raw reference is the only
-				// place the distinction survives.
-				claimedByVRF[normalized] = !strings.Contains(ifName, ".")
+				if claim := resolveMemberDeclaredBase(cfg, ifName); claim.ok {
+					vrfClaims = append(vrfClaims, claim)
+				}
 			}
 		}
 	}
-	if len(claimedByVRF) > 0 {
+	if len(vrfClaims) > 0 {
 		filtered := connectedByVRF[""][:0]
 		for _, prefix := range connectedByVRF[""] {
-			base := prefix.ifName
-			if idx := strings.IndexByte(base, '.'); idx >= 0 {
-				base = base[:idx]
+			excluded := false
+			for _, claim := range vrfClaims {
+				if prefix.owner == claim.base && (!claim.hasUnit || prefix.unitNum == claim.unit) {
+					excluded = true
+					break
+				}
 			}
-			if _, claimed := claimedByVRF[prefix.ifName]; claimed {
-				continue
-			}
-			// #9063: a BASE match excludes every sub-unit of that port, so it
-			// may only fire for a claim that named the whole DEVICE.
-			//
-			// It used to fire for any claim whose key was bare -- and
-			// `ge-0/0/0.0` has a bare key, because `ge-0-0-0` is the kernel
-			// device name for unit 0. So a VRF holding one unit-0 member
-			// discarded every `ge-0-0-0.<vlan>` prefix from the DEFAULT pool.
-			//
-			// For a global-unicast next-hop that is harmless: the render emits a
-			// scopeless `ipv6 route <p> <gw>` and FRR resolves it recursively.
-			// For a LINK-LOCAL next-hop it is not -- FRR rejects a scopeless
-			// `ipv6 route <p> fe80::1`, so the static route never installs and
-			// the prefix blackholes. A dual-tenant trunk (VRF on unit 0, a
-			// tagged unit on the same port in the default table) is the routine
-			// layout that reaches it.
-			if wholeDevice, claimed := claimedByVRF[base]; claimed && wholeDevice {
+			if excluded {
 				continue
 			}
 			filtered = append(filtered, prefix)
@@ -578,34 +681,106 @@ func inferIPv6StaticNextHopInterfaces(cfg *config.Config, overlay []config.Route
 // not fan up to the base, deliberately (#9063): the base row carries unit 0's
 // addresses, so binding the base from a unit-1 reference would move unit 0's
 // prefix into unit 1's instance.
-//
 // A tunnel or xfrmi member resolves to ONE device and is returned before the
 // fan-down: TunnelNameMap is keyed on the canonical ref, those devices have no
 // 802.1Q children, and fanning them down would invent names for units that have
 // no netdev of their own.
+//
+// #9821: a DECLARED-BARE member resolves structurally instead of through the
+// legacy flow above: keys[0] via the singular's authored contract (which
+// skips tunMap — its keys are unit-shaped and can only hit a bare member by
+// collision), keys[1:] via memberUnitLinuxName (own-spelling tunMap probe,
+// else the producer-rule device). TunnelNameMap never holds bare keys, so
+// the tunnel-before-fan-down rule above still fires exactly where it did —
+// for unit-shaped tunnel members in the legacy arm.
 func riMemberLinuxNames(cfg *config.Config, tunMap map[string]string, ifaceName string) []string {
-	canon := config.CanonicalInterfaceUnitRef(ifaceName)
-	if name, ok := tunMap[canon]; ok && name != "" {
-		return []string{name}
+	s := cfg.SplitInterfaceUnitRef(ifaceName)
+	if s.HasUnit || cfg == nil || cfg.Interfaces.Interfaces[s.Base] == nil {
+		// NOT a declared-bare member (unit ref, undeclared bare, nil cfg):
+		// the LEGACY flow, byte-identical modulo canon→Literal (step-4
+		// Literal ≡ legacy canon; the unit path normalizes multi-dot
+		// padded spellings the legacy flow mis-bound — intended).
+		if name, ok := tunMap[s.Literal]; ok && name != "" {
+			return []string{name}
+		}
+		refs := config.InterfaceUnitRefKeys(cfg, ifaceName)
+		if len(refs) == 0 {
+			return []string{riMemberLinuxName(cfg, tunMap, ifaceName)}
+		}
+		seen := make(map[string]struct{}, len(refs))
+		out := make([]string, 0, len(refs))
+		for _, ref := range refs {
+			name := riMemberLinuxName(cfg, tunMap, ref)
+			if name == "" {
+				continue
+			}
+			if _, dup := seen[name]; dup {
+				// A unit with no vlan-id collapses onto the base device
+				// (logicalUnitDeviceKey), so the base and unit 0 name one netdev.
+				continue
+			}
+			seen[name] = struct{}{}
+			out = append(out, name)
+		}
+		return out
 	}
+	// Declared-bare member: resolve STRUCTURALLY. keys[0] (the declared name
+	// itself) via the singular's authored contract — which skips tunMap for
+	// exactly this shape; keys[1:] (generated `Base.N` unit keys) NEVER
+	// re-enter authored precedence, or a generated key that textually matches
+	// another interface's tunnel key would bind the wrong device (the Codex
+	// R2F1 KILL core: naive declared-first reparse CREATES binds). Generated
+	// keys probe tunMap by their own canonical spelling first (same key the
+	// singular would probe), else derive the producer-rule device.
 	refs := config.InterfaceUnitRefKeys(cfg, ifaceName)
 	if len(refs) == 0 {
 		return []string{riMemberLinuxName(cfg, tunMap, ifaceName)}
 	}
 	seen := make(map[string]struct{}, len(refs))
 	out := make([]string, 0, len(refs))
-	for _, ref := range refs {
-		name := riMemberLinuxName(cfg, tunMap, ref)
+	bind := func(name string) {
 		if name == "" {
-			continue
+			return
 		}
 		if _, dup := seen[name]; dup {
-			// A unit with no vlan-id collapses onto the base device
-			// (logicalUnitDeviceKey), so the base and unit 0 name one netdev.
-			continue
+			return
 		}
 		seen[name] = struct{}{}
 		out = append(out, name)
 	}
+	bind(riMemberLinuxName(cfg, tunMap, refs[0]))
+	for _, ref := range refs[1:] {
+		bind(memberUnitLinuxName(cfg, tunMap, s.Base, ref))
+	}
 	return out
+}
+
+// memberUnitLinuxName resolves one GENERATED unit key (`Base.N`, emitted by
+// InterfaceUnitRefKeys fan-down for a declared-bare member) to its kernel
+// device WITHOUT re-entering authored precedence (#9821 #16): generated keys
+// are structural (`Base` + canonical N), so they probe tunMap by their own
+// spelling first and otherwise derive the producer-rule device from the
+// declared stanza. An unparseable key yields "" (skipped by the caller) —
+// unreachable for fan-down-emitted keys, which are always `Base.N` with a
+// canonical N; the empty return keeps the function total without inventing
+// an authored reading for a structural key.
+func memberUnitLinuxName(cfg *config.Config, tunMap map[string]string, base, key string) string {
+	if name, ok := tunMap[key]; ok && name != "" {
+		return name
+	}
+	rest, ok := strings.CutPrefix(key, base+".")
+	if !ok {
+		return ""
+	}
+	unitNum, _, err := config.CanonicalLogicalUnit(rest)
+	if err != nil {
+		return ""
+	}
+	var unit *config.InterfaceUnit
+	if cfg != nil && cfg.Interfaces.Interfaces != nil {
+		if ifc, ok := cfg.Interfaces.Interfaces[base]; ok && ifc != nil {
+			unit = ifc.Units[unitNum]
+		}
+	}
+	return logicalUnitDeviceKey(config.LinuxIfName(base), unitNum, unit)
 }

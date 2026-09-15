@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"sort"
 	"strconv"
-	"strings"
 )
 
 // validateVlanUnitMTUStrict hard-rejects a tagged unit whose family MTU is
@@ -130,11 +129,12 @@ func validateVlanUnitMTUStrict(cfg *Config) error {
 
 // vlanUnitMTUReferencedUnits9837 collects, per interface, the unit numbers
 // named by security-zone references — the same reference set planPhysDesired
-// iterates, parsed the same way resolveInterfaceRef parses (Cut on the first
-// ".", Atoi-or-zero, so a bare interface and a trailing-dot form both name
-// unit 0, exactly as the runtime resolves them). ALL zones count: the planner
-// does not skip mgmt/control. A unit the zones never name contributes nothing
-// to the parent plan, so it must not raise this gate's effective parent.
+// iterates, parsed the same way resolveInterfaceRef parses (#9821 D13: the
+// declared-aware split, so a dotted unit ref resolves against its declared
+// stanza instead of an undeclared first segment). ALL zones count: the
+// planner does not skip mgmt/control. A unit the zones never name
+// contributes nothing to the parent plan, so it must not raise this gate's
+// effective parent.
 func vlanUnitMTUReferencedUnits9837(cfg *Config) map[string]map[int]bool {
 	out := map[string]map[int]bool{}
 	for _, zone := range cfg.Security.Zones {
@@ -142,21 +142,32 @@ func vlanUnitMTUReferencedUnits9837(cfg *Config) map[string]map[int]bool {
 			continue
 		}
 		for _, ref := range zone.Interfaces {
-			base, unitText, _ := strings.Cut(ref, ".")
-			// Atoi-or-zero, exactly as resolveInterfaceRef resolves it (it
-			// ignores Atoi's error): a bare interface, a trailing-dot form,
-			// and a garbage suffix all name unit 0. The error is checked, not
-			// discarded (#6940): on the strict path the #5933 gate already
-			// rejected a garbage suffix, so that arm runs only on the lenient
-			// path, where matching the runtime avoids a second warning.
-			n, aerr := strconv.Atoi(unitText)
-			if aerr != nil {
-				n = 0
+			s := cfg.SplitInterfaceUnitRef(ref)
+			// Mirror resolveInterfaceRef EXACTLY (it assigns, then ignores
+			// the error): a bare ref names unit 0; a syntactically-invalid
+			// suffix yields Atoi's 0; but a RANGE-OVERFLOWED suffix yields
+			// the saturated value, which the planner looks up (and misses)
+			// — it never falls back to unit 0. Zeroing here would credit
+			// an unreferenced unit-0 override the planner never selects.
+			// Strict #5933 rejects garbage first, so the malformed arms run
+			// only on the tolerant path — but the claim is all-shape
+			// agreement with the runtime, so match it bit-for-bit.
+			n := 0
+			if s.HasUnit {
+				var atoiErr error
+				n, atoiErr = strconv.Atoi(s.UnitTok)
+				if atoiErr != nil {
+					// Checked, deliberately uncorrected: #6940 forbids a
+					// discarded Atoi error in the compiler, and no
+					// correction is owed — the comment above explains why
+					// Atoi's return (0 on syntax errors, saturated on
+					// range errors) is kept verbatim in both modes.
+				}
 			}
-			if out[base] == nil {
-				out[base] = map[int]bool{}
+			if out[s.Base] == nil {
+				out[s.Base] = map[int]bool{}
 			}
-			out[base][n] = true
+			out[s.Base][n] = true
 		}
 	}
 	return out

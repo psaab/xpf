@@ -3,7 +3,6 @@ package config
 import (
 	"fmt"
 	"sort"
-	"strings"
 )
 
 // compiler_wireguard_plaintext_warn.go carries the #5618 commit-time WARNING
@@ -207,11 +206,15 @@ func warnWireGuardPlaintextUnadjudicatedAST(nodes []*Node) []string {
 			})
 			// Per-unit `tunnel mode wireguard`. A unit that carries its own
 			// tunnel stanza gets its own device, so it is its own finding.
+			// The ref is stored RAW — never canonicalized at write. zoneFor
+			// resolves spellings at lookup through the declared-aware splitter,
+			// so padded and malformed unit tokens reach the malformed-skip path
+			// exactly as authored (#2463: warn+skip, don't coerce).
 			for _, unit := range namedInstances(iface.FindChildren("unit")) {
 				if unit.name == "" {
 					continue
 				}
-				ref := CanonicalInterfaceUnitRef(name + "." + unit.name)
+				ref := name + "." + unit.name
 				_ = forEachChild(unit.node.Children, "tunnel", func(tunnel *Node) error {
 					if astTunnelModeWireguard(tunnel) {
 						add(ref, fmt.Sprintf("interfaces %s unit %s tunnel mode wireguard",
@@ -290,8 +293,9 @@ func wireGuardPlaintextAdvisoryWording() plaintextAdvisoryWording {
 // wgZoneRefIndex maps a zone-member interface reference to its zone name, and
 // resolves a WireGuard tunnel reference against it.
 //
-// Keyed by the LITERAL (canonicalized) reference the operator wrote rather than
-// by a derived device identity, because a WireGuard interface has no
+// Keyed by the reference spellings the operator wrote — raw member text plus
+// the declared-aware identities the shared splitter derives — rather than by
+// a derived device identity, because a WireGuard interface has no
 // config-visible device id to join on the way an xfrmi has an if_id
 // (collectZoneInterfaceRefsAST, #5619). The fan-out that makes the two
 // spellings meet is done at LOOKUP time by zoneFor, which mirrors — deliberately
@@ -302,6 +306,20 @@ type wgZoneRefIndex struct {
 	// refs is byRef's key set in sorted order, so the unit scan in zoneFor is
 	// deterministic when an interface-level tunnel has several zoned units.
 	refs []string
+	// declared is the AST interface-declaration set: the non-leaf children of
+	// every `interfaces` stanza, harvested in collectWireGuardZoneRefsAST.
+	// zoneFor splits through it so writer and lookup share one precedence.
+	declared map[string]struct{}
+}
+
+// split resolves ref against the index's AST-declared set through the shared
+// free-function splitter — the same 4-step precedence the *Config method
+// implements, for a pre-walk that holds node names instead of a *Config.
+func (z wgZoneRefIndex) split(ref string) InterfaceRefSplit {
+	return splitInterfaceRefWithDeclared(func(s string) bool {
+		_, ok := z.declared[s]
+		return ok
+	}, ref)
 }
 
 // collectWireGuardZoneRefsAST builds the zone-membership index from
@@ -314,16 +332,49 @@ type wgZoneRefIndex struct {
 // after it as UNZONED — dropping the escalation in exactly the case that earns
 // it.
 //
-// References are canonicalized with CanonicalInterfaceUnitRef so `wg0.00` and
-// `wg0.0` are one key, matching how buildInterfaceZoneMap keys the runtime map.
+// The declared set is harvested from the non-leaf children of EVERY top-level
+// `interfaces` stanza in the same pre-walk pass — the zone walk alone cannot
+// see declarations. The iteration mirrors the tunnel walk below (#3562: every
+// `interfaces` root) and matches compileInterfaces' non-leaf declaration rule
+// (leaf children are bare-leaf knobs, not interfaces, and must not pollute
+// the set).
+//
+// Keys per member: the raw member spelling, plus the split Literal when the
+// member is a UNIT ref (`p.0.01` also keys `p.0.1`), plus the declared Base
+// when the member is a bare ALIAS (`p.00` of declared `p.0` also keys `p.0`).
+// A bare declared name keys ONLY its raw spelling — `p.01` never keys `p.1` —
+// so an independently-declared `p.1` in another zone cannot be misassigned.
 // First zone wins; a duplicate assignment is a separate concern with its own
 // gate.
 func collectWireGuardZoneRefsAST(nodes []*Node) wgZoneRefIndex {
-	idx := wgZoneRefIndex{byRef: map[string]string{}}
+	idx := wgZoneRefIndex{byRef: map[string]string{}, declared: map[string]struct{}{}}
+	_ = forEachChild(nodes, "interfaces", func(interfaces *Node) error {
+		for _, iface := range interfaces.Children {
+			if iface.IsLeaf {
+				continue
+			}
+			if name := iface.Name(); name != "" {
+				idx.declared[name] = struct{}{}
+			}
+		}
+		return nil
+	})
+	isDeclared := func(s string) bool {
+		_, ok := idx.declared[s]
+		return ok
+	}
+	put := func(key, zone string) {
+		if _, exists := idx.byRef[key]; !exists {
+			idx.byRef[key] = zone
+		}
+	}
 	forEachZoneInterfaceMemberAST(nodes, func(zone, member string) {
-		ref := CanonicalInterfaceUnitRef(member)
-		if _, exists := idx.byRef[ref]; !exists {
-			idx.byRef[ref] = zone
+		s := splitInterfaceRefWithDeclared(isDeclared, member)
+		put(member, zone)
+		if s.HasUnit {
+			put(s.Literal, zone)
+		} else if s.Base != member && isDeclared(s.Base) {
+			put(s.Base, zone)
 		}
 	})
 	idx.refs = make([]string, 0, len(idx.byRef))
@@ -336,21 +387,29 @@ func collectWireGuardZoneRefsAST(nodes []*Node) wgZoneRefIndex {
 
 // zoneFor resolves the zone governing a WireGuard tunnel reference.
 //
-// Three arms, each with a distinct reason, and deliberately no more fan-out
+// Four arms, each with a distinct reason, and deliberately no more fan-out
 // than buildInterfaceZoneMap performs:
 //
-//  1. The literal reference. `bind` and zone written the same way.
+//  1. The raw reference. `bind` and zone written the same way.
 //
-//  2. A UNIT reference falling back to its BASE. A bare zone member
+//  2. The declared-aware Literal. A padded finding (`p.0.01`) meets the
+//     canonical member key (`p.0.1`), and vice versa, through the shared
+//     splitter — never through a blind canonicalization.
+//
+//  3. A UNIT reference falling back to its BASE. A bare zone member
 //     (`interfaces wg0`) means "every unit of wg0" — buildInterfaceZoneMap
 //     fans a bare reference DOWN onto the interface's units, so `wg0.1` is
-//     governed by a zone written on `wg0`.
+//     governed by a zone written on `wg0`. Unit queries only.
 //
-//  3. An INTERFACE reference falling back to any zoned unit beneath it. An
+//  4. A BARE reference falling back to a zoned unit it owns. An
 //     interface-level `tunnel mode wireguard` is ONE shared wgN TUN
 //     (Config.TunnelNameMap), so a zone on `wg1.0` governs that same TUN — and
 //     reporting it as unzoned would drop the escalation for the most common
 //     spelling of all, since operators zone units, not bare interfaces.
+//     A member qualifies iff it splits to a UNIT whose Base is the query; a
+//     separately-declared `p.0.2` splits bare and never qualifies, so textual
+//     nesting alone acquires nothing. Bare queries only — a unit query must
+//     never fan sideways (load-bearing).
 //
 // What it deliberately does NOT do is fan a UNIT zone SIDEWAYS to a SIBLING
 // unit's own tunnel. Under per-unit tunnels, unit 0 takes the base Linux device
@@ -361,14 +420,18 @@ func (z wgZoneRefIndex) zoneFor(ref string) string {
 	if zone := z.byRef[ref]; zone != "" {
 		return zone
 	}
-	base, _, hasUnit := strings.Cut(ref, ".")
-	if hasUnit {
-		return z.byRef[base]
+	s := z.split(ref)
+	if s.Literal != ref {
+		if zone := z.byRef[s.Literal]; zone != "" {
+			return zone
+		}
 	}
-	prefix := ref + "."
-	for _, member := range z.refs {
-		if strings.HasPrefix(member, prefix) {
-			return z.byRef[member]
+	if s.HasUnit {
+		return z.byRef[s.Base]
+	}
+	for _, key := range z.refs {
+		if ms := z.split(key); ms.HasUnit && ms.Base == ref {
+			return z.byRef[key]
 		}
 	}
 	return ""

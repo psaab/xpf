@@ -114,7 +114,13 @@ const preSecureTunnelProtocolVersion = 4
 // #3307) or a value-bearing leaf written with no operand
 // (term.ValuelessFrom, #8480). Nothing about secure_tunnel changed, so
 // MinProtocolSecureTunnelRefusal (7) is untouched again.
-const secureTunnelSnapshotProtocolVersion = 20
+//
+// Issue 9821 moves it 20 -> 21, for `InterfaceSnapshot.is_unit`, the
+// structural row identity (#9875 claimed 20 first; the v8 rule moves the
+// merged wire past both). Nothing about secure_tunnel changed, so
+// MinProtocolSecureTunnelRefusal (7) is untouched again (historical floors
+// are never renumbered; only this current-version assertion moves).
+const secureTunnelSnapshotProtocolVersion = 21
 
 // preV5HelperAcceptsSnapshot models the exact-equality version gate a pre-v5
 // helper applies before touching any dataplane state

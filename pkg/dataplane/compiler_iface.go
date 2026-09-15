@@ -65,8 +65,18 @@ func stUnitCarriesVlanID9873(cfg *config.Config, base, unitSuffix string) bool {
 // For RETH interfaces, configName stays as "reth0" (for config lookups) while
 // physName resolves to the local physical member's Linux name.
 func resolveInterfaceRef(ref string, cfg *config.Config) (physName string, configName string, unitNum int, vlanID int) {
-	parts := strings.SplitN(ref, ".", 2)
-	configName = parts[0]
+	// #9821 D13: split DECLARED-aware, not first-dot. A ref that NAMES a
+	// declared interface resolves against that stanza (configName = the
+	// declared base, unit from the REMAINDER) instead of being cut onto an
+	// undeclared first segment with vlanID 0 and a stanza-missing config
+	// name — which mis-zoned maps and mis-selected AF_XDP attachments on
+	// the userspace-shim path (strict-reachable in both-declared shapes).
+	// Declared-bare short-circuits the IRB and st arms below (a declared
+	// `irb.5`/`st0.1` is an ordinary interface); reth/fabric arms are
+	// behavior-identical (dot-free bases split the same); multi-dot-invalid
+	// falls to step-4 legacy, whose returned (base, unit) equal SplitN's.
+	s := cfg.SplitInterfaceUnitRef(ref)
+	configName = s.Base
 
 	// Resolve IRB interfaces to their bridge device name.
 	// "irb.0" → bridge device "br-bd0" (looked up via bridge-domains config).
@@ -74,8 +84,8 @@ func resolveInterfaceRef(ref string, cfg *config.Config) (physName string, confi
 		irbMap := config.IRBToBridge(cfg.BridgeDomains)
 		if bridge, ok := irbMap[ref]; ok {
 			physName = bridge
-			if len(parts) == 2 {
-				unitNum, _ = strconv.Atoi(parts[1])
+			if s.HasUnit {
+				unitNum, _ = strconv.Atoi(s.UnitTok)
 			}
 			return
 		}
@@ -119,10 +129,10 @@ func resolveInterfaceRef(ref string, cfg *config.Config) (physName string, confi
 	// separate, deliberate question — #6737 — and is deliberately unchanged
 	// here. The one exception is an unbound unit whose configured stanza
 	// carries a vlan-id, which falls through so the tag is honoured — #9873.)
-	if len(parts) == 2 {
+	if s.HasUnit {
 		if dev, ok := cfg.SecureTunnelUnitNetdev(ref); ok {
 			physName = config.LinuxIfName(dev)
-			unitNum, _ = strconv.Atoi(parts[1])
+			unitNum, _ = strconv.Atoi(s.UnitTok)
 			return
 		}
 		// #9873: an unbound unit whose configured stanza carries a vlan-id
@@ -133,9 +143,9 @@ func resolveInterfaceRef(ref string, cfg *config.Config) (physName string, confi
 		// for, and the configured-but-untagged case #6729 and
 		// TestResolveInterfaceRefXFRMUnit pin. The bound arm above is
 		// untouched (#6691 order).
-		if config.IsSecureTunnelIfName(configName) && !stUnitCarriesVlanID9873(cfg, configName, parts[1]) {
+		if config.IsSecureTunnelIfName(configName) && !stUnitCarriesVlanID9873(cfg, configName, s.UnitTok) {
 			physName = config.LinuxIfName(ref)
-			unitNum, _ = strconv.Atoi(parts[1])
+			unitNum, _ = strconv.Atoi(s.UnitTok)
 			return
 		}
 	}
@@ -151,8 +161,8 @@ func resolveInterfaceRef(ref string, cfg *config.Config) (physName string, confi
 
 	physName = config.LinuxIfName(physBase)
 
-	if len(parts) == 2 {
-		unitNum, _ = strconv.Atoi(parts[1])
+	if s.HasUnit {
+		unitNum, _ = strconv.Atoi(s.UnitTok)
 	}
 
 	// Per-unit tunnel interfaces have their own Linux interface name

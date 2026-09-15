@@ -100,23 +100,26 @@ func authoredZoneRefs(cfg *config.Config) map[string]string {
 			if rawIface == "" {
 				continue
 			}
-			iface := config.CanonicalInterfaceUnitRef(rawIface)
-			if _, exists := out[iface]; !exists {
-				out[iface] = zoneName
+			// #9821: resolve declared-first like the mirrors: a ref naming a
+			// declared interface fans down even when dotted; a unit ref binds
+			// its canonical Literal so padded spellings agree.
+			s := cfg.SplitInterfaceUnitRef(rawIface)
+			if _, exists := out[s.Literal]; !exists {
+				out[s.Literal] = zoneName
 			}
 			// A unit-suffixed reference speaks for exactly that unit. Do NOT
 			// write the base (that is buildInterfaceZoneMap's fan-UP, the
 			// derivation this map exists to keep out).
-			if base, unit, ok := strings.Cut(iface, "."); ok && base != "" && unit != "" {
+			if s.HasUnit {
 				continue
 			}
 			// A bare reference speaks for every configured unit of the
 			// interface. Mirrors buildInterfaceZoneMap's fan-down exactly,
 			// including that a present-but-nil unit slot still takes a key, so
 			// the two maps hold the same references.
-			if ifCfg := cfg.Interfaces.Interfaces[iface]; ifCfg != nil {
+			if ifCfg := cfg.Interfaces.Interfaces[s.Base]; ifCfg != nil {
 				for unitNum := range ifCfg.Units {
-					unitName := fmt.Sprintf("%s.%d", iface, unitNum)
+					unitName := fmt.Sprintf("%s.%d", s.Base, unitNum)
 					if _, exists := out[unitName]; !exists {
 						out[unitName] = zoneName
 					}

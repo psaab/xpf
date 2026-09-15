@@ -38,11 +38,30 @@ func buildIngressFoldResolver(cfg *config.Config) func(uint32) (uint32, uint16, 
 	if err != nil {
 		return nil
 	}
+	return buildIngressFoldResolverWithIfaces(cfg, ifaces)
+}
+
+// buildIngressFoldResolverWithIfaces is the testable core of
+// buildIngressFoldResolver: the same pre-fold over an injected interface
+// list, so tuple cells drive it without host netdevs. Production passes the
+// once-per-apply snapshot above; behavior is identical.
+func buildIngressFoldResolverWithIfaces(cfg *config.Config, ifaces []net.Interface) func(uint32) (uint32, uint16, bool) {
 	indexByLinuxName := make(map[string]uint32, len(ifaces))
 	for _, ifc := range ifaces {
 		if ifc.Index > 0 {
 			indexByLinuxName[ifc.Name] = uint32(ifc.Index)
 		}
+	}
+	// Exact declared spellings, for the D25 short-circuit below. Resolved
+	// names ARE declared spellings (the enumeration emits config names and
+	// LocalIfaceForStableID resolves reth to the configured member), so an
+	// exact hit means "this name is an interface", not a unit ref.
+	declared := make(map[string]struct{}, len(cfg.Interfaces.Interfaces))
+	for name, ifc := range cfg.Interfaces.Interfaces {
+		if ifc == nil {
+			continue
+		}
+		declared[name] = struct{}{}
 	}
 	// Pre-fold this node's own stable names once. The reverse direction runs per
 	// imported session, and a bulk sync imports the peer's whole table.
@@ -65,9 +84,16 @@ func buildIngressFoldResolver(cfg *config.Config) func(uint32) (uint32, uint16, 
 			continue
 		}
 		base, vlan := localName, uint16(0)
-		if i := strings.LastIndexByte(localName, '.'); i >= 0 {
-			if v, err := strconv.ParseUint(localName[i+1:], 10, 16); err == nil {
-				base, vlan = localName[:i], uint16(v)
+		// #9821 D25: an exact-declared resolved name installs WHOLE with
+		// vlan 0 — NO split. `p.0` installs its own device; the enum's
+		// `p.0.100` candidate (undeclared) still splits to parent+vlan,
+		// matching undotted handling; truncated legacy folds in
+		// mixed-version flight take the unchanged path below.
+		if _, isDeclared := declared[localName]; !isDeclared {
+			if i := strings.LastIndexByte(localName, '.'); i >= 0 {
+				if v, err := strconv.ParseUint(localName[i+1:], 10, 16); err == nil {
+					base, vlan = localName[:i], uint16(v)
+				}
 			}
 		}
 		idx, ok := indexByLinuxName[config.LinuxIfName(base)]

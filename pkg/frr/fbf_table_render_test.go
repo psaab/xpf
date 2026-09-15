@@ -27,7 +27,7 @@ func TestGenerateStaticRouteInTable(t *testing.T) {
 		Destination: "0.0.0.0/0",
 		NextHops:    []config.NextHopEntry{{Address: "172.16.80.1"}},
 	}
-	got := m.generateStaticRouteInTable(sr, "", 100, nil, nil)
+	got := m.generateStaticRouteInTable(sr, "", 100, nil, nil, nil)
 	if got != "ip route 0.0.0.0/0 172.16.80.1 table 100\n" {
 		t.Errorf("v4 table route = %q", got)
 	}
@@ -35,7 +35,7 @@ func TestGenerateStaticRouteInTable(t *testing.T) {
 	// With preference (distance precedes table — both live in FRR's
 	// order-free trailing keyword set).
 	sr.Preference = 5
-	got = m.generateStaticRouteInTable(sr, "", 100, nil, nil)
+	got = m.generateStaticRouteInTable(sr, "", 100, nil, nil, nil)
 	if got != "ip route 0.0.0.0/0 172.16.80.1 5 table 100\n" {
 		t.Errorf("v4 table route with distance = %q", got)
 	}
@@ -45,27 +45,27 @@ func TestGenerateStaticRouteInTable(t *testing.T) {
 		Destination: "::/0",
 		NextHops:    []config.NextHopEntry{{Address: "2001:db8:80::1"}},
 	}
-	got = m.generateStaticRouteInTable(sr6, "", 101, nil, nil)
+	got = m.generateStaticRouteInTable(sr6, "", 101, nil, nil, nil)
 	if got != "ipv6 route ::/0 2001:db8:80::1 table 101\n" {
 		t.Errorf("v6 table route = %q", got)
 	}
 
 	// vrfName wins over tableID (virtual-router instances never emit
 	// `table`).
-	got = m.generateStaticRouteInTable(sr6, "vrf-BLUE", 101, nil, nil)
+	got = m.generateStaticRouteInTable(sr6, "vrf-BLUE", 101, nil, nil, nil)
 	if got != "ipv6 route ::/0 2001:db8:80::1 vrf vrf-BLUE\n" {
 		t.Errorf("vrf route = %q", got)
 	}
 
 	// tableID 0 == legacy default-table behavior.
-	got = m.generateStaticRouteInTable(sr6, "", 0, nil, nil)
+	got = m.generateStaticRouteInTable(sr6, "", 0, nil, nil, nil)
 	if got != "ipv6 route ::/0 2001:db8:80::1\n" {
 		t.Errorf("default-table route = %q", got)
 	}
 
 	// Discard routes carry the table too.
 	discard := &config.StaticRoute{Destination: "10.66.0.0/16", Discard: true}
-	got = m.generateStaticRouteInTable(discard, "", 100, nil, nil)
+	got = m.generateStaticRouteInTable(discard, "", 100, nil, nil, nil)
 	if got != "ip route 10.66.0.0/16 Null0 table 100\n" {
 		t.Errorf("discard table route = %q", got)
 	}

@@ -1064,19 +1064,24 @@ func validateHostInboundStanzaWarnings(cfg *Config) []string {
 		// physical would describe an object nothing enforces. A unit-less
 		// physical IS its own key (see ResolveHostInboundIngressInterface).
 		hiKeysFor := func(ref string) []string {
-			canon := CanonicalInterfaceUnitRef(ref)
-			if strings.Contains(canon, ".") {
-				return []string{canon}
+			// #9821: bare-vs-unit decided by the split (declared-first). A
+			// declared bare ref enumerates its units (ANY bare ref whose
+			// Base stanza carries units — declared or not, legacy
+			// enumeration preserved); a unit ref is its canonical Literal
+			// (trailing-dot keeps the legacy single key).
+			s := cfg.SplitInterfaceUnitRef(ref)
+			if s.HasUnit {
+				return []string{s.Literal}
 			}
-			if ifCfg := cfg.Interfaces.Interfaces[canon]; ifCfg != nil && len(ifCfg.Units) > 0 {
+			if ifCfg := cfg.Interfaces.Interfaces[s.Base]; ifCfg != nil && len(ifCfg.Units) > 0 {
 				units := make([]string, 0, len(ifCfg.Units))
 				for unitNum := range ifCfg.Units {
-					units = append(units, fmt.Sprintf("%s.%d", canon, unitNum))
+					units = append(units, fmt.Sprintf("%s.%d", s.Base, unitNum))
 				}
 				sort.Strings(units)
 				return units
 			}
-			return []string{canon}
+			return []string{s.Literal}
 		}
 		// hiEffectiveAt returns the effective system-service set the dataplane
 		// admits on ONE enforcement key: the resolved override when one applies

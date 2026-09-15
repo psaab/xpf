@@ -238,11 +238,16 @@ func CanonicalLogicalUnit(raw string) (int, string, error) {
 // cross-subsystem interface reference (#5878 phase 2) so two textual spellings
 // of one logical unit — ge-0/0/0.01, ge-0/0/0.1, ge-0/0/0.+1 — resolve to ONE
 // runtime identity when a reference binder keys a map by the reference. The
-// suffix is split on the FIRST "." — exactly how each subsystem's runtime splits
-// the reference (buildInterfaceZoneMap, buildInterfaceRoutingInstances,
-// buildInterfaceRouteTables, buildInterfaceHostInboundMap, junosHostZoneBy
-// Interface, zoneIfaceLogicalKeys) — so schema acceptance, validation, and
-// binding stay aligned. Interface names carry no "." except the unit suffix.
+// suffix is split on the FIRST "." — exactly how each subsystem's runtime split
+// the reference before #9821 (buildInterfaceZoneMap,
+// buildInterfaceRoutingInstances, buildInterfaceRouteTables,
+// buildInterfaceHostInboundMap, junosHostZoneByInterface,
+// zoneIfaceLogicalKeys) — so schema acceptance, validation, and binding stay
+// aligned. Interface names carry no "." except the unit suffix ON THE CFG-FREE
+// PATHS THAT CALL THIS. A declared interface name MAY contain a dot
+// (ValidateInterfaceName allows it); callers WITH a *Config must resolve
+// through SplitInterfaceUnitRef instead, which applies the #8994
+// declared-name-first precedence this function cannot express.
 //
 // A bare interface (no "."), a trailing-dot form ("base." — the runtime treats
 // it as bare), or a suffix that is not a valid logical unit is returned
@@ -260,6 +265,117 @@ func CanonicalInterfaceUnitRef(ref string) string {
 		return ref
 	}
 	return base + "." + canon
+}
+
+// InterfaceRefSplit is one parsed cross-subsystem interface reference
+// (#9821). The tuple shape mirrors strings.Cut deliberately so every
+// call-site swap reads as `Cut(x, ".")` → `Split(x)`, with declared-name
+// precedence centralized in the splitter instead of distributed per caller.
+type InterfaceRefSplit struct {
+	// Base is the interface: the DECLARED name when one matched (exact or
+	// longest dot-prefix), else the legacy first-dot base (or the whole
+	// ref when dot-free).
+	Base string
+	// UnitTok is the RAW suffix after Base ("" when bare or trailing-dot).
+	// It is NOT validated here; callers run CanonicalLogicalUnit /
+	// ValidateLogicalUnit exactly as before, so malformed suffixes keep
+	// their current disposition at every call site.
+	UnitTok string
+	// HasUnit reports a ".<suffix>" was present — including trailing-dot
+	// and malformed forms, exactly as strings.Cut would.
+	HasUnit bool
+	// Literal is the canonical single-key form: Base when bare;
+	// Base+"."+canon(UnitTok) when the suffix validates;
+	// Base+"."+UnitTok otherwise. On the legacy path (step 4) this is
+	// byte-equal to CanonicalInterfaceUnitRef(ref) in every case: a valid
+	// suffix canonicalizes identically, an invalid/trailing suffix is
+	// returned unchanged by both.
+	Literal string
+}
+
+// SplitInterfaceUnitRef splits a cross-subsystem interface reference into its
+// interface base and optional ".<unit>" suffix, with a DECLARED name outranking
+// a parse (#8994, extended by #9821 from the kernel-name resolver to every
+// member consumer). Precedence is centralized HERE, in order:
+//
+//  1. raw exact-declared (non-nil stanza) → bare. A padded declared name
+//     (`p.01`) is never normalized away; the raw spelling wins over a
+//     canonical alias when both `p.01` and `p.1` are declared.
+//  2. legacy-canon alias: CanonicalInterfaceUnitRef(raw) exact-declared →
+//     bare with Base/Literal = the canon (`ge-0/0/5.00` → `ge-0/0/5.0`;
+//     #5878 canonical identity honored for declarations too).
+//  3. longest declared dot-prefix of RAW + any suffix → unit (suffix NOT
+//     validated here — see InterfaceRefSplit.UnitTok).
+//  4. else (no declared match, nil receiver/map) → legacy Cut of the legacy
+//     canon, byte-identical to the pre-#9821 behavior on every input.
+//
+// No slash/dash aliasing HERE: #8829 linux-name matching stays local to its
+// daemon consumers, which extend it explicitly. Central aliasing would change
+// plain dash-spelled bare/unit members tree-wide.
+//
+// Nil-receiver safe: a nil *Config (or nil interface map) degrades to step 4,
+// so cfg-free callers behave exactly as before.
+func (c *Config) SplitInterfaceUnitRef(ref string) InterfaceRefSplit {
+	isDeclared := func(string) bool { return false }
+	if c != nil && c.Interfaces.Interfaces != nil {
+		declared := c.Interfaces.Interfaces
+		// Present-but-nil slots count as ABSENT (#5886 LookupInterface
+		// doctrine): only a real stanza outranks a parse.
+		isDeclared = func(name string) bool {
+			ifc, ok := declared[name]
+			return ok && ifc != nil
+		}
+	}
+	return splitInterfaceRefWithDeclared(isDeclared, ref)
+}
+
+// splitInterfaceRefWithDeclared is SplitInterfaceUnitRef over an abstract
+// declared-name predicate, so AST-side consumers (which hold node names, not
+// a *Config) share the ONE precedence implementation instead of re-deriving
+// it. The *Config method delegates to this; their agreement is pinned by
+// TestSplitInterfaceUnitRefAgreesWithDeclaredSet9821.
+func splitInterfaceRefWithDeclared(isDeclared func(string) bool, ref string) InterfaceRefSplit {
+	if isDeclared == nil {
+		isDeclared = func(string) bool { return false }
+	}
+	// Step 1: raw exact-declared.
+	if isDeclared(ref) {
+		return InterfaceRefSplit{Base: ref, Literal: ref}
+	}
+	// Step 2: legacy-canon alias of a declaration.
+	canon := CanonicalInterfaceUnitRef(ref)
+	if canon != ref && isDeclared(canon) {
+		return InterfaceRefSplit{Base: canon, Literal: canon}
+	}
+	// Step 3: longest declared dot-prefix of RAW, scanning back to front so
+	// the first hit wins (`p.0.1` with `p`+`p.0` declared → base `p.0`,
+	// never `p` + invalid `0.1`).
+	for prefix := ref; ; {
+		dot := strings.LastIndexByte(prefix, '.')
+		if dot < 0 {
+			break
+		}
+		prefix = prefix[:dot]
+		if isDeclared(prefix) {
+			return makeInterfaceRefSplit(prefix, ref[len(prefix)+1:], true)
+		}
+	}
+	// Step 4: legacy Cut of the legacy canon.
+	base, unitTok, hasUnit := strings.Cut(canon, ".")
+	return makeInterfaceRefSplit(base, unitTok, hasUnit)
+}
+
+// makeInterfaceRefSplit builds the result tuple plus the canonical Literal
+// for one (base, suffix, hasUnit) triple. hasUnit=false yields the bare
+// form regardless of the suffix value.
+func makeInterfaceRefSplit(base, unitTok string, hasUnit bool) InterfaceRefSplit {
+	if !hasUnit {
+		return InterfaceRefSplit{Base: base, Literal: base}
+	}
+	if _, canon, err := CanonicalLogicalUnit(unitTok); err == nil {
+		return InterfaceRefSplit{Base: base, UnitTok: unitTok, HasUnit: true, Literal: base + "." + canon}
+	}
+	return InterfaceRefSplit{Base: base, UnitTok: unitTok, HasUnit: true, Literal: base + "." + unitTok}
 }
 
 // ValidateLogicalUnit is the ONE canonical numeric-identity validator for a

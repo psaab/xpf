@@ -9016,3 +9016,112 @@ fn worker_sites_publish_the_syn_cookie_key_ring_9173() {
         );
     }
 }
+
+// #9821 cell 13 — the CONSUMER half of the Go→Rust snapshot contract. The
+// Go producer half (`TestContractSnapshotGolden9821`,
+// `pkg/dataplane/userspace`) builds the declared-dotted fixture with
+// stubbed links and byte-pins the marshalled `ConfigSnapshot`; this half
+// deserializes THOSE bytes and asserts the build output they produce — the
+// pair is atomic (name+domain from ONE row) and row identity is structural.
+// Expected values are read FROM the golden, not restated: the only literals
+// are the fixture's stubbed ifindexes (90/91/92), stable by construction.
+// A golden regen that changes behavior reds here until these asserts are
+// re-derived — that re-derivation IS the cross-language review.
+#[cfg(test)]
+mod contract_9821_tests {
+    use super::*;
+    use crate::protocol::ConfigSnapshot;
+
+    const GOLDEN: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../pkg/dataplane/userspace/testdata/contract-9821-declared-snapshot.json"
+    ));
+
+    fn build_contract() -> (ConfigSnapshot, ForwardingState) {
+        let snapshot: ConfigSnapshot =
+            serde_json::from_str(GOLDEN).expect("contract golden deserializes");
+        let mut state = ForwardingState::default();
+        crate::afxdp::forwarding_build::zones::populate_zones(&snapshot, &mut state);
+        crate::afxdp::forwarding_build::interfaces::populate_interfaces(
+            &snapshot,
+            &mut state,
+            &FastSet::default(),
+            &FastSet::default(),
+        )
+        .expect("populate_interfaces");
+        (snapshot, state)
+    }
+
+    /// The same-ifindex pair resolves (name, instance, domain) from ONE row:
+    /// the last — the address-carrying unit row — never a mix.
+    #[test]
+    fn contract_pair_is_atomic_from_the_unit_row() {
+        let (snapshot, state) = build_contract();
+        let unit = snapshot
+            .interfaces
+            .iter()
+            .find(|r| r.name == "ge-0/0/5.0.0")
+            .expect("golden carries the ge-0/0/5.0.0 unit row");
+        assert_eq!(unit.ifindex, 90, "fixture pins the pair on ifindex 90");
+        assert_eq!(
+            state.ifindex_to_config_name.get(&90).cloned(),
+            Some(unit.name.clone()),
+            "the name comes from the unit row"
+        );
+        assert_eq!(
+            state.ifindex_to_routing_instance.get(&90).cloned(),
+            Some(unit.routing_instance.clone()),
+            "the instance comes from the unit row"
+        );
+        assert_eq!(
+            state.ifindex_to_routing_domain.get(&90).copied(),
+            Some(unit.routing_domain),
+            "the domain comes from the unit row — the SAME row as the name"
+        );
+        assert_ne!(
+            unit.routing_domain, 0,
+            "the golden's unit row must carry a real domain or this asserts nothing"
+        );
+    }
+
+    /// Structural identity governs the zone claims: the `Some(false)` base
+    /// row is excluded even though its name has a numeric suffix, and the
+    /// `Some(true)` unit row's zone is admitted.
+    #[test]
+    fn contract_structural_identity_admits_the_unit_zone() {
+        let (snapshot, state) = build_contract();
+        let trust = snapshot
+            .zones
+            .iter()
+            .find(|z| z.name == "trust")
+            .expect("golden carries the trust zone");
+        assert_eq!(
+            state.ifindex_to_zone_id.get(&90).copied(),
+            Some(trust.id),
+            "the unit row's zone is admitted; the base row's inherited zone \
+             is refused, not disagreed into silence"
+        );
+    }
+
+    /// The undotted control pair resolves identically (same-shape rows,
+    /// unchanged behavior), pinning that the contract did not special-case
+    /// the dotted spelling.
+    #[test]
+    fn contract_undotted_control_pair_matches() {
+        let (snapshot, state) = build_contract();
+        let unit = snapshot
+            .interfaces
+            .iter()
+            .find(|r| r.name == "ge-0/0/6.0")
+            .expect("golden carries the ge-0/0/6.0 control row");
+        assert_eq!(unit.ifindex, 92, "fixture pins the control on ifindex 92");
+        assert_eq!(
+            state.ifindex_to_config_name.get(&92).cloned(),
+            Some(unit.name.clone())
+        );
+        assert_eq!(
+            state.ifindex_to_routing_domain.get(&92).copied(),
+            Some(unit.routing_domain)
+        );
+    }
+}

@@ -25,7 +25,7 @@ func TestGenerateStaticRoute_SanitizesVRFName_5557(t *testing.T) {
 		NextHops:    []config.NextHopEntry{{Address: "10.0.2.254"}},
 	}
 
-	got := m.generateStaticRoute(sr, "red\ninjected", nil, nil)
+	got := m.generateStaticRoute(sr, "red\ninjected", nil, nil, nil)
 
 	if strings.Contains(got, "vrf red\ninjected") {
 		t.Fatalf("vrfName newline not sanitized (frr.conf line injection); rendered:\n%q", got)

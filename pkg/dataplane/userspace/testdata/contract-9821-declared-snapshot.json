@@ -1,0 +1,545 @@
+{
+  "version": 21,
+  "generation": 0,
+  "generated_at": "1970-01-01T00:00:00Z",
+  "summary": {
+    "host_name": "",
+    "dataplane_type": "",
+    "interface_count": 2,
+    "zone_count": 1,
+    "policy_count": 0,
+    "scheduler_count": 0,
+    "ha_enabled": false
+  },
+  "capabilities": {
+    "forwarding_supported": true
+  },
+  "map_pins": {
+    "ctrl": "/sys/fs/bpf/xpf/userspace_ctrl",
+    "bindings": "/sys/fs/bpf/xpf/userspace_bindings",
+    "heartbeat": "/sys/fs/bpf/xpf/userspace_heartbeat",
+    "xsk": "/sys/fs/bpf/xpf/userspace_xsk_map",
+    "local_v4": "/sys/fs/bpf/xpf/userspace_local_v4",
+    "local_v6": "/sys/fs/bpf/xpf/userspace_local_v6",
+    "sessions": "/sys/fs/bpf/xpf/userspace_sessions",
+    "conntrack_v4": "/sys/fs/bpf/xpf/sessions",
+    "conntrack_v6": "/sys/fs/bpf/xpf/sessions_v6",
+    "dnat_table": "/sys/fs/bpf/xpf/dnat_table",
+    "dnat_table_v6": "/sys/fs/bpf/xpf/dnat_table_v6",
+    "trace": "/sys/fs/bpf/xpf/userspace_trace"
+  },
+  "zones": [
+    {
+      "name": "trust",
+      "id": 50675,
+      "host_inbound_configured": true
+    }
+  ],
+  "interfaces": [
+    {
+      "name": "ge-0/0/5.0",
+      "zone": "trust",
+      "routing_instance": "RA",
+      "routing_domain": 274651,
+      "linux_name": "ge-0-0-5.0",
+      "ifindex": 90,
+      "egress_zone": "trust",
+      "unit_count": 2,
+      "tunnel": false,
+      "mtu": 1500,
+      "hardware_addr": "02:00:00:00:00:90",
+      "is_unit": false
+    },
+    {
+      "name": "ge-0/0/5.0.0",
+      "zone": "trust",
+      "routing_instance": "RA",
+      "routing_domain": 274651,
+      "linux_name": "ge-0-0-5.0",
+      "parent_linux_name": "ge-0-0-5.0",
+      "ifindex": 90,
+      "parent_ifindex": 90,
+      "egress_zone": "trust",
+      "unit_count": 0,
+      "tunnel": false,
+      "mtu": 1500,
+      "hardware_addr": "02:00:00:00:00:90",
+      "addresses": [
+        {
+          "family": "inet",
+          "address": "10.55.0.1/24"
+        }
+      ],
+      "is_unit": true
+    },
+    {
+      "name": "ge-0/0/5.0.100",
+      "routing_instance": "RA",
+      "routing_domain": 274651,
+      "linux_name": "ge-0-0-5.0.100",
+      "parent_linux_name": "ge-0-0-5.0",
+      "ifindex": 91,
+      "parent_ifindex": 90,
+      "vlan_id": 100,
+      "egress_zone": "",
+      "unit_count": 0,
+      "tunnel": false,
+      "mtu": 1500,
+      "hardware_addr": "02:00:00:00:00:91",
+      "addresses": [
+        {
+          "family": "inet",
+          "address": "10.55.100.1/24"
+        }
+      ],
+      "is_unit": true
+    },
+    {
+      "name": "ge-0/0/6",
+      "zone": "trust",
+      "linux_name": "ge-0-0-6",
+      "ifindex": 92,
+      "egress_zone": "trust",
+      "unit_count": 1,
+      "tunnel": false,
+      "mtu": 1500,
+      "hardware_addr": "02:00:00:00:00:92",
+      "is_unit": false
+    },
+    {
+      "name": "ge-0/0/6.0",
+      "zone": "trust",
+      "routing_instance": "RA",
+      "routing_domain": 274651,
+      "linux_name": "ge-0-0-6",
+      "parent_linux_name": "ge-0-0-6",
+      "ifindex": 92,
+      "parent_ifindex": 92,
+      "egress_zone": "trust",
+      "unit_count": 0,
+      "tunnel": false,
+      "mtu": 1500,
+      "hardware_addr": "02:00:00:00:00:92",
+      "addresses": [
+        {
+          "family": "inet",
+          "address": "10.56.0.1/24"
+        }
+      ],
+      "is_unit": true
+    }
+  ],
+  "routes": [
+    {
+      "table": "RA.inet.0",
+      "family": "inet",
+      "destination": "10.55.0.0/24",
+      "discard": false
+    },
+    {
+      "table": "RA.inet.0",
+      "family": "inet",
+      "destination": "10.55.100.0/24",
+      "discard": false
+    },
+    {
+      "table": "RA.inet.0",
+      "family": "inet",
+      "destination": "10.56.0.0/24",
+      "discard": false
+    }
+  ],
+  "flow": {},
+  "default_policy": "deny",
+  "config": {
+    "Security": {
+      "Zones": {
+        "trust": {
+          "Name": "trust",
+          "Description": "",
+          "Interfaces": [
+            "ge-0/0/5.0.0",
+            "ge-0/0/6.0"
+          ],
+          "ScreenProfile": "",
+          "HostInboundTraffic": null,
+          "InterfaceHostInbound": null,
+          "DHCPScopeWithheld": null,
+          "ResolvedInterfaceOverrides": {},
+          "ResolvedInterfaceDeclared": {
+            "ge-0/0/5.0": true,
+            "ge-0/0/6": true
+          },
+          "TCPRst": false,
+          "AddressBook": null
+        }
+      },
+      "Policies": null,
+      "GlobalPolicies": null,
+      "DefaultPolicy": 1,
+      "NAT": {
+        "Source": null,
+        "SourcePools": null,
+        "AddressPersistent": false,
+        "Destination": null,
+        "Static": null,
+        "NAT64": null,
+        "NATv6v4": null,
+        "PoolUtilizationAlarm": null,
+        "ProxyARP": null,
+        "SourceInterfacePortOverloadingOff": false
+      },
+      "Screen": {},
+      "AddressBook": null,
+      "Log": {
+        "Mode": "",
+        "Format": "",
+        "SourceInterface": "",
+        "Streams": null,
+        "Report": false,
+        "Profiles": null
+      },
+      "Flow": {
+        "TCPSession": null,
+        "UDPSessionTimeout": 0,
+        "ICMPSessionTimeout": 0,
+        "TCPMSSAllTCP": 0,
+        "TCPMSSIPsecVPN": 0,
+        "TCPMSSGreIn": 0,
+        "TCPMSSGreOut": 0,
+        "AllowDNSReply": false,
+        "AllowEmbeddedICMP": false,
+        "GREPerformanceAcceleration": false,
+        "PowerModeDisable": false,
+        "SynFloodProtectionMode": "",
+        "Traceoptions": null,
+        "AgingEarlyAgeout": 0,
+        "AgingHighWatermark": 0,
+        "AgingLowWatermark": 0,
+        "AgingUnknownLeaves": null,
+        "RouteChangeTimeout": 0,
+        "SyncICMPSession": false,
+        "ForceIPReassembly": false,
+        "MulticastSessionLifetime": 0,
+        "PreserveIncomingFragmentSize": false
+      },
+      "ALG": {
+        "DNSDisable": false,
+        "FTPDisable": false,
+        "SIPDisable": false,
+        "TFTPDisable": false,
+        "UnsupportedProtos": null
+      },
+      "IPsec": {
+        "IKEProposals": null,
+        "IKEPolicies": null,
+        "Gateways": null,
+        "Proposals": null,
+        "Policies": null,
+        "VPNs": null
+      },
+      "DynamicAddress": {
+        "FeedServers": null,
+        "AddressBindings": null
+      },
+      "SSHKnownHosts": null,
+      "PolicyStatsEnabled": false,
+      "PreIDDefaultPolicy": null,
+      "DefaultPolicyLogSessionInit": false,
+      "DefaultPolicyLogSessionClose": false,
+      "PolicyRematch": false,
+      "PolicyRematchExtensive": false
+    },
+    "Interfaces": {
+      "Interfaces": {
+        "ge-0/0/5.0": {
+          "Name": "ge-0/0/5.0",
+          "Description": "",
+          "MTU": 0,
+          "Speed": "",
+          "Duplex": "",
+          "VlanTagging": true,
+          "FlexibleVlanTagging": false,
+          "Encapsulation": "",
+          "Bandwidth": 0,
+          "Disable": false,
+          "RedundantParent": "",
+          "LAGParent": "",
+          "RedundancyGroup": 0,
+          "FabricMembers": null,
+          "LocalFabricMember": "",
+          "BondMode": "",
+          "AggregatedEtherOpts": null,
+          "Units": {
+            "0": {
+              "Number": 0,
+              "Description": "",
+              "VlanID": 0,
+              "InnerVlanID": 0,
+              "PointToPoint": false,
+              "Addresses": [
+                "10.55.0.1/24"
+              ],
+              "PrimaryAddress": "",
+              "PreferredAddress": "",
+              "MTU": 0,
+              "DHCP": false,
+              "DHCPOptions": null,
+              "DHCPv6": false,
+              "DHCPv6Client": null,
+              "DADDisable": false,
+              "UnnumberedInet": "",
+              "TargetedBroadcast": false,
+              "SamplingInput": false,
+              "SamplingOutput": false,
+              "FilterInputV4": "",
+              "FilterOutputV4": "",
+              "FilterInputV6": "",
+              "FilterOutputV6": "",
+              "VRRPGroups": null,
+              "Tunnel": null,
+              "DynamicDNSInet": null,
+              "DynamicDNSInet6": null
+            },
+            "100": {
+              "Number": 100,
+              "Description": "",
+              "VlanID": 100,
+              "InnerVlanID": 0,
+              "PointToPoint": false,
+              "Addresses": [
+                "10.55.100.1/24"
+              ],
+              "PrimaryAddress": "",
+              "PreferredAddress": "",
+              "MTU": 0,
+              "DHCP": false,
+              "DHCPOptions": null,
+              "DHCPv6": false,
+              "DHCPv6Client": null,
+              "DADDisable": false,
+              "UnnumberedInet": "",
+              "TargetedBroadcast": false,
+              "SamplingInput": false,
+              "SamplingOutput": false,
+              "FilterInputV4": "",
+              "FilterOutputV4": "",
+              "FilterInputV6": "",
+              "FilterOutputV6": "",
+              "VRRPGroups": null,
+              "Tunnel": null,
+              "DynamicDNSInet": null,
+              "DynamicDNSInet6": null
+            }
+          },
+          "Tunnel": null,
+          "NativeVlanID": 0,
+          "GratuitousARPReply": false,
+          "NoGratuitousARPRequest": false
+        },
+        "ge-0/0/6": {
+          "Name": "ge-0/0/6",
+          "Description": "",
+          "MTU": 0,
+          "Speed": "",
+          "Duplex": "",
+          "VlanTagging": false,
+          "FlexibleVlanTagging": false,
+          "Encapsulation": "",
+          "Bandwidth": 0,
+          "Disable": false,
+          "RedundantParent": "",
+          "LAGParent": "",
+          "RedundancyGroup": 0,
+          "FabricMembers": null,
+          "LocalFabricMember": "",
+          "BondMode": "",
+          "AggregatedEtherOpts": null,
+          "Units": {
+            "0": {
+              "Number": 0,
+              "Description": "",
+              "VlanID": 0,
+              "InnerVlanID": 0,
+              "PointToPoint": false,
+              "Addresses": [
+                "10.56.0.1/24"
+              ],
+              "PrimaryAddress": "",
+              "PreferredAddress": "",
+              "MTU": 0,
+              "DHCP": false,
+              "DHCPOptions": null,
+              "DHCPv6": false,
+              "DHCPv6Client": null,
+              "DADDisable": false,
+              "UnnumberedInet": "",
+              "TargetedBroadcast": false,
+              "SamplingInput": false,
+              "SamplingOutput": false,
+              "FilterInputV4": "",
+              "FilterOutputV4": "",
+              "FilterInputV6": "",
+              "FilterOutputV6": "",
+              "VRRPGroups": null,
+              "Tunnel": null,
+              "DynamicDNSInet": null,
+              "DynamicDNSInet6": null
+            }
+          },
+          "Tunnel": null,
+          "NativeVlanID": 0,
+          "GratuitousARPReply": false,
+          "NoGratuitousARPRequest": false
+        }
+      }
+    },
+    "Applications": {
+      "Applications": {},
+      "ApplicationSets": {},
+      "MixedDirectTermApps": null
+    },
+    "RoutingOptions": {
+      "StaticRoutes": null,
+      "Inet6StaticRoutes": null,
+      "UnhandledRibs": null,
+      "GenerateRoutes": null,
+      "ForwardingTableExport": "",
+      "ForwardingTableExports": null,
+      "AutonomousSystem": 0,
+      "RibGroups": null,
+      "InterfaceRoutesRibGroup": "",
+      "InterfaceRoutesRibGroupV6": ""
+    },
+    "Protocols": {
+      "OSPF": null,
+      "OSPFv3": null,
+      "BGP": null,
+      "RIP": null,
+      "ISIS": null,
+      "RouterAdvertisement": null,
+      "LLDP": null
+    },
+    "RoutingInstances": [
+      {
+        "Name": "RA",
+        "Description": "",
+        "InstanceType": "",
+        "Interfaces": [
+          "ge-0/0/5.0",
+          "ge-0/0/6.0"
+        ],
+        "StaticRoutes": null,
+        "Inet6StaticRoutes": null,
+        "UnhandledRibs": null,
+        "OSPF": null,
+        "OSPFv3": null,
+        "BGP": null,
+        "RIP": null,
+        "ISIS": null,
+        "AutonomousSystem": 0,
+        "TableID": 274651,
+        "InterfaceRoutesRibGroup": "",
+        "InterfaceRoutesRibGroupV6": ""
+      }
+    ],
+    "Firewall": {
+      "FiltersInet": null,
+      "FiltersInet6": null,
+      "Policers": null,
+      "ThreeColorPolicers": null
+    },
+    "ClassOfService": {
+      "ForwardingClasses": {},
+      "DSCPClassifiers": {},
+      "IEEE8021Classifiers": null,
+      "INetPrecedenceClassifierDefs": null,
+      "DSCPRewriteRules": {},
+      "IEEE8021RewriteRules": null,
+      "Schedulers": {},
+      "SchedulerMaps": {},
+      "Interfaces": {},
+      "FairnessExpectations": null,
+      "INetPrecedenceClassifiers": null,
+      "INetPrecedenceRewriteRules": null,
+      "EXPRewriteRules": null,
+      "TrafficControlProfiles": null
+    },
+    "Services": {
+      "FlowMonitoring": null,
+      "RPM": null,
+      "IPMonitoring": null,
+      "ApplicationIdentification": false
+    },
+    "ForwardingOptions": {
+      "Sampling": null,
+      "DHCPRelay": null,
+      "FamilyInet6Mode": "",
+      "PortMirroring": null,
+      "AllowDataplaneSleep": false
+    },
+    "System": {
+      "HostName": "",
+      "DomainName": "",
+      "DomainSearch": null,
+      "TimeZone": "",
+      "NameServers": null,
+      "NTPServers": null,
+      "NTPServerOptions": null,
+      "NTPThreshold": 0,
+      "NTPThresholdAction": "",
+      "NoRedirects": false,
+      "BackupRouter": "",
+      "BackupRouterDst": "",
+      "Lo0FilterInputV4": "",
+      "Lo0FilterInputV6": "",
+      "DataplaneType": "",
+      "UserspaceDataplane": null,
+      "InternetOptions": null,
+      "Services": null,
+      "Syslog": null,
+      "DHCPServer": {
+        "DHCPLocalServer": null,
+        "DHCPv6LocalServer": null,
+        "DynamicDNS": null,
+        "DynamicDNSv6": null
+      },
+      "SNMP": null,
+      "Login": null,
+      "LoginDroppedByPacking": false,
+      "RootAuthentication": null,
+      "Archival": null,
+      "MasterPassword": "",
+      "LicenseAutoUpdate": "",
+      "DisabledProcesses": null,
+      "PersistGroupsInheritance": false,
+      "ManagementInterface": ""
+    },
+    "PolicyOptions": {
+      "PrefixLists": null,
+      "Communities": null,
+      "ASPaths": null,
+      "PolicyStatements": null
+    },
+    "Schedulers": null,
+    "Chassis": {
+      "Cluster": null,
+      "DeviceMap": null
+    },
+    "EventOptions": null,
+    "BridgeDomains": null,
+    "Warnings": [
+      "zone interface defined (downgraded to warning on tolerant path): security zone \"trust\" references interface \"ge-0/0/5.0.0\", which is not defined under `interfaces` (nor materialized as the lo0 loopback or an IPsec secure-tunnel bind-interface); Junos rejects a zone member that names no configured interface — define the interface or fix the typo (the daemon brings an unconfigured interface DOWN, so the zone member silently carries no traffic)"
+    ],
+    "LenientNATTerminalActionRules": null
+  },
+  "userspace": {
+    "binary": "",
+    "control_socket": "/run/xpf/userspace-dp.sock",
+    "event_socket": "/run/xpf/userspace-dp-events.sock",
+    "state_file": "/run/xpf/userspace-dp.json",
+    "workers": 1,
+    "ring_entries": 1024,
+    "poll_mode": ""
+  }
+}

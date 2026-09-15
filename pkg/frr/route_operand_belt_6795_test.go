@@ -72,7 +72,7 @@ func TestMalformedStaticRouteOperandsNeverReachFRRConf6795(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			out := m.generateStaticRouteInTable(tc.route, "", 0, nil, nil)
+			out := m.generateStaticRouteInTable(tc.route, "", 0, nil, nil, nil)
 			if strings.Contains(out, tc.absent) {
 				t.Fatalf("a malformed route operand reached frr.conf (%q):\n%s",
 					tc.absent, out)
@@ -81,8 +81,7 @@ func TestMalformedStaticRouteOperandsNeverReachFRRConf6795(t *testing.T) {
 			// Control on the SAME renderer: a legitimate route must still
 			// render fully, so the assertion above is not passing because the
 			// renderer emits nothing at all.
-			ok := m.generateStaticRouteInTable(
-				staticRoute6795("10.2.0.0/16", good), "", 0, nil, nil)
+			ok := m.generateStaticRouteInTable(staticRoute6795("10.2.0.0/16", good), "", 0, nil, nil, nil)
 			if !strings.Contains(ok, "ip route 10.2.0.0/16 10.0.0.1") {
 				t.Fatalf("the VALID route did not render, so this cell cannot "+
 					"distinguish a working belt from a broken renderer:\n%s", ok)
@@ -108,7 +107,7 @@ func TestEcmpDropsOnlyTheBadNextHop6795(t *testing.T) {
 			{Address: "10.0.0.3"},
 		},
 	}
-	out := m.generateStaticRouteInTable(route, "", 0, nil, nil)
+	out := m.generateStaticRouteInTable(route, "", 0, nil, nil, nil)
 
 	for _, want := range []string{"10.0.0.1", "10.0.0.3"} {
 		if !strings.Contains(out, "ip route 10.1.0.0/16 "+want) {

@@ -423,10 +423,10 @@ func compileNAT(dp DataPlane, cfg *config.Config, result *CompileResult) error {
 						if vlanID > 0 {
 							subName = fmt.Sprintf("%s.%d", physName, vlanID)
 						}
-						if ip, ierr := getInterfaceIP(subName, result); ierr == nil {
+						if ip, ierr := getInterfaceIPFn(subName, result); ierr == nil {
 							unitV4 = ip
 						}
-						if ip, ierr := getInterfaceIPv6(subName, result); ierr == nil {
+						if ip, ierr := getInterfaceIPv6Fn(subName, result); ierr == nil {
 							unitV6 = ip
 						}
 					}

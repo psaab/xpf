@@ -272,7 +272,27 @@ const (
 	// enforces the widened term exactly as before — the pre-fix window,
 	// closed on upgrade. Exact equality refuses both pairings; the #8892
 	// digest moves with it (a real, transmitted field).
-	ProtocolVersion = 20
+	//
+	// v21 (issue 9821): `InterfaceSnapshot.IsUnit`, the STRUCTURAL row
+	// identity (true = logical-unit row, false = interface row), emitted
+	// unconditionally. BUMPED on the merits under the v9 rule: an old helper
+	// parses every row by NAME SHAPE ("contains a dot"), so a v20 helper
+	// reads a dotted base row (`ge-0/0/5.0`) as a UNIT row — admitting its
+	// zone claim into the unit agreement (#7509) and its netdev into the
+	// ingress identity (#9637) — and that misread IS the defect the field
+	// closes, not an acceptable degradation. The reverse pairing degrades by
+	// construction instead of refusing: a new helper reads `None` (absent
+	// key) as "parse the name", which is old-Go behavior exactly — but exact
+	// equality refuses the pairing anyway, because a mixed window would
+	// silently lose the fix on the old side. The #8892 digest moves with it
+	// (a real, transmitted field).
+	//
+	// #9875 claimed 20 first for a different wire change. The v8 rule
+	// applies: the merged wire carries BOTH contracts, so it cannot reuse
+	// 20 — a v20 helper built from #9875 alone would accept this daemon's
+	// snapshots and misread every dotted base row. 21 was never shipped by
+	// either side.
+	ProtocolVersion = 21
 
 	// MinProtocolMultiZoneScopedPolicy is the FIRST snapshot protocol version
 	// that can represent a multi-zone scoped global policy — the plural
@@ -977,6 +997,24 @@ type InterfaceSnapshot struct {
 	HostInboundConfigured     bool     `json:"host_inbound_configured,omitempty"`
 	HostInboundSystemServices []string `json:"host_inbound_system_services,omitempty"`
 	HostInboundProtocols      []string `json:"host_inbound_protocols,omitempty"`
+	// IsUnit is the STRUCTURAL row identity: true when this row was emitted
+	// for a logical unit, false for an interface (base) row (#9821 #22).
+	// Name shape cannot answer this — a declared interface may itself
+	// contain a dot (`ge-0/0/5.0`), so "contains a dot" reads a dotted base
+	// row as a unit row. The builder knows which loop emitted the row and
+	// states it here instead of making every consumer re-derive it.
+	//
+	// Emitted UNCONDITIONALLY (no omitempty): false is the base-row answer,
+	// not an absence. The Rust side reads `Option<bool>` — `Some` is
+	// structural, `None` (old Go, tests, fixtures) falls back to the legacy
+	// name parse, which is old-Go behavior exactly.
+	//
+	// BUMPED 20 -> 21 with this field, by the v9 rule: an old helper parses
+	// every row by name shape, so a v20 helper would read a dotted base row
+	// as a unit row — and that misread IS the defect the field closes, not
+	// an acceptable degradation. Exact equality refuses the pairing both
+	// ways (see the v21 note on ProtocolVersion).
+	IsUnit bool `json:"is_unit"`
 }
 
 type FabricSnapshot struct {

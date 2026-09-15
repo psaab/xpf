@@ -3,7 +3,6 @@ package config
 import (
 	"fmt"
 	"strconv"
-	"strings"
 )
 
 // validateProtocolInterfaceRefWarnings makes the #9405 failure LOUD.
@@ -115,20 +114,29 @@ func unresolvedInterfaceRef(declared map[string]*InterfaceConfig, ref string) st
 	if _, ok := declared[ref]; ok {
 		return ""
 	}
-	base, unitPart, dotted := strings.Cut(ref, ".")
-	ifc, ok := declared[base]
+	// #9821 D17: the unit arm splits through the SAME index (either
+	// spelling), so longest-declared-prefix + Atoi + unit-exists replaces
+	// the first-dot cut — `ge-0/0/5.0.1` resolves against declared
+	// `ge-0/0/5.0`, not undeclared `ge-0/0/5`. Post-#11 FRR binds
+	// double-dot refs the advisory would otherwise call undefined, so an
+	// unmigrated arm is a NEW divergence, not a preserved one.
+	s := splitInterfaceRefWithDeclared(func(n string) bool {
+		_, ok := declared[n]
+		return ok
+	}, ref)
+	ifc, ok := declared[s.Base]
 	if !ok {
 		return "names no configured interface"
 	}
-	if !dotted {
+	if !s.HasUnit {
 		return ""
 	}
-	unit, err := strconv.Atoi(unitPart)
+	unit, err := strconv.Atoi(s.UnitTok)
 	if err != nil {
 		return "has an unparseable unit"
 	}
 	if u, ok := ifc.Units[unit]; !ok || u == nil {
-		return "names no configured unit on " + base
+		return "names no configured unit on " + s.Base
 	}
 	return ""
 }

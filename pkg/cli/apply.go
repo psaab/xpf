@@ -273,10 +273,16 @@ func (c *CLI) applyToDataplane(cfg *config.Config) error {
 		// Collect interface bandwidths and point-to-point flags for FRR.
 		ifaceBandwidths := make(map[string]uint64)
 		ifaceP2P := make(map[string]bool)
+		// #9821: same declared-name → device map the daemon wires, so this
+		// legacy standalone-CLI path renders devices for authored operands.
+		declaredNetdevs := make(map[string]string)
 		for name, ifc := range cfg.Interfaces.Interfaces {
 			if ifc == nil { // #5886: skip present-but-nil InterfaceConfig
 				continue
 			}
+			linuxName := config.LinuxIfName(name)
+			declaredNetdevs[name] = linuxName
+			declaredNetdevs[linuxName] = linuxName
 			if ifc.Bandwidth > 0 {
 				ifaceBandwidths[name] = ifc.Bandwidth
 			}
@@ -296,6 +302,7 @@ func (c *CLI) applyToDataplane(cfg *config.Config) error {
 			BGP:                   cfg.Protocols.BGP,
 			StaticRoutes:          cfg.RoutingOptions.StaticRoutes,
 			InterfaceBandwidths:   ifaceBandwidths,
+			DeclaredNetdevs:       declaredNetdevs,
 			InterfacePointToPoint: ifaceP2P,
 			// #9405: same canonical resolver the daemon's assembleFRRConfig
 			// wires, so this legacy standalone-CLI apply path cannot render a

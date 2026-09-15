@@ -2,6 +2,7 @@ package userspace
 
 import (
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -109,5 +110,112 @@ func TestResolverAgreement8994(t *testing.T) {
 			"reproduces exactly this. The NOTE in pkg/config/types.go asks for these to "+
 			"be kept in step and cannot detect it; this cell can.",
 			len(diverged), strings.Join(diverged, "\n  "))
+	}
+}
+
+// TestResolverAgreementDeclaredUnit9821 extends TestResolverAgreement8994's
+// empty-divergence property from bare declared names to UNIT refs: for the
+// same configured (interface, unit), ResolveKernelIfName(ref) must equal
+// snapshotLinuxName(cfg, base, ifc, unit) — including vlan-numbered,
+// unit-0-collapsed, padded, and tunneled units on dotted bases (#9821 #11).
+// Struct-built: only configured (not derived) names are compared, except
+// where noted.
+func TestResolverAgreementDeclaredUnit9821(t *testing.T) {
+	cfg := &config.Config{Interfaces: config.InterfacesConfig{Interfaces: map[string]*config.InterfaceConfig{
+		"ge-0/0/5.0": {Name: "ge-0/0/5.0", Units: map[int]*config.InterfaceUnit{
+			0:  {Number: 0},
+			1:  {Number: 1},
+			7:  {Number: 7},
+			10: {Number: 10, VlanID: 100},
+		}},
+		"ge-0/0/6": {Name: "ge-0/0/6", Units: map[int]*config.InterfaceUnit{
+			0: {Number: 0},
+			3: {Number: 3, Tunnel: &config.TunnelConfig{Name: "utun9"}},
+		}},
+		"gr-0/0/9.0": {
+			Name:   "gr-0/0/9.0",
+			Tunnel: &config.TunnelConfig{Source: "10.0.0.1", Destination: "10.0.0.2"},
+			Units:  map[int]*config.InterfaceUnit{1: {Number: 1}},
+		},
+	}}}
+	cases := []struct{ ref, base string }{
+		{"ge-0/0/5.0.0", "ge-0/0/5.0"},  // unit-0 collapse onto the dotted base device
+		{"ge-0/0/5.0.1", "ge-0/0/5.0"},  // plain numbered unit of a dotted base
+		{"ge-0/0/5.0.01", "ge-0/0/5.0"}, // padded spelling, same unit
+		{"ge-0/0/5.0.7", "ge-0/0/5.0"},  // untagged non-zero unit
+		{"ge-0/0/5.0.10", "ge-0/0/5.0"}, // vlan-id wins over unit number
+		{"ge-0/0/6.0", "ge-0/0/6"},      // undotted controls
+		{"ge-0/0/6.3", "ge-0/0/6"},      // per-unit tunnel device (assigned name)
+		{"gr-0/0/9.0.1", "gr-0/0/9.0"},  // interface-level tunnel shared device
+		{"gr-0/0/9.0.01", "gr-0/0/9.0"}, // padded ref onto the shared tunnel
+	}
+	var diverged []string
+	for _, tc := range cases {
+		ifc := cfg.Interfaces.Interfaces[tc.base]
+		if ifc == nil {
+			t.Fatalf("fixture lacks declared %q", tc.base)
+		}
+		// The unit under test is the LAST dot segment (padded spellings fold
+		// onto the canonical unit, #5878).
+		unitTok := tc.ref[len(tc.base)+1:]
+		unitNum, err := strconv.Atoi(unitTok)
+		if err != nil {
+			t.Fatalf("fixture ref %q has non-numeric unit %q", tc.ref, unitTok)
+		}
+		unit := ifc.Units[unitNum]
+		if unit == nil {
+			t.Fatalf("fixture lacks unit %d on %q", unitNum, tc.base)
+		}
+		viaConfig := cfg.ResolveKernelIfName(tc.ref)
+		viaDataplane := snapshotLinuxName(cfg, tc.base, ifc, unit)
+		if viaConfig != viaDataplane {
+			diverged = append(diverged, tc.ref+": config="+viaConfig+" dataplane="+viaDataplane)
+		}
+	}
+	sort.Strings(diverged)
+	if len(diverged) != 0 {
+		t.Errorf("#9821: ResolveKernelIfName and snapshotLinuxName disagree on %d unit ref(s):\n  %s",
+			len(diverged), strings.Join(diverged, "\n  "))
+	}
+}
+
+// TestResolverTunnelCollisionIsDifferentObjects9821 pins the BOTH-declared
+// tunnel-collision shape as two correct answers, not a divergence: the
+// AUTHORED ref names the declared dotted interface, while the STRUCTURAL
+// (interface, unit) pair names the tunnel device. Conflating them (in
+// either direction) is the Codex-F1 failure; distinguishing them is the
+// #8994 doctrine this cohort extends.
+func TestResolverTunnelCollisionIsDifferentObjects9821(t *testing.T) {
+	tree := &config.ConfigTree{}
+	for _, l := range []string{
+		"set interfaces gr-0/0/0 unit 0 tunnel mode gre",
+		"set interfaces gr-0/0/0 unit 0 tunnel source 10.0.0.1",
+		"set interfaces gr-0/0/0 unit 0 tunnel destination 10.0.0.2",
+		"set interfaces gr-0/0/0.0 unit 0 family inet address 10.9.2.1/24",
+	} {
+		path, err := config.ParseSetCommand(l)
+		if err != nil {
+			t.Fatalf("parse %q: %v", l, err)
+		}
+		tree.SetPath(path)
+	}
+	cfg, err := config.CompileConfig(tree)
+	if err != nil {
+		t.Fatalf("corpus must COMPILE for this to be reachable: %v", err)
+	}
+	authored := cfg.ResolveKernelIfName("gr-0/0/0.0")
+	if authored != "gr-0-0-0.0" {
+		t.Errorf("authored ResolveKernelIfName(gr-0/0/0.0) = %q, want the declared device gr-0-0-0.0", authored)
+	}
+	grIface := cfg.Interfaces.Interfaces["gr-0/0/0"]
+	if grIface == nil || grIface.Units[0] == nil {
+		t.Fatal("corpus lost gr-0/0/0 unit 0")
+	}
+	structural := snapshotLinuxName(cfg, "gr-0/0/0", grIface, grIface.Units[0])
+	if structural != "gr-0-0-0" {
+		t.Errorf("structural snapshotLinuxName(gr-0/0/0 unit 0) = %q, want the tunnel device gr-0-0-0", structural)
+	}
+	if authored == structural {
+		t.Errorf("authored (%q) and structural (%q) agree — the test no longer distinguishes the two objects", authored, structural)
 	}
 }

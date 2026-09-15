@@ -54,12 +54,12 @@ func TestStaticRejectRendersUnreachable_5298(t *testing.T) {
 	})
 
 	v4 := findStaticReject5298(t, c.RoutingOptions.StaticRoutes, "10.9.0.0/16")
-	if got, want := m.generateStaticRoute(v4, "", nil, nil), "ip route 10.9.0.0/16 reject 5\n"; got != want {
+	if got, want := m.generateStaticRoute(v4, "", nil, nil, nil), "ip route 10.9.0.0/16 reject 5\n"; got != want {
 		t.Errorf("v4 reject render = %q, want %q", got, want)
 	}
 
 	v6 := findStaticReject5298(t, c.RoutingOptions.StaticRoutes, "2001:db8:dead::/48")
-	if got, want := m.generateStaticRoute(v6, "", nil, nil), "ipv6 route 2001:db8:dead::/48 reject 5\n"; got != want {
+	if got, want := m.generateStaticRoute(v6, "", nil, nil, nil), "ipv6 route 2001:db8:dead::/48 reject 5\n"; got != want {
 		t.Errorf("v6 reject render = %q, want %q", got, want)
 	}
 }
@@ -74,12 +74,12 @@ func TestStaticDiscardRendersNull0_5298(t *testing.T) {
 	})
 
 	v4 := findStaticReject5298(t, c.RoutingOptions.StaticRoutes, "10.8.0.0/16")
-	if got, want := m.generateStaticRoute(v4, "", nil, nil), "ip route 10.8.0.0/16 Null0 5\n"; got != want {
+	if got, want := m.generateStaticRoute(v4, "", nil, nil, nil), "ip route 10.8.0.0/16 Null0 5\n"; got != want {
 		t.Errorf("v4 discard render = %q, want %q", got, want)
 	}
 
 	v6 := findStaticReject5298(t, c.RoutingOptions.StaticRoutes, "2001:db8:beef::/48")
-	if got, want := m.generateStaticRoute(v6, "", nil, nil), "ipv6 route 2001:db8:beef::/48 Null0 5\n"; got != want {
+	if got, want := m.generateStaticRoute(v6, "", nil, nil, nil), "ipv6 route 2001:db8:beef::/48 Null0 5\n"; got != want {
 		t.Errorf("v6 discard render = %q, want %q", got, want)
 	}
 }
@@ -91,13 +91,13 @@ func TestStaticRejectRenderShape_5298(t *testing.T) {
 
 	// Default preference (0 in a hand-built route → no trailing distance).
 	sr := &config.StaticRoute{Destination: "192.0.2.0/24", Reject: true}
-	if got, want := m.generateStaticRoute(sr, "", nil, nil), "ip route 192.0.2.0/24 reject\n"; got != want {
+	if got, want := m.generateStaticRoute(sr, "", nil, nil, nil), "ip route 192.0.2.0/24 reject\n"; got != want {
 		t.Errorf("reject (no pref) = %q, want %q", got, want)
 	}
 
 	// Explicit preference + VRF.
 	srPref := &config.StaticRoute{Destination: "192.0.2.0/24", Reject: true, Preference: 20}
-	if got, want := m.generateStaticRoute(srPref, "blue", nil, nil), "ip route 192.0.2.0/24 reject 20 vrf blue\n"; got != want {
+	if got, want := m.generateStaticRoute(srPref, "blue", nil, nil, nil), "ip route 192.0.2.0/24 reject 20 vrf blue\n"; got != want {
 		t.Errorf("reject (pref+vrf) = %q, want %q", got, want)
 	}
 }

@@ -86,17 +86,24 @@ func stampZoneDHCPScopeWithheld(cfg *Config) {
 			if withheld == nil {
 				withheld = map[string]bool{}
 			}
+			// #9821: stamp the canonical Literal alongside the authored
+			// spelling so padded multi-dot refs (`p.0.01`) withhold the
+			// canonical unit (`p.0.1`) the enforcement path resolves.
+			// Single-dot behavior is byte-identical (Literal == legacy canon).
 			withheld[ref] = true
-			withheld[CanonicalInterfaceUnitRef(ref)] = true
+			withheld[cfg.SplitInterfaceUnitRef(ref).Literal] = true
 		}
 		for _, ref := range zone.Interfaces {
 			mark(ref)
-			if strings.Contains(ref, ".") {
+			// #9821: bare-vs-unit decided by the split (declared-first):
+			// a dotted-physical member fans down onto its units.
+			s := cfg.SplitInterfaceUnitRef(ref)
+			if s.HasUnit {
 				continue
 			}
-			if ifc := cfg.Interfaces.Interfaces[ref]; ifc != nil {
+			if ifc := cfg.Interfaces.Interfaces[s.Base]; ifc != nil {
 				for unitNum := range ifc.Units {
-					mark(fmt.Sprintf("%s.%d", ref, unitNum))
+					mark(fmt.Sprintf("%s.%d", s.Base, unitNum))
 				}
 			}
 		}

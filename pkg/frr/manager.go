@@ -430,6 +430,15 @@ type FullConfig struct {
 	// Used to translate RETH interface names in static routes to kernel names.
 	RethMap map[string]string
 
+	// DeclaredNetdevs maps every DECLARED interface name in BOTH spellings
+	// (authored Junos + linux) to its kernel device (#9821 #15v3 + D7).
+	// Static-route render probes it before the legacy `.0` strip so an
+	// authored dotted declaration (`ge-0/0/5.0`) renders its device
+	// (`ge-0-0-5.0`) instead of being mis-stripped, and authored
+	// slash-spelled undotted operands (`ge-0/0/1`) render kernel names
+	// instead of FRR-choking slashes. nil → legacy behavior throughout.
+	DeclaredNetdevs map[string]string
+
 	// IPv6NextHopInterfaces maps VRF name -> IPv6 next-hop -> interface for
 	// global and per-instance static routes that omit an explicit interface.
 	// Values may still be logical interface names (for example, "reth0.50");
@@ -606,7 +615,7 @@ func (m *Manager) buildManagedSection(fc *FullConfig) string {
 	// 1. Global static routes
 	if len(fc.StaticRoutes) > 0 {
 		for _, sr := range fc.StaticRoutes {
-			b.WriteString(m.generateStaticRoute(sr, "", fc.RethMap, fc.IPv6NextHopInterfaces))
+			b.WriteString(m.generateStaticRoute(sr, "", fc.RethMap, fc.IPv6NextHopInterfaces, fc.DeclaredNetdevs))
 		}
 		b.WriteString("!\n")
 	}
@@ -617,7 +626,7 @@ func (m *Manager) buildManagedSection(fc *FullConfig) string {
 	// 3. IPv6 RIB static routes (rib inet6.0)
 	if len(fc.Inet6StaticRoutes) > 0 {
 		for _, sr := range fc.Inet6StaticRoutes {
-			b.WriteString(m.generateStaticRoute(sr, "", fc.RethMap, fc.IPv6NextHopInterfaces))
+			b.WriteString(m.generateStaticRoute(sr, "", fc.RethMap, fc.IPv6NextHopInterfaces, fc.DeclaredNetdevs))
 		}
 		b.WriteString("!\n")
 	}
@@ -640,10 +649,10 @@ func (m *Manager) buildManagedSection(fc *FullConfig) string {
 	for _, inst := range fc.Instances {
 		if len(inst.StaticRoutes) > 0 || len(inst.Inet6StaticRoutes) > 0 {
 			for _, sr := range inst.StaticRoutes {
-				b.WriteString(m.generateStaticRouteInTable(sr, inst.VRFName, inst.TableID, fc.RethMap, fc.IPv6NextHopInterfaces))
+				b.WriteString(m.generateStaticRouteInTable(sr, inst.VRFName, inst.TableID, fc.RethMap, fc.IPv6NextHopInterfaces, fc.DeclaredNetdevs))
 			}
 			for _, sr := range inst.Inet6StaticRoutes {
-				b.WriteString(m.generateStaticRouteInTable(sr, inst.VRFName, inst.TableID, fc.RethMap, fc.IPv6NextHopInterfaces))
+				b.WriteString(m.generateStaticRouteInTable(sr, inst.VRFName, inst.TableID, fc.RethMap, fc.IPv6NextHopInterfaces, fc.DeclaredNetdevs))
 			}
 			b.WriteString("!\n")
 		}

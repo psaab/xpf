@@ -159,8 +159,41 @@ func TestSameInterfaceDoesNotCollapseSiblingUnits6519(t *testing.T) {
 		{"reth1.0", "reth2.0", false},
 		{"reth1", "reth2", false},
 	} {
-		if got := hostInboundSameInterface(tc.a, tc.b); got != tc.want {
-			t.Errorf("hostInboundSameInterface(%q,%q)=%v want %v", tc.a, tc.b, got, tc.want)
+		// Nil config pins the legacy first-dot comparison, byte-identical.
+		if got := hostInboundSameInterface(nil, tc.a, tc.b); got != tc.want {
+			t.Errorf("hostInboundSameInterface(nil,%q,%q)=%v want %v", tc.a, tc.b, got, tc.want)
+		}
+	}
+	// Declared-aware path (#9821): same dot-free answers through the split,
+	// plus canonical-alias positives and both-declared independence that the
+	// first-dot comparison cannot express.
+	dottedCfg := &Config{Interfaces: InterfacesConfig{Interfaces: map[string]*InterfaceConfig{
+		"reth1": {Name: "reth1", Units: map[int]*InterfaceUnit{0: {Number: 0}, 50: {Number: 50}}},
+		"reth2": {Name: "reth2", Units: map[int]*InterfaceUnit{0: {Number: 0}}},
+		"p":     {Name: "p"},
+		"p.0":   {Name: "p.0", Units: map[int]*InterfaceUnit{1: {Number: 1}}},
+		"p.0.2": {Name: "p.0.2"},
+	}}}
+	for _, tc := range []struct {
+		a, b string
+		want bool
+	}{
+		{"reth1", "reth1.0", true},
+		{"reth1.0", "reth1.50", false},
+		{"reth1.0", "reth2.0", false},
+		{"p.0", "p.0.1", true},
+		{"p.0.01", "p.0.1", true},
+		{"p.0.1", "p.0.2", false},
+		{"p.0", "p.0.2", false},
+		{"p.0", "p", false},
+		{"p.0.1", "p.2", false},
+	} {
+		if got := hostInboundSameInterface(dottedCfg, tc.a, tc.b); got != tc.want {
+			t.Errorf("hostInboundSameInterface(cfg,%q,%q)=%v want %v", tc.a, tc.b, got, tc.want)
+		}
+		// Symmetric: argument order must not matter.
+		if got := hostInboundSameInterface(dottedCfg, tc.b, tc.a); got != tc.want {
+			t.Errorf("hostInboundSameInterface(cfg,%q,%q)=%v want %v", tc.b, tc.a, got, tc.want)
 		}
 	}
 

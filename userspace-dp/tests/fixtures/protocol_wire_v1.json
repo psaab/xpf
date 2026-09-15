@@ -744,6 +744,7 @@
     "host_inbound_protocols": [],
     "host_inbound_system_services": [],
     "ifindex": 0,
+    "is_unit": null,
     "linux_name": "",
     "local_fabric_member": "",
     "mtu": 0,

@@ -318,11 +318,16 @@ func (c *Config) resolveKernelIfNameWith(ref string, tunMap map[string]string) s
 	if ifc, ok := c.Interfaces.Interfaces[ref]; ok && ifc != nil {
 		return c.resolveBareKernelIfName(ref)
 	}
-	parts := strings.SplitN(ref, ".", 2)
-	base := parts[0]
+	// #9821: parse the REMAINDER (non-exact refs) through the split so a unit
+	// of a declared dotted base (`ge-0/0/5.0.10`) resolves against the right
+	// stanza instead of first-dot-cutting to an undeclared base — agreeing
+	// with snapshotLinuxName, which branches structurally. The exact arm
+	// above is unchanged. Bare refs keep the bare arm.
+	s := c.SplitInterfaceUnitRef(ref)
+	base := s.Base
 
 	// Bare refs.
-	if len(parts) == 1 {
+	if !s.HasUnit {
 		return c.resolveBareKernelIfName(base)
 	}
 
@@ -367,14 +372,14 @@ func (c *Config) resolveKernelIfNameWith(ref string, tunMap map[string]string) s
 
 	// Per-unit tunnel by ref.
 	if tunMap != nil {
-		if linuxName, ok := tunMap[ref]; ok && linuxName != "" {
+		if linuxName, ok := tunMap[s.Literal]; ok && linuxName != "" {
 			return linuxName
 		}
 	}
 
 	// Bail to fallback if the suffix isn't numeric (malformed ref
 	// like "ge-0/0/0.foo" must not silently map to unit 0).
-	unitNum, err := strconv.Atoi(parts[1])
+	unitNum, err := strconv.Atoi(s.UnitTok)
 	if err != nil {
 		return LinuxIfName(c.ResolveReth(ref))
 	}

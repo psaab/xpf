@@ -128,12 +128,11 @@ func TestZonedLiteralsOmitted_9820(t *testing.T) {
 		t.Fatalf("zoned backup-router must render nothing, got:\n%s", got)
 	}
 	m := &Manager{}
-	out := m.generateStaticRoute(
-		&config.StaticRoute{
-			Destination: "2001:db8::/32",
-			Preference:  5,
-			NextHops:    []config.NextHopEntry{{Address: "fe80::1%eth0"}},
-		}, "", nil, nil)
+	out := m.generateStaticRoute(&config.StaticRoute{
+		Destination: "2001:db8::/32",
+		Preference:  5,
+		NextHops:    []config.NextHopEntry{{Address: "fe80::1%eth0"}},
+	}, "", nil, nil, nil)
 	if strings.TrimSpace(out) != "" {
 		t.Fatalf("zoned static next-hop must render nothing, got:\n%s", out)
 	}

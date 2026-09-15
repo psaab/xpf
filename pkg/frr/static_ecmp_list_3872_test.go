@@ -20,7 +20,7 @@ func TestStaticNextHopListRendersECMP_3872(t *testing.T) {
 			{Address: "10.0.0.2"},
 		},
 	}
-	got := m.generateStaticRoute(sr, "", nil, nil)
+	got := m.generateStaticRoute(sr, "", nil, nil, nil)
 	for _, want := range []string{
 		"ip route 10.1.0.0/16 10.0.0.1 5\n",
 		"ip route 10.1.0.0/16 10.0.0.2 5\n",

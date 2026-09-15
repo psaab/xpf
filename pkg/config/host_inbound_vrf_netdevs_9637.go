@@ -21,17 +21,26 @@ func HostInboundVRFEnslavedNetdevs(cfg *Config) map[string]bool {
 // ("<if>.<unit>") to its kernel netdev through name.
 func junosHostNetdevByRef(cfg *Config, name func(ifName string, unit *InterfaceUnit) string) map[string]string {
 	out := map[string]string{}
+	// Two passes so a both-declared key collision (`p` unit 0 vs declared
+	// `p.0`) resolves deterministically: unit rows first, declared bases
+	// overwrite (#9821 declared-wins). Undotted keys are disjoint across
+	// passes, so those entries are byte-identical either way.
 	for ifName, iface := range cfg.Interfaces.Interfaces {
 		if iface == nil {
 			continue
 		}
-		out[ifName] = name(ifName, nil)
 		for un, unit := range iface.Units {
 			if unit == nil {
 				continue
 			}
 			out[fmt.Sprintf("%s.%d", ifName, un)] = name(ifName, unit)
 		}
+	}
+	for ifName, iface := range cfg.Interfaces.Interfaces {
+		if iface == nil {
+			continue
+		}
+		out[ifName] = name(ifName, nil)
 	}
 	return out
 }

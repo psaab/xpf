@@ -108,17 +108,34 @@ func RoutingInstanceMemberUnits(cfg *Config, member string) []RoutingInstanceMem
 	if cfg == nil {
 		return nil
 	}
+	// #9821: generated keys parse against the MEMBER's own base (the
+	// egressRowIdentity.owner discipline — ownership is structural, never
+	// re-derived by re-splitting a generated key, which both-declared shapes
+	// would reattribute: `p` fans down `p.0`, which exact-matches declared
+	// `p.0`).
+	memberBase := cfg.SplitInterfaceUnitRef(member).Base
 	var out []RoutingInstanceMemberUnit
 	for _, key := range InterfaceUnitRefKeys(cfg, member) {
-		base, unitTok, hasUnit := strings.Cut(key, ".")
-		if !hasUnit {
+		if key == memberBase {
 			continue // the base key a bare reference also keeps
 		}
-		n, err := strconv.Atoi(unitTok)
-		if err != nil {
+		rest, ok := strings.CutPrefix(key, memberBase+".")
+		if !ok {
+			// Unreachable for helper-generated keys (bare fan-down emits
+			// memberBase and memberBase+"."+N; unit members emit their
+			// Literal, which carries the same prefix): skip defensively.
 			continue
 		}
-		ifc := cfg.Interfaces.Interfaces[base]
+		n, err := strconv.Atoi(rest)
+		if err != nil {
+			// Malformed suffixes — and the trailing-dot member's empty
+			// rest — skip here, the byte-identical outcome of today's
+			// Atoi-failure skip. No legacy-Cut fallback: re-splitting
+			// would reintroduce the both-declared reparse this loop
+			// exists to close (Codex Q3).
+			continue
+		}
+		ifc := cfg.Interfaces.Interfaces[memberBase]
 		if ifc == nil {
 			continue
 		}

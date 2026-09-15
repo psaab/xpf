@@ -72,6 +72,33 @@ func (z *ZoneConfig) InterfaceHostInboundOverride(ref string) (svc, proto []stri
 	if z == nil {
 		return nil, nil, false
 	}
+	// #9821: compiled stamps resolve through precomputed keys. Probe the
+	// raw spelling, then its canonical Literal resolved through the STAMPED
+	// declaration set (never the legacy first-dot cut): an alias query
+	// (`p.0.001`) reaches the canonical unit key (`p.0.1`); raw-exact
+	// precedence is preserved because the raw probe comes first, so a
+	// padded declared name never aliases onto another interface.
+	// A miss under a compiled stamp is authoritative ABSENT — every spelling
+	// the runtime binds is stamped (construction invariant:
+	// stampKeys ⊇ runtimeKeys per zone), so nothing governed is missed and
+	// the method agrees with the runtime map on every query. A nil stamp
+	// (hand-built cfgs bypassing compile) keeps the legacy walk below,
+	// byte-identical.
+	if z.ResolvedInterfaceOverrides != nil && z.ResolvedInterfaceDeclared != nil {
+		if hib := z.ResolvedInterfaceOverrides[ref]; hib != nil {
+			return UnionHostInboundTokens(hib.SystemServices, nil),
+				UnionHostInboundTokens(hib.Protocols, nil), true
+		}
+		declared := z.ResolvedInterfaceDeclared
+		isDeclared := func(s string) bool { return declared[s] }
+		if lit := splitInterfaceRefWithDeclared(isDeclared, ref).Literal; lit != ref {
+			if hib := z.ResolvedInterfaceOverrides[lit]; hib != nil {
+				return UnionHostInboundTokens(hib.SystemServices, nil),
+					UnionHostInboundTokens(hib.Protocols, nil), true
+			}
+		}
+		return nil, nil, false
+	}
 	if base, unit, ok := strings.Cut(ref, "."); ok && unit != "" && base != "" {
 		if phys := z.InterfaceHostInbound[base]; phys != nil {
 			svc = UnionHostInboundTokens(svc, phys.SystemServices)
@@ -85,6 +112,123 @@ func (z *ZoneConfig) InterfaceHostInboundOverride(ref string) (svc, proto []stri
 		declared = true
 	}
 	return svc, proto, declared
+}
+
+// stampResolvedInterfaceOverrides derives, per zone, the override closure
+// InterfaceHostInboundOverride consults (#9821). Runs in resolveDerivedConfig
+// where the whole *Config is available; the method itself cannot take one.
+//
+// Key discipline (sorted authored refs — the same deterministic discipline
+// ResolveInterfaceHostInbound uses, so token order agrees too) is TARGET
+// based, mirroring the runtime #18 arms exactly: BARE keys first-win
+// (direct and alias writes alike skip an occupied key — occupant provenance
+// does not matter: same-identity raw, co-authored alias, or fan-down from
+// a dotted-nesting parent all lose to the first writer, as #18 does);
+// UNIT keys union (parent∪child accumulates across identities on both
+// sides). Every authored ref is stored under its RAW spelling (exact
+// diagnostic queries keep working) AND its canonical Literal (alias queries
+// and canonical consumers land together — Literal keys regardless of dot
+// count, GLM-F1: multi-dot-only is retired FOR THE STAMP while the D3 gate
+// keeps it); every bare ref fans its merged hib down onto each CONFIGURED
+// unit (present-but-nil slots included, as the runtime does). Values are
+// merged clones, never config aliases. No M01/#5489 guards here: the stamp
+// preserves method semantics exactly and quarantine stays runtime-only
+// (changing lenient quarantine is a separate behavior change, out of scope).
+//
+// D19 union completeness: each raw alias key carries what its canonical
+// Literal resolved to — `p.0.01` and `p.0.1` BOTH map to union(parent-`p.0`,
+// child), single-dot `p.01` and `p.1` likewise. The main loop leaves raw unit
+// keys child-only (fan-down touches canonical keys only), so a second pass
+// copies the resolved canonical value onto each authored raw alias. Bare
+// aliases converge the same way (D20): authored `p.00` of declared `p.0`
+// stamps {`p.00`, `p.0`, `p.0.N` fan-down} with the first-winner's value on
+// the first two and inherit-unions on the units.
+//
+// Construction invariant (F-D19): stampKeys ⊇ runtimeKeys per zone — authored
+// raws + Literals + bare fan-down over the SAME configured-unit set #18 fans
+// — so a miss under a present stamp proves no governing override in EITHER
+// map and the method returns authoritative ABSENT with no legacy walk.
+func stampResolvedInterfaceOverrides(cfg *Config) {
+	if cfg == nil || len(cfg.Security.Zones) == 0 {
+		return
+	}
+	declared := make(map[string]bool, len(cfg.Interfaces.Interfaces))
+	for name, ifc := range cfg.Interfaces.Interfaces {
+		if ifc != nil {
+			declared[name] = true
+		}
+	}
+	isDeclared := func(s string) bool { return declared[s] }
+	for _, zone := range cfg.Security.Zones {
+		if zone == nil {
+			continue
+		}
+		stamp := make(map[string]*HostInboundTraffic)
+		refs := make([]string, 0, len(zone.InterfaceHostInbound))
+		for ref := range zone.InterfaceHostInbound {
+			refs = append(refs, ref)
+		}
+		sort.Strings(refs)
+		type aliasKey struct{ raw, lit string }
+		var aliases []aliasKey
+		for _, ref := range refs {
+			hib := zone.InterfaceHostInbound[ref]
+			if ref == "" || hib == nil {
+				continue
+			}
+			s := splitInterfaceRefWithDeclared(isDeclared, ref)
+			merge := func(key string) {
+				stamp[key] = MergeHostInboundTraffic(stamp[key], hib)
+			}
+			// Target-based discipline (review: exact runtime parity with
+			// the #18 bare arm, which skips occupied Literals regardless
+			// of occupant provenance): BARE keys first-win — a direct or
+			// alias write skips when ANY earlier ref already wrote the
+			// key, whether a same-identity raw, a co-authored alias, or
+			// fan-down from a dotted-nesting parent. UNIT keys union —
+			// parent∪child accumulates across identities on both sides.
+			mergeFirstWins := func(key string) {
+				if _, ok := stamp[key]; !ok {
+					stamp[key] = MergeHostInboundTraffic(nil, hib)
+				}
+			}
+			if !s.HasUnit {
+				mergeFirstWins(ref)
+				if s.Literal != ref {
+					mergeFirstWins(s.Literal)
+					aliases = append(aliases, aliasKey{ref, s.Literal})
+				}
+				if ifCfg := cfg.Interfaces.Interfaces[s.Base]; ifCfg != nil {
+					for unitNum := range ifCfg.Units {
+						merge(fmt.Sprintf("%s.%d", s.Base, unitNum))
+					}
+				}
+			} else {
+				merge(ref)
+				if s.Literal != ref {
+					merge(s.Literal)
+					aliases = append(aliases, aliasKey{ref, s.Literal})
+				}
+			}
+		}
+		// D19/D20: the loop above leaves raw alias keys child-only (unit
+		// fan-down lands on canonical keys only) or carrying only their own
+		// direct value (a skipped bare-alias Literal merge). Each authored
+		// raw alias instead carries what its canonical Literal resolved to
+		// — parent∪child for units, the first-winner's value for bare
+		// aliases (same-identity co-authors first-win on the canonical, so
+		// the raw must see the winner, not a union) — so raw and canonical
+		// queries agree exactly. Clones, never aliases. Unconfigured units
+		// need no special case: their canonical holds child-only already
+		// (no fan-down reached it), which is what the runtime binds too.
+		for _, a := range aliases {
+			if canon := stamp[a.lit]; canon != nil {
+				stamp[a.raw] = MergeHostInboundTraffic(nil, canon)
+			}
+		}
+		zone.ResolvedInterfaceOverrides = stamp
+		zone.ResolvedInterfaceDeclared = declared
+	}
 }
 
 // hostInboundSetAdmitsService reports whether an authored `system-services` list
@@ -350,7 +494,45 @@ type hostInboundDHCPRoles struct {
 // relationship — but two DIFFERENT units are not (`reth1.0` vs `reth1.50`).
 // Basing both sides on the physical would collapse those two, over-matching a
 // sibling unit's DHCP role onto an interface that has none.
-func hostInboundSameInterface(a, b string) bool {
+//
+// #9821: identity resolves through the split (declared-first), not first-dot
+// cuts. Same iff string-equal, or resolved owners equal with bare/bare or
+// bare/unit status, or two unit refs with equal canonical unit numbers.
+// Both-declared independence OUTRANKS textual nesting (`p.0` vs `p.0.2` with
+// both declared are distinct interfaces even though one nests in the other).
+// Canonical aliases of one unit (`p.0.01` vs `p.0.1`) ARE the same interface.
+func hostInboundSameInterface(cfg *Config, a, b string) bool {
+	if a == b {
+		return true
+	}
+	if cfg == nil {
+		return hostInboundSameInterfaceLegacy(a, b)
+	}
+	sa, sb := cfg.SplitInterfaceUnitRef(a), cfg.SplitInterfaceUnitRef(b)
+	if sa.Base != sb.Base {
+		return false
+	}
+	if !sa.HasUnit || !sb.HasUnit {
+		// Bare/bare (same base) or bare/unit: the #3720 relationship — but
+		// only when the bare side's base is actually that interface (split
+		// bases already encode declared-ness, so no extra check is needed).
+		return true
+	}
+	// Two unit refs: same only when their canonical unit numbers agree.
+	// Sibling exclusion preserved: distinct units are distinct interfaces.
+	na, _, errA := CanonicalLogicalUnit(sa.UnitTok)
+	nb, _, errB := CanonicalLogicalUnit(sb.UnitTok)
+	if errA != nil || errB != nil {
+		return false
+	}
+	return na == nb
+}
+
+// hostInboundSameInterfaceLegacy is the pre-#9821 first-dot comparison,
+// kept for nil-config callers. NOTE the bool-tuple subtlety the rewrite
+// preserves: strings.Cut's third return is `found`, not the suffix, so
+// `aUnit != bUnit` below means "exactly one side is bare".
+func hostInboundSameInterfaceLegacy(a, b string) bool {
 	if a == b {
 		return true
 	}
@@ -408,21 +590,33 @@ func hostInboundIsDHCPClient(cfg *Config, ref string) bool {
 	if cfg == nil || ref == "" {
 		return false
 	}
-	base, unitStr, hasUnit := strings.Cut(ref, ".")
-	ifc := cfg.Interfaces.Interfaces[base]
+	// #9821: resolve the stanza and unit through the split (declared-first):
+	// a dotted child (`p.0.1`) looks under its declared parent (`p.0`), not
+	// under the first-dot base (`p`). The unit match runs through
+	// CanonicalLogicalUnit so padded spellings (`01`) match unit 1 (this also
+	// fixes a pre-existing padded miss — pinned as intended).
+	s := cfg.SplitInterfaceUnitRef(ref)
+	ifc := cfg.Interfaces.Interfaces[s.Base]
 	if ifc == nil {
 		return false
 	}
-	for n, u := range ifc.Units {
-		if u == nil || !u.DHCP {
-			continue
+	if !s.HasUnit {
+		// A bare physical ref answers for ANY unit beneath it, because the
+		// zone membership names the physical while the client is configured
+		// on a unit.
+		for _, u := range ifc.Units {
+			if u != nil && u.DHCP {
+				return true
+			}
 		}
-		if !hasUnit {
-			return true
-		}
-		if fmt.Sprintf("%d", n) == unitStr {
-			return true
-		}
+		return false
+	}
+	n, _, err := CanonicalLogicalUnit(s.UnitTok)
+	if err != nil {
+		return false
+	}
+	if u := ifc.Units[n]; u != nil && u.DHCP {
+		return true
 	}
 	return false
 }
@@ -431,7 +625,7 @@ func hostInboundIsDHCPClient(cfg *Config, ref string) bool {
 func hostInboundDHCPRolesFor(cfg *Config, serverRefs []string, ref string) hostInboundDHCPRoles {
 	var r hostInboundDHCPRoles
 	for _, s := range serverRefs {
-		if hostInboundSameInterface(s, ref) {
+		if hostInboundSameInterface(cfg, s, ref) {
 			r.server = true
 			break
 		}
