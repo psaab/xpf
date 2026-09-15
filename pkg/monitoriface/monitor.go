@@ -609,19 +609,36 @@ func ReadLinkState(name string) string {
 	return "Down"
 }
 
+// formatLinkSpeed renders an integer-Mbps sysfs speed for the operator display
+// (#9917 F-138). Exact multiples of 1000 render as integer gbps; any other
+// gigabit-plus speed renders one decimal — computed with integer math and
+// truncated, never float-rounded — so 2500 Mbps reads 2.5gbps instead of the
+// mbps/1000 truncation 2gbps. The rule is uniform at all magnitudes (no >=10G
+// integer tier that would reintroduce the truncation one tier up), and every
+// real Ethernet rate renders exactly. Non-positive input renders unknown.
+func formatLinkSpeed(mbps int) string {
+	if mbps <= 0 {
+		return "unknown"
+	}
+	if mbps < 1000 {
+		return fmt.Sprintf("%dmbps", mbps)
+	}
+	if mbps%1000 == 0 {
+		return fmt.Sprintf("%dgbps", mbps/1000)
+	}
+	return fmt.Sprintf("%d.%dgbps", mbps/1000, (mbps%1000)/100)
+}
+
 func ReadLinkSpeed(name string) string {
 	raw, err := os.ReadFile("/sys/class/net/" + name + "/speed")
 	if err != nil {
 		return "unknown"
 	}
 	var mbps int
-	if _, err := fmt.Sscanf(strings.TrimSpace(string(raw)), "%d", &mbps); err != nil || mbps <= 0 {
+	if _, err := fmt.Sscanf(strings.TrimSpace(string(raw)), "%d", &mbps); err != nil {
 		return "unknown"
 	}
-	if mbps >= 1000 {
-		return fmt.Sprintf("%dgbps", mbps/1000)
-	}
-	return fmt.Sprintf("%dmbps", mbps)
+	return formatLinkSpeed(mbps)
 }
 
 func RenderSingleInterface(w io.Writer, hostname, displayName, kernelName string, snap, prev, baseline *Snapshot, startTime time.Time) {

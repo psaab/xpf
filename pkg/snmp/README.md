@@ -216,6 +216,9 @@ sender learned about us via discovery, not our local clock at receive time.
   from our header. This path is unchanged by the #2640 fix.
 - DES (`decryptDES`/`encryptDES`, RFC 3414 §8) derives its IV from `privParams`
   XOR the pre-IV salt alone, so boots/time do not enter the DES IV.
+- DES privacy (`privacy-des`, 56-bit effective) is **deprecated** and stays only
+  for Junos compatibility — prefer `privacy-aes128`. Configuring DES draws a
+  commit-time warning naming the user (#9917 F-136); the cipher keeps working.
 
 **Privacy salt is a monotonic counter, unique per engine boot (RFC 3826 §3.3,
 RFC 3414 §8.1.1.1, #5032).** The privacy salt (`msgPrivacyParameters`) MUST be
@@ -761,18 +764,52 @@ packet handlers, and MIB view that call into them.
   forms with one shared snapshot. `ifSnapshot` is not safe for concurrent use;
   each request builds its own. Fail-on-revert guard:
   `TestV2cGetBulk_SingleLinkListPerPDU`.
+- **The Serve loop budgets requests per source IP (#9917 F-139).** The loop
+  stays strictly serial — which is what keeps the `lastPacket` v3-auth pattern
+  safe — so one fast manager or valid-credential flood would otherwise stall
+  all polling. Each source gets 100 requests/second sustained with a 200 burst
+  (`snmpServeBudget`, checked before any MIB work, so shed requests cost no
+  LinkList snapshot); the excess sheds silently, as with unknown-community
+  drops. Shed is silent rather than `tooBig` because a `tooBig` reply costs a
+  decode plus near-full USM framing for v3, defeating the shed. Admitted
+  requests are additionally debited their loop time at 10x, so a source
+  feeding back-to-back expensive PDUs converges to ~1/10 of loop share
+  instead of replenishing its token while the loop is busy with its own
+  request; cheap polls are dominated by the admission token instead. A global
+  backstop (2000/s + 4000 burst, expensive aggregate charged at 2x toward
+  ~1/2 of loop share) bounds what rotating-spoof floods — one fresh bucket
+  per packet — can take. At most 1024 sources are tracked; past the cap a
+  newcomer displaces a random incumbent, so no refreshed set of entries can
+  lock legitimate managers out and no scan ever runs per packet. Typical
+  polls cost microseconds, so legitimate polling and walk bursts pass
+  untouched. Residual, documented not fixed: within the global half the loop
+  is first-come FIFO, so N distinct expensive sources split it with no
+  fairness guarantee (#10113 tracks fair-share scheduling); a flood that
+  saturates the socket buffer ahead of userspace is likewise out of reach;
+  and per-source fairness assumes non-spoofed sources — spoofed-rotating
+  floods are bounded only by the global aggregate.
 - **Trap delivery is asynchronous and bounded (#2991).** Link-state traps
   are emitted from the daemon's netlink link-monitor goroutine.
-  `sendLinkTraps` builds the packet on the caller's goroutine (cheap) and
-  enqueues one job per target onto a bounded channel
-  (`trapQueueDepth = 256`) drained by a single worker goroutine; the
+  `sendLinkTraps` builds the v2c packet on the caller's goroutine (cheap,
+  allocation only) and enqueues one job per emitted packet onto a bounded
+  channel (`trapQueueDepth = 256`) drained by a single worker goroutine; the
   blocking `net.DialTimeout` (and DNS resolution for an FQDN target) runs
-  on the worker, NOT on the link monitor. A dead or slow target therefore
-  cannot stall link-state processing. The queue is started lazily (works
-  for both `NewAgent` and bare-struct test agents). When the queue is full
-  the trap is DROPPED and `trapsDropped` is incremented rather than
-  blocking the caller — dropping is the correct backpressure when targets
-  are not draining. The delivery is replaceable through the per-Agent
+  on the worker, NOT on the link monitor. The v1 packet is likewise built on
+  the worker from a deferred job, because its agent-addr costs a second
+  dial per target — building it on the caller serialized K transitions x T
+  targets of blocking dials ahead of the queue (#9917 F-134). A dead or slow
+  target therefore cannot stall link-state processing. The queue is started
+  lazily (works for both `NewAgent` and bare-struct test agents). When the
+  queue is full the trap is DROPPED and `trapsDropped` is incremented rather
+  than blocking the caller — dropping is the correct backpressure when
+  targets are not draining. Once the queue is half-full, admission caps each
+  receiver at `maxPerTargetTrapQueue = 32` slots (host/host:port spellings and
+  numeric-IP variants key together), so one dead receiver cannot fill the
+  shared queue and evict healthy-target traps behind it; below half-full
+  bursts absorb freely, so the cap cannot drop traffic the un-capped queue
+  would have held. That is drop isolation only, the worker still drains one
+  FIFO (#9917 F-140). The
+  delivery is replaceable through the per-Agent
   `trapSender` field (the seam tests use to inject a slow/mock sender on
   their own Agent; #5023 moved it off a shared package var so the injection
   no longer races the running trap worker's read under `-race`). Before #2991
@@ -796,8 +833,9 @@ packet handlers, and MIB view that call into them.
   (`buildLinkTrapV1` — message version field 0, PDU tag 0xa4, the trap type
   carried in the enterprise/generic-trap/specific-trap/time-stamp fields per
   RFC 1157, with ifIndex/ifDescr/ifOperStatus varbinds; enterprise =
-  `snmpTraps` 1.3.6.1.6.3.1.1.5 and agent-addr 0.0.0.0 per the RFC 2576 §3.1
-  SNMPv2→SNMPv1 mapping), `v2` (or an unspecified/empty version — the default)
+  `snmpTraps` 1.3.6.1.6.3.1.1.5 and agent-addr set to the source address
+  toward the target per RFC 3584 §3.2 (#9123)), `v2` (or an
+  unspecified/empty version — the default)
   emits the SNMPv2c trap (`buildLinkTrap`, version 1, PDU tag 0xa7), and `all`
   emits BOTH. Before #3948 the version was parsed but had no typed field, so a
   `version v1` group silently emitted v2c traps that a v1-only receiver drops.

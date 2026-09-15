@@ -258,6 +258,14 @@ type Agent struct {
 	trapQueue      chan trapJob
 	trapWorkerOnce sync.Once
 	trapsDropped   atomic.Uint64
+	// trapPerTarget counts admitted-but-not-yet-dequeued trap jobs per
+	// normalized receiver (#9917 F-140). Guarded by mu; lazily created in
+	// enqueueTrap next to the queue itself so bare-struct test agents work.
+	// Every increment (admit) pairs with exactly one decTrapPerTarget
+	// (worker dequeue, whether sent, abandoned, or drained), so the map
+	// tracks live backlog only. Keys are config-authored targets, hence
+	// bounded — no network-driven growth.
+	trapPerTarget map[string]int
 
 	// trapSender delivers a single pre-built trap to a target. It is a
 	// per-Agent field (not a package global) so tests can inject a
@@ -287,12 +295,22 @@ type Agent struct {
 	lifeCancel context.CancelFunc
 	trapStop   chan struct{}
 	trapWG     sync.WaitGroup
+	// serveBudget is the Serve loop's per-source request budget (#9917 F-139),
+	// set by the constructors. A nil budget (bare-struct test agents) allows
+	// everything -- only constructor-built agents enforce.
+	serveBudget *snmpServeBudget
 }
 
-// trapJob is one queued trap-delivery unit: a pre-built SNMP packet and its
-// destination target (host or host:port). The packet is built on the caller's
-// goroutine (cheap, allocation only) and the blocking dial/write happens on the
-// worker.
+// trapJob is one queued trap-delivery unit: a destination target (host or
+// host:port) plus either a pre-built SNMP packet or, for the v1 leg, the
+// parameters the worker builds it from. Prebuilt packets are assembled on the
+// caller's goroutine (cheap, allocation only) and the blocking dial/write
+// happens on the worker. A v1 packet is NOT prebuilt: its agent-addr costs a
+// DNS lookup plus an up-to-2s dial, which must not run on the link monitor, so
+// sendLinkTraps enqueues a deferred job (pkt nil, deferredV1 set) and the
+// worker builds it just before sending (#9917 F-134). Precedence: a deferred
+// job's build wins over any carried pkt (senders never set both; explicit
+// beats ambiguous).
 type trapJob struct {
 	target  string
 	pkt     []byte
@@ -300,6 +318,13 @@ type trapJob struct {
 	event   string
 	iface   string
 	ifindex int
+	// Deferred v1 build parameters (used only when deferredV1 is set). uptime
+	// is captured at event time so the v1 time-stamp keeps event-time
+	// semantics instead of skewing to delivery time under backlog.
+	deferredV1 bool
+	community  string
+	linkUp     bool
+	uptime     int
 }
 
 // trapQueueDepth bounds the number of pending trap deliveries. A handful of
@@ -307,6 +332,26 @@ type trapJob struct {
 // targets are clearly not draining and dropping is preferable to unbounded
 // memory growth or blocking the link monitor.
 const trapQueueDepth = 256
+
+// maxPerTargetTrapQueue caps how many jobs one receiver may hold in the
+// shared trap queue once the queue is under pressure (#9917 F-140). Past the
+// cap that receiver's new traps are shed (counted in trapsDropped) so a dead
+// receiver cannot fill the queue and evict healthy-target traps behind it. A
+// lone sick receiver holds at most ~half the queue (admitted pre-pressure),
+// versus all of it before; healthy targets always have room. The cap counts
+// queued PACKETS, not events -- a `version all` group consumes two slots per
+// event per target. This is DROP isolation only: the worker still drains one
+// shared FIFO, so a healthy trap admitted behind a sick backlog waits out the
+// serial sends ahead of it before delivery.
+const maxPerTargetTrapQueue = 32
+
+// trapCapPressureThreshold is the shared-queue occupancy at which the
+// per-target cap starts binding (#9917 F-140). Below half-full the queue
+// absorbs bursts freely -- including healthy fan-out while the worker is
+// transiently stalled -- so the cap cannot drop traffic the un-capped queue
+// would have held. Above half-full each receiver is capped, which is exactly
+// when one receiver's backlog threatens the others' room.
+const trapCapPressureThreshold = trapQueueDepth / 2
 
 // NewAgent creates a new SNMP agent with the given configuration. The
 // SNMPv3 engineBoots counter is loaded from defaultEngineBootsPath,
@@ -342,6 +387,7 @@ func NewAgentWithPaths(cfg *config.SNMPConfig, bootsPath, engineIDPath string) *
 		engineBootsPath: bootsPath,
 		engineIDPath:    engineIDPath,
 		trapSender:      sendTrap,
+		serveBudget:     newSNMPServeBudget(),
 	}
 	a.initEngine()
 	a.initV3Users()
@@ -860,7 +906,27 @@ func (a *Agent) Serve() {
 		if remoteAddr != nil {
 			srcIP = remoteAddr.IP
 		}
+		// #9917 F-139: per-source request budget plus a global aggregate
+		// backstop. The loop stays strictly serial -- which is what keeps the
+		// lastPacket auth pattern safe -- so fairness comes from shedding an
+		// over-budget source BEFORE any MIB work (no per-PDU LinkList snapshot
+		// for shed requests) and debiting loop time consumed, rather than from
+		// concurrency. Shed is silent (no response), as with unknown-community
+		// and source-denied drops: a tooBig reply would cost a BER decode plus,
+		// for v3, near-full USM framing, defeating the shed, and an over-budget
+		// source is abusive or pathological by construction at this rate. No
+		// queue is introduced, so there is nothing to shed via tooBig instead.
+		if !a.serveBudget.allow(srcIP) {
+			slog.Debug("SNMP: request shed: source over budget", "src", srcIP)
+			continue
+		}
+		start := a.serveBudget.clock()
 		resp := a.handlePacketFrom(buf[:n], srcIP)
+		// Debit the loop time consumed: without the service charge the refill
+		// during handling would replenish the admission token of any request
+		// slower than 1/rate, letting back-to-back expensive PDUs hold the
+		// serial loop forever without depleting.
+		a.serveBudget.account(srcIP, a.serveBudget.clock().Sub(start))
 		if resp != nil {
 			if _, err := conn.WriteToUDP(resp, remoteAddr); err != nil {
 				slog.Error("SNMP write error", "err", err, "remote", remoteAddr)
