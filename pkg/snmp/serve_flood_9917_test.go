@@ -8,16 +8,22 @@ import (
 	"github.com/psaab/xpf/pkg/config"
 )
 
-// TestServePerSourceBudget9917 is the F-139 RED cell, behavioral on the base
-// surface (no new API): flood the Serve loop from one source and assert the
-// per-source budget sheds the excess while a second source is still served.
-// RED on base (no budget: every datagram answered).
+// TestServePerSourceBudget9917 is the F-139 enforcement cell: flood the Serve
+// loop from one source and assert the per-source budget sheds the excess while
+// a second source is still served. The oracle is the shed call-site counter
+// under a frozen budget clock -- exact, with no timing dependence -- not the
+// count of arrived UDP datagrams (buffer loss or a quiet-window timeout must
+// neither false-pass an unbudgeted agent nor false-fail a correct one). RED on
+// base (no budget: shed stays 0).
 func TestServePerSourceBudget9917(t *testing.T) {
 	a := NewAgent(&config.SNMPConfig{
 		Communities: map[string]*config.SNMPCommunity{
 			"public": {Name: "public", Authorization: "read-only"},
 		},
 	})
+	frozen := time.Unix(1_700_000_000, 0)
+	a.serveBudget.now = func() time.Time { return frozen }
+
 	srv, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1")})
 	if err != nil {
 		t.Fatalf("listen: %v", err)
@@ -54,32 +60,44 @@ func TestServePerSourceBudget9917(t *testing.T) {
 		}
 	}
 
+	// The control source's own bucket is full: all five must arrive, proving a
+	// second source stays served under a first-source flood and the loop is
+	// alive to observe the shed below.
 	buf := make([]byte, 4096)
-	ctrlGot := 0
 	if err := ctrl.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
 		t.Fatalf("control deadline: %v", err)
 	}
-	for ctrlGot < ctrlSent {
+	for i := 0; i < ctrlSent; i++ {
 		if _, _, err := ctrl.ReadFromUDP(buf); err != nil {
-			t.Fatalf("control source got %d/%d responses: %v (second source must stay served under a first-source flood)", ctrlGot, ctrlSent, err)
+			t.Fatalf("control source got %d/%d responses: %v", i, ctrlSent, err)
 		}
-		ctrlGot++
 	}
-
-	// Drain the flood responses until a quiet window proves the shed remainder
-	// is never coming (shed = no response, as with unknown-community drops).
+	// Drain the flood responses until a quiet window (best-effort drain only;
+	// the shed counter below is the oracle, not this count).
 	floodGot := 0
 	for {
 		if err := flood.SetReadDeadline(time.Now().Add(300 * time.Millisecond)); err != nil {
 			t.Fatalf("flood deadline: %v", err)
 		}
 		if _, _, err := flood.ReadFromUDP(buf); err != nil {
-			break // quiet window: server answered all it will
+			break
 		}
 		floodGot++
 	}
-	if floodGot >= sent {
-		t.Fatalf("F-139: flood source served %d/%d (no per-source budget); want the excess shed", floodGot, sent)
+	// Frozen clock: no refill, no service charge (elapsed 0), global burst far
+	// above 405 -- so exactly burst-many flood requests admit and the rest shed.
+	const wantShed = sent - snmpServeBurstPerSource
+	deadline := time.Now().Add(5 * time.Second)
+	for a.serveBudget.shed.Load() != wantShed && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
 	}
-	t.Logf("flood source served %d/%d, control %d/%d", floodGot, sent, ctrlGot, ctrlSent)
+	if got := a.serveBudget.shed.Load(); got != wantShed {
+		t.Fatalf("F-139: shed = %d, want exactly %d (burst %d of %d flood admitted, rest shed)",
+			got, wantShed, snmpServeBurstPerSource, sent)
+	}
+	if floodGot < 1 {
+		t.Fatalf("flood source got %d responses, want >= 1 (loop must serve it too)", floodGot)
+	}
+	t.Logf("shed %d/%d flood, control %d/%d, flood responses drained %d",
+		wantShed, sent, ctrlSent, ctrlSent, floodGot)
 }

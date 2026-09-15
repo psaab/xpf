@@ -897,21 +897,27 @@ func (a *Agent) Serve() {
 		if remoteAddr != nil {
 			srcIP = remoteAddr.IP
 		}
-		// #9917 F-139: per-source request budget. The loop stays strictly
-		// serial -- which is what keeps the lastPacket auth pattern safe --
-		// so fairness comes from shedding an over-budget source BEFORE any
-		// MIB work (no per-PDU LinkList snapshot for shed requests) rather
-		// than from concurrency. Shed is silent (no response), as with
-		// unknown-community and source-denied drops: a tooBig reply would
-		// cost a BER decode plus, for v3, near-full USM framing, defeating
-		// the shed, and an over-budget source is abusive or pathological by
-		// construction at this rate. No queue is introduced, so there is
-		// nothing to shed via tooBig instead.
+		// #9917 F-139: per-source request budget plus a global aggregate
+		// backstop. The loop stays strictly serial -- which is what keeps the
+		// lastPacket auth pattern safe -- so fairness comes from shedding an
+		// over-budget source BEFORE any MIB work (no per-PDU LinkList snapshot
+		// for shed requests) and debiting loop time consumed, rather than from
+		// concurrency. Shed is silent (no response), as with unknown-community
+		// and source-denied drops: a tooBig reply would cost a BER decode plus,
+		// for v3, near-full USM framing, defeating the shed, and an over-budget
+		// source is abusive or pathological by construction at this rate. No
+		// queue is introduced, so there is nothing to shed via tooBig instead.
 		if !a.serveBudget.allow(srcIP) {
 			slog.Debug("SNMP: request shed: source over budget", "src", srcIP)
 			continue
 		}
+		start := a.serveBudget.clock()
 		resp := a.handlePacketFrom(buf[:n], srcIP)
+		// Debit the loop time consumed: without the service charge the refill
+		// during handling would replenish the admission token of any request
+		// slower than 1/rate, letting back-to-back expensive PDUs hold the
+		// serial loop forever without depleting.
+		a.serveBudget.account(srcIP, a.serveBudget.clock().Sub(start))
 		if resp != nil {
 			if _, err := conn.WriteToUDP(resp, remoteAddr); err != nil {
 				slog.Error("SNMP write error", "err", err, "remote", remoteAddr)

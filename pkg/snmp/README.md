@@ -771,15 +771,23 @@ packet handlers, and MIB view that call into them.
   (`snmpServeBudget`, checked before any MIB work, so shed requests cost no
   LinkList snapshot); the excess sheds silently, as with unknown-community
   drops. Shed is silent rather than `tooBig` because a `tooBig` reply costs a
-  decode plus near-full USM framing for v3, defeating the shed. Typical polls
-  cost microseconds, so legitimate polling and walk bursts pass untouched.
-  Residual, documented not fixed: worst-case PDU shapes (a max-size GETNEXT
-  measured ~33 ms) can still saturate the loop below the rate — bounding that
-  needs per-PDU cost charging or a varbind cap, a follow-up. Likewise a
-  distributed flood saturates the socket buffer ahead of any userspace budget;
-  the per-source budget bounds the single-source actor. At most 1024 sources
-  are tracked (60 s idle expiry, expiry sweep at most 1/s) so spoofed-source
-  floods cannot grow memory or buy a scan per packet.
+  decode plus near-full USM framing for v3, defeating the shed. Admitted
+  requests are additionally debited their loop time at 10x, so a source
+  feeding back-to-back expensive PDUs converges to ~1/10 of loop share
+  instead of replenishing its token while the loop is busy with its own
+  request; cheap polls are dominated by the admission token instead. A global
+  backstop (2000/s + 4000 burst, expensive aggregate charged at 2x toward
+  ~1/2 of loop share) bounds what rotating-spoof floods — one fresh bucket
+  per packet — can take. At most 1024 sources are tracked; past the cap a
+  newcomer displaces a random incumbent, so no refreshed set of entries can
+  lock legitimate managers out and no scan ever runs per packet. Typical
+  polls cost microseconds, so legitimate polling and walk bursts pass
+  untouched. Residual, documented not fixed: within the global half the loop
+  is first-come FIFO, so N distinct expensive sources split it with no
+  fairness guarantee (#10113 tracks fair-share scheduling); a flood that
+  saturates the socket buffer ahead of userspace is likewise out of reach;
+  and per-source fairness assumes non-spoofed sources — spoofed-rotating
+  floods are bounded only by the global aggregate.
 - **Trap delivery is asynchronous and bounded (#2991).** Link-state traps
   are emitted from the daemon's netlink link-monitor goroutine.
   `sendLinkTraps` builds the v2c packet on the caller's goroutine (cheap,
