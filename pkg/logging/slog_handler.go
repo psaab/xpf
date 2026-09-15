@@ -10,12 +10,20 @@ import (
 
 // SyslogSlogHandler is an slog.Handler that forwards log records to remote
 // syslog servers in addition to a wrapped base handler (typically stderr).
+//
+// The client set is SHARED by pointer across WithAttrs/WithGroup derivatives
+// (#9916 F-056): SetClients/Close on any member of the lineage affects all of
+// them, so a reconfigure is observed by previously derived slog.With(...) loggers
+// instead of stranding them on closed clients. The daemon calls SetClients only
+// on the root; sharing is the correct semantic for one logical handler.
 type SyslogSlogHandler struct {
-	base    slog.Handler
-	mu      sync.RWMutex
-	clients []*SyslogClient
-	attrs   []slog.Attr
-	groups  []string
+	base slog.Handler
+	// mu guards the shared pointer's lazy publication (zero-value safe), not
+	// the client slice itself. The slice lives in shared under its own lock.
+	mu     sync.RWMutex
+	shared *syslogClientSet
+	attrs  []slog.Attr
+	groups []string
 	// forwarding is the set of goroutine IDs currently inside the
 	// syslog-forwarding section of Handle. It is the re-entrancy guard
 	// (#2287): if a client's Send emits an slog record (e.g. a drop warning),
@@ -27,17 +35,54 @@ type SyslogSlogHandler struct {
 	forwarding *sync.Map // map[uint64]struct{}
 }
 
+// syslogClientSet is the shared, mutex-guarded client slice behind every member
+// of a SyslogSlogHandler lineage (#9916 F-056). Derivatives share the pointer
+// (like forwarding); attrs/groups are still copied per derivative.
+type syslogClientSet struct {
+	mu      sync.RWMutex
+	clients []*SyslogClient
+}
+
 // NewSyslogSlogHandler wraps a base slog.Handler with syslog forwarding.
 func NewSyslogSlogHandler(base slog.Handler) *SyslogSlogHandler {
-	return &SyslogSlogHandler{base: base, forwarding: &sync.Map{}}
+	return &SyslogSlogHandler{base: base, shared: &syslogClientSet{}, forwarding: &sync.Map{}}
+}
+
+// loadShared returns the lineage's client set, or nil for a zero-value handler
+// that has never been given one. Lock-free for callers after New (pointer never
+// changes); the RLock covers only the lazy-publication race.
+func (h *SyslogSlogHandler) loadShared() *syslogClientSet {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return h.shared
+}
+
+// loadOrAllocShared returns the lineage's client set, allocating it on first use
+// so zero-value lineages still share (WithAttrs/WithGroup and SetClients route
+// through here). Safe for concurrent use.
+func (h *SyslogSlogHandler) loadOrAllocShared() *syslogClientSet {
+	h.mu.RLock()
+	s := h.shared
+	h.mu.RUnlock()
+	if s != nil {
+		return s
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.shared == nil {
+		h.shared = &syslogClientSet{}
+	}
+	return h.shared
 }
 
 // SetClients replaces the set of syslog clients. Old clients are closed.
+// Shared across the lineage (#9916 F-056): derived handlers observe the swap.
 func (h *SyslogSlogHandler) SetClients(clients []*SyslogClient) {
-	h.mu.Lock()
-	old := h.clients
-	h.clients = clients
-	h.mu.Unlock()
+	s := h.loadOrAllocShared()
+	s.mu.Lock()
+	old := s.clients
+	s.clients = clients
+	s.mu.Unlock()
 
 	for _, c := range old {
 		c.Close()
@@ -52,17 +97,25 @@ func (h *SyslogSlogHandler) SetClients(clients []*SyslogClient) {
 // is the refactor shape that silently drops a value; without this, deleting
 // either step left the whole suite green.
 func (h *SyslogSlogHandler) Clients() []*SyslogClient {
-	h.mu.RLock()
-	defer h.mu.RUnlock()
-	return append([]*SyslogClient(nil), h.clients...)
+	s := h.loadShared()
+	if s == nil {
+		return nil
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return append([]*SyslogClient(nil), s.clients...)
 }
 
 // Close closes all syslog clients.
 func (h *SyslogSlogHandler) Close() {
-	h.mu.Lock()
-	clients := h.clients
-	h.clients = nil
-	h.mu.Unlock()
+	s := h.loadShared()
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	clients := s.clients
+	s.clients = nil
+	s.mu.Unlock()
 
 	for _, c := range clients {
 		c.Close()
@@ -89,9 +142,14 @@ func (h *SyslogSlogHandler) Handle(ctx context.Context, r slog.Record) error {
 	// default until syslog config applies) there is nothing to forward, so
 	// return before paying for the re-entrancy guard's goID() — runtime.Stack +
 	// ParseUint per record is wasted work on the common no-client path (#2295).
-	h.mu.RLock()
-	clients := h.clients
-	h.mu.RUnlock()
+	// The set is shared across the lineage (#9916 F-056); the snapshot is taken
+	// under the shared lock and the sends run outside it, as before.
+	var clients []*SyslogClient
+	if s := h.loadShared(); s != nil {
+		s.mu.RLock()
+		clients = s.clients
+		s.mu.RUnlock()
+	}
 
 	if len(clients) == 0 {
 		return err
@@ -128,7 +186,7 @@ func (h *SyslogSlogHandler) Handle(ctx context.Context, r slog.Record) error {
 func (h *SyslogSlogHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
 	return &SyslogSlogHandler{
 		base:       h.base.WithAttrs(attrs),
-		clients:    h.clients,
+		shared:     h.loadOrAllocShared(), // share the client set (#9916 F-056)
 		attrs:      append(append([]slog.Attr{}, h.attrs...), attrs...),
 		groups:     h.groups,
 		forwarding: h.forwarding, // share the re-entrancy guard (#2287)
@@ -139,7 +197,7 @@ func (h *SyslogSlogHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
 func (h *SyslogSlogHandler) WithGroup(name string) slog.Handler {
 	return &SyslogSlogHandler{
 		base:       h.base.WithGroup(name),
-		clients:    h.clients,
+		shared:     h.loadOrAllocShared(), // share the client set (#9916 F-056)
 		attrs:      h.attrs,
 		groups:     append(append([]string{}, h.groups...), name),
 		forwarding: h.forwarding, // share the re-entrancy guard (#2287)
