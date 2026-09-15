@@ -68,6 +68,11 @@ impl crate::afxdp::Coordinator {
         // #6242: enqueue the export command + collect the ack atomic via each
         // worker's runtime record.
         for rec in self.workers.records().values() {
+            // #9900 F-093: shed dead workers — excluded from the ack set, so
+            // the export no longer stalls 15 s on a worker that never acks.
+            if rec.shed_if_dead(1) {
+                continue;
+            }
             let handle = &rec.handle;
             // #1790/#1807: recover, don't early-return — one dead worker's
             // poisoned queue must not block session export for every

@@ -190,6 +190,8 @@ pub(crate) fn refresh_status(state: &mut ServerState) {
     state.status.tx_completion_skew = state.afxdp.tx_completion_skew_total();
     state.status.tx_completion_invalid = state.afxdp.tx_completion_invalid_total();
     state.status.fill_invalid = state.afxdp.fill_invalid_total();
+    // #9900 F-093: fan-out legs shed to dead workers.
+    state.status.worker_command_queue_shed = state.afxdp.worker_command_queue_shed_total();
     // #7398: the three counters below were computed, unit-tested and never
     // assigned into ProcessStatus, so they reached no operator through status,
     // gRPC or Prometheus. They are the queue the UNSURFACED allowlist below

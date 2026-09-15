@@ -36,6 +36,34 @@ pub(in crate::afxdp) struct WorkerRuntimeRecord {
     pub(in crate::afxdp) last_resolution: Arc<Mutex<Option<ResolutionEvent>>>,
 }
 
+impl WorkerRuntimeRecord {
+    /// #9900 F-093: whether the #925 supervisor recorded this worker's panic.
+    /// Fan-out producers shed (skip + count) dead workers instead of feeding
+    /// a queue no thread will ever drain again.
+    #[inline]
+    pub(in crate::afxdp) fn is_dead(&self) -> bool {
+        self.handle
+            .runtime_atomics
+            .dead
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+    /// #9900 F-093: shed check for record-keyed fan-out. When the worker is
+    /// dead, counts `commands` (the pushes this iteration would have made —
+    /// callers pass their static fan-out width so shed stays commensurable
+    /// with `WORKER_COMMAND_QUEUE_DROPS`) and returns true so the caller
+    /// skips the queue instead of feeding a thread that will never drain.
+    #[inline]
+    pub(in crate::afxdp) fn shed_if_dead(&self, commands: u64) -> bool {
+        if self.is_dead() {
+            crate::afxdp::worker_queue::WORKER_COMMAND_QUEUE_SHED_TOTAL
+                .fetch_add(commands, std::sync::atomic::Ordering::Relaxed);
+            true
+        } else {
+            false
+        }
+    }
+}
+
 #[cfg(test)]
 impl WorkerRuntimeRecord {
     /// Wrap a bare `WorkerHandle` in a record with fresh empty observability

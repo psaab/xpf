@@ -73,6 +73,10 @@ impl crate::afxdp::Coordinator {
         if !demoted_rgs.is_empty() {
             // #6242: fan out demote commands via each worker's runtime record.
             for rec in self.workers.records().values() {
+                // #9900 F-093: shed dead workers (2 pushes skipped: demote + vacate).
+                if rec.shed_if_dead(2) {
+                    continue;
+                }
                 // #1790/#1807: recover from a poisoned worker command mutex
                 // instead of early-returning. The new HA state was already
                 // published via rg_runtime.store above, so an Err here would
@@ -135,13 +139,19 @@ impl crate::afxdp::Coordinator {
         // increment would still invalidate correctly but is avoided for
         // clarity and to keep each transition a single epoch step.
 
-        let worker_commands = self
+        // #9900 F-093: shed dead workers at collect time (the prewarm below
+        // takes the plain queue slice and keeps its exact behavior).
+        let (shed_flags, worker_commands): (Vec<bool>, Vec<_>) = self
             .workers
             .records()
             .values()
-            .map(|rec| rec.handle.commands.clone())
-            .collect::<Vec<_>>();
-        for commands in &worker_commands {
+            .map(|rec| (rec.shed_if_dead(1), rec.handle.commands.clone()))
+            .unzip();
+        for (shed, commands) in shed_flags.iter().zip(&worker_commands) {
+            // #9900 F-093: shed dead workers (counted at collect above).
+            if *shed {
+                continue;
+            }
             // #1790/#1807: uniform poison recovery (worker_queue.rs).
             let mut pending = worker_queue::lock_recover(commands);
             worker_queue::push_bounded(

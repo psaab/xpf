@@ -1046,6 +1046,7 @@
     "wg_decap_ecn_illegal_drops_total": 0,
     "worker_command_queue_drops": 0,
     "worker_command_queue_poison_recoveries": 0,
+    "worker_command_queue_shed": 0,
     "worker_heartbeats": [],
     "worker_runtime": [],
     "workers": 0

@@ -474,6 +474,9 @@ pub(crate) struct ProcessStatus {
     /// Additive / defaulted.
     #[serde(rename = "fill_invalid", default)]
     pub fill_invalid: u64,
+    /// #9900 F-093: worker commands shed to dead workers. Additive / defaulted.
+    #[serde(rename = "worker_command_queue_shed", default)]
+    pub worker_command_queue_shed: u64,
     /// #9048: peer `DeleteSynced` commands REFUSED because the key named a
     /// LIVE LOCAL session this node is actively forwarding for — the
     /// delete-side mirror of the install-side clobber guard in

@@ -524,6 +524,14 @@ impl super::Coordinator {
         crate::afxdp::tx::rings::FILL_INVALID_TOTAL.load(Ordering::Relaxed)
     }
 
+    /// #9900 F-093: worker commands shed because the target worker is dead
+    /// (recorded panic, thread exited). Distinct from drops (live-queue
+    /// overload) and poison recoveries (lossless): shed load needs
+    /// restart/reconcile, not load-shedding.
+    pub fn worker_command_queue_shed_total(&self) -> u64 {
+        crate::afxdp::worker_queue::WORKER_COMMAND_QUEUE_SHED_TOTAL.load(Ordering::Relaxed)
+    }
+
     /// #2402/#6641: total shared-session mutex poison recoveries across
     /// every shared-session and owner-RG-index site (publish, remove,
     /// lookups, index maintenance, and the #5154 HA import

@@ -9939,3 +9939,95 @@ fn shim_maps_view_places_configured_uncovered_ingress_9594() {
         .unwrap_or_else(|e| e.into_inner())
         .retain(|(name, _)| name != "wgt9594-view");
 }
+
+/// #9900 F-093: record-keyed fan-out sheds dead workers (skip + count)
+/// instead of feeding a queue no thread will ever drain. The counter query
+/// is the probe: the live worker is still queried, the dead one is skipped,
+/// and the wait still reports the dead worker as `answered: false` (never
+/// silently dropped).
+#[test]
+fn record_keyed_fan_out_sheds_dead_workers_9900() {
+    use std::sync::atomic::Ordering;
+
+    let mut coordinator = Coordinator::new();
+    let live_rec = WorkerRuntimeRecord::for_test(gre1881_fake_worker_handle());
+    let live_commands = live_rec.handle.commands.clone();
+    let live_atomics = live_rec.handle.runtime_atomics.clone();
+    coordinator.workers.register(6, live_rec, None);
+    let dead_rec = WorkerRuntimeRecord::for_test(gre1881_fake_worker_handle());
+    let dead_commands = dead_rec.handle.commands.clone();
+    let dead_atomics = dead_rec.handle.runtime_atomics.clone();
+    dead_atomics.dead.store(true, Ordering::Relaxed);
+    coordinator.workers.register(5, dead_rec, None);
+    // The live worker answers immediately so the wait below cannot stall.
+    live_atomics
+        .counter_query_seq
+        .store(u64::MAX, Ordering::Release);
+
+    let shed_before =
+        crate::afxdp::worker_queue::WORKER_COMMAND_QUEUE_SHED_TOTAL.load(Ordering::Relaxed);
+    let wait = coordinator.kick_session_counter_query(&f4_key());
+    assert_eq!(
+        live_commands.lock().unwrap().len(),
+        1,
+        "the live worker must still be queried"
+    );
+    assert!(
+        dead_commands.lock().unwrap().is_empty(),
+        "the dead worker's queue must not be fed"
+    );
+    assert_eq!(
+        crate::afxdp::worker_queue::WORKER_COMMAND_QUEUE_SHED_TOTAL.load(Ordering::Relaxed),
+        shed_before + 1,
+        "the shed leg must be counted"
+    );
+    let got = wait.wait_and_collect();
+    assert_eq!(got.len(), 2, "one entry per worker, dead included");
+    assert!(
+        got.iter().any(|c| c.worker_id == 5 && !c.answered),
+        "the shed worker must read as unanswered, not go missing"
+    );
+    assert!(
+        got.iter().any(|c| c.worker_id == 6 && c.answered),
+        "the live worker must answer"
+    );
+}
+
+/// #9900 F-093: the session-delete fan-out sheds dead workers too (same
+/// helper, delete-shaped width).
+#[test]
+fn session_delete_fan_out_sheds_dead_workers_9900() {
+    use std::sync::atomic::Ordering;
+
+    let mut coordinator = Coordinator::new();
+    let live_rec = WorkerRuntimeRecord::for_test(gre1881_fake_worker_handle());
+    let live_commands = live_rec.handle.commands.clone();
+    coordinator.workers.register(6, live_rec, None);
+    let dead_rec = WorkerRuntimeRecord::for_test(gre1881_fake_worker_handle());
+    let dead_commands = dead_rec.handle.commands.clone();
+    dead_rec
+        .handle
+        .runtime_atomics
+        .dead
+        .store(true, Ordering::Relaxed);
+    coordinator.workers.register(5, dead_rec, None);
+
+    let shed_before =
+        crate::afxdp::worker_queue::WORKER_COMMAND_QUEUE_SHED_TOTAL.load(Ordering::Relaxed);
+    coordinator.delete_synced_session(f4_key());
+    assert_eq!(
+        live_commands.lock().unwrap().len(),
+        1,
+        "the live worker must still receive the delete"
+    );
+    assert!(
+        dead_commands.lock().unwrap().is_empty(),
+        "the dead worker's queue must not be fed"
+    );
+    // f4 has no reverse companion: width 1.
+    assert_eq!(
+        crate::afxdp::worker_queue::WORKER_COMMAND_QUEUE_SHED_TOTAL.load(Ordering::Relaxed),
+        shed_before + 1,
+        "the shed leg must be counted"
+    );
+}

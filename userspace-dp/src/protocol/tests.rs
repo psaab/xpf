@@ -413,6 +413,7 @@ fn process_status_tx_completion_counters_roundtrip_9900() {
         tx_completion_skew: 3,
         tx_completion_invalid: 5,
         fill_invalid: 7,
+        worker_command_queue_shed: 11,
         ..Default::default()
     };
     let value: serde_json::Value =
@@ -420,11 +421,13 @@ fn process_status_tx_completion_counters_roundtrip_9900() {
     assert_eq!(value["tx_completion_skew"], 3);
     assert_eq!(value["tx_completion_invalid"], 5);
     assert_eq!(value["fill_invalid"], 7);
+    assert_eq!(value["worker_command_queue_shed"], 11);
 
     let back: ProcessStatus = serde_json::from_value(value).expect("deserialize ProcessStatus");
     assert_eq!(back.tx_completion_skew, 3);
     assert_eq!(back.tx_completion_invalid, 5);
     assert_eq!(back.fill_invalid, 7);
+    assert_eq!(back.worker_command_queue_shed, 11);
 
     // Pre-#9900 payload (keys absent) must decode with zero defaults.
     let mut legacy_value =
@@ -439,12 +442,15 @@ fn process_status_tx_completion_counters_roundtrip_9900() {
             .expect("new key present before strip");
         obj.remove("fill_invalid")
             .expect("new key present before strip");
+        obj.remove("worker_command_queue_shed")
+            .expect("new key present before strip");
     }
     let legacy: ProcessStatus =
         serde_json::from_value(legacy_value).expect("pre-#9900 payload decodes");
     assert_eq!(legacy.tx_completion_skew, 0);
     assert_eq!(legacy.tx_completion_invalid, 0);
     assert_eq!(legacy.fill_invalid, 0);
+    assert_eq!(legacy.worker_command_queue_shed, 0);
 }
 
 // #2402/#6641: round-trip + backward-compat pin for the shared-session

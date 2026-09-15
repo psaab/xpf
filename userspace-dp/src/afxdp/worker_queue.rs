@@ -66,9 +66,12 @@ pub(in crate::afxdp) static WORKER_COMMAND_QUEUE_POISON_RECOVERIES: AtomicU64 = 
 ///     this argument — and no `dead` check, so it keeps pushing into that queue
 ///     forever.
 ///
-/// The `dead` flag is read only by `coordinator/status.rs`, for diagnostics. So
-/// after any worker panic the queues grow without bound until memory is
-/// exhausted, which is a correction rather than a hardening.
+/// The `dead` flag is read by `coordinator/status.rs` for diagnostics AND by
+/// record-keyed fan-out producers, which shed (skip + count) dead workers
+/// instead of feeding them (#9900 F-093). Slice-based producers (session
+/// replication, CoS redirect, PPTP broadcast) carry bare queue handles with
+/// no record access and still push; `push_bounded` caps those queues at 4096
+/// so a dead worker's backlog is bounded, never unbounded.
 ///
 /// 4096 mirrors `MAX_PENDING_SESSION_DELTAS`, the sibling bound this codebase
 /// already applies to the same class of producer-side deque. Matching it is
@@ -87,6 +90,18 @@ pub(in crate::afxdp) const MAX_PENDING_WORKER_COMMANDS: usize = 4096;
 /// queue" while hiding whether anything was actually lost, and the two have
 /// opposite remediations.
 pub(in crate::afxdp) static WORKER_COMMAND_QUEUE_DROPS: AtomicU64 = AtomicU64::new(0);
+
+/// #9900 F-093: worker commands SHED because the target worker is dead
+/// (the #925 supervisor recorded its panic and the thread exited).
+///
+/// THIRD signal alongside the two above, and again the distinction is
+/// load-bearing: a poison recovery loses nothing, a capacity drop discards a
+/// command a LIVE worker would have consumed, and a shed discards a command
+/// addressed to a worker that can never consume anything again. Folding shed
+/// into DROPS would report dead-worker fan-out as live-queue overload — the
+/// two have opposite remediations (restart/reconcile the dead worker vs shed
+/// load from a live one).
+pub(in crate::afxdp) static WORKER_COMMAND_QUEUE_SHED_TOTAL: AtomicU64 = AtomicU64::new(0);
 
 /// Push a command onto a worker queue, refusing at the capacity bound (#6929).
 ///

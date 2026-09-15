@@ -750,6 +750,10 @@ impl crate::afxdp::ha::SessionDomain {
         }
         // #6242: fan out to each worker's command queue via its runtime record.
         for rec in worker_records.values() {
+            // #9900 F-093: shed dead workers — no thread will ever drain this queue.
+            if rec.shed_if_dead(1 + reverse_entry.is_some() as u64) {
+                continue;
+            }
             // #1790/#1807: recover-and-push instead of silently skipping a
             // poisoned queue (same policy as update_ha_state).
             let mut pending = worker_queue::lock_recover(&rec.handle.commands);
@@ -1023,6 +1027,11 @@ impl crate::afxdp::ha::SessionDomain {
         // reservation is the part with no other owner. The wider signal is
         // `WORKER_COMMAND_QUEUE_DROPS`.
         for (worker_id, rec) in self.workers.load().iter() {
+            // #9900 F-093: shed dead workers. No F4 repair here: the
+            // dead-worker sweep reclaims dead bits; repair covers live drops.
+            if rec.shed_if_dead(1 + reverse_key.is_some() as u64) {
+                continue;
+            }
             // #1790/#1807: recover-and-push instead of silently skipping a
             // poisoned queue (same policy as update_ha_state).
             let mut pending = worker_queue::lock_recover(&rec.handle.commands);

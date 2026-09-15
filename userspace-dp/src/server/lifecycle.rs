@@ -413,6 +413,7 @@ pub(crate) fn run() -> Result<(), String> {
             tx_completion_skew: 0,
             tx_completion_invalid: 0,
             fill_invalid: 0,
+            worker_command_queue_shed: 0,
             session_install_stale_ignored: 0,
             session_delete_stale_ignored: 0,
             session_delete_dropped_released: 0,
