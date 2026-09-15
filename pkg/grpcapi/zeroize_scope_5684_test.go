@@ -48,9 +48,15 @@ func TestZeroizeRefusesSharedConfigRoot(t *testing.T) {
 	store := newConfigStore(t, configPath)
 	s := &Server{store: store}
 
-	// Register the throwaway dir as a shared/system root for this test.
+	// Register the throwaway dir as a shared/system root for this test, in
+	// RESOLVED form (#9897 review): the gate compares resolved candidates,
+	// which differ under a symlinked TMPDIR (identity on Linux).
+	wantShared, werr := filepath.EvalSymlinks(shared)
+	if werr != nil {
+		t.Fatalf("EvalSymlinks(%q): %v", shared, werr)
+	}
 	old := configstore.FactoryResetForbiddenRoots
-	configstore.FactoryResetForbiddenRoots = append(append([]string(nil), old...), filepath.Clean(shared))
+	configstore.FactoryResetForbiddenRoots = append(append([]string(nil), old...), filepath.Clean(wantShared))
 	t.Cleanup(func() { configstore.FactoryResetForbiddenRoots = old })
 
 	resp, err := s.SystemAction(context.Background(), &pb.SystemActionRequest{Action: "zeroize"})
@@ -98,9 +104,14 @@ func TestZeroizeConfigDirRefusesSharedRoot(t *testing.T) {
 		}
 	}
 
-	// Register the throwaway dir as a shared/system root for this test.
+	// Register the throwaway dir as a shared/system root for this test, in
+	// RESOLVED form (#9897 review — see above).
+	wantShared, werr := filepath.EvalSymlinks(shared)
+	if werr != nil {
+		t.Fatalf("EvalSymlinks(%q): %v", shared, werr)
+	}
 	old := configstore.FactoryResetForbiddenRoots
-	configstore.FactoryResetForbiddenRoots = append(append([]string(nil), old...), filepath.Clean(shared))
+	configstore.FactoryResetForbiddenRoots = append(append([]string(nil), old...), filepath.Clean(wantShared))
 	t.Cleanup(func() { configstore.FactoryResetForbiddenRoots = old })
 
 	if err := zeroizeConfigDir(shared, "xpf.conf"); err == nil {
