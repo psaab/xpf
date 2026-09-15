@@ -378,23 +378,42 @@ func (p *nlPlan) pfxAddrMatch(field string, f nlFamily, addrs []string, except b
 		off = f.saddrOff
 	}
 	pfxs := make([]netip.Prefix, 0, len(addrs))
-	for _, a := range addrs {
-		if pfx, err := netip.ParsePrefix(a); err == nil {
-			pfxs = append(pfxs, pfx.Masked())
-			continue
-		}
-		if ip, err := netip.ParseAddr(a); err == nil {
-			pfxs = append(pfxs, netip.PrefixFrom(ip, ip.BitLen()))
-			continue
-		}
-	}
-	if len(pfxs) == 0 {
-		return nil
-	}
 	load := &expr.Payload{DestRegister: 1, Base: expr.PayloadBaseNetworkHeader, Offset: off, Len: f.addrLen}
 	op := expr.CmpOpEq
 	if except {
 		op = expr.CmpOpNeq
+	}
+	// #9903 F-127: every token must parse AND match this rule's family.
+	// An unparseable token silently skipped narrows a positive list or
+	// widens an except list (all-unparseable renders NO predicate at all);
+	// a wrong-family token is worse — v6-in-v4 PANICS in As4 below, and
+	// v4-in-v6 silently compares ::a.b.c.d (never-match). Fail the plan
+	// CLOSED (#6512) instead. The family predicate mirrors lo0's
+	// filterFamilyAddrs (Is6()==f.v6) so 4-in-6 literals classify
+	// identically at every layer; lo0 itself is unaffected (it pre-splits
+	// families and fails malformed tokens before this helper runs).
+	for _, a := range addrs {
+		if pfx, err := netip.ParsePrefix(a); err == nil {
+			if pfx.Addr().Is6() != f.v6 {
+				p.fail(fmt.Errorf("address %q is the wrong family for this rule", a))
+				return nil
+			}
+			pfxs = append(pfxs, pfx.Masked())
+			continue
+		}
+		if ip, err := netip.ParseAddr(a); err == nil {
+			if ip.Is6() != f.v6 {
+				p.fail(fmt.Errorf("address %q is the wrong family for this rule", a))
+				return nil
+			}
+			pfxs = append(pfxs, netip.PrefixFrom(ip, ip.BitLen()))
+			continue
+		}
+		p.fail(fmt.Errorf("malformed address %q (neither an IP nor a CIDR prefix)", a))
+		return nil
+	}
+	if len(pfxs) == 0 {
+		return nil
 	}
 	if len(pfxs) == 1 {
 		pfx := pfxs[0]
@@ -665,6 +684,25 @@ func exthdrFragV6Match() []expr.Any {
 func (p *nlPlan) iifnameMatch(names []string) []expr.Any {
 	if len(names) == 0 {
 		return nil
+	}
+	// #9903 F-126: a kernel interface name is at most 15 bytes (IFNAMSIZ-1,
+	// NUL-padded to 16). ifname16 below copies without a length check, so a
+	// longer name fills the field with no NUL and the compare key can never
+	// match — the iifname-scoped jump (junos-host, IKE/ident shields,
+	// ingress scoping, reinject accept) goes dead while sibling rules from
+	// the same generation still install. Fail the plan CLOSED (#6512
+	// posture) rather than installing the never-matching rule. This
+	// validates EVERY element before either shape is constructed, so one
+	// invalid member fails the whole set build — the tradeoff is
+	// deliberate: a partially-installed generation is worse than a refused
+	// one, and no legitimate name exceeds 15 bytes. The text renderer
+	// keeps the token verbatim for the kernel to refuse loudly (#6512
+	// doctrine); parity is no-silent-truncation, not kernel behavior.
+	for _, n := range names {
+		if len(n) > unix.IFNAMSIZ-1 {
+			p.fail(fmt.Errorf("iifname %q exceeds the 15-byte interface-name limit and would never match", n))
+			return nil
+		}
 	}
 	load := &expr.Meta{Key: expr.MetaKeyIIFNAME, Register: 1}
 	if len(names) == 1 {

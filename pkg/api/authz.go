@@ -894,6 +894,22 @@ func candidateConfigReadPermission(r *http.Request) (config.LoginClassPermission
 func (s *Server) readAuthz(w http.ResponseWriter, r *http.Request, next http.Handler) {
 	required, known := readPermissionFor(r.Method, r.URL.Path)
 	if !known {
+		// #9903 F-129: fail closed for the API namespace. An unlisted
+		// /api/v1 path previously served with NO authorization decision —
+		// the census below moves that risk to the suite for REGISTERED
+		// shapes, but a shape no census sees (mux.Handle, method-less,
+		// subtree) would still serve. Non-/api/v1 paths (/health,
+		// /metrics, mux 404s) pass through unchanged. The match is the
+		// exact `/api/v1` or the `/api/v1/` prefix on the RAW path (never
+		// cleaned — cleaning can only widen what matches, per the
+		// mutation guard below), so `/api/v1evil` is untouched.
+		if r.URL.Path == "/api/v1" || strings.HasPrefix(r.URL.Path, "/api/v1/") {
+			slog.Debug("api: refused unguarded read",
+				"method", r.Method, "path", r.URL.Path, "remote", r.RemoteAddr)
+			writeError(w, http.StatusForbidden,
+				"permission denied: no authorization policy is defined for this read endpoint")
+			return
+		}
 		next.ServeHTTP(w, r)
 		return
 	}

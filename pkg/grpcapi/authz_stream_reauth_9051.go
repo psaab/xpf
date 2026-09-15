@@ -59,9 +59,11 @@ func (s reauthServerStream) Context() context.Context { return s.ctx }
 //
 // The returned error is the AUTHZ error, not context.Canceled: a client whose
 // class was revoked must be told that, and a bare cancellation is
-// indistinguishable from an ordinary shutdown. The handler's own error wins
-// when it returns first, because a handler that already failed has a more
-// specific reason than "and also you were revoked".
+// indistinguishable from an ordinary shutdown. When revocation and a handler
+// error are co-present, the revocation wins: the watcher records it before
+// cancelling, so a handler returning *because of* the revocation reports it
+// deterministically (#9903 F-128). A handler-only failure still returns the
+// handler's own (more specific) error.
 func (s *Server) authorizeStreamContinuously(
 	srv any,
 	ss grpc.ServerStream,
@@ -102,15 +104,25 @@ func (s *Server) authorizeStreamContinuously(
 	}()
 
 	herr := handler(srv, reauthServerStream{ServerStream: ss, ctx: ctx})
-	if herr != nil {
-		return herr
-	}
-	// The handler returned cleanly. If that was because we cancelled it, report
-	// the revocation rather than success.
+	// #9903 F-128: consult the revocation BEFORE the handler error. The
+	// watcher sends to revoked (buffered) BEFORE cancelling, so when the
+	// handler returns *because of* the revocation, revoked is already
+	// populated and the client deterministically learns PermissionDenied.
+	// Pre-fix the handler's own ctx error won, and identical revocations
+	// surfaced as PermissionDenied or Canceled/Unavailable by timing, so
+	// the client retried instead of surfacing the authorization event. A
+	// handler-only failure (revoked empty) still returns herr, and a clean
+	// return with no revocation still returns nil — only the co-present
+	// case changes precedence, and revocation is terminal anyway. (This
+	// orders the SIGNAL only; the wrapper overrides Context, not the
+	// transport's blocked Send/Recv.)
 	select {
 	case err := <-revoked:
 		return err
 	default:
-		return nil
 	}
+	if herr != nil {
+		return herr
+	}
+	return nil
 }
