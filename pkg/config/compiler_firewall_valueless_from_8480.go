@@ -203,94 +203,80 @@ func firewallTermValuelessFromLeaves(termNode *Node, fromSchema *schemaNode) []s
 // tell them apart. That is the same reason #6526 and #7525 run pre-walk.
 func validateFirewallFilterValuelessFromStrict(children []*Node, lenient bool) ([]string, error) {
 	var warnings []string
+	firewallPermitted := firewallFamilyPermitted9017()
+	// checkFilters gates every term under the given filter nodes, attributing
+	// rejects to displayFamily ("" for the family-less spelling). Filter and
+	// term names resolve through namedInstances, the same dual-shape reader
+	// compileFirewall uses, so `filter { F { ... } }` and `term { T { ... } }`
+	// block names are gated too. The `from` schema each term is read under
+	// resolves from af, the address family the filters compile under ("" for
+	// the family-less and unknown-container spellings, where schemaForPath
+	// yields nil and the helper falls back to the inet from-schema, #9875).
+	checkFilters := func(af, displayFamily string, filterNodes []*Node) error {
+		fromSchema := schemaForPath("firewall", "family", af, "filter", "term", "from")
+		for _, filterInst := range namedInstances(filterNodes) {
+			for _, termInst := range namedInstances(filterInst.node.FindChildren("term")) {
+				bad := firewallTermValuelessFromLeaves(termInst.node, fromSchema)
+				if len(bad) == 0 {
+					continue
+				}
+				where := fmt.Sprintf("firewall filter %q term %q", filterInst.name, termInst.name)
+				if displayFamily != "" {
+					where = fmt.Sprintf("firewall family %s filter %q term %q",
+						displayFamily, filterInst.name, termInst.name)
+				}
+				msg := fmt.Sprintf("%s: `from %s` carries no value, and an "+
+					"empty match set is read as match-ANY — the term matches "+
+					"EVERY packet on that criterion rather than none, so a "+
+					"`then discard` widens and a `then accept` opens. Give "+
+					"the leaf a value; for an intentional wildcard, omit the "+
+					"leaf entirely (#8480)",
+					where, strings.Join(bad, ", "))
+				if !lenient {
+					return fmt.Errorf("%s", msg)
+				}
+				warnings = append(warnings, msg)
+			}
+		}
+		return nil
+	}
 	for _, fw := range children {
 		if fw.Name() != "firewall" {
 			continue
 		}
+		// `firewall filter F` (no family) and `firewall family ...` are both
+		// real spellings; the filter level is found by NAME rather than by
+		// depth, in document order (which offending term strict reports first
+		// when several offend is therefore unchanged from #8480).
 		for _, fam := range fw.Children {
-			// `firewall filter F` (no family) and `firewall family inet
-			// filter F` are both real spellings; the first has `filter` where
-			// the second has a family, so the filter level is found by NAME
-			// rather than by depth. The set-command shape `family { inet {
-			// ... } }` is a third: the compiler descends into the
-			// family-name children (compileFirewall), so the gate must too —
-			// skipping them lets a valueless leaf COMMIT while compilation
-			// records the marker, and the marker then refuses the snapshot
-			// of a committed config (boot brick). Each group carries the
-			// address family its from-schema resolves under, plus the
-			// family name the diagnostic prints (the resolved af — NOT
-			// the container keyword, which would print "family family").
-			type famFilters struct {
-				af      string
-				famName string
-				filters []*Node
-			}
-			var groups []famFilters
-			switch {
-			case fam.Name() == "filter":
-				groups = append(groups, famFilters{"", "", []*Node{fam}})
-			case fam.Name() == "family" && len(fam.Keys) < 2:
-				for _, afNode := range fam.Children {
-					af := afNode.Name()
-					if len(afNode.Keys) >= 2 {
-						af = afNode.Keys[1]
+			switch fam.Name() {
+			case "family":
+				// BOTH shapes compileFirewall compiles, via the shared
+				// firewallFamilyMembers9883 extractor (#9876 over #9883):
+				// hierarchical `family inet { filter ... }` and nested
+				// `family { inet { filter ... } }`. Quarantined members
+				// compile to NOTHING, so there are no compiled terms to
+				// check — skipped exactly like the compiler skips them.
+				for _, m := range firewallFamilyMembers9883(fam) {
+					if firewallFamilyQuarantined9883(m, firewallPermitted) {
+						continue
 					}
-					groups = append(groups, famFilters{af, af, afNode.Children})
+					if err := checkFilters(m.Af, m.Af, m.AfNode.FindChildren("filter")); err != nil {
+						return nil, err
+					}
 				}
-			case fam.Name() == "family":
-				af := ""
-				if len(fam.Keys) >= 2 {
-					af = fam.Keys[1]
+			case "filter":
+				if err := checkFilters("", "", []*Node{fam}); err != nil {
+					return nil, err
 				}
-				groups = append(groups, famFilters{af, af, fam.Children})
 			default:
 				// Unknown container directly under firewall: af stays ""
 				// (schemaForPath yields nil, the helper falls back to the
 				// inet from-schema). The compiler ignores these shapes; the
 				// gate still polices nested filters in the safe
 				// (reject-only) direction.
-				groups = append(groups, famFilters{"", fam.Name(), fam.Children})
-			}
-			for _, g := range groups {
-				fromSchema := schemaForPath("firewall", "family", g.af, "filter", "term", "from")
-				for _, filt := range g.filters {
-					if filt.Name() != "filter" {
-						continue
-					}
-					// GPT-F1: resolve filter and term INSTANCES exactly as
-					// the compiler does (namedInstances at both levels). A
-					// nested filter-name node (`filter { F { ... } }`) has
-					// no `term` children itself, and a nested term-name node
-					// (`term { T { ... } }`) holds no `from` — inspecting
-					// the wrappers instead of the resolved instances lets a
-					// valueless leaf commit while compilation records the
-					// marker on the actual term.
-					for _, fi := range namedInstances([]*Node{filt}) {
-						for _, termNode := range fi.node.FindChildren("term") {
-							for _, ti := range namedInstances([]*Node{termNode}) {
-								bad := firewallTermValuelessFromLeaves(ti.node, fromSchema)
-								if len(bad) == 0 {
-									continue
-								}
-								where := fmt.Sprintf("firewall filter %q term %q", fi.name, ti.name)
-								if g.famName != "" {
-									where = fmt.Sprintf("firewall family %s filter %q term %q",
-										g.famName, fi.name, ti.name)
-								}
-								msg := fmt.Sprintf("%s: `from %s` carries no value, and an "+
-									"empty match set is read as match-ANY — the term matches "+
-									"EVERY packet on that criterion rather than none, so a "+
-									"`then discard` widens and a `then accept` opens. Give "+
-									"the leaf a value; for an intentional wildcard, omit the "+
-									"leaf entirely (#8480)",
-									where, strings.Join(bad, ", "))
-								if !lenient {
-									return nil, fmt.Errorf("%s", msg)
-								}
-								warnings = append(warnings, msg)
-							}
-						}
-					}
+				if err := checkFilters("", fam.Name(), fam.FindChildren("filter")); err != nil {
+					return nil, err
 				}
 			}
 		}
