@@ -71,6 +71,19 @@ type compileOpts struct {
 	// config an older binary silently accepted still boots (#1960).
 	lenientVRRPAuthentication bool
 
+	// lenientRenderUnsafeInterfaceNames (#9886) turns the render-unsafe
+	// interface-name gate (validateRenderUnsafeInterfaceNamesAST) from a hard
+	// compile error into DROP-plus-warning: a top-level `interfaces` or
+	// `bridge-domains` member, a `chassis device-map interface` entry, or a
+	// `fabric-options member-interfaces` reference whose post-sanitize name is
+	// not render-safe is pruned from the AST with a loud cfg.Warnings entry
+	// naming the name, the #1798 scrub, and the remedy. Set ONLY on the
+	// tolerant load / peer-sync paths. Hard-erroring the whole compile here
+	// would safe-state Load and alarm-loop SyncApply for one never-usable name
+	// (store.go's stated loop); dropping matches the #5834 VRRP-auth shape for
+	// a fail-closed security property on lenient.
+	lenientRenderUnsafeInterfaceNames bool
+
 	// lenientDeviceMap (#1956 V-1) downgrades the cross-entry device-map
 	// validator (validateDeviceMapStrict) from a hard compile error to a
 	// cfg.Warnings entry. Set ONLY on the tolerant load / peer-sync paths
@@ -2792,6 +2805,7 @@ func lenientCompileOpts() compileOpts {
 		sanitizeFreeTextControlChars:           true,
 		lenientVRRPTrackDuplicates:             true,
 		lenientVRRPAuthentication:              true,
+		lenientRenderUnsafeInterfaceNames:      true,
 		lenientDeviceMap:                       true,
 		lenientPolicyMatchAddress:              true,
 		lenientTCPMSSRange:                     true,

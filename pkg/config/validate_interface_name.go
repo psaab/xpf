@@ -3,6 +3,8 @@ package config
 import (
 	"fmt"
 	"strings"
+
+	"github.com/psaab/xpf/pkg/rendersafe"
 )
 
 // validate_interface_name.go — the commit-time gate on the `interfaces`
@@ -130,8 +132,13 @@ func ValidateInterfaceName(raw string, _ *Config) error {
 // the validator protects can be asserted directly against systemd's documented
 // grammar, rather than only through the validator's own allowlist — a test that
 // checked the allowlist against itself would be true by construction.
+//
+// The body lives in pkg/rendersafe (#9886): the networkd render belt must
+// answer the same question, and duplicating it would let the two copies drift.
+// The grammar facts (ASCII separator set, unicode-space pass-through, glob
+// deferral to #10089) are documented there, beside the body.
 func interfaceNameRendersAsOnePattern(name string) bool {
-	return len(strings.Fields(name)) == 1 && strings.Fields(name)[0] == name
+	return rendersafe.RendersAsOnePattern(name)
 }
 
 // interfaceNameIsNotAnOptionWord reports whether name occupies an argv slot as

@@ -12,6 +12,7 @@ import (
 
 	"github.com/psaab/xpf/pkg/fsatomic"
 	"github.com/psaab/xpf/pkg/networkd"
+	"github.com/psaab/xpf/pkg/rendersafe"
 	"github.com/vishvananda/netlink"
 )
 
@@ -547,6 +548,21 @@ func containsLine(text, s string) bool {
 // one that matters: a .link that did not land is a NIC that comes up with its
 // kernel name and no zone.
 func writeLinkFile(target, originalName string) (bool, error) {
+	// #9886: refuse a render-unsafe name BEFORE any mutation — before the
+	// path is even built, so a slash/control name cannot escape the managed
+	// directory or land on disk in any form. Both slots interpolate raw:
+	// target into [Link] Name= (and the file name), originalName into
+	// [Match] OriginalName= — itself a whitespace-separated match list, so a
+	// multi-pattern original claims devices other than the intended NIC.
+	// Callers surface the error on their existing fail-closed channels
+	// (#5842 positional errs, #4956 device-map renameErrs); the rename still
+	// proceeds without a .link rather than stranding the NIC mid-pass.
+	if !rendersafe.SafeInterfaceName(target) {
+		return false, fmt.Errorf("linksetup: refusing .link target name %q: it is not exactly one pattern or it carries control bytes — no file written (#9886)", target)
+	}
+	if !rendersafe.SafeInterfaceName(originalName) {
+		return false, fmt.Errorf("linksetup: refusing .link OriginalName %q for target %q: it is not exactly one [Match] OriginalName= pattern or it carries control bytes — no file written (#9886)", originalName, target)
+	}
 	path := filepath.Join(linkDir, linkPrefix+target+".link")
 	content := fmt.Sprintf(`# Managed by xpfd — do not edit
 [Match]
