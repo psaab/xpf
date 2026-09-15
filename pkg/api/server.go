@@ -233,6 +233,18 @@ type Config struct {
 	// reported as a non-fatal field plus the gauge for alerting. Optional;
 	// if nil, the field and gauge are omitted.
 	RollbackHistoryDegradedFn func() bool
+	// JournalPermsDegradedFn surfaces the configstore journal's
+	// permission-repair-degraded state via /health and the
+	// xpf_config_journal_perms_degraded gauge (#9898 F-113, mirrors the
+	// RollbackHistoryDegradedFn pattern). Returning true means a journal
+	// segment could not be tightened to owner-only 0600 and
+	// world-readable history (which may carry operator free text) may
+	// still be exposed. Like RollbackHistoryDegradedFn this does NOT make
+	// /health return 503: appends continue and the journal is intact (a
+	// confidentiality exposure on a recovery aid, not a forwarding or
+	// durability outage), so it is reported as a non-fatal field plus the
+	// gauge for alerting. Optional; if nil, the field and gauge are omitted.
+	JournalPermsDegradedFn func() bool
 	// ConfigApplyDebtFn surfaces the daemon's #9811 config-apply debt: the
 	// dataplane is known to be enforcing something OTHER than the active
 	// configuration, because an apply on a path with no caller to report to
@@ -559,6 +571,7 @@ type Server struct {
 	configPersistDegradedFn              func() bool
 	configApplyDebtFn                    func() (bool, uint64, string)
 	rollbackHistoryDegradedFn            func() bool
+	journalPermsDegradedFn               func() bool
 	neighborPhaseAgeFn                   func() map[string]float64
 	frrReloadDegradedFn                  func() bool
 	frrQuarantinedRouteMapsFn            func() []string
@@ -681,6 +694,7 @@ func NewServer(cfg Config) *Server {
 		hostInboundAppliedFn:                 cfg.HostInboundAppliedFn,
 		configPersistDegradedFn:              cfg.ConfigPersistDegradedFn,
 		rollbackHistoryDegradedFn:            cfg.RollbackHistoryDegradedFn,
+		journalPermsDegradedFn:               cfg.JournalPermsDegradedFn,
 		configApplyDebtFn:                    cfg.ConfigApplyDebtFn,
 		neighborPhaseAgeFn:                   cfg.NeighborPhaseAgeFn,
 		frrReloadDegradedFn:                  cfg.FRRReloadDegradedFn,

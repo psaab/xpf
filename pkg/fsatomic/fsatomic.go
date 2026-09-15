@@ -320,21 +320,33 @@ func writeFile(path string, data []byte, perm os.FileMode, durable bool, opts ..
 		}
 	}()
 
-	if _, err := writeTemp(tmp, data); err != nil {
-		_ = tmp.Close()
+	n, err := writeTemp(tmp, data)
+	if err != nil {
+		_ = closeTemp(tmp)
 		return fmt.Errorf("write temp file: %w", err)
+	}
+	// #9898 F-115: assert the write count. os.File.Write already reports a
+	// short count as an error (os/file.go), so in production this is
+	// defense-in-depth rather than a reachable truncation — but the seam
+	// is the contract, and a seam that silently accepts n != len(data)
+	// would install a truncated file with success returned. Fail here, so
+	// the rename below can never publish a short temp over a good target.
+	if n != len(data) {
+		_ = closeTemp(tmp)
+		return fmt.Errorf("write temp file: short write (%d of %d bytes with nil error) — "+
+			"refusing to install a truncated file", n, len(data))
 	}
 	// Mode/ownership on the open fd (fchmod/fchown) before rename: the
 	// final path never appears with a transient mode and there is no
 	// path race on the temp name.
 	if err := chmodTemp(tmp, mode); err != nil {
-		_ = tmp.Close()
+		_ = closeTemp(tmp)
 		return fmt.Errorf("chmod temp file: %w", err)
 	}
 	if setOwner {
 		if cur, ok := tempOwner(tmp); !ok || cur != owner {
 			if err := chownTemp(tmp, owner.uid, owner.gid); err != nil {
-				_ = tmp.Close()
+				_ = closeTemp(tmp)
 				return fmt.Errorf("chown temp file to %d:%d: %w", owner.uid, owner.gid, err)
 			}
 		}
@@ -344,7 +356,7 @@ func writeFile(path string, data []byte, perm os.FileMode, durable bool, opts ..
 		// surface a zero-length/partial file after power loss. EINTR is
 		// retried inside the stdlib (internal/poll ignoringEINTR).
 		if err := syncFile(tmp); err != nil {
-			_ = tmp.Close()
+			_ = closeTemp(tmp)
 			return fmt.Errorf("sync temp file: %w", err)
 		}
 	}

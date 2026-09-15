@@ -81,6 +81,14 @@ func (s *Server) healthHandler(w http.ResponseWriter, _ *http.Request) {
 	if s.rollbackHistoryDegradedFn != nil {
 		payload["rollback_history_degraded"] = s.rollbackHistoryDegradedFn()
 	}
+	// #9898 F-113: journal permission-repair degradation is likewise a
+	// non-fatal field. Appends continue and the journal is intact; only
+	// the owner-only posture of pre-existing history failed to establish,
+	// so like rollback_history_degraded this does NOT force a 503. The
+	// xpf_config_journal_perms_degraded gauge is the alerting hook.
+	if s.journalPermsDegradedFn != nil {
+		payload["journal_perms_degraded"] = s.journalPermsDegradedFn()
+	}
 	// #9811: the node is enforcing a configuration it does not report. A
 	// commit-confirmed auto-rollback promotes the store FIRST and then applies;
 	// when that apply fails, every other surface in this payload — and `show

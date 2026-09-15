@@ -103,6 +103,33 @@ const (
 	// fragment past the cap is discarded and the scanner resyncs at
 	// the previous newline, dropping only the poisoned line.
 	maxTailLineBytes = 16 << 20
+
+	// maxJournalEntryBytes caps one marshaled Journal.Log entry (#9898
+	// F-110). The only bound used to be the caller belt in
+	// Store.journalLog (4 KiB Detail truncate), so a direct Log caller
+	// with a pathological Detail got a nil error while the bounded
+	// reverse-tail scanner above later discarded the poisoned line — a
+	// silently lost audit record with success reported. The bound sits in
+	// Log itself: refuse before appendLocked, appending and rotating
+	// nothing. 64 KiB holds the belted path (~4.3 KiB typical for a maxed
+	// Detail plus framing: ~15x headroom; ~24.8 KiB worst case when every
+	// Detail byte JSON-escapes 6x: ~2.6x) and stays 256x below the
+	// scanner line cap.
+	maxJournalEntryBytes = 64 << 10
+
+	// maxReadAllSegmentBytes caps one segment read on the Tail(0)
+	// full-scan path (#9898 F-114). readAllLocked used to io.ReadAll every
+	// segment unboundedly; a garbage/huge segment ballooned memory before
+	// any check. 16 MiB holds rotated segments (~1 MiB at the defaults)
+	// with 16x headroom; a legacy fat v1 segment (which predates rotation
+	// and can exceed anything) fails closed with a loud error instead of
+	// materializing unboundedly or returning partial-as-complete history.
+	// The guarantee is per segment: aggregate raw input is bounded by
+	// (maxSegments+1) x this cap. Valid entries still allocate per entry
+	// (inherent to "read everything"); what the cap plus the incremental
+	// iteration below remove is AMPLIFICATION — notably bytes.Split's
+	// per-line descriptors, which cost ~384 MiB for 16 MiB of blank lines.
+	maxReadAllSegmentBytes = 16 << 20
 )
 
 // Journal is an append-only, size-rotated JSONL audit log. All methods
@@ -124,8 +151,16 @@ type Journal struct {
 	maxSegmentBytes int64
 	maxSegments     int
 	// migrated guards the one-time permission-repair pass (#5188) so it
-	// runs once on first use, under j.mu, and is a no-op thereafter.
+	// runs once on first use, under j.mu, and is a no-op thereafter. It is
+	// set only when EVERY segment repair succeeds (#9898 F-113): a failure
+	// leaves it false so the next use retries, instead of sticking true
+	// after one warn and never looking again.
 	migrated bool
+	// permsDegraded reports that the last permission-repair attempt FAILED
+	// (or a rotation re-assert failed since) and world-readable history
+	// may still be exposed (#9898 F-113). Guarded by j.mu; read via
+	// PermRepairDegraded. Cleared only by a fully-successful repair pass.
+	permsDegraded bool
 	// syncFile fsyncs a fully-written segment for durability. It is a
 	// field only so tests can inject a slow/blocking fsync and prove Tail
 	// does not stall behind it (#4829); production always uses
@@ -202,6 +237,14 @@ func (j *Journal) segmentPath(n int) string {
 	return fmt.Sprintf("%s.%d", j.path, n)
 }
 
+// journalLstat and journalChmod are the permission-repair syscalls, as
+// package seams so tests can inject repair failures deterministically
+// (#9898 F-113). Production code must never mutate them.
+var (
+	journalLstat = os.Lstat
+	journalChmod = os.Chmod
+)
+
 // migratePermsLocked runs once on first use (Log or Tail) and repairs
 // the permissions of every OWNED journal segment — the current file and
 // its rotation siblings — to owner-only 0600 (#5188). #4579 A4-02 made
@@ -210,14 +253,39 @@ func (j *Journal) segmentPath(n int) string {
 // secret-bearing legacy .N segment, stayed world-readable with no
 // migration pass. Only these journal-owned paths are touched, never an
 // unrelated file. Caller holds j.mu.
+//
+// #9898 F-113: a failed pass is retried on the next use (migrated is set
+// only when every repair succeeds) and latched into permsDegraded until
+// one succeeds — a failed repair used to be one warning and then silence,
+// with the exposure never revisited. Every retry re-warns, so a stuck
+// failure stays loud in the logs while the flag carries it for scrapers.
 func (j *Journal) migratePermsLocked() {
 	if j.migrated {
 		return
 	}
-	j.migrated = true
+	ok := true
 	for seg := 0; seg <= j.maxSegments; seg++ {
-		chmodOwnerOnly(j.segmentPath(seg))
+		if err := chmodOwnerOnly(j.segmentPath(seg)); err != nil {
+			ok = false
+		}
 	}
+	if ok {
+		j.migrated = true
+		j.permsDegraded = false
+	} else {
+		j.permsDegraded = true
+	}
+}
+
+// PermRepairDegraded reports whether journal permission repair is in a
+// failed state: the last repair attempt failed (or a rotation re-assert
+// failed since) and pre-existing world-readable history may still be
+// exposed (#9898 F-113). Appends continue while degraded — journaling must
+// never fail a commit — and every use retries the repair.
+func (j *Journal) PermRepairDegraded() bool {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	return j.permsDegraded
 }
 
 // chmodOwnerOnly tightens path to 0600 when it is a regular file whose
@@ -226,31 +294,43 @@ func (j *Journal) migratePermsLocked() {
 // deliberately locked-down journal is never loosened. A symlink is
 // refused — the path is lstat'd and the link is never followed to chmod
 // an arbitrary target — and a missing path is a no-op. Failures are
-// surfaced as warnings (#5188 "surface failures"), not swallowed.
-func chmodOwnerOnly(path string) {
-	fi, err := os.Lstat(path)
+// surfaced as warnings (#5188 "surface failures"), not swallowed, AND
+// returned (#9898 F-113) so the caller can retry and latch degraded state.
+// Skips (absent, symlink, non-regular, already-tight) return nil: refusing
+// to chmod through a link is correct behavior, not a repair failure.
+//
+// Residual: the Lstat-then-Chmod-by-path sequence has a TOCTOU (a swap
+// between the two acts on the wrong file). Retry closes the
+// failure-retention gap, not that race; the blast radius stays one chmod
+// to 0600 (tighten-only), and closing it needs descriptor-relative chmod,
+// out of scope here.
+func chmodOwnerOnly(path string) error {
+	fi, err := journalLstat(path)
 	if err != nil {
 		if !os.IsNotExist(err) {
 			slog.Warn("journal: lstat segment for permission repair failed",
 				"path", path, "err", err)
+			return err
 		}
-		return
+		return nil
 	}
 	if fi.Mode()&os.ModeSymlink != 0 {
 		slog.Warn("journal: refusing to chmod through a symlinked journal segment",
 			"path", path)
-		return
+		return nil
 	}
 	if !fi.Mode().IsRegular() {
-		return // not an owned journal segment (device/socket/dir/etc.)
+		return nil // not an owned journal segment (device/socket/dir/etc.)
 	}
 	if fi.Mode().Perm()&^0o600 == 0 {
-		return // already owner-only (or stricter): only tighten, never loosen
+		return nil // already owner-only (or stricter): only tighten, never loosen
 	}
-	if err := os.Chmod(path, 0o600); err != nil {
+	if err := journalChmod(path, 0o600); err != nil {
 		slog.Warn("journal: chmod journal segment to 0600 failed",
 			"path", path, "err", err)
+		return err
 	}
+	return nil
 }
 
 // Log appends an entry, rotating first when the current segment is
@@ -287,6 +367,15 @@ func (j *Journal) Log(entry *Entry) error {
 	data, err := json.Marshal(entry)
 	if err != nil {
 		return fmt.Errorf("marshal journal entry: %w", err)
+	}
+
+	// #9898 F-110: refuse an entry no tail scan could return, BEFORE
+	// appendLocked — a refusal must neither append nor rotate. Log returns
+	// the error and Store.journalLog warns loudly, so the record is lost
+	// visibly instead of silently.
+	if len(data) > maxJournalEntryBytes {
+		return fmt.Errorf("journal entry too large: %d bytes exceeds the %d-byte record bound; "+
+			"shorten Detail (the commit-description cap is 4 KiB) — refusing", len(data), maxJournalEntryBytes)
 	}
 
 	f, ino, created, rotated, err := j.appendLocked(data)
@@ -541,8 +630,14 @@ func (j *Journal) maybeRotateLocked() (bool, error) {
 	// The renamed segment inherits the current file's mode. New v2 files
 	// are 0600, but an un-migrated legacy 0644 current would carry
 	// world-read into the rotated (secret-bearing) segment; re-assert
-	// owner-only here so rotation never widens exposure (#5188).
-	chmodOwnerOnly(j.segmentPath(1))
+	// owner-only here so rotation never widens exposure (#5188). A failed
+	// re-assert latches degraded AND re-arms the migration (#9898 F-113):
+	// it can strike after an earlier successful pass, and the next use
+	// must retry the full repair including this segment.
+	if err := chmodOwnerOnly(j.segmentPath(1)); err != nil {
+		j.permsDegraded = true
+		j.migrated = false
+	}
 	return true, nil
 }
 
@@ -577,13 +672,17 @@ func (j *Journal) oldestSegmentHasInflightAppendLocked() bool {
 }
 
 // Tail returns up to limit most-recent entries in oldest-first order
-// (matching the v1 ListEntries contract). The read is bounded: segments
-// are scanned newest-first with a reverse chunked scan that stops as
-// soon as limit entries have been collected, so Tail(50) reads O(50)
-// entries regardless of journal lifetime. Unparseable lines (torn tail,
-// corruption, foreign content) are skipped, the same tolerance v1 had.
-// limit <= 0 reads everything (oldest segment first) — the legacy
-// full-scan path kept for ListCommitHistory(0) callers.
+// (matching the v1 ListEntries contract). MEMORY is bounded: segments are
+// scanned newest-first with a reverse chunked scan that stops as soon as
+// limit entries have been collected, and line assembly is capped — but WORK
+// is not O(limit): when entries are sparse (or fewer than limit exist) the
+// scan walks whole segments, and the whole scan holds j.mu, so a Tail over
+// fat segments stalls concurrent Logs (#9898 honest-labeling; the work
+// bound is a pre-existing residual, not changed here). Unparseable lines
+// (torn tail, corruption, foreign content) are skipped, the same tolerance
+// v1 had. limit <= 0 reads everything (oldest segment first) subject to the
+// per-segment byte cap — the legacy full-scan path kept for
+// ListCommitHistory(0) callers.
 func (j *Journal) Tail(limit int) ([]*Entry, error) {
 	j.mu.Lock()
 	defer j.mu.Unlock()
@@ -612,24 +711,49 @@ func (j *Journal) Tail(limit int) ([]*Entry, error) {
 	return out, nil
 }
 
-// readAllLocked is the unbounded path (limit <= 0): every segment,
-// oldest first, parsed forward. Caller holds j.mu.
+// readAllLocked is the full-scan path (limit <= 0): every segment, oldest
+// first, parsed forward. Caller holds j.mu.
+//
+// #9898 F-114: each segment read is byte-capped (Stat fast-path plus a
+// LimitReader belt for growth between the Stat and the read — appends race
+// this scan). An over-cap segment fails closed with nil history plus an
+// error, INCLUDING an overflow in a later (newer) segment after older ones
+// parsed fine: partial-as-complete history is never returned. Lines are
+// iterated incrementally over the capped buffer rather than bytes.Split, so
+// a hostile run of blank lines cannot amplify 16 MiB of input into ~384 MiB
+// of slice descriptors for zero entries.
 func (j *Journal) readAllLocked() ([]*Entry, error) {
 	var out []*Entry
 	for seg := j.maxSegments; seg >= 0; seg-- {
-		f, oerr := openSegmentNoFollow(j.segmentPath(seg))
+		segPath := j.segmentPath(seg)
+		f, oerr := openSegmentNoFollow(segPath)
 		if oerr != nil {
 			if os.IsNotExist(oerr) {
 				continue // gaps tolerated (crash mid-rotation)
 			}
 			return nil, oerr
 		}
-		data, rerr := io.ReadAll(f)
+		if fi, serr := f.Stat(); serr == nil && fi.Size() > maxReadAllSegmentBytes {
+			f.Close()
+			return nil, fmt.Errorf("journal segment %s is %d bytes, past the %d-byte full-scan bound; "+
+				"use Tail(limit) for bounded history — refusing", segPath, fi.Size(), maxReadAllSegmentBytes)
+		}
+		data, rerr := io.ReadAll(io.LimitReader(f, maxReadAllSegmentBytes+1))
 		f.Close()
 		if rerr != nil {
 			return nil, fmt.Errorf("read journal segment: %w", rerr)
 		}
-		for _, line := range bytes.Split(data, []byte{'\n'}) {
+		if len(data) > maxReadAllSegmentBytes {
+			return nil, fmt.Errorf("journal segment %s exceeds the %d-byte full-scan bound; "+
+				"use Tail(limit) for bounded history — refusing", segPath, maxReadAllSegmentBytes)
+		}
+		for len(data) > 0 {
+			var line []byte
+			if i := bytes.IndexByte(data, '\n'); i >= 0 {
+				line, data = data[:i], data[i+1:]
+			} else {
+				line, data = data, nil
+			}
 			if e := parseLine(line); e != nil {
 				out = append(out, e)
 			}

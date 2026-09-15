@@ -1308,6 +1308,18 @@ func (s *Store) RollbackHistoryDegraded() bool {
 	return s.rollbackPersistDegraded
 }
 
+// JournalPermsDegraded reports whether journal permission repair is in a
+// failed state: a pre-0600 segment could not be tightened and
+// world-readable history (which may carry operator free text) may still be
+// exposed (#9898 F-113). Poll-through to the journal, which owns the state
+// and retries the repair on every use; getter-only like
+// RollbackHistoryDegraded (non-critical degradation does not trip /health).
+func (s *Store) JournalPermsDegraded() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.journal.PermRepairDegraded()
+}
+
 // rotateArchives keeps only the most recent maxArchives files.
 func rotateArchives(dir string, maxArchives int) {
 	entries, err := os.ReadDir(dir)

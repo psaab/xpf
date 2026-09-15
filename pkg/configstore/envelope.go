@@ -2,6 +2,8 @@ package configstore
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"strconv"
@@ -368,4 +370,130 @@ func envelopeHeaderLineBytes(data []byte) []byte {
 		return nil
 	}
 	return data[:nl+1]
+}
+
+// bodySHA256FieldKey names the #9898 F-035 tamper-evidence field. The writer
+// stamps "body-sha256=<64 lowercase hex>" into the header line of
+// UNENCRYPTED envelopes only; the reader verifies it when present and reads
+// on when absent (legacy, no flag day).
+//
+// What it binds: SHA-256 over the stored header line (with the hash slot
+// zeroed) plus the stored body bytes — so every header byte (the v=,
+// min-reader, and #1922 committed= marker included) and every body byte is
+// covered. A naive one-byte committed=0/1 flip, or any corruption of header
+// or body that does not recompute the digest, fails closed instead of
+// silently changing the boot class.
+//
+// What it is NOT: tamper-PROOFING. The digest is unkeyed — there is no
+// secret on the unencrypted path — so a file writer who recomputes (or
+// strips, or single-bit-renames, e.g. "cody-sha256=") the field bypasses it
+// exactly as they could rewrite the file wholesale. Full authentication of
+// the header needs master-password (#7176 AAD on the encrypted path).
+//
+// Encrypted envelopes deliberately carry NO field: the seal's AAD already
+// binds their header (a stronger, keyed binding), and stamping one would
+// break decryption — the seal is computed over the final stored header, so
+// a zero-slot-then-fill would authenticate bytes that are never stored.
+const bodySHA256FieldKey = "body-sha256"
+
+// bodySHA256ZeroSlot is the placeholder the writer hashes over: the digest
+// input is the header line with the value zeroed plus the body, so the
+// digest covers the header without a chicken-and-egg. Exactly 64 chars.
+var bodySHA256ZeroSlot = strings.Repeat("0", 64)
+
+// slottedBodySHA256Header returns headerLine with " body-sha256=<zeros>"
+// inserted before the trailing newline. headerLine must end with '\n' (every
+// buildEnvelopeHeaderLine output does). fillBodySHA256 writes the digest.
+func slottedBodySHA256Header(headerLine []byte) []byte {
+	base := headerLine[:len(headerLine)-1]
+	out := make([]byte, 0, len(base)+1+len(bodySHA256FieldKey)+1+len(bodySHA256ZeroSlot)+1)
+	out = append(out, base...)
+	out = append(out, ' ')
+	out = append(out, bodySHA256FieldKey...)
+	out = append(out, '=')
+	out = append(out, bodySHA256ZeroSlot...)
+	out = append(out, '\n')
+	return out
+}
+
+// fillBodySHA256 replaces the zero slot in a slotted header line (see
+// slottedBodySHA256Header) with the hex SHA-256 over (slotted line + body).
+func fillBodySHA256(slottedLine, body []byte) []byte {
+	h := sha256.New()
+	h.Write(slottedLine)
+	h.Write(body)
+	sum := hex.EncodeToString(h.Sum(nil))
+	out := make([]byte, len(slottedLine))
+	copy(out, slottedLine)
+	start := len(out) - len(bodySHA256ZeroSlot) - 1 // slot sits just before '\n'
+	copy(out[start:], sum)
+	return out
+}
+
+// verifyBodySHA256 checks the F-035 binding on a stored envelope: storedLine
+// is the raw header line bytes (envelopeHeaderLineBytes, trailing newline
+// included) and body is the stored body (post-strip, pre-decrypt — for the
+// unencrypted envelopes that carry the field this is the plaintext).
+//
+// Absent field: nil (legacy envelope, read on). Present field: the value
+// must be exactly 64 hex chars naming SHA-256(zeroed line + body), else the
+// envelope is rejected. Duplicate fields are malformed, never "the first
+// one wins". Only field-boundary matches count — "xbody-sha256=" is an
+// unrelated unknown field, tolerated like any other.
+func verifyBodySHA256(storedLine, body []byte) error {
+	token := bodySHA256FieldKey + "="
+	valStart, valEnd := -1, -1
+	for i := 0; i+len(token) <= len(storedLine); {
+		j := bytes.Index(storedLine[i:], []byte(token))
+		if j < 0 {
+			break
+		}
+		i += j
+		// Field boundary: start of line or preceded by whitespace, so
+		// "xbody-sha256=" (an unrelated unknown field) never matches.
+		if i > 0 && !isHeaderSpace(storedLine[i-1]) {
+			i += len(token)
+			continue
+		}
+		vStart := i + len(token)
+		vEnd := vStart
+		for vEnd < len(storedLine) && !isHeaderSpace(storedLine[vEnd]) {
+			vEnd++
+		}
+		if valStart >= 0 {
+			return fmt.Errorf("config envelope: duplicate %q fields", bodySHA256FieldKey)
+		}
+		valStart, valEnd = vStart, vEnd
+		i = vEnd
+	}
+	if valStart < 0 {
+		return nil // no field: legacy envelope, read on
+	}
+	value := storedLine[valStart:valEnd]
+	if len(value) != 64 {
+		return fmt.Errorf("config envelope: bad %s length %d (want 64 hex chars)", bodySHA256FieldKey, len(value))
+	}
+	if _, err := hex.DecodeString(string(value)); err != nil {
+		return fmt.Errorf("config envelope: bad %s value (want hex): %v", bodySHA256FieldKey, err)
+	}
+	// Reconstruct the zeroed-slot input on a copy: the stored bytes with
+	// exactly the value span replaced by zeros. Everything else (field
+	// order, spacing, unknown forward-compat fields) is hashed verbatim.
+	slotted := make([]byte, len(storedLine))
+	copy(slotted, storedLine)
+	copy(slotted[valStart:], bodySHA256ZeroSlot)
+	h := sha256.New()
+	h.Write(slotted)
+	h.Write(body)
+	if got := hex.EncodeToString(h.Sum(nil)); got != string(value) {
+		return fmt.Errorf("config envelope: %s mismatch — the header or body was modified "+
+			"without recomputing the digest (naive edit or corruption); refusing", bodySHA256FieldKey)
+	}
+	return nil
+}
+
+// isHeaderSpace reports JSON/header insignificant whitespace plus CR (headers
+// are single lines; CR appears only in hand-edited ones).
+func isHeaderSpace(c byte) bool {
+	return c == ' ' || c == '\t' || c == '\r' || c == '\n'
 }

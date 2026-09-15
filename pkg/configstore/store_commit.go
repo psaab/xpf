@@ -1342,12 +1342,14 @@ func (s *Store) ListHistory() []*HistoryEntry {
 }
 
 // ListCommitHistory returns recent commit journal entries (most recent
-// last). The journal read is bounded by limit (#1896): the tail scan
-// stops after limit entries, so cost is O(limit), not O(lifetime
-// journal). Semantics preserved from v1: the last `limit` entries of
-// ANY action are read first, THEN filtered to commit actions — fewer
-// than `limit` commits can come back when other actions interleave.
-// limit <= 0 reads everything (persist_failure_test relies on it).
+// last). MEMORY is bounded by limit (#1896): the tail scan stops after
+// limit entries — but work is O(scanned suffix), up to O(segment) per
+// segment when entries are sparse, all under the journal lock; "O(limit)"
+// in older comments names the memory, not the I/O (#9898). Semantics
+// preserved from v1: the last `limit` entries of ANY action are read
+// first, THEN filtered to commit actions — fewer than `limit` commits can
+// come back when other actions interleave. limit <= 0 reads everything
+// subject to the per-segment byte cap (persist_failure_test relies on it).
 // No Store.mu needed: the journal serializes Log/Tail internally.
 func (s *Store) ListCommitHistory(limit int) ([]*JournalEntry, error) {
 	entries, err := s.journal.Tail(limit)

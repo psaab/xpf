@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -217,10 +218,21 @@ func (db *DB) WriteCandidate(tree *config.ConfigTree) error {
 }
 
 // DeleteCandidate removes the candidate file from disk.
+//
+// The removal is a DURABLE transition like DeleteConfirm (#4864): the unlink
+// plus a parent-dir fsync, both through the rbRemove/rbSyncDir seams (#9898
+// F-112), so a power cut cannot replay the deleted slot. Absent still falls
+// through to the dir sync (the #5835 rule): a retry after an
+// unlinked-but-unsynced removal must not launder the owed sync into a false
+// success.
 func (db *DB) DeleteCandidate() error {
-	err := os.Remove(db.candidatePath())
-	if err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("delete candidate: %w", err)
+	if err := rbRemove(db.candidatePath()); err != nil {
+		if !os.IsNotExist(err) {
+			return fmt.Errorf("delete candidate: %w", err)
+		}
+	}
+	if err := rbSyncDir(filepath.Dir(db.candidatePath())); err != nil {
+		return fmt.Errorf("sync dir after delete candidate: %w", err)
 	}
 	return nil
 }
@@ -238,10 +250,18 @@ func (db *DB) WriteRollback(n int, tree *config.ConfigTree) error {
 }
 
 // DeleteRollback removes rollback slot n from disk.
+//
+// Durable like DeleteCandidate above (unlink + dir fsync through the seams,
+// absent falls through to the sync): a power cut cannot replay the deleted
+// slot (#9898 F-112).
 func (db *DB) DeleteRollback(n int) error {
-	err := os.Remove(db.rollbackPath(n))
-	if err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("delete rollback %d: %w", n, err)
+	if err := rbRemove(db.rollbackPath(n)); err != nil {
+		if !os.IsNotExist(err) {
+			return fmt.Errorf("delete rollback %d: %w", n, err)
+		}
+	}
+	if err := rbSyncDir(filepath.Dir(db.rollbackPath(n))); err != nil {
+		return fmt.Errorf("sync dir after delete rollback %d: %w", n, err)
 	}
 	return nil
 }
@@ -471,6 +491,17 @@ func (db *DB) readTreeMeta(path string) (*config.ConfigTree, bool, error) {
 		if hdr.FormatVersion >= envelopeAADFormatVersion {
 			aad = envelopeHeaderLineBytes(data)
 		}
+		// #9898 F-035: verify the unencrypted header/body binding when the
+		// writer stamped one. Absent on every pre-fix envelope (read on —
+		// migration, no flag day); present on every post-fix unencrypted
+		// write, where a naive committed=/body edit without a recomputed
+		// digest fails closed here instead of silently changing the boot
+		// class. Verified over the STORED body (pre-decrypt), so a field on
+		// an encrypted body — which the writer never produces — is checked
+		// against the ciphertext uniformly rather than specially.
+		if verr := verifyBodySHA256(envelopeHeaderLineBytes(data), body); verr != nil {
+			return nil, true, fmt.Errorf("read %s: %w", path, verr)
+		}
 		data = body
 		committed = hdr.Committed
 	}
@@ -501,6 +532,20 @@ func (db *DB) readTreeMeta(path string) (*config.ConfigTree, bool, error) {
 	// Store.Load tags the returned error with ErrConfigDBUnreadable, so a null/
 	// array/scalar DB becomes a fatal fail-closed boot, not a blind bootstrap.
 	if err := requireJSONObject(data); err != nil {
+		return nil, true, fmt.Errorf("parse %s: %w", path, err)
+	}
+	// #9898 F-001: the top-level key set must be exactly the ConfigTree
+	// shape. requireJSONObject only checks the leading byte and the typed
+	// decode below drops unknown keys, so any JSON object — {"bogus":{}} —
+	// used to boot as a (possibly empty) policy with no signal. Reject
+	// anything but the one known key, case-folded exactly the way
+	// encoding/json folds it, so "children" reads and "evil" refuses.
+	// Deliberately TOP-LEVEL ONLY: nested Node fields evolve additively
+	// and recursive strictness would brick boots on benign schema drift;
+	// a future new ROOT field needs its own explicit compat decision here.
+	// Duplicate keys keep Go's last-wins replacement, same as the typed
+	// decode. The valid empty config {} carries no keys and passes.
+	if err := requireKnownTopLevelKeys(data); err != nil {
 		return nil, true, fmt.Errorf("parse %s: %w", path, err)
 	}
 
@@ -558,6 +603,30 @@ func requireJSONObject(data []byte) error {
 	return nil
 }
 
+// requireKnownTopLevelKeys rejects a persisted config body whose top-level
+// JSON object carries any key outside the ConfigTree shape (#9898 F-001).
+// The typed decode drops unknown keys silently, so without this gate a body
+// like {"bogus":{}} decodes to a zero (empty-policy) tree and boots with
+// policy absent — the same fail-open direction #5474 closed for `null`.
+// Only the single known key is accepted, case-folded the way encoding/json
+// folds field matches; nested objects keep the typed decode's lenient
+// behavior. A body that is not a decodable object (e.g. "{truncated") is
+// left for the typed decode below, which owns that error site.
+func requireKnownTopLevelKeys(data []byte) error {
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(data, &obj); err != nil {
+		return nil
+	}
+	for k := range obj {
+		if !strings.EqualFold(k, "Children") {
+			return fmt.Errorf("config body has unknown top-level key %q (want only \"Children\"); "+
+				"unknown keys decode to an EMPTY config and would boot with policy absent "+
+				"(fail-open) — refusing", k)
+		}
+	}
+	return nil
+}
+
 // writeTree persists a config tree to a JSON file durably (#1894,
 // DurableState class): temp + fsync + rename + dir fsync, so a commit
 // that reported success cannot be silently lost to a power cut — the
@@ -593,6 +662,17 @@ func (db *DB) writeTreeMarked(path string, tree *config.ConfigTree, committed bo
 	data, err = db.maybeEncryptTreeJSON(data, tree, aad)
 	if err != nil {
 		return fmt.Errorf("encrypt config: %w", err)
+	}
+
+	// #9898 F-035: stamp the header/body binding on UNENCRYPTED bodies, so
+	// a naive committed= flip or corruption fails closed on read (see
+	// verifyBodySHA256). Encrypted bodies are excluded: their header is
+	// already bound by the keyed AAD, and a zero-slot-then-fill here would
+	// authenticate bytes that are never stored (the seal covers the final
+	// header), breaking every decrypt. Computed over the final body bytes,
+	// exactly what the reader verifies.
+	if !encrypted {
+		header = fillBodySHA256(slottedBodySHA256Header(header), data)
 	}
 
 	// Wrap the (possibly-encrypted) body in the config compatibility
