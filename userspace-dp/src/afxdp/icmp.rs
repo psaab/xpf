@@ -247,7 +247,7 @@ pub(super) fn build_local_time_exceeded_request(
     // is still correct and strictly better (distinct physical ingress ports no
     // longer starve each other), just coarser than the reject path's
     // per-logical-unit granularity. An unzoned / unknown ingress interface (id 0)
-    // falls back to the shared `TIME_EXCEEDED_FALLBACK_BUCKET` (never fail-open).
+    // falls back to the shared `TIME_EXCEEDED_FALLBACK_LIMITER` (never fail-open).
     //
     // #5567: the token was previously consumed BEFORE the egress lookup + build.
     // A flood of reply-eligible-but-UNBUILDABLE triggers on one interface
@@ -317,7 +317,9 @@ pub(super) fn build_local_time_exceeded_request(
     // filtered and over budget is attributed to the FILTER, because that
     // decision is deterministic and the limiter should only meter traffic that
     // would otherwise have gone out.
-    if !allow_generated_error_zoned(forwarding, GeneratedErrorReason::TimeExceeded, from_zone_id) {
+    // #9901 (F-074): key the limiter's per-source tier on the trigger's
+    // source (`flow` is the pre-NAT session flow, so this is the true origin).
+    if !allow_generated_error_zoned(forwarding, GeneratedErrorReason::TimeExceeded, from_zone_id, Some(flow.src_ip)) {
         counters.touched = true;
         return None;
     }

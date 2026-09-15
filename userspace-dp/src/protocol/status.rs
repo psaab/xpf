@@ -147,6 +147,10 @@ pub(crate) struct ProcessStatus {
     /// whole maximum lifetime. Additive + `default`ed (#1961).
     #[serde(rename = "frag_max_lifetime_evictions_total", default)]
     pub frag_max_lifetime_evictions_total: u64,
+    /// #9901 (F-074): forwarded frames whose egress-MTU decision ran with no
+    /// known MTU and fail-opened to `Forward`. Additive + `default`ed (#1961).
+    #[serde(rename = "egress_mtu_unknown_forward_total", default)]
+    pub egress_mtu_unknown_forward_total: u64,
     /// #6751 PR 2/3: interface-mode SNAT admissions that failed CLOSED with no
     /// free translated identity — a completed full-cycle PAT probe, a port-less
     /// protocol whose single identity is owned, or a peer-synced import whose

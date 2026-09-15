@@ -424,6 +424,15 @@ impl super::Coordinator {
     pub fn frag_max_lifetime_evictions_total(&self) -> u64 {
         crate::fragment_assoc::FRAG_MAX_LIFETIME_EVICTIONS.load(Ordering::Relaxed)
     }
+    /// #9901 (F-074): forwarded frames whose egress-MTU decision ran with NO
+    /// known MTU (`mtu == 0`) and took the documented fail-open `Forward` arm.
+    /// The decision is deliberate, but silence about it hid unknown-MTU
+    /// configurations (missing egress row / unknown tunnel kind) behind
+    /// healthy-looking forwards. Surfaced as
+    /// `xpf_userspace_egress_mtu_unknown_forward_total`.
+    pub fn egress_mtu_unknown_forward_total(&self) -> u64 {
+        crate::afxdp::icmp_ptb::EGRESS_MTU_UNKNOWN_FORWARD_TOTAL.load(Ordering::Relaxed)
+    }
 
     /// #6751 PR 2/3: interface-mode SNAT admissions that failed CLOSED with no
     /// free translated identity for their `(egress, remote)` pair, plus

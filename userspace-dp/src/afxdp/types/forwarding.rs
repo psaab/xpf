@@ -263,38 +263,39 @@ pub(in crate::afxdp) struct ForwardingState {
     ///
     /// Keyed by the ingress interface's configured zone id
     /// (`ifindex_to_zone_id`); an unzoned (id 0) or unknown from-zone falls back
-    /// to the process-global `REJECT_FALLBACK_BUCKET` at the gate (never
-    /// fail-open). Held as `Arc<TokenBucket>` so the shared atomics survive
+    /// to the process-global `REJECT_FALLBACK_LIMITER` at the gate (never
+    /// fail-open). Held as `Arc<ZoneLimiter>` so the shared atomics survive
     /// `ForwardingState::clone()` — the coordinator re-stores a clone of the
     /// forwarding state at runtime cadence (fabric refresh), and a plain-value
     /// clone would snapshot stale coordinator-side atomics and effectively reset
     /// the limiter every refresh. A genuine config rebuild re-runs
-    /// `populate_zones` and installs fresh buckets (reset-on-commit, accepted
+    /// `populate_zones` and installs fresh limiters (reset-on-commit, accepted
     /// for a diagnostic limiter). See `docs/generated-reply-rate-limit.md`.
     pub(in crate::afxdp) reject_buckets:
-        FastMap<u16, std::sync::Arc<crate::afxdp::icmp_ratelimit::TokenBucket>>,
-    /// #5856: per-(from-)zone rate-limit buckets for locally-generated ICMP
+        FastMap<u16, std::sync::Arc<crate::afxdp::icmp_ratelimit::ZoneLimiter>>,
+    /// #5856: per-(from-)zone rate-limit limiters for locally-generated ICMP
     /// Time-Exceeded / Hop-Limit-Exceeded replies, and for Packet-Too-Big /
     /// Frag-Needed PMTUD replies. Built in `populate_zones` from the SAME
-    /// validated zone set as `reject_buckets` (#3618) — one GCRA `TokenBucket`
-    /// per configured zone id, keyed by the ingress interface's configured
-    /// zone id (`ifindex_to_zone_id`); an unzoned (id 0) or unknown from-zone
-    /// falls back to the process-global `TIME_EXCEEDED_FALLBACK_BUCKET` /
-    /// `PACKET_TOO_BIG_FALLBACK_BUCKET` at the gate (never fail-open).
+    /// validated zone set as `reject_buckets` (#3618) — one #9901 (F-074)
+    /// per-source-fair `ZoneLimiter` per configured zone id, keyed by the
+    /// ingress interface's configured zone id (`ifindex_to_zone_id`); an
+    /// unzoned (id 0) or unknown from-zone falls back to the process-global
+    /// `TIME_EXCEEDED_FALLBACK_LIMITER` / `PACKET_TOO_BIG_FALLBACK_LIMITER` at
+    /// the gate (never fail-open).
     ///
     /// Before #5856 these two reasons shared a SINGLE process-global bucket, so
     /// an attacker flooding TTL=1/hop-limit=1 (→ Time-Exceeded) or oversized-DF
     /// (→ Packet-Too-Big) traffic through ONE ingress zone drained the shared
     /// bucket and suppressed legitimate traceroute / PMTUD replies for EVERY
     /// other zone (a cross-zone denial of the generated-error service). Per-zone
-    /// buckets remove that starvation exactly as #3618 did for Reject. Held as
-    /// `Arc<TokenBucket>` for the same reason `reject_buckets` is — the shared
+    /// limiters remove that starvation exactly as #3618 did for Reject. Held as
+    /// `Arc<ZoneLimiter>` for the same reason `reject_buckets` is — the shared
     /// atomics must survive `ForwardingState::clone()` (fabric refresh). Cardin-
     /// ality is config-bounded (Go-capped ≤ 65533), never attacker-growable.
     pub(in crate::afxdp) time_exceeded_buckets:
-        FastMap<u16, std::sync::Arc<crate::afxdp::icmp_ratelimit::TokenBucket>>,
+        FastMap<u16, std::sync::Arc<crate::afxdp::icmp_ratelimit::ZoneLimiter>>,
     pub(in crate::afxdp) packet_too_big_buckets:
-        FastMap<u16, std::sync::Arc<crate::afxdp::icmp_ratelimit::TokenBucket>>,
+        FastMap<u16, std::sync::Arc<crate::afxdp::icmp_ratelimit::ZoneLimiter>>,
     pub(in crate::afxdp) egress: FastMap<i32, EgressInterface>,
     pub(in crate::afxdp) ingress_logical_ifindex: FastMap<(i32, u16), i32>,
     pub(in crate::afxdp) fabrics: Vec<FabricLink>,
@@ -790,18 +791,18 @@ impl ForwardingState {
             .unwrap_or(0)
     }
 
-    /// #3618/#5856: the per-zone generated-error rate-limit bucket for `reason`
+    /// #3618/#5856: the per-zone generated-error rate limiter for `reason`
     /// and ingress (from) zone `from_zone_id`, or `None` if the zone is
     /// unconfigured / unknown (the gate then falls back to the reason's shared
-    /// `*_FALLBACK_BUCKET`). Returns a plain `&TokenBucket` (deref of the held
-    /// `Arc`) so the limiter gate treats a per-zone bucket and the `&'static`
+    /// `*_FALLBACK_LIMITER`). Returns a plain `&ZoneLimiter` (deref of the held
+    /// `Arc`) so the limiter gate treats a per-zone limiter and the `&'static`
     /// fallback uniformly. Used by `icmp_ratelimit::allow_generated_error_zoned*`
     /// (and, via that, the `allow_generated_reject*` convenience wrappers).
     pub(in crate::afxdp) fn generated_error_bucket(
         &self,
         reason: crate::afxdp::icmp_ratelimit::GeneratedErrorReason,
         from_zone_id: u16,
-    ) -> Option<&crate::afxdp::icmp_ratelimit::TokenBucket> {
+    ) -> Option<&crate::afxdp::icmp_ratelimit::ZoneLimiter> {
         use crate::afxdp::icmp_ratelimit::GeneratedErrorReason;
         let buckets = match reason {
             GeneratedErrorReason::TimeExceeded => &self.time_exceeded_buckets,

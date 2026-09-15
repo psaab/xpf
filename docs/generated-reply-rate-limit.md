@@ -15,22 +15,29 @@ gates:
 
 | Reason | Generator | Rate-limit scope |
 |--------|-----------|------------------|
-| `TimeExceeded` | ICMPv4 Time Exceeded / ICMPv6 Hop-Limit Exceeded (`icmp::build_local_time_exceeded_request`) | **Per ingress (from) zone (#5856)** |
-| `PacketTooBig` | ICMPv4 Frag-Needed / ICMPv6 Packet Too Big (PMTUD, #2301/#2330) | **Per ingress (from) zone (#5856)** |
-| `Reject` | Policy `then reject`, firewall-filter / lo0 `then reject`, and a zone `tcp-rst` deny → TCP RST or ICMP/ICMPv6 admin-prohibited unreachable (`poll_descriptor::reject_reply`) | **Per ingress (from) zone (#3618)** |
+| `TimeExceeded` | ICMPv4 Time Exceeded / ICMPv6 Hop-Limit Exceeded (`icmp::build_local_time_exceeded_request`) | **Per ingress (from) zone (#5856), per-source-fair within the zone (#9901 F-074)** |
+| `PacketTooBig` | ICMPv4 Frag-Needed / ICMPv6 Packet Too Big (PMTUD, #2301/#2330) | **Per ingress (from) zone (#5856), per-source-fair within the zone (#9901 F-074)** |
+| `Reject` | Policy `then reject`, firewall-filter / lo0 `then reject`, and a zone `tcp-rst` deny → TCP RST or ICMP/ICMPv6 admin-prohibited unreachable (`poll_descriptor::reject_reply`) | **Per ingress (from) zone (#3618), per-source-fair within the zone (#9901 F-074)** |
 
 Without a limiter, an attacker driving a flood of TTL-1 packets, oversized DF=1
 packets, or rejected flows makes the box emit one generated reply per trigger
 packet — a CPU / TX amplification sink and a reflection vector (the reply is
 addressed to the trigger's spoofable source). The limiter is modelled on Linux's
-`net.ipv4.icmp_msgs_per_sec` (default 1000/s): a bounded-state GCRA token bucket,
-no per-source/per-destination map, so there is no attacker-driven map growth.
+`net.ipv4.icmp_msgs_per_sec` (default 1000/s): bounded-state GCRA tiers with
+fixed cardinality, so there is no attacker-driven map growth.
 
-The `TokenBucket` is a single-atomic-word GCRA (theoretical-arrival-time); refill
-and consume commit together in one CAS so concurrent workers can never
-double-credit or over-admit (#2955). Default rate/burst are compile-time
-constants `DEFAULT_RATE_PER_SEC = DEFAULT_BURST = 1000`; a zero rate disables the
-limiter.
+The `ZoneLimiter` is a per-source-fair hierarchy (#9901 F-074): a per-source
+tier (64 fixed slots, 100/s + burst 100 each, plus a same-budget overflow
+bucket for sourceless errors) in front of the zone aggregate (1000/s + burst
+1000). Each tier is a single-atomic-word GCRA (theoretical-arrival-time);
+refill and consume commit together in one CAS so concurrent workers can never
+double-credit or over-admit (#2955). Gate order is source-FIRST then
+aggregate: a source-deny consumes NOTHING shared, so one flooder cannot starve
+another source in the same zone. Default aggregate rate/burst are compile-time
+constants `DEFAULT_RATE_PER_SEC = DEFAULT_BURST = 1000` (mirroring Linux's
+`icmp_msgs_per_sec`); a zero rate disables the limiter. Slot collisions share
+the slot's sustained rate (tag hint-only, no takeover reset); cardinality is
+config-bounded (~1.5KB per zone limiter), never attacker-growable.
 
 ## #2472 → #3618 → #5856: why every reason is per-zone
 
@@ -49,11 +56,12 @@ key was an API omission, not absence of attribution). All three reasons now use
 **one bucket per configured zone**:
 
 - `ForwardingState::{reject_buckets, time_exceeded_buckets, packet_too_big_buckets}:
-  FastMap<u16, Arc<TokenBucket>>` — one GCRA bucket per configured zone id per
-  reason, built in `forwarding_build::zones::populate_zones` from the SAME
-  validated zone set as `zone_id_to_name`. Cardinality = configured zones (the Go
-  control plane caps distinct zones at `MaxUsableZoneID = 65533`), so it is
-  config-bounded, never attacker-growable.
+  FastMap<u16, Arc<ZoneLimiter>>` — one per-source-fair hierarchical limiter
+  per configured zone id per reason (#9901 F-074; before, one bare GCRA
+  `TokenBucket`), built in `forwarding_build::zones::populate_zones` from the
+  SAME validated zone set as `zone_id_to_name`. Cardinality = configured zones
+  (the Go control plane caps distinct zones at `MaxUsableZoneID = 65533`), so
+  it is config-bounded, never attacker-growable.
 - At each generator call site the ingress **from-zone** is resolved via
   `ifindex_to_zone_id`, but the two paths key that map by DIFFERENT ifindexes, so
   their per-zone granularity differs:
@@ -79,17 +87,20 @@ key was an API omission, not absence of attribution). All three reasons now use
     sources its reply from its own address/VLAN and enforces its own output
     filter / CoS, while the per-zone amplification bound stays per-physical-port.
 - An unzoned (id 0) or otherwise-unknown from-zone falls back to the reason's
-  process-global `{REJECT,TIME_EXCEEDED,PACKET_TOO_BIG}_FALLBACK_BUCKET` — a real
-  bucket, so the gate is **never fail-open** and never panics on a missing key.
-  Unzoned/unknown errors share that one budget (the rare/degenerate case).
+  process-global `{REJECT,TIME_EXCEEDED,PACKET_TOO_BIG}_FALLBACK_LIMITER` — a
+  full `ZoneLimiter` (#9901 F-074; a real limiter, so the gate is **never
+  fail-open** and never panics on a missing key). Unzoned/unknown errors share
+  that one budget (the rare/degenerate case), with per-source fairness inside
+  it.
 
 The zone-keyed lookup is the single accessor
 `ForwardingState::generated_error_bucket(reason, from_zone_id)`, and the single
 gate is `icmp_ratelimit::allow_generated_error_zoned[_at]` (the `Reject`-specific
-`allow_generated_reject[_at]` wrappers delegate to it).
-
-Zone ids are sparse `u16` stable name-hashes over `[0, 65533]` (NOT dense
-`[0, 64)`), so the maps are keyed by zone id, not a dense array.
+`allow_generated_reject[_at]` wrappers delegate to it). Every gate takes the
+trigger's source address (`Some` keys the per-source tier, `None` the shared
+overflow tier): TE and Reject pass `flow.src_ip` (the pre-NAT session flow);
+the PTB path passes the shim-stamped META addrs (the PTB frame itself is
+post-NAT, so frame bytes would key the wrong identity).
 
 ### Why this does not weaken the anti-amplification cap
 
@@ -116,39 +127,37 @@ carry ingress identity (`ingress_ident.ifindex`); the missing zone key was an
 API/design omission. #5856 resolves the from-zone at each site and keys a
 per-zone bucket exactly as #3618 did for Reject, closing the cross-zone denial.
 
-## Lifetime / sharing model (why `Arc<TokenBucket>`)
+## Lifetime / sharing model (why `Arc<ZoneLimiter>`)
 
-All workers gate against the SAME per-zone bucket (for every reason): each worker
+All workers gate against the SAME per-zone limiter (for every reason): each worker
 holds an `Arc<ForwardingState>` loaded from the shared `ArcSwap` (`load_full()`),
 so within one forwarding generation they share the one `ForwardingState` instance
 and its atomics — the cap is per-zone, not per-worker.
 
-The buckets are held behind `Arc` (not plain values) because the coordinator
+The limiters are held behind `Arc` (not plain values) because the coordinator
 re-stores a CLONE of the forwarding state at runtime cadence (fabric refresh,
 `snapshot_refresh.rs`), not only on config commit. A plain-value clone would
 snapshot the coordinator-side (stale, worker-untouched) atomics on every refresh
-and effectively RESET the limiter. `Arc<TokenBucket>` is shared by reference
+and effectively RESET the limiter. `Arc<ZoneLimiter>` is shared by reference
 across `ForwardingState::clone()`, so the limiter state persists across a refresh.
-A genuine config rebuild re-runs `populate_zones` and installs fresh buckets —
+A genuine config rebuild re-runs `populate_zones` and installs fresh limiters —
 **reset-on-commit**, which is accepted for a diagnostic limiter (a commit is rare,
 operator-initiated, and a fresh burst allowance right after a commit is benign).
 
 ## Observability (metric unchanged)
 
 Each reason's aggregate `*_rate_limited_total` is a SINGLE process-global atomic
-(`{REJECT,TIME_EXCEEDED,PACKET_TOO_BIG}_RATE_LIMITED_TOTAL`) bumped on ANY
-per-zone (or fallback) deny — NOT a sum over the per-zone buckets' fields — so
-`rate_limited_count(reason)` stays an O(1) atomic load and the coordinator status
+(`{REJECT,TIME_EXCEEDED,PACKET_TOO_BIG}_RATE_LIMITED_TOTAL`) bumped on ANY deny —
+per-zone aggregate-denies, source-denies, and fallback denies alike — NOT a sum
+over the per-zone limiters' fields — so `rate_limited_count(reason)` stays an
+O(1) atomic load and the coordinator status
 / Prometheus `xpf_userspace_{reject,time_exceeded,packet_too_big}_rate_limited_total`
-wire contract is UNCHANGED by the per-zone split. Each per-zone `TokenBucket`
-keeps its own `rate_limited` field for OPTIONAL future per-zone attribution; the
-aggregate metric never reads it. (Before #5856, TE/PTB read their single global
-bucket's field directly; now they read the dedicated aggregate atomic, which the
-per-zone and fallback gates both bump — the surfaced value is unchanged.)
-
-The per-source split (#3661) — `policy_reject_rate_limit_drops` /
-`filter_reject_rate_limit_drops` — is orthogonal and still sums to the
-source-neutral aggregate.
+wire contract is UNCHANGED by the per-zone (#3618/#5856) and per-source (#9901
+F-074) splits. Each tier's `TokenBucket` keeps its own `rate_limited` field for
+OPTIONAL future attribution; the aggregate metric never reads it. (Before #5856,
+TE/PTB read their single global bucket's field directly; now they read the
+dedicated aggregate atomic, which every gate bumps — the surfaced value is
+unchanged.)
 
 ## Fail-closed invariants preserved
 
@@ -156,7 +165,7 @@ source-neutral aggregate.
   drop) still returns false and the caller silently drops the trigger packet —
   the reject reply is a courtesy; the trigger is dropped regardless, so this is a
   fairness/observability fix, never a good-traffic-drop or security bypass.
-- A missing zone id maps to the fallback bucket, never a fail-open skip.
+- A missing zone id maps to the fallback limiter, never a fail-open skip.
 - #3656: a frame that can never produce a reply (inbound RST, inbound ICMP error,
   non-first fragment, ...) is proven unreplyable BEFORE the token is consumed, so
   a flood of unreplyable frames cannot drain a zone's bucket (H11).
@@ -203,3 +212,11 @@ source-neutral aggregate.
   `verdict.dscp_rewrite`. The trigger-packet disposition is unchanged (the caller
   drops the trigger on a `false` return regardless); only WHEN the token advances
   changed.
+- #9901 (F-074): WITHIN a zone the tier order is source-FIRST then aggregate —
+  the #5567 build-before-consume principle applied to the tier order. A
+  source-denied reply consumes NOTHING shared (only the reason's aggregate
+  deny counter moves, for observability), so one flooder cannot spend another
+  source's budget or the zone aggregate. An aggregate-denied reply consumed
+  its source token first (conservative: the source spent budget on a reply
+  the zone could not emit); the alternative (peeking the aggregate without
+  consuming) would race under concurrent workers for no operator benefit.

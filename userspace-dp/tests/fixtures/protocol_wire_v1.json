@@ -891,6 +891,7 @@
     "debug_worker_threads": 0,
     "dnat_publish_errors_total": 0,
     "dynamic_neighbor_learn_cap_drops_total": 0,
+    "egress_mtu_unknown_forward_total": 0,
     "enabled": false,
     "event_stream_acked": 0,
     "event_stream_connected": false,

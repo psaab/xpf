@@ -125,11 +125,11 @@ pub(super) fn populate_zones(snapshot: &ConfigSnapshot, state: &mut ForwardingSt
         // CONFIGURED zone here (not per-packet) bounds cardinality to the
         // configured zone set and gives each ingress zone an independent budget.
         // An unzoned / unknown from-zone (id 0, never in this table) falls back
-        // to the shared `REJECT_FALLBACK_BUCKET` at the gate. Fresh buckets on
+        // to the shared `REJECT_FALLBACK_LIMITER` at the gate. Fresh limiters on
         // every build = reset-on-commit, accepted for a diagnostic limiter.
         state.reject_buckets.insert(
             zone.id,
-            std::sync::Arc::new(crate::afxdp::icmp_ratelimit::TokenBucket::new()),
+            std::sync::Arc::new(crate::afxdp::icmp_ratelimit::ZoneLimiter::new()),
         );
         // #5856: one per-zone Time-Exceeded and one per-zone Packet-Too-Big
         // bucket per KNOWN zone, keyed by the SAME validated zone id, built
@@ -141,15 +141,15 @@ pub(super) fn populate_zones(snapshot: &ConfigSnapshot, state: &mut ForwardingSt
         // per-packet) bounds cardinality to the configured zone set and gives
         // each ingress zone an independent budget. An unzoned / unknown
         // from-zone (id 0, never in this table) falls back to the shared
-        // per-reason `*_FALLBACK_BUCKET` at the gate. Fresh buckets on every
+        // per-reason `*_FALLBACK_LIMITER` at the gate. Fresh limiters on every
         // build = reset-on-commit, accepted for a diagnostic limiter.
         state.time_exceeded_buckets.insert(
             zone.id,
-            std::sync::Arc::new(crate::afxdp::icmp_ratelimit::TokenBucket::new()),
+            std::sync::Arc::new(crate::afxdp::icmp_ratelimit::ZoneLimiter::new()),
         );
         state.packet_too_big_buckets.insert(
             zone.id,
-            std::sync::Arc::new(crate::afxdp::icmp_ratelimit::TokenBucket::new()),
+            std::sync::Arc::new(crate::afxdp::icmp_ratelimit::ZoneLimiter::new()),
         );
         // #3071: record the per-zone Junos `tcp-rst` knob keyed by zone id so
         // the policy-deny hot path can answer a denied TCP flow whose ingress
