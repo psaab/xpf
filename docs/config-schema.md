@@ -7988,6 +7988,21 @@ accept-with-advisory knobs #2078/#4231 and false-reject valid-but-unmodeled
 Junos, the #4191 class). Both the remaining per-subtree flips and the
 blanket-flip doctrine decision remain tracked on #4313.
 
+**`security zones` + `security policies` closed (#9878).** The two
+enforcement subtrees were open-world, so a typo silently dropped a whole
+stanza with a clean commit while `show configuration` still displayed it.
+Leaf-completeness audit on the flags in `schema_security.go`: every keyword
+the zone/policy compilers read is modeled (zone description/interfaces/
+tcp-rst/screen/host-inbound/address-book; default-policy + blockValue,
+default-policy-log, policy-rematch, from-zone/global with
+description/match/then/scheduler-name; `then` mirrors the compiler switch
+via canary). `from-zone` inherits; its fixed midKeyword is now validated
+at the walk (flat keys and hierarchical peel) — previously silently
+accepted. Verified by inventory cells, hierarchical typo cells, and a
+pinned 10/10 shipped/example sweep. Residual: a typo OF a subtree root
+(`policie`) needs the `security`-level arm, which false-rejects today
+(`flow tcp-mss all-tcp`, #1979 opaque grammar) — filed as #10078.
+
 **Remaining per-subtree flips (future PRs, tracked on #4313).** Turning
 `closedWorld` on for the other umbrella candidates (`snmp community` — INCOMPLETE,
 and MORE incomplete than this note used to say. A #4313 attempt to close it was

@@ -235,11 +235,7 @@ var instanceNameBlindBaseline9091 = []string{
 	"/security/nat/source/rule-set/rule",
 	"/security/nat/static/rule-set",
 	"/security/nat/static/rule-set/rule",
-	"/security/policies/from-zone",
-	"/security/policies/from-zone/policy",
-	"/security/policies/global/policy",
 	"/security/screen/ids-option",
-	"/security/zones/security-zone",
 	"/services/flow-monitoring/version-ipfix/template",
 	"/services/flow-monitoring/version9/template",
 	"/services/ip-monitoring/policy",
@@ -277,6 +273,9 @@ var instanceNameBlindCeiling9091 = len(instanceNameBlindBaseline9091)
 // protocols node brought `rip group` — which carries closedWorld — into the
 // per-instance grammar, so `/routing-instances/*/protocols/rip/group` is armed
 // there too. That is the ratchet moving in the direction it wants.
+// #9878 moved it 23 -> 27: arming `security zones` + `security policies`
+// brings four instance-name containers inside a closed world
+// (from-zone, from-zone/policy, global/policy, zones/security-zone).
 // #9416 moved it 8 -> 9: `snmp community <c> routing-instance <ri>` is a new
 // instance-name container, and every keyword it can absorb is a SOURCE
 // RESTRICTION (`clients`, `client-list-name`). An unmodelled keyword there
@@ -301,6 +300,10 @@ var instanceNameArmedBaseline9091 = []string{
 	"/security/ipsec/vpn/traffic-selector",
 	"/security/nat/nat64/rule-set",
 	"/security/nat/proxy-arp/interface",
+	"/security/policies/from-zone",
+	"/security/policies/from-zone/policy",
+	"/security/policies/global/policy",
+	"/security/zones/security-zone",
 	"/security/zones/security-zone/address-book/address-set",
 	"/snmp/community/routing-instance",
 	"/system/backup-router",

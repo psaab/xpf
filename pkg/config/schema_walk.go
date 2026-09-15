@@ -538,6 +538,18 @@ func walkSchemaNode(node *Node, parent *schemaNode, path []string, vc *walkConte
 	declaredKeyTokens := 1 + childSchema.args
 	consumed, descendSchema := consumeNodeKeys(node.Keys, childSchema)
 	newPath := append(append([]string(nil), path...), node.Keys[:consumed]...)
+	// #9878 (spark-F1): a midKeyword is structural, not a value. `from-zone
+	// trust to-zon untrust` packs Keys[2]="to-zon" while the compiler reads
+	// Keys[1],Keys[3] and ignores Keys[2], so the typo commits clean and the
+	// policy attaches to a pair the operator misspelled. Validate the mid
+	// position whenever it is present in this node's Keys; the hierarchical
+	// peel (walkInstanceChildren) enforces the same position when the name
+	// levels arrive as nested children.
+	if childSchema.midKeyword != "" && len(node.Keys) > childSchema.midKeywordAt &&
+		node.Keys[childSchema.midKeywordAt] != childSchema.midKeyword {
+		return typedLeafErrorf(newPath, "unexpected keyword %q — expected %q (`%s <a> %s <b>` names a zone pair, and the middle keyword is fixed)",
+			node.Keys[childSchema.midKeywordAt], childSchema.midKeyword, node.Keys[0], childSchema.midKeyword)
+	}
 
 	// Typed KEY slot (#1319 PR 3): a named-instance container with a
 	// keyValidator validates the identity arg token(s) packed into this
@@ -785,6 +797,20 @@ func walkInstanceChildren(node *Node, containerSchema *schemaNode, remaining, ba
 		for i, tok := range node.Keys[:consume] {
 			if err := validateKeySlot(containerSchema, baseArgIdx+i, tok, vc); err != nil {
 				return typedLeafInvalidErrorf(path, tok, err)
+			}
+		}
+	}
+	// #9878 (spark-F1): the midKeyword position is structural even when it
+	// arrives as a peeled name level in hierarchical form (`from-zone {
+	// trust { to-zon { ... }}}` consumes "to-zon" as the arg-1 name level
+	// the same way flat Keys[2] does). Whenever the peel covers the
+	// 0-based mid index (midKeywordAt-1), the token there must equal the
+	// fixed keyword. Only midKeyword nodes take this branch (one today).
+	if containerSchema.midKeyword != "" {
+		for i, tok := range node.Keys[:consume] {
+			if baseArgIdx+i == containerSchema.midKeywordAt-1 && tok != containerSchema.midKeyword {
+				return typedLeafErrorf(path, "unexpected keyword %q — expected %q (the middle keyword of this stanza is fixed)",
+					tok, containerSchema.midKeyword)
 			}
 		}
 	}

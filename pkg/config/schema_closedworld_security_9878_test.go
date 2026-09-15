@@ -1,0 +1,335 @@
+package config
+
+import (
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+// #9878 — closed-world arm on `security zones` + `security policies`.
+//
+// Both subtrees were open-world, so a typo silently dropped a whole stanza
+// with a clean commit while `show configuration` still displayed it:
+// fail-open under default-permit, availability loss under default-deny.
+// `from-zone` inherits the arm from `policies` (childClosed propagation in
+// walkSchemaNode); no separate flag needed.
+//
+// SCOPE (verified, not assumed): this arm rejects typos UNDER either
+// subtree. A typo OF a subtree root keyword itself (`policie` for
+// `policies`) is a sibling-level unknown under the still-open `security`
+// node and needs the security-level arm — filed follow-up #10078, which
+// false-rejects today (`security flow tcp-mss all-tcp`,
+// TestShippedHAConfigsCheckCleanOnBothNodes_9619; tcp-mss is an
+// intentionally-opaque value grammar per #1979).
+//
+// Each rejection cell is RED with the flags reverted (open-world
+// silent-accept) and GREEN with them armed.
+func cwSecurity9878Set(bodyLines ...string) []string {
+	out := []string{}
+	for _, l := range bodyLines {
+		out = append(out, "set security "+l)
+	}
+	return out
+}
+
+func TestClosedWorldSecurity9878_TypoRejected(t *testing.T) {
+	for _, tc := range []struct{ line, bad string }{
+		{"policies frum-zone trust to-zone untrust policy p1 then permit", "frum-zone"},
+		{"policies from-zone trust to-zone untrust policy p1 mach source-address any", "mach"},
+		{"zones security-zone trust interfces ge-0/0/0", "interfces"},
+		{"zones security-zone trust host-inbound-traffic system-servces ssh", "system-servces"},
+	} {
+		tree := buildTree(t, cwSecurity9878Set(tc.line))
+		err := SchemaValidate(tree, nil)
+		if err == nil {
+			t.Fatalf("typo %q must be rejected at commit, not silently dropped", tc.line)
+		}
+		if !strings.Contains(err.Error(), tc.bad) || !strings.Contains(err.Error(), "closed-world") {
+			t.Fatalf("error must name the typo %q and the closed-world subtree, got: %v", tc.bad, err)
+		}
+	}
+}
+
+// TestClosedWorldSecurity9878_MidKeywordRejected (spark-F1): the `to-zone`
+// middle keyword of a from-zone stanza is structural, not a value — the
+// compiler reads Keys[1],Keys[3] and ignores Keys[2], so `to-zon`
+// committed clean pre-fix while the operator misspelled the pair. Both the
+// flat-set packed shape and the hierarchical nested shape are rejected
+// naming the token; the correctly-spelled nested shape still commits.
+func TestClosedWorldSecurity9878_MidKeywordRejected(t *testing.T) {
+	flat := buildTree(t, cwSecurity9878Set(
+		"policies from-zone trust to-zon untrust policy p1 then permit",
+	))
+	if err := SchemaValidate(flat, nil); err == nil {
+		t.Fatal("flat `to-zon` must be rejected at commit, not silently accepted")
+	} else if !strings.Contains(err.Error(), "to-zon") {
+		t.Fatalf("flat rejection must name the typo token, got: %v", err)
+	}
+	hierText := `security {
+    policies {
+        from-zone trust to-zon untrust {
+            policy p1 {
+                then permit;
+            }
+        }
+    }
+}`
+	hier, perrs := NewParser(hierText).Parse()
+	if len(perrs) > 0 {
+		t.Fatalf("hierarchical fixture does not parse: %v", perrs)
+	}
+	if err := SchemaValidate(hier, nil); err == nil {
+		t.Fatal("hierarchical nested `to-zon` must be rejected at commit, not silently accepted")
+	} else if !strings.Contains(err.Error(), "to-zon") {
+		t.Fatalf("hierarchical rejection must name the typo token, got: %v", err)
+	}
+	// Control: the correctly-spelled nested shape still commits.
+	okText := `security {
+    policies {
+        from-zone trust to-zone untrust {
+            policy p1 {
+                then permit;
+            }
+        }
+    }
+}`
+	ok, perrs := NewParser(okText).Parse()
+	if len(perrs) > 0 {
+		t.Fatalf("control fixture does not parse: %v", perrs)
+	}
+	if err := SchemaValidate(ok, nil); err != nil {
+		t.Fatalf("correctly-spelled nested from-zone must commit clean, got: %v", err)
+	}
+}
+
+// TestClosedWorldSecurity9878_AcceptsValid proves no false-reject: every
+// modeled zones/policies leaf still commits clean under closed-world,
+// including the shapes most likely to collide with the gate — wildcard
+// interface names, multi-value list leaves, block-form valued leaves, and
+// the default-policy valued leaf.
+func TestClosedWorldSecurity9878_AcceptsValid(t *testing.T) {
+	valid := [][]string{
+		{
+			"policies from-zone trust to-zone untrust policy p1 match source-address any",
+			"policies from-zone trust to-zone untrust policy p1 match destination-address any",
+			"policies from-zone trust to-zone untrust policy p1 match application any",
+			"policies from-zone trust to-zone untrust policy p1 then permit",
+		},
+		{
+			"policies global policy gp1 match source-address any",
+			"policies global policy gp1 match destination-address any",
+			"policies global policy gp1 match application any",
+			"policies global policy gp1 then deny",
+		},
+		{
+			"policies default-policy deny-all",
+		},
+		{
+			"zones security-zone trust interfaces ge-0/0/0",
+			"zones security-zone trust host-inbound-traffic system-services ssh",
+			"zones security-zone trust host-inbound-traffic protocols ping",
+			"zones security-zone trust description edge-zone",
+			"zones security-zone trust tcp-rst",
+			"zones security-zone trust screen ids-opt1",
+			"zones security-zone trust address-book address web 10.0.5.0/24",
+			"zones security-zone trust address-book address-set grp address web",
+			"zones security-zone trust address-book address-set outer address-set grp",
+		},
+		{
+			"zones security-zone trust interfaces ge-0/0/1 host-inbound-traffic system-services ssh",
+		},
+		{
+			// Bare `interfaces <if>`: zone membership only, no body.
+			"zones security-zone dmz interfaces ge-0/0/2",
+		},
+		{
+			"policies policy-rematch extensive",
+			"policies default-policy-log session-init",
+			"policies default-policy-log [ session-init session-close ]",
+		},
+		{
+			"policies from-zone trust to-zone untrust policy p2 match source-address-excluded",
+			"policies from-zone trust to-zone untrust policy p2 match destination-address-excluded",
+			"policies from-zone trust to-zone untrust policy p2 match source-address any",
+			"policies from-zone trust to-zone untrust policy p2 match destination-address any",
+			"policies from-zone trust to-zone untrust policy p2 match application any",
+			"policies from-zone trust to-zone untrust policy p2 then deny log session-init",
+			"policies from-zone trust to-zone untrust policy p2 then deny count",
+			"policies from-zone trust to-zone untrust policy p2 scheduler-name sched1",
+			"policies from-zone trust to-zone untrust policy p2 description pair-policy",
+		},
+		{
+			"policies global policy gp2 match from-zone trust",
+			"policies global policy gp2 match to-zone untrust",
+			"policies global policy gp2 match source-address any",
+			"policies global policy gp2 match destination-address any",
+			"policies global policy gp2 match application any",
+			"policies global policy gp2 then log session-init",
+			"policies global policy gp2 then count",
+			"policies global policy gp2 scheduler-name sched1",
+		},
+	}
+	for _, stanza := range valid {
+		tree := buildTree(t, cwSecurity9878Set(stanza...))
+		if err := SchemaValidate(tree, nil); err != nil {
+			t.Fatalf("valid zones/policies stanza %q must commit clean under closed-world, got: %v", stanza, err)
+		}
+	}
+}
+
+// TestClosedWorldSecurity9878_HierarchicalShapes: the typo cells above are
+// flat-set only (buildTree). The hierarchical (braced) spelling must reject
+// typos too — a gate that only closed one serialization would leave the
+// other open — and must accept the blockValue + nested-container shapes.
+func TestClosedWorldSecurity9878_HierarchicalShapes(t *testing.T) {
+	parse := func(text string) *ConfigTree {
+		tree, perrs := NewParser(text).Parse()
+		if len(perrs) > 0 {
+			t.Fatalf("fixture does not parse: %v", perrs)
+		}
+		return tree
+	}
+	for _, tc := range []struct{ name, text, bad string }{
+		{"frum-zone", `security { policies { frum-zone trust to-zone untrust { policy p1 { then permit; } } } }`, "frum-zone"},
+		{"interfces", `security { zones { security-zone trust { interfces ge-0/0/0; } } }`, "interfces"},
+		{"match-typo", `security { policies { from-zone trust to-zone untrust { policy p1 { mach { source-address any; } then permit; } } } }`, "mach"},
+	} {
+		if err := SchemaValidate(parse(tc.text), nil); err == nil {
+			t.Fatalf("hierarchical typo %q must be rejected at commit", tc.name)
+		} else if !strings.Contains(err.Error(), tc.bad) {
+			t.Fatalf("hierarchical rejection must name %q, got: %v", tc.bad, err)
+		}
+	}
+	// Valid hierarchical shapes: default-policy blockValue, nested
+	// zone/policy containers, address-book nesting.
+	validHier := `security {
+    policies {
+        default-policy { deny-all; }
+        from-zone trust to-zone untrust {
+            policy p1 {
+                match { source-address any; destination-address any; application any; }
+                then permit;
+            }
+        }
+    }
+    zones {
+        security-zone trust {
+            interfaces ge-0/0/0;
+            host-inbound-traffic { system-services { ssh; } }
+            address-book { address web 10.0.5.0/24; }
+        }
+    }
+}`
+	if err := SchemaValidate(parse(validHier), nil); err != nil {
+		t.Fatalf("valid hierarchical zones/policies must commit clean, got: %v", err)
+	}
+}
+
+// TestClosedWorldSecurity9878_PolicieStillOpen9878 pins the KNOWN-OPEN
+// residual (parent verdict A): a typo OF a subtree root keyword (`policie`
+// for `policies`) is a sibling-level unknown under the still-open
+// `security` node, in BOTH serializations. Filed follow-up #10078.
+// Contrast rip_neighbor_absorption_9206_test.go:65 — same tripwire shape:
+// RED here means someone closed the residual, which is good news, and this
+// cell must then be rewritten to assert the stronger property rather than
+// deleted.
+func TestClosedWorldSecurity9878_PolicieStillOpen9878(t *testing.T) {
+	flat := buildTree(t, cwSecurity9878Set(
+		"policie from-zone trust to-zone untrust policy p1 then permit",
+	))
+	if err := SchemaValidate(flat, nil); err != nil {
+		t.Logf("#10078 CLOSED: subtree-root typo now refused (%v). Rewrite this cell.", err)
+		t.Errorf("#9878: this cell pins a KNOWN-OPEN residual and it is no longer open — " +
+			"update it deliberately rather than leaving a cell that documents a gap that " +
+			"has been fixed.")
+	}
+	hier, perrs := NewParser(`security { policie { from-zone trust to-zone untrust { policy p1 { then permit; } } } }`).Parse()
+	if len(perrs) > 0 {
+		t.Fatalf("tripwire fixture does not parse: %v", perrs)
+	}
+	if err := SchemaValidate(hier, nil); err != nil {
+		t.Logf("#10078 CLOSED (hierarchical): subtree-root typo now refused (%v). Rewrite this cell.", err)
+		t.Errorf("#9878: this cell pins a KNOWN-OPEN residual and it is no longer open — " +
+			"update it deliberately rather than leaving a cell that documents a gap that " +
+			"has been fixed.")
+	}
+}
+
+// TestClosedWorldSecurity9878_LenientDoesNotBrick binds only the
+// downgrade FUNCTION (CompileConfigLenient must not error on the typo) —
+// it deliberately does NOT bind the Store.Load/SyncApply ingress, which
+// lives in pkg/configstore and is bound there by
+// TestLoadToleratesSecurityTypo_9878 (a pkg/config cell alone would stay
+// green while a change that made Load schema-validate bricked booting
+// nodes — the ipip_no_brick_4785 argument). #1960.
+func TestClosedWorldSecurity9878_LenientDoesNotBrick(t *testing.T) {
+	typoTree := buildTree(t, cwSecurity9878Set("policies frum-zone trust to-zone untrust policy p1 then permit"))
+	if err := SchemaValidate(typoTree, nil); err == nil {
+		t.Fatal("precondition: strict SchemaValidate must reject the typo")
+	}
+	if _, err := CompileConfigLenient(typoTree); err != nil {
+		t.Fatalf("the lenient load/peer-sync path must not brick on a closed-world typo (#1960); got: %v", err)
+	}
+}
+
+// TestClosedWorldSecurity9878_ShippedConfigsStillCommit sweeps every
+// shipped and example config through strict SchemaValidate: the arm must
+// not false-reject any production grammar (the #8882 lesson — a gate that
+// rejects everything satisfies the typo cells above).
+//
+// NO SILENT SKIPS (GPT-2/spark-F7): every globbed file must validate — a
+// read failure, a parse failure, or a validation failure is a sweep
+// failure, and checked!=len(files) fails. A sweep that logs green on a
+// partial population is the vacuous-pass this harness exists to prevent.
+// The positive control walks the SAME file path (temp file + NewParser),
+// not the buildTree unit path, so it proves the sweep itself can report.
+func TestClosedWorldSecurity9878_ShippedConfigsStillCommit(t *testing.T) {
+	var files []string
+	for _, g := range []string{"../../docs/*.conf", "../../examples/deploy/*.conf", "../../test/incus/*.conf"} {
+		m, _ := filepath.Glob(g)
+		files = append(files, m...)
+	}
+	if len(files) == 0 {
+		t.Fatal("no shipped configs found — this sweep would pass vacuously")
+	}
+	checked := 0
+	for _, f := range files {
+		b, err := os.ReadFile(f)
+		if err != nil {
+			t.Errorf("%s unreadable, sweep cannot certify it: %v", filepath.Base(f), err)
+			continue
+		}
+		tree, perrs := NewParser(string(b)).Parse()
+		if len(perrs) > 0 {
+			t.Errorf("%s does not parse, sweep cannot certify it: %v", filepath.Base(f), perrs)
+			continue
+		}
+		cfg, _ := CompileConfigLenient(tree)
+		tree2, _ := NewParser(string(b)).Parse()
+		if err := SchemaValidate(tree2, cfg); err != nil {
+			t.Errorf("%s no longer validates: %v", filepath.Base(f), err)
+			continue
+		}
+		checked++
+	}
+	if checked != len(files) {
+		t.Fatalf("sweep certified %d of %d shipped/example configs — partial green is failure", checked, len(files))
+	}
+	t.Logf("swept %d/%d shipped/example configs, all validate", checked, len(files))
+	// POSITIVE CONTROL through the same file path: a typo config written
+	// to a temp file and parsed with NewParser must still reject, or the
+	// sweep above cannot report one.
+	ctlPath := filepath.Join(t.TempDir(), "ctl-frum-zone.conf")
+	if err := os.WriteFile(ctlPath, []byte("security {\n policies {\n frum-zone trust to-zone untrust {\n policy p1 {\n then permit;\n }\n }\n }\n}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cb, _ := os.ReadFile(ctlPath)
+	ctl, perrs := NewParser(string(cb)).Parse()
+	if len(perrs) > 0 {
+		t.Fatalf("control file does not parse — the control proves nothing: %v", perrs)
+	}
+	if err := SchemaValidate(ctl, nil); err == nil {
+		t.Fatal("the control typo was accepted through the file path — this sweep cannot report a rejection")
+	}
+}

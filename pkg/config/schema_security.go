@@ -164,7 +164,18 @@ func policyThenSchemaChildren() map[string]*schemaNode {
 }
 
 var schemaSecurity = &schemaNode{desc: "Security configuration", children: map[string]*schemaNode{
-	"zones": {desc: "Security zones", children: map[string]*schemaNode{
+	// #9878: closed-world arm. Leaf-completeness audit (the schema.go
+	// contract: only flip a LEAF-COMPLETE subtree). zones children =
+	// {security-zone}: the zone compiler (compiler_security_zones.go)
+	// reads description, interfaces (dynamic names via wildcard),
+	// tcp-rst, screen, host-inbound-traffic, and the zone-local
+	// address-book — each modeled below; host-inbound service tokens
+	// ride as leaf VALUES validated by validateHostInboundTokensStrict,
+	// not as keywords, so no service name can false-reject. Verified
+	// three ways: the AcceptsValid inventory commits every modeled leaf,
+	// 10/10 shipped/example configs validate, and the tolerant
+	// Load/SyncApply downgrade (#1960) is unchanged.
+	"zones": {desc: "Security zones", closedWorld: true, children: map[string]*schemaNode{
 		"security-zone": {desc: "Security zone name", args: 1, valueHint: ValueHintZoneName, placeholder: "<zone-name>", children: map[string]*schemaNode{
 			"description": {desc: "Zone description", args: 1, scalar: true, placeholder: "<text>", children: nil},
 			// #3362: per-interface host-inbound-traffic override. The interface
@@ -208,7 +219,18 @@ var schemaSecurity = &schemaNode{desc: "Security configuration", children: map[s
 			}},
 		}},
 	}},
-	"policies": {desc: "Security policies", children: map[string]*schemaNode{
+	// #9878: closed-world arm. Leaf-completeness audit: policies children =
+	// {default-policy (+blockValue spelling), default-policy-log,
+	// policy-rematch/extensive, from-zone, global}; policy children =
+	// {description, match, then, scheduler-name} in both scopes; match =
+	// {source/destination-address (+excluded), application, plus global
+	// from-zone/to-zone}; then mirrors the compiler switch (canary in
+	// schema_policy_then_3377_test.go). from-zone inherits this arm
+	// (childClosed) so no separate flag; its fixed midKeyword is
+	// validated at the walk (spark-F1), flat keys and hierarchical peel.
+	// Same three-way verification as zones above. A typo OF a subtree
+	// root (`policie`) needs the security-level arm: #10078.
+	"policies": {desc: "Security policies", closedWorld: true, children: map[string]*schemaNode{
 		// #3065: explicit no-match default override. Unset = deny-all
 		// (fail-closed, matching the Junos default-security-policy);
 		// permit-all restores the legacy fail-open behaviour.
