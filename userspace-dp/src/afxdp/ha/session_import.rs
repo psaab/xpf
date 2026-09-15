@@ -396,7 +396,7 @@ impl crate::afxdp::ha::SessionDomain {
         }
     }
 
-    pub fn upsert_synced_session(&self, entry: SyncedSessionEntry) -> SyncedImportOutcome {
+    pub fn upsert_synced_session(&self, mut entry: SyncedSessionEntry) -> SyncedImportOutcome {
         // #8015: refuse a STANDALONE reverse. This runs before every other
         // decision below because none of them apply to an entry that must not
         // be imported at all — and because the cap gate deliberately skips
@@ -633,6 +633,33 @@ impl crate::afxdp::ha::SessionDomain {
                 .import_reserve_refused
                 .fetch_add(1, Ordering::Relaxed);
             return SyncedImportOutcome::RejectedReserve;
+        }
+        // #9752 round 4 item 2: unknown-never-default AT the authoritative
+        // shared install. A (0,0) import over a stamped stored entry of the
+        // SAME (or unknown) incarnation is an old sender's resend — preserve
+        // the stored stamp into the published entry. The Go receive memo
+        // cannot cover this: a LOCALLY-originated session never entered it
+        // (nothing was ever received), and it declines at capacity — after
+        // demotion an old-peer's resend would otherwise overwrite shared
+        // authority with zeros and materialization would forward on the
+        // default table. The worker-local preserve repairs only worker
+        // tables; this is the copy `materialize_shared_session_hit`
+        // forwards on. Same incarnation rule as the worker twin (0 =
+        // unknown, never a real id — local publishes carry 0).
+        if entry.decision.install_table_domain == 0 && entry.decision.install_table_check == 0 {
+            if let Some(previous) = previous_entry.as_ref() {
+                let stamped = previous.decision.install_table_domain != 0
+                    || previous.decision.install_table_check != 0;
+                let same = entry.session_id == 0
+                    || previous.session_id == 0
+                    || entry.session_id == previous.session_id;
+                if stamped && same {
+                    entry.decision.install_table_domain =
+                        previous.decision.install_table_domain;
+                    entry.decision.install_table_check =
+                        previous.decision.install_table_check;
+                }
+            }
         }
         publish_shared_session(
             &self.sessions.synced,

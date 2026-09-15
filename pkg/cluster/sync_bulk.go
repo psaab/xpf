@@ -2,6 +2,7 @@ package cluster
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -10,6 +11,13 @@ import (
 
 	"github.com/psaab/xpf/pkg/dataplane"
 )
+
+// errBulkFencedForPeer marks a bulk refused by the #9752 install fence: the
+// peer cannot take stamped installs, so no authoritative window may complete
+// to it. Callers treat it as a quiet skip (the fence already counted and
+// warned once), not a failure to retry hot — the latch re-arms on
+// disconnect or capable discovery.
+var errBulkFencedForPeer = errors.New("bulk sync refused: peer lacks install-table identity")
 
 // doBulkSync delivers the cold-start / survivor-fabric re-drive bulk session
 // snapshot to the peer.
@@ -180,6 +188,13 @@ func snapshotBulkWalk(snap BulkSnapshot) *bulkWalk {
 // install-generation stamping, the record-then-send bulk-ack discipline
 // (#3912), and the writeMu direct writes. Only the session SOURCE differs.
 func (s *SessionSync) bulkSyncWindow(walk *bulkWalk) error {
+	// #9752 round 4: latched refusal — a previous window in this peer
+	// incarnation already hit the install fence. Skip quietly (no walk, no
+	// BulkStart): retrying every tick would burn full-table walks that all
+	// abort at the first stamped session.
+	if s.bulkFencedForPeer.Load() {
+		return errBulkFencedForPeer
+	}
 	s.bulkSendMu.Lock()
 	defer s.bulkSendMu.Unlock()
 
@@ -236,8 +251,18 @@ func (s *SessionSync) bulkSyncWindow(walk *bulkWalk) error {
 	var count int
 	slog.Info("cluster sync: bulk sync iterating v4", "epoch", epoch, "source", walk.source)
 	// Send owned v4 forward sessions.
+	fenced := false
 	err = walk.forEachV4(func(key dataplane.SessionKey, val dataplane.SessionValue) bool {
 		s.stampInstallGenV4(key, &val)
+		// #9752 round 4: the bulk is its own transmission path — it must
+		// judge the fence, not bypass it. A refusal ABORTS the window (no
+		// BulkEnd): skipping would finish an incomplete authoritative
+		// window as successful, and the receiver would reconcile against
+		// it. Partial upserts already written are idempotent and safe.
+		if s.suppressStampedInstallForIncapablePeer(val.InstallTableDomain, val.InstallTableCheck, "bulk_v4") {
+			fenced = true
+			return false
+		}
 		msg := encodeSessionV4Payload(key, val)
 		s.writeMu.Lock()
 		err := writeMsg(conn, syncMsgSessionV4, msg)
@@ -257,6 +282,11 @@ func (s *SessionSync) bulkSyncWindow(walk *bulkWalk) error {
 		}
 		return true
 	})
+	if fenced {
+		s.bulkFencedForPeer.Store(true)
+		s.clearPendingBulkAck()
+		return fmt.Errorf("bulk sync v4: %w", errBulkFencedForPeer)
+	}
 	if err != nil {
 		s.clearPendingBulkAck()
 		return fmt.Errorf("bulk sync v4 iterate: %w", err)
@@ -269,8 +299,14 @@ func (s *SessionSync) bulkSyncWindow(walk *bulkWalk) error {
 
 	// Send owned v6 forward sessions.
 	slog.Info("cluster sync: bulk sync iterating v6", "epoch", epoch, "source", walk.source, "sessions", count, "skipped", walk.skipped)
+	fenced = false
 	err = walk.forEachV6(func(key dataplane.SessionKeyV6, val dataplane.SessionValueV6) bool {
 		s.stampInstallGenV6(key, &val)
+		// #9752 round 4: v6 twin of the bulk fence above — refusal aborts.
+		if s.suppressStampedInstallForIncapablePeer(val.InstallTableDomain, val.InstallTableCheck, "bulk_v6") {
+			fenced = true
+			return false
+		}
 		msg := encodeSessionV6Payload(key, val)
 		s.writeMu.Lock()
 		err := writeMsg(conn, syncMsgSessionV6, msg)
@@ -286,6 +322,11 @@ func (s *SessionSync) bulkSyncWindow(walk *bulkWalk) error {
 		}
 		return true
 	})
+	if fenced {
+		s.bulkFencedForPeer.Store(true)
+		s.clearPendingBulkAck()
+		return fmt.Errorf("bulk sync v6: %w", errBulkFencedForPeer)
+	}
 	if err != nil {
 		s.clearPendingBulkAck()
 		return fmt.Errorf("bulk sync v6 iterate: %w", err)

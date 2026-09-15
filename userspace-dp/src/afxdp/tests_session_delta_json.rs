@@ -768,3 +768,73 @@ fn session_delta_json_carries_the_purge_retirement_marker_9752() {
         "an ordinary close must not set the marker"
     );
 }
+
+/// Round 4 item 4, chain root (R0): the producer's session-delta JSON for the
+/// PBR flow, as `session_delta_info` emits it — tuple, blue stamp, stable id
+/// 77, zones, owner RG 1. Written to the shared golden
+/// `pbr_delta_9752.json`, which the Go chain test consumes; no hand-shaped
+/// delta exists anywhere downstream. Regen with
+/// `XPF_WRITE_PBR_DELTA_9752=1` (deliberate shape change only).
+#[test]
+fn producer_delta_json_matches_the_shared_golden_9752() {
+    use crate::session::install_table_identity;
+    let (domain, check) = install_table_identity("blue");
+    let mut delta = delta_with_session_id(77);
+    delta.key = SessionKey {
+        addr_family: libc::AF_INET as u8,
+        protocol: 6,
+        src_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 61, 102)),
+        dst_ip: IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)),
+        src_port: 55068,
+        dst_port: 443,
+        discriminator: Default::default(),
+        routing_domain: 0,
+    };
+    delta.decision.install_table_domain = domain;
+    delta.decision.install_table_check = check;
+    delta.metadata.ingress_zone = 1;
+    delta.metadata.egress_zone = 2;
+    delta.metadata.owner_rg_id = 1;
+    let info = session_delta_info(&test_binding_identity(), &delta, &zone_names());
+    let json = serde_json::to_value(info).expect("delta serializes");
+    // Pin the load-bearing keys the chain downstream consumes.
+    assert_eq!(json.get("event").and_then(|v| v.as_str()), Some("open"));
+    assert_eq!(json.get("src_ip").and_then(|v| v.as_str()), Some("10.0.61.102"));
+    assert_eq!(json.get("dst_ip").and_then(|v| v.as_str()), Some("8.8.8.8"));
+    assert_eq!(
+        json.get("install_table_domain").and_then(|v| v.as_u64()),
+        Some(domain as u64)
+    );
+    assert_eq!(
+        json.get("install_table_check").and_then(|v| v.as_u64()),
+        Some(check as u64)
+    );
+    assert_eq!(
+        json.get("rt_flow_session_id").and_then(|v| v.as_u64()),
+        Some(77)
+    );
+    // Normalize the wall-clock timestamp: the golden pins the SHAPE, not the
+    // instant (production stamps time.Now at emit; the chain downstream never
+    // reads it — convert ignores it).
+    let mut json = json;
+    if let Some(obj) = json.as_object_mut() {
+        obj.insert(
+            "timestamp".to_string(),
+            serde_json::Value::String("1970-01-01T00:00:00Z".to_string()),
+        );
+    }
+    let text = serde_json::to_string_pretty(&json).expect("json renders");
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../pkg/dataplane/userspace/testdata/pbr_delta_9752.json"
+    );
+    if std::env::var_os("XPF_WRITE_PBR_DELTA_9752").is_some() {
+        std::fs::write(path, format!("{text}\n")).expect("write golden");
+    }
+    let golden = std::fs::read_to_string(path).expect("read the shared golden");
+    assert_eq!(
+        format!("{text}\n"),
+        golden,
+        "producer delta JSON drifted vs the shared golden"
+    );
+}

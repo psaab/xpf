@@ -6261,3 +6261,83 @@ fn ordinary_peer_delete_retires_both_halves_9752() {
         "ordinary delete must queue DeleteSynced for both halves"
     );
 }
+
+/// #9752 round 4 item 2: unknown-never-default AT the authoritative shared
+/// install. A locally-originated PBR session's shared row is stamped, but the
+/// Go receive memo never recorded it (nothing was ever received). After
+/// demotion an old peer's stamp-less resend must NOT overwrite shared
+/// authority with zeros — materialization forwards on this copy. Production
+/// shape: the real `upsert_synced_session` on a real Coordinator (shared
+/// maps + worker fan-out), over a locally-published stamped row.
+#[test]
+fn authoritative_shared_install_preserves_stamp_over_local_origin_9752() {
+    let fixture = fixture_9714_with_origin(false, SessionOrigin::ForwardFlow);
+    // Stamp the locally-published shared row (the state a PBR miss on this
+    // node publishes at HA-publish time; the miss-side stamping itself is
+    // pinned by the install-table stamp matrix).
+    let (domain, check) = crate::session::install_table_identity("blue");
+    {
+        let mut synced = fixture.coordinator.sessions.synced.lock().expect("synced map");
+        let stored = synced.get_mut(&fixture.forward.key).expect("forward row present");
+        stored.decision.install_table_domain = domain;
+        stored.decision.install_table_check = check;
+    }
+    // Old peer's resend: stamp absent, its own incarnation id.
+    let mut resend = fixture.forward.clone();
+    resend.origin = SessionOrigin::SyncImport;
+    resend.decision.install_table_domain = 0;
+    resend.decision.install_table_check = 0;
+    resend.session_id = 99;
+    resend.generation = 11;
+    let _ = fixture.coordinator.upsert_synced_session(resend);
+    let stored = fixture
+        .coordinator
+        .sessions
+        .synced
+        .lock()
+        .expect("synced map")
+        .get(&fixture.forward.key)
+        .expect("shared row must survive a resend")
+        .clone();
+    assert_eq!(
+        (stored.decision.install_table_domain, stored.decision.install_table_check),
+        (domain, check),
+        "a stamp-less resend must not overwrite shared authority with zeros"
+    );
+}
+
+/// Control: a new incarnation stating (0,0) applies it — no inheritance at
+/// the shared install either.
+#[test]
+fn authoritative_shared_install_new_incarnation_applies_zero_9752() {
+    let fixture = fixture_9714_with_origin(false, SessionOrigin::SyncImport);
+    let (domain, check) = crate::session::install_table_identity("blue");
+    {
+        let mut synced = fixture.coordinator.sessions.synced.lock().expect("synced map");
+        let stored = synced.get_mut(&fixture.forward.key).expect("forward row present");
+        stored.decision.install_table_domain = domain;
+        stored.decision.install_table_check = check;
+        stored.session_id = 77;
+    }
+    let mut resend = fixture.forward.clone();
+    resend.origin = SessionOrigin::SyncImport;
+    resend.decision.install_table_domain = 0;
+    resend.decision.install_table_check = 0;
+    resend.session_id = 78;
+    resend.generation = 11;
+    let _ = fixture.coordinator.upsert_synced_session(resend);
+    let stored = fixture
+        .coordinator
+        .sessions
+        .synced
+        .lock()
+        .expect("synced map")
+        .get(&fixture.forward.key)
+        .expect("shared row must survive a resend")
+        .clone();
+    assert_eq!(
+        (stored.decision.install_table_domain, stored.decision.install_table_check),
+        (0, 0),
+        "a new incarnation stating (0,0) must apply it, not inherit"
+    );
+}

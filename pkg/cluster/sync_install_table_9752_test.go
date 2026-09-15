@@ -29,6 +29,10 @@ func installTableFixture9752(t *testing.T, sessionID uint64) (*SessionSync, *moc
 	ss.stats.Connected.Store(true)
 	ss.IsPrimaryFn = func() bool { return true }
 	ss.lastSweepTime = base - 10
+	// Post-discovery steady state: these cells pin MEMO behavior, so the
+	// fence must pass (its own cells cover withhold/discovery).
+	ss.handleMessage(nil, syncMsgPeerCapabilities,
+		capabilityFrame9714(t, capFlagFenceAck|capFlagPeerDeleteOwnership|capFlagPurgeRetirementForwardOnly|capFlagInstallTableIdentity))
 	return ss, dp, key
 }
 
